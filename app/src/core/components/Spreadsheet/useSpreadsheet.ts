@@ -6,6 +6,7 @@
 import { useRef, useCallback, useState, useEffect } from "react";
 import { useGridState, useGridContext } from "../../state";
 import type { GridCanvasHandle } from "../Grid";
+import { useScrollbarMetrics } from "../../../core/components/Scrollbar";
 
 import { useSpreadsheetStyles } from "./useSpreadsheetStyles";
 import { useSpreadsheetSelection } from "./useSpreadsheetSelection";
@@ -25,6 +26,16 @@ export function useSpreadsheet() {
   
   const styleLogic = useSpreadsheetStyles(canvasRef);
   
+  // Calculate Scrollbar Metrics (Excel-like dynamic scaling)
+  // This hook abstracts the logic of "Used Range" vs "Viewport"
+  const scrollbarMetrics = useScrollbarMetrics({
+    config: state.config,
+    viewport: state.viewport,
+    // Fix: state.dimensions is DimensionOverrides; state.viewport contains the physical width/height
+    viewportDimensions: state.viewport as any,
+    refreshInterval: 3000, // Check for new data every 3s
+  });
+
   const selectionLogic = useSpreadsheetSelection({
     canvasRef,
     containerRef,
@@ -83,7 +94,7 @@ export function useSpreadsheet() {
       if (containerRef.current && !editingLogic.editingState.isEditing) {
         containerRef.current.focus();
         setIsFocused(true);
-        console.log("[Spreadsheet] Container focused on mount");
+        // console.log("[Spreadsheet] Container focused on mount");
       }
     }, 100);
 
@@ -92,6 +103,8 @@ export function useSpreadsheet() {
 
   const handleCellsUpdatedWithFocus = useCallback(async () => {
     await styleLogic.handleCellsUpdated();
+    // Refresh scrollbar metrics as content might have expanded
+    scrollbarMetrics.refresh();
     
     setTimeout(() => {
       if (containerRef.current && !editingLogic.editingState.isEditing) {
@@ -99,7 +112,7 @@ export function useSpreadsheet() {
         setIsFocused(true);
       }
     }, 50);
-  }, [styleLogic, editingLogic.editingState.isEditing]);
+  }, [styleLogic, editingLogic.editingState.isEditing, scrollbarMetrics]);
 
   return {
     refs: {
@@ -146,6 +159,8 @@ export function useSpreadsheet() {
       handleMouseUp: selectionLogic.mouseHandlers.handleMouseUp,
       handleDoubleClickEvent: selectionLogic.handleDoubleClickEvent,
       
+      // Use layout logic for scrolling, but this likely needs to accept
+      // values from our custom Scrollbar component
       handleScrollEvent: layoutLogic.handleScrollEvent,
       
       handleFocus,
@@ -158,7 +173,10 @@ export function useSpreadsheet() {
     },
     ui: {
       getSelectionReference: selectionLogic.getSelectionReference,
-      contentSize: layoutLogic.contentSize,
+      // We expose the dynamically calculated scrollbar metrics here
+      scrollbarMetrics,
+      // Fallback/Legacy content size if needed by other components
+      contentSize: layoutLogic.contentSize, 
       statusText: layoutLogic.statusText,
       scrollInfo: layoutLogic.scrollInfo,
       boundsInfo: layoutLogic.boundsInfo,

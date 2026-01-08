@@ -10,7 +10,7 @@ export interface ScrollbarProps {
   orientation: "horizontal" | "vertical";
   /** Current scroll position in pixels */
   scrollPosition: number;
-  /** Total content size in pixels */
+  /** Total content size in pixels (The Used Range + Buffer) */
   contentSize: number;
   /** Visible viewport size in pixels */
   viewportSize: number;
@@ -20,14 +20,17 @@ export interface ScrollbarProps {
   thickness?: number;
   /** Minimum thumb size in pixels */
   minThumbSize?: number;
+  /** Optional custom style for the track */
+  style?: React.CSSProperties;
 }
 
 const SCROLLBAR_THICKNESS = 14;
-const MIN_THUMB_SIZE = 20; // Reduced minimum for better visual feedback
-const SCROLLBAR_BG = "#f0f0f0";
-const THUMB_COLOR = "#c0c0c0";
-const THUMB_HOVER_COLOR = "#a0a0a0";
-const THUMB_ACTIVE_COLOR = "#808080";
+const MIN_THUMB_SIZE = 20;
+const SCROLLBAR_BG = "#f9f9f9";
+const SCROLLBAR_BORDER = "#e1e1e1";
+const THUMB_COLOR = "#c1c1c1";
+const THUMB_HOVER_COLOR = "#a8a8a8";
+const THUMB_ACTIVE_COLOR = "#787878";
 
 export function Scrollbar({
   orientation,
@@ -37,6 +40,7 @@ export function Scrollbar({
   onScroll,
   thickness = SCROLLBAR_THICKNESS,
   minThumbSize = MIN_THUMB_SIZE,
+  style,
 }: ScrollbarProps): React.ReactElement | null {
   const trackRef = useRef<HTMLDivElement>(null);
   const [isDragging, setIsDragging] = useState(false);
@@ -80,7 +84,8 @@ export function Scrollbar({
   // maxScroll = how much we can scroll (content that extends beyond viewport)
   const maxScroll = Math.max(0, contentSize - viewportSize);
 
-  // If content fits in viewport, don't show scrollbar
+  // If content fits in viewport, logic dictates we generally don't show, 
+  // or show a disabled bar. Returning null hides it.
   if (maxScroll <= 0) {
     return null;
   }
@@ -89,18 +94,12 @@ export function Scrollbar({
   const effectiveTrackSize = trackSize > 0 ? trackSize : Math.max(100, viewportSize);
 
   // THUMB SIZE CALCULATION (Excel-like behavior):
-  // The thumb represents what fraction of total content is visible.
   // thumbRatio = viewportSize / contentSize
-  // - Small content (contentSize ~= viewportSize): thumbRatio ~= 1.0 --> large thumb
-  // - Large content (contentSize >> viewportSize): thumbRatio ~= 0.0 --> small thumb (min size)
   const thumbRatio = Math.min(1, viewportSize / contentSize);
   const calculatedThumbSize = thumbRatio * effectiveTrackSize;
   const thumbSize = Math.max(minThumbSize, Math.min(calculatedThumbSize, effectiveTrackSize - 10));
 
   // THUMB POSITION CALCULATION:
-  // The thumb position represents scroll progress through the scrollable range.
-  // thumbRange = track space available for thumb movement
-  // scrollProgress = scrollPosition / maxScroll (0 to 1)
   const thumbRange = effectiveTrackSize - thumbSize;
   const scrollProgress = maxScroll > 0 ? Math.min(1, Math.max(0, scrollPosition / maxScroll)) : 0;
   const thumbPosition = scrollProgress * thumbRange;
@@ -121,6 +120,7 @@ export function Scrollbar({
   // Handle track click (jump to position)
   const handleTrackClick = useCallback(
     (event: React.MouseEvent<HTMLDivElement>) => {
+      // Ignore clicks on the thumb itself (handled by stopPropagation in handleMouseDown)
       if (!trackRef.current || thumbRange <= 0) return;
 
       const rect = trackRef.current.getBoundingClientRect();
@@ -178,6 +178,11 @@ export function Scrollbar({
   const trackStyle: React.CSSProperties = {
     position: "absolute",
     backgroundColor: SCROLLBAR_BG,
+    borderLeft: isHorizontal ? "none" : `1px solid ${SCROLLBAR_BORDER}`,
+    borderTop: isHorizontal ? `1px solid ${SCROLLBAR_BORDER}` : "none",
+    userSelect: "none",
+    zIndex: 100, // Ensure it sits above grid content
+    ...style,
     ...(isHorizontal
       ? {
           bottom: 0,
@@ -202,22 +207,25 @@ export function Scrollbar({
       : isHovered
         ? THUMB_HOVER_COLOR
         : THUMB_COLOR,
-    borderRadius: 3,
+    // Excel thumbs have a slight gap from the edges of the track
+    borderRadius: 0, 
     transition: isDragging ? "none" : "background-color 0.1s",
+    boxSizing: "border-box",
+    border: "1px solid white", // Creates the "padding" look inside the track
     ...(isHorizontal
       ? {
           left: thumbPosition,
-          top: 2,
+          top: 1,
           width: thumbSize,
-          height: thickness - 4,
-          cursor: "pointer",
+          height: thickness - 1,
+          cursor: "default",
         }
       : {
           top: thumbPosition,
-          left: 2,
-          width: thickness - 4,
+          left: 1,
+          width: thickness - 1,
           height: thumbSize,
-          cursor: "pointer",
+          cursor: "default",
         }),
   };
 
@@ -255,6 +263,9 @@ export function ScrollbarCorner({
         width: size,
         height: size,
         backgroundColor: SCROLLBAR_BG,
+        borderTop: `1px solid ${SCROLLBAR_BORDER}`,
+        borderLeft: `1px solid ${SCROLLBAR_BORDER}`,
+        zIndex: 101,
       }}
     />
   );

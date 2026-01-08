@@ -4,7 +4,8 @@
 // UPDATED: Excel-like behavior - thumb contracts when scrolling back within used range
 
 import { useState, useEffect, useCallback } from "react";
-import { getGridBounds } from "../../lib/tauri-api";
+// Assuming this is the correct path for your API
+import { getGridBounds } from "../../lib/tauri-api"; 
 import type { GridConfig, Viewport, ViewportDimensions } from "../../types";
 
 export interface ScrollbarMetrics {
@@ -34,8 +35,8 @@ export interface UseScrollbarMetricsOptions {
 
 const SCROLLBAR_SIZE = 14;
 // Buffer rows/cols beyond the used range (Excel-like behavior)
-const BUFFER_ROWS = 1;
-const BUFFER_COLS = 1;
+const BUFFER_ROWS = 5; // A bit more buffer feels nicer
+const BUFFER_COLS = 2;
 
 /**
  * Hook to calculate scrollbar metrics based on the used range.
@@ -56,8 +57,8 @@ export function useScrollbarMetrics({
   const refreshUsedRange = useCallback(async () => {
     try {
       const bounds = await getGridBounds();
-      if (bounds) {
-        // getGridBounds returns [rows, cols] as the count of used cells
+      if (bounds && Array.isArray(bounds) && bounds.length === 2) {
+        // getGridBounds returns [rowCount, colCount]
         // Convert to 0-based max indices
         setUsedRange({
           maxRow: Math.max(0, bounds[0] - 1),
@@ -66,7 +67,7 @@ export function useScrollbarMetrics({
       }
     } catch (error) {
       // Silently handle errors - grid bounds might not be available yet
-      console.debug("[Scrollbar] Failed to get grid bounds:", error);
+      // console.debug("[Scrollbar] Failed to get grid bounds:", error);
     }
   }, []);
 
@@ -103,33 +104,19 @@ export function useScrollbarMetrics({
   const currentScrollCol = Math.floor(viewport.scrollX / config.defaultCellWidth);
 
   // Excel-like effective bounds calculation:
-  // - Base: the actual used range from backend data
-  // - Expand temporarily if user scrolls past the used range
-  // - Contract back when user scrolls back within used range
-  // 
-  // The key insight: we DON'T use virtualBounds which is sticky.
-  // Instead, we dynamically compute based on:
-  // 1. Used range (data extent)
-  // 2. Current scroll position + viewport (where user is looking)
-  
-  // Minimum content extent = what's needed to show current viewport
+  // 1. Minimum content extent = what's needed to show current viewport (so we don't clip view)
   const viewportExtentRow = currentScrollRow + viewportRows;
   const viewportExtentCol = currentScrollCol + viewportCols;
 
-  // Effective extent = max of used range and viewport extent
-  // This means:
-  // - If used range is large, thumb stays small
-  // - If used range is small but we scrolled far, thumb stays small while there
-  // - If used range is small and we're viewing it, thumb is large
+  // 2. Effective extent = max of (Used Range) and (Current View Position)
   const effectiveMaxRow = Math.max(usedRange.maxRow, viewportExtentRow - 1);
   const effectiveMaxCol = Math.max(usedRange.maxCol, viewportExtentCol - 1);
 
-  // Add small buffer for breathing room (Excel adds ~1 row/col beyond used range)
+  // 3. Add small buffer
   const boundedMaxRow = Math.min(effectiveMaxRow + BUFFER_ROWS, config.totalRows - 1);
   const boundedMaxCol = Math.min(effectiveMaxCol + BUFFER_COLS, config.totalCols - 1);
 
   // Calculate content size in pixels
-  // +1 because maxRow is 0-indexed, so row 0 means 1 row of content
   const contentWidth = (boundedMaxCol + 1) * config.defaultCellWidth;
   const contentHeight = (boundedMaxRow + 1) * config.defaultCellHeight;
 
