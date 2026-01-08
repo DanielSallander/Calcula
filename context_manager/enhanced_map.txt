@@ -1,0 +1,1119 @@
+================================================================================
+                                 INSTRUCTIONS
+================================================================================
+This is the second step. You have been provided with an ENHANCED DEPENDENCY MAP of the project below.
+
+1. ANALYZE FIRST: Use the map to understand the project structure and identifying 
+   where the business logic resides.
+2. BE SELECTIVE: Do NOT request code for:
+   - Standard library functions.
+   - Simple getters/setters or wrappers shown in the map.
+   - Functions that clearly belong to other domains (e.g., UI formatting when 
+     solving a backend logic issue).
+3. REQUEST FORMAT: When you need to see the implementation details, request 
+   them using the filenames found in the map by using the command:
+   "python generate_context_map_step3.py --include [folder(s)]"
+   so for example: "python generate_context_map_step3.py --include app/src/hooks app/src/components"
+   **Respond only with this command**
+   python generate_context_map_step3.py --include app/src/hooks app/src/components/Ribbon
+4. If you edit existing files, be sure to request the full content of those files first.
+
+================================================================================
+                             PROJECT DEPENDENCY MAP
+================================================================================
+> Generated automatically. 
+> [?] indicates ambiguous calls. 
+> `self ::` indicates a local function call.
+
+================================================================================
+                          HOOK COMPOSITION OVERVIEW
+================================================================================
+
+useEditing
+    Uses: useGridContext
+    Returns: { success, row, col, display, formula, ... }
+    Purpose: Manages cell editing state and commits
+
+  |-- useGridContext
+      Purpose: Grid state management
+
+useGridDispatch
+    Uses: useGridContext
+    Purpose: Grid state management
+
+  |-- useGridContext
+      Purpose: Grid state management
+
+useGridKeyboard
+    Uses: useGridContext
+    Purpose: Handles keyboard events
+
+  |-- useGridContext
+      Purpose: Grid state management
+
+useMouseSelection
+    Uses: useAutoScroll
+    Returns: { isDragging, isFormulaDragging, isResizing, cursorStyle, handleMouseDown, ... }
+    Purpose: Manages selection state and interactions
+
+  |-- useAutoScroll
+      Returns: { startAutoScroll, stopAutoScroll }
+      Purpose: Handles scrolling behavior
+
+useRegistryTabs
+
+useSelection
+    Uses: useGridContext
+    Returns: { selection, selectCell, extendTo, moveActiveCell, getSelectionReference, ... }
+    Purpose: Manages selection state and interactions
+
+  |-- useGridContext
+      Purpose: Grid state management
+
+useSpreadsheet
+    Uses: useGridContext, useSpreadsheetSelection, useSpreadsheetEditing, useSpreadsheetLayout, useGridState, useSpreadsheetStyles
+
+  |-- useGridContext
+      Purpose: Grid state management
+
+  |-- useGridState
+      Uses: useGridContext
+      Purpose: Grid state management
+
+  |-- useSpreadsheetStyles
+      Returns: { styleCache, styleCacheVersion, handleCellsUpdated, refreshStyles }
+      Purpose: Manages style cache and updates
+
+useViewport
+    Uses: useGridContext
+    Returns: { width, height }
+    Purpose: Manages viewport and scrolling
+
+  |-- useGridContext
+      Purpose: Grid state management
+
+================================================================================
+                           INTEGRATION LAYERS
+================================================================================
+
+### useEditing (useEditing.ts)
+    Integrates: Grid State --> Editing System, Formula System
+    1. [IN] Consumes from: useGridContext
+    2. [OUT] Triggers: dispatch(setFormulaReferences), dispatch(clearFormulaReferences), dispatch(startEditingAction)
+
+### useSelection (useSelection.ts)
+    Integrates: Grid State --> Selection System
+    1. [IN] Consumes from: useGridContext
+    2. [OUT] Triggers: dispatch(setSelection), dispatch(extendSelection), dispatch(moveSelection)
+
+### useViewport (useViewport.ts)
+    Integrates: Grid State --> Viewport System, Virtual Bounds
+    1. [IN] Consumes from: useGridContext
+    2. [OUT] Triggers: dispatch(expandVirtualBounds), dispatch(updateScroll), dispatch(scrollToCellAction)
+
+================================================================================
+                            CRITICAL PATHS
+================================================================================
+
+CRITICAL PATH: Double-Click Cell to Start Editing
+  Description: User double-clicks a cell to enter edit mode
+
+  1. gridActions.ts :: startEditing
+  2. useEditing.ts :: useEditing
+     [HOOK] [INTEGRATION] [STATE:context] [STATE:dispatch] [STATE:read] [STATE:write] [RENDER:trigger] [EFFECT]
+       --> app/src/state/gridActions.ts :: clearFormulaReferences
+       --> app/src/lib/gridRenderer/references/conversion.ts :: columnRangeToReference
+       --> app/src/lib/types.ts :: isFormulaExpectingReference
+
+---
+
+CRITICAL PATH: Keyboard Navigation
+  Description: User navigates grid with arrow keys
+
+  1. useGridKeyboard.ts :: useGridKeyboard
+     [HOOK] [STATE:context] [STATE:dispatch] [STATE:read] [LISTENER] [RENDER:trigger] [EFFECT] [KEYBOARD]
+       --> app/src/state/GridContext.tsx :: useGridContext
+  2. gridActions.ts :: scrollToCell
+     [SCROLL]
+
+---
+
+CRITICAL PATH: Mouse Cell Selection
+  Description: User clicks to select a cell
+
+  1. useMouseSelection.ts :: useMouseSelection
+     [HOOK] [STATE:write] [LISTENER] [EFFECT] [MOUSE]
+       --> app/src/hooks/useMouseSelection/editing/formulaHeaderHandlers.ts :: createFormulaHeaderHandlers
+       --> app/src/hooks/useMouseSelection/layout/resizeHandlers.ts :: updateCursorForPosition
+       --> app/src/hooks/useMouseSelection/layout/resizeHandlers.ts :: createResizeHandlers
+  2. cellSelectionHandlers.ts :: createCellSelectionHandlers
+     [MOUSE]
+
+---
+
+================================================================================
+                             FILE DETAILS
+================================================================================
+> Enhanced dependency information with markers and data flow.
+
+
+## DIR: app/src
+
+### App.tsx 
+   - **App** `fn` (13 loc) [EFFECT]
+     Returns: React.ReactElement
+
+## DIR: app/src-tauri
+
+### build.rs 
+   - **main** `fn` (2 loc)
+       --> tauri_build::build
+
+## DIR: app/src-tauri/src
+
+### api_types.rs 
+   - **CellData** `struct` (6 loc)
+   - **StyleData** `struct` (14 loc)
+   - **DimensionData** `struct` (3 loc)
+   - **FormattingParams** `struct` (12 loc)
+   - **FormattingResult** `struct` (6 loc)
+   - **StyleEntry** `struct` (3 loc)
+   - **FunctionInfo** `struct` (5 loc)
+   - **FunctionListResult** `struct` (2 loc)
+   - **from** `fn` (30 loc)
+     Params: (style: &CellStyle)
+     Returns: Self
+       --> TextRotation::Rotate270
+       --> TextAlign::Center
+       --> TextAlign::Right
+       --> VerticalAlign::Top
+       --> TextRotation::Custom
+       --> self :: format_number_format_name
+       --> VerticalAlign::Bottom
+       --> TextRotation::None
+       --> ... (+4 more)
+   - **format_number_format_name** `fn` (30 loc)
+     Params: (format: &NumberFormat)
+     Returns: String
+       --> NumberFormat::Scientific
+       --> NumberFormat::Date
+       --> NumberFormat::Custom
+       --> NumberFormat::Currency
+       --> NumberFormat::Time
+       --> NumberFormat::General
+       --> NumberFormat::Percentage
+       --> NumberFormat::Number
+
+### commands.rs [HAS_COMMANDS]
+   - **get_next_seq** `fn` (2 loc) [CMD] [BACKEND:sync]
+     Returns: u64
+   - **log_frontend** `fn` (3 loc) [CMD] [BACKEND:sync]
+     Returns: Result<(), String>
+       --> crate::write_log_raw
+   - **get_cell** `fn` (20 loc) [CMD] [STATE:write] [BACKEND:sync]
+     Params: (state: State<AppState>, row: u32, col: u32)
+     Returns: Option<CellData>
+       --> self :: get_cell
+       --> app/src-tauri/src/lib.rs :: format_cell_value
+   - **clear_cell** `fn` (11 loc) [CMD] [STATE:write] [BACKEND:sync]
+     Params: (state: State<AppState>, row: u32, col: u32)
+       --> self :: clear_cell
+       --> HashSet::new
+   - **get_grid_bounds** `fn` (8 loc) [CMD] [STATE:write] [BACKEND:sync]
+     Returns: (u32, u32)
+   - **get_cell_count** `fn` (8 loc) [CMD] [STATE:write] [BACKEND:sync]
+     Returns: usize
+   - **set_column_width** `fn` (9 loc) [CMD] [STATE:write] [BACKEND:sync]
+   - **get_column_width** `fn` (8 loc) [CMD] [STATE:write] [BACKEND:sync]
+     Returns: Option<f64>
+   - **get_all_column_widths** `fn` (8 loc) [CMD] [STATE:write] [BACKEND:sync]
+     Returns: Vec<DimensionData>
+   - **set_row_height** `fn` (9 loc) [CMD] [STATE:write] [BACKEND:sync]
+   - **get_row_height** `fn` (8 loc) [CMD] [STATE:write] [BACKEND:sync]
+     Returns: Option<f64>
+   - **get_all_row_heights** `fn` (8 loc) [CMD] [STATE:write] [BACKEND:sync]
+     Returns: Vec<DimensionData>
+   - **get_style** `fn` (8 loc) [CMD] [STATE:write] [BACKEND:sync]
+     Returns: StyleData
+       --> app/src-tauri/src/api_types.rs :: from
+       --> StyleData::from
+   - **get_all_styles** `fn` (8 loc) [CMD] [STATE:write] [BACKEND:sync]
+     Returns: Vec<StyleData>
+       --> StyleData::from
+   - **parse_number_format** `fn` (30 loc) [CMD] [BACKEND:sync]
+     Params: (format: &str)
+     Returns: NumberFormat
+       --> engine::CurrencyPosition
+       --> NumberFormat::Scientific
+       --> NumberFormat::Currency
+       --> NumberFormat::Time
+       --> NumberFormat::General
+       --> NumberFormat::Percentage
+       --> NumberFormat::Number
+       --> NumberFormat::Date
+   - **parse_text_rotation** `fn` (19 loc)
+     Params: (rotation: &str)
+     Returns: TextRotation
+       --> app/src/state/gridReducer.ts :: clamp
+       --> TextRotation::Custom
+       --> TextRotation::Rotate270
+       --> TextRotation::None
+       --> TextRotation::Rotate90
+   - **get_style_count** `fn` (8 loc) [CMD] [STATE:write] [BACKEND:sync]
+     Returns: usize
+   - **sort_log_file** `fn` (49 loc) [CMD] [STATE:write] [BACKEND:sync]
+     Returns: Result<String, String>
+       --> std::io
+       --> u64::MAX
+       --> SeekFrom::Start
+       --> String::new
+   - **log_frontend_atomic** `fn` (4 loc) [CMD] [BACKEND:sync]
+     Returns: Result<(), String>
+       --> crate::write_log
+
+### formula.rs [HAS_COMMANDS]
+   - **get_functions_by_category** `fn` (179 loc) [CMD] [BACKEND:sync]
+     Params: (category: String)
+     Returns: FunctionListResult
+   - **get_all_functions** `fn` (13 loc) [CMD] [BACKEND:sync]
+     Returns: FunctionListResult
+       --> self :: get_functions_by_category
+       --> Vec::new
+   - **get_function_template** `fn` (53 loc) [CMD] [BACKEND:sync]
+     Params: (function_name: String)
+     Returns: String
+
+### lib.rs 
+   - **AppState** `struct` (7 loc)
+   - **create_app_state** `fn` (10 loc) [STATE:write]
+     Returns: AppState
+       --> StyleRegistry::new
+       --> HashMap::new
+       --> Mutex::new
+       --> Grid::new
+   - **format_cell_value** `fn` (14 loc)
+     Params: (value: &CellValue, style: &CellStyle)
+     Returns: String
+       --> CellValue::Empty
+       --> String::new
+       --> NumberFormat::General
+       --> CellValue::Error
+       --> CellValue::Boolean
+       --> CellValue::Number
+       --> CellValue::Text
+   - **format_cell_value_simple** `fn` (8 loc)
+     Returns: String
+       --> CellValue::Empty
+       --> String::new
+       --> CellValue::Error
+       --> CellValue::Boolean
+       --> CellValue::Number
+       --> self :: format_number_simple
+       --> CellValue::Text
+   - **format_number_simple** `fn` (7 loc)
+     Returns: String
+   - **convert_value** `fn` (6 loc)
+     Returns: EngineValue
+       --> ParserValue::String
+       --> EngineValue::Number
+       --> ParserValue::Boolean
+       --> EngineValue::String
+       --> ParserValue::Number
+       --> EngineValue::Boolean
+   - **convert_binary_op** `fn` (15 loc)
+     Params: (op: &ParserBinaryOp)
+     Returns: EngineBinaryOp
+       --> ParserBinaryOp::LessEqual
+       --> ParserBinaryOp::Multiply
+       --> EngineBinaryOp::NotEqual
+       --> EngineBinaryOp::Multiply
+       --> EngineBinaryOp::Subtract
+       --> EngineBinaryOp::Divide
+       --> EngineBinaryOp::GreaterThan
+       --> ParserBinaryOp::GreaterThan
+       --> ... (+16 more)
+   - **convert_unary_op** `fn` (4 loc)
+     Returns: EngineUnaryOp
+       --> EngineUnaryOp::Negate
+       --> ParserUnaryOp::Negate
+   - **convert_expr** `fn` (33 loc)
+     Params: (expr: &ParserExpr)
+     Returns: EngineExpr
+       --> ParserExpr::Literal
+       --> self :: convert_unary_op
+       --> EngineExpr::UnaryOp
+       --> ParserExpr::UnaryOp
+       --> Box::new
+       --> EngineExpr::Literal
+       --> EngineExpr::CellRef
+       --> EngineExpr::ColumnRef
+       --> ... (+12 more)
+   - **col_letter_to_index** `fn` (7 loc)
+     Returns: u32
+   - **extract_references** `fn` (4 loc)
+     Returns: HashSet<(u32, u32)>
+       --> HashSet::new
+   - **evaluate_formula** `fn` (17 loc)
+     Params: (grid: &Grid, formula: &str)
+     Returns: CellValue
+       --> self :: convert_expr
+       --> Evaluator::new
+       --> CellError::Value
+       --> CellValue::Error
+   - **parse_cell_input** `fn` (20 loc)
+     Params: (input: &str)
+     Returns: Cell
+       --> self :: parse_number
+       --> Cell::new_boolean
+       --> Cell::new_text
+       --> Cell::new_formula
+       --> Cell::new
+       --> Cell::new_number
+   - **parse_number** `fn` (16 loc)
+     Params: (s: &str)
+     Returns: Option<f64>
+   - **run** `fn` (44 loc)
+       --> commands::get_column_width
+       --> commands::get_style
+       --> commands::apply_formatting
+       --> formula::get_all_functions
+       --> commands::update_cell
+       --> commands::get_next_seq
+       --> commands::get_viewport_cells
+       --> formula::get_function_template
+       --> ... (+22 more)
+
+### main.rs 
+   - **main** `fn` (2 loc)
+       --> app/src-tauri/src/lib.rs :: run
+       --> app_lib::run
+
+### tests.rs 
+   - **test_format_number_integer** `fn` (4 loc)
+       --> app/src-tauri/src/lib.rs :: format_number_simple
+   - **test_format_number_decimal** `fn` (4 loc)
+       --> app/src-tauri/src/lib.rs :: format_number_simple
+   - **test_format_cell_value** `fn` (19 loc)
+       --> CellStyle::new
+       --> CellValue::Empty
+       --> CellValue::Boolean
+       --> CellValue::Number
+       --> app/src-tauri/src/lib.rs :: format_cell_value
+       --> CellValue::Text
+   - **test_format_cell_value_with_style** `fn` (19 loc)
+       --> engine::CurrencyPosition
+       --> CellStyle::new
+       --> NumberFormat::Currency
+       --> NumberFormat::Percentage
+       --> CellValue::Number
+       --> app/src-tauri/src/lib.rs :: format_cell_value
+   - **test_parse_number** `fn` (9 loc)
+       --> app/src-tauri/src/lib.rs :: parse_number
+   - **test_parse_cell_input** `fn` (27 loc)
+       --> CellValue::Number
+       --> CellValue::Empty
+       --> app/src-tauri/src/lib.rs :: parse_cell_input
+       --> CellValue::Boolean
+       --> CellValue::Text
+   - **test_evaluate_formula_simple** `fn` (14 loc)
+       --> app/src-tauri/src/lib.rs :: evaluate_formula
+       --> Grid::new
+       --> CellValue::Number
+   - **test_evaluate_formula_with_cells** `fn` (8 loc)
+       --> app/src-tauri/src/lib.rs :: evaluate_formula
+       --> Grid::new
+       --> CellValue::Number
+       --> Cell::new_number
+   - **test_evaluate_formula_functions** `fn` (13 loc)
+       --> app/src-tauri/src/lib.rs :: evaluate_formula
+       --> Grid::new
+       --> CellValue::Number
+       --> Cell::new_number
+   - **test_evaluate_formula_column_ref** `fn` (9 loc)
+       --> app/src-tauri/src/lib.rs :: evaluate_formula
+       --> Grid::new
+       --> CellValue::Number
+       --> Cell::new_number
+   - **test_evaluate_formula_error** `fn` (6 loc)
+       --> app/src-tauri/src/lib.rs :: evaluate_formula
+       --> CellValue::Error
+       --> Grid::new
+       --> CellError::Div0
+   - **test_col_letter_to_index** `fn` (8 loc)
+       --> app/src-tauri/src/lib.rs :: col_letter_to_index
+   - **test_dependency_tracking** `fn` (28 loc)
+       --> HashMap::new
+       --> HashSet::new
+
+## DIR: app/src-tauri/src/utils
+
+### bridge.ts 
+   - **getTimestamp** `fn` (9 loc)
+     Returns: string
+       --> self :: pad
+   - **pad** `fn` (13 loc)
+     Params: (n: number, len = 2)
+     Returns: string
+       --> self :: log
+   - **log** `fn` (5 loc) [async] [BACKEND:sync]
+     Returns: Promise<void>
+       --> self :: getTimestamp
+   - **compactArgs** `fn` (26 loc)
+     Params: (args: InvokeArgs)
+     Returns: string
+   - **tracedInvoke** `fn` (37 loc) [async] [BACKEND:sync]
+     Params: (cmd: string, args: InvokeArgs = {})
+     Returns: Promise<T>
+       --> self :: compactArgs
+       --> self :: log
+   - **logUserAction** `fn` (3 loc) [async]
+     Returns: Promise<void>
+       --> self :: log
+   - **logSystem** `fn` (2 loc) [async]
+     Returns: Promise<void>
+       --> self :: log
+   - **logDebug** `fn` (2 loc) [async]
+     Returns: Promise<void>
+       --> self :: log
+   - **sortLogs** `fn` (2 loc) [async] [BACKEND:sync]
+     Returns: Promise<string>
+       --> self :: tracedInvoke
+
+## DIR: app/src/components
+
+### GridCanvas.tsx 
+   - **GridCanvas** `fn` (281 loc) [STATE:write] [BACKEND:sync] [EFFECT]
+     Params: (props, ref)
+     Returns: object
+       --> app/src/lib/types.ts :: createEmptyDimensionOverrides
+       --> app/src/lib/types.ts :: cellKey
+       --> app/src-tauri/src/utils/bridge.ts :: log
+       --> self :: updateSize
+   - **updateSize** `fn` (18 loc)
+
+### InlineEditor.tsx 
+   - **InlineEditor** `fn` (179 loc) [STATE:write] [EFFECT] [FOCUS] [FORM] [KEYBOARD]
+     Params: (props: InlineEditorProps)
+     Returns: React.ReactElement | null
+       --> app/src/lib/types.ts :: createEmptyDimensionOverrides
+       --> app/src/lib/types.ts :: isFormulaExpectingReference
+
+## DIR: app/src/components/Ribbon
+
+### FormulaIcons.tsx 
+   - **InsertFunctionIcon** `fn` (15 loc)
+     Returns: React.ReactElement
+   - **AutoSumIcon** `fn` (9 loc)
+     Returns: React.ReactElement
+   - **RecentlyUsedIcon** `fn` (12 loc)
+     Returns: React.ReactElement
+   - **FinancialIcon** `fn` (10 loc)
+     Returns: React.ReactElement
+   - **LogicalIcon** `fn` (17 loc)
+     Returns: React.ReactElement
+   - **TextIcon** `fn` (17 loc)
+     Returns: React.ReactElement
+   - **DateTimeIcon** `fn` (7 loc)
+     Returns: React.ReactElement
+   - **LookupIcon** `fn` (7 loc)
+     Returns: React.ReactElement
+   - **MathTrigIcon** `fn` (16 loc)
+     Returns: React.ReactElement
+   - **MoreFunctionsIcon** `fn` (9 loc)
+     Returns: React.ReactElement
+
+### FormulasTab.tsx 
+   - **CalculatorIcon** `fn` (16 loc)
+     Returns: React.ReactElement
+   - **loadMode** `fn` (7 loc) [async]
+       --> app/src/lib/tauri-api.ts :: getCalculationMode
+
+### Icons.tsx 
+   - **AlignLeftIcon** `fn` (8 loc)
+     Returns: React.ReactElement
+   - **AlignCenterIcon** `fn` (8 loc)
+     Returns: React.ReactElement
+   - **AlignRightIcon** `fn` (8 loc)
+     Returns: React.ReactElement
+   - **WrapTextIcon** `fn` (13 loc)
+     Returns: React.ReactElement
+   - **RotateUpIcon** `fn` (22 loc)
+     Returns: React.ReactElement
+   - **RotateDownIcon** `fn` (22 loc)
+     Returns: React.ReactElement
+
+### Ribbon.tsx 
+   - **useRegistryTabs** `hook` (18 loc) [HOOK] [STATE:write] [EFFECT]
+     Returns: RibbonTabDefinition[]
+
+### styles.ts 
+   - **getColorButtonStyle** `fn` (7 loc)
+     Returns: React.CSSProperties
+
+## DIR: app/src/components/Ribbon/components
+
+### RibbonDropdownButton.tsx 
+   - **handleClickOutside** `fn` (7 loc) [MOUSE]
+
+### RibbonSeparator.tsx 
+   - **RibbonSeparator** `fn` (2 loc)
+     Returns: React.ReactElement
+
+## DIR: app/src/components/Ribbon/registry
+
+### RibbonRegistry.ts 
+   - **RibbonRegistryImpl** `class` (132 loc)
+       --> app/src/hooks/useCellEvents.ts :: listener
+       --> app/src-tauri/src/api_types.rs :: from
+
+## DIR: app/src/components/Ribbon/tabs/FormulasTab
+
+### CalculationGroup.tsx 
+   - **loadMode** `fn` (7 loc) [async]
+       --> app/src/lib/tauri-api.ts :: getCalculationMode
+
+### FormulasTab.tsx 
+   - **FormulasTab** `fn` (19 loc)
+     Params: ({ context })
+     Returns: React.ReactElement
+
+### icons.tsx 
+   - **InsertFunctionIcon** `fn` (15 loc)
+     Returns: React.ReactElement
+   - **AutoSumIcon** `fn` (9 loc)
+     Returns: React.ReactElement
+   - **RecentlyUsedIcon** `fn` (12 loc)
+     Returns: React.ReactElement
+   - **FinancialIcon** `fn` (34 loc)
+     Returns: React.ReactElement
+   - **LogicalIcon** `fn` (26 loc)
+     Returns: React.ReactElement
+   - **TextIcon** `fn` (26 loc)
+     Returns: React.ReactElement
+   - **DateTimeIcon** `fn` (19 loc)
+     Returns: React.ReactElement
+   - **LookupIcon** `fn` (19 loc)
+     Returns: React.ReactElement
+   - **MathTrigIcon** `fn` (25 loc)
+     Returns: React.ReactElement
+   - **MoreFunctionsIcon** `fn` (18 loc)
+     Returns: React.ReactElement
+   - **CalculatorIcon** `fn` (23 loc)
+     Returns: React.ReactElement
+
+## DIR: app/src/components/Ribbon/tabs/HomeTab
+
+### FontGroup.tsx 
+   - **FontGroup** `fn` (190 loc) [STATE:write]
+     Params: ({ context })
+     Returns: React.ReactElement
+       --> self :: getColorButtonStyle
+       --> app/src-tauri/src/utils/bridge.ts :: log
+   - **getColorButtonStyle** `fn` (5 loc)
+     Returns: React.CSSProperties
+
+### HomeTab.tsx 
+   - **HomeTab** `fn` (20 loc)
+     Params: ({ context })
+     Returns: React.ReactElement
+
+### NumberGroup.tsx 
+   - **NumberGroup** `fn` (119 loc) [STATE:write]
+     Params: ({ context })
+     Returns: React.ReactElement
+       --> self :: getButtonStyle
+       --> app/src-tauri/src/utils/bridge.ts :: log
+   - **getButtonStyle** `fn` (5 loc)
+     Returns: React.CSSProperties
+
+### icons.tsx 
+   - **InsertFunctionIcon** `fn` (15 loc)
+     Returns: React.ReactElement
+   - **AutoSumIcon** `fn` (9 loc)
+     Returns: React.ReactElement
+   - **RecentlyUsedIcon** `fn` (12 loc)
+     Returns: React.ReactElement
+   - **FinancialIcon** `fn` (34 loc)
+     Returns: React.ReactElement
+   - **LogicalIcon** `fn` (26 loc)
+     Returns: React.ReactElement
+   - **TextIcon** `fn` (26 loc)
+     Returns: React.ReactElement
+   - **DateTimeIcon** `fn` (19 loc)
+     Returns: React.ReactElement
+   - **LookupIcon** `fn` (19 loc)
+     Returns: React.ReactElement
+   - **MathTrigIcon** `fn` (25 loc)
+     Returns: React.ReactElement
+   - **MoreFunctionsIcon** `fn` (18 loc)
+     Returns: React.ReactElement
+   - **CalculatorIcon** `fn` (23 loc)
+     Returns: React.ReactElement
+
+## DIR: app/src/components/Ribbon/tabs/InsertTab
+
+### InsertTab.tsx 
+   - **InsertTab** `fn` (6 loc)
+     Returns: React.ReactElement
+
+## DIR: app/src/components/Ribbon/tabs/ViewTab
+
+### ViewTab.tsx 
+   - **ViewTab** `fn` (6 loc)
+     Returns: React.ReactElement
+
+## DIR: app/src/components/Spreadsheet
+
+### Spreadsheet.tsx 
+   - **SpreadsheetContent** `fn` (114 loc)
+     Params: ({ className })
+     Returns: React.ReactElement
+     Hooks: useSpreadsheet
+     Consumes from useSpreadsheet: refs, state, handlers, ui
+       --> app/src/components/Spreadsheet/useSpreadsheet.ts :: useSpreadsheet
+       --> app/src/components/Spreadsheet/useSpreadsheetLayout.ts :: getModeStatus
+       --> app/src/components/Spreadsheet/useSpreadsheetEditing.ts :: getFormulaBarValue
+   - **Spreadsheet** `fn` (6 loc)
+     Returns: React.ReactElement
+
+### useSpreadsheet.ts 
+   - **useSpreadsheet** `hook` (178 loc) [HOOK] [STATE:context] [STATE:read] [STATE:write] [EFFECT] [FOCUS]
+     Returns: object
+     Hooks: useGridContext, useSpreadsheetSelection, useSpreadsheetEditing, useSpreadsheetLayout, useGridState, useSpreadsheetStyles, [+5 React]
+     Consumes from useGridContext: dispatch
+       --> app/src-tauri/src/utils/bridge.ts :: log
+       --> app/src/components/Spreadsheet/useSpreadsheetStyles.ts :: useSpreadsheetStyles
+       --> app/src/state/GridContext.tsx :: useGridState
+       --> app/src/state/GridContext.tsx :: useGridContext
+
+### useSpreadsheetEditing.ts 
+   - **getFormulaBarValue** `fn` (5 loc)
+     Returns: string
+
+### useSpreadsheetLayout.ts 
+   - **getSelectionSize** `fn` (6 loc)
+     Returns: string
+   - **getModeStatus** `fn` (7 loc)
+     Returns: string
+
+### useSpreadsheetSelection.ts 
+   - **fetchCellContent** `fn` (9 loc) [async]
+       --> app/src/lib/tauri-api.ts :: getCell
+
+### useSpreadsheetStyles.ts 
+   - **createDefaultStyleCache** `fn` (4 loc)
+     Returns: StyleDataMap
+   - **useSpreadsheetStyles** `hook` (107 loc) [HOOK] [STATE:write] [EFFECT]
+     Params: (canvasRef: React.RefObject<GridCanvasHandle | null>)
+     Returns: { styleCache: unknown, styleCacheVersion: unknown, handleCellsUpdated: (...) => void, refreshStyles: unknown }
+       --> self :: createDefaultStyleCache
+       --> app/src-tauri/src/utils/bridge.ts :: log
+       --> app/src/lib/tauri-api.ts :: getAllStyles
+
+## DIR: app/src/hooks
+
+### useCanvas.ts 
+   - **handleWindowResize** `fn` (2 loc)
+   - **handleChange** `fn` (2 loc) [FORM]
+
+### useCellEvents.ts 
+   - **listener** `fn` (2 loc) [FORM]
+
+### useEditing.ts [INTEGRATION]
+   - **useEditing** `hook` (621 loc) [HOOK] [INTEGRATION] [STATE:context] [STATE:dispatch] [STATE:read] [STATE:write] [RENDER:trigger] [EFFECT]
+     Returns: { success: unknown, row: unknown, col: unknown, display: unknown, formula: unknown, ... }
+     Hooks: useGridContext, [+21 React]
+     Consumes from useGridContext: state, dispatch
+     Triggers: dispatch(setFormulaReferences), dispatch(clearFormulaReferences), dispatch(startEditingAction), dispatch(updateEditing), ...
+       --> app/src/state/gridActions.ts :: clearFormulaReferences
+       --> app/src/lib/gridRenderer/references/conversion.ts :: columnRangeToReference
+       --> app/src/lib/types.ts :: isFormulaExpectingReference
+       --> app/src/state/gridActions.ts :: setFormulaReferences
+       --> app/src/lib/tauri-api.ts :: getCell
+       --> app/src/state/gridActions.ts :: updateEditing
+       --> app/src/lib/gridRenderer/references/conversion.ts :: rowToReference
+       --> app/src/lib/gridRenderer/references/conversion.ts :: columnToReference
+       --> ... (+3 more)
+
+### useGridKeyboard.ts 
+   - **useGridKeyboard** `hook` (168 loc) [HOOK] [STATE:context] [STATE:dispatch] [STATE:read] [LISTENER] [RENDER:trigger] [EFFECT] [KEYBOARD]
+     Params: (options: UseGridKeyboardOptions)
+     Hooks: useGridContext, [+2 React]
+     Consumes from useGridContext: state, dispatch
+     Triggers: dispatch(moveSelection)
+       --> app/src/state/GridContext.tsx :: useGridContext
+
+### useSelection.ts [INTEGRATION]
+   - **useSelection** `hook` (211 loc) [HOOK] [INTEGRATION] [STATE:context] [STATE:dispatch] [STATE:read] [STATE:write] [RENDER:trigger]
+     Returns: { selection: unknown, selectCell: unknown, extendTo: unknown, moveActiveCell: unknown, getSelectionReference: unknown, ... }
+     Hooks: useGridContext, [+8 React]
+     Consumes from useGridContext: state, dispatch
+     Triggers: dispatch(setSelection), dispatch(extendSelection), dispatch(moveSelection)
+       --> app/src/state/GridContext.tsx :: useGridContext
+       --> app/src/lib/tauri-api.ts :: indexToCol
+       --> app/src/state/gridActions.ts :: extendSelection
+
+### useViewport.ts [INTEGRATION]
+   - **useViewport** `hook` (298 loc) [HOOK] [INTEGRATION] [STATE:context] [STATE:dispatch] [STATE:read] [RENDER:trigger] [EFFECT] [SCROLL]
+     Returns: { width: unknown, height: unknown }
+     Hooks: useGridContext, [+18 React]
+     Consumes from useGridContext: state, dispatch
+     Triggers: dispatch(expandVirtualBounds), dispatch(updateScroll), dispatch(scrollToCellAction), dispatch(scrollBy), ...
+       --> app/src/state/gridActions.ts :: setViewportDimensions
+       --> app/src/state/gridActions.ts :: expandVirtualBounds
+       --> app/src/state/gridActions.ts :: updateScroll
+       --> app/src/state/gridActions.ts :: scrollToCell
+       --> app/src/state/gridActions.ts :: scrollBy
+       --> app/src/state/gridActions.ts :: setViewportSize
+       --> app/src/state/GridContext.tsx :: useGridContext
+   - **normalizeSelection** `fn` (12 loc)
+     Params: (selection: Selection)
+     Returns: object
+   - **isCellSelected** `fn` (7 loc)
+     Returns: boolean
+       --> self :: normalizeSelection
+   - **isActiveCell** `fn` (6 loc)
+     Returns: boolean
+
+## DIR: app/src/hooks/useMouseSelection
+
+### useMouseSelection.ts 
+   - **useMouseSelection** `hook` (458 loc) [HOOK] [STATE:write] [LISTENER] [EFFECT] [MOUSE]
+     Params: (props: UseMouseSelectionProps)
+     Returns: { isDragging: boolean, isFormulaDragging: boolean, isResizing: boolean, cursorStyle: unknown, handleMouseDown: (...) => void, ... }
+     Hooks: useAutoScroll, [+6 React]
+     Consumes from useAutoScroll: startAutoScroll, stopAutoScroll
+       --> app/src/hooks/useMouseSelection/editing/formulaHeaderHandlers.ts :: createFormulaHeaderHandlers
+       --> app/src/hooks/useMouseSelection/layout/resizeHandlers.ts :: updateCursorForPosition
+       --> app/src/hooks/useMouseSelection/layout/resizeHandlers.ts :: createResizeHandlers
+       --> app/src/hooks/useMouseSelection/selection/cellSelectionHandlers.ts :: createCellSelectionHandlers
+       --> app/src/hooks/useMouseSelection/selection/useAutoScroll.ts :: useAutoScroll
+       --> app/src/hooks/useMouseSelection/editing/formulaHandlers.ts :: createFormulaHandlers
+       --> app/src/hooks/useMouseSelection/selection/headerSelectionHandlers.ts :: createHeaderSelectionHandlers
+       --> app/src/hooks/useMouseSelection/selection/headerSelectionHandlers.ts :: handleHeaderDragMove
+       --> ... (+4 more)
+   - **handleGlobalMouseUp** `fn` (13 loc) [MOUSE]
+       --> app/src/hooks/useMouseSelection/layout/resizeHandlers.ts :: handleResizeMouseUp
+   - **handleGlobalMouseMove** `fn` (47 loc) [MOUSE]
+     Params: (event: MouseEvent)
+       --> app/src/hooks/useMouseSelection/layout/resizeHandlers.ts :: handleResizeMouseMove
+
+## DIR: app/src/hooks/useMouseSelection/editing
+
+### formulaHandlers.ts 
+   - **createFormulaHandlers** `fn` (115 loc) [MOUSE]
+     Params: (deps: FormulaDependencies)
+     Returns: FormulaHandlers
+   - **handleFormulaCellMouseUp** `fn` (35 loc) [MOUSE]
+     Params: (stopAutoScroll: ()
+
+### formulaHeaderHandlers.ts 
+   - **createFormulaHeaderHandlers** `fn` (162 loc) [MOUSE]
+     Params: (deps: FormulaHeaderDependencies)
+     Returns: FormulaHeaderHandlers
+   - **handleFormulaHeaderMouseUp** `fn` (50 loc) [MOUSE]
+     Params: (stopAutoScroll: ()
+
+## DIR: app/src/hooks/useMouseSelection/layout
+
+### resizeHandlers.ts 
+   - **createResizeHandlers** `fn` (122 loc) [MOUSE]
+     Params: (deps: ResizeDependencies)
+     Returns: ResizeHandlers
+   - **checkResizeHandle** `fn` (4 loc)
+     Returns: boolean
+   - **handleResizeMouseMove** `fn` (20 loc) [MOUSE]
+     Params: (mouseX: number, mouseY: number)
+   - **handleResizeMouseUp** `fn` (3 loc) [MOUSE]
+   - **updateCursorForPosition** `fn` (11 loc)
+     Params: (mouseX: number, mouseY: number)
+
+## DIR: app/src/hooks/useMouseSelection/selection
+
+### cellSelectionHandlers.ts 
+   - **createCellSelectionHandlers** `fn` (60 loc) [MOUSE]
+     Params: (deps: CellSelectionDependencies)
+     Returns: CellSelectionHandlers
+
+### headerSelectionHandlers.ts 
+   - **createHeaderSelectionHandlers** `fn` (139 loc) [MOUSE]
+     Params: (deps: HeaderSelectionDependencies)
+     Returns: HeaderSelectionHandlers
+   - **handleHeaderDragMove** `fn` (26 loc) [DRAG]
+     Params: (mouseX: number, mouseY: number)
+
+### useAutoScroll.ts 
+   - **useAutoScroll** `hook` (86 loc) [HOOK] [EFFECT] [SCROLL]
+     Params: (props: UseAutoScrollProps)
+     Returns: { startAutoScroll: unknown, stopAutoScroll: unknown }
+
+## DIR: app/src/lib
+
+### cellEvents.ts 
+   - **CellEventEmitter** `class` (42 loc) [FORM]
+       --> app/src/hooks/useCellEvents.ts :: listener
+
+### scrollUtils.ts 
+   - **cellToScroll** `fn` (7 loc) [SCROLL]
+     Returns: object
+
+### tauri-api.ts 
+   - **indexToCol** `fn` (7 loc)
+     Returns: string
+   - **colToIndex** `fn` (6 loc)
+     Returns: number
+   - **getCell** `fn` (2 loc) [async] [BACKEND:sync]
+     Returns: Promise<CellData | null>
+   - **clearCell** `fn` (2 loc) [async] [BACKEND:sync]
+     Returns: Promise<void>
+   - **getGridBounds** `fn` (2 loc) [async] [BACKEND:sync]
+     Returns: Promise<[number, number]>
+   - **getCellCount** `fn` (2 loc) [async] [BACKEND:sync]
+     Returns: Promise<number>
+   - **setColumnWidth** `fn` (2 loc) [async] [BACKEND:sync]
+     Returns: Promise<void>
+   - **getColumnWidth** `fn` (2 loc) [async] [BACKEND:sync]
+     Returns: Promise<number | null>
+   - **getAllColumnWidths** `fn` (2 loc) [async] [BACKEND:sync]
+     Returns: Promise<DimensionData[]>
+   - **setRowHeight** `fn` (2 loc) [async] [BACKEND:sync]
+     Returns: Promise<void>
+   - **getRowHeight** `fn` (2 loc) [async] [BACKEND:sync]
+     Returns: Promise<number | null>
+   - **getAllRowHeights** `fn` (2 loc) [async] [BACKEND:sync]
+     Returns: Promise<DimensionData[]>
+   - **getStyle** `fn` (2 loc) [async] [BACKEND:sync]
+     Returns: Promise<StyleData>
+   - **getAllStyles** `fn` (2 loc) [async] [BACKEND:sync]
+     Returns: Promise<StyleData[]>
+   - **getStyleCount** `fn` (2 loc) [async] [BACKEND:sync]
+     Returns: Promise<number>
+   - **getAllFunctions** `fn` (2 loc) [async] [BACKEND:sync]
+     Returns: Promise<
+   - **getFunctionTemplate** `fn` (2 loc) [async] [BACKEND:sync]
+     Returns: Promise<string>
+   - **setCalculationMode** `fn` (2 loc) [async] [BACKEND:sync]
+     Returns: Promise<string>
+   - **getCalculationMode** `fn` (2 loc) [async] [BACKEND:sync]
+     Returns: Promise<string>
+   - **calculateNow** `fn` (5 loc) [async] [BACKEND:sync]
+     Returns: Promise<CellData[]>
+       --> app/src-tauri/src/utils/bridge.ts :: log
+   - **calculateSheet** `fn` (5 loc) [async] [BACKEND:sync]
+     Returns: Promise<CellData[]>
+       --> app/src-tauri/src/utils/bridge.ts :: log
+
+### types.ts 
+   - **createEmptyDimensionOverrides** `fn` (5 loc)
+     Returns: DimensionOverrides
+   - **createDefaultStyleCache** `fn` (4 loc)
+     Returns: StyleDataMap
+   - **cellKey** `fn` (2 loc)
+     Returns: string
+   - **createInitialGridState** `fn` (27 loc)
+     Returns: GridState
+       --> self :: createEmptyDimensionOverrides
+   - **isFormula** `fn` (2 loc)
+     Returns: boolean
+   - **isFormulaExpectingReference** `fn` (14 loc)
+     Params: (value: string)
+     Returns: boolean
+       --> self :: isFormula
+   - **columnToLetter** `fn` (11 loc)
+     Params: (col: number)
+     Returns: string
+   - **letterToColumn** `fn` (6 loc)
+     Returns: number
+
+## DIR: app/src/lib/gridRenderer/references
+
+### conversion.ts 
+   - **cellToReference** `fn` (2 loc)
+     Returns: string
+       --> app/src/lib/types.ts :: columnToLetter
+   - **columnToReference** `fn` (3 loc)
+     Returns: string
+       --> app/src/lib/types.ts :: columnToLetter
+   - **columnRangeToReference** `fn` (8 loc)
+     Returns: string
+       --> app/src/lib/types.ts :: columnToLetter
+       --> self :: columnToReference
+   - **rowToReference** `fn` (3 loc)
+     Returns: string
+   - **rowRangeToReference** `fn` (8 loc)
+     Returns: string
+       --> self :: rowToReference
+
+## DIR: app/src/lib/gridRenderer/rendering
+
+### cells.ts 
+   - **drawCellText** `fn` (237 loc)
+     Params: (state: RenderState)
+       --> app/src/lib/gridRenderer/styles/styleUtils.ts :: isValidColor
+       --> app/src/lib/gridRenderer/styles/styleUtils.ts :: getStyleFromCache
+       --> app/src/lib/gridRenderer/styles/cellFormatting.ts :: isNumericValue
+       --> app/src/lib/types.ts :: cellKey
+       --> app/src/lib/gridRenderer/styles/styleUtils.ts :: isDefaultTextColor
+       --> app/src-tauri/src/utils/bridge.ts :: log
+       --> app/src/lib/gridRenderer/styles/cellFormatting.ts :: isErrorValue
+       --> app/src/lib/gridRenderer/styles/styleUtils.ts :: isDefaultBackgroundColor
+       --> ... (+2 more)
+
+### grid.ts 
+   - **drawGridLines** `fn` (36 loc)
+     Params: (state: RenderState)
+       --> app/src/lib/tauri-api.ts :: getRowHeight
+       --> app/src/lib/tauri-api.ts :: getColumnWidth
+   - **drawCellBackgrounds** `fn` (13 loc)
+     Params: (state: RenderState)
+
+### headers.ts 
+   - **drawCorner** `fn` (13 loc)
+     Params: (state: RenderState)
+   - **drawColumnHeaders** `fn` (74 loc)
+     Params: (state: RenderState)
+       --> app/src/lib/tauri-api.ts :: getColumnWidth
+       --> app/src/lib/types.ts :: columnToLetter
+   - **drawRowHeaders** `fn` (72 loc)
+     Params: (state: RenderState)
+       --> app/src/lib/tauri-api.ts :: getRowHeight
+
+### references.ts 
+   - **drawFormulaReferences** `fn` (61 loc)
+     Params: (state: RenderState)
+       --> app/src/lib/tauri-api.ts :: getRowHeight
+       --> app/src/lib/tauri-api.ts :: getColumnWidth
+
+### selection.ts 
+   - **drawSelection** `fn` (53 loc)
+     Params: (state: RenderState)
+       --> app/src/lib/tauri-api.ts :: getRowHeight
+       --> app/src/lib/tauri-api.ts :: getColumnWidth
+   - **drawActiveCell** `fn` (57 loc)
+     Params: (state: RenderState)
+       --> app/src/lib/tauri-api.ts :: getRowHeight
+       --> app/src/lib/tauri-api.ts :: getColumnWidth
+   - **drawActiveCellBackground** `fn` (37 loc)
+     Params: (state: RenderState)
+       --> app/src/lib/tauri-api.ts :: getRowHeight
+       --> app/src/lib/tauri-api.ts :: getColumnWidth
+
+## DIR: app/src/lib/gridRenderer/styles
+
+### cellFormatting.ts 
+   - **isNumericValue** `fn` (9 loc)
+     Returns: boolean
+   - **isErrorValue** `fn` (4 loc)
+     Returns: boolean
+
+### styleUtils.ts 
+   - **ensureDimensions** `fn` (5 loc)
+     Returns: DimensionOverrides
+       --> app/src/lib/types.ts :: createEmptyDimensionOverrides
+   - **ensureStyleCache** `fn` (7 loc)
+     Returns: StyleDataMap
+   - **getStyleFromCache** `fn` (7 loc)
+     Returns: StyleData
+   - **isValidColor** `fn` (35 loc)
+     Params: (color: string | undefined | null)
+     Returns: boolean
+   - **isDefaultTextColor** `fn` (20 loc)
+     Params: (color: string | undefined | null)
+     Returns: boolean
+   - **isDefaultBackgroundColor** `fn` (26 loc)
+     Params: (color: string | undefined | null)
+     Returns: boolean
+
+## DIR: app/src/state
+
+### GridContext.tsx 
+   - **GridProvider** `fn` (13 loc)
+     Params: ({ children, initialState })
+     Returns: React.ReactElement
+       --> app/src/state/gridReducer.ts :: getInitialState
+   - **useGridContext** `hook` (8 loc) [HOOK] [STATE:context] [STATE:read]
+     Returns: GridContextValue
+   - **useGridState** `hook` (3 loc) [HOOK] [STATE:context] [STATE:read]
+     Returns: GridState
+     Hooks: useGridContext
+     Consumes from useGridContext: state
+       --> self :: useGridContext
+   - **useGridDispatch** `hook` (3 loc) [HOOK] [STATE:context] [STATE:read]
+     Returns: React.Dispatch<GridAction>
+     Hooks: useGridContext
+     Consumes from useGridContext: dispatch
+       --> self :: useGridContext
+
+### gridActions.ts 
+   - **clearSelection** `fn` (4 loc)
+     Returns: ClearSelectionAction
+   - **extendSelection** `fn` (5 loc)
+     Returns: ExtendSelectionAction
+   - **setViewport** `fn` (5 loc)
+     Returns: SetViewportAction
+   - **updateScroll** `fn` (5 loc) [SCROLL]
+     Returns: UpdateScrollAction
+   - **scrollBy** `fn` (5 loc) [SCROLL]
+     Returns: ScrollByAction
+   - **scrollToCell** `fn` (5 loc) [SCROLL]
+     Returns: ScrollToCellAction
+   - **scrollToPosition** `fn` (5 loc) [SCROLL]
+     Returns: ScrollToPositionAction
+   - **startEditing** `fn` (5 loc)
+     Returns: StartEditingAction
+   - **updateEditing** `fn` (5 loc)
+     Returns: UpdateEditingAction
+   - **stopEditing** `fn` (4 loc)
+     Returns: StopEditingAction
+   - **updateConfig** `fn` (5 loc)
+     Returns: UpdateConfigAction
+   - **setViewportSize** `fn` (5 loc)
+     Returns: SetViewportSizeAction
+   - **setViewportDimensions** `fn` (5 loc)
+     Returns: SetViewportDimensionsAction
+   - **expandVirtualBounds** `fn` (5 loc)
+     Returns: ExpandVirtualBoundsAction
+   - **setVirtualBounds** `fn` (5 loc)
+     Returns: SetVirtualBoundsAction
+   - **resetVirtualBounds** `fn` (4 loc)
+     Returns: ResetVirtualBoundsAction
+   - **setFormulaReferences** `fn` (5 loc)
+     Returns: SetFormulaReferencesAction
+   - **clearFormulaReferences** `fn` (4 loc)
+     Returns: ClearFormulaReferencesAction
+   - **setColumnWidth** `fn` (5 loc)
+     Returns: SetColumnWidthAction
+   - **setRowHeight** `fn` (5 loc)
+     Returns: SetRowHeightAction
+
+### gridReducer.ts 
+   - **clamp** `fn` (2 loc)
+     Returns: number
+   - **gridReducer** `fn` (480 loc)
+     Params: (state: GridState, action: GridAction)
+     Returns: GridState
+       --> self :: clamp
+   - **getInitialState** `fn` (2 loc)
+     Returns: GridState
+       --> app/src/lib/types.ts :: createInitialGridState
+================================================================================
+                           DATA FLOW SUMMARY
+================================================================================
+
+## useAutoScroll
+   Consumed by:
+     - useMouseSelection: startAutoScroll, stopAutoScroll
+
+## useGridContext
+   Consumed by:
+     - useEditing: state, dispatch
+     - useGridDispatch: dispatch
+     - useGridKeyboard: state, dispatch
+     - useGridState: state
+     - useSelection: state, dispatch
+     - useSpreadsheet: dispatch
+     - useViewport: state, dispatch
+
+## useSpreadsheet
+   Consumed by:
+     - SpreadsheetContent: refs, state, handlers, ui

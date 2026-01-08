@@ -1,0 +1,32 @@
+{<intro>}
+
+================================================================================
+                         TASK DESCRIPTION
+================================================================================
+
+{<task>}
+
+================================================================================
+                         CODE STRUCTURE
+================================================================================
+
+The following is a structural outline of the relevant code paths. This is NOT 
+the full source code - it shows function signatures, call relationships, and 
+type definitions to help you understand the architecture.
+
+IMPORTANT: After reviewing this outline, you must request the specific code 
+you need to complete the task. Do NOT attempt to solve the task with only 
+this outline - you need to see the actual implementations.
+Only request code that exists in the provided call graph.
+
+{<content>}
+
+Please analyze the code structure and help me understand how cell formatting 
+is applied when the user clicks a formatting button. Specifically:
+
+1. How does the frontend trigger the formatting command?
+2. How does the backend apply the style to the cell?
+3. Where is the style data stored?
+
+After reviewing the outline, request the specific code you need to answer 
+these questions.

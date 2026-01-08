@@ -1,0 +1,30 @@
+# PROJECT CONTEXT: CALCULA
+{<intro>}
+
+# REPO STRUCTURE
+{<files>}
+
+# CURRENT TASK
+{<task>}
+
+# SELECTED CODE TERRITORY
+Below is the full content of the files selected for this task.
+---------------------------------------------------------
+{<content>}
+---------------------------------------------------------
+
+# INSTRUCTIONS
+**STEP 1: SANITY CHECK**
+Before writing any code, ask yourself: "Do I see all the file definitions needed to solve the task?"
+* Check for missing Type definitions.
+* Check for missing API calls or Backend Commands.
+* Check for missing imports that are crucial to the logic.
+
+**STEP 2: DECISION**
+* **IF files are missing:**
+    STOP immediately. Return ONLY the build command with the *combined* list of current files plus the missing ones.
+    Format: "python context_manager.py build --files <current_files>,<missing_file_1>,<missing_file_2>"
+
+* **IF context is complete:**
+    Proceed to implement the requested changes.
+    1. If you modify a file, you MUST update its top-level docstring/comment.

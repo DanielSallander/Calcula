@@ -1,0 +1,585 @@
+// FILENAME: src-tauri/src/commands.rs
+// PURPOSE: Tauri command handlers for grid operations.
+// CONTEXT: These commands are called from the frontend via Tauri IPC.
+
+use crate::api_types::{CellData, DimensionData, FormattingParams, FormattingResult, StyleData, StyleEntry};
+use crate::{
+    create_app_state, evaluate_formula, evaluate_formula_multi_sheet, extract_references,
+    format_cell_value, get_recalculation_order, parse_cell_input, update_dependencies, AppState,
+};
+use engine::{
+    Cell, CellStyle, CellValue, Color, Grid, NumberFormat, StyleRegistry, TextAlign, TextRotation,
+    VerticalAlign, CurrencyPosition,
+};
+use std::collections::HashSet;
+use tauri::State;
+
+// ============================================================================
+// GRID DATA COMMANDS
+// ============================================================================
+
+/// Get cells for a viewport range.
+#[tauri::command]
+pub fn get_viewport_cells(
+    state: State<AppState>,
+    start_row: u32,
+    start_col: u32,
+    end_row: u32,
+    end_col: u32,
+) -> Vec<CellData> {
+    let grid = state.grid.lock().unwrap();
+    let styles = state.style_registry.lock().unwrap();
+    let mut cells = Vec::new();
+
+    for row in start_row..=end_row {
+        for col in start_col..=end_col {
+            if let Some(cell_data) = get_cell_internal(&grid, &styles, row, col) {
+                cells.push(cell_data);
+            }
+        }
+    }
+
+    cells
+}
+
+/// Get a single cell's data.
+#[tauri::command]
+pub fn get_cell(state: State<AppState>, row: u32, col: u32) -> Option<CellData> {
+    let grid = state.grid.lock().unwrap();
+    let styles = state.style_registry.lock().unwrap();
+    get_cell_internal(&grid, &styles, row, col)
+}
+
+/// Internal helper for getting cell data.
+fn get_cell_internal(grid: &Grid, styles: &StyleRegistry, row: u32, col: u32) -> Option<CellData> {
+    let cell = grid.get_cell(row, col)?;
+    let style = styles.get(cell.style_index);
+    let display = format_cell_value(&cell.value, style);
+
+    Some(CellData {
+        row,
+        col,
+        display,
+        formula: cell.formula.clone(),
+        style_index: cell.style_index,
+    })
+}
+
+/// Update a cell with new content.
+/// Returns all cells that were updated (including dependent cells).
+#[tauri::command]
+pub fn update_cell(
+    state: State<AppState>,
+    row: u32,
+    col: u32,
+    value: String,
+) -> Result<Vec<CellData>, String> {
+    //log_debug!("CMD", "update_cell row={} col={} value={}", row, col, &value);
+
+    let mut grid = state.grid.lock().unwrap();
+    let mut grids = state.grids.lock().unwrap();
+    let sheet_names = state.sheet_names.lock().unwrap();
+    let active_sheet = *state.active_sheet.lock().unwrap();
+    let styles = state.style_registry.lock().unwrap();
+    let mut dependents_map = state.dependents.lock().unwrap();
+    let mut dependencies_map = state.dependencies.lock().unwrap();
+    let calc_mode = state.calculation_mode.lock().unwrap();
+
+    let mut updated_cells = Vec::new();
+
+    // Handle empty value - clear the cell
+    if value.trim().is_empty() {
+        grid.clear_cell(row, col);
+        // Also update the grids vector
+        if active_sheet < grids.len() {
+            grids[active_sheet].clear_cell(row, col);
+        }
+        update_dependencies(
+            (row, col),
+            HashSet::new(),
+            &mut dependencies_map,
+            &mut dependents_map,
+        );
+        updated_cells.push(CellData {
+            row,
+            col,
+            display: String::new(),
+            formula: None,
+            style_index: 0,
+        });
+        return Ok(updated_cells);
+    }
+
+    // Parse the input
+    let mut cell = parse_cell_input(&value);
+
+    // Preserve existing style
+    if let Some(existing) = grid.get_cell(row, col) {
+        cell.style_index = existing.style_index;
+    }
+
+    // If it's a formula, evaluate it using multi-sheet context
+    if let Some(ref formula) = cell.formula {
+        // Extract references for dependency tracking
+        if let Ok(parsed) = parser::parse(formula) {
+            let refs = extract_references(&parsed, &grid);
+            update_dependencies((row, col), refs, &mut dependencies_map, &mut dependents_map);
+        }
+
+        // Evaluate using multi-sheet context for cross-sheet reference support
+        let result = evaluate_formula_multi_sheet(
+            &grids,
+            &sheet_names,
+            active_sheet,
+            formula,
+        );
+        cell.value = result;
+    } else {
+        // Clear dependencies for non-formula cells
+        update_dependencies(
+            (row, col),
+            HashSet::new(),
+            &mut dependencies_map,
+            &mut dependents_map,
+        );
+    }
+
+    // Store the cell
+    grid.set_cell(row, col, cell.clone());
+    // Also update the grids vector to keep them in sync
+    if active_sheet < grids.len() {
+        grids[active_sheet].set_cell(row, col, cell.clone());
+    }
+
+    // Get the display value
+    let style = styles.get(cell.style_index);
+    let display = format_cell_value(&cell.value, style);
+
+    updated_cells.push(CellData {
+        row,
+        col,
+        display,
+        formula: cell.formula.clone(),
+        style_index: cell.style_index,
+    });
+
+    // Recalculate dependents if automatic mode
+    if *calc_mode == "automatic" {
+        let recalc_order = get_recalculation_order((row, col), &dependents_map);
+
+        for (dep_row, dep_col) in recalc_order {
+            if let Some(dep_cell) = grid.get_cell(dep_row, dep_col) {
+                if let Some(ref formula) = dep_cell.formula {
+                    // Evaluate dependent using multi-sheet context
+                    let result = evaluate_formula_multi_sheet(
+                        &grids,
+                        &sheet_names,
+                        active_sheet,
+                        formula,
+                    );
+
+                    let mut updated_dep = dep_cell.clone();
+                    updated_dep.value = result;
+                    grid.set_cell(dep_row, dep_col, updated_dep.clone());
+                    
+                    // Also update the grids vector
+                    if active_sheet < grids.len() {
+                        grids[active_sheet].set_cell(dep_row, dep_col, updated_dep.clone());
+                    }
+
+                    let dep_style = styles.get(updated_dep.style_index);
+                    let dep_display = format_cell_value(&updated_dep.value, dep_style);
+
+                    updated_cells.push(CellData {
+                        row: dep_row,
+                        col: dep_col,
+                        display: dep_display,
+                        formula: updated_dep.formula.clone(),
+                        style_index: updated_dep.style_index,
+                    });
+                }
+            }
+        }
+    }
+
+    //log_debug!("CMD", "update_cell done, updated={}", updated_cells.len());
+    Ok(updated_cells)
+}
+
+/// Clear a cell.
+#[tauri::command]
+pub fn clear_cell(state: State<AppState>, row: u32, col: u32) {
+    let mut grid = state.grid.lock().unwrap();
+    let mut grids = state.grids.lock().unwrap();
+    let active_sheet = *state.active_sheet.lock().unwrap();
+    let mut dependents_map = state.dependents.lock().unwrap();
+    let mut dependencies_map = state.dependencies.lock().unwrap();
+
+    grid.clear_cell(row, col);
+    // Also update the grids vector
+    if active_sheet < grids.len() {
+        grids[active_sheet].clear_cell(row, col);
+    }
+    
+    update_dependencies(
+        (row, col),
+        HashSet::new(),
+        &mut dependencies_map,
+        &mut dependents_map,
+    );
+}
+
+/// Get the grid bounds (max row and col with data).
+#[tauri::command]
+pub fn get_grid_bounds(state: State<AppState>) -> (u32, u32) {
+    let grid = state.grid.lock().unwrap();
+    (grid.max_row, grid.max_col)
+}
+
+/// Get the total number of non-empty cells.
+#[tauri::command]
+pub fn get_cell_count(state: State<AppState>) -> usize {
+    let grid = state.grid.lock().unwrap();
+    grid.cells.len()
+}
+
+// ============================================================================
+// DIMENSION COMMANDS
+// ============================================================================
+
+/// Set a column width.
+#[tauri::command]
+pub fn set_column_width(state: State<AppState>, col: u32, width: f64) {
+    let mut widths = state.column_widths.lock().unwrap();
+    if width > 0.0 {
+        widths.insert(col, width);
+    } else {
+        widths.remove(&col);
+    }
+}
+
+/// Get a column width.
+#[tauri::command]
+pub fn get_column_width(state: State<AppState>, col: u32) -> Option<f64> {
+    let widths = state.column_widths.lock().unwrap();
+    widths.get(&col).copied()
+}
+
+/// Get all column widths.
+#[tauri::command]
+pub fn get_all_column_widths(state: State<AppState>) -> Vec<DimensionData> {
+    let widths = state.column_widths.lock().unwrap();
+    widths
+        .iter()
+        .map(|(&index, &size)| DimensionData { index, size })
+        .collect()
+}
+
+/// Set a row height.
+#[tauri::command]
+pub fn set_row_height(state: State<AppState>, row: u32, height: f64) {
+    let mut heights = state.row_heights.lock().unwrap();
+    if height > 0.0 {
+        heights.insert(row, height);
+    } else {
+        heights.remove(&row);
+    }
+}
+
+/// Get a row height.
+#[tauri::command]
+pub fn get_row_height(state: State<AppState>, row: u32) -> Option<f64> {
+    let heights = state.row_heights.lock().unwrap();
+    heights.get(&row).copied()
+}
+
+/// Get all row heights.
+#[tauri::command]
+pub fn get_all_row_heights(state: State<AppState>) -> Vec<DimensionData> {
+    let heights = state.row_heights.lock().unwrap();
+    heights
+        .iter()
+        .map(|(&index, &size)| DimensionData { index, size })
+        .collect()
+}
+
+// ============================================================================
+// STYLE COMMANDS
+// ============================================================================
+
+/// Get a style by index.
+#[tauri::command]
+pub fn get_style(state: State<AppState>, index: usize) -> StyleData {
+    let styles = state.style_registry.lock().unwrap();
+    StyleData::from(styles.get(index))
+}
+
+/// Get all styles.
+#[tauri::command]
+pub fn get_all_styles(state: State<AppState>) -> Vec<StyleData> {
+    let styles = state.style_registry.lock().unwrap();
+    styles.all_styles().iter().map(StyleData::from).collect()
+}
+
+/// Set a cell's style index.
+#[tauri::command]
+pub fn set_cell_style(
+    state: State<AppState>,
+    row: u32,
+    col: u32,
+    style_index: usize,
+) -> Option<CellData> {
+    let mut grid = state.grid.lock().unwrap();
+    let mut grids = state.grids.lock().unwrap();
+    let active_sheet = *state.active_sheet.lock().unwrap();
+    let styles = state.style_registry.lock().unwrap();
+
+    if let Some(cell) = grid.get_cell(row, col) {
+        let mut updated_cell = cell.clone();
+        updated_cell.style_index = style_index;
+        grid.set_cell(row, col, updated_cell.clone());
+        
+        if active_sheet < grids.len() {
+            grids[active_sheet].set_cell(row, col, updated_cell.clone());
+        }
+
+        let style = styles.get(style_index);
+        let display = format_cell_value(&updated_cell.value, style);
+
+        Some(CellData {
+            row,
+            col,
+            display,
+            formula: updated_cell.formula,
+            style_index,
+        })
+    } else {
+        // Create a new empty cell with the style
+        let cell = Cell {
+            value: CellValue::Empty,
+            formula: None,
+            style_index,
+        };
+        grid.set_cell(row, col, cell.clone());
+        
+        if active_sheet < grids.len() {
+            grids[active_sheet].set_cell(row, col, cell);
+        }
+
+        Some(CellData {
+            row,
+            col,
+            display: String::new(),
+            formula: None,
+            style_index,
+        })
+    }
+}
+
+/// Apply formatting to a range of cells.
+#[tauri::command]
+pub fn apply_formatting(
+    state: State<AppState>,
+    params: FormattingParams,
+) -> Result<FormattingResult, String> {
+    let mut grid = state.grid.lock().unwrap();
+    let mut grids = state.grids.lock().unwrap();
+    let active_sheet = *state.active_sheet.lock().unwrap();
+    let mut styles = state.style_registry.lock().unwrap();
+
+    let mut updated_cells = Vec::new();
+    let mut updated_styles = Vec::new();
+
+    // Iterate over all row/col combinations from the params
+    for row in &params.rows {
+        for col in &params.cols {
+            let row = *row;
+            let col = *col;
+            
+            // Get or create cell
+            let (cell, old_style_index) = if let Some(existing) = grid.get_cell(row, col) {
+                (existing.clone(), existing.style_index)
+            } else {
+                (
+                    Cell {
+                        value: CellValue::Empty,
+                        formula: None,
+                        style_index: 0,
+                    },
+                    0,
+                )
+            };
+
+            // Get base style
+            let mut new_style = styles.get(old_style_index).clone();
+
+            // Apply formatting changes
+            if let Some(bold) = params.bold {
+                new_style.font.bold = bold;
+            }
+            if let Some(italic) = params.italic {
+                new_style.font.italic = italic;
+            }
+            if let Some(underline) = params.underline {
+                new_style.font.underline = underline;
+            }
+            if let Some(font_size) = params.font_size {
+                new_style.font.size = font_size;
+            }
+            if let Some(ref font_family) = params.font_family {
+                new_style.font.family = font_family.clone();
+            }
+            if let Some(ref text_color) = params.text_color {
+                if let Some(color) = Color::from_hex(text_color) {
+                    new_style.font.color = color;
+                }
+            }
+            if let Some(ref bg_color) = params.background_color {
+                if let Some(color) = Color::from_hex(bg_color) {
+                    new_style.background = color;
+                }
+            }
+            if let Some(ref align) = params.text_align {
+                new_style.text_align = match align.as_str() {
+                    "left" => TextAlign::Left,
+                    "center" => TextAlign::Center,
+                    "right" => TextAlign::Right,
+                    _ => TextAlign::General,
+                };
+            }
+            if let Some(ref valign) = params.vertical_align {
+                new_style.vertical_align = match valign.as_str() {
+                    "top" => VerticalAlign::Top,
+                    "middle" => VerticalAlign::Middle,
+                    "bottom" => VerticalAlign::Bottom,
+                    _ => VerticalAlign::Middle,
+                };
+            }
+            if let Some(wrap) = params.wrap_text {
+                new_style.wrap_text = wrap;
+            }
+            if let Some(ref rotation) = params.text_rotation {
+                new_style.text_rotation = parse_text_rotation(rotation);
+            }
+            if let Some(ref format) = params.number_format {
+                new_style.number_format = parse_number_format(format);
+            }
+
+            // Get or create style index
+            let new_style_index = styles.get_or_create(new_style.clone());
+
+            // Update cell
+            let mut updated_cell = cell;
+            updated_cell.style_index = new_style_index;
+            grid.set_cell(row, col, updated_cell.clone());
+            
+            if active_sheet < grids.len() {
+                grids[active_sheet].set_cell(row, col, updated_cell.clone());
+            }
+
+            let display = format_cell_value(&updated_cell.value, &new_style);
+
+            updated_cells.push(CellData {
+                row,
+                col,
+                display,
+                formula: updated_cell.formula,
+                style_index: new_style_index,
+            });
+        }
+    }
+
+    // Collect all styles
+    for (index, style) in styles.all_styles().iter().enumerate() {
+        updated_styles.push(StyleEntry {
+            index,
+            style: StyleData::from(style),
+        });
+    }
+
+    Ok(FormattingResult {
+        cells: updated_cells,
+        styles: updated_styles,
+    })
+}
+
+/// Parse a number format string.
+fn parse_number_format(format: &str) -> NumberFormat {
+    match format.to_lowercase().as_str() {
+        "general" => NumberFormat::General,
+        "number" => NumberFormat::Number {
+            decimal_places: 2,
+            use_thousands_separator: false,
+        },
+        "number_sep" => NumberFormat::Number {
+            decimal_places: 2,
+            use_thousands_separator: true,
+        },
+        "currency_usd" => NumberFormat::Currency {
+            decimal_places: 2,
+            symbol: "$".to_string(),
+            symbol_position: CurrencyPosition::Before,
+        },
+        "currency_eur" => NumberFormat::Currency {
+            decimal_places: 2,
+            symbol: "EUR".to_string(),
+            symbol_position: CurrencyPosition::Before,
+        },
+        "currency_sek" => NumberFormat::Currency {
+            decimal_places: 2,
+            symbol: "kr".to_string(),
+            symbol_position: CurrencyPosition::After,
+        },
+        "percentage" => NumberFormat::Percentage { decimal_places: 2 },
+        "scientific" => NumberFormat::Scientific { decimal_places: 2 },
+        "date_iso" => NumberFormat::Date {
+            format: "yyyy-mm-dd".to_string(),
+        },
+        "date_us" => NumberFormat::Date {
+            format: "mm/dd/yyyy".to_string(),
+        },
+        "date_eu" => NumberFormat::Date {
+            format: "dd/mm/yyyy".to_string(),
+        },
+        "time_24h" => NumberFormat::Time {
+            format: "hh:mm:ss".to_string(),
+        },
+        "time_12h" => NumberFormat::Time {
+            format: "hh:mm:ss AM/PM".to_string(),
+        },
+        _ => NumberFormat::General,
+    }
+}
+
+/// Parse a text rotation string.
+fn parse_text_rotation(rotation: &str) -> TextRotation {
+    match rotation.to_lowercase().as_str() {
+        "none" | "0" => TextRotation::None,
+        "90" | "up" => TextRotation::Rotate90,
+        "270" | "-90" | "down" => TextRotation::Rotate270,
+        _ => {
+            // Try to parse as a number
+            if let Ok(angle) = rotation.parse::<i16>() {
+                let clamped = angle.clamp(-90, 90);
+                if clamped == 0 {
+                    TextRotation::None
+                } else if clamped == 90 {
+                    TextRotation::Rotate90
+                } else if clamped == -90 {
+                    TextRotation::Rotate270
+                } else {
+                    TextRotation::Custom(clamped)
+                }
+            } else {
+                TextRotation::None
+            }
+        }
+    }
+}
+
+/// Get the total number of styles.
+#[tauri::command]
+pub fn get_style_count(state: State<AppState>) -> usize {
+    let styles = state.style_registry.lock().unwrap();
+    styles.len()
+}

@@ -1,0 +1,333 @@
+// FILENAME: app/src/components/InlineEditor.tsx
+// PURPOSE: Inline cell editor component that renders directly over the cell being edited.
+// CONTEXT: This component provides Excel-like inline editing by positioning a text input
+// directly over the cell being edited. It handles keyboard events for committing (Enter),
+// canceling (Escape), and tabbing between cells. The editor automatically focuses when
+// it appears and positions itself based on cell coordinates and scroll position.
+
+import React, { useRef, useEffect, useCallback } from "react";
+import type { GridConfig, Viewport, EditingCell, DimensionOverrides } from "../../types";
+import { isFormulaExpectingReference, createEmptyDimensionOverrides } from "../../types";
+
+/**
+ * Props for the InlineEditor component.
+ */
+export interface InlineEditorProps {
+  /** Current editing state */
+  editing: EditingCell;
+  /** Grid configuration for cell dimensions */
+  config: GridConfig;
+  /** Current viewport for scroll position */
+  viewport: Viewport;
+  /** Custom dimension overrides for columns/rows */
+  dimensions?: DimensionOverrides;
+  /** Callback to update the editing value */
+  onValueChange: (value: string) => void;
+  /** Callback to commit the edit */
+  onCommit: () => Promise<boolean>;
+  /** Callback to cancel the edit */
+  onCancel: () => void;
+  /** Callback when Tab is pressed (to move to next cell) */
+  onTab?: (shiftKey: boolean) => void;
+  /** Callback when Enter is pressed (to move down after commit) */
+  onEnter?: (shiftKey: boolean) => void;
+  /** Whether the editor is disabled (e.g., during save) */
+  disabled?: boolean;
+}
+
+/**
+ * Get the width of a specific column, using custom width if set.
+ */
+function getColumnWidth(
+  col: number,
+  config: GridConfig,
+  dimensions: DimensionOverrides
+): number {
+  const customWidth = dimensions.columnWidths.get(col);
+  if (customWidth !== undefined && customWidth > 0) {
+    return customWidth;
+  }
+  return config.defaultCellWidth || 100;
+}
+
+/**
+ * Get the height of a specific row, using custom height if set.
+ */
+function getRowHeight(
+  row: number,
+  config: GridConfig,
+  dimensions: DimensionOverrides
+): number {
+  const customHeight = dimensions.rowHeights.get(row);
+  if (customHeight !== undefined && customHeight > 0) {
+    return customHeight;
+  }
+  return config.defaultCellHeight || 24;
+}
+
+/**
+ * Calculate the X position of a column (left edge) accounting for variable widths.
+ */
+function calculateColumnX(
+  col: number,
+  config: GridConfig,
+  dimensions: DimensionOverrides,
+  scrollX: number
+): number {
+  const rowHeaderWidth = config.rowHeaderWidth || 50;
+  let x = rowHeaderWidth;
+  for (let c = 0; c < col; c++) {
+    x += getColumnWidth(c, config, dimensions);
+  }
+  return x - scrollX;
+}
+
+/**
+ * Calculate the Y position of a row (top edge) accounting for variable heights.
+ */
+function calculateRowY(
+  row: number,
+  config: GridConfig,
+  dimensions: DimensionOverrides,
+  scrollY: number
+): number {
+  const colHeaderHeight = config.colHeaderHeight || 24;
+  let y = colHeaderHeight;
+  for (let r = 0; r < row; r++) {
+    y += getRowHeight(r, config, dimensions);
+  }
+  return y - scrollY;
+}
+
+/**
+ * Calculate the position and visibility of the inline editor.
+ * Phase 5.2: Uses proper dimension calculations for variable column/row sizes.
+ */
+function calculateEditorPosition(
+  editing: EditingCell,
+  config: GridConfig,
+  viewport: Viewport,
+  dimensions: DimensionOverrides
+): {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  visible: boolean;
+} {
+  const { row, col } = editing;
+  const { rowHeaderWidth, colHeaderHeight } = config;
+
+  // Calculate cell position using proper dimension-aware functions
+  const cellX = calculateColumnX(col, config, dimensions, viewport.scrollX);
+  const cellY = calculateRowY(row, config, dimensions, viewport.scrollY);
+  const cellWidth = getColumnWidth(col, config, dimensions);
+  const cellHeight = getRowHeight(row, config, dimensions);
+
+  // Check if cell is visible (not scrolled out of view)
+  const visible =
+    cellX + cellWidth > rowHeaderWidth &&
+    cellY + cellHeight > colHeaderHeight &&
+    cellX < window.innerWidth &&
+    cellY < window.innerHeight;
+
+  // Clamp position to ensure editor doesn't overlap headers
+  const x = Math.max(cellX, rowHeaderWidth);
+  const y = Math.max(cellY, colHeaderHeight);
+
+  // Adjust width/height if partially clipped by headers
+  const clipLeft = Math.max(0, rowHeaderWidth - cellX);
+  const clipTop = Math.max(0, colHeaderHeight - cellY);
+  const width = cellWidth - clipLeft;
+  const height = cellHeight - clipTop;
+
+  return { x, y, width, height, visible };
+}
+
+/**
+ * InlineEditor component - renders a text input directly over the cell being edited.
+ * Phase 4.3: Added disabled prop, improved commit handling, and formula mode awareness.
+ * Phase 5.2: Fixed positioning to use proper dimension calculations.
+ */
+export function InlineEditor(props: InlineEditorProps): React.ReactElement | null {
+  const {
+    editing,
+    config,
+    viewport,
+    dimensions,
+    onValueChange,
+    onCommit,
+    onCancel,
+    onTab,
+    onEnter,
+    disabled = false,
+  } = props;
+
+  const inputRef = useRef<HTMLInputElement | null>(null);
+  const isCommittingRef = useRef(false);
+
+  // Ensure we have valid dimensions
+  const dims = dimensions || createEmptyDimensionOverrides();
+
+  // Check if we're in formula reference mode
+  const isFormulaMode = isFormulaExpectingReference(editing.value);
+
+  // Calculate position
+  const position = calculateEditorPosition(editing, config, viewport, dims);
+
+  /**
+   * Handle input value changes.
+   */
+  const handleChange = useCallback(
+    (event: React.ChangeEvent<HTMLInputElement>) => {
+      if (!disabled) {
+        onValueChange(event.target.value);
+      }
+    },
+    [onValueChange, disabled]
+  );
+
+  /**
+   * Handle keyboard events.
+   */
+  const handleKeyDown = useCallback(
+    async (event: React.KeyboardEvent<HTMLInputElement>) => {
+      if (disabled || isCommittingRef.current) {
+        return;
+      }
+
+      switch (event.key) {
+        case "Enter":
+          event.preventDefault();
+          event.stopPropagation();
+          isCommittingRef.current = true;
+          try {
+            const commitSuccess = await onCommit();
+            if (commitSuccess && onEnter) {
+              onEnter(event.shiftKey);
+            }
+          } finally {
+            isCommittingRef.current = false;
+          }
+          break;
+
+        case "Escape":
+          event.preventDefault();
+          event.stopPropagation();
+          onCancel();
+          break;
+
+        case "Tab":
+          event.preventDefault();
+          event.stopPropagation();
+          isCommittingRef.current = true;
+          try {
+            const tabSuccess = await onCommit();
+            if (tabSuccess && onTab) {
+              onTab(event.shiftKey);
+            }
+          } finally {
+            isCommittingRef.current = false;
+          }
+          break;
+
+        default:
+          // Let other keys propagate normally for text input
+          break;
+      }
+    },
+    [onCommit, onCancel, onTab, onEnter, disabled]
+  );
+
+  /**
+   * Handle blur - commit edit when focus leaves the editor.
+   * Phase 4.3: Skip commit when in formula mode (clicking grid to add reference).
+   * Phase 4.3+: Skip commit when focus transfers to formula bar (allows continued editing).
+   */
+  const handleBlur = useCallback(
+    async (event: React.FocusEvent<HTMLInputElement>) => {
+      // Don't commit if already committing (e.g., from Enter key)
+      if (isCommittingRef.current || disabled) {
+        return;
+      }
+
+      // Don't commit if in formula reference mode - user is clicking to add a reference
+      if (isFormulaMode) {
+        return;
+      }
+
+      // Check if focus is moving to the formula bar input
+      const relatedTarget = event.relatedTarget as HTMLElement | null;
+      if (relatedTarget?.hasAttribute("data-formula-bar")) {
+        // Focus moving to formula bar - don't commit, just transfer focus
+        // The user continues editing the same cell via the formula bar
+        return;
+      }
+
+      // Focus moving elsewhere - commit
+      isCommittingRef.current = true;
+      try {
+        await onCommit();
+      } finally {
+        isCommittingRef.current = false;
+      }
+    },
+    [onCommit, disabled, isFormulaMode]
+  );
+
+  /**
+   * Auto-focus the input when editing starts.
+   */
+  useEffect(() => {
+    if (inputRef.current && position.visible && !disabled) {
+      inputRef.current.focus();
+      // Place cursor at end of text
+      const len = inputRef.current.value.length;
+      inputRef.current.setSelectionRange(len, len);
+    }
+  }, [editing.row, editing.col, position.visible, disabled]);
+
+  // Don't render if not visible
+  if (!position.visible) {
+    return null;
+  }
+
+  const inputStyles: React.CSSProperties = {
+    position: "absolute",
+    left: position.x,
+    top: position.y,
+    width: position.width,
+    height: position.height,
+    padding: "0 4px",
+    margin: 0,
+    border: "2px solid #1a5fb4",
+    borderRadius: 0,
+    outline: "none",
+    backgroundColor: disabled ? "#f5f5f5" : "#ffffff",
+    color: disabled ? "#999" : "#000000",
+    fontFamily: "system-ui, -apple-system, sans-serif",
+    fontSize: "13px",
+    lineHeight: `${position.height - 4}px`,
+    boxSizing: "border-box",
+    zIndex: 10,
+  };
+
+  return (
+    <input
+      ref={inputRef}
+      type="text"
+      style={inputStyles}
+      value={editing.value}
+      onChange={handleChange}
+      onKeyDown={handleKeyDown}
+      onBlur={handleBlur}
+      disabled={disabled}
+      spellCheck={false}
+      autoComplete="off"
+      autoCorrect="off"
+      autoCapitalize="off"
+    />
+  );
+}
+
+export default InlineEditor;

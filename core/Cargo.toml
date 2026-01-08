@@ -1,0 +1,7 @@
+[workspace]
+members = [
+    "engine",
+    "parser",
+    "persistence"
+]
+resolver = "2"

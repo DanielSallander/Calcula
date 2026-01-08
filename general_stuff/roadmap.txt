@@ -1,0 +1,115 @@
+### 2\. The Master Task List
+
+Here is the roadmap. We have just finished **Phase 1.3**.
+
+#### **Phase 1: The Core Brain (Rust)**
+
+  * [x] **1.1 Data Structure:** Define `Cell` and `Grid` (Sparse Matrix).
+  * [x] **1.2 Persistence:** Implement JSON saving/loading for the Grid.
+  * [x] **1.3 Lexer:** Build the tokenizer for formulas.
+  * [ ] **1.4 AST (Abstract Syntax Tree):** Define the tree structure for math/logic (e.g., `BinaryOp(Left, Right)`).
+  * [ ] **1.5 Parser:** Write the recursive descent parser to convert Tokens -\> AST.
+  * [ ] **1.6 Dependency Graph:** Implement the logic to track which cells depend on which (DAG).
+  * [ ] **1.7 Evaluator:** The engine that traverses the AST and calculates the actual result (e.g., `5 + 5 = 10`).
+
+#### **Phase 2: The Frontend Foundation (Tauri + React)**
+
+  * [ ] **2.1 Tauri Setup:** Initialize the Tauri app structure inside `/app`.
+  * [ ] **2.2 IPC Bridge:** Create the Rust commands to expose `get_viewport_cells(x, y, width, height)` to the frontend.
+  * [ ] **2.3 State Management:** Set up the React state to handle scroll position and selection.
+
+#### **Phase 3: The Rendering Engine (The "Face")**
+
+  * [ ] **3.1 Canvas Setup:** Initialize an HTML5 Canvas context.
+  * [ ] **3.2 Grid Renderer:** Write the TS function to draw lines and cell backgrounds based on viewport coordinates.
+  * [ ] **3.3 Text Rendering:** Draw text inside the cell boxes.
+  * [ ] **3.4 Scrolling:** Implement virtual scrolling logic (mapping scrollbar position to row/col indices).
+
+#### **Phase 4: Interaction**
+
+  * [ ] **4.1 Selection Model:** Handle clicking and dragging to select a range of cells.
+  * [ ] **4.2 Input Handling:** Create the hidden input field logic for typing into cells.
+  * [ ] **4.3 Integration:** wire the frontend input to the Rust backend `update_cell` function.
+
+### **Phase 5: The "Alive" Engine (Connecting Logic)**
+Currently, your frontend likely displays static text. We need to activate the Rust calculation engine so that when a user types `=SUM(A1:B2)`, the numbers actually update.
+
+* [ ] **5.1 The Update Cycle (Wiring):**
+    * **Goal:** Create the full round-trip: Frontend Input $\rightarrow$ Rust Parse $\rightarrow$ Rust Evaluate $\rightarrow$ Dependency Update $\rightarrow$ Frontend Re-render.
+    * **Detail:** When a user hits "Enter", the UI must send the raw string to Rust. Rust determines if it is a value or a formula, updates the Cell, triggers the recalculation of dependent cells, and sends a `GridUpdated` event back to the frontend to trigger a redraw.
+* [ ] **5.2 Basic Standard Library:**
+    * **Goal:** Implement the "Must-Have" functions in the Rust Engine.
+    * **Detail:** Implement `SUM`, `AVERAGE`, `MIN`, `MAX`, `COUNT`, and basic arithmetic (`+`, `-`, `*`, `/`).
+* [ ] **5.3 visual Error Handling:**
+    * **Goal:** distinct visual feedback for errors.
+    * **Detail:** If the engine returns `CellError::Div0`, the frontend should render the cell text in red or add a small warning triangle corner indicator.
+
+### **Phase 6: Visual Richness & Formatting (The "Style" Engine)***Focus: Turning the grid from a calculator into a document.*
+
+* **6.1 The Style Data Model (Rust):**
+* **Goal:** Implement the **Flyweight Pattern**.
+* **Task:** Create a `StyleRegistry`. Instead of storing `Color` on every `Cell`, store a `style_index` (usize) on the Cell (already in your struct) and a central vector of `Style` objects (Bold, Italic, Text Color, Background Color, Alignment).
+
+* **6.2 The Ribbon UI (React):**
+* **Goal:** A tabbed toolbar (Home, Insert, Formula).
+* **Task:** Build the UI components for Bold/Italic toggles, Color Pickers, and Font alignment.
+
+* **6.3 Canvas Style Rendering:**
+* **Goal:** Visual fidelity.
+* **Task:** Update the frontend renderer to look up the `style_index`, retrieve the properties, and apply `ctx.font`, `ctx.fillStyle`, and `ctx.textAlign` before drawing the cell.
+
+* **6.4 Number Formatting:**
+* **Goal:** Display vs. Raw Value.
+* **Task:** Differentiate between `1000` (raw) and `$1,000.00` (display). Implement standard formats: Currency, Percentage, Date, Decimal Precision.
+
+### **Phase 7: Structural Editing & Workbook Architecture***Focus: Managing the grid structure beyond just fixed cells.*
+
+* **7.1 Workbook & Sheets (Tabs):**
+* **Goal:** Multi-sheet support.
+* **Task:** Refactor the Backend `Grid` to be contained within a `Workbook` struct (HashMap of Grids). Add a "Tabs" bar at the bottom of the UI.
+
+* **7.2 Row/Column Insertion & Deletion:**
+* **Goal:** The ability to `Shift Cells`.
+* **Task:** Implement the heavy logic of inserting a row at index `N`. This requires shifting all cell keys `>N` in the backend and, crucially, **updating formulas** that reference those shifted cells (e.g., `=A5` must become `=A6`).
+
+* **7.3 Merged Cells:**
+* **Goal:** Layout flexibility.
+* **Task:** Define a `MergeRegistry`. Update the renderer to detect if a cell is the "Head" of a merge (draw it large) or "Covered" by a merge (skip drawing).
+
+### **Phase 8: Interaction & Safety (The User Workflow)***Focus: Making the application forgive mistakes and interact with the OS.*
+
+* **8.1 The Undo/Redo System (Time Machine):**
+* **Goal:** Non-destructive editing.
+* **Task:** Implement the **Command Pattern** in Rust. Every action (Edit, Format, Resize) must generate a `Cmd` struct with `execute()` and `rollback()` methods.
+
+* **8.2 System Clipboard (Copy/Paste):**
+* **Goal:** Interoperability.
+* **Task:** Use Tauri's clipboard API.
+* *Internal Paste:* Copying cells within Calcula preserves formulas and styles.
+* *External Paste:* Pasting from Excel/Notepad/Web parses CSV/TSV data.
+
+* **8.3 Context Menus:**
+* **Goal:** Mouse efficiency.
+* **Task:** Custom right-click menu: Cut, Copy, Paste, Insert Row, Delete Column, Clear Contents.
+
+* **8.4 Drag-to-Fill (Auto-fill):**
+* **Goal:** Rapid data entry.
+* **Task:** Visual handle on the bottom-right of selection. Logic to extrapolate series (1, 2, 3...) or copy formulas.
+
+### **Phase 9: Data Analysis & Advanced Logic***Focus: Tools for analyzing the data.*
+
+* **9.1 Sorting & Filtering:**
+* **Goal:** Organizing data.
+* **Task:** "Filter Views" on columns. Sort A-Z / Z-A logic in Rust.
+
+* **9.2 Advanced Functions:**
+* **Goal:** Feature parity.
+* **Task:** Implement `VLOOKUP`, `SUMIF`, `COUNTIF`, and string manipulation (`LEFT`, `RIGHT`, `CONCAT`).
+
+* **9.3 Global Search & Replace:**
+* **Goal:** Navigation.
+* **Task:** UI to jump to cells containing specific text.
+
+###**Phase 10: The "Ambition" (Scripting)*** **10.1 Python Integration (PyO3)**
+* **10.2 The `=PY()` Function**
+* **10.3 Plugin System**

@@ -1,0 +1,22 @@
+# PROJECT CONTEXT
+{intro}
+
+{roadmap}
+
+# REPO STRUCTURE
+{files}
+
+# CURRENT TASK
+{task}
+
+# AVAILABLE SEARCH SCOPES
+The codebase is segmented into the following scopes to reduce noise.
+---------------------------------------------------------
+{scopes_list}
+---------------------------------------------------------
+
+# INSTRUCTIONS
+1. Analyze the Current Task.
+2. Determine which SINGLE scope covers the files likely needed to solve this task.
+3. Return ONLY the command to run that scope.
+   Example Format: "python context_manager.py scan --scope bridge"

@@ -1,0 +1,227 @@
+// FILENAME: app/src/components/Spreadsheet/useSpreadsheetEditing.ts
+// PURPOSE: Manages the editing lifecycle, formula bar, and inline inputs.
+// CONTEXT: Contains complex logic for handling key events in both the container and inputs.
+
+import { useCallback, useEffect, useState } from "react";
+import { useEditing } from "../../hooks";
+import { useGridState } from "../../state";
+
+type GridState = ReturnType<typeof useGridState>;
+
+interface UseSpreadsheetEditingProps {
+  containerRef: React.RefObject<HTMLDivElement | null>;
+  formulaInputRef: React.RefObject<HTMLInputElement | null>;
+  state: GridState;
+  selectedCellContent: string;
+  moveActiveCell: (deltaRow: number, deltaCol: number) => void;
+  scrollToSelection: () => void;
+  selectCell: (row: number, col: number) => void;
+  // startEditing is derived internally via useEditing()
+}
+
+export function useSpreadsheetEditing({
+  containerRef,
+  formulaInputRef,
+  state,
+  selectedCellContent,
+  moveActiveCell,
+  scrollToSelection,
+  selectCell,
+}: UseSpreadsheetEditingProps) {
+  const [statusMessage, setStatusMessage] = useState<string | null>(null);
+  const { selection } = state;
+  
+  const {
+    isEditing,
+    isFormulaMode,
+    isCommitting,
+    lastError,
+    editing,
+    updateValue,
+    commitEdit,
+    cancelEdit,
+    clearError,
+    startEditing // Derived here
+  } = useEditing();
+
+  const showStatus = useCallback((message: string, duration: number = 3000) => {
+    setStatusMessage(message);
+    setTimeout(() => setStatusMessage(null), duration);
+  }, []);
+
+  useEffect(() => {
+    if (lastError) {
+      showStatus(`Error: ${lastError}`, 5000);
+    }
+  }, [lastError, showStatus]);
+
+  const handleCommitBeforeSelect = useCallback(async () => {
+    if (isEditing && !isFormulaMode) {
+      await commitEdit();
+    }
+  }, [isEditing, isFormulaMode, commitEdit]);
+
+  const handleCommitEdit = useCallback(async (): Promise<boolean> => {
+    const result = await commitEdit();
+    if (result) {
+      if (result.success) {
+        return true;
+      } else {
+        return false;
+      }
+    }
+    return false;
+  }, [commitEdit]);
+
+  const handleFormulaInputChange = useCallback(
+    (event: React.ChangeEvent<HTMLInputElement>) => {
+      updateValue(event.target.value);
+    },
+    [updateValue]
+  );
+
+  const handleFormulaBarFocus = useCallback(() => {
+    if (!isEditing && selection) {
+      startEditing();
+    }
+  }, [isEditing, selection, startEditing]);
+
+  const handleFormulaInputKeyDown = useCallback(
+    async (event: React.KeyboardEvent<HTMLInputElement>) => {
+      if (event.key === "Enter") {
+        event.preventDefault();
+        const success = await handleCommitEdit();
+        if (success) {
+          moveActiveCell(event.shiftKey ? -1 : 1, 0);
+          scrollToSelection();
+        }
+        containerRef.current?.focus();
+      } else if (event.key === "Escape") {
+        event.preventDefault();
+        cancelEdit();
+        containerRef.current?.focus();
+      } else if (event.key === "Tab") {
+        event.preventDefault();
+        const success = await handleCommitEdit();
+        if (success) {
+          moveActiveCell(0, event.shiftKey ? -1 : 1);
+          scrollToSelection();
+        }
+        containerRef.current?.focus();
+      }
+    },
+    [handleCommitEdit, cancelEdit, moveActiveCell, scrollToSelection, containerRef]
+  );
+
+  // --- Inline Editor Handlers ---
+
+  const handleInlineValueChange = useCallback((value: string) => updateValue(value), [updateValue]);
+  
+  const handleInlineCommit = useCallback(async () => {
+    const success = await handleCommitEdit();
+    if (success) {
+      containerRef.current?.focus();
+    }
+    return success;
+  }, [handleCommitEdit, containerRef]);
+  
+  const handleInlineCancel = useCallback(() => {
+    cancelEdit();
+    containerRef.current?.focus();
+  }, [cancelEdit, containerRef]);
+
+  const handleInlineTab = useCallback((shiftKey: boolean) => {
+    moveActiveCell(0, shiftKey ? -1 : 1);
+    scrollToSelection();
+    containerRef.current?.focus();
+  }, [moveActiveCell, scrollToSelection, containerRef]);
+
+  const handleInlineEnter = useCallback((shiftKey: boolean) => {
+    moveActiveCell(shiftKey ? -1 : 1, 0);
+    scrollToSelection();
+    containerRef.current?.focus();
+  }, [moveActiveCell, scrollToSelection, containerRef]);
+
+  const handleContainerKeyDown = useCallback(
+    async (event: React.KeyboardEvent<HTMLDivElement>) => {
+      if (isEditing) {
+        return;
+      }
+
+      const navigationKeys = [
+        "ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight",
+        "PageUp", "PageDown", "Home", "End"
+      ];
+
+      if (navigationKeys.includes(event.key)) {
+        return;
+      }
+
+      if (event.key === "F2") {
+        event.preventDefault();
+        startEditing();
+        return;
+      }
+
+      if (event.key === "Enter") {
+        event.preventDefault();
+        moveActiveCell(event.shiftKey ? -1 : 1, 0);
+        scrollToSelection();
+        return;
+      }
+
+      if (
+        event.key.length === 1 &&
+        !event.ctrlKey &&
+        !event.metaKey &&
+        !event.altKey
+      ) {
+        event.preventDefault();
+        startEditing(event.key);
+        return;
+      }
+
+      if (event.key === "Delete" || event.key === "Backspace") {
+        event.preventDefault();
+        startEditing("");
+        await handleCommitEdit();
+        return;
+      }
+    },
+    [isEditing, startEditing, handleCommitEdit, moveActiveCell, scrollToSelection]
+  );
+
+  const getFormulaBarValue = (): string => {
+    if (isEditing && editing) {
+      return editing.value;
+    }
+    return selectedCellContent;
+  };
+
+  return {
+    statusMessage,
+    setStatusMessage,
+    editingState: {
+      isEditing,
+      isFormulaMode,
+      isCommitting,
+      editing
+    },
+    handlers: {
+      handleCommitBeforeSelect,
+      handleFormulaInputChange,
+      handleFormulaBarFocus,
+      handleFormulaInputKeyDown,
+      handleInlineValueChange,
+      handleInlineCommit,
+      handleInlineCancel,
+      handleInlineTab,
+      handleInlineEnter,
+      handleContainerKeyDown,
+      clearError
+    },
+    ui: {
+      getFormulaBarValue
+    }
+  };
+}

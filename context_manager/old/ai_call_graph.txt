@@ -1,0 +1,690 @@
+I am building "Calcula," an ambitious open-source spreadsheet engine (Excel alternative) built for high performance and extensibility.
+
+## ARCHITECTURE:
+1.  **The Brain (Core Logic):** Written in **Rust**. It handles the Cell Dependency Graph, Formula Parsing, and Data Storage. It must be memory-safe and incredibly fast.
+    * Modules: `engine` (calculation), `parser` (formulas), `persistence` (file I/O).
+2.  **The Face (Frontend):** Written in **TypeScript + React**. It uses HTML5 Canvas/WebGL for rendering the grid to support 1M+ rows (virtualization). It does NOT use HTML tables for the grid.
+3.  **The Bridge:** Uses **Tauri** to connect the Rust backend to the WebView frontend.
+
+## TECH STACK:
+* OS: Windows 11
+* Backend: Rust (Workspace structure)
+* Frontend: React, TypeScript, Vite
+* Scripting: Python (embedded for users)
+
+## CODING GUIDELINES:
+* **No Placeholders:** Write full implementation code.
+* **Windows Native:** Assume Windows paths and environment.
+* **Clean Output:** Avoid Unicode characters (check marks, etc.) in terminal outputs; use ASCII alternatives.
+* **Modularity:** Keep logic isolated. The UI should never calculate; the Backend should never render.
+* **When coding Typescript the "Folder-as-Module" pattern is preferred in order to keep the files organized into smaller, manageable sizes.
+
+## NAMING CONVENTIONS (Rust <-> TypeScript API Boundary)
+
+### The Golden Rule
+- **TypeScript**: Always use `camelCase` for all properties (textColor, backgroundColor, styleIndex)
+- **Rust**: Always use `snake_case` for all fields (text_color, background_color, style_index)
+- **Serde handles conversion automatically** via `#[serde(rename_all = "camelCase")]`
+
+### Implementation Pattern
+
+**Rust API types** (in `api_types.rs`):
+```rust
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]  // <-- This single attribute handles ALL fields
+pub struct CellData {
+    pub row: u32,
+    pub col: u32,
+    pub style_index: usize,  // Rust uses snake_case
+}
+```
+
+**TypeScript types** (in `types.ts`):
+```typescript
+export interface CellData {
+  row: number;
+  col: number;
+  styleIndex: number;  // TypeScript uses camelCase
+}
+```
+
+### Rules
+1. **Never use manual `#[serde(rename = "...")]` on individual fields** - use struct-level `rename_all` instead
+2. **All Tauri API types must live in `api_types.rs`** - this is the single source of truth
+3. **TypeScript interfaces must mirror Rust structs** with camelCase property names
+4. **When adding new fields**: just add them - serde converts automatically
+5. **When accessing properties in TypeScript**: always use camelCase (cell.styleIndex, style.textColor)
+6. **When accessing fields in Rust**: always use snake_case (cell.style_index, style.text_color)
+7. **Provide the full functional block or file**: (no " // ... rest of code ").
+
+### Common Mistakes to Avoid
+- Using `style_index` in TypeScript (should be `styleIndex`)
+- Using `text_color` in TypeScript (should be `textColor`)
+- Forgetting `#[serde(rename_all = "camelCase")]` on new Rust structs
+- Adding `#[serde(rename = "fieldName")]` to individual fields (use struct-level instead)
+
+================================================================================
+                         TASK DESCRIPTION
+================================================================================
+
+I am aiming for the same "feel" as Excel has when editing a cell.
+In current solution I have to double click a cell in order to edit it.
+I want to be able to edit as soon as I have a cell selected.
+In addition, I notice that styling is applied to a cell only after I deselect the cell I change style for.
+The styling should be applied and visible as soon as it is applied by the user.
+
+================================================================================
+                         CODE STRUCTURE
+================================================================================
+
+The following is a structural outline of the relevant code paths. This is NOT 
+the full source code - it shows function signatures, call relationships, and 
+type definitions to help you understand the architecture.
+
+IMPORTANT: After reviewing this outline, you must request the specific code 
+you need to complete the task. Do NOT attempt to solve the task with only 
+this outline - you need to see the actual implementations.
+Only request code that exists in the provided call graph.
+
+======================================================================
+                    CODE STRUCTURE OUTLINE
+              For AI Analysis - Request Specific Code
+======================================================================
+
+SUMMARY:
+  Trace depth: 5
+  Functions traced: 56
+  Types referenced: 24
+  Entry points: 8
+
+======================================================================
+                        CALL GRAPH
+======================================================================
+
+ENTRY POINTS (from application logs):
+  - Editing.commitEdit [COMPLEX]
+  - Editing.startEdit
+  - Editing.startEditing
+  - get_all_styles
+  - get_cell
+  - get_viewport_cells
+  - update_cell [COMPLEX]
+  - useGridKeyboard.effect
+
+FUNCTION DETAILS:
+------------------------------------------------------------
+
+[ROOT]
+
+FUNCTION: Editing.commitEdit [COMPLEX]
+  Location: app/src/hooks/useEditing.ts:500-585 (86 lines)
+  Signature: const commitEdit = useCallback(async (): Promise<CellUpdateResult | null> =>
+  Calls: error, getCell, stopEditing, updateCell
+
+FUNCTION: Editing.startEdit
+  Location: app/src/hooks/useEditing.ts:199-234 (36 lines)
+  Signature: const startEdit = useCallback( async (row: number, col: number, initialValue?: string) =>
+  Calls: clearFormulaReferences, error, getCell
+
+FUNCTION: Editing.startEditing
+  Location: app/src/hooks/useEditing.ts:243-278 (36 lines)
+  Signature: const startEditing = useCallback( async (initialValue?: string) =>
+  Calls: startEdit
+
+FUNCTION: get_all_styles
+  Location: app/src-tauri/src/commands.rs:293-302 (10 lines)
+  Signature: #[tauri::command] pub fn get_all_styles(state: State<AppState>) -> Vec<StyleData>
+  Calls: all_styles, get_all_styles, len
+  External calls: Vec::len
+
+FUNCTION: get_cell
+  Location: app/src-tauri/src/commands.rs:62-83 (22 lines)
+  Signature: #[tauri::command] pub fn get_cell(state: State<AppState>, row: u32, col: u32) -> Option<CellData>
+  Called by: get_viewport_cells, update_cell
+  Calls: format_cell_value, get, get_cell
+
+FUNCTION: get_viewport_cells
+  Location: app/src-tauri/src/commands.rs:28-60 (33 lines)
+  Signature: #[tauri::command] pub fn get_viewport_cells( state: State<AppState>, start_row: u32, start_col: u32, end_row: u32, end_col: u32, ) -> Vec<CellData>
+  Calls: format_cell_value, get, get_cell, get_viewport_cells, len, new
+  External calls: Vec::len, Vec::new, Vec::push
+
+FUNCTION: update_cell [COMPLEX]
+  Location: app/src-tauri/src/commands.rs:85-176 (92 lines)
+  Signature: #[tauri::command] pub fn update_cell( state: State<AppState>, row: u32, col: u32, input: String, ) -> Result<Vec<CellData>, String>
+  Calls: clear_cell, evaluate_formula, extract_references, format_cell_value, get, get_cell, get_recalculation_order, len, new, parse_cell_input, set_cell, update_cell, update_dependencies
+  External calls: HashSet::new, String::new, Vec::len, Vec::new, Vec::push
+
+FUNCTION: useGridKeyboard.effect
+  Location: app/src/hooks/useGridKeyboard.ts:183-198 (16 lines)
+  Signature: useEffect(() =>
+  Calls: (none - leaf function)
+
+
+[DEPTH 1]
+
+FUNCTION: all_styles
+  Location: core/engine/src/style.rs:326-329 (4 lines)
+  Signature: /// Get all styles (for serialization/debugging). pub fn all_styles(&self) -> &[CellStyle]
+  Called by: get_all_styles
+  Calls: all_styles
+
+FUNCTION: clearFormulaReferences
+  Location: app/src/state/gridActions.ts:400-404 (5 lines)
+  Signature: export function clearFormulaReferences(): ClearFormulaReferencesAction
+  Called by: Editing.startEdit, startEdit
+  Calls: clearFormulaReferences
+
+FUNCTION: clear_cell
+  Location: app/src-tauri/src/commands.rs:178-190 (13 lines)
+  Signature: #[tauri::command] pub fn clear_cell(state: State<AppState>, row: u32, col: u32)
+  Called by: update_cell
+  Calls: clear_cell, new, update_dependencies
+  External calls: HashSet::new
+
+FUNCTION: error
+  Location: app/src/utils/log.ts:20-22 (3 lines)
+  Signature: export function error(cat: string, msg: string, data?: unknown): void
+  Called by: Editing.commitEdit, Editing.startEdit, startEdit
+  Calls: error
+
+FUNCTION: evaluate_formula
+  Location: app/src-tauri/src/lib.rs:245-262 (18 lines)
+  Signature: pub fn evaluate_formula(grid: &Grid, formula: &str) -> CellValue
+  Called by: update_cell
+  Calls: convert_expr, evaluate_formula, new, to_cell_value
+  External calls: Evaluator::evaluate, Evaluator::new
+
+FUNCTION: extract_references
+  Location: app/src-tauri/src/lib.rs:177-181 (5 lines)
+  Signature: pub fn extract_references(expr: &ParserExpr, grid: &Grid) -> HashSet<(u32, u32)>
+  Called by: update_cell
+  Calls: extract_references, extract_references_recursive, new
+  External calls: HashSet::new
+
+FUNCTION: format_cell_value
+  Location: app/src-tauri/src/lib.rs:59-73 (15 lines)
+  Signature: pub fn format_cell_value(value: &CellValue, style: &CellStyle) -> String
+  Called by: get_cell, get_viewport_cells, update_cell
+  Calls: format_cell_value, format_number, new
+  External calls: String::new
+
+FUNCTION: get
+  Location: core/engine/src/style.rs:297-301 (5 lines)
+  Signature: /// Get a style by its index. /// Returns the default style (index 0) if index is out of bounds. pub fn get(&self, index: usize) -> &CellStyle
+  Called by: get_cell, get_viewport_cells, update_cell
+  Calls: get
+
+FUNCTION: getCell
+  Location: app/src/lib/tauri-api.ts:65-67 (3 lines)
+  Signature: export async function getCell(row: number, col: number): Promise<CellData | null>
+  Called by: Editing.commitEdit, Editing.startEdit, startEdit
+  Calls: getCell
+
+FUNCTION: get_recalculation_order
+  Location: app/src-tauri/src/lib.rs:339-368 (30 lines)
+  Signature: pub fn get_recalculation_order( changed_cell: (u32, u32), dependents: &HashMap<(u32, u32), HashSet<(u32, u32)>>, ) -> Vec<(u32, u32)>
+  Called by: update_cell
+  Calls: get, get_recalculation_order, is_empty, len, new
+  External calls: HashSet::contains, HashSet::insert, HashSet::new, Vec::is_empty, Vec::len, Vec::new, Vec::push
+
+FUNCTION: len
+  Location: core/engine/src/style.rs:308-311 (4 lines)
+  Signature: /// Get the total number of unique styles. pub fn len(&self) -> usize
+  Called by: get_all_styles, get_viewport_cells, update_cell
+  Calls: len
+
+FUNCTION: new
+  Location: core/engine/src/cell.rs:39-45 (7 lines)
+  Signature: pub fn new() -> Self
+  Called by: format_cell_value, get_viewport_cells, update_cell
+  Calls: new
+
+FUNCTION: parse_cell_input
+  Location: app/src-tauri/src/lib.rs:264-284 (21 lines)
+  Signature: pub fn parse_cell_input(input: &str) -> Cell
+  Called by: update_cell
+  Calls: Cell::new, Cell::new_boolean, Cell::new_formula, Cell::new_number, Cell::new_text, is_empty, new, new_boolean, new_formula, new_number, new_text, parse_cell_input, parse_number
+
+FUNCTION: set_cell
+  Location: core/engine/src/grid.rs:35-45 (11 lines)
+  Signature: /// Sets a cell at the specified coordinates. /// Updates max_row/max_col boundaries automatically. pub fn set_cell(&mut self, row: u32, col: u32, cell: Cell)
+  Called by: update_cell
+  Calls: set_cell
+
+FUNCTION: startEdit
+  Location: app/src/hooks/useEditing.ts:199-234 (36 lines)
+  Signature: const startEdit = useCallback( async (row: number, col: number, initialValue?: string) =>
+  Called by: Editing.startEditing
+  Calls: clearFormulaReferences, error, getCell
+
+FUNCTION: stopEditing
+  Location: app/src/state/gridActions.ts:322-326 (5 lines)
+  Signature: export function stopEditing(): StopEditingAction
+  Called by: Editing.commitEdit
+  Calls: stopEditing
+
+FUNCTION: updateCell
+  Location: app/src/lib/tauri-api.ts:73-104 (32 lines)
+  Signature: export async function updateCell( row: number, col: number, input: string ): Promise<CellUpdateResult>
+  Called by: Editing.commitEdit
+  Calls: updateCell
+
+FUNCTION: update_dependencies
+  Location: app/src-tauri/src/lib.rs:308-337 (30 lines)
+  Signature: pub fn update_dependencies( cell_pos: (u32, u32), new_refs: HashSet<(u32, u32)>, dependencies: &mut HashMap<(u32, u32), HashSet<(u32, u32)>>, dependents: &mut HashMap<(u32, u32), HashSet<(u32, u32)>>, )
+  Called by: update_cell
+  Calls: is_empty, len, update_dependencies
+
+
+[DEPTH 2]
+
+FUNCTION: Cell::new
+  Location: core/engine/src/cell.rs:39-45 (7 lines)
+  Signature: pub fn new() -> Self
+  Called by: parse_cell_input
+  Calls: new
+
+FUNCTION: Cell::new_boolean
+  Location: core/engine/src/cell.rs:71-77 (7 lines)
+  Signature: pub fn new_boolean(value: bool) -> Self
+  Called by: parse_cell_input
+  Calls: new_boolean
+
+FUNCTION: Cell::new_formula
+  Location: core/engine/src/cell.rs:63-69 (7 lines)
+  Signature: pub fn new_formula(formula: String) -> Self
+  Called by: parse_cell_input
+  Calls: new_formula
+
+FUNCTION: Cell::new_number
+  Location: core/engine/src/cell.rs:47-53 (7 lines)
+  Signature: pub fn new_number(num: f64) -> Self
+  Called by: parse_cell_input
+  Calls: new_number
+
+FUNCTION: Cell::new_text
+  Location: core/engine/src/cell.rs:55-61 (7 lines)
+  Signature: pub fn new_text(text: String) -> Self
+  Called by: parse_cell_input
+  Calls: new_text
+
+FUNCTION: convert_expr
+  Location: app/src-tauri/src/lib.rs:129-162 (34 lines)
+  Signature: fn convert_expr(expr: &ParserExpr) -> EngineExpr
+  Called by: evaluate_formula
+  Calls: convert_binary_op, convert_expr, convert_unary_op, convert_value, new
+  External calls: Box::new
+
+FUNCTION: extract_references_recursive [COMPLEX]
+  Location: app/src-tauri/src/lib.rs:183-243 (61 lines)
+  Signature: fn extract_references_recursive(expr: &ParserExpr, grid: &Grid, refs: &mut HashSet<(u32, u32)>)
+  Called by: extract_references
+  Calls: col_letter_to_index, extract_references_recursive, get_cell
+
+FUNCTION: format_number
+  Location: core/engine/src/number_format.rs:8-27 (20 lines)
+  Signature: /// Format a number according to the specified format. pub fn format_number(value: f64, format: &NumberFormat) -> String
+  Called by: format_cell_value
+  Calls: format_currency, format_custom, format_date_number, format_decimal, format_general, format_number, format_percentage, format_scientific, format_time_number
+
+FUNCTION: is_empty
+  Location: core/engine/src/style.rs:313-316 (4 lines)
+  Signature: /// Check if the registry only contains the default style. pub fn is_empty(&self) -> bool
+  Called by: get_recalculation_order, parse_cell_input, update_dependencies
+  Calls: is_empty, len
+
+FUNCTION: new_boolean
+  Location: core/engine/src/cell.rs:71-77 (7 lines)
+  Signature: pub fn new_boolean(value: bool) -> Self
+  Called by: parse_cell_input
+  Calls: new_boolean
+
+FUNCTION: new_formula
+  Location: core/engine/src/cell.rs:63-69 (7 lines)
+  Signature: pub fn new_formula(formula: String) -> Self
+  Called by: Cell::new_formula, parse_cell_input
+  Calls: new_formula
+
+FUNCTION: new_number
+  Location: core/engine/src/cell.rs:47-53 (7 lines)
+  Signature: pub fn new_number(num: f64) -> Self
+  Called by: parse_cell_input
+  Calls: new_number
+
+FUNCTION: new_text
+  Location: core/engine/src/cell.rs:55-61 (7 lines)
+  Signature: pub fn new_text(text: String) -> Self
+  Called by: parse_cell_input
+  Calls: new_text
+
+FUNCTION: parse_number
+  Location: app/src-tauri/src/lib.rs:286-302 (17 lines)
+  Signature: fn parse_number(s: &str) -> Option<f64>
+  Called by: parse_cell_input
+  Calls: parse_number
+
+FUNCTION: to_cell_value
+  Location: core/engine/src/evaluator.rs:41-57 (17 lines)
+  Signature: /// Converts the evaluation result to a CellValue for storage. pub fn to_cell_value(&self) -> CellValue
+  Called by: evaluate_formula
+  Calls: to_cell_value
+
+
+[DEPTH 3]
+
+FUNCTION: col_letter_to_index
+  Location: app/src-tauri/src/lib.rs:164-171 (8 lines)
+  Signature: fn col_letter_to_index(col: &str) -> u32
+  Called by: extract_references_recursive
+  Calls: col_letter_to_index
+
+FUNCTION: convert_binary_op
+  Location: app/src-tauri/src/lib.rs:106-121 (16 lines)
+  Signature: fn convert_binary_op(op: &ParserBinaryOp) -> EngineBinaryOp
+  Called by: convert_expr
+  Calls: convert_binary_op
+
+FUNCTION: convert_unary_op
+  Location: app/src-tauri/src/lib.rs:123-127 (5 lines)
+  Signature: fn convert_unary_op(op: &ParserUnaryOp) -> EngineUnaryOp
+  Called by: convert_expr
+  Calls: convert_unary_op
+
+FUNCTION: convert_value
+  Location: app/src-tauri/src/lib.rs:98-104 (7 lines)
+  Signature: fn convert_value(v: &ParserValue) -> EngineValue
+  Called by: convert_expr
+  Calls: convert_value
+
+FUNCTION: format_currency
+  Location: core/engine/src/number_format.rs:100-119 (20 lines)
+  Signature: /// Format a number as currency. fn format_currency( value: f64, decimal_places: u8, symbol: &str, position: CurrencyPosition, ) -> String
+  Called by: format_number
+  Calls: add_thousands_separator, format_currency
+
+FUNCTION: format_custom
+  Location: core/engine/src/number_format.rs:233-250 (18 lines)
+  Signature: /// Format a number using a custom format string. /// Supports basic patterns like "0.00", "#,##0", etc. fn format_custom(value: f64, format: &str) -> String
+  Called by: format_number
+  Calls: format_custom, format_decimal
+
+FUNCTION: format_date_number
+  Location: core/engine/src/number_format.rs:133-163 (31 lines)
+  Signature: /// Format a number as a date (Excel serial date number). /// Excel dates: 1 = January 1, 1900 fn format_date_number(value: f64, format: &str) -> String
+  Called by: format_number
+  Calls: chrono_lite_date, format_date_number
+
+FUNCTION: format_decimal
+  Location: core/engine/src/number_format.rs:58-67 (10 lines)
+  Signature: /// Format a number with specified decimal places and optional thousands separator. fn format_decimal(value: f64, decimal_places: u8, use_thousands_separator: bool) -> String
+  Called by: format_number
+  Calls: add_thousands_separator, format_decimal
+
+FUNCTION: format_general
+  Location: core/engine/src/number_format.rs:29-56 (28 lines)
+  Signature: /// Format a number in general format (auto-detect best representation). fn format_general(value: f64) -> String
+  Called by: format_number
+  Calls: format_general
+
+FUNCTION: format_percentage
+  Location: core/engine/src/number_format.rs:121-125 (5 lines)
+  Signature: /// Format a number as percentage. fn format_percentage(value: f64, decimal_places: u8) -> String
+  Called by: format_number
+  Calls: format_percentage
+
+FUNCTION: format_scientific
+  Location: core/engine/src/number_format.rs:127-131 (5 lines)
+  Signature: /// Format a number in scientific notation. fn format_scientific(value: f64, decimal_places: u8) -> String
+  Called by: format_number
+  Calls: format_scientific
+
+FUNCTION: format_time_number
+  Location: core/engine/src/number_format.rs:208-231 (24 lines)
+  Signature: /// Format a number as time (fraction of a day). fn format_time_number(value: f64, format: &str) -> String
+  Called by: format_number
+  Calls: format_time_number
+
+
+[DEPTH 4]
+
+FUNCTION: add_thousands_separator
+  Location: core/engine/src/number_format.rs:69-98 (30 lines)
+  Signature: /// Add thousands separators to a numeric string. fn add_thousands_separator(s: &str) -> String
+  Called by: format_currency, format_decimal
+  Calls: add_thousands_separator, get, len, new
+  External calls: String::chars, String::len, String::new, String::push, String::push_str, Vec::get
+
+FUNCTION: chrono_lite_date
+  Location: core/engine/src/number_format.rs:165-202 (38 lines)
+  Signature: /// Simple date calculation without external dependencies. /// Returns (year, month, day) for a given number of days since Dec 31, 1899. fn chrono_lite_date(days: i64) -> Option<(i32, u32, u32)>
+  Called by: format_date_number
+  Calls: chrono_lite_date, is_leap_year
+
+
+[DEPTH 5]
+
+FUNCTION: is_leap_year
+  Location: core/engine/src/number_format.rs:204-206 (3 lines)
+  Signature: fn is_leap_year(year: i32) -> bool
+  Called by: chrono_lite_date
+  Calls: is_leap_year
+
+
+======================================================================
+                     TYPE DEFINITIONS
+======================================================================
+
+STRUCTS:
+
+  TYPE: AppState
+    Location: app/src-tauri/src/lib.rs:34-41 (8 lines)
+    Fields: grid: Mutex<Grid>, style_registry: Mutex<StyleRegistry>, column_widths: Mutex<HashMap<u32, row_heights: Mutex<HashMap<u32, (+2 more)
+
+  TYPE: BorderStyle
+    Location: core/engine/src/style.rs:139-145 (7 lines)
+    Fields: width: u8, color: Color, style: BorderLineStyle
+
+  TYPE: Borders
+    Location: core/engine/src/style.rs:158-165 (8 lines)
+    Fields: top: BorderStyle, right: BorderStyle, bottom: BorderStyle, left: BorderStyle
+
+  TYPE: Cell
+    Location: core/engine/src/cell.rs:30-36 (7 lines)
+    Fields: formula: Option<String>, value: CellValue, style_index: usize
+    Impl blocks: impl_Cell (5 methods, 41 lines)
+
+  TYPE: CellStyle
+    Location: core/engine/src/style.rs:193-205 (13 lines)
+    Fields: font: FontStyle, background: Color, text_align: TextAlign, vertical_align: VerticalAlign, (+4 more)
+    Impl blocks: impl_CellStyle (7 methods, 51 lines) [COMPLEX]
+
+  TYPE: Color
+    Location: core/engine/src/style.rs:68-75 (8 lines)
+    Fields: r: u8, g: u8, b: u8, a: u8
+    Impl blocks: impl_Color (2 methods, 55 lines) [COMPLEX], impl_Default_for_Color (1 methods, 5 lines)
+
+  TYPE: Evaluator
+    Location: core/engine/src/evaluator.rs:140-146 (7 lines)
+    Fields: grid: &'a Grid
+
+  TYPE: FontStyle
+    Location: core/engine/src/style.rs:167-177 (11 lines)
+    Fields: family: String, size: u8, bold: bool, italic: bool, (+3 more)
+    Impl blocks: impl_Default_for_FontStyle (1 methods, 13 lines)
+
+  TYPE: Grid
+    Location: core/engine/src/grid.rs:10-23 (14 lines)
+    Fields: storage: keys are (row, cells: HashMap<(u32, max_row: u32, max_col: u32
+    Impl blocks: impl_Grid (4 methods, 35 lines)
+
+  TYPE: StyleRegistry
+    Location: core/engine/src/style.rs:259-268 (10 lines)
+    Fields: styles: Vec<CellStyle>, lookup: style hash -> index for deduplication., style_to_index: HashMap<CellStyle
+    Impl blocks: impl_StyleRegistry (8 methods, 61 lines) [COMPLEX], impl_Default_for_StyleRegistry (1 methods, 5 lines)
+
+ENUMS:
+
+  TYPE: BorderLineStyle
+    Location: core/engine/src/style.rs:147-156 (10 lines)
+    Fields: None, Solid, Dashed, Dotted, Double
+
+  TYPE: CellError
+    Location: core/engine/src/cell.rs:9-18 (10 lines)
+    Fields: Div0, Ref, Name, Value, Parse, (+1 more)
+
+  TYPE: CellValue
+    Location: core/engine/src/cell.rs:20-28 (9 lines)
+    Fields: Empty, Number, Text, Boolean, Error
+
+  TYPE: CurrencyPosition
+    Location: core/engine/src/style.rs:60-66 (7 lines)
+    Fields: Before, After
+
+  TYPE: EvalResult
+    Location: core/engine/src/evaluator.rs:26-38 (13 lines)
+    Fields: Number, Text, Boolean, Error, Array
+    Impl blocks: impl_EvalResult (6 methods, 99 lines) [COMPLEX]
+
+  TYPE: NumberFormat
+    Location: core/engine/src/style.rs:29-58 (30 lines)
+    Fields: General, Number, decimal_places, use_thousands_separator
+
+  TYPE: TextAlign
+    Location: core/engine/src/style.rs:10-18 (9 lines)
+    Fields: General, Left, Center, Right
+
+  TYPE: Value
+    Location: core/engine/src/dependency_extractor.rs:52-57 (6 lines)
+    Fields: Number, String, Boolean
+    Impl blocks: impl_Display_for_Value (1 methods, 9 lines)
+
+  TYPE: VerticalAlign
+    Location: core/engine/src/style.rs:20-27 (8 lines)
+    Fields: Top, Middle, Bottom
+
+INTERFACES:
+
+  TYPE: CellData
+    Location: app/src/lib/types.ts:126-137 (12 lines)
+    Fields: row: number, col: number, display: string, formula: string | null, (+1 more)
+
+  TYPE: CellUpdateResult
+    Location: app/src/lib/tauri-api.ts:109-117 (9 lines)
+    Fields: success: boolean, row: number, col: number, display: string, (+3 more)
+
+  TYPE: ClearFormulaReferencesAction
+    Location: app/src/state/gridActions.ts:141-143 (3 lines)
+    Fields: type: typeof GRID_ACTIONS.CLEAR_FORMULA_REFERENCES
+
+  TYPE: StopEditingAction
+    Location: app/src/state/gridActions.ts:103-105 (3 lines)
+    Fields: type: typeof GRID_ACTIONS.STOP_EDITING
+
+  TYPE: StyleData
+    Location: app/src/lib/types.ts:143-156 (14 lines)
+    Fields: bold: boolean, italic: boolean, underline: boolean, strikethrough: boolean, (+8 more)
+    Impl blocks: impl_From_for_StyleData (1 methods, 27 lines)
+
+======================================================================
+                   CONFIGURATION FILES
+======================================================================
+
+  - app/package.json
+  - app/tsconfig.json
+  - app/src-tauri/Cargo.toml
+  - core/Cargo.toml
+  - core/engine/Cargo.toml
+  - core/parser/Cargo.toml
+  - core/persistence/Cargo.toml
+
+(Request 'CONFIG:filename' to see contents)
+
+======================================================================
+HOW TO REQUEST CODE
+============================================================
+
+After reviewing this outline, respond with the exact command to run.
+The user will copy-paste your command directly into their terminal.
+
+FORMAT YOUR RESPONSE EXACTLY LIKE THIS:
+
+```
+python call_graph.py request "item1,item2,item3"
+```
+
+EXAMPLE RESPONSES:
+
+```
+python call_graph.py request "update_cell,Grid,impl_Grid"
+```
+
+```
+python call_graph.py request "apply_formatting,StyleManager::get_or_create_style,CellStyle"
+```
+
+WHAT YOU CAN REQUEST:
+  - Functions: get_cell, update_cell, apply_formatting
+  - Hook functions: useEditing.startEdit, useGridKeyboard.effect
+  - Methods (qualified): Grid::set_cell, Evaluator::evaluate
+  - Types (struct/enum): Grid, CellValue, CellStyle
+  - Impl blocks: impl_Grid, impl_Evaluator
+  - Trait impls: impl_Default_for_CellStyle
+
+AVAILABLE ITEMS:
+
+  Functions (55):
+    Cell::new, Cell::new_boolean, Cell::new_formula, Cell::new_number, Cell::new_text
+    Editing.commitEdit, Editing.startEdit, Editing.startEditing, add_thousands_separator, all_styles
+    chrono_lite_date, clearFormulaReferences, clear_cell, col_letter_to_index, convert_binary_op
+    convert_expr, convert_unary_op, convert_value, error, evaluate_formula
+    extract_references, extract_references_recursive, format_cell_value, format_currency, format_custom
+    format_date_number, format_decimal, format_general, format_number, format_percentage
+    format_scientific, format_time_number, get, getCell, get_all_styles
+    get_cell, get_recalculation_order, get_viewport_cells, is_empty, is_leap_year
+    len, new, new_boolean, new_formula, new_number
+    new_text, parse_cell_input, parse_number, set_cell, stopEditing
+    to_cell_value, updateCell, update_cell, update_dependencies, useGridKeyboard.effect
+
+  Types (24):
+    AppState, BorderLineStyle, BorderStyle, Borders, Cell
+    CellData, CellError, CellStyle, CellUpdateResult, CellValue
+    ClearFormulaReferencesAction, Color, CurrencyPosition, EvalResult, Evaluator
+    FontStyle, Grid, NumberFormat, StopEditingAction, StyleData
+    StyleRegistry, TextAlign, Value, VerticalAlign
+
+  Impl blocks (11):
+    impl_Cell, impl_CellStyle, impl_Color
+    impl_Default_for_Color, impl_Default_for_FontStyle, impl_Default_for_StyleRegistry
+    impl_Display_for_Value, impl_EvalResult, impl_From_for_StyleData
+    impl_Grid, impl_StyleRegistry
+
+TIPS:
+  - Start with entry point functions and the types they use
+  - Request impl blocks to see all methods on a type
+  - Items marked [COMPLEX] or [VERY_COMPLEX] have many lines
+  - Keep requests focused - you can request more code later
+
+IF YOU NEED MORE CODE LATER:
+
+After receiving code, if you need additional definitions, respond with:
+
+```
+python call_graph.py request "additional_item1,additional_item2"
+```
+
+IMPORTANT:
+  - Respond ONLY with the command in a code block
+  - Do NOT attempt to solve the task until you have the actual code
+  - Do NOT explain what you plan to request - just give the command
+
+
+Please analyze the code structure and help me understand how cell formatting 
+is applied when the user clicks a formatting button. Specifically:
+
+1. How does the frontend trigger the formatting command?
+2. How does the backend apply the style to the cell?
+3. Where is the style data stored?
+
+After reviewing the outline, request the specific code you need to answer 
+these questions.

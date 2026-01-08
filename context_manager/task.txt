@@ -1,0 +1,5 @@
+We must fix the scrollbar (both horizontal and vertical).
+When scrolling the "thumb", "handle" as it may be called, is always stuck on top for vertical scrollbars
+and stuck to the left for the horizontal scrollbars.
+Probably this has to do with the scaling of the scrollbar itself with respect to the used range.
+We need to properly implement it as it is in Excel.

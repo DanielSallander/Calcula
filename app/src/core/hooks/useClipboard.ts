@@ -1,0 +1,361 @@
+// FILENAME: app/src/hooks/useClipboard.ts
+// PURPOSE: Custom hook for clipboard operations (cut, copy, paste).
+// CONTEXT: Handles reading/writing to system clipboard and cell data operations.
+// Updated: Added clearClipboardState for ESC key handling.
+
+import { useCallback, useRef } from "react";
+import { useGridContext } from "../state/GridContext";
+import { getCell, updateCell, clearCell } from "../lib/tauri-api";
+import { cellEvents } from "../lib/cellEvents";
+import { setClipboard, clearClipboard } from "../state/gridActions";
+import type { Selection, CellData, ClipboardMode } from "../types";
+
+/**
+ * Internal clipboard data structure.
+ * We store both the raw text and structured cell data.
+ */
+interface ClipboardData {
+  /** Source selection when copy/cut was performed */
+  sourceSelection: Selection;
+  /** Cell data matrix [row][col] relative to source selection */
+  cells: (CellData | null)[][];
+  /** Whether this was a cut operation (cells should be cleared on paste) */
+  isCut: boolean;
+  /** Plain text representation for system clipboard */
+  text: string;
+}
+
+/**
+ * Return type for the useClipboard hook.
+ */
+export interface UseClipboardReturn {
+  /** Cut selected cells to clipboard */
+  cut: () => Promise<void>;
+  /** Copy selected cells to clipboard */
+  copy: () => Promise<void>;
+  /** Paste clipboard contents to current selection */
+  paste: () => Promise<void>;
+  /** Check if clipboard has content */
+  hasClipboardData: () => boolean;
+  /** Get current clipboard mode */
+  clipboardMode: ClipboardMode;
+  /** Get clipboard selection (for rendering) */
+  clipboardSelection: Selection | null;
+  /** Clear clipboard state (for ESC key) */
+  clearClipboardState: () => void;
+}
+
+// Module-level clipboard storage (persists across hook instances)
+let internalClipboard: ClipboardData | null = null;
+
+/**
+ * Hook for clipboard operations.
+ */
+export function useClipboard(): UseClipboardReturn {
+  const { state, dispatch } = useGridContext();
+  const { selection, config, clipboard } = state;
+  
+  // Ref to track cut source for clearing after paste
+  const cutSourceRef = useRef<Selection | null>(null);
+
+  /**
+   * Get cell data for a range.
+   */
+  const getCellRange = useCallback(
+    async (sel: Selection): Promise<(CellData | null)[][]> => {
+      const minRow = Math.min(sel.startRow, sel.endRow);
+      const maxRow = Math.max(sel.startRow, sel.endRow);
+      const minCol = Math.min(sel.startCol, sel.endCol);
+      const maxCol = Math.max(sel.startCol, sel.endCol);
+
+      const cells: (CellData | null)[][] = [];
+      
+      for (let r = minRow; r <= maxRow; r++) {
+        const row: (CellData | null)[] = [];
+        for (let c = minCol; c <= maxCol; c++) {
+          try {
+            const cellData = await getCell(r, c);
+            row.push(cellData || null);
+          } catch {
+            row.push(null);
+          }
+        }
+        cells.push(row);
+      }
+
+      return cells;
+    },
+    []
+  );
+
+  /**
+   * Convert cell matrix to plain text (tab-separated values).
+   */
+  const cellsToText = useCallback((cells: (CellData | null)[][]): string => {
+    return cells
+      .map((row) =>
+        row
+          .map((cell) => {
+            if (!cell) return "";
+            // Use formula if present, otherwise display value
+            return cell.formula || cell.display || "";
+          })
+          .join("\t")
+      )
+      .join("\n");
+  }, []);
+
+  /**
+   * Copy selected cells to clipboard.
+   */
+  const copy = useCallback(async () => {
+    if (!selection) {
+      console.log("[Clipboard] No selection to copy");
+      return;
+    }
+
+    console.log("[Clipboard] Copying selection:", selection);
+
+    try {
+      const cells = await getCellRange(selection);
+      const text = cellsToText(cells);
+
+      // Store in internal clipboard
+      internalClipboard = {
+        sourceSelection: { ...selection },
+        cells,
+        isCut: false,
+        text,
+      };
+
+      // Update state for visual feedback (marching ants border)
+      dispatch(setClipboard("copy", { ...selection }));
+
+      // Also write to system clipboard
+      try {
+        await navigator.clipboard.writeText(text);
+        console.log("[Clipboard] Copied to system clipboard");
+      } catch (err) {
+        console.warn("[Clipboard] Could not write to system clipboard:", err);
+      }
+
+      // Clear any previous cut source
+      cutSourceRef.current = null;
+    } catch (error) {
+      console.error("[Clipboard] Copy failed:", error);
+    }
+  }, [selection, getCellRange, cellsToText, dispatch]);
+
+  /**
+   * Cut selected cells to clipboard.
+   */
+  const cut = useCallback(async () => {
+    if (!selection) {
+      console.log("[Clipboard] No selection to cut");
+      return;
+    }
+
+    console.log("[Clipboard] Cutting selection:", selection);
+
+    try {
+      const cells = await getCellRange(selection);
+      const text = cellsToText(cells);
+
+      // Store in internal clipboard with cut flag
+      internalClipboard = {
+        sourceSelection: { ...selection },
+        cells,
+        isCut: true,
+        text,
+      };
+
+      // Remember cut source for clearing after paste
+      cutSourceRef.current = { ...selection };
+
+      // Update state for visual feedback (marching ants border)
+      dispatch(setClipboard("cut", { ...selection }));
+
+      // Also write to system clipboard
+      try {
+        await navigator.clipboard.writeText(text);
+        console.log("[Clipboard] Cut to system clipboard");
+      } catch (err) {
+        console.warn("[Clipboard] Could not write to system clipboard:", err);
+      }
+    } catch (error) {
+      console.error("[Clipboard] Cut failed:", error);
+    }
+  }, [selection, getCellRange, cellsToText, dispatch]);
+
+  /**
+   * Paste clipboard contents to current selection.
+   */
+  const paste = useCallback(async () => {
+    if (!selection) {
+      console.log("[Clipboard] No selection for paste target");
+      return;
+    }
+
+    console.log("[Clipboard] Pasting to selection:", selection);
+
+    // Try to read from system clipboard first
+    let textToPaste: string | null = null;
+    try {
+      textToPaste = await navigator.clipboard.readText();
+    } catch (err) {
+      console.warn("[Clipboard] Could not read from system clipboard:", err);
+    }
+
+    // Determine what to paste
+    let cellsToPaste: (CellData | null)[][] | null = null;
+    let pasteWidth = 1;
+    let pasteHeight = 1;
+
+    if (
+      internalClipboard &&
+      (!textToPaste || textToPaste === internalClipboard.text)
+    ) {
+      // Use internal clipboard (preserves formulas, formatting, etc.)
+      cellsToPaste = internalClipboard.cells;
+      pasteHeight = cellsToPaste.length;
+      pasteWidth = cellsToPaste[0]?.length || 1;
+      console.log("[Clipboard] Using internal clipboard data");
+    } else if (textToPaste) {
+      // Parse text from system clipboard (tab/newline separated)
+      const rows = textToPaste.split("\n");
+      cellsToPaste = rows.map((row) =>
+        row.split("\t").map((value) => ({
+          row: 0,
+          col: 0,
+          display: value,
+          formula: null,
+          styleIndex: 0,
+        }))
+      );
+      pasteHeight = cellsToPaste.length;
+      pasteWidth = Math.max(...cellsToPaste.map((r) => r.length));
+      console.log("[Clipboard] Parsed system clipboard text");
+    }
+
+    if (!cellsToPaste || cellsToPaste.length === 0) {
+      console.log("[Clipboard] Nothing to paste");
+      return;
+    }
+
+    // Determine target range
+    const targetRow = Math.min(selection.startRow, selection.endRow);
+    const targetCol = Math.min(selection.startCol, selection.endCol);
+
+    try {
+      // Paste cells
+      for (let r = 0; r < pasteHeight; r++) {
+        for (let c = 0; c < pasteWidth; c++) {
+          const destRow = targetRow + r;
+          const destCol = targetCol + c;
+
+          // Check bounds
+          if (destRow >= config.totalRows || destCol >= config.totalCols) {
+            continue;
+          }
+
+          const sourceCell = cellsToPaste[r]?.[c];
+          const value = sourceCell?.formula || sourceCell?.display || "";
+
+          try {
+            const updatedCells = await updateCell(destRow, destCol, value);
+            
+            // Emit events for updated cells
+            for (const cell of updatedCells) {
+              cellEvents.emit({
+                row: cell.row,
+                col: cell.col,
+                oldValue: undefined,
+                newValue: cell.display,
+                formula: cell.formula ?? null,
+              });
+            }
+          } catch (err) {
+            console.error(`[Clipboard] Failed to paste cell (${destRow}, ${destCol}):`, err);
+          }
+        }
+      }
+
+      // If this was a cut operation, clear the source cells
+      if (internalClipboard?.isCut && cutSourceRef.current) {
+        const src = cutSourceRef.current;
+        const srcMinRow = Math.min(src.startRow, src.endRow);
+        const srcMaxRow = Math.max(src.startRow, src.endRow);
+        const srcMinCol = Math.min(src.startCol, src.endCol);
+        const srcMaxCol = Math.max(src.startCol, src.endCol);
+
+        for (let r = srcMinRow; r <= srcMaxRow; r++) {
+          for (let c = srcMinCol; c <= srcMaxCol; c++) {
+            // Don't clear if it overlaps with paste destination
+            const overlaps =
+              r >= targetRow &&
+              r < targetRow + pasteHeight &&
+              c >= targetCol &&
+              c < targetCol + pasteWidth;
+            
+            if (!overlaps) {
+              try {
+                await clearCell(r, c);
+                cellEvents.emit({
+                  row: r,
+                  col: c,
+                  oldValue: undefined,
+                  newValue: "",
+                  formula: null,
+                });
+              } catch (err) {
+                console.error(`[Clipboard] Failed to clear cut source (${r}, ${c}):`, err);
+              }
+            }
+          }
+        }
+
+        // Clear cut source reference
+        cutSourceRef.current = null;
+        if (internalClipboard) {
+          internalClipboard.isCut = false;
+        }
+      }
+
+      // Clear clipboard visual state after paste
+      dispatch(clearClipboard());
+      
+      console.log("[Clipboard] Paste complete");
+    } catch (error) {
+      console.error("[Clipboard] Paste failed:", error);
+    }
+  }, [selection, config.totalRows, config.totalCols, dispatch]);
+
+  /**
+   * Check if there's clipboard data available.
+   */
+  const hasClipboardData = useCallback((): boolean => {
+    return internalClipboard !== null;
+  }, []);
+
+  /**
+   * Clear clipboard state (removes marching ants visual).
+   * Called when user presses ESC.
+   */
+  const clearClipboardState = useCallback(() => {
+    console.log("[Clipboard] Clearing clipboard state (ESC pressed)");
+    dispatch(clearClipboard());
+    // Note: We don't clear internalClipboard here, only the visual state
+    // This matches Excel behavior where ESC stops marching ants but 
+    // you can still paste until you copy/cut something else
+  }, [dispatch]);
+
+  return {
+    cut,
+    copy,
+    paste,
+    hasClipboardData,
+    clipboardMode: clipboard?.mode || "none",
+    clipboardSelection: clipboard?.selection || null,
+    clearClipboardState,
+  };
+}

@@ -1,0 +1,117 @@
+I am building "Calcula," an ambitious open-source spreadsheet engine (Excel alternative) built for high performance and extensibility.
+
+## ARCHITECTURE:
+
+### Core + Add-in Architecture
+Calcula follows a **plugin architecture** where the application is divided into:
+1. **Core Shell** - A minimal, stable foundation providing "spreadsheet primitives"
+2. **Add-ins** - Self-contained feature modules that plug into the shell via extension points
+The inspiration for this architecture is "Microsoft VSCode".
+
+### The Three Layers
+1. **The Brain (Core Logic):** Written in **Rust**. It handles the Cell Dependency Graph, Formula Parsing, and Data Storage. It must be memory-safe and incredibly fast.
+    * Modules: `engine` (calculation), `parser` (formulas), `persistence` (file I/O).
+2. **The Face (Frontend):** Written in **TypeScript + React**. It uses HTML5 Canvas for rendering the grid to support 1M+ rows (virtualization). It does NOT use HTML tables for the grid.
+3. **The Bridge:** Uses **Tauri** to connect the Rust backend to the WebView frontend.
+
+### Directory Structure
+```
+app/src/
+  core/           # Core spreadsheet functionality (grid, selection, editing, clipboard)
+  shell/          # Minimal UI shell (ribbon container, layout)
+  addins/         # Add-in modules (formatting, functions, etc.)
+    _disabled/    # Parked add-ins awaiting migration to new system
+```
+
+### What Lives Where
+
+**Core (`src/core/`)** - Foundational, universal, primitive features:
+- Grid engine, rendering pipeline, virtual scrolling
+- Selection model (single, range, multi-select)
+- Cell editing (inline editor, formula bar)
+- Fill handle
+- Clipboard (cut, copy, paste)
+- Keyboard navigation
+- Undo/Redo
+- Core formula functions (SUM, IF, VLOOKUP, etc.)
+
+**Shell (`src/shell/`)** - Minimal application frame:
+- App layout (ribbon area, grid area, status bar)
+- Empty ribbon container (add-ins populate it)
+- Add-in loader
+
+**Add-ins (`src/addins/`)** - Self-contained feature modules:
+- Formatting (font, alignment, number formats, colors)
+- Extended function library (financial, statistical, text, date)
+- Data tools (sort, filter, validation)
+- Charts
+- Comments
+- And more...
+
+### Extension Points
+Add-ins interact with core through defined extension points:
+- `registerCommand(command)` - Register executable commands
+- `registerRibbonTab(tab)` - Add ribbon tabs
+- `registerRibbonGroup(tabId, group)` - Add groups to tabs
+- `registerFunction(name, impl)` - Add formula functions
+- `onSelectionChange(callback)` - React to selection changes
+- `onCellChange(callback)` - React to cell edits
+
+## TECH STACK:
+* OS: Windows 11
+* Backend: Rust (Workspace structure)
+* Frontend: React, TypeScript, Vite
+* Scripting: Python (embedded for users)
+
+## CODING GUIDELINES:
+* **No Placeholders:** Write full implementation code.
+* **Windows Native:** Assume Windows paths and environment.
+* **Clean Output:** Avoid Unicode characters (check marks, etc.) in terminal outputs; use ASCII alternatives.
+* **Modularity:** Keep logic isolated. The UI should never calculate; the Backend should never render.
+* **Core/Add-in Separation:** Core never imports from addins. Add-ins only interact with core through extension points.
+* **When coding TypeScript the "Folder-as-Module" pattern is preferred in order to keep the files organized into smaller, manageable sizes.
+
+## NAMING CONVENTIONS (Rust <-> TypeScript API Boundary)
+
+### The Golden Rule
+- **TypeScript**: Always use `camelCase` for all properties (textColor, backgroundColor, styleIndex)
+- **Rust**: Always use `snake_case` for all fields (text_color, background_color, style_index)
+- **Serde handles conversion automatically** via `#[serde(rename_all = "camelCase")]`
+
+### Implementation Pattern
+
+**Rust API types** (in `api_types.rs`):
+```rust
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]  // <-- This single attribute handles ALL fields
+pub struct CellData {
+    pub row: u32,
+    pub col: u32,
+    pub style_index: usize,  // Rust uses snake_case
+}
+```
+
+**TypeScript types** (in `types.ts`):
+```typescript
+export interface CellData {
+  row: number;
+  col: number;
+  styleIndex: number;  // TypeScript uses camelCase
+}
+```
+
+### Rules
+1. **Never use manual `#[serde(rename = "...")]` on individual fields** - use struct-level `rename_all` instead
+2. **All Tauri API types must live in `api_types.rs`** - this is the single source of truth
+3. **TypeScript interfaces must mirror Rust structs** with camelCase property names
+4. **When adding new fields**: just add them - serde converts automatically
+5. **When accessing properties in TypeScript**: always use camelCase (cell.styleIndex, style.textColor)
+6. **When accessing fields in Rust**: always use snake_case (cell.style_index, style.text_color)
+7. **Provide the full functional block or file**: (no " // ... rest of code ").
+
+### Common Mistakes to Avoid
+- Using `style_index` in TypeScript (should be `styleIndex`)
+- Using `text_color` in TypeScript (should be `textColor`)
+- Forgetting `#[serde(rename_all = "camelCase")]` on new Rust structs
+- Adding `#[serde(rename = "fieldName")]` to individual fields (use struct-level instead)
+- Importing from `addins/` in core code (core must never depend on add-ins)

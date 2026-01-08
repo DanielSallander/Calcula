@@ -1,0 +1,7 @@
+// FILENAME: shell/index.ts
+// PURPOSE: Barrel exports for the shell module
+
+export { App } from "./App";
+export { Layout } from "./Layout";
+export { RibbonContainer } from "./Ribbon/RibbonContainer";
+export { SheetTabs } from "./SheetTabs";

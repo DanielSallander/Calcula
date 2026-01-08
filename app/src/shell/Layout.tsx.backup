@@ -1,0 +1,59 @@
+// FILENAME: app/src/shell/Layout.tsx
+// PURPOSE: Main application layout - ribbon, grid, status bar.
+// CONTEXT: Provides the structural layout for the application.
+
+import React from "react";
+import { RibbonContainer } from "./Ribbon/RibbonContainer";
+// TODO: Import Spreadsheet from core once moved
+// import { Spreadsheet } from "../core/components/Spreadsheet";
+
+export function Layout(): React.ReactElement {
+  return (
+    <div
+      style={{
+        display: "flex",
+        flexDirection: "column",
+        height: "100vh",
+        width: "100vw",
+        overflow: "hidden",
+      }}
+    >
+      {/* Ribbon Area */}
+      <RibbonContainer />
+
+      {/* Grid Area */}
+      <div style={{ flex: 1, overflow: "hidden" }}>
+        {/* TODO: Add Spreadsheet component once core is set up */}
+        <div
+          style={{
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            height: "100%",
+            backgroundColor: "#f0f0f0",
+            color: "#666",
+            fontSize: "14px",
+          }}
+        >
+          [Grid will be rendered here]
+        </div>
+      </div>
+
+      {/* Status Bar */}
+      <div
+        style={{
+          height: "24px",
+          backgroundColor: "#f3f3f3",
+          borderTop: "1px solid #d0d0d0",
+          display: "flex",
+          alignItems: "center",
+          padding: "0 8px",
+          fontSize: "12px",
+          color: "#666",
+        }}
+      >
+        Ready
+      </div>
+    </div>
+  );
+}
