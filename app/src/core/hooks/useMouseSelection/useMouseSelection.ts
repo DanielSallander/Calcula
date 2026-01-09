@@ -1,9 +1,6 @@
 // FILENAME: app/src/hooks/useMouseSelection/useMouseSelection.ts
 // PURPOSE: Main hook for handling mouse-based selection interactions.
-// CONTEXT: Updated to explicitly apply the calculated cursor style to the
-// container element via a useEffect. This ensures the "plus sign" and
-// "crosshair" cursors appear correctly even if the parent component
-// doesn't manually bind the cursor style.
+// CONTEXT: Updated to pass drag start position for direction-aware 50% threshold.
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import type {
@@ -85,9 +82,7 @@ export function useMouseSelection(props: UseMouseSelectionProps): UseMouseSelect
   // Side Effects
   // -------------------------------------------------------------------------
 
-  // [NEW] Apply cursor style directly to the container element
-  // This ensures the cursor updates (cell, crosshair, resize) are visible
-  // even if the parent component doesn't explicitly bind the style prop.
+  // Apply cursor style directly to the container element
   useEffect(() => {
     if (containerRef.current) {
       containerRef.current.style.cursor = cursorStyle;
@@ -107,6 +102,7 @@ export function useMouseSelection(props: UseMouseSelectionProps): UseMouseSelect
     isDragging,
     isFormulaDragging,
     formulaDragStartRef,
+    dragStartRef,
     onScroll,
     onExtendTo,
     onUpdatePendingReference,
@@ -294,12 +290,8 @@ export function useMouseSelection(props: UseMouseSelectionProps): UseMouseSelect
             // Check if over a cell (standard cell cursor)
             const cell = getCellFromPixel(mouseX, mouseY, config, viewport, dimensions);
             if (cell) {
-              // Over a cell - use cell cursor (plus sign in Excel)
-              // NOTE: 'cell' is standard CSS but browser support varies. 
-              // It usually renders as a thick plus or crosshair.
               setCursorStyle("cell");
             } else {
-              // Over headers or outside grid - use default
               setCursorStyle("default");
             }
           }
@@ -311,9 +303,8 @@ export function useMouseSelection(props: UseMouseSelectionProps): UseMouseSelect
         formulaHandlers.handleFormulaCellDragMove(mouseX, mouseY, rect);
       }
       // Handle regular cell selection drag
-      else if (isDragging && !headerDragRef.current) {
-        // Use midpoint threshold for drag selection - cells are only included
-        // when cursor passes their center point for more accurate selection
+      else if (isDragging && !headerDragRef.current && dragStartRef.current) {
+        // Use midpoint threshold with drag start for direction-aware 50% threshold
         const cell = getCellFromMousePosition(
           mouseX, 
           mouseY, 
@@ -321,7 +312,10 @@ export function useMouseSelection(props: UseMouseSelectionProps): UseMouseSelect
           config, 
           viewport, 
           dimensions,
-          { useMidpointThreshold: true }
+          { 
+            dragStartRow: dragStartRef.current.row,
+            dragStartCol: dragStartRef.current.col,
+          }
         );
         if (cell) {
           onExtendTo(cell.row, cell.col);
@@ -410,9 +404,6 @@ export function useMouseSelection(props: UseMouseSelectionProps): UseMouseSelect
       const mouseX = event.clientX - rect.left;
       const mouseY = event.clientY - rect.top;
 
-      // Double-click on column header could auto-fit column width (future feature)
-      // Double-click on row header could auto-fit row height (future feature)
-
       return getCellFromPixel(mouseX, mouseY, config, viewport, dimensions);
     },
     [config, viewport, dimensions]
@@ -479,26 +470,32 @@ export function useMouseSelection(props: UseMouseSelectionProps): UseMouseSelect
       }
 
       // Extend selection/reference even when mouse is outside
-      // Use midpoint threshold for consistent drag behavior
-      const cell = getCellFromMousePosition(
-        mouseX, 
-        mouseY, 
-        rect, 
-        config, 
-        viewport, 
-        dimensions,
-        { useMidpointThreshold: true }
-      );
-      if (cell) {
-        if (isFormulaDragging && formulaDragStartRef.current && onUpdatePendingReference) {
+      // Use midpoint threshold with drag start for direction-aware behavior
+      if (isDragging && !headerDragRef.current && dragStartRef.current) {
+        const cell = getCellFromMousePosition(
+          mouseX, 
+          mouseY, 
+          rect, 
+          config, 
+          viewport, 
+          dimensions,
+          { 
+            dragStartRow: dragStartRef.current.row,
+            dragStartCol: dragStartRef.current.col,
+          }
+        );
+        if (cell) {
+          onExtendTo(cell.row, cell.col);
+        }
+      } else if (isFormulaDragging && formulaDragStartRef.current && onUpdatePendingReference) {
+        const cell = getCellFromMousePosition(mouseX, mouseY, rect, config, viewport, dimensions);
+        if (cell) {
           onUpdatePendingReference(
             formulaDragStartRef.current.row,
             formulaDragStartRef.current.col,
             cell.row,
             cell.col
           );
-        } else if (isDragging && !headerDragRef.current) {
-          onExtendTo(cell.row, cell.col);
         }
       }
 

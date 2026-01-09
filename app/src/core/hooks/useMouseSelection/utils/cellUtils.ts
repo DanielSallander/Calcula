@@ -32,12 +32,12 @@ export function getCellFromMousePosition(
  * Get the current size of a dimension (column width or row height).
  */
 export function getCurrentDimensionSize(
+  type: "column" | "row",
   index: number,
-  isColumn: boolean,
   config: GridConfig,
   dimensions?: DimensionOverrides
 ): number {
-  if (isColumn) {
+  if (type === "column") {
     return dimensions?.columnWidths?.get(index) ?? config.defaultCellWidth;
   }
   return dimensions?.rowHeights?.get(index) ?? config.defaultCellHeight;

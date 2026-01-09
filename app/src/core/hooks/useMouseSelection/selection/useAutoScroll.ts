@@ -21,6 +21,7 @@ interface UseAutoScrollProps {
   isDragging: boolean;
   isFormulaDragging: boolean;
   formulaDragStartRef: React.MutableRefObject<CellPosition | null>;
+  dragStartRef: React.MutableRefObject<CellPosition | null>;
   onScroll: (scrollX: number, scrollY: number) => void;
   onExtendTo: (row: number, col: number) => void;
   onUpdatePendingReference?: (startRow: number, startCol: number, endRow: number, endCol: number) => void;
@@ -46,6 +47,7 @@ export function useAutoScroll(props: UseAutoScrollProps): UseAutoScrollReturn {
     isDragging,
     isFormulaDragging,
     formulaDragStartRef,
+    dragStartRef,
     onScroll,
     onExtendTo,
     onUpdatePendingReference,
@@ -79,16 +81,31 @@ export function useAutoScroll(props: UseAutoScrollProps): UseAutoScrollReturn {
       onScroll(newScrollX, newScrollY);
 
       // Update selection/reference to cell under mouse (with new scroll position)
-      const cell = getCellFromMousePosition(mouseX, mouseY, rect, config, viewport, dimensions);
-      if (cell) {
-        if (isFormulaDragging && formulaDragStartRef.current && onUpdatePendingReference) {
+      if (isFormulaDragging && formulaDragStartRef.current && onUpdatePendingReference) {
+        const cell = getCellFromMousePosition(mouseX, mouseY, rect, config, viewport, dimensions);
+        if (cell) {
           onUpdatePendingReference(
             formulaDragStartRef.current.row,
             formulaDragStartRef.current.col,
             cell.row,
             cell.col
           );
-        } else if (isDragging) {
+        }
+      } else if (isDragging && dragStartRef.current) {
+        // Use direction-aware 50% threshold during auto-scroll
+        const cell = getCellFromMousePosition(
+          mouseX, 
+          mouseY, 
+          rect, 
+          config, 
+          viewport, 
+          dimensions,
+          {
+            dragStartRow: dragStartRef.current.row,
+            dragStartCol: dragStartRef.current.col,
+          }
+        );
+        if (cell) {
           onExtendTo(cell.row, cell.col);
         }
       }
@@ -96,7 +113,7 @@ export function useAutoScroll(props: UseAutoScrollProps): UseAutoScrollReturn {
 
     // Schedule next frame
     autoScrollRef.current = window.setTimeout(runAutoScroll, DEFAULT_AUTO_SCROLL_CONFIG.intervalMs);
-  }, [isDragging, isFormulaDragging, containerRef, scrollRef, config, viewport, dimensions, lastMousePosRef, formulaDragStartRef, onScroll, onExtendTo, onUpdatePendingReference]);
+  }, [isDragging, isFormulaDragging, containerRef, scrollRef, config, viewport, dimensions, lastMousePosRef, formulaDragStartRef, dragStartRef, onScroll, onExtendTo, onUpdatePendingReference]);
 
   /**
    * Start auto-scroll loop.
