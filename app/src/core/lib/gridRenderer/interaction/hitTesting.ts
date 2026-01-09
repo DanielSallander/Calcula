@@ -10,7 +10,6 @@ import { calculateVisibleRange } from "../layout/viewport";
 // =============================================================================
 // SELECTION THRESHOLDS
 // =============================================================================
-// "Fixated" values for the application's selection feel.
 // X = 0.0: Instant selection (cell selects as soon as cursor touches it)
 // Y = 1.2: Delayed selection (requires dragging significantly past the border)
 const SELECTION_THRESHOLD_X = 0.0;

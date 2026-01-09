@@ -27,12 +27,11 @@ export function useSpreadsheet() {
   const styleLogic = useSpreadsheetStyles(canvasRef);
   
   // Calculate Scrollbar Metrics (Excel-like dynamic scaling)
-  // This hook abstracts the logic of "Used Range" vs "Viewport"
+  // viewportDimensions is now tracked in Spreadsheet.tsx via ResizeObserver
   const scrollbarMetrics = useScrollbarMetrics({
     config: state.config,
     viewport: state.viewport,
-    // Fix: state.dimensions is DimensionOverrides; state.viewport contains the physical width/height
-    viewportDimensions: state.viewport as any,
+    viewportDimensions: state.viewportDimensions,
     refreshInterval: 3000, // Check for new data every 3s
   });
 
@@ -159,8 +158,7 @@ export function useSpreadsheet() {
       handleMouseUp: selectionLogic.mouseHandlers.handleMouseUp,
       handleDoubleClickEvent: selectionLogic.handleDoubleClickEvent,
       
-      // Use layout logic for scrolling, but this likely needs to accept
-      // values from our custom Scrollbar component
+      // Use layout logic for scrolling
       handleScrollEvent: layoutLogic.handleScrollEvent,
       
       handleFocus,

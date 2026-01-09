@@ -35,7 +35,7 @@ export interface UseScrollbarMetricsOptions {
 
 const SCROLLBAR_SIZE = 14;
 // Buffer rows/cols beyond the used range (Excel-like behavior)
-const BUFFER_ROWS = 5; // A bit more buffer feels nicer
+const BUFFER_ROWS = 5;
 const BUFFER_COLS = 2;
 
 /**
@@ -85,6 +85,20 @@ export function useScrollbarMetrics({
     };
   }, [refreshUsedRange, refreshInterval]);
 
+  // Guard: If viewportDimensions not yet initialized, return safe defaults
+  // This prevents NaN calculations when width/height are 0
+  if (viewportDimensions.width <= 0 || viewportDimensions.height <= 0) {
+    return {
+      contentWidth: 1,
+      contentHeight: 1,
+      maxScrollX: 0,
+      maxScrollY: 0,
+      showHorizontal: false,
+      showVertical: false,
+      refresh: refreshUsedRange,
+    };
+  }
+
   // Available viewport size (minus headers and scrollbar space)
   const availableWidth = Math.max(
     1,
@@ -103,18 +117,30 @@ export function useScrollbarMetrics({
   const currentScrollRow = Math.floor(viewport.scrollY / config.defaultCellHeight);
   const currentScrollCol = Math.floor(viewport.scrollX / config.defaultCellWidth);
 
-  // Excel-like effective bounds calculation:
-  // 1. Minimum content extent = what's needed to show current viewport (so we don't clip view)
+  // EXCEL-LIKE THUMB SIZING:
+  // The key insight: content size should be based on the USED RANGE (+ buffer),
+  // but must also be large enough to contain the current scroll position.
+  //
+  // When used range is small --> content size is small --> thumb is LARGE
+  // When used range is large --> content size is large --> thumb is SMALL
+
+  // Step 1: Calculate content bounds based purely on used range + small buffer
+  // This is what determines the thumb size ratio
+  const usedBasedMaxRow = usedRange.maxRow + BUFFER_ROWS;
+  const usedBasedMaxCol = usedRange.maxCol + BUFFER_COLS;
+
+  // Step 2: Ensure we can display the current viewport (don't clip the view)
   const viewportExtentRow = currentScrollRow + viewportRows;
   const viewportExtentCol = currentScrollCol + viewportCols;
 
-  // 2. Effective extent = max of (Used Range) and (Current View Position)
-  const effectiveMaxRow = Math.max(usedRange.maxRow, viewportExtentRow - 1);
-  const effectiveMaxCol = Math.max(usedRange.maxCol, viewportExtentCol - 1);
+  // Step 3: Final effective bounds = max of used range and current view extent
+  // This ensures scrolling past the used range works, but thumb reflects data size
+  const effectiveMaxRow = Math.max(usedBasedMaxRow, viewportExtentRow);
+  const effectiveMaxCol = Math.max(usedBasedMaxCol, viewportExtentCol);
 
-  // 3. Add small buffer
-  const boundedMaxRow = Math.min(effectiveMaxRow + BUFFER_ROWS, config.totalRows - 1);
-  const boundedMaxCol = Math.min(effectiveMaxCol + BUFFER_COLS, config.totalCols - 1);
+  // Clamp to grid limits
+  const boundedMaxRow = Math.min(effectiveMaxRow, config.totalRows - 1);
+  const boundedMaxCol = Math.min(effectiveMaxCol, config.totalCols - 1);
 
   // Calculate content size in pixels
   const contentWidth = (boundedMaxCol + 1) * config.defaultCellWidth;

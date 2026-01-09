@@ -1,9 +1,10 @@
 // PURPOSE: Main spreadsheet component combining grid, editor, and ribbon
 // CONTEXT: Core component that orchestrates the spreadsheet experience
-// FIX: Removed GridProvider - now provided at Layout level for shared context with SheetTabs
+// FIX: Added gridAreaRef to properly measure grid area dimensions for scrollbar calculations
 
-import React, { useCallback } from "react";
-import { useGridState } from "../../state";
+import React, { useCallback, useRef, useEffect } from "react";
+import { useGridState, useGridContext } from "../../state";
+import { setViewportDimensions } from "../../state/gridActions";
 import { GridCanvas } from "../Grid";
 import { InlineEditor } from "../InlineEditor";
 import { Scrollbar, ScrollbarCorner } from "../Scrollbar/Scrollbar";
@@ -20,6 +21,10 @@ function SpreadsheetContent({ className }: SpreadsheetContentProps): React.React
   const { refs, state, handlers, ui } = useSpreadsheet();
   const { startEdit } = useEditing();
   const gridState = useGridState();
+  const { dispatch } = useGridContext();
+
+  // Ref for the grid area (the scrollable region containing the canvas)
+  const gridAreaRef = useRef<HTMLDivElement>(null);
 
   // 2. Extract Refs
   const { 
@@ -65,7 +70,35 @@ function SpreadsheetContent({ className }: SpreadsheetContentProps): React.React
     fillState,
   } = state;
 
-  // 6. Scrollbar metrics based on used range (removed virtualBounds)
+  // FIX: Track grid area dimensions and update state for scrollbar calculations
+  useEffect(() => {
+    const gridArea = gridAreaRef.current;
+    if (!gridArea) return;
+
+    const updateDimensions = () => {
+      const width = gridArea.clientWidth;
+      const height = gridArea.clientHeight;
+      if (width > 0 && height > 0) {
+        dispatch(setViewportDimensions(width, height));
+      }
+    };
+
+    // Initial measurement
+    updateDimensions();
+
+    // Set up ResizeObserver for size changes
+    const resizeObserver = new ResizeObserver(() => {
+      updateDimensions();
+    });
+
+    resizeObserver.observe(gridArea);
+
+    return () => {
+      resizeObserver.disconnect();
+    };
+  }, [dispatch]);
+
+  // 6. Scrollbar metrics based on used range
   const scrollbarMetrics = useScrollbarMetrics({
     config: gridState.config,
     viewport: gridState.viewport,
@@ -213,8 +246,9 @@ function SpreadsheetContent({ className }: SpreadsheetContentProps): React.React
         />
       </div>
 
-      {/* Grid Area with Scrollbars */}
+      {/* Grid Area with Scrollbars - FIX: Added ref for dimension tracking */}
       <div
+        ref={gridAreaRef}
         style={{ 
           flex: 1, 
           position: "relative", 

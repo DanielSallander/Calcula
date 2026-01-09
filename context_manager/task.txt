@@ -1,7 +1,4 @@
-We must improve the range selection.
-When I drag and select a range of cells only those cells that are more than 50% covered by the cursor should be included.
-So lets say I start at cell B1. I drag and select down to B2. 
-Only when the cursor is crossing 50% of its "hitbox" it should include B2 in its selection.
-Then I continue to drag to the left to A2.
-Only when the cursor is crossing 50% of its hitbox on cell A2 should this cell be included.
-This will finally result in range A1:B2 being included in the selection.
+We must fix the scaling of the scroll bar handle (or "thumb").
+When the used range in small the scroll bar handle should take up basically the entire scroll bar.
+And as the used range get larger the scroll bar handle should get smaller, 
+basically inversely scale with size of the used range.
