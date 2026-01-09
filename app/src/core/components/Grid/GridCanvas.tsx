@@ -6,6 +6,7 @@
 // actual grid drawing to the gridRenderer module. Phase 3.3 adds text
 // rendering by fetching viewport cells and passing them to the renderer.
 // Updated: Added marching ants animation for clipboard selection.
+// Updated: Added sheet:formulaModeSwitch event listener for cross-sheet formula references.
 
 import React, { useRef, useEffect, useCallback, useImperativeHandle, forwardRef, useState } from "react";
 import { renderGrid, DEFAULT_THEME, calculateVisibleRange } from "../../lib/gridRenderer";
@@ -394,6 +395,31 @@ export const GridCanvas = forwardRef<GridCanvasHandle, GridCanvasProps>(
      */
     useEffect(() => {
       fetchCells();
+    }, [fetchCells]);
+
+    /**
+     * Listen for sheet switch events during formula mode.
+     * When user switches sheets while editing a formula (Point Mode),
+     * we need to refresh cells to show the new sheet's data.
+     */
+    useEffect(() => {
+      const handleFormulaModeSheetSwitch = async (event: Event) => {
+        const customEvent = event as CustomEvent<{
+          newSheetIndex: number;
+          newSheetName: string;
+        }>;
+        console.log(`[GridCanvas] Formula mode sheet switch to: ${customEvent.detail.newSheetName}`);
+        
+        // Clear the fetch cache and reload cells from the new active sheet
+        lastFetchRef.current = null;
+        await fetchCells(true);
+      };
+
+      window.addEventListener("sheet:formulaModeSwitch", handleFormulaModeSheetSwitch);
+      
+      return () => {
+        window.removeEventListener("sheet:formulaModeSwitch", handleFormulaModeSheetSwitch);
+      };
     }, [fetchCells]);
 
     /**

@@ -8,6 +8,7 @@
 // - Formula reference tracking for visual highlighting
 // - Column and row reference insertion for formula mode
 // - Cross-sheet reference support for formulas
+// FIX: Commit now switches back to source sheet before saving
 
 import { useCallback, useState, useEffect } from "react";
 import { useGridContext } from "../state/GridContext";
@@ -17,8 +18,9 @@ import {
   stopEditing,
   setFormulaReferences,
   clearFormulaReferences,
+  setActiveSheet,
 } from "../../core/state/gridActions";
-import { updateCell, getCell } from "../lib/tauri-api";
+import { updateCell, getCell, setActiveSheet as setActiveSheetApi } from "../lib/tauri-api";
 import { cellEvents } from "../lib/cellEvents";
 import { 
   rangeToReference, 
@@ -29,7 +31,6 @@ import {
 } from "../lib/gridRenderer";
 import type { EditingCell, CellUpdateResult, FormulaReference } from "../types";
 import { isFormula, isFormulaExpectingReference, FORMULA_REFERENCE_COLORS } from "../types";
-import { fnLog, stateLog } from '../../utils/component-logger';
 
 /**
  * Return type for the useEditing hook.
@@ -159,7 +160,6 @@ export function useEditing(): UseEditingReturn {
         color: pendingReference?.color || getNextReferenceColor(),
       };
       setPendingReference(newPending);
-      stateLog.change('Editing', 'pendingReference', pendingReference, newPending);
     },
     [pendingReference, getNextReferenceColor]
   );
@@ -178,7 +178,6 @@ export function useEditing(): UseEditingReturn {
         color: pendingReference?.color || getNextReferenceColor(),
       };
       setPendingReference(newPending);
-      stateLog.change('Editing', 'pendingColumnReference', pendingReference, newPending);
     },
     [pendingReference, getNextReferenceColor, config]
   );
@@ -197,7 +196,6 @@ export function useEditing(): UseEditingReturn {
         color: pendingReference?.color || getNextReferenceColor(),
       };
       setPendingReference(newPending);
-      stateLog.change('Editing', 'pendingRowReference', pendingReference, newPending);
     },
     [pendingReference, getNextReferenceColor, config]
   );
@@ -206,11 +204,8 @@ export function useEditing(): UseEditingReturn {
    * Clear pending reference.
    */
   const clearPendingReference = useCallback(() => {
-    if (pendingReference) {
-      stateLog.change('Editing', 'pendingReference', pendingReference, null);
-    }
     setPendingReference(null);
-  }, [pendingReference]);
+  }, []);
 
   /**
    * Update formula references in state, including pending reference.
@@ -226,8 +221,6 @@ export function useEditing(): UseEditingReturn {
    */
   const startEdit = useCallback(
     async (row: number, col: number, initialValue?: string) => {
-      fnLog.enter('Editing.startEdit', `row=${row} col=${col} initial="${initialValue ?? 'fetch'}"`)
-      
       setLastError(null);
       dispatch(clearFormulaReferences());
       setPendingReference(null);
@@ -244,7 +237,6 @@ export function useEditing(): UseEditingReturn {
         }
       }
 
-      stateLog.change('Editing', 'editingCell', null, { row, col, value });
       dispatch(
         startEditingAction({
           row,
@@ -255,8 +247,6 @@ export function useEditing(): UseEditingReturn {
           sourceSheetName: sheetContext.activeSheetName,
         })
       );
-      
-      fnLog.exit('Editing.startEdit');
     },
     [dispatch, sheetContext]
   );
@@ -268,21 +258,16 @@ export function useEditing(): UseEditingReturn {
     async (initialValue?: string) => {
       const { selection } = state;
       if (!selection) {
-        fnLog.enter('Editing.startEditing', 'no selection');
-        fnLog.exit('Editing.startEditing', 'aborted');
         return;
       }
 
       const row = selection.endRow;
       const col = selection.endCol;
-      
-      fnLog.enter('Editing.startEditing', `row=${row} col=${col} initial="${initialValue ?? 'fetch'}"`);
 
       if (initialValue !== undefined) {
         setLastError(null);
         dispatch(clearFormulaReferences());
         setPendingReference(null);
-        stateLog.change('Editing', 'editingCell', null, { row, col, value: initialValue });
         dispatch(
           startEditingAction({
             row,
@@ -292,10 +277,8 @@ export function useEditing(): UseEditingReturn {
             sourceSheetName: sheetContext.activeSheetName,
           })
         );
-        fnLog.exit('Editing.startEditing', 'with initial value');
       } else {
         await startEdit(row, col);
-        fnLog.exit('Editing.startEditing', 'fetched value');
       }
     },
     [state, startEdit, dispatch, sheetContext]
@@ -306,12 +289,9 @@ export function useEditing(): UseEditingReturn {
    */
   const updateValue = useCallback(
     (value: string) => {
-      if (editing) {
-        stateLog.change('Editing', 'value', editing.value, value);
-      }
       dispatch(updateEditing(value));
     },
-    [dispatch, editing]
+    [dispatch]
   );
 
   /**
@@ -324,8 +304,6 @@ export function useEditing(): UseEditingReturn {
         return;
       }
 
-      fnLog.enter('Editing.insertReference', `row=${row} col=${col}`);
-      
       const targetSheet = getTargetSheetName();
       const sourceSheet = getSourceSheetName();
       const reference = rangeToReference(row, col, row, col, targetSheet, sourceSheet);
@@ -341,9 +319,6 @@ export function useEditing(): UseEditingReturn {
       };
       dispatch(setFormulaReferences([...formulaReferences, newRef]));
       setPendingReference(null);
-      
-      stateLog.change('Editing', 'value', editing.value, newValue);
-      fnLog.exit('Editing.insertReference', `ref=${reference}`);
     },
     [editing, dispatch, formulaReferences, getNextReferenceColor, getTargetSheetName, getSourceSheetName]
   );
@@ -358,8 +333,6 @@ export function useEditing(): UseEditingReturn {
         return;
       }
 
-      fnLog.enter('Editing.insertRangeReference', `${startRow},${startCol}:${endRow},${endCol}`);
-      
       const targetSheet = getTargetSheetName();
       const sourceSheet = getSourceSheetName();
       const reference = rangeToReference(startRow, startCol, endRow, endCol, targetSheet, sourceSheet);
@@ -375,9 +348,6 @@ export function useEditing(): UseEditingReturn {
       };
       dispatch(setFormulaReferences([...formulaReferences.filter(r => r !== pendingReference), newRef]));
       setPendingReference(null);
-      
-      stateLog.change('Editing', 'value', editing.value, newValue);
-      fnLog.exit('Editing.insertRangeReference', `ref=${reference}`);
     },
     [editing, dispatch, formulaReferences, pendingReference, getNextReferenceColor, getTargetSheetName, getSourceSheetName]
   );
@@ -392,8 +362,6 @@ export function useEditing(): UseEditingReturn {
         return;
       }
 
-      fnLog.enter('Editing.insertColumnReference', `col=${col}`);
-      
       const targetSheet = getTargetSheetName();
       const sourceSheet = getSourceSheetName();
       const reference = columnToReference(col, targetSheet, sourceSheet);
@@ -410,9 +378,6 @@ export function useEditing(): UseEditingReturn {
       };
       dispatch(setFormulaReferences([...formulaReferences.filter(r => r !== pendingReference), newRef]));
       setPendingReference(null);
-      
-      stateLog.change('Editing', 'value', editing.value, newValue);
-      fnLog.exit('Editing.insertColumnReference', `ref=${reference}`);
     },
     [editing, dispatch, formulaReferences, pendingReference, getNextReferenceColor, config, getTargetSheetName, getSourceSheetName]
   );
@@ -427,8 +392,6 @@ export function useEditing(): UseEditingReturn {
         return;
       }
 
-      fnLog.enter('Editing.insertColumnRangeReference', `cols=${startCol}:${endCol}`);
-      
       const targetSheet = getTargetSheetName();
       const sourceSheet = getSourceSheetName();
       const reference = columnRangeToReference(startCol, endCol, targetSheet, sourceSheet);
@@ -447,9 +410,6 @@ export function useEditing(): UseEditingReturn {
       };
       dispatch(setFormulaReferences([...formulaReferences.filter(r => r !== pendingReference), newRef]));
       setPendingReference(null);
-      
-      stateLog.change('Editing', 'value', editing.value, newValue);
-      fnLog.exit('Editing.insertColumnRangeReference', `ref=${reference}`);
     },
     [editing, dispatch, formulaReferences, pendingReference, getNextReferenceColor, config, getTargetSheetName, getSourceSheetName]
   );
@@ -464,8 +424,6 @@ export function useEditing(): UseEditingReturn {
         return;
       }
 
-      fnLog.enter('Editing.insertRowReference', `row=${row}`);
-      
       const targetSheet = getTargetSheetName();
       const sourceSheet = getSourceSheetName();
       const reference = rowToReference(row, targetSheet, sourceSheet);
@@ -482,9 +440,6 @@ export function useEditing(): UseEditingReturn {
       };
       dispatch(setFormulaReferences([...formulaReferences.filter(r => r !== pendingReference), newRef]));
       setPendingReference(null);
-      
-      stateLog.change('Editing', 'value', editing.value, newValue);
-      fnLog.exit('Editing.insertRowReference', `ref=${reference}`);
     },
     [editing, dispatch, formulaReferences, pendingReference, getNextReferenceColor, config, getTargetSheetName, getSourceSheetName]
   );
@@ -499,8 +454,6 @@ export function useEditing(): UseEditingReturn {
         return;
       }
 
-      fnLog.enter('Editing.insertRowRangeReference', `rows=${startRow}:${endRow}`);
-      
       const targetSheet = getTargetSheetName();
       const sourceSheet = getSourceSheetName();
       const reference = rowRangeToReference(startRow, endRow, targetSheet, sourceSheet);
@@ -519,30 +472,55 @@ export function useEditing(): UseEditingReturn {
       };
       dispatch(setFormulaReferences([...formulaReferences.filter(r => r !== pendingReference), newRef]));
       setPendingReference(null);
-      
-      stateLog.change('Editing', 'value', editing.value, newValue);
-      fnLog.exit('Editing.insertRowRangeReference', `ref=${reference}`);
     },
     [editing, dispatch, formulaReferences, pendingReference, getNextReferenceColor, config, getTargetSheetName, getSourceSheetName]
   );
 
   /**
    * Commit the current edit to the backend.
+   * FIX: If editing started on a different sheet, switch back to that sheet before committing.
    */
   const commitEdit = useCallback(async (): Promise<CellUpdateResult | null> => {
     if (!editing) {
-      fnLog.enter('Editing.commitEdit', 'no editing');
-      fnLog.exit('Editing.commitEdit', 'aborted');
       return null;
     }
 
-    fnLog.enter('Editing.commitEdit', `row=${editing.row} col=${editing.col} value="${editing.value.substring(0, 30)}"`);
+    console.log("[useEditing] commitEdit called", {
+      editingRow: editing.row,
+      editingCol: editing.col,
+      sourceSheetIndex: editing.sourceSheetIndex,
+      sourceSheetName: editing.sourceSheetName,
+      currentSheetIndex: sheetContext.activeSheetIndex,
+      currentSheetName: sheetContext.activeSheetName,
+    });
     
     setIsCommitting(true);
-    stateLog.change('Editing', 'isCommitting', false, true);
     setLastError(null);
 
     try {
+      // FIX: Check if we need to switch back to the source sheet before committing
+      const needsSheetSwitch = 
+        editing.sourceSheetIndex !== undefined && 
+        editing.sourceSheetIndex !== sheetContext.activeSheetIndex;
+
+      if (needsSheetSwitch) {
+        console.log("[useEditing] Switching back to source sheet before commit:", editing.sourceSheetName);
+        
+        // Switch the backend to the source sheet
+        await setActiveSheetApi(editing.sourceSheetIndex!);
+        
+        // Update the frontend state to match
+        dispatch(setActiveSheet(editing.sourceSheetIndex!, editing.sourceSheetName!));
+        
+        // Dispatch event to refresh grid cells for the source sheet
+        window.dispatchEvent(new CustomEvent("sheet:formulaModeSwitch", {
+          detail: {
+            newSheetIndex: editing.sourceSheetIndex,
+            newSheetName: editing.sourceSheetName,
+          }
+        }));
+      }
+
       let oldValue: string | undefined;
       try {
         const oldCell = await getCell(editing.row, editing.col);
@@ -574,7 +552,6 @@ export function useEditing(): UseEditingReturn {
           });
         }
         
-        stateLog.change('Editing', 'editingCell', editing, null);
         dispatch(stopEditing());
         dispatch(clearFormulaReferences());
         
@@ -587,10 +564,8 @@ export function useEditing(): UseEditingReturn {
           updatedCells,
         };
         
-        fnLog.exit('Editing.commitEdit', `success display="${primaryCell.display}"`);
         return result;
       } else {
-        stateLog.change('Editing', 'editingCell', editing, null);
         dispatch(stopEditing());
         dispatch(clearFormulaReferences());
         
@@ -603,18 +578,14 @@ export function useEditing(): UseEditingReturn {
           updatedCells,
         };
         
-        fnLog.exit('Editing.commitEdit', 'success (cleared)');
         return result;
       }
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : "Unknown error";
       console.error("Failed to update cell:", error);
-      stateLog.change('Editing', 'lastError', null, errorMessage);
       setLastError(errorMessage);
-      stateLog.change('Editing', 'editingCell', editing, null);
       dispatch(stopEditing());
       dispatch(clearFormulaReferences());
-      fnLog.exit('Editing.commitEdit', `exception="${errorMessage}"`);
       return {
         success: false,
         row: editing.row,
@@ -625,25 +596,48 @@ export function useEditing(): UseEditingReturn {
       };
     } finally {
       setIsCommitting(false);
-      stateLog.change('Editing', 'isCommitting', true, false);
     }
-  }, [editing, dispatch]);
+  }, [editing, dispatch, sheetContext]);
 
   /**
    * Cancel the current edit without saving.
+   * FIX: If editing started on a different sheet, switch back to that sheet.
    */
-  const cancelEdit = useCallback(() => {
-    fnLog.enter('Editing.cancelEdit', editing ? `row=${editing.row} col=${editing.col}` : 'no editing');
-    
-    if (editing) {
-      stateLog.change('Editing', 'editingCell', editing, null);
+  const cancelEdit = useCallback(async () => {
+    if (!editing) {
+      setLastError(null);
+      setPendingReference(null);
+      dispatch(stopEditing());
+      return;
     }
+
+    // Check if we need to switch back to the source sheet
+    const needsSheetSwitch = 
+      editing.sourceSheetIndex !== undefined && 
+      editing.sourceSheetIndex !== sheetContext.activeSheetIndex;
+
+    if (needsSheetSwitch) {
+      console.log("[useEditing] Canceling - switching back to source sheet:", editing.sourceSheetName);
+      
+      // Switch the backend to the source sheet
+      await setActiveSheetApi(editing.sourceSheetIndex!);
+      
+      // Update the frontend state to match
+      dispatch(setActiveSheet(editing.sourceSheetIndex!, editing.sourceSheetName!));
+      
+      // Dispatch event to refresh grid cells for the source sheet
+      window.dispatchEvent(new CustomEvent("sheet:formulaModeSwitch", {
+        detail: {
+          newSheetIndex: editing.sourceSheetIndex,
+          newSheetName: editing.sourceSheetName,
+        }
+      }));
+    }
+
     setLastError(null);
     setPendingReference(null);
     dispatch(stopEditing());
-    
-    fnLog.exit('Editing.cancelEdit');
-  }, [dispatch, editing]);
+  }, [dispatch, editing, sheetContext]);
 
   /**
    * Start editing the currently selected cell with its current content.
@@ -654,9 +648,7 @@ export function useEditing(): UseEditingReturn {
       return;
     }
 
-    fnLog.enter('Editing.editCurrentCell', `row=${selection.endRow} col=${selection.endCol}`);
     await startEdit(selection.endRow, selection.endCol);
-    fnLog.exit('Editing.editCurrentCell');
   }, [state, startEdit]);
 
   /**
@@ -669,17 +661,9 @@ export function useEditing(): UseEditingReturn {
         return;
       }
 
-      fnLog.enter('Editing.replaceCurrentCell', `row=${selection.endRow} col=${selection.endCol} char="${initialChar || ''}"`);
-      
       setLastError(null);
       dispatch(clearFormulaReferences());
       setPendingReference(null);
-      
-      stateLog.change('Editing', 'editingCell', null, { 
-        row: selection.endRow, 
-        col: selection.endCol, 
-        value: initialChar || '' 
-      });
       
       dispatch(
         startEditingAction({
@@ -690,8 +674,6 @@ export function useEditing(): UseEditingReturn {
           sourceSheetName: sheetContext.activeSheetName,
         })
       );
-      
-      fnLog.exit('Editing.replaceCurrentCell');
     },
     [state, dispatch, sheetContext]
   );
@@ -700,11 +682,8 @@ export function useEditing(): UseEditingReturn {
    * Clear the last error message.
    */
   const clearError = useCallback(() => {
-    if (lastError) {
-      stateLog.change('Editing', 'lastError', lastError, null);
-    }
     setLastError(null);
-  }, [lastError]);
+  }, []);
 
   return {
     editing,

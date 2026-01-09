@@ -1,5 +1,7 @@
-We must fix the scrollbar (both horizontal and vertical).
-When scrolling the "thumb", "handle" as it may be called, is always stuck on top for vertical scrollbars
-and stuck to the left for the horizontal scrollbars.
-Probably this has to do with the scaling of the scrollbar itself with respect to the used range.
-We need to properly implement it as it is in Excel.
+We must improve the range selection.
+When I drag and select a range of cells only those cells that are more than 50% covered by the cursor should be included.
+So lets say I start at cell B1. I drag and select down to B2. 
+Only when the cursor is crossing 50% of its "hitbox" it should include B2 in its selection.
+Then I continue to drag to the left to A2.
+Only when the cursor is crossing 50% of its hitbox on cell A2 should this cell be included.
+This will finally result in range A1:B2 being included in the selection.

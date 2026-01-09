@@ -1,8 +1,9 @@
 // PURPOSE: Main spreadsheet component combining grid, editor, and ribbon
 // CONTEXT: Core component that orchestrates the spreadsheet experience
+// FIX: Removed GridProvider - now provided at Layout level for shared context with SheetTabs
 
 import React, { useCallback } from "react";
-import { GridProvider, useGridState } from "../../state";
+import { useGridState } from "../../state";
 import { GridCanvas } from "../Grid";
 import { InlineEditor } from "../InlineEditor";
 import { Scrollbar, ScrollbarCorner } from "../Scrollbar/Scrollbar";
@@ -296,12 +297,10 @@ function SpreadsheetContent({ className }: SpreadsheetContentProps): React.React
   );
 }
 
+// FIX: Removed GridProvider wrapper - now provided at Layout level
+// This allows SheetTabs and Spreadsheet to share the same context
 export function Spreadsheet({ className }: SpreadsheetContentProps): React.ReactElement {
-  return (
-    <GridProvider>
-      <SpreadsheetContent className={className} />
-    </GridProvider>
-  );
+  return <SpreadsheetContent className={className} />;
 }
 
 export default Spreadsheet;

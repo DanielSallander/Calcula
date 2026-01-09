@@ -1,6 +1,7 @@
 // FILENAME: shell/SheetTabs/SheetTabs.tsx
 // PURPOSE: Sheet tabs component for switching between worksheets
 // CONTEXT: Enhanced to support sheet switching during formula editing without page reload.
+//          Key fix: Uses global flag to prevent blur commit during formula mode navigation.
 
 import React, { useState, useEffect, useCallback, useRef } from "react";
 import {
@@ -21,6 +22,7 @@ import {
 import { useGridContext } from "../../core/state/GridContext";
 import { setActiveSheet, setSheetContext } from "../../core/state/gridActions";
 import { isFormulaExpectingReference } from "../../core/types";
+import { setPreventBlurCommit } from "../../core/components/InlineEditor/InlineEditor";
 
 export interface SheetTabsProps {
   onSheetChange?: (sheetIndex: number, sheetName: string) => void;
@@ -127,9 +129,30 @@ export function SheetTabs({ onSheetChange }: SheetTabsProps): React.ReactElement
     }
   }, [dispatch]);
 
+  /**
+   * Handle mousedown on sheet tabs.
+   * CRITICAL: When in formula mode, set the global flag to prevent blur commit.
+   * This flag is checked by InlineEditor's blur handler.
+   */
+  const handleTabMouseDown = useCallback(
+    (e: React.MouseEvent, sheetIndex: number) => {
+      if (isInFormulaMode && sheetIndex !== activeIndex) {
+        console.log("[SheetTabs] Formula mode mousedown - setting prevent blur flag");
+        // Set the global flag BEFORE blur fires
+        setPreventBlurCommit(true);
+        // Prevent default to try to keep focus (may not work in all browsers)
+        e.preventDefault();
+        e.stopPropagation();
+      }
+    },
+    [isInFormulaMode, activeIndex]
+  );
+
   const handleSheetClick = useCallback(
     async (index: number) => {
       if (index === activeIndex) return;
+
+      console.log("[SheetTabs] Sheet click, index:", index, "isInFormulaMode:", isInFormulaMode);
 
       // Emit before event
       await sheetExtensions.emit({
@@ -142,6 +165,8 @@ export function SheetTabs({ onSheetChange }: SheetTabsProps): React.ReactElement
       try {
         // When in formula mode, we need special handling
         if (isInFormulaMode) {
+          console.log("[SheetTabs] Formula mode - switching without reload");
+          
           // Just update the backend's active sheet for cell selection
           // but DON'T reload the page or exit edit mode
           const result: SheetsResult = await setActiveSheetApi(index);
@@ -166,6 +191,17 @@ export function SheetTabs({ onSheetChange }: SheetTabsProps): React.ReactElement
           });
 
           onSheetChange?.(result.activeIndex, newActiveSheet?.name || "");
+          
+          // Emit a custom event to trigger grid refresh and editor refocus
+          // GridCanvas listens for this to re-fetch cells
+          // InlineEditor listens for this to refocus and clear the prevent flag
+          console.log("[SheetTabs] Dispatching sheet:formulaModeSwitch event");
+          window.dispatchEvent(new CustomEvent("sheet:formulaModeSwitch", {
+            detail: {
+              newSheetIndex: result.activeIndex,
+              newSheetName: newActiveSheet?.name || "",
+            }
+          }));
           
           // DO NOT reload - stay in edit mode for formula reference selection
           return;
@@ -195,6 +231,8 @@ export function SheetTabs({ onSheetChange }: SheetTabsProps): React.ReactElement
         window.location.reload();
       } catch (err) {
         console.error("[SheetTabs] setActiveSheet error:", err);
+        // Clear the prevent flag on error
+        setPreventBlurCommit(false);
         alert("Failed to switch sheet: " + String(err));
       }
     },
@@ -413,12 +451,15 @@ export function SheetTabs({ onSheetChange }: SheetTabsProps): React.ReactElement
               return (
                 <button
                   key={sheet.index}
+                  type="button"
+                  tabIndex={-1}
                   style={{
                     ...styles.tab,
                     ...(sheet.index === activeIndex ? styles.activeTab : {}),
                     ...(isSourceSheet ? styles.formulaSourceTab : {}),
                     ...(isTargetSheet ? styles.formulaTargetTab : {}),
                   }}
+                  onMouseDown={(e) => handleTabMouseDown(e, sheet.index)}
                   onClick={() => handleSheetClick(sheet.index)}
                   onContextMenu={(e) => handleContextMenu(e, sheet.index)}
                   onDoubleClick={() => handleDoubleClick(sheet.index)}
@@ -436,6 +477,8 @@ export function SheetTabs({ onSheetChange }: SheetTabsProps): React.ReactElement
               );
             })}
             <button
+              type="button"
+              tabIndex={-1}
               style={{
                 ...styles.addButton,
                 ...(isInFormulaMode ? styles.disabledButton : {}),
@@ -480,6 +523,7 @@ export function SheetTabs({ onSheetChange }: SheetTabsProps): React.ReactElement
           {getContextMenuItems(contextMenu.sheetIndex).map((item, idx) => (
             <React.Fragment key={item.id}>
               <button
+                type="button"
                 style={{
                   ...styles.contextMenuItem,
                   ...(item.disabled ? styles.contextMenuItemDisabled : {}),

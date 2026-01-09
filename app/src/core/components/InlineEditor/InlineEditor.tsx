@@ -4,10 +4,34 @@
 // directly over the cell being edited. It handles keyboard events for committing (Enter),
 // canceling (Escape), and tabbing between cells. The editor automatically focuses when
 // it appears and positions itself based on cell coordinates and scroll position.
+// Updated: Added support for cross-sheet formula editing - uses global flag to prevent
+// blur commit during sheet tab clicks.
 
-import React, { useRef, useEffect, useCallback } from "react";
+import React, { useRef, useEffect, useCallback, useState } from "react";
 import type { GridConfig, Viewport, EditingCell, DimensionOverrides } from "../../types";
 import { isFormulaExpectingReference, createEmptyDimensionOverrides } from "../../types";
+
+/**
+ * Global flag to prevent blur from committing during sheet tab navigation.
+ * This is set by SheetTabs before clicking and cleared after.
+ * Using a global because the blur event fires between mousedown and click,
+ * and we need to coordinate across components.
+ */
+let preventBlurCommit = false;
+
+/**
+ * Set the preventBlurCommit flag. Called by SheetTabs during formula mode sheet switching.
+ */
+export function setPreventBlurCommit(value: boolean): void {
+  preventBlurCommit = value;
+}
+
+/**
+ * Get the current preventBlurCommit flag value.
+ */
+export function getPreventBlurCommit(): boolean {
+  return preventBlurCommit;
+}
 
 /**
  * Props for the InlineEditor component.
@@ -148,6 +172,7 @@ function calculateEditorPosition(
  * InlineEditor component - renders a text input directly over the cell being edited.
  * Phase 4.3: Added disabled prop, improved commit handling, and formula mode awareness.
  * Phase 5.2: Fixed positioning to use proper dimension calculations.
+ * Updated: Added refocus support for cross-sheet formula editing.
  */
 export function InlineEditor(props: InlineEditorProps): React.ReactElement | null {
   const {
@@ -165,12 +190,12 @@ export function InlineEditor(props: InlineEditorProps): React.ReactElement | nul
 
   const inputRef = useRef<HTMLInputElement | null>(null);
   const isCommittingRef = useRef(false);
+  
+  // Counter to force refocus after sheet switches
+  const [refocusTrigger, setRefocusTrigger] = useState(0);
 
   // Ensure we have valid dimensions
   const dims = dimensions || createEmptyDimensionOverrides();
-
-  // Check if we're in formula reference mode
-  const isFormulaMode = isFormulaExpectingReference(editing.value);
 
   // Calculate position
   const position = calculateEditorPosition(editing, config, viewport, dims);
@@ -241,8 +266,8 @@ export function InlineEditor(props: InlineEditorProps): React.ReactElement | nul
 
   /**
    * Handle blur - commit edit when focus leaves the editor.
-   * Phase 4.3: Skip commit when in formula mode (clicking grid to add reference).
-   * Phase 4.3+: Skip commit when focus transfers to formula bar (allows continued editing).
+   * Uses the actual input value at blur time to avoid stale closure issues.
+   * Also checks the global preventBlurCommit flag set by SheetTabs.
    */
   const handleBlur = useCallback(
     async (event: React.FocusEvent<HTMLInputElement>) => {
@@ -251,20 +276,29 @@ export function InlineEditor(props: InlineEditorProps): React.ReactElement | nul
         return;
       }
 
-      // Don't commit if in formula reference mode - user is clicking to add a reference
-      if (isFormulaMode) {
+      // Check the global flag set by SheetTabs during formula mode navigation
+      if (preventBlurCommit) {
+        console.log("[InlineEditor] Blur prevented by global flag");
+        return;
+      }
+
+      // Check the actual input value at blur time (not closure) to determine formula mode
+      const currentValue = event.target.value;
+      const isCurrentlyInFormulaMode = isFormulaExpectingReference(currentValue);
+      
+      if (isCurrentlyInFormulaMode) {
+        console.log("[InlineEditor] Blur prevented - formula mode active, value:", currentValue);
         return;
       }
 
       // Check if focus is moving to the formula bar input
       const relatedTarget = event.relatedTarget as HTMLElement | null;
       if (relatedTarget?.hasAttribute("data-formula-bar")) {
-        // Focus moving to formula bar - don't commit, just transfer focus
-        // The user continues editing the same cell via the formula bar
         return;
       }
 
       // Focus moving elsewhere - commit
+      console.log("[InlineEditor] Blur committing, value:", currentValue);
       isCommittingRef.current = true;
       try {
         await onCommit();
@@ -272,20 +306,50 @@ export function InlineEditor(props: InlineEditorProps): React.ReactElement | nul
         isCommittingRef.current = false;
       }
     },
-    [onCommit, disabled, isFormulaMode]
+    [onCommit, disabled]
   );
 
   /**
-   * Auto-focus the input when editing starts.
+   * Listen for sheet switch events during formula mode.
+   * When the user switches sheets while editing a formula, we need to refocus
+   * the input so they can continue editing and selecting cells.
+   */
+  useEffect(() => {
+    const handleFormulaModeSheetSwitch = () => {
+      console.log("[InlineEditor] Received sheet switch event, will refocus");
+      // Clear the prevent flag now that the switch is complete
+      preventBlurCommit = false;
+      // Trigger a refocus by updating the trigger counter
+      setRefocusTrigger(prev => prev + 1);
+    };
+
+    window.addEventListener("sheet:formulaModeSwitch", handleFormulaModeSheetSwitch);
+    
+    return () => {
+      window.removeEventListener("sheet:formulaModeSwitch", handleFormulaModeSheetSwitch);
+    };
+  }, []);
+
+  /**
+   * Auto-focus the input when editing starts or when triggered by sheet switch.
    */
   useEffect(() => {
     if (inputRef.current && position.visible && !disabled) {
-      inputRef.current.focus();
-      // Place cursor at end of text
-      const len = inputRef.current.value.length;
-      inputRef.current.setSelectionRange(len, len);
+      // Use setTimeout to ensure focus happens after any pending DOM updates
+      // This is especially important after sheet switches
+      const timeoutId = setTimeout(() => {
+        if (inputRef.current) {
+          inputRef.current.focus();
+          // Place cursor at end of text
+          const len = inputRef.current.value.length;
+          inputRef.current.setSelectionRange(len, len);
+          console.log("[InlineEditor] Focused input, cursor at position:", len);
+        }
+      }, 0);
+      
+      return () => clearTimeout(timeoutId);
     }
-  }, [editing.row, editing.col, position.visible, disabled]);
+  }, [editing.row, editing.col, position.visible, disabled, refocusTrigger]);
 
   // Don't render if not visible
   if (!position.visible) {
