@@ -6,7 +6,7 @@
 // are designed for high-performance rendering of large datasets (1M+ rows).
 // Phase 3.4 implementation of virtual scrolling logic.
 
-import type { GridConfig, Viewport } from "../types";
+import type { GridConfig, Viewport, DimensionOverrides } from "../types";
 
 /**
  * Scroll direction enumeration for navigation.
@@ -43,27 +43,137 @@ export interface VisibleRange {
 }
 
 /**
+ * Default scrollbar dimensions (used when custom scrollbars are rendered).
+ */
+export const SCROLLBAR_WIDTH = 17;
+export const SCROLLBAR_HEIGHT = 17;
+
+/**
+ * Get the width of a specific column, considering overrides.
+ */
+export function getColumnWidthFromDimensions(
+  col: number,
+  config: GridConfig,
+  dimensions?: DimensionOverrides
+): number {
+  if (dimensions?.columnWidths?.has(col)) {
+    return dimensions.columnWidths.get(col)!;
+  }
+  return config.defaultCellWidth;
+}
+
+/**
+ * Get the height of a specific row, considering overrides.
+ */
+export function getRowHeightFromDimensions(
+  row: number,
+  config: GridConfig,
+  dimensions?: DimensionOverrides
+): number {
+  if (dimensions?.rowHeights?.has(row)) {
+    return dimensions.rowHeights.get(row)!;
+  }
+  return config.defaultCellHeight;
+}
+
+/**
+ * Calculate the X position of a column's left edge.
+ * For performance with large column indices, uses default width calculation
+ * and only iterates through custom-width columns.
+ */
+export function getColumnXPosition(
+  col: number,
+  config: GridConfig,
+  dimensions?: DimensionOverrides
+): number {
+  // Fast path: no custom dimensions
+  if (!dimensions?.columnWidths || dimensions.columnWidths.size === 0) {
+    return col * config.defaultCellWidth;
+  }
+
+  // Calculate base position assuming all default widths
+  let x = col * config.defaultCellWidth;
+
+  // Adjust for any custom widths in columns before target
+  dimensions.columnWidths.forEach((width, c) => {
+    if (c < col) {
+      x += width - config.defaultCellWidth;
+    }
+  });
+
+  return x;
+}
+
+/**
+ * Calculate the Y position of a row's top edge.
+ * For performance with large row indices, uses default height calculation
+ * and only iterates through custom-height rows.
+ */
+export function getRowYPosition(
+  row: number,
+  config: GridConfig,
+  dimensions?: DimensionOverrides
+): number {
+  // Fast path: no custom dimensions
+  if (!dimensions?.rowHeights || dimensions.rowHeights.size === 0) {
+    return row * config.defaultCellHeight;
+  }
+
+  // Calculate base position assuming all default heights
+  let y = row * config.defaultCellHeight;
+
+  // Adjust for any custom heights in rows before target
+  dimensions.rowHeights.forEach((height, r) => {
+    if (r < row) {
+      y += height - config.defaultCellHeight;
+    }
+  });
+
+  return y;
+}
+
+/**
  * Calculate the maximum scroll values based on grid configuration.
  *
  * @param config - Grid configuration
  * @param viewportWidth - Available viewport width in pixels
  * @param viewportHeight - Available viewport height in pixels
+ * @param dimensions - Optional dimension overrides
  * @returns Maximum scroll X and Y values
  */
 export function calculateMaxScroll(
   config: GridConfig,
   viewportWidth: number,
-  viewportHeight: number
+  viewportHeight: number,
+  dimensions?: DimensionOverrides
 ): { maxScrollX: number; maxScrollY: number } {
   const { totalRows, totalCols, defaultCellWidth, defaultCellHeight, rowHeaderWidth, colHeaderHeight } = config;
 
-  // Total content size
-  const totalContentWidth = totalCols * defaultCellWidth;
-  const totalContentHeight = totalRows * defaultCellHeight;
+  // Calculate total content size accounting for custom dimensions
+  let totalContentWidth = totalCols * defaultCellWidth;
+  let totalContentHeight = totalRows * defaultCellHeight;
 
-  // Available viewport size (minus headers)
-  const availableWidth = viewportWidth - rowHeaderWidth;
-  const availableHeight = viewportHeight - colHeaderHeight;
+  // Adjust for custom column widths
+  if (dimensions?.columnWidths) {
+    dimensions.columnWidths.forEach((width, col) => {
+      if (col < totalCols) {
+        totalContentWidth += width - defaultCellWidth;
+      }
+    });
+  }
+
+  // Adjust for custom row heights
+  if (dimensions?.rowHeights) {
+    dimensions.rowHeights.forEach((height, row) => {
+      if (row < totalRows) {
+        totalContentHeight += height - defaultCellHeight;
+      }
+    });
+  }
+
+  // Available viewport size (minus headers and scrollbars)
+  const availableWidth = viewportWidth - rowHeaderWidth - SCROLLBAR_WIDTH;
+  const availableHeight = viewportHeight - colHeaderHeight - SCROLLBAR_HEIGHT;
 
   // Maximum scroll is content size minus viewport size
   const maxScrollX = Math.max(0, totalContentWidth - availableWidth);
@@ -80,6 +190,7 @@ export function calculateMaxScroll(
  * @param config - Grid configuration
  * @param viewportWidth - Viewport width in pixels
  * @param viewportHeight - Viewport height in pixels
+ * @param dimensions - Optional dimension overrides
  * @returns Clamped scroll position
  */
 export function clampScroll(
@@ -87,9 +198,10 @@ export function clampScroll(
   scrollY: number,
   config: GridConfig,
   viewportWidth: number,
-  viewportHeight: number
+  viewportHeight: number,
+  dimensions?: DimensionOverrides
 ): ScrollPosition {
-  const { maxScrollX, maxScrollY } = calculateMaxScroll(config, viewportWidth, viewportHeight);
+  const { maxScrollX, maxScrollY } = calculateMaxScroll(config, viewportWidth, viewportHeight, dimensions);
   const { defaultCellWidth, defaultCellHeight } = config;
 
   const clampedX = Math.max(0, Math.min(scrollX, maxScrollX));
@@ -142,9 +254,9 @@ export function scrollToVisibleRange(
   const offsetX = -(scrollX % defaultCellWidth);
   const offsetY = -(scrollY % defaultCellHeight);
 
-  // Calculate available viewport size
-  const availableWidth = viewportWidth - rowHeaderWidth;
-  const availableHeight = viewportHeight - colHeaderHeight;
+  // Calculate available viewport size (minus scrollbars)
+  const availableWidth = viewportWidth - rowHeaderWidth - SCROLLBAR_WIDTH;
+  const availableHeight = viewportHeight - colHeaderHeight - SCROLLBAR_HEIGHT;
 
   // Calculate how many cells fit in the viewport (add 1 for partial cells)
   const visibleCols = Math.ceil(availableWidth / defaultCellWidth) + 1;
@@ -171,14 +283,18 @@ export function scrollToVisibleRange(
  * @param row - Target row index
  * @param col - Target column index
  * @param config - Grid configuration
+ * @param dimensions - Optional dimension overrides
  * @returns Scroll position that shows the cell at the top-left of viewport
  */
-export function cellToScroll(row: number, col: number, config: GridConfig): { scrollX: number; scrollY: number } {
-  const { defaultCellWidth, defaultCellHeight } = config;
-
+export function cellToScroll(
+  row: number,
+  col: number,
+  config: GridConfig,
+  dimensions?: DimensionOverrides
+): { scrollX: number; scrollY: number } {
   return {
-    scrollX: col * defaultCellWidth,
-    scrollY: row * defaultCellHeight,
+    scrollX: getColumnXPosition(col, config, dimensions),
+    scrollY: getRowYPosition(row, config, dimensions),
   };
 }
 
@@ -190,6 +306,7 @@ export function cellToScroll(row: number, col: number, config: GridConfig): { sc
  * @param config - Grid configuration
  * @param viewportWidth - Viewport width in pixels
  * @param viewportHeight - Viewport height in pixels
+ * @param dimensions - Optional dimension overrides
  * @returns Scroll position that centers the cell
  */
 export function cellToCenteredScroll(
@@ -197,21 +314,24 @@ export function cellToCenteredScroll(
   col: number,
   config: GridConfig,
   viewportWidth: number,
-  viewportHeight: number
+  viewportHeight: number,
+  dimensions?: DimensionOverrides
 ): { scrollX: number; scrollY: number } {
-  const { defaultCellWidth, defaultCellHeight, rowHeaderWidth, colHeaderHeight } = config;
+  const { rowHeaderWidth, colHeaderHeight } = config;
 
-  // Calculate cell position
-  const cellX = col * defaultCellWidth;
-  const cellY = row * defaultCellHeight;
+  // Calculate cell position and size
+  const cellX = getColumnXPosition(col, config, dimensions);
+  const cellY = getRowYPosition(row, config, dimensions);
+  const cellWidth = getColumnWidthFromDimensions(col, config, dimensions);
+  const cellHeight = getRowHeightFromDimensions(row, config, dimensions);
 
-  // Calculate viewport center offset
-  const availableWidth = viewportWidth - rowHeaderWidth;
-  const availableHeight = viewportHeight - colHeaderHeight;
+  // Calculate viewport center offset (account for scrollbars)
+  const availableWidth = viewportWidth - rowHeaderWidth - SCROLLBAR_WIDTH;
+  const availableHeight = viewportHeight - colHeaderHeight - SCROLLBAR_HEIGHT;
 
   // Position cell at center of viewport
-  const scrollX = cellX - availableWidth / 2 + defaultCellWidth / 2;
-  const scrollY = cellY - availableHeight / 2 + defaultCellHeight / 2;
+  const scrollX = cellX - availableWidth / 2 + cellWidth / 2;
+  const scrollY = cellY - availableHeight / 2 + cellHeight / 2;
 
   return { scrollX, scrollY };
 }
@@ -237,9 +357,9 @@ export function calculateScrollDelta(
 ): { deltaX: number; deltaY: number } {
   const { defaultCellWidth, defaultCellHeight, rowHeaderWidth, colHeaderHeight, totalRows, totalCols } = config;
 
-  // Calculate available viewport size
-  const availableWidth = viewportWidth - rowHeaderWidth;
-  const availableHeight = viewportHeight - colHeaderHeight;
+  // Calculate available viewport size (account for scrollbars)
+  const availableWidth = viewportWidth - rowHeaderWidth - SCROLLBAR_WIDTH;
+  const availableHeight = viewportHeight - colHeaderHeight - SCROLLBAR_HEIGHT;
 
   let deltaX = 0;
   let deltaY = 0;
@@ -312,8 +432,11 @@ export function isCellVisible(
 }
 
 /**
- * Calculate the scroll position needed to make a cell visible.
- * Returns null if the cell is already visible.
+ * Calculate the scroll position needed to make a cell fully visible.
+ * Returns null if the cell is already fully visible.
+ *
+ * This function ensures the ENTIRE cell is visible, not just partially.
+ * It accounts for custom column widths, row heights, and scrollbar dimensions.
  *
  * @param row - Target row index
  * @param col - Target column index
@@ -321,7 +444,8 @@ export function isCellVisible(
  * @param config - Grid configuration
  * @param viewportWidth - Viewport width in pixels
  * @param viewportHeight - Viewport height in pixels
- * @returns New scroll position or null if already visible
+ * @param dimensions - Optional dimension overrides for custom widths/heights
+ * @returns New scroll position or null if already fully visible
  */
 export function scrollToMakeVisible(
   row: number,
@@ -329,41 +453,62 @@ export function scrollToMakeVisible(
   viewport: Viewport,
   config: GridConfig,
   viewportWidth: number,
-  viewportHeight: number
+  viewportHeight: number,
+  dimensions?: DimensionOverrides
 ): { scrollX: number; scrollY: number } | null {
-  const { defaultCellWidth, defaultCellHeight, rowHeaderWidth, colHeaderHeight } = config;
+  const { rowHeaderWidth, colHeaderHeight } = config;
 
-  // Cell position in pixels
-  const cellLeft = col * defaultCellWidth;
-  const cellTop = row * defaultCellHeight;
-  const cellRight = cellLeft + defaultCellWidth;
-  const cellBottom = cellTop + defaultCellHeight;
+  // Calculate cell bounds using actual dimensions
+  const cellLeft = getColumnXPosition(col, config, dimensions);
+  const cellTop = getRowYPosition(row, config, dimensions);
+  const cellWidth = getColumnWidthFromDimensions(col, config, dimensions);
+  const cellHeight = getRowHeightFromDimensions(row, config, dimensions);
+  const cellRight = cellLeft + cellWidth;
+  const cellBottom = cellTop + cellHeight;
 
-  // Current visible area
+  // Current visible area (content area, excluding headers AND scrollbars)
   const viewLeft = viewport.scrollX;
   const viewTop = viewport.scrollY;
-  const viewRight = viewLeft + viewportWidth - rowHeaderWidth;
-  const viewBottom = viewTop + viewportHeight - colHeaderHeight;
+  const availableWidth = viewportWidth - rowHeaderWidth - SCROLLBAR_WIDTH;
+  const availableHeight = viewportHeight - colHeaderHeight - SCROLLBAR_HEIGHT;
+  const viewRight = viewLeft + availableWidth;
+  const viewBottom = viewTop + availableHeight;
 
   let newScrollX = viewport.scrollX;
   let newScrollY = viewport.scrollY;
   let needsScroll = false;
 
-  // Check horizontal visibility
+  // Check horizontal visibility - ensure ENTIRE cell is visible
   if (cellLeft < viewLeft) {
+    // Cell is off to the left - align cell's left edge with viewport's left edge
     newScrollX = cellLeft;
     needsScroll = true;
   } else if (cellRight > viewRight) {
-    newScrollX = cellRight - (viewportWidth - rowHeaderWidth);
+    // Cell extends beyond right edge
+    if (cellWidth > availableWidth) {
+      // Cell is wider than viewport - show left edge
+      newScrollX = cellLeft;
+    } else {
+      // Normal case - scroll just enough to show the right edge
+      newScrollX = cellRight - availableWidth;
+    }
     needsScroll = true;
   }
 
-  // Check vertical visibility
+  // Check vertical visibility - ensure ENTIRE cell is visible
   if (cellTop < viewTop) {
+    // Cell is above - align cell's top edge with viewport's top edge
     newScrollY = cellTop;
     needsScroll = true;
   } else if (cellBottom > viewBottom) {
-    newScrollY = cellBottom - (viewportHeight - colHeaderHeight);
+    // Cell extends below
+    if (cellHeight > availableHeight) {
+      // Cell is taller than viewport - show top edge
+      newScrollY = cellTop;
+    } else {
+      // Normal case - scroll just enough to show the bottom edge
+      newScrollY = cellBottom - availableHeight;
+    }
     needsScroll = true;
   }
 
@@ -371,8 +516,8 @@ export function scrollToMakeVisible(
     return null;
   }
 
-  // Clamp the scroll position
-  const clamped = clampScroll(newScrollX, newScrollY, config, viewportWidth, viewportHeight);
+  // Clamp the scroll position to valid bounds
+  const clamped = clampScroll(newScrollX, newScrollY, config, viewportWidth, viewportHeight, dimensions);
   return { scrollX: clamped.scrollX, scrollY: clamped.scrollY };
 }
 
@@ -427,9 +572,9 @@ export function calculateScrollbarMetrics(
   const contentWidth = totalCols * defaultCellWidth;
   const contentHeight = totalRows * defaultCellHeight;
 
-  // Viewport dimensions (minus headers)
-  const viewWidth = viewportWidth - rowHeaderWidth;
-  const viewHeight = viewportHeight - colHeaderHeight;
+  // Viewport dimensions (minus headers and scrollbars)
+  const viewWidth = viewportWidth - rowHeaderWidth - SCROLLBAR_WIDTH;
+  const viewHeight = viewportHeight - colHeaderHeight - SCROLLBAR_HEIGHT;
 
   // Horizontal scrollbar
   const hTrackSize = viewWidth;

@@ -8,7 +8,15 @@ import type { GridState, Selection, ClipboardMode } from "../types";
 import { createInitialGridState, DEFAULT_VIRTUAL_BOUNDS, DEFAULT_VIRTUAL_BOUNDS_CONFIG } from "../types";
 import type { GridAction } from "./gridActions";
 import { GRID_ACTIONS } from "./gridActions";
-import { clampScroll, cellToCenteredScroll, scrollToMakeVisible } from "../lib/scrollUtils";
+import { 
+  clampScroll, 
+  cellToCenteredScroll, 
+  scrollToMakeVisible,
+  getColumnXPosition,
+  getRowYPosition,
+  getColumnWidthFromDimensions,
+  getRowHeightFromDimensions
+} from "../lib/scrollUtils";
 
 /**
  * Clamp a value between min and max bounds.
@@ -100,6 +108,21 @@ function calculateScrollState(
   };
 
   return clampScroll(scrollX, scrollY, virtualConfig, viewportWidth, viewportHeight);
+}
+
+/**
+ * Get viewport dimensions from state with fallback calculation.
+ */
+function getViewportDimensions(state: GridState): { width: number; height: number } {
+  const { config, viewportDimensions, viewport } = state;
+  return {
+    width: viewportDimensions.width > 0
+      ? viewportDimensions.width
+      : viewport.colCount * config.defaultCellWidth + config.rowHeaderWidth,
+    height: viewportDimensions.height > 0
+      ? viewportDimensions.height
+      : viewport.rowCount * config.defaultCellHeight + config.colHeaderHeight,
+  };
 }
 
 /**
@@ -228,10 +251,55 @@ export function gridReducer(state: GridState, action: GridAction): GridState {
         state.config.totalCols
       );
 
+      // Calculate scroll to make the new active cell visible
+      const { config, dimensions } = state;
+      const dims = getViewportDimensions(state);
+
+      const targetRow = newSelection.endRow;
+      const targetCol = newSelection.endCol;
+
+      // Use scrollToMakeVisible with actual dimensions for accurate calculation
+      const makeVisible = scrollToMakeVisible(
+        targetRow,
+        targetCol,
+        state.viewport,
+        config,
+        dims.width,
+        dims.height,
+        dimensions // Pass dimension overrides for custom widths/heights
+      );
+
+      if (!makeVisible) {
+        // Cell already visible, just update selection and bounds
+        return {
+          ...state,
+          selection: newSelection,
+          virtualBounds: newBounds,
+        };
+      }
+
+      // Need to scroll - calculate new scroll state with updated bounds
+      const stateWithNewBounds = {
+        ...state,
+        virtualBounds: newBounds,
+      };
+      const scrollState = calculateScrollState(
+        makeVisible.scrollX,
+        makeVisible.scrollY,
+        stateWithNewBounds
+      );
+
       return {
         ...state,
         selection: newSelection,
         virtualBounds: newBounds,
+        viewport: {
+          ...state.viewport,
+          scrollX: scrollState.scrollX,
+          scrollY: scrollState.scrollY,
+          startRow: scrollState.startRow,
+          startCol: scrollState.startCol,
+        },
       };
     }
 
@@ -360,7 +428,7 @@ export function gridReducer(state: GridState, action: GridAction): GridState {
 
     case GRID_ACTIONS.SCROLL_TO_CELL: {
       const { row, col, center } = action.payload;
-      const { config, viewportDimensions } = state;
+      const { config, viewportDimensions, dimensions } = state;
 
       // Expand virtual bounds to include target cell
       const newBounds = calculateExpandedBounds(
@@ -384,8 +452,16 @@ export function gridReducer(state: GridState, action: GridAction): GridState {
         // Center the cell in viewport
         targetScroll = cellToCenteredScroll(row, col, config, viewportWidth, viewportHeight);
       } else {
-        // Scroll just enough to make cell visible
-        const makeVisible = scrollToMakeVisible(row, col, state.viewport, config, viewportWidth, viewportHeight);
+        // Scroll just enough to make cell visible (with dimension support)
+        const makeVisible = scrollToMakeVisible(
+          row, 
+          col, 
+          state.viewport, 
+          config, 
+          viewportWidth, 
+          viewportHeight,
+          dimensions // Pass dimension overrides
+        );
         if (!makeVisible) {
           // Cell already visible, just update bounds if needed
           if (newBounds.maxRow !== state.virtualBounds.maxRow || newBounds.maxCol !== state.virtualBounds.maxCol) {
