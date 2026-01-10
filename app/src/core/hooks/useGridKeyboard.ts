@@ -6,7 +6,8 @@
 
 import { useCallback, useEffect } from "react";
 import { useGridContext } from "../state/GridContext";
-import { moveSelection } from "../state/gridActions";
+import { moveSelection, setSelection } from "../state/gridActions";
+import { findCtrlArrowTarget, type ArrowDirection } from "../lib/tauri-api";
 import { fnLog, stateLog, eventLog } from '../../utils/component-logger';
 
 /**
@@ -57,7 +58,62 @@ export function useGridKeyboard(options: UseGridKeyboardOptions): void {
     hasClipboardContent = false,
   } = options;
   const { state, dispatch } = useGridContext();
-  const { config, viewport } = state;
+  const { config, viewport, selection } = state;
+
+  /**
+   * Handle Ctrl+Arrow navigation by querying the backend for the target cell.
+   */
+  const handleCtrlArrow = useCallback(
+    async (direction: ArrowDirection, extend: boolean) => {
+      if (!selection) {
+        return;
+      }
+
+      const currentRow = selection.endRow;
+      const currentCol = selection.endCol;
+      const maxRow = config.totalRows - 1;
+      const maxCol = config.totalCols - 1;
+
+      try {
+        const [targetRow, targetCol] = await findCtrlArrowTarget(
+          currentRow,
+          currentCol,
+          direction,
+          maxRow,
+          maxCol
+        );
+
+        fnLog.exit('handleCtrlArrow', `target=(${targetRow}, ${targetCol})`);
+
+        if (extend) {
+          // Extend selection to target
+          dispatch(setSelection({
+            startRow: selection.startRow,
+            startCol: selection.startCol,
+            endRow: targetRow,
+            endCol: targetCol,
+            type: selection.type,
+          }));
+        } else {
+          // Move selection to target
+          dispatch(setSelection({
+            startRow: targetRow,
+            startCol: targetCol,
+            endRow: targetRow,
+            endCol: targetCol,
+            type: "cells",
+          }));
+        }
+
+        if (onSelectionChange) {
+          setTimeout(onSelectionChange, 0);
+        }
+      } catch (error) {
+        console.error("[useGridKeyboard] Ctrl+Arrow navigation failed:", error);
+      }
+    },
+    [selection, config.totalRows, config.totalCols, dispatch, onSelectionChange]
+  );
 
   /**
    * Handle keydown events for navigation and shortcuts.
@@ -162,44 +218,62 @@ export function useGridKeyboard(options: UseGridKeyboardOptions): void {
         return;
       }
 
+      // Handle Ctrl+Arrow for Excel-like navigation (async)
+      if (modKey && !altKey) {
+        let direction: ArrowDirection | null = null;
+        
+        switch (key) {
+          case "ArrowUp":
+            direction = "up";
+            break;
+          case "ArrowDown":
+            direction = "down";
+            break;
+          case "ArrowLeft":
+            direction = "left";
+            break;
+          case "ArrowRight":
+            direction = "right";
+            break;
+        }
+        
+        if (direction) {
+          event.preventDefault();
+          event.stopPropagation();
+          
+          const mods: string[] = ['Ctrl'];
+          if (shiftKey) mods.push('Shift');
+          eventLog.keyboard('Grid', 'handleKeyDown', `Ctrl+${key}`, mods);
+          
+          // Call async handler (non-blocking)
+          handleCtrlArrow(direction, shiftKey);
+          fnLog.exit('handleKeyDown', 'ctrl+arrow (async)');
+          return;
+        }
+      }
+
       let deltaRow = 0;
       let deltaCol = 0;
       let handled = false;
 
       switch (key) {
         case "ArrowUp":
-          if (modKey) {
-            deltaRow = -config.totalRows;
-          } else {
-            deltaRow = -1;
-          }
+          deltaRow = -1;
           handled = true;
           break;
 
         case "ArrowDown":
-          if (modKey) {
-            deltaRow = config.totalRows;
-          } else {
-            deltaRow = 1;
-          }
+          deltaRow = 1;
           handled = true;
           break;
 
         case "ArrowLeft":
-          if (modKey) {
-            deltaCol = -config.totalCols;
-          } else {
-            deltaCol = -1;
-          }
+          deltaCol = -1;
           handled = true;
           break;
 
         case "ArrowRight":
-          if (modKey) {
-            deltaCol = config.totalCols;
-          } else {
-            deltaCol = 1;
-          }
+          deltaCol = 1;
           handled = true;
           break;
 
@@ -271,7 +345,7 @@ export function useGridKeyboard(options: UseGridKeyboardOptions): void {
         fnLog.exit('handleKeyDown', 'handled');
       }
     },
-    [enabled, isEditing, config.totalRows, config.totalCols, viewport.rowCount, dispatch, onSelectionChange, onCut, onCopy, onPaste, onUndo, onRedo, onClearClipboard, hasClipboardContent]
+    [enabled, isEditing, config.totalRows, config.totalCols, viewport.rowCount, dispatch, onSelectionChange, onCut, onCopy, onPaste, onUndo, onRedo, onClearClipboard, hasClipboardContent, handleCtrlArrow]
   );
 
   /**

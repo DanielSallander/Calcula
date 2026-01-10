@@ -270,10 +270,80 @@ export function gridReducer(state: GridState, action: GridAction): GridState {
         state.config.totalCols
       );
 
+      // --- SCROLL LOGIC START ---
+      // Ensure the active cell (endRow, endCol) is visible
+      const activeRow = clampedSelection.endRow;
+      const activeCol = clampedSelection.endCol;
+      const dims = getViewportDimensions(state);
+      
+      // Check if the cell is currently visible
+      const cellCurrentlyVisible = isCellInViewport(
+        activeRow,
+        activeCol,
+        state.viewport,
+        state.config,
+        dims.width,
+        dims.height,
+        state.dimensions
+      );
+
+      let newViewport = state.viewport;
+
+      // If not visible, scroll to it
+      if (!cellCurrentlyVisible) {
+        logViewport('SET_SELECTION ensuring visibility', {
+          activeCell: { activeRow, activeCol },
+          currentlyVisible: cellCurrentlyVisible
+        });
+
+        // Try standard make visible
+        let scrollResult = scrollToMakeVisible(
+          activeRow,
+          activeCol,
+          state.viewport,
+          state.config,
+          dims.width,
+          dims.height,
+          state.dimensions
+        );
+
+        // If standard check failed (e.g. large jump or logic quirk), force calculation
+        if (!scrollResult) {
+          scrollResult = calculateScrollForCell(
+            activeRow,
+            activeCol,
+            state.config,
+            dims.width,
+            dims.height,
+            state.dimensions
+          );
+        }
+
+        if (scrollResult) {
+          // Calculate new scroll state with the updated bounds
+          const scrollState = calculateScrollState(
+            scrollResult.scrollX,
+            scrollResult.scrollY,
+            { ...state, virtualBounds: newBounds },
+            state.dimensions
+          );
+
+          newViewport = {
+            ...state.viewport,
+            scrollX: scrollState.scrollX,
+            scrollY: scrollState.scrollY,
+            startRow: scrollState.startRow,
+            startCol: scrollState.startCol,
+          };
+        }
+      }
+      // --- SCROLL LOGIC END ---
+
       return {
         ...state,
         selection: clampedSelection,
         virtualBounds: newBounds,
+        viewport: newViewport,
       };
     }
 

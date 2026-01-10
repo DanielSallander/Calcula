@@ -78,6 +78,37 @@ export async function getCellCount(): Promise<number> {
 }
 
 // ============================================================================
+// Navigation Operations
+// ============================================================================
+
+export type ArrowDirection = "up" | "down" | "left" | "right";
+
+/**
+ * Find the target cell for Ctrl+Arrow navigation (Excel-like behavior).
+ * @param row - Current row position
+ * @param col - Current column position
+ * @param direction - Direction to navigate ("up", "down", "left", "right")
+ * @param maxRow - Maximum row index (totalRows - 1)
+ * @param maxCol - Maximum column index (totalCols - 1)
+ * @returns Target [row, col] position
+ */
+export async function findCtrlArrowTarget(
+  row: number,
+  col: number,
+  direction: ArrowDirection,
+  maxRow: number,
+  maxCol: number
+): Promise<[number, number]> {
+  return invoke<[number, number]>("find_ctrl_arrow_target", {
+    row,
+    col,
+    direction,
+    maxRow,
+    maxCol,
+  });
+}
+
+// ============================================================================
 // Dimension Operations
 // ============================================================================
 

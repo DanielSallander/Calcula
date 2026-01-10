@@ -472,6 +472,8 @@ pub fn run() {
             commands::clear_cell,
             commands::get_grid_bounds,
             commands::get_cell_count,
+            // Navigation commands
+            commands::find_ctrl_arrow_target,
             // Dimension commands
             commands::set_column_width,
             commands::get_column_width,

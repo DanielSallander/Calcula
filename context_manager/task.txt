@@ -2,3 +2,173 @@ When using Ctrl + any arrow key the view port is not following.
 For example, I stand in cell "A1" and I press Ctrl + arrow key down
 it seems like the cells is not moved to the bottom, at least the viewport is not moving to this position.
 Maybe we need more logging that tracks where the current position is, cell or range, that is currently selected.
+From the console:
+[VIEWPORT] MOVE_SELECTION start: {
+  "deltaRow": -1,
+  "deltaCol": 0,
+  "extend": false,
+  "currentSelection": {
+    "startRow": 1048575,
+    "startCol": 0,
+    "endRow": 1048575,
+    "endCol": 0,
+    "type": "cells"
+  },
+  "currentViewport": {
+    "scrollX": 0,
+    "scrollY": 0,
+    "startRow": 0,
+    "startCol": 0
+  }
+}
+gridReducer.ts:26 [VIEWPORT] MOVE_SELECTION new selection: {
+  "newSelection": {
+    "startRow": 1048574,
+    "startCol": 0,
+    "endRow": 1048574,
+    "endCol": 0,
+    "type": "cells"
+  },
+  "activeCell": {
+    "activeRow": 1048574,
+    "activeCol": 0
+  }
+}
+gridReducer.ts:26 [VIEWPORT] MOVE_SELECTION expanded bounds: {
+  "oldBounds": {
+    "maxRow": 1048575,
+    "maxCol": 51
+  },
+  "newBounds": {
+    "maxRow": 1048575,
+    "maxCol": 51
+  }
+}
+gridReducer.ts:26 [VIEWPORT] MOVE_SELECTION viewport dimensions: {
+  "width": 1280,
+  "height": 559
+}
+gridReducer.ts:26 [VIEWPORT] MOVE_SELECTION visibility check: {
+  "isLargeJump": false,
+  "cellCurrentlyVisible": false
+}
+gridReducer.ts:26 [VIEWPORT] MOVE_SELECTION scrollToMakeVisible result: {
+  "scrollResult": {
+    "scrollX": 0,
+    "scrollY": 25165282
+  }
+}
+gridReducer.ts:26 [VIEWPORT] MOVE_SELECTION final scroll state: {
+  "requestedScroll": {
+    "scrollX": 0,
+    "scrollY": 25165282
+  },
+  "clampedScroll": {
+    "scrollX": 0,
+    "scrollY": 25165282,
+    "startRow": 1048553,
+    "startCol": 0
+  },
+  "finalSelection": {
+    "startRow": 1048574,
+    "startCol": 0,
+    "endRow": 1048574,
+    "endCol": 0,
+    "type": "cells"
+  }
+}
+gridReducer.ts:26 [VIEWPORT] MOVE_SELECTION start: {
+  "deltaRow": -1,
+  "deltaCol": 0,
+  "extend": false,
+  "currentSelection": {
+    "startRow": 1048575,
+    "startCol": 0,
+    "endRow": 1048575,
+    "endCol": 0,
+    "type": "cells"
+  },
+  "currentViewport": {
+    "scrollX": 0,
+    "scrollY": 0,
+    "startRow": 0,
+    "startCol": 0
+  }
+}
+gridReducer.ts:26 [VIEWPORT] MOVE_SELECTION new selection: {
+  "newSelection": {
+    "startRow": 1048574,
+    "startCol": 0,
+    "endRow": 1048574,
+    "endCol": 0,
+    "type": "cells"
+  },
+  "activeCell": {
+    "activeRow": 1048574,
+    "activeCol": 0
+  }
+}
+gridReducer.ts:26 [VIEWPORT] MOVE_SELECTION expanded bounds: {
+  "oldBounds": {
+    "maxRow": 1048575,
+    "maxCol": 51
+  },
+  "newBounds": {
+    "maxRow": 1048575,
+    "maxCol": 51
+  }
+}
+gridReducer.ts:26 [VIEWPORT] MOVE_SELECTION viewport dimensions: {
+  "width": 1280,
+  "height": 559
+}
+gridReducer.ts:26 [VIEWPORT] MOVE_SELECTION visibility check: {
+  "isLargeJump": false,
+  "cellCurrentlyVisible": false
+}
+gridReducer.ts:26 [VIEWPORT] MOVE_SELECTION scrollToMakeVisible result: {
+  "scrollResult": {
+    "scrollX": 0,
+    "scrollY": 25165282
+  }
+}
+gridReducer.ts:26 [VIEWPORT] MOVE_SELECTION final scroll state: {
+  "requestedScroll": {
+    "scrollX": 0,
+    "scrollY": 25165282
+  },
+  "clampedScroll": {
+    "scrollX": 0,
+    "scrollY": 25165282,
+    "startRow": 1048553,
+    "startCol": 0
+  },
+  "finalSelection": {
+    "startRow": 1048574,
+    "startCol": 0,
+    "endRow": 1048574,
+    "endCol": 0,
+    "type": "cells"
+  }
+}
+
+From the log:
+3|D|CMD|ENTER useGridKeyboard.effect adding listener
+4|D|CMD|ENTER handleKeyDown key=Control
+5|D|CMD|EXIT handleKeyDown not a navigation key
+6|D|CMD|ENTER handleKeyDown key=ArrowDown
+7|I|EVENT|handleKeyDown Grid key=Ctrl+Ctrl+ArrowDown
+8|D|CMD|EXIT handleKeyDown ctrl+arrow (async)
+9|D|CMD|EXIT handleCtrlArrow target=(1048575, 0)
+10|D|CMD|EXIT useGridKeyboard.effect removing listener
+11|D|CMD|ENTER useGridKeyboard.effect adding listener
+12|D|CMD|EXIT useGridKeyboard.effect removing listener
+13|D|CMD|ENTER useGridKeyboard.effect adding listener
+14|D|CMD|EXIT useGridKeyboard.effect removing listener
+15|D|CMD|ENTER useGridKeyboard.effect adding listener
+16|D|CMD|EXIT useGridKeyboard.effect removing listener
+17|D|CMD|ENTER useGridKeyboard.effect adding listener
+18|I|ACTION|Selection.selectCell row=0 col=0 type=cells
+
+It should be mentioned that this used to work but broke in the recent update involving changes in
+useGridKeyboard.ts, tauri-api.ts, commands.rs, lib.rs
