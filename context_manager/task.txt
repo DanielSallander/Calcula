@@ -1,5 +1,4 @@
-When using arrow keys to navigate out of view the viewport should move along with the navigation so that
-it always shows entire cells, not only a half cell - atleast as long as the cell is not bigger than the viewport.
-Check the attached image - the L-column is extending beyond the viewport to the right.
-In addition, if I use the hotkey Ctrl + any arrow key the view port is not following. 
-I think the main logic resides in app/src/state/gridReducer.ts
+When using Ctrl + any arrow key the view port is not following. 
+For example, I stand in cell "A1" and I press Ctrl + arrow key down
+it seems like the cells is not moved to the bottom, at least the viewport is not moving to this position.
+Maybe we need more logging that tracks where the current position is, cell or range, that is currently selected.

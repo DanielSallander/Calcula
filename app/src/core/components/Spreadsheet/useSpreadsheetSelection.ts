@@ -48,7 +48,7 @@ export function useSpreadsheetSelection({
   const [selectedCellContent, setSelectedCellContent] = useState<string>("");
   const { viewport, config, selection, dimensions } = state;
 
-  const { scrollToSelection } = useViewport();
+  const { scrollToSelection, registerScrollContainer } = useViewport();
 
   const { 
     selectCell, 
@@ -97,6 +97,13 @@ export function useSpreadsheetSelection({
   } = useFillHandle();
 
   const pendingRefreshRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // Register the scroll container so useViewport can sync DOM scroll position
+  useEffect(() => {
+    if (scrollRef.current) {
+      registerScrollContainer(scrollRef.current);
+    }
+  }, [scrollRef, registerScrollContainer]);
 
   useEffect(() => {
     if (!selection || isEditing) {
@@ -283,9 +290,13 @@ export function useSpreadsheetSelection({
   }, [fillState.isDragging, cursorStyle]);
 
   // Keyboard handling with clipboard shortcuts and ESC to clear clipboard
+  // NOTE: onSelectionChange is NOT passed here because the reducer already
+  // handles viewport scrolling for MOVE_SELECTION actions. Passing it would
+  // cause a stale closure to overwrite the correct scroll position.
   useGridKeyboard({
     containerRef,
-    onSelectionChange: scrollToSelection,
+    // Do NOT pass onSelectionChange - the reducer handles scrolling for keyboard navigation
+    // onSelectionChange: scrollToSelection,  // REMOVED - causes stale closure bug
     enabled: isFocused && !isEditing,
     onCut: cut,
     onCopy: copy,

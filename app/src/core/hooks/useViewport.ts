@@ -52,6 +52,8 @@ export interface UseViewportReturn {
   setScrollPosition: (scrollX: number, scrollY: number) => void;
   /** Get current virtual bounds */
   getVirtualBounds: () => { maxRow: number; maxCol: number };
+  /** Register a scroll container element */
+  registerScrollContainer: (element: HTMLDivElement | null) => void;
 }
 
 /**
@@ -65,6 +67,18 @@ export function useViewport(): UseViewportReturn {
   const { viewport, config, selection, viewportDimensions, virtualBounds } = state;
   const containerRef = useRef<HTMLDivElement | null>(null);
   const scrollContainerRef = useRef<HTMLDivElement | null>(null);
+  
+  // Track if we're programmatically scrolling to avoid feedback loops
+  const isProgrammaticScrollRef = useRef(false);
+  // Track the last scroll position we set to detect external changes
+  const lastProgrammaticScrollRef = useRef({ x: 0, y: 0 });
+
+  /**
+   * Register a scroll container element for programmatic scrolling.
+   */
+  const registerScrollContainer = useCallback((element: HTMLDivElement | null) => {
+    scrollContainerRef.current = element;
+  }, []);
 
   /**
    * Get current container dimensions.
@@ -132,6 +146,10 @@ export function useViewport(): UseViewportReturn {
   const throttledScrollUpdate = useMemo(
     () =>
       createThrottledScrollHandler((scrollX: number, scrollY: number) => {
+        // Skip if this is our own programmatic scroll
+        if (isProgrammaticScrollRef.current) {
+          return;
+        }
         // First check if we need to expand bounds proactively
         checkAndExpandBounds(scrollX, scrollY);
         // Then update the scroll position
@@ -152,6 +170,47 @@ export function useViewport(): UseViewportReturn {
     },
     [throttledScrollUpdate]
   );
+
+  /**
+   * Sync DOM scroll position with state.
+   * This effect ensures the DOM scroll container matches the state.
+   */
+  useEffect(() => {
+    const container = scrollContainerRef.current;
+    if (!container) {
+      return;
+    }
+
+    const stateScrollX = viewport.scrollX;
+    const stateScrollY = viewport.scrollY;
+    const domScrollX = container.scrollLeft;
+    const domScrollY = container.scrollTop;
+
+    // Check if DOM scroll position differs significantly from state
+    // Use a threshold to avoid fighting with sub-pixel differences
+    const threshold = 1;
+    const needsSyncX = Math.abs(domScrollX - stateScrollX) > threshold;
+    const needsSyncY = Math.abs(domScrollY - stateScrollY) > threshold;
+
+    if (needsSyncX || needsSyncY) {
+      console.log('[VIEWPORT] Syncing DOM scroll to state:', {
+        state: { scrollX: stateScrollX, scrollY: stateScrollY },
+        dom: { scrollX: domScrollX, scrollY: domScrollY }
+      });
+
+      // Set flag to prevent feedback loop
+      isProgrammaticScrollRef.current = true;
+      lastProgrammaticScrollRef.current = { x: stateScrollX, y: stateScrollY };
+
+      container.scrollLeft = stateScrollX;
+      container.scrollTop = stateScrollY;
+
+      // Clear the flag after the scroll event would have fired
+      requestAnimationFrame(() => {
+        isProgrammaticScrollRef.current = false;
+      });
+    }
+  }, [viewport.scrollX, viewport.scrollY]);
 
   /**
    * Convert pixel coordinates (relative to content) to cell coordinates.
@@ -225,11 +284,10 @@ export function useViewport(): UseViewportReturn {
    */
   const setScrollPosition = useCallback(
     (scrollX: number, scrollY: number) => {
-      if (scrollContainerRef.current) {
-        scrollContainerRef.current.scrollLeft = scrollX;
-        scrollContainerRef.current.scrollTop = scrollY;
-      }
+      // Update state first
       dispatch(updateScroll(scrollX, scrollY));
+      
+      // DOM will be synced by the effect
     },
     [dispatch]
   );
@@ -239,19 +297,11 @@ export function useViewport(): UseViewportReturn {
    */
   const scrollToCell = useCallback(
     (row: number, col: number, center: boolean = false) => {
+      console.log('[VIEWPORT] scrollToCell called:', { row, col, center });
       dispatch(scrollToCellAction(row, col, center));
-
-      // Also update the DOM scroll position after a microtask
-      // to ensure state is updated first
-      Promise.resolve().then(() => {
-        if (scrollContainerRef.current) {
-          const newState = state;
-          scrollContainerRef.current.scrollLeft = newState.viewport.scrollX;
-          scrollContainerRef.current.scrollTop = newState.viewport.scrollY;
-        }
-      });
+      // DOM scroll position will be synced by the useEffect
     },
-    [dispatch, state]
+    [dispatch]
   );
 
   /**
@@ -261,6 +311,11 @@ export function useViewport(): UseViewportReturn {
     if (!selection) {
       return;
     }
+
+    console.log('[VIEWPORT] scrollToSelection called:', { 
+      endRow: selection.endRow, 
+      endCol: selection.endCol 
+    });
 
     // Scroll to the active cell (end of selection)
     scrollToCell(selection.endRow, selection.endCol, false);
@@ -274,14 +329,7 @@ export function useViewport(): UseViewportReturn {
       const dims = getContainerDimensions();
       const delta = calculateScrollDelta(direction, unit, config, viewport, dims.width, dims.height);
       dispatch(scrollBy(delta.deltaX, delta.deltaY));
-
-      // Update DOM scroll position
-      Promise.resolve().then(() => {
-        if (scrollContainerRef.current) {
-          scrollContainerRef.current.scrollLeft += delta.deltaX;
-          scrollContainerRef.current.scrollTop += delta.deltaY;
-        }
-      });
+      // DOM scroll position will be synced by the useEffect
     },
     [config, viewport, dispatch, getContainerDimensions]
   );
@@ -357,6 +405,7 @@ export function useViewport(): UseViewportReturn {
     getMaxScroll,
     setScrollPosition,
     getVirtualBounds,
+    registerScrollContainer,
   };
 }
 

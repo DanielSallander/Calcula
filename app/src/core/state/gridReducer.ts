@@ -4,7 +4,7 @@
 // It handles all state updates for selection, viewport scrolling, cell editing, and configuration.
 // The reducer ensures immutable state updates and enforces grid boundaries.
 
-import type { GridState, Selection, ClipboardMode } from "../types";
+import type { GridState, Selection, ClipboardMode, GridConfig } from "../types";
 import { createInitialGridState, DEFAULT_VIRTUAL_BOUNDS, DEFAULT_VIRTUAL_BOUNDS_CONFIG } from "../types";
 import type { GridAction } from "./gridActions";
 import { GRID_ACTIONS } from "./gridActions";
@@ -18,10 +18,19 @@ import {
   getRowHeightFromDimensions
 } from "../lib/scrollUtils";
 
+// Debug logging for viewport tracking
+const DEBUG_VIEWPORT = true;
+
+function logViewport(label: string, data: Record<string, unknown>): void {
+  if (DEBUG_VIEWPORT) {
+    console.log(`[VIEWPORT] ${label}:`, JSON.stringify(data, null, 2));
+  }
+}
+
 /**
  * Clamp a value between min and max bounds.
  */
-function clamp(value: number, min: number, max: number): number {
+export function clamp(value: number, min: number, max: number): number {
   return Math.max(min, Math.min(max, value));
 }
 
@@ -88,7 +97,8 @@ function calculateExpandedBounds(
 function calculateScrollState(
   scrollX: number,
   scrollY: number,
-  state: GridState
+  state: GridState,
+  dimensions?: { columnWidths: Map<number, number>; rowHeights: Map<number, number> }
 ): { scrollX: number; scrollY: number; startRow: number; startCol: number } {
   const { config, viewportDimensions, virtualBounds } = state;
 
@@ -107,7 +117,7 @@ function calculateScrollState(
     totalCols: virtualBounds.maxCol + 1,
   };
 
-  return clampScroll(scrollX, scrollY, virtualConfig, viewportWidth, viewportHeight);
+  return clampScroll(scrollX, scrollY, virtualConfig, viewportWidth, viewportHeight, dimensions);
 }
 
 /**
@@ -115,14 +125,122 @@ function calculateScrollState(
  */
 function getViewportDimensions(state: GridState): { width: number; height: number } {
   const { config, viewportDimensions, viewport } = state;
-  return {
-    width: viewportDimensions.width > 0
-      ? viewportDimensions.width
-      : viewport.colCount * config.defaultCellWidth + config.rowHeaderWidth,
-    height: viewportDimensions.height > 0
-      ? viewportDimensions.height
-      : viewport.rowCount * config.defaultCellHeight + config.colHeaderHeight,
-  };
+  
+  // Ensure we have reasonable defaults
+  const defaultWidth = 800;
+  const defaultHeight = 600;
+  
+  let width = viewportDimensions.width;
+  let height = viewportDimensions.height;
+  
+  if (width <= 0) {
+    width = viewport.colCount > 0 
+      ? viewport.colCount * config.defaultCellWidth + config.rowHeaderWidth
+      : defaultWidth;
+  }
+  
+  if (height <= 0) {
+    height = viewport.rowCount > 0
+      ? viewport.rowCount * config.defaultCellHeight + config.colHeaderHeight
+      : defaultHeight;
+  }
+  
+  return { width, height };
+}
+
+/**
+ * Calculate scroll position to make a cell visible, using cell coordinates directly.
+ * This ensures the viewport scrolls to show the target cell.
+ */
+function calculateScrollForCell(
+  row: number,
+  col: number,
+  config: GridConfig,
+  viewportWidth: number,
+  viewportHeight: number,
+  dimensions?: { columnWidths: Map<number, number>; rowHeights: Map<number, number> }
+): { scrollX: number; scrollY: number } {
+  // Calculate cell position
+  const cellX = getColumnXPosition(col, config, dimensions);
+  const cellY = getRowYPosition(row, config, dimensions);
+  
+  // Calculate available viewport area (account for headers and scrollbars)
+  const SCROLLBAR_SIZE = 17;
+  const availableWidth = Math.max(1, viewportWidth - config.rowHeaderWidth - SCROLLBAR_SIZE);
+  const availableHeight = Math.max(1, viewportHeight - config.colHeaderHeight - SCROLLBAR_SIZE);
+  
+  // Get cell dimensions
+  const cellWidth = getColumnWidthFromDimensions(col, config, dimensions);
+  const cellHeight = getRowHeightFromDimensions(row, config, dimensions);
+  
+  // Calculate scroll position to show the cell
+  // For cells near the end, align the cell's right/bottom edge with viewport edge
+  // For cells near the start, align the cell's left/top edge with viewport edge
+  let scrollX: number;
+  let scrollY: number;
+  
+  if (cellWidth >= availableWidth) {
+    // Cell is wider than viewport - show left edge
+    scrollX = cellX;
+  } else {
+    // Position so cell's right edge is at viewport's right edge
+    // This ensures we see the cell when jumping to far columns
+    scrollX = Math.max(0, cellX + cellWidth - availableWidth);
+  }
+  
+  if (cellHeight >= availableHeight) {
+    // Cell is taller than viewport - show top edge
+    scrollY = cellY;
+  } else {
+    // Position so cell's bottom edge is at viewport's bottom edge
+    // This ensures we see the cell when jumping to far rows
+    scrollY = Math.max(0, cellY + cellHeight - availableHeight);
+  }
+  
+  logViewport('calculateScrollForCell', {
+    targetCell: { row, col },
+    cellPosition: { cellX, cellY },
+    cellSize: { cellWidth, cellHeight },
+    viewportArea: { availableWidth, availableHeight },
+    calculatedScroll: { scrollX, scrollY }
+  });
+  
+  return { scrollX, scrollY };
+}
+
+/**
+ * Check if a cell is visible within the current viewport.
+ */
+function isCellInViewport(
+  row: number,
+  col: number,
+  viewport: { scrollX: number; scrollY: number },
+  config: GridConfig,
+  viewportWidth: number,
+  viewportHeight: number,
+  dimensions?: { columnWidths: Map<number, number>; rowHeights: Map<number, number> }
+): boolean {
+  const SCROLLBAR_SIZE = 17;
+  
+  const cellX = getColumnXPosition(col, config, dimensions);
+  const cellY = getRowYPosition(row, config, dimensions);
+  const cellWidth = getColumnWidthFromDimensions(col, config, dimensions);
+  const cellHeight = getRowHeightFromDimensions(row, config, dimensions);
+  
+  const viewLeft = viewport.scrollX;
+  const viewTop = viewport.scrollY;
+  const viewRight = viewLeft + viewportWidth - config.rowHeaderWidth - SCROLLBAR_SIZE;
+  const viewBottom = viewTop + viewportHeight - config.colHeaderHeight - SCROLLBAR_SIZE;
+  
+  // Check if cell is fully visible
+  const isVisible = (
+    cellX >= viewLeft &&
+    cellX + cellWidth <= viewRight &&
+    cellY >= viewTop &&
+    cellY + cellHeight <= viewBottom
+  );
+  
+  return isVisible;
 }
 
 /**
@@ -200,8 +318,22 @@ export function gridReducer(state: GridState, action: GridAction): GridState {
 
     case GRID_ACTIONS.MOVE_SELECTION: {
       const { deltaRow, deltaCol, extend } = action.payload;
-      const maxRow = state.config.totalRows - 1;
-      const maxCol = state.config.totalCols - 1;
+      const { config, dimensions } = state;
+      const maxRow = config.totalRows - 1;
+      const maxCol = config.totalCols - 1;
+
+      logViewport('MOVE_SELECTION start', {
+        deltaRow,
+        deltaCol,
+        extend,
+        currentSelection: state.selection,
+        currentViewport: {
+          scrollX: state.viewport.scrollX,
+          scrollY: state.viewport.scrollY,
+          startRow: state.viewport.startRow,
+          startCol: state.viewport.startCol
+        }
+      });
 
       if (!state.selection) {
         // If no selection, start at origin
@@ -242,35 +374,91 @@ export function gridReducer(state: GridState, action: GridAction): GridState {
         };
       }
 
-      // Expand virtual bounds if moving near edge
+      // The active cell is always the end of the selection
+      const activeRow = newSelection.endRow;
+      const activeCol = newSelection.endCol;
+
+      logViewport('MOVE_SELECTION new selection', {
+        newSelection,
+        activeCell: { activeRow, activeCol }
+      });
+
+      // Expand virtual bounds to include target cell
       const newBounds = calculateExpandedBounds(
         state.virtualBounds,
         Math.max(newSelection.startRow, newSelection.endRow),
         Math.max(newSelection.startCol, newSelection.endCol),
-        state.config.totalRows,
-        state.config.totalCols
+        config.totalRows,
+        config.totalCols
       );
 
-      // Calculate scroll to make the new active cell visible
-      const { config, dimensions } = state;
+      logViewport('MOVE_SELECTION expanded bounds', {
+        oldBounds: state.virtualBounds,
+        newBounds
+      });
+
+      // Get viewport dimensions for scroll calculations
       const dims = getViewportDimensions(state);
 
-      const targetRow = newSelection.endRow;
-      const targetCol = newSelection.endCol;
+      logViewport('MOVE_SELECTION viewport dimensions', dims);
 
-      // Use scrollToMakeVisible with actual dimensions for accurate calculation
-      const makeVisible = scrollToMakeVisible(
-        targetRow,
-        targetCol,
+      // Check if this is a large jump (Ctrl+Arrow or similar)
+      const isLargeJump = Math.abs(deltaRow) > 1 || Math.abs(deltaCol) > 1;
+      
+      // Check if the cell is currently visible
+      const cellCurrentlyVisible = isCellInViewport(
+        activeRow,
+        activeCol,
         state.viewport,
         config,
         dims.width,
         dims.height,
-        dimensions // Pass dimension overrides for custom widths/heights
+        dimensions
       );
 
-      if (!makeVisible) {
-        // Cell already visible, just update selection and bounds
+      logViewport('MOVE_SELECTION visibility check', {
+        isLargeJump,
+        cellCurrentlyVisible
+      });
+
+      // Try to calculate scroll to make the new active cell visible
+      let scrollResult = scrollToMakeVisible(
+        activeRow,
+        activeCol,
+        state.viewport,
+        config,
+        dims.width,
+        dims.height,
+        dimensions
+      );
+
+      logViewport('MOVE_SELECTION scrollToMakeVisible result', {
+        scrollResult
+      });
+
+      // For large jumps or if scrollToMakeVisible returned null but cell isn't visible,
+      // force calculate the scroll position
+      if (!scrollResult && (isLargeJump || !cellCurrentlyVisible)) {
+        logViewport('MOVE_SELECTION forcing scroll calculation', {
+          reason: isLargeJump ? 'large jump' : 'cell not visible'
+        });
+        
+        scrollResult = calculateScrollForCell(
+          activeRow,
+          activeCol,
+          config,
+          dims.width,
+          dims.height,
+          dimensions
+        );
+      }
+
+      if (!scrollResult) {
+        // Cell is already visible, just update selection and bounds
+        logViewport('MOVE_SELECTION no scroll needed', {
+          finalSelection: newSelection
+        });
+        
         return {
           ...state,
           selection: newSelection,
@@ -283,11 +471,19 @@ export function gridReducer(state: GridState, action: GridAction): GridState {
         ...state,
         virtualBounds: newBounds,
       };
+      
       const scrollState = calculateScrollState(
-        makeVisible.scrollX,
-        makeVisible.scrollY,
-        stateWithNewBounds
+        scrollResult.scrollX,
+        scrollResult.scrollY,
+        stateWithNewBounds,
+        dimensions
       );
+
+      logViewport('MOVE_SELECTION final scroll state', {
+        requestedScroll: scrollResult,
+        clampedScroll: scrollState,
+        finalSelection: newSelection
+      });
 
       return {
         ...state,
@@ -353,7 +549,7 @@ export function gridReducer(state: GridState, action: GridAction): GridState {
       const scrollState = calculateScrollState(scrollX, scrollY, {
         ...state,
         virtualBounds: newBounds,
-      });
+      }, state.dimensions);
 
       return {
         ...state,
@@ -411,7 +607,7 @@ export function gridReducer(state: GridState, action: GridAction): GridState {
       const scrollState = calculateScrollState(newScrollX, newScrollY, {
         ...state,
         virtualBounds: newBounds,
-      });
+      }, state.dimensions);
 
       return {
         ...state,
@@ -450,7 +646,7 @@ export function gridReducer(state: GridState, action: GridAction): GridState {
       let targetScroll;
       if (center) {
         // Center the cell in viewport
-        targetScroll = cellToCenteredScroll(row, col, config, viewportWidth, viewportHeight);
+        targetScroll = cellToCenteredScroll(row, col, config, viewportWidth, viewportHeight, dimensions);
       } else {
         // Scroll just enough to make cell visible (with dimension support)
         const makeVisible = scrollToMakeVisible(
@@ -478,7 +674,7 @@ export function gridReducer(state: GridState, action: GridAction): GridState {
       const scrollState = calculateScrollState(targetScroll.scrollX, targetScroll.scrollY, {
         ...state,
         virtualBounds: newBounds,
-      });
+      }, dimensions);
 
       return {
         ...state,
@@ -495,7 +691,7 @@ export function gridReducer(state: GridState, action: GridAction): GridState {
 
     case GRID_ACTIONS.SCROLL_TO_POSITION: {
       const { scrollX, scrollY } = action.payload;
-      const scrollState = calculateScrollState(scrollX, scrollY, state);
+      const scrollState = calculateScrollState(scrollX, scrollY, state, state.dimensions);
 
       return {
         ...state,
