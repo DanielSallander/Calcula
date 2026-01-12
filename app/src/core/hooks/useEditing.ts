@@ -9,8 +9,9 @@
 // - Column and row reference insertion for formula mode
 // - Cross-sheet reference support for formulas
 // FIX: Commit now switches back to source sheet before saving
+// FIX: Added synchronous editingRef to prevent stale closure race conditions
 
-import { useCallback, useState, useEffect } from "react";
+import { useCallback, useState, useEffect, useRef } from "react";
 import { useGridContext } from "../state/GridContext";
 import { 
   startEditing as startEditingAction, 
@@ -40,6 +41,8 @@ export interface UseEditingReturn {
   editing: EditingCell | null;
   /** Check if currently editing */
   isEditing: boolean;
+  /** Ref for synchronous editing check (avoids stale closure issues) */
+  isEditingRef: React.MutableRefObject<boolean>;
   /** Check if in formula reference mode (editing a formula that expects a reference) */
   isFormulaMode: boolean;
   /** Last error message from a failed commit */
@@ -103,6 +106,10 @@ export function useEditing(): UseEditingReturn {
   const [lastError, setLastError] = useState<string | null>(null);
   const [isCommitting, setIsCommitting] = useState(false);
   const [pendingReference, setPendingReference] = useState<FormulaReference | null>(null);
+  
+  // FIX: Synchronous ref for immediate editing state access
+  // This avoids stale closure issues where isEditing state hasn't updated yet
+  const isEditingRef = useRef<boolean>(false);
 
   /**
    * Check if currently in formula mode (expecting a reference).
@@ -218,6 +225,7 @@ export function useEditing(): UseEditingReturn {
 
   /**
    * Start editing a cell by row/col.
+   * FIX: Updates isEditingRef BEFORE dispatch to prevent race conditions.
    */
   const startEdit = useCallback(
     async (row: number, col: number, initialValue?: string) => {
@@ -225,28 +233,36 @@ export function useEditing(): UseEditingReturn {
       dispatch(clearFormulaReferences());
       setPendingReference(null);
       
-      let value = initialValue;
-
-      if (value === undefined) {
-        try {
-          const cellData = await getCell(row, col);
-          value = cellData?.formula || cellData?.display || "";
-        } catch (error) {
-          console.error("Failed to get cell data:", error);
-          value = "";
-        }
-      }
-
+      // FIX: Set ref BEFORE dispatch to prevent stale closure race conditions
+      // This ensures handleContainerKeyDown sees the updated state immediately
+      isEditingRef.current = true;
+      
+      // Determine if we need to fetch cell content
+      const needsFetch = initialValue === undefined;
+      
+      // Dispatch to set editing state
       dispatch(
         startEditingAction({
           row,
           col,
-          value: value ?? "",
-          // Store the source sheet context for cross-sheet references
+          value: initialValue ?? "",
           sourceSheetIndex: sheetContext.activeSheetIndex,
           sourceSheetName: sheetContext.activeSheetName,
         })
       );
+      
+      // If no initial value was provided, fetch the cell content and update
+      if (needsFetch) {
+        try {
+          const cellData = await getCell(row, col);
+          const fetchedValue = cellData?.formula || cellData?.display || "";
+          // Update the editing value with fetched content
+          dispatch(updateEditing(fetchedValue));
+        } catch (error) {
+          console.error("Failed to get cell data:", error);
+          // Leave empty value on error
+        }
+      }
     },
     [dispatch, sheetContext]
   );
@@ -265,19 +281,25 @@ export function useEditing(): UseEditingReturn {
       const col = selection.endCol;
 
       if (initialValue !== undefined) {
+        // REPLACE mode - start with provided character
         setLastError(null);
         dispatch(clearFormulaReferences());
         setPendingReference(null);
+        
+        // FIX: Set ref BEFORE dispatch
+        isEditingRef.current = true;
+        
         dispatch(
           startEditingAction({
             row,
             col,
-            value: initialValue ?? "",
+            value: initialValue,
             sourceSheetIndex: sheetContext.activeSheetIndex,
             sourceSheetName: sheetContext.activeSheetName,
           })
         );
       } else {
+        // EDIT mode - fetch existing content
         await startEdit(row, col);
       }
     },
@@ -532,6 +554,9 @@ export function useEditing(): UseEditingReturn {
       const updatedCells = await updateCell(editing.row, editing.col, editing.value);
       const primaryCell = updatedCells[0];
       
+      // FIX: Clear ref when editing stops
+      isEditingRef.current = false;
+      
       if (primaryCell) {
         cellEvents.emit({
           row: primaryCell.row,
@@ -584,6 +609,10 @@ export function useEditing(): UseEditingReturn {
       const errorMessage = error instanceof Error ? error.message : "Unknown error";
       console.error("Failed to update cell:", error);
       setLastError(errorMessage);
+      
+      // FIX: Clear ref on error too
+      isEditingRef.current = false;
+      
       dispatch(stopEditing());
       dispatch(clearFormulaReferences());
       return {
@@ -604,6 +633,9 @@ export function useEditing(): UseEditingReturn {
    * FIX: If editing started on a different sheet, switch back to that sheet.
    */
   const cancelEdit = useCallback(async () => {
+    // FIX: Clear ref immediately
+    isEditingRef.current = false;
+    
     if (!editing) {
       setLastError(null);
       setPendingReference(null);
@@ -665,6 +697,9 @@ export function useEditing(): UseEditingReturn {
       dispatch(clearFormulaReferences());
       setPendingReference(null);
       
+      // FIX: Set ref BEFORE dispatch
+      isEditingRef.current = true;
+      
       dispatch(
         startEditingAction({
           row: selection.endRow,
@@ -688,6 +723,7 @@ export function useEditing(): UseEditingReturn {
   return {
     editing,
     isEditing: editing !== null,
+    isEditingRef,
     isFormulaMode,
     lastError,
     isCommitting,

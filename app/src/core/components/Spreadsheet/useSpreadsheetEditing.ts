@@ -1,6 +1,7 @@
 // FILENAME: app/src/components/Spreadsheet/useSpreadsheetEditing.ts
 // PURPOSE: Manages the editing lifecycle, formula bar, and inline inputs.
 // CONTEXT: Contains complex logic for handling key events in both the container and inputs.
+// FIX: Uses isEditingRef for synchronous editing check to prevent stale closure race conditions
 
 import { useCallback, useEffect, useState } from "react";
 import { useEditing } from "../../hooks";
@@ -19,6 +20,17 @@ interface UseSpreadsheetEditingProps {
   // startEditing is derived internally via useEditing()
 }
 
+export function getFormulaBarValue(
+  isEditing: boolean,
+  editing: { value: string } | null,
+  selectedCellContent: string
+): string {
+  if (isEditing && editing) {
+    return editing.value;
+  }
+  return selectedCellContent;
+}
+
 export function useSpreadsheetEditing({
   containerRef,
   formulaInputRef,
@@ -33,6 +45,7 @@ export function useSpreadsheetEditing({
   
   const {
     isEditing,
+    isEditingRef,  // FIX: Get the synchronous ref
     isFormulaMode,
     isCommitting,
     lastError,
@@ -144,7 +157,10 @@ export function useSpreadsheetEditing({
 
   const handleContainerKeyDown = useCallback(
     async (event: React.KeyboardEvent<HTMLDivElement>) => {
-      if (isEditing) {
+      // FIX: Check BOTH the state AND the synchronous ref
+      // The ref is updated immediately when editing starts, before React re-renders
+      // This prevents the stale closure race condition on double-click
+      if (isEditing || isEditingRef.current) {
         return;
       }
 
@@ -188,10 +204,10 @@ export function useSpreadsheetEditing({
         return;
       }
     },
-    [isEditing, startEditing, handleCommitEdit, moveActiveCell, scrollToSelection]
+    [isEditing, isEditingRef, startEditing, handleCommitEdit, moveActiveCell, scrollToSelection]
   );
 
-  const getFormulaBarValue = (): string => {
+  const getFormulaBarValueInternal = (): string => {
     if (isEditing && editing) {
       return editing.value;
     }
@@ -221,7 +237,7 @@ export function useSpreadsheetEditing({
       clearError
     },
     ui: {
-      getFormulaBarValue
+      getFormulaBarValue: getFormulaBarValueInternal
     }
   };
 }
