@@ -2,6 +2,7 @@
 // CONTEXT: Core component that orchestrates the spreadsheet experience
 // FIX: Added data-formula-bar attribute and onFocus handler to Formula Input
 //      to correctly coordinate focus transfer with InlineEditor.
+// FIX: Corrected containerRef to point to grid area for proper mouse coordinate calculation.
 
 import React, { useCallback, useRef, useEffect } from "react";
 import { useGridState, useGridContext } from "../../state";
@@ -24,10 +25,13 @@ function SpreadsheetContent({ className }: SpreadsheetContentProps): React.React
   const gridState = useGridState();
   const { dispatch } = useGridContext();
 
-  // Ref for the grid area (the scrollable region containing the canvas)
-  const gridAreaRef = useRef<HTMLDivElement>(null);
+  // FIX: Create a separate ref for the outer focus container
+  // This allows keyboard focus on the outer container while mouse coordinate
+  // calculations use the grid area (where mouse events are attached)
+  const focusContainerRef = useRef<HTMLDivElement>(null);
 
   // 2. Extract Refs
+  // containerRef is now used for the grid area (mouse coordinate calculations)
   const { 
     containerRef, 
     canvasRef 
@@ -73,8 +77,9 @@ function SpreadsheetContent({ className }: SpreadsheetContentProps): React.React
   } = state;
 
   // FIX: Track grid area dimensions and update state for scrollbar calculations
+  // Now uses containerRef which points to the grid area
   useEffect(() => {
-    const gridArea = gridAreaRef.current;
+    const gridArea = containerRef.current;
     if (!gridArea) return;
 
     const updateDimensions = () => {
@@ -98,7 +103,7 @@ function SpreadsheetContent({ className }: SpreadsheetContentProps): React.React
     return () => {
       resizeObserver.disconnect();
     };
-  }, [dispatch]);
+  }, [dispatch, containerRef]);
 
   // 6. Scrollbar metrics based on used range
   const scrollbarMetrics = useScrollbarMetrics({
@@ -186,7 +191,7 @@ function SpreadsheetContent({ className }: SpreadsheetContentProps): React.React
 
   return (
     <div
-      ref={containerRef}
+      ref={focusContainerRef}
       className={className}
       style={{
         display: "flex",
@@ -250,9 +255,9 @@ function SpreadsheetContent({ className }: SpreadsheetContentProps): React.React
         />
       </div>
 
-      {/* Grid Area with Scrollbars - FIX: Added ref for dimension tracking */}
+      {/* Grid Area with Scrollbars - FIX: Now uses containerRef for mouse coordinate consistency */}
       <div
-        ref={gridAreaRef}
+        ref={containerRef}
         style={{ 
           flex: 1, 
           position: "relative", 

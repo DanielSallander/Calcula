@@ -1,5 +1,5 @@
-**Resizing row height**
-When resizing row height it first "jumps" to increase row height.
-It does not matter if I increase or decrease row height.
-As soon as the handle is dragged to start the increase/decrease operation it performs this "jump" in row height increase.
-I would say that this jump in row height is approximately the equivalent to a default row height. 
+The cursor seems to point wrong.
+If I point and click a cell it select a cell under it. 
+Also, if I try to resize the row height I have to grab the resize handle slightly above the handle.
+So it seems like in general there is an offset of the cursor and where it actually points.
+I have attached a screenshot. It is marked with a red cross when I click to and the blue square is the cell that is selected.
