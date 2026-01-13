@@ -196,10 +196,20 @@ export function useMouseSelection(props: UseMouseSelectionProps): UseMouseSelect
   /**
    * Handle mouse down - start selection, extend with shift, handle resize,
    * or handle formula reference.
+   * 
+   * IMPORTANT: We use containerRef.current for coordinate calculation to ensure
+   * consistency with handleGlobalMouseMove, which also uses containerRef.current.
+   * Using event.currentTarget would cause coordinate discrepancies if the event
+   * target differs from containerRef.
    */
   const handleMouseDown = useCallback(
     async (event: React.MouseEvent<HTMLElement>) => {
-      const rect = event.currentTarget.getBoundingClientRect();
+      // Use containerRef for consistent coordinates with global mouse move handler
+      // This prevents coordinate discrepancies between mouse down and mouse move
+      if (!containerRef.current) {
+        return;
+      }
+      const rect = containerRef.current.getBoundingClientRect();
       const mouseX = event.clientX - rect.left;
       const mouseY = event.clientY - rect.top;
 
@@ -237,6 +247,7 @@ export function useMouseSelection(props: UseMouseSelectionProps): UseMouseSelect
       }
     },
     [
+      containerRef,
       isFormulaMode,
       resizeHandlers,
       cellSelectionHandlers,
@@ -251,16 +262,20 @@ export function useMouseSelection(props: UseMouseSelectionProps): UseMouseSelect
    */
   const handleMouseMove = useCallback(
     (event: React.MouseEvent<HTMLElement>) => {
-      const rect = event.currentTarget.getBoundingClientRect();
+      // Use containerRef for consistent coordinates
+      if (!containerRef.current) {
+        return;
+      }
+      const rect = containerRef.current.getBoundingClientRect();
       const mouseX = event.clientX - rect.left;
       const mouseY = event.clientY - rect.top;
 
       // Update last mouse position for auto-scroll
       lastMousePosRef.current = { x: mouseX, y: mouseY };
 
-      // Handle resize operation
+      // Handle resize operation - skip here, global handler will handle it
+      // This prevents double-handling with different coordinate calculations
       if (isResizing) {
-        resizeHandlers.handleResizeMouseMove(mouseX, mouseY);
         return;
       }
 
@@ -333,6 +348,7 @@ export function useMouseSelection(props: UseMouseSelectionProps): UseMouseSelect
       }
     },
     [
+      containerRef,
       config,
       viewport,
       dimensions,
@@ -400,13 +416,17 @@ export function useMouseSelection(props: UseMouseSelectionProps): UseMouseSelect
    */
   const handleDoubleClick = useCallback(
     (event: React.MouseEvent<HTMLElement>): { row: number; col: number } | null => {
-      const rect = event.currentTarget.getBoundingClientRect();
+      // Use containerRef for consistent coordinates
+      if (!containerRef.current) {
+        return null;
+      }
+      const rect = containerRef.current.getBoundingClientRect();
       const mouseX = event.clientX - rect.left;
       const mouseY = event.clientY - rect.top;
 
       return getCellFromPixel(mouseX, mouseY, config, viewport, dimensions);
     },
-    [config, viewport, dimensions]
+    [containerRef, config, viewport, dimensions]
   );
 
   // -------------------------------------------------------------------------
