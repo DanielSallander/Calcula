@@ -1,7 +1,8 @@
 // FILENAME: app/src/components/Spreadsheet/useSpreadsheetEditing.ts
 // PURPOSE: Manages the editing lifecycle, formula bar, and inline inputs.
 // CONTEXT: Contains complex logic for handling key events in both the container and inputs.
-// FIX: Uses isEditingRef for synchronous editing check to prevent stale closure race conditions
+// FIX: Added event.stopPropagation() to formula input key handler to prevent bubbling
+//      which caused the container to trigger "Replace Mode" editing.
 
 import { useCallback, useEffect, useState } from "react";
 import { useEditing } from "../../hooks";
@@ -45,7 +46,7 @@ export function useSpreadsheetEditing({
   
   const {
     isEditing,
-    isEditingRef,  // FIX: Get the synchronous ref
+    isEditingRef, 
     isFormulaMode,
     isCommitting,
     lastError,
@@ -101,6 +102,10 @@ export function useSpreadsheetEditing({
 
   const handleFormulaInputKeyDown = useCallback(
     async (event: React.KeyboardEvent<HTMLInputElement>) => {
+      // FIX: Stop propagation immediately to prevent the container from 
+      // catching this event and triggering "Start Edit (Replace Mode)"
+      event.stopPropagation();
+
       if (event.key === "Enter") {
         event.preventDefault();
         const success = await handleCommitEdit();

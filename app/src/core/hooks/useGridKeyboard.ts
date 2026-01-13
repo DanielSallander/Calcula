@@ -3,12 +3,15 @@
 // CONTEXT: This hook manages keyboard events for cell navigation including
 // arrow keys, Tab, Enter, Page Up/Down, Home, End, modifier combinations,
 // clipboard shortcuts (Ctrl+C, Ctrl+V, Ctrl+X, Ctrl+Z), and ESC to clear clipboard.
+// FIX: Added check for getGlobalIsEditing() to catch editing state synchronously
+//      before React state updates, preventing keystrokes from starting new edits.
 
 import { useCallback, useEffect } from "react";
 import { useGridContext } from "../state/GridContext";
 import { moveSelection, setSelection } from "../state/gridActions";
 import { findCtrlArrowTarget, type ArrowDirection } from "../lib/tauri-api";
 import { fnLog, stateLog, eventLog } from '../../utils/component-logger';
+import { getGlobalIsEditing } from "./useEditing";
 
 /**
  * Options for the useGridKeyboard hook.
@@ -129,10 +132,20 @@ export function useGridKeyboard(options: UseGridKeyboardOptions): void {
         return;
       }
 
+      // FIX: Check the global editing flag synchronously
+      // The isEditing prop may be stale (from React state that hasn't re-rendered yet)
+      // but the global flag is updated immediately when editing starts
+      const isCurrentlyEditing = isEditing || getGlobalIsEditing();
+      
+      if (isCurrentlyEditing) {
+        fnLog.exit('handleKeyDown', 'skipped (editing active - global check)');
+        return;
+      }
+
       const modKey = ctrlKey || metaKey;
 
       // Handle ESC key - clear clipboard if content exists
-      if (key === "Escape" && !isEditing && hasClipboardContent && onClearClipboard) {
+      if (key === "Escape" && hasClipboardContent && onClearClipboard) {
         event.preventDefault();
         event.stopPropagation();
         eventLog.keyboard('Grid', 'handleKeyDown', 'Escape', []);
@@ -141,12 +154,12 @@ export function useGridKeyboard(options: UseGridKeyboardOptions): void {
         return;
       }
 
-      // Handle clipboard shortcuts (even during editing for some operations)
+      // Handle clipboard shortcuts
       if (modKey && !altKey) {
         switch (key.toLowerCase()) {
           case 'c':
             // Ctrl+C - Copy
-            if (!isEditing && onCopy) {
+            if (onCopy) {
               event.preventDefault();
               event.stopPropagation();
               eventLog.keyboard('Grid', 'handleKeyDown', 'Ctrl+C', ['Ctrl']);
@@ -158,7 +171,7 @@ export function useGridKeyboard(options: UseGridKeyboardOptions): void {
           
           case 'x':
             // Ctrl+X - Cut
-            if (!isEditing && onCut) {
+            if (onCut) {
               event.preventDefault();
               event.stopPropagation();
               eventLog.keyboard('Grid', 'handleKeyDown', 'Ctrl+X', ['Ctrl']);
@@ -170,7 +183,7 @@ export function useGridKeyboard(options: UseGridKeyboardOptions): void {
           
           case 'v':
             // Ctrl+V - Paste
-            if (!isEditing && onPaste) {
+            if (onPaste) {
               event.preventDefault();
               event.stopPropagation();
               eventLog.keyboard('Grid', 'handleKeyDown', 'Ctrl+V', ['Ctrl']);
@@ -182,25 +195,22 @@ export function useGridKeyboard(options: UseGridKeyboardOptions): void {
           
           case 'z':
             // Ctrl+Z - Undo, Ctrl+Shift+Z - Redo
-            if (!isEditing) {
-              event.preventDefault();
-              event.stopPropagation();
-              if (shiftKey && onRedo) {
-                eventLog.keyboard('Grid', 'handleKeyDown', 'Ctrl+Shift+Z', ['Ctrl', 'Shift']);
-                onRedo();
-                fnLog.exit('handleKeyDown', 'redo');
-              } else if (onUndo) {
-                eventLog.keyboard('Grid', 'handleKeyDown', 'Ctrl+Z', ['Ctrl']);
-                onUndo();
-                fnLog.exit('handleKeyDown', 'undo');
-              }
-              return;
+            event.preventDefault();
+            event.stopPropagation();
+            if (shiftKey && onRedo) {
+              eventLog.keyboard('Grid', 'handleKeyDown', 'Ctrl+Shift+Z', ['Ctrl', 'Shift']);
+              onRedo();
+              fnLog.exit('handleKeyDown', 'redo');
+            } else if (onUndo) {
+              eventLog.keyboard('Grid', 'handleKeyDown', 'Ctrl+Z', ['Ctrl']);
+              onUndo();
+              fnLog.exit('handleKeyDown', 'undo');
             }
-            break;
+            return;
           
           case 'y':
             // Ctrl+Y - Redo (alternative)
-            if (!isEditing && onRedo) {
+            if (onRedo) {
               event.preventDefault();
               event.stopPropagation();
               eventLog.keyboard('Grid', 'handleKeyDown', 'Ctrl+Y', ['Ctrl']);
@@ -210,12 +220,6 @@ export function useGridKeyboard(options: UseGridKeyboardOptions): void {
             }
             break;
         }
-      }
-
-      // Skip navigation if editing
-      if (isEditing) {
-        fnLog.exit('handleKeyDown', 'skipped (editing)');
-        return;
       }
 
       // Handle Ctrl+Arrow for Excel-like navigation (async)

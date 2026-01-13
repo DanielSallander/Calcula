@@ -9,7 +9,8 @@
 // - Column and row reference insertion for formula mode
 // - Cross-sheet reference support for formulas
 // FIX: Commit now switches back to source sheet before saving
-// FIX: Added synchronous editingRef to prevent stale closure race conditions
+// FIX: isEditingRef is now a MODULE-LEVEL singleton to prevent race conditions
+//      across multiple useEditing() hook instances
 
 import { useCallback, useState, useEffect, useRef } from "react";
 import { useGridContext } from "../state/GridContext";
@@ -34,6 +35,33 @@ import type { EditingCell, CellUpdateResult, FormulaReference } from "../types";
 import { isFormula, isFormulaExpectingReference, FORMULA_REFERENCE_COLORS } from "../types";
 
 /**
+ * MODULE-LEVEL singleton ref for synchronous editing state.
+ * This is shared across ALL useEditing() hook instances to prevent race conditions
+ * where one instance starts editing but another instance's keydown handler
+ * doesn't see the updated state.
+ * 
+ * FIX: Previously each useEditing() call created its own ref, causing:
+ * - useSpreadsheetSelection.ts sets isEditingRef.current = true
+ * - useSpreadsheetEditing.ts checks ITS OWN ref which is still false
+ * - Keystroke slips through and starts a new edit session in replace mode
+ */
+let globalIsEditing = false;
+
+/**
+ * Set the global editing flag. Used internally by the hook.
+ */
+function setGlobalIsEditing(value: boolean): void {
+  globalIsEditing = value;
+}
+
+/**
+ * Get the global editing flag. Can be used for synchronous checks.
+ */
+export function getGlobalIsEditing(): boolean {
+  return globalIsEditing;
+}
+
+/**
  * Return type for the useEditing hook.
  */
 export interface UseEditingReturn {
@@ -42,7 +70,7 @@ export interface UseEditingReturn {
   /** Check if currently editing */
   isEditing: boolean;
   /** Ref for synchronous editing check (avoids stale closure issues) */
-  isEditingRef: React.MutableRefObject<boolean>;
+  isEditingRef: { current: boolean };
   /** Check if in formula reference mode (editing a formula that expects a reference) */
   isFormulaMode: boolean;
   /** Last error message from a failed commit */
@@ -107,9 +135,12 @@ export function useEditing(): UseEditingReturn {
   const [isCommitting, setIsCommitting] = useState(false);
   const [pendingReference, setPendingReference] = useState<FormulaReference | null>(null);
   
-  // FIX: Synchronous ref for immediate editing state access
-  // This avoids stale closure issues where isEditing state hasn't updated yet
-  const isEditingRef = useRef<boolean>(false);
+  // FIX: Create a ref-like object that accesses the module-level singleton
+  // This ensures all hook instances see the same value
+  const isEditingRef = useRef<{ current: boolean }>({
+    get current() { return globalIsEditing; },
+    set current(value: boolean) { globalIsEditing = value; }
+  }).current;
 
   /**
    * Check if currently in formula mode (expecting a reference).
@@ -225,7 +256,8 @@ export function useEditing(): UseEditingReturn {
 
   /**
    * Start editing a cell by row/col.
-   * FIX: Updates isEditingRef BEFORE dispatch to prevent race conditions.
+   * FIX: Now fetches cell content BEFORE dispatching to prevent race conditions.
+   * This ensures the InlineEditor receives the correct initial value immediately.
    */
   const startEdit = useCallback(
     async (row: number, col: number, initialValue?: string) => {
@@ -233,36 +265,36 @@ export function useEditing(): UseEditingReturn {
       dispatch(clearFormulaReferences());
       setPendingReference(null);
       
-      // FIX: Set ref BEFORE dispatch to prevent stale closure race conditions
-      // This ensures handleContainerKeyDown sees the updated state immediately
-      isEditingRef.current = true;
+      // FIX: Set global flag BEFORE any async operation to prevent race conditions
+      // This ensures ALL useEditing() instances see editing state immediately
+      setGlobalIsEditing(true);
       
-      // Determine if we need to fetch cell content
-      const needsFetch = initialValue === undefined;
+      // Determine the initial value to use
+      let value = initialValue ?? "";
       
-      // Dispatch to set editing state
+      // FIX: If no initial value provided (EDIT mode), fetch cell content FIRST
+      // This prevents the race condition where the editor renders with empty value
+      // while the async fetch is in progress, allowing typed characters to replace content
+      if (initialValue === undefined) {
+        try {
+          const cellData = await getCell(row, col);
+          value = cellData?.formula || cellData?.display || "";
+        } catch (error) {
+          console.error("Failed to get cell data:", error);
+          // Keep value as "" on error
+        }
+      }
+      
+      // Dispatch with the correct value (either provided or fetched)
       dispatch(
         startEditingAction({
           row,
           col,
-          value: initialValue ?? "",
+          value,
           sourceSheetIndex: sheetContext.activeSheetIndex,
           sourceSheetName: sheetContext.activeSheetName,
         })
       );
-      
-      // If no initial value was provided, fetch the cell content and update
-      if (needsFetch) {
-        try {
-          const cellData = await getCell(row, col);
-          const fetchedValue = cellData?.formula || cellData?.display || "";
-          // Update the editing value with fetched content
-          dispatch(updateEditing(fetchedValue));
-        } catch (error) {
-          console.error("Failed to get cell data:", error);
-          // Leave empty value on error
-        }
-      }
     },
     [dispatch, sheetContext]
   );
@@ -286,8 +318,8 @@ export function useEditing(): UseEditingReturn {
         dispatch(clearFormulaReferences());
         setPendingReference(null);
         
-        // FIX: Set ref BEFORE dispatch
-        isEditingRef.current = true;
+        // FIX: Set global flag BEFORE dispatch
+        setGlobalIsEditing(true);
         
         dispatch(
           startEditingAction({
@@ -299,7 +331,7 @@ export function useEditing(): UseEditingReturn {
           })
         );
       } else {
-        // EDIT mode - fetch existing content
+        // EDIT mode - fetch existing content (handled by startEdit)
         await startEdit(row, col);
       }
     },
@@ -554,8 +586,8 @@ export function useEditing(): UseEditingReturn {
       const updatedCells = await updateCell(editing.row, editing.col, editing.value);
       const primaryCell = updatedCells[0];
       
-      // FIX: Clear ref when editing stops
-      isEditingRef.current = false;
+      // FIX: Clear global flag when editing stops
+      setGlobalIsEditing(false);
       
       if (primaryCell) {
         cellEvents.emit({
@@ -610,8 +642,8 @@ export function useEditing(): UseEditingReturn {
       console.error("Failed to update cell:", error);
       setLastError(errorMessage);
       
-      // FIX: Clear ref on error too
-      isEditingRef.current = false;
+      // FIX: Clear global flag on error too
+      setGlobalIsEditing(false);
       
       dispatch(stopEditing());
       dispatch(clearFormulaReferences());
@@ -633,8 +665,8 @@ export function useEditing(): UseEditingReturn {
    * FIX: If editing started on a different sheet, switch back to that sheet.
    */
   const cancelEdit = useCallback(async () => {
-    // FIX: Clear ref immediately
-    isEditingRef.current = false;
+    // FIX: Clear global flag immediately
+    setGlobalIsEditing(false);
     
     if (!editing) {
       setLastError(null);
@@ -697,8 +729,8 @@ export function useEditing(): UseEditingReturn {
       dispatch(clearFormulaReferences());
       setPendingReference(null);
       
-      // FIX: Set ref BEFORE dispatch
-      isEditingRef.current = true;
+      // FIX: Set global flag BEFORE dispatch
+      setGlobalIsEditing(true);
       
       dispatch(
         startEditingAction({

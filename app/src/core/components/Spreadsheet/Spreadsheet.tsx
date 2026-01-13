@@ -1,6 +1,7 @@
 // PURPOSE: Main spreadsheet component combining grid, editor, and ribbon
 // CONTEXT: Core component that orchestrates the spreadsheet experience
-// FIX: Added gridAreaRef to properly measure grid area dimensions for scrollbar calculations
+// FIX: Added data-formula-bar attribute and onFocus handler to Formula Input
+//      to correctly coordinate focus transfer with InlineEditor.
 
 import React, { useCallback, useRef, useEffect } from "react";
 import { useGridState, useGridContext } from "../../state";
@@ -42,6 +43,7 @@ function SpreadsheetContent({ className }: SpreadsheetContentProps): React.React
     handleContainerKeyDown,
     handleFormulaInputChange,
     handleFormulaInputKeyDown,
+    handleFormulaBarFocus, // FIX: Extracted this handler
     handleInlineValueChange,
     handleInlineCommit,
     handleInlineCancel,
@@ -232,9 +234,11 @@ function SpreadsheetContent({ className }: SpreadsheetContentProps): React.React
         </div>
         <input
           type="text"
+          data-formula-bar="true" // FIX: Added identification for InlineEditor
           value={getFormulaBarValue()}
           onChange={handleFormulaInputChange}
           onKeyDown={handleFormulaInputKeyDown}
+          onFocus={handleFormulaBarFocus} // FIX: Added focus handler to start editing
           style={{
             flex: 1,
             height: "22px",

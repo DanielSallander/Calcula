@@ -1,11 +1,7 @@
 // FILENAME: app/src/components/InlineEditor.tsx
 // PURPOSE: Inline cell editor component that renders directly over the cell being edited.
-// CONTEXT: This component provides Excel-like inline editing by positioning a text input
-// directly over the cell being edited. It handles keyboard events for committing (Enter),
-// canceling (Escape), and tabbing between cells. The editor automatically focuses when
-// it appears and positions itself based on cell coordinates and scroll position.
-// Updated: Added support for cross-sheet formula editing - uses global flag to prevent
-// blur commit during sheet tab clicks.
+// CONTEXT: Added check to prevent stealing focus if the Formula Bar is currently active.
+// FIX: In useEffect, check document.activeElement before calling focus().
 
 import React, { useRef, useEffect, useCallback, useState } from "react";
 import type { GridConfig, Viewport, EditingCell, DimensionOverrides } from "../../types";
@@ -292,8 +288,9 @@ export function InlineEditor(props: InlineEditorProps): React.ReactElement | nul
       }
 
       // Check if focus is moving to the formula bar input
+      // FIX: Ensure data-formula-bar attribute is checked
       const relatedTarget = event.relatedTarget as HTMLElement | null;
-      if (relatedTarget?.hasAttribute("data-formula-bar")) {
+      if (relatedTarget?.getAttribute("data-formula-bar") === "true") {
         return;
       }
 
@@ -339,6 +336,14 @@ export function InlineEditor(props: InlineEditorProps): React.ReactElement | nul
       // This is especially important after sheet switches
       const timeoutId = setTimeout(() => {
         if (inputRef.current) {
+          // FIX: Check if focus is already on the formula bar (data-formula-bar)
+          // If it is, DO NOT steal focus. Let the user type in the formula bar.
+          const activeElement = document.activeElement;
+          if (activeElement?.getAttribute("data-formula-bar") === "true") {
+            console.log("[InlineEditor] Formula bar active, skipping autofocus");
+            return;
+          }
+
           inputRef.current.focus();
           // Place cursor at end of text
           const len = inputRef.current.value.length;
