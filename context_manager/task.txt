@@ -1,8 +1,133 @@
-**The arrow key bug**
-- The arrow key have stopped working. I cannot navigate using the arrow keys anymore.
-This worked until recently when app/src/components/Spreadsheet/Spreadsheet.tsx got updated.
-**Column selection**
-When selecting a column it navigates all the way to the bottom. 
-Just as in Excel, selecting a column should not mean expandning the used range to the bottom.
-One should be able to reference a column (for example "B:B") without necessary expanding the used range to include all rows in this column.
-I hope it is clear what I mean. Basically I want the same behavior as in Excel.
+Something is causing a hanging issue when I type a formula that sums an entire column - for instance "=SUM(B:B)".
+Right after I write a formula that sums an entire column I can no longer navigate with keyboard arrows and automatic calculation does not work. I dont think it has to do with the arrow keys or automatic calculation, they are merely symtoms of something else hanging (this is what I think at least).
+However, if I go back and edit the same cell and just press enter, everything works fine again.
+
+Here are the console messages if that helps:
+[InlineEditor] Formula bar active, skipping autofocus
+useEditing.ts:542 [useEditing] commitEdit called {editingRow: 3, editingCol: 6, sourceSheetIndex: 0, sourceSheetName: 'Sheet1', currentSheetIndex: 0, …}
+tauri-api.ts:61 [tauri-api] updateCell(3, 6, "")
+tauri-api.ts:64 [tauri-api] updateCell returned 1 updated cells
+GridCanvas.tsx:277 [Cells] Fetched 10 cells. First cell: row=2, col=1, display="9", style_index=0
+InlineEditor.tsx:351 [InlineEditor] Focused input, cursor at position: 0
+react-dom.development.js:86  Warning: Removing a style property during rerender (borderColor) when a conflicting property is set (borderBottom) can lead to styling bugs. To avoid this, don't mix shorthand and non-shorthand properties for the same value; instead, replace the shorthand with separate values.
+    at button
+    at div
+    at div
+    at SheetTabs (http://localhost:5173/src/shell/SheetTabs/SheetTabs.tsx:35:29)
+    at div
+    at GridProvider (http://localhost:5173/src/core/state/GridContext.tsx:21:32)
+    at Layout
+    at GridProvider (http://localhost:5173/src/core/state/GridContext.tsx:21:32)
+    at App
+printWarning @ react-dom.development.js:86
+error @ react-dom.development.js:60
+validateShorthandPropertyCollisionInDev @ react-dom.development.js:2899
+diffProperties @ react-dom.development.js:10123
+prepareUpdate @ react-dom.development.js:10977
+updateHostComponent$1 @ react-dom.development.js:21825
+completeWork @ react-dom.development.js:22194
+completeUnitOfWork @ react-dom.development.js:26635
+performUnitOfWork @ react-dom.development.js:26607
+workLoopSync @ react-dom.development.js:26505
+renderRootSync @ react-dom.development.js:26473
+performSyncWorkOnRoot @ react-dom.development.js:26124
+flushSyncCallbacks @ react-dom.development.js:12042
+flushSync @ react-dom.development.js:26240
+finishEventHandler @ react-dom.development.js:3976
+batchedUpdates @ react-dom.development.js:3994
+dispatchEventForPluginEventSystem @ react-dom.development.js:9287
+dispatchEventWithEnableCapturePhaseSelectiveHydrationWithoutDiscreteEventReplay @ react-dom.development.js:6465
+dispatchEvent @ react-dom.development.js:6457
+dispatchDiscreteEvent @ react-dom.development.js:6430
+react-dom.development.js:86  Warning: Removing a style property during rerender (borderColor) when a conflicting property is set (border) can lead to styling bugs. To avoid this, don't mix shorthand and non-shorthand properties for the same value; instead, replace the shorthand with separate values.
+    at button
+    at div
+    at div
+    at SheetTabs (http://localhost:5173/src/shell/SheetTabs/SheetTabs.tsx:35:29)
+    at div
+    at GridProvider (http://localhost:5173/src/core/state/GridContext.tsx:21:32)
+    at Layout
+    at GridProvider (http://localhost:5173/src/core/state/GridContext.tsx:21:32)
+    at App
+printWarning @ react-dom.development.js:86
+error @ react-dom.development.js:60
+validateShorthandPropertyCollisionInDev @ react-dom.development.js:2899
+diffProperties @ react-dom.development.js:10123
+prepareUpdate @ react-dom.development.js:10977
+updateHostComponent$1 @ react-dom.development.js:21825
+completeWork @ react-dom.development.js:22194
+completeUnitOfWork @ react-dom.development.js:26635
+performUnitOfWork @ react-dom.development.js:26607
+workLoopSync @ react-dom.development.js:26505
+renderRootSync @ react-dom.development.js:26473
+performSyncWorkOnRoot @ react-dom.development.js:26124
+flushSyncCallbacks @ react-dom.development.js:12042
+flushSync @ react-dom.development.js:26240
+finishEventHandler @ react-dom.development.js:3976
+batchedUpdates @ react-dom.development.js:3994
+dispatchEventForPluginEventSystem @ react-dom.development.js:9287
+dispatchEventWithEnableCapturePhaseSelectiveHydrationWithoutDiscreteEventReplay @ react-dom.development.js:6465
+dispatchEvent @ react-dom.development.js:6457
+dispatchDiscreteEvent @ react-dom.development.js:6430
+react-dom.development.js:86  Warning: Removing a style property during rerender (borderColor) when a conflicting property is set (borderBottom) can lead to styling bugs. To avoid this, don't mix shorthand and non-shorthand properties for the same value; instead, replace the shorthand with separate values.
+    at button
+    at div
+    at div
+    at SheetTabs (http://localhost:5173/src/shell/SheetTabs/SheetTabs.tsx:35:29)
+    at div
+    at GridProvider (http://localhost:5173/src/core/state/GridContext.tsx:21:32)
+    at Layout
+    at GridProvider (http://localhost:5173/src/core/state/GridContext.tsx:21:32)
+    at App
+printWarning @ react-dom.development.js:86
+error @ react-dom.development.js:60
+validateShorthandPropertyCollisionInDev @ react-dom.development.js:2899
+diffProperties @ react-dom.development.js:10123
+prepareUpdate @ react-dom.development.js:10977
+updateHostComponent$1 @ react-dom.development.js:21825
+completeWork @ react-dom.development.js:22194
+completeUnitOfWork @ react-dom.development.js:26635
+performUnitOfWork @ react-dom.development.js:26607
+workLoopSync @ react-dom.development.js:26505
+renderRootSync @ react-dom.development.js:26473
+performSyncWorkOnRoot @ react-dom.development.js:26124
+flushSyncCallbacks @ react-dom.development.js:12042
+(anonymous) @ react-dom.development.js:25690
+react-dom.development.js:86  Warning: Removing a style property during rerender (borderColor) when a conflicting property is set (border) can lead to styling bugs. To avoid this, don't mix shorthand and non-shorthand properties for the same value; instead, replace the shorthand with separate values.
+    at button
+    at div
+    at div
+    at SheetTabs (http://localhost:5173/src/shell/SheetTabs/SheetTabs.tsx:35:29)
+    at div
+    at GridProvider (http://localhost:5173/src/core/state/GridContext.tsx:21:32)
+    at Layout
+    at GridProvider (http://localhost:5173/src/core/state/GridContext.tsx:21:32)
+    at App
+printWarning @ react-dom.development.js:86
+error @ react-dom.development.js:60
+validateShorthandPropertyCollisionInDev @ react-dom.development.js:2899
+diffProperties @ react-dom.development.js:10123
+prepareUpdate @ react-dom.development.js:10977
+updateHostComponent$1 @ react-dom.development.js:21825
+completeWork @ react-dom.development.js:22194
+completeUnitOfWork @ react-dom.development.js:26635
+performUnitOfWork @ react-dom.development.js:26607
+workLoopSync @ react-dom.development.js:26505
+renderRootSync @ react-dom.development.js:26473
+performSyncWorkOnRoot @ react-dom.development.js:26124
+flushSyncCallbacks @ react-dom.development.js:12042
+(anonymous) @ react-dom.development.js:25690
+useEditing.ts:542 [useEditing] commitEdit called {editingRow: 3, editingCol: 6, sourceSheetIndex: 0, sourceSheetName: 'Sheet1', currentSheetIndex: 0, …}
+tauri-api.ts:61 [tauri-api] updateCell(3, 6, "=SUM(I:I)")
+tauri-api.ts:64 [tauri-api] updateCell returned 1 updated cells
+useViewport.ts:315 [VIEWPORT] scrollToSelection called: {endRow: 3, endCol: 6}
+useViewport.ts:300 [VIEWPORT] scrollToCell called: {row: 3, col: 6, center: false}
+GridCanvas.tsx:277 [Cells] Fetched 11 cells. First cell: row=2, col=1, display="9", style_index=0
+InlineEditor.tsx:343 [InlineEditor] Formula bar active, skipping autofocus
+useEditing.ts:542 [useEditing] commitEdit called {editingRow: 3, editingCol: 6, sourceSheetIndex: 0, sourceSheetName: 'Sheet1', currentSheetIndex: 0, …}
+tauri-api.ts:61 [tauri-api] updateCell(3, 6, "=SUM(I:I)")
+tauri-api.ts:64 [tauri-api] updateCell returned 1 updated cells
+useViewport.ts:315 [VIEWPORT] scrollToSelection called: {endRow: 3, endCol: 6}
+useViewport.ts:300 [VIEWPORT] scrollToCell called: {row: 3, col: 6, center: false}
+GridCanvas.tsx:277 [Cells] Fetched 11 cells. First cell: row=2, col=1, display="9", style_index=0
+Spreadsheet.tsx:145

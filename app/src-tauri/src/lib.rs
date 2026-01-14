@@ -243,20 +243,22 @@ fn extract_references_recursive(expr: &ParserExpr, grid: &Grid, refs: &mut HashS
         ParserExpr::ColumnRef { start_col, end_col, .. } => {
             let sc = col_letter_to_index(start_col);
             let ec = col_letter_to_index(end_col);
-            for r in 0..=grid.max_row {
-                for c in sc.min(ec)..=sc.max(ec) {
-                    if grid.get_cell(r, c).is_some() {
-                        refs.insert((r, c));
-                    }
+            let min_col = sc.min(ec);
+            let max_col = sc.max(ec);
+            // Iterate only through existing cells instead of all possible rows
+            for ((r, c), _) in grid.cells.iter() {
+                if *c >= min_col && *c <= max_col {
+                    refs.insert((*r, *c));
                 }
             }
         }
         ParserExpr::RowRef { start_row, end_row, .. } => {
-            for r in *start_row.min(end_row)..=*start_row.max(end_row) {
-                for c in 0..=grid.max_col {
-                    if grid.get_cell(r, c).is_some() {
-                        refs.insert((r, c));
-                    }
+            let min_row = start_row.min(end_row);
+            let max_row = start_row.max(end_row);
+            // Iterate only through existing cells instead of all possible columns
+            for ((r, c), _) in grid.cells.iter() {
+                if *r >= *min_row && *r <= *max_row {
+                    refs.insert((*r, *c));
                 }
             }
         }

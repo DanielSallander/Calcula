@@ -381,6 +381,9 @@ export const DEFAULT_VIRTUAL_BOUNDS_CONFIG: VirtualBoundsConfig = {
 
 /**
  * A formula reference for visual highlighting.
+ * FIX: Added isFullColumn and isFullRow flags to indicate full column/row
+ * references. When set, the visual bounds are limited but the actual
+ * formula references the entire column/row.
  */
 export interface FormulaReference {
   startRow: number;
@@ -390,6 +393,10 @@ export interface FormulaReference {
   color: string;
   /** Optional sheet name for cross-sheet references */
   sheetName?: string;
+  /** True if this represents a full column reference (e.g., A:A) */
+  isFullColumn?: boolean;
+  /** True if this represents a full row reference (e.g., 1:1) */
+  isFullRow?: boolean;
 }
 
 /**

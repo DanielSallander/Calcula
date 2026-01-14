@@ -1,7 +1,15 @@
 ================================================================================
                                  INSTRUCTIONS
 ================================================================================
-Provide the full full content of the files you update.
+Please provide the output as a single Unified Diff block containing all changes.
+**Strict Format Rules:**
+1. Start each file's section with a header specifying the filename:
+`--- path/to/filename.ext`
+`+++ path/to/filename.ext`
+2. Follow with the standard diff hunks (`@@ -old,len +new,len @@`).
+3. Do not include `a/` or `b/` prefixes in the filenames.
+4. Do not use Markdown code blocks for individual files; put the ENTIRE output in one single code block."
+
 Never update files you have not "seen" yet. Request those files first.
 ================================================================================
                              PROJECT DEPENDENCY MAP

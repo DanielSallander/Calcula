@@ -1,4 +1,4 @@
-// FILENAME: app/src/hooks/useEditing.ts
+// FILENAME: app/src/core/hooks/useEditing.ts
 // PURPOSE: Custom hook for managing cell editing state.
 // CONTEXT: This hook provides cell editing functionality including:
 // - Starting edit mode on a cell (with optional initial value)
@@ -11,6 +11,8 @@
 // FIX: Commit now switches back to source sheet before saving
 // FIX: isEditingRef is now a MODULE-LEVEL singleton to prevent race conditions
 //      across multiple useEditing() hook instances
+// FIX: Column/row references now use limited bounds for visual highlighting
+//      to prevent performance issues with large ranges
 
 import { useCallback, useState, useEffect, useRef } from "react";
 import { useGridContext } from "../state/GridContext";
@@ -60,6 +62,15 @@ function setGlobalIsEditing(value: boolean): void {
 export function getGlobalIsEditing(): boolean {
   return globalIsEditing;
 }
+
+/**
+ * Maximum rows/cols to include in formula reference highlighting.
+ * This prevents performance issues when highlighting entire column/row references.
+ * The visual highlight will show this many rows/cols, which is sufficient for
+ * indicating a full column/row reference without iterating over millions of cells.
+ */
+const MAX_FORMULA_REFERENCE_ROWS = 1000;
+const MAX_FORMULA_REFERENCE_COLS = 100;
 
 /**
  * Return type for the useEditing hook.
@@ -204,16 +215,19 @@ export function useEditing(): UseEditingReturn {
 
   /**
    * Update pending column reference for live preview.
+   * FIX: Limit the row range to prevent performance issues.
    */
   const updatePendingColumnReference = useCallback(
     (startCol: number, endCol: number) => {
-      const totalRows = config?.totalRows || 1048576;
+      // FIX: Use limited bounds instead of totalRows to prevent performance issues
+      const maxRow = Math.min(MAX_FORMULA_REFERENCE_ROWS - 1, (config?.totalRows || MAX_FORMULA_REFERENCE_ROWS) - 1);
       const newPending: FormulaReference = {
         startRow: 0,
         startCol: Math.min(startCol, endCol),
-        endRow: totalRows - 1,
+        endRow: maxRow,
         endCol: Math.max(startCol, endCol),
         color: pendingReference?.color || getNextReferenceColor(),
+        isFullColumn: true, // Flag to indicate this is a full column reference
       };
       setPendingReference(newPending);
     },
@@ -222,16 +236,19 @@ export function useEditing(): UseEditingReturn {
 
   /**
    * Update pending row reference for live preview.
+   * FIX: Limit the column range to prevent performance issues.
    */
   const updatePendingRowReference = useCallback(
     (startRow: number, endRow: number) => {
-      const totalCols = config?.totalCols || 16384;
+      // FIX: Use limited bounds instead of totalCols to prevent performance issues
+      const maxCol = Math.min(MAX_FORMULA_REFERENCE_COLS - 1, (config?.totalCols || MAX_FORMULA_REFERENCE_COLS) - 1);
       const newPending: FormulaReference = {
         startRow: Math.min(startRow, endRow),
         startCol: 0,
         endRow: Math.max(startRow, endRow),
-        endCol: totalCols - 1,
+        endCol: maxCol,
         color: pendingReference?.color || getNextReferenceColor(),
+        isFullRow: true, // Flag to indicate this is a full row reference
       };
       setPendingReference(newPending);
     },
@@ -409,6 +426,7 @@ export function useEditing(): UseEditingReturn {
   /**
    * Insert a column reference into the current formula.
    * Includes sheet prefix if on a different sheet.
+   * FIX: Use limited bounds for visual highlighting.
    */
   const insertColumnReference = useCallback(
     (col: number) => {
@@ -422,13 +440,17 @@ export function useEditing(): UseEditingReturn {
       const newValue = editing.value + reference;
       dispatch(updateEditing(newValue));
 
-      const totalRows = config?.totalRows || 1048576;
+      // FIX: Use limited bounds instead of totalRows to prevent performance issues
+      // The actual formula will still reference the entire column, but the visual
+      // highlight will only show a reasonable number of rows
+      const maxRow = Math.min(MAX_FORMULA_REFERENCE_ROWS - 1, (config?.totalRows || MAX_FORMULA_REFERENCE_ROWS) - 1);
       const newRef: FormulaReference = {
         startRow: 0,
         startCol: col,
-        endRow: totalRows - 1,
+        endRow: maxRow,
         endCol: col,
         color: pendingReference?.color || getNextReferenceColor(),
+        isFullColumn: true,
       };
       dispatch(setFormulaReferences([...formulaReferences.filter(r => r !== pendingReference), newRef]));
       setPendingReference(null);
@@ -439,6 +461,7 @@ export function useEditing(): UseEditingReturn {
   /**
    * Insert a column range reference into the current formula.
    * Includes sheet prefix if on a different sheet.
+   * FIX: Use limited bounds for visual highlighting.
    */
   const insertColumnRangeReference = useCallback(
     (startCol: number, endCol: number) => {
@@ -452,15 +475,17 @@ export function useEditing(): UseEditingReturn {
       const newValue = editing.value + reference;
       dispatch(updateEditing(newValue));
 
-      const totalRows = config?.totalRows || 1048576;
+      // FIX: Use limited bounds instead of totalRows to prevent performance issues
+      const maxRow = Math.min(MAX_FORMULA_REFERENCE_ROWS - 1, (config?.totalRows || MAX_FORMULA_REFERENCE_ROWS) - 1);
       const minCol = Math.min(startCol, endCol);
       const maxCol = Math.max(startCol, endCol);
       const newRef: FormulaReference = {
         startRow: 0,
         startCol: minCol,
-        endRow: totalRows - 1,
+        endRow: maxRow,
         endCol: maxCol,
         color: pendingReference?.color || getNextReferenceColor(),
+        isFullColumn: true,
       };
       dispatch(setFormulaReferences([...formulaReferences.filter(r => r !== pendingReference), newRef]));
       setPendingReference(null);
@@ -471,6 +496,7 @@ export function useEditing(): UseEditingReturn {
   /**
    * Insert a row reference into the current formula.
    * Includes sheet prefix if on a different sheet.
+   * FIX: Use limited bounds for visual highlighting.
    */
   const insertRowReference = useCallback(
     (row: number) => {
@@ -484,13 +510,15 @@ export function useEditing(): UseEditingReturn {
       const newValue = editing.value + reference;
       dispatch(updateEditing(newValue));
 
-      const totalCols = config?.totalCols || 16384;
+      // FIX: Use limited bounds instead of totalCols to prevent performance issues
+      const maxCol = Math.min(MAX_FORMULA_REFERENCE_COLS - 1, (config?.totalCols || MAX_FORMULA_REFERENCE_COLS) - 1);
       const newRef: FormulaReference = {
         startRow: row,
         startCol: 0,
         endRow: row,
-        endCol: totalCols - 1,
+        endCol: maxCol,
         color: pendingReference?.color || getNextReferenceColor(),
+        isFullRow: true,
       };
       dispatch(setFormulaReferences([...formulaReferences.filter(r => r !== pendingReference), newRef]));
       setPendingReference(null);
@@ -501,6 +529,7 @@ export function useEditing(): UseEditingReturn {
   /**
    * Insert a row range reference into the current formula.
    * Includes sheet prefix if on a different sheet.
+   * FIX: Use limited bounds for visual highlighting.
    */
   const insertRowRangeReference = useCallback(
     (startRow: number, endRow: number) => {
@@ -514,15 +543,17 @@ export function useEditing(): UseEditingReturn {
       const newValue = editing.value + reference;
       dispatch(updateEditing(newValue));
 
-      const totalCols = config?.totalCols || 16384;
+      // FIX: Use limited bounds instead of totalCols to prevent performance issues
+      const maxCol = Math.min(MAX_FORMULA_REFERENCE_COLS - 1, (config?.totalCols || MAX_FORMULA_REFERENCE_COLS) - 1);
       const minRow = Math.min(startRow, endRow);
       const maxRow = Math.max(startRow, endRow);
       const newRef: FormulaReference = {
         startRow: minRow,
         startCol: 0,
         endRow: maxRow,
-        endCol: totalCols - 1,
+        endCol: maxCol,
         color: pendingReference?.color || getNextReferenceColor(),
+        isFullRow: true,
       };
       dispatch(setFormulaReferences([...formulaReferences.filter(r => r !== pendingReference), newRef]));
       setPendingReference(null);
