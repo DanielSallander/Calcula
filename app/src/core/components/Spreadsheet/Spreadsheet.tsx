@@ -1,8 +1,10 @@
+// FILENAME: app/src/components/Spreadsheet/Spreadsheet.tsx
 // PURPOSE: Main spreadsheet component combining grid, editor, and ribbon
 // CONTEXT: Core component that orchestrates the spreadsheet experience
 // FIX: Added data-formula-bar attribute and onFocus handler to Formula Input
 //      to correctly coordinate focus transfer with InlineEditor.
 // FIX: Corrected containerRef to point to grid area for proper mouse coordinate calculation.
+// FIX: Use focusContainerRef from useSpreadsheet for keyboard event handling.
 
 import React, { useCallback, useRef, useEffect } from "react";
 import { useGridState, useGridContext } from "../../state";
@@ -25,15 +27,12 @@ function SpreadsheetContent({ className }: SpreadsheetContentProps): React.React
   const gridState = useGridState();
   const { dispatch } = useGridContext();
 
-  // FIX: Create a separate ref for the outer focus container
-  // This allows keyboard focus on the outer container while mouse coordinate
-  // calculations use the grid area (where mouse events are attached)
-  const focusContainerRef = useRef<HTMLDivElement>(null);
-
   // 2. Extract Refs
-  // containerRef is now used for the grid area (mouse coordinate calculations)
+  // FIX: Use focusContainerRef from useSpreadsheet for the focusable outer container
+  // containerRef is used for the grid area (mouse coordinate calculations)
   const { 
     containerRef, 
+    focusContainerRef,
     canvasRef 
   } = refs;
 
@@ -47,7 +46,7 @@ function SpreadsheetContent({ className }: SpreadsheetContentProps): React.React
     handleContainerKeyDown,
     handleFormulaInputChange,
     handleFormulaInputKeyDown,
-    handleFormulaBarFocus, // FIX: Extracted this handler
+    handleFormulaBarFocus,
     handleInlineValueChange,
     handleInlineCommit,
     handleInlineCancel,
@@ -239,11 +238,11 @@ function SpreadsheetContent({ className }: SpreadsheetContentProps): React.React
         </div>
         <input
           type="text"
-          data-formula-bar="true" // FIX: Added identification for InlineEditor
+          data-formula-bar="true"
           value={getFormulaBarValue()}
           onChange={handleFormulaInputChange}
           onKeyDown={handleFormulaInputKeyDown}
-          onFocus={handleFormulaBarFocus} // FIX: Added focus handler to start editing
+          onFocus={handleFormulaBarFocus}
           style={{
             flex: 1,
             height: "22px",
@@ -255,7 +254,7 @@ function SpreadsheetContent({ className }: SpreadsheetContentProps): React.React
         />
       </div>
 
-      {/* Grid Area with Scrollbars - FIX: Now uses containerRef for mouse coordinate consistency */}
+      {/* Grid Area with Scrollbars - uses containerRef for mouse coordinate consistency */}
       <div
         ref={containerRef}
         style={{ 

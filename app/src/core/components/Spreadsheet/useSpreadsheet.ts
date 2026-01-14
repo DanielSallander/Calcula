@@ -2,6 +2,7 @@
 // PURPOSE: Main composer hook that aggregates functional sub-hooks.
 // CONTEXT: Orchestrates initialization and combines logic from Styles, Selection, Editing, and Layout hooks.
 // Updated: Added clipboard state for marching ants animation.
+// FIX: Added focusContainerRef for proper keyboard event handling.
 
 import { useRef, useCallback, useState, useEffect } from "react";
 import { useGridState, useGridContext } from "../../state";
@@ -15,6 +16,8 @@ import { useSpreadsheetLayout } from "./useSpreadsheetLayout";
 
 export function useSpreadsheet() {
   const containerRef = useRef<HTMLDivElement>(null);
+  // FIX: Separate ref for the focusable outer container that receives keyboard events
+  const focusContainerRef = useRef<HTMLDivElement>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
   const formulaInputRef = useRef<HTMLInputElement>(null);
   const canvasRef = useRef<GridCanvasHandle>(null);
@@ -38,6 +41,7 @@ export function useSpreadsheet() {
   const selectionLogic = useSpreadsheetSelection({
     canvasRef,
     containerRef,
+    focusContainerRef, // FIX: Pass focusContainerRef for keyboard events
     scrollRef,
     state,
     dispatch,
@@ -90,10 +94,10 @@ export function useSpreadsheet() {
 
   useEffect(() => {
     const timer = setTimeout(() => {
-      if (containerRef.current && !editingLogic.editingState.isEditing) {
-        containerRef.current.focus();
+      // FIX: Focus the focusContainerRef instead of containerRef
+      if (focusContainerRef.current && !editingLogic.editingState.isEditing) {
+        focusContainerRef.current.focus();
         setIsFocused(true);
-        // console.log("[Spreadsheet] Container focused on mount");
       }
     }, 100);
 
@@ -106,8 +110,9 @@ export function useSpreadsheet() {
     scrollbarMetrics.refresh();
     
     setTimeout(() => {
-      if (containerRef.current && !editingLogic.editingState.isEditing) {
-        containerRef.current.focus();
+      // FIX: Focus the focusContainerRef instead of containerRef
+      if (focusContainerRef.current && !editingLogic.editingState.isEditing) {
+        focusContainerRef.current.focus();
         setIsFocused(true);
       }
     }, 50);
@@ -116,6 +121,7 @@ export function useSpreadsheet() {
   return {
     refs: {
       containerRef,
+      focusContainerRef, // FIX: Expose focusContainerRef
       scrollRef,
       formulaInputRef,
       canvasRef,

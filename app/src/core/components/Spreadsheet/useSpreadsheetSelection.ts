@@ -2,6 +2,7 @@
 // PURPOSE: Handles mouse/keyboard interaction and selection state.
 // CONTEXT: Coordinates global selection hooks with local canvas events.
 // Includes fill handle and clipboard support with marching ants.
+// FIX: Added focusContainerRef parameter for keyboard event handling.
 
 import { useState, useCallback, useEffect, useRef } from "react";
 import { 
@@ -29,6 +30,8 @@ type GridDispatch = ReturnType<typeof useGridContext>["dispatch"];
 interface UseSpreadsheetSelectionProps {
   canvasRef: React.RefObject<GridCanvasHandle | null>;
   containerRef: React.RefObject<HTMLDivElement | null>;
+  /** FIX: Separate ref for keyboard focus container */
+  focusContainerRef: React.RefObject<HTMLDivElement | null>;
   scrollRef: React.RefObject<HTMLDivElement | null>;
   state: GridState;
   dispatch: GridDispatch;
@@ -39,6 +42,7 @@ interface UseSpreadsheetSelectionProps {
 export function useSpreadsheetSelection({
   canvasRef,
   containerRef,
+  focusContainerRef,
   scrollRef,
   state,
   dispatch,
@@ -290,13 +294,10 @@ export function useSpreadsheetSelection({
   }, [fillState.isDragging, cursorStyle]);
 
   // Keyboard handling with clipboard shortcuts and ESC to clear clipboard
-  // NOTE: onSelectionChange is NOT passed here because the reducer already
-  // handles viewport scrolling for MOVE_SELECTION actions. Passing it would
-  // cause a stale closure to overwrite the correct scroll position.
+  // FIX: Use focusContainerRef instead of containerRef for keyboard events
+  // The focusContainerRef points to the focusable outer container that receives keyboard events
   useGridKeyboard({
-    containerRef,
-    // Do NOT pass onSelectionChange - the reducer handles scrolling for keyboard navigation
-    // onSelectionChange: scrollToSelection,  // REMOVED - causes stale closure bug
+    containerRef: focusContainerRef,
     enabled: isFocused && !isEditing,
     onCut: cut,
     onCopy: copy,
