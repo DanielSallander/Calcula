@@ -5,7 +5,9 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "tsc && vite build",
+    "build": "tsc -b && vite build",
+    "check-types": "tsc -b",
+    "check-types:watch": "tsc -b --watch",
     "lint": "eslint .",
     "preview": "vite preview",
     "tauri": "tauri"
