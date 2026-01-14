@@ -3,6 +3,7 @@
 // CONTEXT: This module implements the state transition logic for the spreadsheet grid.
 // It handles all state updates for selection, viewport scrolling, cell editing, and configuration.
 // The reducer ensures immutable state updates and enforces grid boundaries.
+// FIX: Skip scroll-to-visible for column/row selections to match Excel behavior.
 
 import type { GridState, Selection, ClipboardMode, GridConfig } from "../types";
 import { createInitialGridState, DEFAULT_VIRTUAL_BOUNDS, DEFAULT_VIRTUAL_BOUNDS_CONFIG } from "../types";
@@ -19,7 +20,7 @@ import {
 } from "../lib/scrollUtils";
 
 // Debug logging for viewport tracking
-const DEBUG_VIEWPORT = true;
+const DEBUG_VIEWPORT = false;
 
 function logViewport(label: string, data: Record<string, unknown>): void {
   if (DEBUG_VIEWPORT) {
@@ -261,16 +262,32 @@ export function gridReducer(state: GridState, action: GridAction): GridState {
         type: type || "cells",
       };
 
-      // Expand virtual bounds if selection is near edge
-      const newBounds = calculateExpandedBounds(
-        state.virtualBounds,
-        Math.max(clampedSelection.startRow, clampedSelection.endRow),
-        Math.max(clampedSelection.startCol, clampedSelection.endCol),
-        state.config.totalRows,
-        state.config.totalCols
-      );
+      // FIX: For column/row selections, do NOT expand virtual bounds to include the full range.
+      // This matches Excel behavior where selecting a column doesn't expand the used range.
+      // Only expand bounds for regular cell selections.
+      let newBounds = state.virtualBounds;
+      if (type !== "columns" && type !== "rows") {
+        newBounds = calculateExpandedBounds(
+          state.virtualBounds,
+          Math.max(clampedSelection.startRow, clampedSelection.endRow),
+          Math.max(clampedSelection.startCol, clampedSelection.endCol),
+          state.config.totalRows,
+          state.config.totalCols
+        );
+      }
 
-      // --- SCROLL LOGIC START ---
+      // FIX: For column/row selections, do NOT scroll to make the "active cell" visible.
+      // In Excel, selecting column B does NOT scroll to the bottom of the sheet.
+      // Only perform scroll-to-visible for regular cell selections.
+      if (type === "columns" || type === "rows") {
+        return {
+          ...state,
+          selection: clampedSelection,
+          virtualBounds: newBounds,
+        };
+      }
+
+      // --- SCROLL LOGIC START (only for regular cell selections) ---
       // Ensure the active cell (endRow, endCol) is visible
       const activeRow = clampedSelection.endRow;
       const activeCol = clampedSelection.endCol;
@@ -366,14 +383,17 @@ export function gridReducer(state: GridState, action: GridAction): GridState {
       const clampedRow = clamp(row, 0, maxRow);
       const clampedCol = clamp(col, 0, maxCol);
 
-      // Expand virtual bounds if extending near edge
-      const newBounds = calculateExpandedBounds(
-        state.virtualBounds,
-        Math.max(state.selection.startRow, clampedRow),
-        Math.max(state.selection.startCol, clampedCol),
-        state.config.totalRows,
-        state.config.totalCols
-      );
+      // FIX: For column/row selections, do NOT expand virtual bounds
+      let newBounds = state.virtualBounds;
+      if (state.selection.type !== "columns" && state.selection.type !== "rows") {
+        newBounds = calculateExpandedBounds(
+          state.virtualBounds,
+          Math.max(state.selection.startRow, clampedRow),
+          Math.max(state.selection.startCol, clampedCol),
+          state.config.totalRows,
+          state.config.totalCols
+        );
+      }
 
       return {
         ...state,

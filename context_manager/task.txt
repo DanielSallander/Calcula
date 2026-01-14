@@ -1,5 +1,8 @@
-The cursor seems to point wrong.
-If I point and click a cell it select a cell under it. 
-Also, if I try to resize the row height I have to grab the resize handle slightly above the handle.
-So it seems like in general there is an offset of the cursor and where it actually points.
-I have attached a screenshot. It is marked with a red cross when I click to and the blue square is the cell that is selected.
+**The arrow key bug**
+- The arrow key have stopped working. I cannot navigate using the arrow keys anymore.
+This worked until recently when app/src/components/Spreadsheet/Spreadsheet.tsx got updated.
+**Column selection**
+When selecting a column it navigates all the way to the bottom. 
+Just as in Excel, selecting a column should not mean expandning the used range to the bottom.
+One should be able to reference a column (for example "B:B") without necessary expanding the used range to include all rows in this column.
+I hope it is clear what I mean. Basically I want the same behavior as in Excel.
