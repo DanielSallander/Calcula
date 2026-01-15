@@ -22,6 +22,7 @@ Step 2 is a more detailed dependency map, however only of a part of the reposito
     so for example: "python generate_context_map_step2.py --include app/src/hooks app/src/components"
     **Respond only with this command**
 5. ONLY REQUEST EXISTING CONTENT. Never request files or folder that does not exists in the dependecy map.
+6. Keep answers brief.
 
 ================================================================================
                                 TASK DESCRIPTION

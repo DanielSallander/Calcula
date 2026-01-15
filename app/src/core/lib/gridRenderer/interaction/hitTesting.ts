@@ -13,7 +13,7 @@ import { calculateVisibleRange } from "../layout/viewport";
 // X = 0.0: Instant selection (cell selects as soon as cursor touches it)
 // Y = 1.2: Delayed selection (requires dragging significantly past the border)
 const SELECTION_THRESHOLD_X = 0.0;
-const SELECTION_THRESHOLD_Y = 1.2;
+const SELECTION_THRESHOLD_Y = 0.0;
 
 /**
  * Options for getCellFromPixel behavior.

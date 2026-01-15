@@ -6,6 +6,7 @@
 import React, { useRef, useEffect, useCallback, useState } from "react";
 import type { GridConfig, Viewport, EditingCell, DimensionOverrides } from "../../types";
 import { isFormulaExpectingReference, createEmptyDimensionOverrides } from "../../types";
+import { useGridContext } from "../../state/GridContext";
 
 /**
  * Global flag to prevent blur from committing during sheet tab navigation.
@@ -184,9 +185,12 @@ export function InlineEditor(props: InlineEditorProps): React.ReactElement | nul
     disabled = false,
   } = props;
 
-  const inputRef = useRef<HTMLInputElement | null>(null);
+const inputRef = useRef<HTMLInputElement | null>(null);
   const isCommittingRef = useRef(false);
   
+  // Get current sheet context to determine if we should render
+  const { state: gridState } = useGridContext();
+  const currentSheetIndex = gridState.sheetContext.activeSheetIndex;
   // Counter to force refocus after sheet switches
   const [refocusTrigger, setRefocusTrigger] = useState(0);
 
@@ -359,11 +363,20 @@ export function InlineEditor(props: InlineEditorProps): React.ReactElement | nul
       }, 0);
       
       return () => clearTimeout(timeoutId);
-    }
+}
   }, [editing.row, editing.col, position.visible, disabled, refocusTrigger]);
 
-  // Don't render if not visible
-  if (!position.visible) {
+  // Don't render the inline editor if we're viewing a different sheet than the source.
+  // This happens during cross-sheet formula reference selection (point mode).
+  // The formula bar still shows the formula, but we don't overlay the editor on the target sheet.
+  // This matches Excel behavior where you see the target sheet clearly while selecting references.
+  const isOnDifferentSheet = 
+    editing.sourceSheetIndex !== undefined && 
+    editing.sourceSheetIndex !== currentSheetIndex;
+
+  // Don't render if not visible OR if viewing a different sheet during formula mode
+  // NOTE: This check must be AFTER all hooks to avoid React hooks rule violation
+  if (!position.visible || isOnDifferentSheet) {
     return null;
   }
 

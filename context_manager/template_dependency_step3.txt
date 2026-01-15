@@ -9,6 +9,7 @@ Please provide the output as a single Unified Diff block containing all changes.
 2. Follow with the standard diff hunks (`@@ -old,len +new,len @@`).
 3. Do not include `a/` or `b/` prefixes in the filenames.
 4. Do not use Markdown code blocks for individual files; put the ENTIRE output in one single code block."
+5. Keep answers brief. Just the Unified Diff block and a short summary.
 
 Never update files you have not "seen" yet. Request those files first.
 ================================================================================

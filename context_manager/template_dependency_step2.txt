@@ -17,6 +17,7 @@ This is the second step. You have been provided with an ENHANCED DEPENDENCY MAP 
    **Respond only with this command**
    python generate_context_map_step3.py --include app/src/hooks app/src/components/Ribbon
 4. If you edit existing files, be sure to request the full content of those files first.
+5. Keep answers brief.
 
 ================================================================================
                              PROJECT DEPENDENCY MAP
