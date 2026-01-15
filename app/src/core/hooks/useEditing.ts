@@ -564,9 +564,11 @@ export function useEditing(): UseEditingReturn {
   /**
    * Commit the current edit to the backend.
    * FIX: If editing started on a different sheet, switch back to that sheet before committing.
-   */
+*/
   const commitEdit = useCallback(async (): Promise<CellUpdateResult | null> => {
     if (!editing) {
+      // FIX: Clear global flag even on early return to prevent stuck state
+      setGlobalIsEditing(false);
       return null;
     }
 

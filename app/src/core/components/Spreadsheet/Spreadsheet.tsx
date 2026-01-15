@@ -304,6 +304,7 @@ function SpreadsheetContent({ className }: SpreadsheetContentProps): React.React
               onCancel={handleInlineCancel}
               onTab={handleInlineTab}
               onEnter={handleInlineEnter}
+              onRestoreFocus={() => focusContainerRef.current?.focus()}
             />
           )}
         </div>

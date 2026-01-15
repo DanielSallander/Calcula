@@ -3,13 +3,10 @@ import os
 import re
 import shutil
 
-def normalize_line_endings(lines):
-    return [line.rstrip('\r\n') for line in lines]
-
 def apply_hunks(target_file, hunks):
     """
     Applies a list of hunks to a specific target file.
-    Returns True if successful, False otherwise.
+    Uses whitespace-insensitive matching to find context.
     """
     if not os.path.exists(target_file):
         print(f"  [ERROR] Target file not found: {target_file}")
@@ -32,7 +29,7 @@ def apply_hunks(target_file, hunks):
     offset = 0
 
     for header, content in hunks:
-        # Parse header: @@ -old_start,old_len +new_start,new_len @@
+        # Parse header
         m = re.search(r'@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@', header)
         if not m:
             print(f"  [WARN] Invalid hunk header: {header.strip()}")
@@ -48,7 +45,7 @@ def apply_hunks(target_file, hunks):
         
         for pl in patch_lines:
             if not pl: continue
-            code_line = pl[1:]
+            code_line = pl[1:] # Remove the +, -, or space
             
             if pl.startswith(' '):
                 expected_original_block.append(code_line)
@@ -58,26 +55,30 @@ def apply_hunks(target_file, hunks):
             elif pl.startswith('+'):
                 new_block.append(code_line)
             else:
+                # Fallback: assume it's context if undefined
                 expected_original_block.append(pl)
                 new_block.append(pl)
 
-        search_block = normalize_line_endings(expected_original_block)
+        # We strip indentation for the SEARCH, but keep it for the REPLACEMENT
+        search_block_stripped = [x.strip() for x in expected_original_block]
         
         # Fuzzy search for the context
         match_index = -1
         start_search_idx = (old_start - 1) + offset
-        search_range = 1000 
+        search_range = 2000 # Increased search range
         
         min_search = max(0, start_search_idx - search_range)
         max_search = min(len(lines), start_search_idx + search_range)
 
         for i in range(min_search, max_search):
             match = True
-            for j, line_content in enumerate(search_block):
+            for j, search_line_stripped in enumerate(search_block_stripped):
                 if i + j >= len(lines):
                     match = False
                     break
-                if lines[i+j].rstrip('\r\n') != line_content:
+                
+                # KEY FIX: Compare stripped lines to ignore indentation differences
+                if lines[i+j].strip() != search_line_stripped:
                     match = False
                     break
             if match:
@@ -85,17 +86,18 @@ def apply_hunks(target_file, hunks):
                 break
         
         if match_index == -1:
-            print(f"  [FAIL] Could not find context for hunk at line {old_start}")
+            print(f"  [FAIL] Could not find context for hunk starting at approximate line {old_start}")
+            print(f"         Make sure the context lines (starting with space) in the patch match your file content.")
             continue
 
         # Apply replacement
-        del lines[match_index : match_index + len(search_block)]
+        del lines[match_index : match_index + len(expected_original_block)]
         lines_to_insert = [x + '\n' for x in new_block]
         
         for k, line_to_add in enumerate(lines_to_insert):
             lines.insert(match_index + k, line_to_add)
 
-        offset += (len(new_block) - len(search_block))
+        offset += (len(new_block) - len(expected_original_block))
         changes_made = True
 
     if changes_made:
@@ -103,35 +105,27 @@ def apply_hunks(target_file, hunks):
             f.writelines(lines)
         print(f"  [OK] Successfully updated {target_file}")
         
-        # CLEANUP: Remove backup on success
-        try:
+        # Cleanup target backup on success
+        if os.path.exists(backup_file):
             os.remove(backup_file)
-            print(f"  [CLEAN] Backup removed: {backup_file}")
-        except OSError as e:
-            print(f"  [WARN] Could not remove backup: {e}")
-            
         return True
     else:
         print(f"  [INFO] No changes applied to {target_file}")
-        # If no changes, we should probably remove the backup we just made 
-        # since it is identical to the file.
+        # Cleanup target backup if nothing happened
         if os.path.exists(backup_file):
             os.remove(backup_file)
         return False
 
 def main():
-    # Set default patch filename if not provided
     patch_file = "changes.patch"
     if len(sys.argv) > 1:
         patch_file = sys.argv[1]
 
     if not os.path.exists(patch_file):
         print(f"Patch file '{patch_file}' not found.")
-        print("Please create this file with your AI generated diff content.")
-        # Pause effect if run from double-click (optional, handled by .bat usually)
         sys.exit(1)
 
-    # 1. Backup the patch file
+    # Backup the patch file itself
     patch_backup = patch_file + ".bak"
     shutil.copy(patch_file, patch_backup)
     print(f"--> Patch file backed up to {patch_backup}")
@@ -139,7 +133,7 @@ def main():
     with open(patch_file, 'r', encoding='utf-8') as f:
         content = f.read()
 
-    # Split by the "--- " marker 
+    # Split files
     raw_blocks = re.split(r'(^--- .*$)', content, flags=re.MULTILINE)
     
     if len(raw_blocks) < 2:
@@ -153,6 +147,7 @@ def main():
         body = raw_blocks[i+1]
         
         target_file = header_line.replace('--- ', '').strip()
+        # Clean git prefixes
         if target_file.startswith('a/') or target_file.startswith('b/'):
              target_file = target_file[2:]
              
@@ -173,20 +168,14 @@ def main():
             if apply_hunks(target_file, parsed_hunks):
                 files_processed += 1
 
-    # 3. Clear the patch file and remove its backup if work was done
     if files_processed > 0:
         with open(patch_file, 'w', encoding='utf-8') as f:
             f.write("")
         print(f"\n--> {patch_file} has been cleared.")
-        
-        # Cleanup patch backup
         if os.path.exists(patch_backup):
             os.remove(patch_backup)
-            print(f"--> Patch backup {patch_backup} removed.")
-            
-        print("\n[SUCCESS] All operations completed.")
     else:
-        print("\n--> No files were updated. Backups preserved.")
+        print("\n--> No changes were made. Check the console output for [FAIL] messages.")
 
 if __name__ == "__main__":
     main()

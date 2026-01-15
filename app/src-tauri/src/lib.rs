@@ -53,6 +53,14 @@ pub struct AppState {
     pub dependencies: Mutex<HashMap<(u32, u32), HashSet<(u32, u32)>>>,
     /// Calculation mode: "automatic" or "manual"
     pub calculation_mode: Mutex<String>,
+    /// Column-level dependencies: column index -> set of formula cells that depend on entire column
+    pub column_dependents: Mutex<HashMap<u32, HashSet<(u32, u32)>>>,
+    /// Row-level dependencies: row index -> set of formula cells that depend on entire row
+    pub row_dependents: Mutex<HashMap<u32, HashSet<(u32, u32)>>>,
+    /// Track which columns each formula cell depends on (for cleanup)
+    pub column_dependencies: Mutex<HashMap<(u32, u32), HashSet<u32>>>,
+    /// Track which rows each formula cell depends on (for cleanup)
+    pub row_dependencies: Mutex<HashMap<(u32, u32), HashSet<u32>>>,
 }
 
 impl AppState {
@@ -76,6 +84,10 @@ pub fn create_app_state() -> AppState {
         dependents: Mutex::new(HashMap::new()),
         dependencies: Mutex::new(HashMap::new()),
         calculation_mode: Mutex::new("automatic".to_string()),
+        column_dependents: Mutex::new(HashMap::new()),
+        row_dependents: Mutex::new(HashMap::new()),
+        column_dependencies: Mutex::new(HashMap::new()),
+        row_dependencies: Mutex::new(HashMap::new()),
     }
 }
 
@@ -205,19 +217,44 @@ fn col_letter_to_index(col: &str) -> u32 {
 // FORMULA EVALUATION
 // ============================================================================
 
+/// Result of extracting references from a formula expression
+pub struct ExtractedRefs {
+    /// Individual cell references (row, col)
+    pub cells: HashSet<(u32, u32)>,
+    /// Column references (column indices)
+    pub columns: HashSet<u32>,
+    /// Row references (row indices)
+    pub rows: HashSet<u32>,
+}
+
+impl ExtractedRefs {
+    pub fn new() -> Self {
+        ExtractedRefs {
+            cells: HashSet::new(),
+            columns: HashSet::new(),
+            rows: HashSet::new(),
+        }
+    }
+}
+
 pub fn extract_references(expr: &ParserExpr, grid: &Grid) -> HashSet<(u32, u32)> {
-    let mut refs = HashSet::new();
+    let refs = extract_all_references(expr, grid);
+    refs.cells
+}
+
+pub fn extract_all_references(expr: &ParserExpr, grid: &Grid) -> ExtractedRefs {
+    let mut refs = ExtractedRefs::new();
     extract_references_recursive(expr, grid, &mut refs);
     refs
 }
 
-fn extract_references_recursive(expr: &ParserExpr, grid: &Grid, refs: &mut HashSet<(u32, u32)>) {
+fn extract_references_recursive(expr: &ParserExpr, grid: &Grid, refs: &mut ExtractedRefs) {
     match expr {
         ParserExpr::Literal(_) => {}
         // Note: sheet field is ignored for now - only extracts refs from current sheet
         ParserExpr::CellRef { col, row, .. } => {
             let col_idx = col_letter_to_index(col);
-            refs.insert((*row, col_idx));
+            refs.cells.insert((*row, col_idx));
         }
         ParserExpr::Range { start, end, .. } => {
             // Try to match both start and end as CellRefs
@@ -232,7 +269,7 @@ fn extract_references_recursive(expr: &ParserExpr, grid: &Grid, refs: &mut HashS
                 let er = *end_row;
                 for r in sr.min(er)..=sr.max(er) {
                     for c in sc.min(ec)..=sc.max(ec) {
-                        refs.insert((r, c));
+                        refs.cells.insert((r, c));
                     }
                 }
             } else {
@@ -245,20 +282,32 @@ fn extract_references_recursive(expr: &ParserExpr, grid: &Grid, refs: &mut HashS
             let ec = col_letter_to_index(end_col);
             let min_col = sc.min(ec);
             let max_col = sc.max(ec);
-            // Iterate only through existing cells instead of all possible rows
+            
+            // Register column-level dependencies
+            for col in min_col..=max_col {
+                refs.columns.insert(col);
+            }
+            
+            // Also add existing cells for immediate evaluation
             for ((r, c), _) in grid.cells.iter() {
                 if *c >= min_col && *c <= max_col {
-                    refs.insert((*r, *c));
+                    refs.cells.insert((*r, *c));
                 }
             }
         }
         ParserExpr::RowRef { start_row, end_row, .. } => {
             let min_row = start_row.min(end_row);
             let max_row = start_row.max(end_row);
-            // Iterate only through existing cells instead of all possible columns
+            
+            // Register row-level dependencies
+            for row in *min_row..=*max_row {
+                refs.rows.insert(row);
+            }
+            
+            // Also add existing cells for immediate evaluation
             for ((r, c), _) in grid.cells.iter() {
                 if *r >= *min_row && *r <= *max_row {
-                    refs.insert((*r, *c));
+                    refs.cells.insert((*r, *c));
                 }
             }
         }
@@ -412,6 +461,70 @@ pub fn update_dependencies(
     }
 }
 
+/// Update column-level dependencies for a formula cell
+pub fn update_column_dependencies(
+    cell_pos: (u32, u32),
+    new_cols: HashSet<u32>,
+    column_dependencies: &mut HashMap<(u32, u32), HashSet<u32>>,
+    column_dependents: &mut HashMap<u32, HashSet<(u32, u32)>>,
+) {
+    let old_cols = column_dependencies.remove(&cell_pos).unwrap_or_default();
+    
+    // Remove old column dependencies
+    for old_col in &old_cols {
+        if let Some(deps) = column_dependents.get_mut(old_col) {
+            deps.remove(&cell_pos);
+            if deps.is_empty() {
+                column_dependents.remove(old_col);
+            }
+        }
+    }
+    
+    // Add new column dependencies
+    for new_col in &new_cols {
+        column_dependents
+            .entry(*new_col)
+            .or_insert_with(HashSet::new)
+            .insert(cell_pos);
+    }
+    
+    if !new_cols.is_empty() {
+        column_dependencies.insert(cell_pos, new_cols);
+    }
+}
+
+/// Update row-level dependencies for a formula cell
+pub fn update_row_dependencies(
+    cell_pos: (u32, u32),
+    new_rows: HashSet<u32>,
+    row_dependencies: &mut HashMap<(u32, u32), HashSet<u32>>,
+    row_dependents: &mut HashMap<u32, HashSet<(u32, u32)>>,
+) {
+    let old_rows = row_dependencies.remove(&cell_pos).unwrap_or_default();
+    
+    // Remove old row dependencies
+    for old_row in &old_rows {
+        if let Some(deps) = row_dependents.get_mut(old_row) {
+            deps.remove(&cell_pos);
+            if deps.is_empty() {
+                row_dependents.remove(old_row);
+            }
+        }
+    }
+    
+    // Add new row dependencies
+    for new_row in &new_rows {
+        row_dependents
+            .entry(*new_row)
+            .or_insert_with(HashSet::new)
+            .insert(cell_pos);
+    }
+    
+    if !new_rows.is_empty() {
+        row_dependencies.insert(cell_pos, new_rows);
+    }
+}
+
 pub fn get_recalculation_order(
     changed_cell: (u32, u32),
     dependents: &HashMap<(u32, u32), HashSet<(u32, u32)>>,
@@ -441,6 +554,36 @@ pub fn get_recalculation_order(
     }
     
     to_recalc
+}
+
+/// Get all formula cells that depend on a specific column or row
+pub fn get_column_row_dependents(
+    changed_cell: (u32, u32),
+    column_dependents: &HashMap<u32, HashSet<(u32, u32)>>,
+    row_dependents: &HashMap<u32, HashSet<(u32, u32)>>,
+) -> HashSet<(u32, u32)> {
+    let (row, col) = changed_cell;
+    let mut result = HashSet::new();
+    
+    // Get formulas that depend on this column
+    if let Some(col_deps) = column_dependents.get(&col) {
+        for dep in col_deps {
+            if *dep != changed_cell {
+                result.insert(*dep);
+            }
+        }
+    }
+    
+    // Get formulas that depend on this row
+    if let Some(row_deps) = row_dependents.get(&row) {
+        for dep in row_deps {
+            if *dep != changed_cell {
+                result.insert(*dep);
+            }
+        }
+    }
+    
+    result
 }
 
 // ============================================================================

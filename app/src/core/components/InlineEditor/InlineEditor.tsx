@@ -29,9 +29,6 @@ export function getPreventBlurCommit(): boolean {
   return preventBlurCommit;
 }
 
-/**
- * Props for the InlineEditor component.
- */
 export interface InlineEditorProps {
   /** Current editing state */
   editing: EditingCell;
@@ -51,6 +48,8 @@ export interface InlineEditorProps {
   onTab?: (shiftKey: boolean) => void;
   /** Callback when Enter is pressed (to move down after commit) */
   onEnter?: (shiftKey: boolean) => void;
+  /** Callback to restore focus to the grid container after commit */
+  onRestoreFocus?: () => void;  // <-- ADD THIS LINE
   /** Whether the editor is disabled (e.g., during save) */
   disabled?: boolean;
 }
@@ -181,6 +180,7 @@ export function InlineEditor(props: InlineEditorProps): React.ReactElement | nul
     onCancel,
     onTab,
     onEnter,
+    onRestoreFocus,
     disabled = false,
   } = props;
 
@@ -227,6 +227,8 @@ export function InlineEditor(props: InlineEditorProps): React.ReactElement | nul
             if (commitSuccess && onEnter) {
               onEnter(event.shiftKey);
             }
+            // ADD THIS: Restore focus to grid container so keyboard navigation works
+            onRestoreFocus?.();
           } finally {
             isCommittingRef.current = false;
           }
@@ -247,6 +249,8 @@ export function InlineEditor(props: InlineEditorProps): React.ReactElement | nul
             if (tabSuccess && onTab) {
               onTab(event.shiftKey);
             }
+            // ADD THIS: Restore focus to grid container so keyboard navigation works
+            onRestoreFocus?.();
           } finally {
             isCommittingRef.current = false;
           }
@@ -298,12 +302,14 @@ export function InlineEditor(props: InlineEditorProps): React.ReactElement | nul
       console.log("[InlineEditor] Blur committing, value:", currentValue);
       isCommittingRef.current = true;
       try {
+        // ADD THIS: Restore focus to grid container so keyboard navigation works
+        onRestoreFocus?.();
         await onCommit();
       } finally {
         isCommittingRef.current = false;
       }
     },
-    [onCommit, disabled]
+    [onCommit, disabled, onRestoreFocus]
   );
 
   /**

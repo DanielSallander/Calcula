@@ -5,7 +5,9 @@
 use crate::api_types::{CellData, DimensionData, FormattingParams, FormattingResult, StyleData, StyleEntry};
 use crate::{
     create_app_state, evaluate_formula, evaluate_formula_multi_sheet, extract_references,
-    format_cell_value, get_recalculation_order, parse_cell_input, update_dependencies, AppState,
+    extract_all_references, format_cell_value, get_recalculation_order, get_column_row_dependents,
+    parse_cell_input, update_dependencies, update_column_dependencies, update_row_dependencies,
+    AppState,
 };
 use engine::{
     Cell, CellStyle, CellValue, Color, Grid, NumberFormat, StyleRegistry, TextAlign, TextRotation,
@@ -83,6 +85,10 @@ pub fn update_cell(
     let styles = state.style_registry.lock().unwrap();
     let mut dependents_map = state.dependents.lock().unwrap();
     let mut dependencies_map = state.dependencies.lock().unwrap();
+    let mut column_dependents_map = state.column_dependents.lock().unwrap();
+    let mut column_dependencies_map = state.column_dependencies.lock().unwrap();
+    let mut row_dependents_map = state.row_dependents.lock().unwrap();
+    let mut row_dependencies_map = state.row_dependencies.lock().unwrap();
     let calc_mode = state.calculation_mode.lock().unwrap();
 
     let mut updated_cells = Vec::new();
@@ -99,6 +105,18 @@ pub fn update_cell(
             HashSet::new(),
             &mut dependencies_map,
             &mut dependents_map,
+        );
+        update_column_dependencies(
+            (row, col),
+            HashSet::new(),
+            &mut column_dependencies_map,
+            &mut column_dependents_map,
+        );
+        update_row_dependencies(
+            (row, col),
+            HashSet::new(),
+            &mut row_dependencies_map,
+            &mut row_dependents_map,
         );
         updated_cells.push(CellData {
             row,
@@ -122,8 +140,10 @@ pub fn update_cell(
     if let Some(ref formula) = cell.formula {
         // Extract references for dependency tracking
         if let Ok(parsed) = parser::parse(formula) {
-            let refs = extract_references(&parsed, &grid);
-            update_dependencies((row, col), refs, &mut dependencies_map, &mut dependents_map);
+            let refs = extract_all_references(&parsed, &grid);
+            update_dependencies((row, col), refs.cells, &mut dependencies_map, &mut dependents_map);
+            update_column_dependencies((row, col), refs.columns, &mut column_dependencies_map, &mut column_dependents_map);
+            update_row_dependencies((row, col), refs.rows, &mut row_dependencies_map, &mut row_dependents_map);
         }
 
         // Evaluate using multi-sheet context for cross-sheet reference support
@@ -141,6 +161,18 @@ pub fn update_cell(
             HashSet::new(),
             &mut dependencies_map,
             &mut dependents_map,
+        );
+        update_column_dependencies(
+            (row, col),
+            HashSet::new(),
+            &mut column_dependencies_map,
+            &mut column_dependents_map,
+        );
+        update_row_dependencies(
+            (row, col),
+            HashSet::new(),
+            &mut row_dependencies_map,
+            &mut row_dependents_map,
         );
     }
 
@@ -165,7 +197,16 @@ pub fn update_cell(
 
     // Recalculate dependents if automatic mode
     if *calc_mode == "automatic" {
-        let recalc_order = get_recalculation_order((row, col), &dependents_map);
+        // Get direct cell dependents
+        let mut recalc_order = get_recalculation_order((row, col), &dependents_map);
+        
+        // Also get column/row dependents (formulas with column or row references)
+        let col_row_deps = get_column_row_dependents((row, col), &column_dependents_map, &row_dependents_map);
+        for dep in col_row_deps {
+            if !recalc_order.contains(&dep) {
+                recalc_order.push(dep);
+            }
+        }
 
         for (dep_row, dep_col) in recalc_order {
             if let Some(dep_cell) = grid.get_cell(dep_row, dep_col) {
@@ -214,6 +255,10 @@ pub fn clear_cell(state: State<AppState>, row: u32, col: u32) {
     let active_sheet = *state.active_sheet.lock().unwrap();
     let mut dependents_map = state.dependents.lock().unwrap();
     let mut dependencies_map = state.dependencies.lock().unwrap();
+    let mut column_dependents_map = state.column_dependents.lock().unwrap();
+    let mut column_dependencies_map = state.column_dependencies.lock().unwrap();
+    let mut row_dependents_map = state.row_dependents.lock().unwrap();
+    let mut row_dependencies_map = state.row_dependencies.lock().unwrap();
 
     grid.clear_cell(row, col);
     // Also update the grids vector
@@ -226,6 +271,18 @@ pub fn clear_cell(state: State<AppState>, row: u32, col: u32) {
         HashSet::new(),
         &mut dependencies_map,
         &mut dependents_map,
+    );
+    update_column_dependencies(
+        (row, col),
+        HashSet::new(),
+        &mut column_dependencies_map,
+        &mut column_dependents_map,
+    );
+    update_row_dependencies(
+        (row, col),
+        HashSet::new(),
+        &mut row_dependencies_map,
+        &mut row_dependents_map,
     );
 }
 
