@@ -7,7 +7,7 @@ use crate::{
     create_app_state, evaluate_formula, evaluate_formula_multi_sheet, extract_references,
     extract_all_references, format_cell_value, get_recalculation_order, get_column_row_dependents,
     parse_cell_input, update_dependencies, update_column_dependencies, update_row_dependencies,
-    AppState,
+    update_cross_sheet_dependencies, AppState,
 };
 use engine::{
     Cell, CellStyle, CellValue, Color, Grid, NumberFormat, StyleRegistry, TextAlign, TextRotation,
@@ -76,11 +76,9 @@ pub fn update_cell(
     col: u32,
     value: String,
 ) -> Result<Vec<CellData>, String> {
-    //log_debug!("CMD", "update_cell row={} col={} value={}", row, col, &value);
-
+    let sheet_names = state.sheet_names.lock().unwrap();
     let mut grid = state.grid.lock().unwrap();
     let mut grids = state.grids.lock().unwrap();
-    let sheet_names = state.sheet_names.lock().unwrap();
     let active_sheet = *state.active_sheet.lock().unwrap();
     let styles = state.style_registry.lock().unwrap();
     let mut dependents_map = state.dependents.lock().unwrap();
@@ -89,7 +87,11 @@ pub fn update_cell(
     let mut column_dependencies_map = state.column_dependencies.lock().unwrap();
     let mut row_dependents_map = state.row_dependents.lock().unwrap();
     let mut row_dependencies_map = state.row_dependencies.lock().unwrap();
+    let mut cross_sheet_dependents_map = state.cross_sheet_dependents.lock().unwrap();
+    let mut cross_sheet_dependencies_map = state.cross_sheet_dependencies.lock().unwrap();
     let calc_mode = state.calculation_mode.lock().unwrap();
+
+    let current_sheet_name = sheet_names.get(active_sheet).cloned().unwrap_or_default();
 
     let mut updated_cells = Vec::new();
 
@@ -100,6 +102,13 @@ pub fn update_cell(
         if active_sheet < grids.len() {
             grids[active_sheet].clear_cell(row, col);
         }
+        // Clear cross-sheet dependencies for this cell
+        update_cross_sheet_dependencies(
+            (active_sheet, row, col),
+            HashSet::new(),
+            &mut cross_sheet_dependencies_map,
+            &mut cross_sheet_dependents_map,
+        );
         update_dependencies(
             (row, col),
             HashSet::new(),
@@ -144,6 +153,14 @@ pub fn update_cell(
             update_dependencies((row, col), refs.cells, &mut dependencies_map, &mut dependents_map);
             update_column_dependencies((row, col), refs.columns, &mut column_dependencies_map, &mut column_dependents_map);
             update_row_dependencies((row, col), refs.rows, &mut row_dependencies_map, &mut row_dependents_map);
+            
+            // Track cross-sheet dependencies
+            update_cross_sheet_dependencies(
+                (active_sheet, row, col),
+                refs.cross_sheet_cells,
+                &mut cross_sheet_dependencies_map,
+                &mut cross_sheet_dependents_map,
+            );
         }
 
         // Evaluate using multi-sheet context for cross-sheet reference support
@@ -161,6 +178,13 @@ pub fn update_cell(
             HashSet::new(),
             &mut dependencies_map,
             &mut dependents_map,
+        );
+        // Clear cross-sheet dependencies for non-formula cells
+        update_cross_sheet_dependencies(
+            (active_sheet, row, col),
+            HashSet::new(),
+            &mut cross_sheet_dependencies_map,
+            &mut cross_sheet_dependents_map,
         );
         update_column_dependencies(
             (row, col),
@@ -241,9 +265,43 @@ pub fn update_cell(
                 }
             }
         }
+        
+        // Also recalculate cross-sheet dependents (formulas on OTHER sheets that reference this cell)
+        let cross_sheet_key = (current_sheet_name.clone(), row, col);
+        if let Some(cross_deps) = cross_sheet_dependents_map.get(&cross_sheet_key) {
+            for (dep_sheet_idx, dep_row, dep_col) in cross_deps.iter() {
+                // Skip if it's on the current sheet (already handled above)
+                if *dep_sheet_idx == active_sheet {
+                    continue;
+                }
+                
+                // Get the dependent cell from its sheet
+                if *dep_sheet_idx < grids.len() {
+                    if let Some(dep_cell) = grids[*dep_sheet_idx].get_cell(*dep_row, *dep_col) {
+                        if let Some(ref formula) = dep_cell.formula {
+                            // Evaluate the formula in context of its own sheet
+                            let result = evaluate_formula_multi_sheet(
+                                &grids,
+                                &sheet_names,
+                                *dep_sheet_idx,
+                                formula,
+                            );
+
+                            let mut updated_dep = dep_cell.clone();
+                            updated_dep.value = result;
+                            grids[*dep_sheet_idx].set_cell(*dep_row, *dep_col, updated_dep.clone());
+
+                            // Note: We don't add these to updated_cells since they're on different sheets
+                            // The frontend will need to refresh when switching sheets
+                            // But we log it for debugging
+                            let _dep_sheet_name = sheet_names.get(*dep_sheet_idx).unwrap_or(&String::new());
+                        }
+                    }
+                }
+            }
+        }
     }
 
-    //log_debug!("CMD", "update_cell done, updated={}", updated_cells.len());
     Ok(updated_cells)
 }
 
@@ -259,12 +317,22 @@ pub fn clear_cell(state: State<AppState>, row: u32, col: u32) {
     let mut column_dependencies_map = state.column_dependencies.lock().unwrap();
     let mut row_dependents_map = state.row_dependents.lock().unwrap();
     let mut row_dependencies_map = state.row_dependencies.lock().unwrap();
+    let mut cross_sheet_dependents_map = state.cross_sheet_dependents.lock().unwrap();
+    let mut cross_sheet_dependencies_map = state.cross_sheet_dependencies.lock().unwrap();
 
     grid.clear_cell(row, col);
     // Also update the grids vector
     if active_sheet < grids.len() {
         grids[active_sheet].clear_cell(row, col);
     }
+    
+    // Clear cross-sheet dependencies
+    update_cross_sheet_dependencies(
+        (active_sheet, row, col),
+        HashSet::new(),
+        &mut cross_sheet_dependencies_map,
+        &mut cross_sheet_dependents_map,
+    );
     
     update_dependencies(
         (row, col),

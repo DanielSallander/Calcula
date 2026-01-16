@@ -1,15 +1,44 @@
 ================================================================================
                                  INSTRUCTIONS
 ================================================================================
-Please provide the output as a single Unified Diff block containing all changes.
-**Strict Format Rules:**
-1. Start each file's section with a header specifying the filename:
-`--- path/to/filename.ext`
-`+++ path/to/filename.ext`
-2. Follow with the standard diff hunks (`@@ -old,len +new,len @@`).
-3. Do not include `a/` or `b/` prefixes in the filenames.
-4. Do not use Markdown code blocks for individual files; put the ENTIRE output in one single code block."
-5. Keep answers brief. Just the Unified Diff block and a short summary.
+Please provide code updates using the following "Block Replacement" format.
+Do not use Diff or Unified format. Use the custom tags shown below.
+
+TAGS FORMAT:
+<<<< FILE: path/to/file.ext >>>>
+<<<< SEARCH: exact_line_or_keyword >>>>
+<<<< CODE >>>>
+... content ...
+<<<< END >>>>
+
+MODES:
+1. UPDATE EXISTING BLOCK (Function/Class):
+   - FILE: Path to existing file.
+   - SEARCH: The exact function signature or unique starting line.
+   - CODE: The complete replacement block. 
+   - RULE: The first non-empty line of the CODE block must match the SEARCH line exactly. Do NOT include decorators/attributes in CODE unless they are also in SEARCH.
+
+2. CREATE NEW FILE:
+   - FILE: Path to the new file.
+   - SEARCH: Create New File
+   - CODE: The full content of the new file.
+
+3. APPEND TO FILE (Add new function/class):
+   - FILE: Path to existing file.
+   - SEARCH: Append to End
+   - CODE: The new code block to add at the bottom of the file.
+
+4. DELETE BLOCK:
+   - FILE: Path to existing file.
+   - SEARCH: The exact function signature or unique starting line to delete.
+   - CODE: DELETE_BLOCK
+
+Rules:
+- For Typescript/Rust: Ensure the SEARCH line matches the code exactly.
+- Avoid unicode characters in the response.
+- You can provide multiple file updates in one response.
+
+Keep answers brief. Just the block replacement content and a short summary.
 
 Never update files you have not "seen" yet. Request those files first.
 ================================================================================

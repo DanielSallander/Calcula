@@ -61,6 +61,10 @@ pub struct AppState {
     pub column_dependencies: Mutex<HashMap<(u32, u32), HashSet<u32>>>,
     /// Track which rows each formula cell depends on (for cleanup)
     pub row_dependencies: Mutex<HashMap<(u32, u32), HashSet<u32>>>,
+    /// Cross-sheet dependencies: (sheet_name, row, col) -> set of (sheet_index, row, col) that depend on it
+    pub cross_sheet_dependents: Mutex<HashMap<(String, u32, u32), HashSet<(usize, u32, u32)>>>,
+    /// Track which cross-sheet cells each formula depends on (for cleanup)
+    pub cross_sheet_dependencies: Mutex<HashMap<(usize, u32, u32), HashSet<(String, u32, u32)>>>,
 }
 
 impl AppState {
@@ -88,6 +92,8 @@ pub fn create_app_state() -> AppState {
         row_dependents: Mutex::new(HashMap::new()),
         column_dependencies: Mutex::new(HashMap::new()),
         row_dependencies: Mutex::new(HashMap::new()),
+        cross_sheet_dependents: Mutex::new(HashMap::new()),
+        cross_sheet_dependencies: Mutex::new(HashMap::new()),
     }
 }
 
@@ -219,12 +225,14 @@ fn col_letter_to_index(col: &str) -> u32 {
 
 /// Result of extracting references from a formula expression
 pub struct ExtractedRefs {
-    /// Individual cell references (row, col)
+    /// Individual cell references (row, col) on the current sheet
     pub cells: HashSet<(u32, u32)>,
     /// Column references (column indices)
     pub columns: HashSet<u32>,
     /// Row references (row indices)
     pub rows: HashSet<u32>,
+    /// Cross-sheet cell references (sheet_name, row, col)
+    pub cross_sheet_cells: HashSet<(String, u32, u32)>,
 }
 
 impl ExtractedRefs {
@@ -233,6 +241,7 @@ impl ExtractedRefs {
             cells: HashSet::new(),
             columns: HashSet::new(),
             rows: HashSet::new(),
+            cross_sheet_cells: HashSet::new(),
         }
     }
 }
@@ -251,12 +260,16 @@ pub fn extract_all_references(expr: &ParserExpr, grid: &Grid) -> ExtractedRefs {
 fn extract_references_recursive(expr: &ParserExpr, grid: &Grid, refs: &mut ExtractedRefs) {
     match expr {
         ParserExpr::Literal(_) => {}
-        // Note: sheet field is ignored for now - only extracts refs from current sheet
-        ParserExpr::CellRef { col, row, .. } => {
+        ParserExpr::CellRef { sheet, col, row } => {
             let col_idx = col_letter_to_index(col);
-            refs.cells.insert((*row, col_idx));
+            // If sheet is specified, this is a cross-sheet reference
+            if let Some(sheet_name) = sheet {
+                refs.cross_sheet_cells.insert((sheet_name.clone(), *row, col_idx));
+            } else {
+                refs.cells.insert((*row, col_idx));
+            }
         }
-        ParserExpr::Range { start, end, .. } => {
+        ParserExpr::Range { sheet, start, end } => {
             // Try to match both start and end as CellRefs
             if let (
                 ParserExpr::CellRef { col: start_col, row: start_row, .. },
@@ -267,9 +280,19 @@ fn extract_references_recursive(expr: &ParserExpr, grid: &Grid, refs: &mut Extra
                 let ec = col_letter_to_index(end_col);
                 let sr = *start_row;
                 let er = *end_row;
-                for r in sr.min(er)..=sr.max(er) {
-                    for c in sc.min(ec)..=sc.max(ec) {
-                        refs.cells.insert((r, c));
+                
+                // If sheet is specified, these are cross-sheet references
+                if let Some(sheet_name) = sheet {
+                    for r in sr.min(er)..=sr.max(er) {
+                        for c in sc.min(ec)..=sc.max(ec) {
+                            refs.cross_sheet_cells.insert((sheet_name.clone(), r, c));
+                        }
+                    }
+                } else {
+                    for r in sr.min(er)..=sr.max(er) {
+                        for c in sc.min(ec)..=sc.max(ec) {
+                            refs.cells.insert((r, c));
+                        }
                     }
                 }
             } else {
@@ -522,6 +545,39 @@ pub fn update_row_dependencies(
     
     if !new_rows.is_empty() {
         row_dependencies.insert(cell_pos, new_rows);
+    }
+}
+
+/// Update cross-sheet dependencies for a formula cell
+pub fn update_cross_sheet_dependencies(
+    formula_cell: (usize, u32, u32), // (sheet_index, row, col) of the formula
+    new_refs: HashSet<(String, u32, u32)>, // (sheet_name, row, col) references
+    cross_sheet_dependencies: &mut HashMap<(usize, u32, u32), HashSet<(String, u32, u32)>>,
+    cross_sheet_dependents: &mut HashMap<(String, u32, u32), HashSet<(usize, u32, u32)>>,
+) {
+    let old_refs = cross_sheet_dependencies.remove(&formula_cell).unwrap_or_default();
+    
+    // Remove old cross-sheet dependencies
+    for old_ref in &old_refs {
+        if let Some(deps) = cross_sheet_dependents.get_mut(old_ref) {
+            deps.remove(&formula_cell);
+            if deps.is_empty() {
+                cross_sheet_dependents.remove(old_ref);
+            }
+        }
+    }
+    
+    // Add new cross-sheet dependencies
+    for new_ref in &new_refs {
+        cross_sheet_dependents
+            .entry(new_ref.clone())
+            .or_insert_with(HashSet::new)
+            .insert(formula_cell);
+    }
+    
+    if !new_refs.is_empty() {
+        log_debug!("XDEP", "formula={:?} cross_sheet_refs={}", formula_cell, new_refs.len());
+        cross_sheet_dependencies.insert(formula_cell, new_refs);
     }
 }
 

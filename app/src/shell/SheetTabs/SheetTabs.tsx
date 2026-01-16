@@ -203,6 +203,17 @@ export function SheetTabs({ onSheetChange }: SheetTabsProps): React.ReactElement
             }
           }));
           
+          // Focus the formula bar since InlineEditor won't render on target sheet
+          // This matches Excel behavior where formula bar stays active during cross-sheet selection
+          setTimeout(() => {
+            const formulaBar = document.querySelector('[data-formula-bar="true"]') as HTMLInputElement;
+            if (formulaBar) {
+              formulaBar.focus();
+              const len = formulaBar.value.length;
+              formulaBar.setSelectionRange(len, len);
+            }
+          }, 50);
+          
           // DO NOT reload - stay in edit mode for formula reference selection
           return;
         }
