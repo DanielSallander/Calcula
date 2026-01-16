@@ -2,9 +2,10 @@
 // PURPOSE: Custom hook for handling keyboard navigation in the grid.
 // CONTEXT: This hook manages keyboard events for cell navigation including
 // arrow keys, Tab, Enter, Page Up/Down, Home, End, modifier combinations,
-// clipboard shortcuts (Ctrl+C, Ctrl+V, Ctrl+X, Ctrl+Z), and ESC to clear clipboard.
+// clipboard shortcuts (Ctrl+C, Ctrl+V, Ctrl+X, Ctrl+Z), DELETE key, and ESC to clear clipboard.
 // FIX: Added check for getGlobalIsEditing() to catch editing state synchronously
 //      before React state updates, preventing keystrokes from starting new edits.
+// FIX: Added DELETE key handler to clear selection contents.
 
 import { useCallback, useEffect } from "react";
 import { useGridContext } from "../state/GridContext";
@@ -39,6 +40,8 @@ interface UseGridKeyboardOptions {
   onClearClipboard?: () => void;
   /** Whether clipboard has content (for ESC handling) */
   hasClipboardContent?: boolean;
+  /** Callback for delete/clear contents operation */
+  onDelete?: () => Promise<void>;
 }
 
 /**
@@ -59,6 +62,7 @@ export function useGridKeyboard(options: UseGridKeyboardOptions): void {
     onRedo,
     onClearClipboard,
     hasClipboardContent = false,
+    onDelete,
   } = options;
   const { state, dispatch } = useGridContext();
   const { config, viewport, selection } = state;
@@ -151,6 +155,16 @@ export function useGridKeyboard(options: UseGridKeyboardOptions): void {
         eventLog.keyboard('Grid', 'handleKeyDown', 'Escape', []);
         onClearClipboard();
         fnLog.exit('handleKeyDown', 'cleared clipboard');
+        return;
+      }
+
+      // Handle DELETE/Backspace key - clear selection contents
+      if ((key === "Delete" || key === "Backspace") && onDelete) {
+        event.preventDefault();
+        event.stopPropagation();
+        eventLog.keyboard('Grid', 'handleKeyDown', key, []);
+        onDelete();
+        fnLog.exit('handleKeyDown', 'delete contents');
         return;
       }
 
@@ -349,7 +363,7 @@ export function useGridKeyboard(options: UseGridKeyboardOptions): void {
         fnLog.exit('handleKeyDown', 'handled');
       }
     },
-    [enabled, isEditing, config.totalRows, config.totalCols, viewport.rowCount, dispatch, onSelectionChange, onCut, onCopy, onPaste, onUndo, onRedo, onClearClipboard, hasClipboardContent, handleCtrlArrow]
+    [enabled, isEditing, config.totalRows, config.totalCols, viewport.rowCount, dispatch, onSelectionChange, onCut, onCopy, onPaste, onUndo, onRedo, onClearClipboard, hasClipboardContent, onDelete, handleCtrlArrow]
   );
 
   /**

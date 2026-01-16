@@ -3,6 +3,7 @@
 // CONTEXT: Coordinates global selection hooks with local canvas events.
 // Includes fill handle and clipboard support with marching ants.
 // FIX: Added focusContainerRef parameter for keyboard event handling.
+// FIX: Added onDelete handler to useGridKeyboard to clear selection on DELETE key.
 
 import { useState, useCallback, useEffect, useRef } from "react";
 import { 
@@ -19,9 +20,11 @@ import { useGridState, useGridContext } from "../../state";
 import { 
   getCell, 
   setColumnWidth as setColumnWidthApi, 
-  setRowHeight as setRowHeightApi 
+  setRowHeight as setRowHeightApi,
+  clearRange,
 } from "../../lib/tauri-api";
 import { setColumnWidth, setRowHeight } from "../../state/gridActions";
+import { cellEvents } from "../../lib/cellEvents";
 import type { GridCanvasHandle } from "../Grid";
 
 type GridState = ReturnType<typeof useGridState>;
@@ -207,6 +210,37 @@ export function useSpreadsheetSelection({
     autoFillToEdge();
   }, [autoFillToEdge]);
 
+  // Handle DELETE key - clear contents of selection
+  const handleDeleteContents = useCallback(async () => {
+    if (!selection) {
+      console.log("[useSpreadsheetSelection] No selection to clear");
+      return;
+    }
+
+    const minRow = Math.min(selection.startRow, selection.endRow);
+    const maxRow = Math.max(selection.startRow, selection.endRow);
+    const minCol = Math.min(selection.startCol, selection.endCol);
+    const maxCol = Math.max(selection.startCol, selection.endCol);
+
+    console.log(`[useSpreadsheetSelection] Clearing contents from (${minRow},${minCol}) to (${maxRow},${maxCol})`);
+
+    try {
+      const clearedCount = await clearRange(minRow, minCol, maxRow, maxCol);
+      console.log(`[useSpreadsheetSelection] Clear contents complete - ${clearedCount} cells cleared`);
+      
+      // Emit a single event to trigger refresh
+      cellEvents.emit({
+        row: minRow,
+        col: minCol,
+        oldValue: undefined,
+        newValue: "",
+        formula: null,
+      });
+    } catch (error) {
+      console.error("[useSpreadsheetSelection] Failed to clear contents:", error);
+    }
+  }, [selection]);
+
   const {
     isDragging,
     isFormulaDragging,
@@ -300,7 +334,7 @@ export function useSpreadsheetSelection({
     return cursorStyle;
   }, [fillState.isDragging, cursorStyle]);
 
-  // Keyboard handling with clipboard shortcuts and ESC to clear clipboard
+  // Keyboard handling with clipboard shortcuts, ESC to clear clipboard, and DELETE to clear contents
   // FIX: Use focusContainerRef instead of containerRef for keyboard events
   // The focusContainerRef points to the focusable outer container that receives keyboard events
   useGridKeyboard({
@@ -317,6 +351,7 @@ export function useSpreadsheetSelection({
     },
     onClearClipboard: clearClipboardState,
     hasClipboardContent: clipboardMode !== "none",
+    onDelete: handleDeleteContents,
   });
 
   const handleDoubleClickEvent = useCallback(
