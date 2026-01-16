@@ -1,12 +1,26 @@
-We have now introduced a right-mouse-click menu.
-It appears as it should.
-However, the we do not have any commands connected to the items yet.
-Go ahead and create the commands associated with each item:
-- Cut
-- Copy
-- Paste
-- Clear Contents
-- Insert Row
-- Insert Column
-In addition, I notice that if I select a range of cells and right click it unselects the range and only selects the cell that is right clicked on.
-This should change so that the selection on the range is intact, and then any item that is selected in the menu should be applied to that selection.
+We an issue with editing cells that makes it a bit "glitchy".
+The arises when editing in this way:
+1. User writes something, lets say "hello" in a cell, lets say cell A1
+2. User press enter and the value is commited to the cell
+3. User goes back to A1 to append something else to the existing value, lets say " world".
+4. User press enter.
+This creates some issue where one is left in edit mode but cannot write anything.
+Looking at the formula bar it looks like its still in edit mode.
+However, one can still click on other cells, but not type in anything.
+It hard to describe exactly what going on but I hope this gives an idea of what is happening:
+
+Below are messages from the console if that gives any idea:
+[InlineEditor] Focused input, cursor at position: 0
+useEditing.ts:575 [useEditing] commitEdit called {editingRow: 1, editingCol: 1, sourceSheetIndex: 0, sourceSheetName: 'Sheet1', currentSheetIndex: 0, …}
+tauri-api.ts:61 [tauri-api] updateCell(1, 1, "hello")
+tauri-api.ts:64 [tauri-api] updateCell returned 1 updated cells
+useViewport.ts:315 [VIEWPORT] scrollToSelection called: {endRow: 1, endCol: 1}
+useViewport.ts:300 [VIEWPORT] scrollToCell called: {row: 1, col: 1, center: false}
+GridCanvas.tsx:277 [Cells] Fetched 1 cells. First cell: row=1, col=1, display="hello", style_index=0
+InlineEditor.tsx:353 [InlineEditor] Formula bar active, skipping autofocus
+useEditing.ts:575 [useEditing] commitEdit called {editingRow: 1, editingCol: 1, sourceSheetIndex: 0, sourceSheetName: 'Sheet1', currentSheetIndex: 0, …}
+tauri-api.ts:61 [tauri-api] updateCell(1, 1, "hello")
+tauri-api.ts:64 [tauri-api] updateCell returned 1 updated cells
+useViewport.ts:315 [VIEWPORT] scrollToSelection called: {endRow: 1, endCol: 1}
+useViewport.ts:300 [VIEWPORT] scrollToCell called: {row: 1, col: 1, center: false}
+GridCanvas.tsx:277 [Cells] Fetched 1 cells. First cell: row=1, col=1, display="hello", style_index=0

@@ -145,6 +145,11 @@ export function useEditing(): UseEditingReturn {
   const [lastError, setLastError] = useState<string | null>(null);
   const [isCommitting, setIsCommitting] = useState(false);
   const [pendingReference, setPendingReference] = useState<FormulaReference | null>(null);
+
+  // FIX: Ref to prevent double commits from race conditions
+  // This catches cases where multiple sources (InlineEditor blur, formula bar, etc.)
+  // trigger commitEdit before React state updates
+  const commitInProgressRef = useRef(false);
   
   // FIX: Create a ref-like object that accesses the module-level singleton
   // This ensures all hook instances see the same value
@@ -564,15 +569,25 @@ export function useEditing(): UseEditingReturn {
   /**
    * Commit the current edit to the backend.
    * FIX: If editing started on a different sheet, switch back to that sheet before committing.
-*/
-  const commitEdit = useCallback(async (): Promise<CellUpdateResult | null> => {
-    if (!editing) {
-      // FIX: Clear global flag even on early return to prevent stuck state
-      setGlobalIsEditing(false);
-      return null;
-    }
+  */
+    const commitEdit = useCallback(async (): Promise<CellUpdateResult | null> => {
+      // FIX: Prevent double commits from race conditions
+      // This can happen when InlineEditor blur and formula bar both trigger commit
+      if (commitInProgressRef.current) {
+        console.log("[useEditing] commitEdit skipped - already in progress");
+        return null;
+      }
 
-    console.log("[useEditing] commitEdit called", {
+      if (!editing) {
+        // FIX: Clear global flag even on early return to prevent stuck state
+        setGlobalIsEditing(false);
+        return null;
+      }
+
+      // FIX: Set the ref guard BEFORE any async work
+      commitInProgressRef.current = true;
+
+      console.log("[useEditing] commitEdit called", {
       editingRow: editing.row,
       editingCol: editing.col,
       sourceSheetIndex: editing.sourceSheetIndex,
@@ -690,6 +705,8 @@ export function useEditing(): UseEditingReturn {
       };
     } finally {
       setIsCommitting(false);
+      // FIX: Clear the ref guard
+      commitInProgressRef.current = false;
     }
   }, [editing, dispatch, sheetContext]);
 

@@ -3,6 +3,9 @@
 // CONTEXT: Contains complex logic for handling key events in both the container and inputs.
 // FIX: Added event.stopPropagation() to formula input key handler to prevent bubbling
 //      which caused the container to trigger "Replace Mode" editing.
+// FIX: Use focusContainerRef instead of containerRef for focus restoration.
+//      containerRef points to the grid area (not focusable), while focusContainerRef
+//      points to the outer container with tabIndex={0}.
 
 import { useCallback, useEffect, useState } from "react";
 import { useEditing } from "../../hooks";
@@ -12,6 +15,7 @@ type GridState = ReturnType<typeof useGridState>;
 
 interface UseSpreadsheetEditingProps {
   containerRef: React.RefObject<HTMLDivElement | null>;
+  focusContainerRef: React.RefObject<HTMLDivElement | null>; // FIX: Add focusContainerRef
   formulaInputRef: React.RefObject<HTMLInputElement | null>;
   state: GridState;
   selectedCellContent: string;
@@ -34,6 +38,7 @@ export function getFormulaBarValue(
 
 export function useSpreadsheetEditing({
   containerRef,
+  focusContainerRef, // FIX: Destructure focusContainerRef
   formulaInputRef,
   state,
   selectedCellContent,
@@ -113,11 +118,13 @@ export function useSpreadsheetEditing({
           moveActiveCell(event.shiftKey ? -1 : 1, 0);
           scrollToSelection();
         }
-        containerRef.current?.focus();
+        // FIX: Use focusContainerRef instead of containerRef
+        focusContainerRef.current?.focus();
       } else if (event.key === "Escape") {
         event.preventDefault();
         cancelEdit();
-        containerRef.current?.focus();
+        // FIX: Use focusContainerRef instead of containerRef
+        focusContainerRef.current?.focus();
       } else if (event.key === "Tab") {
         event.preventDefault();
         const success = await handleCommitEdit();
@@ -125,10 +132,11 @@ export function useSpreadsheetEditing({
           moveActiveCell(0, event.shiftKey ? -1 : 1);
           scrollToSelection();
         }
-        containerRef.current?.focus();
+        // FIX: Use focusContainerRef instead of containerRef
+        focusContainerRef.current?.focus();
       }
     },
-    [handleCommitEdit, cancelEdit, moveActiveCell, scrollToSelection, containerRef]
+    [handleCommitEdit, cancelEdit, moveActiveCell, scrollToSelection, focusContainerRef]
   );
 
   // --- Inline Editor Handlers ---
@@ -138,27 +146,31 @@ export function useSpreadsheetEditing({
   const handleInlineCommit = useCallback(async () => {
     const success = await handleCommitEdit();
     if (success) {
-      containerRef.current?.focus();
+      // FIX: Use focusContainerRef instead of containerRef
+      focusContainerRef.current?.focus();
     }
     return success;
-  }, [handleCommitEdit, containerRef]);
+  }, [handleCommitEdit, focusContainerRef]);
   
   const handleInlineCancel = useCallback(() => {
     cancelEdit();
-    containerRef.current?.focus();
-  }, [cancelEdit, containerRef]);
+    // FIX: Use focusContainerRef instead of containerRef
+    focusContainerRef.current?.focus();
+  }, [cancelEdit, focusContainerRef]);
 
   const handleInlineTab = useCallback((shiftKey: boolean) => {
     moveActiveCell(0, shiftKey ? -1 : 1);
     scrollToSelection();
-    containerRef.current?.focus();
-  }, [moveActiveCell, scrollToSelection, containerRef]);
+    // FIX: Use focusContainerRef instead of containerRef
+    focusContainerRef.current?.focus();
+  }, [moveActiveCell, scrollToSelection, focusContainerRef]);
 
   const handleInlineEnter = useCallback((shiftKey: boolean) => {
     moveActiveCell(shiftKey ? -1 : 1, 0);
     scrollToSelection();
-    containerRef.current?.focus();
-  }, [moveActiveCell, scrollToSelection, containerRef]);
+    // FIX: Use focusContainerRef instead of containerRef
+    focusContainerRef.current?.focus();
+  }, [moveActiveCell, scrollToSelection, focusContainerRef]);
 
   const handleContainerKeyDown = useCallback(
     async (event: React.KeyboardEvent<HTMLDivElement>) => {

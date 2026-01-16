@@ -3,6 +3,7 @@
 // CONTEXT: Orchestrates initialization and combines logic from Styles, Selection, Editing, and Layout hooks.
 // Updated: Added clipboard state for marching ants animation.
 // FIX: Added focusContainerRef for proper keyboard event handling.
+// FIX: Pass focusContainerRef to useSpreadsheetEditing for proper focus restoration.
 
 import { useRef, useCallback, useState, useEffect } from "react";
 import { useGridState, useGridContext } from "../../state";
@@ -53,6 +54,7 @@ export function useSpreadsheet() {
 
   const editingLogic = useSpreadsheetEditing({
     containerRef,
+    focusContainerRef, // FIX: Pass focusContainerRef for focus restoration
     formulaInputRef,
     state,
     selectedCellContent: selectionLogic.selectedCellContent,
