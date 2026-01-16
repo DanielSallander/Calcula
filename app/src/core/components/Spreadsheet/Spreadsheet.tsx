@@ -6,6 +6,7 @@
 // FIX: Corrected containerRef to point to grid area for proper mouse coordinate calculation.
 // FIX: Use focusContainerRef from useSpreadsheet for keyboard event handling.
 // UPDATE: Added extensible right-click context menu system.
+// UPDATE: Register command handlers with gridCommands for context menu actions.
 
 import React, { useCallback, useEffect, useState } from "react";
 import { useGridState, useGridContext } from "../../state";
@@ -15,11 +16,13 @@ import { InlineEditor } from "../InlineEditor";
 import { Scrollbar, ScrollbarCorner } from "../Scrollbar/Scrollbar";
 import { useScrollbarMetrics } from "../Scrollbar/useScrollbarMetrics";
 import { useSpreadsheet } from "./useSpreadsheet";
-//import { useEditing } from "../../hooks/useEditing";
+import { clearCell } from "../../lib/tauri-api";
+import { cellEvents } from "../../lib/cellEvents";
 import { ContextMenu } from "../ContextMenu";
 import type { ContextMenuPosition, ContextMenuItem } from "../ContextMenu";
 import {
   gridExtensions,
+  gridCommands,
   registerCoreGridContextMenu,
   isClickWithinSelection,
   type GridMenuContext,
@@ -63,6 +66,9 @@ function SpreadsheetContent({ className }: SpreadsheetContentProps): React.React
     handleInlineCancel,
     handleInlineTab,
     handleInlineEnter,
+    handleCut,
+    handleCopy,
+    handlePaste,
   } = handlers;
 
   // 4. Extract UI Helpers
@@ -85,6 +91,60 @@ function SpreadsheetContent({ className }: SpreadsheetContentProps): React.React
     clipboardMode,
     fillState,
   } = state;
+
+  // -------------------------------------------------------------------------
+  // Clear Contents Handler
+  // -------------------------------------------------------------------------
+  const handleClearContents = useCallback(async () => {
+    if (!selection) {
+      console.log("[Spreadsheet] No selection to clear");
+      return;
+    }
+
+    const minRow = Math.min(selection.startRow, selection.endRow);
+    const maxRow = Math.max(selection.startRow, selection.endRow);
+    const minCol = Math.min(selection.startCol, selection.endCol);
+    const maxCol = Math.max(selection.startCol, selection.endCol);
+
+    console.log(`[Spreadsheet] Clearing contents from (${minRow},${minCol}) to (${maxRow},${maxCol})`);
+
+    try {
+      for (let row = minRow; row <= maxRow; row++) {
+        for (let col = minCol; col <= maxCol; col++) {
+          await clearCell(row, col);
+          cellEvents.emit({
+            row,
+            col,
+            oldValue: undefined,
+            newValue: "",
+            formula: null,
+          });
+        }
+      }
+      console.log("[Spreadsheet] Clear contents complete");
+    } catch (error) {
+      console.error("[Spreadsheet] Failed to clear contents:", error);
+    }
+  }, [selection]);
+
+  // -------------------------------------------------------------------------
+  // Register Command Handlers
+  // -------------------------------------------------------------------------
+  useEffect(() => {
+    // Register clipboard and edit command handlers
+    gridCommands.register("cut", handleCut);
+    gridCommands.register("copy", handleCopy);
+    gridCommands.register("paste", handlePaste);
+    gridCommands.register("clearContents", handleClearContents);
+
+    // Cleanup on unmount
+    return () => {
+      gridCommands.unregister("cut");
+      gridCommands.unregister("copy");
+      gridCommands.unregister("paste");
+      gridCommands.unregister("clearContents");
+    };
+  }, [handleCut, handleCopy, handlePaste, handleClearContents]);
 
   // -------------------------------------------------------------------------
   // Context Menu State
@@ -148,7 +208,12 @@ function SpreadsheetContent({ className }: SpreadsheetContentProps): React.React
   // Close context menu
   const handleCloseContextMenu = useCallback(() => {
     setContextMenu(null);
-  }, []);
+    // Restore focus to the grid container for keyboard navigation
+    // Use setTimeout to ensure focus happens after React re-render
+    setTimeout(() => {
+      focusContainerRef.current?.focus();
+    }, 0);
+  }, [focusContainerRef]);
 
   // Get menu items for current context
   const getContextMenuItems = useCallback((): ContextMenuItem[] => {

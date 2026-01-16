@@ -1,7 +1,8 @@
-// FILENAME: app/src/hooks/useMouseSelection/selection/cellSelectionHandlers.ts
+// FILENAME: app/src/core/hooks/useMouseSelection/selection/cellSelectionHandlers.ts
 // PURPOSE: Factory function for creating cell selection event handlers.
 // CONTEXT: Creates handlers for mouse down on cells, supporting single
 // click selection and shift-click to extend selection ranges.
+// FIX: Right-click within selection now preserves the selection.
 
 import type { GridConfig, Viewport, Selection, DimensionOverrides } from "../../../types";
 import type { CellPosition, MousePosition, HeaderDragState } from "../types";
@@ -28,6 +29,24 @@ interface CellSelectionHandlers {
     shiftKey: boolean,
     event: React.MouseEvent<HTMLElement>
   ) => Promise<boolean>;
+}
+
+/**
+ * Check if a cell is within the given selection range.
+ */
+function isCellWithinSelection(
+  row: number,
+  col: number,
+  selection: Selection | null
+): boolean {
+  if (!selection) return false;
+
+  const minRow = Math.min(selection.startRow, selection.endRow);
+  const maxRow = Math.max(selection.startRow, selection.endRow);
+  const minCol = Math.min(selection.startCol, selection.endCol);
+  const maxCol = Math.max(selection.startCol, selection.endCol);
+
+  return row >= minRow && row <= maxRow && col >= minCol && col <= maxCol;
 }
 
 /**
@@ -68,6 +87,18 @@ export function createCellSelectionHandlers(deps: CellSelectionDependencies): Ce
 
     const { row, col } = cell;
 
+    // Check if this is a right-click (button === 2)
+    const isRightClick = event.button === 2;
+
+    // If right-clicking within current selection, preserve the selection
+    // and don't start a drag operation
+    if (isRightClick && isCellWithinSelection(row, col, selection)) {
+      // Don't change selection, don't start drag
+      // Context menu will be handled by onContextMenu event
+      event.preventDefault();
+      return true;
+    }
+
     // If we're editing, commit first
     if (onCommitBeforeSelect) {
       await onCommitBeforeSelect();
@@ -77,15 +108,17 @@ export function createCellSelectionHandlers(deps: CellSelectionDependencies): Ce
       // Shift-click extends selection
       onExtendTo(row, col);
     } else {
-      // Regular click starts new selection
+      // Regular click (or right-click outside selection) starts new selection
       onSelectCell(row, col);
     }
 
-    // Start drag
-    setIsDragging(true);
-    dragStartRef.current = { row, col };
-    headerDragRef.current = null;
-    lastMousePosRef.current = { x: mouseX, y: mouseY };
+    // Only start drag for left-click (button === 0)
+    if (!isRightClick) {
+      setIsDragging(true);
+      dragStartRef.current = { row, col };
+      headerDragRef.current = null;
+      lastMousePosRef.current = { x: mouseX, y: mouseY };
+    }
 
     event.preventDefault();
     return true;

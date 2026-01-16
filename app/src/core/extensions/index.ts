@@ -22,6 +22,7 @@ export type {
 // Grid extensions
 export {
   gridExtensions,
+  gridCommands,
   registerCoreGridContextMenu,
   isClickWithinSelection,
   GridMenuGroups,

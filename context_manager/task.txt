@@ -1,6 +1,12 @@
-I would like to introduce a right-mouse-click menu.
-It should appear when right clicking the mouse.
-And we **must** prepare it for extensibility. What I mean is that I want other people to be able to build extensions here.
-Much like one has the possibility to extend the right mouse click menu in VSCode.
-One more thing. Now when you right mouse click you get the option to get the developer tools (when we are now developing).
-I want to keep this option, so please come up with an idea of how we should handle that.
+We have now introduced a right-mouse-click menu.
+It appears as it should.
+However, the we do not have any commands connected to the items yet.
+Go ahead and create the commands associated with each item:
+- Cut
+- Copy
+- Paste
+- Clear Contents
+- Insert Row
+- Insert Column
+In addition, I notice that if I select a range of cells and right click it unselects the range and only selects the cell that is right clicked on.
+This should change so that the selection on the range is intact, and then any item that is selected in the menu should be applied to that selection.

@@ -2,6 +2,7 @@
 // PURPOSE: Extension points for grid context menu customization
 // CONTEXT: Allows extensions to add context menu items when right-clicking on cells.
 //          Follows the same pattern as sheetExtensions.ts for consistency.
+// UPDATE: Added command registry for direct handler invocation instead of keyboard events.
 
 import type { Selection } from "../types";
 
@@ -66,6 +67,71 @@ const GROUP_ORDER: Record<string, number> = {
   [GridMenuGroups.DATA]: 400,
   [GridMenuGroups.DEVELOPER]: 900,
 };
+
+// ============================================================================
+// Command Registry - allows components to register handlers for menu commands
+// ============================================================================
+
+/** Command handler function type */
+type CommandHandler = () => void | Promise<void>;
+
+/** Available command names */
+export type GridCommand = "cut" | "copy" | "paste" | "clearContents" | "insertRow" | "insertColumn";
+
+/** Command registry for direct handler invocation */
+class GridCommandRegistry {
+  private handlers: Map<GridCommand, CommandHandler> = new Map();
+
+  /**
+   * Register a command handler.
+   * @param command The command name
+   * @param handler The handler function
+   */
+  register(command: GridCommand, handler: CommandHandler): void {
+    this.handlers.set(command, handler);
+  }
+
+  /**
+   * Unregister a command handler.
+   * @param command The command name
+   */
+  unregister(command: GridCommand): void {
+    this.handlers.delete(command);
+  }
+
+  /**
+   * Execute a command if a handler is registered.
+   * @param command The command to execute
+   * @returns true if the command was executed, false otherwise
+   */
+  async execute(command: GridCommand): Promise<boolean> {
+    const handler = this.handlers.get(command);
+    if (handler) {
+      await handler();
+      return true;
+    }
+    console.warn(`[GridCommands] No handler registered for command: ${command}`);
+    return false;
+  }
+
+  /**
+   * Check if a command has a registered handler.
+   * @param command The command name
+   */
+  hasHandler(command: GridCommand): boolean {
+    return this.handlers.has(command);
+  }
+
+  /**
+   * Clear all registered handlers (useful for cleanup/testing).
+   */
+  clear(): void {
+    this.handlers.clear();
+  }
+}
+
+/** Singleton command registry instance */
+export const gridCommands = new GridCommandRegistry();
 
 // ============================================================================
 // Grid Extension Registry
@@ -213,10 +279,7 @@ export function registerCoreGridContextMenu(): void {
     order: 10,
     disabled: (ctx) => !ctx.selection,
     onClick: async () => {
-      // Dispatch keyboard event to trigger existing cut handler
-      document.dispatchEvent(
-        new KeyboardEvent("keydown", { key: "x", ctrlKey: true, bubbles: true })
-      );
+      await gridCommands.execute("cut");
     },
   });
 
@@ -228,9 +291,7 @@ export function registerCoreGridContextMenu(): void {
     order: 20,
     disabled: (ctx) => !ctx.selection,
     onClick: async () => {
-      document.dispatchEvent(
-        new KeyboardEvent("keydown", { key: "c", ctrlKey: true, bubbles: true })
-      );
+      await gridCommands.execute("copy");
     },
   });
 
@@ -242,9 +303,7 @@ export function registerCoreGridContextMenu(): void {
     order: 30,
     separatorAfter: true,
     onClick: async () => {
-      document.dispatchEvent(
-        new KeyboardEvent("keydown", { key: "v", ctrlKey: true, bubbles: true })
-      );
+      await gridCommands.execute("paste");
     },
   });
 
@@ -260,24 +319,25 @@ export function registerCoreGridContextMenu(): void {
     disabled: (ctx) => !ctx.selection,
     separatorAfter: true,
     onClick: async () => {
-      document.dispatchEvent(
-        new KeyboardEvent("keydown", { key: "Delete", bubbles: true })
-      );
+      await gridCommands.execute("clearContents");
     },
   });
 
   // -------------------------------------------------------------------------
-  // Insert Group (placeholders for future implementation)
+  // Insert Group
+  // Note: Insert Row/Column require backend implementation (Rust commands)
+  // that don't exist yet. Keeping disabled until backend support is added.
   // -------------------------------------------------------------------------
   gridExtensions.registerContextMenuItem({
     id: "core:insertRow",
     label: "Insert Row",
     group: GridMenuGroups.INSERT,
     order: 10,
-    disabled: true, // TODO: Implement
+    disabled: true, // Backend not implemented yet
     onClick: async (ctx) => {
-      console.log("[GridMenu] Insert row at:", ctx.clickedCell?.row);
-      // TODO: Implement row insertion
+      // TODO: Implement when backend insert_row command is available
+      console.log("[GridMenu] Insert row at:", ctx.clickedCell?.row ?? ctx.selection?.startRow);
+      await gridCommands.execute("insertRow");
     },
   });
 
@@ -286,11 +346,12 @@ export function registerCoreGridContextMenu(): void {
     label: "Insert Column",
     group: GridMenuGroups.INSERT,
     order: 20,
-    disabled: true, // TODO: Implement
+    disabled: true, // Backend not implemented yet
     separatorAfter: true,
     onClick: async (ctx) => {
-      console.log("[GridMenu] Insert column at:", ctx.clickedCell?.col);
-      // TODO: Implement column insertion
+      // TODO: Implement when backend insert_column command is available
+      console.log("[GridMenu] Insert column at:", ctx.clickedCell?.col ?? ctx.selection?.startCol);
+      await gridCommands.execute("insertColumn");
     },
   });
 
@@ -305,9 +366,7 @@ export function registerCoreGridContextMenu(): void {
       group: GridMenuGroups.DEVELOPER,
       order: 10,
       onClick: async () => {
-        // Inform user about the shortcut
         console.log("[GridMenu] Tip: Use Shift+Right-click for browser context menu with DevTools");
-        // Try Tauri devtools command if available
         try {
           const { invoke } = await import("@tauri-apps/api/core");
           await invoke("open_devtools");
