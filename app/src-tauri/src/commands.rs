@@ -354,6 +354,82 @@ pub fn clear_cell(state: State<AppState>, row: u32, col: u32) {
     );
 }
 
+/// Clear a range of cells efficiently.
+/// Only clears cells that actually exist within the range.
+#[tauri::command]
+pub fn clear_range(
+    state: State<AppState>,
+    start_row: u32,
+    start_col: u32,
+    end_row: u32,
+    end_col: u32,
+) -> u32 {
+    let mut grid = state.grid.lock().unwrap();
+    let mut grids = state.grids.lock().unwrap();
+    let active_sheet = *state.active_sheet.lock().unwrap();
+    let mut dependents_map = state.dependents.lock().unwrap();
+    let mut dependencies_map = state.dependencies.lock().unwrap();
+    let mut column_dependents_map = state.column_dependents.lock().unwrap();
+    let mut column_dependencies_map = state.column_dependencies.lock().unwrap();
+    let mut row_dependents_map = state.row_dependents.lock().unwrap();
+    let mut row_dependencies_map = state.row_dependencies.lock().unwrap();
+    let mut cross_sheet_dependents_map = state.cross_sheet_dependents.lock().unwrap();
+    let mut cross_sheet_dependencies_map = state.cross_sheet_dependencies.lock().unwrap();
+
+    // Clamp to grid bounds to avoid iterating beyond used range
+    let effective_end_row = end_row.min(grid.max_row);
+    let effective_end_col = end_col.min(grid.max_col);
+
+    // Collect cells to clear (we need to collect first to avoid borrow issues)
+    let cells_to_clear: Vec<(u32, u32)> = grid
+        .cells
+        .keys()
+        .filter(|(r, c)| {
+            *r >= start_row && *r <= effective_end_row && *c >= start_col && *c <= effective_end_col
+        })
+        .cloned()
+        .collect();
+
+    let count = cells_to_clear.len() as u32;
+
+    // Clear each cell
+    for (row, col) in cells_to_clear {
+        grid.clear_cell(row, col);
+        
+        if active_sheet < grids.len() {
+            grids[active_sheet].clear_cell(row, col);
+        }
+
+        // Clear dependencies
+        update_cross_sheet_dependencies(
+            (active_sheet, row, col),
+            HashSet::new(),
+            &mut cross_sheet_dependencies_map,
+            &mut cross_sheet_dependents_map,
+        );
+        update_dependencies(
+            (row, col),
+            HashSet::new(),
+            &mut dependencies_map,
+            &mut dependents_map,
+        );
+        update_column_dependencies(
+            (row, col),
+            HashSet::new(),
+            &mut column_dependencies_map,
+            &mut column_dependents_map,
+        );
+        update_row_dependencies(
+            (row, col),
+            HashSet::new(),
+            &mut row_dependencies_map,
+            &mut row_dependents_map,
+        );
+    }
+
+    count
+}
+
 /// Get the grid bounds (max row and col with data).
 #[tauri::command]
 pub fn get_grid_bounds(state: State<AppState>) -> (u32, u32) {

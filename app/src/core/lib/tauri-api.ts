@@ -69,6 +69,20 @@ export async function clearCell(row: number, col: number): Promise<void> {
   return invoke<void>("clear_cell", { row, col });
 }
 
+export async function clearRange(
+  startRow: number,
+  startCol: number,
+  endRow: number,
+  endCol: number
+): Promise<number> {
+  return invoke<number>("clear_range", {
+    startRow,
+    startCol,
+    endRow,
+    endCol,
+  });
+}
+
 export async function getGridBounds(): Promise<[number, number]> {
   return invoke<[number, number]>("get_grid_bounds");
 }

@@ -16,7 +16,7 @@ import { InlineEditor } from "../InlineEditor";
 import { Scrollbar, ScrollbarCorner } from "../Scrollbar/Scrollbar";
 import { useScrollbarMetrics } from "../Scrollbar/useScrollbarMetrics";
 import { useSpreadsheet } from "./useSpreadsheet";
-import { clearCell } from "../../lib/tauri-api";
+import { clearRange } from "../../lib/tauri-api";
 import { cellEvents } from "../../lib/cellEvents";
 import { ContextMenu } from "../ContextMenu";
 import type { ContextMenuPosition, ContextMenuItem } from "../ContextMenu";
@@ -96,36 +96,34 @@ function SpreadsheetContent({ className }: SpreadsheetContentProps): React.React
   // Clear Contents Handler
   // -------------------------------------------------------------------------
   const handleClearContents = useCallback(async () => {
-    if (!selection) {
-      console.log("[Spreadsheet] No selection to clear");
-      return;
-    }
-
-    const minRow = Math.min(selection.startRow, selection.endRow);
-    const maxRow = Math.max(selection.startRow, selection.endRow);
-    const minCol = Math.min(selection.startCol, selection.endCol);
-    const maxCol = Math.max(selection.startCol, selection.endCol);
-
-    console.log(`[Spreadsheet] Clearing contents from (${minRow},${minCol}) to (${maxRow},${maxCol})`);
-
-    try {
-      for (let row = minRow; row <= maxRow; row++) {
-        for (let col = minCol; col <= maxCol; col++) {
-          await clearCell(row, col);
-          cellEvents.emit({
-            row,
-            col,
-            oldValue: undefined,
-            newValue: "",
-            formula: null,
-          });
-        }
+      if (!selection) {
+        console.log("[Spreadsheet] No selection to clear");
+        return;
       }
-      console.log("[Spreadsheet] Clear contents complete");
-    } catch (error) {
-      console.error("[Spreadsheet] Failed to clear contents:", error);
-    }
-  }, [selection]);
+
+      const minRow = Math.min(selection.startRow, selection.endRow);
+      const maxRow = Math.max(selection.startRow, selection.endRow);
+      const minCol = Math.min(selection.startCol, selection.endCol);
+      const maxCol = Math.max(selection.startCol, selection.endCol);
+
+      console.log(`[Spreadsheet] Clearing contents from (${minRow},${minCol}) to (${maxRow},${maxCol})`);
+
+      try {
+        const clearedCount = await clearRange(minRow, minCol, maxRow, maxCol);
+        console.log(`[Spreadsheet] Clear contents complete - ${clearedCount} cells cleared`);
+        
+        // Emit a single event to trigger refresh
+        cellEvents.emit({
+          row: minRow,
+          col: minCol,
+          oldValue: undefined,
+          newValue: "",
+          formula: null,
+        });
+      } catch (error) {
+        console.error("[Spreadsheet] Failed to clear contents:", error);
+      }
+    }, [selection]);
 
   // -------------------------------------------------------------------------
   // Register Command Handlers
