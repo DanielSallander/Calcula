@@ -1,6 +1,6 @@
 // FILENAME: app/src/hooks/useMouseSelection/useMouseSelection.ts
 // PURPOSE: Main hook for handling mouse-based selection interactions.
-// CONTEXT: Updated to pass drag start position for direction-aware 50% threshold.
+// CONTEXT: Updated to use custom Excel-style cursor images for header selection.
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import type {
@@ -12,7 +12,7 @@ import type {
   HeaderDragState,
   FormulaHeaderDragState,
 } from "./types";
-import { getCellFromPixel } from "../../lib/gridRenderer";
+import { getCellFromPixel, getColumnFromHeader, getRowFromHeader } from "../../lib/gridRenderer";
 import { calculateAutoScrollDelta } from "./utils/autoScrollUtils";
 import { getCellFromMousePosition } from "./utils/cellUtils";
 import { useAutoScroll } from "./selection/useAutoScroll";
@@ -22,6 +22,11 @@ import { createFormulaHandlers } from "./editing/formulaHandlers";
 import { createFormulaHeaderHandlers } from "./editing/formulaHeaderHandlers";
 import { createResizeHandlers } from "./layout/resizeHandlers";
 import { createFillHandleCursorChecker } from "./utils/fillHandleUtils";
+
+// Custom cursor data URLs for Excel-style header selection arrows
+const COLUMN_SELECT_CURSOR = `url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='24' height='24' viewBox='0 0 24 24'%3E%3Cpath d='M12 2 L12 18 M12 18 L8 14 M12 18 L16 14' stroke='black' stroke-width='2' fill='none' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E") 12 12, pointer`;
+
+const ROW_SELECT_CURSOR = `url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='24' height='24' viewBox='0 0 24 24'%3E%3Cpath d='M2 12 L18 12 M18 12 L14 8 M18 12 L14 16' stroke='black' stroke-width='2' fill='none' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E") 12 12, pointer`;
 
 /**
  * Hook for managing mouse-based cell selection with drag support.
@@ -302,12 +307,24 @@ export function useMouseSelection(props: UseMouseSelectionProps): UseMouseSelect
           if (colResize) {
             resizeHandlers.updateCursorForPosition(mouseX, mouseY);
           } else {
-            // Check if over a cell (standard cell cursor)
-            const cell = getCellFromPixel(mouseX, mouseY, config, viewport, dimensions);
-            if (cell) {
-              setCursorStyle("cell");
+            // Check if over column header (not resize handle) - show down arrow
+            const headerCol = getColumnFromHeader(mouseX, mouseY, config, viewport, dimensions);
+            if (headerCol !== null) {
+              setCursorStyle(COLUMN_SELECT_CURSOR);
             } else {
-              setCursorStyle("default");
+              // Check if over row header (not resize handle) - show right arrow
+              const headerRow = getRowFromHeader(mouseX, mouseY, config, viewport, dimensions);
+              if (headerRow !== null) {
+                setCursorStyle(ROW_SELECT_CURSOR);
+              } else {
+                // Check if over a cell (standard cell cursor)
+                const cell = getCellFromPixel(mouseX, mouseY, config, viewport, dimensions);
+                if (cell) {
+                  setCursorStyle("cell");
+                } else {
+                  setCursorStyle("default");
+                }
+              }
             }
           }
         }
