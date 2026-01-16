@@ -98,6 +98,7 @@ export function useSpreadsheetSelection({
     updateFillDrag,
     completeFill,
     cancelFill,
+    autoFillToEdge,
   } = useFillHandle();
 
   const pendingRefreshRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -201,6 +202,11 @@ export function useSpreadsheetSelection({
     [dispatch, canvasRef]
   );
 
+  // Handle fill handle double-click (auto-fill to edge)
+  const handleFillHandleDoubleClick = useCallback(() => {
+    autoFillToEdge();
+  }, [autoFillToEdge]);
+
   const {
     isDragging,
     isFormulaDragging,
@@ -237,6 +243,7 @@ export function useSpreadsheetSelection({
     onRowResize: handleRowResize,
     onSelectColumn: selectColumn,
     onSelectRow: selectRow,
+    onFillHandleDoubleClick: handleFillHandleDoubleClick,
   });
 
   // Wrap mouse handlers to include fill handle logic

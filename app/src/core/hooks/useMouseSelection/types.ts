@@ -125,6 +125,8 @@ export interface UseMouseSelectionProps {
   onSelectColumn?: (col: number, extend?: boolean) => void;
   /** Callback to select entire row */
   onSelectRow?: (row: number, extend?: boolean) => void;
+  /** Callback when fill handle is double-clicked (auto-fill to edge) */
+  onFillHandleDoubleClick?: () => void;
 }
 
 /**

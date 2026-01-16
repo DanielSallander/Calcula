@@ -61,6 +61,7 @@ export function useMouseSelection(props: UseMouseSelectionProps): UseMouseSelect
     onRowResize,
     onSelectColumn,
     onSelectRow,
+    onFillHandleDoubleClick,
   } = props;
 
   // -------------------------------------------------------------------------
@@ -429,7 +430,8 @@ export function useMouseSelection(props: UseMouseSelectionProps): UseMouseSelect
   ]);
 
   /**
-   * Handle double-click - returns cell coordinates for editing.
+   * Handle double-click - returns cell coordinates for editing,
+   * or triggers fill handle auto-fill if double-clicking on fill handle.
    */
   const handleDoubleClick = useCallback(
     (event: React.MouseEvent<HTMLElement>): { row: number; col: number } | null => {
@@ -441,9 +443,20 @@ export function useMouseSelection(props: UseMouseSelectionProps): UseMouseSelect
       const mouseX = event.clientX - rect.left;
       const mouseY = event.clientY - rect.top;
 
+      // Check if double-click is on fill handle
+      if (isOverFillHandle(mouseX, mouseY)) {
+        console.log("[useMouseSelection] Double-click on fill handle detected");
+        // Trigger auto-fill to edge
+        if (onFillHandleDoubleClick) {
+          onFillHandleDoubleClick();
+        }
+        // Return null to prevent entering edit mode
+        return null;
+      }
+
       return getCellFromPixel(mouseX, mouseY, config, viewport, dimensions);
     },
-    [containerRef, config, viewport, dimensions]
+    [containerRef, config, viewport, dimensions, isOverFillHandle, onFillHandleDoubleClick]
   );
 
   // -------------------------------------------------------------------------

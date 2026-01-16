@@ -49,6 +49,8 @@ export interface UseFillHandleReturn {
   cancelFill: () => void;
   /** Get fill handle position for rendering */
   getFillHandlePosition: () => { x: number; y: number; visible: boolean } | null;
+  /** Auto-fill to edge (double-click behavior) */
+  autoFillToEdge: () => Promise<void>;
 }
 
 /**
@@ -570,6 +572,114 @@ export function useFillHandle(): UseFillHandleReturn {
     dragStartRef.current = null;
   }, []);
 
+  /**
+   * Auto-fill to edge (Excel double-click fill handle behavior).
+   * Looks at adjacent columns to determine how far to fill down.
+   */
+  const autoFillToEdge = useCallback(async () => {
+    if (!selection) {
+      console.log("[FillHandle] autoFillToEdge: No selection");
+      return;
+    }
+
+    const selMinRow = Math.min(selection.startRow, selection.endRow);
+    const selMaxRow = Math.max(selection.startRow, selection.endRow);
+    const selMinCol = Math.min(selection.startCol, selection.endCol);
+    const selMaxCol = Math.max(selection.startCol, selection.endCol);
+
+    console.log("[FillHandle] autoFillToEdge: Selection", { selMinRow, selMaxRow, selMinCol, selMaxCol });
+
+    // Find the edge by looking at adjacent columns (left first, then right)
+    let edgeRow = selMaxRow;
+    const maxRowsToCheck = 10000; // Safety limit
+
+    // Check column to the left of selection
+    if (selMinCol > 0) {
+      const checkCol = selMinCol - 1;
+      // Start from the row after selection and find where data ends
+      for (let r = selMaxRow + 1; r < selMaxRow + maxRowsToCheck; r++) {
+        const cell = await getCell(r, checkCol);
+        const hasData = cell && cell.display && cell.display.trim() !== "";
+        if (hasData) {
+          edgeRow = r;
+        } else {
+          // Found empty cell, stop here
+          break;
+        }
+      }
+    }
+
+    // If no edge found from left, check column to the right
+    if (edgeRow === selMaxRow && selMaxCol < 16383) {
+      const checkCol = selMaxCol + 1;
+      for (let r = selMaxRow + 1; r < selMaxRow + maxRowsToCheck; r++) {
+        const cell = await getCell(r, checkCol);
+        const hasData = cell && cell.display && cell.display.trim() !== "";
+        if (hasData) {
+          edgeRow = r;
+        } else {
+          break;
+        }
+      }
+    }
+
+    // If no adjacent data found, do nothing
+    if (edgeRow === selMaxRow) {
+      console.log("[FillHandle] autoFillToEdge: No adjacent data found, nothing to fill");
+      return;
+    }
+
+    console.log("[FillHandle] autoFillToEdge: Filling down to row", edgeRow);
+
+    try {
+      // Get source values column by column
+      const sourceValues: string[][] = [];
+      for (let c = selMinCol; c <= selMaxCol; c++) {
+        const colValues: string[] = [];
+        for (let r = selMinRow; r <= selMaxRow; r++) {
+          const cell = await getCell(r, c);
+          colValues.push(cell?.formula || cell?.display || "");
+        }
+        sourceValues.push(colValues);
+      }
+
+      // Fill down for each column
+      for (let c = selMinCol; c <= selMaxCol; c++) {
+        const colIdx = c - selMinCol;
+        const pattern = detectPattern(sourceValues[colIdx]);
+
+        for (let r = selMaxRow + 1; r <= edgeRow; r++) {
+          const fillIndex = r - selMinRow;
+          const value = generateFillValue(pattern, sourceValues[colIdx], fillIndex);
+          
+          const updatedCells = await updateCell(r, c, value);
+          for (const cell of updatedCells) {
+            cellEvents.emit({
+              row: cell.row,
+              col: cell.col,
+              oldValue: undefined,
+              newValue: cell.display,
+              formula: cell.formula ?? null,
+            });
+          }
+        }
+      }
+
+      console.log("[FillHandle] autoFillToEdge complete");
+
+      // Update selection to include filled cells
+      dispatch(setSelection({
+        startRow: selMinRow,
+        startCol: selMinCol,
+        endRow: edgeRow,
+        endCol: selMaxCol,
+        type: "cells",
+      }));
+    } catch (error) {
+      console.error("[FillHandle] autoFillToEdge failed:", error);
+    }
+  }, [selection, dispatch]);
+
   return {
     fillState,
     isOverFillHandle,
@@ -578,5 +688,6 @@ export function useFillHandle(): UseFillHandleReturn {
     completeFill,
     cancelFill,
     getFillHandlePosition,
+    autoFillToEdge,
   };
 }
