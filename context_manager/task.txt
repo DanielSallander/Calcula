@@ -1,29 +1,6 @@
-There is an issue with automatic calculations across sheets.
-Lets say I have two sheets - Sheet1 and Sheet2.
-I am in cell A1 in Sheet2 and I edit it, I write: "=SUM(Sheet1!B1:B8)"
-Then I go to cell 5 Sheet 1 and put in value 5.
-Then I go back to Sheet2 and I expect A1 to be updated. However, this is not the case.
-In addition, when I am editing a cell, in point mode, and I go to another sheet and point to some cells, 
-I have to click on the inline editor, the formula bar, to continue writing the formula. It is sort of as it loses focus of the cell editing when going to another sheet in point mode.
-
-Below are messages from the console when I performed this operation:
-Download the React DevTools for a better development experience: https://reactjs.org/link/react-devtools
-Layout.tsx:13 [Layout] Module loaded, SheetTabs imported: ƒ SheetTabs({ onSheetChange }) {
-  _s();
-  const { state, dispatch } = useGridContext();
-  const { editing } = state;
-  const [sheets, setSheets] = useState([{ index: 0, name: "Sheet1" }]);
-  const [ac…
-index.ts:14 [AddIns] Loading add-ins...
-index.ts:34 [AddIns] Loaded 0 add-in(s)
-index.ts:35 [AddIns] Registered 0 ribbon tab(s)
-index.ts:38 [AddIns] No add-ins enabled. Ribbon will be empty.
-index.ts:39 [AddIns] This is expected during core development.
-Layout.tsx:16 [Layout] Rendering
-Layout.tsx:16 [Layout] Rendering
-sheetExtensions.ts:88 [SheetExtensions] Registered context menu item: core:rename
-sheetExtensions.ts:88 [SheetExtensions] Registered context menu item: core:delete
-sheetExtensions.ts:88 [SheetExtensions] Registered context menu item: core:insertSheet
-useSpreadsheetStyles.ts:50 [Styles] Loaded 1 styles from backend
-GridCanvas.tsx:277 [Cells] Fetched 1 cells. First cell: row=0, col=0, display="0", style_index=0
-useSpreadsheetStyles.ts:50
+I would like to introduce a right-mouse-click menu.
+It should appear when right clicking the mouse.
+And we **must** prepare it for extensibility. What I mean is that I want other people to be able to build extensions here.
+Much like one has the possibility to extend the right mouse click menu in VSCode.
+One more thing. Now when you right mouse click you get the option to get the developer tools (when we are now developing).
+I want to keep this option, so please come up with an idea of how we should handle that.

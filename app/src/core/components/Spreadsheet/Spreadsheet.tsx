@@ -5,8 +5,9 @@
 //      to correctly coordinate focus transfer with InlineEditor.
 // FIX: Corrected containerRef to point to grid area for proper mouse coordinate calculation.
 // FIX: Use focusContainerRef from useSpreadsheet for keyboard event handling.
+// UPDATE: Added extensible right-click context menu system.
 
-import React, { useCallback, useRef, useEffect } from "react";
+import React, { useCallback, useEffect, useState } from "react";
 import { useGridState, useGridContext } from "../../state";
 import { setViewportDimensions } from "../../state/gridActions";
 import { GridCanvas } from "../Grid";
@@ -14,16 +15,26 @@ import { InlineEditor } from "../InlineEditor";
 import { Scrollbar, ScrollbarCorner } from "../Scrollbar/Scrollbar";
 import { useScrollbarMetrics } from "../Scrollbar/useScrollbarMetrics";
 import { useSpreadsheet } from "./useSpreadsheet";
-import { useEditing } from "../../hooks/useEditing";
-import { getFunctionTemplate } from "../../lib/tauri-api";
+//import { useEditing } from "../../hooks/useEditing";
+import { ContextMenu } from "../ContextMenu";
+import type { ContextMenuPosition, ContextMenuItem } from "../ContextMenu";
+import {
+  gridExtensions,
+  registerCoreGridContextMenu,
+  isClickWithinSelection,
+  type GridMenuContext,
+} from "../../extensions";
+import { getCellFromPixel } from "../../lib/gridRenderer";
 import type { SpreadsheetContentProps } from "./SpreadsheetTypes";
 
 const SCROLLBAR_SIZE = 14;
 
+// Register core context menu items once
+let coreGridMenuRegistered = false;
+
 function SpreadsheetContent({ className }: SpreadsheetContentProps): React.ReactElement {
   // 1. Destructure the grouped object returned by the refactored hook
   const { refs, state, handlers, ui } = useSpreadsheet();
-  const { startEdit } = useEditing();
   const gridState = useGridState();
   const { dispatch } = useGridContext();
 
@@ -74,6 +85,88 @@ function SpreadsheetContent({ className }: SpreadsheetContentProps): React.React
     clipboardMode,
     fillState,
   } = state;
+
+  // -------------------------------------------------------------------------
+  // Context Menu State
+  // -------------------------------------------------------------------------
+  const [contextMenu, setContextMenu] = useState<{
+    position: ContextMenuPosition;
+    context: GridMenuContext;
+  } | null>(null);
+
+  // Register core menu items on first render
+  useEffect(() => {
+    if (!coreGridMenuRegistered) {
+      registerCoreGridContextMenu();
+      coreGridMenuRegistered = true;
+    }
+  }, []);
+
+  // -------------------------------------------------------------------------
+  // Context Menu Handler
+  // -------------------------------------------------------------------------
+  const handleContextMenu = useCallback(
+    (event: React.MouseEvent<HTMLDivElement>) => {
+      // Shift+Right-click: show native browser menu (for DevTools access)
+      if (event.shiftKey) {
+        return; // Let browser handle it
+      }
+
+      // Prevent default browser context menu
+      event.preventDefault();
+
+      // Get mouse position relative to container
+      const rect = containerRef.current?.getBoundingClientRect();
+      if (!rect) return;
+
+      const mouseX = event.clientX - rect.left;
+      const mouseY = event.clientY - rect.top;
+
+      // Determine which cell was clicked
+      const clickedCell = getCellFromPixel(mouseX, mouseY, config, viewport, dimensions);
+
+      // Build context for menu items
+      const menuContext: GridMenuContext = {
+        selection,
+        clickedCell,
+        isWithinSelection: clickedCell
+          ? isClickWithinSelection(clickedCell.row, clickedCell.col, selection)
+          : false,
+        sheetIndex: gridState.sheetContext.activeSheetIndex,
+        sheetName: gridState.sheetContext.activeSheetName,
+      };
+
+      // Show context menu at mouse position
+      setContextMenu({
+        position: { x: event.clientX, y: event.clientY },
+        context: menuContext,
+      });
+    },
+    [containerRef, config, viewport, dimensions, selection, gridState.sheetContext]
+  );
+
+  // Close context menu
+  const handleCloseContextMenu = useCallback(() => {
+    setContextMenu(null);
+  }, []);
+
+  // Get menu items for current context
+  const getContextMenuItems = useCallback((): ContextMenuItem[] => {
+    if (!contextMenu) return [];
+
+    const items = gridExtensions.getContextMenuItemsForContext(contextMenu.context);
+
+    // Convert GridContextMenuItem to ContextMenuItem
+    return items.map((item) => ({
+      id: item.id,
+      label: item.label,
+      shortcut: item.shortcut,
+      icon: item.icon,
+      disabled: !!item.disabled,
+      separatorAfter: item.separatorAfter,
+      onClick: () => item.onClick(contextMenu.context),
+    }));
+  }, [contextMenu]);
 
   // FIX: Track grid area dimensions and update state for scrollbar calculations
   // Now uses containerRef which points to the grid area
@@ -169,21 +262,6 @@ function SpreadsheetContent({ className }: SpreadsheetContentProps): React.React
     [handleScrollEvent, gridState.viewport.scrollX, gridState.viewport.scrollY, scrollbarMetrics]
   );
 
-  // Handle function insertion from ribbon (will be called by add-ins)
-  const handleInsertFunction = useCallback(
-    async (functionName: string, _syntax: string) => {
-      if (!selection) return;
-
-      try {
-        const template = await getFunctionTemplate(functionName);
-        startEdit(selection.startRow, selection.startCol, template);
-      } catch (err) {
-        console.error("Failed to get function template:", err);
-      }
-    },
-    [selection, startEdit]
-  );
-
   // Calculate viewport dimensions for scrollbars
   const viewportWidth = gridState.viewportDimensions.width - config.rowHeaderWidth - SCROLLBAR_SIZE;
   const viewportHeight = gridState.viewportDimensions.height - config.colHeaderHeight - SCROLLBAR_SIZE;
@@ -267,6 +345,7 @@ function SpreadsheetContent({ className }: SpreadsheetContentProps): React.React
         onMouseUp={handleMouseUp}
         onDoubleClick={handleDoubleClickEvent}
         onWheel={handleWheel}
+        onContextMenu={handleContextMenu}
       >
         {/* Grid Canvas - adjusted for scrollbar space */}
         <div
@@ -336,6 +415,15 @@ function SpreadsheetContent({ className }: SpreadsheetContentProps): React.React
         {/* Corner piece */}
         <ScrollbarCorner size={SCROLLBAR_SIZE} />
       </div>
+
+      {/* Context Menu */}
+      {contextMenu && (
+        <ContextMenu
+          position={contextMenu.position}
+          items={getContextMenuItems()}
+          onClose={handleCloseContextMenu}
+        />
+      )}
     </div>
   );
 }

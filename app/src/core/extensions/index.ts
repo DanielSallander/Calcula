@@ -18,3 +18,15 @@ export type {
   SheetEventPayload,
   SheetEventHandler,
 } from "./sheetExtensions";
+
+// Grid extensions
+export {
+  gridExtensions,
+  registerCoreGridContextMenu,
+  isClickWithinSelection,
+  GridMenuGroups,
+} from "./gridExtensions";
+export type {
+  GridMenuContext,
+  GridContextMenuItem,
+} from "./gridExtensions";
