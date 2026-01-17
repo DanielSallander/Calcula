@@ -302,3 +302,27 @@ export async function renameSheet(index: number, newName: string): Promise<Sheet
   // FIXED: Mapped 'newName' to 'new_name' to match Rust command signature
   return invoke<SheetsResult>("rename_sheet", { index, new_name: newName });
 }
+
+/**
+ * Insert rows at the specified position, shifting existing rows down.
+ * @param row - The row index where new rows will be inserted
+ * @param count - Number of rows to insert
+ */
+export async function insertRows(row: number, count: number): Promise<CellData[]> {
+  console.log(`[tauri-api] insertRows(${row}, ${count})`);
+  const result = await invoke<CellData[]>("insert_rows", { row, count });
+  console.log(`[tauri-api] insertRows returned ${result.length} updated cells`);
+  return result;
+}
+
+/**
+ * Insert columns at the specified position, shifting existing columns right.
+ * @param col - The column index where new columns will be inserted
+ * @param count - Number of columns to insert
+ */
+export async function insertColumns(col: number, count: number): Promise<CellData[]> {
+  console.log(`[tauri-api] insertColumns(${col}, ${count})`);
+  const result = await invoke<CellData[]>("insert_columns", { col, count });
+  console.log(`[tauri-api] insertColumns returned ${result.length} updated cells`);
+  return result;
+}

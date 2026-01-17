@@ -225,13 +225,13 @@ fn col_letter_to_index(col: &str) -> u32 {
 
 /// Result of extracting references from a formula expression
 pub struct ExtractedRefs {
-    /// Individual cell references (row, col) on the current sheet
+    /// Individual cell references (row, col) on the current sheet - 0-indexed
     pub cells: HashSet<(u32, u32)>,
     /// Column references (column indices)
     pub columns: HashSet<u32>,
-    /// Row references (row indices)
+    /// Row references (row indices) - 0-indexed
     pub rows: HashSet<u32>,
-    /// Cross-sheet cell references (sheet_name, row, col)
+    /// Cross-sheet cell references (sheet_name, row, col) - row is 0-indexed
     pub cross_sheet_cells: HashSet<(String, u32, u32)>,
 }
 
@@ -262,11 +262,13 @@ fn extract_references_recursive(expr: &ParserExpr, grid: &Grid, refs: &mut Extra
         ParserExpr::Literal(_) => {}
         ParserExpr::CellRef { sheet, col, row } => {
             let col_idx = col_letter_to_index(col);
+            // BUGFIX: Parser row is 1-indexed, convert to 0-indexed for dependency tracking
+            let row_idx = row.saturating_sub(1);
             // If sheet is specified, this is a cross-sheet reference
             if let Some(sheet_name) = sheet {
-                refs.cross_sheet_cells.insert((sheet_name.clone(), *row, col_idx));
+                refs.cross_sheet_cells.insert((sheet_name.clone(), row_idx, col_idx));
             } else {
-                refs.cells.insert((*row, col_idx));
+                refs.cells.insert((row_idx, col_idx));
             }
         }
         ParserExpr::Range { sheet, start, end } => {
@@ -278,8 +280,9 @@ fn extract_references_recursive(expr: &ParserExpr, grid: &Grid, refs: &mut Extra
             {
                 let sc = col_letter_to_index(start_col);
                 let ec = col_letter_to_index(end_col);
-                let sr = *start_row;
-                let er = *end_row;
+                // BUGFIX: Parser rows are 1-indexed, convert to 0-indexed
+                let sr = start_row.saturating_sub(1);
+                let er = end_row.saturating_sub(1);
                 
                 // If sheet is specified, these are cross-sheet references
                 if let Some(sheet_name) = sheet {
@@ -319,17 +322,18 @@ fn extract_references_recursive(expr: &ParserExpr, grid: &Grid, refs: &mut Extra
             }
         }
         ParserExpr::RowRef { start_row, end_row, .. } => {
-            let min_row = start_row.min(end_row);
-            let max_row = start_row.max(end_row);
+            // BUGFIX: Parser rows are 1-indexed, convert to 0-indexed
+            let min_row = start_row.saturating_sub(1).min(end_row.saturating_sub(1));
+            let max_row = start_row.saturating_sub(1).max(end_row.saturating_sub(1));
             
-            // Register row-level dependencies
-            for row in *min_row..=*max_row {
+            // Register row-level dependencies (0-indexed)
+            for row in min_row..=max_row {
                 refs.rows.insert(row);
             }
             
             // Also add existing cells for immediate evaluation
             for ((r, c), _) in grid.cells.iter() {
-                if *r >= *min_row && *r <= *max_row {
+                if *r >= min_row && *r <= max_row {
                     refs.cells.insert((*r, *c));
                 }
             }
@@ -689,6 +693,8 @@ pub fn run() {
             commands::set_cell_style,
             commands::apply_formatting,
             commands::get_style_count,
+            commands::insert_rows,
+            commands::insert_columns,
             // Logging commands
             logging::log_frontend,
             logging::log_frontend_atomic,

@@ -891,3 +891,304 @@ pub fn get_style_count(state: State<AppState>) -> usize {
     let styles = state.style_registry.lock().unwrap();
     styles.len()
 }
+
+/// Insert rows at the specified position, shifting existing rows down.
+#[tauri::command]
+pub fn insert_rows(
+    state: State<AppState>,
+    row: u32,
+    count: u32,
+) -> Result<Vec<CellData>, String> {
+    let mut grid = state.grid.lock().map_err(|e| e.to_string())?;
+    let mut grids = state.grids.lock().map_err(|e| e.to_string())?;
+    let styles = state.style_registry.lock().map_err(|e| e.to_string())?;
+    let mut row_heights = state.row_heights.lock().map_err(|e| e.to_string())?;
+    let active_sheet = *state.active_sheet.lock().map_err(|e| e.to_string())?;
+    
+    // BUGFIX: First, update formula references in ALL cells that reference rows at or after the insertion point
+    // This must happen BEFORE moving cells, so we iterate over all cells
+    let all_cells: Vec<((u32, u32), Cell)> = grid.cells.iter()
+        .map(|(&pos, cell)| (pos, cell.clone()))
+        .collect();
+    
+    for ((r, c), cell) in &all_cells {
+        if let Some(formula) = &cell.formula {
+            let updated_formula = shift_formula_row_references(formula, row, count as i32);
+            if updated_formula != *formula {
+                // Formula was updated, update the cell in place
+                let mut updated_cell = cell.clone();
+                updated_cell.formula = Some(updated_formula);
+                grid.cells.insert((*r, *c), updated_cell);
+            }
+        }
+    }
+    
+    // Collect all cells that need to be moved (from row onwards)
+    let mut cells_to_move: Vec<((u32, u32), Cell)> = Vec::new();
+    for (&(r, c), cell) in grid.cells.iter() {
+        if r >= row {
+            cells_to_move.push(((r, c), cell.clone()));
+        }
+    }
+    
+    // Sort by row descending so we move from bottom to top
+    cells_to_move.sort_by(|a, b| b.0 .0.cmp(&a.0 .0));
+    
+    // Remove old cells and insert at new positions
+    for ((r, c), cell) in cells_to_move {
+        grid.cells.remove(&(r, c));
+        grid.cells.insert((r + count, c), cell);
+    }
+    
+    // Update row heights - shift heights at or after the insertion point
+    let old_heights: Vec<(u32, f64)> = row_heights.iter().map(|(&r, &h)| (r, h)).collect();
+    row_heights.clear();
+    for (r, height) in old_heights {
+        if r >= row {
+            row_heights.insert(r + count, height);
+        } else {
+            row_heights.insert(r, height);
+        }
+    }
+    
+    // Recalculate grid bounds
+    grid.recalculate_bounds();
+    
+    // Also update the grids vector to keep in sync
+    if active_sheet < grids.len() {
+        // Copy cells to the grids vector version
+        grids[active_sheet].cells = grid.cells.clone();
+        grids[active_sheet].max_row = grid.max_row;
+        grids[active_sheet].max_col = grid.max_col;
+    }
+    
+    // Return updated cells in the affected area
+    let mut result: Vec<CellData> = Vec::new();
+    for r in 0..=grid.max_row {
+        for c in 0..=grid.max_col {
+            if let Some(cell_data) = get_cell_internal(&grid, &styles, r, c) {
+                result.push(cell_data);
+            }
+        }
+    }
+    
+    Ok(result)
+}
+
+/// Insert columns at the specified position, shifting existing columns right.
+#[tauri::command]
+pub fn insert_columns(
+    state: State<AppState>,
+    col: u32,
+    count: u32,
+) -> Result<Vec<CellData>, String> {
+    let mut grid = state.grid.lock().map_err(|e| e.to_string())?;
+    let mut grids = state.grids.lock().map_err(|e| e.to_string())?;
+    let styles = state.style_registry.lock().map_err(|e| e.to_string())?;
+    let mut column_widths = state.column_widths.lock().map_err(|e| e.to_string())?;
+    let active_sheet = *state.active_sheet.lock().map_err(|e| e.to_string())?;
+    
+    // BUGFIX: First, update formula references in ALL cells that reference columns at or after the insertion point
+    // This must happen BEFORE moving cells, so we iterate over all cells
+    let all_cells: Vec<((u32, u32), Cell)> = grid.cells.iter()
+        .map(|(&pos, cell)| (pos, cell.clone()))
+        .collect();
+    
+    for ((r, c), cell) in &all_cells {
+        if let Some(formula) = &cell.formula {
+            let updated_formula = shift_formula_col_references(formula, col, count as i32);
+            if updated_formula != *formula {
+                // Formula was updated, update the cell in place
+                let mut updated_cell = cell.clone();
+                updated_cell.formula = Some(updated_formula);
+                grid.cells.insert((*r, *c), updated_cell);
+            }
+        }
+    }
+    
+    // Collect all cells that need to be moved (from col onwards)
+    let mut cells_to_move: Vec<((u32, u32), Cell)> = Vec::new();
+    for (&(r, c), cell) in grid.cells.iter() {
+        if c >= col {
+            cells_to_move.push(((r, c), cell.clone()));
+        }
+    }
+    
+    // Sort by column descending so we move from right to left
+    cells_to_move.sort_by(|a, b| b.0 .1.cmp(&a.0 .1));
+    
+    // Remove old cells and insert at new positions
+    for ((r, c), cell) in cells_to_move {
+        grid.cells.remove(&(r, c));
+        grid.cells.insert((r, c + count), cell);
+    }
+    
+    // Update column widths - shift widths at or after the insertion point
+    let old_widths: Vec<(u32, f64)> = column_widths.iter().map(|(&c, &w)| (c, w)).collect();
+    column_widths.clear();
+    for (c, width) in old_widths {
+        if c >= col {
+            column_widths.insert(c + count, width);
+        } else {
+            column_widths.insert(c, width);
+        }
+    }
+    
+    // Recalculate grid bounds
+    grid.recalculate_bounds();
+    
+    // Also update the grids vector to keep in sync
+    if active_sheet < grids.len() {
+        grids[active_sheet].cells = grid.cells.clone();
+        grids[active_sheet].max_row = grid.max_row;
+        grids[active_sheet].max_col = grid.max_col;
+    }
+    
+    // Return updated cells (return all cells since formulas anywhere may have changed)
+    let mut result: Vec<CellData> = Vec::new();
+    for r in 0..=grid.max_row {
+        for c in 0..=grid.max_col {
+            if let Some(cell_data) = get_cell_internal(&grid, &styles, r, c) {
+                result.push(cell_data);
+            }
+        }
+    }
+    
+    Ok(result)
+}
+
+/// Shift row references in a formula by a given amount.
+/// For example, "=A5+B10" with row=3, delta=2 becomes "=A7+B12"
+/// Also handles row-only references like "5:5" or "2:10"
+fn shift_formula_row_references(formula: &str, from_row: u32, delta: i32) -> String {
+    use regex::Regex;
+    
+    // First handle cell references (e.g., A5, $A$5)
+    let cell_re = Regex::new(r"(\$?)([A-Z]+)(\$?)(\d+)").unwrap();
+    
+    let result = cell_re.replace_all(formula, |caps: &regex::Captures| {
+        let col_abs = &caps[1];
+        let col_letters = &caps[2];
+        let row_abs = &caps[3];
+        let row_num: u32 = caps[4].parse().unwrap_or(0);
+        
+        // Only shift if row is at or after from_row and not absolute
+        // Note: from_row is 0-indexed, row_num is 1-indexed
+        let new_row = if row_abs.is_empty() && row_num > from_row {
+            ((row_num as i32) + delta).max(1) as u32
+        } else {
+            row_num
+        };
+        
+        format!("{}{}{}{}", col_abs, col_letters, row_abs, new_row)
+    }).to_string();
+    
+    // Then handle row-only references (e.g., 5:5, $2:$10)
+    let row_re = Regex::new(r"(\$?)(\d+):(\$?)(\d+)").unwrap();
+    
+    row_re.replace_all(&result, |caps: &regex::Captures| {
+        let start_abs = &caps[1];
+        let start_row: u32 = caps[2].parse().unwrap_or(0);
+        let end_abs = &caps[3];
+        let end_row: u32 = caps[4].parse().unwrap_or(0);
+        
+        // Only shift if row is after from_row and not absolute
+        // Note: from_row is 0-indexed, row numbers in formula are 1-indexed
+        let new_start = if start_abs.is_empty() && start_row > from_row {
+            ((start_row as i32) + delta).max(1) as u32
+        } else {
+            start_row
+        };
+        
+        let new_end = if end_abs.is_empty() && end_row > from_row {
+            ((end_row as i32) + delta).max(1) as u32
+        } else {
+            end_row
+        };
+        
+        format!("{}{}:{}{}", start_abs, new_start, end_abs, new_end)
+    }).to_string()
+}
+
+/// Shift column references in a formula by a given amount.
+/// For example, "=C5+E10" with col=2 (C), delta=2 becomes "=E5+G10"
+/// Also handles column-only references like "B:B" or "A:C"
+fn shift_formula_col_references(formula: &str, from_col: u32, delta: i32) -> String {
+    use regex::Regex;
+    
+    /// Helper to convert column letters to 0-based index
+    fn col_to_index(col: &str) -> u32 {
+        let mut index: u32 = 0;
+        for ch in col.chars() {
+            index = index * 26 + (ch as u32 - 'A' as u32 + 1);
+        }
+        index - 1 // Convert to 0-based
+    }
+    
+    /// Helper to convert 0-based index to column letters
+    fn index_to_col(mut idx: u32) -> String {
+        let mut result = String::new();
+        loop {
+            result.insert(0, (b'A' + (idx % 26) as u8) as char);
+            if idx < 26 {
+                break;
+            }
+            idx = idx / 26 - 1;
+        }
+        result
+    }
+    
+    // First handle cell references (e.g., C5, $C$5)
+    let cell_re = Regex::new(r"(\$?)([A-Z]+)(\$?)(\d+)").unwrap();
+    
+    let result = cell_re.replace_all(formula, |caps: &regex::Captures| {
+        let col_abs = &caps[1];
+        let col_letters = &caps[2];
+        let row_abs = &caps[3];
+        let row_num = &caps[4];
+        
+        let col_index = col_to_index(col_letters);
+        
+        // Only shift if column is at or after from_col and not absolute
+        let new_col_index = if col_abs.is_empty() && col_index >= from_col {
+            ((col_index as i32) + delta).max(0) as u32
+        } else {
+            col_index
+        };
+        
+        let new_col_letters = index_to_col(new_col_index);
+        
+        format!("{}{}{}{}", col_abs, new_col_letters, row_abs, row_num)
+    }).to_string();
+    
+    // Then handle column-only references (e.g., B:B, $A:$C)
+    let col_re = Regex::new(r"(\$?)([A-Z]+):(\$?)([A-Z]+)").unwrap();
+    
+    col_re.replace_all(&result, |caps: &regex::Captures| {
+        let start_abs = &caps[1];
+        let start_col = &caps[2];
+        let end_abs = &caps[3];
+        let end_col = &caps[4];
+        
+        let start_index = col_to_index(start_col);
+        let end_index = col_to_index(end_col);
+        
+        // Only shift if column is at or after from_col and not absolute
+        let new_start_index = if start_abs.is_empty() && start_index >= from_col {
+            ((start_index as i32) + delta).max(0) as u32
+        } else {
+            start_index
+        };
+        
+        let new_end_index = if end_abs.is_empty() && end_index >= from_col {
+            ((end_index as i32) + delta).max(0) as u32
+        } else {
+            end_index
+        };
+        
+        let new_start_col = index_to_col(new_start_index);
+        let new_end_col = index_to_col(new_end_index);
+        
+        format!("{}{}:{}{}", start_abs, new_start_col, end_abs, new_end_col)
+    }).to_string()
+}

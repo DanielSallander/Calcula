@@ -7,6 +7,7 @@
 // FIX: Use focusContainerRef from useSpreadsheet for keyboard event handling.
 // UPDATE: Added extensible right-click context menu system.
 // UPDATE: Register command handlers with gridCommands for context menu actions.
+// UPDATE: Added insertRow and insertColumn command handlers.
 
 import React, { useCallback, useEffect, useState } from "react";
 import { useGridState, useGridContext } from "../../state";
@@ -16,7 +17,7 @@ import { InlineEditor } from "../InlineEditor";
 import { Scrollbar, ScrollbarCorner } from "../Scrollbar/Scrollbar";
 import { useScrollbarMetrics } from "../Scrollbar/useScrollbarMetrics";
 import { useSpreadsheet } from "./useSpreadsheet";
-import { clearRange } from "../../lib/tauri-api";
+import { clearRange, insertRows, insertColumns } from "../../lib/tauri-api";
 import { cellEvents } from "../../lib/cellEvents";
 import { ContextMenu } from "../ContextMenu";
 import type { ContextMenuPosition, ContextMenuItem } from "../ContextMenu";
@@ -126,6 +127,78 @@ function SpreadsheetContent({ className }: SpreadsheetContentProps): React.React
     }, [selection]);
 
   // -------------------------------------------------------------------------
+  // Insert Row Handler
+  // -------------------------------------------------------------------------
+  const handleInsertRow = useCallback(async () => {
+    if (!selection || selection.type !== "rows") {
+      console.log("[Spreadsheet] Insert row requires row selection");
+      return;
+    }
+
+    const startRow = Math.min(selection.startRow, selection.endRow);
+    const endRow = Math.max(selection.startRow, selection.endRow);
+    const count = endRow - startRow + 1;
+
+    console.log(`[Spreadsheet] Inserting ${count} row(s) at row ${startRow}`);
+
+    try {
+      const updatedCells = await insertRows(startRow, count);
+      console.log(`[Spreadsheet] Insert rows complete - ${updatedCells.length} cells updated`);
+
+      // Emit event to trigger refresh
+      cellEvents.emit({
+        row: startRow,
+        col: 0,
+        oldValue: undefined,
+        newValue: "",
+        formula: null,
+      });
+
+      // Force canvas refresh
+      canvasRef.current?.refreshCells();
+      canvasRef.current?.redraw();
+    } catch (error) {
+      console.error("[Spreadsheet] Failed to insert rows:", error);
+    }
+  }, [selection, canvasRef]);
+
+  // -------------------------------------------------------------------------
+  // Insert Column Handler
+  // -------------------------------------------------------------------------
+  const handleInsertColumn = useCallback(async () => {
+    if (!selection || selection.type !== "columns") {
+      console.log("[Spreadsheet] Insert column requires column selection");
+      return;
+    }
+
+    const startCol = Math.min(selection.startCol, selection.endCol);
+    const endCol = Math.max(selection.startCol, selection.endCol);
+    const count = endCol - startCol + 1;
+
+    console.log(`[Spreadsheet] Inserting ${count} column(s) at column ${startCol}`);
+
+    try {
+      const updatedCells = await insertColumns(startCol, count);
+      console.log(`[Spreadsheet] Insert columns complete - ${updatedCells.length} cells updated`);
+
+      // Emit event to trigger refresh
+      cellEvents.emit({
+        row: 0,
+        col: startCol,
+        oldValue: undefined,
+        newValue: "",
+        formula: null,
+      });
+
+      // Force canvas refresh
+      canvasRef.current?.refreshCells();
+      canvasRef.current?.redraw();
+    } catch (error) {
+      console.error("[Spreadsheet] Failed to insert columns:", error);
+    }
+  }, [selection, canvasRef]);
+
+  // -------------------------------------------------------------------------
   // Register Command Handlers
   // -------------------------------------------------------------------------
   useEffect(() => {
@@ -134,6 +207,8 @@ function SpreadsheetContent({ className }: SpreadsheetContentProps): React.React
     gridCommands.register("copy", handleCopy);
     gridCommands.register("paste", handlePaste);
     gridCommands.register("clearContents", handleClearContents);
+    gridCommands.register("insertRow", handleInsertRow);
+    gridCommands.register("insertColumn", handleInsertColumn);
 
     // Cleanup on unmount
     return () => {
@@ -141,8 +216,10 @@ function SpreadsheetContent({ className }: SpreadsheetContentProps): React.React
       gridCommands.unregister("copy");
       gridCommands.unregister("paste");
       gridCommands.unregister("clearContents");
+      gridCommands.unregister("insertRow");
+      gridCommands.unregister("insertColumn");
     };
-  }, [handleCut, handleCopy, handlePaste, handleClearContents]);
+  }, [handleCut, handleCopy, handlePaste, handleClearContents, handleInsertRow, handleInsertColumn]);
 
   // -------------------------------------------------------------------------
   // Context Menu State

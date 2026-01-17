@@ -3,6 +3,7 @@
 // CONTEXT: Allows extensions to add context menu items when right-clicking on cells.
 //          Follows the same pattern as sheetExtensions.ts for consistency.
 // UPDATE: Added command registry for direct handler invocation instead of keyboard events.
+// UPDATE: Insert Row/Column now filter visibility based on selection type.
 
 import type { Selection } from "../types";
 
@@ -325,18 +326,24 @@ export function registerCoreGridContextMenu(): void {
 
   // -------------------------------------------------------------------------
   // Insert Group
-  // Note: Insert Row/Column require backend implementation (Rust commands)
-  // that don't exist yet. Keeping disabled until backend support is added.
+  // Only visible when appropriate selection type is active
   // -------------------------------------------------------------------------
   gridExtensions.registerContextMenuItem({
     id: "core:insertRow",
     label: "Insert Row",
     group: GridMenuGroups.INSERT,
     order: 10,
-    disabled: true, // Backend not implemented yet
+    // Only visible when rows are selected (right-click on row header)
+    visible: (ctx) => ctx.selection?.type === "rows",
+    disabled: false,
     onClick: async (ctx) => {
-      // TODO: Implement when backend insert_row command is available
-      console.log("[GridMenu] Insert row at:", ctx.clickedCell?.row ?? ctx.selection?.startRow);
+      if (!ctx.selection || ctx.selection.type !== "rows") return;
+      
+      const startRow = Math.min(ctx.selection.startRow, ctx.selection.endRow);
+      const endRow = Math.max(ctx.selection.startRow, ctx.selection.endRow);
+      const count = endRow - startRow + 1;
+      
+      console.log(`[GridMenu] Insert ${count} row(s) at row ${startRow}`);
       await gridCommands.execute("insertRow");
     },
   });
@@ -346,11 +353,18 @@ export function registerCoreGridContextMenu(): void {
     label: "Insert Column",
     group: GridMenuGroups.INSERT,
     order: 20,
-    disabled: true, // Backend not implemented yet
     separatorAfter: true,
+    // Only visible when columns are selected (right-click on column header)
+    visible: (ctx) => ctx.selection?.type === "columns",
+    disabled: false,
     onClick: async (ctx) => {
-      // TODO: Implement when backend insert_column command is available
-      console.log("[GridMenu] Insert column at:", ctx.clickedCell?.col ?? ctx.selection?.startCol);
+      if (!ctx.selection || ctx.selection.type !== "columns") return;
+      
+      const startCol = Math.min(ctx.selection.startCol, ctx.selection.endCol);
+      const endCol = Math.max(ctx.selection.startCol, ctx.selection.endCol);
+      const count = endCol - startCol + 1;
+      
+      console.log(`[GridMenu] Insert ${count} column(s) at column ${startCol}`);
       await gridCommands.execute("insertColumn");
     },
   });

@@ -2,6 +2,7 @@
 // PURPOSE: Factory function for creating header selection event handlers.
 // CONTEXT: Creates handlers for column and row header clicks, supporting
 // entire column/row selection and shift-click to extend selections.
+// FIX: Right-click within existing header selection now preserves the selection.
 
 import type { GridConfig, Viewport, Selection, SelectionType, DimensionOverrides } from "../../../types";
 import type { MousePosition, HeaderDragState } from "../types";
@@ -42,6 +43,30 @@ interface HeaderSelectionHandlers {
 }
 
 /**
+ * Check if a column is within the current column selection.
+ */
+function isColumnWithinSelection(col: number, selection: Selection | null): boolean {
+  if (!selection || selection.type !== "columns") {
+    return false;
+  }
+  const minCol = Math.min(selection.startCol, selection.endCol);
+  const maxCol = Math.max(selection.startCol, selection.endCol);
+  return col >= minCol && col <= maxCol;
+}
+
+/**
+ * Check if a row is within the current row selection.
+ */
+function isRowWithinSelection(row: number, selection: Selection | null): boolean {
+  if (!selection || selection.type !== "rows") {
+    return false;
+  }
+  const minRow = Math.min(selection.startRow, selection.endRow);
+  const maxRow = Math.max(selection.startRow, selection.endRow);
+  return row >= minRow && row <= maxRow;
+}
+
+/**
  * Creates handlers for header selection operations.
  * Handles column and row header clicks for entire column/row selection.
  */
@@ -79,6 +104,12 @@ export function createHeaderSelectionHandlers(deps: HeaderSelectionDependencies)
 
     event.preventDefault();
 
+    // Right-click (button === 2) within existing column selection: preserve selection
+    if (event.button === 2 && isColumnWithinSelection(headerCol, selection)) {
+      // Don't change selection, just let context menu appear
+      return true;
+    }
+
     // If we're editing, commit first
     if (onCommitBeforeSelect) {
       await onCommitBeforeSelect();
@@ -96,10 +127,12 @@ export function createHeaderSelectionHandlers(deps: HeaderSelectionDependencies)
       onExtendTo(config.totalRows - 1, headerCol);
     }
 
-    // Start header drag for extending selection
-    setIsDragging(true);
-    headerDragRef.current = { type: "column", startIndex: headerCol };
-    lastMousePosRef.current = { x: mouseX, y: mouseY };
+    // Start header drag for extending selection (only for left-click)
+    if (event.button === 0) {
+      setIsDragging(true);
+      headerDragRef.current = { type: "column", startIndex: headerCol };
+      lastMousePosRef.current = { x: mouseX, y: mouseY };
+    }
 
     return true;
   };
@@ -122,6 +155,12 @@ export function createHeaderSelectionHandlers(deps: HeaderSelectionDependencies)
 
     event.preventDefault();
 
+    // Right-click (button === 2) within existing row selection: preserve selection
+    if (event.button === 2 && isRowWithinSelection(headerRow, selection)) {
+      // Don't change selection, just let context menu appear
+      return true;
+    }
+
     // If we're editing, commit first
     if (onCommitBeforeSelect) {
       await onCommitBeforeSelect();
@@ -139,10 +178,12 @@ export function createHeaderSelectionHandlers(deps: HeaderSelectionDependencies)
       onExtendTo(headerRow, config.totalCols - 1);
     }
 
-    // Start header drag for extending selection
-    setIsDragging(true);
-    headerDragRef.current = { type: "row", startIndex: headerRow };
-    lastMousePosRef.current = { x: mouseX, y: mouseY };
+    // Start header drag for extending selection (only for left-click)
+    if (event.button === 0) {
+      setIsDragging(true);
+      headerDragRef.current = { type: "row", startIndex: headerRow };
+      lastMousePosRef.current = { x: mouseX, y: mouseY };
+    }
 
     return true;
   };
