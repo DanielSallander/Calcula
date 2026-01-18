@@ -129,7 +129,7 @@ function SpreadsheetContent({ className }: SpreadsheetContentProps): React.React
   // -------------------------------------------------------------------------
   // Insert Row Handler
   // -------------------------------------------------------------------------
-  const handleInsertRow = useCallback(async () => {
+ const handleInsertRow = useCallback(async () => {
     if (!selection || selection.type !== "rows") {
       console.log("[Spreadsheet] Insert row requires row selection");
       return;
@@ -142,8 +142,14 @@ function SpreadsheetContent({ className }: SpreadsheetContentProps): React.React
     console.log(`[Spreadsheet] Inserting ${count} row(s) at row ${startRow}`);
 
     try {
+      // Start animation before backend call
+      const animationPromise = canvasRef.current?.animateRowInsertion(startRow, count, 200);
+
       const updatedCells = await insertRows(startRow, count);
       console.log(`[Spreadsheet] Insert rows complete - ${updatedCells.length} cells updated`);
+
+      // Wait for animation to complete
+      await animationPromise;
 
       // Emit event to trigger refresh
       cellEvents.emit({
@@ -162,9 +168,8 @@ function SpreadsheetContent({ className }: SpreadsheetContentProps): React.React
     }
   }, [selection, canvasRef]);
 
-  // -------------------------------------------------------------------------
-  // Insert Column Handler
-  // -------------------------------------------------------------------------
+  // Similarly update handleInsertColumn:
+
   const handleInsertColumn = useCallback(async () => {
     if (!selection || selection.type !== "columns") {
       console.log("[Spreadsheet] Insert column requires column selection");
@@ -178,8 +183,14 @@ function SpreadsheetContent({ className }: SpreadsheetContentProps): React.React
     console.log(`[Spreadsheet] Inserting ${count} column(s) at column ${startCol}`);
 
     try {
+      // Start animation before backend call
+      const animationPromise = canvasRef.current?.animateColumnInsertion(startCol, count, 200);
+
       const updatedCells = await insertColumns(startCol, count);
       console.log(`[Spreadsheet] Insert columns complete - ${updatedCells.length} cells updated`);
+
+      // Wait for animation to complete
+      await animationPromise;
 
       // Emit event to trigger refresh
       cellEvents.emit({

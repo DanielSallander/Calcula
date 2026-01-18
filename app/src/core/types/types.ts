@@ -400,6 +400,23 @@ export interface FormulaReference {
 }
 
 /**
+ * State for row/column insertion animation.
+ * Creates a "sliding" effect where existing content moves to make room.
+ */
+export interface InsertionAnimation {
+  /** Type of insertion */
+  type: "row" | "column";
+  /** Index where insertion starts (0-based) */
+  index: number;
+  /** Number of rows/columns being inserted */
+  count: number;
+  /** Animation progress from 0 (start) to 1 (complete) */
+  progress: number;
+  /** Target size in pixels (row height or column width) */
+  targetSize: number;
+}
+
+/**
  * Colors for formula reference highlighting.
  * Matches Excel's formula reference colors.
  */

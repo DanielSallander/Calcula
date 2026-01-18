@@ -1,2 +1,3 @@
-When I select a range of cells and click the DELETE button it should clear content from all the files in the selection.
-In current implementation, if one has multiple cells selected and press DELETE button it loses the selection and only clears content in the last cell in the range selected.
+I would like to have smoother transition when inserting a column or row.
+Is it possible to make it so that it "flows" instead of instantanious?
+Can we parameterize so that we can set the "flowness"?

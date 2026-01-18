@@ -1,6 +1,7 @@
 // FILENAME: app/src/lib/gridRenderer/core.ts
 // PURPOSE: Main rendering orchestration function
 // CONTEXT: Coordinates all rendering phases for the grid
+// Updated: Added insertionAnimation parameter for smooth row/column insertion
 
 import type {
   GridConfig,
@@ -12,6 +13,7 @@ import type {
   DimensionOverrides,
   StyleDataMap,
   ClipboardMode,
+  InsertionAnimation,
 } from "../../../core/types";
 import type { GridTheme, RenderState } from "./types";
 import { DEFAULT_THEME } from "./types";
@@ -41,6 +43,7 @@ import { drawFormulaReferences } from "./rendering/references";
  * @param clipboardSelection - Selection that was copied/cut (for dotted border)
  * @param clipboardMode - Current clipboard mode (none, copy, cut)
  * @param clipboardAnimationOffset - Animation offset for marching ants (0-8 range)
+ * @param insertionAnimation - Active insertion animation for smooth row/column insertion
  */
 export function renderGrid(
   ctx: CanvasRenderingContext2D,
@@ -58,7 +61,8 @@ export function renderGrid(
   fillPreviewRange?: Selection | null,
   clipboardSelection?: Selection | null,
   clipboardMode?: ClipboardMode,
-  clipboardAnimationOffset?: number
+  clipboardAnimationOffset?: number,
+  insertionAnimation?: InsertionAnimation | null
 ): void {
   // Create render state object with all parameters
   const state: RenderState = {
@@ -81,6 +85,7 @@ export function renderGrid(
     clipboardSelection: clipboardSelection || null,
     clipboardMode: clipboardMode || "none",
     clipboardAnimationOffset: clipboardAnimationOffset || 0,
+    insertionAnimation: insertionAnimation || undefined,
   };
 
   // Clear canvas

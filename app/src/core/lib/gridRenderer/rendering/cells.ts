@@ -2,6 +2,7 @@
 // PURPOSE: Cell text rendering with style support
 // CONTEXT: Draws cell content with formatting, colors, and truncation
 // UPDATED: Fixed property names to use camelCase matching TypeScript interfaces
+// UPDATED: Added insertion animation support for smooth row/column insertion
 
 import type { RenderState } from "../types";
 import { calculateVisibleRange } from "../layout/viewport";
@@ -68,7 +69,7 @@ export function drawTextWithTruncation(
  * Applies cell styles from styleCache including colors, fonts, and formatting.
  */
 export function drawCellText(state: RenderState): void {
-  const { ctx, width, height, config, viewport, theme, cells, editing, dimensions, styleCache } = state;
+  const { ctx, width, height, config, viewport, theme, cells, editing, dimensions, styleCache, insertionAnimation } = state;
   const rowHeaderWidth = config.rowHeaderWidth || 50;
   const colHeaderHeight = config.colHeaderHeight || 24;
   const totalRows = config.totalRows || 1000;
@@ -79,22 +80,39 @@ export function drawCellText(state: RenderState): void {
   // Padding inside cells
   const paddingX = 4;
   
+  // Calculate insertion animation offset
+  const rowAnimOffset = insertionAnimation && insertionAnimation.type === "row"
+    ? insertionAnimation.progress * insertionAnimation.targetSize * insertionAnimation.count
+    : 0;
+  const colAnimOffset = insertionAnimation && insertionAnimation.type === "column"
+    ? insertionAnimation.progress * insertionAnimation.targetSize * insertionAnimation.count
+    : 0;
+  const rowAnimIndex = insertionAnimation?.type === "row" ? insertionAnimation.index : -1;
+  const colAnimIndex = insertionAnimation?.type === "column" ? insertionAnimation.index : -1;
+  
   // Debug: Log styleCache state once per render
   if (styleCache && styleCache.size > 1) {
     console.log(`[Render] Drawing cells with ${styleCache.size} styles in cache`);
   }
   
   // Iterate through visible cells
-  let y = colHeaderHeight + range.offsetY;
+  let baseY = colHeaderHeight + range.offsetY;
   for (let row = range.startRow; row <= range.endRow && row < totalRows; row++) {
     const rowHeight = getRowHeight(row, config, dimensions);
-    let x = rowHeaderWidth + range.offsetX;
+    
+    // Apply row insertion animation offset
+    const y = row >= rowAnimIndex && rowAnimIndex >= 0 ? baseY + rowAnimOffset : baseY;
+    
+    let baseX = rowHeaderWidth + range.offsetX;
     for (let col = range.startCol; col <= range.endCol && col < totalCols; col++) {
       const colWidth = getColumnWidth(col, config, dimensions);
+      
+      // Apply column insertion animation offset
+      const x = col >= colAnimIndex && colAnimIndex >= 0 ? baseX + colAnimOffset : baseX;
 
       // Skip if this cell is being edited (the input field handles display)
       if (editing && editing.row === row && editing.col === col) {
-        x += colWidth;
+        baseX += colWidth;
         continue;
       }
 
@@ -104,13 +122,13 @@ export function drawCellText(state: RenderState): void {
 
       // Skip empty cells
       if (!cell || cell.display === "") {
-        x += colWidth;
+        baseX += colWidth;
         continue;
       }
 
       // Skip if cell is not visible
       if (x + colWidth < rowHeaderWidth || x > width || y + rowHeight < colHeaderHeight || y > height) {
-        x += colWidth;
+        baseX += colWidth;
         continue;
       }
 
@@ -124,7 +142,7 @@ export function drawCellText(state: RenderState): void {
       const availableWidth = cellRight - cellLeft - paddingX * 2;
 
       if (availableWidth <= 0) {
-        x += colWidth;
+        baseX += colWidth;
         continue;
       }
 
@@ -299,9 +317,9 @@ export function drawCellText(state: RenderState): void {
 
       ctx.restore();
 
-      x += colWidth;
+      baseX += colWidth;
     }
 
-    y += rowHeight;
+    baseY += rowHeight;
   }
 }

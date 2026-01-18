@@ -7,11 +7,12 @@
 // rendering by fetching viewport cells and passing them to the renderer.
 // Updated: Added marching ants animation for clipboard selection.
 // Updated: Added sheet:formulaModeSwitch event listener for cross-sheet formula references.
+// Updated: Added smooth insertion animation for rows/columns.
 
 import React, { useRef, useEffect, useCallback, useImperativeHandle, forwardRef, useState } from "react";
 import { renderGrid, DEFAULT_THEME, calculateVisibleRange } from "../../lib/gridRenderer";
 import { getViewportCells } from "../../lib/tauri-api";
-import type { GridConfig, Viewport, Selection, EditingCell, CellDataMap, FormulaReference, DimensionOverrides, StyleDataMap, ClipboardMode } from "../../types";
+import type { GridConfig, Viewport, Selection, EditingCell, CellDataMap, FormulaReference, DimensionOverrides, StyleDataMap, ClipboardMode, InsertionAnimation } from "../../types";
 import { cellKey, createEmptyDimensionOverrides } from "../../types";
 import type { GridTheme } from "../../lib/gridRenderer";
 
@@ -64,6 +65,22 @@ export interface GridCanvasHandle {
   getContext: () => CanvasRenderingContext2D | null;
   /** Refresh cell data from backend - returns Promise for sequencing */
   refreshCells: () => Promise<void>;
+  /** 
+   * Animate row insertion with smooth "flow" effect.
+   * @param index - Row index where insertion starts (0-based)
+   * @param count - Number of rows being inserted
+   * @param durationMs - Animation duration in milliseconds (default: 200)
+   * @returns Promise that resolves when animation completes
+   */
+  animateRowInsertion: (index: number, count: number, durationMs?: number) => Promise<void>;
+  /**
+   * Animate column insertion with smooth "flow" effect.
+   * @param index - Column index where insertion starts (0-based)
+   * @param count - Number of columns being inserted
+   * @param durationMs - Animation duration in milliseconds (default: 200)
+   * @returns Promise that resolves when animation completes
+   */
+  animateColumnInsertion: (index: number, count: number, durationMs?: number) => Promise<void>;
 }
 
 /**
@@ -82,6 +99,19 @@ const MARCHING_ANTS_SPEED = 0.5;
  * Total length of dash pattern (dash + gap) for animation wrap.
  */
 const DASH_PATTERN_LENGTH = 8; // 4px dash + 4px gap
+
+/**
+ * Default duration for insertion animations in milliseconds.
+ */
+const DEFAULT_INSERTION_ANIMATION_DURATION = 200;
+
+/**
+ * Easing function for smooth animation (ease-out cubic).
+ * Starts fast, slows down at the end for a natural feel.
+ */
+function easeOutCubic(t: number): number {
+  return 1 - Math.pow(1 - t, 3);
+}
 
 /**
  * GridCanvas component - renders the spreadsheet grid using HTML5 Canvas.
@@ -129,6 +159,14 @@ export const GridCanvas = forwardRef<GridCanvasHandle, GridCanvasProps>(
     // Animation state for marching ants
     const animationFrameRef = useRef<number | null>(null);
     const animationOffsetRef = useRef<number>(0);
+
+    // Animation state for row/column insertion
+    const [insertionAnimation, setInsertionAnimation] = useState<InsertionAnimation | null>(null);
+    const insertionAnimationRef = useRef<{
+      startTime: number;
+      duration: number;
+      resolve: () => void;
+    } | null>(null);
 
     // Ensure we have valid dimensions
     const dims = dimensions || createEmptyDimensionOverrides();
@@ -306,9 +344,9 @@ export const GridCanvas = forwardRef<GridCanvasHandle, GridCanvasProps>(
 
     /**
      * Draw the grid content using the grid renderer.
-     * Accepts optional animation offset for marching ants.
+     * Accepts optional animation offset for marching ants and insertion animation.
      */
-    const draw = useCallback((animationOffset: number = 0) => {
+    const draw = useCallback((animationOffset: number = 0, currentInsertionAnimation: InsertionAnimation | null = null) => {
       if (!context || canvasSize.width === 0 || canvasSize.height === 0) {
         return;
       }
@@ -316,7 +354,7 @@ export const GridCanvas = forwardRef<GridCanvasHandle, GridCanvasProps>(
       // Clear the canvas
       clear();
 
-      // Render the grid with cell data, formula references, style cache, fill preview, and clipboard
+      // Render the grid with cell data, formula references, style cache, fill preview, clipboard, and insertion animation
       renderGrid(
         context,
         canvasSize.width,
@@ -333,18 +371,67 @@ export const GridCanvas = forwardRef<GridCanvasHandle, GridCanvasProps>(
         fillPreviewRange,
         clipboardSelection,
         clipboardMode,
-        animationOffset
+        animationOffset,
+        currentInsertionAnimation
       );
     }, [context, canvasSize.width, canvasSize.height, config, viewport, selection, editing, cells, theme, formulaReferences, dims, styleCache, fillPreviewRange, clipboardSelection, clipboardMode, clear]);
 
     /**
-     * Animation loop for marching ants effect.
+     * Start row insertion animation.
+     */
+    const animateRowInsertion = useCallback((index: number, count: number, durationMs: number = DEFAULT_INSERTION_ANIMATION_DURATION): Promise<void> => {
+      return new Promise((resolve) => {
+        const targetSize = config.defaultCellHeight || 24;
+        
+        // Set initial animation state
+        setInsertionAnimation({
+          type: "row",
+          index,
+          count,
+          progress: 0,
+          targetSize,
+        });
+
+        insertionAnimationRef.current = {
+          startTime: performance.now(),
+          duration: durationMs,
+          resolve,
+        };
+      });
+    }, [config.defaultCellHeight]);
+
+    /**
+     * Start column insertion animation.
+     */
+    const animateColumnInsertion = useCallback((index: number, count: number, durationMs: number = DEFAULT_INSERTION_ANIMATION_DURATION): Promise<void> => {
+      return new Promise((resolve) => {
+        const targetSize = config.defaultCellWidth || 100;
+        
+        // Set initial animation state
+        setInsertionAnimation({
+          type: "column",
+          index,
+          count,
+          progress: 0,
+          targetSize,
+        });
+
+        insertionAnimationRef.current = {
+          startTime: performance.now(),
+          duration: durationMs,
+          resolve,
+        };
+      });
+    }, [config.defaultCellWidth]);
+
+    /**
+     * Combined animation loop for marching ants and insertion animations.
      */
     useEffect(() => {
-      // Only animate when clipboard has content
-      const shouldAnimate = clipboardSelection && clipboardMode !== "none";
+      const shouldAnimateClipboard = clipboardSelection && clipboardMode !== "none";
+      const shouldAnimateInsertion = insertionAnimation !== null;
 
-      if (!shouldAnimate) {
+      if (!shouldAnimateClipboard && !shouldAnimateInsertion) {
         // Cancel any existing animation
         if (animationFrameRef.current !== null) {
           cancelAnimationFrame(animationFrameRef.current);
@@ -362,20 +449,45 @@ export const GridCanvas = forwardRef<GridCanvasHandle, GridCanvasProps>(
         const deltaTime = currentTime - lastTime;
         lastTime = currentTime;
 
-        // Update offset based on time (60fps = ~16.67ms per frame)
-        // Speed is in pixels per frame at 60fps
-        animationOffsetRef.current += MARCHING_ANTS_SPEED * (deltaTime / 16.67);
-
-        // Wrap around at pattern length to prevent float overflow
-        if (animationOffsetRef.current >= DASH_PATTERN_LENGTH) {
-          animationOffsetRef.current -= DASH_PATTERN_LENGTH;
+        // Update marching ants offset
+        if (shouldAnimateClipboard) {
+          animationOffsetRef.current += MARCHING_ANTS_SPEED * (deltaTime / 16.67);
+          if (animationOffsetRef.current >= DASH_PATTERN_LENGTH) {
+            animationOffsetRef.current -= DASH_PATTERN_LENGTH;
+          }
         }
 
-        // Redraw with current offset
-        draw(animationOffsetRef.current);
+        // Update insertion animation progress
+        let currentInsertionAnim = insertionAnimation;
+        if (shouldAnimateInsertion && insertionAnimationRef.current) {
+          const { startTime, duration, resolve } = insertionAnimationRef.current;
+          const elapsed = currentTime - startTime;
+          const rawProgress = Math.min(elapsed / duration, 1);
+          const easedProgress = easeOutCubic(rawProgress);
 
-        // Continue animation
-        animationFrameRef.current = requestAnimationFrame(animate);
+          if (rawProgress >= 1) {
+            // Animation complete
+            currentInsertionAnim = null;
+            setInsertionAnimation(null);
+            insertionAnimationRef.current = null;
+            resolve();
+          } else {
+            // Update progress
+            currentInsertionAnim = {
+              ...insertionAnimation!,
+              progress: easedProgress,
+            };
+            setInsertionAnimation(currentInsertionAnim);
+          }
+        }
+
+        // Redraw with current animation states
+        draw(animationOffsetRef.current, currentInsertionAnim);
+
+        // Continue animation if still needed
+        if (shouldAnimateClipboard || (currentInsertionAnim !== null)) {
+          animationFrameRef.current = requestAnimationFrame(animate);
+        }
       };
 
       // Start animation
@@ -388,7 +500,7 @@ export const GridCanvas = forwardRef<GridCanvasHandle, GridCanvasProps>(
           animationFrameRef.current = null;
         }
       };
-    }, [clipboardSelection, clipboardMode, draw]);
+    }, [clipboardSelection, clipboardMode, insertionAnimation, draw]);
 
     /**
      * Fetch cells when viewport changes.
@@ -424,15 +536,16 @@ export const GridCanvas = forwardRef<GridCanvasHandle, GridCanvasProps>(
 
     /**
      * Redraw when dependencies change (but not during animation).
-     * Animation loop handles redraws when clipboard is active.
+     * Animation loop handles redraws when clipboard is active or insertion is animating.
      */
     useEffect(() => {
       // Only do manual redraw when not animating
-      const shouldAnimate = clipboardSelection && clipboardMode !== "none";
-      if (!shouldAnimate) {
-        draw(0);
+      const shouldAnimateClipboard = clipboardSelection && clipboardMode !== "none";
+      const shouldAnimateInsertion = insertionAnimation !== null;
+      if (!shouldAnimateClipboard && !shouldAnimateInsertion) {
+        draw(0, null);
       }
-    }, [draw, clipboardSelection, clipboardMode]);
+    }, [draw, clipboardSelection, clipboardMode, insertionAnimation]);
 
     /**
      * Expose imperative methods via ref.
@@ -440,12 +553,14 @@ export const GridCanvas = forwardRef<GridCanvasHandle, GridCanvasProps>(
     useImperativeHandle(
       ref,
       () => ({
-        redraw: () => draw(animationOffsetRef.current),
+        redraw: () => draw(animationOffsetRef.current, insertionAnimation),
         getCanvas: () => canvasRef.current,
         getContext: () => context,
         refreshCells,
+        animateRowInsertion,
+        animateColumnInsertion,
       }),
-      [draw, context, refreshCells]
+      [draw, context, refreshCells, animateRowInsertion, animateColumnInsertion, insertionAnimation]
     );
 
     return (

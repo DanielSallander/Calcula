@@ -1,6 +1,7 @@
-//FILENAME: app/src/lib/gridRenderer/types.ts
-//PURPOSE: Core type definitions and theme configuration for grid rendering
-//CONTEXT: Defines interfaces used throughout the rendering pipeline
+// FILENAME: app/src/lib/gridRenderer/types.ts
+// PURPOSE: Core type definitions and theme configuration for grid rendering
+// CONTEXT: Defines interfaces used throughout the rendering pipeline
+// Updated: Added InsertionAnimation support for smooth row/column insertion
 
 import type {
   GridConfig,
@@ -11,6 +12,7 @@ import type {
   FormulaReference,
   DimensionOverrides,
   StyleDataMap,
+  InsertionAnimation,
 } from "../../types";
 
 /**
@@ -82,6 +84,7 @@ export const DEFAULT_THEME: GridTheme = {
 /**
  * Render state passed to all drawing functions.
  * Phase 6 FIX: Added styleCache for proper style rendering.
+ * Updated: Added insertionAnimation for smooth row/column insertion.
  */
 export interface RenderState {
   ctx: CanvasRenderingContext2D;
@@ -100,6 +103,8 @@ export interface RenderState {
   fillPreviewRange?: Selection | null;
   clipboardSelection?: Selection | null;
   clipboardMode?: "none" | "copy" | "cut";
-  /** Animation offset for marching ants effect (0-20 range) */
+  /** Animation offset for marching ants effect (0-8 range) */
   clipboardAnimationOffset?: number;
+  /** Active insertion animation state for smooth row/column insertion */
+  insertionAnimation?: InsertionAnimation;
 }

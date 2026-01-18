@@ -13,7 +13,7 @@ use engine::{
     Cell, CellStyle, CellValue, Color, Grid, NumberFormat, StyleRegistry, TextAlign, TextRotation,
     VerticalAlign, CurrencyPosition,
 };
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use tauri::State;
 
 // ============================================================================
@@ -892,6 +892,103 @@ pub fn get_style_count(state: State<AppState>) -> usize {
     styles.len()
 }
 
+// ============================================================================
+// ROW/COLUMN INSERTION WITH DEPENDENCY MAP UPDATES
+// ============================================================================
+
+/// Shift all cell positions in a HashMap where the key is (row, col)
+fn shift_cell_positions_for_row_insert<V: Clone>(
+    map: &mut HashMap<(u32, u32), V>,
+    from_row: u32,
+    count: u32,
+) {
+    let entries: Vec<_> = map.drain().collect();
+    for ((r, c), v) in entries {
+        let new_r = if r >= from_row { r + count } else { r };
+        map.insert((new_r, c), v);
+    }
+}
+
+/// Shift all cell positions in a HashMap where the key is (row, col)
+fn shift_cell_positions_for_col_insert<V: Clone>(
+    map: &mut HashMap<(u32, u32), V>,
+    from_col: u32,
+    count: u32,
+) {
+    let entries: Vec<_> = map.drain().collect();
+    for ((r, c), v) in entries {
+        let new_c = if c >= from_col { c + count } else { c };
+        map.insert((r, new_c), v);
+    }
+}
+
+/// Shift cell references inside a HashSet<(u32, u32)>
+fn shift_cell_set_for_row_insert(set: &HashSet<(u32, u32)>, from_row: u32, count: u32) -> HashSet<(u32, u32)> {
+    set.iter()
+        .map(|(r, c)| {
+            let new_r = if *r >= from_row { *r + count } else { *r };
+            (new_r, *c)
+        })
+        .collect()
+}
+
+fn shift_cell_set_for_col_insert(set: &HashSet<(u32, u32)>, from_col: u32, count: u32) -> HashSet<(u32, u32)> {
+    set.iter()
+        .map(|(r, c)| {
+            let new_c = if *c >= from_col { *c + count } else { *c };
+            (*r, new_c)
+        })
+        .collect()
+}
+
+/// Shift row indices in row_dependents map
+fn shift_row_indices(map: &mut HashMap<u32, HashSet<(u32, u32)>>, from_row: u32, count: u32) {
+    let entries: Vec<_> = map.drain().collect();
+    for (row_idx, cell_set) in entries {
+        let new_row_idx = if row_idx >= from_row { row_idx + count } else { row_idx };
+        // Also shift the cell positions in the set
+        let new_set = shift_cell_set_for_row_insert(&cell_set, from_row, count);
+        map.insert(new_row_idx, new_set);
+    }
+}
+
+/// Shift column indices in column_dependents map
+fn shift_col_indices(map: &mut HashMap<u32, HashSet<(u32, u32)>>, from_col: u32, count: u32) {
+    let entries: Vec<_> = map.drain().collect();
+    for (col_idx, cell_set) in entries {
+        let new_col_idx = if col_idx >= from_col { col_idx + count } else { col_idx };
+        // Also shift the cell positions in the set
+        let new_set = shift_cell_set_for_col_insert(&cell_set, from_col, count);
+        map.insert(new_col_idx, new_set);
+    }
+}
+
+/// Shift row dependencies (cell -> set of row indices)
+fn shift_row_dependencies_map(map: &mut HashMap<(u32, u32), HashSet<u32>>, from_row: u32, count: u32) {
+    let entries: Vec<_> = map.drain().collect();
+    for ((r, c), row_set) in entries {
+        let new_r = if r >= from_row { r + count } else { r };
+        let new_row_set: HashSet<u32> = row_set
+            .iter()
+            .map(|row_idx| if *row_idx >= from_row { *row_idx + count } else { *row_idx })
+            .collect();
+        map.insert((new_r, c), new_row_set);
+    }
+}
+
+/// Shift column dependencies (cell -> set of col indices)
+fn shift_col_dependencies_map(map: &mut HashMap<(u32, u32), HashSet<u32>>, from_col: u32, count: u32) {
+    let entries: Vec<_> = map.drain().collect();
+    for ((r, c), col_set) in entries {
+        let new_c = if c >= from_col { c + count } else { c };
+        let new_col_set: HashSet<u32> = col_set
+            .iter()
+            .map(|col_idx| if *col_idx >= from_col { *col_idx + count } else { *col_idx })
+            .collect();
+        map.insert((r, new_c), new_col_set);
+    }
+}
+
 /// Insert rows at the specified position, shifting existing rows down.
 #[tauri::command]
 pub fn insert_rows(
@@ -905,8 +1002,15 @@ pub fn insert_rows(
     let mut row_heights = state.row_heights.lock().map_err(|e| e.to_string())?;
     let active_sheet = *state.active_sheet.lock().map_err(|e| e.to_string())?;
     
-    // BUGFIX: First, update formula references in ALL cells that reference rows at or after the insertion point
-    // This must happen BEFORE moving cells, so we iterate over all cells
+    // Lock all dependency maps
+    let mut dependents_map = state.dependents.lock().map_err(|e| e.to_string())?;
+    let mut dependencies_map = state.dependencies.lock().map_err(|e| e.to_string())?;
+    let mut column_dependents_map = state.column_dependents.lock().map_err(|e| e.to_string())?;
+    let mut column_dependencies_map = state.column_dependencies.lock().map_err(|e| e.to_string())?;
+    let mut row_dependents_map = state.row_dependents.lock().map_err(|e| e.to_string())?;
+    let mut row_dependencies_map = state.row_dependencies.lock().map_err(|e| e.to_string())?;
+    
+    // First, update formula references in ALL cells that reference rows at or after the insertion point
     let all_cells: Vec<((u32, u32), Cell)> = grid.cells.iter()
         .map(|(&pos, cell)| (pos, cell.clone()))
         .collect();
@@ -915,7 +1019,6 @@ pub fn insert_rows(
         if let Some(formula) = &cell.formula {
             let updated_formula = shift_formula_row_references(formula, row, count as i32);
             if updated_formula != *formula {
-                // Formula was updated, update the cell in place
                 let mut updated_cell = cell.clone();
                 updated_cell.formula = Some(updated_formula);
                 grid.cells.insert((*r, *c), updated_cell);
@@ -940,7 +1043,7 @@ pub fn insert_rows(
         grid.cells.insert((r + count, c), cell);
     }
     
-    // Update row heights - shift heights at or after the insertion point
+    // Update row heights
     let old_heights: Vec<(u32, f64)> = row_heights.iter().map(|(&r, &h)| (r, h)).collect();
     row_heights.clear();
     for (r, height) in old_heights {
@@ -951,18 +1054,49 @@ pub fn insert_rows(
         }
     }
     
+    // === UPDATE DEPENDENCY MAPS ===
+    
+    // Update dependents map: shift keys and values
+    let deps_entries: Vec<_> = dependents_map.drain().collect();
+    for ((r, c), dep_set) in deps_entries {
+        let new_r = if r >= row { r + count } else { r };
+        let new_set = shift_cell_set_for_row_insert(&dep_set, row, count);
+        dependents_map.insert((new_r, c), new_set);
+    }
+    
+    // Update dependencies map: shift keys and values
+    let deps_entries: Vec<_> = dependencies_map.drain().collect();
+    for ((r, c), ref_set) in deps_entries {
+        let new_r = if r >= row { r + count } else { r };
+        let new_set = shift_cell_set_for_row_insert(&ref_set, row, count);
+        dependencies_map.insert((new_r, c), new_set);
+    }
+    
+    // Update column_dependents: shift cell positions in values
+    for (_col, cell_set) in column_dependents_map.iter_mut() {
+        *cell_set = shift_cell_set_for_row_insert(cell_set, row, count);
+    }
+    
+    // Update column_dependencies: shift keys only (cell positions)
+    shift_cell_positions_for_row_insert(&mut column_dependencies_map, row, count);
+    
+    // Update row_dependents: shift both keys (row indices) and values (cell positions)
+    shift_row_indices(&mut row_dependents_map, row, count);
+    
+    // Update row_dependencies: shift keys (cell positions) and values (row indices)
+    shift_row_dependencies_map(&mut row_dependencies_map, row, count);
+    
     // Recalculate grid bounds
     grid.recalculate_bounds();
     
-    // Also update the grids vector to keep in sync
+    // Sync grids vector
     if active_sheet < grids.len() {
-        // Copy cells to the grids vector version
         grids[active_sheet].cells = grid.cells.clone();
         grids[active_sheet].max_row = grid.max_row;
         grids[active_sheet].max_col = grid.max_col;
     }
     
-    // Return updated cells in the affected area
+    // Return updated cells
     let mut result: Vec<CellData> = Vec::new();
     for r in 0..=grid.max_row {
         for c in 0..=grid.max_col {
@@ -988,8 +1122,15 @@ pub fn insert_columns(
     let mut column_widths = state.column_widths.lock().map_err(|e| e.to_string())?;
     let active_sheet = *state.active_sheet.lock().map_err(|e| e.to_string())?;
     
-    // BUGFIX: First, update formula references in ALL cells that reference columns at or after the insertion point
-    // This must happen BEFORE moving cells, so we iterate over all cells
+    // Lock all dependency maps
+    let mut dependents_map = state.dependents.lock().map_err(|e| e.to_string())?;
+    let mut dependencies_map = state.dependencies.lock().map_err(|e| e.to_string())?;
+    let mut column_dependents_map = state.column_dependents.lock().map_err(|e| e.to_string())?;
+    let mut column_dependencies_map = state.column_dependencies.lock().map_err(|e| e.to_string())?;
+    let mut row_dependents_map = state.row_dependents.lock().map_err(|e| e.to_string())?;
+    let mut row_dependencies_map = state.row_dependencies.lock().map_err(|e| e.to_string())?;
+    
+    // First, update formula references in ALL cells
     let all_cells: Vec<((u32, u32), Cell)> = grid.cells.iter()
         .map(|(&pos, cell)| (pos, cell.clone()))
         .collect();
@@ -998,7 +1139,6 @@ pub fn insert_columns(
         if let Some(formula) = &cell.formula {
             let updated_formula = shift_formula_col_references(formula, col, count as i32);
             if updated_formula != *formula {
-                // Formula was updated, update the cell in place
                 let mut updated_cell = cell.clone();
                 updated_cell.formula = Some(updated_formula);
                 grid.cells.insert((*r, *c), updated_cell);
@@ -1023,7 +1163,7 @@ pub fn insert_columns(
         grid.cells.insert((r, c + count), cell);
     }
     
-    // Update column widths - shift widths at or after the insertion point
+    // Update column widths
     let old_widths: Vec<(u32, f64)> = column_widths.iter().map(|(&c, &w)| (c, w)).collect();
     column_widths.clear();
     for (c, width) in old_widths {
@@ -1034,17 +1174,49 @@ pub fn insert_columns(
         }
     }
     
+    // === UPDATE DEPENDENCY MAPS ===
+    
+    // Update dependents map: shift keys and values
+    let deps_entries: Vec<_> = dependents_map.drain().collect();
+    for ((r, c), dep_set) in deps_entries {
+        let new_c = if c >= col { c + count } else { c };
+        let new_set = shift_cell_set_for_col_insert(&dep_set, col, count);
+        dependents_map.insert((r, new_c), new_set);
+    }
+    
+    // Update dependencies map: shift keys and values
+    let deps_entries: Vec<_> = dependencies_map.drain().collect();
+    for ((r, c), ref_set) in deps_entries {
+        let new_c = if c >= col { c + count } else { c };
+        let new_set = shift_cell_set_for_col_insert(&ref_set, col, count);
+        dependencies_map.insert((r, new_c), new_set);
+    }
+    
+    // Update column_dependents: shift both keys (col indices) and values (cell positions)
+    shift_col_indices(&mut column_dependents_map, col, count);
+    
+    // Update column_dependencies: shift keys (cell positions) and values (col indices)
+    shift_col_dependencies_map(&mut column_dependencies_map, col, count);
+    
+    // Update row_dependents: shift cell positions in values only
+    for (_row, cell_set) in row_dependents_map.iter_mut() {
+        *cell_set = shift_cell_set_for_col_insert(cell_set, col, count);
+    }
+    
+    // Update row_dependencies: shift keys only (cell positions)
+    shift_cell_positions_for_col_insert(&mut row_dependencies_map, col, count);
+    
     // Recalculate grid bounds
     grid.recalculate_bounds();
     
-    // Also update the grids vector to keep in sync
+    // Sync grids vector
     if active_sheet < grids.len() {
         grids[active_sheet].cells = grid.cells.clone();
         grids[active_sheet].max_row = grid.max_row;
         grids[active_sheet].max_col = grid.max_col;
     }
     
-    // Return updated cells (return all cells since formulas anywhere may have changed)
+    // Return updated cells
     let mut result: Vec<CellData> = Vec::new();
     for r in 0..=grid.max_row {
         for c in 0..=grid.max_col {
@@ -1058,12 +1230,10 @@ pub fn insert_columns(
 }
 
 /// Shift row references in a formula by a given amount.
-/// For example, "=A5+B10" with row=3, delta=2 becomes "=A7+B12"
-/// Also handles row-only references like "5:5" or "2:10"
 fn shift_formula_row_references(formula: &str, from_row: u32, delta: i32) -> String {
     use regex::Regex;
     
-    // First handle cell references (e.g., A5, $A$5)
+    // Handle cell references (e.g., A5, $A$5)
     let cell_re = Regex::new(r"(\$?)([A-Z]+)(\$?)(\d+)").unwrap();
     
     let result = cell_re.replace_all(formula, |caps: &regex::Captures| {
@@ -1073,7 +1243,7 @@ fn shift_formula_row_references(formula: &str, from_row: u32, delta: i32) -> Str
         let row_num: u32 = caps[4].parse().unwrap_or(0);
         
         // Only shift if row is at or after from_row and not absolute
-        // Note: from_row is 0-indexed, row_num is 1-indexed
+        // from_row is 0-indexed, row_num is 1-indexed
         let new_row = if row_abs.is_empty() && row_num > from_row {
             ((row_num as i32) + delta).max(1) as u32
         } else {
@@ -1083,7 +1253,7 @@ fn shift_formula_row_references(formula: &str, from_row: u32, delta: i32) -> Str
         format!("{}{}{}{}", col_abs, col_letters, row_abs, new_row)
     }).to_string();
     
-    // Then handle row-only references (e.g., 5:5, $2:$10)
+    // Handle row-only references (e.g., 5:5, $2:$10)
     let row_re = Regex::new(r"(\$?)(\d+):(\$?)(\d+)").unwrap();
     
     row_re.replace_all(&result, |caps: &regex::Captures| {
@@ -1092,8 +1262,6 @@ fn shift_formula_row_references(formula: &str, from_row: u32, delta: i32) -> Str
         let end_abs = &caps[3];
         let end_row: u32 = caps[4].parse().unwrap_or(0);
         
-        // Only shift if row is after from_row and not absolute
-        // Note: from_row is 0-indexed, row numbers in formula are 1-indexed
         let new_start = if start_abs.is_empty() && start_row > from_row {
             ((start_row as i32) + delta).max(1) as u32
         } else {
@@ -1111,21 +1279,17 @@ fn shift_formula_row_references(formula: &str, from_row: u32, delta: i32) -> Str
 }
 
 /// Shift column references in a formula by a given amount.
-/// For example, "=C5+E10" with col=2 (C), delta=2 becomes "=E5+G10"
-/// Also handles column-only references like "B:B" or "A:C"
 fn shift_formula_col_references(formula: &str, from_col: u32, delta: i32) -> String {
     use regex::Regex;
     
-    /// Helper to convert column letters to 0-based index
     fn col_to_index(col: &str) -> u32 {
         let mut index: u32 = 0;
         for ch in col.chars() {
             index = index * 26 + (ch as u32 - 'A' as u32 + 1);
         }
-        index - 1 // Convert to 0-based
+        index - 1
     }
     
-    /// Helper to convert 0-based index to column letters
     fn index_to_col(mut idx: u32) -> String {
         let mut result = String::new();
         loop {
@@ -1138,7 +1302,7 @@ fn shift_formula_col_references(formula: &str, from_col: u32, delta: i32) -> Str
         result
     }
     
-    // First handle cell references (e.g., C5, $C$5)
+    // Handle cell references (e.g., C5, $C$5)
     let cell_re = Regex::new(r"(\$?)([A-Z]+)(\$?)(\d+)").unwrap();
     
     let result = cell_re.replace_all(formula, |caps: &regex::Captures| {
@@ -1149,7 +1313,6 @@ fn shift_formula_col_references(formula: &str, from_col: u32, delta: i32) -> Str
         
         let col_index = col_to_index(col_letters);
         
-        // Only shift if column is at or after from_col and not absolute
         let new_col_index = if col_abs.is_empty() && col_index >= from_col {
             ((col_index as i32) + delta).max(0) as u32
         } else {
@@ -1161,7 +1324,7 @@ fn shift_formula_col_references(formula: &str, from_col: u32, delta: i32) -> Str
         format!("{}{}{}{}", col_abs, new_col_letters, row_abs, row_num)
     }).to_string();
     
-    // Then handle column-only references (e.g., B:B, $A:$C)
+    // Handle column-only references (e.g., B:B, $A:$C)
     let col_re = Regex::new(r"(\$?)([A-Z]+):(\$?)([A-Z]+)").unwrap();
     
     col_re.replace_all(&result, |caps: &regex::Captures| {
@@ -1173,7 +1336,6 @@ fn shift_formula_col_references(formula: &str, from_col: u32, delta: i32) -> Str
         let start_index = col_to_index(start_col);
         let end_index = col_to_index(end_col);
         
-        // Only shift if column is at or after from_col and not absolute
         let new_start_index = if start_abs.is_empty() && start_index >= from_col {
             ((start_index as i32) + delta).max(0) as u32
         } else {
