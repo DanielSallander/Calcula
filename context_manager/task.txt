@@ -1,3 +1,2 @@
-I would like to have smoother transition when inserting a column or row.
-Is it possible to make it so that it "flows" instead of instantanious?
-Can we parameterize so that we can set the "flowness"?
+We now have insert column and insert row commands, and these are connected to the right mouse button click menu.
+I now would like to implement the corresponding feature for **delete** column and row.

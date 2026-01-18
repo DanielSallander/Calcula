@@ -326,3 +326,27 @@ export async function insertColumns(col: number, count: number): Promise<CellDat
   console.log(`[tauri-api] insertColumns returned ${result.length} updated cells`);
   return result;
 }
+
+/**
+ * Delete rows at the specified position, shifting remaining rows up.
+ * @param row - The row index where deletion starts
+ * @param count - Number of rows to delete
+ */
+export async function deleteRows(row: number, count: number): Promise<CellData[]> {
+  console.log(`[tauri-api] deleteRows(${row}, ${count})`);
+  const result = await invoke<CellData[]>("delete_rows", { row, count });
+  console.log(`[tauri-api] deleteRows returned ${result.length} updated cells`);
+  return result;
+}
+
+/**
+ * Delete columns at the specified position, shifting remaining columns left.
+ * @param col - The column index where deletion starts
+ * @param count - Number of columns to delete
+ */
+export async function deleteColumns(col: number, count: number): Promise<CellData[]> {
+  console.log(`[tauri-api] deleteColumns(${col}, ${count})`);
+  const result = await invoke<CellData[]>("delete_columns", { col, count });
+  console.log(`[tauri-api] deleteColumns returned ${result.length} updated cells`);
+  return result;
+}

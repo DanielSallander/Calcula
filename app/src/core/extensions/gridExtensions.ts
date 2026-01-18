@@ -77,7 +77,7 @@ const GROUP_ORDER: Record<string, number> = {
 type CommandHandler = () => void | Promise<void>;
 
 /** Available command names */
-export type GridCommand = "cut" | "copy" | "paste" | "clearContents" | "insertRow" | "insertColumn";
+export type GridCommand = "cut" | "copy" | "paste" | "clearContents" | "insertRow" | "insertColumn" | "deleteRow" | "deleteColumn";
 
 /** Command registry for direct handler invocation */
 class GridCommandRegistry {
@@ -366,6 +366,47 @@ export function registerCoreGridContextMenu(): void {
       
       console.log(`[GridMenu] Insert ${count} column(s) at column ${startCol}`);
       await gridCommands.execute("insertColumn");
+    },
+  });
+
+  gridExtensions.registerContextMenuItem({
+    id: "core:deleteRow",
+    label: "Delete Row",
+    group: GridMenuGroups.INSERT,
+    order: 30,
+    // Only visible when rows are selected (right-click on row header)
+    visible: (ctx) => ctx.selection?.type === "rows",
+    disabled: false,
+    onClick: async (ctx) => {
+      if (!ctx.selection || ctx.selection.type !== "rows") return;
+      
+      const startRow = Math.min(ctx.selection.startRow, ctx.selection.endRow);
+      const endRow = Math.max(ctx.selection.startRow, ctx.selection.endRow);
+      const count = endRow - startRow + 1;
+      
+      console.log(`[GridMenu] Delete ${count} row(s) starting at row ${startRow}`);
+      await gridCommands.execute("deleteRow");
+    },
+  });
+
+  gridExtensions.registerContextMenuItem({
+    id: "core:deleteColumn",
+    label: "Delete Column",
+    group: GridMenuGroups.INSERT,
+    order: 40,
+    separatorAfter: true,
+    // Only visible when columns are selected (right-click on column header)
+    visible: (ctx) => ctx.selection?.type === "columns",
+    disabled: false,
+    onClick: async (ctx) => {
+      if (!ctx.selection || ctx.selection.type !== "columns") return;
+      
+      const startCol = Math.min(ctx.selection.startCol, ctx.selection.endCol);
+      const endCol = Math.max(ctx.selection.startCol, ctx.selection.endCol);
+      const count = endCol - startCol + 1;
+      
+      console.log(`[GridMenu] Delete ${count} column(s) starting at column ${startCol}`);
+      await gridCommands.execute("deleteColumn");
     },
   });
 

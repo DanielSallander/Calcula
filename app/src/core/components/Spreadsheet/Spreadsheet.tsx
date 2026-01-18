@@ -8,6 +8,7 @@
 // UPDATE: Added extensible right-click context menu system.
 // UPDATE: Register command handlers with gridCommands for context menu actions.
 // UPDATE: Added insertRow and insertColumn command handlers.
+// UPDATE: Added deleteRow and deleteColumn command handlers.
 
 import React, { useCallback, useEffect, useState } from "react";
 import { useGridState, useGridContext } from "../../state";
@@ -17,7 +18,7 @@ import { InlineEditor } from "../InlineEditor";
 import { Scrollbar, ScrollbarCorner } from "../Scrollbar/Scrollbar";
 import { useScrollbarMetrics } from "../Scrollbar/useScrollbarMetrics";
 import { useSpreadsheet } from "./useSpreadsheet";
-import { clearRange, insertRows, insertColumns } from "../../lib/tauri-api";
+import { clearRange, insertRows, insertColumns, deleteRows, deleteColumns } from "../../lib/tauri-api";
 import { cellEvents } from "../../lib/cellEvents";
 import { ContextMenu } from "../ContextMenu";
 import type { ContextMenuPosition, ContextMenuItem } from "../ContextMenu";
@@ -168,8 +169,9 @@ function SpreadsheetContent({ className }: SpreadsheetContentProps): React.React
     }
   }, [selection, canvasRef]);
 
-  // Similarly update handleInsertColumn:
-
+  // -------------------------------------------------------------------------
+  // Insert Column Handler
+  // -------------------------------------------------------------------------
   const handleInsertColumn = useCallback(async () => {
     if (!selection || selection.type !== "columns") {
       console.log("[Spreadsheet] Insert column requires column selection");
@@ -210,6 +212,78 @@ function SpreadsheetContent({ className }: SpreadsheetContentProps): React.React
   }, [selection, canvasRef]);
 
   // -------------------------------------------------------------------------
+  // Delete Row Handler
+  // -------------------------------------------------------------------------
+  const handleDeleteRow = useCallback(async () => {
+    if (!selection || selection.type !== "rows") {
+      console.log("[Spreadsheet] Delete row requires row selection");
+      return;
+    }
+
+    const startRow = Math.min(selection.startRow, selection.endRow);
+    const endRow = Math.max(selection.startRow, selection.endRow);
+    const count = endRow - startRow + 1;
+
+    console.log(`[Spreadsheet] Deleting ${count} row(s) starting at row ${startRow}`);
+
+    try {
+      const updatedCells = await deleteRows(startRow, count);
+      console.log(`[Spreadsheet] Delete rows complete - ${updatedCells.length} cells updated`);
+
+      // Emit event to trigger refresh
+      cellEvents.emit({
+        row: startRow,
+        col: 0,
+        oldValue: undefined,
+        newValue: "",
+        formula: null,
+      });
+
+      // Force canvas refresh
+      canvasRef.current?.refreshCells();
+      canvasRef.current?.redraw();
+    } catch (error) {
+      console.error("[Spreadsheet] Failed to delete rows:", error);
+    }
+  }, [selection, canvasRef]);
+
+  // -------------------------------------------------------------------------
+  // Delete Column Handler
+  // -------------------------------------------------------------------------
+  const handleDeleteColumn = useCallback(async () => {
+    if (!selection || selection.type !== "columns") {
+      console.log("[Spreadsheet] Delete column requires column selection");
+      return;
+    }
+
+    const startCol = Math.min(selection.startCol, selection.endCol);
+    const endCol = Math.max(selection.startCol, selection.endCol);
+    const count = endCol - startCol + 1;
+
+    console.log(`[Spreadsheet] Deleting ${count} column(s) starting at column ${startCol}`);
+
+    try {
+      const updatedCells = await deleteColumns(startCol, count);
+      console.log(`[Spreadsheet] Delete columns complete - ${updatedCells.length} cells updated`);
+
+      // Emit event to trigger refresh
+      cellEvents.emit({
+        row: 0,
+        col: startCol,
+        oldValue: undefined,
+        newValue: "",
+        formula: null,
+      });
+
+      // Force canvas refresh
+      canvasRef.current?.refreshCells();
+      canvasRef.current?.redraw();
+    } catch (error) {
+      console.error("[Spreadsheet] Failed to delete columns:", error);
+    }
+  }, [selection, canvasRef]);
+
+  // -------------------------------------------------------------------------
   // Register Command Handlers
   // -------------------------------------------------------------------------
   useEffect(() => {
@@ -220,6 +294,8 @@ function SpreadsheetContent({ className }: SpreadsheetContentProps): React.React
     gridCommands.register("clearContents", handleClearContents);
     gridCommands.register("insertRow", handleInsertRow);
     gridCommands.register("insertColumn", handleInsertColumn);
+    gridCommands.register("deleteRow", handleDeleteRow);
+    gridCommands.register("deleteColumn", handleDeleteColumn);
 
     // Cleanup on unmount
     return () => {
@@ -229,8 +305,10 @@ function SpreadsheetContent({ className }: SpreadsheetContentProps): React.React
       gridCommands.unregister("clearContents");
       gridCommands.unregister("insertRow");
       gridCommands.unregister("insertColumn");
+      gridCommands.unregister("deleteRow");
+      gridCommands.unregister("deleteColumn");
     };
-  }, [handleCut, handleCopy, handlePaste, handleClearContents, handleInsertRow, handleInsertColumn]);
+  }, [handleCut, handleCopy, handlePaste, handleClearContents, handleInsertRow, handleInsertColumn, handleDeleteRow, handleDeleteColumn]);
 
   // -------------------------------------------------------------------------
   // Context Menu State

@@ -695,6 +695,8 @@ pub fn run() {
             commands::get_style_count,
             commands::insert_rows,
             commands::insert_columns,
+            commands::delete_rows,
+            commands::delete_columns,
             // Logging commands
             logging::log_frontend,
             logging::log_frontend_atomic,

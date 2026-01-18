@@ -1354,3 +1354,423 @@ fn shift_formula_col_references(formula: &str, from_col: u32, delta: i32) -> Str
         format!("{}{}:{}{}", start_abs, new_start_col, end_abs, new_end_col)
     }).to_string()
 }
+
+// ============================================================================
+// ROW/COLUMN DELETION WITH DEPENDENCY MAP UPDATES
+// ============================================================================
+
+/// Shift cell positions for row deletion (move cells up)
+fn shift_cell_positions_for_row_delete<V: Clone>(
+    map: &mut HashMap<(u32, u32), V>,
+    from_row: u32,
+    count: u32,
+) {
+    let entries: Vec<_> = map.drain().collect();
+    for ((r, c), v) in entries {
+        // Skip cells in the deleted range
+        if r >= from_row && r < from_row + count {
+            continue;
+        }
+        let new_r = if r >= from_row + count { r - count } else { r };
+        map.insert((new_r, c), v);
+    }
+}
+
+/// Shift cell positions for column deletion (move cells left)
+fn shift_cell_positions_for_col_delete<V: Clone>(
+    map: &mut HashMap<(u32, u32), V>,
+    from_col: u32,
+    count: u32,
+) {
+    let entries: Vec<_> = map.drain().collect();
+    for ((r, c), v) in entries {
+        // Skip cells in the deleted range
+        if c >= from_col && c < from_col + count {
+            continue;
+        }
+        let new_c = if c >= from_col + count { c - count } else { c };
+        map.insert((r, new_c), v);
+    }
+}
+
+/// Shift cell references inside a HashSet for row deletion
+fn shift_cell_set_for_row_delete(set: &HashSet<(u32, u32)>, from_row: u32, count: u32) -> HashSet<(u32, u32)> {
+    set.iter()
+        .filter(|(r, _)| *r < from_row || *r >= from_row + count)
+        .map(|(r, c)| {
+            let new_r = if *r >= from_row + count { *r - count } else { *r };
+            (new_r, *c)
+        })
+        .collect()
+}
+
+/// Shift cell references inside a HashSet for column deletion
+fn shift_cell_set_for_col_delete(set: &HashSet<(u32, u32)>, from_col: u32, count: u32) -> HashSet<(u32, u32)> {
+    set.iter()
+        .filter(|(_, c)| *c < from_col || *c >= from_col + count)
+        .map(|(r, c)| {
+            let new_c = if *c >= from_col + count { *c - count } else { *c };
+            (*r, new_c)
+        })
+        .collect()
+}
+
+/// Shift row indices in row_dependents map for deletion
+fn shift_row_indices_for_delete(map: &mut HashMap<u32, HashSet<(u32, u32)>>, from_row: u32, count: u32) {
+    let entries: Vec<_> = map.drain().collect();
+    for (row_idx, cell_set) in entries {
+        // Skip rows in the deleted range
+        if row_idx >= from_row && row_idx < from_row + count {
+            continue;
+        }
+        let new_row_idx = if row_idx >= from_row + count { row_idx - count } else { row_idx };
+        let new_set = shift_cell_set_for_row_delete(&cell_set, from_row, count);
+        if !new_set.is_empty() {
+            map.insert(new_row_idx, new_set);
+        }
+    }
+}
+
+/// Shift column indices in column_dependents map for deletion
+fn shift_col_indices_for_delete(map: &mut HashMap<u32, HashSet<(u32, u32)>>, from_col: u32, count: u32) {
+    let entries: Vec<_> = map.drain().collect();
+    for (col_idx, cell_set) in entries {
+        // Skip columns in the deleted range
+        if col_idx >= from_col && col_idx < from_col + count {
+            continue;
+        }
+        let new_col_idx = if col_idx >= from_col + count { col_idx - count } else { col_idx };
+        let new_set = shift_cell_set_for_col_delete(&cell_set, from_col, count);
+        if !new_set.is_empty() {
+            map.insert(new_col_idx, new_set);
+        }
+    }
+}
+
+/// Shift row dependencies for deletion
+fn shift_row_dependencies_map_for_delete(map: &mut HashMap<(u32, u32), HashSet<u32>>, from_row: u32, count: u32) {
+    let entries: Vec<_> = map.drain().collect();
+    for ((r, c), row_set) in entries {
+        // Skip cells in the deleted range
+        if r >= from_row && r < from_row + count {
+            continue;
+        }
+        let new_r = if r >= from_row + count { r - count } else { r };
+        let new_row_set: HashSet<u32> = row_set
+            .iter()
+            .filter(|row_idx| **row_idx < from_row || **row_idx >= from_row + count)
+            .map(|row_idx| if *row_idx >= from_row + count { *row_idx - count } else { *row_idx })
+            .collect();
+        if !new_row_set.is_empty() {
+            map.insert((new_r, c), new_row_set);
+        }
+    }
+}
+
+/// Shift column dependencies for deletion
+fn shift_col_dependencies_map_for_delete(map: &mut HashMap<(u32, u32), HashSet<u32>>, from_col: u32, count: u32) {
+    let entries: Vec<_> = map.drain().collect();
+    for ((r, c), col_set) in entries {
+        // Skip cells in the deleted range
+        if c >= from_col && c < from_col + count {
+            continue;
+        }
+        let new_c = if c >= from_col + count { c - count } else { c };
+        let new_col_set: HashSet<u32> = col_set
+            .iter()
+            .filter(|col_idx| **col_idx < from_col || **col_idx >= from_col + count)
+            .map(|col_idx| if *col_idx >= from_col + count { *col_idx - count } else { *col_idx })
+            .collect();
+        if !new_col_set.is_empty() {
+            map.insert((r, new_c), new_col_set);
+        }
+    }
+}
+
+/// Delete rows at the specified position, shifting remaining rows up.
+#[tauri::command]
+pub fn delete_rows(
+    state: State<AppState>,
+    row: u32,
+    count: u32,
+) -> Result<Vec<CellData>, String> {
+    let mut grid = state.grid.lock().map_err(|e| e.to_string())?;
+    let mut grids = state.grids.lock().map_err(|e| e.to_string())?;
+    let styles = state.style_registry.lock().map_err(|e| e.to_string())?;
+    let mut row_heights = state.row_heights.lock().map_err(|e| e.to_string())?;
+    let active_sheet = *state.active_sheet.lock().map_err(|e| e.to_string())?;
+    
+    // Lock all dependency maps
+    let mut dependents_map = state.dependents.lock().map_err(|e| e.to_string())?;
+    let mut dependencies_map = state.dependencies.lock().map_err(|e| e.to_string())?;
+    let mut column_dependents_map = state.column_dependents.lock().map_err(|e| e.to_string())?;
+    let mut column_dependencies_map = state.column_dependencies.lock().map_err(|e| e.to_string())?;
+    let mut row_dependents_map = state.row_dependents.lock().map_err(|e| e.to_string())?;
+    let mut row_dependencies_map = state.row_dependencies.lock().map_err(|e| e.to_string())?;
+    
+    // First, remove cells in the deleted rows
+    let cells_to_delete: Vec<(u32, u32)> = grid.cells.keys()
+        .filter(|(r, _)| *r >= row && *r < row + count)
+        .cloned()
+        .collect();
+    
+    for pos in cells_to_delete {
+        grid.cells.remove(&pos);
+    }
+    
+    // Update formula references in remaining cells (shift up = negative delta)
+    let all_cells: Vec<((u32, u32), Cell)> = grid.cells.iter()
+        .map(|(&pos, cell)| (pos, cell.clone()))
+        .collect();
+    
+    for ((r, c), cell) in &all_cells {
+        if let Some(formula) = &cell.formula {
+            let updated_formula = shift_formula_row_references(formula, row, -(count as i32));
+            if updated_formula != *formula {
+                let mut updated_cell = cell.clone();
+                updated_cell.formula = Some(updated_formula);
+                grid.cells.insert((*r, *c), updated_cell);
+            }
+        }
+    }
+    
+    // Move remaining cells up
+    let mut cells_to_move: Vec<((u32, u32), Cell)> = Vec::new();
+    for (&(r, c), cell) in grid.cells.iter() {
+        if r >= row + count {
+            cells_to_move.push(((r, c), cell.clone()));
+        }
+    }
+    
+    // Sort by row ascending so we move from top to bottom
+    cells_to_move.sort_by(|a, b| a.0 .0.cmp(&b.0 .0));
+    
+    // Remove old cells and insert at new positions
+    for ((r, c), cell) in cells_to_move {
+        grid.cells.remove(&(r, c));
+        grid.cells.insert((r - count, c), cell);
+    }
+    
+    // Update row heights
+    let old_heights: Vec<(u32, f64)> = row_heights.iter().map(|(&r, &h)| (r, h)).collect();
+    row_heights.clear();
+    for (r, height) in old_heights {
+        if r >= row && r < row + count {
+            // Skip deleted rows
+            continue;
+        }
+        if r >= row + count {
+            row_heights.insert(r - count, height);
+        } else {
+            row_heights.insert(r, height);
+        }
+    }
+    
+    // === UPDATE DEPENDENCY MAPS ===
+    
+    // Update dependents map
+    let deps_entries: Vec<_> = dependents_map.drain().collect();
+    for ((r, c), dep_set) in deps_entries {
+        if r >= row && r < row + count {
+            continue; // Skip deleted rows
+        }
+        let new_r = if r >= row + count { r - count } else { r };
+        let new_set = shift_cell_set_for_row_delete(&dep_set, row, count);
+        if !new_set.is_empty() {
+            dependents_map.insert((new_r, c), new_set);
+        }
+    }
+    
+    // Update dependencies map
+    let deps_entries: Vec<_> = dependencies_map.drain().collect();
+    for ((r, c), ref_set) in deps_entries {
+        if r >= row && r < row + count {
+            continue; // Skip deleted rows
+        }
+        let new_r = if r >= row + count { r - count } else { r };
+        let new_set = shift_cell_set_for_row_delete(&ref_set, row, count);
+        if !new_set.is_empty() {
+            dependencies_map.insert((new_r, c), new_set);
+        }
+    }
+    
+    // Update column_dependents: shift cell positions in values
+    for (_col, cell_set) in column_dependents_map.iter_mut() {
+        *cell_set = shift_cell_set_for_row_delete(cell_set, row, count);
+    }
+    
+    // Update column_dependencies: shift keys (cell positions)
+    shift_cell_positions_for_row_delete(&mut column_dependencies_map, row, count);
+    
+    // Update row_dependents: shift both keys (row indices) and values (cell positions)
+    shift_row_indices_for_delete(&mut row_dependents_map, row, count);
+    
+    // Update row_dependencies: shift keys (cell positions) and values (row indices)
+    shift_row_dependencies_map_for_delete(&mut row_dependencies_map, row, count);
+    
+    // Recalculate grid bounds
+    grid.recalculate_bounds();
+    
+    // Sync grids vector
+    if active_sheet < grids.len() {
+        grids[active_sheet].cells = grid.cells.clone();
+        grids[active_sheet].max_row = grid.max_row;
+        grids[active_sheet].max_col = grid.max_col;
+    }
+    
+    // Return updated cells
+    let mut result: Vec<CellData> = Vec::new();
+    for r in 0..=grid.max_row {
+        for c in 0..=grid.max_col {
+            if let Some(cell_data) = get_cell_internal(&grid, &styles, r, c) {
+                result.push(cell_data);
+            }
+        }
+    }
+    
+    Ok(result)
+}
+
+/// Delete columns at the specified position, shifting remaining columns left.
+#[tauri::command]
+pub fn delete_columns(
+    state: State<AppState>,
+    col: u32,
+    count: u32,
+) -> Result<Vec<CellData>, String> {
+    let mut grid = state.grid.lock().map_err(|e| e.to_string())?;
+    let mut grids = state.grids.lock().map_err(|e| e.to_string())?;
+    let styles = state.style_registry.lock().map_err(|e| e.to_string())?;
+    let mut column_widths = state.column_widths.lock().map_err(|e| e.to_string())?;
+    let active_sheet = *state.active_sheet.lock().map_err(|e| e.to_string())?;
+    
+    // Lock all dependency maps
+    let mut dependents_map = state.dependents.lock().map_err(|e| e.to_string())?;
+    let mut dependencies_map = state.dependencies.lock().map_err(|e| e.to_string())?;
+    let mut column_dependents_map = state.column_dependents.lock().map_err(|e| e.to_string())?;
+    let mut column_dependencies_map = state.column_dependencies.lock().map_err(|e| e.to_string())?;
+    let mut row_dependents_map = state.row_dependents.lock().map_err(|e| e.to_string())?;
+    let mut row_dependencies_map = state.row_dependencies.lock().map_err(|e| e.to_string())?;
+    
+    // First, remove cells in the deleted columns
+    let cells_to_delete: Vec<(u32, u32)> = grid.cells.keys()
+        .filter(|(_, c)| *c >= col && *c < col + count)
+        .cloned()
+        .collect();
+    
+    for pos in cells_to_delete {
+        grid.cells.remove(&pos);
+    }
+    
+    // Update formula references in remaining cells (shift left = negative delta)
+    let all_cells: Vec<((u32, u32), Cell)> = grid.cells.iter()
+        .map(|(&pos, cell)| (pos, cell.clone()))
+        .collect();
+    
+    for ((r, c), cell) in &all_cells {
+        if let Some(formula) = &cell.formula {
+            let updated_formula = shift_formula_col_references(formula, col, -(count as i32));
+            if updated_formula != *formula {
+                let mut updated_cell = cell.clone();
+                updated_cell.formula = Some(updated_formula);
+                grid.cells.insert((*r, *c), updated_cell);
+            }
+        }
+    }
+    
+    // Move remaining cells left
+    let mut cells_to_move: Vec<((u32, u32), Cell)> = Vec::new();
+    for (&(r, c), cell) in grid.cells.iter() {
+        if c >= col + count {
+            cells_to_move.push(((r, c), cell.clone()));
+        }
+    }
+    
+    // Sort by column ascending so we move from left to right
+    cells_to_move.sort_by(|a, b| a.0 .1.cmp(&b.0 .1));
+    
+    // Remove old cells and insert at new positions
+    for ((r, c), cell) in cells_to_move {
+        grid.cells.remove(&(r, c));
+        grid.cells.insert((r, c - count), cell);
+    }
+    
+    // Update column widths
+    let old_widths: Vec<(u32, f64)> = column_widths.iter().map(|(&c, &w)| (c, w)).collect();
+    column_widths.clear();
+    for (c, width) in old_widths {
+        if c >= col && c < col + count {
+            // Skip deleted columns
+            continue;
+        }
+        if c >= col + count {
+            column_widths.insert(c - count, width);
+        } else {
+            column_widths.insert(c, width);
+        }
+    }
+    
+    // === UPDATE DEPENDENCY MAPS ===
+    
+    // Update dependents map
+    let deps_entries: Vec<_> = dependents_map.drain().collect();
+    for ((r, c), dep_set) in deps_entries {
+        if c >= col && c < col + count {
+            continue; // Skip deleted columns
+        }
+        let new_c = if c >= col + count { c - count } else { c };
+        let new_set = shift_cell_set_for_col_delete(&dep_set, col, count);
+        if !new_set.is_empty() {
+            dependents_map.insert((r, new_c), new_set);
+        }
+    }
+    
+    // Update dependencies map
+    let deps_entries: Vec<_> = dependencies_map.drain().collect();
+    for ((r, c), ref_set) in deps_entries {
+        if c >= col && c < col + count {
+            continue; // Skip deleted columns
+        }
+        let new_c = if c >= col + count { c - count } else { c };
+        let new_set = shift_cell_set_for_col_delete(&ref_set, col, count);
+        if !new_set.is_empty() {
+            dependencies_map.insert((r, new_c), new_set);
+        }
+    }
+    
+    // Update column_dependents: shift both keys (col indices) and values (cell positions)
+    shift_col_indices_for_delete(&mut column_dependents_map, col, count);
+    
+    // Update column_dependencies: shift keys (cell positions) and values (col indices)
+    shift_col_dependencies_map_for_delete(&mut column_dependencies_map, col, count);
+    
+    // Update row_dependents: shift cell positions in values only
+    for (_row, cell_set) in row_dependents_map.iter_mut() {
+        *cell_set = shift_cell_set_for_col_delete(cell_set, col, count);
+    }
+    
+    // Update row_dependencies: shift keys only (cell positions)
+    shift_cell_positions_for_col_delete(&mut row_dependencies_map, col, count);
+    
+    // Recalculate grid bounds
+    grid.recalculate_bounds();
+    
+    // Sync grids vector
+    if active_sheet < grids.len() {
+        grids[active_sheet].cells = grid.cells.clone();
+        grids[active_sheet].max_row = grid.max_row;
+        grids[active_sheet].max_col = grid.max_col;
+    }
+    
+    // Return updated cells
+    let mut result: Vec<CellData> = Vec::new();
+    for r in 0..=grid.max_row {
+        for c in 0..=grid.max_col {
+            if let Some(cell_data) = get_cell_internal(&grid, &styles, r, c) {
+                result.push(cell_data);
+            }
+        }
+    }
+    
+    Ok(result)
+}
