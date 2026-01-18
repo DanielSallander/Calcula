@@ -52,7 +52,7 @@ let globalIsEditing = false;
 /**
  * Set the global editing flag. Used internally by the hook.
  */
-function setGlobalIsEditing(value: boolean): void {
+export function setGlobalIsEditing(value: boolean): void {
   globalIsEditing = value;
 }
 

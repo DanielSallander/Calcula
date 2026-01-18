@@ -2,6 +2,7 @@
 // PURPOSE: Main spreadsheet component combining grid, editor, and ribbon
 // CONTEXT: Core component that orchestrates the spreadsheet experience
 // UPDATE: Made Name Box interactive with navigation support
+// FIX: NameBox now participates in global editing state to prevent keyboard capture
 
 import React, { useCallback, useEffect, useState, useRef } from "react";
 import { useGridState, useGridContext } from "../../state";
@@ -25,6 +26,7 @@ import {
 import { getCellFromPixel } from "../../lib/gridRenderer";
 import { letterToColumn } from "../../types/types";
 import type { SpreadsheetContentProps } from "./SpreadsheetTypes";
+import { setGlobalIsEditing } from "../../hooks/useEditing"; // FIX: Import global editing state
 
 const SCROLLBAR_SIZE = 14;
 
@@ -129,8 +131,27 @@ function SpreadsheetContent({ className }: SpreadsheetContentProps): React.React
     }
   }, [displayAddress, isNameBoxEditing]);
 
+  // FIX: Exit edit mode when clicking outside the NameBox input
+  useEffect(() => {
+    if (!isNameBoxEditing) return;
+
+    const handleDocumentMouseDown = (e: MouseEvent) => {
+      if (nameBoxRef.current && !nameBoxRef.current.contains(e.target as Node)) {
+        setIsNameBoxEditing(false);
+        setGlobalIsEditing(false);
+        setNameBoxValue(displayAddress);
+      }
+    };
+
+    document.addEventListener("mousedown", handleDocumentMouseDown, { capture: true });
+    return () => {
+      document.removeEventListener("mousedown", handleDocumentMouseDown, { capture: true });
+    };
+  }, [isNameBoxEditing, displayAddress]);
+
   const handleNameBoxFocus = useCallback(() => {
     setIsNameBoxEditing(true);
+    setGlobalIsEditing(true); // FIX: Prevent grid keyboard handler from capturing keystrokes
     // Select all text on focus for easy replacement
     setTimeout(() => {
       nameBoxRef.current?.select();
@@ -139,12 +160,16 @@ function SpreadsheetContent({ className }: SpreadsheetContentProps): React.React
 
   const handleNameBoxBlur = useCallback(() => {
     setIsNameBoxEditing(false);
+    setGlobalIsEditing(false); // FIX: Allow grid keyboard handler to work again
     // Reset to current selection address on blur without navigation
     setNameBoxValue(displayAddress);
   }, [displayAddress]);
 
   const handleNameBoxKeyDown = useCallback(
     (e: React.KeyboardEvent<HTMLInputElement>) => {
+      // FIX: Stop propagation for ALL keys to prevent grid keyboard handler from capturing
+      e.stopPropagation();
+
       if (e.key === "Enter") {
         e.preventDefault();
         const parsed = parseCellReference(nameBoxValue);
@@ -153,6 +178,7 @@ function SpreadsheetContent({ className }: SpreadsheetContentProps): React.React
           dispatch(setSelection(parsed.row, parsed.col, parsed.row, parsed.col, "cells"));
           dispatch(scrollToCell(parsed.row, parsed.col, false));
           setIsNameBoxEditing(false);
+          setGlobalIsEditing(false); // FIX: Clear global editing state
           // Return focus to the grid
           nameBoxRef.current?.blur();
           focusContainerRef.current?.focus();
@@ -163,6 +189,7 @@ function SpreadsheetContent({ className }: SpreadsheetContentProps): React.React
       } else if (e.key === "Escape") {
         e.preventDefault();
         setIsNameBoxEditing(false);
+        setGlobalIsEditing(false); // FIX: Clear global editing state
         setNameBoxValue(displayAddress);
         nameBoxRef.current?.blur();
         focusContainerRef.current?.focus();
@@ -173,6 +200,11 @@ function SpreadsheetContent({ className }: SpreadsheetContentProps): React.React
 
   const handleNameBoxChange = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
     setNameBoxValue(e.target.value);
+  }, []);
+
+  // FIX: Prevent mousedown from bubbling to grid handlers
+  const handleNameBoxMouseDown = useCallback((e: React.MouseEvent<HTMLInputElement>) => {
+    e.stopPropagation();
   }, []);
 
   // -------------------------------------------------------------------------
@@ -577,6 +609,7 @@ function SpreadsheetContent({ className }: SpreadsheetContentProps): React.React
           onFocus={handleNameBoxFocus}
           onBlur={handleNameBoxBlur}
           onKeyDown={handleNameBoxKeyDown}
+          onMouseDown={handleNameBoxMouseDown}
           style={{
             width: "80px",
             height: "22px",
@@ -588,6 +621,8 @@ function SpreadsheetContent({ className }: SpreadsheetContentProps): React.React
             textAlign: "center",
             outline: "none",
             backgroundColor: isNameBoxEditing ? "#ffffff" : "#f9f9f9",
+            color: "#000000",
+            caretColor: "#000000",
           }}
           aria-label="Name Box"
         />

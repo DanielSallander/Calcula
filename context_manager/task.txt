@@ -1,7 +1,40 @@
-We should now implement the **Name Box**.
-I have attached a screenshot to clarify what box I mean.
+The **NameBox** component (`app/src/shell/FormulaBar/NameBox.tsx`) has three issues:
 
-We should implement these two functions:
+1. **Font color is white/invisible** - Text in the NameBox should be black but appears white or invisible
+2. **Navigation doesn't work** - When typing a cell reference like "B5" and pressing Enter, instead of navigating to cell B5, it writes "B5" into the currently selected cell
+3. **Edit mode doesn't exit on click** - When in edit mode in the NameBox, clicking elsewhere in the grid to select cells should exit edit mode and update the NameBox to show the new selection. Instead, it stays in edit mode with the old typed value.
 
-* **Displays Active Cell:** It shows the address of the currently selected cell (e.g., if you click cell A1, it says "A1").
-* **Navigation:** You can type a cell address (like Z1000) or a defined name into the box and press Enter to jump directly to that location.
+### Root Cause Analysis
+The grid has a keyboard handler (`useGridKeyboard.ts`) that listens for keystrokes. When you type in the NameBox, those keystrokes are bubbling up to the grid's handler, which interprets them as "start editing the selected cell with this character" - hence typing "B5" puts "B5" into the cell.
+
+The keyboard handler checks `getGlobalIsEditing()` from `useEditing.ts` to know when to ignore keystrokes (during cell editing). However, the NameBox is not part of the cell editing system.
+
+### What We Tried
+
+1. **Import and use `setGlobalIsEditing`** from `useEditing.ts` to tell the grid to ignore keystrokes while NameBox is focused
+   - Required exporting `setGlobalIsEditing` (it was private)
+   - Called it in `handleFocus` (set true) and `handleBlur`/Enter/Escape (set false)
+   - **Result**: No observable change
+
+2. **Stop propagation on ALL keystrokes** - Added `e.stopPropagation()` at the start of `handleKeyDown` for all keys, not just Enter/Escape
+   - **Result**: No observable change
+
+3. **Add mousedown listener** to exit edit mode when clicking outside the NameBox
+   - Used document-level listener in capture phase
+   - **Result**: No observable change
+
+4. **CSS fixes for font color** - Added `caretColor: "#000000"` and `WebkitTextFillColor: "#000000"` in addition to `color: "#000000"`
+   - **Result**: No observable change
+
+### Files Involved
+- `app/src/shell/FormulaBar/NameBox.tsx` - The component with issues
+- `app/src/core/hooks/useEditing.ts` - Contains `setGlobalIsEditing` (now exported) and `getGlobalIsEditing`
+- `app/src/core/hooks/useGridKeyboard.ts` - Grid keyboard handler that checks `getGlobalIsEditing()`
+
+### Next Steps to Investigate
+
+1. **Verify changes are being applied** - The changes may not be hot-reloading or compiling. Check if the build is picking up changes.
+2. **Check event flow** - The keystrokes might be captured elsewhere before reaching NameBox's handler. Look at `useSpreadsheetSelection.ts` and `useSpreadsheetEditing.ts` which also handle keyboard input.
+3. **Check for CSS cascade issues** - There might be global styles overriding the NameBox input styles. Use browser DevTools to inspect computed styles.
+4. **Debug with console logs** - Add logging to `handleKeyDown` in NameBox to verify it's being called at all, and to `useGridKeyboard` to see if keystrokes are still reaching it.
+5. **Check if input is actually receiving focus** - The input might not be the active element when typing.

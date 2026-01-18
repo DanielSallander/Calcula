@@ -1,11 +1,14 @@
 // FILENAME: shell/FormulaBar/NameBox.tsx
 // PURPOSE: Name Box component displaying active cell address with navigation support
 // CONTEXT: Shows current selection (e.g., "A1") and allows typing an address to navigate
+// FIX: Now participates in global editing state to prevent grid keyboard handler
+//      from capturing keystrokes and starting cell editing
 
 import React, { useState, useEffect, useRef, useCallback } from "react";
 import { useGridContext } from "../../core/state/GridContext";
 import { setSelection, scrollToCell } from "../../core/state/gridActions";
 import { columnToLetter, letterToColumn } from "../../core/types/types";
+import { setGlobalIsEditing } from "../../core/hooks/useEditing";
 
 /**
  * Parse a cell reference string (e.g., "A1", "Z100", "AA25") into row and column indices.
@@ -91,8 +94,29 @@ export function NameBox(): React.ReactElement {
     }
   }, [displayAddress, isEditing]);
 
+  // Exit edit mode when clicking outside the input
+  useEffect(() => {
+    if (!isEditing) return;
+
+    const handleMouseDown = (e: MouseEvent) => {
+      // If click is outside the input, exit edit mode
+      if (inputRef.current && !inputRef.current.contains(e.target as Node)) {
+        setIsEditing(false);
+        setGlobalIsEditing(false); // FIX: Clear global editing state
+        setInputValue(displayAddress);
+      }
+    };
+
+    // Use capture phase to catch clicks before they reach other handlers
+    document.addEventListener("mousedown", handleMouseDown, { capture: true });
+    return () => {
+      document.removeEventListener("mousedown", handleMouseDown, { capture: true });
+    };
+  }, [isEditing, displayAddress]);
+
   const handleFocus = useCallback(() => {
     setIsEditing(true);
+    setGlobalIsEditing(true); // FIX: Set global editing state to prevent grid keyboard capture
     // Select all text on focus for easy replacement
     setTimeout(() => {
       inputRef.current?.select();
@@ -101,12 +125,17 @@ export function NameBox(): React.ReactElement {
 
   const handleBlur = useCallback(() => {
     setIsEditing(false);
+    setGlobalIsEditing(false); // FIX: Clear global editing state
     // Reset to current selection address on blur without navigation
     setInputValue(displayAddress);
   }, [displayAddress]);
 
   const handleKeyDown = useCallback(
     (e: React.KeyboardEvent<HTMLInputElement>) => {
+      // CRITICAL: Stop propagation for ALL keys to prevent grid keyboard handler
+      // from capturing input and starting cell editing
+      e.stopPropagation();
+
       if (e.key === "Enter") {
         e.preventDefault();
         const parsed = parseCellReference(inputValue);
@@ -115,6 +144,7 @@ export function NameBox(): React.ReactElement {
           dispatch(setSelection(parsed.row, parsed.col, parsed.row, parsed.col, "cells"));
           dispatch(scrollToCell(parsed.row, parsed.col, false));
           setIsEditing(false);
+          setGlobalIsEditing(false); // FIX: Clear global editing state
           // Return focus to the grid
           inputRef.current?.blur();
         } else {
@@ -124,6 +154,7 @@ export function NameBox(): React.ReactElement {
       } else if (e.key === "Escape") {
         e.preventDefault();
         setIsEditing(false);
+        setGlobalIsEditing(false); // FIX: Clear global editing state
         setInputValue(displayAddress);
         inputRef.current?.blur();
       }
@@ -135,6 +166,12 @@ export function NameBox(): React.ReactElement {
     setInputValue(e.target.value);
   }, []);
 
+  // FIX: Handle mousedown to prevent focus stealing issues
+  const handleMouseDown = useCallback((e: React.MouseEvent<HTMLInputElement>) => {
+    // Prevent the grid from handling this click
+    e.stopPropagation();
+  }, []);
+
   return (
     <input
       ref={inputRef}
@@ -144,6 +181,7 @@ export function NameBox(): React.ReactElement {
       onFocus={handleFocus}
       onBlur={handleBlur}
       onKeyDown={handleKeyDown}
+      onMouseDown={handleMouseDown}
       style={{
         width: "80px",
         height: "22px",
@@ -154,6 +192,11 @@ export function NameBox(): React.ReactElement {
         fontFamily: "system-ui, -apple-system, sans-serif",
         outline: "none",
         backgroundColor: isEditing ? "#ffffff" : "#f9f9f9",
+        color: "#000000",
+        caretColor: "#000000",
+        WebkitTextFillColor: "#000000",
+        // FIX: Ensure text is always visible regardless of selection state
+        textAlign: "left",
       }}
       aria-label="Name Box"
     />
