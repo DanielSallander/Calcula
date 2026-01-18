@@ -1,18 +1,11 @@
 // FILENAME: app/src/core/components/Spreadsheet/Spreadsheet.tsx
 // PURPOSE: Main spreadsheet component combining grid, editor, and ribbon
 // CONTEXT: Core component that orchestrates the spreadsheet experience
-// FIX: Added data-formula-bar attribute and onFocus handler to Formula Input
-//      to correctly coordinate focus transfer with InlineEditor.
-// FIX: Corrected containerRef to point to grid area for proper mouse coordinate calculation.
-// FIX: Use focusContainerRef from useSpreadsheet for keyboard event handling.
-// UPDATE: Added extensible right-click context menu system.
-// UPDATE: Register command handlers with gridCommands for context menu actions.
-// UPDATE: Added insertRow and insertColumn command handlers.
-// UPDATE: Added deleteRow and deleteColumn command handlers.
+// UPDATE: Made Name Box interactive with navigation support
 
-import React, { useCallback, useEffect, useState } from "react";
+import React, { useCallback, useEffect, useState, useRef } from "react";
 import { useGridState, useGridContext } from "../../state";
-import { setViewportDimensions } from "../../state/gridActions";
+import { setViewportDimensions, setSelection, scrollToCell } from "../../state/gridActions";
 import { GridCanvas } from "../Grid";
 import { InlineEditor } from "../InlineEditor";
 import { Scrollbar, ScrollbarCorner } from "../Scrollbar/Scrollbar";
@@ -30,12 +23,41 @@ import {
   type GridMenuContext,
 } from "../../extensions";
 import { getCellFromPixel } from "../../lib/gridRenderer";
+import { letterToColumn } from "../../types/types";
 import type { SpreadsheetContentProps } from "./SpreadsheetTypes";
 
 const SCROLLBAR_SIZE = 14;
 
 // Register core context menu items once
 let coreGridMenuRegistered = false;
+
+/**
+ * Parse a cell reference string (e.g., "A1", "Z100", "AA25") into row and column indices.
+ * Returns null if the reference is invalid.
+ */
+function parseCellReference(ref: string): { row: number; col: number } | null {
+  const trimmed = ref.trim().toUpperCase();
+  if (!trimmed) return null;
+
+  // Match pattern: letters followed by numbers (e.g., "A1", "AA100", "XFD1048576")
+  const match = trimmed.match(/^([A-Z]+)(\d+)$/);
+  if (!match) return null;
+
+  const colLetters = match[1];
+  const rowNumber = parseInt(match[2], 10);
+
+  // Row numbers are 1-based in display, convert to 0-based index
+  if (rowNumber < 1) return null;
+  const row = rowNumber - 1;
+
+  // Convert column letters to 0-based index
+  const col = letterToColumn(colLetters);
+
+  // Validate within reasonable bounds (Excel limits: 1048576 rows, 16384 cols)
+  if (row > 1048575 || col > 16383) return null;
+
+  return { row, col };
+}
 
 function SpreadsheetContent({ className }: SpreadsheetContentProps): React.ReactElement {
   // 1. Destructure the grouped object returned by the refactored hook
@@ -44,8 +66,6 @@ function SpreadsheetContent({ className }: SpreadsheetContentProps): React.React
   const { dispatch } = useGridContext();
 
   // 2. Extract Refs
-  // FIX: Use focusContainerRef from useSpreadsheet for the focusable outer container
-  // containerRef is used for the grid area (mouse coordinate calculations)
   const { 
     containerRef, 
     focusContainerRef,
@@ -95,6 +115,67 @@ function SpreadsheetContent({ className }: SpreadsheetContentProps): React.React
   } = state;
 
   // -------------------------------------------------------------------------
+  // Name Box State and Handlers
+  // -------------------------------------------------------------------------
+  const nameBoxRef = useRef<HTMLInputElement>(null);
+  const [nameBoxValue, setNameBoxValue] = useState("");
+  const [isNameBoxEditing, setIsNameBoxEditing] = useState(false);
+
+  // Update name box value when selection changes (and not editing)
+  const displayAddress = getSelectionReference();
+  useEffect(() => {
+    if (!isNameBoxEditing) {
+      setNameBoxValue(displayAddress);
+    }
+  }, [displayAddress, isNameBoxEditing]);
+
+  const handleNameBoxFocus = useCallback(() => {
+    setIsNameBoxEditing(true);
+    // Select all text on focus for easy replacement
+    setTimeout(() => {
+      nameBoxRef.current?.select();
+    }, 0);
+  }, []);
+
+  const handleNameBoxBlur = useCallback(() => {
+    setIsNameBoxEditing(false);
+    // Reset to current selection address on blur without navigation
+    setNameBoxValue(displayAddress);
+  }, [displayAddress]);
+
+  const handleNameBoxKeyDown = useCallback(
+    (e: React.KeyboardEvent<HTMLInputElement>) => {
+      if (e.key === "Enter") {
+        e.preventDefault();
+        const parsed = parseCellReference(nameBoxValue);
+        if (parsed) {
+          // Navigate to the cell
+          dispatch(setSelection(parsed.row, parsed.col, parsed.row, parsed.col, "cells"));
+          dispatch(scrollToCell(parsed.row, parsed.col, false));
+          setIsNameBoxEditing(false);
+          // Return focus to the grid
+          nameBoxRef.current?.blur();
+          focusContainerRef.current?.focus();
+        } else {
+          // Invalid reference - reset to current selection
+          setNameBoxValue(displayAddress);
+        }
+      } else if (e.key === "Escape") {
+        e.preventDefault();
+        setIsNameBoxEditing(false);
+        setNameBoxValue(displayAddress);
+        nameBoxRef.current?.blur();
+        focusContainerRef.current?.focus();
+      }
+    },
+    [nameBoxValue, displayAddress, dispatch, focusContainerRef]
+  );
+
+  const handleNameBoxChange = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
+    setNameBoxValue(e.target.value);
+  }, []);
+
+  // -------------------------------------------------------------------------
   // Clear Contents Handler
   // -------------------------------------------------------------------------
   const handleClearContents = useCallback(async () => {
@@ -130,9 +211,6 @@ function SpreadsheetContent({ className }: SpreadsheetContentProps): React.React
   // -------------------------------------------------------------------------
   // Insert Row Handler
   // -------------------------------------------------------------------------
-// -------------------------------------------------------------------------
-  // Insert Row Handler - FIXED: Backend first, then animate
-  // -------------------------------------------------------------------------
   const handleInsertRow = useCallback(async () => {
     if (!selection || selection.type !== "rows") {
       console.log("[Spreadsheet] Insert row requires row selection");
@@ -146,17 +224,12 @@ function SpreadsheetContent({ className }: SpreadsheetContentProps): React.React
     console.log(`[Spreadsheet] Inserting ${count} row(s) at row ${startRow}`);
 
     try {
-      // 1. Backend operation FIRST
       const updatedCells = await insertRows(startRow, count);
       console.log(`[Spreadsheet] Insert rows complete - ${updatedCells.length} cells updated`);
 
-      // 2. Refresh cells to get updated positions
       await canvasRef.current?.refreshCells();
-
-      // 3. NOW animate - cells flow from old positions to new
       await canvasRef.current?.animateRowInsertion(startRow, count, 200);
 
-      // 4. Emit event to notify other components
       cellEvents.emit({
         row: startRow,
         col: 0,
@@ -165,7 +238,6 @@ function SpreadsheetContent({ className }: SpreadsheetContentProps): React.React
         formula: null,
       });
 
-      // 5. Final redraw
       canvasRef.current?.redraw();
     } catch (error) {
       console.error("[Spreadsheet] Failed to insert rows:", error);
@@ -173,7 +245,7 @@ function SpreadsheetContent({ className }: SpreadsheetContentProps): React.React
   }, [selection, canvasRef]);
 
   // -------------------------------------------------------------------------
-  // Insert Column Handler - FIXED: Backend first, then animate
+  // Insert Column Handler
   // -------------------------------------------------------------------------
   const handleInsertColumn = useCallback(async () => {
     if (!selection || selection.type !== "columns") {
@@ -188,17 +260,12 @@ function SpreadsheetContent({ className }: SpreadsheetContentProps): React.React
     console.log(`[Spreadsheet] Inserting ${count} column(s) at column ${startCol}`);
 
     try {
-      // 1. Backend operation FIRST
       const updatedCells = await insertColumns(startCol, count);
       console.log(`[Spreadsheet] Insert columns complete - ${updatedCells.length} cells updated`);
 
-      // 2. Refresh cells to get updated positions
       await canvasRef.current?.refreshCells();
-
-      // 3. NOW animate - cells flow from old positions to new
       await canvasRef.current?.animateColumnInsertion(startCol, count, 200);
 
-      // 4. Emit event to notify other components
       cellEvents.emit({
         row: 0,
         col: startCol,
@@ -207,7 +274,6 @@ function SpreadsheetContent({ className }: SpreadsheetContentProps): React.React
         formula: null,
       });
 
-      // 5. Final redraw
       canvasRef.current?.redraw();
     } catch (error) {
       console.error("[Spreadsheet] Failed to insert columns:", error);
@@ -215,7 +281,7 @@ function SpreadsheetContent({ className }: SpreadsheetContentProps): React.React
   }, [selection, canvasRef]);
 
   // -------------------------------------------------------------------------
-  // Delete Row Handler - ADDED: Animation support
+  // Delete Row Handler
   // -------------------------------------------------------------------------
   const handleDeleteRow = useCallback(async () => {
     if (!selection || selection.type !== "rows") {
@@ -230,17 +296,12 @@ function SpreadsheetContent({ className }: SpreadsheetContentProps): React.React
     console.log(`[Spreadsheet] Deleting ${count} row(s) starting at row ${startRow}`);
 
     try {
-      // 1. Backend operation FIRST
       const updatedCells = await deleteRows(startRow, count);
       console.log(`[Spreadsheet] Delete rows complete - ${updatedCells.length} cells updated`);
 
-      // 2. Refresh cells to get updated positions
       await canvasRef.current?.refreshCells();
-
-      // 3. Animate - cells collapse from old positions to new
       await canvasRef.current?.animateRowDeletion(startRow, count, 200);
 
-      // 4. Emit event to notify other components
       cellEvents.emit({
         row: startRow,
         col: 0,
@@ -249,7 +310,6 @@ function SpreadsheetContent({ className }: SpreadsheetContentProps): React.React
         formula: null,
       });
 
-      // 5. Final redraw
       canvasRef.current?.redraw();
     } catch (error) {
       console.error("[Spreadsheet] Failed to delete rows:", error);
@@ -257,7 +317,7 @@ function SpreadsheetContent({ className }: SpreadsheetContentProps): React.React
   }, [selection, canvasRef]);
 
   // -------------------------------------------------------------------------
-  // Delete Column Handler - ADDED: Animation support
+  // Delete Column Handler
   // -------------------------------------------------------------------------
   const handleDeleteColumn = useCallback(async () => {
     if (!selection || selection.type !== "columns") {
@@ -272,17 +332,12 @@ function SpreadsheetContent({ className }: SpreadsheetContentProps): React.React
     console.log(`[Spreadsheet] Deleting ${count} column(s) starting at column ${startCol}`);
 
     try {
-      // 1. Backend operation FIRST
       const updatedCells = await deleteColumns(startCol, count);
       console.log(`[Spreadsheet] Delete columns complete - ${updatedCells.length} cells updated`);
 
-      // 2. Refresh cells to get updated positions
       await canvasRef.current?.refreshCells();
-
-      // 3. Animate - cells collapse from old positions to new
       await canvasRef.current?.animateColumnDeletion(startCol, count, 200);
 
-      // 4. Emit event to notify other components
       cellEvents.emit({
         row: 0,
         col: startCol,
@@ -291,7 +346,6 @@ function SpreadsheetContent({ className }: SpreadsheetContentProps): React.React
         formula: null,
       });
 
-      // 5. Final redraw
       canvasRef.current?.redraw();
     } catch (error) {
       console.error("[Spreadsheet] Failed to delete columns:", error);
@@ -302,7 +356,6 @@ function SpreadsheetContent({ className }: SpreadsheetContentProps): React.React
   // Register Command Handlers
   // -------------------------------------------------------------------------
   useEffect(() => {
-    // Register clipboard and edit command handlers
     gridCommands.register("cut", handleCut);
     gridCommands.register("copy", handleCopy);
     gridCommands.register("paste", handlePaste);
@@ -312,7 +365,6 @@ function SpreadsheetContent({ className }: SpreadsheetContentProps): React.React
     gridCommands.register("deleteRow", handleDeleteRow);
     gridCommands.register("deleteColumn", handleDeleteColumn);
 
-    // Cleanup on unmount
     return () => {
       gridCommands.unregister("cut");
       gridCommands.unregister("copy");
@@ -333,7 +385,6 @@ function SpreadsheetContent({ className }: SpreadsheetContentProps): React.React
     context: GridMenuContext;
   } | null>(null);
 
-  // Register core menu items on first render
   useEffect(() => {
     if (!coreGridMenuRegistered) {
       registerCoreGridContextMenu();
@@ -346,25 +397,20 @@ function SpreadsheetContent({ className }: SpreadsheetContentProps): React.React
   // -------------------------------------------------------------------------
   const handleContextMenu = useCallback(
     (event: React.MouseEvent<HTMLDivElement>) => {
-      // Shift+Right-click: show native browser menu (for DevTools access)
       if (event.shiftKey) {
-        return; // Let browser handle it
+        return;
       }
 
-      // Prevent default browser context menu
       event.preventDefault();
 
-      // Get mouse position relative to container
       const rect = containerRef.current?.getBoundingClientRect();
       if (!rect) return;
 
       const mouseX = event.clientX - rect.left;
       const mouseY = event.clientY - rect.top;
 
-      // Determine which cell was clicked
       const clickedCell = getCellFromPixel(mouseX, mouseY, config, viewport, dimensions);
 
-      // Build context for menu items
       const menuContext: GridMenuContext = {
         selection,
         clickedCell,
@@ -375,7 +421,6 @@ function SpreadsheetContent({ className }: SpreadsheetContentProps): React.React
         sheetName: gridState.sheetContext.activeSheetName,
       };
 
-      // Show context menu at mouse position
       setContextMenu({
         position: { x: event.clientX, y: event.clientY },
         context: menuContext,
@@ -384,23 +429,18 @@ function SpreadsheetContent({ className }: SpreadsheetContentProps): React.React
     [containerRef, config, viewport, dimensions, selection, gridState.sheetContext]
   );
 
-  // Close context menu
   const handleCloseContextMenu = useCallback(() => {
     setContextMenu(null);
-    // Restore focus to the grid container for keyboard navigation
-    // Use setTimeout to ensure focus happens after React re-render
     setTimeout(() => {
       focusContainerRef.current?.focus();
     }, 0);
   }, [focusContainerRef]);
 
-  // Get menu items for current context
   const getContextMenuItems = useCallback((): ContextMenuItem[] => {
     if (!contextMenu) return [];
 
     const items = gridExtensions.getContextMenuItemsForContext(contextMenu.context);
 
-    // Convert GridContextMenuItem to ContextMenuItem
     return items.map((item) => ({
       id: item.id,
       label: item.label,
@@ -412,8 +452,6 @@ function SpreadsheetContent({ className }: SpreadsheetContentProps): React.React
     }));
   }, [contextMenu]);
 
-  // FIX: Track grid area dimensions and update state for scrollbar calculations
-  // Now uses containerRef which points to the grid area
   useEffect(() => {
     const gridArea = containerRef.current;
     if (!gridArea) return;
@@ -426,10 +464,8 @@ function SpreadsheetContent({ className }: SpreadsheetContentProps): React.React
       }
     };
 
-    // Initial measurement
     updateDimensions();
 
-    // Set up ResizeObserver for size changes
     const resizeObserver = new ResizeObserver(() => {
       updateDimensions();
     });
@@ -441,17 +477,14 @@ function SpreadsheetContent({ className }: SpreadsheetContentProps): React.React
     };
   }, [dispatch, containerRef]);
 
-  // 6. Scrollbar metrics based on used range
   const scrollbarMetrics = useScrollbarMetrics({
     config: gridState.config,
     viewport: gridState.viewport,
     viewportDimensions: gridState.viewportDimensions,
   });
 
-  // 7. Scrollbar handlers
   const handleHorizontalScroll = useCallback(
     (scrollX: number) => {
-      // Create a synthetic scroll event-like update
       const event = {
         currentTarget: {
           scrollLeft: scrollX,
@@ -476,7 +509,6 @@ function SpreadsheetContent({ className }: SpreadsheetContentProps): React.React
     [handleScrollEvent, gridState.viewport.scrollX]
   );
 
-  // 8. Handle wheel events for scrolling
   const handleWheel = useCallback(
     (event: React.WheelEvent<HTMLDivElement>) => {
       event.preventDefault();
@@ -506,7 +538,6 @@ function SpreadsheetContent({ className }: SpreadsheetContentProps): React.React
     [handleScrollEvent, gridState.viewport.scrollX, gridState.viewport.scrollY, scrollbarMetrics]
   );
 
-  // Calculate viewport dimensions for scrollbars
   const viewportWidth = gridState.viewportDimensions.width - config.rowHeaderWidth - SCROLLBAR_SIZE;
   const viewportHeight = gridState.viewportDimensions.height - config.colHeaderHeight - SCROLLBAR_SIZE;
 
@@ -537,22 +568,29 @@ function SpreadsheetContent({ className }: SpreadsheetContentProps): React.React
           gap: "4px",
         }}
       >
-        {/* Name Box */}
-        <div
+        {/* Name Box - Interactive with navigation support */}
+        <input
+          ref={nameBoxRef}
+          type="text"
+          value={nameBoxValue}
+          onChange={handleNameBoxChange}
+          onFocus={handleNameBoxFocus}
+          onBlur={handleNameBoxBlur}
+          onKeyDown={handleNameBoxKeyDown}
           style={{
             width: "80px",
             height: "22px",
             border: "1px solid #d0d0d0",
-            backgroundColor: "#fff",
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "center",
+            borderRadius: "0",
+            padding: "0 4px",
             fontSize: "12px",
-            fontFamily: "Segoe UI, sans-serif",
+            fontFamily: "Segoe UI, system-ui, sans-serif",
+            textAlign: "center",
+            outline: "none",
+            backgroundColor: isNameBoxEditing ? "#ffffff" : "#f9f9f9",
           }}
-        >
-          {getSelectionReference()}
-        </div>
+          aria-label="Name Box"
+        />
         
         {/* Formula Input */}
         <div style={{ display: "flex", alignItems: "center", gap: "2px" }}>
@@ -576,7 +614,7 @@ function SpreadsheetContent({ className }: SpreadsheetContentProps): React.React
         />
       </div>
 
-      {/* Grid Area with Scrollbars - uses containerRef for mouse coordinate consistency */}
+      {/* Grid Area with Scrollbars */}
       <div
         ref={containerRef}
         style={{ 
@@ -591,7 +629,7 @@ function SpreadsheetContent({ className }: SpreadsheetContentProps): React.React
         onWheel={handleWheel}
         onContextMenu={handleContextMenu}
       >
-        {/* Grid Canvas - adjusted for scrollbar space */}
+        {/* Grid Canvas */}
         <div
           style={{
             position: "absolute",
@@ -672,8 +710,6 @@ function SpreadsheetContent({ className }: SpreadsheetContentProps): React.React
   );
 }
 
-// FIX: Removed GridProvider wrapper - now provided at Layout level
-// This allows SheetTabs and Spreadsheet to share the same context
 export function Spreadsheet({ className }: SpreadsheetContentProps): React.ReactElement {
   return <SpreadsheetContent className={className} />;
 }

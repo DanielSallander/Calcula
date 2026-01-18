@@ -1,7 +1,6 @@
 // FILENAME: shell/Layout.tsx
 // PURPOSE: Main application layout
 // CONTEXT: Arranges menu bar, ribbon, spreadsheet, sheet tabs, and status bar
-// FIX: Moved GridProvider to Layout level so SheetTabs and Spreadsheet share context
 
 import React from "react";
 import { MenuBar } from "./MenuBar";
@@ -33,7 +32,7 @@ export function Layout(): React.ReactElement {
         {/* Ribbon Area */}
         <RibbonContainer />
 
-        {/* Spreadsheet Area */}
+        {/* Spreadsheet Area (includes its own formula bar) */}
         <div style={{ flex: 1, overflow: "hidden" }}>
           <Spreadsheet />
         </div>

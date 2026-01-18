@@ -1,19 +1,7 @@
-We now have insert / delete column and row commands, and these are connected to the right mouse button click menu.
-I notice that when inserting columns there is a small glitchiness.
-The columns shifts correctly to the commanded position.
-However, for a very brief small moment the values in the column that was shifted 
-flickers and shows briefly in the position it was shifted from.
-I suspect this has to do with the animation, or "smoothness", we implemented when shifting columns.
+We should now implement the **Name Box**.
+I have attached a screenshot to clarify what box I mean.
 
-In addition, we must implement animation for deleting rows and columns as well.
-Now we only have animation for inserting rows and columns.
+We should implement these two functions:
 
-These files were updated when we implemented the smoothing feature:
-- src-tauri/src/commands.rs
-- app/src/core/components/GridCanvas.tsx
-- app/src/core/components/Spreadsheet/Spreadsheet.tsx
-- app/src/core/lib/gridRenderer/core.ts
-- app/src/core/lib/gridRenderer/layout/dimensions.ts
-- app/src/core/lib/gridRenderer/rendering/cells.ts
-- app/src/core/lib/gridRenderer/types.ts
-- app/src/core/lib/types.ts
+* **Displays Active Cell:** It shows the address of the currently selected cell (e.g., if you click cell A1, it says "A1").
+* **Navigation:** You can type a cell address (like Z1000) or a defined name into the box and press Enter to jump directly to that location.
