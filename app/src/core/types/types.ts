@@ -400,19 +400,21 @@ export interface FormulaReference {
 }
 
 /**
- * State for row/column insertion animation.
- * Creates a "sliding" effect where existing content moves to make room.
+ * Animation state for row/column insertion or deletion.
+ * Used to create smooth "flow" effect when structure changes.
  */
 export interface InsertionAnimation {
-  /** Type of insertion */
+  /** Type of structural change */
   type: "row" | "column";
-  /** Index where insertion starts (0-based) */
+  /** Whether this is an insert or delete operation */
+  direction: "insert" | "delete";
+  /** Index where the change starts (0-based) */
   index: number;
-  /** Number of rows/columns being inserted */
+  /** Number of rows/columns being inserted or deleted */
   count: number;
-  /** Animation progress from 0 (start) to 1 (complete) */
+  /** Animation progress from 0 to 1 */
   progress: number;
-  /** Target size in pixels (row height or column width) */
+  /** Target size of each inserted/deleted row or column in pixels */
   targetSize: number;
 }
 

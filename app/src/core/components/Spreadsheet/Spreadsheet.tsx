@@ -1,4 +1,4 @@
-// FILENAME: app/src/components/Spreadsheet/Spreadsheet.tsx
+// FILENAME: app/src/core/components/Spreadsheet/Spreadsheet.tsx
 // PURPOSE: Main spreadsheet component combining grid, editor, and ribbon
 // CONTEXT: Core component that orchestrates the spreadsheet experience
 // FIX: Added data-formula-bar attribute and onFocus handler to Formula Input
@@ -130,7 +130,10 @@ function SpreadsheetContent({ className }: SpreadsheetContentProps): React.React
   // -------------------------------------------------------------------------
   // Insert Row Handler
   // -------------------------------------------------------------------------
- const handleInsertRow = useCallback(async () => {
+// -------------------------------------------------------------------------
+  // Insert Row Handler - FIXED: Backend first, then animate
+  // -------------------------------------------------------------------------
+  const handleInsertRow = useCallback(async () => {
     if (!selection || selection.type !== "rows") {
       console.log("[Spreadsheet] Insert row requires row selection");
       return;
@@ -143,16 +146,17 @@ function SpreadsheetContent({ className }: SpreadsheetContentProps): React.React
     console.log(`[Spreadsheet] Inserting ${count} row(s) at row ${startRow}`);
 
     try {
-      // Start animation before backend call
-      const animationPromise = canvasRef.current?.animateRowInsertion(startRow, count, 200);
-
+      // 1. Backend operation FIRST
       const updatedCells = await insertRows(startRow, count);
       console.log(`[Spreadsheet] Insert rows complete - ${updatedCells.length} cells updated`);
 
-      // Wait for animation to complete
-      await animationPromise;
+      // 2. Refresh cells to get updated positions
+      await canvasRef.current?.refreshCells();
 
-      // Emit event to trigger refresh
+      // 3. NOW animate - cells flow from old positions to new
+      await canvasRef.current?.animateRowInsertion(startRow, count, 200);
+
+      // 4. Emit event to notify other components
       cellEvents.emit({
         row: startRow,
         col: 0,
@@ -161,8 +165,7 @@ function SpreadsheetContent({ className }: SpreadsheetContentProps): React.React
         formula: null,
       });
 
-      // Force canvas refresh
-      canvasRef.current?.refreshCells();
+      // 5. Final redraw
       canvasRef.current?.redraw();
     } catch (error) {
       console.error("[Spreadsheet] Failed to insert rows:", error);
@@ -170,7 +173,7 @@ function SpreadsheetContent({ className }: SpreadsheetContentProps): React.React
   }, [selection, canvasRef]);
 
   // -------------------------------------------------------------------------
-  // Insert Column Handler
+  // Insert Column Handler - FIXED: Backend first, then animate
   // -------------------------------------------------------------------------
   const handleInsertColumn = useCallback(async () => {
     if (!selection || selection.type !== "columns") {
@@ -185,16 +188,17 @@ function SpreadsheetContent({ className }: SpreadsheetContentProps): React.React
     console.log(`[Spreadsheet] Inserting ${count} column(s) at column ${startCol}`);
 
     try {
-      // Start animation before backend call
-      const animationPromise = canvasRef.current?.animateColumnInsertion(startCol, count, 200);
-
+      // 1. Backend operation FIRST
       const updatedCells = await insertColumns(startCol, count);
       console.log(`[Spreadsheet] Insert columns complete - ${updatedCells.length} cells updated`);
 
-      // Wait for animation to complete
-      await animationPromise;
+      // 2. Refresh cells to get updated positions
+      await canvasRef.current?.refreshCells();
 
-      // Emit event to trigger refresh
+      // 3. NOW animate - cells flow from old positions to new
+      await canvasRef.current?.animateColumnInsertion(startCol, count, 200);
+
+      // 4. Emit event to notify other components
       cellEvents.emit({
         row: 0,
         col: startCol,
@@ -203,8 +207,7 @@ function SpreadsheetContent({ className }: SpreadsheetContentProps): React.React
         formula: null,
       });
 
-      // Force canvas refresh
-      canvasRef.current?.refreshCells();
+      // 5. Final redraw
       canvasRef.current?.redraw();
     } catch (error) {
       console.error("[Spreadsheet] Failed to insert columns:", error);
@@ -212,7 +215,7 @@ function SpreadsheetContent({ className }: SpreadsheetContentProps): React.React
   }, [selection, canvasRef]);
 
   // -------------------------------------------------------------------------
-  // Delete Row Handler
+  // Delete Row Handler - ADDED: Animation support
   // -------------------------------------------------------------------------
   const handleDeleteRow = useCallback(async () => {
     if (!selection || selection.type !== "rows") {
@@ -227,10 +230,17 @@ function SpreadsheetContent({ className }: SpreadsheetContentProps): React.React
     console.log(`[Spreadsheet] Deleting ${count} row(s) starting at row ${startRow}`);
 
     try {
+      // 1. Backend operation FIRST
       const updatedCells = await deleteRows(startRow, count);
       console.log(`[Spreadsheet] Delete rows complete - ${updatedCells.length} cells updated`);
 
-      // Emit event to trigger refresh
+      // 2. Refresh cells to get updated positions
+      await canvasRef.current?.refreshCells();
+
+      // 3. Animate - cells collapse from old positions to new
+      await canvasRef.current?.animateRowDeletion(startRow, count, 200);
+
+      // 4. Emit event to notify other components
       cellEvents.emit({
         row: startRow,
         col: 0,
@@ -239,8 +249,7 @@ function SpreadsheetContent({ className }: SpreadsheetContentProps): React.React
         formula: null,
       });
 
-      // Force canvas refresh
-      canvasRef.current?.refreshCells();
+      // 5. Final redraw
       canvasRef.current?.redraw();
     } catch (error) {
       console.error("[Spreadsheet] Failed to delete rows:", error);
@@ -248,7 +257,7 @@ function SpreadsheetContent({ className }: SpreadsheetContentProps): React.React
   }, [selection, canvasRef]);
 
   // -------------------------------------------------------------------------
-  // Delete Column Handler
+  // Delete Column Handler - ADDED: Animation support
   // -------------------------------------------------------------------------
   const handleDeleteColumn = useCallback(async () => {
     if (!selection || selection.type !== "columns") {
@@ -263,10 +272,17 @@ function SpreadsheetContent({ className }: SpreadsheetContentProps): React.React
     console.log(`[Spreadsheet] Deleting ${count} column(s) starting at column ${startCol}`);
 
     try {
+      // 1. Backend operation FIRST
       const updatedCells = await deleteColumns(startCol, count);
       console.log(`[Spreadsheet] Delete columns complete - ${updatedCells.length} cells updated`);
 
-      // Emit event to trigger refresh
+      // 2. Refresh cells to get updated positions
+      await canvasRef.current?.refreshCells();
+
+      // 3. Animate - cells collapse from old positions to new
+      await canvasRef.current?.animateColumnDeletion(startCol, count, 200);
+
+      // 4. Emit event to notify other components
       cellEvents.emit({
         row: 0,
         col: startCol,
@@ -275,8 +291,7 @@ function SpreadsheetContent({ className }: SpreadsheetContentProps): React.React
         formula: null,
       });
 
-      // Force canvas refresh
-      canvasRef.current?.refreshCells();
+      // 5. Final redraw
       canvasRef.current?.redraw();
     } catch (error) {
       console.error("[Spreadsheet] Failed to delete columns:", error);

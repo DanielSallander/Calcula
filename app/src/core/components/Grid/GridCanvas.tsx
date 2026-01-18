@@ -1,13 +1,11 @@
-// FILENAME: app/src/components/GridCanvas.tsx
+// FILENAME: app/src/core/components/GridCanvas.tsx
 // PURPOSE: Canvas component for rendering the spreadsheet grid.
 // CONTEXT: This component manages the HTML5 Canvas element used for
 // high-performance grid rendering. It handles device pixel ratio scaling,
 // automatic resizing, fetching cell data from the backend, and delegates
-// actual grid drawing to the gridRenderer module. Phase 3.3 adds text
-// rendering by fetching viewport cells and passing them to the renderer.
-// Updated: Added marching ants animation for clipboard selection.
-// Updated: Added sheet:formulaModeSwitch event listener for cross-sheet formula references.
-// Updated: Added smooth insertion animation for rows/columns.
+// actual grid drawing to the gridRenderer module.
+// Updated: Fixed insertion animation to work with backend-first approach
+// Updated: Added deletion animation support (animateRowDeletion, animateColumnDeletion)
 
 import React, { useRef, useEffect, useCallback, useImperativeHandle, forwardRef, useState } from "react";
 import { renderGrid, DEFAULT_THEME, calculateVisibleRange } from "../../lib/gridRenderer";
@@ -67,6 +65,7 @@ export interface GridCanvasHandle {
   refreshCells: () => Promise<void>;
   /** 
    * Animate row insertion with smooth "flow" effect.
+   * Call AFTER backend operation and refreshCells() complete.
    * @param index - Row index where insertion starts (0-based)
    * @param count - Number of rows being inserted
    * @param durationMs - Animation duration in milliseconds (default: 200)
@@ -75,12 +74,31 @@ export interface GridCanvasHandle {
   animateRowInsertion: (index: number, count: number, durationMs?: number) => Promise<void>;
   /**
    * Animate column insertion with smooth "flow" effect.
+   * Call AFTER backend operation and refreshCells() complete.
    * @param index - Column index where insertion starts (0-based)
    * @param count - Number of columns being inserted
    * @param durationMs - Animation duration in milliseconds (default: 200)
    * @returns Promise that resolves when animation completes
    */
   animateColumnInsertion: (index: number, count: number, durationMs?: number) => Promise<void>;
+  /**
+   * Animate row deletion with smooth "collapse" effect.
+   * Call AFTER backend operation and refreshCells() complete.
+   * @param index - Row index where deletion starts (0-based)
+   * @param count - Number of rows that were deleted
+   * @param durationMs - Animation duration in milliseconds (default: 200)
+   * @returns Promise that resolves when animation completes
+   */
+  animateRowDeletion: (index: number, count: number, durationMs?: number) => Promise<void>;
+  /**
+   * Animate column deletion with smooth "collapse" effect.
+   * Call AFTER backend operation and refreshCells() complete.
+   * @param index - Column index where deletion starts (0-based)
+   * @param count - Number of columns that were deleted
+   * @param durationMs - Animation duration in milliseconds (default: 200)
+   * @returns Promise that resolves when animation completes
+   */
+  animateColumnDeletion: (index: number, count: number, durationMs?: number) => Promise<void>;
 }
 
 /**
@@ -101,9 +119,9 @@ const MARCHING_ANTS_SPEED = 0.5;
 const DASH_PATTERN_LENGTH = 8; // 4px dash + 4px gap
 
 /**
- * Default duration for insertion animations in milliseconds.
+ * Default duration for insertion/deletion animations in milliseconds.
  */
-const DEFAULT_INSERTION_ANIMATION_DURATION = 200;
+const DEFAULT_ANIMATION_DURATION = 200;
 
 /**
  * Easing function for smooth animation (ease-out cubic).
@@ -160,7 +178,7 @@ export const GridCanvas = forwardRef<GridCanvasHandle, GridCanvasProps>(
     const animationFrameRef = useRef<number | null>(null);
     const animationOffsetRef = useRef<number>(0);
 
-    // Animation state for row/column insertion
+    // Animation state for row/column insertion/deletion
     const [insertionAnimation, setInsertionAnimation] = useState<InsertionAnimation | null>(null);
     const insertionAnimationRef = useRef<{
       startTime: number;
@@ -378,14 +396,16 @@ export const GridCanvas = forwardRef<GridCanvasHandle, GridCanvasProps>(
 
     /**
      * Start row insertion animation.
+     * Should be called AFTER backend operation and refreshCells() complete.
      */
-    const animateRowInsertion = useCallback((index: number, count: number, durationMs: number = DEFAULT_INSERTION_ANIMATION_DURATION): Promise<void> => {
+    const animateRowInsertion = useCallback((index: number, count: number, durationMs: number = DEFAULT_ANIMATION_DURATION): Promise<void> => {
       return new Promise((resolve) => {
         const targetSize = config.defaultCellHeight || 24;
         
-        // Set initial animation state
+        // Set initial animation state - progress starts at 0
         setInsertionAnimation({
           type: "row",
+          direction: "insert",
           index,
           count,
           progress: 0,
@@ -402,14 +422,16 @@ export const GridCanvas = forwardRef<GridCanvasHandle, GridCanvasProps>(
 
     /**
      * Start column insertion animation.
+     * Should be called AFTER backend operation and refreshCells() complete.
      */
-    const animateColumnInsertion = useCallback((index: number, count: number, durationMs: number = DEFAULT_INSERTION_ANIMATION_DURATION): Promise<void> => {
+    const animateColumnInsertion = useCallback((index: number, count: number, durationMs: number = DEFAULT_ANIMATION_DURATION): Promise<void> => {
       return new Promise((resolve) => {
         const targetSize = config.defaultCellWidth || 100;
         
-        // Set initial animation state
+        // Set initial animation state - progress starts at 0
         setInsertionAnimation({
           type: "column",
+          direction: "insert",
           index,
           count,
           progress: 0,
@@ -425,7 +447,59 @@ export const GridCanvas = forwardRef<GridCanvasHandle, GridCanvasProps>(
     }, [config.defaultCellWidth]);
 
     /**
-     * Combined animation loop for marching ants and insertion animations.
+     * Start row deletion animation.
+     * Should be called AFTER backend operation and refreshCells() complete.
+     */
+    const animateRowDeletion = useCallback((index: number, count: number, durationMs: number = DEFAULT_ANIMATION_DURATION): Promise<void> => {
+      return new Promise((resolve) => {
+        const targetSize = config.defaultCellHeight || 24;
+        
+        // Set initial animation state - progress starts at 0
+        setInsertionAnimation({
+          type: "row",
+          direction: "delete",
+          index,
+          count,
+          progress: 0,
+          targetSize,
+        });
+
+        insertionAnimationRef.current = {
+          startTime: performance.now(),
+          duration: durationMs,
+          resolve,
+        };
+      });
+    }, [config.defaultCellHeight]);
+
+    /**
+     * Start column deletion animation.
+     * Should be called AFTER backend operation and refreshCells() complete.
+     */
+    const animateColumnDeletion = useCallback((index: number, count: number, durationMs: number = DEFAULT_ANIMATION_DURATION): Promise<void> => {
+      return new Promise((resolve) => {
+        const targetSize = config.defaultCellWidth || 100;
+        
+        // Set initial animation state - progress starts at 0
+        setInsertionAnimation({
+          type: "column",
+          direction: "delete",
+          index,
+          count,
+          progress: 0,
+          targetSize,
+        });
+
+        insertionAnimationRef.current = {
+          startTime: performance.now(),
+          duration: durationMs,
+          resolve,
+        };
+      });
+    }, [config.defaultCellWidth]);
+
+    /**
+     * Combined animation loop for marching ants and insertion/deletion animations.
      */
     useEffect(() => {
       const shouldAnimateClipboard = clipboardSelection && clipboardMode !== "none";
@@ -457,7 +531,7 @@ export const GridCanvas = forwardRef<GridCanvasHandle, GridCanvasProps>(
           }
         }
 
-        // Update insertion animation progress
+        // Update insertion/deletion animation progress
         let currentInsertionAnim = insertionAnimation;
         if (shouldAnimateInsertion && insertionAnimationRef.current) {
           const { startTime, duration, resolve } = insertionAnimationRef.current;
@@ -559,8 +633,10 @@ export const GridCanvas = forwardRef<GridCanvasHandle, GridCanvasProps>(
         refreshCells,
         animateRowInsertion,
         animateColumnInsertion,
+        animateRowDeletion,
+        animateColumnDeletion,
       }),
-      [draw, context, refreshCells, animateRowInsertion, animateColumnInsertion, insertionAnimation]
+      [draw, context, refreshCells, animateRowInsertion, animateColumnInsertion, animateRowDeletion, animateColumnDeletion, insertionAnimation]
     );
 
     return (

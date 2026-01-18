@@ -1,7 +1,8 @@
-// FILENAME: app/src/lib/gridRenderer/layout/dimensions.ts
+// FILENAME: app/src/core/lib/gridRenderer/layout/dimensions.ts
 // PURPOSE: Column width and row height calculations with custom dimension support
 // CONTEXT: Handles cell positioning in the grid coordinate system
-// Updated: Added insertion animation offset support for smooth row/column insertion
+// Updated: Fixed insertion animation to work correctly with backend-first approach
+// Updated: Added deletion animation support
 
 import type { GridConfig, DimensionOverrides, InsertionAnimation } from "../../../types";
 import { ensureDimensions } from "../styles/styleUtils";
@@ -40,7 +41,13 @@ export function getRowHeight(
 
 /**
  * Calculate the X position of a column (left edge).
- * Optionally applies insertion animation offset.
+ * Applies insertion/deletion animation offset for smooth structural changes.
+ * 
+ * Animation logic:
+ * - INSERT: Cells at/after insertion point animate FROM old positions TO new positions
+ *   Offset starts negative (appear at old position) and shrinks to 0 (final position)
+ * - DELETE: Cells at/after deletion point animate FROM old positions TO new positions  
+ *   Offset starts positive (appear at old position) and shrinks to 0 (final position)
  */
 export function getColumnX(
   col: number,
@@ -56,10 +63,19 @@ export function getColumnX(
     x += getColumnWidth(c, config, dims);
   }
 
-  // Apply insertion animation offset for columns at or after the insertion point
+  // Apply animation offset for columns at or after the change point
   if (insertionAnimation && insertionAnimation.type === "column" && col >= insertionAnimation.index) {
-    const animOffset = insertionAnimation.progress * insertionAnimation.targetSize * insertionAnimation.count;
-    x += animOffset;
+    const totalOffset = insertionAnimation.targetSize * insertionAnimation.count;
+    // Progress goes 0 -> 1, so (1 - progress) goes 1 -> 0
+    const remainingOffset = (1 - insertionAnimation.progress) * totalOffset;
+    
+    if (insertionAnimation.direction === "insert") {
+      // INSERT: cells moved right, so offset is negative to show them at old (left) position
+      x -= remainingOffset;
+    } else {
+      // DELETE: cells moved left, so offset is positive to show them at old (right) position
+      x += remainingOffset;
+    }
   }
 
   return x;
@@ -67,7 +83,13 @@ export function getColumnX(
 
 /**
  * Calculate the Y position of a row (top edge).
- * Optionally applies insertion animation offset.
+ * Applies insertion/deletion animation offset for smooth structural changes.
+ * 
+ * Animation logic:
+ * - INSERT: Rows at/after insertion point animate FROM old positions TO new positions
+ *   Offset starts negative (appear at old position) and shrinks to 0 (final position)
+ * - DELETE: Rows at/after deletion point animate FROM old positions TO new positions
+ *   Offset starts positive (appear at old position) and shrinks to 0 (final position)
  */
 export function getRowY(
   row: number,
@@ -83,10 +105,19 @@ export function getRowY(
     y += getRowHeight(r, config, dims);
   }
 
-  // Apply insertion animation offset for rows at or after the insertion point
+  // Apply animation offset for rows at or after the change point
   if (insertionAnimation && insertionAnimation.type === "row" && row >= insertionAnimation.index) {
-    const animOffset = insertionAnimation.progress * insertionAnimation.targetSize * insertionAnimation.count;
-    y += animOffset;
+    const totalOffset = insertionAnimation.targetSize * insertionAnimation.count;
+    // Progress goes 0 -> 1, so (1 - progress) goes 1 -> 0
+    const remainingOffset = (1 - insertionAnimation.progress) * totalOffset;
+    
+    if (insertionAnimation.direction === "insert") {
+      // INSERT: rows moved down, so offset is negative to show them at old (up) position
+      y -= remainingOffset;
+    } else {
+      // DELETE: rows moved up, so offset is positive to show them at old (down) position
+      y += remainingOffset;
+    }
   }
 
   return y;

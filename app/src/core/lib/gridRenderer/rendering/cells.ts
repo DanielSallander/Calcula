@@ -1,8 +1,8 @@
 // FILENAME: app/src/lib/gridRenderer/rendering/cells.ts
 // PURPOSE: Cell text rendering with style support
 // CONTEXT: Draws cell content with formatting, colors, and truncation
-// UPDATED: Fixed property names to use camelCase matching TypeScript interfaces
-// UPDATED: Added insertion animation support for smooth row/column insertion
+// UPDATED: Fixed animation offset calculation to match backend-first approach
+// UPDATED: Added deletion animation support
 
 import type { RenderState } from "../types";
 import { calculateVisibleRange } from "../layout/viewport";
@@ -80,15 +80,26 @@ export function drawCellText(state: RenderState): void {
   // Padding inside cells
   const paddingX = 4;
   
-  // Calculate insertion animation offset
-  const rowAnimOffset = insertionAnimation && insertionAnimation.type === "row"
-    ? insertionAnimation.progress * insertionAnimation.targetSize * insertionAnimation.count
-    : 0;
-  const colAnimOffset = insertionAnimation && insertionAnimation.type === "column"
-    ? insertionAnimation.progress * insertionAnimation.targetSize * insertionAnimation.count
-    : 0;
-  const rowAnimIndex = insertionAnimation?.type === "row" ? insertionAnimation.index : -1;
-  const colAnimIndex = insertionAnimation?.type === "column" ? insertionAnimation.index : -1;
+  // Calculate insertion/deletion animation offset
+  // For INSERT: negative offset (cells animate from left/up to right/down)
+  // For DELETE: positive offset (cells animate from right/down to left/up)
+  let rowAnimOffset = 0;
+  let colAnimOffset = 0;
+  let rowAnimIndex = -1;
+  let colAnimIndex = -1;
+  
+  if (insertionAnimation) {
+    const totalOffset = insertionAnimation.targetSize * insertionAnimation.count;
+    const remainingOffset = (1 - insertionAnimation.progress) * totalOffset;
+    
+    if (insertionAnimation.type === "row") {
+      rowAnimIndex = insertionAnimation.index;
+      rowAnimOffset = insertionAnimation.direction === "insert" ? -remainingOffset : remainingOffset;
+    } else {
+      colAnimIndex = insertionAnimation.index;
+      colAnimOffset = insertionAnimation.direction === "insert" ? -remainingOffset : remainingOffset;
+    }
+  }
   
   // Debug: Log styleCache state once per render
   if (styleCache && styleCache.size > 1) {
@@ -100,14 +111,14 @@ export function drawCellText(state: RenderState): void {
   for (let row = range.startRow; row <= range.endRow && row < totalRows; row++) {
     const rowHeight = getRowHeight(row, config, dimensions);
     
-    // Apply row insertion animation offset
+    // Apply row animation offset for rows at or after the change point
     const y = row >= rowAnimIndex && rowAnimIndex >= 0 ? baseY + rowAnimOffset : baseY;
     
     let baseX = rowHeaderWidth + range.offsetX;
     for (let col = range.startCol; col <= range.endCol && col < totalCols; col++) {
       const colWidth = getColumnWidth(col, config, dimensions);
       
-      // Apply column insertion animation offset
+      // Apply column animation offset for columns at or after the change point
       const x = col >= colAnimIndex && colAnimIndex >= 0 ? baseX + colAnimOffset : baseX;
 
       // Skip if this cell is being edited (the input field handles display)
@@ -126,7 +137,7 @@ export function drawCellText(state: RenderState): void {
         continue;
       }
 
-      // Skip if cell is not visible
+      // Skip if cell is not visible (considering animation offset)
       if (x + colWidth < rowHeaderWidth || x > width || y + rowHeight < colHeaderHeight || y > height) {
         baseX += colWidth;
         continue;

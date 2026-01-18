@@ -1,4 +1,4 @@
-// FILENAME: app/src/lib/gridRenderer/core.ts
+// FILENAME: app/src/core/lib/gridRenderer/core.ts
 // PURPOSE: Main rendering orchestration function
 // CONTEXT: Coordinates all rendering phases for the grid
 // Updated: Added insertionAnimation parameter for smooth row/column insertion
