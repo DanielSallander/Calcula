@@ -75,7 +75,8 @@ export function FormulaInput(): React.ReactElement {
         inputRef.current?.blur();
       } else if (e.key === "Escape") {
         e.preventDefault();
-        cancelEdit();
+        // FIX: Await cancelEdit and ensure we don't commit
+        await cancelEdit();
         inputRef.current?.blur();
       }
     },

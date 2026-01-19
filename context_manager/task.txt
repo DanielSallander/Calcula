@@ -6,13 +6,10 @@ We have implemented the **Insert Function** button.
 - Insert Function Dialog - Searchable, categorized function picker
 - Smart formula completion - Auto-closes missing parentheses when committing
 
-However, it is not showing in the app.
-I suspect the components is not implemented properly (I think app/src/core/components/Spreadsheet/Spreadsheet.tsx is central here).
+However, we dont see any icons (see the attached image). Lets add the icons ase they are in Excel.
+ESC = Cross icon
+Enter = Check icon
+Insert function = function icon
 
-These are the files that was added or updated:
-- app/src/core/hooks/useEditing.ts
-- app/src/core/lib/formulaCompletion.ts
-- shell/FormulaBar/FormulaBar.tsx
-- shell/FormulaBar/FormulaInput.tsx
-- shell/FormulaBar/index.ts
-- shell/FormulaBar/InsertFunctionDialog.tsx
+Also, I notice that the "ESC" command basically works as pressing "Enter".
+It should revert back to previous state, not commit.

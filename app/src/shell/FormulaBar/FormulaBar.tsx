@@ -6,56 +6,58 @@
 //   - Insert Function (fx) button opens function dialog
 //   - Formula input syncs with inline cell editor
 
-import React, { useState, useCallback, useRef, useEffect } from "react";
+import React, { useState, useCallback } from "react";
 import { NameBox } from "./NameBox";
 import { FormulaInput } from "./FormulaInput";
 import { InsertFunctionDialog } from "./InsertFunctionDialog";
 import { useGridContext } from "../../core/state/GridContext";
-import { useEditing, setGlobalIsEditing } from "../../core/hooks/useEditing";
+import { useEditing } from "../../core/hooks/useEditing";
 
-// Icons as simple SVG components
+// Icons using text/spans for reliable rendering
 function CancelIcon(): React.ReactElement {
   return (
-    <svg width="12" height="12" viewBox="0 0 12 12" fill="none">
-      <path
-        d="M2 2L10 10M10 2L2 10"
-        stroke="currentColor"
-        strokeWidth="1.5"
-        strokeLinecap="round"
-      />
-    </svg>
+    <span
+      style={{
+        fontSize: "16px",
+        fontWeight: "bold",
+        lineHeight: 1,
+        fontFamily: "Arial, sans-serif",
+      }}
+    >
+      X
+    </span>
   );
 }
 
 function EnterIcon(): React.ReactElement {
+  // Using Unicode checkmark character
   return (
-    <svg width="12" height="12" viewBox="0 0 12 12" fill="none">
-      <path
-        d="M2 6L5 9L10 3"
-        stroke="currentColor"
-        strokeWidth="1.5"
-        strokeLinecap="round"
-        strokeLinejoin="round"
-      />
-    </svg>
+    <span
+      style={{
+        fontSize: "18px",
+        fontWeight: "bold",
+        lineHeight: 1,
+        fontFamily: "Arial, sans-serif",
+      }}
+    >
+      {"\u2713"}
+    </span>
   );
 }
 
 function InsertFunctionIcon(): React.ReactElement {
   return (
-    <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
-      <text
-        x="7"
-        y="11"
-        textAnchor="middle"
-        fontSize="10"
-        fontStyle="italic"
-        fontFamily="serif"
-        fill="currentColor"
-      >
-        fx
-      </text>
-    </svg>
+    <span
+      style={{
+        fontSize: "14px",
+        fontStyle: "italic",
+        fontFamily: "Times New Roman, Georgia, serif",
+        fontWeight: "normal",
+        lineHeight: 1,
+      }}
+    >
+      fx
+    </span>
   );
 }
 
@@ -66,8 +68,8 @@ export function FormulaBar(): React.ReactElement {
   
   const isEditing = editing !== null;
 
-  const handleCancel = useCallback(() => {
-    cancelEdit();
+  const handleCancel = useCallback(async () => {
+    await cancelEdit();
   }, [cancelEdit]);
 
   const handleEnter = useCallback(async () => {
@@ -131,27 +133,27 @@ export function FormulaBar(): React.ReactElement {
             gap: "1px",
           }}
         >
-          {/* Cancel button - only visible when editing */}
+          {/* Cancel button (X) - only active when editing */}
           <button
             onClick={handleCancel}
             disabled={!isEditing}
             title="Cancel (Esc)"
             style={{
-              width: "22px",
-              height: "22px",
+              width: "24px",
+              height: "24px",
               border: "none",
               backgroundColor: "transparent",
               cursor: isEditing ? "pointer" : "default",
               display: "flex",
               alignItems: "center",
               justifyContent: "center",
-              color: isEditing ? "#c00000" : "#cccccc",
+              color: isEditing ? "#c42b1c" : "#a0a0a0",
               borderRadius: "2px",
-              opacity: isEditing ? 1 : 0.4,
+              opacity: isEditing ? 1 : 0.5,
             }}
             onMouseEnter={(e) => {
               if (isEditing) {
-                e.currentTarget.style.backgroundColor = "#e8e8e8";
+                e.currentTarget.style.backgroundColor = "#fde7e9";
               }
             }}
             onMouseLeave={(e) => {
@@ -161,27 +163,27 @@ export function FormulaBar(): React.ReactElement {
             <CancelIcon />
           </button>
 
-          {/* Enter button - only visible when editing */}
+          {/* Enter button (checkmark) - only active when editing */}
           <button
             onClick={handleEnter}
             disabled={!isEditing}
             title="Enter"
             style={{
-              width: "22px",
-              height: "22px",
+              width: "24px",
+              height: "24px",
               border: "none",
               backgroundColor: "transparent",
               cursor: isEditing ? "pointer" : "default",
               display: "flex",
               alignItems: "center",
               justifyContent: "center",
-              color: isEditing ? "#008000" : "#cccccc",
+              color: isEditing ? "#0f7b0f" : "#a0a0a0",
               borderRadius: "2px",
-              opacity: isEditing ? 1 : 0.4,
+              opacity: isEditing ? 1 : 0.5,
             }}
             onMouseEnter={(e) => {
               if (isEditing) {
-                e.currentTarget.style.backgroundColor = "#e8e8e8";
+                e.currentTarget.style.backgroundColor = "#dff6dd";
               }
             }}
             onMouseLeave={(e) => {
@@ -191,13 +193,13 @@ export function FormulaBar(): React.ReactElement {
             <EnterIcon />
           </button>
 
-          {/* Insert Function button - always active */}
+          {/* Insert Function button (fx) - always active */}
           <button
             onClick={handleInsertFunction}
             title="Insert Function"
             style={{
-              width: "22px",
-              height: "22px",
+              width: "24px",
+              height: "24px",
               border: "none",
               backgroundColor: "transparent",
               cursor: "pointer",
@@ -208,7 +210,7 @@ export function FormulaBar(): React.ReactElement {
               borderRadius: "2px",
             }}
             onMouseEnter={(e) => {
-              e.currentTarget.style.backgroundColor = "#e8e8e8";
+              e.currentTarget.style.backgroundColor = "#e5e5e5";
             }}
             onMouseLeave={(e) => {
               e.currentTarget.style.backgroundColor = "transparent";
