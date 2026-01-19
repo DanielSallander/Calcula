@@ -68,9 +68,19 @@ export function FormulaBar(): React.ReactElement {
   
   const isEditing = editing !== null;
 
+  // FIX: Prevent mousedown from stealing focus (which would trigger blur commit)
+  const handleCancelMouseDown = useCallback((e: React.MouseEvent) => {
+    e.preventDefault();
+  }, []);
+
   const handleCancel = useCallback(async () => {
     await cancelEdit();
   }, [cancelEdit]);
+
+  // FIX: Prevent mousedown from stealing focus for Enter button too (consistency)
+  const handleEnterMouseDown = useCallback((e: React.MouseEvent) => {
+    e.preventDefault();
+  }, []);
 
   const handleEnter = useCallback(async () => {
     await commitEdit();
@@ -135,6 +145,7 @@ export function FormulaBar(): React.ReactElement {
         >
           {/* Cancel button (X) - only active when editing */}
           <button
+            onMouseDown={handleCancelMouseDown}
             onClick={handleCancel}
             disabled={!isEditing}
             title="Cancel (Esc)"
@@ -165,6 +176,7 @@ export function FormulaBar(): React.ReactElement {
 
           {/* Enter button (checkmark) - only active when editing */}
           <button
+            onMouseDown={handleEnterMouseDown}
             onClick={handleEnter}
             disabled={!isEditing}
             title="Enter"

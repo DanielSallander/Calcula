@@ -1,15 +1,2 @@
-We have implemented the **Insert Function** button.
-- Cancel button (X) - Red, calls cancelEdit()
-- Enter button (checkmark) - Green, calls commitEdit()
-- Insert Function button (fx) - Opens the function dialog
-- Formula input - Syncs with cell editing, shows formula/value
-- Insert Function Dialog - Searchable, categorized function picker
-- Smart formula completion - Auto-closes missing parentheses when committing
-
-However, we dont see any icons (see the attached image). Lets add the icons ase they are in Excel.
-ESC = Cross icon
-Enter = Check icon
-Insert function = function icon
-
-Also, I notice that the "ESC" command basically works as pressing "Enter".
-It should revert back to previous state, not commit.
+We need to properly connect the "X" icon in the formula bar to the "ESC" command.
+Now when pressing the "X" icon it commits the value rather than reverting it (basically acting as pressing "Enter").

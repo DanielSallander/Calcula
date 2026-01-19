@@ -2,6 +2,7 @@
 // PURPOSE: Inline cell editor component that renders directly over the cell being edited.
 // CONTEXT: Added check to prevent stealing focus if the Formula Bar is currently active.
 // FIX: In useEffect, check document.activeElement before calling focus().
+// FIX: Added isCancelingRef to prevent blur from committing after ESC is pressed.
 
 import React, { useRef, useEffect, useCallback, useState } from "react";
 import type { GridConfig, Viewport, EditingCell, DimensionOverrides } from "../../types";
@@ -50,7 +51,7 @@ export interface InlineEditorProps {
   /** Callback when Enter is pressed (to move down after commit) */
   onEnter?: (shiftKey: boolean) => void;
   /** Callback to restore focus to the grid container after commit */
-  onRestoreFocus?: () => void;  // <-- ADD THIS LINE
+  onRestoreFocus?: () => void;
   /** Whether the editor is disabled (e.g., during save) */
   disabled?: boolean;
 }
@@ -169,6 +170,7 @@ function calculateEditorPosition(
  * Phase 4.3: Added disabled prop, improved commit handling, and formula mode awareness.
  * Phase 5.2: Fixed positioning to use proper dimension calculations.
  * Updated: Added refocus support for cross-sheet formula editing.
+ * FIX: Added isCancelingRef to prevent blur from committing after ESC.
  */
 export function InlineEditor(props: InlineEditorProps): React.ReactElement | null {
   const {
@@ -185,8 +187,10 @@ export function InlineEditor(props: InlineEditorProps): React.ReactElement | nul
     disabled = false,
   } = props;
 
-const inputRef = useRef<HTMLInputElement | null>(null);
+  const inputRef = useRef<HTMLInputElement | null>(null);
   const isCommittingRef = useRef(false);
+  // FIX: Track when ESC is pressed to prevent blur from committing
+  const isCancelingRef = useRef(false);
   
   // Get current sheet context to determine if we should render
   const { state: gridState } = useGridContext();
@@ -231,7 +235,7 @@ const inputRef = useRef<HTMLInputElement | null>(null);
             if (commitSuccess && onEnter) {
               onEnter(event.shiftKey);
             }
-            // ADD THIS: Restore focus to grid container so keyboard navigation works
+            // Restore focus to grid container so keyboard navigation works
             onRestoreFocus?.();
           } finally {
             isCommittingRef.current = false;
@@ -241,7 +245,11 @@ const inputRef = useRef<HTMLInputElement | null>(null);
         case "Escape":
           event.preventDefault();
           event.stopPropagation();
+          // FIX: Set canceling flag BEFORE calling onCancel to prevent blur from committing
+          isCancelingRef.current = true;
           onCancel();
+          // Restore focus to grid container so keyboard navigation works
+          onRestoreFocus?.();
           break;
 
         case "Tab":
@@ -253,7 +261,7 @@ const inputRef = useRef<HTMLInputElement | null>(null);
             if (tabSuccess && onTab) {
               onTab(event.shiftKey);
             }
-            // ADD THIS: Restore focus to grid container so keyboard navigation works
+            // Restore focus to grid container so keyboard navigation works
             onRestoreFocus?.();
           } finally {
             isCommittingRef.current = false;
@@ -265,18 +273,25 @@ const inputRef = useRef<HTMLInputElement | null>(null);
           break;
       }
     },
-    [onCommit, onCancel, onTab, onEnter, disabled]
+    [onCommit, onCancel, onTab, onEnter, onRestoreFocus, disabled]
   );
 
   /**
    * Handle blur - commit edit when focus leaves the editor.
    * Uses the actual input value at blur time to avoid stale closure issues.
    * Also checks the global preventBlurCommit flag set by SheetTabs.
+   * FIX: Also checks isCancelingRef to prevent commit after ESC.
    */
   const handleBlur = useCallback(
     async (event: React.FocusEvent<HTMLInputElement>) => {
       // Don't commit if already committing (e.g., from Enter key)
       if (isCommittingRef.current || disabled) {
+        return;
+      }
+
+      // FIX: Don't commit if we're canceling (ESC was pressed)
+      if (isCancelingRef.current) {
+        console.log("[InlineEditor] Blur prevented - cancel in progress");
         return;
       }
 
@@ -306,7 +321,7 @@ const inputRef = useRef<HTMLInputElement | null>(null);
       console.log("[InlineEditor] Blur committing, value:", currentValue);
       isCommittingRef.current = true;
       try {
-        // ADD THIS: Restore focus to grid container so keyboard navigation works
+        // Restore focus to grid container so keyboard navigation works
         onRestoreFocus?.();
         await onCommit();
       } finally {
@@ -363,7 +378,7 @@ const inputRef = useRef<HTMLInputElement | null>(null);
       }, 0);
       
       return () => clearTimeout(timeoutId);
-}
+    }
   }, [editing.row, editing.col, position.visible, disabled, refocusTrigger]);
 
   // Don't render the inline editor if we're viewing a different sheet than the source.
