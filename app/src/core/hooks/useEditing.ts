@@ -14,6 +14,7 @@
 // FIX: Column/row references now use limited bounds for visual highlighting
 //      to prevent performance issues with large ranges
 
+import { autoCompleteFormula } from "../lib/formulaCompletion";
 import { useCallback, useState, useEffect, useRef } from "react";
 import { useGridContext } from "../state/GridContext";
 import { 
@@ -623,6 +624,7 @@ export function useEditing(): UseEditingReturn {
         }));
       }
 
+      // AFTER:
       let oldValue: string | undefined;
       try {
         const oldCell = await getCell(editing.row, editing.col);
@@ -631,7 +633,10 @@ export function useEditing(): UseEditingReturn {
         // Ignore - cell might not exist yet
       }
 
-      const updatedCells = await updateCell(editing.row, editing.col, editing.value);
+      // Smart formula completion - auto-close parentheses, etc.
+      const valueToCommit = autoCompleteFormula(editing.value);
+
+      const updatedCells = await updateCell(editing.row, editing.col, valueToCommit);
       const primaryCell = updatedCells[0];
       
       // FIX: Clear global flag when editing stops

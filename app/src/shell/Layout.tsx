@@ -1,10 +1,11 @@
 // FILENAME: shell/Layout.tsx
 // PURPOSE: Main application layout
-// CONTEXT: Arranges menu bar, ribbon, spreadsheet, sheet tabs, and status bar
+// CONTEXT: Arranges menu bar, ribbon, formula bar, spreadsheet, sheet tabs, and status bar
 
 import React from "react";
 import { MenuBar } from "./MenuBar";
 import { RibbonContainer } from "./Ribbon/RibbonContainer";
+import { FormulaBar } from "./FormulaBar";
 import { Spreadsheet } from "../core/components/Spreadsheet";
 import { SheetTabs } from "./SheetTabs";
 import { GridProvider } from "../core/state/GridContext";
@@ -32,7 +33,10 @@ export function Layout(): React.ReactElement {
         {/* Ribbon Area */}
         <RibbonContainer />
 
-        {/* Spreadsheet Area (includes its own formula bar) */}
+        {/* Formula Bar */}
+        <FormulaBar />
+
+        {/* Spreadsheet Area */}
         <div style={{ flex: 1, overflow: "hidden" }}>
           <Spreadsheet />
         </div>
