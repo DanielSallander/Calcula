@@ -17,6 +17,7 @@ use parser::parse as parse_formula;
 use std::collections::{HashMap, HashSet};
 use std::sync::Mutex;
 use persistence::FileState;
+use engine::UndoStack;
 
 pub mod persistence;
 pub mod api_types;
@@ -25,9 +26,14 @@ pub mod commands;
 pub mod formula;
 pub mod logging;
 pub mod sheets;
+pub mod undo_commands;
+// REMOVED: pub mod undo; (This file does not exist)
 
 pub use api_types::{CellData, StyleData, DimensionData, FormattingParams};
 pub use logging::{init_log_file, get_log_path, next_seq, write_log, write_log_raw};
+
+// CHANGED: Consolidated these exports. They come from 'engine', not 'undo' or 'undo_commands'.
+pub use engine::{Transaction, CellChange};
 
 #[cfg(test)]
 mod tests;
@@ -65,6 +71,7 @@ pub struct AppState {
     pub cross_sheet_dependents: Mutex<HashMap<(String, u32, u32), HashSet<(usize, u32, u32)>>>,
     /// Track which cross-sheet cells each formula depends on (for cleanup)
     pub cross_sheet_dependencies: Mutex<HashMap<(usize, u32, u32), HashSet<(String, u32, u32)>>>,
+    pub undo_stack: Mutex<UndoStack>,
 }
 
 impl AppState {
@@ -94,6 +101,7 @@ pub fn create_app_state() -> AppState {
         row_dependencies: Mutex::new(HashMap::new()),
         cross_sheet_dependents: Mutex::new(HashMap::new()),
         cross_sheet_dependencies: Mutex::new(HashMap::new()),
+        undo_stack: Mutex::new(UndoStack::new()),
     }
 }
 
@@ -697,6 +705,14 @@ pub fn run() {
             commands::insert_columns,
             commands::delete_rows,
             commands::delete_columns,
+            // Undo/Redo commands
+            undo_commands::begin_undo_transaction,
+            undo_commands::commit_undo_transaction,
+            undo_commands::cancel_undo_transaction,
+            undo_commands::get_undo_state,
+            undo_commands::undo,
+            undo_commands::redo,
+            undo_commands::clear_undo_history,
             // Logging commands
             logging::log_frontend,
             logging::log_frontend_atomic,

@@ -1,2 +1,10 @@
-We need to properly connect the "X" icon in the formula bar to the "ESC" command.
-Now when pressing the "X" icon it commits the value rather than reverting it (basically acting as pressing "Enter").
+Implement the Undo/Redo Stack (The Time Machine)
+**Context:** A spreadsheet without Undo is unusable.
+We now have implemented undo and redo in the backend, in these files.
+- src-tauri/src/commands.rs
+- src-tauri/src/lib.rs
+- src-tauri/src/undo_commands.rs
+
+Next step is to implement undo and redo so that they can be used with keyboard shortcuts 
+(Ctrl + Z and Ctrl + Y).
+We do not have to add any icons, buttons or anything else "visible" in the frontend.

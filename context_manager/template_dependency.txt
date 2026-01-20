@@ -17,10 +17,14 @@ Step 2 is a more detailed dependency map, however only of a part of the reposito
    - Functions that clearly belong to other domains (e.g., UI formatting when 
      solving a backend logic issue).
 4. REQUEST FORMAT: When you are confident about what parts of the repository you 
-    need to deep dive into request the detailed dependency map by using the command
-    "python generate_context_map_step2.py --include [folder(s)]"
-    so for example: "python generate_context_map_step2.py --include app/src/hooks app/src/components"
-    **Respond only with this command**
+    need to deep dive into request either:
+      (1) a more detailed dependency map of a specific part of the codebase, by using the command "python generate_context_map_step2.py --include [folder(s)]"
+      so for example: "python generate_context_map_step2.py --include app/src/hooks app/src/components"
+      (2) the implementation details by requesting the files found in the map by using the command:
+      "python generate_context_map_step3.py --include [folder(s)]"
+      so for example: "python generate_context_map_step3.py --include app/src/hooks app/src/components"
+      Use this command when you are absolutely sure what files you need to request. If not, request the detailed dependency map to analyze further.
+    **Respond only with one of the request commands above ("generate_context_map_step2.py" or generate_context_map_step3.py)**
 5. ONLY REQUEST EXISTING CONTENT. Never request files or folder that does not exists in the dependecy map.
 6. Keep answers brief.
 

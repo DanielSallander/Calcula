@@ -4,6 +4,7 @@
 // Includes fill handle and clipboard support with marching ants.
 // FIX: Added focusContainerRef parameter for keyboard event handling.
 // FIX: Added onDelete handler to useGridKeyboard to clear selection on DELETE key.
+// FIX: Added undo/redo handlers for Ctrl+Z and Ctrl+Y keyboard shortcuts.
 
 import { useState, useCallback, useEffect, useRef } from "react";
 import { 
@@ -22,6 +23,8 @@ import {
   setColumnWidth as setColumnWidthApi, 
   setRowHeight as setRowHeightApi,
   clearRange,
+  undo as undoApi,
+  redo as redoApi,
 } from "../../lib/tauri-api";
 import { setColumnWidth, setRowHeight } from "../../state/gridActions";
 import { cellEvents } from "../../lib/cellEvents";
@@ -241,6 +244,66 @@ export function useSpreadsheetSelection({
     }
   }, [selection]);
 
+  // Handle Undo (Ctrl+Z)
+  const handleUndo = useCallback(async () => {
+    console.log("[useSpreadsheetSelection] Undo requested");
+    try {
+      const result = await undoApi();
+      console.log(`[useSpreadsheetSelection] Undo complete - ${result.updatedCells.length} cells updated`);
+      
+      // Trigger canvas refresh
+      const canvas = canvasRef.current;
+      if (canvas) {
+        await canvas.refreshCells();
+        canvas.redraw();
+      }
+      
+      // Emit event to update any listeners (e.g., formula bar)
+      if (result.updatedCells.length > 0) {
+        const firstCell = result.updatedCells[0];
+        cellEvents.emit({
+          row: firstCell.row,
+          col: firstCell.col,
+          oldValue: undefined,
+          newValue: firstCell.display,
+          formula: firstCell.formula || null,
+        });
+      }
+    } catch (error) {
+      console.error("[useSpreadsheetSelection] Undo failed:", error);
+    }
+  }, [canvasRef]);
+
+  // Handle Redo (Ctrl+Y or Ctrl+Shift+Z)
+  const handleRedo = useCallback(async () => {
+    console.log("[useSpreadsheetSelection] Redo requested");
+    try {
+      const result = await redoApi();
+      console.log(`[useSpreadsheetSelection] Redo complete - ${result.updatedCells.length} cells updated`);
+      
+      // Trigger canvas refresh
+      const canvas = canvasRef.current;
+      if (canvas) {
+        await canvas.refreshCells();
+        canvas.redraw();
+      }
+      
+      // Emit event to update any listeners (e.g., formula bar)
+      if (result.updatedCells.length > 0) {
+        const firstCell = result.updatedCells[0];
+        cellEvents.emit({
+          row: firstCell.row,
+          col: firstCell.col,
+          oldValue: undefined,
+          newValue: firstCell.display,
+          formula: firstCell.formula || null,
+        });
+      }
+    } catch (error) {
+      console.error("[useSpreadsheetSelection] Redo failed:", error);
+    }
+  }, [canvasRef]);
+
   const {
     isDragging,
     isFormulaDragging,
@@ -334,7 +397,7 @@ export function useSpreadsheetSelection({
     return cursorStyle;
   }, [fillState.isDragging, cursorStyle]);
 
-  // Keyboard handling with clipboard shortcuts, ESC to clear clipboard, and DELETE to clear contents
+  // Keyboard handling with clipboard shortcuts, ESC to clear clipboard, DELETE to clear contents, and undo/redo
   // FIX: Use focusContainerRef instead of containerRef for keyboard events
   // The focusContainerRef points to the focusable outer container that receives keyboard events
   useGridKeyboard({
@@ -343,12 +406,8 @@ export function useSpreadsheetSelection({
     onCut: cut,
     onCopy: copy,
     onPaste: paste,
-    onUndo: async () => {
-      console.log("[Keyboard] Undo - not yet implemented");
-    },
-    onRedo: async () => {
-      console.log("[Keyboard] Redo - not yet implemented");
-    },
+    onUndo: handleUndo,
+    onRedo: handleRedo,
     onClearClipboard: clearClipboardState,
     hasClipboardContent: clipboardMode !== "none",
     onDelete: handleDeleteContents,

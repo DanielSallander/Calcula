@@ -350,3 +350,49 @@ export async function deleteColumns(col: number, count: number): Promise<CellDat
   console.log(`[tauri-api] deleteColumns returned ${result.length} updated cells`);
   return result;
 }
+
+// ============================================================================
+// Undo/Redo Operations
+// ============================================================================
+
+export interface UndoState {
+  canUndo: boolean;
+  canRedo: boolean;
+  undoDescription: string | null;
+  redoDescription: string | null;
+}
+
+export interface UndoResult {
+  success: boolean;
+  description: string | null;
+  updatedCells: CellData[];
+  canUndo: boolean;
+  canRedo: boolean;
+}
+
+/**
+ * Get the current undo/redo state.
+ */
+export async function getUndoState(): Promise<UndoState> {
+  return invoke<UndoState>("get_undo_state");
+}
+
+/**
+ * Undo the last action.
+ */
+export async function undo(): Promise<UndoResult> {
+  console.log("[tauri-api] undo");
+  const result = await invoke<UndoResult>("undo");
+  console.log(`[tauri-api] undo returned ${result.updatedCells.length} updated cells, canUndo=${result.canUndo}, canRedo=${result.canRedo}`);
+  return result;
+}
+
+/**
+ * Redo the last undone action.
+ */
+export async function redo(): Promise<UndoResult> {
+  console.log("[tauri-api] redo");
+  const result = await invoke<UndoResult>("redo");
+  console.log(`[tauri-api] redo returned ${result.updatedCells.length} updated cells, canUndo=${result.canUndo}, canRedo=${result.canRedo}`);
+  return result;
+}

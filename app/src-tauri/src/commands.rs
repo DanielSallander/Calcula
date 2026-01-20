@@ -90,10 +90,14 @@ pub fn update_cell(
     let mut cross_sheet_dependents_map = state.cross_sheet_dependents.lock().unwrap();
     let mut cross_sheet_dependencies_map = state.cross_sheet_dependencies.lock().unwrap();
     let calc_mode = state.calculation_mode.lock().unwrap();
+    let mut undo_stack = state.undo_stack.lock().unwrap();
 
     let current_sheet_name = sheet_names.get(active_sheet).cloned().unwrap_or_default();
 
     let mut updated_cells = Vec::new();
+
+    // Record previous state for undo BEFORE making any changes
+    let previous_cell = grid.get_cell(row, col).cloned();
 
     // Handle empty value - clear the cell
     if value.trim().is_empty() {
@@ -134,6 +138,10 @@ pub fn update_cell(
             formula: None,
             style_index: 0,
         });
+
+        // Record undo after successful change
+        undo_stack.record_cell_change(row, col, previous_cell);
+
         return Ok(updated_cells);
     }
 
@@ -218,6 +226,9 @@ pub fn update_cell(
         formula: cell.formula.clone(),
         style_index: cell.style_index,
     });
+
+    // Record undo after successful change
+    undo_stack.record_cell_change(row, col, previous_cell);
 
     // Recalculate dependents if automatic mode
     if *calc_mode == "automatic" {
@@ -319,6 +330,10 @@ pub fn clear_cell(state: State<AppState>, row: u32, col: u32) {
     let mut row_dependencies_map = state.row_dependencies.lock().unwrap();
     let mut cross_sheet_dependents_map = state.cross_sheet_dependents.lock().unwrap();
     let mut cross_sheet_dependencies_map = state.cross_sheet_dependencies.lock().unwrap();
+    let mut undo_stack = state.undo_stack.lock().unwrap();
+
+    // Record previous state for undo
+    let previous_cell = grid.get_cell(row, col).cloned();
 
     grid.clear_cell(row, col);
     // Also update the grids vector
@@ -352,6 +367,11 @@ pub fn clear_cell(state: State<AppState>, row: u32, col: u32) {
         &mut row_dependencies_map,
         &mut row_dependents_map,
     );
+
+    // Record undo if there was actually a cell to clear
+    if previous_cell.is_some() {
+        undo_stack.record_cell_change(row, col, previous_cell);
+    }
 }
 
 /// Clear a range of cells efficiently.
@@ -375,6 +395,7 @@ pub fn clear_range(
     let mut row_dependencies_map = state.row_dependencies.lock().unwrap();
     let mut cross_sheet_dependents_map = state.cross_sheet_dependents.lock().unwrap();
     let mut cross_sheet_dependencies_map = state.cross_sheet_dependencies.lock().unwrap();
+    let mut undo_stack = state.undo_stack.lock().unwrap();
 
     // Clamp to grid bounds to avoid iterating beyond used range
     let effective_end_row = end_row.min(grid.max_row);
@@ -392,8 +413,22 @@ pub fn clear_range(
 
     let count = cells_to_clear.len() as u32;
 
+    // Begin undo transaction for batch operation
+    if count > 0 {
+        undo_stack.begin_transaction(format!(
+            "Clear range ({},{}) to ({},{})",
+            start_row, start_col, end_row, end_col
+        ));
+    }
+
     // Clear each cell
     for (row, col) in cells_to_clear {
+        // Record previous state for undo
+        let previous_cell = grid.get_cell(row, col).cloned();
+        if previous_cell.is_some() {
+            undo_stack.record_cell_change(row, col, previous_cell);
+        }
+
         grid.clear_cell(row, col);
         
         if active_sheet < grids.len() {
@@ -425,6 +460,11 @@ pub fn clear_range(
             &mut row_dependencies_map,
             &mut row_dependents_map,
         );
+    }
+
+    // Commit undo transaction
+    if count > 0 {
+        undo_stack.commit_transaction();
     }
 
     count
@@ -559,11 +599,19 @@ pub fn find_ctrl_arrow_target(
 #[tauri::command]
 pub fn set_column_width(state: State<AppState>, col: u32, width: f64) {
     let mut widths = state.column_widths.lock().unwrap();
+    let mut undo_stack = state.undo_stack.lock().unwrap();
+
+    // Record previous state for undo
+    let previous_width = widths.get(&col).copied();
+
     if width > 0.0 {
         widths.insert(col, width);
     } else {
         widths.remove(&col);
     }
+
+    // Record undo
+    undo_stack.record_column_width_change(col, previous_width);
 }
 
 /// Get a column width.
@@ -587,11 +635,19 @@ pub fn get_all_column_widths(state: State<AppState>) -> Vec<DimensionData> {
 #[tauri::command]
 pub fn set_row_height(state: State<AppState>, row: u32, height: f64) {
     let mut heights = state.row_heights.lock().unwrap();
+    let mut undo_stack = state.undo_stack.lock().unwrap();
+
+    // Record previous state for undo
+    let previous_height = heights.get(&row).copied();
+
     if height > 0.0 {
         heights.insert(row, height);
     } else {
         heights.remove(&row);
     }
+
+    // Record undo
+    undo_stack.record_row_height_change(row, previous_height);
 }
 
 /// Get a row height.
@@ -641,6 +697,10 @@ pub fn set_cell_style(
     let mut grids = state.grids.lock().unwrap();
     let active_sheet = *state.active_sheet.lock().unwrap();
     let styles = state.style_registry.lock().unwrap();
+    let mut undo_stack = state.undo_stack.lock().unwrap();
+
+    // Record previous state for undo
+    let previous_cell = grid.get_cell(row, col).cloned();
 
     if let Some(cell) = grid.get_cell(row, col) {
         let mut updated_cell = cell.clone();
@@ -650,6 +710,9 @@ pub fn set_cell_style(
         if active_sheet < grids.len() {
             grids[active_sheet].set_cell(row, col, updated_cell.clone());
         }
+
+        // Record undo
+        undo_stack.record_cell_change(row, col, previous_cell);
 
         let style = styles.get(style_index);
         let display = format_cell_value(&updated_cell.value, style);
@@ -674,6 +737,9 @@ pub fn set_cell_style(
             grids[active_sheet].set_cell(row, col, cell);
         }
 
+        // Record undo (previous was None since cell didn't exist)
+        undo_stack.record_cell_change(row, col, previous_cell);
+
         Some(CellData {
             row,
             col,
@@ -694,9 +760,14 @@ pub fn apply_formatting(
     let mut grids = state.grids.lock().unwrap();
     let active_sheet = *state.active_sheet.lock().unwrap();
     let mut styles = state.style_registry.lock().unwrap();
+    let mut undo_stack = state.undo_stack.lock().unwrap();
 
     let mut updated_cells = Vec::new();
     let mut updated_styles = Vec::new();
+
+    // Begin undo transaction for batch formatting
+    let cell_count = params.rows.len() * params.cols.len();
+    undo_stack.begin_transaction(format!("Format {} cells", cell_count));
 
     // Iterate over all row/col combinations from the params
     for row in &params.rows {
@@ -704,6 +775,9 @@ pub fn apply_formatting(
             let row = *row;
             let col = *col;
             
+            // Record previous state for undo
+            let previous_cell = grid.get_cell(row, col).cloned();
+
             // Get or create cell
             let (cell, old_style_index) = if let Some(existing) = grid.get_cell(row, col) {
                 (existing.clone(), existing.style_index)
@@ -785,6 +859,9 @@ pub fn apply_formatting(
                 grids[active_sheet].set_cell(row, col, updated_cell.clone());
             }
 
+            // Record undo
+            undo_stack.record_cell_change(row, col, previous_cell);
+
             let display = format_cell_value(&updated_cell.value, &new_style);
 
             updated_cells.push(CellData {
@@ -796,6 +873,9 @@ pub fn apply_formatting(
             });
         }
     }
+
+    // Commit undo transaction
+    undo_stack.commit_transaction();
 
     // Collect all styles
     for (index, style) in styles.all_styles().iter().enumerate() {
@@ -990,6 +1070,8 @@ fn shift_col_dependencies_map(map: &mut HashMap<(u32, u32), HashSet<u32>>, from_
 }
 
 /// Insert rows at the specified position, shifting existing rows down.
+/// NOTE: insert_rows does NOT support undo currently due to complexity of structural changes.
+/// This could be added in a future version.
 #[tauri::command]
 pub fn insert_rows(
     state: State<AppState>,
@@ -1001,6 +1083,7 @@ pub fn insert_rows(
     let styles = state.style_registry.lock().map_err(|e| e.to_string())?;
     let mut row_heights = state.row_heights.lock().map_err(|e| e.to_string())?;
     let active_sheet = *state.active_sheet.lock().map_err(|e| e.to_string())?;
+    let mut undo_stack = state.undo_stack.lock().map_err(|e| e.to_string())?;
     
     // Lock all dependency maps
     let mut dependents_map = state.dependents.lock().map_err(|e| e.to_string())?;
@@ -1009,6 +1092,9 @@ pub fn insert_rows(
     let mut column_dependencies_map = state.column_dependencies.lock().map_err(|e| e.to_string())?;
     let mut row_dependents_map = state.row_dependents.lock().map_err(|e| e.to_string())?;
     let mut row_dependencies_map = state.row_dependencies.lock().map_err(|e| e.to_string())?;
+
+    // Clear undo history for structural changes (complex to reverse)
+    undo_stack.clear();
     
     // First, update formula references in ALL cells that reference rows at or after the insertion point
     let all_cells: Vec<((u32, u32), Cell)> = grid.cells.iter()
@@ -1110,6 +1196,7 @@ pub fn insert_rows(
 }
 
 /// Insert columns at the specified position, shifting existing columns right.
+/// NOTE: insert_columns does NOT support undo currently due to complexity of structural changes.
 #[tauri::command]
 pub fn insert_columns(
     state: State<AppState>,
@@ -1121,6 +1208,7 @@ pub fn insert_columns(
     let styles = state.style_registry.lock().map_err(|e| e.to_string())?;
     let mut column_widths = state.column_widths.lock().map_err(|e| e.to_string())?;
     let active_sheet = *state.active_sheet.lock().map_err(|e| e.to_string())?;
+    let mut undo_stack = state.undo_stack.lock().map_err(|e| e.to_string())?;
     
     // Lock all dependency maps
     let mut dependents_map = state.dependents.lock().map_err(|e| e.to_string())?;
@@ -1129,6 +1217,9 @@ pub fn insert_columns(
     let mut column_dependencies_map = state.column_dependencies.lock().map_err(|e| e.to_string())?;
     let mut row_dependents_map = state.row_dependents.lock().map_err(|e| e.to_string())?;
     let mut row_dependencies_map = state.row_dependencies.lock().map_err(|e| e.to_string())?;
+
+    // Clear undo history for structural changes
+    undo_stack.clear();
     
     // First, update formula references in ALL cells
     let all_cells: Vec<((u32, u32), Cell)> = grid.cells.iter()
@@ -1488,6 +1579,7 @@ fn shift_col_dependencies_map_for_delete(map: &mut HashMap<(u32, u32), HashSet<u
 }
 
 /// Delete rows at the specified position, shifting remaining rows up.
+/// NOTE: delete_rows does NOT support undo currently due to complexity of structural changes.
 #[tauri::command]
 pub fn delete_rows(
     state: State<AppState>,
@@ -1499,6 +1591,7 @@ pub fn delete_rows(
     let styles = state.style_registry.lock().map_err(|e| e.to_string())?;
     let mut row_heights = state.row_heights.lock().map_err(|e| e.to_string())?;
     let active_sheet = *state.active_sheet.lock().map_err(|e| e.to_string())?;
+    let mut undo_stack = state.undo_stack.lock().map_err(|e| e.to_string())?;
     
     // Lock all dependency maps
     let mut dependents_map = state.dependents.lock().map_err(|e| e.to_string())?;
@@ -1507,6 +1600,9 @@ pub fn delete_rows(
     let mut column_dependencies_map = state.column_dependencies.lock().map_err(|e| e.to_string())?;
     let mut row_dependents_map = state.row_dependents.lock().map_err(|e| e.to_string())?;
     let mut row_dependencies_map = state.row_dependencies.lock().map_err(|e| e.to_string())?;
+
+    // Clear undo history for structural changes
+    undo_stack.clear();
     
     // First, remove cells in the deleted rows
     let cells_to_delete: Vec<(u32, u32)> = grid.cells.keys()
@@ -1632,6 +1728,7 @@ pub fn delete_rows(
 }
 
 /// Delete columns at the specified position, shifting remaining columns left.
+/// NOTE: delete_columns does NOT support undo currently due to complexity of structural changes.
 #[tauri::command]
 pub fn delete_columns(
     state: State<AppState>,
@@ -1643,6 +1740,7 @@ pub fn delete_columns(
     let styles = state.style_registry.lock().map_err(|e| e.to_string())?;
     let mut column_widths = state.column_widths.lock().map_err(|e| e.to_string())?;
     let active_sheet = *state.active_sheet.lock().map_err(|e| e.to_string())?;
+    let mut undo_stack = state.undo_stack.lock().map_err(|e| e.to_string())?;
     
     // Lock all dependency maps
     let mut dependents_map = state.dependents.lock().map_err(|e| e.to_string())?;
@@ -1651,6 +1749,9 @@ pub fn delete_columns(
     let mut column_dependencies_map = state.column_dependencies.lock().map_err(|e| e.to_string())?;
     let mut row_dependents_map = state.row_dependents.lock().map_err(|e| e.to_string())?;
     let mut row_dependencies_map = state.row_dependencies.lock().map_err(|e| e.to_string())?;
+
+    // Clear undo history for structural changes
+    undo_stack.clear();
     
     // First, remove cells in the deleted columns
     let cells_to_delete: Vec<(u32, u32)> = grid.cells.keys()
