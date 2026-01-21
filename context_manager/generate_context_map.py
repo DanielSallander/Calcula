@@ -21,6 +21,7 @@ EXCLUDE_PATTERNS = [
 # 2. EXCLUDE DIRECTORIES: Entire directories to skip (in addition to DEFAULT_IGNORE_DIRS)
 EXCLUDE_DIRECTORIES = {
     "context_manager",  # Build tooling, not application code
+    "z_archive",
 }
 
 # 3. EXCLUDE FUNCTIONS: Functions matching these patterns are hidden

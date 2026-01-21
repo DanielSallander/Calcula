@@ -1,4 +1,2 @@
-We have recently implemented Find and Replace commands.
-I can fire the command and the dialog comes up as it should (app/src/core/components/FindReplaceDialog/FindReplaceDialog.tsx).
-However, I cannot enter anything in either Find textbox or Replace textbox.
-If I type anything there it instead edits whatever cell I currently have selected.
+We have two instances of the formula bar (see the attached image where I have marked with a red rectangle).
+We need to remove the bottom one.
