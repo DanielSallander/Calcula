@@ -1,5 +1,6 @@
 // FILENAME: src-tauri/src/lib.rs
 // PURPOSE: Main library entry point.
+// UPDATED: Added freeze_configs to AppState for freeze panes support
 
 use engine::{
     format_number, Cell, CellError, CellStyle, CellValue, Evaluator, Grid, NumberFormat,
@@ -27,13 +28,11 @@ pub mod formula;
 pub mod logging;
 pub mod sheets;
 pub mod undo_commands;
-// REMOVED: pub mod undo; (This file does not exist)
 
 pub use api_types::{CellData, StyleData, DimensionData, FormattingParams};
 pub use logging::{init_log_file, get_log_path, next_seq, write_log, write_log_raw};
-
-// CHANGED: Consolidated these exports. They come from 'engine', not 'undo' or 'undo_commands'.
 pub use engine::{Transaction, CellChange};
+pub use sheets::FreezeConfig;
 
 #[cfg(test)]
 mod tests;
@@ -72,6 +71,8 @@ pub struct AppState {
     /// Track which cross-sheet cells each formula depends on (for cleanup)
     pub cross_sheet_dependencies: Mutex<HashMap<(usize, u32, u32), HashSet<(String, u32, u32)>>>,
     pub undo_stack: Mutex<UndoStack>,
+    /// Freeze pane configurations per sheet
+    pub freeze_configs: Mutex<Vec<FreezeConfig>>,
 }
 
 impl AppState {
@@ -102,6 +103,7 @@ pub fn create_app_state() -> AppState {
         cross_sheet_dependents: Mutex::new(HashMap::new()),
         cross_sheet_dependencies: Mutex::new(HashMap::new()),
         undo_stack: Mutex::new(UndoStack::new()),
+        freeze_configs: Mutex::new(vec![FreezeConfig::default()]),
     }
 }
 
@@ -270,9 +272,7 @@ fn extract_references_recursive(expr: &ParserExpr, grid: &Grid, refs: &mut Extra
         ParserExpr::Literal(_) => {}
         ParserExpr::CellRef { sheet, col, row } => {
             let col_idx = col_letter_to_index(col);
-            // BUGFIX: Parser row is 1-indexed, convert to 0-indexed for dependency tracking
             let row_idx = row.saturating_sub(1);
-            // If sheet is specified, this is a cross-sheet reference
             if let Some(sheet_name) = sheet {
                 refs.cross_sheet_cells.insert((sheet_name.clone(), row_idx, col_idx));
             } else {
@@ -280,7 +280,6 @@ fn extract_references_recursive(expr: &ParserExpr, grid: &Grid, refs: &mut Extra
             }
         }
         ParserExpr::Range { sheet, start, end } => {
-            // Try to match both start and end as CellRefs
             if let (
                 ParserExpr::CellRef { col: start_col, row: start_row, .. },
                 ParserExpr::CellRef { col: end_col, row: end_row, .. },
@@ -288,11 +287,9 @@ fn extract_references_recursive(expr: &ParserExpr, grid: &Grid, refs: &mut Extra
             {
                 let sc = col_letter_to_index(start_col);
                 let ec = col_letter_to_index(end_col);
-                // BUGFIX: Parser rows are 1-indexed, convert to 0-indexed
                 let sr = start_row.saturating_sub(1);
                 let er = end_row.saturating_sub(1);
                 
-                // If sheet is specified, these are cross-sheet references
                 if let Some(sheet_name) = sheet {
                     for r in sr.min(er)..=sr.max(er) {
                         for c in sc.min(ec)..=sc.max(ec) {
@@ -317,12 +314,10 @@ fn extract_references_recursive(expr: &ParserExpr, grid: &Grid, refs: &mut Extra
             let min_col = sc.min(ec);
             let max_col = sc.max(ec);
             
-            // Register column-level dependencies
             for col in min_col..=max_col {
                 refs.columns.insert(col);
             }
             
-            // Also add existing cells for immediate evaluation
             for ((r, c), _) in grid.cells.iter() {
                 if *c >= min_col && *c <= max_col {
                     refs.cells.insert((*r, *c));
@@ -330,16 +325,13 @@ fn extract_references_recursive(expr: &ParserExpr, grid: &Grid, refs: &mut Extra
             }
         }
         ParserExpr::RowRef { start_row, end_row, .. } => {
-            // BUGFIX: Parser rows are 1-indexed, convert to 0-indexed
             let min_row = start_row.saturating_sub(1).min(end_row.saturating_sub(1));
             let max_row = start_row.saturating_sub(1).max(end_row.saturating_sub(1));
             
-            // Register row-level dependencies (0-indexed)
             for row in min_row..=max_row {
                 refs.rows.insert(row);
             }
             
-            // Also add existing cells for immediate evaluation
             for ((r, c), _) in grid.cells.iter() {
                 if *r >= min_row && *r <= max_row {
                     refs.cells.insert((*r, *c));
@@ -397,7 +389,6 @@ pub fn evaluate_formula_multi_sheet(
         Ok(parser_ast) => {
             let engine_ast = convert_expr(&parser_ast);
             
-            // Build multi-sheet context
             let current_grid = &grids[current_sheet_index];
             let current_sheet_name = &sheet_names[current_sheet_index];
             
@@ -496,7 +487,6 @@ pub fn update_dependencies(
     }
 }
 
-/// Update column-level dependencies for a formula cell
 pub fn update_column_dependencies(
     cell_pos: (u32, u32),
     new_cols: HashSet<u32>,
@@ -505,7 +495,6 @@ pub fn update_column_dependencies(
 ) {
     let old_cols = column_dependencies.remove(&cell_pos).unwrap_or_default();
     
-    // Remove old column dependencies
     for old_col in &old_cols {
         if let Some(deps) = column_dependents.get_mut(old_col) {
             deps.remove(&cell_pos);
@@ -515,7 +504,6 @@ pub fn update_column_dependencies(
         }
     }
     
-    // Add new column dependencies
     for new_col in &new_cols {
         column_dependents
             .entry(*new_col)
@@ -528,7 +516,6 @@ pub fn update_column_dependencies(
     }
 }
 
-/// Update row-level dependencies for a formula cell
 pub fn update_row_dependencies(
     cell_pos: (u32, u32),
     new_rows: HashSet<u32>,
@@ -537,7 +524,6 @@ pub fn update_row_dependencies(
 ) {
     let old_rows = row_dependencies.remove(&cell_pos).unwrap_or_default();
     
-    // Remove old row dependencies
     for old_row in &old_rows {
         if let Some(deps) = row_dependents.get_mut(old_row) {
             deps.remove(&cell_pos);
@@ -547,7 +533,6 @@ pub fn update_row_dependencies(
         }
     }
     
-    // Add new row dependencies
     for new_row in &new_rows {
         row_dependents
             .entry(*new_row)
@@ -560,16 +545,14 @@ pub fn update_row_dependencies(
     }
 }
 
-/// Update cross-sheet dependencies for a formula cell
 pub fn update_cross_sheet_dependencies(
-    formula_cell: (usize, u32, u32), // (sheet_index, row, col) of the formula
-    new_refs: HashSet<(String, u32, u32)>, // (sheet_name, row, col) references
+    formula_cell: (usize, u32, u32),
+    new_refs: HashSet<(String, u32, u32)>,
     cross_sheet_dependencies: &mut HashMap<(usize, u32, u32), HashSet<(String, u32, u32)>>,
     cross_sheet_dependents: &mut HashMap<(String, u32, u32), HashSet<(usize, u32, u32)>>,
 ) {
     let old_refs = cross_sheet_dependencies.remove(&formula_cell).unwrap_or_default();
     
-    // Remove old cross-sheet dependencies
     for old_ref in &old_refs {
         if let Some(deps) = cross_sheet_dependents.get_mut(old_ref) {
             deps.remove(&formula_cell);
@@ -579,7 +562,6 @@ pub fn update_cross_sheet_dependencies(
         }
     }
     
-    // Add new cross-sheet dependencies
     for new_ref in &new_refs {
         cross_sheet_dependents
             .entry(new_ref.clone())
@@ -624,7 +606,6 @@ pub fn get_recalculation_order(
     to_recalc
 }
 
-/// Get all formula cells that depend on a specific column or row
 pub fn get_column_row_dependents(
     changed_cell: (u32, u32),
     column_dependents: &HashMap<u32, HashSet<(u32, u32)>>,
@@ -633,7 +614,6 @@ pub fn get_column_row_dependents(
     let (row, col) = changed_cell;
     let mut result = HashSet::new();
     
-    // Get formulas that depend on this column
     if let Some(col_deps) = column_dependents.get(&col) {
         for dep in col_deps {
             if *dep != changed_cell {
@@ -642,7 +622,6 @@ pub fn get_column_row_dependents(
         }
     }
     
-    // Get formulas that depend on this row
     if let Some(row_deps) = row_dependents.get(&row) {
         for dep in row_deps {
             if *dep != changed_cell {
@@ -660,7 +639,6 @@ pub fn get_column_row_dependents(
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    // Initialize unified logging
     match init_log_file() {
         Ok(path) => {
             eprintln!("[LOG_INIT] SUCCESS - Log file: {:?}", path);
@@ -741,6 +719,8 @@ pub fn run() {
             sheets::add_sheet,
             sheets::delete_sheet,
             sheets::rename_sheet,
+            sheets::set_freeze_panes,
+            sheets::get_freeze_panes,
             // Find & Replace commands
             commands::find_all,
             commands::count_matches,

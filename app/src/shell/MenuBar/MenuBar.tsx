@@ -1,6 +1,6 @@
 import React, { useState, useCallback, useEffect, useRef } from 'react';
 import { newFile, openFile, saveFile, saveFileAs, isFileModified } from '../../core/lib/file-api';
-import { undo, redo } from '../../core/lib/tauri-api';
+import { undo, redo, setFreezePanes, getFreezePanes } from '../../core/lib/tauri-api';
 
 interface MenuItem {
   label: string;
@@ -8,6 +8,7 @@ interface MenuItem {
   action?: () => void;
   separator?: boolean;
   disabled?: boolean;
+  checked?: boolean;
 }
 
 interface Menu {
@@ -22,17 +23,16 @@ export const MenuEvents = {
   PASTE: 'menu:paste',
   FIND: 'menu:find',
   REPLACE: 'menu:replace',
+  FREEZE_CHANGED: 'menu:freezeChanged',
 } as const;
 
-export function emitMenuEvent(eventName: string): void {
-  window.dispatchEvent(new CustomEvent(eventName));
+export function emitMenuEvent(eventName: string, detail?: unknown): void {
+  window.dispatchEvent(new CustomEvent(eventName, { detail }));
 }
 
 // Helper to restore focus to the grid after menu actions
 function restoreFocusToGrid(): void {
-  // Small delay to let menu close first
   setTimeout(() => {
-    // Find the spreadsheet focus container and focus it
     const focusContainer = document.querySelector('[tabindex="0"][style*="outline: none"]') as HTMLElement;
     if (focusContainer) {
       focusContainer.focus();
@@ -44,7 +44,26 @@ export function MenuBar(): React.ReactElement {
   const [openMenu, setOpenMenu] = useState<string | null>(null);
   const [hoveredItem, setHoveredItem] = useState<string | null>(null);
   const [hoveredMenuButton, setHoveredMenuButton] = useState<string | null>(null);
+  const [freezeState, setFreezeState] = useState<{ row: boolean; col: boolean }>({ row: false, col: false });
   const menuBarRef = useRef<HTMLDivElement>(null);
+
+  // Load freeze state on mount
+  useEffect(() => {
+    const loadFreezeState = async () => {
+      console.log('[MenuBar] Loading freeze state...');
+      try {
+        const config = await getFreezePanes();
+        console.log('[MenuBar] Loaded freeze config:', config);
+        setFreezeState({
+          row: config.freezeRow !== null && config.freezeRow > 0,
+          col: config.freezeCol !== null && config.freezeCol > 0,
+        });
+      } catch (error) {
+        console.error('[MenuBar] Failed to load freeze state:', error);
+      }
+    };
+    loadFreezeState();
+  }, []);
 
   const handleNew = useCallback(async () => {
     try {
@@ -102,12 +121,10 @@ export function MenuBar(): React.ReactElement {
     }
   }, []);
 
-  // Edit menu handlers
   const handleUndo = useCallback(async () => {
     try {
       const result = await undo();
       console.log('[MenuBar] Undo result:', result);
-      // Emit event so grid can refresh
       window.dispatchEvent(new CustomEvent('grid:refresh'));
     } catch (error) {
       console.error('[MenuBar] handleUndo error:', error);
@@ -118,7 +135,6 @@ export function MenuBar(): React.ReactElement {
     try {
       const result = await redo();
       console.log('[MenuBar] Redo result:', result);
-      // Emit event so grid can refresh
       window.dispatchEvent(new CustomEvent('grid:refresh'));
     } catch (error) {
       console.error('[MenuBar] handleRedo error:', error);
@@ -148,6 +164,73 @@ export function MenuBar(): React.ReactElement {
     emitMenuEvent(MenuEvents.REPLACE);
   }, []);
 
+  // View menu handlers for freeze panes
+  const handleFreezeTopRow = useCallback(async () => {
+    console.log('[MenuBar] handleFreezeTopRow called, current state:', freezeState);
+    try {
+      const newRowState = !freezeState.row;
+      const freezeRow = newRowState ? 1 : null;
+      const freezeCol = freezeState.col ? 1 : null;
+      console.log('[MenuBar] Calling setFreezePanes with:', { freezeRow, freezeCol });
+      const result = await setFreezePanes(freezeRow, freezeCol);
+      console.log('[MenuBar] setFreezePanes result:', result);
+      setFreezeState(prev => ({ ...prev, row: newRowState }));
+      emitMenuEvent(MenuEvents.FREEZE_CHANGED, { freezeRow, freezeCol });
+      window.dispatchEvent(new CustomEvent('grid:refresh'));
+    } catch (error) {
+      console.error('[MenuBar] handleFreezeTopRow error:', error);
+    }
+  }, [freezeState]);
+
+  const handleFreezeFirstColumn = useCallback(async () => {
+    console.log('[MenuBar] handleFreezeFirstColumn called, current state:', freezeState);
+    try {
+      const newColState = !freezeState.col;
+      const freezeRow = freezeState.row ? 1 : null;
+      const freezeCol = newColState ? 1 : null;
+      console.log('[MenuBar] Calling setFreezePanes with:', { freezeRow, freezeCol });
+      const result = await setFreezePanes(freezeRow, freezeCol);
+      console.log('[MenuBar] setFreezePanes result:', result);
+      setFreezeState(prev => ({ ...prev, col: newColState }));
+      emitMenuEvent(MenuEvents.FREEZE_CHANGED, { freezeRow, freezeCol });
+      window.dispatchEvent(new CustomEvent('grid:refresh'));
+    } catch (error) {
+      console.error('[MenuBar] handleFreezeFirstColumn error:', error);
+    }
+  }, [freezeState]);
+
+  const handleFreezeBoth = useCallback(async () => {
+    console.log('[MenuBar] handleFreezeBoth called, current state:', freezeState);
+    try {
+      const bothFrozen = freezeState.row && freezeState.col;
+      const newState = !bothFrozen;
+      const freezeRow = newState ? 1 : null;
+      const freezeCol = newState ? 1 : null;
+      console.log('[MenuBar] Calling setFreezePanes with:', { freezeRow, freezeCol });
+      const result = await setFreezePanes(freezeRow, freezeCol);
+      console.log('[MenuBar] setFreezePanes result:', result);
+      setFreezeState({ row: newState, col: newState });
+      emitMenuEvent(MenuEvents.FREEZE_CHANGED, { freezeRow, freezeCol });
+      window.dispatchEvent(new CustomEvent('grid:refresh'));
+    } catch (error) {
+      console.error('[MenuBar] handleFreezeBoth error:', error);
+    }
+  }, [freezeState]);
+
+  const handleUnfreeze = useCallback(async () => {
+    console.log('[MenuBar] handleUnfreeze called');
+    try {
+      console.log('[MenuBar] Calling setFreezePanes with:', { freezeRow: null, freezeCol: null });
+      const result = await setFreezePanes(null, null);
+      console.log('[MenuBar] setFreezePanes result:', result);
+      setFreezeState({ row: false, col: false });
+      emitMenuEvent(MenuEvents.FREEZE_CHANGED, { freezeRow: null, freezeCol: null });
+      window.dispatchEvent(new CustomEvent('grid:refresh'));
+    } catch (error) {
+      console.error('[MenuBar] handleUnfreeze error:', error);
+    }
+  }, []);
+
   const menus: Menu[] = [
     {
       label: 'File',
@@ -173,9 +256,19 @@ export function MenuBar(): React.ReactElement {
         { label: 'Replace...', shortcut: 'Ctrl+H', action: handleReplace },
       ],
     },
+    {
+      label: 'View',
+      items: [
+        { label: 'Freeze Top Row', action: handleFreezeTopRow, checked: freezeState.row },
+        { label: 'Freeze First Column', action: handleFreezeFirstColumn, checked: freezeState.col },
+        { separator: true, label: '' },
+        { label: 'Freeze Top Row and First Column', action: handleFreezeBoth, checked: freezeState.row && freezeState.col },
+        { separator: true, label: '' },
+        { label: 'Unfreeze Panes', action: handleUnfreeze, disabled: !freezeState.row && !freezeState.col },
+      ],
+    },
   ];
 
-  // Close menu when clicking outside
   useEffect(() => {
     const handleClickOutside = (e: MouseEvent) => {
       if (menuBarRef.current && !menuBarRef.current.contains(e.target as Node)) {
@@ -187,10 +280,8 @@ export function MenuBar(): React.ReactElement {
     return () => document.removeEventListener('mousedown', handleClickOutside);
   }, []);
 
-  // Keyboard shortcuts
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
-      // Skip if user is typing in an input field
       const target = e.target as HTMLElement;
       const isInputField = target.tagName === 'INPUT' || 
                           target.tagName === 'TEXTAREA' || 
@@ -247,10 +338,10 @@ export function MenuBar(): React.ReactElement {
   };
 
   const handleItemClick = (item: MenuItem) => {
+    console.log('[MenuBar] handleItemClick:', item.label, 'disabled:', item.disabled, 'hasAction:', !!item.action);
     if (item.action && !item.disabled) {
       item.action();
       setOpenMenu(null);
-      // FIX: Restore focus to the grid after menu action
       restoreFocusToGrid();
     }
   };
@@ -306,7 +397,12 @@ export function MenuBar(): React.ReactElement {
                     onMouseLeave={() => setHoveredItem(null)}
                     disabled={item.disabled}
                   >
-                    <span>{item.label}</span>
+                    <span style={styles.menuItemContent}>
+                      {item.checked !== undefined && (
+                        <span style={styles.checkmark}>{item.checked ? '[x]' : '[ ]'}</span>
+                      )}
+                      <span>{item.label}</span>
+                    </span>
                     {item.shortcut && (
                       <span style={styles.shortcut}>{item.shortcut}</span>
                     )}
@@ -321,7 +417,6 @@ export function MenuBar(): React.ReactElement {
   );
 }
 
-// FIX: Use backgroundColor consistently instead of mixing with background shorthand
 const styles: Record<string, React.CSSProperties> = {
   menuBar: {
     display: 'flex',
@@ -354,7 +449,7 @@ const styles: Record<string, React.CSSProperties> = {
     position: 'absolute',
     top: '100%',
     left: '0',
-    minWidth: '200px',
+    minWidth: '260px',
     backgroundColor: '#252526',
     border: '1px solid #454545',
     borderRadius: '4px',
@@ -374,6 +469,16 @@ const styles: Record<string, React.CSSProperties> = {
     fontSize: '13px',
     cursor: 'pointer',
     textAlign: 'left',
+  },
+  menuItemContent: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: '8px',
+  },
+  checkmark: {
+    fontFamily: 'monospace',
+    fontSize: '11px',
+    width: '24px',
   },
   menuItemHover: {
     backgroundColor: '#094771',
