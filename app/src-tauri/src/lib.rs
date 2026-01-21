@@ -741,6 +741,11 @@ pub fn run() {
             sheets::add_sheet,
             sheets::delete_sheet,
             sheets::rename_sheet,
+            // Find & Replace commands
+            commands::find_all,
+            commands::count_matches,
+            commands::replace_all,
+            commands::replace_single,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

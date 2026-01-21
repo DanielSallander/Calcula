@@ -6,7 +6,7 @@
 // FIX: Skip scroll-to-visible for column/row selections to match Excel behavior.
 
 import type { GridState, Selection, ClipboardMode, GridConfig } from "../types";
-import { createInitialGridState, DEFAULT_VIRTUAL_BOUNDS, DEFAULT_VIRTUAL_BOUNDS_CONFIG } from "../types";
+import { createInitialGridState, DEFAULT_VIRTUAL_BOUNDS, DEFAULT_VIRTUAL_BOUNDS_CONFIG, DEFAULT_FIND_STATE } from "../types";
 import type { GridAction } from "./gridActions";
 import { GRID_ACTIONS } from "./gridActions";
 import { 
@@ -977,6 +977,72 @@ export function gridReducer(state: GridState, action: GridAction): GridState {
         sheetContext: {
           activeSheetIndex: index,
           activeSheetName: name,
+        },
+      };
+    }
+
+    // Find/Replace actions
+    case GRID_ACTIONS.FIND_OPEN: {
+      return {
+        ...state,
+        find: {
+          ...state.find,
+          isOpen: true,
+          showReplace: action.payload.showReplace,
+        },
+      };
+    }
+
+    case GRID_ACTIONS.FIND_CLOSE: {
+      return {
+        ...state,
+        find: {
+          ...DEFAULT_FIND_STATE,
+        },
+      };
+    }
+
+    case GRID_ACTIONS.FIND_SET_RESULTS: {
+      const { matches, query } = action.payload;
+      return {
+        ...state,
+        find: {
+          ...state.find,
+          matches,
+          query,
+          currentIndex: matches.length > 0 ? 0 : -1,
+        },
+      };
+    }
+
+    case GRID_ACTIONS.FIND_SET_CURRENT_INDEX: {
+      return {
+        ...state,
+        find: {
+          ...state.find,
+          currentIndex: action.payload.index,
+        },
+      };
+    }
+
+    case GRID_ACTIONS.FIND_CLEAR: {
+      return {
+        ...state,
+        find: {
+          ...state.find,
+          query: "",
+          matches: [],
+          currentIndex: -1,
+        },
+      };
+    }
+
+    case GRID_ACTIONS.FIND_SET_OPTIONS: {
+      return {
+        ...state,
+        find: {
+          ...state.find,
+          ...action.payload,
         },
       };
     }

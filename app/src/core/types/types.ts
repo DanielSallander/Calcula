@@ -452,6 +452,40 @@ export interface ClipboardState {
 }
 
 /**
+ * Find/Replace state for search functionality.
+ */
+export interface FindState {
+  /** Whether the find dialog is open */
+  isOpen: boolean;
+  /** Whether to show replace UI */
+  showReplace: boolean;
+  /** Current search query */
+  query: string;
+  /** All matching cell coordinates */
+  matches: [number, number][];
+  /** Current match index (0-based, -1 if none) */
+  currentIndex: number;
+  /** Search options */
+  caseSensitive: boolean;
+  matchEntireCell: boolean;
+  searchFormulas: boolean;
+}
+
+/**
+ * Default find state.
+ */
+export const DEFAULT_FIND_STATE: FindState = {
+  isOpen: false,
+  showReplace: false,
+  query: "",
+  matches: [],
+  currentIndex: -1,
+  caseSensitive: false,
+  matchEntireCell: false,
+  searchFormulas: false,
+};
+
+/**
  * Grid state for the spreadsheet component.
  */
 export interface GridState {
@@ -475,6 +509,8 @@ export interface GridState {
   clipboard: ClipboardState;
   /** Current sheet context */
   sheetContext: SheetContext;
+  /** Find/Replace state */
+  find: FindState;
 }
 
 /**
@@ -515,6 +551,7 @@ export function createInitialGridState(): GridState {
       activeSheetIndex: 0,
       activeSheetName: "Sheet1",
     },
+    find: { ...DEFAULT_FIND_STATE },
   };
 }
 

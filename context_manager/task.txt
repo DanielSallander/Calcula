@@ -1,10 +1,4 @@
-Implement the Undo/Redo Stack (The Time Machine)
-**Context:** A spreadsheet without Undo is unusable.
-We now have implemented undo and redo in the backend, in these files.
-- src-tauri/src/commands.rs
-- src-tauri/src/lib.rs
-- src-tauri/src/undo_commands.rs
-
-Next step is to implement undo and redo so that they can be used with keyboard shortcuts 
-(Ctrl + Z and Ctrl + Y).
-We do not have to add any icons, buttons or anything else "visible" in the frontend.
+We have recently implemented Find and Replace commands.
+I can fire the command and the dialog comes up as it should (app/src/core/components/FindReplaceDialog/FindReplaceDialog.tsx).
+However, I cannot enter anything in either Find textbox or Replace textbox.
+If I type anything there it instead edits whatever cell I currently have selected.

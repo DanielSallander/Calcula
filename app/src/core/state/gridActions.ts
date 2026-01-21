@@ -34,6 +34,12 @@ export const GRID_ACTIONS = {
   CLEAR_CLIPBOARD: "CLEAR_CLIPBOARD",
   SET_SHEET_CONTEXT: "SET_SHEET_CONTEXT",
   SET_ACTIVE_SHEET: "SET_ACTIVE_SHEET",
+  FIND_SET_RESULTS: "FIND_SET_RESULTS",
+  FIND_SET_CURRENT_INDEX: "FIND_SET_CURRENT_INDEX",
+  FIND_CLEAR: "FIND_CLEAR",
+  FIND_OPEN: "FIND_OPEN",
+  FIND_CLOSE: "FIND_CLOSE",
+  FIND_SET_OPTIONS: "FIND_SET_OPTIONS",
 } as const;
 
 // Action interfaces
@@ -183,6 +189,39 @@ export interface SetActiveSheetAction {
   payload: { index: number; name: string };
 }
 
+// Find/Replace action interfaces
+export interface FindSetResultsAction {
+  type: typeof GRID_ACTIONS.FIND_SET_RESULTS;
+  payload: { matches: [number, number][]; query: string };
+}
+
+export interface FindSetCurrentIndexAction {
+  type: typeof GRID_ACTIONS.FIND_SET_CURRENT_INDEX;
+  payload: { index: number };
+}
+
+export interface FindClearAction {
+  type: typeof GRID_ACTIONS.FIND_CLEAR;
+}
+
+export interface FindOpenAction {
+  type: typeof GRID_ACTIONS.FIND_OPEN;
+  payload: { showReplace: boolean };
+}
+
+export interface FindCloseAction {
+  type: typeof GRID_ACTIONS.FIND_CLOSE;
+}
+
+export interface FindSetOptionsAction {
+  type: typeof GRID_ACTIONS.FIND_SET_OPTIONS;
+  payload: {
+    caseSensitive?: boolean;
+    matchEntireCell?: boolean;
+    searchFormulas?: boolean;
+  };
+}
+
 // Union type of all actions
 export type GridAction =
   | SetSelectionAction
@@ -211,7 +250,14 @@ export type GridAction =
   | SetClipboardAction
   | ClearClipboardAction
   | SetSheetContextAction
-  | SetActiveSheetAction;
+  | SetActiveSheetAction
+  | FindSetResultsAction
+  | FindSetCurrentIndexAction
+  | FindClearAction
+  | FindOpenAction
+  | FindCloseAction
+  | FindSetOptionsAction;
+
 // Action creators
 
 /**
@@ -504,5 +550,70 @@ export function setClipboard(
 export function clearClipboard(): ClearClipboardAction {
   return {
     type: GRID_ACTIONS.CLEAR_CLIPBOARD,
+  };
+}
+
+/**
+ * Set find results from search.
+ */
+export function setFindResults(
+  matches: [number, number][],
+  query: string
+): FindSetResultsAction {
+  return {
+    type: GRID_ACTIONS.FIND_SET_RESULTS,
+    payload: { matches, query },
+  };
+}
+
+/**
+ * Set current match index for navigation.
+ */
+export function setFindCurrentIndex(index: number): FindSetCurrentIndexAction {
+  return {
+    type: GRID_ACTIONS.FIND_SET_CURRENT_INDEX,
+    payload: { index },
+  };
+}
+
+/**
+ * Clear find state.
+ */
+export function clearFind(): FindClearAction {
+  return {
+    type: GRID_ACTIONS.FIND_CLEAR,
+  };
+}
+
+/**
+ * Open the find dialog.
+ */
+export function openFind(showReplace: boolean = false): FindOpenAction {
+  return {
+    type: GRID_ACTIONS.FIND_OPEN,
+    payload: { showReplace },
+  };
+}
+
+/**
+ * Close the find dialog.
+ */
+export function closeFind(): FindCloseAction {
+  return {
+    type: GRID_ACTIONS.FIND_CLOSE,
+  };
+}
+
+/**
+ * Set find options.
+ */
+export function setFindOptions(options: {
+  caseSensitive?: boolean;
+  matchEntireCell?: boolean;
+  searchFormulas?: boolean;
+}): FindSetOptionsAction {
+  return {
+    type: GRID_ACTIONS.FIND_SET_OPTIONS,
+    payload: options,
   };
 }

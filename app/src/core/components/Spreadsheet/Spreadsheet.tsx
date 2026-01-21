@@ -3,10 +3,12 @@
 // CONTEXT: Core component that orchestrates the spreadsheet experience
 // UPDATE: Made Name Box interactive with navigation support
 // FIX: NameBox now participates in global editing state to prevent keyboard capture
+// FIX: Added menu event listeners for Cut/Copy/Paste
+// FIX: Added Find/Replace dialog integration
 
 import React, { useCallback, useEffect, useState, useRef } from "react";
 import { useGridState, useGridContext } from "../../state";
-import { setViewportDimensions, setSelection, scrollToCell } from "../../state/gridActions";
+import { setViewportDimensions, setSelection, scrollToCell, openFind } from "../../state/gridActions";
 import { GridCanvas } from "../Grid";
 import { InlineEditor } from "../InlineEditor";
 import { Scrollbar, ScrollbarCorner } from "../Scrollbar/Scrollbar";
@@ -26,7 +28,9 @@ import {
 import { getCellFromPixel } from "../../lib/gridRenderer";
 import { letterToColumn } from "../../types/types";
 import type { SpreadsheetContentProps } from "./SpreadsheetTypes";
-import { setGlobalIsEditing } from "../../hooks/useEditing"; // FIX: Import global editing state
+import { setGlobalIsEditing } from "../../hooks/useEditing";
+import { FindReplaceDialog } from "../FindReplaceDialog";
+import { MenuEvents } from "../../../shell/MenuBar";
 
 const SCROLLBAR_SIZE = 14;
 
@@ -115,6 +119,46 @@ function SpreadsheetContent({ className }: SpreadsheetContentProps): React.React
     clipboardMode,
     fillState,
   } = state;
+
+  // -------------------------------------------------------------------------
+  // Menu Event Listeners for Cut/Copy/Paste
+  // -------------------------------------------------------------------------
+  useEffect(() => {
+    const handleMenuCut = () => {
+      console.log('[Spreadsheet] Menu cut event received');
+      handleCut();
+    };
+    const handleMenuCopy = () => {
+      console.log('[Spreadsheet] Menu copy event received');
+      handleCopy();
+    };
+    const handleMenuPaste = () => {
+      console.log('[Spreadsheet] Menu paste event received');
+      handlePaste();
+    };
+    const handleMenuFind = () => {
+      console.log('[Spreadsheet] Menu find event received');
+      dispatch(openFind(false));
+    };
+    const handleMenuReplace = () => {
+      console.log('[Spreadsheet] Menu replace event received');
+      dispatch(openFind(true));
+    };
+
+    window.addEventListener(MenuEvents.CUT, handleMenuCut);
+    window.addEventListener(MenuEvents.COPY, handleMenuCopy);
+    window.addEventListener(MenuEvents.PASTE, handleMenuPaste);
+    window.addEventListener(MenuEvents.FIND, handleMenuFind);
+    window.addEventListener(MenuEvents.REPLACE, handleMenuReplace);
+
+    return () => {
+      window.removeEventListener(MenuEvents.CUT, handleMenuCut);
+      window.removeEventListener(MenuEvents.COPY, handleMenuCopy);
+      window.removeEventListener(MenuEvents.PASTE, handleMenuPaste);
+      window.removeEventListener(MenuEvents.FIND, handleMenuFind);
+      window.removeEventListener(MenuEvents.REPLACE, handleMenuReplace);
+    };
+  }, [handleCut, handleCopy, handlePaste, dispatch]);
 
   // -------------------------------------------------------------------------
   // Name Box State and Handlers
@@ -741,6 +785,9 @@ function SpreadsheetContent({ className }: SpreadsheetContentProps): React.React
           onClose={handleCloseContextMenu}
         />
       )}
+
+      {/* Find/Replace Dialog */}
+      <FindReplaceDialog />
     </div>
   );
 }

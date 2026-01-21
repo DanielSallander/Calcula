@@ -1,0 +1,1 @@
+export { FindReplaceDialog } from './FindReplaceDialog';

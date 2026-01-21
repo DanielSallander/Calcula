@@ -1,1 +1,1 @@
-export { MenuBar } from './MenuBar';
+export { MenuBar, MenuEvents, emitMenuEvent } from './MenuBar';

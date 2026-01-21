@@ -396,3 +396,113 @@ export async function redo(): Promise<UndoResult> {
   console.log(`[tauri-api] redo returned ${result.updatedCells.length} updated cells, canUndo=${result.canUndo}, canRedo=${result.canRedo}`);
   return result;
 }
+
+// ============================================================================
+// Find & Replace Operations
+// ============================================================================
+
+export interface FindResult {
+  matches: [number, number][];
+  totalCount: number;
+}
+
+export interface ReplaceResult {
+  updatedCells: CellData[];
+  replacementCount: number;
+}
+
+export interface FindOptions {
+  caseSensitive?: boolean;
+  matchEntireCell?: boolean;
+  searchFormulas?: boolean;
+}
+
+/**
+ * Find all cells matching the search query.
+ * Returns coordinates sorted in reading order (row, then column).
+ */
+export async function findAll(
+  query: string,
+  options: FindOptions = {}
+): Promise<FindResult> {
+  const {
+    caseSensitive = false,
+    matchEntireCell = false,
+    searchFormulas = false,
+  } = options;
+
+  return invoke<FindResult>("find_all", {
+    query,
+    caseSensitive,
+    matchEntireCell,
+    searchFormulas,
+  });
+}
+
+/**
+ * Count matches without returning coordinates (faster for display).
+ */
+export async function countMatches(
+  query: string,
+  options: FindOptions = {}
+): Promise<number> {
+  const {
+    caseSensitive = false,
+    matchEntireCell = false,
+    searchFormulas = false,
+  } = options;
+
+  return invoke<number>("count_matches", {
+    query,
+    caseSensitive,
+    matchEntireCell,
+    searchFormulas,
+  });
+}
+
+/**
+ * Replace all occurrences. This is an atomic operation for undo.
+ */
+export async function replaceAll(
+  search: string,
+  replacement: string,
+  options: { caseSensitive?: boolean; matchEntireCell?: boolean } = {}
+): Promise<ReplaceResult> {
+  const { caseSensitive = false, matchEntireCell = false } = options;
+
+  console.log(
+    `[tauri-api] replaceAll("${search}" -> "${replacement}", caseSensitive=${caseSensitive})`
+  );
+
+  const result = await invoke<ReplaceResult>("replace_all", {
+    search,
+    replacement,
+    caseSensitive,
+    matchEntireCell,
+  });
+
+  console.log(
+    `[tauri-api] replaceAll completed: ${result.replacementCount} replacements`
+  );
+
+  return result;
+}
+
+/**
+ * Replace a single occurrence in a specific cell.
+ */
+export async function replaceSingle(
+  row: number,
+  col: number,
+  search: string,
+  replacement: string,
+  caseSensitive: boolean = false
+): Promise<CellData | null> {
+  return invoke<CellData | null>("replace_single", {
+    row,
+    col,
+    search,
+    replacement,
+    caseSensitive,
+  });
+}

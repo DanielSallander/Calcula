@@ -1,5 +1,6 @@
 import React, { useState, useCallback, useEffect, useRef } from 'react';
 import { newFile, openFile, saveFile, saveFileAs, isFileModified } from '../../core/lib/file-api';
+import { undo, redo } from '../../core/lib/tauri-api';
 
 interface MenuItem {
   label: string;
@@ -14,8 +15,35 @@ interface Menu {
   items: MenuItem[];
 }
 
+// Custom events for menu actions that need to be handled by other components
+export const MenuEvents = {
+  CUT: 'menu:cut',
+  COPY: 'menu:copy',
+  PASTE: 'menu:paste',
+  FIND: 'menu:find',
+  REPLACE: 'menu:replace',
+} as const;
+
+export function emitMenuEvent(eventName: string): void {
+  window.dispatchEvent(new CustomEvent(eventName));
+}
+
+// Helper to restore focus to the grid after menu actions
+function restoreFocusToGrid(): void {
+  // Small delay to let menu close first
+  setTimeout(() => {
+    // Find the spreadsheet focus container and focus it
+    const focusContainer = document.querySelector('[tabindex="0"][style*="outline: none"]') as HTMLElement;
+    if (focusContainer) {
+      focusContainer.focus();
+    }
+  }, 0);
+}
+
 export function MenuBar(): React.ReactElement {
   const [openMenu, setOpenMenu] = useState<string | null>(null);
+  const [hoveredItem, setHoveredItem] = useState<string | null>(null);
+  const [hoveredMenuButton, setHoveredMenuButton] = useState<string | null>(null);
   const menuBarRef = useRef<HTMLDivElement>(null);
 
   const handleNew = useCallback(async () => {
@@ -74,6 +102,52 @@ export function MenuBar(): React.ReactElement {
     }
   }, []);
 
+  // Edit menu handlers
+  const handleUndo = useCallback(async () => {
+    try {
+      const result = await undo();
+      console.log('[MenuBar] Undo result:', result);
+      // Emit event so grid can refresh
+      window.dispatchEvent(new CustomEvent('grid:refresh'));
+    } catch (error) {
+      console.error('[MenuBar] handleUndo error:', error);
+    }
+  }, []);
+
+  const handleRedo = useCallback(async () => {
+    try {
+      const result = await redo();
+      console.log('[MenuBar] Redo result:', result);
+      // Emit event so grid can refresh
+      window.dispatchEvent(new CustomEvent('grid:refresh'));
+    } catch (error) {
+      console.error('[MenuBar] handleRedo error:', error);
+    }
+  }, []);
+
+  const handleCut = useCallback(() => {
+    emitMenuEvent(MenuEvents.CUT);
+    restoreFocusToGrid();
+  }, []);
+
+  const handleCopy = useCallback(() => {
+    emitMenuEvent(MenuEvents.COPY);
+    restoreFocusToGrid();
+  }, []);
+
+  const handlePaste = useCallback(() => {
+    emitMenuEvent(MenuEvents.PASTE);
+    restoreFocusToGrid();
+  }, []);
+
+  const handleFind = useCallback(() => {
+    emitMenuEvent(MenuEvents.FIND);
+  }, []);
+
+  const handleReplace = useCallback(() => {
+    emitMenuEvent(MenuEvents.REPLACE);
+  }, []);
+
   const menus: Menu[] = [
     {
       label: 'File',
@@ -83,6 +157,20 @@ export function MenuBar(): React.ReactElement {
         { separator: true, label: '' },
         { label: 'Save', shortcut: 'Ctrl+S', action: handleSave },
         { label: 'Save As...', shortcut: 'Ctrl+Shift+S', action: handleSaveAs },
+      ],
+    },
+    {
+      label: 'Edit',
+      items: [
+        { label: 'Undo', shortcut: 'Ctrl+Z', action: handleUndo },
+        { label: 'Redo', shortcut: 'Ctrl+Y', action: handleRedo },
+        { separator: true, label: '' },
+        { label: 'Cut', shortcut: 'Ctrl+X', action: handleCut },
+        { label: 'Copy', shortcut: 'Ctrl+C', action: handleCopy },
+        { label: 'Paste', shortcut: 'Ctrl+V', action: handlePaste },
+        { separator: true, label: '' },
+        { label: 'Find...', shortcut: 'Ctrl+F', action: handleFind },
+        { label: 'Replace...', shortcut: 'Ctrl+H', action: handleReplace },
       ],
     },
   ];
@@ -102,6 +190,12 @@ export function MenuBar(): React.ReactElement {
   // Keyboard shortcuts
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
+      // Skip if user is typing in an input field
+      const target = e.target as HTMLElement;
+      const isInputField = target.tagName === 'INPUT' || 
+                          target.tagName === 'TEXTAREA' || 
+                          target.isContentEditable;
+
       if (e.ctrlKey || e.metaKey) {
         switch (e.key.toLowerCase()) {
           case 's':
@@ -120,13 +214,33 @@ export function MenuBar(): React.ReactElement {
             e.preventDefault();
             handleNew();
             break;
+          case 'z':
+            if (!isInputField) {
+              e.preventDefault();
+              handleUndo();
+            }
+            break;
+          case 'y':
+            if (!isInputField) {
+              e.preventDefault();
+              handleRedo();
+            }
+            break;
+          case 'f':
+            e.preventDefault();
+            handleFind();
+            break;
+          case 'h':
+            e.preventDefault();
+            handleReplace();
+            break;
         }
       }
     };
 
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [handleNew, handleOpen, handleSave, handleSaveAs]);
+  }, [handleNew, handleOpen, handleSave, handleSaveAs, handleUndo, handleRedo, handleFind, handleReplace]);
 
   const handleMenuClick = (menuLabel: string) => {
     setOpenMenu(openMenu === menuLabel ? null : menuLabel);
@@ -136,7 +250,31 @@ export function MenuBar(): React.ReactElement {
     if (item.action && !item.disabled) {
       item.action();
       setOpenMenu(null);
+      // FIX: Restore focus to the grid after menu action
+      restoreFocusToGrid();
     }
+  };
+
+  const getMenuButtonStyle = (menuLabel: string): React.CSSProperties => {
+    const isOpen = openMenu === menuLabel;
+    const isHovered = hoveredMenuButton === menuLabel;
+    
+    return {
+      ...styles.menuButton,
+      ...(isOpen ? styles.menuButtonActive : {}),
+      ...(!isOpen && isHovered ? styles.menuButtonHover : {}),
+    };
+  };
+
+  const getMenuItemStyle = (item: MenuItem, menuLabel: string): React.CSSProperties => {
+    const itemKey = `${menuLabel}-${item.label}`;
+    const isHovered = hoveredItem === itemKey;
+    
+    return {
+      ...styles.menuItem,
+      ...(item.disabled ? styles.menuItemDisabled : {}),
+      ...(!item.disabled && isHovered ? styles.menuItemHover : {}),
+    };
   };
 
   return (
@@ -144,12 +282,13 @@ export function MenuBar(): React.ReactElement {
       {menus.map((menu) => (
         <div key={menu.label} style={styles.menuContainer}>
           <button
-            style={{
-              ...styles.menuButton,
-              ...(openMenu === menu.label ? styles.menuButtonActive : {}),
-            }}
+            style={getMenuButtonStyle(menu.label)}
             onClick={() => handleMenuClick(menu.label)}
-            onMouseEnter={() => openMenu && setOpenMenu(menu.label)}
+            onMouseEnter={() => {
+              setHoveredMenuButton(menu.label);
+              if (openMenu) setOpenMenu(menu.label);
+            }}
+            onMouseLeave={() => setHoveredMenuButton(null)}
           >
             {menu.label}
           </button>
@@ -161,11 +300,10 @@ export function MenuBar(): React.ReactElement {
                 ) : (
                   <button
                     key={item.label}
-                    style={{
-                      ...styles.menuItem,
-                      ...(item.disabled ? styles.menuItemDisabled : {}),
-                    }}
+                    style={getMenuItemStyle(item, menu.label)}
                     onClick={() => handleItemClick(item)}
+                    onMouseEnter={() => setHoveredItem(`${menu.label}-${item.label}`)}
+                    onMouseLeave={() => setHoveredItem(null)}
                     disabled={item.disabled}
                   >
                     <span>{item.label}</span>
@@ -183,6 +321,7 @@ export function MenuBar(): React.ReactElement {
   );
 }
 
+// FIX: Use backgroundColor consistently instead of mixing with background shorthand
 const styles: Record<string, React.CSSProperties> = {
   menuBar: {
     display: 'flex',
@@ -197,13 +336,16 @@ const styles: Record<string, React.CSSProperties> = {
     position: 'relative',
   },
   menuButton: {
-    background: 'transparent',
+    backgroundColor: 'transparent',
     border: 'none',
     color: '#cccccc',
     padding: '4px 8px',
     fontSize: '13px',
     cursor: 'pointer',
     borderRadius: '4px',
+  },
+  menuButtonHover: {
+    backgroundColor: '#454545',
   },
   menuButtonActive: {
     backgroundColor: '#505050',
@@ -226,12 +368,15 @@ const styles: Record<string, React.CSSProperties> = {
     alignItems: 'center',
     width: '100%',
     padding: '6px 24px 6px 12px',
-    background: 'transparent',
+    backgroundColor: 'transparent',
     border: 'none',
     color: '#cccccc',
     fontSize: '13px',
     cursor: 'pointer',
     textAlign: 'left',
+  },
+  menuItemHover: {
+    backgroundColor: '#094771',
   },
   menuItemDisabled: {
     color: '#6c6c6c',
