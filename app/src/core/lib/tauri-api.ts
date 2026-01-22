@@ -533,3 +533,68 @@ export async function getFreezePanes(): Promise<FreezeConfig> {
   console.log('[tauri-api] getFreezePanes result:', result);
   return result;
 }
+
+// ============================================================================
+// MERGE CELLS API
+// ============================================================================
+
+export interface MergedRegion {
+  startRow: number;
+  startCol: number;
+  endRow: number;
+  endCol: number;
+}
+
+export interface MergeResult {
+  success: boolean;
+  mergedRegions: MergedRegion[];
+  updatedCells: CellData[];
+}
+
+/**
+ * Merge cells in the specified range.
+ * The top-left cell becomes the master cell.
+ */
+export async function mergeCells(
+  startRow: number,
+  startCol: number,
+  endRow: number,
+  endCol: number
+): Promise<MergeResult> {
+  console.log(`[tauri-api] mergeCells(${startRow}, ${startCol}, ${endRow}, ${endCol})`);
+  const result = await invoke<MergeResult>("merge_cells", {
+    startRow,
+    startCol,
+    endRow,
+    endCol,
+  });
+  console.log(`[tauri-api] mergeCells result:`, result);
+  return result;
+}
+
+/**
+ * Unmerge cells at the specified position.
+ */
+export async function unmergeCells(row: number, col: number): Promise<MergeResult> {
+  console.log(`[tauri-api] unmergeCells(${row}, ${col})`);
+  const result = await invoke<MergeResult>("unmerge_cells", { row, col });
+  console.log(`[tauri-api] unmergeCells result:`, result);
+  return result;
+}
+
+/**
+ * Get all merged regions for the current sheet.
+ */
+export async function getMergedRegions(): Promise<MergedRegion[]> {
+  return invoke<MergedRegion[]>("get_merged_regions");
+}
+
+/**
+ * Check if a cell is part of a merged region.
+ */
+export async function getMergeInfo(
+  row: number,
+  col: number
+): Promise<MergedRegion | null> {
+  return invoke<MergedRegion | null>("get_merge_info", { row, col });
+}

@@ -6,11 +6,12 @@
 // - Moving the active cell (for Tab/Enter navigation)
 // - Getting selection reference in A1 notation
 // - Selecting entire columns or rows
+// UPDATED: Added merge-aware selection expansion
 
 import { useCallback } from "react";
 import { useGridContext } from "../state/GridContext";
 import { setSelection, extendSelection, moveSelection } from "../state/gridActions";
-import { indexToCol } from "../lib/tauri-api";
+import { indexToCol, getMergeInfo } from "../lib/tauri-api";
 import type { Selection, SelectionType } from "../types";
 import { stateLog } from '../../utils/component-logger';
 
@@ -36,6 +37,8 @@ export interface UseSelectionReturn {
   selectColumn: (col: number, extend?: boolean) => void;
   /** Select an entire row */
   selectRow: (row: number, extend?: boolean) => void;
+  /** Select a cell, expanding to cover any merged region */
+  selectCellWithMergeExpansion: (row: number, col: number, type?: SelectionType) => Promise<void>;
 }
 
 /**
@@ -62,6 +65,58 @@ export function useSelection(): UseSelectionReturn {
           type,
         })
       );
+    },
+    [dispatch]
+  );
+
+  /**
+   * Select a cell, automatically expanding to cover any merged region.
+   * This is the merge-aware version that should be used for user interactions.
+   */
+  const selectCellWithMergeExpansion = useCallback(
+    async (row: number, col: number, type: SelectionType = "cells") => {
+      stateLog.action('Selection', 'selectCellWithMergeExpansion', `row=${row} col=${col} type=${type}`);
+      
+      try {
+        // Check if this cell is part of a merged region
+        const mergeInfo = await getMergeInfo(row, col);
+        
+        if (mergeInfo) {
+          // Expand selection to cover the entire merged region
+          dispatch(
+            setSelection({
+              startRow: mergeInfo.startRow,
+              startCol: mergeInfo.startCol,
+              endRow: mergeInfo.endRow,
+              endCol: mergeInfo.endCol,
+              type,
+            })
+          );
+        } else {
+          // Normal single cell selection
+          dispatch(
+            setSelection({
+              startRow: row,
+              startCol: col,
+              endRow: row,
+              endCol: col,
+              type,
+            })
+          );
+        }
+      } catch (error) {
+        console.error('[useSelection] Failed to get merge info:', error);
+        // Fallback to normal selection
+        dispatch(
+          setSelection({
+            startRow: row,
+            startCol: col,
+            endRow: row,
+            endCol: col,
+            type,
+          })
+        );
+      }
     },
     [dispatch]
   );
@@ -246,6 +301,7 @@ export function useSelection(): UseSelectionReturn {
   return {
     selection,
     selectCell,
+    selectCellWithMergeExpansion,
     extendTo,
     moveActiveCell,
     getSelectionReference,

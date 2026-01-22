@@ -1,8 +1,7 @@
 // FILENAME: app/src/lib/gridRenderer/rendering/cells.ts
 // PURPOSE: Cell text rendering with style support
 // CONTEXT: Draws cell content with formatting, colors, and truncation
-// UPDATED: Fixed animation offset calculation to match backend-first approach
-// UPDATED: Added deletion animation support
+// UPDATED: Added merged cell rendering support
 
 import type { RenderState } from "../types";
 import { calculateVisibleRange } from "../layout/viewport";
@@ -65,8 +64,76 @@ export function drawTextWithTruncation(
 }
 
 /**
+ * Calculate the total width of a merged cell spanning multiple columns.
+ */
+function getMergedCellWidth(
+  startCol: number,
+  colSpan: number,
+  config: RenderState["config"],
+  dimensions: RenderState["dimensions"]
+): number {
+  let totalWidth = 0;
+  for (let c = startCol; c < startCol + colSpan; c++) {
+    totalWidth += getColumnWidth(c, config, dimensions);
+  }
+  return totalWidth;
+}
+
+/**
+ * Calculate the total height of a merged cell spanning multiple rows.
+ */
+function getMergedCellHeight(
+  startRow: number,
+  rowSpan: number,
+  config: RenderState["config"],
+  dimensions: RenderState["dimensions"]
+): number {
+  let totalHeight = 0;
+  for (let r = startRow; r < startRow + rowSpan; r++) {
+    totalHeight += getRowHeight(r, config, dimensions);
+  }
+  return totalHeight;
+}
+
+/**
+ * Check if a cell is a "slave" cell (part of a merge but not the master).
+ * Returns the master cell's key if it is, null otherwise.
+ */
+function getMasterCellKey(
+  row: number,
+  col: number,
+  cells: Map<string, { rowSpan?: number; colSpan?: number }>
+): string | null {
+  // Check all cells to see if any merge region covers this cell
+  for (const [key, cell] of cells.entries()) {
+    const rowSpan = cell.rowSpan ?? 1;
+    const colSpan = cell.colSpan ?? 1;
+    
+    if (rowSpan > 1 || colSpan > 1) {
+      // This is a master cell - parse its position
+      const parts = key.split(",");
+      const masterRow = parseInt(parts[0], 10);
+      const masterCol = parseInt(parts[1], 10);
+      
+      // Check if the target cell is within this merge region (but not the master itself)
+      if (
+        row >= masterRow &&
+        row < masterRow + rowSpan &&
+        col >= masterCol &&
+        col < masterCol + colSpan &&
+        !(row === masterRow && col === masterCol)
+      ) {
+        return key;
+      }
+    }
+  }
+  return null;
+}
+
+/**
  * Draw text content for all visible cells.
  * Applies cell styles from styleCache including colors, fonts, and formatting.
+ * Handles merged cells by drawing master cells with expanded dimensions.
  */
 export function drawCellText(state: RenderState): void {
   const { ctx, width, height, config, viewport, theme, cells, editing, dimensions, styleCache, insertionAnimation } = state;
@@ -81,8 +148,6 @@ export function drawCellText(state: RenderState): void {
   const paddingX = 4;
   
   // Calculate insertion/deletion animation offset
-  // For INSERT: negative offset (cells animate from left/up to right/down)
-  // For DELETE: positive offset (cells animate from right/down to left/up)
   let rowAnimOffset = 0;
   let colAnimOffset = 0;
   let rowAnimIndex = -1;
@@ -101,10 +166,8 @@ export function drawCellText(state: RenderState): void {
     }
   }
   
-  // Debug: Log styleCache state once per render
-  if (styleCache && styleCache.size > 1) {
-    console.log(`[Render] Drawing cells with ${styleCache.size} styles in cache`);
-  }
+  // Track which cells we've already drawn (to avoid drawing slave cells)
+  const drawnCells = new Set<string>();
   
   // Iterate through visible cells
   let baseY = colHeaderHeight + range.offsetY;
@@ -121,6 +184,23 @@ export function drawCellText(state: RenderState): void {
       // Apply column animation offset for columns at or after the change point
       const x = col >= colAnimIndex && colAnimIndex >= 0 ? baseX + colAnimOffset : baseX;
 
+      const key = cellKey(row, col);
+      
+      // Skip if already drawn (slave cells)
+      if (drawnCells.has(key)) {
+        baseX += colWidth;
+        continue;
+      }
+
+      // Check if this cell is a slave (part of another cell's merge)
+      const masterKey = getMasterCellKey(row, col, cells as Map<string, { rowSpan?: number; colSpan?: number }>);
+      if (masterKey) {
+        // This is a slave cell - skip rendering
+        drawnCells.add(key);
+        baseX += colWidth;
+        continue;
+      }
+
       // Skip if this cell is being edited (the input field handles display)
       if (editing && editing.row === row && editing.col === col) {
         baseX += colWidth;
@@ -128,7 +208,6 @@ export function drawCellText(state: RenderState): void {
       }
 
       // Look up cell data
-      const key = cellKey(row, col);
       const cell = cells.get(key);
 
       // Skip empty cells
@@ -137,8 +216,29 @@ export function drawCellText(state: RenderState): void {
         continue;
       }
 
+      // Get merge spans
+      const rowSpan = (cell as { rowSpan?: number }).rowSpan ?? 1;
+      const colSpan = (cell as { colSpan?: number }).colSpan ?? 1;
+      
+      // Calculate actual cell dimensions (may span multiple cells)
+      const actualWidth = colSpan > 1 
+        ? getMergedCellWidth(col, colSpan, config, dimensions)
+        : colWidth;
+      const actualHeight = rowSpan > 1
+        ? getMergedCellHeight(row, rowSpan, config, dimensions)
+        : rowHeight;
+
+      // Mark all cells in the merge region as drawn
+      if (rowSpan > 1 || colSpan > 1) {
+        for (let r = row; r < row + rowSpan; r++) {
+          for (let c = col; c < col + colSpan; c++) {
+            drawnCells.add(cellKey(r, c));
+          }
+        }
+      }
+
       // Skip if cell is not visible (considering animation offset)
-      if (x + colWidth < rowHeaderWidth || x > width || y + rowHeight < colHeaderHeight || y > height) {
+      if (x + actualWidth < rowHeaderWidth || x > width || y + actualHeight < colHeaderHeight || y > height) {
         baseX += colWidth;
         continue;
       }
@@ -146,8 +246,8 @@ export function drawCellText(state: RenderState): void {
       // Calculate visible cell bounds
       const cellLeft = Math.max(x, rowHeaderWidth);
       const cellTop = Math.max(y, colHeaderHeight);
-      const cellRight = Math.min(x + colWidth, width);
-      const cellBottom = Math.min(y + rowHeight, height);
+      const cellRight = Math.min(x + actualWidth, width);
+      const cellBottom = Math.min(y + actualHeight, height);
 
       // Available width for text
       const availableWidth = cellRight - cellLeft - paddingX * 2;
@@ -160,26 +260,6 @@ export function drawCellText(state: RenderState): void {
       // Get style data from the styleCache using the cell's styleIndex
       const styleIndex = cell.styleIndex ?? 0;
       const cellStyle = getStyleFromCache(styleCache, styleIndex);
-
-      // Enhanced debug logging for cells with non-default styles
-      if (styleIndex > 0) {
-        console.log(`[Render] Cell (${row},${col}) styleIndex=${styleIndex}, display="${cell.display}":`, {
-          bold: cellStyle.bold,
-          italic: cellStyle.italic,
-          underline: cellStyle.underline,
-          textColor: cellStyle.textColor,
-          backgroundColor: cellStyle.backgroundColor,
-          numberFormat: cellStyle.numberFormat,
-          isTextColorValid: isValidColor(cellStyle.textColor),
-          isTextColorDefault: isDefaultTextColor(cellStyle.textColor),
-          isBgColorValid: isValidColor(cellStyle.backgroundColor),
-          isBgColorDefault: isDefaultBackgroundColor(cellStyle.backgroundColor),
-        });
-        
-        // Debug trace for style application
-        console.log(`[Render] >>> TRACE: About to apply style to cell (${row},${col})`);
-        console.log(`[Render] >>> TRACE: Raw cellStyle object:`, cellStyle);
-      }
 
       // Initialize style variables with theme defaults
       let textColor = theme.cellText;
@@ -195,7 +275,6 @@ export function drawCellText(state: RenderState): void {
       const displayValue = cell.display;
 
       // Apply all style properties from cellStyle
-      // Font styling - boolean flags
       if (cellStyle.bold === true) {
         fontWeight = "bold";
       }
@@ -209,41 +288,26 @@ export function drawCellText(state: RenderState): void {
         hasStrikethrough = true;
       }
       
-      // Font size - only apply if reasonable
       if (typeof cellStyle.fontSize === "number" && cellStyle.fontSize > 0 && cellStyle.fontSize < 200) {
         fontSize = cellStyle.fontSize;
       }
       
-      // Font family - only apply if not empty
       if (typeof cellStyle.fontFamily === "string" && cellStyle.fontFamily.trim() !== "") {
         fontFamily = cellStyle.fontFamily;
       }
       
-      // Text color - apply if valid and not default black
       const textColorValid = isValidColor(cellStyle.textColor);
       const textColorIsDefault = isDefaultTextColor(cellStyle.textColor);
       if (textColorValid && !textColorIsDefault) {
         textColor = cellStyle.textColor;
-        if (styleIndex > 0) {
-          console.log(`[Render] --> Applied text color to cell (${row},${col}): "${textColor}"`);
-        }
-      } else if (styleIndex > 0 && cellStyle.textColor) {
-        console.log(`[Render] --> Text color NOT applied to cell (${row},${col}): valid=${textColorValid}, isDefault=${textColorIsDefault}, value="${cellStyle.textColor}"`);
       }
       
-      // Background color - apply if valid and not default white/transparent
       const bgColorValid = isValidColor(cellStyle.backgroundColor);
       const bgColorIsDefault = isDefaultBackgroundColor(cellStyle.backgroundColor);
       if (bgColorValid && !bgColorIsDefault) {
         backgroundColor = cellStyle.backgroundColor;
-        if (styleIndex > 0) {
-          console.log(`[Render] --> Applied background color to cell (${row},${col}): "${backgroundColor}"`);
-        }
-      } else if (styleIndex > 0 && cellStyle.backgroundColor) {
-        console.log(`[Render] --> Background color NOT applied to cell (${row},${col}): valid=${bgColorValid}, isDefault=${bgColorIsDefault}, value="${cellStyle.backgroundColor}"`);
       }
       
-      // Text alignment from style
       if (cellStyle.textAlign === "left") {
         textAlign = "left";
       } else if (cellStyle.textAlign === "center") {
@@ -251,12 +315,9 @@ export function drawCellText(state: RenderState): void {
       } else if (cellStyle.textAlign === "right") {
         textAlign = "right";
       }
-      // For "general" alignment, apply default based on value type below
 
-      // Default alignment based on value type (only if alignment is "general" or not explicitly set)
       if (cellStyle.textAlign === "general" || cellStyle.textAlign === "") {
         if (isErrorValue(displayValue)) {
-          // Errors override text color and use center alignment
           textColor = theme.cellTextError;
           textAlign = "center";
         } else if (isNumericValue(displayValue)) {
@@ -270,7 +331,7 @@ export function drawCellText(state: RenderState): void {
       ctx.rect(cellLeft, cellTop, cellRight - cellLeft, cellBottom - cellTop);
       ctx.clip();
 
-      // Draw background color if set
+      // Draw background color if set (covers entire merged area)
       if (backgroundColor) {
         ctx.fillStyle = backgroundColor;
         ctx.fillRect(cellLeft, cellTop, cellRight - cellLeft, cellBottom - cellTop);
@@ -280,12 +341,12 @@ export function drawCellText(state: RenderState): void {
       const fontString = `${fontStyle} ${fontWeight} ${fontSize}px ${fontFamily}`;
       ctx.font = fontString;
       ctx.fillStyle = textColor;
-      ctx.textAlign = "left"; // We handle alignment manually
+      ctx.textAlign = "left";
       ctx.textBaseline = "middle";
 
-      // Calculate text position
+      // Calculate text position (center vertically in merged cell)
       const textX = cellLeft + paddingX;
-      const textY = y + rowHeight / 2;
+      const textY = y + actualHeight / 2;
 
       // Draw the text with truncation
       drawTextWithTruncation(ctx, displayValue, textX, textY, availableWidth, textAlign);

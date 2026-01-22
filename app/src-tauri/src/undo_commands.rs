@@ -123,6 +123,8 @@ pub fn undo(state: State<AppState>) -> UndoResult {
                             display,
                             formula: cell.formula.clone(),
                             style_index: cell.style_index,
+                            row_span: 1,
+                            col_span: 1,
                         });
                     }
                     None => {
@@ -136,6 +138,8 @@ pub fn undo(state: State<AppState>) -> UndoResult {
                             display: String::new(),
                             formula: None,
                             style_index: 0,
+                            row_span: 1,
+                            col_span: 1,
                         });
                     }
                 }
@@ -242,6 +246,8 @@ pub fn redo(state: State<AppState>) -> UndoResult {
                             display,
                             formula: cell.formula.clone(),
                             style_index: cell.style_index,
+                            row_span: 1,
+                            col_span: 1,
                         });
                     }
                     None => {
@@ -255,6 +261,8 @@ pub fn redo(state: State<AppState>) -> UndoResult {
                             display: String::new(),
                             formula: None,
                             style_index: 0,
+                            row_span: 1,
+                            col_span: 1,
                         });
                     }
                 }

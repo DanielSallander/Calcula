@@ -2,7 +2,7 @@
 // PURPOSE: Tauri command handlers for grid operations.
 // CONTEXT: These commands are called from the frontend via Tauri IPC.
 
-use crate::api_types::{CellData, DimensionData, FormattingParams, FormattingResult, StyleData, StyleEntry};
+use crate::api_types::{CellData, DimensionData, FormattingParams, FormattingResult, MergedRegion, StyleData, StyleEntry};
 use crate::{
     create_app_state, evaluate_formula, evaluate_formula_multi_sheet, extract_references,
     extract_all_references, format_cell_value, get_recalculation_order, get_column_row_dependents,
@@ -21,6 +21,7 @@ use tauri::State;
 // ============================================================================
 
 /// Get cells for a viewport range.
+/// Now includes merged cell span information.
 #[tauri::command]
 pub fn get_viewport_cells(
     state: State<AppState>,
@@ -31,11 +32,39 @@ pub fn get_viewport_cells(
 ) -> Vec<CellData> {
     let grid = state.grid.lock().unwrap();
     let styles = state.style_registry.lock().unwrap();
+    let merged_regions = state.merged_regions.lock().unwrap();
     let mut cells = Vec::new();
+
+    // Track which cells are "slave" cells (part of a merge but not the master)
+    let mut slave_cells: HashSet<(u32, u32)> = HashSet::new();
+    
+    // First pass: identify all slave cells within the viewport
+    for region in merged_regions.iter() {
+        // Check if this region overlaps with the viewport
+        if region.end_row < start_row || region.start_row > end_row ||
+           region.end_col < start_col || region.start_col > end_col {
+            continue;
+        }
+        
+        // Mark all cells except the master as slaves
+        for r in region.start_row..=region.end_row {
+            for c in region.start_col..=region.end_col {
+                if r == region.start_row && c == region.start_col {
+                    continue; // Skip master cell
+                }
+                slave_cells.insert((r, c));
+            }
+        }
+    }
 
     for row in start_row..=end_row {
         for col in start_col..=end_col {
-            if let Some(cell_data) = get_cell_internal(&grid, &styles, row, col) {
+            // Skip slave cells - they shouldn't be returned
+            if slave_cells.contains(&(row, col)) {
+                continue;
+            }
+            
+            if let Some(cell_data) = get_cell_internal_with_merge(&grid, &styles, &merged_regions, row, col) {
                 cells.push(cell_data);
             }
         }
@@ -49,10 +78,11 @@ pub fn get_viewport_cells(
 pub fn get_cell(state: State<AppState>, row: u32, col: u32) -> Option<CellData> {
     let grid = state.grid.lock().unwrap();
     let styles = state.style_registry.lock().unwrap();
-    get_cell_internal(&grid, &styles, row, col)
+    let merged_regions = state.merged_regions.lock().unwrap();
+    get_cell_internal_with_merge(&grid, &styles, &merged_regions, row, col)
 }
 
-/// Internal helper for getting cell data.
+/// Internal helper for getting cell data without merge info (for backward compatibility).
 fn get_cell_internal(grid: &Grid, styles: &StyleRegistry, row: u32, col: u32) -> Option<CellData> {
     let cell = grid.get_cell(row, col)?;
     let style = styles.get(cell.style_index);
@@ -64,6 +94,56 @@ fn get_cell_internal(grid: &Grid, styles: &StyleRegistry, row: u32, col: u32) ->
         display,
         formula: cell.formula.clone(),
         style_index: cell.style_index,
+        row_span: 1,
+        col_span: 1,
+    })
+}
+
+/// Internal helper for getting cell data with merge span information.
+fn get_cell_internal_with_merge(
+    grid: &Grid,
+    styles: &StyleRegistry,
+    merged_regions: &HashSet<MergedRegion>,
+    row: u32,
+    col: u32,
+) -> Option<CellData> {
+    // Check if this cell is the master of a merged region
+    let merge_info = merged_regions.iter().find(|r| r.start_row == row && r.start_col == col);
+    
+    let (row_span, col_span) = if let Some(region) = merge_info {
+        (
+            region.end_row - region.start_row + 1,
+            region.end_col - region.start_col + 1,
+        )
+    } else {
+        (1, 1)
+    };
+
+    // For master cells, get the cell data
+    // For cells that don't exist but are masters of empty merges, return empty display
+    let cell = grid.get_cell(row, col);
+    
+    if cell.is_none() && row_span == 1 && col_span == 1 {
+        // No cell and not a merge master - return None
+        return None;
+    }
+
+    let (display, formula, style_index) = if let Some(c) = cell {
+        let style = styles.get(c.style_index);
+        (format_cell_value(&c.value, style), c.formula.clone(), c.style_index)
+    } else {
+        // Empty merge master
+        (String::new(), None, 0)
+    };
+
+    Some(CellData {
+        row,
+        col,
+        display,
+        formula,
+        style_index,
+        row_span,
+        col_span,
     })
 }
 
@@ -91,6 +171,7 @@ pub fn update_cell(
     let mut cross_sheet_dependencies_map = state.cross_sheet_dependencies.lock().unwrap();
     let calc_mode = state.calculation_mode.lock().unwrap();
     let mut undo_stack = state.undo_stack.lock().unwrap();
+    let merged_regions = state.merged_regions.lock().unwrap();
 
     let current_sheet_name = sheet_names.get(active_sheet).cloned().unwrap_or_default();
 
@@ -131,12 +212,23 @@ pub fn update_cell(
             &mut row_dependencies_map,
             &mut row_dependents_map,
         );
+        
+        // Get merge span info for the cleared cell
+        let merge_info = merged_regions.iter().find(|r| r.start_row == row && r.start_col == col);
+        let (row_span, col_span) = if let Some(region) = merge_info {
+            (region.end_row - region.start_row + 1, region.end_col - region.start_col + 1)
+        } else {
+            (1, 1)
+        };
+        
         updated_cells.push(CellData {
             row,
             col,
             display: String::new(),
             formula: None,
             style_index: 0,
+            row_span,
+            col_span,
         });
 
         // Record undo after successful change
@@ -219,12 +311,22 @@ pub fn update_cell(
     let style = styles.get(cell.style_index);
     let display = format_cell_value(&cell.value, style);
 
+    // Get merge span info
+    let merge_info = merged_regions.iter().find(|r| r.start_row == row && r.start_col == col);
+    let (row_span, col_span) = if let Some(region) = merge_info {
+        (region.end_row - region.start_row + 1, region.end_col - region.start_col + 1)
+    } else {
+        (1, 1)
+    };
+
     updated_cells.push(CellData {
         row,
         col,
         display,
         formula: cell.formula.clone(),
         style_index: cell.style_index,
+        row_span,
+        col_span,
     });
 
     // Record undo after successful change
@@ -266,12 +368,22 @@ pub fn update_cell(
                     let dep_style = styles.get(updated_dep.style_index);
                     let dep_display = format_cell_value(&updated_dep.value, dep_style);
 
+                    // Get merge span info for dependent
+                    let dep_merge_info = merged_regions.iter().find(|r| r.start_row == dep_row && r.start_col == dep_col);
+                    let (dep_row_span, dep_col_span) = if let Some(region) = dep_merge_info {
+                        (region.end_row - region.start_row + 1, region.end_col - region.start_col + 1)
+                    } else {
+                        (1, 1)
+                    };
+
                     updated_cells.push(CellData {
                         row: dep_row,
                         col: dep_col,
                         display: dep_display,
                         formula: updated_dep.formula.clone(),
                         style_index: updated_dep.style_index,
+                        row_span: dep_row_span,
+                        col_span: dep_col_span,
                     });
                 }
             }
@@ -698,9 +810,18 @@ pub fn set_cell_style(
     let active_sheet = *state.active_sheet.lock().unwrap();
     let styles = state.style_registry.lock().unwrap();
     let mut undo_stack = state.undo_stack.lock().unwrap();
+    let merged_regions = state.merged_regions.lock().unwrap();
 
     // Record previous state for undo
     let previous_cell = grid.get_cell(row, col).cloned();
+
+    // Get merge span info
+    let merge_info = merged_regions.iter().find(|r| r.start_row == row && r.start_col == col);
+    let (row_span, col_span) = if let Some(region) = merge_info {
+        (region.end_row - region.start_row + 1, region.end_col - region.start_col + 1)
+    } else {
+        (1, 1)
+    };
 
     if let Some(cell) = grid.get_cell(row, col) {
         let mut updated_cell = cell.clone();
@@ -723,6 +844,8 @@ pub fn set_cell_style(
             display,
             formula: updated_cell.formula,
             style_index,
+            row_span,
+            col_span,
         })
     } else {
         // Create a new empty cell with the style
@@ -746,6 +869,8 @@ pub fn set_cell_style(
             display: String::new(),
             formula: None,
             style_index,
+            row_span,
+            col_span,
         })
     }
 }
@@ -761,6 +886,7 @@ pub fn apply_formatting(
     let active_sheet = *state.active_sheet.lock().unwrap();
     let mut styles = state.style_registry.lock().unwrap();
     let mut undo_stack = state.undo_stack.lock().unwrap();
+    let merged_regions = state.merged_regions.lock().unwrap();
 
     let mut updated_cells = Vec::new();
     let mut updated_styles = Vec::new();
@@ -864,12 +990,22 @@ pub fn apply_formatting(
 
             let display = format_cell_value(&updated_cell.value, &new_style);
 
+            // Get merge span info
+            let merge_info = merged_regions.iter().find(|r| r.start_row == row && r.start_col == col);
+            let (row_span, col_span) = if let Some(region) = merge_info {
+                (region.end_row - region.start_row + 1, region.end_col - region.start_col + 1)
+            } else {
+                (1, 1)
+            };
+
             updated_cells.push(CellData {
                 row,
                 col,
                 display,
                 formula: updated_cell.formula,
                 style_index: new_style_index,
+                row_span,
+                col_span,
             });
         }
     }
@@ -1084,6 +1220,7 @@ pub fn insert_rows(
     let mut row_heights = state.row_heights.lock().map_err(|e| e.to_string())?;
     let active_sheet = *state.active_sheet.lock().map_err(|e| e.to_string())?;
     let mut undo_stack = state.undo_stack.lock().map_err(|e| e.to_string())?;
+    let merged_regions = state.merged_regions.lock().map_err(|e| e.to_string())?;
     
     // Lock all dependency maps
     let mut dependents_map = state.dependents.lock().map_err(|e| e.to_string())?;
@@ -1182,11 +1319,11 @@ pub fn insert_rows(
         grids[active_sheet].max_col = grid.max_col;
     }
     
-    // Return updated cells
+    // Return updated cells with merge info
     let mut result: Vec<CellData> = Vec::new();
     for r in 0..=grid.max_row {
         for c in 0..=grid.max_col {
-            if let Some(cell_data) = get_cell_internal(&grid, &styles, r, c) {
+            if let Some(cell_data) = get_cell_internal_with_merge(&grid, &styles, &merged_regions, r, c) {
                 result.push(cell_data);
             }
         }
@@ -1209,6 +1346,7 @@ pub fn insert_columns(
     let mut column_widths = state.column_widths.lock().map_err(|e| e.to_string())?;
     let active_sheet = *state.active_sheet.lock().map_err(|e| e.to_string())?;
     let mut undo_stack = state.undo_stack.lock().map_err(|e| e.to_string())?;
+    let merged_regions = state.merged_regions.lock().map_err(|e| e.to_string())?;
     
     // Lock all dependency maps
     let mut dependents_map = state.dependents.lock().map_err(|e| e.to_string())?;
@@ -1307,11 +1445,11 @@ pub fn insert_columns(
         grids[active_sheet].max_col = grid.max_col;
     }
     
-    // Return updated cells
+    // Return updated cells with merge info
     let mut result: Vec<CellData> = Vec::new();
     for r in 0..=grid.max_row {
         for c in 0..=grid.max_col {
-            if let Some(cell_data) = get_cell_internal(&grid, &styles, r, c) {
+            if let Some(cell_data) = get_cell_internal_with_merge(&grid, &styles, &merged_regions, r, c) {
                 result.push(cell_data);
             }
         }
@@ -1592,6 +1730,7 @@ pub fn delete_rows(
     let mut row_heights = state.row_heights.lock().map_err(|e| e.to_string())?;
     let active_sheet = *state.active_sheet.lock().map_err(|e| e.to_string())?;
     let mut undo_stack = state.undo_stack.lock().map_err(|e| e.to_string())?;
+    let merged_regions = state.merged_regions.lock().map_err(|e| e.to_string())?;
     
     // Lock all dependency maps
     let mut dependents_map = state.dependents.lock().map_err(|e| e.to_string())?;
@@ -1714,11 +1853,11 @@ pub fn delete_rows(
         grids[active_sheet].max_col = grid.max_col;
     }
     
-    // Return updated cells
+    // Return updated cells with merge info
     let mut result: Vec<CellData> = Vec::new();
     for r in 0..=grid.max_row {
         for c in 0..=grid.max_col {
-            if let Some(cell_data) = get_cell_internal(&grid, &styles, r, c) {
+            if let Some(cell_data) = get_cell_internal_with_merge(&grid, &styles, &merged_regions, r, c) {
                 result.push(cell_data);
             }
         }
@@ -1741,6 +1880,7 @@ pub fn delete_columns(
     let mut column_widths = state.column_widths.lock().map_err(|e| e.to_string())?;
     let active_sheet = *state.active_sheet.lock().map_err(|e| e.to_string())?;
     let mut undo_stack = state.undo_stack.lock().map_err(|e| e.to_string())?;
+    let merged_regions = state.merged_regions.lock().map_err(|e| e.to_string())?;
     
     // Lock all dependency maps
     let mut dependents_map = state.dependents.lock().map_err(|e| e.to_string())?;
@@ -1863,11 +2003,11 @@ pub fn delete_columns(
         grids[active_sheet].max_col = grid.max_col;
     }
     
-    // Return updated cells
+    // Return updated cells with merge info
     let mut result: Vec<CellData> = Vec::new();
     for r in 0..=grid.max_row {
         for c in 0..=grid.max_col {
-            if let Some(cell_data) = get_cell_internal(&grid, &styles, r, c) {
+            if let Some(cell_data) = get_cell_internal_with_merge(&grid, &styles, &merged_regions, r, c) {
                 result.push(cell_data);
             }
         }
@@ -1932,6 +2072,7 @@ pub fn replace_all(
     let active_sheet = *state.active_sheet.lock().unwrap();
     let styles = state.style_registry.lock().unwrap();
     let mut undo_stack = state.undo_stack.lock().unwrap();
+    let merged_regions = state.merged_regions.lock().unwrap();
 
     // Find all matching cells first
     let matches = grid.find_all(&search, case_sensitive, match_entire_cell, false);
@@ -2043,12 +2184,22 @@ pub fn replace_all(
                 let style = styles.get(new_cell.style_index);
                 let display = format_cell_value(&new_cell.value, style);
 
+                // Get merge span info
+                let merge_info = merged_regions.iter().find(|r| r.start_row == row && r.start_col == col);
+                let (row_span, col_span) = if let Some(region) = merge_info {
+                    (region.end_row - region.start_row + 1, region.end_col - region.start_col + 1)
+                } else {
+                    (1, 1)
+                };
+
                 updated_cells.push(CellData {
                     row,
                     col,
                     display,
                     formula: new_cell.formula,
                     style_index: new_cell.style_index,
+                    row_span,
+                    col_span,
                 });
 
                 replacement_count += 1;
@@ -2109,6 +2260,7 @@ pub fn replace_single(
     let active_sheet = *state.active_sheet.lock().unwrap();
     let styles = state.style_registry.lock().unwrap();
     let mut undo_stack = state.undo_stack.lock().unwrap();
+    let merged_regions = state.merged_regions.lock().unwrap();
 
     let previous_cell = grid.get_cell(row, col).cloned();
     
@@ -2174,12 +2326,22 @@ pub fn replace_single(
             let style = styles.get(new_cell.style_index);
             let display = format_cell_value(&new_cell.value, style);
 
+            // Get merge span info
+            let merge_info = merged_regions.iter().find(|r| r.start_row == row && r.start_col == col);
+            let (row_span, col_span) = if let Some(region) = merge_info {
+                (region.end_row - region.start_row + 1, region.end_col - region.start_col + 1)
+            } else {
+                (1, 1)
+            };
+
             return Ok(Some(CellData {
                 row,
                 col,
                 display,
                 formula: new_cell.formula,
                 style_index: new_cell.style_index,
+                row_span,
+                col_span,
             }));
         }
     }

@@ -86,6 +86,8 @@ pub fn open_file(
                 formula: cell.formula.clone(),
                 display: format_cell_value(&cell.value, style),
                 style_index: cell.style_index,
+                row_span: 1,
+                col_span: 1,
             }
         })
         .collect();

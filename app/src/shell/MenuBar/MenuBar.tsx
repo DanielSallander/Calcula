@@ -2,7 +2,7 @@
 
 import React, { useState, useCallback, useEffect, useRef } from 'react';
 import { newFile, openFile, saveFile, saveFileAs, isFileModified } from '../../core/lib/file-api';
-import { undo, redo, setFreezePanes, getFreezePanes } from '../../core/lib/tauri-api';
+import { undo, redo, setFreezePanes, getFreezePanes, mergeCells, unmergeCells } from '../../core/lib/tauri-api';
 import { useGridContext } from '../../core/state/GridContext';
 import { setFreezeConfig } from '../../core/state/gridActions';
 
@@ -28,6 +28,8 @@ export const MenuEvents = {
   FIND: 'menu:find',
   REPLACE: 'menu:replace',
   FREEZE_CHANGED: 'menu:freezeChanged',
+  CELLS_MERGED: 'menu:cellsMerged',
+  CELLS_UNMERGED: 'menu:cellsUnmerged',
 } as const;
 
 export function emitMenuEvent(eventName: string, detail?: unknown): void {
@@ -51,8 +53,15 @@ export function MenuBar(): React.ReactElement {
   const [freezeState, setFreezeState] = useState<{ row: boolean; col: boolean }>({ row: false, col: false });
   const menuBarRef = useRef<HTMLDivElement>(null);
   
-  // Get dispatch to update React state
-  const { dispatch } = useGridContext();
+  // Get dispatch and state to update React state and read selection
+  const { state, dispatch } = useGridContext();
+  const { selection } = state;
+
+  // Check if current selection can be merged (more than one cell selected)
+  const canMerge = selection !== null && (
+    selection.startRow !== selection.endRow || 
+    selection.startCol !== selection.endCol
+  );
 
   // Load freeze state on mount
   useEffect(() => {
@@ -67,7 +76,6 @@ export function MenuBar(): React.ReactElement {
           row: hasRow,
           col: hasCol,
         });
-        // Also update React state on load
         dispatch(setFreezeConfig(
           hasRow ? config.freezeRow : null,
           hasCol ? config.freezeCol : null
@@ -178,6 +186,52 @@ export function MenuBar(): React.ReactElement {
     emitMenuEvent(MenuEvents.REPLACE);
   }, []);
 
+  // Merge cells handler
+  const handleMergeCells = useCallback(async () => {
+    if (!selection) return;
+    
+    console.log('[MenuBar] handleMergeCells called with selection:', selection);
+    try {
+      const minRow = Math.min(selection.startRow, selection.endRow);
+      const maxRow = Math.max(selection.startRow, selection.endRow);
+      const minCol = Math.min(selection.startCol, selection.endCol);
+      const maxCol = Math.max(selection.startCol, selection.endCol);
+      
+      const result = await mergeCells(minRow, minCol, maxRow, maxCol);
+      console.log('[MenuBar] mergeCells result:', result);
+      
+      if (result.success) {
+        emitMenuEvent(MenuEvents.CELLS_MERGED, result);
+        window.dispatchEvent(new CustomEvent('grid:refresh'));
+      } else {
+        console.warn('[MenuBar] Merge failed - possibly overlapping regions');
+      }
+    } catch (error) {
+      console.error('[MenuBar] handleMergeCells error:', error);
+      alert('Failed to merge cells: ' + String(error));
+    }
+  }, [selection]);
+
+  // Unmerge cells handler
+  const handleUnmergeCells = useCallback(async () => {
+    if (!selection) return;
+    
+    console.log('[MenuBar] handleUnmergeCells called with selection:', selection);
+    try {
+      // Use the start of selection to find the merge region
+      const result = await unmergeCells(selection.startRow, selection.startCol);
+      console.log('[MenuBar] unmergeCells result:', result);
+      
+      if (result.success) {
+        emitMenuEvent(MenuEvents.CELLS_UNMERGED, result);
+        window.dispatchEvent(new CustomEvent('grid:refresh'));
+      }
+    } catch (error) {
+      console.error('[MenuBar] handleUnmergeCells error:', error);
+      alert('Failed to unmerge cells: ' + String(error));
+    }
+  }, [selection]);
+
   // View menu handlers for freeze panes
   const handleFreezeTopRow = useCallback(async () => {
     console.log('[MenuBar] handleFreezeTopRow called, current state:', freezeState);
@@ -189,7 +243,6 @@ export function MenuBar(): React.ReactElement {
       const result = await setFreezePanes(freezeRow, freezeCol);
       console.log('[MenuBar] setFreezePanes result:', result);
       setFreezeState(prev => ({ ...prev, row: newRowState }));
-      // Update React state so renderer gets the new config
       dispatch(setFreezeConfig(freezeRow, freezeCol));
       emitMenuEvent(MenuEvents.FREEZE_CHANGED, { freezeRow, freezeCol });
       window.dispatchEvent(new CustomEvent('grid:refresh'));
@@ -208,7 +261,6 @@ export function MenuBar(): React.ReactElement {
       const result = await setFreezePanes(freezeRow, freezeCol);
       console.log('[MenuBar] setFreezePanes result:', result);
       setFreezeState(prev => ({ ...prev, col: newColState }));
-      // Update React state so renderer gets the new config
       dispatch(setFreezeConfig(freezeRow, freezeCol));
       emitMenuEvent(MenuEvents.FREEZE_CHANGED, { freezeRow, freezeCol });
       window.dispatchEvent(new CustomEvent('grid:refresh'));
@@ -228,7 +280,6 @@ export function MenuBar(): React.ReactElement {
       const result = await setFreezePanes(freezeRow, freezeCol);
       console.log('[MenuBar] setFreezePanes result:', result);
       setFreezeState({ row: newState, col: newState });
-      // Update React state so renderer gets the new config
       dispatch(setFreezeConfig(freezeRow, freezeCol));
       emitMenuEvent(MenuEvents.FREEZE_CHANGED, { freezeRow, freezeCol });
       window.dispatchEvent(new CustomEvent('grid:refresh'));
@@ -244,7 +295,6 @@ export function MenuBar(): React.ReactElement {
       const result = await setFreezePanes(null, null);
       console.log('[MenuBar] setFreezePanes result:', result);
       setFreezeState({ row: false, col: false });
-      // Update React state so renderer gets the new config
       dispatch(setFreezeConfig(null, null));
       emitMenuEvent(MenuEvents.FREEZE_CHANGED, { freezeRow: null, freezeCol: null });
       window.dispatchEvent(new CustomEvent('grid:refresh'));
@@ -276,6 +326,9 @@ export function MenuBar(): React.ReactElement {
         { separator: true, label: '' },
         { label: 'Find...', shortcut: 'Ctrl+F', action: handleFind },
         { label: 'Replace...', shortcut: 'Ctrl+H', action: handleReplace },
+        { separator: true, label: '' },
+        { label: 'Merge Cells', shortcut: 'Ctrl+M', action: handleMergeCells, disabled: !canMerge },
+        { label: 'Unmerge Cells', action: handleUnmergeCells },
       ],
     },
     {
@@ -347,13 +400,19 @@ export function MenuBar(): React.ReactElement {
             e.preventDefault();
             handleReplace();
             break;
+          case 'm':
+            if (!isInputField && canMerge) {
+              e.preventDefault();
+              handleMergeCells();
+            }
+            break;
         }
       }
     };
 
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [handleNew, handleOpen, handleSave, handleSaveAs, handleUndo, handleRedo, handleFind, handleReplace]);
+  }, [handleNew, handleOpen, handleSave, handleSaveAs, handleUndo, handleRedo, handleFind, handleReplace, handleMergeCells, canMerge]);
 
   const handleMenuClick = (menuLabel: string) => {
     setOpenMenu(openMenu === menuLabel ? null : menuLabel);

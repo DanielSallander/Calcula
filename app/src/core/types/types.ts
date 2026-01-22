@@ -756,3 +756,29 @@ export function calculateFreezePaneLayout(
     frozenColCount,
   };
 }
+
+/** A merged cell region */
+export interface MergedRegion {
+  startRow: number;
+  startCol: number;
+  endRow: number;
+  endCol: number;
+}
+
+/** Result of merge operations */
+export interface MergeResult {
+  success: boolean;
+  mergedRegions: MergedRegion[];
+  updatedCells: CellData[];
+}
+
+// Update CellData interface to include spans:
+export interface CellData {
+  row: number;
+  col: number;
+  display: string;
+  formula: string | null;
+  styleIndex: number;
+  rowSpan?: number;
+  colSpan?: number;
+}

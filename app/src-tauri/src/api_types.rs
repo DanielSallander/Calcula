@@ -1,7 +1,7 @@
 // FILENAME: app/src-tauri/src/api_types.rs
 // PURPOSE: Shared type definitions for Tauri API communication.
 // CONTEXT: All structs use camelCase serialization for JavaScript interoperability.
-// UPDATED: Added wrap_text, text_rotation, and function library types.
+// UPDATED: Added row_span and col_span for merged cells support.
 
 use serde::{Deserialize, Serialize};
 
@@ -14,6 +14,16 @@ pub struct CellData {
     pub display: String,
     pub formula: Option<String>,
     pub style_index: usize,
+    /// Number of rows this cell spans (1 = normal, >1 = merged master cell)
+    #[serde(default = "default_span")]
+    pub row_span: u32,
+    /// Number of columns this cell spans (1 = normal, >1 = merged master cell)
+    #[serde(default = "default_span")]
+    pub col_span: u32,
+}
+
+fn default_span() -> u32 {
+    1
 }
 
 /// Style data returned to the frontend.
@@ -98,6 +108,25 @@ pub struct FunctionInfo {
 #[serde(rename_all = "camelCase")]
 pub struct FunctionListResult {
     pub functions: Vec<FunctionInfo>,
+}
+
+/// A merged cell region definition.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[serde(rename_all = "camelCase")]
+pub struct MergedRegion {
+    pub start_row: u32,
+    pub start_col: u32,
+    pub end_row: u32,
+    pub end_col: u32,
+}
+
+/// Result of merge operations.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MergeResult {
+    pub success: bool,
+    pub merged_regions: Vec<MergedRegion>,
+    pub updated_cells: Vec<CellData>,
 }
 
 // ============================================================================

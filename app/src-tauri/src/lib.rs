@@ -1,6 +1,6 @@
 // FILENAME: src-tauri/src/lib.rs
 // PURPOSE: Main library entry point.
-// UPDATED: Added freeze_configs to AppState for freeze panes support
+// UPDATED: Added merged_regions to AppState for merge cells support
 
 use engine::{
     format_number, Cell, CellError, CellStyle, CellValue, Evaluator, Grid, NumberFormat,
@@ -28,8 +28,9 @@ pub mod formula;
 pub mod logging;
 pub mod sheets;
 pub mod undo_commands;
+pub mod merge_commands;
 
-pub use api_types::{CellData, StyleData, DimensionData, FormattingParams};
+pub use api_types::{CellData, StyleData, DimensionData, FormattingParams, MergedRegion};
 pub use logging::{init_log_file, get_log_path, next_seq, write_log, write_log_raw};
 pub use engine::{Transaction, CellChange};
 pub use sheets::FreezeConfig;
@@ -73,6 +74,8 @@ pub struct AppState {
     pub undo_stack: Mutex<UndoStack>,
     /// Freeze pane configurations per sheet
     pub freeze_configs: Mutex<Vec<FreezeConfig>>,
+    /// Merged cell regions for the current sheet
+    pub merged_regions: Mutex<HashSet<MergedRegion>>,
 }
 
 impl AppState {
@@ -104,6 +107,7 @@ pub fn create_app_state() -> AppState {
         cross_sheet_dependencies: Mutex::new(HashMap::new()),
         undo_stack: Mutex::new(UndoStack::new()),
         freeze_configs: Mutex::new(vec![FreezeConfig::default()]),
+        merged_regions: Mutex::new(HashSet::new()),
     }
 }
 
@@ -726,6 +730,11 @@ pub fn run() {
             commands::count_matches,
             commands::replace_all,
             commands::replace_single,
+            // Merge cell commands
+            merge_commands::merge_cells,
+            merge_commands::unmerge_cells,
+            merge_commands::get_merged_regions,
+            merge_commands::get_merge_info,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

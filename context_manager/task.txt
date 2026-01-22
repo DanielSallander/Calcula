@@ -1,19 +1,28 @@
-### Implement "Freeze Panes" (Sticky Headers)
+### Implement "Merge Cells"
 
-**Context:** currently, the `viewport.ts` calculates a single visible range based on scroll position. To support sticky headers (Top Row / First Column), the rendering engine must handle split viewports.
+**Context:** Merged cells break the 1:1 relationship between grid coordinates and visual layout. This is one of the hardest features to implement in a custom grid engine.
 
 **Requirements:**
-1.  **Viewport Splitting:** The Canvas renderer (`GridCanvas.tsx`) needs to render up to four distinct zones if both rows and columns are frozen:
-    * Top-Left (Static)
-    * Top-Right (Scrolls Horizontally only)
-    * Bottom-Left (Scrolls Vertically only)
-    * Bottom-Right (Fully Scrollable)
-2.  **Coordinate Translation:** The `getCellFromPixel` logic in `hitTesting.ts` must account for the offset of frozen rows/cols so that clicking a frozen header doesn't register as clicking a scrolled cell underneath it.
+1.  **Data Structure:** Update `CellData` in Rust to include `row_span` and `col_span`.
+2.  **Rendering Logic:** Update `drawCellText` and `drawGridLines`.
+    * The renderer must check if a cell is part of a merge.
+    * If it is the "Master" cell (top-left), it draws across the total width/height of the spanned columns/rows.
+    * If it is a "Slave" cell (obscured by the merge), it skips rendering entirely.
+3.  **Selection Model:** Update `useSelection.ts`. If a user selects a cell that is part of a merge, the selection rect must expand to encompass the entire merged area automatically.
+4.  **Menu commands:** Update the "Edit" (on the top) to include a command to merge selected cells.
 
+**Current Status:**
+We have implemented a first version, the commands appear in the "Edit" menu,
+but when I apply "Merge Cells" I dont see that the cells are being merged, at least it does not show in the grid.
+However, it seems like merge is happening in the background since I get the message that I cannot merge overlapping cells when I try to
+merge cells that has already been merged.
 
-## Current status
-We have the freeze panes commands in place and they are selectable from the "View" menu.
-When applying the freezing pane commands the cells looks weird, like they are slightly offseted.
-Take a look at the attached images to compare. One image shows when freezing panes are not applied and the other shows when it is applied.
-Also, when scrolling down it looks like, on the row numbers in the margin are increasing even for the frozen row.
-However, the first row does indeed looks frozen.
+Here are the messages from the console:
+[MenuBar] handleItemClick: Merge Cells disabled: false hasAction: true
+MenuBar.tsx:193 [MenuBar] handleMergeCells called with selection: {startRow: 8, startCol: 1, endRow: 8, endCol: 3, type: 'cells'}
+tauri-api.ts:564 [tauri-api] mergeCells(8, 1, 8, 3)
+tauri-api.ts:571 [tauri-api] mergeCells result: {success: true, mergedRegions: Array(2), updatedCells: Array(1)}
+MenuBar.tsx:201 [MenuBar] mergeCells result: {success: true, mergedRegions: Array(2), updatedCells: Array(1)}
+
+The most recent update was done in commands.rs.
+The fix there was to update get_viewport_cells and get_cell_internal to check the merged regions and populate the correct spans.
