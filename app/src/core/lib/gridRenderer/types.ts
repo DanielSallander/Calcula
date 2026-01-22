@@ -1,7 +1,7 @@
 // FILENAME: app/src/lib/gridRenderer/types.ts
 // PURPOSE: Core type definitions and theme configuration for grid rendering
 // CONTEXT: Defines interfaces used throughout the rendering pipeline
-// Updated: Added InsertionAnimation support for smooth row/column insertion
+// UPDATED: Added freeze pane support with zone rendering state
 
 import type {
   GridConfig,
@@ -13,6 +13,8 @@ import type {
   DimensionOverrides,
   StyleDataMap,
   InsertionAnimation,
+  FreezeConfig,
+  VisibleRange,
 } from "../../types";
 
 /**
@@ -83,8 +85,7 @@ export const DEFAULT_THEME: GridTheme = {
 
 /**
  * Render state passed to all drawing functions.
- * Phase 6 FIX: Added styleCache for proper style rendering.
- * Updated: Added insertionAnimation for smooth row/column insertion.
+ * Supports freeze panes with zone-specific rendering.
  */
 export interface RenderState {
   ctx: CanvasRenderingContext2D;
@@ -107,4 +108,12 @@ export interface RenderState {
   clipboardAnimationOffset?: number;
   /** Active insertion animation state for smooth row/column insertion */
   insertionAnimation?: InsertionAnimation;
+  /** Freeze pane configuration */
+  freezeConfig?: FreezeConfig;
+  /** Zone-specific visible range (when rendering a specific zone) */
+  zoneRange?: VisibleRange;
+  /** X offset for zone rendering */
+  zoneOffsetX?: number;
+  /** Y offset for zone rendering */
+  zoneOffsetY?: number;
 }

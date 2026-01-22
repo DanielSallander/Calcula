@@ -1,10 +1,11 @@
-// FILENAME: app/src/lib/types.ts
+// FILENAME: app/src/core/lib/types.ts
 // PURPOSE: Shared TypeScript type definitions for the Calcula frontend.
 // CONTEXT: This module contains interfaces and types used across the
 // React application for type-safe component props and state management.
 // Includes selection, viewport, grid configuration, editing state,
 // cell data representation, scroll behavior types, and the combined
 // grid state used by the state management system.
+// UPDATED: Added FreezeConfig for freeze panes support
 
 /**
  * Type of selection: cells, entire column(s), or entire row(s).
@@ -69,6 +70,26 @@ export function createEmptyDimensionOverrides(): DimensionOverrides {
     rowHeights: new Map(),
   };
 }
+
+/**
+ * Freeze panes configuration.
+ * freezeRow/freezeCol indicate the FIRST scrollable row/column.
+ * Example: freezeRow=1 means row 0 is frozen, freezeCol=2 means columns 0-1 are frozen.
+ */
+export interface FreezeConfig {
+  /** First scrollable row (null = no frozen rows) */
+  freezeRow: number | null;
+  /** First scrollable column (null = no frozen columns) */
+  freezeCol: number | null;
+}
+
+/**
+ * Default freeze config (no frozen panes).
+ */
+export const DEFAULT_FREEZE_CONFIG: FreezeConfig = {
+  freezeRow: null,
+  freezeCol: null,
+};
 
 /**
  * Configuration for grid dimensions.
@@ -511,6 +532,8 @@ export interface GridState {
   sheetContext: SheetContext;
   /** Find/Replace state */
   find: FindState;
+  /** Freeze panes configuration */
+  freezeConfig: FreezeConfig;
 }
 
 /**
@@ -552,6 +575,7 @@ export function createInitialGridState(): GridState {
       activeSheetName: "Sheet1",
     },
     find: { ...DEFAULT_FIND_STATE },
+    freezeConfig: { ...DEFAULT_FREEZE_CONFIG },
   };
 }
 
@@ -649,4 +673,86 @@ export function letterToColumn(letters: string): number {
     result = result * 26 + (letters.charCodeAt(i) - 64);
   }
   return result - 1;
+}
+
+/**
+ * Visible range for a single viewport zone.
+ */
+export interface VisibleRange {
+  startRow: number;
+  endRow: number;
+  startCol: number;
+  endCol: number;
+  offsetX: number;
+  offsetY: number;
+}
+
+/**
+ * Freeze pane zone identifier.
+ * - topLeft: frozen corner (no scroll)
+ * - topRight: frozen rows (scrollX only)
+ * - bottomLeft: frozen columns (scrollY only)
+ * - bottomRight: main scrollable area (both scrollX and scrollY)
+ */
+export type FreezeZone = "topLeft" | "topRight" | "bottomLeft" | "bottomRight";
+
+/**
+ * Freeze pane layout with pixel boundaries for each zone.
+ */
+export interface FreezePaneLayout {
+  /** Width of frozen columns area in pixels (0 if no frozen cols) */
+  frozenColsWidth: number;
+  /** Height of frozen rows area in pixels (0 if no frozen rows) */
+  frozenRowsHeight: number;
+  /** Whether there are frozen rows */
+  hasFrozenRows: boolean;
+  /** Whether there are frozen columns */
+  hasFrozenCols: boolean;
+  /** Number of frozen rows */
+  frozenRowCount: number;
+  /** Number of frozen columns */
+  frozenColCount: number;
+}
+
+/**
+ * Calculate the pixel dimensions of frozen areas.
+ */
+export function calculateFreezePaneLayout(
+  freezeConfig: FreezeConfig,
+  config: GridConfig,
+  dimensions: DimensionOverrides
+): FreezePaneLayout {
+  const { freezeRow, freezeCol } = freezeConfig;
+  const defaultCellWidth = config.defaultCellWidth || 100;
+  const defaultCellHeight = config.defaultCellHeight || 24;
+  
+  let frozenColsWidth = 0;
+  let frozenRowsHeight = 0;
+  const frozenColCount = freezeCol ?? 0;
+  const frozenRowCount = freezeRow ?? 0;
+  
+  // Calculate width of frozen columns
+  if (freezeCol !== null && freezeCol > 0) {
+    for (let col = 0; col < freezeCol; col++) {
+      const customWidth = dimensions.columnWidths.get(col);
+      frozenColsWidth += customWidth !== undefined && customWidth > 0 ? customWidth : defaultCellWidth;
+    }
+  }
+  
+  // Calculate height of frozen rows
+  if (freezeRow !== null && freezeRow > 0) {
+    for (let row = 0; row < freezeRow; row++) {
+      const customHeight = dimensions.rowHeights.get(row);
+      frozenRowsHeight += customHeight !== undefined && customHeight > 0 ? customHeight : defaultCellHeight;
+    }
+  }
+  
+  return {
+    frozenColsWidth,
+    frozenRowsHeight,
+    hasFrozenRows: freezeRow !== null && freezeRow > 0,
+    hasFrozenCols: freezeCol !== null && freezeCol > 0,
+    frozenRowCount,
+    frozenColCount,
+  };
 }

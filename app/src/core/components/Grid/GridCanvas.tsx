@@ -6,12 +6,13 @@
 // actual grid drawing to the gridRenderer module.
 // Updated: Fixed insertion animation to work with backend-first approach
 // Updated: Added deletion animation support (animateRowDeletion, animateColumnDeletion)
+// Updated: Added freeze panes support
 
 import React, { useRef, useEffect, useCallback, useImperativeHandle, forwardRef, useState } from "react";
 import { renderGrid, DEFAULT_THEME, calculateVisibleRange } from "../../lib/gridRenderer";
 import { getViewportCells } from "../../lib/tauri-api";
-import type { GridConfig, Viewport, Selection, EditingCell, CellDataMap, FormulaReference, DimensionOverrides, StyleDataMap, ClipboardMode, InsertionAnimation } from "../../types";
-import { cellKey, createEmptyDimensionOverrides } from "../../types";
+import type { GridConfig, Viewport, Selection, EditingCell, CellDataMap, FormulaReference, DimensionOverrides, StyleDataMap, ClipboardMode, InsertionAnimation, FreezeConfig } from "../../types";
+import { cellKey, createEmptyDimensionOverrides, DEFAULT_FREEZE_CONFIG } from "../../types";
 import type { GridTheme } from "../../lib/gridRenderer";
 
 /**
@@ -38,6 +39,8 @@ export interface GridCanvasProps {
   clipboardSelection?: Selection | null;
   /** Clipboard mode (none, copy, cut) */
   clipboardMode?: ClipboardMode;
+  /** Freeze panes configuration */
+  freezeConfig?: FreezeConfig;
   /** Optional theme override */
   theme?: GridTheme;
   /** Callback when canvas is clicked */
@@ -148,6 +151,7 @@ export const GridCanvas = forwardRef<GridCanvasHandle, GridCanvasProps>(
       fillPreviewRange,
       clipboardSelection,
       clipboardMode = "none",
+      freezeConfig = DEFAULT_FREEZE_CONFIG,
       theme = DEFAULT_THEME,
       onMouseDown,
       onMouseMove,
@@ -244,6 +248,7 @@ export const GridCanvas = forwardRef<GridCanvasHandle, GridCanvasProps>(
 
     /**
      * Calculate the cell range to fetch (visible range + buffer).
+     * With freeze panes, we need to fetch frozen cells plus scrollable cells.
      */
     const calculateFetchRange = useCallback(() => {
       if (canvasSize.width === 0 || canvasSize.height === 0) {
@@ -252,14 +257,22 @@ export const GridCanvas = forwardRef<GridCanvasHandle, GridCanvasProps>(
 
       const range = calculateVisibleRange(viewport, config, canvasSize.width, canvasSize.height, dims);
 
-      // Add buffer zone around visible area
-      const startRow = Math.max(0, range.startRow - CELL_BUFFER);
-      const endRow = Math.min(config.totalRows - 1, range.endRow + CELL_BUFFER);
-      const startCol = Math.max(0, range.startCol - CELL_BUFFER);
-      const endCol = Math.min(config.totalCols - 1, range.endCol + CELL_BUFFER);
+      // Calculate the base range from scroll position
+      let startRow = Math.max(0, range.startRow - CELL_BUFFER);
+      let endRow = Math.min(config.totalRows - 1, range.endRow + CELL_BUFFER);
+      let startCol = Math.max(0, range.startCol - CELL_BUFFER);
+      let endCol = Math.min(config.totalCols - 1, range.endCol + CELL_BUFFER);
+
+      // With freeze panes, always include frozen rows/cols in fetch
+      if (freezeConfig.freezeRow !== null && freezeConfig.freezeRow > 0) {
+        startRow = 0; // Always fetch from row 0 to include frozen rows
+      }
+      if (freezeConfig.freezeCol !== null && freezeConfig.freezeCol > 0) {
+        startCol = 0; // Always fetch from col 0 to include frozen columns
+      }
 
       return { startRow, endRow, startCol, endCol };
-    }, [viewport, config, canvasSize.width, canvasSize.height, dims]);
+    }, [viewport, config, canvasSize.width, canvasSize.height, dims, freezeConfig]);
 
     /**
      * Check if we need to fetch new cells based on scroll position.
@@ -372,7 +385,7 @@ export const GridCanvas = forwardRef<GridCanvasHandle, GridCanvasProps>(
       // Clear the canvas
       clear();
 
-      // Render the grid with cell data, formula references, style cache, fill preview, clipboard, and insertion animation
+      // Render the grid with cell data, formula references, style cache, fill preview, clipboard, insertion animation, and freeze config
       renderGrid(
         context,
         canvasSize.width,
@@ -390,9 +403,10 @@ export const GridCanvas = forwardRef<GridCanvasHandle, GridCanvasProps>(
         clipboardSelection,
         clipboardMode,
         animationOffset,
-        currentInsertionAnimation
+        currentInsertionAnimation,
+        freezeConfig
       );
-    }, [context, canvasSize.width, canvasSize.height, config, viewport, selection, editing, cells, theme, formulaReferences, dims, styleCache, fillPreviewRange, clipboardSelection, clipboardMode, clear]);
+    }, [context, canvasSize.width, canvasSize.height, config, viewport, selection, editing, cells, theme, formulaReferences, dims, styleCache, fillPreviewRange, clipboardSelection, clipboardMode, freezeConfig, clear]);
 
     /**
      * Start row insertion animation.
@@ -577,11 +591,20 @@ export const GridCanvas = forwardRef<GridCanvasHandle, GridCanvasProps>(
     }, [clipboardSelection, clipboardMode, insertionAnimation, draw]);
 
     /**
-     * Fetch cells when viewport changes.
+     * Fetch cells when viewport or freeze config changes.
      */
     useEffect(() => {
       fetchCells();
     }, [fetchCells]);
+
+    /**
+     * Refetch cells when freeze config changes to ensure frozen cells are loaded.
+     */
+    useEffect(() => {
+      // Force refetch when freeze config changes to ensure frozen cells are in cache
+      lastFetchRef.current = null;
+      fetchCells(true);
+    }, [freezeConfig.freezeRow, freezeConfig.freezeCol]);
 
     /**
      * Listen for sheet switch events during formula mode.

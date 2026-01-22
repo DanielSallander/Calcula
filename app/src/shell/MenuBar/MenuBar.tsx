@@ -1,6 +1,10 @@
+// FILENAME: app/src/shell/MenuBar/MenuBar.tsx
+
 import React, { useState, useCallback, useEffect, useRef } from 'react';
 import { newFile, openFile, saveFile, saveFileAs, isFileModified } from '../../core/lib/file-api';
 import { undo, redo, setFreezePanes, getFreezePanes } from '../../core/lib/tauri-api';
+import { useGridContext } from '../../core/state/GridContext';
+import { setFreezeConfig } from '../../core/state/gridActions';
 
 interface MenuItem {
   label: string;
@@ -46,6 +50,9 @@ export function MenuBar(): React.ReactElement {
   const [hoveredMenuButton, setHoveredMenuButton] = useState<string | null>(null);
   const [freezeState, setFreezeState] = useState<{ row: boolean; col: boolean }>({ row: false, col: false });
   const menuBarRef = useRef<HTMLDivElement>(null);
+  
+  // Get dispatch to update React state
+  const { dispatch } = useGridContext();
 
   // Load freeze state on mount
   useEffect(() => {
@@ -54,16 +61,23 @@ export function MenuBar(): React.ReactElement {
       try {
         const config = await getFreezePanes();
         console.log('[MenuBar] Loaded freeze config:', config);
+        const hasRow = config.freezeRow !== null && config.freezeRow > 0;
+        const hasCol = config.freezeCol !== null && config.freezeCol > 0;
         setFreezeState({
-          row: config.freezeRow !== null && config.freezeRow > 0,
-          col: config.freezeCol !== null && config.freezeCol > 0,
+          row: hasRow,
+          col: hasCol,
         });
+        // Also update React state on load
+        dispatch(setFreezeConfig(
+          hasRow ? config.freezeRow : null,
+          hasCol ? config.freezeCol : null
+        ));
       } catch (error) {
         console.error('[MenuBar] Failed to load freeze state:', error);
       }
     };
     loadFreezeState();
-  }, []);
+  }, [dispatch]);
 
   const handleNew = useCallback(async () => {
     try {
@@ -175,12 +189,14 @@ export function MenuBar(): React.ReactElement {
       const result = await setFreezePanes(freezeRow, freezeCol);
       console.log('[MenuBar] setFreezePanes result:', result);
       setFreezeState(prev => ({ ...prev, row: newRowState }));
+      // Update React state so renderer gets the new config
+      dispatch(setFreezeConfig(freezeRow, freezeCol));
       emitMenuEvent(MenuEvents.FREEZE_CHANGED, { freezeRow, freezeCol });
       window.dispatchEvent(new CustomEvent('grid:refresh'));
     } catch (error) {
       console.error('[MenuBar] handleFreezeTopRow error:', error);
     }
-  }, [freezeState]);
+  }, [freezeState, dispatch]);
 
   const handleFreezeFirstColumn = useCallback(async () => {
     console.log('[MenuBar] handleFreezeFirstColumn called, current state:', freezeState);
@@ -192,12 +208,14 @@ export function MenuBar(): React.ReactElement {
       const result = await setFreezePanes(freezeRow, freezeCol);
       console.log('[MenuBar] setFreezePanes result:', result);
       setFreezeState(prev => ({ ...prev, col: newColState }));
+      // Update React state so renderer gets the new config
+      dispatch(setFreezeConfig(freezeRow, freezeCol));
       emitMenuEvent(MenuEvents.FREEZE_CHANGED, { freezeRow, freezeCol });
       window.dispatchEvent(new CustomEvent('grid:refresh'));
     } catch (error) {
       console.error('[MenuBar] handleFreezeFirstColumn error:', error);
     }
-  }, [freezeState]);
+  }, [freezeState, dispatch]);
 
   const handleFreezeBoth = useCallback(async () => {
     console.log('[MenuBar] handleFreezeBoth called, current state:', freezeState);
@@ -210,12 +228,14 @@ export function MenuBar(): React.ReactElement {
       const result = await setFreezePanes(freezeRow, freezeCol);
       console.log('[MenuBar] setFreezePanes result:', result);
       setFreezeState({ row: newState, col: newState });
+      // Update React state so renderer gets the new config
+      dispatch(setFreezeConfig(freezeRow, freezeCol));
       emitMenuEvent(MenuEvents.FREEZE_CHANGED, { freezeRow, freezeCol });
       window.dispatchEvent(new CustomEvent('grid:refresh'));
     } catch (error) {
       console.error('[MenuBar] handleFreezeBoth error:', error);
     }
-  }, [freezeState]);
+  }, [freezeState, dispatch]);
 
   const handleUnfreeze = useCallback(async () => {
     console.log('[MenuBar] handleUnfreeze called');
@@ -224,12 +244,14 @@ export function MenuBar(): React.ReactElement {
       const result = await setFreezePanes(null, null);
       console.log('[MenuBar] setFreezePanes result:', result);
       setFreezeState({ row: false, col: false });
+      // Update React state so renderer gets the new config
+      dispatch(setFreezeConfig(null, null));
       emitMenuEvent(MenuEvents.FREEZE_CHANGED, { freezeRow: null, freezeCol: null });
       window.dispatchEvent(new CustomEvent('grid:refresh'));
     } catch (error) {
       console.error('[MenuBar] handleUnfreeze error:', error);
     }
-  }, []);
+  }, [dispatch]);
 
   const menus: Menu[] = [
     {

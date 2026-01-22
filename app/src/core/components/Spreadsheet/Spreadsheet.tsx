@@ -2,6 +2,7 @@
 // PURPOSE: Main spreadsheet component combining grid, editor, and scrollbars
 // CONTEXT: Core component that orchestrates the spreadsheet experience
 // FIX: Removed duplicate formula bar - now handled by shell/FormulaBar component
+// FIX: Added freezeConfig prop to GridCanvas
 
 import React, { useCallback, useEffect, useState, useRef } from "react";
 import { useGridState, useGridContext } from "../../state";
@@ -77,6 +78,9 @@ function SpreadsheetContent({ className }: SpreadsheetContentProps): React.React
     clipboardMode,
     fillState,
   } = state;
+
+  // 5. Extract freezeConfig from gridState
+  const { freezeConfig } = gridState;
 
   // -------------------------------------------------------------------------
   // Menu Event Listeners for Cut/Copy/Paste
@@ -537,6 +541,7 @@ function SpreadsheetContent({ className }: SpreadsheetContentProps): React.React
             clipboardSelection={clipboardSelection}
             clipboardMode={clipboardMode}
             fillPreviewRange={fillState.previewRange}
+            freezeConfig={freezeConfig}
           />
 
           {editing && isEditing && (

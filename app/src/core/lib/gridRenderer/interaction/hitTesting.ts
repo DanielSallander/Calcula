@@ -1,11 +1,12 @@
 //FILENAME: app/src/lib/gridRenderer/interaction/hitTesting.ts
 //PURPOSE: Pixel coordinate to cell coordinate conversion and resize handle detection
 //CONTEXT: Handles mouse interaction with grid cells, headers, and resize handles
+//UPDATED: Added freeze pane support for coordinate translation
 
-import type { GridConfig, Viewport, DimensionOverrides } from "../../../types";
+import type { GridConfig, Viewport, DimensionOverrides, FreezeConfig, FreezeZone } from "../../../types";
 import { ensureDimensions } from "../styles/styleUtils";
 import { getColumnWidth, getRowHeight } from "../layout/dimensions";
-import { calculateVisibleRange } from "../layout/viewport";
+import { calculateVisibleRange, calculateFreezePaneLayout } from "../layout/viewport";
 
 // =============================================================================
 // SELECTION THRESHOLDS
@@ -30,17 +31,72 @@ export interface GetCellOptions {
    * Required for relative threshold calculation.
    */
   dragStartCol?: number;
+  
+  /**
+   * Freeze pane configuration for coordinate translation.
+   */
+  freezeConfig?: FreezeConfig;
+}
+
+/**
+ * Result from getCellFromPixel including zone information.
+ */
+export interface CellFromPixelResult {
+  row: number;
+  col: number;
+  zone: FreezeZone;
+}
+
+/**
+ * Determine which freeze zone a pixel coordinate falls into.
+ */
+export function getZoneFromPixel(
+  pixelX: number,
+  pixelY: number,
+  config: GridConfig,
+  freezeConfig: FreezeConfig,
+  dimensions?: DimensionOverrides
+): FreezeZone {
+  const rowHeaderWidth = config.rowHeaderWidth || 50;
+  const colHeaderHeight = config.colHeaderHeight || 24;
+  
+  // If no freeze, everything is in bottomRight (main scrollable)
+  if ((freezeConfig.freezeRow === null || freezeConfig.freezeRow <= 0) &&
+      (freezeConfig.freezeCol === null || freezeConfig.freezeCol <= 0)) {
+    return "bottomRight";
+  }
+  
+  const layout = calculateFreezePaneLayout(freezeConfig, config, dimensions);
+  
+  const inFrozenCols = freezeConfig.freezeCol !== null && 
+                       freezeConfig.freezeCol > 0 && 
+                       pixelX < rowHeaderWidth + layout.frozenColsWidth;
+  const inFrozenRows = freezeConfig.freezeRow !== null && 
+                       freezeConfig.freezeRow > 0 && 
+                       pixelY < colHeaderHeight + layout.frozenRowsHeight;
+  
+  if (inFrozenRows && inFrozenCols) {
+    return "topLeft";
+  } else if (inFrozenRows) {
+    return "topRight";
+  } else if (inFrozenCols) {
+    return "bottomLeft";
+  } else {
+    return "bottomRight";
+  }
 }
 
 /**
  * Get cell coordinates from pixel position.
  * Returns null if click is on headers.
- * * @param pixelX - X coordinate in pixels relative to container
+ * Handles frozen pane coordinate translation.
+ * 
+ * @param pixelX - X coordinate in pixels relative to container
  * @param pixelY - Y coordinate in pixels relative to container
  * @param config - Grid configuration
  * @param viewport - Current viewport state
  * @param dimensions - Optional dimension overrides
- * @param options - Optional behavior options
+ * @param options - Optional behavior options including freeze config
  */
 export function getCellFromPixel(
   pixelX: number,
@@ -57,6 +113,7 @@ export function getCellFromPixel(
   
   const dragStartRow = options?.dragStartRow;
   const dragStartCol = options?.dragStartCol;
+  const freezeConfig = options?.freezeConfig;
   
   // Check if click is on headers
   if (pixelX < rowHeaderWidth || pixelY < colHeaderHeight) {
@@ -67,19 +124,67 @@ export function getCellFromPixel(
   const scrollX = viewport.scrollX || 0;
   const scrollY = viewport.scrollY || 0;
 
-  // Calculate content position (relative to grid data area, accounting for scroll)
-  const contentX = pixelX - rowHeaderWidth + scrollX;
-  const contentY = pixelY - colHeaderHeight + scrollY;
+  // Determine which zone we're in and calculate appropriate content position
+  let contentX: number;
+  let contentY: number;
+  let startCol = 0;
+  let startRow = 0;
+  
+  if (freezeConfig && (freezeConfig.freezeRow !== null || freezeConfig.freezeCol !== null)) {
+    const layout = calculateFreezePaneLayout(freezeConfig, config, dims);
+    const zone = getZoneFromPixel(pixelX, pixelY, config, freezeConfig, dims);
+    
+    switch (zone) {
+      case "topLeft":
+        // Frozen corner - no scroll offset
+        contentX = pixelX - rowHeaderWidth;
+        contentY = pixelY - colHeaderHeight;
+        break;
+        
+      case "topRight":
+        // Frozen rows - horizontal scroll only
+        contentX = pixelX - rowHeaderWidth - layout.frozenColsWidth + scrollX;
+        contentY = pixelY - colHeaderHeight;
+        startCol = freezeConfig.freezeCol ?? 0;
+        break;
+        
+      case "bottomLeft":
+        // Frozen columns - vertical scroll only
+        contentX = pixelX - rowHeaderWidth;
+        contentY = pixelY - colHeaderHeight - layout.frozenRowsHeight + scrollY;
+        startRow = freezeConfig.freezeRow ?? 0;
+        break;
+        
+      case "bottomRight":
+        // Main scrollable area - both scrolls
+        contentX = pixelX - rowHeaderWidth - layout.frozenColsWidth + scrollX;
+        contentY = pixelY - colHeaderHeight - layout.frozenRowsHeight + scrollY;
+        startCol = freezeConfig.freezeCol ?? 0;
+        startRow = freezeConfig.freezeRow ?? 0;
+        break;
+    }
+  } else {
+    // No freeze panes - standard calculation
+    contentX = pixelX - rowHeaderWidth + scrollX;
+    contentY = pixelY - colHeaderHeight + scrollY;
+  }
 
   // =========================================================================
   // COLUMN CALCULATION
   // =========================================================================
   
-  let col = 0;
+  let col = startCol;
   let accumulatedWidth = 0;
   let currentColWidth = 0;
   
-  // 1. Find the physical column under the cursor
+  // For frozen zones, we need to account for frozen columns' width offset
+  if (freezeConfig && freezeConfig.freezeCol !== null && freezeConfig.freezeCol > 0 && startCol === 0) {
+    // We're in a frozen column zone - start from column 0
+  } else if (startCol > 0) {
+    // We're past frozen columns - content already adjusted for scroll
+  }
+  
+  // Find the physical column under the cursor
   while (col < totalCols) {
     currentColWidth = getColumnWidth(col, config, dims);
     if (currentColWidth <= 0) break; 
@@ -92,18 +197,15 @@ export function getCellFromPixel(
     col++;
   }
 
-  // 2. Apply Relative Threshold Logic
+  // Apply Relative Threshold Logic
   if (dragStartCol !== undefined && col !== dragStartCol) {
-    // 0.0 = Left edge, 1.0 = Right edge
     const relativePos = (contentX - accumulatedWidth) / currentColWidth;
 
     if (col > dragStartCol) {
-      // Dragging Right
       if (relativePos < SELECTION_THRESHOLD_X) {
         col--;
       }
     } else {
-      // Dragging Left
       if (relativePos > (1 - SELECTION_THRESHOLD_X)) {
         col++;
       }
@@ -118,11 +220,11 @@ export function getCellFromPixel(
   // ROW CALCULATION
   // =========================================================================
   
-  let row = 0;
+  let row = startRow;
   let accumulatedHeight = 0;
   let currentRowHeight = 0;
   
-  // 1. Find the physical row under the cursor
+  // Find the physical row under the cursor
   while (row < totalRows) {
     currentRowHeight = getRowHeight(row, config, dims);
     if (currentRowHeight <= 0) break;
@@ -134,18 +236,15 @@ export function getCellFromPixel(
     row++;
   }
   
-  // 2. Apply Relative Threshold Logic
+  // Apply Relative Threshold Logic
   if (dragStartRow !== undefined && row !== dragStartRow) {
-    // 0.0 = Top edge, 1.0 = Bottom edge
     const relativePos = (contentY - accumulatedHeight) / currentRowHeight;
 
     if (row > dragStartRow) {
-      // Dragging Down
       if (relativePos < SELECTION_THRESHOLD_Y) {
         row--;
       }
     } else {
-      // Dragging Up
       if (relativePos > (1 - SELECTION_THRESHOLD_Y)) {
         row++;
       }

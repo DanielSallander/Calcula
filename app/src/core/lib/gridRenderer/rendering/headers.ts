@@ -1,9 +1,10 @@
 //FILENAME: app/src/lib/gridRenderer/rendering/headers.ts
 //PURPOSE: Drawing functions for row and column headers
 //CONTEXT: Renders header cells with highlighting and borders
+//UPDATED: Added freeze pane support for proper header positioning
 
 import type { RenderState } from "../types";
-import { calculateVisibleRange } from "../layout/viewport";
+import { calculateVisibleRange, calculateFreezePaneLayout } from "../layout/viewport";
 import { getColumnWidth, getRowHeight } from "../layout/dimensions";
 import { columnToLetter } from "../../../types";
 
@@ -27,14 +28,13 @@ export function drawCorner(state: RenderState): void {
 
 /**
  * Draw the column headers (A, B, C, ...).
+ * Supports freeze panes - frozen column headers are drawn at fixed positions.
  */
 export function drawColumnHeaders(state: RenderState): void {
-  const { ctx, width, height, config, viewport, theme, selection, dimensions } = state;
+  const { ctx, width, height, config, viewport, theme, selection, dimensions, freezeConfig } = state;
   const rowHeaderWidth = config.rowHeaderWidth || 50;
   const colHeaderHeight = config.colHeaderHeight || 24;
   const totalCols = config.totalCols || 100;
-
-  const range = calculateVisibleRange(viewport, config, width, height, dimensions);
 
   // Draw header background
   ctx.fillStyle = theme.headerBackground;
@@ -56,43 +56,168 @@ export function drawColumnHeaders(state: RenderState): void {
     isEntireColumnSelected = selection.type === "columns";
   }
 
-  // Draw each visible column header
-  let x = rowHeaderWidth + range.offsetX;
+  // Check for freeze panes
+  const hasFrozenCols = freezeConfig && freezeConfig.freezeCol !== null && freezeConfig.freezeCol > 0;
+  const freezeCol = hasFrozenCols ? freezeConfig!.freezeCol! : 0;
+  
+  if (hasFrozenCols) {
+    const layout = calculateFreezePaneLayout(freezeConfig!, config, dimensions);
+    
+    // 1. Draw frozen column headers (no scroll, fixed position)
+    let x = rowHeaderWidth;
+    for (let col = 0; col < freezeCol && col < totalCols; col++) {
+      const colWidth = getColumnWidth(col, config, dimensions);
+      
+      // Highlight if column is in selection
+      const isSelected = col >= selMinCol && col <= selMaxCol;
+      const isFullySelected = isSelected && isEntireColumnSelected;
 
-  for (let col = range.startCol; col <= range.endCol && col < totalCols; col++) {
-    const colWidth = getColumnWidth(col, config, dimensions);
+      if (isFullySelected) {
+        ctx.fillStyle = theme.headerHighlight;
+        ctx.fillRect(x, 0, colWidth, colHeaderHeight);
+      } else if (isSelected) {
+        ctx.fillStyle = "#e3ecf7";
+        ctx.fillRect(x, 0, colWidth, colHeaderHeight);
+      }
 
-    // Skip if outside visible area
-    if (x + colWidth < rowHeaderWidth || x > width) {
+      // Draw border
+      ctx.strokeStyle = theme.headerBorder;
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.moveTo(x + colWidth + 0.5, 0);
+      ctx.lineTo(x + colWidth + 0.5, colHeaderHeight);
+      ctx.stroke();
+
+      // Draw column letter
+      ctx.fillStyle = isFullySelected ? theme.headerHighlightText : isSelected ? "#1a5fb4" : theme.headerText;
+      ctx.fillText(columnToLetter(col), x + colWidth / 2, colHeaderHeight / 2);
+
       x += colWidth;
-      continue;
     }
-
-    // Highlight if column is in selection
-    const isSelected = col >= selMinCol && col <= selMaxCol;
-    const isFullySelected = isSelected && isEntireColumnSelected;
-
-    if (isFullySelected) {
-      ctx.fillStyle = theme.headerHighlight;
-      ctx.fillRect(x, 0, colWidth, colHeaderHeight);
-    } else if (isSelected) {
-      ctx.fillStyle = "#e3ecf7";
-      ctx.fillRect(x, 0, colWidth, colHeaderHeight);
-    }
-
-    // Draw border
-    ctx.strokeStyle = theme.headerBorder;
-    ctx.lineWidth = 1;
+    
+    // Draw freeze pane separator line on headers
+    ctx.strokeStyle = "#666666";
+    ctx.lineWidth = 2;
     ctx.beginPath();
-    ctx.moveTo(x + colWidth + 0.5, 0);
-    ctx.lineTo(x + colWidth + 0.5, colHeaderHeight);
+    ctx.moveTo(rowHeaderWidth + layout.frozenColsWidth, 0);
+    ctx.lineTo(rowHeaderWidth + layout.frozenColsWidth, colHeaderHeight);
     ctx.stroke();
+    
+    // 2. Draw scrollable column headers (with scroll offset, clipped)
+    const scrollableStartX = rowHeaderWidth + layout.frozenColsWidth;
+    const scrollableWidth = width - scrollableStartX;
+    
+    if (scrollableWidth > 0) {
+      ctx.save();
+      ctx.beginPath();
+      ctx.rect(scrollableStartX, 0, scrollableWidth, colHeaderHeight);
+      ctx.clip();
+      
+      // Calculate visible range for scrollable area
+      const scrollX = viewport.scrollX || 0;
+      
+      // Find first visible scrollable column
+      let accumulatedWidth = 0;
+      let startCol = freezeCol;
+      while (startCol < totalCols) {
+        const colWidth = getColumnWidth(startCol, config, dimensions);
+        if (colWidth <= 0) break;
+        if (accumulatedWidth + colWidth > scrollX) {
+          break;
+        }
+        accumulatedWidth += colWidth;
+        startCol++;
+      }
+      const offsetX = -(scrollX - accumulatedWidth);
+      
+      // Find end column
+      let endCol = startCol;
+      let widthAccum = offsetX;
+      while (endCol < totalCols && widthAccum < scrollableWidth) {
+        widthAccum += getColumnWidth(endCol, config, dimensions);
+        endCol++;
+      }
+      
+      // Draw scrollable headers
+      x = scrollableStartX + offsetX;
+      for (let col = startCol; col <= endCol && col < totalCols; col++) {
+        const colWidth = getColumnWidth(col, config, dimensions);
+        
+        // Skip if completely outside visible area
+        if (x + colWidth < scrollableStartX || x > width) {
+          x += colWidth;
+          continue;
+        }
 
-    // Draw column letter
-    ctx.fillStyle = isFullySelected ? theme.headerHighlightText : isSelected ? "#1a5fb4" : theme.headerText;
-    ctx.fillText(columnToLetter(col), x + colWidth / 2, colHeaderHeight / 2);
+        // Highlight if column is in selection
+        const isSelected = col >= selMinCol && col <= selMaxCol;
+        const isFullySelected = isSelected && isEntireColumnSelected;
 
-    x += colWidth;
+        if (isFullySelected) {
+          ctx.fillStyle = theme.headerHighlight;
+          ctx.fillRect(x, 0, colWidth, colHeaderHeight);
+        } else if (isSelected) {
+          ctx.fillStyle = "#e3ecf7";
+          ctx.fillRect(x, 0, colWidth, colHeaderHeight);
+        }
+
+        // Draw border
+        ctx.strokeStyle = theme.headerBorder;
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        ctx.moveTo(x + colWidth + 0.5, 0);
+        ctx.lineTo(x + colWidth + 0.5, colHeaderHeight);
+        ctx.stroke();
+
+        // Draw column letter
+        ctx.fillStyle = isFullySelected ? theme.headerHighlightText : isSelected ? "#1a5fb4" : theme.headerText;
+        ctx.fillText(columnToLetter(col), x + colWidth / 2, colHeaderHeight / 2);
+
+        x += colWidth;
+      }
+      
+      ctx.restore();
+    }
+  } else {
+    // Standard rendering without freeze panes
+    const range = calculateVisibleRange(viewport, config, width, height, dimensions);
+    let x = rowHeaderWidth + range.offsetX;
+
+    for (let col = range.startCol; col <= range.endCol && col < totalCols; col++) {
+      const colWidth = getColumnWidth(col, config, dimensions);
+
+      // Skip if outside visible area
+      if (x + colWidth < rowHeaderWidth || x > width) {
+        x += colWidth;
+        continue;
+      }
+
+      // Highlight if column is in selection
+      const isSelected = col >= selMinCol && col <= selMaxCol;
+      const isFullySelected = isSelected && isEntireColumnSelected;
+
+      if (isFullySelected) {
+        ctx.fillStyle = theme.headerHighlight;
+        ctx.fillRect(x, 0, colWidth, colHeaderHeight);
+      } else if (isSelected) {
+        ctx.fillStyle = "#e3ecf7";
+        ctx.fillRect(x, 0, colWidth, colHeaderHeight);
+      }
+
+      // Draw border
+      ctx.strokeStyle = theme.headerBorder;
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.moveTo(x + colWidth + 0.5, 0);
+      ctx.lineTo(x + colWidth + 0.5, colHeaderHeight);
+      ctx.stroke();
+
+      // Draw column letter
+      ctx.fillStyle = isFullySelected ? theme.headerHighlightText : isSelected ? "#1a5fb4" : theme.headerText;
+      ctx.fillText(columnToLetter(col), x + colWidth / 2, colHeaderHeight / 2);
+
+      x += colWidth;
+    }
   }
 
   // Draw bottom border of header row
@@ -106,14 +231,13 @@ export function drawColumnHeaders(state: RenderState): void {
 
 /**
  * Draw the row headers (1, 2, 3, ...).
+ * Supports freeze panes - frozen row headers are drawn at fixed positions.
  */
 export function drawRowHeaders(state: RenderState): void {
-  const { ctx, width, height, config, viewport, theme, selection, dimensions } = state;
+  const { ctx, width, height, config, viewport, theme, selection, dimensions, freezeConfig } = state;
   const rowHeaderWidth = config.rowHeaderWidth || 50;
   const colHeaderHeight = config.colHeaderHeight || 24;
   const totalRows = config.totalRows || 1000;
-
-  const range = calculateVisibleRange(viewport, config, width, height, dimensions);
 
   // Draw header background
   ctx.fillStyle = theme.headerBackground;
@@ -135,43 +259,170 @@ export function drawRowHeaders(state: RenderState): void {
     isEntireRowSelected = selection.type === "rows";
   }
 
-  // Draw each visible row header
-  let y = colHeaderHeight + range.offsetY;
+  // Check for freeze panes
+  const hasFrozenRows = freezeConfig && freezeConfig.freezeRow !== null && freezeConfig.freezeRow > 0;
+  const freezeRow = hasFrozenRows ? freezeConfig!.freezeRow! : 0;
+  
+  if (hasFrozenRows) {
+    const layout = calculateFreezePaneLayout(freezeConfig!, config, dimensions);
+    
+    // 1. Draw frozen row headers (no scroll, fixed position)
+    let y = colHeaderHeight;
+    for (let row = 0; row < freezeRow && row < totalRows; row++) {
+      const rowHeight = getRowHeight(row, config, dimensions);
+      
+      // Highlight if row is in selection
+      const isSelected = row >= selMinRow && row <= selMaxRow;
+      const isFullySelected = isSelected && isEntireRowSelected;
 
-  for (let row = range.startRow; row <= range.endRow && row < totalRows; row++) {
-    const rowHeight = getRowHeight(row, config, dimensions);
-    // Skip if outside visible area
-    if (y + rowHeight < colHeaderHeight || y > height) {
+      if (isFullySelected) {
+        ctx.fillStyle = theme.headerHighlight;
+        ctx.fillRect(0, y, rowHeaderWidth, rowHeight);
+      } else if (isSelected) {
+        ctx.fillStyle = "#e3ecf7";
+        ctx.fillRect(0, y, rowHeaderWidth, rowHeight);
+      }
+
+      // Draw border
+      ctx.strokeStyle = theme.headerBorder;
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.moveTo(0, y + rowHeight + 0.5);
+      ctx.lineTo(rowHeaderWidth, y + rowHeight + 0.5);
+      ctx.stroke();
+
+      // Draw row number (1-based)
+      ctx.fillStyle = isFullySelected ? theme.headerHighlightText : isSelected ? "#1a5fb4" : theme.headerText;
+      ctx.fillText(String(row + 1), rowHeaderWidth / 2, y + rowHeight / 2);
+
       y += rowHeight;
-      continue;
     }
-
-    // Highlight if row is in selection
-    const isSelected = row >= selMinRow && row <= selMaxRow;
-    const isFullySelected = isSelected && isEntireRowSelected;
-
-    if (isFullySelected) {
-      ctx.fillStyle = theme.headerHighlight;
-      ctx.fillRect(0, y, rowHeaderWidth, rowHeight);
-    } else if (isSelected) {
-      ctx.fillStyle = "#e3ecf7";
-      ctx.fillRect(0, y, rowHeaderWidth, rowHeight);
-    }
-
-    // Draw border
-    ctx.strokeStyle = theme.headerBorder;
-    ctx.lineWidth = 1;
+    
+    // Draw freeze pane separator line on headers
+    ctx.strokeStyle = "#666666";
+    ctx.lineWidth = 2;
     ctx.beginPath();
-    ctx.moveTo(0, y + rowHeight + 0.5);
-    ctx.lineTo(rowHeaderWidth, y + rowHeight + 0.5);
+    ctx.moveTo(0, colHeaderHeight + layout.frozenRowsHeight);
+    ctx.lineTo(rowHeaderWidth, colHeaderHeight + layout.frozenRowsHeight);
     ctx.stroke();
+    
+    // 2. Draw scrollable row headers (with scroll offset, clipped)
+    const scrollableStartY = colHeaderHeight + layout.frozenRowsHeight;
+    const scrollableHeight = height - scrollableStartY;
+    
+    if (scrollableHeight > 0) {
+      ctx.save();
+      ctx.beginPath();
+      ctx.rect(0, scrollableStartY, rowHeaderWidth, scrollableHeight);
+      ctx.clip();
+      
+      // Calculate visible range for scrollable area
+      const scrollY = viewport.scrollY || 0;
+      
+      // Find first visible scrollable row
+      let accumulatedHeight = 0;
+      let startRow = freezeRow;
+      while (startRow < totalRows) {
+        const rowHeight = getRowHeight(startRow, config, dimensions);
+        if (rowHeight <= 0) break;
+        if (accumulatedHeight + rowHeight > scrollY) {
+          break;
+        }
+        accumulatedHeight += rowHeight;
+        startRow++;
+      }
+      const offsetY = -(scrollY - accumulatedHeight);
+      
+      // Find end row
+      let endRow = startRow;
+      let heightAccum = offsetY;
+      while (endRow < totalRows && heightAccum < scrollableHeight) {
+        heightAccum += getRowHeight(endRow, config, dimensions);
+        endRow++;
+      }
+      
+      // Draw scrollable headers
+      y = scrollableStartY + offsetY;
+      for (let row = startRow; row <= endRow && row < totalRows; row++) {
+        const rowHeight = getRowHeight(row, config, dimensions);
+        
+        // Skip if completely outside visible area
+        if (y + rowHeight < scrollableStartY || y > height) {
+          y += rowHeight;
+          continue;
+        }
 
-    // Draw row number (1-based)
-    ctx.fillStyle = isFullySelected ? theme.headerHighlightText : isSelected ? "#1a5fb4" : theme.headerText;
-    ctx.fillText(String(row + 1), rowHeaderWidth / 2, y + rowHeight / 2);
+        // Highlight if row is in selection
+        const isSelected = row >= selMinRow && row <= selMaxRow;
+        const isFullySelected = isSelected && isEntireRowSelected;
 
-    y += rowHeight;
+        if (isFullySelected) {
+          ctx.fillStyle = theme.headerHighlight;
+          ctx.fillRect(0, y, rowHeaderWidth, rowHeight);
+        } else if (isSelected) {
+          ctx.fillStyle = "#e3ecf7";
+          ctx.fillRect(0, y, rowHeaderWidth, rowHeight);
+        }
+
+        // Draw border
+        ctx.strokeStyle = theme.headerBorder;
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        ctx.moveTo(0, y + rowHeight + 0.5);
+        ctx.lineTo(rowHeaderWidth, y + rowHeight + 0.5);
+        ctx.stroke();
+
+        // Draw row number (1-based)
+        ctx.fillStyle = isFullySelected ? theme.headerHighlightText : isSelected ? "#1a5fb4" : theme.headerText;
+        ctx.fillText(String(row + 1), rowHeaderWidth / 2, y + rowHeight / 2);
+
+        y += rowHeight;
+      }
+      
+      ctx.restore();
+    }
+  } else {
+    // Standard rendering without freeze panes
+    const range = calculateVisibleRange(viewport, config, width, height, dimensions);
+    let y = colHeaderHeight + range.offsetY;
+
+    for (let row = range.startRow; row <= range.endRow && row < totalRows; row++) {
+      const rowHeight = getRowHeight(row, config, dimensions);
+      
+      // Skip if outside visible area
+      if (y + rowHeight < colHeaderHeight || y > height) {
+        y += rowHeight;
+        continue;
+      }
+
+      // Highlight if row is in selection
+      const isSelected = row >= selMinRow && row <= selMaxRow;
+      const isFullySelected = isSelected && isEntireRowSelected;
+
+      if (isFullySelected) {
+        ctx.fillStyle = theme.headerHighlight;
+        ctx.fillRect(0, y, rowHeaderWidth, rowHeight);
+      } else if (isSelected) {
+        ctx.fillStyle = "#e3ecf7";
+        ctx.fillRect(0, y, rowHeaderWidth, rowHeight);
+      }
+
+      // Draw border
+      ctx.strokeStyle = theme.headerBorder;
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.moveTo(0, y + rowHeight + 0.5);
+      ctx.lineTo(rowHeaderWidth, y + rowHeight + 0.5);
+      ctx.stroke();
+
+      // Draw row number (1-based)
+      ctx.fillStyle = isFullySelected ? theme.headerHighlightText : isSelected ? "#1a5fb4" : theme.headerText;
+      ctx.fillText(String(row + 1), rowHeaderWidth / 2, y + rowHeight / 2);
+
+      y += rowHeight;
+    }
   }
+  
   // Draw right border of header column
   ctx.strokeStyle = theme.headerBorder;
   ctx.lineWidth = 1;

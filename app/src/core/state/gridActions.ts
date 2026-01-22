@@ -2,8 +2,9 @@
 // PURPOSE: Action type definitions and action creators for grid state management.
 // CONTEXT: This module defines all possible actions that can modify the grid state.
 // Actions are dispatched to the gridReducer to update selection, viewport, editing state, etc.
+// UPDATED: Added SET_FREEZE_CONFIG action for freeze panes support
 
-import type { Viewport, EditingCell, GridConfig, ViewportDimensions, VirtualBounds, FormulaReference, SelectionType, Selection, ClipboardMode } from "../types";
+import type { Viewport, EditingCell, GridConfig, ViewportDimensions, VirtualBounds, FormulaReference, SelectionType, Selection, ClipboardMode, FreezeConfig } from "../types";
 
 // Action type constants
 export const GRID_ACTIONS = {
@@ -40,6 +41,7 @@ export const GRID_ACTIONS = {
   FIND_OPEN: "FIND_OPEN",
   FIND_CLOSE: "FIND_CLOSE",
   FIND_SET_OPTIONS: "FIND_SET_OPTIONS",
+  SET_FREEZE_CONFIG: "SET_FREEZE_CONFIG",
 } as const;
 
 // Action interfaces
@@ -222,6 +224,12 @@ export interface FindSetOptionsAction {
   };
 }
 
+// Freeze panes action interface
+export interface SetFreezeConfigAction {
+  type: typeof GRID_ACTIONS.SET_FREEZE_CONFIG;
+  payload: FreezeConfig;
+}
+
 // Union type of all actions
 export type GridAction =
   | SetSelectionAction
@@ -256,7 +264,8 @@ export type GridAction =
   | FindClearAction
   | FindOpenAction
   | FindCloseAction
-  | FindSetOptionsAction;
+  | FindSetOptionsAction
+  | SetFreezeConfigAction;
 
 // Action creators
 
@@ -615,5 +624,17 @@ export function setFindOptions(options: {
   return {
     type: GRID_ACTIONS.FIND_SET_OPTIONS,
     payload: options,
+  };
+}
+
+/**
+ * Set freeze panes configuration.
+ * @param freezeRow - First scrollable row (null to unfreeze rows)
+ * @param freezeCol - First scrollable column (null to unfreeze columns)
+ */
+export function setFreezeConfig(freezeRow: number | null, freezeCol: number | null): SetFreezeConfigAction {
+  return {
+    type: GRID_ACTIONS.SET_FREEZE_CONFIG,
+    payload: { freezeRow, freezeCol },
   };
 }

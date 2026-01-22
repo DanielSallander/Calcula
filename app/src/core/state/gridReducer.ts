@@ -5,8 +5,9 @@
 // The reducer ensures immutable state updates and enforces grid boundaries.
 // FIX: Skip scroll-to-visible for column/row selections to match Excel behavior.
 
-import type { GridState, Selection, ClipboardMode, GridConfig } from "../types";
-import { createInitialGridState, DEFAULT_VIRTUAL_BOUNDS, DEFAULT_VIRTUAL_BOUNDS_CONFIG, DEFAULT_FIND_STATE } from "../types";
+
+import type { GridState, Selection, ClipboardMode, GridConfig, FreezeConfig } from "../types";
+import { createInitialGridState, DEFAULT_VIRTUAL_BOUNDS, DEFAULT_VIRTUAL_BOUNDS_CONFIG, DEFAULT_FIND_STATE, DEFAULT_FREEZE_CONFIG } from "../types";
 import type { GridAction } from "./gridActions";
 import { GRID_ACTIONS } from "./gridActions";
 import { 
@@ -1044,6 +1045,13 @@ export function gridReducer(state: GridState, action: GridAction): GridState {
           ...state.find,
           ...action.payload,
         },
+      };
+    }
+
+    case GRID_ACTIONS.SET_FREEZE_CONFIG: {
+      return {
+        ...state,
+        freezeConfig: action.payload,
       };
     }
 

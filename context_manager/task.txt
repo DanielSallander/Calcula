@@ -1,2 +1,19 @@
-We have two instances of the formula bar (see the attached image where I have marked with a red rectangle).
-We need to remove the bottom one.
+### Implement "Freeze Panes" (Sticky Headers)
+
+**Context:** currently, the `viewport.ts` calculates a single visible range based on scroll position. To support sticky headers (Top Row / First Column), the rendering engine must handle split viewports.
+
+**Requirements:**
+1.  **Viewport Splitting:** The Canvas renderer (`GridCanvas.tsx`) needs to render up to four distinct zones if both rows and columns are frozen:
+    * Top-Left (Static)
+    * Top-Right (Scrolls Horizontally only)
+    * Bottom-Left (Scrolls Vertically only)
+    * Bottom-Right (Fully Scrollable)
+2.  **Coordinate Translation:** The `getCellFromPixel` logic in `hitTesting.ts` must account for the offset of frozen rows/cols so that clicking a frozen header doesn't register as clicking a scrolled cell underneath it.
+
+
+## Current status
+We have the freeze panes commands in place and they are selectable from the "View" menu.
+When applying the freezing pane commands the cells looks weird, like they are slightly offseted.
+Take a look at the attached images to compare. One image shows when freezing panes are not applied and the other shows when it is applied.
+Also, when scrolling down it looks like, on the row numbers in the margin are increasing even for the frozen row.
+However, the first row does indeed looks frozen.

@@ -506,3 +506,30 @@ export async function replaceSingle(
     caseSensitive,
   });
 }
+
+
+// ============================================================================
+// FREEZE PANES API
+// ============================================================================
+
+export interface FreezeConfig {
+  freezeRow: number | null;
+  freezeCol: number | null;
+}
+
+export async function setFreezePanes(
+  freezeRow: number | null,
+  freezeCol: number | null
+): Promise<SheetsResult> {
+  console.log('[tauri-api] setFreezePanes called with:', { freezeRow, freezeCol });
+  const result = await invoke<SheetsResult>("set_freeze_panes", { freezeRow, freezeCol });
+  console.log('[tauri-api] setFreezePanes result:', result);
+  return result;
+}
+
+export async function getFreezePanes(): Promise<FreezeConfig> {
+  console.log('[tauri-api] getFreezePanes called');
+  const result = await invoke<FreezeConfig>("get_freeze_panes", {});
+  console.log('[tauri-api] getFreezePanes result:', result);
+  return result;
+}
