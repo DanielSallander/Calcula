@@ -1,9 +1,9 @@
 // FILENAME: core/components/ContextMenu/ContextMenu.tsx
 // PURPOSE: Reusable context menu component for grid and other areas
 // CONTEXT: Used by Spreadsheet to show context menu on right-click.
-//          Designed to be extensible and follow the same visual style as SheetTabs context menu.
 
 import React, { useEffect, useRef, useCallback } from "react";
+import * as S from "./ContextMenu.styles";
 
 export interface ContextMenuPosition {
   x: number;
@@ -104,90 +104,30 @@ export function ContextMenu({
   }
 
   return (
-    <div
+    <S.MenuContainer
       ref={menuRef}
+      role="menu"
+      aria-label="Context menu"
       style={{
-        ...styles.menu,
         left: position.x,
         top: position.y,
       }}
-      role="menu"
-      aria-label="Context menu"
     >
       {items.map((item) => (
         <React.Fragment key={item.id}>
-          <button
+          <S.MenuItem
             type="button"
             role="menuitem"
-            style={{
-              ...styles.menuItem,
-              ...(item.disabled ? styles.menuItemDisabled : {}),
-            }}
             onClick={() => handleItemClick(item)}
             disabled={item.disabled}
           >
-            {item.icon && <span style={styles.menuItemIcon}>{item.icon}</span>}
-            <span style={styles.menuItemLabel}>{item.label}</span>
-            {item.shortcut && (
-              <span style={styles.menuItemShortcut}>{item.shortcut}</span>
-            )}
-          </button>
-          {item.separatorAfter && <div style={styles.separator} />}
+            {item.icon && <S.IconWrapper>{item.icon}</S.IconWrapper>}
+            <S.Label>{item.label}</S.Label>
+            {item.shortcut && <S.Shortcut>{item.shortcut}</S.Shortcut>}
+          </S.MenuItem>
+          {item.separatorAfter && <S.Separator />}
         </React.Fragment>
       ))}
-    </div>
+    </S.MenuContainer>
   );
 }
-
-const styles: Record<string, React.CSSProperties> = {
-  menu: {
-    position: "fixed",
-    backgroundColor: "#ffffff",
-    border: "1px solid #c0c0c0",
-    borderRadius: "4px",
-    boxShadow: "0 2px 10px rgba(0, 0, 0, 0.15)",
-    padding: "4px 0",
-    minWidth: "180px",
-    maxWidth: "280px",
-    zIndex: 10000,
-  },
-  menuItem: {
-    display: "flex",
-    alignItems: "center",
-    width: "100%",
-    padding: "6px 12px",
-    border: "none",
-    backgroundColor: "transparent",
-    cursor: "pointer",
-    fontSize: "12px",
-    color: "#333",
-    textAlign: "left",
-    gap: "8px",
-  },
-  menuItemDisabled: {
-    color: "#999",
-    cursor: "default",
-  },
-  menuItemIcon: {
-    width: "16px",
-    height: "16px",
-    display: "flex",
-    alignItems: "center",
-    justifyContent: "center",
-    flexShrink: 0,
-  },
-  menuItemLabel: {
-    flex: 1,
-  },
-  menuItemShortcut: {
-    color: "#888",
-    fontSize: "11px",
-    marginLeft: "auto",
-    paddingLeft: "16px",
-  },
-  separator: {
-    height: "1px",
-    backgroundColor: "#e0e0e0",
-    margin: "4px 0",
-  },
-};
