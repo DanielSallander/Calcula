@@ -7,11 +7,14 @@
 // - Getting selection reference in A1 notation
 // - Selecting entire columns or rows
 // UPDATED: Added merge-aware selection expansion
+// FIX: extendToWithMergeExpansion now uses getMergedRegions for proper intersection checking
+// FIX: selectCell now accepts optional endRow/endCol for merged cell clicks
+// FIX: Both start and end coordinates now expand based on merged region bounds
 
 import { useCallback } from "react";
 import { useGridContext } from "../state/GridContext";
 import { setSelection, extendSelection, moveSelection } from "../state/gridActions";
-import { indexToCol, getMergeInfo } from "../lib/tauri-api";
+import { indexToCol, getMergeInfo, getMergedRegions } from "../lib/tauri-api";
 import type { Selection, SelectionType } from "../types";
 import { stateLog } from '../../utils/component-logger';
 
@@ -21,10 +24,12 @@ import { stateLog } from '../../utils/component-logger';
 export interface UseSelectionReturn {
   /** Current selection or null */
   selection: Selection | null;
-  /** Select a single cell (or start of range) */
-  selectCell: (row: number, col: number, type?: SelectionType) => void;
+  /** Select a single cell (or range if endRow/endCol provided) */
+  selectCell: (row: number, col: number, type?: SelectionType, endRow?: number, endCol?: number) => void;
   /** Extend selection to include the given cell */
   extendTo: (row: number, col: number) => void;
+  /** Extend selection with merge expansion - expands to include entire merged regions */
+  extendToWithMergeExpansion: (row: number, col: number) => Promise<void>;
   /** Move the active cell by delta (used after Tab/Enter) */
   moveActiveCell: (deltaRow: number, deltaCol: number) => void;
   /** Get selection reference in A1 notation */
@@ -52,16 +57,18 @@ export function useSelection(): UseSelectionReturn {
 
   /**
    * Select a single cell (collapses any existing range).
+   * FIX: Now accepts optional endRow/endCol for selecting a range in one dispatch.
+   * This is used when clicking on merged cells to avoid stale state issues.
    */
   const selectCell = useCallback(
-    (row: number, col: number, type: SelectionType = "cells") => {
-      stateLog.action('Selection', 'selectCell', `row=${row} col=${col} type=${type}`);
+    (row: number, col: number, type: SelectionType = "cells", endRow?: number, endCol?: number) => {
+      stateLog.action('Selection', 'selectCell', `row=${row} col=${col} type=${type} endRow=${endRow} endCol=${endCol}`);
       dispatch(
         setSelection({
           startRow: row,
           startCol: col,
-          endRow: row,
-          endCol: col,
+          endRow: endRow ?? row,
+          endCol: endCol ?? col,
           type,
         })
       );
@@ -131,6 +138,127 @@ export function useSelection(): UseSelectionReturn {
       dispatch(extendSelection(row, col));
     },
     [dispatch]
+  );
+
+  /**
+   * Extend selection with merge expansion.
+   * When extending, checks ALL merged regions to see if they INTERSECT with the
+   * selection bounds, and expands to include any intersecting regions.
+   * FIX: Both start AND end coordinates are updated based on expanded bounds.
+   * This handles cases where a merge expands the bounds on the anchor side.
+   */
+  const extendToWithMergeExpansion = useCallback(
+    async (row: number, col: number) => {
+      if (!selection) {
+        // No existing selection, just select the cell with merge expansion
+        await selectCellWithMergeExpansion(row, col);
+        return;
+      }
+
+      stateLog.action('Selection', 'extendToWithMergeExpansion', `row=${row} col=${col}`);
+
+      try {
+        // Get ALL merged regions - this allows us to check for intersection
+        const mergedRegions = await getMergedRegions();
+        
+        // Calculate initial bounds from selection anchor and target
+        let minRow = Math.min(selection.startRow, row);
+        let maxRow = Math.max(selection.startRow, row);
+        let minCol = Math.min(selection.startCol, col);
+        let maxCol = Math.max(selection.startCol, col);
+        
+        // Expand bounds to include any intersecting merged regions
+        // Loop until no more expansion occurs (handles adjacent/nested merges)
+        let expanded = true;
+        let iterations = 0;
+        const maxIterations = 100; // Safety limit
+        
+        while (expanded && iterations < maxIterations) {
+          expanded = false;
+          iterations++;
+          
+          for (const region of mergedRegions) {
+            // Check if this region INTERSECTS with current bounds
+            // Two rectangles intersect if they overlap in both dimensions
+            const intersects = !(
+              region.endRow < minRow ||    // region is above
+              region.startRow > maxRow ||  // region is below
+              region.endCol < minCol ||    // region is to the left
+              region.startCol > maxCol     // region is to the right
+            );
+            
+            if (intersects) {
+              // Expand bounds to fully include this region
+              if (region.startRow < minRow) {
+                minRow = region.startRow;
+                expanded = true;
+              }
+              if (region.endRow > maxRow) {
+                maxRow = region.endRow;
+                expanded = true;
+              }
+              if (region.startCol < minCol) {
+                minCol = region.startCol;
+                expanded = true;
+              }
+              if (region.endCol > maxCol) {
+                maxCol = region.endCol;
+                expanded = true;
+              }
+            }
+          }
+        }
+        
+        // FIX: Determine BOTH start and end coordinates based on drag direction
+        // and expanded bounds. The selection must cover the full expanded rectangle.
+        // - When dragging down/right: start at min, end at max
+        // - When dragging up/left: start at max, end at min
+        // This ensures the visual selection covers all expanded bounds.
+        
+        let newStartRow: number;
+        let newStartCol: number;
+        let newEndRow: number;
+        let newEndCol: number;
+        
+        // Row direction
+        if (row >= selection.startRow) {
+          // Dragging down or same row: anchor at top, active at bottom
+          newStartRow = minRow;
+          newEndRow = maxRow;
+        } else {
+          // Dragging up: anchor at bottom, active at top
+          newStartRow = maxRow;
+          newEndRow = minRow;
+        }
+        
+        // Column direction
+        if (col >= selection.startCol) {
+          // Dragging right or same column: anchor at left, active at right
+          newStartCol = minCol;
+          newEndCol = maxCol;
+        } else {
+          // Dragging left: anchor at right, active at left
+          newStartCol = maxCol;
+          newEndCol = minCol;
+        }
+        
+        // Dispatch the expanded selection
+        dispatch(
+          setSelection({
+            startRow: newStartRow,
+            startCol: newStartCol,
+            endRow: newEndRow,
+            endCol: newEndCol,
+            type: selection.type,
+          })
+        );
+      } catch (error) {
+        console.error('[useSelection] Failed to extend with merge expansion:', error);
+        // Fallback to simple extend
+        dispatch(extendSelection(row, col));
+      }
+    },
+    [selection, dispatch, selectCellWithMergeExpansion]
   );
 
   /**
@@ -303,6 +431,7 @@ export function useSelection(): UseSelectionReturn {
     selectCell,
     selectCellWithMergeExpansion,
     extendTo,
+    extendToWithMergeExpansion,
     moveActiveCell,
     getSelectionReference,
     isCellSelected,

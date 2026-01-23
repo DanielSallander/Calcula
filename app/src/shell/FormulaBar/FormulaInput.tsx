@@ -1,11 +1,12 @@
 // FILENAME: shell/FormulaBar/FormulaInput.tsx
 // PURPOSE: Formula input field that syncs with cell editing state
 // CONTEXT: Part of FormulaBar, displays and edits the current cell formula/value
+// FIX: Now fetches content from master cell for merged regions
 
 import React, { useCallback, useRef, useEffect } from "react";
 import { useGridContext } from "../../core/state/GridContext";
 import { useEditing, setGlobalIsEditing } from "../../core/hooks/useEditing";
-import { getCell } from "../../core/lib/tauri-api";
+import { getCell, getMergeInfo } from "../../core/lib/tauri-api";
 
 export function FormulaInput(): React.ReactElement {
   const { state } = useGridContext();
@@ -24,18 +25,54 @@ export function FormulaInput(): React.ReactElement {
   }, [editing]);
 
   // Fetch cell content when selection changes and not editing
+  // FIX: For merged cells, fetch from the master cell (top-left of merge)
   useEffect(() => {
     if (!editing && state.selection) {
-      const { endRow, endCol } = state.selection;
-      getCell(endRow, endCol).then((cell) => {
-        if (cell) {
-          setDisplayValue(cell.formula || cell.display || "");
-        } else {
+      const { startRow, startCol, endRow, endCol } = state.selection;
+      
+      // FIX: Determine which cell to fetch content from
+      // For merged regions, we need the master cell (top-left)
+      // The selection's startRow/startCol should be the master cell,
+      // but we verify with getMergeInfo to be safe
+      const fetchCellContent = async () => {
+        try {
+          // Check if this selection covers a merged region
+          // Use startRow/startCol as that's typically the master cell
+          const mergeInfo = await getMergeInfo(startRow, startCol);
+          
+          let cellRow = startRow;
+          let cellCol = startCol;
+          
+          if (mergeInfo) {
+            // Use the master cell from merge info
+            cellRow = mergeInfo.startRow;
+            cellCol = mergeInfo.startCol;
+          } else {
+            // For non-merged selections, use the active cell (endRow, endCol)
+            // But first check if the active cell is part of a different merge
+            const activeMerge = await getMergeInfo(endRow, endCol);
+            if (activeMerge) {
+              cellRow = activeMerge.startRow;
+              cellCol = activeMerge.startCol;
+            } else {
+              cellRow = endRow;
+              cellCol = endCol;
+            }
+          }
+          
+          const cell = await getCell(cellRow, cellCol);
+          if (cell) {
+            setDisplayValue(cell.formula || cell.display || "");
+          } else {
+            setDisplayValue("");
+          }
+        } catch (error) {
+          console.error("[FormulaInput] Failed to fetch cell content:", error);
           setDisplayValue("");
         }
-      }).catch(() => {
-        setDisplayValue("");
-      });
+      };
+      
+      fetchCellContent();
     }
   }, [editing, state.selection]);
 
@@ -97,6 +134,7 @@ export function FormulaInput(): React.ReactElement {
       onBlur={handleBlur}
       onKeyDown={handleKeyDown}
       onMouseDown={handleMouseDown}
+      data-formula-bar="true"
       placeholder=""
       style={{
         flex: 1,

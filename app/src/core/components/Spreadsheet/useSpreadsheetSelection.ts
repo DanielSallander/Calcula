@@ -6,6 +6,7 @@
 // FIX: Added onDelete handler to useGridKeyboard to clear selection on DELETE key.
 // FIX: Added undo/redo handlers for Ctrl+Z and Ctrl+Y keyboard shortcuts.
 // FIX: handleDoubleClickEvent now calls startEdit directly to avoid stale state issues.
+// FIX: Now uses extendToWithMergeExpansion for drag selection to expand merged cells.
 
 import { useState, useCallback, useEffect, useRef } from "react";
 import { 
@@ -64,7 +65,8 @@ export function useSpreadsheetSelection({
   const { 
     selectCell, 
     selectCellWithMergeExpansion,
-    extendTo, 
+    extendTo,
+    extendToWithMergeExpansion,  // FIX: Added for merge-aware drag selection
     moveActiveCell, 
     getSelectionReference, 
     selectColumn, 
@@ -307,6 +309,17 @@ export function useSpreadsheetSelection({
     }
   }, [canvasRef]);
 
+  // FIX: Wrapper for extendTo that uses merge expansion during drag
+  // This is passed to useMouseSelection for drag operations
+  const handleExtendTo = useCallback(
+    (row: number, col: number) => {
+      // Use merge-aware extension for drag selection
+      // The async nature is fine - selection will update when promise resolves
+      extendToWithMergeExpansion(row, col);
+    },
+    [extendToWithMergeExpansion]
+  );
+
   const {
     isDragging,
     isFormulaDragging,
@@ -325,7 +338,7 @@ export function useSpreadsheetSelection({
     dimensions,
     isFormulaMode,
     onSelectCell: selectCell,
-    onExtendTo: extendTo,
+    onExtendTo: handleExtendTo,  // FIX: Use merge-aware extension for drag selection
     onScroll: handleScrollUpdate,
     onDragEnd: handleDragEnd,
     onInsertReference: insertReference,

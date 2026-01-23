@@ -3,7 +3,7 @@
 // CONTEXT: Creates handlers for mouse down on cells, supporting single
 // click selection and shift-click to extend selection ranges.
 // FIX: Right-click within selection now preserves the selection.
-// FIX: Clicking on merged cells now expands selection to cover entire merge.
+// FIX: Clicking on merged cells now uses single dispatch to avoid stale state.
 
 import type { GridConfig, Viewport, Selection, DimensionOverrides } from "../../../types";
 import type { CellPosition, MousePosition, HeaderDragState } from "../types";
@@ -15,7 +15,8 @@ interface CellSelectionDependencies {
   viewport: Viewport;
   dimensions?: DimensionOverrides;
   selection: Selection | null;
-  onSelectCell: (row: number, col: number) => void;
+  /** FIX: Updated signature to accept optional endRow/endCol for merged cells */
+  onSelectCell: (row: number, col: number, type?: string, endRow?: number, endCol?: number) => void;
   onExtendTo: (row: number, col: number) => void;
   onCommitBeforeSelect?: () => Promise<void>;
   setIsDragging: (value: boolean) => void;
@@ -111,6 +112,7 @@ export function createCellSelectionHandlers(deps: CellSelectionDependencies): Ce
     let effectiveStartCol = col;
     let effectiveEndRow = row;
     let effectiveEndCol = col;
+    let isMergedCell = false;
     
     try {
       const mergeInfo = await getMergeInfo(row, col);
@@ -120,6 +122,7 @@ export function createCellSelectionHandlers(deps: CellSelectionDependencies): Ce
         effectiveStartCol = mergeInfo.startCol;
         effectiveEndRow = mergeInfo.endRow;
         effectiveEndCol = mergeInfo.endCol;
+        isMergedCell = true;
       }
     } catch (error) {
       console.error('[cellSelectionHandlers] Failed to get merge info:', error);
@@ -132,11 +135,10 @@ export function createCellSelectionHandlers(deps: CellSelectionDependencies): Ce
       onExtendTo(effectiveEndRow, effectiveEndCol);
     } else {
       // Regular click (or right-click outside selection) starts new selection
-      // For merged cells, select the entire merged region
-      if (effectiveStartRow !== effectiveEndRow || effectiveStartCol !== effectiveEndCol) {
-        // It's a merged region - select from start to end
-        onSelectCell(effectiveStartRow, effectiveStartCol);
-        onExtendTo(effectiveEndRow, effectiveEndCol);
+      if (isMergedCell) {
+        // FIX: For merged cells, use single dispatch with all coordinates
+        // This avoids stale state issues from calling selectCell then extendTo
+        onSelectCell(effectiveStartRow, effectiveStartCol, "cells", effectiveEndRow, effectiveEndCol);
       } else {
         // Single cell selection
         onSelectCell(row, col);
