@@ -8,6 +8,7 @@
 // Updated: Added deletion animation support (animateRowDeletion, animateColumnDeletion)
 // Updated: Added freeze panes support
 // Updated: Added grid:refresh event listener for merge cells support
+// Refactored: Moved styles to GridCanvas.styles.ts
 
 import React, { useRef, useEffect, useCallback, useImperativeHandle, forwardRef, useState } from "react";
 import { renderGrid, DEFAULT_THEME, calculateVisibleRange } from "../../lib/gridRenderer";
@@ -15,6 +16,7 @@ import { getViewportCells } from "../../lib/tauri-api";
 import type { GridConfig, Viewport, Selection, EditingCell, CellDataMap, FormulaReference, DimensionOverrides, StyleDataMap, ClipboardMode, InsertionAnimation, FreezeConfig } from "../../types";
 import { cellKey, createEmptyDimensionOverrides, DEFAULT_FREEZE_CONFIG } from "../../types";
 import type { GridTheme } from "../../lib/gridRenderer";
+import * as S from "./GridCanvas.styles";
 
 /**
  * Props for the GridCanvas component.
@@ -67,8 +69,7 @@ export interface GridCanvasHandle {
   getContext: () => CanvasRenderingContext2D | null;
   /** Refresh cell data from backend - returns Promise for sequencing */
   refreshCells: () => Promise<void>;
-  /** 
-   * Animate row insertion with smooth "flow" effect.
+  /** * Animate row insertion with smooth "flow" effect.
    * Call AFTER backend operation and refreshCells() complete.
    * @param index - Row index where insertion starts (0-based)
    * @param count - Number of rows being inserted
@@ -376,7 +377,10 @@ export const GridCanvas = forwardRef<GridCanvasHandle, GridCanvasProps>(
      */
     const clear = useCallback(() => {
       if (context && canvasSize.width > 0 && canvasSize.height > 0) {
-        context.fillStyle = "#ffffff";
+        // Use theme background if available, otherwise default to white.
+        // Note: Canvas API requires explicit color strings, we are not using CSS vars here for performance/logic reasons.
+        // Ideally this should map to theme.backgroundColor.
+        context.fillStyle = "#ffffff"; 
         context.fillRect(0, 0, canvasSize.width, canvasSize.height);
       }
     }, [context, canvasSize.width, canvasSize.height]);
@@ -690,45 +694,19 @@ export const GridCanvas = forwardRef<GridCanvasHandle, GridCanvasProps>(
     );
 
     return (
-      <div
+      <S.GridContainer
         ref={containerRef}
         className={className}
-        style={containerStyles}
       >
-        <canvas
+        <S.StyledCanvas
           ref={canvasRef}
-          style={canvasStyles}
           onMouseDown={onMouseDown}
           onMouseMove={onMouseMove}
           onMouseUp={onMouseUp}
         />
-      </div>
+      </S.GridContainer>
     );
   }
 );
-
-/**
- * Styles for the canvas container.
- * Positioned to fill parent but below scroll layer (z-index: 0).
- */
-const containerStyles: React.CSSProperties = {
-  position: "absolute",
-  top: 0,
-  left: 0,
-  right: 0,
-  bottom: 0,
-  overflow: "hidden",
-  zIndex: 0,
-};
-
-/**
- * Styles for the canvas element.
- */
-const canvasStyles: React.CSSProperties = {
-  display: "block",
-  position: "absolute",
-  top: 0,
-  left: 0,
-};
 
 export default GridCanvas;

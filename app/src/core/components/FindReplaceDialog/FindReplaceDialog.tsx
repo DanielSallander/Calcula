@@ -15,6 +15,7 @@ import {
 import { findAll, replaceAll, replaceSingle } from '../../lib/tauri-api';
 import { cellEvents } from '../../lib/cellEvents';
 import { columnToLetter } from '../../types/types';
+import * as S from './FindReplaceDialog.styles';
 
 export function FindReplaceDialog(): React.ReactElement | null {
   const { state, dispatch } = useGridContext();
@@ -267,107 +268,99 @@ export function FindReplaceDialog(): React.ReactElement | null {
     : '';
   
   return (
-    <div
+    <S.Overlay
       ref={dialogRef}
-      style={styles.overlay}
       onKeyDown={handleKeyDown}
     >
-      <div style={styles.dialog}>
+      <S.DialogContainer>
         {/* Header */}
-        <div style={styles.header}>
-          <span style={styles.title}>
+        <S.Header>
+          <S.Title>
             {find.showReplace ? 'Find and Replace' : 'Find'}
-          </span>
-          <button 
-            style={styles.closeButton}
+          </S.Title>
+          <S.CloseButton 
             onClick={handleClose}
             title="Close (Esc)"
           >
             X
-          </button>
-        </div>
+          </S.CloseButton>
+        </S.Header>
         
         {/* Search row */}
-        <div style={styles.row}>
-          <label style={styles.label}>Find:</label>
-          <input
+        <S.Row>
+          <S.Label>Find:</S.Label>
+          <S.Input
             ref={searchInputRef}
             type="text"
             value={searchValue}
             onChange={(e) => setSearchValue(e.target.value)}
-            style={styles.input}
             placeholder="Search..."
           />
-          <button 
-            style={styles.button}
+          <S.ActionButton 
             onClick={handleFindPrevious}
             disabled={find.matches.length === 0}
             title="Find Previous (Shift+Enter)"
           >
             {'<'}
-          </button>
-          <button 
-            style={styles.button}
+          </S.ActionButton>
+          <S.ActionButton 
             onClick={handleFindNext}
             disabled={find.matches.length === 0}
             title="Find Next (Enter)"
           >
             {'>'}
-          </button>
-        </div>
+          </S.ActionButton>
+        </S.Row>
         
         {/* Replace row (if enabled) */}
         {find.showReplace && (
-          <div style={styles.row}>
-            <label style={styles.label}>Replace:</label>
-            <input
+          <S.Row>
+            <S.Label>Replace:</S.Label>
+            <S.Input
               type="text"
               value={replaceValue}
               onChange={(e) => setReplaceValue(e.target.value)}
-              style={styles.input}
               placeholder="Replace with..."
             />
-            <button 
-              style={styles.button}
+            <S.ActionButton 
               onClick={handleReplace}
               disabled={find.matches.length === 0}
               title="Replace current match"
             >
               Replace
-            </button>
-            <button 
-              style={styles.button}
+            </S.ActionButton>
+            <S.ActionButton 
               onClick={handleReplaceAll}
               disabled={find.matches.length === 0}
               title="Replace all matches"
             >
               All
-            </button>
-          </div>
+            </S.ActionButton>
+          </S.Row>
         )}
         
         {/* Options row */}
-        <div style={styles.optionsRow}>
-          <label style={styles.checkboxLabel}>
+        <S.OptionsRow>
+          <S.CheckboxLabel>
             <input
               type="checkbox"
               checked={find.caseSensitive}
               onChange={toggleCaseSensitive}
             />
             Match case
-          </label>
-          <label style={styles.checkboxLabel}>
+          </S.CheckboxLabel>
+          <S.CheckboxLabel>
             <input
               type="checkbox"
               checked={find.matchEntireCell}
               onChange={toggleMatchEntireCell}
             />
             Match entire cell
-          </label>
-        </div>
+          </S.CheckboxLabel>
+        </S.OptionsRow>
         
         {/* Status row */}
-        <div style={styles.statusRow}>
+        <S.StatusRow>
           {isSearching ? (
             <span>Searching...</span>
           ) : find.matches.length > 0 ? (
@@ -380,103 +373,10 @@ export function FindReplaceDialog(): React.ReactElement | null {
           ) : (
             <span>Enter search text</span>
           )}
-        </div>
-      </div>
-    </div>
+        </S.StatusRow>
+      </S.DialogContainer>
+    </S.Overlay>
   );
 }
-
-const styles: Record<string, React.CSSProperties> = {
-  overlay: {
-    position: 'fixed',
-    top: 60,
-    right: 20,
-    zIndex: 1001,
-  },
-  dialog: {
-    backgroundColor: '#252526',
-    border: '1px solid #454545',
-    borderRadius: '6px',
-    padding: '12px',
-    minWidth: '400px',
-    boxShadow: '0 8px 24px rgba(0, 0, 0, 0.4)',
-    color: '#cccccc',
-    fontFamily: 'Segoe UI, system-ui, sans-serif',
-    fontSize: '13px',
-  },
-  header: {
-    display: 'flex',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    marginBottom: '12px',
-    paddingBottom: '8px',
-    borderBottom: '1px solid #454545',
-  },
-  title: {
-    fontWeight: 600,
-    fontSize: '14px',
-  },
-  closeButton: {
-    backgroundColor: 'transparent',
-    border: 'none',
-    color: '#cccccc',
-    cursor: 'pointer',
-    padding: '4px 8px',
-    borderRadius: '4px',
-    fontSize: '12px',
-  },
-  row: {
-    display: 'flex',
-    alignItems: 'center',
-    gap: '8px',
-    marginBottom: '8px',
-  },
-  label: {
-    width: '60px',
-    textAlign: 'right',
-  },
-  input: {
-    flex: 1,
-    padding: '6px 8px',
-    backgroundColor: '#3c3c3c',
-    border: '1px solid #555555',
-    borderRadius: '4px',
-    color: '#ffffff',
-    fontSize: '13px',
-    outline: 'none',
-  },
-  button: {
-    padding: '6px 12px',
-    backgroundColor: '#0e639c',
-    border: 'none',
-    borderRadius: '4px',
-    color: '#ffffff',
-    cursor: 'pointer',
-    fontSize: '12px',
-    minWidth: '50px',
-  },
-  optionsRow: {
-    display: 'flex',
-    gap: '16px',
-    marginTop: '8px',
-    marginBottom: '8px',
-    paddingLeft: '68px',
-  },
-  checkboxLabel: {
-    display: 'flex',
-    alignItems: 'center',
-    gap: '4px',
-    cursor: 'pointer',
-    fontSize: '12px',
-  },
-  statusRow: {
-    marginTop: '8px',
-    paddingTop: '8px',
-    borderTop: '1px solid #454545',
-    fontSize: '12px',
-    color: '#888888',
-    textAlign: 'center',
-  },
-};
 
 export default FindReplaceDialog;

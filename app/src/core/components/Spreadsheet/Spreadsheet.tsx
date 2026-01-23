@@ -1,12 +1,11 @@
 // FILENAME: app/src/core/components/Spreadsheet/Spreadsheet.tsx
 // PURPOSE: Main spreadsheet component combining grid, editor, and scrollbars
 // CONTEXT: Core component that orchestrates the spreadsheet experience
-// FIX: Removed duplicate formula bar - now handled by shell/FormulaBar component
-// FIX: Added freezeConfig prop to GridCanvas
+// REFACTOR: Styling moved to Spreadsheet.styles.ts
 
-import React, { useCallback, useEffect, useState, useRef } from "react";
+import React, { useCallback, useEffect, useState } from "react";
 import { useGridState, useGridContext } from "../../state";
-import { setViewportDimensions, setSelection, scrollToCell, openFind } from "../../state/gridActions";
+import { setViewportDimensions, openFind } from "../../state/gridActions";
 import { GridCanvas } from "../Grid";
 import { InlineEditor } from "../InlineEditor";
 import { Scrollbar, ScrollbarCorner } from "../Scrollbar/Scrollbar";
@@ -27,6 +26,9 @@ import { getCellFromPixel } from "../../lib/gridRenderer";
 import type { SpreadsheetContentProps } from "./SpreadsheetTypes";
 import { FindReplaceDialog } from "../FindReplaceDialog";
 import { MenuEvents } from "../../../shell/MenuBar";
+
+// Styles
+import * as S from "./Spreadsheet.styles";
 
 const SCROLLBAR_SIZE = 14;
 
@@ -489,28 +491,15 @@ function SpreadsheetContent({ className }: SpreadsheetContentProps): React.React
   const viewportHeight = gridState.viewportDimensions.height - config.colHeaderHeight - SCROLLBAR_SIZE;
 
   return (
-    <div
+    <S.SpreadsheetContainer
       ref={focusContainerRef}
       className={className}
-      style={{
-        display: "flex",
-        flexDirection: "column",
-        height: "100%",
-        width: "100%",
-        overflow: "hidden",
-        outline: "none",
-      }}
       tabIndex={0}
       onKeyDown={handleContainerKeyDown}
     >
       {/* Grid Area with Scrollbars */}
-      <div
+      <S.GridArea
         ref={containerRef}
-        style={{ 
-          flex: 1, 
-          position: "relative", 
-          overflow: "hidden",
-        }}
         onMouseDown={handleMouseDown}
         onMouseMove={handleMouseMove}
         onMouseUp={handleMouseUp}
@@ -519,16 +508,7 @@ function SpreadsheetContent({ className }: SpreadsheetContentProps): React.React
         onContextMenu={handleContextMenu}
       >
         {/* Grid Canvas */}
-        <div
-          style={{
-            position: "absolute",
-            top: 0,
-            left: 0,
-            right: SCROLLBAR_SIZE,
-            bottom: SCROLLBAR_SIZE,
-            overflow: "hidden",
-          }}
-        >
+        <S.CanvasLayer $scrollbarSize={SCROLLBAR_SIZE}>
           <GridCanvas
             ref={canvasRef}
             config={config}
@@ -558,7 +538,7 @@ function SpreadsheetContent({ className }: SpreadsheetContentProps): React.React
               onRestoreFocus={() => focusContainerRef.current?.focus()}
             />
           )}
-        </div>
+        </S.CanvasLayer>
 
         {/* Vertical Scrollbar */}
         {scrollbarMetrics.showVertical && (
@@ -586,7 +566,7 @@ function SpreadsheetContent({ className }: SpreadsheetContentProps): React.React
 
         {/* Corner piece */}
         <ScrollbarCorner size={SCROLLBAR_SIZE} />
-      </div>
+      </S.GridArea>
 
       {/* Context Menu */}
       {contextMenu && (
@@ -599,7 +579,7 @@ function SpreadsheetContent({ className }: SpreadsheetContentProps): React.React
 
       {/* Find/Replace Dialog */}
       <FindReplaceDialog />
-    </div>
+    </S.SpreadsheetContainer>
   );
 }
 

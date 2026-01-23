@@ -1,14 +1,12 @@
 // FILENAME: app/src/components/InlineEditor.tsx
 // PURPOSE: Inline cell editor component that renders directly over the cell being edited.
-// CONTEXT: Added check to prevent stealing focus if the Formula Bar is currently active.
-// FIX: In useEffect, check document.activeElement before calling focus().
-// FIX: Added isCancelingRef to prevent blur from committing after ESC is pressed.
-// FIX: Added support for merged cells - editor now spans the full merged region.
+// CONTEXT: Refactored to separate styles into .styles.ts file using styled-components.
 
 import React, { useRef, useEffect, useCallback, useState } from "react";
 import type { GridConfig, Viewport, EditingCell, DimensionOverrides } from "../../types";
 import { isFormulaExpectingReference, createEmptyDimensionOverrides } from "../../types";
 import { useGridContext } from "../../state/GridContext";
+import * as S from "./InlineEditor.styles";
 
 /**
  * Global flag to prevent blur from committing during sheet tab navigation.
@@ -123,7 +121,6 @@ function calculateRowY(
 
 /**
  * Calculate the total width for a cell spanning multiple columns.
- * FIX: Added for merged cell support.
  */
 function getMergedWidth(
   startCol: number,
@@ -140,7 +137,6 @@ function getMergedWidth(
 
 /**
  * Calculate the total height for a cell spanning multiple rows.
- * FIX: Added for merged cell support.
  */
 function getMergedHeight(
   startRow: number,
@@ -157,8 +153,6 @@ function getMergedHeight(
 
 /**
  * Calculate the position and visibility of the inline editor.
- * Phase 5.2: Uses proper dimension calculations for variable column/row sizes.
- * FIX: Now accounts for merged cell spans (rowSpan/colSpan).
  */
 function calculateEditorPosition(
   editing: EditingCell,
@@ -178,7 +172,7 @@ function calculateEditorPosition(
   // Calculate cell position using proper dimension-aware functions
   const cellX = calculateColumnX(col, config, dimensions, viewport.scrollX);
   const cellY = calculateRowY(row, config, dimensions, viewport.scrollY);
-  
+   
   // FIX: Calculate dimensions accounting for merged cell spans
   const cellWidth = colSpan > 1 
     ? getMergedWidth(col, colSpan, config, dimensions)
@@ -209,11 +203,6 @@ function calculateEditorPosition(
 
 /**
  * InlineEditor component - renders a text input directly over the cell being edited.
- * Phase 4.3: Added disabled prop, improved commit handling, and formula mode awareness.
- * Phase 5.2: Fixed positioning to use proper dimension calculations.
- * Updated: Added refocus support for cross-sheet formula editing.
- * FIX: Added isCancelingRef to prevent blur from committing after ESC.
- * FIX: Added support for merged cells - editor now spans the full merged region.
  */
 export function InlineEditor(props: InlineEditorProps): React.ReactElement | null {
   const {
@@ -234,7 +223,7 @@ export function InlineEditor(props: InlineEditorProps): React.ReactElement | nul
   const isCommittingRef = useRef(false);
   // FIX: Track when ESC is pressed to prevent blur from committing
   const isCancelingRef = useRef(false);
-  
+   
   // Get current sheet context to determine if we should render
   const { state: gridState } = useGridContext();
   const currentSheetIndex = gridState.sheetContext.activeSheetIndex;
@@ -438,31 +427,13 @@ export function InlineEditor(props: InlineEditorProps): React.ReactElement | nul
     return null;
   }
 
-  const inputStyles: React.CSSProperties = {
-    position: "absolute",
-    left: position.x,
-    top: position.y,
-    width: position.width,
-    height: position.height,
-    padding: "0 4px",
-    margin: 0,
-    border: "2px solid #1a5fb4",
-    borderRadius: 0,
-    outline: "none",
-    backgroundColor: disabled ? "#f5f5f5" : "#ffffff",
-    color: disabled ? "#999" : "#000000",
-    fontFamily: "system-ui, -apple-system, sans-serif",
-    fontSize: "13px",
-    lineHeight: `${position.height - 4}px`,
-    boxSizing: "border-box",
-    zIndex: 10,
-  };
-
   return (
-    <input
+    <S.EditorInput
       ref={inputRef}
-      type="text"
-      style={inputStyles}
+      $x={position.x}
+      $y={position.y}
+      $width={position.width}
+      $height={position.height}
       value={editing.value}
       onChange={handleChange}
       onKeyDown={handleKeyDown}
