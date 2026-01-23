@@ -13,8 +13,8 @@
 
 **Current Status:**
 We have working version, the commands appear in the "Edit" menu.
-When I apply "Merge Cells" it looks like the cell is merged, the edit works and I can navigate properly to and from the merged cell.
-These issues remain to be fixed:
-- If I edit a merged cell I dont see the content in the inline editor (formula bar), as in the attached image. However, the content appear in the inline editor as soon as i start to add content to the cell.
-- drag selecting onto a merged cell causes the only the part that is drag selected to be included, not the whole merged cell. It should expand the selection to include and detect the border of the whole merged cell.
-    This means that the expanded borders should also include adjacent cells that falls within these new border.
+Everything is almost done.
+We have these issues that remains to be fixed:
+- *Navigating through merged cells*. Lets say we have cells C3 and D3 merged and I have C2 currently selected. With the arrow keys I go down to the merged cell and then down one step more. It lands on D4. It should land on C4.
+    It lands correct if I go down from D2 -> D4.
+- *Interaction with frozen panes*. When having frozen panes active the merged cells is not properly showing in the grid. It is showing the merged cells as unmerged cells, not rendering them properly.

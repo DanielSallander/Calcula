@@ -2,6 +2,7 @@
 // PURPOSE: Main rendering orchestration function
 // CONTEXT: Coordinates all rendering phases for the grid
 // UPDATED: Fixed freeze pane cell text rendering with proper padding
+// UPDATED: Added merged cell support for freeze pane zone rendering
 
 import type {
   GridConfig,
@@ -34,6 +35,134 @@ import {
 } from "./layout/viewport";
 import { getColumnWidth, getRowHeight } from "./layout/dimensions";
 import { cellKey } from "../../../core/types";
+
+/**
+ * Check if a cell is a "slave" cell (part of a merge but not the master).
+ * Returns the master cell's key if it is, null otherwise.
+ */
+function getMasterCellKey(
+  row: number,
+  col: number,
+  cells: Map<string, { rowSpan?: number; colSpan?: number }>
+): string | null {
+  for (const [key, cell] of cells.entries()) {
+    const rowSpan = cell.rowSpan ?? 1;
+    const colSpan = cell.colSpan ?? 1;
+    
+    if (rowSpan > 1 || colSpan > 1) {
+      const parts = key.split(",");
+      const masterRow = parseInt(parts[0], 10);
+      const masterCol = parseInt(parts[1], 10);
+      
+      if (
+        row >= masterRow &&
+        row < masterRow + rowSpan &&
+        col >= masterCol &&
+        col < masterCol + colSpan &&
+        !(row === masterRow && col === masterCol)
+      ) {
+        return key;
+      }
+    }
+  }
+  return null;
+}
+
+/**
+ * Calculate the total width of a merged cell spanning multiple columns.
+ */
+function getMergedCellWidth(
+  startCol: number,
+  colSpan: number,
+  config: GridConfig,
+  dimensions: DimensionOverrides
+): number {
+  let totalWidth = 0;
+  for (let c = startCol; c < startCol + colSpan; c++) {
+    totalWidth += getColumnWidth(c, config, dimensions);
+  }
+  return totalWidth;
+}
+
+/**
+ * Calculate the total height of a merged cell spanning multiple rows.
+ */
+function getMergedCellHeight(
+  startRow: number,
+  rowSpan: number,
+  config: GridConfig,
+  dimensions: DimensionOverrides
+): number {
+  let totalHeight = 0;
+  for (let r = startRow; r < startRow + rowSpan; r++) {
+    totalHeight += getRowHeight(r, config, dimensions);
+  }
+  return totalHeight;
+}
+
+/**
+ * Get segments of a line that should be drawn, excluding merged cell interiors.
+ */
+function getLineSegments(
+  cells: Map<string, { rowSpan?: number; colSpan?: number }>,
+  lineType: "vertical" | "horizontal",
+  lineIndex: number,
+  perpStart: number,
+  perpEnd: number
+): Array<{ start: number; end: number }> {
+  const gaps: Array<{ start: number; end: number }> = [];
+  
+  for (const [key, cell] of cells.entries()) {
+    const rowSpan = cell.rowSpan ?? 1;
+    const colSpan = cell.colSpan ?? 1;
+    
+    if (rowSpan <= 1 && colSpan <= 1) continue;
+    
+    const parts = key.split(",");
+    const masterRow = parseInt(parts[0], 10);
+    const masterCol = parseInt(parts[1], 10);
+    
+    if (lineType === "vertical") {
+      if (
+        colSpan > 1 &&
+        lineIndex > masterCol &&
+        lineIndex < masterCol + colSpan
+      ) {
+        gaps.push({ start: masterRow, end: masterRow + rowSpan });
+      }
+    } else {
+      if (
+        rowSpan > 1 &&
+        lineIndex > masterRow &&
+        lineIndex < masterRow + rowSpan
+      ) {
+        gaps.push({ start: masterCol, end: masterCol + colSpan });
+      }
+    }
+  }
+  
+  if (gaps.length === 0) {
+    return [{ start: perpStart, end: perpEnd + 1 }];
+  }
+  
+  gaps.sort((a, b) => a.start - b.start);
+  
+  const segments: Array<{ start: number; end: number }> = [];
+  let current = perpStart;
+  
+  for (const gap of gaps) {
+    if (gap.start > current) {
+      segments.push({ start: current, end: gap.start });
+    }
+    current = Math.max(current, gap.end);
+  }
+  
+  if (current <= perpEnd) {
+    segments.push({ start: current, end: perpEnd + 1 });
+  }
+  
+  return segments;
+}
 
 /**
  * Render a single zone of the grid with clipping.
@@ -71,7 +200,7 @@ function renderZone(
 }
 
 /**
- * Draw grid lines for a specific zone.
+ * Draw grid lines for a specific zone with merge-aware gaps.
  */
 function drawGridLinesZone(
   state: RenderState,
@@ -81,21 +210,43 @@ function drawGridLinesZone(
   clipWidth: number,
   clipHeight: number
 ): void {
-  const { ctx, config, theme, dimensions } = state;
+  const { ctx, config, theme, dimensions, cells } = state;
   const totalRows = config.totalRows || 1000;
   const totalCols = config.totalCols || 100;
   
   ctx.strokeStyle = theme.gridLine;
   ctx.lineWidth = 1;
   
-  // Draw vertical lines
+  // Draw vertical lines with merge-aware gaps
   let x = clipX + range.offsetX;
   for (let col = range.startCol; col <= range.endCol + 1 && col <= totalCols; col++) {
     if (x >= clipX && x <= clipX + clipWidth) {
-      ctx.beginPath();
-      ctx.moveTo(Math.floor(x) + 0.5, clipY);
-      ctx.lineTo(Math.floor(x) + 0.5, clipY + clipHeight);
-      ctx.stroke();
+      // Get segments that should be drawn (excluding merged cell interiors)
+      const segments = getLineSegments(
+        cells as Map<string, { rowSpan?: number; colSpan?: number }>,
+        "vertical",
+        col,
+        range.startRow,
+        range.endRow
+      );
+      
+      for (const segment of segments) {
+        // Calculate Y positions for this segment
+        let segmentStartY = clipY + range.offsetY;
+        for (let r = range.startRow; r < segment.start; r++) {
+          segmentStartY += getRowHeight(r, config, dimensions);
+        }
+        
+        let segmentEndY = segmentStartY;
+        for (let r = segment.start; r < segment.end && r <= range.endRow; r++) {
+          segmentEndY += getRowHeight(r, config, dimensions);
+        }
+        
+        ctx.beginPath();
+        ctx.moveTo(Math.floor(x) + 0.5, Math.max(segmentStartY, clipY));
+        ctx.lineTo(Math.floor(x) + 0.5, Math.min(segmentEndY, clipY + clipHeight));
+        ctx.stroke();
+      }
     }
     if (col <= range.endCol) {
       const colWidth = getColumnWidth(col, config, dimensions);
@@ -103,14 +254,36 @@ function drawGridLinesZone(
     }
   }
   
-  // Draw horizontal lines
+  // Draw horizontal lines with merge-aware gaps
   let y = clipY + range.offsetY;
   for (let row = range.startRow; row <= range.endRow + 1 && row <= totalRows; row++) {
     if (y >= clipY && y <= clipY + clipHeight) {
-      ctx.beginPath();
-      ctx.moveTo(clipX, Math.floor(y) + 0.5);
-      ctx.lineTo(clipX + clipWidth, Math.floor(y) + 0.5);
-      ctx.stroke();
+      // Get segments that should be drawn (excluding merged cell interiors)
+      const segments = getLineSegments(
+        cells as Map<string, { rowSpan?: number; colSpan?: number }>,
+        "horizontal",
+        row,
+        range.startCol,
+        range.endCol
+      );
+      
+      for (const segment of segments) {
+        // Calculate X positions for this segment
+        let segmentStartX = clipX + range.offsetX;
+        for (let c = range.startCol; c < segment.start; c++) {
+          segmentStartX += getColumnWidth(c, config, dimensions);
+        }
+        
+        let segmentEndX = segmentStartX;
+        for (let c = segment.start; c < segment.end && c <= range.endCol; c++) {
+          segmentEndX += getColumnWidth(c, config, dimensions);
+        }
+        
+        ctx.beginPath();
+        ctx.moveTo(Math.max(segmentStartX, clipX), Math.floor(y) + 0.5);
+        ctx.lineTo(Math.min(segmentEndX, clipX + clipWidth), Math.floor(y) + 0.5);
+        ctx.stroke();
+      }
     }
     if (row <= range.endRow) {
       const rowHeight = getRowHeight(row, config, dimensions);
@@ -120,7 +293,7 @@ function drawGridLinesZone(
 }
 
 /**
- * Draw cell text for a specific zone.
+ * Draw cell text for a specific zone with merged cell support.
  * Uses the same padding and bounds logic as the main drawCellText function.
  */
 function drawCellTextZone(
@@ -142,6 +315,9 @@ function drawCellTextZone(
   const zoneRight = clipX + clipWidth;
   const zoneBottom = clipY + clipHeight;
   
+  // Track which cells we've already drawn (to avoid drawing slave cells)
+  const drawnCells = new Set<string>();
+  
   let baseY = clipY + range.offsetY;
   for (let row = range.startRow; row <= range.endRow && row < totalRows; row++) {
     const rowHeight = getRowHeight(row, config, dimensions);
@@ -149,6 +325,22 @@ function drawCellTextZone(
     let baseX = clipX + range.offsetX;
     for (let col = range.startCol; col <= range.endCol && col < totalCols; col++) {
       const colWidth = getColumnWidth(col, config, dimensions);
+      const key = cellKey(row, col);
+      
+      // Skip if already drawn (slave cells)
+      if (drawnCells.has(key)) {
+        baseX += colWidth;
+        continue;
+      }
+      
+      // Check if this cell is a slave (part of another cell's merge)
+      const masterKey = getMasterCellKey(row, col, cells as Map<string, { rowSpan?: number; colSpan?: number }>);
+      if (masterKey) {
+        // This is a slave cell - skip rendering
+        drawnCells.add(key);
+        baseX += colWidth;
+        continue;
+      }
       
       // Skip if this cell is being edited
       if (editing && editing.row === row && editing.col === col) {
@@ -157,7 +349,6 @@ function drawCellTextZone(
       }
       
       // Look up cell data
-      const key = cellKey(row, col);
       const cell = cells.get(key);
       
       if (!cell || cell.display === "") {
@@ -165,11 +356,32 @@ function drawCellTextZone(
         continue;
       }
       
+      // Get merge spans
+      const rowSpan = (cell as { rowSpan?: number }).rowSpan ?? 1;
+      const colSpan = (cell as { colSpan?: number }).colSpan ?? 1;
+      
+      // Calculate actual cell dimensions (may span multiple cells)
+      const actualWidth = colSpan > 1 
+        ? getMergedCellWidth(col, colSpan, config, dimensions)
+        : colWidth;
+      const actualHeight = rowSpan > 1
+        ? getMergedCellHeight(row, rowSpan, config, dimensions)
+        : rowHeight;
+      
+      // Mark all cells in the merge region as drawn
+      if (rowSpan > 1 || colSpan > 1) {
+        for (let r = row; r < row + rowSpan; r++) {
+          for (let c = col; c < col + colSpan; c++) {
+            drawnCells.add(cellKey(r, c));
+          }
+        }
+      }
+      
       // Calculate visible cell bounds (clipped to zone)
       const cellLeft = Math.max(baseX, zoneLeft);
       const cellTop = Math.max(baseY, zoneTop);
-      const cellRight = Math.min(baseX + colWidth, zoneRight);
-      const cellBottom = Math.min(baseY + rowHeight, zoneBottom);
+      const cellRight = Math.min(baseX + actualWidth, zoneRight);
+      const cellBottom = Math.min(baseY + actualHeight, zoneBottom);
       
       // Skip if cell is not visible
       if (cellRight <= cellLeft || cellBottom <= cellTop) {
@@ -215,8 +427,9 @@ function drawCellTextZone(
       ctx.textBaseline = "middle";
       
       // Calculate text position with proper padding
+      // Center vertically in the full merged cell height
       const textX = cellLeft + paddingX;
-      const textY = baseY + rowHeight / 2;
+      const textY = baseY + actualHeight / 2;
       
       // Determine text alignment
       let textAlign: "left" | "right" | "center" = "left";

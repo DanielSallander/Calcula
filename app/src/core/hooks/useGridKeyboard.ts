@@ -9,6 +9,7 @@
 // FIX: Added merge-aware navigation - when landing on a merged cell, expands selection.
 // FIX: When navigating FROM a merged cell, calculate target from the edge of the merge
 //      in the direction of movement to avoid getting stuck.
+// FIX: Preserve entry column/row when exiting merged cells vertically/horizontally.
 
 import { useCallback, useEffect } from "react";
 import { useGridContext } from "../state/GridContext";
@@ -80,6 +81,10 @@ export function useGridKeyboard(options: UseGridKeyboardOptions): void {
   /**
    * Handle navigation to a cell, expanding to merged region if needed.
    * This is an async helper that checks for merges and dispatches the appropriate selection.
+   * 
+   * IMPORTANT: When landing on a merged cell, we preserve the entry point (row, col) as
+   * startRow/startCol, and set endRow/endCol to cover the merge extent. This allows
+   * subsequent navigation to exit from the correct position.
    */
   const navigateToCell = useCallback(
     async (row: number, col: number, extend: boolean) => {
@@ -102,11 +107,14 @@ export function useGridKeyboard(options: UseGridKeyboardOptions): void {
             }));
           } else {
             // Not extending - select the entire merged region
+            // Keep startRow/startCol at the entry point (row, col)
+            // Set endRow/endCol to the opposite corner to cover the full merge
             dispatch(setSelection({
-              startRow: mergeInfo.startRow,
-              startCol: mergeInfo.startCol,
-              endRow: mergeInfo.endRow,
-              endCol: mergeInfo.endCol,
+              startRow: row,
+              startCol: col,
+              // Set end to opposite corner of merge to ensure full coverage
+              endRow: row <= mergeInfo.startRow ? mergeInfo.endRow : mergeInfo.startRow,
+              endCol: col <= mergeInfo.startCol ? mergeInfo.endCol : mergeInfo.startCol,
               type: "cells",
             }));
           }
@@ -176,29 +184,30 @@ export function useGridKeyboard(options: UseGridKeyboardOptions): void {
       const maxCol = Math.max(selection.startCol, selection.endCol);
 
       // Determine starting position based on direction
+      // Use startCol/startRow as the "entry point" for the current position
       let currentRow: number;
       let currentCol: number;
 
       switch (direction) {
         case "up":
           currentRow = minRow;  // Start from top edge
-          currentCol = selection.endCol;
+          currentCol = selection.startCol;  // Preserve entry column
           break;
         case "down":
           currentRow = maxRow;  // Start from bottom edge
-          currentCol = selection.endCol;
+          currentCol = selection.startCol;  // Preserve entry column
           break;
         case "left":
-          currentRow = selection.endRow;
+          currentRow = selection.startRow;  // Preserve entry row
           currentCol = minCol;  // Start from left edge
           break;
         case "right":
-          currentRow = selection.endRow;
+          currentRow = selection.startRow;  // Preserve entry row
           currentCol = maxCol;  // Start from right edge
           break;
         default:
-          currentRow = selection.endRow;
-          currentCol = selection.endCol;
+          currentRow = selection.startRow;
+          currentCol = selection.startCol;
       }
 
       const maxRowBound = config.totalRows - 1;
@@ -227,7 +236,8 @@ export function useGridKeyboard(options: UseGridKeyboardOptions): void {
   /**
    * Handle regular arrow key navigation with merge awareness.
    * When navigating FROM a merged cell, we calculate the target from the edge
-   * of the merge in the direction of movement.
+   * of the merge in the direction of movement, while preserving the entry
+   * column (for vertical movement) or entry row (for horizontal movement).
    */
   const handleArrowNavigation = useCallback(
     async (deltaRow: number, deltaCol: number, extend: boolean) => {
@@ -249,6 +259,7 @@ export function useGridKeyboard(options: UseGridKeyboardOptions): void {
 
       // Calculate starting position based on direction of movement
       // This ensures we exit from the correct edge of a merged cell
+      // while preserving the entry point for the perpendicular axis
       let startRow: number;
       let startCol: number;
 
@@ -259,8 +270,8 @@ export function useGridKeyboard(options: UseGridKeyboardOptions): void {
         // Moving down - start from bottom edge
         startRow = maxRowSel;
       } else {
-        // No vertical movement - use current end position
-        startRow = selection.endRow;
+        // No vertical movement - preserve the entry row (startRow)
+        startRow = selection.startRow;
       }
 
       if (deltaCol < 0) {
@@ -270,8 +281,10 @@ export function useGridKeyboard(options: UseGridKeyboardOptions): void {
         // Moving right - start from right edge
         startCol = maxColSel;
       } else {
-        // No horizontal movement - use current end position
-        startCol = selection.endCol;
+        // No horizontal movement - preserve the entry column (startCol)
+        // This is the key fix: when exiting a merged cell vertically,
+        // we stay in the same column we entered from
+        startCol = selection.startCol;
       }
 
       // Calculate target position from the appropriate edge
