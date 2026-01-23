@@ -3,6 +3,7 @@
 // CONTEXT: Added check to prevent stealing focus if the Formula Bar is currently active.
 // FIX: In useEffect, check document.activeElement before calling focus().
 // FIX: Added isCancelingRef to prevent blur from committing after ESC is pressed.
+// FIX: Added support for merged cells - editor now spans the full merged region.
 
 import React, { useRef, useEffect, useCallback, useState } from "react";
 import type { GridConfig, Viewport, EditingCell, DimensionOverrides } from "../../types";
@@ -121,8 +122,43 @@ function calculateRowY(
 }
 
 /**
+ * Calculate the total width for a cell spanning multiple columns.
+ * FIX: Added for merged cell support.
+ */
+function getMergedWidth(
+  startCol: number,
+  colSpan: number,
+  config: GridConfig,
+  dimensions: DimensionOverrides
+): number {
+  let totalWidth = 0;
+  for (let c = startCol; c < startCol + colSpan; c++) {
+    totalWidth += getColumnWidth(c, config, dimensions);
+  }
+  return totalWidth;
+}
+
+/**
+ * Calculate the total height for a cell spanning multiple rows.
+ * FIX: Added for merged cell support.
+ */
+function getMergedHeight(
+  startRow: number,
+  rowSpan: number,
+  config: GridConfig,
+  dimensions: DimensionOverrides
+): number {
+  let totalHeight = 0;
+  for (let r = startRow; r < startRow + rowSpan; r++) {
+    totalHeight += getRowHeight(r, config, dimensions);
+  }
+  return totalHeight;
+}
+
+/**
  * Calculate the position and visibility of the inline editor.
  * Phase 5.2: Uses proper dimension calculations for variable column/row sizes.
+ * FIX: Now accounts for merged cell spans (rowSpan/colSpan).
  */
 function calculateEditorPosition(
   editing: EditingCell,
@@ -136,14 +172,20 @@ function calculateEditorPosition(
   height: number;
   visible: boolean;
 } {
-  const { row, col } = editing;
+  const { row, col, rowSpan = 1, colSpan = 1 } = editing;
   const { rowHeaderWidth, colHeaderHeight } = config;
 
   // Calculate cell position using proper dimension-aware functions
   const cellX = calculateColumnX(col, config, dimensions, viewport.scrollX);
   const cellY = calculateRowY(row, config, dimensions, viewport.scrollY);
-  const cellWidth = getColumnWidth(col, config, dimensions);
-  const cellHeight = getRowHeight(row, config, dimensions);
+  
+  // FIX: Calculate dimensions accounting for merged cell spans
+  const cellWidth = colSpan > 1 
+    ? getMergedWidth(col, colSpan, config, dimensions)
+    : getColumnWidth(col, config, dimensions);
+  const cellHeight = rowSpan > 1
+    ? getMergedHeight(row, rowSpan, config, dimensions)
+    : getRowHeight(row, config, dimensions);
 
   // Check if cell is visible (not scrolled out of view)
   const visible =
@@ -171,6 +213,7 @@ function calculateEditorPosition(
  * Phase 5.2: Fixed positioning to use proper dimension calculations.
  * Updated: Added refocus support for cross-sheet formula editing.
  * FIX: Added isCancelingRef to prevent blur from committing after ESC.
+ * FIX: Added support for merged cells - editor now spans the full merged region.
  */
 export function InlineEditor(props: InlineEditorProps): React.ReactElement | null {
   const {

@@ -6,6 +6,7 @@
 // cell data representation, scroll behavior types, and the combined
 // grid state used by the state management system.
 // UPDATED: Added FreezeConfig for freeze panes support
+// UPDATED: Added rowSpan/colSpan to EditingCell for merged cell editing
 
 /**
  * Type of selection: cells, entire column(s), or entire row(s).
@@ -129,6 +130,7 @@ export const DEFAULT_GRID_CONFIG: GridConfig = {
 
 /**
  * Represents a cell being edited.
+ * UPDATED: Added rowSpan/colSpan for merged cell editing support.
  */
 export interface EditingCell {
   /** Row index (0-based) */
@@ -141,6 +143,10 @@ export interface EditingCell {
   sourceSheetIndex?: number;
   /** Source sheet name where editing started (for cross-sheet references) */
   sourceSheetName?: string;
+  /** Number of rows this cell spans (for merged cells, default 1) */
+  rowSpan?: number;
+  /** Number of columns this cell spans (for merged cells, default 1) */
+  colSpan?: number;
 }
 
 /**
@@ -171,6 +177,10 @@ export interface CellData {
   formula: string | null;
   /** Style index for looking up formatting */
   styleIndex: number;  // Changed from style_index
+  /** Number of rows this cell spans (for merged cells) */
+  rowSpan?: number;
+  /** Number of columns this cell spans (for merged cells) */
+  colSpan?: number;
 }
 
 /**
@@ -770,15 +780,4 @@ export interface MergeResult {
   success: boolean;
   mergedRegions: MergedRegion[];
   updatedCells: CellData[];
-}
-
-// Update CellData interface to include spans:
-export interface CellData {
-  row: number;
-  col: number;
-  display: string;
-  formula: string | null;
-  styleIndex: number;
-  rowSpan?: number;
-  colSpan?: number;
 }

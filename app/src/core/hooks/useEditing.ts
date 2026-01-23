@@ -13,6 +13,7 @@
 //      across multiple useEditing() hook instances
 // FIX: Column/row references now use limited bounds for visual highlighting
 //      to prevent performance issues with large ranges
+// FIX: startEdit now resolves to master cell when editing merged cells
 
 import { autoCompleteFormula } from "../lib/formulaCompletion";
 import { useCallback, useState, useEffect, useRef } from "react";
@@ -24,8 +25,9 @@ import {
   setFormulaReferences,
   clearFormulaReferences,
   setActiveSheet,
+  setSelection,
 } from "../../core/state/gridActions";
-import { updateCell, getCell, setActiveSheet as setActiveSheetApi } from "../lib/tauri-api";
+import { updateCell, getCell, setActiveSheet as setActiveSheetApi, getMergeInfo } from "../lib/tauri-api";
 import { cellEvents } from "../lib/cellEvents";
 import { 
   rangeToReference, 
@@ -280,6 +282,7 @@ export function useEditing(): UseEditingReturn {
   /**
    * Start editing a cell by row/col.
    * FIX: Now fetches cell content BEFORE dispatching to prevent race conditions.
+   * FIX: Resolves to master cell when the target cell is part of a merged region.
    * This ensures the InlineEditor receives the correct initial value immediately.
    */
   const startEdit = useCallback(
@@ -292,6 +295,37 @@ export function useEditing(): UseEditingReturn {
       // This ensures ALL useEditing() instances see editing state immediately
       setGlobalIsEditing(true);
       
+      // FIX: Check if this cell is part of a merged region and resolve to master cell
+      let editRow = row;
+      let editCol = col;
+      let rowSpan = 1;
+      let colSpan = 1;
+      
+      try {
+        const mergeInfo = await getMergeInfo(row, col);
+        if (mergeInfo) {
+          // Use the master cell (top-left of the merged region)
+          editRow = mergeInfo.startRow;
+          editCol = mergeInfo.startCol;
+          rowSpan = mergeInfo.endRow - mergeInfo.startRow + 1;
+          colSpan = mergeInfo.endCol - mergeInfo.startCol + 1;
+          
+          console.log(`[useEditing] Resolved to master cell: (${editRow}, ${editCol}) with span (${rowSpan}x${colSpan})`);
+          
+          // Also update selection to cover the entire merged region
+          dispatch(setSelection({
+            startRow: mergeInfo.startRow,
+            startCol: mergeInfo.startCol,
+            endRow: mergeInfo.endRow,
+            endCol: mergeInfo.endCol,
+            type: "cells",
+          }));
+        }
+      } catch (error) {
+        console.error("[useEditing] Failed to get merge info:", error);
+        // Continue with original coordinates on error
+      }
+      
       // Determine the initial value to use
       let value = initialValue ?? "";
       
@@ -300,7 +334,7 @@ export function useEditing(): UseEditingReturn {
       // while the async fetch is in progress, allowing typed characters to replace content
       if (initialValue === undefined) {
         try {
-          const cellData = await getCell(row, col);
+          const cellData = await getCell(editRow, editCol);
           value = cellData?.formula || cellData?.display || "";
         } catch (error) {
           console.error("Failed to get cell data:", error);
@@ -309,13 +343,16 @@ export function useEditing(): UseEditingReturn {
       }
       
       // Dispatch with the correct value (either provided or fetched)
+      // Include rowSpan/colSpan for the InlineEditor to use
       dispatch(
         startEditingAction({
-          row,
-          col,
+          row: editRow,
+          col: editCol,
           value,
           sourceSheetIndex: sheetContext.activeSheetIndex,
           sourceSheetName: sheetContext.activeSheetName,
+          rowSpan,
+          colSpan,
         })
       );
     },
@@ -337,6 +374,7 @@ export function useEditing(): UseEditingReturn {
 
       if (initialValue !== undefined) {
         // REPLACE mode - start with provided character
+        // Still need to check for merge to get correct position
         setLastError(null);
         dispatch(clearFormulaReferences());
         setPendingReference(null);
@@ -344,13 +382,42 @@ export function useEditing(): UseEditingReturn {
         // FIX: Set global flag BEFORE dispatch
         setGlobalIsEditing(true);
         
+        // Check for merge info for replace mode too
+        let editRow = row;
+        let editCol = col;
+        let rowSpan = 1;
+        let colSpan = 1;
+        
+        try {
+          const mergeInfo = await getMergeInfo(row, col);
+          if (mergeInfo) {
+            editRow = mergeInfo.startRow;
+            editCol = mergeInfo.startCol;
+            rowSpan = mergeInfo.endRow - mergeInfo.startRow + 1;
+            colSpan = mergeInfo.endCol - mergeInfo.startCol + 1;
+            
+            // Update selection to cover merged region
+            dispatch(setSelection({
+              startRow: mergeInfo.startRow,
+              startCol: mergeInfo.startCol,
+              endRow: mergeInfo.endRow,
+              endCol: mergeInfo.endCol,
+              type: "cells",
+            }));
+          }
+        } catch (error) {
+          console.error("[useEditing] Failed to get merge info:", error);
+        }
+        
         dispatch(
           startEditingAction({
-            row,
-            col,
+            row: editRow,
+            col: editCol,
             value: initialValue,
             sourceSheetIndex: sheetContext.activeSheetIndex,
             sourceSheetName: sheetContext.activeSheetName,
+            rowSpan,
+            colSpan,
           })
         );
       } else {
@@ -774,7 +841,7 @@ export function useEditing(): UseEditingReturn {
    * Start editing the currently selected cell in replace mode.
    */
   const replaceCurrentCell = useCallback(
-    (initialChar?: string) => {
+    async (initialChar?: string) => {
       const { selection } = state;
       if (!selection) {
         return;
@@ -787,13 +854,42 @@ export function useEditing(): UseEditingReturn {
       // FIX: Set global flag BEFORE dispatch
       setGlobalIsEditing(true);
       
+      // Check for merge info
+      let editRow = selection.endRow;
+      let editCol = selection.endCol;
+      let rowSpan = 1;
+      let colSpan = 1;
+      
+      try {
+        const mergeInfo = await getMergeInfo(selection.endRow, selection.endCol);
+        if (mergeInfo) {
+          editRow = mergeInfo.startRow;
+          editCol = mergeInfo.startCol;
+          rowSpan = mergeInfo.endRow - mergeInfo.startRow + 1;
+          colSpan = mergeInfo.endCol - mergeInfo.startCol + 1;
+          
+          // Update selection to cover merged region
+          dispatch(setSelection({
+            startRow: mergeInfo.startRow,
+            startCol: mergeInfo.startCol,
+            endRow: mergeInfo.endRow,
+            endCol: mergeInfo.endCol,
+            type: "cells",
+          }));
+        }
+      } catch (error) {
+        console.error("[useEditing] Failed to get merge info:", error);
+      }
+      
       dispatch(
         startEditingAction({
-          row: selection.endRow,
-          col: selection.endCol,
+          row: editRow,
+          col: editCol,
           value: initialChar || "",
           sourceSheetIndex: sheetContext.activeSheetIndex,
           sourceSheetName: sheetContext.activeSheetName,
+          rowSpan,
+          colSpan,
         })
       );
     },

@@ -5,6 +5,7 @@
 // FIX: Added focusContainerRef parameter for keyboard event handling.
 // FIX: Added onDelete handler to useGridKeyboard to clear selection on DELETE key.
 // FIX: Added undo/redo handlers for Ctrl+Z and Ctrl+Y keyboard shortcuts.
+// FIX: handleDoubleClickEvent now calls startEdit directly to avoid stale state issues.
 
 import { useState, useCallback, useEffect, useRef } from "react";
 import { 
@@ -62,6 +63,7 @@ export function useSpreadsheetSelection({
 
   const { 
     selectCell, 
+    selectCellWithMergeExpansion,
     extendTo, 
     moveActiveCell, 
     getSelectionReference, 
@@ -73,6 +75,7 @@ export function useSpreadsheetSelection({
     isEditing,
     isFormulaMode,
     startEditing,
+    startEdit,  // FIX: Added startEdit to avoid stale state issues
     insertReference,
     insertRangeReference,
     insertColumnReference,
@@ -413,15 +416,28 @@ export function useSpreadsheetSelection({
     onDelete: handleDeleteContents,
   });
 
+  /**
+   * Handle double-click to start editing.
+   * FIX: Call startEdit directly with the clicked cell coordinates.
+   * This avoids the stale state issue where startEditing reads from
+   * state.selection before React has updated it from the prior
+   * selectCellWithMergeExpansion call.
+   * startEdit will internally resolve to the master cell if this
+   * cell is part of a merged region.
+   */
   const handleDoubleClickEvent = useCallback(
-    (event: React.MouseEvent<HTMLDivElement>) => {
+    async (event: React.MouseEvent<HTMLDivElement>) => {
       const cell = getDoubleClickCell(event);
       if (cell) {
-        selectCell(cell.row, cell.col);
-        startEditing();
+        // First expand selection to cover merged region (for visual feedback)
+        await selectCellWithMergeExpansion(cell.row, cell.col);
+        // FIX: Call startEdit directly with the clicked coordinates
+        // startEdit will resolve to master cell and fetch content correctly
+        // This avoids the stale closure issue where startEditing reads old state
+        await startEdit(cell.row, cell.col);
       }
     },
-    [getDoubleClickCell, selectCell, startEditing]
+    [getDoubleClickCell, selectCellWithMergeExpansion, startEdit]
   );
 
   return {
