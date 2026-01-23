@@ -6,11 +6,14 @@
 // FIX: Added check for getGlobalIsEditing() to catch editing state synchronously
 //      before React state updates, preventing keystrokes from starting new edits.
 // FIX: Added DELETE key handler to clear selection contents.
+// FIX: Added merge-aware navigation - when landing on a merged cell, expands selection.
+// FIX: When navigating FROM a merged cell, calculate target from the edge of the merge
+//      in the direction of movement to avoid getting stuck.
 
 import { useCallback, useEffect } from "react";
 import { useGridContext } from "../state/GridContext";
 import { moveSelection, setSelection } from "../state/gridActions";
-import { findCtrlArrowTarget, type ArrowDirection } from "../lib/tauri-api";
+import { findCtrlArrowTarget, getMergeInfo, type ArrowDirection } from "../lib/tauri-api";
 import { fnLog, stateLog, eventLog } from '../../utils/component-logger';
 import { getGlobalIsEditing } from "./useEditing";
 
@@ -45,6 +48,13 @@ interface UseGridKeyboardOptions {
 }
 
 /**
+ * Clamp a value between min and max bounds.
+ */
+function clamp(value: number, min: number, max: number): number {
+  return Math.max(min, Math.min(max, value));
+}
+
+/**
  * Hook for handling keyboard navigation in the grid.
  *
  * @param options - Configuration options
@@ -68,6 +78,88 @@ export function useGridKeyboard(options: UseGridKeyboardOptions): void {
   const { config, viewport, selection } = state;
 
   /**
+   * Handle navigation to a cell, expanding to merged region if needed.
+   * This is an async helper that checks for merges and dispatches the appropriate selection.
+   */
+  const navigateToCell = useCallback(
+    async (row: number, col: number, extend: boolean) => {
+      try {
+        const mergeInfo = await getMergeInfo(row, col);
+        
+        if (mergeInfo) {
+          // Cell is part of a merge - expand selection to cover it
+          if (extend && selection) {
+            // When extending, keep the start anchor and extend to the merge bounds
+            // Use the corner of the merge that's furthest from the start
+            const endRow = row >= selection.startRow ? mergeInfo.endRow : mergeInfo.startRow;
+            const endCol = col >= selection.startCol ? mergeInfo.endCol : mergeInfo.startCol;
+            dispatch(setSelection({
+              startRow: selection.startRow,
+              startCol: selection.startCol,
+              endRow,
+              endCol,
+              type: selection.type,
+            }));
+          } else {
+            // Not extending - select the entire merged region
+            dispatch(setSelection({
+              startRow: mergeInfo.startRow,
+              startCol: mergeInfo.startCol,
+              endRow: mergeInfo.endRow,
+              endCol: mergeInfo.endCol,
+              type: "cells",
+            }));
+          }
+        } else {
+          // Regular cell - normal selection
+          if (extend && selection) {
+            dispatch(setSelection({
+              startRow: selection.startRow,
+              startCol: selection.startCol,
+              endRow: row,
+              endCol: col,
+              type: selection.type,
+            }));
+          } else {
+            dispatch(setSelection({
+              startRow: row,
+              startCol: col,
+              endRow: row,
+              endCol: col,
+              type: "cells",
+            }));
+          }
+        }
+      } catch (error) {
+        console.error('[useGridKeyboard] Failed to get merge info:', error);
+        // Fallback to regular selection on error
+        if (extend && selection) {
+          dispatch(setSelection({
+            startRow: selection.startRow,
+            startCol: selection.startCol,
+            endRow: row,
+            endCol: col,
+            type: selection.type,
+          }));
+        } else {
+          dispatch(setSelection({
+            startRow: row,
+            startCol: col,
+            endRow: row,
+            endCol: col,
+            type: "cells",
+          }));
+        }
+      }
+
+      if (onSelectionChange) {
+        setTimeout(onSelectionChange, 0);
+      }
+    },
+    [selection, dispatch, onSelectionChange]
+  );
+
+  /**
    * Handle Ctrl+Arrow navigation by querying the backend for the target cell.
    */
   const handleCtrlArrow = useCallback(
@@ -76,50 +168,120 @@ export function useGridKeyboard(options: UseGridKeyboardOptions): void {
         return;
       }
 
-      const currentRow = selection.endRow;
-      const currentCol = selection.endCol;
-      const maxRow = config.totalRows - 1;
-      const maxCol = config.totalCols - 1;
+      // For Ctrl+Arrow from a merged cell, we need to start from the appropriate edge
+      // Get the normalized bounds of the current selection
+      const minRow = Math.min(selection.startRow, selection.endRow);
+      const maxRow = Math.max(selection.startRow, selection.endRow);
+      const minCol = Math.min(selection.startCol, selection.endCol);
+      const maxCol = Math.max(selection.startCol, selection.endCol);
+
+      // Determine starting position based on direction
+      let currentRow: number;
+      let currentCol: number;
+
+      switch (direction) {
+        case "up":
+          currentRow = minRow;  // Start from top edge
+          currentCol = selection.endCol;
+          break;
+        case "down":
+          currentRow = maxRow;  // Start from bottom edge
+          currentCol = selection.endCol;
+          break;
+        case "left":
+          currentRow = selection.endRow;
+          currentCol = minCol;  // Start from left edge
+          break;
+        case "right":
+          currentRow = selection.endRow;
+          currentCol = maxCol;  // Start from right edge
+          break;
+        default:
+          currentRow = selection.endRow;
+          currentCol = selection.endCol;
+      }
+
+      const maxRowBound = config.totalRows - 1;
+      const maxColBound = config.totalCols - 1;
 
       try {
         const [targetRow, targetCol] = await findCtrlArrowTarget(
           currentRow,
           currentCol,
           direction,
-          maxRow,
-          maxCol
+          maxRowBound,
+          maxColBound
         );
 
         fnLog.exit('handleCtrlArrow', `target=(${targetRow}, ${targetCol})`);
 
-        if (extend) {
-          // Extend selection to target
-          dispatch(setSelection({
-            startRow: selection.startRow,
-            startCol: selection.startCol,
-            endRow: targetRow,
-            endCol: targetCol,
-            type: selection.type,
-          }));
-        } else {
-          // Move selection to target
-          dispatch(setSelection({
-            startRow: targetRow,
-            startCol: targetCol,
-            endRow: targetRow,
-            endCol: targetCol,
-            type: "cells",
-          }));
-        }
-
-        if (onSelectionChange) {
-          setTimeout(onSelectionChange, 0);
-        }
+        // Use merge-aware navigation
+        await navigateToCell(targetRow, targetCol, extend);
       } catch (error) {
         console.error("[useGridKeyboard] Ctrl+Arrow navigation failed:", error);
       }
     },
-    [selection, config.totalRows, config.totalCols, dispatch, onSelectionChange]
+    [selection, config.totalRows, config.totalCols, navigateToCell]
+  );
+
+  /**
+   * Handle regular arrow key navigation with merge awareness.
+   * When navigating FROM a merged cell, we calculate the target from the edge
+   * of the merge in the direction of movement.
+   */
+  const handleArrowNavigation = useCallback(
+    async (deltaRow: number, deltaCol: number, extend: boolean) => {
+      if (!selection) {
+        // No selection - start at origin
+        await navigateToCell(0, 0, false);
+        return;
+      }
+
+      const maxRow = config.totalRows - 1;
+      const maxCol = config.totalCols - 1;
+
+      // Get the normalized bounds of the current selection
+      // This handles both regular cells and merged cells
+      const minRow = Math.min(selection.startRow, selection.endRow);
+      const maxRowSel = Math.max(selection.startRow, selection.endRow);
+      const minCol = Math.min(selection.startCol, selection.endCol);
+      const maxColSel = Math.max(selection.startCol, selection.endCol);
+
+      // Calculate starting position based on direction of movement
+      // This ensures we exit from the correct edge of a merged cell
+      let startRow: number;
+      let startCol: number;
+
+      if (deltaRow < 0) {
+        // Moving up - start from top edge
+        startRow = minRow;
+      } else if (deltaRow > 0) {
+        // Moving down - start from bottom edge
+        startRow = maxRowSel;
+      } else {
+        // No vertical movement - use current end position
+        startRow = selection.endRow;
+      }
+
+      if (deltaCol < 0) {
+        // Moving left - start from left edge
+        startCol = minCol;
+      } else if (deltaCol > 0) {
+        // Moving right - start from right edge
+        startCol = maxColSel;
+      } else {
+        // No horizontal movement - use current end position
+        startCol = selection.endCol;
+      }
+
+      // Calculate target position from the appropriate edge
+      const targetRow = clamp(startRow + deltaRow, 0, maxRow);
+      const targetCol = clamp(startCol + deltaCol, 0, maxCol);
+
+      // Use merge-aware navigation
+      await navigateToCell(targetRow, targetCol, extend);
+    },
+    [selection, config.totalRows, config.totalCols, navigateToCell]
   );
 
   /**
@@ -353,17 +515,15 @@ export function useGridKeyboard(options: UseGridKeyboardOptions): void {
 
         const extend = shiftKey && key !== "Tab";
         
-        stateLog.action('GridContext', 'dispatch(moveSelection)', `dRow=${deltaRow}, dCol=${deltaCol}, extend=${extend}`);
-        dispatch(moveSelection(deltaRow, deltaCol, extend));
-
-        if (onSelectionChange) {
-          setTimeout(onSelectionChange, 0);
-        }
+        stateLog.action('GridContext', 'dispatch(handleArrowNavigation)', `dRow=${deltaRow}, dCol=${deltaCol}, extend=${extend}`);
+        
+        // Use merge-aware navigation (async)
+        handleArrowNavigation(deltaRow, deltaCol, extend);
         
         fnLog.exit('handleKeyDown', 'handled');
       }
     },
-    [enabled, isEditing, config.totalRows, config.totalCols, viewport.rowCount, dispatch, onSelectionChange, onCut, onCopy, onPaste, onUndo, onRedo, onClearClipboard, hasClipboardContent, onDelete, handleCtrlArrow]
+    [enabled, isEditing, config.totalRows, config.totalCols, viewport.rowCount, onSelectionChange, onCut, onCopy, onPaste, onUndo, onRedo, onClearClipboard, hasClipboardContent, onDelete, handleCtrlArrow, handleArrowNavigation]
   );
 
   /**

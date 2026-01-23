@@ -7,6 +7,7 @@
 // Updated: Fixed insertion animation to work with backend-first approach
 // Updated: Added deletion animation support (animateRowDeletion, animateColumnDeletion)
 // Updated: Added freeze panes support
+// Updated: Added grid:refresh event listener for merge cells support
 
 import React, { useRef, useEffect, useCallback, useImperativeHandle, forwardRef, useState } from "react";
 import { renderGrid, DEFAULT_THEME, calculateVisibleRange } from "../../lib/gridRenderer";
@@ -340,10 +341,16 @@ export const GridCanvas = forwardRef<GridCanvasHandle, GridCanvasProps>(
           newCells.set(cellKey(cell.row, cell.col), cell);
         }
 
-        // Debug: log cell info
+        // Debug: log cell info including merge spans
         if (cellData.length > 0) {
           const firstCell = cellData[0];
-          console.log(`[Cells] Fetched ${cellData.length} cells. First cell: row=${firstCell.row}, col=${firstCell.col}, display="${firstCell.display}", style_index=${firstCell.styleIndex}`);
+          console.log(`[Cells] Fetched ${cellData.length} cells. First cell: row=${firstCell.row}, col=${firstCell.col}, display="${firstCell.display}", styleIndex=${firstCell.styleIndex}, rowSpan=${firstCell.rowSpan}, colSpan=${firstCell.colSpan}`);
+          
+          // Log any merged cells (cells with span > 1)
+          const mergedCells = cellData.filter(c => (c.rowSpan && c.rowSpan > 1) || (c.colSpan && c.colSpan > 1));
+          if (mergedCells.length > 0) {
+            console.log(`[Cells] Found ${mergedCells.length} merged master cells:`, mergedCells.map(c => `(${c.row},${c.col}) ${c.rowSpan}x${c.colSpan}`));
+          }
         }
 
         setCells(newCells);
@@ -359,6 +366,7 @@ export const GridCanvas = forwardRef<GridCanvasHandle, GridCanvasProps>(
      * Returns a Promise for proper sequencing.
      */
     const refreshCells = useCallback(async (): Promise<void> => {
+      console.log('[GridCanvas] refreshCells called');
       lastFetchRef.current = null;
       await fetchCells(true);
     }, [fetchCells]);
@@ -605,6 +613,25 @@ export const GridCanvas = forwardRef<GridCanvasHandle, GridCanvasProps>(
       lastFetchRef.current = null;
       fetchCells(true);
     }, [freezeConfig.freezeRow, freezeConfig.freezeCol]);
+
+    /**
+     * Listen for grid:refresh events (from MenuBar merge/unmerge, undo/redo, etc.).
+     * This ensures the canvas refreshes its cells when data changes externally.
+     */
+    useEffect(() => {
+      const handleGridRefresh = async () => {
+        console.log('[GridCanvas] grid:refresh event received - refreshing cells');
+        await refreshCells();
+        // Redraw after refresh to show updated data
+        draw(animationOffsetRef.current, insertionAnimation);
+      };
+
+      window.addEventListener('grid:refresh', handleGridRefresh);
+      
+      return () => {
+        window.removeEventListener('grid:refresh', handleGridRefresh);
+      };
+    }, [refreshCells, draw, insertionAnimation]);
 
     /**
      * Listen for sheet switch events during formula mode.

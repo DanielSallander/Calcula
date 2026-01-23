@@ -3,10 +3,12 @@
 // CONTEXT: Creates handlers for mouse down on cells, supporting single
 // click selection and shift-click to extend selection ranges.
 // FIX: Right-click within selection now preserves the selection.
+// FIX: Clicking on merged cells now expands selection to cover entire merge.
 
 import type { GridConfig, Viewport, Selection, DimensionOverrides } from "../../../types";
 import type { CellPosition, MousePosition, HeaderDragState } from "../types";
 import { getCellFromPixel } from "../../../lib/gridRenderer";
+import { getMergeInfo } from "../../../lib/tauri-api";
 
 interface CellSelectionDependencies {
   config: GridConfig;
@@ -104,18 +106,48 @@ export function createCellSelectionHandlers(deps: CellSelectionDependencies): Ce
       await onCommitBeforeSelect();
     }
 
+    // Check if this cell is part of a merged region
+    let effectiveStartRow = row;
+    let effectiveStartCol = col;
+    let effectiveEndRow = row;
+    let effectiveEndCol = col;
+    
+    try {
+      const mergeInfo = await getMergeInfo(row, col);
+      if (mergeInfo) {
+        // Cell is part of a merge - use the merged region bounds
+        effectiveStartRow = mergeInfo.startRow;
+        effectiveStartCol = mergeInfo.startCol;
+        effectiveEndRow = mergeInfo.endRow;
+        effectiveEndCol = mergeInfo.endCol;
+      }
+    } catch (error) {
+      console.error('[cellSelectionHandlers] Failed to get merge info:', error);
+      // Continue with normal single-cell selection on error
+    }
+
     if (shiftKey && selection) {
       // Shift-click extends selection
-      onExtendTo(row, col);
+      // For merged cells, extend to the farthest corner of the merge
+      onExtendTo(effectiveEndRow, effectiveEndCol);
     } else {
       // Regular click (or right-click outside selection) starts new selection
-      onSelectCell(row, col);
+      // For merged cells, select the entire merged region
+      if (effectiveStartRow !== effectiveEndRow || effectiveStartCol !== effectiveEndCol) {
+        // It's a merged region - select from start to end
+        onSelectCell(effectiveStartRow, effectiveStartCol);
+        onExtendTo(effectiveEndRow, effectiveEndCol);
+      } else {
+        // Single cell selection
+        onSelectCell(row, col);
+      }
     }
 
     // Only start drag for left-click (button === 0)
     if (!isRightClick) {
       setIsDragging(true);
-      dragStartRef.current = { row, col };
+      // For drag operations, use the effective start position (master cell for merges)
+      dragStartRef.current = { row: effectiveStartRow, col: effectiveStartCol };
       headerDragRef.current = null;
       lastMousePosRef.current = { x: mouseX, y: mouseY };
     }

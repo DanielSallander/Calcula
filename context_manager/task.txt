@@ -12,17 +12,19 @@
 4.  **Menu commands:** Update the "Edit" (on the top) to include a command to merge selected cells.
 
 **Current Status:**
-We have implemented a first version, the commands appear in the "Edit" menu,
-but when I apply "Merge Cells" I dont see that the cells are being merged, at least it does not show in the grid.
-However, it seems like merge is happening in the background since I get the message that I cannot merge overlapping cells when I try to
-merge cells that has already been merged.
+We have implemented a first version, the commands appear in the "Edit" menu.
+When I apply "Merge Cells" it looks like the cell is merged.
+However, when I select the merged cell it only selects the part of it, as it was never merged.
+I have attached an image.
+In the image I have merged cells B2 and C2.
 
-Here are the messages from the console:
+Below are messages from the console:
 [MenuBar] handleItemClick: Merge Cells disabled: false hasAction: true
-MenuBar.tsx:193 [MenuBar] handleMergeCells called with selection: {startRow: 8, startCol: 1, endRow: 8, endCol: 3, type: 'cells'}
-tauri-api.ts:564 [tauri-api] mergeCells(8, 1, 8, 3)
+MenuBar.tsx:193 [MenuBar] handleMergeCells called with selection: {startRow: 3, startCol: 1, endRow: 3, endCol: 2, type: 'cells'}
+tauri-api.ts:564 [tauri-api] mergeCells(3, 1, 3, 2)
 tauri-api.ts:571 [tauri-api] mergeCells result: {success: true, mergedRegions: Array(2), updatedCells: Array(1)}
 MenuBar.tsx:201 [MenuBar] mergeCells result: {success: true, mergedRegions: Array(2), updatedCells: Array(1)}
-
-The most recent update was done in commands.rs.
-The fix there was to update get_viewport_cells and get_cell_internal to check the merged regions and populate the correct spans.
+GridCanvas.tsx:623 [GridCanvas] grid:refresh event received - refreshing cells
+GridCanvas.tsx:369 [GridCanvas] refreshCells called
+GridCanvas.tsx:347 [Cells] Fetched 2 cells. First cell: row=1, col=1, display="", styleIndex=0, rowSpan=1, colSpan=2
+GridCanvas.tsx:352 [Cells] Found 2 merged master cells: (2) ['(1,1) 1x2', '(3,1) 1x2']

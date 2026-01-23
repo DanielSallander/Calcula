@@ -3,12 +3,14 @@
 // CONTEXT: Shows current selection (e.g., "A1") and allows typing an address to navigate
 // FIX: Now participates in global editing state to prevent grid keyboard handler
 //      from capturing keystrokes and starting cell editing
+// FIX: Added merge-aware navigation - when navigating to a merged cell, expands selection
 
 import React, { useState, useEffect, useRef, useCallback } from "react";
 import { useGridContext } from "../../core/state/GridContext";
 import { setSelection, scrollToCell } from "../../core/state/gridActions";
 import { columnToLetter, letterToColumn } from "../../core/types/types";
 import { setGlobalIsEditing } from "../../core/hooks/useEditing";
+import { getMergeInfo } from "../../core/lib/tauri-api";
 
 /**
  * Parse a cell reference string (e.g., "A1", "Z100", "AA25") into row and column indices.
@@ -130,8 +132,54 @@ export function NameBox(): React.ReactElement {
     setInputValue(displayAddress);
   }, [displayAddress]);
 
+  /**
+   * Navigate to a cell, expanding selection to cover merged region if needed.
+   */
+  const navigateToCell = useCallback(
+    async (row: number, col: number) => {
+      try {
+        const mergeInfo = await getMergeInfo(row, col);
+        
+        if (mergeInfo) {
+          // Cell is part of a merge - select the entire merged region
+          dispatch(setSelection({
+            startRow: mergeInfo.startRow,
+            startCol: mergeInfo.startCol,
+            endRow: mergeInfo.endRow,
+            endCol: mergeInfo.endCol,
+            type: "cells",
+          }));
+          // Scroll to the master cell of the merge
+          dispatch(scrollToCell(mergeInfo.startRow, mergeInfo.startCol, false));
+        } else {
+          // Regular cell - normal selection
+          dispatch(setSelection({
+            startRow: row,
+            startCol: col,
+            endRow: row,
+            endCol: col,
+            type: "cells",
+          }));
+          dispatch(scrollToCell(row, col, false));
+        }
+      } catch (error) {
+        console.error('[NameBox] Failed to get merge info:', error);
+        // Fallback to regular selection on error
+        dispatch(setSelection({
+          startRow: row,
+          startCol: col,
+          endRow: row,
+          endCol: col,
+          type: "cells",
+        }));
+        dispatch(scrollToCell(row, col, false));
+      }
+    },
+    [dispatch]
+  );
+
   const handleKeyDown = useCallback(
-    (e: React.KeyboardEvent<HTMLInputElement>) => {
+    async (e: React.KeyboardEvent<HTMLInputElement>) => {
       // CRITICAL: Stop propagation for ALL keys to prevent grid keyboard handler
       // from capturing input and starting cell editing
       e.stopPropagation();
@@ -140,9 +188,8 @@ export function NameBox(): React.ReactElement {
         e.preventDefault();
         const parsed = parseCellReference(inputValue);
         if (parsed) {
-          // Navigate to the cell
-          dispatch(setSelection(parsed.row, parsed.col, parsed.row, parsed.col, "cells"));
-          dispatch(scrollToCell(parsed.row, parsed.col, false));
+          // Navigate to the cell with merge awareness
+          await navigateToCell(parsed.row, parsed.col);
           setIsEditing(false);
           setGlobalIsEditing(false); // FIX: Clear global editing state
           // Return focus to the grid
@@ -159,7 +206,7 @@ export function NameBox(): React.ReactElement {
         inputRef.current?.blur();
       }
     },
-    [inputValue, displayAddress, dispatch]
+    [inputValue, displayAddress, navigateToCell]
   );
 
   const handleChange = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
