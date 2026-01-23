@@ -1,0 +1,32 @@
+import { THEME_TOKENS } from './tokens';
+
+export const defaultTheme: Record<string, string> = {
+  // --- Context Menu ---
+  [THEME_TOKENS.CTX_MENU_BG]: '#ffffff',
+  [THEME_TOKENS.CTX_MENU_TEXT]: '#333333',
+  [THEME_TOKENS.CTX_MENU_BORDER]: '#d1d5db',
+  [THEME_TOKENS.CTX_MENU_HOVER_BG]: '#f3f4f6',
+  [THEME_TOKENS.CTX_MENU_SEPARATOR]: '#e5e7eb',
+
+  // --- Grid ---
+  [THEME_TOKENS.GRID_BG]: '#ffffff',
+  [THEME_TOKENS.GRID_TEXT]: '#000000',
+  [THEME_TOKENS.GRID_LINE]: '#e0e0e0',
+  [THEME_TOKENS.GRID_HEADER_BG]: '#f9fafb',
+  [THEME_TOKENS.GRID_HEADER_TEXT]: '#374151',
+  [THEME_TOKENS.GRID_SELECTION_BORDER]: '#10b981',
+  [THEME_TOKENS.GRID_SELECTION_BG]: 'rgba(16, 185, 129, 0.1)',
+
+  // --- Formula Bar ---
+  [THEME_TOKENS.FORMULA_BAR_BG]: '#ffffff',
+  [THEME_TOKENS.FORMULA_BAR_BORDER]: '#d1d5db',
+  [THEME_TOKENS.FORMULA_INPUT_BG]: '#ffffff',
+
+  // --- General ---
+  [THEME_TOKENS.TEXT_PRIMARY]: '#111827',
+  [THEME_TOKENS.TEXT_SECONDARY]: '#6b7280',
+  [THEME_TOKENS.TEXT_DISABLED]: '#9ca3af',
+  [THEME_TOKENS.ACCENT_PRIMARY]: '#10b981',
+  [THEME_TOKENS.BORDER_DEFAULT]: '#d1d5db',
+  [THEME_TOKENS.PANEL_BG]: '#f9fafb',
+};

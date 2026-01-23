@@ -5,11 +5,14 @@
 import React from "react";
 import { Layout } from "./Layout";
 import { GridProvider } from "../core/state/GridContext";
+import { ThemeRoot } from "../core/theme/ThemeRoot";
 
 export function App(): React.ReactElement {
   return (
-    <GridProvider>
-      <Layout />
-    </GridProvider>
+    <ThemeRoot>
+      <GridProvider>
+        <Layout />
+      </GridProvider>
+    </ThemeRoot>
   );
 }
