@@ -1,6 +1,6 @@
 // FILENAME: src-tauri/src/lib.rs
 // PURPOSE: Main library entry point.
-// UPDATED: Added merged_regions to AppState for merge cells support
+// UPDATED: Added pivot table state management
 
 use engine::{
     format_number, Cell, CellError, CellStyle, CellValue, Evaluator, Grid, NumberFormat,
@@ -10,6 +10,7 @@ use engine::{
     BinaryOperator as EngineBinaryOp, Expression as EngineExpr, UnaryOperator as EngineUnaryOp,
     Value as EngineValue,
 };
+use engine::pivot::{PivotCache, PivotDefinition, PivotId};
 use parser::ast::{
     BinaryOperator as ParserBinaryOp, Expression as ParserExpr, UnaryOperator as ParserUnaryOp,
     Value as ParserValue,
@@ -29,6 +30,7 @@ pub mod logging;
 pub mod sheets;
 pub mod undo_commands;
 pub mod merge_commands;
+pub mod pivot_commands;
 
 pub use api_types::{CellData, StyleData, DimensionData, FormattingParams, MergedRegion};
 pub use logging::{init_log_file, get_log_path, next_seq, write_log, write_log_raw};
@@ -76,6 +78,12 @@ pub struct AppState {
     pub freeze_configs: Mutex<Vec<FreezeConfig>>,
     /// Merged cell regions for the current sheet
     pub merged_regions: Mutex<HashSet<MergedRegion>>,
+    /// Pivot table storage: id -> (definition, cache)
+    pub pivot_tables: Mutex<HashMap<PivotId, (PivotDefinition, PivotCache)>>,
+    /// Next available pivot table ID
+    pub next_pivot_id: Mutex<PivotId>,
+    /// Currently active pivot table ID (for single-pivot operations)
+    pub active_pivot_id: Mutex<Option<PivotId>>,
 }
 
 impl AppState {
@@ -108,6 +116,9 @@ pub fn create_app_state() -> AppState {
         undo_stack: Mutex::new(UndoStack::new()),
         freeze_configs: Mutex::new(vec![FreezeConfig::default()]),
         merged_regions: Mutex::new(HashSet::new()),
+        pivot_tables: Mutex::new(HashMap::new()),
+        next_pivot_id: Mutex::new(1),
+        active_pivot_id: Mutex::new(None),
     }
 }
 
@@ -735,6 +746,14 @@ pub fn run() {
             merge_commands::unmerge_cells,
             merge_commands::get_merged_regions,
             merge_commands::get_merge_info,
+            // Pivot table commands
+            pivot_commands::create_pivot_table,
+            pivot_commands::update_pivot_fields,
+            pivot_commands::toggle_pivot_group,
+            pivot_commands::get_pivot_view,
+            pivot_commands::delete_pivot_table,
+            pivot_commands::get_pivot_source_data,
+            pivot_commands::refresh_pivot_cache,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

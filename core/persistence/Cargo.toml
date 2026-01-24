@@ -1,0 +1,13 @@
+[package]
+name = "persistence"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+engine = { path = "../engine" }
+rust_xlsxwriter = "0.79"
+calamine = "0.26"
+thiserror = "1.0"
+
+[dev-dependencies]
+tempfile = "3.10"

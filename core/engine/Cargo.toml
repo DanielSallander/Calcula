@@ -1,0 +1,8 @@
+[package]
+name = "engine"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+# Serde allows our structs to be converted to/from formats like JSON
+serde = { version = "1.0", features = ["derive"] }

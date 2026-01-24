@@ -151,3 +151,8 @@ $RECYCLE.BIN/
 *.sublime-project
 
 *.pyc
+
+/target/
+
+# Force include the core directory
+!core/

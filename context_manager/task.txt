@@ -1,20 +1,184 @@
-### Implement "Merge Cells"
+### Pivot Table implementation"
 
 **Context:** Merged cells break the 1:1 relationship between grid coordinates and visual layout. This is one of the hardest features to implement in a custom grid engine.
 
 **Requirements:**
-1.  **Data Structure:** Update `CellData` in Rust to include `row_span` and `col_span`.
-2.  **Rendering Logic:** Update `drawCellText` and `drawGridLines`.
-    * The renderer must check if a cell is part of a merge.
-    * If it is the "Master" cell (top-left), it draws across the total width/height of the spanned columns/rows.
-    * If it is a "Slave" cell (obscured by the merge), it skips rendering entirely.
-3.  **Selection Model:** Update `useSelection.ts`. If a user selects a cell that is part of a merge, the selection rect must expand to encompass the entire merged area automatically.
-4.  **Menu commands:** Update the "Edit" (on the top) to include a command to merge selected cells.
+1.  **Complete implementation of Pivot Table implementation as it is in Excel
 
 **Current Status:**
-We have working version, the commands appear in the "Edit" menu.
-Everything is almost done.
-We have these issues that remains to be fixed:
-- *Navigating through merged cells*. Lets say we have cells C3 and D3 merged and I have C2 currently selected. With the arrow keys I go down to the merged cell and then down one step more. It lands on D4. It should land on C4.
-    It lands correct if I go down from D2 -> D4.
-- *Interaction with frozen panes*. When having frozen panes active the merged cells is not properly showing in the grid. It is showing the merged cells as unmerged cells, not rendering them properly.
+We have currently these files implemented in the solution:
+- app\src\core\lib\pivot-api.test.ts
+- app\src\core\lib\pivot-api.ts
+- app\src\core\lib\gridRenderer\rendering\pivot.ts
+- src-tauri\src\lib.rs
+- app\src-tauri\src\pivot_commands.rs
+- core\engine\src\pivot\cache.rs
+- core\engine\src\pivot\definition.rs
+- core\engine\src\pivot\engine.rs
+- core\engine\src\pivot\mod.rs
+- core\engine\src\pivot\view.rs
+
+When running the app I get these errors:
+(.venv) PS C:\Dropbox\Projekt\Calcula\app> yarn tauri dev
+yarn run v1.22.22
+$ tauri dev
+     Running BeforeDevCommand (`yarn dev`)
+$ vite
+
+  VITE v6.4.1  ready in 227 ms
+
+  ➜  Local:   http://localhost:5173/
+  ➜  Network: use --host to expose
+     Running DevCommand (`cargo  run --no-default-features --color always --`)
+        Info Watching C:\Dropbox\Projekt\Calcula\app\src-tauri for changes...
+warning: method `update_aggregates_for_key` is never used
+   --> C:\Dropbox\Projekt\Calcula\core\engine\src\pivot\cache.rs:678:8
+    |
+476 | impl PivotCache {
+    | --------------- method in this implementation
+...
+678 |     fn update_aggregates_for_key(
+    |        ^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: `engine` (lib) generated 1 warning
+   Compiling app v0.1.0 (C:\Dropbox\Projekt\Calcula\app\src-tauri)
+error[E0432]: unresolved imports `engine::pivot::calculate_pivot`, `engine::pivot::drill_down`
+ --> src\pivot_commands.rs:8:5
+  |
+8 |     calculate_pivot, drill_down, AggregationType, FieldIndex, PivotCache, PivotDefinition,
+  |     ^^^^^^^^^^^^^^^  ^^^^^^^^^^ no `drill_down` in `pivot`
+  |     |
+  |     no `calculate_pivot` in `pivot`
+
+warning: unused import: `MultiSheetContext`
+ --> src\lib.rs:7:20
+  |
+7 |     StyleRegistry, MultiSheetContext,
+  |                    ^^^^^^^^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused imports: `evaluate_formula` and `format_cell_value`
+ --> src\calculation.rs:5:23
+  |
+5 | use crate::{AppState, evaluate_formula, format_cell_value};
+  |                       ^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^
+
+warning: unused import: `log_debug`
+ --> src\calculation.rs:7:65
+  |
+7 | use crate::{log_enter, log_exit, log_enter_info, log_exit_info, log_debug, log_warn};
+  |                                                                 ^^^^^^^^^
+
+warning: unused imports: `create_app_state`, `evaluate_formula`, and `extract_references`
+ --> src\commands.rs:7:5
+  |
+7 |     create_app_state, evaluate_formula, evaluate_formula_multi_sheet, extract_references,
+  |     ^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^                                ^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `CellStyle`
+  --> src\commands.rs:13:11
+   |
+13 |     Cell, CellStyle, CellValue, Color, Grid, NumberFormat, StyleRegistry, TextAlign, TextRotation,
+   |           ^^^^^^^^^
+
+warning: unused import: `tauri::State`
+ --> src\formula.rs:5:5
+  |
+5 | use tauri::State;
+  |     ^^^^^^^^^^^^
+
+warning: unused import: `crate::AppState`
+ --> src\formula.rs:8:5
+  |
+8 | use crate::AppState;
+  |     ^^^^^^^^^^^^^^^
+
+warning: unused import: `std::collections::HashSet`
+ --> src\merge_commands.rs:7:5
+  |
+7 | use std::collections::HashSet;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `log_error`
+ --> src\pivot_commands.rs:6:24
+  |
+6 | use crate::{log_debug, log_error, log_info, AppState};
+  |                        ^^^^^^^^^
+
+warning: unused import: `FieldIndex`
+ --> src\pivot_commands.rs:8:51
+  |
+8 |     calculate_pivot, drill_down, AggregationType, FieldIndex, PivotCache, PivotDefinition,
+  |                                                   ^^^^^^^^^^
+
+warning: unused import: `std::collections::HashMap`
+  --> src\pivot_commands.rs:14:5
+   |
+14 | use std::collections::HashMap;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error[E0599]: no method named `rows` found for reference `&PivotView` in the current scope
+   --> src\pivot_commands.rs:352:10
+    |
+351 |       let rows: Vec<PivotRowData> = view
+    |  ___________________________________-
+352 | |         .rows()
+    | |         -^^^^-- help: remove the arguments
+    | |         ||
+    | |_________|field, not a method
+    |
+
+error[E0614]: type `f64` cannot be dereferenced
+   --> src\pivot_commands.rs:361:96
+    |
+361 |                         engine::pivot::PivotCellValue::Number(n) => PivotCellValueData::Number(*n),
+    |                                                                                                ^^ can't be dereferenced
+
+error[E0614]: type `bool` cannot be dereferenced
+   --> src\pivot_commands.rs:366:57
+    |
+366 | ...                   PivotCellValueData::Boolean(*b)
+    |                                                   ^^ can't be dereferenced
+
+error[E0599]: no method named `columns` found for reference `&PivotView` in the current scope
+   --> src\pivot_commands.rs:393:10
+    |
+392 |       let columns: Vec<PivotColumnData> = view
+    |  _________________________________________-
+393 | |         .columns()
+    | |         -^^^^^^^-- help: remove the arguments
+    | |         ||
+    | |_________|field, not a method
+    |
+    |
+help: there is a method `set_columns` with a similar name, but with different arguments
+   --> C:\Dropbox\Projekt\Calcula\core\engine\src\pivot\view.rs:410:5
+    |
+410 |     pub fn set_columns(&mut self, columns: Vec<PivotColumnDescriptor>) {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error[E0308]: mismatched types
+   --> src\pivot_commands.rs:463:26
+    |
+463 |         cache.add_record((row - data_start_row) as usize, &values);
+    |               ---------- ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ expected `u32`, found `usize`
+    |               |
+    |               arguments to this method are incorrect
+    |
+note: method defined here
+   --> C:\Dropbox\Projekt\Calcula\core\engine\src\pivot\cache.rs:501:12
+    |
+501 |     pub fn add_record(&mut self, source_row: u32, values: &[CellValue]) {
+    |            ^^^^^^^^^^
+help: you can convert a `usize` to a `u32` and panic if the converted value doesn't fit
+    |
+463 |         cache.add_record(((row - data_start_row) as usize).try_into().unwrap(), &values);
+    |                          +                               +++++++++++++++++++++
+
+Some errors have detailed explanations: E0308, E0432, E0599, E0614.
+For more information about an error, try `rustc --explain E0308`.
+warning: `app` (lib) generated 11 warnings
+error: could not compile `app` (lib) due to 6 previous errors; 11 warnings emitted
