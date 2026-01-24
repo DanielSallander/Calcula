@@ -1,0 +1,154 @@
+// Pivot Editor Types - Matching Rust backend definitions
+
+export type PivotId = number;
+export type FieldIndex = number;
+
+// Aggregation types matching AggregationType enum in definition.rs
+export type AggregationType =
+  | 'sum'
+  | 'count'
+  | 'average'
+  | 'min'
+  | 'max'
+  | 'countnumbers'
+  | 'stddev'
+  | 'stddevp'
+  | 'var'
+  | 'varp'
+  | 'product';
+
+// Sort order matching SortOrder enum
+export type SortOrder = 'asc' | 'desc' | 'manual' | 'source';
+
+// Show values as matching ShowValuesAs enum
+export type ShowValuesAs =
+  | 'normal'
+  | 'percent_of_total'
+  | 'percent_of_row'
+  | 'percent_of_column'
+  | 'percent_of_parent_row'
+  | 'percent_of_parent_column'
+  | 'difference'
+  | 'percent_difference'
+  | 'running_total'
+  | 'index';
+
+// Report layout matching ReportLayout enum
+export type ReportLayout = 'compact' | 'outline' | 'tabular';
+
+// Values position matching ValuesPosition enum
+export type ValuesPosition = 'columns' | 'rows';
+
+// Field configuration matching PivotFieldConfig in pivot_commands.rs
+export interface PivotFieldConfig {
+  source_index: FieldIndex;
+  name: string;
+  sort_order?: SortOrder;
+  show_subtotals?: boolean;
+  collapsed?: boolean;
+  hidden_items?: string[];
+}
+
+// Value field configuration matching ValueFieldConfig in pivot_commands.rs
+export interface ValueFieldConfig {
+  source_index: FieldIndex;
+  name: string;
+  aggregation: string;
+  number_format?: string;
+  show_values_as?: ShowValuesAs;
+}
+
+// Layout configuration matching LayoutConfig in pivot_commands.rs
+export interface LayoutConfig {
+  show_row_grand_totals?: boolean;
+  show_column_grand_totals?: boolean;
+  report_layout?: ReportLayout;
+  repeat_row_labels?: boolean;
+  show_empty_rows?: boolean;
+  show_empty_cols?: boolean;
+  values_position?: ValuesPosition;
+}
+
+// Update request matching UpdatePivotFieldsRequest in pivot_commands.rs
+export interface UpdatePivotFieldsRequest {
+  pivot_id: PivotId;
+  row_fields?: PivotFieldConfig[];
+  column_fields?: PivotFieldConfig[];
+  value_fields?: ValueFieldConfig[];
+  layout?: LayoutConfig;
+}
+
+// Source field from the data - used in the field list
+export interface SourceField {
+  index: FieldIndex;
+  name: string;
+  isNumeric: boolean;
+}
+
+// Drop zone identifiers
+export type DropZoneType = 'filters' | 'columns' | 'rows' | 'values';
+
+// Internal field representation for drag and drop
+export interface DragField {
+  sourceIndex: FieldIndex;
+  name: string;
+  isNumeric: boolean;
+  fromZone?: DropZoneType;
+  fromIndex?: number;
+}
+
+// Field in a drop zone
+export interface ZoneField {
+  sourceIndex: FieldIndex;
+  name: string;
+  isNumeric: boolean;
+  // For value fields
+  aggregation?: AggregationType;
+}
+
+// Editor state
+export interface PivotEditorState {
+  pivotId: PivotId;
+  sourceFields: SourceField[];
+  filters: ZoneField[];
+  columns: ZoneField[];
+  rows: ZoneField[];
+  values: ZoneField[];
+  layout: LayoutConfig;
+}
+
+// Aggregation option for the dropdown menu
+export interface AggregationOption {
+  value: AggregationType;
+  label: string;
+}
+
+export const AGGREGATION_OPTIONS: AggregationOption[] = [
+  { value: 'sum', label: 'Sum' },
+  { value: 'count', label: 'Count' },
+  { value: 'average', label: 'Average' },
+  { value: 'min', label: 'Min' },
+  { value: 'max', label: 'Max' },
+  { value: 'countnumbers', label: 'Count Numbers' },
+  { value: 'stddev', label: 'Std Dev' },
+  { value: 'stddevp', label: 'Std Dev (Population)' },
+  { value: 'var', label: 'Variance' },
+  { value: 'varp', label: 'Variance (Population)' },
+  { value: 'product', label: 'Product' },
+];
+
+// Helper to get default aggregation based on field type
+export function getDefaultAggregation(isNumeric: boolean): AggregationType {
+  return isNumeric ? 'sum' : 'count';
+}
+
+// Helper to get display name for value field
+export function getValueFieldDisplayName(
+  name: string,
+  aggregation: AggregationType
+): string {
+  const aggLabel =
+    AGGREGATION_OPTIONS.find((opt) => opt.value === aggregation)?.label ||
+    'Sum';
+  return `${aggLabel} of ${name}`;
+}
