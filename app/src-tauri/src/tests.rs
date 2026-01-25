@@ -1,7 +1,9 @@
-// FILENAME: app/src-tauri/src/tests.rs
 #[cfg(test)]
 use super::*;
-use engine::{Cell, CellStyle, CellValue, CellError, Grid, NumberFormat};
+use crate::pivot_commands::{
+    col_index_to_letter, parse_cell_ref, parse_range, strip_sheet_prefix,
+};
+use engine::{Cell, CellError, CellStyle, CellValue, Grid, NumberFormat};
 use std::collections::{HashMap, HashSet};
 
 #[test]
@@ -209,4 +211,59 @@ fn test_dependency_tracking() {
 
     // Check that A2 now has B1 as a dependent
     assert!(dependents.get(&(1, 0)).unwrap().contains(&(0, 1)));
+}
+
+// ============================================================================
+// PIVOT COMMANDS TESTS
+// ============================================================================
+
+#[test]
+fn test_pivot_parse_cell_ref() {
+    assert_eq!(parse_cell_ref("A1").unwrap(), (0, 0));
+    assert_eq!(parse_cell_ref("B2").unwrap(), (1, 1));
+    assert_eq!(parse_cell_ref("Z26").unwrap(), (25, 25));
+    assert_eq!(parse_cell_ref("AA1").unwrap(), (0, 26));
+    assert_eq!(parse_cell_ref("a1").unwrap(), (0, 0)); // case insensitive
+}
+
+#[test]
+fn test_pivot_parse_cell_ref_with_sheet_prefix() {
+    assert_eq!(parse_cell_ref("Sheet1!A1").unwrap(), (0, 0));
+    assert_eq!(parse_cell_ref("Sheet1!B2").unwrap(), (1, 1));
+    assert_eq!(parse_cell_ref("'My Sheet'!C3").unwrap(), (2, 2));
+}
+
+#[test]
+fn test_pivot_parse_range() {
+    let ((sr, sc), (er, ec)) = parse_range("A1:D10").unwrap();
+    assert_eq!((sr, sc), (0, 0));
+    assert_eq!((er, ec), (9, 3));
+
+    // Reversed range should normalize
+    let ((sr, sc), (er, ec)) = parse_range("D10:A1").unwrap();
+    assert_eq!((sr, sc), (0, 0));
+    assert_eq!((er, ec), (9, 3));
+}
+
+#[test]
+fn test_pivot_parse_range_with_sheet_prefix() {
+    let ((sr, sc), (er, ec)) = parse_range("Sheet1!B2:C5").unwrap();
+    assert_eq!((sr, sc), (1, 1));
+    assert_eq!((er, ec), (4, 2));
+}
+
+#[test]
+fn test_pivot_col_index_to_letter() {
+    assert_eq!(col_index_to_letter(0), "A");
+    assert_eq!(col_index_to_letter(25), "Z");
+    assert_eq!(col_index_to_letter(26), "AA");
+    assert_eq!(col_index_to_letter(27), "AB");
+}
+
+#[test]
+fn test_pivot_strip_sheet_prefix() {
+    assert_eq!(strip_sheet_prefix("A1"), "A1");
+    assert_eq!(strip_sheet_prefix("Sheet1!A1"), "A1");
+    assert_eq!(strip_sheet_prefix("'Sheet Name'!B2"), "B2");
+    assert_eq!(strip_sheet_prefix("Sheet1!A1:D10"), "A1:D10");
 }

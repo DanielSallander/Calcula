@@ -53,7 +53,7 @@ export interface PivotFieldConfig {
 export interface ValueFieldConfig {
   source_index: FieldIndex;
   name: string;
-  aggregation: string;
+  aggregation: AggregationType;  // Changed from 'string' to 'AggregationType'
   number_format?: string;
   show_values_as?: ShowValuesAs;
 }

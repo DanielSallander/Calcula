@@ -1,3 +1,5 @@
+// FILENAME: app/src/core/components/pivot/CreatePivotDialog.tsx
+
 import React, { useCallback, useState } from 'react';
 import { styles } from './PivotEditor.styles';
 import { ZoneFieldItem } from './ZoneFieldItem';

@@ -4,6 +4,7 @@ import { FieldList } from './FieldList';
 import { DropZones } from './DropZones';
 import { LayoutOptions } from './LayoutOptions';
 import { usePivotEditorState } from './usePivotEditorState';
+import { updatePivotFields } from '../../lib/pivot-api';
 import type {
   SourceField,
   ZoneField,
@@ -11,15 +12,6 @@ import type {
   UpdatePivotFieldsRequest,
   PivotId,
 } from './types';
-
-// Mock API call - replace with actual Tauri invoke
-async function updatePivotFields(
-  request: UpdatePivotFieldsRequest
-): Promise<void> {
-  console.log('Updating pivot fields:', request);
-  // TODO: Replace with actual Tauri command
-  // await invoke('update_pivot_fields', { request });
-}
 
 interface PivotEditorProps {
   pivotId: PivotId;
@@ -30,6 +22,7 @@ interface PivotEditorProps {
   initialFilters?: ZoneField[];
   initialLayout?: LayoutConfig;
   onClose?: () => void;
+  onViewUpdate?: () => void;
 }
 
 export function PivotEditor({
@@ -41,14 +34,19 @@ export function PivotEditor({
   initialFilters = [],
   initialLayout = {},
   onClose,
+  onViewUpdate,
 }: PivotEditorProps): React.ReactElement {
   const handleUpdate = useCallback(async (request: UpdatePivotFieldsRequest) => {
     try {
       await updatePivotFields(request);
+      // Notify parent that the pivot view has been updated
+      if (onViewUpdate) {
+        onViewUpdate();
+      }
     } catch (error) {
       console.error('Failed to update pivot fields:', error);
     }
-  }, []);
+  }, [onViewUpdate]);
 
   const {
     usedFields,

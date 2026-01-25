@@ -9,7 +9,7 @@ use engine::pivot::{
     PivotField, PivotId, PivotLayout, PivotView, ReportLayout, ShowValuesAs, SortOrder,
     ValueField, ValuesPosition,
 };
-use engine::CellValue;
+use engine::{Cell, CellValue};
 use serde::{Deserialize, Serialize};
 use tauri::State;
 
@@ -173,8 +173,21 @@ pub struct SourceDataResponse {
 // HELPER FUNCTIONS
 // ============================================================================
 
-/// Parses a cell reference like "A1" into (row, col) 0-indexed coordinates
-fn parse_cell_ref(cell_ref: &str) -> Result<(u32, u32), String> {
+/// Strips the sheet name prefix from a cell reference or range.
+/// "Sheet1!A1" -> "A1", "A1" -> "A1", "'Sheet Name'!B2" -> "B2"
+pub(crate) fn strip_sheet_prefix(reference: &str) -> &str {
+    if let Some(pos) = reference.rfind('!') {
+        &reference[pos + 1..]
+    } else {
+        reference
+    }
+}
+
+/// Parses a cell reference like "A1" into (row, col) 0-indexed coordinates.
+/// Also handles references with sheet prefixes like "Sheet1!A1".
+pub(crate) fn parse_cell_ref(cell_ref: &str) -> Result<(u32, u32), String> {
+    // Strip any sheet prefix first
+    let cell_ref = strip_sheet_prefix(cell_ref);
     let cell_ref = cell_ref.trim().to_uppercase();
     
     let col_end = cell_ref
@@ -206,8 +219,11 @@ fn parse_cell_ref(cell_ref: &str) -> Result<(u32, u32), String> {
     Ok((row - 1, col)) // Convert to 0-indexed
 }
 
-/// Parses a range like "A1:D10" into ((start_row, start_col), (end_row, end_col))
-fn parse_range(range: &str) -> Result<((u32, u32), (u32, u32)), String> {
+/// Parses a range like "A1:D10" or "Sheet1!A1:D10" into ((start_row, start_col), (end_row, end_col))
+pub(crate) fn parse_range(range: &str) -> Result<((u32, u32), (u32, u32)), String> {
+    // Strip any sheet prefix from the entire range first
+    let range = strip_sheet_prefix(range);
+    
     let parts: Vec<&str> = range.split(':').collect();
     
     if parts.len() != 2 {
@@ -227,7 +243,7 @@ fn parse_range(range: &str) -> Result<((u32, u32), (u32, u32)), String> {
 }
 
 /// Converts column letters to 0-indexed column number
-fn col_letter_to_index(col: &str) -> u32 {
+pub(crate) fn col_letter_to_index(col: &str) -> u32 {
     let mut result: u32 = 0;
     for c in col.chars() {
         let val = (c.to_ascii_uppercase() as u32) - ('A' as u32) + 1;
@@ -237,7 +253,7 @@ fn col_letter_to_index(col: &str) -> u32 {
 }
 
 /// Converts 0-indexed column to letters
-fn col_index_to_letter(col: u32) -> String {
+pub(crate) fn col_index_to_letter(col: u32) -> String {
     let mut result = String::new();
     let mut n = col + 1;
     while n > 0 {
@@ -467,6 +483,80 @@ fn build_cache_from_grid(
     Ok((cache, headers))
 }
 
+/// Writes pivot view cells to the destination grid
+fn write_pivot_to_grid(
+    grid: &mut engine::Grid,
+    view: &PivotView,
+    destination: (u32, u32),
+) {
+    let (dest_row, dest_col) = destination;
+    
+    log_debug!(
+        "PIVOT",
+        "write_pivot_to_grid: dest=({},{}) view_size={}x{}",
+        dest_row,
+        dest_col,
+        view.row_count,
+        view.col_count
+    );
+    
+    // Iterate through visible rows only
+    for (row_idx, row_descriptor) in view.rows.iter().enumerate() {
+        if !row_descriptor.visible {
+            continue;
+        }
+        
+        // Get the cells for this row
+        if row_idx >= view.cells.len() {
+            continue;
+        }
+        let row_cells = &view.cells[row_idx];
+        
+        for (col_idx, pivot_cell) in row_cells.iter().enumerate() {
+            let grid_row = dest_row + row_idx as u32;
+            let grid_col = dest_col + col_idx as u32;
+            
+            // Convert pivot cell value to grid cell
+            let cell_value = match &pivot_cell.value {
+                engine::pivot::PivotCellValue::Empty => CellValue::Empty,
+                engine::pivot::PivotCellValue::Number(n) => CellValue::Number(*n),
+                engine::pivot::PivotCellValue::Text(s) => CellValue::Text(s.clone()),
+                engine::pivot::PivotCellValue::Boolean(b) => CellValue::Boolean(*b),
+                engine::pivot::PivotCellValue::Error(e) => CellValue::Error(engine::CellError::Value), // Simplified error mapping
+            };
+            
+            // Use formatted_value for display if available, otherwise use the raw value
+            let display_text = if !pivot_cell.formatted_value.is_empty() {
+                pivot_cell.formatted_value.clone()
+            } else {
+                match &pivot_cell.value {
+                    engine::pivot::PivotCellValue::Empty => String::new(),
+                    engine::pivot::PivotCellValue::Number(n) => n.to_string(),
+                    engine::pivot::PivotCellValue::Text(s) => s.clone(),
+                    engine::pivot::PivotCellValue::Boolean(b) => if *b { "TRUE".to_string() } else { "FALSE".to_string() },
+                    engine::pivot::PivotCellValue::Error(e) => format!("#{}", e),
+                }
+            };
+            
+            // Create the cell - for now we use text cells with the formatted value
+            // This ensures the display matches what the pivot engine calculated
+            let cell = if display_text.is_empty() {
+                Cell::new()
+            } else {
+                Cell::new_text(display_text)
+            };
+            
+            grid.set_cell(grid_row, grid_col, cell);
+        }
+    }
+    
+    log_debug!(
+        "PIVOT",
+        "write_pivot_to_grid: wrote {} rows to grid",
+        view.rows.iter().filter(|r| r.visible).count()
+    );
+}
+
 // ============================================================================
 // TAURI COMMANDS
 // ============================================================================
@@ -479,9 +569,10 @@ pub fn create_pivot_table(
 ) -> Result<PivotViewResponse, String> {
     log_info!(
         "PIVOT",
-        "create_pivot_table source={} dest={}",
+        "create_pivot_table source={} dest={} dest_sheet={:?}",
         request.source_range,
-        request.destination_cell
+        request.destination_cell,
+        request.destination_sheet
     );
 
     // Parse ranges
@@ -493,7 +584,19 @@ pub fn create_pivot_table(
         *state.active_sheet.lock().unwrap()
     });
 
-    // Get grid data
+    // Get destination sheet - use provided value or fall back to active sheet
+    let dest_sheet_idx = request.destination_sheet.unwrap_or_else(|| {
+        *state.active_sheet.lock().unwrap()
+    });
+    
+    log_info!(
+        "PIVOT",
+        "source_sheet_idx={} dest_sheet_idx={}",
+        source_sheet_idx,
+        dest_sheet_idx
+    );
+
+    // Get grid data for source
     let grids = state.grids.lock().unwrap();
     let grid = grids
         .get(source_sheet_idx)
@@ -516,10 +619,11 @@ pub fn create_pivot_table(
     definition.source_has_headers = has_headers;
     definition.destination = destination;
 
-    if let Some(dest_sheet) = request.destination_sheet {
+    // Store destination sheet in definition
+    {
         let sheet_names = state.sheet_names.lock().unwrap();
-        if dest_sheet < sheet_names.len() {
-            definition.destination_sheet = Some(sheet_names[dest_sheet].clone());
+        if dest_sheet_idx < sheet_names.len() {
+            definition.destination_sheet = Some(sheet_names[dest_sheet_idx].clone());
         }
     }
 
@@ -553,6 +657,48 @@ pub fn create_pivot_table(
     let mut cache_mut = cache;
     let view = calculate_pivot(&definition, &mut cache_mut);
     let response = view_to_response(&view);
+
+    // Write pivot output to destination grid
+    {
+        let mut grids = state.grids.lock().unwrap();
+        
+        // Verify destination sheet exists
+        if dest_sheet_idx >= grids.len() {
+            return Err(format!(
+                "Destination sheet index {} does not exist (only {} sheets available)",
+                dest_sheet_idx,
+                grids.len()
+            ));
+        }
+        
+        if let Some(dest_grid) = grids.get_mut(dest_sheet_idx) {
+            write_pivot_to_grid(dest_grid, &view, destination);
+            log_info!(
+                "PIVOT",
+                "wrote pivot output to grids[{}] at ({},{}) size {}x{}",
+                dest_sheet_idx,
+                destination.0,
+                destination.1,
+                view.row_count,
+                view.col_count
+            );
+            
+            // IMPORTANT: If dest_sheet is the currently active sheet,
+            // we also need to sync state.grid
+            let active_sheet = *state.active_sheet.lock().unwrap();
+            if dest_sheet_idx == active_sheet {
+                let mut grid = state.grid.lock().unwrap();
+                // Copy the cells we just wrote to state.grid as well
+                for ((r, c), cell) in dest_grid.cells.iter() {
+                    grid.set_cell(*r, *c, cell.clone());
+                }
+                grid.recalculate_bounds();
+                log_info!("PIVOT", "synced pivot cells to state.grid (active sheet)");
+            }
+        } else {
+            log_info!("PIVOT", "WARNING: destination sheet {} not found", dest_sheet_idx);
+        }
+    }
 
     // Store pivot table
     let mut pivot_tables = state.pivot_tables.lock().unwrap();
@@ -614,13 +760,29 @@ pub fn update_pivot_fields(
 
     // Recalculate view
     let view = calculate_pivot(definition, cache);
+    
+    // Get destination info before dropping pivot_tables lock
+    let destination = definition.destination;
+    let dest_sheet_idx = 0; // TODO: resolve from definition.destination_sheet
+    
+    drop(pivot_tables);
+    
+    // Write updated pivot output to grid
+    {
+        let mut grids = state.grids.lock().unwrap();
+        if let Some(dest_grid) = grids.get_mut(dest_sheet_idx) {
+            // Clear old pivot area first (we don't track old size, so just write new)
+            write_pivot_to_grid(dest_grid, &view, destination);
+        }
+    }
+    
     let response = view_to_response(&view);
 
     log_info!(
         "PIVOT",
         "updated pivot_id={} version={} rows={}",
         request.pivot_id,
-        definition.version,
+        response.version,
         response.row_count
     );
 
@@ -677,6 +839,21 @@ pub fn toggle_pivot_group(
 
     // Recalculate view
     let view = calculate_pivot(definition, cache);
+    
+    // Get destination info
+    let destination = definition.destination;
+    let dest_sheet_idx = 0; // TODO: resolve from definition.destination_sheet
+    
+    drop(pivot_tables);
+    
+    // Write updated pivot output to grid
+    {
+        let mut grids = state.grids.lock().unwrap();
+        if let Some(dest_grid) = grids.get_mut(dest_sheet_idx) {
+            write_pivot_to_grid(dest_grid, &view, destination);
+        }
+    }
+    
     let response = view_to_response(&view);
 
     Ok(response)
@@ -807,6 +984,7 @@ pub fn refresh_pivot_cache(
     let source_start = definition.source_start;
     let source_end = definition.source_end;
     let has_headers = definition.source_has_headers;
+    let destination = definition.destination;
     drop(pivot_tables);
 
     // Get fresh data from grid
@@ -829,49 +1007,27 @@ pub fn refresh_pivot_cache(
     definition.bump_version();
 
     let view = calculate_pivot(definition, cache);
+    
+    drop(pivot_tables);
+    
+    // Write refreshed pivot output to grid
+    {
+        let mut grids = state.grids.lock().unwrap();
+        let dest_sheet_idx = 0; // TODO: resolve from definition.destination_sheet
+        if let Some(dest_grid) = grids.get_mut(dest_sheet_idx) {
+            write_pivot_to_grid(dest_grid, &view, destination);
+        }
+    }
+    
     let response = view_to_response(&view);
 
     log_info!(
         "PIVOT",
         "refreshed pivot_id={} version={} rows={}",
         pivot_id,
-        definition.version,
+        response.version,
         response.row_count
     );
 
     Ok(response)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_parse_cell_ref() {
-        assert_eq!(parse_cell_ref("A1").unwrap(), (0, 0));
-        assert_eq!(parse_cell_ref("B2").unwrap(), (1, 1));
-        assert_eq!(parse_cell_ref("Z26").unwrap(), (25, 25));
-        assert_eq!(parse_cell_ref("AA1").unwrap(), (0, 26));
-        assert_eq!(parse_cell_ref("a1").unwrap(), (0, 0)); // case insensitive
-    }
-
-    #[test]
-    fn test_parse_range() {
-        let ((sr, sc), (er, ec)) = parse_range("A1:D10").unwrap();
-        assert_eq!((sr, sc), (0, 0));
-        assert_eq!((er, ec), (9, 3));
-
-        // Reversed range should normalize
-        let ((sr, sc), (er, ec)) = parse_range("D10:A1").unwrap();
-        assert_eq!((sr, sc), (0, 0));
-        assert_eq!((er, ec), (9, 3));
-    }
-
-    #[test]
-    fn test_col_index_to_letter() {
-        assert_eq!(col_index_to_letter(0), "A");
-        assert_eq!(col_index_to_letter(25), "Z");
-        assert_eq!(col_index_to_letter(26), "AA");
-        assert_eq!(col_index_to_letter(27), "AB");
-    }
 }

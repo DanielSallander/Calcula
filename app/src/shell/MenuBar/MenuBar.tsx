@@ -1,349 +1,31 @@
-// FILENAME: app/src/shell/MenuBar/MenuBar.tsx
-
-import React, { useState, useCallback, useEffect, useRef } from 'react';
-import { newFile, openFile, saveFile, saveFileAs, isFileModified } from '../../core/lib/file-api';
-import { undo, redo, setFreezePanes, getFreezePanes, mergeCells, unmergeCells } from '../../core/lib/tauri-api';
+import React, { useState, useEffect, useRef } from 'react';
 import { useGridContext } from '../../core/state/GridContext';
-import { setFreezeConfig } from '../../core/state/gridActions';
+import { CreatePivotDialog } from '../../core/components/pivot/CreatePivotDialog';
+import type { MenuItem } from './MenuBar.types';
+import { restoreFocusToGrid } from './MenuBar.events';
+import { useFileMenu, useEditMenu, useViewMenu, useInsertMenu } from './menus';
+import * as S from './MenuBar.styles';
 
-interface MenuItem {
-  label: string;
-  shortcut?: string;
-  action?: () => void;
-  separator?: boolean;
-  disabled?: boolean;
-  checked?: boolean;
-}
-
-interface Menu {
-  label: string;
-  items: MenuItem[];
-}
-
-// Custom events for menu actions that need to be handled by other components
-export const MenuEvents = {
-  CUT: 'menu:cut',
-  COPY: 'menu:copy',
-  PASTE: 'menu:paste',
-  FIND: 'menu:find',
-  REPLACE: 'menu:replace',
-  FREEZE_CHANGED: 'menu:freezeChanged',
-  CELLS_MERGED: 'menu:cellsMerged',
-  CELLS_UNMERGED: 'menu:cellsUnmerged',
-} as const;
-
-export function emitMenuEvent(eventName: string, detail?: unknown): void {
-  window.dispatchEvent(new CustomEvent(eventName, { detail }));
-}
-
-// Helper to restore focus to the grid after menu actions
-function restoreFocusToGrid(): void {
-  setTimeout(() => {
-    const focusContainer = document.querySelector('[tabindex="0"][style*="outline: none"]') as HTMLElement;
-    if (focusContainer) {
-      focusContainer.focus();
-    }
-  }, 0);
-}
+// Re-export for external consumers
+export { MenuEvents, emitMenuEvent } from './MenuBar.events';
+export type { MenuItem, Menu } from './MenuBar.types';
 
 export function MenuBar(): React.ReactElement {
   const [openMenu, setOpenMenu] = useState<string | null>(null);
-  const [hoveredItem, setHoveredItem] = useState<string | null>(null);
-  const [hoveredMenuButton, setHoveredMenuButton] = useState<string | null>(null);
-  const [freezeState, setFreezeState] = useState<{ row: boolean; col: boolean }>({ row: false, col: false });
   const menuBarRef = useRef<HTMLDivElement>(null);
-  
-  // Get dispatch and state to update React state and read selection
+
   const { state, dispatch } = useGridContext();
   const { selection } = state;
 
-  // Check if current selection can be merged (more than one cell selected)
-  const canMerge = selection !== null && (
-    selection.startRow !== selection.endRow || 
-    selection.startCol !== selection.endCol
-  );
+  // Initialize all menus
+  const { menu: fileMenu, handlers: fileHandlers } = useFileMenu();
+  const { menu: editMenu, handlers: editHandlers, canMerge } = useEditMenu({ selection });
+  const { menu: viewMenu } = useViewMenu({ dispatch });
+  const { menu: insertMenu, handlers: insertHandlers, isPivotDialogOpen } = useInsertMenu();
 
-  // Load freeze state on mount
-  useEffect(() => {
-    const loadFreezeState = async () => {
-      console.log('[MenuBar] Loading freeze state...');
-      try {
-        const config = await getFreezePanes();
-        console.log('[MenuBar] Loaded freeze config:', config);
-        const hasRow = config.freezeRow !== null && config.freezeRow > 0;
-        const hasCol = config.freezeCol !== null && config.freezeCol > 0;
-        setFreezeState({
-          row: hasRow,
-          col: hasCol,
-        });
-        dispatch(setFreezeConfig(
-          hasRow ? config.freezeRow : null,
-          hasCol ? config.freezeCol : null
-        ));
-      } catch (error) {
-        console.error('[MenuBar] Failed to load freeze state:', error);
-      }
-    };
-    loadFreezeState();
-  }, [dispatch]);
+  const menus = [fileMenu, editMenu, viewMenu, insertMenu];
 
-  const handleNew = useCallback(async () => {
-    try {
-      const modified = await isFileModified();
-      if (modified) {
-        const confirmed = window.confirm('You have unsaved changes. Create new file anyway?');
-        if (!confirmed) return;
-      }
-      await newFile();
-      window.location.reload();
-    } catch (error) {
-      console.error('[MenuBar] handleNew error:', error);
-      alert('Failed to create new file: ' + String(error));
-    }
-  }, []);
-
-  const handleOpen = useCallback(async () => {
-    try {
-      const modified = await isFileModified();
-      if (modified) {
-        const confirmed = window.confirm('You have unsaved changes. Open file anyway?');
-        if (!confirmed) return;
-      }
-      const cells = await openFile();
-      if (cells) {
-        window.location.reload();
-      }
-    } catch (error) {
-      console.error('[MenuBar] handleOpen error:', error);
-      alert('Failed to open file: ' + String(error));
-    }
-  }, []);
-
-  const handleSave = useCallback(async () => {
-    try {
-      const path = await saveFile();
-      if (path) {
-        console.log('[MenuBar] Saved to:', path);
-      }
-    } catch (error) {
-      console.error('[MenuBar] handleSave error:', error);
-      alert('Failed to save file: ' + String(error));
-    }
-  }, []);
-
-  const handleSaveAs = useCallback(async () => {
-    try {
-      const path = await saveFileAs();
-      if (path) {
-        console.log('[MenuBar] Saved as:', path);
-      }
-    } catch (error) {
-      console.error('[MenuBar] handleSaveAs error:', error);
-      alert('Failed to save file: ' + String(error));
-    }
-  }, []);
-
-  const handleUndo = useCallback(async () => {
-    try {
-      const result = await undo();
-      console.log('[MenuBar] Undo result:', result);
-      window.dispatchEvent(new CustomEvent('grid:refresh'));
-    } catch (error) {
-      console.error('[MenuBar] handleUndo error:', error);
-    }
-  }, []);
-
-  const handleRedo = useCallback(async () => {
-    try {
-      const result = await redo();
-      console.log('[MenuBar] Redo result:', result);
-      window.dispatchEvent(new CustomEvent('grid:refresh'));
-    } catch (error) {
-      console.error('[MenuBar] handleRedo error:', error);
-    }
-  }, []);
-
-  const handleCut = useCallback(() => {
-    emitMenuEvent(MenuEvents.CUT);
-    restoreFocusToGrid();
-  }, []);
-
-  const handleCopy = useCallback(() => {
-    emitMenuEvent(MenuEvents.COPY);
-    restoreFocusToGrid();
-  }, []);
-
-  const handlePaste = useCallback(() => {
-    emitMenuEvent(MenuEvents.PASTE);
-    restoreFocusToGrid();
-  }, []);
-
-  const handleFind = useCallback(() => {
-    emitMenuEvent(MenuEvents.FIND);
-  }, []);
-
-  const handleReplace = useCallback(() => {
-    emitMenuEvent(MenuEvents.REPLACE);
-  }, []);
-
-  // Merge cells handler
-  const handleMergeCells = useCallback(async () => {
-    if (!selection) return;
-    
-    console.log('[MenuBar] handleMergeCells called with selection:', selection);
-    try {
-      const minRow = Math.min(selection.startRow, selection.endRow);
-      const maxRow = Math.max(selection.startRow, selection.endRow);
-      const minCol = Math.min(selection.startCol, selection.endCol);
-      const maxCol = Math.max(selection.startCol, selection.endCol);
-      
-      const result = await mergeCells(minRow, minCol, maxRow, maxCol);
-      console.log('[MenuBar] mergeCells result:', result);
-      
-      if (result.success) {
-        emitMenuEvent(MenuEvents.CELLS_MERGED, result);
-        window.dispatchEvent(new CustomEvent('grid:refresh'));
-      } else {
-        console.warn('[MenuBar] Merge failed - possibly overlapping regions');
-      }
-    } catch (error) {
-      console.error('[MenuBar] handleMergeCells error:', error);
-      alert('Failed to merge cells: ' + String(error));
-    }
-  }, [selection]);
-
-  // Unmerge cells handler
-  const handleUnmergeCells = useCallback(async () => {
-    if (!selection) return;
-    
-    console.log('[MenuBar] handleUnmergeCells called with selection:', selection);
-    try {
-      // Use the start of selection to find the merge region
-      const result = await unmergeCells(selection.startRow, selection.startCol);
-      console.log('[MenuBar] unmergeCells result:', result);
-      
-      if (result.success) {
-        emitMenuEvent(MenuEvents.CELLS_UNMERGED, result);
-        window.dispatchEvent(new CustomEvent('grid:refresh'));
-      }
-    } catch (error) {
-      console.error('[MenuBar] handleUnmergeCells error:', error);
-      alert('Failed to unmerge cells: ' + String(error));
-    }
-  }, [selection]);
-
-  // View menu handlers for freeze panes
-  const handleFreezeTopRow = useCallback(async () => {
-    console.log('[MenuBar] handleFreezeTopRow called, current state:', freezeState);
-    try {
-      const newRowState = !freezeState.row;
-      const freezeRow = newRowState ? 1 : null;
-      const freezeCol = freezeState.col ? 1 : null;
-      console.log('[MenuBar] Calling setFreezePanes with:', { freezeRow, freezeCol });
-      const result = await setFreezePanes(freezeRow, freezeCol);
-      console.log('[MenuBar] setFreezePanes result:', result);
-      setFreezeState(prev => ({ ...prev, row: newRowState }));
-      dispatch(setFreezeConfig(freezeRow, freezeCol));
-      emitMenuEvent(MenuEvents.FREEZE_CHANGED, { freezeRow, freezeCol });
-      window.dispatchEvent(new CustomEvent('grid:refresh'));
-    } catch (error) {
-      console.error('[MenuBar] handleFreezeTopRow error:', error);
-    }
-  }, [freezeState, dispatch]);
-
-  const handleFreezeFirstColumn = useCallback(async () => {
-    console.log('[MenuBar] handleFreezeFirstColumn called, current state:', freezeState);
-    try {
-      const newColState = !freezeState.col;
-      const freezeRow = freezeState.row ? 1 : null;
-      const freezeCol = newColState ? 1 : null;
-      console.log('[MenuBar] Calling setFreezePanes with:', { freezeRow, freezeCol });
-      const result = await setFreezePanes(freezeRow, freezeCol);
-      console.log('[MenuBar] setFreezePanes result:', result);
-      setFreezeState(prev => ({ ...prev, col: newColState }));
-      dispatch(setFreezeConfig(freezeRow, freezeCol));
-      emitMenuEvent(MenuEvents.FREEZE_CHANGED, { freezeRow, freezeCol });
-      window.dispatchEvent(new CustomEvent('grid:refresh'));
-    } catch (error) {
-      console.error('[MenuBar] handleFreezeFirstColumn error:', error);
-    }
-  }, [freezeState, dispatch]);
-
-  const handleFreezeBoth = useCallback(async () => {
-    console.log('[MenuBar] handleFreezeBoth called, current state:', freezeState);
-    try {
-      const bothFrozen = freezeState.row && freezeState.col;
-      const newState = !bothFrozen;
-      const freezeRow = newState ? 1 : null;
-      const freezeCol = newState ? 1 : null;
-      console.log('[MenuBar] Calling setFreezePanes with:', { freezeRow, freezeCol });
-      const result = await setFreezePanes(freezeRow, freezeCol);
-      console.log('[MenuBar] setFreezePanes result:', result);
-      setFreezeState({ row: newState, col: newState });
-      dispatch(setFreezeConfig(freezeRow, freezeCol));
-      emitMenuEvent(MenuEvents.FREEZE_CHANGED, { freezeRow, freezeCol });
-      window.dispatchEvent(new CustomEvent('grid:refresh'));
-    } catch (error) {
-      console.error('[MenuBar] handleFreezeBoth error:', error);
-    }
-  }, [freezeState, dispatch]);
-
-  const handleUnfreeze = useCallback(async () => {
-    console.log('[MenuBar] handleUnfreeze called');
-    try {
-      console.log('[MenuBar] Calling setFreezePanes with:', { freezeRow: null, freezeCol: null });
-      const result = await setFreezePanes(null, null);
-      console.log('[MenuBar] setFreezePanes result:', result);
-      setFreezeState({ row: false, col: false });
-      dispatch(setFreezeConfig(null, null));
-      emitMenuEvent(MenuEvents.FREEZE_CHANGED, { freezeRow: null, freezeCol: null });
-      window.dispatchEvent(new CustomEvent('grid:refresh'));
-    } catch (error) {
-      console.error('[MenuBar] handleUnfreeze error:', error);
-    }
-  }, [dispatch]);
-
-  const menus: Menu[] = [
-    {
-      label: 'File',
-      items: [
-        { label: 'New', shortcut: 'Ctrl+N', action: handleNew },
-        { label: 'Open...', shortcut: 'Ctrl+O', action: handleOpen },
-        { separator: true, label: '' },
-        { label: 'Save', shortcut: 'Ctrl+S', action: handleSave },
-        { label: 'Save As...', shortcut: 'Ctrl+Shift+S', action: handleSaveAs },
-      ],
-    },
-    {
-      label: 'Edit',
-      items: [
-        { label: 'Undo', shortcut: 'Ctrl+Z', action: handleUndo },
-        { label: 'Redo', shortcut: 'Ctrl+Y', action: handleRedo },
-        { separator: true, label: '' },
-        { label: 'Cut', shortcut: 'Ctrl+X', action: handleCut },
-        { label: 'Copy', shortcut: 'Ctrl+C', action: handleCopy },
-        { label: 'Paste', shortcut: 'Ctrl+V', action: handlePaste },
-        { separator: true, label: '' },
-        { label: 'Find...', shortcut: 'Ctrl+F', action: handleFind },
-        { label: 'Replace...', shortcut: 'Ctrl+H', action: handleReplace },
-        { separator: true, label: '' },
-        { label: 'Merge Cells', shortcut: 'Ctrl+M', action: handleMergeCells, disabled: !canMerge },
-        { label: 'Unmerge Cells', action: handleUnmergeCells },
-      ],
-    },
-    {
-      label: 'View',
-      items: [
-        { label: 'Freeze Top Row', action: handleFreezeTopRow, checked: freezeState.row },
-        { label: 'Freeze First Column', action: handleFreezeFirstColumn, checked: freezeState.col },
-        { separator: true, label: '' },
-        { label: 'Freeze Top Row and First Column', action: handleFreezeBoth, checked: freezeState.row && freezeState.col },
-        { separator: true, label: '' },
-        { label: 'Unfreeze Panes', action: handleUnfreeze, disabled: !freezeState.row && !freezeState.col },
-      ],
-    },
-  ];
-
+  // Handle click outside to close menu
   useEffect(() => {
     const handleClickOutside = (e: MouseEvent) => {
       if (menuBarRef.current && !menuBarRef.current.contains(e.target as Node)) {
@@ -355,11 +37,12 @@ export function MenuBar(): React.ReactElement {
     return () => document.removeEventListener('mousedown', handleClickOutside);
   }, []);
 
+  // Global keyboard shortcuts
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
       const target = e.target as HTMLElement;
-      const isInputField = target.tagName === 'INPUT' || 
-                          target.tagName === 'TEXTAREA' || 
+      const isInputField = target.tagName === 'INPUT' ||
+                          target.tagName === 'TEXTAREA' ||
                           target.isContentEditable;
 
       if (e.ctrlKey || e.metaKey) {
@@ -367,43 +50,43 @@ export function MenuBar(): React.ReactElement {
           case 's':
             e.preventDefault();
             if (e.shiftKey) {
-              handleSaveAs();
+              fileHandlers.handleSaveAs();
             } else {
-              handleSave();
+              fileHandlers.handleSave();
             }
             break;
           case 'o':
             e.preventDefault();
-            handleOpen();
+            fileHandlers.handleOpen();
             break;
           case 'n':
             e.preventDefault();
-            handleNew();
+            fileHandlers.handleNew();
             break;
           case 'z':
             if (!isInputField) {
               e.preventDefault();
-              handleUndo();
+              editHandlers.handleUndo();
             }
             break;
           case 'y':
             if (!isInputField) {
               e.preventDefault();
-              handleRedo();
+              editHandlers.handleRedo();
             }
             break;
           case 'f':
             e.preventDefault();
-            handleFind();
+            editHandlers.handleFind();
             break;
           case 'h':
             e.preventDefault();
-            handleReplace();
+            editHandlers.handleReplace();
             break;
           case 'm':
             if (!isInputField && canMerge) {
               e.preventDefault();
-              handleMergeCells();
+              editHandlers.handleMergeCells();
             }
             break;
         }
@@ -412,10 +95,16 @@ export function MenuBar(): React.ReactElement {
 
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [handleNew, handleOpen, handleSave, handleSaveAs, handleUndo, handleRedo, handleFind, handleReplace, handleMergeCells, canMerge]);
+  }, [fileHandlers, editHandlers, canMerge]);
 
   const handleMenuClick = (menuLabel: string) => {
     setOpenMenu(openMenu === menuLabel ? null : menuLabel);
+  };
+
+  const handleMenuHover = (menuLabel: string) => {
+    if (openMenu) {
+      setOpenMenu(menuLabel);
+    }
   };
 
   const handleItemClick = (item: MenuItem) => {
@@ -427,155 +116,54 @@ export function MenuBar(): React.ReactElement {
     }
   };
 
-  const getMenuButtonStyle = (menuLabel: string): React.CSSProperties => {
-    const isOpen = openMenu === menuLabel;
-    const isHovered = hoveredMenuButton === menuLabel;
-    
-    return {
-      ...styles.menuButton,
-      ...(isOpen ? styles.menuButtonActive : {}),
-      ...(!isOpen && isHovered ? styles.menuButtonHover : {}),
-    };
-  };
-
-  const getMenuItemStyle = (item: MenuItem, menuLabel: string): React.CSSProperties => {
-    const itemKey = `${menuLabel}-${item.label}`;
-    const isHovered = hoveredItem === itemKey;
-    
-    return {
-      ...styles.menuItem,
-      ...(item.disabled ? styles.menuItemDisabled : {}),
-      ...(!item.disabled && isHovered ? styles.menuItemHover : {}),
-    };
-  };
-
   return (
-    <div ref={menuBarRef} style={styles.menuBar}>
-      {menus.map((menu) => (
-        <div key={menu.label} style={styles.menuContainer}>
-          <button
-            style={getMenuButtonStyle(menu.label)}
-            onClick={() => handleMenuClick(menu.label)}
-            onMouseEnter={() => {
-              setHoveredMenuButton(menu.label);
-              if (openMenu) setOpenMenu(menu.label);
-            }}
-            onMouseLeave={() => setHoveredMenuButton(null)}
-          >
-            {menu.label}
-          </button>
-          {openMenu === menu.label && (
-            <div style={styles.dropdown}>
-              {menu.items.map((item, index) =>
-                item.separator ? (
-                  <div key={index} style={styles.separator} />
-                ) : (
-                  <button
-                    key={item.label}
-                    style={getMenuItemStyle(item, menu.label)}
-                    onClick={() => handleItemClick(item)}
-                    onMouseEnter={() => setHoveredItem(`${menu.label}-${item.label}`)}
-                    onMouseLeave={() => setHoveredItem(null)}
-                    disabled={item.disabled}
-                  >
-                    <span style={styles.menuItemContent}>
-                      {item.checked !== undefined && (
-                        <span style={styles.checkmark}>{item.checked ? '[x]' : '[ ]'}</span>
+    <>
+      <S.MenuBarContainer ref={menuBarRef}>
+        {menus.map((menu) => (
+          <S.MenuContainer key={menu.label}>
+            <S.MenuButton
+              $isOpen={openMenu === menu.label}
+              onClick={() => handleMenuClick(menu.label)}
+              onMouseEnter={() => handleMenuHover(menu.label)}
+            >
+              {menu.label}
+            </S.MenuButton>
+            {openMenu === menu.label && (
+              <S.Dropdown>
+                {menu.items.map((item, index) =>
+                  item.separator ? (
+                    <S.Separator key={index} />
+                  ) : (
+                    <S.MenuItemButton
+                      key={item.label}
+                      $disabled={item.disabled}
+                      onClick={() => handleItemClick(item)}
+                      disabled={item.disabled}
+                    >
+                      <S.MenuItemContent>
+                        {item.checked !== undefined && (
+                          <S.Checkmark>{item.checked ? '[x]' : '[ ]'}</S.Checkmark>
+                        )}
+                        <span>{item.label}</span>
+                      </S.MenuItemContent>
+                      {item.shortcut && (
+                        <S.Shortcut>{item.shortcut}</S.Shortcut>
                       )}
-                      <span>{item.label}</span>
-                    </span>
-                    {item.shortcut && (
-                      <span style={styles.shortcut}>{item.shortcut}</span>
-                    )}
-                  </button>
-                )
-              )}
-            </div>
-          )}
-        </div>
-      ))}
-    </div>
+                    </S.MenuItemButton>
+                  )
+                )}
+              </S.Dropdown>
+            )}
+          </S.MenuContainer>
+        ))}
+      </S.MenuBarContainer>
+
+      <CreatePivotDialog
+        isOpen={isPivotDialogOpen}
+        onClose={insertHandlers.handlePivotDialogClose}
+        onCreated={insertHandlers.handlePivotCreated}
+        selection={selection}
+      />
+    </>
   );
 }
-
-const styles: Record<string, React.CSSProperties> = {
-  menuBar: {
-    display: 'flex',
-    alignItems: 'center',
-    height: '28px',
-    backgroundColor: '#3c3c3c',
-    borderBottom: '1px solid #252526',
-    padding: '0 8px',
-    userSelect: 'none',
-  },
-  menuContainer: {
-    position: 'relative',
-  },
-  menuButton: {
-    backgroundColor: 'transparent',
-    border: 'none',
-    color: '#cccccc',
-    padding: '4px 8px',
-    fontSize: '13px',
-    cursor: 'pointer',
-    borderRadius: '4px',
-  },
-  menuButtonHover: {
-    backgroundColor: '#454545',
-  },
-  menuButtonActive: {
-    backgroundColor: '#505050',
-  },
-  dropdown: {
-    position: 'absolute',
-    top: '100%',
-    left: '0',
-    minWidth: '260px',
-    backgroundColor: '#252526',
-    border: '1px solid #454545',
-    borderRadius: '4px',
-    padding: '4px 0',
-    zIndex: 1000,
-    boxShadow: '0 4px 12px rgba(0, 0, 0, 0.3)',
-  },
-  menuItem: {
-    display: 'flex',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    width: '100%',
-    padding: '6px 24px 6px 12px',
-    backgroundColor: 'transparent',
-    border: 'none',
-    color: '#cccccc',
-    fontSize: '13px',
-    cursor: 'pointer',
-    textAlign: 'left',
-  },
-  menuItemContent: {
-    display: 'flex',
-    alignItems: 'center',
-    gap: '8px',
-  },
-  checkmark: {
-    fontFamily: 'monospace',
-    fontSize: '11px',
-    width: '24px',
-  },
-  menuItemHover: {
-    backgroundColor: '#094771',
-  },
-  menuItemDisabled: {
-    color: '#6c6c6c',
-    cursor: 'default',
-  },
-  shortcut: {
-    color: '#888888',
-    fontSize: '12px',
-    marginLeft: '24px',
-  },
-  separator: {
-    height: '1px',
-    backgroundColor: '#454545',
-    margin: '4px 0',
-  },
-};
