@@ -153,6 +153,28 @@ pub struct SourceDataResponse {
     pub is_truncated: bool,
 }
 
+/// Zone field info - represents a field assigned to a zone
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ZoneFieldInfo {
+    pub source_index: usize,
+    pub name: String,
+    pub is_numeric: bool,
+    /// Only present for value fields
+    pub aggregation: Option<String>,
+}
+
+/// Current field configuration for the pivot editor
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PivotFieldConfiguration {
+    pub row_fields: Vec<ZoneFieldInfo>,
+    pub column_fields: Vec<ZoneFieldInfo>,
+    pub value_fields: Vec<ZoneFieldInfo>,
+    pub filter_fields: Vec<ZoneFieldInfo>,
+    pub layout: LayoutConfig,
+}
+
 /// Response for pivot region check
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -160,6 +182,8 @@ pub struct PivotRegionInfo {
     pub pivot_id: PivotId,
     pub is_empty: bool,
     pub source_fields: Vec<SourceFieldInfo>,
+    /// Current field configuration - which fields are in which zones
+    pub field_configuration: PivotFieldConfiguration,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -200,6 +200,44 @@ pub(crate) fn apply_layout_config(layout: &mut PivotLayout, config: &LayoutConfi
     }
 }
 
+// ============================================================================
+// REVERSE CONVERTERS (engine types to strings)
+// ============================================================================
+
+/// Converts AggregationType to string
+pub(crate) fn aggregation_to_string(agg: AggregationType) -> String {
+    match agg {
+        AggregationType::Sum => "sum".to_string(),
+        AggregationType::Count => "count".to_string(),
+        AggregationType::Average => "average".to_string(),
+        AggregationType::Min => "min".to_string(),
+        AggregationType::Max => "max".to_string(),
+        AggregationType::CountNumbers => "countnumbers".to_string(),
+        AggregationType::StdDev => "stddev".to_string(),
+        AggregationType::StdDevP => "stddevp".to_string(),
+        AggregationType::Var => "var".to_string(),
+        AggregationType::VarP => "varp".to_string(),
+        AggregationType::Product => "product".to_string(),
+    }
+}
+
+/// Converts ReportLayout to string
+pub(crate) fn report_layout_to_string(layout: ReportLayout) -> String {
+    match layout {
+        ReportLayout::Compact => "compact".to_string(),
+        ReportLayout::Outline => "outline".to_string(),
+        ReportLayout::Tabular => "tabular".to_string(),
+    }
+}
+
+/// Converts ValuesPosition to string
+pub(crate) fn values_position_to_string(pos: ValuesPosition) -> String {
+    match pos {
+        ValuesPosition::Columns => "columns".to_string(),
+        ValuesPosition::Rows => "rows".to_string(),
+    }
+}
+
 /// Converts engine PivotView to response format
 pub(crate) fn view_to_response(view: &PivotView) -> PivotViewResponse {
     let rows: Vec<PivotRowData> = view

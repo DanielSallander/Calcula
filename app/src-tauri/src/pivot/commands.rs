@@ -506,6 +506,8 @@ pub fn get_pivot_at_cell(
     row: u32,
     col: u32,
 ) -> Result<Option<PivotRegionInfo>, String> {
+    use crate::pivot::utils::{aggregation_to_string, report_layout_to_string, values_position_to_string};
+    
     let active_sheet = *state.active_sheet.lock().unwrap();
     
     // Check if cell is in any pivot region
@@ -539,10 +541,70 @@ pub fn get_pivot_at_cell(
         })
         .collect();
     
+    // Build current field configuration from definition
+    let row_fields: Vec<ZoneFieldInfo> = definition.row_fields.iter().map(|f| {
+        let is_numeric = cache.is_numeric_field(f.source_index);
+        ZoneFieldInfo {
+            source_index: f.source_index,
+            name: f.name.clone(),
+            is_numeric,
+            aggregation: None,
+        }
+    }).collect();
+    
+    let column_fields: Vec<ZoneFieldInfo> = definition.column_fields.iter().map(|f| {
+        let is_numeric = cache.is_numeric_field(f.source_index);
+        ZoneFieldInfo {
+            source_index: f.source_index,
+            name: f.name.clone(),
+            is_numeric,
+            aggregation: None,
+        }
+    }).collect();
+    
+    let value_fields: Vec<ZoneFieldInfo> = definition.value_fields.iter().map(|f| {
+        let is_numeric = cache.is_numeric_field(f.source_index);
+        ZoneFieldInfo {
+            source_index: f.source_index,
+            name: f.name.clone(),
+            is_numeric,
+            aggregation: Some(aggregation_to_string(f.aggregation)),
+        }
+    }).collect();
+    
+    let filter_fields: Vec<ZoneFieldInfo> = definition.filter_fields.iter().map(|f| {
+        let is_numeric = cache.is_numeric_field(f.field.source_index);
+        ZoneFieldInfo {
+            source_index: f.field.source_index,
+            name: f.field.name.clone(),
+            is_numeric,
+            aggregation: None,
+        }
+    }).collect();
+    
+    let layout = LayoutConfig {
+        show_row_grand_totals: Some(definition.layout.show_row_grand_totals),
+        show_column_grand_totals: Some(definition.layout.show_column_grand_totals),
+        report_layout: Some(report_layout_to_string(definition.layout.report_layout)),
+        repeat_row_labels: Some(definition.layout.repeat_row_labels),
+        show_empty_rows: Some(definition.layout.show_empty_rows),
+        show_empty_cols: Some(definition.layout.show_empty_cols),
+        values_position: Some(values_position_to_string(definition.layout.values_position)),
+    };
+    
+    let field_configuration = PivotFieldConfiguration {
+        row_fields,
+        column_fields,
+        value_fields,
+        filter_fields,
+        layout,
+    };
+    
     Ok(Some(PivotRegionInfo {
         pivot_id,
         is_empty,
         source_fields,
+        field_configuration,
     }))
 }
 

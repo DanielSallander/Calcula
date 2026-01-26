@@ -12,13 +12,18 @@ import { SheetTabs } from "./SheetTabs";
 import { GridProvider, useGridContext } from "../core/state/GridContext";
 import { PivotEditorPanel } from "../core/components/pivot/PivotEditorPanel";
 import { getPivotSourceData, getPivotAtCell } from "../core/lib/pivot-api";
-import type { PivotId, SourceField } from "../core/components/pivot/types";
+import type { PivotId, SourceField, ZoneField, LayoutConfig, AggregationType } from "../core/components/pivot/types";
 
 console.log("[Layout] Module loaded");
 
 interface PivotEditorState {
   pivotId: PivotId;
   sourceFields: SourceField[];
+  initialRows: ZoneField[];
+  initialColumns: ZoneField[];
+  initialValues: ZoneField[];
+  initialFilters: ZoneField[];
+  initialLayout: LayoutConfig;
 }
 
 /**
@@ -56,11 +61,27 @@ function LayoutInner(): React.ReactElement {
         }));
 
         console.log("[Layout] Opening pivot editor with fields:", sourceFields);
-        setPivotEditor({ pivotId, sourceFields });
+        setPivotEditor({
+          pivotId,
+          sourceFields,
+          initialRows: [],
+          initialColumns: [],
+          initialValues: [],
+          initialFilters: [],
+          initialLayout: {},
+        });
       } catch (error) {
         console.error("[Layout] Failed to load pivot source fields:", error);
         // Still try to open editor with minimal info
-        setPivotEditor({ pivotId, sourceFields: [] });
+        setPivotEditor({
+          pivotId,
+          sourceFields: [],
+          initialRows: [],
+          initialColumns: [],
+          initialValues: [],
+          initialFilters: [],
+          initialLayout: {},
+        });
       }
     };
 
@@ -98,9 +119,60 @@ function LayoutInner(): React.ReactElement {
                 isNumeric: field.isNumeric,
               }));
               
+              // Convert field configuration from backend format to ZoneField format
+              const config = pivotInfo.fieldConfiguration;
+              
+              const initialRows: ZoneField[] = config.rowFields.map((f) => ({
+                sourceIndex: f.sourceIndex,
+                name: f.name,
+                isNumeric: f.isNumeric,
+              }));
+              
+              const initialColumns: ZoneField[] = config.columnFields.map((f) => ({
+                sourceIndex: f.sourceIndex,
+                name: f.name,
+                isNumeric: f.isNumeric,
+              }));
+              
+              const initialValues: ZoneField[] = config.valueFields.map((f) => ({
+                sourceIndex: f.sourceIndex,
+                name: f.name,
+                isNumeric: f.isNumeric,
+                aggregation: f.aggregation as AggregationType | undefined,
+              }));
+              
+              const initialFilters: ZoneField[] = config.filterFields.map((f) => ({
+                sourceIndex: f.sourceIndex,
+                name: f.name,
+                isNumeric: f.isNumeric,
+              }));
+              
+              // Layout config uses snake_case to match Rust backend
+              const initialLayout: LayoutConfig = {
+                show_row_grand_totals: config.layout.show_row_grand_totals,
+                show_column_grand_totals: config.layout.show_column_grand_totals,
+                report_layout: config.layout.report_layout,
+                repeat_row_labels: config.layout.repeat_row_labels,
+                show_empty_rows: config.layout.show_empty_rows,
+                show_empty_cols: config.layout.show_empty_cols,
+                values_position: config.layout.values_position,
+              };
+              
+              console.log("[Layout] Restoring pivot editor state:", {
+                rows: initialRows.length,
+                columns: initialColumns.length,
+                values: initialValues.length,
+                filters: initialFilters.length,
+              });
+              
               setPivotEditor({
                 pivotId: pivotInfo.pivotId,
                 sourceFields,
+                initialRows,
+                initialColumns,
+                initialValues,
+                initialFilters,
+                initialLayout,
               });
             }
           }
@@ -167,6 +239,11 @@ function LayoutInner(): React.ReactElement {
           <PivotEditorPanel
             pivotId={pivotEditor.pivotId}
             sourceFields={pivotEditor.sourceFields}
+            initialRows={pivotEditor.initialRows}
+            initialColumns={pivotEditor.initialColumns}
+            initialValues={pivotEditor.initialValues}
+            initialFilters={pivotEditor.initialFilters}
+            initialLayout={pivotEditor.initialLayout}
             onClose={handlePivotEditorClose}
             onViewUpdate={handlePivotViewUpdate}
           />

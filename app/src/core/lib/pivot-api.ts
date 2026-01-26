@@ -222,11 +222,31 @@ export interface SourceFieldInfo {
   isNumeric: boolean;
 }
 
+/** Zone field info - represents a field assigned to a zone */
+export interface ZoneFieldInfo {
+  sourceIndex: number;
+  name: string;
+  isNumeric: boolean;
+  /** Only present for value fields */
+  aggregation?: string;
+}
+
+/** Current field configuration for the pivot editor */
+export interface PivotFieldConfiguration {
+  rowFields: ZoneFieldInfo[];
+  columnFields: ZoneFieldInfo[];
+  valueFields: ZoneFieldInfo[];
+  filterFields: ZoneFieldInfo[];
+  layout: LayoutConfig;
+}
+
 /** Pivot region info returned when checking if a cell is in a pivot */
 export interface PivotRegionInfo {
   pivotId: PivotId;
   isEmpty: boolean;
   sourceFields: SourceFieldInfo[];
+  /** Current field configuration - which fields are in which zones */
+  fieldConfiguration: PivotFieldConfiguration;
 }
 
 /** Pivot region data for rendering placeholders */
