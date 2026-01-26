@@ -696,18 +696,31 @@ impl<'a> PivotCalculator<'a> {
         
         // Data columns
         if self.col_items.is_empty() {
-            // No column fields - one column per value field
-            for (i, _vf) in self.definition.value_fields.iter().enumerate() {
-                let col_idx = row_label_cols + i;
+            // No column fields - one column per value field (or one blank column if no values)
+            if self.definition.value_fields.is_empty() {
+                // No value fields - add a single blank data column
                 descriptors.push(PivotColumnDescriptor {
-                    view_col: col_idx,
+                    view_col: row_label_cols,
                     col_type: PivotColumnType::Data,
                     depth: 0,
                     width_hint: 100,
                     parent_index: None,
                     children_indices: Vec::new(),
-                    group_values: vec![i as ValueId],
+                    group_values: Vec::new(),
                 });
+            } else {
+                for (i, _vf) in self.definition.value_fields.iter().enumerate() {
+                    let col_idx = row_label_cols + i;
+                    descriptors.push(PivotColumnDescriptor {
+                        view_col: col_idx,
+                        col_type: PivotColumnType::Data,
+                        depth: 0,
+                        width_hint: 100,
+                        parent_index: None,
+                        children_indices: Vec::new(),
+                        group_values: vec![i as ValueId],
+                    });
+                }
             }
         } else {
             // Generate from column items
@@ -778,12 +791,21 @@ impl<'a> PivotCalculator<'a> {
             
             // Column header cells
             if self.col_items.is_empty() {
-                // No column fields - show value field names
-                for vf in &self.definition.value_fields {
+                // No column fields - show value field names (or blank if no values)
+                if self.definition.value_fields.is_empty() {
+                    // No value fields - add blank header
                     if header_row == col_header_rows - 1 {
-                        cells.push(PivotViewCell::column_header(vf.name.clone()));
+                        cells.push(PivotViewCell::column_header(String::new()));
                     } else {
                         cells.push(PivotViewCell::corner());
+                    }
+                } else {
+                    for vf in &self.definition.value_fields {
+                        if header_row == col_header_rows - 1 {
+                            cells.push(PivotViewCell::column_header(vf.name.clone()));
+                        } else {
+                            cells.push(PivotViewCell::corner());
+                        }
                     }
                 }
             } else {
@@ -974,6 +996,20 @@ impl<'a> PivotCalculator<'a> {
         let value_fields = self.definition.value_fields.clone();
         let values_position = self.definition.layout.values_position;
         
+        // Handle case with no value fields - generate blank cells
+        if value_fields.is_empty() {
+            if col_items.is_empty() {
+                // No columns and no values - add one blank cell
+                cells.push(PivotViewCell::blank());
+            } else {
+                // Generate blank cells for each column
+                for _ in &col_items {
+                    cells.push(PivotViewCell::blank());
+                }
+            }
+            return;
+        }
+        
         if col_items.is_empty() {
             // No column fields - one cell per value field
             for (vf_idx, vf) in value_fields.iter().enumerate() {
@@ -1007,6 +1043,9 @@ impl<'a> PivotCalculator<'a> {
                     value_fields.len(),
                     values_position,
                 );
+                
+                // Safety check: ensure vf_idx is valid
+                let vf_idx = vf_idx.min(value_fields.len().saturating_sub(1));
                 
                 let vf = &value_fields[vf_idx];
                 
@@ -1117,6 +1156,11 @@ fn expand_axis_for_values(
     items: &mut Vec<FlatAxisItem>,
     value_fields: &[crate::pivot::definition::ValueField],
 ) {
+    // Early return if no value fields
+    if value_fields.is_empty() {
+        return;
+    }
+    
     if items.is_empty() {
         // No axis items - create items just for value fields
         for (i, vf) in value_fields.iter().enumerate() {
@@ -1174,7 +1218,12 @@ fn extract_value_field_from_column(
     value_count: usize,
     values_position: ValuesPosition,
 ) -> (usize, Vec<ValueId>) {
-    if value_count <= 1 {
+    // Handle empty value fields case
+    if value_count == 0 {
+        return (0, col_item.group_values.clone());
+    }
+    
+    if value_count == 1 {
         // Single value field - use index 0
         return (0, col_item.group_values.clone());
     }
@@ -1329,5 +1378,31 @@ mod tests {
         // Should produce rows with single value column
         assert!(view.row_count > 0);
         assert!(view.col_count >= 2); // Row label + value
+    }
+    
+    #[test]
+    fn test_no_value_fields() {
+        let mut cache = create_test_cache();
+        let mut definition = create_test_definition();
+        definition.value_fields.clear();
+        
+        let view = calculate_pivot(&definition, &mut cache);
+        
+        // Should produce a view without panicking
+        assert!(view.row_count > 0);
+        assert!(view.col_count >= 1);
+    }
+    
+    #[test]
+    fn test_no_value_fields_with_columns() {
+        let mut cache = create_test_cache();
+        let mut definition = create_test_definition();
+        definition.value_fields.clear();
+        // Keep column_fields
+        
+        let view = calculate_pivot(&definition, &mut cache);
+        
+        // Should produce a view without panicking
+        assert!(view.row_count > 0);
     }
 }

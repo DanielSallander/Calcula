@@ -8,11 +8,13 @@
 **Current Status:**
 We have a first working version of the Pivot Table.
 As a use case I have this:
-I have data, with headers, in range B2:C5. The I select this range and insert a pivot table.
-After clicking "OK" in the pivot table dialog I see the pivot table appearing and a pivot table pane where I can edit the layout, change aggregations etc.
-The following issues is whar we need to fix / improve:
-- The pivot table is instantiated with a reserved area. However, we do not see this reserved area. In Excel there is like a startup image.
-In our solution it is enough to have a white rectangle. Let us make the reserved area 18 rows and 3 columns in size.
-- When a user trying to edit a cell or range of cells in the reserved area the solution is rightfully denying that.
-However we should also get a pop-up message saying "You can't change this part of the PivotTable".
-- When a cell is selected that is located within the pivot area the pivot pane should be visible. Otherwise it should be hidden.
+I have data, with headers, in range B2:C5. Then I select this range and insert a pivot table.
+A pivot table is correctly created and I can drag a field onto rows pane.
+We have these issues to address:
+- The Pivot Area seems to not be correctly set. In the startup, when no fields are applied it is correctly setting a reserved area.
+But after applying fields the rows beneath the headers are outside the pivot area. We must fix so that the pivot area always encapsulates
+the whole area that contains values and fields layouted in the sheet.
+- Pivot table is not updating properly when adding and removing fields to any of the pivot panes (rows, columns, filters, values).
+For example, after applying and removing a field the pivot table is still showing values.
+(Maybe this is connected to the first issue).
+

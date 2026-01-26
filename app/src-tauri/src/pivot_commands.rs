@@ -555,6 +555,52 @@ fn build_cache_from_grid(
     Ok((cache, headers))
 }
 
+/// Resolves the destination sheet index from a pivot definition.
+/// Falls back to active sheet if destination_sheet is not set or not found.
+fn resolve_dest_sheet_index(state: &AppState, definition: &PivotDefinition) -> usize {
+    if let Some(ref sheet_name) = definition.destination_sheet {
+        let sheet_names = state.sheet_names.lock().unwrap();
+        for (idx, name) in sheet_names.iter().enumerate() {
+            if name == sheet_name {
+                return idx;
+            }
+        }
+    }
+    // Fallback to active sheet
+    *state.active_sheet.lock().unwrap()
+}
+
+/// Clears cells in a pivot region from the grid.
+/// This is called before writing a new pivot view to ensure old data is removed.
+fn clear_pivot_region_from_grid(
+    grid: &mut engine::Grid,
+    start_row: u32,
+    start_col: u32,
+    end_row: u32,
+    end_col: u32,
+) {
+    log_debug!(
+        "PIVOT",
+        "clear_pivot_region_from_grid: ({},{}) to ({},{})",
+        start_row,
+        start_col,
+        end_row,
+        end_col
+    );
+    
+    for row in start_row..=end_row {
+        for col in start_col..=end_col {
+            grid.clear_cell(row, col);
+        }
+    }
+}
+
+/// Gets the current pivot region for a pivot ID, if it exists.
+fn get_pivot_region(state: &AppState, pivot_id: PivotId) -> Option<PivotRegion> {
+    let regions = state.pivot_regions.lock().unwrap();
+    regions.iter().find(|r| r.pivot_id == pivot_id).cloned()
+}
+
 /// Writes pivot view cells to the destination grid
 fn write_pivot_to_grid(
     grid: &mut engine::Grid,
@@ -578,7 +624,7 @@ fn write_pivot_to_grid(
         return;
     }
     
-    // Iterate through visible rows only
+    // Iterate through all rows (not just visible, since we need grid positions to be correct)
     for (row_idx, row_descriptor) in view.rows.iter().enumerate() {
         if !row_descriptor.visible {
             continue;
@@ -644,10 +690,13 @@ fn update_pivot_region(
     
     // Calculate region size - use actual view size or minimum reserved size for empty pivots
     let (end_row, end_col) = if view.row_count > 0 && view.col_count > 0 {
-        let visible_rows = view.rows.iter().filter(|r| r.visible).count() as u32;
+        // Count all rows in the view (headers + data)
+        // All rows should have visible=true unless explicitly collapsed
+        let total_rows = view.row_count as u32;
+        let total_cols = view.col_count as u32;
         (
-            dest_row + visible_rows.saturating_sub(1),
-            dest_col + (view.col_count as u32).saturating_sub(1),
+            dest_row + total_rows.saturating_sub(1),
+            dest_col + total_cols.saturating_sub(1),
         )
     } else {
         // Empty pivot - reserve minimum space for placeholder
@@ -677,6 +726,62 @@ fn update_pivot_region(
         end_col,
         view.row_count == 0
     );
+}
+
+/// Clears the old pivot region and writes the new view to the grid.
+/// Also syncs to state.grid if needed.
+fn update_pivot_in_grid(
+    state: &AppState,
+    pivot_id: PivotId,
+    dest_sheet_idx: usize,
+    destination: (u32, u32),
+    view: &PivotView,
+) {
+    // Get old region before writing new data
+    let old_region = get_pivot_region(state, pivot_id);
+    
+    let mut grids = state.grids.lock().unwrap();
+    if let Some(dest_grid) = grids.get_mut(dest_sheet_idx) {
+        // Clear old pivot area first if it exists
+        if let Some(ref region) = old_region {
+            if region.sheet_index == dest_sheet_idx {
+                clear_pivot_region_from_grid(
+                    dest_grid,
+                    region.start_row,
+                    region.start_col,
+                    region.end_row,
+                    region.end_col,
+                );
+            }
+        }
+        
+        // Write new pivot data
+        write_pivot_to_grid(dest_grid, view, destination);
+        
+        // Sync to state.grid if this is the active sheet
+        let active_sheet = *state.active_sheet.lock().unwrap();
+        if dest_sheet_idx == active_sheet {
+            let mut grid = state.grid.lock().unwrap();
+            
+            // If we cleared old region, clear it from state.grid too
+            if let Some(ref region) = old_region {
+                if region.sheet_index == dest_sheet_idx {
+                    for row in region.start_row..=region.end_row {
+                        for col in region.start_col..=region.end_col {
+                            grid.clear_cell(row, col);
+                        }
+                    }
+                }
+            }
+            
+            // Copy new cells to state.grid
+            for ((r, c), cell) in dest_grid.cells.iter() {
+                grid.set_cell(*r, *c, cell.clone());
+            }
+            grid.recalculate_bounds();
+            log_debug!("PIVOT", "synced pivot cells to state.grid (active sheet)");
+        }
+    }
 }
 
 // ============================================================================
@@ -867,40 +972,27 @@ pub fn update_pivot_fields(
     // Get destination info before dropping pivot_tables lock
     let destination = definition.destination;
     let pivot_id = definition.id;
-    let dest_sheet_idx = 0; // TODO: resolve from definition.destination_sheet
+    
+    // Resolve destination sheet index from definition
+    let dest_sheet_idx = resolve_dest_sheet_index(&state, definition);
     
     drop(pivot_tables);
     
+    // Update pivot in grid (clears old region, writes new view)
+    update_pivot_in_grid(&state, pivot_id, dest_sheet_idx, destination, &view);
+    
     // Update pivot region tracking
     update_pivot_region(&state, pivot_id, dest_sheet_idx, destination, &view);
-    
-    // Write updated pivot output to grid
-    {
-        let mut grids = state.grids.lock().unwrap();
-        if let Some(dest_grid) = grids.get_mut(dest_sheet_idx) {
-            // Clear old pivot area first (we don't track old size, so just write new)
-            write_pivot_to_grid(dest_grid, &view, destination);
-            
-            // Sync to state.grid if this is the active sheet
-            let active_sheet = *state.active_sheet.lock().unwrap();
-            if dest_sheet_idx == active_sheet {
-                let mut grid = state.grid.lock().unwrap();
-                for ((r, c), cell) in dest_grid.cells.iter() {
-                    grid.set_cell(*r, *c, cell.clone());
-                }
-                grid.recalculate_bounds();
-            }
-        }
-    }
     
     let response = view_to_response(&view);
 
     log_info!(
         "PIVOT",
-        "updated pivot_id={} version={} rows={}",
+        "updated pivot_id={} version={} rows={} cols={}",
         request.pivot_id,
         response.version,
-        response.row_count
+        response.row_count,
+        response.col_count
     );
 
     Ok(response)
@@ -960,30 +1052,17 @@ pub fn toggle_pivot_group(
     // Get destination info
     let destination = definition.destination;
     let pivot_id = definition.id;
-    let dest_sheet_idx = 0; // TODO: resolve from definition.destination_sheet
+    
+    // Resolve destination sheet index from definition
+    let dest_sheet_idx = resolve_dest_sheet_index(&state, definition);
     
     drop(pivot_tables);
     
+    // Update pivot in grid (clears old region, writes new view)
+    update_pivot_in_grid(&state, pivot_id, dest_sheet_idx, destination, &view);
+    
     // Update pivot region tracking
     update_pivot_region(&state, pivot_id, dest_sheet_idx, destination, &view);
-    
-    // Write updated pivot output to grid
-    {
-        let mut grids = state.grids.lock().unwrap();
-        if let Some(dest_grid) = grids.get_mut(dest_sheet_idx) {
-            write_pivot_to_grid(dest_grid, &view, destination);
-            
-            // Sync to state.grid if this is the active sheet
-            let active_sheet = *state.active_sheet.lock().unwrap();
-            if dest_sheet_idx == active_sheet {
-                let mut grid = state.grid.lock().unwrap();
-                for ((r, c), cell) in dest_grid.cells.iter() {
-                    grid.set_cell(*r, *c, cell.clone());
-                }
-                grid.recalculate_bounds();
-            }
-        }
-    }
     
     let response = view_to_response(&view);
 
@@ -1021,11 +1100,48 @@ pub fn get_pivot_view(
 pub fn delete_pivot_table(state: State<AppState>, pivot_id: PivotId) -> Result<(), String> {
     log_info!("PIVOT", "delete_pivot_table pivot_id={}", pivot_id);
 
-    let mut pivot_tables = state.pivot_tables.lock().unwrap();
+    // Get pivot info before removing
+    let pivot_tables = state.pivot_tables.lock().unwrap();
+    let (definition, _) = pivot_tables
+        .get(&pivot_id)
+        .ok_or_else(|| format!("Pivot table {} not found", pivot_id))?;
     
-    if pivot_tables.remove(&pivot_id).is_none() {
-        return Err(format!("Pivot table {} not found", pivot_id));
+    let destination = definition.destination;
+    let dest_sheet_idx = resolve_dest_sheet_index(&state, definition);
+    drop(pivot_tables);
+    
+    // Get the region to clear
+    let old_region = get_pivot_region(&state, pivot_id);
+    
+    // Clear the pivot area from the grid
+    if let Some(ref region) = old_region {
+        let mut grids = state.grids.lock().unwrap();
+        if let Some(dest_grid) = grids.get_mut(dest_sheet_idx) {
+            clear_pivot_region_from_grid(
+                dest_grid,
+                region.start_row,
+                region.start_col,
+                region.end_row,
+                region.end_col,
+            );
+            
+            // Sync to state.grid if this is the active sheet
+            let active_sheet = *state.active_sheet.lock().unwrap();
+            if dest_sheet_idx == active_sheet {
+                let mut grid = state.grid.lock().unwrap();
+                for row in region.start_row..=region.end_row {
+                    for col in region.start_col..=region.end_col {
+                        grid.clear_cell(row, col);
+                    }
+                }
+                grid.recalculate_bounds();
+            }
+        }
     }
+
+    // Remove pivot table
+    let mut pivot_tables = state.pivot_tables.lock().unwrap();
+    pivot_tables.remove(&pivot_id);
 
     // Clear active if this was the active pivot
     let mut active = state.active_pivot_id.lock().unwrap();
@@ -1120,11 +1236,15 @@ pub fn refresh_pivot_cache(
     let source_end = definition.source_end;
     let has_headers = definition.source_has_headers;
     let destination = definition.destination;
+    
+    // Resolve destination sheet index from definition
+    let dest_sheet_idx = resolve_dest_sheet_index(&state, definition);
+    
     drop(pivot_tables);
 
     // Get fresh data from grid
     let grids = state.grids.lock().unwrap();
-    let source_sheet_idx = 0; // TODO: resolve from definition.destination_sheet
+    let source_sheet_idx = 0; // TODO: resolve from definition.source_sheet
     let grid = grids
         .get(source_sheet_idx)
         .ok_or_else(|| "Source sheet not found".to_string())?;
@@ -1143,30 +1263,13 @@ pub fn refresh_pivot_cache(
 
     let view = safe_calculate_pivot(definition, cache);
     
-    let dest_sheet_idx = 0; // TODO: resolve from definition.destination_sheet
-    
     drop(pivot_tables);
+    
+    // Update pivot in grid (clears old region, writes new view)
+    update_pivot_in_grid(&state, pivot_id, dest_sheet_idx, destination, &view);
     
     // Update pivot region tracking
     update_pivot_region(&state, pivot_id, dest_sheet_idx, destination, &view);
-    
-    // Write refreshed pivot output to grid
-    {
-        let mut grids = state.grids.lock().unwrap();
-        if let Some(dest_grid) = grids.get_mut(dest_sheet_idx) {
-            write_pivot_to_grid(dest_grid, &view, destination);
-            
-            // Sync to state.grid if this is the active sheet
-            let active_sheet = *state.active_sheet.lock().unwrap();
-            if dest_sheet_idx == active_sheet {
-                let mut grid = state.grid.lock().unwrap();
-                for ((r, c), cell) in dest_grid.cells.iter() {
-                    grid.set_cell(*r, *c, cell.clone());
-                }
-                grid.recalculate_bounds();
-            }
-        }
-    }
     
     let response = view_to_response(&view);
 
