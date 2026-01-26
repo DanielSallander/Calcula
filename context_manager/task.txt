@@ -8,13 +8,21 @@
 **Current Status:**
 We have a first working version of the Pivot Table.
 As a use case I have this:
-I have data, with headers, in range B2:C5. Then I select this range and insert a pivot table.
+I have data, with headers (A and B), in range B2:C5. Then I select this range and insert a pivot table.
 A pivot table is correctly created and I can drag a field onto rows pane.
 We have these issues to address:
-- The Pivot Area seems to not be correctly set. In the startup, when no fields are applied it is correctly setting a reserved area.
-But after applying fields the rows beneath the headers are outside the pivot area. We must fix so that the pivot area always encapsulates
-the whole area that contains values and fields layouted in the sheet.
-- Pivot table is not updating properly when adding and removing fields to any of the pivot panes (rows, columns, filters, values).
-For example, after applying and removing a field the pivot table is still showing values.
-(Maybe this is connected to the first issue).
+- There seems to be a bug in how the pivot table is updated when a change of the layout is done.
+For example. if I put column A on rows nothing happens. 
+And when I remove column A from rows the pivot table is layouted with column A on rows.
 
+Here is the console messages from when I add column A to rows and then remove it from rows.
+[Layout] Pivot view updated, refreshing grid
+GridCanvas.tsx:652 [GridCanvas] grid:refresh event received - refreshing cells
+GridCanvas.tsx:386 [GridCanvas] refreshCells called
+GridCanvas.tsx:351 [Cells] Fetched 8 cells. First cell: row=1, col=1, display="A", styleIndex=0, rowSpan=1, colSpan=1
+Layout.tsx:132 [Layout] Pivot view updated, refreshing grid
+GridCanvas.tsx:652 [GridCanvas] grid:refresh event received - refreshing cells
+GridCanvas.tsx:386 [GridCanvas] refreshCells called
+GridCanvas.tsx:351 [Cells] Fetched 18 cells. First cell: row=1, col=1, display="A", styleIndex=0, rowSpan=1, colSpan=1
+
+I have also attached an image where you can see this scenario.

@@ -1,4 +1,4 @@
-import { useState, useCallback, useMemo } from 'react';
+import { useState, useCallback, useMemo, useEffect, useRef } from 'react';
 import type {
   PivotEditorState,
   SourceField,
@@ -42,6 +42,10 @@ export function usePivotEditorState({
   const [layout, setLayout] = useState<LayoutConfig>(initialLayout);
   const [draggingField, setDraggingField] = useState<DragField | null>(null);
 
+  // Track whether we should trigger an update (skip initial render)
+  const isInitialMount = useRef(true);
+  const pendingUpdate = useRef(false);
+
   // Track which fields are currently used in any zone
   const usedFields = useMemo(() => {
     const used = new Set<number>();
@@ -81,12 +85,28 @@ export function usePivotEditorState({
     };
   }, [pivotId, rows, columns, values, layout]);
 
-  // Trigger update callback
-  const triggerUpdate = useCallback(() => {
-    if (onUpdate) {
+  // Effect to trigger update when zones change (after state is actually updated)
+  useEffect(() => {
+    if (isInitialMount.current) {
+      isInitialMount.current = false;
+      return;
+    }
+
+    if (pendingUpdate.current && onUpdate) {
+      pendingUpdate.current = false;
+      console.log('[PivotEditor] Triggering update with current state:', {
+        rows: rows.length,
+        columns: columns.length,
+        values: values.length,
+      });
       onUpdate(buildUpdateRequest());
     }
-  }, [onUpdate, buildUpdateRequest]);
+  }, [rows, columns, values, filters, layout, onUpdate, buildUpdateRequest]);
+
+  // Mark that an update should be triggered after state changes
+  const scheduleUpdate = useCallback(() => {
+    pendingUpdate.current = true;
+  }, []);
 
   // Get zone state setter
   const getZoneSetter = useCallback(
@@ -152,10 +172,10 @@ export function usePivotEditorState({
         setValues(removeFromZone);
       }
 
-      // Defer update to next tick so state is updated
-      setTimeout(triggerUpdate, 0);
+      // Schedule update to run after state is updated
+      scheduleUpdate();
     },
-    [triggerUpdate]
+    [scheduleUpdate]
   );
 
   // Handle drop into a zone
@@ -189,9 +209,9 @@ export function usePivotEditorState({
         return [...prev, zoneField];
       });
 
-      setTimeout(triggerUpdate, 0);
+      scheduleUpdate();
     },
-    [getZoneSetter, triggerUpdate]
+    [getZoneSetter, scheduleUpdate]
   );
 
   // Handle remove from zone
@@ -199,9 +219,9 @@ export function usePivotEditorState({
     (zone: DropZoneType, index: number) => {
       const setter = getZoneSetter(zone);
       setter((prev) => prev.filter((_, i) => i !== index));
-      setTimeout(triggerUpdate, 0);
+      scheduleUpdate();
     },
-    [getZoneSetter, triggerUpdate]
+    [getZoneSetter, scheduleUpdate]
   );
 
   // Handle reorder within zone
@@ -216,9 +236,9 @@ export function usePivotEditorState({
         newFields.splice(adjustedToIndex, 0, removed);
         return newFields;
       });
-      setTimeout(triggerUpdate, 0);
+      scheduleUpdate();
     },
-    [getZoneSetter, triggerUpdate]
+    [getZoneSetter, scheduleUpdate]
   );
 
   // Handle aggregation change for values
@@ -227,18 +247,18 @@ export function usePivotEditorState({
       setValues((prev) =>
         prev.map((f, i) => (i === index ? { ...f, aggregation } : f))
       );
-      setTimeout(triggerUpdate, 0);
+      scheduleUpdate();
     },
-    [triggerUpdate]
+    [scheduleUpdate]
   );
 
   // Handle layout change
   const handleLayoutChange = useCallback(
     (newLayout: LayoutConfig) => {
       setLayout(newLayout);
-      setTimeout(triggerUpdate, 0);
+      scheduleUpdate();
     },
-    [triggerUpdate]
+    [scheduleUpdate]
   );
 
   // Drag handlers
