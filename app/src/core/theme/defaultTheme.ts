@@ -5,8 +5,10 @@ export const defaultTheme: Record<string, string> = {
   [THEME_TOKENS.CTX_MENU_BG]: '#ffffff',
   [THEME_TOKENS.CTX_MENU_TEXT]: '#333333',
   [THEME_TOKENS.CTX_MENU_BORDER]: '#d1d5db',
-  [THEME_TOKENS.CTX_MENU_HOVER_BG]: '#f3f4f6',
+  [THEME_TOKENS.CTX_MENU_SHADOW]: '0 4px 12px rgba(0, 0, 0, 0.15)',
+  [THEME_TOKENS.CTX_MENU_ITEM_HOVER_BG]: '#f3f4f6',
   [THEME_TOKENS.CTX_MENU_SEPARATOR]: '#e5e7eb',
+  [THEME_TOKENS.CTX_MENU_Z_INDEX]: '10000',
 
   // --- Grid ---
   [THEME_TOKENS.GRID_BG]: '#ffffff',

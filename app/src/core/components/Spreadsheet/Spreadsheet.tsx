@@ -18,7 +18,6 @@ import type { ContextMenuPosition, ContextMenuItem } from "../ContextMenu";
 import {
   gridExtensions,
   gridCommands,
-  registerCoreGridContextMenu,
   isClickWithinSelection,
   type GridMenuContext,
 } from "../../extensions";
@@ -31,9 +30,6 @@ import { MenuEvents } from "../../../shell/MenuBar";
 import * as S from "./Spreadsheet.styles";
 
 const SCROLLBAR_SIZE = 14;
-
-// Register core context menu items once
-let coreGridMenuRegistered = false;
 
 function SpreadsheetContent({ className }: SpreadsheetContentProps): React.ReactElement {
   // 1. Destructure the grouped object returned by the refactored hook
@@ -334,31 +330,31 @@ function SpreadsheetContent({ className }: SpreadsheetContentProps): React.React
     context: GridMenuContext;
   } | null>(null);
 
-  useEffect(() => {
-    if (!coreGridMenuRegistered) {
-      registerCoreGridContextMenu();
-      coreGridMenuRegistered = true;
-    }
-  }, []);
-
   // -------------------------------------------------------------------------
   // Context Menu Handler
   // -------------------------------------------------------------------------
   const handleContextMenu = useCallback(
     (event: React.MouseEvent<HTMLDivElement>) => {
+      console.log("[Spreadsheet] Context menu triggered"); // ADD THIS
+      
       if (event.shiftKey) {
+        console.log("[Spreadsheet] Shift+right-click, allowing browser menu"); // ADD THIS
         return;
       }
 
       event.preventDefault();
 
       const rect = containerRef.current?.getBoundingClientRect();
-      if (!rect) return;
+      if (!rect) {
+        console.log("[Spreadsheet] No container rect, aborting"); // ADD THIS
+        return;
+      }
 
       const mouseX = event.clientX - rect.left;
       const mouseY = event.clientY - rect.top;
 
       const clickedCell = getCellFromPixel(mouseX, mouseY, config, viewport, dimensions);
+      console.log("[Spreadsheet] Clicked cell:", clickedCell); // ADD THIS
 
       const menuContext: GridMenuContext = {
         selection,
@@ -370,10 +366,16 @@ function SpreadsheetContent({ className }: SpreadsheetContentProps): React.React
         sheetName: gridState.sheetContext.activeSheetName,
       };
 
+      // ADD THIS DEBUG BLOCK
+      const items = gridExtensions.getContextMenuItemsForContext(menuContext);
+      console.log("[Spreadsheet] Context menu items:", items.length, items.map(i => i.id));
+
       setContextMenu({
         position: { x: event.clientX, y: event.clientY },
         context: menuContext,
       });
+      
+      console.log("[Spreadsheet] Context menu state set"); // ADD THIS
     },
     [containerRef, config, viewport, dimensions, selection, gridState.sheetContext]
   );

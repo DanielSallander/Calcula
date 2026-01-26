@@ -1,14 +1,8 @@
-### Pivot Table implementation"
+The right click menu seems to have gone missing.
+I used to be able to right click a column and row to insert / delete.
 
-**Context:** Merged cells break the 1:1 relationship between grid coordinates and visual layout. This is one of the hardest features to implement in a custom grid engine.
-
-**Requirements:**
-1.  **Complete implementation of Pivot Table implementation as it is in Excel
-
-**Current Status:**
-We have a first working version of the Pivot Table.
-As a use case I have this:
-I have data, with headers (A and B), in range B2:C5. Then I select this range and insert a pivot table.
-A pivot table is correctly created and I can drag a field onto rows pane.
-We have these issues to address:
-- I would like to implement drag and drop, so that I can drag fields onto the different layout panes.
+This is from the console when right clicking a menu (strange that is says pivotEditor)
+[Layout] Rendering, pivotEditor: null
+Layout.tsx:208 [Layout] Rendering, pivotEditor: null
+Layout.tsx:208 [Layout] Rendering, pivotEditor: null
+Layout.tsx:208 [Layout] Rendering, pivotEditor: null

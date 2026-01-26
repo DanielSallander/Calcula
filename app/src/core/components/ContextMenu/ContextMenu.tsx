@@ -33,6 +33,8 @@ export function ContextMenu({
 }: ContextMenuProps): React.ReactElement {
   const menuRef = useRef<HTMLDivElement>(null);
 
+  console.log("[ContextMenu] Rendering with", items.length, "items at position", position);
+
   // Close on outside click or Escape
   useEffect(() => {
     const handleClickOutside = (e: MouseEvent) => {
@@ -100,8 +102,11 @@ export function ContextMenu({
   );
 
   if (items.length === 0) {
+    console.log("[ContextMenu] No items, returning empty");
     return <></>;
   }
+
+  console.log("[ContextMenu] Rendering menu container");
 
   return (
     <S.MenuContainer

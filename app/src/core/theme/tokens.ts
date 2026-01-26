@@ -7,8 +7,10 @@ export const THEME_TOKENS = {
   CTX_MENU_BG: '--ctx-menu-bg',
   CTX_MENU_TEXT: '--ctx-menu-text',
   CTX_MENU_BORDER: '--ctx-menu-border',
-  CTX_MENU_HOVER_BG: '--ctx-menu-hover-bg',
+  CTX_MENU_SHADOW: '--ctx-menu-shadow',
+  CTX_MENU_ITEM_HOVER_BG: '--ctx-menu-item-hover-bg',
   CTX_MENU_SEPARATOR: '--ctx-menu-separator',
+  CTX_MENU_Z_INDEX: '--z-context-menu',
 
   // --- Grid / Spreadsheet ---
   GRID_BG: '--grid-bg',

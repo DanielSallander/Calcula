@@ -1,8 +1,11 @@
 // FILENAME: addins/index.ts
 // PURPOSE: Add-in loader
 // CONTEXT: Registers all enabled add-ins with the ExtensionRegistry
+// FIX: Also registers core grid and sheet context menus
 
 import { ExtensionRegistry } from "../core/extensions";
+import { registerCoreGridContextMenu } from "../core/extensions/gridExtensions";
+import { registerCoreSheetContextMenu } from "../core/extensions/sheetExtensions";
 
 /**
  * Load and register all enabled add-ins.
@@ -12,6 +15,18 @@ import { ExtensionRegistry } from "../core/extensions";
  */
 export function loadAddIns(): void {
   console.log("[AddIns] Loading add-ins...");
+
+  // =========================================================================
+  // CORE EXTENSIONS (always registered)
+  // =========================================================================
+  
+  // Register core context menu items for grid (Cut, Copy, Paste, Insert/Delete Row/Column, etc.)
+  registerCoreGridContextMenu();
+  console.log("[AddIns] Registered core grid context menu");
+  
+  // Register core context menu items for sheet tabs (Rename, Delete, Insert Sheet)
+  registerCoreSheetContextMenu();
+  console.log("[AddIns] Registered core sheet context menu");
 
   // =========================================================================
   // ENABLED ADD-INS
