@@ -5,6 +5,7 @@
 // FIX: Added focusContainerRef for proper keyboard event handling.
 // FIX: Pass focusContainerRef to useSpreadsheetEditing for proper focus restoration.
 // FIX: Added grid:navigateToCell event listener for pivot table navigation.
+// FIX: Added selection:changed event emission for pivot table sidebar sync.
 
 import { useRef, useCallback, useState, useEffect } from "react";
 import { useGridState, useGridContext } from "../../state";
@@ -144,6 +145,24 @@ export function useSpreadsheet() {
       window.removeEventListener('grid:navigateToCell', handleNavigateToCell);
     };
   }, [dispatch]);
+
+  // Emit selection:changed event whenever selection changes
+  // This allows other components (like pivot table sidebar) to react to selection changes
+  useEffect(() => {
+    if (state.selection) {
+      window.dispatchEvent(new CustomEvent("selection:changed", {
+        detail: { 
+          row: state.selection.startRow, 
+          col: state.selection.startCol,
+          startRow: state.selection.startRow,
+          startCol: state.selection.startCol,
+          endRow: state.selection.endRow,
+          endCol: state.selection.endCol,
+          type: state.selection.type
+        }
+      }));
+    }
+  }, [state.selection]);
 
   const handleCellsUpdatedWithFocus = useCallback(async () => {
     await styleLogic.handleCellsUpdated();

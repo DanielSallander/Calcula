@@ -713,6 +713,17 @@ impl PivotCache {
     pub fn filtered_count(&self) -> usize {
         self.stats.filtered_records
     }
+    
+    /// Returns the number of fields (columns) in the cache.
+    pub fn field_count(&self) -> usize {
+        self.fields.len()
+    }
+
+    /// Returns the name of a field by index.
+    pub fn field_name(&self, field_index: usize) -> Option<String> {
+        self.fields.get(field_index).map(|f| f.name.clone())
+    }
+
 }
 
 impl PivotCache {

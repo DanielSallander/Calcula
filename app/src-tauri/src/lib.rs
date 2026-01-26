@@ -1,6 +1,6 @@
 // FILENAME: src-tauri/src/lib.rs
 // PURPOSE: Main library entry point.
-// UPDATED: Added pivot table state management
+// UPDATED: Added pivot table state management and pivot region tracking
 
 use engine::{
     format_number, Cell, CellError, CellStyle, CellValue, Evaluator, Grid, NumberFormat,
@@ -44,6 +44,17 @@ mod tests;
 // APPLICATION STATE
 // ============================================================================
 
+/// Represents a pivot table output region on a sheet
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct PivotRegion {
+    pub pivot_id: PivotId,
+    pub sheet_index: usize,
+    pub start_row: u32,
+    pub start_col: u32,
+    pub end_row: u32,
+    pub end_col: u32,
+}
+
 pub struct AppState {
     /// Multiple grids, one per sheet
     pub grids: Mutex<Vec<Grid>>,
@@ -84,12 +95,30 @@ pub struct AppState {
     pub next_pivot_id: Mutex<PivotId>,
     /// Currently active pivot table ID (for single-pivot operations)
     pub active_pivot_id: Mutex<Option<PivotId>>,
+    /// Pivot output regions - cells in these regions cannot be edited directly
+    pub pivot_regions: Mutex<Vec<PivotRegion>>,
 }
 
 impl AppState {
     /// Get the active grid (convenience method)
     pub fn get_active_grid(&self) -> std::sync::MutexGuard<Grid> {
         self.grid.lock().unwrap()
+    }
+    
+    /// Check if a cell is within a pivot output region
+    pub fn is_cell_in_pivot_region(&self, sheet_index: usize, row: u32, col: u32) -> Option<PivotId> {
+        let regions = self.pivot_regions.lock().unwrap();
+        for region in regions.iter() {
+            if region.sheet_index == sheet_index
+                && row >= region.start_row
+                && row <= region.end_row
+                && col >= region.start_col
+                && col <= region.end_col
+            {
+                return Some(region.pivot_id);
+            }
+        }
+        None
     }
 }
 
@@ -119,6 +148,7 @@ pub fn create_app_state() -> AppState {
         pivot_tables: Mutex::new(HashMap::new()),
         next_pivot_id: Mutex::new(1),
         active_pivot_id: Mutex::new(None),
+        pivot_regions: Mutex::new(Vec::new()),
     }
 }
 
@@ -754,6 +784,7 @@ pub fn run() {
             pivot_commands::delete_pivot_table,
             pivot_commands::get_pivot_source_data,
             pivot_commands::refresh_pivot_cache,
+            pivot_commands::get_pivot_at_cell,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

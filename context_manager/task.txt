@@ -6,9 +6,11 @@
 1.  **Complete implementation of Pivot Table implementation as it is in Excel
 
 **Current Status:**
-We have a first version of a full implementation of the Pivot Table feature.
-I select the range B2:C5, shown in the image, and insert a pivot table. 
-After clicking "OK" in the pivot table dialog I see the pivot table appearing.
-However, I dont see a pivot table pane where I can edit the layout, change aggregations etc.
-Maybe we dont have this code in the repo yet, so please investigate that.
-If we dont have it, go ahead and create it.
+We have a first working version of the Pivot Table.
+As a use case I have this:
+I have data, with headers, in range B2:C5. The I select this range and insert a pivot table.
+After clicking "OK" in the pivot table dialog I see the pivot table appearing and a pivot table pane where I can edit the layout, change aggregations etc.
+The following issues is whar we need to fix / improve:
+- The pivot table is instantiated with aggregations and dimensions already in layout. This should not be the case.
+In the beginning it should show a white field that represents the reserved space. Image attached of how this looks like in Excel.
+- When a cell is selected that is located within the pivot area the pivot pane should be visible. Otherwise it should be hidden.

@@ -3,7 +3,7 @@
 //! This module provides the bridge between the frontend and the pivot table engine.
 //! Commands handle creation, updates, and view generation for pivot tables.
 
-use crate::{log_debug, log_info, AppState};
+use crate::{log_debug, log_info, AppState, PivotRegion};
 use engine::pivot::{
     calculate_pivot, drill_down, AggregationType, PivotCache, PivotDefinition,
     PivotField, PivotId, PivotLayout, PivotView, ReportLayout, ShowValuesAs, SortOrder,
@@ -168,6 +168,32 @@ pub struct SourceDataResponse {
     pub total_count: usize,
     pub is_truncated: bool,
 }
+
+/// Response for pivot region check
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PivotRegionInfo {
+    pub pivot_id: PivotId,
+    pub is_empty: bool,
+    pub source_fields: Vec<SourceFieldInfo>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SourceFieldInfo {
+    pub index: usize,
+    pub name: String,
+    pub is_numeric: bool,
+}
+
+// ============================================================================
+// CONSTANTS
+// ============================================================================
+
+/// Minimum reserved rows for an empty pivot table placeholder
+const EMPTY_PIVOT_ROWS: u32 = 18;
+/// Minimum reserved columns for an empty pivot table placeholder
+const EMPTY_PIVOT_COLS: u32 = 5;
 
 // ============================================================================
 // HELPER FUNCTIONS
@@ -361,6 +387,40 @@ fn apply_layout_config(layout: &mut PivotLayout, config: &LayoutConfig) {
     }
 }
 
+/// Creates an empty pivot view for when no fields are configured
+fn create_empty_view(pivot_id: PivotId, version: u64) -> PivotView {
+    PivotView {
+        pivot_id,
+        version,
+        row_count: 0,
+        col_count: 0,
+        row_label_col_count: 0,
+        column_header_row_count: 0,
+        cells: Vec::new(),
+        rows: Vec::new(),
+        columns: Vec::new(),
+        is_windowed: false,
+        total_row_count: None,
+        window_start_row: None,
+    }
+}
+
+/// Check if the pivot definition has any fields configured
+fn has_fields_configured(definition: &PivotDefinition) -> bool {
+    !definition.row_fields.is_empty() 
+        || !definition.column_fields.is_empty() 
+        || !definition.value_fields.is_empty()
+}
+
+/// Safely calculate pivot - returns empty view if no fields configured
+fn safe_calculate_pivot(definition: &PivotDefinition, cache: &mut PivotCache) -> PivotView {
+    if !has_fields_configured(definition) {
+        log_debug!("PIVOT", "No fields configured, returning empty view");
+        return create_empty_view(definition.id, definition.version);
+    }
+    calculate_pivot(definition, cache)
+}
+
 /// Converts engine PivotView to response format
 fn view_to_response(view: &PivotView) -> PivotViewResponse {
     let rows: Vec<PivotRowData> = view
@@ -500,6 +560,12 @@ fn write_pivot_to_grid(
         view.col_count
     );
     
+    // If view is empty, nothing to write
+    if view.row_count == 0 || view.col_count == 0 {
+        log_debug!("PIVOT", "Empty view, nothing to write to grid");
+        return;
+    }
+    
     // Iterate through visible rows only
     for (row_idx, row_descriptor) in view.rows.iter().enumerate() {
         if !row_descriptor.visible {
@@ -515,15 +581,6 @@ fn write_pivot_to_grid(
         for (col_idx, pivot_cell) in row_cells.iter().enumerate() {
             let grid_row = dest_row + row_idx as u32;
             let grid_col = dest_col + col_idx as u32;
-            
-            // Convert pivot cell value to grid cell
-            let cell_value = match &pivot_cell.value {
-                engine::pivot::PivotCellValue::Empty => CellValue::Empty,
-                engine::pivot::PivotCellValue::Number(n) => CellValue::Number(*n),
-                engine::pivot::PivotCellValue::Text(s) => CellValue::Text(s.clone()),
-                engine::pivot::PivotCellValue::Boolean(b) => CellValue::Boolean(*b),
-                engine::pivot::PivotCellValue::Error(e) => CellValue::Error(engine::CellError::Value), // Simplified error mapping
-            };
             
             // Use formatted_value for display if available, otherwise use the raw value
             let display_text = if !pivot_cell.formatted_value.is_empty() {
@@ -554,6 +611,59 @@ fn write_pivot_to_grid(
         "PIVOT",
         "write_pivot_to_grid: wrote {} rows to grid",
         view.rows.iter().filter(|r| r.visible).count()
+    );
+}
+
+/// Updates the pivot region tracking for a pivot table.
+/// Always tracks a region, even for empty pivots (using minimum reserved size).
+fn update_pivot_region(
+    state: &AppState,
+    pivot_id: PivotId,
+    sheet_index: usize,
+    destination: (u32, u32),
+    view: &PivotView,
+) {
+    let mut regions = state.pivot_regions.lock().unwrap();
+    
+    // Remove any existing region for this pivot
+    regions.retain(|r| r.pivot_id != pivot_id);
+    
+    let (dest_row, dest_col) = destination;
+    
+    // Calculate region size - use actual view size or minimum reserved size for empty pivots
+    let (end_row, end_col) = if view.row_count > 0 && view.col_count > 0 {
+        let visible_rows = view.rows.iter().filter(|r| r.visible).count() as u32;
+        (
+            dest_row + visible_rows.saturating_sub(1),
+            dest_col + (view.col_count as u32).saturating_sub(1),
+        )
+    } else {
+        // Empty pivot - reserve minimum space for placeholder
+        (
+            dest_row + EMPTY_PIVOT_ROWS - 1,
+            dest_col + EMPTY_PIVOT_COLS - 1,
+        )
+    };
+    
+    regions.push(PivotRegion {
+        pivot_id,
+        sheet_index,
+        start_row: dest_row,
+        start_col: dest_col,
+        end_row,
+        end_col,
+    });
+    
+    log_debug!(
+        "PIVOT",
+        "updated pivot region: id={} sheet={} ({},{}) to ({},{}) empty={}",
+        pivot_id,
+        sheet_index,
+        dest_row,
+        dest_col,
+        end_row,
+        end_col,
+        view.row_count == 0
     );
 }
 
@@ -605,7 +715,7 @@ pub fn create_pivot_table(
     let has_headers = request.has_headers.unwrap_or(true);
 
     // Build cache from grid
-    let (cache, headers) = build_cache_from_grid(grid, source_start, source_end, has_headers)?;
+    let (cache, _headers) = build_cache_from_grid(grid, source_start, source_end, has_headers)?;
     drop(grids); // Release lock early
 
     // Generate new pivot ID
@@ -614,7 +724,7 @@ pub fn create_pivot_table(
     *next_id += 1;
     drop(next_id);
 
-    // Create definition
+    // Create definition - START EMPTY (no auto-population)
     let mut definition = PivotDefinition::new(pivot_id, source_start, source_end);
     definition.source_has_headers = has_headers;
     definition.destination = destination;
@@ -627,38 +737,19 @@ pub fn create_pivot_table(
         }
     }
 
-    // Auto-detect field types and set up default configuration
-    // First numeric column becomes value field, others become row fields
-    let mut found_value_field = false;
-    for (i, _header) in headers.iter().enumerate() {
-        if !found_value_field && cache.is_numeric_field(i) {
-            definition.value_fields.push(ValueField::new(
-                i,
-                format!("Sum of {}", headers[i]),
-                AggregationType::Sum,
-            ));
-            found_value_field = true;
-        } else if definition.row_fields.len() < 2 {
-            // Add first two non-numeric fields as row fields
-            definition.row_fields.push(PivotField::new(i, headers[i].clone()));
-        }
-    }
+    // NOTE: We intentionally do NOT auto-populate fields here.
+    // The pivot table starts empty - users drag fields into zones via the pivot pane.
+    // This gives users full control over the pivot layout from the start.
 
-    // If no value field found, use first field with Count
-    if !found_value_field && !headers.is_empty() {
-        definition.value_fields.push(ValueField::new(
-            0,
-            format!("Count of {}", headers[0]),
-            AggregationType::Count,
-        ));
-    }
-
-    // Calculate initial view
+    // Calculate initial view (will be empty since no fields are configured)
     let mut cache_mut = cache;
-    let view = calculate_pivot(&definition, &mut cache_mut);
+    let view = safe_calculate_pivot(&definition, &mut cache_mut);
     let response = view_to_response(&view);
 
-    // Write pivot output to destination grid
+    // Update pivot region tracking (tracks even empty pivots with reserved space)
+    update_pivot_region(&state, pivot_id, dest_sheet_idx, destination, &view);
+
+    // Write pivot output to destination grid (empty for now, but reserves the space)
     {
         let mut grids = state.grids.lock().unwrap();
         
@@ -708,7 +799,7 @@ pub fn create_pivot_table(
     let mut active = state.active_pivot_id.lock().unwrap();
     *active = Some(pivot_id);
 
-    log_info!("PIVOT", "created pivot_id={} rows={}", pivot_id, response.row_count);
+    log_info!("PIVOT", "created pivot_id={} rows={} (empty - awaiting field configuration)", pivot_id, response.row_count);
 
     Ok(response)
 }
@@ -759,13 +850,17 @@ pub fn update_pivot_fields(
     definition.bump_version();
 
     // Recalculate view
-    let view = calculate_pivot(definition, cache);
+    let view = safe_calculate_pivot(definition, cache);
     
     // Get destination info before dropping pivot_tables lock
     let destination = definition.destination;
+    let pivot_id = definition.id;
     let dest_sheet_idx = 0; // TODO: resolve from definition.destination_sheet
     
     drop(pivot_tables);
+    
+    // Update pivot region tracking
+    update_pivot_region(&state, pivot_id, dest_sheet_idx, destination, &view);
     
     // Write updated pivot output to grid
     {
@@ -773,6 +868,16 @@ pub fn update_pivot_fields(
         if let Some(dest_grid) = grids.get_mut(dest_sheet_idx) {
             // Clear old pivot area first (we don't track old size, so just write new)
             write_pivot_to_grid(dest_grid, &view, destination);
+            
+            // Sync to state.grid if this is the active sheet
+            let active_sheet = *state.active_sheet.lock().unwrap();
+            if dest_sheet_idx == active_sheet {
+                let mut grid = state.grid.lock().unwrap();
+                for ((r, c), cell) in dest_grid.cells.iter() {
+                    grid.set_cell(*r, *c, cell.clone());
+                }
+                grid.recalculate_bounds();
+            }
         }
     }
     
@@ -838,19 +943,33 @@ pub fn toggle_pivot_group(
     definition.bump_version();
 
     // Recalculate view
-    let view = calculate_pivot(definition, cache);
+    let view = safe_calculate_pivot(definition, cache);
     
     // Get destination info
     let destination = definition.destination;
+    let pivot_id = definition.id;
     let dest_sheet_idx = 0; // TODO: resolve from definition.destination_sheet
     
     drop(pivot_tables);
+    
+    // Update pivot region tracking
+    update_pivot_region(&state, pivot_id, dest_sheet_idx, destination, &view);
     
     // Write updated pivot output to grid
     {
         let mut grids = state.grids.lock().unwrap();
         if let Some(dest_grid) = grids.get_mut(dest_sheet_idx) {
             write_pivot_to_grid(dest_grid, &view, destination);
+            
+            // Sync to state.grid if this is the active sheet
+            let active_sheet = *state.active_sheet.lock().unwrap();
+            if dest_sheet_idx == active_sheet {
+                let mut grid = state.grid.lock().unwrap();
+                for ((r, c), cell) in dest_grid.cells.iter() {
+                    grid.set_cell(*r, *c, cell.clone());
+                }
+                grid.recalculate_bounds();
+            }
         }
     }
     
@@ -881,7 +1000,7 @@ pub fn get_pivot_view(
         .get_mut(&id)
         .ok_or_else(|| format!("Pivot table {} not found", id))?;
 
-    let view = calculate_pivot(definition, cache);
+    let view = safe_calculate_pivot(definition, cache);
     Ok(view_to_response(&view))
 }
 
@@ -901,6 +1020,10 @@ pub fn delete_pivot_table(state: State<AppState>, pivot_id: PivotId) -> Result<(
     if *active == Some(pivot_id) {
         *active = None;
     }
+    
+    // Remove pivot region tracking
+    let mut regions = state.pivot_regions.lock().unwrap();
+    regions.retain(|r| r.pivot_id != pivot_id);
 
     Ok(())
 }
@@ -1006,16 +1129,30 @@ pub fn refresh_pivot_cache(
     *cache = new_cache;
     definition.bump_version();
 
-    let view = calculate_pivot(definition, cache);
+    let view = safe_calculate_pivot(definition, cache);
+    
+    let dest_sheet_idx = 0; // TODO: resolve from definition.destination_sheet
     
     drop(pivot_tables);
+    
+    // Update pivot region tracking
+    update_pivot_region(&state, pivot_id, dest_sheet_idx, destination, &view);
     
     // Write refreshed pivot output to grid
     {
         let mut grids = state.grids.lock().unwrap();
-        let dest_sheet_idx = 0; // TODO: resolve from definition.destination_sheet
         if let Some(dest_grid) = grids.get_mut(dest_sheet_idx) {
             write_pivot_to_grid(dest_grid, &view, destination);
+            
+            // Sync to state.grid if this is the active sheet
+            let active_sheet = *state.active_sheet.lock().unwrap();
+            if dest_sheet_idx == active_sheet {
+                let mut grid = state.grid.lock().unwrap();
+                for ((r, c), cell) in dest_grid.cells.iter() {
+                    grid.set_cell(*r, *c, cell.clone());
+                }
+                grid.recalculate_bounds();
+            }
         }
     }
     
@@ -1030,4 +1167,51 @@ pub fn refresh_pivot_cache(
     );
 
     Ok(response)
+}
+
+/// Check if a cell is within a pivot region and return pivot info if so
+#[tauri::command]
+pub fn get_pivot_at_cell(
+    state: State<AppState>,
+    row: u32,
+    col: u32,
+) -> Result<Option<PivotRegionInfo>, String> {
+    let active_sheet = *state.active_sheet.lock().unwrap();
+    
+    // Check if cell is in any pivot region
+    let pivot_id = match state.is_cell_in_pivot_region(active_sheet, row, col) {
+        Some(id) => id,
+        None => return Ok(None),
+    };
+    
+    log_debug!("PIVOT", "get_pivot_at_cell ({},{}) found pivot_id={}", row, col, pivot_id);
+    
+    // Get pivot info
+    let pivot_tables = state.pivot_tables.lock().unwrap();
+    let (definition, cache) = match pivot_tables.get(&pivot_id) {
+        Some(t) => t,
+        None => return Ok(None),
+    };
+    
+    let is_empty = !has_fields_configured(definition);
+    
+    // Build source field info from cache
+    let field_count = cache.field_count();
+    let source_fields: Vec<SourceFieldInfo> = (0..field_count)
+        .map(|i| {
+            let name = cache.field_name(i).unwrap_or_else(|| format!("Field{}", i + 1));
+            let is_numeric = cache.is_numeric_field(i);
+            SourceFieldInfo {
+                index: i,
+                name,
+                is_numeric,
+            }
+        })
+        .collect();
+    
+    Ok(Some(PivotRegionInfo {
+        pivot_id,
+        is_empty,
+        source_fields,
+    }))
 }
