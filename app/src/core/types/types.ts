@@ -781,3 +781,13 @@ export interface MergeResult {
   mergedRegions: MergedRegion[];
   updatedCells: CellData[];
 }
+
+/** Pivot region for rendering placeholders */
+export interface PivotRegionData {
+  pivotId: number;
+  startRow: number;
+  startCol: number;
+  endRow: number;
+  endCol: number;
+  isEmpty: boolean;
+}

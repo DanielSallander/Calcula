@@ -186,6 +186,18 @@ pub struct SourceFieldInfo {
     pub is_numeric: bool,
 }
 
+/// Pivot region data for rendering
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PivotRegionData {
+    pub pivot_id: PivotId,
+    pub start_row: u32,
+    pub start_col: u32,
+    pub end_row: u32,
+    pub end_col: u32,
+    pub is_empty: bool,
+}
+
 // ============================================================================
 // CONSTANTS
 // ============================================================================
@@ -193,7 +205,7 @@ pub struct SourceFieldInfo {
 /// Minimum reserved rows for an empty pivot table placeholder
 const EMPTY_PIVOT_ROWS: u32 = 18;
 /// Minimum reserved columns for an empty pivot table placeholder
-const EMPTY_PIVOT_COLS: u32 = 5;
+const EMPTY_PIVOT_COLS: u32 = 3;
 
 // ============================================================================
 // HELPER FUNCTIONS
@@ -1214,4 +1226,35 @@ pub fn get_pivot_at_cell(
         is_empty,
         source_fields,
     }))
+
+}
+
+/// Get all pivot regions for the current sheet (for rendering placeholders)
+#[tauri::command]
+pub fn get_pivot_regions_for_sheet(
+    state: State<AppState>,
+) -> Vec<PivotRegionData> {
+    let active_sheet = *state.active_sheet.lock().unwrap();
+    let regions = state.pivot_regions.lock().unwrap();
+    let pivot_tables = state.pivot_tables.lock().unwrap();
+    
+    regions
+        .iter()
+        .filter(|r| r.sheet_index == active_sheet)
+        .map(|r| {
+            let is_empty = pivot_tables
+                .get(&r.pivot_id)
+                .map(|(def, _)| !has_fields_configured(def))
+                .unwrap_or(true);
+            
+            PivotRegionData {
+                pivot_id: r.pivot_id,
+                start_row: r.start_row,
+                start_col: r.start_col,
+                end_row: r.end_row,
+                end_col: r.end_col,
+                is_empty,
+            }
+        })
+        .collect()
 }

@@ -11,6 +11,8 @@ As a use case I have this:
 I have data, with headers, in range B2:C5. The I select this range and insert a pivot table.
 After clicking "OK" in the pivot table dialog I see the pivot table appearing and a pivot table pane where I can edit the layout, change aggregations etc.
 The following issues is whar we need to fix / improve:
-- The pivot table is instantiated with aggregations and dimensions already in layout. This should not be the case.
-In the beginning it should show a white field that represents the reserved space. Image attached of how this looks like in Excel.
+- The pivot table is instantiated with a reserved area. However, we do not see this reserved area. In Excel there is like a startup image.
+In our solution it is enough to have a white rectangle. Let us make the reserved area 18 rows and 3 columns in size.
+- When a user trying to edit a cell or range of cells in the reserved area the solution is rightfully denying that.
+However we should also get a pop-up message saying "You can't change this part of the PivotTable".
 - When a cell is selected that is located within the pivot area the pivot pane should be visible. Otherwise it should be hidden.

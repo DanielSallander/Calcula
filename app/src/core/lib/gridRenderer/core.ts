@@ -35,6 +35,7 @@ import {
 } from "./layout/viewport";
 import { getColumnWidth, getRowHeight } from "./layout/dimensions";
 import { cellKey } from "../../../core/types";
+import type { PivotRegionData } from "../../../core/types";
 
 /**
  * Check if a cell is a "slave" cell (part of a merge but not the master).
@@ -488,6 +489,90 @@ function drawCellTextZone(
 }
 
 /**
+ * Draw pivot table placeholder for empty pivot regions.
+ * Shows a white rectangle with a light border to indicate the reserved area.
+ */
+function drawPivotPlaceholder(
+  ctx: CanvasRenderingContext2D,
+  region: PivotRegionData,
+  config: GridConfig,
+  viewport: Viewport,
+  dimensions: DimensionOverrides
+): void {
+  const rowHeaderWidth = config.rowHeaderWidth || 50;
+  const colHeaderHeight = config.colHeaderHeight || 24;
+  
+  // Calculate pixel positions for the region
+  let startX = rowHeaderWidth;
+  for (let col = 0; col < region.startCol; col++) {
+    startX += getColumnWidth(col, config, dimensions);
+  }
+  startX -= viewport.scrollX;
+  
+  let startY = colHeaderHeight;
+  for (let row = 0; row < region.startRow; row++) {
+    startY += getRowHeight(row, config, dimensions);
+  }
+  startY -= viewport.scrollY;
+  
+  // Calculate width and height of the region
+  let regionWidth = 0;
+  for (let col = region.startCol; col <= region.endCol; col++) {
+    regionWidth += getColumnWidth(col, config, dimensions);
+  }
+  
+  let regionHeight = 0;
+  for (let row = region.startRow; row <= region.endRow; row++) {
+    regionHeight += getRowHeight(row, config, dimensions);
+  }
+  
+  // Only draw if visible
+  if (startX + regionWidth < rowHeaderWidth || startY + regionHeight < colHeaderHeight) {
+    return;
+  }
+  
+  // Clip to cell area (not headers)
+  ctx.save();
+  ctx.beginPath();
+  ctx.rect(rowHeaderWidth, colHeaderHeight, ctx.canvas.width / (window.devicePixelRatio || 1) - rowHeaderWidth, ctx.canvas.height / (window.devicePixelRatio || 1) - colHeaderHeight);
+  ctx.clip();
+  
+  // Draw white background
+  ctx.fillStyle = "#ffffff";
+  ctx.fillRect(startX, startY, regionWidth, regionHeight);
+  
+  // Draw light gray border
+  ctx.strokeStyle = "#d0d0d0";
+  ctx.lineWidth = 1;
+  ctx.setLineDash([]);
+  ctx.strokeRect(
+    Math.floor(startX) + 0.5,
+    Math.floor(startY) + 0.5,
+    regionWidth - 1,
+    regionHeight - 1
+  );
+  
+  // Draw "PivotTable" text in center (like Excel's placeholder)
+  ctx.fillStyle = "#888888";
+  ctx.font = "12px system-ui, -apple-system, sans-serif";
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+  
+  const centerX = startX + regionWidth / 2;
+  const centerY = startY + regionHeight / 2;
+  
+  // Only draw text if there's enough space
+  if (regionWidth > 80 && regionHeight > 30) {
+    ctx.fillText("PivotTable", centerX, centerY - 8);
+    ctx.font = "11px system-ui, -apple-system, sans-serif";
+    ctx.fillStyle = "#aaaaaa";
+    ctx.fillText("Drag fields to build", centerX, centerY + 8);
+  }
+  
+  ctx.restore();
+}
+
+/**
  * Main render function for the grid.
  * Orchestrates all rendering phases in the correct order.
  * Supports freeze panes with 4-zone rendering.
@@ -510,7 +595,8 @@ export function renderGrid(
   clipboardMode?: ClipboardMode,
   clipboardAnimationOffset?: number,
   insertionAnimation?: InsertionAnimation | null,
-  freezeConfig?: FreezeConfig
+  freezeConfig?: FreezeConfig,
+  pivotRegions?: PivotRegionData[]  // Add this parameter
 ): void {
   const rowHeaderWidth = config.rowHeaderWidth || 50;
   const colHeaderHeight = config.colHeaderHeight || 24;
@@ -619,6 +705,15 @@ export function renderGrid(
 
     // 2. Cells (content)
     drawCellText(state);
+  }
+
+  // 2.5. Draw pivot placeholders for empty pivot regions
+  if (pivotRegions && pivotRegions.length > 0) {
+    for (const region of pivotRegions) {
+      if (region.isEmpty) {
+        drawPivotPlaceholder(ctx, region, config, viewport, dims);
+      }
+    }
   }
 
   // 3. Formula references (before selection so selection appears on top)

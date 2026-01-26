@@ -38,6 +38,7 @@ import {
 } from "../lib/gridRenderer";
 import type { EditingCell, CellUpdateResult, FormulaReference } from "../types";
 import { isFormula, isFormulaExpectingReference, FORMULA_REFERENCE_COLORS } from "../types";
+import { getPivotAtCell } from "../lib/pivot-api";
 
 /**
  * MODULE-LEVEL singleton ref for synchronous editing state.
@@ -283,6 +284,7 @@ export function useEditing(): UseEditingReturn {
    * Start editing a cell by row/col.
    * FIX: Now fetches cell content BEFORE dispatching to prevent race conditions.
    * FIX: Resolves to master cell when the target cell is part of a merged region.
+   * FIX: Checks if cell is in a pivot region and shows error message if so.
    * This ensures the InlineEditor receives the correct initial value immediately.
    */
   const startEdit = useCallback(
@@ -290,6 +292,20 @@ export function useEditing(): UseEditingReturn {
       setLastError(null);
       dispatch(clearFormulaReferences());
       setPendingReference(null);
+      
+      // FIX: Check if cell is in a pivot region BEFORE allowing edit
+      try {
+        const pivotInfo = await getPivotAtCell(row, col);
+        if (pivotInfo) {
+          // Cell is in a pivot region - show error and don't start editing
+          console.log("[useEditing] Cell is in pivot region, blocking edit");
+          window.alert("You can't change this part of the PivotTable.");
+          return;
+        }
+      } catch (error) {
+        console.error("[useEditing] Failed to check pivot region:", error);
+        // Continue with edit on error - fail open
+      }
       
       // FIX: Set global flag BEFORE any async operation to prevent race conditions
       // This ensures ALL useEditing() instances see editing state immediately
@@ -362,6 +378,9 @@ export function useEditing(): UseEditingReturn {
   /**
    * Start editing the currently selected cell.
    */
+  /**
+   * Start editing the currently selected cell.
+   */
   const startEditing = useCallback(
     async (initialValue?: string) => {
       const { selection } = state;
@@ -371,6 +390,20 @@ export function useEditing(): UseEditingReturn {
 
       const row = selection.endRow;
       const col = selection.endCol;
+
+      // FIX: Check if cell is in a pivot region BEFORE allowing edit
+      try {
+        const pivotInfo = await getPivotAtCell(row, col);
+        if (pivotInfo) {
+          // Cell is in a pivot region - show error and don't start editing
+          console.log("[useEditing] Cell is in pivot region, blocking edit");
+          window.alert("You can't change this part of the PivotTable.");
+          return;
+        }
+      } catch (error) {
+        console.error("[useEditing] Failed to check pivot region:", error);
+        // Continue with edit on error - fail open
+      }
 
       if (initialValue !== undefined) {
         // REPLACE mode - start with provided character
@@ -845,6 +878,20 @@ export function useEditing(): UseEditingReturn {
       const { selection } = state;
       if (!selection) {
         return;
+      }
+
+      // FIX: Check if cell is in a pivot region BEFORE allowing edit
+      try {
+        const pivotInfo = await getPivotAtCell(selection.endRow, selection.endCol);
+        if (pivotInfo) {
+          // Cell is in a pivot region - show error and don't start editing
+          console.log("[useEditing] Cell is in pivot region, blocking edit");
+          window.alert("You can't change this part of the PivotTable.");
+          return;
+        }
+      } catch (error) {
+        console.error("[useEditing] Failed to check pivot region:", error);
+        // Continue with edit on error - fail open
       }
 
       setLastError(null);

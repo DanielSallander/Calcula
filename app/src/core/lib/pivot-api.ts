@@ -215,6 +215,30 @@ export interface SourceDataResponse {
 /** Group path for drill-down operations */
 export type GroupPath = Array<[number, number]>; // [field_index, value_id]
 
+/** Source field info from pivot region check */
+export interface SourceFieldInfo {
+  index: number;
+  name: string;
+  isNumeric: boolean;
+}
+
+/** Pivot region info returned when checking if a cell is in a pivot */
+export interface PivotRegionInfo {
+  pivotId: PivotId;
+  isEmpty: boolean;
+  sourceFields: SourceFieldInfo[];
+}
+
+/** Pivot region data for rendering placeholders */
+export interface PivotRegionData {
+  pivotId: PivotId;
+  startRow: number;
+  startCol: number;
+  endRow: number;
+  endCol: number;
+  isEmpty: boolean;
+}
+
 // ============================================================================
 // API Functions
 // ============================================================================
@@ -363,6 +387,48 @@ export async function getPivotSourceData(
  */
 export async function refreshPivotCache(pivotId: PivotId): Promise<PivotViewResponse> {
   return invoke<PivotViewResponse>("refresh_pivot_cache", { pivotId });
+}
+
+/**
+ * Checks if a cell is within a pivot table region.
+ *
+ * @param row - Row index (0-based)
+ * @param col - Column index (0-based)
+ * @returns Pivot region info if cell is in a pivot, null otherwise
+ *
+ * @example
+ * ```ts
+ * const info = await getPivotAtCell(5, 10);
+ * if (info) {
+ *   console.log("Cell is in pivot", info.pivotId);
+ * }
+ * ```
+ */
+export async function getPivotAtCell(
+  row: number,
+  col: number
+): Promise<PivotRegionInfo | null> {
+  return invoke<PivotRegionInfo | null>("get_pivot_at_cell", { row, col });
+}
+
+/**
+ * Gets all pivot regions for the current sheet.
+ * Used for rendering pivot placeholders.
+ *
+ * @returns Array of pivot region data
+ *
+ * @example
+ * ```ts
+ * const regions = await getPivotRegionsForSheet();
+ * for (const region of regions) {
+ *   if (region.isEmpty) {
+ *     // Draw placeholder
+ *   }
+ * }
+ * ```
+ */
+export async function getPivotRegionsForSheet(): Promise<PivotRegionData[]> {
+  return invoke<PivotRegionData[]>("get_pivot_regions_for_sheet", {});
 }
 
 // ============================================================================

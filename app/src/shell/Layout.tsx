@@ -1,6 +1,7 @@
 // FILENAME: shell/Layout.tsx
 // PURPOSE: Main application layout with pivot table support
 // CONTEXT: Arranges menu bar, ribbon, formula bar, spreadsheet, sheet tabs, status bar, and pivot editor
+// FIX: Pivot pane now shows/hides based on whether selection is within a pivot region
 
 import React, { useState, useCallback, useEffect } from "react";
 import { MenuBar } from "./MenuBar";
@@ -8,9 +9,9 @@ import { RibbonContainer } from "./Ribbon/RibbonContainer";
 import { FormulaBar } from "./FormulaBar";
 import { Spreadsheet } from "../core/components/Spreadsheet";
 import { SheetTabs } from "./SheetTabs";
-import { GridProvider } from "../core/state/GridContext";
+import { GridProvider, useGridContext } from "../core/state/GridContext";
 import { PivotEditorPanel } from "../core/components/pivot/PivotEditorPanel";
-import { getPivotSourceData } from "../core/lib/pivot-api";
+import { getPivotSourceData, getPivotAtCell } from "../core/lib/pivot-api";
 import type { PivotId, SourceField } from "../core/components/pivot/types";
 
 console.log("[Layout] Module loaded");
@@ -20,8 +21,13 @@ interface PivotEditorState {
   sourceFields: SourceField[];
 }
 
-export function Layout(): React.ReactElement {
+/**
+ * Inner layout component that has access to GridContext
+ */
+function LayoutInner(): React.ReactElement {
+  const { state } = useGridContext();
   const [pivotEditor, setPivotEditor] = useState<PivotEditorState | null>(null);
+  const [manualClose, setManualClose] = useState<PivotId | null>(null);
 
   // Listen for pivot:created event from InsertMenu
   useEffect(() => {
@@ -29,6 +35,9 @@ export function Layout(): React.ReactElement {
       const customEvent = event as CustomEvent<{ pivotId: number }>;
       const { pivotId } = customEvent.detail;
       console.log("[Layout] Pivot created event received:", pivotId);
+      
+      // Reset manual close state for new pivots
+      setManualClose(null);
 
       try {
         // Get source data with empty group path to retrieve headers
@@ -61,9 +70,63 @@ export function Layout(): React.ReactElement {
     };
   }, []);
 
+  // Check selection changes and show/hide pivot pane accordingly
+  useEffect(() => {
+    const checkPivotAtSelection = async () => {
+      if (!state.selection) {
+        return;
+      }
+
+      const row = state.selection.endRow;
+      const col = state.selection.endCol;
+
+      try {
+        const pivotInfo = await getPivotAtCell(row, col);
+        
+        if (pivotInfo) {
+          // Selection is within a pivot region
+          // Only show if not manually closed for this pivot
+          if (manualClose !== pivotInfo.pivotId) {
+            // Check if we already have this pivot open
+            if (!pivotEditor || pivotEditor.pivotId !== pivotInfo.pivotId) {
+              console.log("[Layout] Selection entered pivot region:", pivotInfo.pivotId);
+              
+              // Convert source fields from backend format
+              const sourceFields: SourceField[] = pivotInfo.sourceFields.map((field) => ({
+                index: field.index,
+                name: field.name,
+                isNumeric: field.isNumeric,
+              }));
+              
+              setPivotEditor({
+                pivotId: pivotInfo.pivotId,
+                sourceFields,
+              });
+            }
+          }
+        } else {
+          // Selection is outside any pivot region - hide the pane
+          if (pivotEditor) {
+            console.log("[Layout] Selection left pivot region, hiding pane");
+            setPivotEditor(null);
+            setManualClose(null);
+          }
+        }
+      } catch (error) {
+        console.error("[Layout] Failed to check pivot at selection:", error);
+      }
+    };
+
+    checkPivotAtSelection();
+  }, [state.selection, pivotEditor, manualClose]);
+
   const handlePivotEditorClose = useCallback(() => {
+    // Remember that user manually closed this pivot's pane
+    if (pivotEditor) {
+      setManualClose(pivotEditor.pivotId);
+    }
     setPivotEditor(null);
-  }, []);
+  }, [pivotEditor]);
 
   const handlePivotViewUpdate = useCallback(() => {
     console.log("[Layout] Pivot view updated, refreshing grid");
@@ -73,62 +136,68 @@ export function Layout(): React.ReactElement {
   console.log("[Layout] Rendering, pivotEditor:", pivotEditor);
 
   return (
-    <GridProvider>
+    <div
+      style={{
+        display: "flex",
+        flexDirection: "column",
+        height: "100vh",
+        width: "100vw",
+        overflow: "hidden",
+        backgroundColor: "#ffffff",
+      }}
+    >
+      {/* Menu Bar */}
+      <MenuBar />
+
+      {/* Ribbon Area */}
+      <RibbonContainer />
+
+      {/* Formula Bar */}
+      <FormulaBar />
+
+      {/* Main Content Area - Spreadsheet + Optional Pivot Editor */}
+      <div style={{ flex: 1, display: "flex", overflow: "hidden" }}>
+        {/* Spreadsheet Area */}
+        <div style={{ flex: 1, overflow: "hidden" }}>
+          <Spreadsheet />
+        </div>
+
+        {/* Pivot Editor Panel (when active) */}
+        {pivotEditor && (
+          <PivotEditorPanel
+            pivotId={pivotEditor.pivotId}
+            sourceFields={pivotEditor.sourceFields}
+            onClose={handlePivotEditorClose}
+            onViewUpdate={handlePivotViewUpdate}
+          />
+        )}
+      </div>
+
+      {/* Sheet Tabs */}
+      <SheetTabs />
+
+      {/* Status Bar */}
       <div
         style={{
+          height: "24px",
+          backgroundColor: "#217346",
           display: "flex",
-          flexDirection: "column",
-          height: "100vh",
-          width: "100vw",
-          overflow: "hidden",
-          backgroundColor: "#ffffff",
+          alignItems: "center",
+          padding: "0 12px",
+          fontSize: "12px",
+          color: "#ffffff",
         }}
       >
-        {/* Menu Bar */}
-        <MenuBar />
-
-        {/* Ribbon Area */}
-        <RibbonContainer />
-
-        {/* Formula Bar */}
-        <FormulaBar />
-
-        {/* Main Content Area - Spreadsheet + Optional Pivot Editor */}
-        <div style={{ flex: 1, display: "flex", overflow: "hidden" }}>
-          {/* Spreadsheet Area */}
-          <div style={{ flex: 1, overflow: "hidden" }}>
-            <Spreadsheet />
-          </div>
-
-          {/* Pivot Editor Panel (when active) */}
-          {pivotEditor && (
-            <PivotEditorPanel
-              pivotId={pivotEditor.pivotId}
-              sourceFields={pivotEditor.sourceFields}
-              onClose={handlePivotEditorClose}
-              onViewUpdate={handlePivotViewUpdate}
-            />
-          )}
-        </div>
-
-        {/* Sheet Tabs */}
-        <SheetTabs />
-
-        {/* Status Bar */}
-        <div
-          style={{
-            height: "24px",
-            backgroundColor: "#217346",
-            display: "flex",
-            alignItems: "center",
-            padding: "0 12px",
-            fontSize: "12px",
-            color: "#ffffff",
-          }}
-        >
-          Ready
-        </div>
+        Ready
       </div>
+    </div>
+  );
+}
+
+export function Layout(): React.ReactElement {
+  return (
+    <GridProvider>
+      <LayoutInner />
     </GridProvider>
   );
 }
