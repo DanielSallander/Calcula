@@ -30,7 +30,7 @@ pub mod logging;
 pub mod sheets;
 pub mod undo_commands;
 pub mod merge_commands;
-pub mod pivot_commands;
+pub mod pivot;
 
 pub use api_types::{CellData, StyleData, DimensionData, FormattingParams, MergedRegion};
 pub use logging::{init_log_file, get_log_path, next_seq, write_log, write_log_raw};
@@ -777,15 +777,15 @@ pub fn run() {
             merge_commands::get_merged_regions,
             merge_commands::get_merge_info,
             // Pivot table commands
-            pivot_commands::create_pivot_table,
-            pivot_commands::update_pivot_fields,
-            pivot_commands::toggle_pivot_group,
-            pivot_commands::get_pivot_view,
-            pivot_commands::delete_pivot_table,
-            pivot_commands::get_pivot_source_data,
-            pivot_commands::refresh_pivot_cache,
-            pivot_commands::get_pivot_at_cell,
-            pivot_commands::get_pivot_regions_for_sheet,
+            pivot::create_pivot_table,
+            pivot::update_pivot_fields,
+            pivot::toggle_pivot_group,
+            pivot::get_pivot_view,
+            pivot::delete_pivot_table,
+            pivot::get_pivot_source_data,
+            pivot::refresh_pivot_cache,
+            pivot::get_pivot_at_cell,
+            pivot::get_pivot_regions_for_sheet,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
