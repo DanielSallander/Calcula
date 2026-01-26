@@ -12,53 +12,18 @@ import { FormulaInput } from "./FormulaInput";
 import { InsertFunctionDialog } from "./InsertFunctionDialog";
 import { useGridContext } from "../../core/state/GridContext";
 import { useEditing } from "../../core/hooks/useEditing";
+import * as S from './FormulaBar.styles';
 
-// Icons using text/spans for reliable rendering
 function CancelIcon(): React.ReactElement {
-  return (
-    <span
-      style={{
-        fontSize: "16px",
-        fontWeight: "bold",
-        lineHeight: 1,
-        fontFamily: "Arial, sans-serif",
-      }}
-    >
-      X
-    </span>
-  );
+  return <S.CancelIconSpan>X</S.CancelIconSpan>;
 }
 
 function EnterIcon(): React.ReactElement {
-  // Using Unicode checkmark character
-  return (
-    <span
-      style={{
-        fontSize: "18px",
-        fontWeight: "bold",
-        lineHeight: 1,
-        fontFamily: "Arial, sans-serif",
-      }}
-    >
-      {"\u2713"}
-    </span>
-  );
+  return <S.EnterIconSpan>[OK]</S.EnterIconSpan>;
 }
 
 function InsertFunctionIcon(): React.ReactElement {
-  return (
-    <span
-      style={{
-        fontSize: "14px",
-        fontStyle: "italic",
-        fontFamily: "Times New Roman, Georgia, serif",
-        fontWeight: "normal",
-        lineHeight: 1,
-      }}
-    >
-      fx
-    </span>
-  );
+  return <S.InsertFunctionIconSpan>fx</S.InsertFunctionIconSpan>;
 }
 
 export function FormulaBar(): React.ReactElement {
@@ -68,7 +33,6 @@ export function FormulaBar(): React.ReactElement {
   
   const isEditing = editing !== null;
 
-  // FIX: Prevent mousedown from stealing focus (which would trigger blur commit)
   const handleCancelMouseDown = useCallback((e: React.MouseEvent) => {
     e.preventDefault();
   }, []);
@@ -77,7 +41,6 @@ export function FormulaBar(): React.ReactElement {
     await cancelEdit();
   }, [cancelEdit]);
 
-  // FIX: Prevent mousedown from stealing focus for Enter button too (consistency)
   const handleEnterMouseDown = useCallback((e: React.MouseEvent) => {
     e.preventDefault();
   }, []);
@@ -87,7 +50,6 @@ export function FormulaBar(): React.ReactElement {
   }, [commitEdit]);
 
   const handleInsertFunction = useCallback(() => {
-    // If not editing, start editing with "="
     if (!editing) {
       startEditing("=");
     }
@@ -96,15 +58,12 @@ export function FormulaBar(): React.ReactElement {
 
   const handleFunctionSelect = useCallback((functionName: string, template: string) => {
     if (editing) {
-      // If current value is just "=" or empty, replace with template
       const currentValue = editing.value;
       if (currentValue === "=" || currentValue === "") {
         updateValue(template);
       } else if (currentValue.endsWith("(") || currentValue.endsWith(",") || currentValue.endsWith("=")) {
-        // Append function name with opening paren
         updateValue(currentValue + functionName + "(");
       } else {
-        // Append the function
         updateValue(currentValue + functionName + "(");
       }
     }
@@ -117,126 +76,42 @@ export function FormulaBar(): React.ReactElement {
 
   return (
     <>
-      <div
-        style={{
-          display: "flex",
-          alignItems: "center",
-          height: "28px",
-          borderBottom: "1px solid #d0d0d0",
-          backgroundColor: "#f3f3f3",
-          padding: "0 4px",
-          gap: "2px",
-        }}
-      >
-        {/* Name Box */}
+      <S.FormulaBarContainer>
         <NameBox />
 
-        {/* Button group: Cancel, Enter, Insert Function */}
-        <div
-          style={{
-            display: "flex",
-            alignItems: "center",
-            borderLeft: "1px solid #c0c0c0",
-            borderRight: "1px solid #c0c0c0",
-            height: "100%",
-            padding: "0 2px",
-            gap: "1px",
-          }}
-        >
-          {/* Cancel button (X) - only active when editing */}
-          <button
+        <S.ButtonGroup>
+          <S.IconButton
+            variant="cancel"
             onMouseDown={handleCancelMouseDown}
             onClick={handleCancel}
             disabled={!isEditing}
             title="Cancel (Esc)"
-            style={{
-              width: "24px",
-              height: "24px",
-              border: "none",
-              backgroundColor: "transparent",
-              cursor: isEditing ? "pointer" : "default",
-              display: "flex",
-              alignItems: "center",
-              justifyContent: "center",
-              color: isEditing ? "#c42b1c" : "#a0a0a0",
-              borderRadius: "2px",
-              opacity: isEditing ? 1 : 0.5,
-            }}
-            onMouseEnter={(e) => {
-              if (isEditing) {
-                e.currentTarget.style.backgroundColor = "#fde7e9";
-              }
-            }}
-            onMouseLeave={(e) => {
-              e.currentTarget.style.backgroundColor = "transparent";
-            }}
           >
             <CancelIcon />
-          </button>
+          </S.IconButton>
 
-          {/* Enter button (checkmark) - only active when editing */}
-          <button
+          <S.IconButton
+            variant="enter"
             onMouseDown={handleEnterMouseDown}
             onClick={handleEnter}
             disabled={!isEditing}
             title="Enter"
-            style={{
-              width: "24px",
-              height: "24px",
-              border: "none",
-              backgroundColor: "transparent",
-              cursor: isEditing ? "pointer" : "default",
-              display: "flex",
-              alignItems: "center",
-              justifyContent: "center",
-              color: isEditing ? "#0f7b0f" : "#a0a0a0",
-              borderRadius: "2px",
-              opacity: isEditing ? 1 : 0.5,
-            }}
-            onMouseEnter={(e) => {
-              if (isEditing) {
-                e.currentTarget.style.backgroundColor = "#dff6dd";
-              }
-            }}
-            onMouseLeave={(e) => {
-              e.currentTarget.style.backgroundColor = "transparent";
-            }}
           >
             <EnterIcon />
-          </button>
+          </S.IconButton>
 
-          {/* Insert Function button (fx) - always active */}
-          <button
+          <S.IconButton
+            variant="function"
             onClick={handleInsertFunction}
             title="Insert Function"
-            style={{
-              width: "24px",
-              height: "24px",
-              border: "none",
-              backgroundColor: "transparent",
-              cursor: "pointer",
-              display: "flex",
-              alignItems: "center",
-              justifyContent: "center",
-              color: "#444444",
-              borderRadius: "2px",
-            }}
-            onMouseEnter={(e) => {
-              e.currentTarget.style.backgroundColor = "#e5e5e5";
-            }}
-            onMouseLeave={(e) => {
-              e.currentTarget.style.backgroundColor = "transparent";
-            }}
           >
             <InsertFunctionIcon />
-          </button>
-        </div>
+          </S.IconButton>
+        </S.ButtonGroup>
 
-        {/* Formula input area */}
         <FormulaInput />
-      </div>
+      </S.FormulaBarContainer>
 
-      {/* Insert Function Dialog */}
       {showFunctionDialog && (
         <InsertFunctionDialog
           onSelect={handleFunctionSelect}

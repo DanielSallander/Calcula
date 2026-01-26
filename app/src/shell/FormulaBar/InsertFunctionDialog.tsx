@@ -5,6 +5,7 @@
 import React, { useState, useEffect, useCallback, useRef } from "react";
 import { getAllFunctions, getFunctionTemplate } from "../../core/lib/tauri-api";
 import type { FunctionInfo } from "../../core/types";
+import * as S from './InsertFunctionDialog.styles';
 
 interface InsertFunctionDialogProps {
   onSelect: (functionName: string, template: string) => void;
@@ -35,7 +36,6 @@ export function InsertFunctionDialog({
   const searchInputRef = useRef<HTMLInputElement>(null);
   const dialogRef = useRef<HTMLDivElement>(null);
 
-  // Load all functions on mount
   useEffect(() => {
     setIsLoading(true);
     getAllFunctions()
@@ -50,11 +50,9 @@ export function InsertFunctionDialog({
       });
   }, []);
 
-  // Filter functions when search term or category changes
   useEffect(() => {
     let filtered = functions;
 
-    // Filter by category
     if (selectedCategory !== "all") {
       filtered = filtered.filter(
         (fn) => fn.category.toLowerCase().replace(/[& ]/g, "_") === selectedCategory ||
@@ -62,7 +60,6 @@ export function InsertFunctionDialog({
       );
     }
 
-    // Filter by search term
     if (searchTerm) {
       const term = searchTerm.toLowerCase();
       filtered = filtered.filter(
@@ -74,7 +71,6 @@ export function InsertFunctionDialog({
 
     setFilteredFunctions(filtered);
     
-    // Select first function if current selection is not in filtered list
     if (filtered.length > 0 && (!selectedFunction || !filtered.includes(selectedFunction))) {
       setSelectedFunction(filtered[0]);
     } else if (filtered.length === 0) {
@@ -82,12 +78,10 @@ export function InsertFunctionDialog({
     }
   }, [searchTerm, selectedCategory, functions, selectedFunction]);
 
-  // Focus search input on mount
   useEffect(() => {
     searchInputRef.current?.focus();
   }, []);
 
-  // Handle click outside to close
   useEffect(() => {
     const handleClickOutside = (e: MouseEvent) => {
       if (dialogRef.current && !dialogRef.current.contains(e.target as Node)) {
@@ -98,7 +92,6 @@ export function InsertFunctionDialog({
     return () => document.removeEventListener("mousedown", handleClickOutside);
   }, [onClose]);
 
-  // Handle keyboard navigation
   const handleKeyDown = useCallback(
     (e: React.KeyboardEvent) => {
       if (e.key === "Escape") {
@@ -134,228 +127,78 @@ export function InsertFunctionDialog({
       onSelect(selectedFunction.name, template);
     } catch (error) {
       console.error("Failed to get function template:", error);
-      // Fallback to basic template
       onSelect(selectedFunction.name, `=${selectedFunction.name}(`);
     }
   }, [selectedFunction, onSelect]);
 
   return (
-    <div
-      style={{
-        position: "fixed",
-        top: 0,
-        left: 0,
-        right: 0,
-        bottom: 0,
-        backgroundColor: "rgba(0, 0, 0, 0.3)",
-        display: "flex",
-        alignItems: "center",
-        justifyContent: "center",
-        zIndex: 1000,
-      }}
-    >
-      <div
-        ref={dialogRef}
-        onKeyDown={handleKeyDown}
-        style={{
-          backgroundColor: "#ffffff",
-          borderRadius: "4px",
-          boxShadow: "0 4px 20px rgba(0, 0, 0, 0.2)",
-          width: "500px",
-          maxHeight: "80vh",
-          display: "flex",
-          flexDirection: "column",
-          overflow: "hidden",
-        }}
-      >
-        {/* Header */}
-        <div
-          style={{
-            padding: "16px",
-            borderBottom: "1px solid #e0e0e0",
-            display: "flex",
-            justifyContent: "space-between",
-            alignItems: "center",
-          }}
-        >
-          <h2 style={{ margin: 0, fontSize: "16px", fontWeight: 600 }}>
-            Insert Function
-          </h2>
-          <button
-            onClick={onClose}
-            style={{
-              border: "none",
-              background: "transparent",
-              cursor: "pointer",
-              fontSize: "18px",
-              color: "#666",
-              padding: "4px",
-            }}
-          >
-            x
-          </button>
-        </div>
+    <S.Overlay>
+      <S.DialogContainer ref={dialogRef} onKeyDown={handleKeyDown}>
+        <S.Header>
+          <S.Title>Insert Function</S.Title>
+          <S.CloseButton onClick={onClose}>x</S.CloseButton>
+        </S.Header>
 
-        {/* Search */}
-        <div style={{ padding: "12px 16px", borderBottom: "1px solid #e0e0e0" }}>
-          <input
+        <S.SearchContainer>
+          <S.SearchInput
             ref={searchInputRef}
             type="text"
             value={searchTerm}
             onChange={(e) => setSearchTerm(e.target.value)}
             placeholder="Search for a function..."
-            style={{
-              width: "100%",
-              padding: "8px 12px",
-              border: "1px solid #d0d0d0",
-              borderRadius: "4px",
-              fontSize: "13px",
-              outline: "none",
-              boxSizing: "border-box",
-            }}
           />
-        </div>
+        </S.SearchContainer>
 
-        {/* Category selector */}
-        <div
-          style={{
-            padding: "8px 16px",
-            borderBottom: "1px solid #e0e0e0",
-            display: "flex",
-            flexWrap: "wrap",
-            gap: "4px",
-          }}
-        >
+        <S.CategoryContainer>
           {CATEGORIES.map((cat) => (
-            <button
+            <S.CategoryButton
               key={cat.id}
               onClick={() => setSelectedCategory(cat.id)}
-              style={{
-                padding: "4px 8px",
-                fontSize: "11px",
-                border: "1px solid #d0d0d0",
-                borderRadius: "3px",
-                backgroundColor:
-                  selectedCategory === cat.id ? "#0078d4" : "#ffffff",
-                color: selectedCategory === cat.id ? "#ffffff" : "#333333",
-                cursor: "pointer",
-              }}
+              isActive={selectedCategory === cat.id}
             >
               {cat.label}
-            </button>
+            </S.CategoryButton>
           ))}
-        </div>
+        </S.CategoryContainer>
 
-        {/* Function list */}
-        <div
-          style={{
-            flex: 1,
-            overflow: "auto",
-            minHeight: "200px",
-            maxHeight: "300px",
-          }}
-        >
+        <S.FunctionListContainer>
           {isLoading ? (
-            <div style={{ padding: "20px", textAlign: "center", color: "#666" }}>
-              Loading functions...
-            </div>
+            <S.LoadingMessage>Loading functions...</S.LoadingMessage>
           ) : filteredFunctions.length === 0 ? (
-            <div style={{ padding: "20px", textAlign: "center", color: "#666" }}>
-              No functions found
-            </div>
+            <S.EmptyMessage>No functions found</S.EmptyMessage>
           ) : (
             filteredFunctions.map((fn) => (
-              <div
+              <S.FunctionItem
                 key={fn.name}
                 onClick={() => setSelectedFunction(fn)}
                 onDoubleClick={handleInsert}
-                style={{
-                  padding: "8px 16px",
-                  cursor: "pointer",
-                  backgroundColor:
-                    selectedFunction?.name === fn.name ? "#e8f4fc" : "transparent",
-                  borderLeft:
-                    selectedFunction?.name === fn.name
-                      ? "3px solid #0078d4"
-                      : "3px solid transparent",
-                }}
+                isSelected={selectedFunction?.name === fn.name}
               >
-                <div style={{ fontWeight: 500, fontSize: "13px" }}>{fn.name}</div>
-                <div
-                  style={{
-                    fontSize: "11px",
-                    color: "#666",
-                    marginTop: "2px",
-                    whiteSpace: "nowrap",
-                    overflow: "hidden",
-                    textOverflow: "ellipsis",
-                  }}
-                >
-                  {fn.description}
-                </div>
-              </div>
+                <S.FunctionName>{fn.name}</S.FunctionName>
+                <S.FunctionDescription>{fn.description}</S.FunctionDescription>
+              </S.FunctionItem>
             ))
           )}
-        </div>
+        </S.FunctionListContainer>
 
-        {/* Function details */}
         {selectedFunction && (
-          <div
-            style={{
-              padding: "12px 16px",
-              borderTop: "1px solid #e0e0e0",
-              backgroundColor: "#f9f9f9",
-            }}
-          >
-            <div style={{ fontWeight: 600, fontSize: "13px", marginBottom: "4px" }}>
+          <S.FunctionDetails>
+            <S.FunctionSignature>
               {selectedFunction.name}({selectedFunction.syntax})
-            </div>
-            <div style={{ fontSize: "12px", color: "#444" }}>
+            </S.FunctionSignature>
+            <S.FunctionFullDescription>
               {selectedFunction.description}
-            </div>
-          </div>
+            </S.FunctionFullDescription>
+          </S.FunctionDetails>
         )}
 
-        {/* Footer */}
-        <div
-          style={{
-            padding: "12px 16px",
-            borderTop: "1px solid #e0e0e0",
-            display: "flex",
-            justifyContent: "flex-end",
-            gap: "8px",
-          }}
-        >
-          <button
-            onClick={onClose}
-            style={{
-              padding: "6px 16px",
-              border: "1px solid #d0d0d0",
-              borderRadius: "4px",
-              backgroundColor: "#ffffff",
-              cursor: "pointer",
-              fontSize: "13px",
-            }}
-          >
-            Cancel
-          </button>
-          <button
-            onClick={handleInsert}
-            disabled={!selectedFunction}
-            style={{
-              padding: "6px 16px",
-              border: "none",
-              borderRadius: "4px",
-              backgroundColor: selectedFunction ? "#0078d4" : "#cccccc",
-              color: "#ffffff",
-              cursor: selectedFunction ? "pointer" : "default",
-              fontSize: "13px",
-            }}
-          >
+        <S.Footer>
+          <S.CancelButton onClick={onClose}>Cancel</S.CancelButton>
+          <S.InsertButton onClick={handleInsert} disabled={!selectedFunction}>
             Insert
-          </button>
-        </div>
-      </div>
-    </div>
+          </S.InsertButton>
+        </S.Footer>
+      </S.DialogContainer>
+    </S.Overlay>
   );
 }
