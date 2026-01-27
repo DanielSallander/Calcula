@@ -1,8 +1,18 @@
-The right click menu seems to have gone missing.
-I used to be able to right click a column and row to insert / delete.
+### Pivot Table implementation"
 
-This is from the console when right clicking a menu (strange that is says pivotEditor)
-[Layout] Rendering, pivotEditor: null
-Layout.tsx:208 [Layout] Rendering, pivotEditor: null
-Layout.tsx:208 [Layout] Rendering, pivotEditor: null
-Layout.tsx:208 [Layout] Rendering, pivotEditor: null
+**Context:** Merged cells break the 1:1 relationship between grid coordinates and visual layout. This is one of the hardest features to implement in a custom grid engine.
+
+**Requirements:**
+1.  **Complete implementation of Pivot Table implementation as it is in Excel
+
+**Current Status:**
+We have a first working version of the Pivot Table.
+As a use case I have this:
+I have data, with headers (A and B), in range B2:C5. Then I select this range and insert a pivot table.
+A pivot table is correctly created and I can drag a field onto rows pane.
+We have an issue that causes everything to hang and crash, 
+caused by when inserting rows over a pivot table or inserting columns before a pivot table.
+
+The most recent changes was done in these files:
+- app\src\shell\Layout.tsx
+- app\src-tauri\src\commands\structure.rs

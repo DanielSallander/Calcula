@@ -3,7 +3,7 @@
 // CONTEXT: Arranges menu bar, ribbon, formula bar, spreadsheet, sheet tabs, status bar, and pivot editor
 // FIX: Pivot pane now shows/hides based on whether selection is within a pivot region
 
-import React, { useState, useCallback, useEffect } from "react";
+import React, { useState, useCallback, useEffect, useRef } from "react";
 import { MenuBar } from "./MenuBar";
 import { RibbonContainer } from "./Ribbon/RibbonContainer";
 import { FormulaBar } from "./FormulaBar";
@@ -13,8 +13,6 @@ import { GridProvider, useGridContext } from "../core/state/GridContext";
 import { PivotEditorPanel } from "../core/components/pivot/PivotEditorPanel";
 import { getPivotSourceData, getPivotAtCell } from "../core/lib/pivot-api";
 import type { PivotId, SourceField, ZoneField, LayoutConfig, AggregationType } from "../core/components/pivot/types";
-
-console.log("[Layout] Module loaded");
 
 interface PivotEditorState {
   pivotId: PivotId;
@@ -33,13 +31,16 @@ function LayoutInner(): React.ReactElement {
   const { state } = useGridContext();
   const [pivotEditor, setPivotEditor] = useState<PivotEditorState | null>(null);
   const [manualClose, setManualClose] = useState<PivotId | null>(null);
+  
+  // Track last checked selection to avoid redundant API calls
+  const lastCheckedSelectionRef = useRef<{ row: number; col: number } | null>(null);
+  const checkInProgressRef = useRef(false);
 
   // Listen for pivot:created event from InsertMenu
   useEffect(() => {
     const handlePivotCreated = async (event: Event) => {
       const customEvent = event as CustomEvent<{ pivotId: number }>;
       const { pivotId } = customEvent.detail;
-      console.log("[Layout] Pivot created event received:", pivotId);
       
       // Reset manual close state for new pivots
       setManualClose(null);
@@ -48,19 +49,14 @@ function LayoutInner(): React.ReactElement {
         // Get source data with empty group path to retrieve headers
         // Pass maxRecords=1 to minimize data transfer - we just need headers
         const sourceData = await getPivotSourceData(pivotId, [], 1);
-        console.log("[Layout] Source data headers:", sourceData.headers);
 
         // Convert headers to source fields
-        // We'll assume fields could be either numeric or text - the backend handles validation
         const sourceFields: SourceField[] = sourceData.headers.map((name, index) => ({
           index,
           name,
-          // Heuristic: check if the header name suggests a numeric field
-          // This is a simple heuristic - in production, we'd get this info from the backend
           isNumeric: isLikelyNumericField(name),
         }));
 
-        console.log("[Layout] Opening pivot editor with fields:", sourceFields);
         setPivotEditor({
           pivotId,
           sourceFields,
@@ -92,14 +88,32 @@ function LayoutInner(): React.ReactElement {
   }, []);
 
   // Check selection changes and show/hide pivot pane accordingly
+  // Debounced to prevent excessive API calls
   useEffect(() => {
-    const checkPivotAtSelection = async () => {
-      if (!state.selection) {
-        return;
-      }
+    if (!state.selection) {
+      return;
+    }
 
-      const row = state.selection.endRow;
-      const col = state.selection.endCol;
+    const row = state.selection.endRow;
+    const col = state.selection.endCol;
+    
+    // Skip if we already checked this exact cell
+    if (
+      lastCheckedSelectionRef.current &&
+      lastCheckedSelectionRef.current.row === row &&
+      lastCheckedSelectionRef.current.col === col
+    ) {
+      return;
+    }
+    
+    // Skip if a check is already in progress
+    if (checkInProgressRef.current) {
+      return;
+    }
+
+    const checkPivotAtSelection = async () => {
+      checkInProgressRef.current = true;
+      lastCheckedSelectionRef.current = { row, col };
 
       try {
         const pivotInfo = await getPivotAtCell(row, col);
@@ -110,8 +124,6 @@ function LayoutInner(): React.ReactElement {
           if (manualClose !== pivotInfo.pivotId) {
             // Check if we already have this pivot open
             if (!pivotEditor || pivotEditor.pivotId !== pivotInfo.pivotId) {
-              console.log("[Layout] Selection entered pivot region:", pivotInfo.pivotId);
-              
               // Convert source fields from backend format
               const sourceFields: SourceField[] = pivotInfo.sourceFields.map((field) => ({
                 index: field.index,
@@ -158,13 +170,6 @@ function LayoutInner(): React.ReactElement {
                 values_position: config.layout.values_position,
               };
               
-              console.log("[Layout] Restoring pivot editor state:", {
-                rows: initialRows.length,
-                columns: initialColumns.length,
-                values: initialValues.length,
-                filters: initialFilters.length,
-              });
-              
               setPivotEditor({
                 pivotId: pivotInfo.pivotId,
                 sourceFields,
@@ -179,17 +184,20 @@ function LayoutInner(): React.ReactElement {
         } else {
           // Selection is outside any pivot region - hide the pane
           if (pivotEditor) {
-            console.log("[Layout] Selection left pivot region, hiding pane");
             setPivotEditor(null);
             setManualClose(null);
           }
         }
       } catch (error) {
         console.error("[Layout] Failed to check pivot at selection:", error);
+      } finally {
+        checkInProgressRef.current = false;
       }
     };
 
-    checkPivotAtSelection();
+    // Small delay to debounce rapid selection changes
+    const timeoutId = setTimeout(checkPivotAtSelection, 50);
+    return () => clearTimeout(timeoutId);
   }, [state.selection, pivotEditor, manualClose]);
 
   const handlePivotEditorClose = useCallback(() => {
@@ -201,11 +209,8 @@ function LayoutInner(): React.ReactElement {
   }, [pivotEditor]);
 
   const handlePivotViewUpdate = useCallback(() => {
-    console.log("[Layout] Pivot view updated, refreshing grid");
     window.dispatchEvent(new CustomEvent("grid:refresh"));
   }, []);
-
-  console.log("[Layout] Rendering, pivotEditor:", pivotEditor);
 
   return (
     <div

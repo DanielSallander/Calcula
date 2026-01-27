@@ -7,6 +7,248 @@ use engine::Cell;
 use std::collections::{HashMap, HashSet};
 use tauri::State;
 
+/// ============================================================================
+// PIVOT REGION SHIFT HELPERS
+// ============================================================================
+
+/// Shift pivot regions when rows are inserted
+fn shift_pivot_regions_for_row_insert(state: &AppState, from_row: u32, count: u32, sheet_index: usize) {
+    let mut regions = state.pivot_regions.lock().unwrap();
+    let mut pivot_tables = state.pivot_tables.lock().unwrap();
+    
+    for region in regions.iter_mut() {
+        if region.sheet_index != sheet_index {
+            continue;
+        }
+        
+        // Shift region coordinates if at or below insertion point
+        if region.start_row >= from_row {
+            region.start_row += count;
+            region.end_row += count;
+        } else if region.end_row >= from_row {
+            // Region spans the insertion point - expand it
+            region.end_row += count;
+        }
+        
+        // Also update the pivot definition's destination
+        if let Some((definition, _)) = pivot_tables.get_mut(&region.pivot_id) {
+            let (dest_row, dest_col) = definition.destination;
+            if dest_row >= from_row {
+                definition.destination = (dest_row + count, dest_col);
+            }
+            
+            // Update source range if on the same sheet
+            // (For simplicity, assuming source is on same sheet - could be enhanced)
+            let (src_start_row, src_start_col) = definition.source_start;
+            let (src_end_row, src_end_col) = definition.source_end;
+            
+            if src_start_row >= from_row {
+                definition.source_start = (src_start_row + count, src_start_col);
+            }
+            if src_end_row >= from_row {
+                definition.source_end = (src_end_row + count, src_end_col);
+            } else if src_end_row >= from_row {
+                // Source range spans insertion - expand
+                definition.source_end = (src_end_row + count, src_end_col);
+            }
+        }
+    }
+}
+
+/// Shift pivot regions when columns are inserted
+fn shift_pivot_regions_for_col_insert(state: &AppState, from_col: u32, count: u32, sheet_index: usize) {
+    let mut regions = state.pivot_regions.lock().unwrap();
+    let mut pivot_tables = state.pivot_tables.lock().unwrap();
+    
+    for region in regions.iter_mut() {
+        if region.sheet_index != sheet_index {
+            continue;
+        }
+        
+        // Shift region coordinates if at or to the right of insertion point
+        if region.start_col >= from_col {
+            region.start_col += count;
+            region.end_col += count;
+        } else if region.end_col >= from_col {
+            // Region spans the insertion point - expand it
+            region.end_col += count;
+        }
+        
+        // Also update the pivot definition's destination
+        if let Some((definition, _)) = pivot_tables.get_mut(&region.pivot_id) {
+            let (dest_row, dest_col) = definition.destination;
+            if dest_col >= from_col {
+                definition.destination = (dest_row, dest_col + count);
+            }
+            
+            // Update source range
+            let (src_start_row, src_start_col) = definition.source_start;
+            let (src_end_row, src_end_col) = definition.source_end;
+            
+            if src_start_col >= from_col {
+                definition.source_start = (src_start_row, src_start_col + count);
+            }
+            if src_end_col >= from_col {
+                definition.source_end = (src_end_row, src_end_col + count);
+            } else if src_end_col >= from_col {
+                definition.source_end = (src_end_row, src_end_col + count);
+            }
+        }
+    }
+}
+
+/// Shift pivot regions when rows are deleted
+fn shift_pivot_regions_for_row_delete(state: &AppState, from_row: u32, count: u32, sheet_index: usize) {
+    let mut regions = state.pivot_regions.lock().unwrap();
+    let mut pivot_tables = state.pivot_tables.lock().unwrap();
+    
+    // Collect pivot IDs to remove (if their region is fully deleted)
+    let mut pivots_to_remove: Vec<u32> = Vec::new();
+    
+    for region in regions.iter_mut() {
+        if region.sheet_index != sheet_index {
+            continue;
+        }
+        
+        let delete_end = from_row + count;
+        
+        // Check if region is fully within deleted range
+        if region.start_row >= from_row && region.end_row < delete_end {
+            pivots_to_remove.push(region.pivot_id);
+            continue;
+        }
+        
+        // Shift region coordinates
+        if region.start_row >= delete_end {
+            region.start_row -= count;
+            region.end_row -= count;
+        } else if region.start_row >= from_row {
+            // Start is in deleted range, end is after
+            region.start_row = from_row;
+            region.end_row -= count;
+        } else if region.end_row >= delete_end {
+            // Region spans deletion - shrink
+            region.end_row -= count;
+        } else if region.end_row >= from_row {
+            // End is in deleted range
+            region.end_row = from_row.saturating_sub(1);
+        }
+        
+        // Update pivot definition
+        if let Some((definition, _)) = pivot_tables.get_mut(&region.pivot_id) {
+            let (dest_row, dest_col) = definition.destination;
+            if dest_row >= delete_end {
+                definition.destination = (dest_row - count, dest_col);
+            } else if dest_row >= from_row {
+                definition.destination = (from_row, dest_col);
+            }
+            
+            // Update source range
+            let (src_start_row, src_start_col) = definition.source_start;
+            let (src_end_row, src_end_col) = definition.source_end;
+            
+            let new_start_row = if src_start_row >= delete_end {
+                src_start_row - count
+            } else if src_start_row >= from_row {
+                from_row
+            } else {
+                src_start_row
+            };
+            
+            let new_end_row = if src_end_row >= delete_end {
+                src_end_row - count
+            } else if src_end_row >= from_row {
+                from_row.saturating_sub(1).max(new_start_row)
+            } else {
+                src_end_row
+            };
+            
+            definition.source_start = (new_start_row, src_start_col);
+            definition.source_end = (new_end_row, src_end_col);
+        }
+    }
+    
+    // Remove fully deleted pivots
+    for pivot_id in pivots_to_remove {
+        regions.retain(|r| r.pivot_id != pivot_id);
+        pivot_tables.remove(&pivot_id);
+    }
+}
+
+/// Shift pivot regions when columns are deleted
+fn shift_pivot_regions_for_col_delete(state: &AppState, from_col: u32, count: u32, sheet_index: usize) {
+    let mut regions = state.pivot_regions.lock().unwrap();
+    let mut pivot_tables = state.pivot_tables.lock().unwrap();
+    
+    let mut pivots_to_remove: Vec<u32> = Vec::new();
+    
+    for region in regions.iter_mut() {
+        if region.sheet_index != sheet_index {
+            continue;
+        }
+        
+        let delete_end = from_col + count;
+        
+        // Check if region is fully within deleted range
+        if region.start_col >= from_col && region.end_col < delete_end {
+            pivots_to_remove.push(region.pivot_id);
+            continue;
+        }
+        
+        // Shift region coordinates
+        if region.start_col >= delete_end {
+            region.start_col -= count;
+            region.end_col -= count;
+        } else if region.start_col >= from_col {
+            region.start_col = from_col;
+            region.end_col -= count;
+        } else if region.end_col >= delete_end {
+            region.end_col -= count;
+        } else if region.end_col >= from_col {
+            region.end_col = from_col.saturating_sub(1);
+        }
+        
+        // Update pivot definition
+        if let Some((definition, _)) = pivot_tables.get_mut(&region.pivot_id) {
+            let (dest_row, dest_col) = definition.destination;
+            if dest_col >= delete_end {
+                definition.destination = (dest_row, dest_col - count);
+            } else if dest_col >= from_col {
+                definition.destination = (dest_row, from_col);
+            }
+            
+            // Update source range
+            let (src_start_row, src_start_col) = definition.source_start;
+            let (src_end_row, src_end_col) = definition.source_end;
+            
+            let new_start_col = if src_start_col >= delete_end {
+                src_start_col - count
+            } else if src_start_col >= from_col {
+                from_col
+            } else {
+                src_start_col
+            };
+            
+            let new_end_col = if src_end_col >= delete_end {
+                src_end_col - count
+            } else if src_end_col >= from_col {
+                from_col.saturating_sub(1).max(new_start_col)
+            } else {
+                src_end_col
+            };
+            
+            definition.source_start = (src_start_row, new_start_col);
+            definition.source_end = (src_end_row, new_end_col);
+        }
+    }
+    
+    // Remove fully deleted pivots
+    for pivot_id in pivots_to_remove {
+        regions.retain(|r| r.pivot_id != pivot_id);
+        pivot_tables.remove(&pivot_id);
+    }
+}
+
 // ============================================================================
 // ROW/COLUMN INSERTION WITH DEPENDENCY MAP UPDATES
 // ============================================================================
@@ -218,6 +460,28 @@ pub fn insert_rows(
         grids[active_sheet].max_col = grid.max_col;
     }
     
+    // Drop locks before calling pivot region shift (which needs its own locks)
+    drop(dependents_map);
+    drop(dependencies_map);
+    drop(column_dependents_map);
+    drop(column_dependencies_map);
+    drop(row_dependents_map);
+    drop(row_dependencies_map);
+    drop(undo_stack);
+    drop(row_heights);
+    drop(merged_regions);
+    drop(styles);
+    drop(grids);
+    drop(grid);
+    
+    // === UPDATE PIVOT REGIONS ===
+    shift_pivot_regions_for_row_insert(&state, row, count, active_sheet);
+    
+    // Re-acquire locks for result building
+    let grid = state.grid.lock().map_err(|e| e.to_string())?;
+    let styles = state.style_registry.lock().map_err(|e| e.to_string())?;
+    let merged_regions = state.merged_regions.lock().map_err(|e| e.to_string())?;
+    
     // Return updated cells with merge info
     let mut result: Vec<CellData> = Vec::new();
     for r in 0..=grid.max_row {
@@ -343,6 +607,28 @@ pub fn insert_columns(
         grids[active_sheet].max_row = grid.max_row;
         grids[active_sheet].max_col = grid.max_col;
     }
+    
+    // Drop locks before calling pivot region shift
+    drop(dependents_map);
+    drop(dependencies_map);
+    drop(column_dependents_map);
+    drop(column_dependencies_map);
+    drop(row_dependents_map);
+    drop(row_dependencies_map);
+    drop(undo_stack);
+    drop(column_widths);
+    drop(merged_regions);
+    drop(styles); 
+    drop(grids);
+    drop(grid);
+    
+    // === UPDATE PIVOT REGIONS ===
+    shift_pivot_regions_for_col_insert(&state, col, count, active_sheet);
+    
+    // Re-acquire locks for result building
+    let grid = state.grid.lock().map_err(|e| e.to_string())?;
+    let styles = state.style_registry.lock().map_err(|e| e.to_string())?;
+    let merged_regions = state.merged_regions.lock().map_err(|e| e.to_string())?;
     
     // Return updated cells with merge info
     let mut result: Vec<CellData> = Vec::new();
@@ -752,6 +1038,28 @@ pub fn delete_rows(
         grids[active_sheet].max_col = grid.max_col;
     }
     
+    // Drop locks before calling pivot region shift
+    drop(dependents_map);
+    drop(dependencies_map);
+    drop(column_dependents_map);
+    drop(column_dependencies_map);
+    drop(row_dependents_map);
+    drop(row_dependencies_map);
+    drop(undo_stack);
+    drop(row_heights);
+    drop(merged_regions);
+    drop(styles);
+    drop(grids);
+    drop(grid);
+    
+    // === UPDATE PIVOT REGIONS ===
+    shift_pivot_regions_for_row_delete(&state, row, count, active_sheet);
+    
+    // Re-acquire locks for result building
+    let grid = state.grid.lock().map_err(|e| e.to_string())?;
+    let styles = state.style_registry.lock().map_err(|e| e.to_string())?;
+    let merged_regions = state.merged_regions.lock().map_err(|e| e.to_string())?;
+    
     // Return updated cells with merge info
     let mut result: Vec<CellData> = Vec::new();
     for r in 0..=grid.max_row {
@@ -901,6 +1209,28 @@ pub fn delete_columns(
         grids[active_sheet].max_row = grid.max_row;
         grids[active_sheet].max_col = grid.max_col;
     }
+    
+    // Drop locks before calling pivot region shift
+    drop(dependents_map);
+    drop(dependencies_map);
+    drop(column_dependents_map);
+    drop(column_dependencies_map);
+    drop(row_dependents_map);
+    drop(row_dependencies_map);
+    drop(undo_stack);
+    drop(column_widths);
+    drop(merged_regions);
+    drop(styles);
+    drop(grids);
+    drop(grid);
+    
+    // === UPDATE PIVOT REGIONS ===
+    shift_pivot_regions_for_col_delete(&state, col, count, active_sheet);
+    
+    // Re-acquire locks for result building
+    let grid = state.grid.lock().map_err(|e| e.to_string())?;
+    let styles = state.style_registry.lock().map_err(|e| e.to_string())?;
+    let merged_regions = state.merged_regions.lock().map_err(|e| e.to_string())?;
     
     // Return updated cells with merge info
     let mut result: Vec<CellData> = Vec::new();
