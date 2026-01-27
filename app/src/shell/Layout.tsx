@@ -50,11 +50,16 @@ function LayoutInner(): React.ReactElement {
   const lastCheckedSelectionRef = useRef<{ row: number; col: number } | null>(null);
   const checkInProgressRef = useRef(false);
 
+  // Track when a pivot was just created to avoid race condition with selection check
+  const justCreatedPivotRef = useRef(false);
+
   // Listen for pivot regions updates from GridCanvas
   useEffect(() => {
     const handlePivotRegionsUpdate = (event: Event) => {
       const customEvent = event as CustomEvent<{ regions: PivotRegionData[] }>;
       setCachedPivotRegions(customEvent.detail.regions);
+      // Clear the just-created flag now that regions are cached
+      justCreatedPivotRef.current = false;
     };
     
     window.addEventListener("pivot:regionsUpdated", handlePivotRegionsUpdate);
@@ -79,9 +84,12 @@ function LayoutInner(): React.ReactElement {
     const handlePivotCreated = async (event: Event) => {
       const customEvent = event as CustomEvent<{ pivotId: number }>;
       const { pivotId } = customEvent.detail;
-      
+
       // Clear manually closed state for pivot pane when a new pivot is created
       useTaskPaneStore.getState().clearManuallyClosed(PIVOT_PANE_ID);
+
+      // Set flag to prevent selection effect from closing the pane before regions are cached
+      justCreatedPivotRef.current = true;
 
       try {
         const sourceData = await getPivotSourceData(pivotId, [], 1);
@@ -152,13 +160,17 @@ function LayoutInner(): React.ReactElement {
     
     if (localPivotRegion === null) {
       // Cell is NOT in any pivot region - close pivot pane if open
+      // BUT skip if a pivot was just created (regions not yet cached)
+      if (justCreatedPivotRef.current) {
+        return;
+      }
       lastCheckedSelectionRef.current = { row, col };
       closePane(PIVOT_PANE_ID);
       return;
     }
 
     // Cell IS in a pivot region - check if manually closed
-    if (manuallyClosed.has(PIVOT_PANE_ID)) {
+    if (manuallyClosed.includes(PIVOT_PANE_ID)) {
       lastCheckedSelectionRef.current = { row, col };
       return;
     }

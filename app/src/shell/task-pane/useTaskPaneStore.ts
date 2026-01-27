@@ -36,8 +36,8 @@ export interface TaskPaneState {
   activeContextKeys: TaskPaneContextKey[];
   /** Dock mode: docked compresses grid, floating overlays */
   dockMode: "docked" | "floating";
-  /** Views that were manually closed by the user (won't auto-open) */
-  manuallyClosed: Set<string>;
+  /** Views that were manually closed by the user (won't auto-open) - stored as array for serialization */
+  manuallyClosed: string[];
 }
 
 /**
@@ -83,7 +83,7 @@ const initialState: TaskPaneState = {
   openPanes: [],
   activeContextKeys: [],
   dockMode: "docked",
-  manuallyClosed: new Set(),
+  manuallyClosed: [],
 };
 
 /**
@@ -111,6 +111,7 @@ export const useTaskPaneStore = create<TaskPaneState & TaskPaneActions>()(
       },
 
       openPane: (viewId: string, data?: Record<string, unknown>) => {
+        console.log("[TaskPane] openPane called:", { viewId, data });
         const state = get();
         const existingIndex = state.openPanes.findIndex(
           (p) => p.viewId === viewId
@@ -123,6 +124,7 @@ export const useTaskPaneStore = create<TaskPaneState & TaskPaneActions>()(
             ...newPanes[existingIndex],
             data: data ?? newPanes[existingIndex].data,
           };
+          console.log("[TaskPane] Updating existing pane, setting isOpen=true");
           set({
             openPanes: newPanes,
             activeViewId: viewId,
@@ -135,6 +137,7 @@ export const useTaskPaneStore = create<TaskPaneState & TaskPaneActions>()(
             data,
             openedAt: Date.now(),
           };
+          console.log("[TaskPane] Adding new pane, setting isOpen=true");
           set({
             openPanes: [...state.openPanes, newPane],
             activeViewId: viewId,
@@ -142,10 +145,9 @@ export const useTaskPaneStore = create<TaskPaneState & TaskPaneActions>()(
           });
         }
 
-        // Clear manually closed state when explicitly opening
-        const manuallyClosed = new Set(state.manuallyClosed);
-        manuallyClosed.delete(viewId);
-        set({ manuallyClosed });
+        // Clear manually closed state when explicitly opening (array filter)
+        const newManuallyClosed = state.manuallyClosed.filter((id) => id !== viewId);
+        set({ manuallyClosed: newManuallyClosed });
       },
 
       closePane: (viewId: string) => {
@@ -177,21 +179,21 @@ export const useTaskPaneStore = create<TaskPaneState & TaskPaneActions>()(
       },
 
       markManuallyClosed: (viewId: string) => {
-        const manuallyClosed = new Set(get().manuallyClosed);
-        manuallyClosed.add(viewId);
-        set({ manuallyClosed });
+        const current = get().manuallyClosed;
+        if (!current.includes(viewId)) {
+          set({ manuallyClosed: [...current, viewId] });
+        }
       },
 
       clearManuallyClosed: (viewId: string) => {
-        const manuallyClosed = new Set(get().manuallyClosed);
-        manuallyClosed.delete(viewId);
-        set({ manuallyClosed });
+        const current = get().manuallyClosed;
+        set({ manuallyClosed: current.filter((id) => id !== viewId) });
       },
 
       reset: () => {
         set({
           ...initialState,
-          manuallyClosed: new Set(),
+          manuallyClosed: [],
         });
       },
     }),

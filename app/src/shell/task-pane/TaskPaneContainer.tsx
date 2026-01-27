@@ -89,6 +89,15 @@ export function TaskPaneContainer(): React.ReactElement {
 
   const hasOpenPanes = openPanes.length > 0;
 
+  // Debug logging
+  console.log("[TaskPaneContainer] render:", {
+    isOpen,
+    hasOpenPanes,
+    openPanes: openPanes.map((p) => p.viewId),
+    activeViewId,
+    activeViewDef: activeViewDef?.id ?? null,
+  });
+
   return (
     <S.TaskPaneWrapper
       ref={containerRef}
