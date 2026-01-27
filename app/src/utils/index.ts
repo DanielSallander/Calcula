@@ -1,4 +1,4 @@
-// FILENAME: src/utils/index.ts
+//! FILENAME: app/src/utils/index.ts
 // PURPOSE: Barrel export for utils
 
 /*

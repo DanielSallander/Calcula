@@ -1,4 +1,4 @@
-// FILENAME: app/src/components/Spreadsheet/useSpreadsheet.ts
+//! FILENAME: app/src/core/components/Spreadsheet/useSpreadsheet.ts
 // PURPOSE: Main composer hook that aggregates functional sub-hooks.
 // CONTEXT: Orchestrates initialization and combines logic from Styles, Selection, Editing, and Layout hooks.
 // Updated: Added clipboard state for marching ants animation.

@@ -1,4 +1,4 @@
-// FILENAME: src/utils/bridge.ts
+//! FILENAME: app/src-tauri/src/utils/bridge.ts
 // PURPOSE: Wrapper around Tauri's invoke function with compact AI-optimized logging.
 // FORMAT: [timestamp]|level|category|message (e.g., "[2025-01-15 10:30:45.123]|I|CMD|update_cell r=0 c=0")
 

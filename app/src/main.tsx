@@ -1,4 +1,4 @@
-// FILENAME: main.tsx
+//! FILENAME: app/src/main.tsx
 // PURPOSE: Application entry point
 // CONTEXT: Initializes React and loads the shell application
 

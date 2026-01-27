@@ -1,4 +1,4 @@
-// FILENAME: app/src/components/Ribbon/tabs/HomeTab/ClipboardGroup.tsx
+//! FILENAME: z_archive/addins/_disabled/formatting/font/ClipboardGroup.tsx
 // PURPOSE: Clipboard group for the Home tab with Cut, Copy, Paste buttons
 // CONTEXT: Provides clipboard operations for selected cells
 

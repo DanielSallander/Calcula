@@ -1,4 +1,4 @@
-// FILENAME: core/components/Scrollbar/index.ts
+//! FILENAME: app/src/core/components/Scrollbar/index.ts
 // PURPOSE: Barrel exports for Scrollbar components
 
 export { Scrollbar, ScrollbarCorner } from "./Scrollbar";

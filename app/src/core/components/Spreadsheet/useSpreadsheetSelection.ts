@@ -1,4 +1,4 @@
-// FILENAME: app/src/components/Spreadsheet/useSpreadsheetSelection.ts
+//! FILENAME: app/src/core/components/Spreadsheet/useSpreadsheetSelection.ts
 // PURPOSE: Handles mouse/keyboard interaction and selection state.
 // CONTEXT: Coordinates global selection hooks with local canvas events.
 // Includes fill handle and clipboard support with marching ants.

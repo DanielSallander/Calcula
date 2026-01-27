@@ -1,4 +1,4 @@
-// FILENAME: app/src/core/extensions/ExtensionRegistry.ts
+//! FILENAME: app/src/core/extensions/ExtensionRegistry.ts
 // PURPOSE: Central registry for all extension points.
 // CONTEXT: Add-ins register their contributions here; core consumes them.
 

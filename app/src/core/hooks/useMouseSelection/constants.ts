@@ -1,4 +1,4 @@
-// FILENAME: app/src/hooks/useMouseSelection/constants.ts
+//! FILENAME: app/src/core/hooks/useMouseSelection/constants.ts
 // PURPOSE: Configuration constants for mouse selection behavior.
 // CONTEXT: Contains default values for auto-scroll behavior during drag
 // operations, extracted for easy tuning and testing.

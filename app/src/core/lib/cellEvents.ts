@@ -1,4 +1,4 @@
-// FILENAME: app/src/lib/cellEvents.ts
+//! FILENAME: app/src/core/lib/cellEvents.ts
 // PURPOSE: Event emitter for cell change notifications.
 // CONTEXT: Phase 4.3 introduces a cell event system to decouple components
 // that need to respond to cell changes. This enables the canvas to refresh

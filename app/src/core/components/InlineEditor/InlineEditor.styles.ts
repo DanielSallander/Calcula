@@ -1,3 +1,4 @@
+//! FILENAME: app/src/core/components/InlineEditor/InlineEditor.styles.ts
 import styled from 'styled-components';
 
 // Helper to keep syntax clean and consistent

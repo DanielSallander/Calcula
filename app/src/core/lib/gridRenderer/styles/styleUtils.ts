@@ -1,4 +1,4 @@
-//FILENAME: app/src/lib/gridRenderer/styles/styleUtils.ts
+//! FILENAME: app/src/core/lib/gridRenderer/styles/styleUtils.ts
 //PURPOSE: Style cache management and color validation utilities
 //CONTEXT: Handles style data retrieval and CSS color validation
 

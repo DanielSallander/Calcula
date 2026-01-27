@@ -1,4 +1,4 @@
-// FILENAME: shell/FormulaBar/FormulaBar.tsx
+//! FILENAME: app/src/shell/FormulaBar/FormulaBar.tsx
 // PURPOSE: Formula bar with Name Box, Cancel/Enter buttons, and formula input
 // CONTEXT: Positioned between Ribbon and Spreadsheet grid
 // FEATURES: 

@@ -1,4 +1,4 @@
-// FILENAME: app/src/components/Ribbon/tabs/HomeTab/HomeTab.tsx
+//! FILENAME: z_archive/addins/_disabled/formatting/HomeTab.tsx
 // PURPOSE: Home tab content component.
 // CONTEXT: Contains Clipboard, Font, Alignment, and Number format groups.
 

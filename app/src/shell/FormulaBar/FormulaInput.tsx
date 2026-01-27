@@ -1,4 +1,4 @@
-// FILENAME: shell/FormulaBar/FormulaInput.tsx
+//! FILENAME: app/src/shell/FormulaBar/FormulaInput.tsx
 // PURPOSE: Formula input field that syncs with cell editing state
 // CONTEXT: Part of FormulaBar, displays and edits the current cell formula/value
 // FIX: Now fetches content from master cell for merged regions

@@ -1,3 +1,4 @@
+//! FILENAME: app/src-tauri/src/commands/utils.rs
 // PURPOSE: Helper functions shared between different command modules.
 
 use crate::api_types::{CellData, MergedRegion};

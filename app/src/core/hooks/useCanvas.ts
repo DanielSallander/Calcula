@@ -1,4 +1,4 @@
-// FILENAME: app/src/hooks/useCanvas.ts
+//! FILENAME: app/src/core/hooks/useCanvas.ts
 // PURPOSE: Custom hook for managing HTML5 Canvas setup and context.
 // CONTEXT: This hook provides canvas management functionality including:
 // - Setting up the 2D rendering context with proper device pixel ratio

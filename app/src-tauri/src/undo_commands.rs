@@ -1,4 +1,4 @@
-// FILENAME: src-tauri/src/undo_commands.rs
+//! FILENAME: app/src-tauri/src/undo_commands.rs
 // PURPOSE: Tauri commands for undo/redo operations.
 
 use crate::api_types::CellData;

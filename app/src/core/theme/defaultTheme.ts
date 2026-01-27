@@ -1,3 +1,4 @@
+//! FILENAME: app/src/core/theme/defaultTheme.ts
 import { THEME_TOKENS } from './tokens';
 
 export const defaultTheme: Record<string, string> = {

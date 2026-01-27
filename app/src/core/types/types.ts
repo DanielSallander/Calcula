@@ -1,4 +1,4 @@
-// FILENAME: app/src/core/lib/types.ts
+//! FILENAME: app/src/core/types/types.ts
 // PURPOSE: Shared TypeScript type definitions for the Calcula frontend.
 // CONTEXT: This module contains interfaces and types used across the
 // React application for type-safe component props and state management.

@@ -1,4 +1,4 @@
-// FILENAME: app/src/shell/Ribbon/components/RibbonGroup.tsx
+//! FILENAME: app/src/shell/Ribbon/components/RibbonGroup.tsx
 // PURPOSE: Container component for a group of ribbon controls.
 // CONTEXT: Used by add-ins to group related controls together.
 

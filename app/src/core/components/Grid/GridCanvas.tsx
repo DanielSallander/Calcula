@@ -1,4 +1,4 @@
-// FILENAME: app/src/core/components/GridCanvas.tsx
+//! FILENAME: app/src/core/components/Grid/GridCanvas.tsx
 // PURPOSE: Canvas component for rendering the spreadsheet grid.
 // CONTEXT: This component manages the HTML5 Canvas element used for
 // high-performance grid rendering. It handles device pixel ratio scaling,

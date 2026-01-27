@@ -1,4 +1,4 @@
-//FILENAME: app/src/lib/gridRenderer/interaction/hitTesting.ts
+//! FILENAME: app/src/core/lib/gridRenderer/interaction/hitTesting.ts
 //PURPOSE: Pixel coordinate to cell coordinate conversion and resize handle detection
 //CONTEXT: Handles mouse interaction with grid cells, headers, and resize handles
 //UPDATED: Added freeze pane support for coordinate translation

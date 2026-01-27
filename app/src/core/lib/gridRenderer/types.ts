@@ -1,4 +1,4 @@
-// FILENAME: app/src/lib/gridRenderer/types.ts
+//! FILENAME: app/src/core/lib/gridRenderer/types.ts
 // PURPOSE: Core type definitions and theme configuration for grid rendering
 // CONTEXT: Defines interfaces used throughout the rendering pipeline
 // UPDATED: Added freeze pane support with zone rendering state

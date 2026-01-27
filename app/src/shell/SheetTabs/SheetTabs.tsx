@@ -1,4 +1,4 @@
-// FILENAME: shell/SheetTabs/SheetTabs.tsx
+//! FILENAME: app/src/shell/SheetTabs/SheetTabs.tsx
 // PURPOSE: Sheet tabs component for switching between worksheets
 // CONTEXT: Enhanced to support sheet switching during formula editing without page reload.
 //          Key fix: Uses global flag to prevent blur commit during formula mode navigation.

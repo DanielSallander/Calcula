@@ -1,4 +1,4 @@
-// FILENAME: app/src/core/lib/formulaCompletion.ts
+//! FILENAME: app/src/core/lib/formulaCompletion.ts
 // PURPOSE: Smart formula auto-completion (e.g., adding missing closing parentheses)
 // CONTEXT: Used when committing a formula to fix common incomplete formulas
 

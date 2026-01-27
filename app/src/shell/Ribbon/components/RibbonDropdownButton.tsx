@@ -1,4 +1,4 @@
-// FILENAME: app/src/components/Ribbon/components/RibbonDropdownButton.tsx
+//! FILENAME: app/src/shell/Ribbon/components/RibbonDropdownButton.tsx
 // PURPOSE: Button with dropdown functionality for ribbon toolbar.
 // CONTEXT: Combines a button with a dropdown panel that can be toggled.
 

@@ -1,4 +1,4 @@
-// FILENAME: app/src/hooks/useMouseSelection/utils/autoScrollUtils.ts
+//! FILENAME: app/src/core/hooks/useMouseSelection/utils/autoScrollUtils.ts
 // PURPOSE: Utility functions for calculating auto-scroll behavior.
 // CONTEXT: Contains pure functions for determining scroll deltas based on
 // mouse position relative to viewport edges during drag operations.

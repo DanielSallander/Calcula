@@ -1,4 +1,4 @@
-// FILENAME: app/src/utils/log.ts
+//! FILENAME: app/src/utils/log.ts
 // PURPOSE: Simple wrapper around logger for easy importing
 
 import { logger as loggerInstance } from './logger';

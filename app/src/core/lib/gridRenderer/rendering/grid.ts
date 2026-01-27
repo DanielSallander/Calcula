@@ -1,4 +1,4 @@
-//FILENAME: app/src/lib/gridRenderer/rendering/grid.ts
+//! FILENAME: app/src/core/lib/gridRenderer/rendering/grid.ts
 //PURPOSE: Grid line and cell background rendering
 //CONTEXT: Draws the grid structure and default cell backgrounds
 //UPDATED: Added merged cell support - skip internal grid lines for merged regions

@@ -1,4 +1,4 @@
-// FILENAME: core/components/InlineEditor/index.ts
+//! FILENAME: app/src/core/components/InlineEditor/index.ts
 // PURPOSE: Barrel exports for InlineEditor component
 
 export { InlineEditor, default } from "./InlineEditor";

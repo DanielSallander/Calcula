@@ -1,4 +1,4 @@
-// FILENAME: app/src/core/components/Spreadsheet/Spreadsheet.styles.ts
+//! FILENAME: app/src/core/components/Spreadsheet/Spreadsheet.styles.ts
 // PURPOSE: Styled components for the Spreadsheet shell
 // CONTEXT: Handles the layout of the grid, scrollbars, and formula bar integration
 

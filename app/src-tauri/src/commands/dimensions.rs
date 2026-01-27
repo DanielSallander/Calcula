@@ -1,3 +1,4 @@
+//! FILENAME: app/src-tauri/src/commands/dimensions.rs
 // PURPOSE: Managing row heights and column widths.
 
 use crate::api_types::DimensionData;

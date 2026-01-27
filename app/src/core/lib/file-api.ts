@@ -1,3 +1,4 @@
+//! FILENAME: app/src/core/lib/file-api.ts
 import { tracedInvoke } from '../../utils/bridge';
 import { open, save } from '@tauri-apps/plugin-dialog';
 import type { CellData } from '../types/types';

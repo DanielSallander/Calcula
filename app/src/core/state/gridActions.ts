@@ -1,4 +1,4 @@
-// FILENAME: app/src/state/gridActions.ts
+//! FILENAME: app/src/core/state/gridActions.ts
 // PURPOSE: Action type definitions and action creators for grid state management.
 // CONTEXT: This module defines all possible actions that can modify the grid state.
 // Actions are dispatched to the gridReducer to update selection, viewport, editing state, etc.

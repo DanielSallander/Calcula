@@ -1,4 +1,4 @@
-// FILENAME: app/src/lib/scrollUtils.ts
+//! FILENAME: app/src/core/lib/scrollUtils.ts
 // PURPOSE: Utility functions for virtual scrolling calculations.
 // CONTEXT: This module provides optimized functions for mapping scrollbar
 // positions to row/column indices, calculating visible ranges, handling

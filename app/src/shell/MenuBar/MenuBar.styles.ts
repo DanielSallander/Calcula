@@ -1,3 +1,4 @@
+//! FILENAME: app/src/shell/MenuBar/MenuBar.styles.ts
 import styled, { css } from 'styled-components';
 
 const v = (name: string) => `var(${name})`;

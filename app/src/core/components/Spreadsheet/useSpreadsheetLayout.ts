@@ -1,4 +1,4 @@
-// FILENAME: app/src/components/Spreadsheet/useSpreadsheetLayout.ts
+//! FILENAME: app/src/core/components/Spreadsheet/useSpreadsheetLayout.ts
 // PURPOSE: Handles visual layout calculations and status bar text.
 // CONTEXT: Purely presentational logic for determining what is visible and what to show in the status bar.
 

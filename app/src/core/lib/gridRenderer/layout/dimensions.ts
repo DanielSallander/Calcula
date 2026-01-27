@@ -1,4 +1,4 @@
-// FILENAME: app/src/core/lib/gridRenderer/layout/dimensions.ts
+//! FILENAME: app/src/core/lib/gridRenderer/layout/dimensions.ts
 // PURPOSE: Column width and row height calculations with custom dimension support
 // CONTEXT: Handles cell positioning in the grid coordinate system
 // Updated: Fixed insertion animation to work correctly with backend-first approach

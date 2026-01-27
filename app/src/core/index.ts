@@ -1,4 +1,4 @@
-// FILENAME: src/core/index.ts
+//! FILENAME: app/src/core/index.ts
 // PURPOSE: Barrel exports for the core module
 // CONTEXT: This is the public API that shell and add-ins can use
 

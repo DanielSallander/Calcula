@@ -1,4 +1,4 @@
-// FILENAME: addins/_disabled/insert/index.ts
+//! FILENAME: z_archive/addins/_disabled/insert/index.ts
 // PURPOSE: Index for disabled insert add-in
 // STATUS: DISABLED - awaiting add-in system implementation
 

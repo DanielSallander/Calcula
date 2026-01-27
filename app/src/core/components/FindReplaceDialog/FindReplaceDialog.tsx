@@ -1,4 +1,4 @@
-// FILENAME: app/src/core/components/FindReplaceDialog/FindReplaceDialog.tsx
+//! FILENAME: app/src/core/components/FindReplaceDialog/FindReplaceDialog.tsx
 // PURPOSE: Find and Replace dialog component
 // CONTEXT: Provides UI for searching and replacing cell content
 

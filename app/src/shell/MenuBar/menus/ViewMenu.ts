@@ -1,3 +1,4 @@
+//! FILENAME: app/src/shell/MenuBar/menus/ViewMenu.ts
 import { useCallback, useEffect, useState } from 'react';
 import { setFreezePanes, getFreezePanes } from '../../../core/lib/tauri-api';
 import { setFreezeConfig } from '../../../core/state/gridActions';

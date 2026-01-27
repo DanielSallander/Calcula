@@ -1,3 +1,4 @@
+//! FILENAME: app/src/shell/MenuBar/menus/FileMenu.ts
 import { useCallback } from 'react';
 import { newFile, openFile, saveFile, saveFileAs, isFileModified } from '../../../core/lib/file-api';
 import type { Menu } from '../MenuBar.types';

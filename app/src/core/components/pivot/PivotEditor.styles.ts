@@ -1,3 +1,4 @@
+//! FILENAME: app/src/core/components/pivot/PivotEditor.styles.ts
 import { css } from '@emotion/css';
 
 export const styles = {

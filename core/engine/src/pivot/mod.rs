@@ -1,3 +1,4 @@
+//! FILENAME: core/engine/src/pivot/mod.rs
 //! Pivot Table subsystem for Calcula.
 //!
 //! This module provides three distinct layers:

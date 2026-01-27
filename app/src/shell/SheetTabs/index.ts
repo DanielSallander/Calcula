@@ -1,4 +1,4 @@
-// FILENAME: shell/SheetTabs/index.ts
+//! FILENAME: app/src/shell/SheetTabs/index.ts
 // PURPOSE: Barrel exports for SheetTabs module
 
 export { SheetTabs } from "./SheetTabs";

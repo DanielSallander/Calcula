@@ -1,4 +1,4 @@
-// FILENAME: app/src/components/Spreadsheet/SpreadsheetTypes.ts
+//! FILENAME: app/src/core/components/Spreadsheet/SpreadsheetTypes.ts
 // PURPOSE: Definitions for component props and related types.
 // CONTEXT: Extracts interfaces to avoid circular dependencies.
 

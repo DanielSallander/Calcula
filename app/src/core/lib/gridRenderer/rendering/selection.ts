@@ -1,4 +1,4 @@
-// FILENAME: app/src/lib/gridRenderer/rendering/selection.ts
+//! FILENAME: app/src/core/lib/gridRenderer/rendering/selection.ts
 // PURPOSE: Selection and active cell rendering
 // CONTEXT: Draws selection highlights, active cell borders, fill handles, fill preview,
 //          and clipboard marching ants animation

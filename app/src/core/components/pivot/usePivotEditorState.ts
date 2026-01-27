@@ -1,3 +1,4 @@
+//! FILENAME: app/src/core/components/pivot/usePivotEditorState.ts
 import { useState, useCallback, useMemo, useEffect, useRef } from 'react';
 import type {
   PivotEditorState,

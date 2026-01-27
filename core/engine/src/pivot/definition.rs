@@ -1,3 +1,4 @@
+//! FILENAME: core/engine/src/pivot/definition.rs
 //! Pivot Table Definition - The serializable configuration.
 //!
 //! This module contains all the types needed to DESCRIBE a pivot table.

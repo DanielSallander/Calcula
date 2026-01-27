@@ -1,4 +1,4 @@
-// FILENAME: app/src/hooks/useGridKeyboard.ts
+//! FILENAME: app/src/core/hooks/useGridKeyboard.ts
 // PURPOSE: Custom hook for handling keyboard navigation in the grid.
 // CONTEXT: This hook manages keyboard events for cell navigation including
 // arrow keys, Tab, Enter, Page Up/Down, Home, End, modifier combinations,

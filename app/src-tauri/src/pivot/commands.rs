@@ -1,3 +1,4 @@
+//! FILENAME: app/src-tauri/src/pivot/commands.rs
 use crate::pivot::operations::*;
 use crate::pivot::types::*;
 use crate::pivot::utils::*;

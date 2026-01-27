@@ -1,4 +1,4 @@
-// FILENAME: src-tauri/src/formula.rs
+//! FILENAME: app/src-tauri/src/formula.rs
 // PURPOSE: Formula library commands - function catalog and templates
 // FORMAT: seq|level|category|message
 

@@ -1,4 +1,4 @@
-// FILENAME: app/src-tauri/build.rs
+//! FILENAME: app/src-tauri/build.rs
 // PURPOSE: Tauri build script.
 
 fn main() {

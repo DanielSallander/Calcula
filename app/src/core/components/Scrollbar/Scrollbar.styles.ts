@@ -1,3 +1,4 @@
+//! FILENAME: app/src/core/components/Scrollbar/Scrollbar.styles.ts
 import styled, { css } from 'styled-components';
 
 // Helper for CSS variables

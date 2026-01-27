@@ -1,4 +1,4 @@
-// FILENAME: app/src/components/Ribbon/styles.ts
+//! FILENAME: app/src/shell/Ribbon/styles/styles.ts
 // PURPOSE: Shared styles for ribbon components.
 // CONTEXT: Centralizes ribbon styling for consistency.
 

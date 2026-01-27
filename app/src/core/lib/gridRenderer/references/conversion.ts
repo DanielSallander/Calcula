@@ -1,4 +1,4 @@
-//FILENAME: app/src/lib/gridRenderer/references/conversion.ts
+//! FILENAME: app/src/core/lib/gridRenderer/references/conversion.ts
 //PURPOSE: Cell and range to Excel-style reference conversion
 //CONTEXT: Converts cell coordinates to string references like "A1", "B2:C5", "Sheet1!A1"
 

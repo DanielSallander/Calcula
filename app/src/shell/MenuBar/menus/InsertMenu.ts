@@ -1,3 +1,4 @@
+//! FILENAME: app/src/shell/MenuBar/menus/InsertMenu.ts
 import { useCallback, useState } from 'react';
 import type { Menu } from '../MenuBar.types';
 import { restoreFocusToGrid } from '../MenuBar.events';

@@ -1,4 +1,4 @@
-//FILENAME: app/src/lib/gridRenderer/rendering/references.ts
+//! FILENAME: app/src/core/lib/gridRenderer/rendering/references.ts
 //PURPOSE: Formula reference highlighting
 //CONTEXT: Draws colored borders around formula cell references
 

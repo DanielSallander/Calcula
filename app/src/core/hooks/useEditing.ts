@@ -1,4 +1,4 @@
-// FILENAME: app/src/core/hooks/useEditing.ts
+//! FILENAME: app/src/core/hooks/useEditing.ts
 // PURPOSE: Custom hook for managing cell editing state.
 // CONTEXT: This hook provides cell editing functionality including:
 // - Starting edit mode on a cell (with optional initial value)

@@ -1,4 +1,4 @@
-// FILENAME: app/src/components/Ribbon/tabs/InsertTab/InsertTab.tsx
+//! FILENAME: z_archive/addins/_disabled/insert/InsertTab.tsx
 // PURPOSE: Insert tab placeholder.
 
 import React from "react";

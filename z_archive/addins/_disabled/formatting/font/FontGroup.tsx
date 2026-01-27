@@ -1,4 +1,4 @@
-// FILENAME: app/src/components/Ribbon/tabs/HomeTab/FontGroup.tsx
+//! FILENAME: z_archive/addins/_disabled/formatting/font/FontGroup.tsx
 // PURPOSE: Font formatting group for the Home tab.
 // CONTEXT: Contains Bold, Italic, Underline, text color, and background color controls.
 

@@ -1,4 +1,4 @@
-// FILENAME: app/src/components/Ribbon/pickers/ColorPicker.tsx
+//! FILENAME: z_archive/addins/_disabled/formatting/shared/ColorPicker.tsx
 // PURPOSE: Color picker dropdown component for selecting text and background colors.
 // CONTEXT: Renders a grid of predefined colors that users can click to apply to selected
 // cells. Used by both the text color and fill color buttons in the Ribbon toolbar.

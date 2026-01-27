@@ -1,4 +1,4 @@
-// FILENAME: app/src-tauri/src/merge_commands.rs
+//! FILENAME: app/src-tauri/src/merge_commands.rs
 // PURPOSE: Tauri commands for cell merge operations.
 // CONTEXT: Handles merging and unmerging cells in the spreadsheet.
 

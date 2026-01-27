@@ -1,3 +1,4 @@
+//! FILENAME: app/src/shell/MenuBar/menus/EditMenu.ts
 import { useCallback } from 'react';
 import { undo, redo, mergeCells, unmergeCells } from '../../../core/lib/tauri-api';
 import type { Menu } from '../MenuBar.types';

@@ -1,4 +1,4 @@
-// FILENAME: app/src/components/Ribbon/tabs/FormulasTab/CalculationGroup.tsx
+//! FILENAME: z_archive/addins/_disabled/functions/calculation/CalculationGroup.tsx
 // PURPOSE: Calculation group for the Formulas tab.
 // CONTEXT: Contains calculation mode options and manual calculation triggers.
 

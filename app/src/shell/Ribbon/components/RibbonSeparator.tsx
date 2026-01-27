@@ -1,4 +1,4 @@
-// FILENAME: app/src/components/Ribbon/components/RibbonSeparator.tsx
+//! FILENAME: app/src/shell/Ribbon/components/RibbonSeparator.tsx
 // PURPOSE: Visual separator between ribbon groups.
 
 import React from "react";

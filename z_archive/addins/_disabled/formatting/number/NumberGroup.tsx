@@ -1,4 +1,4 @@
-// FILENAME: app/src/components/Ribbon/tabs/HomeTab/NumberGroup.tsx
+//! FILENAME: z_archive/addins/_disabled/formatting/number/NumberGroup.tsx
 // PURPOSE: Number formatting group for the Home tab.
 // CONTEXT: Contains number format dropdown and quick access buttons for currency,
 // percentage, and comma formatting.

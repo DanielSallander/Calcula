@@ -1,4 +1,4 @@
-// FILENAME: app/src/components/Ribbon/FormulasTab.tsx
+//! FILENAME: z_archive/addins/_disabled/functions/FormulasTab_old.tsx
 // PURPOSE: Formulas tab content for the Ribbon toolbar.
 // CONTEXT: Provides quick access to spreadsheet functions organized by category,
 // similar to Microsoft Excel's Formulas ribbon tab. Also includes Calculation options.

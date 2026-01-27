@@ -1,4 +1,4 @@
-// FILENAME: core/components/ContextMenu/ContextMenu.tsx
+//! FILENAME: app/src/core/components/ContextMenu/ContextMenu.tsx
 // PURPOSE: Reusable context menu component for grid and other areas
 // CONTEXT: Used by Spreadsheet to show context menu on right-click.
 

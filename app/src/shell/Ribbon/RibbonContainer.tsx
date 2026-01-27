@@ -1,4 +1,4 @@
-// FILENAME: shell/Ribbon/RibbonContainer.tsx
+//! FILENAME: app/src/shell/Ribbon/RibbonContainer.tsx
 // PURPOSE: The ribbon container - renders tabs registered by add-ins
 // CONTEXT: This is an empty ribbon shell that add-ins populate via ExtensionRegistry
 

@@ -1,4 +1,4 @@
-// FILENAME: core/extensions/gridExtensions.ts
+//! FILENAME: app/src/core/extensions/gridExtensions.ts
 // PURPOSE: Extension points for grid context menu customization
 // CONTEXT: Allows extensions to add context menu items when right-clicking on cells.
 //          Follows the same pattern as sheetExtensions.ts for consistency.

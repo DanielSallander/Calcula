@@ -1,4 +1,4 @@
-// FILENAME: app/src/components/Ribbon/tabs/HomeTab/AlignmentGroup.tsx
+//! FILENAME: z_archive/addins/_disabled/formatting/alignment/AlignmentGroup.tsx
 // PURPOSE: Alignment formatting group for the Home tab.
 // CONTEXT: Contains text alignment, wrap text, and text rotation controls.
 

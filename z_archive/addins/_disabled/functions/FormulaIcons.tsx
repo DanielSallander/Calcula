@@ -1,4 +1,4 @@
-// FILENAME: app/src/components/Ribbon/FormulaIcons.tsx
+//! FILENAME: z_archive/addins/_disabled/functions/FormulaIcons.tsx
 // PURPOSE: SVG icon components for the Formulas ribbon tab.
 // CONTEXT: Contains icons for function categories matching Excel's Formulas tab design.
 

@@ -1,3 +1,4 @@
+//! FILENAME: app/src/core/components/FindReplaceDialog/FindReplaceDialog.styles.ts
 import styled from 'styled-components';
 
 // Helper for CSS variables

@@ -1,3 +1,4 @@
+//! FILENAME: app/src-tauri/src/pivot/types.rs
 use engine::pivot::PivotId;
 use serde::{Deserialize, Serialize};
 

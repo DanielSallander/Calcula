@@ -1,3 +1,4 @@
+//! FILENAME: app/src/core/theme/ThemeRoot.tsx
 import React from 'react';
 import { defaultTheme } from './defaultTheme';
 

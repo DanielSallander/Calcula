@@ -1,4 +1,4 @@
-// FILENAME: shell/FormulaBar/index.ts
+//! FILENAME: app/src/shell/FormulaBar/index.ts
 // PURPOSE: Barrel export for FormulaBar components
 
 export { FormulaBar } from "./FormulaBar";

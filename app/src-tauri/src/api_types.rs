@@ -1,4 +1,4 @@
-// FILENAME: app/src-tauri/src/api_types.rs
+//! FILENAME: app/src-tauri/src/api_types.rs
 // PURPOSE: Shared type definitions for Tauri API communication.
 // CONTEXT: All structs use camelCase serialization for JavaScript interoperability.
 // UPDATED: Added row_span and col_span for merged cells support.

@@ -1,4 +1,4 @@
-// FILENAME: src/utils/logger.ts
+//! FILENAME: app/src/utils/logger.ts
 // PURPOSE: Centralized logging with atomic sequence assignment from backend
 // FORMAT: seq|level|category|message
 

@@ -1,4 +1,4 @@
-// FILENAME: app/src/hooks/useSelection.ts
+//! FILENAME: app/src/core/hooks/useSelection.ts
 // PURPOSE: Custom hook for managing cell selection state.
 // CONTEXT: This hook provides selection functionality including:
 // - Selecting a single cell

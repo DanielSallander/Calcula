@@ -1,3 +1,4 @@
+//! FILENAME: app/src/shell/MenuBar/MenuBar.tsx
 import React, { useState, useEffect, useRef } from 'react';
 import { useGridContext } from '../../core/state/GridContext';
 import { CreatePivotDialog } from '../../core/components/pivot/CreatePivotDialog';

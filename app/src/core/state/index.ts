@@ -1,4 +1,4 @@
-// FILENAME: app/src/state/index.ts
+//! FILENAME: app/src/core/state/index.ts
 // PURPOSE: Barrel export file for state management modules.
 // CONTEXT: This module re-exports all state-related exports
 // for convenient importing throughout the application.

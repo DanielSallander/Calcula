@@ -1,4 +1,4 @@
-// FILENAME: core/components/ContextMenu/index.ts
+//! FILENAME: app/src/core/components/ContextMenu/index.ts
 // PURPOSE: Barrel exports for ContextMenu component
 
 export { ContextMenu } from "./ContextMenu";

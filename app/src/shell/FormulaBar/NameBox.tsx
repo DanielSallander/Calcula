@@ -1,4 +1,4 @@
-// FILENAME: shell/FormulaBar/NameBox.tsx
+//! FILENAME: app/src/shell/FormulaBar/NameBox.tsx
 // PURPOSE: Name Box component displaying active cell address with navigation support
 // CONTEXT: Shows current selection (e.g., "A1") and allows typing an address to navigate
 // FIX: Now participates in global editing state to prevent grid keyboard handler

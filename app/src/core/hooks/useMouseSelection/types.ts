@@ -1,4 +1,4 @@
-// FILENAME: app/src/hooks/useMouseSelection/types.ts
+//! FILENAME: app/src/core/hooks/useMouseSelection/types.ts
 // PURPOSE: Type definitions for the mouse selection hook and its sub-modules.
 // CONTEXT: Contains all interfaces and types used across the useMouseSelection
 // module, including configuration, state, props, and return types.

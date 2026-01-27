@@ -1,4 +1,4 @@
-// FILENAME: core\persistence\src\error.rs
+//! FILENAME: core/persistence/src/error.rs
 
 use thiserror::Error;
 

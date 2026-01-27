@@ -1,4 +1,4 @@
-// FILENAME: core\persistence\src\xlsx_reader.rs
+//! FILENAME: core/persistence/src/xlsx_reader.rs
 
 use crate::{PersistenceError, SavedCell, SavedCellValue, Sheet, Workbook};
 use calamine::{open_workbook, Data, Reader, Xlsx};

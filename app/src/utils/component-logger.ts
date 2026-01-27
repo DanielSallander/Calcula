@@ -1,4 +1,4 @@
-// FILENAME: src/utils/component-logger.ts
+//! FILENAME: app/src/utils/component-logger.ts
 // PURPOSE: Comprehensive React component logging with minimal integration overhead
 // Provides HOCs, hooks, and decorators for automatic call graph tracing
 

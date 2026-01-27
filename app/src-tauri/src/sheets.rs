@@ -1,4 +1,4 @@
-// FILENAME: src-tauri/src/sheets.rs
+//! FILENAME: app/src-tauri/src/sheets.rs
 // PURPOSE: Sheet management commands for multi-sheet workbook support.
 // CONTEXT: Provides Tauri commands for creating, switching, renaming, deleting sheets,
 //          and managing freeze panes.

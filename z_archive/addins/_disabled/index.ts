@@ -1,4 +1,4 @@
-// FILENAME: addins/_disabled/index.ts
+//! FILENAME: z_archive/addins/_disabled/index.ts
 // PURPOSE: Index for all disabled add-ins
 // CONTEXT: These add-ins are parked while core is being developed
 

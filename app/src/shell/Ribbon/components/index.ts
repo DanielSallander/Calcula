@@ -1,4 +1,4 @@
-// FILENAME: shell/Ribbon/components/index.ts
+//! FILENAME: app/src/shell/Ribbon/components/index.ts
 // PURPOSE: Barrel exports for shell ribbon components
 
 export { RibbonButton } from "./RibbonButton";

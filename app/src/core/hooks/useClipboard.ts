@@ -1,4 +1,4 @@
-// FILENAME: app/src/hooks/useClipboard.ts
+//! FILENAME: app/src/core/hooks/useClipboard.ts
 // PURPOSE: Custom hook for clipboard operations (cut, copy, paste).
 // CONTEXT: Handles reading/writing to system clipboard and cell data operations.
 // Updated: Added clearClipboardState for ESC key handling.

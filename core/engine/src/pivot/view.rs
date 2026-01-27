@@ -1,3 +1,4 @@
+//! FILENAME: core/engine/src/pivot/view.rs
 //! Pivot View - Renderable output for the frontend.
 //!
 //! This module transforms the cache data into a 2D grid structure

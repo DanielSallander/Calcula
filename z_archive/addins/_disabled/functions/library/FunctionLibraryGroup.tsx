@@ -1,4 +1,4 @@
-// FILENAME: app/src/components/Ribbon/tabs/FormulasTab/FunctionLibraryGroup.tsx
+//! FILENAME: z_archive/addins/_disabled/functions/library/FunctionLibraryGroup.tsx
 // PURPOSE: Function Library group for the Formulas tab.
 // CONTEXT: Contains category buttons for inserting spreadsheet functions.
 

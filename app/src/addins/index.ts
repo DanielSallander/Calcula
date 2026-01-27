@@ -1,4 +1,4 @@
-// FILENAME: addins/index.ts
+//! FILENAME: app/src/addins/index.ts
 // PURPOSE: Add-in loader
 // CONTEXT: Registers all enabled add-ins with the ExtensionRegistry
 // FIX: Also registers core grid and sheet context menus

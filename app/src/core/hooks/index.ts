@@ -1,4 +1,4 @@
-// FILENAME: app/src/hooks/index.ts
+//! FILENAME: app/src/core/hooks/index.ts
 // PURPOSE: Central export point for all custom hooks.
 // CONTEXT: Re-exports hooks for easier imports throughout the application.
 

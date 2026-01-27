@@ -1,4 +1,4 @@
-// FILENAME: src-tauri/src/calculation.rs
+//! FILENAME: app/src-tauri/src/calculation.rs
 // PURPOSE: Calculation mode commands for manual/automatic recalculation.
 
 use tauri::State;

@@ -1,3 +1,4 @@
+//! FILENAME: app/src/shell/MenuBar/MenuBar.types.ts
 export interface MenuItem {
   label: string;
   shortcut?: string;

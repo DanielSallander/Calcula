@@ -1,4 +1,4 @@
-// FILENAME: app/src/components/Spreadsheet/useSpreadsheetEditing.ts
+//! FILENAME: app/src/core/components/Spreadsheet/useSpreadsheetEditing.ts
 // PURPOSE: Manages the editing lifecycle, formula bar, and inline inputs.
 // CONTEXT: Contains complex logic for handling key events in both the container and inputs.
 // FIX: Added event.stopPropagation() to formula input key handler to prevent bubbling

@@ -1,3 +1,4 @@
+//! FILENAME: app/src-tauri/src/tests.rs
 #[cfg(test)]
 use super::*;
 use crate::pivot_commands::{

@@ -1,4 +1,4 @@
-// FILENAME: app/src/state/gridReducer.ts
+//! FILENAME: app/src/core/state/gridReducer.ts
 // PURPOSE: Reducer function for grid state management.
 // CONTEXT: This module implements the state transition logic for the spreadsheet grid.
 // It handles all state updates for selection, viewport scrolling, cell editing, and configuration.

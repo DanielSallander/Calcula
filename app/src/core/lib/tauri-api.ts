@@ -1,4 +1,4 @@
-// FILENAME: app/src/core/lib/tauri-api.ts
+//! FILENAME: app/src/core/lib/tauri-api.ts
 // PURPOSE: TypeScript API wrapper for Tauri backend commands.
 // CONTEXT: Provides type-safe functions to invoke Rust commands from the frontend.
 // Handles all communication with the Tauri backend including cell operations,

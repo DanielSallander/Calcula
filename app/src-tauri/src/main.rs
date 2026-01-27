@@ -1,4 +1,4 @@
-// FILENAME: app/src-tauri/src/main.rs
+//! FILENAME: app/src-tauri/src/main.rs
 // PURPOSE: Desktop entry point with unified logging (frontend + backend in one file).
 // FORMAT: seq|level|category|message
 

@@ -1,4 +1,4 @@
-// FILENAME: core/lib/index.ts
+//! FILENAME: app/src/core/lib/index.ts
 // PURPOSE: Barrel exports for core libraries
 
 export * from "./cellEvents";

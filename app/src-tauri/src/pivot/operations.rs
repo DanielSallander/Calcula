@@ -1,3 +1,4 @@
+//! FILENAME: app/src-tauri/src/pivot/operations.rs
 use crate::pivot::utils::col_index_to_letter;
 use crate::{log_debug, log_info, AppState, PivotRegion};
 use engine::pivot::{calculate_pivot, PivotCache, PivotDefinition, PivotId, PivotView};

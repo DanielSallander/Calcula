@@ -1,3 +1,4 @@
+//! FILENAME: app/src-tauri/src/commands/styles.rs
 // PURPOSE: Styling operations, formatting, and style definitions.
 
 use crate::api_types::{CellData, FormattingParams, FormattingResult, StyleData, StyleEntry};

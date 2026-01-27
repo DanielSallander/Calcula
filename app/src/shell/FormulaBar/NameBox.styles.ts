@@ -1,3 +1,4 @@
+//! FILENAME: app/src/shell/FormulaBar/NameBox.styles.ts
 import styled from 'styled-components';
 
 const v = (name: string) => `var(${name})`;

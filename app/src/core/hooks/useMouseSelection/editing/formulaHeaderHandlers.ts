@@ -1,4 +1,4 @@
-// FILENAME: app/src/hooks/useMouseSelection/editing/formulaHeaderHandlers.ts
+//! FILENAME: app/src/core/hooks/useMouseSelection/editing/formulaHeaderHandlers.ts
 // PURPOSE: Factory function for creating formula mode header reference handlers.
 // CONTEXT: Creates handlers for inserting column and row references when
 // clicking on headers while in formula editing mode, supporting both

@@ -1,4 +1,4 @@
-// FILENAME: core/extensions/index.ts
+//! FILENAME: app/src/core/extensions/index.ts
 // PURPOSE: Barrel exports for extensions module
 // CONTEXT: Central export point for the extension system that allows
 // extensions to register ribbon tabs, commands, and sheet customizations.

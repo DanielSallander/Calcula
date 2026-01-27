@@ -1,4 +1,4 @@
-// FILENAME: app/src/hooks/useMouseSelection/utils/cellUtils.ts
+//! FILENAME: app/src/core/hooks/useMouseSelection/utils/cellUtils.ts
 // PURPOSE: Utility functions for cell position calculations during mouse selection.
 // CONTEXT: Converts mouse positions to cell coordinates with optional midpoint threshold.
 

@@ -1,3 +1,4 @@
+//! FILENAME: app/src-tauri/src/pivot/mod.rs
 pub mod types;
 pub mod utils;
 pub mod operations;

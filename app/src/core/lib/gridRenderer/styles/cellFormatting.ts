@@ -1,4 +1,4 @@
-//FILENAME: app/src/lib/gridRenderer/styles/cellFormatting.ts
+//! FILENAME: app/src/core/lib/gridRenderer/styles/cellFormatting.ts
 //PURPOSE: Cell value type detection utilities
 //CONTEXT: Determines if cell values are numbers, errors, or text
 

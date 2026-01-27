@@ -1,4 +1,4 @@
-// FILENAME: core/components/Grid/index.ts
+//! FILENAME: app/src/core/components/Grid/index.ts
 // PURPOSE: Barrel exports for Grid component
 
 export { GridCanvas, default } from "./GridCanvas";

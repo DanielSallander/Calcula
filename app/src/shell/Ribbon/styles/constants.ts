@@ -1,4 +1,4 @@
-// FILENAME: app/src/components/Ribbon/constants.ts
+//! FILENAME: app/src/shell/Ribbon/styles/constants.ts
 // PURPOSE: Constant values used throughout the Ribbon component module.
 // CONTEXT: Contains predefined color palettes, function definitions, and other static
 // configuration values that are shared across multiple sub-components within the Ribbon.

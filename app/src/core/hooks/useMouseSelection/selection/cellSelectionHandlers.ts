@@ -1,4 +1,4 @@
-// FILENAME: app/src/core/hooks/useMouseSelection/selection/cellSelectionHandlers.ts
+//! FILENAME: app/src/core/hooks/useMouseSelection/selection/cellSelectionHandlers.ts
 // PURPOSE: Factory function for creating cell selection event handlers.
 // CONTEXT: Creates handlers for mouse down on cells, supporting single
 // click selection and shift-click to extend selection ranges.

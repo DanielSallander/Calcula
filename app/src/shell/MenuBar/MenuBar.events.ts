@@ -1,3 +1,4 @@
+//! FILENAME: app/src/shell/MenuBar/MenuBar.events.ts
 export const MenuEvents = {
   CUT: 'menu:cut',
   COPY: 'menu:copy',

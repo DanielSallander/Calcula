@@ -1,4 +1,4 @@
-// FILENAME: app/src/hooks/useMouseSelection/selection/useAutoScroll.ts
+//! FILENAME: app/src/core/hooks/useMouseSelection/selection/useAutoScroll.ts
 // PURPOSE: Hook for managing auto-scroll behavior during drag operations.
 // CONTEXT: Provides auto-scroll functionality when the user drags near
 // the edges of the viewport, enabling selection of cells outside the

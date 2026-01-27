@@ -1,3 +1,4 @@
+//! FILENAME: app/src/core/components/pivot/PivotEditor.tsx
 import React, { useCallback } from 'react';
 import { styles } from './PivotEditor.styles';
 import { FieldList } from './FieldList';

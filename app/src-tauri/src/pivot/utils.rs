@@ -1,3 +1,4 @@
+//! FILENAME: app/src-tauri/src/pivot/utils.rs
 use crate::pivot::types::*;
 use engine::pivot::{
     AggregationType, PivotField, PivotLayout, PivotView, ReportLayout, ShowValuesAs, SortOrder,

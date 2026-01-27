@@ -1,4 +1,4 @@
-// FILENAME: shell/index.ts
+//! FILENAME: app/src/shell/index.ts
 // PURPOSE: Barrel exports for the shell module
 
 export { App } from "./App";

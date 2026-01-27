@@ -1,4 +1,4 @@
-//FILENAME: app/src/lib/gridRenderer/rendering/headers.ts
+//! FILENAME: app/src/core/lib/gridRenderer/rendering/headers.ts
 //PURPOSE: Drawing functions for row and column headers
 //CONTEXT: Renders header cells with highlighting and borders
 //UPDATED: Added freeze pane support for proper header positioning

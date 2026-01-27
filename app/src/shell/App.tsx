@@ -1,4 +1,4 @@
-// FILENAME: shell/App.tsx
+//! FILENAME: app/src/shell/App.tsx
 // PURPOSE: Main application shell
 // CONTEXT: Provides the root layout and state management
 

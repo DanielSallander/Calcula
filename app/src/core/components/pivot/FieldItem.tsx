@@ -1,3 +1,4 @@
+//! FILENAME: app/src/core/components/pivot/FieldItem.tsx
 import React, { useCallback } from 'react';
 import { styles } from './PivotEditor.styles';
 import type { SourceField, DragField, DropZoneType } from './types';

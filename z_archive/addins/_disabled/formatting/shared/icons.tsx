@@ -1,4 +1,4 @@
-// FILENAME: app/src/components/Ribbon/tabs/HomeTab/icons.tsx
+//! FILENAME: z_archive/addins/_disabled/formatting/shared/icons.tsx
 // PURPOSE: SVG icon components used in the Home tab.
 // CONTEXT: Contains alignment icons (left, center, right), wrap text, and rotation icons.
 

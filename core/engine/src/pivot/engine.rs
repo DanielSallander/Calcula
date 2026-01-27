@@ -1,3 +1,4 @@
+//! FILENAME: core/engine/src/pivot/engine.rs
 //! Pivot Engine - The calculation core that transforms data into a renderable view.
 //!
 //! This module takes a PivotDefinition (configuration) and PivotCache (data)

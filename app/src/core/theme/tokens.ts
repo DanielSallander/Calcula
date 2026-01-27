@@ -1,3 +1,4 @@
+//! FILENAME: app/src/core/theme/tokens.ts
 /**
  * These are the semantic keys for your application.
  * Extensions will eventually be able to override the values of these variables.

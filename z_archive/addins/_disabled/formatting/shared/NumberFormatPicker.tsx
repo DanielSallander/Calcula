@@ -1,4 +1,4 @@
-// FILENAME: app/src/components/Ribbon/pickers/NumberFormatPicker.tsx
+//! FILENAME: z_archive/addins/_disabled/formatting/shared/NumberFormatPicker.tsx
 // PURPOSE: Number format picker dropdown component for selecting cell number formats.
 // CONTEXT: Displays a list of predefined number format options (General, Number, Currency,
 // Percentage, etc.) that users can apply to selected cells in the spreadsheet.

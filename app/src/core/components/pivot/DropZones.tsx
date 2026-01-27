@@ -1,3 +1,4 @@
+//! FILENAME: app/src/core/components/pivot/DropZones.tsx
 import React from 'react';
 import { styles } from './PivotEditor.styles';
 import { DropZone } from './DropZone';

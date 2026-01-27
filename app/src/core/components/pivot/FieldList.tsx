@@ -1,3 +1,4 @@
+//! FILENAME: app/src/core/components/pivot/FieldList.tsx
 import React, { useMemo } from 'react';
 import { styles } from './PivotEditor.styles';
 import { FieldItem } from './FieldItem';

@@ -1,4 +1,4 @@
-// FILENAME: app/src/core/types/index.ts
+//! FILENAME: app/src/core/types/index.ts
 // PURPOSE: Core type definitions.
 // CONTEXT: These types are used throughout the core module.
 // 

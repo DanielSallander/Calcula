@@ -1,4 +1,4 @@
-// FILENAME: app/src/hooks/useCellEvents.ts
+//! FILENAME: app/src/core/hooks/useCellEvents.ts
 // PURPOSE: React hook for subscribing to cell change events.
 // CONTEXT: Phase 4.3 introduces this hook to allow components to react
 // to cell changes without tight coupling. Components like GridCanvas

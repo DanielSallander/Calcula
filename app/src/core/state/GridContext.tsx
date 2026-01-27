@@ -1,4 +1,4 @@
-// FILENAME: app/src/state/GridContext.tsx
+//! FILENAME: app/src/core/state/GridContext.tsx
 // PURPOSE: React Context provider for grid state management.
 // CONTEXT: This module creates a React Context that provides the grid state and dispatch
 // function to all child components. It uses useReducer for predictable state updates

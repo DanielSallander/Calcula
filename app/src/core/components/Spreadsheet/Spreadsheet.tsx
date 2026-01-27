@@ -1,4 +1,4 @@
-// FILENAME: app/src/core/components/Spreadsheet/Spreadsheet.tsx
+//! FILENAME: app/src/core/components/Spreadsheet/Spreadsheet.tsx
 // PURPOSE: Main spreadsheet component combining grid, editor, and scrollbars
 // CONTEXT: Core component that orchestrates the spreadsheet experience
 // REFACTOR: Styling moved to Spreadsheet.styles.ts

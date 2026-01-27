@@ -1,4 +1,4 @@
-// FILENAME: app/src/hooks/useMouseSelection/editing/formulaHandlers.ts
+//! FILENAME: app/src/core/hooks/useMouseSelection/editing/formulaHandlers.ts
 // PURPOSE: Factory function for creating formula mode cell reference handlers.
 // CONTEXT: Creates handlers for inserting cell references when clicking
 // on cells while in formula editing mode, supporting both single cell

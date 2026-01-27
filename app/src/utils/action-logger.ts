@@ -1,4 +1,4 @@
-// FILENAME: src/utils/action-logger.ts
+//! FILENAME: app/src/utils/action-logger.ts
 // PURPOSE: Global event listener to debug user interactions (Click/Change)
 // FORMAT: [timestamp]|I|USER|ACTION <element> details
 

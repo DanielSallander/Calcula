@@ -1,4 +1,4 @@
-// FILENAME: app/src/hooks/useViewport.ts
+//! FILENAME: app/src/core/hooks/useViewport.ts
 // PURPOSE: Custom hook for managing viewport calculations and scroll handling.
 // CONTEXT: This hook provides viewport management functionality including:
 // - Calculating visible rows/columns based on container dimensions

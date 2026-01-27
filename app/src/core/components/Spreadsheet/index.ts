@@ -1,4 +1,4 @@
-// FILENAME: core/components/Spreadsheet/index.ts
+//! FILENAME: app/src/core/components/Spreadsheet/index.ts
 // PURPOSE: Barrel exports for Spreadsheet component
 
 export { Spreadsheet } from "./Spreadsheet";

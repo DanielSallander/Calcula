@@ -1,4 +1,4 @@
-// FILENAME: app/src/shell/Ribbon/components/RibbonButton.tsx
+//! FILENAME: app/src/shell/Ribbon/components/RibbonButton.tsx
 // PURPOSE: Reusable button component for ribbon groups.
 // CONTEXT: Used by add-ins to create consistent ribbon buttons.
 

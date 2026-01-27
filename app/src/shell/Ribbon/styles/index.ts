@@ -1,4 +1,4 @@
-// FILENAME: shell/Ribbon/styles/index.ts
+//! FILENAME: app/src/shell/Ribbon/styles/index.ts
 // PURPOSE: Barrel exports for ribbon styles
 
 export * from "./styles";

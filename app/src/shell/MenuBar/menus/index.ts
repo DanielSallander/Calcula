@@ -1,3 +1,4 @@
+//! FILENAME: app/src/shell/MenuBar/menus/index.ts
 export { useFileMenu } from './FileMenu';
 export type { FileMenuHandlers } from './FileMenu';
 

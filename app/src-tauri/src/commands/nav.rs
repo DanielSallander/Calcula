@@ -1,3 +1,4 @@
+//! FILENAME: app/src-tauri/src/commands/nav.rs
 // PURPOSE: Navigation logic (e.g., Ctrl+Arrow).
 
 use crate::AppState;

@@ -1,3 +1,4 @@
+//! FILENAME: app/src-tauri/src/commands/data.rs
 // PURPOSE: Core operations for reading and writing cell data.
 
 use crate::api_types::CellData;

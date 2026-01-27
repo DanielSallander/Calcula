@@ -1,4 +1,4 @@
-// FILENAME: app/src/hooks/useMouseSelection/useMouseSelection.ts
+//! FILENAME: app/src/core/hooks/useMouseSelection/useMouseSelection.ts
 // PURPOSE: Main hook for handling mouse-based selection interactions.
 // CONTEXT: Updated to use custom Excel-style cursor images for header selection.
 

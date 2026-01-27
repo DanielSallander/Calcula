@@ -1,4 +1,4 @@
-// FILENAME: src-tauri/src/logging.rs
+//! FILENAME: app/src-tauri/src/logging.rs
 // PURPOSE: Unified logging system for the application.
 
 use std::fs::File;

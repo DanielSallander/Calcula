@@ -1,4 +1,4 @@
-//FILENAME: app/src/lib/gridRenderer/layout/viewport.ts
+//! FILENAME: app/src/core/lib/gridRenderer/layout/viewport.ts
 //PURPOSE: Viewport and visible cell range calculations for virtual scrolling
 //CONTEXT: Maps scroll positions to cell indices for efficient rendering
 //UPDATED: Added freeze pane zone calculations for split viewport rendering

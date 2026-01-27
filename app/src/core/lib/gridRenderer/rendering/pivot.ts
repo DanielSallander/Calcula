@@ -1,4 +1,4 @@
-// FILENAME: app/src/core/lib/gridRenderer/rendering/pivot.ts
+//! FILENAME: app/src/core/lib/gridRenderer/rendering/pivot.ts
 // PURPOSE: Pivot table cell rendering with hierarchy support
 // CONTEXT: Renders PivotViewCell data with indentation, expand/collapse icons, and visual hierarchy
 

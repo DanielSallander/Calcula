@@ -1,4 +1,4 @@
-// FILENAME: app/src/lib/gridRenderer/rendering/cells.ts
+//! FILENAME: app/src/core/lib/gridRenderer/rendering/cells.ts
 // PURPOSE: Cell text rendering with style support
 // CONTEXT: Draws cell content with formatting, colors, and truncation
 // UPDATED: Added merged cell rendering support

@@ -1,4 +1,4 @@
-//FILENAME: app/src/lib/gridRenderer/index.ts
+//! FILENAME: app/src/core/lib/gridRenderer/index.ts
 //PURPOSE: Main entry point that exports all gridRenderer functionality
 //CONTEXT: This barrel export file maintains backward compatibility with existing imports
 

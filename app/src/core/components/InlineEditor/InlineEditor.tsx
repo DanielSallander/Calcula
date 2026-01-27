@@ -1,4 +1,4 @@
-// FILENAME: app/src/components/InlineEditor.tsx
+//! FILENAME: app/src/core/components/InlineEditor/InlineEditor.tsx
 // PURPOSE: Inline cell editor component that renders directly over the cell being edited.
 // CONTEXT: Refactored to separate styles into .styles.ts file using styled-components.
 

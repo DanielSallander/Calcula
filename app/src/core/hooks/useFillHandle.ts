@@ -1,4 +1,4 @@
-// FILENAME: app/src/hooks/useFillHandle.ts
+//! FILENAME: app/src/core/hooks/useFillHandle.ts
 // PURPOSE: Custom hook for fill handle (drag-to-fill) functionality.
 // CONTEXT: Handles detection, patterns, and auto-fill logic for the fill handle.
 

@@ -1,4 +1,4 @@
-// FILENAME: shell/FormulaBar/InsertFunctionDialog.tsx
+//! FILENAME: app/src/shell/FormulaBar/InsertFunctionDialog.tsx
 // PURPOSE: Dialog for searching and inserting functions into formulas
 // CONTEXT: Opened by clicking the fx button in the formula bar
 

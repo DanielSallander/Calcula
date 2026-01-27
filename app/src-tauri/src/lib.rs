@@ -1,4 +1,4 @@
-// FILENAME: src-tauri/src/lib.rs
+//! FILENAME: app/src-tauri/src/lib.rs
 // PURPOSE: Main library entry point.
 // UPDATED: Added pivot table state management and pivot region tracking
 

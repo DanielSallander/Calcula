@@ -1,4 +1,4 @@
-// FILENAME: app/src/core/components/pivot/CreatePivotDialog.tsx
+//! FILENAME: app/src/core/components/pivot/DropZone.tsx
 
 import React, { useCallback, useState } from 'react';
 import { styles } from './PivotEditor.styles';

@@ -1,4 +1,4 @@
-// FILENAME: app/src/components/Ribbon/tabs/ViewTab/ViewTab.tsx
+//! FILENAME: z_archive/addins/_disabled/view/ViewTab.tsx
 // PURPOSE: View tab placeholder.
 
 import React from "react";

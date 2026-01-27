@@ -1,3 +1,4 @@
+//! FILENAME: app/src/core/components/pivot/types.ts
 // Pivot Editor Types - Matching Rust backend definitions
 
 export type PivotId = number;

@@ -1,3 +1,4 @@
+//! FILENAME: app/src-tauri/src/commands/search.rs
 // PURPOSE: Find and replace functionality.
 
 use crate::api_types::CellData;

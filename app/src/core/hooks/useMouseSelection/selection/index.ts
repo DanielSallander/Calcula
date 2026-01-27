@@ -1,4 +1,4 @@
-// FILENAME: app/src/hooks/useMouseSelection/selection/index.ts
+//! FILENAME: app/src/core/hooks/useMouseSelection/selection/index.ts
 // PURPOSE: Public API for selection-related hooks and utilities.
 // CONTEXT: Re-exports selection functionality including auto-scroll
 // management and cell/header selection handlers.

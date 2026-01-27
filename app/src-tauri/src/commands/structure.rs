@@ -1,3 +1,4 @@
+//! FILENAME: app/src-tauri/src/commands/structure.rs
 // PURPOSE: Complex logic for inserting and deleting rows/columns and updating references.
 
 use crate::api_types::CellData;

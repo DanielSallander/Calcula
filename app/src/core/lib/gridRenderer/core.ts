@@ -1,4 +1,4 @@
-// FILENAME: app/src/core/lib/gridRenderer/core.ts
+//! FILENAME: app/src/core/lib/gridRenderer/core.ts
 // PURPOSE: Main rendering orchestration function
 // CONTEXT: Coordinates all rendering phases for the grid
 // UPDATED: Fixed freeze pane cell text rendering with proper padding

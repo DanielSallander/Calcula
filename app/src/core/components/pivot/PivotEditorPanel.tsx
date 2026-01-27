@@ -1,3 +1,4 @@
+//! FILENAME: app/src/core/components/pivot/PivotEditorPanel.tsx
 import React from 'react';
 import { css } from '@emotion/css';
 import { PivotEditor } from './PivotEditor';

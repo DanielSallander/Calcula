@@ -1,4 +1,4 @@
-// FILENAME: app\src\core\lib\pivot-api.ts
+//! FILENAME: app/src/core/lib/pivot-api.ts
 /**
  * Pivot Table API
  *

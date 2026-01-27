@@ -1,4 +1,4 @@
-// FILENAME: app/src/hooks/useMouseSelection/selection/headerSelectionHandlers.ts
+//! FILENAME: app/src/core/hooks/useMouseSelection/selection/headerSelectionHandlers.ts
 // PURPOSE: Factory function for creating header selection event handlers.
 // CONTEXT: Creates handlers for column and row header clicks, supporting
 // entire column/row selection and shift-click to extend selections.

@@ -1,3 +1,4 @@
+//! FILENAME: core/engine/src/pivot/cache.rs
 //! Pivot Cache - High-performance internal representation.
 //!
 //! The cache is designed for:

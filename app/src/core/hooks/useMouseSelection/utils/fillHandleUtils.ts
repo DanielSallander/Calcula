@@ -1,4 +1,4 @@
-// FILENAME: app/src/hooks/useMouseSelection/utils/fillHandleUtils.ts
+//! FILENAME: app/src/core/hooks/useMouseSelection/utils/fillHandleUtils.ts
 // PURPOSE: Utility functions for fill handle cursor detection.
 // CONTEXT: Contains functions for detecting when mouse is over the fill handle
 // to change cursor style to crosshair.

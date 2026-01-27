@@ -1,4 +1,4 @@
-// FILENAME: shell/Layout.tsx
+//! FILENAME: app/src/shell/Layout.tsx
 // PURPOSE: Main application layout with pivot table support
 // CONTEXT: Arranges menu bar, ribbon, formula bar, spreadsheet, sheet tabs, status bar, and pivot editor
 // FIX: Pivot pane now shows/hides based on whether selection is within a pivot region

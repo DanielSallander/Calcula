@@ -1,4 +1,4 @@
-// FILENAME: app/src/hooks/useMouseSelection/layout/resizeHandlers.ts
+//! FILENAME: app/src/core/hooks/useMouseSelection/layout/resizeHandlers.ts
 // PURPOSE: Factory function for creating column and row resize handlers.
 // CONTEXT: Creates handlers for detecting resize handles on header edges
 // and performing drag-to-resize operations for columns and rows.
