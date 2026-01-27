@@ -6,6 +6,7 @@ export interface MenuItem {
   separator?: boolean;
   disabled?: boolean;
   checked?: boolean;
+  hidden?: boolean;
 }
 
 export interface Menu {

@@ -131,7 +131,7 @@ export function MenuBar(): React.ReactElement {
             </S.MenuButton>
             {openMenu === menu.label && (
               <S.Dropdown>
-                {menu.items.map((item, index) =>
+                {menu.items.filter(item => !item.hidden).map((item, index) =>
                   item.separator ? (
                     <S.Separator key={index} />
                   ) : (

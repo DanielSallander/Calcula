@@ -4,6 +4,7 @@ import { setFreezePanes, getFreezePanes } from '../../../core/lib/tauri-api';
 import { setFreezeConfig } from '../../../core/state/gridActions';
 import type { Menu } from '../MenuBar.types';
 import { MenuEvents, emitMenuEvent } from '../MenuBar.events';
+import { useTaskPaneStore } from '../../task-pane/useTaskPaneStore';
 
 export interface ViewMenuHandlers {
   handleFreezeTopRow: () => Promise<void>;
@@ -25,6 +26,11 @@ export interface FreezeState {
 export function useViewMenu(deps: ViewMenuDependencies): { menu: Menu; handlers: ViewMenuHandlers; freezeState: FreezeState } {
   const { dispatch } = deps;
   const [freezeState, setFreezeState] = useState<FreezeState>({ row: false, col: false });
+
+  // Task pane state
+  const isTaskPaneOpen = useTaskPaneStore((state) => state.isOpen);
+  const openTaskPane = useTaskPaneStore((state) => state.open);
+  const closeTaskPane = useTaskPaneStore((state) => state.close);
 
   useEffect(() => {
     const loadFreezeState = async () => {
@@ -122,6 +128,9 @@ export function useViewMenu(deps: ViewMenuDependencies): { menu: Menu; handlers:
   const menu: Menu = {
     label: 'View',
     items: [
+      { label: 'Show Taskpane', action: openTaskPane, hidden: isTaskPaneOpen },
+      { label: 'Hide Taskpane', action: closeTaskPane, hidden: !isTaskPaneOpen },
+      { separator: true, label: '' },
       { label: 'Freeze Top Row', action: handleFreezeTopRow, checked: freezeState.row },
       { label: 'Freeze First Column', action: handleFreezeFirstColumn, checked: freezeState.col },
       { separator: true, label: '' },
