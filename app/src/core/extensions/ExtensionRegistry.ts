@@ -9,6 +9,20 @@ import type {
   SelectionChangeCallback,
   CellChangeCallback,
   AddInManifest,
+  RibbonContext, // Added to imports
+} from "./types";
+
+// Re-export types so they can be consumed by index.ts and other modules
+export type {
+  AddInManifest,
+  RibbonTabDefinition,
+  RibbonGroupDefinition,
+  RibbonContext,
+  Command,
+  // Alias Command as CommandDefinition to match index.ts expectations
+  Command as CommandDefinition, 
+  SelectionChangeCallback,
+  CellChangeCallback,
 } from "./types";
 
 class ExtensionRegistryImpl {

@@ -1,29 +1,33 @@
 //! FILENAME: app/src/core/extensions/index.ts
-// PURPOSE: Barrel exports for extensions module
-// CONTEXT: Central export point for the extension system that allows
-// extensions to register ribbon tabs, commands, and sheet customizations.
+// PURPOSE: Barrel exports for the extensions module
 
 export { ExtensionRegistry } from "./ExtensionRegistry";
-export * from "./ExtensionRegistry";
+export type {
+  AddInManifest,
+  CommandDefinition,
+  RibbonTabDefinition,
+  RibbonGroupDefinition,
+  RibbonContext,
+} from "./ExtensionRegistry";
 
-// Sheet extensions
-export {
-  sheetExtensions,
-  registerCoreSheetContextMenu,
-} from "./sheetExtensions";
+export { registerCoreGridContextMenu } from "./gridExtensions";
+export { sheetExtensions, registerCoreSheetContextMenu } from "./sheetExtensions";
 export type {
   SheetContext,
   SheetContextMenuItem,
-  SheetEventType,
-  SheetEventPayload,
-  SheetEventHandler,
 } from "./sheetExtensions";
+
+export { TaskPaneExtensions } from "./taskPaneExtensions";
+export type {
+  TaskPaneViewDefinition,
+  TaskPaneViewProps,
+  TaskPaneContextKey,
+} from "./taskPaneExtensions";
 
 // Grid extensions
 export {
   gridExtensions,
   gridCommands,
-  registerCoreGridContextMenu,
   isClickWithinSelection,
   GridMenuGroups,
 } from "./gridExtensions";

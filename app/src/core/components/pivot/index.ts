@@ -2,6 +2,8 @@
 export { PivotEditor } from './PivotEditor';
 export { CreatePivotDialog } from './CreatePivotDialog';
 export { PivotEditorPanel } from './PivotEditorPanel';
+export { PivotEditorView } from './PivotEditorView';
+export type { PivotEditorViewData } from './PivotEditorView';
 export { FieldList } from './FieldList';
 export { DropZone } from './DropZone';
 export { DropZones } from './DropZones';

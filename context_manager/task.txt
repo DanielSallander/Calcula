@@ -1,18 +1,109 @@
-### Pivot Table implementation"
+# Task: Implement Core Task Pane Infrastructure
 
-**Context:** Merged cells break the 1:1 relationship between grid coordinates and visual layout. This is one of the hardest features to implement in a custom grid engine.
+## 1. Context & Objective
 
-**Requirements:**
-1.  **Complete implementation of Pivot Table implementation as it is in Excel
+**Project:** Calcula (High-performance Open Source Spreadsheet)
+**Stack:** Tauri (Rust Backend) + React/TypeScript (Frontend)
+**Architecture:** Core + Add-in (VS Code style)
 
-**Current Status:**
-We have a first working version of the Pivot Table.
-As a use case I have this:
-I have data, with headers (A and B), in range B2:C5. Then I select this range and insert a pivot table.
-A pivot table is correctly created and I can drag a field onto rows pane.
-We have an issue that causes everything to hang and crash, 
-caused by when inserting rows over a pivot table or inserting columns before a pivot table.
+**Objective:**
+We need to implement the **Task Pane**, a fundamental UI container located in the `Shell`. This pane serves as a host for auxiliary tools (e.g., Formatting, Pivot Fields, Chart Options) without obscuring the main grid.
 
-The most recent changes was done in these files:
-- app\src\shell\Layout.tsx
-- app\src-tauri\src\commands\structure.rs
+Unlike a simple sidebar, the Task Pane must be a **dynamic, extensibility-first container**. It does not own the content it displays; rather, it provides a "slot" where the **Core** or **Add-ins** can inject their UI.
+
+## 2. Architectural Placement
+
+* **Location:** `src/shell/task-pane/`
+* **Role:** The Task Pane is part of the "Shell" (the application frame). It consumes the "Global Layout State" to determine visibility and width.
+* **Data Flow:**
+1. **Add-ins** register "Pane Views" via an Extension API.
+2. **Core** triggers the pane to open (e.g., User clicks "Format Cells" -> Pane opens with Format Component).
+3. **Shell** renders the container and the requested component.
+
+## 3. Functional Requirements
+
+### A. The Container (Shell)
+
+1. **Docking & Layout:**
+* Default position: Right side of the viewport.
+* Must occupy vertical space from below the Ribbon to the Status Bar.
+* **Resizable:** The user must be able to drag the left edge to resize the pane.
+* **Collapsible:** Must have a UI toggle ( 'X' or toggle button) to close.
+
+2. **Floating vs. Docked (Advanced):**
+* *Primary:* Docked mode (compresses the grid width).
+* *Secondary:* Floating mode (overlays the grid). The architecture must support detaching the pane into a floating window (draggable within the webview boundary) in the future.
+
+3. **Stacking/Tabs:**
+* If multiple features request the pane (e.g., "Comments" and "Formatting" are active), the pane must handle this via a **Tab Strip** or **Accordion** layout.
+* *Requirement:* Implement a "Tabbed Header" system within the pane to switch between active views.
+
+### B. The Registry (Core Logic)
+
+1. **Registration API:**
+* Create a mechanism for Add-ins to register components.
+* `registerPane(id: string, title: string, component: ReactNode, icon?: Icon)`
+
+
+2. **Context Awareness:**
+* The pane should support "Context Keys."
+* *Example:* If the user selects a Chart, the "Chart Tools" pane automatically becomes active/visible.
+* *Example:* If the user selects a Cell, the pane remains as is unless explicitly toggled.
+
+### C. State Management
+
+1. **Persistence:**
+* The pane's width and open/closed state should be persisted in user settings (Rust/local storage).
+
+
+2. **Performance:**
+* Resizing the pane triggers a layout shift for the main Grid. This must be handled efficiently. The Grid (Canvas) must resize without a full re-initialization of the React tree.
+
+## 4. Technical Specifications
+
+### Data Structures
+
+Define a TypeScript interface for the Pane Manager store (likely Zustand or Redux):
+
+```typescript
+interface PaneView {
+  id: string;
+  title: string;
+  component: React.ComponentType<any>;
+  initialProps?: any;
+  isContextual: boolean; // e.g., only shows when specific object selected
+}
+
+interface TaskPaneState {
+  isOpen: boolean;
+  width: number;
+  activeViewId: string | null;
+  registeredViews: Map<string, PaneView>;
+  dockMode: 'docked' | 'floating';
+}
+
+```
+
+### Component Hierarchy Proposal
+
+1. `ShellLayout`: The flexbox/grid parent handling the main split (Grid | Pane).
+2. `TaskPaneContainer`: Handles the resizing logic, DOM events for dragging, and the "Frame" (Title bar, Close button).
+3. `TaskPaneContent`: A dynamic loader that renders `registeredViews[activeViewId].component`.
+
+## 5. Deliverables
+
+1. **Pane Store:** A global state manager for registering views and toggling visibility.
+2. **Shell Component:** The visual implementation of the collapsible, resizable right sidebar.
+3. **Sample Implementation:**
+* Create a "Mock Add-in" (e.g., a simple "Properties" panel showing generic text) that registers itself on startup to prove the registry works.
+* A button in the Ribbon to toggle this Mock Pane.
+
+## 6. Constraints
+
+* **Styling:** Must use CSS Variables/Styled Components compatible with the existing theme system.
+* **Virtualization:** Do not modify the Grid's virtualization logic, but ensure the Grid receives a resize observer event when the pane width changes.
+* **No Unicode in Code:** Use `[x]` or `(c)` instead of unicode symbols in comments/strings.
+
+## 7. Integrate existing features
+We already have a first working version of the pivot table. 
+The pivot table pane should moved and placed inside this new task pane.
