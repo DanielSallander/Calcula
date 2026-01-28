@@ -29,6 +29,7 @@ export { FilterDropdown } from './FilterDropdown';
 export type { FilterDropdownProps } from './FilterDropdown';
 export { FilterBar } from './FilterBar';
 export type { FilterBarProps, FilterFieldState } from './FilterBar';
+export { PivotFilterOverlay } from './PivotFilterOverlay';
 
 export type {
   PivotId,

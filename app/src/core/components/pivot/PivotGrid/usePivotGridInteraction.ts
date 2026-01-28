@@ -1,372 +1,416 @@
-//! FILENAME: app/src/core/components/pivot/PivotGrid/usePivotGridInteraction.ts
-// PURPOSE: Hook for handling mouse/keyboard interactions on the PivotGrid canvas
-// CONTEXT: Manages expand/collapse icon clicks, cell selection, and context menu
+// FILENAME: app/src/core/components/pivot/PivotGrid/usePivotGridInteraction.ts
+import { useState, useCallback, useRef, useEffect } from 'react';
+import type {
+  PivotViewResponse,
+  FilterRowData,
+  PivotId,
+} from '../../../lib/pivot-api';
+import { updatePivotFields } from '../../../lib/pivot-api';
+import type { PivotInteractiveBounds } from '../../../lib/gridRenderer/rendering/pivot';
 
-import { useCallback, useRef, useState } from "react";
-import type { PivotCellData, PivotViewResponse } from "../../../lib/pivot-api";
-import { findClickedPivotIcon } from "../../../lib/gridRenderer/rendering/pivot";
+// =============================================================================
+// TYPES
+// =============================================================================
 
-export interface PivotGridInteractionState {
-  /** Currently hovered cell [row, col] or null */
-  hoveredCell: [number, number] | null;
-  /** Whether an icon is being hovered */
-  iconHovered: boolean;
+export interface ActiveFilterDropdown {
+  fieldIndex: number;
+  filterRow: FilterRowData;
+  anchorRect: { x: number; y: number; width: number; height: number };
 }
 
-export interface UsePivotGridInteractionProps {
-  /** The pivot view data */
-  pivotView: PivotViewResponse;
-  /** Column widths array */
-  columnWidths: number[];
-  /** Row heights array */
-  rowHeights: number[];
-  /** Current scroll X position */
-  scrollX: number;
-  /** Current scroll Y position */
-  scrollY: number;
-  /** Width of the frozen row label area */
-  rowHeaderWidth: number;
-  /** Height of the frozen column header area */
-  columnHeaderHeight: number;
-  /** Callback when expand/collapse icon is clicked */
-  onToggleGroup?: (row: number, col: number, cell: PivotCellData) => void;
-  /** Callback when a cell is clicked */
-  onCellClick?: (row: number, col: number, cell: PivotCellData) => void;
-  /** Callback when a cell is right-clicked */
-  onCellContextMenu?: (
-    row: number,
-    col: number,
-    cell: PivotCellData,
-    event: React.MouseEvent
-  ) => void;
+export interface CellPosition {
+  row: number;
+  col: number;
+}
+
+export interface SelectionRange {
+  start: CellPosition;
+  end: CellPosition;
+}
+
+export interface UsePivotGridInteractionOptions {
+  pivotId: PivotId;
+  pivotView: PivotViewResponse | null;
+  canvasRef: React.RefObject<HTMLCanvasElement | null>;
+  interactiveBounds: PivotInteractiveBounds | null;
+  onExpandCollapse?: (row: number, col: number, isExpanded: boolean) => void;
+  onSelectionChange?: (selection: SelectionRange | null) => void;
+  onRefresh?: () => void;
 }
 
 export interface UsePivotGridInteractionResult {
-  /** Current interaction state */
-  state: PivotGridInteractionState;
-  /** Icon bounds map for hit testing (from last render) */
-  iconBoundsMapRef: React.MutableRefObject<
-    Map<string, { x: number; y: number; width: number; height: number }>
-  >;
-  /** Handle mouse down on canvas */
-  handleMouseDown: (event: React.MouseEvent<HTMLCanvasElement>) => void;
-  /** Handle mouse move on canvas */
-  handleMouseMove: (event: React.MouseEvent<HTMLCanvasElement>) => void;
-  /** Handle mouse leave on canvas */
-  handleMouseLeave: () => void;
-  /** Handle context menu on canvas */
-  handleContextMenu: (event: React.MouseEvent<HTMLCanvasElement>) => void;
+  // Selection state
+  selectedCell: CellPosition | null;
+  selectionRange: SelectionRange | null;
+
+  // Filter dropdown state
+  activeFilterDropdown: ActiveFilterDropdown | null;
+  handleCloseFilterDropdown: () => void;
+  handleApplyFilter: (fieldIndex: number, selectedValues: string[], hiddenItems: string[]) => Promise<void>;
+
+  // Hover state
+  hoveredFilterFieldIndex: number | null;
+  hoveredIconKey: string | null;
+
+  // Event handlers
+  handleCanvasClick: (e: React.MouseEvent<HTMLCanvasElement>) => void;
+  handleCanvasMouseMove: (e: React.MouseEvent<HTMLCanvasElement>) => void;
+  handleCanvasMouseLeave: () => void;
+  handleCanvasDoubleClick: (e: React.MouseEvent<HTMLCanvasElement>) => void;
+  handleKeyDown: (e: React.KeyboardEvent) => void;
+
+  // Actions
+  requestRedraw: () => void;
 }
 
-/**
- * Convert mouse event coordinates to canvas-relative coordinates.
- */
-function getCanvasCoordinates(
-  event: React.MouseEvent<HTMLCanvasElement>,
-  canvas: HTMLCanvasElement
-): { x: number; y: number } {
-  const rect = canvas.getBoundingClientRect();
-  const dpr = window.devicePixelRatio || 1;
-  return {
-    x: (event.clientX - rect.left) * dpr,
-    y: (event.clientY - rect.top) * dpr,
-  };
-}
-
-/**
- * Find which cell is at the given canvas coordinates.
- */
-function findCellAtPosition(
-  canvasX: number,
-  canvasY: number,
-  pivotView: PivotViewResponse,
-  columnWidths: number[],
-  rowHeights: number[],
-  scrollX: number,
-  scrollY: number,
-  rowHeaderWidth: number,
-  columnHeaderHeight: number
-): { row: number; col: number } | null {
-  const frozenCols = pivotView.row_label_col_count;
-  const frozenRows = pivotView.column_header_row_count;
-  const dpr = window.devicePixelRatio || 1;
-
-  // Adjust for DPR
-  const x = canvasX / dpr;
-  const y = canvasY / dpr;
-
-  // Determine which zone we're in
-  const inFrozenCols = x < rowHeaderWidth;
-  const inFrozenRows = y < columnHeaderHeight;
-
-  // Find column
-  let col = -1;
-  let currentX = 0;
-
-  if (inFrozenCols) {
-    // In frozen columns area
-    for (let c = 0; c < frozenCols; c++) {
-      const width = columnWidths[c] || 100;
-      if (x >= currentX && x < currentX + width) {
-        col = c;
-        break;
-      }
-      currentX += width;
-    }
-  } else {
-    // In scrollable columns area
-    currentX = rowHeaderWidth - scrollX;
-    for (let c = frozenCols; c < pivotView.col_count; c++) {
-      const width = columnWidths[c] || 100;
-      if (x >= currentX && x < currentX + width) {
-        col = c;
-        break;
-      }
-      currentX += width;
-    }
-  }
-
-  // Find row
-  let row = -1;
-  let currentY = 0;
-
-  if (inFrozenRows) {
-    // In frozen rows area
-    for (let r = 0; r < frozenRows; r++) {
-      const height = rowHeights[r] || 24;
-      if (y >= currentY && y < currentY + height) {
-        row = r;
-        break;
-      }
-      currentY += height;
-    }
-  } else {
-    // In scrollable rows area
-    currentY = columnHeaderHeight - scrollY;
-    for (let r = frozenRows; r < pivotView.row_count; r++) {
-      const height = rowHeights[r] || 24;
-      if (y >= currentY && y < currentY + height) {
-        row = r;
-        break;
-      }
-      currentY += height;
-    }
-  }
-
-  if (row >= 0 && col >= 0) {
-    return { row, col };
-  }
-  return null;
-}
-
-/**
- * Get cell data from the pivot view.
- */
-function getCellData(
-  pivotView: PivotViewResponse,
-  row: number,
-  col: number
-): PivotCellData | null {
-  const rowData = pivotView.rows.find((r) => r.view_row === row);
-  if (rowData && rowData.cells[col]) {
-    return rowData.cells[col];
-  }
-  return null;
-}
+// =============================================================================
+// HOOK
+// =============================================================================
 
 export function usePivotGridInteraction(
-  props: UsePivotGridInteractionProps
+  options: UsePivotGridInteractionOptions
 ): UsePivotGridInteractionResult {
   const {
+    pivotId,
     pivotView,
-    columnWidths,
-    rowHeights,
-    scrollX,
-    scrollY,
-    rowHeaderWidth,
-    columnHeaderHeight,
-    onToggleGroup,
-    onCellClick,
-    onCellContextMenu,
-  } = props;
+    canvasRef,
+    interactiveBounds,
+    onExpandCollapse,
+    onSelectionChange,
+    onRefresh,
+  } = options;
 
-  const [state, setState] = useState<PivotGridInteractionState>({
-    hoveredCell: null,
-    iconHovered: false,
-  });
+  // Selection state
+  const [selectedCell, setSelectedCell] = useState<CellPosition | null>(null);
+  const [selectionRange, setSelectionRange] = useState<SelectionRange | null>(null);
 
-  const iconBoundsMapRef = useRef<
-    Map<string, { x: number; y: number; width: number; height: number }>
-  >(new Map());
+  // Filter dropdown state
+  const [activeFilterDropdown, setActiveFilterDropdown] = useState<ActiveFilterDropdown | null>(null);
 
-  const handleMouseDown = useCallback(
-    (event: React.MouseEvent<HTMLCanvasElement>) => {
-      const canvas = event.currentTarget;
-      const { x, y } = getCanvasCoordinates(event, canvas);
-      const dpr = window.devicePixelRatio || 1;
+  // Hover state
+  const [hoveredFilterFieldIndex, setHoveredFilterFieldIndex] = useState<number | null>(null);
+  const [hoveredIconKey, setHoveredIconKey] = useState<string | null>(null);
 
-      // Check if an icon was clicked
-      const clickedIcon = findClickedPivotIcon(
-        x / dpr,
-        y / dpr,
-        iconBoundsMapRef.current
-      );
+  // Redraw trigger
+  const redrawRequestedRef = useRef(false);
+  const [, forceUpdate] = useState({});
 
-      if (clickedIcon && onToggleGroup) {
-        const cell = getCellData(pivotView, clickedIcon.row, clickedIcon.col);
-        if (cell) {
-          onToggleGroup(clickedIcon.row, clickedIcon.col, cell);
+  const requestRedraw = useCallback(() => {
+    if (!redrawRequestedRef.current) {
+      redrawRequestedRef.current = true;
+      requestAnimationFrame(() => {
+        redrawRequestedRef.current = false;
+        forceUpdate({});
+      });
+    }
+  }, []);
+
+  // ==========================================================================
+  // HIT TESTING HELPERS
+  // ==========================================================================
+
+  const findClickedFilterButton = useCallback(
+    (canvasX: number, canvasY: number): {
+      fieldIndex: number;
+      row: number;
+      col: number;
+      bounds: { x: number; y: number; width: number; height: number };
+    } | null => {
+      if (!interactiveBounds?.filterButtons) return null;
+
+      for (const [, bounds] of interactiveBounds.filterButtons) {
+        if (
+          canvasX >= bounds.x &&
+          canvasX <= bounds.x + bounds.width &&
+          canvasY >= bounds.y &&
+          canvasY <= bounds.y + bounds.height
+        ) {
+          return {
+            fieldIndex: bounds.fieldIndex,
+            row: bounds.row,
+            col: bounds.col,
+            bounds: {
+              x: bounds.x,
+              y: bounds.y,
+              width: bounds.width,
+              height: bounds.height,
+            },
+          };
+        }
+      }
+      return null;
+    },
+    [interactiveBounds]
+  );
+
+  const findClickedExpandIcon = useCallback(
+    (canvasX: number, canvasY: number): {
+      row: number;
+      col: number;
+      isExpanded: boolean;
+      key: string;
+    } | null => {
+      if (!interactiveBounds?.expandCollapseIcons) return null;
+
+      for (const [key, bounds] of interactiveBounds.expandCollapseIcons) {
+        if (
+          canvasX >= bounds.x &&
+          canvasX <= bounds.x + bounds.width &&
+          canvasY >= bounds.y &&
+          canvasY <= bounds.y + bounds.height
+        ) {
+          return {
+            row: bounds.row,
+            col: bounds.col,
+            isExpanded: bounds.isExpanded,
+            key,
+          };
+        }
+      }
+      return null;
+    },
+    [interactiveBounds]
+  );
+
+  // ==========================================================================
+  // FILTER DROPDOWN HANDLERS
+  // ==========================================================================
+
+  const handleCloseFilterDropdown = useCallback(() => {
+    setActiveFilterDropdown(null);
+  }, []);
+
+  const handleApplyFilter = useCallback(
+    async (fieldIndex: number, _selectedValues: string[], hiddenItems: string[]) => {
+      if (!pivotView) return;
+
+      try {
+        // Build the filter field config for the specific field
+        const filterFieldConfig = {
+          source_index: fieldIndex,
+          name: pivotView.filter_rows.find(fr => fr.field_index === fieldIndex)?.field_name || '',
+          hidden_items: hiddenItems.length > 0 ? hiddenItems : undefined,
+        };
+
+        // Call API to update pivot fields
+        await updatePivotFields({
+          pivot_id: pivotId,
+          filter_fields: [filterFieldConfig],
+        });
+
+        // Close dropdown
+        setActiveFilterDropdown(null);
+
+        // Trigger refresh
+        onRefresh?.();
+      } catch (error) {
+        console.error('Failed to apply filter:', error);
+      }
+    },
+    [pivotId, pivotView, onRefresh]
+  );
+
+  // ==========================================================================
+  // CANVAS EVENT HANDLERS
+  // ==========================================================================
+
+  const handleCanvasClick = useCallback(
+    (e: React.MouseEvent<HTMLCanvasElement>) => {
+      const canvas = canvasRef.current;
+      if (!canvas || !pivotView) return;
+
+      const rect = canvas.getBoundingClientRect();
+      const canvasX = e.clientX - rect.left;
+      const canvasY = e.clientY - rect.top;
+
+      // 1. Check filter button clicks FIRST
+      const clickedFilter = findClickedFilterButton(canvasX, canvasY);
+      if (clickedFilter && pivotView.filter_rows) {
+        const filterRow = pivotView.filter_rows.find(
+          (fr) => fr.field_index === clickedFilter.fieldIndex
+        );
+        if (filterRow) {
+          // Convert canvas coords to screen coords for dropdown positioning
+          const screenX = rect.left + clickedFilter.bounds.x;
+          const screenY = rect.top + clickedFilter.bounds.y + clickedFilter.bounds.height + 2;
+
+          setActiveFilterDropdown({
+            fieldIndex: clickedFilter.fieldIndex,
+            filterRow,
+            anchorRect: {
+              x: screenX,
+              y: screenY,
+              width: clickedFilter.bounds.width,
+              height: clickedFilter.bounds.height,
+            },
+          });
           return;
         }
       }
 
-      // Check if a cell was clicked
-      const cellPos = findCellAtPosition(
-        x,
-        y,
-        pivotView,
-        columnWidths,
-        rowHeights,
-        scrollX,
-        scrollY,
-        rowHeaderWidth,
-        columnHeaderHeight
-      );
+      // 2. Check expand/collapse icon clicks
+      const clickedIcon = findClickedExpandIcon(canvasX, canvasY);
+      if (clickedIcon) {
+        onExpandCollapse?.(clickedIcon.row, clickedIcon.col, clickedIcon.isExpanded);
+        return;
+      }
 
-      if (cellPos && onCellClick) {
-        const cell = getCellData(pivotView, cellPos.row, cellPos.col);
-        if (cell) {
-          onCellClick(cellPos.row, cellPos.col, cell);
-        }
+      // 3. Handle cell selection
+      // TODO: Implement cell hit testing based on row/column positions
+      // For now, just clear selection when clicking elsewhere
+      if (selectedCell) {
+        setSelectedCell(null);
+        setSelectionRange(null);
+        onSelectionChange?.(null);
       }
     },
     [
+      canvasRef,
       pivotView,
-      columnWidths,
-      rowHeights,
-      scrollX,
-      scrollY,
-      rowHeaderWidth,
-      columnHeaderHeight,
-      onToggleGroup,
-      onCellClick,
+      findClickedFilterButton,
+      findClickedExpandIcon,
+      onExpandCollapse,
+      selectedCell,
+      onSelectionChange,
     ]
   );
 
-  const handleMouseMove = useCallback(
-    (event: React.MouseEvent<HTMLCanvasElement>) => {
-      const canvas = event.currentTarget;
-      const { x, y } = getCanvasCoordinates(event, canvas);
-      const dpr = window.devicePixelRatio || 1;
+  const handleCanvasMouseMove = useCallback(
+    (e: React.MouseEvent<HTMLCanvasElement>) => {
+      const canvas = canvasRef.current;
+      if (!canvas) return;
 
-      // Check if hovering over an icon
-      const hoveredIcon = findClickedPivotIcon(
-        x / dpr,
-        y / dpr,
-        iconBoundsMapRef.current
-      );
+      const rect = canvas.getBoundingClientRect();
+      const canvasX = e.clientX - rect.left;
+      const canvasY = e.clientY - rect.top;
 
-      // Find hovered cell
-      const cellPos = findCellAtPosition(
-        x,
-        y,
-        pivotView,
-        columnWidths,
-        rowHeights,
-        scrollX,
-        scrollY,
-        rowHeaderWidth,
-        columnHeaderHeight
-      );
+      let cursorStyle = 'default';
+      let needsRedraw = false;
 
-      setState((prev) => {
-        const newHoveredCell = cellPos
-          ? ([cellPos.row, cellPos.col] as [number, number])
-          : null;
-        const newIconHovered = hoveredIcon !== null;
+      // Check filter button hover
+      const hoveredFilter = findClickedFilterButton(canvasX, canvasY);
+      const newHoveredFilterIndex = hoveredFilter?.fieldIndex ?? null;
 
-        // Only update if something changed
-        if (
-          prev.hoveredCell?.[0] === newHoveredCell?.[0] &&
-          prev.hoveredCell?.[1] === newHoveredCell?.[1] &&
-          prev.iconHovered === newIconHovered
-        ) {
-          return prev;
-        }
+      if (newHoveredFilterIndex !== hoveredFilterFieldIndex) {
+        setHoveredFilterFieldIndex(newHoveredFilterIndex);
+        needsRedraw = true;
+      }
 
-        return {
-          hoveredCell: newHoveredCell,
-          iconHovered: newIconHovered,
-        };
-      });
+      if (hoveredFilter) {
+        cursorStyle = 'pointer';
+      }
+
+      // Check expand/collapse icon hover
+      const hoveredIcon = findClickedExpandIcon(canvasX, canvasY);
+      const newHoveredIconKey = hoveredIcon?.key ?? null;
+
+      if (newHoveredIconKey !== hoveredIconKey) {
+        setHoveredIconKey(newHoveredIconKey);
+        needsRedraw = true;
+      }
+
+      if (hoveredIcon) {
+        cursorStyle = 'pointer';
+      }
 
       // Update cursor
-      canvas.style.cursor = hoveredIcon ? "pointer" : "default";
-    },
-    [
-      pivotView,
-      columnWidths,
-      rowHeights,
-      scrollX,
-      scrollY,
-      rowHeaderWidth,
-      columnHeaderHeight,
-    ]
-  );
+      canvas.style.cursor = cursorStyle;
 
-  const handleMouseLeave = useCallback(() => {
-    setState({
-      hoveredCell: null,
-      iconHovered: false,
-    });
-  }, []);
-
-  const handleContextMenu = useCallback(
-    (event: React.MouseEvent<HTMLCanvasElement>) => {
-      event.preventDefault();
-
-      if (!onCellContextMenu) return;
-
-      const canvas = event.currentTarget;
-      const { x, y } = getCanvasCoordinates(event, canvas);
-
-      const cellPos = findCellAtPosition(
-        x,
-        y,
-        pivotView,
-        columnWidths,
-        rowHeights,
-        scrollX,
-        scrollY,
-        rowHeaderWidth,
-        columnHeaderHeight
-      );
-
-      if (cellPos) {
-        const cell = getCellData(pivotView, cellPos.row, cellPos.col);
-        if (cell) {
-          onCellContextMenu(cellPos.row, cellPos.col, cell, event);
-        }
+      // Request redraw if hover state changed
+      if (needsRedraw) {
+        requestRedraw();
       }
     },
     [
-      pivotView,
-      columnWidths,
-      rowHeights,
-      scrollX,
-      scrollY,
-      rowHeaderWidth,
-      columnHeaderHeight,
-      onCellContextMenu,
+      canvasRef,
+      findClickedFilterButton,
+      findClickedExpandIcon,
+      hoveredFilterFieldIndex,
+      hoveredIconKey,
+      requestRedraw,
     ]
   );
 
+  const handleCanvasMouseLeave = useCallback(() => {
+    let needsRedraw = false;
+
+    if (hoveredFilterFieldIndex !== null) {
+      setHoveredFilterFieldIndex(null);
+      needsRedraw = true;
+    }
+
+    if (hoveredIconKey !== null) {
+      setHoveredIconKey(null);
+      needsRedraw = true;
+    }
+
+    if (needsRedraw) {
+      requestRedraw();
+    }
+  }, [hoveredFilterFieldIndex, hoveredIconKey, requestRedraw]);
+
+  const handleCanvasDoubleClick = useCallback(
+    (_e: React.MouseEvent<HTMLCanvasElement>) => {
+      // TODO: Implement double-click behavior (e.g., expand all, drill-through)
+    },
+    []
+  );
+
+  const handleKeyDown = useCallback(
+    (e: React.KeyboardEvent) => {
+      // Close filter dropdown on Escape
+      if (e.key === 'Escape' && activeFilterDropdown) {
+        e.preventDefault();
+        setActiveFilterDropdown(null);
+        return;
+      }
+
+      // TODO: Implement keyboard navigation
+      // Arrow keys for selection movement
+      // Enter for expand/collapse
+      // Space for selection toggle
+    },
+    [activeFilterDropdown]
+  );
+
+  // ==========================================================================
+  // EFFECT: Selection change notification
+  // ==========================================================================
+
+  useEffect(() => {
+    if (selectionRange) {
+      onSelectionChange?.(selectionRange);
+    }
+  }, [selectionRange, onSelectionChange]);
+
+  // ==========================================================================
+  // RETURN
+  // ==========================================================================
+
   return {
-    state,
-    iconBoundsMapRef,
-    handleMouseDown,
-    handleMouseMove,
-    handleMouseLeave,
-    handleContextMenu,
+    // Selection state
+    selectedCell,
+    selectionRange,
+
+    // Filter dropdown state
+    activeFilterDropdown,
+    handleCloseFilterDropdown,
+    handleApplyFilter,
+
+    // Hover state
+    hoveredFilterFieldIndex,
+    hoveredIconKey,
+
+    // Event handlers
+    handleCanvasClick,
+    handleCanvasMouseMove,
+    handleCanvasMouseLeave,
+    handleCanvasDoubleClick,
+    handleKeyDown,
+
+    // Actions
+    requestRedraw,
   };
 }
+
+export default usePivotGridInteraction;

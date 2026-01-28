@@ -5,7 +5,7 @@
 // FIX: Right-click within selection now preserves the selection.
 // FIX: Clicking on merged cells now uses single dispatch to avoid stale state.
 
-import type { GridConfig, Viewport, Selection, DimensionOverrides } from "../../../types";
+import type { GridConfig, Viewport, Selection, DimensionOverrides, SelectionType } from "../../../types";
 import type { CellPosition, MousePosition, HeaderDragState } from "../types";
 import { getCellFromPixel } from "../../../lib/gridRenderer";
 import { getMergeInfo } from "../../../lib/tauri-api";
@@ -16,7 +16,7 @@ interface CellSelectionDependencies {
   dimensions?: DimensionOverrides;
   selection: Selection | null;
   /** FIX: Updated signature to accept optional endRow/endCol for merged cells */
-  onSelectCell: (row: number, col: number, type?: string, endRow?: number, endCol?: number) => void;
+  onSelectCell: (row: number, col: number, type?: SelectionType, endRow?: number, endCol?: number) => void;
   onExtendTo: (row: number, col: number) => void;
   onCommitBeforeSelect?: () => Promise<void>;
   setIsDragging: (value: boolean) => void;

@@ -786,6 +786,7 @@ pub fn run() {
             pivot::refresh_pivot_cache,
             pivot::get_pivot_at_cell,
             pivot::get_pivot_regions_for_sheet,
+            pivot::get_pivot_field_unique_values,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

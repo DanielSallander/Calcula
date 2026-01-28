@@ -1,498 +1,466 @@
-//! FILENAME: app/src/core/components/pivot/PivotGrid/PivotGrid.tsx
-// PURPOSE: Canvas-based pivot table grid component with frozen panes and expand/collapse
-// CONTEXT: Renders PivotViewResponse data using the existing pivot rendering infrastructure
-
-import React, {
-  useRef,
-  useEffect,
-  useCallback,
-  useImperativeHandle,
-  forwardRef,
-  useState,
-  useMemo,
-} from "react";
+// FILENAME: app/src/core/components/pivot/PivotGrid/PivotGrid.tsx
+import React, { useRef, useEffect, useState, useCallback, useMemo } from 'react';
+import type { PivotViewResponse } from '../../../lib/pivot-api';
+import { getPivotView } from '../../../lib/pivot-api';
 import {
   renderPivotView,
-  DEFAULT_PIVOT_THEME,
-  type PivotView,
-  type PivotViewCell,
-  type PivotTheme,
-  type PivotCellValue,
-  type PivotBackgroundStyle,
-} from "../../../lib/gridRenderer/rendering/pivot";
+  createPivotTheme,
+  measurePivotColumnWidth,
+} from '../../../lib/gridRenderer/rendering/pivot';
 import type {
-  PivotId,
-  PivotViewResponse,
-  PivotCellData,
-  ToggleGroupRequest,
-  BackgroundStyle,
-} from "../../../lib/pivot-api";
-import { Scrollbar, ScrollbarCorner } from "../../Scrollbar";
-import { usePivotGridInteraction } from "./usePivotGridInteraction";
-import * as S from "./PivotGrid.styles";
+  PivotTheme,
+  PivotInteractiveBounds,
+  PivotRenderOptions,
+} from '../../../lib/gridRenderer/rendering/pivot';
+import { usePivotGridInteraction } from './usePivotGridInteraction';
+import { FilterDropdown } from '../FilterDropdown';
 
-// ============================================================================
-// TYPE DEFINITIONS
-// ============================================================================
+// =============================================================================
+// TYPES
+// =============================================================================
 
-export interface PivotGridProps {
-  /** Pivot table ID */
-  pivotId: PivotId;
-  /** The pivot view data from backend */
-  pivotView: PivotViewResponse;
-  /** Callback when a group is toggled (expand/collapse) */
-  onToggleGroup?: (request: ToggleGroupRequest) => void;
-  /** Callback when a cell is clicked */
-  onCellClick?: (row: number, col: number, cell: PivotCellData) => void;
-  /** Callback when a cell is right-clicked */
-  onCellContextMenu?: (
-    row: number,
-    col: number,
-    cell: PivotCellData,
-    event: React.MouseEvent
-  ) => void;
-  /** Optional theme override */
+interface PivotGridProps {
+  pivotId: number;
   theme?: Partial<PivotTheme>;
-  /** Default column width */
-  defaultColumnWidth?: number;
-  /** Default row height */
   defaultRowHeight?: number;
+  defaultColumnWidth?: number;
+  minColumnWidth?: number;
+  maxColumnWidth?: number;
+  onCellClick?: (row: number, col: number, cell: unknown) => void;
+  onExpandCollapse?: (row: number, col: number, newExpandedState: boolean) => void;
+  className?: string;
+  style?: React.CSSProperties;
 }
 
-export interface PivotGridHandle {
-  /** Force a redraw of the canvas */
-  redraw: () => void;
-  /** Get the canvas element */
-  getCanvas: () => HTMLCanvasElement | null;
-}
-
-// ============================================================================
+// =============================================================================
 // CONSTANTS
-// ============================================================================
+// =============================================================================
 
-const DEFAULT_COLUMN_WIDTH = 100;
-const DEFAULT_ROW_HEIGHT = 24;
-const SCROLLBAR_SIZE = 14;
-const CHAR_WIDTH_MULTIPLIER = 8; // Approximate pixels per character
+const DEFAULT_ROW_HEIGHT = 28;
+const DEFAULT_COLUMN_WIDTH = 120;
+const MIN_COLUMN_WIDTH = 50;
+const MAX_COLUMN_WIDTH = 400;
 
-// ============================================================================
-// CONVERSION UTILITIES
-// ============================================================================
-
-/**
- * Convert BackgroundStyle from API to rendering format.
- */
-function convertBackgroundStyle(style: BackgroundStyle): PivotBackgroundStyle {
-  switch (style) {
-    case "Normal":
-      return "Normal";
-    case "Alternate":
-      return "Alternate";
-    case "Subtotal":
-      return "Subtotal";
-    case "Total":
-      return "Total";
-    case "GrandTotal":
-      return "GrandTotal";
-    default:
-      return "Normal";
-  }
-}
-
-/**
- * Convert PivotCellValue from API format to rendering format.
- */
-function convertCellValue(
-  value: import("../../../lib/pivot-api").PivotCellValue
-): PivotCellValue {
-  switch (value.type) {
-    case "Empty":
-      return { type: "Empty" };
-    case "Number":
-      return { type: "Number", value: value.data };
-    case "Text":
-      return { type: "Text", value: value.data };
-    case "Boolean":
-      return { type: "Boolean", value: value.data };
-    case "Error":
-      return { type: "Error", value: value.data };
-    default:
-      return { type: "Empty" };
-  }
-}
-
-/**
- * Convert PivotViewResponse from backend to PivotView format for rendering.
- */
-function convertToPivotView(response: PivotViewResponse): PivotView {
-  // Build 2D cells array
-  const cells: PivotViewCell[][] = [];
-
-  for (let rowIdx = 0; rowIdx < response.row_count; rowIdx++) {
-    const rowData = response.rows.find((r) => r.view_row === rowIdx);
-    const rowCells: PivotViewCell[] = [];
-
-    for (let colIdx = 0; colIdx < response.col_count; colIdx++) {
-      if (rowData && rowData.cells[colIdx]) {
-        const apiCell = rowData.cells[colIdx];
-        rowCells.push({
-          value: convertCellValue(apiCell.value),
-          cellType: apiCell.cell_type,
-          indentLevel: apiCell.indent_level,
-          isCollapsed: apiCell.is_collapsed,
-          isExpandable: apiCell.is_expandable,
-          numberFormat: apiCell.number_format || null,
-          rowSpan: 1,
-          colSpan: 1,
-          isBold: apiCell.is_bold,
-          backgroundStyle: convertBackgroundStyle(apiCell.background_style),
-          groupPath: [],
-        });
-      } else {
-        // Empty cell
-        rowCells.push({
-          value: { type: "Empty" },
-          cellType: "Blank",
-          indentLevel: 0,
-          isCollapsed: false,
-          isExpandable: false,
-          numberFormat: null,
-          rowSpan: 1,
-          colSpan: 1,
-          isBold: false,
-          backgroundStyle: "Normal",
-          groupPath: [],
-        });
-      }
-    }
-    cells.push(rowCells);
-  }
-
-  // Build row descriptors
-  const rows = response.rows.map((r) => ({
-    viewRow: r.view_row,
-    rowType: r.row_type as "Data" | "Subtotal" | "GrandTotal" | "ColumnHeader",
-    depth: r.depth,
-    visible: r.visible,
-    parentIndex: null,
-    childrenIndices: [],
-    groupValues: [],
-  }));
-
-  // Build column descriptors
-  const columns = response.columns.map((c) => ({
-    viewCol: c.view_col,
-    colType: c.col_type as "RowLabel" | "Data" | "Subtotal" | "GrandTotal",
-    depth: c.depth,
-    widthHint: c.width_hint,
-    parentIndex: null,
-    childrenIndices: [],
-    groupValues: [],
-  }));
-
-  return {
-    pivotId: String(response.pivot_id),
-    cells,
-    rows,
-    columns,
-    rowCount: response.row_count,
-    colCount: response.col_count,
-    rowLabelColCount: response.row_label_col_count,
-    columnHeaderRowCount: response.column_header_row_count,
-    isWindowed: false,
-    totalRowCount: null,
-    windowStartRow: null,
-    version: response.version,
-  };
-}
-
-// ============================================================================
+// =============================================================================
 // COMPONENT
-// ============================================================================
+// =============================================================================
 
-export const PivotGrid = forwardRef<PivotGridHandle, PivotGridProps>(
-  function PivotGrid(props, ref) {
-    const {
-      pivotId,
-      pivotView,
-      onToggleGroup,
-      onCellClick,
-      onCellContextMenu,
-      theme: themeOverride,
-      defaultColumnWidth = DEFAULT_COLUMN_WIDTH,
-      defaultRowHeight = DEFAULT_ROW_HEIGHT,
-    } = props;
+export const PivotGrid: React.FC<PivotGridProps> = ({
+  pivotId,
+  theme: themeOverrides,
+  defaultRowHeight = DEFAULT_ROW_HEIGHT,
+  minColumnWidth = MIN_COLUMN_WIDTH,
+  maxColumnWidth = MAX_COLUMN_WIDTH,
+  onExpandCollapse,
+  className,
+  style,
+}) => {
+  // Refs
+  const containerRef = useRef<HTMLDivElement>(null);
+  const canvasRef = useRef<HTMLCanvasElement>(null);
 
-    const containerRef = useRef<HTMLDivElement>(null);
-    const canvasRef = useRef<HTMLCanvasElement>(null);
-    const [canvasSize, setCanvasSize] = useState({ width: 0, height: 0 });
-    const [scrollX, setScrollX] = useState(0);
-    const [scrollY, setScrollY] = useState(0);
+  // State
+  const [pivotView, setPivotView] = useState<PivotViewResponse | null>(null);
+  const [isLoading, setIsLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
 
-    // Merge theme with defaults
-    const theme = useMemo<PivotTheme>(
-      () => ({ ...DEFAULT_PIVOT_THEME, ...themeOverride }),
-      [themeOverride]
-    );
+  const [canvasSize, setCanvasSize] = useState({ width: 800, height: 600 });
+  const [scrollPosition, setScrollPosition] = useState({ left: 0, top: 0 });
+  const [interactiveBounds, setInteractiveBounds] = useState<PivotInteractiveBounds | null>(null);
 
-    // Convert response to render format
-    const renderPivotData = useMemo(
-      () => convertToPivotView(pivotView),
-      [pivotView]
-    );
+  // Calculated dimensions
+  const [rowHeights, setRowHeights] = useState<number[]>([]);
+  const [colWidths, setColWidths] = useState<number[]>([]);
 
-    // Calculate column widths from width hints
-    const columnWidths = useMemo(() => {
-      return pivotView.columns.map((col) => {
-        if (col.width_hint > 0) {
-          return Math.max(
-            60,
-            col.width_hint * CHAR_WIDTH_MULTIPLIER + 16 // padding
-          );
-        }
-        return defaultColumnWidth;
-      });
-    }, [pivotView.columns, defaultColumnWidth]);
+  // Theme
+  const theme = useMemo(() => createPivotTheme(themeOverrides), [themeOverrides]);
+
+  // ==========================================================================
+  // DATA FETCHING
+  // ==========================================================================
+
+  const fetchPivotData = useCallback(async () => {
+    try {
+      setIsLoading(true);
+      setError(null);
+
+      const response = await getPivotView(pivotId);
+      setPivotView(response);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to load pivot data');
+    } finally {
+      setIsLoading(false);
+    }
+  }, [pivotId]);
+
+  useEffect(() => {
+    fetchPivotData();
+  }, [fetchPivotData]);
+
+  // ==========================================================================
+  // DIMENSION CALCULATIONS
+  // ==========================================================================
+
+  useEffect(() => {
+    if (!pivotView) return;
 
     // Calculate row heights (uniform for now)
-    const rowHeights = useMemo(() => {
-      return Array(pivotView.row_count).fill(defaultRowHeight);
-    }, [pivotView.row_count, defaultRowHeight]);
+    const heights = pivotView.rows.map(() => defaultRowHeight);
+    setRowHeights(heights);
 
-    // Calculate total content size
-    const totalWidth = useMemo(
-      () => columnWidths.reduce((sum, w) => sum + w, 0),
-      [columnWidths]
-    );
+    // Calculate column widths (auto-size based on content)
+    const canvas = canvasRef.current;
+    if (canvas) {
+      const ctx = canvas.getContext('2d');
+      if (ctx) {
+        const colCount = pivotView.rows[0]?.cells.length || 0;
+        const widths: number[] = [];
 
-    const totalHeight = useMemo(
-      () => rowHeights.reduce((sum, h) => sum + h, 0),
-      [rowHeights]
-    );
+        for (let c = 0; c < colCount; c++) {
+          const measuredWidth = measurePivotColumnWidth(
+            ctx,
+            pivotView,
+            c,
+            theme,
+            minColumnWidth,
+            maxColumnWidth
+          );
+          widths.push(measuredWidth);
+        }
 
-    // Calculate frozen areas
-    const rowHeaderWidth = useMemo(() => {
-      let width = 0;
-      for (let i = 0; i < pivotView.row_label_col_count; i++) {
-        width += columnWidths[i] || defaultColumnWidth;
+        setColWidths(widths);
       }
-      return width;
-    }, [pivotView.row_label_col_count, columnWidths, defaultColumnWidth]);
+    }
+  }, [pivotView, defaultRowHeight, theme, minColumnWidth, maxColumnWidth]);
 
-    const columnHeaderHeight = useMemo(() => {
-      let height = 0;
-      for (let i = 0; i < pivotView.column_header_row_count; i++) {
-        height += rowHeights[i] || defaultRowHeight;
-      }
-      return height;
-    }, [pivotView.column_header_row_count, rowHeights, defaultRowHeight]);
+  // ==========================================================================
+  // CANVAS RESIZE
+  // ==========================================================================
 
-    // Viewport size (excluding scrollbars)
-    const viewportWidth = canvasSize.width - SCROLLBAR_SIZE;
-    const viewportHeight = canvasSize.height - SCROLLBAR_SIZE;
+  useEffect(() => {
+    const container = containerRef.current;
+    if (!container) return;
 
-    // Set up interaction handling
-    const handleToggleGroup = useCallback(
-      (row: number, col: number, cell: PivotCellData) => {
-        if (!onToggleGroup) return;
-
-        // Find the field index from the cell position
-        // For row headers, field_index is the column index
-        // For column headers, field_index is based on the row depth
-        const isRowHeader = cell.cell_type === "RowHeader";
-
-        onToggleGroup({
-          pivot_id: pivotId,
-          is_row: isRowHeader,
-          field_index: isRowHeader ? col : row,
-          value: cell.formatted_value || undefined,
+    const resizeObserver = new ResizeObserver((entries) => {
+      const entry = entries[0];
+      if (entry) {
+        const { width, height } = entry.contentRect;
+        setCanvasSize({
+          width: Math.floor(width),
+          height: Math.floor(height),
         });
-      },
-      [pivotId, onToggleGroup]
-    );
-
-    const {
-      state: interactionState,
-      iconBoundsMapRef,
-      handleMouseDown,
-      handleMouseMove,
-      handleMouseLeave,
-      handleContextMenu,
-    } = usePivotGridInteraction({
-      pivotView,
-      columnWidths,
-      rowHeights,
-      scrollX,
-      scrollY,
-      rowHeaderWidth,
-      columnHeaderHeight,
-      onToggleGroup: handleToggleGroup,
-      onCellClick,
-      onCellContextMenu,
+      }
     });
 
-    // Drawing function
-    const draw = useCallback(() => {
-      const canvas = canvasRef.current;
-      const ctx = canvas?.getContext("2d");
-      if (!canvas || !ctx) return;
+    resizeObserver.observe(container);
+    return () => resizeObserver.disconnect();
+  }, []);
 
-      const dpr = window.devicePixelRatio || 1;
+  // ==========================================================================
+  // INTERACTION HOOK
+  // ==========================================================================
 
-      // Set canvas size with DPR
-      canvas.width = viewportWidth * dpr;
-      canvas.height = viewportHeight * dpr;
-      canvas.style.width = `${viewportWidth}px`;
-      canvas.style.height = `${viewportHeight}px`;
+  const handleExpandCollapse = useCallback(
+    async (row: number, col: number, isExpanded: boolean) => {
+      // Toggle the expanded state
+      const newExpandedState = !isExpanded;
+      onExpandCollapse?.(row, col, newExpandedState);
 
-      // Scale for DPR
-      ctx.scale(dpr, dpr);
+      // TODO: Call API to toggle expand/collapse and refresh view
+      // For now, just trigger a refresh
+      await fetchPivotData();
+    },
+    [onExpandCollapse, fetchPivotData]
+  );
 
-      // Render the pivot view
-      const iconBounds = renderPivotView({
-        ctx,
-        width: viewportWidth,
-        height: viewportHeight,
-        pivotView: renderPivotData,
-        theme,
-        scrollX,
-        scrollY,
-        rowHeaderWidth,
-        columnHeaderHeight,
-        columnWidths,
-        rowHeights,
-        hoveredCell: interactionState.hoveredCell,
-      });
+  const {
+    activeFilterDropdown,
+    handleCloseFilterDropdown,
+    handleApplyFilter,
+    hoveredFilterFieldIndex,
+    hoveredIconKey,
+    handleCanvasClick,
+    handleCanvasMouseMove,
+    handleCanvasMouseLeave,
+    handleKeyDown,
+  } = usePivotGridInteraction({
+    pivotId,
+    pivotView,
+    canvasRef,
+    interactiveBounds,
+    onExpandCollapse: handleExpandCollapse,
+    onRefresh: fetchPivotData,
+  });
 
-      // Store icon bounds for hit testing
-      iconBoundsMapRef.current = iconBounds;
-    }, [
-      viewportWidth,
-      viewportHeight,
-      renderPivotData,
-      theme,
-      scrollX,
-      scrollY,
-      rowHeaderWidth,
-      columnHeaderHeight,
-      columnWidths,
+  // ==========================================================================
+  // RENDERING
+  // ==========================================================================
+
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas || !pivotView) return;
+
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return;
+
+    // Set canvas resolution for sharp rendering
+    const dpr = window.devicePixelRatio || 1;
+    canvas.width = canvasSize.width * dpr;
+    canvas.height = canvasSize.height * dpr;
+    ctx.scale(dpr, dpr);
+
+    // Calculate visible range
+    const frozenRowCount = pivotView.column_header_row_count || 0;
+    const frozenColCount = pivotView.row_label_col_count || 0;
+
+    // Calculate total dimensions
+    let totalHeight = 0;
+    for (const h of rowHeights) {
+      totalHeight += h;
+    }
+
+    let totalWidth = 0;
+    for (const w of colWidths) {
+      totalWidth += w;
+    }
+
+    // Calculate visible rows
+    let frozenHeight = 0;
+    for (let r = 0; r < frozenRowCount && r < rowHeights.length; r++) {
+      frozenHeight += rowHeights[r];
+    }
+
+    let startRow = frozenRowCount;
+    let accumulatedHeight = 0;
+    for (let r = frozenRowCount; r < rowHeights.length; r++) {
+      if (accumulatedHeight + rowHeights[r] >= scrollPosition.top) {
+        startRow = r;
+        break;
+      }
+      accumulatedHeight += rowHeights[r];
+    }
+
+    let endRow = startRow;
+    accumulatedHeight = 0;
+    for (let r = startRow; r < rowHeights.length; r++) {
+      endRow = r;
+      accumulatedHeight += rowHeights[r];
+      if (accumulatedHeight >= canvasSize.height - frozenHeight) {
+        break;
+      }
+    }
+
+    // Calculate visible columns
+    let frozenWidth = 0;
+    for (let c = 0; c < frozenColCount && c < colWidths.length; c++) {
+      frozenWidth += colWidths[c];
+    }
+
+    let startCol = frozenColCount;
+    let accumulatedWidth = 0;
+    for (let c = frozenColCount; c < colWidths.length; c++) {
+      if (accumulatedWidth + colWidths[c] >= scrollPosition.left) {
+        startCol = c;
+        break;
+      }
+      accumulatedWidth += colWidths[c];
+    }
+
+    let endCol = startCol;
+    accumulatedWidth = 0;
+    for (let c = startCol; c < colWidths.length; c++) {
+      endCol = c;
+      accumulatedWidth += colWidths[c];
+      if (accumulatedWidth >= canvasSize.width - frozenWidth) {
+        break;
+      }
+    }
+
+    // Render
+    const renderOptions: PivotRenderOptions = {
+      startRow,
+      endRow,
+      startCol,
+      endCol,
       rowHeights,
-      interactionState.hoveredCell,
-      iconBoundsMapRef,
-    ]);
+      colWidths,
+      scrollLeft: scrollPosition.left,
+      scrollTop: scrollPosition.top,
+      frozenRowCount,
+      frozenColCount,
+      hoveredFilterFieldIndex,
+      hoveredIconKey,
+    };
 
-    // Imperative handle
-    useImperativeHandle(ref, () => ({
-      redraw: draw,
-      getCanvas: () => canvasRef.current,
-    }));
-
-    // Resize observer for container
-    useEffect(() => {
-      const container = containerRef.current;
-      if (!container) return;
-
-      const resizeObserver = new ResizeObserver((entries) => {
-        for (const entry of entries) {
-          const { width, height } = entry.contentRect;
-          setCanvasSize({ width, height });
-        }
-      });
-
-      resizeObserver.observe(container);
-      return () => resizeObserver.disconnect();
-    }, []);
-
-    // Draw on state changes
-    useEffect(() => {
-      draw();
-    }, [draw]);
-
-    // Scroll handlers
-    const handleScrollX = useCallback((position: number) => {
-      setScrollX(position);
-    }, []);
-
-    const handleScrollY = useCallback((position: number) => {
-      setScrollY(position);
-    }, []);
-
-    // Handle wheel scroll
-    const handleWheel = useCallback(
-      (event: React.WheelEvent) => {
-        event.preventDefault();
-
-        const maxScrollX = Math.max(0, totalWidth - viewportWidth);
-        const maxScrollY = Math.max(0, totalHeight - viewportHeight);
-
-        if (event.shiftKey || Math.abs(event.deltaX) > Math.abs(event.deltaY)) {
-          // Horizontal scroll
-          setScrollX((prev) =>
-            Math.max(0, Math.min(maxScrollX, prev + event.deltaX))
-          );
-        } else {
-          // Vertical scroll
-          setScrollY((prev) =>
-            Math.max(0, Math.min(maxScrollY, prev + event.deltaY))
-          );
-        }
-      },
-      [totalWidth, totalHeight, viewportWidth, viewportHeight]
+    const result = renderPivotView(
+      ctx,
+      pivotView,
+      canvasSize.width,
+      canvasSize.height,
+      renderOptions,
+      theme
     );
 
-    // Content sizes for scrollbars (adjusted for frozen areas)
-    const scrollableWidth = totalWidth - rowHeaderWidth;
-    const scrollableHeight = totalHeight - columnHeaderHeight;
-    const scrollableViewportWidth = viewportWidth - rowHeaderWidth;
-    const scrollableViewportHeight = viewportHeight - columnHeaderHeight;
+    setInteractiveBounds(result.interactiveBounds);
+  }, [
+    pivotView,
+    canvasSize,
+    scrollPosition,
+    rowHeights,
+    colWidths,
+    hoveredFilterFieldIndex,
+    hoveredIconKey,
+    theme,
+  ]);
 
+  // ==========================================================================
+  // SCROLL HANDLING
+  // ==========================================================================
+
+  const handleScroll = useCallback((e: React.UIEvent<HTMLDivElement>) => {
+    const target = e.currentTarget;
+    setScrollPosition({
+      left: target.scrollLeft,
+      top: target.scrollTop,
+    });
+  }, []);
+
+  // Calculate total content size for scroll container
+  const totalContentSize = useMemo(() => {
+    let width = 0;
+    let height = 0;
+
+    for (const w of colWidths) {
+      width += w;
+    }
+    for (const h of rowHeights) {
+      height += h;
+    }
+
+    return { width, height };
+  }, [colWidths, rowHeights]);
+
+  // ==========================================================================
+  // RENDER
+  // ==========================================================================
+
+  if (isLoading) {
     return (
-      <S.PivotGridContainer ref={containerRef}>
-        <S.GridArea>
-          <S.StyledCanvas
-            ref={canvasRef}
-            onMouseDown={handleMouseDown}
-            onMouseMove={handleMouseMove}
-            onMouseLeave={handleMouseLeave}
-            onContextMenu={handleContextMenu}
-            onWheel={handleWheel}
-          />
-        </S.GridArea>
-
-        {/* Vertical scrollbar */}
-        {scrollableHeight > scrollableViewportHeight && (
-          <S.VerticalScrollbarContainer>
-            <Scrollbar
-              orientation="vertical"
-              scrollPosition={scrollY}
-              contentSize={scrollableHeight}
-              viewportSize={scrollableViewportHeight}
-              onScroll={handleScrollY}
-            />
-          </S.VerticalScrollbarContainer>
-        )}
-
-        {/* Horizontal scrollbar */}
-        {scrollableWidth > scrollableViewportWidth && (
-          <S.HorizontalScrollbarContainer>
-            <Scrollbar
-              orientation="horizontal"
-              scrollPosition={scrollX}
-              contentSize={scrollableWidth}
-              viewportSize={scrollableViewportWidth}
-              onScroll={handleScrollX}
-            />
-          </S.HorizontalScrollbarContainer>
-        )}
-
-        {/* Corner piece */}
-        {(scrollableHeight > scrollableViewportHeight ||
-          scrollableWidth > scrollableViewportWidth) && (
-          <S.ScrollbarCornerContainer>
-            <ScrollbarCorner size={SCROLLBAR_SIZE} />
-          </S.ScrollbarCornerContainer>
-        )}
-      </S.PivotGridContainer>
+      <div
+        className={className}
+        style={{
+          ...style,
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          color: '#6b7280',
+          fontSize: 14,
+        }}
+      >
+        Loading pivot table...
+      </div>
     );
   }
-);
+
+  if (error) {
+    return (
+      <div
+        className={className}
+        style={{
+          ...style,
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          color: '#dc2626',
+          fontSize: 14,
+        }}
+      >
+        Error: {error}
+      </div>
+    );
+  }
+
+  if (!pivotView) {
+    return (
+      <div
+        className={className}
+        style={{
+          ...style,
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          color: '#6b7280',
+          fontSize: 14,
+        }}
+      >
+        No pivot data available
+      </div>
+    );
+  }
+
+  return (
+    <div
+      ref={containerRef}
+      className={className}
+      style={{
+        position: 'relative',
+        width: '100%',
+        height: '100%',
+        overflow: 'hidden',
+        ...style,
+      }}
+      tabIndex={0}
+      onKeyDown={handleKeyDown}
+    >
+      {/* Scroll container */}
+      <div
+        style={{
+          position: 'absolute',
+          inset: 0,
+          overflow: 'auto',
+        }}
+        onScroll={handleScroll}
+      >
+        {/* Scroll spacer */}
+        <div
+          style={{
+            width: totalContentSize.width,
+            height: totalContentSize.height,
+            pointerEvents: 'none',
+          }}
+        />
+      </div>
+
+      {/* Canvas layer */}
+      <canvas
+        ref={canvasRef}
+        style={{
+          position: 'absolute',
+          top: 0,
+          left: 0,
+          width: canvasSize.width,
+          height: canvasSize.height,
+          pointerEvents: 'auto',
+        }}
+        onClick={handleCanvasClick}
+        onMouseMove={handleCanvasMouseMove}
+        onMouseLeave={handleCanvasMouseLeave}
+      />
+
+      {/* Filter Dropdown Overlay */}
+      {activeFilterDropdown && (
+        <FilterDropdown
+          fieldName={activeFilterDropdown.filterRow.field_name}
+          fieldIndex={activeFilterDropdown.fieldIndex}
+          uniqueValues={activeFilterDropdown.filterRow.unique_values}
+          selectedValues={activeFilterDropdown.filterRow.selected_values}
+          anchorRect={activeFilterDropdown.anchorRect}
+          onApply={handleApplyFilter}
+          onClose={handleCloseFilterDropdown}
+        />
+      )}
+    </div>
+  );
+};
+
+export default PivotGrid;

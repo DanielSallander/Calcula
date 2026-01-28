@@ -1,7 +1,6 @@
 //! FILENAME: app/src/core/components/Spreadsheet/Spreadsheet.tsx
 // PURPOSE: Main spreadsheet component combining grid, editor, and scrollbars
 // CONTEXT: Core component that orchestrates the spreadsheet experience
-// REFACTOR: Styling moved to Spreadsheet.styles.ts
 
 import React, { useCallback, useEffect, useState } from "react";
 import { useGridState, useGridContext } from "../../state";
@@ -21,10 +20,12 @@ import {
   isClickWithinSelection,
   type GridMenuContext,
 } from "../../extensions";
-import { getCellFromPixel } from "../../lib/gridRenderer";
+import { getCellFromPixel, getColumnWidth, getRowHeight } from "../../lib/gridRenderer";
 import type { SpreadsheetContentProps } from "./SpreadsheetTypes";
 import { FindReplaceDialog } from "../FindReplaceDialog";
 import { MenuEvents } from "../../../shell/MenuBar";
+import { PivotFilterOverlay } from "../pivot";
+import type { PivotRegionData } from "../../types";
 
 // Styles
 import * as S from "./Spreadsheet.styles";
@@ -79,6 +80,33 @@ function SpreadsheetContent({ className }: SpreadsheetContentProps): React.React
 
   // 5. Extract freezeConfig from gridState
   const { freezeConfig } = gridState;
+
+  // 6. Pivot filter overlay state
+  const [pivotRegions, setPivotRegions] = useState<PivotRegionData[]>([]);
+
+  // Listen for pivot regions updates from GridCanvas
+  useEffect(() => {
+    const handlePivotRegionsUpdate = (event: Event) => {
+      const customEvent = event as CustomEvent<{ regions: PivotRegionData[] }>;
+      setPivotRegions(customEvent.detail.regions);
+    };
+
+    window.addEventListener('pivot:regionsUpdated', handlePivotRegionsUpdate);
+    return () => {
+      window.removeEventListener('pivot:regionsUpdated', handlePivotRegionsUpdate);
+    };
+  }, []);
+
+  // Helper functions for getting column/row dimensions
+  const getColWidth = useCallback(
+    (col: number) => getColumnWidth(col, config, dimensions),
+    [config, dimensions]
+  );
+
+  const getRowHeightFn = useCallback(
+    (row: number) => getRowHeight(row, config, dimensions),
+    [config, dimensions]
+  );
 
   // -------------------------------------------------------------------------
   // Menu Event Listeners for Cut/Copy/Paste
@@ -540,6 +568,17 @@ function SpreadsheetContent({ className }: SpreadsheetContentProps): React.React
               onRestoreFocus={() => focusContainerRef.current?.focus()}
             />
           )}
+
+          {/* Pivot Filter Overlay - renders filter dropdowns within pivot areas */}
+          <PivotFilterOverlay
+            pivotRegions={pivotRegions}
+            scrollX={viewport.scrollX}
+            scrollY={viewport.scrollY}
+            rowHeaderWidth={config.rowHeaderWidth}
+            colHeaderHeight={config.colHeaderHeight}
+            getColumnWidth={getColWidth}
+            getRowHeight={getRowHeightFn}
+          />
         </S.CanvasLayer>
 
         {/* Vertical Scrollbar */}

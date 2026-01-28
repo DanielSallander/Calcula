@@ -270,6 +270,7 @@ pub(crate) fn view_to_response(view: &PivotView) -> PivotViewResponse {
                     is_collapsed: cell.is_collapsed,
                     background_style: format!("{:?}", cell.background_style),
                     number_format: cell.number_format.clone(),
+                    filter_field_index: cell.filter_field_index, // Added missing field
                 })
                 .collect();
 
@@ -301,6 +302,8 @@ pub(crate) fn view_to_response(view: &PivotView) -> PivotViewResponse {
         col_count: view.col_count,
         row_label_col_count: view.row_label_col_count,
         column_header_row_count: view.column_header_row_count,
+        filter_row_count: view.filter_row_count,
+        filter_rows: Vec::new(),
         rows,
         columns,
     }

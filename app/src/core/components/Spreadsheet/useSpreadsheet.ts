@@ -1,11 +1,6 @@
 //! FILENAME: app/src/core/components/Spreadsheet/useSpreadsheet.ts
 // PURPOSE: Main composer hook that aggregates functional sub-hooks.
 // CONTEXT: Orchestrates initialization and combines logic from Styles, Selection, Editing, and Layout hooks.
-// Updated: Added clipboard state for marching ants animation.
-// FIX: Added focusContainerRef for proper keyboard event handling.
-// FIX: Pass focusContainerRef to useSpreadsheetEditing for proper focus restoration.
-// FIX: Added grid:navigateToCell event listener for pivot table navigation.
-// FIX: Added selection:changed event emission for pivot table sidebar sync.
 
 import { useRef, useCallback, useState, useEffect } from "react";
 import { useGridState, useGridContext } from "../../state";

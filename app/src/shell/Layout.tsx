@@ -15,7 +15,7 @@ import { TaskPaneExtensions } from "../core/extensions/taskPaneExtensions";
 import { PivotEditorView } from "../core/components/pivot/PivotEditorView";
 import type { PivotEditorViewData } from "../core/components/pivot/PivotEditorView";
 import { getPivotSourceData, getPivotAtCell } from "../core/lib/pivot-api";
-import type { PivotId, SourceField, ZoneField, LayoutConfig, AggregationType } from "../core/components/pivot/types";
+import type { SourceField, ZoneField, LayoutConfig, AggregationType } from "../core/components/pivot/types";
 import type { PivotRegionData } from "../core/types";
 
 // Register the Pivot Editor as a Task Pane view
@@ -42,10 +42,10 @@ registerPivotEditorPane();
 function LayoutInner(): React.ReactElement {
   const { state } = useGridContext();
   const { openPane, closePane, markManuallyClosed, manuallyClosed } = useTaskPaneStore();
-  
+
   // FIX: Cache pivot regions for fast local bounds checking
   const [cachedPivotRegions, setCachedPivotRegions] = useState<PivotRegionData[]>([]);
-  
+
   // Track last checked selection to avoid redundant API calls
   const lastCheckedSelectionRef = useRef<{ row: number; col: number } | null>(null);
   const checkInProgressRef = useRef(false);

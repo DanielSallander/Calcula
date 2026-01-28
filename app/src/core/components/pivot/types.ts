@@ -76,6 +76,7 @@ export interface UpdatePivotFieldsRequest {
   row_fields?: PivotFieldConfig[];
   column_fields?: PivotFieldConfig[];
   value_fields?: ValueFieldConfig[];
+  filter_fields?: PivotFieldConfig[];
   layout?: LayoutConfig;
 }
 
@@ -105,6 +106,11 @@ export interface ZoneField {
   isNumeric: boolean;
   // For value fields
   aggregation?: AggregationType;
+  customName?: string;
+  numberFormat?: string;
+  showValuesAs?: ShowValuesAs;
+  // For filter fields
+  hiddenItems?: string[];
 }
 
 // Editor state

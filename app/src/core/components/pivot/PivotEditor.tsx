@@ -1,9 +1,11 @@
 //! FILENAME: app/src/core/components/pivot/PivotEditor.tsx
-import React, { useCallback } from 'react';
+import React, { useCallback, useState, useEffect } from 'react';
 import { styles } from './PivotEditor.styles';
 import { FieldList } from './FieldList';
 import { DropZones } from './DropZones';
 import { LayoutOptions } from './LayoutOptions';
+import { ValueFieldSettingsModal, type ValueFieldSettings } from './ValueFieldSettingsModal';
+import { NumberFormatModal } from './NumberFormatModal';
 import { usePivotEditorState } from './usePivotEditorState';
 import { updatePivotFields } from '../../lib/pivot-api';
 import type {
@@ -37,6 +39,10 @@ export function PivotEditor({
   onClose,
   onViewUpdate,
 }: PivotEditorProps): React.ReactElement {
+  // Modal state
+  const [valueSettingsIndex, setValueSettingsIndex] = useState<number | null>(null);
+  const [numberFormatIndex, setNumberFormatIndex] = useState<number | null>(null);
+
   const handleUpdate = useCallback(async (request: UpdatePivotFieldsRequest) => {
     try {
       await updatePivotFields(request);
@@ -61,6 +67,8 @@ export function PivotEditor({
     handleRemove,
     handleReorder,
     handleAggregationChange,
+    handleValueFieldSettings,
+    handleNumberFormatChange,
     handleLayoutChange,
     handleDragStart,
     handleDragEnd,
@@ -74,6 +82,41 @@ export function PivotEditor({
     initialLayout,
     onUpdate: handleUpdate,
   });
+
+  // Modal handlers
+  const handleOpenValueSettings = useCallback((index: number) => {
+    setValueSettingsIndex(index);
+  }, []);
+
+  const handleOpenNumberFormat = useCallback((index: number) => {
+    setNumberFormatIndex(index);
+  }, []);
+
+  const handleSaveValueSettings = useCallback((settings: ValueFieldSettings) => {
+    if (valueSettingsIndex !== null) {
+      handleValueFieldSettings(valueSettingsIndex, settings);
+      setValueSettingsIndex(null);
+    }
+  }, [valueSettingsIndex, handleValueFieldSettings]);
+
+  const handleSaveNumberFormat = useCallback((format: string) => {
+    if (numberFormatIndex !== null) {
+      handleNumberFormatChange(numberFormatIndex, format);
+      setNumberFormatIndex(null);
+    }
+  }, [numberFormatIndex, handleNumberFormatChange]);
+
+  // Notify Layout when filter fields change so it can show the FilterBar
+  useEffect(() => {
+    window.dispatchEvent(
+      new CustomEvent("pivot:filterFieldsChanged", {
+        detail: {
+          pivotId,
+          filterFields: filters,
+        },
+      })
+    );
+  }, [pivotId, filters]);
 
   return (
     <div className={styles.container}>
@@ -108,12 +151,34 @@ export function PivotEditor({
           onRemove={handleRemove}
           onReorder={handleReorder}
           onValuesAggregationChange={handleAggregationChange}
+          onOpenValueSettings={handleOpenValueSettings}
+          onOpenNumberFormat={handleOpenNumberFormat}
           onDragStart={handleDragStart}
           onDragEnd={handleDragEnd}
         />
 
         <LayoutOptions layout={layout} onChange={handleLayoutChange} />
       </div>
+
+      {/* Value Field Settings Modal */}
+      {valueSettingsIndex !== null && values[valueSettingsIndex] && (
+        <ValueFieldSettingsModal
+          isOpen={true}
+          field={values[valueSettingsIndex]}
+          onSave={handleSaveValueSettings}
+          onCancel={() => setValueSettingsIndex(null)}
+        />
+      )}
+
+      {/* Number Format Modal */}
+      {numberFormatIndex !== null && values[numberFormatIndex] && (
+        <NumberFormatModal
+          isOpen={true}
+          currentFormat={values[numberFormatIndex].numberFormat || ''}
+          onSave={handleSaveNumberFormat}
+          onCancel={() => setNumberFormatIndex(null)}
+        />
+      )}
     </div>
   );
 }

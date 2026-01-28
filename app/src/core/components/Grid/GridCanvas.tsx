@@ -4,11 +4,6 @@
 // high-performance grid rendering. It handles device pixel ratio scaling,
 // automatic resizing, fetching cell data from the backend, and delegates
 // actual grid drawing to the gridRenderer module.
-// Updated: Fixed insertion animation to work with backend-first approach
-// Updated: Added deletion animation support (animateRowDeletion, animateColumnDeletion)
-// Updated: Added freeze panes support
-// Updated: Added grid:refresh event listener for merge cells support
-// Refactored: Moved styles to GridCanvas.styles.ts
 
 import React, { useRef, useEffect, useCallback, useImperativeHandle, forwardRef, useState } from "react";
 import { renderGrid, DEFAULT_THEME, calculateVisibleRange } from "../../lib/gridRenderer";
@@ -367,14 +362,29 @@ export const GridCanvas = forwardRef<GridCanvasHandle, GridCanvasProps>(
 
     /**
      * Fetch pivot regions for rendering placeholders.
+     * Also dispatches pivot:regionsUpdated event for components that need region info.
      */
     const fetchPivotRegions = useCallback(async (): Promise<void> => {
       try {
         const regions = await getPivotRegionsForSheet();
         setPivotRegions(regions);
+
+        // Dispatch event so other components (PivotFilterOverlay, Layout) can access regions
+        window.dispatchEvent(
+          new CustomEvent("pivot:regionsUpdated", {
+            detail: { regions },
+          })
+        );
       } catch (error) {
         console.error("Failed to fetch pivot regions:", error);
         setPivotRegions([]);
+
+        // Still dispatch event with empty regions
+        window.dispatchEvent(
+          new CustomEvent("pivot:regionsUpdated", {
+            detail: { regions: [] },
+          })
+        );
       }
     }, []);
 
@@ -656,9 +666,28 @@ export const GridCanvas = forwardRef<GridCanvasHandle, GridCanvasProps>(
       };
 
       window.addEventListener('grid:refresh', handleGridRefresh);
-      
+
       return () => {
         window.removeEventListener('grid:refresh', handleGridRefresh);
+      };
+    }, [refreshCells, draw, insertionAnimation]);
+
+    /**
+     * Listen for pivot:refresh events (from filter changes, field updates, etc.).
+     * This ensures the canvas refreshes cells and pivot regions when pivot data changes.
+     */
+    useEffect(() => {
+      const handlePivotRefresh = async () => {
+        console.log('[GridCanvas] pivot:refresh event received - refreshing cells and pivot regions');
+        await refreshCells();
+        // Redraw after refresh to show updated data
+        draw(animationOffsetRef.current, insertionAnimation);
+      };
+
+      window.addEventListener('pivot:refresh', handlePivotRefresh);
+
+      return () => {
+        window.removeEventListener('pivot:refresh', handlePivotRefresh);
       };
     }, [refreshCells, draw, insertionAnimation]);
 

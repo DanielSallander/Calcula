@@ -1,11 +1,6 @@
 //! FILENAME: app/src/core/components/Spreadsheet/useSpreadsheetEditing.ts
 // PURPOSE: Manages the editing lifecycle, formula bar, and inline inputs.
 // CONTEXT: Contains complex logic for handling key events in both the container and inputs.
-// FIX: Added event.stopPropagation() to formula input key handler to prevent bubbling
-//      which caused the container to trigger "Replace Mode" editing.
-// FIX: Use focusContainerRef instead of containerRef for focus restoration.
-//      containerRef points to the grid area (not focusable), while focusContainerRef
-//      points to the outer container with tabIndex={0}.
 
 import { useCallback, useEffect, useState } from "react";
 import { useEditing } from "../../hooks";

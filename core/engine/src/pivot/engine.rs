@@ -9,6 +9,7 @@
 //! 2. Flatten trees into ordered lists with hierarchy metadata
 //! 3. Cross-tabulate: for each (row, column) intersection, compute aggregates
 //! 4. Generate the final PivotView with proper cell types and formatting
+//! 5. Add filter rows at the top if filter fields are configured
 
 use std::collections::HashMap;
 use crate::pivot::cache::{CacheValue, GroupKey, PivotCache, ValueId, VALUE_ID_EMPTY};
@@ -17,7 +18,7 @@ use crate::pivot::definition::{
     ReportLayout, ValuesPosition,
 };
 use crate::pivot::view::{
-    BackgroundStyle, PivotCellType, PivotColumnDescriptor,
+    BackgroundStyle, FilterRowInfo, PivotCellType, PivotColumnDescriptor,
     PivotColumnType, PivotRowDescriptor, PivotRowType, PivotView, PivotViewCell,
 };
 
@@ -206,6 +207,16 @@ impl<'a> PivotCalculator<'a> {
                 let hidden_ids = self.resolve_hidden_items(field);
                 if !hidden_ids.is_empty() {
                     hidden_items.push((field.source_index, hidden_ids));
+                }
+            }
+        }
+        
+        // Collect hidden items from filter fields
+        for filter in &self.definition.filter_fields {
+            if !filter.field.hidden_items.is_empty() {
+                let hidden_ids = self.resolve_hidden_items(&filter.field);
+                if !hidden_ids.is_empty() {
+                    hidden_items.push((filter.field.source_index, hidden_ids));
                 }
             }
         }
@@ -638,13 +649,131 @@ impl<'a> PivotCalculator<'a> {
         let col_descriptors = self.generate_column_descriptors(row_label_cols);
         view.set_columns(col_descriptors);
         
+        // Generate filter rows first (at the top)
+        let filter_row_count = self.generate_filter_rows(&mut view, row_label_cols);
+        view.filter_row_count = filter_row_count;
+        
         // Generate column header rows
         self.generate_column_headers(&mut view, row_label_cols, col_header_rows);
         
         // Generate data rows
         self.generate_data_rows(&mut view, row_label_cols);
         
+        // Update column_header_row_count to include filter rows
+        view.column_header_row_count = col_header_rows + filter_row_count;
+        
         view
+    }
+    
+    /// Generates filter rows at the top of the pivot view.
+    /// Returns the number of filter rows generated.
+    fn generate_filter_rows(&mut self, view: &mut PivotView, row_label_cols: usize) -> usize {
+        let filter_fields = &self.definition.filter_fields;
+        
+        if filter_fields.is_empty() {
+            return 0;
+        }
+        
+        let total_cols = view.col_count.max(row_label_cols + 1);
+        
+        for (filter_idx, filter) in filter_fields.iter().enumerate() {
+            let field_index = filter.field.source_index;
+            let field_name = filter.field.name.clone();
+            
+            // Collect unique values for this filter field
+            let unique_values = self.collect_unique_values_for_field(field_index);
+            
+            // Determine which values are selected (not hidden)
+            let hidden_items = &filter.field.hidden_items;
+            let selected_values: Vec<String> = unique_values
+                .iter()
+                .filter(|v| !hidden_items.contains(v))
+                .cloned()
+                .collect();
+            
+            // Generate display value for the dropdown
+            let display_value = if hidden_items.is_empty() || selected_values.len() == unique_values.len() {
+                "(All)".to_string()
+            } else if selected_values.len() == 1 {
+                selected_values[0].clone()
+            } else if selected_values.is_empty() {
+                "(None)".to_string()
+            } else {
+                format!("({} items)", selected_values.len())
+            };
+            
+            // Create filter row info
+            let filter_info = FilterRowInfo {
+                field_index,
+                field_name: field_name.clone(),
+                selected_values: selected_values.clone(),
+                unique_values: unique_values.clone(),
+                display_value: display_value.clone(),
+                view_row: filter_idx,
+            };
+            view.filter_rows.push(filter_info);
+            
+            // Build the row cells
+            let mut cells = Vec::with_capacity(total_cols);
+            
+            // First cell: filter label
+            let mut label_cell = PivotViewCell::filter_label(
+                format!("{}:", field_name),
+                field_index,
+            );
+            label_cell.background_style = BackgroundStyle::FilterRow;
+            cells.push(label_cell);
+            
+            // Second cell: filter dropdown (spans remaining row label columns if any)
+            let mut dropdown_cell = PivotViewCell::filter_dropdown(display_value, field_index);
+            dropdown_cell.background_style = BackgroundStyle::FilterRow;
+            if row_label_cols > 1 {
+                dropdown_cell.col_span = (row_label_cols - 1) as u16;
+            }
+            cells.push(dropdown_cell);
+            
+            // Fill remaining columns with blank cells
+            for _ in 2..total_cols {
+                let mut blank = PivotViewCell::blank();
+                blank.background_style = BackgroundStyle::FilterRow;
+                cells.push(blank);
+            }
+            
+            // Ensure we have exactly total_cols cells
+            while cells.len() < total_cols {
+                let mut blank = PivotViewCell::blank();
+                blank.background_style = BackgroundStyle::FilterRow;
+                cells.push(blank);
+            }
+            
+            let descriptor = PivotRowDescriptor {
+                view_row: filter_idx,
+                row_type: PivotRowType::FilterRow,
+                depth: 0,
+                visible: true,
+                parent_index: None,
+                children_indices: Vec::new(),
+                group_values: Vec::new(),
+            };
+            
+            view.add_row(cells, descriptor);
+        }
+        
+        filter_fields.len()
+    }
+    
+    /// Collects all unique values for a field as display strings.
+    fn collect_unique_values_for_field(&self, field_index: FieldIndex) -> Vec<String> {
+        let mut values = Vec::new();
+        
+        if let Some(field_cache) = self.cache.fields.get(field_index) {
+            for id in 0..field_cache.unique_count() as ValueId {
+                let label = self.get_value_label(field_cache, id);
+                values.push(label);
+            }
+        }
+        
+        values
     }
     
     /// Calculates how many columns are needed for row labels.
@@ -761,6 +890,8 @@ impl<'a> PivotCalculator<'a> {
         row_label_cols: usize,
         col_header_rows: usize,
     ) {
+        let filter_row_offset = view.filter_row_count;
+        
         for header_row in 0..col_header_rows {
             let mut cells = Vec::new();
             
@@ -825,7 +956,7 @@ impl<'a> PivotCalculator<'a> {
             }
             
             let descriptor = PivotRowDescriptor {
-                view_row: header_row,
+                view_row: filter_row_offset + header_row,
                 row_type: PivotRowType::ColumnHeader,
                 depth: 0,
                 visible: true,
@@ -850,6 +981,7 @@ impl<'a> PivotCalculator<'a> {
         let row_items = self.row_items.clone();
         let report_layout = self.definition.layout.report_layout;
         let repeat_row_labels = self.definition.layout.repeat_row_labels;
+        let base_row_offset = view.row_count;
         
         for (row_idx, item) in row_items.iter().enumerate() {
             let view_row = view.row_count;
@@ -921,7 +1053,7 @@ impl<'a> PivotCalculator<'a> {
                 depth: item.depth as u8,
                 visible: true,
                 parent_index: if item.parent_index >= 0 {
-                    Some((view.column_header_row_count as i32 + item.parent_index) as usize)
+                    Some((base_row_offset as i32 + item.parent_index) as usize)
                 } else {
                     None
                 },
@@ -1405,5 +1537,28 @@ mod tests {
         
         // Should produce a view without panicking
         assert!(view.row_count > 0);
+    }
+    
+    #[test]
+    fn test_filter_rows_generation() {
+        use crate::pivot::definition::{PivotFilter, FilterCondition, FilterValue};
+        
+        let mut cache = create_test_cache();
+        let mut definition = create_test_definition();
+        
+        // Add a filter field
+        definition.filter_fields.push(PivotFilter {
+            field: PivotField::new(0, "Region".to_string()),
+            condition: FilterCondition::ValueList(vec![
+                FilterValue::Text("North".to_string()),
+            ]),
+        });
+        
+        let view = calculate_pivot(&definition, &mut cache);
+        
+        // Should have filter rows
+        assert_eq!(view.filter_row_count, 1);
+        assert_eq!(view.filter_rows.len(), 1);
+        assert_eq!(view.filter_rows[0].field_name, "Region");
     }
 }

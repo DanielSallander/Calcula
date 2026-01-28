@@ -1,7 +1,6 @@
 //! FILENAME: app/src/core/components/Scrollbar/Scrollbar.tsx
 // PURPOSE: Custom scrollbar component for virtual scrolling
 // CONTEXT: Renders proportional scrollbars based on used range and virtual bounds
-// UPDATED: Excel-like thumb sizing that changes based on content size
 
 import React, { useCallback, useRef, useState, useEffect, useLayoutEffect } from "react";
 import * as S from "./Scrollbar.styles";

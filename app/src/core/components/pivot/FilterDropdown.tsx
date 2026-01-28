@@ -1,324 +1,258 @@
-//! FILENAME: app/src/core/components/pivot/FilterDropdown.tsx
-// PURPOSE: Dropdown component for filtering pivot table values
-// CONTEXT: Shows checkbox list of unique values for a field with search
-
-import React, { useState, useCallback, useMemo, useRef, useEffect } from "react";
-import { css } from "@emotion/css";
+import React, { useState, useCallback, useRef, useEffect } from 'react';
 
 export interface FilterDropdownProps {
-  /** Field name being filtered */
   fieldName: string;
-  /** All unique values available for filtering */
+  fieldIndex: number;
   uniqueValues: string[];
-  /** Currently selected (visible) values */
   selectedValues: string[];
-  /** Callback when selection changes */
-  onSelectionChange: (selectedValues: string[]) => void;
-  /** Callback to apply the filter */
-  onApply: () => void;
-  /** Callback to cancel */
-  onCancel: () => void;
-  /** Position for the dropdown */
-  position: { x: number; y: number };
+  anchorRect: { x: number; y: number; width: number; height: number };
+  onApply: (fieldIndex: number, selectedValues: string[], hiddenItems: string[]) => Promise<void>;
+  onClose: () => void;
 }
 
-const filterStyles = {
-  overlay: css`
-    position: fixed;
-    top: 0;
-    left: 0;
-    right: 0;
-    bottom: 0;
-    z-index: 9999;
-  `,
-  container: css`
-    position: fixed;
-    background: #fff;
-    border: 1px solid #d0d0d0;
-    border-radius: 6px;
-    box-shadow: 0 4px 16px rgba(0, 0, 0, 0.2);
-    z-index: 10000;
-    min-width: 240px;
-    max-width: 320px;
-    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
-      sans-serif;
-    font-size: 13px;
-    display: flex;
-    flex-direction: column;
-    max-height: 400px;
-  `,
-  header: css`
-    padding: 12px 14px;
-    border-bottom: 1px solid #e0e0e0;
-    font-weight: 600;
-    color: #333;
-    font-size: 13px;
-  `,
-  searchContainer: css`
-    padding: 10px 14px;
-    border-bottom: 1px solid #e0e0e0;
-  `,
-  searchInput: css`
-    width: 100%;
-    padding: 8px 10px;
-    border: 1px solid #d0d0d0;
-    border-radius: 4px;
-    font-size: 12px;
-    box-sizing: border-box;
-
-    &:focus {
-      outline: none;
-      border-color: #0078d4;
-      box-shadow: 0 0 0 2px rgba(0, 120, 212, 0.2);
-    }
-
-    &::placeholder {
-      color: #999;
-    }
-  `,
-  listContainer: css`
-    flex: 1;
-    overflow-y: auto;
-    max-height: 240px;
-    padding: 4px 0;
-  `,
-  selectAllRow: css`
-    display: flex;
-    align-items: center;
-    padding: 8px 14px;
-    cursor: pointer;
-    border-bottom: 1px solid #f0f0f0;
-    font-weight: 500;
-
-    &:hover {
-      background: #f5f5f5;
-    }
-  `,
-  itemRow: css`
-    display: flex;
-    align-items: center;
-    padding: 6px 14px;
-    cursor: pointer;
-
-    &:hover {
-      background: #f5f5f5;
-    }
-  `,
-  checkbox: css`
-    margin-right: 10px;
-    accent-color: #0078d4;
-    width: 16px;
-    height: 16px;
-    cursor: pointer;
-  `,
-  itemLabel: css`
-    flex: 1;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-    color: #333;
-  `,
-  emptyLabel: css`
-    color: #888;
-    font-style: italic;
-  `,
-  noResults: css`
-    padding: 20px 14px;
-    text-align: center;
-    color: #888;
-    font-size: 12px;
-  `,
-  footer: css`
-    display: flex;
-    justify-content: flex-end;
-    gap: 8px;
-    padding: 12px 14px;
-    border-top: 1px solid #e0e0e0;
-    background: #f9f9f9;
-    border-radius: 0 0 6px 6px;
-  `,
-  button: css`
-    padding: 6px 14px;
-    border-radius: 4px;
-    font-size: 12px;
-    font-weight: 500;
-    cursor: pointer;
-    transition: all 0.15s;
-  `,
-  cancelButton: css`
-    background: #fff;
-    border: 1px solid #d0d0d0;
-    color: #333;
-
-    &:hover {
-      background: #f5f5f5;
-    }
-  `,
-  applyButton: css`
-    background: #0078d4;
-    border: 1px solid #0078d4;
-    color: #fff;
-
-    &:hover {
-      background: #106ebe;
-    }
-  `,
-  countInfo: css`
-    flex: 1;
-    font-size: 11px;
-    color: #888;
-  `,
-};
-
-export function FilterDropdown({
+export const FilterDropdown: React.FC<FilterDropdownProps> = ({
   fieldName,
+  fieldIndex,
   uniqueValues,
   selectedValues,
-  onSelectionChange,
+  anchorRect,
   onApply,
-  onCancel,
-  position,
-}: FilterDropdownProps): React.ReactElement {
-  const containerRef = useRef<HTMLDivElement>(null);
-  const [searchText, setSearchText] = useState("");
+  onClose,
+}) => {
+  const [localSelectedValues, setLocalSelectedValues] = useState<Set<string>>(
+    new Set(selectedValues)
+  );
+  const [searchText, setSearchText] = useState('');
+  const dropdownRef = useRef<HTMLDivElement>(null);
 
-  // Filter values based on search
-  const filteredValues = useMemo(() => {
-    if (!searchText.trim()) return uniqueValues;
-    const search = searchText.toLowerCase();
-    return uniqueValues.filter((v) =>
-      (v || "(Blank)").toLowerCase().includes(search)
-    );
-  }, [uniqueValues, searchText]);
+  // Close on outside click
+  useEffect(() => {
+    const handleClickOutside = (e: MouseEvent) => {
+      if (dropdownRef.current && !dropdownRef.current.contains(e.target as Node)) {
+        onClose();
+      }
+    };
 
-  // Check states
-  const allSelected = selectedValues.length === uniqueValues.length;
-  const noneSelected = selectedValues.length === 0;
+    document.addEventListener('mousedown', handleClickOutside);
+    return () => document.removeEventListener('mousedown', handleClickOutside);
+  }, [onClose]);
+
+  // Close on Escape
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        onClose();
+      }
+    };
+
+    document.addEventListener('keydown', handleKeyDown);
+    return () => document.removeEventListener('keydown', handleKeyDown);
+  }, [onClose]);
+
+  const filteredValues = uniqueValues.filter((v) =>
+    v.toLowerCase().includes(searchText.toLowerCase())
+  );
+
+  const handleToggleValue = useCallback((value: string) => {
+    setLocalSelectedValues((prev) => {
+      const next = new Set(prev);
+      if (next.has(value)) {
+        next.delete(value);
+      } else {
+        next.add(value);
+      }
+      return next;
+    });
+  }, []);
 
   const handleSelectAll = useCallback(() => {
-    if (allSelected) {
-      onSelectionChange([]);
-    } else {
-      onSelectionChange([...uniqueValues]);
-    }
-  }, [allSelected, uniqueValues, onSelectionChange]);
+    setLocalSelectedValues(new Set(uniqueValues));
+  }, [uniqueValues]);
 
-  const handleToggleValue = useCallback(
-    (value: string) => {
-      if (selectedValues.includes(value)) {
-        onSelectionChange(selectedValues.filter((v) => v !== value));
-      } else {
-        onSelectionChange([...selectedValues, value]);
-      }
-    },
-    [selectedValues, onSelectionChange]
-  );
+  const handleSelectNone = useCallback(() => {
+    setLocalSelectedValues(new Set());
+  }, []);
 
-  const handleKeyDown = useCallback(
-    (event: React.KeyboardEvent) => {
-      if (event.key === "Escape") {
-        onCancel();
-      } else if (event.key === "Enter") {
-        onApply();
-      }
-    },
-    [onCancel, onApply]
-  );
+  const handleApply = useCallback(async () => {
+    const selected = Array.from(localSelectedValues);
+    const hidden = uniqueValues.filter((v) => !localSelectedValues.has(v));
+    await onApply(fieldIndex, selected, hidden);
+  }, [fieldIndex, localSelectedValues, uniqueValues, onApply]);
 
-  // Adjust position to keep in viewport
-  const adjustedPosition = {
-    x: Math.min(position.x, window.innerWidth - 260),
-    y: Math.min(position.y, window.innerHeight - 420),
-  };
+  // CRITICAL FIX: Guard clause to prevent crash if anchorRect is undefined
+  if (!anchorRect) {
+    return null;
+  }
 
   return (
-    <>
-      <div className={filterStyles.overlay} onClick={onCancel} />
+    <div
+      ref={dropdownRef}
+      style={{
+        position: 'fixed',
+        left: anchorRect.x,
+        top: anchorRect.y,
+        width: 250,
+        maxHeight: 350,
+        backgroundColor: '#ffffff',
+        border: '1px solid #d1d5db',
+        borderRadius: 4,
+        boxShadow: '0 4px 12px rgba(0, 0, 0, 0.15)',
+        zIndex: 1000,
+        display: 'flex',
+        flexDirection: 'column',
+        fontSize: 13,
+      }}
+    >
+      {/* Header */}
       <div
-        ref={containerRef}
-        className={filterStyles.container}
         style={{
-          left: adjustedPosition.x,
-          top: adjustedPosition.y,
+          padding: '8px 12px',
+          borderBottom: '1px solid #e5e7eb',
+          fontWeight: 600,
+          color: '#374151',
         }}
-        onKeyDown={handleKeyDown}
       >
-        <div className={filterStyles.header}>Filter: {fieldName}</div>
-
-        <div className={filterStyles.searchContainer}>
-          <input
-            type="text"
-            className={filterStyles.searchInput}
-            placeholder="Search..."
-            value={searchText}
-            onChange={(e) => setSearchText(e.target.value)}
-            autoFocus
-          />
-        </div>
-
-        <div className={filterStyles.listContainer}>
-          {!searchText && (
-            <div className={filterStyles.selectAllRow} onClick={handleSelectAll}>
-              <input
-                type="checkbox"
-                className={filterStyles.checkbox}
-                checked={allSelected}
-                ref={(el) => {
-                  if (el) {
-                    el.indeterminate = !allSelected && !noneSelected;
-                  }
-                }}
-                onChange={handleSelectAll}
-              />
-              <span className={filterStyles.itemLabel}>(Select All)</span>
-            </div>
-          )}
-
-          {filteredValues.length === 0 ? (
-            <div className={filterStyles.noResults}>No matching values</div>
-          ) : (
-            filteredValues.map((value) => (
-              <div
-                key={value || "__blank__"}
-                className={filterStyles.itemRow}
-                onClick={() => handleToggleValue(value)}
-              >
-                <input
-                  type="checkbox"
-                  className={filterStyles.checkbox}
-                  checked={selectedValues.includes(value)}
-                  onChange={() => handleToggleValue(value)}
-                />
-                <span
-                  className={`${filterStyles.itemLabel} ${
-                    !value ? filterStyles.emptyLabel : ""
-                  }`}
-                >
-                  {value || "(Blank)"}
-                </span>
-              </div>
-            ))
-          )}
-        </div>
-
-        <div className={filterStyles.footer}>
-          <span className={filterStyles.countInfo}>
-            {selectedValues.length} of {uniqueValues.length} selected
-          </span>
-          <button
-            className={`${filterStyles.button} ${filterStyles.cancelButton}`}
-            onClick={onCancel}
-          >
-            Cancel
-          </button>
-          <button
-            className={`${filterStyles.button} ${filterStyles.applyButton}`}
-            onClick={onApply}
-          >
-            Apply
-          </button>
-        </div>
+        Filter: {fieldName}
       </div>
-    </>
+
+      {/* Search */}
+      <div style={{ padding: '8px 12px', borderBottom: '1px solid #e5e7eb' }}>
+        <input
+          type="text"
+          placeholder="Search..."
+          value={searchText}
+          onChange={(e) => setSearchText(e.target.value)}
+          style={{
+            width: '100%',
+            padding: '6px 8px',
+            border: '1px solid #d1d5db',
+            borderRadius: 4,
+            fontSize: 13,
+            outline: 'none',
+          }}
+        />
+      </div>
+
+      {/* Select All / None */}
+      <div
+        style={{
+          padding: '6px 12px',
+          borderBottom: '1px solid #e5e7eb',
+          display: 'flex',
+          gap: 8,
+        }}
+      >
+        <button
+          onClick={handleSelectAll}
+          style={{
+            padding: '4px 8px',
+            border: '1px solid #d1d5db',
+            borderRadius: 4,
+            background: '#f9fafb',
+            cursor: 'pointer',
+            fontSize: 12,
+          }}
+        >
+          Select All
+        </button>
+        <button
+          onClick={handleSelectNone}
+          style={{
+            padding: '4px 8px',
+            border: '1px solid #d1d5db',
+            borderRadius: 4,
+            background: '#f9fafb',
+            cursor: 'pointer',
+            fontSize: 12,
+          }}
+        >
+          Select None
+        </button>
+      </div>
+
+      {/* Values list */}
+      <div
+        style={{
+          flex: 1,
+          overflowY: 'auto',
+          padding: '8px 0',
+          maxHeight: 200,
+        }}
+      >
+        {filteredValues.map((value) => (
+          <label
+            key={value}
+            style={{
+              display: 'flex',
+              alignItems: 'center',
+              padding: '4px 12px',
+              cursor: 'pointer',
+            }}
+          >
+            <input
+              type="checkbox"
+              checked={localSelectedValues.has(value)}
+              onChange={() => handleToggleValue(value)}
+              style={{ marginRight: 8 }}
+            />
+            <span
+              style={{
+                overflow: 'hidden',
+                textOverflow: 'ellipsis',
+                whiteSpace: 'nowrap',
+              }}
+            >
+              {value || '(Blank)'}
+            </span>
+          </label>
+        ))}
+        {filteredValues.length === 0 && (
+          <div style={{ padding: '8px 12px', color: '#6b7280', fontStyle: 'italic' }}>
+            No matching values
+          </div>
+        )}
+      </div>
+
+      {/* Footer buttons */}
+      <div
+        style={{
+          padding: '8px 12px',
+          borderTop: '1px solid #e5e7eb',
+          display: 'flex',
+          justifyContent: 'flex-end',
+          gap: 8,
+        }}
+      >
+        <button
+          onClick={onClose}
+          style={{
+            padding: '6px 12px',
+            border: '1px solid #d1d5db',
+            borderRadius: 4,
+            background: '#ffffff',
+            cursor: 'pointer',
+            fontSize: 13,
+          }}
+        >
+          Cancel
+        </button>
+        <button
+          onClick={handleApply}
+          style={{
+            padding: '6px 12px',
+            border: 'none',
+            borderRadius: 4,
+            background: '#3b82f6',
+            color: '#ffffff',
+            cursor: 'pointer',
+            fontSize: 13,
+          }}
+        >
+          Apply
+        </button>
+      </div>
+    </div>
   );
-}
+};
+
+export default FilterDropdown;

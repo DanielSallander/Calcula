@@ -1,7 +1,6 @@
 //! FILENAME: app/src/core/components/Scrollbar/useScrollbarMetrics.ts
 // PURPOSE: Hook to calculate scrollbar metrics based on used range
 // CONTEXT: Combines backend used range with current viewport for proportional scrollbars
-// UPDATED: Excel-like behavior - thumb contracts when scrolling back within used range
 
 import { useState, useEffect, useCallback } from "react";
 // Assuming this is the correct path for your API

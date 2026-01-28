@@ -32,6 +32,8 @@ pub(crate) fn create_empty_view(pivot_id: PivotId, version: u64) -> PivotView {
         is_windowed: false,
         total_row_count: None,
         window_start_row: None,
+        filter_row_count: 0,     // Added missing field
+        filter_rows: Vec::new(), // Added missing field
     }
 }
 

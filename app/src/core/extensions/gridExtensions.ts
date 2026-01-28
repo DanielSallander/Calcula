@@ -2,8 +2,6 @@
 // PURPOSE: Extension points for grid context menu customization
 // CONTEXT: Allows extensions to add context menu items when right-clicking on cells.
 //          Follows the same pattern as sheetExtensions.ts for consistency.
-// UPDATE: Added command registry for direct handler invocation instead of keyboard events.
-// UPDATE: Insert Row/Column now filter visibility based on selection type.
 
 import type { Selection } from "../types";
 

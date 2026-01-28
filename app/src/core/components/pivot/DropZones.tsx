@@ -18,6 +18,8 @@ interface DropZonesProps {
   onRemove: (zone: DropZoneType, index: number) => void;
   onReorder: (zone: DropZoneType, fromIndex: number, toIndex: number) => void;
   onValuesAggregationChange: (index: number, aggregation: AggregationType) => void;
+  onOpenValueSettings?: (index: number) => void;
+  onOpenNumberFormat?: (index: number) => void;
   onDragStart: (field: DragField) => void;
   onDragEnd: () => void;
 }
@@ -31,6 +33,8 @@ export function DropZones({
   onRemove,
   onReorder,
   onValuesAggregationChange,
+  onOpenValueSettings,
+  onOpenNumberFormat,
   onDragStart,
   onDragEnd,
 }: DropZonesProps): React.ReactElement {
@@ -78,6 +82,8 @@ export function DropZones({
           onRemove={onRemove}
           onReorder={onReorder}
           onAggregationChange={onValuesAggregationChange}
+          onOpenValueSettings={onOpenValueSettings}
+          onOpenNumberFormat={onOpenNumberFormat}
           onDragStart={onDragStart}
           onDragEnd={onDragEnd}
         />

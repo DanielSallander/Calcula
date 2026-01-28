@@ -3,7 +3,7 @@ use crate::pivot::operations::*;
 use crate::pivot::types::*;
 use crate::pivot::utils::*;
 use crate::{log_debug, log_info, AppState};
-use engine::pivot::{drill_down, PivotDefinition, PivotId};
+use engine::pivot::{drill_down, CacheValue, PivotDefinition, PivotId, VALUE_ID_EMPTY};
 use tauri::State;
 
 // ============================================================================
@@ -617,7 +617,7 @@ pub fn get_pivot_regions_for_sheet(
     let active_sheet = *state.active_sheet.lock().unwrap();
     let regions = state.pivot_regions.lock().unwrap();
     let pivot_tables = state.pivot_tables.lock().unwrap();
-    
+
     regions
         .iter()
         .filter(|r| r.sheet_index == active_sheet)
@@ -626,7 +626,7 @@ pub fn get_pivot_regions_for_sheet(
                 .get(&r.pivot_id)
                 .map(|(def, _)| !has_fields_configured(def))
                 .unwrap_or(true);
-            
+
             PivotRegionData {
                 pivot_id: r.pivot_id,
                 start_row: r.start_row,
@@ -637,4 +637,79 @@ pub fn get_pivot_regions_for_sheet(
             }
         })
         .collect()
+}
+
+/// Get unique values for a pivot field (for filter dropdowns)
+#[tauri::command]
+pub fn get_pivot_field_unique_values(
+    state: State<AppState>,
+    pivot_id: PivotId,
+    field_index: usize,
+) -> Result<FieldUniqueValuesResponse, String> {
+    log_debug!(
+        "PIVOT",
+        "get_pivot_field_unique_values pivot_id={} field_index={}",
+        pivot_id,
+        field_index
+    );
+
+    let mut pivot_tables = state.pivot_tables.lock().unwrap();
+    let (_, cache) = pivot_tables
+        .get_mut(&pivot_id)
+        .ok_or_else(|| format!("Pivot table {} not found", pivot_id))?;
+
+    // Get field cache
+    let field = cache.fields
+        .get_mut(field_index)
+        .ok_or_else(|| format!("Field index {} out of range", field_index))?;
+
+    let field_name = field.name.clone();
+
+    // Collect unique values as strings
+    // 'sorted_ids()' borrows 'field' mutably. If we iterate the result directly,
+    // the mutable borrow persists through the loop, preventing us from calling
+    // 'field.get_value()' (an immutable borrow) inside the closure.
+    // Cloning the IDs ends the mutable borrow immediately.
+    let sorted_ids = field.sorted_ids().to_vec();
+    
+    let unique_values: Vec<String> = sorted_ids
+        .iter()
+        .filter_map(|&id| {
+            if id == VALUE_ID_EMPTY {
+                return None;
+            }
+            field.get_value(id).map(|value| cache_value_to_string(value))
+        })
+        .collect();
+
+    log_debug!(
+        "PIVOT",
+        "get_pivot_field_unique_values returning {} unique values for field '{}'",
+        unique_values.len(),
+        field_name
+    );
+
+    Ok(FieldUniqueValuesResponse {
+        field_index,
+        field_name,
+        unique_values,
+    })
+}
+
+/// Convert a CacheValue to a display string
+fn cache_value_to_string(value: &CacheValue) -> String {
+    match value {
+        CacheValue::Empty => "(Blank)".to_string(),
+        CacheValue::Number(n) => {
+            let f = n.as_f64();
+            if f.fract() == 0.0 {
+                format!("{}", f as i64)
+            } else {
+                format!("{}", f)
+            }
+        }
+        CacheValue::Text(s) => s.clone(),
+        CacheValue::Boolean(b) => if *b { "TRUE".to_string() } else { "FALSE".to_string() },
+        CacheValue::Error(e) => format!("#{}", e),
+    }
 }

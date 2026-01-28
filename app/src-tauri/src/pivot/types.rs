@@ -74,6 +74,8 @@ pub struct UpdatePivotFieldsRequest {
     pub column_fields: Option<Vec<PivotFieldConfig>>,
     /// Value fields (optional)
     pub value_fields: Option<Vec<ValueFieldConfig>>,
+    /// Filter fields (optional)
+    pub filter_fields: Option<Vec<PivotFieldConfig>>,
     /// Layout options (optional)
     pub layout: Option<LayoutConfig>,
 }
@@ -100,8 +102,21 @@ pub struct PivotViewResponse {
     pub col_count: usize,
     pub row_label_col_count: usize,
     pub column_header_row_count: usize,
+    pub filter_row_count: usize,
+    pub filter_rows: Vec<FilterRowData>,
     pub rows: Vec<PivotRowData>,
     pub columns: Vec<PivotColumnData>,
+}
+
+/// Filter row metadata for frontend interaction
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FilterRowData {
+    pub field_index: usize,
+    pub field_name: String,
+    pub selected_values: Vec<String>,
+    pub unique_values: Vec<String>,
+    pub display_value: String,
+    pub view_row: usize,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -124,6 +139,7 @@ pub struct PivotCellData {
     pub is_collapsed: bool,
     pub background_style: String,
     pub number_format: Option<String>,
+    pub filter_field_index: Option<usize>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -205,4 +221,13 @@ pub struct PivotRegionData {
     pub end_row: u32,
     pub end_col: u32,
     pub is_empty: bool,
+}
+
+/// Response for field unique values query
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FieldUniqueValuesResponse {
+    pub field_index: usize,
+    pub field_name: String,
+    pub unique_values: Vec<String>,
 }

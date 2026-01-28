@@ -7,6 +7,7 @@ import type {
   DragField,
   DropZoneType,
   AggregationType,
+  ShowValuesAs,
   LayoutConfig,
   UpdatePivotFieldsRequest,
   PivotFieldConfig,
@@ -14,6 +15,8 @@ import type {
   PivotId,
 } from './types';
 import { getDefaultAggregation, getValueFieldDisplayName } from './types';
+import type { ValueFieldSettings } from './ValueFieldSettingsModal';
+import type { FilterFieldState } from './FilterBar';
 
 interface UsePivotEditorStateOptions {
   pivotId: PivotId;
@@ -68,13 +71,23 @@ export function usePivotEditorState({
       name: f.name,
     }));
 
-    const valueFields: ValueFieldConfig[] = values.map((f) => ({
+    const valueFields: ValueFieldConfig[] = values.map((f) => {
+      const aggregation = f.aggregation ?? getDefaultAggregation(f.isNumeric);
+      const displayName = f.customName || getValueFieldDisplayName(f.name, aggregation);
+      return {
+        source_index: f.sourceIndex,
+        name: displayName,
+        aggregation,
+        number_format: f.numberFormat,
+        show_values_as: f.showValuesAs,
+      };
+    });
+
+    // Build filter fields with hidden items
+    const filterFields: PivotFieldConfig[] = filters.map((f) => ({
       source_index: f.sourceIndex,
-      name: getValueFieldDisplayName(
-        f.name,
-        f.aggregation ?? getDefaultAggregation(f.isNumeric)
-      ),
-      aggregation: f.aggregation ?? getDefaultAggregation(f.isNumeric),
+      name: f.name,
+      hidden_items: f.hiddenItems,
     }));
 
     return {
@@ -82,9 +95,10 @@ export function usePivotEditorState({
       row_fields: rowFields,
       column_fields: columnFields,
       value_fields: valueFields,
+      filter_fields: filterFields,
       layout,
     };
-  }, [pivotId, rows, columns, values, layout]);
+  }, [pivotId, rows, columns, values, filters, layout]);
 
   // Effect to trigger update when zones change (after state is actually updated)
   useEffect(() => {
@@ -253,6 +267,54 @@ export function usePivotEditorState({
     [scheduleUpdate]
   );
 
+  // Handle value field settings change (from modal)
+  const handleValueFieldSettings = useCallback(
+    (index: number, settings: ValueFieldSettings) => {
+      setValues((prev) =>
+        prev.map((f, i) =>
+          i === index
+            ? {
+                ...f,
+                aggregation: settings.aggregation,
+                customName: settings.customName,
+                showValuesAs: settings.showValuesAs,
+              }
+            : f
+        )
+      );
+      scheduleUpdate();
+    },
+    [scheduleUpdate]
+  );
+
+  // Handle number format change for value field
+  const handleNumberFormatChange = useCallback(
+    (index: number, numberFormat: string) => {
+      setValues((prev) =>
+        prev.map((f, i) =>
+          i === index ? { ...f, numberFormat: numberFormat || undefined } : f
+        )
+      );
+      scheduleUpdate();
+    },
+    [scheduleUpdate]
+  );
+
+  // Handle filter change (update hidden items for a filter field)
+  const handleFilterHiddenItemsChange = useCallback(
+    (filterIndex: number, hiddenItems: string[]) => {
+      setFilters((prev) =>
+        prev.map((f, i) =>
+          i === filterIndex
+            ? { ...f, hiddenItems: hiddenItems.length > 0 ? hiddenItems : undefined }
+            : f
+        )
+      );
+      scheduleUpdate();
+    },
+    [scheduleUpdate]
+  );
+
   // Handle layout change
   const handleLayoutChange = useCallback(
     (newLayout: LayoutConfig) => {
@@ -285,6 +347,9 @@ export function usePivotEditorState({
     handleRemove,
     handleReorder,
     handleAggregationChange,
+    handleValueFieldSettings,
+    handleNumberFormatChange,
+    handleFilterHiddenItemsChange,
     handleLayoutChange,
     handleDragStart,
     handleDragEnd,

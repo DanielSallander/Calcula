@@ -1,5 +1,5 @@
-//! FILENAME: app/src/core/lib/pivot-api.ts
 /**
+ * FILENAME: app/src/core/lib/pivot-api.ts
  * Pivot Table API
  *
  * TypeScript bindings for the Tauri pivot table commands.
@@ -115,6 +115,8 @@ export interface UpdatePivotFieldsRequest {
   column_fields?: PivotFieldConfig[];
   /** Value fields (optional) */
   value_fields?: ValueFieldConfig[];
+  /** Filter fields (optional) */
+  filter_fields?: PivotFieldConfig[];
   /** Layout options (optional) */
   layout?: LayoutConfig;
 }
@@ -150,13 +152,22 @@ export type PivotCellType =
   | "GrandTotal"
   | "GrandTotalRow"
   | "GrandTotalColumn"
-  | "Blank";
+  | "Blank"
+  | "FilterLabel"
+  | "FilterDropdown";
 
 /** Background style for cells */
-export type BackgroundStyle = "Normal" | "Alternate" | "Subtotal" | "Total" | "GrandTotal";
+export type BackgroundStyle = 
+  | "Normal" 
+  | "Alternate" 
+  | "Subtotal" 
+  | "Total" 
+  | "GrandTotal"
+  | "Header"
+  | "FilterRow";
 
 /** Row type identifiers */
-export type PivotRowType = "ColumnHeader" | "Data" | "Subtotal" | "GrandTotal";
+export type PivotRowType = "ColumnHeader" | "Data" | "Subtotal" | "GrandTotal" | "FilterRow";
 
 /** Column type identifiers */
 export type PivotColumnType = "RowLabel" | "Data" | "Subtotal" | "GrandTotal";
@@ -172,6 +183,7 @@ export interface PivotCellData {
   is_collapsed: boolean;
   background_style: BackgroundStyle;
   number_format?: string;
+  filter_field_index?: number;
 }
 
 /** Row data from the backend */
@@ -191,6 +203,16 @@ export interface PivotColumnData {
   width_hint: number;
 }
 
+/** Filter row metadata */
+export interface FilterRowData {
+  field_index: number;
+  field_name: string;
+  selected_values: string[];
+  unique_values: string[];
+  display_value: string;
+  view_row: number;
+}
+
 /** Complete pivot view response */
 export interface PivotViewResponse {
   pivot_id: PivotId;
@@ -199,6 +221,8 @@ export interface PivotViewResponse {
   col_count: number;
   row_label_col_count: number;
   column_header_row_count: number;
+  filter_row_count: number;
+  filter_rows: FilterRowData[];
   rows: PivotRowData[];
   columns: PivotColumnData[];
 }
@@ -451,6 +475,38 @@ export async function getPivotRegionsForSheet(): Promise<PivotRegionData[]> {
   return invoke<PivotRegionData[]>("get_pivot_regions_for_sheet", {});
 }
 
+/** Response containing unique values for a field */
+export interface FieldUniqueValuesResponse {
+  field_index: number;
+  field_name: string;
+  unique_values: string[];
+}
+
+/**
+ * Gets unique values for a specific field in a pivot table's source data.
+ * Used for filter dropdowns.
+ *
+ * @param pivotId - The pivot table ID
+ * @param fieldIndex - The source field index
+ * @returns Array of unique values as strings
+ * @throws Error if pivot not found or field index is out of range
+ *
+ * @example
+ * ```ts
+ * const values = await getPivotFieldUniqueValues(1, 0);
+ * console.log(values.unique_values); // ["North", "South", "East", "West"]
+ * ```
+ */
+export async function getPivotFieldUniqueValues(
+  pivotId: PivotId,
+  fieldIndex: number
+): Promise<FieldUniqueValuesResponse> {
+  return invoke<FieldUniqueValuesResponse>("get_pivot_field_unique_values", {
+    pivotId,
+    fieldIndex,
+  });
+}
+
 // ============================================================================
 // Utility Functions
 // ============================================================================
@@ -505,10 +561,24 @@ export function isTotalCell(cellType: PivotCellType): boolean {
 }
 
 /**
+ * Checks if a cell is a filter cell.
+ */
+export function isFilterCell(cellType: PivotCellType): boolean {
+  return cellType === "FilterLabel" || cellType === "FilterDropdown";
+}
+
+/**
  * Checks if a row is a data row (not header or total).
  */
 export function isDataRow(rowType: PivotRowType): boolean {
   return rowType === "Data";
+}
+
+/**
+ * Checks if a row is a filter row.
+ */
+export function isFilterRow(rowType: PivotRowType): boolean {
+  return rowType === "FilterRow";
 }
 
 /**

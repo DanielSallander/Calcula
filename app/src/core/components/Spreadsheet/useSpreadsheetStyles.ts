@@ -1,7 +1,6 @@
 //! FILENAME: app/src/core/components/Spreadsheet/useSpreadsheetStyles.ts
 // PURPOSE: Manages style data, caching, and backend synchronization.
 // CONTEXT: Handles fetching styles from the Rust backend and updating the React state cache.
-// FIX: Improved immediate style visibility by ensuring selected cell is refreshed
 
 import { useState, useCallback, useEffect, useRef } from "react";
 import { getAllStyles } from "../../lib/tauri-api";

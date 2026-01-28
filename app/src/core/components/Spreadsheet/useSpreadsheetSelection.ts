@@ -2,11 +2,6 @@
 // PURPOSE: Handles mouse/keyboard interaction and selection state.
 // CONTEXT: Coordinates global selection hooks with local canvas events.
 // Includes fill handle and clipboard support with marching ants.
-// FIX: Added focusContainerRef parameter for keyboard event handling.
-// FIX: Added onDelete handler to useGridKeyboard to clear selection on DELETE key.
-// FIX: Added undo/redo handlers for Ctrl+Z and Ctrl+Y keyboard shortcuts.
-// FIX: handleDoubleClickEvent now calls startEdit directly to avoid stale state issues.
-// FIX: Now uses extendToWithMergeExpansion for drag selection to expand merged cells.
 
 import { useState, useCallback, useEffect, useRef } from "react";
 import { 

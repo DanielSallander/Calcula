@@ -2,7 +2,6 @@
 // PURPOSE: Sheet management commands for multi-sheet workbook support.
 // CONTEXT: Provides Tauri commands for creating, switching, renaming, deleting sheets,
 //          and managing freeze panes.
-// UPDATED: Added freeze panes support (freeze_row, freeze_col)
 
 use tauri::State;
 use crate::AppState;

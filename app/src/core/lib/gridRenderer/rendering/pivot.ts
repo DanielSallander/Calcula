@@ -1,959 +1,753 @@
-//! FILENAME: app/src/core/lib/gridRenderer/rendering/pivot.ts
-// PURPOSE: Pivot table cell rendering with hierarchy support
-// CONTEXT: Renders PivotViewCell data with indentation, expand/collapse icons, and visual hierarchy
+// FILENAME: app/src/core/lib/gridRenderer/rendering/pivot.ts
 
-// ============================================================================
-// TYPE DEFINITIONS - Mirrors view.rs structs
-// ============================================================================
+import type {
+  PivotViewResponse,
+  PivotCellData,
+  BackgroundStyle,
+  PivotCellType,
+  PivotCellValue,
+} from '../../pivot-api';
+import { getCellDisplayValue } from '../../pivot-api';
 
-/**
- * The type of a cell in the pivot view.
- * Mirrors PivotCellType enum from view.rs
- */
-export type PivotCellType =
-  | "Corner"
-  | "RowHeader"
-  | "ColumnHeader"
-  | "Data"
-  | "RowSubtotal"
-  | "ColumnSubtotal"
-  | "GrandTotalRow"
-  | "GrandTotalColumn"
-  | "GrandTotal"
-  | "Blank";
+// =============================================================================
+// TYPES
+// =============================================================================
 
-/**
- * Display value for a pivot cell.
- * Mirrors PivotCellValue enum from view.rs
- */
-export type PivotCellValue =
-  | { type: "Empty" }
-  | { type: "Number"; value: number }
-  | { type: "Text"; value: string }
-  | { type: "Boolean"; value: boolean }
-  | { type: "Error"; value: string };
-
-/**
- * Background style hints for rendering.
- * Mirrors BackgroundStyle enum from view.rs
- */
-export type PivotBackgroundStyle =
-  | "Normal"
-  | "Header"
-  | "Subtotal"
-  | "Total"
-  | "GrandTotal"
-  | "Alternate";
-
-/**
- * A single cell in the pivot table view.
- * Mirrors PivotViewCell struct from view.rs
- */
-export interface PivotViewCell {
-  /** The display value */
-  value: PivotCellValue;
-  /** The type of this cell */
-  cellType: PivotCellType;
-  /** Indentation level (for compact layout row headers) */
-  indentLevel: number;
-  /** Whether this cell's group is collapsed */
-  isCollapsed: boolean;
-  /** Whether this cell can be expanded/collapsed */
-  isExpandable: boolean;
-  /** Number format string for display */
-  numberFormat: string | null;
-  /** Row span (for merged cells in tabular layout) */
-  rowSpan: number;
-  /** Column span (for merged cells) */
-  colSpan: number;
-  /** Whether this cell should be visually emphasized */
-  isBold: boolean;
-  /** Background style hint */
-  backgroundStyle: PivotBackgroundStyle;
-  /** Link back to source data: [fieldIndex, valueId] pairs */
-  groupPath: Array<[number, number]>;
-}
-
-/**
- * Row descriptor from PivotView.
- * Mirrors PivotRowDescriptor from view.rs
- */
-export interface PivotRowDescriptor {
-  viewRow: number;
-  rowType: "Data" | "Subtotal" | "GrandTotal" | "ColumnHeader";
-  depth: number;
-  visible: boolean;
-  parentIndex: number | null;
-  childrenIndices: number[];
-  groupValues: number[];
-}
-
-/**
- * Column descriptor from PivotView.
- * Mirrors PivotColumnDescriptor from view.rs
- */
-export interface PivotColumnDescriptor {
-  viewCol: number;
-  colType: "RowLabel" | "Data" | "Subtotal" | "GrandTotal";
-  depth: number;
-  widthHint: number;
-  parentIndex: number | null;
-  childrenIndices: number[];
-  groupValues: number[];
-}
-
-/**
- * The complete rendered view of a pivot table.
- * Mirrors PivotView struct from view.rs
- */
-export interface PivotView {
-  pivotId: string;
-  cells: PivotViewCell[][];
-  rows: PivotRowDescriptor[];
-  columns: PivotColumnDescriptor[];
-  rowCount: number;
-  colCount: number;
-  rowLabelColCount: number;
-  columnHeaderRowCount: number;
-  isWindowed: boolean;
-  totalRowCount: number | null;
-  windowStartRow: number | null;
-  version: number;
-}
-
-// ============================================================================
-// THEME CONFIGURATION
-// ============================================================================
-
-/**
- * Theme colors for pivot table rendering.
- */
 export interface PivotTheme {
   // Text colors
   headerText: string;
-  dataText: string;
+  labelText: string;
+  valueText: string;
   totalText: string;
-  errorText: string;
+  grandTotalText: string;
+  filterText: string;
 
   // Background colors
   headerBackground: string;
-  dataBackground: string;
-  subtotalBackground: string;
+  labelBackground: string;
+  valueBackground: string;
   totalBackground: string;
   grandTotalBackground: string;
-  alternateBackground: string;
+  filterRowBackground: string;
 
-  // Icon colors
-  iconStroke: string;
-  iconFill: string;
-  iconHoverFill: string;
+  // Alternating row colors
+  alternateRowBackground: string;
 
-  // Grid
-  gridLine: string;
-  separatorLine: string;
+  // Borders
+  borderColor: string;
+  headerBorderColor: string;
+
+  // Filter button
+  filterButtonBackground: string;
+  filterButtonBorder: string;
+  filterButtonHoverBackground: string;
+  filterDropdownArrow: string;
+
+  // Expand/collapse icons
+  iconColor: string;
+  iconHoverColor: string;
+
+  // Selection
+  selectionBackground: string;
+  selectionBorder: string;
 
   // Font
   fontFamily: string;
   fontSize: number;
   headerFontSize: number;
+  headerFontWeight: string;
 }
 
-/**
- * Default pivot theme matching the existing grid style.
- */
 export const DEFAULT_PIVOT_THEME: PivotTheme = {
-  headerText: "#1a1a1a",
-  dataText: "#333333",
-  totalText: "#000000",
-  errorText: "#cc0000",
+  // Text colors
+  headerText: '#1f2937',
+  labelText: '#374151',
+  valueText: '#111827',
+  totalText: '#1f2937',
+  grandTotalText: '#1f2937',
+  filterText: '#374151',
 
-  headerBackground: "#f5f5f5",
-  dataBackground: "#ffffff",
-  subtotalBackground: "#e8e8e8",
-  totalBackground: "#d9d9d9",
-  grandTotalBackground: "#c0c0c0",
-  alternateBackground: "#fafafa",
+  // Background colors
+  headerBackground: '#f3f4f6',
+  labelBackground: '#f9fafb',
+  valueBackground: '#ffffff',
+  totalBackground: '#e5e7eb',
+  grandTotalBackground: '#d1d5db',
+  filterRowBackground: '#fef3c7',
 
-  iconStroke: "#666666",
-  iconFill: "#ffffff",
-  iconHoverFill: "#e0e0e0",
+  // Alternating
+  alternateRowBackground: '#f9fafb',
 
-  gridLine: "#e0e0e0",
-  separatorLine: "#999999",
+  // Borders
+  borderColor: '#e5e7eb',
+  headerBorderColor: '#d1d5db',
 
-  fontFamily: "system-ui, -apple-system, sans-serif",
+  // Filter button
+  filterButtonBackground: '#ffffff',
+  filterButtonBorder: '#d1d5db',
+  filterButtonHoverBackground: '#f3f4f6',
+  filterDropdownArrow: '#6b7280',
+
+  // Icons
+  iconColor: '#6b7280',
+  iconHoverColor: '#374151',
+
+  // Selection
+  selectionBackground: 'rgba(59, 130, 246, 0.1)',
+  selectionBorder: '#3b82f6',
+
+  // Font
+  fontFamily: 'Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif',
   fontSize: 13,
   headerFontSize: 13,
+  headerFontWeight: '600',
 };
 
-// ============================================================================
+export interface PivotCellDrawResult {
+  iconBounds: {
+    x: number;
+    y: number;
+    width: number;
+    height: number;
+    row: number;
+    col: number;
+    isExpanded: boolean;
+  } | null;
+  filterButtonBounds: {
+    x: number;
+    y: number;
+    width: number;
+    height: number;
+    fieldIndex: number;
+    row: number;
+    col: number;
+  } | null;
+}
+
+export interface PivotInteractiveBounds {
+  expandCollapseIcons: Map<string, {
+    x: number;
+    y: number;
+    width: number;
+    height: number;
+    row: number;
+    col: number;
+    isExpanded: boolean;
+  }>;
+  filterButtons: Map<string, {
+    x: number;
+    y: number;
+    width: number;
+    height: number;
+    fieldIndex: number;
+    row: number;
+    col: number;
+  }>;
+}
+
+export interface PivotRenderOptions {
+  startRow: number;
+  endRow: number;
+  startCol: number;
+  endCol: number;
+  rowHeights: number[];
+  colWidths: number[];
+  scrollLeft: number;
+  scrollTop: number;
+  frozenRowCount: number;
+  frozenColCount: number;
+  hoveredFilterFieldIndex?: number | null;
+  hoveredIconKey?: string | null;
+}
+
+export interface PivotRenderResult {
+  interactiveBounds: PivotInteractiveBounds;
+}
+
+// =============================================================================
 // CONSTANTS
-// ============================================================================
+// =============================================================================
 
-/** Pixels per indentation level */
-const INDENT_WIDTH = 20;
+const FILTER_BUTTON_HEIGHT = 20;
+const FILTER_BUTTON_MIN_WIDTH = 80;
+const FILTER_BUTTON_MAX_WIDTH = 150;
+const FILTER_ARROW_SIZE = 6;
+const FILTER_BUTTON_PADDING = 6;
 
-/** Padding inside cells */
-const CELL_PADDING_X = 4;
+const EXPAND_ICON_SIZE = 12;
+const EXPAND_ICON_PADDING = 4;
 
-/** Size of expand/collapse icon box */
-const ICON_SIZE = 12;
+const CELL_PADDING_X = 6;
 
-/** Gap between icon and text */
-const ICON_TEXT_GAP = 4;
-
-// ============================================================================
+// =============================================================================
 // HELPER FUNCTIONS
-// ============================================================================
+// =============================================================================
 
-/**
- * Extract display string from PivotCellValue.
- */
-export function getPivotCellDisplayValue(
-  value: PivotCellValue,
-  numberFormat: string | null
-): string {
-  switch (value.type) {
-    case "Empty":
-      return "";
-    case "Number":
-      return formatPivotNumber(value.value, numberFormat);
-    case "Text":
-      return value.value;
-    case "Boolean":
-      return value.value ? "TRUE" : "FALSE";
-    case "Error":
-      return value.value;
-  }
-}
-
-/**
- * Format a number according to the specified format string.
- * Basic implementation - extend as needed for full number formatting.
- */
-function formatPivotNumber(value: number, format: string | null): string {
-  if (format === null) {
-    // Default formatting: show up to 2 decimal places, use thousands separator
-    if (Number.isInteger(value)) {
-      return value.toLocaleString();
-    }
-    return value.toLocaleString(undefined, {
-      minimumFractionDigits: 0,
-      maximumFractionDigits: 2,
-    });
-  }
-
-  // Handle common format patterns
-  if (format === "0") {
-    return Math.round(value).toLocaleString();
-  }
-  if (format === "0.00") {
-    return value.toLocaleString(undefined, {
-      minimumFractionDigits: 2,
-      maximumFractionDigits: 2,
-    });
-  }
-  if (format === "0%") {
-    return Math.round(value * 100) + "%";
-  }
-  if (format === "0.00%") {
-    return (value * 100).toFixed(2) + "%";
-  }
-  if (format === "#,##0") {
-    return Math.round(value).toLocaleString();
-  }
-  if (format === "#,##0.00") {
-    return value.toLocaleString(undefined, {
-      minimumFractionDigits: 2,
-      maximumFractionDigits: 2,
-    });
-  }
-
-  // Fallback to default formatting
-  return value.toLocaleString();
-}
-
-/**
- * Get background color for a pivot cell based on its style.
- */
-export function getPivotBackgroundColor(
-  style: PivotBackgroundStyle,
-  theme: PivotTheme
-): string {
-  switch (style) {
-    case "Normal":
-      return theme.dataBackground;
-    case "Header":
-      return theme.headerBackground;
-    case "Subtotal":
-      return theme.subtotalBackground;
-    case "Total":
-      return theme.totalBackground;
-    case "GrandTotal":
-      return theme.grandTotalBackground;
-    case "Alternate":
-      return theme.alternateBackground;
-  }
-}
-
-/**
- * Get text color for a pivot cell based on its type and value.
- */
-export function getPivotTextColor(
-  cell: PivotViewCell,
-  theme: PivotTheme
-): string {
-  // Error values get error color
-  if (cell.value.type === "Error") {
-    return theme.errorText;
-  }
-
-  // Headers and totals get distinct colors
-  switch (cell.cellType) {
-    case "RowHeader":
-    case "ColumnHeader":
-    case "Corner":
-      return theme.headerText;
-    case "GrandTotal":
-    case "GrandTotalRow":
-    case "GrandTotalColumn":
-    case "RowSubtotal":
-    case "ColumnSubtotal":
-      return theme.totalText;
-    default:
-      return theme.dataText;
-  }
-}
-
-// ============================================================================
-// ICON RENDERING
-// ============================================================================
-
-/**
- * Draw a crisp expand/collapse icon using vector paths.
- *
- * @param ctx - Canvas rendering context
- * @param x - Left edge of the icon box
- * @param y - Top edge of the icon box
- * @param size - Size of the icon box (width and height)
- * @param isExpanded - Whether to draw minus (expanded) or plus (collapsed)
- * @param theme - Theme colors for the icon
- * @param isHovered - Optional hover state for visual feedback
- */
-export function drawPivotIcon(
-  ctx: CanvasRenderingContext2D,
-  x: number,
-  y: number,
-  size: number,
-  isExpanded: boolean,
+function getPivotBackgroundColor(
+  backgroundStyle: BackgroundStyle | undefined,
   theme: PivotTheme,
-  isHovered: boolean = false
-): void {
-  // Snap to pixel grid for crispness
-  const boxX = Math.floor(x) + 0.5;
-  const boxY = Math.floor(y) + 0.5;
-  const boxSize = Math.floor(size);
-
-  // Draw the box background
-  ctx.fillStyle = isHovered ? theme.iconHoverFill : theme.iconFill;
-  ctx.fillRect(boxX, boxY, boxSize, boxSize);
-
-  // Draw the box border
-  ctx.strokeStyle = theme.iconStroke;
-  ctx.lineWidth = 1;
-  ctx.strokeRect(boxX, boxY, boxSize, boxSize);
-
-  // Calculate center and glyph dimensions
-  const centerX = boxX + boxSize / 2;
-  const centerY = boxY + boxSize / 2;
-  const glyphLength = Math.floor(boxSize * 0.5);
-  const halfGlyph = Math.floor(glyphLength / 2);
-
-  // Draw the minus (horizontal line) - always present
-  ctx.beginPath();
-  ctx.moveTo(Math.floor(centerX - halfGlyph) + 0.5, Math.floor(centerY) + 0.5);
-  ctx.lineTo(Math.floor(centerX + halfGlyph) + 0.5, Math.floor(centerY) + 0.5);
-  ctx.stroke();
-
-  // Draw the plus (vertical line) - only when collapsed
-  if (!isExpanded) {
-    ctx.beginPath();
-    ctx.moveTo(Math.floor(centerX) + 0.5, Math.floor(centerY - halfGlyph) + 0.5);
-    ctx.lineTo(Math.floor(centerX) + 0.5, Math.floor(centerY + halfGlyph) + 0.5);
-    ctx.stroke();
+  rowIndex: number
+): string {
+  switch (backgroundStyle) {
+    case 'Header':
+      return theme.headerBackground;
+    case 'Normal':
+      return rowIndex % 2 === 0 ? theme.valueBackground : theme.alternateRowBackground;
+    case 'Alternate':
+      return theme.alternateRowBackground;
+    case 'Subtotal':
+    case 'Total':
+      return theme.totalBackground;
+    case 'GrandTotal':
+      return theme.grandTotalBackground;
+    case 'FilterRow':
+      return theme.filterRowBackground;
+    default:
+      return theme.valueBackground;
   }
 }
 
-/**
- * Alternative chevron-style icon for expand/collapse.
- * Use this if you prefer a more modern look.
- */
-export function drawPivotChevron(
-  ctx: CanvasRenderingContext2D,
-  x: number,
-  y: number,
-  size: number,
-  isExpanded: boolean,
+function getPivotTextColor(
+  cellType: PivotCellType | undefined,
+  backgroundStyle: BackgroundStyle | undefined,
   theme: PivotTheme
-): void {
-  const centerX = x + size / 2;
-  const centerY = y + size / 2;
-  const chevronSize = size * 0.3;
-
-  ctx.strokeStyle = theme.iconStroke;
-  ctx.lineWidth = 1.5;
-  ctx.lineCap = "round";
-  ctx.lineJoin = "round";
-
-  ctx.beginPath();
-  if (isExpanded) {
-    // Down chevron (V shape)
-    ctx.moveTo(centerX - chevronSize, centerY - chevronSize / 2);
-    ctx.lineTo(centerX, centerY + chevronSize / 2);
-    ctx.lineTo(centerX + chevronSize, centerY - chevronSize / 2);
-  } else {
-    // Right chevron (> shape)
-    ctx.moveTo(centerX - chevronSize / 2, centerY - chevronSize);
-    ctx.lineTo(centerX + chevronSize / 2, centerY);
-    ctx.lineTo(centerX - chevronSize / 2, centerY + chevronSize);
+): string {
+  // Filter cells
+  if (cellType === 'FilterLabel' || cellType === 'FilterDropdown') {
+    return theme.filterText;
   }
-  ctx.stroke();
+
+  switch (backgroundStyle) {
+    case 'Header':
+      return theme.headerText;
+    case 'Subtotal':
+    case 'Total':
+      return theme.totalText;
+    case 'GrandTotal':
+      return theme.grandTotalText;
+    default:
+      return theme.valueText;
+  }
 }
 
-// ============================================================================
-// CELL RENDERING
-// ============================================================================
-
-/**
- * Geometry information for rendering a pivot cell.
- */
-export interface PivotCellGeometry {
-  /** Left edge of the cell */
-  x: number;
-  /** Top edge of the cell */
-  y: number;
-  /** Width of the cell (including any col span) */
-  width: number;
-  /** Height of the cell (including any row span) */
-  height: number;
+function getFontWeight(
+  cellType: PivotCellType | undefined,
+  backgroundStyle: BackgroundStyle | undefined
+): string {
+  if (
+    backgroundStyle === 'Header' ||
+    backgroundStyle === 'Subtotal' ||
+    backgroundStyle === 'Total' ||
+    backgroundStyle === 'GrandTotal' ||
+    cellType === 'FilterLabel'
+  ) {
+    return '600';
+  }
+  return '400';
 }
 
-/**
- * Options for pivot cell rendering.
- */
-export interface PivotCellRenderOptions {
-  /** Theme colors */
-  theme: PivotTheme;
-  /** Whether to draw the background */
-  drawBackground?: boolean;
-  /** Whether to draw grid borders */
-  drawBorders?: boolean;
-  /** Hover state for icon */
-  iconHovered?: boolean;
-  /** Use chevron style instead of +/- box */
-  useChevronIcon?: boolean;
+function getTextAlign(
+  cellType: PivotCellType | undefined
+): CanvasTextAlign {
+  if (
+    cellType === 'Data' ||
+    cellType === 'RowSubtotal' ||
+    cellType === 'ColumnSubtotal' ||
+    cellType === 'GrandTotal' ||
+    cellType === 'GrandTotalRow' ||
+    cellType === 'GrandTotalColumn'
+  ) {
+    return 'right';
+  }
+  return 'left';
 }
 
-/**
- * Draw a single pivot cell with full styling support.
- *
- * @param ctx - Canvas rendering context
- * @param cell - The pivot cell data
- * @param geometry - Position and size information
- * @param options - Rendering options
- * @returns The bounding box of the expand/collapse icon (if drawn), for hit testing
- */
-export function drawPivotCell(
-  ctx: CanvasRenderingContext2D,
-  cell: PivotViewCell,
-  geometry: PivotCellGeometry,
-  options: PivotCellRenderOptions
-): { iconBounds: { x: number; y: number; width: number; height: number } | null } {
-  const { x, y, width, height } = geometry;
-  const {
-    theme,
-    drawBackground = true,
-    drawBorders = false,
-    iconHovered = false,
-    useChevronIcon = false,
-  } = options;
-
-  // Skip blank cells
-  if (cell.cellType === "Blank" && cell.value.type === "Empty") {
-    return { iconBounds: null };
-  }
-
-  // Save context state
-  ctx.save();
-
-  // Set up clipping region
-  ctx.beginPath();
-  ctx.rect(x, y, width, height);
-  ctx.clip();
-
-  // 1. Draw background
-  if (drawBackground) {
-    ctx.fillStyle = getPivotBackgroundColor(cell.backgroundStyle, theme);
-    ctx.fillRect(x, y, width, height);
-  }
-
-  // 2. Draw borders if requested
-  if (drawBorders) {
-    ctx.strokeStyle = theme.gridLine;
-    ctx.lineWidth = 1;
-    ctx.strokeRect(Math.floor(x) + 0.5, Math.floor(y) + 0.5, width - 1, height - 1);
-  }
-
-  // 3. Calculate content layout
-  const indentOffset = cell.indentLevel * INDENT_WIDTH;
-  let contentX = x + CELL_PADDING_X + indentOffset;
-  let iconBounds: { x: number; y: number; width: number; height: number } | null = null;
-
-  // 4. Draw expand/collapse icon if expandable
-  if (cell.isExpandable) {
-    const iconY = y + (height - ICON_SIZE) / 2;
-    const iconX = contentX;
-
-    if (useChevronIcon) {
-      drawPivotChevron(ctx, iconX, iconY, ICON_SIZE, !cell.isCollapsed, theme);
-    } else {
-      drawPivotIcon(ctx, iconX, iconY, ICON_SIZE, !cell.isCollapsed, theme, iconHovered);
-    }
-
-    iconBounds = {
-      x: iconX,
-      y: iconY,
-      width: ICON_SIZE,
-      height: ICON_SIZE,
-    };
-
-    contentX += ICON_SIZE + ICON_TEXT_GAP;
-  }
-
-  // 5. Get display text
-  const displayText = getPivotCellDisplayValue(cell.value, cell.numberFormat);
-
-  if (displayText !== "") {
-    // 6. Set up font
-    const fontWeight = cell.isBold ? "bold" : "normal";
-    const fontSize =
-      cell.cellType === "RowHeader" || cell.cellType === "ColumnHeader"
-        ? theme.headerFontSize
-        : theme.fontSize;
-
-    ctx.font = `${fontWeight} ${fontSize}px ${theme.fontFamily}`;
-    ctx.fillStyle = getPivotTextColor(cell, theme);
-    ctx.textBaseline = "middle";
-
-    // 7. Calculate available width for text
-    const availableWidth = x + width - contentX - CELL_PADDING_X;
-
-    if (availableWidth > 0) {
-      // 8. Determine text alignment based on cell type and value
-      let textAlign: "left" | "right" | "center" = "left";
-
-      // Data cells with numbers align right
-      if (cell.cellType === "Data" && cell.value.type === "Number") {
-        textAlign = "right";
-      }
-      // Subtotals and totals with numbers align right
-      if (
-        (cell.cellType === "RowSubtotal" ||
-          cell.cellType === "ColumnSubtotal" ||
-          cell.cellType === "GrandTotal" ||
-          cell.cellType === "GrandTotalRow" ||
-          cell.cellType === "GrandTotalColumn") &&
-        cell.value.type === "Number"
-      ) {
-        textAlign = "right";
-      }
-      // Column headers center align
-      if (cell.cellType === "ColumnHeader") {
-        textAlign = "center";
-      }
-
-      // 9. Calculate text position
-      const textY = y + height / 2;
-
-      // 10. Draw text with truncation
-      drawPivotTextWithTruncation(
-        ctx,
-        displayText,
-        contentX,
-        textY,
-        availableWidth,
-        textAlign
-      );
-    }
-  }
-
-  // Restore context state
-  ctx.restore();
-
-  return { iconBounds };
-}
-
-/**
- * Draw text with ellipsis truncation for pivot cells.
- * Optimized version that avoids binary search for common cases.
- */
-function drawPivotTextWithTruncation(
+function truncateText(
   ctx: CanvasRenderingContext2D,
   text: string,
+  maxWidth: number
+): string {
+  if (ctx.measureText(text).width <= maxWidth) {
+    return text;
+  }
+
+  const ellipsis = '...';
+  const ellipsisWidth = ctx.measureText(ellipsis).width;
+  let truncated = text;
+
+  while (truncated.length > 0 && ctx.measureText(truncated).width + ellipsisWidth > maxWidth) {
+    truncated = truncated.slice(0, -1);
+  }
+
+  return truncated + ellipsis;
+}
+
+// =============================================================================
+// DRAWING FUNCTIONS
+// =============================================================================
+
+function drawExpandCollapseIcon(
+  ctx: CanvasRenderingContext2D,
   x: number,
   y: number,
-  maxWidth: number,
-  align: "left" | "right" | "center"
+  isCollapsed: boolean,
+  theme: PivotTheme,
+  isHovered: boolean
 ): void {
-  const metrics = ctx.measureText(text);
-  const textWidth = metrics.width;
+  const color = isHovered ? theme.iconHoverColor : theme.iconColor;
+  const size = EXPAND_ICON_SIZE;
+  const centerX = x + size / 2;
+  const centerY = y + size / 2;
 
-  // Fast path: text fits without truncation
-  if (textWidth <= maxWidth) {
-    let drawX = x;
-    if (align === "right") {
-      drawX = x + maxWidth - textWidth;
-    } else if (align === "center") {
-      drawX = x + (maxWidth - textWidth) / 2;
-    }
-    ctx.fillText(text, drawX, y);
-    return;
+  ctx.save();
+  ctx.strokeStyle = color;
+  ctx.fillStyle = color;
+  ctx.lineWidth = 1.5;
+
+  // Draw box
+  ctx.strokeRect(x + 1, y + 1, size - 2, size - 2);
+
+  // Draw minus (always present)
+  const lineY = centerY;
+  const lineStartX = x + 3;
+  const lineEndX = x + size - 3;
+
+  ctx.beginPath();
+  ctx.moveTo(lineStartX, lineY);
+  ctx.lineTo(lineEndX, lineY);
+  ctx.stroke();
+
+  // Draw vertical line for plus (collapsed state)
+  if (isCollapsed) {
+    const lineX = centerX;
+    const lineStartY = y + 3;
+    const lineEndY = y + size - 3;
+
+    ctx.beginPath();
+    ctx.moveTo(lineX, lineStartY);
+    ctx.lineTo(lineX, lineEndY);
+    ctx.stroke();
   }
 
-  // Text needs truncation
-  const ellipsis = "...";
-  const ellipsisWidth = ctx.measureText(ellipsis).width;
-  const availableWidth = maxWidth - ellipsisWidth;
-
-  if (availableWidth <= 0) {
-    // Not enough room - just draw ellipsis
-    ctx.fillText(ellipsis, x, y);
-    return;
-  }
-
-  // Estimate truncation point based on average character width
-  const avgCharWidth = textWidth / text.length;
-  let estimatedChars = Math.floor(availableWidth / avgCharWidth);
-
-  // Refine estimate
-  while (estimatedChars > 0) {
-    const truncated = text.substring(0, estimatedChars);
-    const truncWidth = ctx.measureText(truncated).width;
-    if (truncWidth <= availableWidth) {
-      // Found a fit, try to get a bit more
-      while (estimatedChars < text.length) {
-        const nextTruncated = text.substring(0, estimatedChars + 1);
-        const nextWidth = ctx.measureText(nextTruncated).width;
-        if (nextWidth > availableWidth) break;
-        estimatedChars++;
-      }
-      break;
-    }
-    estimatedChars--;
-  }
-
-  const truncatedText = text.substring(0, estimatedChars) + ellipsis;
-  ctx.fillText(truncatedText, x, y);
+  ctx.restore();
 }
 
-// ============================================================================
-// BATCH RENDERING
-// ============================================================================
+function drawFilterDropdownButton(
+  ctx: CanvasRenderingContext2D,
+  x: number,
+  y: number,
+  width: number,
+  height: number,
+  displayValue: string,
+  theme: PivotTheme,
+  isHovered: boolean
+): { buttonBounds: { x: number; y: number; width: number; height: number } } {
+  const buttonWidth = Math.max(FILTER_BUTTON_MIN_WIDTH, Math.min(width, FILTER_BUTTON_MAX_WIDTH));
 
-/**
- * Render a complete PivotView to the canvas.
- * Handles the full grid of cells with proper clipping and scrolling.
- */
-export interface PivotRenderConfig {
-  /** Canvas rendering context */
-  ctx: CanvasRenderingContext2D;
-  /** Canvas width */
-  width: number;
-  /** Canvas height */
-  height: number;
-  /** The pivot view data */
-  pivotView: PivotView;
-  /** Theme colors */
-  theme: PivotTheme;
-  /** Scroll offset X */
-  scrollX: number;
-  /** Scroll offset Y */
-  scrollY: number;
-  /** Row header width (left frozen area) */
-  rowHeaderWidth: number;
-  /** Column header height (top frozen area) */
-  columnHeaderHeight: number;
-  /** Column widths array */
-  columnWidths: number[];
-  /** Row heights array */
-  rowHeights: number[];
-  /** Currently hovered cell for icon hover effect [row, col] or null */
-  hoveredCell: [number, number] | null;
+  ctx.save();
+
+  // Draw button background
+  ctx.fillStyle = isHovered ? theme.filterButtonHoverBackground : theme.filterButtonBackground;
+  ctx.fillRect(x, y, buttonWidth, height);
+
+  // Draw button border
+  ctx.strokeStyle = theme.filterButtonBorder;
+  ctx.lineWidth = 1;
+  ctx.strokeRect(x + 0.5, y + 0.5, buttonWidth - 1, height - 1);
+
+  // Draw text
+  const textX = x + FILTER_BUTTON_PADDING;
+  const textMaxWidth = buttonWidth - FILTER_BUTTON_PADDING * 2 - FILTER_ARROW_SIZE - 4;
+  const textY = y + height / 2;
+
+  ctx.fillStyle = theme.filterText;
+  ctx.font = `400 ${theme.fontSize}px ${theme.fontFamily}`;
+  ctx.textAlign = 'left';
+  ctx.textBaseline = 'middle';
+
+  const truncatedText = truncateText(ctx, displayValue, textMaxWidth);
+  ctx.fillText(truncatedText, textX, textY);
+
+  // Draw dropdown arrow (triangle)
+  const arrowX = x + buttonWidth - FILTER_BUTTON_PADDING - FILTER_ARROW_SIZE / 2;
+  const arrowY = y + height / 2;
+
+  ctx.fillStyle = theme.filterDropdownArrow;
+  ctx.beginPath();
+  ctx.moveTo(arrowX - FILTER_ARROW_SIZE / 2, arrowY - FILTER_ARROW_SIZE / 3);
+  ctx.lineTo(arrowX + FILTER_ARROW_SIZE / 2, arrowY - FILTER_ARROW_SIZE / 3);
+  ctx.lineTo(arrowX, arrowY + FILTER_ARROW_SIZE / 2);
+  ctx.closePath();
+  ctx.fill();
+
+  ctx.restore();
+
+  return {
+    buttonBounds: { x, y, width: buttonWidth, height },
+  };
 }
 
-/**
- * Render the entire pivot table view.
- * Returns a map of icon bounds for hit testing.
- */
+interface DrawCellOptions {
+  isHoveredFilterButton?: boolean;
+  isHoveredIcon?: boolean;
+}
+
+function drawPivotCell(
+  ctx: CanvasRenderingContext2D,
+  cell: PivotCellData,
+  x: number,
+  y: number,
+  width: number,
+  height: number,
+  rowIndex: number,
+  colIndex: number,
+  theme: PivotTheme,
+  options: DrawCellOptions = {}
+): PivotCellDrawResult {
+  const result: PivotCellDrawResult = {
+    iconBounds: null,
+    filterButtonBounds: null,
+  };
+
+  // Draw background
+  const bgColor = getPivotBackgroundColor(cell.background_style, theme, rowIndex);
+  ctx.fillStyle = bgColor;
+  ctx.fillRect(x, y, width, height);
+
+  // Draw border
+  ctx.strokeStyle = theme.borderColor;
+  ctx.lineWidth = 1;
+  ctx.strokeRect(x + 0.5, y + 0.5, width - 1, height - 1);
+
+  // Handle FilterDropdown specially
+  if (cell.cell_type === 'FilterDropdown') {
+    const buttonY = y + Math.floor((height - FILTER_BUTTON_HEIGHT) / 2);
+    const displayText = cell.formatted_value || getCellDisplayValue(cell.value) || '(All)';
+    const buttonResult = drawFilterDropdownButton(
+      ctx,
+      x + CELL_PADDING_X,
+      buttonY,
+      width - CELL_PADDING_X * 2,
+      FILTER_BUTTON_HEIGHT,
+      displayText,
+      theme,
+      options.isHoveredFilterButton || false
+    );
+
+    result.filterButtonBounds = {
+      ...buttonResult.buttonBounds,
+      x: x + CELL_PADDING_X,
+      y: buttonY,
+      fieldIndex: cell.filter_field_index ?? -1,
+      row: rowIndex,
+      col: colIndex,
+    };
+
+    return result;
+  }
+
+  // Calculate text position
+  let textX = x + CELL_PADDING_X;
+  let textMaxWidth = width - CELL_PADDING_X * 2;
+
+  // Handle expand/collapse icon for row headers
+  if (cell.cell_type === 'RowHeader' && cell.is_expandable) {
+    const iconX = x + CELL_PADDING_X + (cell.indent_level || 0) * 16;
+    const iconY = y + (height - EXPAND_ICON_SIZE) / 2;
+
+    // is_collapsed means currently collapsed (show + icon)
+    // !is_collapsed means currently expanded (show - icon)
+    drawExpandCollapseIcon(
+      ctx,
+      iconX,
+      iconY,
+      cell.is_collapsed,
+      theme,
+      options.isHoveredIcon || false
+    );
+
+    result.iconBounds = {
+      x: iconX,
+      y: iconY,
+      width: EXPAND_ICON_SIZE,
+      height: EXPAND_ICON_SIZE,
+      row: rowIndex,
+      col: colIndex,
+      isExpanded: !cell.is_collapsed,
+    };
+
+    textX = iconX + EXPAND_ICON_SIZE + EXPAND_ICON_PADDING;
+    textMaxWidth = width - (textX - x) - CELL_PADDING_X;
+  } else if (cell.indent_level && cell.indent_level > 0) {
+    // Apply indentation without icon
+    textX += cell.indent_level * 16;
+    textMaxWidth -= cell.indent_level * 16;
+  }
+
+  // Draw text
+  const displayText = cell.formatted_value || getCellDisplayValue(cell.value);
+  if (displayText) {
+    const textColor = getPivotTextColor(cell.cell_type, cell.background_style, theme);
+    const fontWeight = getFontWeight(cell.cell_type, cell.background_style);
+    const textAlign = getTextAlign(cell.cell_type);
+
+    ctx.fillStyle = textColor;
+    ctx.font = `${fontWeight} ${theme.fontSize}px ${theme.fontFamily}`;
+    ctx.textAlign = textAlign;
+    ctx.textBaseline = 'middle';
+
+    const textY = y + height / 2;
+
+    if (textAlign === 'right') {
+      const rightX = x + width - CELL_PADDING_X;
+      const truncatedDisplayText = truncateText(ctx, displayText, textMaxWidth);
+      ctx.fillText(truncatedDisplayText, rightX, textY);
+    } else {
+      const truncatedDisplayText = truncateText(ctx, displayText, textMaxWidth);
+      ctx.fillText(truncatedDisplayText, textX, textY);
+    }
+  }
+
+  return result;
+}
+
+// =============================================================================
+// MAIN RENDER FUNCTION
+// =============================================================================
+
 export function renderPivotView(
-  config: PivotRenderConfig
-): Map<string, { x: number; y: number; width: number; height: number }> {
-  const {
-    ctx,
-    width,
-    height,
-    pivotView,
-    theme,
-    scrollX,
-    scrollY,
-    rowHeaderWidth,
-    columnHeaderHeight,
-    columnWidths,
-    rowHeights,
-    hoveredCell,
-  } = config;
+  ctx: CanvasRenderingContext2D,
+  pivotView: PivotViewResponse,
+  canvasWidth: number,
+  canvasHeight: number,
+  options: PivotRenderOptions,
+  theme: PivotTheme = DEFAULT_PIVOT_THEME
+): PivotRenderResult {
+  const interactiveBounds: PivotInteractiveBounds = {
+    expandCollapseIcons: new Map(),
+    filterButtons: new Map(),
+  };
 
-  const iconBoundsMap = new Map<string, { x: number; y: number; width: number; height: number }>();
+  const {
+    startRow,
+    endRow,
+    startCol,
+    endCol,
+    rowHeights,
+    colWidths,
+    scrollLeft,
+    scrollTop,
+    frozenRowCount,
+    frozenColCount,
+    hoveredFilterFieldIndex,
+    hoveredIconKey,
+  } = options;
 
   // Clear canvas
-  ctx.fillStyle = theme.dataBackground;
-  ctx.fillRect(0, 0, width, height);
+  ctx.clearRect(0, 0, canvasWidth, canvasHeight);
 
-  // Calculate visible range
-  const visibleRows = pivotView.rows.filter((r) => r.visible);
-  const frozenCols = pivotView.rowLabelColCount;
-  const frozenRows = pivotView.columnHeaderRowCount;
+  // Calculate frozen dimensions
+  let frozenWidth = 0;
+  for (let c = 0; c < frozenColCount && c < colWidths.length; c++) {
+    frozenWidth += colWidths[c];
+  }
 
-  // Draw cells in layers: scrollable, then frozen
+  let frozenHeight = 0;
+  for (let r = 0; r < frozenRowCount && r < rowHeights.length; r++) {
+    frozenHeight += rowHeights[r];
+  }
 
-  // 1. Draw scrollable area (bottom-right)
+  // Helper to get Y position for a row
+  const getRowY = (rowIndex: number): number => {
+    let y = 0;
+    if (rowIndex < frozenRowCount) {
+      for (let r = 0; r < rowIndex; r++) {
+        y += rowHeights[r] || 24;
+      }
+    } else {
+      y = frozenHeight;
+      for (let r = frozenRowCount; r < rowIndex; r++) {
+        y += rowHeights[r] || 24;
+      }
+      y -= scrollTop;
+    }
+    return y;
+  };
+
+  // Helper to get X position for a column
+  const getColX = (colIndex: number): number => {
+    let x = 0;
+    if (colIndex < frozenColCount) {
+      for (let c = 0; c < colIndex; c++) {
+        x += colWidths[c] || 100;
+      }
+    } else {
+      x = frozenWidth;
+      for (let c = frozenColCount; c < colIndex; c++) {
+        x += colWidths[c] || 100;
+      }
+      x -= scrollLeft;
+    }
+    return x;
+  };
+
+  // Render cells in four quadrants:
+  // 1. Frozen corner (top-left)
+  // 2. Frozen top (scrolls horizontally)
+  // 3. Frozen left (scrolls vertically)
+  // 4. Main area (scrolls both ways)
+
+  const renderCell = (rowIndex: number, colIndex: number): void => {
+    if (rowIndex >= pivotView.rows.length) return;
+    const row = pivotView.rows[rowIndex];
+    if (colIndex >= row.cells.length) return;
+    const cell = row.cells[colIndex];
+
+    const x = getColX(colIndex);
+    const y = getRowY(rowIndex);
+    const width = colWidths[colIndex] || 100;
+    const height = rowHeights[rowIndex] || 24;
+
+    // Skip cells outside visible area
+    if (x + width < 0 || x > canvasWidth || y + height < 0 || y > canvasHeight) {
+      return;
+    }
+
+    const cellKey = `${rowIndex}-${colIndex}`;
+    const isHoveredFilter = cell.filter_field_index !== undefined &&
+      cell.filter_field_index === hoveredFilterFieldIndex;
+    const isHoveredIcon = hoveredIconKey === cellKey;
+
+    const cellResult = drawPivotCell(
+      ctx,
+      cell,
+      x,
+      y,
+      width,
+      height,
+      rowIndex,
+      colIndex,
+      theme,
+      {
+        isHoveredFilterButton: isHoveredFilter,
+        isHoveredIcon,
+      }
+    );
+
+    // Store interactive bounds
+    if (cellResult.iconBounds) {
+      interactiveBounds.expandCollapseIcons.set(cellKey, cellResult.iconBounds);
+    }
+
+    if (cellResult.filterButtonBounds) {
+      const filterKey = `filter-${cell.filter_field_index}`;
+      interactiveBounds.filterButtons.set(filterKey, cellResult.filterButtonBounds);
+    }
+  };
+
+  // Render main scrollable area first (bottom-right)
   ctx.save();
   ctx.beginPath();
-  ctx.rect(rowHeaderWidth, columnHeaderHeight, width - rowHeaderWidth, height - columnHeaderHeight);
+  ctx.rect(frozenWidth, frozenHeight, canvasWidth - frozenWidth, canvasHeight - frozenHeight);
   ctx.clip();
 
-  let currentY = columnHeaderHeight - scrollY;
-  for (let viewRow = frozenRows; viewRow < visibleRows.length; viewRow++) {
-    const rowIdx = visibleRows[viewRow].viewRow;
-    const rowHeight = rowHeights[rowIdx] || 24;
-
-    // Skip rows above viewport
-    if (currentY + rowHeight < columnHeaderHeight) {
-      currentY += rowHeight;
-      continue;
+  for (let r = Math.max(startRow, frozenRowCount); r <= endRow && r < pivotView.rows.length; r++) {
+    for (let c = Math.max(startCol, frozenColCount); c <= endCol; c++) {
+      renderCell(r, c);
     }
-    // Stop if below viewport
-    if (currentY > height) break;
-
-    let currentX = rowHeaderWidth - scrollX;
-    for (let col = frozenCols; col < pivotView.colCount; col++) {
-      const colWidth = columnWidths[col] || 100;
-
-      // Skip columns left of viewport
-      if (currentX + colWidth < rowHeaderWidth) {
-        currentX += colWidth;
-        continue;
-      }
-      // Stop if right of viewport
-      if (currentX > width) break;
-
-      const cell = pivotView.cells[rowIdx]?.[col];
-      if (cell) {
-        const isHovered =
-          hoveredCell !== null &&
-          hoveredCell[0] === rowIdx &&
-          hoveredCell[1] === col;
-
-        const result = drawPivotCell(
-          ctx,
-          cell,
-          { x: currentX, y: currentY, width: colWidth, height: rowHeight },
-          { theme, iconHovered: isHovered }
-        );
-
-        if (result.iconBounds) {
-          iconBoundsMap.set(`${rowIdx},${col}`, result.iconBounds);
-        }
-      }
-
-      currentX += colWidth;
-    }
-    currentY += rowHeight;
   }
   ctx.restore();
 
-  // 2. Draw frozen left column (row labels)
-  if (frozenCols > 0) {
+  // Render frozen left column (scrolls vertically)
+  if (frozenColCount > 0) {
     ctx.save();
     ctx.beginPath();
-    ctx.rect(0, columnHeaderHeight, rowHeaderWidth, height - columnHeaderHeight);
+    ctx.rect(0, frozenHeight, frozenWidth, canvasHeight - frozenHeight);
     ctx.clip();
 
-    currentY = columnHeaderHeight - scrollY;
-    for (let viewRow = frozenRows; viewRow < visibleRows.length; viewRow++) {
-      const rowIdx = visibleRows[viewRow].viewRow;
-      const rowHeight = rowHeights[rowIdx] || 24;
-
-      if (currentY + rowHeight < columnHeaderHeight) {
-        currentY += rowHeight;
-        continue;
+    for (let r = Math.max(startRow, frozenRowCount); r <= endRow && r < pivotView.rows.length; r++) {
+      for (let c = 0; c < frozenColCount; c++) {
+        renderCell(r, c);
       }
-      if (currentY > height) break;
-
-      let currentX = 0;
-      for (let col = 0; col < frozenCols; col++) {
-        const colWidth = columnWidths[col] || 100;
-        const cell = pivotView.cells[rowIdx]?.[col];
-
-        if (cell) {
-          const isHovered =
-            hoveredCell !== null &&
-            hoveredCell[0] === rowIdx &&
-            hoveredCell[1] === col;
-
-          const result = drawPivotCell(
-            ctx,
-            cell,
-            { x: currentX, y: currentY, width: colWidth, height: rowHeight },
-            { theme, iconHovered: isHovered }
-          );
-
-          if (result.iconBounds) {
-            iconBoundsMap.set(`${rowIdx},${col}`, result.iconBounds);
-          }
-        }
-
-        currentX += colWidth;
-      }
-      currentY += rowHeight;
     }
     ctx.restore();
   }
 
-  // 3. Draw frozen top rows (column headers)
-  if (frozenRows > 0) {
+  // Render frozen top rows (scrolls horizontally)
+  if (frozenRowCount > 0) {
     ctx.save();
     ctx.beginPath();
-    ctx.rect(rowHeaderWidth, 0, width - rowHeaderWidth, columnHeaderHeight);
+    ctx.rect(frozenWidth, 0, canvasWidth - frozenWidth, frozenHeight);
     ctx.clip();
 
-    currentY = 0;
-    for (let rowIdx = 0; rowIdx < frozenRows && rowIdx < pivotView.rowCount; rowIdx++) {
-      const rowHeight = rowHeights[rowIdx] || 24;
-
-      let currentX = rowHeaderWidth - scrollX;
-      for (let col = frozenCols; col < pivotView.colCount; col++) {
-        const colWidth = columnWidths[col] || 100;
-
-        if (currentX + colWidth < rowHeaderWidth) {
-          currentX += colWidth;
-          continue;
-        }
-        if (currentX > width) break;
-
-        const cell = pivotView.cells[rowIdx]?.[col];
-        if (cell) {
-          drawPivotCell(
-            ctx,
-            cell,
-            { x: currentX, y: currentY, width: colWidth, height: rowHeight },
-            { theme }
-          );
-        }
-
-        currentX += colWidth;
+    for (let r = 0; r < frozenRowCount && r < pivotView.rows.length; r++) {
+      for (let c = Math.max(startCol, frozenColCount); c <= endCol; c++) {
+        renderCell(r, c);
       }
-      currentY += rowHeight;
     }
     ctx.restore();
   }
 
-  // 4. Draw frozen corner (top-left)
-  if (frozenCols > 0 && frozenRows > 0) {
+  // Render frozen corner (top-left, never scrolls)
+  if (frozenRowCount > 0 && frozenColCount > 0) {
     ctx.save();
     ctx.beginPath();
-    ctx.rect(0, 0, rowHeaderWidth, columnHeaderHeight);
+    ctx.rect(0, 0, frozenWidth, frozenHeight);
     ctx.clip();
 
-    currentY = 0;
-    for (let rowIdx = 0; rowIdx < frozenRows && rowIdx < pivotView.rowCount; rowIdx++) {
-      const rowHeight = rowHeights[rowIdx] || 24;
-
-      let currentX = 0;
-      for (let col = 0; col < frozenCols; col++) {
-        const colWidth = columnWidths[col] || 100;
-        const cell = pivotView.cells[rowIdx]?.[col];
-
-        if (cell) {
-          drawPivotCell(
-            ctx,
-            cell,
-            { x: currentX, y: currentY, width: colWidth, height: rowHeight },
-            { theme }
-          );
-        }
-
-        currentX += colWidth;
+    for (let r = 0; r < frozenRowCount && r < pivotView.rows.length; r++) {
+      for (let c = 0; c < frozenColCount; c++) {
+        renderCell(r, c);
       }
-      currentY += rowHeight;
     }
     ctx.restore();
   }
 
-  // 5. Draw separator lines for frozen panes
-  ctx.strokeStyle = theme.separatorLine;
-  ctx.lineWidth = 2;
-
-  if (frozenCols > 0) {
-    ctx.beginPath();
-    ctx.moveTo(rowHeaderWidth, 0);
-    ctx.lineTo(rowHeaderWidth, height);
-    ctx.stroke();
-  }
-
-  if (frozenRows > 0) {
-    ctx.beginPath();
-    ctx.moveTo(0, columnHeaderHeight);
-    ctx.lineTo(width, columnHeaderHeight);
-    ctx.stroke();
-  }
-
-  return iconBoundsMap;
+  return { interactiveBounds };
 }
 
-// ============================================================================
-// HIT TESTING
-// ============================================================================
+// =============================================================================
+// UTILITY EXPORTS
+// =============================================================================
 
-/**
- * Check if a point is within an icon's bounds.
- */
-export function hitTestPivotIcon(
-  x: number,
-  y: number,
-  iconBounds: { x: number; y: number; width: number; height: number }
-): boolean {
-  return (
-    x >= iconBounds.x &&
-    x <= iconBounds.x + iconBounds.width &&
-    y >= iconBounds.y &&
-    y <= iconBounds.y + iconBounds.height
-  );
+export function createPivotTheme(overrides: Partial<PivotTheme> = {}): PivotTheme {
+  return { ...DEFAULT_PIVOT_THEME, ...overrides };
 }
 
-/**
- * Find which icon (if any) was clicked.
- */
-export function findClickedPivotIcon(
-  x: number,
-  y: number,
-  iconBoundsMap: Map<string, { x: number; y: number; width: number; height: number }>
-): { row: number; col: number } | null {
-  for (const [key, bounds] of iconBoundsMap.entries()) {
-    if (hitTestPivotIcon(x, y, bounds)) {
-      const [row, col] = key.split(",").map(Number);
-      return { row, col };
+export function measurePivotColumnWidth(
+  ctx: CanvasRenderingContext2D,
+  pivotView: PivotViewResponse,
+  colIndex: number,
+  theme: PivotTheme = DEFAULT_PIVOT_THEME,
+  minWidth: number = 60,
+  maxWidth: number = 300
+): number {
+  let maxContentWidth = minWidth;
+
+  ctx.font = `${theme.headerFontWeight} ${theme.fontSize}px ${theme.fontFamily}`;
+
+  for (const row of pivotView.rows) {
+    if (colIndex < row.cells.length) {
+      const cell = row.cells[colIndex];
+      const displayText = cell.formatted_value || getCellDisplayValue(cell.value);
+      if (displayText) {
+        const textWidth = ctx.measureText(displayText).width;
+        let totalWidth = textWidth + CELL_PADDING_X * 2;
+
+        // Account for indentation
+        if (cell.indent_level) {
+          totalWidth += cell.indent_level * 16;
+        }
+
+        // Account for expand/collapse icon
+        if (cell.is_expandable) {
+          totalWidth += EXPAND_ICON_SIZE + EXPAND_ICON_PADDING;
+        }
+
+        maxContentWidth = Math.max(maxContentWidth, totalWidth);
+      }
     }
   }
-  return null;
+
+  return Math.min(maxContentWidth, maxWidth);
 }

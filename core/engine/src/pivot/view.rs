@@ -7,6 +7,7 @@
 //! - Row/column headers with nesting levels
 //! - Cell types (data, subtotal, grand total)
 //! - Visual formatting hints
+//! - Filter rows with dropdown buttons
 
 use serde::{Deserialize, Serialize};
 use crate::pivot::definition::PivotId;
@@ -39,6 +40,10 @@ pub enum PivotCellType {
     GrandTotal,
     /// Blank cell (for layout purposes).
     Blank,
+    /// Filter field label (left side of filter row).
+    FilterLabel,
+    /// Filter dropdown button (right side of filter row).
+    FilterDropdown,
 }
 
 /// Display value for a pivot cell.
@@ -120,6 +125,8 @@ pub struct PivotViewCell {
     /// Pre-formatted display string.
     pub formatted_value: String,
     
+    /// For filter dropdown cells: the field index being filtered.
+    pub filter_field_index: Option<usize>,
 }
 
 impl PivotViewCell {
@@ -138,6 +145,7 @@ impl PivotViewCell {
             is_bold: false,
             background_style: BackgroundStyle::Normal,
             group_path: Vec::new(),
+            filter_field_index: None,
         }
     }
     
@@ -156,6 +164,7 @@ impl PivotViewCell {
             is_bold: false,
             background_style: BackgroundStyle::Header,
             group_path: Vec::new(),
+            filter_field_index: None,
         }
     }
     
@@ -174,6 +183,7 @@ impl PivotViewCell {
             is_bold: true,
             background_style: BackgroundStyle::Header,
             group_path: Vec::new(),
+            filter_field_index: None,
         }
     }
     
@@ -192,6 +202,7 @@ impl PivotViewCell {
             is_bold: false,
             background_style: BackgroundStyle::Header,
             group_path: Vec::new(),
+            filter_field_index: None,
         }
     }
     
@@ -210,6 +221,45 @@ impl PivotViewCell {
             is_bold: false,
             background_style: BackgroundStyle::Normal,
             group_path: Vec::new(),
+            filter_field_index: None,
+        }
+    }
+    
+    /// Creates a filter label cell (left side of filter row).
+    pub fn filter_label(field_name: String, field_index: usize) -> Self {
+        PivotViewCell {
+            value: PivotCellValue::Text(field_name.clone()),
+            formatted_value: field_name,
+            cell_type: PivotCellType::FilterLabel,
+            indent_level: 0,
+            is_collapsed: false,
+            is_expandable: false,
+            number_format: None,
+            row_span: 1,
+            col_span: 1,
+            is_bold: false,
+            background_style: BackgroundStyle::Header,
+            group_path: Vec::new(),
+            filter_field_index: Some(field_index),
+        }
+    }
+    
+    /// Creates a filter dropdown cell (right side of filter row).
+    pub fn filter_dropdown(display_value: String, field_index: usize) -> Self {
+        PivotViewCell {
+            value: PivotCellValue::Text(display_value.clone()),
+            formatted_value: display_value,
+            cell_type: PivotCellType::FilterDropdown,
+            indent_level: 0,
+            is_collapsed: false,
+            is_expandable: false,
+            number_format: None,
+            row_span: 1,
+            col_span: 1,
+            is_bold: false,
+            background_style: BackgroundStyle::Normal,
+            group_path: Vec::new(),
+            filter_field_index: Some(field_index),
         }
     }
     
@@ -243,6 +293,7 @@ pub enum BackgroundStyle {
     Total,
     GrandTotal,
     Alternate, // For zebra striping
+    FilterRow, // For filter rows
 }
 
 impl Default for BackgroundStyle {
@@ -291,6 +342,8 @@ pub enum PivotRowType {
     GrandTotal,
     /// Column header row.
     ColumnHeader,
+    /// Filter row (contains filter label and dropdown).
+    FilterRow,
 }
 
 /// Describes a column in the pivot view.
@@ -332,6 +385,32 @@ pub enum PivotColumnType {
 }
 
 // ============================================================================
+// FILTER ROW METADATA
+// ============================================================================
+
+/// Metadata for a filter field displayed in the pivot view.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FilterRowInfo {
+    /// The source field index being filtered.
+    pub field_index: usize,
+    
+    /// The display name of the field.
+    pub field_name: String,
+    
+    /// Currently selected/visible values (empty means all selected).
+    pub selected_values: Vec<String>,
+    
+    /// All unique values available for this field.
+    pub unique_values: Vec<String>,
+    
+    /// Display string for the dropdown (e.g., "(All)", "Value1", "(Multiple Items)").
+    pub display_value: String,
+    
+    /// The view row index where this filter is rendered.
+    pub view_row: usize,
+}
+
+// ============================================================================
 // MAIN VIEW STRUCT
 // ============================================================================
 
@@ -364,6 +443,12 @@ pub struct PivotView {
     /// Number of column header rows (top frozen area).
     pub column_header_row_count: usize,
     
+    /// Number of filter rows at the top.
+    pub filter_row_count: usize,
+    
+    /// Metadata for filter rows (for frontend interaction).
+    pub filter_rows: Vec<FilterRowInfo>,
+    
     /// Indicates if the view is a partial/windowed view.
     pub is_windowed: bool,
     
@@ -389,6 +474,8 @@ impl PivotView {
             col_count: 0,
             row_label_col_count: 0,
             column_header_row_count: 0,
+            filter_row_count: 0,
+            filter_rows: Vec::new(),
             is_windowed: false,
             total_row_count: None,
             window_start_row: None,
@@ -413,6 +500,22 @@ impl PivotView {
         self.row_count = self.cells.len();
         if self.col_count == 0 && !self.cells.is_empty() {
             self.col_count = self.cells[0].len();
+        }
+    }
+    
+    /// Inserts a row at the specified index.
+    pub fn insert_row(&mut self, index: usize, cells: Vec<PivotViewCell>, descriptor: PivotRowDescriptor) {
+        if index <= self.cells.len() {
+            self.cells.insert(index, cells);
+            self.rows.insert(index, descriptor);
+            self.row_count = self.cells.len();
+            if self.col_count == 0 && !self.cells.is_empty() {
+                self.col_count = self.cells[0].len();
+            }
+            // Update view_row indices for all rows after the insertion
+            for i in index..self.rows.len() {
+                self.rows[i].view_row = i;
+            }
         }
     }
     
@@ -518,6 +621,8 @@ impl PivotView {
         windowed.col_count = self.col_count;
         windowed.row_label_col_count = self.row_label_col_count;
         windowed.column_header_row_count = self.column_header_row_count;
+        windowed.filter_row_count = self.filter_row_count;
+        windowed.filter_rows = self.filter_rows.clone();
         windowed.version = self.version;
         
         for &idx in &windowed_indices {
