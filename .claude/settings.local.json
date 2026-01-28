@@ -8,7 +8,8 @@
       "Bash(cargo check:*)",
       "Bash(npm run dev:*)",
       "Bash(taskkill:*)",
-      "Bash(nul)"
+      "Bash(nul)",
+      "Bash(npx tsc:*)"
     ],
     "deny": [],
     "ask": []

@@ -1,7 +1,9 @@
 //! FILENAME: app/src/core/components/pivot/ZoneFieldItem.tsx
-import React, { useCallback, useState, useRef } from 'react';
+import React, { useCallback, useState, useMemo } from 'react';
 import { styles } from './PivotEditor.styles';
 import { AggregationMenu } from './AggregationMenu';
+import { ValueFieldContextMenu } from './ValueFieldContextMenu';
+import { useDraggable } from './useDragDrop';
 import {
   type ZoneField,
   type DragField,
@@ -16,10 +18,13 @@ interface ZoneFieldItemProps {
   index: number;
   onRemove: (zone: DropZoneType, index: number) => void;
   onAggregationChange?: (index: number, aggregation: AggregationType) => void;
-  onDragStart: (field: DragField) => void;
-  onDragEnd: () => void;
-  onDragOver: (e: React.DragEvent, index: number) => void;
-  onDrop: (e: React.DragEvent, index: number) => void;
+  // Legacy props kept for API compatibility - not used with mouse-based drag
+  onDragStart?: (field: DragField) => void;
+  onDragEnd?: () => void;
+  /** Callback to open value field settings modal */
+  onOpenValueSettings?: (index: number) => void;
+  /** Callback to open number format modal */
+  onOpenNumberFormat?: (index: number) => void;
 }
 
 export function ZoneFieldItem({
@@ -28,42 +33,30 @@ export function ZoneFieldItem({
   index,
   onRemove,
   onAggregationChange,
-  onDragStart,
-  onDragEnd,
-  onDragOver,
-  onDrop,
+  onOpenValueSettings,
+  onOpenNumberFormat,
 }: ZoneFieldItemProps): React.ReactElement {
-  const [isDragging, setIsDragging] = useState(false);
   const [showAggMenu, setShowAggMenu] = useState(false);
+  const [showContextMenu, setShowContextMenu] = useState(false);
   const [menuPosition, setMenuPosition] = useState({ x: 0, y: 0 });
-  const itemRef = useRef<HTMLDivElement>(null);
 
   const displayName =
     zone === 'values' && field.aggregation
       ? getValueFieldDisplayName(field.name, field.aggregation)
       : field.name;
 
-  const handleDragStart = useCallback(
-    (e: React.DragEvent<HTMLDivElement>) => {
-      const dragData: DragField = {
-        sourceIndex: field.sourceIndex,
-        name: field.name,
-        isNumeric: field.isNumeric,
-        fromZone: zone,
-        fromIndex: index,
-      };
-      e.dataTransfer.setData('application/json', JSON.stringify(dragData));
-      e.dataTransfer.effectAllowed = 'move';
-      setIsDragging(true);
-      onDragStart(dragData);
-    },
-    [field, zone, index, onDragStart]
+  const dragData: DragField = useMemo(
+    () => ({
+      sourceIndex: field.sourceIndex,
+      name: field.name,
+      isNumeric: field.isNumeric,
+      fromZone: zone,
+      fromIndex: index,
+    }),
+    [field.sourceIndex, field.name, field.isNumeric, zone, index]
   );
 
-  const handleDragEnd = useCallback(() => {
-    setIsDragging(false);
-    onDragEnd();
-  }, [onDragEnd]);
+  const { isDragging, dragHandleProps } = useDraggable(dragData, displayName);
 
   const handleRemove = useCallback(() => {
     onRemove(zone, index);
@@ -92,32 +85,39 @@ export function ZoneFieldItem({
     [index, onAggregationChange]
   );
 
-  const handleDragOver = useCallback(
-    (e: React.DragEvent) => {
+  const handleContextMenu = useCallback(
+    (e: React.MouseEvent) => {
+      // Only show context menu for values zone
+      if (zone !== 'values') return;
+
       e.preventDefault();
-      onDragOver(e, index);
+      setMenuPosition({
+        x: e.clientX,
+        y: e.clientY,
+      });
+      setShowContextMenu(true);
     },
-    [index, onDragOver]
+    [zone]
   );
 
-  const handleDrop = useCallback(
-    (e: React.DragEvent) => {
-      e.preventDefault();
-      onDrop(e, index);
-    },
-    [index, onDrop]
-  );
+  const handleValueFieldSettings = useCallback(() => {
+    if (onOpenValueSettings) {
+      onOpenValueSettings(index);
+    }
+  }, [index, onOpenValueSettings]);
+
+  const handleNumberFormat = useCallback(() => {
+    if (onOpenNumberFormat) {
+      onOpenNumberFormat(index);
+    }
+  }, [index, onOpenNumberFormat]);
 
   return (
     <>
       <div
-        ref={itemRef}
+        {...dragHandleProps}
         className={`${styles.zoneField} ${isDragging ? 'dragging' : ''}`}
-        draggable
-        onDragStart={handleDragStart}
-        onDragEnd={handleDragEnd}
-        onDragOver={handleDragOver}
-        onDrop={handleDrop}
+        onContextMenu={handleContextMenu}
       >
         <span className={styles.zoneFieldName} title={displayName}>
           {displayName}
@@ -145,6 +145,15 @@ export function ZoneFieldItem({
           position={menuPosition}
           onSelect={handleAggregationSelect}
           onClose={() => setShowAggMenu(false)}
+        />
+      )}
+      {showContextMenu && zone === 'values' && (
+        <ValueFieldContextMenu
+          position={menuPosition}
+          onValueFieldSettings={handleValueFieldSettings}
+          onNumberFormat={handleNumberFormat}
+          onRemove={handleRemove}
+          onClose={() => setShowContextMenu(false)}
         />
       )}
     </>

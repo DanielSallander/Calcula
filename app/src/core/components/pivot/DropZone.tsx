@@ -1,8 +1,9 @@
 //! FILENAME: app/src/core/components/pivot/DropZone.tsx
 
-import React, { useCallback, useState } from 'react';
+import React, { useCallback, useRef } from 'react';
 import { styles } from './PivotEditor.styles';
 import { ZoneFieldItem } from './ZoneFieldItem';
+import { useDropZone } from './useDragDrop';
 import type {
   ZoneField,
   DragField,
@@ -35,101 +36,59 @@ export function DropZone({
   onDragStart,
   onDragEnd,
 }: DropZoneProps): React.ReactElement {
-  const [isDragOver, setIsDragOver] = useState(false);
-  const [dropIndex, setDropIndex] = useState<number | null>(null);
+  const contentRef = useRef<HTMLDivElement>(null);
 
-  const handleDragOver = useCallback((e: React.DragEvent) => {
-    e.preventDefault();
-    e.dataTransfer.dropEffect = 'move';
-    setIsDragOver(true);
-  }, []);
-
-  const handleDragLeave = useCallback((e: React.DragEvent) => {
-    if (e.currentTarget.contains(e.relatedTarget as Node)) {
-      return;
-    }
-    setIsDragOver(false);
-    setDropIndex(null);
-  }, []);
-
+  // Handle drop - either reorder within zone or drop from outside
   const handleDrop = useCallback(
-    (e: React.DragEvent) => {
-      e.preventDefault();
-      setIsDragOver(false);
-      setDropIndex(null);
-
-      try {
-        const data = e.dataTransfer.getData('application/json');
-        if (!data) return;
-
-        const dragField: DragField = JSON.parse(data);
-
-        if (dragField.fromZone === zone && dragField.fromIndex !== undefined) {
-          // Reordering within the same zone
-          const targetIndex = dropIndex ?? fields.length;
-          if (targetIndex !== dragField.fromIndex) {
-            onReorder(zone, dragField.fromIndex, targetIndex);
-          }
-        } else {
-          // Dropping from field list or another zone
-          onDrop(zone, dragField, dropIndex ?? undefined);
+    (dragField: DragField, insertIndex?: number) => {
+      if (dragField.fromZone === zone && dragField.fromIndex !== undefined) {
+        // Reordering within the same zone
+        const targetIndex = insertIndex ?? fields.length;
+        if (targetIndex !== dragField.fromIndex) {
+          onReorder(zone, dragField.fromIndex, targetIndex);
         }
-      } catch (err) {
-        console.error('Failed to parse drag data:', err);
+      } else {
+        // Dropping from field list or another zone
+        onDrop(zone, dragField, insertIndex);
       }
     },
-    [zone, fields.length, dropIndex, onDrop, onReorder]
+    [zone, fields.length, onDrop, onReorder]
   );
 
-  const handleFieldDragOver = useCallback(
-    (e: React.DragEvent, index: number) => {
-      e.preventDefault();
-      setDropIndex(index);
-    },
-    []
-  );
-
-  const handleFieldDrop = useCallback(
-    (e: React.DragEvent, index: number) => {
-      e.preventDefault();
-      e.stopPropagation();
-      setIsDragOver(false);
-
-      try {
-        const data = e.dataTransfer.getData('application/json');
-        if (!data) return;
-
-        const dragField: DragField = JSON.parse(data);
-
-        if (dragField.fromZone === zone && dragField.fromIndex !== undefined) {
-          if (index !== dragField.fromIndex) {
-            onReorder(zone, dragField.fromIndex, index);
-          }
-        } else {
-          onDrop(zone, dragField, index);
-        }
-      } catch (err) {
-        console.error('Failed to parse drag data:', err);
+  // Calculate insert index based on Y position
+  const getInsertIndex = useCallback(
+    (y: number): number => {
+      if (!contentRef.current || fields.length === 0) {
+        return 0;
       }
 
-      setDropIndex(null);
+      const children = contentRef.current.children;
+      for (let i = 0; i < children.length; i++) {
+        const child = children[i] as HTMLElement;
+        const rect = child.getBoundingClientRect();
+        const midY = rect.top + rect.height / 2;
+        if (y < midY) {
+          return i;
+        }
+      }
+      return fields.length;
     },
-    [zone, onDrop, onReorder]
+    [fields.length]
   );
+
+  const { isDragOver, dropZoneProps } = useDropZone(zone, handleDrop, getInsertIndex);
 
   const placeholder = getPlaceholder(zone);
 
   return (
     <div
+      {...dropZoneProps}
       className={`${styles.dropZone} ${isDragOver ? 'drag-over' : ''} ${
         fullWidth ? 'full-width' : ''
       }`}
-      onDragOver={handleDragOver}
-      onDragLeave={handleDragLeave}
-      onDrop={handleDrop}
     >
       <div className={styles.dropZoneTitle}>{title}</div>
-      <div className={styles.dropZoneContent}>
+      <div ref={contentRef} className={styles.dropZoneContent}>
         {fields.length === 0 ? (
           <div className={styles.dropZonePlaceholder}>{placeholder}</div>
         ) : (
@@ -145,8 +104,6 @@ export function DropZone({
               }
               onDragStart={onDragStart}
               onDragEnd={onDragEnd}
-              onDragOver={handleFieldDragOver}
-              onDrop={handleFieldDrop}
             />
           ))
         )}

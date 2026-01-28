@@ -1,8 +1,8 @@
 //! FILENAME: app/src/core/components/pivot/FieldList.tsx
-import React, { useMemo } from 'react';
+import React from 'react';
 import { styles } from './PivotEditor.styles';
 import { FieldItem } from './FieldItem';
-import type { SourceField, DragField, ZoneField } from './types';
+import type { SourceField, DragField } from './types';
 
 interface FieldListProps {
   fields: SourceField[];

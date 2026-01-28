@@ -9,6 +9,26 @@ export { DropZone } from './DropZone';
 export { DropZones } from './DropZones';
 export { LayoutOptions } from './LayoutOptions';
 export { usePivotEditorState } from './usePivotEditorState';
+export { PivotGrid } from './PivotGrid';
+export type { PivotGridProps, PivotGridHandle } from './PivotGrid';
+
+// Context menus and modals
+export { ValueFieldContextMenu } from './ValueFieldContextMenu';
+export type { ValueFieldContextMenuProps } from './ValueFieldContextMenu';
+export { ValueFieldSettingsModal } from './ValueFieldSettingsModal';
+export type { ValueFieldSettingsModalProps, ValueFieldSettings } from './ValueFieldSettingsModal';
+export { NumberFormatModal, NUMBER_FORMAT_PRESETS } from './NumberFormatModal';
+export type { NumberFormatModalProps, NumberFormatOption } from './NumberFormatModal';
+
+// Sorting
+export { SortDropdown } from './SortDropdown';
+export type { SortDropdownProps } from './SortDropdown';
+
+// Filtering
+export { FilterDropdown } from './FilterDropdown';
+export type { FilterDropdownProps } from './FilterDropdown';
+export { FilterBar } from './FilterBar';
+export type { FilterBarProps, FilterFieldState } from './FilterBar';
 
 export type {
   PivotId,
