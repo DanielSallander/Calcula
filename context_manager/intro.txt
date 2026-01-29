@@ -2,60 +2,89 @@ I am building "Calcula," an ambitious open-source spreadsheet engine (Excel alte
 
 ## ARCHITECTURE:
 
-### Core + Add-in Architecture
-Calcula follows a **plugin architecture** where the application is divided into:
-1. **Core Shell** - A minimal, stable foundation providing "spreadsheet primitives"
-2. **Add-ins** - Self-contained feature modules that plug into the shell via extension points
-The inspiration for this architecture is "Microsoft VSCode".
+### Microkernel Architecture (VSCode Style)
 
-### The Three Layers
-1. **The Brain (Core Logic):** Written in **Rust**. It handles the Cell Dependency Graph, Formula Parsing, and Data Storage. It must be memory-safe and incredibly fast.
-    * Modules: `engine` (calculation), `parser` (formulas), `persistence` (file I/O).
-2. **The Face (Frontend):** Written in **TypeScript + React**. It uses HTML5 Canvas for rendering the grid to support 1M+ rows (virtualization). It does NOT use HTML tables for the grid.
-3. **The Bridge:** Uses **Tauri** to connect the Rust backend to the WebView frontend.
+Calcula follows a strict **Microkernel Architecture**. The application is divided into:
+
+1. **The Kernel (Core)** - A minimal, stable engine that knows *nothing* about specific features.
+2. **The Shell (Host)** - The application frame that orchestrates the lifecycle and loads extensions.
+3. **The Extensions** - All user-facing features (formatting, charts, sort) are implemented as extensions, even if they are "built-in".
+
+### The Four Layers
+
+1. **The Brain (Backend):** Written in **Rust**. Handles the Cell Dependency Graph, Formula Parsing, and Persistence.
+2. **The Face (Core Frontend):** Written in **TypeScript + React**. A pure component that renders the virtualized grid on HTML5 Canvas. It has **zero dependencies** on the Shell or Extensions.
+3. **The API (Facade):** A strictly typed "Sandbox" layer. This is the **only** bridge between the Core and Extensions.
+4. **The Bridge:** Uses **Tauri** to connect Rust to the WebView.
 
 ### Directory Structure
-```
-app/src/
-  core/           # Core spreadsheet functionality (grid, selection, editing, clipboard)
-  shell/          # Minimal UI shell (ribbon container, layout)
-  addins/         # Add-in modules (formatting, functions, etc.)
-    _disabled/    # Parked add-ins awaiting migration to new system
-```
+
+Calcula/
+├── app/
+│   ├── src/
+│   │   ├── core/           # The Engine. PURE. 
+│   │   │                   # RULE: Cannot import from 'shell' or 'extensions'.
+│   │   │
+│   │   ├── shell/          # The Host.
+│   │   │                   # Responsibilities: 
+│   │   │                   # 1. Mounts the Core Grid.
+│   │   │                   # 2. Scans the 'extensions' folder.
+│   │   │                   # 3. Registers them into the Core.
+│   │   │
+│   │   └── api/            # The "Sandpit".
+│   │                       # The ONLY interfaces extensions are allowed to touch.
+│   │
+│   └── extensions/         # <--- MOVED OUTSIDE 'src' (Optional but recommended)
+│       ├── _standard/      # Your "Base" extensions.
+│       │   ├── formatting/ # Font, Color, Borders
+│       │   ├── sorting/    # Sort & Filter logic
+│       │   └── charts/     # Charting engine
+│       │
+│       └── _3rdparty/      # User installed extensions (gitignored)
 
 ### What Lives Where
 
-**Core (`src/core/`)** - Foundational, universal, primitive features:
-- Grid engine, rendering pipeline, virtual scrolling
-- Selection model (single, range, multi-select)
-- Cell editing (inline editor, formula bar)
-- Fill handle
-- Clipboard (cut, copy, paste)
-- Keyboard navigation
-- Undo/Redo
-- Core formula functions (SUM, IF, VLOOKUP, etc.)
+**Core (`app/src/core/`)** - The "Kernel". Universal primitives only:
 
-**Shell (`src/shell/`)** - Minimal application frame:
-- App layout (ribbon area, grid area, status bar)
-- Empty ribbon container (add-ins populate it)
-- Add-in loader
+* Grid rendering pipeline & virtualization
+* Selection model & Cursor logic
+* Input handling (Keyboard/Mouse primitives)
+* Undo/Redo stack
+* **Constraint:** Never imports from `shell` or `extensions`.
 
-**Add-ins (`src/addins/`)** - Self-contained feature modules:
-- Formatting (font, alignment, number formats, colors)
-- Extended function library (financial, statistical, text, date)
-- Data tools (sort, filter, validation)
-- Charts
-- Comments
-- And more...
+**Shell (`app/src/shell/`)** - The "Container":
 
-### Extension Points
-Add-ins interact with core through defined extension points:
-- `registerCommand(command)` - Register executable commands
-- `registerRibbonTab(tab)` - Add ribbon tabs
-- `registerRibbonGroup(tabId, group)` - Add groups to tabs
-- `registerFunction(name, impl)` - Add formula functions
-- `onSelectionChange(callback)` - React to selection changes
-- `onCellChange(callback)` - React to cell edits
+* Window Layout (Sidebar, Status Bar)
+* **Extension Host:** Responsible for scanning, loading, and activating extensions.
+* **Constraint:** Orchestrates Core and Extensions but contains no business logic.
+
+**API (`app/src/api/`)** - The "Contract":
+
+* `types.ts`: Stable interfaces re-exported from Core.
+* `commands.ts`: Registry definitions.
+* **Constraint:** The *only* import allowed in an Extension file.
+
+**Extensions (`app/extensions/`)** - The "Features":
+
+* **Built-in:** Formatting, Sort/Filter, Charts, Fin/Stat Functions.
+* **User:** Future 3rd party plugins.
+* **Constraint:** Must function exactly like 3rd party plugins. No "backdoor" access to Core internal state.
+
+### Extension Points (via `src/api`)
+
+Extensions interact with the Core *exclusively* through the API Facade:
+
+* `commands.register(id, handler)` - Register actions (e.g., "format.bold").
+* `ui.ribbon.registerTab(tabDef)` - Inject UI elements.
+* `formulas.registerFunction(name, impl)` - Add calculation logic.
+* `events.onSelectionChange(cb)` - Listen for context.
+
+## MICROKERNEL RULES (Strict Enforcement):
+
+1. **The "Alien" Rule:** The Core must treat all extensions (even built-in ones like "Sorting") as foreign objects. Hard imports from `core` to `extensions` are **strictly forbidden**.
+2. **The Facade Rule:** Extensions may **only** import from `app/src/api`. They must never import deep into `app/src/core/...`.
+3. **Dogfooding:** "Base" features (Formatting, Charts) must be built using the public Extension API. If the API cannot support "Sort", the API must be improved, rather than hacking the feature into the Core.
+4. **Inversion of Control:** The Core does not call Extensions. The Core emits events/hooks (via the API), and Extensions respond.
 
 ## TECH STACK:
 * OS: Windows 11
@@ -100,14 +129,29 @@ export interface CellData {
 }
 ```
 
-### Rules
-1. **Never use manual `#[serde(rename = "...")]` on individual fields** - use struct-level `rename_all` instead
-2. **All Tauri API types must live in `api_types.rs`** - this is the single source of truth
-3. **TypeScript interfaces must mirror Rust structs** with camelCase property names
-4. **When adding new fields**: just add them - serde converts automatically
-5. **When accessing properties in TypeScript**: always use camelCase (cell.styleIndex, style.textColor)
-6. **When accessing fields in Rust**: always use snake_case (cell.style_index, style.text_color)
-7. **Provide the full functional block or file**: (no " // ... rest of code ").
+### Rules & Constraints
+
+**Architecture & Import boundaries**
+
+1. **The "Alien" Rule:** The Core (`src/core`) must **never** import from `src/extensions` or `src/shell`.
+2. **The Facade Rule:** Extensions (`src/extensions`) must **only** import from `src/api`. Deep imports into `src/core` are strictly forbidden.
+3. **Primitive vs. Logic:** If a feature requires new logic (e.g., Sorting), implement generic primitives in Core (e.g., `read/write range`) and the specific business logic in an Extension.
+4. **Feature Location:** Default to building features as **Extensions** (`src/extensions/builtin/`) unless they are foundational primitives (like Rendering or Undo/Redo).
+
+**Naming & Data Types (Rust <-> TS Boundary)**
+5.  **Strict CamelCase/SnakeCase:**
+* **TypeScript:** Always use `camelCase` (e.g., `styleIndex`, `textColor`).
+* **Rust:** Always use `snake_case` (e.g., `style_index`, `text_color`).
+6.  **Serde Configuration:**
+	* Use `#[serde(rename_all = "camelCase")]` on Rust structs.
+	* **Never** use manual `#[serde(rename = "...")]` on individual fields.
+7.  **Type Centralization:** All Tauri API types must live in `api_types.rs` (Rust) and `types.ts` (TS). These files are the single source of truth.
+8.  **Interface Mirroring:** TypeScript interfaces in `types.ts` must exactly mirror Rust structs in `api_types.rs`.
+
+**Coding Standards**
+9.  **Completeness:** Provide the full functional block or file. Do not use placeholders like `// ... rest of code`.
+10. **Windows Native:** Assume Windows 11 paths and environment.
+11. **Clean Output:** Avoid Unicode characters in terminal output (use `[OK]` instead of `✓`).
 
 ### Common Mistakes to Avoid
 - Using `style_index` in TypeScript (should be `styleIndex`)
