@@ -120,7 +120,7 @@ function LayoutInner(): React.ReactElement {
         try {
           const valuesResponse = await getPivotFieldUniqueValues(pivotInfo.pivotId, fieldIndex);
           console.log("[Layout] Got unique values:", valuesResponse);
-          allValues = valuesResponse?.unique_values ?? [];
+          allValues = valuesResponse?.uniqueValues ?? [];
         } catch (valuesError) {
           console.error("[Layout] Failed to get unique values:", valuesError);
           // Continue with empty array - user will see "No matching values"

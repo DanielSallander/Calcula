@@ -1,8 +1,9 @@
 //! FILENAME: app/src-tauri/src/pivot/utils.rs
 use crate::pivot::types::*;
 use engine::pivot::{
-    AggregationType, FilterCondition, PivotField, PivotFilter, PivotLayout, PivotView, ReportLayout,
-    ShowValuesAs, SortOrder, ValueField, ValuesPosition,
+    AggregationType, CacheValue, FilterCondition, PivotCache, PivotDefinition, PivotField,
+    PivotFilter, PivotLayout, PivotView, ReportLayout, ShowValuesAs, SortOrder, ValueField,
+    ValuesPosition, VALUE_ID_EMPTY,
 };
 
 // ============================================================================
@@ -261,8 +262,30 @@ pub(crate) fn values_position_to_string(pos: ValuesPosition) -> String {
     }
 }
 
-/// Converts engine PivotView to response format
-pub(crate) fn view_to_response(view: &PivotView) -> PivotViewResponse {
+/// Convert a CacheValue to a display string
+pub(crate) fn cache_value_to_string(value: &CacheValue) -> String {
+    match value {
+        CacheValue::Empty => "(Blank)".to_string(),
+        CacheValue::Number(n) => {
+            let f = n.as_f64();
+            if f.fract() == 0.0 {
+                format!("{}", f as i64)
+            } else {
+                format!("{}", f)
+            }
+        }
+        CacheValue::Text(s) => s.clone(),
+        CacheValue::Boolean(b) => if *b { "TRUE".to_string() } else { "FALSE".to_string() },
+        CacheValue::Error(e) => format!("#{}", e),
+    }
+}
+
+/// Converts engine PivotView to response format, including filter row data with unique values
+pub(crate) fn view_to_response(
+    view: &PivotView,
+    definition: &PivotDefinition,
+    cache: &mut PivotCache,
+) -> PivotViewResponse {
     let rows: Vec<PivotRowData> = view
         .cells
         .iter()
@@ -292,7 +315,7 @@ pub(crate) fn view_to_response(view: &PivotView) -> PivotViewResponse {
                     is_collapsed: cell.is_collapsed,
                     background_style: format!("{:?}", cell.background_style),
                     number_format: cell.number_format.clone(),
-                    filter_field_index: cell.filter_field_index, // Added missing field
+                    filter_field_index: cell.filter_field_index,
                 })
                 .collect();
 
@@ -317,6 +340,62 @@ pub(crate) fn view_to_response(view: &PivotView) -> PivotViewResponse {
         })
         .collect();
 
+    // Build filter rows with unique values from the cache
+    let filter_rows: Vec<FilterRowData> = definition
+        .filter_fields
+        .iter()
+        .enumerate()
+        .map(|(idx, filter)| {
+            let field_index = filter.field.source_index;
+            let field_name = filter.field.name.clone();
+
+            // Get unique values from cache
+            let unique_values: Vec<String> = if let Some(field_cache) = cache.fields.get_mut(field_index) {
+                // Clone sorted_ids to end the mutable borrow before calling get_value
+                let sorted_ids = field_cache.sorted_ids().to_vec();
+                sorted_ids
+                    .iter()
+                    .filter_map(|&id| {
+                        if id == VALUE_ID_EMPTY {
+                            return None;
+                        }
+                        field_cache.get_value(id).map(cache_value_to_string)
+                    })
+                    .collect()
+            } else {
+                Vec::new()
+            };
+
+            // Get selected values (all values minus hidden items)
+            let hidden_items = &filter.field.hidden_items;
+            let selected_values: Vec<String> = unique_values
+                .iter()
+                .filter(|v| !hidden_items.contains(v))
+                .cloned()
+                .collect();
+
+            // Calculate display value for the filter cell
+            let display_value = if hidden_items.is_empty() {
+                "(All)".to_string()
+            } else if selected_values.len() == 1 {
+                selected_values[0].clone()
+            } else if selected_values.is_empty() {
+                "(None)".to_string()
+            } else {
+                "(Multiple Items)".to_string()
+            };
+
+            FilterRowData {
+                field_index,
+                field_name,
+                selected_values,
+                unique_values,
+                display_value,
+                view_row: idx,
+            }
+        })
+        .collect();
+
     PivotViewResponse {
         pivot_id: view.pivot_id,
         version: view.version,
@@ -325,7 +404,7 @@ pub(crate) fn view_to_response(view: &PivotView) -> PivotViewResponse {
         row_label_col_count: view.row_label_col_count,
         column_header_row_count: view.column_header_row_count,
         filter_row_count: view.filter_row_count,
-        filter_rows: Vec::new(),
+        filter_rows,
         rows,
         columns,
     }

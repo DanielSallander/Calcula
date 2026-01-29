@@ -1,7 +1,7 @@
 # Pivot table filter
 
-We now have the pivot table filter displayed in cells above the rows and columns of the pivot table (see attached image).
-However, I cannot click the cell that should contain the filters (the cell that contains "(All)").
-This should be a drop down list with unique values of the field currently used as filter, in this case column A.
-Also, as seen in the other image there is now this strange scrollbar in the "Choose fields to add to report" area.
-Lets remove this scrollbar and have objects inside fit to the size of the container instead.
+We now have the pivot table filter displayed in cells above the rows and columns of the pivot table.
+We have the pivot filter correctly as a drop down list when clicking the cell (see the image).
+The drop down frontend is mainly handled in app\src\core\components\pivot\FilterDropdown.tsx
+Now we must implement so that the values in the pivot filter is correctly populated from the data.
+The list of values shown in the pivot filter should be unique values of the field its using.

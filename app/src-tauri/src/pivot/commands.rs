@@ -2,7 +2,7 @@
 use crate::pivot::operations::*;
 use crate::pivot::types::*;
 use crate::pivot::utils::*;
-use crate::{log_debug, log_info, AppState};
+use crate::{log_debug, log_info, AppState, PivotRegion};
 use engine::pivot::{drill_down, CacheValue, PivotDefinition, PivotId, VALUE_ID_EMPTY};
 use tauri::State;
 
@@ -79,7 +79,7 @@ pub fn create_pivot_table(
     // Calculate initial view (will be empty since no fields are configured)
     let mut cache_mut = cache;
     let view = safe_calculate_pivot(&definition, &mut cache_mut);
-    let response = view_to_response(&view);
+    let response = view_to_response(&view, &definition, &mut cache_mut);
 
     // Update pivot region tracking (tracks even empty pivots with reserved space)
     update_pivot_region(&state, pivot_id, dest_sheet_idx, destination, &view);
@@ -193,6 +193,7 @@ pub fn update_pivot_fields(
 
     // Recalculate view
     let view = safe_calculate_pivot(definition, cache);
+    let response = view_to_response(&view, definition, cache);
     
     // Get destination info before dropping pivot_tables lock
     let destination = definition.destination;
@@ -208,16 +209,15 @@ pub fn update_pivot_fields(
     
     // Update pivot region tracking
     update_pivot_region(&state, pivot_id, dest_sheet_idx, destination, &view);
-    
-    let response = view_to_response(&view);
 
     log_info!(
         "PIVOT",
-        "updated pivot_id={} version={} rows={} cols={}",
+        "updated pivot_id={} version={} rows={} cols={} filters={}",
         request.pivot_id,
         response.version,
         response.row_count,
-        response.col_count
+        response.col_count,
+        response.filter_rows.len()
     );
 
     Ok(response)
@@ -273,6 +273,7 @@ pub fn toggle_pivot_group(
 
     // Recalculate view
     let view = safe_calculate_pivot(definition, cache);
+    let response = view_to_response(&view, definition, cache);
     
     // Get destination info
     let destination = definition.destination;
@@ -288,8 +289,6 @@ pub fn toggle_pivot_group(
     
     // Update pivot region tracking
     update_pivot_region(&state, pivot_id, dest_sheet_idx, destination, &view);
-    
-    let response = view_to_response(&view);
 
     Ok(response)
 }
@@ -317,7 +316,7 @@ pub fn get_pivot_view(
         .ok_or_else(|| format!("Pivot table {} not found", id))?;
 
     let view = safe_calculate_pivot(definition, cache);
-    Ok(view_to_response(&view))
+    Ok(view_to_response(&view, definition, cache))
 }
 
 /// Deletes a pivot table
@@ -486,6 +485,7 @@ pub fn refresh_pivot_cache(
     definition.bump_version();
 
     let view = safe_calculate_pivot(definition, cache);
+    let response = view_to_response(&view, definition, cache);
     
     drop(pivot_tables);
     
@@ -494,8 +494,6 @@ pub fn refresh_pivot_cache(
     
     // Update pivot region tracking
     update_pivot_region(&state, pivot_id, dest_sheet_idx, destination, &view);
-    
-    let response = view_to_response(&view);
 
     log_info!(
         "PIVOT",
@@ -690,10 +688,7 @@ pub fn get_pivot_field_unique_values(
     let field_name = field.name.clone();
 
     // Collect unique values as strings
-    // 'sorted_ids()' borrows 'field' mutably. If we iterate the result directly,
-    // the mutable borrow persists through the loop, preventing us from calling
-    // 'field.get_value()' (an immutable borrow) inside the closure.
-    // Cloning the IDs ends the mutable borrow immediately.
+    // Clone sorted_ids to end the mutable borrow before calling get_value
     let sorted_ids = field.sorted_ids().to_vec();
     
     let unique_values: Vec<String> = sorted_ids
@@ -718,22 +713,4 @@ pub fn get_pivot_field_unique_values(
         field_name,
         unique_values,
     })
-}
-
-/// Convert a CacheValue to a display string
-fn cache_value_to_string(value: &CacheValue) -> String {
-    match value {
-        CacheValue::Empty => "(Blank)".to_string(),
-        CacheValue::Number(n) => {
-            let f = n.as_f64();
-            if f.fract() == 0.0 {
-                format!("{}", f as i64)
-            } else {
-                format!("{}", f)
-            }
-        }
-        CacheValue::Text(s) => s.clone(),
-        CacheValue::Boolean(b) => if *b { "TRUE".to_string() } else { "FALSE".to_string() },
-        CacheValue::Error(e) => format!("#{}", e),
-    }
 }

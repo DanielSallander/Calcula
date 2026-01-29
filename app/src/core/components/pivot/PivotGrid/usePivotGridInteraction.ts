@@ -5,7 +5,7 @@ import type {
   FilterRowData,
   PivotId,
 } from '../../../lib/pivot-api';
-import { updatePivotFields } from '../../../lib/pivot-api';
+import { updatePivotFields, getPivotFieldUniqueValues } from '../../../lib/pivot-api';
 import type { PivotInteractiveBounds } from '../../../lib/gridRenderer/rendering/pivot';
 
 // =============================================================================
@@ -215,7 +215,7 @@ export function usePivotGridInteraction(
   // ==========================================================================
 
   const handleCanvasClick = useCallback(
-    (e: React.MouseEvent<HTMLCanvasElement>) => {
+    async (e: React.MouseEvent<HTMLCanvasElement>) => {
       const canvas = canvasRef.current;
       if (!canvas || !pivotView) return;
 
@@ -225,11 +225,30 @@ export function usePivotGridInteraction(
 
       // 1. Check filter button clicks FIRST
       const clickedFilter = findClickedFilterButton(canvasX, canvasY);
-      if (clickedFilter && pivotView.filter_rows) {
-        const filterRow = pivotView.filter_rows.find(
+      if (clickedFilter) {
+        // Find the filter row metadata from pivotView
+        const filterRowMeta = pivotView.filter_rows?.find(
           (fr) => fr.field_index === clickedFilter.fieldIndex
         );
-        if (filterRow) {
+
+        // Fetch unique values from backend API (always fresh)
+        try {
+          const response = await getPivotFieldUniqueValues(
+            pivotId,
+            clickedFilter.fieldIndex
+          );
+
+          // Build filterRow with fetched unique values
+          const filterRow: FilterRowData = {
+            field_index: clickedFilter.fieldIndex,
+            field_name: response.field_name,
+            unique_values: response.unique_values,
+            // Use existing selected values from metadata, or default to all selected
+            selected_values: filterRowMeta?.selected_values ?? response.unique_values,
+            display_value: filterRowMeta?.display_value ?? '(All)',
+            view_row: filterRowMeta?.view_row ?? 0,
+          };
+
           // Convert canvas coords to screen coords for dropdown positioning
           const screenX = rect.left + clickedFilter.bounds.x;
           const screenY = rect.top + clickedFilter.bounds.y + clickedFilter.bounds.height + 2;
@@ -244,8 +263,10 @@ export function usePivotGridInteraction(
               height: clickedFilter.bounds.height,
             },
           });
-          return;
+        } catch (error) {
+          console.error('Failed to fetch filter unique values:', error);
         }
+        return;
       }
 
       // 2. Check expand/collapse icon clicks
@@ -266,6 +287,7 @@ export function usePivotGridInteraction(
     },
     [
       canvasRef,
+      pivotId,
       pivotView,
       findClickedFilterButton,
       findClickedExpandIcon,

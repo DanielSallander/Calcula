@@ -487,9 +487,9 @@ export async function getPivotRegionsForSheet(): Promise<PivotRegionData[]> {
 
 /** Response containing unique values for a field */
 export interface FieldUniqueValuesResponse {
-  field_index: number;
-  field_name: string;
-  unique_values: string[];
+  fieldIndex: number;
+  fieldName: string;
+  uniqueValues: string[];
 }
 
 /**
