@@ -9,7 +9,8 @@
       "Bash(npm run dev:*)",
       "Bash(taskkill:*)",
       "Bash(nul)",
-      "Bash(npx tsc:*)"
+      "Bash(npx tsc:*)",
+      "Bash(rustfmt:*)"
     ],
     "deny": [],
     "ask": []

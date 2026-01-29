@@ -4,10 +4,10 @@
 // Includes fill handle and clipboard support with marching ants.
 
 import { useState, useCallback, useEffect, useRef } from "react";
-import { 
-  useSelection, 
-  useMouseSelection, 
-  useGridKeyboard, 
+import {
+  useSelection,
+  useMouseSelection,
+  useGridKeyboard,
   useCellEvents,
   useEditing,
   useViewport,
@@ -15,14 +15,16 @@ import {
   useFillHandle,
 } from "../../hooks";
 import { useGridState, useGridContext } from "../../state";
-import { 
-  getCell, 
-  setColumnWidth as setColumnWidthApi, 
+import {
+  getCell,
+  setColumnWidth as setColumnWidthApi,
   setRowHeight as setRowHeightApi,
   clearRange,
   undo as undoApi,
   redo as redoApi,
 } from "../../lib/tauri-api";
+import { getPivotAtCell } from "../../lib/pivot-api";
+import type { FilterZoneInfo } from "../../lib/pivot-api";
 import { setColumnWidth, setRowHeight } from "../../state/gridActions";
 import { cellEvents } from "../../lib/cellEvents";
 import type { GridCanvasHandle } from "../Grid";
@@ -354,9 +356,33 @@ export function useSpreadsheetSelection({
     onFillHandleDoubleClick: handleFillHandleDoubleClick,
   });
 
-  // Wrap mouse handlers to include fill handle logic
+  // Check if a cell is a filter dropdown in a pivot region
+  const checkPivotFilterClick = useCallback(
+    async (row: number, col: number): Promise<FilterZoneInfo | null> => {
+      try {
+        const pivotInfo = await getPivotAtCell(row, col);
+        if (!pivotInfo || !pivotInfo.filterZones) {
+          return null;
+        }
+
+        // Check if the clicked cell matches any filter zone
+        for (const zone of pivotInfo.filterZones) {
+          if (zone.row === row && zone.col === col) {
+            return zone;
+          }
+        }
+        return null;
+      } catch (error) {
+        console.error("[useSpreadsheetSelection] Failed to check pivot filter:", error);
+        return null;
+      }
+    },
+    []
+  );
+
+  // Wrap mouse handlers to include fill handle logic and pivot filter detection
   const handleMouseDown = useCallback(
-    (event: React.MouseEvent<HTMLElement>) => {
+    async (event: React.MouseEvent<HTMLElement>) => {
       const rect = event.currentTarget.getBoundingClientRect();
       const mouseX = event.clientX - rect.left;
       const mouseY = event.clientY - rect.top;
@@ -368,9 +394,37 @@ export function useSpreadsheetSelection({
         return;
       }
 
+      // Get cell from click position to check for pivot filter
+      const { getCellFromPixel } = await import("../../lib/gridRenderer");
+      const clickedCell = getCellFromPixel(mouseX, mouseY, state.config, state.viewport, state.dimensions);
+
+      if (clickedCell) {
+        // Check if this is a pivot filter dropdown cell
+        const filterZone = await checkPivotFilterClick(clickedCell.row, clickedCell.col);
+        if (filterZone) {
+          // Emit event to open filter menu instead of selecting the cell
+          event.preventDefault();
+          event.stopPropagation();
+
+          window.dispatchEvent(
+            new CustomEvent("pivot:openFilterMenu", {
+              detail: {
+                fieldIndex: filterZone.fieldIndex,
+                fieldName: filterZone.fieldName,
+                row: filterZone.row,
+                col: filterZone.col,
+                anchorX: event.clientX,
+                anchorY: event.clientY,
+              },
+            })
+          );
+          return;
+        }
+      }
+
       baseHandleMouseDown(event);
     },
-    [baseHandleMouseDown, isOverFillHandle, startFillDrag]
+    [baseHandleMouseDown, isOverFillHandle, startFillDrag, checkPivotFilterClick, state.config, state.viewport, state.dimensions]
   );
 
   const handleMouseMove = useCallback(

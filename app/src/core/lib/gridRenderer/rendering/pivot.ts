@@ -419,6 +419,23 @@ function drawPivotCell(
   ctx.lineWidth = 1;
   ctx.strokeRect(x + 0.5, y + 0.5, width - 1, height - 1);
 
+  // Handle FilterLabel - bold, right-aligned text
+  if (cell.cell_type === 'FilterLabel') {
+    const displayText = cell.formatted_value || getCellDisplayValue(cell.value) || '';
+    if (displayText) {
+      ctx.fillStyle = theme.filterText;
+      ctx.font = `600 ${theme.fontSize}px ${theme.fontFamily}`;
+      ctx.textAlign = 'right';
+      ctx.textBaseline = 'middle';
+
+      const textX = x + width - CELL_PADDING_X;
+      const textY = y + height / 2;
+      const truncatedText = truncateText(ctx, displayText, width - CELL_PADDING_X * 2);
+      ctx.fillText(truncatedText, textX, textY);
+    }
+    return result;
+  }
+
   // Handle FilterDropdown specially
   if (cell.cell_type === 'FilterDropdown') {
     const buttonY = y + Math.floor((height - FILTER_BUTTON_HEIGHT) / 2);
@@ -742,6 +759,19 @@ export function measurePivotColumnWidth(
         // Account for expand/collapse icon
         if (cell.is_expandable) {
           totalWidth += EXPAND_ICON_SIZE + EXPAND_ICON_PADDING;
+        }
+
+        // Account for filter label - ensure bold font is measured correctly
+        if (cell.cell_type === 'FilterLabel') {
+          ctx.font = `600 ${theme.fontSize}px ${theme.fontFamily}`;
+          const filterTextWidth = ctx.measureText(displayText).width;
+          totalWidth = filterTextWidth + CELL_PADDING_X * 2;
+          ctx.font = `${theme.headerFontWeight} ${theme.fontSize}px ${theme.fontFamily}`;
+        }
+
+        // Account for filter dropdown button width
+        if (cell.cell_type === 'FilterDropdown') {
+          totalWidth = Math.max(totalWidth, FILTER_BUTTON_MIN_WIDTH + CELL_PADDING_X * 2);
         }
 
         maxContentWidth = Math.max(maxContentWidth, totalWidth);

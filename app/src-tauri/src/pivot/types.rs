@@ -201,6 +201,18 @@ pub struct PivotRegionInfo {
     pub source_fields: Vec<SourceFieldInfo>,
     /// Current field configuration - which fields are in which zones
     pub field_configuration: PivotFieldConfiguration,
+    /// Filter zones: (row, col, field_index) for each filter dropdown cell
+    pub filter_zones: Vec<FilterZoneInfo>,
+}
+
+/// Info about a filter dropdown cell position
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FilterZoneInfo {
+    pub row: u32,
+    pub col: u32,
+    pub field_index: usize,
+    pub field_name: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

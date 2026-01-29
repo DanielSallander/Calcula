@@ -1,8 +1,8 @@
 //! FILENAME: app/src-tauri/src/pivot/utils.rs
 use crate::pivot::types::*;
 use engine::pivot::{
-    AggregationType, PivotField, PivotLayout, PivotView, ReportLayout, ShowValuesAs, SortOrder,
-    ValueField, ValuesPosition,
+    AggregationType, FilterCondition, PivotField, PivotFilter, PivotLayout, PivotView, ReportLayout,
+    ShowValuesAs, SortOrder, ValueField, ValuesPosition,
 };
 
 // ============================================================================
@@ -167,6 +167,28 @@ pub(crate) fn config_to_value_field(config: &ValueFieldConfig) -> ValueField {
     }
     
     field
+}
+
+/// Converts PivotFieldConfig to engine PivotFilter (for filter area)
+pub(crate) fn config_to_pivot_filter(config: &PivotFieldConfig) -> PivotFilter {
+    let field = config_to_pivot_field(config);
+
+    // Default to showing all values (empty ValueList means include all)
+    // If hidden_items are specified, we'll exclude those
+    let condition = if let Some(ref hidden) = config.hidden_items {
+        if hidden.is_empty() {
+            // No hidden items means show all
+            FilterCondition::ValueList(Vec::new())
+        } else {
+            // hidden_items represents items to exclude
+            // For now, we use ValueList but the engine handles hidden_items on the field
+            FilterCondition::ValueList(Vec::new())
+        }
+    } else {
+        FilterCondition::ValueList(Vec::new())
+    };
+
+    PivotFilter { field, condition }
 }
 
 /// Applies layout config to PivotLayout

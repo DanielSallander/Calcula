@@ -666,23 +666,23 @@ impl<'a> PivotCalculator<'a> {
     }
     
     /// Generates filter rows at the top of the pivot view.
-    /// Returns the number of filter rows generated.
+    /// Returns the number of filter rows generated (including spacing row).
     fn generate_filter_rows(&mut self, view: &mut PivotView, row_label_cols: usize) -> usize {
         let filter_fields = &self.definition.filter_fields;
-        
+
         if filter_fields.is_empty() {
             return 0;
         }
-        
+
         let total_cols = view.col_count.max(row_label_cols + 1);
-        
+
         for (filter_idx, filter) in filter_fields.iter().enumerate() {
             let field_index = filter.field.source_index;
             let field_name = filter.field.name.clone();
-            
+
             // Collect unique values for this filter field
             let unique_values = self.collect_unique_values_for_field(field_index);
-            
+
             // Determine which values are selected (not hidden)
             let hidden_items = &filter.field.hidden_items;
             let selected_values: Vec<String> = unique_values
@@ -690,7 +690,7 @@ impl<'a> PivotCalculator<'a> {
                 .filter(|v| !hidden_items.contains(v))
                 .cloned()
                 .collect();
-            
+
             // Generate display value for the dropdown
             let display_value = if hidden_items.is_empty() || selected_values.len() == unique_values.len() {
                 "(All)".to_string()
@@ -701,7 +701,7 @@ impl<'a> PivotCalculator<'a> {
             } else {
                 format!("({} items)", selected_values.len())
             };
-            
+
             // Create filter row info
             let filter_info = FilterRowInfo {
                 field_index,
@@ -712,10 +712,10 @@ impl<'a> PivotCalculator<'a> {
                 view_row: filter_idx,
             };
             view.filter_rows.push(filter_info);
-            
+
             // Build the row cells
             let mut cells = Vec::with_capacity(total_cols);
-            
+
             // First cell: filter label
             let mut label_cell = PivotViewCell::filter_label(
                 format!("{}:", field_name),
@@ -723,7 +723,7 @@ impl<'a> PivotCalculator<'a> {
             );
             label_cell.background_style = BackgroundStyle::FilterRow;
             cells.push(label_cell);
-            
+
             // Second cell: filter dropdown (spans remaining row label columns if any)
             let mut dropdown_cell = PivotViewCell::filter_dropdown(display_value, field_index);
             dropdown_cell.background_style = BackgroundStyle::FilterRow;
@@ -731,21 +731,21 @@ impl<'a> PivotCalculator<'a> {
                 dropdown_cell.col_span = (row_label_cols - 1) as u16;
             }
             cells.push(dropdown_cell);
-            
+
             // Fill remaining columns with blank cells
             for _ in 2..total_cols {
                 let mut blank = PivotViewCell::blank();
                 blank.background_style = BackgroundStyle::FilterRow;
                 cells.push(blank);
             }
-            
+
             // Ensure we have exactly total_cols cells
             while cells.len() < total_cols {
                 let mut blank = PivotViewCell::blank();
                 blank.background_style = BackgroundStyle::FilterRow;
                 cells.push(blank);
             }
-            
+
             let descriptor = PivotRowDescriptor {
                 view_row: filter_idx,
                 row_type: PivotRowType::FilterRow,
@@ -755,11 +755,31 @@ impl<'a> PivotCalculator<'a> {
                 children_indices: Vec::new(),
                 group_values: Vec::new(),
             };
-            
+
             view.add_row(cells, descriptor);
         }
-        
-        filter_fields.len()
+
+        // Add a spacing row after filters to separate from column headers
+        let spacing_row_idx = filter_fields.len();
+        let mut spacing_cells = Vec::with_capacity(total_cols);
+        for _ in 0..total_cols {
+            spacing_cells.push(PivotViewCell::blank());
+        }
+
+        let spacing_descriptor = PivotRowDescriptor {
+            view_row: spacing_row_idx,
+            row_type: PivotRowType::FilterRow, // Treat as part of filter area
+            depth: 0,
+            visible: true,
+            parent_index: None,
+            children_indices: Vec::new(),
+            group_values: Vec::new(),
+        };
+
+        view.add_row(spacing_cells, spacing_descriptor);
+
+        // Return filter count + 1 for the spacing row
+        filter_fields.len() + 1
     }
     
     /// Collects all unique values for a field as display strings.

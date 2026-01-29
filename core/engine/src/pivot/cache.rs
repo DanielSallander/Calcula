@@ -12,7 +12,7 @@
 //! - Row data is stored as vectors of indices into the unique value stores
 //! - Aggregates are pre-computed and keyed by group combinations
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use serde::{Deserialize, Serialize};
 use crate::cell::CellValue;
 use crate::pivot::definition::{AggregationType, FieldIndex, PivotId};
@@ -536,28 +536,211 @@ impl PivotCache {
         for mask in self.filter_mask.iter_mut() {
             *mask = true;
         }
-        
+
         // Apply each field's hidden items
         for (field_idx, hidden) in hidden_items {
             if *field_idx >= self.fields.len() {
                 continue;
             }
-            
+
             for (i, record) in self.records.iter().enumerate() {
                 if !self.filter_mask[i] {
                     continue; // Already filtered out
                 }
-                
+
                 let value_id = record.values.get(*field_idx).copied().unwrap_or(VALUE_ID_EMPTY);
                 if hidden.contains(&value_id) {
                     self.filter_mask[i] = false;
                 }
             }
         }
-        
+
         // Update stats
         self.stats.filtered_records = self.filter_mask.iter().filter(|&&x| x).count();
         self.aggregates_dirty = true;
+    }
+
+    /// Pre-filters records based on Page Filter selections.
+    /// This acts as a "pre-filter" on the dataset before aggregation happens.
+    /// Only records matching ALL page filter selections are included.
+    ///
+    /// # Arguments
+    /// * `page_filters` - A map from field index to the set of allowed ValueIds.
+    ///   If a field is in the map, only records with values in the HashSet are included.
+    ///   If the HashSet is empty, all values for that field are excluded.
+    pub fn pre_filter_records(&mut self, page_filters: &HashMap<FieldIndex, HashSet<ValueId>>) {
+        // Reset filter mask
+        for mask in self.filter_mask.iter_mut() {
+            *mask = true;
+        }
+
+        // Skip if no page filters
+        if page_filters.is_empty() {
+            self.stats.filtered_records = self.records.len();
+            self.aggregates_dirty = true;
+            return;
+        }
+
+        // Apply page filters - record must match ALL filter criteria
+        for (i, record) in self.records.iter().enumerate() {
+            if !self.filter_mask[i] {
+                continue; // Already filtered out
+            }
+
+            // Check each page filter
+            for (field_idx, allowed_values) in page_filters {
+                if *field_idx >= self.fields.len() {
+                    continue;
+                }
+
+                let value_id = record.values.get(*field_idx).copied().unwrap_or(VALUE_ID_EMPTY);
+
+                // If the value is not in the allowed set, exclude this record
+                if !allowed_values.contains(&value_id) {
+                    self.filter_mask[i] = false;
+                    break; // No need to check other filters
+                }
+            }
+        }
+
+        // Update stats
+        self.stats.filtered_records = self.filter_mask.iter().filter(|&&x| x).count();
+        self.aggregates_dirty = true;
+    }
+
+    /// Applies both page filters and hidden item filters in sequence.
+    /// Page filters are applied first (inclusion filter), then hidden items (exclusion filter).
+    ///
+    /// # Arguments
+    /// * `page_filters` - Map of field index to allowed ValueIds (inclusion filter)
+    /// * `hidden_items` - List of (field_index, hidden_value_ids) tuples (exclusion filter)
+    pub fn apply_combined_filters(
+        &mut self,
+        page_filters: &HashMap<FieldIndex, HashSet<ValueId>>,
+        hidden_items: &[(FieldIndex, Vec<ValueId>)],
+    ) {
+        // Reset filter mask
+        for mask in self.filter_mask.iter_mut() {
+            *mask = true;
+        }
+
+        // First pass: apply page filters (inclusion filter)
+        if !page_filters.is_empty() {
+            for (i, record) in self.records.iter().enumerate() {
+                for (field_idx, allowed_values) in page_filters {
+                    if *field_idx >= self.fields.len() {
+                        continue;
+                    }
+
+                    let value_id = record.values.get(*field_idx).copied().unwrap_or(VALUE_ID_EMPTY);
+                    if !allowed_values.contains(&value_id) {
+                        self.filter_mask[i] = false;
+                        break;
+                    }
+                }
+            }
+        }
+
+        // Second pass: apply hidden items filter (exclusion filter)
+        for (field_idx, hidden) in hidden_items {
+            if *field_idx >= self.fields.len() {
+                continue;
+            }
+
+            for (i, record) in self.records.iter().enumerate() {
+                if !self.filter_mask[i] {
+                    continue; // Already filtered out
+                }
+
+                let value_id = record.values.get(*field_idx).copied().unwrap_or(VALUE_ID_EMPTY);
+                if hidden.contains(&value_id) {
+                    self.filter_mask[i] = false;
+                }
+            }
+        }
+
+        // Update stats
+        self.stats.filtered_records = self.filter_mask.iter().filter(|&&x| x).count();
+        self.aggregates_dirty = true;
+    }
+
+    /// Returns all unique values for a specific filter field.
+    /// Used for populating the dropdown list in Page Filters.
+    ///
+    /// # Arguments
+    /// * `field_index` - The index of the field to get unique values for
+    ///
+    /// # Returns
+    /// A vector of (ValueId, String) pairs where the string is the display label
+    pub fn get_unique_values_for_filter(&self, field_index: FieldIndex) -> Vec<(ValueId, String)> {
+        let mut result = Vec::new();
+
+        if let Some(field_cache) = self.fields.get(field_index) {
+            for id in 0..field_cache.unique_count() as ValueId {
+                if let Some(value) = field_cache.get_value(id) {
+                    let label = match value {
+                        CacheValue::Empty => "(blank)".to_string(),
+                        CacheValue::Number(n) => format!("{}", n.as_f64()),
+                        CacheValue::Text(s) => s.clone(),
+                        CacheValue::Boolean(b) => if *b { "TRUE" } else { "FALSE" }.to_string(),
+                        CacheValue::Error(e) => format!("#{}", e),
+                    };
+                    result.push((id, label));
+                }
+            }
+        }
+
+        result
+    }
+
+    /// Returns unique values for a filter field that exist in the current filtered dataset.
+    /// This is useful when cascading filters (showing only values that exist after other filters).
+    ///
+    /// # Arguments
+    /// * `field_index` - The index of the field to get unique values for
+    ///
+    /// # Returns
+    /// A vector of (ValueId, String) pairs for values that exist in filtered records
+    pub fn get_unique_values_for_filter_in_data(&self, field_index: FieldIndex) -> Vec<(ValueId, String)> {
+        let mut seen_ids: HashSet<ValueId> = HashSet::new();
+
+        // Collect unique value IDs from filtered records
+        for (i, record) in self.records.iter().enumerate() {
+            if !self.filter_mask[i] {
+                continue;
+            }
+
+            if let Some(&value_id) = record.values.get(field_index) {
+                seen_ids.insert(value_id);
+            }
+        }
+
+        // Convert to (ValueId, label) pairs
+        let mut result = Vec::with_capacity(seen_ids.len());
+
+        if let Some(field_cache) = self.fields.get(field_index) {
+            for id in seen_ids {
+                let label = if id == VALUE_ID_EMPTY {
+                    "(blank)".to_string()
+                } else if let Some(value) = field_cache.get_value(id) {
+                    match value {
+                        CacheValue::Empty => "(blank)".to_string(),
+                        CacheValue::Number(n) => format!("{}", n.as_f64()),
+                        CacheValue::Text(s) => s.clone(),
+                        CacheValue::Boolean(b) => if *b { "TRUE" } else { "FALSE" }.to_string(),
+                        CacheValue::Error(e) => format!("#{}", e),
+                    }
+                } else {
+                    "(unknown)".to_string()
+                };
+                result.push((id, label));
+            }
+        }
+
+        // Sort by label for consistent ordering
+        result.sort_by(|a, b| a.1.cmp(&b.1));
+
+        result
     }
     
     /// Returns an iterator over filtered records.

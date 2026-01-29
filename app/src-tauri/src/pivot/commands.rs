@@ -175,6 +175,14 @@ pub fn update_pivot_fields(
             .collect();
     }
 
+    // Update filter fields
+    if let Some(ref filter_configs) = request.filter_fields {
+        definition.filter_fields = filter_configs
+            .iter()
+            .map(config_to_pivot_filter)
+            .collect();
+    }
+
     // Update layout
     if let Some(ref layout_config) = request.layout {
         apply_layout_config(&mut definition.layout, layout_config);
@@ -597,15 +605,31 @@ pub fn get_pivot_at_cell(
         row_fields,
         column_fields,
         value_fields,
-        filter_fields,
+        filter_fields: filter_fields.clone(),
         layout,
     };
-    
+
+    // Calculate filter zones from filter field configuration
+    // Filter fields are rendered at the top of the pivot:
+    // Each filter field occupies one row with label in col 0 and dropdown in col 1
+    let destination = definition.destination;
+    let filter_zones: Vec<FilterZoneInfo> = filter_fields
+        .iter()
+        .enumerate()
+        .map(|(idx, field)| FilterZoneInfo {
+            row: destination.0 + idx as u32,      // Row relative to pivot start
+            col: destination.1 + 1,               // Dropdown is in column 1 (after label)
+            field_index: field.source_index,
+            field_name: field.name.clone(),
+        })
+        .collect();
+
     Ok(Some(PivotRegionInfo {
         pivot_id,
         is_empty,
         source_fields,
         field_configuration,
+        filter_zones,
     }))
 }
 

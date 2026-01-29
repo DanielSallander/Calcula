@@ -111,38 +111,59 @@ export const styles = {
   dropZonesContainer: css`
     display: grid;
     grid-template-columns: 1fr 1fr;
-    gap: 8px;
+    grid-template-rows: minmax(50px, auto) minmax(70px, 1fr) minmax(70px, 1fr) minmax(50px, auto);
+    gap: 6px;
+    min-height: 260px;
   `,
 
   dropZone: css`
     background: #fff;
-    border: 1px solid #e0e0e0;
-    border-radius: 4px;
-    min-height: 80px;
-    padding: 8px;
-    transition: all 0.2s;
+    border: 1px solid #d4d4d4;
+    border-radius: 2px;
+    min-height: 50px;
+    max-height: 100px;
+    padding: 6px 8px;
+    transition: border-color 0.15s, background-color 0.15s;
+    overflow-y: auto;
+    display: flex;
+    flex-direction: column;
+
+    &::-webkit-scrollbar {
+      width: 6px;
+    }
+
+    &::-webkit-scrollbar-thumb {
+      background: #c1c1c1;
+      border-radius: 3px;
+    }
 
     &.drag-over {
       border-color: #0078d4;
-      background: #f0f7ff;
+      background: #e5f3ff;
+      border-width: 2px;
+      padding: 5px 7px;
     }
 
     &.full-width {
       grid-column: span 2;
+      max-height: 80px;
     }
   `,
 
   dropZoneTitle: css`
     font-size: 10px;
     font-weight: 600;
-    color: #666;
+    color: #444;
     text-transform: uppercase;
-    margin-bottom: 6px;
-    letter-spacing: 0.5px;
+    margin-bottom: 4px;
+    letter-spacing: 0.3px;
+    flex-shrink: 0;
   `,
 
   dropZoneContent: css`
-    min-height: 40px;
+    flex: 1;
+    min-height: 24px;
+    position: relative;
   `,
 
   dropZonePlaceholder: css`

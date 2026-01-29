@@ -264,6 +264,14 @@ export interface PivotFieldConfiguration {
   layout: LayoutConfig;
 }
 
+/** Info about a filter dropdown cell position */
+export interface FilterZoneInfo {
+  row: number;
+  col: number;
+  fieldIndex: number;
+  fieldName: string;
+}
+
 /** Pivot region info returned when checking if a cell is in a pivot */
 export interface PivotRegionInfo {
   pivotId: PivotId;
@@ -271,6 +279,8 @@ export interface PivotRegionInfo {
   sourceFields: SourceFieldInfo[];
   /** Current field configuration - which fields are in which zones */
   fieldConfiguration: PivotFieldConfiguration;
+  /** Filter zones: position info for each filter dropdown cell */
+  filterZones: FilterZoneInfo[];
 }
 
 /** Pivot region data for rendering placeholders */
