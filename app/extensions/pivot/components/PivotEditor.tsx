@@ -7,7 +7,7 @@ import { LayoutOptions } from './LayoutOptions';
 import { ValueFieldSettingsModal, type ValueFieldSettings } from './ValueFieldSettingsModal';
 import { NumberFormatModal } from './NumberFormatModal';
 import { usePivotEditorState } from './usePivotEditorState';
-import { updatePivotFields } from '../../lib/pivot-api';
+import { updatePivotFields } from '../../../src/core/lib/pivot-api';
 import type {
   SourceField,
   ZoneField,

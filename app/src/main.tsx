@@ -6,12 +6,8 @@
 import React from "react";
 import ReactDOM from "react-dom/client";
 import { App } from "./shell";
-import { loadAddIns } from "./addins";
 import { loadExtensions } from "../extensions";
 import "./index.css";
-
-// Load core functionality (grid/sheet context menus)
-loadAddIns();
 
 // Load feature extensions (pivot, etc.)
 loadExtensions();

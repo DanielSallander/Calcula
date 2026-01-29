@@ -4,9 +4,9 @@ import type {
   PivotViewResponse,
   FilterRowData,
   PivotId,
-} from '../../../lib/pivot-api';
-import { updatePivotFields, getPivotFieldUniqueValues } from '../../../lib/pivot-api';
-import type { PivotInteractiveBounds } from '../../../lib/gridRenderer/rendering/pivot';
+} from '../../../../src/core/lib/pivot-api';
+import { updatePivotFields, getPivotFieldUniqueValues } from '../../../../src/core/lib/pivot-api';
+import type { PivotInteractiveBounds } from '../../../../src/core/lib/gridRenderer/rendering/pivot';
 
 // =============================================================================
 // TYPES

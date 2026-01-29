@@ -4,7 +4,7 @@
 
 import React from "react";
 import { PivotEditor } from "./PivotEditor";
-import type { TaskPaneViewProps } from "../../extensions/taskPaneExtensions";
+import type { TaskPaneViewProps } from "../../../src/core/extensions/taskPaneExtensions";
 import type { PivotId, SourceField, ZoneField, LayoutConfig } from "./types";
 
 /**

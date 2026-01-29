@@ -18,29 +18,86 @@ export type { AppEventType } from "./events";
 // Types - Core type definitions
 // ============================================================================
 export type {
+  // Selection and viewport
   Selection,
   SelectionType,
   Viewport,
   ClipboardMode,
+
+  // Grid configuration
   GridConfig,
   FreezeConfig,
   DimensionOverrides,
+
+  // Editing state
   EditingCell,
+
+  // Cell data
   CellData,
   StyleData,
   DimensionData,
+
+  // Formatting
   FormattingOptions,
   FormattingResult,
+
+  // Functions
   FunctionInfo,
+
+  // Formula references
   FormulaReference,
+
+  // Merged cells
   MergedRegion,
+
+  // Pivot regions
   PivotRegionData,
 } from "./types";
 
 export { DEFAULT_FREEZE_CONFIG, DEFAULT_GRID_CONFIG } from "./types";
 
 // ============================================================================
-// Extensions - Extension registration APIs
+// UI - Task Pane, Dialog, and Overlay registration
+// ============================================================================
+export {
+  // Task Pane
+  TaskPaneExtensions,
+  registerTaskPane,
+  unregisterTaskPane,
+  openTaskPane,
+  closeTaskPane,
+  getTaskPane,
+
+  // Dialogs
+  DialogExtensions,
+  registerDialog,
+  unregisterDialog,
+  showDialog,
+  hideDialog,
+
+  // Overlays
+  OverlayExtensions,
+  registerOverlay,
+  unregisterOverlay,
+  showOverlay,
+  hideOverlay,
+  hideAllOverlays,
+} from "./ui";
+
+export type {
+  TaskPaneViewDefinition,
+  TaskPaneViewProps,
+  TaskPaneContextKey,
+  DialogDefinition,
+  DialogProps,
+  OverlayDefinition,
+  OverlayProps,
+  OverlayLayer,
+  AnchorRect,
+} from "./ui";
+
+// ============================================================================
+// Extensions - Extension registry and context menus
 // ============================================================================
 export {
   ExtensionRegistry,
@@ -51,9 +108,6 @@ export {
   registerCoreGridContextMenu,
   sheetExtensions,
   registerCoreSheetContextMenu,
-  TaskPaneExtensions,
-  DialogExtensions,
-  OverlayExtensions,
 } from "./extensions";
 
 export type {
@@ -66,15 +120,6 @@ export type {
   GridContextMenuItem,
   SheetContext,
   SheetContextMenuItem,
-  TaskPaneViewDefinition,
-  TaskPaneViewProps,
-  TaskPaneContextKey,
-  DialogDefinition,
-  DialogProps,
-  OverlayDefinition,
-  OverlayProps,
-  OverlayLayer,
-  AnchorRect,
 } from "./extensions";
 
 // ============================================================================

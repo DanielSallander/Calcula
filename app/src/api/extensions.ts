@@ -29,26 +29,5 @@ export {
 } from "../core/extensions";
 export type { SheetContext, SheetContextMenuItem } from "../core/extensions";
 
-// Task pane extensions
-export { TaskPaneExtensions } from "../core/extensions";
-export type {
-  TaskPaneViewDefinition,
-  TaskPaneViewProps,
-  TaskPaneContextKey,
-} from "../core/extensions";
-
-// Dialog extensions
-export { DialogExtensions } from "../core/extensions";
-export type {
-  DialogDefinition,
-  DialogProps,
-} from "../core/extensions";
-
-// Overlay extensions
-export { OverlayExtensions } from "../core/extensions";
-export type {
-  OverlayDefinition,
-  OverlayProps,
-  OverlayLayer,
-  AnchorRect,
-} from "../core/extensions";
+// NOTE: TaskPaneExtensions, DialogExtensions, OverlayExtensions
+// are now exported from ./ui.ts for a cleaner API surface.

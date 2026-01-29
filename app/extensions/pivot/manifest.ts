@@ -8,9 +8,9 @@ import type {
   DialogDefinition,
   OverlayDefinition,
 } from "../../src/api";
-import { PivotEditorView } from "../../src/core/components/pivot/PivotEditorView";
-import { CreatePivotDialog } from "../../src/core/components/pivot/CreatePivotDialog";
-import { FilterDropdown } from "../../src/core/components/pivot/FilterDropdown";
+import { PivotEditorView } from "./components/PivotEditorView";
+import { CreatePivotDialog } from "./components/CreatePivotDialog";
+import { FilterDropdown } from "./components/FilterDropdown";
 import type { DialogProps, OverlayProps } from "../../src/api";
 import React from "react";
 

@@ -1,4 +1,45 @@
-# Task pane toggle flickering
+# Repository rearrangement
 
-When the task pane is toggled between being showed or hidden there is a noticeable flickering happening.
-Lets improve this so that the toggling experience is more smooth.
+We are in the process of rearranging the repository to fully adopt the Microkernel approach.
+
+## ⛔ Critical Violations Remaining
+
+**1. The "Split-Brain" Pivot Feature (Major Violation)**
+
+* **Observation:** You created `app/extensions/pivot`, which is great.
+* **The Problem:** The heavy UI logic for Pivot Tables is still sitting inside **Core**.
+* `app/src/core/components/pivot/PivotEditor.tsx`
+* `app/src/core/components/pivot/DropZone.tsx`
+* `app/src/core/components/pivot/PivotGrid/...`
+
+
+* **The Rule:** If "Pivots" are an extension, **Core cannot contain `PivotEditor.tsx**`. The Core should not know what a "Pivot Editor" is.
+* **Fix:** The entire `app/src/core/components/pivot` folder must move to `app/extensions/pivot/components`.
+
+**2. The "Anemic" API**
+
+* **Observation:** `app/src/api` exists but only contains `events.ts`.
+* **The Problem:** Real extensions need to register Commands, Ribbon Buttons, and Side Panels. Since these APIs don't exist yet, your extensions are likely "cheating" by importing directly from Shell or Core to register themselves.
+* **Fix:** We need `app/src/api/commands.ts`, `app/src/api/ui.ts` (for Ribbon/Panels), and `app/src/api/grid.ts`.
+
+**3. Legacy Artifacts**
+
+* **Observation:** `app/src/addins/index.ts` still exists.
+* **The Problem:** We decided to rename "Add-ins" to "Extensions" and move them out of `src`. Having both `src/addins` and `extensions/` creates confusion about which loader is the source of truth.
+* **Fix:** Delete `app/src/addins` and migrate its logic to `app/src/shell/ExtensionLoader.ts`.
+
+**4. Core Pollution**
+
+* **Observation:** `app/src/core/extensions/` exists.
+* **The Problem:** Naming matters. Core should not have a folder named "extensions." It implies Core depends on them.
+* **Fix:** If these are default behaviors (like context menus), they should either be:
+1. Native Core features (renamed to `core/menus`).
+2. Moved to a "Default Extension" that loads at startup.
+
+## Immediate Next Steps
+
+1. **Expand the API Facade:**
+Before we can move the Pivot UI out of Core, we need a way for the Extension to tell the Shell "Hey, please render my React Component in the Sidebar."
+* *Task:* Create `app/src/api/ui.ts` with interfaces like `registerTaskPane(id, component)`.
+
+After this task is completed, list the files that can be deleted.

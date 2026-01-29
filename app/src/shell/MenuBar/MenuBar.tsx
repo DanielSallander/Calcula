@@ -1,7 +1,7 @@
 //! FILENAME: app/src/shell/MenuBar/MenuBar.tsx
 import React, { useState, useEffect, useRef } from 'react';
 import { useGridContext } from '../../core/state/GridContext';
-import { CreatePivotDialog } from '../../core/components/pivot/CreatePivotDialog';
+import { CreatePivotDialog } from '../../../extensions/pivot/components/CreatePivotDialog';
 import type { MenuItem } from './MenuBar.types';
 import { restoreFocusToGrid } from './MenuBar.events';
 import { useFileMenu, useEditMenu, useViewMenu, useInsertMenu } from './menus';

@@ -1,8 +1,8 @@
 //! FILENAME: app/src/core/components/pivot/CreatePivotDialog.tsx
 
 import React, { useState, useEffect, useCallback } from 'react';
-import { createPivotTable } from '../../lib/pivot-api';
-import { addSheet, getSheets, setActiveSheet, indexToCol, colToIndex } from '../../lib/tauri-api';
+import { createPivotTable } from '../../../src/core/lib/pivot-api';
+import { addSheet, getSheets, setActiveSheet, indexToCol, colToIndex } from '../../../src/core/lib/tauri-api';
 
 // ============================================================================
 // Types
