@@ -1,7 +1,7 @@
-//! FILENAME: app/src/shell/MenuBar/menus/FileMenu.ts
+//! FILENAME: app/extensions/builtin/standard-menus/FileMenu.ts
 import { useCallback } from 'react';
-import { newFile, openFile, saveFile, saveFileAs, isFileModified } from '../../../core/lib/file-api';
-import type { Menu } from '../MenuBar.types';
+import { newFile, openFile, saveFile, saveFileAs, isFileModified } from '../../../src/core/lib/file-api';
+import type { MenuDefinition } from '../../../src/api/ui';
 
 export interface FileMenuHandlers {
   handleNew: () => Promise<void>;
@@ -10,7 +10,7 @@ export interface FileMenuHandlers {
   handleSaveAs: () => Promise<void>;
 }
 
-export function useFileMenu(): { menu: Menu; handlers: FileMenuHandlers } {
+export function useFileMenu(): { menu: MenuDefinition; handlers: FileMenuHandlers } {
   const handleNew = useCallback(async () => {
     try {
       const modified = await isFileModified();
@@ -67,14 +67,16 @@ export function useFileMenu(): { menu: Menu; handlers: FileMenuHandlers } {
     }
   }, []);
 
-  const menu: Menu = {
+  const menu: MenuDefinition = {
+    id: 'file',
     label: 'File',
+    order: 10,
     items: [
-      { label: 'New', shortcut: 'Ctrl+N', action: handleNew },
-      { label: 'Open...', shortcut: 'Ctrl+O', action: handleOpen },
-      { separator: true, label: '' },
-      { label: 'Save', shortcut: 'Ctrl+S', action: handleSave },
-      { label: 'Save As...', shortcut: 'Ctrl+Shift+S', action: handleSaveAs },
+      { id: 'file.new', label: 'New', shortcut: 'Ctrl+N', action: handleNew },
+      { id: 'file.open', label: 'Open...', shortcut: 'Ctrl+O', action: handleOpen },
+      { id: 'file.sep1', label: '', separator: true },
+      { id: 'file.save', label: 'Save', shortcut: 'Ctrl+S', action: handleSave },
+      { id: 'file.saveas', label: 'Save As...', shortcut: 'Ctrl+Shift+S', action: handleSaveAs },
     ],
   };
 

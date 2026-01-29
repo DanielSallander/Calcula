@@ -1,9 +1,8 @@
-//! FILENAME: app/src/shell/MenuBar/menus/index.ts
+//! FILENAME: app/extensions/builtin/standard-menus/index.ts
 export { useFileMenu } from './FileMenu';
 export type { FileMenuHandlers } from './FileMenu';
 
-export { useEditMenu } from './EditMenu';
-export type { EditMenuHandlers, EditMenuDependencies } from './EditMenu';
+export { registerEditMenu } from './EditMenu';
 
 export { useViewMenu } from './ViewMenu';
 export type { ViewMenuHandlers, ViewMenuDependencies, FreezeState } from './ViewMenu';

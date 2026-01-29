@@ -1,10 +1,10 @@
-//! FILENAME: app/src/shell/MenuBar/menus/ViewMenu.ts
+//! FILENAME: app/extensions/builtin/standard-menus/ViewMenu.ts
 import { useCallback, useEffect, useState } from 'react';
-import { setFreezePanes, getFreezePanes } from '../../../core/lib/tauri-api';
-import { setFreezeConfig } from '../../../core/state/gridActions';
-import type { Menu } from '../MenuBar.types';
-import { MenuEvents, emitMenuEvent } from '../MenuBar.events';
-import { useTaskPaneStore } from '../../task-pane/useTaskPaneStore';
+import { setFreezePanes, getFreezePanes } from '../../../src/core/lib/tauri-api';
+import { setFreezeConfig } from '../../../src/core/state/gridActions';
+import type { MenuDefinition } from '../../../src/api/ui';
+import { AppEvents, emitAppEvent } from '../../../src/api/events';
+import { useTaskPaneStore } from '../../../src/shell/task-pane/useTaskPaneStore';
 
 export interface ViewMenuHandlers {
   handleFreezeTopRow: () => Promise<void>;
@@ -23,7 +23,7 @@ export interface FreezeState {
   col: boolean;
 }
 
-export function useViewMenu(deps: ViewMenuDependencies): { menu: Menu; handlers: ViewMenuHandlers; freezeState: FreezeState } {
+export function useViewMenu(deps: ViewMenuDependencies): { menu: MenuDefinition; handlers: ViewMenuHandlers; freezeState: FreezeState } {
   const { dispatch } = deps;
   const [freezeState, setFreezeState] = useState<FreezeState>({ row: false, col: false });
 
@@ -66,7 +66,7 @@ export function useViewMenu(deps: ViewMenuDependencies): { menu: Menu; handlers:
       console.log('[ViewMenu] setFreezePanes result:', result);
       setFreezeState(prev => ({ ...prev, row: newRowState }));
       dispatch(setFreezeConfig(freezeRow, freezeCol));
-      emitMenuEvent(MenuEvents.FREEZE_CHANGED, { freezeRow, freezeCol });
+      emitAppEvent(AppEvents.FREEZE_CHANGED, { freezeRow, freezeCol });
       window.dispatchEvent(new CustomEvent('grid:refresh'));
     } catch (error) {
       console.error('[ViewMenu] handleFreezeTopRow error:', error);
@@ -84,7 +84,7 @@ export function useViewMenu(deps: ViewMenuDependencies): { menu: Menu; handlers:
       console.log('[ViewMenu] setFreezePanes result:', result);
       setFreezeState(prev => ({ ...prev, col: newColState }));
       dispatch(setFreezeConfig(freezeRow, freezeCol));
-      emitMenuEvent(MenuEvents.FREEZE_CHANGED, { freezeRow, freezeCol });
+      emitAppEvent(AppEvents.FREEZE_CHANGED, { freezeRow, freezeCol });
       window.dispatchEvent(new CustomEvent('grid:refresh'));
     } catch (error) {
       console.error('[ViewMenu] handleFreezeFirstColumn error:', error);
@@ -103,7 +103,7 @@ export function useViewMenu(deps: ViewMenuDependencies): { menu: Menu; handlers:
       console.log('[ViewMenu] setFreezePanes result:', result);
       setFreezeState({ row: newState, col: newState });
       dispatch(setFreezeConfig(freezeRow, freezeCol));
-      emitMenuEvent(MenuEvents.FREEZE_CHANGED, { freezeRow, freezeCol });
+      emitAppEvent(AppEvents.FREEZE_CHANGED, { freezeRow, freezeCol });
       window.dispatchEvent(new CustomEvent('grid:refresh'));
     } catch (error) {
       console.error('[ViewMenu] handleFreezeBoth error:', error);
@@ -118,25 +118,27 @@ export function useViewMenu(deps: ViewMenuDependencies): { menu: Menu; handlers:
       console.log('[ViewMenu] setFreezePanes result:', result);
       setFreezeState({ row: false, col: false });
       dispatch(setFreezeConfig(null, null));
-      emitMenuEvent(MenuEvents.FREEZE_CHANGED, { freezeRow: null, freezeCol: null });
+      emitAppEvent(AppEvents.FREEZE_CHANGED, { freezeRow: null, freezeCol: null });
       window.dispatchEvent(new CustomEvent('grid:refresh'));
     } catch (error) {
       console.error('[ViewMenu] handleUnfreeze error:', error);
     }
   }, [dispatch]);
 
-  const menu: Menu = {
+  const menu: MenuDefinition = {
+    id: 'view',
     label: 'View',
+    order: 30,
     items: [
-      { label: 'Show Taskpane', action: openTaskPane, hidden: isTaskPaneOpen },
-      { label: 'Hide Taskpane', action: closeTaskPane, hidden: !isTaskPaneOpen },
-      { separator: true, label: '' },
-      { label: 'Freeze Top Row', action: handleFreezeTopRow, checked: freezeState.row },
-      { label: 'Freeze First Column', action: handleFreezeFirstColumn, checked: freezeState.col },
-      { separator: true, label: '' },
-      { label: 'Freeze Top Row and First Column', action: handleFreezeBoth, checked: freezeState.row && freezeState.col },
-      { separator: true, label: '' },
-      { label: 'Unfreeze Panes', action: handleUnfreeze, disabled: !freezeState.row && !freezeState.col },
+      { id: 'view.showTaskpane', label: 'Show Taskpane', action: openTaskPane, hidden: isTaskPaneOpen },
+      { id: 'view.hideTaskpane', label: 'Hide Taskpane', action: closeTaskPane, hidden: !isTaskPaneOpen },
+      { id: 'view.sep1', label: '', separator: true },
+      { id: 'view.freezeRow', label: 'Freeze Top Row', action: handleFreezeTopRow, checked: freezeState.row },
+      { id: 'view.freezeCol', label: 'Freeze First Column', action: handleFreezeFirstColumn, checked: freezeState.col },
+      { id: 'view.sep2', label: '', separator: true },
+      { id: 'view.freezeBoth', label: 'Freeze Top Row and First Column', action: handleFreezeBoth, checked: freezeState.row && freezeState.col },
+      { id: 'view.sep3', label: '', separator: true },
+      { id: 'view.unfreeze', label: 'Unfreeze Panes', action: handleUnfreeze, disabled: !freezeState.row && !freezeState.col },
     ],
   };
 
