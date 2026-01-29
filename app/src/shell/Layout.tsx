@@ -13,8 +13,14 @@ import { TaskPaneContainer, useTaskPaneStore } from "./task-pane";
 import { GridProvider, useGridContext } from "../core/state/GridContext";
 import { TaskPaneExtensions } from "../core/extensions/taskPaneExtensions";
 import { PivotEditorView } from "../core/components/pivot/PivotEditorView";
+import { FilterDropdown } from "../core/components/pivot/FilterDropdown";
 import type { PivotEditorViewData } from "../core/components/pivot/PivotEditorView";
-import { getPivotSourceData, getPivotAtCell } from "../core/lib/pivot-api";
+import {
+  getPivotSourceData,
+  getPivotAtCell,
+  getPivotFieldUniqueValues,
+  updatePivotFields,
+} from "../core/lib/pivot-api";
 import type { SourceField, ZoneField, LayoutConfig, AggregationType } from "../core/components/pivot/types";
 import type { PivotRegionData } from "../core/types";
 
@@ -36,6 +42,17 @@ function registerPivotEditorPane(): void {
 // Register on module load
 registerPivotEditorPane();
 
+/** State for the filter dropdown menu */
+interface FilterMenuState {
+  isOpen: boolean;
+  pivotId: number;
+  fieldIndex: number;
+  fieldName: string;
+  uniqueValues: string[];
+  selectedValues: string[];
+  anchorRect: { x: number; y: number; width: number; height: number };
+}
+
 /**
  * Inner layout component that has access to GridContext
  */
@@ -45,6 +62,9 @@ function LayoutInner(): React.ReactElement {
 
   // FIX: Cache pivot regions for fast local bounds checking
   const [cachedPivotRegions, setCachedPivotRegions] = useState<PivotRegionData[]>([]);
+
+  // State for filter dropdown menu
+  const [filterMenu, setFilterMenu] = useState<FilterMenuState | null>(null);
 
   // Track last checked selection to avoid redundant API calls
   const lastCheckedSelectionRef = useRef<{ row: number; col: number } | null>(null);
@@ -67,6 +87,115 @@ function LayoutInner(): React.ReactElement {
       window.removeEventListener("pivot:regionsUpdated", handlePivotRegionsUpdate);
     };
   }, []);
+
+  // Listen for pivot:openFilterMenu event from spreadsheet clicks
+  useEffect(() => {
+    const handleOpenFilterMenu = async (event: Event) => {
+      const customEvent = event as CustomEvent<{
+        fieldIndex: number;
+        fieldName: string;
+        row: number;
+        col: number;
+        anchorX: number;
+        anchorY: number;
+      }>;
+
+      const { fieldIndex, fieldName, row, col, anchorX, anchorY } = customEvent.detail;
+
+      console.log("[Layout] Opening filter menu:", { fieldIndex, fieldName, row, col });
+
+      // Find the pivot at this cell to get pivotId
+      try {
+        const pivotInfo = await getPivotAtCell(row, col);
+        if (!pivotInfo) {
+          console.warn("[Layout] No pivot found at filter cell");
+          return;
+        }
+
+        console.log("[Layout] Found pivot:", pivotInfo.pivotId);
+
+        // Get unique values for this field
+        // NOTE: fieldIndex from filter zone is the source_index of the field
+        let allValues: string[] = [];
+        try {
+          const valuesResponse = await getPivotFieldUniqueValues(pivotInfo.pivotId, fieldIndex);
+          console.log("[Layout] Got unique values:", valuesResponse);
+          allValues = valuesResponse?.unique_values ?? [];
+        } catch (valuesError) {
+          console.error("[Layout] Failed to get unique values:", valuesError);
+          // Continue with empty array - user will see "No matching values"
+        }
+
+        // Find current filter configuration for this field to get hidden items
+        const filterConfig = pivotInfo.fieldConfiguration.filterFields.find(
+          (f) => f.sourceIndex === fieldIndex
+        );
+
+        // All values are selected by default unless they're in hidden_items
+        // For now, start with all selected (the FilterDropdown handles toggling)
+        const selectedValues = [...allValues];
+
+        setFilterMenu({
+          isOpen: true,
+          pivotId: pivotInfo.pivotId,
+          fieldIndex,
+          fieldName,
+          uniqueValues: allValues,
+          selectedValues: selectedValues,
+          anchorRect: {
+            x: anchorX,
+            y: anchorY,
+            width: 150,
+            height: 24,
+          },
+        });
+      } catch (error) {
+        console.error("[Layout] Failed to open filter menu:", error);
+      }
+    };
+
+    window.addEventListener("pivot:openFilterMenu", handleOpenFilterMenu);
+    return () => {
+      window.removeEventListener("pivot:openFilterMenu", handleOpenFilterMenu);
+    };
+  }, []);
+
+  // Handle filter dropdown close
+  const handleCloseFilterMenu = useCallback(() => {
+    setFilterMenu(null);
+  }, []);
+
+  // Handle filter apply
+  const handleApplyFilter = useCallback(
+    async (fieldIndex: number, selectedValues: string[], hiddenItems: string[]) => {
+      if (!filterMenu) return;
+
+      console.log("[Layout] Applying filter:", { fieldIndex, selectedValues, hiddenItems });
+
+      try {
+        // Update the pivot with the new filter configuration
+        await updatePivotFields({
+          pivot_id: filterMenu.pivotId,
+          filter_fields: [
+            {
+              source_index: fieldIndex,
+              name: filterMenu.fieldName,
+              hidden_items: hiddenItems.length > 0 ? hiddenItems : undefined,
+            },
+          ],
+        });
+
+        // Close the menu
+        setFilterMenu(null);
+
+        // Trigger grid refresh
+        window.dispatchEvent(new CustomEvent("grid:refresh"));
+      } catch (error) {
+        console.error("[Layout] Failed to apply filter:", error);
+      }
+    },
+    [filterMenu]
+  );
 
   // Fast local check if a cell is within any pivot region
   const findPivotRegionAtCell = useCallback((row: number, col: number): PivotRegionData | null => {
@@ -302,6 +431,19 @@ function LayoutInner(): React.ReactElement {
       >
         Ready
       </div>
+
+      {/* Filter Dropdown Overlay */}
+      {filterMenu && filterMenu.isOpen && (
+        <FilterDropdown
+          fieldName={filterMenu.fieldName}
+          fieldIndex={filterMenu.fieldIndex}
+          uniqueValues={filterMenu.uniqueValues}
+          selectedValues={filterMenu.selectedValues}
+          anchorRect={filterMenu.anchorRect}
+          onApply={handleApplyFilter}
+          onClose={handleCloseFilterMenu}
+        />
+      )}
     </div>
   );
 }

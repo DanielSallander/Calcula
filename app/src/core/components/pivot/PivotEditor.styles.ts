@@ -66,6 +66,7 @@ export const styles = {
     border-radius: 4px;
     max-height: 200px;
     overflow-y: auto;
+    overflow-x: hidden;
   `,
 
   fieldItem: css`
@@ -76,6 +77,7 @@ export const styles = {
     user-select: none;
     border-bottom: 1px solid #f0f0f0;
     transition: background 0.15s;
+    box-sizing: border-box;
 
     &:last-child {
       border-bottom: none;
@@ -94,18 +96,24 @@ export const styles = {
   fieldCheckbox: css`
     margin-right: 8px;
     cursor: pointer;
+    flex-shrink: 0;
   `,
 
   fieldName: css`
     flex: 1;
     color: #333;
     font-size: 12px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    min-width: 0;
   `,
 
   fieldTypeIcon: css`
     color: #999;
     font-size: 10px;
     margin-left: 4px;
+    flex-shrink: 0;
   `,
 
   dropZonesContainer: css`
@@ -125,6 +133,7 @@ export const styles = {
     padding: 6px 8px;
     transition: border-color 0.15s, background-color 0.15s;
     overflow-y: auto;
+    overflow-x: hidden;
     display: flex;
     flex-direction: column;
 

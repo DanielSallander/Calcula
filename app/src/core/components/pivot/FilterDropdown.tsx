@@ -1,3 +1,4 @@
+//! FILENAME: app\src\core\components\pivot\FilterDropdown.tsx
 import React, { useState, useCallback, useRef, useEffect } from 'react';
 
 export interface FilterDropdownProps {
@@ -5,7 +6,7 @@ export interface FilterDropdownProps {
   fieldIndex: number;
   uniqueValues: string[];
   selectedValues: string[];
-  anchorRect: { x: number; y: number; width: number; height: number };
+  anchorRect: { x: number; y: number; width: number; height: number } | undefined;
   onApply: (fieldIndex: number, selectedValues: string[], hiddenItems: string[]) => Promise<void>;
   onClose: () => void;
 }
@@ -19,8 +20,18 @@ export const FilterDropdown: React.FC<FilterDropdownProps> = ({
   onApply,
   onClose,
 }) => {
+  // CRITICAL FIX: Guard clause to prevent crash if anchorRect is undefined
+  // Must be BEFORE any hooks to follow Rules of Hooks
+  if (!anchorRect) {
+    return null;
+  }
+
+  // Defensive: ensure arrays are valid
+  const safeUniqueValues = Array.isArray(uniqueValues) ? uniqueValues : [];
+  const safeSelectedValues = Array.isArray(selectedValues) ? selectedValues : [];
+
   const [localSelectedValues, setLocalSelectedValues] = useState<Set<string>>(
-    new Set(selectedValues)
+    new Set(safeSelectedValues)
   );
   const [searchText, setSearchText] = useState('');
   const dropdownRef = useRef<HTMLDivElement>(null);
@@ -49,7 +60,7 @@ export const FilterDropdown: React.FC<FilterDropdownProps> = ({
     return () => document.removeEventListener('keydown', handleKeyDown);
   }, [onClose]);
 
-  const filteredValues = uniqueValues.filter((v) =>
+  const filteredValues = safeUniqueValues.filter((v) =>
     v.toLowerCase().includes(searchText.toLowerCase())
   );
 
@@ -66,8 +77,8 @@ export const FilterDropdown: React.FC<FilterDropdownProps> = ({
   }, []);
 
   const handleSelectAll = useCallback(() => {
-    setLocalSelectedValues(new Set(uniqueValues));
-  }, [uniqueValues]);
+    setLocalSelectedValues(new Set(safeUniqueValues));
+  }, [safeUniqueValues]);
 
   const handleSelectNone = useCallback(() => {
     setLocalSelectedValues(new Set());
@@ -75,14 +86,9 @@ export const FilterDropdown: React.FC<FilterDropdownProps> = ({
 
   const handleApply = useCallback(async () => {
     const selected = Array.from(localSelectedValues);
-    const hidden = uniqueValues.filter((v) => !localSelectedValues.has(v));
+    const hidden = safeUniqueValues.filter((v) => !localSelectedValues.has(v));
     await onApply(fieldIndex, selected, hidden);
-  }, [fieldIndex, localSelectedValues, uniqueValues, onApply]);
-
-  // CRITICAL FIX: Guard clause to prevent crash if anchorRect is undefined
-  if (!anchorRect) {
-    return null;
-  }
+  }, [fieldIndex, localSelectedValues, safeUniqueValues, onApply]);
 
   return (
     <div
@@ -101,6 +107,7 @@ export const FilterDropdown: React.FC<FilterDropdownProps> = ({
         display: 'flex',
         flexDirection: 'column',
         fontSize: 13,
+        color: '#374151', // Ensure default text color is dark
       }}
     >
       {/* Header */}
@@ -129,6 +136,9 @@ export const FilterDropdown: React.FC<FilterDropdownProps> = ({
             borderRadius: 4,
             fontSize: 13,
             outline: 'none',
+            boxSizing: 'border-box', // Fixes width overflow
+            backgroundColor: '#ffffff', // Ensures white background
+            color: '#374151', // Ensures text is visible
           }}
         />
       </div>
@@ -151,6 +161,7 @@ export const FilterDropdown: React.FC<FilterDropdownProps> = ({
             background: '#f9fafb',
             cursor: 'pointer',
             fontSize: 12,
+            color: '#374151', // Fix: Make text visible
           }}
         >
           Select All
@@ -164,6 +175,7 @@ export const FilterDropdown: React.FC<FilterDropdownProps> = ({
             background: '#f9fafb',
             cursor: 'pointer',
             fontSize: 12,
+            color: '#374151', // Fix: Make text visible
           }}
         >
           Select None
@@ -232,6 +244,7 @@ export const FilterDropdown: React.FC<FilterDropdownProps> = ({
             background: '#ffffff',
             cursor: 'pointer',
             fontSize: 13,
+            color: '#374151',
           }}
         >
           Cancel
