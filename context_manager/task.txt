@@ -37,9 +37,10 @@ We are in the process of rearranging the repository to fully adopt the Microkern
 2. Moved to a "Default Extension" that loads at startup.
 
 ## Immediate Next Steps
-
-1. **Expand the API Facade:**
-Before we can move the Pivot UI out of Core, we need a way for the Extension to tell the Shell "Hey, please render my React Component in the Sidebar."
-* *Task:* Create `app/src/api/ui.ts` with interfaces like `registerTaskPane(id, component)`.
+3. **Refactor the Shell:**
+The Shell (`Layout.tsx`) likely imports `PivotEditorPanel` directly.
+* *Current:* `import { PivotEditorPanel } from '../core/components/pivot/...'`
+* *Goal:* The Shell should render a generic `<ExtensionZone location="sidebar" />`. 
+The Pivot Extension registers its component into that zone via the API.
 
 After this task is completed, list the files that can be deleted.

@@ -1,25 +1,15 @@
 //! FILENAME: app/src/shell/MenuBar/MenuBar.types.ts
-export interface MenuItem {
-  label: string;
-  shortcut?: string;
-  action?: () => void;
-  separator?: boolean;
-  disabled?: boolean;
-  checked?: boolean;
-  hidden?: boolean;
-}
+// PURPOSE: Type definitions for the MenuBar component.
+// CONTEXT: We now mirror the API types to ensure the Shell renders exactly what Extensions register.
 
-export interface Menu {
-  label: string;
-  items: MenuItem[];
-}
+import type { MenuDefinition, MenuItemDefinition } from '../../api/ui';
 
-export interface MenuHookDependencies {
-  selection: {
-    startRow: number;
-    endRow: number;
-    startCol: number;
-    endCol: number;
-  } | null;
-  dispatch: React.Dispatch<unknown>;
+// Alias the API types for local use. 
+// This creates a "Single Source of Truth" - the API.
+export type Menu = MenuDefinition;
+export type MenuItem = MenuItemDefinition;
+
+// View-specific props (if the MenuBar component needs props)
+export interface MenuBarProps {
+  className?: string;
 }

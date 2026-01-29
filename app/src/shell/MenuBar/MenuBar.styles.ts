@@ -1,6 +1,11 @@
 //! FILENAME: app/src/shell/MenuBar/MenuBar.styles.ts
+// PURPOSE: Styled components for the MenuBar.
+// CONTEXT: The Shell owns the "Pixels" (CSS), while Extensions own the "Data".
+// Uses CSS Variables to allow Theme Extensions to control colors.
+
 import styled, { css } from 'styled-components';
 
+// Helper to access CSS variables injected by Theme Extensions
 const v = (name: string) => `var(${name})`;
 
 export const MenuBarContainer = styled.div`
@@ -30,6 +35,7 @@ export const MenuButton = styled.button<MenuButtonProps>`
   cursor: pointer;
   border-radius: 4px;
 
+  /* Theme-aware hover states */
   &:hover {
     background-color: ${v('--menu-button-hover-bg')};
   }
@@ -38,7 +44,7 @@ export const MenuButton = styled.button<MenuButtonProps>`
     $isOpen &&
     css`
       background-color: ${v('--menu-button-active-bg')};
-
+      
       &:hover {
         background-color: ${v('--menu-button-active-bg')};
       }
@@ -84,6 +90,7 @@ export const MenuItemButton = styled.button<MenuItemButtonProps>`
     css`
       color: ${v('--menu-text-disabled')};
       cursor: default;
+      pointer-events: none;
 
       &:hover {
         background-color: transparent;

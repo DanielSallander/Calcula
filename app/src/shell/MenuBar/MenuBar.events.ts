@@ -1,31 +1,11 @@
 //! FILENAME: app/src/shell/MenuBar/MenuBar.events.ts
-// PURPOSE: Re-exports from the API layer for backward compatibility.
-// CONTEXT: New code should import directly from "../../api/events" instead.
+// PURPOSE: UI Utilities for the MenuBar.
+// CONTEXT: Purely for DOM/Focus management. No business logic or event definitions.
 
-import {
-  AppEvents,
-  emitAppEvent,
-  restoreFocusToGrid as apiRestoreFocusToGrid,
-  type AppEventType,
-} from "../../api/events";
+import { restoreFocusToGrid as apiRestoreFocusToGrid } from "../../api/events";
 
-// Re-export AppEvents as MenuEvents for backward compatibility
-export const MenuEvents = {
-  CUT: AppEvents.CUT,
-  COPY: AppEvents.COPY,
-  PASTE: AppEvents.PASTE,
-  FIND: AppEvents.FIND,
-  REPLACE: AppEvents.REPLACE,
-  FREEZE_CHANGED: AppEvents.FREEZE_CHANGED,
-  CELLS_MERGED: AppEvents.CELLS_MERGED,
-  CELLS_UNMERGED: AppEvents.CELLS_UNMERGED,
-  PIVOT_CREATED: AppEvents.PIVOT_CREATED,
-} as const;
-
-// Re-export emitAppEvent as emitMenuEvent for backward compatibility
-export function emitMenuEvent(eventName: string, detail?: unknown): void {
-  emitAppEvent(eventName as AppEventType, detail);
-}
-
-// Re-export restoreFocusToGrid
+/**
+ * Helper to return focus to the grid after a menu action.
+ * This is a UI utility, not a business event.
+ */
 export const restoreFocusToGrid = apiRestoreFocusToGrid;

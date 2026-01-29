@@ -1,170 +1,159 @@
 //! FILENAME: app/src/shell/MenuBar/MenuBar.tsx
 import React, { useState, useEffect, useRef } from 'react';
-import { useGridContext } from '../../core/state/GridContext';
-import { CreatePivotDialog } from '../../../extensions/pivot/components/CreatePivotDialog';
-import type { MenuItem } from './MenuBar.types';
+import * as UI from '../../api/ui'; // Import the facade
 import { restoreFocusToGrid } from './MenuBar.events';
-import { useFileMenu, useEditMenu, useViewMenu, useInsertMenu } from './menus';
 import * as S from './MenuBar.styles';
 
 // Re-export for external consumers
-export { MenuEvents, emitMenuEvent } from './MenuBar.events';
-export type { MenuItem, Menu } from './MenuBar.types';
+export type { MenuItem, Menu } from './MenuBar.types'; // Legacy types, might want to deprecate later
 
 export function MenuBar(): React.ReactElement {
   const [openMenu, setOpenMenu] = useState<string | null>(null);
+  const [menus, setMenus] = useState<UI.MenuDefinition[]>([]);
   const menuBarRef = useRef<HTMLDivElement>(null);
 
-  const { state, dispatch } = useGridContext();
-  const { selection } = state;
+  // 1. Subscribe to the Menu Registry
+  useEffect(() => {
+    // Initial fetch
+    setMenus(UI.getMenus());
+    
+    // Subscribe to updates (e.g. when an extension loads late)
+    const unsubscribe = UI.subscribeToMenus(() => {
+      setMenus(UI.getMenus());
+    });
+    return unsubscribe;
+  }, []);
 
-  // Initialize all menus
-  const { menu: fileMenu, handlers: fileHandlers } = useFileMenu();
-  const { menu: editMenu, handlers: editHandlers, canMerge } = useEditMenu({ selection });
-  const { menu: viewMenu } = useViewMenu({ dispatch });
-  const { menu: insertMenu, handlers: insertHandlers, isPivotDialogOpen } = useInsertMenu();
-
-  const menus = [fileMenu, editMenu, viewMenu, insertMenu];
-
-  // Handle click outside to close menu
+  // 2. Handle click outside to close menu
   useEffect(() => {
     const handleClickOutside = (e: MouseEvent) => {
       if (menuBarRef.current && !menuBarRef.current.contains(e.target as Node)) {
         setOpenMenu(null);
       }
     };
-
     document.addEventListener('mousedown', handleClickOutside);
     return () => document.removeEventListener('mousedown', handleClickOutside);
   }, []);
 
-  // Global keyboard shortcuts
+  // 3. Dynamic Keyboard Shortcuts
+  // Instead of hardcoding keys, we scan the registered menus for matching shortcuts.
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
       const target = e.target as HTMLElement;
-      const isInputField = target.tagName === 'INPUT' ||
-                          target.tagName === 'TEXTAREA' ||
-                          target.isContentEditable;
+      const isInputField = target.tagName === 'INPUT' || 
+                           target.tagName === 'TEXTAREA' || 
+                           target.isContentEditable;
 
-      if (e.ctrlKey || e.metaKey) {
-        switch (e.key.toLowerCase()) {
-          case 's':
-            e.preventDefault();
-            if (e.shiftKey) {
-              fileHandlers.handleSaveAs();
-            } else {
-              fileHandlers.handleSave();
-            }
-            break;
-          case 'o':
-            e.preventDefault();
-            fileHandlers.handleOpen();
-            break;
-          case 'n':
-            e.preventDefault();
-            fileHandlers.handleNew();
-            break;
-          case 'z':
-            if (!isInputField) {
-              e.preventDefault();
-              editHandlers.handleUndo();
-            }
-            break;
-          case 'y':
-            if (!isInputField) {
-              e.preventDefault();
-              editHandlers.handleRedo();
-            }
-            break;
-          case 'f':
-            e.preventDefault();
-            editHandlers.handleFind();
-            break;
-          case 'h':
-            e.preventDefault();
-            editHandlers.handleReplace();
-            break;
-          case 'm':
-            if (!isInputField && canMerge) {
-              e.preventDefault();
-              editHandlers.handleMergeCells();
-            }
-            break;
+      // Don't trigger shortcuts while typing in a cell/input, unless it's a specific override
+      // (This logic might need refinement based on exact requirements)
+      if (isInputField && !e.ctrlKey && !e.metaKey) return;
+
+      const keyCombo = parseKeyboardEvent(e);
+      if (!keyCombo) return;
+
+      // Scan all menus for a matching shortcut
+      for (const menu of menus) {
+        for (const item of menu.items) {
+          if (item.shortcut && normalizeShortcut(item.shortcut) === keyCombo) {
+             if (item.disabled) return;
+             
+             e.preventDefault();
+             executeMenuItem(item);
+             return; // Stop after first match
+          }
         }
       }
     };
 
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [fileHandlers, editHandlers, canMerge]);
+  }, [menus]); // Re-bind if menus change
 
-  const handleMenuClick = (menuLabel: string) => {
-    setOpenMenu(openMenu === menuLabel ? null : menuLabel);
+  const handleMenuClick = (menuId: string) => {
+    setOpenMenu(openMenu === menuId ? null : menuId);
   };
 
-  const handleMenuHover = (menuLabel: string) => {
+  const handleMenuHover = (menuId: string) => {
     if (openMenu) {
-      setOpenMenu(menuLabel);
+      setOpenMenu(menuId);
     }
   };
 
-  const handleItemClick = (item: MenuItem) => {
-    console.log('[MenuBar] handleItemClick:', item.label, 'disabled:', item.disabled, 'hasAction:', !!item.action);
-    if (item.action && !item.disabled) {
+  const executeMenuItem = (item: UI.MenuItemDefinition) => {
+    if (item.action) {
       item.action();
-      setOpenMenu(null);
-      restoreFocusToGrid();
+    } 
+    else if (item.commandId) {
+
+      console.log('Executing Command:', item.commandId);
+      
     }
+
+    setOpenMenu(null);
+    restoreFocusToGrid();
   };
 
   return (
-    <>
-      <S.MenuBarContainer ref={menuBarRef}>
-        {menus.map((menu) => (
-          <S.MenuContainer key={menu.label}>
-            <S.MenuButton
-              $isOpen={openMenu === menu.label}
-              onClick={() => handleMenuClick(menu.label)}
-              onMouseEnter={() => handleMenuHover(menu.label)}
-            >
-              {menu.label}
-            </S.MenuButton>
-            {openMenu === menu.label && (
-              <S.Dropdown>
-                {menu.items.filter(item => !item.hidden).map((item, index) =>
-                  item.separator ? (
-                    <S.Separator key={index} />
-                  ) : (
-                    <S.MenuItemButton
-                      key={item.label}
-                      $disabled={item.disabled}
-                      onClick={() => handleItemClick(item)}
-                      disabled={item.disabled}
-                    >
-                      <S.MenuItemContent>
-                        {item.checked !== undefined && (
-                          <S.Checkmark>{item.checked ? '[x]' : '[ ]'}</S.Checkmark>
-                        )}
-                        <span>{item.label}</span>
-                      </S.MenuItemContent>
-                      {item.shortcut && (
-                        <S.Shortcut>{item.shortcut}</S.Shortcut>
+    <S.MenuBarContainer ref={menuBarRef}>
+      {menus.map((menu) => (
+        <S.MenuContainer key={menu.id}>
+          <S.MenuButton
+            $isOpen={openMenu === menu.id}
+            onClick={() => handleMenuClick(menu.id)}
+            onMouseEnter={() => handleMenuHover(menu.id)}
+          >
+            {menu.label}
+          </S.MenuButton>
+          
+          {openMenu === menu.id && (
+            <S.Dropdown>
+              {menu.items.filter(item => !item.hidden).map((item, index) =>
+                item.separator ? (
+                  <S.Separator key={`sep-${index}`} />
+                ) : (
+                  <S.MenuItemButton
+                    key={item.id || index}
+                    $disabled={item.disabled}
+                    onClick={() => executeMenuItem(item)}
+                    disabled={item.disabled}
+                  >
+                    <S.MenuItemContent>
+                      {item.checked !== undefined && (
+                        <S.Checkmark>{item.checked ? '[x]' : '[ ]'}</S.Checkmark>
                       )}
-                    </S.MenuItemButton>
-                  )
-                )}
-              </S.Dropdown>
-            )}
-          </S.MenuContainer>
-        ))}
-      </S.MenuBarContainer>
-
-      <CreatePivotDialog
-        isOpen={isPivotDialogOpen}
-        onClose={insertHandlers.handlePivotDialogClose}
-        onCreated={insertHandlers.handlePivotCreated}
-        selection={selection}
-      />
-    </>
+                      <span>{item.label}</span>
+                    </S.MenuItemContent>
+                    {item.shortcut && (
+                      <S.Shortcut>{item.shortcut}</S.Shortcut>
+                    )}
+                  </S.MenuItemButton>
+                )
+              )}
+            </S.Dropdown>
+          )}
+        </S.MenuContainer>
+      ))}
+    </S.MenuBarContainer>
   );
+}
+
+// Helper to normalize "Ctrl+S" vs "ctrl+s" for comparison
+function normalizeShortcut(shortcut: string): string {
+  return shortcut.toLowerCase().replace(/\s/g, '');
+}
+
+// Helper to turn event into "ctrl+s" string
+function parseKeyboardEvent(e: KeyboardEvent): string | null {
+  if (!e.ctrlKey && !e.metaKey) return null; // Simplified for now
+  
+  const parts = [];
+  if (e.ctrlKey || e.metaKey) parts.push('ctrl'); // Treat cmd/ctrl as same
+  if (e.shiftKey) parts.push('shift');
+  if (e.altKey) parts.push('alt');
+  
+  // Ignore modifier key presses themselves
+  if (['Control', 'Meta', 'Shift', 'Alt'].includes(e.key)) return null;
+  
+  parts.push(e.key.toLowerCase());
+  return parts.join('+');
 }

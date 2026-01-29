@@ -1,7 +1,7 @@
 //! FILENAME: app/src/shell/MenuBar/menus/EditMenu.ts
 import { useCallback } from 'react';
 import { undo, redo, mergeCells, unmergeCells } from '../../../core/lib/tauri-api';
-import type { Menu } from '../MenuBar.types';
+import type { Menu } from '../../MenuBar.types';
 import { MenuEvents, emitMenuEvent, restoreFocusToGrid } from '../MenuBar.events';
 
 export interface EditMenuHandlers {
