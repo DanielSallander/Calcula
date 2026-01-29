@@ -23,7 +23,7 @@ import {
 import { getCellFromPixel } from "../../lib/gridRenderer";
 import type { SpreadsheetContentProps } from "./SpreadsheetTypes";
 import { FindReplaceDialog } from "../FindReplaceDialog";
-import { MenuEvents } from "../../../shell/MenuBar";
+import { AppEvents } from "../../../api/events";
 
 // Styles
 import * as S from "./Spreadsheet.styles";
@@ -107,18 +107,18 @@ function SpreadsheetContent({ className }: SpreadsheetContentProps): React.React
       dispatch(openFind(true));
     };
 
-    window.addEventListener(MenuEvents.CUT, handleMenuCut);
-    window.addEventListener(MenuEvents.COPY, handleMenuCopy);
-    window.addEventListener(MenuEvents.PASTE, handleMenuPaste);
-    window.addEventListener(MenuEvents.FIND, handleMenuFind);
-    window.addEventListener(MenuEvents.REPLACE, handleMenuReplace);
+    window.addEventListener(AppEvents.CUT, handleMenuCut);
+    window.addEventListener(AppEvents.COPY, handleMenuCopy);
+    window.addEventListener(AppEvents.PASTE, handleMenuPaste);
+    window.addEventListener(AppEvents.FIND, handleMenuFind);
+    window.addEventListener(AppEvents.REPLACE, handleMenuReplace);
 
     return () => {
-      window.removeEventListener(MenuEvents.CUT, handleMenuCut);
-      window.removeEventListener(MenuEvents.COPY, handleMenuCopy);
-      window.removeEventListener(MenuEvents.PASTE, handleMenuPaste);
-      window.removeEventListener(MenuEvents.FIND, handleMenuFind);
-      window.removeEventListener(MenuEvents.REPLACE, handleMenuReplace);
+      window.removeEventListener(AppEvents.CUT, handleMenuCut);
+      window.removeEventListener(AppEvents.COPY, handleMenuCopy);
+      window.removeEventListener(AppEvents.PASTE, handleMenuPaste);
+      window.removeEventListener(AppEvents.FIND, handleMenuFind);
+      window.removeEventListener(AppEvents.REPLACE, handleMenuReplace);
     };
   }, [handleCut, handleCopy, handlePaste, dispatch]);
 

@@ -35,3 +35,19 @@ export type {
   GridMenuContext,
   GridContextMenuItem,
 } from "./gridExtensions";
+
+// Dialog extensions
+export { DialogExtensions } from "./dialogExtensions";
+export type {
+  DialogDefinition,
+  DialogProps,
+} from "./dialogExtensions";
+
+// Overlay extensions
+export { OverlayExtensions } from "./overlayExtensions";
+export type {
+  OverlayDefinition,
+  OverlayProps,
+  OverlayLayer,
+  AnchorRect,
+} from "./overlayExtensions";

@@ -1,25 +1,31 @@
 //! FILENAME: app/src/shell/MenuBar/MenuBar.events.ts
+// PURPOSE: Re-exports from the API layer for backward compatibility.
+// CONTEXT: New code should import directly from "../../api/events" instead.
+
+import {
+  AppEvents,
+  emitAppEvent,
+  restoreFocusToGrid as apiRestoreFocusToGrid,
+  type AppEventType,
+} from "../../api/events";
+
+// Re-export AppEvents as MenuEvents for backward compatibility
 export const MenuEvents = {
-  CUT: 'menu:cut',
-  COPY: 'menu:copy',
-  PASTE: 'menu:paste',
-  FIND: 'menu:find',
-  REPLACE: 'menu:replace',
-  FREEZE_CHANGED: 'menu:freezeChanged',
-  CELLS_MERGED: 'menu:cellsMerged',
-  CELLS_UNMERGED: 'menu:cellsUnmerged',
-  PIVOT_CREATED: 'menu:pivotCreated',
+  CUT: AppEvents.CUT,
+  COPY: AppEvents.COPY,
+  PASTE: AppEvents.PASTE,
+  FIND: AppEvents.FIND,
+  REPLACE: AppEvents.REPLACE,
+  FREEZE_CHANGED: AppEvents.FREEZE_CHANGED,
+  CELLS_MERGED: AppEvents.CELLS_MERGED,
+  CELLS_UNMERGED: AppEvents.CELLS_UNMERGED,
+  PIVOT_CREATED: AppEvents.PIVOT_CREATED,
 } as const;
 
+// Re-export emitAppEvent as emitMenuEvent for backward compatibility
 export function emitMenuEvent(eventName: string, detail?: unknown): void {
-  window.dispatchEvent(new CustomEvent(eventName, { detail }));
+  emitAppEvent(eventName as AppEventType, detail);
 }
 
-export function restoreFocusToGrid(): void {
-  setTimeout(() => {
-    const focusContainer = document.querySelector('[tabindex="0"][style*="outline: none"]') as HTMLElement;
-    if (focusContainer) {
-      focusContainer.focus();
-    }
-  }, 0);
-}
+// Re-export restoreFocusToGrid
+export const restoreFocusToGrid = apiRestoreFocusToGrid;
