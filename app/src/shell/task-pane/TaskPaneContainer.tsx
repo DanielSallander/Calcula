@@ -24,6 +24,9 @@ export function TaskPaneContainer(): React.ReactElement {
   const startXRef = useRef(0);
   const startWidthRef = useRef(0);
 
+  const hasOpenPanes = openPanes.length > 0;
+  const shouldBeVisible = isOpen && hasOpenPanes;
+
   // Handle resize drag
   const handleResizeStart = useCallback(
     (e: React.MouseEvent) => {
@@ -87,46 +90,33 @@ export function TaskPaneContainer(): React.ReactElement {
     }
   }, [activeViewId]);
 
-  const hasOpenPanes = openPanes.length > 0;
-
-  // Debug logging
-  console.log("[TaskPaneContainer] render:", {
-    isOpen,
-    hasOpenPanes,
-    openPanes: openPanes.map((p) => p.viewId),
-    activeViewId,
-    activeViewDef: activeViewDef?.id ?? null,
-  });
-
   return (
     <S.TaskPaneWrapper
       ref={containerRef}
       $width={width}
-      $isOpen={isOpen && hasOpenPanes}
+      $isOpen={shouldBeVisible}
       $dockMode={dockMode}
     >
-      {isOpen && hasOpenPanes && (
-        <>
-          <S.ResizeHandle onMouseDown={handleResizeStart} />
+      <S.TaskPaneContent $isVisible={shouldBeVisible}>
+        <S.ResizeHandle onMouseDown={handleResizeStart} />
 
-          <TaskPaneHeader onClose={close} />
+        <TaskPaneHeader onClose={close} />
 
-          <S.Content>
-            {activeViewDef && activePaneInstance ? (
-              <activeViewDef.component
-                onClose={handleViewClose}
-                onUpdate={handleViewUpdate}
-                data={activePaneInstance.data}
-              />
-            ) : (
-              <S.EmptyState>
-                <S.EmptyStateIcon>[?]</S.EmptyStateIcon>
-                <S.EmptyStateText>No pane selected</S.EmptyStateText>
-              </S.EmptyState>
-            )}
-          </S.Content>
-        </>
-      )}
+        <S.Content>
+          {activeViewDef && activePaneInstance ? (
+            <activeViewDef.component
+              onClose={handleViewClose}
+              onUpdate={handleViewUpdate}
+              data={activePaneInstance.data}
+            />
+          ) : (
+            <S.EmptyState>
+              <S.EmptyStateIcon>[?]</S.EmptyStateIcon>
+              <S.EmptyStateText>No pane selected</S.EmptyStateText>
+            </S.EmptyState>
+          )}
+        </S.Content>
+      </S.TaskPaneContent>
     </S.TaskPaneWrapper>
   );
 }

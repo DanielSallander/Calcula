@@ -1,7 +1,4 @@
-# Pivot table filter
+# Task pane toggle flickering
 
-We now have the pivot table filter displayed in cells above the rows and columns of the pivot table.
-We have the pivot filter correctly as a drop down list when clicking the cell (see the image).
-The drop down frontend is mainly handled in app\src\core\components\pivot\FilterDropdown.tsx
-Now we must implement so that the values in the pivot filter is correctly populated from the data.
-The list of values shown in the pivot filter should be unique values of the field its using.
+When the task pane is toggled between being showed or hidden there is a noticeable flickering happening.
+Lets improve this so that the toggling experience is more smooth.

@@ -4,43 +4,48 @@
 
 import styled, { css } from "styled-components";
 
-const v = (name: string) => `var(${name})`;
-
 export const TaskPaneWrapper = styled.div<{
   $width: number;
   $isOpen: boolean;
   $dockMode: "docked" | "floating";
 }>`
+  /* Always positioned absolute - floats over content */
+  position: absolute;
+  right: 0;
+  top: 0;
+  bottom: 0;
+  z-index: 100;
+  
   display: flex;
   flex-direction: column;
   height: 100%;
   background-color: #f8f9fa;
   border-left: 1px solid #e0e0e0;
   overflow: hidden;
-  transition: width 0.15s ease-out;
-  will-change: width;
+  
+  /* Fixed width */
+  width: ${({ $width }) => $width}px;
+  
+  /* Slide animation using transform */
+  transform: translateX(${({ $isOpen }) => ($isOpen ? "0" : "100%")});
+  transition: transform 0.15s ease-out;
+  will-change: transform;
+  
+  /* Shadow only when open */
+  box-shadow: ${({ $isOpen }) => ($isOpen ? "-4px 0 12px rgba(0, 0, 0, 0.1)" : "none")};
+  
+  /* Prevent interaction when closed */
+  pointer-events: ${({ $isOpen }) => ($isOpen ? "auto" : "none")};
+`;
 
-  ${({ $isOpen, $width }) =>
-    $isOpen
-      ? css`
-          width: ${$width}px;
-          min-width: ${$width}px;
-        `
-      : css`
-          width: 0;
-          min-width: 0;
-        `}
-
-  ${({ $dockMode }) =>
-    $dockMode === "floating" &&
-    css`
-      position: absolute;
-      right: 0;
-      top: 0;
-      bottom: 0;
-      z-index: 100;
-      box-shadow: -4px 0 12px rgba(0, 0, 0, 0.15);
-    `}
+export const TaskPaneContent = styled.div<{ $isVisible: boolean }>`
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  width: 100%;
+  opacity: ${({ $isVisible }) => ($isVisible ? 1 : 0)};
+  transition: opacity 0.1s ease-out;
+  transition-delay: ${({ $isVisible }) => ($isVisible ? "0.05s" : "0s")};
 `;
 
 export const ResizeHandle = styled.div`

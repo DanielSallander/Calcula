@@ -2,7 +2,7 @@
 // PURPOSE: Main spreadsheet component combining grid, editor, and scrollbars
 // CONTEXT: Core component that orchestrates the spreadsheet experience
 
-import React, { useCallback, useEffect, useState } from "react";
+import React, { useCallback, useEffect, useState, useRef } from "react";
 import { useGridState, useGridContext } from "../../state";
 import { setViewportDimensions, openFind } from "../../state/gridActions";
 import { GridCanvas } from "../Grid";
@@ -29,6 +29,9 @@ import { MenuEvents } from "../../../shell/MenuBar";
 import * as S from "./Spreadsheet.styles";
 
 const SCROLLBAR_SIZE = 14;
+
+// Debounce delay for resize observer - prevents flickering during task pane animation
+const RESIZE_DEBOUNCE_MS = 150;
 
 function SpreadsheetContent({ className }: SpreadsheetContentProps): React.ReactElement {
   // 1. Destructure the grouped object returned by the refactored hook
@@ -334,10 +337,10 @@ function SpreadsheetContent({ className }: SpreadsheetContentProps): React.React
   // -------------------------------------------------------------------------
   const handleContextMenu = useCallback(
     (event: React.MouseEvent<HTMLDivElement>) => {
-      console.log("[Spreadsheet] Context menu triggered"); // ADD THIS
+      console.log("[Spreadsheet] Context menu triggered");
       
       if (event.shiftKey) {
-        console.log("[Spreadsheet] Shift+right-click, allowing browser menu"); // ADD THIS
+        console.log("[Spreadsheet] Shift+right-click, allowing browser menu");
         return;
       }
 
@@ -345,7 +348,7 @@ function SpreadsheetContent({ className }: SpreadsheetContentProps): React.React
 
       const rect = containerRef.current?.getBoundingClientRect();
       if (!rect) {
-        console.log("[Spreadsheet] No container rect, aborting"); // ADD THIS
+        console.log("[Spreadsheet] No container rect, aborting");
         return;
       }
 
@@ -353,7 +356,7 @@ function SpreadsheetContent({ className }: SpreadsheetContentProps): React.React
       const mouseY = event.clientY - rect.top;
 
       const clickedCell = getCellFromPixel(mouseX, mouseY, config, viewport, dimensions);
-      console.log("[Spreadsheet] Clicked cell:", clickedCell); // ADD THIS
+      console.log("[Spreadsheet] Clicked cell:", clickedCell);
 
       const menuContext: GridMenuContext = {
         selection,
@@ -365,7 +368,6 @@ function SpreadsheetContent({ className }: SpreadsheetContentProps): React.React
         sheetName: gridState.sheetContext.activeSheetName,
       };
 
-      // ADD THIS DEBUG BLOCK
       const items = gridExtensions.getContextMenuItemsForContext(menuContext);
       console.log("[Spreadsheet] Context menu items:", items.length, items.map(i => i.id));
 
@@ -374,7 +376,7 @@ function SpreadsheetContent({ className }: SpreadsheetContentProps): React.React
         context: menuContext,
       });
       
-      console.log("[Spreadsheet] Context menu state set"); // ADD THIS
+      console.log("[Spreadsheet] Context menu state set");
     },
     [containerRef, config, viewport, dimensions, selection, gridState.sheetContext]
   );
@@ -402,6 +404,12 @@ function SpreadsheetContent({ className }: SpreadsheetContentProps): React.React
     }));
   }, [contextMenu]);
 
+  // -------------------------------------------------------------------------
+  // Debounced Resize Observer
+  // -------------------------------------------------------------------------
+  const resizeTimeoutRef = useRef<number | null>(null);
+  const lastDimensionsRef = useRef<{ width: number; height: number } | null>(null);
+
   useEffect(() => {
     const gridArea = containerRef.current;
     if (!gridArea) return;
@@ -409,21 +417,43 @@ function SpreadsheetContent({ className }: SpreadsheetContentProps): React.React
     const updateDimensions = () => {
       const width = gridArea.clientWidth;
       const height = gridArea.clientHeight;
-      if (width > 0 && height > 0) {
+      
+      // Only dispatch if dimensions actually changed significantly
+      if (
+        width > 0 && 
+        height > 0 &&
+        (!lastDimensionsRef.current ||
+          Math.abs(lastDimensionsRef.current.width - width) > 1 ||
+          Math.abs(lastDimensionsRef.current.height - height) > 1)
+      ) {
+        lastDimensionsRef.current = { width, height };
         dispatch(setViewportDimensions(width, height));
       }
     };
 
+    // Initial update (no debounce)
     updateDimensions();
 
     const resizeObserver = new ResizeObserver(() => {
-      updateDimensions();
+      // Clear any pending timeout
+      if (resizeTimeoutRef.current !== null) {
+        window.clearTimeout(resizeTimeoutRef.current);
+      }
+      
+      // Debounce the dimension update to avoid flickering during animations
+      resizeTimeoutRef.current = window.setTimeout(() => {
+        updateDimensions();
+        resizeTimeoutRef.current = null;
+      }, RESIZE_DEBOUNCE_MS);
     });
 
     resizeObserver.observe(gridArea);
 
     return () => {
       resizeObserver.disconnect();
+      if (resizeTimeoutRef.current !== null) {
+        window.clearTimeout(resizeTimeoutRef.current);
+      }
     };
   }, [dispatch, containerRef]);
 

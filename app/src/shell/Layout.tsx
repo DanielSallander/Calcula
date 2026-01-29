@@ -404,13 +404,20 @@ function LayoutInner(): React.ReactElement {
       <FormulaBar />
 
       {/* Main Content Area - Spreadsheet + Task Pane */}
-      <div style={{ flex: 1, display: "flex", overflow: "hidden", position: "relative" }}>
-        {/* Spreadsheet Area */}
+      <div 
+        style={{ 
+          flex: 1, 
+          display: "flex", 
+          overflow: "hidden", 
+          position: "relative",
+        }}
+      >
+        {/* Spreadsheet Area - full width, task pane floats over it */}
         <div style={{ flex: 1, overflow: "hidden" }}>
           <Spreadsheet />
         </div>
 
-        {/* Task Pane */}
+        {/* Task Pane - floats over the spreadsheet */}
         <TaskPaneContainer />
       </div>
 
