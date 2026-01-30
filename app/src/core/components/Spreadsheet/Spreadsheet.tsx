@@ -22,7 +22,6 @@ import {
 } from "../../extensions";
 import { getCellFromPixel } from "../../lib/gridRenderer";
 import type { SpreadsheetContentProps } from "./SpreadsheetTypes";
-import { FindReplaceDialog } from "../../../../extensions/BuiltIn/FindReplaceDialog";
 import { AppEvents } from "../../../api/events";
 
 // Styles
@@ -610,8 +609,6 @@ function SpreadsheetContent({ className }: SpreadsheetContentProps): React.React
         />
       )}
 
-      {/* Find/Replace Dialog */}
-      <FindReplaceDialog />
     </S.SpreadsheetContainer>
   );
 }

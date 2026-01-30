@@ -3,18 +3,20 @@
 // CONTEXT: Provides UI for searching and replacing cell content
 
 import React, { useState, useCallback, useEffect, useRef } from 'react';
-import { useGridContext } from '../../../src/core/state/GridContext';
-import { 
-  setFindResults, 
-  setFindCurrentIndex, 
-  closeFind, 
+import {
+  useGridContext,
+  setFindResults,
+  setFindCurrentIndex,
+  closeFind,
   setFindOptions,
   setSelection,
-  scrollToCell 
-} from '../../../src/core/state/gridActions';
-import { findAll, replaceAll, replaceSingle } from '../../../src/core/lib/tauri-api';
-import { cellEvents } from '../../../src/core/lib/cellEvents';
-import { columnToLetter } from '../../../src/core/types/types';
+  scrollToCell,
+  findAll,
+  replaceAll,
+  replaceSingle,
+  cellEvents,
+  columnToLetter,
+} from '../../../src/api';
 import * as S from './FindReplaceDialog.styles';
 
 export function FindReplaceDialog(): React.ReactElement | null {

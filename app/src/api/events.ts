@@ -28,6 +28,9 @@ export const AppEvents = {
   // Grid refresh
   GRID_REFRESH: "grid:refresh",
 
+  // Editor events
+  PREVENT_BLUR_COMMIT: "editor:preventBlurCommit",
+
   // Pivot events (extensions emit these)
   PIVOT_CREATED: "menu:pivotCreated",
   PIVOT_REGIONS_UPDATED: "pivot:regionsUpdated",

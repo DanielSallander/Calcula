@@ -1,5 +1,5 @@
 /**
- * FILENAME: app/src/core/lib/pivot-api.ts
+ * FILENAME: app/extensions/Pivot/lib/pivot-api.ts
  * Pivot Table API
  *
  * TypeScript bindings for the Tauri pivot table commands.

@@ -128,7 +128,7 @@ export {
   createFieldConfig,
   createValueFieldConfig,
   createLayoutConfig,
-} from "../core/lib/pivot-api";
+} from "../../extensions/Pivot/lib/pivot-api";
 
 // ============================================================================
 // Grid Renderer - Pivot interactive bounds
@@ -136,7 +136,7 @@ export {
 
 export type {
   PivotInteractiveBounds,
-} from "../core/lib/gridRenderer/rendering/pivot";
+} from "../../extensions/Pivot/rendering/pivot";
 
 // Type exports from pivot-api
 export type {
@@ -171,4 +171,4 @@ export type {
   PivotRegionInfo,
   PivotRegionData,
   FieldUniqueValuesResponse,
-} from "../core/lib/pivot-api";
+} from "../../extensions/Pivot/lib/pivot-api";

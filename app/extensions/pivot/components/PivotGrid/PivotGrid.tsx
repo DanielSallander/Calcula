@@ -1,17 +1,17 @@
-// FILENAME: app/src/core/components/pivot/PivotGrid/PivotGrid.tsx
+// FILENAME: app/extensions/Pivot/components/PivotGrid/PivotGrid.tsx
 import React, { useRef, useEffect, useState, useCallback, useMemo } from 'react';
-import type { PivotViewResponse } from '../../../lib/pivot-api';
-import { getPivotView } from '../../../lib/pivot-api';
+import type { PivotViewResponse } from '../../lib/pivot-api';
+import { getPivotView } from '../../lib/pivot-api';
 import {
   renderPivotView,
   createPivotTheme,
   measurePivotColumnWidth,
-} from '../../../lib/gridRenderer/rendering/pivot';
+} from '../../rendering/pivot';
 import type {
   PivotTheme,
   PivotInteractiveBounds,
   PivotRenderOptions,
-} from '../../../lib/gridRenderer/rendering/pivot';
+} from '../../rendering/pivot';
 import { usePivotGridInteraction } from './usePivotGridInteraction';
 import { FilterDropdown } from '../FilterDropdown';
 

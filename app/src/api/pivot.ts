@@ -3,7 +3,7 @@
 // CONTEXT: The ONLY entry point for the Pivot Extension to talk to the engine.
 // Extensions import from this module instead of core/lib/pivot-api directly.
 
-// Import internal core logic (allowed in the API layer, forbidden in extensions)
+// Import from extension-local pivot-api (API layer bridges to extension code)
 import {
   // Core operations
   createPivotTable,
@@ -30,7 +30,7 @@ import {
   createFieldConfig,
   createValueFieldConfig,
   createLayoutConfig,
-} from '../core/lib/pivot-api';
+} from '../../extensions/Pivot/lib/pivot-api';
 
 // Re-export types so extensions can import them from this module
 export type {
@@ -65,11 +65,11 @@ export type {
   PivotRegionInfo,
   PivotRegionData,
   FieldUniqueValuesResponse,
-} from '../core/lib/pivot-api';
+} from '../../extensions/Pivot/lib/pivot-api';
 
 export type {
   PivotInteractiveBounds,
-} from '../core/lib/gridRenderer/rendering/pivot';
+} from '../../extensions/Pivot/rendering/pivot';
 
 /**
  * Pivot Table API Facade.

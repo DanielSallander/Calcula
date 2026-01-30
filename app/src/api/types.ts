@@ -35,10 +35,7 @@ export type {
 
   // Merged cells
   MergedRegion,
-
-  // Pivot regions
-  PivotRegionData,
 } from "../core/types";
 
-// Re-export default config
-export { DEFAULT_FREEZE_CONFIG, DEFAULT_GRID_CONFIG } from "../core/types";
+// Re-export default config and utility functions
+export { DEFAULT_FREEZE_CONFIG, DEFAULT_GRID_CONFIG, columnToLetter } from "../core/types";

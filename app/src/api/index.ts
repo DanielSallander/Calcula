@@ -49,12 +49,9 @@ export type {
 
   // Merged cells
   MergedRegion,
-
-  // Pivot regions
-  PivotRegionData,
 } from "./types";
 
-export { DEFAULT_FREEZE_CONFIG, DEFAULT_GRID_CONFIG } from "./types";
+export { DEFAULT_FREEZE_CONFIG, DEFAULT_GRID_CONFIG, columnToLetter } from "./types";
 
 // ============================================================================
 // UI - Task Pane, Dialog, and Overlay registration
@@ -301,6 +298,50 @@ export {
 // System API - Workspace facade (preferred over bare filesystem exports)
 // ============================================================================
 export { workspace } from "./system";
+
+// ============================================================================
+// Grid Overlays - Generic overlay lifecycle system for extensions
+// ============================================================================
+export {
+  registerGridOverlay,
+  unregisterGridOverlay,
+  setGridRegions,
+  addGridRegions,
+  removeGridRegionsByType,
+  getGridRegions,
+  getOverlayRenderers,
+  onRegionChange,
+  hitTestOverlays,
+} from "./gridOverlays";
+
+export type {
+  GridRegion,
+  OverlayRenderContext,
+  OverlayRendererFn,
+  OverlayHitTestContext,
+  OverlayHitTestFn,
+  RegionChangeHandler,
+  OverlayRegistration,
+} from "./gridOverlays";
+
+// ============================================================================
+// State - Grid state hooks and action creators for extensions
+// ============================================================================
+export {
+  useGridContext,
+  setSelection,
+  scrollToCell,
+  setFindResults,
+  setFindCurrentIndex,
+  closeFind,
+  setFindOptions,
+} from "./state";
+
+// ============================================================================
+// Cell Events - Cell change pub/sub for extensions
+// ============================================================================
+export { cellEvents } from "./cellEvents";
+export type { CellChangeListener } from "./cellEvents";
 
 // ============================================================================
 // Pivot API - Pivot facade (preferred over bare pivot exports from lib)

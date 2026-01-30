@@ -15,6 +15,7 @@ import { OverlayContainer } from "./OverlayContainer";
 import { GridProvider, useGridContext } from "../core/state/GridContext";
 import { setFreezeConfig } from "../core/state/gridActions";
 import { ExtensionRegistry, AppEvents, onAppEvent } from "../api";
+import { FindReplaceDialog } from "../../extensions/BuiltIn/FindReplaceDialog";
 
 /**
  * Inner layout component that has access to GridContext.
@@ -97,6 +98,9 @@ function LayoutInner(): React.ReactElement {
       >
         Ready
       </div>
+
+      {/* Find/Replace Dialog (built-in extension) */}
+      <FindReplaceDialog />
 
       {/* Dynamic Dialogs from DialogExtensions */}
       <DialogContainer />

@@ -22,7 +22,7 @@ import {
 import { useGridContext } from "../../core/state/GridContext";
 import { setActiveSheet, setSheetContext } from "../../core/state/gridActions";
 import { isFormulaExpectingReference } from "../../core/types";
-import { setPreventBlurCommit } from "../../core/components/InlineEditor/InlineEditor";
+import { emitAppEvent, AppEvents } from "../../api/events";
 import * as S from './SheetTabs.styles';
 
 export interface SheetTabsProps {
@@ -140,7 +140,7 @@ export function SheetTabs({ onSheetChange }: SheetTabsProps): React.ReactElement
       if (isInFormulaMode && sheetIndex !== activeIndex) {
         console.log("[SheetTabs] Formula mode mousedown - setting prevent blur flag");
         // Set the global flag BEFORE blur fires
-        setPreventBlurCommit(true);
+        emitAppEvent(AppEvents.PREVENT_BLUR_COMMIT, true);
         // Prevent default to try to keep focus (may not work in all browsers)
         e.preventDefault();
         e.stopPropagation();
@@ -244,7 +244,7 @@ export function SheetTabs({ onSheetChange }: SheetTabsProps): React.ReactElement
       } catch (err) {
         console.error("[SheetTabs] setActiveSheet error:", err);
         // Clear the prevent flag on error
-        setPreventBlurCommit(false);
+        emitAppEvent(AppEvents.PREVENT_BLUR_COMMIT, false);
         alert("Failed to switch sheet: " + String(err));
       }
     },

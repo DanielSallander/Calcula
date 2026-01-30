@@ -10,25 +10,16 @@ import * as S from "./InlineEditor.styles";
 
 /**
  * Global flag to prevent blur from committing during sheet tab navigation.
- * This is set by SheetTabs before clicking and cleared after.
+ * Other layers signal this via the "editor:preventBlurCommit" AppEvent.
  * Using a global because the blur event fires between mousedown and click,
  * and we need to coordinate across components.
  */
 let preventBlurCommit = false;
 
-/**
- * Set the preventBlurCommit flag. Called by SheetTabs during formula mode sheet switching.
- */
-export function setPreventBlurCommit(value: boolean): void {
-  preventBlurCommit = value;
-}
-
-/**
- * Get the current preventBlurCommit flag value.
- */
-export function getPreventBlurCommit(): boolean {
-  return preventBlurCommit;
-}
+// Listen for prevent-blur-commit events from other layers (e.g., SheetTabs via API events)
+window.addEventListener("editor:preventBlurCommit", (e: Event) => {
+  preventBlurCommit = (e as CustomEvent<boolean>).detail;
+});
 
 export interface InlineEditorProps {
   /** Current editing state */

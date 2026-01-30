@@ -12,8 +12,6 @@ import type { GridConfig, Viewport, Selection, EditingCell, CellDataMap, Formula
 import { cellKey, createEmptyDimensionOverrides, DEFAULT_FREEZE_CONFIG } from "../../types";
 import type { GridTheme } from "../../lib/gridRenderer";
 import * as S from "./GridCanvas.styles";
-import { getPivotRegionsForSheet } from "../../lib/pivot-api";
-import type { PivotRegionData } from "../../types";
 
 /**
  * Props for the GridCanvas component.
@@ -183,7 +181,6 @@ export const GridCanvas = forwardRef<GridCanvasHandle, GridCanvasProps>(
 
     // Animation state for row/column insertion/deletion
     const [insertionAnimation, setInsertionAnimation] = useState<InsertionAnimation | null>(null);
-    const [pivotRegions, setPivotRegions] = useState<PivotRegionData[]>([]);
     const insertionAnimationRef = useRef<{
       startTime: number;
       duration: number;
@@ -361,34 +358,6 @@ export const GridCanvas = forwardRef<GridCanvasHandle, GridCanvasProps>(
     }, [calculateFetchRange, needsFetch]);
 
     /**
-     * Fetch pivot regions for rendering placeholders.
-     * Also dispatches pivot:regionsUpdated event for components that need region info.
-     */
-    const fetchPivotRegions = useCallback(async (): Promise<void> => {
-      try {
-        const regions = await getPivotRegionsForSheet();
-        setPivotRegions(regions);
-
-        // Dispatch event so other components (PivotFilterOverlay, Layout) can access regions
-        window.dispatchEvent(
-          new CustomEvent("pivot:regionsUpdated", {
-            detail: { regions },
-          })
-        );
-      } catch (error) {
-        console.error("Failed to fetch pivot regions:", error);
-        setPivotRegions([]);
-
-        // Still dispatch event with empty regions
-        window.dispatchEvent(
-          new CustomEvent("pivot:regionsUpdated", {
-            detail: { regions: [] },
-          })
-        );
-      }
-    }, []);
-
-    /**
      * Force refresh cells from backend (clears cache).
      * Returns a Promise for proper sequencing.
      */
@@ -396,8 +365,7 @@ export const GridCanvas = forwardRef<GridCanvasHandle, GridCanvasProps>(
       console.log('[GridCanvas] refreshCells called');
       lastFetchRef.current = null;
       await fetchCells(true);
-      await fetchPivotRegions();
-    }, [fetchCells, fetchPivotRegions]);
+    }, [fetchCells]);
 
     /**
      * Clear the canvas.
@@ -424,7 +392,7 @@ export const GridCanvas = forwardRef<GridCanvasHandle, GridCanvasProps>(
       // Clear the canvas
       clear();
 
-      // Render the grid with cell data, formula references, style cache, fill preview, clipboard, insertion animation, freeze config, and pivot regions
+      // Render the grid with cell data, formula references, style cache, fill preview, clipboard, insertion animation, and freeze config
       renderGrid(
         context,
         canvasSize.width,
@@ -444,9 +412,8 @@ export const GridCanvas = forwardRef<GridCanvasHandle, GridCanvasProps>(
         animationOffset,
         currentInsertionAnimation,
         freezeConfig,
-        pivotRegions  // Add this parameter
       );
-    }, [context, canvasSize.width, canvasSize.height, config, viewport, selection, editing, cells, theme, formulaReferences, dims, styleCache, fillPreviewRange, clipboardSelection, clipboardMode, freezeConfig, pivotRegions, clear]);
+    }, [context, canvasSize.width, canvasSize.height, config, viewport, selection, editing, cells, theme, formulaReferences, dims, styleCache, fillPreviewRange, clipboardSelection, clipboardMode, freezeConfig, clear]);
 
     /**
      * Start row insertion animation.
@@ -638,13 +605,6 @@ export const GridCanvas = forwardRef<GridCanvasHandle, GridCanvasProps>(
     }, [fetchCells]);
 
     /**
-     * Fetch pivot regions when cells are refreshed.
-     */
-    useEffect(() => {
-      fetchPivotRegions();
-    }, [cells, fetchPivotRegions]);
-
-    /**
      * Refetch cells when freeze config changes to ensure frozen cells are loaded.
      */
     useEffect(() => {
@@ -669,25 +629,6 @@ export const GridCanvas = forwardRef<GridCanvasHandle, GridCanvasProps>(
 
       return () => {
         window.removeEventListener('grid:refresh', handleGridRefresh);
-      };
-    }, [refreshCells, draw, insertionAnimation]);
-
-    /**
-     * Listen for pivot:refresh events (from filter changes, field updates, etc.).
-     * This ensures the canvas refreshes cells and pivot regions when pivot data changes.
-     */
-    useEffect(() => {
-      const handlePivotRefresh = async () => {
-        console.log('[GridCanvas] pivot:refresh event received - refreshing cells and pivot regions');
-        await refreshCells();
-        // Redraw after refresh to show updated data
-        draw(animationOffsetRef.current, insertionAnimation);
-      };
-
-      window.addEventListener('pivot:refresh', handlePivotRefresh);
-
-      return () => {
-        window.removeEventListener('pivot:refresh', handlePivotRefresh);
       };
     }, [refreshCells, draw, insertionAnimation]);
 

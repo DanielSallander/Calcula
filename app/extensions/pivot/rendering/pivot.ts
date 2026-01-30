@@ -1,4 +1,4 @@
-// FILENAME: app/src/core/lib/gridRenderer/rendering/pivot.ts
+// FILENAME: app/extensions/Pivot/rendering/pivot.ts
 
 import type {
   PivotViewResponse,
@@ -6,8 +6,8 @@ import type {
   BackgroundStyle,
   PivotCellType,
   PivotCellValue,
-} from '../../pivot-api';
-import { getCellDisplayValue } from '../../pivot-api';
+} from '../lib/pivot-api';
+import { getCellDisplayValue } from '../lib/pivot-api';
 
 // =============================================================================
 // TYPES
