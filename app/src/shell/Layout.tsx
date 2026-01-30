@@ -9,7 +9,7 @@ import { RibbonContainer } from "./Ribbon/RibbonContainer";
 import { FormulaBar } from "./FormulaBar";
 import { Spreadsheet } from "../core/components/Spreadsheet";
 import { SheetTabs } from "./SheetTabs";
-import { TaskPaneContainer } from "./task-pane";
+import { TaskPaneContainer } from "./TaskPane";
 import { DialogContainer } from "./DialogContainer";
 import { OverlayContainer } from "./OverlayContainer";
 import { GridProvider, useGridContext } from "../core/state/GridContext";

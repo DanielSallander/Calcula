@@ -3,7 +3,7 @@ use crate::pivot::operations::*;
 use crate::pivot::types::*;
 use crate::pivot::utils::*;
 use crate::{log_debug, log_info, AppState, PivotRegion};
-use engine::pivot::{drill_down, CacheValue, PivotDefinition, PivotId, VALUE_ID_EMPTY};
+use pivot_engine::{drill_down, CacheValue, PivotDefinition, PivotId, VALUE_ID_EMPTY};
 use tauri::State;
 
 // ============================================================================

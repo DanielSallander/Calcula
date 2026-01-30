@@ -5,4 +5,4 @@ export { App } from "./App";
 export { Layout } from "./Layout";
 export { RibbonContainer } from "./Ribbon/RibbonContainer";
 export { SheetTabs } from "./SheetTabs";
-export { TaskPaneContainer, useTaskPaneStore } from "./task-pane";
+export { TaskPaneContainer, useTaskPaneStore } from "./TaskPane";

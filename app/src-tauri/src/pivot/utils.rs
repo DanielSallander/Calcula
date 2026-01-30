@@ -1,6 +1,6 @@
 //! FILENAME: app/src-tauri/src/pivot/utils.rs
 use crate::pivot::types::*;
-use engine::pivot::{
+use pivot_engine::{
     AggregationType, CacheValue, FilterCondition, PivotCache, PivotDefinition, PivotField,
     PivotFilter, PivotLayout, PivotView, ReportLayout, ShowValuesAs, SortOrder, ValueField,
     ValuesPosition, VALUE_ID_EMPTY,
@@ -296,15 +296,15 @@ pub(crate) fn view_to_response(
                 .map(|cell| PivotCellData {
                     cell_type: format!("{:?}", cell.cell_type),
                     value: match &cell.value {
-                        engine::pivot::PivotCellValue::Empty => PivotCellValueData::Empty,
-                        engine::pivot::PivotCellValue::Number(n) => PivotCellValueData::Number(*n),
-                        engine::pivot::PivotCellValue::Text(s) => {
+                        pivot_engine::PivotCellValue::Empty => PivotCellValueData::Empty,
+                        pivot_engine::PivotCellValue::Number(n) => PivotCellValueData::Number(*n),
+                        pivot_engine::PivotCellValue::Text(s) => {
                             PivotCellValueData::Text(s.clone())
                         }
-                        engine::pivot::PivotCellValue::Boolean(b) => {
+                        pivot_engine::PivotCellValue::Boolean(b) => {
                             PivotCellValueData::Boolean(*b)
                         }
-                        engine::pivot::PivotCellValue::Error(e) => {
+                        pivot_engine::PivotCellValue::Error(e) => {
                             PivotCellValueData::Error(e.clone())
                         }
                     },

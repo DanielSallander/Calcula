@@ -1,7 +1,7 @@
 //! FILENAME: app/src-tauri/src/pivot/operations.rs
 use crate::pivot::utils::col_index_to_letter;
 use crate::{log_debug, log_info, AppState, PivotRegion};
-use engine::pivot::{calculate_pivot, PivotCache, PivotDefinition, PivotId, PivotView};
+use pivot_engine::{calculate_pivot, PivotCache, PivotDefinition, PivotId, PivotView};
 use engine::{Cell, CellValue};
 
 // ============================================================================
@@ -197,11 +197,11 @@ pub(crate) fn write_pivot_to_grid(
                 pivot_cell.formatted_value.clone()
             } else {
                 match &pivot_cell.value {
-                    engine::pivot::PivotCellValue::Empty => String::new(),
-                    engine::pivot::PivotCellValue::Number(n) => n.to_string(),
-                    engine::pivot::PivotCellValue::Text(s) => s.clone(),
-                    engine::pivot::PivotCellValue::Boolean(b) => if *b { "TRUE".to_string() } else { "FALSE".to_string() },
-                    engine::pivot::PivotCellValue::Error(e) => format!("#{}", e),
+                    pivot_engine::PivotCellValue::Empty => String::new(),
+                    pivot_engine::PivotCellValue::Number(n) => n.to_string(),
+                    pivot_engine::PivotCellValue::Text(s) => s.clone(),
+                    pivot_engine::PivotCellValue::Boolean(b) => if *b { "TRUE".to_string() } else { "FALSE".to_string() },
+                    pivot_engine::PivotCellValue::Error(e) => format!("#{}", e),
                 }
             };
             

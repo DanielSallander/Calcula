@@ -9,7 +9,6 @@ pub mod dependency_graph;
 pub mod evaluator;
 pub mod grid;
 pub mod number_format;
-pub mod pivot;
 pub mod style;
 pub mod undo;
 
@@ -27,12 +26,6 @@ pub use style::{
 };
 pub use evaluator::MultiSheetContext;
 pub use undo::{UndoStack, Transaction, CellChange};
-
-// Re-export pivot types
-pub use pivot::{
-    PivotId, PivotDefinition, PivotField, ValueField, AggregationType,
-    PivotCache, PivotView, PivotViewCell, PivotCellType, PivotCellValue,
-};
 
 #[cfg(test)]
 mod tests {

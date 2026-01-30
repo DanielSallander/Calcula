@@ -5,7 +5,7 @@
 import { TaskPaneExtensions } from "../core/extensions/taskPaneExtensions";
 import { DialogExtensions } from "../core/extensions/dialogExtensions";
 import { OverlayExtensions } from "../core/extensions/overlayExtensions";
-import { useTaskPaneStore } from "../shell/task-pane/useTaskPaneStore";
+import { useTaskPaneStore } from "../shell/TaskPane/useTaskPaneStore";
 
 // Re-export the extension registries
 export { TaskPaneExtensions, DialogExtensions, OverlayExtensions };

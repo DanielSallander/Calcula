@@ -2,7 +2,7 @@
 // PURPOSE: Extension loader - loads all extensions during application initialization.
 // CONTEXT: Called from main.tsx to register all extensions before rendering.
 
-import { registerPivotExtension, unregisterPivotExtension } from "./pivot";
+import { registerPivotExtension, unregisterPivotExtension } from "./Pivot";
 
 /**
  * Load all extensions.

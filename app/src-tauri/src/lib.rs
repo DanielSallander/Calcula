@@ -10,7 +10,7 @@ use engine::{
     BinaryOperator as EngineBinaryOp, Expression as EngineExpr, UnaryOperator as EngineUnaryOp,
     Value as EngineValue,
 };
-use engine::pivot::{PivotCache, PivotDefinition, PivotId};
+use pivot_engine::{PivotCache, PivotDefinition, PivotId};
 use parser::ast::{
     BinaryOperator as ParserBinaryOp, Expression as ParserExpr, UnaryOperator as ParserUnaryOp,
     Value as ParserValue,

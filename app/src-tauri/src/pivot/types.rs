@@ -1,5 +1,5 @@
 //! FILENAME: app/src-tauri/src/pivot/types.rs
-use engine::pivot::PivotId;
+use pivot_engine::PivotId;
 use serde::{Deserialize, Serialize};
 
 /// Request to create a new pivot table

@@ -21,6 +21,7 @@ serde_json = "1"
 engine = { path = "../../core/engine" }
 parser = { path = "../../core/parser" }
 persistence = { path = "../../core/persistence" }
+pivot-engine = { path = "../../core/pivot-engine" }
 tauri-plugin-log = "2"
 log = "0.4"
 chrono = "0.4"

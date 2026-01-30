@@ -22,7 +22,7 @@ import {
 } from "../../extensions";
 import { getCellFromPixel } from "../../lib/gridRenderer";
 import type { SpreadsheetContentProps } from "./SpreadsheetTypes";
-import { FindReplaceDialog } from "../../../../extensions/FindReplaceDialog";
+import { FindReplaceDialog } from "../../../../extensions/BuiltIn/FindReplaceDialog";
 import { AppEvents } from "../../../api/events";
 
 // Styles
