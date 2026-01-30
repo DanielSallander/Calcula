@@ -1,10 +1,13 @@
 //! FILENAME: app/extensions/builtin/standard-menus/ViewMenu.ts
+// REFACTORED: All imports now go through app/src/api (The Facade Rule).
+// - Removed: direct imports from core/lib/tauri-api, core/state/gridActions, shell/task-pane
+// - Uses: api/grid.ts for freeze operations, api/ui.ts for task pane hooks
+// - The Shell (Layout.tsx) listens for FREEZE_CHANGED events and dispatches to Core state.
+
 import { useCallback, useEffect, useState } from 'react';
-import { setFreezePanes, getFreezePanes } from '../../../src/core/lib/tauri-api';
-import { setFreezeConfig } from '../../../src/core/state/gridActions';
 import type { MenuDefinition } from '../../../src/api/ui';
-import { AppEvents, emitAppEvent } from '../../../src/api/events';
-import { useTaskPaneStore } from '../../../src/shell/task-pane/useTaskPaneStore';
+import { freezePanes, loadFreezePanesConfig } from '../../../src/api/grid';
+import { useIsTaskPaneOpen, useOpenTaskPaneAction, useCloseTaskPaneAction } from '../../../src/api/ui';
 
 export interface ViewMenuHandlers {
   handleFreezeTopRow: () => Promise<void>;
@@ -13,30 +16,26 @@ export interface ViewMenuHandlers {
   handleUnfreeze: () => Promise<void>;
 }
 
-export interface ViewMenuDependencies {
-  // Use 'any' here to allow passing Dispatch<GridAction> or other specific action types
-  dispatch: React.Dispatch<any>;
-}
-
 export interface FreezeState {
   row: boolean;
   col: boolean;
 }
 
-export function useViewMenu(deps: ViewMenuDependencies): { menu: MenuDefinition; handlers: ViewMenuHandlers; freezeState: FreezeState } {
-  const { dispatch } = deps;
+export function useViewMenu(): { menu: MenuDefinition; handlers: ViewMenuHandlers; freezeState: FreezeState } {
   const [freezeState, setFreezeState] = useState<FreezeState>({ row: false, col: false });
 
-  // Task pane state
-  const isTaskPaneOpen = useTaskPaneStore((state) => state.isOpen);
-  const openTaskPane = useTaskPaneStore((state) => state.open);
-  const closeTaskPane = useTaskPaneStore((state) => state.close);
+  // Task pane state via API hooks (no shell import)
+  const isTaskPaneOpen = useIsTaskPaneOpen();
+  const openTaskPane = useOpenTaskPaneAction();
+  const closeTaskPane = useCloseTaskPaneAction();
 
   useEffect(() => {
     const loadFreezeState = async () => {
       console.log('[ViewMenu] Loading freeze state...');
       try {
-        const config = await getFreezePanes();
+        // loadFreezePanesConfig fetches from backend AND emits FREEZE_CHANGED
+        // so the Shell bridge in Layout.tsx dispatches setFreezeConfig to Core state.
+        const config = await loadFreezePanesConfig();
         console.log('[ViewMenu] Loaded freeze config:', config);
         const hasRow = config.freezeRow !== null && config.freezeRow > 0;
         const hasCol = config.freezeCol !== null && config.freezeCol > 0;
@@ -44,16 +43,12 @@ export function useViewMenu(deps: ViewMenuDependencies): { menu: MenuDefinition;
           row: hasRow,
           col: hasCol,
         });
-        dispatch(setFreezeConfig(
-          hasRow ? config.freezeRow : null,
-          hasCol ? config.freezeCol : null
-        ));
       } catch (error) {
         console.error('[ViewMenu] Failed to load freeze state:', error);
       }
     };
     loadFreezeState();
-  }, [dispatch]);
+  }, []);
 
   const handleFreezeTopRow = useCallback(async () => {
     console.log('[ViewMenu] handleFreezeTopRow called, current state:', freezeState);
@@ -61,17 +56,14 @@ export function useViewMenu(deps: ViewMenuDependencies): { menu: MenuDefinition;
       const newRowState = !freezeState.row;
       const freezeRow = newRowState ? 1 : null;
       const freezeCol = freezeState.col ? 1 : null;
-      console.log('[ViewMenu] Calling setFreezePanes with:', { freezeRow, freezeCol });
-      const result = await setFreezePanes(freezeRow, freezeCol);
-      console.log('[ViewMenu] setFreezePanes result:', result);
+      console.log('[ViewMenu] Calling freezePanes with:', { freezeRow, freezeCol });
+      // freezePanes: calls backend + emits FREEZE_CHANGED + emits GRID_REFRESH
+      await freezePanes(freezeRow, freezeCol);
       setFreezeState(prev => ({ ...prev, row: newRowState }));
-      dispatch(setFreezeConfig(freezeRow, freezeCol));
-      emitAppEvent(AppEvents.FREEZE_CHANGED, { freezeRow, freezeCol });
-      window.dispatchEvent(new CustomEvent('grid:refresh'));
     } catch (error) {
       console.error('[ViewMenu] handleFreezeTopRow error:', error);
     }
-  }, [freezeState, dispatch]);
+  }, [freezeState]);
 
   const handleFreezeFirstColumn = useCallback(async () => {
     console.log('[ViewMenu] handleFreezeFirstColumn called, current state:', freezeState);
@@ -79,17 +71,13 @@ export function useViewMenu(deps: ViewMenuDependencies): { menu: MenuDefinition;
       const newColState = !freezeState.col;
       const freezeRow = freezeState.row ? 1 : null;
       const freezeCol = newColState ? 1 : null;
-      console.log('[ViewMenu] Calling setFreezePanes with:', { freezeRow, freezeCol });
-      const result = await setFreezePanes(freezeRow, freezeCol);
-      console.log('[ViewMenu] setFreezePanes result:', result);
+      console.log('[ViewMenu] Calling freezePanes with:', { freezeRow, freezeCol });
+      await freezePanes(freezeRow, freezeCol);
       setFreezeState(prev => ({ ...prev, col: newColState }));
-      dispatch(setFreezeConfig(freezeRow, freezeCol));
-      emitAppEvent(AppEvents.FREEZE_CHANGED, { freezeRow, freezeCol });
-      window.dispatchEvent(new CustomEvent('grid:refresh'));
     } catch (error) {
       console.error('[ViewMenu] handleFreezeFirstColumn error:', error);
     }
-  }, [freezeState, dispatch]);
+  }, [freezeState]);
 
   const handleFreezeBoth = useCallback(async () => {
     console.log('[ViewMenu] handleFreezeBoth called, current state:', freezeState);
@@ -98,32 +86,24 @@ export function useViewMenu(deps: ViewMenuDependencies): { menu: MenuDefinition;
       const newState = !bothFrozen;
       const freezeRow = newState ? 1 : null;
       const freezeCol = newState ? 1 : null;
-      console.log('[ViewMenu] Calling setFreezePanes with:', { freezeRow, freezeCol });
-      const result = await setFreezePanes(freezeRow, freezeCol);
-      console.log('[ViewMenu] setFreezePanes result:', result);
+      console.log('[ViewMenu] Calling freezePanes with:', { freezeRow, freezeCol });
+      await freezePanes(freezeRow, freezeCol);
       setFreezeState({ row: newState, col: newState });
-      dispatch(setFreezeConfig(freezeRow, freezeCol));
-      emitAppEvent(AppEvents.FREEZE_CHANGED, { freezeRow, freezeCol });
-      window.dispatchEvent(new CustomEvent('grid:refresh'));
     } catch (error) {
       console.error('[ViewMenu] handleFreezeBoth error:', error);
     }
-  }, [freezeState, dispatch]);
+  }, [freezeState]);
 
   const handleUnfreeze = useCallback(async () => {
     console.log('[ViewMenu] handleUnfreeze called');
     try {
-      console.log('[ViewMenu] Calling setFreezePanes with:', { freezeRow: null, freezeCol: null });
-      const result = await setFreezePanes(null, null);
-      console.log('[ViewMenu] setFreezePanes result:', result);
+      console.log('[ViewMenu] Calling freezePanes with:', { freezeRow: null, freezeCol: null });
+      await freezePanes(null, null);
       setFreezeState({ row: false, col: false });
-      dispatch(setFreezeConfig(null, null));
-      emitAppEvent(AppEvents.FREEZE_CHANGED, { freezeRow: null, freezeCol: null });
-      window.dispatchEvent(new CustomEvent('grid:refresh'));
     } catch (error) {
       console.error('[ViewMenu] handleUnfreeze error:', error);
     }
-  }, [dispatch]);
+  }, []);
 
   const menu: MenuDefinition = {
     id: 'view',

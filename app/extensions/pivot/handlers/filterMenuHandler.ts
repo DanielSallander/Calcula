@@ -3,12 +3,8 @@
 // CONTEXT: When a user clicks a filter dropdown cell in a pivot table,
 // this handler fetches the unique values and shows the filter overlay.
 
-import {
-  getPivotAtCell,
-  getPivotFieldUniqueValues,
-  updatePivotFields,
-  OverlayExtensions,
-} from "../../../src/api";
+import { pivot } from "../../../src/api/pivot";
+import { OverlayExtensions } from "../../../src/api";
 import { PIVOT_FILTER_OVERLAY_ID } from "../manifest";
 
 /**
@@ -39,7 +35,7 @@ export async function handleOpenFilterMenu(detail: {
 
   try {
     // Find the pivot at this cell to get pivotId
-    const pivotInfo = await getPivotAtCell(row, col);
+    const pivotInfo = await pivot.getAtCell(row, col);
     if (!pivotInfo) {
       console.warn("[Pivot Extension] No pivot found at filter cell");
       return;
@@ -50,7 +46,7 @@ export async function handleOpenFilterMenu(detail: {
     // Get unique values for this field
     let allValues: string[] = [];
     try {
-      const valuesResponse = await getPivotFieldUniqueValues(pivotInfo.pivotId, fieldIndex);
+      const valuesResponse = await pivot.getFieldUniqueValues(pivotInfo.pivotId, fieldIndex);
       console.log("[Pivot Extension] Got unique values:", valuesResponse);
       allValues = valuesResponse?.uniqueValues ?? [];
     } catch (valuesError) {
@@ -106,7 +102,7 @@ async function handleApplyFilter(
 
   try {
     // Update the pivot with the new filter configuration
-    await updatePivotFields({
+    await pivot.updateFields({
       pivot_id: currentFilterState.pivotId,
       filter_fields: [
         {

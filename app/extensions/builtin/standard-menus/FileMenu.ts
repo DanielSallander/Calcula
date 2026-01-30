@@ -1,6 +1,8 @@
 //! FILENAME: app/extensions/builtin/standard-menus/FileMenu.ts
+// ARCHITECTURE: Uses the System API facade (The Facade Rule).
+// Extensions must ONLY import from app/src/api.
 import { useCallback } from 'react';
-import { newFile, openFile, saveFile, saveFileAs, isFileModified } from '../../../src/core/lib/file-api';
+import { workspace } from '../../../src/api/system';
 import type { MenuDefinition } from '../../../src/api/ui';
 
 export interface FileMenuHandlers {
@@ -13,12 +15,12 @@ export interface FileMenuHandlers {
 export function useFileMenu(): { menu: MenuDefinition; handlers: FileMenuHandlers } {
   const handleNew = useCallback(async () => {
     try {
-      const modified = await isFileModified();
+      const modified = await workspace.isModified();
       if (modified) {
         const confirmed = window.confirm('You have unsaved changes. Create new file anyway?');
         if (!confirmed) return;
       }
-      await newFile();
+      await workspace.new();
       window.location.reload();
     } catch (error) {
       console.error('[FileMenu] handleNew error:', error);
@@ -28,12 +30,12 @@ export function useFileMenu(): { menu: MenuDefinition; handlers: FileMenuHandler
 
   const handleOpen = useCallback(async () => {
     try {
-      const modified = await isFileModified();
+      const modified = await workspace.isModified();
       if (modified) {
         const confirmed = window.confirm('You have unsaved changes. Open file anyway?');
         if (!confirmed) return;
       }
-      const cells = await openFile();
+      const cells = await workspace.open();
       if (cells) {
         window.location.reload();
       }
@@ -45,7 +47,7 @@ export function useFileMenu(): { menu: MenuDefinition; handlers: FileMenuHandler
 
   const handleSave = useCallback(async () => {
     try {
-      const path = await saveFile();
+      const path = await workspace.save();
       if (path) {
         console.log('[FileMenu] Saved to:', path);
       }
@@ -57,7 +59,7 @@ export function useFileMenu(): { menu: MenuDefinition; handlers: FileMenuHandler
 
   const handleSaveAs = useCallback(async () => {
     try {
-      const path = await saveFileAs();
+      const path = await workspace.saveAs();
       if (path) {
         console.log('[FileMenu] Saved as:', path);
       }

@@ -175,3 +175,63 @@ export function hideOverlay(overlayId: string): void {
 export function hideAllOverlays(): void {
   OverlayExtensions.hideAllOverlays();
 }
+
+// ============================================================================
+// Task Pane API - Additional accessors for extensions
+// ============================================================================
+
+/**
+ * Show the task pane container (not a specific view).
+ */
+export function showTaskPaneContainer(): void {
+  useTaskPaneStore.getState().open();
+}
+
+/**
+ * Hide the task pane container.
+ */
+export function hideTaskPaneContainer(): void {
+  useTaskPaneStore.getState().close();
+}
+
+/**
+ * Check if the task pane container is currently open (sync, non-reactive).
+ */
+export function isTaskPaneContainerOpen(): boolean {
+  return useTaskPaneStore.getState().isOpen;
+}
+
+/**
+ * Get the list of manually closed view IDs.
+ */
+export function getTaskPaneManuallyClosed(): string[] {
+  return useTaskPaneStore.getState().manuallyClosed;
+}
+
+/**
+ * Clear the manually-closed flag for a specific view.
+ */
+export function clearTaskPaneManuallyClosed(viewId: string): void {
+  useTaskPaneStore.getState().clearManuallyClosed(viewId);
+}
+
+/**
+ * React hook: is the task pane container open? (reactive)
+ */
+export function useIsTaskPaneOpen(): boolean {
+  return useTaskPaneStore((state) => state.isOpen);
+}
+
+/**
+ * React hook: get the open action for the task pane container. (reactive)
+ */
+export function useOpenTaskPaneAction(): () => void {
+  return useTaskPaneStore((state) => state.open);
+}
+
+/**
+ * React hook: get the close action for the task pane container. (reactive)
+ */
+export function useCloseTaskPaneAction(): () => void {
+  return useTaskPaneStore((state) => state.close);
+}

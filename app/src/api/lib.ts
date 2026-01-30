@@ -130,6 +130,14 @@ export {
   createLayoutConfig,
 } from "../core/lib/pivot-api";
 
+// ============================================================================
+// Grid Renderer - Pivot interactive bounds
+// ============================================================================
+
+export type {
+  PivotInteractiveBounds,
+} from "../core/lib/gridRenderer/rendering/pivot";
+
 // Type exports from pivot-api
 export type {
   PivotId,

@@ -3,9 +3,13 @@
 // CONTEXT: When the user selects a cell within a pivot region, we show the editor.
 // When they select outside, we hide it.
 
-import { getPivotAtCell } from "../../../src/api";
+import { pivot } from "../../../src/api/pivot";
+import {
+  openTaskPane,
+  closeTaskPane,
+  getTaskPaneManuallyClosed,
+} from "../../../src/api";
 import type { LayoutConfig, AggregationType } from "../../../src/api";
-import { useTaskPaneStore } from "../../../src/shell/task-pane";
 import { PIVOT_PANE_ID } from "../manifest";
 import type { SourceField, ZoneField, PivotEditorViewData, PivotRegionData } from "../types";
 
@@ -106,7 +110,7 @@ export function handleSelectionChange(
     return;
   }
 
-  const { manuallyClosed, openPane, closePane } = useTaskPaneStore.getState();
+  const manuallyClosed = getTaskPaneManuallyClosed();
 
   // Fast local bounds check using cached regions
   const localPivotRegion = findPivotRegionAtCell(row, col);
@@ -118,7 +122,7 @@ export function handleSelectionChange(
       return;
     }
     lastCheckedSelection = { row, col };
-    closePane(PIVOT_PANE_ID);
+    closeTaskPane(PIVOT_PANE_ID);
     return;
   }
 
@@ -136,7 +140,7 @@ export function handleSelectionChange(
   // Small delay to debounce rapid selection changes within pivot regions
   debounceTimer = setTimeout(() => {
     debounceTimer = null;
-    checkPivotAtSelection(row, col, openPane, closePane);
+    checkPivotAtSelection(row, col);
   }, 50);
 }
 
@@ -146,14 +150,12 @@ export function handleSelectionChange(
 async function checkPivotAtSelection(
   row: number,
   col: number,
-  openPane: (viewId: string, data?: Record<string, unknown>) => void,
-  closePane: (viewId: string) => void,
 ): Promise<void> {
   checkInProgress = true;
   lastCheckedSelection = { row, col };
 
   try {
-    const pivotInfo = await getPivotAtCell(row, col);
+    const pivotInfo = await pivot.getAtCell(row, col);
 
     if (pivotInfo) {
       // Convert source fields from backend format
@@ -210,9 +212,9 @@ async function checkPivotAtSelection(
         initialLayout,
       };
 
-      openPane(PIVOT_PANE_ID, paneData as unknown as Record<string, unknown>);
+      openTaskPane(PIVOT_PANE_ID, paneData as unknown as Record<string, unknown>);
     } else {
-      closePane(PIVOT_PANE_ID);
+      closeTaskPane(PIVOT_PANE_ID);
     }
   } catch (error) {
     console.error("[Pivot Extension] Failed to check pivot at selection:", error);

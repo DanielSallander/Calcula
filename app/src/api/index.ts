@@ -68,6 +68,16 @@ export {
   closeTaskPane,
   getTaskPane,
 
+  // Task Pane - Additional accessors for extensions
+  showTaskPaneContainer,
+  hideTaskPaneContainer,
+  isTaskPaneContainerOpen,
+  getTaskPaneManuallyClosed,
+  clearTaskPaneManuallyClosed,
+  useIsTaskPaneOpen,
+  useOpenTaskPaneAction,
+  useCloseTaskPaneAction,
+
   // Dialogs
   DialogExtensions,
   registerDialog,
@@ -123,7 +133,7 @@ export type {
 } from "./extensions";
 
 // ============================================================================
-// Library - Backend API functions
+// Library - Backend API functions (Tauri / non-pivot)
 // ============================================================================
 export {
   // Tauri API
@@ -178,7 +188,7 @@ export {
   unmergeCells,
   getMergedRegions,
   getMergeInfo,
-  // Pivot API
+  // Pivot API (legacy bare exports - prefer importing `pivot` from "./pivot")
   createPivotTable,
   updatePivotFields,
   togglePivotGroup,
@@ -213,6 +223,7 @@ export type {
   TauriFreezeConfig,
   TauriMergedRegion,
   MergeResult,
+  PivotInteractiveBounds,
   PivotId,
   SortOrder,
   AggregationType,
@@ -263,3 +274,35 @@ export type {
 
 // Re-export ribbon styles
 export * from "../shell/Ribbon/styles";
+
+// ============================================================================
+// Grid - Grid operations (freeze panes, etc.)
+// ============================================================================
+export {
+  freezePanes,
+  loadFreezePanesConfig,
+  getFreezePanesConfig,
+} from "./grid";
+
+// ============================================================================
+// Filesystem - File operations (legacy bare exports - prefer `workspace` from "./system")
+// ============================================================================
+export {
+  newFile,
+  openFile,
+  saveFile,
+  saveFileAs,
+  isFileModified,
+  markFileModified,
+  getCurrentFilePath,
+} from "./filesystem";
+
+// ============================================================================
+// System API - Workspace facade (preferred over bare filesystem exports)
+// ============================================================================
+export { workspace } from "./system";
+
+// ============================================================================
+// Pivot API - Pivot facade (preferred over bare pivot exports from lib)
+// ============================================================================
+export { pivot } from "./pivot";

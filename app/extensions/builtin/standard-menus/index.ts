@@ -5,7 +5,7 @@ export type { FileMenuHandlers } from './FileMenu';
 export { registerEditMenu } from './EditMenu';
 
 export { useViewMenu } from './ViewMenu';
-export type { ViewMenuHandlers, ViewMenuDependencies, FreezeState } from './ViewMenu';
+export type { ViewMenuHandlers, FreezeState } from './ViewMenu';
 
 export { useInsertMenu } from './InsertMenu';
 export type { InsertMenuHandlers } from './InsertMenu';

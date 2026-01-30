@@ -1,12 +1,12 @@
 // FILENAME: app/src/core/components/pivot/PivotGrid/usePivotGridInteraction.ts
 import { useState, useCallback, useRef, useEffect } from 'react';
+import { pivot } from '../../../../src/api/pivot';
 import type {
   PivotViewResponse,
   FilterRowData,
   PivotId,
-} from '../../../../src/core/lib/pivot-api';
-import { updatePivotFields, getPivotFieldUniqueValues } from '../../../../src/core/lib/pivot-api';
-import type { PivotInteractiveBounds } from '../../../../src/core/lib/gridRenderer/rendering/pivot';
+  PivotInteractiveBounds,
+} from '../../../../src/api/pivot';
 
 // =============================================================================
 // TYPES
@@ -193,7 +193,7 @@ export function usePivotGridInteraction(
         };
 
         // Call API to update pivot fields
-        await updatePivotFields({
+        await pivot.updateFields({
           pivot_id: pivotId,
           filter_fields: [filterFieldConfig],
         });
@@ -233,7 +233,7 @@ export function usePivotGridInteraction(
 
         // Fetch unique values from backend API (always fresh)
         try {
-          const response = await getPivotFieldUniqueValues(
+          const response = await pivot.getFieldUniqueValues(
             pivotId,
             clickedFilter.fieldIndex
           );

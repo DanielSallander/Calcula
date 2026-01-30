@@ -1,8 +1,8 @@
 //! FILENAME: app/src/core/components/pivot/CreatePivotDialog.tsx
 
 import React, { useState, useEffect, useCallback } from 'react';
-import { createPivotTable } from '../../../src/core/lib/pivot-api';
-import { addSheet, getSheets, setActiveSheet, indexToCol, colToIndex } from '../../../src/core/lib/tauri-api';
+import { pivot } from '../../../src/api/pivot';
+import { addSheet, getSheets, setActiveSheet, indexToCol, colToIndex } from '../../../src/api';
 
 // ============================================================================
 // Types
@@ -285,7 +285,7 @@ export function CreatePivotDialog({
       });
 
       // Create the pivot table - NOW WITH destination_sheet!
-      const view = await createPivotTable({
+      const view = await pivot.create({
         source_range: sourceRange,
         destination_cell: destinationCell,
         destination_sheet: destinationSheetIndex,  // <-- KEY FIX!

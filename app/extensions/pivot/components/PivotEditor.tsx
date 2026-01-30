@@ -7,7 +7,7 @@ import { LayoutOptions } from './LayoutOptions';
 import { ValueFieldSettingsModal, type ValueFieldSettings } from './ValueFieldSettingsModal';
 import { NumberFormatModal } from './NumberFormatModal';
 import { usePivotEditorState } from './usePivotEditorState';
-import { updatePivotFields } from '../../../src/core/lib/pivot-api';
+import { pivot } from '../../../src/api/pivot';
 import type {
   SourceField,
   ZoneField,
@@ -45,7 +45,7 @@ export function PivotEditor({
 
   const handleUpdate = useCallback(async (request: UpdatePivotFieldsRequest) => {
     try {
-      await updatePivotFields(request);
+      await pivot.updateFields(request);
       // Notify parent that the pivot view has been updated
       if (onViewUpdate) {
         onViewUpdate();

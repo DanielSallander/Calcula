@@ -13,13 +13,14 @@ import { TaskPaneContainer } from "./task-pane";
 import { DialogContainer } from "./DialogContainer";
 import { OverlayContainer } from "./OverlayContainer";
 import { GridProvider, useGridContext } from "../core/state/GridContext";
-import { ExtensionRegistry } from "../api";
+import { setFreezeConfig } from "../core/state/gridActions";
+import { ExtensionRegistry, AppEvents, onAppEvent } from "../api";
 
 /**
  * Inner layout component that has access to GridContext.
  */
 function LayoutInner(): React.ReactElement {
-  const { state } = useGridContext();
+  const { state, dispatch } = useGridContext();
 
   // Bridge: notify extensions whenever the grid selection changes.
   // This allows any extension to react to selection changes via
@@ -27,6 +28,19 @@ function LayoutInner(): React.ReactElement {
   useEffect(() => {
     ExtensionRegistry.notifySelectionChange(state.selection);
   }, [state.selection]);
+
+  // Bridge: sync freeze pane state from API events into Core state.
+  // Extensions call api/grid.ts freezePanes() which emits FREEZE_CHANGED.
+  // The Shell listens here and dispatches to Core state (Inversion of Control).
+  useEffect(() => {
+    const cleanup = onAppEvent<{ freezeRow: number | null; freezeCol: number | null }>(
+      AppEvents.FREEZE_CHANGED,
+      (detail) => {
+        dispatch(setFreezeConfig(detail.freezeRow, detail.freezeCol));
+      }
+    );
+    return cleanup;
+  }, [dispatch]);
 
   return (
     <div
