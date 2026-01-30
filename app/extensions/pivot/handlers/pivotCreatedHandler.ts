@@ -7,6 +7,7 @@ import { getPivotSourceData } from "../../../src/api";
 import { useTaskPaneStore } from "../../../src/shell/task-pane";
 import { PIVOT_PANE_ID } from "../manifest";
 import type { SourceField, PivotEditorViewData } from "../types";
+import { setJustCreatedPivot } from "./selectionHandler";
 
 /**
  * Handle the pivot:created event.
@@ -19,6 +20,9 @@ export async function handlePivotCreated(detail: { pivotId: number }): Promise<v
 
   // Clear manually closed state for pivot pane when a new pivot is created
   useTaskPaneStore.getState().clearManuallyClosed(PIVOT_PANE_ID);
+
+  // Prevent the selection handler from closing the pane before regions are cached
+  setJustCreatedPivot(true);
 
   try {
     const sourceData = await getPivotSourceData(pivotId, [], 1);

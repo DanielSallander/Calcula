@@ -11,7 +11,8 @@
       "Bash(nul)",
       "Bash(npx tsc:*)",
       "Bash(rustfmt:*)",
-      "Bash(npm run build:*)"
+      "Bash(npm run build:*)",
+      "Bash(tree:*)"
     ],
     "deny": [],
     "ask": []

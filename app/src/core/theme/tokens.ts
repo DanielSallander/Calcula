@@ -47,6 +47,19 @@ export const THEME_TOKENS = {
   NAMEBOX_BORDER: '--namebox-border',
   NAMEBOX_TEXT: '--namebox-text',
 
+  // --- Sheet Tabs ---
+  SHEET_TABS_BG: '--sheet-tabs-bg',
+  SHEET_TABS_BORDER: '--sheet-tabs-border',
+  SHEET_TAB_BG: '--sheet-tab-bg',
+  SHEET_TAB_BORDER: '--sheet-tab-border',
+  SHEET_TAB_ACTIVE_BG: '--sheet-tab-active-bg',
+  SHEET_TAB_FORMULA_SOURCE_BG: '--sheet-tab-formula-source-bg',
+  SHEET_TAB_FORMULA_SOURCE_BORDER: '--sheet-tab-formula-source-border',
+  SHEET_TAB_FORMULA_TARGET_BG: '--sheet-tab-formula-target-bg',
+  SHEET_TAB_FORMULA_TARGET_BORDER: '--sheet-tab-formula-target-border',
+  SHEET_TAB_FORMULA_INDICATOR_TEXT: '--sheet-tab-formula-indicator-text',
+  SHEET_TAB_FORMULA_INDICATOR_BG: '--sheet-tab-formula-indicator-bg',
+
   // --- Dialog ---
   DIALOG_OVERLAY_BG: '--dialog-overlay-bg',
   DIALOG_BG: '--dialog-bg',
@@ -101,6 +114,8 @@ export const THEME_TOKENS = {
   // --- General UI ---
   TEXT_PRIMARY: '--text-primary',
   TEXT_SECONDARY: '--text-secondary',
+  TEXT_TERTIARY: '--text-tertiary',
+  TEXT_ERROR: '--text-error',
   TEXT_DISABLED: '--text-disabled',
   ACCENT_PRIMARY: '--accent-primary',
   ACCENT_COLOR: '--accent-color',

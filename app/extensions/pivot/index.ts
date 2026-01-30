@@ -23,7 +23,12 @@ import {
 
 import { handlePivotCreated } from "./handlers/pivotCreatedHandler";
 import { handleOpenFilterMenu } from "./handlers/filterMenuHandler";
-import { resetSelectionHandlerState } from "./handlers/selectionHandler";
+import {
+  handleSelectionChange,
+  updateCachedRegions,
+  resetSelectionHandlerState,
+} from "./handlers/selectionHandler";
+import type { PivotRegionData } from "./types";
 
 // Cleanup functions for event listeners
 let cleanupFunctions: Array<() => void> = [];
@@ -61,6 +66,19 @@ export function registerPivotExtension(): void {
       anchorX: number;
       anchorY: number;
     }>(AppEvents.PIVOT_OPEN_FILTER_MENU, handleOpenFilterMenu)
+  );
+
+  // Subscribe to selection changes to show/hide the pivot editor pane
+  cleanupFunctions.push(
+    ExtensionRegistry.onSelectionChange(handleSelectionChange)
+  );
+
+  // Subscribe to pivot region updates to cache region bounds locally
+  cleanupFunctions.push(
+    onAppEvent<{ regions: PivotRegionData[] }>(
+      AppEvents.PIVOT_REGIONS_UPDATED,
+      (detail) => updateCachedRegions(detail.regions)
+    )
   );
 
   console.log("[Pivot Extension] Registered successfully");

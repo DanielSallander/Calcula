@@ -23,6 +23,7 @@ import { useGridContext } from "../../core/state/GridContext";
 import { setActiveSheet, setSheetContext } from "../../core/state/gridActions";
 import { isFormulaExpectingReference } from "../../core/types";
 import { setPreventBlurCommit } from "../../core/components/InlineEditor/InlineEditor";
+import * as S from './SheetTabs.styles';
 
 export interface SheetTabsProps {
   onSheetChange?: (sheetIndex: number, sheetName: string) => void;
@@ -429,27 +430,27 @@ export function SheetTabs({ onSheetChange }: SheetTabsProps): React.ReactElement
     editing.sourceSheetIndex !== activeIndex;
 
   return (
-    <div style={styles.container}>
+    <S.Container>
       {/* Navigation arrows */}
-      <div style={styles.navArea}>
-        <button style={styles.navButton} title="First sheet" disabled>
+      <S.NavArea>
+        <S.NavButton title="First sheet" disabled>
           |&lt;
-        </button>
-        <button style={styles.navButton} title="Previous sheet" disabled>
+        </S.NavButton>
+        <S.NavButton title="Previous sheet" disabled>
           &lt;
-        </button>
-        <button style={styles.navButton} title="Next sheet" disabled>
+        </S.NavButton>
+        <S.NavButton title="Next sheet" disabled>
           &gt;
-        </button>
-        <button style={styles.navButton} title="Last sheet" disabled>
+        </S.NavButton>
+        <S.NavButton title="Last sheet" disabled>
           &gt;|
-        </button>
-      </div>
+        </S.NavButton>
+      </S.NavArea>
 
       {/* Sheet tabs */}
-      <div style={styles.tabsArea}>
+      <S.TabsArea>
         {isLoading ? (
-          <span style={styles.loadingText}>Loading...</span>
+          <S.LoadingText>Loading...</S.LoadingText>
         ) : (
           <>
             {sheets.map((sheet) => {
@@ -460,16 +461,13 @@ export function SheetTabs({ onSheetChange }: SheetTabsProps): React.ReactElement
                 !isSourceSheet;
               
               return (
-                <button
+                <S.Tab
                   key={sheet.index}
                   type="button"
                   tabIndex={-1}
-                  style={{
-                    ...styles.tab,
-                    ...(sheet.index === activeIndex ? styles.activeTab : {}),
-                    ...(isSourceSheet ? styles.formulaSourceTab : {}),
-                    ...(isTargetSheet ? styles.formulaTargetTab : {}),
-                  }}
+                  $isActive={sheet.index === activeIndex}
+                  $isFormulaSource={isSourceSheet}
+                  $isFormulaTarget={isTargetSheet}
                   onMouseDown={(e) => handleTabMouseDown(e, sheet.index)}
                   onClick={() => handleSheetClick(sheet.index)}
                   onContextMenu={(e) => handleContextMenu(e, sheet.index)}
@@ -483,223 +481,64 @@ export function SheetTabs({ onSheetChange }: SheetTabsProps): React.ReactElement
                   }
                 >
                   {sheet.name}
-                  {isSourceSheet && <span style={styles.sourceIndicator}> [*]</span>}
-                </button>
+                  {isSourceSheet && <S.SourceIndicator> [*]</S.SourceIndicator>}
+                </S.Tab>
               );
             })}
-            <button
+            <S.AddButton
               type="button"
               tabIndex={-1}
-              style={{
-                ...styles.addButton,
-                ...(isInFormulaMode ? styles.disabledButton : {}),
-              }}
+              $disabled={isInFormulaMode}
               onClick={handleAddSheet}
               title={isInFormulaMode ? "Finish formula editing first" : "Add new sheet"}
               disabled={isInFormulaMode}
             >
               +
-            </button>
+            </S.AddButton>
           </>
         )}
         {error && (
-          <span style={styles.errorText} title={error}>
+          <S.ErrorText title={error}>
             [API Error]
-          </span>
+          </S.ErrorText>
         )}
-      </div>
+      </S.TabsArea>
 
       {/* Formula mode indicator */}
       {isViewingDifferentSheet && (
-        <div style={styles.formulaModeIndicator}>
+        <S.FormulaModeIndicator>
           Selecting from: {sheets[activeIndex]?.name} 
           {" --> "}
           {editing?.sourceSheetName || sheets[editing?.sourceSheetIndex ?? 0]?.name}
-        </div>
+        </S.FormulaModeIndicator>
       )}
 
       {/* Scroll bar area */}
-      <div style={styles.scrollArea}></div>
+      <S.ScrollArea />
 
       {/* Context Menu */}
       {contextMenu && (
-        <div
+        <S.ContextMenu
           ref={contextMenuRef}
-          style={{
-            ...styles.contextMenu,
-            left: contextMenu.x,
-            top: contextMenu.y,
-          }}
+          $x={contextMenu.x}
+          $y={contextMenu.y}
         >
           {getContextMenuItems(contextMenu.sheetIndex).map((item, idx) => (
             <React.Fragment key={item.id}>
-              <button
+              <S.ContextMenuItem
                 type="button"
-                style={{
-                  ...styles.contextMenuItem,
-                  ...(item.disabled ? styles.contextMenuItemDisabled : {}),
-                }}
+                $disabled={!!item.disabled}
                 onClick={() => handleContextMenuItemClick(item)}
                 disabled={!!item.disabled}
               >
-                {item.icon && <span style={styles.contextMenuIcon}>{item.icon}</span>}
+                {item.icon && <S.ContextMenuIcon>{item.icon}</S.ContextMenuIcon>}
                 {item.label}
-              </button>
-              {item.separatorAfter && <div style={styles.contextMenuSeparator} />}
+              </S.ContextMenuItem>
+              {item.separatorAfter && <S.ContextMenuSeparator />}
             </React.Fragment>
           ))}
-        </div>
+        </S.ContextMenu>
       )}
-    </div>
+    </S.Container>
   );
 }
-
-const styles: Record<string, React.CSSProperties> = {
-  container: {
-    display: "flex",
-    alignItems: "center",
-    height: "26px",
-    backgroundColor: "#f0f0f0",
-    borderTop: "1px solid #d0d0d0",
-    userSelect: "none",
-    fontSize: "12px",
-    position: "relative",
-  },
-  navArea: {
-    display: "flex",
-    alignItems: "center",
-    padding: "0 4px",
-    borderRight: "1px solid #d0d0d0",
-  },
-  navButton: {
-    width: "20px",
-    height: "20px",
-    padding: 0,
-    border: "none",
-    backgroundColor: "transparent",
-    color: "#666",
-    cursor: "pointer",
-    fontSize: "10px",
-    display: "flex",
-    alignItems: "center",
-    justifyContent: "center",
-  },
-  tabsArea: {
-    display: "flex",
-    alignItems: "center",
-    flex: "0 1 auto",
-    overflow: "hidden",
-    padding: "0 4px",
-  },
-  tab: {
-    padding: "4px 12px",
-    border: "1px solid #c0c0c0",
-    borderBottom: "none",
-    borderRadius: "4px 4px 0 0",
-    backgroundColor: "#e8e8e8",
-    color: "#333",
-    cursor: "pointer",
-    fontSize: "11px",
-    marginRight: "2px",
-    whiteSpace: "nowrap",
-    maxWidth: "120px",
-    overflow: "hidden",
-    textOverflow: "ellipsis",
-  },
-  activeTab: {
-    backgroundColor: "#ffffff",
-    borderBottom: "1px solid #ffffff",
-    marginBottom: "-1px",
-    fontWeight: 500,
-  },
-  formulaSourceTab: {
-    backgroundColor: "#fff3e0",
-    borderColor: "#ff9800",
-  },
-  formulaTargetTab: {
-    backgroundColor: "#e3f2fd",
-    borderColor: "#2196f3",
-  },
-  sourceIndicator: {
-    color: "#ff9800",
-    fontWeight: "bold",
-  },
-  addButton: {
-    width: "22px",
-    height: "20px",
-    padding: 0,
-    border: "1px solid #c0c0c0",
-    borderRadius: "4px",
-    backgroundColor: "#e8e8e8",
-    color: "#666",
-    cursor: "pointer",
-    fontSize: "14px",
-    display: "flex",
-    alignItems: "center",
-    justifyContent: "center",
-    marginLeft: "4px",
-  },
-  disabledButton: {
-    opacity: 0.5,
-    cursor: "not-allowed",
-  },
-  scrollArea: {
-    flex: 1,
-    minWidth: "50px",
-  },
-  loadingText: {
-    color: "#888",
-    fontStyle: "italic",
-    padding: "0 8px",
-  },
-  errorText: {
-    color: "#c00",
-    fontStyle: "italic",
-    padding: "0 8px",
-    cursor: "help",
-  },
-  formulaModeIndicator: {
-    padding: "0 8px",
-    color: "#1976d2",
-    fontSize: "11px",
-    fontStyle: "italic",
-    backgroundColor: "#e3f2fd",
-    borderRadius: "3px",
-    marginLeft: "4px",
-  },
-  contextMenu: {
-    position: "fixed",
-    backgroundColor: "#ffffff",
-    border: "1px solid #c0c0c0",
-    borderRadius: "4px",
-    boxShadow: "0 2px 8px rgba(0, 0, 0, 0.15)",
-    padding: "4px 0",
-    minWidth: "150px",
-    zIndex: 10000,
-  },
-  contextMenuItem: {
-    display: "flex",
-    alignItems: "center",
-    width: "100%",
-    padding: "6px 12px",
-    border: "none",
-    backgroundColor: "transparent",
-    cursor: "pointer",
-    fontSize: "12px",
-    color: "#333",
-    textAlign: "left",
-  },
-  contextMenuItemDisabled: {
-    color: "#999",
-    cursor: "default",
-  },
-  contextMenuIcon: {
-    marginRight: "8px",
-    width: "16px",
-  },
-  contextMenuSeparator: {
-    height: "1px",
-    backgroundColor: "#e0e0e0",
-    margin: "4px 0",
-  },
-};

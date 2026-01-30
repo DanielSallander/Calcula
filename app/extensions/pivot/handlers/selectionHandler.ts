@@ -9,17 +9,57 @@ import { useTaskPaneStore } from "../../../src/shell/task-pane";
 import { PIVOT_PANE_ID } from "../manifest";
 import type { SourceField, ZoneField, PivotEditorViewData, PivotRegionData } from "../types";
 
-// Track last checked selection to avoid redundant API calls
+// ---------------------------------------------------------------------------
+// Module-level state (owned by the pivot extension, not by the shell)
+// ---------------------------------------------------------------------------
+
+/** Cached pivot regions for fast local bounds checking. */
+let cachedRegions: PivotRegionData[] = [];
+
+/** Flag to prevent closing the pane right after a pivot is created (regions not yet cached). */
+let justCreatedPivot = false;
+
+/** Track last checked selection to avoid redundant API calls. */
 let lastCheckedSelection: { row: number; col: number } | null = null;
+
+/** Guard against overlapping async checks. */
 let checkInProgress = false;
+
+/** Debounce timer for selection changes within a pivot region. */
+let debounceTimer: ReturnType<typeof setTimeout> | null = null;
+
+// ---------------------------------------------------------------------------
+// State mutators (called by other handlers / extension index)
+// ---------------------------------------------------------------------------
+
+/**
+ * Update the cached pivot regions.
+ * Called when a `pivot:regionsUpdated` event fires.
+ */
+export function updateCachedRegions(regions: PivotRegionData[]): void {
+  cachedRegions = regions;
+  // Regions arrived, so clear the just-created flag
+  justCreatedPivot = false;
+}
+
+/**
+ * Set the justCreatedPivot flag.
+ * Called by pivotCreatedHandler before opening the pane.
+ */
+export function setJustCreatedPivot(value: boolean): void {
+  justCreatedPivot = value;
+}
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
 
 /**
  * Fast local check if a cell is within any cached pivot region.
  */
-export function findPivotRegionAtCell(
+function findPivotRegionAtCell(
   row: number,
   col: number,
-  cachedRegions: PivotRegionData[]
 ): PivotRegionData | null {
   for (const region of cachedRegions) {
     if (
@@ -34,18 +74,17 @@ export function findPivotRegionAtCell(
   return null;
 }
 
+// ---------------------------------------------------------------------------
+// Main handler
+// ---------------------------------------------------------------------------
+
 /**
- * Handle selection change to show/hide pivot pane.
- *
- * @param selection - Current selection
- * @param cachedRegions - Cached pivot regions for fast local check
- * @param justCreatedPivot - Flag to prevent closing pane right after creation
+ * Handle selection change to show/hide the pivot pane.
+ * Called by the ExtensionRegistry.onSelectionChange subscription.
  */
-export async function handleSelectionChange(
+export function handleSelectionChange(
   selection: { endRow: number; endCol: number } | null,
-  cachedRegions: PivotRegionData[],
-  justCreatedPivot: boolean
-): Promise<void> {
+): void {
   if (!selection) {
     return;
   }
@@ -70,7 +109,7 @@ export async function handleSelectionChange(
   const { manuallyClosed, openPane, closePane } = useTaskPaneStore.getState();
 
   // Fast local bounds check using cached regions
-  const localPivotRegion = findPivotRegionAtCell(row, col, cachedRegions);
+  const localPivotRegion = findPivotRegionAtCell(row, col);
 
   if (localPivotRegion === null) {
     // Cell is NOT in any pivot region - close pivot pane if open
@@ -89,7 +128,27 @@ export async function handleSelectionChange(
     return;
   }
 
-  // Call API for full pivot details
+  // Clear any pending debounce
+  if (debounceTimer !== null) {
+    clearTimeout(debounceTimer);
+  }
+
+  // Small delay to debounce rapid selection changes within pivot regions
+  debounceTimer = setTimeout(() => {
+    debounceTimer = null;
+    checkPivotAtSelection(row, col, openPane, closePane);
+  }, 50);
+}
+
+/**
+ * Fetch full pivot details for the given cell and open/close the pane.
+ */
+async function checkPivotAtSelection(
+  row: number,
+  col: number,
+  openPane: (viewId: string, data?: Record<string, unknown>) => void,
+  closePane: (viewId: string) => void,
+): Promise<void> {
   checkInProgress = true;
   lastCheckedSelection = { row, col };
 
@@ -162,11 +221,21 @@ export async function handleSelectionChange(
   }
 }
 
+// ---------------------------------------------------------------------------
+// Cleanup
+// ---------------------------------------------------------------------------
+
 /**
  * Reset the selection handler state.
  * Called when the extension is unloaded.
  */
 export function resetSelectionHandlerState(): void {
+  cachedRegions = [];
+  justCreatedPivot = false;
   lastCheckedSelection = null;
   checkInProgress = false;
+  if (debounceTimer !== null) {
+    clearTimeout(debounceTimer);
+    debounceTimer = null;
+  }
 }
