@@ -10,6 +10,8 @@ import {
   onAppEvent,
   AppEvents,
   emitAppEvent,
+  registerEditGuard,
+  registerCellClickInterceptor,
 } from "../../src/api";
 
 import {
@@ -38,7 +40,7 @@ import {
   resetSelectionHandlerState,
 } from "./handlers/selectionHandler";
 import type { PivotRegionData } from "./types";
-import { getPivotRegionsForSheet } from "./lib/pivot-api";
+import { getPivotRegionsForSheet, getPivotAtCell } from "./lib/pivot-api";
 
 // ============================================================================
 // Pivot Placeholder Overlay Renderer
@@ -199,6 +201,48 @@ export function registerPivotExtension(): void {
 
   // Register overlays
   OverlayExtensions.registerOverlay(PivotFilterOverlayDefinition);
+
+  // Register edit guard - block editing in pivot regions
+  cleanupFunctions.push(
+    registerEditGuard(async (row, col) => {
+      try {
+        const pivotInfo = await getPivotAtCell(row, col);
+        if (pivotInfo) {
+          return { blocked: true, message: "You can't change this part of the PivotTable." };
+        }
+      } catch (error) {
+        console.error("[Pivot Extension] Failed to check pivot region:", error);
+      }
+      return null;
+    })
+  );
+
+  // Register click interceptor - handle filter dropdown clicks
+  cleanupFunctions.push(
+    registerCellClickInterceptor(async (row, col, event) => {
+      try {
+        const pivotInfo = await getPivotAtCell(row, col);
+        if (!pivotInfo?.filterZones) return false;
+
+        for (const zone of pivotInfo.filterZones) {
+          if (zone.row === row && zone.col === col) {
+            emitAppEvent(AppEvents.PIVOT_OPEN_FILTER_MENU, {
+              fieldIndex: zone.fieldIndex,
+              fieldName: zone.fieldName,
+              row: zone.row,
+              col: zone.col,
+              anchorX: event.clientX,
+              anchorY: event.clientY,
+            });
+            return true;
+          }
+        }
+      } catch (error) {
+        console.error("[Pivot Extension] Failed to check pivot filter:", error);
+      }
+      return false;
+    })
+  );
 
   // Register grid overlay renderer for pivot placeholder regions
   cleanupFunctions.push(

@@ -3,6 +3,7 @@
 // CONTEXT: Called from main.tsx to register all extensions before rendering.
 
 import { registerPivotExtension, unregisterPivotExtension } from "./Pivot";
+import { registerEditMenu } from "./BuiltIn/StandardMenus";
 
 /**
  * Load all extensions.
@@ -12,6 +13,7 @@ export function loadExtensions(): void {
   console.log("[Extensions] Loading extensions...");
 
   // Load built-in extensions
+  registerEditMenu();
   registerPivotExtension();
 
   // Future: Load user extensions from config

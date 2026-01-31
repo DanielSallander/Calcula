@@ -23,8 +23,7 @@ import {
   undo as undoApi,
   redo as redoApi,
 } from "../../lib/tauri-api";
-import { getPivotAtCell } from "../../lib/pivot-api";
-import type { FilterZoneInfo } from "../../lib/pivot-api";
+import { checkCellClickInterceptors } from "../../../api/cellClickInterceptors";
 import { setColumnWidth, setRowHeight } from "../../state/gridActions";
 import { cellEvents } from "../../lib/cellEvents";
 import type { GridCanvasHandle } from "../Grid";
@@ -356,31 +355,7 @@ export function useSpreadsheetSelection({
     onFillHandleDoubleClick: handleFillHandleDoubleClick,
   });
 
-  // Check if a cell is a filter dropdown in a pivot region
-  const checkPivotFilterClick = useCallback(
-    async (row: number, col: number): Promise<FilterZoneInfo | null> => {
-      try {
-        const pivotInfo = await getPivotAtCell(row, col);
-        if (!pivotInfo || !pivotInfo.filterZones) {
-          return null;
-        }
-
-        // Check if the clicked cell matches any filter zone
-        for (const zone of pivotInfo.filterZones) {
-          if (zone.row === row && zone.col === col) {
-            return zone;
-          }
-        }
-        return null;
-      } catch (error) {
-        console.error("[useSpreadsheetSelection] Failed to check pivot filter:", error);
-        return null;
-      }
-    },
-    []
-  );
-
-  // Wrap mouse handlers to include fill handle logic and pivot filter detection
+  // Wrap mouse handlers to include fill handle logic and extension click interception
   const handleMouseDown = useCallback(
     async (event: React.MouseEvent<HTMLElement>) => {
       const rect = event.currentTarget.getBoundingClientRect();
@@ -394,37 +369,27 @@ export function useSpreadsheetSelection({
         return;
       }
 
-      // Get cell from click position to check for pivot filter
+      // Get cell from click position to check for extension click interceptors
       const { getCellFromPixel } = await import("../../lib/gridRenderer");
       const clickedCell = getCellFromPixel(mouseX, mouseY, state.config, state.viewport, state.dimensions);
 
       if (clickedCell) {
-        // Check if this is a pivot filter dropdown cell
-        const filterZone = await checkPivotFilterClick(clickedCell.row, clickedCell.col);
-        if (filterZone) {
-          // Emit event to open filter menu instead of selecting the cell
+        // Let extensions intercept the click (e.g., pivot filter dropdowns)
+        const intercepted = await checkCellClickInterceptors(
+          clickedCell.row,
+          clickedCell.col,
+          { clientX: event.clientX, clientY: event.clientY }
+        );
+        if (intercepted) {
           event.preventDefault();
           event.stopPropagation();
-
-          window.dispatchEvent(
-            new CustomEvent("pivot:openFilterMenu", {
-              detail: {
-                fieldIndex: filterZone.fieldIndex,
-                fieldName: filterZone.fieldName,
-                row: filterZone.row,
-                col: filterZone.col,
-                anchorX: event.clientX,
-                anchorY: event.clientY,
-              },
-            })
-          );
           return;
         }
       }
 
       baseHandleMouseDown(event);
     },
-    [baseHandleMouseDown, isOverFillHandle, startFillDrag, checkPivotFilterClick, state.config, state.viewport, state.dimensions]
+    [baseHandleMouseDown, isOverFillHandle, startFillDrag, state.config, state.viewport, state.dimensions]
   );
 
   const handleMouseMove = useCallback(

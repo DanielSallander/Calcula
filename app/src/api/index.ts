@@ -344,6 +344,24 @@ export { cellEvents } from "./cellEvents";
 export type { CellChangeListener } from "./cellEvents";
 
 // ============================================================================
+// Edit Guards - Generic edit guard registry for extensions
+// ============================================================================
+export { registerEditGuard, checkEditGuards } from "./editGuards";
+export type { EditGuardResult, EditGuardFn } from "./editGuards";
+
+// ============================================================================
+// Cell Click Interceptors - Generic click interceptor registry for extensions
+// ============================================================================
+export {
+  registerCellClickInterceptor,
+  checkCellClickInterceptors,
+} from "./cellClickInterceptors";
+export type {
+  CellClickEvent,
+  CellClickInterceptorFn,
+} from "./cellClickInterceptors";
+
+// ============================================================================
 // Pivot API - Pivot facade (preferred over bare pivot exports from lib)
 // ============================================================================
 export { pivot } from "./pivot";

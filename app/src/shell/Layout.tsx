@@ -16,6 +16,7 @@ import { GridProvider, useGridContext } from "../core/state/GridContext";
 import { setFreezeConfig } from "../core/state/gridActions";
 import { ExtensionRegistry, AppEvents, onAppEvent } from "../api";
 import { FindReplaceDialog } from "../../extensions/BuiltIn/FindReplaceDialog";
+import { StandardMenus } from "../../extensions/BuiltIn/StandardMenus/StandardMenus";
 
 /**
  * Inner layout component that has access to GridContext.
@@ -98,6 +99,9 @@ function LayoutInner(): React.ReactElement {
       >
         Ready
       </div>
+
+      {/* Standard Menus (File, View, Insert — hook-based registration) */}
+      <StandardMenus />
 
       {/* Find/Replace Dialog (built-in extension) */}
       <FindReplaceDialog />
