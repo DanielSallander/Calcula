@@ -2,11 +2,11 @@
 // PURPOSE: Formula input field that syncs with cell editing state
 // CONTEXT: Part of FormulaBar, displays and edits the current cell formula/value
 // FIX: Now fetches content from master cell for merged regions
+// REFACTOR: Imports from api layer instead of core internals
 
 import React, { useCallback, useRef, useEffect } from "react";
-import { useGridContext } from "../../core/state/GridContext";
-import { useEditing, setGlobalIsEditing } from "../../core/hooks/useEditing";
-import { getCell, getMergeInfo } from "../../core/lib/tauri-api";
+import { useGridContext, getCell, getMergeInfo } from "../../api";
+import { useEditing, setGlobalIsEditing } from "../../api/editing";
 import * as S from './FormulaInput.styles';
 
 export function FormulaInput(): React.ReactElement {

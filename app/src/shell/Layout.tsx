@@ -2,6 +2,8 @@
 // PURPOSE: Main application layout (the "Shell")
 // CONTEXT: Arranges menu bar, ribbon, formula bar, spreadsheet, sheet tabs, status bar, and task pane.
 // All feature-specific logic lives in extensions; the shell only renders generic zones.
+// NOTE: GridProvider is imported from core as a special case - it's the root context provider.
+// REFACTOR: Actions are now imported from api layer.
 
 import React, { useEffect } from "react";
 import { MenuBar } from "./MenuBar";
@@ -12,9 +14,16 @@ import { SheetTabs } from "./SheetTabs";
 import { TaskPaneContainer } from "./TaskPane";
 import { DialogContainer } from "./DialogContainer";
 import { OverlayContainer } from "./OverlayContainer";
-import { GridProvider, useGridContext } from "../core/state/GridContext";
-import { setFreezeConfig } from "../core/state/gridActions";
-import { ExtensionRegistry, AppEvents, onAppEvent } from "../api";
+// GridProvider is a special case - it's the root React context that must wrap everything
+import { GridProvider } from "../core/state/GridContext";
+// Actions and hooks are imported from the API layer
+import {
+  useGridContext,
+  setFreezeConfig,
+  ExtensionRegistry,
+  AppEvents,
+  onAppEvent,
+} from "../api";
 import { FindReplaceDialog } from "../../extensions/BuiltIn/FindReplaceDialog";
 import { StandardMenus } from "../../extensions/BuiltIn/StandardMenus/StandardMenus";
 
@@ -100,7 +109,7 @@ function LayoutInner(): React.ReactElement {
         Ready
       </div>
 
-      {/* Standard Menus (File, View, Insert — hook-based registration) */}
+      {/* Standard Menus (File, View, Insert - hook-based registration) */}
       <StandardMenus />
 
       {/* Find/Replace Dialog (built-in extension) */}

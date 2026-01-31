@@ -1,11 +1,12 @@
 //! FILENAME: app/src/shell/Ribbon/RibbonContainer.tsx
 // PURPOSE: The ribbon container - renders tabs registered by add-ins
 // CONTEXT: This is an empty ribbon shell that add-ins populate via ExtensionRegistry
+// REFACTOR: Imports from api layer instead of core internals
 
 import React, { useState, useEffect } from "react";
 import { ExtensionRegistry } from "../../api/extensions";
 import type { RibbonTabDefinition, RibbonContext } from "../../api/extensions";
-import { useGridState } from "../../core/state/GridContext";
+import { useGridState } from "../../api/state";
 
 export function RibbonContainer(): React.ReactElement {
   const state = useGridState();

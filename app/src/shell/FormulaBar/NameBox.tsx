@@ -4,13 +4,18 @@
 // FIX: Now participates in global editing state to prevent grid keyboard handler
 //      from capturing keystrokes and starting cell editing
 // FIX: Added merge-aware navigation - when navigating to a merged cell, expands selection
+// REFACTOR: Imports from api layer instead of core internals
 
 import React, { useState, useEffect, useRef, useCallback } from "react";
-import { useGridContext } from "../../core/state/GridContext";
-import { setSelection, scrollToCell } from "../../core/state/gridActions";
-import { columnToLetter, letterToColumn } from "../../core/types/types";
-import { setGlobalIsEditing } from "../../core/hooks/useEditing";
-import { getMergeInfo } from "../../core/lib/tauri-api";
+import {
+  useGridContext,
+  setSelection,
+  scrollToCell,
+  columnToLetter,
+  letterToColumn,
+  getMergeInfo,
+} from "../../api";
+import { setGlobalIsEditing } from "../../api/editing";
 import * as S from './NameBox.styles';
 
 function parseCellReference(ref: string): { row: number; col: number } | null {

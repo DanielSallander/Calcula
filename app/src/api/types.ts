@@ -38,4 +38,9 @@ export type {
 } from "../core/types";
 
 // Re-export default config and utility functions
-export { DEFAULT_FREEZE_CONFIG, DEFAULT_GRID_CONFIG, columnToLetter } from "../core/types";
+export {
+  DEFAULT_FREEZE_CONFIG,
+  DEFAULT_GRID_CONFIG,
+  columnToLetter,
+  letterToColumn,
+} from "../core/types";

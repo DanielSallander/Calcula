@@ -10,7 +10,7 @@ import React, { useState, useCallback } from "react";
 import { NameBox } from "./NameBox";
 import { FormulaInput } from "./FormulaInput";
 import { InsertFunctionDialog } from "./InsertFunctionDialog";
-import { useEditing } from "../../core/hooks/useEditing";
+import { useEditing } from "../../api/editing";
 import * as S from './FormulaBar.styles';
 
 function CancelIcon(): React.ReactElement {

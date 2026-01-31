@@ -51,7 +51,12 @@ export type {
   MergedRegion,
 } from "./types";
 
-export { DEFAULT_FREEZE_CONFIG, DEFAULT_GRID_CONFIG, columnToLetter } from "./types";
+export {
+  DEFAULT_FREEZE_CONFIG,
+  DEFAULT_GRID_CONFIG,
+  columnToLetter,
+  letterToColumn,
+} from "./types";
 
 // ============================================================================
 // UI - Task Pane, Dialog, and Overlay registration
@@ -338,13 +343,26 @@ export type {
 // ============================================================================
 export {
   useGridContext,
+  useGridState,
+  useGridDispatch,
   setSelection,
   scrollToCell,
   setFindResults,
   setFindCurrentIndex,
   closeFind,
   setFindOptions,
+  setFreezeConfig,
+  setSheetContext,
 } from "./state";
+
+// ============================================================================
+// Editing - Editing hooks and state for shell/extensions
+// ============================================================================
+export {
+  useEditing,
+  setGlobalIsEditing,
+  getGlobalIsEditing,
+} from "./editing";
 
 // ============================================================================
 // Cell Events - Cell change pub/sub for extensions
