@@ -3,8 +3,8 @@
 // CONTEXT: This is an empty ribbon shell that add-ins populate via ExtensionRegistry
 
 import React, { useState, useEffect } from "react";
-import { ExtensionRegistry } from "../../core/extensions";
-import type { RibbonTabDefinition, RibbonContext } from "../../core/extensions";
+import { ExtensionRegistry } from "../../api/extensions";
+import type { RibbonTabDefinition, RibbonContext } from "../../api/extensions";
 import { useGridState } from "../../core/state/GridContext";
 
 export function RibbonContainer(): React.ReactElement {

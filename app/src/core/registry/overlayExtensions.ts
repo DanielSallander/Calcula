@@ -1,4 +1,4 @@
-//! FILENAME: app/src/core/extensions/overlayExtensions.ts
+//! FILENAME: app/src/core/registry/overlayExtensions.ts
 // PURPOSE: Registry for overlays (dropdowns, tooltips, popovers) that extensions can register.
 // CONTEXT: Allows extensions to contribute overlay UI without shell hardcoding.
 

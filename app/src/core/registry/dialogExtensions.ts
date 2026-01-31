@@ -1,4 +1,4 @@
-//! FILENAME: app/src/core/extensions/dialogExtensions.ts
+//! FILENAME: app/src/core/registry/dialogExtensions.ts
 // PURPOSE: Registry for dialogs that extensions can register.
 // CONTEXT: Allows extensions to contribute modal dialogs without shell hardcoding.
 

@@ -18,7 +18,7 @@ import {
   registerCoreSheetContextMenu,
   type SheetContext,
   type SheetContextMenuItem,
-} from "../../core/extensions";
+} from "../../api/extensions";
 import { useGridContext } from "../../core/state/GridContext";
 import { setActiveSheet, setSheetContext } from "../../core/state/gridActions";
 import { isFormulaExpectingReference } from "../../core/types";

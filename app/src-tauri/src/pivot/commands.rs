@@ -3,6 +3,7 @@ use crate::pivot::operations::*;
 use crate::pivot::types::*;
 use crate::pivot::utils::*;
 use crate::{log_debug, log_info, AppState};
+use crate::pivot::types::PivotState;
 use pivot_engine::{drill_down, CacheValue, PivotDefinition, PivotId, VALUE_ID_EMPTY};
 use tauri::State;
 
@@ -14,6 +15,7 @@ use tauri::State;
 #[tauri::command]
 pub fn create_pivot_table(
     state: State<AppState>,
+    pivot_state: State<'_, PivotState>,
     request: CreatePivotRequest,
 ) -> Result<PivotViewResponse, String> {
     log_info!(
@@ -58,7 +60,7 @@ pub fn create_pivot_table(
     drop(grids); // Release lock early
 
     // Generate new pivot ID
-    let mut next_id = state.next_pivot_id.lock().unwrap();
+    let mut next_id = pivot_state.next_pivot_id.lock().unwrap();
     let pivot_id = *next_id;
     *next_id += 1;
     drop(next_id);
@@ -126,11 +128,11 @@ pub fn create_pivot_table(
     }
 
     // Store pivot table
-    let mut pivot_tables = state.pivot_tables.lock().unwrap();
+    let mut pivot_tables = pivot_state.pivot_tables.lock().unwrap();
     pivot_tables.insert(pivot_id, (definition, cache_mut));
 
     // Set as active pivot
-    let mut active = state.active_pivot_id.lock().unwrap();
+    let mut active = pivot_state.active_pivot_id.lock().unwrap();
     *active = Some(pivot_id);
 
     log_info!("PIVOT", "created pivot_id={} rows={} (empty - awaiting field configuration)", pivot_id, response.row_count);
@@ -142,11 +144,12 @@ pub fn create_pivot_table(
 #[tauri::command]
 pub fn update_pivot_fields(
     state: State<AppState>,
+    pivot_state: State<'_, PivotState>,
     request: UpdatePivotFieldsRequest,
 ) -> Result<PivotViewResponse, String> {
     log_info!("PIVOT", "update_pivot_fields pivot_id={}", request.pivot_id);
 
-    let mut pivot_tables = state.pivot_tables.lock().unwrap();
+    let mut pivot_tables = pivot_state.pivot_tables.lock().unwrap();
     let (definition, cache) = pivot_tables
         .get_mut(&request.pivot_id)
         .ok_or_else(|| format!("Pivot table {} not found", request.pivot_id))?;
@@ -227,6 +230,7 @@ pub fn update_pivot_fields(
 #[tauri::command]
 pub fn toggle_pivot_group(
     state: State<AppState>,
+    pivot_state: State<'_, PivotState>,
     request: ToggleGroupRequest,
 ) -> Result<PivotViewResponse, String> {
     log_info!(
@@ -237,7 +241,7 @@ pub fn toggle_pivot_group(
         request.field_index
     );
 
-    let mut pivot_tables = state.pivot_tables.lock().unwrap();
+    let mut pivot_tables = pivot_state.pivot_tables.lock().unwrap();
     let (definition, cache) = pivot_tables
         .get_mut(&request.pivot_id)
         .ok_or_else(|| format!("Pivot table {} not found", request.pivot_id))?;
@@ -297,20 +301,21 @@ pub fn toggle_pivot_group(
 #[tauri::command]
 pub fn get_pivot_view(
     state: State<AppState>,
+    pivot_state: State<'_, PivotState>,
     pivot_id: Option<PivotId>,
 ) -> Result<PivotViewResponse, String> {
     // Use provided ID or active pivot
     let id = match pivot_id {
         Some(id) => id,
         None => {
-            let active = state.active_pivot_id.lock().unwrap();
+            let active = pivot_state.active_pivot_id.lock().unwrap();
             active.ok_or_else(|| "No active pivot table".to_string())?
         }
     };
 
     log_debug!("PIVOT", "get_pivot_view pivot_id={}", id);
 
-    let mut pivot_tables = state.pivot_tables.lock().unwrap();
+    let mut pivot_tables = pivot_state.pivot_tables.lock().unwrap();
     let (definition, cache) = pivot_tables
         .get_mut(&id)
         .ok_or_else(|| format!("Pivot table {} not found", id))?;
@@ -321,11 +326,11 @@ pub fn get_pivot_view(
 
 /// Deletes a pivot table
 #[tauri::command]
-pub fn delete_pivot_table(state: State<AppState>, pivot_id: PivotId) -> Result<(), String> {
+pub fn delete_pivot_table(state: State<AppState>, pivot_state: State<'_, PivotState>, pivot_id: PivotId) -> Result<(), String> {
     log_info!("PIVOT", "delete_pivot_table pivot_id={}", pivot_id);
 
     // Get pivot info before removing
-    let pivot_tables = state.pivot_tables.lock().unwrap();
+    let pivot_tables = pivot_state.pivot_tables.lock().unwrap();
     let (definition, _) = pivot_tables
         .get(&pivot_id)
         .ok_or_else(|| format!("Pivot table {} not found", pivot_id))?;
@@ -363,11 +368,11 @@ pub fn delete_pivot_table(state: State<AppState>, pivot_id: PivotId) -> Result<(
     }
 
     // Remove pivot table
-    let mut pivot_tables = state.pivot_tables.lock().unwrap();
+    let mut pivot_tables = pivot_state.pivot_tables.lock().unwrap();
     pivot_tables.remove(&pivot_id);
 
     // Clear active if this was the active pivot
-    let mut active = state.active_pivot_id.lock().unwrap();
+    let mut active = pivot_state.active_pivot_id.lock().unwrap();
     if *active == Some(pivot_id) {
         *active = None;
     }
@@ -383,6 +388,7 @@ pub fn delete_pivot_table(state: State<AppState>, pivot_id: PivotId) -> Result<(
 #[tauri::command]
 pub fn get_pivot_source_data(
     state: State<AppState>,
+    pivot_state: State<'_, PivotState>,
     pivot_id: PivotId,
     group_path: Vec<(usize, u32)>,
     max_records: Option<usize>,
@@ -394,7 +400,7 @@ pub fn get_pivot_source_data(
         group_path.len()
     );
 
-    let pivot_tables = state.pivot_tables.lock().unwrap();
+    let pivot_tables = pivot_state.pivot_tables.lock().unwrap();
     let (definition, cache) = pivot_tables
         .get(&pivot_id)
         .ok_or_else(|| format!("Pivot table {} not found", pivot_id))?;
@@ -445,12 +451,13 @@ pub fn get_pivot_source_data(
 #[tauri::command]
 pub fn refresh_pivot_cache(
     state: State<AppState>,
+    pivot_state: State<'_, PivotState>,
     pivot_id: PivotId,
 ) -> Result<PivotViewResponse, String> {
     log_info!("PIVOT", "refresh_pivot_cache pivot_id={}", pivot_id);
 
     // First, get the definition to know the source range
-    let pivot_tables = state.pivot_tables.lock().unwrap();
+    let pivot_tables = pivot_state.pivot_tables.lock().unwrap();
     let (definition, _) = pivot_tables
         .get(&pivot_id)
         .ok_or_else(|| format!("Pivot table {} not found", pivot_id))?;
@@ -476,7 +483,7 @@ pub fn refresh_pivot_cache(
     drop(grids);
 
     // Update the stored cache
-    let mut pivot_tables = state.pivot_tables.lock().unwrap();
+    let mut pivot_tables = pivot_state.pivot_tables.lock().unwrap();
     let (definition, cache) = pivot_tables
         .get_mut(&pivot_id)
         .ok_or_else(|| format!("Pivot table {} not found", pivot_id))?;
@@ -510,6 +517,7 @@ pub fn refresh_pivot_cache(
 #[tauri::command]
 pub fn get_pivot_at_cell(
     state: State<AppState>,
+    pivot_state: State<'_, PivotState>,
     row: u32,
     col: u32,
 ) -> Result<Option<PivotRegionInfo>, String> {
@@ -526,7 +534,7 @@ pub fn get_pivot_at_cell(
     log_debug!("PIVOT", "get_pivot_at_cell ({},{}) found pivot_id={}", row, col, pivot_id);
     
     // Get pivot info
-    let pivot_tables = state.pivot_tables.lock().unwrap();
+    let pivot_tables = pivot_state.pivot_tables.lock().unwrap();
     let (definition, cache) = match pivot_tables.get(&pivot_id) {
         Some(t) => t,
         None => return Ok(None),
@@ -635,10 +643,11 @@ pub fn get_pivot_at_cell(
 #[tauri::command]
 pub fn get_pivot_regions_for_sheet(
     state: State<AppState>,
+    pivot_state: State<'_, PivotState>,
 ) -> Vec<PivotRegionData> {
     let active_sheet = *state.active_sheet.lock().unwrap();
     let regions = state.protected_regions.lock().unwrap();
-    let pivot_tables = state.pivot_tables.lock().unwrap();
+    let pivot_tables = pivot_state.pivot_tables.lock().unwrap();
 
     regions
         .iter()
@@ -666,6 +675,7 @@ pub fn get_pivot_regions_for_sheet(
 #[tauri::command]
 pub fn get_pivot_field_unique_values(
     state: State<AppState>,
+    pivot_state: State<'_, PivotState>,
     pivot_id: PivotId,
     field_index: usize,
 ) -> Result<FieldUniqueValuesResponse, String> {
@@ -676,7 +686,7 @@ pub fn get_pivot_field_unique_values(
         field_index
     );
 
-    let mut pivot_tables = state.pivot_tables.lock().unwrap();
+    let mut pivot_tables = pivot_state.pivot_tables.lock().unwrap();
     let (_, cache) = pivot_tables
         .get_mut(&pivot_id)
         .ok_or_else(|| format!("Pivot table {} not found", pivot_id))?;

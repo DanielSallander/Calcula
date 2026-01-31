@@ -4,7 +4,7 @@
 
 import React, { useCallback, useRef, useEffect, useState } from "react";
 import { useTaskPaneStore } from "./useTaskPaneStore";
-import { TaskPaneExtensions } from "../../core/extensions/taskPaneExtensions";
+import { TaskPaneExtensions } from "../../api/ui";
 import { TaskPaneHeader } from "./TaskPaneHeader";
 import * as S from "./TaskPane.styles";
 

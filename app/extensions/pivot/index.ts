@@ -18,6 +18,12 @@ import {
   registerGridOverlay,
   setGridRegions,
   removeGridRegionsByType,
+  overlayGetColumnX,
+  overlayGetRowY,
+  overlayGetColumnsWidth,
+  overlayGetRowsHeight,
+  overlayGetRowHeaderWidth,
+  overlayGetColHeaderHeight,
   type GridRegion,
   type OverlayRenderContext,
 } from "../../src/api/gridOverlays";
@@ -46,48 +52,21 @@ import { getPivotRegionsForSheet, getPivotAtCell } from "./lib/pivot-api";
 // Pivot Placeholder Overlay Renderer
 // ============================================================================
 
-/** Helper: get column width from config/dimensions */
-function getColWidth(col: number, config: { defaultCellWidth?: number }, dims: { columnWidths: Map<number, number> }): number {
-  return dims.columnWidths.get(col) ?? config.defaultCellWidth ?? 100;
-}
-
-/** Helper: get row height from config/dimensions */
-function getRowHt(row: number, config: { defaultCellHeight?: number }, dims: { rowHeights: Map<number, number> }): number {
-  return dims.rowHeights.get(row) ?? config.defaultCellHeight ?? 24;
-}
-
 /**
  * Draw pivot table placeholder for empty pivot regions.
  * Shows a white rectangle with a light border to indicate the reserved area.
+ * Uses API dimension helpers — no direct access to core types.
  */
 function drawPivotPlaceholder(overlayCtx: OverlayRenderContext): void {
-  const { ctx, region, config, viewport, dimensions } = overlayCtx;
-  const rowHeaderWidth = config.rowHeaderWidth || 50;
-  const colHeaderHeight = config.colHeaderHeight || 24;
+  const { ctx, region } = overlayCtx;
+  const rowHeaderWidth = overlayGetRowHeaderWidth(overlayCtx);
+  const colHeaderHeight = overlayGetColHeaderHeight(overlayCtx);
 
-  // Calculate pixel positions for the region
-  let startX = rowHeaderWidth;
-  for (let col = 0; col < region.startCol; col++) {
-    startX += getColWidth(col, config, dimensions);
-  }
-  startX -= viewport.scrollX;
-
-  let startY = colHeaderHeight;
-  for (let row = 0; row < region.startRow; row++) {
-    startY += getRowHt(row, config, dimensions);
-  }
-  startY -= viewport.scrollY;
-
-  // Calculate width and height of the region
-  let regionWidth = 0;
-  for (let col = region.startCol; col <= region.endCol; col++) {
-    regionWidth += getColWidth(col, config, dimensions);
-  }
-
-  let regionHeight = 0;
-  for (let row = region.startRow; row <= region.endRow; row++) {
-    regionHeight += getRowHt(row, config, dimensions);
-  }
+  // Calculate pixel positions using API helpers
+  const startX = overlayGetColumnX(overlayCtx, region.startCol);
+  const startY = overlayGetRowY(overlayCtx, region.startRow);
+  const regionWidth = overlayGetColumnsWidth(overlayCtx, region.startCol, region.endCol);
+  const regionHeight = overlayGetRowsHeight(overlayCtx, region.startRow, region.endRow);
 
   // Only draw if visible
   if (startX + regionWidth < rowHeaderWidth || startY + regionHeight < colHeaderHeight) {

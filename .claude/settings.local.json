@@ -13,7 +13,11 @@
       "Bash(rustfmt:*)",
       "Bash(npm run build:*)",
       "Bash(tree:*)",
-      "Bash(dir:*)"
+      "Bash(dir:*)",
+      "Bash(find:*)",
+      "Bash(cargo metadata:*)",
+      "Bash(python -c:*)",
+      "Bash(cargo clean:*)"
     ],
     "deny": [],
     "ask": []

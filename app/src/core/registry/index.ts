@@ -1,4 +1,4 @@
-//! FILENAME: app/src/core/extensions/index.ts
+//! FILENAME: app/src/core/registry/index.ts
 // PURPOSE: Barrel exports for the extensions module
 
 export { ExtensionRegistry } from "./ExtensionRegistry";

@@ -4,7 +4,7 @@
 // overlay components (dropdowns, popovers, tooltips) dynamically.
 
 import React, { useState, useEffect } from "react";
-import { OverlayExtensions } from "../core/extensions/overlayExtensions";
+import { OverlayExtensions } from "../api/ui";
 
 /**
  * Container that renders all visible overlays from the OverlayExtensions registry.

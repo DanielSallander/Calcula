@@ -32,8 +32,11 @@ export interface GridRegion {
 export interface OverlayRenderContext {
   ctx: CanvasRenderingContext2D;
   region: GridRegion;
+  /** @internal Prefer using helper functions (overlayGetColumnWidth, overlayGetRowHeight, etc.) */
   config: GridConfig;
+  /** @internal Prefer using helper functions (overlayGetColumnX, overlayGetRowY, etc.) */
   viewport: Viewport;
+  /** @internal Prefer using helper functions (overlayGetColumnWidth, overlayGetRowHeight, etc.) */
   dimensions: DimensionOverrides;
   canvasWidth: number;
   canvasHeight: number;
@@ -194,4 +197,68 @@ function notifyRegionChange(): void {
   for (const handler of regionChangeListeners) {
     handler(snapshot);
   }
+}
+
+// ============================================================================
+// Dimension Helpers for Overlay Renderers
+// ============================================================================
+// Extensions should use these helpers instead of accessing the raw
+// config / viewport / dimensions objects on OverlayRenderContext.
+
+/** Get the width of a specific column, accounting for custom widths. */
+export function overlayGetColumnWidth(ctx: OverlayRenderContext, col: number): number {
+  return ctx.dimensions.columnWidths.get(col) ?? ctx.config.defaultCellWidth ?? 100;
+}
+
+/** Get the height of a specific row, accounting for custom heights. */
+export function overlayGetRowHeight(ctx: OverlayRenderContext, row: number): number {
+  return ctx.dimensions.rowHeights.get(row) ?? ctx.config.defaultCellHeight ?? 24;
+}
+
+/** Get the X pixel coordinate of a column's left edge, relative to the canvas. */
+export function overlayGetColumnX(ctx: OverlayRenderContext, col: number): number {
+  const rowHeaderWidth = ctx.config.rowHeaderWidth ?? 50;
+  let x = rowHeaderWidth;
+  for (let c = 0; c < col; c++) {
+    x += overlayGetColumnWidth(ctx, c);
+  }
+  return x - ctx.viewport.scrollX;
+}
+
+/** Get the Y pixel coordinate of a row's top edge, relative to the canvas. */
+export function overlayGetRowY(ctx: OverlayRenderContext, row: number): number {
+  const colHeaderHeight = ctx.config.colHeaderHeight ?? 24;
+  let y = colHeaderHeight;
+  for (let r = 0; r < row; r++) {
+    y += overlayGetRowHeight(ctx, r);
+  }
+  return y - ctx.viewport.scrollY;
+}
+
+/** Get the total width of a range of columns (inclusive). */
+export function overlayGetColumnsWidth(ctx: OverlayRenderContext, startCol: number, endCol: number): number {
+  let width = 0;
+  for (let col = startCol; col <= endCol; col++) {
+    width += overlayGetColumnWidth(ctx, col);
+  }
+  return width;
+}
+
+/** Get the total height of a range of rows (inclusive). */
+export function overlayGetRowsHeight(ctx: OverlayRenderContext, startRow: number, endRow: number): number {
+  let height = 0;
+  for (let row = startRow; row <= endRow; row++) {
+    height += overlayGetRowHeight(ctx, row);
+  }
+  return height;
+}
+
+/** Get the row header width from the overlay context. */
+export function overlayGetRowHeaderWidth(ctx: OverlayRenderContext): number {
+  return ctx.config.rowHeaderWidth ?? 50;
+}
+
+/** Get the column header height from the overlay context. */
+export function overlayGetColHeaderHeight(ctx: OverlayRenderContext): number {
+  return ctx.config.colHeaderHeight ?? 24;
 }

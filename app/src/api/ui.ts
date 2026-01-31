@@ -2,9 +2,9 @@
 // PURPOSE: UI registration APIs for extensions.
 // CONTEXT: Extensions use these to register task panes, dialogs, overlays, and MENUS.
 
-import { TaskPaneExtensions } from "../core/extensions/taskPaneExtensions";
-import { DialogExtensions } from "../core/extensions/dialogExtensions";
-import { OverlayExtensions } from "../core/extensions/overlayExtensions";
+import { TaskPaneExtensions } from "../core/registry/taskPaneExtensions";
+import { DialogExtensions } from "../core/registry/dialogExtensions";
+import { OverlayExtensions } from "../core/registry/overlayExtensions";
 import { useTaskPaneStore } from "../shell/TaskPane/useTaskPaneStore";
 import type { TaskPaneViewDefinition, DialogDefinition, OverlayDefinition, AnchorRect } from "./uiTypes";
 

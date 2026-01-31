@@ -312,6 +312,15 @@ export {
   getOverlayRenderers,
   onRegionChange,
   hitTestOverlays,
+  // Dimension helpers for overlay renderers
+  overlayGetColumnWidth,
+  overlayGetRowHeight,
+  overlayGetColumnX,
+  overlayGetRowY,
+  overlayGetColumnsWidth,
+  overlayGetRowsHeight,
+  overlayGetRowHeaderWidth,
+  overlayGetColHeaderHeight,
 } from "./gridOverlays";
 
 export type {

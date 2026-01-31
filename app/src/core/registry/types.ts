@@ -1,4 +1,4 @@
-//! FILENAME: app/src/core/extensions/types.ts
+//! FILENAME: app/src/core/registry/types.ts
 // PURPOSE: Type definitions for the extension point system.
 // CONTEXT: Defines interfaces that add-ins implement to extend core functionality.
 

@@ -4,7 +4,7 @@
 // dialog components dynamically, removing the need for hardcoded dialog imports.
 
 import React, { useState, useEffect } from "react";
-import { DialogExtensions } from "../core/extensions/dialogExtensions";
+import { DialogExtensions } from "../api/ui";
 
 /**
  * Container that renders all active dialogs from the DialogExtensions registry.

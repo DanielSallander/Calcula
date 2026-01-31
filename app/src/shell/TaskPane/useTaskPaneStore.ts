@@ -4,7 +4,7 @@
 
 import { create } from "zustand";
 import { persist } from "zustand/middleware";
-import type { TaskPaneContextKey } from "../../core/extensions/taskPaneExtensions";
+import type { TaskPaneContextKey } from "../../api/ui";
 
 /**
  * Data associated with an open pane instance.

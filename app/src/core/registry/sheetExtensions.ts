@@ -1,4 +1,4 @@
-//! FILENAME: app/src/core/extensions/sheetExtensions.ts
+//! FILENAME: app/src/core/registry/sheetExtensions.ts
 // PURPOSE: Extension points for sheet tab customization
 // CONTEXT: Allows extensions to extend sheet tab functionality with context menus,
 // custom actions, and event handlers.

@@ -243,3 +243,28 @@ pub struct FieldUniqueValuesResponse {
     pub field_name: String,
     pub unique_values: Vec<String>,
 }
+
+use std::collections::HashMap;
+use std::sync::Mutex;
+use pivot_engine::{PivotCache, PivotDefinition};
+
+/// Managed state for the pivot extension.
+/// Registered separately from AppState to keep the kernel feature-agnostic.
+pub struct PivotState {
+    /// Pivot table storage: id -> (definition, cache)
+    pub pivot_tables: Mutex<HashMap<PivotId, (PivotDefinition, PivotCache)>>,
+    /// Next available pivot table ID
+    pub next_pivot_id: Mutex<PivotId>,
+    /// Currently active pivot table ID (for single-pivot operations)
+    pub active_pivot_id: Mutex<Option<PivotId>>,
+}
+
+impl PivotState {
+    pub fn new() -> Self {
+        PivotState {
+            pivot_tables: Mutex::new(HashMap::new()),
+            next_pivot_id: Mutex::new(1),
+            active_pivot_id: Mutex::new(None),
+        }
+    }
+}

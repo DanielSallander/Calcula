@@ -1,4 +1,4 @@
-//! FILENAME: app/src/core/extensions/taskPaneExtensions.ts
+//! FILENAME: app/src/core/registry/taskPaneExtensions.ts
 // PURPOSE: Extension registry for Task Pane views
 // CONTEXT: Allows Core and Add-ins to register pane views that appear in the Task Pane
 

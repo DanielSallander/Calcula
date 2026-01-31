@@ -4,6 +4,7 @@
 use crate::api_types::CellData;
 use crate::commands::utils::get_cell_internal_with_merge;
 use crate::AppState;
+use crate::pivot::types::PivotState;
 use engine::Cell;
 use pivot_engine::PivotId;
 use std::collections::{HashMap, HashSet};
@@ -15,9 +16,9 @@ use tauri::State;
 
 /// Shift protected regions when rows are inserted.
 /// Coordinate shifts apply to ALL regions; pivot definition updates apply only to pivot regions.
-fn shift_pivot_regions_for_row_insert(state: &AppState, from_row: u32, count: u32, sheet_index: usize) {
+fn shift_pivot_regions_for_row_insert(state: &AppState, pivot_state: &PivotState, from_row: u32, count: u32, sheet_index: usize) {
     let mut regions = state.protected_regions.lock().unwrap();
-    let mut pivot_tables = state.pivot_tables.lock().unwrap();
+    let mut pivot_tables = pivot_state.pivot_tables.lock().unwrap();
 
     for region in regions.iter_mut() {
         if region.sheet_index != sheet_index {
@@ -59,9 +60,9 @@ fn shift_pivot_regions_for_row_insert(state: &AppState, from_row: u32, count: u3
 }
 
 /// Shift protected regions when columns are inserted.
-fn shift_pivot_regions_for_col_insert(state: &AppState, from_col: u32, count: u32, sheet_index: usize) {
+fn shift_pivot_regions_for_col_insert(state: &AppState, pivot_state: &PivotState, from_col: u32, count: u32, sheet_index: usize) {
     let mut regions = state.protected_regions.lock().unwrap();
-    let mut pivot_tables = state.pivot_tables.lock().unwrap();
+    let mut pivot_tables = pivot_state.pivot_tables.lock().unwrap();
 
     for region in regions.iter_mut() {
         if region.sheet_index != sheet_index {
@@ -102,9 +103,9 @@ fn shift_pivot_regions_for_col_insert(state: &AppState, from_col: u32, count: u3
 }
 
 /// Shift protected regions when rows are deleted.
-fn shift_pivot_regions_for_row_delete(state: &AppState, from_row: u32, count: u32, sheet_index: usize) {
+fn shift_pivot_regions_for_row_delete(state: &AppState, pivot_state: &PivotState, from_row: u32, count: u32, sheet_index: usize) {
     let mut regions = state.protected_regions.lock().unwrap();
-    let mut pivot_tables = state.pivot_tables.lock().unwrap();
+    let mut pivot_tables = pivot_state.pivot_tables.lock().unwrap();
 
     // Collect IDs of regions fully within the deleted range
     let mut regions_to_remove: Vec<String> = Vec::new();
@@ -184,9 +185,9 @@ fn shift_pivot_regions_for_row_delete(state: &AppState, from_row: u32, count: u3
 }
 
 /// Shift protected regions when columns are deleted.
-fn shift_pivot_regions_for_col_delete(state: &AppState, from_col: u32, count: u32, sheet_index: usize) {
+fn shift_pivot_regions_for_col_delete(state: &AppState, pivot_state: &PivotState, from_col: u32, count: u32, sheet_index: usize) {
     let mut regions = state.protected_regions.lock().unwrap();
-    let mut pivot_tables = state.pivot_tables.lock().unwrap();
+    let mut pivot_tables = pivot_state.pivot_tables.lock().unwrap();
 
     let mut regions_to_remove: Vec<String> = Vec::new();
 
@@ -367,6 +368,7 @@ fn shift_col_dependencies_map(map: &mut HashMap<(u32, u32), HashSet<u32>>, from_
 #[tauri::command]
 pub fn insert_rows(
     state: State<AppState>,
+    pivot_state: State<'_, PivotState>,
     row: u32,
     count: u32,
 ) -> Result<Vec<CellData>, String> {
@@ -490,7 +492,7 @@ pub fn insert_rows(
     drop(grid);
     
     // === UPDATE PIVOT REGIONS ===
-    shift_pivot_regions_for_row_insert(&state, row, count, active_sheet);
+    shift_pivot_regions_for_row_insert(&state, &pivot_state, row, count, active_sheet);
     
     // Re-acquire locks for result building
     let grid = state.grid.lock().map_err(|e| e.to_string())?;
@@ -515,6 +517,7 @@ pub fn insert_rows(
 #[tauri::command]
 pub fn insert_columns(
     state: State<AppState>,
+    pivot_state: State<'_, PivotState>,
     col: u32,
     count: u32,
 ) -> Result<Vec<CellData>, String> {
@@ -638,7 +641,7 @@ pub fn insert_columns(
     drop(grid);
     
     // === UPDATE PIVOT REGIONS ===
-    shift_pivot_regions_for_col_insert(&state, col, count, active_sheet);
+    shift_pivot_regions_for_col_insert(&state, &pivot_state, col, count, active_sheet);
     
     // Re-acquire locks for result building
     let grid = state.grid.lock().map_err(|e| e.to_string())?;
@@ -921,6 +924,7 @@ fn shift_col_dependencies_map_for_delete(map: &mut HashMap<(u32, u32), HashSet<u
 #[tauri::command]
 pub fn delete_rows(
     state: State<AppState>,
+    pivot_state: State<'_, PivotState>,
     row: u32,
     count: u32,
 ) -> Result<Vec<CellData>, String> {
@@ -1068,7 +1072,7 @@ pub fn delete_rows(
     drop(grid);
     
     // === UPDATE PIVOT REGIONS ===
-    shift_pivot_regions_for_row_delete(&state, row, count, active_sheet);
+    shift_pivot_regions_for_row_delete(&state, &pivot_state, row, count, active_sheet);
     
     // Re-acquire locks for result building
     let grid = state.grid.lock().map_err(|e| e.to_string())?;
@@ -1093,6 +1097,7 @@ pub fn delete_rows(
 #[tauri::command]
 pub fn delete_columns(
     state: State<AppState>,
+    pivot_state: State<'_, PivotState>,
     col: u32,
     count: u32,
 ) -> Result<Vec<CellData>, String> {
@@ -1240,7 +1245,7 @@ pub fn delete_columns(
     drop(grid);
     
     // === UPDATE PIVOT REGIONS ===
-    shift_pivot_regions_for_col_delete(&state, col, count, active_sheet);
+    shift_pivot_regions_for_col_delete(&state, &pivot_state, col, count, active_sheet);
     
     // Re-acquire locks for result building
     let grid = state.grid.lock().map_err(|e| e.to_string())?;

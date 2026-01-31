@@ -6,3 +6,4 @@ pub mod commands;
 
 // Re-export commands so they are easy to access from main.rs
 pub use commands::*;
+pub use types::PivotState;

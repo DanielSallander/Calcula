@@ -10,7 +10,6 @@ use engine::{
     BinaryOperator as EngineBinaryOp, Expression as EngineExpr, UnaryOperator as EngineUnaryOp,
     Value as EngineValue,
 };
-use pivot_engine::{PivotCache, PivotDefinition, PivotId};
 use parser::ast::{
     BinaryOperator as ParserBinaryOp, Expression as ParserExpr, UnaryOperator as ParserUnaryOp,
     Value as ParserValue,
@@ -95,12 +94,6 @@ pub struct AppState {
     pub freeze_configs: Mutex<Vec<FreezeConfig>>,
     /// Merged cell regions for the current sheet
     pub merged_regions: Mutex<HashSet<MergedRegion>>,
-    /// Pivot table storage: id -> (definition, cache)
-    pub pivot_tables: Mutex<HashMap<PivotId, (PivotDefinition, PivotCache)>>,
-    /// Next available pivot table ID
-    pub next_pivot_id: Mutex<PivotId>,
-    /// Currently active pivot table ID (for single-pivot operations)
-    pub active_pivot_id: Mutex<Option<PivotId>>,
     /// Protected regions - cells in these regions cannot be edited directly.
     /// Registered by extensions (e.g., pivot tables, charts).
     pub protected_regions: Mutex<Vec<ProtectedRegion>>,
@@ -153,9 +146,6 @@ pub fn create_app_state() -> AppState {
         undo_stack: Mutex::new(UndoStack::new()),
         freeze_configs: Mutex::new(vec![FreezeConfig::default()]),
         merged_regions: Mutex::new(HashSet::new()),
-        pivot_tables: Mutex::new(HashMap::new()),
-        next_pivot_id: Mutex::new(1),
-        active_pivot_id: Mutex::new(None),
         protected_regions: Mutex::new(Vec::new()),
     }
 }
@@ -708,6 +698,7 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .manage(create_app_state())
         .manage(FileState::default())
+        .manage(pivot::PivotState::new())
         .invoke_handler(tauri::generate_handler![
             // Grid commands
             commands::get_viewport_cells,
