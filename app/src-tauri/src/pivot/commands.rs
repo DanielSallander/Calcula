@@ -2,7 +2,7 @@
 use crate::pivot::operations::*;
 use crate::pivot::types::*;
 use crate::pivot::utils::*;
-use crate::{log_debug, log_info, AppState, PivotRegion};
+use crate::{log_debug, log_info, AppState};
 use pivot_engine::{drill_down, CacheValue, PivotDefinition, PivotId, VALUE_ID_EMPTY};
 use tauri::State;
 
@@ -372,9 +372,9 @@ pub fn delete_pivot_table(state: State<AppState>, pivot_id: PivotId) -> Result<(
         *active = None;
     }
     
-    // Remove pivot region tracking
-    let mut regions = state.pivot_regions.lock().unwrap();
-    regions.retain(|r| r.pivot_id != pivot_id);
+    // Remove pivot region tracking (via generic protected region system)
+    let mut regions = state.protected_regions.lock().unwrap();
+    regions.retain(|r| !(r.region_type == "pivot" && r.owner_id == pivot_id as u64));
 
     Ok(())
 }
@@ -517,10 +517,10 @@ pub fn get_pivot_at_cell(
     
     let active_sheet = *state.active_sheet.lock().unwrap();
     
-    // Check if cell is in any pivot region
-    let pivot_id = match state.is_cell_in_pivot_region(active_sheet, row, col) {
-        Some(id) => id,
-        None => return Ok(None),
+    // Check if cell is in any pivot region (via the generic protected region system)
+    let pivot_id = match state.get_region_at_cell(active_sheet, row, col) {
+        Some(region) if region.region_type == "pivot" => region.owner_id as PivotId,
+        _ => return Ok(None),
     };
     
     log_debug!("PIVOT", "get_pivot_at_cell ({},{}) found pivot_id={}", row, col, pivot_id);
@@ -637,20 +637,21 @@ pub fn get_pivot_regions_for_sheet(
     state: State<AppState>,
 ) -> Vec<PivotRegionData> {
     let active_sheet = *state.active_sheet.lock().unwrap();
-    let regions = state.pivot_regions.lock().unwrap();
+    let regions = state.protected_regions.lock().unwrap();
     let pivot_tables = state.pivot_tables.lock().unwrap();
 
     regions
         .iter()
-        .filter(|r| r.sheet_index == active_sheet)
+        .filter(|r| r.region_type == "pivot" && r.sheet_index == active_sheet)
         .map(|r| {
+            let pid = r.owner_id as PivotId;
             let is_empty = pivot_tables
-                .get(&r.pivot_id)
+                .get(&pid)
                 .map(|(def, _)| !has_fields_configured(def))
                 .unwrap_or(true);
 
             PivotRegionData {
-                pivot_id: r.pivot_id,
+                pivot_id: pid,
                 start_row: r.start_row,
                 start_col: r.start_col,
                 end_row: r.end_row,

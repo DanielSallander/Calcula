@@ -2,51 +2,9 @@
 // PURPOSE: Extension registry for Task Pane views
 // CONTEXT: Allows Core and Add-ins to register pane views that appear in the Task Pane
 
-import React from "react";
-
-/**
- * Context keys for conditional pane visibility.
- * Panes can specify which contexts they should appear in.
- */
-export type TaskPaneContextKey =
-  | "pivot"           // Selection is within a pivot table
-  | "chart"           // Selection is within a chart
-  | "comment"         // Cell has a comment
-  | "formatting"      // Formatting pane requested
-  | "properties"      // Generic properties pane
-  | "always";         // Always available
-
-/**
- * Definition of a Task Pane view that can be registered.
- */
-export interface TaskPaneViewDefinition {
-  /** Unique identifier for this pane view */
-  id: string;
-  /** Display title shown in the tab/header */
-  title: string;
-  /** Icon to display (React element or string) */
-  icon?: React.ReactNode;
-  /** The component to render as pane content */
-  component: React.ComponentType<TaskPaneViewProps>;
-  /** Context keys that trigger this pane to become available */
-  contextKeys: TaskPaneContextKey[];
-  /** Priority for ordering (higher = shown first in tabs) */
-  priority?: number;
-  /** Whether this pane can be closed by the user */
-  closable?: boolean;
-}
-
-/**
- * Props passed to Task Pane view components.
- */
-export interface TaskPaneViewProps {
-  /** Callback to close this pane */
-  onClose?: () => void;
-  /** Callback when the pane updates its content (e.g., pivot fields changed) */
-  onUpdate?: () => void;
-  /** Any additional data passed to the pane */
-  data?: Record<string, unknown>;
-}
+// Type definitions are canonical in api/uiTypes.ts (the API contract layer).
+import type { TaskPaneContextKey, TaskPaneViewDefinition, TaskPaneViewProps } from "../../api/uiTypes";
+export type { TaskPaneContextKey, TaskPaneViewDefinition, TaskPaneViewProps };
 
 /**
  * Internal registry storage.

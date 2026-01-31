@@ -2,31 +2,9 @@
 // PURPOSE: Registry for dialogs that extensions can register.
 // CONTEXT: Allows extensions to contribute modal dialogs without shell hardcoding.
 
-import React from "react";
-
-/**
- * Props passed to dialog components.
- */
-export interface DialogProps {
-  /** Whether the dialog is currently open */
-  isOpen: boolean;
-  /** Callback to close the dialog */
-  onClose: () => void;
-  /** Additional data passed when opening the dialog */
-  data?: Record<string, unknown>;
-}
-
-/**
- * Definition of a dialog that can be registered.
- */
-export interface DialogDefinition {
-  /** Unique identifier for the dialog */
-  id: string;
-  /** The React component to render */
-  component: React.ComponentType<DialogProps>;
-  /** Priority for z-index ordering (higher = on top) */
-  priority?: number;
-}
+// Type definitions are canonical in api/uiTypes.ts (the API contract layer).
+import type { DialogProps, DialogDefinition } from "../../api/uiTypes";
+export type { DialogProps, DialogDefinition };
 
 interface DialogState {
   isOpen: boolean;

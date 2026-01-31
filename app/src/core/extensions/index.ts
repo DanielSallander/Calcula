@@ -18,11 +18,6 @@ export type {
 } from "./sheetExtensions";
 
 export { TaskPaneExtensions } from "./taskPaneExtensions";
-export type {
-  TaskPaneViewDefinition,
-  TaskPaneViewProps,
-  TaskPaneContextKey,
-} from "./taskPaneExtensions";
 
 // Grid extensions
 export {
@@ -38,16 +33,19 @@ export type {
 
 // Dialog extensions
 export { DialogExtensions } from "./dialogExtensions";
-export type {
-  DialogDefinition,
-  DialogProps,
-} from "./dialogExtensions";
 
 // Overlay extensions
 export { OverlayExtensions } from "./overlayExtensions";
+
+// UI extension types - re-exported from the canonical api/uiTypes.ts contract
 export type {
+  TaskPaneViewDefinition,
+  TaskPaneViewProps,
+  TaskPaneContextKey,
+  DialogDefinition,
+  DialogProps,
   OverlayDefinition,
   OverlayProps,
   OverlayLayer,
   AnchorRect,
-} from "./overlayExtensions";
+} from "../../api/uiTypes";

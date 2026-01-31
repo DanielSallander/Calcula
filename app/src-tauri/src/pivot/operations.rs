@@ -1,6 +1,6 @@
 //! FILENAME: app/src-tauri/src/pivot/operations.rs
 use crate::pivot::utils::col_index_to_letter;
-use crate::{log_debug, log_info, AppState, PivotRegion};
+use crate::{log_debug, log_info, AppState, ProtectedRegion};
 use pivot_engine::{calculate_pivot, PivotCache, PivotDefinition, PivotId, PivotView};
 use engine::{Cell, CellValue};
 
@@ -147,10 +147,10 @@ pub(crate) fn clear_pivot_region_from_grid(
     }
 }
 
-/// Gets the current pivot region for a pivot ID, if it exists.
-pub(crate) fn get_pivot_region(state: &AppState, pivot_id: PivotId) -> Option<PivotRegion> {
-    let regions = state.pivot_regions.lock().unwrap();
-    regions.iter().find(|r| r.pivot_id == pivot_id).cloned()
+/// Gets the current protected region for a pivot ID, if it exists.
+pub(crate) fn get_pivot_region(state: &AppState, pivot_id: PivotId) -> Option<ProtectedRegion> {
+    let regions = state.protected_regions.lock().unwrap();
+    regions.iter().find(|r| r.region_type == "pivot" && r.owner_id == pivot_id as u64).cloned()
 }
 
 /// Writes pivot view cells to the destination grid
@@ -231,10 +231,10 @@ pub(crate) fn update_pivot_region(
     destination: (u32, u32),
     view: &PivotView,
 ) {
-    let mut regions = state.pivot_regions.lock().unwrap();
-    
+    let mut regions = state.protected_regions.lock().unwrap();
+
     // Remove any existing region for this pivot
-    regions.retain(|r| r.pivot_id != pivot_id);
+    regions.retain(|r| !(r.region_type == "pivot" && r.owner_id == pivot_id as u64));
     
     let (dest_row, dest_col) = destination;
     
@@ -255,8 +255,10 @@ pub(crate) fn update_pivot_region(
         )
     };
     
-    regions.push(PivotRegion {
-        pivot_id,
+    regions.push(ProtectedRegion {
+        id: format!("pivot-{}", pivot_id),
+        region_type: "pivot".to_string(),
+        owner_id: pivot_id as u64,
         sheet_index,
         start_row: dest_row,
         start_col: dest_col,

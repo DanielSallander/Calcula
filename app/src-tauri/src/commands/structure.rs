@@ -5,24 +5,26 @@ use crate::api_types::CellData;
 use crate::commands::utils::get_cell_internal_with_merge;
 use crate::AppState;
 use engine::Cell;
+use pivot_engine::PivotId;
 use std::collections::{HashMap, HashSet};
 use tauri::State;
 
 /// ============================================================================
-// PIVOT REGION SHIFT HELPERS
+// PROTECTED REGION SHIFT HELPERS
 // ============================================================================
 
-/// Shift pivot regions when rows are inserted
+/// Shift protected regions when rows are inserted.
+/// Coordinate shifts apply to ALL regions; pivot definition updates apply only to pivot regions.
 fn shift_pivot_regions_for_row_insert(state: &AppState, from_row: u32, count: u32, sheet_index: usize) {
-    let mut regions = state.pivot_regions.lock().unwrap();
+    let mut regions = state.protected_regions.lock().unwrap();
     let mut pivot_tables = state.pivot_tables.lock().unwrap();
-    
+
     for region in regions.iter_mut() {
         if region.sheet_index != sheet_index {
             continue;
         }
-        
-        // Shift region coordinates if at or below insertion point
+
+        // Shift region coordinates if at or below insertion point (generic for all regions)
         if region.start_row >= from_row {
             region.start_row += count;
             region.end_row += count;
@@ -30,173 +32,178 @@ fn shift_pivot_regions_for_row_insert(state: &AppState, from_row: u32, count: u3
             // Region spans the insertion point - expand it
             region.end_row += count;
         }
-        
-        // Also update the pivot definition's destination
-        if let Some((definition, _)) = pivot_tables.get_mut(&region.pivot_id) {
-            let (dest_row, dest_col) = definition.destination;
-            if dest_row >= from_row {
-                definition.destination = (dest_row + count, dest_col);
-            }
-            
-            // Update source range if on the same sheet
-            // (For simplicity, assuming source is on same sheet - could be enhanced)
-            let (src_start_row, src_start_col) = definition.source_start;
-            let (src_end_row, src_end_col) = definition.source_end;
-            
-            if src_start_row >= from_row {
-                definition.source_start = (src_start_row + count, src_start_col);
-            }
-            if src_end_row >= from_row {
-                definition.source_end = (src_end_row + count, src_end_col);
-            } else if src_end_row >= from_row {
-                // Source range spans insertion - expand
-                definition.source_end = (src_end_row + count, src_end_col);
+
+        // Pivot-specific: also update the pivot definition's destination
+        if region.region_type == "pivot" {
+            let pid = region.owner_id as PivotId;
+            if let Some((definition, _)) = pivot_tables.get_mut(&pid) {
+                let (dest_row, dest_col) = definition.destination;
+                if dest_row >= from_row {
+                    definition.destination = (dest_row + count, dest_col);
+                }
+
+                let (src_start_row, src_start_col) = definition.source_start;
+                let (src_end_row, src_end_col) = definition.source_end;
+
+                if src_start_row >= from_row {
+                    definition.source_start = (src_start_row + count, src_start_col);
+                }
+                if src_end_row >= from_row {
+                    definition.source_end = (src_end_row + count, src_end_col);
+                } else if src_end_row >= from_row {
+                    definition.source_end = (src_end_row + count, src_end_col);
+                }
             }
         }
     }
 }
 
-/// Shift pivot regions when columns are inserted
+/// Shift protected regions when columns are inserted.
 fn shift_pivot_regions_for_col_insert(state: &AppState, from_col: u32, count: u32, sheet_index: usize) {
-    let mut regions = state.pivot_regions.lock().unwrap();
+    let mut regions = state.protected_regions.lock().unwrap();
     let mut pivot_tables = state.pivot_tables.lock().unwrap();
-    
+
     for region in regions.iter_mut() {
         if region.sheet_index != sheet_index {
             continue;
         }
-        
-        // Shift region coordinates if at or to the right of insertion point
+
+        // Shift region coordinates (generic for all regions)
         if region.start_col >= from_col {
             region.start_col += count;
             region.end_col += count;
         } else if region.end_col >= from_col {
-            // Region spans the insertion point - expand it
             region.end_col += count;
         }
-        
-        // Also update the pivot definition's destination
-        if let Some((definition, _)) = pivot_tables.get_mut(&region.pivot_id) {
-            let (dest_row, dest_col) = definition.destination;
-            if dest_col >= from_col {
-                definition.destination = (dest_row, dest_col + count);
-            }
-            
-            // Update source range
-            let (src_start_row, src_start_col) = definition.source_start;
-            let (src_end_row, src_end_col) = definition.source_end;
-            
-            if src_start_col >= from_col {
-                definition.source_start = (src_start_row, src_start_col + count);
-            }
-            if src_end_col >= from_col {
-                definition.source_end = (src_end_row, src_end_col + count);
-            } else if src_end_col >= from_col {
-                definition.source_end = (src_end_row, src_end_col + count);
+
+        // Pivot-specific: update the pivot definition's destination
+        if region.region_type == "pivot" {
+            let pid = region.owner_id as PivotId;
+            if let Some((definition, _)) = pivot_tables.get_mut(&pid) {
+                let (dest_row, dest_col) = definition.destination;
+                if dest_col >= from_col {
+                    definition.destination = (dest_row, dest_col + count);
+                }
+
+                let (src_start_row, src_start_col) = definition.source_start;
+                let (src_end_row, src_end_col) = definition.source_end;
+
+                if src_start_col >= from_col {
+                    definition.source_start = (src_start_row, src_start_col + count);
+                }
+                if src_end_col >= from_col {
+                    definition.source_end = (src_end_row, src_end_col + count);
+                } else if src_end_col >= from_col {
+                    definition.source_end = (src_end_row, src_end_col + count);
+                }
             }
         }
     }
 }
 
-/// Shift pivot regions when rows are deleted
+/// Shift protected regions when rows are deleted.
 fn shift_pivot_regions_for_row_delete(state: &AppState, from_row: u32, count: u32, sheet_index: usize) {
-    let mut regions = state.pivot_regions.lock().unwrap();
+    let mut regions = state.protected_regions.lock().unwrap();
     let mut pivot_tables = state.pivot_tables.lock().unwrap();
-    
-    // Collect pivot IDs to remove (if their region is fully deleted)
-    let mut pivots_to_remove: Vec<u32> = Vec::new();
-    
+
+    // Collect IDs of regions fully within the deleted range
+    let mut regions_to_remove: Vec<String> = Vec::new();
+
     for region in regions.iter_mut() {
         if region.sheet_index != sheet_index {
             continue;
         }
-        
+
         let delete_end = from_row + count;
-        
+
         // Check if region is fully within deleted range
         if region.start_row >= from_row && region.end_row < delete_end {
-            pivots_to_remove.push(region.pivot_id);
+            regions_to_remove.push(region.id.clone());
             continue;
         }
-        
-        // Shift region coordinates
+
+        // Shift region coordinates (generic for all regions)
         if region.start_row >= delete_end {
             region.start_row -= count;
             region.end_row -= count;
         } else if region.start_row >= from_row {
-            // Start is in deleted range, end is after
             region.start_row = from_row;
             region.end_row -= count;
         } else if region.end_row >= delete_end {
-            // Region spans deletion - shrink
             region.end_row -= count;
         } else if region.end_row >= from_row {
-            // End is in deleted range
             region.end_row = from_row.saturating_sub(1);
         }
-        
-        // Update pivot definition
-        if let Some((definition, _)) = pivot_tables.get_mut(&region.pivot_id) {
-            let (dest_row, dest_col) = definition.destination;
-            if dest_row >= delete_end {
-                definition.destination = (dest_row - count, dest_col);
-            } else if dest_row >= from_row {
-                definition.destination = (from_row, dest_col);
+
+        // Pivot-specific: update definition
+        if region.region_type == "pivot" {
+            let pid = region.owner_id as PivotId;
+            if let Some((definition, _)) = pivot_tables.get_mut(&pid) {
+                let (dest_row, dest_col) = definition.destination;
+                if dest_row >= delete_end {
+                    definition.destination = (dest_row - count, dest_col);
+                } else if dest_row >= from_row {
+                    definition.destination = (from_row, dest_col);
+                }
+
+                let (src_start_row, src_start_col) = definition.source_start;
+                let (src_end_row, src_end_col) = definition.source_end;
+
+                let new_start_row = if src_start_row >= delete_end {
+                    src_start_row - count
+                } else if src_start_row >= from_row {
+                    from_row
+                } else {
+                    src_start_row
+                };
+
+                let new_end_row = if src_end_row >= delete_end {
+                    src_end_row - count
+                } else if src_end_row >= from_row {
+                    from_row.saturating_sub(1).max(new_start_row)
+                } else {
+                    src_end_row
+                };
+
+                definition.source_start = (new_start_row, src_start_col);
+                definition.source_end = (new_end_row, src_end_col);
             }
-            
-            // Update source range
-            let (src_start_row, src_start_col) = definition.source_start;
-            let (src_end_row, src_end_col) = definition.source_end;
-            
-            let new_start_row = if src_start_row >= delete_end {
-                src_start_row - count
-            } else if src_start_row >= from_row {
-                from_row
-            } else {
-                src_start_row
-            };
-            
-            let new_end_row = if src_end_row >= delete_end {
-                src_end_row - count
-            } else if src_end_row >= from_row {
-                from_row.saturating_sub(1).max(new_start_row)
-            } else {
-                src_end_row
-            };
-            
-            definition.source_start = (new_start_row, src_start_col);
-            definition.source_end = (new_end_row, src_end_col);
         }
     }
-    
-    // Remove fully deleted pivots
-    for pivot_id in pivots_to_remove {
-        regions.retain(|r| r.pivot_id != pivot_id);
-        pivot_tables.remove(&pivot_id);
+
+    // Remove fully deleted regions and their associated pivot data
+    for region_id in &regions_to_remove {
+        if let Some(region) = regions.iter().find(|r| &r.id == region_id) {
+            if region.region_type == "pivot" {
+                let pid = region.owner_id as PivotId;
+                pivot_tables.remove(&pid);
+            }
+        }
     }
+    regions.retain(|r| !regions_to_remove.contains(&r.id));
 }
 
-/// Shift pivot regions when columns are deleted
+/// Shift protected regions when columns are deleted.
 fn shift_pivot_regions_for_col_delete(state: &AppState, from_col: u32, count: u32, sheet_index: usize) {
-    let mut regions = state.pivot_regions.lock().unwrap();
+    let mut regions = state.protected_regions.lock().unwrap();
     let mut pivot_tables = state.pivot_tables.lock().unwrap();
-    
-    let mut pivots_to_remove: Vec<u32> = Vec::new();
-    
+
+    let mut regions_to_remove: Vec<String> = Vec::new();
+
     for region in regions.iter_mut() {
         if region.sheet_index != sheet_index {
             continue;
         }
-        
+
         let delete_end = from_col + count;
-        
+
         // Check if region is fully within deleted range
         if region.start_col >= from_col && region.end_col < delete_end {
-            pivots_to_remove.push(region.pivot_id);
+            regions_to_remove.push(region.id.clone());
             continue;
         }
-        
-        // Shift region coordinates
+
+        // Shift region coordinates (generic for all regions)
         if region.start_col >= delete_end {
             region.start_col -= count;
             region.end_col -= count;
@@ -208,46 +215,53 @@ fn shift_pivot_regions_for_col_delete(state: &AppState, from_col: u32, count: u3
         } else if region.end_col >= from_col {
             region.end_col = from_col.saturating_sub(1);
         }
-        
-        // Update pivot definition
-        if let Some((definition, _)) = pivot_tables.get_mut(&region.pivot_id) {
-            let (dest_row, dest_col) = definition.destination;
-            if dest_col >= delete_end {
-                definition.destination = (dest_row, dest_col - count);
-            } else if dest_col >= from_col {
-                definition.destination = (dest_row, from_col);
+
+        // Pivot-specific: update definition
+        if region.region_type == "pivot" {
+            let pid = region.owner_id as PivotId;
+            if let Some((definition, _)) = pivot_tables.get_mut(&pid) {
+                let (dest_row, dest_col) = definition.destination;
+                if dest_col >= delete_end {
+                    definition.destination = (dest_row, dest_col - count);
+                } else if dest_col >= from_col {
+                    definition.destination = (dest_row, from_col);
+                }
+
+                let (src_start_row, src_start_col) = definition.source_start;
+                let (src_end_row, src_end_col) = definition.source_end;
+
+                let new_start_col = if src_start_col >= delete_end {
+                    src_start_col - count
+                } else if src_start_col >= from_col {
+                    from_col
+                } else {
+                    src_start_col
+                };
+
+                let new_end_col = if src_end_col >= delete_end {
+                    src_end_col - count
+                } else if src_end_col >= from_col {
+                    from_col.saturating_sub(1).max(new_start_col)
+                } else {
+                    src_end_col
+                };
+
+                definition.source_start = (src_start_row, new_start_col);
+                definition.source_end = (src_end_row, new_end_col);
             }
-            
-            // Update source range
-            let (src_start_row, src_start_col) = definition.source_start;
-            let (src_end_row, src_end_col) = definition.source_end;
-            
-            let new_start_col = if src_start_col >= delete_end {
-                src_start_col - count
-            } else if src_start_col >= from_col {
-                from_col
-            } else {
-                src_start_col
-            };
-            
-            let new_end_col = if src_end_col >= delete_end {
-                src_end_col - count
-            } else if src_end_col >= from_col {
-                from_col.saturating_sub(1).max(new_start_col)
-            } else {
-                src_end_col
-            };
-            
-            definition.source_start = (src_start_row, new_start_col);
-            definition.source_end = (src_end_row, new_end_col);
         }
     }
-    
-    // Remove fully deleted pivots
-    for pivot_id in pivots_to_remove {
-        regions.retain(|r| r.pivot_id != pivot_id);
-        pivot_tables.remove(&pivot_id);
+
+    // Remove fully deleted regions and their associated pivot data
+    for region_id in &regions_to_remove {
+        if let Some(region) = regions.iter().find(|r| &r.id == region_id) {
+            if region.region_type == "pivot" {
+                let pid = region.owner_id as PivotId;
+                pivot_tables.remove(&pid);
+            }
+        }
     }
+    regions.retain(|r| !regions_to_remove.contains(&r.id));
 }
 
 // ============================================================================

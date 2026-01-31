@@ -104,12 +104,12 @@ pub fn update_cell(
     col: u32,
     value: String,
 ) -> Result<Vec<CellData>, String> {
-    // Check if cell is in a pivot region - pivot cells cannot be edited directly
-    let active_sheet_for_pivot_check = *state.active_sheet.lock().unwrap();
-    if let Some(pivot_id) = state.is_cell_in_pivot_region(active_sheet_for_pivot_check, row, col) {
+    // Check if cell is in a protected region (e.g., pivot table, chart)
+    let active_sheet_for_region_check = *state.active_sheet.lock().unwrap();
+    if let Some(region) = state.get_region_at_cell(active_sheet_for_region_check, row, col) {
         return Err(format!(
-            "Cannot edit cell ({}, {}): it is part of pivot table {}. Use the pivot pane to modify pivot tables.",
-            row + 1, col + 1, pivot_id
+            "Cannot edit cell ({}, {}): it is part of a protected {} region (id: {}).",
+            row + 1, col + 1, region.region_type, region.id
         ));
     }
 

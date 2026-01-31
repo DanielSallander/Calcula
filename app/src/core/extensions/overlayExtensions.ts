@@ -2,46 +2,9 @@
 // PURPOSE: Registry for overlays (dropdowns, tooltips, popovers) that extensions can register.
 // CONTEXT: Allows extensions to contribute overlay UI without shell hardcoding.
 
-import React from "react";
-
-/**
- * Anchor rectangle for positioning overlays.
- */
-export interface AnchorRect {
-  x: number;
-  y: number;
-  width: number;
-  height: number;
-}
-
-/**
- * Props passed to overlay components.
- */
-export interface OverlayProps {
-  /** Callback to close the overlay */
-  onClose: () => void;
-  /** Additional data passed when showing the overlay */
-  data?: Record<string, unknown>;
-  /** Anchor position for the overlay */
-  anchorRect?: AnchorRect;
-}
-
-/**
- * Overlay layer for z-index ordering.
- */
-export type OverlayLayer = "dropdown" | "popover" | "modal" | "tooltip";
-
-/**
- * Definition of an overlay that can be registered.
- */
-export interface OverlayDefinition {
-  /** Unique identifier for the overlay */
-  id: string;
-  /** The React component to render */
-  component: React.ComponentType<OverlayProps>;
-  /** Z-index layer */
-  layer?: OverlayLayer;
-}
+// Type definitions are canonical in api/uiTypes.ts (the API contract layer).
+import type { AnchorRect, OverlayProps, OverlayLayer, OverlayDefinition } from "../../api/uiTypes";
+export type { AnchorRect, OverlayProps, OverlayLayer, OverlayDefinition };
 
 interface OverlayState {
   isVisible: boolean;

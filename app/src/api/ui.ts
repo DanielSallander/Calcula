@@ -6,14 +6,15 @@ import { TaskPaneExtensions } from "../core/extensions/taskPaneExtensions";
 import { DialogExtensions } from "../core/extensions/dialogExtensions";
 import { OverlayExtensions } from "../core/extensions/overlayExtensions";
 import { useTaskPaneStore } from "../shell/TaskPane/useTaskPaneStore";
+import type { TaskPaneViewDefinition, DialogDefinition, OverlayDefinition, AnchorRect } from "./uiTypes";
 
 // Re-export the extension registries
 export { TaskPaneExtensions, DialogExtensions, OverlayExtensions };
 
-// Re-export types
-export type { TaskPaneViewDefinition, TaskPaneViewProps, TaskPaneContextKey } from "../core/extensions/taskPaneExtensions";
-export type { DialogDefinition, DialogProps } from "../core/extensions/dialogExtensions";
-export type { OverlayDefinition, OverlayProps, OverlayLayer, AnchorRect } from "../core/extensions/overlayExtensions";
+// Re-export types from the canonical contract layer (api/uiTypes.ts)
+export type { TaskPaneViewDefinition, TaskPaneViewProps, TaskPaneContextKey } from "./uiTypes";
+export type { DialogDefinition, DialogProps } from "./uiTypes";
+export type { OverlayDefinition, OverlayProps, OverlayLayer, AnchorRect } from "./uiTypes";
 
 // ============================================================================
 // Menu API Definitions
@@ -112,7 +113,7 @@ export function subscribeToMenus(callback: () => void): () => void {
 // Task Pane API
 // ============================================================================
 
-export function registerTaskPane(definition: import("../core/extensions/taskPaneExtensions").TaskPaneViewDefinition): void {
+export function registerTaskPane(definition: TaskPaneViewDefinition): void {
   TaskPaneExtensions.registerView(definition);
 }
 
@@ -128,7 +129,7 @@ export function closeTaskPane(viewId: string): void {
   useTaskPaneStore.getState().closePane(viewId);
 }
 
-export function getTaskPane(viewId: string): import("../core/extensions/taskPaneExtensions").TaskPaneViewDefinition | undefined {
+export function getTaskPane(viewId: string): TaskPaneViewDefinition | undefined {
   return TaskPaneExtensions.getView(viewId);
 }
 
@@ -136,7 +137,7 @@ export function getTaskPane(viewId: string): import("../core/extensions/taskPane
 // Dialog API
 // ============================================================================
 
-export function registerDialog(definition: import("../core/extensions/dialogExtensions").DialogDefinition): void {
+export function registerDialog(definition: DialogDefinition): void {
   DialogExtensions.registerDialog(definition);
 }
 
@@ -156,7 +157,7 @@ export function hideDialog(dialogId: string): void {
 // Overlay API
 // ============================================================================
 
-export function registerOverlay(definition: import("../core/extensions/overlayExtensions").OverlayDefinition): void {
+export function registerOverlay(definition: OverlayDefinition): void {
   OverlayExtensions.registerOverlay(definition);
 }
 
@@ -164,7 +165,7 @@ export function unregisterOverlay(overlayId: string): void {
   OverlayExtensions.unregisterOverlay(overlayId);
 }
 
-export function showOverlay(overlayId: string, options: { data?: Record<string, unknown>; anchorRect?: import("../core/extensions/overlayExtensions").AnchorRect; }): void {
+export function showOverlay(overlayId: string, options: { data?: Record<string, unknown>; anchorRect?: AnchorRect; }): void {
   OverlayExtensions.showOverlay(overlayId, options);
 }
 

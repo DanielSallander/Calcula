@@ -1,6 +1,6 @@
 //! FILENAME: app/src-tauri/src/lib.rs
-// PURPOSE: Main library entry point.
-// UPDATED: Added pivot table state management and pivot region tracking
+// PURPOSE: Main library entry point (Tauri Bridge).
+// CONTEXT: Uses a generic ProtectedRegion system for extension-owned cell regions.
 
 use engine::{
     format_number, Cell, CellError, CellStyle, CellValue, Evaluator, Grid, NumberFormat,
@@ -44,10 +44,16 @@ mod tests;
 // APPLICATION STATE
 // ============================================================================
 
-/// Represents a pivot table output region on a sheet
+/// A generic protected region on a sheet, registered by any extension (e.g., pivot, chart).
+/// Extensions register regions through this struct; the kernel remains feature-agnostic.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct PivotRegion {
-    pub pivot_id: PivotId,
+pub struct ProtectedRegion {
+    /// Unique identifier (e.g., "pivot-1", "chart-3")
+    pub id: String,
+    /// Region type (e.g., "pivot", "chart")
+    pub region_type: String,
+    /// Numeric owner ID within the extension's namespace
+    pub owner_id: u64,
     pub sheet_index: usize,
     pub start_row: u32,
     pub start_col: u32,
@@ -95,8 +101,9 @@ pub struct AppState {
     pub next_pivot_id: Mutex<PivotId>,
     /// Currently active pivot table ID (for single-pivot operations)
     pub active_pivot_id: Mutex<Option<PivotId>>,
-    /// Pivot output regions - cells in these regions cannot be edited directly
-    pub pivot_regions: Mutex<Vec<PivotRegion>>,
+    /// Protected regions - cells in these regions cannot be edited directly.
+    /// Registered by extensions (e.g., pivot tables, charts).
+    pub protected_regions: Mutex<Vec<ProtectedRegion>>,
 }
 
 impl AppState {
@@ -105,9 +112,10 @@ impl AppState {
         self.grid.lock().unwrap()
     }
     
-    /// Check if a cell is within a pivot output region
-    pub fn is_cell_in_pivot_region(&self, sheet_index: usize, row: u32, col: u32) -> Option<PivotId> {
-        let regions = self.pivot_regions.lock().unwrap();
+    /// Check if a cell is within any protected region.
+    /// Returns the first matching region, or None.
+    pub fn get_region_at_cell(&self, sheet_index: usize, row: u32, col: u32) -> Option<ProtectedRegion> {
+        let regions = self.protected_regions.lock().unwrap();
         for region in regions.iter() {
             if region.sheet_index == sheet_index
                 && row >= region.start_row
@@ -115,7 +123,7 @@ impl AppState {
                 && col >= region.start_col
                 && col <= region.end_col
             {
-                return Some(region.pivot_id);
+                return Some(region.clone());
             }
         }
         None
@@ -148,7 +156,7 @@ pub fn create_app_state() -> AppState {
         pivot_tables: Mutex::new(HashMap::new()),
         next_pivot_id: Mutex::new(1),
         active_pivot_id: Mutex::new(None),
-        pivot_regions: Mutex::new(Vec::new()),
+        protected_regions: Mutex::new(Vec::new()),
     }
 }
 
