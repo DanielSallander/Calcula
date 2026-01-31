@@ -138,7 +138,6 @@ export function CreatePivotDialog({
   onClose,
   onCreated,
   selection,
-  activeSheetIndex = 0,
 }: CreatePivotDialogProps): React.ReactElement | null {
   // Form state
   const [sourceRange, setSourceRange] = useState('');

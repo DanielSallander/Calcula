@@ -13,7 +13,7 @@
 
 import { useCallback, useEffect } from "react";
 import { useGridContext } from "../state/GridContext";
-import { moveSelection, setSelection } from "../state/gridActions";
+import { setSelection } from "../state/gridActions";
 import { findCtrlArrowTarget, getMergeInfo, type ArrowDirection } from "../lib/tauri-api";
 import { fnLog, stateLog, eventLog } from '../../utils/component-logger';
 import { getGlobalIsEditing } from "./useEditing";

@@ -19,7 +19,7 @@ import { FilterDropdown } from '../FilterDropdown';
 // TYPES
 // =============================================================================
 
-interface PivotGridProps {
+export interface PivotGridProps {
   pivotId: number;
   theme?: Partial<PivotTheme>;
   defaultRowHeight?: number;
@@ -37,7 +37,6 @@ interface PivotGridProps {
 // =============================================================================
 
 const DEFAULT_ROW_HEIGHT = 28;
-const DEFAULT_COLUMN_WIDTH = 120;
 const MIN_COLUMN_WIDTH = 50;
 const MAX_COLUMN_WIDTH = 400;
 

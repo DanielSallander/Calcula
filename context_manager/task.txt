@@ -1,0 +1,90 @@
+# Project refactoring to adhere to architecture rules
+
+While the project largely adheres to the structure, there are **three critical violations** where the "Sandbox" has been breached.
+
+### 1. VIOLATION: The "Facade Rule" Breach (Extension Leaking into Core)
+
+**Severity:** 🔴 **High** **Rule:** Extensions may **only** import from `app/src/api`. They must never import deep into `app/src/core/...`.
+
+**Evidence:**
+In `app/extensions/Pivot/rendering/pivot.ts`, the Pivot extension bypasses the API to access internal layout logic directly:
+
+```typescript
+// app/extensions/Pivot/rendering/pivot.ts
+--> app/src/core/lib/gridRenderer/layout/dimensions.ts :: getRowY  // <--- ILLEGAL IMPORT
+
+```
+
+**Analysis:**
+The Pivot extension is calculating row positions by importing `dimensions.ts` from the Core internals. If the Core changes its internal rendering logic, the Pivot extension will break.
+**Fix:** The Extension should use `app/src/api/gridOverlays.ts` (specifically `overlayGetRowY`), which is already exposed in the API layer.
+
+---
+
+### 2. VIOLATION: Shell Coupled to Core Internals
+
+**Severity:** 🟠 **Medium** **Rule:** The Shell orchestrates the Core but contains no business logic. It should not depend on internal Core hooks or state management.
+
+**Evidence:**
+The Shell components (Formula Bar, Name Box, Ribbon) are importing React hooks and Context directly from the Core:
+
+1. **Formula Bar:**
+```typescript
+// app/src/shell/FormulaBar/FormulaInput.tsx
+--> app/src/core/hooks/useEditing.ts :: useEditing           // <--- ILLEGAL
+--> app/src/core/state/GridContext.tsx :: useGridContext     // <--- ILLEGAL
+
+```
+
+2. **Ribbon:**
+```typescript
+// app/src/shell/Ribbon/RibbonContainer.tsx
+--> app/src/core/state/GridContext.tsx :: useGridState       // <--- ILLEGAL
+
+```
+
+3. **App Layout:**
+```typescript
+// app/src/shell/Layout.tsx
+--> app/src/core/state/gridActions.ts :: setFreezeConfig     // <--- ILLEGAL
+
+```
+
+**Analysis:**
+The Shell is treating the Core as a library of hooks rather than a strictly isolated "Alien" component. The Shell is now tightly coupled to the specific React State implementation (Redux/Context) of the Core. If you refactored the Core to use Signals or MobX, the Shell would break.
+**Fix:** The Shell should interact with the Core *only* via the `app/src/api` or by passing props to the mounted `<Core />` component.
+
+---
+
+### 3. VIOLATION: Backend Architecture (Monolithic "Extension")
+
+**Severity:** 🟡 **Low (Architectural Observation)** **Rule:** Extensions should be treated as foreign objects.
+
+**Evidence:**
+The Rust backend for the Pivot extension seems to be hardcoded into the main application binary (`app/src-tauri`):
+
+```rust
+// app/src-tauri/src/pivot/commands.rs
+--> app/src-tauri/src/pivot/operations.rs
+
+```
+
+And implicitly registered in `main.rs`.
+
+**Analysis:**
+While `app/extensions/Pivot` exists as a frontend extension, its backend logic (`core/pivot-engine` and `app/src-tauri/src/pivot`) is compiled directly into the host application. This technically violates the "Microkernel" concept on the backend, as adding a new extension requires recompiling the binary.
+**Fix:** For a strict Microkernel, Pivot backend logic should be a dynamically loaded library (DLL/dylib) or a separate sidecar, though this is often acceptable for "Built-in" extensions in early development.
+
+---
+
+### Summary of Cleanup Required
+
+| Component | Violation | Action Required |
+| --- | --- | --- |
+| **Pivot Extension** | Imports `core/lib/.../dimensions.ts` | **Refactor:** Switch import to `api/gridOverlays.ts`. |
+| **Formula Bar** | Imports `core/hooks/useEditing` | **Refactor:** Expose editing state via `api/events` or `api/ui`. |
+| **Ribbon** | Imports `core/state/GridContext` | **Refactor:** Create an API hook for `useRibbonState` in `src/api`. |
+
+### Next Step
+
+The most immediate violation is the **Pivot Extension** breaking the Facade rule, as this sets a bad precedent for 3rd party extensions.

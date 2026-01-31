@@ -241,10 +241,10 @@ export function usePivotGridInteraction(
           // Build filterRow with fetched unique values
           const filterRow: FilterRowData = {
             field_index: clickedFilter.fieldIndex,
-            field_name: response.field_name,
-            unique_values: response.unique_values,
+            field_name: response.fieldName,
+            unique_values: response.uniqueValues,
             // Use existing selected values from metadata, or default to all selected
-            selected_values: filterRowMeta?.selected_values ?? response.unique_values,
+            selected_values: filterRowMeta?.selected_values ?? response.uniqueValues,
             display_value: filterRowMeta?.display_value ?? '(All)',
             view_row: filterRowMeta?.view_row ?? 0,
           };

@@ -1,13 +1,11 @@
 //! FILENAME: app/src/core/components/pivot/usePivotEditorState.ts
 import { useState, useCallback, useMemo, useEffect, useRef } from 'react';
 import type {
-  PivotEditorState,
   SourceField,
   ZoneField,
   DragField,
   DropZoneType,
   AggregationType,
-  ShowValuesAs,
   LayoutConfig,
   UpdatePivotFieldsRequest,
   PivotFieldConfig,
@@ -16,7 +14,6 @@ import type {
 } from './types';
 import { getDefaultAggregation, getValueFieldDisplayName } from './types';
 import type { ValueFieldSettings } from './ValueFieldSettingsModal';
-import type { FilterFieldState } from './FilterBar';
 
 interface UsePivotEditorStateOptions {
   pivotId: PivotId;
@@ -138,23 +135,6 @@ export function usePivotEditorState({
       }
     },
     []
-  );
-
-  // Get zone state
-  const getZoneFields = useCallback(
-    (zone: DropZoneType): ZoneField[] => {
-      switch (zone) {
-        case 'filters':
-          return filters;
-        case 'columns':
-          return columns;
-        case 'rows':
-          return rows;
-        case 'values':
-          return values;
-      }
-    },
-    [filters, columns, rows, values]
   );
 
   // Handle field toggle from field list

@@ -6,8 +6,8 @@
 
 import type { RenderState } from "../types";
 import type { FreezeConfig, DimensionOverrides, GridConfig, Viewport } from "../../../types";
-import { calculateVisibleRange, calculateFreezePaneLayout } from "../layout/viewport";
-import { getColumnWidth, getRowHeight, getColumnX, getRowY } from "../layout/dimensions";
+import { calculateFreezePaneLayout } from "../layout/viewport";
+import { getColumnWidth, getRowHeight } from "../layout/dimensions";
 
 /**
  * Calculate the X position of a column accounting for freeze panes.

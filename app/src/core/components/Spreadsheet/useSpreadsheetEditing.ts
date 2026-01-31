@@ -32,14 +32,11 @@ export function getFormulaBarValue(
 }
 
 export function useSpreadsheetEditing({
-  containerRef,
   focusContainerRef, // FIX: Destructure focusContainerRef
-  formulaInputRef,
   state,
   selectedCellContent,
   moveActiveCell,
   scrollToSelection,
-  selectCell,
 }: UseSpreadsheetEditingProps) {
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
   const { selection } = state;

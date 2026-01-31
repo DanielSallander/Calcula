@@ -2,7 +2,7 @@
 // PURPOSE: Styled components for Task Pane
 // CONTEXT: Uses CSS-in-JS via styled-components
 
-import styled, { css } from "styled-components";
+import styled from "styled-components";
 
 export const TaskPaneWrapper = styled.div<{
   $width: number;

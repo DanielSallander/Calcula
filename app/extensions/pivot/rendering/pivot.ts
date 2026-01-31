@@ -5,7 +5,6 @@ import type {
   PivotCellData,
   BackgroundStyle,
   PivotCellType,
-  PivotCellValue,
 } from '../lib/pivot-api';
 import { getCellDisplayValue } from '../lib/pivot-api';
 

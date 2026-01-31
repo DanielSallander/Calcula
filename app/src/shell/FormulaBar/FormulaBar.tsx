@@ -10,7 +10,6 @@ import React, { useState, useCallback } from "react";
 import { NameBox } from "./NameBox";
 import { FormulaInput } from "./FormulaInput";
 import { InsertFunctionDialog } from "./InsertFunctionDialog";
-import { useGridContext } from "../../core/state/GridContext";
 import { useEditing } from "../../core/hooks/useEditing";
 import * as S from './FormulaBar.styles';
 
@@ -27,7 +26,6 @@ function InsertFunctionIcon(): React.ReactElement {
 }
 
 export function FormulaBar(): React.ReactElement {
-  const { state } = useGridContext();
   const { editing, commitEdit, cancelEdit, updateValue, startEditing } = useEditing();
   const [showFunctionDialog, setShowFunctionDialog] = useState(false);
   

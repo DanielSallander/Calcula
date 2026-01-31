@@ -115,8 +115,6 @@ export function calculateFreezePaneLayout(
   dimensions?: DimensionOverrides
 ): FreezePaneLayout {
   const { freezeRow, freezeCol } = freezeConfig;
-  const defaultCellWidth = config.defaultCellWidth || 100;
-  const defaultCellHeight = config.defaultCellHeight || 24;
   const dims = ensureDimensions(dimensions);
   
   let frozenColsWidth = 0;
@@ -153,10 +151,10 @@ export function calculateFreezePaneLayout(
  */
 export function calculateFrozenTopLeftRange(
   freezeConfig: FreezeConfig,
-  config: GridConfig,
-  canvasWidth: number,
-  canvasHeight: number,
-  dimensions?: DimensionOverrides
+  _config: GridConfig,
+  _canvasWidth: number,
+  _canvasHeight: number,
+  _dimensions?: DimensionOverrides
 ): VisibleRange | null {
   const { freezeRow, freezeCol } = freezeConfig;
   
@@ -183,7 +181,7 @@ export function calculateFrozenTopRange(
   freezeConfig: FreezeConfig,
   config: GridConfig,
   canvasWidth: number,
-  canvasHeight: number,
+  _canvasHeight: number,
   dimensions?: DimensionOverrides
 ): VisibleRange | null {
   const { freezeRow, freezeCol } = freezeConfig;
@@ -253,7 +251,7 @@ export function calculateFrozenLeftRange(
   viewport: Viewport,
   freezeConfig: FreezeConfig,
   config: GridConfig,
-  canvasWidth: number,
+  _canvasWidth: number,
   canvasHeight: number,
   dimensions?: DimensionOverrides
 ): VisibleRange | null {

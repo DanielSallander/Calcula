@@ -1,8 +1,6 @@
 //! FILENAME: app/src/core/components/Grid/GridCanvas.styles.ts
 import styled from 'styled-components';
 
-const v = (name: string) => `var(${name})`;
-
 export const GridContainer = styled.div`
   position: absolute;
   top: 0;

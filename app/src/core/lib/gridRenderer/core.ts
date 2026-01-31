@@ -25,8 +25,7 @@ import { drawGridLines } from "./rendering/grid";
 import { drawCellText } from "./rendering/cells";
 import { drawSelection, drawFillPreview, drawClipboardSelection } from "./rendering/selection";
 import { drawFormulaReferences } from "./rendering/references";
-import { 
-  calculateVisibleRange, 
+import {
   calculateFreezePaneLayout,
   calculateFrozenTopLeftRange,
   calculateFrozenTopRange,

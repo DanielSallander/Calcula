@@ -523,7 +523,7 @@ export function SheetTabs({ onSheetChange }: SheetTabsProps): React.ReactElement
           $x={contextMenu.x}
           $y={contextMenu.y}
         >
-          {getContextMenuItems(contextMenu.sheetIndex).map((item, idx) => (
+          {getContextMenuItems(contextMenu.sheetIndex).map((item, _idx) => (
             <React.Fragment key={item.id}>
               <S.ContextMenuItem
                 type="button"

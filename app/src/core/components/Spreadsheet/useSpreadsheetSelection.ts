@@ -58,21 +58,19 @@ export function useSpreadsheetSelection({
 
   const { scrollToSelection, registerScrollContainer } = useViewport();
 
-  const { 
-    selectCell, 
+  const {
+    selectCell,
     selectCellWithMergeExpansion,
-    extendTo,
     extendToWithMergeExpansion,  // FIX: Added for merge-aware drag selection
-    moveActiveCell, 
-    getSelectionReference, 
-    selectColumn, 
-    selectRow 
+    moveActiveCell,
+    getSelectionReference,
+    selectColumn,
+    selectRow
   } = useSelection();
 
   const {
     isEditing,
     isFormulaMode,
-    startEditing,
     startEdit,  // FIX: Added startEdit to avoid stale state issues
     insertReference,
     insertRangeReference,
@@ -94,7 +92,6 @@ export function useSpreadsheetSelection({
     clipboardMode, 
     clipboardSelection,
     clearClipboardState,
-    hasClipboardData,
   } = useClipboard();
 
   // Fill handle hook
@@ -104,7 +101,6 @@ export function useSpreadsheetSelection({
     startFillDrag,
     updateFillDrag,
     completeFill,
-    cancelFill,
     autoFillToEdge,
   } = useFillHandle();
 
@@ -175,7 +171,7 @@ export function useSpreadsheetSelection({
   }, []);
 
   const handleScrollUpdate = useCallback(
-    (scrollX: number, scrollY: number) => {
+    (_scrollX: number, _scrollY: number) => {
       if (scrollRef.current) {
         canvasRef.current?.redraw();
       }

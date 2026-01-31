@@ -123,11 +123,7 @@ export function FilterBar({
     [filters]
   );
 
-  const handleSelectionChange = useCallback((values: string[]) => {
-    setPendingSelection(values);
-  }, []);
-
-  const handleApply = useCallback(() => {
+  const handleApply = useCallback(async (_fieldIndex: number, _selectedValues: string[], _hiddenItems: string[]) => {
     if (openFilterIndex !== null && pendingSelection !== null) {
       onFilterChange(openFilterIndex, pendingSelection);
       onApplyFilters();
@@ -179,12 +175,12 @@ export function FilterBar({
       {openFilterIndex !== null && pendingSelection !== null && (
         <FilterDropdown
           fieldName={filters[openFilterIndex].field.name}
+          fieldIndex={filters[openFilterIndex].field.sourceIndex}
           uniqueValues={filters[openFilterIndex].uniqueValues}
           selectedValues={pendingSelection}
-          onSelectionChange={handleSelectionChange}
+          anchorRect={{ x: dropdownPosition.x, y: dropdownPosition.y, width: 0, height: 0 }}
           onApply={handleApply}
-          onCancel={handleCancel}
-          position={dropdownPosition}
+          onClose={handleCancel}
         />
       )}
     </div>

@@ -37,7 +37,7 @@ import {
   rowRangeToReference 
 } from "../lib/gridRenderer";
 import type { EditingCell, CellUpdateResult, FormulaReference } from "../types";
-import { isFormula, isFormulaExpectingReference, FORMULA_REFERENCE_COLORS } from "../types";
+import { isFormulaExpectingReference, FORMULA_REFERENCE_COLORS } from "../types";
 import { checkEditGuards } from "../../api/editGuards";
 
 /**

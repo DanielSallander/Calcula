@@ -6,14 +6,13 @@
 import type { RenderState } from "../types";
 import { calculateVisibleRange } from "../layout/viewport";
 import { getColumnWidth, getRowHeight } from "../layout/dimensions";
-import { cellKey } from "../../../types";
 
 /**
  * Check if a grid line should be skipped due to a merged cell.
  * For vertical lines: check if the line is inside a horizontally-spanning merged cell.
  * For horizontal lines: check if the line is inside a vertically-spanning merged cell.
  */
-function isLineInsideMerge(
+export function isLineInsideMerge(
   cells: Map<string, { rowSpan?: number; colSpan?: number }>,
   lineType: "vertical" | "horizontal",
   lineIndex: number,

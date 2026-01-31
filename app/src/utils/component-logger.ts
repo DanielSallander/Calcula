@@ -62,8 +62,6 @@ export const CAT = {
   EFFECT: 'EFFECT',  // useEffect executions
 } as const;
 
-type Category = typeof CAT[keyof typeof CAT];
-
 // ============================================================================
 // CORE LOGGING HELPERS
 // ============================================================================

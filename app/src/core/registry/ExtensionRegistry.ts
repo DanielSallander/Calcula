@@ -9,7 +9,6 @@ import type {
   SelectionChangeCallback,
   CellChangeCallback,
   AddInManifest,
-  RibbonContext, // Added to imports
 } from "./types";
 
 // Re-export types so they can be consumed by index.ts and other modules

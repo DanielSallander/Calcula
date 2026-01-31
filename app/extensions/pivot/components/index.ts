@@ -10,7 +10,7 @@ export { DropZones } from './DropZones';
 export { LayoutOptions } from './LayoutOptions';
 export { usePivotEditorState } from './usePivotEditorState';
 export { PivotGrid } from './PivotGrid';
-export type { PivotGridProps, PivotGridHandle } from './PivotGrid';
+export type { PivotGridProps } from './PivotGrid';
 
 // Context menus and modals
 export { ValueFieldContextMenu } from './ValueFieldContextMenu';

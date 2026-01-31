@@ -41,8 +41,6 @@ function formatSelectionAddress(
 ): string {
   const startColLetter = columnToLetter(startCol);
   const startRowDisplay = startRow + 1;
-  const endColLetter = columnToLetter(endCol);
-  const endRowDisplay = endRow + 1;
 
   if (startRow === endRow && startCol === endCol) {
     return `${startColLetter}${startRowDisplay}`;

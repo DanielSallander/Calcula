@@ -19,7 +19,7 @@ import {
   gridCommands,
   isClickWithinSelection,
   type GridMenuContext,
-} from "../../extensions";
+} from "../../registry";
 import { getCellFromPixel } from "../../lib/gridRenderer";
 import type { SpreadsheetContentProps } from "./SpreadsheetTypes";
 import { AppEvents } from "../../../api/events";
@@ -34,7 +34,7 @@ const RESIZE_DEBOUNCE_MS = 150;
 
 function SpreadsheetContent({ className }: SpreadsheetContentProps): React.ReactElement {
   // 1. Destructure the grouped object returned by the refactored hook
-  const { refs, state, handlers, ui } = useSpreadsheet();
+  const { refs, state, handlers } = useSpreadsheet();
   const gridState = useGridState();
   const { dispatch } = useGridContext();
 
