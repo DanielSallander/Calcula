@@ -1,82 +1,88 @@
 //! FILENAME: app/src/api/events.ts
-// PURPOSE: Application-wide events that extensions can listen to and emit.
-// CONTEXT: This replaces direct imports between layers (e.g., MenuEvents from shell).
-// Extensions and core can use these events without creating circular dependencies.
+// PURPOSE: Application-wide event system for decoupled communication
+// CONTEXT: Enables Core to emit events that Shell/Extensions can listen to
+// without creating import dependencies.
 
-/**
- * Application events that can be emitted and listened to.
- * Use these instead of importing events from shell or core directly.
- *
- * NOTE: Event names use 'menu:' prefix for backward compatibility with existing code.
- * Future versions may migrate to 'app:' prefix.
- */
+// ============================================================================
+// Event Types
+// ============================================================================
+
 export const AppEvents = {
-  // Menu/Clipboard events
-  CUT: "menu:cut",
-  COPY: "menu:copy",
-  PASTE: "menu:paste",
-  FIND: "menu:find",
-  REPLACE: "menu:replace",
+  // Clipboard events
+  CUT: "app:cut",
+  COPY: "app:copy",
+  PASTE: "app:paste",
+
+  // Find/Replace events
+  FIND: "app:find",
+  REPLACE: "app:replace",
 
   // Freeze pane events
-  FREEZE_CHANGED: "menu:freezeChanged",
+  FREEZE_CHANGED: "app:freeze-changed",
 
-  // Cell merge events
-  CELLS_MERGED: "menu:cellsMerged",
-  CELLS_UNMERGED: "menu:cellsUnmerged",
+  // Navigation events
+  NAVIGATE_TO_CELL: "app:navigate-to-cell",
 
-  // Grid refresh
-  GRID_REFRESH: "grid:refresh",
+  // Cell events
+  CELLS_UPDATED: "app:cells-updated",
 
-  // Editor events
-  PREVENT_BLUR_COMMIT: "editor:preventBlurCommit",
-
-  // Pivot events (extensions emit these)
-  PIVOT_CREATED: "menu:pivotCreated",
-  PIVOT_REGIONS_UPDATED: "pivot:regionsUpdated",
-  PIVOT_OPEN_FILTER_MENU: "pivot:openFilterMenu",
+  // Context Menu events (NEW)
+  CONTEXT_MENU_REQUEST: "app:context-menu-request",
+  CONTEXT_MENU_CLOSE: "app:context-menu-close",
 } as const;
 
 export type AppEventType = (typeof AppEvents)[keyof typeof AppEvents];
 
+// ============================================================================
+// Event Emission
+// ============================================================================
+
 /**
  * Emit an application event.
- * @param event - The event type from AppEvents
- * @param detail - Optional event data
+ * @param event The event type to emit
+ * @param detail Optional detail payload
  */
 export function emitAppEvent(event: AppEventType, detail?: unknown): void {
   window.dispatchEvent(new CustomEvent(event, { detail }));
 }
 
+// ============================================================================
+// Event Subscription
+// ============================================================================
+
 /**
- * Listen to an application event.
- * @param event - The event type from AppEvents
- * @param handler - The event handler
- * @returns A cleanup function to remove the listener
+ * Subscribe to an application event.
+ * @param event The event type to listen for
+ * @param callback The callback to invoke when the event fires
+ * @returns Cleanup function to remove the listener
  */
 export function onAppEvent<T = unknown>(
   event: AppEventType,
-  handler: (detail: T) => void
+  callback: (detail: T) => void
 ): () => void {
-  const listener = (e: Event) => {
+  const handler = (e: Event) => {
     const customEvent = e as CustomEvent<T>;
-    handler(customEvent.detail);
+    callback(customEvent.detail);
   };
-  window.addEventListener(event, listener);
-  return () => window.removeEventListener(event, listener);
+
+  window.addEventListener(event, handler);
+  return () => window.removeEventListener(event, handler);
 }
 
+// ============================================================================
+// Focus Management
+// ============================================================================
+
 /**
- * Restore focus to the spreadsheet grid.
- * Useful after menu interactions.
+ * Restore focus to the grid container.
+ * This is useful after dialogs or overlays close.
  */
 export function restoreFocusToGrid(): void {
-  setTimeout(() => {
-    const focusContainer = document.querySelector(
-      '[tabindex="0"][style*="outline: none"]'
-    ) as HTMLElement;
-    if (focusContainer) {
-      focusContainer.focus();
-    }
-  }, 0);
+  // Find the spreadsheet focus container and focus it
+  const focusContainer = document.querySelector(
+    '[data-focus-container="spreadsheet"]'
+  ) as HTMLElement | null;
+  if (focusContainer) {
+    focusContainer.focus();
+  }
 }

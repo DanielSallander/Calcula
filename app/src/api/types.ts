@@ -43,4 +43,5 @@ export {
   DEFAULT_GRID_CONFIG,
   columnToLetter,
   letterToColumn,
+  isFormulaExpectingReference,
 } from "../core/types";

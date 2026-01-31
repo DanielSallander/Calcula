@@ -1,6 +1,7 @@
 //! FILENAME: app/src/core/components/Spreadsheet/Spreadsheet.tsx
 // PURPOSE: Main spreadsheet component combining grid, editor, and scrollbars
 // CONTEXT: Core component that orchestrates the spreadsheet experience
+// REFACTOR: Context menu rendering moved to Shell via event emission
 
 import React, { useCallback, useEffect, useState, useRef } from "react";
 import { useGridState, useGridContext } from "../../state";
@@ -10,19 +11,22 @@ import { InlineEditor } from "../InlineEditor";
 import { Scrollbar, ScrollbarCorner } from "../Scrollbar/Scrollbar";
 import { useScrollbarMetrics } from "../Scrollbar/useScrollbarMetrics";
 import { useSpreadsheet } from "./useSpreadsheet";
-import { clearRange, insertRows, insertColumns, deleteRows, deleteColumns } from "../../lib/tauri-api";
-import { cellEvents } from "../../lib/cellEvents";
-import { ContextMenu } from "../ContextMenu";
-import type { ContextMenuPosition, ContextMenuItem } from "../ContextMenu";
 import {
-  gridExtensions,
+  clearRange,
+  insertRows,
+  insertColumns,
+  deleteRows,
+  deleteColumns,
+} from "../../lib/tauri-api";
+import { cellEvents } from "../../lib/cellEvents";
+import {
   gridCommands,
   isClickWithinSelection,
-  type GridMenuContext,
 } from "../../registry";
 import { getCellFromPixel } from "../../lib/gridRenderer";
 import type { SpreadsheetContentProps } from "./SpreadsheetTypes";
-import { AppEvents } from "../../../api/events";
+import { AppEvents, emitAppEvent } from "../../../api/events";
+import type { GridMenuContext } from "../../registry";
 
 // Styles
 import * as S from "./Spreadsheet.styles";
@@ -32,18 +36,16 @@ const SCROLLBAR_SIZE = 14;
 // Debounce delay for resize observer - prevents flickering during task pane animation
 const RESIZE_DEBOUNCE_MS = 150;
 
-function SpreadsheetContent({ className }: SpreadsheetContentProps): React.ReactElement {
+function SpreadsheetContent({
+  className,
+}: SpreadsheetContentProps): React.ReactElement {
   // 1. Destructure the grouped object returned by the refactored hook
   const { refs, state, handlers } = useSpreadsheet();
   const gridState = useGridState();
   const { dispatch } = useGridContext();
 
   // 2. Extract Refs
-  const { 
-    containerRef, 
-    focusContainerRef,
-    canvasRef 
-  } = refs;
+  const { containerRef, focusContainerRef, canvasRef } = refs;
 
   // 3. Extract and Rename Handlers to match JSX requirements
   const {
@@ -86,23 +88,18 @@ function SpreadsheetContent({ className }: SpreadsheetContentProps): React.React
   // -------------------------------------------------------------------------
   useEffect(() => {
     const handleMenuCut = () => {
-      console.log('[Spreadsheet] Menu cut event received');
       handleCut();
     };
     const handleMenuCopy = () => {
-      console.log('[Spreadsheet] Menu copy event received');
       handleCopy();
     };
     const handleMenuPaste = () => {
-      console.log('[Spreadsheet] Menu paste event received');
       handlePaste();
     };
     const handleMenuFind = () => {
-      console.log('[Spreadsheet] Menu find event received');
       dispatch(openFind(false));
     };
     const handleMenuReplace = () => {
-      console.log('[Spreadsheet] Menu replace event received');
       dispatch(openFind(true));
     };
 
@@ -125,41 +122,36 @@ function SpreadsheetContent({ className }: SpreadsheetContentProps): React.React
   // Clear Contents Handler
   // -------------------------------------------------------------------------
   const handleClearContents = useCallback(async () => {
-      if (!selection) {
-        console.log("[Spreadsheet] No selection to clear");
-        return;
-      }
+    if (!selection) {
+      return;
+    }
 
-      const minRow = Math.min(selection.startRow, selection.endRow);
-      const maxRow = Math.max(selection.startRow, selection.endRow);
-      const minCol = Math.min(selection.startCol, selection.endCol);
-      const maxCol = Math.max(selection.startCol, selection.endCol);
+    const minRow = Math.min(selection.startRow, selection.endRow);
+    const maxRow = Math.max(selection.startRow, selection.endRow);
+    const minCol = Math.min(selection.startCol, selection.endCol);
+    const maxCol = Math.max(selection.startCol, selection.endCol);
 
-      console.log(`[Spreadsheet] Clearing contents from (${minRow},${minCol}) to (${maxRow},${maxCol})`);
+    try {
+      await clearRange(minRow, minCol, maxRow, maxCol);
 
-      try {
-        const clearedCount = await clearRange(minRow, minCol, maxRow, maxCol);
-        console.log(`[Spreadsheet] Clear contents complete - ${clearedCount} cells cleared`);
-        
-        // Emit a single event to trigger refresh
-        cellEvents.emit({
-          row: minRow,
-          col: minCol,
-          oldValue: undefined,
-          newValue: "",
-          formula: null,
-        });
-      } catch (error) {
-        console.error("[Spreadsheet] Failed to clear contents:", error);
-      }
-    }, [selection]);
+      // Emit a single event to trigger refresh
+      cellEvents.emit({
+        row: minRow,
+        col: minCol,
+        oldValue: undefined,
+        newValue: "",
+        formula: null,
+      });
+    } catch (error) {
+      console.error("[Spreadsheet] Failed to clear contents:", error);
+    }
+  }, [selection]);
 
   // -------------------------------------------------------------------------
   // Insert Row Handler
   // -------------------------------------------------------------------------
   const handleInsertRow = useCallback(async () => {
     if (!selection || selection.type !== "rows") {
-      console.log("[Spreadsheet] Insert row requires row selection");
       return;
     }
 
@@ -167,11 +159,8 @@ function SpreadsheetContent({ className }: SpreadsheetContentProps): React.React
     const endRow = Math.max(selection.startRow, selection.endRow);
     const count = endRow - startRow + 1;
 
-    console.log(`[Spreadsheet] Inserting ${count} row(s) at row ${startRow}`);
-
     try {
-      const updatedCells = await insertRows(startRow, count);
-      console.log(`[Spreadsheet] Insert rows complete - ${updatedCells.length} cells updated`);
+      await insertRows(startRow, count);
 
       await canvasRef.current?.refreshCells();
       await canvasRef.current?.animateRowInsertion(startRow, count, 200);
@@ -195,7 +184,6 @@ function SpreadsheetContent({ className }: SpreadsheetContentProps): React.React
   // -------------------------------------------------------------------------
   const handleInsertColumn = useCallback(async () => {
     if (!selection || selection.type !== "columns") {
-      console.log("[Spreadsheet] Insert column requires column selection");
       return;
     }
 
@@ -203,11 +191,8 @@ function SpreadsheetContent({ className }: SpreadsheetContentProps): React.React
     const endCol = Math.max(selection.startCol, selection.endCol);
     const count = endCol - startCol + 1;
 
-    console.log(`[Spreadsheet] Inserting ${count} column(s) at column ${startCol}`);
-
     try {
-      const updatedCells = await insertColumns(startCol, count);
-      console.log(`[Spreadsheet] Insert columns complete - ${updatedCells.length} cells updated`);
+      await insertColumns(startCol, count);
 
       await canvasRef.current?.refreshCells();
       await canvasRef.current?.animateColumnInsertion(startCol, count, 200);
@@ -231,7 +216,6 @@ function SpreadsheetContent({ className }: SpreadsheetContentProps): React.React
   // -------------------------------------------------------------------------
   const handleDeleteRow = useCallback(async () => {
     if (!selection || selection.type !== "rows") {
-      console.log("[Spreadsheet] Delete row requires row selection");
       return;
     }
 
@@ -239,11 +223,8 @@ function SpreadsheetContent({ className }: SpreadsheetContentProps): React.React
     const endRow = Math.max(selection.startRow, selection.endRow);
     const count = endRow - startRow + 1;
 
-    console.log(`[Spreadsheet] Deleting ${count} row(s) starting at row ${startRow}`);
-
     try {
-      const updatedCells = await deleteRows(startRow, count);
-      console.log(`[Spreadsheet] Delete rows complete - ${updatedCells.length} cells updated`);
+      await deleteRows(startRow, count);
 
       await canvasRef.current?.refreshCells();
       await canvasRef.current?.animateRowDeletion(startRow, count, 200);
@@ -267,7 +248,6 @@ function SpreadsheetContent({ className }: SpreadsheetContentProps): React.React
   // -------------------------------------------------------------------------
   const handleDeleteColumn = useCallback(async () => {
     if (!selection || selection.type !== "columns") {
-      console.log("[Spreadsheet] Delete column requires column selection");
       return;
     }
 
@@ -275,11 +255,8 @@ function SpreadsheetContent({ className }: SpreadsheetContentProps): React.React
     const endCol = Math.max(selection.startCol, selection.endCol);
     const count = endCol - startCol + 1;
 
-    console.log(`[Spreadsheet] Deleting ${count} column(s) starting at column ${startCol}`);
-
     try {
-      const updatedCells = await deleteColumns(startCol, count);
-      console.log(`[Spreadsheet] Delete columns complete - ${updatedCells.length} cells updated`);
+      await deleteColumns(startCol, count);
 
       await canvasRef.current?.refreshCells();
       await canvasRef.current?.animateColumnDeletion(startCol, count, 200);
@@ -321,25 +298,24 @@ function SpreadsheetContent({ className }: SpreadsheetContentProps): React.React
       gridCommands.unregister("deleteRow");
       gridCommands.unregister("deleteColumn");
     };
-  }, [handleCut, handleCopy, handlePaste, handleClearContents, handleInsertRow, handleInsertColumn, handleDeleteRow, handleDeleteColumn]);
+  }, [
+    handleCut,
+    handleCopy,
+    handlePaste,
+    handleClearContents,
+    handleInsertRow,
+    handleInsertColumn,
+    handleDeleteRow,
+    handleDeleteColumn,
+  ]);
 
   // -------------------------------------------------------------------------
-  // Context Menu State
-  // -------------------------------------------------------------------------
-  const [contextMenu, setContextMenu] = useState<{
-    position: ContextMenuPosition;
-    context: GridMenuContext;
-  } | null>(null);
-
-  // -------------------------------------------------------------------------
-  // Context Menu Handler
+  // Context Menu Handler - Now emits event instead of rendering
   // -------------------------------------------------------------------------
   const handleContextMenu = useCallback(
     (event: React.MouseEvent<HTMLDivElement>) => {
-      console.log("[Spreadsheet] Context menu triggered");
-      
       if (event.shiftKey) {
-        console.log("[Spreadsheet] Shift+right-click, allowing browser menu");
+        // Allow browser context menu with Shift+right-click
         return;
       }
 
@@ -347,15 +323,19 @@ function SpreadsheetContent({ className }: SpreadsheetContentProps): React.React
 
       const rect = containerRef.current?.getBoundingClientRect();
       if (!rect) {
-        console.log("[Spreadsheet] No container rect, aborting");
         return;
       }
 
       const mouseX = event.clientX - rect.left;
       const mouseY = event.clientY - rect.top;
 
-      const clickedCell = getCellFromPixel(mouseX, mouseY, config, viewport, dimensions);
-      console.log("[Spreadsheet] Clicked cell:", clickedCell);
+      const clickedCell = getCellFromPixel(
+        mouseX,
+        mouseY,
+        config,
+        viewport,
+        dimensions
+      );
 
       const menuContext: GridMenuContext = {
         selection,
@@ -367,47 +347,22 @@ function SpreadsheetContent({ className }: SpreadsheetContentProps): React.React
         sheetName: gridState.sheetContext.activeSheetName,
       };
 
-      const items = gridExtensions.getContextMenuItemsForContext(menuContext);
-      console.log("[Spreadsheet] Context menu items:", items.length, items.map(i => i.id));
-
-      setContextMenu({
+      // Emit event for Shell to handle rendering
+      emitAppEvent(AppEvents.CONTEXT_MENU_REQUEST, {
         position: { x: event.clientX, y: event.clientY },
         context: menuContext,
       });
-      
-      console.log("[Spreadsheet] Context menu state set");
     },
     [containerRef, config, viewport, dimensions, selection, gridState.sheetContext]
   );
-
-  const handleCloseContextMenu = useCallback(() => {
-    setContextMenu(null);
-    setTimeout(() => {
-      focusContainerRef.current?.focus();
-    }, 0);
-  }, [focusContainerRef]);
-
-  const getContextMenuItems = useCallback((): ContextMenuItem[] => {
-    if (!contextMenu) return [];
-
-    const items = gridExtensions.getContextMenuItemsForContext(contextMenu.context);
-
-    return items.map((item) => ({
-      id: item.id,
-      label: item.label,
-      shortcut: item.shortcut,
-      icon: item.icon,
-      disabled: !!item.disabled,
-      separatorAfter: item.separatorAfter,
-      onClick: () => item.onClick(contextMenu.context),
-    }));
-  }, [contextMenu]);
 
   // -------------------------------------------------------------------------
   // Debounced Resize Observer
   // -------------------------------------------------------------------------
   const resizeTimeoutRef = useRef<number | null>(null);
-  const lastDimensionsRef = useRef<{ width: number; height: number } | null>(null);
+  const lastDimensionsRef = useRef<{ width: number; height: number } | null>(
+    null
+  );
 
   useEffect(() => {
     const gridArea = containerRef.current;
@@ -416,10 +371,10 @@ function SpreadsheetContent({ className }: SpreadsheetContentProps): React.React
     const updateDimensions = () => {
       const width = gridArea.clientWidth;
       const height = gridArea.clientHeight;
-      
+
       // Only dispatch if dimensions actually changed significantly
       if (
-        width > 0 && 
+        width > 0 &&
         height > 0 &&
         (!lastDimensionsRef.current ||
           Math.abs(lastDimensionsRef.current.width - width) > 1 ||
@@ -438,7 +393,7 @@ function SpreadsheetContent({ className }: SpreadsheetContentProps): React.React
       if (resizeTimeoutRef.current !== null) {
         window.clearTimeout(resizeTimeoutRef.current);
       }
-      
+
       // Debounce the dimension update to avoid flickering during animations
       resizeTimeoutRef.current = window.setTimeout(() => {
         updateDimensions();
@@ -491,20 +446,29 @@ function SpreadsheetContent({ className }: SpreadsheetContentProps): React.React
   const handleWheel = useCallback(
     (event: React.WheelEvent<HTMLDivElement>) => {
       event.preventDefault();
-      
+
       const deltaX = event.deltaX;
       const deltaY = event.deltaY;
-      
+
       const newScrollX = Math.max(
         0,
-        Math.min(scrollbarMetrics.maxScrollX, gridState.viewport.scrollX + deltaX)
+        Math.min(
+          scrollbarMetrics.maxScrollX,
+          gridState.viewport.scrollX + deltaX
+        )
       );
       const newScrollY = Math.max(
         0,
-        Math.min(scrollbarMetrics.maxScrollY, gridState.viewport.scrollY + deltaY)
+        Math.min(
+          scrollbarMetrics.maxScrollY,
+          gridState.viewport.scrollY + deltaY
+        )
       );
 
-      if (newScrollX !== gridState.viewport.scrollX || newScrollY !== gridState.viewport.scrollY) {
+      if (
+        newScrollX !== gridState.viewport.scrollX ||
+        newScrollY !== gridState.viewport.scrollY
+      ) {
         const syntheticEvent = {
           currentTarget: {
             scrollLeft: newScrollX,
@@ -514,11 +478,20 @@ function SpreadsheetContent({ className }: SpreadsheetContentProps): React.React
         handleScrollEvent(syntheticEvent);
       }
     },
-    [handleScrollEvent, gridState.viewport.scrollX, gridState.viewport.scrollY, scrollbarMetrics]
+    [
+      handleScrollEvent,
+      gridState.viewport.scrollX,
+      gridState.viewport.scrollY,
+      scrollbarMetrics,
+    ]
   );
 
-  const viewportWidth = gridState.viewportDimensions.width - config.rowHeaderWidth - SCROLLBAR_SIZE;
-  const viewportHeight = gridState.viewportDimensions.height - config.colHeaderHeight - SCROLLBAR_SIZE;
+  const viewportWidth =
+    gridState.viewportDimensions.width - config.rowHeaderWidth - SCROLLBAR_SIZE;
+  const viewportHeight =
+    gridState.viewportDimensions.height -
+    config.colHeaderHeight -
+    SCROLLBAR_SIZE;
 
   return (
     <S.SpreadsheetContainer
@@ -526,6 +499,7 @@ function SpreadsheetContent({ className }: SpreadsheetContentProps): React.React
       className={className}
       tabIndex={0}
       onKeyDown={handleContainerKeyDown}
+      data-focus-container="spreadsheet"
     >
       {/* Grid Area with Scrollbars */}
       <S.GridArea
@@ -568,8 +542,6 @@ function SpreadsheetContent({ className }: SpreadsheetContentProps): React.React
               onRestoreFocus={() => focusContainerRef.current?.focus()}
             />
           )}
-
-          {/* Filter dropdowns are now rendered on canvas and handled via pivot:openFilterMenu event */}
         </S.CanvasLayer>
 
         {/* Vertical Scrollbar */}
@@ -600,20 +572,14 @@ function SpreadsheetContent({ className }: SpreadsheetContentProps): React.React
         <ScrollbarCorner size={SCROLLBAR_SIZE} />
       </S.GridArea>
 
-      {/* Context Menu */}
-      {contextMenu && (
-        <ContextMenu
-          position={contextMenu.position}
-          items={getContextMenuItems()}
-          onClose={handleCloseContextMenu}
-        />
-      )}
-
+      {/* Context Menu is now rendered by Shell via GridContextMenuHost */}
     </S.SpreadsheetContainer>
   );
 }
 
-export function Spreadsheet({ className }: SpreadsheetContentProps): React.ReactElement {
+export function Spreadsheet({
+  className,
+}: SpreadsheetContentProps): React.ReactElement {
   return <SpreadsheetContent className={className} />;
 }
 

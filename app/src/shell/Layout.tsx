@@ -4,6 +4,7 @@
 // All feature-specific logic lives in extensions; the shell only renders generic zones.
 // NOTE: GridProvider is imported from core as a special case - it's the root context provider.
 // REFACTOR: Actions are now imported from api layer.
+// REFACTOR: Context menu rendering moved from Core to Shell (GridContextMenuHost)
 
 import React, { useEffect } from "react";
 import { MenuBar } from "./MenuBar";
@@ -14,6 +15,7 @@ import { SheetTabs } from "./SheetTabs";
 import { TaskPaneContainer } from "./TaskPane";
 import { DialogContainer } from "./DialogContainer";
 import { OverlayContainer } from "./OverlayContainer";
+import { GridContextMenuHost } from "./Overlays/GridContextMenuHost";
 // GridProvider is a special case - it's the root React context that must wrap everything
 import { GridProvider } from "../core/state/GridContext";
 // Actions and hooks are imported from the API layer
@@ -44,12 +46,12 @@ function LayoutInner(): React.ReactElement {
   // Extensions call api/grid.ts freezePanes() which emits FREEZE_CHANGED.
   // The Shell listens here and dispatches to Core state (Inversion of Control).
   useEffect(() => {
-    const cleanup = onAppEvent<{ freezeRow: number | null; freezeCol: number | null }>(
-      AppEvents.FREEZE_CHANGED,
-      (detail) => {
-        dispatch(setFreezeConfig(detail.freezeRow, detail.freezeCol));
-      }
-    );
+    const cleanup = onAppEvent<{
+      freezeRow: number | null;
+      freezeCol: number | null;
+    }>(AppEvents.FREEZE_CHANGED, (detail) => {
+      dispatch(setFreezeConfig(detail.freezeRow, detail.freezeCol));
+    });
     return cleanup;
   }, [dispatch]);
 
@@ -120,6 +122,9 @@ function LayoutInner(): React.ReactElement {
 
       {/* Dynamic Overlays from OverlayExtensions */}
       <OverlayContainer />
+
+      {/* Grid Context Menu - Shell handles rendering, Core emits events */}
+      <GridContextMenuHost />
     </div>
   );
 }

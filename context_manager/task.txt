@@ -1,90 +1,63 @@
 # Project refactoring to adhere to architecture rules
 
-While the project largely adheres to the structure, there are **three critical violations** where the "Sandbox" has been breached.
+While the backend (Rust) modularity is excellent and strictly separated, the Frontend (TypeScript) shows specific areas where **The Shell** and **The Core** are coupled, violating the Microkernel architecture.
 
-### 1. VIOLATION: The "Facade Rule" Breach (Extension Leaking into Core)
+Here are the critical violations and discrepancies found:
 
-**Severity:** 🔴 **High** **Rule:** Extensions may **only** import from `app/src/api`. They must never import deep into `app/src/core/...`.
+### 1. Violation of the "Zero Dependency" Rule (Core  Shell)
 
-**Evidence:**
-In `app/extensions/Pivot/rendering/pivot.ts`, the Pivot extension bypasses the API to access internal layout logic directly:
+**Severity: CRITICAL**
 
-```typescript
-// app/extensions/Pivot/rendering/pivot.ts
---> app/src/core/lib/gridRenderer/layout/dimensions.ts :: getRowY  // <--- ILLEGAL IMPORT
+The Core is strictly forbidden from importing from the Shell. However, the dependency map suggests the Core is reaching out to the Shell to get UI state.
 
-```
+* **Evidence:** `app/src/core/components/Spreadsheet/useSpreadsheetEditing.ts` contains `getFormulaBarValue`.
+* **The Problem:** The "Formula Bar" is a UI component defined in `app/src/shell/FormulaBar`. If the Core imports a function to read the Formula Bar's state, the Core is now coupled to the Shell. You cannot use the Core in a headless mode or with a different Shell without breaking this file.
+* **Fix:** **Inversion of Control.** The Core should expose an event or hook (e.g., `useActiveCellInput`) via the API. The Formula Bar (in Shell) should consume this hook and push updates *to* the Core via a command, rather than the Core pulling data *from* the Formula Bar.
 
-**Analysis:**
-The Pivot extension is calculating row positions by importing `dimensions.ts` from the Core internals. If the Core changes its internal rendering logic, the Pivot extension will break.
-**Fix:** The Extension should use `app/src/api/gridOverlays.ts` (specifically `overlayGetRowY`), which is already exposed in the API layer.
+### 2. UI Components Leaking into The Kernel
 
----
+**Severity: HIGH**
 
-### 2. VIOLATION: Shell Coupled to Core Internals
+The Core's responsibility is the "Face" (Canvas Grid & Virtualization). Native DOM UI overlays (menus, context menus) belong to the Shell or Extensions.
 
-**Severity:** 🟠 **Medium** **Rule:** The Shell orchestrates the Core but contains no business logic. It should not depend on internal Core hooks or state management.
+* **Evidence:** `app/src/core/components/ContextMenu/ContextMenu.tsx`.
+* **The Problem:** We have placed the context menu implementation inside the Core. A context menu is a host-level UI element. By baking it into the Core, you force every consumer of your engine to use *your* specific context menu styling and logic.
+* **Fix:** Move `ContextMenu.tsx` to `app/src/shell/Overlays`. The Core should only handle the `onContextMenu` event (detecting the right-click on a specific cell) and emit an event via the API. The Shell listens to this event and renders the Menu.
 
-**Evidence:**
-The Shell components (Formula Bar, Name Box, Ribbon) are importing React hooks and Context directly from the Core:
+### 3. The "Registry" Ambiguity (Logic in Wrong Layer)
 
-1. **Formula Bar:**
-```typescript
-// app/src/shell/FormulaBar/FormulaInput.tsx
---> app/src/core/hooks/useEditing.ts :: useEditing           // <--- ILLEGAL
---> app/src/core/state/GridContext.tsx :: useGridContext     // <--- ILLEGAL
+**Severity: MEDIUM**
 
-```
+* **Evidence:** `app/src/core/registry/gridExtensions.ts` and `sheetExtensions.ts`.
+* **The Problem:** The Core contains a `registry` folder. In a Microkernel architecture, the **Shell** is responsible for being the "Extension Host" (scanning and registering). The **Core** should just be a passive receiver of logic injected via the API.
+* **Risk:** If `registerCoreGridContextMenu` inside Core contains hardcoded logic to load specific menu items, you have violated the "Alien Rule." The Core should not know what items are in the menu.
+* **Fix:** Ensure the `registry` folder is moved to `app/src/shell/` or `app/src/api/`. The Core should possess a `CommandService` (internal), but the act of *registering* things into it belongs to the Shell/API loader.
 
-2. **Ribbon:**
-```typescript
-// app/src/shell/Ribbon/RibbonContainer.tsx
---> app/src/core/state/GridContext.tsx :: useGridState       // <--- ILLEGAL
+### 4. Extension Boundary Risks (Pivot Extension)
 
-```
+**Severity: MEDIUM (Requires Verification)**
 
-3. **App Layout:**
-```typescript
-// app/src/shell/Layout.tsx
---> app/src/core/state/gridActions.ts :: setFreezeConfig     // <--- ILLEGAL
+The Pivot extension is large and complex. There is a high risk it is bypassing the API Facade.
 
-```
+* **Evidence:** `app/extensions/Pivot/components/PivotGrid/usePivotGridInteraction.ts` (366 LOC).
+* **The Risk:** This file is handling grid interaction within an extension. Does it import `useGridSelection` or `useViewport` from `app/src/core/hooks`?
+* **Rule Check:** If this file imports *anything* starting with `../../src/core`, it is a hard violation. It must only use `app/src/api/events` or `app/src/api/commands`.
+* **Observation:** The file `app/extensions/Pivot/lib/pivot-api.ts` exists. This is good practice (a local facade). Ensure this file wraps `app/src/api` and does not leak Core types.
 
-**Analysis:**
-The Shell is treating the Core as a library of hooks rather than a strictly isolated "Alien" component. The Shell is now tightly coupled to the specific React State implementation (Redux/Context) of the Core. If you refactored the Core to use Signals or MobX, the Shell would break.
-**Fix:** The Shell should interact with the Core *only* via the `app/src/api` or by passing props to the mounted `<Core />` component.
+### 5. Backend/Frontend Logic Split (File I/O)
 
----
+**Severity: LOW**
 
-### 3. VIOLATION: Backend Architecture (Monolithic "Extension")
+* **Evidence:** `app/src/core/lib/file-api.ts` (Save/Open logic).
+* **The Problem:** Persistence (File I/O) is often a Shell responsibility (managing OS dialogs, file handles) or a pure Backend responsibility.
+* **Refinement:** If `core/lib/file-api.ts` is just a wrapper around `tauri-api` to send data to Rust, it is acceptable. However, strictly speaking, the Core should likely just provide methods like `getSnapshot()` or `loadSnapshot()`. The *act* of saving that snapshot to a file on the disk is a Shell orchestration task.
 
-**Severity:** 🟡 **Low (Architectural Observation)** **Rule:** Extensions should be treated as foreign objects.
+## Summary of Refactoring Actions
 
-**Evidence:**
-The Rust backend for the Pivot extension seems to be hardcoded into the main application binary (`app/src-tauri`):
-
-```rust
-// app/src-tauri/src/pivot/commands.rs
---> app/src-tauri/src/pivot/operations.rs
-
-```
-
-And implicitly registered in `main.rs`.
-
-**Analysis:**
-While `app/extensions/Pivot` exists as a frontend extension, its backend logic (`core/pivot-engine` and `app/src-tauri/src/pivot`) is compiled directly into the host application. This technically violates the "Microkernel" concept on the backend, as adding a new extension requires recompiling the binary.
-**Fix:** For a strict Microkernel, Pivot backend logic should be a dynamically loaded library (DLL/dylib) or a separate sidecar, though this is often acceptable for "Built-in" extensions in early development.
-
----
-
-### Summary of Cleanup Required
-
-| Component | Violation | Action Required |
-| --- | --- | --- |
-| **Pivot Extension** | Imports `core/lib/.../dimensions.ts` | **Refactor:** Switch import to `api/gridOverlays.ts`. |
-| **Formula Bar** | Imports `core/hooks/useEditing` | **Refactor:** Expose editing state via `api/events` or `api/ui`. |
-| **Ribbon** | Imports `core/state/GridContext` | **Refactor:** Create an API hook for `useRibbonState` in `src/api`. |
-
-### Next Step
-
-The most immediate violation is the **Pivot Extension** breaking the Facade rule, as this sets a bad precedent for 3rd party extensions.
+| Component | Current Location | Violation | Recommended Action |
+| --- | --- | --- | --- |
+| **Formula Bar Link** | `core/.../useSpreadsheetEditing.ts` | Imports Shell Logic | Remove `getFormulaBarValue`. Use Event/Prop injection from Shell. |
+| **Context Menu** | `core/components/ContextMenu` | UI Logic in Kernel | Move to `shell/Overlays`. Core triggers event; Shell renders UI. |
+| **Extension Registry** | `core/registry/` | Host Logic in Kernel | Move registration logic to `shell/ExtensionHost`. |
+| **Pivot Grid** | `extensions/Pivot` | Potential Facade Bypass | Audit imports. Ensure ZERO imports from `src/core`. |
+| **File API** | `core/lib/file-api.ts` | Shell Responsibility | Move "Save/Open" orchestration to `shell/commands`. Keep serialization in Core. |

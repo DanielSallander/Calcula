@@ -2,27 +2,35 @@
 // PURPOSE: Sheet tabs component for switching between worksheets
 // CONTEXT: Enhanced to support sheet switching during formula editing without page reload.
 //          Key fix: Uses global flag to prevent blur commit during formula mode navigation.
+// REFACTOR: Imports from api layer instead of core internals to comply with architecture rules.
 
 import React, { useState, useEffect, useCallback, useRef } from "react";
 import {
+  // Tauri API functions
   getSheets,
-  setActiveSheet as setActiveSheetApi,
+  setActiveSheetApi,
   addSheet,
   deleteSheet,
   renameSheet,
-  type SheetInfo,
-  type SheetsResult,
-} from "../../core/lib/tauri-api";
-import {
+  // Extension registry
   sheetExtensions,
   registerCoreSheetContextMenu,
-  type SheetContext,
-  type SheetContextMenuItem,
-} from "../../api/extensions";
-import { useGridContext } from "../../core/state/GridContext";
-import { setActiveSheet, setSheetContext } from "../../core/state/gridActions";
-import { isFormulaExpectingReference } from "../../core/types";
-import { emitAppEvent, AppEvents } from "../../api/events";
+  // State hooks and actions
+  useGridContext,
+  setActiveSheet,
+  setSheetContext,
+  // Events
+  emitAppEvent,
+  AppEvents,
+  // Types and utilities
+  isFormulaExpectingReference,
+} from "../../api";
+import type {
+  SheetInfo,
+  SheetsResult,
+  SheetContext,
+  SheetContextMenuItem,
+} from "../../api";
 import * as S from './SheetTabs.styles';
 
 export interface SheetTabsProps {

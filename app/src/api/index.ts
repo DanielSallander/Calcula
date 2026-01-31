@@ -14,6 +14,8 @@
 export { AppEvents, emitAppEvent, onAppEvent, restoreFocusToGrid } from "./events";
 export type { AppEventType } from "./events";
 
+export type { ContextMenuRequestPayload } from "./contextMenuTypes";
+
 // ============================================================================
 // Types - Core type definitions
 // ============================================================================
@@ -56,6 +58,7 @@ export {
   DEFAULT_GRID_CONFIG,
   columnToLetter,
   letterToColumn,
+  isFormulaExpectingReference,
 } from "./types";
 
 // ============================================================================
@@ -169,7 +172,7 @@ export {
   calculateSheet,
   getSheets,
   getActiveSheet,
-  setActiveSheet,
+  setActiveSheet as setActiveSheetApi,
   addSheet,
   deleteSheet,
   renameSheet,
@@ -353,6 +356,7 @@ export {
   setFindOptions,
   setFreezeConfig,
   setSheetContext,
+  setActiveSheet,
 } from "./state";
 
 // ============================================================================
