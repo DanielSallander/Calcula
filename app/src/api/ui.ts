@@ -1,10 +1,11 @@
 //! FILENAME: app/src/api/ui.ts
 // PURPOSE: UI registration APIs for extensions.
 // CONTEXT: Extensions use these to register task panes, dialogs, overlays, and MENUS.
+// NOTE: Imports from shell/registries, NOT core/registry (per microkernel architecture).
 
-import { TaskPaneExtensions } from "../core/registry/taskPaneExtensions";
-import { DialogExtensions } from "../core/registry/dialogExtensions";
-import { OverlayExtensions } from "../core/registry/overlayExtensions";
+import { TaskPaneExtensions } from "../shell/registries/taskPaneExtensions";
+import { DialogExtensions } from "../shell/registries/dialogExtensions";
+import { OverlayExtensions } from "../shell/registries/overlayExtensions";
 import { useTaskPaneStore } from "../shell/TaskPane/useTaskPaneStore";
 import type { TaskPaneViewDefinition, DialogDefinition, OverlayDefinition, AnchorRect } from "./uiTypes";
 
@@ -41,7 +42,7 @@ export interface MenuDefinition {
 }
 
 // Internal State for Menus (Simple Store Pattern)
-// In a future refactor, this could move to core/registries/MenuRegistry.ts
+// In a future refactor, this could move to shell/registries/MenuRegistry.ts
 class MenuRegistry {
   private menus: Map<string, MenuDefinition> = new Map();
   private listeners: Set<() => void> = new Set();

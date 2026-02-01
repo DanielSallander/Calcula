@@ -1,28 +1,65 @@
 # Project refactoring to adhere to architecture rules
 
-While the backend (Rust) modularity is excellent and strictly separated, the Frontend (TypeScript) shows specific areas where **The Shell** and **The Core** are coupled, violating the Microkernel architecture.
+We have analyzed the solution's adherence to the architecture rules.
+Below are the findings.
 
-### 1. The "Backend Brain" Violation (Rust)
+### 🚨 Critical Violations & Discrepancies
 
-**Rule:** *The Brain (Backend) is a minimal, stable engine that knows **nothing** about specific features.*
-**Violation:** The dependency map shows a hardcoded `pivot` module inside the main application source.
+#### 1. Logic Leakage in the API Layer (Violation of "The Facade")
 
-* **Location:** `app/src-tauri/src/pivot/`
-* **The Issue:** The "Brain" (`app/src-tauri/src`) explicitly contains a folder named `pivot`. This means the core calculation engine is aware of Pivot Tables. In a true Microkernel, "Pivot" should be a separate crate or a plugin loaded dynamically, or at least a separate module that implements a generic `Aggregator` trait defined by the Core.
-* **Evidence:**
-* `app/src-tauri/src/pivot/commands.rs` (Pivot-specific Tauri commands in the core binary)
-* `app/src-tauri/src/pivot/engine.rs`
+The `app/src/api` directory is supposed to be a "Sandbox/Contract" layer. However, the dependency map shows substantial logic implementation residing here.
 
-**Recommendation:** Move `app/src-tauri/src/pivot` into a separate crate (e.g., `crates/extension-pivot`) or a strictly isolated module that interacts with the Core only via a public `Calculation` trait.
+* **Evidence:** `app/src/api/dimensions.ts` contains calculation logic:
+* `calculateColumnXWithFreeze` (21 loc)
+* `buildFreezePaneConfig` (32 loc)
 
-### 2. The "Facade" Rule Violation (Frontend API)
 
-**Rule:** *Extensions may **only** import from `app/src/api`. They must never import deep into `app/src/core/...`.*
-**Violation:** The Pivot Extension appears to be performing canvas rendering, but the API layer does not expose the necessary rendering primitives.
+* **The Problem:** This creates a **"Split Brain"**. The Core has its own dimension logic (`app/src/core/lib/gridRenderer/layout/dimensions.ts`), and the API has *another* copy.
+* **Risk:** Extensions using the API might calculate coordinates differently than the Core renderer, leading to visual glitches (e.g., overlays drifting from cells).
+* **Fix:** The API must strictly be a pass-through. `api.dimensions.getColumnX` should call into `core.state.selectors`, not perform math itself.
 
-* **Location:** `app/extensions/Pivot/rendering/pivot.ts`
-* **The Issue:** This file contains `renderPivotView` (189 loc). To render on the HTML5 Canvas, it requires access to the `CanvasRenderingContext2D`, coordinate systems, and potentially `RenderState` or `Theme` objects.
-* **The Gap:** Looking at `app/src/api/`, there are **no rendering interfaces exposed**:
-* `app/src/api/grid.ts` (Logic only)
-* `app/src/api/ui.ts` (DOM UI only, e.g., Dialogs/Menus)
-* `app/src/api/gridOverlays.ts` (DOM overlays, not Canvas drawing)
+#### 2. The "Alien" Rule Risk in Core Registry
+
+The Core must treat extensions as foreign objects. However, there is a suspicious directory inside Core.
+
+* **Evidence:** `app/src/core/registry/` contains `gridExtensions.ts` and `sheetExtensions.ts`.
+* **The Problem:** The Core should not know what an "Extension" is. The **Shell** is responsible for loading extensions and injecting them. If `app/src/core` contains code to "register" context menus specifically for extensions, it is likely importing types or logic that belongs in the Shell or API.
+* **Fix:** Move the Registry mechanism to `app/src/shell/` or `app/src/api/`. The Core should only expose generic hooks (e.g., `onContextMenu`), and the API should listen to those hooks to inject Extension menu items.
+
+#### 3. Deep Coupling in Pivot Extension (Violation of "Inversion of Control")
+
+The Pivot extension appears to be hooking too deeply into the application state, bypassing the API.
+
+* **Evidence:** `app/extensions/Pivot/components/PivotGrid/usePivotGridInteraction.ts` is tagged with `[TASK:grid]`.
+* **The Problem:** The tag `[TASK:grid]` usually implies interaction with `app/src/core/state` (e.g., `useGridDispatch`). If this extension imports `GridContext` or Reducers directly, it violates the strict sandbox.
+* **Fix:** Ensure `usePivotGridInteraction` only uses hooks provided by `app/src/api/events.ts` or `app/src/api/commands.ts`.
+
+#### 4. Backend Monolith (Rust)
+
+While the Frontend follows a Microkernel pattern, the Backend does not.
+
+* **Evidence:** `app/src-tauri/src/pivot/` exists as a hardcoded module.
+* **Evidence:** `app/src-tauri/src/lib.rs` likely imports `pivot/commands.rs`.
+* **The Problem:** You have a **Modular Frontend** but a **Monolithic Backend**. If a 3rd party developer wants to create a "Chart" extension that requires heavy calculation, they have no way to extend the Rust backend dynamically; they are stuck in the slow JavaScript thread.
+* **Fix:** Eventually, the Rust backend needs a plugin system (e.g., using `libloading` or WASM plugins) so the "Brain" can be extended just like the "Face".
+
+### 🛠 Refactoring Steps
+
+1. **Purge Logic from API:**
+Refactor `app/src/api/dimensions.ts`. It should look like this:
+```typescript
+// app/src/api/dimensions.ts
+import { coreStore } from '../core/state/store'; // (This import is allowed ONLY here)
+
+export const getColumnWidth = (col: number) => {
+   // Delegate to Core
+   return coreStore.getState().grid.dimensions.colWidths[col];
+}
+
+```
+
+*Remove all `calculate...` functions from the API and move them to Core.*
+2. **Move Registries to Shell:**
+Move `app/src/core/registry/*` to `app/src/shell/registries/`. The Core should be "dumb" regarding context menus.
+3. **Audit Pivot Imports:**
+Strictly lint `app/extensions/Pivot/**/*.ts`. Ensure **zero** imports start with `../../src/core`. If `usePivotGridInteraction` needs grid state, add a new hook to `app/src/api` (e.g., `api.hooks.useGridEvents()`) and use that instead.

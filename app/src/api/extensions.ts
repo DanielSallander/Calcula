@@ -1,33 +1,34 @@
 //! FILENAME: app/src/api/extensions.ts
 // PURPOSE: Extension system exports for add-ins.
 // CONTEXT: Extensions register themselves using these APIs.
+// NOTE: Imports from shell/registries, NOT core/registry (per microkernel architecture).
 
-// Extension registry
-export { ExtensionRegistry } from "../core/registry";
+// Extension registry - now from Shell
+export { ExtensionRegistry } from "../shell/registries";
 export type {
   AddInManifest,
   CommandDefinition,
   RibbonTabDefinition,
   RibbonGroupDefinition,
   RibbonContext,
-} from "../core/registry";
+} from "../shell/registries";
 
-// Grid extensions
+// Grid extensions - now from Shell
 export {
   gridExtensions,
   gridCommands,
   isClickWithinSelection,
   GridMenuGroups,
   registerCoreGridContextMenu,
-} from "../core/registry";
-export type { GridMenuContext, GridContextMenuItem } from "../core/registry";
+} from "../shell/registries";
+export type { GridMenuContext, GridContextMenuItem } from "../shell/registries";
 
-// Sheet extensions
+// Sheet extensions - now from Shell
 export {
   sheetExtensions,
   registerCoreSheetContextMenu,
-} from "../core/registry";
-export type { SheetContext, SheetContextMenuItem } from "../core/registry";
+} from "../shell/registries";
+export type { SheetContext, SheetContextMenuItem } from "../shell/registries";
 
 // NOTE: TaskPaneExtensions, DialogExtensions, OverlayExtensions
 // are now exported from ./ui.ts for a cleaner API surface.

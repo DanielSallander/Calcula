@@ -1,51 +1,15 @@
 //! FILENAME: app/src/core/registry/index.ts
-// PURPOSE: Barrel exports for the extensions module
+// PURPOSE: DEPRECATED - Backward compatibility re-exports during migration.
+// CONTEXT: Registries have been moved to shell/registries per microkernel architecture.
+//          This file exists only for backward compatibility. New code should import
+//          from shell/registries or api/extensions directly.
+//
+// TODO: Remove this file after all imports are updated to use shell/registries.
 
-export { ExtensionRegistry } from "./ExtensionRegistry";
-export type {
-  AddInManifest,
-  CommandDefinition,
-  RibbonTabDefinition,
-  RibbonGroupDefinition,
-  RibbonContext,
-} from "./ExtensionRegistry";
+console.warn(
+  "[DEPRECATED] Importing from core/registry is deprecated. " +
+  "Use shell/registries or api/extensions instead."
+);
 
-export { registerCoreGridContextMenu } from "./gridExtensions";
-export { sheetExtensions, registerCoreSheetContextMenu } from "./sheetExtensions";
-export type {
-  SheetContext,
-  SheetContextMenuItem,
-} from "./sheetExtensions";
-
-export { TaskPaneExtensions } from "./taskPaneExtensions";
-
-// Grid extensions
-export {
-  gridExtensions,
-  gridCommands,
-  isClickWithinSelection,
-  GridMenuGroups,
-} from "./gridExtensions";
-export type {
-  GridMenuContext,
-  GridContextMenuItem,
-} from "./gridExtensions";
-
-// Dialog extensions
-export { DialogExtensions } from "./dialogExtensions";
-
-// Overlay extensions
-export { OverlayExtensions } from "./overlayExtensions";
-
-// UI extension types - re-exported from the canonical api/uiTypes.ts contract
-export type {
-  TaskPaneViewDefinition,
-  TaskPaneViewProps,
-  TaskPaneContextKey,
-  DialogDefinition,
-  DialogProps,
-  OverlayDefinition,
-  OverlayProps,
-  OverlayLayer,
-  AnchorRect,
-} from "../../api/uiTypes";
+// Re-export everything from shell/registries for backward compatibility
+export * from "../../shell/registries";
