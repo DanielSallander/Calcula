@@ -5,6 +5,7 @@
 import { useRef, useCallback, useState, useEffect } from "react";
 import { useGridState, useGridContext } from "../../state";
 import { scrollToCell, setSelection } from "../../state/gridActions";
+import { AppEvents, onAppEvent } from "../../lib/events";
 import type { GridCanvasHandle } from "../Grid";
 import { useScrollbarMetrics } from "../../../core/components/Scrollbar";
 
@@ -104,41 +105,34 @@ export function useSpreadsheet() {
     return () => clearTimeout(timer);
   }, []);
 
-  // Listen for grid:navigateToCell events (e.g., from pivot table creation)
+  // Listen for NAVIGATE_TO_CELL events (e.g., from pivot table creation)
   // This handles scroll + selection + refresh in the correct sequence
   useEffect(() => {
-    const handleNavigateToCell = async (event: Event) => {
-      const customEvent = event as CustomEvent<{
-        row: number;
-        col: number;
-      }>;
-      const { row, col } = customEvent.detail;
-      
-      console.log('[useSpreadsheet] grid:navigateToCell event received:', { row, col });
-      
-      // First set selection to the target cell - this will also trigger scroll in the reducer
-      dispatch(setSelection(row, col, row, col, 'cells'));
-      
-      // Also explicitly dispatch scroll to ensure visibility
-      dispatch(scrollToCell(row, col, false));
-      
-      // Wait for React to re-render with new viewport state, then refresh cells
-      // Use requestAnimationFrame + setTimeout for more reliable timing
-      requestAnimationFrame(() => {
-        setTimeout(async () => {
-          console.log('[useSpreadsheet] Refreshing cells after navigation');
-          if (canvasRef.current) {
-            await canvasRef.current.refreshCells();
-          }
-        }, 100);
-      });
-    };
+    const cleanup = onAppEvent<{ row: number; col: number }>(
+      AppEvents.NAVIGATE_TO_CELL,
+      ({ row, col }) => {
+        console.log('[useSpreadsheet] NAVIGATE_TO_CELL event received:', { row, col });
 
-    window.addEventListener('grid:navigateToCell', handleNavigateToCell);
-    
-    return () => {
-      window.removeEventListener('grid:navigateToCell', handleNavigateToCell);
-    };
+        // First set selection to the target cell - this will also trigger scroll in the reducer
+        dispatch(setSelection(row, col, row, col, 'cells'));
+
+        // Also explicitly dispatch scroll to ensure visibility
+        dispatch(scrollToCell(row, col, false));
+
+        // Wait for React to re-render with new viewport state, then refresh cells
+        // Use requestAnimationFrame + setTimeout for more reliable timing
+        requestAnimationFrame(() => {
+          setTimeout(async () => {
+            console.log('[useSpreadsheet] Refreshing cells after navigation');
+            if (canvasRef.current) {
+              await canvasRef.current.refreshCells();
+            }
+          }, 100);
+        });
+      }
+    );
+
+    return cleanup;
   }, [dispatch]);
 
   // Emit selection:changed event whenever selection changes

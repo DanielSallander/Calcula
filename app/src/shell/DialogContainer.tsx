@@ -5,6 +5,12 @@
 
 import React, { useState, useEffect } from "react";
 import { DialogExtensions } from "../api/ui";
+import type { DialogDefinition } from "../api/uiTypes";
+
+interface DialogState {
+  isOpen: boolean;
+  data?: Record<string, unknown>;
+}
 
 /**
  * Container that renders all active dialogs from the DialogExtensions registry.
@@ -20,11 +26,11 @@ export function DialogContainer(): React.ReactElement {
     });
   }, []);
 
-  const activeDialogs = DialogExtensions.getActiveDialogs();
+  const activeDialogs = DialogExtensions.getOpenDialogs();
 
   return (
     <>
-      {activeDialogs.map(({ definition, state }) => {
+      {activeDialogs.map(({ definition, state }: { definition: DialogDefinition; state: DialogState }) => {
         const DialogComponent = definition.component;
         return (
           <DialogComponent

@@ -1,8 +1,9 @@
-//! FILENAME: app/src/core/components/pivot/CreatePivotDialog.tsx
+//! FILENAME: app/extensions/pivot/components/CreatePivotDialog.tsx
 
 import React, { useState, useEffect, useCallback } from 'react';
 import { pivot } from '../../../src/api/pivot';
-import { addSheet, getSheets, setActiveSheet, indexToCol, colToIndex } from '../../../src/api';
+import { addSheet, getSheets, setActiveSheetApi, indexToCol, colToIndex } from '../../../src/api';
+import { emitAppEvent, AppEvents } from '../../../src/api/events';
 
 // ============================================================================
 // Types
@@ -302,12 +303,13 @@ export function CreatePivotDialog({
       // Switch to destination sheet if it's different from current
       if (destinationSheetName && destinationSheetIndex !== undefined) {
         console.log('[CreatePivotDialog] Switching to sheet:', destinationSheetName, 'index:', destinationSheetIndex);
-        await setActiveSheet(destinationSheetIndex);
+        await setActiveSheetApi(destinationSheetIndex);
         
         // Emit sheet change event so the grid reloads data for the new sheet
-        window.dispatchEvent(new CustomEvent('sheet:changed', {
-          detail: { sheetIndex: destinationSheetIndex, sheetName: destinationSheetName }
-        }));
+        emitAppEvent(AppEvents.SHEET_CHANGED, {
+          sheetIndex: destinationSheetIndex,
+          sheetName: destinationSheetName,
+        });
       }
 
       // Dispatch events to scroll to pivot location and then refresh
@@ -317,12 +319,10 @@ export function CreatePivotDialog({
       // Wait a bit for sheet switch to complete
       setTimeout(() => {
         // Dispatch scroll event - this should trigger selection change and scroll
-        window.dispatchEvent(new CustomEvent('grid:navigateToCell', {
-          detail: {
-            row: destinationCoords.row,
-            col: destinationCoords.col,
-          }
-        }));
+        emitAppEvent(AppEvents.NAVIGATE_TO_CELL, {
+          row: destinationCoords.row,
+          col: destinationCoords.col,
+        });
       }, 150);
 
     } catch (err) {

@@ -2,27 +2,16 @@
 // PURPOSE: Extension points for grid context menu customization
 // CONTEXT: Allows extensions to add context menu items when right-clicking on cells.
 //          Follows the same pattern as sheetExtensions.ts for consistency.
-// NOTE: Moved from core/registry to shell/registries per microkernel architecture.
+// NOTE: GridMenuContext, gridCommands, and isClickWithinSelection are core primitives
+//       imported from core/lib/gridCommands. This file adds the extension registry layer.
 
-import type { Selection } from "../../core/types";
+// Re-export core primitives so existing consumers don't break
+export type { GridMenuContext } from "../../core/lib/gridCommands";
+export { gridCommands, isClickWithinSelection } from "../../core/lib/gridCommands";
+export type { GridCommand } from "../../core/lib/gridCommands";
 
-// ============================================================================
-// Types for Grid Context Menu Extensions
-// ============================================================================
-
-/** Context passed to grid context menu callbacks */
-export interface GridMenuContext {
-  /** The current selection */
-  selection: Selection | null;
-  /** The cell that was right-clicked (may differ from selection start) */
-  clickedCell: { row: number; col: number } | null;
-  /** Whether the clicked cell is within the current selection */
-  isWithinSelection: boolean;
-  /** Active sheet index */
-  sheetIndex: number;
-  /** Active sheet name */
-  sheetName: string;
-}
+// Import GridMenuContext for use within this file
+import type { GridMenuContext } from "../../core/lib/gridCommands";
 
 /** A context menu item for the grid */
 export interface GridContextMenuItem {
@@ -68,70 +57,8 @@ const GROUP_ORDER: Record<string, number> = {
   [GridMenuGroups.DEVELOPER]: 900,
 };
 
-// ============================================================================
-// Command Registry - allows components to register handlers for menu commands
-// ============================================================================
-
-/** Command handler function type */
-type CommandHandler = () => void | Promise<void>;
-
-/** Available command names */
-export type GridCommand = "cut" | "copy" | "paste" | "clearContents" | "insertRow" | "insertColumn" | "deleteRow" | "deleteColumn";
-
-/** Command registry for direct handler invocation */
-class GridCommandRegistry {
-  private handlers: Map<GridCommand, CommandHandler> = new Map();
-
-  /**
-   * Register a command handler.
-   * @param command The command name
-   * @param handler The handler function
-   */
-  register(command: GridCommand, handler: CommandHandler): void {
-    this.handlers.set(command, handler);
-  }
-
-  /**
-   * Unregister a command handler.
-   * @param command The command name
-   */
-  unregister(command: GridCommand): void {
-    this.handlers.delete(command);
-  }
-
-  /**
-   * Execute a command if a handler is registered.
-   * @param command The command to execute
-   * @returns true if the command was executed, false otherwise
-   */
-  async execute(command: GridCommand): Promise<boolean> {
-    const handler = this.handlers.get(command);
-    if (handler) {
-      await handler();
-      return true;
-    }
-    console.warn(`[GridCommands] No handler registered for command: ${command}`);
-    return false;
-  }
-
-  /**
-   * Check if a command has a registered handler.
-   * @param command The command name
-   */
-  hasHandler(command: GridCommand): boolean {
-    return this.handlers.has(command);
-  }
-
-  /**
-   * Clear all registered handlers (useful for cleanup/testing).
-   */
-  clear(): void {
-    this.handlers.clear();
-  }
-}
-
-/** Singleton command registry instance */
-export const gridCommands = new GridCommandRegistry();
+// Import gridCommands for use in registerCoreGridContextMenu
+import { gridCommands } from "../../core/lib/gridCommands";
 
 // ============================================================================
 // Grid Extension Registry
@@ -432,21 +359,3 @@ export function registerCoreGridContextMenu(): void {
   }
 }
 
-// ============================================================================
-// Helper to check if click is within selection
-// ============================================================================
-
-export function isClickWithinSelection(
-  row: number,
-  col: number,
-  selection: Selection | null
-): boolean {
-  if (!selection) return false;
-
-  const minRow = Math.min(selection.startRow, selection.endRow);
-  const maxRow = Math.max(selection.startRow, selection.endRow);
-  const minCol = Math.min(selection.startCol, selection.endCol);
-  const maxCol = Math.max(selection.startCol, selection.endCol);
-
-  return row >= minRow && row <= maxRow && col >= minCol && col <= maxCol;
-}

@@ -3,7 +3,7 @@
 // CONTEXT: Core component that orchestrates the spreadsheet experience
 // REFACTOR: Context menu rendering moved to Shell via event emission
 
-import React, { useCallback, useEffect, useState, useRef } from "react";
+import React, { useCallback, useEffect, useRef } from "react";
 import { useGridState, useGridContext } from "../../state";
 import { setViewportDimensions, openFind } from "../../state/gridActions";
 import { GridCanvas } from "../Grid";
@@ -19,14 +19,14 @@ import {
   deleteColumns,
 } from "../../lib/tauri-api";
 import { cellEvents } from "../../lib/cellEvents";
+import { getCellFromPixel } from "../../lib/gridRenderer";
+import type { SpreadsheetContentProps } from "./SpreadsheetTypes";
+import { AppEvents, emitAppEvent } from "../../lib/events";
 import {
   gridCommands,
   isClickWithinSelection,
-} from "../../registry";
-import { getCellFromPixel } from "../../lib/gridRenderer";
-import type { SpreadsheetContentProps } from "./SpreadsheetTypes";
-import { AppEvents, emitAppEvent } from "../../../api/events";
-import type { GridMenuContext } from "../../registry";
+} from "../../lib/gridCommands";
+import type { GridMenuContext } from "../../lib/gridCommands";
 
 // Styles
 import * as S from "./Spreadsheet.styles";

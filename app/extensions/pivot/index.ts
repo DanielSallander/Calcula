@@ -14,6 +14,8 @@ import {
   registerCellClickInterceptor,
 } from "../../src/api";
 
+import { PivotEvents } from "./lib/pivotEvents";
+
 import {
   registerGridOverlay,
   setGridRegions,
@@ -146,7 +148,7 @@ async function refreshPivotRegions(triggerRepaint: boolean = false): Promise<voi
     setGridRegions(gridRegions);
 
     // Notify other components (selection handler, etc.)
-    emitAppEvent(AppEvents.PIVOT_REGIONS_UPDATED, { regions });
+    emitAppEvent(PivotEvents.PIVOT_REGIONS_UPDATED, { regions });
 
     // Only trigger grid repaint when NOT already inside a grid:refresh cycle
     if (triggerRepaint) {
@@ -155,7 +157,7 @@ async function refreshPivotRegions(triggerRepaint: boolean = false): Promise<voi
   } catch (error) {
     console.error("[Pivot Extension] Failed to fetch pivot regions:", error);
     removeGridRegionsByType("pivot");
-    emitAppEvent(AppEvents.PIVOT_REGIONS_UPDATED, { regions: [] });
+    emitAppEvent(PivotEvents.PIVOT_REGIONS_UPDATED, { regions: [] });
   }
 }
 
@@ -205,7 +207,7 @@ export function registerPivotExtension(): void {
 
         for (const zone of pivotInfo.filterZones) {
           if (zone.row === row && zone.col === col) {
-            emitAppEvent(AppEvents.PIVOT_OPEN_FILTER_MENU, {
+            emitAppEvent(PivotEvents.PIVOT_OPEN_FILTER_MENU, {
               fieldIndex: zone.fieldIndex,
               fieldName: zone.fieldName,
               row: zone.row,
@@ -246,7 +248,7 @@ export function registerPivotExtension(): void {
 
   // Subscribe to events
   cleanupFunctions.push(
-    onAppEvent<{ pivotId: number }>(AppEvents.PIVOT_CREATED, handlePivotCreated)
+    onAppEvent<{ pivotId: number }>(PivotEvents.PIVOT_CREATED, handlePivotCreated)
   );
 
   cleanupFunctions.push(
@@ -257,7 +259,7 @@ export function registerPivotExtension(): void {
       col: number;
       anchorX: number;
       anchorY: number;
-    }>(AppEvents.PIVOT_OPEN_FILTER_MENU, handleOpenFilterMenu)
+    }>(PivotEvents.PIVOT_OPEN_FILTER_MENU, handleOpenFilterMenu)
   );
 
   // Subscribe to selection changes to show/hide the pivot editor pane
@@ -268,7 +270,7 @@ export function registerPivotExtension(): void {
   // Subscribe to pivot region updates to cache region bounds locally
   cleanupFunctions.push(
     onAppEvent<{ regions: PivotRegionData[] }>(
-      AppEvents.PIVOT_REGIONS_UPDATED,
+      PivotEvents.PIVOT_REGIONS_UPDATED,
       (detail) => updateCachedRegions(detail.regions)
     )
   );
