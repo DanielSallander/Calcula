@@ -17,7 +17,8 @@
       "Bash(find:*)",
       "Bash(cargo metadata:*)",
       "Bash(python -c:*)",
-      "Bash(cargo clean:*)"
+      "Bash(cargo clean:*)",
+      "Bash(del:*)"
     ],
     "deny": [],
     "ask": []

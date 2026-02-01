@@ -1,8 +1,0 @@
-// FILENAME: app/src/shell/Ribbon/components/index.ts
-// PURPOSE: Barrel exports for ribbon components.
-
-export { RibbonButton } from "./RibbonButton";
-export type { RibbonButtonProps } from "./RibbonButton";
-
-export { RibbonGroup } from "./RibbonGroup";
-export type { RibbonGroupProps } from "./RibbonGroup";
