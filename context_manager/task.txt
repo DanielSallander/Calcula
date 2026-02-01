@@ -1,65 +1,96 @@
-# Project refactoring to adhere to architecture rules
+# Fix errors
 
-We have analyzed the solution's adherence to the architecture rules.
-Below are the findings.
+Please fix the errors that appear when building the project
 
-### 🚨 Critical Violations & Discrepancies
+(.venv) PS C:\Dropbox\Projekt\Calcula\app> npm run build      
 
-#### 1. Logic Leakage in the API Layer (Violation of "The Facade")
+> calcula@0.1.0 build
+> tsc -b && vite build
 
-The `app/src/api` directory is supposed to be a "Sandbox/Contract" layer. However, the dependency map shows substantial logic implementation residing here.
+extensions/Pivot/components/CreatePivotDialog.tsx:305:15 - error TS2554: Expected 2 arguments, but got 1.
 
-* **Evidence:** `app/src/api/dimensions.ts` contains calculation logic:
-* `calculateColumnXWithFreeze` (21 loc)
-* `buildFreezePaneConfig` (32 loc)
+305         await setActiveSheet(destinationSheetIndex);
+                  ~~~~~~~~~~~~~~
+
+  src/core/state/gridActions.ts:288:47
+    288 export function setActiveSheet(index: number, name: string): SetActiveSheetAction {
+                                                      ~~~~~~~~~~~~
+    An argument for 'name' was not provided.
+
+extensions/Pivot/index.ts:149:28 - error TS2339: Property 'PIVOT_REGIONS_UPDATED' does not exist on type '{ readonly CUT: "app:cut"; readonly COPY: "app:copy"; readonly PASTE: "app:paste"; readonly FIND: "app:find"; readonly REPLACE: "app:replace"; readonly FREEZE_CHANGED: "app:freeze-changed"; readonly NAVIGATE_TO_CELL: "app:navigate-to-cell"; readonly CELLS_UPDATED: "app:cells-updated"; readonly CONTEXT_MENU_REQUEST: ...'.
+
+149     emitAppEvent(AppEvents.PIVOT_REGIONS_UPDATED, { regions });
+                               ~~~~~~~~~~~~~~~~~~~~~
+
+extensions/Pivot/index.ts:153:30 - error TS2339: Property 'GRID_REFRESH' does not exist on type '{ readonly CUT: "app:cut"; readonly COPY: "app:copy"; readonly PASTE: "app:paste"; readonly FIND: "app:find"; readonly REPLACE: "app:replace"; readonly FREEZE_CHANGED: "app:freeze-changed"; readonly NAVIGATE_TO_CELL: "app:navigate-to-cell"; readonly CELLS_UPDATED: "app:cells-updated"; readonly CONTEXT_MENU_REQUEST: ...'.
+
+153       emitAppEvent(AppEvents.GRID_REFRESH);
+                                 ~~~~~~~~~~~~
+
+extensions/Pivot/index.ts:158:28 - error TS2339: Property 'PIVOT_REGIONS_UPDATED' does not exist on type '{ readonly CUT: "app:cut"; readonly COPY: "app:copy"; readonly PASTE: "app:paste"; readonly FIND: "app:find"; readonly REPLACE: "app:replace"; readonly FREEZE_CHANGED: "app:freeze-changed"; readonly NAVIGATE_TO_CELL: "app:navigate-to-cell"; readonly CELLS_UPDATED: "app:cells-updated"; readonly CONTEXT_MENU_REQUEST: ...'.
+
+158     emitAppEvent(AppEvents.PIVOT_REGIONS_UPDATED, { regions: [] });
+                               ~~~~~~~~~~~~~~~~~~~~~
+
+extensions/Pivot/index.ts:208:36 - error TS2339: Property 'PIVOT_OPEN_FILTER_MENU' does not exist on type '{ readonly CUT: "app:cut"; readonly COPY: "app:copy"; readonly PASTE: "app:paste"; readonly FIND: "app:find"; readonly REPLACE: "app:replace"; readonly FREEZE_CHANGED: "app:freeze-changed"; readonly NAVIGATE_TO_CELL: "app:navigate-to-cell"; readonly CELLS_UPDATED: "app:cells-updated"; readonly CONTEXT_MENU_REQUEST: ...'.
+
+208             emitAppEvent(AppEvents.PIVOT_OPEN_FILTER_MENU, {
+                                       ~~~~~~~~~~~~~~~~~~~~~~
+
+extensions/Pivot/index.ts:249:47 - error TS2339: Property 'PIVOT_CREATED' does not exist on type '{ readonly CUT: "app:cut"; readonly COPY: "app:copy"; readonly PASTE: "app:paste"; readonly FIND: "app:find"; readonly REPLACE: "app:replace"; readonly FREEZE_CHANGED: "app:freeze-changed"; readonly NAVIGATE_TO_CELL: "app:navigate-to-cell"; readonly CELLS_UPDATED: "app:cells-updated"; readonly CONTEXT_MENU_REQUEST: ...'.
+
+249     onAppEvent<{ pivotId: number }>(AppEvents.PIVOT_CREATED, handlePivotCreated)
+                                                  ~~~~~~~~~~~~~
+
+extensions/Pivot/index.ts:260:18 - error TS2339: Property 'PIVOT_OPEN_FILTER_MENU' does not exist on type '{ readonly CUT: "app:cut"; readonly COPY: "app:copy"; readonly PASTE: "app:paste"; readonly FIND: "app:find"; readonly REPLACE: "app:replace"; readonly FREEZE_CHANGED: "app:freeze-changed"; readonly NAVIGATE_TO_CELL: "app:navigate-to-cell"; readonly CELLS_UPDATED: "app:cells-updated"; readonly CONTEXT_MENU_REQUEST: ...'.
+
+260     }>(AppEvents.PIVOT_OPEN_FILTER_MENU, handleOpenFilterMenu)
+                     ~~~~~~~~~~~~~~~~~~~~~~
+
+extensions/Pivot/index.ts:271:17 - error TS2339: Property 'PIVOT_REGIONS_UPDATED' does not exist on type '{ readonly CUT: "app:cut"; readonly COPY: "app:copy"; readonly PASTE: "app:paste"; readonly FIND: "app:find"; readonly REPLACE: "app:replace"; readonly FREEZE_CHANGED: "app:freeze-changed"; readonly NAVIGATE_TO_CELL: "app:navigate-to-cell"; readonly CELLS_UPDATED: "app:cells-updated"; readonly CONTEXT_MENU_REQUEST: ...'.
+
+271       AppEvents.PIVOT_REGIONS_UPDATED,
+                    ~~~~~~~~~~~~~~~~~~~~~
+
+extensions/Pivot/rendering/pivot.ts:14:8 - error TS6133: 'FreezePanePositionConfig' is declared but its value is never read.
+
+14   type FreezePanePositionConfig,
+          ~~~~~~~~~~~~~~~~~~~~~~~~
+
+src/api/grid.ts:31:26 - error TS2339: Property 'GRID_REFRESH' does not exist on type '{ readonly CUT: "app:cut"; readonly COPY: "app:copy"; readonly PASTE: "app:paste"; readonly FIND: "app:find"; readonly REPLACE: "app:replace"; readonly FREEZE_CHANGED: "app:freeze-changed"; readonly NAVIGATE_TO_CELL: "app:navigate-to-cell"; readonly CELLS_UPDATED: "app:cells-updated"; readonly CONTEXT_MENU_REQUEST: ...'.
+
+31   emitAppEvent(AppEvents.GRID_REFRESH);
+                            ~~~~~~~~~~~~
+
+src/core/components/Spreadsheet/Spreadsheet.tsx:6:41 - error TS6133: 'useState' is declared but its value is never read.
+
+6 import React, { useCallback, useEffect, useState, useRef } from "react";
+                                          ~~~~~~~~
+
+src/shell/DialogContainer.tsx:23:42 - error TS2339: Property 'getActiveDialogs' does not exist on type '{ registerDialog(definition: DialogDefinition): void; unregisterDialog(dialogId: string): void; openDialog(dialogId: string, data?: Record<string, unknown> | undefined): void; ... 4 more ...; onChange(listener: () => void): () => void; }'.  
+
+23   const activeDialogs = DialogExtensions.getActiveDialogs();
+                                            ~~~~~~~~~~~~~~~~
+
+src/shell/DialogContainer.tsx:27:29 - error TS7031: Binding element 'definition' implicitly has an 'any' type.     
+
+27       {activeDialogs.map(({ definition, state }) => {
+                               ~~~~~~~~~~
+
+src/shell/DialogContainer.tsx:27:41 - error TS7031: Binding element 'state' implicitly has an 'any' type.
+
+27       {activeDialogs.map(({ definition, state }) => {
+                                           ~~~~~
+
+src/shell/SheetTabs/SheetTabs.tsx:151:32 - error TS2339: Property 'PREVENT_BLUR_COMMIT' does not exist on type '{ readonly CUT: "app:cut"; readonly COPY: "app:copy"; readonly PASTE: "app:paste"; readonly FIND: "app:find"; readonly REPLACE: "app:replace"; readonly FREEZE_CHANGED: "app:freeze-changed"; readonly NAVIGATE_TO_CELL: "app:navigate-to-cell"; readonly CELLS_UPDATED: "app:cells-updated"; readonly CONTEXT_MENU_REQUEST: ...'.
+
+151         emitAppEvent(AppEvents.PREVENT_BLUR_COMMIT, true);
+                                   ~~~~~~~~~~~~~~~~~~~
+
+src/shell/SheetTabs/SheetTabs.tsx:255:32 - error TS2339: Property 'PREVENT_BLUR_COMMIT' does not exist on type '{ readonly CUT: "app:cut"; readonly COPY: "app:copy"; readonly PASTE: "app:paste"; readonly FIND: "app:find"; readonly REPLACE: "app:replace"; readonly FREEZE_CHANGED: "app:freeze-changed"; readonly NAVIGATE_TO_CELL: "app:navigate-to-cell"; readonly CELLS_UPDATED: "app:cells-updated"; readonly CONTEXT_MENU_REQUEST: ...'.
+
+255         emitAppEvent(AppEvents.PREVENT_BLUR_COMMIT, false);
+                                   ~~~~~~~~~~~~~~~~~~~
 
 
-* **The Problem:** This creates a **"Split Brain"**. The Core has its own dimension logic (`app/src/core/lib/gridRenderer/layout/dimensions.ts`), and the API has *another* copy.
-* **Risk:** Extensions using the API might calculate coordinates differently than the Core renderer, leading to visual glitches (e.g., overlays drifting from cells).
-* **Fix:** The API must strictly be a pass-through. `api.dimensions.getColumnX` should call into `core.state.selectors`, not perform math itself.
-
-#### 2. The "Alien" Rule Risk in Core Registry
-
-The Core must treat extensions as foreign objects. However, there is a suspicious directory inside Core.
-
-* **Evidence:** `app/src/core/registry/` contains `gridExtensions.ts` and `sheetExtensions.ts`.
-* **The Problem:** The Core should not know what an "Extension" is. The **Shell** is responsible for loading extensions and injecting them. If `app/src/core` contains code to "register" context menus specifically for extensions, it is likely importing types or logic that belongs in the Shell or API.
-* **Fix:** Move the Registry mechanism to `app/src/shell/` or `app/src/api/`. The Core should only expose generic hooks (e.g., `onContextMenu`), and the API should listen to those hooks to inject Extension menu items.
-
-#### 3. Deep Coupling in Pivot Extension (Violation of "Inversion of Control")
-
-The Pivot extension appears to be hooking too deeply into the application state, bypassing the API.
-
-* **Evidence:** `app/extensions/Pivot/components/PivotGrid/usePivotGridInteraction.ts` is tagged with `[TASK:grid]`.
-* **The Problem:** The tag `[TASK:grid]` usually implies interaction with `app/src/core/state` (e.g., `useGridDispatch`). If this extension imports `GridContext` or Reducers directly, it violates the strict sandbox.
-* **Fix:** Ensure `usePivotGridInteraction` only uses hooks provided by `app/src/api/events.ts` or `app/src/api/commands.ts`.
-
-#### 4. Backend Monolith (Rust)
-
-While the Frontend follows a Microkernel pattern, the Backend does not.
-
-* **Evidence:** `app/src-tauri/src/pivot/` exists as a hardcoded module.
-* **Evidence:** `app/src-tauri/src/lib.rs` likely imports `pivot/commands.rs`.
-* **The Problem:** You have a **Modular Frontend** but a **Monolithic Backend**. If a 3rd party developer wants to create a "Chart" extension that requires heavy calculation, they have no way to extend the Rust backend dynamically; they are stuck in the slow JavaScript thread.
-* **Fix:** Eventually, the Rust backend needs a plugin system (e.g., using `libloading` or WASM plugins) so the "Brain" can be extended just like the "Face".
-
-### 🛠 Refactoring Steps
-
-1. **Purge Logic from API:**
-Refactor `app/src/api/dimensions.ts`. It should look like this:
-```typescript
-// app/src/api/dimensions.ts
-import { coreStore } from '../core/state/store'; // (This import is allowed ONLY here)
-
-export const getColumnWidth = (col: number) => {
-   // Delegate to Core
-   return coreStore.getState().grid.dimensions.colWidths[col];
-}
-
-```
-
-*Remove all `calculate...` functions from the API and move them to Core.*
-2. **Move Registries to Shell:**
-Move `app/src/core/registry/*` to `app/src/shell/registries/`. The Core should be "dumb" regarding context menus.
-3. **Audit Pivot Imports:**
-Strictly lint `app/extensions/Pivot/**/*.ts`. Ensure **zero** imports start with `../../src/core`. If `usePivotGridInteraction` needs grid state, add a new hook to `app/src/api` (e.g., `api.hooks.useGridEvents()`) and use that instead.
+Found 16 errors.
