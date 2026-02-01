@@ -5,6 +5,15 @@
 // this generic API without knowing about any specific extension (e.g., pivot).
 
 import type { GridConfig, Viewport, DimensionOverrides } from "./types";
+import {
+  getColumnWidth,
+  getRowHeight,
+  getColumnsWidth,
+  getRowsHeight,
+  calculateColumnX,
+  calculateRowY,
+  createDimensionGetterFromMap,
+} from "./dimensions";
 
 // ============================================================================
 // Region Definition
@@ -204,53 +213,72 @@ function notifyRegionChange(): void {
 // ============================================================================
 // Extensions should use these helpers instead of accessing the raw
 // config / viewport / dimensions objects on OverlayRenderContext.
+// These functions delegate to the shared dimension utilities.
 
 /** Get the width of a specific column, accounting for custom widths. */
 export function overlayGetColumnWidth(ctx: OverlayRenderContext, col: number): number {
-  return ctx.dimensions.columnWidths.get(col) ?? ctx.config.defaultCellWidth ?? 100;
+  return getColumnWidth(
+    col,
+    ctx.config.defaultCellWidth ?? 100,
+    ctx.dimensions.columnWidths
+  );
 }
 
 /** Get the height of a specific row, accounting for custom heights. */
 export function overlayGetRowHeight(ctx: OverlayRenderContext, row: number): number {
-  return ctx.dimensions.rowHeights.get(row) ?? ctx.config.defaultCellHeight ?? 24;
+  return getRowHeight(
+    row,
+    ctx.config.defaultCellHeight ?? 24,
+    ctx.dimensions.rowHeights
+  );
 }
 
 /** Get the X pixel coordinate of a column's left edge, relative to the canvas. */
 export function overlayGetColumnX(ctx: OverlayRenderContext, col: number): number {
-  const rowHeaderWidth = ctx.config.rowHeaderWidth ?? 50;
-  let x = rowHeaderWidth;
-  for (let c = 0; c < col; c++) {
-    x += overlayGetColumnWidth(ctx, c);
-  }
-  return x - ctx.viewport.scrollX;
+  const getWidth = createDimensionGetterFromMap(
+    ctx.config.defaultCellWidth ?? 100,
+    ctx.dimensions.columnWidths
+  );
+  return calculateColumnX(
+    col,
+    ctx.config.rowHeaderWidth ?? 50,
+    ctx.viewport.scrollX,
+    getWidth
+  );
 }
 
 /** Get the Y pixel coordinate of a row's top edge, relative to the canvas. */
 export function overlayGetRowY(ctx: OverlayRenderContext, row: number): number {
-  const colHeaderHeight = ctx.config.colHeaderHeight ?? 24;
-  let y = colHeaderHeight;
-  for (let r = 0; r < row; r++) {
-    y += overlayGetRowHeight(ctx, r);
-  }
-  return y - ctx.viewport.scrollY;
+  const getHeight = createDimensionGetterFromMap(
+    ctx.config.defaultCellHeight ?? 24,
+    ctx.dimensions.rowHeights
+  );
+  return calculateRowY(
+    row,
+    ctx.config.colHeaderHeight ?? 24,
+    ctx.viewport.scrollY,
+    getHeight
+  );
 }
 
 /** Get the total width of a range of columns (inclusive). */
 export function overlayGetColumnsWidth(ctx: OverlayRenderContext, startCol: number, endCol: number): number {
-  let width = 0;
-  for (let col = startCol; col <= endCol; col++) {
-    width += overlayGetColumnWidth(ctx, col);
-  }
-  return width;
+  return getColumnsWidth(
+    startCol,
+    endCol,
+    ctx.config.defaultCellWidth ?? 100,
+    ctx.dimensions.columnWidths
+  );
 }
 
 /** Get the total height of a range of rows (inclusive). */
 export function overlayGetRowsHeight(ctx: OverlayRenderContext, startRow: number, endRow: number): number {
-  let height = 0;
-  for (let row = startRow; row <= endRow; row++) {
-    height += overlayGetRowHeight(ctx, row);
-  }
-  return height;
+  return getRowsHeight(
+    startRow,
+    endRow,
+    ctx.config.defaultCellHeight ?? 24,
+    ctx.dimensions.rowHeights
+  );
 }
 
 /** Get the row header width from the overlay context. */

@@ -7,6 +7,12 @@ import type {
   PivotCellType,
 } from '../lib/pivot-api';
 import { getCellDisplayValue } from '../lib/pivot-api';
+import {
+  buildFreezePaneConfig,
+  calculateColumnXWithFreeze,
+  calculateRowYWithFreeze,
+  type FreezePanePositionConfig,
+} from '../../../src/api/dimensions';
 
 // =============================================================================
 // TYPES
@@ -177,6 +183,10 @@ const EXPAND_ICON_SIZE = 12;
 const EXPAND_ICON_PADDING = 4;
 
 const CELL_PADDING_X = 6;
+
+// Default cell dimensions for pivot tables
+const DEFAULT_PIVOT_CELL_WIDTH = 100;
+const DEFAULT_PIVOT_CELL_HEIGHT = 24;
 
 // =============================================================================
 // HELPER FUNCTIONS
@@ -562,49 +572,29 @@ export function renderPivotView(
   // Clear canvas
   ctx.clearRect(0, 0, canvasWidth, canvasHeight);
 
-  // Calculate frozen dimensions
-  let frozenWidth = 0;
-  for (let c = 0; c < frozenColCount && c < colWidths.length; c++) {
-    frozenWidth += colWidths[c];
-  }
+  // Build dimension configuration using shared utility
+  const positionConfig = buildFreezePaneConfig({
+    colWidths,
+    rowHeights,
+    defaultCellWidth: DEFAULT_PIVOT_CELL_WIDTH,
+    defaultCellHeight: DEFAULT_PIVOT_CELL_HEIGHT,
+    scrollX: scrollLeft,
+    scrollY: scrollTop,
+    frozenColCount,
+    frozenRowCount,
+  });
 
-  let frozenHeight = 0;
-  for (let r = 0; r < frozenRowCount && r < rowHeights.length; r++) {
-    frozenHeight += rowHeights[r];
-  }
+  // Extract pre-calculated frozen dimensions for clipping regions
+  const { frozenWidth, frozenHeight } = positionConfig;
 
-  // Helper to get Y position for a row
+  // Helper to get Y position for a row using shared utility
   const getRowY = (rowIndex: number): number => {
-    let y = 0;
-    if (rowIndex < frozenRowCount) {
-      for (let r = 0; r < rowIndex; r++) {
-        y += rowHeights[r] || 24;
-      }
-    } else {
-      y = frozenHeight;
-      for (let r = frozenRowCount; r < rowIndex; r++) {
-        y += rowHeights[r] || 24;
-      }
-      y -= scrollTop;
-    }
-    return y;
+    return calculateRowYWithFreeze(rowIndex, positionConfig);
   };
 
-  // Helper to get X position for a column
+  // Helper to get X position for a column using shared utility
   const getColX = (colIndex: number): number => {
-    let x = 0;
-    if (colIndex < frozenColCount) {
-      for (let c = 0; c < colIndex; c++) {
-        x += colWidths[c] || 100;
-      }
-    } else {
-      x = frozenWidth;
-      for (let c = frozenColCount; c < colIndex; c++) {
-        x += colWidths[c] || 100;
-      }
-      x -= scrollLeft;
-    }
-    return x;
+    return calculateColumnXWithFreeze(colIndex, positionConfig);
   };
 
   // Render cells in four quadrants:
@@ -621,8 +611,8 @@ export function renderPivotView(
 
     const x = getColX(colIndex);
     const y = getRowY(rowIndex);
-    const width = colWidths[colIndex] || 100;
-    const height = rowHeights[rowIndex] || 24;
+    const width = colWidths[colIndex] || DEFAULT_PIVOT_CELL_WIDTH;
+    const height = rowHeights[rowIndex] || DEFAULT_PIVOT_CELL_HEIGHT;
 
     // Skip cells outside visible area
     if (x + width < 0 || x > canvasWidth || y + height < 0 || y > canvasHeight) {

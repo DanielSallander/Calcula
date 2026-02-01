@@ -2,62 +2,27 @@
 
 While the backend (Rust) modularity is excellent and strictly separated, the Frontend (TypeScript) shows specific areas where **The Shell** and **The Core** are coupled, violating the Microkernel architecture.
 
-Here are the critical violations and discrepancies found:
+### 1. The "Backend Brain" Violation (Rust)
 
-### 1. Violation of the "Zero Dependency" Rule (Core  Shell)
+**Rule:** *The Brain (Backend) is a minimal, stable engine that knows **nothing** about specific features.*
+**Violation:** The dependency map shows a hardcoded `pivot` module inside the main application source.
 
-**Severity: CRITICAL**
+* **Location:** `app/src-tauri/src/pivot/`
+* **The Issue:** The "Brain" (`app/src-tauri/src`) explicitly contains a folder named `pivot`. This means the core calculation engine is aware of Pivot Tables. In a true Microkernel, "Pivot" should be a separate crate or a plugin loaded dynamically, or at least a separate module that implements a generic `Aggregator` trait defined by the Core.
+* **Evidence:**
+* `app/src-tauri/src/pivot/commands.rs` (Pivot-specific Tauri commands in the core binary)
+* `app/src-tauri/src/pivot/engine.rs`
 
-The Core is strictly forbidden from importing from the Shell. However, the dependency map suggests the Core is reaching out to the Shell to get UI state.
+**Recommendation:** Move `app/src-tauri/src/pivot` into a separate crate (e.g., `crates/extension-pivot`) or a strictly isolated module that interacts with the Core only via a public `Calculation` trait.
 
-* **Evidence:** `app/src/core/components/Spreadsheet/useSpreadsheetEditing.ts` contains `getFormulaBarValue`.
-* **The Problem:** The "Formula Bar" is a UI component defined in `app/src/shell/FormulaBar`. If the Core imports a function to read the Formula Bar's state, the Core is now coupled to the Shell. You cannot use the Core in a headless mode or with a different Shell without breaking this file.
-* **Fix:** **Inversion of Control.** The Core should expose an event or hook (e.g., `useActiveCellInput`) via the API. The Formula Bar (in Shell) should consume this hook and push updates *to* the Core via a command, rather than the Core pulling data *from* the Formula Bar.
+### 2. The "Facade" Rule Violation (Frontend API)
 
-### 2. UI Components Leaking into The Kernel
+**Rule:** *Extensions may **only** import from `app/src/api`. They must never import deep into `app/src/core/...`.*
+**Violation:** The Pivot Extension appears to be performing canvas rendering, but the API layer does not expose the necessary rendering primitives.
 
-**Severity: HIGH**
-
-The Core's responsibility is the "Face" (Canvas Grid & Virtualization). Native DOM UI overlays (menus, context menus) belong to the Shell or Extensions.
-
-* **Evidence:** `app/src/core/components/ContextMenu/ContextMenu.tsx`.
-* **The Problem:** We have placed the context menu implementation inside the Core. A context menu is a host-level UI element. By baking it into the Core, you force every consumer of your engine to use *your* specific context menu styling and logic.
-* **Fix:** Move `ContextMenu.tsx` to `app/src/shell/Overlays`. The Core should only handle the `onContextMenu` event (detecting the right-click on a specific cell) and emit an event via the API. The Shell listens to this event and renders the Menu.
-
-### 3. The "Registry" Ambiguity (Logic in Wrong Layer)
-
-**Severity: MEDIUM**
-
-* **Evidence:** `app/src/core/registry/gridExtensions.ts` and `sheetExtensions.ts`.
-* **The Problem:** The Core contains a `registry` folder. In a Microkernel architecture, the **Shell** is responsible for being the "Extension Host" (scanning and registering). The **Core** should just be a passive receiver of logic injected via the API.
-* **Risk:** If `registerCoreGridContextMenu` inside Core contains hardcoded logic to load specific menu items, you have violated the "Alien Rule." The Core should not know what items are in the menu.
-* **Fix:** Ensure the `registry` folder is moved to `app/src/shell/` or `app/src/api/`. The Core should possess a `CommandService` (internal), but the act of *registering* things into it belongs to the Shell/API loader.
-
-### 4. Extension Boundary Risks (Pivot Extension)
-
-**Severity: MEDIUM (Requires Verification)**
-
-The Pivot extension is large and complex. There is a high risk it is bypassing the API Facade.
-
-* **Evidence:** `app/extensions/Pivot/components/PivotGrid/usePivotGridInteraction.ts` (366 LOC).
-* **The Risk:** This file is handling grid interaction within an extension. Does it import `useGridSelection` or `useViewport` from `app/src/core/hooks`?
-* **Rule Check:** If this file imports *anything* starting with `../../src/core`, it is a hard violation. It must only use `app/src/api/events` or `app/src/api/commands`.
-* **Observation:** The file `app/extensions/Pivot/lib/pivot-api.ts` exists. This is good practice (a local facade). Ensure this file wraps `app/src/api` and does not leak Core types.
-
-### 5. Backend/Frontend Logic Split (File I/O)
-
-**Severity: LOW**
-
-* **Evidence:** `app/src/core/lib/file-api.ts` (Save/Open logic).
-* **The Problem:** Persistence (File I/O) is often a Shell responsibility (managing OS dialogs, file handles) or a pure Backend responsibility.
-* **Refinement:** If `core/lib/file-api.ts` is just a wrapper around `tauri-api` to send data to Rust, it is acceptable. However, strictly speaking, the Core should likely just provide methods like `getSnapshot()` or `loadSnapshot()`. The *act* of saving that snapshot to a file on the disk is a Shell orchestration task.
-
-## Summary of Refactoring Actions
-
-| Component | Current Location | Violation | Recommended Action |
-| --- | --- | --- | --- |
-| **Formula Bar Link** | `core/.../useSpreadsheetEditing.ts` | Imports Shell Logic | Remove `getFormulaBarValue`. Use Event/Prop injection from Shell. |
-| **Context Menu** | `core/components/ContextMenu` | UI Logic in Kernel | Move to `shell/Overlays`. Core triggers event; Shell renders UI. |
-| **Extension Registry** | `core/registry/` | Host Logic in Kernel | Move registration logic to `shell/ExtensionHost`. |
-| **Pivot Grid** | `extensions/Pivot` | Potential Facade Bypass | Audit imports. Ensure ZERO imports from `src/core`. |
-| **File API** | `core/lib/file-api.ts` | Shell Responsibility | Move "Save/Open" orchestration to `shell/commands`. Keep serialization in Core. |
+* **Location:** `app/extensions/Pivot/rendering/pivot.ts`
+* **The Issue:** This file contains `renderPivotView` (189 loc). To render on the HTML5 Canvas, it requires access to the `CanvasRenderingContext2D`, coordinate systems, and potentially `RenderState` or `Theme` objects.
+* **The Gap:** Looking at `app/src/api/`, there are **no rendering interfaces exposed**:
+* `app/src/api/grid.ts` (Logic only)
+* `app/src/api/ui.ts` (DOM UI only, e.g., Dialogs/Menus)
+* `app/src/api/gridOverlays.ts` (DOM overlays, not Canvas drawing)
