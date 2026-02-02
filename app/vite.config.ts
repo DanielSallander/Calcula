@@ -1,10 +1,21 @@
-//! FILENAME: app/vite.config.ts
 import { defineConfig } from 'vite';
 import react from '@vitejs/plugin-react';
+import path from 'path';
 
 export default defineConfig({
   plugins: [react()],
   clearScreen: false,
+  
+  // ARCHITECTURE: Path Aliases
+  // This ensures Vite understands the shortcuts defined in tsconfig
+  resolve: {
+    alias: {
+      '@api': path.resolve(__dirname, './src/api'),
+      '@core': path.resolve(__dirname, './src/core'),
+      '@shell': path.resolve(__dirname, './src/shell'),
+    },
+  },
+
   server: {
     port: 5173,
     strictPort: true,

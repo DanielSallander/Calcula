@@ -21,7 +21,20 @@
     "noUnusedLocals": true,
     "noUnusedParameters": true,
     "noFallthroughCasesInSwitch": true,
-    "noUncheckedSideEffectImports": true
+    "noUncheckedSideEffectImports": true,
+
+    /* ARCHITECTURE PATHS */
+    /* This allows imports like: import { ... } from '@api/types' */
+    "baseUrl": ".",
+    "paths": {
+      "@api/*": ["src/api/*"],
+      "@core/*": ["src/core/*"],
+      "@shell/*": ["src/shell/*"]
+    }
   },
-  "include": ["src/**/*", "extensions/Pivot/components/PivotGrid", "extensions/Pivot/components/AggregationMenu.tsx", "extensions/Pivot/components/CreatePivotDialog.tsx", "extensions/Pivot/components/DropZone.tsx", "extensions/Pivot/components/DropZones.tsx", "extensions/Pivot/components/FieldItem.tsx", "extensions/Pivot/components/FieldList.tsx", "extensions/Pivot/components/FilterBar.tsx", "extensions/Pivot/components/FilterDropdown.tsx", "extensions/Pivot/components/index.ts", "extensions/Pivot/components/LayoutOptions.tsx", "extensions/Pivot/components/NumberFormatModal.tsx", "extensions/Pivot/components/PivotEditor.styles.ts", "extensions/Pivot/components/PivotEditor.tsx", "extensions/Pivot/components/PivotEditorPanel.tsx", "extensions/Pivot/components/PivotEditorView.tsx", "extensions/Pivot/components/SortDropdown.tsx", "extensions/Pivot/components/types.ts", "extensions/Pivot/components/useDragDrop.ts", "extensions/Pivot/components/usePivotEditorState.ts", "extensions/Pivot/components/ValueFieldContextMenu.tsx", "extensions/Pivot/components/ValueFieldSettingsModal.tsx", "extensions/Pivot/components/ZoneFieldItem.tsx", "extensions/BuiltIn/FindReplaceDialog", "extensions/BuiltIn/StandardMenus", "extensions/manifest.ts"]
+  /* CRITICAL FIX: Use glob patterns to automatically include all extension files */
+  "include": [
+    "src/**/*", 
+    "extensions/**/*"
+  ]
 }
