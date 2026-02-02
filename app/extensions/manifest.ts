@@ -1,4 +1,4 @@
-//! FILENAME: app/src/extensions/manifest.ts
+//! FILENAME: app/extensions/manifest.ts
 // PURPOSE: Static manifest of built-in extensions.
 // CONTEXT: This is the ONLY file allowed to import from extensions/BuiltIn/*.
 //          The ExtensionManager imports from here to load built-ins.

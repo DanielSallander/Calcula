@@ -1,4 +1,4 @@
-// FILENAME: app/extensions/Pivot/components/PivotGrid/PivotGrid.tsx
+//! FILENAME: app/extensions/pivot/components/PivotGrid/PivotGrid.tsx
 import React, { useRef, useEffect, useState, useCallback, useMemo } from 'react';
 import type { PivotViewResponse } from '../../lib/pivot-api';
 import { getPivotView } from '../../lib/pivot-api';

@@ -1,4 +1,4 @@
-//! FILENAME: app/src/core/components/pivot/NumberFormatModal.tsx
+//! FILENAME: app/extensions/pivot/components/NumberFormatModal.tsx
 // PURPOSE: Modal dialog for selecting number format for value fields
 // CONTEXT: Provides preset formats for currency, percentage, and general numbers
 

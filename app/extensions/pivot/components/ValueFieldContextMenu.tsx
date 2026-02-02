@@ -1,4 +1,4 @@
-//! FILENAME: app/src/core/components/pivot/ValueFieldContextMenu.tsx
+//! FILENAME: app/extensions/pivot/components/ValueFieldContextMenu.tsx
 // PURPOSE: Context menu for value field items in the pivot editor
 // CONTEXT: Shown on right-click, provides options for field settings and number format
 

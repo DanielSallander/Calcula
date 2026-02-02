@@ -1,4 +1,4 @@
-//! FILENAME: app/extensions/builtin/standard-menus/EditMenu.ts
+//! FILENAME: app/extensions/BuiltIn/StandardMenus/EditMenu.ts
 // PURPOSE: Edit menu registration using the Command Pattern.
 // CONTEXT: This extension registers menu items with commandIds from CoreCommands.
 //          The Shell executes commands via the Command Registry — no direct callbacks.

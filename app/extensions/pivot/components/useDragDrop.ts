@@ -1,4 +1,4 @@
-//! FILENAME: app/src/core/components/pivot/useDragDrop.ts
+//! FILENAME: app/extensions/pivot/components/useDragDrop.ts
 // PURPOSE: Custom mouse-based drag and drop for Tauri WebView compatibility
 // CONTEXT: HTML5 DnD doesn't work reliably in Tauri's WebView2
 

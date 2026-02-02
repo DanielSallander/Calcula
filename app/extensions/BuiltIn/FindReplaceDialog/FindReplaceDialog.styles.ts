@@ -1,4 +1,4 @@
-//! FILENAME: app/src/core/components/FindReplaceDialog/FindReplaceDialog.styles.ts
+//! FILENAME: app/extensions/BuiltIn/FindReplaceDialog/FindReplaceDialog.styles.ts
 import styled from 'styled-components';
 
 // Helper for CSS variables

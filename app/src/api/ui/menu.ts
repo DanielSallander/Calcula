@@ -1,3 +1,4 @@
+//! FILENAME: app/src/api/ui/menu.ts
 export interface MenuItem {
   id: string;
   label: string;

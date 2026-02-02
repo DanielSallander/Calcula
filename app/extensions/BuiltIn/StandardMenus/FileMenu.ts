@@ -1,4 +1,4 @@
-//! FILENAME: app/extensions/builtin/standard-menus/FileMenu.ts
+//! FILENAME: app/extensions/BuiltIn/StandardMenus/FileMenu.ts
 // ARCHITECTURE: Uses the System API facade (The Facade Rule).
 // Extensions must ONLY import from app/src/api.
 import { useCallback } from 'react';

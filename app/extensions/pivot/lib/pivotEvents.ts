@@ -1,4 +1,4 @@
-//! FILENAME: app/extensions/Pivot/lib/pivotEvents.ts
+//! FILENAME: app/extensions/pivot/lib/pivotEvents.ts
 // PURPOSE: Pivot-specific event constants.
 // CONTEXT: Extension-defined events that are NOT part of the Core event system.
 // Uses the generic emitAppEvent/onAppEvent from the API with custom strings.

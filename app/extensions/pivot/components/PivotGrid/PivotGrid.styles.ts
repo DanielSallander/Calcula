@@ -1,4 +1,4 @@
-//! FILENAME: app/src/core/components/pivot/PivotGrid/PivotGrid.styles.ts
+//! FILENAME: app/extensions/pivot/components/PivotGrid/PivotGrid.styles.ts
 // PURPOSE: Styled components for the PivotGrid canvas component
 // CONTEXT: Provides styles for the pivot table grid with frozen panes and scrollbars
 

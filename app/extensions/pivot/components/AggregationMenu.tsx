@@ -1,4 +1,4 @@
-//! FILENAME: app/src/core/components/pivot/AggregationMenu.tsx
+//! FILENAME: app/extensions/pivot/components/AggregationMenu.tsx
 import React, { useEffect, useRef, useCallback } from 'react';
 import { styles } from './PivotEditor.styles';
 import { AGGREGATION_OPTIONS, type AggregationType } from './types';

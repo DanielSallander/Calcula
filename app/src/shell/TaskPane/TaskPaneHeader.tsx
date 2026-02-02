@@ -1,4 +1,4 @@
-//! FILENAME: app/src/shell/task-pane/TaskPaneHeader.tsx
+//! FILENAME: app/src/shell/TaskPane/TaskPaneHeader.tsx
 // PURPOSE: Task Pane header with tabs and close button
 // CONTEXT: Renders tab strip for switching between open panes
 

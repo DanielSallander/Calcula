@@ -1,4 +1,4 @@
-//! FILENAME: app/src/core/components/pivot/usePivotEditorState.ts
+//! FILENAME: app/extensions/pivot/components/usePivotEditorState.ts
 import { useState, useCallback, useMemo, useEffect, useRef } from 'react';
 import type {
   SourceField,

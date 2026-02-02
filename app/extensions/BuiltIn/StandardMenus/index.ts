@@ -1,4 +1,4 @@
-//! FILENAME: app/src/extensions/BuiltIn/StandardMenus/index.ts
+//! FILENAME: app/extensions/BuiltIn/StandardMenus/index.ts
 // PURPOSE: Standard Menus extension module.
 // CONTEXT: Registers File, Edit, View, Insert menus.
 // NOTE: Default exports an ExtensionModule object per the contract.

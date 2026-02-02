@@ -1,4 +1,4 @@
-//! FILENAME: app/src/core/components/pivot/index.ts
+//! FILENAME: app/extensions/pivot/components/index.ts
 export { PivotEditor } from './PivotEditor';
 export { CreatePivotDialog } from './CreatePivotDialog';
 export { PivotEditorPanel } from './PivotEditorPanel';

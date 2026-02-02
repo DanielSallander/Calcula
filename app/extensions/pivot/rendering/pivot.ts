@@ -1,4 +1,4 @@
-// FILENAME: app/extensions/Pivot/rendering/pivot.ts
+//! FILENAME: app/extensions/pivot/rendering/pivot.ts
 
 import type {
   PivotViewResponse,

@@ -1,4 +1,4 @@
-// FILENAME: app/extensions/Pivot/components/PivotGrid/usePivotGridInteraction.ts
+//! FILENAME: app/extensions/pivot/components/PivotGrid/usePivotGridInteraction.ts
 import { useState, useCallback, useRef, useEffect } from 'react';
 import { pivot } from '../../../../src/api/pivot';
 import type {

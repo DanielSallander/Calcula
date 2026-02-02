@@ -1,4 +1,4 @@
-//! FILENAME: app/src/shell/task-pane/TaskPane.styles.ts
+//! FILENAME: app/src/shell/TaskPane/TaskPane.styles.ts
 // PURPOSE: Styled components for Task Pane
 // CONTEXT: Uses CSS-in-JS via styled-components
 

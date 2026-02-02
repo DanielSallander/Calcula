@@ -1,4 +1,4 @@
-//! FILENAME: app/extensions/Pivot/lib/pivot-api.test.ts
+//! FILENAME: app/extensions/pivot/lib/pivot-api.test.ts
 /**
  * Unit tests for pivot-api utilities
  */

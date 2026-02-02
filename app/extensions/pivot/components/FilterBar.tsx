@@ -1,4 +1,4 @@
-//! FILENAME: app/src/core/components/pivot/FilterBar.tsx
+//! FILENAME: app/extensions/pivot/components/FilterBar.tsx
 // PURPOSE: Bar component displaying active filters above the pivot table
 // CONTEXT: Shows filter chips that can be clicked to open filter dropdowns
 

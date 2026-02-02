@@ -1,4 +1,4 @@
-//! FILENAME: app/src/core/components/pivot/ZoneFieldItem.tsx
+//! FILENAME: app/extensions/pivot/components/ZoneFieldItem.tsx
 import React, { useCallback, useState, useMemo } from 'react';
 import { styles } from './PivotEditor.styles';
 import { AggregationMenu } from './AggregationMenu';

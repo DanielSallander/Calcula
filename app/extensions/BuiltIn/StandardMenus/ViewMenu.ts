@@ -1,4 +1,4 @@
-//! FILENAME: app/extensions/builtin/standard-menus/ViewMenu.ts
+//! FILENAME: app/extensions/BuiltIn/StandardMenus/ViewMenu.ts
 // REFACTORED: All imports now go through app/src/api (The Facade Rule).
 // - Removed: direct imports from core/lib/tauri-api, core/state/gridActions, shell/task-pane
 // - Uses: api/grid.ts for freeze operations, api/ui.ts for task pane hooks

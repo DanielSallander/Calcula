@@ -1,4 +1,4 @@
-//! FILENAME: app/src/shell/task-pane/index.ts
+//! FILENAME: app/src/shell/TaskPane/index.ts
 // PURPOSE: Barrel exports for Task Pane module
 
 export { TaskPaneContainer } from "./TaskPaneContainer";

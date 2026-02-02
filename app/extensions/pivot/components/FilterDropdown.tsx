@@ -1,4 +1,4 @@
-//! FILENAME: app\src\core\components\pivot\FilterDropdown.tsx
+//! FILENAME: app/extensions/pivot/components/FilterDropdown.tsx
 import React, { useState, useCallback, useRef, useEffect } from 'react';
 
 export interface FilterDropdownProps {

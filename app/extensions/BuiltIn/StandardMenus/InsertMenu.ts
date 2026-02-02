@@ -1,4 +1,4 @@
-//! FILENAME: app/extensions/builtin/standard-menus/InsertMenu.ts
+//! FILENAME: app/extensions/BuiltIn/StandardMenus/InsertMenu.ts
 import { useCallback, useState } from 'react';
 import type { MenuDefinition } from '../../../src/api/ui';
 import { restoreFocusToGrid } from '../../../src/api/events';

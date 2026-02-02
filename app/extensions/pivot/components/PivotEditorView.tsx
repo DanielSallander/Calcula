@@ -1,4 +1,4 @@
-//! FILENAME: app/src/core/components/pivot/PivotEditorView.tsx
+//! FILENAME: app/extensions/pivot/components/PivotEditorView.tsx
 // PURPOSE: Task Pane view wrapper for PivotEditor
 // CONTEXT: Adapts PivotEditor to work within the Task Pane system
 

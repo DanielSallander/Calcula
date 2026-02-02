@@ -1,4 +1,4 @@
-//! FILENAME: app/src/core/components/pivot/FieldItem.tsx
+//! FILENAME: app/extensions/pivot/components/FieldItem.tsx
 import React, { useCallback, useMemo } from 'react';
 import { styles } from './PivotEditor.styles';
 import { useDraggable } from './useDragDrop';

@@ -1,4 +1,4 @@
-//! FILENAME: app/src/core/components/pivot/FieldList.tsx
+//! FILENAME: app/extensions/pivot/components/FieldList.tsx
 import React, { useState, useMemo } from 'react';
 import { css } from '@emotion/css';
 import { styles } from './PivotEditor.styles';

@@ -1,4 +1,4 @@
-//! FILENAME: app/src/core/components/pivot/DropZone.tsx
+//! FILENAME: app/extensions/pivot/components/DropZone.tsx
 
 import React, { useCallback, useRef, useState, useEffect } from 'react';
 import { css } from '@emotion/css';

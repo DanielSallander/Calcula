@@ -1,4 +1,4 @@
-//! FILENAME: app/src/shell/task-pane/TaskPaneContainer.tsx
+//! FILENAME: app/src/shell/TaskPane/TaskPaneContainer.tsx
 // PURPOSE: Main Task Pane container with resize, tabs, and content rendering
 // CONTEXT: Renders the task pane sidebar with dynamic content from registered views
 

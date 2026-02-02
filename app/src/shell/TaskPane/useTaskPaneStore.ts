@@ -1,4 +1,4 @@
-//! FILENAME: app/src/shell/task-pane/useTaskPaneStore.ts
+//! FILENAME: app/src/shell/TaskPane/useTaskPaneStore.ts
 // PURPOSE: Zustand store for Task Pane state management
 // CONTEXT: Manages visibility, width, active view, and registered views
 

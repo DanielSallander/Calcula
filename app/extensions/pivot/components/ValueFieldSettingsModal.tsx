@@ -1,4 +1,4 @@
-//! FILENAME: app/src/core/components/pivot/ValueFieldSettingsModal.tsx
+//! FILENAME: app/extensions/pivot/components/ValueFieldSettingsModal.tsx
 // PURPOSE: Modal dialog for configuring value field settings
 // CONTEXT: Allows changing aggregation type, custom name, and show values as
 

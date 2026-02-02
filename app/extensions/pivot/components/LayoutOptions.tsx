@@ -1,4 +1,4 @@
-//! FILENAME: app/src/core/components/pivot/LayoutOptions.tsx
+//! FILENAME: app/extensions/pivot/components/LayoutOptions.tsx
 import React, { useCallback } from 'react';
 import { styles } from './PivotEditor.styles';
 import type { LayoutConfig, ReportLayout, ValuesPosition } from './types';

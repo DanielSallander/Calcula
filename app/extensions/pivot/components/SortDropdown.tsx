@@ -1,4 +1,4 @@
-//! FILENAME: app/src/core/components/pivot/SortDropdown.tsx
+//! FILENAME: app/extensions/pivot/components/SortDropdown.tsx
 // PURPOSE: Dropdown component for sorting pivot table row/column fields
 // CONTEXT: Provides A-Z, Z-A label sorting and sort by value options
 
