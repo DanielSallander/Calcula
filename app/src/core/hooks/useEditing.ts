@@ -38,7 +38,7 @@ import {
 } from "../lib/gridRenderer";
 import type { EditingCell, CellUpdateResult, FormulaReference } from "../types";
 import { isFormulaExpectingReference, FORMULA_REFERENCE_COLORS } from "../types";
-import { checkEditGuards } from "../../api/editGuards";
+import { checkEditGuards } from "../lib/editGuards";
 
 /**
  * MODULE-LEVEL singleton ref for synchronous editing state.

@@ -1,9 +1,11 @@
 //! FILENAME: app/src/shell/hooks/useExtensions.ts
 // PURPOSE: React hook for subscribing to ExtensionManager state.
 // CONTEXT: Used by Shell components to re-render when extensions load/change.
+// UPDATED: Now calls bootstrapShell before initializing extensions.
 
 import { useState, useEffect, useSyncExternalStore, useCallback } from "react";
 import { ExtensionManager, type LoadedExtension } from "../registries/ExtensionManager";
+import { bootstrapShell } from "../bootstrap";
 
 // ============================================================================
 // useExtensions Hook
@@ -48,6 +50,9 @@ export function useExtensions(): {
 /**
  * Hook that initializes the ExtensionManager on mount.
  * Should be called once at the root of the application.
+ * 
+ * IMPORTANT: This now calls bootstrapShell() first to register all
+ * Shell service implementations with the API layer before loading extensions.
  */
 export function useExtensionInitializer(): {
   isLoading: boolean;
@@ -63,7 +68,13 @@ export function useExtensionInitializer(): {
 
     async function init() {
       try {
+        // CRITICAL: Bootstrap Shell services BEFORE initializing extensions
+        // This registers all Shell implementations with the API layer
+        bootstrapShell();
+
+        // Now initialize extensions (they can safely use the API)
         await ExtensionManager.initialize();
+        
         if (mounted) {
           setIsReady(true);
         }

@@ -4,7 +4,7 @@ import styled from 'styled-components';
 const v = (name: string) => `var(${name})`;
 
 interface StyledInputProps {
-  isFocused: boolean;
+  $isFocused: boolean;
 }
 
 export const StyledInput = styled.input<StyledInputProps>`
@@ -16,6 +16,6 @@ export const StyledInput = styled.input<StyledInputProps>`
   font-size: 12px;
   font-family: Consolas, 'Courier New', monospace;
   outline: none;
-  background-color: ${props => props.isFocused ? v('--formula-input-bg-focused') : v('--formula-input-bg')};
+  background-color: ${props => props.$isFocused ? v('--formula-input-bg-focused') : v('--formula-input-bg')};
   color: ${v('--formula-input-text')};
 `;

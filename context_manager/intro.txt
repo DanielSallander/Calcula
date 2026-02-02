@@ -159,3 +159,10 @@ export interface CellData {
 - Forgetting `#[serde(rename_all = "camelCase")]` on new Rust structs
 - Adding `#[serde(rename = "fieldName")]` to individual fields (use struct-level instead)
 - Importing from `addins/` in core code (core must never depend on add-ins)
+
+###  The "Calcula" Decision Matrix
+When developing a new feature, ask yourself these three questions to find its home:
+Question|If YES...|If NO...
+"Is it a Primal? Does the grid need this to simply exist (e.g., coordinates, scrolling, basic pixel rendering)?"|CORE|Move to next question.
+"Is it a Bridge? Is this a generic tool that any extension might need (e.g., ""Show a Dialog,"" ""Read a Cell,"" ""Interchange format"")?"|API|Move to next question.
+"Is it a Feature? Is this a specific user-facing behavior (e.g., Data Validation, Charts, Pivot, Formatting)?"|EXTENSION|It's an Extension.

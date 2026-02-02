@@ -1,13 +1,28 @@
-//! FILENAME: app/extensions/pivot/lib/pivot-api.ts
+//! FILENAME: app/extensions/Pivot/lib/pivot-api.ts
 /**
  * FILENAME: app/extensions/Pivot/lib/pivot-api.ts
  * Pivot Table API
  *
  * TypeScript bindings for the Tauri pivot table commands.
  * Provides a clean async interface for creating, updating, and querying pivot tables.
+ * 
+ * ARCHITECTURE NOTE: This file uses the API facade (src/api/backend.ts) instead of
+ * importing directly from @tauri-apps/api. This ensures extensions go through the
+ * sandboxed API layer, maintaining the Microkernel architecture.
  */
 
-import { invoke } from "@tauri-apps/api/core";
+import {
+  createPivotTable as apiCreatePivotTable,
+  updatePivotFields as apiUpdatePivotFields,
+  togglePivotGroup as apiTogglePivotGroup,
+  getPivotView as apiGetPivotView,
+  deletePivotTable as apiDeletePivotTable,
+  getPivotSourceData as apiGetPivotSourceData,
+  refreshPivotCache as apiRefreshPivotCache,
+  getPivotAtCell as apiGetPivotAtCell,
+  getPivotRegionsForSheet as apiGetPivotRegionsForSheet,
+  getPivotFieldUniqueValues as apiGetPivotFieldUniqueValues,
+} from "../../../src/api/backend";
 
 // ============================================================================
 // Types
@@ -300,190 +315,78 @@ export interface PivotRegionData {
 
 /**
  * Creates a new pivot table from the specified source range.
- *
- * @param request - Configuration for the new pivot table
- * @returns The initial pivot view
- * @throws Error if creation fails
- *
- * @example
- * ```ts
- * const view = await createPivotTable({
- *   source_range: "A1:D100",
- *   destination_cell: "F1",
- *   has_headers: true,
- * });
- * ```
  */
 export async function createPivotTable(
   request: CreatePivotRequest
 ): Promise<PivotViewResponse> {
-  return invoke<PivotViewResponse>("create_pivot_table", { request });
+  return apiCreatePivotTable<CreatePivotRequest, PivotViewResponse>(request);
 }
 
 /**
  * Updates the field configuration of an existing pivot table.
- *
- * @param request - The fields to update (only specified fields are changed)
- * @returns The updated pivot view
- * @throws Error if update fails or pivot not found
- *
- * @example
- * ```ts
- * const view = await updatePivotFields({
- *   pivot_id: 1,
- *   row_fields: [
- *     { source_index: 0, name: "Region", sort_order: "asc" },
- *   ],
- *   value_fields: [
- *     { source_index: 2, name: "Total Sales", aggregation: "sum" },
- *   ],
- * });
- * ```
  */
 export async function updatePivotFields(
   request: UpdatePivotFieldsRequest
 ): Promise<PivotViewResponse> {
-  return invoke<PivotViewResponse>("update_pivot_fields", { request });
+  return apiUpdatePivotFields<UpdatePivotFieldsRequest, PivotViewResponse>(request);
 }
 
 /**
  * Toggles the expand/collapse state of a pivot group.
- *
- * @param request - Identifies which group to toggle
- * @returns The updated pivot view
- * @throws Error if toggle fails or pivot not found
- *
- * @example
- * ```ts
- * const view = await togglePivotGroup({
- *   pivot_id: 1,
- *   is_row: true,
- *   field_index: 0,
- * });
- * ```
  */
 export async function togglePivotGroup(
   request: ToggleGroupRequest
 ): Promise<PivotViewResponse> {
-  return invoke<PivotViewResponse>("toggle_pivot_group", { request });
+  return apiTogglePivotGroup<ToggleGroupRequest, PivotViewResponse>(request);
 }
 
 /**
  * Gets the current view of a pivot table.
- *
- * @param pivotId - The pivot table ID (optional, uses active pivot if not specified)
- * @returns The current pivot view
- * @throws Error if pivot not found
- *
- * @example
- * ```ts
- * const view = await getPivotView(1);
- * ```
  */
 export async function getPivotView(pivotId?: PivotId): Promise<PivotViewResponse> {
-  return invoke<PivotViewResponse>("get_pivot_view", { pivotId });
+  return apiGetPivotView<PivotViewResponse>(pivotId);
 }
 
 /**
  * Deletes a pivot table.
- *
- * @param pivotId - The pivot table ID to delete
- * @throws Error if pivot not found
- *
- * @example
- * ```ts
- * await deletePivotTable(1);
- * ```
  */
 export async function deletePivotTable(pivotId: PivotId): Promise<void> {
-  return invoke<void>("delete_pivot_table", { pivotId });
+  return apiDeletePivotTable(pivotId);
 }
 
 /**
  * Gets source data for drill-down (detail view).
- *
- * @param pivotId - The pivot table ID
- * @param groupPath - The path identifying which cell to drill into
- * @param maxRecords - Maximum records to return (default: 1000)
- * @returns The source data rows matching the group path
- * @throws Error if pivot not found
- *
- * @example
- * ```ts
- * const data = await getPivotSourceData(1, [[0, 5]], 100);
- * console.log(data.headers); // ["Region", "Product", "Sales"]
- * console.log(data.rows);    // [["North", "Apples", "100"], ...]
- * ```
  */
 export async function getPivotSourceData(
   pivotId: PivotId,
   groupPath: GroupPath,
   maxRecords?: number
 ): Promise<SourceDataResponse> {
-  return invoke<SourceDataResponse>("get_pivot_source_data", {
-    pivotId,
-    groupPath,
-    maxRecords,
-  });
+  return apiGetPivotSourceData<SourceDataResponse>(pivotId, groupPath, maxRecords);
 }
 
 /**
  * Refreshes the pivot cache from current grid data.
- * Call this when the source data has changed.
- *
- * @param pivotId - The pivot table ID to refresh
- * @returns The refreshed pivot view
- * @throws Error if pivot not found
- *
- * @example
- * ```ts
- * const view = await refreshPivotCache(1);
- * ```
  */
 export async function refreshPivotCache(pivotId: PivotId): Promise<PivotViewResponse> {
-  return invoke<PivotViewResponse>("refresh_pivot_cache", { pivotId });
+  return apiRefreshPivotCache<PivotViewResponse>(pivotId);
 }
 
 /**
  * Checks if a cell is within a pivot table region.
- *
- * @param row - Row index (0-based)
- * @param col - Column index (0-based)
- * @returns Pivot region info if cell is in a pivot, null otherwise
- *
- * @example
- * ```ts
- * const info = await getPivotAtCell(5, 10);
- * if (info) {
- *   console.log("Cell is in pivot", info.pivotId);
- * }
- * ```
  */
 export async function getPivotAtCell(
   row: number,
   col: number
 ): Promise<PivotRegionInfo | null> {
-  return invoke<PivotRegionInfo | null>("get_pivot_at_cell", { row, col });
+  return apiGetPivotAtCell<PivotRegionInfo>(row, col);
 }
 
 /**
  * Gets all pivot regions for the current sheet.
- * Used for rendering pivot placeholders.
- *
- * @returns Array of pivot region data
- *
- * @example
- * ```ts
- * const regions = await getPivotRegionsForSheet();
- * for (const region of regions) {
- *   if (region.isEmpty) {
- *     // Draw placeholder
- *   }
- * }
- * ```
  */
 export async function getPivotRegionsForSheet(): Promise<PivotRegionData[]> {
-  return invoke<PivotRegionData[]>("get_pivot_regions_for_sheet", {});
+  return apiGetPivotRegionsForSheet<PivotRegionData>();
 }
 
 /** Response containing unique values for a field */
@@ -495,27 +398,12 @@ export interface FieldUniqueValuesResponse {
 
 /**
  * Gets unique values for a specific field in a pivot table's source data.
- * Used for filter dropdowns.
- *
- * @param pivotId - The pivot table ID
- * @param fieldIndex - The source field index
- * @returns Array of unique values as strings
- * @throws Error if pivot not found or field index is out of range
- *
- * @example
- * ```ts
- * const values = await getPivotFieldUniqueValues(1, 0);
- * console.log(values.unique_values); // ["North", "South", "East", "West"]
- * ```
  */
 export async function getPivotFieldUniqueValues(
   pivotId: PivotId,
   fieldIndex: number
 ): Promise<FieldUniqueValuesResponse> {
-  return invoke<FieldUniqueValuesResponse>("get_pivot_field_unique_values", {
-    pivotId,
-    fieldIndex,
-  });
+  return apiGetPivotFieldUniqueValues<FieldUniqueValuesResponse>(pivotId, fieldIndex);
 }
 
 // ============================================================================

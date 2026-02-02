@@ -197,7 +197,7 @@ export function NameBox(): React.ReactElement {
       onBlur={handleBlur}
       onKeyDown={handleKeyDown}
       onMouseDown={handleMouseDown}
-      isEditing={isEditing}
+      $isEditing={isEditing}
       aria-label="Name Box"
     />
   );

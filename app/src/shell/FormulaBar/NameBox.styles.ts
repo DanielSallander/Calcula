@@ -4,7 +4,7 @@ import styled from 'styled-components';
 const v = (name: string) => `var(${name})`;
 
 interface StyledNameBoxInputProps {
-  isEditing: boolean;
+  $isEditing: boolean;
 }
 
 export const StyledNameBoxInput = styled.input<StyledNameBoxInputProps>`
@@ -16,7 +16,7 @@ export const StyledNameBoxInput = styled.input<StyledNameBoxInputProps>`
   font-size: 12px;
   font-family: system-ui, -apple-system, sans-serif;
   outline: none;
-  background-color: ${props => props.isEditing ? v('--namebox-bg-editing') : v('--namebox-bg')};
+  background-color: ${props => props.$isEditing ? v('--namebox-bg-editing') : v('--namebox-bg')};
   color: ${v('--namebox-text')};
   caret-color: ${v('--namebox-text')};
   -webkit-text-fill-color: ${v('--namebox-text')};

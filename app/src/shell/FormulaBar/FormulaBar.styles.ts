@@ -25,7 +25,7 @@ export const ButtonGroup = styled.div`
 
 interface IconButtonProps {
   disabled?: boolean;
-  variant?: 'cancel' | 'enter' | 'function';
+  $variant?: 'cancel' | 'enter' | 'function';
 }
 
 export const IconButton = styled.button<IconButtonProps>`
@@ -39,8 +39,8 @@ export const IconButton = styled.button<IconButtonProps>`
   justify-content: center;
   color: ${props => {
     if (props.disabled) return v('--formula-bar-button-disabled');
-    if (props.variant === 'cancel') return v('--formula-bar-cancel-color');
-    if (props.variant === 'enter') return v('--formula-bar-enter-color');
+    if (props.$variant === 'cancel') return v('--formula-bar-cancel-color');
+    if (props.$variant === 'enter') return v('--formula-bar-enter-color');
     return v('--formula-bar-function-color');
   }};
   border-radius: 2px;
@@ -48,8 +48,8 @@ export const IconButton = styled.button<IconButtonProps>`
 
   &:hover:not(:disabled) {
     background-color: ${props => {
-      if (props.variant === 'cancel') return v('--formula-bar-cancel-hover-bg');
-      if (props.variant === 'enter') return v('--formula-bar-enter-hover-bg');
+      if (props.$variant === 'cancel') return v('--formula-bar-cancel-hover-bg');
+      if (props.$variant === 'enter') return v('--formula-bar-enter-hover-bg');
       return v('--formula-bar-function-hover-bg');
     }};
   }

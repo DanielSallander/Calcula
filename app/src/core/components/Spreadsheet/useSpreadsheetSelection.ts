@@ -23,7 +23,7 @@ import {
   undo as undoApi,
   redo as redoApi,
 } from "../../lib/tauri-api";
-import { checkCellClickInterceptors } from "../../../api/cellClickInterceptors";
+import { checkCellClickInterceptors } from "../../lib/cellClickInterceptors";
 import { setColumnWidth, setRowHeight } from "../../state/gridActions";
 import { cellEvents } from "../../lib/cellEvents";
 import type { GridCanvasHandle } from "../Grid";

@@ -1,9 +1,53 @@
-# Fix error
-app/src/core/state/gridActions.ts was recently refactored.
-Some logic was moved here:
-app/extensions/BuiltIn/FindReplaceDialog/useFindStore.ts 
-and here: 
-app/extensions/BuiltIn/FindReplaceDialog/FindReplaceDialog.tsx
+# Fix errors
 
-This is the error I get:
-Spreadsheet.tsx:8  Uncaught SyntaxError: The requested module '/src/core/state/gridActions.ts' does not provide an export named 'openFind' (at Spreadsheet.tsx:8:33)
+I get these errors from the console when starting the application:
+
+[ExtensionManager] Initialization complete. 2 extensions loaded.
+extensions.ts:353  [API] registerCoreSheetContextMenu should be called from Shell bootstrap
+registerCoreSheetContextMenu @ extensions.ts:353
+react-dom.development.js:22878  Uncaught TypeError: ExtensionRegistry.notifySelectionChange is not a function
+    at Layout.tsx:105:23
+    at commitHookEffectListMount (react-dom.development.js:23189:26)
+    at commitPassiveMountOnFiber (react-dom.development.js:24965:13)
+    at commitPassiveMountEffects_complete (react-dom.development.js:24930:9)
+    at commitPassiveMountEffects_begin (react-dom.development.js:24917:7)
+    at commitPassiveMountEffects (react-dom.development.js:24905:3)
+    at flushPassiveEffectsImpl (react-dom.development.js:27078:3)
+    at flushPassiveEffects (react-dom.development.js:27023:14)
+    at react-dom.development.js:26808:9
+    at workLoop (scheduler.development.js:266:34)
+react-dom.development.js:22878  Uncaught TypeError: ExtensionRegistry.notifySelectionChange is not a function
+    at Layout.tsx:105:23
+    at commitHookEffectListMount (react-dom.development.js:23189:26)
+    at invokePassiveEffectMountInDEV (react-dom.development.js:25193:13)
+    at invokeEffectsInDev (react-dom.development.js:27390:11)
+    at commitDoubleInvokeEffectsInDEV (react-dom.development.js:27369:7)
+    at flushPassiveEffectsImpl (react-dom.development.js:27095:5)
+    at flushPassiveEffects (react-dom.development.js:27023:14)
+    at react-dom.development.js:26808:9
+    at workLoop (scheduler.development.js:266:34)
+    at flushWork (scheduler.development.js:239:14)
+react-dom.development.js:18704  The above error occurred in the <LayoutInner> component:
+
+    at LayoutInner (http://localhost:5173/src/shell/Layout.tsx:146:31)
+    at GridProvider (http://localhost:5173/src/core/state/GridContext.tsx:22:32)
+    at Layout (http://localhost:5173/src/shell/Layout.tsx:297:32)
+    at GridProvider (http://localhost:5173/src/core/state/GridContext.tsx:22:32)
+    at ThemeRoot (http://localhost:5173/src/core/theme/ThemeRoot.tsx:20:29)
+    at App
+
+Consider adding an error boundary to your tree to customize error handling behavior.
+Visit https://reactjs.org/link/error-boundaries to learn more about error boundaries.
+logCapturedError @ react-dom.development.js:18704
+react-dom.development.js:12056  Uncaught TypeError: ExtensionRegistry.notifySelectionChange is not a function
+    at Layout.tsx:105:23
+    at commitHookEffectListMount (react-dom.development.js:23189:26)
+    at commitPassiveMountOnFiber (react-dom.development.js:24965:13)
+    at commitPassiveMountEffects_complete (react-dom.development.js:24930:9)
+    at commitPassiveMountEffects_begin (react-dom.development.js:24917:7)
+    at commitPassiveMountEffects (react-dom.development.js:24905:3)
+    at flushPassiveEffectsImpl (react-dom.development.js:27078:3)
+    at flushPassiveEffects (react-dom.development.js:27023:14)
+    at react-dom.development.js:26808:9
+    at workLoop (scheduler.development.js:266:34)
+useSpreadsheetStyles.ts:49 [Styles] Loaded 1 styles from backend

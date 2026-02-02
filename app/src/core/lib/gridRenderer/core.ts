@@ -1,8 +1,7 @@
 //! FILENAME: app/src/core/lib/gridRenderer/core.ts
 // PURPOSE: Main rendering orchestration function
 // CONTEXT: Coordinates all rendering phases for the grid
-// UPDATED: Fixed freeze pane cell text rendering with proper padding
-// UPDATED: Added merged cell support for freeze pane zone rendering
+// FIX: Removed API import - overlays are now passed as parameters
 
 import type {
   GridConfig,
@@ -34,12 +33,49 @@ import {
 } from "./layout/viewport";
 import { getColumnWidth, getRowHeight } from "./layout/dimensions";
 import { cellKey } from "../../../core/types";
-import { getGridRegions, getOverlayRenderers } from "../../../api/gridOverlays";
 
-/**
- * Check if a cell is a "slave" cell (part of a merge but not the master).
- * Returns the master cell's key if it is, null otherwise.
- */
+// REMOVED: import { getGridRegions, getOverlayRenderers } from "../../../api/gridOverlays";
+
+// ============================================================================
+// Overlay Types (defined locally in Core for type safety)
+// ============================================================================
+
+/** A rectangular region on the grid that an extension claims ownership of. */
+export interface GridRegion {
+  id: string;
+  type: string;
+  startRow: number;
+  startCol: number;
+  endRow: number;
+  endCol: number;
+  data?: Record<string, unknown>;
+}
+
+/** Context passed to overlay render functions during grid paint. */
+export interface OverlayRenderContext {
+  ctx: CanvasRenderingContext2D;
+  region: GridRegion;
+  config: GridConfig;
+  viewport: Viewport;
+  dimensions: DimensionOverrides;
+  canvasWidth: number;
+  canvasHeight: number;
+}
+
+/** A function that renders an overlay for a given region. */
+export type OverlayRendererFn = (context: OverlayRenderContext) => void;
+
+/** Describes an overlay renderer that handles a specific region type. */
+export interface OverlayRegistration {
+  type: string;
+  render: OverlayRendererFn;
+  priority?: number;
+}
+
+// ============================================================================
+// Helper Functions (unchanged)
+// ============================================================================
+
 function getMasterCellKey(
   row: number,
   col: number,
@@ -68,9 +104,6 @@ function getMasterCellKey(
   return null;
 }
 
-/**
- * Calculate the total width of a merged cell spanning multiple columns.
- */
 function getMergedCellWidth(
   startCol: number,
   colSpan: number,
@@ -84,9 +117,6 @@ function getMergedCellWidth(
   return totalWidth;
 }
 
-/**
- * Calculate the total height of a merged cell spanning multiple rows.
- */
 function getMergedCellHeight(
   startRow: number,
   rowSpan: number,
@@ -100,9 +130,6 @@ function getMergedCellHeight(
   return totalHeight;
 }
 
-/**
- * Get segments of a line that should be drawn, excluding merged cell interiors.
- */
 function getLineSegments(
   cells: Map<string, { rowSpan?: number; colSpan?: number }>,
   lineType: "vertical" | "horizontal",
@@ -164,9 +191,6 @@ function getLineSegments(
   return segments;
 }
 
-/**
- * Render a single zone of the grid with clipping.
- */
 function renderZone(
   state: RenderState,
   range: VisibleRange,
@@ -177,31 +201,17 @@ function renderZone(
 ): void {
   const { ctx, theme } = state;
   
-  // Save context state
   ctx.save();
-  
-  // Set clipping region for this zone
   ctx.beginPath();
   ctx.rect(clipX, clipY, clipWidth, clipHeight);
   ctx.clip();
-  
-  // Clear zone background
   ctx.fillStyle = theme.cellBackground;
   ctx.fillRect(clipX, clipY, clipWidth, clipHeight);
-  
-  // Draw grid lines for this zone
   drawGridLinesZone(state, range, clipX, clipY, clipWidth, clipHeight);
-  
-  // Draw cell text for this zone
   drawCellTextZone(state, range, clipX, clipY, clipWidth, clipHeight);
-  
-  // Restore context state
   ctx.restore();
 }
 
-/**
- * Draw grid lines for a specific zone with merge-aware gaps.
- */
 function drawGridLinesZone(
   state: RenderState,
   range: VisibleRange,
@@ -217,11 +227,9 @@ function drawGridLinesZone(
   ctx.strokeStyle = theme.gridLine;
   ctx.lineWidth = 1;
   
-  // Draw vertical lines with merge-aware gaps
   let x = clipX + range.offsetX;
   for (let col = range.startCol; col <= range.endCol + 1 && col <= totalCols; col++) {
     if (x >= clipX && x <= clipX + clipWidth) {
-      // Get segments that should be drawn (excluding merged cell interiors)
       const segments = getLineSegments(
         cells as Map<string, { rowSpan?: number; colSpan?: number }>,
         "vertical",
@@ -231,7 +239,6 @@ function drawGridLinesZone(
       );
       
       for (const segment of segments) {
-        // Calculate Y positions for this segment
         let segmentStartY = clipY + range.offsetY;
         for (let r = range.startRow; r < segment.start; r++) {
           segmentStartY += getRowHeight(r, config, dimensions);
@@ -254,11 +261,9 @@ function drawGridLinesZone(
     }
   }
   
-  // Draw horizontal lines with merge-aware gaps
   let y = clipY + range.offsetY;
   for (let row = range.startRow; row <= range.endRow + 1 && row <= totalRows; row++) {
     if (y >= clipY && y <= clipY + clipHeight) {
-      // Get segments that should be drawn (excluding merged cell interiors)
       const segments = getLineSegments(
         cells as Map<string, { rowSpan?: number; colSpan?: number }>,
         "horizontal",
@@ -268,7 +273,6 @@ function drawGridLinesZone(
       );
       
       for (const segment of segments) {
-        // Calculate X positions for this segment
         let segmentStartX = clipX + range.offsetX;
         for (let c = range.startCol; c < segment.start; c++) {
           segmentStartX += getColumnWidth(c, config, dimensions);
@@ -292,10 +296,6 @@ function drawGridLinesZone(
   }
 }
 
-/**
- * Draw cell text for a specific zone with merged cell support.
- * Uses the same padding and bounds logic as the main drawCellText function.
- */
 function drawCellTextZone(
   state: RenderState,
   range: VisibleRange,
@@ -309,13 +309,11 @@ function drawCellTextZone(
   const totalCols = config.totalCols || 100;
   const paddingX = 4;
   
-  // Calculate zone boundaries for clipping
   const zoneLeft = clipX;
   const zoneTop = clipY;
   const zoneRight = clipX + clipWidth;
   const zoneBottom = clipY + clipHeight;
   
-  // Track which cells we've already drawn (to avoid drawing slave cells)
   const drawnCells = new Set<string>();
   
   let baseY = clipY + range.offsetY;
@@ -327,28 +325,23 @@ function drawCellTextZone(
       const colWidth = getColumnWidth(col, config, dimensions);
       const key = cellKey(row, col);
       
-      // Skip if already drawn (slave cells)
       if (drawnCells.has(key)) {
         baseX += colWidth;
         continue;
       }
       
-      // Check if this cell is a slave (part of another cell's merge)
       const masterKey = getMasterCellKey(row, col, cells as Map<string, { rowSpan?: number; colSpan?: number }>);
       if (masterKey) {
-        // This is a slave cell - skip rendering
         drawnCells.add(key);
         baseX += colWidth;
         continue;
       }
       
-      // Skip if this cell is being edited
       if (editing && editing.row === row && editing.col === col) {
         baseX += colWidth;
         continue;
       }
       
-      // Look up cell data
       const cell = cells.get(key);
       
       if (!cell || cell.display === "") {
@@ -356,11 +349,9 @@ function drawCellTextZone(
         continue;
       }
       
-      // Get merge spans
       const rowSpan = (cell as { rowSpan?: number }).rowSpan ?? 1;
       const colSpan = (cell as { colSpan?: number }).colSpan ?? 1;
       
-      // Calculate actual cell dimensions (may span multiple cells)
       const actualWidth = colSpan > 1 
         ? getMergedCellWidth(col, colSpan, config, dimensions)
         : colWidth;
@@ -368,7 +359,6 @@ function drawCellTextZone(
         ? getMergedCellHeight(row, rowSpan, config, dimensions)
         : rowHeight;
       
-      // Mark all cells in the merge region as drawn
       if (rowSpan > 1 || colSpan > 1) {
         for (let r = row; r < row + rowSpan; r++) {
           for (let c = col; c < col + colSpan; c++) {
@@ -377,19 +367,16 @@ function drawCellTextZone(
         }
       }
       
-      // Calculate visible cell bounds (clipped to zone)
       const cellLeft = Math.max(baseX, zoneLeft);
       const cellTop = Math.max(baseY, zoneTop);
       const cellRight = Math.min(baseX + actualWidth, zoneRight);
       const cellBottom = Math.min(baseY + actualHeight, zoneBottom);
       
-      // Skip if cell is not visible
       if (cellRight <= cellLeft || cellBottom <= cellTop) {
         baseX += colWidth;
         continue;
       }
       
-      // Calculate available width for text
       const availableWidth = cellRight - cellLeft - paddingX * 2;
       
       if (availableWidth <= 0) {
@@ -397,17 +384,14 @@ function drawCellTextZone(
         continue;
       }
       
-      // Get style
       const styleIndex = cell.styleIndex ?? 0;
       const cellStyle = styleCache.get(styleIndex) ?? styleCache.get(0);
       
-      // Set up clipping region for this cell
       ctx.save();
       ctx.beginPath();
       ctx.rect(cellLeft, cellTop, cellRight - cellLeft, cellBottom - cellTop);
       ctx.clip();
       
-      // Draw background if style has non-default background
       if (cellStyle && cellStyle.backgroundColor && 
           cellStyle.backgroundColor !== "#ffffff" && 
           cellStyle.backgroundColor !== "#FFFFFF" &&
@@ -416,7 +400,6 @@ function drawCellTextZone(
         ctx.fillRect(cellLeft, cellTop, cellRight - cellLeft, cellBottom - cellTop);
       }
       
-      // Build font string
       const fontWeight = cellStyle?.bold ? "bold" : "normal";
       const fontStyle = cellStyle?.italic ? "italic" : "normal";
       const fontSize = cellStyle?.fontSize ?? theme.cellFontSize;
@@ -426,26 +409,21 @@ function drawCellTextZone(
       ctx.fillStyle = cellStyle?.textColor ?? theme.cellText;
       ctx.textBaseline = "middle";
       
-      // Calculate text position with proper padding
-      // Center vertically in the full merged cell height
       const textX = cellLeft + paddingX;
       const textY = baseY + actualHeight / 2;
       
-      // Determine text alignment
       let textAlign: "left" | "right" | "center" = "left";
       if (cellStyle?.textAlign === "right") {
         textAlign = "right";
       } else if (cellStyle?.textAlign === "center") {
         textAlign = "center";
       } else if (cellStyle?.textAlign === "general" || !cellStyle?.textAlign) {
-        // Check if numeric for right alignment
         const numericPattern = /^-?[\d,]+\.?\d*%?$|^-?\.\d+%?$/;
         if (numericPattern.test(cell.display.trim())) {
           textAlign = "right";
         }
       }
       
-      // Draw text with alignment
       ctx.textAlign = "left";
       let drawX = textX;
       const textMetrics = ctx.measureText(cell.display);
@@ -459,7 +437,6 @@ function drawCellTextZone(
       
       ctx.fillText(cell.display, drawX, textY, availableWidth);
       
-      // Draw underline if needed
       if (cellStyle?.underline) {
         ctx.beginPath();
         ctx.strokeStyle = cellStyle?.textColor ?? theme.cellText;
@@ -469,7 +446,6 @@ function drawCellTextZone(
         ctx.stroke();
       }
       
-      // Draw strikethrough if needed
       if (cellStyle?.strikethrough) {
         ctx.beginPath();
         ctx.strokeStyle = cellStyle?.textColor ?? theme.cellText;
@@ -487,10 +463,16 @@ function drawCellTextZone(
   }
 }
 
+// ============================================================================
+// Main Render Function
+// ============================================================================
+
 /**
  * Main render function for the grid.
  * Orchestrates all rendering phases in the correct order.
- * Supports freeze panes with 4-zone rendering.
+ * 
+ * @param overlayRegions - Grid regions provided by the Shell (from extensions)
+ * @param overlayRenderers - Overlay renderers provided by the Shell (from extensions)
  */
 export function renderGrid(
   ctx: CanvasRenderingContext2D,
@@ -511,6 +493,9 @@ export function renderGrid(
   clipboardAnimationOffset?: number,
   insertionAnimation?: InsertionAnimation | null,
   freezeConfig?: FreezeConfig,
+  // NEW: Overlays passed as parameters instead of imported from API
+  overlayRegions: GridRegion[] = [],
+  overlayRenderers: OverlayRegistration[] = [],
 ): void {
   const rowHeaderWidth = config.rowHeaderWidth || 50;
   const colHeaderHeight = config.colHeaderHeight || 24;
@@ -522,7 +507,6 @@ export function renderGrid(
   
   const styles = styleCache || new Map();
   
-  // Create base render state
   const state: RenderState = {
     ctx,
     width,
@@ -544,19 +528,15 @@ export function renderGrid(
     freezeConfig: freezeConfig || { freezeRow: null, freezeCol: null },
   };
 
-  // Clear canvas
   ctx.fillStyle = theme.cellBackground;
   ctx.fillRect(0, 0, width, height);
 
-  // Check if we have freeze panes
   const hasFreezeRows = freezeConfig && freezeConfig.freezeRow !== null && freezeConfig.freezeRow > 0;
   const hasFreezeCols = freezeConfig && freezeConfig.freezeCol !== null && freezeConfig.freezeCol > 0;
   
   if (hasFreezeRows || hasFreezeCols) {
-    // Render with freeze panes (4 zones)
     const layout = calculateFreezePaneLayout(freezeConfig!, config, dims);
     
-    // Calculate zone boundaries
     const frozenColsX = rowHeaderWidth;
     const frozenRowsY = colHeaderHeight;
     const scrollableX = rowHeaderWidth + layout.frozenColsWidth;
@@ -564,13 +544,11 @@ export function renderGrid(
     const scrollableWidth = width - scrollableX;
     const scrollableHeight = height - scrollableY;
     
-    // 1. Render bottom-right (main scrollable) zone first
     const scrollableRange = calculateScrollableRange(viewport, freezeConfig!, config, width, height, dims);
     if (scrollableWidth > 0 && scrollableHeight > 0) {
       renderZone(state, scrollableRange, scrollableX, scrollableY, scrollableWidth, scrollableHeight);
     }
     
-    // 2. Render bottom-left (frozen columns) zone
     if (hasFreezeCols) {
       const leftRange = calculateFrozenLeftRange(viewport, freezeConfig!, config, width, height, dims);
       if (leftRange && scrollableHeight > 0) {
@@ -578,7 +556,6 @@ export function renderGrid(
       }
     }
     
-    // 3. Render top-right (frozen rows) zone
     if (hasFreezeRows) {
       const topRange = calculateFrozenTopRange(viewport, freezeConfig!, config, width, height, dims);
       if (topRange && scrollableWidth > 0) {
@@ -586,7 +563,6 @@ export function renderGrid(
       }
     }
     
-    // 4. Render top-left (frozen corner) zone
     if (hasFreezeRows && hasFreezeCols) {
       const topLeftRange = calculateFrozenTopLeftRange(freezeConfig!, config, width, height, dims);
       if (topLeftRange) {
@@ -594,7 +570,6 @@ export function renderGrid(
       }
     }
     
-    // Draw freeze pane separator lines
     ctx.strokeStyle = "#666666";
     ctx.lineWidth = 2;
     
@@ -613,48 +588,38 @@ export function renderGrid(
     }
     
   } else {
-    // Standard rendering without freeze panes
-    // 1. Grid lines (background)
     drawGridLines(state);
-
-    // 2. Cells (content)
     drawCellText(state);
   }
 
-  // 2.5. Render registered overlays (extensions draw here)
-  const overlayRegions = getGridRegions();
-  const overlayRenderers = getOverlayRenderers();
-  for (const renderer of overlayRenderers) {
+  // Render overlays using INJECTED data (not imported from API)
+  const sortedRenderers = [...overlayRenderers].sort(
+    (a, b) => (a.priority ?? 0) - (b.priority ?? 0)
+  );
+  for (const renderer of sortedRenderers) {
     const matchingRegions = overlayRegions.filter(r => r.type === renderer.type);
     for (const region of matchingRegions) {
       renderer.render({ ctx, region, config, viewport, dimensions: dims, canvasWidth: width, canvasHeight: height });
     }
   }
 
-  // 3. Formula references (before selection so selection appears on top)
   if (formulaReferences.length > 0) {
     drawFormulaReferences(state);
   }
 
-  // 4. Fill preview (if dragging fill handle)
   if (fillPreviewRange) {
     drawFillPreview(state);
   }
 
-  // 5. Selection (highlight layer)
   if (selection) {
     drawSelection(state);
   }
 
-  // 6. Clipboard selection (marching ants for copy/cut)
   if (clipboardSelection && clipboardMode && clipboardMode !== "none") {
     drawClipboardSelection(state);
   }
 
-  // 7. Headers (overlay, drawn last so they appear on top)
   drawColumnHeaders(state);
   drawRowHeaders(state);
-
-  // 8. Corner cell (top-left intersection)
   drawCorner(state);
 }

@@ -79,7 +79,7 @@ export function FormulaBar(): React.ReactElement {
 
         <S.ButtonGroup>
           <S.IconButton
-            variant="cancel"
+            $variant="cancel"
             onMouseDown={handleCancelMouseDown}
             onClick={handleCancel}
             disabled={!isEditing}
@@ -89,7 +89,7 @@ export function FormulaBar(): React.ReactElement {
           </S.IconButton>
 
           <S.IconButton
-            variant="enter"
+            $variant="enter"
             onMouseDown={handleEnterMouseDown}
             onClick={handleEnter}
             disabled={!isEditing}
@@ -99,7 +99,7 @@ export function FormulaBar(): React.ReactElement {
           </S.IconButton>
 
           <S.IconButton
-            variant="function"
+            $variant="function"
             onClick={handleInsertFunction}
             title="Insert Function"
           >

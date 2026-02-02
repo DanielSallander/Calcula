@@ -1,12 +1,10 @@
 //! FILENAME: app/src/api/ui.ts
 // PURPOSE: UI registration APIs for extensions.
-// CONTEXT: Extensions use these to register task panes, dialogs, overlays, and MENUS.
-// NOTE: Imports from shell/registries, NOT core/registry (per microkernel architecture).
+// CONTEXT: Extensions use these to register task panes, dialogs, overlays, and menus.
+// FIX: Uses IoC pattern - Shell registers implementations at startup.
+// FIX: Provides facade objects (TaskPaneExtensions, DialogExtensions, OverlayExtensions)
+//      that delegate to registered services for backward compatibility.
 
-import { TaskPaneExtensions } from "../shell/registries/taskPaneExtensions";
-import { DialogExtensions } from "../shell/registries/dialogExtensions";
-import { OverlayExtensions } from "../shell/registries/overlayExtensions";
-import { useTaskPaneStore } from "../shell/TaskPane/useTaskPaneStore";
 import type {
   TaskPaneViewDefinition,
   DialogDefinition,
@@ -14,10 +12,8 @@ import type {
   AnchorRect,
   MenuDefinition,
   MenuItemDefinition,
+  TaskPaneContextKey,
 } from "./uiTypes";
-
-// Re-export the extension registries
-export { TaskPaneExtensions, DialogExtensions, OverlayExtensions };
 
 // Re-export types from the canonical contract layer (api/uiTypes.ts)
 export type {
@@ -35,7 +31,96 @@ export type {
 } from "./uiTypes";
 
 // ============================================================================
-// Menu Registry (Internal State)
+// Service Interfaces (Contracts for Shell to implement)
+// ============================================================================
+
+export interface TaskPaneService {
+  registerView(definition: TaskPaneViewDefinition): void;
+  unregisterView(viewId: string): void;
+  getView(viewId: string): TaskPaneViewDefinition | undefined;
+  getAllViews(): TaskPaneViewDefinition[];
+  getViewsForContext(activeContextKeys: TaskPaneContextKey[]): TaskPaneViewDefinition[];
+  openPane(viewId: string, data?: Record<string, unknown>): void;
+  closePane(viewId: string): void;
+  open(): void;
+  close(): void;
+  isOpen(): boolean;
+  getManuallyClosed(): string[];
+  clearManuallyClosed(viewId: string): void;
+  onRegistryChange(listener: () => void): () => void;
+}
+
+export interface DialogService {
+  registerDialog(definition: DialogDefinition): void;
+  unregisterDialog(dialogId: string): void;
+  openDialog(dialogId: string, data?: Record<string, unknown>): void;
+  closeDialog(dialogId: string): void;
+  getDialog(dialogId: string): DialogDefinition | undefined;
+  getVisibleDialogs(): Array<{ definition: DialogDefinition; data?: Record<string, unknown> }>;
+  onChange(listener: () => void): () => void;
+}
+
+export interface OverlayService {
+  registerOverlay(definition: OverlayDefinition): void;
+  unregisterOverlay(overlayId: string): void;
+  showOverlay(overlayId: string, options: { data?: Record<string, unknown>; anchorRect?: AnchorRect }): void;
+  hideOverlay(overlayId: string): void;
+  hideAllOverlays(): void;
+  getOverlay(overlayId: string): OverlayDefinition | undefined;
+  getVisibleOverlays(): Array<{ definition: OverlayDefinition; state: { isVisible: boolean; data?: Record<string, unknown>; anchorRect?: AnchorRect } }>;
+  getAllOverlays(): OverlayDefinition[];
+  onChange(listener: () => void): () => void;
+}
+
+// ============================================================================
+// Service Registration (IoC pattern)
+// ============================================================================
+
+let taskPaneService: TaskPaneService | undefined;
+let dialogService: DialogService | undefined;
+let overlayService: OverlayService | undefined;
+
+// React hook providers (optional, registered by Shell)
+let useIsTaskPaneOpenHook: (() => boolean) | undefined;
+let useOpenTaskPaneActionHook: (() => () => void) | undefined;
+let useCloseTaskPaneActionHook: (() => () => void) | undefined;
+
+/**
+ * Register the TaskPane service implementation (called by Shell at startup).
+ */
+export function registerTaskPaneService(service: TaskPaneService): void {
+  taskPaneService = service;
+}
+
+/**
+ * Register the Dialog service implementation (called by Shell at startup).
+ */
+export function registerDialogService(service: DialogService): void {
+  dialogService = service;
+}
+
+/**
+ * Register the Overlay service implementation (called by Shell at startup).
+ */
+export function registerOverlayService(service: OverlayService): void {
+  overlayService = service;
+}
+
+/**
+ * Register React hooks for TaskPane (called by Shell at startup).
+ */
+export function registerTaskPaneHooks(hooks: {
+  useIsOpen: () => boolean;
+  useOpenAction: () => () => void;
+  useCloseAction: () => () => void;
+}): void {
+  useIsTaskPaneOpenHook = hooks.useIsOpen;
+  useOpenTaskPaneActionHook = hooks.useOpenAction;
+  useCloseTaskPaneActionHook = hooks.useCloseAction;
+}
+
+// ============================================================================
+// Menu Registry (Internal State - self-contained in API)
 // ============================================================================
 
 class MenuRegistry {
@@ -77,36 +162,147 @@ const menuRegistry = new MenuRegistry();
 // Menu API Exports
 // ============================================================================
 
-/**
- * Register a top-level menu (e.g., "File", "Edit").
- */
 export function registerMenu(definition: MenuDefinition): void {
   menuRegistry.registerMenu(definition);
 }
 
-/**
- * Add an item to an existing menu.
- */
 export function registerMenuItem(menuId: string, item: MenuItemDefinition): void {
   menuRegistry.registerMenuItem(menuId, item);
 }
 
-/**
- * Get all registered menus (sorted by order).
- */
 export function getMenus(): MenuDefinition[] {
   return menuRegistry.getMenus();
 }
 
-/**
- * Subscribe to menu changes (for React components).
- */
 export function subscribeToMenus(callback: () => void): () => void {
   return menuRegistry.subscribe(callback);
 }
 
 // ============================================================================
-// Task Pane API
+// TaskPaneExtensions Facade (for backward compatibility)
+// ============================================================================
+
+export const TaskPaneExtensions = {
+  registerView(definition: TaskPaneViewDefinition): void {
+    if (!taskPaneService) {
+      console.warn("[API] TaskPaneService not registered. Call registerTaskPaneService first.");
+      return;
+    }
+    taskPaneService.registerView(definition);
+  },
+
+  unregisterView(viewId: string): void {
+    taskPaneService?.unregisterView(viewId);
+  },
+
+  getView(viewId: string): TaskPaneViewDefinition | undefined {
+    return taskPaneService?.getView(viewId);
+  },
+
+  getAllViews(): TaskPaneViewDefinition[] {
+    return taskPaneService?.getAllViews() ?? [];
+  },
+
+  getViewsForContext(activeContextKeys: TaskPaneContextKey[]): TaskPaneViewDefinition[] {
+    return taskPaneService?.getViewsForContext(activeContextKeys) ?? [];
+  },
+
+  onRegistryChange(listener: () => void): () => void {
+    return taskPaneService?.onRegistryChange(listener) ?? (() => {});
+  },
+
+  clear(): void {
+    // No-op for API facade - Shell owns the actual registry
+    console.warn("[API] TaskPaneExtensions.clear() is not supported via API facade");
+  },
+};
+
+// ============================================================================
+// DialogExtensions Facade (for backward compatibility)
+// ============================================================================
+
+export const DialogExtensions = {
+  registerDialog(definition: DialogDefinition): void {
+    if (!dialogService) {
+      console.warn("[API] DialogService not registered. Call registerDialogService first.");
+      return;
+    }
+    dialogService.registerDialog(definition);
+  },
+
+  unregisterDialog(dialogId: string): void {
+    dialogService?.unregisterDialog(dialogId);
+  },
+
+  openDialog(dialogId: string, data?: Record<string, unknown>): void {
+    dialogService?.openDialog(dialogId, data);
+  },
+
+  closeDialog(dialogId: string): void {
+    dialogService?.closeDialog(dialogId);
+  },
+
+  getDialog(dialogId: string): DialogDefinition | undefined {
+    return dialogService?.getDialog(dialogId);
+  },
+
+  getVisibleDialogs(): Array<{ definition: DialogDefinition; data?: Record<string, unknown> }> {
+    return dialogService?.getVisibleDialogs() ?? [];
+  },
+
+  onChange(listener: () => void): () => void {
+    return dialogService?.onChange(listener) ?? (() => {});
+  },
+};
+
+// ============================================================================
+// OverlayExtensions Facade (for backward compatibility)
+// ============================================================================
+
+export const OverlayExtensions = {
+  registerOverlay(definition: OverlayDefinition): void {
+    if (!overlayService) {
+      console.warn("[API] OverlayService not registered. Call registerOverlayService first.");
+      return;
+    }
+    overlayService.registerOverlay(definition);
+  },
+
+  unregisterOverlay(overlayId: string): void {
+    overlayService?.unregisterOverlay(overlayId);
+  },
+
+  showOverlay(overlayId: string, options?: { data?: Record<string, unknown>; anchorRect?: AnchorRect }): void {
+    overlayService?.showOverlay(overlayId, options ?? {});
+  },
+
+  hideOverlay(overlayId: string): void {
+    overlayService?.hideOverlay(overlayId);
+  },
+
+  hideAllOverlays(): void {
+    overlayService?.hideAllOverlays();
+  },
+
+  getOverlay(overlayId: string): OverlayDefinition | undefined {
+    return overlayService?.getOverlay(overlayId);
+  },
+
+  getVisibleOverlays(): Array<{ definition: OverlayDefinition; state: { isVisible: boolean; data?: Record<string, unknown>; anchorRect?: AnchorRect } }> {
+    return overlayService?.getVisibleOverlays() ?? [];
+  },
+
+  getAllOverlays(): OverlayDefinition[] {
+    return overlayService?.getAllOverlays() ?? [];
+  },
+
+  onChange(listener: () => void): () => void {
+    return overlayService?.onChange(listener) ?? (() => {});
+  },
+};
+
+// ============================================================================
+// Task Pane Function API (convenience wrappers)
 // ============================================================================
 
 export function registerTaskPane(definition: TaskPaneViewDefinition): void {
@@ -118,19 +314,62 @@ export function unregisterTaskPane(viewId: string): void {
 }
 
 export function openTaskPane(viewId: string, data?: Record<string, unknown>): void {
-  useTaskPaneStore.getState().openPane(viewId, data);
+  taskPaneService?.openPane(viewId, data);
 }
 
 export function closeTaskPane(viewId: string): void {
-  useTaskPaneStore.getState().closePane(viewId);
+  taskPaneService?.closePane(viewId);
 }
 
 export function getTaskPane(viewId: string): TaskPaneViewDefinition | undefined {
   return TaskPaneExtensions.getView(viewId);
 }
 
+export function showTaskPaneContainer(): void {
+  taskPaneService?.open();
+}
+
+export function hideTaskPaneContainer(): void {
+  taskPaneService?.close();
+}
+
+export function isTaskPaneContainerOpen(): boolean {
+  return taskPaneService?.isOpen() ?? false;
+}
+
+export function getTaskPaneManuallyClosed(): string[] {
+  return taskPaneService?.getManuallyClosed() ?? [];
+}
+
+export function clearTaskPaneManuallyClosed(viewId: string): void {
+  taskPaneService?.clearManuallyClosed(viewId);
+}
+
+// React hooks (delegate to registered implementations)
+export function useIsTaskPaneOpen(): boolean {
+  if (!useIsTaskPaneOpenHook) {
+    console.warn("[API] TaskPane hooks not registered.");
+    return false;
+  }
+  return useIsTaskPaneOpenHook();
+}
+
+export function useOpenTaskPaneAction(): () => void {
+  if (!useOpenTaskPaneActionHook) {
+    return () => {};
+  }
+  return useOpenTaskPaneActionHook();
+}
+
+export function useCloseTaskPaneAction(): () => void {
+  if (!useCloseTaskPaneActionHook) {
+    return () => {};
+  }
+  return useCloseTaskPaneActionHook();
+}
+
 // ============================================================================
-// Dialog API
+// Dialog Function API (convenience wrappers)
 // ============================================================================
 
 export function registerDialog(definition: DialogDefinition): void {
@@ -150,7 +389,7 @@ export function hideDialog(dialogId: string): void {
 }
 
 // ============================================================================
-// Overlay API
+// Overlay Function API (convenience wrappers)
 // ============================================================================
 
 export function registerOverlay(definition: OverlayDefinition): void {
@@ -171,64 +410,4 @@ export function hideOverlay(overlayId: string): void {
 
 export function hideAllOverlays(): void {
   OverlayExtensions.hideAllOverlays();
-}
-
-// ============================================================================
-// Task Pane API - Additional accessors for extensions
-// ============================================================================
-
-/**
- * Show the task pane container (not a specific view).
- */
-export function showTaskPaneContainer(): void {
-  useTaskPaneStore.getState().open();
-}
-
-/**
- * Hide the task pane container.
- */
-export function hideTaskPaneContainer(): void {
-  useTaskPaneStore.getState().close();
-}
-
-/**
- * Check if the task pane container is currently open (sync, non-reactive).
- */
-export function isTaskPaneContainerOpen(): boolean {
-  return useTaskPaneStore.getState().isOpen;
-}
-
-/**
- * Get the list of manually closed view IDs.
- */
-export function getTaskPaneManuallyClosed(): string[] {
-  return useTaskPaneStore.getState().manuallyClosed;
-}
-
-/**
- * Clear the manually-closed flag for a specific view.
- */
-export function clearTaskPaneManuallyClosed(viewId: string): void {
-  useTaskPaneStore.getState().clearManuallyClosed(viewId);
-}
-
-/**
- * React hook: is the task pane container open? (reactive)
- */
-export function useIsTaskPaneOpen(): boolean {
-  return useTaskPaneStore((state) => state.isOpen);
-}
-
-/**
- * React hook: get the open action for the task pane container. (reactive)
- */
-export function useOpenTaskPaneAction(): () => void {
-  return useTaskPaneStore((state) => state.open);
-}
-
-/**
- * React hook: get the close action for the task pane container. (reactive)
- */
-export function useCloseTaskPaneAction(): () => void {
-  return useTaskPaneStore((state) => state.close);
 }

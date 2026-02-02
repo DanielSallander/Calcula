@@ -7,11 +7,6 @@ import React, { useState, useEffect } from "react";
 import { DialogExtensions } from "../api/ui";
 import type { DialogDefinition } from "../api/uiTypes";
 
-interface DialogState {
-  isOpen: boolean;
-  data?: Record<string, unknown>;
-}
-
 /**
  * Container that renders all active dialogs from the DialogExtensions registry.
  * Place this component at the root of your layout to enable dynamic dialog rendering.
@@ -26,18 +21,18 @@ export function DialogContainer(): React.ReactElement {
     });
   }, []);
 
-  const activeDialogs = DialogExtensions.getOpenDialogs();
+  const activeDialogs = DialogExtensions.getVisibleDialogs();
 
   return (
     <>
-      {activeDialogs.map(({ definition, state }: { definition: DialogDefinition; state: DialogState }) => {
+      {activeDialogs.map(({ definition, data }: { definition: DialogDefinition; data?: Record<string, unknown> }) => {
         const DialogComponent = definition.component;
         return (
           <DialogComponent
             key={definition.id}
-            isOpen={state.isOpen}
+            isOpen={true}
             onClose={() => DialogExtensions.closeDialog(definition.id)}
-            data={state.data}
+            data={data}
           />
         );
       })}

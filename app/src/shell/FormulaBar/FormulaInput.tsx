@@ -118,7 +118,7 @@ export function FormulaInput(): React.ReactElement {
       onBlur={handleBlur}
       onKeyDown={handleKeyDown}
       onMouseDown={handleMouseDown}
-      isFocused={isFocused}
+      $isFocused={isFocused}
       data-formula-bar="true"
       placeholder=""
       aria-label="Formula Bar"

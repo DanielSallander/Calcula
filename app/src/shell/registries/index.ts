@@ -2,7 +2,9 @@
 // PURPOSE: Barrel exports for the shell registries module
 // CONTEXT: All extension registries now live in Shell per microkernel architecture.
 //          The Core is kept "dumb" regarding extensions; Shell owns extension hosting.
+// NOTE: These are the IMPLEMENTATIONS. Extensions should import from api/ layer instead.
 
+// Extension Registry (Shell implementation)
 export { ExtensionRegistry } from "./ExtensionRegistry";
 export type {
   AddInManifest,
@@ -12,20 +14,10 @@ export type {
   RibbonContext,
 } from "./ExtensionRegistry";
 
-export { registerCoreGridContextMenu } from "./gridExtensions";
-export { sheetExtensions, registerCoreSheetContextMenu } from "./sheetExtensions";
-export type {
-  SheetContext,
-  SheetContextMenuItem,
-} from "./sheetExtensions";
-
-export { TaskPaneExtensions } from "./taskPaneExtensions";
-
-// Grid extensions
+// Grid extensions (Shell implementation)
 export {
   gridExtensions,
-  gridCommands,
-  isClickWithinSelection,
+  registerCoreGridContextMenu,
   GridMenuGroups,
 } from "./gridExtensions";
 export type {
@@ -33,10 +25,23 @@ export type {
   GridContextMenuItem,
 } from "./gridExtensions";
 
-// Dialog extensions
+// Re-export core primitives that gridExtensions uses
+export { gridCommands, isClickWithinSelection } from "../../core/lib/gridCommands";
+
+// Sheet extensions (Shell implementation)
+export { sheetExtensions, registerCoreSheetContextMenu } from "./sheetExtensions";
+export type {
+  SheetContext,
+  SheetContextMenuItem,
+} from "./sheetExtensions";
+
+// TaskPane extensions (Shell implementation)
+export { TaskPaneExtensions } from "./taskPaneExtensions";
+
+// Dialog extensions (Shell implementation)
 export { DialogExtensions } from "./dialogExtensions";
 
-// Overlay extensions
+// Overlay extensions (Shell implementation)
 export { OverlayExtensions } from "./overlayExtensions";
 
 // UI extension types - re-exported from the canonical api/uiTypes.ts contract
