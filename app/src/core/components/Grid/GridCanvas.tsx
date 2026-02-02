@@ -256,9 +256,9 @@ export const GridCanvas = forwardRef<GridCanvasHandle, GridCanvasProps>(
 
       // Calculate the base range from scroll position
       let startRow = Math.max(0, range.startRow - CELL_BUFFER);
-      let endRow = Math.min(config.totalRows - 1, range.endRow + CELL_BUFFER);
+      const endRow = Math.min(config.totalRows - 1, range.endRow + CELL_BUFFER);
       let startCol = Math.max(0, range.startCol - CELL_BUFFER);
-      let endCol = Math.min(config.totalCols - 1, range.endCol + CELL_BUFFER);
+      const endCol = Math.min(config.totalCols - 1, range.endCol + CELL_BUFFER);
 
       // With freeze panes, always include frozen rows/cols in fetch
       if (freezeConfig.freezeRow !== null && freezeConfig.freezeRow > 0) {
