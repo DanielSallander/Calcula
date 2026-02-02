@@ -7,6 +7,8 @@
 // grid state used by the state management system.
 // UPDATED: Added FreezeConfig for freeze panes support
 // UPDATED: Added rowSpan/colSpan to EditingCell for merged cell editing
+// UPDATED: Removed FindState - Find state now lives in the FindReplaceDialog extension
+//          per Microkernel Architecture (Find is a feature, not a kernel primitive)
 
 /**
  * Type of selection: cells, entire column(s), or entire row(s).
@@ -159,11 +161,6 @@ export interface SheetContext {
 
 /**
  * Represents cell data from the backend.
- * Used for rendering cell content in the grid.
- * Phase 6: Added style_index for style lookups.
- */
-/**
- * Represents cell data from the backend.
  * Uses camelCase to match Rust's serde(rename_all = "camelCase").
  */
 export interface CellData {
@@ -176,7 +173,7 @@ export interface CellData {
   /** Original formula if cell contains a formula */
   formula: string | null;
   /** Style index for looking up formatting */
-  styleIndex: number;  // Changed from style_index
+  styleIndex: number;
   /** Number of rows this cell spans (for merged cells) */
   rowSpan?: number;
   /** Number of columns this cell spans (for merged cells) */
@@ -202,15 +199,15 @@ export interface StyleData {
   italic: boolean;
   underline: boolean;
   strikethrough: boolean;
-  fontSize: number;       // Changed from font_size
-  fontFamily: string;     // Changed from font_family
-  textColor: string;      // Changed from text_color
-  backgroundColor: string; // Changed from background_color
-  textAlign: string;      // Changed from text_align
-  verticalAlign: string;  // Changed from vertical_align
-  numberFormat: string;   // Changed from number_format
-  wrapText: boolean;      // Changed from wrap_text
-  textRotation: string;   // Added for text rotation
+  fontSize: number;
+  fontFamily: string;
+  textColor: string;
+  backgroundColor: string;
+  textAlign: string;
+  verticalAlign: string;
+  numberFormat: string;
+  wrapText: boolean;
+  textRotation: string;
 }
 
 /**
@@ -244,7 +241,7 @@ export interface FormattingOptions {
   textAlign?: "left" | "center" | "right" | "general";
   numberFormat?: string;
   wrapText?: boolean;
-  textRotation?: "none" | "rotate90" | "rotate270";  // Changed from string to specific union type
+  textRotation?: "none" | "rotate90" | "rotate270";
 }
 
 /**
@@ -409,7 +406,6 @@ export const DEFAULT_VIRTUAL_BOUNDS_CONFIG: VirtualBoundsConfig = {
   expansionThreshold: 20, // Trigger expansion 20 cells from edge (increased from 5)
 };
 
-
 /**
  * A formula reference for visual highlighting.
  * FIX: Added isFullColumn and isFullRow flags to indicate full column/row
@@ -482,42 +478,23 @@ export interface ClipboardState {
   selection: Selection | null;
 }
 
-/**
- * Find/Replace state for search functionality.
- */
-export interface FindState {
-  /** Whether the find dialog is open */
-  isOpen: boolean;
-  /** Whether to show replace UI */
-  showReplace: boolean;
-  /** Current search query */
-  query: string;
-  /** All matching cell coordinates */
-  matches: [number, number][];
-  /** Current match index (0-based, -1 if none) */
-  currentIndex: number;
-  /** Search options */
-  caseSensitive: boolean;
-  matchEntireCell: boolean;
-  searchFormulas: boolean;
-}
-
-/**
- * Default find state.
- */
-export const DEFAULT_FIND_STATE: FindState = {
-  isOpen: false,
-  showReplace: false,
-  query: "",
-  matches: [],
-  currentIndex: -1,
-  caseSensitive: false,
-  matchEntireCell: false,
-  searchFormulas: false,
-};
+// ============================================================================
+// NOTE: FindState has been removed from Core.
+// Find/Replace is a FEATURE, not a kernel primitive.
+// The Find state now lives in the FindReplaceDialog extension:
+// app/extensions/BuiltIn/FindReplaceDialog/useFindStore.ts
+//
+// The Core only provides search PRIMITIVES via the Tauri API:
+// - findAll(query, options) -> returns matching cell coordinates
+// - replaceAll(query, replacement, options) -> performs replacement
+// - replaceSingle(row, col, query, replacement, options) -> single replace
+//
+// The DIALOG STATE (isOpen, currentIndex, etc.) is managed by the extension.
+// ============================================================================
 
 /**
  * Grid state for the spreadsheet component.
+ * NOTE: Find state has been moved to the FindReplaceDialog extension.
  */
 export interface GridState {
   /** Current selection (null if nothing selected) */
@@ -540,8 +517,6 @@ export interface GridState {
   clipboard: ClipboardState;
   /** Current sheet context */
   sheetContext: SheetContext;
-  /** Find/Replace state */
-  find: FindState;
   /** Freeze panes configuration */
   freezeConfig: FreezeConfig;
 }
@@ -549,6 +524,7 @@ export interface GridState {
 /**
  * Create initial grid state with default values.
  * Sets up an empty selection, no editing, and default viewport/config.
+ * NOTE: Find state has been moved to the FindReplaceDialog extension.
  */
 export function createInitialGridState(): GridState {
   return {
@@ -584,7 +560,6 @@ export function createInitialGridState(): GridState {
       activeSheetIndex: 0,
       activeSheetName: "Sheet1",
     },
-    find: { ...DEFAULT_FIND_STATE },
     freezeConfig: { ...DEFAULT_FREEZE_CONFIG },
   };
 }
@@ -623,13 +598,13 @@ export function isFormula(value: string): boolean {
  * This is true when:
  * - The value starts with "="
  * - AND ends with an operator, open paren, comma, or is just "="
- * 
+ *
  * Examples that return true:
  * - "="
  * - "=SUM("
  * - "=A1+"
  * - "=IF(A1>0,"
- * 
+ *
  * Examples that return false:
  * - "=A1"
  * - "=SUM(A1:B2)"
@@ -641,7 +616,7 @@ export function isFormulaExpectingReference(value: string): boolean {
   }
 
   const trimmed = value.trim();
-  
+
   // Just "=" - definitely expecting a reference
   if (trimmed === "=") {
     return true;
@@ -649,15 +624,23 @@ export function isFormulaExpectingReference(value: string): boolean {
 
   // Get the last character
   const lastChar = trimmed[trimmed.length - 1];
-  
+
   // Check if last char is an operator or delimiter that expects a reference
   const expectingChars = [
-    "+", "-", "*", "/", "^", "&",  // Operators
-    "(", ",",                      // Function delimiters
-    "=", "<", ">",                 // Comparison operators (also handles <=, >=, <>)
-    ":",                           // Range operator (partial range like "A1:")
+    "+",
+    "-",
+    "*",
+    "/",
+    "^",
+    "&", // Operators
+    "(",
+    ",", // Function delimiters
+    "=",
+    "<",
+    ">", // Comparison operators (also handles <=, >=, <>)
+    ":", // Range operator (partial range like "A1:")
   ];
-  
+
   return expectingChars.includes(lastChar);
 }
 
@@ -735,28 +718,30 @@ export function calculateFreezePaneLayout(
   const { freezeRow, freezeCol } = freezeConfig;
   const defaultCellWidth = config.defaultCellWidth || 100;
   const defaultCellHeight = config.defaultCellHeight || 24;
-  
+
   let frozenColsWidth = 0;
   let frozenRowsHeight = 0;
   const frozenColCount = freezeCol ?? 0;
   const frozenRowCount = freezeRow ?? 0;
-  
+
   // Calculate width of frozen columns
   if (freezeCol !== null && freezeCol > 0) {
     for (let col = 0; col < freezeCol; col++) {
       const customWidth = dimensions.columnWidths.get(col);
-      frozenColsWidth += customWidth !== undefined && customWidth > 0 ? customWidth : defaultCellWidth;
+      frozenColsWidth +=
+        customWidth !== undefined && customWidth > 0 ? customWidth : defaultCellWidth;
     }
   }
-  
+
   // Calculate height of frozen rows
   if (freezeRow !== null && freezeRow > 0) {
     for (let row = 0; row < freezeRow; row++) {
       const customHeight = dimensions.rowHeights.get(row);
-      frozenRowsHeight += customHeight !== undefined && customHeight > 0 ? customHeight : defaultCellHeight;
+      frozenRowsHeight +=
+        customHeight !== undefined && customHeight > 0 ? customHeight : defaultCellHeight;
     }
   }
-  
+
   return {
     frozenColsWidth,
     frozenRowsHeight,

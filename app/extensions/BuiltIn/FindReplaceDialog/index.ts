@@ -1,11 +1,13 @@
-//! FILENAME: app/src/extensions/BuiltIn/FindReplaceDialog/index.ts
+//! FILENAME: app/extensions/BuiltIn/FindReplaceDialog/index.ts
 // PURPOSE: Find & Replace extension module.
 // CONTEXT: Registers the Find/Replace dialog and commands.
 // NOTE: Default exports an ExtensionModule object per the contract.
+// FIX: Import DialogExtensions from API, not Shell (Facade Rule compliance).
 
 import type { ExtensionModule, ExtensionContext } from "../../../src/api/contract";
 import { CoreCommands } from "../../../src/api/commands";
-import { DialogExtensions } from "../../../src/shell/registries/dialogExtensions";
+// FIX: Import from API layer, not directly from Shell
+import { DialogExtensions } from "../../../src/api/ui";
 import { FindReplaceDialog } from "./FindReplaceDialog";
 
 // ============================================================================

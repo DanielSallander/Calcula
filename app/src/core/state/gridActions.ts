@@ -2,9 +2,21 @@
 // PURPOSE: Action type definitions and action creators for grid state management.
 // CONTEXT: This module defines all possible actions that can modify the grid state.
 // Actions are dispatched to the gridReducer to update selection, viewport, editing state, etc.
-// UPDATED: Added SET_FREEZE_CONFIG action for freeze panes support
+// UPDATED: Removed Find actions - Find state now lives in the FindReplaceDialog extension.
+// UPDATED: Added SET_FREEZE_CONFIG action for freeze panes support.
 
-import type { Viewport, EditingCell, GridConfig, ViewportDimensions, VirtualBounds, FormulaReference, SelectionType, Selection, ClipboardMode, FreezeConfig } from "../types";
+import type {
+  Viewport,
+  EditingCell,
+  GridConfig,
+  ViewportDimensions,
+  VirtualBounds,
+  FormulaReference,
+  SelectionType,
+  Selection,
+  ClipboardMode,
+  FreezeConfig,
+} from "../types";
 
 // Action type constants
 export const GRID_ACTIONS = {
@@ -35,12 +47,6 @@ export const GRID_ACTIONS = {
   CLEAR_CLIPBOARD: "CLEAR_CLIPBOARD",
   SET_SHEET_CONTEXT: "SET_SHEET_CONTEXT",
   SET_ACTIVE_SHEET: "SET_ACTIVE_SHEET",
-  FIND_SET_RESULTS: "FIND_SET_RESULTS",
-  FIND_SET_CURRENT_INDEX: "FIND_SET_CURRENT_INDEX",
-  FIND_CLEAR: "FIND_CLEAR",
-  FIND_OPEN: "FIND_OPEN",
-  FIND_CLOSE: "FIND_CLOSE",
-  FIND_SET_OPTIONS: "FIND_SET_OPTIONS",
   SET_FREEZE_CONFIG: "SET_FREEZE_CONFIG",
 } as const;
 
@@ -191,39 +197,6 @@ export interface SetActiveSheetAction {
   payload: { index: number; name: string };
 }
 
-// Find/Replace action interfaces
-export interface FindSetResultsAction {
-  type: typeof GRID_ACTIONS.FIND_SET_RESULTS;
-  payload: { matches: [number, number][]; query: string };
-}
-
-export interface FindSetCurrentIndexAction {
-  type: typeof GRID_ACTIONS.FIND_SET_CURRENT_INDEX;
-  payload: { index: number };
-}
-
-export interface FindClearAction {
-  type: typeof GRID_ACTIONS.FIND_CLEAR;
-}
-
-export interface FindOpenAction {
-  type: typeof GRID_ACTIONS.FIND_OPEN;
-  payload: { showReplace: boolean };
-}
-
-export interface FindCloseAction {
-  type: typeof GRID_ACTIONS.FIND_CLOSE;
-}
-
-export interface FindSetOptionsAction {
-  type: typeof GRID_ACTIONS.FIND_SET_OPTIONS;
-  payload: {
-    caseSensitive?: boolean;
-    matchEntireCell?: boolean;
-    searchFormulas?: boolean;
-  };
-}
-
 // Freeze panes action interface
 export interface SetFreezeConfigAction {
   type: typeof GRID_ACTIONS.SET_FREEZE_CONFIG;
@@ -259,12 +232,6 @@ export type GridAction =
   | ClearClipboardAction
   | SetSheetContextAction
   | SetActiveSheetAction
-  | FindSetResultsAction
-  | FindSetCurrentIndexAction
-  | FindClearAction
-  | FindOpenAction
-  | FindCloseAction
-  | FindSetOptionsAction
   | SetFreezeConfigAction;
 
 // Action creators
@@ -392,7 +359,11 @@ export function scrollBy(deltaX: number, deltaY: number): ScrollByAction {
  * @param col - Target column index
  * @param center - If true, center the cell in the viewport
  */
-export function scrollToCell(row: number, col: number, center: boolean = false): ScrollToCellAction {
+export function scrollToCell(
+  row: number,
+  col: number,
+  center: boolean = false
+): ScrollToCellAction {
   return {
     type: GRID_ACTIONS.SCROLL_TO_CELL,
     payload: { row, col, center },
@@ -447,7 +418,10 @@ export function setViewportSize(rowCount: number, colCount: number): SetViewport
  * Set the viewport dimensions in pixels.
  * Used for scroll calculations that need pixel-level precision.
  */
-export function setViewportDimensions(width: number, height: number): SetViewportDimensionsAction {
+export function setViewportDimensions(
+  width: number,
+  height: number
+): SetViewportDimensionsAction {
   return {
     type: GRID_ACTIONS.SET_VIEWPORT_DIMENSIONS,
     payload: { width, height },
@@ -458,7 +432,10 @@ export function setViewportDimensions(width: number, height: number): SetViewpor
  * Expand virtual bounds to include the target cell.
  * Used when user navigates or scrolls toward the edge of current bounds.
  */
-export function expandVirtualBounds(targetRow: number, targetCol: number): ExpandVirtualBoundsAction {
+export function expandVirtualBounds(
+  targetRow: number,
+  targetCol: number
+): ExpandVirtualBoundsAction {
   return {
     type: GRID_ACTIONS.EXPAND_VIRTUAL_BOUNDS,
     payload: { targetRow, targetCol },
@@ -490,7 +467,9 @@ export function resetVirtualBounds(): ResetVirtualBoundsAction {
  * Set formula references for visual highlighting during formula entry.
  * Used when the user clicks cells while editing a formula.
  */
-export function setFormulaReferences(references: FormulaReference[]): SetFormulaReferencesAction {
+export function setFormulaReferences(
+  references: FormulaReference[]
+): SetFormulaReferencesAction {
   return {
     type: GRID_ACTIONS.SET_FORMULA_REFERENCES,
     payload: references,
@@ -563,76 +542,14 @@ export function clearClipboard(): ClearClipboardAction {
 }
 
 /**
- * Set find results from search.
- */
-export function setFindResults(
-  matches: [number, number][],
-  query: string
-): FindSetResultsAction {
-  return {
-    type: GRID_ACTIONS.FIND_SET_RESULTS,
-    payload: { matches, query },
-  };
-}
-
-/**
- * Set current match index for navigation.
- */
-export function setFindCurrentIndex(index: number): FindSetCurrentIndexAction {
-  return {
-    type: GRID_ACTIONS.FIND_SET_CURRENT_INDEX,
-    payload: { index },
-  };
-}
-
-/**
- * Clear find state.
- */
-export function clearFind(): FindClearAction {
-  return {
-    type: GRID_ACTIONS.FIND_CLEAR,
-  };
-}
-
-/**
- * Open the find dialog.
- */
-export function openFind(showReplace: boolean = false): FindOpenAction {
-  return {
-    type: GRID_ACTIONS.FIND_OPEN,
-    payload: { showReplace },
-  };
-}
-
-/**
- * Close the find dialog.
- */
-export function closeFind(): FindCloseAction {
-  return {
-    type: GRID_ACTIONS.FIND_CLOSE,
-  };
-}
-
-/**
- * Set find options.
- */
-export function setFindOptions(options: {
-  caseSensitive?: boolean;
-  matchEntireCell?: boolean;
-  searchFormulas?: boolean;
-}): FindSetOptionsAction {
-  return {
-    type: GRID_ACTIONS.FIND_SET_OPTIONS,
-    payload: options,
-  };
-}
-
-/**
  * Set freeze panes configuration.
  * @param freezeRow - First scrollable row (null to unfreeze rows)
  * @param freezeCol - First scrollable column (null to unfreeze columns)
  */
-export function setFreezeConfig(freezeRow: number | null, freezeCol: number | null): SetFreezeConfigAction {
+export function setFreezeConfig(
+  freezeRow: number | null,
+  freezeCol: number | null
+): SetFreezeConfigAction {
   return {
     type: GRID_ACTIONS.SET_FREEZE_CONFIG,
     payload: { freezeRow, freezeCol },

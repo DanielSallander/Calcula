@@ -1,167 +1,192 @@
-//! FILENAME: app/src/core/components/FindReplaceDialog/FindReplaceDialog.tsx
+//! FILENAME: app/extensions/BuiltIn/FindReplaceDialog/FindReplaceDialog.tsx
 // PURPOSE: Find and Replace dialog component
 // CONTEXT: Provides UI for searching and replacing cell content
+// UPDATED: Now uses extension-local useFindStore instead of Core's GridState.
+//          This follows Microkernel Architecture - Find is a feature, not a kernel primitive.
+//          Core only provides primitives (setSelection, scrollToCell).
+//          Dialog state (isOpen, currentIndex, matches) lives in the extension.
 
-import React, { useState, useCallback, useEffect, useRef } from 'react';
+import React, { useState, useCallback, useEffect, useRef } from "react";
 import {
-  useGridContext,
-  setFindResults,
-  setFindCurrentIndex,
-  closeFind,
-  setFindOptions,
+  // Core primitives only - no Find actions from Core
+  useGridDispatch,
   setSelection,
   scrollToCell,
+  // Backend API for search operations
   findAll,
   replaceAll,
   replaceSingle,
+  // Events and utilities
   cellEvents,
   columnToLetter,
-} from '../../../src/api';
-import * as S from './FindReplaceDialog.styles';
+} from "../../../src/api";
+// Extension-local state management
+import { useFindStore } from "./useFindStore";
+import * as S from "./FindReplaceDialog.styles";
 
 export function FindReplaceDialog(): React.ReactElement | null {
-  const { state, dispatch } = useGridContext();
-  const { find } = state;
-  
-  const [searchValue, setSearchValue] = useState('');
-  const [replaceValue, setReplaceValue] = useState('');
+  // Core dispatch for grid primitives (selection, scroll)
+  const dispatch = useGridDispatch();
+
+  // Extension-local Find state from Zustand store
+  const {
+    isOpen,
+    showReplace,
+    matches,
+    currentIndex,
+    query,
+    options,
+    setMatches,
+    setCurrentIndex,
+    setOptions,
+    close,
+    clearResults,
+  } = useFindStore();
+
+  const [searchValue, setSearchValue] = useState("");
+  const [replaceValue, setReplaceValue] = useState("");
   const [isSearching, setIsSearching] = useState(false);
-  
+
   const searchInputRef = useRef<HTMLInputElement>(null);
   const dialogRef = useRef<HTMLDivElement>(null);
-  
+
   // Track the current search value in a ref for use in cell event listener
   const searchValueRef = useRef(searchValue);
   useEffect(() => {
     searchValueRef.current = searchValue;
   }, [searchValue]);
-  
+
   // Focus search input when dialog opens
   useEffect(() => {
-    if (find.isOpen && searchInputRef.current) {
+    if (isOpen && searchInputRef.current) {
       searchInputRef.current.focus();
       searchInputRef.current.select();
     }
-  }, [find.isOpen]);
-  
+  }, [isOpen]);
+
   // Perform search
-  const performSearch = useCallback(async (query: string, preserveIndex = false) => {
-    if (!query.trim()) {
-      dispatch(setFindResults([], ''));
-      return;
-    }
-    
-    setIsSearching(true);
-    try {
-      const result = await findAll(query, {
-        caseSensitive: find.caseSensitive,
-        matchEntireCell: find.matchEntireCell,
-        searchFormulas: find.searchFormulas,
-      });
-      
-      dispatch(setFindResults(result.matches, query));
-      
-      // Navigate to first match if any (unless preserving index for live updates)
-      if (result.matches.length > 0 && !preserveIndex) {
-        const [row, col] = result.matches[0];
-        dispatch(setSelection(row, col, row, col, 'cells'));
-        dispatch(scrollToCell(row, col, false));
+  const performSearch = useCallback(
+    async (searchQuery: string, preserveIndex = false) => {
+      if (!searchQuery.trim()) {
+        clearResults();
+        return;
       }
-    } catch (error) {
-      console.error('[FindReplaceDialog] Search failed:', error);
-    } finally {
-      setIsSearching(false);
-    }
-  }, [dispatch, find.caseSensitive, find.matchEntireCell, find.searchFormulas]);
-  
+
+      setIsSearching(true);
+      try {
+        const result = await findAll(searchQuery, {
+          caseSensitive: options.caseSensitive,
+          matchEntireCell: options.matchEntireCell,
+          searchFormulas: options.searchFormulas,
+        });
+
+        // Update extension-local state
+        setMatches(result.matches, searchQuery);
+
+        // Navigate to first match if any (unless preserving index for live updates)
+        if (result.matches.length > 0 && !preserveIndex) {
+          const [row, col] = result.matches[0];
+          // Use Core primitives for navigation
+          dispatch(setSelection(row, col, row, col, "cells"));
+          dispatch(scrollToCell(row, col, false));
+        }
+      } catch (error) {
+        console.error("[FindReplaceDialog] Search failed:", error);
+      } finally {
+        setIsSearching(false);
+      }
+    },
+    [dispatch, options.caseSensitive, options.matchEntireCell, options.searchFormulas, setMatches, clearResults]
+  );
+
   // Handle search input change with debounce
   useEffect(() => {
     const timer = setTimeout(() => {
-      if (searchValue !== find.query) {
+      if (searchValue !== query) {
         performSearch(searchValue);
       }
     }, 300);
-    
+
     return () => clearTimeout(timer);
-  }, [searchValue, performSearch, find.query]);
-  
+  }, [searchValue, performSearch, query]);
+
   // Subscribe to cell change events for live search updates
   useEffect(() => {
     // Only subscribe when dialog is open and there's a search query
-    if (!find.isOpen) {
+    if (!isOpen) {
       return;
     }
-    
+
     let debounceTimer: ReturnType<typeof setTimeout> | null = null;
-    
+
     const handleCellChange = () => {
       const currentQuery = searchValueRef.current;
       if (!currentQuery.trim()) {
         return;
       }
-      
+
       // Debounce to avoid excessive searches during rapid edits
       if (debounceTimer) {
         clearTimeout(debounceTimer);
       }
-      
+
       debounceTimer = setTimeout(() => {
         // Re-run search with preserveIndex=true to avoid jumping to first match
         performSearch(currentQuery, true);
       }, 500);
     };
-    
+
     const unsubscribe = cellEvents.subscribe(handleCellChange);
-    
+
     return () => {
       unsubscribe();
       if (debounceTimer) {
         clearTimeout(debounceTimer);
       }
     };
-  }, [find.isOpen, performSearch]);
-  
+  }, [isOpen, performSearch]);
+
   // Navigate to next match
   const handleFindNext = useCallback(() => {
-    if (find.matches.length === 0) return;
-    
-    const nextIndex = (find.currentIndex + 1) % find.matches.length;
-    dispatch(setFindCurrentIndex(nextIndex));
-    
-    const [row, col] = find.matches[nextIndex];
-    dispatch(setSelection(row, col, row, col, 'cells'));
+    if (matches.length === 0) return;
+
+    const nextIndex = (currentIndex + 1) % matches.length;
+    setCurrentIndex(nextIndex);
+
+    const [row, col] = matches[nextIndex];
+    // Use Core primitives for navigation
+    dispatch(setSelection(row, col, row, col, "cells"));
     dispatch(scrollToCell(row, col, false));
-  }, [dispatch, find.matches, find.currentIndex]);
-  
+  }, [dispatch, matches, currentIndex, setCurrentIndex]);
+
   // Navigate to previous match
   const handleFindPrevious = useCallback(() => {
-    if (find.matches.length === 0) return;
-    
-    const prevIndex = find.currentIndex <= 0 
-      ? find.matches.length - 1 
-      : find.currentIndex - 1;
-    dispatch(setFindCurrentIndex(prevIndex));
-    
-    const [row, col] = find.matches[prevIndex];
-    dispatch(setSelection(row, col, row, col, 'cells'));
+    if (matches.length === 0) return;
+
+    const prevIndex = currentIndex <= 0 ? matches.length - 1 : currentIndex - 1;
+    setCurrentIndex(prevIndex);
+
+    const [row, col] = matches[prevIndex];
+    // Use Core primitives for navigation
+    dispatch(setSelection(row, col, row, col, "cells"));
     dispatch(scrollToCell(row, col, false));
-  }, [dispatch, find.matches, find.currentIndex]);
-  
+  }, [dispatch, matches, currentIndex, setCurrentIndex]);
+
   // Replace current match
   const handleReplace = useCallback(async () => {
-    if (find.currentIndex < 0 || find.currentIndex >= find.matches.length) return;
-    
-    const [row, col] = find.matches[find.currentIndex];
-    
+    if (currentIndex < 0 || currentIndex >= matches.length) return;
+
+    const [row, col] = matches[currentIndex];
+
     try {
       const result = await replaceSingle(
-        row, 
-        col, 
-        searchValue, 
-        replaceValue, 
-        find.caseSensitive
+        row,
+        col,
+        searchValue,
+        replaceValue,
+        options.caseSensitive
       );
-      
+
       if (result) {
         // Emit cell change event for refresh
         cellEvents.emit({
@@ -171,27 +196,27 @@ export function FindReplaceDialog(): React.ReactElement | null {
           newValue: result.display,
           formula: result.formula,
         });
-        
+
         // Re-search to update matches
         await performSearch(searchValue);
       }
     } catch (error) {
-      console.error('[FindReplaceDialog] Replace failed:', error);
+      console.error("[FindReplaceDialog] Replace failed:", error);
     }
-  }, [find.currentIndex, find.matches, searchValue, replaceValue, find.caseSensitive, performSearch]);
-  
+  }, [currentIndex, matches, searchValue, replaceValue, options.caseSensitive, performSearch]);
+
   // Replace all matches
   const handleReplaceAll = useCallback(async () => {
     if (!searchValue.trim()) return;
-    
+
     try {
       const result = await replaceAll(searchValue, replaceValue, {
-        caseSensitive: find.caseSensitive,
-        matchEntireCell: find.matchEntireCell,
+        caseSensitive: options.caseSensitive,
+        matchEntireCell: options.matchEntireCell,
       });
-      
+
       console.log(`[FindReplaceDialog] Replaced ${result.replacementCount} occurrences`);
-      
+
       // Emit refresh events
       for (const cell of result.updatedCells) {
         cellEvents.emit({
@@ -202,92 +227,86 @@ export function FindReplaceDialog(): React.ReactElement | null {
           formula: cell.formula,
         });
       }
-      
+
       // Clear results since all replaced
-      dispatch(setFindResults([], searchValue));
+      setMatches([], searchValue);
     } catch (error) {
-      console.error('[FindReplaceDialog] Replace all failed:', error);
+      console.error("[FindReplaceDialog] Replace all failed:", error);
     }
-  }, [searchValue, replaceValue, find.caseSensitive, find.matchEntireCell, dispatch]);
-  
+  }, [searchValue, replaceValue, options.caseSensitive, options.matchEntireCell, setMatches]);
+
   // Handle close
   const handleClose = useCallback(() => {
-    dispatch(closeFind());
-    setSearchValue('');
-    setReplaceValue('');
-  }, [dispatch]);
-  
+    close();
+    setSearchValue("");
+    setReplaceValue("");
+  }, [close]);
+
   // Handle key down - stop propagation to prevent grid keyboard handler from intercepting
-  const handleKeyDown = useCallback((e: React.KeyboardEvent) => {
-    // Stop propagation for ALL keys to prevent grid keyboard handler from intercepting
-    // This allows typing in the input fields without triggering grid navigation
-    e.stopPropagation();
-    
-    if (e.key === 'Escape') {
-      handleClose();
-    } else if (e.key === 'Enter') {
-      e.preventDefault();
-      if (e.shiftKey) {
-        handleFindPrevious();
-      } else {
-        handleFindNext();
+  const handleKeyDown = useCallback(
+    (e: React.KeyboardEvent) => {
+      // Stop propagation for ALL keys to prevent grid keyboard handler from intercepting
+      // This allows typing in the input fields without triggering grid navigation
+      e.stopPropagation();
+
+      if (e.key === "Escape") {
+        handleClose();
+      } else if (e.key === "Enter") {
+        e.preventDefault();
+        if (e.shiftKey) {
+          handleFindPrevious();
+        } else {
+          handleFindNext();
+        }
+      } else if (e.key === "F3") {
+        e.preventDefault();
+        if (e.shiftKey) {
+          handleFindPrevious();
+        } else {
+          handleFindNext();
+        }
       }
-    } else if (e.key === 'F3') {
-      e.preventDefault();
-      if (e.shiftKey) {
-        handleFindPrevious();
-      } else {
-        handleFindNext();
-      }
-    }
-  }, [handleClose, handleFindNext, handleFindPrevious]);
-  
+    },
+    [handleClose, handleFindNext, handleFindPrevious]
+  );
+
   // Toggle options
   const toggleCaseSensitive = useCallback(() => {
-    dispatch(setFindOptions({ caseSensitive: !find.caseSensitive }));
+    setOptions({ caseSensitive: !options.caseSensitive });
     if (searchValue) {
       performSearch(searchValue);
     }
-  }, [dispatch, find.caseSensitive, searchValue, performSearch]);
-  
+  }, [options.caseSensitive, searchValue, performSearch, setOptions]);
+
   const toggleMatchEntireCell = useCallback(() => {
-    dispatch(setFindOptions({ matchEntireCell: !find.matchEntireCell }));
+    setOptions({ matchEntireCell: !options.matchEntireCell });
     if (searchValue) {
       performSearch(searchValue);
     }
-  }, [dispatch, find.matchEntireCell, searchValue, performSearch]);
-  
-  if (!find.isOpen) {
+  }, [options.matchEntireCell, searchValue, performSearch, setOptions]);
+
+  if (!isOpen) {
     return null;
   }
-  
-  const currentMatch = find.currentIndex >= 0 && find.matches.length > 0
-    ? find.matches[find.currentIndex]
-    : null;
-  
+
+  const currentMatch =
+    currentIndex >= 0 && matches.length > 0 ? matches[currentIndex] : null;
+
   const currentMatchLabel = currentMatch
     ? `${columnToLetter(currentMatch[1])}${currentMatch[0] + 1}`
-    : '';
-  
+    : "";
+
   return (
-    <S.Overlay
-      ref={dialogRef}
-      onKeyDown={handleKeyDown}
-    >
+    <S.Overlay ref={dialogRef} onKeyDown={handleKeyDown}>
       <S.DialogContainer>
         {/* Header */}
         <S.Header>
-          <S.Title>
-            {find.showReplace ? 'Find and Replace' : 'Find'}
-          </S.Title>
-          <S.CloseButton 
-            onClick={handleClose}
-            title="Close (Esc)"
-          >
+          <S.Title>{showReplace ? "Find and Replace" : "Find"}</S.Title>
+          <S.CloseButton onClick={handleClose} title="Close (Esc)">
             X
           </S.CloseButton>
         </S.Header>
-        
+
         {/* Search row */}
         <S.Row>
           <S.Label>Find:</S.Label>
@@ -298,24 +317,24 @@ export function FindReplaceDialog(): React.ReactElement | null {
             onChange={(e) => setSearchValue(e.target.value)}
             placeholder="Search..."
           />
-          <S.ActionButton 
+          <S.ActionButton
             onClick={handleFindPrevious}
-            disabled={find.matches.length === 0}
+            disabled={matches.length === 0}
             title="Find Previous (Shift+Enter)"
           >
-            {'<'}
+            {"<"}
           </S.ActionButton>
-          <S.ActionButton 
+          <S.ActionButton
             onClick={handleFindNext}
-            disabled={find.matches.length === 0}
+            disabled={matches.length === 0}
             title="Find Next (Enter)"
           >
-            {'>'}
+            {">"}
           </S.ActionButton>
         </S.Row>
-        
+
         {/* Replace row (if enabled) */}
-        {find.showReplace && (
+        {showReplace && (
           <S.Row>
             <S.Label>Replace:</S.Label>
             <S.Input
@@ -324,29 +343,29 @@ export function FindReplaceDialog(): React.ReactElement | null {
               onChange={(e) => setReplaceValue(e.target.value)}
               placeholder="Replace with..."
             />
-            <S.ActionButton 
+            <S.ActionButton
               onClick={handleReplace}
-              disabled={find.matches.length === 0}
+              disabled={matches.length === 0}
               title="Replace current match"
             >
               Replace
             </S.ActionButton>
-            <S.ActionButton 
+            <S.ActionButton
               onClick={handleReplaceAll}
-              disabled={find.matches.length === 0}
+              disabled={matches.length === 0}
               title="Replace all matches"
             >
               All
             </S.ActionButton>
           </S.Row>
         )}
-        
+
         {/* Options row */}
         <S.OptionsRow>
           <S.CheckboxLabel>
             <input
               type="checkbox"
-              checked={find.caseSensitive}
+              checked={options.caseSensitive}
               onChange={toggleCaseSensitive}
             />
             Match case
@@ -354,20 +373,20 @@ export function FindReplaceDialog(): React.ReactElement | null {
           <S.CheckboxLabel>
             <input
               type="checkbox"
-              checked={find.matchEntireCell}
+              checked={options.matchEntireCell}
               onChange={toggleMatchEntireCell}
             />
             Match entire cell
           </S.CheckboxLabel>
         </S.OptionsRow>
-        
+
         {/* Status row */}
         <S.StatusRow>
           {isSearching ? (
             <span>Searching...</span>
-          ) : find.matches.length > 0 ? (
+          ) : matches.length > 0 ? (
             <span>
-              {find.currentIndex + 1} of {find.matches.length} matches
+              {currentIndex + 1} of {matches.length} matches
               {currentMatchLabel && ` (${currentMatchLabel})`}
             </span>
           ) : searchValue ? (

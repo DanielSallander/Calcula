@@ -1,11 +1,12 @@
 //! FILENAME: app/src/core/components/Spreadsheet/Spreadsheet.tsx
 // PURPOSE: Main spreadsheet component combining grid, editor, and scrollbars
 // CONTEXT: Core component that orchestrates the spreadsheet experience
-// REFACTOR: Context menu rendering moved to Shell via event emission
+// REFACTOR: Removed legacy Find/Replace event listeners (logic moved to Extensions)
 
 import React, { useCallback, useEffect, useRef } from "react";
 import { useGridState, useGridContext } from "../../state";
-import { setViewportDimensions, openFind } from "../../state/gridActions";
+// FIX: Removed openFind import to resolve SyntaxError
+import { setViewportDimensions } from "../../state/gridActions";
 import { GridCanvas } from "../Grid";
 import { InlineEditor } from "../InlineEditor";
 import { Scrollbar, ScrollbarCorner } from "../Scrollbar/Scrollbar";
@@ -96,25 +97,17 @@ function SpreadsheetContent({
     const handleMenuPaste = () => {
       handlePaste();
     };
-    const handleMenuFind = () => {
-      dispatch(openFind(false));
-    };
-    const handleMenuReplace = () => {
-      dispatch(openFind(true));
-    };
+    // FIX: Removed legacy Find/Replace handlers. 
+    // These events are now handled by the FindReplaceDialog extension.
 
     window.addEventListener(AppEvents.CUT, handleMenuCut);
     window.addEventListener(AppEvents.COPY, handleMenuCopy);
     window.addEventListener(AppEvents.PASTE, handleMenuPaste);
-    window.addEventListener(AppEvents.FIND, handleMenuFind);
-    window.addEventListener(AppEvents.REPLACE, handleMenuReplace);
 
     return () => {
       window.removeEventListener(AppEvents.CUT, handleMenuCut);
       window.removeEventListener(AppEvents.COPY, handleMenuCopy);
       window.removeEventListener(AppEvents.PASTE, handleMenuPaste);
-      window.removeEventListener(AppEvents.FIND, handleMenuFind);
-      window.removeEventListener(AppEvents.REPLACE, handleMenuReplace);
     };
   }, [handleCut, handleCopy, handlePaste, dispatch]);
 

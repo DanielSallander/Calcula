@@ -1,11 +1,12 @@
 //! FILENAME: app/src/api/grid.ts
 // PURPOSE: Grid-related API exports for extensions.
 // CONTEXT: Re-exports grid state hooks and actions from core.
+// UPDATED: Removed Find actions - Find state now lives in the FindReplaceDialog extension.
 
 // Re-export the context hook
 export { useGridContext, useGridState, useGridDispatch } from "../core/state/GridContext";
 
-// Re-export grid actions
+// Re-export grid actions (Find actions removed - they live in FindReplaceDialog extension)
 export {
   setSelection,
   clearSelection,
@@ -34,12 +35,6 @@ export {
   clearClipboard,
   setSheetContext,
   setActiveSheet,
-  setFindResults,
-  setFindCurrentIndex,
-  clearFind,
-  openFind,
-  closeFind,
-  setFindOptions,
   setFreezeConfig,
 } from "../core/state/gridActions";
 
@@ -61,7 +56,7 @@ import { emitAppEvent, AppEvents } from "./events";
  */
 export async function freezePanes(
   freezeRow: number | null,
-  freezeCol: number | null,
+  freezeCol: number | null
 ): Promise<void> {
   await backendSetFreezePanes(freezeRow, freezeCol);
   emitAppEvent(AppEvents.FREEZE_CHANGED, { freezeRow, freezeCol });

@@ -1,6 +1,7 @@
 //! FILENAME: app/src/api/index.ts
 // PURPOSE: Public API barrel export for the application.
 // CONTEXT: Extensions and Shell components import from here.
+// UPDATED: Removed Find actions - Find state now lives in the FindReplaceDialog extension.
 
 // ============================================================================
 // Commands
@@ -24,7 +25,7 @@ export {
   useGridContext,
   useGridState,
   useGridDispatch,
-  // Actions
+  // Actions (Find actions removed - they live in FindReplaceDialog extension)
   setSelection,
   clearSelection,
   extendSelection,
@@ -52,19 +53,13 @@ export {
   clearClipboard,
   setSheetContext,
   setActiveSheet,
-  setFindResults,
-  setFindCurrentIndex,
-  clearFind,
-  openFind,
-  closeFind,
-  setFindOptions,
   setFreezeConfig,
 } from "./grid";
 
 export type { GridAction, SetSelectionPayload } from "./grid";
 
 // ============================================================================
-// Backend API (Find & Replace, Sheets, Cells, etc.)
+// Backend API (Sheets, Cells, etc.)
 // ============================================================================
 
 export {
