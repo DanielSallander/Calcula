@@ -1,119 +1,129 @@
 //! FILENAME: app/src/api/index.ts
-// PURPOSE: Public API facade for extensions.
-// CONTEXT: Extensions should ONLY import from this module (or its submodules).
-// This ensures a stable API surface and enforces architectural boundaries.
-//
-// ARCHITECTURE RULES:
-// 1. Core must NEVER import from api, shell, or extensions
-// 2. Extensions must ONLY import from api
-// 3. Shell can import from core and api
+// PURPOSE: Public API barrel export for the application.
+// CONTEXT: Extensions and Shell components import from here.
 
 // ============================================================================
-// Events - Application-wide event system
+// Commands
 // ============================================================================
+
+export { CoreCommands, CommandRegistry } from "./commands";
+export type { ICommandRegistry } from "./commands";
+
+// ============================================================================
+// Contract (Extension types)
+// ============================================================================
+
+export type { ExtensionContext, ExtensionManifest, ExtensionModule } from "./contract";
+
+// ============================================================================
+// Grid API
+// ============================================================================
+
+export {
+  // Context hooks
+  useGridContext,
+  useGridState,
+  useGridDispatch,
+  // Actions
+  setSelection,
+  clearSelection,
+  extendSelection,
+  moveSelection,
+  setViewport,
+  updateScroll,
+  scrollBy,
+  scrollToCell,
+  scrollToPosition,
+  startEditing,
+  updateEditing,
+  stopEditing,
+  updateConfig,
+  setViewportSize,
+  setViewportDimensions,
+  expandVirtualBounds,
+  setVirtualBounds,
+  resetVirtualBounds,
+  setFormulaReferences,
+  clearFormulaReferences,
+  setColumnWidth,
+  setRowHeight,
+  setAllDimensions,
+  setClipboard,
+  clearClipboard,
+  setSheetContext,
+  setActiveSheet,
+  setFindResults,
+  setFindCurrentIndex,
+  clearFind,
+  openFind,
+  closeFind,
+  setFindOptions,
+  setFreezeConfig,
+} from "./grid";
+
+export type { GridAction, SetSelectionPayload } from "./grid";
+
+// ============================================================================
+// Backend API (Find & Replace, Sheets, Cells, etc.)
+// ============================================================================
+
+export {
+  findAll,
+  replaceAll,
+  replaceSingle,
+  getCell,
+  getMergeInfo,
+  getSheets,
+  addSheet,
+  deleteSheet,
+  renameSheet,
+  indexToCol,
+  colToIndex,
+  setActiveSheet as setActiveSheetApi,
+} from "./lib";
+
+export type {
+  LayoutConfig,
+  AggregationType,
+  SheetInfo,
+  SheetsResult,
+} from "./lib";
+
+// ============================================================================
+// Cell Events
+// ============================================================================
+
+export { cellEvents } from "./cellEvents";
+
+// ============================================================================
+// Types (utility functions & types)
+// ============================================================================
+
+export { columnToLetter, letterToColumn, isFormulaExpectingReference } from "./types";
+
+// ============================================================================
+// Edit Guards
+// ============================================================================
+
+export { registerEditGuard } from "./editGuards";
+
+// ============================================================================
+// Cell Click Interceptors
+// ============================================================================
+
+export { registerCellClickInterceptor } from "./cellClickInterceptors";
+
+// ============================================================================
+// Events
+// ============================================================================
+
 export { AppEvents, emitAppEvent, onAppEvent, restoreFocusToGrid } from "./events";
-export type { AppEventType } from "./events";
-
-export type { ContextMenuRequestPayload } from "./contextMenuTypes";
+export type { AppEventName } from "./events";
 
 // ============================================================================
-// Types - Core type definitions
+// Extension Registry & Extensions
 // ============================================================================
-export type {
-  // Selection and viewport
-  Selection,
-  SelectionType,
-  Viewport,
-  ClipboardMode,
 
-  // Grid configuration
-  GridConfig,
-  FreezeConfig,
-  DimensionOverrides,
-
-  // Editing state
-  EditingCell,
-
-  // Cell data
-  CellData,
-  StyleData,
-  DimensionData,
-
-  // Formatting
-  FormattingOptions,
-  FormattingResult,
-
-  // Functions
-  FunctionInfo,
-
-  // Formula references
-  FormulaReference,
-
-  // Merged cells
-  MergedRegion,
-} from "./types";
-
-export {
-  DEFAULT_FREEZE_CONFIG,
-  DEFAULT_GRID_CONFIG,
-  columnToLetter,
-  letterToColumn,
-  isFormulaExpectingReference,
-} from "./types";
-
-// ============================================================================
-// UI - Task Pane, Dialog, and Overlay registration
-// ============================================================================
-export {
-  // Task Pane
-  TaskPaneExtensions,
-  registerTaskPane,
-  unregisterTaskPane,
-  openTaskPane,
-  closeTaskPane,
-  getTaskPane,
-
-  // Task Pane - Additional accessors for extensions
-  showTaskPaneContainer,
-  hideTaskPaneContainer,
-  isTaskPaneContainerOpen,
-  getTaskPaneManuallyClosed,
-  clearTaskPaneManuallyClosed,
-  useIsTaskPaneOpen,
-  useOpenTaskPaneAction,
-  useCloseTaskPaneAction,
-
-  // Dialogs
-  DialogExtensions,
-  registerDialog,
-  unregisterDialog,
-  showDialog,
-  hideDialog,
-
-  // Overlays
-  OverlayExtensions,
-  registerOverlay,
-  unregisterOverlay,
-  showOverlay,
-  hideOverlay,
-  hideAllOverlays,
-} from "./ui";
-
-export type {
-  TaskPaneViewDefinition,
-  TaskPaneViewProps,
-  TaskPaneContextKey,
-  DialogDefinition,
-  DialogProps,
-  OverlayDefinition,
-  OverlayProps,
-  OverlayLayer,
-  AnchorRect,
-} from "./ui";
-
-// ============================================================================
-// Extensions - Extension registry and context menus
-// ============================================================================
 export {
   ExtensionRegistry,
   gridExtensions,
@@ -124,7 +134,6 @@ export {
   sheetExtensions,
   registerCoreSheetContextMenu,
 } from "./extensions";
-
 export type {
   AddInManifest,
   CommandDefinition,
@@ -138,261 +147,79 @@ export type {
 } from "./extensions";
 
 // ============================================================================
-// Library - Backend API functions (Tauri / non-pivot)
+// Context Menu Types
 // ============================================================================
+
+export type { ContextMenuRequestPayload } from "./contextMenuTypes";
+
+// ============================================================================
+// Grid API (freeze panes orchestration)
+// ============================================================================
+
+export { freezePanes, loadFreezePanesConfig } from "./grid";
+
+// ============================================================================
+// Extension Manager
+// ============================================================================
+
+export { ExtensionManager } from "../shell/registries/ExtensionManager";
+export type { LoadedExtension, ExtensionStatus } from "../shell/registries/ExtensionManager";
+
+// ============================================================================
+// UI Registration API
+// ============================================================================
+
 export {
-  // Tauri API
-  getViewportCells,
-  getCell,
-  updateCell,
-  clearCell,
-  clearRange,
-  getGridBounds,
-  getCellCount,
-  findCtrlArrowTarget,
-  indexToCol,
-  colToIndex,
-  setColumnWidth,
-  getColumnWidth,
-  getAllColumnWidths,
-  setRowHeight,
-  getRowHeight,
-  getAllRowHeights,
-  getStyle,
-  getAllStyles,
-  setCellStyle,
-  applyFormatting,
-  getStyleCount,
-  getFunctionsByCategory,
-  getAllFunctions,
-  getFunctionTemplate,
-  setCalculationMode,
-  getCalculationMode,
-  calculateNow,
-  calculateSheet,
-  getSheets,
-  getActiveSheet,
-  setActiveSheet as setActiveSheetApi,
-  addSheet,
-  deleteSheet,
-  renameSheet,
-  insertRows,
-  insertColumns,
-  deleteRows,
-  deleteColumns,
-  getUndoState,
-  undo,
-  redo,
-  findAll,
-  countMatches,
-  replaceAll,
-  replaceSingle,
-  setFreezePanes,
-  getFreezePanes,
-  mergeCells,
-  unmergeCells,
-  getMergedRegions,
-  getMergeInfo,
-  // Pivot API (legacy bare exports - prefer importing `pivot` from "./pivot")
-  createPivotTable,
-  updatePivotFields,
-  togglePivotGroup,
-  getPivotView,
-  deletePivotTable,
-  refreshPivotCache,
-  getPivotSourceData,
-  getPivotAtCell,
-  getPivotRegionsForSheet,
-  getPivotFieldUniqueValues,
-  getCellNumericValue,
-  getCellDisplayValue,
-  isHeaderCell,
-  isTotalCell,
-  isFilterCell,
-  isDataRow,
-  isFilterRow,
-  createFieldConfig,
-  createValueFieldConfig,
-  createLayoutConfig,
-} from "./lib";
+  // Menu API
+  registerMenu,
+  registerMenuItem,
+  getMenus,
+  subscribeToMenus,
+  // Task Pane API
+  registerTaskPane,
+  unregisterTaskPane,
+  openTaskPane,
+  closeTaskPane,
+  getTaskPane,
+  showTaskPaneContainer,
+  hideTaskPaneContainer,
+  isTaskPaneContainerOpen,
+  useIsTaskPaneOpen,
+  useOpenTaskPaneAction,
+  useCloseTaskPaneAction,
+  getTaskPaneManuallyClosed,
+  clearTaskPaneManuallyClosed,
+  // Dialog API
+  registerDialog,
+  unregisterDialog,
+  showDialog,
+  hideDialog,
+  // Overlay API
+  registerOverlay,
+  unregisterOverlay,
+  showOverlay,
+  hideOverlay,
+  hideAllOverlays,
+  // Registries (for direct access if needed)
+  TaskPaneExtensions,
+  DialogExtensions,
+  OverlayExtensions,
+} from "./ui";
+
+// ============================================================================
+// UI Types
+// ============================================================================
 
 export type {
-  ArrowDirection,
-  SheetInfo,
-  SheetsResult,
-  UndoState,
-  UndoResult,
-  FindResult,
-  ReplaceResult,
-  FindOptions,
-  TauriFreezeConfig,
-  TauriMergedRegion,
-  MergeResult,
-  PivotInteractiveBounds,
-  PivotId,
-  SortOrder,
-  AggregationType,
-  ShowValuesAs,
-  ReportLayout,
-  ValuesPosition,
-  CreatePivotRequest,
-  PivotFieldConfig,
-  ValueFieldConfig,
-  LayoutConfig,
-  UpdatePivotFieldsRequest,
-  ToggleGroupRequest,
-  PivotCellValue,
-  PivotCellType,
-  BackgroundStyle,
-  PivotRowType,
-  PivotColumnType,
-  PivotCellData,
-  PivotRowData,
-  PivotColumnData,
-  FilterRowData,
-  PivotViewResponse,
-  SourceDataResponse,
-  GroupPath,
-  SourceFieldInfo,
-  ZoneFieldInfo,
-  PivotFieldConfiguration,
-  FilterZoneInfo,
-  PivotRegionInfo,
-  FieldUniqueValuesResponse,
-} from "./lib";
-
-// ============================================================================
-// Components - UI components for extensions
-// ============================================================================
-export {
-  RibbonButton,
-  RibbonGroup,
-  RibbonSeparator,
-  RibbonDropdownButton,
-} from "./components";
-
-export type {
-  RibbonButtonProps,
-  RibbonGroupProps,
-  RibbonDropdownButtonProps,
-} from "./components";
-
-// Re-export ribbon styles
-export * from "../shell/Ribbon/styles";
-
-// ============================================================================
-// Grid - Grid operations (freeze panes, etc.)
-// ============================================================================
-export {
-  freezePanes,
-  loadFreezePanesConfig,
-  getFreezePanesConfig,
-} from "./grid";
-
-// ============================================================================
-// Filesystem - File operations (legacy bare exports - prefer `workspace` from "./system")
-// ============================================================================
-export {
-  newFile,
-  openFile,
-  saveFile,
-  saveFileAs,
-  isFileModified,
-  markFileModified,
-  getCurrentFilePath,
-} from "./filesystem";
-
-// ============================================================================
-// System API - Workspace facade (preferred over bare filesystem exports)
-// ============================================================================
-export { workspace } from "./system";
-
-// ============================================================================
-// Grid Overlays - Generic overlay lifecycle system for extensions
-// ============================================================================
-export {
-  registerGridOverlay,
-  unregisterGridOverlay,
-  setGridRegions,
-  addGridRegions,
-  removeGridRegionsByType,
-  getGridRegions,
-  getOverlayRenderers,
-  onRegionChange,
-  hitTestOverlays,
-  // Dimension helpers for overlay renderers
-  overlayGetColumnWidth,
-  overlayGetRowHeight,
-  overlayGetColumnX,
-  overlayGetRowY,
-  overlayGetColumnsWidth,
-  overlayGetRowsHeight,
-  overlayGetRowHeaderWidth,
-  overlayGetColHeaderHeight,
-} from "./gridOverlays";
-
-export type {
-  GridRegion,
-  OverlayRenderContext,
-  OverlayRendererFn,
-  OverlayHitTestContext,
-  OverlayHitTestFn,
-  RegionChangeHandler,
-  OverlayRegistration,
-} from "./gridOverlays";
-
-// ============================================================================
-// State - Grid state hooks and action creators for extensions
-// ============================================================================
-export {
-  useGridContext,
-  useGridState,
-  useGridDispatch,
-  setSelection,
-  scrollToCell,
-  setFindResults,
-  setFindCurrentIndex,
-  closeFind,
-  setFindOptions,
-  setFreezeConfig,
-  setSheetContext,
-  setActiveSheet,
-} from "./state";
-
-// ============================================================================
-// Editing - Editing hooks and state for shell/extensions
-// ============================================================================
-export {
-  useEditing,
-  setGlobalIsEditing,
-  getGlobalIsEditing,
-} from "./editing";
-
-// ============================================================================
-// Cell Events - Cell change pub/sub for extensions
-// ============================================================================
-export { cellEvents } from "./cellEvents";
-export type { CellChangeListener } from "./cellEvents";
-
-// ============================================================================
-// Edit Guards - Generic edit guard registry for extensions
-// ============================================================================
-export { registerEditGuard, checkEditGuards } from "./editGuards";
-export type { EditGuardResult, EditGuardFn } from "./editGuards";
-
-// ============================================================================
-// Cell Click Interceptors - Generic click interceptor registry for extensions
-// ============================================================================
-export {
-  registerCellClickInterceptor,
-  checkCellClickInterceptors,
-} from "./cellClickInterceptors";
-export type {
-  CellClickEvent,
-  CellClickInterceptorFn,
-} from "./cellClickInterceptors";
-
-// ============================================================================
-// Pivot API - Pivot facade (preferred over bare pivot exports from lib)
-// ============================================================================
-export { pivot } from "./pivot";
+  MenuDefinition,
+  MenuItemDefinition,
+  TaskPaneViewDefinition,
+  TaskPaneViewProps,
+  TaskPaneContextKey,
+  DialogDefinition,
+  DialogProps,
+  OverlayDefinition,
+  OverlayProps,
+  OverlayLayer,
+  AnchorRect,
+} from "./uiTypes";

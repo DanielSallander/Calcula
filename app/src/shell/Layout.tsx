@@ -2,9 +2,7 @@
 // PURPOSE: Main application layout (the "Shell")
 // CONTEXT: Arranges menu bar, ribbon, formula bar, spreadsheet, sheet tabs, status bar, and task pane.
 // All feature-specific logic lives in extensions; the shell only renders generic zones.
-// NOTE: GridProvider is imported from core as a special case - it's the root context provider.
-// REFACTOR: Actions are now imported from api layer.
-// REFACTOR: Context menu rendering moved from Core to Shell (GridContextMenuHost)
+// REFACTOR: Extensions are now loaded dynamically via ExtensionManager (no hard imports).
 
 import React, { useEffect } from "react";
 import { MenuBar } from "./MenuBar";
@@ -26,25 +24,88 @@ import {
   AppEvents,
   onAppEvent,
 } from "../api";
-import { FindReplaceDialog } from "../../extensions/BuiltIn/FindReplaceDialog";
-import { StandardMenus } from "../../extensions/BuiltIn/StandardMenus/StandardMenus";
+// Extension management
+import { useExtensionInitializer, useExtensions } from "./hooks/useExtensions";
+
+/**
+ * Loading screen shown while extensions are initializing.
+ */
+function LoadingScreen(): React.ReactElement {
+  return (
+    <div
+      style={{
+        display: "flex",
+        flexDirection: "column",
+        alignItems: "center",
+        justifyContent: "center",
+        height: "100vh",
+        width: "100vw",
+        backgroundColor: "#f5f5f5",
+        fontFamily: "system-ui, -apple-system, sans-serif",
+      }}
+    >
+      <div
+        style={{
+          fontSize: "24px",
+          fontWeight: 600,
+          color: "#217346",
+          marginBottom: "16px",
+        }}
+      >
+        Calcula
+      </div>
+      <div style={{ fontSize: "14px", color: "#666" }}>Loading extensions...</div>
+    </div>
+  );
+}
+
+/**
+ * Error screen shown if extension initialization fails.
+ */
+function ErrorScreen({ error }: { error: Error }): React.ReactElement {
+  return (
+    <div
+      style={{
+        display: "flex",
+        flexDirection: "column",
+        alignItems: "center",
+        justifyContent: "center",
+        height: "100vh",
+        width: "100vw",
+        backgroundColor: "#fff5f5",
+        fontFamily: "system-ui, -apple-system, sans-serif",
+      }}
+    >
+      <div
+        style={{
+          fontSize: "24px",
+          fontWeight: 600,
+          color: "#c00",
+          marginBottom: "16px",
+        }}
+      >
+        Initialization Error
+      </div>
+      <div style={{ fontSize: "14px", color: "#666", maxWidth: "400px", textAlign: "center" }}>
+        {error.message}
+      </div>
+    </div>
+  );
+}
 
 /**
  * Inner layout component that has access to GridContext.
  */
 function LayoutInner(): React.ReactElement {
   const { state, dispatch } = useGridContext();
+  const { activeCount, errorCount } = useExtensions();
 
   // Bridge: notify extensions whenever the grid selection changes.
-  // This allows any extension to react to selection changes via
-  // ExtensionRegistry.onSelectionChange() without coupling to React state.
   useEffect(() => {
     ExtensionRegistry.notifySelectionChange(state.selection);
   }, [state.selection]);
 
   // Bridge: sync freeze pane state from API events into Core state.
-  // Extensions call api/grid.ts freezePanes() which emits FREEZE_CHANGED.
-  // The Shell listens here and dispatches to Core state (Inversion of Control).
   useEffect(() => {
     const cleanup = onAppEvent<{
       freezeRow: number | null;
@@ -103,21 +164,19 @@ function LayoutInner(): React.ReactElement {
           backgroundColor: "#217346",
           display: "flex",
           alignItems: "center",
+          justifyContent: "space-between",
           padding: "0 12px",
           fontSize: "12px",
           color: "#ffffff",
         }}
       >
-        Ready
+        <span>Ready</span>
+        <span style={{ opacity: 0.8 }}>
+          Extensions: {activeCount} active{errorCount > 0 ? `, ${errorCount} error` : ""}
+        </span>
       </div>
 
-      {/* Standard Menus (File, View, Insert - hook-based registration) */}
-      <StandardMenus />
-
-      {/* Find/Replace Dialog (built-in extension) */}
-      <FindReplaceDialog />
-
-      {/* Dynamic Dialogs from DialogExtensions */}
+      {/* Dynamic Dialogs from DialogExtensions (registered by extensions) */}
       <DialogContainer />
 
       {/* Dynamic Overlays from OverlayExtensions */}
@@ -129,7 +188,23 @@ function LayoutInner(): React.ReactElement {
   );
 }
 
+/**
+ * Main Layout component with extension initialization.
+ */
 export function Layout(): React.ReactElement {
+  const { isLoading, error } = useExtensionInitializer();
+
+  // Show loading screen while extensions initialize
+  if (isLoading) {
+    return <LoadingScreen />;
+  }
+
+  // Show error screen if initialization failed
+  if (error) {
+    return <ErrorScreen error={error} />;
+  }
+
+  // Render the full layout once extensions are ready
   return (
     <GridProvider>
       <LayoutInner />

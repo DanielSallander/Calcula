@@ -1,59 +1,81 @@
 //! FILENAME: app/src/api/grid.ts
-// PURPOSE: Grid operations API for extensions.
-// CONTEXT: Extensions call these functions to manipulate grid state (freeze panes, etc.)
-// instead of importing directly from core/lib or core/state.
-// The Shell listens for the emitted events and updates Core state accordingly.
+// PURPOSE: Grid-related API exports for extensions.
+// CONTEXT: Re-exports grid state hooks and actions from core.
+
+// Re-export the context hook
+export { useGridContext, useGridState, useGridDispatch } from "../core/state/GridContext";
+
+// Re-export grid actions
+export {
+  setSelection,
+  clearSelection,
+  extendSelection,
+  moveSelection,
+  setViewport,
+  updateScroll,
+  scrollBy,
+  scrollToCell,
+  scrollToPosition,
+  startEditing,
+  updateEditing,
+  stopEditing,
+  updateConfig,
+  setViewportSize,
+  setViewportDimensions,
+  expandVirtualBounds,
+  setVirtualBounds,
+  resetVirtualBounds,
+  setFormulaReferences,
+  clearFormulaReferences,
+  setColumnWidth,
+  setRowHeight,
+  setAllDimensions,
+  setClipboard,
+  clearClipboard,
+  setSheetContext,
+  setActiveSheet,
+  setFindResults,
+  setFindCurrentIndex,
+  clearFind,
+  openFind,
+  closeFind,
+  setFindOptions,
+  setFreezeConfig,
+} from "../core/state/gridActions";
+
+// Re-export action types
+export type { GridAction, SetSelectionPayload } from "../core/state/gridActions";
+
+// ============================================================================
+// Freeze Panes Orchestration
+// ============================================================================
 
 import {
-  setFreezePanes as setFreezePanesBackend,
-  getFreezePanes as getFreezePanesBackend,
+  setFreezePanes as backendSetFreezePanes,
+  getFreezePanes as backendGetFreezePanes,
 } from "../core/lib/tauri-api";
-import { AppEvents, emitAppEvent } from "./events";
-
-// ============================================================================
-// Freeze Panes API
-// ============================================================================
+import { emitAppEvent, AppEvents } from "./events";
 
 /**
- * Set freeze panes configuration.
- * Calls the Tauri backend, then emits FREEZE_CHANGED so the Shell can
- * update Core state, and emits GRID_REFRESH to repaint.
- *
- * @param freezeRow - Row to freeze at (1 = top row), or null to unfreeze rows
- * @param freezeCol - Column to freeze at (1 = first column), or null to unfreeze columns
+ * Set freeze panes via backend and emit events for Shell/Core sync.
  */
 export async function freezePanes(
   freezeRow: number | null,
   freezeCol: number | null,
 ): Promise<void> {
-  await setFreezePanesBackend(freezeRow, freezeCol);
+  await backendSetFreezePanes(freezeRow, freezeCol);
   emitAppEvent(AppEvents.FREEZE_CHANGED, { freezeRow, freezeCol });
   emitAppEvent(AppEvents.GRID_REFRESH);
 }
 
 /**
- * Load the current freeze panes configuration from the backend.
- * Also emits FREEZE_CHANGED so the Shell can sync Core state.
- *
- * @returns The current freeze configuration
+ * Load freeze panes config from backend and emit FREEZE_CHANGED event.
  */
 export async function loadFreezePanesConfig(): Promise<{
   freezeRow: number | null;
   freezeCol: number | null;
 }> {
-  const config = await getFreezePanesBackend();
+  const config = await backendGetFreezePanes();
   emitAppEvent(AppEvents.FREEZE_CHANGED, config);
   return config;
-}
-
-/**
- * Get the current freeze panes configuration from the backend (read-only, no event).
- *
- * @returns The current freeze configuration
- */
-export async function getFreezePanesConfig(): Promise<{
-  freezeRow: number | null;
-  freezeCol: number | null;
-}> {
-  return getFreezePanesBackend();
 }

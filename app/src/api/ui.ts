@@ -7,52 +7,47 @@ import { TaskPaneExtensions } from "../shell/registries/taskPaneExtensions";
 import { DialogExtensions } from "../shell/registries/dialogExtensions";
 import { OverlayExtensions } from "../shell/registries/overlayExtensions";
 import { useTaskPaneStore } from "../shell/TaskPane/useTaskPaneStore";
-import type { TaskPaneViewDefinition, DialogDefinition, OverlayDefinition, AnchorRect } from "./uiTypes";
+import type {
+  TaskPaneViewDefinition,
+  DialogDefinition,
+  OverlayDefinition,
+  AnchorRect,
+  MenuDefinition,
+  MenuItemDefinition,
+} from "./uiTypes";
 
 // Re-export the extension registries
 export { TaskPaneExtensions, DialogExtensions, OverlayExtensions };
 
 // Re-export types from the canonical contract layer (api/uiTypes.ts)
-export type { TaskPaneViewDefinition, TaskPaneViewProps, TaskPaneContextKey } from "./uiTypes";
-export type { DialogDefinition, DialogProps } from "./uiTypes";
-export type { OverlayDefinition, OverlayProps, OverlayLayer, AnchorRect } from "./uiTypes";
+export type {
+  TaskPaneViewDefinition,
+  TaskPaneViewProps,
+  TaskPaneContextKey,
+  DialogDefinition,
+  DialogProps,
+  OverlayDefinition,
+  OverlayProps,
+  OverlayLayer,
+  AnchorRect,
+  MenuDefinition,
+  MenuItemDefinition,
+} from "./uiTypes";
 
 // ============================================================================
-// Menu API Definitions
+// Menu Registry (Internal State)
 // ============================================================================
 
-export interface MenuItemDefinition {
-  id: string;
-  label: string;
-  commandId?: string; // The preferred way: execute a registered command
-  action?: () => void; // Legacy/Simple way: direct callback
-  icon?: string;
-  disabled?: boolean;
-  checked?: boolean;
-  separator?: boolean;
-  shortcut?: string; // e.g. "Ctrl+S"
-  hidden?: boolean;
-}
-
-export interface MenuDefinition {
-  id: string;
-  label: string;
-  order: number;
-  items: MenuItemDefinition[];
-}
-
-// Internal State for Menus (Simple Store Pattern)
-// In a future refactor, this could move to shell/registries/MenuRegistry.ts
 class MenuRegistry {
   private menus: Map<string, MenuDefinition> = new Map();
   private listeners: Set<() => void> = new Set();
 
-  registerMenu(menu: MenuDefinition) {
+  registerMenu(menu: MenuDefinition): void {
     this.menus.set(menu.id, menu);
     this.notify();
   }
 
-  registerMenuItem(menuId: string, item: MenuItemDefinition) {
+  registerMenuItem(menuId: string, item: MenuItemDefinition): void {
     const menu = this.menus.get(menuId);
     if (menu) {
       menu.items.push(item);
@@ -71,7 +66,7 @@ class MenuRegistry {
     return () => this.listeners.delete(callback);
   }
 
-  private notify() {
+  private notify(): void {
     this.listeners.forEach((cb) => cb());
   }
 }
@@ -166,7 +161,7 @@ export function unregisterOverlay(overlayId: string): void {
   OverlayExtensions.unregisterOverlay(overlayId);
 }
 
-export function showOverlay(overlayId: string, options: { data?: Record<string, unknown>; anchorRect?: AnchorRect; }): void {
+export function showOverlay(overlayId: string, options: { data?: Record<string, unknown>; anchorRect?: AnchorRect }): void {
   OverlayExtensions.showOverlay(overlayId, options);
 }
 

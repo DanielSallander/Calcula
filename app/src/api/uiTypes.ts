@@ -2,9 +2,52 @@
 // PURPOSE: Canonical type definitions for UI extension contracts.
 // CONTEXT: These interfaces define the API contract between Core registries
 // and Extensions. Both sides import from here, ensuring a single source of truth.
-// Previously these types lived in core/extensions/ and were re-exported by api/.
 
 import React from "react";
+
+// ============================================================================
+// Menu Types
+// ============================================================================
+
+/**
+ * Definition of a menu item.
+ */
+export interface MenuItemDefinition {
+  /** Unique identifier for this menu item */
+  id: string;
+  /** Display label */
+  label: string;
+  /** The preferred way: execute a registered command */
+  commandId?: string;
+  /** Legacy/Simple way: direct callback */
+  action?: () => void;
+  /** Optional icon */
+  icon?: string;
+  /** Whether the item is disabled */
+  disabled?: boolean;
+  /** Whether the item is checked (for toggle items) */
+  checked?: boolean;
+  /** Whether this is a separator */
+  separator?: boolean;
+  /** Keyboard shortcut hint (e.g., "Ctrl+S") */
+  shortcut?: string;
+  /** Whether the item is hidden */
+  hidden?: boolean;
+}
+
+/**
+ * Definition of a top-level menu.
+ */
+export interface MenuDefinition {
+  /** Unique identifier for this menu */
+  id: string;
+  /** Display label */
+  label: string;
+  /** Order for positioning (lower = further left) */
+  order: number;
+  /** Menu items */
+  items: MenuItemDefinition[];
+}
 
 // ============================================================================
 // Task Pane Types
