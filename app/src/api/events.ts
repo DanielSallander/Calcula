@@ -1,23 +1,51 @@
 //! FILENAME: app/src/api/events.ts
 // PURPOSE: Application-wide event system for decoupled communication.
 // CONTEXT: Extensions and Shell use this to communicate without direct coupling.
+// FIX: Event names must match core/lib/events.ts which is the canonical source.
 
 // ============================================================================
 // Event Names
 // ============================================================================
 
 export const AppEvents = {
-  FREEZE_CHANGED: "calcula:freeze-changed",
-  SELECTION_CHANGED: "calcula:selection-changed",
-  SHEET_CHANGED: "calcula:sheet-changed",
-  DATA_CHANGED: "calcula:data-changed",
-  EDIT_STARTED: "calcula:edit-started",
-  EDIT_ENDED: "calcula:edit-ended",
-  GRID_REFRESH: "calcula:grid-refresh",
-  CONTEXT_MENU_REQUEST: "calcula:context-menu-request",
-  CONTEXT_MENU_CLOSE: "calcula:context-menu-close",
-  NAVIGATE_TO_CELL: "calcula:navigate-to-cell",
-  PREVENT_BLUR_COMMIT: "calcula:prevent-blur-commit",
+  // Clipboard events (from core)
+  CUT: "app:cut",
+  COPY: "app:copy",
+  PASTE: "app:paste",
+
+  // Find/Replace events (from core)
+  FIND: "app:find",
+  REPLACE: "app:replace",
+
+  // Freeze pane events
+  FREEZE_CHANGED: "app:freeze-changed",
+
+  // Selection events
+  SELECTION_CHANGED: "app:selection-changed",
+
+  // Sheet events
+  SHEET_CHANGED: "app:sheet-changed",
+
+  // Data events
+  DATA_CHANGED: "app:data-changed",
+  CELLS_UPDATED: "app:cells-updated",
+
+  // Editing events
+  EDIT_STARTED: "app:edit-started",
+  EDIT_ENDED: "app:edit-ended",
+
+  // Grid events
+  GRID_REFRESH: "app:grid-refresh",
+
+  // Context menu events - FIX: Must match core/lib/events.ts
+  CONTEXT_MENU_REQUEST: "app:context-menu-request",
+  CONTEXT_MENU_CLOSE: "app:context-menu-close",
+
+  // Navigation events
+  NAVIGATE_TO_CELL: "app:navigate-to-cell",
+
+  // Blur commit prevention
+  PREVENT_BLUR_COMMIT: "app:prevent-blur-commit",
 } as const;
 
 export type AppEventName = (typeof AppEvents)[keyof typeof AppEvents];
