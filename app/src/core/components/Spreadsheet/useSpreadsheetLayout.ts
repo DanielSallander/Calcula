@@ -68,9 +68,11 @@ export function useSpreadsheetLayout({
 
   const contentSize = getContentSize();
 
+  /* eslint-disable react-hooks/refs -- Container dimensions needed for layout calculation with fallback defaults */
   const containerWidth = containerRef.current?.clientWidth || 800;
   const containerHeight = containerRef.current?.clientHeight || 600;
   const visibleRange = calculateVisibleRange(viewport, config, containerWidth, containerHeight, dimensions);
+  /* eslint-enable react-hooks/refs */
 
   const getSelectionSize = (): string => {
     if (!selection) return "";

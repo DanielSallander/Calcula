@@ -209,12 +209,6 @@ export function calculateFrozenTopRange(
   let accumulatedWidth = 0;
   let startCol = startColAfterFrozen;
   
-  // Skip frozen columns' worth of scroll offset
-  let frozenWidth = 0;
-  for (let c = 0; c < startColAfterFrozen; c++) {
-    frozenWidth += getColumnWidth(c, config, dims);
-  }
-  
   while (startCol < totalCols) {
     const colWidth = getColumnWidth(startCol, config, dims);
     if (colWidth <= 0) break;

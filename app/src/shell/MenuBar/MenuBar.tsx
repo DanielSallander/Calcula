@@ -1,5 +1,5 @@
 //! FILENAME: app/src/shell/MenuBar/MenuBar.tsx
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 import * as UI from '../../api/ui'; // Import the facade
 import { restoreFocusToGrid } from './MenuBar.events';
 import * as S from './MenuBar.styles';
@@ -9,15 +9,23 @@ export type { MenuItem, Menu } from './MenuBar.types'; // Legacy types, might wa
 
 export function MenuBar(): React.ReactElement {
   const [openMenu, setOpenMenu] = useState<string | null>(null);
-  const [menus, setMenus] = useState<UI.MenuDefinition[]>([]);
+  const [menus, setMenus] = useState<UI.MenuDefinition[]>(() => UI.getMenus());
   const menuBarRef = useRef<HTMLDivElement>(null);
 
-  // 1. Subscribe to the Menu Registry
+  const executeMenuItem = useCallback((item: UI.MenuItemDefinition) => {
+    if (item.action) {
+      item.action();
+    }
+    else if (item.commandId) {
+      console.log('Executing Command:', item.commandId);
+    }
+
+    setOpenMenu(null);
+    restoreFocusToGrid();
+  }, []);
+
+  // 1. Subscribe to the Menu Registry for updates
   useEffect(() => {
-    // Initial fetch
-    setMenus(UI.getMenus());
-    
-    // Subscribe to updates (e.g. when an extension loads late)
     const unsubscribe = UI.subscribeToMenus(() => {
       setMenus(UI.getMenus());
     });
@@ -40,8 +48,8 @@ export function MenuBar(): React.ReactElement {
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
       const target = e.target as HTMLElement;
-      const isInputField = target.tagName === 'INPUT' || 
-                           target.tagName === 'TEXTAREA' || 
+      const isInputField = target.tagName === 'INPUT' ||
+                           target.tagName === 'TEXTAREA' ||
                            target.isContentEditable;
 
       // Don't trigger shortcuts while typing in a cell/input, unless it's a specific override
@@ -56,7 +64,7 @@ export function MenuBar(): React.ReactElement {
         for (const item of menu.items) {
           if (item.shortcut && normalizeShortcut(item.shortcut) === keyCombo) {
              if (item.disabled) return;
-             
+
              e.preventDefault();
              executeMenuItem(item);
              return; // Stop after first match
@@ -67,7 +75,7 @@ export function MenuBar(): React.ReactElement {
 
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [menus]); // Re-bind if menus change
+  }, [menus, executeMenuItem]); // Re-bind if menus change
 
   const handleMenuClick = (menuId: string) => {
     setOpenMenu(openMenu === menuId ? null : menuId);
@@ -77,20 +85,6 @@ export function MenuBar(): React.ReactElement {
     if (openMenu) {
       setOpenMenu(menuId);
     }
-  };
-
-  const executeMenuItem = (item: UI.MenuItemDefinition) => {
-    if (item.action) {
-      item.action();
-    } 
-    else if (item.commandId) {
-
-      console.log('Executing Command:', item.commandId);
-      
-    }
-
-    setOpenMenu(null);
-    restoreFocusToGrid();
   };
 
   return (

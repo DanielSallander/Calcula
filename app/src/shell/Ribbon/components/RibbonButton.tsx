@@ -1,8 +1,5 @@
-//! FILENAME: app/src/shell/Ribbon/components/RibbonButton.tsx
-// PURPOSE: Reusable button component for ribbon groups.
-// CONTEXT: Used by add-ins to create consistent ribbon buttons.
-
 import React from "react";
+import * as S from "./RibbonButton.styles";
 
 export interface RibbonButtonProps {
   /** Button label */
@@ -30,33 +27,16 @@ export function RibbonButton({
   title,
   size = "medium",
 }: RibbonButtonProps): React.ReactElement {
-  const sizeStyles = {
-    small: { padding: "2px 6px", fontSize: "11px" },
-    medium: { padding: "4px 8px", fontSize: "12px" },
-    large: { padding: "6px 12px", fontSize: "13px" },
-  };
-
   return (
-    <button
+    <S.StyledButton
       onClick={onClick}
       disabled={disabled}
       title={title}
-      style={{
-        display: "flex",
-        flexDirection: "column",
-        alignItems: "center",
-        justifyContent: "center",
-        gap: "2px",
-        border: "1px solid transparent",
-        borderRadius: "3px",
-        backgroundColor: active ? "#e0e0e0" : "transparent",
-        cursor: disabled ? "not-allowed" : "pointer",
-        opacity: disabled ? 0.5 : 1,
-        ...sizeStyles[size],
-      }}
+      $active={active}
+      $size={size}
     >
-      {icon && <span style={{ fontSize: "16px" }}>{icon}</span>}
+      {icon && <S.IconWrapper>{icon}</S.IconWrapper>}
       <span>{label}</span>
-    </button>
+    </S.StyledButton>
   );
 }

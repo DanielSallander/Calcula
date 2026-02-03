@@ -69,17 +69,13 @@ export function Scrollbar({
       const rect = trackRef.current.getBoundingClientRect();
       const size = isHorizontal ? rect.width : rect.height;
       if (size > 0) {
-        setTrackSize(size);
+        setTrackSize(size); // eslint-disable-line react-hooks/set-state-in-effect -- DOM measurement requires effect
       }
     }
   }, [viewportSize, isHorizontal]);
 
   // Calculate scrollbar metrics
   const maxScroll = Math.max(0, contentSize - viewportSize);
-
-  if (maxScroll <= 0) {
-    return null;
-  }
 
   // Use measured track size, fall back to a reasonable default
   const effectiveTrackSize = trackSize > 0 ? trackSize : Math.max(100, viewportSize);
@@ -159,6 +155,11 @@ export function Scrollbar({
       document.removeEventListener("mouseup", handleMouseUp);
     };
   }, [isDragging, isHorizontal, thumbRange, maxScroll, onScroll]);
+
+  // Early return AFTER all hooks (Rules of Hooks require hooks to always run)
+  if (maxScroll <= 0) {
+    return null;
+  }
 
   // Dynamic thumb styles (geometry only)
   // We use inline styles for these specific properties to ensure 

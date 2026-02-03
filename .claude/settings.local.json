@@ -18,7 +18,14 @@
       "Bash(cargo metadata:*)",
       "Bash(python -c:*)",
       "Bash(cargo clean:*)",
-      "Bash(del:*)"
+      "Bash(del:*)",
+      "Bash(yarn lint:*)",
+      "Bash(findstr:*)",
+      "Bash(Select-String \"error\")",
+      "Bash(Select-String -NotMatch \"warning\")",
+      "Bash(Select-String -NotMatch \"Exit\")",
+      "Bash(Select-String -NotMatch \"Command\")",
+      "Bash(npx eslint:*)"
     ],
     "deny": [],
     "ask": []

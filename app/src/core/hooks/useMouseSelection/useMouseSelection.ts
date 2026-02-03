@@ -117,6 +117,7 @@ export function useMouseSelection(props: UseMouseSelectionProps): UseMouseSelect
   // -------------------------------------------------------------------------
   // Handler Factories
   // -------------------------------------------------------------------------
+  // eslint-disable-next-line react-hooks/refs -- Refs are captured in closures for event-time access, not read during render
   const resizeHandlers = createResizeHandlers({
     config,
     viewport,
@@ -128,6 +129,7 @@ export function useMouseSelection(props: UseMouseSelectionProps): UseMouseSelect
     resizeStateRef,
   });
 
+  // eslint-disable-next-line react-hooks/refs -- Refs are captured in closures for event-time access, not read during render
   const cellSelectionHandlers = createCellSelectionHandlers({
     config,
     viewport,
@@ -142,6 +144,7 @@ export function useMouseSelection(props: UseMouseSelectionProps): UseMouseSelect
     lastMousePosRef,
   });
 
+  // eslint-disable-next-line react-hooks/refs -- Refs are captured in closures for event-time access, not read during render
   const headerSelectionHandlers = createHeaderSelectionHandlers({
     config,
     viewport,
@@ -157,6 +160,7 @@ export function useMouseSelection(props: UseMouseSelectionProps): UseMouseSelect
     lastMousePosRef,
   });
 
+  // eslint-disable-next-line react-hooks/refs -- Refs are captured in closures for event-time access, not read during render
   const formulaHandlers = createFormulaHandlers({
     config,
     viewport,
@@ -171,6 +175,7 @@ export function useMouseSelection(props: UseMouseSelectionProps): UseMouseSelect
     lastMousePosRef,
   });
 
+  // eslint-disable-next-line react-hooks/refs -- Refs are captured in closures for event-time access, not read during render
   const formulaHeaderHandlers = createFormulaHeaderHandlers({
     config,
     viewport,

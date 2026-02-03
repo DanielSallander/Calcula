@@ -179,6 +179,7 @@ export function DropZone({
         {isDragOver && insertIndicatorIndex !== null && fields.length > 0 && (
           <div
             className={insertIndicatorStyle}
+            // eslint-disable-next-line react-hooks/refs -- Ref read needed for DOM position calculation
             style={{ top: getIndicatorTop() }}
           />
         )}

@@ -191,30 +191,45 @@ export function ValueFieldSettingsModal({
   );
   const [showValuesAs, setShowValuesAs] = useState<ShowValuesAs>("normal");
 
-  // Reset state when field changes
+  // Reset local state when the modal opens or when the field changes.
+  // Uses render-time derived state pattern (prev-prop comparison) instead of
+  // useEffect to avoid the react-hooks/set-state-in-effect lint error.
+  const [prevIsOpen, setPrevIsOpen] = React.useState(isOpen);
+  const [prevFieldKey, setPrevFieldKey] = React.useState(`${field.sourceIndex}-${field.aggregation}`);
+
+  const fieldKey = `${field.sourceIndex}-${field.aggregation}`;
+  if (isOpen && (!prevIsOpen || fieldKey !== prevFieldKey)) {
+    const name = getValueFieldDisplayName(
+      field.name,
+      field.aggregation || "sum"
+    );
+    setCustomName(name);
+    setAggregation(field.aggregation || "sum");
+    setShowValuesAs("normal");
+    setPrevIsOpen(isOpen);
+    setPrevFieldKey(fieldKey);
+  } else if (!isOpen && prevIsOpen) {
+    setPrevIsOpen(false);
+  }
+
+  // Focus input when modal opens
   useEffect(() => {
     if (isOpen) {
-      const name = getValueFieldDisplayName(
-        field.name,
-        field.aggregation || "sum"
-      );
-      setCustomName(name);
-      setAggregation(field.aggregation || "sum");
-      setShowValuesAs("normal");
-
-      // Focus input on open
       setTimeout(() => inputRef.current?.select(), 50);
     }
-  }, [isOpen, field]);
+  }, [isOpen]);
 
-  // Update custom name when aggregation changes
-  useEffect(() => {
+  // Track previous aggregation to update the custom name when aggregation changes.
+  // Uses render-time derived state pattern instead of useEffect.
+  const [prevAggregation, setPrevAggregation] = React.useState(aggregation);
+  if (aggregation !== prevAggregation) {
     const newDefaultName = getValueFieldDisplayName(field.name, aggregation);
-    // Only update if the name matches the pattern
+    // Only update if the name matches the auto-generated pattern
     if (customName.includes(" of " + field.name)) {
       setCustomName(newDefaultName);
     }
-  }, [aggregation, field.name, customName]);
+    setPrevAggregation(aggregation);
+  }
 
   const handleSave = useCallback(() => {
     onSave({

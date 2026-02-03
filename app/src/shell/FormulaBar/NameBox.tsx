@@ -77,11 +77,14 @@ export function NameBox(): React.ReactElement {
       )
     : "A1";
 
-  useEffect(() => {
+  // Sync inputValue with displayAddress (render-time derived state pattern)
+  const [prevDisplayAddress, setPrevDisplayAddress] = useState(displayAddress);
+  if (displayAddress !== prevDisplayAddress) {
+    setPrevDisplayAddress(displayAddress);
     if (!isEditing) {
       setInputValue(displayAddress);
     }
-  }, [displayAddress, isEditing]);
+  }
 
   useEffect(() => {
     if (!isEditing) return;

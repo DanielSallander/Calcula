@@ -2,7 +2,7 @@
 // PURPOSE: Dialog for searching and inserting functions into formulas
 // CONTEXT: Opened by clicking the fx button in the formula bar
 
-import React, { useState, useEffect, useCallback, useRef } from "react";
+import React, { useState, useEffect, useCallback, useRef, useMemo } from "react";
 import { getAllFunctions, getFunctionTemplate } from "../../core/lib/tauri-api";
 import type { FunctionInfo } from "../../core/types";
 import * as S from './InsertFunctionDialog.styles';
@@ -30,18 +30,15 @@ export function InsertFunctionDialog({
   const [searchTerm, setSearchTerm] = useState("");
   const [selectedCategory, setSelectedCategory] = useState("all");
   const [functions, setFunctions] = useState<FunctionInfo[]>([]);
-  const [filteredFunctions, setFilteredFunctions] = useState<FunctionInfo[]>([]);
   const [selectedFunction, setSelectedFunction] = useState<FunctionInfo | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const searchInputRef = useRef<HTMLInputElement>(null);
   const dialogRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
-    setIsLoading(true);
     getAllFunctions()
       .then((result) => {
         setFunctions(result.functions);
-        setFilteredFunctions(result.functions);
         setIsLoading(false);
       })
       .catch((error) => {
@@ -50,7 +47,8 @@ export function InsertFunctionDialog({
       });
   }, []);
 
-  useEffect(() => {
+  // Derive filtered functions during render (not in an effect)
+  const filteredFunctions = useMemo(() => {
     let filtered = functions;
 
     if (selectedCategory !== "all") {
@@ -69,14 +67,19 @@ export function InsertFunctionDialog({
       );
     }
 
-    setFilteredFunctions(filtered);
-    
-    if (filtered.length > 0 && (!selectedFunction || !filtered.includes(selectedFunction))) {
-      setSelectedFunction(filtered[0]);
-    } else if (filtered.length === 0) {
+    return filtered;
+  }, [searchTerm, selectedCategory, functions]);
+
+  // Auto-select first function when filtered list changes (render-time derived state)
+  const [prevFiltered, setPrevFiltered] = useState(filteredFunctions);
+  if (filteredFunctions !== prevFiltered) {
+    setPrevFiltered(filteredFunctions);
+    if (filteredFunctions.length > 0 && (!selectedFunction || !filteredFunctions.includes(selectedFunction))) {
+      setSelectedFunction(filteredFunctions[0]);
+    } else if (filteredFunctions.length === 0) {
       setSelectedFunction(null);
     }
-  }, [searchTerm, selectedCategory, functions, selectedFunction]);
+  }
 
   useEffect(() => {
     searchInputRef.current?.focus();
@@ -91,6 +94,18 @@ export function InsertFunctionDialog({
     document.addEventListener("mousedown", handleClickOutside);
     return () => document.removeEventListener("mousedown", handleClickOutside);
   }, [onClose]);
+
+  const handleInsert = useCallback(async () => {
+    if (!selectedFunction) return;
+
+    try {
+      const template = await getFunctionTemplate(selectedFunction.name);
+      onSelect(selectedFunction.name, template);
+    } catch (error) {
+      console.error("Failed to get function template:", error);
+      onSelect(selectedFunction.name, `=${selectedFunction.name}(`);
+    }
+  }, [selectedFunction, onSelect]);
 
   const handleKeyDown = useCallback(
     (e: React.KeyboardEvent) => {
@@ -116,20 +131,8 @@ export function InsertFunctionDialog({
         setSelectedFunction(filteredFunctions[prevIndex]);
       }
     },
-    [selectedFunction, filteredFunctions, onClose]
+    [selectedFunction, filteredFunctions, onClose, handleInsert]
   );
-
-  const handleInsert = useCallback(async () => {
-    if (!selectedFunction) return;
-    
-    try {
-      const template = await getFunctionTemplate(selectedFunction.name);
-      onSelect(selectedFunction.name, template);
-    } catch (error) {
-      console.error("Failed to get function template:", error);
-      onSelect(selectedFunction.name, `=${selectedFunction.name}(`);
-    }
-  }, [selectedFunction, onSelect]);
 
   return (
     <S.Overlay>

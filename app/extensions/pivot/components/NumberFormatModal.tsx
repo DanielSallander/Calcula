@@ -2,7 +2,7 @@
 // PURPOSE: Modal dialog for selecting number format for value fields
 // CONTEXT: Provides preset formats for currency, percentage, and general numbers
 
-import React, { useState, useCallback, useEffect, useRef } from "react";
+import React, { useState, useCallback, useRef } from "react";
 import { css } from "@emotion/css";
 
 export interface NumberFormatOption {
@@ -193,25 +193,32 @@ export function NumberFormatModal({
   const [customFormat, setCustomFormat] = useState("");
   const [isCustom, setIsCustom] = useState(false);
 
-  // Reset state when modal opens
-  useEffect(() => {
-    if (isOpen) {
-      const preset = NUMBER_FORMAT_PRESETS.find((p) => p.value === currentFormat);
-      if (preset) {
-        setSelectedFormat(currentFormat);
-        setIsCustom(false);
-        setCustomFormat("");
-      } else if (currentFormat) {
-        setIsCustom(true);
-        setCustomFormat(currentFormat);
-        setSelectedFormat("");
-      } else {
-        setSelectedFormat("");
-        setIsCustom(false);
-        setCustomFormat("");
-      }
+  // Reset local state when the modal opens or when the external format changes.
+  // Uses render-time derived state pattern (prev-prop comparison) instead of
+  // useEffect to avoid the react-hooks/set-state-in-effect lint error.
+  const [prevIsOpen, setPrevIsOpen] = React.useState(isOpen);
+  const [prevFormat, setPrevFormat] = React.useState(currentFormat);
+
+  if (isOpen && (!prevIsOpen || currentFormat !== prevFormat)) {
+    const preset = NUMBER_FORMAT_PRESETS.find((p) => p.value === currentFormat);
+    if (preset) {
+      setSelectedFormat(currentFormat);
+      setIsCustom(false);
+      setCustomFormat("");
+    } else if (currentFormat) {
+      setIsCustom(true);
+      setCustomFormat(currentFormat);
+      setSelectedFormat("");
+    } else {
+      setSelectedFormat("");
+      setIsCustom(false);
+      setCustomFormat("");
     }
-  }, [isOpen, currentFormat]);
+    setPrevIsOpen(isOpen);
+    setPrevFormat(currentFormat);
+  } else if (!isOpen && prevIsOpen) {
+    setPrevIsOpen(false);
+  }
 
   const handlePresetSelect = useCallback((format: string) => {
     setSelectedFormat(format);

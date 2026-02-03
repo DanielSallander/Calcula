@@ -7,7 +7,7 @@ import boundaries from 'eslint-plugin-boundaries'
 import { defineConfig, globalIgnores } from 'eslint/config'
 
 export default defineConfig([
-  globalIgnores(['dist', '.tmp']),
+  globalIgnores(['dist', '.tmp', 'src-tauri']),
   {
     // Base configuration for all TS files
     files: ['**/*.{ts,tsx}'],
@@ -106,12 +106,34 @@ export default defineConfig([
           "format": ["camelCase", "PascalCase"] // React components are PascalCase
         },
         {
+          "selector": "import",
+          "format": ["camelCase", "PascalCase", "UPPER_CASE"]
+        },
+        {
           "selector": "typeLike",
           "format": ["PascalCase"]
         },
         {
+          "selector": "parameter",
+          "format": ["camelCase"],
+          "leadingUnderscore": "allow"
+        },
+        {
           "selector": "objectLiteralProperty",
-          "format": ["camelCase"] // STRICT: Forces { styleIndex: 1 } instead of { style_index: 1 }
+          "format": ["camelCase", "UPPER_CASE", "snake_case"]
+        },
+        {
+          "selector": "typeProperty",
+          "format": ["camelCase", "snake_case"]
+        }
+      ],
+
+      // Allow unused variables/params with underscore prefix
+      "@typescript-eslint/no-unused-vars": [
+        "error",
+        {
+          "argsIgnorePattern": "^_",
+          "varsIgnorePattern": "^_"
         }
       ],
 

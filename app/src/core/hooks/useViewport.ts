@@ -143,6 +143,7 @@ export function useViewport(): UseViewportReturn {
   /**
    * Throttled scroll update to prevent excessive re-renders.
    */
+  /* eslint-disable react-hooks/refs -- Ref is read inside scroll callback, not during render */
   const throttledScrollUpdate = useMemo(
     () =>
       createThrottledScrollHandler((scrollX: number, scrollY: number) => {
@@ -157,6 +158,7 @@ export function useViewport(): UseViewportReturn {
       }),
     [dispatch, checkAndExpandBounds]
   );
+  /* eslint-enable react-hooks/refs */
 
   /**
    * Handle scroll events from the container element.

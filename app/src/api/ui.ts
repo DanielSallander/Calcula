@@ -81,9 +81,9 @@ let dialogService: DialogService | undefined;
 let overlayService: OverlayService | undefined;
 
 // React hook providers (optional, registered by Shell)
-let useIsTaskPaneOpenHook: (() => boolean) | undefined;
-let useOpenTaskPaneActionHook: (() => () => void) | undefined;
-let useCloseTaskPaneActionHook: (() => () => void) | undefined;
+let useIsTaskPaneOpenHook: () => boolean = () => false;
+let useOpenTaskPaneActionHook: () => () => void = () => () => {};
+let useCloseTaskPaneActionHook: () => () => void = () => () => {};
 
 /**
  * Register the TaskPane service implementation (called by Shell at startup).
@@ -346,25 +346,16 @@ export function clearTaskPaneManuallyClosed(viewId: string): void {
 }
 
 // React hooks (delegate to registered implementations)
+// Default no-op hooks are used before shell initialization completes
 export function useIsTaskPaneOpen(): boolean {
-  if (!useIsTaskPaneOpenHook) {
-    console.warn("[API] TaskPane hooks not registered.");
-    return false;
-  }
   return useIsTaskPaneOpenHook();
 }
 
 export function useOpenTaskPaneAction(): () => void {
-  if (!useOpenTaskPaneActionHook) {
-    return () => {};
-  }
   return useOpenTaskPaneActionHook();
 }
 
 export function useCloseTaskPaneAction(): () => void {
-  if (!useCloseTaskPaneActionHook) {
-    return () => {};
-  }
   return useCloseTaskPaneActionHook();
 }
 

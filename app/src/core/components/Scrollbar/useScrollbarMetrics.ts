@@ -64,15 +64,14 @@ export function useScrollbarMetrics({
           maxCol: Math.max(0, bounds[1] - 1),
         });
       }
-    } catch (error) {
+    } catch {
       // Silently handle errors - grid bounds might not be available yet
-      // console.debug("[Scrollbar] Failed to get grid bounds:", error);
     }
   }, []);
 
   // Initial fetch and periodic refresh
   useEffect(() => {
-    refreshUsedRange();
+    refreshUsedRange(); // eslint-disable-line react-hooks/set-state-in-effect -- Initial data fetch pattern
 
     // Set up periodic refresh
     const interval = setInterval(() => {

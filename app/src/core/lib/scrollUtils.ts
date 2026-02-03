@@ -373,7 +373,7 @@ export function calculateScrollDelta(
       if (direction === "right") deltaX = defaultCellWidth;
       break;
 
-    case "page":
+    case "page": {
       // Scroll by visible page (minus one row/col for context)
       const pageRows = Math.max(1, Math.floor(availableHeight / defaultCellHeight) - 1);
       const pageCols = Math.max(1, Math.floor(availableWidth / defaultCellWidth) - 1);
@@ -383,6 +383,7 @@ export function calculateScrollDelta(
       if (direction === "left") deltaX = -pageCols * defaultCellWidth;
       if (direction === "right") deltaX = pageCols * defaultCellWidth;
       break;
+    }
 
     case "document":
       // Scroll to start or end of document

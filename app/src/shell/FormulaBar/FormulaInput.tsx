@@ -15,12 +15,15 @@ export function FormulaInput(): React.ReactElement {
   const inputRef = useRef<HTMLInputElement>(null);
   const [displayValue, setDisplayValue] = React.useState("");
   const [isFocused, setIsFocused] = React.useState(false);
+  const [prevEditing, setPrevEditing] = React.useState(editing);
 
-  useEffect(() => {
+  // Sync displayValue with editing state (render-time derived state pattern)
+  if (editing !== prevEditing) {
+    setPrevEditing(editing);
     if (editing) {
       setDisplayValue(editing.value);
     }
-  }, [editing]);
+  }
 
   useEffect(() => {
     if (!editing && state.selection) {

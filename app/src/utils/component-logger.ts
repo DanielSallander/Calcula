@@ -135,6 +135,7 @@ interface WithLoggingOptions {
  *   export default withLogging(function MyComponent() { ... });
  */
 export function withLogging<P extends object>(
+  // eslint-disable-next-line @typescript-eslint/naming-convention -- React component type uses PascalCase
   WrappedComponent: React.ComponentType<P>,
   options: WithLoggingOptions = {}
 ): React.FC<P> {
@@ -158,6 +159,7 @@ export function withLogging<P extends object>(
 
     // Render logging (throttled)
     if (shouldLogRenders && mountedRef.current) {
+      // eslint-disable-next-line react-hooks/purity -- Date.now() needed for throttle timing in dev logger
       const now = Date.now();
       if (now - lastRenderTimeRef.current > config.renderThrottleMs) {
         renderCountRef.current++;

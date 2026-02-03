@@ -10,8 +10,11 @@ export default defineConfig({
   // This ensures Vite understands the shortcuts defined in tsconfig
   resolve: {
     alias: {
+      // eslint-disable-next-line @typescript-eslint/naming-convention
       '@api': path.resolve(__dirname, './src/api'),
+      // eslint-disable-next-line @typescript-eslint/naming-convention
       '@core': path.resolve(__dirname, './src/core'),
+      // eslint-disable-next-line @typescript-eslint/naming-convention
       '@shell': path.resolve(__dirname, './src/shell'),
     },
   },

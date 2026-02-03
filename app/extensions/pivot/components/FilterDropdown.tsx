@@ -1,5 +1,5 @@
 //! FILENAME: app/extensions/pivot/components/FilterDropdown.tsx
-import React, { useState, useCallback, useRef, useEffect } from 'react';
+import React, { useState, useCallback, useRef, useEffect, useMemo } from 'react';
 
 export interface FilterDropdownProps {
   fieldName: string;
@@ -20,15 +20,15 @@ export const FilterDropdown: React.FC<FilterDropdownProps> = ({
   onApply,
   onClose,
 }) => {
-  // CRITICAL FIX: Guard clause to prevent crash if anchorRect is undefined
-  // Must be BEFORE any hooks to follow Rules of Hooks
-  if (!anchorRect) {
-    return null;
-  }
-
-  // Defensive: ensure arrays are valid
-  const safeUniqueValues = Array.isArray(uniqueValues) ? uniqueValues : [];
-  const safeSelectedValues = Array.isArray(selectedValues) ? selectedValues : [];
+  // Defensive: ensure arrays are valid (memoized for stable deps)
+  const safeUniqueValues = useMemo(
+    () => Array.isArray(uniqueValues) ? uniqueValues : [],
+    [uniqueValues]
+  );
+  const safeSelectedValues = useMemo(
+    () => Array.isArray(selectedValues) ? selectedValues : [],
+    [selectedValues]
+  );
 
   const [localSelectedValues, setLocalSelectedValues] = useState<Set<string>>(
     new Set(safeSelectedValues)
@@ -60,10 +60,6 @@ export const FilterDropdown: React.FC<FilterDropdownProps> = ({
     return () => document.removeEventListener('keydown', handleKeyDown);
   }, [onClose]);
 
-  const filteredValues = safeUniqueValues.filter((v) =>
-    v.toLowerCase().includes(searchText.toLowerCase())
-  );
-
   const handleToggleValue = useCallback((value: string) => {
     setLocalSelectedValues((prev) => {
       const next = new Set(prev);
@@ -89,6 +85,15 @@ export const FilterDropdown: React.FC<FilterDropdownProps> = ({
     const hidden = safeUniqueValues.filter((v) => !localSelectedValues.has(v));
     await onApply(fieldIndex, selected, hidden);
   }, [fieldIndex, localSelectedValues, safeUniqueValues, onApply]);
+
+  // Guard clause AFTER all hooks to follow Rules of Hooks
+  if (!anchorRect) {
+    return null;
+  }
+
+  const filteredValues = safeUniqueValues.filter((v) =>
+    v.toLowerCase().includes(searchText.toLowerCase())
+  );
 
   return (
     <div

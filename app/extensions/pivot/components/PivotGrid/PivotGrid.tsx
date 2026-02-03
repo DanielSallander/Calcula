@@ -212,17 +212,6 @@ export const PivotGrid: React.FC<PivotGridProps> = ({
     const frozenRowCount = pivotView.column_header_row_count || 0;
     const frozenColCount = pivotView.row_label_col_count || 0;
 
-    // Calculate total dimensions
-    let totalHeight = 0;
-    for (const h of rowHeights) {
-      totalHeight += h;
-    }
-
-    let totalWidth = 0;
-    for (const w of colWidths) {
-      totalWidth += w;
-    }
-
     // Calculate visible rows
     let frozenHeight = 0;
     for (let r = 0; r < frozenRowCount && r < rowHeights.length; r++) {

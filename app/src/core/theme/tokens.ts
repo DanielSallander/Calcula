@@ -135,4 +135,8 @@ export const THEME_TOKENS = {
   SCROLLBAR_THUMB_BG_HOVER: '--scrollbar-thumb-bg-hover',
   SCROLLBAR_THUMB_BG_ACTIVE: '--scrollbar-thumb-bg-active',
   SCROLLBAR_THUMB_BORDER_COLOR: '--scrollbar-thumb-border-color',
+
+  // --- Ribbon ---
+  RIBBON_BUTTON_ACTIVE_BG: '--ribbon-button-active-bg',
+  RIBBON_BUTTON_HOVER_BG: '--ribbon-button-hover-bg',
 } as const;

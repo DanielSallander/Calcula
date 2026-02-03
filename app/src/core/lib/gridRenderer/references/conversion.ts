@@ -10,7 +10,7 @@ import { columnToLetter } from "../../../types";
  */
 export function formatSheetName(sheetName: string): string {
   // Check if quoting is needed (spaces, special chars, or starts with digit)
-  const needsQuoting = /[\s'!\[\]]/.test(sheetName) || /^\d/.test(sheetName);
+  const needsQuoting = /[\s'![\]]/.test(sheetName) || /^\d/.test(sheetName);
   
   if (needsQuoting) {
     // Escape any single quotes by doubling them

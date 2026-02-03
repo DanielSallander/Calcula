@@ -62,7 +62,7 @@ export function useSpreadsheetEditing({
 
   useEffect(() => {
     if (lastError) {
-      showStatus(`Error: ${lastError}`, 5000);
+      showStatus(`Error: ${lastError}`, 5000); // eslint-disable-line react-hooks/set-state-in-effect -- Reacting to error state change requires side effect (timer)
     }
   }, [lastError, showStatus]);
 

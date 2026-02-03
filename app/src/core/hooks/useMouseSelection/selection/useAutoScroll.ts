@@ -112,6 +112,7 @@ export function useAutoScroll(props: UseAutoScrollProps): UseAutoScrollReturn {
     }
 
     // Schedule next frame
+    // eslint-disable-next-line react-hooks/immutability -- Self-scheduling timer pattern requires self-reference
     autoScrollRef.current = window.setTimeout(runAutoScroll, DEFAULT_AUTO_SCROLL_CONFIG.intervalMs);
   }, [isDragging, isFormulaDragging, containerRef, scrollRef, config, viewport, dimensions, lastMousePosRef, formulaDragStartRef, dragStartRef, onScroll, onExtendTo, onUpdatePendingReference]);
 
