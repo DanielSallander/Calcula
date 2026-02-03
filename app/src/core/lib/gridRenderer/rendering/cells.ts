@@ -1,7 +1,7 @@
 //! FILENAME: app/src/core/lib/gridRenderer/rendering/cells.ts
 // PURPOSE: Cell text rendering with style support
 // CONTEXT: Draws cell content with formatting, colors, and truncation
-// UPDATED: Added merged cell rendering support
+// UPDATED: Added style interceptor support for conditional formatting
 
 import type { RenderState } from "../types";
 import { calculateVisibleRange } from "../layout/viewport";
@@ -9,6 +9,11 @@ import { getColumnWidth, getRowHeight } from "../layout/dimensions";
 import { getStyleFromCache, isValidColor, isDefaultTextColor, isDefaultBackgroundColor } from "../styles/styleUtils";
 import { isNumericValue, isErrorValue } from "../styles/cellFormatting";
 import { cellKey } from "../../../types";
+import { 
+  hasStyleInterceptors, 
+  applyStyleInterceptors,
+  type BaseStyleInfo 
+} from "../../../../api/styleInterceptors";
 
 /**
  * Draw text with ellipsis truncation if it exceeds the available width.
@@ -134,6 +139,7 @@ function getMasterCellKey(
  * Draw text content for all visible cells.
  * Applies cell styles from styleCache including colors, fonts, and formatting.
  * Handles merged cells by drawing master cells with expanded dimensions.
+ * Applies style interceptors for features like conditional formatting.
  */
 export function drawCellText(state: RenderState): void {
   const { ctx, width, height, config, viewport, theme, cells, editing, dimensions, styleCache, insertionAnimation } = state;
@@ -146,6 +152,9 @@ export function drawCellText(state: RenderState): void {
   
   // Padding inside cells
   const paddingX = 4;
+  
+  // Check if we need to run style interceptors
+  const useInterceptors = hasStyleInterceptors();
   
   // Calculate insertion/deletion animation offset
   let rowAnimOffset = 0;
@@ -259,7 +268,29 @@ export function drawCellText(state: RenderState): void {
 
       // Get style data from the styleCache using the cell's styleIndex
       const styleIndex = cell.styleIndex ?? 0;
-      const cellStyle = getStyleFromCache(styleCache, styleIndex);
+      const baseCellStyle = getStyleFromCache(styleCache, styleIndex);
+
+      // Build base style info for interceptors
+      let effectiveStyle: BaseStyleInfo = {
+        styleIndex,
+        backgroundColor: baseCellStyle.backgroundColor,
+        textColor: baseCellStyle.textColor,
+        bold: baseCellStyle.bold,
+        italic: baseCellStyle.italic,
+        underline: baseCellStyle.underline,
+        strikethrough: baseCellStyle.strikethrough,
+        fontSize: baseCellStyle.fontSize,
+        fontFamily: baseCellStyle.fontFamily,
+      };
+
+      // Apply style interceptors (e.g., conditional formatting)
+      if (useInterceptors) {
+        effectiveStyle = applyStyleInterceptors(
+          cell.display,
+          effectiveStyle,
+          { row, col }
+        );
+      }
 
       // Initialize style variables with theme defaults
       let textColor = theme.cellText;
@@ -274,49 +305,50 @@ export function drawCellText(state: RenderState): void {
 
       const displayValue = cell.display;
 
-      // Apply all style properties from cellStyle
-      if (cellStyle.bold === true) {
+      // Apply all style properties from effectiveStyle (includes interceptor overrides)
+      if (effectiveStyle.bold === true) {
         fontWeight = "bold";
       }
-      if (cellStyle.italic === true) {
+      if (effectiveStyle.italic === true) {
         fontStyle = "italic";
       }
-      if (cellStyle.underline === true) {
+      if (effectiveStyle.underline === true) {
         hasUnderline = true;
       }
-      if (cellStyle.strikethrough === true) {
+      if (effectiveStyle.strikethrough === true) {
         hasStrikethrough = true;
       }
       
-      if (typeof cellStyle.fontSize === "number" && cellStyle.fontSize > 0 && cellStyle.fontSize < 200) {
-        fontSize = cellStyle.fontSize;
+      if (typeof effectiveStyle.fontSize === "number" && effectiveStyle.fontSize > 0 && effectiveStyle.fontSize < 200) {
+        fontSize = effectiveStyle.fontSize;
       }
       
-      if (typeof cellStyle.fontFamily === "string" && cellStyle.fontFamily.trim() !== "") {
-        fontFamily = cellStyle.fontFamily;
+      if (typeof effectiveStyle.fontFamily === "string" && effectiveStyle.fontFamily.trim() !== "") {
+        fontFamily = effectiveStyle.fontFamily;
       }
       
-      const textColorValid = isValidColor(cellStyle.textColor);
-      const textColorIsDefault = isDefaultTextColor(cellStyle.textColor);
+      const textColorValid = isValidColor(effectiveStyle.textColor);
+      const textColorIsDefault = isDefaultTextColor(effectiveStyle.textColor);
       if (textColorValid && !textColorIsDefault) {
-        textColor = cellStyle.textColor;
+        textColor = effectiveStyle.textColor!;
       }
       
-      const bgColorValid = isValidColor(cellStyle.backgroundColor);
-      const bgColorIsDefault = isDefaultBackgroundColor(cellStyle.backgroundColor);
+      const bgColorValid = isValidColor(effectiveStyle.backgroundColor);
+      const bgColorIsDefault = isDefaultBackgroundColor(effectiveStyle.backgroundColor);
       if (bgColorValid && !bgColorIsDefault) {
-        backgroundColor = cellStyle.backgroundColor;
+        backgroundColor = effectiveStyle.backgroundColor!;
       }
       
-      if (cellStyle.textAlign === "left") {
+      // Get textAlign from base style (interceptors don't modify alignment)
+      if (baseCellStyle.textAlign === "left") {
         textAlign = "left";
-      } else if (cellStyle.textAlign === "center") {
+      } else if (baseCellStyle.textAlign === "center") {
         textAlign = "center";
-      } else if (cellStyle.textAlign === "right") {
+      } else if (baseCellStyle.textAlign === "right") {
         textAlign = "right";
       }
 
-      if (cellStyle.textAlign === "general" || cellStyle.textAlign === "") {
+      if (baseCellStyle.textAlign === "general" || baseCellStyle.textAlign === "") {
         if (isErrorValue(displayValue)) {
           textColor = theme.cellTextError;
           textAlign = "center";

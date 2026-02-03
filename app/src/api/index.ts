@@ -218,3 +218,19 @@ export type {
   OverlayLayer,
   AnchorRect,
 } from "./uiTypes";
+
+// Style Interceptors
+export {
+  registerStyleInterceptor,
+  unregisterStyleInterceptor,
+  hasStyleInterceptors,
+  markRangeDirty,
+  markSheetDirty,
+} from "./styleInterceptors";
+
+export type {
+  IStyleOverride,
+  CellCoords,
+  BaseStyleInfo,
+  StyleInterceptorFn,
+} from "./styleInterceptors";

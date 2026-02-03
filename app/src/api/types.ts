@@ -45,3 +45,10 @@ export {
   letterToColumn,
   isFormulaExpectingReference,
 } from "../core/types";
+
+export type {
+  IStyleOverride,
+  CellCoords,
+  BaseStyleInfo,
+  StyleInterceptorFn,
+} from "./styleInterceptors";
