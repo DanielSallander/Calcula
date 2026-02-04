@@ -26,6 +26,8 @@ import {
 } from "../api";
 // Extension management
 import { useExtensionInitializer, useExtensions } from "./hooks/useExtensions";
+// Hook-based menus that need to be rendered inside React tree
+import { StandardMenus } from "../../extensions/BuiltIn/StandardMenus/StandardMenus";
 
 /**
  * Loading screen shown while extensions are initializing.
@@ -127,6 +129,9 @@ function LayoutInner(): React.ReactElement {
         backgroundColor: "#ffffff",
       }}
     >
+      {/* Hook-based menus (renders nothing, just activates hooks) */}
+      <StandardMenus />
+
       {/* Menu Bar */}
       <MenuBar />
 

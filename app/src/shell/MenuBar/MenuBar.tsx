@@ -1,11 +1,12 @@
 //! FILENAME: app/src/shell/MenuBar/MenuBar.tsx
 import React, { useState, useEffect, useRef, useCallback } from 'react';
-import * as UI from '../../api/ui'; // Import the facade
+import * as UI from '../../api/ui';
+import { CommandRegistry } from '../../api/commands';
 import { restoreFocusToGrid } from './MenuBar.events';
 import * as S from './MenuBar.styles';
 
 // Re-export for external consumers
-export type { MenuItem, Menu } from './MenuBar.types'; // Legacy types, might want to deprecate later
+export type { MenuItem, Menu } from './MenuBar.types';
 
 export function MenuBar(): React.ReactElement {
   const [openMenu, setOpenMenu] = useState<string | null>(null);
@@ -18,6 +19,9 @@ export function MenuBar(): React.ReactElement {
     }
     else if (item.commandId) {
       console.log('Executing Command:', item.commandId);
+      CommandRegistry.execute(item.commandId).catch((err) => {
+        console.error(`[MenuBar] Failed to execute command ${item.commandId}:`, err);
+      });
     }
 
     setOpenMenu(null);
@@ -44,7 +48,6 @@ export function MenuBar(): React.ReactElement {
   }, []);
 
   // 3. Dynamic Keyboard Shortcuts
-  // Instead of hardcoding keys, we scan the registered menus for matching shortcuts.
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
       const target = e.target as HTMLElement;
@@ -52,14 +55,11 @@ export function MenuBar(): React.ReactElement {
                            target.tagName === 'TEXTAREA' ||
                            target.isContentEditable;
 
-      // Don't trigger shortcuts while typing in a cell/input, unless it's a specific override
-      // (This logic might need refinement based on exact requirements)
       if (isInputField && !e.ctrlKey && !e.metaKey) return;
 
       const keyCombo = parseKeyboardEvent(e);
       if (!keyCombo) return;
 
-      // Scan all menus for a matching shortcut
       for (const menu of menus) {
         for (const item of menu.items) {
           if (item.shortcut && normalizeShortcut(item.shortcut) === keyCombo) {
@@ -67,7 +67,7 @@ export function MenuBar(): React.ReactElement {
 
              e.preventDefault();
              executeMenuItem(item);
-             return; // Stop after first match
+             return;
           }
         }
       }
@@ -75,7 +75,7 @@ export function MenuBar(): React.ReactElement {
 
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [menus, executeMenuItem]); // Re-bind if menus change
+  }, [menus, executeMenuItem]);
 
   const handleMenuClick = (menuId: string) => {
     setOpenMenu(openMenu === menuId ? null : menuId);
@@ -131,21 +131,18 @@ export function MenuBar(): React.ReactElement {
   );
 }
 
-// Helper to normalize "Ctrl+S" vs "ctrl+s" for comparison
 function normalizeShortcut(shortcut: string): string {
   return shortcut.toLowerCase().replace(/\s/g, '');
 }
 
-// Helper to turn event into "ctrl+s" string
 function parseKeyboardEvent(e: KeyboardEvent): string | null {
-  if (!e.ctrlKey && !e.metaKey) return null; // Simplified for now
+  if (!e.ctrlKey && !e.metaKey) return null;
   
   const parts = [];
-  if (e.ctrlKey || e.metaKey) parts.push('ctrl'); // Treat cmd/ctrl as same
+  if (e.ctrlKey || e.metaKey) parts.push('ctrl');
   if (e.shiftKey) parts.push('shift');
   if (e.altKey) parts.push('alt');
   
-  // Ignore modifier key presses themselves
   if (['Control', 'Meta', 'Shift', 'Alt'].includes(e.key)) return null;
   
   parts.push(e.key.toLowerCase());

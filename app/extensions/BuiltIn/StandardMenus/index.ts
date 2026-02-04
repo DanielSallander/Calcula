@@ -1,6 +1,6 @@
 //! FILENAME: app/extensions/BuiltIn/StandardMenus/index.ts
 // PURPOSE: Standard Menus extension module.
-// CONTEXT: Registers File, Edit, View, Insert menus.
+// CONTEXT: Registers Edit menu. File, View, Insert are handled by StandardMenus.tsx hooks.
 // NOTE: Default exports an ExtensionModule object per the contract.
 
 import type { ExtensionModule, ExtensionContext } from "../../../src/api/contract";
@@ -17,24 +17,9 @@ let isActivated = false;
 // Menu Definitions
 // ============================================================================
 
-function registerFileMenu(): void {
-  const fileMenu: MenuDefinition = {
-    id: "file",
-    label: "File",
-    order: 10,
-    items: [
-      { id: "file:new", label: "New", shortcut: "Ctrl+N", commandId: "core.file.new" },
-      { id: "file:open", label: "Open...", shortcut: "Ctrl+O", commandId: "core.file.open" },
-      { id: "file:save", label: "Save", shortcut: "Ctrl+S", commandId: "core.file.save" },
-      { id: "file:saveAs", label: "Save As...", shortcut: "Ctrl+Shift+S", commandId: "core.file.saveAs" },
-      { id: "file:sep1", label: "", separator: true },
-      { id: "file:export", label: "Export...", commandId: "core.file.export" },
-      { id: "file:sep2", label: "", separator: true },
-      { id: "file:close", label: "Close", commandId: "core.file.close" },
-    ],
-  };
-  registerMenu(fileMenu);
-}
+// NOTE: File, View, and Insert menus are handled by StandardMenus.tsx component
+// which uses React hooks for reactive state (checkmarks, dynamic items).
+// Only Edit menu is registered here since it's purely command-based.
 
 function registerEditMenu(context: ExtensionContext): void {
   const editMenu: MenuDefinition = {
@@ -68,40 +53,6 @@ function registerEditMenu(context: ExtensionContext): void {
   registerMenu(editMenu);
 }
 
-function registerViewMenu(): void {
-  const viewMenu: MenuDefinition = {
-    id: "view",
-    label: "View",
-    order: 30,
-    items: [
-      { id: "view:freezePanes", label: "Freeze Panes", commandId: CoreCommands.FREEZE_PANES },
-      { id: "view:sep1", label: "", separator: true },
-      { id: "view:gridlines", label: "Gridlines", commandId: "core.view.gridlines" },
-      { id: "view:headers", label: "Headers", commandId: "core.view.headers" },
-      { id: "view:formulaBar", label: "Formula Bar", commandId: "core.view.formulaBar" },
-    ],
-  };
-  registerMenu(viewMenu);
-}
-
-function registerInsertMenu(): void {
-  const insertMenu: MenuDefinition = {
-    id: "insert",
-    label: "Insert",
-    order: 40,
-    items: [
-      { id: "insert:row", label: "Row", commandId: CoreCommands.INSERT_ROW },
-      { id: "insert:column", label: "Column", commandId: CoreCommands.INSERT_COLUMN },
-      { id: "insert:sep1", label: "", separator: true },
-      { id: "insert:cells", label: "Cells...", commandId: "core.insert.cells" },
-      { id: "insert:sep2", label: "", separator: true },
-      { id: "insert:chart", label: "Chart...", commandId: "core.insert.chart" },
-      { id: "insert:image", label: "Image...", commandId: "core.insert.image" },
-    ],
-  };
-  registerMenu(insertMenu);
-}
-
 // ============================================================================
 // Activation
 // ============================================================================
@@ -114,11 +65,9 @@ function activate(context: ExtensionContext): void {
 
   console.log("[StandardMenusExtension] Activating...");
 
-  // Register all standard menus
-  registerFileMenu();
+  // Only register Edit menu here
+  // File, View, Insert are handled by StandardMenus.tsx component (hook-based)
   registerEditMenu(context);
-  registerViewMenu();
-  registerInsertMenu();
 
   isActivated = true;
   console.log("[StandardMenusExtension] Activated successfully.");
@@ -134,7 +83,6 @@ function deactivate(): void {
   }
 
   console.log("[StandardMenusExtension] Deactivating...");
-  // Note: Menu unregistration would go here if MenuRegistry supported it
   isActivated = false;
   console.log("[StandardMenusExtension] Deactivated.");
 }
@@ -148,7 +96,7 @@ const extension: ExtensionModule = {
     id: "calcula.builtin.standard-menus",
     name: "Standard Menus",
     version: "1.0.0",
-    description: "Provides File, Edit, View, and Insert menus.",
+    description: "Provides standard application menus.",
   },
   activate,
   deactivate,

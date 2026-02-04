@@ -1,3 +1,5 @@
-## Selection after paste
-When copying a range and pasting it it should move the selection to those cells it paste to.
-For example, I copy range A1:A3. I paste in cell B1. It should after the paste operation move the selection to B1:B3, basically the cells that was pasted.
+## Menu commands
+It seems like none of the menu commands are working (the commands under File, Edit etc.)
+For instance, I click "View" > "Freeze Panes" nothing happens.
+But I can see in the console: 
+Executing Command: core.grid.freeze
