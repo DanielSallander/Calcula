@@ -6,7 +6,7 @@
 import React, { useCallback, useEffect, useRef } from "react";
 import { useGridState, useGridContext } from "../../state";
 // FIX: Removed openFind import to resolve SyntaxError
-import { setViewportDimensions } from "../../state/gridActions";
+import { setViewportDimensions, setAllDimensions } from "../../state/gridActions";
 import { GridCanvas } from "../Grid";
 import { InlineEditor } from "../InlineEditor";
 import { Scrollbar, ScrollbarCorner } from "../Scrollbar/Scrollbar";
@@ -18,6 +18,8 @@ import {
   insertColumns,
   deleteRows,
   deleteColumns,
+  getAllColumnWidths,
+  getAllRowHeights,
 } from "../../lib/tauri-api";
 import { cellEvents } from "../../lib/cellEvents";
 import { getCellFromPixel } from "../../lib/gridRenderer";
@@ -83,6 +85,33 @@ function SpreadsheetContent({
 
   // 5. Extract freezeConfig from gridState
   const { freezeConfig } = gridState;
+
+  // -------------------------------------------------------------------------
+  // Helper: Refresh dimensions from backend
+  // -------------------------------------------------------------------------
+  const refreshDimensions = useCallback(async () => {
+    try {
+      const [colWidths, rowHeights] = await Promise.all([
+        getAllColumnWidths(),
+        getAllRowHeights(),
+      ]);
+
+      const columnWidthsMap = new Map<number, number>();
+      for (const item of colWidths) {
+        columnWidthsMap.set(item.index, item.size);
+      }
+
+      const rowHeightsMap = new Map<number, number>();
+      for (const item of rowHeights) {
+        rowHeightsMap.set(item.index, item.size);
+      }
+
+      dispatch(setAllDimensions(columnWidthsMap, rowHeightsMap));
+      console.log("[Spreadsheet] Dimensions refreshed from backend");
+    } catch (error) {
+      console.error("[Spreadsheet] Failed to refresh dimensions:", error);
+    }
+  }, [dispatch]);
 
   // -------------------------------------------------------------------------
   // Menu Event Listeners for Cut/Copy/Paste
@@ -155,6 +184,9 @@ function SpreadsheetContent({
     try {
       await insertRows(startRow, count);
 
+      // Refresh dimensions from backend (row heights shifted)
+      await refreshDimensions();
+
       await canvasRef.current?.refreshCells();
       await canvasRef.current?.animateRowInsertion(startRow, count, 200);
 
@@ -170,7 +202,7 @@ function SpreadsheetContent({
     } catch (error) {
       console.error("[Spreadsheet] Failed to insert rows:", error);
     }
-  }, [selection, canvasRef]);
+  }, [selection, canvasRef, refreshDimensions]);
 
   // -------------------------------------------------------------------------
   // Insert Column Handler
@@ -187,6 +219,9 @@ function SpreadsheetContent({
     try {
       await insertColumns(startCol, count);
 
+      // Refresh dimensions from backend (column widths shifted)
+      await refreshDimensions();
+
       await canvasRef.current?.refreshCells();
       await canvasRef.current?.animateColumnInsertion(startCol, count, 200);
 
@@ -202,7 +237,7 @@ function SpreadsheetContent({
     } catch (error) {
       console.error("[Spreadsheet] Failed to insert columns:", error);
     }
-  }, [selection, canvasRef]);
+  }, [selection, canvasRef, refreshDimensions]);
 
   // -------------------------------------------------------------------------
   // Delete Row Handler
@@ -219,6 +254,9 @@ function SpreadsheetContent({
     try {
       await deleteRows(startRow, count);
 
+      // Refresh dimensions from backend (row heights shifted)
+      await refreshDimensions();
+
       await canvasRef.current?.refreshCells();
       await canvasRef.current?.animateRowDeletion(startRow, count, 200);
 
@@ -234,7 +272,7 @@ function SpreadsheetContent({
     } catch (error) {
       console.error("[Spreadsheet] Failed to delete rows:", error);
     }
-  }, [selection, canvasRef]);
+  }, [selection, canvasRef, refreshDimensions]);
 
   // -------------------------------------------------------------------------
   // Delete Column Handler
@@ -251,6 +289,9 @@ function SpreadsheetContent({
     try {
       await deleteColumns(startCol, count);
 
+      // Refresh dimensions from backend (column widths shifted)
+      await refreshDimensions();
+
       await canvasRef.current?.refreshCells();
       await canvasRef.current?.animateColumnDeletion(startCol, count, 200);
 
@@ -266,7 +307,7 @@ function SpreadsheetContent({
     } catch (error) {
       console.error("[Spreadsheet] Failed to delete columns:", error);
     }
-  }, [selection, canvasRef]);
+  }, [selection, canvasRef, refreshDimensions]);
 
   // -------------------------------------------------------------------------
   // Register Command Handlers

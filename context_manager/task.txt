@@ -1,72 +1,9 @@
-## Feature Specification: Dynamic Visual Interceptors (Conditional Formatting)
+## Shifting columns and rows
+I notice that if I insert a column or row it correctly shifts the values in the existing cells a corresponding amount of rows down or colums to the left.
+Vice versa, deleting columns and rows works as expected.
+However, it does not shift the size of the columns and rows, this is something we must fix.
+For example, I resize column C to have width X. Then I insert a column at column B.
+I would then expect column C to shift one step to the left so that column now has have width X.
 
-This specification outlines the integration of **Conditional Formatting** into the Calcula engine. To maintain our strict Microkernel Architecture, we will not bake "formatting rules" into the engine. Instead, we will introduce a **Visual Interceptor Bridge** in the API, allowing the Core to remain a "dumb" coordinate-and-pixel renderer while the Extension handles the complex business logic of evaluation.
-
----
-
-### 1. Architectural Decision
-
-* **Verdict:** **Extension** (Logic) + **API Bridge** (Generic Interceptor).
-* **Placement Reasoning:** Conditional Formatting is a high-level feature. The Core should not know what a "Greater Than" rule is, nor should it care about "Red Backgrounds." However, the Core currently lacks a way for external modules to modify the visual state of a cell *just before* it hits the GPU/Canvas. We will implement a generic **Style Interceptor Pipeline** in the API. This prevents "Kernel Bloat" by keeping the logic in the extension while providing the necessary "hooks" for the feature to perform at scale.
-
----
-
-### 2. Core Implementation (Rust/TS)
-
-* **Generic Capability:** **The Style Interceptor.** The Core will be updated to support a "Middleware" pattern for cell styling. When the renderer requests the style for coordinate , it will pass the base style through a list of registered interceptors.
-* **Performance Considerations:** Since this sits in the hot path of the 60fps rendering loop, interceptors must be synchronous and highly optimized. We will implement a **Dirty-Range Cache** in the Core; if the underlying data in a range hasn't changed, the Core will skip the interceptor pass and use the cached visual result.
-
----
-
-### 3. API Layer (The Bridge)
-
-* **Contract Definition:** We will add `IStyleInterceptor` and `IConditionalRule` to `app/src/api`.
-```typescript
-interface IStyleOverride {
-    backgroundColor?: string;
-    textColor?: string;
-    fontSize?: number;
-}
-
-type StyleInterceptorFn = (cellValue: any, baseStyle: IStyleOverride, coords: {row: number, col: number}) => IStyleOverride;
-
-```
-
-* **Hook/Event:** * `api.render.registerStyleInterceptor(id: string, callback: StyleInterceptorFn)`: Allows the extension to hook into the render pipeline.
-* `api.sheets.onDataChanged`: A registry of listeners that the extension will use to trigger a re-evaluation of which cells are "dirty."
-
-
----
-
-### 4. Extension Implementation
-
-* **Folder Location:** `app/extensions/_standard/conditional-formatting`
-* **Logic Flow:**
-1. The extension maintains a private **Rule Engine**.
-2. It registers a `StyleInterceptor` via the API.
-3. When the Core renders a cell, the extension's interceptor checks the cell value against the active rules (e.g., `if value > 100`).
-4. If a match is found, it returns the `IStyleOverride` (e.g., `{ backgroundColor: 'red' }`); otherwise, it returns the `baseStyle` untouched.
-
-* **UI Integration:**
-* **Ribbon:** Add a "Conditional Formatting" dropdown in the "Home" tab.
-* **Modals:** A "Rule Manager" dialog for creating, editing, and prioritizing rules.
-* **Context Menu:** "Quick Format" options when right-clicking a selection.
-
----
-
-### 5. Step-by-Step Implementation Plan
-
-1. [ ] **Phase 1 (Kernel/API):** * Modify the `CellRenderer` in the Core to support an array of interceptor callbacks.
-* Expose `registerStyleInterceptor` in the `app/src/api` layer.
-* Implement "RequestRender" signaling so extensions can tell the Core to redraw when a rule is added.
-
-2. [ ] **Phase 2 (Extension):** * Create the `conditional-formatting` extension directory.
-* Implement the `RuleEvaluator` (contains the logic for "Between", "Equal To", "Top 10%", etc.).
-* Build the React-based UI for the Rule Manager and link it to the Extension's state.
-
-3. [ ] **Phase 3 (Verification):** * **Isolation Test:** Disable the Conditional Formatting extension. Ensure the Core has zero references to "rules" or "formatting logic" and continues to render plain grids.
-* **Alien Test:** Ensure a 3rd-party plugin can use the same `registerStyleInterceptor` to create a "Heatmap" extension without modifying a single line of Core code.
-
-## Current status
-Phase 1 is complete, now please proceed with phase 2
----
+In addition, I would like to add to the right click menu the ability to type in the width of a column, and the height of a row.
+Much like one is able to do that in Excel.

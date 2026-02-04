@@ -59,6 +59,7 @@ const GROUP_ORDER: Record<string, number> = {
 
 // Import gridCommands for use in registerCoreGridContextMenu
 import { gridCommands } from "../../core/lib/gridCommands";
+import { setColumnWidth, setRowHeight, getColumnWidth, getRowHeight } from "../../core/lib/tauri-api";
 
 // ============================================================================
 // Grid Extension Registry
@@ -192,6 +193,11 @@ export const gridExtensions = new GridExtensionRegistry();
 // ============================================================================
 // Built-in Context Menu Items (Core functionality)
 // ============================================================================
+
+/** Default column width in pixels */
+const DEFAULT_COLUMN_WIDTH = 100;
+/** Default row height in pixels */
+const DEFAULT_ROW_HEIGHT = 24;
 
 /** Register the default/core context menu items */
 export function registerCoreGridContextMenu(): void {
@@ -337,6 +343,96 @@ export function registerCoreGridContextMenu(): void {
   });
 
   // -------------------------------------------------------------------------
+  // Format Group - Column Width and Row Height
+  // -------------------------------------------------------------------------
+  gridExtensions.registerContextMenuItem({
+    id: "core:columnWidth",
+    label: "Column Width...",
+    group: GridMenuGroups.FORMAT,
+    order: 10,
+    // Only visible when columns are selected
+    visible: (ctx) => ctx.selection?.type === "columns",
+    disabled: false,
+    onClick: async (ctx) => {
+      if (!ctx.selection || ctx.selection.type !== "columns") return;
+      
+      const startCol = Math.min(ctx.selection.startCol, ctx.selection.endCol);
+      const endCol = Math.max(ctx.selection.startCol, ctx.selection.endCol);
+      
+      // Get the current width of the first selected column
+      const currentWidth = await getColumnWidth(startCol) ?? DEFAULT_COLUMN_WIDTH;
+      
+      // Prompt user for new width
+      const input = window.prompt(
+        `Enter column width (in pixels):`,
+        String(Math.round(currentWidth))
+      );
+      
+      if (input === null) return; // User cancelled
+      
+      const newWidth = parseFloat(input);
+      if (isNaN(newWidth) || newWidth <= 0) {
+        alert("Please enter a valid positive number for column width.");
+        return;
+      }
+      
+      // Apply the width to all selected columns
+      for (let col = startCol; col <= endCol; col++) {
+        await setColumnWidth(col, newWidth);
+      }
+      
+      console.log(`[GridMenu] Set column width to ${newWidth}px for columns ${startCol}-${endCol}`);
+      
+      // Trigger grid refresh
+      window.dispatchEvent(new CustomEvent("grid:refresh"));
+    },
+  });
+
+  gridExtensions.registerContextMenuItem({
+    id: "core:rowHeight",
+    label: "Row Height...",
+    group: GridMenuGroups.FORMAT,
+    order: 20,
+    separatorAfter: true,
+    // Only visible when rows are selected
+    visible: (ctx) => ctx.selection?.type === "rows",
+    disabled: false,
+    onClick: async (ctx) => {
+      if (!ctx.selection || ctx.selection.type !== "rows") return;
+      
+      const startRow = Math.min(ctx.selection.startRow, ctx.selection.endRow);
+      const endRow = Math.max(ctx.selection.startRow, ctx.selection.endRow);
+      
+      // Get the current height of the first selected row
+      const currentHeight = await getRowHeight(startRow) ?? DEFAULT_ROW_HEIGHT;
+      
+      // Prompt user for new height
+      const input = window.prompt(
+        `Enter row height (in pixels):`,
+        String(Math.round(currentHeight))
+      );
+      
+      if (input === null) return; // User cancelled
+      
+      const newHeight = parseFloat(input);
+      if (isNaN(newHeight) || newHeight <= 0) {
+        alert("Please enter a valid positive number for row height.");
+        return;
+      }
+      
+      // Apply the height to all selected rows
+      for (let row = startRow; row <= endRow; row++) {
+        await setRowHeight(row, newHeight);
+      }
+      
+      console.log(`[GridMenu] Set row height to ${newHeight}px for rows ${startRow}-${endRow}`);
+      
+      // Trigger grid refresh
+      window.dispatchEvent(new CustomEvent("grid:refresh"));
+    },
+  });
+
+  // -------------------------------------------------------------------------
   // Developer Group (only in dev mode)
   // -------------------------------------------------------------------------
   if (import.meta.env.DEV) {
@@ -358,4 +454,3 @@ export function registerCoreGridContextMenu(): void {
     });
   }
 }
-
