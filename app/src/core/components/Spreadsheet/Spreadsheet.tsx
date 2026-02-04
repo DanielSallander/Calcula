@@ -126,7 +126,7 @@ function SpreadsheetContent({
     const handleMenuPaste = () => {
       handlePaste();
     };
-    // FIX: Removed legacy Find/Replace handlers. 
+    // FIX: Removed legacy Find/Replace handlers.
     // These events are now handled by the FindReplaceDialog extension.
 
     window.addEventListener(AppEvents.CUT, handleMenuCut);
@@ -139,6 +139,21 @@ function SpreadsheetContent({
       window.removeEventListener(AppEvents.PASTE, handleMenuPaste);
     };
   }, [handleCut, handleCopy, handlePaste, dispatch]);
+
+  // -------------------------------------------------------------------------
+  // Dimensions Refresh Listener (from context menu column width / row height)
+  // -------------------------------------------------------------------------
+  useEffect(() => {
+    const handleDimensionsRefresh = () => {
+      refreshDimensions();
+    };
+
+    window.addEventListener("dimensions:refresh", handleDimensionsRefresh);
+
+    return () => {
+      window.removeEventListener("dimensions:refresh", handleDimensionsRefresh);
+    };
+  }, [refreshDimensions]);
 
   // -------------------------------------------------------------------------
   // Clear Contents Handler

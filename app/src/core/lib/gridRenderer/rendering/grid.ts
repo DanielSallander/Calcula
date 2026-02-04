@@ -138,7 +138,7 @@ function getLineSegments(
  * Handles merged cells by not drawing internal grid lines.
  */
 export function drawGridLines(state: RenderState): void {
-  const { ctx, width, height, config, viewport, theme, dimensions, cells } = state;
+  const { ctx, width, height, config, viewport, theme, dimensions, cells, insertionAnimation } = state;
   const rowHeaderWidth = config.rowHeaderWidth || 50;
   const colHeaderHeight = config.colHeaderHeight || 24;
   const totalRows = config.totalRows || 1000;
@@ -147,10 +147,32 @@ export function drawGridLines(state: RenderState): void {
   const range = calculateVisibleRange(viewport, config, width, height, dimensions);
   ctx.strokeStyle = theme.gridLine;
   ctx.lineWidth = 1;
-  
+
+  // Calculate insertion/deletion animation offsets (same logic as cells.ts)
+  let rowAnimOffset = 0;
+  let colAnimOffset = 0;
+  let rowAnimIndex = -1;
+  let colAnimIndex = -1;
+
+  if (insertionAnimation) {
+    const totalOffset = insertionAnimation.targetSize * insertionAnimation.count;
+    const remainingOffset = (1 - insertionAnimation.progress) * totalOffset;
+
+    if (insertionAnimation.type === "row") {
+      rowAnimIndex = insertionAnimation.index;
+      rowAnimOffset = insertionAnimation.direction === "insert" ? -remainingOffset : remainingOffset;
+    } else {
+      colAnimIndex = insertionAnimation.index;
+      colAnimOffset = insertionAnimation.direction === "insert" ? -remainingOffset : remainingOffset;
+    }
+  }
+
   // Draw vertical lines with merge-aware gaps
-  let x = rowHeaderWidth + range.offsetX;
+  let baseX = rowHeaderWidth + range.offsetX;
   for (let col = range.startCol; col <= range.endCol + 1 && col <= totalCols; col++) {
+    // Apply animation offset for columns at or after the change point
+    const x = col >= colAnimIndex && colAnimIndex >= 0 ? baseX + colAnimOffset : baseX;
+
     if (x >= rowHeaderWidth && x <= width) {
       // Get segments that should be drawn (excluding merged cell interiors)
       const segments = getLineSegments(
@@ -160,19 +182,23 @@ export function drawGridLines(state: RenderState): void {
         range.startRow,
         range.endRow
       );
-      
+
       for (const segment of segments) {
-        // Calculate Y positions for this segment
-        let segmentStartY = colHeaderHeight + range.offsetY;
+        // Calculate Y positions for this segment with animation offset
+        let segmentStartBaseY = colHeaderHeight + range.offsetY;
         for (let r = range.startRow; r < segment.start; r++) {
-          segmentStartY += getRowHeight(r, config, dimensions);
+          segmentStartBaseY += getRowHeight(r, config, dimensions);
         }
-        
-        let segmentEndY = segmentStartY;
+        const segmentStartY = segment.start >= rowAnimIndex && rowAnimIndex >= 0
+          ? segmentStartBaseY + rowAnimOffset : segmentStartBaseY;
+
+        let segmentEndBaseY = segmentStartBaseY;
         for (let r = segment.start; r < segment.end && r <= range.endRow; r++) {
-          segmentEndY += getRowHeight(r, config, dimensions);
+          segmentEndBaseY += getRowHeight(r, config, dimensions);
         }
-        
+        const segmentEndY = segment.end >= rowAnimIndex && rowAnimIndex >= 0
+          ? segmentEndBaseY + rowAnimOffset : segmentEndBaseY;
+
         ctx.beginPath();
         ctx.moveTo(Math.floor(x) + 0.5, Math.max(segmentStartY, colHeaderHeight));
         ctx.lineTo(Math.floor(x) + 0.5, Math.min(segmentEndY, height));
@@ -180,13 +206,16 @@ export function drawGridLines(state: RenderState): void {
       }
     }
     if (col <= range.endCol) {
-      x += getColumnWidth(col, config, dimensions);
+      baseX += getColumnWidth(col, config, dimensions);
     }
   }
-  
+
   // Draw horizontal lines with merge-aware gaps
-  let y = colHeaderHeight + range.offsetY;
+  let baseY = colHeaderHeight + range.offsetY;
   for (let row = range.startRow; row <= range.endRow + 1 && row <= totalRows; row++) {
+    // Apply animation offset for rows at or after the change point
+    const y = row >= rowAnimIndex && rowAnimIndex >= 0 ? baseY + rowAnimOffset : baseY;
+
     if (y >= colHeaderHeight && y <= height) {
       // Get segments that should be drawn (excluding merged cell interiors)
       const segments = getLineSegments(
@@ -196,19 +225,23 @@ export function drawGridLines(state: RenderState): void {
         range.startCol,
         range.endCol
       );
-      
+
       for (const segment of segments) {
-        // Calculate X positions for this segment
-        let segmentStartX = rowHeaderWidth + range.offsetX;
+        // Calculate X positions for this segment with animation offset
+        let segmentStartBaseX = rowHeaderWidth + range.offsetX;
         for (let c = range.startCol; c < segment.start; c++) {
-          segmentStartX += getColumnWidth(c, config, dimensions);
+          segmentStartBaseX += getColumnWidth(c, config, dimensions);
         }
-        
-        let segmentEndX = segmentStartX;
+        const segmentStartX = segment.start >= colAnimIndex && colAnimIndex >= 0
+          ? segmentStartBaseX + colAnimOffset : segmentStartBaseX;
+
+        let segmentEndBaseX = segmentStartBaseX;
         for (let c = segment.start; c < segment.end && c <= range.endCol; c++) {
-          segmentEndX += getColumnWidth(c, config, dimensions);
+          segmentEndBaseX += getColumnWidth(c, config, dimensions);
         }
-        
+        const segmentEndX = segment.end >= colAnimIndex && colAnimIndex >= 0
+          ? segmentEndBaseX + colAnimOffset : segmentEndBaseX;
+
         ctx.beginPath();
         ctx.moveTo(Math.max(segmentStartX, rowHeaderWidth), Math.floor(y) + 0.5);
         ctx.lineTo(Math.min(segmentEndX, width), Math.floor(y) + 0.5);
@@ -216,7 +249,7 @@ export function drawGridLines(state: RenderState): void {
       }
     }
     if (row <= range.endRow) {
-      y += getRowHeight(row, config, dimensions);
+      baseY += getRowHeight(row, config, dimensions);
     }
   }
 }

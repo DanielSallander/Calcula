@@ -380,10 +380,11 @@ export function registerCoreGridContextMenu(): void {
       for (let col = startCol; col <= endCol; col++) {
         await setColumnWidth(col, newWidth);
       }
-      
+
       console.log(`[GridMenu] Set column width to ${newWidth}px for columns ${startCol}-${endCol}`);
-      
-      // Trigger grid refresh
+
+      // Refresh frontend dimension state and redraw
+      window.dispatchEvent(new CustomEvent("dimensions:refresh"));
       window.dispatchEvent(new CustomEvent("grid:refresh"));
     },
   });
@@ -424,10 +425,11 @@ export function registerCoreGridContextMenu(): void {
       for (let row = startRow; row <= endRow; row++) {
         await setRowHeight(row, newHeight);
       }
-      
+
       console.log(`[GridMenu] Set row height to ${newHeight}px for rows ${startRow}-${endRow}`);
-      
-      // Trigger grid refresh
+
+      // Refresh frontend dimension state and redraw
+      window.dispatchEvent(new CustomEvent("dimensions:refresh"));
       window.dispatchEvent(new CustomEvent("grid:refresh"));
     },
   });

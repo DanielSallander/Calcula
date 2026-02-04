@@ -199,57 +199,76 @@ export function useFillHandle(): UseFillHandleReturn {
 
   /**
    * Get the fill handle position in pixels.
+   * The fill handle is at the bottom-right corner of the selection bounding box.
    */
   const getFillHandlePosition = useCallback((): { x: number; y: number; visible: boolean } | null => {
     if (!selection) return null;
 
-    const activeRow = selection.endRow;
-    const activeCol = selection.endCol;
+    // Use bounding box (maxRow/maxCol), not endRow/endCol,
+    // so the handle position matches the rendering regardless of selection direction
+    const maxRow = Math.max(selection.startRow, selection.endRow);
+    const maxCol = Math.max(selection.startCol, selection.endCol);
+    const minRow = Math.min(selection.startRow, selection.endRow);
+    const minCol = Math.min(selection.startCol, selection.endCol);
 
-    // Get visible range
-    const containerWidth = 800; // Default, should be passed in
-    const containerHeight = 600;
+    // Use large container dimensions to avoid clipping issues
+    const containerWidth = 2000;
+    const containerHeight = 2000;
     const range = calculateVisibleRange(viewport, config, containerWidth, containerHeight, dimensions);
 
-    // Check if cell is visible
+    // Check if bottom-right cell is visible
     if (
-      activeRow < range.startRow ||
-      activeRow > range.endRow ||
-      activeCol < range.startCol ||
-      activeCol > range.endCol
+      maxRow < range.startRow ||
+      maxRow > range.endRow ||
+      maxCol < range.startCol ||
+      maxCol > range.endCol
     ) {
       return { x: 0, y: 0, visible: false };
     }
 
-    const cellWidth = getColumnWidth(activeCol, config, dimensions);
-    const cellHeight = getRowHeight(activeRow, config, dimensions);
-    const x = getColumnX(activeCol, config, dimensions, range.startCol, range.offsetX);
-    const y = getRowY(activeRow, config, dimensions, range.startRow, range.offsetY);
+    // Calculate x2, y2 of the selection bounding box (matches selection.ts rendering)
+    const x1 = getColumnX(minCol, config, dimensions, range.startCol, range.offsetX);
+    let x2 = x1;
+    for (let c = minCol; c <= maxCol; c++) {
+      x2 += getColumnWidth(c, config, dimensions);
+    }
+
+    const y1 = getRowY(minRow, config, dimensions, range.startRow, range.offsetY);
+    let y2 = y1;
+    for (let r = minRow; r <= maxRow; r++) {
+      y2 += getRowHeight(r, config, dimensions);
+    }
 
     return {
-      x: x + cellWidth,
-      y: y + cellHeight,
+      x: x2,
+      y: y2,
       visible: true,
     };
   }, [selection, viewport, config, dimensions]);
 
   /**
    * Check if mouse position is over the fill handle.
+   * Uses handleSize=8 and hit padding=3 to match the rendering in selection.ts.
    */
   const isOverFillHandle = useCallback(
     (mouseX: number, mouseY: number): boolean => {
       const handlePos = getFillHandlePosition();
       if (!handlePos || !handlePos.visible) return false;
 
-      const handleSize = 6;
-      const handleX = handlePos.x - handleSize / 2 - 1;
-      const handleY = handlePos.y - handleSize / 2 - 1;
+      // Match the rendering code in selection.ts:
+      // borderX2 = x2 - 1, handleX = borderX2 - handleSize/2
+      const handleSize = 8;
+      const borderX = handlePos.x - 1;
+      const borderY = handlePos.y - 1;
+      const handleX = borderX - handleSize / 2;
+      const handleY = borderY - handleSize / 2;
 
+      const hitPadding = 3;
       return (
-        mouseX >= handleX - 3 &&
-        mouseX <= handleX + handleSize + 3 &&
-        mouseY >= handleY - 3 &&
-        mouseY <= handleY + handleSize + 3
+        mouseX >= handleX - handleSize / 2 - hitPadding &&
+        mouseX <= handleX + handleSize / 2 + hitPadding &&
+        mouseY >= handleY - handleSize / 2 - hitPadding &&
+        mouseY <= handleY + handleSize / 2 + hitPadding
       );
     },
     [getFillHandlePosition]
@@ -262,16 +281,20 @@ export function useFillHandle(): UseFillHandleReturn {
     (_mouseX: number, _mouseY: number) => {
       if (!selection) return;
 
+      // Use bounding box max as the drag anchor (fill handle is at bottom-right)
+      const maxRow = Math.max(selection.startRow, selection.endRow);
+      const maxCol = Math.max(selection.startCol, selection.endCol);
+
       dragStartRef.current = {
-        row: selection.endRow,
-        col: selection.endCol,
+        row: maxRow,
+        col: maxCol,
       };
 
       setFillState({
         isDragging: true,
         direction: null,
-        targetRow: selection.endRow,
-        targetCol: selection.endCol,
+        targetRow: maxRow,
+        targetCol: maxCol,
         previewRange: { ...selection },
       });
 
@@ -287,9 +310,13 @@ export function useFillHandle(): UseFillHandleReturn {
     (mouseX: number, mouseY: number) => {
       if (!fillState.isDragging || !selection || !dragStartRef.current) return;
 
+      // Use bounding box for direction calculation
+      const selMaxRow = Math.max(selection.startRow, selection.endRow);
+      const selMaxCol = Math.max(selection.startCol, selection.endCol);
+
       // Convert mouse position to cell
-      const containerWidth = 800;
-      const containerHeight = 600;
+      const containerWidth = 2000;
+      const containerHeight = 2000;
       const range = calculateVisibleRange(viewport, config, containerWidth, containerHeight, dimensions);
 
       // Find cell under mouse
@@ -320,24 +347,23 @@ export function useFillHandle(): UseFillHandleReturn {
       }
 
       // Determine direction (constrain to single axis)
-      const rowDiff = targetRow - selection.endRow;
-      const colDiff = targetCol - selection.endCol;
+      // Use bounding box max for comparison since fill handle is at bottom-right
+      const rowDiff = targetRow - selMaxRow;
+      const colDiff = targetCol - selMaxCol;
 
       if (Math.abs(rowDiff) > Math.abs(colDiff)) {
-        // Vertical fill
-        targetCol = selection.endCol;
+        // Vertical fill - constrain column to selection max
+        targetCol = selMaxCol;
         direction = rowDiff > 0 ? "down" : rowDiff < 0 ? "up" : null;
       } else if (colDiff !== 0) {
-        // Horizontal fill
-        targetRow = selection.endRow;
+        // Horizontal fill - constrain row to selection max
+        targetRow = selMaxRow;
         direction = colDiff > 0 ? "right" : "left";
       }
 
       // Build preview range
       const selMinRow = Math.min(selection.startRow, selection.endRow);
-      const selMaxRow = Math.max(selection.startRow, selection.endRow);
       const selMinCol = Math.min(selection.startCol, selection.endCol);
-      const selMaxCol = Math.max(selection.startCol, selection.endCol);
 
       let previewRange: Selection;
       

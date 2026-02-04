@@ -31,10 +31,20 @@ export function drawCorner(state: RenderState): void {
  * Supports freeze panes - frozen column headers are drawn at fixed positions.
  */
 export function drawColumnHeaders(state: RenderState): void {
-  const { ctx, width, height, config, viewport, theme, selection, dimensions, freezeConfig } = state;
+  const { ctx, width, height, config, viewport, theme, selection, dimensions, freezeConfig, insertionAnimation } = state;
   const rowHeaderWidth = config.rowHeaderWidth || 50;
   const colHeaderHeight = config.colHeaderHeight || 24;
   const totalCols = config.totalCols || 100;
+
+  // Calculate column insertion/deletion animation offset (same logic as cells.ts)
+  let colAnimOffset = 0;
+  let colAnimIndex = -1;
+  if (insertionAnimation && insertionAnimation.type === "column") {
+    const totalOffset = insertionAnimation.targetSize * insertionAnimation.count;
+    const remainingOffset = (1 - insertionAnimation.progress) * totalOffset;
+    colAnimIndex = insertionAnimation.index;
+    colAnimOffset = insertionAnimation.direction === "insert" ? -remainingOffset : remainingOffset;
+  }
 
   // Draw header background
   ctx.fillStyle = theme.headerBackground;
@@ -181,14 +191,24 @@ export function drawColumnHeaders(state: RenderState): void {
   } else {
     // Standard rendering without freeze panes
     const range = calculateVisibleRange(viewport, config, width, height, dimensions);
-    let x = rowHeaderWidth + range.offsetX;
+
+    // Clip column headers to the header area (prevents animation overflow into row headers)
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(rowHeaderWidth, 0, width - rowHeaderWidth, colHeaderHeight);
+    ctx.clip();
+
+    let baseX = rowHeaderWidth + range.offsetX;
 
     for (let col = range.startCol; col <= range.endCol && col < totalCols; col++) {
       const colWidth = getColumnWidth(col, config, dimensions);
 
+      // Apply animation offset for columns at or after the change point
+      const x = col >= colAnimIndex && colAnimIndex >= 0 ? baseX + colAnimOffset : baseX;
+
       // Skip if outside visible area
       if (x + colWidth < rowHeaderWidth || x > width) {
-        x += colWidth;
+        baseX += colWidth;
         continue;
       }
 
@@ -216,8 +236,10 @@ export function drawColumnHeaders(state: RenderState): void {
       ctx.fillStyle = isFullySelected ? theme.headerHighlightText : isSelected ? "#1a5fb4" : theme.headerText;
       ctx.fillText(columnToLetter(col), x + colWidth / 2, colHeaderHeight / 2);
 
-      x += colWidth;
+      baseX += colWidth;
     }
+
+    ctx.restore();
   }
 
   // Draw bottom border of header row
@@ -234,10 +256,20 @@ export function drawColumnHeaders(state: RenderState): void {
  * Supports freeze panes - frozen row headers are drawn at fixed positions.
  */
 export function drawRowHeaders(state: RenderState): void {
-  const { ctx, width, height, config, viewport, theme, selection, dimensions, freezeConfig } = state;
+  const { ctx, width, height, config, viewport, theme, selection, dimensions, freezeConfig, insertionAnimation } = state;
   const rowHeaderWidth = config.rowHeaderWidth || 50;
   const colHeaderHeight = config.colHeaderHeight || 24;
   const totalRows = config.totalRows || 1000;
+
+  // Calculate row insertion/deletion animation offset (same logic as cells.ts)
+  let rowAnimOffset = 0;
+  let rowAnimIndex = -1;
+  if (insertionAnimation && insertionAnimation.type === "row") {
+    const totalOffset = insertionAnimation.targetSize * insertionAnimation.count;
+    const remainingOffset = (1 - insertionAnimation.progress) * totalOffset;
+    rowAnimIndex = insertionAnimation.index;
+    rowAnimOffset = insertionAnimation.direction === "insert" ? -remainingOffset : remainingOffset;
+  }
 
   // Draw header background
   ctx.fillStyle = theme.headerBackground;
@@ -384,14 +416,24 @@ export function drawRowHeaders(state: RenderState): void {
   } else {
     // Standard rendering without freeze panes
     const range = calculateVisibleRange(viewport, config, width, height, dimensions);
-    let y = colHeaderHeight + range.offsetY;
+
+    // Clip row headers to the header area (prevents animation overflow into column headers)
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(0, colHeaderHeight, rowHeaderWidth, height - colHeaderHeight);
+    ctx.clip();
+
+    let baseY = colHeaderHeight + range.offsetY;
 
     for (let row = range.startRow; row <= range.endRow && row < totalRows; row++) {
       const rowHeight = getRowHeight(row, config, dimensions);
-      
+
+      // Apply animation offset for rows at or after the change point
+      const y = row >= rowAnimIndex && rowAnimIndex >= 0 ? baseY + rowAnimOffset : baseY;
+
       // Skip if outside visible area
       if (y + rowHeight < colHeaderHeight || y > height) {
-        y += rowHeight;
+        baseY += rowHeight;
         continue;
       }
 
@@ -419,8 +461,10 @@ export function drawRowHeaders(state: RenderState): void {
       ctx.fillStyle = isFullySelected ? theme.headerHighlightText : isSelected ? "#1a5fb4" : theme.headerText;
       ctx.fillText(String(row + 1), rowHeaderWidth / 2, y + rowHeight / 2);
 
-      y += rowHeight;
+      baseY += rowHeight;
     }
+
+    ctx.restore();
   }
   
   // Draw right border of header column
