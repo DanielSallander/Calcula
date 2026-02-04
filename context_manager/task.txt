@@ -1,9 +1,3 @@
-## Shifting columns and rows
-I notice that if I insert a column or row it correctly shifts the values in the existing cells a corresponding amount of rows down or colums to the left.
-Vice versa, deleting columns and rows works as expected.
-However, it does not shift the size of the columns and rows, this is something we must fix.
-For example, I resize column C to have width X. Then I insert a column at column B.
-I would then expect column C to shift one step to the left so that column now has have width X.
-
-In addition, I would like to add to the right click menu the ability to type in the width of a column, and the height of a row.
-Much like one is able to do that in Excel.
+## Selection after paste
+When copying a range and pasting it it should move the selection to those cells it paste to.
+For example, I copy range A1:A3. I paste in cell B1. It should after the paste operation move the selection to B1:B3, basically the cells that was pasted.

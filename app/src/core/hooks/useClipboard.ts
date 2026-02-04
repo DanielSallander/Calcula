@@ -2,12 +2,14 @@
 // PURPOSE: Custom hook for clipboard operations (cut, copy, paste).
 // CONTEXT: Handles reading/writing to system clipboard and cell data operations.
 // Updated: Added clearClipboardState for ESC key handling.
+// Updated: Selection now moves to pasted range after paste.
+// Updated: Copy source remains active after paste (only cut clears clipboard).
 
 import { useCallback, useRef } from "react";
 import { useGridContext } from "../state/GridContext";
 import { getCell, updateCell, clearCell } from "../lib/tauri-api";
 import { cellEvents } from "../lib/cellEvents";
-import { setClipboard, clearClipboard } from "../state/gridActions";
+import { setClipboard, clearClipboard, setSelection } from "../state/gridActions";
 import type { Selection, CellData, ClipboardMode } from "../types";
 
 /**
@@ -210,6 +212,8 @@ export function useClipboard(): UseClipboardReturn {
     let cellsToPaste: (CellData | null)[][] | null = null;
     let pasteWidth = 1;
     let pasteHeight = 1;
+    // Track if we're using internal clipboard (for deciding whether to clear after paste)
+    let usingInternalClipboard = false;
 
     if (
       internalClipboard &&
@@ -219,6 +223,7 @@ export function useClipboard(): UseClipboardReturn {
       cellsToPaste = internalClipboard.cells;
       pasteHeight = cellsToPaste.length;
       pasteWidth = cellsToPaste[0]?.length || 1;
+      usingInternalClipboard = true;
       console.log("[Clipboard] Using internal clipboard data");
     } else if (textToPaste) {
       // Parse text from system clipboard (tab/newline separated)
@@ -245,6 +250,13 @@ export function useClipboard(): UseClipboardReturn {
     // Determine target range
     const targetRow = Math.min(selection.startRow, selection.endRow);
     const targetCol = Math.min(selection.startCol, selection.endCol);
+
+    // Calculate actual paste bounds (clamped to grid bounds)
+    const actualPasteHeight = Math.min(pasteHeight, config.totalRows - targetRow);
+    const actualPasteWidth = Math.min(pasteWidth, config.totalCols - targetCol);
+
+    // Track if this was a cut operation (need to check before we potentially modify internalClipboard)
+    const wasCutOperation = usingInternalClipboard && internalClipboard?.isCut;
 
     try {
       // Paste cells
@@ -281,7 +293,7 @@ export function useClipboard(): UseClipboardReturn {
       }
 
       // If this was a cut operation, clear the source cells
-      if (internalClipboard?.isCut && cutSourceRef.current) {
+      if (wasCutOperation && cutSourceRef.current) {
         const src = cutSourceRef.current;
         const srcMinRow = Math.min(src.startRow, src.endRow);
         const srcMaxRow = Math.max(src.startRow, src.endRow);
@@ -319,12 +331,32 @@ export function useClipboard(): UseClipboardReturn {
         if (internalClipboard) {
           internalClipboard.isCut = false;
         }
+
+        // Clear clipboard visual state only after cut+paste (cut is one-time operation)
+        dispatch(clearClipboard());
+        console.log("[Clipboard] Cut+paste complete, clipboard cleared");
+      } else {
+        // Copy+paste: keep clipboard active for multiple pastes
+        console.log("[Clipboard] Copy+paste complete, clipboard remains active");
       }
 
-      // Clear clipboard visual state after paste
-      dispatch(clearClipboard());
+      // Update selection to cover the pasted range
+      const pastedEndRow = targetRow + actualPasteHeight - 1;
+      const pastedEndCol = targetCol + actualPasteWidth - 1;
       
-      console.log("[Clipboard] Paste complete");
+      dispatch(setSelection({
+        startRow: targetRow,
+        startCol: targetCol,
+        endRow: pastedEndRow,
+        endCol: pastedEndCol,
+      }));
+      
+      console.log("[Clipboard] Selection moved to pasted range:", {
+        startRow: targetRow,
+        startCol: targetCol,
+        endRow: pastedEndRow,
+        endCol: pastedEndCol,
+      });
     } catch (error) {
       console.error("[Clipboard] Paste failed:", error);
     }
