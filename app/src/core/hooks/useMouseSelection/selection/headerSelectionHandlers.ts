@@ -3,6 +3,10 @@
 // CONTEXT: Creates handlers for column and row header clicks, supporting
 // entire column/row selection and shift-click to extend selections.
 // FIX: Right-click within existing header selection now preserves the selection.
+// FIX: Drag selection now works in both directions (left-to-right and right-to-left for columns,
+//      top-to-bottom and bottom-to-top for rows) by keeping the start position as anchor.
+// FIX: Eliminated flickering by only calling onExtendTo when the column/row actually changes,
+//      and by not resetting the selection start on every mouse move.
 
 import type { GridConfig, Viewport, Selection, SelectionType, DimensionOverrides } from "../../../types";
 import type { MousePosition, HeaderDragState } from "../types";
@@ -86,6 +90,9 @@ export function createHeaderSelectionHandlers(deps: HeaderSelectionDependencies)
     lastMousePosRef,
   } = deps;
 
+  // Track the last extended index to avoid redundant updates
+  let lastExtendedIndex: number | null = null;
+
   /**
    * Handle mouse down on column header.
    * Returns true if the event was handled.
@@ -132,6 +139,8 @@ export function createHeaderSelectionHandlers(deps: HeaderSelectionDependencies)
       setIsDragging(true);
       headerDragRef.current = { type: "column", startIndex: headerCol };
       lastMousePosRef.current = { x: mouseX, y: mouseY };
+      // Reset last extended index for new drag operation
+      lastExtendedIndex = headerCol;
     }
 
     return true;
@@ -183,6 +192,8 @@ export function createHeaderSelectionHandlers(deps: HeaderSelectionDependencies)
       setIsDragging(true);
       headerDragRef.current = { type: "row", startIndex: headerRow };
       lastMousePosRef.current = { x: mouseX, y: mouseY };
+      // Reset last extended index for new drag operation
+      lastExtendedIndex = headerRow;
     }
 
     return true;
@@ -191,6 +202,10 @@ export function createHeaderSelectionHandlers(deps: HeaderSelectionDependencies)
   /**
    * Handle mouse move during header drag.
    * Extends the column or row selection as the mouse moves.
+   * The startIndex is kept as the anchor point, allowing selection
+   * in both directions (e.g., left-to-right AND right-to-left for columns).
+   * 
+   * Only updates when the target column/row actually changes to prevent flickering.
    */
   const handleHeaderDragMove = (mouseX: number, mouseY: number): void => {
     if (!headerDragRef.current) {
@@ -201,21 +216,23 @@ export function createHeaderSelectionHandlers(deps: HeaderSelectionDependencies)
 
     if (type === "column") {
       const currentCol = getColumnFromHeader(mouseX, mouseY, config, viewport, dimensions);
-      if (currentCol !== null && onSelectColumn) {
-        // Extend column selection by setting selection range
-        const minCol = Math.min(startIndex, currentCol);
-        const maxCol = Math.max(startIndex, currentCol);
-        onSelectCell(0, minCol, "columns");
-        onExtendTo(config.totalRows - 1, maxCol);
+      if (currentCol !== null && currentCol !== lastExtendedIndex) {
+        // Only update if the column actually changed
+        lastExtendedIndex = currentCol;
+        // Extend column selection from startIndex (anchor) to currentCol
+        // Do NOT call onSelectCell here - it was already called in handleColumnHeaderMouseDown
+        // Just extend to the new column
+        onExtendTo(config.totalRows - 1, currentCol);
       }
     } else {
       const currentRow = getRowFromHeader(mouseX, mouseY, config, viewport, dimensions);
-      if (currentRow !== null && onSelectRow) {
-        // Extend row selection
-        const minRow = Math.min(startIndex, currentRow);
-        const maxRow = Math.max(startIndex, currentRow);
-        onSelectCell(minRow, 0, "rows");
-        onExtendTo(maxRow, config.totalCols - 1);
+      if (currentRow !== null && currentRow !== lastExtendedIndex) {
+        // Only update if the row actually changed
+        lastExtendedIndex = currentRow;
+        // Extend row selection from startIndex (anchor) to currentRow
+        // Do NOT call onSelectCell here - it was already called in handleRowHeaderMouseDown
+        // Just extend to the new row
+        onExtendTo(currentRow, config.totalCols - 1);
       }
     }
   };

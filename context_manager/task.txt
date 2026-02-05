@@ -1,5 +1,9 @@
-## Menu commands
-It seems like none of the menu commands are working (the commands under File, Edit etc.)
-For instance, I click "View" > "Freeze Panes" nothing happens.
-But I can see in the console: 
-Executing Command: core.grid.freeze
+## Drag selection
+When drag selecting columns it works when drag selecting from left to right but not from right to left. 
+Same with rows, it works when drag selecting top to down but not down to up. 
+This should be changed so that columns and rows can be drag selected from both directions.
+
+I notice also that when drag selecting a column from left to right, while holding down the mouse button, 
+the selection flickers between the top cell in the column you start in and selection that is held.
+
+So in general we need to improve the smoothness of the drag selection here.
