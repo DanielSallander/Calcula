@@ -14,6 +14,8 @@
 // FIX: Column/row references now use limited bounds for visual highlighting
 //      to prevent performance issues with large ranges
 // FIX: startEdit now resolves to master cell when editing merged cells
+// FIX: Added globalEditingValue for synchronous formula mode checking
+// FIX: Dispatch formula:referenceInserted event to restore focus after inserting references
 
 import { autoCompleteFormula } from "../lib/formulaCompletion";
 import { useCallback, useState, useEffect, useRef } from "react";
@@ -54,10 +56,21 @@ import { checkEditGuards } from "../lib/editGuards";
 let globalIsEditing = false;
 
 /**
+ * MODULE-LEVEL variable for synchronous formula value checking.
+ * FIX: This allows checking if we're in formula mode without waiting for React to re-render.
+ * When the user types "+" in a formula, this is updated immediately, so a subsequent
+ * mouse click can correctly detect formula mode and insert a cell reference.
+ */
+let globalEditingValue = "";
+
+/**
  * Set the global editing flag. Used internally by the hook.
  */
 export function setGlobalIsEditing(value: boolean): void {
   globalIsEditing = value;
+  if (!value) {
+    globalEditingValue = "";
+  }
 }
 
 /**
@@ -68,6 +81,29 @@ export function getGlobalIsEditing(): boolean {
 }
 
 /**
+ * Set the global editing value. Updated synchronously when the user types.
+ */
+export function setGlobalEditingValue(value: string): void {
+  globalEditingValue = value;
+}
+
+/**
+ * Get the global editing value.
+ */
+export function getGlobalEditingValue(): string {
+  return globalEditingValue;
+}
+
+/**
+ * Check if currently in formula mode synchronously.
+ * FIX: This checks the global editing value immediately, without waiting for React state.
+ * Use this in event handlers where the React state might be stale.
+ */
+export function isGlobalFormulaMode(): boolean {
+  return globalIsEditing && isFormulaExpectingReference(globalEditingValue);
+}
+
+/**
  * Maximum rows/cols to include in formula reference highlighting.
  * This prevents performance issues when highlighting entire column/row references.
  * The visual highlight will show this many rows/cols, which is sufficient for
@@ -75,6 +111,14 @@ export function getGlobalIsEditing(): boolean {
  */
 const MAX_FORMULA_REFERENCE_ROWS = 1000;
 const MAX_FORMULA_REFERENCE_COLS = 100;
+
+/**
+ * FIX: Dispatch event to trigger refocus of the InlineEditor after inserting a reference.
+ * This ensures the user can continue typing after clicking a cell to add a reference.
+ */
+function dispatchReferenceInsertedEvent(): void {
+  window.dispatchEvent(new CustomEvent("formula:referenceInserted"));
+}
 
 /**
  * Return type for the useEditing hook.
@@ -352,6 +396,9 @@ export function useEditing(): UseEditingReturn {
         }
       }
       
+      // FIX: Update global editing value synchronously for formula mode detection
+      setGlobalEditingValue(value);
+      
       // Dispatch with the correct value (either provided or fetched)
       // Include rowSpan/colSpan for the InlineEditor to use
       dispatch(
@@ -430,6 +477,9 @@ export function useEditing(): UseEditingReturn {
           console.error("[useEditing] Failed to get merge info:", error);
         }
         
+        // FIX: Update global editing value synchronously for formula mode detection
+        setGlobalEditingValue(initialValue);
+        
         dispatch(
           startEditingAction({
             row: editRow,
@@ -451,9 +501,13 @@ export function useEditing(): UseEditingReturn {
 
   /**
    * Update the current editing value.
+   * FIX: Also updates global editing value synchronously for formula mode detection.
    */
   const updateValue = useCallback(
     (value: string) => {
+      // FIX: Update global value synchronously BEFORE dispatching to React state
+      // This ensures formula mode is detected immediately when the user types "+"
+      setGlobalEditingValue(value);
       dispatch(updateEditing(value));
     },
     [dispatch]
@@ -462,6 +516,7 @@ export function useEditing(): UseEditingReturn {
   /**
    * Insert a cell reference into the current formula.
    * Includes sheet prefix if on a different sheet.
+   * FIX: Dispatches event to restore focus to InlineEditor.
    */
   const insertReference = useCallback(
     (row: number, col: number) => {
@@ -473,6 +528,9 @@ export function useEditing(): UseEditingReturn {
       const sourceSheet = getSourceSheetName();
       const reference = rangeToReference(row, col, row, col, targetSheet, sourceSheet);
       const newValue = editing.value + reference;
+      
+      // FIX: Update global value synchronously
+      setGlobalEditingValue(newValue);
       dispatch(updateEditing(newValue));
 
       const newRef: FormulaReference = {
@@ -484,6 +542,9 @@ export function useEditing(): UseEditingReturn {
       };
       dispatch(setFormulaReferences([...formulaReferences, newRef]));
       setPendingReference(null);
+      
+      // FIX: Dispatch event to restore focus to the InlineEditor
+      dispatchReferenceInsertedEvent();
     },
     [editing, dispatch, formulaReferences, getNextReferenceColor, getTargetSheetName, getSourceSheetName]
   );
@@ -491,6 +552,7 @@ export function useEditing(): UseEditingReturn {
   /**
    * Insert a range reference into the current formula.
    * Includes sheet prefix if on a different sheet.
+   * FIX: Dispatches event to restore focus to InlineEditor.
    */
   const insertRangeReference = useCallback(
     (startRow: number, startCol: number, endRow: number, endCol: number) => {
@@ -502,6 +564,9 @@ export function useEditing(): UseEditingReturn {
       const sourceSheet = getSourceSheetName();
       const reference = rangeToReference(startRow, startCol, endRow, endCol, targetSheet, sourceSheet);
       const newValue = editing.value + reference;
+      
+      // FIX: Update global value synchronously
+      setGlobalEditingValue(newValue);
       dispatch(updateEditing(newValue));
 
       const newRef: FormulaReference = {
@@ -513,6 +578,9 @@ export function useEditing(): UseEditingReturn {
       };
       dispatch(setFormulaReferences([...formulaReferences.filter(r => r !== pendingReference), newRef]));
       setPendingReference(null);
+      
+      // FIX: Dispatch event to restore focus to the InlineEditor
+      dispatchReferenceInsertedEvent();
     },
     [editing, dispatch, formulaReferences, pendingReference, getNextReferenceColor, getTargetSheetName, getSourceSheetName]
   );
@@ -521,6 +589,7 @@ export function useEditing(): UseEditingReturn {
    * Insert a column reference into the current formula.
    * Includes sheet prefix if on a different sheet.
    * FIX: Use limited bounds for visual highlighting.
+   * FIX: Dispatches event to restore focus to InlineEditor.
    */
   const insertColumnReference = useCallback(
     (col: number) => {
@@ -532,6 +601,9 @@ export function useEditing(): UseEditingReturn {
       const sourceSheet = getSourceSheetName();
       const reference = columnToReference(col, targetSheet, sourceSheet);
       const newValue = editing.value + reference;
+      
+      // FIX: Update global value synchronously
+      setGlobalEditingValue(newValue);
       dispatch(updateEditing(newValue));
 
       // FIX: Use limited bounds instead of totalRows to prevent performance issues
@@ -548,6 +620,9 @@ export function useEditing(): UseEditingReturn {
       };
       dispatch(setFormulaReferences([...formulaReferences.filter(r => r !== pendingReference), newRef]));
       setPendingReference(null);
+      
+      // FIX: Dispatch event to restore focus to the InlineEditor
+      dispatchReferenceInsertedEvent();
     },
     [editing, dispatch, formulaReferences, pendingReference, getNextReferenceColor, config, getTargetSheetName, getSourceSheetName]
   );
@@ -556,6 +631,7 @@ export function useEditing(): UseEditingReturn {
    * Insert a column range reference into the current formula.
    * Includes sheet prefix if on a different sheet.
    * FIX: Use limited bounds for visual highlighting.
+   * FIX: Dispatches event to restore focus to InlineEditor.
    */
   const insertColumnRangeReference = useCallback(
     (startCol: number, endCol: number) => {
@@ -567,6 +643,9 @@ export function useEditing(): UseEditingReturn {
       const sourceSheet = getSourceSheetName();
       const reference = columnRangeToReference(startCol, endCol, targetSheet, sourceSheet);
       const newValue = editing.value + reference;
+      
+      // FIX: Update global value synchronously
+      setGlobalEditingValue(newValue);
       dispatch(updateEditing(newValue));
 
       // FIX: Use limited bounds instead of totalRows to prevent performance issues
@@ -583,6 +662,9 @@ export function useEditing(): UseEditingReturn {
       };
       dispatch(setFormulaReferences([...formulaReferences.filter(r => r !== pendingReference), newRef]));
       setPendingReference(null);
+      
+      // FIX: Dispatch event to restore focus to the InlineEditor
+      dispatchReferenceInsertedEvent();
     },
     [editing, dispatch, formulaReferences, pendingReference, getNextReferenceColor, config, getTargetSheetName, getSourceSheetName]
   );
@@ -591,6 +673,7 @@ export function useEditing(): UseEditingReturn {
    * Insert a row reference into the current formula.
    * Includes sheet prefix if on a different sheet.
    * FIX: Use limited bounds for visual highlighting.
+   * FIX: Dispatches event to restore focus to InlineEditor.
    */
   const insertRowReference = useCallback(
     (row: number) => {
@@ -602,6 +685,9 @@ export function useEditing(): UseEditingReturn {
       const sourceSheet = getSourceSheetName();
       const reference = rowToReference(row, targetSheet, sourceSheet);
       const newValue = editing.value + reference;
+      
+      // FIX: Update global value synchronously
+      setGlobalEditingValue(newValue);
       dispatch(updateEditing(newValue));
 
       // FIX: Use limited bounds instead of totalCols to prevent performance issues
@@ -616,6 +702,9 @@ export function useEditing(): UseEditingReturn {
       };
       dispatch(setFormulaReferences([...formulaReferences.filter(r => r !== pendingReference), newRef]));
       setPendingReference(null);
+      
+      // FIX: Dispatch event to restore focus to the InlineEditor
+      dispatchReferenceInsertedEvent();
     },
     [editing, dispatch, formulaReferences, pendingReference, getNextReferenceColor, config, getTargetSheetName, getSourceSheetName]
   );
@@ -624,6 +713,7 @@ export function useEditing(): UseEditingReturn {
    * Insert a row range reference into the current formula.
    * Includes sheet prefix if on a different sheet.
    * FIX: Use limited bounds for visual highlighting.
+   * FIX: Dispatches event to restore focus to InlineEditor.
    */
   const insertRowRangeReference = useCallback(
     (startRow: number, endRow: number) => {
@@ -635,6 +725,9 @@ export function useEditing(): UseEditingReturn {
       const sourceSheet = getSourceSheetName();
       const reference = rowRangeToReference(startRow, endRow, targetSheet, sourceSheet);
       const newValue = editing.value + reference;
+      
+      // FIX: Update global value synchronously
+      setGlobalEditingValue(newValue);
       dispatch(updateEditing(newValue));
 
       // FIX: Use limited bounds instead of totalCols to prevent performance issues
@@ -651,6 +744,9 @@ export function useEditing(): UseEditingReturn {
       };
       dispatch(setFormulaReferences([...formulaReferences.filter(r => r !== pendingReference), newRef]));
       setPendingReference(null);
+      
+      // FIX: Dispatch event to restore focus to the InlineEditor
+      dispatchReferenceInsertedEvent();
     },
     [editing, dispatch, formulaReferences, pendingReference, getNextReferenceColor, config, getTargetSheetName, getSourceSheetName]
   );
@@ -670,6 +766,7 @@ export function useEditing(): UseEditingReturn {
       if (!editing) {
         // FIX: Clear global flag even on early return to prevent stuck state
         setGlobalIsEditing(false);
+        setGlobalEditingValue("");
         return null;
       }
 
@@ -729,6 +826,7 @@ export function useEditing(): UseEditingReturn {
       
       // FIX: Clear global flag when editing stops
       setGlobalIsEditing(false);
+      setGlobalEditingValue("");
       
       if (primaryCell) {
         cellEvents.emit({
@@ -785,6 +883,7 @@ export function useEditing(): UseEditingReturn {
       
       // FIX: Clear global flag on error too
       setGlobalIsEditing(false);
+      setGlobalEditingValue("");
       
       dispatch(stopEditing());
       dispatch(clearFormulaReferences());
@@ -810,6 +909,7 @@ export function useEditing(): UseEditingReturn {
   const cancelEdit = useCallback(async () => {
     // FIX: Clear global flag immediately
     setGlobalIsEditing(false);
+    setGlobalEditingValue("");
     
     if (!editing) {
       setLastError(null);
@@ -909,6 +1009,9 @@ export function useEditing(): UseEditingReturn {
       } catch (error) {
         console.error("[useEditing] Failed to get merge info:", error);
       }
+      
+      // FIX: Update global editing value synchronously
+      setGlobalEditingValue(initialChar || "");
       
       dispatch(
         startEditingAction({

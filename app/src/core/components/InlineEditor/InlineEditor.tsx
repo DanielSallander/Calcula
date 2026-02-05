@@ -218,7 +218,7 @@ export function InlineEditor(props: InlineEditorProps): React.ReactElement | nul
   // Get current sheet context to determine if we should render
   const { state: gridState } = useGridContext();
   const currentSheetIndex = gridState.sheetContext.activeSheetIndex;
-  // Counter to force refocus after sheet switches
+  // Counter to force refocus after sheet switches or formula reference insertions
   const [refocusTrigger, setRefocusTrigger] = useState(0);
 
   // Ensure we have valid dimensions
@@ -372,6 +372,25 @@ export function InlineEditor(props: InlineEditorProps): React.ReactElement | nul
     
     return () => {
       window.removeEventListener("sheet:formulaModeSwitch", handleFormulaModeSheetSwitch);
+    };
+  }, []);
+
+  /**
+   * FIX: Listen for formula reference insertion events.
+   * When the user clicks a cell to add a reference during formula editing,
+   * we need to refocus the input so they can continue typing.
+   */
+  useEffect(() => {
+    const handleReferenceInserted = () => {
+      console.log("[InlineEditor] Reference inserted, will refocus");
+      // Trigger a refocus by updating the trigger counter
+      setRefocusTrigger(prev => prev + 1);
+    };
+
+    window.addEventListener("formula:referenceInserted", handleReferenceInserted);
+    
+    return () => {
+      window.removeEventListener("formula:referenceInserted", handleReferenceInserted);
     };
   }, []);
 

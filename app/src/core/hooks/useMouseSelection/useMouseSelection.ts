@@ -1,6 +1,8 @@
 //! FILENAME: app/src/core/hooks/useMouseSelection/useMouseSelection.ts
 // PURPOSE: Main hook for handling mouse-based selection interactions.
 // CONTEXT: Updated to use custom Excel-style cursor images for header selection.
+// FIX: Now checks formula mode synchronously using isGlobalFormulaMode() to handle
+//      cases where the user types "+" and clicks before React re-renders.
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import type {
@@ -22,6 +24,7 @@ import { createFormulaHandlers } from "./editing/formulaHandlers";
 import { createFormulaHeaderHandlers } from "./editing/formulaHeaderHandlers";
 import { createResizeHandlers } from "./layout/resizeHandlers";
 import { createFillHandleCursorChecker } from "./utils/fillHandleUtils";
+import { isGlobalFormulaMode } from "../../hooks/useEditing";
 
 // Custom cursor data URLs for Excel-style header selection arrows
 const COLUMN_SELECT_CURSOR = `url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='24' height='24' viewBox='0 0 24 24'%3E%3Cpath d='M12 2 L12 18 M12 18 L8 14 M12 18 L16 14' stroke='black' stroke-width='2' fill='none' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E") 12 12, pointer`;
@@ -212,6 +215,10 @@ export function useMouseSelection(props: UseMouseSelectionProps): UseMouseSelect
    * consistency with handleGlobalMouseMove, which also uses containerRef.current.
    * Using event.currentTarget would cause coordinate discrepancies if the event
    * target differs from containerRef.
+   * 
+   * FIX: Now checks formula mode synchronously using isGlobalFormulaMode() in addition
+   * to the isFormulaMode prop. This handles cases where the user types "+" and clicks
+   * before React has re-rendered with the updated state.
    */
   const handleMouseDown = useCallback(
     async (event: React.MouseEvent<HTMLElement>) => {
@@ -229,8 +236,14 @@ export function useMouseSelection(props: UseMouseSelectionProps): UseMouseSelect
         return;
       }
 
+      // FIX: Check formula mode synchronously at event time, not just from props
+      // The isFormulaMode prop might be stale if the user just typed "+" and
+      // React hasn't re-rendered yet. isGlobalFormulaMode() checks the actual
+      // current editing value synchronously.
+      const isCurrentlyFormulaMode = isFormulaMode || isGlobalFormulaMode();
+
       // Priority 2: Check for column header click
-      if (isFormulaMode) {
+      if (isCurrentlyFormulaMode) {
         // Formula mode: insert column reference
         if (formulaHeaderHandlers.handleFormulaColumnHeaderMouseDown(mouseX, mouseY, event)) {
           return;
