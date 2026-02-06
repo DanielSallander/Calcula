@@ -795,8 +795,82 @@ pub fn shift_formula_col_references(formula: &str, from_col: u32, delta: i32) ->
     }).to_string()
 }
 
+/// Convert a column letter string (e.g., "A", "AA", "AZ") to a 0-based index.
+/// Extracted as a shared helper for formula manipulation functions.
+fn col_letters_to_index(col: &str) -> u32 {
+    let mut index: u32 = 0;
+    for ch in col.to_uppercase().chars() {
+        index = index * 26 + (ch as u32 - 'A' as u32 + 1);
+    }
+    index - 1
+}
+
+/// Normalize inverted ranges in a formula after reference shifting.
+///
+/// During fill operations, a relative reference can shift past an absolute
+/// anchor, producing an inverted range where start > end. For example:
+///   =SUM(I10:$I$11)  filled down by 3  -->  =SUM(I13:$I$11)   [row 13 > 11]
+///
+/// This function detects such inversions and swaps the two cell references
+/// so the range is valid:
+///   =SUM(I13:$I$11)  -->  =SUM($I$11:I13)
+///
+/// The $ (absolute) markers travel with their original reference, preserving
+/// fill semantics for any future operations on the result.
+fn normalize_inverted_ranges(formula: &str) -> String {
+    use regex::Regex;
+
+    // Match a cell-range pattern: CellRef:CellRef
+    // Each CellRef = optional($) + col_letters + optional($) + row_digits
+    // The outer group captures the full "start:end" so we can replace it.
+    let range_re = Regex::new(
+        r"(\$?)([A-Za-z]+)(\$?)(\d+):(\$?)([A-Za-z]+)(\$?)(\d+)"
+    ).unwrap();
+
+    range_re.replace_all(formula, |caps: &regex::Captures| {
+        let s_col_abs = &caps[1];
+        let s_col     = &caps[2];
+        let s_row_abs = &caps[3];
+        let s_row: u32 = caps[4].parse().unwrap_or(0);
+
+        let e_col_abs = &caps[5];
+        let e_col     = &caps[6];
+        let e_row_abs = &caps[7];
+        let e_row: u32 = caps[8].parse().unwrap_or(0);
+
+        let s_col_idx = col_letters_to_index(s_col);
+        let e_col_idx = col_letters_to_index(e_col);
+
+        let row_inverted = s_row > e_row;
+        let col_inverted = s_col_idx > e_col_idx;
+
+        if row_inverted || col_inverted {
+            // Swap the entire start and end cell references.
+            //
+            // During fill, only one axis shifts at a time (rows for vertical,
+            // cols for horizontal), so inversion only occurs on one axis while
+            // the other stays equal or correctly ordered.  A full swap is safe
+            // because the non-inverted axis either:
+            //   (a) has identical start/end values (e.g., I:I), or
+            //   (b) was already correctly ordered and stays that way.
+            //
+            // The $ markers travel with their original reference, which is
+            // correct: the fixed (absolute) part becomes the new start, and
+            // the moving (relative) part becomes the new end.
+            format!("{}{}{}{}:{}{}{}{}",
+                e_col_abs, e_col, e_row_abs, e_row,
+                s_col_abs, s_col, s_row_abs, s_row)
+        } else {
+            // Range is correctly ordered -- keep as-is
+            caps[0].to_string()
+        }
+    }).to_string()
+}
+
 /// Shift formula references for fill handle operation.
 /// This shifts references based on the fill direction and offset.
+/// After shifting, inverted ranges (where start > end due to a relative
+/// reference crossing past an absolute anchor) are normalized.
 /// Exported for use by fill handle command.
 #[tauri::command]
 pub fn shift_formula_for_fill(
@@ -805,19 +879,21 @@ pub fn shift_formula_for_fill(
     col_delta: i32,
 ) -> Result<String, String> {
     let mut result = formula;
-    
+
     // Shift rows if there's a row delta
     if row_delta != 0 {
-        // For fill, we shift all non-absolute rows by the delta
-        // Use from_row=0 so all rows >= 1 are considered for shifting
         result = shift_formula_row_references_for_fill(&result, row_delta);
     }
-    
+
     // Shift columns if there's a column delta
     if col_delta != 0 {
         result = shift_formula_col_references_for_fill(&result, col_delta);
     }
-    
+
+    // Normalize any ranges that became inverted after shifting.
+    // Example: I10:$I$11 shifted by +3 rows --> I13:$I$11 --> $I$11:I13
+    result = normalize_inverted_ranges(&result);
+
     Ok(result)
 }
 
