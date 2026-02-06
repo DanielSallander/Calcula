@@ -7,6 +7,8 @@ import type { GridConfig, Viewport, EditingCell, DimensionOverrides } from "../.
 import { isFormulaExpectingReference, createEmptyDimensionOverrides } from "../../types";
 import { useGridContext } from "../../state/GridContext";
 import * as S from "./InlineEditor.styles";
+import { toggleReferenceAtCursor } from "../../lib/formulaRefToggle";
+import { getGlobalEditingValue } from "../../hooks/useEditing";
 
 /**
  * Global flag to prevent blur from committing during sheet tab navigation.
@@ -241,6 +243,7 @@ export function InlineEditor(props: InlineEditorProps): React.ReactElement | nul
 
   /**
    * Handle keyboard events.
+   * FIX: Added F4 handler to toggle absolute/relative cell reference modes.
    */
   const handleKeyDown = useCallback(
     async (event: React.KeyboardEvent<HTMLInputElement>) => {
@@ -291,12 +294,43 @@ export function InlineEditor(props: InlineEditorProps): React.ReactElement | nul
           }
           break;
 
+        case "F4": {
+          // FIX: Toggle absolute/relative reference mode on the cell reference
+          // at the current cursor position. Only active when editing a formula.
+          // 
+          // IMPORTANT: Use getGlobalEditingValue() instead of reading from the DOM
+          // or React state. This is because:
+          // 1. The input is a controlled React component (value comes from props)
+          // 2. React state updates are asynchronous
+          // 3. When F4 is pressed rapidly, React may not have re-rendered yet
+          // 4. getGlobalEditingValue() is updated synchronously in updateValue()
+          const inputEl = inputRef.current;
+          if (!inputEl) break;
+          
+          // Use global value (updated synchronously) with fallback to DOM
+          const currentValue = getGlobalEditingValue() || inputEl.value;
+          if (currentValue.startsWith("=")) {
+            event.preventDefault();
+            event.stopPropagation();
+            const cursorPos = inputEl.selectionStart ?? 0;
+            const result = toggleReferenceAtCursor(currentValue, cursorPos);
+            if (result.formula !== currentValue) {
+              onValueChange(result.formula);
+              // Restore cursor position after React re-renders the input value
+              requestAnimationFrame(() => {
+                inputEl.setSelectionRange(result.cursorPos, result.cursorPos);
+              });
+            }
+          }
+          break;
+        }
+
         default:
           // Let other keys propagate normally for text input
           break;
       }
     },
-    [onCommit, onCancel, onTab, onEnter, onRestoreFocus, disabled]
+    [onCommit, onCancel, onTab, onEnter, onRestoreFocus, disabled, onValueChange]
   );
 
   /**

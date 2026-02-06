@@ -7,4 +7,5 @@ export {
   useEditing,
   setGlobalIsEditing,
   getGlobalIsEditing,
+  getGlobalEditingValue
 } from "../core/hooks/useEditing";

@@ -227,7 +227,7 @@ fn convert_unary_op(op: &ParserUnaryOp) -> EngineUnaryOp {
 fn convert_expr(expr: &ParserExpr) -> EngineExpr {
     match expr {
         ParserExpr::Literal(v) => EngineExpr::Literal(convert_value(v)),
-        ParserExpr::CellRef { sheet, col, row } => EngineExpr::CellRef {
+        ParserExpr::CellRef { sheet, col, row, .. } => EngineExpr::CellRef {
             sheet: sheet.clone(),
             col: col.clone(),
             row: *row,
@@ -237,12 +237,12 @@ fn convert_expr(expr: &ParserExpr) -> EngineExpr {
             start: Box::new(convert_expr(start)),
             end: Box::new(convert_expr(end)),
         },
-        ParserExpr::ColumnRef { sheet, start_col, end_col } => EngineExpr::ColumnRef {
+        ParserExpr::ColumnRef { sheet, start_col, end_col, .. } => EngineExpr::ColumnRef {
             sheet: sheet.clone(),
             start_col: start_col.clone(),
             end_col: end_col.clone(),
         },
-        ParserExpr::RowRef { sheet, start_row, end_row } => EngineExpr::RowRef {
+        ParserExpr::RowRef { sheet, start_row, end_row, .. } => EngineExpr::RowRef {
             sheet: sheet.clone(),
             start_row: *start_row,
             end_row: *end_row,
@@ -313,7 +313,7 @@ pub fn extract_all_references(expr: &ParserExpr, grid: &Grid) -> ExtractedRefs {
 fn extract_references_recursive(expr: &ParserExpr, grid: &Grid, refs: &mut ExtractedRefs) {
     match expr {
         ParserExpr::Literal(_) => {}
-        ParserExpr::CellRef { sheet, col, row } => {
+        ParserExpr::CellRef { sheet, col, row, .. } => {
             let col_idx = col_letter_to_index(col);
             let row_idx = row.saturating_sub(1);
             if let Some(sheet_name) = sheet {
@@ -727,6 +727,7 @@ pub fn run() {
             commands::insert_columns,
             commands::delete_rows,
             commands::delete_columns,
+            commands::shift_formula_for_fill,
             // Undo/Redo commands
             undo_commands::begin_undo_transaction,
             undo_commands::commit_undo_transaction,

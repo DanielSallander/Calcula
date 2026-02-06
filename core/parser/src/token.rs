@@ -34,6 +34,8 @@ pub enum Token {
     Colon,
     /// Sheet reference separator: !
     Exclamation,
+    /// Absolute reference marker: $
+    Dollar,
 
     // Special
     EOF,
@@ -65,6 +67,7 @@ impl std::fmt::Display for Token {
             Token::Comma => write!(f, ","),
             Token::Colon => write!(f, ":"),
             Token::Exclamation => write!(f, "!"),
+            Token::Dollar => write!(f, "$"),
             Token::EOF => write!(f, "EOF"),
             Token::Illegal(c) => write!(f, "ILLEGAL({})", c),
         }

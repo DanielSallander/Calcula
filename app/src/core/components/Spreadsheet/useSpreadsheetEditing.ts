@@ -3,8 +3,9 @@
 // CONTEXT: Contains complex logic for handling key events in both the container and inputs.
 
 import { useCallback, useEffect, useState } from "react";
-import { useEditing } from "../../hooks";
+import { useEditing, getGlobalEditingValue } from "../../hooks";
 import { useGridState } from "../../state";
+import { toggleReferenceAtCursor } from "../../lib/formulaRefToggle";
 
 type GridState = ReturnType<typeof useGridState>;
 
@@ -126,9 +127,31 @@ export function useSpreadsheetEditing({
         }
         // FIX: Use focusContainerRef instead of containerRef
         focusContainerRef.current?.focus();
+      } else if (event.key === "F4") {
+        // Toggle absolute/relative reference mode ($) on the cell reference at cursor
+        // FIX: Use getGlobalEditingValue() instead of editing.value or DOM value.
+        // This is because:
+        // 1. The formula bar input is a controlled React component
+        // 2. React state updates are asynchronous
+        // 3. When F4 is pressed rapidly, React may not have re-rendered yet
+        // 4. getGlobalEditingValue() is updated synchronously in updateValue()
+        const inputEl = event.currentTarget;
+        const currentValue = getGlobalEditingValue() || inputEl.value;
+        if (currentValue.startsWith("=")) {
+          event.preventDefault();
+          const cursorPos = inputEl.selectionStart ?? 0;
+          const result = toggleReferenceAtCursor(currentValue, cursorPos);
+          if (result.formula !== currentValue) {
+            updateValue(result.formula);
+            // Restore cursor position after React re-renders the input value
+            requestAnimationFrame(() => {
+              inputEl.setSelectionRange(result.cursorPos, result.cursorPos);
+            });
+          }
+        }
       }
     },
-    [handleCommitEdit, cancelEdit, moveActiveCell, scrollToSelection, focusContainerRef]
+    [handleCommitEdit, cancelEdit, moveActiveCell, scrollToSelection, focusContainerRef, updateValue]
   );
 
   // --- Inline Editor Handlers ---

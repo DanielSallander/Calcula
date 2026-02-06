@@ -2,11 +2,13 @@
 // PURPOSE: Formula input field that syncs with cell editing state
 // CONTEXT: Part of FormulaBar, displays and edits the current cell formula/value
 // FIX: Now fetches content from master cell for merged regions
+// FIX: Added F4 key handler for toggling absolute/relative cell references
 // REFACTOR: Imports from api layer instead of core internals
 
 import React, { useCallback, useRef, useEffect } from "react";
 import { useGridContext, getCell, getMergeInfo } from "../../api";
-import { useEditing, setGlobalIsEditing } from "../../api/editing";
+import { useEditing, setGlobalIsEditing, getGlobalEditingValue } from "../../api/editing";
+import { toggleReferenceAtCursor } from "../../core/lib/formulaRefToggle";
 import * as S from './FormulaInput.styles';
 
 export function FormulaInput(): React.ReactElement {
@@ -102,9 +104,31 @@ export function FormulaInput(): React.ReactElement {
         e.preventDefault();
         await cancelEdit();
         inputRef.current?.blur();
+      } else if (e.key === "F4") {
+        // FIX: Toggle absolute/relative reference mode on the cell reference
+        // at the current cursor position. Only active when editing a formula.
+        const inputEl = inputRef.current;
+        if (!inputEl) return;
+        
+        // Use global value (updated synchronously) with fallback to DOM
+        const currentValue = getGlobalEditingValue() || inputEl.value;
+        if (currentValue.startsWith("=")) {
+          e.preventDefault();
+          e.stopPropagation();
+          const cursorPos = inputEl.selectionStart ?? 0;
+          const result = toggleReferenceAtCursor(currentValue, cursorPos);
+          if (result.formula !== currentValue) {
+            setDisplayValue(result.formula);
+            updateValue(result.formula);
+            // Restore cursor position after React re-renders the input value
+            requestAnimationFrame(() => {
+              inputEl.setSelectionRange(result.cursorPos, result.cursorPos);
+            });
+          }
+        }
       }
     },
-    [commitEdit, cancelEdit]
+    [commitEdit, cancelEdit, updateValue]
   );
 
   const handleMouseDown = useCallback((e: React.MouseEvent) => {

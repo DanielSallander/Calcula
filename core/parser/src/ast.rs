@@ -7,9 +7,10 @@
 //! SUPPORTED EXPRESSIONS:
 //! - Literals: Numbers, Strings, Booleans
 //! - Cell references: A1, AA100, Sheet1!A1, 'Sheet Name'!A1
-//! - Ranges: A1:B10, Sheet1!A1:B10
-//! - Column references: A:A, A:B, Sheet1!A:B
-//! - Row references: 1:1, 1:5, Sheet1!1:5
+//! - Absolute references: $A$1, A$1, $A1
+//! - Ranges: A1:B10, Sheet1!A1:B10, $A$1:$B$10
+//! - Column references: A:A, A:B, Sheet1!A:B, $A:$B
+//! - Row references: 1:1, 1:5, Sheet1!1:5, $1:$5
 //! - Binary operations: +, -, *, /, ^, &, =, <>, <, >, <=, >=
 //! - Unary operations: - (negation)
 //! - Function calls: SUM(A1:A10), IF(A1>0, "yes", "no")
@@ -21,16 +22,19 @@ pub enum Expression {
     /// A literal value: number, string, or boolean.
     Literal(Value),
 
-    /// A single cell reference like A1, B2, AA100, or Sheet1!A1.
+    /// A single cell reference like A1, B2, AA100, $A$1, or Sheet1!A1.
     /// The column is stored as a string (e.g., "A", "AA") and row as 1-indexed integer.
     /// The sheet is optional and only present for cross-sheet references.
+    /// col_absolute and row_absolute indicate if $ prefix was used.
     CellRef {
         sheet: Option<String>,
         col: String,
         row: u32,
+        col_absolute: bool,
+        row_absolute: bool,
     },
 
-    /// A range reference like A1:B10 or Sheet1!A1:B10.
+    /// A range reference like A1:B10 or Sheet1!$A$1:$B$10.
     /// Both start and end should be CellRef expressions.
     /// The sheet applies to the entire range.
     Range {
@@ -39,20 +43,24 @@ pub enum Expression {
         end: Box<Expression>,
     },
 
-    /// A column reference like A:A, A:B, or Sheet1!A:B (entire columns).
+    /// A column reference like A:A, A:B, $A:$B, or Sheet1!A:B (entire columns).
     /// Used for referencing all cells in one or more columns.
     ColumnRef {
         sheet: Option<String>,
         start_col: String,
         end_col: String,
+        start_absolute: bool,
+        end_absolute: bool,
     },
 
-    /// A row reference like 1:1, 1:5, or Sheet1!1:5 (entire rows).
+    /// A row reference like 1:1, 1:5, $1:$5, or Sheet1!1:5 (entire rows).
     /// Used for referencing all cells in one or more rows.
     RowRef {
         sheet: Option<String>,
         start_row: u32,
         end_row: u32,
+        start_absolute: bool,
+        end_absolute: bool,
     },
 
     /// A binary operation: left op right (e.g., 5 + 3, A1 > 10).

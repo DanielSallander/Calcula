@@ -1,6 +1,10 @@
-## Cells editing
-When clicking and editing a cell I can click a cell to reference it.
-In the attached image I have two values in B-column. 
-Then in C3 I type in "=" and click cell B4. After that I cannot type anything or press enter. 
-However, if I click another cell it exits edit mode and commits the value. Then I can go back to C3 and edit it normally. 
-However, as soon as I click a cell to reference it I cannot type anymore.
+## F4 toggle
+We are working on the F4-toggle function.
+When pressing F4 the formula reference lock should toggle this => fully locked => rows only => columns only => unlocked.
+Basically it should work as in Excel.
+
+### Current status
+We have done four iterations of this task already but still it is not working as expected.
+It works to edit a cell, click a cell to refence it and subsequently click F4.
+It does not work to edit a cell, click a cell to refence it, press enter, and then go back to edit the same cell and click F4.
+In this last scenario nothing happens when pressing F4.

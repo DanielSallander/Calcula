@@ -3,7 +3,7 @@
 //! CONTEXT: This is the second stage of the parsing pipeline. It takes tokens
 //! from the Lexer and builds an Expression tree that can be evaluated.
 //!
-//! GRAMMAR (complete with sheet references):
+//! GRAMMAR (complete with sheet references and absolute markers):
 //!   expression     --> comparison
 //!   comparison     --> concatenation ( ("=" | "<>" | "<" | ">" | "<=" | ">=") concatenation )*
 //!   concatenation  --> additive ( "&" additive )*
@@ -14,9 +14,10 @@
 //!   primary        --> NUMBER | STRING | BOOLEAN | reference | function_call | "(" expression ")"
 //!   reference      --> [sheet_prefix] (cell_or_range | column_ref | row_ref)
 //!   sheet_prefix   --> (IDENTIFIER | QUOTED_IDENTIFIER) "!"
-//!   cell_or_range  --> IDENTIFIER (":" IDENTIFIER)?
-//!   column_ref     --> IDENTIFIER ":" IDENTIFIER   // where both are column-only (e.g., A:B)
-//!   row_ref        --> NUMBER ":" NUMBER           // where both are row-only (e.g., 1:5)
+//!   cell_or_range  --> cell_ref (":" cell_ref)?
+//!   cell_ref       --> "$"? COLUMN "$"? ROW
+//!   column_ref     --> "$"? COLUMN ":" "$"? COLUMN
+//!   row_ref        --> "$"? NUMBER ":" "$"? NUMBER
 //!   function_call  --> IDENTIFIER "(" arguments? ")"
 //!   arguments      --> expression ("," expression)*
 
@@ -250,13 +251,19 @@ impl<'a> Parser<'a> {
     /// Parses primary expressions (literals, cell refs, function calls, parentheses).
     fn parse_primary(&mut self) -> ParseResult<Expression> {
         match self.current_token.clone() {
+            // Dollar sign - start of absolute reference like $A1 or $1:$5
+            Token::Dollar => {
+                self.advance();
+                self.parse_absolute_reference(None)
+            }
+
             // Number literal - could also be start of row reference (e.g., 1:5)
             Token::Number(n) => {
                 self.advance();
 
                 // Check if this is a row reference (number followed by ':')
                 if self.current_token == Token::Colon {
-                    return self.parse_row_reference(None, n);
+                    return self.parse_row_reference(None, n, false);
                 }
 
                 Ok(Expression::Literal(Value::Number(n)))
@@ -299,11 +306,44 @@ impl<'a> Parser<'a> {
 
                 // Check if it's a range or column reference (followed by ':')
                 if self.current_token == Token::Colon {
-                    return self.parse_range_or_column_ref(None, name);
+                    return self.parse_range_or_column_ref(None, name, false);
+                }
+
+                // FIX: Handle column-only identifier followed by $ (absolute row marker).
+                // This covers patterns like D$2, AA$100 where the lexer splits the
+                // reference into Identifier("D"), Dollar, Number(2) because $ is not
+                // alphanumeric and stops identifier scanning.
+                let is_col_only = name.chars().all(|c| c.is_ascii_alphabetic());
+                if is_col_only && self.current_token == Token::Dollar {
+                    self.advance(); // consume $
+                    if let Token::Number(n) = self.current_token.clone() {
+                        self.advance();
+                        let row = n as u32;
+                        if row == 0 {
+                            return Err(ParseError::new("Row number must be >= 1"));
+                        }
+                        // Check for range continuation like D$2:D6
+                        if self.current_token == Token::Colon {
+                            return self.parse_range_continuation(
+                                None, name, row, false, true,
+                            );
+                        }
+                        return Ok(Expression::CellRef {
+                            sheet: None,
+                            col: name.to_uppercase(),
+                            row,
+                            col_absolute: false,
+                            row_absolute: true,
+                        });
+                    }
+                    return Err(ParseError::new(format!(
+                        "Expected row number after $, found {:?}",
+                        self.current_token
+                    )));
                 }
 
                 // Otherwise it's a simple cell reference
-                self.parse_cell_ref(None, name)
+                self.parse_cell_ref(None, name, false, false)
             }
 
             // Parenthesized expression
@@ -323,15 +363,96 @@ impl<'a> Parser<'a> {
         }
     }
 
+    /// Parses a reference that starts with $ (absolute marker).
+    fn parse_absolute_reference(&mut self, sheet: Option<String>) -> ParseResult<Expression> {
+        match self.current_token.clone() {
+            // $A1 or $A:$B (column is absolute)
+            Token::Identifier(name) => {
+                self.advance();
+                
+                // Check if this is a column-only reference (no digits in name)
+                let is_col_only = name.chars().all(|c| c.is_ascii_alphabetic());
+                
+                if self.current_token == Token::Colon {
+                    // Could be $A:B, $A$1:B2, etc.
+                    return self.parse_range_or_column_ref(sheet, name, true);
+                }
+                
+                if is_col_only {
+                    // Check for $A$1 pattern ($ followed by number)
+                    if self.current_token == Token::Dollar {
+                        self.advance();
+                        // Expect row number
+                        if let Token::Number(row) = self.current_token.clone() {
+                            self.advance();
+                            let row = row as u32;
+                            if row == 0 {
+                                return Err(ParseError::new("Row number must be >= 1"));
+                            }
+                            
+                            // Check for range
+                            if self.current_token == Token::Colon {
+                                return self.parse_range_continuation(sheet, name, row, true, true);
+                            }
+                            
+                            return Ok(Expression::CellRef {
+                                sheet,
+                                col: name.to_uppercase(),
+                                row,
+                                col_absolute: true,
+                                row_absolute: true,
+                            });
+                        } else {
+                            return Err(ParseError::new("Expected row number after $"));
+                        }
+                    }
+                    
+                    // $A without row - could be column reference $A:B
+                    if self.current_token == Token::Colon {
+                        return self.parse_column_ref_continuation(sheet, name, true);
+                    }
+                    
+                    return Err(ParseError::new(format!(
+                        "Expected row number or ':' after ${}",
+                        name
+                    )));
+                }
+                
+                // Has digits, so it's like $A1 (col absolute, row not)
+                self.parse_cell_ref(sheet, name, true, false)
+            }
+            
+            // $1:$5 (row reference with absolute start)
+            Token::Number(n) => {
+                self.advance();
+                if self.current_token == Token::Colon {
+                    return self.parse_row_reference(sheet, n, true);
+                }
+                Err(ParseError::new("Expected ':' after absolute row number"))
+            }
+            
+            _ => Err(ParseError::new(format!(
+                "Expected identifier or number after $, found {:?}",
+                self.current_token
+            ))),
+        }
+    }
+
     /// Parses a reference after a sheet prefix (SheetName!).
     /// Handles cell refs, ranges, column refs, and row refs with sheet context.
     fn parse_sheet_reference(&mut self, sheet_name: String) -> ParseResult<Expression> {
         match self.current_token.clone() {
+            // $ - absolute reference
+            Token::Dollar => {
+                self.advance();
+                self.parse_absolute_reference(Some(sheet_name))
+            }
+            
             // Number - must be a row reference like Sheet1!1:5
             Token::Number(n) => {
                 self.advance();
                 if self.current_token == Token::Colon {
-                    self.parse_row_reference(Some(sheet_name), n)
+                    self.parse_row_reference(Some(sheet_name), n, false)
                 } else {
                     Err(ParseError::new(
                         "Expected ':' after row number in sheet reference",
@@ -344,9 +465,38 @@ impl<'a> Parser<'a> {
                 self.advance();
 
                 if self.current_token == Token::Colon {
-                    self.parse_range_or_column_ref(Some(sheet_name), name)
+                    self.parse_range_or_column_ref(Some(sheet_name), name, false)
                 } else {
-                    self.parse_cell_ref(Some(sheet_name), name)
+                    // FIX: Handle column-only identifier followed by $ (absolute row marker)
+                    // e.g., Sheet1!D$2
+                    let is_col_only = name.chars().all(|c| c.is_ascii_alphabetic());
+                    if is_col_only && self.current_token == Token::Dollar {
+                        self.advance(); // consume $
+                        if let Token::Number(n) = self.current_token.clone() {
+                            self.advance();
+                            let row = n as u32;
+                            if row == 0 {
+                                return Err(ParseError::new("Row number must be >= 1"));
+                            }
+                            if self.current_token == Token::Colon {
+                                return self.parse_range_continuation(
+                                    Some(sheet_name), name, row, false, true,
+                                );
+                            }
+                            return Ok(Expression::CellRef {
+                                sheet: Some(sheet_name),
+                                col: name.to_uppercase(),
+                                row,
+                                col_absolute: false,
+                                row_absolute: true,
+                            });
+                        }
+                        return Err(ParseError::new(format!(
+                            "Expected row number after $, found {:?}",
+                            self.current_token
+                        )));
+                    }
+                    self.parse_cell_ref(Some(sheet_name), name, false, false)
                 }
             }
 
@@ -358,9 +508,21 @@ impl<'a> Parser<'a> {
     }
 
     /// Parses a cell reference from an identifier string like "A1" or "AA100".
-    fn parse_cell_ref(&self, sheet: Option<String>, identifier: String) -> ParseResult<Expression> {
+    fn parse_cell_ref(
+        &self, 
+        sheet: Option<String>, 
+        identifier: String,
+        col_absolute: bool,
+        row_absolute: bool,
+    ) -> ParseResult<Expression> {
         let (col, row) = self.split_cell_reference(&identifier)?;
-        Ok(Expression::CellRef { sheet, col, row })
+        Ok(Expression::CellRef { 
+            sheet, 
+            col, 
+            row,
+            col_absolute,
+            row_absolute,
+        })
     }
 
     /// Parses a range or column reference after seeing "IDENTIFIER :".
@@ -368,9 +530,18 @@ impl<'a> Parser<'a> {
         &mut self,
         sheet: Option<String>,
         start_identifier: String,
+        start_col_absolute: bool,
     ) -> ParseResult<Expression> {
         // Consume the ':'
         self.advance();
+
+        // Check for absolute marker on end
+        let end_col_absolute = if self.current_token == Token::Dollar {
+            self.advance();
+            true
+        } else {
+            false
+        };
 
         // Expect another identifier for the end
         let end_identifier = match self.current_token.clone() {
@@ -389,32 +560,180 @@ impl<'a> Parser<'a> {
         let start_is_col_only = start_identifier.chars().all(|c| c.is_ascii_alphabetic());
         let end_is_col_only = end_identifier.chars().all(|c| c.is_ascii_alphabetic());
 
-        if start_is_col_only && end_is_col_only {
-            // Column reference like A:B or A:A
+        // FIX: Check if end identifier is column-only but followed by $ (absolute row marker).
+        // In that case it's a cell reference like D$6, not a column reference like D:D.
+        // Without this check, parse_range_or_column_ref treats "D" as column-only
+        // and tries to create a ColumnRef, or split_cell_reference("D") fails with
+        // "Cell reference missing row".
+        let end_has_dollar_row = end_is_col_only && self.current_token == Token::Dollar;
+
+        if start_is_col_only && end_is_col_only && !end_has_dollar_row {
+            // Column reference like A:B or $A:$B
             Ok(Expression::ColumnRef {
                 sheet,
                 start_col: start_identifier.to_uppercase(),
                 end_col: end_identifier.to_uppercase(),
+                start_absolute: start_col_absolute,
+                end_absolute: end_col_absolute,
             })
         } else {
-            // Cell range like A1:B10
+            // Cell range like A1:B10 or D2:D$6
             let (start_col, start_row) = self.split_cell_reference(&start_identifier)?;
-            let (end_col, end_row) = self.split_cell_reference(&end_identifier)?;
+
+            // FIX: Handle end identifier being column-only with $row pattern.
+            // e.g., in D2:D$6, the end "D" has no row digits -- the row comes
+            // from the Dollar + Number tokens that follow.
+            let (end_col, end_row, end_row_absolute) = if end_is_col_only {
+                if self.current_token == Token::Dollar {
+                    self.advance();
+                    if let Token::Number(n) = self.current_token.clone() {
+                        self.advance();
+                        (end_identifier.to_uppercase(), n as u32, true)
+                    } else {
+                        return Err(ParseError::new(
+                            "Expected row number after $ in range end",
+                        ));
+                    }
+                } else {
+                    return Err(ParseError::new(format!(
+                        "Cell reference missing row: {}",
+                        end_identifier
+                    )));
+                }
+            } else {
+                let (col, row) = self.split_cell_reference(&end_identifier)?;
+                (col, row, false)
+            };
 
             Ok(Expression::Range {
                 sheet,
                 start: Box::new(Expression::CellRef {
-                    sheet: None, // Sheet is on the Range, not individual cells
+                    sheet: None,
                     col: start_col,
                     row: start_row,
+                    col_absolute: start_col_absolute,
+                    row_absolute: false,
                 }),
                 end: Box::new(Expression::CellRef {
                     sheet: None,
                     col: end_col,
                     row: end_row,
+                    col_absolute: end_col_absolute,
+                    row_absolute: end_row_absolute,
                 }),
             })
         }
+    }
+
+    /// Parses continuation of a range after we have the start cell.
+    fn parse_range_continuation(
+        &mut self,
+        sheet: Option<String>,
+        start_col: String,
+        start_row: u32,
+        start_col_absolute: bool,
+        start_row_absolute: bool,
+    ) -> ParseResult<Expression> {
+        // Consume the ':'
+        self.advance();
+
+        // Parse end cell with potential absolute markers
+        let end_col_absolute = if self.current_token == Token::Dollar {
+            self.advance();
+            true
+        } else {
+            false
+        };
+
+        let end_identifier = match self.current_token.clone() {
+            Token::Identifier(name) => {
+                self.advance();
+                name
+            }
+            _ => {
+                return Err(ParseError::new("Expected cell reference after ':'"));
+            }
+        };
+
+        // Check for $row pattern
+        let end_row_absolute = if self.current_token == Token::Dollar {
+            self.advance();
+            true
+        } else {
+            false
+        };
+
+        // If end_row_absolute, we need to get the row number
+        let (end_col, end_row) = if end_row_absolute {
+            // Pattern like B$10 - identifier is just column
+            if let Token::Number(n) = self.current_token.clone() {
+                self.advance();
+                (end_identifier.to_uppercase(), n as u32)
+            } else {
+                return Err(ParseError::new("Expected row number after $"));
+            }
+        } else {
+            self.split_cell_reference(&end_identifier)?
+        };
+
+        Ok(Expression::Range {
+            sheet,
+            start: Box::new(Expression::CellRef {
+                sheet: None,
+                col: start_col.to_uppercase(),
+                row: start_row,
+                col_absolute: start_col_absolute,
+                row_absolute: start_row_absolute,
+            }),
+            end: Box::new(Expression::CellRef {
+                sheet: None,
+                col: end_col,
+                row: end_row,
+                col_absolute: end_col_absolute,
+                row_absolute: end_row_absolute,
+            }),
+        })
+    }
+
+    /// Parses column reference continuation like $A:B or $A:$B
+    fn parse_column_ref_continuation(
+        &mut self,
+        sheet: Option<String>,
+        start_col: String,
+        start_absolute: bool,
+    ) -> ParseResult<Expression> {
+        // Consume the ':'
+        self.advance();
+
+        let end_absolute = if self.current_token == Token::Dollar {
+            self.advance();
+            true
+        } else {
+            false
+        };
+
+        let end_col = match self.current_token.clone() {
+            Token::Identifier(name) => {
+                self.advance();
+                name
+            }
+            _ => {
+                return Err(ParseError::new("Expected column after ':'"));
+            }
+        };
+
+        // Verify it's column-only
+        if !end_col.chars().all(|c| c.is_ascii_alphabetic()) {
+            return Err(ParseError::new("Expected column letter in column reference"));
+        }
+
+        Ok(Expression::ColumnRef {
+            sheet,
+            start_col: start_col.to_uppercase(),
+            end_col: end_col.to_uppercase(),
+            start_absolute,
+            end_absolute,
+        })
     }
 
     /// Parses a row reference after seeing "NUMBER :".
@@ -422,9 +741,18 @@ impl<'a> Parser<'a> {
         &mut self,
         sheet: Option<String>,
         start_num: f64,
+        start_absolute: bool,
     ) -> ParseResult<Expression> {
         // Consume the ':'
         self.advance();
+
+        // Check for absolute marker on end row
+        let end_absolute = if self.current_token == Token::Dollar {
+            self.advance();
+            true
+        } else {
+            false
+        };
 
         // Expect another number for the end row
         let end_num = match self.current_token.clone() {
@@ -450,6 +778,8 @@ impl<'a> Parser<'a> {
             sheet,
             start_row,
             end_row,
+            start_absolute,
+            end_absolute,
         })
     }
 

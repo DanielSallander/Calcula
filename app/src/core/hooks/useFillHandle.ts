@@ -1,11 +1,14 @@
 //! FILENAME: app/src/core/hooks/useFillHandle.ts
 // PURPOSE: Custom hook for fill handle (drag-to-fill) functionality.
 // CONTEXT: Handles detection, patterns, and auto-fill logic for the fill handle.
+// FIX: Formula values are now shifted via shiftFormulaForFill instead of being copied verbatim.
+//      This ensures references inside functions (e.g., =SUM(B2)) update correctly when filling.
+//      Absolute references ($) are respected -- $B$2 won't shift, B$2 shifts column only, etc.
 
 import { useCallback, useRef, useState } from "react";
 import { useGridContext } from "../state/GridContext";
 import { setSelection } from "../state/gridActions";
-import { getCell, updateCell } from "../lib/tauri-api";
+import { getCell, updateCell, shiftFormulaForFill } from "../lib/tauri-api";
 import { cellEvents } from "../lib/cellEvents";
 import type { Selection } from "../types";
 import { getColumnWidth, getRowHeight, getColumnX, getRowY, calculateVisibleRange } from "../lib/gridRenderer";
@@ -181,6 +184,41 @@ function generateFillValue(
 }
 
 /**
+ * Compute the fill value for a target cell.
+ * If the source value is a formula, shifts references via the backend.
+ * Otherwise, uses the pattern-based generation for non-formula values.
+ *
+ * FIX: Wrapped shiftFormulaForFill in try/catch so that a backend error
+ * (e.g., unregistered command, parse failure) falls back to copying the
+ * source formula as-is rather than aborting the entire fill operation.
+ */
+async function computeFillValue(
+  sourceValue: string,
+  sourceRow: number,
+  sourceCol: number,
+  targetRow: number,
+  targetCol: number,
+  pattern: PatternResult,
+  allSourceValues: string[],
+  fillIndex: number,
+): Promise<string> {
+  if (sourceValue.startsWith("=")) {
+    // Formula: shift references based on position delta
+    const rowDelta = targetRow - sourceRow;
+    const colDelta = targetCol - sourceCol;
+    try {
+      return await shiftFormulaForFill(sourceValue, rowDelta, colDelta);
+    } catch (error) {
+      console.error("[FillHandle] shiftFormulaForFill failed, copying formula as-is:", error);
+      // Fallback: return the source formula unchanged
+      return sourceValue;
+    }
+  }
+  // Non-formula: use pattern-based fill
+  return generateFillValue(pattern, allSourceValues, fillIndex);
+}
+
+/**
  * Hook for fill handle functionality.
  */
 export function useFillHandle(): UseFillHandleReturn {
@@ -204,19 +242,15 @@ export function useFillHandle(): UseFillHandleReturn {
   const getFillHandlePosition = useCallback((): { x: number; y: number; visible: boolean } | null => {
     if (!selection) return null;
 
-    // Use bounding box (maxRow/maxCol), not endRow/endCol,
-    // so the handle position matches the rendering regardless of selection direction
     const maxRow = Math.max(selection.startRow, selection.endRow);
     const maxCol = Math.max(selection.startCol, selection.endCol);
     const minRow = Math.min(selection.startRow, selection.endRow);
     const minCol = Math.min(selection.startCol, selection.endCol);
 
-    // Use large container dimensions to avoid clipping issues
     const containerWidth = 2000;
     const containerHeight = 2000;
     const range = calculateVisibleRange(viewport, config, containerWidth, containerHeight, dimensions);
 
-    // Check if bottom-right cell is visible
     if (
       maxRow < range.startRow ||
       maxRow > range.endRow ||
@@ -226,7 +260,6 @@ export function useFillHandle(): UseFillHandleReturn {
       return { x: 0, y: 0, visible: false };
     }
 
-    // Calculate x2, y2 of the selection bounding box (matches selection.ts rendering)
     const x1 = getColumnX(minCol, config, dimensions, range.startCol, range.offsetX);
     let x2 = x1;
     for (let c = minCol; c <= maxCol; c++) {
@@ -248,15 +281,12 @@ export function useFillHandle(): UseFillHandleReturn {
 
   /**
    * Check if mouse position is over the fill handle.
-   * Uses handleSize=8 and hit padding=3 to match the rendering in selection.ts.
    */
   const isOverFillHandle = useCallback(
     (mouseX: number, mouseY: number): boolean => {
       const handlePos = getFillHandlePosition();
       if (!handlePos || !handlePos.visible) return false;
 
-      // Match the rendering code in selection.ts:
-      // borderX2 = x2 - 1, handleX = borderX2 - handleSize/2
       const handleSize = 8;
       const borderX = handlePos.x - 1;
       const borderY = handlePos.y - 1;
@@ -281,7 +311,6 @@ export function useFillHandle(): UseFillHandleReturn {
     (_mouseX: number, _mouseY: number) => {
       if (!selection) return;
 
-      // Use bounding box max as the drag anchor (fill handle is at bottom-right)
       const maxRow = Math.max(selection.startRow, selection.endRow);
       const maxCol = Math.max(selection.startCol, selection.endCol);
 
@@ -310,21 +339,17 @@ export function useFillHandle(): UseFillHandleReturn {
     (mouseX: number, mouseY: number) => {
       if (!fillState.isDragging || !selection || !dragStartRef.current) return;
 
-      // Use bounding box for direction calculation
       const selMaxRow = Math.max(selection.startRow, selection.endRow);
       const selMaxCol = Math.max(selection.startCol, selection.endCol);
 
-      // Convert mouse position to cell
       const containerWidth = 2000;
       const containerHeight = 2000;
       const range = calculateVisibleRange(viewport, config, containerWidth, containerHeight, dimensions);
 
-      // Find cell under mouse
       let targetRow = dragStartRef.current.row;
       let targetCol = dragStartRef.current.col;
       let direction: FillDirection = null;
 
-      // Calculate row
       let y = config.colHeaderHeight;
       for (let r = range.startRow; r <= range.endRow + 10; r++) {
         const rowHeight = getRowHeight(r, config, dimensions);
@@ -335,7 +360,6 @@ export function useFillHandle(): UseFillHandleReturn {
         y += rowHeight;
       }
 
-      // Calculate column
       let x = config.rowHeaderWidth;
       for (let c = range.startCol; c <= range.endCol + 10; c++) {
         const colWidth = getColumnWidth(c, config, dimensions);
@@ -346,22 +370,17 @@ export function useFillHandle(): UseFillHandleReturn {
         x += colWidth;
       }
 
-      // Determine direction (constrain to single axis)
-      // Use bounding box max for comparison since fill handle is at bottom-right
       const rowDiff = targetRow - selMaxRow;
       const colDiff = targetCol - selMaxCol;
 
       if (Math.abs(rowDiff) > Math.abs(colDiff)) {
-        // Vertical fill - constrain column to selection max
         targetCol = selMaxCol;
         direction = rowDiff > 0 ? "down" : rowDiff < 0 ? "up" : null;
       } else if (colDiff !== 0) {
-        // Horizontal fill - constrain row to selection max
         targetRow = selMaxRow;
         direction = colDiff > 0 ? "right" : "left";
       }
 
-      // Build preview range
       const selMinRow = Math.min(selection.startRow, selection.endRow);
       const selMinCol = Math.min(selection.startCol, selection.endCol);
 
@@ -421,6 +440,7 @@ export function useFillHandle(): UseFillHandleReturn {
 
   /**
    * Complete the fill operation.
+   * FIX: Formula values are now shifted via shiftFormulaForFill.
    */
   const completeFill = useCallback(async () => {
     if (!fillState.isDragging || !selection || !fillState.direction) {
@@ -442,11 +462,9 @@ export function useFillHandle(): UseFillHandleReturn {
     const selMinCol = Math.min(selection.startCol, selection.endCol);
     const selMaxCol = Math.max(selection.startCol, selection.endCol);
 
-    // Store the preview range before clearing state
     const finalRange = fillState.previewRange;
 
     try {
-      // Get source values based on direction
       const sourceValues: string[][] = [];
 
       if (fillState.direction === "down" || fillState.direction === "up") {
@@ -460,18 +478,28 @@ export function useFillHandle(): UseFillHandleReturn {
           sourceValues.push(colValues);
         }
 
-        // Fill rows
         const startRow = fillState.direction === "down" ? selMaxRow + 1 : fillState.targetRow;
         const endRow = fillState.direction === "down" ? fillState.targetRow : selMinRow - 1;
+        const sourceCount = selMaxRow - selMinRow + 1;
 
         for (let c = selMinCol; c <= selMaxCol; c++) {
           const colIdx = c - selMinCol;
-          const pattern = detectPattern(sourceValues[colIdx]);
+          // FIX: Filter out formulas for pattern detection (formulas are handled separately)
+          const nonFormulaValues = sourceValues[colIdx].filter(v => !v.startsWith("="));
+          const pattern = detectPattern(nonFormulaValues.length > 0 ? nonFormulaValues : sourceValues[colIdx]);
 
           if (fillState.direction === "down") {
             for (let r = startRow; r <= endRow; r++) {
               const fillIndex = r - selMinRow;
-              const value = generateFillValue(pattern, sourceValues[colIdx], fillIndex);
+              const sourceIndex = fillIndex % sourceCount;
+              const sourceValue = sourceValues[colIdx][sourceIndex];
+              const sourceRow = selMinRow + sourceIndex;
+
+              // FIX: Use computeFillValue which handles formulas via shiftFormulaForFill
+              const value = await computeFillValue(
+                sourceValue, sourceRow, c, r, c,
+                pattern, sourceValues[colIdx], fillIndex,
+              );
               
               const updatedCells = await updateCell(r, c, value);
               for (const cell of updatedCells) {
@@ -485,10 +513,18 @@ export function useFillHandle(): UseFillHandleReturn {
               }
             }
           } else {
-            // Fill up (reverse order)
+            // Fill up - mirror from bottom of selection upward
             for (let r = endRow; r >= startRow; r--) {
               const fillIndex = selMaxRow - r;
-              const value = generateFillValue(pattern, sourceValues[colIdx].slice().reverse(), fillIndex);
+              const sourceIndex = fillIndex % sourceCount;
+              // Reversed: source from bottom of selection
+              const sourceValue = sourceValues[colIdx][sourceCount - 1 - sourceIndex];
+              const sourceRow = selMaxRow - sourceIndex;
+
+              const value = await computeFillValue(
+                sourceValue, sourceRow, c, r, c,
+                pattern, sourceValues[colIdx].slice().reverse(), fillIndex,
+              );
               
               const updatedCells = await updateCell(r, c, value);
               for (const cell of updatedCells) {
@@ -516,15 +552,24 @@ export function useFillHandle(): UseFillHandleReturn {
 
         const startCol = fillState.direction === "right" ? selMaxCol + 1 : fillState.targetCol;
         const endCol = fillState.direction === "right" ? fillState.targetCol : selMinCol - 1;
+        const sourceCount = selMaxCol - selMinCol + 1;
 
         for (let r = selMinRow; r <= selMaxRow; r++) {
           const rowIdx = r - selMinRow;
-          const pattern = detectPattern(sourceValues[rowIdx]);
+          const nonFormulaValues = sourceValues[rowIdx].filter(v => !v.startsWith("="));
+          const pattern = detectPattern(nonFormulaValues.length > 0 ? nonFormulaValues : sourceValues[rowIdx]);
 
           if (fillState.direction === "right") {
             for (let c = startCol; c <= endCol; c++) {
               const fillIndex = c - selMinCol;
-              const value = generateFillValue(pattern, sourceValues[rowIdx], fillIndex);
+              const sourceIndex = fillIndex % sourceCount;
+              const sourceValue = sourceValues[rowIdx][sourceIndex];
+              const sourceCol = selMinCol + sourceIndex;
+
+              const value = await computeFillValue(
+                sourceValue, r, sourceCol, r, c,
+                pattern, sourceValues[rowIdx], fillIndex,
+              );
               
               const updatedCells = await updateCell(r, c, value);
               for (const cell of updatedCells) {
@@ -538,10 +583,17 @@ export function useFillHandle(): UseFillHandleReturn {
               }
             }
           } else {
-            // Fill left (reverse)
+            // Fill left - mirror from right of selection leftward
             for (let c = endCol; c >= startCol; c--) {
               const fillIndex = selMaxCol - c;
-              const value = generateFillValue(pattern, sourceValues[rowIdx].slice().reverse(), fillIndex);
+              const sourceIndex = fillIndex % sourceCount;
+              const sourceValue = sourceValues[rowIdx][sourceCount - 1 - sourceIndex];
+              const sourceCol = selMaxCol - sourceIndex;
+
+              const value = await computeFillValue(
+                sourceValue, r, sourceCol, r, c,
+                pattern, sourceValues[rowIdx].slice().reverse(), fillIndex,
+              );
               
               const updatedCells = await updateCell(r, c, value);
               for (const cell of updatedCells) {
@@ -560,7 +612,6 @@ export function useFillHandle(): UseFillHandleReturn {
 
       console.log("[FillHandle] Fill complete");
 
-      // Update selection to include filled cells
       if (finalRange) {
         dispatch(setSelection({
           startRow: finalRange.startRow,
@@ -601,6 +652,7 @@ export function useFillHandle(): UseFillHandleReturn {
   /**
    * Auto-fill to edge (Excel double-click fill handle behavior).
    * Looks at adjacent columns to determine how far to fill down.
+   * FIX: Formula values are now shifted via shiftFormulaForFill.
    */
   const autoFillToEdge = useCallback(async () => {
     if (!selection) {
@@ -615,27 +667,22 @@ export function useFillHandle(): UseFillHandleReturn {
 
     console.log("[FillHandle] autoFillToEdge: Selection", { selMinRow, selMaxRow, selMinCol, selMaxCol });
 
-    // Find the edge by looking at adjacent columns (left first, then right)
     let edgeRow = selMaxRow;
-    const maxRowsToCheck = 10000; // Safety limit
+    const maxRowsToCheck = 10000;
 
-    // Check column to the left of selection
     if (selMinCol > 0) {
       const checkCol = selMinCol - 1;
-      // Start from the row after selection and find where data ends
       for (let r = selMaxRow + 1; r < selMaxRow + maxRowsToCheck; r++) {
         const cell = await getCell(r, checkCol);
         const hasData = cell && cell.display && cell.display.trim() !== "";
         if (hasData) {
           edgeRow = r;
         } else {
-          // Found empty cell, stop here
           break;
         }
       }
     }
 
-    // If no edge found from left, check column to the right
     if (edgeRow === selMaxRow && selMaxCol < 16383) {
       const checkCol = selMaxCol + 1;
       for (let r = selMaxRow + 1; r < selMaxRow + maxRowsToCheck; r++) {
@@ -649,7 +696,6 @@ export function useFillHandle(): UseFillHandleReturn {
       }
     }
 
-    // If no adjacent data found, do nothing
     if (edgeRow === selMaxRow) {
       console.log("[FillHandle] autoFillToEdge: No adjacent data found, nothing to fill");
       return;
@@ -658,7 +704,6 @@ export function useFillHandle(): UseFillHandleReturn {
     console.log("[FillHandle] autoFillToEdge: Filling down to row", edgeRow);
 
     try {
-      // Get source values column by column
       const sourceValues: string[][] = [];
       for (let c = selMinCol; c <= selMaxCol; c++) {
         const colValues: string[] = [];
@@ -669,14 +714,24 @@ export function useFillHandle(): UseFillHandleReturn {
         sourceValues.push(colValues);
       }
 
-      // Fill down for each column
+      const sourceCount = selMaxRow - selMinRow + 1;
+
       for (let c = selMinCol; c <= selMaxCol; c++) {
         const colIdx = c - selMinCol;
-        const pattern = detectPattern(sourceValues[colIdx]);
+        const nonFormulaValues = sourceValues[colIdx].filter(v => !v.startsWith("="));
+        const pattern = detectPattern(nonFormulaValues.length > 0 ? nonFormulaValues : sourceValues[colIdx]);
 
         for (let r = selMaxRow + 1; r <= edgeRow; r++) {
           const fillIndex = r - selMinRow;
-          const value = generateFillValue(pattern, sourceValues[colIdx], fillIndex);
+          const sourceIndex = fillIndex % sourceCount;
+          const sourceValue = sourceValues[colIdx][sourceIndex];
+          const sourceRow = selMinRow + sourceIndex;
+
+          // FIX: Use computeFillValue which handles formulas via shiftFormulaForFill
+          const value = await computeFillValue(
+            sourceValue, sourceRow, c, r, c,
+            pattern, sourceValues[colIdx], fillIndex,
+          );
           
           const updatedCells = await updateCell(r, c, value);
           for (const cell of updatedCells) {
@@ -693,7 +748,6 @@ export function useFillHandle(): UseFillHandleReturn {
 
       console.log("[FillHandle] autoFillToEdge complete");
 
-      // Update selection to include filled cells
       dispatch(setSelection({
         startRow: selMinRow,
         startCol: selMinCol,

@@ -598,3 +598,15 @@ export async function getMergeInfo(
 ): Promise<MergedRegion | null> {
   return invoke<MergedRegion | null>("get_merge_info", { row, col });
 }
+
+export async function shiftFormulaForFill(
+  formula: string,
+  rowDelta: number,
+  colDelta: number
+): Promise<string> {
+  return await invoke<string>("shift_formula_for_fill", {
+    formula,
+    rowDelta,
+    colDelta,
+  });
+}

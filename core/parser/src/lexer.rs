@@ -5,7 +5,7 @@
 //! for sheet names, and multi-character operators like <= and <>.
 //!
 //! SUPPORTED OPERATORS:
-//! - Single char: + - * / ^ & ( ) , : = < > !
+//! - Single char: + - * / ^ & ( ) , : = < > ! $
 //! - Multi char: <= >= <>
 //! - Quoted identifiers: 'Sheet Name'
 
@@ -40,6 +40,7 @@ impl<'a> Lexer<'a> {
             Some(',') => Token::Comma,
             Some(':') => Token::Colon,
             Some('!') => Token::Exclamation,
+            Some('$') => Token::Dollar,
 
             // Handle = and potentially other operators starting with =
             Some('=') => Token::Equals,
