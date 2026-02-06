@@ -3,16 +3,19 @@
 // CONTEXT: Part of FormulaBar, displays and edits the current cell formula/value
 // FIX: Now fetches content from master cell for merged regions
 // FIX: Added F4 key handler for toggling absolute/relative cell references
+// FIX: Parses formula references on selection change for passive highlighting
 // REFACTOR: Imports from api layer instead of core internals
 
 import React, { useCallback, useRef, useEffect } from "react";
 import { useGridContext, getCell, getMergeInfo } from "../../api";
 import { useEditing, setGlobalIsEditing, getGlobalEditingValue } from "../../api/editing";
 import { toggleReferenceAtCursor } from "../../core/lib/formulaRefToggle";
+import { parseFormulaReferences } from "../../core/lib/formulaRefParser";
+import { setFormulaReferences, clearFormulaReferences } from "../../core/state/gridActions";
 import * as S from './FormulaInput.styles';
 
 export function FormulaInput(): React.ReactElement {
-  const { state } = useGridContext();
+  const { state, dispatch } = useGridContext();
   const { editing, updateValue, commitEdit, cancelEdit, startEdit } = useEditing();
   const inputRef = useRef<HTMLInputElement>(null);
   const [displayValue, setDisplayValue] = React.useState("");
@@ -54,19 +57,30 @@ export function FormulaInput(): React.ReactElement {
           
           const cell = await getCell(cellRow, cellCol);
           if (cell) {
-            setDisplayValue(cell.formula || cell.display || "");
+            const content = cell.formula || cell.display || "";
+            setDisplayValue(content);
+
+            // FIX: Parse formula references for passive highlighting when selecting a formula cell
+            if (cell.formula && cell.formula.startsWith("=")) {
+              const refs = parseFormulaReferences(cell.formula, true);
+              dispatch(setFormulaReferences(refs));
+            } else {
+              dispatch(clearFormulaReferences());
+            }
           } else {
             setDisplayValue("");
+            dispatch(clearFormulaReferences());
           }
         } catch (error) {
           console.error("[FormulaInput] Failed to fetch cell content:", error);
           setDisplayValue("");
+          dispatch(clearFormulaReferences());
         }
       };
       
       fetchCellContent();
     }
-  }, [editing, state.selection]);
+  }, [editing, state.selection, dispatch]);
 
   const handleChange = useCallback(
     (e: React.ChangeEvent<HTMLInputElement>) => {

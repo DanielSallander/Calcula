@@ -411,6 +411,8 @@ export const DEFAULT_VIRTUAL_BOUNDS_CONFIG: VirtualBoundsConfig = {
  * FIX: Added isFullColumn and isFullRow flags to indicate full column/row
  * references. When set, the visual bounds are limited but the actual
  * formula references the entire column/row.
+ * FIX: Added isPassive flag for faint highlighting when selecting (not editing)
+ * a formula cell.
  */
 export interface FormulaReference {
   startRow: number;
@@ -424,6 +426,8 @@ export interface FormulaReference {
   isFullColumn?: boolean;
   /** True if this represents a full row reference (e.g., 1:1) */
   isFullRow?: boolean;
+  /** True if this is a passive highlight (cell selected but not being edited) */
+  isPassive?: boolean;
 }
 
 /**

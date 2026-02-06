@@ -1,6 +1,7 @@
 //! FILENAME: app/src/core/lib/gridRenderer/rendering/references.ts
-//PURPOSE: Formula reference highlighting
-//CONTEXT: Draws colored borders around formula cell references
+// PURPOSE: Formula reference highlighting
+// CONTEXT: Draws colored borders around formula cell references
+// FIX: Supports passive (faint) vs active (full) rendering modes
 
 import type { RenderState } from "../types";
 import { calculateVisibleRange } from "../layout/viewport";
@@ -8,6 +9,8 @@ import { getColumnWidth, getRowHeight, getColumnX, getRowY } from "../layout/dim
 
 /**
  * Draw formula reference highlights with dotted borders.
+ * Passive references (from cell selection) are drawn faintly.
+ * Active references (during editing) are drawn with full intensity.
  */
 export function drawFormulaReferences(state: RenderState): void {
   const { ctx, width, height, config, viewport, formulaReferences, dimensions } = state;
@@ -49,14 +52,21 @@ export function drawFormulaReferences(state: RenderState): void {
       continue;
     }
 
+    // FIX: Use different intensity for passive (selection) vs active (editing) references
+    const isPassive = ref.isPassive === true;
+    const fillOpacity = isPassive ? "0D" : "20";   // 5% vs 12%
+    const borderOpacity = isPassive ? "50" : "";    // 31% vs 100%
+    const lineWidth = isPassive ? 1 : 2;
+    const dashPattern = isPassive ? [6, 4] : [4, 4];
+
     // Draw semi-transparent fill
-    ctx.fillStyle = ref.color + "20"; // 12% opacity
+    ctx.fillStyle = ref.color + fillOpacity;
     ctx.fillRect(visX1, visY1, visX2 - visX1, visY2 - visY1);
 
     // Draw dotted border
-    ctx.strokeStyle = ref.color;
-    ctx.lineWidth = 2;
-    ctx.setLineDash([4, 4]);
+    ctx.strokeStyle = ref.color + borderOpacity;
+    ctx.lineWidth = lineWidth;
+    ctx.setLineDash(dashPattern);
 
     ctx.beginPath();
     ctx.rect(

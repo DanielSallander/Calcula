@@ -41,6 +41,7 @@ import {
 import type { EditingCell, CellUpdateResult, FormulaReference } from "../types";
 import { isFormulaExpectingReference, FORMULA_REFERENCE_COLORS } from "../types";
 import { checkEditGuards } from "../lib/editGuards";
+import { parseFormulaReferences } from "../lib/formulaRefParser";
 
 /**
  * MODULE-LEVEL singleton ref for synchronous editing state.
@@ -334,7 +335,6 @@ export function useEditing(): UseEditingReturn {
   const startEdit = useCallback(
     async (row: number, col: number, initialValue?: string) => {
       setLastError(null);
-      dispatch(clearFormulaReferences());
       setPendingReference(null);
       
       // Check if any extension blocks editing this cell (e.g., pivot regions)
@@ -346,7 +346,6 @@ export function useEditing(): UseEditingReturn {
       }
 
       // FIX: Set global flag BEFORE any async operation to prevent race conditions
-      // This ensures ALL useEditing() instances see editing state immediately
       setGlobalIsEditing(true);
       
       // FIX: Check if this cell is part of a merged region and resolve to master cell
@@ -358,7 +357,6 @@ export function useEditing(): UseEditingReturn {
       try {
         const mergeInfo = await getMergeInfo(row, col);
         if (mergeInfo) {
-          // Use the master cell (top-left of the merged region)
           editRow = mergeInfo.startRow;
           editCol = mergeInfo.startCol;
           rowSpan = mergeInfo.endRow - mergeInfo.startRow + 1;
@@ -366,7 +364,6 @@ export function useEditing(): UseEditingReturn {
           
           console.log(`[useEditing] Resolved to master cell: (${editRow}, ${editCol}) with span (${rowSpan}x${colSpan})`);
           
-          // Also update selection to cover the entire merged region
           dispatch(setSelection({
             startRow: mergeInfo.startRow,
             startCol: mergeInfo.startCol,
@@ -377,30 +374,33 @@ export function useEditing(): UseEditingReturn {
         }
       } catch (error) {
         console.error("[useEditing] Failed to get merge info:", error);
-        // Continue with original coordinates on error
       }
       
       // Determine the initial value to use
       let value = initialValue ?? "";
       
-      // FIX: If no initial value provided (EDIT mode), fetch cell content FIRST
-      // This prevents the race condition where the editor renders with empty value
-      // while the async fetch is in progress, allowing typed characters to replace content
       if (initialValue === undefined) {
         try {
           const cellData = await getCell(editRow, editCol);
           value = cellData?.formula || cellData?.display || "";
         } catch (error) {
           console.error("Failed to get cell data:", error);
-          // Keep value as "" on error
         }
       }
       
       // FIX: Update global editing value synchronously for formula mode detection
       setGlobalEditingValue(value);
       
-      // Dispatch with the correct value (either provided or fetched)
-      // Include rowSpan/colSpan for the InlineEditor to use
+      // FIX: Clear old references, then re-parse from the formula being edited.
+      // This replaces the passive (faint) selection highlights with active (full) edit highlights.
+      dispatch(clearFormulaReferences());
+      if (value.startsWith("=")) {
+        const refs = parseFormulaReferences(value, false);
+        if (refs.length > 0) {
+          dispatch(setFormulaReferences(refs));
+        }
+      }
+      
       dispatch(
         startEditingAction({
           row: editRow,
