@@ -96,6 +96,7 @@ pub fn merge_cells(
         style_index: master_style_index,
         row_span: max_row - min_row + 1,
         col_span: max_col - min_col + 1,
+        sheet_index: None,
     });
 
     Ok(MergeResult {
@@ -143,6 +144,7 @@ pub fn unmerge_cells(
             style_index: master_style_index,
             row_span: 1,
             col_span: 1,
+            sheet_index: None,
         }];
 
         Ok(MergeResult {

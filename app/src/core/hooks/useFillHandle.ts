@@ -503,6 +503,7 @@ export function useFillHandle(): UseFillHandleReturn {
               
               const updatedCells = await updateCell(r, c, value);
               for (const cell of updatedCells) {
+                if (cell.sheetIndex !== undefined) continue; // Skip cross-sheet cells
                 cellEvents.emit({
                   row: cell.row,
                   col: cell.col,
@@ -528,6 +529,7 @@ export function useFillHandle(): UseFillHandleReturn {
               
               const updatedCells = await updateCell(r, c, value);
               for (const cell of updatedCells) {
+                if (cell.sheetIndex !== undefined) continue; // Skip cross-sheet cells
                 cellEvents.emit({
                   row: cell.row,
                   col: cell.col,
@@ -573,6 +575,7 @@ export function useFillHandle(): UseFillHandleReturn {
               
               const updatedCells = await updateCell(r, c, value);
               for (const cell of updatedCells) {
+                if (cell.sheetIndex !== undefined) continue; // Skip cross-sheet cells
                 cellEvents.emit({
                   row: cell.row,
                   col: cell.col,
@@ -597,6 +600,7 @@ export function useFillHandle(): UseFillHandleReturn {
               
               const updatedCells = await updateCell(r, c, value);
               for (const cell of updatedCells) {
+                if (cell.sheetIndex !== undefined) continue; // Skip cross-sheet cells
                 cellEvents.emit({
                   row: cell.row,
                   col: cell.col,
@@ -735,6 +739,7 @@ export function useFillHandle(): UseFillHandleReturn {
           
           const updatedCells = await updateCell(r, c, value);
           for (const cell of updatedCells) {
+            if (cell.sheetIndex !== undefined) continue; // Skip cross-sheet cells
             cellEvents.emit({
               row: cell.row,
               col: cell.col,

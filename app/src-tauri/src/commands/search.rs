@@ -195,6 +195,7 @@ pub fn replace_all(
                     style_index: new_cell.style_index,
                     row_span,
                     col_span,
+                    sheet_index: None,
                 });
 
                 replacement_count += 1;
@@ -329,6 +330,7 @@ pub fn replace_single(
                 style_index: new_cell.style_index,
                 row_span,
                 col_span,
+                sheet_index: None,
             }));
         }
     }

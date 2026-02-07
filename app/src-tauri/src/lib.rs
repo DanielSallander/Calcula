@@ -606,14 +606,15 @@ pub fn update_cross_sheet_dependencies(
     }
     
     for new_ref in &new_refs {
+        println!("[XDEP] Adding dependent: {:?} depends on {:?}", formula_cell, new_ref);
         cross_sheet_dependents
             .entry(new_ref.clone())
             .or_insert_with(HashSet::new)
             .insert(formula_cell);
     }
-    
+
     if !new_refs.is_empty() {
-        log_debug!("XDEP", "formula={:?} cross_sheet_refs={}", formula_cell, new_refs.len());
+        println!("[XDEP] Registered cross-sheet deps for {:?}: {:?}", formula_cell, new_refs);
         cross_sheet_dependencies.insert(formula_cell, new_refs);
     }
 }

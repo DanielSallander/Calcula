@@ -20,6 +20,9 @@ pub struct CellData {
     /// Number of columns this cell spans (1 = normal, >1 = merged master cell)
     #[serde(default = "default_span")]
     pub col_span: u32,
+    /// Sheet index for cross-sheet updates (None = current active sheet)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sheet_index: Option<usize>,
 }
 
 fn default_span() -> u32 {

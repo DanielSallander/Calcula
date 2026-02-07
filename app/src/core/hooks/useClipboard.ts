@@ -275,9 +275,12 @@ export function useClipboard(): UseClipboardReturn {
 
           try {
             const updatedCells = await updateCell(destRow, destCol, value);
-            
-            // Emit events for updated cells
+
+            // Emit events for same-sheet cells only (skip cross-sheet dependents)
             for (const cell of updatedCells) {
+              if (cell.sheetIndex !== undefined) {
+                continue; // Skip cross-sheet cells
+              }
               cellEvents.emit({
                 row: cell.row,
                 col: cell.col,

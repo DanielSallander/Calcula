@@ -657,9 +657,33 @@ export const GridCanvas = forwardRef<GridCanvasHandle, GridCanvasProps>(
       };
 
       window.addEventListener("sheet:formulaModeSwitch", handleFormulaModeSheetSwitch);
-      
+
       return () => {
         window.removeEventListener("sheet:formulaModeSwitch", handleFormulaModeSheetSwitch);
+      };
+    }, [fetchCells]);
+
+    /**
+     * Listen for normal sheet switch events (non-formula mode).
+     * This replaces the page reload with a proper cell refresh.
+     */
+    useEffect(() => {
+      const handleNormalSheetSwitch = async (event: Event) => {
+        const customEvent = event as CustomEvent<{
+          newSheetIndex: number;
+          newSheetName: string;
+        }>;
+        console.log(`[GridCanvas] Normal sheet switch to: ${customEvent.detail.newSheetName}`);
+
+        // Clear the fetch cache and reload cells from the new active sheet
+        lastFetchRef.current = null;
+        await fetchCells(true);
+      };
+
+      window.addEventListener("sheet:normalSwitch", handleNormalSheetSwitch);
+
+      return () => {
+        window.removeEventListener("sheet:normalSwitch", handleNormalSheetSwitch);
       };
     }, [fetchCells]);
 

@@ -156,6 +156,22 @@ function SpreadsheetContent({
   }, [refreshDimensions]);
 
   // -------------------------------------------------------------------------
+  // Sheet Switch Listener (for normal sheet switching without page reload)
+  // -------------------------------------------------------------------------
+  useEffect(() => {
+    const handleSheetSwitch = () => {
+      console.log("[Spreadsheet] Sheet switch - refreshing dimensions");
+      refreshDimensions();
+    };
+
+    window.addEventListener("sheet:normalSwitch", handleSheetSwitch);
+
+    return () => {
+      window.removeEventListener("sheet:normalSwitch", handleSheetSwitch);
+    };
+  }, [refreshDimensions]);
+
+  // -------------------------------------------------------------------------
   // Clear Contents Handler
   // -------------------------------------------------------------------------
   const handleClearContents = useCallback(async () => {

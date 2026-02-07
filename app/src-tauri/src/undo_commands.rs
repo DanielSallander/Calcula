@@ -125,6 +125,7 @@ pub fn undo(state: State<AppState>) -> UndoResult {
                             style_index: cell.style_index,
                             row_span: 1,
                             col_span: 1,
+                            sheet_index: None,
                         });
                     }
                     None => {
@@ -140,6 +141,7 @@ pub fn undo(state: State<AppState>) -> UndoResult {
                             style_index: 0,
                             row_span: 1,
                             col_span: 1,
+                            sheet_index: None,
                         });
                     }
                 }
@@ -248,6 +250,7 @@ pub fn redo(state: State<AppState>) -> UndoResult {
                             style_index: cell.style_index,
                             row_span: 1,
                             col_span: 1,
+                            sheet_index: None,
                         });
                     }
                     None => {
@@ -263,6 +266,7 @@ pub fn redo(state: State<AppState>) -> UndoResult {
                             style_index: 0,
                             row_span: 1,
                             col_span: 1,
+                            sheet_index: None,
                         });
                     }
                 }

@@ -224,8 +224,13 @@ export function SheetTabs({ onSheetChange }: SheetTabsProps): React.ReactElement
 
         onSheetChange?.(result.activeIndex, newActiveSheet?.name || "");
 
-        // Reload to refresh grid data (only in non-formula mode)
-        window.location.reload();
+        // Dispatch event to refresh grid data without full page reload
+        window.dispatchEvent(new CustomEvent("sheet:normalSwitch", {
+          detail: {
+            newSheetIndex: result.activeIndex,
+            newSheetName: newActiveSheet?.name || "",
+          }
+        }));
       } catch (err) {
         console.error("[SheetTabs] setActiveSheet error:", err);
         // Clear the prevent flag on error
@@ -247,8 +252,19 @@ export function SheetTabs({ onSheetChange }: SheetTabsProps): React.ReactElement
       setSheets(result.sheets);
       setActiveIndex(result.activeIndex);
 
-      onSheetChange?.(result.activeIndex, result.sheets[result.activeIndex]?.name || "");
-      window.location.reload();
+      const newActiveSheet = result.sheets[result.activeIndex];
+      if (newActiveSheet) {
+        dispatch(setActiveSheet(result.activeIndex, newActiveSheet.name));
+      }
+      onSheetChange?.(result.activeIndex, newActiveSheet?.name || "");
+
+      // Dispatch event to refresh grid data without full page reload
+      window.dispatchEvent(new CustomEvent("sheet:normalSwitch", {
+        detail: {
+          newSheetIndex: result.activeIndex,
+          newSheetName: newActiveSheet?.name || "",
+        }
+      }));
     } catch (err) {
       console.error("[SheetTabs] addSheet error:", err);
       alert("Failed to add sheet: " + String(err));
@@ -269,8 +285,19 @@ export function SheetTabs({ onSheetChange }: SheetTabsProps): React.ReactElement
         setSheets(result.sheets);
         setActiveIndex(result.activeIndex);
 
-        onSheetChange?.(result.activeIndex, result.sheets[result.activeIndex]?.name || "");
-        window.location.reload();
+        const newActiveSheet = result.sheets[result.activeIndex];
+        if (newActiveSheet) {
+          dispatch(setActiveSheet(result.activeIndex, newActiveSheet.name));
+        }
+        onSheetChange?.(result.activeIndex, newActiveSheet?.name || "");
+
+        // Dispatch event to refresh grid data without full page reload
+        window.dispatchEvent(new CustomEvent("sheet:normalSwitch", {
+          detail: {
+            newSheetIndex: result.activeIndex,
+            newSheetName: newActiveSheet?.name || "",
+          }
+        }));
       } catch (err) {
         console.error("[SheetTabs] deleteSheet error:", err);
         alert("Failed to delete sheet: " + String(err));

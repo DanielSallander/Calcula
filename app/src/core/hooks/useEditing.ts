@@ -857,9 +857,16 @@ export function useEditing(): UseEditingReturn {
           newValue: primaryCell.display,
           formula: primaryCell.formula ?? null,
         });
-        
+
+        // Emit events for same-sheet dependent cells only
+        // Cross-sheet cells (sheetIndex defined) are already updated in the backend
+        // and will be fetched fresh when switching sheets
         for (let i = 1; i < updatedCells.length; i++) {
           const depCell = updatedCells[i];
+          // Skip cross-sheet cells - sheetIndex is undefined for same-sheet cells
+          if (depCell.sheetIndex !== undefined) {
+            continue;
+          }
           cellEvents.emit({
             row: depCell.row,
             col: depCell.col,

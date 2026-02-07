@@ -89,6 +89,7 @@ pub fn open_file(
                 style_index: cell.style_index,
                 row_span: 1,
                 col_span: 1,
+                sheet_index: None,
             }
         })
         .collect();

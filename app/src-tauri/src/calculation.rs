@@ -96,6 +96,7 @@ pub fn calculate_now(state: State<AppState>) -> Result<Vec<CellData>, String> {
                 style_index: updated.style_index,
                 row_span: 1,
                 col_span: 1,
+                sheet_index: None,
             });
         }
     }

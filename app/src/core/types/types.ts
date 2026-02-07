@@ -178,6 +178,8 @@ export interface CellData {
   rowSpan?: number;
   /** Number of columns this cell spans (for merged cells) */
   colSpan?: number;
+  /** Sheet index for cross-sheet updates (undefined = current active sheet) */
+  sheetIndex?: number;
 }
 
 /**

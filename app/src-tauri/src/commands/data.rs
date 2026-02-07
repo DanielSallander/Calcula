@@ -92,6 +92,7 @@ fn get_cell_internal(grid: &Grid, styles: &StyleRegistry, row: u32, col: u32) ->
         style_index: cell.style_index,
         row_span: 1,
         col_span: 1,
+        sheet_index: None,
     })
 }
 
@@ -186,6 +187,7 @@ pub fn update_cell(
             style_index: 0,
             row_span,
             col_span,
+            sheet_index: None,
         });
 
         // Record undo after successful change
@@ -212,6 +214,10 @@ pub fn update_cell(
             update_row_dependencies((row, col), refs.rows, &mut row_dependencies_map, &mut row_dependents_map);
             
             // Track cross-sheet dependencies
+            if !refs.cross_sheet_cells.is_empty() {
+                println!("[XDEP] Cell ({}, {}) on sheet {} has cross-sheet refs: {:?}",
+                    row, col, current_sheet_name, refs.cross_sheet_cells);
+            }
             update_cross_sheet_dependencies(
                 (active_sheet, row, col),
                 refs.cross_sheet_cells,
@@ -284,6 +290,7 @@ pub fn update_cell(
         style_index: cell.style_index,
         row_span,
         col_span,
+        sheet_index: None, // Current active sheet
     });
 
     // Record undo after successful change
@@ -341,20 +348,24 @@ pub fn update_cell(
                         style_index: updated_dep.style_index,
                         row_span: dep_row_span,
                         col_span: dep_col_span,
+                        sheet_index: None, // Current active sheet
                     });
                 }
             }
         }
-        
+
         // Also recalculate cross-sheet dependents (formulas on OTHER sheets that reference this cell)
         let cross_sheet_key = (current_sheet_name.clone(), row, col);
+        println!("[XDEP] Looking up dependents for key {:?}", cross_sheet_key);
+        println!("[XDEP] All keys in map: {:?}", cross_sheet_dependents_map.keys().collect::<Vec<_>>());
         if let Some(cross_deps) = cross_sheet_dependents_map.get(&cross_sheet_key) {
+            println!("[XDEP] Found {} cross-sheet dependents: {:?}", cross_deps.len(), cross_deps);
             for (dep_sheet_idx, dep_row, dep_col) in cross_deps.iter() {
                 // Skip if it's on the current sheet (already handled above)
                 if *dep_sheet_idx == active_sheet {
                     continue;
                 }
-                
+
                 // Get the dependent cell from its sheet
                 if *dep_sheet_idx < grids.len() {
                     if let Some(dep_cell) = grids[*dep_sheet_idx].get_cell(*dep_row, *dep_col) {
@@ -368,13 +379,27 @@ pub fn update_cell(
                             );
 
                             let mut updated_dep = dep_cell.clone();
-                            updated_dep.value = result;
+                            updated_dep.value = result.clone();
+                            println!("[XDEP] Recalculated sheet {} cell ({}, {}) = {:?}",
+                                dep_sheet_idx, dep_row, dep_col, result);
                             grids[*dep_sheet_idx].set_cell(*dep_row, *dep_col, updated_dep.clone());
 
-                            // Note: We don't add these to updated_cells since they're on different sheets
-                            // The frontend will need to refresh when switching sheets
-                            // But we log it for debugging
-                            let _dep_sheet_name = sheet_names.get(*dep_sheet_idx).unwrap_or(&String::new());
+                            // Format the display value and add to updated_cells with sheet_index
+                            let dep_style = styles.get(updated_dep.style_index);
+                            let dep_display = format_cell_value(&updated_dep.value, dep_style);
+
+                            // For cross-sheet cells, use default span (1,1) since merged_regions
+                            // is currently tracked per-active-sheet only
+                            updated_cells.push(CellData {
+                                row: *dep_row,
+                                col: *dep_col,
+                                display: dep_display,
+                                formula: updated_dep.formula.clone(),
+                                style_index: updated_dep.style_index,
+                                row_span: 1,
+                                col_span: 1,
+                                sheet_index: Some(*dep_sheet_idx),
+                            });
                         }
                     }
                 }

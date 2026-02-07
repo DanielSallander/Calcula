@@ -52,5 +52,6 @@ pub(crate) fn get_cell_internal_with_merge(
         style_index,
         row_span,
         col_span,
+        sheet_index: None,
     })
 }

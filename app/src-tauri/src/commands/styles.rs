@@ -72,6 +72,7 @@ pub fn set_cell_style(
             style_index,
             row_span,
             col_span,
+            sheet_index: None,
         })
     } else {
         // Create a new empty cell with the style
@@ -97,6 +98,7 @@ pub fn set_cell_style(
             style_index,
             row_span,
             col_span,
+            sheet_index: None,
         })
     }
 }
@@ -232,6 +234,7 @@ pub fn apply_formatting(
                 style_index: new_style_index,
                 row_span,
                 col_span,
+                sheet_index: None,
             });
         }
     }
