@@ -575,6 +575,7 @@ function SpreadsheetContent({
             clipboardMode={clipboardMode}
             fillPreviewRange={fillState.previewRange}
             freezeConfig={freezeConfig}
+            currentSheetName={gridState.sheetContext.activeSheetName}
           />
 
           {editing && isEditing && (

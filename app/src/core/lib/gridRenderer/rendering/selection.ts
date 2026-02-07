@@ -106,12 +106,25 @@ function getRowYWithFreeze(
 /**
  * Draw the selection highlight.
  * Supports freeze panes with proper positioning across zones.
+ * FIX: Skips drawing when viewing a different sheet during formula editing.
  */
 export function drawSelection(state: RenderState): void {
-  const { ctx, width, height, config, viewport, selection, theme, dimensions, freezeConfig } = state;
+  const {
+    ctx, width, height, config, viewport, selection, theme, dimensions, freezeConfig,
+    editing, currentSheetName, formulaSourceSheetName
+  } = state;
 
   if (!selection) {
     return;
+  }
+
+  // FIX: When editing a formula and viewing a different sheet, don't draw the source sheet's selection
+  // This prevents showing the wrong selection (e.g., B3 on Sheet1 appearing on Sheet2)
+  if (editing && formulaSourceSheetName && currentSheetName) {
+    const isOnDifferentSheet = currentSheetName.toLowerCase() !== formulaSourceSheetName.toLowerCase();
+    if (isOnDifferentSheet) {
+      return;
+    }
   }
   const rowHeaderWidth = config.rowHeaderWidth || 50;
   const colHeaderHeight = config.colHeaderHeight || 24;

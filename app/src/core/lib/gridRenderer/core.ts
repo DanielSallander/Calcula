@@ -496,17 +496,19 @@ export function renderGrid(
   // NEW: Overlays passed as parameters instead of imported from API
   overlayRegions: GridRegion[] = [],
   overlayRenderers: OverlayRegistration[] = [],
+  // FIX: Sheet context for cross-sheet reference highlighting
+  currentSheetName?: string,
 ): void {
   const rowHeaderWidth = config.rowHeaderWidth || 50;
   const colHeaderHeight = config.colHeaderHeight || 24;
-  
+
   const dims = dimensions || {
     columnWidths: new Map(),
     rowHeights: new Map(),
   };
-  
+
   const styles = styleCache || new Map();
-  
+
   const state: RenderState = {
     ctx,
     width,
@@ -526,6 +528,9 @@ export function renderGrid(
     clipboardAnimationOffset: clipboardAnimationOffset || 0,
     insertionAnimation: insertionAnimation || undefined,
     freezeConfig: freezeConfig || { freezeRow: null, freezeCol: null },
+    // FIX: Pass sheet context for cross-sheet reference highlighting
+    currentSheetName,
+    formulaSourceSheetName: editing?.sourceSheetName,
   };
 
   ctx.fillStyle = theme.cellBackground;

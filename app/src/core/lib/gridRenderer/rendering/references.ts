@@ -2,18 +2,45 @@
 // PURPOSE: Formula reference highlighting
 // CONTEXT: Draws colored borders around formula cell references
 // FIX: Supports passive (faint) vs active (full) rendering modes
+// FIX: Now respects sheet names for cross-sheet reference highlighting
 
 import type { RenderState } from "../types";
 import { calculateVisibleRange } from "../layout/viewport";
 import { getColumnWidth, getRowHeight, getColumnX, getRowY } from "../layout/dimensions";
 
 /**
+ * Check if a reference should be drawn on the current sheet.
+ * A reference is drawn if:
+ * - It has no sheet name AND we're on the formula's source sheet
+ * - It has a sheet name that matches the current sheet (case-insensitive)
+ */
+function shouldDrawReference(
+  refSheetName: string | undefined,
+  currentSheetName: string | undefined,
+  formulaSourceSheetName: string | undefined
+): boolean {
+  if (!refSheetName) {
+    // Reference has no sheet prefix - it refers to the formula's source sheet
+    // Only draw if we're viewing the source sheet
+    if (!currentSheetName || !formulaSourceSheetName) return true;
+    return currentSheetName.toLowerCase() === formulaSourceSheetName.toLowerCase();
+  }
+  // Reference has a sheet prefix - draw if it matches current sheet
+  if (!currentSheetName) return true;
+  return refSheetName.toLowerCase() === currentSheetName.toLowerCase();
+}
+
+/**
  * Draw formula reference highlights with dotted borders.
  * Passive references (from cell selection) are drawn faintly.
  * Active references (during editing) are drawn with full intensity.
+ * FIX: Only draws references that belong to the current sheet.
  */
 export function drawFormulaReferences(state: RenderState): void {
-  const { ctx, width, height, config, viewport, formulaReferences, dimensions } = state;
+  const {
+    ctx, width, height, config, viewport, formulaReferences, dimensions,
+    currentSheetName, formulaSourceSheetName
+  } = state;
 
   if (!formulaReferences || formulaReferences.length === 0) {
     return;
@@ -22,6 +49,11 @@ export function drawFormulaReferences(state: RenderState): void {
   const colHeaderHeight = config.colHeaderHeight || 24;
   const range = calculateVisibleRange(viewport, config, width, height, dimensions);
   for (const ref of formulaReferences) {
+    // FIX: Skip references that belong to a different sheet
+    if (!shouldDrawReference(ref.sheetName, currentSheetName, formulaSourceSheetName)) {
+      continue;
+    }
+
     // Normalize bounds
     const minRow = Math.min(ref.startRow, ref.endRow);
     const maxRow = Math.max(ref.startRow, ref.endRow);

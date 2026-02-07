@@ -116,4 +116,8 @@ export interface RenderState {
   zoneOffsetX?: number;
   /** Y offset for zone rendering */
   zoneOffsetY?: number;
+  /** Current sheet name for cross-sheet reference highlighting */
+  currentSheetName?: string;
+  /** Source sheet name when editing a formula (the sheet where the formula lives) */
+  formulaSourceSheetName?: string;
 }

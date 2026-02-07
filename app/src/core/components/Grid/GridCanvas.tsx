@@ -49,6 +49,8 @@ export interface GridCanvasProps {
   onMouseUp?: (event: React.MouseEvent<HTMLCanvasElement>) => void;
   /** Optional class name for styling */
   className?: string;
+  /** Current sheet name for cross-sheet reference highlighting */
+  currentSheetName?: string;
 }
 
 /**
@@ -154,6 +156,7 @@ export const GridCanvas = forwardRef<GridCanvasHandle, GridCanvasProps>(
       onMouseMove,
       onMouseUp,
       className,
+      currentSheetName,
     } = props;
 
     const containerRef = useRef<HTMLDivElement | null>(null);
@@ -392,7 +395,7 @@ export const GridCanvas = forwardRef<GridCanvasHandle, GridCanvasProps>(
       // Clear the canvas
       clear();
 
-      // Render the grid with cell data, formula references, style cache, fill preview, clipboard, insertion animation, and freeze config
+      // Render the grid with cell data, formula references, style cache, fill preview, clipboard, insertion animation, freeze config, and sheet context
       renderGrid(
         context,
         canvasSize.width,
@@ -412,8 +415,11 @@ export const GridCanvas = forwardRef<GridCanvasHandle, GridCanvasProps>(
         animationOffset,
         currentInsertionAnimation,
         freezeConfig,
+        [], // overlayRegions
+        [], // overlayRenderers
+        currentSheetName, // FIX: Pass current sheet for cross-sheet reference highlighting
       );
-    }, [context, canvasSize.width, canvasSize.height, config, viewport, selection, editing, cells, theme, formulaReferences, dims, styleCache, fillPreviewRange, clipboardSelection, clipboardMode, freezeConfig, clear]);
+    }, [context, canvasSize.width, canvasSize.height, config, viewport, selection, editing, cells, theme, formulaReferences, dims, styleCache, fillPreviewRange, clipboardSelection, clipboardMode, freezeConfig, clear, currentSheetName]);
 
     /**
      * Start row insertion animation.

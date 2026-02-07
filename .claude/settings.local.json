@@ -25,7 +25,8 @@
       "Bash(Select-String -NotMatch \"warning\")",
       "Bash(Select-String -NotMatch \"Exit\")",
       "Bash(Select-String -NotMatch \"Command\")",
-      "Bash(npx eslint:*)"
+      "Bash(npx eslint:*)",
+      "Bash(grep:*)"
     ],
     "deny": [],
     "ask": []

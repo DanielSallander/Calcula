@@ -44,7 +44,7 @@ export function useSpreadsheetEditing({
   
   const {
     isEditing,
-    isEditingRef, 
+    isEditingRef,
     isFormulaMode,
     isCommitting,
     lastError,
@@ -53,7 +53,8 @@ export function useSpreadsheetEditing({
     commitEdit,
     cancelEdit,
     clearError,
-    startEditing // Derived here
+    startEditing, // Derived here
+    isOnDifferentSheet, // FIX: For handling Enter/Escape when on different sheet during formula mode
   } = useEditing();
 
   const showStatus = useCallback((message: string, duration: number = 3000) => {
@@ -193,6 +194,25 @@ export function useSpreadsheetEditing({
       // The ref is updated immediately when editing starts, before React re-renders
       // This prevents the stale closure race condition on double-click
       if (isEditing || isEditingRef.current) {
+        // FIX: When editing on a different sheet, InlineEditor is not rendered
+        // so we need to handle Enter/Escape here for cross-sheet formula editing
+        if (isOnDifferentSheet()) {
+          if (event.key === "Enter") {
+            event.preventDefault();
+            const success = await handleCommitEdit();
+            if (success) {
+              moveActiveCell(event.shiftKey ? -1 : 1, 0);
+              scrollToSelection();
+            }
+            focusContainerRef.current?.focus();
+            return;
+          } else if (event.key === "Escape") {
+            event.preventDefault();
+            cancelEdit();
+            focusContainerRef.current?.focus();
+            return;
+          }
+        }
         return;
       }
 
@@ -236,7 +256,7 @@ export function useSpreadsheetEditing({
         return;
       }
     },
-    [isEditing, isEditingRef, startEditing, handleCommitEdit, moveActiveCell, scrollToSelection]
+    [isEditing, isEditingRef, isOnDifferentSheet, startEditing, handleCommitEdit, cancelEdit, moveActiveCell, scrollToSelection, focusContainerRef]
   );
 
   const getFormulaBarValueInternal = (): string => {

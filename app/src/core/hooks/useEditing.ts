@@ -252,27 +252,32 @@ export function useEditing(): UseEditingReturn {
 
   /**
    * Update pending reference for live preview.
+   * FIX: Include sheetName for cross-sheet reference highlighting.
    */
   const updatePendingReference = useCallback(
     (startRow: number, startCol: number, endRow: number, endCol: number) => {
+      const targetSheet = getTargetSheetName();
       const newPending: FormulaReference = {
         startRow,
         startCol,
         endRow,
         endCol,
         color: pendingReference?.color || getNextReferenceColor(),
+        sheetName: targetSheet ?? undefined,
       };
       setPendingReference(newPending);
     },
-    [pendingReference, getNextReferenceColor]
+    [pendingReference, getNextReferenceColor, getTargetSheetName]
   );
 
   /**
    * Update pending column reference for live preview.
    * FIX: Limit the row range to prevent performance issues.
+   * FIX: Include sheetName for cross-sheet reference highlighting.
    */
   const updatePendingColumnReference = useCallback(
     (startCol: number, endCol: number) => {
+      const targetSheet = getTargetSheetName();
       // FIX: Use limited bounds instead of totalRows to prevent performance issues
       const maxRow = Math.min(MAX_FORMULA_REFERENCE_ROWS - 1, (config?.totalRows || MAX_FORMULA_REFERENCE_ROWS) - 1);
       const newPending: FormulaReference = {
@@ -281,19 +286,22 @@ export function useEditing(): UseEditingReturn {
         endRow: maxRow,
         endCol: Math.max(startCol, endCol),
         color: pendingReference?.color || getNextReferenceColor(),
+        sheetName: targetSheet ?? undefined,
         isFullColumn: true, // Flag to indicate this is a full column reference
       };
       setPendingReference(newPending);
     },
-    [pendingReference, getNextReferenceColor, config]
+    [pendingReference, getNextReferenceColor, config, getTargetSheetName]
   );
 
   /**
    * Update pending row reference for live preview.
    * FIX: Limit the column range to prevent performance issues.
+   * FIX: Include sheetName for cross-sheet reference highlighting.
    */
   const updatePendingRowReference = useCallback(
     (startRow: number, endRow: number) => {
+      const targetSheet = getTargetSheetName();
       // FIX: Use limited bounds instead of totalCols to prevent performance issues
       const maxCol = Math.min(MAX_FORMULA_REFERENCE_COLS - 1, (config?.totalCols || MAX_FORMULA_REFERENCE_COLS) - 1);
       const newPending: FormulaReference = {
@@ -302,11 +310,12 @@ export function useEditing(): UseEditingReturn {
         endRow: Math.max(startRow, endRow),
         endCol: maxCol,
         color: pendingReference?.color || getNextReferenceColor(),
+        sheetName: targetSheet ?? undefined,
         isFullRow: true, // Flag to indicate this is a full row reference
       };
       setPendingReference(newPending);
     },
-    [pendingReference, getNextReferenceColor, config]
+    [pendingReference, getNextReferenceColor, config, getTargetSheetName]
   );
 
   /**
@@ -528,21 +537,23 @@ export function useEditing(): UseEditingReturn {
       const sourceSheet = getSourceSheetName();
       const reference = rangeToReference(row, col, row, col, targetSheet, sourceSheet);
       const newValue = editing.value + reference;
-      
+
       // FIX: Update global value synchronously
       setGlobalEditingValue(newValue);
       dispatch(updateEditing(newValue));
 
+      // FIX: Include sheetName for cross-sheet reference highlighting
       const newRef: FormulaReference = {
         startRow: row,
         startCol: col,
         endRow: row,
         endCol: col,
         color: getNextReferenceColor(),
+        sheetName: targetSheet ?? undefined,
       };
       dispatch(setFormulaReferences([...formulaReferences, newRef]));
       setPendingReference(null);
-      
+
       // FIX: Dispatch event to restore focus to the InlineEditor
       dispatchReferenceInsertedEvent();
     },
@@ -564,17 +575,19 @@ export function useEditing(): UseEditingReturn {
       const sourceSheet = getSourceSheetName();
       const reference = rangeToReference(startRow, startCol, endRow, endCol, targetSheet, sourceSheet);
       const newValue = editing.value + reference;
-      
+
       // FIX: Update global value synchronously
       setGlobalEditingValue(newValue);
       dispatch(updateEditing(newValue));
 
+      // FIX: Include sheetName for cross-sheet reference highlighting
       const newRef: FormulaReference = {
         startRow,
         startCol,
         endRow,
         endCol,
         color: pendingReference?.color || getNextReferenceColor(),
+        sheetName: targetSheet ?? undefined,
       };
       dispatch(setFormulaReferences([...formulaReferences.filter(r => r !== pendingReference), newRef]));
       setPendingReference(null);
@@ -610,17 +623,19 @@ export function useEditing(): UseEditingReturn {
       // The actual formula will still reference the entire column, but the visual
       // highlight will only show a reasonable number of rows
       const maxRow = Math.min(MAX_FORMULA_REFERENCE_ROWS - 1, (config?.totalRows || MAX_FORMULA_REFERENCE_ROWS) - 1);
+      // FIX: Include sheetName for cross-sheet reference highlighting
       const newRef: FormulaReference = {
         startRow: 0,
         startCol: col,
         endRow: maxRow,
         endCol: col,
         color: pendingReference?.color || getNextReferenceColor(),
+        sheetName: targetSheet ?? undefined,
         isFullColumn: true,
       };
       dispatch(setFormulaReferences([...formulaReferences.filter(r => r !== pendingReference), newRef]));
       setPendingReference(null);
-      
+
       // FIX: Dispatch event to restore focus to the InlineEditor
       dispatchReferenceInsertedEvent();
     },
@@ -643,7 +658,7 @@ export function useEditing(): UseEditingReturn {
       const sourceSheet = getSourceSheetName();
       const reference = columnRangeToReference(startCol, endCol, targetSheet, sourceSheet);
       const newValue = editing.value + reference;
-      
+
       // FIX: Update global value synchronously
       setGlobalEditingValue(newValue);
       dispatch(updateEditing(newValue));
@@ -652,12 +667,14 @@ export function useEditing(): UseEditingReturn {
       const maxRow = Math.min(MAX_FORMULA_REFERENCE_ROWS - 1, (config?.totalRows || MAX_FORMULA_REFERENCE_ROWS) - 1);
       const minCol = Math.min(startCol, endCol);
       const maxCol = Math.max(startCol, endCol);
+      // FIX: Include sheetName for cross-sheet reference highlighting
       const newRef: FormulaReference = {
         startRow: 0,
         startCol: minCol,
         endRow: maxRow,
         endCol: maxCol,
         color: pendingReference?.color || getNextReferenceColor(),
+        sheetName: targetSheet ?? undefined,
         isFullColumn: true,
       };
       dispatch(setFormulaReferences([...formulaReferences.filter(r => r !== pendingReference), newRef]));
@@ -692,17 +709,19 @@ export function useEditing(): UseEditingReturn {
 
       // FIX: Use limited bounds instead of totalCols to prevent performance issues
       const maxCol = Math.min(MAX_FORMULA_REFERENCE_COLS - 1, (config?.totalCols || MAX_FORMULA_REFERENCE_COLS) - 1);
+      // FIX: Include sheetName for cross-sheet reference highlighting
       const newRef: FormulaReference = {
         startRow: row,
         startCol: 0,
         endRow: row,
         endCol: maxCol,
         color: pendingReference?.color || getNextReferenceColor(),
+        sheetName: targetSheet ?? undefined,
         isFullRow: true,
       };
       dispatch(setFormulaReferences([...formulaReferences.filter(r => r !== pendingReference), newRef]));
       setPendingReference(null);
-      
+
       // FIX: Dispatch event to restore focus to the InlineEditor
       dispatchReferenceInsertedEvent();
     },
@@ -725,7 +744,7 @@ export function useEditing(): UseEditingReturn {
       const sourceSheet = getSourceSheetName();
       const reference = rowRangeToReference(startRow, endRow, targetSheet, sourceSheet);
       const newValue = editing.value + reference;
-      
+
       // FIX: Update global value synchronously
       setGlobalEditingValue(newValue);
       dispatch(updateEditing(newValue));
@@ -734,17 +753,19 @@ export function useEditing(): UseEditingReturn {
       const maxCol = Math.min(MAX_FORMULA_REFERENCE_COLS - 1, (config?.totalCols || MAX_FORMULA_REFERENCE_COLS) - 1);
       const minRow = Math.min(startRow, endRow);
       const maxRow = Math.max(startRow, endRow);
+      // FIX: Include sheetName for cross-sheet reference highlighting
       const newRef: FormulaReference = {
         startRow: minRow,
         startCol: 0,
         endRow: maxRow,
         endCol: maxCol,
         color: pendingReference?.color || getNextReferenceColor(),
+        sheetName: targetSheet ?? undefined,
         isFullRow: true,
       };
       dispatch(setFormulaReferences([...formulaReferences.filter(r => r !== pendingReference), newRef]));
       setPendingReference(null);
-      
+
       // FIX: Dispatch event to restore focus to the InlineEditor
       dispatchReferenceInsertedEvent();
     },
