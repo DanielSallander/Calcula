@@ -163,14 +163,6 @@ export function SheetTabs({ onSheetChange }: SheetTabsProps): React.ReactElement
 
       console.log("[SheetTabs] Sheet click, index:", index, "isInFormulaMode:", isInFormulaMode);
 
-      // Emit before event
-      await sheetExtensions.emit({
-        type: "sheet:beforeSwitch",
-        sheetIndex: index,
-        sheetName: sheets[index]?.name || "",
-        previousIndex: activeIndex,
-      });
-
       try {
         // When in formula mode, we need special handling
         if (isInFormulaMode) {
@@ -190,14 +182,6 @@ export function SheetTabs({ onSheetChange }: SheetTabsProps): React.ReactElement
           if (newActiveSheet) {
             dispatch(setActiveSheet(result.activeIndex, newActiveSheet.name));
           }
-
-          // Emit after event
-          await sheetExtensions.emit({
-            type: "sheet:afterSwitch",
-            sheetIndex: result.activeIndex,
-            sheetName: newActiveSheet?.name || "",
-            previousIndex: activeIndex,
-          });
 
           onSheetChange?.(result.activeIndex, newActiveSheet?.name || "");
           
@@ -238,15 +222,8 @@ export function SheetTabs({ onSheetChange }: SheetTabsProps): React.ReactElement
           dispatch(setActiveSheet(result.activeIndex, newActiveSheet.name));
         }
 
-        await sheetExtensions.emit({
-          type: "sheet:afterSwitch",
-          sheetIndex: result.activeIndex,
-          sheetName: newActiveSheet?.name || "",
-          previousIndex: activeIndex,
-        });
-
         onSheetChange?.(result.activeIndex, newActiveSheet?.name || "");
-        
+
         // Reload to refresh grid data (only in non-formula mode)
         window.location.reload();
       } catch (err) {
@@ -265,23 +242,10 @@ export function SheetTabs({ onSheetChange }: SheetTabsProps): React.ReactElement
       return;
     }
 
-    await sheetExtensions.emit({
-      type: "sheet:beforeAdd",
-      sheetIndex: sheets.length,
-      sheetName: "",
-    });
-
     try {
       const result = await addSheet();
       setSheets(result.sheets);
       setActiveIndex(result.activeIndex);
-
-      await sheetExtensions.emit({
-        type: "sheet:afterAdd",
-        sheetIndex: result.activeIndex,
-        sheetName: result.sheets[result.activeIndex]?.name || "",
-        newIndex: result.activeIndex,
-      });
 
       onSheetChange?.(result.activeIndex, result.sheets[result.activeIndex]?.name || "");
       window.location.reload();
@@ -289,33 +253,21 @@ export function SheetTabs({ onSheetChange }: SheetTabsProps): React.ReactElement
       console.error("[SheetTabs] addSheet error:", err);
       alert("Failed to add sheet: " + String(err));
     }
-  }, [sheets.length, onSheetChange, isInFormulaMode]);
+  }, [onSheetChange, isInFormulaMode]);
 
   const handleDeleteSheet = useCallback(
     async (index: number) => {
       if (sheets.length <= 1) return;
-      
+
       // Don't allow deleting sheets while in formula mode
       if (isInFormulaMode) {
         return;
       }
 
-      await sheetExtensions.emit({
-        type: "sheet:beforeDelete",
-        sheetIndex: index,
-        sheetName: sheets[index]?.name || "",
-      });
-
       try {
         const result = await deleteSheet(index);
         setSheets(result.sheets);
         setActiveIndex(result.activeIndex);
-
-        await sheetExtensions.emit({
-          type: "sheet:afterDelete",
-          sheetIndex: index,
-          sheetName: "",
-        });
 
         onSheetChange?.(result.activeIndex, result.sheets[result.activeIndex]?.name || "");
         window.location.reload();
@@ -324,7 +276,7 @@ export function SheetTabs({ onSheetChange }: SheetTabsProps): React.ReactElement
         alert("Failed to delete sheet: " + String(err));
       }
     },
-    [sheets, onSheetChange, isInFormulaMode]
+    [sheets.length, onSheetChange, isInFormulaMode]
   );
 
   const handleRenameSheet = useCallback(
@@ -334,31 +286,15 @@ export function SheetTabs({ onSheetChange }: SheetTabsProps): React.ReactElement
         return;
       }
 
-      const oldName = sheets[index]?.name || "";
-
-      await sheetExtensions.emit({
-        type: "sheet:beforeRename",
-        sheetIndex: index,
-        sheetName: newName,
-        previousName: oldName,
-      });
-
       try {
         const result = await renameSheet(index, newName);
         setSheets(result.sheets);
-
-        await sheetExtensions.emit({
-          type: "sheet:afterRename",
-          sheetIndex: index,
-          sheetName: newName,
-          previousName: oldName,
-        });
       } catch (err) {
         console.error("[SheetTabs] renameSheet error:", err);
         alert("Failed to rename sheet: " + String(err));
       }
     },
-    [sheets, isInFormulaMode]
+    [isInFormulaMode]
   );
 
   const handleContextMenu = useCallback(
@@ -460,50 +396,38 @@ export function SheetTabs({ onSheetChange }: SheetTabsProps): React.ReactElement
         {isLoading ? (
           <S.LoadingText>Loading...</S.LoadingText>
         ) : (
-          <>
-            {sheets.map((sheet) => {
-              const isSourceSheet = isInFormulaMode && 
-                editing?.sourceSheetIndex === sheet.index;
-              const isTargetSheet = isInFormulaMode && 
-                sheet.index === activeIndex && 
-                !isSourceSheet;
-              
-              return (
-                <S.Tab
-                  key={sheet.index}
-                  type="button"
-                  tabIndex={-1}
-                  $isActive={sheet.index === activeIndex}
-                  $isFormulaSource={isSourceSheet}
-                  $isFormulaTarget={isTargetSheet}
-                  onMouseDown={(e) => handleTabMouseDown(e, sheet.index)}
-                  onClick={() => handleSheetClick(sheet.index)}
-                  onContextMenu={(e) => handleContextMenu(e, sheet.index)}
-                  onDoubleClick={() => handleDoubleClick(sheet.index)}
-                  title={
-                    isInFormulaMode
-                      ? isSourceSheet
-                        ? `Formula source: ${sheet.name}`
-                        : `Click to select cells from ${sheet.name}`
-                      : `${sheet.name} (right-click for options)`
-                  }
-                >
-                  {sheet.name}
-                  {isSourceSheet && <S.SourceIndicator> [*]</S.SourceIndicator>}
-                </S.Tab>
-              );
-            })}
-            <S.AddButton
-              type="button"
-              tabIndex={-1}
-              $disabled={isInFormulaMode}
-              onClick={handleAddSheet}
-              title={isInFormulaMode ? "Finish formula editing first" : "Add new sheet"}
-              disabled={isInFormulaMode}
-            >
-              +
-            </S.AddButton>
-          </>
+          sheets.map((sheet) => {
+            const isSourceSheet = isInFormulaMode &&
+              editing?.sourceSheetIndex === sheet.index;
+            const isTargetSheet = isInFormulaMode &&
+              sheet.index === activeIndex &&
+              !isSourceSheet;
+
+            return (
+              <S.Tab
+                key={sheet.index}
+                type="button"
+                tabIndex={-1}
+                $isActive={sheet.index === activeIndex}
+                $isFormulaSource={isSourceSheet}
+                $isFormulaTarget={isTargetSheet}
+                onMouseDown={(e) => handleTabMouseDown(e, sheet.index)}
+                onClick={() => handleSheetClick(sheet.index)}
+                onContextMenu={(e) => handleContextMenu(e, sheet.index)}
+                onDoubleClick={() => handleDoubleClick(sheet.index)}
+                title={
+                  isInFormulaMode
+                    ? isSourceSheet
+                      ? `Formula source: ${sheet.name}`
+                      : `Click to select cells from ${sheet.name}`
+                    : `${sheet.name} (right-click for options)`
+                }
+              >
+                {sheet.name}
+                {isSourceSheet && <S.SourceIndicator> [*]</S.SourceIndicator>}
+              </S.Tab>
+            );
+          })
         )}
         {error && (
           <S.ErrorText title={error}>
@@ -511,6 +435,20 @@ export function SheetTabs({ onSheetChange }: SheetTabsProps): React.ReactElement
           </S.ErrorText>
         )}
       </S.TabsArea>
+
+      {/* Add sheet button - outside TabsArea to avoid overflow clipping */}
+      {!isLoading && (
+        <S.AddButton
+          type="button"
+          tabIndex={-1}
+          $disabled={isInFormulaMode}
+          onClick={handleAddSheet}
+          title={isInFormulaMode ? "Finish formula editing first" : "Add new sheet"}
+          disabled={isInFormulaMode}
+        >
+          +
+        </S.AddButton>
+      )}
 
       {/* Formula mode indicator */}
       {isViewingDifferentSheet && (

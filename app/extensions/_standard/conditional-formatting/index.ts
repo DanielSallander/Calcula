@@ -12,7 +12,7 @@ import {
   type CellCoords,
 } from "../../../src/api/styleInterceptors";
 import { onAppEvent, AppEvents, emitAppEvent } from "../../../src/api/events";
-import { registerMenu, registerDialog } from "../../../src/api/ui";
+import { registerMenu } from "../../../src/api/ui";
 import type { ConditionalRule, RuleSet, RangeContext } from "./types";
 import { 
   evaluateRule, 
@@ -348,14 +348,9 @@ function activate(context: ExtensionContext): void {
     markSheetDirty();
   });
   
-  // Register the Rule Manager dialog
-  registerDialog("conditional-formatting-manager", {
-    id: "conditional-formatting-manager",
-    title: "Manage Conditional Formatting Rules",
-    width: 700,
-    height: 500,
-  });
-  
+  // Note: Dialog component registration is handled in the components folder
+  // The RuleManagerDialog will self-register when imported
+
   // Register ribbon menu item
   registerConditionalFormattingMenu();
   
@@ -396,42 +391,36 @@ function deactivate(): void {
  * Register the Conditional Formatting menu in the ribbon.
  */
 function registerConditionalFormattingMenu(): void {
+  // Helper to create menu action handlers
+  const createAction = (actionId: string) => () => {
+    console.log(`[ConditionalFormatting] Action: ${actionId}`);
+    // TODO: Connect to QuickFormatMenu or RuleEditor components
+    emitAppEvent(AppEvents.GRID_REFRESH);
+  };
+
   registerMenu({
     id: "conditional-formatting",
     label: "Conditional Formatting",
-    parentId: "home", // Goes in Home tab
+    order: 50, // Position in menu bar
     items: [
-      {
-        id: "cf-highlight-cells",
-        label: "Highlight Cells Rules",
-        icon: "highlight",
-        children: [
-          { id: "cf-greater-than", label: "Greater Than...", action: "cf:greaterThan" },
-          { id: "cf-less-than", label: "Less Than...", action: "cf:lessThan" },
-          { id: "cf-between", label: "Between...", action: "cf:between" },
-          { id: "cf-equal-to", label: "Equal To...", action: "cf:equalTo" },
-          { id: "cf-text-contains", label: "Text that Contains...", action: "cf:textContains" },
-          { id: "cf-date-occurring", label: "A Date Occurring...", action: "cf:dateOccurring" },
-          { id: "cf-duplicate", label: "Duplicate Values...", action: "cf:duplicate" },
-        ],
-      },
-      {
-        id: "cf-top-bottom",
-        label: "Top/Bottom Rules",
-        icon: "ranking",
-        children: [
-          { id: "cf-top-10", label: "Top 10 Items...", action: "cf:top10Items" },
-          { id: "cf-top-10-percent", label: "Top 10%...", action: "cf:top10Percent" },
-          { id: "cf-bottom-10", label: "Bottom 10 Items...", action: "cf:bottom10Items" },
-          { id: "cf-bottom-10-percent", label: "Bottom 10%...", action: "cf:bottom10Percent" },
-          { id: "cf-above-average", label: "Above Average...", action: "cf:aboveAverage" },
-          { id: "cf-below-average", label: "Below Average...", action: "cf:belowAverage" },
-        ],
-      },
-      { type: "separator" },
-      { id: "cf-new-rule", label: "New Rule...", action: "cf:newRule", icon: "plus" },
-      { id: "cf-clear-rules", label: "Clear Rules", action: "cf:clearRules", icon: "trash" },
-      { id: "cf-manage-rules", label: "Manage Rules...", action: "cf:manageRules", icon: "settings" },
+      // Highlight Cells Rules
+      { id: "cf-greater-than", label: "Greater Than...", icon: "highlight", action: createAction("greaterThan") },
+      { id: "cf-less-than", label: "Less Than...", icon: "highlight", action: createAction("lessThan") },
+      { id: "cf-between", label: "Between...", icon: "highlight", action: createAction("between") },
+      { id: "cf-equal-to", label: "Equal To...", icon: "highlight", action: createAction("equalTo") },
+      { id: "cf-text-contains", label: "Text that Contains...", action: createAction("textContains") },
+      { id: "cf-duplicate", label: "Duplicate Values...", action: createAction("duplicate") },
+      { id: "cf-separator-1", label: "", separator: true },
+      // Top/Bottom Rules
+      { id: "cf-top-10", label: "Top 10 Items...", icon: "ranking", action: createAction("top10Items") },
+      { id: "cf-bottom-10", label: "Bottom 10 Items...", icon: "ranking", action: createAction("bottom10Items") },
+      { id: "cf-above-average", label: "Above Average...", action: createAction("aboveAverage") },
+      { id: "cf-below-average", label: "Below Average...", action: createAction("belowAverage") },
+      { id: "cf-separator-2", label: "", separator: true },
+      // Management
+      { id: "cf-new-rule", label: "New Rule...", icon: "plus", action: createAction("newRule") },
+      { id: "cf-clear-rules", label: "Clear Rules", icon: "trash", action: createAction("clearRules") },
+      { id: "cf-manage-rules", label: "Manage Rules...", icon: "settings", action: createAction("manageRules") },
     ],
   });
 }
