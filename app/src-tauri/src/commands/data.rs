@@ -309,7 +309,7 @@ pub fn update_cell(
             }
         }
 
-        for (dep_row, dep_col) in recalc_order {
+        for &(dep_row, dep_col) in &recalc_order {
             if let Some(dep_cell) = grid.get_cell(dep_row, dep_col) {
                 if let Some(ref formula) = dep_cell.formula {
                     // Evaluate dependent using multi-sheet context
@@ -355,51 +355,119 @@ pub fn update_cell(
         }
 
         // Also recalculate cross-sheet dependents (formulas on OTHER sheets that reference this cell)
-        let cross_sheet_key = (current_sheet_name.clone(), row, col);
-        println!("[XDEP] Looking up dependents for key {:?}", cross_sheet_key);
-        println!("[XDEP] All keys in map: {:?}", cross_sheet_dependents_map.keys().collect::<Vec<_>>());
-        if let Some(cross_deps) = cross_sheet_dependents_map.get(&cross_sheet_key) {
-            println!("[XDEP] Found {} cross-sheet dependents: {:?}", cross_deps.len(), cross_deps);
-            for (dep_sheet_idx, dep_row, dep_col) in cross_deps.iter() {
-                // Skip if it's on the current sheet (already handled above)
-                if *dep_sheet_idx == active_sheet {
-                    continue;
+        // Use a work queue to properly cascade recalculations across sheets
+        // Work queue contains: (sheet_index, sheet_name, row, col) of cells that changed
+        let mut work_queue: Vec<(usize, String, u32, u32)> = vec![(active_sheet, current_sheet_name.clone(), row, col)];
+        let mut processed: HashSet<(usize, u32, u32)> = HashSet::new();
+
+        // Mark the original cell and same-sheet recalculated cells as processed
+        processed.insert((active_sheet, row, col));
+        for (dep_row, dep_col) in &recalc_order {
+            processed.insert((active_sheet, *dep_row, *dep_col));
+        }
+
+        while let Some((source_sheet_idx, source_sheet_name, source_row, source_col)) = work_queue.pop() {
+            // 1. Find cross-sheet dependents (formulas on OTHER sheets that reference this cell)
+            let cross_sheet_key = (source_sheet_name.clone(), source_row, source_col);
+
+            if let Some(cross_deps) = cross_sheet_dependents_map.get(&cross_sheet_key).cloned() {
+                for (dep_sheet_idx, dep_row, dep_col) in cross_deps.iter() {
+                    // Skip if already processed
+                    if processed.contains(&(*dep_sheet_idx, *dep_row, *dep_col)) {
+                        continue;
+                    }
+                    processed.insert((*dep_sheet_idx, *dep_row, *dep_col));
+
+                    // Get the dependent cell from its sheet
+                    if *dep_sheet_idx < grids.len() {
+                        if let Some(dep_cell) = grids[*dep_sheet_idx].get_cell(*dep_row, *dep_col) {
+                            if let Some(ref formula) = dep_cell.formula {
+                                // Evaluate the formula in context of its own sheet
+                                let result = evaluate_formula_multi_sheet(
+                                    &grids,
+                                    &sheet_names,
+                                    *dep_sheet_idx,
+                                    formula,
+                                );
+
+                                let mut updated_dep = dep_cell.clone();
+                                updated_dep.value = result.clone();
+                                grids[*dep_sheet_idx].set_cell(*dep_row, *dep_col, updated_dep.clone());
+
+                                // Format the display value and add to updated_cells with sheet_index
+                                let dep_style = styles.get(updated_dep.style_index);
+                                let dep_display = format_cell_value(&updated_dep.value, dep_style);
+
+                                // For cross-sheet cells, use default span (1,1) since merged_regions
+                                // is currently tracked per-active-sheet only
+                                updated_cells.push(CellData {
+                                    row: *dep_row,
+                                    col: *dep_col,
+                                    display: dep_display,
+                                    formula: updated_dep.formula.clone(),
+                                    style_index: updated_dep.style_index,
+                                    row_span: 1,
+                                    col_span: 1,
+                                    sheet_index: Some(*dep_sheet_idx),
+                                });
+
+                                // Add this updated cell to the work queue so its dependents also get recalculated
+                                if let Some(dep_sheet_name) = sheet_names.get(*dep_sheet_idx) {
+                                    work_queue.push((*dep_sheet_idx, dep_sheet_name.clone(), *dep_row, *dep_col));
+                                }
+                            }
+                        }
+                    }
                 }
+            }
 
-                // Get the dependent cell from its sheet
-                if *dep_sheet_idx < grids.len() {
-                    if let Some(dep_cell) = grids[*dep_sheet_idx].get_cell(*dep_row, *dep_col) {
-                        if let Some(ref formula) = dep_cell.formula {
-                            // Evaluate the formula in context of its own sheet
-                            let result = evaluate_formula_multi_sheet(
-                                &grids,
-                                &sheet_names,
-                                *dep_sheet_idx,
-                                formula,
-                            );
+            // 2. For non-active sheets, also cascade same-sheet dependents
+            // (The active sheet's same-sheet dependents were already handled above)
+            if source_sheet_idx != active_sheet && source_sheet_idx < grids.len() {
+                // Look up same-sheet dependents in the global dependents map
+                // and filter to cells that exist on this sheet
+                if let Some(same_sheet_deps) = dependents_map.get(&(source_row, source_col)).cloned() {
+                    for (ss_dep_row, ss_dep_col) in same_sheet_deps {
+                        // Skip if already processed
+                        if processed.contains(&(source_sheet_idx, ss_dep_row, ss_dep_col)) {
+                            continue;
+                        }
 
-                            let mut updated_dep = dep_cell.clone();
-                            updated_dep.value = result.clone();
-                            println!("[XDEP] Recalculated sheet {} cell ({}, {}) = {:?}",
-                                dep_sheet_idx, dep_row, dep_col, result);
-                            grids[*dep_sheet_idx].set_cell(*dep_row, *dep_col, updated_dep.clone());
+                        // Only process if this cell exists on the source sheet (not another sheet)
+                        if let Some(dep_cell) = grids[source_sheet_idx].get_cell(ss_dep_row, ss_dep_col) {
+                            if let Some(ref formula) = dep_cell.formula {
+                                processed.insert((source_sheet_idx, ss_dep_row, ss_dep_col));
 
-                            // Format the display value and add to updated_cells with sheet_index
-                            let dep_style = styles.get(updated_dep.style_index);
-                            let dep_display = format_cell_value(&updated_dep.value, dep_style);
+                                // Evaluate the formula in context of its own sheet
+                                let result = evaluate_formula_multi_sheet(
+                                    &grids,
+                                    &sheet_names,
+                                    source_sheet_idx,
+                                    formula,
+                                );
 
-                            // For cross-sheet cells, use default span (1,1) since merged_regions
-                            // is currently tracked per-active-sheet only
-                            updated_cells.push(CellData {
-                                row: *dep_row,
-                                col: *dep_col,
-                                display: dep_display,
-                                formula: updated_dep.formula.clone(),
-                                style_index: updated_dep.style_index,
-                                row_span: 1,
-                                col_span: 1,
-                                sheet_index: Some(*dep_sheet_idx),
-                            });
+                                let mut updated_dep = dep_cell.clone();
+                                updated_dep.value = result.clone();
+                                grids[source_sheet_idx].set_cell(ss_dep_row, ss_dep_col, updated_dep.clone());
+
+                                // Format the display value and add to updated_cells
+                                let dep_style = styles.get(updated_dep.style_index);
+                                let dep_display = format_cell_value(&updated_dep.value, dep_style);
+
+                                updated_cells.push(CellData {
+                                    row: ss_dep_row,
+                                    col: ss_dep_col,
+                                    display: dep_display,
+                                    formula: updated_dep.formula.clone(),
+                                    style_index: updated_dep.style_index,
+                                    row_span: 1,
+                                    col_span: 1,
+                                    sheet_index: Some(source_sheet_idx),
+                                });
+
+                                // Add this updated cell to the work queue so its dependents also get recalculated
+                                work_queue.push((source_sheet_idx, source_sheet_name.clone(), ss_dep_row, ss_dep_col));
+                            }
                         }
                     }
                 }

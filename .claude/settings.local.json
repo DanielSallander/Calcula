@@ -27,7 +27,8 @@
       "Bash(Select-String -NotMatch \"Command\")",
       "Bash(npx eslint:*)",
       "Bash(grep:*)",
-      "Bash(npm run type-check:*)"
+      "Bash(npm run type-check:*)",
+      "Bash(pushd:*)"
     ],
     "deny": [],
     "ask": []
