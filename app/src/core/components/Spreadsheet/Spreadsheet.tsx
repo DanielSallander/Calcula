@@ -233,6 +233,12 @@ function SpreadsheetContent({
 
       // Update the previous sheet index for the next switch
       previousSheetIndexRef.current = newSheetIndex;
+
+      // Restore focus to the grid container so keyboard input works immediately
+      // Use setTimeout to ensure DOM has settled after state updates
+      setTimeout(() => {
+        focusContainerRef.current?.focus();
+      }, 0);
     };
 
     // Listen for the event that fires BEFORE the sheet switch (to save state)
