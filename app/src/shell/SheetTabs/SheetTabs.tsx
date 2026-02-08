@@ -42,12 +42,21 @@ let coreMenuRegistered = false;
 
 export function SheetTabs({ onSheetChange }: SheetTabsProps): React.ReactElement {
   const { state, dispatch } = useGridContext();
-  const { editing } = state;
-  
+  const { editing, sheetContext } = state;
+
   const [sheets, setSheets] = useState<SheetInfo[]>([{ index: 0, name: "Sheet1" }]);
   const [activeIndex, setActiveIndex] = useState<number>(0);
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+
+  // Sync local activeIndex with Redux state when it changes from outside
+  // This handles the case when commitEdit switches back to the source sheet
+  useEffect(() => {
+    if (sheetContext.activeSheetIndex !== activeIndex && !isLoading) {
+      console.log("[SheetTabs] Syncing activeIndex with Redux:", sheetContext.activeSheetIndex);
+      setActiveIndex(sheetContext.activeSheetIndex);
+    }
+  }, [sheetContext.activeSheetIndex, activeIndex, isLoading]);
 
   // Context menu state
   const [contextMenu, setContextMenu] = useState<{
@@ -212,12 +221,20 @@ export function SheetTabs({ onSheetChange }: SheetTabsProps): React.ReactElement
         }
 
         // Normal mode: switch sheets with full reload
+        // Dispatch event BEFORE switching to save current sheet's state
+        window.dispatchEvent(new CustomEvent("sheet:beforeSwitch", {
+          detail: {
+            oldSheetIndex: activeIndex,
+            newSheetIndex: index,
+          }
+        }));
+
         const result: SheetsResult = await setActiveSheetApi(index);
         setSheets(result.sheets);
         setActiveIndex(result.activeIndex);
-        
+
         const newActiveSheet = result.sheets[result.activeIndex];
-        
+
         if (newActiveSheet) {
           dispatch(setActiveSheet(result.activeIndex, newActiveSheet.name));
         }
@@ -248,6 +265,14 @@ export function SheetTabs({ onSheetChange }: SheetTabsProps): React.ReactElement
     }
 
     try {
+      // Dispatch event BEFORE adding sheet to save current sheet's state
+      window.dispatchEvent(new CustomEvent("sheet:beforeSwitch", {
+        detail: {
+          oldSheetIndex: activeIndex,
+          newSheetIndex: -1, // New sheet index not known yet
+        }
+      }));
+
       const result = await addSheet();
       setSheets(result.sheets);
       setActiveIndex(result.activeIndex);
@@ -281,6 +306,14 @@ export function SheetTabs({ onSheetChange }: SheetTabsProps): React.ReactElement
       }
 
       try {
+        // Dispatch event BEFORE deleting sheet to save current sheet's state
+        window.dispatchEvent(new CustomEvent("sheet:beforeSwitch", {
+          detail: {
+            oldSheetIndex: activeIndex,
+            newSheetIndex: -1, // New sheet index not known yet
+          }
+        }));
+
         const result = await deleteSheet(index);
         setSheets(result.sheets);
         setActiveIndex(result.activeIndex);

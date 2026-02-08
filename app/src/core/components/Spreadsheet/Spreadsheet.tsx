@@ -6,7 +6,8 @@
 import React, { useCallback, useEffect, useRef } from "react";
 import { useGridState, useGridContext } from "../../state";
 // FIX: Removed openFind import to resolve SyntaxError
-import { setViewportDimensions, setAllDimensions } from "../../state/gridActions";
+import { setViewportDimensions, setAllDimensions, setSelection } from "../../state/gridActions";
+import type { Selection, Viewport, VirtualBounds } from "../../types";
 import { GridCanvas } from "../Grid";
 import { InlineEditor } from "../InlineEditor";
 import { Scrollbar, ScrollbarCorner } from "../Scrollbar/Scrollbar";
@@ -38,6 +39,22 @@ const SCROLLBAR_SIZE = 14;
 
 // Debounce delay for resize observer - prevents flickering during task pane animation
 const RESIZE_DEBOUNCE_MS = 150;
+
+/**
+ * Per-sheet state storage for selection, viewport, and virtual bounds.
+ * This persists across sheet switches so users can return to the same position.
+ */
+interface SheetState {
+  selection: Selection | null;
+  viewport: Viewport;
+  virtualBounds: VirtualBounds;
+}
+
+/**
+ * Module-level storage for per-sheet state.
+ * Using module-level to persist across component re-renders.
+ */
+const sheetStatesMap = new Map<number, SheetState>();
 
 function SpreadsheetContent({
   className,
@@ -157,19 +174,76 @@ function SpreadsheetContent({
 
   // -------------------------------------------------------------------------
   // Sheet Switch Listener (for normal sheet switching without page reload)
+  // Saves current sheet's selection/viewport state and restores the new sheet's state.
   // -------------------------------------------------------------------------
+  // Track the previous sheet index for saving state before switch
+  const previousSheetIndexRef = useRef<number>(gridState.sheetContext.activeSheetIndex);
+
   useEffect(() => {
-    const handleSheetSwitch = () => {
-      console.log("[Spreadsheet] Sheet switch - refreshing dimensions");
-      refreshDimensions();
+    const handleSheetSwitchStart = (_event: Event) => {
+      // Save the current sheet's state BEFORE the switch happens
+      const currentSheetIndex = previousSheetIndexRef.current;
+      const currentState: SheetState = {
+        selection: selection,
+        viewport: { ...viewport },
+        virtualBounds: { ...gridState.virtualBounds },
+      };
+      sheetStatesMap.set(currentSheetIndex, currentState);
+      console.log(`[Spreadsheet] Saved state for sheet ${currentSheetIndex}:`, {
+        selection: currentState.selection,
+        scrollX: currentState.viewport.scrollX,
+        scrollY: currentState.viewport.scrollY,
+      });
     };
 
+    const handleSheetSwitch = (event: Event) => {
+      const customEvent = event as CustomEvent<{
+        newSheetIndex: number;
+        newSheetName: string;
+      }>;
+      const newSheetIndex = customEvent.detail.newSheetIndex;
+
+      console.log("[Spreadsheet] Sheet switch - refreshing dimensions");
+      refreshDimensions();
+
+      // Restore the new sheet's saved state if available
+      const savedState = sheetStatesMap.get(newSheetIndex);
+      if (savedState) {
+        console.log(`[Spreadsheet] Restoring state for sheet ${newSheetIndex}:`, {
+          selection: savedState.selection,
+          scrollX: savedState.viewport.scrollX,
+          scrollY: savedState.viewport.scrollY,
+        });
+
+        // Restore selection
+        if (savedState.selection) {
+          dispatch(setSelection(savedState.selection));
+        }
+      } else {
+        // No saved state - set default selection to A1
+        console.log(`[Spreadsheet] No saved state for sheet ${newSheetIndex}, using default A1`);
+        dispatch(setSelection({
+          startRow: 0,
+          startCol: 0,
+          endRow: 0,
+          endCol: 0,
+          type: "cells",
+        }));
+      }
+
+      // Update the previous sheet index for the next switch
+      previousSheetIndexRef.current = newSheetIndex;
+    };
+
+    // Listen for the event that fires BEFORE the sheet switch (to save state)
+    window.addEventListener("sheet:beforeSwitch", handleSheetSwitchStart);
     window.addEventListener("sheet:normalSwitch", handleSheetSwitch);
 
     return () => {
+      window.removeEventListener("sheet:beforeSwitch", handleSheetSwitchStart);
       window.removeEventListener("sheet:normalSwitch", handleSheetSwitch);
     };
-  }, [refreshDimensions]);
+  }, [refreshDimensions, selection, viewport, gridState.virtualBounds, dispatch]);
 
   // -------------------------------------------------------------------------
   // Clear Contents Handler

@@ -316,7 +316,10 @@ fn extract_references_recursive(expr: &ParserExpr, grid: &Grid, refs: &mut Extra
         ParserExpr::CellRef { sheet, col, row, .. } => {
             let col_idx = col_letter_to_index(col);
             let row_idx = row.saturating_sub(1);
+            println!("[XDEP-EXTRACT] CellRef: sheet={:?}, col={}, row={} -> col_idx={}, row_idx={}",
+                sheet, col, row, col_idx, row_idx);
             if let Some(sheet_name) = sheet {
+                println!("[XDEP-EXTRACT] Adding cross-sheet ref: ({}, {}, {})", sheet_name, row_idx, col_idx);
                 refs.cross_sheet_cells.insert((sheet_name.clone(), row_idx, col_idx));
             } else {
                 refs.cells.insert((row_idx, col_idx));

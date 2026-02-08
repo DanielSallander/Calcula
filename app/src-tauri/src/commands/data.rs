@@ -206,24 +206,53 @@ pub fn update_cell(
 
     // If it's a formula, evaluate it using multi-sheet context
     if let Some(ref formula) = cell.formula {
+        println!("[XDEP] Processing formula: {} at ({}, {}) on sheet {} (index {})",
+            formula, row, col, current_sheet_name, active_sheet);
+
         // Extract references for dependency tracking
-        if let Ok(parsed) = parser::parse(formula) {
-            let refs = extract_all_references(&parsed, &grid);
-            update_dependencies((row, col), refs.cells, &mut dependencies_map, &mut dependents_map);
-            update_column_dependencies((row, col), refs.columns, &mut column_dependencies_map, &mut column_dependents_map);
-            update_row_dependencies((row, col), refs.rows, &mut row_dependencies_map, &mut row_dependents_map);
-            
-            // Track cross-sheet dependencies
-            if !refs.cross_sheet_cells.is_empty() {
-                println!("[XDEP] Cell ({}, {}) on sheet {} has cross-sheet refs: {:?}",
-                    row, col, current_sheet_name, refs.cross_sheet_cells);
+        match parser::parse(formula) {
+            Ok(parsed) => {
+                println!("[XDEP] Formula parsed successfully");
+                let refs = extract_all_references(&parsed, &grid);
+                println!("[XDEP] Extracted refs - cells: {:?}, cross_sheet: {:?}",
+                    refs.cells, refs.cross_sheet_cells);
+
+                update_dependencies((row, col), refs.cells, &mut dependencies_map, &mut dependents_map);
+                update_column_dependencies((row, col), refs.columns, &mut column_dependencies_map, &mut column_dependents_map);
+                update_row_dependencies((row, col), refs.rows, &mut row_dependencies_map, &mut row_dependents_map);
+
+                // Normalize cross-sheet references: match sheet names case-insensitively
+                // to the official sheet_names list
+                let normalized_cross_sheet_refs: HashSet<(String, u32, u32)> = refs.cross_sheet_cells
+                    .iter()
+                    .filter_map(|(parsed_sheet_name, r, c)| {
+                        // Find the official sheet name (case-insensitive match)
+                        let normalized = sheet_names.iter()
+                            .find(|name| name.eq_ignore_ascii_case(parsed_sheet_name))
+                            .cloned()
+                            .unwrap_or_else(|| parsed_sheet_name.clone());
+                        println!("[XDEP] Normalizing sheet ref: '{}' -> '{}'", parsed_sheet_name, normalized);
+                        Some((normalized, *r, *c))
+                    })
+                    .collect();
+
+                // Track cross-sheet dependencies
+                if !normalized_cross_sheet_refs.is_empty() {
+                    println!("[XDEP] Cell ({}, {}) on sheet {} has cross-sheet refs: {:?}",
+                        row, col, current_sheet_name, normalized_cross_sheet_refs);
+                } else {
+                    println!("[XDEP] No cross-sheet refs found in formula");
+                }
+                update_cross_sheet_dependencies(
+                    (active_sheet, row, col),
+                    normalized_cross_sheet_refs,
+                    &mut cross_sheet_dependencies_map,
+                    &mut cross_sheet_dependents_map,
+                );
             }
-            update_cross_sheet_dependencies(
-                (active_sheet, row, col),
-                refs.cross_sheet_cells,
-                &mut cross_sheet_dependencies_map,
-                &mut cross_sheet_dependents_map,
-            );
+            Err(e) => {
+                println!("[XDEP] Formula parse error: {:?}", e);
+            }
         }
 
         // Evaluate using multi-sheet context for cross-sheet reference support
@@ -360,6 +389,8 @@ pub fn update_cell(
         let mut work_queue: Vec<(usize, String, u32, u32)> = vec![(active_sheet, current_sheet_name.clone(), row, col)];
         let mut processed: HashSet<(usize, u32, u32)> = HashSet::new();
 
+        println!("[XDEP] Starting cross-sheet recalculation from ({}, {}) on sheet {}", row, col, current_sheet_name);
+
         // Mark the original cell and same-sheet recalculated cells as processed
         processed.insert((active_sheet, row, col));
         for (dep_row, dep_col) in &recalc_order {
@@ -370,7 +401,13 @@ pub fn update_cell(
             // 1. Find cross-sheet dependents (formulas on OTHER sheets that reference this cell)
             let cross_sheet_key = (source_sheet_name.clone(), source_row, source_col);
 
+            println!("[XDEP] Looking for dependents of ({}, {}, {}) - key: {:?}",
+                source_sheet_name, source_row, source_col, cross_sheet_key);
+            println!("[XDEP] Current cross_sheet_dependents_map keys: {:?}",
+                cross_sheet_dependents_map.keys().collect::<Vec<_>>());
+
             if let Some(cross_deps) = cross_sheet_dependents_map.get(&cross_sheet_key).cloned() {
+                println!("[XDEP] Found {} cross-sheet dependents: {:?}", cross_deps.len(), cross_deps);
                 for (dep_sheet_idx, dep_row, dep_col) in cross_deps.iter() {
                     // Skip if already processed
                     if processed.contains(&(*dep_sheet_idx, *dep_row, *dep_col)) {
@@ -397,6 +434,9 @@ pub fn update_cell(
                                 // Format the display value and add to updated_cells with sheet_index
                                 let dep_style = styles.get(updated_dep.style_index);
                                 let dep_display = format_cell_value(&updated_dep.value, dep_style);
+
+                                println!("[XDEP] Recalculated cell ({}, {}) on sheet {} -> display: {}",
+                                    *dep_row, *dep_col, *dep_sheet_idx, dep_display);
 
                                 // For cross-sheet cells, use default span (1,1) since merged_regions
                                 // is currently tracked per-active-sheet only
