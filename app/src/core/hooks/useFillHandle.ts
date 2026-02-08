@@ -5,13 +5,15 @@
 //      This ensures references inside functions (e.g., =SUM(B2)) update correctly when filling.
 //      Absolute references ($) are respected -- $B$2 won't shift, B$2 shifts column only, etc.
 
-import { useCallback, useRef, useState } from "react";
+import { useCallback, useRef, useState, useEffect } from "react";
 import { useGridContext } from "../state/GridContext";
-import { setSelection } from "../state/gridActions";
+import { setSelection, scrollBy } from "../state/gridActions";
 import { getCell, updateCell, shiftFormulaForFill } from "../lib/tauri-api";
 import { cellEvents } from "../lib/cellEvents";
-import type { Selection } from "../types";
+import type { Selection, GridConfig } from "../types";
 import { getColumnWidth, getRowHeight, getColumnX, getRowY, calculateVisibleRange } from "../lib/gridRenderer";
+import { calculateAutoScrollDelta } from "./useMouseSelection/utils/autoScrollUtils";
+import { DEFAULT_AUTO_SCROLL_CONFIG } from "./useMouseSelection/constants";
 
 /**
  * Fill direction enumeration.
@@ -32,6 +34,16 @@ export interface FillHandleState {
   targetCol: number;
   /** Preview range for visual feedback */
   previewRange: Selection | null;
+}
+
+/**
+ * Props for the useFillHandle hook.
+ */
+export interface UseFillHandleProps {
+  /** Reference to the container element for coordinate calculation */
+  containerRef: React.RefObject<HTMLElement | null>;
+  /** Grid configuration for header dimensions */
+  config: GridConfig;
 }
 
 /**
@@ -221,7 +233,8 @@ async function computeFillValue(
 /**
  * Hook for fill handle functionality.
  */
-export function useFillHandle(): UseFillHandleReturn {
+export function useFillHandle(props: UseFillHandleProps): UseFillHandleReturn {
+  const { containerRef, config: propsConfig } = props;
   const { state, dispatch } = useGridContext();
   const { selection, config, viewport, dimensions } = state;
 
@@ -234,6 +247,178 @@ export function useFillHandle(): UseFillHandleReturn {
   });
 
   const dragStartRef = useRef<{ row: number; col: number } | null>(null);
+  const autoScrollRef = useRef<number | null>(null);
+  const lastMousePosRef = useRef<{ x: number; y: number } | null>(null);
+
+  /**
+   * Stop auto-scroll loop.
+   */
+  const stopAutoScroll = useCallback(() => {
+    if (autoScrollRef.current !== null) {
+      clearTimeout(autoScrollRef.current);
+      autoScrollRef.current = null;
+    }
+  }, []);
+
+  /**
+   * Internal function to update fill drag - will be called by auto-scroll loop.
+   * Accepts optional scroll override to use current DOM scroll position instead of stale state.
+   */
+  const updateFillDragInternal = useCallback(
+    (mouseX: number, mouseY: number, scrollOverride?: { scrollX: number; scrollY: number }) => {
+      if (!selection || !dragStartRef.current) return;
+
+      const selMaxRow = Math.max(selection.startRow, selection.endRow);
+      const selMaxCol = Math.max(selection.startCol, selection.endCol);
+
+      // Use scroll override if provided (for auto-scroll), otherwise use state viewport
+      const effectiveViewport = scrollOverride
+        ? { ...viewport, scrollX: scrollOverride.scrollX, scrollY: scrollOverride.scrollY }
+        : viewport;
+
+      const containerWidth = 2000;
+      const containerHeight = 2000;
+      const range = calculateVisibleRange(effectiveViewport, config, containerWidth, containerHeight, dimensions);
+
+      let targetRow = dragStartRef.current.row;
+      let targetCol = dragStartRef.current.col;
+      let direction: FillDirection = null;
+
+      let y = config.colHeaderHeight;
+      for (let r = range.startRow; r <= range.endRow + 10; r++) {
+        const rowHeight = getRowHeight(r, config, dimensions);
+        if (mouseY >= y && mouseY < y + rowHeight) {
+          targetRow = r;
+          break;
+        }
+        y += rowHeight;
+      }
+
+      let x = config.rowHeaderWidth;
+      for (let c = range.startCol; c <= range.endCol + 10; c++) {
+        const colWidth = getColumnWidth(c, config, dimensions);
+        if (mouseX >= x && mouseX < x + colWidth) {
+          targetCol = c;
+          break;
+        }
+        x += colWidth;
+      }
+
+      const rowDiff = targetRow - selMaxRow;
+      const colDiff = targetCol - selMaxCol;
+
+      if (Math.abs(rowDiff) > Math.abs(colDiff)) {
+        targetCol = selMaxCol;
+        direction = rowDiff > 0 ? "down" : rowDiff < 0 ? "up" : null;
+      } else if (colDiff !== 0) {
+        targetRow = selMaxRow;
+        direction = colDiff > 0 ? "right" : "left";
+      }
+
+      const selMinRow = Math.min(selection.startRow, selection.endRow);
+      const selMinCol = Math.min(selection.startCol, selection.endCol);
+
+      let previewRange: Selection;
+
+      switch (direction) {
+        case "down":
+          previewRange = {
+            startRow: selMinRow,
+            startCol: selMinCol,
+            endRow: Math.max(selMaxRow, targetRow),
+            endCol: selMaxCol,
+            type: "cells",
+          };
+          break;
+        case "up":
+          previewRange = {
+            startRow: Math.min(selMinRow, targetRow),
+            startCol: selMinCol,
+            endRow: selMaxRow,
+            endCol: selMaxCol,
+            type: "cells",
+          };
+          break;
+        case "right":
+          previewRange = {
+            startRow: selMinRow,
+            startCol: selMinCol,
+            endRow: selMaxRow,
+            endCol: Math.max(selMaxCol, targetCol),
+            type: "cells",
+          };
+          break;
+        case "left":
+          previewRange = {
+            startRow: selMinRow,
+            startCol: Math.min(selMinCol, targetCol),
+            endRow: selMaxRow,
+            endCol: selMaxCol,
+            type: "cells",
+          };
+          break;
+        default:
+          previewRange = { ...selection };
+      }
+
+      setFillState({
+        isDragging: true,
+        direction,
+        targetRow,
+        targetCol,
+        previewRange,
+      });
+    },
+    [selection, viewport, config, dimensions]
+  );
+
+  /**
+   * Auto-scroll loop that runs during fill handle drag.
+   * Uses Redux dispatch to update viewport scroll state (virtualized canvas approach).
+   */
+  const runAutoScroll = useCallback(() => {
+    if (!lastMousePosRef.current || !containerRef.current) {
+      return;
+    }
+
+    const rect = containerRef.current.getBoundingClientRect();
+    const { x: mouseX, y: mouseY } = lastMousePosRef.current;
+
+    // Calculate scroll delta based on edge proximity
+    const { deltaX, deltaY } = calculateAutoScrollDelta(mouseX, mouseY, rect, propsConfig);
+
+    if (deltaX !== 0 || deltaY !== 0) {
+      // Dispatch scroll action to update viewport state
+      dispatch(scrollBy(deltaX, deltaY));
+
+      // Calculate new scroll position for fill drag update
+      const newScrollX = Math.max(0, viewport.scrollX + deltaX);
+      const newScrollY = Math.max(0, viewport.scrollY + deltaY);
+
+      // Update fill drag with current mouse position and NEW scroll position
+      // Pass scroll override since state viewport update is async
+      updateFillDragInternal(mouseX, mouseY, { scrollX: newScrollX, scrollY: newScrollY });
+    }
+
+    // Schedule next frame
+    autoScrollRef.current = window.setTimeout(runAutoScroll, DEFAULT_AUTO_SCROLL_CONFIG.intervalMs);
+  }, [containerRef, propsConfig, updateFillDragInternal, dispatch, viewport.scrollX, viewport.scrollY]);
+
+  /**
+   * Start auto-scroll loop.
+   */
+  const startAutoScroll = useCallback(() => {
+    if (autoScrollRef.current === null) {
+      runAutoScroll();
+    }
+  }, [runAutoScroll]);
+
+  // Clean up auto-scroll on unmount
+  useEffect(() => {
+    return () => {
+      stopAutoScroll();
+    };
+  }, [stopAutoScroll]);
 
   /**
    * Get the fill handle position in pixels.
@@ -334,108 +519,30 @@ export function useFillHandle(): UseFillHandleReturn {
 
   /**
    * Update fill drag with current mouse position.
+   * Integrates with auto-scroll when mouse is near viewport edges.
    */
   const updateFillDrag = useCallback(
     (mouseX: number, mouseY: number) => {
       if (!fillState.isDragging || !selection || !dragStartRef.current) return;
 
-      const selMaxRow = Math.max(selection.startRow, selection.endRow);
-      const selMaxCol = Math.max(selection.startCol, selection.endCol);
+      // Store mouse position for auto-scroll loop
+      lastMousePosRef.current = { x: mouseX, y: mouseY };
 
-      const containerWidth = 2000;
-      const containerHeight = 2000;
-      const range = calculateVisibleRange(viewport, config, containerWidth, containerHeight, dimensions);
+      // Update the fill drag state
+      updateFillDragInternal(mouseX, mouseY);
 
-      let targetRow = dragStartRef.current.row;
-      let targetCol = dragStartRef.current.col;
-      let direction: FillDirection = null;
-
-      let y = config.colHeaderHeight;
-      for (let r = range.startRow; r <= range.endRow + 10; r++) {
-        const rowHeight = getRowHeight(r, config, dimensions);
-        if (mouseY >= y && mouseY < y + rowHeight) {
-          targetRow = r;
-          break;
+      // Check if we need to auto-scroll
+      if (containerRef.current) {
+        const rect = containerRef.current.getBoundingClientRect();
+        const { deltaX, deltaY } = calculateAutoScrollDelta(mouseX, mouseY, rect, propsConfig);
+        if (deltaX !== 0 || deltaY !== 0) {
+          startAutoScroll();
+        } else {
+          stopAutoScroll();
         }
-        y += rowHeight;
       }
-
-      let x = config.rowHeaderWidth;
-      for (let c = range.startCol; c <= range.endCol + 10; c++) {
-        const colWidth = getColumnWidth(c, config, dimensions);
-        if (mouseX >= x && mouseX < x + colWidth) {
-          targetCol = c;
-          break;
-        }
-        x += colWidth;
-      }
-
-      const rowDiff = targetRow - selMaxRow;
-      const colDiff = targetCol - selMaxCol;
-
-      if (Math.abs(rowDiff) > Math.abs(colDiff)) {
-        targetCol = selMaxCol;
-        direction = rowDiff > 0 ? "down" : rowDiff < 0 ? "up" : null;
-      } else if (colDiff !== 0) {
-        targetRow = selMaxRow;
-        direction = colDiff > 0 ? "right" : "left";
-      }
-
-      const selMinRow = Math.min(selection.startRow, selection.endRow);
-      const selMinCol = Math.min(selection.startCol, selection.endCol);
-
-      let previewRange: Selection;
-      
-      switch (direction) {
-        case "down":
-          previewRange = {
-            startRow: selMinRow,
-            startCol: selMinCol,
-            endRow: Math.max(selMaxRow, targetRow),
-            endCol: selMaxCol,
-            type: "cells",
-          };
-          break;
-        case "up":
-          previewRange = {
-            startRow: Math.min(selMinRow, targetRow),
-            startCol: selMinCol,
-            endRow: selMaxRow,
-            endCol: selMaxCol,
-            type: "cells",
-          };
-          break;
-        case "right":
-          previewRange = {
-            startRow: selMinRow,
-            startCol: selMinCol,
-            endRow: selMaxRow,
-            endCol: Math.max(selMaxCol, targetCol),
-            type: "cells",
-          };
-          break;
-        case "left":
-          previewRange = {
-            startRow: selMinRow,
-            startCol: Math.min(selMinCol, targetCol),
-            endRow: selMaxRow,
-            endCol: selMaxCol,
-            type: "cells",
-          };
-          break;
-        default:
-          previewRange = { ...selection };
-      }
-
-      setFillState({
-        isDragging: true,
-        direction,
-        targetRow,
-        targetCol,
-        previewRange,
-      });
     },
-    [fillState.isDragging, selection, viewport, config, dimensions]
+    [fillState.isDragging, selection, updateFillDragInternal, containerRef, propsConfig, startAutoScroll, stopAutoScroll]
   );
 
   /**
@@ -443,6 +550,10 @@ export function useFillHandle(): UseFillHandleReturn {
    * FIX: Formula values are now shifted via shiftFormulaForFill.
    */
   const completeFill = useCallback(async () => {
+    // Stop auto-scroll and clear mouse position
+    stopAutoScroll();
+    lastMousePosRef.current = null;
+
     if (!fillState.isDragging || !selection || !fillState.direction) {
       setFillState({
         isDragging: false,
@@ -637,12 +748,16 @@ export function useFillHandle(): UseFillHandleReturn {
       previewRange: null,
     });
     dragStartRef.current = null;
-  }, [fillState, selection, dispatch]);
+  }, [fillState, selection, dispatch, stopAutoScroll]);
 
   /**
    * Cancel fill operation.
    */
   const cancelFill = useCallback(() => {
+    // Stop auto-scroll and clear mouse position
+    stopAutoScroll();
+    lastMousePosRef.current = null;
+
     setFillState({
       isDragging: false,
       direction: null,
@@ -651,7 +766,7 @@ export function useFillHandle(): UseFillHandleReturn {
       previewRange: null,
     });
     dragStartRef.current = null;
-  }, []);
+  }, [stopAutoScroll]);
 
   /**
    * Auto-fill to edge (Excel double-click fill handle behavior).

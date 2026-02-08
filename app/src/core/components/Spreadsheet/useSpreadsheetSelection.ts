@@ -94,7 +94,7 @@ export function useSpreadsheetSelection({
     clearClipboardState,
   } = useClipboard();
 
-  // Fill handle hook
+  // Fill handle hook with auto-scroll support
   const {
     fillState,
     isOverFillHandle,
@@ -102,7 +102,10 @@ export function useSpreadsheetSelection({
     updateFillDrag,
     completeFill,
     autoFillToEdge,
-  } = useFillHandle();
+  } = useFillHandle({
+    containerRef,
+    config: state.config,
+  });
 
   const pendingRefreshRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -422,6 +425,33 @@ export function useSpreadsheetSelection({
     }
     return cursorStyle;
   }, [fillState.isDragging, cursorStyle]);
+
+  // Global mouse handlers for fill handle dragging
+  // This allows fill drag to continue even when mouse leaves the canvas
+  useEffect(() => {
+    if (!fillState.isDragging) return;
+
+    const handleGlobalMouseMove = (event: MouseEvent) => {
+      const rect = containerRef.current?.getBoundingClientRect();
+      if (!rect) return;
+
+      const mouseX = event.clientX - rect.left;
+      const mouseY = event.clientY - rect.top;
+      updateFillDrag(mouseX, mouseY);
+    };
+
+    const handleGlobalMouseUp = () => {
+      completeFill();
+    };
+
+    window.addEventListener("mousemove", handleGlobalMouseMove);
+    window.addEventListener("mouseup", handleGlobalMouseUp);
+
+    return () => {
+      window.removeEventListener("mousemove", handleGlobalMouseMove);
+      window.removeEventListener("mouseup", handleGlobalMouseUp);
+    };
+  }, [fillState.isDragging, containerRef, updateFillDrag, completeFill]);
 
   // Keyboard handling with clipboard shortcuts, ESC to clear clipboard, DELETE to clear contents, and undo/redo
   // FIX: Use focusContainerRef instead of containerRef for keyboard events
