@@ -80,6 +80,7 @@ function SpreadsheetContent({
     handleInlineCancel,
     handleInlineTab,
     handleInlineEnter,
+    handleArrowKeyReference,
     handleCut,
     handleCopy,
     handlePaste,
@@ -686,6 +687,7 @@ function SpreadsheetContent({
               onTab={handleInlineTab}
               onEnter={handleInlineEnter}
               onRestoreFocus={() => focusContainerRef.current?.focus()}
+              onArrowKeyReference={handleArrowKeyReference}
             />
           )}
         </S.CanvasLayer>

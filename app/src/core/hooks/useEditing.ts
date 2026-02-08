@@ -31,12 +31,13 @@ import {
 } from "../../core/state/gridActions";
 import { updateCell, getCell, setActiveSheet as setActiveSheetApi, getMergeInfo } from "../lib/tauri-api";
 import { cellEvents } from "../lib/cellEvents";
-import { 
-  rangeToReference, 
-  columnToReference, 
-  columnRangeToReference, 
-  rowToReference, 
-  rowRangeToReference 
+import {
+  rangeToReference,
+  columnToReference,
+  columnRangeToReference,
+  rowToReference,
+  rowRangeToReference,
+  cellToReference,
 } from "../lib/gridRenderer";
 import type { EditingCell, CellUpdateResult, FormulaReference } from "../types";
 import { isFormulaExpectingReference, FORMULA_REFERENCE_COLORS } from "../types";
@@ -63,6 +64,19 @@ let globalIsEditing = false;
  * mouse click can correctly detect formula mode and insert a cell reference.
  */
 let globalEditingValue = "";
+
+/**
+ * MODULE-LEVEL state for arrow key reference navigation.
+ * When navigating cell references with arrow keys in formula mode, we track:
+ * - The current cursor position (where arrow keys navigate from)
+ * - The insert index (where the reference starts in the formula string)
+ * - The color assigned to the current arrow-navigated reference
+ * This allows replacing the current reference when pressing additional arrow keys,
+ * rather than appending new references.
+ */
+let arrowRefCursor: { row: number; col: number } | null = null;
+let arrowRefInsertIndex: number = 0;
+let arrowRefColor: string | null = null;
 
 /**
  * Set the global editing flag. Used internally by the hook.
@@ -102,6 +116,58 @@ export function getGlobalEditingValue(): string {
  */
 export function isGlobalFormulaMode(): boolean {
   return globalIsEditing && isFormulaExpectingReference(globalEditingValue);
+}
+
+/**
+ * Get the arrow reference cursor position.
+ */
+export function getArrowRefCursor(): { row: number; col: number } | null {
+  return arrowRefCursor;
+}
+
+/**
+ * Set the arrow reference cursor position.
+ */
+export function setArrowRefCursor(cursor: { row: number; col: number } | null): void {
+  arrowRefCursor = cursor;
+}
+
+/**
+ * Get the arrow reference insert index.
+ */
+export function getArrowRefInsertIndex(): number {
+  return arrowRefInsertIndex;
+}
+
+/**
+ * Set the arrow reference insert index.
+ */
+export function setArrowRefInsertIndex(index: number): void {
+  arrowRefInsertIndex = index;
+}
+
+/**
+ * Reset arrow reference navigation state.
+ * Called when user types something (not arrow navigation) to reset the cursor.
+ */
+export function resetArrowRefState(): void {
+  arrowRefCursor = null;
+  arrowRefInsertIndex = 0;
+  arrowRefColor = null;
+}
+
+/**
+ * Get the arrow reference color.
+ */
+export function getArrowRefColor(): string | null {
+  return arrowRefColor;
+}
+
+/**
+ * Set the arrow reference color.
+ */
+export function setArrowRefColor(color: string | null): void {
+  arrowRefColor = color;
 }
 
 /**
@@ -179,6 +245,8 @@ export interface UseEditingReturn {
   getSourceSheetName: () => string | null;
   /** Check if currently on a different sheet than the formula source */
   isOnDifferentSheet: () => boolean;
+  /** Navigate cell reference with arrow keys in formula mode */
+  navigateReferenceWithArrow: (direction: "up" | "down" | "left" | "right") => void;
 }
 
 /**
@@ -511,12 +579,18 @@ export function useEditing(): UseEditingReturn {
   /**
    * Update the current editing value.
    * FIX: Also updates global editing value synchronously for formula mode detection.
+   * FIX: Resets arrow reference cursor when user types (not from arrow navigation).
    */
   const updateValue = useCallback(
     (value: string) => {
       // FIX: Update global value synchronously BEFORE dispatching to React state
       // This ensures formula mode is detected immediately when the user types "+"
       setGlobalEditingValue(value);
+
+      // Reset arrow reference cursor when user types
+      // This ensures the next arrow key press starts fresh from the editing cell
+      resetArrowRefState();
+
       dispatch(updateEditing(value));
     },
     [dispatch]
@@ -526,6 +600,7 @@ export function useEditing(): UseEditingReturn {
    * Insert a cell reference into the current formula.
    * Includes sheet prefix if on a different sheet.
    * FIX: Dispatches event to restore focus to InlineEditor.
+   * FIX: Sets up arrow cursor state so arrow keys can continue from this cell.
    */
   const insertReference = useCallback(
     (row: number, col: number) => {
@@ -543,16 +618,22 @@ export function useEditing(): UseEditingReturn {
       dispatch(updateEditing(newValue));
 
       // FIX: Include sheetName for cross-sheet reference highlighting
+      const color = getNextReferenceColor();
       const newRef: FormulaReference = {
         startRow: row,
         startCol: col,
         endRow: row,
         endCol: col,
-        color: getNextReferenceColor(),
+        color: color,
         sheetName: targetSheet ?? undefined,
       };
       dispatch(setFormulaReferences([...formulaReferences, newRef]));
       setPendingReference(null);
+
+      // FIX: Set up arrow cursor state so arrow keys can continue from this cell
+      arrowRefCursor = { row, col };
+      arrowRefInsertIndex = editing.value.length; // Where the reference starts
+      arrowRefColor = color;
 
       // FIX: Dispatch event to restore focus to the InlineEditor
       dispatchReferenceInsertedEvent();
@@ -1063,6 +1144,101 @@ export function useEditing(): UseEditingReturn {
     setLastError(null);
   }, []);
 
+  /**
+   * Navigate cell reference with arrow keys in formula mode.
+   * When in formula mode and arrow keys are pressed, this function:
+   * - Creates a new reference if no arrow navigation is active
+   * - Replaces the current reference if arrow navigation is active
+   * This mimics Excel's behavior of navigating cell references with arrow keys.
+   */
+  const navigateReferenceWithArrow = useCallback(
+    (direction: "up" | "down" | "left" | "right") => {
+      if (!editing) {
+        return;
+      }
+
+      // Allow navigation if:
+      // 1. Formula is expecting a reference (e.g., "=" or "=A1+")
+      // 2. OR we're already in arrow navigation mode (e.g., just pressed arrow to get "=B1")
+      const isInArrowNavMode = arrowRefCursor !== null;
+      const isExpectingRef = isFormulaExpectingReference(editing.value);
+
+      if (!isExpectingRef && !isInArrowNavMode) {
+        return;
+      }
+
+      const currentCursor = arrowRefCursor;
+      let newRow: number;
+      let newCol: number;
+      let color: string;
+
+      if (currentCursor === null) {
+        // Starting a new arrow navigation from the editing cell
+        newRow = editing.row;
+        newCol = editing.col;
+        arrowRefInsertIndex = editing.value.length;
+        // Get a new color for this arrow navigation session
+        color = getNextReferenceColor();
+        arrowRefColor = color;
+      } else {
+        // Continue from current cursor position
+        newRow = currentCursor.row;
+        newCol = currentCursor.col;
+        // Reuse the same color from the current arrow navigation session
+        color = arrowRefColor || getNextReferenceColor();
+      }
+
+      // Calculate new position based on direction
+      switch (direction) {
+        case "up":
+          newRow = Math.max(0, newRow - 1);
+          break;
+        case "down":
+          newRow = newRow + 1;
+          break;
+        case "left":
+          newCol = Math.max(0, newCol - 1);
+          break;
+        case "right":
+          newCol = newCol + 1;
+          break;
+      }
+
+      // Update the cursor position
+      arrowRefCursor = { row: newRow, col: newCol };
+
+      // Build the new reference
+      const targetSheet = getTargetSheetName();
+      const sourceSheet = getSourceSheetName();
+      const reference = cellToReference(newRow, newCol, targetSheet, sourceSheet);
+
+      // Replace the formula from the insert index with the new reference
+      const newValue = editing.value.substring(0, arrowRefInsertIndex) + reference;
+
+      // Update the value synchronously
+      setGlobalEditingValue(newValue);
+      dispatch(updateEditing(newValue));
+
+      // Update formula references for highlighting
+      const newRef: FormulaReference = {
+        startRow: newRow,
+        startCol: newCol,
+        endRow: newRow,
+        endCol: newCol,
+        color: color,
+        sheetName: targetSheet ?? undefined,
+      };
+
+      // Filter out the previous arrow reference (same color) and add the new one
+      const filteredRefs = formulaReferences.filter(ref => ref.color !== color);
+      dispatch(setFormulaReferences([...filteredRefs, newRef]));
+
+      // Dispatch event to restore focus to the InlineEditor
+      dispatchReferenceInsertedEvent();
+    },
+    [editing, dispatch, formulaReferences, getNextReferenceColor, getTargetSheetName, getSourceSheetName]
+  );
+
   return {
     editing,
     isEditing: editing !== null,
@@ -1091,5 +1267,6 @@ export function useEditing(): UseEditingReturn {
     clearPendingReference,
     getSourceSheetName,
     isOnDifferentSheet,
+    navigateReferenceWithArrow,
   };
 }

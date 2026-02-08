@@ -55,6 +55,7 @@ export function useSpreadsheetEditing({
     clearError,
     startEditing, // Derived here
     isOnDifferentSheet, // FIX: For handling Enter/Escape when on different sheet during formula mode
+    navigateReferenceWithArrow, // For arrow key cell reference navigation in formula mode
   } = useEditing();
 
   const showStatus = useCallback((message: string, duration: number = 3000) => {
@@ -188,6 +189,14 @@ export function useSpreadsheetEditing({
     focusContainerRef.current?.focus();
   }, [moveActiveCell, scrollToSelection, focusContainerRef]);
 
+  // Handler for arrow key cell reference navigation in formula mode
+  const handleArrowKeyReference = useCallback(
+    (direction: "up" | "down" | "left" | "right") => {
+      navigateReferenceWithArrow(direction);
+    },
+    [navigateReferenceWithArrow]
+  );
+
   const handleContainerKeyDown = useCallback(
     async (event: React.KeyboardEvent<HTMLDivElement>) => {
       // FIX: Check BOTH the state AND the synchronous ref
@@ -286,6 +295,7 @@ export function useSpreadsheetEditing({
       handleInlineTab,
       handleInlineEnter,
       handleContainerKeyDown,
+      handleArrowKeyReference,
       clearError
     },
     ui: {

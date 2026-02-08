@@ -8,7 +8,7 @@ import { isFormulaExpectingReference, createEmptyDimensionOverrides } from "../.
 import { useGridContext } from "../../state/GridContext";
 import * as S from "./InlineEditor.styles";
 import { toggleReferenceAtCursor } from "../../lib/formulaRefToggle";
-import { getGlobalEditingValue } from "../../hooks/useEditing";
+import { getGlobalEditingValue, getArrowRefCursor } from "../../hooks/useEditing";
 
 /**
  * Global flag to prevent blur from committing during sheet tab navigation.
@@ -46,6 +46,8 @@ export interface InlineEditorProps {
   onRestoreFocus?: () => void;
   /** Whether the editor is disabled (e.g., during save) */
   disabled?: boolean;
+  /** Callback when arrow key is pressed in formula mode to navigate cell references */
+  onArrowKeyReference?: (direction: "up" | "down" | "left" | "right") => void;
 }
 
 /**
@@ -210,6 +212,7 @@ export function InlineEditor(props: InlineEditorProps): React.ReactElement | nul
     onEnter,
     onRestoreFocus,
     disabled = false,
+    onArrowKeyReference,
   } = props;
 
   const inputRef = useRef<HTMLInputElement | null>(null);
@@ -297,7 +300,7 @@ export function InlineEditor(props: InlineEditorProps): React.ReactElement | nul
         case "F4": {
           // FIX: Toggle absolute/relative reference mode on the cell reference
           // at the current cursor position. Only active when editing a formula.
-          // 
+          //
           // IMPORTANT: Use getGlobalEditingValue() instead of reading from the DOM
           // or React state. This is because:
           // 1. The input is a controlled React component (value comes from props)
@@ -306,7 +309,7 @@ export function InlineEditor(props: InlineEditorProps): React.ReactElement | nul
           // 4. getGlobalEditingValue() is updated synchronously in updateValue()
           const inputEl = inputRef.current;
           if (!inputEl) break;
-          
+
           // Use global value (updated synchronously) with fallback to DOM
           const currentValue = getGlobalEditingValue() || inputEl.value;
           if (currentValue.startsWith("=")) {
@@ -325,12 +328,44 @@ export function InlineEditor(props: InlineEditorProps): React.ReactElement | nul
           break;
         }
 
+        case "ArrowUp":
+        case "ArrowDown":
+        case "ArrowLeft":
+        case "ArrowRight": {
+          // Handle arrow keys for cell reference navigation in formula mode
+          // When in formula mode (expecting a reference) OR when we're already navigating
+          // a reference with arrow keys, arrow keys insert/navigate cell references
+          // instead of moving the cursor within the text
+          const currentVal = getGlobalEditingValue() || editing.value;
+          const isInArrowNavMode = getArrowRefCursor() !== null;
+          const isExpectingRef = isFormulaExpectingReference(currentVal);
+
+          // Continue arrow navigation if:
+          // 1. Formula is expecting a reference (e.g., "=" or "=A1+")
+          // 2. OR we're already in arrow navigation mode (e.g., just pressed arrow to get "=B1")
+          if (onArrowKeyReference && (isExpectingRef || isInArrowNavMode)) {
+            event.preventDefault();
+            event.stopPropagation();
+
+            const directionMap: Record<string, "up" | "down" | "left" | "right"> = {
+              "ArrowUp": "up",
+              "ArrowDown": "down",
+              "ArrowLeft": "left",
+              "ArrowRight": "right",
+            };
+
+            onArrowKeyReference(directionMap[event.key]);
+          }
+          // If not in formula mode and not in arrow nav mode, let arrow keys work normally
+          break;
+        }
+
         default:
           // Let other keys propagate normally for text input
           break;
       }
     },
-    [onCommit, onCancel, onTab, onEnter, onRestoreFocus, disabled, onValueChange]
+    [onCommit, onCancel, onTab, onEnter, onRestoreFocus, disabled, onValueChange, onArrowKeyReference, editing.value]
   );
 
   /**

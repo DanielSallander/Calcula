@@ -204,6 +204,7 @@ export function useSpreadsheet() {
       handleInlineCancel: editingLogic.handlers.handleInlineCancel,
       handleInlineTab: editingLogic.handlers.handleInlineTab,
       handleInlineEnter: editingLogic.handlers.handleInlineEnter,
+      handleArrowKeyReference: editingLogic.handlers.handleArrowKeyReference,
       handleContainerKeyDown: editingLogic.handlers.handleContainerKeyDown,
       setStatusMessage: editingLogic.setStatusMessage,
       clearError: editingLogic.handlers.clearError,
