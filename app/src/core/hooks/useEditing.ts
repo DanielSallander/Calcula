@@ -862,13 +862,21 @@ export function useEditing(): UseEditingReturn {
       // This can happen when InlineEditor blur and formula bar both trigger commit
       if (commitInProgressRef.current) {
         console.log("[useEditing] commitEdit skipped - already in progress");
+        // FIX: Clear global state to prevent stuck editing mode.
+        // If a commit is already in progress, the new edit session that set
+        // globalIsEditing=true should be abandoned. The in-progress commit
+        // will handle clearing state when it completes.
+        setGlobalIsEditing(false);
+        setGlobalEditingValue("");
+        resetArrowRefState();
         return null;
       }
 
       if (!editing) {
-        // FIX: Clear global flag even on early return to prevent stuck state
+        // FIX: Clear global flag and arrow reference state even on early return to prevent stuck state
         setGlobalIsEditing(false);
         setGlobalEditingValue("");
+        resetArrowRefState();
         return null;
       }
 
@@ -926,10 +934,13 @@ export function useEditing(): UseEditingReturn {
       const updatedCells = await updateCell(editing.row, editing.col, valueToCommit);
       const primaryCell = updatedCells[0];
       
-      // FIX: Clear global flag when editing stops
+      // FIX: Clear global flag and arrow reference state when editing stops
+      console.log("[commitEdit] SUCCESS - clearing globalIsEditing, was:", globalIsEditing);
       setGlobalIsEditing(false);
       setGlobalEditingValue("");
-      
+      resetArrowRefState();
+      console.log("[commitEdit] globalIsEditing is now:", globalIsEditing);
+
       if (primaryCell) {
         cellEvents.emit({
           row: primaryCell.row,
@@ -990,10 +1001,11 @@ export function useEditing(): UseEditingReturn {
       console.error("Failed to update cell:", error);
       setLastError(errorMessage);
       
-      // FIX: Clear global flag on error too
+      // FIX: Clear global flag and arrow reference state on error too
       setGlobalIsEditing(false);
       setGlobalEditingValue("");
-      
+      resetArrowRefState();
+
       dispatch(stopEditing());
       dispatch(clearFormulaReferences());
       return {
@@ -1016,9 +1028,10 @@ export function useEditing(): UseEditingReturn {
    * FIX: If editing started on a different sheet, switch back to that sheet.
    */
   const cancelEdit = useCallback(async () => {
-    // FIX: Clear global flag immediately
+    // FIX: Clear global flag and arrow reference state immediately
     setGlobalIsEditing(false);
     setGlobalEditingValue("");
+    resetArrowRefState();
     
     if (!editing) {
       setLastError(null);

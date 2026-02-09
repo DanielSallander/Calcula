@@ -258,11 +258,16 @@ export function InlineEditor(props: InlineEditorProps): React.ReactElement | nul
         case "Enter":
           event.preventDefault();
           event.stopPropagation();
+          console.log("[InlineEditor] Enter pressed, starting commit");
           isCommittingRef.current = true;
           try {
             const commitSuccess = await onCommit();
+            console.log("[InlineEditor] onCommit returned:", commitSuccess, "onEnter exists:", !!onEnter);
             if (commitSuccess && onEnter) {
+              console.log("[InlineEditor] Calling onEnter");
               onEnter(event.shiftKey);
+            } else {
+              console.log("[InlineEditor] NOT calling onEnter - commitSuccess:", commitSuccess);
             }
             // Restore focus to grid container so keyboard navigation works
             onRestoreFocus?.();

@@ -456,9 +456,12 @@ export function useSpreadsheetSelection({
   // Keyboard handling with clipboard shortcuts, ESC to clear clipboard, DELETE to clear contents, and undo/redo
   // FIX: Use focusContainerRef instead of containerRef for keyboard events
   // The focusContainerRef points to the focusable outer container that receives keyboard events
+  // FIX: Don't use isEditing in enabled prop - it's stale React state after commit.
+  // useGridKeyboard internally checks getGlobalIsEditing() synchronously in handleKeyDown,
+  // which correctly reflects the current editing state.
   useGridKeyboard({
     containerRef: focusContainerRef,
-    enabled: isFocused && !isEditing,
+    enabled: isFocused,
     onCut: cut,
     onCopy: copy,
     onPaste: paste,

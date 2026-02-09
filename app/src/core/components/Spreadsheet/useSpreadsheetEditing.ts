@@ -3,7 +3,7 @@
 // CONTEXT: Contains complex logic for handling key events in both the container and inputs.
 
 import { useCallback, useEffect, useState } from "react";
-import { useEditing, getGlobalEditingValue } from "../../hooks";
+import { useEditing, getGlobalEditingValue, setGlobalIsEditing } from "../../hooks";
 import { useGridState } from "../../state";
 import { toggleReferenceAtCursor } from "../../lib/formulaRefToggle";
 
@@ -69,6 +69,31 @@ export function useSpreadsheetEditing({
     }
   }, [lastError, showStatus]);
 
+  // FIX: Listen for formula bar commit events from FormulaInput (shell layer)
+  // FormulaInput can't directly call moveActiveCell since it's in the shell layer,
+  // so it dispatches an event that we handle here to move the cell and restore focus
+  useEffect(() => {
+    const handleFormulaBarCommit = (event: Event) => {
+      const { key, shiftKey } = (event as CustomEvent<{ key: string; shiftKey: boolean }>).detail;
+      console.log("[useSpreadsheetEditing] formulaBar:commitComplete received:", { key, shiftKey });
+
+      if (key === "Enter") {
+        moveActiveCell(shiftKey ? -1 : 1, 0);
+        scrollToSelection();
+      } else if (key === "Tab") {
+        moveActiveCell(0, shiftKey ? -1 : 1);
+        scrollToSelection();
+      }
+      // For all keys (including Escape), restore focus to grid
+      focusContainerRef.current?.focus();
+    };
+
+    window.addEventListener("formulaBar:commitComplete", handleFormulaBarCommit);
+    return () => {
+      window.removeEventListener("formulaBar:commitComplete", handleFormulaBarCommit);
+    };
+  }, [moveActiveCell, scrollToSelection, focusContainerRef]);
+
   const handleCommitBeforeSelect = useCallback(async () => {
     if (isEditing && !isFormulaMode) {
       await commitEdit();
@@ -76,14 +101,19 @@ export function useSpreadsheetEditing({
   }, [isEditing, isFormulaMode, commitEdit]);
 
   const handleCommitEdit = useCallback(async (): Promise<boolean> => {
+    console.log("[handleCommitEdit] START, calling commitEdit");
     const result = await commitEdit();
+    console.log("[handleCommitEdit] commitEdit returned:", result);
     if (result) {
       if (result.success) {
+        console.log("[handleCommitEdit] returning true");
         return true;
       } else {
+        console.log("[handleCommitEdit] result.success is false, returning false");
         return false;
       }
     }
+    console.log("[handleCommitEdit] result is falsy, returning false");
     return false;
   }, [commitEdit]);
 
@@ -161,7 +191,9 @@ export function useSpreadsheetEditing({
   const handleInlineValueChange = useCallback((value: string) => updateValue(value), [updateValue]);
   
   const handleInlineCommit = useCallback(async () => {
+    console.log("[handleInlineCommit] START");
     const success = await handleCommitEdit();
+    console.log("[handleInlineCommit] handleCommitEdit returned:", success);
     if (success) {
       // FIX: Use focusContainerRef instead of containerRef
       focusContainerRef.current?.focus();
@@ -199,30 +231,65 @@ export function useSpreadsheetEditing({
 
   const handleContainerKeyDown = useCallback(
     async (event: React.KeyboardEvent<HTMLDivElement>) => {
-      // FIX: Check BOTH the state AND the synchronous ref
-      // The ref is updated immediately when editing starts, before React re-renders
-      // This prevents the stale closure race condition on double-click
-      if (isEditing || isEditingRef.current) {
-        // FIX: When editing on a different sheet, InlineEditor is not rendered
-        // so we need to handle Enter/Escape here for cross-sheet formula editing
-        if (isOnDifferentSheet()) {
-          if (event.key === "Enter") {
-            event.preventDefault();
-            const success = await handleCommitEdit();
-            if (success) {
-              moveActiveCell(event.shiftKey ? -1 : 1, 0);
-              scrollToSelection();
-            }
-            focusContainerRef.current?.focus();
-            return;
-          } else if (event.key === "Escape") {
-            event.preventDefault();
-            cancelEdit();
-            focusContainerRef.current?.focus();
+      // FIX: Use ONLY the synchronous ref for editing check
+      // The ref is updated immediately when editing starts/stops, before React re-renders.
+      // This prevents:
+      // 1. Race condition on double-click (editing starts, ref true, but React state false)
+      // 2. Arrow key blocking after commit (editing stops, ref false, but React state true)
+      // Using OR would cause stale React state to block navigation after commit.
+      if (isEditingRef.current) {
+        // FIX: Handle Enter/Escape when editing, even if InlineEditor should have focus.
+        // This handles two cases:
+        // 1. Cross-sheet formula editing (InlineEditor not rendered on target sheet)
+        // 2. Race condition where user presses Enter before InlineEditor focuses
+        // If InlineEditor has focus, it handles these keys and stops propagation,
+        // so this code only runs when the container has focus during editing.
+        if (event.key === "Enter") {
+          event.preventDefault();
+          console.log("[handleContainerKeyDown] Enter pressed while isEditingRef.current is true, editing state:", !!editing);
+          // FIX: If editing state is not yet set (race condition with async startEditing),
+          // don't try to commit. Just wait for InlineEditor to render - the user can
+          // press Enter there. This prevents the bug where commit clears globalIsEditing
+          // but then startEditing completes and renders InlineEditor, leaving the user
+          // stuck with InlineEditor focused but unable to navigate.
+          if (!editing) {
+            console.log("[handleContainerKeyDown] Enter pressed but editing not set yet, waiting for InlineEditor");
             return;
           }
+          const success = await handleCommitEdit();
+          console.log("[handleContainerKeyDown] handleCommitEdit returned:", success);
+          if (success) {
+            console.log("[handleContainerKeyDown] Calling moveActiveCell");
+            moveActiveCell(event.shiftKey ? -1 : 1, 0);
+            scrollToSelection();
+          }
+          focusContainerRef.current?.focus();
+          return;
+        } else if (event.key === "Escape") {
+          event.preventDefault();
+          // FIX: Same race condition fix for Escape
+          if (!editing) {
+            console.log("[handleContainerKeyDown] Escape pressed but editing not set yet");
+            setGlobalIsEditing(false);
+            return;
+          }
+          cancelEdit();
+          focusContainerRef.current?.focus();
+          return;
         }
-        return;
+
+        // FIX: Self-healing for stuck editing state.
+        // If isEditingRef is true but React editing state is null, we have an
+        // inconsistent state (likely from a race condition or error during startEdit).
+        // Clear the stuck global flag and allow navigation to proceed.
+        if (!editing) {
+          console.warn("[handleContainerKeyDown] Editing ref stuck without editing state, clearing...");
+          setGlobalIsEditing(false);
+          // Don't return - let the key be handled normally below
+        } else {
+          // For other keys during editing, return early (let InlineEditor handle if focused)
+          return;
+        }
       }
 
       const navigationKeys = [
@@ -265,7 +332,7 @@ export function useSpreadsheetEditing({
         return;
       }
     },
-    [isEditing, isEditingRef, isOnDifferentSheet, startEditing, handleCommitEdit, cancelEdit, moveActiveCell, scrollToSelection, focusContainerRef]
+    [isEditingRef, editing, isOnDifferentSheet, startEditing, handleCommitEdit, cancelEdit, moveActiveCell, scrollToSelection, focusContainerRef]
   );
 
   const getFormulaBarValueInternal = (): string => {

@@ -112,12 +112,35 @@ export function FormulaInput(): React.ReactElement {
 
       if (e.key === "Enter") {
         e.preventDefault();
-        await commitEdit();
+        const shiftKey = e.shiftKey;
+        const result = await commitEdit();
         inputRef.current?.blur();
+        // FIX: Dispatch event so core layer can move active cell and restore focus
+        // The core layer (useSpreadsheetEditing) listens for this event
+        if (result?.success) {
+          window.dispatchEvent(new CustomEvent("formulaBar:commitComplete", {
+            detail: { key: "Enter", shiftKey }
+          }));
+        }
+      } else if (e.key === "Tab") {
+        e.preventDefault();
+        const shiftKey = e.shiftKey;
+        const result = await commitEdit();
+        inputRef.current?.blur();
+        // FIX: Dispatch event so core layer can move active cell and restore focus
+        if (result?.success) {
+          window.dispatchEvent(new CustomEvent("formulaBar:commitComplete", {
+            detail: { key: "Tab", shiftKey }
+          }));
+        }
       } else if (e.key === "Escape") {
         e.preventDefault();
         await cancelEdit();
         inputRef.current?.blur();
+        // FIX: Dispatch event so core layer can restore focus to grid
+        window.dispatchEvent(new CustomEvent("formulaBar:commitComplete", {
+          detail: { key: "Escape", shiftKey: false }
+        }));
       } else if (e.key === "F4") {
         // FIX: Toggle absolute/relative reference mode on the cell reference
         // at the current cursor position. Only active when editing a formula.
