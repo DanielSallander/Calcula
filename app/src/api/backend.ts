@@ -162,3 +162,148 @@ export async function getPivotFieldUniqueValues<TResponse>(
     fieldIndex,
   });
 }
+
+// ============================================================================
+// Clear Range Commands
+// ============================================================================
+
+/**
+ * Clear apply to options (Excel-compatible).
+ */
+export type ClearApplyTo =
+  | "all"
+  | "contents"
+  | "formats"
+  | "hyperlinks"
+  | "removeHyperlinks"
+  | "resetContents";
+
+/**
+ * Clear a range with options for what to clear.
+ * @param startRow - Start row (0-based)
+ * @param startCol - Start column (0-based)
+ * @param endRow - End row (0-based, inclusive)
+ * @param endCol - End column (0-based, inclusive)
+ * @param applyTo - What to clear (default: "all")
+ * @returns Result with count and updated cells
+ */
+export async function clearRangeWithOptions<TResult>(
+  startRow: number,
+  startCol: number,
+  endRow: number,
+  endCol: number,
+  applyTo: ClearApplyTo = "all"
+): Promise<TResult> {
+  return invoke<TResult>("clear_range_with_options", {
+    params: {
+      startRow,
+      startCol,
+      endRow,
+      endCol,
+      applyTo,
+    },
+  });
+}
+
+// ============================================================================
+// Sort Range Commands
+// ============================================================================
+
+/**
+ * What to sort on.
+ */
+export type SortOn = "value" | "cellColor" | "fontColor" | "icon";
+
+/**
+ * Sort data option.
+ */
+export type SortDataOption = "normal" | "textAsNumber";
+
+/**
+ * Sort orientation.
+ */
+export type SortOrientation = "rows" | "columns";
+
+/**
+ * A sort field (criterion).
+ */
+export interface SortField {
+  /** Column/row offset from start (0-based) */
+  key: number;
+  /** Ascending order (default: true) */
+  ascending?: boolean;
+  /** What to sort on (default: "value") */
+  sortOn?: SortOn;
+  /** Color for color-based sorting */
+  color?: string;
+  /** Data option (default: "normal") */
+  dataOption?: SortDataOption;
+  /** Subfield for rich values */
+  subField?: string;
+}
+
+/**
+ * Sort a range by one or more criteria.
+ * @param startRow - Start row (0-based)
+ * @param startCol - Start column (0-based)
+ * @param endRow - End row (0-based, inclusive)
+ * @param endCol - End column (0-based, inclusive)
+ * @param fields - Sort fields (at least one required)
+ * @param options - Additional sort options
+ * @returns Result with success status and updated cells
+ */
+export async function sortRange<TResult>(
+  startRow: number,
+  startCol: number,
+  endRow: number,
+  endCol: number,
+  fields: SortField[],
+  options?: {
+    matchCase?: boolean;
+    hasHeaders?: boolean;
+    orientation?: SortOrientation;
+  }
+): Promise<TResult> {
+  return invoke<TResult>("sort_range", {
+    params: {
+      startRow,
+      startCol,
+      endRow,
+      endCol,
+      fields,
+      matchCase: options?.matchCase ?? false,
+      hasHeaders: options?.hasHeaders ?? false,
+      orientation: options?.orientation ?? "rows",
+    },
+  });
+}
+
+/**
+ * Convenience function to sort a range by a single column.
+ * @param startRow - Start row (0-based)
+ * @param startCol - Start column (0-based)
+ * @param endRow - End row (0-based, inclusive)
+ * @param endCol - End column (0-based, inclusive)
+ * @param sortColumn - Column to sort by (0-based absolute, will be converted to relative)
+ * @param ascending - Sort ascending (default: true)
+ * @param hasHeaders - Has header row (default: false)
+ * @returns Result with success status and updated cells
+ */
+export async function sortRangeByColumn<TResult>(
+  startRow: number,
+  startCol: number,
+  endRow: number,
+  endCol: number,
+  sortColumn: number,
+  ascending: boolean = true,
+  hasHeaders: boolean = false
+): Promise<TResult> {
+  return sortRange<TResult>(
+    startRow,
+    startCol,
+    endRow,
+    endCol,
+    [{ key: sortColumn - startCol, ascending }],
+    { hasHeaders }
+  );
+}

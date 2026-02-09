@@ -133,10 +133,186 @@ pub struct MergeResult {
 }
 
 // ============================================================================
+// Clear Range Options (Excel-compatible)
+// ============================================================================
+
+/// Specifies what to clear from a range.
+/// Matches Excel's ClearApplyTo enum.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum ClearApplyTo {
+    /// Clear all contents and formatting (default behavior)
+    All,
+    /// Clear only cell values, leaving formatting intact
+    Contents,
+    /// Clear only formatting, leaving values intact
+    Formats,
+    /// Clear hyperlinks only (placeholder - not yet implemented)
+    Hyperlinks,
+    /// Remove hyperlinks and formatting but keep content
+    RemoveHyperlinks,
+    /// Reset cells to their default state
+    ResetContents,
+}
+
+impl Default for ClearApplyTo {
+    fn default() -> Self {
+        ClearApplyTo::All
+    }
+}
+
+/// Parameters for clear_range_with_options command.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ClearRangeParams {
+    pub start_row: u32,
+    pub start_col: u32,
+    pub end_row: u32,
+    pub end_col: u32,
+    #[serde(default)]
+    pub apply_to: ClearApplyTo,
+}
+
+/// Result of clear_range_with_options command.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ClearRangeResult {
+    /// Number of cells affected
+    pub count: u32,
+    /// Updated cells (with new display values if only formatting was cleared)
+    pub updated_cells: Vec<CellData>,
+}
+
+// ============================================================================
+// Sort Range (Excel-compatible)
+// ============================================================================
+
+/// Specifies what to sort on.
+/// Matches Excel's SortOn enum.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum SortOn {
+    /// Sort by cell value (default)
+    Value,
+    /// Sort by cell background color
+    CellColor,
+    /// Sort by font color
+    FontColor,
+    /// Sort by cell icon (conditional formatting)
+    Icon,
+}
+
+impl Default for SortOn {
+    fn default() -> Self {
+        SortOn::Value
+    }
+}
+
+/// Additional sort data options.
+/// Matches Excel's SortDataOption enum.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum SortDataOption {
+    /// Normal sorting (default)
+    Normal,
+    /// Treat text as numbers when sorting
+    TextAsNumber,
+}
+
+impl Default for SortDataOption {
+    fn default() -> Self {
+        SortDataOption::Normal
+    }
+}
+
+/// Sort orientation (by rows or columns).
+/// Matches Excel's SortOrientation enum.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum SortOrientation {
+    /// Sort by rows (sort data vertically - typical case)
+    Rows,
+    /// Sort by columns (sort data horizontally)
+    Columns,
+}
+
+impl Default for SortOrientation {
+    fn default() -> Self {
+        SortOrientation::Rows
+    }
+}
+
+/// A single sort field/condition.
+/// Matches Excel's SortField interface.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SortField {
+    /// Column (or row) offset from the first column (or row) being sorted (0-based).
+    /// Required field.
+    pub key: u32,
+    /// Sort direction: true for ascending (A-Z, 0-9), false for descending.
+    #[serde(default = "default_ascending")]
+    pub ascending: bool,
+    /// What to sort on (value, cell color, font color, or icon).
+    #[serde(default)]
+    pub sort_on: SortOn,
+    /// The color to sort by when sort_on is CellColor or FontColor (CSS color string).
+    pub color: Option<String>,
+    /// Additional data options (e.g., treat text as numbers).
+    #[serde(default)]
+    pub data_option: SortDataOption,
+    /// For sorting rich values - the subfield/property name to sort on.
+    pub sub_field: Option<String>,
+}
+
+fn default_ascending() -> bool {
+    true
+}
+
+/// Parameters for sort_range command.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SortRangeParams {
+    /// Start row of range to sort (0-based)
+    pub start_row: u32,
+    /// Start column of range to sort (0-based)
+    pub start_col: u32,
+    /// End row of range to sort (0-based, inclusive)
+    pub end_row: u32,
+    /// End column of range to sort (0-based, inclusive)
+    pub end_col: u32,
+    /// Sort fields (criteria) - at least one required
+    pub fields: Vec<SortField>,
+    /// Whether sorting is case-sensitive
+    #[serde(default)]
+    pub match_case: bool,
+    /// Whether the range has a header row/column that should not be sorted
+    #[serde(default)]
+    pub has_headers: bool,
+    /// Sort orientation (rows or columns)
+    #[serde(default)]
+    pub orientation: SortOrientation,
+}
+
+/// Result of sort_range command.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SortRangeResult {
+    /// Whether the sort was successful
+    pub success: bool,
+    /// Number of rows (or columns) sorted
+    pub sorted_count: u32,
+    /// Updated cells after sorting
+    pub updated_cells: Vec<CellData>,
+    /// Error message if sort failed
+    pub error: Option<String>,
+}
+
+// ============================================================================
 // Conversion helpers: API types <--> Engine types
 // ============================================================================
 
-use engine::{CellStyle, TextAlign, VerticalAlign, NumberFormat, TextRotation};
+use engine::{CellStyle, NumberFormat, TextAlign, TextRotation, VerticalAlign};
 
 impl From<&CellStyle> for StyleData {
     fn from(style: &CellStyle) -> Self {

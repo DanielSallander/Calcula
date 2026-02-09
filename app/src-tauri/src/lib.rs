@@ -735,6 +735,8 @@ pub fn run() {
             commands::update_cell,
             commands::clear_cell,
             commands::clear_range,
+            commands::clear_range_with_options,
+            commands::sort_range,
             commands::get_grid_bounds,
             commands::get_cell_count,
             // Navigation commands

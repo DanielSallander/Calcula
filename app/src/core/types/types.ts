@@ -1341,3 +1341,155 @@ export const DEFAULT_COMMENT_AUTHOR = {
   email: "user@local",
   name: "User",
 };
+
+// ============================================================================
+// Clear Range Options (Excel-compatible)
+// ============================================================================
+
+/**
+ * Specifies what to clear from a range.
+ * Matches Excel's ClearApplyTo enum.
+ */
+export type ClearApplyTo =
+  | "all"
+  | "contents"
+  | "formats"
+  | "hyperlinks"
+  | "removeHyperlinks"
+  | "resetContents";
+
+/**
+ * Parameters for clear_range_with_options command.
+ */
+export interface ClearRangeParams {
+  startRow: number;
+  startCol: number;
+  endRow: number;
+  endCol: number;
+  applyTo?: ClearApplyTo;
+}
+
+/**
+ * Result of clear_range_with_options command.
+ */
+export interface ClearRangeResult {
+  /** Number of cells affected */
+  count: number;
+  /** Updated cells (with new display values if only formatting was cleared) */
+  updatedCells: CellData[];
+}
+
+// ============================================================================
+// Sort Range (Excel-compatible)
+// ============================================================================
+
+/**
+ * Specifies what to sort on.
+ * Matches Excel's SortOn enum.
+ */
+export type SortOn = "value" | "cellColor" | "fontColor" | "icon";
+
+/**
+ * Additional sort data options.
+ * Matches Excel's SortDataOption enum.
+ */
+export type SortDataOption = "normal" | "textAsNumber";
+
+/**
+ * Sort orientation (by rows or columns).
+ * Matches Excel's SortOrientation enum.
+ */
+export type SortOrientation = "rows" | "columns";
+
+/**
+ * A single sort field/condition.
+ * Matches Excel's SortField interface.
+ */
+export interface SortField {
+  /** Column (or row) offset from the first column (or row) being sorted (0-based). Required. */
+  key: number;
+  /** Sort direction: true for ascending (A-Z, 0-9), false for descending. Default: true */
+  ascending?: boolean;
+  /** What to sort on (value, cell color, font color, or icon). Default: "value" */
+  sortOn?: SortOn;
+  /** The color to sort by when sortOn is cellColor or fontColor (CSS color string). */
+  color?: string;
+  /** Additional data options (e.g., treat text as numbers). Default: "normal" */
+  dataOption?: SortDataOption;
+  /** For sorting rich values - the subfield/property name to sort on. */
+  subField?: string;
+}
+
+/**
+ * Parameters for sort_range command.
+ */
+export interface SortRangeParams {
+  /** Start row of range to sort (0-based) */
+  startRow: number;
+  /** Start column of range to sort (0-based) */
+  startCol: number;
+  /** End row of range to sort (0-based, inclusive) */
+  endRow: number;
+  /** End column of range to sort (0-based, inclusive) */
+  endCol: number;
+  /** Sort fields (criteria) - at least one required */
+  fields: SortField[];
+  /** Whether sorting is case-sensitive. Default: false */
+  matchCase?: boolean;
+  /** Whether the range has a header row/column that should not be sorted. Default: false */
+  hasHeaders?: boolean;
+  /** Sort orientation (rows or columns). Default: "rows" */
+  orientation?: SortOrientation;
+}
+
+/**
+ * Result of sort_range command.
+ */
+export interface SortRangeResult {
+  /** Whether the sort was successful */
+  success: boolean;
+  /** Number of rows (or columns) sorted */
+  sortedCount: number;
+  /** Updated cells after sorting */
+  updatedCells: CellData[];
+  /** Error message if sort failed */
+  error: string | null;
+}
+
+/**
+ * Helper to create a simple ascending sort field.
+ */
+export function createSortField(
+  key: number,
+  ascending: boolean = true,
+  options?: Partial<Omit<SortField, "key" | "ascending">>
+): SortField {
+  return {
+    key,
+    ascending,
+    ...options,
+  };
+}
+
+/**
+ * Helper to create sort params for a common case: single column sort.
+ */
+export function createSimpleSortParams(
+  startRow: number,
+  startCol: number,
+  endRow: number,
+  endCol: number,
+  sortColumn: number,
+  ascending: boolean = true,
+  hasHeaders: boolean = false
+): SortRangeParams {
+  return {
+    startRow,
+    startCol,
+    endRow,
+    endCol,
+    fields: [{ key: sortColumn - startCol, ascending }],
+    hasHeaders,
+    orientation: "rows",
+  };
+}
