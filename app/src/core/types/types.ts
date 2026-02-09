@@ -772,3 +772,572 @@ export interface MergeResult {
   mergedRegions: MergedRegion[];
   updatedCells: CellData[];
 }
+
+// ============================================================================
+// Named Ranges
+// ============================================================================
+
+/**
+ * A named range definition.
+ * Can be workbook-scoped (sheetIndex = null) or sheet-scoped.
+ */
+export interface NamedRange {
+  /** The name identifier (e.g., "SalesData", "TaxRate") */
+  name: string;
+  /** Sheet index for sheet-scoped names, null for workbook-scoped */
+  sheetIndex: number | null;
+  /** Start row of the range (0-indexed) */
+  startRow: number;
+  /** Start column of the range (0-indexed) */
+  startCol: number;
+  /** End row of the range (0-indexed, inclusive) */
+  endRow: number;
+  /** End column of the range (0-indexed, inclusive) */
+  endCol: number;
+  /** Optional comment/description */
+  comment?: string;
+}
+
+/**
+ * Result of a named range operation.
+ */
+export interface NamedRangeResult {
+  success: boolean;
+  namedRange: NamedRange | null;
+  error: string | null;
+}
+
+/**
+ * Resolved range coordinates for formula evaluation.
+ */
+export interface ResolvedRange {
+  sheetIndex: number;
+  startRow: number;
+  startCol: number;
+  endRow: number;
+  endCol: number;
+}
+
+// ============================================================================
+// Data Validation
+// ============================================================================
+
+/**
+ * The type of validation applied to a cell or range.
+ */
+export type DataValidationType =
+  | "none"
+  | "wholeNumber"
+  | "decimal"
+  | "list"
+  | "date"
+  | "time"
+  | "textLength"
+  | "custom";
+
+/**
+ * Comparison operators for validation rules.
+ */
+export type DataValidationOperator =
+  | "between"
+  | "notBetween"
+  | "equal"
+  | "notEqual"
+  | "greaterThan"
+  | "lessThan"
+  | "greaterThanOrEqual"
+  | "lessThanOrEqual";
+
+/**
+ * Error alert style when invalid data is entered.
+ */
+export type DataValidationAlertStyle = "stop" | "warning" | "information";
+
+/**
+ * Numeric validation rule (for WholeNumber, Decimal, TextLength).
+ */
+export interface NumericRule {
+  /** First formula/value for comparison */
+  formula1: number;
+  /** Second formula/value for comparison (used with Between/NotBetween) */
+  formula2?: number;
+  /** Comparison operator */
+  operator: DataValidationOperator;
+}
+
+/**
+ * Date validation rule.
+ */
+export interface DateRule {
+  /** First date value (as Excel serial date number) */
+  formula1: number;
+  /** Second date value (used with Between/NotBetween) */
+  formula2?: number;
+  /** Comparison operator */
+  operator: DataValidationOperator;
+}
+
+/**
+ * Time validation rule.
+ */
+export interface TimeRule {
+  /** First time value (as fraction of day, e.g., 0.5 = 12:00) */
+  formula1: number;
+  /** Second time value (used with Between/NotBetween) */
+  formula2?: number;
+  /** Comparison operator */
+  operator: DataValidationOperator;
+}
+
+/**
+ * Source of list values.
+ */
+export type ListSource =
+  | { values: string[] }
+  | {
+      range: {
+        sheetIndex?: number;
+        startRow: number;
+        startCol: number;
+        endRow: number;
+        endCol: number;
+      };
+    };
+
+/**
+ * List validation rule (dropdown).
+ */
+export interface ListRule {
+  /** Source values for the dropdown */
+  source: ListSource;
+  /** Whether to show the in-cell dropdown arrow */
+  inCellDropdown: boolean;
+}
+
+/**
+ * Custom formula validation rule.
+ */
+export interface CustomRule {
+  /** Formula that must evaluate to TRUE for valid data */
+  formula: string;
+}
+
+/**
+ * The complete validation rule (union of all rule types).
+ */
+export type DataValidationRule =
+  | { none: true }
+  | { wholeNumber: NumericRule }
+  | { decimal: NumericRule }
+  | { list: ListRule }
+  | { date: DateRule }
+  | { time: TimeRule }
+  | { textLength: NumericRule }
+  | { custom: CustomRule };
+
+/**
+ * Error alert configuration shown when invalid data is entered.
+ */
+export interface DataValidationErrorAlert {
+  /** Alert title */
+  title: string;
+  /** Alert message */
+  message: string;
+  /** Alert style (Stop, Warning, Information) */
+  style: DataValidationAlertStyle;
+  /** Whether to show the alert (default true) */
+  showAlert: boolean;
+}
+
+/**
+ * Input prompt shown when the cell is selected.
+ */
+export interface DataValidationPrompt {
+  /** Prompt title */
+  title: string;
+  /** Prompt message */
+  message: string;
+  /** Whether to show the prompt (default true) */
+  showPrompt: boolean;
+}
+
+/**
+ * Complete data validation definition for a cell or range.
+ */
+export interface DataValidation {
+  /** The validation rule */
+  rule: DataValidationRule;
+  /** Error alert configuration */
+  errorAlert: DataValidationErrorAlert;
+  /** Input prompt configuration */
+  prompt: DataValidationPrompt;
+  /** Whether to allow blank cells (default true) */
+  ignoreBlanks: boolean;
+}
+
+/**
+ * A cell range with its validation rule.
+ */
+export interface ValidationRange {
+  startRow: number;
+  startCol: number;
+  endRow: number;
+  endCol: number;
+  validation: DataValidation;
+}
+
+/**
+ * Result of a validation operation.
+ */
+export interface DataValidationResult {
+  success: boolean;
+  validation: DataValidation | null;
+  error: string | null;
+}
+
+/**
+ * Result of getting invalid cells.
+ */
+export interface InvalidCellsResult {
+  /** List of invalid cell coordinates [row, col] */
+  cells: [number, number][];
+  /** Total count of invalid cells */
+  count: number;
+}
+
+/**
+ * Result of validating a single cell value.
+ */
+export interface CellValidationResult {
+  isValid: boolean;
+  errorAlert: DataValidationErrorAlert | null;
+}
+
+/**
+ * Default error alert for data validation.
+ */
+export const DEFAULT_ERROR_ALERT: DataValidationErrorAlert = {
+  title: "",
+  message: "",
+  style: "stop",
+  showAlert: true,
+};
+
+/**
+ * Default prompt for data validation.
+ */
+export const DEFAULT_PROMPT: DataValidationPrompt = {
+  title: "",
+  message: "",
+  showPrompt: true,
+};
+
+/**
+ * Default data validation (no validation).
+ */
+export const DEFAULT_VALIDATION: DataValidation = {
+  rule: { none: true },
+  errorAlert: DEFAULT_ERROR_ALERT,
+  prompt: DEFAULT_PROMPT,
+  ignoreBlanks: true,
+};
+
+/**
+ * Helper to create a whole number validation rule.
+ */
+export function createWholeNumberRule(
+  operator: DataValidationOperator,
+  formula1: number,
+  formula2?: number
+): DataValidationRule {
+  return {
+    wholeNumber: {
+      formula1,
+      formula2,
+      operator,
+    },
+  };
+}
+
+/**
+ * Helper to create a decimal validation rule.
+ */
+export function createDecimalRule(
+  operator: DataValidationOperator,
+  formula1: number,
+  formula2?: number
+): DataValidationRule {
+  return {
+    decimal: {
+      formula1,
+      formula2,
+      operator,
+    },
+  };
+}
+
+/**
+ * Helper to create a list validation rule with literal values.
+ */
+export function createListRule(
+  values: string[],
+  inCellDropdown: boolean = true
+): DataValidationRule {
+  return {
+    list: {
+      source: { values },
+      inCellDropdown,
+    },
+  };
+}
+
+/**
+ * Helper to create a list validation rule with a range source.
+ */
+export function createListRuleFromRange(
+  startRow: number,
+  startCol: number,
+  endRow: number,
+  endCol: number,
+  sheetIndex?: number,
+  inCellDropdown: boolean = true
+): DataValidationRule {
+  return {
+    list: {
+      source: {
+        range: {
+          sheetIndex,
+          startRow,
+          startCol,
+          endRow,
+          endCol,
+        },
+      },
+      inCellDropdown,
+    },
+  };
+}
+
+/**
+ * Helper to create a text length validation rule.
+ */
+export function createTextLengthRule(
+  operator: DataValidationOperator,
+  formula1: number,
+  formula2?: number
+): DataValidationRule {
+  return {
+    textLength: {
+      formula1,
+      formula2,
+      operator,
+    },
+  };
+}
+
+/**
+ * Helper to create a custom formula validation rule.
+ */
+export function createCustomRule(formula: string): DataValidationRule {
+  return {
+    custom: {
+      formula,
+    },
+  };
+}
+
+/**
+ * Helper to create a date validation rule.
+ */
+export function createDateRule(
+  operator: DataValidationOperator,
+  formula1: number,
+  formula2?: number
+): DataValidationRule {
+  return {
+    date: {
+      formula1,
+      formula2,
+      operator,
+    },
+  };
+}
+
+/**
+ * Helper to create a time validation rule.
+ */
+export function createTimeRule(
+  operator: DataValidationOperator,
+  formula1: number,
+  formula2?: number
+): DataValidationRule {
+  return {
+    time: {
+      formula1,
+      formula2,
+      operator,
+    },
+  };
+}
+
+// ============================================================================
+// Comments / Notes
+// ============================================================================
+
+/**
+ * A mention within a comment's rich content.
+ */
+export interface CommentMention {
+  /** The email of the mentioned user */
+  email: string;
+  /** The display name of the mentioned user */
+  name: string;
+  /** Start index in the rich content string */
+  startIndex: number;
+  /** Length of the mention placeholder in the rich content */
+  length: number;
+}
+
+/**
+ * A reply to a comment thread.
+ */
+export interface CommentReply {
+  /** Unique identifier for the reply */
+  id: string;
+  /** Email of the reply author */
+  authorEmail: string;
+  /** Display name of the reply author */
+  authorName: string;
+  /** Plain text content of the reply */
+  content: string;
+  /** Rich content with mention placeholders (for parsing mentions) */
+  richContent?: string;
+  /** Mentions within this reply */
+  mentions: CommentMention[];
+  /** Creation timestamp (ISO 8601 format) */
+  createdAt: string;
+  /** Last modified timestamp (ISO 8601 format) */
+  modifiedAt?: string;
+}
+
+/**
+ * Content type of a comment or reply.
+ */
+export type CommentContentType = "plain" | "mention";
+
+/**
+ * A comment thread attached to a cell.
+ */
+export interface Comment {
+  /** Unique identifier for the comment */
+  id: string;
+  /** Row of the cell this comment is attached to (0-indexed) */
+  row: number;
+  /** Column of the cell this comment is attached to (0-indexed) */
+  col: number;
+  /** Sheet index this comment belongs to */
+  sheetIndex: number;
+  /** Email of the comment author */
+  authorEmail: string;
+  /** Display name of the comment author */
+  authorName: string;
+  /** Plain text content of the comment */
+  content: string;
+  /** Rich content with mention placeholders (for parsing mentions) */
+  richContent?: string;
+  /** Content type (plain or mention) */
+  contentType: CommentContentType;
+  /** Mentions within this comment */
+  mentions: CommentMention[];
+  /** Whether the comment thread is resolved */
+  resolved: boolean;
+  /** Replies to this comment */
+  replies: CommentReply[];
+  /** Creation timestamp (ISO 8601 format) */
+  createdAt: string;
+  /** Last modified timestamp (ISO 8601 format) */
+  modifiedAt?: string;
+}
+
+/**
+ * Result of a comment operation.
+ */
+export interface CommentResult {
+  success: boolean;
+  comment: Comment | null;
+  error: string | null;
+}
+
+/**
+ * Result of a reply operation.
+ */
+export interface ReplyResult {
+  success: boolean;
+  reply: CommentReply | null;
+  comment: Comment | null;
+  error: string | null;
+}
+
+/**
+ * Parameters for adding a comment.
+ */
+export interface AddCommentParams {
+  row: number;
+  col: number;
+  authorEmail: string;
+  authorName: string;
+  content: string;
+  richContent?: string;
+  mentions?: CommentMention[];
+}
+
+/**
+ * Parameters for updating a comment.
+ */
+export interface UpdateCommentParams {
+  commentId: string;
+  content: string;
+  richContent?: string;
+  mentions?: CommentMention[];
+}
+
+/**
+ * Parameters for adding a reply.
+ */
+export interface AddReplyParams {
+  commentId: string;
+  authorEmail: string;
+  authorName: string;
+  content: string;
+  richContent?: string;
+  mentions?: CommentMention[];
+}
+
+/**
+ * Parameters for updating a reply.
+ */
+export interface UpdateReplyParams {
+  commentId: string;
+  replyId: string;
+  content: string;
+  richContent?: string;
+  mentions?: CommentMention[];
+}
+
+/**
+ * Information about cells with comments (for indicators).
+ */
+export interface CommentIndicator {
+  row: number;
+  col: number;
+  resolved: boolean;
+  replyCount: number;
+}
+
+/**
+ * Default comment author info (can be customized per session).
+ */
+export const DEFAULT_COMMENT_AUTHOR = {
+  email: "user@local",
+  name: "User",
+};

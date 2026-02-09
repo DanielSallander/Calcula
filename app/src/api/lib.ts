@@ -81,6 +81,46 @@ export {
   unmergeCells,
   getMergedRegions,
   getMergeInfo,
+
+  // Named ranges
+  createNamedRange,
+  updateNamedRange,
+  deleteNamedRange,
+  getNamedRange,
+  getAllNamedRanges,
+  resolveNamedRange,
+  renameNamedRange,
+
+  // Data validation
+  setDataValidation,
+  clearDataValidation,
+  getDataValidation,
+  getAllDataValidations,
+  validateCell,
+  getValidationPrompt,
+  getInvalidCells,
+  getValidationListValues,
+  hasInCellDropdown,
+
+  // Comments
+  addComment,
+  updateComment,
+  deleteComment,
+  getComment,
+  getCommentById,
+  getAllComments,
+  getCommentsForSheet,
+  getCommentIndicators,
+  getCommentIndicatorsInRange,
+  resolveComment,
+  addReply,
+  updateReply,
+  deleteReply,
+  moveComment,
+  getCommentCount,
+  hasComment,
+  clearAllComments,
+  clearCommentsInRange,
 } from "../core/lib/tauri-api";
 
 // Type exports from tauri-api
@@ -97,6 +137,67 @@ export type {
   MergedRegion as TauriMergedRegion,
   MergeResult,
 } from "../core/lib/tauri-api";
+
+// Named range type exports
+export type {
+  NamedRange,
+  NamedRangeResult,
+  ResolvedRange,
+} from "../core/types";
+
+// Data validation type exports
+export type {
+  DataValidationType,
+  DataValidationOperator,
+  DataValidationAlertStyle,
+  NumericRule,
+  DateRule,
+  TimeRule,
+  ListSource,
+  ListRule,
+  CustomRule,
+  DataValidationRule,
+  DataValidationErrorAlert,
+  DataValidationPrompt,
+  DataValidation,
+  ValidationRange,
+  DataValidationResult,
+  InvalidCellsResult,
+  CellValidationResult,
+} from "../core/types";
+
+// Data validation helper exports
+export {
+  DEFAULT_ERROR_ALERT,
+  DEFAULT_PROMPT,
+  DEFAULT_VALIDATION,
+  createWholeNumberRule,
+  createDecimalRule,
+  createListRule,
+  createListRuleFromRange,
+  createTextLengthRule,
+  createCustomRule,
+  createDateRule,
+  createTimeRule,
+} from "../core/types";
+
+// Comment type exports
+export type {
+  Comment,
+  CommentReply,
+  CommentMention,
+  CommentContentType,
+  CommentResult,
+  ReplyResult,
+  CommentIndicator,
+  AddCommentParams,
+  UpdateCommentParams,
+  AddReplyParams,
+  UpdateReplyParams,
+} from "../core/types";
+
+// Comment helper exports
+export { DEFAULT_COMMENT_AUTHOR } from "../core/types";
 
 // ============================================================================
 // Pivot API - Pivot table operations

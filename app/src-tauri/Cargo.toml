@@ -25,6 +25,7 @@ pivot-engine = { path = "../../core/pivot-engine" }
 tauri-plugin-log = "2"
 log = "0.4"
 chrono = "0.4"
+uuid = { version = "1", features = ["v4"] }
 once_cell = "1.19"
 regex = "1"
 

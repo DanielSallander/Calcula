@@ -30,11 +30,27 @@ pub mod sheets;
 pub mod undo_commands;
 pub mod merge_commands;
 pub mod pivot;
+pub mod named_ranges;
+pub mod data_validation;
+pub mod comments;
 
 pub use api_types::{CellData, StyleData, DimensionData, FormattingParams, MergedRegion};
 pub use logging::{init_log_file, get_log_path, next_seq, write_log, write_log_raw};
 pub use engine::{Transaction, CellChange};
 pub use sheets::FreezeConfig;
+pub use named_ranges::{NamedRange, NamedRangeResult, ResolvedRange};
+pub use data_validation::{
+    DataValidation, DataValidationType, DataValidationOperator, DataValidationAlertStyle,
+    DataValidationRule, DataValidationErrorAlert, DataValidationPrompt,
+    ValidationRange, DataValidationResult, InvalidCellsResult, CellValidationResult,
+    NumericRule, DateRule, TimeRule, ListRule, ListSource, CustomRule,
+    ValidationStorage,
+};
+pub use comments::{
+    Comment, CommentReply, CommentMention, CommentContentType,
+    CommentResult, ReplyResult, CommentIndicator, CommentStorage,
+    AddCommentParams, UpdateCommentParams, AddReplyParams, UpdateReplyParams,
+};
 
 #[cfg(test)]
 mod tests;
@@ -97,6 +113,12 @@ pub struct AppState {
     /// Protected regions - cells in these regions cannot be edited directly.
     /// Registered by extensions (e.g., pivot tables, charts).
     pub protected_regions: Mutex<Vec<ProtectedRegion>>,
+    /// Named ranges for formula references (key is uppercase name)
+    pub named_ranges: Mutex<HashMap<String, named_ranges::NamedRange>>,
+    /// Data validation rules per sheet
+    pub data_validations: Mutex<data_validation::ValidationStorage>,
+    /// Comments per sheet: sheet_index -> (row, col) -> Comment
+    pub comments: Mutex<comments::CommentStorage>,
 }
 
 impl AppState {
@@ -147,6 +169,9 @@ pub fn create_app_state() -> AppState {
         freeze_configs: Mutex::new(vec![FreezeConfig::default()]),
         merged_regions: Mutex::new(HashSet::new()),
         protected_regions: Mutex::new(Vec::new()),
+        named_ranges: Mutex::new(HashMap::new()),
+        data_validations: Mutex::new(HashMap::new()),
+        comments: Mutex::new(HashMap::new()),
     }
 }
 
@@ -791,6 +816,43 @@ pub fn run() {
             pivot::get_pivot_at_cell,
             pivot::get_pivot_regions_for_sheet,
             pivot::get_pivot_field_unique_values,
+            // Named range commands
+            named_ranges::create_named_range,
+            named_ranges::update_named_range,
+            named_ranges::delete_named_range,
+            named_ranges::get_named_range,
+            named_ranges::get_all_named_ranges,
+            named_ranges::resolve_named_range,
+            named_ranges::rename_named_range,
+            // Data validation commands
+            data_validation::set_data_validation,
+            data_validation::clear_data_validation,
+            data_validation::get_data_validation,
+            data_validation::get_all_data_validations,
+            data_validation::validate_cell,
+            data_validation::get_validation_prompt,
+            data_validation::get_invalid_cells,
+            data_validation::get_validation_list_values,
+            data_validation::has_in_cell_dropdown,
+            // Comment commands
+            comments::add_comment,
+            comments::update_comment,
+            comments::delete_comment,
+            comments::get_comment,
+            comments::get_comment_by_id,
+            comments::get_all_comments,
+            comments::get_comments_for_sheet,
+            comments::get_comment_indicators,
+            comments::get_comment_indicators_in_range,
+            comments::resolve_comment,
+            comments::add_reply,
+            comments::update_reply,
+            comments::delete_reply,
+            comments::move_comment,
+            comments::get_comment_count,
+            comments::has_comment,
+            comments::clear_all_comments,
+            comments::clear_comments_in_range,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
