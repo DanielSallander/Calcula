@@ -307,3 +307,334 @@ export async function sortRangeByColumn<TResult>(
     { hasHeaders }
   );
 }
+
+// ============================================================================
+// AutoFilter Commands
+// ============================================================================
+
+/**
+ * What aspect of the cell to filter on.
+ */
+export type FilterOn =
+  | "values"
+  | "topItems"
+  | "topPercent"
+  | "bottomItems"
+  | "bottomPercent"
+  | "cellColor"
+  | "fontColor"
+  | "dynamic"
+  | "custom"
+  | "icon";
+
+/**
+ * Dynamic filter criteria for date and average-based filtering.
+ */
+export type DynamicFilterCriteria =
+  | "aboveAverage"
+  | "belowAverage"
+  | "today"
+  | "tomorrow"
+  | "yesterday"
+  | "thisWeek"
+  | "lastWeek"
+  | "nextWeek"
+  | "thisMonth"
+  | "lastMonth"
+  | "nextMonth"
+  | "thisQuarter"
+  | "lastQuarter"
+  | "nextQuarter"
+  | "thisYear"
+  | "lastYear"
+  | "nextYear"
+  | "yearToDate"
+  | "allDatesInPeriodJanuary"
+  | "allDatesInPeriodFebruary"
+  | "allDatesInPeriodMarch"
+  | "allDatesInPeriodApril"
+  | "allDatesInPeriodMay"
+  | "allDatesInPeriodJune"
+  | "allDatesInPeriodJuly"
+  | "allDatesInPeriodAugust"
+  | "allDatesInPeriodSeptember"
+  | "allDatesInPeriodOctober"
+  | "allDatesInPeriodNovember"
+  | "allDatesInPeriodDecember"
+  | "allDatesInPeriodQuarter1"
+  | "allDatesInPeriodQuarter2"
+  | "allDatesInPeriodQuarter3"
+  | "allDatesInPeriodQuarter4"
+  | "unknown";
+
+/**
+ * Operator for combining criterion1 and criterion2 in custom filters.
+ */
+export type FilterOperator = "and" | "or";
+
+/**
+ * Icon filter criteria.
+ */
+export interface IconFilter {
+  iconSet: string;
+  iconIndex: number;
+}
+
+/**
+ * Filter criteria for a column.
+ */
+export interface FilterCriteria {
+  criterion1?: string;
+  criterion2?: string;
+  filterOn: FilterOn;
+  dynamicCriteria?: DynamicFilterCriteria;
+  operator?: FilterOperator;
+  color?: string;
+  icon?: IconFilter;
+  values: string[];
+  filterOutBlanks: boolean;
+}
+
+/**
+ * AutoFilter info returned from the backend.
+ */
+export interface AutoFilterInfo {
+  startRow: number;
+  startCol: number;
+  endRow: number;
+  endCol: number;
+  enabled: boolean;
+  isDataFiltered: boolean;
+  criteria: (FilterCriteria | null)[];
+}
+
+/**
+ * Result of an AutoFilter operation.
+ */
+export interface AutoFilterResult {
+  success: boolean;
+  autoFilter?: AutoFilterInfo;
+  error?: string;
+  hiddenRows: number[];
+  visibleRows: number[];
+}
+
+/**
+ * Unique value with count.
+ */
+export interface UniqueValue {
+  value: string;
+  count: number;
+}
+
+/**
+ * Result of getting unique values for filtering.
+ */
+export interface UniqueValuesResult {
+  success: boolean;
+  values: UniqueValue[];
+  hasBlanks: boolean;
+  error?: string;
+}
+
+/**
+ * Apply an AutoFilter to a range.
+ * @param startRow - Start row (0-based, typically header row)
+ * @param startCol - Start column (0-based)
+ * @param endRow - End row (0-based)
+ * @param endCol - End column (0-based)
+ * @param columnIndex - Optional column to apply filter to (relative, 0-based)
+ * @param criteria - Optional filter criteria for the column
+ * @returns Result with hidden/visible rows
+ */
+export async function applyAutoFilter(
+  startRow: number,
+  startCol: number,
+  endRow: number,
+  endCol: number,
+  columnIndex?: number,
+  criteria?: Partial<FilterCriteria>
+): Promise<AutoFilterResult> {
+  return invoke<AutoFilterResult>("apply_auto_filter", {
+    params: {
+      startRow,
+      startCol,
+      endRow,
+      endCol,
+      columnIndex,
+      criteria: criteria
+        ? {
+            filterOn: criteria.filterOn ?? "values",
+            criterion1: criteria.criterion1,
+            criterion2: criteria.criterion2,
+            dynamicCriteria: criteria.dynamicCriteria,
+            operator: criteria.operator,
+            color: criteria.color,
+            icon: criteria.icon,
+            values: criteria.values ?? [],
+            filterOutBlanks: criteria.filterOutBlanks ?? false,
+          }
+        : undefined,
+    },
+  });
+}
+
+/**
+ * Clear filter criteria for a specific column.
+ * @param columnIndex - Column index (relative to AutoFilter range, 0-based)
+ * @returns Result with updated hidden/visible rows
+ */
+export async function clearColumnCriteria(
+  columnIndex: number
+): Promise<AutoFilterResult> {
+  return invoke<AutoFilterResult>("clear_column_criteria", { columnIndex });
+}
+
+/**
+ * Clear all filter criteria but keep the AutoFilter range.
+ * @returns Result with all rows now visible
+ */
+export async function clearAutoFilterCriteria(): Promise<AutoFilterResult> {
+  return invoke<AutoFilterResult>("clear_auto_filter_criteria", {});
+}
+
+/**
+ * Reapply the AutoFilter (refresh filtering with current data).
+ * @returns Result with updated hidden/visible rows
+ */
+export async function reapplyAutoFilter(): Promise<AutoFilterResult> {
+  return invoke<AutoFilterResult>("reapply_auto_filter", {});
+}
+
+/**
+ * Remove the AutoFilter from the sheet entirely.
+ * @returns Result with all rows now visible
+ */
+export async function removeAutoFilter(): Promise<AutoFilterResult> {
+  return invoke<AutoFilterResult>("remove_auto_filter", {});
+}
+
+/**
+ * Get the current AutoFilter for the active sheet.
+ * @returns AutoFilter info or null if none exists
+ */
+export async function getAutoFilter(): Promise<AutoFilterInfo | null> {
+  return invoke<AutoFilterInfo | null>("get_auto_filter", {});
+}
+
+/**
+ * Get the AutoFilter range for the active sheet.
+ * @returns Tuple [startRow, startCol, endRow, endCol] or null if no AutoFilter
+ */
+export async function getAutoFilterRange(): Promise<
+  [number, number, number, number] | null
+> {
+  return invoke<[number, number, number, number] | null>(
+    "get_auto_filter_range",
+    {}
+  );
+}
+
+/**
+ * Get all hidden (filtered) rows for the active sheet.
+ * @returns Array of hidden row indices
+ */
+export async function getHiddenRows(): Promise<number[]> {
+  return invoke<number[]>("get_hidden_rows", {});
+}
+
+/**
+ * Check if a specific row is hidden by the AutoFilter.
+ * @param row - Row index (0-based)
+ * @returns true if row is filtered/hidden
+ */
+export async function isRowFiltered(row: number): Promise<boolean> {
+  return invoke<boolean>("is_row_filtered", { row });
+}
+
+/**
+ * Get unique values for a column in the AutoFilter range.
+ * @param columnIndex - Column index (relative to AutoFilter range, 0-based)
+ * @returns Unique values with counts
+ */
+export async function getFilterUniqueValues(
+  columnIndex: number
+): Promise<UniqueValuesResult> {
+  return invoke<UniqueValuesResult>("get_filter_unique_values", { columnIndex });
+}
+
+/**
+ * Set filter criteria for a column using value selection.
+ * @param columnIndex - Column index (relative to AutoFilter range, 0-based)
+ * @param values - Values to include in filter
+ * @param includeBlanks - Whether to include blank cells
+ * @returns Result with updated hidden/visible rows
+ */
+export async function setColumnFilterValues(
+  columnIndex: number,
+  values: string[],
+  includeBlanks: boolean = false
+): Promise<AutoFilterResult> {
+  return invoke<AutoFilterResult>("set_column_filter_values", {
+    columnIndex,
+    values,
+    includeBlanks,
+  });
+}
+
+/**
+ * Set a custom filter for a column.
+ * @param columnIndex - Column index (relative to AutoFilter range, 0-based)
+ * @param criterion1 - First criterion (e.g., ">=100", "=*text*")
+ * @param criterion2 - Optional second criterion
+ * @param operator - Operator to combine criteria ("and" or "or")
+ * @returns Result with updated hidden/visible rows
+ */
+export async function setColumnCustomFilter(
+  columnIndex: number,
+  criterion1: string,
+  criterion2?: string,
+  operator?: FilterOperator
+): Promise<AutoFilterResult> {
+  return invoke<AutoFilterResult>("set_column_custom_filter", {
+    columnIndex,
+    criterion1,
+    criterion2,
+    operator,
+  });
+}
+
+/**
+ * Set a top/bottom filter for a column.
+ * @param columnIndex - Column index (relative to AutoFilter range, 0-based)
+ * @param filterOn - Filter type ("topItems", "topPercent", "bottomItems", "bottomPercent")
+ * @param value - Number of items or percentage
+ * @returns Result with updated hidden/visible rows
+ */
+export async function setColumnTopBottomFilter(
+  columnIndex: number,
+  filterOn: "topItems" | "topPercent" | "bottomItems" | "bottomPercent",
+  value: number
+): Promise<AutoFilterResult> {
+  return invoke<AutoFilterResult>("set_column_top_bottom_filter", {
+    columnIndex,
+    filterOn,
+    value,
+  });
+}
+
+/**
+ * Set a dynamic filter for a column.
+ * @param columnIndex - Column index (relative to AutoFilter range, 0-based)
+ * @param dynamicCriteria - Dynamic filter type (e.g., "aboveAverage", "today")
+ * @returns Result with updated hidden/visible rows
+ */
+export async function setColumnDynamicFilter(
+  columnIndex: number,
+  dynamicCriteria: DynamicFilterCriteria
+): Promise<AutoFilterResult> {
+  return invoke<AutoFilterResult>("set_column_dynamic_filter", {
+    columnIndex,
+    dynamicCriteria,
+  });
+}

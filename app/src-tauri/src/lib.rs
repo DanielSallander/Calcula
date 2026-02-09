@@ -33,6 +33,7 @@ pub mod pivot;
 pub mod named_ranges;
 pub mod data_validation;
 pub mod comments;
+pub mod autofilter;
 
 pub use api_types::{CellData, StyleData, DimensionData, FormattingParams, MergedRegion};
 pub use logging::{init_log_file, get_log_path, next_seq, write_log, write_log_raw};
@@ -50,6 +51,12 @@ pub use comments::{
     Comment, CommentReply, CommentMention, CommentContentType,
     CommentResult, ReplyResult, CommentIndicator, CommentStorage,
     AddCommentParams, UpdateCommentParams, AddReplyParams, UpdateReplyParams,
+};
+pub use autofilter::{
+    FilterOn, FilterOperator, FilterCriteria, DynamicFilterCriteria,
+    AutoFilter, AutoFilterInfo, AutoFilterResult, AutoFilterStorage,
+    ColumnFilter, IconFilter, UniqueValuesResult, UniqueValue,
+    ApplyAutoFilterParams,
 };
 
 #[cfg(test)]
@@ -119,6 +126,8 @@ pub struct AppState {
     pub data_validations: Mutex<data_validation::ValidationStorage>,
     /// Comments per sheet: sheet_index -> (row, col) -> Comment
     pub comments: Mutex<comments::CommentStorage>,
+    /// AutoFilters per sheet: sheet_index -> AutoFilter
+    pub auto_filters: Mutex<autofilter::AutoFilterStorage>,
 }
 
 impl AppState {
@@ -172,6 +181,7 @@ pub fn create_app_state() -> AppState {
         named_ranges: Mutex::new(HashMap::new()),
         data_validations: Mutex::new(HashMap::new()),
         comments: Mutex::new(HashMap::new()),
+        auto_filters: Mutex::new(HashMap::new()),
     }
 }
 
@@ -855,6 +865,21 @@ pub fn run() {
             comments::has_comment,
             comments::clear_all_comments,
             comments::clear_comments_in_range,
+            // AutoFilter commands
+            autofilter::apply_auto_filter,
+            autofilter::clear_column_criteria,
+            autofilter::clear_auto_filter_criteria,
+            autofilter::reapply_auto_filter,
+            autofilter::remove_auto_filter,
+            autofilter::get_auto_filter,
+            autofilter::get_auto_filter_range,
+            autofilter::get_hidden_rows,
+            autofilter::is_row_filtered,
+            autofilter::get_filter_unique_values,
+            autofilter::set_column_filter_values,
+            autofilter::set_column_custom_filter,
+            autofilter::set_column_top_bottom_filter,
+            autofilter::set_column_dynamic_filter,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

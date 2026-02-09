@@ -1493,3 +1493,260 @@ export function createSimpleSortParams(
     orientation: "rows",
   };
 }
+
+// ============================================================================
+// AutoFilter (Excel-compatible)
+// ============================================================================
+
+/**
+ * What aspect of the cell to filter on.
+ * Matches Excel's FilterOn enum.
+ */
+export type FilterOn =
+  | "values"
+  | "topItems"
+  | "topPercent"
+  | "bottomItems"
+  | "bottomPercent"
+  | "cellColor"
+  | "fontColor"
+  | "dynamic"
+  | "custom"
+  | "icon";
+
+/**
+ * Dynamic filter criteria for date and average-based filtering.
+ * Matches Excel's DynamicFilterCriteria enum.
+ */
+export type DynamicFilterCriteria =
+  | "aboveAverage"
+  | "belowAverage"
+  | "today"
+  | "tomorrow"
+  | "yesterday"
+  | "thisWeek"
+  | "lastWeek"
+  | "nextWeek"
+  | "thisMonth"
+  | "lastMonth"
+  | "nextMonth"
+  | "thisQuarter"
+  | "lastQuarter"
+  | "nextQuarter"
+  | "thisYear"
+  | "lastYear"
+  | "nextYear"
+  | "yearToDate"
+  | "allDatesInPeriodJanuary"
+  | "allDatesInPeriodFebruary"
+  | "allDatesInPeriodMarch"
+  | "allDatesInPeriodApril"
+  | "allDatesInPeriodMay"
+  | "allDatesInPeriodJune"
+  | "allDatesInPeriodJuly"
+  | "allDatesInPeriodAugust"
+  | "allDatesInPeriodSeptember"
+  | "allDatesInPeriodOctober"
+  | "allDatesInPeriodNovember"
+  | "allDatesInPeriodDecember"
+  | "allDatesInPeriodQuarter1"
+  | "allDatesInPeriodQuarter2"
+  | "allDatesInPeriodQuarter3"
+  | "allDatesInPeriodQuarter4"
+  | "unknown";
+
+/**
+ * Operator for combining criterion1 and criterion2 in custom filters.
+ * Matches Excel's FilterOperator enum.
+ */
+export type FilterOperator = "and" | "or";
+
+/**
+ * Icon filter criteria for conditional formatting icons.
+ */
+export interface IconFilter {
+  /** The icon set name (e.g., "3Arrows", "4TrafficLights") */
+  iconSet: string;
+  /** The icon index within the set (0-based) */
+  iconIndex: number;
+}
+
+/**
+ * Filter criteria for a single column.
+ * Matches Excel's FilterCriteria interface.
+ */
+export interface FilterCriteria {
+  /** First criterion value (string for values, number for top/bottom items/percent) */
+  criterion1?: string;
+  /** Second criterion value (used with custom filters when operator is specified) */
+  criterion2?: string;
+  /** What aspect of the cell to filter on */
+  filterOn: FilterOn;
+  /** Dynamic filter criteria (when filterOn is "dynamic") */
+  dynamicCriteria?: DynamicFilterCriteria;
+  /** Operator for combining criterion1 and criterion2 (for custom filters) */
+  operator?: FilterOperator;
+  /** Color to filter by (CSS color string, when filterOn is "cellColor" or "fontColor") */
+  color?: string;
+  /** Icon to filter by (when filterOn is "icon") */
+  icon?: IconFilter;
+  /** Specific values to filter (when filterOn is "values") */
+  values: string[];
+  /** Whether to filter out blank cells */
+  filterOutBlanks: boolean;
+}
+
+/**
+ * AutoFilter info returned from the backend.
+ */
+export interface AutoFilterInfo {
+  /** Start row of the AutoFilter range (0-based, typically header row) */
+  startRow: number;
+  /** Start column of the AutoFilter range (0-based) */
+  startCol: number;
+  /** End row of the AutoFilter range (0-based) */
+  endRow: number;
+  /** End column of the AutoFilter range (0-based) */
+  endCol: number;
+  /** Whether the AutoFilter is enabled (showing filter dropdowns) */
+  enabled: boolean;
+  /** Whether the AutoFilter has any active filter criteria */
+  isDataFiltered: boolean;
+  /** Filter criteria array (indexed by column, null if no filter) */
+  criteria: (FilterCriteria | null)[];
+}
+
+/**
+ * Result of an AutoFilter operation.
+ */
+export interface AutoFilterResult {
+  success: boolean;
+  autoFilter?: AutoFilterInfo;
+  error?: string;
+  /** Rows that are now hidden (filtered out) */
+  hiddenRows: number[];
+  /** Rows that are now visible */
+  visibleRows: number[];
+}
+
+/**
+ * A unique value in a column with its count.
+ */
+export interface UniqueValue {
+  value: string;
+  count: number;
+}
+
+/**
+ * Result of getting unique values for filtering.
+ */
+export interface UniqueValuesResult {
+  success: boolean;
+  values: UniqueValue[];
+  hasBlanks: boolean;
+  error?: string;
+}
+
+/**
+ * Default filter criteria (no filter).
+ */
+export const DEFAULT_FILTER_CRITERIA: FilterCriteria = {
+  filterOn: "values",
+  values: [],
+  filterOutBlanks: false,
+};
+
+/**
+ * Helper to create a values filter criteria.
+ */
+export function createValuesFilter(
+  values: string[],
+  includeBlanks: boolean = true
+): FilterCriteria {
+  const filterValues = includeBlanks ? [...values, "(Blanks)"] : values;
+  return {
+    filterOn: "values",
+    values: filterValues,
+    filterOutBlanks: !includeBlanks,
+  };
+}
+
+/**
+ * Helper to create a top N items filter.
+ */
+export function createTopItemsFilter(count: number): FilterCriteria {
+  return {
+    filterOn: "topItems",
+    criterion1: count.toString(),
+    values: [],
+    filterOutBlanks: false,
+  };
+}
+
+/**
+ * Helper to create a top N percent filter.
+ */
+export function createTopPercentFilter(percent: number): FilterCriteria {
+  return {
+    filterOn: "topPercent",
+    criterion1: percent.toString(),
+    values: [],
+    filterOutBlanks: false,
+  };
+}
+
+/**
+ * Helper to create a bottom N items filter.
+ */
+export function createBottomItemsFilter(count: number): FilterCriteria {
+  return {
+    filterOn: "bottomItems",
+    criterion1: count.toString(),
+    values: [],
+    filterOutBlanks: false,
+  };
+}
+
+/**
+ * Helper to create a bottom N percent filter.
+ */
+export function createBottomPercentFilter(percent: number): FilterCriteria {
+  return {
+    filterOn: "bottomPercent",
+    criterion1: percent.toString(),
+    values: [],
+    filterOutBlanks: false,
+  };
+}
+
+/**
+ * Helper to create a custom filter with one or two criteria.
+ */
+export function createCustomFilter(
+  criterion1: string,
+  criterion2?: string,
+  operator: FilterOperator = "and"
+): FilterCriteria {
+  return {
+    filterOn: "custom",
+    criterion1,
+    criterion2,
+    operator,
+    values: [],
+    filterOutBlanks: false,
+  };
+}
+
+/**
+ * Helper to create a dynamic filter (e.g., above average).
+ */
+export function createDynamicFilter(
+  dynamicCriteria: DynamicFilterCriteria
+): FilterCriteria {
+  return {
+    filterOn: "dynamic",
+    dynamicCriteria,
+    values: [],
+    filterOutBlanks: false,
+  };
+}
