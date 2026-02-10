@@ -4,6 +4,3 @@ C:\Dropbox\Projekt\Calcula\core\setup-rust-env.ps1
 python context_manager.py build --files 
 
 python context_manager.py scan
-
-python extract_context.py summarized
-python extract_context.py full

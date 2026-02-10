@@ -279,6 +279,24 @@ impl CellStyle {
         self.text_rotation = rotation;
         self
     }
+
+    /// Create a style with a specific vertical alignment.
+    pub fn with_vertical_align(mut self, align: VerticalAlign) -> Self {
+        self.vertical_align = align;
+        self
+    }
+
+    /// Create a style with underline text.
+    pub fn with_underline(mut self, underline: bool) -> Self {
+        self.font.underline = underline;
+        self
+    }
+
+    /// Create a style with strikethrough text.
+    pub fn with_strikethrough(mut self, strikethrough: bool) -> Self {
+        self.font.strikethrough = strikethrough;
+        self
+    }
 }
 
 /// The StyleRegistry implements the Flyweight Pattern.

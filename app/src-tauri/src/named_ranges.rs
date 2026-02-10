@@ -89,36 +89,58 @@ impl NamedRange {
     }
 
     /// Check if a string looks like a cell reference (e.g., A1, BC123).
+    /// Valid Excel columns are A-XFD (1-16384) and rows are 1-1048576.
     fn looks_like_cell_reference(s: &str) -> bool {
         let upper = s.to_uppercase();
-        let mut chars = upper.chars().peekable();
+        let bytes = upper.as_bytes();
 
-        // Must start with letters
-        let mut has_letters = false;
-        while let Some(&c) = chars.peek() {
-            if c.is_ascii_uppercase() {
-                has_letters = true;
-                chars.next();
+        // Find where letters end and digits begin
+        let mut letter_end = 0;
+        for (i, &b) in bytes.iter().enumerate() {
+            if b.is_ascii_uppercase() {
+                letter_end = i + 1;
             } else {
                 break;
             }
         }
 
-        if !has_letters {
+        // Must have at least one letter
+        if letter_end == 0 {
             return false;
         }
 
-        // Must end with digits
-        let mut has_digits = false;
-        for c in chars {
-            if c.is_ascii_digit() {
-                has_digits = true;
-            } else {
+        // Must have at least one digit after the letters
+        if letter_end >= bytes.len() {
+            return false;
+        }
+
+        // All remaining characters must be digits
+        for &b in &bytes[letter_end..] {
+            if !b.is_ascii_digit() {
                 return false;
             }
         }
 
-        has_digits
+        // Convert column letters to column number (A=1, B=2, ..., Z=26, AA=27, etc.)
+        let col_str = &upper[..letter_end];
+        let mut col_num: u32 = 0;
+        for c in col_str.chars() {
+            col_num = col_num * 26 + (c as u32 - 'A' as u32 + 1);
+        }
+
+        // Excel max column is XFD = 16384
+        if col_num > 16384 {
+            return false;
+        }
+
+        // Parse the row number
+        let row_str = &upper[letter_end..];
+        if let Ok(row_num) = row_str.parse::<u32>() {
+            // Row must be between 1 and 1048576
+            row_num >= 1 && row_num <= 1048576
+        } else {
+            false
+        }
     }
 }
 

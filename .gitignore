@@ -16,6 +16,8 @@
 # ----------------------------------------------------------------------
 # Dependencies
 node_modules/
+context_manager/
+general_stuff/
 
 # Production Build Output (commonly dist or build)
 dist/

@@ -1,7 +1,7 @@
 //! FILENAME: app/src-tauri/src/tests.rs
 #[cfg(test)]
 use super::*;
-use crate::pivot_commands::{
+use crate::pivot::utils::{
     col_index_to_letter, parse_cell_ref, parse_range, strip_sheet_prefix,
 };
 use engine::{Cell, CellError, CellStyle, CellValue, Grid, NumberFormat};
