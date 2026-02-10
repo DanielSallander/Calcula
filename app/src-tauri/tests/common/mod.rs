@@ -2,14 +2,10 @@
 //! Test harness and fixtures for Calcula backend integration tests.
 
 use app_lib::{
-    create_app_state, AppState, CellData, StyleData, MergedRegion,
-    NamedRange, DataValidation, DataValidationType, DataValidationOperator,
-    DataValidationAlertStyle, DataValidationRule, NumericRule,
-    Comment, AddCommentParams, ApplyAutoFilterParams,
+    create_app_state, AppState, CellData, MergedRegion,
+    NamedRange,
 };
-use engine::{Cell, CellValue, CellStyle, Grid, StyleRegistry, NumberFormat};
-use std::collections::{HashMap, HashSet};
-use std::sync::Mutex;
+use engine::{Cell, CellValue, Grid};
 
 /// Test harness for creating and managing test state.
 pub struct TestHarness {

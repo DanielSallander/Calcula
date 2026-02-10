@@ -4,13 +4,12 @@
 mod common;
 
 use app_lib::{
-    DataValidation, DataValidationType, DataValidationOperator,
+    DataValidation, DataValidationOperator,
     DataValidationAlertStyle, DataValidationRule, NumericRule,
-    ValidationRange, ValidationStorage, DataValidationErrorAlert,
+    ValidationRange, DataValidationErrorAlert,
     DataValidationPrompt,
 };
 use common::TestHarness;
-use std::collections::HashMap;
 
 // ============================================================================
 // HELPER FUNCTIONS

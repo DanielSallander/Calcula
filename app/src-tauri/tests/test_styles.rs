@@ -3,7 +3,7 @@
 
 mod common;
 
-use app_lib::{format_cell_value, StyleData};
+use app_lib::format_cell_value;
 use common::TestHarness;
 use engine::{Cell, CellStyle, CellValue, Color, NumberFormat, TextAlign, VerticalAlign};
 

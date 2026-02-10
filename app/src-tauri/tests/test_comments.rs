@@ -3,7 +3,7 @@
 
 mod common;
 
-use app_lib::{Comment, CommentReply, CommentStorage, CommentContentType};
+use app_lib::{Comment, CommentReply, CommentContentType};
 use common::TestHarness;
 use std::collections::HashMap;
 

@@ -4,12 +4,11 @@
 mod common;
 
 use app_lib::{
-    AutoFilter, AutoFilterStorage, FilterCriteria, FilterOn, FilterOperator,
+    AutoFilter, FilterCriteria, FilterOn, FilterOperator,
     DynamicFilterCriteria, ColumnFilter,
 };
 use common::{TestHarness, SalesFixture};
 use engine::Cell;
-use std::collections::{HashMap, HashSet};
 
 // ============================================================================
 // HELPER FUNCTIONS
