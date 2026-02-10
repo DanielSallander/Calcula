@@ -638,3 +638,1603 @@ export async function setColumnDynamicFilter(
     dynamicCriteria,
   });
 }
+
+// ============================================================================
+// Hyperlink Commands
+// ============================================================================
+
+/**
+ * The type of hyperlink target.
+ */
+export type HyperlinkType = "url" | "file" | "internalReference" | "email";
+
+/**
+ * Internal reference details for sheet/cell navigation.
+ */
+export interface InternalReference {
+  sheetName?: string;
+  cellReference: string;
+}
+
+/**
+ * A hyperlink attached to a cell.
+ */
+export interface Hyperlink {
+  row: number;
+  col: number;
+  sheetIndex: number;
+  linkType: HyperlinkType;
+  target: string;
+  internalRef?: InternalReference;
+  displayText?: string;
+  tooltip?: string;
+}
+
+/**
+ * Result of a hyperlink operation.
+ */
+export interface HyperlinkResult {
+  success: boolean;
+  hyperlink?: Hyperlink;
+  error?: string;
+}
+
+/**
+ * Indicator for cells with hyperlinks (for rendering).
+ */
+export interface HyperlinkIndicator {
+  row: number;
+  col: number;
+  linkType: HyperlinkType;
+  tooltip?: string;
+}
+
+/**
+ * Parameters for adding a hyperlink.
+ */
+export interface AddHyperlinkParams {
+  row: number;
+  col: number;
+  linkType: HyperlinkType;
+  target: string;
+  displayText?: string;
+  tooltip?: string;
+  sheetName?: string;
+  cellReference?: string;
+  emailSubject?: string;
+}
+
+/**
+ * Parameters for updating a hyperlink.
+ */
+export interface UpdateHyperlinkParams {
+  row: number;
+  col: number;
+  target?: string;
+  displayText?: string;
+  tooltip?: string;
+}
+
+/**
+ * Add a hyperlink to a cell.
+ * @param params - Hyperlink parameters
+ * @returns Result with the created hyperlink
+ */
+export async function addHyperlink(
+  params: AddHyperlinkParams
+): Promise<HyperlinkResult> {
+  return invoke<HyperlinkResult>("add_hyperlink", { params });
+}
+
+/**
+ * Update an existing hyperlink.
+ * @param params - Update parameters
+ * @returns Result with the updated hyperlink
+ */
+export async function updateHyperlink(
+  params: UpdateHyperlinkParams
+): Promise<HyperlinkResult> {
+  return invoke<HyperlinkResult>("update_hyperlink", { params });
+}
+
+/**
+ * Remove a hyperlink from a cell.
+ * @param row - Row index (0-based)
+ * @param col - Column index (0-based)
+ * @returns Result with the removed hyperlink
+ */
+export async function removeHyperlink(
+  row: number,
+  col: number
+): Promise<HyperlinkResult> {
+  return invoke<HyperlinkResult>("remove_hyperlink", { row, col });
+}
+
+/**
+ * Get hyperlink at a specific cell.
+ * @param row - Row index (0-based)
+ * @param col - Column index (0-based)
+ * @returns The hyperlink or null if none exists
+ */
+export async function getHyperlink(
+  row: number,
+  col: number
+): Promise<Hyperlink | null> {
+  return invoke<Hyperlink | null>("get_hyperlink", { row, col });
+}
+
+/**
+ * Get all hyperlinks in the current sheet.
+ * @returns Array of hyperlinks
+ */
+export async function getAllHyperlinks(): Promise<Hyperlink[]> {
+  return invoke<Hyperlink[]>("get_all_hyperlinks", {});
+}
+
+/**
+ * Get hyperlink indicators for rendering.
+ * @returns Array of indicators showing which cells have hyperlinks
+ */
+export async function getHyperlinkIndicators(): Promise<HyperlinkIndicator[]> {
+  return invoke<HyperlinkIndicator[]>("get_hyperlink_indicators", {});
+}
+
+/**
+ * Get hyperlinks within a specific range.
+ * @param startRow - Start row (0-based)
+ * @param startCol - Start column (0-based)
+ * @param endRow - End row (0-based)
+ * @param endCol - End column (0-based)
+ * @returns Array of hyperlink indicators in the range
+ */
+export async function getHyperlinksInRange(
+  startRow: number,
+  startCol: number,
+  endRow: number,
+  endCol: number
+): Promise<HyperlinkIndicator[]> {
+  return invoke<HyperlinkIndicator[]>("get_hyperlinks_in_range", {
+    startRow,
+    startCol,
+    endRow,
+    endCol,
+  });
+}
+
+/**
+ * Check if a cell has a hyperlink.
+ * @param row - Row index (0-based)
+ * @param col - Column index (0-based)
+ * @returns true if the cell has a hyperlink
+ */
+export async function hasHyperlink(row: number, col: number): Promise<boolean> {
+  return invoke<boolean>("has_hyperlink", { row, col });
+}
+
+/**
+ * Clear all hyperlinks in a range.
+ * @param startRow - Start row (0-based)
+ * @param startCol - Start column (0-based)
+ * @param endRow - End row (0-based)
+ * @param endCol - End column (0-based)
+ * @returns Number of hyperlinks removed
+ */
+export async function clearHyperlinksInRange(
+  startRow: number,
+  startCol: number,
+  endRow: number,
+  endCol: number
+): Promise<number> {
+  return invoke<number>("clear_hyperlinks_in_range", {
+    startRow,
+    startCol,
+    endRow,
+    endCol,
+  });
+}
+
+/**
+ * Move a hyperlink from one cell to another.
+ * @param fromRow - Source row (0-based)
+ * @param fromCol - Source column (0-based)
+ * @param toRow - Destination row (0-based)
+ * @param toCol - Destination column (0-based)
+ * @returns Result with the moved hyperlink
+ */
+export async function moveHyperlink(
+  fromRow: number,
+  fromCol: number,
+  toRow: number,
+  toCol: number
+): Promise<HyperlinkResult> {
+  return invoke<HyperlinkResult>("move_hyperlink", {
+    fromRow,
+    fromCol,
+    toRow,
+    toCol,
+  });
+}
+
+// ============================================================================
+// Protection Commands
+// ============================================================================
+
+/**
+ * Sheet protection options - what users can do when sheet is protected.
+ */
+export interface SheetProtectionOptions {
+  allowSelectLockedCells: boolean;
+  allowSelectUnlockedCells: boolean;
+  allowFormatCells: boolean;
+  allowFormatColumns: boolean;
+  allowFormatRows: boolean;
+  allowInsertColumns: boolean;
+  allowInsertRows: boolean;
+  allowInsertHyperlinks: boolean;
+  allowDeleteColumns: boolean;
+  allowDeleteRows: boolean;
+  allowSort: boolean;
+  allowAutoFilter: boolean;
+  allowPivotTables: boolean;
+  allowEditObjects: boolean;
+  allowEditScenarios: boolean;
+}
+
+/**
+ * Default protection options.
+ */
+export const DEFAULT_PROTECTION_OPTIONS: SheetProtectionOptions = {
+  allowSelectLockedCells: true,
+  allowSelectUnlockedCells: true,
+  allowFormatCells: false,
+  allowFormatColumns: false,
+  allowFormatRows: false,
+  allowInsertColumns: false,
+  allowInsertRows: false,
+  allowInsertHyperlinks: false,
+  allowDeleteColumns: false,
+  allowDeleteRows: false,
+  allowSort: false,
+  allowAutoFilter: false,
+  allowPivotTables: false,
+  allowEditObjects: false,
+  allowEditScenarios: false,
+};
+
+/**
+ * A range that can be edited even when the sheet is protected.
+ */
+export interface AllowEditRange {
+  title: string;
+  startRow: number;
+  startCol: number;
+  endRow: number;
+  endCol: number;
+  passwordHash?: string;
+  passwordSalt?: string;
+}
+
+/**
+ * Sheet-level protection settings.
+ */
+export interface SheetProtection {
+  protected: boolean;
+  passwordHash?: string;
+  passwordSalt?: string;
+  options: SheetProtectionOptions;
+  allowEditRanges: AllowEditRange[];
+}
+
+/**
+ * Cell-level protection properties.
+ */
+export interface CellProtection {
+  locked: boolean;
+  formulaHidden: boolean;
+}
+
+/**
+ * Default cell protection (locked, formula visible).
+ */
+export const DEFAULT_CELL_PROTECTION: CellProtection = {
+  locked: true,
+  formulaHidden: false,
+};
+
+/**
+ * Result of a protection operation.
+ */
+export interface ProtectionResult {
+  success: boolean;
+  protection?: SheetProtection;
+  error?: string;
+}
+
+/**
+ * Result of checking if an action can be performed.
+ */
+export interface ProtectionCheckResult {
+  canEdit: boolean;
+  reason?: string;
+}
+
+/**
+ * Protection status summary.
+ */
+export interface ProtectionStatus {
+  isProtected: boolean;
+  hasPassword: boolean;
+  options: SheetProtectionOptions;
+  allowEditRangeCount: number;
+}
+
+/**
+ * Parameters for protecting a sheet.
+ */
+export interface ProtectSheetParams {
+  password?: string;
+  options?: SheetProtectionOptions;
+}
+
+/**
+ * Parameters for adding an allow-edit range.
+ */
+export interface AddAllowEditRangeParams {
+  title: string;
+  startRow: number;
+  startCol: number;
+  endRow: number;
+  endCol: number;
+  password?: string;
+}
+
+/**
+ * Parameters for setting cell protection.
+ */
+export interface SetCellProtectionParams {
+  startRow: number;
+  startCol: number;
+  endRow: number;
+  endCol: number;
+  locked?: boolean;
+  formulaHidden?: boolean;
+}
+
+/**
+ * Protect the current sheet.
+ * @param params - Protection parameters
+ * @returns Result with the protection settings
+ */
+export async function protectSheet(
+  params: ProtectSheetParams = {}
+): Promise<ProtectionResult> {
+  return invoke<ProtectionResult>("protect_sheet", { params });
+}
+
+/**
+ * Unprotect the current sheet.
+ * @param password - Password if the sheet is password-protected
+ * @returns Result with the updated protection settings
+ */
+export async function unprotectSheet(
+  password?: string
+): Promise<ProtectionResult> {
+  return invoke<ProtectionResult>("unprotect_sheet", { password });
+}
+
+/**
+ * Update protection options for the current sheet.
+ * @param options - New protection options
+ * @returns Result with the updated protection settings
+ */
+export async function updateProtectionOptions(
+  options: SheetProtectionOptions
+): Promise<ProtectionResult> {
+  return invoke<ProtectionResult>("update_protection_options", { options });
+}
+
+/**
+ * Add an allow-edit range to the current sheet.
+ * @param params - Range parameters
+ * @returns Result with the updated protection settings
+ */
+export async function addAllowEditRange(
+  params: AddAllowEditRangeParams
+): Promise<ProtectionResult> {
+  return invoke<ProtectionResult>("add_allow_edit_range", { params });
+}
+
+/**
+ * Remove an allow-edit range by title.
+ * @param title - Title of the range to remove
+ * @returns Result with the updated protection settings
+ */
+export async function removeAllowEditRange(
+  title: string
+): Promise<ProtectionResult> {
+  return invoke<ProtectionResult>("remove_allow_edit_range", { title });
+}
+
+/**
+ * Get all allow-edit ranges for the current sheet.
+ * @returns Array of allow-edit ranges
+ */
+export async function getAllowEditRanges(): Promise<AllowEditRange[]> {
+  return invoke<AllowEditRange[]>("get_allow_edit_ranges", {});
+}
+
+/**
+ * Get protection status for the current sheet.
+ * @returns Protection status summary
+ */
+export async function getProtectionStatus(): Promise<ProtectionStatus> {
+  return invoke<ProtectionStatus>("get_protection_status", {});
+}
+
+/**
+ * Check if the current sheet is protected.
+ * @returns true if the sheet is protected
+ */
+export async function isSheetProtected(): Promise<boolean> {
+  return invoke<boolean>("is_sheet_protected", {});
+}
+
+/**
+ * Check if a specific cell can be edited.
+ * @param row - Row index (0-based)
+ * @param col - Column index (0-based)
+ * @returns Check result with reason if blocked
+ */
+export async function canEditCell(
+  row: number,
+  col: number
+): Promise<ProtectionCheckResult> {
+  return invoke<ProtectionCheckResult>("can_edit_cell", { row, col });
+}
+
+/**
+ * Check if a specific action can be performed.
+ * @param action - Action name (e.g., "formatCells", "insertRows")
+ * @returns Check result with reason if blocked
+ */
+export async function canPerformAction(
+  action: string
+): Promise<ProtectionCheckResult> {
+  return invoke<ProtectionCheckResult>("can_perform_action", { action });
+}
+
+/**
+ * Set cell protection for a range.
+ * @param params - Cell protection parameters
+ * @returns Result
+ */
+export async function setCellProtection(
+  params: SetCellProtectionParams
+): Promise<ProtectionResult> {
+  return invoke<ProtectionResult>("set_cell_protection", { params });
+}
+
+/**
+ * Get cell protection for a specific cell.
+ * @param row - Row index (0-based)
+ * @param col - Column index (0-based)
+ * @returns Cell protection settings
+ */
+export async function getCellProtection(
+  row: number,
+  col: number
+): Promise<CellProtection> {
+  return invoke<CellProtection>("get_cell_protection", { row, col });
+}
+
+/**
+ * Verify password for an allow-edit range.
+ * @param title - Range title
+ * @param password - Password to verify
+ * @returns true if password is correct
+ */
+export async function verifyEditRangePassword(
+  title: string,
+  password: string
+): Promise<boolean> {
+  return invoke<boolean>("verify_edit_range_password", { title, password });
+}
+
+// ============================================================================
+// Grouping (Outline) Commands
+// ============================================================================
+
+/**
+ * Maximum outline level (Excel limit is 8).
+ */
+export const MAX_OUTLINE_LEVEL = 8;
+
+/**
+ * Position of summary row/column relative to detail.
+ */
+export type SummaryPosition = "belowRight" | "aboveLeft";
+
+/**
+ * Outline settings for a sheet.
+ */
+export interface OutlineSettings {
+  summaryRowPosition: SummaryPosition;
+  summaryColPosition: SummaryPosition;
+  showOutlineSymbols: boolean;
+  autoStyles: boolean;
+}
+
+/**
+ * Default outline settings.
+ */
+export const DEFAULT_OUTLINE_SETTINGS: OutlineSettings = {
+  summaryRowPosition: "belowRight",
+  summaryColPosition: "belowRight",
+  showOutlineSymbols: true,
+  autoStyles: false,
+};
+
+/**
+ * A row group (horizontal outline).
+ */
+export interface RowGroup {
+  startRow: number;
+  endRow: number;
+  level: number;
+  collapsed: boolean;
+}
+
+/**
+ * A column group (vertical outline).
+ */
+export interface ColumnGroup {
+  startCol: number;
+  endCol: number;
+  level: number;
+  collapsed: boolean;
+}
+
+/**
+ * Complete outline data for a sheet.
+ */
+export interface SheetOutline {
+  rowGroups: RowGroup[];
+  columnGroups: ColumnGroup[];
+  settings: OutlineSettings;
+  maxRowLevel: number;
+  maxColLevel: number;
+}
+
+/**
+ * Result of a grouping operation.
+ */
+export interface GroupResult {
+  success: boolean;
+  outline?: SheetOutline;
+  error?: string;
+  hiddenRowsChanged: number[];
+  hiddenColsChanged: number[];
+}
+
+/**
+ * Row outline symbol for rendering.
+ */
+export interface RowOutlineSymbol {
+  row: number;
+  level: number;
+  isCollapsed: boolean;
+  isButtonRow: boolean;
+  isHidden: boolean;
+}
+
+/**
+ * Column outline symbol for rendering.
+ */
+export interface ColOutlineSymbol {
+  col: number;
+  level: number;
+  isCollapsed: boolean;
+  isButtonCol: boolean;
+  isHidden: boolean;
+}
+
+/**
+ * Complete outline info for a viewport.
+ */
+export interface OutlineInfo {
+  rowSymbols: RowOutlineSymbol[];
+  colSymbols: ColOutlineSymbol[];
+  maxRowLevel: number;
+  maxColLevel: number;
+  settings: OutlineSettings;
+}
+
+/**
+ * Parameters for grouping rows.
+ */
+export interface GroupRowsParams {
+  startRow: number;
+  endRow: number;
+}
+
+/**
+ * Parameters for grouping columns.
+ */
+export interface GroupColumnsParams {
+  startCol: number;
+  endCol: number;
+}
+
+/**
+ * Group rows (create or increment outline level).
+ * @param params - Row range parameters
+ * @returns Result with the updated outline
+ */
+export async function groupRows(params: GroupRowsParams): Promise<GroupResult> {
+  return invoke<GroupResult>("group_rows", { params });
+}
+
+/**
+ * Ungroup rows (remove or decrement outline level).
+ * @param startRow - Start row (0-based)
+ * @param endRow - End row (0-based)
+ * @returns Result with the updated outline
+ */
+export async function ungroupRows(
+  startRow: number,
+  endRow: number
+): Promise<GroupResult> {
+  return invoke<GroupResult>("ungroup_rows", { startRow, endRow });
+}
+
+/**
+ * Group columns (create or increment outline level).
+ * @param params - Column range parameters
+ * @returns Result with the updated outline
+ */
+export async function groupColumns(
+  params: GroupColumnsParams
+): Promise<GroupResult> {
+  return invoke<GroupResult>("group_columns", { params });
+}
+
+/**
+ * Ungroup columns (remove or decrement outline level).
+ * @param startCol - Start column (0-based)
+ * @param endCol - End column (0-based)
+ * @returns Result with the updated outline
+ */
+export async function ungroupColumns(
+  startCol: number,
+  endCol: number
+): Promise<GroupResult> {
+  return invoke<GroupResult>("ungroup_columns", { startCol, endCol });
+}
+
+/**
+ * Collapse a row group.
+ * @param row - Row within the group to collapse
+ * @returns Result with hidden rows
+ */
+export async function collapseRowGroup(row: number): Promise<GroupResult> {
+  return invoke<GroupResult>("collapse_row_group", { row });
+}
+
+/**
+ * Expand a row group.
+ * @param row - Row within the group to expand
+ * @returns Result with visible rows
+ */
+export async function expandRowGroup(row: number): Promise<GroupResult> {
+  return invoke<GroupResult>("expand_row_group", { row });
+}
+
+/**
+ * Collapse a column group.
+ * @param col - Column within the group to collapse
+ * @returns Result with hidden columns
+ */
+export async function collapseColumnGroup(col: number): Promise<GroupResult> {
+  return invoke<GroupResult>("collapse_column_group", { col });
+}
+
+/**
+ * Expand a column group.
+ * @param col - Column within the group to expand
+ * @returns Result with visible columns
+ */
+export async function expandColumnGroup(col: number): Promise<GroupResult> {
+  return invoke<GroupResult>("expand_column_group", { col });
+}
+
+/**
+ * Show/hide rows and columns up to a specific outline level.
+ * @param rowLevel - Row level to show (undefined = don't change)
+ * @param colLevel - Column level to show (undefined = don't change)
+ * @returns Result with hidden rows/columns changes
+ */
+export async function showOutlineLevel(
+  rowLevel?: number,
+  colLevel?: number
+): Promise<GroupResult> {
+  return invoke<GroupResult>("show_outline_level", { rowLevel, colLevel });
+}
+
+/**
+ * Get outline info for a viewport.
+ * @param startRow - Start row
+ * @param endRow - End row
+ * @param startCol - Start column
+ * @param endCol - End column
+ * @returns Outline info for the viewport
+ */
+export async function getOutlineInfo(
+  startRow: number,
+  endRow: number,
+  startCol: number,
+  endCol: number
+): Promise<OutlineInfo> {
+  return invoke<OutlineInfo>("get_outline_info", {
+    startRow,
+    endRow,
+    startCol,
+    endCol,
+  });
+}
+
+/**
+ * Get outline settings for the current sheet.
+ * @returns Outline settings
+ */
+export async function getOutlineSettings(): Promise<OutlineSettings> {
+  return invoke<OutlineSettings>("get_outline_settings", {});
+}
+
+/**
+ * Set outline settings for the current sheet.
+ * @param settings - New outline settings
+ * @returns Result with the updated outline
+ */
+export async function setOutlineSettings(
+  settings: OutlineSettings
+): Promise<GroupResult> {
+  return invoke<GroupResult>("set_outline_settings", { settings });
+}
+
+/**
+ * Clear all outline/grouping for the current sheet.
+ * @returns Result with previously hidden rows/columns
+ */
+export async function clearOutline(): Promise<GroupResult> {
+  return invoke<GroupResult>("clear_outline", {});
+}
+
+/**
+ * Check if a row is hidden due to grouping.
+ * @param row - Row index (0-based)
+ * @returns true if row is hidden
+ */
+export async function isRowHiddenByGroup(row: number): Promise<boolean> {
+  return invoke<boolean>("is_row_hidden_by_group", { row });
+}
+
+/**
+ * Check if a column is hidden due to grouping.
+ * @param col - Column index (0-based)
+ * @returns true if column is hidden
+ */
+export async function isColHiddenByGroup(col: number): Promise<boolean> {
+  return invoke<boolean>("is_col_hidden_by_group", { col });
+}
+
+/**
+ * Get all hidden rows due to grouping.
+ * @returns Array of hidden row indices
+ */
+export async function getHiddenRowsByGroup(): Promise<number[]> {
+  return invoke<number[]>("get_hidden_rows_by_group", {});
+}
+
+/**
+ * Get all hidden columns due to grouping.
+ * @returns Array of hidden column indices
+ */
+export async function getHiddenColsByGroup(): Promise<number[]> {
+  return invoke<number[]>("get_hidden_cols_by_group", {});
+}
+
+// ============================================================================
+// Conditional Formatting Commands
+// ============================================================================
+
+/**
+ * How to interpret the value for color scales, data bars, icon sets.
+ */
+export type CFValueType =
+  | "number"
+  | "percent"
+  | "formula"
+  | "percentile"
+  | "min"
+  | "max"
+  | "autoMin"
+  | "autoMax";
+
+/**
+ * A point in a color scale.
+ */
+export interface ColorScalePoint {
+  valueType: CFValueType;
+  value?: number;
+  formula?: string;
+  color: string;
+}
+
+/**
+ * Color scale rule (2 or 3 color).
+ */
+export interface ColorScaleRule {
+  type: "colorScale";
+  minPoint: ColorScalePoint;
+  midPoint?: ColorScalePoint;
+  maxPoint: ColorScalePoint;
+}
+
+/**
+ * Data bar direction.
+ */
+export type DataBarDirection = "context" | "leftToRight" | "rightToLeft";
+
+/**
+ * Data bar axis position.
+ */
+export type DataBarAxisPosition = "automatic" | "cellMidpoint" | "none";
+
+/**
+ * Data bar rule.
+ */
+export interface DataBarRule {
+  type: "dataBar";
+  minValueType: CFValueType;
+  minValue?: number;
+  maxValueType: CFValueType;
+  maxValue?: number;
+  fillColor: string;
+  borderColor?: string;
+  negativeFillColor?: string;
+  negativeBorderColor?: string;
+  axisColor?: string;
+  axisPosition: DataBarAxisPosition;
+  direction: DataBarDirection;
+  showValue: boolean;
+  gradientFill: boolean;
+}
+
+/**
+ * Icon set types.
+ */
+export type IconSetType =
+  | "threeArrows"
+  | "threeArrowsGray"
+  | "threeFlags"
+  | "threeTrafficLights1"
+  | "threeTrafficLights2"
+  | "threeSigns"
+  | "threeSymbols"
+  | "threeSymbols2"
+  | "threeStars"
+  | "threeTriangles"
+  | "fourArrows"
+  | "fourArrowsGray"
+  | "fourRating"
+  | "fourTrafficLights"
+  | "fourRedToBlack"
+  | "fiveArrows"
+  | "fiveArrowsGray"
+  | "fiveRating"
+  | "fiveQuarters"
+  | "fiveBoxes";
+
+/**
+ * Threshold operator for icon sets.
+ */
+export type ThresholdOperator = "greaterThan" | "greaterThanOrEqual";
+
+/**
+ * Icon set threshold.
+ */
+export interface IconSetThreshold {
+  valueType: CFValueType;
+  value: number;
+  operator: ThresholdOperator;
+}
+
+/**
+ * Icon set rule.
+ */
+export interface IconSetRule {
+  type: "iconSet";
+  iconSet: IconSetType;
+  thresholds: IconSetThreshold[];
+  reverseIcons: boolean;
+  showIconOnly: boolean;
+}
+
+/**
+ * Cell value comparison operator.
+ */
+export type CellValueOperator =
+  | "equal"
+  | "notEqual"
+  | "greaterThan"
+  | "greaterThanOrEqual"
+  | "lessThan"
+  | "lessThanOrEqual"
+  | "between"
+  | "notBetween";
+
+/**
+ * Cell value rule.
+ */
+export interface CellValueRule {
+  type: "cellValue";
+  operator: CellValueOperator;
+  value1: string;
+  value2?: string;
+}
+
+/**
+ * Text rule type.
+ */
+export type TextRuleType = "contains" | "notContains" | "beginsWith" | "endsWith";
+
+/**
+ * Contains text rule.
+ */
+export interface ContainsTextRule {
+  type: "containsText";
+  ruleType: TextRuleType;
+  text: string;
+}
+
+/**
+ * Top/bottom rule type.
+ */
+export type TopBottomType = "topItems" | "topPercent" | "bottomItems" | "bottomPercent";
+
+/**
+ * Top/bottom rule.
+ */
+export interface TopBottomRule {
+  type: "topBottom";
+  ruleType: TopBottomType;
+  rank: number;
+}
+
+/**
+ * Above/below average rule type.
+ */
+export type AverageRuleType =
+  | "aboveAverage"
+  | "belowAverage"
+  | "equalOrAboveAverage"
+  | "equalOrBelowAverage"
+  | "oneStdDevAbove"
+  | "oneStdDevBelow"
+  | "twoStdDevAbove"
+  | "twoStdDevBelow"
+  | "threeStdDevAbove"
+  | "threeStdDevBelow";
+
+/**
+ * Above/below average rule.
+ */
+export interface AboveAverageRule {
+  type: "aboveAverage";
+  ruleType: AverageRuleType;
+}
+
+/**
+ * Time period for date-based rules.
+ */
+export type TimePeriod =
+  | "today"
+  | "yesterday"
+  | "tomorrow"
+  | "last7Days"
+  | "thisWeek"
+  | "lastWeek"
+  | "nextWeek"
+  | "thisMonth"
+  | "lastMonth"
+  | "nextMonth"
+  | "thisQuarter"
+  | "lastQuarter"
+  | "nextQuarter"
+  | "thisYear"
+  | "lastYear"
+  | "nextYear";
+
+/**
+ * Time period rule.
+ */
+export interface TimePeriodRule {
+  type: "timePeriod";
+  period: TimePeriod;
+}
+
+/**
+ * Expression/formula rule.
+ */
+export interface ExpressionRule {
+  type: "expression";
+  formula: string;
+}
+
+/**
+ * Simple rules without parameters.
+ */
+export interface DuplicateValuesRule {
+  type: "duplicateValues";
+}
+
+export interface UniqueValuesRule {
+  type: "uniqueValues";
+}
+
+export interface BlankCellsRule {
+  type: "blankCells";
+}
+
+export interface NoBlanksRule {
+  type: "noBlanks";
+}
+
+export interface ErrorCellsRule {
+  type: "errorCells";
+}
+
+export interface NoErrorsRule {
+  type: "noErrors";
+}
+
+/**
+ * All conditional format rule types.
+ */
+export type ConditionalFormatRule =
+  | ColorScaleRule
+  | DataBarRule
+  | IconSetRule
+  | CellValueRule
+  | ContainsTextRule
+  | TopBottomRule
+  | AboveAverageRule
+  | TimePeriodRule
+  | ExpressionRule
+  | DuplicateValuesRule
+  | UniqueValuesRule
+  | BlankCellsRule
+  | NoBlanksRule
+  | ErrorCellsRule
+  | NoErrorsRule;
+
+/**
+ * The format/style to apply when a rule matches.
+ */
+export interface ConditionalFormat {
+  backgroundColor?: string;
+  textColor?: string;
+  bold?: boolean;
+  italic?: boolean;
+  underline?: boolean;
+  strikethrough?: boolean;
+  numberFormat?: string;
+}
+
+/**
+ * A range where conditional formatting applies.
+ */
+export interface ConditionalFormatRange {
+  startRow: number;
+  startCol: number;
+  endRow: number;
+  endCol: number;
+}
+
+/**
+ * A complete conditional format definition.
+ */
+export interface ConditionalFormatDefinition {
+  id: number;
+  priority: number;
+  rule: ConditionalFormatRule;
+  format: ConditionalFormat;
+  ranges: ConditionalFormatRange[];
+  stopIfTrue: boolean;
+  enabled: boolean;
+}
+
+/**
+ * Result of a conditional formatting operation.
+ */
+export interface CFResult {
+  success: boolean;
+  rule?: ConditionalFormatDefinition;
+  error?: string;
+}
+
+/**
+ * Evaluated conditional format for a cell.
+ */
+export interface CellConditionalFormat {
+  row: number;
+  col: number;
+  format: ConditionalFormat;
+  dataBarPercent?: number;
+  iconIndex?: number;
+  colorScaleColor?: string;
+}
+
+/**
+ * Result of evaluating conditional formats for a range.
+ */
+export interface EvaluateCFResult {
+  cells: CellConditionalFormat[];
+}
+
+/**
+ * Parameters for adding a conditional format.
+ */
+export interface AddCFParams {
+  rule: ConditionalFormatRule;
+  format: ConditionalFormat;
+  ranges: ConditionalFormatRange[];
+  stopIfTrue?: boolean;
+}
+
+/**
+ * Parameters for updating a conditional format.
+ */
+export interface UpdateCFParams {
+  ruleId: number;
+  rule?: ConditionalFormatRule;
+  format?: ConditionalFormat;
+  ranges?: ConditionalFormatRange[];
+  stopIfTrue?: boolean;
+  enabled?: boolean;
+}
+
+/**
+ * Add a conditional format rule.
+ * @param params - Rule parameters
+ * @returns Result with the created rule
+ */
+export async function addConditionalFormat(
+  params: AddCFParams
+): Promise<CFResult> {
+  return invoke<CFResult>("add_conditional_format", { params });
+}
+
+/**
+ * Update a conditional format rule.
+ * @param params - Update parameters
+ * @returns Result with the updated rule
+ */
+export async function updateConditionalFormat(
+  params: UpdateCFParams
+): Promise<CFResult> {
+  return invoke<CFResult>("update_conditional_format", { params });
+}
+
+/**
+ * Delete a conditional format rule.
+ * @param ruleId - ID of the rule to delete
+ * @returns Result
+ */
+export async function deleteConditionalFormat(
+  ruleId: number
+): Promise<CFResult> {
+  return invoke<CFResult>("delete_conditional_format", { ruleId });
+}
+
+/**
+ * Reorder conditional format rules.
+ * @param ruleIds - Rule IDs in new priority order
+ * @returns Result
+ */
+export async function reorderConditionalFormats(
+  ruleIds: number[]
+): Promise<CFResult> {
+  return invoke<CFResult>("reorder_conditional_formats", { ruleIds });
+}
+
+/**
+ * Get a specific conditional format rule.
+ * @param ruleId - ID of the rule
+ * @returns The rule or null if not found
+ */
+export async function getConditionalFormat(
+  ruleId: number
+): Promise<ConditionalFormatDefinition | null> {
+  return invoke<ConditionalFormatDefinition | null>("get_conditional_format", {
+    ruleId,
+  });
+}
+
+/**
+ * Get all conditional format rules for the current sheet.
+ * @returns Array of rules sorted by priority
+ */
+export async function getAllConditionalFormats(): Promise<
+  ConditionalFormatDefinition[]
+> {
+  return invoke<ConditionalFormatDefinition[]>("get_all_conditional_formats", {});
+}
+
+/**
+ * Evaluate conditional formats for a range.
+ * Returns computed styles for each cell in the range.
+ * @param startRow - Start row
+ * @param startCol - Start column
+ * @param endRow - End row
+ * @param endCol - End column
+ * @returns Evaluated formats for cells in range
+ */
+export async function evaluateConditionalFormats(
+  startRow: number,
+  startCol: number,
+  endRow: number,
+  endCol: number
+): Promise<EvaluateCFResult> {
+  return invoke<EvaluateCFResult>("evaluate_conditional_formats", {
+    startRow,
+    startCol,
+    endRow,
+    endCol,
+  });
+}
+
+/**
+ * Clear conditional formats in a range.
+ * @param startRow - Start row
+ * @param startCol - Start column
+ * @param endRow - End row
+ * @param endCol - End column
+ * @returns Number of rules removed
+ */
+export async function clearConditionalFormatsInRange(
+  startRow: number,
+  startCol: number,
+  endRow: number,
+  endCol: number
+): Promise<number> {
+  return invoke<number>("clear_conditional_formats_in_range", {
+    startRow,
+    startCol,
+    endRow,
+    endCol,
+  });
+}
+
+// ============================================================================
+// Table Commands
+// ============================================================================
+
+/**
+ * Function to use in a table's totals row.
+ */
+export type TotalsRowFunction =
+  | "none"
+  | "average"
+  | "count"
+  | "countNumbers"
+  | "max"
+  | "min"
+  | "sum"
+  | "stdDev"
+  | "var"
+  | "custom";
+
+/**
+ * Style options for table formatting.
+ */
+export interface TableStyleOptions {
+  bandedRows: boolean;
+  bandedColumns: boolean;
+  headerRow: boolean;
+  totalRow: boolean;
+  firstColumn: boolean;
+  lastColumn: boolean;
+  showFilterButton: boolean;
+}
+
+/**
+ * Default table style options.
+ */
+export const DEFAULT_TABLE_STYLE_OPTIONS: TableStyleOptions = {
+  bandedRows: true,
+  bandedColumns: false,
+  headerRow: true,
+  totalRow: false,
+  firstColumn: false,
+  lastColumn: false,
+  showFilterButton: true,
+};
+
+/**
+ * A column in a table.
+ */
+export interface TableColumn {
+  id: number;
+  name: string;
+  totalsRowFunction: TotalsRowFunction;
+  totalsRowFormula?: string;
+  calculatedFormula?: string;
+}
+
+/**
+ * A table definition.
+ */
+export interface Table {
+  id: number;
+  name: string;
+  sheetIndex: number;
+  startRow: number;
+  startCol: number;
+  endRow: number;
+  endCol: number;
+  columns: TableColumn[];
+  styleOptions: TableStyleOptions;
+  styleName: string;
+  autoFilterId?: number;
+}
+
+/**
+ * Result of a table operation.
+ */
+export interface TableResult {
+  success: boolean;
+  table?: Table;
+  error?: string;
+}
+
+/**
+ * Resolved structured reference.
+ */
+export interface ResolvedStructuredRef {
+  sheetIndex: number;
+  startRow: number;
+  startCol: number;
+  endRow: number;
+  endCol: number;
+}
+
+/**
+ * Result of resolving a structured reference.
+ */
+export interface StructuredRefResult {
+  success: boolean;
+  resolved?: ResolvedStructuredRef;
+  error?: string;
+}
+
+/**
+ * Parameters for creating a table.
+ */
+export interface CreateTableParams {
+  name: string;
+  startRow: number;
+  startCol: number;
+  endRow: number;
+  endCol: number;
+  hasHeaders?: boolean;
+  styleOptions?: TableStyleOptions;
+  styleName?: string;
+}
+
+/**
+ * Parameters for resizing a table.
+ */
+export interface ResizeTableParams {
+  tableId: number;
+  startRow: number;
+  startCol: number;
+  endRow: number;
+  endCol: number;
+}
+
+/**
+ * Parameters for updating table style.
+ */
+export interface UpdateTableStyleParams {
+  tableId: number;
+  styleOptions?: TableStyleOptions;
+  styleName?: string;
+}
+
+/**
+ * Parameters for setting totals row function.
+ */
+export interface SetTotalsRowFunctionParams {
+  tableId: number;
+  columnName: string;
+  function: TotalsRowFunction;
+  customFormula?: string;
+}
+
+/**
+ * Create a new table.
+ * @param params - Table creation parameters
+ * @returns Result with the created table
+ */
+export async function createTable(params: CreateTableParams): Promise<TableResult> {
+  return invoke<TableResult>("create_table", { params });
+}
+
+/**
+ * Delete a table.
+ * @param tableId - ID of the table to delete
+ * @returns Result
+ */
+export async function deleteTable(tableId: number): Promise<TableResult> {
+  return invoke<TableResult>("delete_table", { tableId });
+}
+
+/**
+ * Rename a table.
+ * @param tableId - ID of the table
+ * @param newName - New table name
+ * @returns Result with the updated table
+ */
+export async function renameTable(
+  tableId: number,
+  newName: string
+): Promise<TableResult> {
+  return invoke<TableResult>("rename_table", { tableId, newName });
+}
+
+/**
+ * Update table style options.
+ * @param params - Style update parameters
+ * @returns Result with the updated table
+ */
+export async function updateTableStyle(
+  params: UpdateTableStyleParams
+): Promise<TableResult> {
+  return invoke<TableResult>("update_table_style", { params });
+}
+
+/**
+ * Add a column to a table.
+ * @param tableId - ID of the table
+ * @param columnName - Name of the new column
+ * @param position - Optional position (0-based), defaults to end
+ * @returns Result with the updated table
+ */
+export async function addTableColumn(
+  tableId: number,
+  columnName: string,
+  position?: number
+): Promise<TableResult> {
+  return invoke<TableResult>("add_table_column", { tableId, columnName, position });
+}
+
+/**
+ * Remove a column from a table.
+ * @param tableId - ID of the table
+ * @param columnName - Name of the column to remove
+ * @returns Result with the updated table
+ */
+export async function removeTableColumn(
+  tableId: number,
+  columnName: string
+): Promise<TableResult> {
+  return invoke<TableResult>("remove_table_column", { tableId, columnName });
+}
+
+/**
+ * Rename a table column.
+ * @param tableId - ID of the table
+ * @param oldName - Current column name
+ * @param newName - New column name
+ * @returns Result with the updated table
+ */
+export async function renameTableColumn(
+  tableId: number,
+  oldName: string,
+  newName: string
+): Promise<TableResult> {
+  return invoke<TableResult>("rename_table_column", { tableId, oldName, newName });
+}
+
+/**
+ * Set totals row function for a column.
+ * @param params - Function parameters
+ * @returns Result with the updated table
+ */
+export async function setTotalsRowFunction(
+  params: SetTotalsRowFunctionParams
+): Promise<TableResult> {
+  return invoke<TableResult>("set_totals_row_function", { params });
+}
+
+/**
+ * Toggle totals row visibility.
+ * @param tableId - ID of the table
+ * @param show - Whether to show the totals row
+ * @returns Result with the updated table
+ */
+export async function toggleTotalsRow(
+  tableId: number,
+  show: boolean
+): Promise<TableResult> {
+  return invoke<TableResult>("toggle_totals_row", { tableId, show });
+}
+
+/**
+ * Resize a table.
+ * @param params - Resize parameters
+ * @returns Result with the updated table
+ */
+export async function resizeTable(params: ResizeTableParams): Promise<TableResult> {
+  return invoke<TableResult>("resize_table", { params });
+}
+
+/**
+ * Convert a table to a range (removes table but keeps data).
+ * @param tableId - ID of the table
+ * @returns Result
+ */
+export async function convertToRange(tableId: number): Promise<TableResult> {
+  return invoke<TableResult>("convert_to_range", { tableId });
+}
+
+/**
+ * Get a table by ID.
+ * @param tableId - ID of the table
+ * @returns The table or null if not found
+ */
+export async function getTable(tableId: number): Promise<Table | null> {
+  return invoke<Table | null>("get_table", { tableId });
+}
+
+/**
+ * Get a table by name.
+ * @param name - Name of the table
+ * @returns The table or null if not found
+ */
+export async function getTableByName(name: string): Promise<Table | null> {
+  return invoke<Table | null>("get_table_by_name", { name });
+}
+
+/**
+ * Get the table at a specific cell.
+ * @param row - Row index (0-based)
+ * @param col - Column index (0-based)
+ * @returns The table or null if not found
+ */
+export async function getTableAtCell(
+  row: number,
+  col: number
+): Promise<Table | null> {
+  return invoke<Table | null>("get_table_at_cell", { row, col });
+}
+
+/**
+ * Get all tables on the current sheet.
+ * @returns Array of tables
+ */
+export async function getAllTables(): Promise<Table[]> {
+  return invoke<Table[]>("get_all_tables", {});
+}
+
+/**
+ * Resolve a structured reference (e.g., "Table1[Column1]").
+ * @param reference - The structured reference string
+ * @returns Result with the resolved range
+ */
+export async function resolveStructuredReference(
+  reference: string
+): Promise<StructuredRefResult> {
+  return invoke<StructuredRefResult>("resolve_structured_reference", { reference });
+}

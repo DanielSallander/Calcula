@@ -34,6 +34,11 @@ pub mod named_ranges;
 pub mod data_validation;
 pub mod comments;
 pub mod autofilter;
+pub mod hyperlinks;
+pub mod protection;
+pub mod grouping;
+pub mod conditional_formatting;
+pub mod tables;
 
 pub use api_types::{CellData, StyleData, DimensionData, FormattingParams, MergedRegion};
 pub use logging::{init_log_file, get_log_path, next_seq, write_log, write_log_raw};
@@ -57,6 +62,39 @@ pub use autofilter::{
     AutoFilter, AutoFilterInfo, AutoFilterResult, AutoFilterStorage,
     ColumnFilter, IconFilter, UniqueValuesResult, UniqueValue,
     ApplyAutoFilterParams,
+};
+pub use hyperlinks::{
+    Hyperlink, HyperlinkType, HyperlinkResult, HyperlinkStorage,
+    HyperlinkIndicator, InternalReference,
+    AddHyperlinkParams, UpdateHyperlinkParams,
+};
+pub use protection::{
+    SheetProtection, SheetProtectionOptions, AllowEditRange, CellProtection,
+    ProtectionResult, ProtectionCheckResult, ProtectionStatus,
+    ProtectionStorage, CellProtectionStorage,
+    ProtectSheetParams, AddAllowEditRangeParams, SetCellProtectionParams,
+};
+pub use grouping::{
+    RowGroup, ColumnGroup, SheetOutline, OutlineSettings, SummaryPosition,
+    GroupResult, OutlineInfo, RowOutlineSymbol, ColOutlineSymbol,
+    OutlineStorage, GroupRowsParams, GroupColumnsParams,
+    MAX_OUTLINE_LEVEL,
+};
+pub use conditional_formatting::{
+    CFValueType, ColorScalePoint, ColorScaleRule, DataBarDirection, DataBarAxisPosition,
+    DataBarRule, IconSetType, ThresholdOperator, IconSetThreshold, IconSetRule,
+    CellValueOperator, CellValueRule, TextRuleType, ContainsTextRule,
+    TopBottomType, TopBottomRule, AverageRuleType, AboveAverageRule,
+    TimePeriod, TimePeriodRule, ExpressionRule, ConditionalFormat,
+    ConditionalFormatRule, ConditionalFormatRange, ConditionalFormatDefinition,
+    ConditionalFormatStorage, CFResult, CellConditionalFormat, EvaluateCFResult,
+    AddCFParams, UpdateCFParams,
+};
+pub use tables::{
+    TotalsRowFunction, TableStyleOptions, TableColumn, Table,
+    TableStorage, TableNameRegistry, TableResult, ResolvedStructuredRef,
+    StructuredRefResult, CreateTableParams, ResizeTableParams,
+    UpdateTableStyleParams, SetTotalsRowFunctionParams,
 };
 
 #[cfg(test)]
@@ -128,6 +166,24 @@ pub struct AppState {
     pub comments: Mutex<comments::CommentStorage>,
     /// AutoFilters per sheet: sheet_index -> AutoFilter
     pub auto_filters: Mutex<autofilter::AutoFilterStorage>,
+    /// Hyperlinks per sheet: sheet_index -> (row, col) -> Hyperlink
+    pub hyperlinks: Mutex<hyperlinks::HyperlinkStorage>,
+    /// Sheet protection settings per sheet
+    pub sheet_protection: Mutex<protection::ProtectionStorage>,
+    /// Cell-level protection per sheet: sheet_index -> (row, col) -> CellProtection
+    pub cell_protection: Mutex<protection::CellProtectionStorage>,
+    /// Row/column grouping (outlines) per sheet
+    pub outlines: Mutex<grouping::OutlineStorage>,
+    /// Conditional formatting rules per sheet
+    pub conditional_formats: Mutex<conditional_formatting::ConditionalFormatStorage>,
+    /// Next conditional format rule ID
+    pub next_cf_rule_id: Mutex<u64>,
+    /// Tables per sheet: sheet_index -> table_id -> Table
+    pub tables: Mutex<tables::TableStorage>,
+    /// Table name registry: table_name (uppercase) -> (sheet_index, table_id)
+    pub table_names: Mutex<tables::TableNameRegistry>,
+    /// Next table ID
+    pub next_table_id: Mutex<u64>,
 }
 
 impl AppState {
@@ -182,6 +238,15 @@ pub fn create_app_state() -> AppState {
         data_validations: Mutex::new(HashMap::new()),
         comments: Mutex::new(HashMap::new()),
         auto_filters: Mutex::new(HashMap::new()),
+        hyperlinks: Mutex::new(HashMap::new()),
+        sheet_protection: Mutex::new(HashMap::new()),
+        cell_protection: Mutex::new(HashMap::new()),
+        outlines: Mutex::new(HashMap::new()),
+        conditional_formats: Mutex::new(HashMap::new()),
+        next_cf_rule_id: Mutex::new(1),
+        tables: Mutex::new(HashMap::new()),
+        table_names: Mutex::new(HashMap::new()),
+        next_table_id: Mutex::new(1),
     }
 }
 
@@ -880,6 +945,75 @@ pub fn run() {
             autofilter::set_column_custom_filter,
             autofilter::set_column_top_bottom_filter,
             autofilter::set_column_dynamic_filter,
+            // Hyperlink commands
+            hyperlinks::add_hyperlink,
+            hyperlinks::update_hyperlink,
+            hyperlinks::remove_hyperlink,
+            hyperlinks::get_hyperlink,
+            hyperlinks::get_all_hyperlinks,
+            hyperlinks::get_hyperlink_indicators,
+            hyperlinks::get_hyperlinks_in_range,
+            hyperlinks::has_hyperlink,
+            hyperlinks::clear_hyperlinks_in_range,
+            hyperlinks::move_hyperlink,
+            // Protection commands
+            protection::protect_sheet,
+            protection::unprotect_sheet,
+            protection::update_protection_options,
+            protection::add_allow_edit_range,
+            protection::remove_allow_edit_range,
+            protection::get_allow_edit_ranges,
+            protection::get_protection_status,
+            protection::is_sheet_protected,
+            protection::can_edit_cell,
+            protection::can_perform_action,
+            protection::set_cell_protection,
+            protection::get_cell_protection,
+            protection::verify_edit_range_password,
+            // Grouping (Outline) commands
+            grouping::group_rows,
+            grouping::ungroup_rows,
+            grouping::group_columns,
+            grouping::ungroup_columns,
+            grouping::collapse_row_group,
+            grouping::expand_row_group,
+            grouping::collapse_column_group,
+            grouping::expand_column_group,
+            grouping::show_outline_level,
+            grouping::get_outline_info,
+            grouping::get_outline_settings,
+            grouping::set_outline_settings,
+            grouping::clear_outline,
+            grouping::is_row_hidden_by_group,
+            grouping::is_col_hidden_by_group,
+            grouping::get_hidden_rows_by_group,
+            grouping::get_hidden_cols_by_group,
+            // Conditional Formatting commands
+            conditional_formatting::add_conditional_format,
+            conditional_formatting::update_conditional_format,
+            conditional_formatting::delete_conditional_format,
+            conditional_formatting::reorder_conditional_formats,
+            conditional_formatting::get_conditional_format,
+            conditional_formatting::get_all_conditional_formats,
+            conditional_formatting::evaluate_conditional_formats,
+            conditional_formatting::clear_conditional_formats_in_range,
+            // Table commands
+            tables::create_table,
+            tables::delete_table,
+            tables::rename_table,
+            tables::update_table_style,
+            tables::add_table_column,
+            tables::remove_table_column,
+            tables::rename_table_column,
+            tables::set_totals_row_function,
+            tables::toggle_totals_row,
+            tables::resize_table,
+            tables::convert_to_range,
+            tables::get_table,
+            tables::get_table_by_name,
+            tables::get_table_at_cell,
+            tables::get_all_tables,
+            tables::resolve_structured_reference,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
