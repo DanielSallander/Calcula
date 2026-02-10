@@ -608,6 +608,15 @@ pub fn get_pivot_at_cell(
         show_empty_rows: Some(definition.layout.show_empty_rows),
         show_empty_cols: Some(definition.layout.show_empty_cols),
         values_position: Some(values_position_to_string(definition.layout.values_position)),
+        auto_format: None,
+        preserve_formatting: None,
+        show_field_headers: None,
+        enable_field_list: None,
+        empty_cell_text: None,
+        fill_empty_cells: None,
+        subtotal_location: None,
+        alt_text_title: None,
+        alt_text_description: None,
     };
     
     let field_configuration = PivotFieldConfiguration {

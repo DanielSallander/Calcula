@@ -65,6 +65,31 @@ export async function updateCell(
   return result;
 }
 
+/**
+ * Input for batch cell updates.
+ */
+export interface CellUpdateInput {
+  row: number;
+  col: number;
+  value: string;
+}
+
+/**
+ * Batch update multiple cells in a single operation.
+ * This is significantly faster than calling updateCell multiple times
+ * because it sends all updates in a single IPC call.
+ * @param updates - Array of cell updates with row, col, and value
+ * @returns Array of all updated cells (including dependents)
+ */
+export async function updateCellsBatch(
+  updates: CellUpdateInput[]
+): Promise<CellData[]> {
+  console.log(`[tauri-api] updateCellsBatch(${updates.length} cells)`);
+  const result = await invoke<CellData[]>("update_cells_batch", { updates });
+  console.log(`[tauri-api] updateCellsBatch returned ${result.length} updated cells`);
+  return result;
+}
+
 export async function clearCell(row: number, col: number): Promise<void> {
   return invoke<void>("clear_cell", { row, col });
 }
@@ -609,6 +634,34 @@ export async function shiftFormulaForFill(
     rowDelta,
     colDelta,
   });
+}
+
+/**
+ * Input for batch formula shifting.
+ */
+export interface FormulaShiftInput {
+  formula: string;
+  rowDelta: number;
+  colDelta: number;
+}
+
+/**
+ * Batch shift multiple formulas at once for fill operations.
+ * This is significantly faster than calling shiftFormulaForFill multiple times
+ * because it processes all formulas in a single IPC call.
+ * @param inputs - Array of formula shift inputs
+ * @returns Array of shifted formulas in the same order as inputs
+ */
+export async function shiftFormulasBatch(
+  inputs: FormulaShiftInput[]
+): Promise<string[]> {
+  if (inputs.length === 0) {
+    return [];
+  }
+  const result = await invoke<{ formulas: string[] }>("shift_formulas_batch", {
+    inputs,
+  });
+  return result.formulas;
 }
 
 // ============================================================================

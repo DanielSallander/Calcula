@@ -878,7 +878,12 @@ pub fn shift_formula_for_fill(
     row_delta: i32,
     col_delta: i32,
 ) -> Result<String, String> {
-    let mut result = formula;
+    Ok(shift_formula_internal(&formula, row_delta, col_delta))
+}
+
+/// Internal function to shift a single formula (no Result wrapper).
+fn shift_formula_internal(formula: &str, row_delta: i32, col_delta: i32) -> String {
+    let mut result = formula.to_string();
 
     // Shift rows if there's a row delta
     if row_delta != 0 {
@@ -892,9 +897,22 @@ pub fn shift_formula_for_fill(
 
     // Normalize any ranges that became inverted after shifting.
     // Example: I10:$I$11 shifted by +3 rows --> I13:$I$11 --> $I$11:I13
-    result = normalize_inverted_ranges(&result);
+    normalize_inverted_ranges(&result)
+}
 
-    Ok(result)
+/// Batch shift multiple formulas at once for fill operations.
+/// This is significantly faster than calling shift_formula_for_fill multiple times
+/// because it processes all formulas in a single IPC call.
+#[tauri::command]
+pub fn shift_formulas_batch(
+    inputs: Vec<crate::api_types::FormulaShiftInput>,
+) -> crate::api_types::FormulaShiftResult {
+    let formulas: Vec<String> = inputs
+        .iter()
+        .map(|input| shift_formula_internal(&input.formula, input.row_delta, input.col_delta))
+        .collect();
+
+    crate::api_types::FormulaShiftResult { formulas }
 }
 
 /// Shift row references for fill operation (all non-absolute refs shift).

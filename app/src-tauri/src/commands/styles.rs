@@ -80,6 +80,7 @@ pub fn set_cell_style(
             value: CellValue::Empty,
             formula: None,
             style_index,
+            cached_ast: None,
         };
         grid.set_cell(row, col, cell.clone());
         
@@ -141,6 +142,7 @@ pub fn apply_formatting(
                         value: CellValue::Empty,
                         formula: None,
                         style_index: 0,
+                        cached_ast: None,
                     },
                     0,
                 )

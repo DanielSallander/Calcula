@@ -8,7 +8,7 @@
 import { useCallback, useRef, useState, useEffect } from "react";
 import { useGridContext } from "../state/GridContext";
 import { setSelection, scrollBy } from "../state/gridActions";
-import { getCell, updateCell, shiftFormulaForFill } from "../lib/tauri-api";
+import { getCell, getViewportCells, updateCellsBatch, shiftFormulasBatch, type CellUpdateInput, type FormulaShiftInput } from "../lib/tauri-api";
 import { cellEvents } from "../lib/cellEvents";
 import type { Selection, GridConfig } from "../types";
 import { getColumnWidth, getRowHeight, getColumnX, getRowY, calculateVisibleRange } from "../lib/gridRenderer";
@@ -196,38 +196,85 @@ function generateFillValue(
 }
 
 /**
- * Compute the fill value for a target cell.
- * If the source value is a formula, shifts references via the backend.
- * Otherwise, uses the pattern-based generation for non-formula values.
- *
- * FIX: Wrapped shiftFormulaForFill in try/catch so that a backend error
- * (e.g., unregistered command, parse failure) falls back to copying the
- * source formula as-is rather than aborting the entire fill operation.
+ * Represents a pending cell fill that may need formula shifting.
  */
-async function computeFillValue(
-  sourceValue: string,
-  sourceRow: number,
-  sourceCol: number,
-  targetRow: number,
-  targetCol: number,
+interface PendingFill {
+  row: number;
+  col: number;
+  sourceValue: string;
+  sourceRow: number;
+  sourceCol: number;
+  pattern: PatternResult;
+  allSourceValues: string[];
+  fillIndex: number;
+}
+
+/**
+ * Compute the fill value for a non-formula cell synchronously.
+ */
+function computeNonFormulaFillValue(
   pattern: PatternResult,
   allSourceValues: string[],
   fillIndex: number,
-): Promise<string> {
-  if (sourceValue.startsWith("=")) {
-    // Formula: shift references based on position delta
-    const rowDelta = targetRow - sourceRow;
-    const colDelta = targetCol - sourceCol;
-    try {
-      return await shiftFormulaForFill(sourceValue, rowDelta, colDelta);
-    } catch (error) {
-      console.error("[FillHandle] shiftFormulaForFill failed, copying formula as-is:", error);
-      // Fallback: return the source formula unchanged
-      return sourceValue;
+): string {
+  return generateFillValue(pattern, allSourceValues, fillIndex);
+}
+
+/**
+ * Process pending fills by batching formula shifts.
+ * Returns an array of CellUpdateInput ready for updateCellsBatch.
+ */
+async function processPendingFills(pendingFills: PendingFill[]): Promise<CellUpdateInput[]> {
+  // Separate formulas from non-formulas
+  const formulaFills: { index: number; fill: PendingFill }[] = [];
+  const results: CellUpdateInput[] = new Array(pendingFills.length);
+
+  for (let i = 0; i < pendingFills.length; i++) {
+    const fill = pendingFills[i];
+    if (fill.sourceValue.startsWith("=")) {
+      formulaFills.push({ index: i, fill });
+    } else {
+      // Non-formula: compute synchronously
+      results[i] = {
+        row: fill.row,
+        col: fill.col,
+        value: computeNonFormulaFillValue(fill.pattern, fill.allSourceValues, fill.fillIndex),
+      };
     }
   }
-  // Non-formula: use pattern-based fill
-  return generateFillValue(pattern, allSourceValues, fillIndex);
+
+  // Batch process all formulas
+  if (formulaFills.length > 0) {
+    const shiftInputs: FormulaShiftInput[] = formulaFills.map(({ fill }) => ({
+      formula: fill.sourceValue,
+      rowDelta: fill.row - fill.sourceRow,
+      colDelta: fill.col - fill.sourceCol,
+    }));
+
+    try {
+      const shiftedFormulas = await shiftFormulasBatch(shiftInputs);
+      for (let i = 0; i < formulaFills.length; i++) {
+        const { index, fill } = formulaFills[i];
+        results[index] = {
+          row: fill.row,
+          col: fill.col,
+          value: shiftedFormulas[i],
+        };
+      }
+    } catch (error) {
+      console.error("[FillHandle] shiftFormulasBatch failed, copying formulas as-is:", error);
+      // Fallback: use formulas unchanged
+      for (const { index, fill } of formulaFills) {
+        results[index] = {
+          row: fill.row,
+          col: fill.col,
+          value: fill.sourceValue,
+        };
+      }
+    }
+  }
+
+  return results;
 }
 
 /**
@@ -547,7 +594,10 @@ export function useFillHandle(props: UseFillHandleProps): UseFillHandleReturn {
 
   /**
    * Complete the fill operation.
-   * FIX: Formula values are now shifted via shiftFormulaForFill.
+   * OPTIMIZED: Uses batch APIs to minimize IPC calls.
+   * - getViewportCells: fetches all source cells in one call
+   * - shiftFormulasBatch: shifts all formulas in one call
+   * - updateCellsBatch: applies all updates in one call
    */
   const completeFill = useCallback(async () => {
     // Stop auto-scroll and clear mouse position
@@ -576,15 +626,31 @@ export function useFillHandle(props: UseFillHandleProps): UseFillHandleReturn {
     const finalRange = fillState.previewRange;
 
     try {
+      // OPTIMIZATION: Fetch all source cells in a single IPC call
+      const sourceCells = await getViewportCells(selMinRow, selMinCol, selMaxRow, selMaxCol);
+
+      // Build a map for quick lookup: (row, col) -> value
+      const cellMap = new Map<string, string>();
+      for (const cell of sourceCells) {
+        const key = `${cell.row},${cell.col}`;
+        cellMap.set(key, cell.formula || cell.display || "");
+      }
+
+      // Helper to get source value from map
+      const getSourceValue = (row: number, col: number): string => {
+        return cellMap.get(`${row},${col}`) || "";
+      };
+
+      // Build source values arrays and collect pending fills
       const sourceValues: string[][] = [];
+      const pendingFills: PendingFill[] = [];
 
       if (fillState.direction === "down" || fillState.direction === "up") {
-        // Get values column by column
+        // Get values column by column from the map
         for (let c = selMinCol; c <= selMaxCol; c++) {
           const colValues: string[] = [];
           for (let r = selMinRow; r <= selMaxRow; r++) {
-            const cell = await getCell(r, c);
-            colValues.push(cell?.formula || cell?.display || "");
+            colValues.push(getSourceValue(r, c));
           }
           sourceValues.push(colValues);
         }
@@ -595,7 +661,6 @@ export function useFillHandle(props: UseFillHandleProps): UseFillHandleReturn {
 
         for (let c = selMinCol; c <= selMaxCol; c++) {
           const colIdx = c - selMinCol;
-          // FIX: Filter out formulas for pattern detection (formulas are handled separately)
           const nonFormulaValues = sourceValues[colIdx].filter(v => !v.startsWith("="));
           const pattern = detectPattern(nonFormulaValues.length > 0 ? nonFormulaValues : sourceValues[colIdx]);
 
@@ -606,49 +671,35 @@ export function useFillHandle(props: UseFillHandleProps): UseFillHandleReturn {
               const sourceValue = sourceValues[colIdx][sourceIndex];
               const sourceRow = selMinRow + sourceIndex;
 
-              // FIX: Use computeFillValue which handles formulas via shiftFormulaForFill
-              const value = await computeFillValue(
-                sourceValue, sourceRow, c, r, c,
-                pattern, sourceValues[colIdx], fillIndex,
-              );
-              
-              const updatedCells = await updateCell(r, c, value);
-              for (const cell of updatedCells) {
-                if (cell.sheetIndex !== undefined) continue; // Skip cross-sheet cells
-                cellEvents.emit({
-                  row: cell.row,
-                  col: cell.col,
-                  oldValue: undefined,
-                  newValue: cell.display,
-                  formula: cell.formula ?? null,
-                });
-              }
+              pendingFills.push({
+                row: r,
+                col: c,
+                sourceValue,
+                sourceRow,
+                sourceCol: c,
+                pattern,
+                allSourceValues: sourceValues[colIdx],
+                fillIndex,
+              });
             }
           } else {
             // Fill up - mirror from bottom of selection upward
             for (let r = endRow; r >= startRow; r--) {
               const fillIndex = selMaxRow - r;
               const sourceIndex = fillIndex % sourceCount;
-              // Reversed: source from bottom of selection
               const sourceValue = sourceValues[colIdx][sourceCount - 1 - sourceIndex];
               const sourceRow = selMaxRow - sourceIndex;
 
-              const value = await computeFillValue(
-                sourceValue, sourceRow, c, r, c,
-                pattern, sourceValues[colIdx].slice().reverse(), fillIndex,
-              );
-              
-              const updatedCells = await updateCell(r, c, value);
-              for (const cell of updatedCells) {
-                if (cell.sheetIndex !== undefined) continue; // Skip cross-sheet cells
-                cellEvents.emit({
-                  row: cell.row,
-                  col: cell.col,
-                  oldValue: undefined,
-                  newValue: cell.display,
-                  formula: cell.formula ?? null,
-                });
-              }
+              pendingFills.push({
+                row: r,
+                col: c,
+                sourceValue,
+                sourceRow,
+                sourceCol: c,
+                pattern,
+                allSourceValues: sourceValues[colIdx].slice().reverse(),
+                fillIndex,
+              });
             }
           }
         }
@@ -657,8 +708,7 @@ export function useFillHandle(props: UseFillHandleProps): UseFillHandleReturn {
         for (let r = selMinRow; r <= selMaxRow; r++) {
           const rowValues: string[] = [];
           for (let c = selMinCol; c <= selMaxCol; c++) {
-            const cell = await getCell(r, c);
-            rowValues.push(cell?.formula || cell?.display || "");
+            rowValues.push(getSourceValue(r, c));
           }
           sourceValues.push(rowValues);
         }
@@ -679,22 +729,16 @@ export function useFillHandle(props: UseFillHandleProps): UseFillHandleReturn {
               const sourceValue = sourceValues[rowIdx][sourceIndex];
               const sourceCol = selMinCol + sourceIndex;
 
-              const value = await computeFillValue(
-                sourceValue, r, sourceCol, r, c,
-                pattern, sourceValues[rowIdx], fillIndex,
-              );
-              
-              const updatedCells = await updateCell(r, c, value);
-              for (const cell of updatedCells) {
-                if (cell.sheetIndex !== undefined) continue; // Skip cross-sheet cells
-                cellEvents.emit({
-                  row: cell.row,
-                  col: cell.col,
-                  oldValue: undefined,
-                  newValue: cell.display,
-                  formula: cell.formula ?? null,
-                });
-              }
+              pendingFills.push({
+                row: r,
+                col: c,
+                sourceValue,
+                sourceRow: r,
+                sourceCol,
+                pattern,
+                allSourceValues: sourceValues[rowIdx],
+                fillIndex,
+              });
             }
           } else {
             // Fill left - mirror from right of selection leftward
@@ -704,24 +748,39 @@ export function useFillHandle(props: UseFillHandleProps): UseFillHandleReturn {
               const sourceValue = sourceValues[rowIdx][sourceCount - 1 - sourceIndex];
               const sourceCol = selMaxCol - sourceIndex;
 
-              const value = await computeFillValue(
-                sourceValue, r, sourceCol, r, c,
-                pattern, sourceValues[rowIdx].slice().reverse(), fillIndex,
-              );
-              
-              const updatedCells = await updateCell(r, c, value);
-              for (const cell of updatedCells) {
-                if (cell.sheetIndex !== undefined) continue; // Skip cross-sheet cells
-                cellEvents.emit({
-                  row: cell.row,
-                  col: cell.col,
-                  oldValue: undefined,
-                  newValue: cell.display,
-                  formula: cell.formula ?? null,
-                });
-              }
+              pendingFills.push({
+                row: r,
+                col: c,
+                sourceValue,
+                sourceRow: r,
+                sourceCol,
+                pattern,
+                allSourceValues: sourceValues[rowIdx].slice().reverse(),
+                fillIndex,
+              });
             }
           }
+        }
+      }
+
+      // OPTIMIZATION: Process all fills using batch formula shifting
+      const batchUpdates = await processPendingFills(pendingFills);
+
+      // Execute all updates in a single batch call
+      if (batchUpdates.length > 0) {
+        console.log(`[FillHandle] Sending batch update for ${batchUpdates.length} cells`);
+        const updatedCells = await updateCellsBatch(batchUpdates);
+
+        // Emit events for all updated cells
+        for (const cell of updatedCells) {
+          if (cell.sheetIndex !== undefined) continue; // Skip cross-sheet cells
+          cellEvents.emit({
+            row: cell.row,
+            col: cell.col,
+            oldValue: undefined,
+            newValue: cell.display,
+            formula: cell.formula ?? null,
+          });
         }
       }
 
@@ -771,7 +830,7 @@ export function useFillHandle(props: UseFillHandleProps): UseFillHandleReturn {
   /**
    * Auto-fill to edge (Excel double-click fill handle behavior).
    * Looks at adjacent columns to determine how far to fill down.
-   * FIX: Formula values are now shifted via shiftFormulaForFill.
+   * OPTIMIZED: Uses batch APIs to minimize IPC calls.
    */
   const autoFillToEdge = useCallback(async () => {
     if (!selection) {
@@ -789,6 +848,8 @@ export function useFillHandle(props: UseFillHandleProps): UseFillHandleReturn {
     let edgeRow = selMaxRow;
     const maxRowsToCheck = 10000;
 
+    // Edge detection still uses individual getCell calls since we need to stop at first empty
+    // This is typically a small number of calls (just until we hit the edge)
     if (selMinCol > 0) {
       const checkCol = selMinCol - 1;
       for (let r = selMaxRow + 1; r < selMaxRow + maxRowsToCheck; r++) {
@@ -823,12 +884,28 @@ export function useFillHandle(props: UseFillHandleProps): UseFillHandleReturn {
     console.log("[FillHandle] autoFillToEdge: Filling down to row", edgeRow);
 
     try {
+      // OPTIMIZATION: Fetch all source cells in a single IPC call
+      const sourceCells = await getViewportCells(selMinRow, selMinCol, selMaxRow, selMaxCol);
+
+      // Build a map for quick lookup
+      const cellMap = new Map<string, string>();
+      for (const cell of sourceCells) {
+        const key = `${cell.row},${cell.col}`;
+        cellMap.set(key, cell.formula || cell.display || "");
+      }
+
+      const getSourceValue = (row: number, col: number): string => {
+        return cellMap.get(`${row},${col}`) || "";
+      };
+
       const sourceValues: string[][] = [];
+      const pendingFills: PendingFill[] = [];
+
+      // Build source values from map
       for (let c = selMinCol; c <= selMaxCol; c++) {
         const colValues: string[] = [];
         for (let r = selMinRow; r <= selMaxRow; r++) {
-          const cell = await getCell(r, c);
-          colValues.push(cell?.formula || cell?.display || "");
+          colValues.push(getSourceValue(r, c));
         }
         sourceValues.push(colValues);
       }
@@ -846,23 +923,37 @@ export function useFillHandle(props: UseFillHandleProps): UseFillHandleReturn {
           const sourceValue = sourceValues[colIdx][sourceIndex];
           const sourceRow = selMinRow + sourceIndex;
 
-          // FIX: Use computeFillValue which handles formulas via shiftFormulaForFill
-          const value = await computeFillValue(
-            sourceValue, sourceRow, c, r, c,
-            pattern, sourceValues[colIdx], fillIndex,
-          );
-          
-          const updatedCells = await updateCell(r, c, value);
-          for (const cell of updatedCells) {
-            if (cell.sheetIndex !== undefined) continue; // Skip cross-sheet cells
-            cellEvents.emit({
-              row: cell.row,
-              col: cell.col,
-              oldValue: undefined,
-              newValue: cell.display,
-              formula: cell.formula ?? null,
-            });
-          }
+          pendingFills.push({
+            row: r,
+            col: c,
+            sourceValue,
+            sourceRow,
+            sourceCol: c,
+            pattern,
+            allSourceValues: sourceValues[colIdx],
+            fillIndex,
+          });
+        }
+      }
+
+      // OPTIMIZATION: Process all fills using batch formula shifting
+      const batchUpdates = await processPendingFills(pendingFills);
+
+      // Execute all updates in a single batch call
+      if (batchUpdates.length > 0) {
+        console.log(`[FillHandle] autoFillToEdge: Sending batch update for ${batchUpdates.length} cells`);
+        const updatedCells = await updateCellsBatch(batchUpdates);
+
+        // Emit events for all updated cells
+        for (const cell of updatedCells) {
+          if (cell.sheetIndex !== undefined) continue; // Skip cross-sheet cells
+          cellEvents.emit({
+            row: cell.row,
+            col: cell.col,
+            oldValue: undefined,
+            newValue: cell.display,
+            formula: cell.formula ?? null,
+          });
         }
       }
 

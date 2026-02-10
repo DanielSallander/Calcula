@@ -29,6 +29,16 @@ fn default_span() -> u32 {
     1
 }
 
+/// Input for batch cell updates.
+/// Used by update_cells_batch for efficient bulk operations.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CellUpdateInput {
+    pub row: u32,
+    pub col: u32,
+    pub value: String,
+}
+
 /// Style data returned to the frontend.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -346,6 +356,31 @@ impl From<&CellStyle> for StyleData {
             },
         }
     }
+}
+
+// ============================================================================
+// Batch Formula Shift (for fill operations)
+// ============================================================================
+
+/// Input for batch formula shifting.
+/// Used by shift_formulas_batch for efficient fill operations.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FormulaShiftInput {
+    /// The formula to shift (including the "=" prefix)
+    pub formula: String,
+    /// Row delta to shift (positive = down, negative = up)
+    pub row_delta: i32,
+    /// Column delta to shift (positive = right, negative = left)
+    pub col_delta: i32,
+}
+
+/// Result of batch formula shifting.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FormulaShiftResult {
+    /// The shifted formulas in the same order as the input
+    pub formulas: Vec<String>,
 }
 
 /// Convert NumberFormat to a display name.

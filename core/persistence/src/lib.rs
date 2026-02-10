@@ -130,6 +130,7 @@ impl SavedCell {
             value: self.value.to_value(),
             formula: self.formula.clone(),
             style_index: self.style_index,
+            cached_ast: None,
         }
     }
 }

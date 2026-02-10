@@ -925,6 +925,7 @@ pub fn run() {
             commands::get_viewport_cells,
             commands::get_cell,
             commands::update_cell,
+            commands::update_cells_batch,
             commands::clear_cell,
             commands::clear_range,
             commands::clear_range_with_options,
@@ -951,6 +952,7 @@ pub fn run() {
             commands::delete_rows,
             commands::delete_columns,
             commands::shift_formula_for_fill,
+            commands::shift_formulas_batch,
             // Undo/Redo commands
             undo_commands::begin_undo_transaction,
             undo_commands::commit_undo_transaction,
