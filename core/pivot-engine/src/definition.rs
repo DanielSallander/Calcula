@@ -255,24 +255,80 @@ pub enum DateFilterType {
 pub struct PivotLayout {
     /// Show row grand totals.
     pub show_row_grand_totals: bool,
-    
+
     /// Show column grand totals.
     pub show_column_grand_totals: bool,
-    
+
     /// Layout form: Compact, Outline, or Tabular.
     pub report_layout: ReportLayout,
-    
+
     /// Repeat row labels in Tabular/Outline layouts.
     pub repeat_row_labels: bool,
-    
+
     /// Show empty rows.
     pub show_empty_rows: bool,
-    
+
     /// Show empty columns.
     pub show_empty_cols: bool,
-    
+
     /// Where to place multiple value fields.
     pub values_position: ValuesPosition,
+
+    // ============================================================================
+    // NEW EXCEL-COMPATIBLE PROPERTIES
+    // ============================================================================
+
+    /// Auto-format when refreshed or fields moved.
+    #[serde(default = "default_true")]
+    pub auto_format: bool,
+
+    /// Preserve formatting on refresh/recalculation.
+    #[serde(default = "default_true")]
+    pub preserve_formatting: bool,
+
+    /// Display field headers and filter drop-downs.
+    #[serde(default = "default_true")]
+    pub show_field_headers: bool,
+
+    /// Enable field list in UI.
+    #[serde(default = "default_true")]
+    pub enable_field_list: bool,
+
+    /// Text to fill empty cells.
+    #[serde(default)]
+    pub empty_cell_text: Option<String>,
+
+    /// Whether to fill empty cells with empty_cell_text.
+    #[serde(default)]
+    pub fill_empty_cells: bool,
+
+    /// Subtotal location: AtTop, AtBottom, or Off.
+    #[serde(default)]
+    pub subtotal_location: SubtotalLocation,
+
+    /// Alt text title for accessibility.
+    #[serde(default)]
+    pub alt_text_title: Option<String>,
+
+    /// Alt text description for accessibility.
+    #[serde(default)]
+    pub alt_text_description: Option<String>,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+/// Subtotal location type.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum SubtotalLocation {
+    /// Show subtotals at top of group.
+    AtTop,
+    /// Show subtotals at bottom of group (default).
+    #[default]
+    AtBottom,
+    /// Do not show subtotals.
+    Off,
 }
 
 impl Default for PivotLayout {
@@ -285,6 +341,15 @@ impl Default for PivotLayout {
             show_empty_rows: false,
             show_empty_cols: false,
             values_position: ValuesPosition::Columns,
+            auto_format: true,
+            preserve_formatting: true,
+            show_field_headers: true,
+            enable_field_list: true,
+            empty_cell_text: None,
+            fill_empty_cells: false,
+            subtotal_location: SubtotalLocation::AtBottom,
+            alt_text_title: None,
+            alt_text_description: None,
         }
     }
 }
@@ -331,42 +396,63 @@ impl Default for ValuesPosition {
 pub struct PivotDefinition {
     /// Unique identifier for this pivot table.
     pub id: PivotId,
-    
+
     /// User-friendly name for this pivot table.
-    pub name: String,
-    
+    #[serde(default)]
+    pub name: Option<String>,
+
     /// The source data range (top-left corner).
     pub source_start: CellCoord,
-    
+
     /// The source data range (bottom-right corner).
     pub source_end: CellCoord,
-    
+
     /// Whether the first row of source data contains headers.
     pub source_has_headers: bool,
-    
+
     /// Fields placed in the Row area (ordered from outer to inner).
     pub row_fields: Vec<PivotField>,
-    
+
     /// Fields placed in the Column area (ordered from outer to inner).
     pub column_fields: Vec<PivotField>,
-    
+
     /// Fields placed in the Values area.
     pub value_fields: Vec<ValueField>,
-    
+
     /// Fields placed in the Filter area (page filters).
     pub filter_fields: Vec<PivotFilter>,
-    
+
     /// Layout and display options.
     pub layout: PivotLayout,
-    
+
     /// Where the pivot table output starts in the destination sheet.
     pub destination: CellCoord,
-    
+
     /// Destination sheet name (if different from source).
     pub destination_sheet: Option<String>,
-    
+
     /// Version for cache invalidation.
     pub version: u64,
+
+    // ============================================================================
+    // NEW EXCEL-COMPATIBLE PROPERTIES
+    // ============================================================================
+
+    /// Allow multiple filters per field (Excel: allowMultipleFiltersPerField).
+    #[serde(default)]
+    pub allow_multiple_filters_per_field: bool,
+
+    /// Enable editing of values in the data body (Excel: enableDataValueEditing).
+    #[serde(default)]
+    pub enable_data_value_editing: bool,
+
+    /// Refresh when workbook opens (Excel: refreshOnOpen).
+    #[serde(default)]
+    pub refresh_on_open: bool,
+
+    /// Use custom sort lists when sorting (Excel: useCustomSortLists).
+    #[serde(default)]
+    pub use_custom_sort_lists: bool,
 }
 
 impl PivotDefinition {
@@ -374,7 +460,7 @@ impl PivotDefinition {
     pub fn new(id: PivotId, source_start: CellCoord, source_end: CellCoord) -> Self {
         PivotDefinition {
             id,
-            name: format!("PivotTable{}", id),
+            name: None,
             source_start,
             source_end,
             source_has_headers: true,
@@ -386,6 +472,10 @@ impl PivotDefinition {
             destination: (0, 0),
             destination_sheet: None,
             version: 0,
+            allow_multiple_filters_per_field: false,
+            enable_data_value_editing: false,
+            refresh_on_open: false,
+            use_custom_sort_lists: false,
         }
     }
     

@@ -7,8 +7,9 @@ use crate::api_types::{
 };
 use crate::commands::utils::get_cell_internal_with_merge;
 use crate::{
-    evaluate_formula_multi_sheet, extract_all_references, format_cell_value,
-    get_column_row_dependents, get_recalculation_order, parse_cell_input,
+    evaluate_formula_multi_sheet, evaluate_formula_multi_sheet_with_ast,
+    extract_all_references, format_cell_value, get_column_row_dependents,
+    get_recalculation_order, parse_cell_input, parse_formula_to_engine_ast,
     update_column_dependencies, update_cross_sheet_dependencies, update_dependencies,
     update_row_dependencies, AppState,
 };
@@ -222,20 +223,10 @@ pub fn update_cell(
 
     // If it's a formula, evaluate it using multi-sheet context
     if let Some(ref formula) = cell.formula {
-        println!(
-            "[XDEP] Processing formula: {} at ({}, {}) on sheet {} (index {})",
-            formula, row, col, current_sheet_name, active_sheet
-        );
-
-        // Extract references for dependency tracking
+        // Extract references for dependency tracking AND cache the AST
         match parser::parse(formula) {
             Ok(parsed) => {
-                println!("[XDEP] Formula parsed successfully");
                 let refs = extract_all_references(&parsed, &grid);
-                println!(
-                    "[XDEP] Extracted refs - cells: {:?}, cross_sheet: {:?}",
-                    refs.cells, refs.cross_sheet_cells
-                );
 
                 update_dependencies(
                     (row, col),
@@ -268,38 +259,44 @@ pub fn update_cell(
                             .find(|name| name.eq_ignore_ascii_case(parsed_sheet_name))
                             .cloned()
                             .unwrap_or_else(|| parsed_sheet_name.clone());
-                        println!(
-                            "[XDEP] Normalizing sheet ref: '{}' -> '{}'",
-                            parsed_sheet_name, normalized
-                        );
                         Some((normalized, *r, *c))
                     })
                     .collect();
 
                 // Track cross-sheet dependencies
-                if !normalized_cross_sheet_refs.is_empty() {
-                    println!(
-                        "[XDEP] Cell ({}, {}) on sheet {} has cross-sheet refs: {:?}",
-                        row, col, current_sheet_name, normalized_cross_sheet_refs
-                    );
-                } else {
-                    println!("[XDEP] No cross-sheet refs found in formula");
-                }
                 update_cross_sheet_dependencies(
                     (active_sheet, row, col),
                     normalized_cross_sheet_refs,
                     &mut cross_sheet_dependencies_map,
                     &mut cross_sheet_dependents_map,
                 );
+
+                // Cache the engine AST for efficient recalculation
+                if let Ok(engine_ast) = parse_formula_to_engine_ast(formula) {
+                    cell.set_cached_ast(engine_ast.clone());
+                    // Evaluate using the cached AST (avoid re-parsing)
+                    let result = evaluate_formula_multi_sheet_with_ast(
+                        &grids,
+                        &sheet_names,
+                        active_sheet,
+                        &engine_ast,
+                    );
+                    cell.value = result;
+                } else {
+                    // Fallback to string-based evaluation
+                    let result =
+                        evaluate_formula_multi_sheet(&grids, &sheet_names, active_sheet, formula);
+                    cell.value = result;
+                }
             }
-            Err(e) => {
-                println!("[XDEP] Formula parse error: {:?}", e);
+            Err(_e) => {
+                // Formula parse error - dependencies won't be tracked
+                // Still try to evaluate (will return error)
+                let result =
+                    evaluate_formula_multi_sheet(&grids, &sheet_names, active_sheet, formula);
+                cell.value = result;
             }
         }
-
-        // Evaluate using multi-sheet context for cross-sheet reference support
-        let result = evaluate_formula_multi_sheet(&grids, &sheet_names, active_sheet, formula);
-        cell.value = result;
     } else {
         // Clear dependencies for non-formula cells
         update_dependencies(
@@ -369,14 +366,22 @@ pub fn update_cell(
 
     // Recalculate dependents if automatic mode
     if *calc_mode == "automatic" {
+        // Build a HashMap for O(1) merge region lookup instead of O(n) linear search
+        let merge_lookup: std::collections::HashMap<(u32, u32), &MergedRegion> = merged_regions
+            .iter()
+            .map(|r| ((r.start_row, r.start_col), r))
+            .collect();
+
         // Get direct cell dependents
         let mut recalc_order = get_recalculation_order((row, col), &dependents_map);
 
         // Also get column/row dependents (formulas with column or row references)
+        // Use a HashSet for O(1) lookup instead of O(n) Vec::contains
+        let recalc_set: HashSet<(u32, u32)> = recalc_order.iter().copied().collect();
         let col_row_deps =
             get_column_row_dependents((row, col), &column_dependents_map, &row_dependents_map);
         for dep in col_row_deps {
-            if !recalc_order.contains(&dep) {
+            if !recalc_set.contains(&dep) {
                 recalc_order.push(dep);
             }
         }
@@ -384,9 +389,62 @@ pub fn update_cell(
         for &(dep_row, dep_col) in &recalc_order {
             if let Some(dep_cell) = grid.get_cell(dep_row, dep_col) {
                 if let Some(ref formula) = dep_cell.formula {
-                    // Evaluate dependent using multi-sheet context
-                    let result =
-                        evaluate_formula_multi_sheet(&grids, &sheet_names, active_sheet, formula);
+                    // Use cached AST if available for efficient evaluation
+                    let result = if let Some(cached_ast) = dep_cell.get_cached_ast() {
+                        // Fast path: use pre-parsed AST
+                        evaluate_formula_multi_sheet_with_ast(
+                            &grids,
+                            &sheet_names,
+                            active_sheet,
+                            cached_ast,
+                        )
+                    } else {
+                        // Slow path: parse and cache the AST for future use
+                        if let Ok(engine_ast) = parse_formula_to_engine_ast(formula) {
+                            let result = evaluate_formula_multi_sheet_with_ast(
+                                &grids,
+                                &sheet_names,
+                                active_sheet,
+                                &engine_ast,
+                            );
+                            // Cache the AST for next time
+                            let mut updated_with_ast = dep_cell.clone();
+                            updated_with_ast.set_cached_ast(engine_ast);
+                            updated_with_ast.value = result.clone();
+                            grid.set_cell(dep_row, dep_col, updated_with_ast.clone());
+                            if active_sheet < grids.len() {
+                                grids[active_sheet]
+                                    .set_cell(dep_row, dep_col, updated_with_ast.clone());
+                            }
+
+                            let dep_style = styles.get(updated_with_ast.style_index);
+                            let dep_display = format_cell_value(&updated_with_ast.value, dep_style);
+
+                            let (dep_row_span, dep_col_span) =
+                                if let Some(region) = merge_lookup.get(&(dep_row, dep_col)) {
+                                    (
+                                        region.end_row - region.start_row + 1,
+                                        region.end_col - region.start_col + 1,
+                                    )
+                                } else {
+                                    (1, 1)
+                                };
+
+                            updated_cells.push(CellData {
+                                row: dep_row,
+                                col: dep_col,
+                                display: dep_display,
+                                formula: updated_with_ast.formula.clone(),
+                                style_index: updated_with_ast.style_index,
+                                row_span: dep_row_span,
+                                col_span: dep_col_span,
+                                sheet_index: None,
+                            });
+                            continue; // Skip the rest of this iteration
+                        }
+                        // Fallback to string-based evaluation
+                        evaluate_formula_multi_sheet(&grids, &sheet_names, active_sheet, formula)
+                    };
 
                     let mut updated_dep = dep_cell.clone();
                     updated_dep.value = result;
@@ -400,18 +458,16 @@ pub fn update_cell(
                     let dep_style = styles.get(updated_dep.style_index);
                     let dep_display = format_cell_value(&updated_dep.value, dep_style);
 
-                    // Get merge span info for dependent
-                    let dep_merge_info = merged_regions
-                        .iter()
-                        .find(|r| r.start_row == dep_row && r.start_col == dep_col);
-                    let (dep_row_span, dep_col_span) = if let Some(region) = dep_merge_info {
-                        (
-                            region.end_row - region.start_row + 1,
-                            region.end_col - region.start_col + 1,
-                        )
-                    } else {
-                        (1, 1)
-                    };
+                    // Get merge span info for dependent (O(1) HashMap lookup)
+                    let (dep_row_span, dep_col_span) =
+                        if let Some(region) = merge_lookup.get(&(dep_row, dep_col)) {
+                            (
+                                region.end_row - region.start_row + 1,
+                                region.end_col - region.start_col + 1,
+                            )
+                        } else {
+                            (1, 1)
+                        };
 
                     updated_cells.push(CellData {
                         row: dep_row,
@@ -434,11 +490,6 @@ pub fn update_cell(
             vec![(active_sheet, current_sheet_name.clone(), row, col)];
         let mut processed: HashSet<(usize, u32, u32)> = HashSet::new();
 
-        println!(
-            "[XDEP] Starting cross-sheet recalculation from ({}, {}) on sheet {}",
-            row, col, current_sheet_name
-        );
-
         // Mark the original cell and same-sheet recalculated cells as processed
         processed.insert((active_sheet, row, col));
         for (dep_row, dep_col) in &recalc_order {
@@ -451,21 +502,7 @@ pub fn update_cell(
             // 1. Find cross-sheet dependents (formulas on OTHER sheets that reference this cell)
             let cross_sheet_key = (source_sheet_name.clone(), source_row, source_col);
 
-            println!(
-                "[XDEP] Looking for dependents of ({}, {}, {}) - key: {:?}",
-                source_sheet_name, source_row, source_col, cross_sheet_key
-            );
-            println!(
-                "[XDEP] Current cross_sheet_dependents_map keys: {:?}",
-                cross_sheet_dependents_map.keys().collect::<Vec<_>>()
-            );
-
             if let Some(cross_deps) = cross_sheet_dependents_map.get(&cross_sheet_key).cloned() {
-                println!(
-                    "[XDEP] Found {} cross-sheet dependents: {:?}",
-                    cross_deps.len(),
-                    cross_deps
-                );
                 for (dep_sheet_idx, dep_row, dep_col) in cross_deps.iter() {
                     // Skip if already processed
                     if processed.contains(&(*dep_sheet_idx, *dep_row, *dep_col)) {
@@ -477,13 +514,23 @@ pub fn update_cell(
                     if *dep_sheet_idx < grids.len() {
                         if let Some(dep_cell) = grids[*dep_sheet_idx].get_cell(*dep_row, *dep_col) {
                             if let Some(ref formula) = dep_cell.formula {
-                                // Evaluate the formula in context of its own sheet
-                                let result = evaluate_formula_multi_sheet(
-                                    &grids,
-                                    &sheet_names,
-                                    *dep_sheet_idx,
-                                    formula,
-                                );
+                                // Use cached AST if available
+                                let result = if let Some(cached_ast) = dep_cell.get_cached_ast() {
+                                    evaluate_formula_multi_sheet_with_ast(
+                                        &grids,
+                                        &sheet_names,
+                                        *dep_sheet_idx,
+                                        cached_ast,
+                                    )
+                                } else {
+                                    // Fallback: parse and evaluate
+                                    evaluate_formula_multi_sheet(
+                                        &grids,
+                                        &sheet_names,
+                                        *dep_sheet_idx,
+                                        formula,
+                                    )
+                                };
 
                                 let mut updated_dep = dep_cell.clone();
                                 updated_dep.value = result.clone();
@@ -496,11 +543,6 @@ pub fn update_cell(
                                 // Format the display value and add to updated_cells with sheet_index
                                 let dep_style = styles.get(updated_dep.style_index);
                                 let dep_display = format_cell_value(&updated_dep.value, dep_style);
-
-                                println!(
-                                    "[XDEP] Recalculated cell ({}, {}) on sheet {} -> display: {}",
-                                    *dep_row, *dep_col, *dep_sheet_idx, dep_display
-                                );
 
                                 // For cross-sheet cells, use default span (1,1) since merged_regions
                                 // is currently tracked per-active-sheet only
@@ -551,13 +593,23 @@ pub fn update_cell(
                             if let Some(ref formula) = dep_cell.formula {
                                 processed.insert((source_sheet_idx, ss_dep_row, ss_dep_col));
 
-                                // Evaluate the formula in context of its own sheet
-                                let result = evaluate_formula_multi_sheet(
-                                    &grids,
-                                    &sheet_names,
-                                    source_sheet_idx,
-                                    formula,
-                                );
+                                // Use cached AST if available
+                                let result = if let Some(cached_ast) = dep_cell.get_cached_ast() {
+                                    evaluate_formula_multi_sheet_with_ast(
+                                        &grids,
+                                        &sheet_names,
+                                        source_sheet_idx,
+                                        cached_ast,
+                                    )
+                                } else {
+                                    // Fallback: parse and evaluate
+                                    evaluate_formula_multi_sheet(
+                                        &grids,
+                                        &sheet_names,
+                                        source_sheet_idx,
+                                        formula,
+                                    )
+                                };
 
                                 let mut updated_dep = dep_cell.clone();
                                 updated_dep.value = result.clone();

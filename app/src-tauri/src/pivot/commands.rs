@@ -1,4 +1,7 @@
 //! FILENAME: app/src-tauri/src/pivot/commands.rs
+//! PURPOSE: Tauri commands for Pivot Table operations.
+//! CONTEXT: Excel-compatible Pivot Table API implementation.
+
 use crate::pivot::operations::*;
 use crate::pivot::types::*;
 use crate::pivot::utils::*;
@@ -723,5 +726,1213 @@ pub fn get_pivot_field_unique_values(
         field_index,
         field_name,
         unique_values,
+    })
+}
+
+// ============================================================================
+// NEW EXCEL-COMPATIBLE COMMANDS
+// ============================================================================
+
+/// Gets pivot table properties and info.
+#[tauri::command]
+pub fn get_pivot_table_info(
+    state: State<AppState>,
+    pivot_state: State<'_, PivotState>,
+    pivot_id: PivotId,
+) -> Result<PivotTableInfo, String> {
+    log_debug!("PIVOT", "get_pivot_table_info pivot_id={}", pivot_id);
+
+    let pivot_tables = pivot_state.pivot_tables.lock().unwrap();
+    let (definition, _) = pivot_tables
+        .get(&pivot_id)
+        .ok_or_else(|| format!("Pivot table {} not found", pivot_id))?;
+
+    let source_range = format_range(definition.source_start, definition.source_end);
+    let destination = format_cell(definition.destination);
+
+    Ok(PivotTableInfo {
+        id: definition.id,
+        name: definition.name.clone().unwrap_or_else(|| format!("PivotTable{}", pivot_id)),
+        source_range,
+        destination,
+        allow_multiple_filters_per_field: definition.allow_multiple_filters_per_field,
+        enable_data_value_editing: definition.enable_data_value_editing,
+        refresh_on_open: definition.refresh_on_open,
+        use_custom_sort_lists: definition.use_custom_sort_lists,
+        has_headers: definition.source_has_headers,
+    })
+}
+
+/// Updates pivot table properties.
+#[tauri::command]
+pub fn update_pivot_properties(
+    state: State<AppState>,
+    pivot_state: State<'_, PivotState>,
+    request: UpdatePivotPropertiesRequest,
+) -> Result<PivotTableInfo, String> {
+    log_info!("PIVOT", "update_pivot_properties pivot_id={}", request.pivot_id);
+
+    let mut pivot_tables = pivot_state.pivot_tables.lock().unwrap();
+    let (definition, _) = pivot_tables
+        .get_mut(&request.pivot_id)
+        .ok_or_else(|| format!("Pivot table {} not found", request.pivot_id))?;
+
+    // Update properties
+    if let Some(name) = request.name {
+        definition.name = Some(name);
+    }
+    if let Some(v) = request.allow_multiple_filters_per_field {
+        definition.allow_multiple_filters_per_field = v;
+    }
+    if let Some(v) = request.enable_data_value_editing {
+        definition.enable_data_value_editing = v;
+    }
+    if let Some(v) = request.refresh_on_open {
+        definition.refresh_on_open = v;
+    }
+    if let Some(v) = request.use_custom_sort_lists {
+        definition.use_custom_sort_lists = v;
+    }
+
+    let source_range = format_range(definition.source_start, definition.source_end);
+    let destination = format_cell(definition.destination);
+
+    Ok(PivotTableInfo {
+        id: definition.id,
+        name: definition.name.clone().unwrap_or_else(|| format!("PivotTable{}", request.pivot_id)),
+        source_range,
+        destination,
+        allow_multiple_filters_per_field: definition.allow_multiple_filters_per_field,
+        enable_data_value_editing: definition.enable_data_value_editing,
+        refresh_on_open: definition.refresh_on_open,
+        use_custom_sort_lists: definition.use_custom_sort_lists,
+        has_headers: definition.source_has_headers,
+    })
+}
+
+/// Gets pivot layout ranges (data body, row labels, column labels, filter axis).
+#[tauri::command]
+pub fn get_pivot_layout_ranges(
+    state: State<AppState>,
+    pivot_state: State<'_, PivotState>,
+    pivot_id: PivotId,
+) -> Result<PivotLayoutRanges, String> {
+    log_debug!("PIVOT", "get_pivot_layout_ranges pivot_id={}", pivot_id);
+
+    let mut pivot_tables = pivot_state.pivot_tables.lock().unwrap();
+    let (definition, cache) = pivot_tables
+        .get_mut(&pivot_id)
+        .ok_or_else(|| format!("Pivot table {} not found", pivot_id))?;
+
+    // Calculate view to get accurate ranges
+    let view = safe_calculate_pivot(definition, cache);
+    let (dest_row, dest_col) = definition.destination;
+
+    // If view is empty, return empty ranges
+    if view.row_count == 0 || view.col_count == 0 {
+        return Ok(PivotLayoutRanges {
+            range: None,
+            data_body_range: None,
+            column_label_range: None,
+            row_label_range: None,
+            filter_axis_range: None,
+        });
+    }
+
+    // Full range (excluding filter area)
+    let filter_rows = view.filter_row_count;
+    let range_start_row = dest_row + filter_rows as u32;
+    let range = Some(RangeInfo {
+        start_row: range_start_row,
+        start_col: dest_col,
+        end_row: dest_row + view.row_count as u32 - 1,
+        end_col: dest_col + view.col_count as u32 - 1,
+        address: format_range(
+            (range_start_row, dest_col),
+            (dest_row + view.row_count as u32 - 1, dest_col + view.col_count as u32 - 1),
+        ),
+    });
+
+    // Data body range (values only, after headers)
+    let data_start_row = dest_row + filter_rows as u32 + view.column_header_row_count as u32;
+    let data_start_col = dest_col + view.row_label_col_count as u32;
+    let data_body_range = if view.row_count > view.column_header_row_count
+        && view.col_count > view.row_label_col_count {
+        Some(RangeInfo {
+            start_row: data_start_row,
+            start_col: data_start_col,
+            end_row: dest_row + view.row_count as u32 - 1,
+            end_col: dest_col + view.col_count as u32 - 1,
+            address: format_range(
+                (data_start_row, data_start_col),
+                (dest_row + view.row_count as u32 - 1, dest_col + view.col_count as u32 - 1),
+            ),
+        })
+    } else {
+        None
+    };
+
+    // Column label range (header rows, data columns only)
+    let column_label_range = if view.column_header_row_count > 0 && view.col_count > view.row_label_col_count {
+        Some(RangeInfo {
+            start_row: range_start_row,
+            start_col: data_start_col,
+            end_row: data_start_row - 1,
+            end_col: dest_col + view.col_count as u32 - 1,
+            address: format_range(
+                (range_start_row, data_start_col),
+                (data_start_row - 1, dest_col + view.col_count as u32 - 1),
+            ),
+        })
+    } else {
+        None
+    };
+
+    // Row label range (all data rows, label columns only)
+    let row_label_range = if view.row_label_col_count > 0 && view.row_count > view.column_header_row_count {
+        Some(RangeInfo {
+            start_row: data_start_row,
+            start_col: dest_col,
+            end_row: dest_row + view.row_count as u32 - 1,
+            end_col: data_start_col - 1,
+            address: format_range(
+                (data_start_row, dest_col),
+                (dest_row + view.row_count as u32 - 1, data_start_col - 1),
+            ),
+        })
+    } else {
+        None
+    };
+
+    // Filter axis range
+    let filter_axis_range = if filter_rows > 0 {
+        Some(RangeInfo {
+            start_row: dest_row,
+            start_col: dest_col,
+            end_row: dest_row + filter_rows as u32 - 1,
+            end_col: dest_col + 1, // Label and dropdown columns
+            address: format_range(
+                (dest_row, dest_col),
+                (dest_row + filter_rows as u32 - 1, dest_col + 1),
+            ),
+        })
+    } else {
+        None
+    };
+
+    Ok(PivotLayoutRanges {
+        range,
+        data_body_range,
+        column_label_range,
+        row_label_range,
+        filter_axis_range,
+    })
+}
+
+/// Updates pivot layout properties.
+#[tauri::command]
+pub fn update_pivot_layout(
+    state: State<AppState>,
+    pivot_state: State<'_, PivotState>,
+    request: UpdatePivotLayoutRequest,
+) -> Result<PivotViewResponse, String> {
+    log_info!("PIVOT", "update_pivot_layout pivot_id={}", request.pivot_id);
+
+    let mut pivot_tables = pivot_state.pivot_tables.lock().unwrap();
+    let (definition, cache) = pivot_tables
+        .get_mut(&request.pivot_id)
+        .ok_or_else(|| format!("Pivot table {} not found", request.pivot_id))?;
+
+    // Apply layout configuration
+    apply_layout_config(&mut definition.layout, &request.layout);
+
+    // Apply new Excel-compatible layout properties
+    if let Some(v) = request.layout.auto_format {
+        definition.layout.auto_format = v;
+    }
+    if let Some(v) = request.layout.preserve_formatting {
+        definition.layout.preserve_formatting = v;
+    }
+    if let Some(v) = request.layout.show_field_headers {
+        definition.layout.show_field_headers = v;
+    }
+    if let Some(v) = request.layout.enable_field_list {
+        definition.layout.enable_field_list = v;
+    }
+    if let Some(ref text) = request.layout.empty_cell_text {
+        definition.layout.empty_cell_text = Some(text.clone());
+    }
+    if let Some(v) = request.layout.fill_empty_cells {
+        definition.layout.fill_empty_cells = v;
+    }
+    if let Some(ref title) = request.layout.alt_text_title {
+        definition.layout.alt_text_title = Some(title.clone());
+    }
+    if let Some(ref desc) = request.layout.alt_text_description {
+        definition.layout.alt_text_description = Some(desc.clone());
+    }
+
+    // Bump version
+    definition.bump_version();
+
+    // Recalculate view
+    let view = safe_calculate_pivot(definition, cache);
+    let response = view_to_response(&view, definition, cache);
+
+    // Get destination info
+    let destination = definition.destination;
+    let pivot_id = definition.id;
+    let dest_sheet_idx = resolve_dest_sheet_index(&state, definition);
+
+    drop(pivot_tables);
+
+    // Update pivot in grid
+    update_pivot_in_grid(&state, pivot_id, dest_sheet_idx, destination, &view);
+    update_pivot_region(&state, pivot_id, dest_sheet_idx, destination, &view);
+
+    Ok(response)
+}
+
+/// Gets all hierarchies info for a pivot table.
+#[tauri::command]
+pub fn get_pivot_hierarchies(
+    state: State<AppState>,
+    pivot_state: State<'_, PivotState>,
+    pivot_id: PivotId,
+) -> Result<PivotHierarchiesInfo, String> {
+    log_debug!("PIVOT", "get_pivot_hierarchies pivot_id={}", pivot_id);
+
+    let pivot_tables = pivot_state.pivot_tables.lock().unwrap();
+    let (definition, cache) = pivot_tables
+        .get(&pivot_id)
+        .ok_or_else(|| format!("Pivot table {} not found", pivot_id))?;
+
+    // Build source field info from cache
+    let field_count = cache.field_count();
+    let hierarchies: Vec<SourceFieldInfo> = (0..field_count)
+        .map(|i| {
+            let name = cache.field_name(i).unwrap_or_else(|| format!("Field{}", i + 1));
+            let is_numeric = cache.is_numeric_field(i);
+            SourceFieldInfo {
+                index: i,
+                name,
+                is_numeric,
+            }
+        })
+        .collect();
+
+    // Row hierarchies
+    let row_hierarchies: Vec<RowColumnHierarchyInfo> = definition.row_fields
+        .iter()
+        .enumerate()
+        .map(|(pos, f)| RowColumnHierarchyInfo {
+            id: f.source_index,
+            name: f.name.clone(),
+            field_index: f.source_index,
+            position: pos,
+        })
+        .collect();
+
+    // Column hierarchies
+    let column_hierarchies: Vec<RowColumnHierarchyInfo> = definition.column_fields
+        .iter()
+        .enumerate()
+        .map(|(pos, f)| RowColumnHierarchyInfo {
+            id: f.source_index,
+            name: f.name.clone(),
+            field_index: f.source_index,
+            position: pos,
+        })
+        .collect();
+
+    // Data hierarchies
+    let data_hierarchies: Vec<DataHierarchyInfo> = definition.value_fields
+        .iter()
+        .enumerate()
+        .map(|(pos, f)| DataHierarchyInfo {
+            id: f.source_index,
+            name: f.name.clone(),
+            field_index: f.source_index,
+            summarize_by: aggregation_type_to_api(f.aggregation),
+            number_format: f.number_format.clone(),
+            position: pos,
+            show_as: show_values_as_to_api(f.show_values_as),
+        })
+        .collect();
+
+    // Filter hierarchies
+    let filter_hierarchies: Vec<RowColumnHierarchyInfo> = definition.filter_fields
+        .iter()
+        .enumerate()
+        .map(|(pos, f)| RowColumnHierarchyInfo {
+            id: f.field.source_index,
+            name: f.field.name.clone(),
+            field_index: f.field.source_index,
+            position: pos,
+        })
+        .collect();
+
+    Ok(PivotHierarchiesInfo {
+        hierarchies,
+        row_hierarchies,
+        column_hierarchies,
+        data_hierarchies,
+        filter_hierarchies,
+    })
+}
+
+/// Adds a field to a hierarchy (row, column, data, or filter).
+#[tauri::command]
+pub fn add_pivot_hierarchy(
+    state: State<AppState>,
+    pivot_state: State<'_, PivotState>,
+    request: AddHierarchyRequest,
+) -> Result<PivotViewResponse, String> {
+    log_info!(
+        "PIVOT",
+        "add_pivot_hierarchy pivot_id={} field={} axis={:?}",
+        request.pivot_id,
+        request.field_index,
+        request.axis
+    );
+
+    let mut pivot_tables = pivot_state.pivot_tables.lock().unwrap();
+    let (definition, cache) = pivot_tables
+        .get_mut(&request.pivot_id)
+        .ok_or_else(|| format!("Pivot table {} not found", request.pivot_id))?;
+
+    // Get field name from cache
+    let field_name = request.name.clone()
+        .or_else(|| cache.field_name(request.field_index))
+        .unwrap_or_else(|| format!("Field{}", request.field_index + 1));
+
+    match request.axis {
+        PivotAxis::Row => {
+            let field = pivot_engine::PivotField::new(request.field_index, field_name);
+            let position = request.position.unwrap_or(definition.row_fields.len());
+            if position <= definition.row_fields.len() {
+                definition.row_fields.insert(position, field);
+            } else {
+                definition.row_fields.push(field);
+            }
+        }
+        PivotAxis::Column => {
+            let field = pivot_engine::PivotField::new(request.field_index, field_name);
+            let position = request.position.unwrap_or(definition.column_fields.len());
+            if position <= definition.column_fields.len() {
+                definition.column_fields.insert(position, field);
+            } else {
+                definition.column_fields.push(field);
+            }
+        }
+        PivotAxis::Data => {
+            let aggregation = request.aggregation
+                .map(api_to_aggregation_type)
+                .unwrap_or(pivot_engine::AggregationType::Sum);
+            let field = pivot_engine::ValueField::new(request.field_index, field_name, aggregation);
+            let position = request.position.unwrap_or(definition.value_fields.len());
+            if position <= definition.value_fields.len() {
+                definition.value_fields.insert(position, field);
+            } else {
+                definition.value_fields.push(field);
+            }
+        }
+        PivotAxis::Filter => {
+            let field = pivot_engine::PivotField::new(request.field_index, field_name);
+            let filter = pivot_engine::PivotFilter {
+                field,
+                condition: pivot_engine::FilterCondition::ValueList(Vec::new()),
+            };
+            let position = request.position.unwrap_or(definition.filter_fields.len());
+            if position <= definition.filter_fields.len() {
+                definition.filter_fields.insert(position, filter);
+            } else {
+                definition.filter_fields.push(filter);
+            }
+        }
+        PivotAxis::Unknown => {
+            return Err("Cannot add to Unknown axis".to_string());
+        }
+    }
+
+    definition.bump_version();
+
+    // Recalculate view
+    let view = safe_calculate_pivot(definition, cache);
+    let response = view_to_response(&view, definition, cache);
+
+    let destination = definition.destination;
+    let pivot_id = definition.id;
+    let dest_sheet_idx = resolve_dest_sheet_index(&state, definition);
+
+    drop(pivot_tables);
+
+    update_pivot_in_grid(&state, pivot_id, dest_sheet_idx, destination, &view);
+    update_pivot_region(&state, pivot_id, dest_sheet_idx, destination, &view);
+
+    Ok(response)
+}
+
+/// Removes a field from a hierarchy.
+#[tauri::command]
+pub fn remove_pivot_hierarchy(
+    state: State<AppState>,
+    pivot_state: State<'_, PivotState>,
+    request: RemoveHierarchyRequest,
+) -> Result<PivotViewResponse, String> {
+    log_info!(
+        "PIVOT",
+        "remove_pivot_hierarchy pivot_id={} axis={:?} pos={}",
+        request.pivot_id,
+        request.axis,
+        request.position
+    );
+
+    let mut pivot_tables = pivot_state.pivot_tables.lock().unwrap();
+    let (definition, cache) = pivot_tables
+        .get_mut(&request.pivot_id)
+        .ok_or_else(|| format!("Pivot table {} not found", request.pivot_id))?;
+
+    match request.axis {
+        PivotAxis::Row => {
+            if request.position < definition.row_fields.len() {
+                definition.row_fields.remove(request.position);
+            } else {
+                return Err(format!("Position {} out of range for row fields", request.position));
+            }
+        }
+        PivotAxis::Column => {
+            if request.position < definition.column_fields.len() {
+                definition.column_fields.remove(request.position);
+            } else {
+                return Err(format!("Position {} out of range for column fields", request.position));
+            }
+        }
+        PivotAxis::Data => {
+            if request.position < definition.value_fields.len() {
+                definition.value_fields.remove(request.position);
+            } else {
+                return Err(format!("Position {} out of range for value fields", request.position));
+            }
+        }
+        PivotAxis::Filter => {
+            if request.position < definition.filter_fields.len() {
+                definition.filter_fields.remove(request.position);
+            } else {
+                return Err(format!("Position {} out of range for filter fields", request.position));
+            }
+        }
+        PivotAxis::Unknown => {
+            return Err("Cannot remove from Unknown axis".to_string());
+        }
+    }
+
+    definition.bump_version();
+
+    let view = safe_calculate_pivot(definition, cache);
+    let response = view_to_response(&view, definition, cache);
+
+    let destination = definition.destination;
+    let pivot_id = definition.id;
+    let dest_sheet_idx = resolve_dest_sheet_index(&state, definition);
+
+    drop(pivot_tables);
+
+    update_pivot_in_grid(&state, pivot_id, dest_sheet_idx, destination, &view);
+    update_pivot_region(&state, pivot_id, dest_sheet_idx, destination, &view);
+
+    Ok(response)
+}
+
+/// Moves a field between hierarchies.
+#[tauri::command]
+pub fn move_pivot_field(
+    state: State<AppState>,
+    pivot_state: State<'_, PivotState>,
+    request: MoveFieldRequest,
+) -> Result<PivotViewResponse, String> {
+    log_info!(
+        "PIVOT",
+        "move_pivot_field pivot_id={} field={} target={:?}",
+        request.pivot_id,
+        request.field_index,
+        request.target_axis
+    );
+
+    let mut pivot_tables = pivot_state.pivot_tables.lock().unwrap();
+    let (definition, cache) = pivot_tables
+        .get_mut(&request.pivot_id)
+        .ok_or_else(|| format!("Pivot table {} not found", request.pivot_id))?;
+
+    // Find and remove field from its current location
+    let mut field_name = String::new();
+    let mut found = false;
+
+    // Check row fields
+    if let Some(pos) = definition.row_fields.iter().position(|f| f.source_index == request.field_index) {
+        field_name = definition.row_fields[pos].name.clone();
+        definition.row_fields.remove(pos);
+        found = true;
+    }
+    // Check column fields
+    if !found {
+        if let Some(pos) = definition.column_fields.iter().position(|f| f.source_index == request.field_index) {
+            field_name = definition.column_fields[pos].name.clone();
+            definition.column_fields.remove(pos);
+            found = true;
+        }
+    }
+    // Check value fields
+    if !found {
+        if let Some(pos) = definition.value_fields.iter().position(|f| f.source_index == request.field_index) {
+            field_name = definition.value_fields[pos].name.clone();
+            definition.value_fields.remove(pos);
+            found = true;
+        }
+    }
+    // Check filter fields
+    if !found {
+        if let Some(pos) = definition.filter_fields.iter().position(|f| f.field.source_index == request.field_index) {
+            field_name = definition.filter_fields[pos].field.name.clone();
+            definition.filter_fields.remove(pos);
+            found = true;
+        }
+    }
+
+    // If not found, get name from cache
+    if !found {
+        field_name = cache.field_name(request.field_index)
+            .unwrap_or_else(|| format!("Field{}", request.field_index + 1));
+    }
+
+    // Add to target axis
+    match request.target_axis {
+        PivotAxis::Row => {
+            let field = pivot_engine::PivotField::new(request.field_index, field_name);
+            let position = request.position.unwrap_or(definition.row_fields.len());
+            if position <= definition.row_fields.len() {
+                definition.row_fields.insert(position, field);
+            } else {
+                definition.row_fields.push(field);
+            }
+        }
+        PivotAxis::Column => {
+            let field = pivot_engine::PivotField::new(request.field_index, field_name);
+            let position = request.position.unwrap_or(definition.column_fields.len());
+            if position <= definition.column_fields.len() {
+                definition.column_fields.insert(position, field);
+            } else {
+                definition.column_fields.push(field);
+            }
+        }
+        PivotAxis::Data => {
+            let field = pivot_engine::ValueField::new(
+                request.field_index,
+                field_name,
+                pivot_engine::AggregationType::Sum,
+            );
+            let position = request.position.unwrap_or(definition.value_fields.len());
+            if position <= definition.value_fields.len() {
+                definition.value_fields.insert(position, field);
+            } else {
+                definition.value_fields.push(field);
+            }
+        }
+        PivotAxis::Filter => {
+            let field = pivot_engine::PivotField::new(request.field_index, field_name);
+            let filter = pivot_engine::PivotFilter {
+                field,
+                condition: pivot_engine::FilterCondition::ValueList(Vec::new()),
+            };
+            let position = request.position.unwrap_or(definition.filter_fields.len());
+            if position <= definition.filter_fields.len() {
+                definition.filter_fields.insert(position, filter);
+            } else {
+                definition.filter_fields.push(filter);
+            }
+        }
+        PivotAxis::Unknown => {
+            // Just remove from all hierarchies, don't add anywhere
+        }
+    }
+
+    definition.bump_version();
+
+    let view = safe_calculate_pivot(definition, cache);
+    let response = view_to_response(&view, definition, cache);
+
+    let destination = definition.destination;
+    let pivot_id = definition.id;
+    let dest_sheet_idx = resolve_dest_sheet_index(&state, definition);
+
+    drop(pivot_tables);
+
+    update_pivot_in_grid(&state, pivot_id, dest_sheet_idx, destination, &view);
+    update_pivot_region(&state, pivot_id, dest_sheet_idx, destination, &view);
+
+    Ok(response)
+}
+
+/// Sets the aggregation function for a value field.
+#[tauri::command]
+pub fn set_pivot_aggregation(
+    state: State<AppState>,
+    pivot_state: State<'_, PivotState>,
+    request: SetAggregationRequest,
+) -> Result<PivotViewResponse, String> {
+    log_info!(
+        "PIVOT",
+        "set_pivot_aggregation pivot_id={} field={} func={:?}",
+        request.pivot_id,
+        request.value_field_index,
+        request.summarize_by
+    );
+
+    let mut pivot_tables = pivot_state.pivot_tables.lock().unwrap();
+    let (definition, cache) = pivot_tables
+        .get_mut(&request.pivot_id)
+        .ok_or_else(|| format!("Pivot table {} not found", request.pivot_id))?;
+
+    if request.value_field_index >= definition.value_fields.len() {
+        return Err(format!(
+            "Value field index {} out of range (max {})",
+            request.value_field_index,
+            definition.value_fields.len().saturating_sub(1)
+        ));
+    }
+
+    definition.value_fields[request.value_field_index].aggregation =
+        api_to_aggregation_type(request.summarize_by);
+
+    definition.bump_version();
+
+    let view = safe_calculate_pivot(definition, cache);
+    let response = view_to_response(&view, definition, cache);
+
+    let destination = definition.destination;
+    let pivot_id = definition.id;
+    let dest_sheet_idx = resolve_dest_sheet_index(&state, definition);
+
+    drop(pivot_tables);
+
+    update_pivot_in_grid(&state, pivot_id, dest_sheet_idx, destination, &view);
+    update_pivot_region(&state, pivot_id, dest_sheet_idx, destination, &view);
+
+    Ok(response)
+}
+
+/// Sets the number format for a value field.
+#[tauri::command]
+pub fn set_pivot_number_format(
+    state: State<AppState>,
+    pivot_state: State<'_, PivotState>,
+    request: SetNumberFormatRequest,
+) -> Result<PivotViewResponse, String> {
+    log_info!(
+        "PIVOT",
+        "set_pivot_number_format pivot_id={} field={} format={}",
+        request.pivot_id,
+        request.value_field_index,
+        request.number_format
+    );
+
+    let mut pivot_tables = pivot_state.pivot_tables.lock().unwrap();
+    let (definition, cache) = pivot_tables
+        .get_mut(&request.pivot_id)
+        .ok_or_else(|| format!("Pivot table {} not found", request.pivot_id))?;
+
+    if request.value_field_index >= definition.value_fields.len() {
+        return Err(format!(
+            "Value field index {} out of range",
+            request.value_field_index
+        ));
+    }
+
+    definition.value_fields[request.value_field_index].number_format =
+        Some(request.number_format);
+
+    definition.bump_version();
+
+    let view = safe_calculate_pivot(definition, cache);
+    let response = view_to_response(&view, definition, cache);
+
+    let destination = definition.destination;
+    let pivot_id = definition.id;
+    let dest_sheet_idx = resolve_dest_sheet_index(&state, definition);
+
+    drop(pivot_tables);
+
+    update_pivot_in_grid(&state, pivot_id, dest_sheet_idx, destination, &view);
+    update_pivot_region(&state, pivot_id, dest_sheet_idx, destination, &view);
+
+    Ok(response)
+}
+
+/// Applies a filter to a pivot field.
+#[tauri::command]
+pub fn apply_pivot_filter(
+    state: State<AppState>,
+    pivot_state: State<'_, PivotState>,
+    request: ApplyPivotFilterRequest,
+) -> Result<PivotViewResponse, String> {
+    log_info!(
+        "PIVOT",
+        "apply_pivot_filter pivot_id={} field={}",
+        request.pivot_id,
+        request.field_index
+    );
+
+    let mut pivot_tables = pivot_state.pivot_tables.lock().unwrap();
+    let (definition, cache) = pivot_tables
+        .get_mut(&request.pivot_id)
+        .ok_or_else(|| format!("Pivot table {} not found", request.pivot_id))?;
+
+    // Find the field in row, column, or filter fields and update hidden_items
+    let mut found = false;
+
+    // Apply manual filter as hidden items
+    if let Some(ref manual) = request.filters.manual_filter {
+        // Get all unique values for this field
+        let all_values: Vec<String> = if let Some(field_cache) = cache.fields.get_mut(request.field_index) {
+            let sorted_ids = field_cache.sorted_ids().to_vec();
+            sorted_ids.iter()
+                .filter_map(|&id| {
+                    if id == VALUE_ID_EMPTY {
+                        return None;
+                    }
+                    field_cache.get_value(id).map(cache_value_to_string)
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
+
+        // Hidden items = all items - selected items
+        let hidden_items: Vec<String> = all_values.iter()
+            .filter(|v| !manual.selected_items.contains(v))
+            .cloned()
+            .collect();
+
+        // Update row fields
+        for field in &mut definition.row_fields {
+            if field.source_index == request.field_index {
+                field.hidden_items = hidden_items.clone();
+                found = true;
+            }
+        }
+
+        // Update column fields
+        for field in &mut definition.column_fields {
+            if field.source_index == request.field_index {
+                field.hidden_items = hidden_items.clone();
+                found = true;
+            }
+        }
+
+        // Update filter fields
+        for filter in &mut definition.filter_fields {
+            if filter.field.source_index == request.field_index {
+                filter.field.hidden_items = hidden_items.clone();
+                found = true;
+            }
+        }
+    }
+
+    if !found {
+        log_debug!("PIVOT", "Field {} not found in any hierarchy, filter not applied", request.field_index);
+    }
+
+    definition.bump_version();
+
+    let view = safe_calculate_pivot(definition, cache);
+    let response = view_to_response(&view, definition, cache);
+
+    let destination = definition.destination;
+    let pivot_id = definition.id;
+    let dest_sheet_idx = resolve_dest_sheet_index(&state, definition);
+
+    drop(pivot_tables);
+
+    update_pivot_in_grid(&state, pivot_id, dest_sheet_idx, destination, &view);
+    update_pivot_region(&state, pivot_id, dest_sheet_idx, destination, &view);
+
+    Ok(response)
+}
+
+/// Clears filters from a pivot field.
+#[tauri::command]
+pub fn clear_pivot_filter(
+    state: State<AppState>,
+    pivot_state: State<'_, PivotState>,
+    request: ClearPivotFilterRequest,
+) -> Result<PivotViewResponse, String> {
+    log_info!(
+        "PIVOT",
+        "clear_pivot_filter pivot_id={} field={}",
+        request.pivot_id,
+        request.field_index
+    );
+
+    let mut pivot_tables = pivot_state.pivot_tables.lock().unwrap();
+    let (definition, cache) = pivot_tables
+        .get_mut(&request.pivot_id)
+        .ok_or_else(|| format!("Pivot table {} not found", request.pivot_id))?;
+
+    // Clear hidden items from all matching fields
+    for field in &mut definition.row_fields {
+        if field.source_index == request.field_index {
+            field.hidden_items.clear();
+        }
+    }
+    for field in &mut definition.column_fields {
+        if field.source_index == request.field_index {
+            field.hidden_items.clear();
+        }
+    }
+    for filter in &mut definition.filter_fields {
+        if filter.field.source_index == request.field_index {
+            filter.field.hidden_items.clear();
+        }
+    }
+
+    definition.bump_version();
+
+    let view = safe_calculate_pivot(definition, cache);
+    let response = view_to_response(&view, definition, cache);
+
+    let destination = definition.destination;
+    let pivot_id = definition.id;
+    let dest_sheet_idx = resolve_dest_sheet_index(&state, definition);
+
+    drop(pivot_tables);
+
+    update_pivot_in_grid(&state, pivot_id, dest_sheet_idx, destination, &view);
+    update_pivot_region(&state, pivot_id, dest_sheet_idx, destination, &view);
+
+    Ok(response)
+}
+
+/// Sorts a pivot field by labels.
+#[tauri::command]
+pub fn sort_pivot_field(
+    state: State<AppState>,
+    pivot_state: State<'_, PivotState>,
+    request: SortPivotFieldRequest,
+) -> Result<PivotViewResponse, String> {
+    log_info!(
+        "PIVOT",
+        "sort_pivot_field pivot_id={} field={} by={:?}",
+        request.pivot_id,
+        request.field_index,
+        request.sort_by
+    );
+
+    let mut pivot_tables = pivot_state.pivot_tables.lock().unwrap();
+    let (definition, cache) = pivot_tables
+        .get_mut(&request.pivot_id)
+        .ok_or_else(|| format!("Pivot table {} not found", request.pivot_id))?;
+
+    let sort_order = match request.sort_by {
+        SortBy::Ascending => pivot_engine::SortOrder::Ascending,
+        SortBy::Descending => pivot_engine::SortOrder::Descending,
+    };
+
+    // Update sort order for matching fields
+    for field in &mut definition.row_fields {
+        if field.source_index == request.field_index {
+            field.sort_order = sort_order;
+        }
+    }
+    for field in &mut definition.column_fields {
+        if field.source_index == request.field_index {
+            field.sort_order = sort_order;
+        }
+    }
+
+    definition.bump_version();
+
+    let view = safe_calculate_pivot(definition, cache);
+    let response = view_to_response(&view, definition, cache);
+
+    let destination = definition.destination;
+    let pivot_id = definition.id;
+    let dest_sheet_idx = resolve_dest_sheet_index(&state, definition);
+
+    drop(pivot_tables);
+
+    update_pivot_in_grid(&state, pivot_id, dest_sheet_idx, destination, &view);
+    update_pivot_region(&state, pivot_id, dest_sheet_idx, destination, &view);
+
+    Ok(response)
+}
+
+/// Gets pivot field info including items and filters.
+#[tauri::command]
+pub fn get_pivot_field_info(
+    state: State<AppState>,
+    pivot_state: State<'_, PivotState>,
+    pivot_id: PivotId,
+    field_index: usize,
+) -> Result<PivotFieldInfo, String> {
+    log_debug!("PIVOT", "get_pivot_field_info pivot_id={} field={}", pivot_id, field_index);
+
+    let mut pivot_tables = pivot_state.pivot_tables.lock().unwrap();
+    let (definition, cache) = pivot_tables
+        .get_mut(&pivot_id)
+        .ok_or_else(|| format!("Pivot table {} not found", pivot_id))?;
+
+    // Get field name from cache
+    let field_name = cache.field_name(field_index)
+        .unwrap_or_else(|| format!("Field{}", field_index + 1));
+
+    // Get hidden items from definition
+    let hidden_items: Vec<String> = definition.row_fields.iter()
+        .chain(definition.column_fields.iter())
+        .find(|f| f.source_index == field_index)
+        .map(|f| f.hidden_items.clone())
+        .unwrap_or_default();
+
+    let show_all_items = hidden_items.is_empty();
+    let is_filtered = !hidden_items.is_empty();
+
+    // Get unique values and build items
+    let items: Vec<PivotItemInfo> = if let Some(field_cache) = cache.fields.get_mut(field_index) {
+        let sorted_ids = field_cache.sorted_ids().to_vec();
+        sorted_ids.iter()
+            .filter_map(|&id| {
+                if id == VALUE_ID_EMPTY {
+                    return None;
+                }
+                field_cache.get_value(id).map(|value| {
+                    let name = cache_value_to_string(value);
+                    let visible = !hidden_items.contains(&name);
+                    PivotItemInfo {
+                        id,
+                        name,
+                        is_expanded: true, // Default to expanded
+                        visible,
+                    }
+                })
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
+
+    // Build manual filter from hidden items
+    let manual_filter = if !hidden_items.is_empty() {
+        let selected: Vec<String> = items.iter()
+            .filter(|i| i.visible)
+            .map(|i| i.name.clone())
+            .collect();
+        Some(PivotManualFilter { selected_items: selected })
+    } else {
+        None
+    };
+
+    Ok(PivotFieldInfo {
+        id: field_index,
+        name: field_name,
+        show_all_items,
+        filters: PivotFilters {
+            date_filter: None,
+            label_filter: None,
+            manual_filter,
+            value_filter: None,
+        },
+        is_filtered,
+        subtotals: Subtotals::default(),
+        items,
+    })
+}
+
+/// Sets a pivot item's visibility.
+#[tauri::command]
+pub fn set_pivot_item_visibility(
+    state: State<AppState>,
+    pivot_state: State<'_, PivotState>,
+    request: SetItemVisibilityRequest,
+) -> Result<PivotViewResponse, String> {
+    log_info!(
+        "PIVOT",
+        "set_pivot_item_visibility pivot_id={} field={} item={} visible={}",
+        request.pivot_id,
+        request.field_index,
+        request.item_name,
+        request.visible
+    );
+
+    let mut pivot_tables = pivot_state.pivot_tables.lock().unwrap();
+    let (definition, cache) = pivot_tables
+        .get_mut(&request.pivot_id)
+        .ok_or_else(|| format!("Pivot table {} not found", request.pivot_id))?;
+
+    // Update hidden_items for matching fields
+    for field in &mut definition.row_fields {
+        if field.source_index == request.field_index {
+            if request.visible {
+                field.hidden_items.retain(|item| item != &request.item_name);
+            } else if !field.hidden_items.contains(&request.item_name) {
+                field.hidden_items.push(request.item_name.clone());
+            }
+        }
+    }
+    for field in &mut definition.column_fields {
+        if field.source_index == request.field_index {
+            if request.visible {
+                field.hidden_items.retain(|item| item != &request.item_name);
+            } else if !field.hidden_items.contains(&request.item_name) {
+                field.hidden_items.push(request.item_name.clone());
+            }
+        }
+    }
+    for filter in &mut definition.filter_fields {
+        if filter.field.source_index == request.field_index {
+            if request.visible {
+                filter.field.hidden_items.retain(|item| item != &request.item_name);
+            } else if !filter.field.hidden_items.contains(&request.item_name) {
+                filter.field.hidden_items.push(request.item_name.clone());
+            }
+        }
+    }
+
+    definition.bump_version();
+
+    let view = safe_calculate_pivot(definition, cache);
+    let response = view_to_response(&view, definition, cache);
+
+    let destination = definition.destination;
+    let pivot_id = definition.id;
+    let dest_sheet_idx = resolve_dest_sheet_index(&state, definition);
+
+    drop(pivot_tables);
+
+    update_pivot_in_grid(&state, pivot_id, dest_sheet_idx, destination, &view);
+    update_pivot_region(&state, pivot_id, dest_sheet_idx, destination, &view);
+
+    Ok(response)
+}
+
+/// Gets a list of all pivot tables in the workbook.
+#[tauri::command]
+pub fn get_all_pivot_tables(
+    state: State<AppState>,
+    pivot_state: State<'_, PivotState>,
+) -> Vec<PivotTableInfo> {
+    log_debug!("PIVOT", "get_all_pivot_tables");
+
+    let pivot_tables = pivot_state.pivot_tables.lock().unwrap();
+
+    pivot_tables.iter()
+        .map(|(id, (definition, _))| {
+            let source_range = format_range(definition.source_start, definition.source_end);
+            let destination = format_cell(definition.destination);
+            PivotTableInfo {
+                id: *id,
+                name: definition.name.clone().unwrap_or_else(|| format!("PivotTable{}", id)),
+                source_range,
+                destination,
+                allow_multiple_filters_per_field: definition.allow_multiple_filters_per_field,
+                enable_data_value_editing: definition.enable_data_value_editing,
+                refresh_on_open: definition.refresh_on_open,
+                use_custom_sort_lists: definition.use_custom_sort_lists,
+                has_headers: definition.source_has_headers,
+            }
+        })
+        .collect()
+}
+
+/// Refreshes all pivot tables in the workbook.
+#[tauri::command]
+pub fn refresh_all_pivot_tables(
+    state: State<AppState>,
+    pivot_state: State<'_, PivotState>,
+) -> Result<Vec<PivotViewResponse>, String> {
+    log_info!("PIVOT", "refresh_all_pivot_tables");
+
+    let pivot_ids: Vec<PivotId> = {
+        let pivot_tables = pivot_state.pivot_tables.lock().unwrap();
+        pivot_tables.keys().cloned().collect()
+    };
+
+    let mut responses = Vec::new();
+    for pivot_id in pivot_ids {
+        match refresh_pivot_cache(state.clone(), pivot_state.clone(), pivot_id) {
+            Ok(response) => responses.push(response),
+            Err(e) => log_debug!("PIVOT", "Failed to refresh pivot {}: {}", pivot_id, e),
+        }
+    }
+
+    Ok(responses)
+}
+
+// ============================================================================
+// HELPER FUNCTIONS
+// ============================================================================
+
+/// Formats a cell reference from (row, col) to A1 notation.
+fn format_cell(pos: (u32, u32)) -> String {
+    let (row, col) = pos;
+    format!("{}{}", col_index_to_letter(col), row + 1)
+}
+
+/// Formats a range from ((start_row, start_col), (end_row, end_col)) to A1:B2 notation.
+fn format_range(start: (u32, u32), end: (u32, u32)) -> String {
+    format!("{}:{}", format_cell(start), format_cell(end))
+}
+
+/// Converts API AggregationFunction to engine AggregationType.
+fn api_to_aggregation_type(func: AggregationFunction) -> pivot_engine::AggregationType {
+    match func {
+        AggregationFunction::Automatic => pivot_engine::AggregationType::Sum,
+        AggregationFunction::Sum => pivot_engine::AggregationType::Sum,
+        AggregationFunction::Count => pivot_engine::AggregationType::Count,
+        AggregationFunction::Average => pivot_engine::AggregationType::Average,
+        AggregationFunction::Max => pivot_engine::AggregationType::Max,
+        AggregationFunction::Min => pivot_engine::AggregationType::Min,
+        AggregationFunction::Product => pivot_engine::AggregationType::Product,
+        AggregationFunction::CountNumbers => pivot_engine::AggregationType::CountNumbers,
+        AggregationFunction::StandardDeviation => pivot_engine::AggregationType::StdDev,
+        AggregationFunction::StandardDeviationP => pivot_engine::AggregationType::StdDevP,
+        AggregationFunction::Variance => pivot_engine::AggregationType::Var,
+        AggregationFunction::VarianceP => pivot_engine::AggregationType::VarP,
+    }
+}
+
+/// Converts engine AggregationType to API AggregationFunction.
+fn aggregation_type_to_api(agg: pivot_engine::AggregationType) -> AggregationFunction {
+    match agg {
+        pivot_engine::AggregationType::Sum => AggregationFunction::Sum,
+        pivot_engine::AggregationType::Count => AggregationFunction::Count,
+        pivot_engine::AggregationType::Average => AggregationFunction::Average,
+        pivot_engine::AggregationType::Max => AggregationFunction::Max,
+        pivot_engine::AggregationType::Min => AggregationFunction::Min,
+        pivot_engine::AggregationType::Product => AggregationFunction::Product,
+        pivot_engine::AggregationType::CountNumbers => AggregationFunction::CountNumbers,
+        pivot_engine::AggregationType::StdDev => AggregationFunction::StandardDeviation,
+        pivot_engine::AggregationType::StdDevP => AggregationFunction::StandardDeviationP,
+        pivot_engine::AggregationType::Var => AggregationFunction::Variance,
+        pivot_engine::AggregationType::VarP => AggregationFunction::VarianceP,
+    }
+}
+
+/// Converts engine ShowValuesAs to API ShowAsRule.
+fn show_values_as_to_api(show_as: pivot_engine::ShowValuesAs) -> Option<ShowAsRule> {
+    let calculation = match show_as {
+        pivot_engine::ShowValuesAs::Normal => return None,
+        pivot_engine::ShowValuesAs::PercentOfGrandTotal => ShowAsCalculation::PercentOfGrandTotal,
+        pivot_engine::ShowValuesAs::PercentOfRowTotal => ShowAsCalculation::PercentOfRowTotal,
+        pivot_engine::ShowValuesAs::PercentOfColumnTotal => ShowAsCalculation::PercentOfColumnTotal,
+        pivot_engine::ShowValuesAs::PercentOfParentRow => ShowAsCalculation::PercentOfParentRowTotal,
+        pivot_engine::ShowValuesAs::PercentOfParentColumn => ShowAsCalculation::PercentOfParentColumnTotal,
+        pivot_engine::ShowValuesAs::Difference => ShowAsCalculation::DifferenceFrom,
+        pivot_engine::ShowValuesAs::PercentDifference => ShowAsCalculation::PercentDifferenceFrom,
+        pivot_engine::ShowValuesAs::RunningTotal => ShowAsCalculation::RunningTotal,
+        pivot_engine::ShowValuesAs::Index => ShowAsCalculation::Index,
+    };
+    Some(ShowAsRule {
+        calculation,
+        base_field: None,
+        base_item: None,
     })
 }

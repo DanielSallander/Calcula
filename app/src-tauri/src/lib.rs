@@ -416,10 +416,7 @@ fn extract_references_recursive(expr: &ParserExpr, grid: &Grid, refs: &mut Extra
         ParserExpr::CellRef { sheet, col, row, .. } => {
             let col_idx = col_letter_to_index(col);
             let row_idx = row.saturating_sub(1);
-            println!("[XDEP-EXTRACT] CellRef: sheet={:?}, col={}, row={} -> col_idx={}, row_idx={}",
-                sheet, col, row, col_idx, row_idx);
             if let Some(sheet_name) = sheet {
-                println!("[XDEP-EXTRACT] Adding cross-sheet ref: ({}, {}, {})", sheet_name, row_idx, col_idx);
                 refs.cross_sheet_cells.insert((sheet_name.clone(), row_idx, col_idx));
             } else {
                 refs.cells.insert((row_idx, col_idx));
@@ -501,7 +498,7 @@ fn extract_references_recursive(expr: &ParserExpr, grid: &Grid, refs: &mut Extra
 
 pub fn evaluate_formula(grid: &Grid, formula: &str) -> CellValue {
     log_debug!("EVAL", "formula={}", formula);
-    
+
     match parse_formula(formula) {
         Ok(parser_ast) => {
             let engine_ast = convert_expr(&parser_ast);
@@ -518,6 +515,14 @@ pub fn evaluate_formula(grid: &Grid, formula: &str) -> CellValue {
     }
 }
 
+/// Evaluates a formula using a pre-parsed AST. More efficient than evaluate_formula
+/// when the AST is already available (e.g., from cell's cached_ast).
+pub fn evaluate_formula_with_ast(grid: &Grid, ast: &EngineExpr) -> CellValue {
+    let evaluator = Evaluator::new(grid);
+    let result = evaluator.evaluate(ast);
+    result.to_cell_value()
+}
+
 pub fn evaluate_formula_multi_sheet(
     grids: &[Grid],
     sheet_names: &[String],
@@ -525,7 +530,7 @@ pub fn evaluate_formula_multi_sheet(
     formula: &str,
 ) -> CellValue {
     log_debug!("EVAL", "formula={} sheet_idx={}", formula, current_sheet_index);
-    
+
     if current_sheet_index >= grids.len() || current_sheet_index >= sheet_names.len() {
         log_error!("EVAL", "invalid sheet index {}", current_sheet_index);
         return CellValue::Error(CellError::Ref);
@@ -534,17 +539,17 @@ pub fn evaluate_formula_multi_sheet(
     match parse_formula(formula) {
         Ok(parser_ast) => {
             let engine_ast = convert_expr(&parser_ast);
-            
+
             let current_grid = &grids[current_sheet_index];
             let current_sheet_name = &sheet_names[current_sheet_index];
-            
+
             let mut context = engine::MultiSheetContext::new(current_sheet_name.clone());
             for (i, grid) in grids.iter().enumerate() {
                 if i < sheet_names.len() {
                     context.add_grid(sheet_names[i].clone(), grid);
                 }
             }
-            
+
             let evaluator = Evaluator::with_multi_sheet(current_grid, context);
             let result = evaluator.evaluate(&engine_ast);
             let cell_value = result.to_cell_value();
@@ -556,6 +561,120 @@ pub fn evaluate_formula_multi_sheet(
             CellValue::Error(CellError::Value)
         }
     }
+}
+
+/// Evaluates a formula using a pre-parsed AST with multi-sheet support.
+/// This is the most efficient evaluation path when the AST is already cached.
+pub fn evaluate_formula_multi_sheet_with_ast(
+    grids: &[Grid],
+    sheet_names: &[String],
+    current_sheet_index: usize,
+    ast: &EngineExpr,
+) -> CellValue {
+    if current_sheet_index >= grids.len() || current_sheet_index >= sheet_names.len() {
+        return CellValue::Error(CellError::Ref);
+    }
+
+    let current_grid = &grids[current_sheet_index];
+    let current_sheet_name = &sheet_names[current_sheet_index];
+
+    let mut context = engine::MultiSheetContext::new(current_sheet_name.clone());
+    for (i, grid) in grids.iter().enumerate() {
+        if i < sheet_names.len() {
+            context.add_grid(sheet_names[i].clone(), grid);
+        }
+    }
+
+    let evaluator = Evaluator::with_multi_sheet(current_grid, context);
+    evaluator.evaluate(ast).to_cell_value()
+}
+
+/// Parses a formula and converts it to the engine AST.
+/// Returns the engine AST suitable for caching in a Cell.
+pub fn parse_formula_to_engine_ast(formula: &str) -> Result<EngineExpr, String> {
+    match parse_formula(formula) {
+        Ok(parser_ast) => Ok(convert_expr(&parser_ast)),
+        Err(e) => Err(format!("{}", e)),
+    }
+}
+
+/// Creates a reusable MultiSheetContext for batch formula evaluation.
+/// This is more efficient than creating a new context for each formula.
+pub fn create_multi_sheet_context<'a>(
+    grids: &'a [Grid],
+    sheet_names: &[String],
+    current_sheet_name: &str,
+) -> MultiSheetContext<'a> {
+    let mut context = MultiSheetContext::new(current_sheet_name.to_string());
+    for (i, grid) in grids.iter().enumerate() {
+        if i < sheet_names.len() {
+            context.add_grid(sheet_names[i].clone(), grid);
+        }
+    }
+    context
+}
+
+/// Evaluates a formula using a pre-built context. More efficient for batch operations.
+pub fn evaluate_formula_with_context(
+    grids: &[Grid],
+    sheet_names: &[String],
+    current_sheet_index: usize,
+    formula: &str,
+) -> CellValue {
+    if current_sheet_index >= grids.len() || current_sheet_index >= sheet_names.len() {
+        return CellValue::Error(CellError::Ref);
+    }
+
+    match parse_formula(formula) {
+        Ok(parser_ast) => {
+            let engine_ast = convert_expr(&parser_ast);
+            let current_grid = &grids[current_sheet_index];
+            let current_sheet_name = &sheet_names[current_sheet_index];
+
+            // Build context efficiently
+            let context = create_multi_sheet_context(grids, sheet_names, current_sheet_name);
+            let evaluator = Evaluator::with_multi_sheet(current_grid, context);
+            evaluator.evaluate(&engine_ast).to_cell_value()
+        }
+        Err(_) => CellValue::Error(CellError::Value),
+    }
+}
+
+/// Batch evaluates multiple formulas efficiently by reusing the context.
+/// Returns a vector of (row, col, result) tuples.
+pub fn batch_evaluate_formulas(
+    grids: &[Grid],
+    sheet_names: &[String],
+    current_sheet_index: usize,
+    formulas: &[((u32, u32), &str)], // ((row, col), formula)
+) -> Vec<((u32, u32), CellValue)> {
+    if current_sheet_index >= grids.len() || current_sheet_index >= sheet_names.len() {
+        return formulas
+            .iter()
+            .map(|((r, c), _)| ((*r, *c), CellValue::Error(CellError::Ref)))
+            .collect();
+    }
+
+    let current_grid = &grids[current_sheet_index];
+    let current_sheet_name = &sheet_names[current_sheet_index];
+
+    // Build context once for all formulas
+    let context = create_multi_sheet_context(grids, sheet_names, current_sheet_name);
+    let evaluator = Evaluator::with_multi_sheet(current_grid, context);
+
+    formulas
+        .iter()
+        .map(|((row, col), formula)| {
+            let result = match parse_formula(formula) {
+                Ok(parser_ast) => {
+                    let engine_ast = convert_expr(&parser_ast);
+                    evaluator.evaluate(&engine_ast).to_cell_value()
+                }
+                Err(_) => CellValue::Error(CellError::Value),
+            };
+            ((*row, *col), result)
+        })
+        .collect()
 }
 
 pub fn parse_cell_input(input: &str) -> Cell {
@@ -709,7 +828,6 @@ pub fn update_cross_sheet_dependencies(
     }
     
     for new_ref in &new_refs {
-        println!("[XDEP] Adding dependent: {:?} depends on {:?}", formula_cell, new_ref);
         cross_sheet_dependents
             .entry(new_ref.clone())
             .or_insert_with(HashSet::new)
@@ -717,7 +835,6 @@ pub fn update_cross_sheet_dependencies(
     }
 
     if !new_refs.is_empty() {
-        println!("[XDEP] Registered cross-sheet deps for {:?}: {:?}", formula_cell, new_refs);
         cross_sheet_dependencies.insert(formula_cell, new_refs);
     }
 }
@@ -882,7 +999,7 @@ pub fn run() {
             merge_commands::unmerge_cells,
             merge_commands::get_merged_regions,
             merge_commands::get_merge_info,
-            // Pivot table commands
+            // Pivot table commands - Core operations
             pivot::create_pivot_table,
             pivot::update_pivot_fields,
             pivot::toggle_pivot_group,
@@ -893,6 +1010,24 @@ pub fn run() {
             pivot::get_pivot_at_cell,
             pivot::get_pivot_regions_for_sheet,
             pivot::get_pivot_field_unique_values,
+            // Pivot table commands - Excel-compatible API
+            pivot::get_pivot_table_info,
+            pivot::update_pivot_properties,
+            pivot::get_pivot_layout_ranges,
+            pivot::update_pivot_layout,
+            pivot::get_pivot_hierarchies,
+            pivot::add_pivot_hierarchy,
+            pivot::remove_pivot_hierarchy,
+            pivot::move_pivot_field,
+            pivot::set_pivot_aggregation,
+            pivot::set_pivot_number_format,
+            pivot::apply_pivot_filter,
+            pivot::clear_pivot_filter,
+            pivot::sort_pivot_field,
+            pivot::get_pivot_field_info,
+            pivot::set_pivot_item_visibility,
+            pivot::get_all_pivot_tables,
+            pivot::refresh_all_pivot_tables,
             // Named range commands
             named_ranges::create_named_range,
             named_ranges::update_named_range,

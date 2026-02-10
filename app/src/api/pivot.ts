@@ -30,6 +30,25 @@ import {
   createFieldConfig,
   createValueFieldConfig,
   createLayoutConfig,
+
+  // New Excel-compatible operations
+  getPivotTableInfo,
+  updatePivotProperties,
+  getPivotLayoutRanges,
+  updatePivotLayout,
+  getPivotHierarchies,
+  addPivotHierarchy,
+  removePivotHierarchy,
+  movePivotField,
+  setPivotAggregation,
+  setPivotNumberFormat,
+  applyPivotFilter,
+  clearPivotFilter,
+  sortPivotField,
+  getPivotFieldInfo,
+  setPivotItemVisibility,
+  getAllPivotTables,
+  refreshAllPivotTables,
 } from '../../extensions/Pivot/lib/pivot-api';
 
 // Re-export types so extensions can import them from this module
@@ -65,6 +84,42 @@ export type {
   PivotRegionInfo,
   PivotRegionData,
   FieldUniqueValuesResponse,
+  // New Excel-compatible types
+  PivotLayoutType,
+  SubtotalLocationType,
+  AggregationFunction,
+  ShowAsCalculation,
+  PivotFilterType,
+  SortBy,
+  PivotAxis,
+  LabelFilterCondition,
+  ValueFilterCondition,
+  PivotLabelFilter,
+  PivotValueFilter,
+  PivotManualFilter,
+  PivotFilters,
+  ShowAsRule,
+  Subtotals,
+  ExtendedLayoutConfig,
+  PivotTableInfo,
+  RangeInfo,
+  PivotLayoutRanges,
+  PivotFieldInfoResponse,
+  PivotItemInfo,
+  DataHierarchyInfo,
+  RowColumnHierarchyInfo,
+  PivotHierarchiesInfo,
+  UpdatePivotPropertiesRequest,
+  UpdatePivotLayoutRequest,
+  AddHierarchyRequest,
+  RemoveHierarchyRequest,
+  MoveFieldRequest,
+  SetAggregationRequest,
+  SetNumberFormatRequest,
+  ApplyPivotFilterRequest,
+  ClearPivotFilterRequest,
+  SortPivotFieldRequest,
+  SetItemVisibilityRequest,
 } from '../../extensions/Pivot/lib/pivot-api';
 
 export type {
@@ -151,4 +206,59 @@ export const pivot = {
 
   /** Creates a default layout configuration. */
   createLayoutConfig,
+
+  // ---------------------------------------------------------------------------
+  // Excel-compatible API operations
+  // ---------------------------------------------------------------------------
+
+  /** Gets pivot table properties and info. */
+  getInfo: getPivotTableInfo,
+
+  /** Updates pivot table properties. */
+  updateProperties: updatePivotProperties,
+
+  /** Gets pivot layout ranges (data body, row labels, column labels, filter axis). */
+  getLayoutRanges: getPivotLayoutRanges,
+
+  /** Updates pivot layout properties. */
+  updateLayout: updatePivotLayout,
+
+  /** Gets all hierarchies info for a pivot table. */
+  getHierarchies: getPivotHierarchies,
+
+  /** Adds a field to a hierarchy. */
+  addHierarchy: addPivotHierarchy,
+
+  /** Removes a field from a hierarchy. */
+  removeHierarchy: removePivotHierarchy,
+
+  /** Moves a field between hierarchies. */
+  moveField: movePivotField,
+
+  /** Sets the aggregation function for a value field. */
+  setAggregation: setPivotAggregation,
+
+  /** Sets the number format for a value field. */
+  setNumberFormat: setPivotNumberFormat,
+
+  /** Applies a filter to a pivot field. */
+  applyFilter: applyPivotFilter,
+
+  /** Clears filters from a pivot field. */
+  clearFilter: clearPivotFilter,
+
+  /** Sorts a pivot field by labels. */
+  sortField: sortPivotField,
+
+  /** Gets pivot field info including items and filters. */
+  getFieldInfo: getPivotFieldInfo,
+
+  /** Sets a pivot item's visibility. */
+  setItemVisibility: setPivotItemVisibility,
+
+  /** Gets a list of all pivot tables in the workbook. */
+  getAll: getAllPivotTables,
+
+  /** Refreshes all pivot tables in the workbook. */
+  refreshAll: refreshAllPivotTables,
 };

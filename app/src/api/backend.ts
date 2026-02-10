@@ -164,6 +164,160 @@ export async function getPivotFieldUniqueValues<TResponse>(
 }
 
 // ============================================================================
+// New Excel-compatible Pivot Table Commands
+// ============================================================================
+
+/**
+ * Get pivot table properties and info.
+ */
+export async function getPivotTableInfo<TResponse>(
+  pivotId: PivotId
+): Promise<TResponse> {
+  return invoke<TResponse>("get_pivot_table_info", { pivotId });
+}
+
+/**
+ * Update pivot table properties.
+ */
+export async function updatePivotProperties<TRequest, TResponse>(
+  request: TRequest
+): Promise<TResponse> {
+  return invoke<TResponse>("update_pivot_properties", { request });
+}
+
+/**
+ * Get pivot layout ranges (data body, row labels, column labels, filter axis).
+ */
+export async function getPivotLayoutRanges<TResponse>(
+  pivotId: PivotId
+): Promise<TResponse> {
+  return invoke<TResponse>("get_pivot_layout_ranges", { pivotId });
+}
+
+/**
+ * Update pivot layout properties.
+ */
+export async function updatePivotLayout<TRequest, TResponse>(
+  request: TRequest
+): Promise<TResponse> {
+  return invoke<TResponse>("update_pivot_layout", { request });
+}
+
+/**
+ * Get all hierarchies info for a pivot table.
+ */
+export async function getPivotHierarchies<TResponse>(
+  pivotId: PivotId
+): Promise<TResponse> {
+  return invoke<TResponse>("get_pivot_hierarchies", { pivotId });
+}
+
+/**
+ * Add a field to a hierarchy.
+ */
+export async function addPivotHierarchy<TRequest, TResponse>(
+  request: TRequest
+): Promise<TResponse> {
+  return invoke<TResponse>("add_pivot_hierarchy", { request });
+}
+
+/**
+ * Remove a field from a hierarchy.
+ */
+export async function removePivotHierarchy<TRequest, TResponse>(
+  request: TRequest
+): Promise<TResponse> {
+  return invoke<TResponse>("remove_pivot_hierarchy", { request });
+}
+
+/**
+ * Move a field between hierarchies.
+ */
+export async function movePivotField<TRequest, TResponse>(
+  request: TRequest
+): Promise<TResponse> {
+  return invoke<TResponse>("move_pivot_field", { request });
+}
+
+/**
+ * Set the aggregation function for a value field.
+ */
+export async function setPivotAggregation<TRequest, TResponse>(
+  request: TRequest
+): Promise<TResponse> {
+  return invoke<TResponse>("set_pivot_aggregation", { request });
+}
+
+/**
+ * Set the number format for a value field.
+ */
+export async function setPivotNumberFormat<TRequest, TResponse>(
+  request: TRequest
+): Promise<TResponse> {
+  return invoke<TResponse>("set_pivot_number_format", { request });
+}
+
+/**
+ * Apply a filter to a pivot field.
+ */
+export async function applyPivotFilter<TRequest, TResponse>(
+  request: TRequest
+): Promise<TResponse> {
+  return invoke<TResponse>("apply_pivot_filter", { request });
+}
+
+/**
+ * Clear filters from a pivot field.
+ */
+export async function clearPivotFilter<TRequest, TResponse>(
+  request: TRequest
+): Promise<TResponse> {
+  return invoke<TResponse>("clear_pivot_filter", { request });
+}
+
+/**
+ * Sort a pivot field by labels.
+ */
+export async function sortPivotField<TRequest, TResponse>(
+  request: TRequest
+): Promise<TResponse> {
+  return invoke<TResponse>("sort_pivot_field", { request });
+}
+
+/**
+ * Get pivot field info including items and filters.
+ */
+export async function getPivotFieldInfo<TResponse>(
+  pivotId: PivotId,
+  fieldIndex: number
+): Promise<TResponse> {
+  return invoke<TResponse>("get_pivot_field_info", { pivotId, fieldIndex });
+}
+
+/**
+ * Set a pivot item's visibility.
+ */
+export async function setPivotItemVisibility<TRequest, TResponse>(
+  request: TRequest
+): Promise<TResponse> {
+  return invoke<TResponse>("set_pivot_item_visibility", { request });
+}
+
+/**
+ * Get a list of all pivot tables in the workbook.
+ */
+export async function getAllPivotTables<TResponse>(): Promise<TResponse> {
+  return invoke<TResponse>("get_all_pivot_tables", {});
+}
+
+/**
+ * Refresh all pivot tables in the workbook.
+ */
+export async function refreshAllPivotTables<TResponse>(): Promise<TResponse> {
+  return invoke<TResponse>("refresh_all_pivot_tables", {});
+}
+
+// ============================================================================
 // Clear Range Commands
 // ============================================================================
 

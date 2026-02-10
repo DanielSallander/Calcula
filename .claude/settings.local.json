@@ -34,7 +34,8 @@
       "Bash(powershell.exe:*)",
       "Bash(cmd.exe /c \"\"\"C:\\\\Program Files \\(x86\\)\\\\Microsoft Visual Studio\\\\18\\\\BuildTools\\\\Common7\\\\Tools\\\\VsDevCmd.bat\"\" -arch=arm64 && cd /d c:\\\\Dropbox\\\\Projekt\\\\Calcula\\\\app\\\\src-tauri && cargo test named_ranges::tests\")",
       "Bash(cmd.exe /c \"call \"\"C:\\\\Program Files \\(x86\\)\\\\Microsoft Visual Studio\\\\18\\\\BuildTools\\\\Common7\\\\Tools\\\\VsDevCmd.bat\"\" -arch=arm64 >nul 2>&1 && cd /d c:\\\\Dropbox\\\\Projekt\\\\Calcula\\\\app\\\\src-tauri && cargo test named_ranges::tests 2>&1\")",
-      "Bash(export PATH:*)"
+      "Bash(export PATH:*)",
+      "Bash(powershell:*)"
     ],
     "deny": [],
     "ask": []

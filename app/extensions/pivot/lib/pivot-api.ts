@@ -22,6 +22,24 @@ import {
   getPivotAtCell as apiGetPivotAtCell,
   getPivotRegionsForSheet as apiGetPivotRegionsForSheet,
   getPivotFieldUniqueValues as apiGetPivotFieldUniqueValues,
+  // New Excel-compatible API functions
+  getPivotTableInfo as apiGetPivotTableInfo,
+  updatePivotProperties as apiUpdatePivotProperties,
+  getPivotLayoutRanges as apiGetPivotLayoutRanges,
+  updatePivotLayout as apiUpdatePivotLayout,
+  getPivotHierarchies as apiGetPivotHierarchies,
+  addPivotHierarchy as apiAddPivotHierarchy,
+  removePivotHierarchy as apiRemovePivotHierarchy,
+  movePivotField as apiMovePivotField,
+  setPivotAggregation as apiSetPivotAggregation,
+  setPivotNumberFormat as apiSetPivotNumberFormat,
+  applyPivotFilter as apiApplyPivotFilter,
+  clearPivotFilter as apiClearPivotFilter,
+  sortPivotField as apiSortPivotField,
+  getPivotFieldInfo as apiGetPivotFieldInfo,
+  setPivotItemVisibility as apiSetPivotItemVisibility,
+  getAllPivotTables as apiGetAllPivotTables,
+  refreshAllPivotTables as apiRefreshAllPivotTables,
 } from "../../../src/api/backend";
 
 // ============================================================================
@@ -531,4 +549,467 @@ export function createLayoutConfig(
     show_empty_cols: options?.show_empty_cols ?? false,
     values_position: options?.values_position ?? "columns",
   };
+}
+
+// ============================================================================
+// NEW EXCEL-COMPATIBLE TYPES
+// ============================================================================
+
+/** Pivot layout type (Excel: PivotLayoutType) */
+export type PivotLayoutType = "compact" | "tabular" | "outline";
+
+/** Subtotal location type (Excel: SubtotalLocationType) */
+export type SubtotalLocationType = "atTop" | "atBottom" | "off";
+
+/** Aggregation function (Excel: AggregationFunction) */
+export type AggregationFunction =
+  | "automatic"
+  | "sum"
+  | "count"
+  | "average"
+  | "max"
+  | "min"
+  | "product"
+  | "countNumbers"
+  | "standardDeviation"
+  | "standardDeviationP"
+  | "variance"
+  | "varianceP";
+
+/** Show as calculation type (Excel: ShowAsCalculation) */
+export type ShowAsCalculation =
+  | "none"
+  | "percentOfGrandTotal"
+  | "percentOfRowTotal"
+  | "percentOfColumnTotal"
+  | "percentOfParentRowTotal"
+  | "percentOfParentColumnTotal"
+  | "differenceFrom"
+  | "percentDifferenceFrom"
+  | "runningTotal"
+  | "percentOfRunningTotal"
+  | "rankAscending"
+  | "rankDescending"
+  | "index";
+
+/** Pivot filter type (Excel: PivotFilterType) */
+export type PivotFilterType = "unknown" | "value" | "manual" | "label" | "date";
+
+/** Sort direction (Excel: SortBy) */
+export type SortBy = "ascending" | "descending";
+
+/** Pivot axis (Excel: PivotAxis) */
+export type PivotAxis = "unknown" | "row" | "column" | "data" | "filter";
+
+/** Label filter condition */
+export type LabelFilterCondition =
+  | "beginsWith"
+  | "endsWith"
+  | "contains"
+  | "doesNotContain"
+  | "equals"
+  | "doesNotEqual"
+  | "greaterThan"
+  | "greaterThanOrEqualTo"
+  | "lessThan"
+  | "lessThanOrEqualTo"
+  | "between";
+
+/** Value filter condition */
+export type ValueFilterCondition =
+  | "equals"
+  | "doesNotEqual"
+  | "greaterThan"
+  | "greaterThanOrEqualTo"
+  | "lessThan"
+  | "lessThanOrEqualTo"
+  | "between"
+  | "topN"
+  | "bottomN"
+  | "topNPercent"
+  | "bottomNPercent";
+
+/** Label filter for text-based filtering */
+export interface PivotLabelFilter {
+  condition: LabelFilterCondition;
+  substring?: string;
+  lowerBound?: string;
+  upperBound?: string;
+  exclusive?: boolean;
+}
+
+/** Value filter for numeric filtering */
+export interface PivotValueFilter {
+  condition: ValueFilterCondition;
+  comparator?: number;
+  lowerBound?: number;
+  upperBound?: number;
+  value?: number;
+  selectionType?: string;
+  exclusive?: boolean;
+}
+
+/** Manual filter for explicit item selection */
+export interface PivotManualFilter {
+  selectedItems: string[];
+}
+
+/** Combined pivot filters for a field */
+export interface PivotFilters {
+  dateFilter?: unknown; // Date filter (not fully implemented yet)
+  labelFilter?: PivotLabelFilter;
+  manualFilter?: PivotManualFilter;
+  valueFilter?: PivotValueFilter;
+}
+
+/** Show as rule for calculated display */
+export interface ShowAsRule {
+  calculation: ShowAsCalculation;
+  baseField?: string;
+  baseItem?: string;
+}
+
+/** Subtotals configuration for a pivot field */
+export interface Subtotals {
+  automatic?: boolean;
+  average?: boolean;
+  count?: boolean;
+  countNumbers?: boolean;
+  max?: boolean;
+  min?: boolean;
+  product?: boolean;
+  standardDeviation?: boolean;
+  standardDeviationP?: boolean;
+  sum?: boolean;
+  variance?: boolean;
+  varianceP?: boolean;
+}
+
+/** Extended layout configuration with Excel properties */
+export interface ExtendedLayoutConfig extends LayoutConfig {
+  autoFormat?: boolean;
+  preserveFormatting?: boolean;
+  showFieldHeaders?: boolean;
+  enableFieldList?: boolean;
+  emptyCellText?: string;
+  fillEmptyCells?: boolean;
+  subtotalLocation?: SubtotalLocationType;
+  altTextTitle?: string;
+  altTextDescription?: string;
+}
+
+/** Pivot table info response */
+export interface PivotTableInfo {
+  id: PivotId;
+  name: string;
+  sourceRange: string;
+  destination: string;
+  allowMultipleFiltersPerField: boolean;
+  enableDataValueEditing: boolean;
+  refreshOnOpen: boolean;
+  useCustomSortLists: boolean;
+  hasHeaders: boolean;
+}
+
+/** Range information */
+export interface RangeInfo {
+  startRow: number;
+  startCol: number;
+  endRow: number;
+  endCol: number;
+  address: string;
+}
+
+/** Pivot layout ranges response */
+export interface PivotLayoutRanges {
+  range?: RangeInfo;
+  dataBodyRange?: RangeInfo;
+  columnLabelRange?: RangeInfo;
+  rowLabelRange?: RangeInfo;
+  filterAxisRange?: RangeInfo;
+}
+
+/** Pivot field info including items and filters */
+export interface PivotFieldInfoResponse {
+  id: number;
+  name: string;
+  showAllItems: boolean;
+  filters: PivotFilters;
+  isFiltered: boolean;
+  subtotals: Subtotals;
+  items: PivotItemInfo[];
+}
+
+/** Pivot item info */
+export interface PivotItemInfo {
+  id: number;
+  name: string;
+  isExpanded: boolean;
+  visible: boolean;
+}
+
+/** Data hierarchy info */
+export interface DataHierarchyInfo {
+  id: number;
+  name: string;
+  fieldIndex: number;
+  summarizeBy: AggregationFunction;
+  numberFormat?: string;
+  position: number;
+  showAs?: ShowAsRule;
+}
+
+/** Row/Column hierarchy info */
+export interface RowColumnHierarchyInfo {
+  id: number;
+  name: string;
+  fieldIndex: number;
+  position: number;
+}
+
+/** All hierarchies info response */
+export interface PivotHierarchiesInfo {
+  hierarchies: SourceFieldInfo[];
+  rowHierarchies: RowColumnHierarchyInfo[];
+  columnHierarchies: RowColumnHierarchyInfo[];
+  dataHierarchies: DataHierarchyInfo[];
+  filterHierarchies: RowColumnHierarchyInfo[];
+}
+
+// ============================================================================
+// NEW REQUEST TYPES
+// ============================================================================
+
+/** Request to update pivot properties */
+export interface UpdatePivotPropertiesRequest {
+  pivotId: PivotId;
+  name?: string;
+  allowMultipleFiltersPerField?: boolean;
+  enableDataValueEditing?: boolean;
+  refreshOnOpen?: boolean;
+  useCustomSortLists?: boolean;
+}
+
+/** Request to update pivot layout */
+export interface UpdatePivotLayoutRequest {
+  pivotId: PivotId;
+  layout: ExtendedLayoutConfig;
+}
+
+/** Request to add a field to a hierarchy */
+export interface AddHierarchyRequest {
+  pivotId: PivotId;
+  fieldIndex: number;
+  axis: PivotAxis;
+  position?: number;
+  name?: string;
+  aggregation?: AggregationFunction;
+}
+
+/** Request to remove a field from a hierarchy */
+export interface RemoveHierarchyRequest {
+  pivotId: PivotId;
+  axis: PivotAxis;
+  position: number;
+}
+
+/** Request to move a field to a different hierarchy */
+export interface MoveFieldRequest {
+  pivotId: PivotId;
+  fieldIndex: number;
+  targetAxis: PivotAxis;
+  position?: number;
+}
+
+/** Request to set aggregation function */
+export interface SetAggregationRequest {
+  pivotId: PivotId;
+  valueFieldIndex: number;
+  summarizeBy: AggregationFunction;
+}
+
+/** Request to set number format */
+export interface SetNumberFormatRequest {
+  pivotId: PivotId;
+  valueFieldIndex: number;
+  numberFormat: string;
+}
+
+/** Request to apply filters to a pivot field */
+export interface ApplyPivotFilterRequest {
+  pivotId: PivotId;
+  fieldIndex: number;
+  filters: PivotFilters;
+}
+
+/** Request to clear pivot field filters */
+export interface ClearPivotFilterRequest {
+  pivotId: PivotId;
+  fieldIndex: number;
+  filterType?: PivotFilterType;
+}
+
+/** Request to sort a pivot field */
+export interface SortPivotFieldRequest {
+  pivotId: PivotId;
+  fieldIndex: number;
+  sortBy: SortBy;
+  valuesHierarchy?: string;
+  pivotItemScope?: string[];
+}
+
+/** Request to set pivot item visibility */
+export interface SetItemVisibilityRequest {
+  pivotId: PivotId;
+  fieldIndex: number;
+  itemName: string;
+  visible: boolean;
+}
+
+// ============================================================================
+// NEW EXCEL-COMPATIBLE API FUNCTIONS
+// ============================================================================
+
+/**
+ * Gets pivot table properties and info.
+ */
+export async function getPivotTableInfo(pivotId: PivotId): Promise<PivotTableInfo> {
+  return apiGetPivotTableInfo<PivotTableInfo>(pivotId);
+}
+
+/**
+ * Updates pivot table properties.
+ */
+export async function updatePivotProperties(
+  request: UpdatePivotPropertiesRequest
+): Promise<PivotTableInfo> {
+  return apiUpdatePivotProperties<UpdatePivotPropertiesRequest, PivotTableInfo>(request);
+}
+
+/**
+ * Gets pivot layout ranges (data body, row labels, column labels, filter axis).
+ */
+export async function getPivotLayoutRanges(pivotId: PivotId): Promise<PivotLayoutRanges> {
+  return apiGetPivotLayoutRanges<PivotLayoutRanges>(pivotId);
+}
+
+/**
+ * Updates pivot layout properties.
+ */
+export async function updatePivotLayout(
+  request: UpdatePivotLayoutRequest
+): Promise<PivotViewResponse> {
+  return apiUpdatePivotLayout<UpdatePivotLayoutRequest, PivotViewResponse>(request);
+}
+
+/**
+ * Gets all hierarchies info for a pivot table.
+ */
+export async function getPivotHierarchies(pivotId: PivotId): Promise<PivotHierarchiesInfo> {
+  return apiGetPivotHierarchies<PivotHierarchiesInfo>(pivotId);
+}
+
+/**
+ * Adds a field to a hierarchy (row, column, data, or filter).
+ */
+export async function addPivotHierarchy(
+  request: AddHierarchyRequest
+): Promise<PivotViewResponse> {
+  return apiAddPivotHierarchy<AddHierarchyRequest, PivotViewResponse>(request);
+}
+
+/**
+ * Removes a field from a hierarchy.
+ */
+export async function removePivotHierarchy(
+  request: RemoveHierarchyRequest
+): Promise<PivotViewResponse> {
+  return apiRemovePivotHierarchy<RemoveHierarchyRequest, PivotViewResponse>(request);
+}
+
+/**
+ * Moves a field between hierarchies.
+ */
+export async function movePivotField(
+  request: MoveFieldRequest
+): Promise<PivotViewResponse> {
+  return apiMovePivotField<MoveFieldRequest, PivotViewResponse>(request);
+}
+
+/**
+ * Sets the aggregation function for a value field.
+ */
+export async function setPivotAggregation(
+  request: SetAggregationRequest
+): Promise<PivotViewResponse> {
+  return apiSetPivotAggregation<SetAggregationRequest, PivotViewResponse>(request);
+}
+
+/**
+ * Sets the number format for a value field.
+ */
+export async function setPivotNumberFormat(
+  request: SetNumberFormatRequest
+): Promise<PivotViewResponse> {
+  return apiSetPivotNumberFormat<SetNumberFormatRequest, PivotViewResponse>(request);
+}
+
+/**
+ * Applies a filter to a pivot field.
+ */
+export async function applyPivotFilter(
+  request: ApplyPivotFilterRequest
+): Promise<PivotViewResponse> {
+  return apiApplyPivotFilter<ApplyPivotFilterRequest, PivotViewResponse>(request);
+}
+
+/**
+ * Clears filters from a pivot field.
+ */
+export async function clearPivotFilter(
+  request: ClearPivotFilterRequest
+): Promise<PivotViewResponse> {
+  return apiClearPivotFilter<ClearPivotFilterRequest, PivotViewResponse>(request);
+}
+
+/**
+ * Sorts a pivot field by labels.
+ */
+export async function sortPivotField(
+  request: SortPivotFieldRequest
+): Promise<PivotViewResponse> {
+  return apiSortPivotField<SortPivotFieldRequest, PivotViewResponse>(request);
+}
+
+/**
+ * Gets pivot field info including items and filters.
+ */
+export async function getPivotFieldInfo(
+  pivotId: PivotId,
+  fieldIndex: number
+): Promise<PivotFieldInfoResponse> {
+  return apiGetPivotFieldInfo<PivotFieldInfoResponse>(pivotId, fieldIndex);
+}
+
+/**
+ * Sets a pivot item's visibility.
+ */
+export async function setPivotItemVisibility(
+  request: SetItemVisibilityRequest
+): Promise<PivotViewResponse> {
+  return apiSetPivotItemVisibility<SetItemVisibilityRequest, PivotViewResponse>(request);
+}
+
+/**
+ * Gets a list of all pivot tables in the workbook.
+ */
+export async function getAllPivotTables(): Promise<PivotTableInfo[]> {
+  return apiGetAllPivotTables<PivotTableInfo[]>();
+}
+
+/**
+ * Refreshes all pivot tables in the workbook.
+ */
+export async function refreshAllPivotTables(): Promise<PivotViewResponse[]> {
+  return apiRefreshAllPivotTables<PivotViewResponse[]>();
 }
