@@ -25,7 +25,7 @@ import { createFormulaHeaderHandlers } from "./editing/formulaHeaderHandlers";
 import { createReferenceDragHandlers } from "./editing/referenceDragHandlers";
 import { createResizeHandlers } from "./layout/resizeHandlers";
 import { createFillHandleCursorChecker } from "./utils/fillHandleUtils";
-import { isGlobalFormulaMode, isEditingFormula } from "../../hooks/useEditing";
+import { isGlobalFormulaMode, isEditingFormula, setHoveringOverReferenceBorder } from "../../hooks/useEditing";
 
 // Custom cursor data URLs for Excel-style header selection arrows
 const COLUMN_SELECT_CURSOR = `url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='24' height='24' viewBox='0 0 24 24'%3E%3Cpath d='M12 2 L12 18 M12 18 L8 14 M12 18 L16 14' stroke='black' stroke-width='2' fill='none' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E") 12 12, pointer`;
@@ -372,12 +372,17 @@ export function useMouseSelection(props: UseMouseSelectionProps): UseMouseSelect
         // Check fill handle first (highest priority for crosshair)
         if (isOverFillHandle(mouseX, mouseY)) {
           setCursorStyle("crosshair");
+          setHoveringOverReferenceBorder(false);
         } else if (isEditingFormula() && referenceDragHandlers.isOverReferenceBorder(mouseX, mouseY)) {
           // Check if over a formula reference border (for dragging)
           // FIX: Use isEditingFormula() instead of isFormulaMode to allow dragging
           // existing references even when the formula doesn't end with an operator
           setCursorStyle("move");
+          // FIX: Track that we're hovering over a reference border so blur handler
+          // can prevent commit when clicking to start a drag
+          setHoveringOverReferenceBorder(true);
         } else {
+          setHoveringOverReferenceBorder(false);
           // Check for resize handles
           const colResize = resizeHandlers.checkResizeHandle(mouseX, mouseY);
           if (colResize) {

@@ -265,6 +265,30 @@ export function isReferenceDragging(): boolean {
 }
 
 /**
+ * MODULE-LEVEL flag to track when cursor is hovering over a reference border.
+ * This is used to prevent blur commit when clicking on a reference to drag it.
+ * The mousedown event triggers blur BEFORE the drag handler can set preventBlurCommit,
+ * so we need to track the hover state to know if the click was on a reference border.
+ */
+let hoveringOverReferenceBorder = false;
+
+/**
+ * Set whether the cursor is hovering over a reference border.
+ * Called by useMouseSelection when cursor moves over/off a reference border.
+ */
+export function setHoveringOverReferenceBorder(value: boolean): void {
+  hoveringOverReferenceBorder = value;
+}
+
+/**
+ * Check if the cursor is currently hovering over a reference border.
+ * Used by InlineEditor's blur handler to prevent commit when clicking to drag.
+ */
+export function isHoveringOverReferenceBorder(): boolean {
+  return hoveringOverReferenceBorder;
+}
+
+/**
  * Check if a cell is part of an existing formula reference.
  * Returns the reference index if found, or -1 if not.
  * This is used to detect when the user clicks on a reference to drag it.

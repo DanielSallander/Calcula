@@ -8,7 +8,7 @@ import { isFormulaExpectingReference, createEmptyDimensionOverrides } from "../.
 import { useGridContext } from "../../state/GridContext";
 import * as S from "./InlineEditor.styles";
 import { toggleReferenceAtCursor } from "../../lib/formulaRefToggle";
-import { getGlobalEditingValue, getArrowRefCursor } from "../../hooks/useEditing";
+import { getGlobalEditingValue, getArrowRefCursor, isHoveringOverReferenceBorder } from "../../hooks/useEditing";
 
 /**
  * Global flag to prevent blur from committing during sheet tab navigation.
@@ -398,6 +398,14 @@ export function InlineEditor(props: InlineEditorProps): React.ReactElement | nul
         return;
       }
 
+      // FIX: Check if cursor is hovering over a reference border (about to start a drag)
+      // The blur fires BEFORE the mousedown handler can set preventBlurCommit, so we
+      // check the hover state to know if the click was on a reference border.
+      if (isHoveringOverReferenceBorder()) {
+        console.log("[InlineEditor] Blur prevented - hovering over reference border");
+        return;
+      }
+
       // Check the actual input value at blur time (not closure) to determine formula mode
       const currentValue = event.target.value;
       const isCurrentlyInFormulaMode = isFormulaExpectingReference(currentValue);
@@ -436,8 +444,9 @@ export function InlineEditor(props: InlineEditorProps): React.ReactElement | nul
   useEffect(() => {
     const handleFormulaModeSheetSwitch = () => {
       console.log("[InlineEditor] Received sheet switch event, will refocus");
-      // Clear the prevent flag now that the switch is complete
-      preventBlurCommit = false;
+      // NOTE: Don't clear preventBlurCommit here - let the auto-focus useEffect do it
+      // after the focus is actually restored. This prevents race conditions where
+      // a blur event fires before the setTimeout focus completes.
       // Trigger a refocus by updating the trigger counter
       setRefocusTrigger(prev => prev + 1);
     };
@@ -457,8 +466,9 @@ export function InlineEditor(props: InlineEditorProps): React.ReactElement | nul
   useEffect(() => {
     const handleReferenceInserted = () => {
       console.log("[InlineEditor] Reference inserted, will refocus");
-      // FIX: Clear the prevent flag now that the reference insertion is complete
-      preventBlurCommit = false;
+      // NOTE: Don't clear preventBlurCommit here - let the auto-focus useEffect do it
+      // after the focus is actually restored. This prevents race conditions where
+      // a blur event fires before the setTimeout focus completes.
       // Trigger a refocus by updating the trigger counter
       setRefocusTrigger(prev => prev + 1);
     };
@@ -472,6 +482,8 @@ export function InlineEditor(props: InlineEditorProps): React.ReactElement | nul
 
   /**
    * Auto-focus the input when editing starts or when triggered by sheet switch.
+   * Also clears the preventBlurCommit flag AFTER focus is restored to prevent
+   * race conditions where blur fires before focus is set.
    */
   useEffect(() => {
     if (inputRef.current && position.visible && !disabled) {
@@ -484,6 +496,8 @@ export function InlineEditor(props: InlineEditorProps): React.ReactElement | nul
           const activeElement = document.activeElement;
           if (activeElement?.getAttribute("data-formula-bar") === "true") {
             console.log("[InlineEditor] Formula bar active, skipping autofocus");
+            // Still clear the prevent flag - focus is stable on formula bar
+            preventBlurCommit = false;
             return;
           }
 
@@ -492,9 +506,14 @@ export function InlineEditor(props: InlineEditorProps): React.ReactElement | nul
           const len = inputRef.current.value.length;
           inputRef.current.setSelectionRange(len, len);
           console.log("[InlineEditor] Focused input, cursor at position:", len);
+
+          // FIX: Clear the prevent flag AFTER focus is restored
+          // This prevents blur from committing during the race between
+          // event handlers and the setTimeout focus restoration.
+          preventBlurCommit = false;
         }
       }, 0);
-      
+
       return () => clearTimeout(timeoutId);
     }
   }, [editing.row, editing.col, position.visible, disabled, refocusTrigger]);

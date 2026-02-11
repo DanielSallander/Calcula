@@ -9,6 +9,7 @@ import type { GridConfig, Viewport, DimensionOverrides, FormulaReference } from 
 import type { CellPosition, MousePosition } from "../types";
 import { getCellFromPixel, getFormulaReferenceBorderAtPixel } from "../../../lib/gridRenderer";
 import { getCellFromMousePosition } from "../utils/cellUtils";
+import { setHoveringOverReferenceBorder } from "../../../hooks/useEditing";
 
 interface ReferenceDragDependencies {
   config: GridConfig;
@@ -182,6 +183,7 @@ export function createReferenceDragHandlers(deps: ReferenceDragDependencies): Re
 
     setIsRefDragging(false);
     setCursorStyle("cell");  // Reset cursor after drag completes
+    setHoveringOverReferenceBorder(false);  // Clear hover flag after drag ends
     stopAutoScroll();
     refDragStartRef.current = null;
     lastMousePosRef.current = null;
@@ -196,6 +198,7 @@ export function createReferenceDragHandlers(deps: ReferenceDragDependencies): Re
     }
     setIsRefDragging(false);
     setCursorStyle("cell");  // Reset cursor after drag cancels
+    setHoveringOverReferenceBorder(false);  // Clear hover flag after drag cancels
     refDragStartRef.current = null;
     lastMousePosRef.current = null;
   };
