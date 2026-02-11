@@ -16,8 +16,6 @@
 # ----------------------------------------------------------------------
 # Dependencies
 node_modules/
-context_manager/
-general_stuff/
 
 # Production Build Output (commonly dist or build)
 dist/
@@ -136,6 +134,8 @@ $RECYCLE.BIN/
 !.vscode/launch.json
 !.vscode/extensions.json
 *.code-workspace
+.vscode/
+.claude/
 
 # JetBrains / IntelliJ / WebStorm / RustRover
 .idea/
@@ -158,3 +158,7 @@ $RECYCLE.BIN/
 
 # Force include the core directory
 !core/
+
+# Other
+context_manager/
+general_stuff/
