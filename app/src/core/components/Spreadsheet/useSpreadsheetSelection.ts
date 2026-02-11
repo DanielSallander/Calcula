@@ -82,6 +82,10 @@ export function useSpreadsheetSelection({
     updatePendingColumnReference,
     updatePendingRowReference,
     clearPendingReference,
+    startRefDrag,
+    updateRefDrag,
+    completeRefDrag,
+    cancelRefDrag,
   } = useEditing();
 
   // Clipboard hook
@@ -319,6 +323,7 @@ export function useSpreadsheetSelection({
     isDragging,
     isFormulaDragging,
     isResizing,
+    isRefDragging,
     cursorStyle,
     handleMouseDown: baseHandleMouseDown,
     handleMouseMove: baseHandleMouseMove,
@@ -352,6 +357,10 @@ export function useSpreadsheetSelection({
     onSelectColumn: selectColumn,
     onSelectRow: selectRow,
     onFillHandleDoubleClick: handleFillHandleDoubleClick,
+    onStartRefDrag: startRefDrag,
+    onUpdateRefDrag: updateRefDrag,
+    onCompleteRefDrag: completeRefDrag,
+    onCancelRefDrag: cancelRefDrag,
   });
 
   // Wrap mouse handlers to include fill handle logic and extension click interception
@@ -509,6 +518,7 @@ export function useSpreadsheetSelection({
       isDragging,
       isFormulaDragging,
       isResizing,
+      isRefDragging,
       isFillDragging: fillState.isDragging,
     },
     fillState,

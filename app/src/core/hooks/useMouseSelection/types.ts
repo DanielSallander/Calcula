@@ -127,6 +127,14 @@ export interface UseMouseSelectionProps {
   onSelectRow?: (row: number, extend?: boolean) => void;
   /** Callback when fill handle is double-clicked (auto-fill to edge) */
   onFillHandleDoubleClick?: () => void;
+  /** Callback to start dragging an existing reference (returns true if drag started) */
+  onStartRefDrag?: (row: number, col: number) => boolean;
+  /** Callback to update reference position during drag */
+  onUpdateRefDrag?: (row: number, col: number) => void;
+  /** Callback to complete reference drag */
+  onCompleteRefDrag?: (row: number, col: number) => void;
+  /** Callback to cancel reference drag */
+  onCancelRefDrag?: () => void;
 }
 
 /**
@@ -135,10 +143,12 @@ export interface UseMouseSelectionProps {
 export interface UseMouseSelectionReturn {
   /** Whether a drag selection is in progress */
   isDragging: boolean;
-  /** Whether a formula reference drag is in progress */
+  /** Whether a formula reference drag is in progress (adding new references) */
   isFormulaDragging: boolean;
   /** Whether a resize operation is in progress */
   isResizing: boolean;
+  /** Whether an existing reference is being dragged to move it */
+  isRefDragging: boolean;
   /** Current cursor style to use */
   cursorStyle: string;
   /** Handle mouse down on the grid */

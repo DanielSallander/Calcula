@@ -42,7 +42,13 @@ import {
 import type { EditingCell, CellUpdateResult, FormulaReference } from "../types";
 import { isFormulaExpectingReference, FORMULA_REFERENCE_COLORS } from "../types";
 import { checkEditGuards } from "../lib/editGuards";
-import { parseFormulaReferences } from "../lib/formulaRefParser";
+import {
+  parseFormulaReferences,
+  parseFormulaReferencesWithPositions,
+  findReferenceAtCell,
+  updateFormulaReference,
+  type FormulaReferenceWithPosition,
+} from "../lib/formulaRefParser";
 
 /**
  * MODULE-LEVEL singleton ref for synchronous editing state.
@@ -179,6 +185,146 @@ export function setArrowRefColor(color: string | null): void {
 const MAX_FORMULA_REFERENCE_ROWS = 1000;
 const MAX_FORMULA_REFERENCE_COLS = 100;
 
+// =============================================================================
+// REFERENCE DRAGGING STATE
+// =============================================================================
+
+/**
+ * MODULE-LEVEL state for reference dragging.
+ * When dragging an existing reference to move it, we track:
+ * - The reference being dragged (with position info)
+ * - The original cell the drag started from
+ * - The current offset from the original position
+ */
+let draggedReference: FormulaReferenceWithPosition | null = null;
+let draggedRefIndex: number = -1;
+let dragStartCell: { row: number; col: number } | null = null;
+
+/**
+ * Get the currently dragged reference.
+ */
+export function getDraggedReference(): FormulaReferenceWithPosition | null {
+  return draggedReference;
+}
+
+/**
+ * Get the index of the currently dragged reference.
+ */
+export function getDraggedRefIndex(): number {
+  return draggedRefIndex;
+}
+
+/**
+ * Get the cell where the reference drag started.
+ */
+export function getDragStartCell(): { row: number; col: number } | null {
+  return dragStartCell;
+}
+
+/**
+ * Start dragging a reference.
+ * @param ref - The reference being dragged
+ * @param refIndex - Index of the reference in the parsed array
+ * @param startRow - Row where the drag started
+ * @param startCol - Column where the drag started
+ */
+export function startReferenceDrag(
+  ref: FormulaReferenceWithPosition,
+  refIndex: number,
+  startRow: number,
+  startCol: number
+): void {
+  draggedReference = ref;
+  draggedRefIndex = refIndex;
+  dragStartCell = { row: startRow, col: startCol };
+}
+
+/**
+ * Clear the reference dragging state.
+ */
+export function clearReferenceDrag(): void {
+  draggedReference = null;
+  draggedRefIndex = -1;
+  dragStartCell = null;
+}
+
+/**
+ * Check if a reference drag is in progress.
+ */
+export function isReferenceDragging(): boolean {
+  return draggedReference !== null;
+}
+
+/**
+ * Check if a cell is part of an existing formula reference.
+ * Returns the reference index if found, or -1 if not.
+ * This is used to detect when the user clicks on a reference to drag it.
+ *
+ * @param row - Cell row (0-based)
+ * @param col - Cell column (0-based)
+ * @param currentSheetName - The current sheet being viewed
+ * @param formulaSourceSheet - The sheet where the formula is being edited
+ * @returns Index of the reference containing the cell, or -1 if not found
+ */
+export function findReferenceContainingCell(
+  row: number,
+  col: number,
+  currentSheetName?: string,
+  formulaSourceSheet?: string
+): number {
+  if (!globalIsEditing || !globalEditingValue.startsWith("=")) {
+    return -1;
+  }
+
+  const refs = parseFormulaReferencesWithPositions(globalEditingValue);
+  return findReferenceAtCell(refs, row, col, currentSheetName, formulaSourceSheet);
+}
+
+/**
+ * Get the parsed references with positions for the current formula.
+ */
+export function getReferencesWithPositions(): FormulaReferenceWithPosition[] {
+  if (!globalIsEditing || !globalEditingValue.startsWith("=")) {
+    return [];
+  }
+  return parseFormulaReferencesWithPositions(globalEditingValue);
+}
+
+/**
+ * Move a reference by the given offset and update the formula.
+ * Returns the new formula value if successful, or null if the drag is not active.
+ *
+ * @param newRow - The new top-left row of the reference
+ * @param newCol - The new top-left column of the reference
+ * @returns New formula string, or null if no drag is active
+ */
+export function moveReferenceToPosition(
+  newRow: number,
+  newCol: number
+): string | null {
+  if (!draggedReference || !globalEditingValue) {
+    return null;
+  }
+
+  // Calculate the new end position based on the reference size
+  const refHeight = draggedReference.endRow - draggedReference.startRow;
+  const refWidth = draggedReference.endCol - draggedReference.startCol;
+  const newEndRow = newRow + refHeight;
+  const newEndCol = newCol + refWidth;
+
+  // Update the formula with the new reference position
+  const newFormula = updateFormulaReference(
+    globalEditingValue,
+    draggedReference,
+    newRow,
+    newCol,
+    newEndRow,
+    newEndCol
+  );
+
+  return newFormula;
+}
+
 /**
  * FIX: Dispatch event to trigger refocus of the InlineEditor after inserting a reference.
  * This ensures the user can continue typing after clicking a cell to add a reference.
@@ -247,6 +393,16 @@ export interface UseEditingReturn {
   isOnDifferentSheet: () => boolean;
   /** Navigate cell reference with arrow keys in formula mode */
   navigateReferenceWithArrow: (direction: "up" | "down" | "left" | "right") => void;
+  /** Start dragging an existing reference to move it */
+  startRefDrag: (row: number, col: number) => boolean;
+  /** Update the reference position during drag (live preview) */
+  updateRefDrag: (row: number, col: number) => void;
+  /** Complete the reference drag and update the formula */
+  completeRefDrag: (row: number, col: number) => void;
+  /** Cancel the reference drag */
+  cancelRefDrag: () => void;
+  /** Check if currently dragging a reference */
+  isRefDragging: boolean;
 }
 
 /**
@@ -1252,6 +1408,168 @@ export function useEditing(): UseEditingReturn {
     [editing, dispatch, formulaReferences, getNextReferenceColor, getTargetSheetName, getSourceSheetName]
   );
 
+  // ==========================================================================
+  // REFERENCE DRAGGING METHODS
+  // ==========================================================================
+
+  /**
+   * Check if currently dragging a reference.
+   */
+  const isRefDragging = isReferenceDragging();
+
+  /**
+   * Start dragging an existing reference to move it.
+   * Returns true if a reference was found at the cell and drag started, false otherwise.
+   *
+   * @param row - The row that was clicked
+   * @param col - The column that was clicked
+   * @returns True if drag started, false if no reference at that position
+   */
+  const startRefDrag = useCallback(
+    (row: number, col: number): boolean => {
+      if (!editing || !editing.value.startsWith("=")) {
+        return false;
+      }
+
+      const refs = parseFormulaReferencesWithPositions(editing.value);
+      const refIndex = findReferenceAtCell(
+        refs,
+        row,
+        col,
+        sheetContext.activeSheetName,
+        editing.sourceSheetName
+      );
+
+      if (refIndex === -1) {
+        return false;
+      }
+
+      const ref = refs[refIndex];
+      startReferenceDrag(ref, refIndex, row, col);
+      return true;
+    },
+    [editing, sheetContext.activeSheetName]
+  );
+
+  /**
+   * Update the reference position during drag (live preview).
+   * This updates the visual highlighting but doesn't commit the formula change yet.
+   *
+   * @param row - Current mouse row position
+   * @param col - Current mouse column position
+   */
+  const updateRefDrag = useCallback(
+    (row: number, col: number) => {
+      const ref = getDraggedReference();
+      const startCell = getDragStartCell();
+      if (!ref || !startCell || !editing) {
+        return;
+      }
+
+      // Calculate offset from drag start to current position
+      const rowOffset = row - startCell.row;
+      const colOffset = col - startCell.col;
+
+      // Calculate new reference position
+      const newStartRow = Math.max(0, ref.startRow + rowOffset);
+      const newStartCol = Math.max(0, ref.startCol + colOffset);
+      const refHeight = ref.endRow - ref.startRow;
+      const refWidth = ref.endCol - ref.startCol;
+      const newEndRow = newStartRow + refHeight;
+      const newEndCol = newStartCol + refWidth;
+
+      // Get the target sheet for cross-sheet references
+      const targetSheet = getTargetSheetName();
+
+      // Create a new pending reference for visual preview
+      const dragPreviewRef: FormulaReference = {
+        startRow: newStartRow,
+        startCol: newStartCol,
+        endRow: newEndRow,
+        endCol: newEndCol,
+        color: ref.color,
+        sheetName: targetSheet ?? ref.sheetName,
+      };
+
+      // Update formula references - replace the original ref with the preview
+      const updatedRefs = formulaReferences.map((existingRef) => {
+        // Find the ref being dragged by matching the color (assigned during parse)
+        if (existingRef.color === ref.color) {
+          return dragPreviewRef;
+        }
+        return existingRef;
+      });
+
+      dispatch(setFormulaReferences(updatedRefs));
+    },
+    [editing, formulaReferences, dispatch, getTargetSheetName]
+  );
+
+  /**
+   * Complete the reference drag and update the formula.
+   *
+   * @param row - Final mouse row position
+   * @param col - Final mouse column position
+   */
+  const completeRefDrag = useCallback(
+    (row: number, col: number) => {
+      const ref = getDraggedReference();
+      const startCell = getDragStartCell();
+      if (!ref || !startCell || !editing) {
+        clearReferenceDrag();
+        return;
+      }
+
+      // Calculate offset from drag start to final position
+      const rowOffset = row - startCell.row;
+      const colOffset = col - startCell.col;
+
+      // If no movement, just clear the drag state
+      if (rowOffset === 0 && colOffset === 0) {
+        clearReferenceDrag();
+        dispatchReferenceInsertedEvent();
+        return;
+      }
+
+      // Calculate new reference position
+      const newStartRow = Math.max(0, ref.startRow + rowOffset);
+      const newStartCol = Math.max(0, ref.startCol + colOffset);
+
+      // Get the new formula with the moved reference
+      const newFormula = moveReferenceToPosition(newStartRow, newStartCol);
+
+      if (newFormula) {
+        // Update the editing value
+        setGlobalEditingValue(newFormula);
+        dispatch(updateEditing(newFormula));
+
+        // Re-parse and update the formula references for highlighting
+        const newRefs = parseFormulaReferences(newFormula, false);
+        dispatch(setFormulaReferences(newRefs));
+      }
+
+      clearReferenceDrag();
+      dispatchReferenceInsertedEvent();
+    },
+    [editing, dispatch]
+  );
+
+  /**
+   * Cancel the reference drag and restore the original highlighting.
+   */
+  const cancelRefDrag = useCallback(() => {
+    if (!editing) {
+      clearReferenceDrag();
+      return;
+    }
+
+    // Re-parse the original formula to restore highlighting
+    const refs = parseFormulaReferences(editing.value, false);
+    dispatch(setFormulaReferences(refs));
+
+    clearReferenceDrag();
+  }, [editing, dispatch]);
+
   return {
     editing,
     isEditing: editing !== null,
@@ -1281,5 +1599,10 @@ export function useEditing(): UseEditingReturn {
     getSourceSheetName,
     isOnDifferentSheet,
     navigateReferenceWithArrow,
+    startRefDrag,
+    updateRefDrag,
+    completeRefDrag,
+    cancelRefDrag,
+    isRefDragging,
   };
 }
