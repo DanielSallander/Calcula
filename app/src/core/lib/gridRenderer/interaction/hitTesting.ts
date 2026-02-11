@@ -2,10 +2,11 @@
 //PURPOSE: Pixel coordinate to cell coordinate conversion and resize handle detection
 //CONTEXT: Handles mouse interaction with grid cells, headers, and resize handles
 //UPDATED: Added freeze pane support for coordinate translation
+//UPDATED: Added formula reference border detection for reference dragging
 
-import type { GridConfig, Viewport, DimensionOverrides, FreezeConfig, FreezeZone } from "../../../types";
+import type { GridConfig, Viewport, DimensionOverrides, FreezeConfig, FreezeZone, FormulaReference } from "../../../types";
 import { ensureDimensions } from "../styles/styleUtils";
-import { getColumnWidth, getRowHeight } from "../layout/dimensions";
+import { getColumnWidth, getRowHeight, getColumnX, getRowY } from "../layout/dimensions";
 import { calculateVisibleRange, calculateFreezePaneLayout } from "../layout/viewport";
 
 // =============================================================================
@@ -395,4 +396,124 @@ export function getRowFromHeader(
     row++;
   }
   return null;
+}
+
+/**
+ * Threshold in pixels for detecting mouse hover over reference border.
+ */
+const REFERENCE_BORDER_THRESHOLD = 5;
+
+/**
+ * Result from getFormulaReferenceBorderAtPixel.
+ */
+export interface ReferenceBorderHit {
+  /** Index of the reference in the array */
+  refIndex: number;
+  /** The reference that was hit */
+  reference: FormulaReference;
+}
+
+/**
+ * Check if a pixel position is on the border of a formula reference.
+ * Returns the reference info if on a border, null otherwise.
+ * This is used for the reference dragging feature - users can only
+ * drag a reference by clicking on its border (like in Excel).
+ *
+ * @param pixelX - X coordinate in pixels relative to container
+ * @param pixelY - Y coordinate in pixels relative to container
+ * @param config - Grid configuration
+ * @param viewport - Current viewport state
+ * @param formulaReferences - Array of formula references to check
+ * @param dimensions - Optional dimension overrides
+ * @param currentSheetName - Current sheet name for cross-sheet reference matching
+ * @param formulaSourceSheetName - Sheet where the formula is being edited
+ */
+export function getFormulaReferenceBorderAtPixel(
+  pixelX: number,
+  pixelY: number,
+  config: GridConfig,
+  viewport: Viewport,
+  formulaReferences: FormulaReference[],
+  dimensions?: DimensionOverrides,
+  currentSheetName?: string,
+  formulaSourceSheetName?: string
+): ReferenceBorderHit | null {
+  if (!formulaReferences || formulaReferences.length === 0) {
+    return null;
+  }
+
+  const rowHeaderWidth = config.rowHeaderWidth || 50;
+  const colHeaderHeight = config.colHeaderHeight || 24;
+
+  // Skip if click is on headers
+  if (pixelX < rowHeaderWidth || pixelY < colHeaderHeight) {
+    return null;
+  }
+
+  const dims = ensureDimensions(dimensions);
+  const range = calculateVisibleRange(viewport, config, pixelX + 100, pixelY + 100, dims);
+
+  for (let i = 0; i < formulaReferences.length; i++) {
+    const ref = formulaReferences[i];
+
+    // Check if reference belongs to current sheet
+    if (!shouldDrawReferenceOnSheet(ref.sheetName, currentSheetName, formulaSourceSheetName)) {
+      continue;
+    }
+
+    // Skip passive references (from cell selection, not from editing)
+    if (ref.isPassive) {
+      continue;
+    }
+
+    // Normalize bounds
+    const minRow = Math.min(ref.startRow, ref.endRow);
+    const maxRow = Math.max(ref.startRow, ref.endRow);
+    const minCol = Math.min(ref.startCol, ref.endCol);
+    const maxCol = Math.max(ref.startCol, ref.endCol);
+
+    // Calculate rectangle in viewport coordinates
+    const x1 = getColumnX(minCol, config, dims, range.startCol, range.offsetX);
+    const y1 = getRowY(minRow, config, dims, range.startRow, range.offsetY);
+
+    let x2 = x1;
+    for (let c = minCol; c <= maxCol; c++) {
+      x2 += getColumnWidth(c, config, dims);
+    }
+
+    let y2 = y1;
+    for (let r = minRow; r <= maxRow; r++) {
+      y2 += getRowHeight(r, config, dims);
+    }
+
+    // Check if pixel is near the border (within threshold)
+    const isNearLeftBorder = Math.abs(pixelX - x1) <= REFERENCE_BORDER_THRESHOLD && pixelY >= y1 && pixelY <= y2;
+    const isNearRightBorder = Math.abs(pixelX - x2) <= REFERENCE_BORDER_THRESHOLD && pixelY >= y1 && pixelY <= y2;
+    const isNearTopBorder = Math.abs(pixelY - y1) <= REFERENCE_BORDER_THRESHOLD && pixelX >= x1 && pixelX <= x2;
+    const isNearBottomBorder = Math.abs(pixelY - y2) <= REFERENCE_BORDER_THRESHOLD && pixelX >= x1 && pixelX <= x2;
+
+    if (isNearLeftBorder || isNearRightBorder || isNearTopBorder || isNearBottomBorder) {
+      return { refIndex: i, reference: ref };
+    }
+  }
+
+  return null;
+}
+
+/**
+ * Check if a reference should be considered for hit testing on the current sheet.
+ */
+function shouldDrawReferenceOnSheet(
+  refSheetName: string | undefined,
+  currentSheetName: string | undefined,
+  formulaSourceSheetName: string | undefined
+): boolean {
+  if (!refSheetName) {
+    // Reference has no sheet prefix - it refers to the formula's source sheet
+    if (!currentSheetName || !formulaSourceSheetName) return true;
+    return currentSheetName.toLowerCase() === formulaSourceSheetName.toLowerCase();
+  }
+  // Reference has a sheet prefix - check if it matches current sheet
+  if (!currentSheetName) return true;
+  return refSheetName.toLowerCase() === currentSheetName.toLowerCase();
 }

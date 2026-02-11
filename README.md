@@ -6,7 +6,7 @@ Lets find out!
 
 Calcula is an open-source spreadsheet engine project. 
 
-### "Wait, another spreadsheet?"
+### "Just another spreadsheet application"
 Calcula is an exploration into whether we can build a modern "Excel-class" engine using a strict **Microkernel Architecture** (inspired by VSCode) and a high-performance **Rust** backbone.
 
 **Status:** [EXPERIMENTAL / UNDER CONSTRUCTION]

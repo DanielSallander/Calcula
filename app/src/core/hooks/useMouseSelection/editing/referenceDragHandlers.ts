@@ -2,11 +2,12 @@
 // PURPOSE: Factory function for creating formula reference drag handlers.
 // CONTEXT: Creates handlers for dragging existing cell references in a formula
 // to move them to a new location. This allows users to click on a highlighted
-// reference and drag it to change the cell/range it refers to.
+// reference border and drag it to change the cell/range it refers to.
+// NOTE: Dragging only works when clicking on the reference border (like Excel).
 
-import type { GridConfig, Viewport, DimensionOverrides } from "../../../types";
+import type { GridConfig, Viewport, DimensionOverrides, FormulaReference } from "../../../types";
 import type { CellPosition, MousePosition } from "../types";
-import { getCellFromPixel } from "../../../lib/gridRenderer";
+import { getCellFromPixel, getFormulaReferenceBorderAtPixel } from "../../../lib/gridRenderer";
 import { getCellFromMousePosition } from "../utils/cellUtils";
 
 interface ReferenceDragDependencies {
@@ -14,6 +15,9 @@ interface ReferenceDragDependencies {
   viewport: Viewport;
   dimensions?: DimensionOverrides;
   containerRef: React.RefObject<HTMLElement | null>;
+  formulaReferences: FormulaReference[];
+  currentSheetName?: string;
+  formulaSourceSheetName?: string;
   onStartRefDrag?: (row: number, col: number) => boolean;
   onUpdateRefDrag?: (row: number, col: number) => void;
   onCompleteRefDrag?: (row: number, col: number) => void;
@@ -39,6 +43,8 @@ interface ReferenceDragHandlers {
     stopAutoScroll: () => void
   ) => void;
   handleReferenceDragCancel: () => void;
+  /** Check if mouse is over a reference border (for cursor display) */
+  isOverReferenceBorder: (mouseX: number, mouseY: number) => boolean;
 }
 
 /**
@@ -51,6 +57,9 @@ export function createReferenceDragHandlers(deps: ReferenceDragDependencies): Re
     viewport,
     dimensions,
     containerRef,
+    formulaReferences,
+    currentSheetName,
+    formulaSourceSheetName,
     onStartRefDrag,
     onUpdateRefDrag,
     onCompleteRefDrag,
@@ -62,17 +71,52 @@ export function createReferenceDragHandlers(deps: ReferenceDragDependencies): Re
   } = deps;
 
   /**
+   * Check if the mouse is over a reference border (for cursor display).
+   * This is used to show the move cursor when hovering over a draggable border.
+   */
+  const isOverReferenceBorder = (mouseX: number, mouseY: number): boolean => {
+    const borderHit = getFormulaReferenceBorderAtPixel(
+      mouseX,
+      mouseY,
+      config,
+      viewport,
+      formulaReferences,
+      dimensions,
+      currentSheetName,
+      formulaSourceSheetName
+    );
+    return borderHit !== null;
+  };
+
+  /**
    * Handle mouse down to start a reference drag.
-   * Returns true if a drag was started (clicked on an existing reference),
+   * Returns true if a drag was started (clicked on reference border),
    * false otherwise (clicked somewhere else, should be handled by other handlers).
+   * NOTE: Dragging only starts when clicking on the reference BORDER, not inside.
    */
   const handleReferenceDragMouseDown = (
     mouseX: number,
     mouseY: number,
     event: React.MouseEvent<HTMLElement>
   ): boolean => {
-    const cell = getCellFromPixel(mouseX, mouseY, config, viewport, dimensions);
+    // Check if clicking on a reference border (not just inside the reference)
+    const borderHit = getFormulaReferenceBorderAtPixel(
+      mouseX,
+      mouseY,
+      config,
+      viewport,
+      formulaReferences,
+      dimensions,
+      currentSheetName,
+      formulaSourceSheetName
+    );
 
+    if (!borderHit) {
+      return false;
+    }
+
+    // Get the cell at this position to pass to the drag handler
+    const cell = getCellFromPixel(mouseX, mouseY, config, viewport, dimensions);
     if (!cell) {
       return false;
     }
@@ -158,5 +202,6 @@ export function createReferenceDragHandlers(deps: ReferenceDragDependencies): Re
     handleReferenceDragMove,
     handleReferenceDragMouseUp,
     handleReferenceDragCancel,
+    isOverReferenceBorder,
   };
 }

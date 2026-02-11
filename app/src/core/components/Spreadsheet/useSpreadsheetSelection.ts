@@ -54,7 +54,7 @@ export function useSpreadsheetSelection({
   onCommitBeforeSelect
 }: UseSpreadsheetSelectionProps) {
   const [selectedCellContent, setSelectedCellContent] = useState<string>("");
-  const { viewport, config, selection, dimensions } = state;
+  const { viewport, config, selection, dimensions, formulaReferences, sheetContext } = state;
 
   const { scrollToSelection, registerScrollContainer } = useViewport();
 
@@ -337,6 +337,9 @@ export function useSpreadsheetSelection({
     selection,
     dimensions,
     isFormulaMode,
+    formulaReferences,
+    currentSheetName: sheetContext.activeSheetName,
+    formulaSourceSheetName: state.editing?.sourceSheetName,
     onSelectCell: selectCell,
     onExtendTo: handleExtendTo,  // FIX: Use merge-aware extension for drag selection
     onScroll: handleScrollUpdate,

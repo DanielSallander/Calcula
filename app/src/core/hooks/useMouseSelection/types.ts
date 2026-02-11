@@ -3,7 +3,7 @@
 // CONTEXT: Contains all interfaces and types used across the useMouseSelection
 // module, including configuration, state, props, and return types.
 
-import type { GridConfig, Viewport, Selection, SelectionType, DimensionOverrides } from "../../types";
+import type { GridConfig, Viewport, Selection, SelectionType, DimensionOverrides, FormulaReference } from "../../types";
 
 /**
  * Configuration for auto-scroll behavior during drag selection.
@@ -87,6 +87,12 @@ export interface UseMouseSelectionProps {
   dimensions?: DimensionOverrides;
   /** Whether currently in formula editing mode expecting a reference */
   isFormulaMode?: boolean;
+  /** Current formula references for hit testing borders */
+  formulaReferences?: FormulaReference[];
+  /** Current sheet name for cross-sheet reference matching */
+  currentSheetName?: string;
+  /** Sheet where the formula is being edited */
+  formulaSourceSheetName?: string;
   /** Callback to select a single cell */
   onSelectCell: (row: number, col: number, type?: SelectionType) => void;
   /** Callback to extend selection to a cell */

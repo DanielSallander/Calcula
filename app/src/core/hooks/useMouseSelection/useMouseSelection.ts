@@ -46,6 +46,9 @@ export function useMouseSelection(props: UseMouseSelectionProps): UseMouseSelect
     selection,
     dimensions,
     isFormulaMode = false,
+    formulaReferences = [],
+    currentSheetName,
+    formulaSourceSheetName,
     onSelectCell,
     onExtendTo,
     onScroll,
@@ -208,6 +211,9 @@ export function useMouseSelection(props: UseMouseSelectionProps): UseMouseSelect
     viewport,
     dimensions,
     containerRef,
+    formulaReferences,
+    currentSheetName,
+    formulaSourceSheetName,
     onStartRefDrag,
     onUpdateRefDrag,
     onCompleteRefDrag,
@@ -357,6 +363,9 @@ export function useMouseSelection(props: UseMouseSelectionProps): UseMouseSelect
         // Check fill handle first (highest priority for crosshair)
         if (isOverFillHandle(mouseX, mouseY)) {
           setCursorStyle("crosshair");
+        } else if (isFormulaMode && referenceDragHandlers.isOverReferenceBorder(mouseX, mouseY)) {
+          // Check if over a formula reference border (for dragging)
+          setCursorStyle("move");
         } else {
           // Check for resize handles
           const colResize = resizeHandlers.checkResizeHandle(mouseX, mouseY);
