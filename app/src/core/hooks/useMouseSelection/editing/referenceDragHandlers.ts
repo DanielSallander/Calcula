@@ -115,21 +115,24 @@ export function createReferenceDragHandlers(deps: ReferenceDragDependencies): Re
       return false;
     }
 
-    // Get the cell at this position to pass to the drag handler
+    // FIX: Use the reference's startRow/startCol instead of the cell under cursor.
+    // When clicking on a border, the cursor might be over an adjacent cell (e.g.,
+    // clicking on the right border of B1 might have cursor over C1). Using the
+    // reference bounds ensures we correctly identify which reference is being dragged.
+    const { startRow, startCol } = borderHit.reference;
+
+    // Get the actual cell under the cursor for tracking the drag offset
     const cell = getCellFromPixel(mouseX, mouseY, config, viewport, dimensions);
-    if (!cell) {
-      return false;
-    }
+    const dragStartRow = cell?.row ?? startRow;
+    const dragStartCol = cell?.col ?? startCol;
 
-    const { row, col } = cell;
-
-    // Try to start a reference drag - this returns true if the cell is part
-    // of an existing reference in the formula
-    if (onStartRefDrag && onStartRefDrag(row, col)) {
+    // Try to start a reference drag - pass a cell that's definitely inside the reference
+    if (onStartRefDrag && onStartRefDrag(startRow, startCol)) {
       event.preventDefault();
       setIsRefDragging(true);
       setCursorStyle("move");  // Visual feedback: show move cursor during drag
-      refDragStartRef.current = { row, col };
+      // Store the actual cell under cursor for offset calculation during drag
+      refDragStartRef.current = { row: dragStartRow, col: dragStartCol };
       lastMousePosRef.current = { x: mouseX, y: mouseY };
       return true;
     }

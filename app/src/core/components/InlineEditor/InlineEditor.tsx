@@ -457,6 +457,8 @@ export function InlineEditor(props: InlineEditorProps): React.ReactElement | nul
   useEffect(() => {
     const handleReferenceInserted = () => {
       console.log("[InlineEditor] Reference inserted, will refocus");
+      // FIX: Clear the prevent flag now that the reference insertion is complete
+      preventBlurCommit = false;
       // Trigger a refocus by updating the trigger counter
       setRefocusTrigger(prev => prev + 1);
     };

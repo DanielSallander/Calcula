@@ -125,6 +125,15 @@ export function isGlobalFormulaMode(): boolean {
 }
 
 /**
+ * Check if currently editing a formula (regardless of whether expecting a reference).
+ * This is used for reference dragging - you should be able to drag existing references
+ * even when the formula doesn't end with an operator.
+ */
+export function isEditingFormula(): boolean {
+  return globalIsEditing && globalEditingValue.startsWith("=");
+}
+
+/**
  * Get the arrow reference cursor position.
  */
 export function getArrowRefCursor(): { row: number; col: number } | null {
@@ -331,6 +340,14 @@ export function moveReferenceToPosition(
  */
 function dispatchReferenceInsertedEvent(): void {
   window.dispatchEvent(new CustomEvent("formula:referenceInserted"));
+}
+
+/**
+ * FIX: Set the preventBlurCommit flag to prevent the InlineEditor from committing
+ * when focus is lost during a reference drag operation.
+ */
+function setPreventBlurCommit(value: boolean): void {
+  window.dispatchEvent(new CustomEvent("editor:preventBlurCommit", { detail: value }));
 }
 
 /**
@@ -1523,6 +1540,11 @@ export function useEditing(): UseEditingReturn {
       // Calculate offset from drag start to final position
       const rowOffset = row - startCell.row;
       const colOffset = col - startCell.col;
+
+      // FIX: Prevent blur commit during reference drag completion
+      // The blur event fires when focus shifts during the drag, and we don't want
+      // it to commit the formula - we want to continue editing.
+      setPreventBlurCommit(true);
 
       // If no movement, just clear the drag state
       if (rowOffset === 0 && colOffset === 0) {

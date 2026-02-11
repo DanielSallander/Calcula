@@ -25,7 +25,7 @@ import { createFormulaHeaderHandlers } from "./editing/formulaHeaderHandlers";
 import { createReferenceDragHandlers } from "./editing/referenceDragHandlers";
 import { createResizeHandlers } from "./layout/resizeHandlers";
 import { createFillHandleCursorChecker } from "./utils/fillHandleUtils";
-import { isGlobalFormulaMode } from "../../hooks/useEditing";
+import { isGlobalFormulaMode, isEditingFormula } from "../../hooks/useEditing";
 
 // Custom cursor data URLs for Excel-style header selection arrows
 const COLUMN_SELECT_CURSOR = `url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='24' height='24' viewBox='0 0 24 24'%3E%3Cpath d='M12 2 L12 18 M12 18 L8 14 M12 18 L16 14' stroke='black' stroke-width='2' fill='none' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E") 12 12, pointer`;
@@ -271,7 +271,21 @@ export function useMouseSelection(props: UseMouseSelectionProps): UseMouseSelect
       // current editing value synchronously.
       const isCurrentlyFormulaMode = isFormulaMode || isGlobalFormulaMode();
 
-      // Priority 2: Check for column header click
+      // FIX: Check if we're editing ANY formula (for reference dragging)
+      // This is separate from isCurrentlyFormulaMode which checks if expecting a reference
+      const isCurrentlyEditingFormula = isEditingFormula();
+
+      // Priority 2: Check for reference dragging when editing any formula
+      // FIX: Allow dragging existing references even when formula doesn't end with an operator
+      if (isCurrentlyEditingFormula) {
+        if (referenceDragHandlers.handleReferenceDragMouseDown(mouseX, mouseY, event)) {
+          formulaHeaderDragStartRef.current = null;
+          formulaDragStartRef.current = null;
+          return;
+        }
+      }
+
+      // Priority 3: Check for formula mode (expecting reference) operations
       if (isCurrentlyFormulaMode) {
         // Formula mode: insert column reference
         if (formulaHeaderHandlers.handleFormulaColumnHeaderMouseDown(mouseX, mouseY, event)) {
@@ -281,19 +295,14 @@ export function useMouseSelection(props: UseMouseSelectionProps): UseMouseSelect
         if (formulaHeaderHandlers.handleFormulaRowHeaderMouseDown(mouseX, mouseY, event)) {
           return;
         }
-        // Formula mode: try to drag an existing reference first
-        // This allows users to click on a highlighted reference and move it
-        if (referenceDragHandlers.handleReferenceDragMouseDown(mouseX, mouseY, event)) {
-          formulaHeaderDragStartRef.current = null;
-          formulaDragStartRef.current = null;
-          return;
-        }
-        // Formula mode: insert cell reference (if not dragging existing reference)
+        // Formula mode: insert cell reference
         if (formulaHandlers.handleFormulaCellMouseDown(mouseX, mouseY, event)) {
           formulaHeaderDragStartRef.current = null;
           return;
         }
       } else {
+        // Normal mode (or editing complete formula - click not on reference border)
+        // onCommitBeforeSelect will commit any pending edit before selecting
         // Normal mode: select column
         if (await headerSelectionHandlers.handleColumnHeaderMouseDown(mouseX, mouseY, event.shiftKey, event)) {
           return;
@@ -363,8 +372,10 @@ export function useMouseSelection(props: UseMouseSelectionProps): UseMouseSelect
         // Check fill handle first (highest priority for crosshair)
         if (isOverFillHandle(mouseX, mouseY)) {
           setCursorStyle("crosshair");
-        } else if (isFormulaMode && referenceDragHandlers.isOverReferenceBorder(mouseX, mouseY)) {
+        } else if (isEditingFormula() && referenceDragHandlers.isOverReferenceBorder(mouseX, mouseY)) {
           // Check if over a formula reference border (for dragging)
+          // FIX: Use isEditingFormula() instead of isFormulaMode to allow dragging
+          // existing references even when the formula doesn't end with an operator
           setCursorStyle("move");
         } else {
           // Check for resize handles
