@@ -1,6 +1,0 @@
-. .\setup-rust-env.ps1
-C:\Dropbox\Projekt\Calcula\core\setup-rust-env.ps1
-
-python context_manager.py build --files 
-
-python context_manager.py scan

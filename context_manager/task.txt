@@ -1,4 +1,0 @@
-### Cell reference highlighting
-When referencing a cell from another cell the cell referenced is correctly highlighted when creating the cell reference.
-However, when going back to a cell that contains cell references the highlighing is not showing.
-Look at the attached image for an example of this.

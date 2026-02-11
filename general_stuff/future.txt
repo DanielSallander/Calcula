@@ -1,8 +1,0 @@
-### Future Development: The "Calcula Macro" Engine (Powered by Rhai)
-
-To bridge the gap between reactive cell formulas and the heavy-lifting of the Python environment, 
-Calcula will integrate **Rhai**—an embedded scripting language built entirely in Rust—as its native automation layer. 
-Functioning as a modern, memory-safe successor to VBA, this layer will allow users to write "Calcula Macros" 
-to manipulate the application state directly (e.g., *“create a new sheet for every unique value in column A”* or *“apply red formatting if the API fetch fails”*). 
-Unlike Python, which runs in a containerized environment for data science tasks, Rhai scripts run synchronously within the Calcula Core shell. 
-This ensures zero-latency execution for UI interactions and provides a strictly sandboxed environment, guaranteeing that shared workbooks can automate tasks without posing security risks to the user’s operating system.
