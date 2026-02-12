@@ -132,23 +132,40 @@ pub fn init_log_file() -> Result<PathBuf, String> {
     Ok(log_path)
 }
 
-/// Write a log line in unified format
+/// Write a log line in unified format.
+/// PERFORMANCE: Does NOT flush after every write. The OS buffer handles batching.
+/// Only info/warn/error levels print to console to reduce stdout I/O overhead.
 pub fn write_log(level: &str, category: &str, message: &str) {
     let seq = next_seq();
     let line = format!("{}|{}|{}|{}", seq, level, category, message);
-    
+
     if let Ok(mut guard) = LOG_FILE.lock() {
         if let Some(ref mut file) = *guard {
             if let Err(e) = writeln!(file, "{}", line) {
                 eprintln!("[LOG_ERROR] Failed to write: {}", e);
             }
-            let _ = file.flush();
+            // No flush here - let the OS buffer handle it for performance.
+            // Logs will still be written; they just won't be forced to disk on every line.
         } else {
             eprintln!("[LOG_WARN] Log file not initialized, console only: {}", line);
         }
     }
-    
-    println!("{}", line);
+
+    // Only print non-debug messages to console to reduce I/O overhead.
+    // Debug messages are high-volume and printing each to stdout is very slow on Windows.
+    if level != "D" {
+        println!("{}", line);
+    }
+}
+
+/// Explicitly flush the log file. Call this after batch operations
+/// or at important checkpoints to ensure logs are persisted.
+pub fn flush_log() {
+    if let Ok(mut guard) = LOG_FILE.lock() {
+        if let Some(ref mut file) = *guard {
+            let _ = file.flush();
+        }
+    }
 }
 
 /// Write an ENTER log line for function entry
@@ -178,7 +195,6 @@ pub fn write_log_raw(message: &str) {
             if let Err(e) = writeln!(file, "{}", message) {
                 eprintln!("[LOG_ERROR] Failed to write: {}", e);
             }
-            let _ = file.flush();
         }
     }
     println!("{}", message);
@@ -336,6 +352,15 @@ macro_rules! log_exit_info {
     };
 }
 
+// Performance tracing macro - always prints to stdout (level "P")
+
+#[macro_export]
+macro_rules! log_perf {
+    ($cat:expr, $($arg:tt)*) => {
+        $crate::logging::write_log("P", $cat, &format!($($arg)*))
+    };
+}
+
 // Re-export the macros so they can be imported via `use crate::logging::log_info;`
 pub use log_debug;
 pub use log_info;
@@ -345,3 +370,4 @@ pub use log_enter;
 pub use log_exit;
 pub use log_enter_info;
 pub use log_exit_info;
+pub use log_perf;

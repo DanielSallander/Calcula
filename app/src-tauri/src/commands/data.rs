@@ -11,7 +11,7 @@ use crate::{
     extract_all_references, format_cell_value, get_column_row_dependents,
     get_recalculation_order, parse_cell_input, parse_formula_to_engine_ast,
     update_column_dependencies, update_cross_sheet_dependencies, update_dependencies,
-    update_row_dependencies, AppState,
+    update_row_dependencies, AppState, log_perf
 };
 use engine::{self, Grid, StyleRegistry};
 use std::collections::HashSet;
@@ -114,6 +114,9 @@ pub fn update_cell(
     col: u32,
     value: String,
 ) -> Result<Vec<CellData>, String> {
+    use std::time::Instant;
+    let perf_t0 = Instant::now();
+
     // Check if cell is in a protected region (e.g., pivot table, chart)
     let active_sheet_for_region_check = *state.active_sheet.lock().unwrap();
     if let Some(region) = state.get_region_at_cell(active_sheet_for_region_check, row, col) {
@@ -142,6 +145,7 @@ pub fn update_cell(
     let calc_mode = state.calculation_mode.lock().unwrap();
     let mut undo_stack = state.undo_stack.lock().unwrap();
     let merged_regions = state.merged_regions.lock().unwrap();
+    let perf_t1_locks = Instant::now();
 
     let current_sheet_name = sheet_names.get(active_sheet).cloned().unwrap_or_default();
 
@@ -271,23 +275,16 @@ pub fn update_cell(
                     &mut cross_sheet_dependents_map,
                 );
 
-                // Cache the engine AST for efficient recalculation
-                if let Ok(engine_ast) = parse_formula_to_engine_ast(formula) {
-                    cell.set_cached_ast(engine_ast.clone());
-                    // Evaluate using the cached AST (avoid re-parsing)
-                    let result = evaluate_formula_multi_sheet_with_ast(
-                        &grids,
-                        &sheet_names,
-                        active_sheet,
-                        &engine_ast,
-                    );
-                    cell.value = result;
-                } else {
-                    // Fallback to string-based evaluation
-                    let result =
-                        evaluate_formula_multi_sheet(&grids, &sheet_names, active_sheet, formula);
-                    cell.value = result;
-                }
+                // PERF: Convert the already-parsed AST directly instead of re-parsing.
+                let engine_ast = crate::convert_expr(&parsed);
+                cell.set_cached_ast(engine_ast.clone());
+                let result = evaluate_formula_multi_sheet_with_ast(
+                    &grids,
+                    &sheet_names,
+                    active_sheet,
+                    &engine_ast,
+                );
+                cell.value = result;
             }
             Err(_e) => {
                 // Formula parse error - dependencies won't be tracked
@@ -326,6 +323,8 @@ pub fn update_cell(
         );
     }
 
+    let perf_t2_parsed = Instant::now();
+
     // Store the cell
     grid.set_cell(row, col, cell.clone());
     // Also update the grids vector to keep them in sync
@@ -336,6 +335,7 @@ pub fn update_cell(
     // Get the display value
     let style = styles.get(cell.style_index);
     let display = format_cell_value(&cell.value, style);
+    let perf_t3_stored = Instant::now();
 
     // Get merge span info
     let merge_info = merged_regions
@@ -385,12 +385,19 @@ pub fn update_cell(
                 recalc_order.push(dep);
             }
         }
+        let perf_t4_recalc_order = Instant::now();
+        let perf_same_sheet_count = recalc_order.len();
+        let mut perf_cache_hits: u32 = 0;
+        let mut perf_cache_misses: u32 = 0;
+        let mut perf_eval_total = std::time::Duration::ZERO;
 
         for &(dep_row, dep_col) in &recalc_order {
             if let Some(dep_cell) = grid.get_cell(dep_row, dep_col) {
                 if let Some(ref formula) = dep_cell.formula {
+                    let perf_eval_start = Instant::now();
                     // Use cached AST if available for efficient evaluation
                     let result = if let Some(cached_ast) = dep_cell.get_cached_ast() {
+                        perf_cache_hits += 1;
                         // Fast path: use pre-parsed AST
                         evaluate_formula_multi_sheet_with_ast(
                             &grids,
@@ -399,6 +406,7 @@ pub fn update_cell(
                             cached_ast,
                         )
                     } else {
+                        perf_cache_misses += 1;
                         // Slow path: parse and cache the AST for future use
                         if let Ok(engine_ast) = parse_formula_to_engine_ast(formula) {
                             let result = evaluate_formula_multi_sheet_with_ast(
@@ -440,6 +448,7 @@ pub fn update_cell(
                                 col_span: dep_col_span,
                                 sheet_index: None,
                             });
+                            perf_eval_total += perf_eval_start.elapsed();
                             continue; // Skip the rest of this iteration
                         }
                         // Fallback to string-based evaluation
@@ -479,9 +488,11 @@ pub fn update_cell(
                         col_span: dep_col_span,
                         sheet_index: None, // Current active sheet
                     });
+                    perf_eval_total += perf_eval_start.elapsed();
                 }
             }
         }
+        let perf_t5_same_sheet = Instant::now();
 
         // Also recalculate cross-sheet dependents (formulas on OTHER sheets that reference this cell)
         // Use a work queue to properly cascade recalculations across sheets
@@ -647,6 +658,34 @@ pub fn update_cell(
                 }
             }
         }
+        let perf_t6_cross_sheet = Instant::now();
+        let perf_cross_sheet_count = updated_cells.len().saturating_sub(1 + perf_same_sheet_count);
+
+        log_perf!("CELL",
+            "update_cell({},{}) cells={} | locks={:.2}ms parse+deps={:.2}ms store={:.2}ms recalc_order={:.2}ms same_sheet={:.2}ms({}cells, {}hits/{}miss, eval={:.2}ms) cross_sheet={:.2}ms({}cells) TOTAL={:.2}ms",
+            row, col, updated_cells.len(),
+            perf_t1_locks.duration_since(perf_t0).as_secs_f64() * 1000.0,
+            perf_t2_parsed.duration_since(perf_t1_locks).as_secs_f64() * 1000.0,
+            perf_t3_stored.duration_since(perf_t2_parsed).as_secs_f64() * 1000.0,
+            perf_t4_recalc_order.duration_since(perf_t3_stored).as_secs_f64() * 1000.0,
+            perf_t5_same_sheet.duration_since(perf_t4_recalc_order).as_secs_f64() * 1000.0,
+            perf_same_sheet_count, perf_cache_hits, perf_cache_misses,
+            perf_eval_total.as_secs_f64() * 1000.0,
+            perf_t6_cross_sheet.duration_since(perf_t5_same_sheet).as_secs_f64() * 1000.0,
+            perf_cross_sheet_count,
+            perf_t6_cross_sheet.duration_since(perf_t0).as_secs_f64() * 1000.0
+        );
+    } else {
+        // Manual calc mode - just log basic timing
+        let perf_tend = Instant::now();
+        log_perf!("CELL",
+            "update_cell({},{}) manual_mode | locks={:.2}ms parse+deps={:.2}ms store={:.2}ms TOTAL={:.2}ms",
+            row, col,
+            perf_t1_locks.duration_since(perf_t0).as_secs_f64() * 1000.0,
+            perf_t2_parsed.duration_since(perf_t1_locks).as_secs_f64() * 1000.0,
+            perf_t3_stored.duration_since(perf_t2_parsed).as_secs_f64() * 1000.0,
+            perf_tend.duration_since(perf_t0).as_secs_f64() * 1000.0
+        );
     }
 
     Ok(updated_cells)
@@ -662,6 +701,9 @@ pub fn update_cells_batch(
     updates: Vec<crate::api_types::CellUpdateInput>,
 ) -> Result<Vec<CellData>, String> {
     use std::collections::HashMap;
+    use std::time::Instant;
+    let perf_t0 = Instant::now();
+    let perf_batch_size = updates.len();
 
     // Early return for empty batch
     if updates.is_empty() {
@@ -685,6 +727,7 @@ pub fn update_cells_batch(
     let calc_mode = state.calculation_mode.lock().unwrap();
     let mut undo_stack = state.undo_stack.lock().unwrap();
     let merged_regions = state.merged_regions.lock().unwrap();
+    let perf_t1_locks = Instant::now();
 
     let current_sheet_name = sheet_names.get(active_sheet).cloned().unwrap_or_default();
 
@@ -821,21 +864,17 @@ pub fn update_cells_batch(
                         &mut cross_sheet_dependents_map,
                     );
 
-                    // Cache the engine AST and evaluate
-                    if let Ok(engine_ast) = parse_formula_to_engine_ast(formula) {
-                        cell.set_cached_ast(engine_ast.clone());
-                        let result = evaluate_formula_multi_sheet_with_ast(
-                            &grids,
-                            &sheet_names,
-                            active_sheet,
-                            &engine_ast,
-                        );
-                        cell.value = result;
-                    } else {
-                        let result =
-                            evaluate_formula_multi_sheet(&grids, &sheet_names, active_sheet, formula);
-                        cell.value = result;
-                    }
+                    // PERF: Convert the already-parsed AST directly instead of re-parsing.
+                    // This eliminates a redundant parse_formula() call per cell.
+                    let engine_ast = crate::convert_expr(&parsed);
+                    cell.set_cached_ast(engine_ast.clone());
+                    let result = evaluate_formula_multi_sheet_with_ast(
+                        &grids,
+                        &sheet_names,
+                        active_sheet,
+                        &engine_ast,
+                    );
+                    cell.value = result;
                 }
                 Err(_e) => {
                     let result =
@@ -904,6 +943,8 @@ pub fn update_cells_batch(
         undo_stack.record_cell_change(row, col, previous_cell);
         cells_needing_recalc.push((row, col));
     }
+
+    let perf_t2_processed = Instant::now();
 
     // Recalculate dependents if automatic mode - do this ONCE after all updates
     if *calc_mode == "automatic" {
@@ -1107,6 +1148,25 @@ pub fn update_cells_batch(
                 }
             }
         }
+
+        let perf_tend = Instant::now();
+        log_perf!("BATCH",
+            "update_cells_batch(N={}) cells={} | locks={:.2}ms process={:.2}ms recalc+cross={:.2}ms TOTAL={:.2}ms",
+            perf_batch_size, updated_cells.len(),
+            perf_t1_locks.duration_since(perf_t0).as_secs_f64() * 1000.0,
+            perf_t2_processed.duration_since(perf_t1_locks).as_secs_f64() * 1000.0,
+            perf_tend.duration_since(perf_t2_processed).as_secs_f64() * 1000.0,
+            perf_tend.duration_since(perf_t0).as_secs_f64() * 1000.0
+        );
+    } else {
+        let perf_tend = Instant::now();
+        log_perf!("BATCH",
+            "update_cells_batch(N={}) manual_mode | locks={:.2}ms process={:.2}ms TOTAL={:.2}ms",
+            perf_batch_size,
+            perf_t1_locks.duration_since(perf_t0).as_secs_f64() * 1000.0,
+            perf_t2_processed.duration_since(perf_t1_locks).as_secs_f64() * 1000.0,
+            perf_tend.duration_since(perf_t0).as_secs_f64() * 1000.0
+        );
     }
 
     Ok(updated_cells)

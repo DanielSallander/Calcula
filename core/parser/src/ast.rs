@@ -77,7 +77,113 @@ pub enum Expression {
     },
 
     /// A function call like SUM(A1:A10) or IF(A1 > 0, "yes", "no").
-    FunctionCall { name: String, args: Vec<Expression> },
+    /// The function is resolved to a `BuiltinFunction` enum at parse time
+    /// to avoid heap-allocating and string-comparing on every evaluation.
+    FunctionCall { func: BuiltinFunction, args: Vec<Expression> },
+}
+
+/// Built-in spreadsheet functions resolved at parse time.
+/// Using an enum instead of a String avoids heap allocations and enables
+/// fast integer-based dispatch in the evaluator.
+#[derive(Debug, PartialEq, Clone)]
+pub enum BuiltinFunction {
+    // Aggregate functions
+    Sum,
+    Average,
+    Min,
+    Max,
+    Count,
+    CountA,
+
+    // Logical functions
+    If,
+    And,
+    Or,
+    Not,
+    True,
+    False,
+
+    // Math functions
+    Abs,
+    Round,
+    Floor,
+    Ceiling,
+    Sqrt,
+    Power,
+    Mod,
+    Int,
+    Sign,
+
+    // Text functions
+    Len,
+    Upper,
+    Lower,
+    Trim,
+    Concatenate,
+    Left,
+    Right,
+    Mid,
+    Rept,
+    Text,
+
+    // Information functions
+    IsNumber,
+    IsText,
+    IsBlank,
+    IsError,
+
+    /// Fallback for unrecognized function names (future extensions/plugins).
+    Custom(String),
+}
+
+impl BuiltinFunction {
+    /// Resolves a function name string (case-insensitive) to a BuiltinFunction variant.
+    /// This is called once at parse time, not during evaluation.
+    pub fn from_name(name: &str) -> Self {
+        match name.to_uppercase().as_str() {
+            "SUM" => BuiltinFunction::Sum,
+            "AVERAGE" | "AVG" => BuiltinFunction::Average,
+            "MIN" => BuiltinFunction::Min,
+            "MAX" => BuiltinFunction::Max,
+            "COUNT" => BuiltinFunction::Count,
+            "COUNTA" => BuiltinFunction::CountA,
+
+            "IF" => BuiltinFunction::If,
+            "AND" => BuiltinFunction::And,
+            "OR" => BuiltinFunction::Or,
+            "NOT" => BuiltinFunction::Not,
+            "TRUE" => BuiltinFunction::True,
+            "FALSE" => BuiltinFunction::False,
+
+            "ABS" => BuiltinFunction::Abs,
+            "ROUND" => BuiltinFunction::Round,
+            "FLOOR" => BuiltinFunction::Floor,
+            "CEILING" | "CEIL" => BuiltinFunction::Ceiling,
+            "SQRT" => BuiltinFunction::Sqrt,
+            "POWER" | "POW" => BuiltinFunction::Power,
+            "MOD" => BuiltinFunction::Mod,
+            "INT" => BuiltinFunction::Int,
+            "SIGN" => BuiltinFunction::Sign,
+
+            "LEN" => BuiltinFunction::Len,
+            "UPPER" => BuiltinFunction::Upper,
+            "LOWER" => BuiltinFunction::Lower,
+            "TRIM" => BuiltinFunction::Trim,
+            "CONCATENATE" | "CONCAT" => BuiltinFunction::Concatenate,
+            "LEFT" => BuiltinFunction::Left,
+            "RIGHT" => BuiltinFunction::Right,
+            "MID" => BuiltinFunction::Mid,
+            "REPT" => BuiltinFunction::Rept,
+            "TEXT" => BuiltinFunction::Text,
+
+            "ISNUMBER" => BuiltinFunction::IsNumber,
+            "ISTEXT" => BuiltinFunction::IsText,
+            "ISBLANK" => BuiltinFunction::IsBlank,
+            "ISERROR" => BuiltinFunction::IsError,
+
+            _ => BuiltinFunction::Custom(name.to_uppercase()),
+        }
+    }
 }
 
 /// Literal values that can appear in formulas.

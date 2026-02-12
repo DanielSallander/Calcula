@@ -320,6 +320,7 @@ export const GridCanvas = forwardRef<GridCanvasHandle, GridCanvasProps>(
       }
 
       fetchingRef.current = true;
+      const perfT0 = performance.now();
 
       try {
         const cellData = await getViewportCells(
@@ -328,6 +329,7 @@ export const GridCanvas = forwardRef<GridCanvasHandle, GridCanvasProps>(
           fetchRange.endRow,
           fetchRange.endCol
         );
+        const perfT1Ipc = performance.now();
 
         // Update last fetch reference
         lastFetchRef.current = {
@@ -347,7 +349,7 @@ export const GridCanvas = forwardRef<GridCanvasHandle, GridCanvasProps>(
         if (cellData.length > 0) {
           const firstCell = cellData[0];
           console.log(`[Cells] Fetched ${cellData.length} cells. First cell: row=${firstCell.row}, col=${firstCell.col}, display="${firstCell.display}", styleIndex=${firstCell.styleIndex}, rowSpan=${firstCell.rowSpan}, colSpan=${firstCell.colSpan}`);
-          
+
           // Log any merged cells (cells with span > 1)
           const mergedCells = cellData.filter(c => (c.rowSpan && c.rowSpan > 1) || (c.colSpan && c.colSpan > 1));
           if (mergedCells.length > 0) {
@@ -356,6 +358,11 @@ export const GridCanvas = forwardRef<GridCanvasHandle, GridCanvasProps>(
         }
 
         setCells(newCells);
+        const perfT2Total = performance.now();
+        console.log(
+          `[PERF] fetchCells range=(${fetchRange.startRow},${fetchRange.startCol})-(${fetchRange.endRow},${fetchRange.endCol}) ` +
+          `count=${cellData.length} | ipc=${(perfT1Ipc - perfT0).toFixed(1)}ms map=${(perfT2Total - perfT1Ipc).toFixed(1)}ms TOTAL=${(perfT2Total - perfT0).toFixed(1)}ms`
+        );
       } catch (error) {
         console.error("Failed to fetch cells:", error);
       } finally {
@@ -395,6 +402,8 @@ export const GridCanvas = forwardRef<GridCanvasHandle, GridCanvasProps>(
         return;
       }
 
+      const perfDrawStart = performance.now();
+
       // Clear the canvas
       clear();
 
@@ -423,6 +432,11 @@ export const GridCanvas = forwardRef<GridCanvasHandle, GridCanvasProps>(
         [], // overlayRenderers
         currentSheetName, // FIX: Pass current sheet for cross-sheet reference highlighting
       );
+
+      const perfDrawMs = performance.now() - perfDrawStart;
+      if (perfDrawMs > 5) {
+        console.log(`[PERF] draw ms=${perfDrawMs.toFixed(1)}`);
+      }
     }, [context, canvasSize.width, canvasSize.height, config, viewport, selection, editing, cells, theme, formulaReferences, dims, styleCache, fillPreviewRange, selectionDragPreview, clipboardSelection, clipboardMode, freezeConfig, clear, currentSheetName]);
 
     /**

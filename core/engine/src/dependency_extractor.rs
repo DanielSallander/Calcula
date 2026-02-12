@@ -48,9 +48,62 @@ pub enum Expression {
         operand: Box<Expression>,
     },
     FunctionCall {
-        name: String,
+        func: BuiltinFunction,
         args: Vec<Expression>,
     },
+}
+
+/// Built-in spreadsheet functions resolved at parse time.
+/// This is a local mirror of `parser::ast::BuiltinFunction`.
+#[derive(Debug, Clone, PartialEq)]
+pub enum BuiltinFunction {
+    // Aggregate functions
+    Sum,
+    Average,
+    Min,
+    Max,
+    Count,
+    CountA,
+
+    // Logical functions
+    If,
+    And,
+    Or,
+    Not,
+    True,
+    False,
+
+    // Math functions
+    Abs,
+    Round,
+    Floor,
+    Ceiling,
+    Sqrt,
+    Power,
+    Mod,
+    Int,
+    Sign,
+
+    // Text functions
+    Len,
+    Upper,
+    Lower,
+    Trim,
+    Concatenate,
+    Left,
+    Right,
+    Mid,
+    Rept,
+    Text,
+
+    // Information functions
+    IsNumber,
+    IsText,
+    IsBlank,
+    IsError,
+
+    /// Fallback for unrecognized function names (future extensions/plugins).
+    Custom(String),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -404,7 +457,7 @@ mod tests {
     fn test_extract_range() {
         // =SUM(A1:A3)
         let expr = Expression::FunctionCall {
-            name: "SUM".to_string(),
+            func: BuiltinFunction::Sum,
             args: vec![Expression::Range {
                 sheet: None,
                 start: Box::new(Expression::CellRef {
@@ -428,7 +481,7 @@ mod tests {
     fn test_extract_column_ref() {
         // =SUM(A:A) with small bounds
         let expr = Expression::FunctionCall {
-            name: "SUM".to_string(),
+            func: BuiltinFunction::Sum,
             args: vec![Expression::ColumnRef {
                 sheet: None,
                 start_col: "A".to_string(),
@@ -453,7 +506,7 @@ mod tests {
     fn test_extract_row_ref() {
         // =SUM(1:1) with small bounds
         let expr = Expression::FunctionCall {
-            name: "SUM".to_string(),
+            func: BuiltinFunction::Sum,
             args: vec![Expression::RowRef {
                 sheet: None,
                 start_row: 1,
@@ -478,7 +531,7 @@ mod tests {
     fn test_extract_2d_range() {
         // =SUM(A1:B2)
         let expr = Expression::FunctionCall {
-            name: "SUM".to_string(),
+            func: BuiltinFunction::Sum,
             args: vec![Expression::Range {
                 sheet: None,
                 start: Box::new(Expression::CellRef {
@@ -503,7 +556,7 @@ mod tests {
     fn test_extract_reversed_range() {
         // =SUM(B2:A1) - reversed range should still work
         let expr = Expression::FunctionCall {
-            name: "SUM".to_string(),
+            func: BuiltinFunction::Sum,
             args: vec![Expression::Range {
                 sheet: None,
                 start: Box::new(Expression::CellRef {
@@ -528,7 +581,7 @@ mod tests {
         // =SUM(A1:A3) + MAX(B1, B2)
         let expr = Expression::BinaryOp {
             left: Box::new(Expression::FunctionCall {
-                name: "SUM".to_string(),
+                func: BuiltinFunction::Sum,
                 args: vec![Expression::Range {
                     sheet: None,
                     start: Box::new(Expression::CellRef {
@@ -545,7 +598,7 @@ mod tests {
             }),
             op: BinaryOperator::Add,
             right: Box::new(Expression::FunctionCall {
-                name: "MAX".to_string(),
+                func: BuiltinFunction::Max,
                 args: vec![
                     Expression::CellRef {
                         sheet: None,

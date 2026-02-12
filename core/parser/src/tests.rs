@@ -1,7 +1,7 @@
 //! FILENAME: core/parser/src/tests.rs
 //! PURPOSE: Consolidated unit tests for the parser crate.
 
-use crate::ast::{BinaryOperator, Expression, UnaryOperator, Value};
+use crate::ast::{BinaryOperator, BuiltinFunction, Expression, UnaryOperator, Value};
 use crate::lexer::Lexer;
 use crate::parser::parse;
 use crate::token::Token;
@@ -147,7 +147,9 @@ fn parser_parses_simple_cell_ref() {
         Expression::CellRef {
             sheet: None,
             col: "A".to_string(),
-            row: 1
+            row: 1,
+            col_absolute: false,
+            row_absolute: false
         }
     );
 }
@@ -160,7 +162,9 @@ fn parser_parses_multi_letter_column() {
         Expression::CellRef {
             sheet: None,
             col: "AA".to_string(),
-            row: 100
+            row: 100,
+            col_absolute: false,
+            row_absolute: false
         }
     );
 }
@@ -175,12 +179,16 @@ fn parser_parses_range() {
             start: Box::new(Expression::CellRef {
                 sheet: None,
                 col: "A".to_string(),
-                row: 1
+                row: 1,
+                col_absolute: false,
+                row_absolute: false
             }),
             end: Box::new(Expression::CellRef {
                 sheet: None,
                 col: "B".to_string(),
-                row: 10
+                row: 10,
+                col_absolute: false,
+                row_absolute: false
             })
         }
     );
@@ -281,7 +289,9 @@ fn parser_parses_equal() {
             left: Box::new(Expression::CellRef {
                 sheet: None,
                 col: "A".to_string(),
-                row: 1
+                row: 1,
+                col_absolute: false,
+                row_absolute: false
             }),
             op: BinaryOperator::Equal,
             right: Box::new(Expression::Literal(Value::Number(10.0)))
@@ -298,7 +308,9 @@ fn parser_parses_not_equal() {
             left: Box::new(Expression::CellRef {
                 sheet: None,
                 col: "A".to_string(),
-                row: 1
+                row: 1,
+                col_absolute: false,
+                row_absolute: false
             }),
             op: BinaryOperator::NotEqual,
             right: Box::new(Expression::Literal(Value::Number(10.0)))
@@ -315,7 +327,9 @@ fn parser_parses_less_than() {
             left: Box::new(Expression::CellRef {
                 sheet: None,
                 col: "A".to_string(),
-                row: 1
+                row: 1,
+                col_absolute: false,
+                row_absolute: false
             }),
             op: BinaryOperator::LessThan,
             right: Box::new(Expression::Literal(Value::Number(10.0)))
@@ -332,7 +346,9 @@ fn parser_parses_greater_than() {
             left: Box::new(Expression::CellRef {
                 sheet: None,
                 col: "A".to_string(),
-                row: 1
+                row: 1,
+                col_absolute: false,
+                row_absolute: false
             }),
             op: BinaryOperator::GreaterThan,
             right: Box::new(Expression::Literal(Value::Number(10.0)))
@@ -349,7 +365,9 @@ fn parser_parses_less_equal() {
             left: Box::new(Expression::CellRef {
                 sheet: None,
                 col: "A".to_string(),
-                row: 1
+                row: 1,
+                col_absolute: false,
+                row_absolute: false
             }),
             op: BinaryOperator::LessEqual,
             right: Box::new(Expression::Literal(Value::Number(10.0)))
@@ -366,7 +384,9 @@ fn parser_parses_greater_equal() {
             left: Box::new(Expression::CellRef {
                 sheet: None,
                 col: "A".to_string(),
-                row: 1
+                row: 1,
+                col_absolute: false,
+                row_absolute: false
             }),
             op: BinaryOperator::GreaterEqual,
             right: Box::new(Expression::Literal(Value::Number(10.0)))
@@ -461,7 +481,9 @@ fn parser_respects_precedence_add_before_comparison() {
                 left: Box::new(Expression::CellRef {
                     sheet: None,
                     col: "A".to_string(),
-                    row: 1
+                    row: 1,
+                    col_absolute: false,
+                    row_absolute: false
                 }),
                 op: BinaryOperator::Add,
                 right: Box::new(Expression::Literal(Value::Number(1.0)))
@@ -605,7 +627,7 @@ fn parser_parses_function_no_args() {
     assert_eq!(
         result,
         Expression::FunctionCall {
-            name: "NOW".to_string(),
+            func: BuiltinFunction::Custom("NOW".to_string()),
             args: vec![]
         }
     );
@@ -617,7 +639,7 @@ fn parser_parses_function_single_arg() {
     assert_eq!(
         result,
         Expression::FunctionCall {
-            name: "ABS".to_string(),
+            func: BuiltinFunction::Abs,
             args: vec![Expression::UnaryOp {
                 op: UnaryOperator::Negate,
                 operand: Box::new(Expression::Literal(Value::Number(5.0)))
@@ -632,7 +654,7 @@ fn parser_parses_function_multiple_args() {
     assert_eq!(
         result,
         Expression::FunctionCall {
-            name: "SUM".to_string(),
+            func: BuiltinFunction::Sum,
             args: vec![
                 Expression::Literal(Value::Number(1.0)),
                 Expression::Literal(Value::Number(2.0)),
@@ -648,18 +670,22 @@ fn parser_parses_function_with_range_arg() {
     assert_eq!(
         result,
         Expression::FunctionCall {
-            name: "SUM".to_string(),
+            func: BuiltinFunction::Sum,
             args: vec![Expression::Range {
                 sheet: None,
                 start: Box::new(Expression::CellRef {
                     sheet: None,
                     col: "A".to_string(),
-                    row: 1
+                    row: 1,
+                    col_absolute: false,
+                    row_absolute: false
                 }),
                 end: Box::new(Expression::CellRef {
                     sheet: None,
                     col: "A".to_string(),
-                    row: 10
+                    row: 10,
+                    col_absolute: false,
+                    row_absolute: false
                 })
             }]
         }
@@ -672,17 +698,17 @@ fn parser_parses_nested_function_calls() {
     assert_eq!(
         result,
         Expression::FunctionCall {
-            name: "SUM".to_string(),
+            func: BuiltinFunction::Sum,
             args: vec![
                 Expression::FunctionCall {
-                    name: "ABS".to_string(),
+                    func: BuiltinFunction::Abs,
                     args: vec![Expression::UnaryOp {
                         op: UnaryOperator::Negate,
                         operand: Box::new(Expression::Literal(Value::Number(1.0)))
                     }]
                 },
                 Expression::FunctionCall {
-                    name: "ABS".to_string(),
+                    func: BuiltinFunction::Abs,
                     args: vec![Expression::UnaryOp {
                         op: UnaryOperator::Negate,
                         operand: Box::new(Expression::Literal(Value::Number(2.0)))
@@ -699,7 +725,7 @@ fn parser_parses_function_with_expression_arg() {
     assert_eq!(
         result,
         Expression::FunctionCall {
-            name: "SUM".to_string(),
+            func: BuiltinFunction::Sum,
             args: vec![
                 Expression::BinaryOp {
                     left: Box::new(Expression::Literal(Value::Number(1.0))),
@@ -723,13 +749,15 @@ fn parser_parses_if_function_with_comparison() {
     assert_eq!(
         result,
         Expression::FunctionCall {
-            name: "IF".to_string(),
+            func: BuiltinFunction::If,
             args: vec![
                 Expression::BinaryOp {
                     left: Box::new(Expression::CellRef {
                         sheet: None,
                         col: "A".to_string(),
-                        row: 1
+                        row: 1,
+                        col_absolute: false,
+                        row_absolute: false
                     }),
                     op: BinaryOperator::GreaterThan,
                     right: Box::new(Expression::Literal(Value::Number(10.0)))
@@ -754,13 +782,17 @@ fn parser_parses_cell_ref_in_expression() {
             left: Box::new(Expression::CellRef {
                 sheet: None,
                 col: "A".to_string(),
-                row: 1
+                row: 1,
+                col_absolute: false,
+                row_absolute: false
             }),
             op: BinaryOperator::Add,
             right: Box::new(Expression::CellRef {
                 sheet: None,
                 col: "B".to_string(),
-                row: 2
+                row: 2,
+                col_absolute: false,
+                row_absolute: false
             })
         }
     );
@@ -775,18 +807,22 @@ fn parser_parses_complex_formula() {
         Expression::BinaryOp {
             left: Box::new(Expression::BinaryOp {
                 left: Box::new(Expression::FunctionCall {
-                    name: "SUM".to_string(),
+                    func: BuiltinFunction::Sum,
                     args: vec![Expression::Range {
                         sheet: None,
                         start: Box::new(Expression::CellRef {
                             sheet: None,
                             col: "A".to_string(),
-                            row: 1
+                            row: 1,
+                            col_absolute: false,
+                            row_absolute: false
                         }),
                         end: Box::new(Expression::CellRef {
                             sheet: None,
                             col: "A".to_string(),
-                            row: 10
+                            row: 10,
+                            col_absolute: false,
+                            row_absolute: false
                         })
                     }]
                 }),
@@ -797,7 +833,9 @@ fn parser_parses_complex_formula() {
             right: Box::new(Expression::CellRef {
                 sheet: None,
                 col: "B".to_string(),
-                row: 1
+                row: 1,
+                col_absolute: false,
+                row_absolute: false
             })
         }
     );
@@ -818,7 +856,9 @@ fn parser_parses_complex_formula_with_all_operators() {
                             left: Box::new(Expression::CellRef {
                                 sheet: None,
                                 col: "A".to_string(),
-                                row: 1
+                                row: 1,
+                                col_absolute: false,
+                                row_absolute: false
                             }),
                             op: BinaryOperator::Power,
                             right: Box::new(Expression::Literal(Value::Number(2.0)))
@@ -910,7 +950,9 @@ fn test_parse_column_reference() {
         Expression::ColumnRef {
             sheet: None,
             start_col: "A".to_string(),
-            end_col: "A".to_string()
+            end_col: "A".to_string(),
+            start_absolute: false,
+            end_absolute: false
         }
     );
 }
@@ -923,7 +965,9 @@ fn test_parse_column_range() {
         Expression::ColumnRef {
             sheet: None,
             start_col: "A".to_string(),
-            end_col: "C".to_string()
+            end_col: "C".to_string(),
+            start_absolute: false,
+            end_absolute: false
         }
     );
 }
@@ -936,7 +980,9 @@ fn test_parse_row_reference() {
         Expression::RowRef {
             sheet: None,
             start_row: 1,
-            end_row: 1
+            end_row: 1,
+            start_absolute: false,
+            end_absolute: false
         }
     );
 }
@@ -949,7 +995,9 @@ fn test_parse_row_range() {
         Expression::RowRef {
             sheet: None,
             start_row: 1,
-            end_row: 5
+            end_row: 5,
+            start_absolute: false,
+            end_absolute: false
         }
     );
 }
@@ -962,7 +1010,9 @@ fn test_parse_sheet_cell_ref() {
         Expression::CellRef {
             sheet: Some("SHEET1".to_string()),
             col: "A".to_string(),
-            row: 1
+            row: 1,
+            col_absolute: false,
+            row_absolute: false
         }
     );
 }
@@ -975,7 +1025,9 @@ fn test_parse_quoted_sheet_cell_ref() {
         Expression::CellRef {
             sheet: Some("My Sheet".to_string()),
             col: "A".to_string(),
-            row: 1
+            row: 1,
+            col_absolute: false,
+            row_absolute: false
         }
     );
 }
@@ -991,7 +1043,9 @@ fn test_parse_sheet_range() {
                 Expression::CellRef {
                     sheet: None,
                     col: "A".to_string(),
-                    row: 1
+                    row: 1,
+                    col_absolute: false,
+                    row_absolute: false
                 }
             );
             assert_eq!(
@@ -999,7 +1053,9 @@ fn test_parse_sheet_range() {
                 Expression::CellRef {
                     sheet: None,
                     col: "B".to_string(),
-                    row: 10
+                    row: 10,
+                    col_absolute: false,
+                    row_absolute: false
                 }
             );
         }
@@ -1015,7 +1071,9 @@ fn test_parse_sheet_column_ref() {
         Expression::ColumnRef {
             sheet: Some("SHEET1".to_string()),
             start_col: "A".to_string(),
-            end_col: "B".to_string()
+            end_col: "B".to_string(),
+            start_absolute: false,
+            end_absolute: false
         }
     );
 }
@@ -1028,7 +1086,9 @@ fn test_parse_sheet_row_ref() {
         Expression::RowRef {
             sheet: Some("SHEET1".to_string()),
             start_row: 1,
-            end_row: 5
+            end_row: 5,
+            start_absolute: false,
+            end_absolute: false
         }
     );
 }
@@ -1037,8 +1097,8 @@ fn test_parse_sheet_row_ref() {
 fn test_parse_sum_with_sheet_ref() {
     let result = parse("=SUM(Sheet1!A1:A10)").unwrap();
     match result {
-        Expression::FunctionCall { name, args } => {
-            assert_eq!(name, "SUM");
+        Expression::FunctionCall { func, args } => {
+            assert_eq!(func, BuiltinFunction::Sum);
             assert_eq!(args.len(), 1);
             match &args[0] {
                 Expression::Range { sheet, .. } => {
@@ -1055,15 +1115,17 @@ fn test_parse_sum_with_sheet_ref() {
 fn test_parse_sum_with_column_ref() {
     let result = parse("=SUM(A:A)").unwrap();
     match result {
-        Expression::FunctionCall { name, args } => {
-            assert_eq!(name, "SUM");
+        Expression::FunctionCall { func, args } => {
+            assert_eq!(func, BuiltinFunction::Sum);
             assert_eq!(args.len(), 1);
             assert_eq!(
                 args[0],
                 Expression::ColumnRef {
                     sheet: None,
                     start_col: "A".to_string(),
-                    end_col: "A".to_string()
+                    end_col: "A".to_string(),
+                    start_absolute: false,
+                    end_absolute: false
                 }
             );
         }
@@ -1075,15 +1137,17 @@ fn test_parse_sum_with_column_ref() {
 fn test_parse_sum_with_row_ref() {
     let result = parse("=SUM(1:3)").unwrap();
     match result {
-        Expression::FunctionCall { name, args } => {
-            assert_eq!(name, "SUM");
+        Expression::FunctionCall { func, args } => {
+            assert_eq!(func, BuiltinFunction::Sum);
             assert_eq!(args.len(), 1);
             assert_eq!(
                 args[0],
                 Expression::RowRef {
                     sheet: None,
                     start_row: 1,
-                    end_row: 3
+                    end_row: 3,
+                    start_absolute: false,
+                    end_absolute: false
                 }
             );
         }

@@ -1093,20 +1093,22 @@ export function useEditing(): UseEditingReturn {
     setLastError(null);
 
     try {
+      const perfT0 = performance.now();
+
       // FIX: Check if we need to switch back to the source sheet before committing
-      const needsSheetSwitch = 
-        editing.sourceSheetIndex !== undefined && 
+      const needsSheetSwitch =
+        editing.sourceSheetIndex !== undefined &&
         editing.sourceSheetIndex !== sheetContext.activeSheetIndex;
 
       if (needsSheetSwitch) {
         console.log("[useEditing] Switching back to source sheet before commit:", editing.sourceSheetName);
-        
+
         // Switch the backend to the source sheet
         await setActiveSheetApi(editing.sourceSheetIndex!);
-        
+
         // Update the frontend state to match
         dispatch(setActiveSheet(editing.sourceSheetIndex!, editing.sourceSheetName!));
-        
+
         // Dispatch event to refresh grid cells for the source sheet
         window.dispatchEvent(new CustomEvent("sheet:formulaModeSwitch", {
           detail: {
@@ -1115,6 +1117,7 @@ export function useEditing(): UseEditingReturn {
           }
         }));
       }
+      const perfT1SheetSwitch = performance.now();
 
       // AFTER:
       let oldValue: string | undefined;
@@ -1124,13 +1127,15 @@ export function useEditing(): UseEditingReturn {
       } catch {
         // Ignore - cell might not exist yet
       }
+      const perfT2GetOldCell = performance.now();
 
       // Smart formula completion - auto-close parentheses, etc.
       const valueToCommit = autoCompleteFormula(editing.value);
 
       const updatedCells = await updateCell(editing.row, editing.col, valueToCommit);
+      const perfT3UpdateCell = performance.now();
       const primaryCell = updatedCells[0];
-      
+
       // FIX: Clear global flag and arrow reference state when editing stops
       console.log("[commitEdit] SUCCESS - clearing globalIsEditing, was:", globalIsEditing);
       setGlobalIsEditing(false);
@@ -1164,9 +1169,21 @@ export function useEditing(): UseEditingReturn {
             formula: depCell.formula ?? null,
           });
         }
-        
+        const perfT4Events = performance.now();
+
         dispatch(stopEditing());
         dispatch(clearFormulaReferences());
+        const perfT5Dispatch = performance.now();
+
+        console.log(
+          `[PERF] commitEdit(${editing.row},${editing.col}) deps=${updatedCells.length} | ` +
+          `sheetSwitch=${(perfT1SheetSwitch - perfT0).toFixed(1)}ms ` +
+          `getOldCell=${(perfT2GetOldCell - perfT1SheetSwitch).toFixed(1)}ms ` +
+          `updateCell=${(perfT3UpdateCell - perfT2GetOldCell).toFixed(1)}ms ` +
+          `events=${(perfT4Events - perfT3UpdateCell).toFixed(1)}ms ` +
+          `dispatch=${(perfT5Dispatch - perfT4Events).toFixed(1)}ms ` +
+          `TOTAL=${(perfT5Dispatch - perfT0).toFixed(1)}ms`
+        );
         
         const result: CellUpdateResult = {
           success: true,

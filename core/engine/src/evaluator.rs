@@ -20,7 +20,7 @@
 
 use crate::cell::{CellError, CellValue};
 use crate::coord::col_to_index;
-use crate::dependency_extractor::{BinaryOperator, Expression, UnaryOperator, Value};
+use crate::dependency_extractor::{BinaryOperator, BuiltinFunction, Expression, UnaryOperator, Value};
 use crate::grid::Grid;
 use std::collections::HashMap;
 
@@ -223,7 +223,7 @@ impl<'a> Evaluator<'a> {
             }
             Expression::BinaryOp { left, op, right } => self.eval_binary_op(left, op, right),
             Expression::UnaryOp { op, operand } => self.eval_unary_op(op, operand),
-            Expression::FunctionCall { name, args } => self.eval_function(name, args),
+            Expression::FunctionCall { func, args } => self.eval_function(func, args),
         }
     }
 
@@ -579,57 +579,57 @@ impl<'a> Evaluator<'a> {
         }
     }
 
-    /// Evaluates a function call.
-    fn eval_function(&self, name: &str, args: &[Expression]) -> EvalResult {
-        let name_upper = name.to_uppercase();
-
-        match name_upper.as_str() {
+    /// Evaluates a function call via fast enum dispatch.
+    /// No heap allocations or string comparisons - just integer matching.
+    fn eval_function(&self, func: &BuiltinFunction, args: &[Expression]) -> EvalResult {
+        match func {
             // Aggregate functions
-            "SUM" => self.fn_sum(args),
-            "AVERAGE" | "AVG" => self.fn_average(args),
-            "MIN" => self.fn_min(args),
-            "MAX" => self.fn_max(args),
-            "COUNT" => self.fn_count(args),
-            "COUNTA" => self.fn_counta(args),
+            BuiltinFunction::Sum => self.fn_sum(args),
+            BuiltinFunction::Average => self.fn_average(args),
+            BuiltinFunction::Min => self.fn_min(args),
+            BuiltinFunction::Max => self.fn_max(args),
+            BuiltinFunction::Count => self.fn_count(args),
+            BuiltinFunction::CountA => self.fn_counta(args),
 
             // Logical functions
-            "IF" => self.fn_if(args),
-            "AND" => self.fn_and(args),
-            "OR" => self.fn_or(args),
-            "NOT" => self.fn_not(args),
-            "TRUE" => EvalResult::Boolean(true),
-            "FALSE" => EvalResult::Boolean(false),
+            BuiltinFunction::If => self.fn_if(args),
+            BuiltinFunction::And => self.fn_and(args),
+            BuiltinFunction::Or => self.fn_or(args),
+            BuiltinFunction::Not => self.fn_not(args),
+            BuiltinFunction::True => EvalResult::Boolean(true),
+            BuiltinFunction::False => EvalResult::Boolean(false),
 
             // Math functions
-            "ABS" => self.fn_abs(args),
-            "ROUND" => self.fn_round(args),
-            "FLOOR" => self.fn_floor(args),
-            "CEILING" | "CEIL" => self.fn_ceiling(args),
-            "SQRT" => self.fn_sqrt(args),
-            "POWER" | "POW" => self.fn_power(args),
-            "MOD" => self.fn_mod(args),
-            "INT" => self.fn_int(args),
-            "SIGN" => self.fn_sign(args),
+            BuiltinFunction::Abs => self.fn_abs(args),
+            BuiltinFunction::Round => self.fn_round(args),
+            BuiltinFunction::Floor => self.fn_floor(args),
+            BuiltinFunction::Ceiling => self.fn_ceiling(args),
+            BuiltinFunction::Sqrt => self.fn_sqrt(args),
+            BuiltinFunction::Power => self.fn_power(args),
+            BuiltinFunction::Mod => self.fn_mod(args),
+            BuiltinFunction::Int => self.fn_int(args),
+            BuiltinFunction::Sign => self.fn_sign(args),
 
             // Text functions
-            "LEN" => self.fn_len(args),
-            "UPPER" => self.fn_upper(args),
-            "LOWER" => self.fn_lower(args),
-            "TRIM" => self.fn_trim(args),
-            "CONCATENATE" | "CONCAT" => self.fn_concatenate(args),
-            "LEFT" => self.fn_left(args),
-            "RIGHT" => self.fn_right(args),
-            "MID" => self.fn_mid(args),
-            "REPT" => self.fn_rept(args),
-            "TEXT" => self.fn_text(args),
+            BuiltinFunction::Len => self.fn_len(args),
+            BuiltinFunction::Upper => self.fn_upper(args),
+            BuiltinFunction::Lower => self.fn_lower(args),
+            BuiltinFunction::Trim => self.fn_trim(args),
+            BuiltinFunction::Concatenate => self.fn_concatenate(args),
+            BuiltinFunction::Left => self.fn_left(args),
+            BuiltinFunction::Right => self.fn_right(args),
+            BuiltinFunction::Mid => self.fn_mid(args),
+            BuiltinFunction::Rept => self.fn_rept(args),
+            BuiltinFunction::Text => self.fn_text(args),
 
             // Information functions
-            "ISNUMBER" => self.fn_isnumber(args),
-            "ISTEXT" => self.fn_istext(args),
-            "ISBLANK" => self.fn_isblank(args),
-            "ISERROR" => self.fn_iserror(args),
+            BuiltinFunction::IsNumber => self.fn_isnumber(args),
+            BuiltinFunction::IsText => self.fn_istext(args),
+            BuiltinFunction::IsBlank => self.fn_isblank(args),
+            BuiltinFunction::IsError => self.fn_iserror(args),
 
-            _ => EvalResult::Error(CellError::Name),
+            // Unknown/custom functions
+            BuiltinFunction::Custom(_) => EvalResult::Error(CellError::Name),
         }
     }
 
@@ -1225,7 +1225,7 @@ mod tests {
 
         // =SUM(A:A) should sum A1+A2+A3 = 60
         let expr = Expression::FunctionCall {
-            name: "SUM".to_string(),
+            func: BuiltinFunction::Sum,
             args: vec![Expression::ColumnRef {
                 sheet: None,
                 start_col: "A".to_string(),
@@ -1243,7 +1243,7 @@ mod tests {
 
         // =SUM(1:1) should sum A1+B1 = 15
         let expr = Expression::FunctionCall {
-            name: "SUM".to_string(),
+            func: BuiltinFunction::Sum,
             args: vec![Expression::RowRef {
                 sheet: None,
                 start_row: 1,
@@ -1366,7 +1366,7 @@ mod tests {
 
         // =SUM(A1:A3) (10 + 20 + 30 = 60)
         let expr = Expression::FunctionCall {
-            name: "SUM".to_string(),
+            func: BuiltinFunction::Sum,
             args: vec![Expression::Range {
                 sheet: None,
                 start: Box::new(Expression::CellRef {
@@ -1432,7 +1432,7 @@ mod tests {
 
         // =SUM(Sheet2!A1:A2) (should be 300)
         let expr = Expression::FunctionCall {
-            name: "SUM".to_string(),
+            func: BuiltinFunction::Sum,
             args: vec![Expression::Range {
                 sheet: Some("Sheet2".to_string()),
                 start: Box::new(Expression::CellRef {

@@ -7,12 +7,12 @@ use engine::{
     StyleRegistry, MultiSheetContext,
 };
 use engine::{
-    BinaryOperator as EngineBinaryOp, Expression as EngineExpr, UnaryOperator as EngineUnaryOp,
-    Value as EngineValue,
+    BinaryOperator as EngineBinaryOp, BuiltinFunction as EngineBuiltinFn,
+    Expression as EngineExpr, UnaryOperator as EngineUnaryOp, Value as EngineValue,
 };
 use parser::ast::{
-    BinaryOperator as ParserBinaryOp, Expression as ParserExpr, UnaryOperator as ParserUnaryOp,
-    Value as ParserValue,
+    BinaryOperator as ParserBinaryOp, BuiltinFunction as ParserBuiltinFn,
+    Expression as ParserExpr, UnaryOperator as ParserUnaryOp, Value as ParserValue,
 };
 use parser::parse as parse_formula;
 use std::collections::{HashMap, HashSet};
@@ -324,7 +324,48 @@ fn convert_unary_op(op: &ParserUnaryOp) -> EngineUnaryOp {
     }
 }
 
-fn convert_expr(expr: &ParserExpr) -> EngineExpr {
+fn convert_builtin_function(func: &ParserBuiltinFn) -> EngineBuiltinFn {
+    match func {
+        ParserBuiltinFn::Sum => EngineBuiltinFn::Sum,
+        ParserBuiltinFn::Average => EngineBuiltinFn::Average,
+        ParserBuiltinFn::Min => EngineBuiltinFn::Min,
+        ParserBuiltinFn::Max => EngineBuiltinFn::Max,
+        ParserBuiltinFn::Count => EngineBuiltinFn::Count,
+        ParserBuiltinFn::CountA => EngineBuiltinFn::CountA,
+        ParserBuiltinFn::If => EngineBuiltinFn::If,
+        ParserBuiltinFn::And => EngineBuiltinFn::And,
+        ParserBuiltinFn::Or => EngineBuiltinFn::Or,
+        ParserBuiltinFn::Not => EngineBuiltinFn::Not,
+        ParserBuiltinFn::True => EngineBuiltinFn::True,
+        ParserBuiltinFn::False => EngineBuiltinFn::False,
+        ParserBuiltinFn::Abs => EngineBuiltinFn::Abs,
+        ParserBuiltinFn::Round => EngineBuiltinFn::Round,
+        ParserBuiltinFn::Floor => EngineBuiltinFn::Floor,
+        ParserBuiltinFn::Ceiling => EngineBuiltinFn::Ceiling,
+        ParserBuiltinFn::Sqrt => EngineBuiltinFn::Sqrt,
+        ParserBuiltinFn::Power => EngineBuiltinFn::Power,
+        ParserBuiltinFn::Mod => EngineBuiltinFn::Mod,
+        ParserBuiltinFn::Int => EngineBuiltinFn::Int,
+        ParserBuiltinFn::Sign => EngineBuiltinFn::Sign,
+        ParserBuiltinFn::Len => EngineBuiltinFn::Len,
+        ParserBuiltinFn::Upper => EngineBuiltinFn::Upper,
+        ParserBuiltinFn::Lower => EngineBuiltinFn::Lower,
+        ParserBuiltinFn::Trim => EngineBuiltinFn::Trim,
+        ParserBuiltinFn::Concatenate => EngineBuiltinFn::Concatenate,
+        ParserBuiltinFn::Left => EngineBuiltinFn::Left,
+        ParserBuiltinFn::Right => EngineBuiltinFn::Right,
+        ParserBuiltinFn::Mid => EngineBuiltinFn::Mid,
+        ParserBuiltinFn::Rept => EngineBuiltinFn::Rept,
+        ParserBuiltinFn::Text => EngineBuiltinFn::Text,
+        ParserBuiltinFn::IsNumber => EngineBuiltinFn::IsNumber,
+        ParserBuiltinFn::IsText => EngineBuiltinFn::IsText,
+        ParserBuiltinFn::IsBlank => EngineBuiltinFn::IsBlank,
+        ParserBuiltinFn::IsError => EngineBuiltinFn::IsError,
+        ParserBuiltinFn::Custom(name) => EngineBuiltinFn::Custom(name.clone()),
+    }
+}
+
+pub fn convert_expr(expr: &ParserExpr) -> EngineExpr {
     match expr {
         ParserExpr::Literal(v) => EngineExpr::Literal(convert_value(v)),
         ParserExpr::CellRef { sheet, col, row, .. } => EngineExpr::CellRef {
@@ -356,8 +397,8 @@ fn convert_expr(expr: &ParserExpr) -> EngineExpr {
             op: convert_unary_op(op),
             operand: Box::new(convert_expr(operand)),
         },
-        ParserExpr::FunctionCall { name, args } => EngineExpr::FunctionCall {
-            name: name.clone(),
+        ParserExpr::FunctionCall { func, args } => EngineExpr::FunctionCall {
+            func: convert_builtin_function(func),
             args: args.iter().map(convert_expr).collect(),
         },
     }
@@ -497,16 +538,12 @@ fn extract_references_recursive(expr: &ParserExpr, grid: &Grid, refs: &mut Extra
 }
 
 pub fn evaluate_formula(grid: &Grid, formula: &str) -> CellValue {
-    log_debug!("EVAL", "formula={}", formula);
-
     match parse_formula(formula) {
         Ok(parser_ast) => {
             let engine_ast = convert_expr(&parser_ast);
             let evaluator = Evaluator::new(grid);
             let result = evaluator.evaluate(&engine_ast);
-            let cell_value = result.to_cell_value();
-            log_debug!("EVAL", "result={:?}", cell_value);
-            cell_value
+            result.to_cell_value()
         }
         Err(e) => {
             log_error!("EVAL", "parse_err formula={} err={}", formula, e);
@@ -529,10 +566,7 @@ pub fn evaluate_formula_multi_sheet(
     current_sheet_index: usize,
     formula: &str,
 ) -> CellValue {
-    log_debug!("EVAL", "formula={} sheet_idx={}", formula, current_sheet_index);
-
     if current_sheet_index >= grids.len() || current_sheet_index >= sheet_names.len() {
-        log_error!("EVAL", "invalid sheet index {}", current_sheet_index);
         return CellValue::Error(CellError::Ref);
     }
 
@@ -551,10 +585,7 @@ pub fn evaluate_formula_multi_sheet(
             }
 
             let evaluator = Evaluator::with_multi_sheet(current_grid, context);
-            let result = evaluator.evaluate(&engine_ast);
-            let cell_value = result.to_cell_value();
-            log_debug!("EVAL", "result={:?}", cell_value);
-            cell_value
+            evaluator.evaluate(&engine_ast).to_cell_value()
         }
         Err(e) => {
             log_error!("EVAL", "parse_err formula={} err={}", formula, e);
@@ -587,6 +618,29 @@ pub fn evaluate_formula_multi_sheet_with_ast(
 
     let evaluator = Evaluator::with_multi_sheet(current_grid, context);
     evaluator.evaluate(ast).to_cell_value()
+}
+
+/// Evaluates a formula AST using a pre-built evaluator. This is the fastest path
+/// for batch operations where the same evaluator can be reused across many formulas.
+pub fn evaluate_ast_with_evaluator(evaluator: &Evaluator, ast: &EngineExpr) -> CellValue {
+    evaluator.evaluate(ast).to_cell_value()
+}
+
+/// Creates an Evaluator with multi-sheet context. Reuse this for batch evaluations
+/// to avoid recreating the context (HashMap + string cloning) for each formula.
+pub fn create_evaluator_for_sheet<'a>(
+    grids: &'a [Grid],
+    sheet_names: &[String],
+    current_sheet_index: usize,
+) -> Option<Evaluator<'a>> {
+    if current_sheet_index >= grids.len() || current_sheet_index >= sheet_names.len() {
+        return None;
+    }
+
+    let current_grid = &grids[current_sheet_index];
+    let current_sheet_name = &sheet_names[current_sheet_index];
+    let context = create_multi_sheet_context(grids, sheet_names, current_sheet_name);
+    Some(Evaluator::with_multi_sheet(current_grid, context))
 }
 
 /// Parses a formula and converts it to the engine AST.
@@ -683,7 +737,6 @@ pub fn parse_cell_input(input: &str) -> Cell {
         return Cell::new();
     }
     if trimmed.starts_with('=') {
-        log_debug!("PARSE", "formula input={}", trimmed);
         return Cell::new_formula(trimmed.to_string());
     }
     let upper = trimmed.to_uppercase();
@@ -728,10 +781,6 @@ pub fn update_dependencies(
     dependents: &mut HashMap<(u32, u32), HashSet<(u32, u32)>>,
 ) {
     let old_refs = dependencies.remove(&cell_pos).unwrap_or_default();
-    
-    if !old_refs.is_empty() || !new_refs.is_empty() {
-        log_debug!("DEP", "cell={:?} old_refs={} new_refs={}", cell_pos, old_refs.len(), new_refs.len());
-    }
     
     for old_ref in &old_refs {
         if let Some(deps) = dependents.get_mut(old_ref) {
@@ -861,10 +910,6 @@ pub fn get_recalculation_order(
                 }
             }
         }
-    }
-    
-    if !to_recalc.is_empty() {
-        log_debug!("RECALC", "changed={:?} cascade={}", changed_cell, to_recalc.len());
     }
     
     to_recalc

@@ -25,7 +25,7 @@ pub mod token;
 mod tests;
 
 // Re-export commonly used types for convenience
-pub use ast::{BinaryOperator, Expression, UnaryOperator, Value};
+pub use ast::{BinaryOperator, BuiltinFunction, Expression, UnaryOperator, Value};
 pub use lexer::Lexer;
 pub use parser::{parse, ParseError, ParseResult, Parser};
 pub use token::Token;

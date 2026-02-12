@@ -21,7 +21,7 @@
 //!   function_call  --> IDENTIFIER "(" arguments? ")"
 //!   arguments      --> expression ("," expression)*
 
-use crate::ast::{BinaryOperator, Expression, UnaryOperator, Value};
+use crate::ast::{BinaryOperator, BuiltinFunction, Expression, UnaryOperator, Value};
 use crate::lexer::Lexer;
 use crate::token::Token;
 
@@ -784,7 +784,11 @@ impl<'a> Parser<'a> {
     }
 
     /// Parses a function call like SUM(A1, A2, 10).
+    /// Resolves the function name to a BuiltinFunction enum at parse time.
     fn parse_function_call(&mut self, name: String) -> ParseResult<Expression> {
+        // Resolve function name to enum ONCE at parse time (not every evaluation)
+        let func = BuiltinFunction::from_name(&name);
+
         // Consume the '('
         self.advance();
 
@@ -793,7 +797,7 @@ impl<'a> Parser<'a> {
         // Handle empty argument list
         if self.current_token == Token::RParen {
             self.advance();
-            return Ok(Expression::FunctionCall { name, args });
+            return Ok(Expression::FunctionCall { func, args });
         }
 
         // Parse first argument
@@ -808,7 +812,7 @@ impl<'a> Parser<'a> {
         // Expect closing ')'
         self.expect(Token::RParen)?;
 
-        Ok(Expression::FunctionCall { name, args })
+        Ok(Expression::FunctionCall { func, args })
     }
 
     /// Splits a cell reference string like "A1" or "AA100" into column and row parts.

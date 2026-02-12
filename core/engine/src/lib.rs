@@ -15,7 +15,7 @@ pub mod undo;
 // Re-export commonly used types at the crate root
 pub use cell::{Cell, CellError, CellValue};
 pub use coord::{a1_to_coord, col_to_index, coord_to_a1, index_to_col, CellCoord};
-pub use dependency_extractor::{extract_dependencies, BinaryOperator, Expression, UnaryOperator, Value};
+pub use dependency_extractor::{extract_dependencies, BinaryOperator, BuiltinFunction, Expression, UnaryOperator, Value};
 pub use dependency_graph::{CycleError, DependencyGraph};
 pub use evaluator::{EvalResult, Evaluator};
 pub use grid::Grid;
@@ -171,7 +171,7 @@ mod tests {
         };
 
         let if_expr = Expression::FunctionCall {
-            name: "IF".to_string(),
+            func: BuiltinFunction::If,
             args: vec![condition, true_expr, false_expr],
         };
 
