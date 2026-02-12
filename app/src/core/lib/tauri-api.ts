@@ -408,6 +408,29 @@ export interface UndoResult {
 }
 
 /**
+ * Begin an undo transaction. All subsequent cell changes will be grouped
+ * into a single undoable action until commitUndoTransaction() is called.
+ * @param description - Human-readable label for the transaction (e.g., "Paste 10 cells")
+ */
+export async function beginUndoTransaction(description: string): Promise<void> {
+  return invoke<void>("begin_undo_transaction", { description });
+}
+
+/**
+ * Commit the current undo transaction, finalizing it as a single undo entry.
+ */
+export async function commitUndoTransaction(): Promise<void> {
+  return invoke<void>("commit_undo_transaction");
+}
+
+/**
+ * Cancel the current undo transaction without saving it.
+ */
+export async function cancelUndoTransaction(): Promise<void> {
+  return invoke<void>("cancel_undo_transaction");
+}
+
+/**
  * Get the current undo/redo state.
  */
 export async function getUndoState(): Promise<UndoState> {

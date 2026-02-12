@@ -17,6 +17,8 @@ import {
   deleteRows,
   insertColumns,
   deleteColumns,
+  beginUndoTransaction,
+  commitUndoTransaction,
 } from "../lib/tauri-api";
 import { cellEvents } from "../lib/cellEvents";
 import { setClipboard, clearClipboard, setSelection } from "../state/gridActions";
@@ -275,6 +277,12 @@ export function useClipboard(): UseClipboardReturn {
     const wasCutOperation = usingInternalClipboard && internalClipboard?.isCut;
 
     try {
+      // Begin undo transaction so all paste changes are a single undo entry
+      const transactionDesc = wasCutOperation
+        ? `Cut and paste ${pasteHeight * pasteWidth} cells`
+        : `Paste ${pasteHeight * pasteWidth} cells`;
+      await beginUndoTransaction(transactionDesc);
+
       // Paste cells
       const perfPasteStart = performance.now();
       let cellCount = 0;
@@ -346,7 +354,7 @@ export function useClipboard(): UseClipboardReturn {
               r < targetRow + pasteHeight &&
               c >= targetCol &&
               c < targetCol + pasteWidth;
-            
+
             if (!overlaps) {
               try {
                 await clearCell(r, c);
@@ -377,6 +385,9 @@ export function useClipboard(): UseClipboardReturn {
         // Copy+paste: keep clipboard active for multiple pastes
         console.log("[Clipboard] Copy+paste complete, clipboard remains active");
       }
+
+      // Commit the undo transaction
+      await commitUndoTransaction();
 
       // Update selection to cover the pasted range
       const pastedEndRow = targetRow + actualPasteHeight - 1;
@@ -437,6 +448,9 @@ export function useClipboard(): UseClipboardReturn {
       const width = srcMaxCol - srcMinCol + 1;
 
       try {
+        // Begin undo transaction for the entire move operation
+        await beginUndoTransaction(`Move ${height * width} cells`);
+
         // 1. Read source cells
         const sourceCells = await getViewportCells(srcMinRow, srcMinCol, srcMaxRow, srcMaxCol);
         console.log("[Clipboard] Read", sourceCells.length, "source cells");
@@ -511,6 +525,9 @@ export function useClipboard(): UseClipboardReturn {
           }
         }
 
+        // Commit the undo transaction
+        await commitUndoTransaction();
+
         // 5. Update selection to new position
         dispatch(setSelection({
           startRow: targetRow,
@@ -547,6 +564,9 @@ export function useClipboard(): UseClipboardReturn {
       }
 
       try {
+        // Begin undo transaction for the entire row move operation
+        await beginUndoTransaction(`Move ${count} rows`);
+
         // 1. Read all cell data from source rows
         const sourceCells = await getViewportCells(minRow, 0, maxRow, config.totalCols - 1);
         console.log("[Clipboard] Read", sourceCells.length, "cells from source rows");
@@ -578,6 +598,9 @@ export function useClipboard(): UseClipboardReturn {
             }
           }
         }
+
+        // Commit the undo transaction
+        await commitUndoTransaction();
 
         // 5. Emit a generic change event to trigger grid refresh
         // Row/column structure changes require full refresh
@@ -625,6 +648,9 @@ export function useClipboard(): UseClipboardReturn {
       }
 
       try {
+        // Begin undo transaction for the entire column move operation
+        await beginUndoTransaction(`Move ${count} columns`);
+
         // 1. Read all cell data from source columns
         const sourceCells = await getViewportCells(0, minCol, config.totalRows - 1, maxCol);
         console.log("[Clipboard] Read", sourceCells.length, "cells from source columns");
@@ -656,6 +682,9 @@ export function useClipboard(): UseClipboardReturn {
             }
           }
         }
+
+        // Commit the undo transaction
+        await commitUndoTransaction();
 
         // 5. Emit a generic change event to trigger grid refresh
         // Row/column structure changes require full refresh

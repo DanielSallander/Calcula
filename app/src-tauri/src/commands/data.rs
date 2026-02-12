@@ -727,6 +727,9 @@ pub fn update_cells_batch(
     let calc_mode = state.calculation_mode.lock().unwrap();
     let mut undo_stack = state.undo_stack.lock().unwrap();
     let merged_regions = state.merged_regions.lock().unwrap();
+
+    // Begin undo transaction so all batch changes are a single undo entry
+    undo_stack.begin_transaction(format!("Batch update {} cells", updates.len()));
     let perf_t1_locks = Instant::now();
 
     let current_sheet_name = sheet_names.get(active_sheet).cloned().unwrap_or_default();
@@ -1168,6 +1171,9 @@ pub fn update_cells_batch(
             perf_tend.duration_since(perf_t0).as_secs_f64() * 1000.0
         );
     }
+
+    // Commit the undo transaction
+    undo_stack.commit_transaction();
 
     Ok(updated_cells)
 }
