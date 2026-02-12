@@ -46,6 +46,24 @@ export interface FormulaHeaderDragState {
 }
 
 /**
+ * Selection drag state for moving cells, rows, or columns.
+ */
+export interface SelectionDragState {
+  /** The original selection being dragged */
+  sourceSelection: Selection;
+  /** Which edge was clicked to start the drag */
+  dragHandle: "top" | "right" | "bottom" | "left";
+  /** Current target row (top-left of where selection would land) */
+  targetRow: number;
+  /** Current target column (top-left of where selection would land) */
+  targetCol: number;
+  /** Offset from mouse position to selection top-left (for smooth dragging) */
+  offsetRow: number;
+  /** Offset from mouse position to selection top-left (for smooth dragging) */
+  offsetCol: number;
+}
+
+/**
  * Cell position reference.
  */
 export interface CellPosition {
@@ -141,6 +159,12 @@ export interface UseMouseSelectionProps {
   onCompleteRefDrag?: (row: number, col: number) => void;
   /** Callback to cancel reference drag */
   onCancelRefDrag?: () => void;
+  /** Callback to move cells to a new position */
+  onMoveCells?: (source: Selection, targetRow: number, targetCol: number) => Promise<void>;
+  /** Callback to reorder rows (structural move) */
+  onMoveRows?: (sourceStartRow: number, sourceEndRow: number, targetRow: number) => Promise<void>;
+  /** Callback to reorder columns (structural move) */
+  onMoveColumns?: (sourceStartCol: number, sourceEndCol: number, targetCol: number) => Promise<void>;
 }
 
 /**
@@ -155,6 +179,10 @@ export interface UseMouseSelectionReturn {
   isResizing: boolean;
   /** Whether an existing reference is being dragged to move it */
   isRefDragging: boolean;
+  /** Whether a selection is being dragged to move cells */
+  isSelectionDragging: boolean;
+  /** Preview selection showing where cells would land during drag */
+  selectionDragPreview: Selection | null;
   /** Current cursor style to use */
   cursorStyle: string;
   /** Handle mouse down on the grid */

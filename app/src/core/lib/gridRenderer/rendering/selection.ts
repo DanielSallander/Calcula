@@ -427,3 +427,51 @@ export function drawFillPreview(state: RenderState): void {
   ctx.strokeRect(visX1 + 1, visY1 + 1, visX2 - visX1 - 2, visY2 - visY1 - 2);
   ctx.setLineDash([]);
 }
+
+/**
+ * Draw selection drag preview (dashed border showing where cells will be moved).
+ * Supports freeze panes with proper positioning.
+ */
+export function drawSelectionDragPreview(state: RenderState): void {
+  const { ctx, width, height, config, viewport, dimensions, freezeConfig, selectionDragPreview } = state;
+
+  if (!selectionDragPreview) {
+    return;
+  }
+
+  const rowHeaderWidth = config.rowHeaderWidth || 50;
+  const colHeaderHeight = config.colHeaderHeight || 24;
+
+  const minRow = Math.min(selectionDragPreview.startRow, selectionDragPreview.endRow);
+  const maxRow = Math.max(selectionDragPreview.startRow, selectionDragPreview.endRow);
+  const minCol = Math.min(selectionDragPreview.startCol, selectionDragPreview.endCol);
+  const maxCol = Math.max(selectionDragPreview.startCol, selectionDragPreview.endCol);
+
+  // Calculate positions using freeze-aware functions
+  const x1 = getColumnXWithFreeze(minCol, config, dimensions, viewport, freezeConfig);
+  const y1 = getRowYWithFreeze(minRow, config, dimensions, viewport, freezeConfig);
+  const x2 = getColumnXWithFreeze(maxCol, config, dimensions, viewport, freezeConfig) +
+             getColumnWidth(maxCol, config, dimensions);
+  const y2 = getRowYWithFreeze(maxRow, config, dimensions, viewport, freezeConfig) +
+             getRowHeight(maxRow, config, dimensions);
+
+  const visX1 = Math.max(x1, rowHeaderWidth);
+  const visY1 = Math.max(y1, colHeaderHeight);
+  const visX2 = Math.min(x2, width);
+  const visY2 = Math.min(y2, height);
+
+  if (visX1 >= visX2 || visY1 >= visY2) {
+    return;
+  }
+
+  // Draw semi-transparent blue fill
+  ctx.fillStyle = "rgba(33, 115, 215, 0.15)";
+  ctx.fillRect(visX1, visY1, visX2 - visX1, visY2 - visY1);
+
+  // Draw dashed blue border
+  ctx.strokeStyle = "#2563eb";
+  ctx.lineWidth = 2;
+  ctx.setLineDash([4, 4]);
+  ctx.strokeRect(visX1 + 1, visY1 + 1, visX2 - visX1 - 2, visY2 - visY1 - 2);
+  ctx.setLineDash([]);
+}

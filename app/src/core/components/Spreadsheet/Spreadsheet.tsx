@@ -99,6 +99,7 @@ function SpreadsheetContent({
     clipboardSelection,
     clipboardMode,
     fillState,
+    selectionDragPreview,
   } = state;
 
   // 5. Extract freezeConfig from gridState
@@ -671,6 +672,7 @@ function SpreadsheetContent({
             clipboardSelection={clipboardSelection}
             clipboardMode={clipboardMode}
             fillPreviewRange={fillState.previewRange}
+            selectionDragPreview={selectionDragPreview}
             freezeConfig={freezeConfig}
             currentSheetName={gridState.sheetContext.activeSheetName}
           />

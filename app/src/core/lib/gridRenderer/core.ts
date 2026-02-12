@@ -22,7 +22,7 @@ import { DEFAULT_THEME } from "./types";
 import { drawCorner, drawColumnHeaders, drawRowHeaders } from "./rendering/headers";
 import { drawGridLines } from "./rendering/grid";
 import { drawCellText } from "./rendering/cells";
-import { drawSelection, drawFillPreview, drawClipboardSelection } from "./rendering/selection";
+import { drawSelection, drawFillPreview, drawClipboardSelection, drawSelectionDragPreview } from "./rendering/selection";
 import { drawFormulaReferences } from "./rendering/references";
 import {
   calculateFreezePaneLayout,
@@ -488,6 +488,7 @@ export function renderGrid(
   dimensions?: DimensionOverrides,
   styleCache?: StyleDataMap,
   fillPreviewRange?: Selection | null,
+  selectionDragPreview?: Selection | null,
   clipboardSelection?: Selection | null,
   clipboardMode?: ClipboardMode,
   clipboardAnimationOffset?: number,
@@ -523,6 +524,7 @@ export function renderGrid(
     dimensions: dims,
     styleCache: styles,
     fillPreviewRange: fillPreviewRange || null,
+    selectionDragPreview: selectionDragPreview || null,
     clipboardSelection: clipboardSelection || null,
     clipboardMode: clipboardMode || "none",
     clipboardAnimationOffset: clipboardAnimationOffset || 0,
@@ -615,6 +617,9 @@ export function renderGrid(
   if (fillPreviewRange) {
     drawFillPreview(state);
   }
+
+  // Draw selection drag preview (shows where cells will move to)
+  drawSelectionDragPreview(state);
 
   if (selection) {
     drawSelection(state);

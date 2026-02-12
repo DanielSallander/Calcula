@@ -192,6 +192,8 @@ export function useSpreadsheet() {
       // Clipboard state for marching ants
       clipboardMode: selectionLogic.clipboardState.mode,
       clipboardSelection: selectionLogic.clipboardState.selection,
+      // Selection drag preview for move operation
+      selectionDragPreview: selectionLogic.selectionDragPreview,
     },
     handlers: {
       handleCellsUpdated: handleCellsUpdatedWithFocus,

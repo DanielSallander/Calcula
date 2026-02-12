@@ -33,6 +33,8 @@ export interface GridCanvasProps {
   styleCache?: StyleDataMap;
   /** Fill preview range during fill handle drag */
   fillPreviewRange?: Selection | null;
+  /** Selection drag preview showing where cells will be moved */
+  selectionDragPreview?: Selection | null;
   /** Clipboard selection for marching ants */
   clipboardSelection?: Selection | null;
   /** Clipboard mode (none, copy, cut) */
@@ -148,6 +150,7 @@ export const GridCanvas = forwardRef<GridCanvasHandle, GridCanvasProps>(
       dimensions,
       styleCache,
       fillPreviewRange,
+      selectionDragPreview,
       clipboardSelection,
       clipboardMode = "none",
       freezeConfig = DEFAULT_FREEZE_CONFIG,
@@ -395,7 +398,7 @@ export const GridCanvas = forwardRef<GridCanvasHandle, GridCanvasProps>(
       // Clear the canvas
       clear();
 
-      // Render the grid with cell data, formula references, style cache, fill preview, clipboard, insertion animation, freeze config, and sheet context
+      // Render the grid with cell data, formula references, style cache, fill preview, selection drag preview, clipboard, insertion animation, freeze config, and sheet context
       renderGrid(
         context,
         canvasSize.width,
@@ -410,6 +413,7 @@ export const GridCanvas = forwardRef<GridCanvasHandle, GridCanvasProps>(
         dims,
         styleCache,
         fillPreviewRange,
+        selectionDragPreview,
         clipboardSelection,
         clipboardMode,
         animationOffset,
@@ -419,7 +423,7 @@ export const GridCanvas = forwardRef<GridCanvasHandle, GridCanvasProps>(
         [], // overlayRenderers
         currentSheetName, // FIX: Pass current sheet for cross-sheet reference highlighting
       );
-    }, [context, canvasSize.width, canvasSize.height, config, viewport, selection, editing, cells, theme, formulaReferences, dims, styleCache, fillPreviewRange, clipboardSelection, clipboardMode, freezeConfig, clear, currentSheetName]);
+    }, [context, canvasSize.width, canvasSize.height, config, viewport, selection, editing, cells, theme, formulaReferences, dims, styleCache, fillPreviewRange, selectionDragPreview, clipboardSelection, clipboardMode, freezeConfig, clear, currentSheetName]);
 
     /**
      * Start row insertion animation.

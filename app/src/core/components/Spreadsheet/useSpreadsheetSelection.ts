@@ -89,13 +89,16 @@ export function useSpreadsheetSelection({
   } = useEditing();
 
   // Clipboard hook
-  const { 
-    cut, 
-    copy, 
-    paste, 
-    clipboardMode, 
+  const {
+    cut,
+    copy,
+    paste,
+    clipboardMode,
     clipboardSelection,
     clearClipboardState,
+    moveCells,
+    moveRows,
+    moveColumns,
   } = useClipboard();
 
   // Fill handle hook with auto-scroll support
@@ -324,6 +327,8 @@ export function useSpreadsheetSelection({
     isFormulaDragging,
     isResizing,
     isRefDragging,
+    isSelectionDragging,
+    selectionDragPreview,
     cursorStyle,
     handleMouseDown: baseHandleMouseDown,
     handleMouseMove: baseHandleMouseMove,
@@ -364,6 +369,9 @@ export function useSpreadsheetSelection({
     onUpdateRefDrag: updateRefDrag,
     onCompleteRefDrag: completeRefDrag,
     onCancelRefDrag: cancelRefDrag,
+    onMoveCells: moveCells,
+    onMoveRows: moveRows,
+    onMoveColumns: moveColumns,
   });
 
   // Wrap mouse handlers to include fill handle logic and extension click interception
@@ -522,9 +530,11 @@ export function useSpreadsheetSelection({
       isFormulaDragging,
       isResizing,
       isRefDragging,
+      isSelectionDragging,
       isFillDragging: fillState.isDragging,
     },
     fillState,
+    selectionDragPreview,
     clipboardHandlers: {
       cut,
       copy,

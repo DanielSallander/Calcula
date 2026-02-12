@@ -4,7 +4,7 @@
 //UPDATED: Added freeze pane support for coordinate translation
 //UPDATED: Added formula reference border detection for reference dragging
 
-import type { GridConfig, Viewport, DimensionOverrides, FreezeConfig, FreezeZone, FormulaReference } from "../../../types";
+import type { GridConfig, Viewport, DimensionOverrides, FreezeConfig, FreezeZone, FormulaReference, Selection } from "../../../types";
 import { ensureDimensions } from "../styles/styleUtils";
 import { getColumnWidth, getRowHeight, getColumnX, getRowY } from "../layout/dimensions";
 import { calculateVisibleRange, calculateFreezePaneLayout } from "../layout/viewport";
@@ -516,4 +516,115 @@ function shouldDrawReferenceOnSheet(
   // Reference has a sheet prefix - check if it matches current sheet
   if (!currentSheetName) return true;
   return refSheetName.toLowerCase() === currentSheetName.toLowerCase();
+}
+
+/**
+ * Threshold in pixels for detecting mouse hover over selection border.
+ */
+const SELECTION_BORDER_THRESHOLD = 5;
+
+/**
+ * Result from getSelectionBorderAtPixel.
+ */
+export interface SelectionBorderHit {
+  /** Which edge of the selection was hit */
+  edge: "top" | "right" | "bottom" | "left";
+}
+
+/**
+ * Check if a pixel position is on the border of the current selection.
+ * Returns which edge was hit, or null if not on a border.
+ * This is used for the selection dragging feature - users can drag
+ * a selection by clicking on its border (like in Excel).
+ *
+ * IMPORTANT: For row/column selections, we check borders in the CELL AREA
+ * (not the header area) to avoid conflicts with resize handles.
+ * Header borders are reserved for resizing operations.
+ *
+ * @param pixelX - X coordinate in pixels relative to container
+ * @param pixelY - Y coordinate in pixels relative to container
+ * @param config - Grid configuration
+ * @param viewport - Current viewport state
+ * @param selection - Current selection to check
+ * @param dimensions - Optional dimension overrides
+ */
+export function getSelectionBorderAtPixel(
+  pixelX: number,
+  pixelY: number,
+  config: GridConfig,
+  viewport: Viewport,
+  selection: Selection | null,
+  dimensions?: DimensionOverrides
+): SelectionBorderHit | null {
+  if (!selection) {
+    return null;
+  }
+
+  const rowHeaderWidth = config.rowHeaderWidth || 50;
+  const colHeaderHeight = config.colHeaderHeight || 24;
+
+  // All selection types check borders in the CELL AREA (not headers)
+  // This avoids conflicts with resize handles in the header areas
+  if (pixelX < rowHeaderWidth || pixelY < colHeaderHeight) {
+    return null;
+  }
+
+  const dims = ensureDimensions(dimensions);
+  const range = calculateVisibleRange(viewport, config, pixelX + 100, pixelY + 100, dims);
+
+  // Normalize bounds
+  const minRow = Math.min(selection.startRow, selection.endRow);
+  const maxRow = Math.max(selection.startRow, selection.endRow);
+  const minCol = Math.min(selection.startCol, selection.endCol);
+  const maxCol = Math.max(selection.startCol, selection.endCol);
+
+  // Calculate rectangle in viewport coordinates
+  const x1 = getColumnX(minCol, config, dims, range.startCol, range.offsetX);
+  const y1 = getRowY(minRow, config, dims, range.startRow, range.offsetY);
+
+  let x2 = x1;
+  for (let c = minCol; c <= maxCol; c++) {
+    x2 += getColumnWidth(c, config, dims);
+  }
+
+  let y2 = y1;
+  for (let r = minRow; r <= maxRow; r++) {
+    y2 += getRowHeight(r, config, dims);
+  }
+
+  // For row selection, only check top/bottom borders
+  if (selection.type === "rows") {
+    const isNearTopBorder = Math.abs(pixelY - y1) <= SELECTION_BORDER_THRESHOLD && pixelX >= x1 && pixelX <= x2;
+    const isNearBottomBorder = Math.abs(pixelY - y2) <= SELECTION_BORDER_THRESHOLD && pixelX >= x1 && pixelX <= x2;
+
+    if (isNearTopBorder) return { edge: "top" };
+    if (isNearBottomBorder) return { edge: "bottom" };
+
+    return null;
+  }
+
+  // For column selection, only check left/right borders
+  if (selection.type === "columns") {
+    const isNearLeftBorder = Math.abs(pixelX - x1) <= SELECTION_BORDER_THRESHOLD && pixelY >= y1 && pixelY <= y2;
+    const isNearRightBorder = Math.abs(pixelX - x2) <= SELECTION_BORDER_THRESHOLD && pixelY >= y1 && pixelY <= y2;
+
+    if (isNearLeftBorder) return { edge: "left" };
+    if (isNearRightBorder) return { edge: "right" };
+
+    return null;
+  }
+
+  // For cell selection, check all four borders
+  const isNearLeftBorder = Math.abs(pixelX - x1) <= SELECTION_BORDER_THRESHOLD && pixelY >= y1 && pixelY <= y2;
+  const isNearRightBorder = Math.abs(pixelX - x2) <= SELECTION_BORDER_THRESHOLD && pixelY >= y1 && pixelY <= y2;
+  const isNearTopBorder = Math.abs(pixelY - y1) <= SELECTION_BORDER_THRESHOLD && pixelX >= x1 && pixelX <= x2;
+  const isNearBottomBorder = Math.abs(pixelY - y2) <= SELECTION_BORDER_THRESHOLD && pixelX >= x1 && pixelX <= x2;
+
+  // Return the first border hit (priority: left, right, top, bottom)
+  if (isNearLeftBorder) return { edge: "left" };
+  if (isNearRightBorder) return { edge: "right" };
+  if (isNearTopBorder) return { edge: "top" };
+  if (isNearBottomBorder) return { edge: "bottom" };
+
+  return null;
 }

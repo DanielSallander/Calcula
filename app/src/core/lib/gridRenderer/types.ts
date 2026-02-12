@@ -120,4 +120,6 @@ export interface RenderState {
   currentSheetName?: string;
   /** Source sheet name when editing a formula (the sheet where the formula lives) */
   formulaSourceSheetName?: string;
+  /** Preview selection showing where cells will be moved during drag */
+  selectionDragPreview?: Selection | null;
 }
