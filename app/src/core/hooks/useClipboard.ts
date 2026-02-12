@@ -276,6 +276,11 @@ export function useClipboard(): UseClipboardReturn {
 
     try {
       // Paste cells
+      const perfPasteStart = performance.now();
+      let cellCount = 0;
+      let totalIpcMs = 0;
+      let totalEventsMs = 0;
+
       for (let r = 0; r < pasteHeight; r++) {
         for (let c = 0; c < pasteWidth; c++) {
           const destRow = targetRow + r;
@@ -290,9 +295,13 @@ export function useClipboard(): UseClipboardReturn {
           const value = sourceCell?.formula || sourceCell?.display || "";
 
           try {
+            const tIpc = performance.now();
             const updatedCells = await updateCell(destRow, destCol, value);
+            totalIpcMs += performance.now() - tIpc;
+            cellCount++;
 
             // Emit events for same-sheet cells only (skip cross-sheet dependents)
+            const tEvt = performance.now();
             for (const cell of updatedCells) {
               if (cell.sheetIndex !== undefined) {
                 continue; // Skip cross-sheet cells
@@ -305,11 +314,21 @@ export function useClipboard(): UseClipboardReturn {
                 formula: cell.formula ?? null,
               });
             }
+            totalEventsMs += performance.now() - tEvt;
           } catch (err) {
             console.error(`[Clipboard] Failed to paste cell (${destRow}, ${destCol}):`, err);
           }
         }
       }
+
+      const perfPasteLoop = performance.now();
+      console.log(
+        `[PERF][paste] ${cellCount} cells | ` +
+        `loop=${(perfPasteLoop - perfPasteStart).toFixed(1)}ms ` +
+        `ipcTotal=${totalIpcMs.toFixed(1)}ms ` +
+        `ipcAvg=${(totalIpcMs / Math.max(cellCount, 1)).toFixed(2)}ms ` +
+        `eventsTotal=${totalEventsMs.toFixed(1)}ms`
+      );
 
       // If this was a cut operation, clear the source cells
       if (wasCutOperation && cutSourceRef.current) {

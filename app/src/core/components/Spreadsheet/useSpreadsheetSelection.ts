@@ -151,11 +151,20 @@ export function useSpreadsheetSelection({
 
         pendingRefreshRef.current = setTimeout(async () => {
           pendingRefreshRef.current = null;
-          
+
           const canvas = canvasRef.current;
           if (canvas) {
+            const t0 = performance.now();
             await canvas.refreshCells();
+            const t1 = performance.now();
             canvas.redraw();
+            const t2 = performance.now();
+            console.log(
+              `[PERF][cellEvent] debounced refresh+redraw | ` +
+              `refreshCells=${(t1 - t0).toFixed(1)}ms ` +
+              `redraw=${(t2 - t1).toFixed(1)}ms ` +
+              `TOTAL=${(t2 - t0).toFixed(1)}ms`
+            );
           }
         }, 10);
 

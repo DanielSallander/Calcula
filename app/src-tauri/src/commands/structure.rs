@@ -6,9 +6,21 @@ use crate::commands::utils::get_cell_internal_with_merge;
 use crate::AppState;
 use crate::pivot::types::PivotState;
 use engine::Cell;
+use once_cell::sync::Lazy;
 use pivot_engine::PivotId;
+use regex::Regex;
 use std::collections::{HashMap, HashSet};
 use tauri::State;
+
+// Pre-compiled regexes for formula reference shifting (avoids ~2.6ms per Regex::new call)
+static CELL_REF_RE: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r"(\$?)([A-Za-z]+)(\$?)(\d+)").unwrap());
+static ROW_RANGE_RE: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r"(\$?)(\d+):(\$?)(\d+)").unwrap());
+static COL_RANGE_RE: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r"(\$?)([A-Za-z]+):(\$?)([A-Za-z]+)").unwrap());
+static CELL_RANGE_RE: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r"(\$?)([A-Za-z]+)(\$?)(\d+):(\$?)([A-Za-z]+)(\$?)(\d+)").unwrap());
 
 /// ============================================================================
 // PROTECTED REGION SHIFT HELPERS
@@ -668,13 +680,8 @@ pub fn insert_columns(
 /// Shift row references in a formula by a given amount.
 /// Respects $ absolute markers - $5 won't be shifted, but 5 will.
 pub fn shift_formula_row_references(formula: &str, from_row: u32, delta: i32) -> String {
-    use regex::Regex;
-    
     // Handle cell references (e.g., A5, $A$5, A$5, $A5)
-    // Pattern: optional $ + letters + optional $ + digits
-    let cell_re = Regex::new(r"(\$?)([A-Za-z]+)(\$?)(\d+)").unwrap();
-    
-    let result = cell_re.replace_all(formula, |caps: &regex::Captures| {
+    let result = CELL_REF_RE.replace_all(formula, |caps: &regex::Captures| {
         let col_abs = &caps[1];
         let col_letters = &caps[2];
         let row_abs = &caps[3];
@@ -692,9 +699,7 @@ pub fn shift_formula_row_references(formula: &str, from_row: u32, delta: i32) ->
     }).to_string();
     
     // Handle row-only references (e.g., 5:5, $2:$10, 2:$10)
-    let row_re = Regex::new(r"(\$?)(\d+):(\$?)(\d+)").unwrap();
-    
-    row_re.replace_all(&result, |caps: &regex::Captures| {
+    ROW_RANGE_RE.replace_all(&result, |caps: &regex::Captures| {
         let start_abs = &caps[1];
         let start_row: u32 = caps[2].parse().unwrap_or(0);
         let end_abs = &caps[3];
@@ -719,8 +724,6 @@ pub fn shift_formula_row_references(formula: &str, from_row: u32, delta: i32) ->
 /// Shift column references in a formula by a given amount.
 /// Respects $ absolute markers - $A won't be shifted, but A will.
 pub fn shift_formula_col_references(formula: &str, from_col: u32, delta: i32) -> String {
-    use regex::Regex;
-    
     fn col_to_index(col: &str) -> u32 {
         let mut index: u32 = 0;
         for ch in col.to_uppercase().chars() {
@@ -742,9 +745,7 @@ pub fn shift_formula_col_references(formula: &str, from_col: u32, delta: i32) ->
     }
     
     // Handle cell references (e.g., C5, $C$5, C$5, $C5)
-    let cell_re = Regex::new(r"(\$?)([A-Za-z]+)(\$?)(\d+)").unwrap();
-    
-    let result = cell_re.replace_all(formula, |caps: &regex::Captures| {
+    let result = CELL_REF_RE.replace_all(formula, |caps: &regex::Captures| {
         let col_abs = &caps[1];
         let col_letters = &caps[2];
         let row_abs = &caps[3];
@@ -765,9 +766,7 @@ pub fn shift_formula_col_references(formula: &str, from_col: u32, delta: i32) ->
     }).to_string();
     
     // Handle column-only references (e.g., B:B, $A:$C, A:$C)
-    let col_re = Regex::new(r"(\$?)([A-Za-z]+):(\$?)([A-Za-z]+)").unwrap();
-    
-    col_re.replace_all(&result, |caps: &regex::Captures| {
+    COL_RANGE_RE.replace_all(&result, |caps: &regex::Captures| {
         let start_abs = &caps[1];
         let start_col = &caps[2];
         let end_abs = &caps[3];
@@ -818,16 +817,7 @@ fn col_letters_to_index(col: &str) -> u32 {
 /// The $ (absolute) markers travel with their original reference, preserving
 /// fill semantics for any future operations on the result.
 fn normalize_inverted_ranges(formula: &str) -> String {
-    use regex::Regex;
-
-    // Match a cell-range pattern: CellRef:CellRef
-    // Each CellRef = optional($) + col_letters + optional($) + row_digits
-    // The outer group captures the full "start:end" so we can replace it.
-    let range_re = Regex::new(
-        r"(\$?)([A-Za-z]+)(\$?)(\d+):(\$?)([A-Za-z]+)(\$?)(\d+)"
-    ).unwrap();
-
-    range_re.replace_all(formula, |caps: &regex::Captures| {
+    CELL_RANGE_RE.replace_all(formula, |caps: &regex::Captures| {
         let s_col_abs = &caps[1];
         let s_col     = &caps[2];
         let s_row_abs = &caps[3];
@@ -907,21 +897,24 @@ fn shift_formula_internal(formula: &str, row_delta: i32, col_delta: i32) -> Stri
 pub fn shift_formulas_batch(
     inputs: Vec<crate::api_types::FormulaShiftInput>,
 ) -> crate::api_types::FormulaShiftResult {
+    let t0 = std::time::Instant::now();
     let formulas: Vec<String> = inputs
         .iter()
         .map(|input| shift_formula_internal(&input.formula, input.row_delta, input.col_delta))
         .collect();
+    let dt = t0.elapsed();
+
+    crate::logging::log_perf!("SHIFT",
+        "shift_formulas_batch(N={}) | process={:.2}ms",
+        inputs.len(), dt.as_secs_f64() * 1000.0
+    );
 
     crate::api_types::FormulaShiftResult { formulas }
 }
 
 /// Shift row references for fill operation (all non-absolute refs shift).
 fn shift_formula_row_references_for_fill(formula: &str, delta: i32) -> String {
-    use regex::Regex;
-    
-    let cell_re = Regex::new(r"(\$?)([A-Za-z]+)(\$?)(\d+)").unwrap();
-    
-    cell_re.replace_all(formula, |caps: &regex::Captures| {
+    CELL_REF_RE.replace_all(formula, |caps: &regex::Captures| {
         let col_abs = &caps[1];
         let col_letters = &caps[2];
         let row_abs = &caps[3];
@@ -940,8 +933,6 @@ fn shift_formula_row_references_for_fill(formula: &str, delta: i32) -> String {
 
 /// Shift column references for fill operation (all non-absolute refs shift).
 fn shift_formula_col_references_for_fill(formula: &str, delta: i32) -> String {
-    use regex::Regex;
-    
     fn col_to_index(col: &str) -> u32 {
         let mut index: u32 = 0;
         for ch in col.to_uppercase().chars() {
@@ -962,16 +953,14 @@ fn shift_formula_col_references_for_fill(formula: &str, delta: i32) -> String {
         result
     }
     
-    let cell_re = Regex::new(r"(\$?)([A-Za-z]+)(\$?)(\d+)").unwrap();
-    
-    cell_re.replace_all(formula, |caps: &regex::Captures| {
+    CELL_REF_RE.replace_all(formula, |caps: &regex::Captures| {
         let col_abs = &caps[1];
         let col_letters = &caps[2];
         let row_abs = &caps[3];
         let row_num = &caps[4];
-        
+
         let col_index = col_to_index(col_letters);
-        
+
         // Only shift if column is NOT absolute (no $)
         let new_col_index = if col_abs.is_empty() {
             ((col_index as i32) + delta).max(0) as u32

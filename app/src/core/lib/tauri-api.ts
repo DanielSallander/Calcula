@@ -41,16 +41,26 @@ export async function getViewportCells(
   endRow: number,
   endCol: number
 ): Promise<CellData[]> {
-  return invoke<CellData[]>("get_viewport_cells", {
+  const t0 = performance.now();
+  const result = await invoke<CellData[]>("get_viewport_cells", {
     startRow,
     startCol,
     endRow,
     endCol,
   });
+  const dt = performance.now() - t0;
+  console.log(`[PERF][bridge] getViewportCells(${startRow},${startCol})-(${endRow},${endCol}) => ${result.length} cells | ipc=${dt.toFixed(1)}ms`);
+  return result;
 }
 
 export async function getCell(row: number, col: number): Promise<CellData | null> {
-  return invoke<CellData | null>("get_cell", { row, col });
+  const t0 = performance.now();
+  const result = await invoke<CellData | null>("get_cell", { row, col });
+  const dt = performance.now() - t0;
+  if (dt > 1) {
+    console.log(`[PERF][bridge] getCell(${row},${col}) | ipc=${dt.toFixed(1)}ms`);
+  }
+  return result;
 }
 
 export async function updateCell(
@@ -58,10 +68,11 @@ export async function updateCell(
   col: number,
   input: string
 ): Promise<CellData[]> {
-  console.log(`[tauri-api] updateCell(${row}, ${col}, "${input}")`);
+  const t0 = performance.now();
   // FIXED: Mapped 'input' to 'value' to match Rust command signature
   const result = await invoke<CellData[]>("update_cell", { row, col, value: input });
-  console.log(`[tauri-api] updateCell returned ${result.length} updated cells`);
+  const dt = performance.now() - t0;
+  console.log(`[PERF][bridge] updateCell(${row},${col}) => ${result.length} cells | ipc=${dt.toFixed(1)}ms`);
   return result;
 }
 
@@ -84,9 +95,10 @@ export interface CellUpdateInput {
 export async function updateCellsBatch(
   updates: CellUpdateInput[]
 ): Promise<CellData[]> {
-  console.log(`[tauri-api] updateCellsBatch(${updates.length} cells)`);
+  const t0 = performance.now();
   const result = await invoke<CellData[]>("update_cells_batch", { updates });
-  console.log(`[tauri-api] updateCellsBatch returned ${result.length} updated cells`);
+  const dt = performance.now() - t0;
+  console.log(`[PERF][bridge] updateCellsBatch(${updates.length}) => ${result.length} cells | ipc=${dt.toFixed(1)}ms`);
   return result;
 }
 
@@ -658,9 +670,12 @@ export async function shiftFormulasBatch(
   if (inputs.length === 0) {
     return [];
   }
+  const t0 = performance.now();
   const result = await invoke<{ formulas: string[] }>("shift_formulas_batch", {
     inputs,
   });
+  const dt = performance.now() - t0;
+  console.log(`[PERF][bridge] shiftFormulasBatch(${inputs.length}) | ipc=${dt.toFixed(1)}ms`);
   return result.formulas;
 }
 

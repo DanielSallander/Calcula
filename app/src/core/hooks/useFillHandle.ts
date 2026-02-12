@@ -225,6 +225,8 @@ function computeNonFormulaFillValue(
  * Returns an array of CellUpdateInput ready for updateCellsBatch.
  */
 async function processPendingFills(pendingFills: PendingFill[]): Promise<CellUpdateInput[]> {
+  const t0 = performance.now();
+
   // Separate formulas from non-formulas
   const formulaFills: { index: number; fill: PendingFill }[] = [];
   const results: CellUpdateInput[] = new Array(pendingFills.length);
@@ -243,6 +245,8 @@ async function processPendingFills(pendingFills: PendingFill[]): Promise<CellUpd
     }
   }
 
+  const t1 = performance.now();
+
   // Batch process all formulas
   if (formulaFills.length > 0) {
     const shiftInputs: FormulaShiftInput[] = formulaFills.map(({ fill }) => ({
@@ -251,8 +255,12 @@ async function processPendingFills(pendingFills: PendingFill[]): Promise<CellUpd
       colDelta: fill.col - fill.sourceCol,
     }));
 
+    const t2 = performance.now();
+
     try {
       const shiftedFormulas = await shiftFormulasBatch(shiftInputs);
+      const t3 = performance.now();
+
       for (let i = 0; i < formulaFills.length; i++) {
         const { index, fill } = formulaFills[i];
         results[index] = {
@@ -261,6 +269,16 @@ async function processPendingFills(pendingFills: PendingFill[]): Promise<CellUpd
           value: shiftedFormulas[i],
         };
       }
+      const t4 = performance.now();
+
+      console.log(
+        `[PERF][processFills] ${pendingFills.length} fills (${formulaFills.length} formulas) | ` +
+        `separateLoop=${(t1 - t0).toFixed(1)}ms ` +
+        `buildInputs=${(t2 - t1).toFixed(1)}ms ` +
+        `shiftFormulasBatch=${(t3 - t2).toFixed(1)}ms ` +
+        `assignResults=${(t4 - t3).toFixed(1)}ms ` +
+        `TOTAL=${(t4 - t0).toFixed(1)}ms`
+      );
     } catch (error) {
       console.error("[FillHandle] shiftFormulasBatch failed, copying formulas as-is:", error);
       // Fallback: use formulas unchanged
@@ -764,12 +782,14 @@ export function useFillHandle(props: UseFillHandleProps): UseFillHandleReturn {
       }
 
       // OPTIMIZATION: Process all fills using batch formula shifting
+      const perfFillT0 = performance.now();
       const batchUpdates = await processPendingFills(pendingFills);
+      const perfFillT1 = performance.now();
 
       // Execute all updates in a single batch call
       if (batchUpdates.length > 0) {
-        console.log(`[FillHandle] Sending batch update for ${batchUpdates.length} cells`);
         const updatedCells = await updateCellsBatch(batchUpdates);
+        const perfFillT2 = performance.now();
 
         // Emit events for all updated cells
         for (const cell of updatedCells) {
@@ -782,6 +802,15 @@ export function useFillHandle(props: UseFillHandleProps): UseFillHandleReturn {
             formula: cell.formula ?? null,
           });
         }
+        const perfFillT3 = performance.now();
+
+        console.log(
+          `[PERF][fill] ${batchUpdates.length} cells => ${updatedCells.length} updated | ` +
+          `processFills=${(perfFillT1 - perfFillT0).toFixed(1)}ms ` +
+          `batchIpc=${(perfFillT2 - perfFillT1).toFixed(1)}ms ` +
+          `emitEvents=${(perfFillT3 - perfFillT2).toFixed(1)}ms ` +
+          `TOTAL=${(perfFillT3 - perfFillT0).toFixed(1)}ms`
+        );
       }
 
       console.log("[FillHandle] Fill complete");
@@ -937,12 +966,14 @@ export function useFillHandle(props: UseFillHandleProps): UseFillHandleReturn {
       }
 
       // OPTIMIZATION: Process all fills using batch formula shifting
+      const perfAutoT0 = performance.now();
       const batchUpdates = await processPendingFills(pendingFills);
+      const perfAutoT1 = performance.now();
 
       // Execute all updates in a single batch call
       if (batchUpdates.length > 0) {
-        console.log(`[FillHandle] autoFillToEdge: Sending batch update for ${batchUpdates.length} cells`);
         const updatedCells = await updateCellsBatch(batchUpdates);
+        const perfAutoT2 = performance.now();
 
         // Emit events for all updated cells
         for (const cell of updatedCells) {
@@ -955,6 +986,15 @@ export function useFillHandle(props: UseFillHandleProps): UseFillHandleReturn {
             formula: cell.formula ?? null,
           });
         }
+        const perfAutoT3 = performance.now();
+
+        console.log(
+          `[PERF][autoFill] ${batchUpdates.length} cells => ${updatedCells.length} updated | ` +
+          `processFills=${(perfAutoT1 - perfAutoT0).toFixed(1)}ms ` +
+          `batchIpc=${(perfAutoT2 - perfAutoT1).toFixed(1)}ms ` +
+          `emitEvents=${(perfAutoT3 - perfAutoT2).toFixed(1)}ms ` +
+          `TOTAL=${(perfAutoT3 - perfAutoT0).toFixed(1)}ms`
+        );
       }
 
       console.log("[FillHandle] autoFillToEdge complete");
