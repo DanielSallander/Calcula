@@ -128,6 +128,46 @@ export async function getCellCount(): Promise<number> {
   return invoke<number>("get_cell_count");
 }
 
+/**
+ * Get all non-empty cells in a row range using sparse iteration.
+ * Much faster than getViewportCells for full-width row reads.
+ */
+export async function getCellsInRows(
+  startRow: number,
+  endRow: number
+): Promise<CellData[]> {
+  return invoke<CellData[]>("get_cells_in_rows", { startRow, endRow });
+}
+
+/**
+ * Get all non-empty cells in a column range using sparse iteration.
+ * Much faster than getViewportCells for full-height column reads.
+ */
+export async function getCellsInCols(
+  startCol: number,
+  endCol: number
+): Promise<CellData[]> {
+  return invoke<CellData[]>("get_cells_in_cols", { startCol, endCol });
+}
+
+/**
+ * Check if any cells with actual content exist in a range.
+ * Returns true if any cell has a value or formula (ignores style-only cells).
+ */
+export async function hasContentInRange(
+  startRow: number,
+  startCol: number,
+  endRow: number,
+  endCol: number
+): Promise<boolean> {
+  return invoke<boolean>("has_content_in_range", {
+    startRow,
+    startCol,
+    endRow,
+    endCol,
+  });
+}
+
 // ============================================================================
 // Navigation Operations
 // ============================================================================

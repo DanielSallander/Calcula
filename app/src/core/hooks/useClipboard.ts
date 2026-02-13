@@ -6,20 +6,22 @@
 // Updated: Copy source remains active after paste (only cut clears clipboard).
 
 import { useCallback, useRef } from "react";
+import { ask } from "@tauri-apps/plugin-dialog";
 import { useGridContext } from "../state/GridContext";
 import {
   getCell,
   getViewportCells,
   updateCell,
+  updateCellsBatch,
   clearCell,
   clearRange,
-  insertRows,
-  deleteRows,
-  insertColumns,
-  deleteColumns,
   beginUndoTransaction,
   commitUndoTransaction,
+  getCellsInRows,
+  getCellsInCols,
+  hasContentInRange,
 } from "../lib/tauri-api";
+import type { CellUpdateInput } from "../lib/tauri-api";
 import { cellEvents } from "../lib/cellEvents";
 import { setClipboard, clearClipboard, setSelection } from "../state/gridActions";
 import type { Selection, CellData, ClipboardMode } from "../types";
@@ -447,6 +449,18 @@ export function useClipboard(): UseClipboardReturn {
       const height = srcMaxRow - srcMinRow + 1;
       const width = srcMaxCol - srcMinCol + 1;
 
+      // Check if destination area has content (excluding source overlap) and confirm
+      const destEndRow = targetRow + height - 1;
+      const destEndCol = targetCol + width - 1;
+      const hasContent = await hasContentInRange(targetRow, targetCol, destEndRow, destEndCol);
+      if (hasContent) {
+        const confirmed = await ask(
+          "There is data in the destination area. Do you want to replace it?",
+          { title: "Calcula", kind: "warning", okLabel: "Yes", cancelLabel: "No" }
+        );
+        if (!confirmed) return;
+      }
+
       try {
         // Begin undo transaction for the entire move operation
         await beginUndoTransaction(`Move ${height * width} cells`);
@@ -546,8 +560,8 @@ export function useClipboard(): UseClipboardReturn {
   );
 
   /**
-   * Reorder rows (structural move).
-   * Moves rows from source position to target position by deleting and inserting.
+   * Move rows from source position to target position (overwrite, not structural shift).
+   * Source rows are cleared, target rows are replaced with source data.
    */
   const moveRows = useCallback(
     async (sourceStartRow: number, sourceEndRow: number, targetRow: number): Promise<void> => {
@@ -558,52 +572,63 @@ export function useClipboard(): UseClipboardReturn {
       const count = maxRow - minRow + 1;
 
       // Don't move if target is within source range
-      if (targetRow >= minRow && targetRow <= maxRow + 1) {
+      if (targetRow >= minRow && targetRow <= maxRow) {
         console.log("[Clipboard] Target is within source range, no-op");
         return;
       }
 
+      // Check if destination rows have content and confirm with user
+      const targetEndRow = targetRow + count - 1;
+      const hasContent = await hasContentInRange(targetRow, 0, targetEndRow, config.totalCols - 1);
+      if (hasContent) {
+        const confirmed = await ask(
+          "There is data in the destination area. Do you want to replace it?",
+          { title: "Calcula", kind: "warning", okLabel: "Yes", cancelLabel: "No" }
+        );
+        if (!confirmed) return;
+      }
+
       try {
-        // Begin undo transaction for the entire row move operation
         await beginUndoTransaction(`Move ${count} rows`);
 
-        // 1. Read all cell data from source rows
-        const sourceCells = await getViewportCells(minRow, 0, maxRow, config.totalCols - 1);
+        // 1. Read all cell data from source rows (sparse)
+        const sourceCells = await getCellsInRows(minRow, maxRow);
         console.log("[Clipboard] Read", sourceCells.length, "cells from source rows");
 
-        // Adjust target if moving down (account for deletion shift)
-        let adjustedTarget = targetRow;
-        if (targetRow > minRow) {
-          adjustedTarget = targetRow - count;
-        }
+        // 2. Clear target rows
+        await clearRange(targetRow, 0, targetEndRow, config.totalCols - 1);
 
-        // 2. Delete source rows (shifts everything up)
-        await deleteRows(minRow, count);
-        console.log("[Clipboard] Deleted source rows");
-
-        // 3. Insert new rows at target position
-        await insertRows(adjustedTarget, count);
-        console.log("[Clipboard] Inserted rows at target");
-
-        // 4. Write cell data to new rows
+        // 3. Write source data to target rows
+        const updates: CellUpdateInput[] = [];
         for (const cell of sourceCells) {
-          const newRow = adjustedTarget + (cell.row - minRow);
+          const newRow = targetRow + (cell.row - minRow);
           const value = cell.formula || cell.display || "";
-
           if (value) {
-            try {
-              await updateCell(newRow, cell.col, value);
-            } catch (err) {
-              console.error(`[Clipboard] Failed to write cell (${newRow}, ${cell.col}):`, err);
-            }
+            updates.push({ row: newRow, col: cell.col, value });
           }
         }
+        if (updates.length > 0) {
+          await updateCellsBatch(updates);
+        }
 
-        // Commit the undo transaction
+        // 4. Clear source rows (excluding overlap with target)
+        const srcOverlapsTarget =
+          minRow <= targetEndRow && maxRow >= targetRow;
+        if (srcOverlapsTarget) {
+          // Partial overlap: clear only non-overlapping source rows
+          if (minRow < targetRow) {
+            await clearRange(minRow, 0, targetRow - 1, config.totalCols - 1);
+          }
+          if (maxRow > targetEndRow) {
+            await clearRange(targetEndRow + 1, 0, maxRow, config.totalCols - 1);
+          }
+        } else {
+          await clearRange(minRow, 0, maxRow, config.totalCols - 1);
+        }
+
         await commitUndoTransaction();
 
-        // 5. Emit a generic change event to trigger grid refresh
-        // Row/column structure changes require full refresh
+        // 5. Emit change event to trigger grid refresh
         cellEvents.emit({
           row: -1,
           col: -1,
@@ -614,9 +639,9 @@ export function useClipboard(): UseClipboardReturn {
 
         // 6. Update selection to new position
         dispatch(setSelection({
-          startRow: adjustedTarget,
+          startRow: targetRow,
           startCol: 0,
-          endRow: adjustedTarget + count - 1,
+          endRow: targetEndRow,
           endCol: config.totalCols - 1,
           type: "rows",
         }));
@@ -630,8 +655,8 @@ export function useClipboard(): UseClipboardReturn {
   );
 
   /**
-   * Reorder columns (structural move).
-   * Moves columns from source position to target position by deleting and inserting.
+   * Move columns from source position to target position (overwrite, not structural shift).
+   * Source columns are cleared, target columns are replaced with source data.
    */
   const moveColumns = useCallback(
     async (sourceStartCol: number, sourceEndCol: number, targetCol: number): Promise<void> => {
@@ -642,52 +667,62 @@ export function useClipboard(): UseClipboardReturn {
       const count = maxCol - minCol + 1;
 
       // Don't move if target is within source range
-      if (targetCol >= minCol && targetCol <= maxCol + 1) {
+      if (targetCol >= minCol && targetCol <= maxCol) {
         console.log("[Clipboard] Target is within source range, no-op");
         return;
       }
 
+      // Check if destination columns have content and confirm with user
+      const targetEndCol = targetCol + count - 1;
+      const hasContent = await hasContentInRange(0, targetCol, config.totalRows - 1, targetEndCol);
+      if (hasContent) {
+        const confirmed = await ask(
+          "There is data in the destination area. Do you want to replace it?",
+          { title: "Calcula", kind: "warning", okLabel: "Yes", cancelLabel: "No" }
+        );
+        if (!confirmed) return;
+      }
+
       try {
-        // Begin undo transaction for the entire column move operation
         await beginUndoTransaction(`Move ${count} columns`);
 
-        // 1. Read all cell data from source columns
-        const sourceCells = await getViewportCells(0, minCol, config.totalRows - 1, maxCol);
+        // 1. Read all cell data from source columns (sparse)
+        const sourceCells = await getCellsInCols(minCol, maxCol);
         console.log("[Clipboard] Read", sourceCells.length, "cells from source columns");
 
-        // Adjust target if moving right (account for deletion shift)
-        let adjustedTarget = targetCol;
-        if (targetCol > minCol) {
-          adjustedTarget = targetCol - count;
-        }
+        // 2. Clear target columns
+        await clearRange(0, targetCol, config.totalRows - 1, targetEndCol);
 
-        // 2. Delete source columns (shifts everything left)
-        await deleteColumns(minCol, count);
-        console.log("[Clipboard] Deleted source columns");
-
-        // 3. Insert new columns at target position
-        await insertColumns(adjustedTarget, count);
-        console.log("[Clipboard] Inserted columns at target");
-
-        // 4. Write cell data to new columns
+        // 3. Write source data to target columns
+        const updates: CellUpdateInput[] = [];
         for (const cell of sourceCells) {
-          const newCol = adjustedTarget + (cell.col - minCol);
+          const newCol = targetCol + (cell.col - minCol);
           const value = cell.formula || cell.display || "";
-
           if (value) {
-            try {
-              await updateCell(cell.row, newCol, value);
-            } catch (err) {
-              console.error(`[Clipboard] Failed to write cell (${cell.row}, ${newCol}):`, err);
-            }
+            updates.push({ row: cell.row, col: newCol, value });
           }
         }
+        if (updates.length > 0) {
+          await updateCellsBatch(updates);
+        }
 
-        // Commit the undo transaction
+        // 4. Clear source columns (excluding overlap with target)
+        const srcOverlapsTarget =
+          minCol <= targetEndCol && maxCol >= targetCol;
+        if (srcOverlapsTarget) {
+          if (minCol < targetCol) {
+            await clearRange(0, minCol, config.totalRows - 1, targetCol - 1);
+          }
+          if (maxCol > targetEndCol) {
+            await clearRange(0, targetEndCol + 1, config.totalRows - 1, maxCol);
+          }
+        } else {
+          await clearRange(0, minCol, config.totalRows - 1, maxCol);
+        }
+
         await commitUndoTransaction();
 
-        // 5. Emit a generic change event to trigger grid refresh
-        // Row/column structure changes require full refresh
+        // 5. Emit change event to trigger grid refresh
         cellEvents.emit({
           row: -1,
           col: -1,
@@ -699,9 +734,9 @@ export function useClipboard(): UseClipboardReturn {
         // 6. Update selection to new position
         dispatch(setSelection({
           startRow: 0,
-          startCol: adjustedTarget,
+          startCol: targetCol,
           endRow: config.totalRows - 1,
-          endCol: adjustedTarget + count - 1,
+          endCol: targetEndCol,
           type: "columns",
         }));
 

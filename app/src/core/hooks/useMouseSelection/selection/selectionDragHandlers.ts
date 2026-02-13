@@ -263,7 +263,16 @@ export function createSelectionDragHandlers(deps: SelectionDragDependencies): Se
       return;
     }
 
+    // Capture state and reset refs IMMEDIATELY (synchronously) to prevent
+    // the global window mouseup handler from firing a second concurrent call.
     const { sourceSelection, targetRow, targetCol } = selectionDragRef.current;
+    selectionDragRef.current = null;
+    lastMousePosRef.current = null;
+    setIsSelectionDragging(false);
+    setCursorStyle("cell");
+    setSelectionDragPreview(null);
+    stopAutoScroll();
+
     const sourceMinRow = Math.min(sourceSelection.startRow, sourceSelection.endRow);
     const sourceMinCol = Math.min(sourceSelection.startCol, sourceSelection.endCol);
 
@@ -295,14 +304,6 @@ export function createSelectionDragHandlers(deps: SelectionDragDependencies): Se
         console.error("[SelectionDrag] Move operation failed:", error);
       }
     }
-
-    // Reset state
-    setIsSelectionDragging(false);
-    setCursorStyle("cell");
-    setSelectionDragPreview(null);
-    stopAutoScroll();
-    selectionDragRef.current = null;
-    lastMousePosRef.current = null;
   };
 
   /**

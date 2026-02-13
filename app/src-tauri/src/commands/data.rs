@@ -2149,3 +2149,79 @@ pub fn get_cell_count(state: State<AppState>) -> usize {
     let grid = state.grid.lock().unwrap();
     grid.cells.len()
 }
+
+/// Get all non-empty cells in a row range (sparse iteration).
+/// Much faster than get_viewport_cells for full-width row reads because
+/// it iterates only the sparse cell map instead of every possible coordinate.
+#[tauri::command]
+pub fn get_cells_in_rows(
+    state: State<AppState>,
+    start_row: u32,
+    end_row: u32,
+) -> Vec<CellData> {
+    let grid = state.grid.lock().unwrap();
+    let styles = state.style_registry.lock().unwrap();
+    let merged_regions = state.merged_regions.lock().unwrap();
+    let mut cells = Vec::new();
+
+    for &(row, col) in grid.cells.keys() {
+        if row >= start_row && row <= end_row {
+            if let Some(cell_data) =
+                get_cell_internal_with_merge(&grid, &styles, &merged_regions, row, col)
+            {
+                cells.push(cell_data);
+            }
+        }
+    }
+
+    cells
+}
+
+/// Get all non-empty cells in a column range (sparse iteration).
+/// Much faster than get_viewport_cells for full-height column reads because
+/// it iterates only the sparse cell map instead of every possible coordinate.
+#[tauri::command]
+pub fn get_cells_in_cols(
+    state: State<AppState>,
+    start_col: u32,
+    end_col: u32,
+) -> Vec<CellData> {
+    let grid = state.grid.lock().unwrap();
+    let styles = state.style_registry.lock().unwrap();
+    let merged_regions = state.merged_regions.lock().unwrap();
+    let mut cells = Vec::new();
+
+    for &(row, col) in grid.cells.keys() {
+        if col >= start_col && col <= end_col {
+            if let Some(cell_data) =
+                get_cell_internal_with_merge(&grid, &styles, &merged_regions, row, col)
+            {
+                cells.push(cell_data);
+            }
+        }
+    }
+
+    cells
+}
+
+/// Check if any non-empty cells with actual content exist in a range.
+/// Returns true as soon as one cell with a value or formula is found.
+/// Ignores cells that only have styling but no content.
+#[tauri::command]
+pub fn has_content_in_range(
+    state: State<AppState>,
+    start_row: u32,
+    start_col: u32,
+    end_row: u32,
+    end_col: u32,
+) -> bool {
+    let grid = state.grid.lock().unwrap();
+
+    grid.cells.iter().any(|(&(row, col), cell)| {
+        row >= start_row
+            && row <= end_row
+            && col >= start_col
+            && col <= end_col
+            && (cell.formula.is_some() || !matches!(cell.value, engine::CellValue::Empty))
+    })
+}

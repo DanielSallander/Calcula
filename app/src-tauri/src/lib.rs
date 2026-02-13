@@ -977,6 +977,9 @@ pub fn run() {
             commands::sort_range,
             commands::get_grid_bounds,
             commands::get_cell_count,
+            commands::get_cells_in_rows,
+            commands::get_cells_in_cols,
+            commands::has_content_in_range,
             // Navigation commands
             commands::find_ctrl_arrow_target,
             // Dimension commands
