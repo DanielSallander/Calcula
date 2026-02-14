@@ -25,6 +25,7 @@ import { createHeaderSelectionHandlers } from "./selection/headerSelectionHandle
 import { createFormulaHandlers } from "./editing/formulaHandlers";
 import { createFormulaHeaderHandlers } from "./editing/formulaHeaderHandlers";
 import { createReferenceDragHandlers } from "./editing/referenceDragHandlers";
+import { createReferenceResizeHandlers } from "./editing/referenceResizeHandlers";
 import { createResizeHandlers } from "./layout/resizeHandlers";
 import { createFillHandleCursorChecker } from "./utils/fillHandleUtils";
 import { createSelectionDragHandlers } from "./selection/selectionDragHandlers";
@@ -76,6 +77,10 @@ export function useMouseSelection(props: UseMouseSelectionProps): UseMouseSelect
     onUpdateRefDrag,
     onCompleteRefDrag,
     onCancelRefDrag,
+    onStartRefResize,
+    onUpdateRefResize,
+    onCompleteRefResize,
+    onCancelRefResize,
     onMoveCells,
     onMoveRows,
     onMoveColumns,
@@ -88,6 +93,7 @@ export function useMouseSelection(props: UseMouseSelectionProps): UseMouseSelect
   const [isFormulaDragging, setIsFormulaDragging] = useState(false);
   const [isResizing, setIsResizing] = useState(false);
   const [isRefDragging, setIsRefDragging] = useState(false);
+  const [isRefResizing, setIsRefResizing] = useState(false);
   const [isSelectionDragging, setIsSelectionDragging] = useState(false);
   const [selectionDragPreview, setSelectionDragPreview] = useState<Selection | null>(null);
 
@@ -104,6 +110,7 @@ export function useMouseSelection(props: UseMouseSelectionProps): UseMouseSelect
   const resizeStateRef = useRef<ResizeState | null>(null);
   const headerDragRef = useRef<HeaderDragState | null>(null);
   const refDragStartRef = useRef<CellPosition | null>(null);
+  const refResizeStartRef = useRef<CellPosition | null>(null);
   const selectionDragRef = useRef<SelectionDragState | null>(null);
 
   // -------------------------------------------------------------------------
@@ -234,6 +241,25 @@ export function useMouseSelection(props: UseMouseSelectionProps): UseMouseSelect
   });
 
   // eslint-disable-next-line react-hooks/refs -- Refs are captured in closures for event-time access, not read during render
+  const referenceResizeHandlers = createReferenceResizeHandlers({
+    config,
+    viewport,
+    dimensions,
+    containerRef,
+    formulaReferences,
+    currentSheetName,
+    formulaSourceSheetName,
+    onStartRefResize,
+    onUpdateRefResize,
+    onCompleteRefResize,
+    onCancelRefResize,
+    setIsRefResizing,
+    setCursorStyle,
+    refResizeStartRef,
+    lastMousePosRef,
+  });
+
+  // eslint-disable-next-line react-hooks/refs -- Refs are captured in closures for event-time access, not read during render
   const selectionDragHandlers = createSelectionDragHandlers({
     config,
     viewport,
@@ -301,7 +327,17 @@ export function useMouseSelection(props: UseMouseSelectionProps): UseMouseSelect
       // This is separate from isCurrentlyFormulaMode which checks if expecting a reference
       const isCurrentlyEditingFormula = isEditingFormula();
 
-      // Priority 2: Check for reference dragging when editing any formula
+      // Priority 2: Check for reference corner resize when editing any formula
+      // Corner resize has higher priority than border drag (corners overlap with borders)
+      if (isCurrentlyEditingFormula) {
+        if (referenceResizeHandlers.handleReferenceResizeMouseDown(mouseX, mouseY, event)) {
+          formulaHeaderDragStartRef.current = null;
+          formulaDragStartRef.current = null;
+          return;
+        }
+      }
+
+      // Priority 3: Check for reference dragging when editing any formula
       // FIX: Allow dragging existing references even when formula doesn't end with an operator
       if (isCurrentlyEditingFormula) {
         if (referenceDragHandlers.handleReferenceDragMouseDown(mouseX, mouseY, event)) {
@@ -357,6 +393,7 @@ export function useMouseSelection(props: UseMouseSelectionProps): UseMouseSelect
       formulaHandlers,
       formulaHeaderHandlers,
       referenceDragHandlers,
+      referenceResizeHandlers,
       selectionDragHandlers,
     ]
   );
@@ -395,6 +432,12 @@ export function useMouseSelection(props: UseMouseSelectionProps): UseMouseSelect
         return;
       }
 
+      // Handle reference resize (resizing existing reference via corner handle)
+      if (isRefResizing && refResizeStartRef.current) {
+        referenceResizeHandlers.handleReferenceResizeMove(mouseX, mouseY, rect);
+        return;
+      }
+
       // Handle selection drag (moving cells/rows/columns)
       if (isSelectionDragging && selectionDragRef.current) {
         selectionDragHandlers.handleSelectionDragMove(mouseX, mouseY, rect);
@@ -408,11 +451,18 @@ export function useMouseSelection(props: UseMouseSelectionProps): UseMouseSelect
       }
 
       // Update cursor based on position (when not dragging)
-      if (!isDragging && !isFormulaDragging && !isResizing && !isRefDragging && !isSelectionDragging) {
+      if (!isDragging && !isFormulaDragging && !isResizing && !isRefDragging && !isRefResizing && !isSelectionDragging) {
         // Check fill handle first (highest priority for crosshair)
         if (isOverFillHandle(mouseX, mouseY)) {
           setCursorStyle("crosshair");
           setHoveringOverReferenceBorder(false);
+        } else if (isEditingFormula() && referenceResizeHandlers.getCornerAtPosition(mouseX, mouseY)) {
+          // Check corner handles first (higher priority than border)
+          const cornerHit = referenceResizeHandlers.getCornerAtPosition(mouseX, mouseY)!;
+          const resizeCursor = cornerHit.corner === "topLeft" || cornerHit.corner === "bottomRight"
+            ? "nwse-resize" : "nesw-resize";
+          setCursorStyle(resizeCursor);
+          setHoveringOverReferenceBorder(true);
         } else if (isEditingFormula() && referenceDragHandlers.isOverReferenceBorder(mouseX, mouseY)) {
           // Check if over a formula reference border (for dragging)
           // FIX: Use isEditingFormula() instead of isFormulaMode to allow dragging
@@ -481,7 +531,7 @@ export function useMouseSelection(props: UseMouseSelectionProps): UseMouseSelect
       }
 
       // Check if we need to start/stop auto-scroll
-      if (isDragging || isFormulaDragging || isRefDragging || isSelectionDragging) {
+      if (isDragging || isFormulaDragging || isRefDragging || isRefResizing || isSelectionDragging) {
         const { deltaX, deltaY } = calculateAutoScrollDelta(mouseX, mouseY, rect, config);
         if (deltaX !== 0 || deltaY !== 0) {
           startAutoScroll();
@@ -500,6 +550,7 @@ export function useMouseSelection(props: UseMouseSelectionProps): UseMouseSelect
       isFormulaDragging,
       isResizing,
       isRefDragging,
+      isRefResizing,
       isSelectionDragging,
       isOverFillHandle,
       resizeHandlers,
@@ -507,6 +558,7 @@ export function useMouseSelection(props: UseMouseSelectionProps): UseMouseSelect
       formulaHandlers,
       formulaHeaderHandlers,
       referenceDragHandlers,
+      referenceResizeHandlers,
       selectionDragHandlers,
       onExtendTo,
       startAutoScroll,
@@ -528,6 +580,14 @@ export function useMouseSelection(props: UseMouseSelectionProps): UseMouseSelect
     if (isRefDragging) {
       if (refDragStartRef.current) {
         referenceDragHandlers.handleReferenceDragMouseUp(stopAutoScroll);
+        return;
+      }
+    }
+
+    // End reference resize (resizing existing reference via corner handle)
+    if (isRefResizing) {
+      if (refResizeStartRef.current) {
+        referenceResizeHandlers.handleReferenceResizeMouseUp(stopAutoScroll);
         return;
       }
     }
@@ -569,11 +629,13 @@ export function useMouseSelection(props: UseMouseSelectionProps): UseMouseSelect
     isFormulaDragging,
     isResizing,
     isRefDragging,
+    isRefResizing,
     isSelectionDragging,
     resizeHandlers,
     formulaHandlers,
     formulaHeaderHandlers,
     referenceDragHandlers,
+    referenceResizeHandlers,
     selectionDragHandlers,
     stopAutoScroll,
     onDragEnd,
@@ -622,6 +684,8 @@ export function useMouseSelection(props: UseMouseSelectionProps): UseMouseSelect
         resizeHandlers.handleResizeMouseUp();
       } else if (isRefDragging) {
         handleMouseUp();
+      } else if (isRefResizing) {
+        handleMouseUp();
       } else if (isSelectionDragging) {
         handleMouseUp();
       } else if (isFormulaDragging) {
@@ -640,14 +704,14 @@ export function useMouseSelection(props: UseMouseSelectionProps): UseMouseSelect
     return () => {
       window.removeEventListener("mouseup", handleGlobalMouseUp);
     };
-  }, [isDragging, isFormulaDragging, isResizing, isRefDragging, isSelectionDragging, handleMouseUp, resizeHandlers, stopAutoScroll, onDragEnd]);
+  }, [isDragging, isFormulaDragging, isResizing, isRefDragging, isRefResizing, isSelectionDragging, handleMouseUp, resizeHandlers, stopAutoScroll, onDragEnd]);
 
   /**
    * Global mouse move handler for tracking mouse during drag outside component.
    */
   useEffect(() => {
     const handleGlobalMouseMove = (event: MouseEvent) => {
-      if (!isDragging && !isFormulaDragging && !isResizing && !isRefDragging && !isSelectionDragging) {
+      if (!isDragging && !isFormulaDragging && !isResizing && !isRefDragging && !isRefResizing && !isSelectionDragging) {
         return;
       }
 
@@ -670,6 +734,12 @@ export function useMouseSelection(props: UseMouseSelectionProps): UseMouseSelect
       // Handle reference drag during global mouse move (moving existing reference)
       if (isRefDragging && refDragStartRef.current) {
         referenceDragHandlers.handleReferenceDragMove(mouseX, mouseY, rect);
+        return;
+      }
+
+      // Handle reference resize during global mouse move (resizing existing reference)
+      if (isRefResizing && refResizeStartRef.current) {
+        referenceResizeHandlers.handleReferenceResizeMove(mouseX, mouseY, rect);
         return;
       }
 
@@ -722,7 +792,7 @@ export function useMouseSelection(props: UseMouseSelectionProps): UseMouseSelect
       }
     };
 
-    if (isDragging || isFormulaDragging || isResizing || isRefDragging || isSelectionDragging) {
+    if (isDragging || isFormulaDragging || isResizing || isRefDragging || isRefResizing || isSelectionDragging) {
       window.addEventListener("mousemove", handleGlobalMouseMove);
     }
 
@@ -734,6 +804,7 @@ export function useMouseSelection(props: UseMouseSelectionProps): UseMouseSelect
     isFormulaDragging,
     isResizing,
     isRefDragging,
+    isRefResizing,
     isSelectionDragging,
     config,
     viewport,
@@ -742,6 +813,7 @@ export function useMouseSelection(props: UseMouseSelectionProps): UseMouseSelect
     resizeHandlers,
     formulaHeaderHandlers,
     referenceDragHandlers,
+    referenceResizeHandlers,
     selectionDragHandlers,
     onExtendTo,
     onUpdatePendingReference,
@@ -765,6 +837,7 @@ export function useMouseSelection(props: UseMouseSelectionProps): UseMouseSelect
     isFormulaDragging,
     isResizing,
     isRefDragging,
+    isRefResizing,
     isSelectionDragging,
     selectionDragPreview,
     cursorStyle,

@@ -17,6 +17,7 @@ pub enum CellError {
     Ref,        // Invalid reference
     Name,       // Unknown function name
     Value,      // Wrong type of argument
+    NA,         // Value not available (#N/A)
     Parse,      // Formula parsing error
     Circular,   // Circular dependency detected
 }
@@ -148,7 +149,10 @@ impl Cell {
             CellValue::Boolean(b) => {
                 if *b { "TRUE" } else { "FALSE" }.to_string()
             }
-            CellValue::Error(e) => format!("#{:?}", e).to_uppercase(),
+            CellValue::Error(e) => match e {
+                CellError::NA => "#N/A".to_string(),
+                other => format!("#{:?}", other).to_uppercase(),
+            },
         }
     }
 }

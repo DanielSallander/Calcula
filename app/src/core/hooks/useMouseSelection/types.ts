@@ -4,6 +4,7 @@
 // module, including configuration, state, props, and return types.
 
 import type { GridConfig, Viewport, Selection, SelectionType, DimensionOverrides, FormulaReference } from "../../types";
+import type { ReferenceCorner } from "../../lib/gridRenderer";
 
 /**
  * Configuration for auto-scroll behavior during drag selection.
@@ -159,6 +160,14 @@ export interface UseMouseSelectionProps {
   onCompleteRefDrag?: (row: number, col: number) => void;
   /** Callback to cancel reference drag */
   onCancelRefDrag?: () => void;
+  /** Callback to start resizing an existing reference by a corner handle (returns true if resize started) */
+  onStartRefResize?: (row: number, col: number, corner: ReferenceCorner) => boolean;
+  /** Callback to update reference bounds during resize */
+  onUpdateRefResize?: (row: number, col: number) => void;
+  /** Callback to complete reference resize */
+  onCompleteRefResize?: (row: number, col: number) => void;
+  /** Callback to cancel reference resize */
+  onCancelRefResize?: () => void;
   /** Callback to move cells to a new position */
   onMoveCells?: (source: Selection, targetRow: number, targetCol: number) => Promise<void>;
   /** Callback to reorder rows (structural move) */
@@ -179,6 +188,8 @@ export interface UseMouseSelectionReturn {
   isResizing: boolean;
   /** Whether an existing reference is being dragged to move it */
   isRefDragging: boolean;
+  /** Whether an existing reference is being resized via corner handle */
+  isRefResizing: boolean;
   /** Whether a selection is being dragged to move cells */
   isSelectionDragging: boolean;
   /** Preview selection showing where cells would land during drag */

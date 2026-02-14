@@ -111,5 +111,37 @@ export function drawFormulaReferences(state: RenderState): void {
 
     // Reset line dash
     ctx.setLineDash([]);
+
+    // Draw corner resize handles for active (non-passive) references
+    // Skip full column/row references (resize doesn't apply)
+    if (!isPassive && !ref.isFullColumn && !ref.isFullRow) {
+      const handleSize = 7;
+      const halfHandle = Math.floor(handleSize / 2);
+
+      ctx.fillStyle = ref.color;
+
+      // Corner coordinates (matching the border rect corners)
+      const cx1 = Math.max(x1, rowHeaderWidth) + 1;
+      const cy1 = Math.max(y1, colHeaderHeight) + 1;
+      const cx2 = cx1 + Math.min(x2 - x1, visX2 - visX1) - 2;
+      const cy2 = cy1 + Math.min(y2 - y1, visY2 - visY1) - 2;
+
+      // Top-left
+      if (cx1 - halfHandle >= rowHeaderWidth && cy1 - halfHandle >= colHeaderHeight) {
+        ctx.fillRect(cx1 - halfHandle, cy1 - halfHandle, handleSize, handleSize);
+      }
+      // Top-right
+      if (cx2 + halfHandle <= width && cy1 - halfHandle >= colHeaderHeight) {
+        ctx.fillRect(cx2 - halfHandle, cy1 - halfHandle, handleSize, handleSize);
+      }
+      // Bottom-left
+      if (cx1 - halfHandle >= rowHeaderWidth && cy2 + halfHandle <= height) {
+        ctx.fillRect(cx1 - halfHandle, cy2 - halfHandle, handleSize, handleSize);
+      }
+      // Bottom-right
+      if (cx2 + halfHandle <= width && cy2 + halfHandle <= height) {
+        ctx.fillRect(cx2 - halfHandle, cy2 - halfHandle, handleSize, handleSize);
+      }
+    }
   }
 }

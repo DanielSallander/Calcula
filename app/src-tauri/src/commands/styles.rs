@@ -161,6 +161,9 @@ pub fn apply_formatting(
             if let Some(underline) = params.underline {
                 new_style.font.underline = underline;
             }
+            if let Some(strikethrough) = params.strikethrough {
+                new_style.font.strikethrough = strikethrough;
+            }
             if let Some(font_size) = params.font_size {
                 new_style.font.size = font_size;
             }

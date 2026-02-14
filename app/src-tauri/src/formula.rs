@@ -151,6 +151,14 @@ pub fn get_functions_by_category(category: String) -> FunctionListResult {
                 category: "Text".to_string(),
             },
         ],
+        "lookup" | "lookup & reference" => vec![
+            FunctionInfo {
+                name: "XLOOKUP".to_string(),
+                syntax: "XLOOKUP(lookup_value, lookup_array, return_array, [if_not_found], [match_mode], [search_mode])".to_string(),
+                description: "Searches a range or array and returns the corresponding item".to_string(),
+                category: "Lookup & Reference".to_string(),
+            },
+        ],
         "info" | "information" => vec![
             FunctionInfo {
                 name: "ISNUMBER".to_string(),
@@ -198,7 +206,7 @@ pub fn get_all_functions() -> FunctionListResult {
     let mut all_functions = Vec::new();
     
     // Collect from all categories
-    for category in &["math", "logical", "text", "info"] {
+    for category in &["math", "logical", "text", "lookup", "info"] {
         let result = get_functions_by_category(category.to_string());
         all_functions.extend(result.functions);
     }
@@ -250,6 +258,9 @@ pub fn get_function_template(function_name: String) -> String {
         "REPT" => "=REPT(, )".to_string(),
         "TEXT" => "=TEXT(, )".to_string(),
         
+        // Lookup & Reference functions
+        "XLOOKUP" => "=XLOOKUP(, , )".to_string(),
+
         // Information functions
         "ISNUMBER" => "=ISNUMBER()".to_string(),
         "ISTEXT" => "=ISTEXT()".to_string(),

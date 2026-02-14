@@ -132,6 +132,9 @@ pub enum BuiltinFunction {
     IsBlank,
     IsError,
 
+    // Lookup & Reference functions
+    XLookup,
+
     /// Fallback for unrecognized function names (future extensions/plugins).
     Custom(String),
 }
@@ -180,6 +183,8 @@ impl BuiltinFunction {
             "ISTEXT" => BuiltinFunction::IsText,
             "ISBLANK" => BuiltinFunction::IsBlank,
             "ISERROR" => BuiltinFunction::IsError,
+
+            "XLOOKUP" => BuiltinFunction::XLookup,
 
             _ => BuiltinFunction::Custom(name.to_uppercase()),
         }

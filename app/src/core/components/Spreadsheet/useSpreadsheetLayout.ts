@@ -4,6 +4,7 @@
 
 import { useEffect, useCallback } from "react";
 import { useViewport } from "../../hooks";
+import { getExtendMode } from "../../hooks/useGridKeyboard";
 import { useGridState } from "../../state";
 import { calculateVisibleRange } from "../../lib/gridRenderer";
 import type { GridCanvasHandle } from "../Grid";
@@ -96,6 +97,7 @@ export function useSpreadsheetLayout({
     if (isFormulaDragging) return "[Selecting Ref]";
     if (isDragging) return "[Selecting]";
     if (state.editing) return "[Editing]";
+    if (getExtendMode()) return "[Extend]";
     if (isFocused) return "[Ready]";
     return "[Click to focus]";
   };

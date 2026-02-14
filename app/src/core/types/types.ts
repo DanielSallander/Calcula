@@ -238,6 +238,7 @@ export interface FormattingOptions {
   bold?: boolean;
   italic?: boolean;
   underline?: boolean;
+  strikethrough?: boolean;
   textColor?: string;
   backgroundColor?: string;
   textAlign?: "left" | "center" | "right" | "general";

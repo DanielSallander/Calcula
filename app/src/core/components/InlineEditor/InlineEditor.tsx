@@ -47,7 +47,9 @@ export interface InlineEditorProps {
   /** Whether the editor is disabled (e.g., during save) */
   disabled?: boolean;
   /** Callback when arrow key is pressed in formula mode to navigate cell references */
-  onArrowKeyReference?: (direction: "up" | "down" | "left" | "right") => void;
+  onArrowKeyReference?: (direction: "up" | "down" | "left" | "right", extend?: boolean) => void;
+  /** Callback when Ctrl+Enter is pressed (to fill selected range with current entry) */
+  onCtrlEnter?: () => Promise<void>;
 }
 
 /**
@@ -213,6 +215,7 @@ export function InlineEditor(props: InlineEditorProps): React.ReactElement | nul
     onRestoreFocus,
     disabled = false,
     onArrowKeyReference,
+    onCtrlEnter,
   } = props;
 
   const inputRef = useRef<HTMLInputElement | null>(null);
@@ -256,6 +259,21 @@ export function InlineEditor(props: InlineEditorProps): React.ReactElement | nul
 
       switch (event.key) {
         case "Enter":
+          // Ctrl+Enter - fill selected range with current entry
+          if ((event.ctrlKey || event.metaKey) && onCtrlEnter) {
+            event.preventDefault();
+            event.stopPropagation();
+            console.log("[InlineEditor] Ctrl+Enter pressed, filling selection");
+            isCommittingRef.current = true;
+            try {
+              await onCtrlEnter();
+              onRestoreFocus?.();
+            } finally {
+              isCommittingRef.current = false;
+            }
+            break;
+          }
+          // Normal Enter - commit and move down/up
           event.preventDefault();
           event.stopPropagation();
           console.log("[InlineEditor] Enter pressed, starting commit");
@@ -359,7 +377,7 @@ export function InlineEditor(props: InlineEditorProps): React.ReactElement | nul
               "ArrowRight": "right",
             };
 
-            onArrowKeyReference(directionMap[event.key]);
+            onArrowKeyReference(directionMap[event.key], event.shiftKey);
           }
           // If not in formula mode and not in arrow nav mode, let arrow keys work normally
           break;
@@ -370,7 +388,7 @@ export function InlineEditor(props: InlineEditorProps): React.ReactElement | nul
           break;
       }
     },
-    [onCommit, onCancel, onTab, onEnter, onRestoreFocus, disabled, onValueChange, onArrowKeyReference, editing.value]
+    [onCommit, onCancel, onTab, onEnter, onCtrlEnter, onRestoreFocus, disabled, onValueChange, onArrowKeyReference, editing.value]
   );
 
   /**

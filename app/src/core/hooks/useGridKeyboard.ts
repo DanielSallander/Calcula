@@ -46,6 +46,29 @@ interface UseGridKeyboardOptions {
   hasClipboardContent?: boolean;
   /** Callback for delete/clear contents operation */
   onDelete?: () => Promise<void>;
+  /** Callback for selecting an entire column (Ctrl+Space) */
+  onSelectColumn?: (col: number) => void;
+  /** Callback for selecting an entire row (Shift+Space) */
+  onSelectRow?: (row: number) => void;
+  /** Callback for executing a named command (formatting, fill, etc.) */
+  onCommand?: (command: string) => Promise<void>;
+}
+
+/**
+ * MODULE-LEVEL state for F8 "Extend Mode".
+ * When active, arrow keys extend the selection without holding Shift.
+ * Deactivated by pressing F8 again or Escape.
+ */
+let extendModeActive = false;
+
+/** Get the current extend mode state. */
+export function getExtendMode(): boolean {
+  return extendModeActive;
+}
+
+/** Set the extend mode state. */
+export function setExtendMode(value: boolean): void {
+  extendModeActive = value;
 }
 
 /**
@@ -74,6 +97,9 @@ export function useGridKeyboard(options: UseGridKeyboardOptions): void {
     onClearClipboard,
     hasClipboardContent = false,
     onDelete,
+    onSelectColumn,
+    onSelectRow,
+    onCommand,
   } = options;
   const { state, dispatch } = useGridContext();
   const { config, viewport, selection } = state;
@@ -323,13 +349,33 @@ export function useGridKeyboard(options: UseGridKeyboardOptions): void {
 
       const modKey = ctrlKey || metaKey;
 
-      // Handle ESC key - clear clipboard if content exists
-      if (key === "Escape" && hasClipboardContent && onClearClipboard) {
+      // Handle ESC key - deactivate extend mode, then clear clipboard
+      if (key === "Escape") {
+        if (extendModeActive) {
+          event.preventDefault();
+          event.stopPropagation();
+          extendModeActive = false;
+          eventLog.keyboard('Grid', 'handleKeyDown', 'Escape', []);
+          fnLog.exit('handleKeyDown', 'extend mode off (Escape)');
+          return;
+        }
+        if (hasClipboardContent && onClearClipboard) {
+          event.preventDefault();
+          event.stopPropagation();
+          eventLog.keyboard('Grid', 'handleKeyDown', 'Escape', []);
+          onClearClipboard();
+          fnLog.exit('handleKeyDown', 'cleared clipboard');
+          return;
+        }
+      }
+
+      // Handle F8 - Toggle Extend Mode
+      if (key === "F8") {
         event.preventDefault();
         event.stopPropagation();
-        eventLog.keyboard('Grid', 'handleKeyDown', 'Escape', []);
-        onClearClipboard();
-        fnLog.exit('handleKeyDown', 'cleared clipboard');
+        extendModeActive = !extendModeActive;
+        eventLog.keyboard('Grid', 'handleKeyDown', 'F8', []);
+        fnLog.exit('handleKeyDown', `extend mode ${extendModeActive ? 'on' : 'off'}`);
         return;
       }
 
@@ -408,6 +454,203 @@ export function useGridKeyboard(options: UseGridKeyboardOptions): void {
               return;
             }
             break;
+
+          case 'a':
+            // Ctrl+A - Select all cells
+            event.preventDefault();
+            event.stopPropagation();
+            eventLog.keyboard('Grid', 'handleKeyDown', 'Ctrl+A', ['Ctrl']);
+            dispatch(setSelection({
+              startRow: 0,
+              startCol: 0,
+              endRow: config.totalRows - 1,
+              endCol: config.totalCols - 1,
+              type: "cells",
+            }));
+            if (onSelectionChange) {
+              setTimeout(onSelectionChange, 0);
+            }
+            fnLog.exit('handleKeyDown', 'select all');
+            return;
+
+          case 'b':
+            // Ctrl+B - Toggle bold
+            if (!shiftKey && onCommand) {
+              event.preventDefault();
+              event.stopPropagation();
+              eventLog.keyboard('Grid', 'handleKeyDown', 'Ctrl+B', ['Ctrl']);
+              onCommand('format.toggleBold');
+              fnLog.exit('handleKeyDown', 'toggle bold');
+              return;
+            }
+            break;
+
+          case 'i':
+            // Ctrl+I - Toggle italic
+            if (!shiftKey && onCommand) {
+              event.preventDefault();
+              event.stopPropagation();
+              eventLog.keyboard('Grid', 'handleKeyDown', 'Ctrl+I', ['Ctrl']);
+              onCommand('format.toggleItalic');
+              fnLog.exit('handleKeyDown', 'toggle italic');
+              return;
+            }
+            break;
+
+          case 'u':
+            // Ctrl+U - Toggle underline
+            if (!shiftKey && onCommand) {
+              event.preventDefault();
+              event.stopPropagation();
+              eventLog.keyboard('Grid', 'handleKeyDown', 'Ctrl+U', ['Ctrl']);
+              onCommand('format.toggleUnderline');
+              fnLog.exit('handleKeyDown', 'toggle underline');
+              return;
+            }
+            break;
+
+          case 'd':
+            // Ctrl+D - Fill down
+            if (!shiftKey && onCommand) {
+              event.preventDefault();
+              event.stopPropagation();
+              eventLog.keyboard('Grid', 'handleKeyDown', 'Ctrl+D', ['Ctrl']);
+              onCommand('edit.fillDown');
+              fnLog.exit('handleKeyDown', 'fill down');
+              return;
+            }
+            break;
+        }
+      }
+
+      // Handle Ctrl+number shortcuts (formatting)
+      if (modKey && !altKey && !shiftKey && onCommand) {
+        switch (key) {
+          case '2':
+            // Ctrl+2 - Toggle bold (alternative)
+            event.preventDefault();
+            event.stopPropagation();
+            eventLog.keyboard('Grid', 'handleKeyDown', 'Ctrl+2', ['Ctrl']);
+            onCommand('format.toggleBold');
+            fnLog.exit('handleKeyDown', 'toggle bold (Ctrl+2)');
+            return;
+
+          case '3':
+            // Ctrl+3 - Toggle italic (alternative)
+            event.preventDefault();
+            event.stopPropagation();
+            eventLog.keyboard('Grid', 'handleKeyDown', 'Ctrl+3', ['Ctrl']);
+            onCommand('format.toggleItalic');
+            fnLog.exit('handleKeyDown', 'toggle italic (Ctrl+3)');
+            return;
+
+          case '4':
+            // Ctrl+4 - Toggle underline (alternative)
+            event.preventDefault();
+            event.stopPropagation();
+            eventLog.keyboard('Grid', 'handleKeyDown', 'Ctrl+4', ['Ctrl']);
+            onCommand('format.toggleUnderline');
+            fnLog.exit('handleKeyDown', 'toggle underline (Ctrl+4)');
+            return;
+
+          case '5':
+            // Ctrl+5 - Toggle strikethrough
+            event.preventDefault();
+            event.stopPropagation();
+            eventLog.keyboard('Grid', 'handleKeyDown', 'Ctrl+5', ['Ctrl']);
+            onCommand('format.toggleStrikethrough');
+            fnLog.exit('handleKeyDown', 'toggle strikethrough');
+            return;
+        }
+      }
+
+      // Handle Ctrl+; - Insert current date
+      if (modKey && !altKey && !shiftKey && key === ';' && onCommand) {
+        event.preventDefault();
+        event.stopPropagation();
+        eventLog.keyboard('Grid', 'handleKeyDown', 'Ctrl+;', ['Ctrl']);
+        onCommand('edit.insertDate');
+        fnLog.exit('handleKeyDown', 'insert date');
+        return;
+      }
+
+      // Handle Ctrl+Shift shortcuts for number formats and time insertion
+      // On US keyboard, Shift+digit produces the symbol (e.g., Shift+4 = $)
+      // Browsers report the shifted symbol as event.key when Ctrl+Shift is held
+      if (modKey && shiftKey && !altKey && onCommand) {
+        switch (key) {
+          case ':':
+            // Ctrl+Shift+: - Insert current time
+            event.preventDefault();
+            event.stopPropagation();
+            eventLog.keyboard('Grid', 'handleKeyDown', 'Ctrl+Shift+:', ['Ctrl', 'Shift']);
+            onCommand('edit.insertTime');
+            fnLog.exit('handleKeyDown', 'insert time');
+            return;
+
+          case '~':
+          case '`':
+            // Ctrl+Shift+~ - General number format
+            event.preventDefault();
+            event.stopPropagation();
+            eventLog.keyboard('Grid', 'handleKeyDown', 'Ctrl+Shift+~', ['Ctrl', 'Shift']);
+            onCommand('format.numberGeneral');
+            fnLog.exit('handleKeyDown', 'format general');
+            return;
+
+          case '$':
+            // Ctrl+Shift+$ - Currency format
+            event.preventDefault();
+            event.stopPropagation();
+            eventLog.keyboard('Grid', 'handleKeyDown', 'Ctrl+Shift+$', ['Ctrl', 'Shift']);
+            onCommand('format.numberCurrency');
+            fnLog.exit('handleKeyDown', 'format currency');
+            return;
+
+          case '%':
+            // Ctrl+Shift+% - Percentage format
+            event.preventDefault();
+            event.stopPropagation();
+            eventLog.keyboard('Grid', 'handleKeyDown', 'Ctrl+Shift+%', ['Ctrl', 'Shift']);
+            onCommand('format.numberPercentage');
+            fnLog.exit('handleKeyDown', 'format percentage');
+            return;
+
+          case '^':
+            // Ctrl+Shift+^ - Scientific format
+            event.preventDefault();
+            event.stopPropagation();
+            eventLog.keyboard('Grid', 'handleKeyDown', 'Ctrl+Shift+^', ['Ctrl', 'Shift']);
+            onCommand('format.numberScientific');
+            fnLog.exit('handleKeyDown', 'format scientific');
+            return;
+
+          case '#':
+            // Ctrl+Shift+# - Date format
+            event.preventDefault();
+            event.stopPropagation();
+            eventLog.keyboard('Grid', 'handleKeyDown', 'Ctrl+Shift+#', ['Ctrl', 'Shift']);
+            onCommand('format.numberDate');
+            fnLog.exit('handleKeyDown', 'format date');
+            return;
+
+          case '@':
+            // Ctrl+Shift+@ - Time format
+            event.preventDefault();
+            event.stopPropagation();
+            eventLog.keyboard('Grid', 'handleKeyDown', 'Ctrl+Shift+@', ['Ctrl', 'Shift']);
+            onCommand('format.numberTime');
+            fnLog.exit('handleKeyDown', 'format time');
+            return;
+
+          case '!':
+            // Ctrl+Shift+! - Number format (with thousands separator)
+            event.preventDefault();
+            event.stopPropagation();
+            eventLog.keyboard('Grid', 'handleKeyDown', 'Ctrl+Shift+!', ['Ctrl', 'Shift']);
+            onCommand('format.numberNumber');
+            fnLog.exit('handleKeyDown', 'format number');
+            return;
         }
       }
 
@@ -439,8 +682,54 @@ export function useGridKeyboard(options: UseGridKeyboardOptions): void {
           eventLog.keyboard('Grid', 'handleKeyDown', `Ctrl+${key}`, mods);
           
           // Call async handler (non-blocking)
-          handleCtrlArrow(direction, shiftKey);
+          handleCtrlArrow(direction, shiftKey || extendModeActive);
           fnLog.exit('handleKeyDown', 'ctrl+arrow (async)');
+          return;
+        }
+      }
+
+      // Handle Spacebar shortcuts (before navigation switch since Space is not a nav key)
+      if (key === " ") {
+        if (modKey && shiftKey && !altKey) {
+          // Ctrl+Shift+Space - Select all (same as Ctrl+A)
+          event.preventDefault();
+          event.stopPropagation();
+          eventLog.keyboard('Grid', 'handleKeyDown', 'Ctrl+Shift+Space', ['Ctrl', 'Shift']);
+          dispatch(setSelection({
+            startRow: 0,
+            startCol: 0,
+            endRow: config.totalRows - 1,
+            endCol: config.totalCols - 1,
+            type: "cells",
+          }));
+          if (onSelectionChange) {
+            setTimeout(onSelectionChange, 0);
+          }
+          fnLog.exit('handleKeyDown', 'select all (Ctrl+Shift+Space)');
+          return;
+        }
+
+        if (modKey && !shiftKey && !altKey) {
+          // Ctrl+Space - Select entire column
+          event.preventDefault();
+          event.stopPropagation();
+          eventLog.keyboard('Grid', 'handleKeyDown', 'Ctrl+Space', ['Ctrl']);
+          if (onSelectColumn && selection) {
+            onSelectColumn(selection.endCol);
+          }
+          fnLog.exit('handleKeyDown', 'select column');
+          return;
+        }
+
+        if (shiftKey && !modKey && !altKey) {
+          // Shift+Space - Select entire row
+          event.preventDefault();
+          event.stopPropagation();
+          eventLog.keyboard('Grid', 'handleKeyDown', 'Shift+Space', ['Shift']);
+          if (onSelectRow && selection) {
+            onSelectRow(selection.endRow);
+          }
+          fnLog.exit('handleKeyDown', 'select row');
           return;
         }
       }
@@ -526,7 +815,7 @@ export function useGridKeyboard(options: UseGridKeyboardOptions): void {
         event.preventDefault();
         event.stopPropagation();
 
-        const extend = shiftKey && key !== "Tab";
+        const extend = (shiftKey || extendModeActive) && key !== "Tab";
         
         stateLog.action('GridContext', 'dispatch(handleArrowNavigation)', `dRow=${deltaRow}, dCol=${deltaCol}, extend=${extend}`);
         
@@ -536,7 +825,7 @@ export function useGridKeyboard(options: UseGridKeyboardOptions): void {
         fnLog.exit('handleKeyDown', 'handled');
       }
     },
-    [enabled, isEditing, config.totalRows, config.totalCols, viewport.rowCount, onSelectionChange, onCut, onCopy, onPaste, onUndo, onRedo, onClearClipboard, hasClipboardContent, onDelete, handleCtrlArrow, handleArrowNavigation]
+    [enabled, isEditing, config.totalRows, config.totalCols, viewport.rowCount, selection, onSelectionChange, onCut, onCopy, onPaste, onUndo, onRedo, onClearClipboard, hasClipboardContent, onDelete, onSelectColumn, onSelectRow, onCommand, handleCtrlArrow, handleArrowNavigation]
   );
 
   /**

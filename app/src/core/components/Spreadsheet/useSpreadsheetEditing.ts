@@ -6,6 +6,8 @@ import { useCallback, useEffect, useState } from "react";
 import { useEditing, getGlobalEditingValue, setGlobalIsEditing } from "../../hooks";
 import { useGridState } from "../../state";
 import { toggleReferenceAtCursor } from "../../lib/formulaRefToggle";
+import { updateCellsBatch, beginUndoTransaction, commitUndoTransaction, type CellUpdateInput } from "../../lib/tauri-api";
+import { cellEvents } from "../../lib/cellEvents";
 
 type GridState = ReturnType<typeof useGridState>;
 
@@ -221,10 +223,60 @@ export function useSpreadsheetEditing({
     focusContainerRef.current?.focus();
   }, [moveActiveCell, scrollToSelection, focusContainerRef]);
 
+  // Handle Ctrl+Enter - fill selected range with current entry
+  const handleInlineCtrlEnter = useCallback(async () => {
+    if (!editing || !selection) {
+      return;
+    }
+
+    // Capture the value before canceling the edit
+    const fillValue = editing.value;
+
+    // Cancel the edit (closes editor without committing to a single cell)
+    cancelEdit();
+
+    // Determine the selection bounds
+    const minRow = Math.min(selection.startRow, selection.endRow);
+    const maxRow = Math.max(selection.startRow, selection.endRow);
+    const minCol = Math.min(selection.startCol, selection.endCol);
+    const maxCol = Math.max(selection.startCol, selection.endCol);
+
+    // Build batch updates for every cell in the selection
+    try {
+      const updates: CellUpdateInput[] = [];
+      for (let row = minRow; row <= maxRow; row++) {
+        for (let col = minCol; col <= maxCol; col++) {
+          updates.push({ row, col, value: fillValue });
+        }
+      }
+
+      await beginUndoTransaction(`Fill ${updates.length} cells`);
+      const updatedCells = await updateCellsBatch(updates);
+      await commitUndoTransaction();
+
+      console.log(`[useSpreadsheetEditing] Ctrl+Enter filled ${updates.length} cells, ${updatedCells.length} updated`);
+
+      // Emit a single event to trigger canvas refresh
+      if (updatedCells.length > 0) {
+        cellEvents.emit({
+          row: updatedCells[0].row,
+          col: updatedCells[0].col,
+          oldValue: undefined,
+          newValue: updatedCells[0].display,
+          formula: updatedCells[0].formula ?? null,
+        });
+      }
+    } catch (error) {
+      console.error("[useSpreadsheetEditing] Ctrl+Enter fill failed:", error);
+    }
+
+    focusContainerRef.current?.focus();
+  }, [editing, selection, cancelEdit, focusContainerRef]);
+
   // Handler for arrow key cell reference navigation in formula mode
   const handleArrowKeyReference = useCallback(
-    (direction: "up" | "down" | "left" | "right") => {
-      navigateReferenceWithArrow(direction);
+    (direction: "up" | "down" | "left" | "right", extend?: boolean) => {
+      navigateReferenceWithArrow(direction, extend);
     },
     [navigateReferenceWithArrow]
   );
@@ -254,6 +306,12 @@ export function useSpreadsheetEditing({
           // stuck with InlineEditor focused but unable to navigate.
           if (!editing) {
             console.log("[handleContainerKeyDown] Enter pressed but editing not set yet, waiting for InlineEditor");
+            return;
+          }
+          // Ctrl+Enter - fill selected range with current entry
+          if (event.ctrlKey || event.metaKey) {
+            await handleInlineCtrlEnter();
+            focusContainerRef.current?.focus();
             return;
           }
           const success = await handleCommitEdit();
@@ -332,7 +390,7 @@ export function useSpreadsheetEditing({
         return;
       }
     },
-    [isEditingRef, editing, isOnDifferentSheet, startEditing, handleCommitEdit, cancelEdit, moveActiveCell, scrollToSelection, focusContainerRef]
+    [isEditingRef, editing, isOnDifferentSheet, startEditing, handleCommitEdit, handleInlineCtrlEnter, cancelEdit, moveActiveCell, scrollToSelection, focusContainerRef]
   );
 
   const getFormulaBarValueInternal = (): string => {
@@ -361,6 +419,7 @@ export function useSpreadsheetEditing({
       handleInlineCancel,
       handleInlineTab,
       handleInlineEnter,
+      handleInlineCtrlEnter,
       handleContainerKeyDown,
       handleArrowKeyReference,
       clearError

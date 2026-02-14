@@ -361,6 +361,7 @@ fn convert_builtin_function(func: &ParserBuiltinFn) -> EngineBuiltinFn {
         ParserBuiltinFn::IsText => EngineBuiltinFn::IsText,
         ParserBuiltinFn::IsBlank => EngineBuiltinFn::IsBlank,
         ParserBuiltinFn::IsError => EngineBuiltinFn::IsError,
+        ParserBuiltinFn::XLookup => EngineBuiltinFn::XLookup,
         ParserBuiltinFn::Custom(name) => EngineBuiltinFn::Custom(name.clone()),
     }
 }

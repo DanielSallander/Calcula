@@ -18,6 +18,7 @@
 // FIX: Dispatch formula:referenceInserted event to restore focus after inserting references
 
 import { autoCompleteFormula } from "../lib/formulaCompletion";
+import { setExtendMode } from "./useGridKeyboard";
 import { useCallback, useState, useEffect, useRef } from "react";
 import { useGridContext } from "../state/GridContext";
 import { 
@@ -81,6 +82,7 @@ let globalEditingValue = "";
  * rather than appending new references.
  */
 let arrowRefCursor: { row: number; col: number } | null = null;
+let arrowRefAnchor: { row: number; col: number } | null = null;
 let arrowRefInsertIndex: number = 0;
 let arrowRefColor: string | null = null;
 
@@ -167,6 +169,7 @@ export function setArrowRefInsertIndex(index: number): void {
  */
 export function resetArrowRefState(): void {
   arrowRefCursor = null;
+  arrowRefAnchor = null;
   arrowRefInsertIndex = 0;
   arrowRefColor = null;
 }
@@ -262,6 +265,110 @@ export function clearReferenceDrag(): void {
  */
 export function isReferenceDragging(): boolean {
   return draggedReference !== null;
+}
+
+// =============================================================================
+// REFERENCE RESIZE STATE
+// =============================================================================
+
+/**
+ * MODULE-LEVEL state for reference resize.
+ * When resizing an existing reference by dragging a corner handle, we track:
+ * - The reference being resized (with position info)
+ * - Which corner is being dragged
+ * - The anchor point (the corner opposite to the dragged one)
+ */
+let resizedReference: FormulaReferenceWithPosition | null = null;
+let resizedRefIndex: number = -1;
+let resizeCorner: "topLeft" | "topRight" | "bottomLeft" | "bottomRight" | null = null;
+let resizeAnchor: { row: number; col: number } | null = null;
+
+/**
+ * Get the reference being resized.
+ */
+export function getResizedReference(): FormulaReferenceWithPosition | null {
+  return resizedReference;
+}
+
+/**
+ * Get the resize anchor point (the fixed corner).
+ */
+export function getResizeAnchor(): { row: number; col: number } | null {
+  return resizeAnchor;
+}
+
+/**
+ * Start resizing a reference by a corner.
+ * The anchor is the corner OPPOSITE to the one being dragged.
+ */
+export function startReferenceResize(
+  ref: FormulaReferenceWithPosition,
+  refIndex: number,
+  corner: "topLeft" | "topRight" | "bottomLeft" | "bottomRight"
+): void {
+  resizedReference = ref;
+  resizedRefIndex = refIndex;
+  resizeCorner = corner;
+
+  switch (corner) {
+    case "topLeft":
+      resizeAnchor = { row: ref.endRow, col: ref.endCol };
+      break;
+    case "topRight":
+      resizeAnchor = { row: ref.endRow, col: ref.startCol };
+      break;
+    case "bottomLeft":
+      resizeAnchor = { row: ref.startRow, col: ref.endCol };
+      break;
+    case "bottomRight":
+      resizeAnchor = { row: ref.startRow, col: ref.startCol };
+      break;
+  }
+}
+
+/**
+ * Clear the reference resize state.
+ */
+export function clearReferenceResize(): void {
+  resizedReference = null;
+  resizedRefIndex = -1;
+  resizeCorner = null;
+  resizeAnchor = null;
+}
+
+/**
+ * Check if a reference resize is in progress.
+ */
+export function isReferenceResizing(): boolean {
+  return resizedReference !== null;
+}
+
+/**
+ * Resize a reference to include the given cell position.
+ * The anchor point stays fixed; the dragged corner moves to the mouse position.
+ * Returns the new formula value if successful.
+ */
+export function resizeReferenceToPosition(
+  newRow: number,
+  newCol: number
+): string | null {
+  if (!resizedReference || !resizeAnchor || !globalEditingValue) {
+    return null;
+  }
+
+  const newStartRow = Math.min(resizeAnchor.row, newRow);
+  const newStartCol = Math.min(resizeAnchor.col, newCol);
+  const newEndRow = Math.max(resizeAnchor.row, newRow);
+  const newEndCol = Math.max(resizeAnchor.col, newCol);
+
+  return updateFormulaReference(
+    globalEditingValue,
+    resizedReference,
+    newStartRow,
+    newStartCol,
+    newEndRow,
+    newEndCol
+  );
 }
 
 /**
@@ -432,8 +539,8 @@ export interface UseEditingReturn {
   getSourceSheetName: () => string | null;
   /** Check if currently on a different sheet than the formula source */
   isOnDifferentSheet: () => boolean;
-  /** Navigate cell reference with arrow keys in formula mode */
-  navigateReferenceWithArrow: (direction: "up" | "down" | "left" | "right") => void;
+  /** Navigate cell reference with arrow keys in formula mode (extend=true for Shift+Arrow range expansion) */
+  navigateReferenceWithArrow: (direction: "up" | "down" | "left" | "right", extend?: boolean) => void;
   /** Start dragging an existing reference to move it */
   startRefDrag: (row: number, col: number) => boolean;
   /** Update the reference position during drag (live preview) */
@@ -444,6 +551,16 @@ export interface UseEditingReturn {
   cancelRefDrag: () => void;
   /** Check if currently dragging a reference */
   isRefDragging: boolean;
+  /** Start resizing an existing reference by a corner handle */
+  startRefResize: (row: number, col: number, corner: "topLeft" | "topRight" | "bottomLeft" | "bottomRight") => boolean;
+  /** Update the reference bounds during resize (live preview) */
+  updateRefResize: (row: number, col: number) => void;
+  /** Complete the reference resize and update the formula */
+  completeRefResize: (row: number, col: number) => void;
+  /** Cancel the reference resize */
+  cancelRefResize: () => void;
+  /** Check if currently resizing a reference */
+  isRefResizing: boolean;
 }
 
 /**
@@ -459,6 +576,8 @@ export function useEditing(): UseEditingReturn {
   const [lastError, setLastError] = useState<string | null>(null);
   const [isCommitting, setIsCommitting] = useState(false);
   const [pendingReference, setPendingReference] = useState<FormulaReference | null>(null);
+  // Track previous pending reference for proper cleanup during drag updates
+  const prevPendingRefForSync = useRef<FormulaReference | null>(null);
 
   // FIX: Ref to prevent double commits from race conditions
   // This catches cases where multiple sources (InlineEditor blur, formula bar, etc.)
@@ -592,11 +711,17 @@ export function useEditing(): UseEditingReturn {
 
   /**
    * Update formula references in state, including pending reference.
+   * FIX: Use prevPendingRefForSync to filter out the PREVIOUS pending reference
+   * rather than the new one. Without this, each drag move creates a new pending
+   * reference object, and the old ones accumulate in the array (causing corner
+   * handles to appear on every cell during drag).
    */
   useEffect(() => {
     if (pendingReference) {
-      dispatch(setFormulaReferences([...formulaReferences.filter(r => r !== pendingReference), pendingReference]));
+      const filtered = formulaReferences.filter(r => r !== prevPendingRefForSync.current);
+      dispatch(setFormulaReferences([...filtered, pendingReference]));
     }
+    prevPendingRefForSync.current = pendingReference;
   }, [pendingReference, dispatch]);
 
   /**
@@ -621,7 +746,8 @@ export function useEditing(): UseEditingReturn {
 
       // FIX: Set global flag BEFORE any async operation to prevent race conditions
       setGlobalIsEditing(true);
-      
+      setExtendMode(false);
+
       // FIX: Check if this cell is part of a merged region and resolve to master cell
       let editRow = row;
       let editCol = col;
@@ -723,7 +849,8 @@ export function useEditing(): UseEditingReturn {
         
         // FIX: Set global flag BEFORE dispatch
         setGlobalIsEditing(true);
-        
+        setExtendMode(false);
+
         // Check for merge info for replace mode too
         let editRow = row;
         let editCol = col;
@@ -815,7 +942,8 @@ export function useEditing(): UseEditingReturn {
       dispatch(updateEditing(newValue));
 
       // FIX: Include sheetName for cross-sheet reference highlighting
-      const color = getNextReferenceColor();
+      // FIX: Reuse pendingReference color and filter it out (avoids duplicate)
+      const color = pendingReference?.color || getNextReferenceColor();
       const newRef: FormulaReference = {
         startRow: row,
         startCol: col,
@@ -824,18 +952,19 @@ export function useEditing(): UseEditingReturn {
         color: color,
         sheetName: targetSheet ?? undefined,
       };
-      dispatch(setFormulaReferences([...formulaReferences, newRef]));
+      dispatch(setFormulaReferences([...formulaReferences.filter(r => r !== pendingReference), newRef]));
       setPendingReference(null);
 
       // FIX: Set up arrow cursor state so arrow keys can continue from this cell
       arrowRefCursor = { row, col };
+      arrowRefAnchor = { row, col };
       arrowRefInsertIndex = editing.value.length; // Where the reference starts
       arrowRefColor = color;
 
       // FIX: Dispatch event to restore focus to the InlineEditor
       dispatchReferenceInsertedEvent();
     },
-    [editing, dispatch, formulaReferences, getNextReferenceColor, getTargetSheetName, getSourceSheetName]
+    [editing, dispatch, formulaReferences, pendingReference, getNextReferenceColor, getTargetSheetName, getSourceSheetName]
   );
 
   /**
@@ -1318,7 +1447,8 @@ export function useEditing(): UseEditingReturn {
       
       // FIX: Set global flag BEFORE dispatch
       setGlobalIsEditing(true);
-      
+      setExtendMode(false);
+
       // Check for merge info
       let editRow = selection.endRow;
       let editCol = selection.endCol;
@@ -1376,10 +1506,11 @@ export function useEditing(): UseEditingReturn {
    * When in formula mode and arrow keys are pressed, this function:
    * - Creates a new reference if no arrow navigation is active
    * - Replaces the current reference if arrow navigation is active
+   * - When extend=true (Shift+Arrow), expands into a range reference (e.g., B1:B3)
    * This mimics Excel's behavior of navigating cell references with arrow keys.
    */
   const navigateReferenceWithArrow = useCallback(
-    (direction: "up" | "down" | "left" | "right") => {
+    (direction: "up" | "down" | "left" | "right", extend: boolean = false) => {
       if (!editing) {
         return;
       }
@@ -1407,6 +1538,8 @@ export function useEditing(): UseEditingReturn {
         // Get a new color for this arrow navigation session
         color = getNextReferenceColor();
         arrowRefColor = color;
+        // Set anchor for potential Shift+Arrow range extension
+        arrowRefAnchor = { row: newRow, col: newCol };
       } else {
         // Continue from current cursor position
         newRow = currentCursor.row;
@@ -1434,10 +1567,31 @@ export function useEditing(): UseEditingReturn {
       // Update the cursor position
       arrowRefCursor = { row: newRow, col: newCol };
 
-      // Build the new reference
       const targetSheet = getTargetSheetName();
       const sourceSheet = getSourceSheetName();
-      const reference = cellToReference(newRow, newCol, targetSheet, sourceSheet);
+
+      let reference: string;
+      let refStartRow: number;
+      let refStartCol: number;
+      let refEndRow: number;
+      let refEndCol: number;
+
+      if (extend && arrowRefAnchor) {
+        // Shift+Arrow: expand into a range reference from anchor to cursor
+        refStartRow = arrowRefAnchor.row;
+        refStartCol = arrowRefAnchor.col;
+        refEndRow = newRow;
+        refEndCol = newCol;
+        reference = rangeToReference(refStartRow, refStartCol, refEndRow, refEndCol, targetSheet, sourceSheet);
+      } else {
+        // Normal arrow: single cell reference, reset anchor to current position
+        arrowRefAnchor = { row: newRow, col: newCol };
+        refStartRow = newRow;
+        refStartCol = newCol;
+        refEndRow = newRow;
+        refEndCol = newCol;
+        reference = cellToReference(newRow, newCol, targetSheet, sourceSheet);
+      }
 
       // Replace the formula from the insert index with the new reference
       const newValue = editing.value.substring(0, arrowRefInsertIndex) + reference;
@@ -1448,10 +1602,10 @@ export function useEditing(): UseEditingReturn {
 
       // Update formula references for highlighting
       const newRef: FormulaReference = {
-        startRow: newRow,
-        startCol: newCol,
-        endRow: newRow,
-        endCol: newCol,
+        startRow: Math.min(refStartRow, refEndRow),
+        startCol: Math.min(refStartCol, refEndCol),
+        endRow: Math.max(refStartRow, refEndRow),
+        endCol: Math.max(refStartCol, refEndCol),
         color: color,
         sheetName: targetSheet ?? undefined,
       };
@@ -1633,6 +1787,130 @@ export function useEditing(): UseEditingReturn {
     clearReferenceDrag();
   }, [editing, dispatch]);
 
+  // ==========================================================================
+  // REFERENCE RESIZE METHODS
+  // ==========================================================================
+
+  /**
+   * Check if currently resizing a reference.
+   */
+  const isRefResizing = isReferenceResizing();
+
+  /**
+   * Start resizing an existing reference by a corner handle.
+   * Returns true if a reference was found and resize started.
+   */
+  const startRefResize = useCallback(
+    (row: number, col: number, corner: "topLeft" | "topRight" | "bottomLeft" | "bottomRight"): boolean => {
+      if (!editing || !editing.value.startsWith("=")) {
+        return false;
+      }
+
+      const refs = parseFormulaReferencesWithPositions(editing.value);
+      const refIndex = findReferenceAtCell(
+        refs,
+        row,
+        col,
+        sheetContext.activeSheetName,
+        editing.sourceSheetName
+      );
+
+      if (refIndex === -1) {
+        return false;
+      }
+
+      const ref = refs[refIndex];
+      startReferenceResize(ref, refIndex, corner);
+      return true;
+    },
+    [editing, sheetContext.activeSheetName]
+  );
+
+  /**
+   * Update the reference bounds during resize (live preview).
+   */
+  const updateRefResize = useCallback(
+    (row: number, col: number) => {
+      const ref = getResizedReference();
+      const anchor = getResizeAnchor();
+      if (!ref || !anchor || !editing) {
+        return;
+      }
+
+      const newStartRow = Math.min(anchor.row, row);
+      const newStartCol = Math.min(anchor.col, col);
+      const newEndRow = Math.max(anchor.row, row);
+      const newEndCol = Math.max(anchor.col, col);
+
+      const resizePreviewRef: FormulaReference = {
+        startRow: newStartRow,
+        startCol: newStartCol,
+        endRow: newEndRow,
+        endCol: newEndCol,
+        color: ref.color,
+        sheetName: ref.sheetName,
+      };
+
+      const updatedRefs = formulaReferences.map((existingRef) => {
+        if (existingRef.color === ref.color) {
+          return resizePreviewRef;
+        }
+        return existingRef;
+      });
+
+      dispatch(setFormulaReferences(updatedRefs));
+    },
+    [editing, formulaReferences, dispatch]
+  );
+
+  /**
+   * Complete the reference resize and update the formula.
+   */
+  const completeRefResize = useCallback(
+    (row: number, col: number) => {
+      const ref = getResizedReference();
+      const anchor = getResizeAnchor();
+      if (!ref || !anchor || !editing) {
+        clearReferenceResize();
+        return;
+      }
+
+      // Prevent blur commit during resize completion
+      setPreventBlurCommit(true);
+
+      // Get the new formula with the resized reference
+      const newFormula = resizeReferenceToPosition(row, col);
+
+      if (newFormula) {
+        setGlobalEditingValue(newFormula);
+        dispatch(updateEditing(newFormula));
+
+        // Re-parse and update the formula references for highlighting
+        const newRefs = parseFormulaReferences(newFormula, false);
+        dispatch(setFormulaReferences(newRefs));
+      }
+
+      clearReferenceResize();
+      dispatchReferenceInsertedEvent();
+    },
+    [editing, dispatch]
+  );
+
+  /**
+   * Cancel the reference resize and restore the original highlighting.
+   */
+  const cancelRefResize = useCallback(() => {
+    if (!editing) {
+      clearReferenceResize();
+      return;
+    }
+
+    const refs = parseFormulaReferences(editing.value, false);
+    dispatch(setFormulaReferences(refs));
+
+    clearReferenceResize();
+  }, [editing, dispatch]);
+
   return {
     editing,
     isEditing: editing !== null,
@@ -1667,5 +1945,10 @@ export function useEditing(): UseEditingReturn {
     completeRefDrag,
     cancelRefDrag,
     isRefDragging,
+    startRefResize,
+    updateRefResize,
+    completeRefResize,
+    cancelRefResize,
+    isRefResizing,
   };
 }

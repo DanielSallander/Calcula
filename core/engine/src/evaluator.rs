@@ -628,6 +628,9 @@ impl<'a> Evaluator<'a> {
             BuiltinFunction::IsBlank => self.fn_isblank(args),
             BuiltinFunction::IsError => self.fn_iserror(args),
 
+            // Lookup & Reference functions
+            BuiltinFunction::XLookup => self.fn_xlookup(args),
+
             // Unknown/custom functions
             BuiltinFunction::Custom(_) => EvalResult::Error(CellError::Name),
         }
@@ -1197,6 +1200,350 @@ impl<'a> Evaluator<'a> {
         let result = self.evaluate(&args[0]);
         EvalResult::Boolean(result.is_error())
     }
+
+    // ==================== Lookup & Reference Functions ====================
+
+    /// XLOOKUP(lookup_value, lookup_array, return_array, [if_not_found], [match_mode], [search_mode])
+    ///
+    /// Searches lookup_array for lookup_value and returns the corresponding item
+    /// from return_array.
+    ///
+    /// match_mode:  0 = exact (default), -1 = exact or next smaller, 1 = exact or next larger, 2 = wildcard
+    /// search_mode: 1 = first-to-last (default), -1 = last-to-first, 2 = binary asc, -2 = binary desc
+    fn fn_xlookup(&self, args: &[Expression]) -> EvalResult {
+        if args.len() < 3 || args.len() > 6 {
+            return EvalResult::Error(CellError::Value);
+        }
+
+        // Evaluate lookup_value
+        let lookup_val = self.evaluate(&args[0]);
+        if let EvalResult::Error(e) = &lookup_val {
+            return EvalResult::Error(e.clone());
+        }
+
+        // Evaluate lookup_array and return_array (flatten ranges into flat lists)
+        let lookup_array = self.evaluate(&args[1]).flatten();
+        let return_array = self.evaluate(&args[2]).flatten();
+
+        // match_mode (default 0 = exact match)
+        let match_mode: i32 = if args.len() > 4 {
+            match self.evaluate(&args[4]).as_number() {
+                Some(n) => n as i32,
+                None => return EvalResult::Error(CellError::Value),
+            }
+        } else {
+            0
+        };
+
+        // search_mode (default 1 = first to last)
+        let search_mode: i32 = if args.len() > 5 {
+            match self.evaluate(&args[5]).as_number() {
+                Some(n) => n as i32,
+                None => return EvalResult::Error(CellError::Value),
+            }
+        } else {
+            1
+        };
+
+        // Validate match_mode and search_mode
+        if !matches!(match_mode, 0 | -1 | 1 | 2) {
+            return EvalResult::Error(CellError::Value);
+        }
+        if !matches!(search_mode, 1 | -1 | 2 | -2) {
+            return EvalResult::Error(CellError::Value);
+        }
+
+        // Find the matching index
+        let found_index = match match_mode {
+            0 => self.xlookup_exact(&lookup_val, &lookup_array, search_mode),
+            -1 => self.xlookup_approx_smaller(&lookup_val, &lookup_array, search_mode),
+            1 => self.xlookup_approx_larger(&lookup_val, &lookup_array, search_mode),
+            2 => self.xlookup_wildcard(&lookup_val, &lookup_array, search_mode),
+            _ => None,
+        };
+
+        // Return the corresponding value from return_array, or if_not_found, or #N/A
+        match found_index {
+            Some(idx) => {
+                if idx < return_array.len() {
+                    return_array[idx].clone()
+                } else {
+                    EvalResult::Error(CellError::NA)
+                }
+            }
+            None => {
+                // If [if_not_found] argument is provided, evaluate and return it
+                if args.len() > 3 {
+                    self.evaluate(&args[3])
+                } else {
+                    EvalResult::Error(CellError::NA)
+                }
+            }
+        }
+    }
+
+    /// Exact match search for XLOOKUP (match_mode = 0).
+    /// Supports search_mode: 1 (first-to-last), -1 (last-to-first),
+    /// 2 (binary search ascending), -2 (binary search descending).
+    fn xlookup_exact(
+        &self,
+        lookup_val: &EvalResult,
+        lookup_array: &[EvalResult],
+        search_mode: i32,
+    ) -> Option<usize> {
+        match search_mode {
+            1 => {
+                // Linear search first-to-last
+                for (i, item) in lookup_array.iter().enumerate() {
+                    if self.xlookup_values_equal(lookup_val, item) {
+                        return Some(i);
+                    }
+                }
+                None
+            }
+            -1 => {
+                // Linear search last-to-first
+                for (i, item) in lookup_array.iter().enumerate().rev() {
+                    if self.xlookup_values_equal(lookup_val, item) {
+                        return Some(i);
+                    }
+                }
+                None
+            }
+            2 | -2 => {
+                // Binary search (ascending or descending)
+                let ascending = search_mode == 2;
+                self.xlookup_binary_exact(lookup_val, lookup_array, ascending)
+            }
+            _ => None,
+        }
+    }
+
+    /// Binary search for exact match.
+    fn xlookup_binary_exact(
+        &self,
+        lookup_val: &EvalResult,
+        lookup_array: &[EvalResult],
+        ascending: bool,
+    ) -> Option<usize> {
+        if lookup_array.is_empty() {
+            return None;
+        }
+
+        let mut lo: usize = 0;
+        let mut hi: usize = lookup_array.len();
+
+        while lo < hi {
+            let mid = lo + (hi - lo) / 2;
+            let cmp = self.xlookup_compare(lookup_val, &lookup_array[mid]);
+            match cmp {
+                std::cmp::Ordering::Equal => return Some(mid),
+                std::cmp::Ordering::Less => {
+                    if ascending { hi = mid; } else { lo = mid + 1; }
+                }
+                std::cmp::Ordering::Greater => {
+                    if ascending { lo = mid + 1; } else { hi = mid; }
+                }
+            }
+        }
+        None
+    }
+
+    /// Approximate match: exact or next smaller item (match_mode = -1).
+    fn xlookup_approx_smaller(
+        &self,
+        lookup_val: &EvalResult,
+        lookup_array: &[EvalResult],
+        search_mode: i32,
+    ) -> Option<usize> {
+        // First try exact match
+        if let Some(idx) = self.xlookup_exact(lookup_val, lookup_array, search_mode) {
+            return Some(idx);
+        }
+
+        // Find the largest value that is less than lookup_val
+        let mut best_index: Option<usize> = None;
+        let mut best_val: Option<f64> = None;
+        let target = lookup_val.as_number()?;
+
+        for (i, item) in lookup_array.iter().enumerate() {
+            if let Some(n) = item.as_number() {
+                if n < target {
+                    match best_val {
+                        Some(bv) if n > bv => {
+                            best_val = Some(n);
+                            best_index = Some(i);
+                        }
+                        None => {
+                            best_val = Some(n);
+                            best_index = Some(i);
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+        best_index
+    }
+
+    /// Approximate match: exact or next larger item (match_mode = 1).
+    fn xlookup_approx_larger(
+        &self,
+        lookup_val: &EvalResult,
+        lookup_array: &[EvalResult],
+        search_mode: i32,
+    ) -> Option<usize> {
+        // First try exact match
+        if let Some(idx) = self.xlookup_exact(lookup_val, lookup_array, search_mode) {
+            return Some(idx);
+        }
+
+        // Find the smallest value that is greater than lookup_val
+        let mut best_index: Option<usize> = None;
+        let mut best_val: Option<f64> = None;
+        let target = lookup_val.as_number()?;
+
+        for (i, item) in lookup_array.iter().enumerate() {
+            if let Some(n) = item.as_number() {
+                if n > target {
+                    match best_val {
+                        Some(bv) if n < bv => {
+                            best_val = Some(n);
+                            best_index = Some(i);
+                        }
+                        None => {
+                            best_val = Some(n);
+                            best_index = Some(i);
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+        best_index
+    }
+
+    /// Wildcard match (match_mode = 2).
+    /// Supports * (any characters), ? (single character), ~ (escape).
+    fn xlookup_wildcard(
+        &self,
+        lookup_val: &EvalResult,
+        lookup_array: &[EvalResult],
+        search_mode: i32,
+    ) -> Option<usize> {
+        let pattern = match lookup_val {
+            EvalResult::Text(s) => s.to_uppercase(),
+            _ => return self.xlookup_exact(lookup_val, lookup_array, search_mode),
+        };
+
+        let iter: Box<dyn Iterator<Item = (usize, &EvalResult)>> = if search_mode == -1 {
+            Box::new(lookup_array.iter().enumerate().rev())
+        } else {
+            Box::new(lookup_array.iter().enumerate())
+        };
+
+        for (i, item) in iter {
+            if let EvalResult::Text(s) = item {
+                if self.xlookup_wildcard_match(&pattern, &s.to_uppercase()) {
+                    return Some(i);
+                }
+            }
+        }
+        None
+    }
+
+    /// Matches a wildcard pattern against a string.
+    /// * matches any sequence of characters, ? matches exactly one character,
+    /// ~* and ~? match literal * and ?.
+    fn xlookup_wildcard_match(&self, pattern: &str, text: &str) -> bool {
+        let pat_chars: Vec<char> = pattern.chars().collect();
+        let text_chars: Vec<char> = text.chars().collect();
+        self.xlookup_wildcard_match_recursive(&pat_chars, 0, &text_chars, 0)
+    }
+
+    fn xlookup_wildcard_match_recursive(
+        &self,
+        pattern: &[char],
+        pi: usize,
+        text: &[char],
+        ti: usize,
+    ) -> bool {
+        if pi == pattern.len() {
+            return ti == text.len();
+        }
+
+        let ch = pattern[pi];
+
+        if ch == '~' && pi + 1 < pattern.len() {
+            // Escape: ~* matches literal *, ~? matches literal ?
+            let escaped = pattern[pi + 1];
+            if ti < text.len() && text[ti] == escaped {
+                return self.xlookup_wildcard_match_recursive(pattern, pi + 2, text, ti + 1);
+            }
+            return false;
+        }
+
+        if ch == '*' {
+            // * matches zero or more characters
+            // Try matching zero characters, then one, then two, etc.
+            for k in ti..=text.len() {
+                if self.xlookup_wildcard_match_recursive(pattern, pi + 1, text, k) {
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        if ch == '?' {
+            // ? matches exactly one character
+            if ti < text.len() {
+                return self.xlookup_wildcard_match_recursive(pattern, pi + 1, text, ti + 1);
+            }
+            return false;
+        }
+
+        // Literal character match
+        if ti < text.len() && text[ti] == ch {
+            return self.xlookup_wildcard_match_recursive(pattern, pi + 1, text, ti + 1);
+        }
+
+        false
+    }
+
+    /// Compares two EvalResult values for ordering.
+    /// Numbers are compared numerically, strings case-insensitively.
+    fn xlookup_compare(&self, a: &EvalResult, b: &EvalResult) -> std::cmp::Ordering {
+        match (a.as_number(), b.as_number()) {
+            (Some(na), Some(nb)) => na.partial_cmp(&nb).unwrap_or(std::cmp::Ordering::Equal),
+            _ => {
+                let sa = a.as_text().to_uppercase();
+                let sb = b.as_text().to_uppercase();
+                sa.cmp(&sb)
+            }
+        }
+    }
+
+    /// Checks if two EvalResult values are equal for XLOOKUP matching.
+    /// Numbers compared with epsilon tolerance, strings case-insensitively.
+    fn xlookup_values_equal(&self, a: &EvalResult, b: &EvalResult) -> bool {
+        match (a, b) {
+            (EvalResult::Number(n1), EvalResult::Number(n2)) => (n1 - n2).abs() < f64::EPSILON,
+            (EvalResult::Text(s1), EvalResult::Text(s2)) => {
+                s1.to_uppercase() == s2.to_uppercase()
+            }
+            (EvalResult::Boolean(b1), EvalResult::Boolean(b2)) => b1 == b2,
+            // Cross-type: number vs text that parses to number
+            (EvalResult::Number(n), EvalResult::Text(s))
+            | (EvalResult::Text(s), EvalResult::Number(n)) => {
+                if let Ok(parsed) = s.parse::<f64>() {
+                    (parsed - n).abs() < f64::EPSILON
+                } else {
+                    false
+                }
+            }
+            _ => false,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1450,5 +1797,330 @@ mod tests {
         let result = eval.evaluate(&expr);
 
         assert_eq!(result, EvalResult::Number(300.0));
+    }
+
+    // ==================== XLOOKUP Tests ====================
+
+    /// Helper: builds a grid for XLOOKUP tests.
+    /// Layout:
+    ///   A1 = "Apple",  B1 = 1.50
+    ///   A2 = "Banana", B2 = 0.75
+    ///   A3 = "Cherry", B3 = 3.00
+    ///   A4 = "Date",   B4 = 5.00
+    ///   A5 = "Elderberry", B5 = 8.00
+    fn make_xlookup_grid() -> Grid {
+        let mut grid = Grid::new();
+        grid.set_cell(0, 0, Cell::new_text("Apple".to_string()));
+        grid.set_cell(1, 0, Cell::new_text("Banana".to_string()));
+        grid.set_cell(2, 0, Cell::new_text("Cherry".to_string()));
+        grid.set_cell(3, 0, Cell::new_text("Date".to_string()));
+        grid.set_cell(4, 0, Cell::new_text("Elderberry".to_string()));
+
+        grid.set_cell(0, 1, Cell::new_number(1.50));
+        grid.set_cell(1, 1, Cell::new_number(0.75));
+        grid.set_cell(2, 1, Cell::new_number(3.00));
+        grid.set_cell(3, 1, Cell::new_number(5.00));
+        grid.set_cell(4, 1, Cell::new_number(8.00));
+        grid
+    }
+
+    /// Helper to build an XLOOKUP expression from literal args.
+    fn xlookup_expr(args: Vec<Expression>) -> Expression {
+        Expression::FunctionCall {
+            func: BuiltinFunction::XLookup,
+            args,
+        }
+    }
+
+    #[test]
+    fn test_xlookup_exact_match_text() {
+        let grid = make_xlookup_grid();
+        let eval = Evaluator::new(&grid);
+
+        // =XLOOKUP("Cherry", A1:A5, B1:B5) -> 3.0
+        let expr = xlookup_expr(vec![
+            Expression::Literal(Value::String("Cherry".to_string())),
+            Expression::Range {
+                sheet: None,
+                start: Box::new(Expression::CellRef { sheet: None, col: "A".to_string(), row: 1 }),
+                end: Box::new(Expression::CellRef { sheet: None, col: "A".to_string(), row: 5 }),
+            },
+            Expression::Range {
+                sheet: None,
+                start: Box::new(Expression::CellRef { sheet: None, col: "B".to_string(), row: 1 }),
+                end: Box::new(Expression::CellRef { sheet: None, col: "B".to_string(), row: 5 }),
+            },
+        ]);
+        let result = eval.evaluate(&expr);
+        assert_eq!(result, EvalResult::Number(3.0));
+    }
+
+    #[test]
+    fn test_xlookup_exact_match_case_insensitive() {
+        let grid = make_xlookup_grid();
+        let eval = Evaluator::new(&grid);
+
+        // =XLOOKUP("banana", A1:A5, B1:B5) -> 0.75 (case insensitive)
+        let expr = xlookup_expr(vec![
+            Expression::Literal(Value::String("banana".to_string())),
+            Expression::Range {
+                sheet: None,
+                start: Box::new(Expression::CellRef { sheet: None, col: "A".to_string(), row: 1 }),
+                end: Box::new(Expression::CellRef { sheet: None, col: "A".to_string(), row: 5 }),
+            },
+            Expression::Range {
+                sheet: None,
+                start: Box::new(Expression::CellRef { sheet: None, col: "B".to_string(), row: 1 }),
+                end: Box::new(Expression::CellRef { sheet: None, col: "B".to_string(), row: 5 }),
+            },
+        ]);
+        let result = eval.evaluate(&expr);
+        assert_eq!(result, EvalResult::Number(0.75));
+    }
+
+    #[test]
+    fn test_xlookup_not_found_returns_na() {
+        let grid = make_xlookup_grid();
+        let eval = Evaluator::new(&grid);
+
+        // =XLOOKUP("Fig", A1:A5, B1:B5) -> #N/A
+        let expr = xlookup_expr(vec![
+            Expression::Literal(Value::String("Fig".to_string())),
+            Expression::Range {
+                sheet: None,
+                start: Box::new(Expression::CellRef { sheet: None, col: "A".to_string(), row: 1 }),
+                end: Box::new(Expression::CellRef { sheet: None, col: "A".to_string(), row: 5 }),
+            },
+            Expression::Range {
+                sheet: None,
+                start: Box::new(Expression::CellRef { sheet: None, col: "B".to_string(), row: 1 }),
+                end: Box::new(Expression::CellRef { sheet: None, col: "B".to_string(), row: 5 }),
+            },
+        ]);
+        let result = eval.evaluate(&expr);
+        assert_eq!(result, EvalResult::Error(CellError::NA));
+    }
+
+    #[test]
+    fn test_xlookup_if_not_found() {
+        let grid = make_xlookup_grid();
+        let eval = Evaluator::new(&grid);
+
+        // =XLOOKUP("Fig", A1:A5, B1:B5, "Not found") -> "Not found"
+        let expr = xlookup_expr(vec![
+            Expression::Literal(Value::String("Fig".to_string())),
+            Expression::Range {
+                sheet: None,
+                start: Box::new(Expression::CellRef { sheet: None, col: "A".to_string(), row: 1 }),
+                end: Box::new(Expression::CellRef { sheet: None, col: "A".to_string(), row: 5 }),
+            },
+            Expression::Range {
+                sheet: None,
+                start: Box::new(Expression::CellRef { sheet: None, col: "B".to_string(), row: 1 }),
+                end: Box::new(Expression::CellRef { sheet: None, col: "B".to_string(), row: 5 }),
+            },
+            Expression::Literal(Value::String("Not found".to_string())),
+        ]);
+        let result = eval.evaluate(&expr);
+        assert_eq!(result, EvalResult::Text("Not found".to_string()));
+    }
+
+    #[test]
+    fn test_xlookup_numeric_exact_match() {
+        // Grid with numeric lookup: C1=10,C2=20,C3=30 / D1="A",D2="B",D3="C"
+        let mut grid = Grid::new();
+        grid.set_cell(0, 2, Cell::new_number(10.0));
+        grid.set_cell(1, 2, Cell::new_number(20.0));
+        grid.set_cell(2, 2, Cell::new_number(30.0));
+        grid.set_cell(0, 3, Cell::new_text("A".to_string()));
+        grid.set_cell(1, 3, Cell::new_text("B".to_string()));
+        grid.set_cell(2, 3, Cell::new_text("C".to_string()));
+
+        let eval = Evaluator::new(&grid);
+
+        // =XLOOKUP(20, C1:C3, D1:D3) -> "B"
+        let expr = xlookup_expr(vec![
+            Expression::Literal(Value::Number(20.0)),
+            Expression::Range {
+                sheet: None,
+                start: Box::new(Expression::CellRef { sheet: None, col: "C".to_string(), row: 1 }),
+                end: Box::new(Expression::CellRef { sheet: None, col: "C".to_string(), row: 3 }),
+            },
+            Expression::Range {
+                sheet: None,
+                start: Box::new(Expression::CellRef { sheet: None, col: "D".to_string(), row: 1 }),
+                end: Box::new(Expression::CellRef { sheet: None, col: "D".to_string(), row: 3 }),
+            },
+        ]);
+        let result = eval.evaluate(&expr);
+        assert_eq!(result, EvalResult::Text("B".to_string()));
+    }
+
+    #[test]
+    fn test_xlookup_approx_smaller() {
+        // Sorted ascending: C1=10, C2=20, C3=30 / D1="Low", D2="Mid", D3="High"
+        let mut grid = Grid::new();
+        grid.set_cell(0, 2, Cell::new_number(10.0));
+        grid.set_cell(1, 2, Cell::new_number(20.0));
+        grid.set_cell(2, 2, Cell::new_number(30.0));
+        grid.set_cell(0, 3, Cell::new_text("Low".to_string()));
+        grid.set_cell(1, 3, Cell::new_text("Mid".to_string()));
+        grid.set_cell(2, 3, Cell::new_text("High".to_string()));
+
+        let eval = Evaluator::new(&grid);
+
+        // =XLOOKUP(25, C1:C3, D1:D3, , -1) -> "Mid" (25 not found, next smaller is 20)
+        let expr = xlookup_expr(vec![
+            Expression::Literal(Value::Number(25.0)),
+            Expression::Range {
+                sheet: None,
+                start: Box::new(Expression::CellRef { sheet: None, col: "C".to_string(), row: 1 }),
+                end: Box::new(Expression::CellRef { sheet: None, col: "C".to_string(), row: 3 }),
+            },
+            Expression::Range {
+                sheet: None,
+                start: Box::new(Expression::CellRef { sheet: None, col: "D".to_string(), row: 1 }),
+                end: Box::new(Expression::CellRef { sheet: None, col: "D".to_string(), row: 3 }),
+            },
+            Expression::Literal(Value::String("N/A".to_string())),
+            Expression::Literal(Value::Number(-1.0)),
+        ]);
+        let result = eval.evaluate(&expr);
+        assert_eq!(result, EvalResult::Text("Mid".to_string()));
+    }
+
+    #[test]
+    fn test_xlookup_approx_larger() {
+        // Sorted ascending: C1=10, C2=20, C3=30 / D1="Low", D2="Mid", D3="High"
+        let mut grid = Grid::new();
+        grid.set_cell(0, 2, Cell::new_number(10.0));
+        grid.set_cell(1, 2, Cell::new_number(20.0));
+        grid.set_cell(2, 2, Cell::new_number(30.0));
+        grid.set_cell(0, 3, Cell::new_text("Low".to_string()));
+        grid.set_cell(1, 3, Cell::new_text("Mid".to_string()));
+        grid.set_cell(2, 3, Cell::new_text("High".to_string()));
+
+        let eval = Evaluator::new(&grid);
+
+        // =XLOOKUP(25, C1:C3, D1:D3, , 1) -> "High" (25 not found, next larger is 30)
+        let expr = xlookup_expr(vec![
+            Expression::Literal(Value::Number(25.0)),
+            Expression::Range {
+                sheet: None,
+                start: Box::new(Expression::CellRef { sheet: None, col: "C".to_string(), row: 1 }),
+                end: Box::new(Expression::CellRef { sheet: None, col: "C".to_string(), row: 3 }),
+            },
+            Expression::Range {
+                sheet: None,
+                start: Box::new(Expression::CellRef { sheet: None, col: "D".to_string(), row: 1 }),
+                end: Box::new(Expression::CellRef { sheet: None, col: "D".to_string(), row: 3 }),
+            },
+            Expression::Literal(Value::String("N/A".to_string())),
+            Expression::Literal(Value::Number(1.0)),
+        ]);
+        let result = eval.evaluate(&expr);
+        assert_eq!(result, EvalResult::Text("High".to_string()));
+    }
+
+    #[test]
+    fn test_xlookup_wildcard() {
+        let grid = make_xlookup_grid();
+        let eval = Evaluator::new(&grid);
+
+        // =XLOOKUP("Ch*", A1:A5, B1:B5, , 2) -> 3.0 (wildcard matches "Cherry")
+        let expr = xlookup_expr(vec![
+            Expression::Literal(Value::String("Ch*".to_string())),
+            Expression::Range {
+                sheet: None,
+                start: Box::new(Expression::CellRef { sheet: None, col: "A".to_string(), row: 1 }),
+                end: Box::new(Expression::CellRef { sheet: None, col: "A".to_string(), row: 5 }),
+            },
+            Expression::Range {
+                sheet: None,
+                start: Box::new(Expression::CellRef { sheet: None, col: "B".to_string(), row: 1 }),
+                end: Box::new(Expression::CellRef { sheet: None, col: "B".to_string(), row: 5 }),
+            },
+            Expression::Literal(Value::String("N/A".to_string())),
+            Expression::Literal(Value::Number(2.0)),
+        ]);
+        let result = eval.evaluate(&expr);
+        assert_eq!(result, EvalResult::Number(3.0));
+    }
+
+    #[test]
+    fn test_xlookup_wildcard_question_mark() {
+        let grid = make_xlookup_grid();
+        let eval = Evaluator::new(&grid);
+
+        // =XLOOKUP("Da?e", A1:A5, B1:B5, , 2) -> 5.0 (? matches single char, "Date")
+        let expr = xlookup_expr(vec![
+            Expression::Literal(Value::String("Da?e".to_string())),
+            Expression::Range {
+                sheet: None,
+                start: Box::new(Expression::CellRef { sheet: None, col: "A".to_string(), row: 1 }),
+                end: Box::new(Expression::CellRef { sheet: None, col: "A".to_string(), row: 5 }),
+            },
+            Expression::Range {
+                sheet: None,
+                start: Box::new(Expression::CellRef { sheet: None, col: "B".to_string(), row: 1 }),
+                end: Box::new(Expression::CellRef { sheet: None, col: "B".to_string(), row: 5 }),
+            },
+            Expression::Literal(Value::String("N/A".to_string())),
+            Expression::Literal(Value::Number(2.0)),
+        ]);
+        let result = eval.evaluate(&expr);
+        assert_eq!(result, EvalResult::Number(5.0));
+    }
+
+    #[test]
+    fn test_xlookup_reverse_search() {
+        // Grid with duplicate lookup values: A1="X",A2="Y",A3="X" / B1=1,B2=2,B3=3
+        let mut grid = Grid::new();
+        grid.set_cell(0, 0, Cell::new_text("X".to_string()));
+        grid.set_cell(1, 0, Cell::new_text("Y".to_string()));
+        grid.set_cell(2, 0, Cell::new_text("X".to_string()));
+        grid.set_cell(0, 1, Cell::new_number(1.0));
+        grid.set_cell(1, 1, Cell::new_number(2.0));
+        grid.set_cell(2, 1, Cell::new_number(3.0));
+
+        let eval = Evaluator::new(&grid);
+
+        // =XLOOKUP("X", A1:A3, B1:B3, , 0, -1) -> 3.0 (reverse search finds last "X")
+        let expr = xlookup_expr(vec![
+            Expression::Literal(Value::String("X".to_string())),
+            Expression::Range {
+                sheet: None,
+                start: Box::new(Expression::CellRef { sheet: None, col: "A".to_string(), row: 1 }),
+                end: Box::new(Expression::CellRef { sheet: None, col: "A".to_string(), row: 3 }),
+            },
+            Expression::Range {
+                sheet: None,
+                start: Box::new(Expression::CellRef { sheet: None, col: "B".to_string(), row: 1 }),
+                end: Box::new(Expression::CellRef { sheet: None, col: "B".to_string(), row: 3 }),
+            },
+            Expression::Literal(Value::String("N/A".to_string())),
+            Expression::Literal(Value::Number(0.0)),
+            Expression::Literal(Value::Number(-1.0)),
+        ]);
+        let result = eval.evaluate(&expr);
+        assert_eq!(result, EvalResult::Number(3.0));
+    }
+
+    #[test]
+    fn test_xlookup_too_few_args() {
+        let grid = Grid::new();
+        let eval = Evaluator::new(&grid);
+
+        // =XLOOKUP("X", A1:A3) -> #VALUE! (too few args)
+        let expr = xlookup_expr(vec![
+            Expression::Literal(Value::String("X".to_string())),
+            Expression::Range {
+                sheet: None,
+                start: Box::new(Expression::CellRef { sheet: None, col: "A".to_string(), row: 1 }),
+                end: Box::new(Expression::CellRef { sheet: None, col: "A".to_string(), row: 3 }),
+            },
+        ]);
+        let result = eval.evaluate(&expr);
+        assert_eq!(result, EvalResult::Error(CellError::Value));
     }
 }

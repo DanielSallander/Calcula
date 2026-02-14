@@ -22,7 +22,15 @@ import {
   clearRange,
   undo as undoApi,
   redo as redoApi,
+  applyFormatting,
+  getStyle,
+  updateCell,
+  updateCellsBatch,
+  beginUndoTransaction,
+  commitUndoTransaction,
+  type CellUpdateInput,
 } from "../../lib/tauri-api";
+import type { FormattingOptions } from "../../types";
 import { checkCellClickInterceptors } from "../../lib/cellClickInterceptors";
 import { setColumnWidth, setRowHeight } from "../../state/gridActions";
 import { cellEvents } from "../../lib/cellEvents";
@@ -86,6 +94,10 @@ export function useSpreadsheetSelection({
     updateRefDrag,
     completeRefDrag,
     cancelRefDrag,
+    startRefResize,
+    updateRefResize,
+    completeRefResize,
+    cancelRefResize,
   } = useEditing();
 
   // Clipboard hook
@@ -336,6 +348,7 @@ export function useSpreadsheetSelection({
     isFormulaDragging,
     isResizing,
     isRefDragging,
+    isRefResizing,
     isSelectionDragging,
     selectionDragPreview,
     cursorStyle,
@@ -378,6 +391,10 @@ export function useSpreadsheetSelection({
     onUpdateRefDrag: updateRefDrag,
     onCompleteRefDrag: completeRefDrag,
     onCancelRefDrag: cancelRefDrag,
+    onStartRefResize: startRefResize,
+    onUpdateRefResize: updateRefResize,
+    onCompleteRefResize: completeRefResize,
+    onCancelRefResize: cancelRefResize,
     onMoveCells: moveCells,
     onMoveRows: moveRows,
     onMoveColumns: moveColumns,
@@ -482,6 +499,264 @@ export function useSpreadsheetSelection({
     };
   }, [fillState.isDragging, containerRef, updateFillDrag, completeFill]);
 
+  // -------------------------------------------------------------------------
+  // Command handler for formatting, fill, and data entry shortcuts
+  // -------------------------------------------------------------------------
+
+  /**
+   * Helper: Get rows and cols arrays from the current selection.
+   */
+  const getSelectionRowsCols = useCallback((): { rows: number[]; cols: number[] } | null => {
+    if (!selection) return null;
+    const minRow = Math.min(selection.startRow, selection.endRow);
+    const maxRow = Math.max(selection.startRow, selection.endRow);
+    const minCol = Math.min(selection.startCol, selection.endCol);
+    const maxCol = Math.max(selection.startCol, selection.endCol);
+
+    const rows: number[] = [];
+    const cols: number[] = [];
+    for (let r = minRow; r <= maxRow; r++) rows.push(r);
+    for (let c = minCol; c <= maxCol; c++) cols.push(c);
+    return { rows, cols };
+  }, [selection]);
+
+  /**
+   * Helper: Apply formatting to the current selection and refresh canvas.
+   */
+  const applyFormattingToSelection = useCallback(async (formatting: FormattingOptions) => {
+    const rc = getSelectionRowsCols();
+    if (!rc) return;
+
+    try {
+      await applyFormatting(rc.rows, rc.cols, formatting);
+
+      // Refresh canvas to show updated styles
+      const canvas = canvasRef.current;
+      if (canvas) {
+        await canvas.refreshCells();
+        canvas.redraw();
+      }
+    } catch (error) {
+      console.error("[useSpreadsheetSelection] applyFormatting failed:", error);
+    }
+  }, [getSelectionRowsCols, canvasRef]);
+
+  /**
+   * Helper: Toggle a boolean formatting property (bold, italic, underline, strikethrough).
+   * Reads the active cell's current style to determine the toggle direction.
+   * If the active cell has the property ON, turns it OFF for the entire selection (and vice versa).
+   */
+  const toggleFormatProperty = useCallback(async (property: "bold" | "italic" | "underline" | "strikethrough") => {
+    if (!selection) return;
+
+    try {
+      // Read the active cell's style to determine current state
+      const activeCell = await getCell(selection.startRow, selection.startCol);
+      const styleIndex = activeCell?.styleIndex ?? 0;
+      const style = await getStyle(styleIndex);
+
+      // Determine new value: toggle the current state
+      const currentValue = style[property] as boolean;
+      const newValue = !currentValue;
+
+      const formatting: FormattingOptions = {};
+      formatting[property] = newValue;
+
+      await applyFormattingToSelection(formatting);
+    } catch (error) {
+      console.error(`[useSpreadsheetSelection] toggleFormatProperty(${property}) failed:`, error);
+    }
+  }, [selection, applyFormattingToSelection]);
+
+  /**
+   * Handle Ctrl+D - Fill Down.
+   * Copies the contents and format of the topmost cell in the selection to cells below.
+   */
+  const handleFillDown = useCallback(async () => {
+    if (!selection) return;
+
+    const minRow = Math.min(selection.startRow, selection.endRow);
+    const maxRow = Math.max(selection.startRow, selection.endRow);
+    const minCol = Math.min(selection.startCol, selection.endCol);
+    const maxCol = Math.max(selection.startCol, selection.endCol);
+
+    // Need at least 2 rows selected
+    if (maxRow <= minRow) return;
+
+    try {
+      await beginUndoTransaction("Fill Down");
+
+      const updates: CellUpdateInput[] = [];
+
+      for (let col = minCol; col <= maxCol; col++) {
+        // Read the top cell's content (formula or display value)
+        const sourceCell = await getCell(minRow, col);
+        const sourceValue = sourceCell?.formula || sourceCell?.display || "";
+
+        // Fill down to all rows below
+        for (let row = minRow + 1; row <= maxRow; row++) {
+          updates.push({ row, col, value: sourceValue });
+        }
+      }
+
+      if (updates.length > 0) {
+        const updatedCells = await updateCellsBatch(updates);
+        await commitUndoTransaction();
+
+        // Also copy formatting from source row
+        for (let col = minCol; col <= maxCol; col++) {
+          const sourceCell = await getCell(minRow, col);
+          if (sourceCell && sourceCell.styleIndex > 0) {
+            const sourceStyle = await getStyle(sourceCell.styleIndex);
+            const targetRows: number[] = [];
+            for (let row = minRow + 1; row <= maxRow; row++) {
+              targetRows.push(row);
+            }
+            // Apply the source cell's formatting to target cells
+            await applyFormatting(targetRows, [col], {
+              bold: sourceStyle.bold,
+              italic: sourceStyle.italic,
+              underline: sourceStyle.underline,
+              strikethrough: sourceStyle.strikethrough,
+              numberFormat: sourceStyle.numberFormat !== "General" ? sourceStyle.numberFormat : undefined,
+            });
+          }
+        }
+
+        // Emit event to trigger canvas refresh
+        if (updatedCells.length > 0) {
+          cellEvents.emit({
+            row: updatedCells[0].row,
+            col: updatedCells[0].col,
+            oldValue: undefined,
+            newValue: updatedCells[0].display,
+            formula: updatedCells[0].formula ?? null,
+          });
+        }
+      } else {
+        await commitUndoTransaction();
+      }
+    } catch (error) {
+      console.error("[useSpreadsheetSelection] Fill Down failed:", error);
+    }
+  }, [selection]);
+
+  /**
+   * Handle inserting current date into the active cell.
+   */
+  const handleInsertDate = useCallback(async () => {
+    if (!selection) return;
+
+    const now = new Date();
+    const month = now.getMonth() + 1;
+    const day = now.getDate();
+    const year = now.getFullYear();
+    const dateStr = `${month}/${day}/${year}`;
+
+    try {
+      await updateCell(selection.startRow, selection.startCol, dateStr);
+
+      cellEvents.emit({
+        row: selection.startRow,
+        col: selection.startCol,
+        oldValue: undefined,
+        newValue: dateStr,
+        formula: null,
+      });
+    } catch (error) {
+      console.error("[useSpreadsheetSelection] Insert date failed:", error);
+    }
+  }, [selection]);
+
+  /**
+   * Handle inserting current time into the active cell.
+   */
+  const handleInsertTime = useCallback(async () => {
+    if (!selection) return;
+
+    const now = new Date();
+    let hours = now.getHours();
+    const minutes = now.getMinutes();
+    const ampm = hours >= 12 ? "PM" : "AM";
+    hours = hours % 12 || 12;
+    const timeStr = `${hours}:${minutes.toString().padStart(2, "0")} ${ampm}`;
+
+    try {
+      await updateCell(selection.startRow, selection.startCol, timeStr);
+
+      cellEvents.emit({
+        row: selection.startRow,
+        col: selection.startCol,
+        oldValue: undefined,
+        newValue: timeStr,
+        formula: null,
+      });
+    } catch (error) {
+      console.error("[useSpreadsheetSelection] Insert time failed:", error);
+    }
+  }, [selection]);
+
+  /**
+   * Central command handler for keyboard shortcuts.
+   * Dispatches formatting, fill, and data entry commands.
+   */
+  const handleCommand = useCallback(async (command: string) => {
+    switch (command) {
+      // Font style toggles
+      case 'format.toggleBold':
+        await toggleFormatProperty('bold');
+        break;
+      case 'format.toggleItalic':
+        await toggleFormatProperty('italic');
+        break;
+      case 'format.toggleUnderline':
+        await toggleFormatProperty('underline');
+        break;
+      case 'format.toggleStrikethrough':
+        await toggleFormatProperty('strikethrough');
+        break;
+
+      // Number format shortcuts
+      case 'format.numberGeneral':
+        await applyFormattingToSelection({ numberFormat: 'general' });
+        break;
+      case 'format.numberCurrency':
+        await applyFormattingToSelection({ numberFormat: 'currency_usd' });
+        break;
+      case 'format.numberPercentage':
+        await applyFormattingToSelection({ numberFormat: 'percentage' });
+        break;
+      case 'format.numberScientific':
+        await applyFormattingToSelection({ numberFormat: 'scientific' });
+        break;
+      case 'format.numberDate':
+        await applyFormattingToSelection({ numberFormat: 'date_us' });
+        break;
+      case 'format.numberTime':
+        await applyFormattingToSelection({ numberFormat: 'time_12h' });
+        break;
+      case 'format.numberNumber':
+        await applyFormattingToSelection({ numberFormat: 'number_sep' });
+        break;
+
+      // Data entry
+      case 'edit.insertDate':
+        await handleInsertDate();
+        break;
+      case 'edit.insertTime':
+        await handleInsertTime();
+        break;
+
+      // Fill
+      case 'edit.fillDown':
+        await handleFillDown();
+        break;
+
+      default:
+        console.warn(`[useSpreadsheetSelection] Unknown command: ${command}`);
+    }
+  }, [toggleFormatProperty, applyFormattingToSelection, handleInsertDate, handleInsertTime, handleFillDown]);
+
   // Keyboard handling with clipboard shortcuts, ESC to clear clipboard, DELETE to clear contents, and undo/redo
   // FIX: Use focusContainerRef instead of containerRef for keyboard events
   // The focusContainerRef points to the focusable outer container that receives keyboard events
@@ -499,6 +774,9 @@ export function useSpreadsheetSelection({
     onClearClipboard: clearClipboardState,
     hasClipboardContent: clipboardMode !== "none",
     onDelete: handleDeleteContents,
+    onSelectColumn: selectColumn,
+    onSelectRow: selectRow,
+    onCommand: handleCommand,
   });
 
   /**
@@ -539,6 +817,7 @@ export function useSpreadsheetSelection({
       isFormulaDragging,
       isResizing,
       isRefDragging,
+      isRefResizing,
       isSelectionDragging,
       isFillDragging: fillState.isDragging,
     },

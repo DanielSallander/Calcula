@@ -273,6 +273,7 @@ export async function applyFormatting(
       bold: formatting.bold,
       italic: formatting.italic,
       underline: formatting.underline,
+      strikethrough: formatting.strikethrough,
       textColor: formatting.textColor,
       backgroundColor: formatting.backgroundColor,
       textAlign: formatting.textAlign,

@@ -75,6 +75,7 @@ pub struct FormattingParams {
     pub bold: Option<bool>,
     pub italic: Option<bool>,
     pub underline: Option<bool>,
+    pub strikethrough: Option<bool>,
     pub font_size: Option<u8>,
     pub font_family: Option<String>,
     pub text_color: Option<String>,

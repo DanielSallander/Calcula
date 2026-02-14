@@ -404,6 +404,17 @@ export function getRowFromHeader(
 const REFERENCE_BORDER_THRESHOLD = 5;
 
 /**
+ * Size of the corner resize handle hit area (pixels).
+ * The visual handle is 7x7; the hit area is slightly larger for easier targeting.
+ */
+const REFERENCE_CORNER_HIT_SIZE = 9;
+
+/**
+ * Which corner of a reference was hit.
+ */
+export type ReferenceCorner = "topLeft" | "topRight" | "bottomLeft" | "bottomRight";
+
+/**
  * Result from getFormulaReferenceBorderAtPixel.
  */
 export interface ReferenceBorderHit {
@@ -494,6 +505,109 @@ export function getFormulaReferenceBorderAtPixel(
 
     if (isNearLeftBorder || isNearRightBorder || isNearTopBorder || isNearBottomBorder) {
       return { refIndex: i, reference: ref };
+    }
+  }
+
+  return null;
+}
+
+/**
+ * Result from getFormulaReferenceCornerAtPixel.
+ */
+export interface ReferenceCornerHit {
+  /** Index of the reference in the array */
+  refIndex: number;
+  /** The reference that was hit */
+  reference: FormulaReference;
+  /** Which corner was hit */
+  corner: ReferenceCorner;
+}
+
+/**
+ * Check if a pixel position is on a corner handle of a formula reference.
+ * Returns the reference info and corner if on a handle, null otherwise.
+ * This is used for the reference resize feature - users can drag corner
+ * handles to resize a reference range.
+ *
+ * Corner hits have HIGHER priority than border hits, so this should be
+ * checked before getFormulaReferenceBorderAtPixel.
+ */
+export function getFormulaReferenceCornerAtPixel(
+  pixelX: number,
+  pixelY: number,
+  config: GridConfig,
+  viewport: Viewport,
+  formulaReferences: FormulaReference[],
+  dimensions?: DimensionOverrides,
+  currentSheetName?: string,
+  formulaSourceSheetName?: string
+): ReferenceCornerHit | null {
+  if (!formulaReferences || formulaReferences.length === 0) {
+    return null;
+  }
+
+  const rowHeaderWidth = config.rowHeaderWidth || 50;
+  const colHeaderHeight = config.colHeaderHeight || 24;
+
+  // Skip if click is on headers
+  if (pixelX < rowHeaderWidth || pixelY < colHeaderHeight) {
+    return null;
+  }
+
+  const dims = ensureDimensions(dimensions);
+  const range = calculateVisibleRange(viewport, config, pixelX + 100, pixelY + 100, dims);
+  const hitHalf = Math.floor(REFERENCE_CORNER_HIT_SIZE / 2);
+
+  for (let i = 0; i < formulaReferences.length; i++) {
+    const ref = formulaReferences[i];
+
+    // Check if reference belongs to current sheet
+    if (!shouldDrawReferenceOnSheet(ref.sheetName, currentSheetName, formulaSourceSheetName)) {
+      continue;
+    }
+
+    // Skip passive references
+    if (ref.isPassive) {
+      continue;
+    }
+
+    // Skip full column/row references (resize doesn't apply)
+    if (ref.isFullColumn || ref.isFullRow) {
+      continue;
+    }
+
+    // Normalize bounds
+    const minRow = Math.min(ref.startRow, ref.endRow);
+    const maxRow = Math.max(ref.startRow, ref.endRow);
+    const minCol = Math.min(ref.startCol, ref.endCol);
+    const maxCol = Math.max(ref.startCol, ref.endCol);
+
+    // Calculate rectangle in viewport coordinates
+    const x1 = getColumnX(minCol, config, dims, range.startCol, range.offsetX);
+    const y1 = getRowY(minRow, config, dims, range.startRow, range.offsetY);
+
+    let x2 = x1;
+    for (let c = minCol; c <= maxCol; c++) {
+      x2 += getColumnWidth(c, config, dims);
+    }
+
+    let y2 = y1;
+    for (let r = minRow; r <= maxRow; r++) {
+      y2 += getRowHeight(r, config, dims);
+    }
+
+    // Check each corner using the reference rectangle corners
+    if (Math.abs(pixelX - x1) <= hitHalf && Math.abs(pixelY - y1) <= hitHalf) {
+      return { refIndex: i, reference: ref, corner: "topLeft" };
+    }
+    if (Math.abs(pixelX - x2) <= hitHalf && Math.abs(pixelY - y1) <= hitHalf) {
+      return { refIndex: i, reference: ref, corner: "topRight" };
+    }
+    if (Math.abs(pixelX - x1) <= hitHalf && Math.abs(pixelY - y2) <= hitHalf) {
+      return { refIndex: i, reference: ref, corner: "bottomLeft" };
+    }
+    if (Math.abs(pixelX - x2) <= hitHalf && Math.abs(pixelY - y2) <= hitHalf) {
+      return { refIndex: i, reference: ref, corner: "bottomRight" };
     }
   }
 
