@@ -6,6 +6,7 @@
 import { useState, useEffect, useSyncExternalStore, useCallback } from "react";
 import { ExtensionManager, type LoadedExtension } from "../registries/ExtensionManager";
 import { bootstrapShell } from "../bootstrap";
+import { loadExtensions } from "../../../extensions";
 
 // ============================================================================
 // useExtensions Hook
@@ -72,7 +73,11 @@ export function useExtensionInitializer(): {
         // This registers all Shell implementations with the API layer
         bootstrapShell();
 
-        // Now initialize extensions (they can safely use the API)
+        // Load feature extensions (pivot, etc.) AFTER bootstrap so that
+        // services (DialogExtensions, TaskPaneExtensions, etc.) are available
+        loadExtensions();
+
+        // Now initialize managed extensions (StandardMenus, FindReplace, etc.)
         await ExtensionManager.initialize();
         
         if (mounted) {

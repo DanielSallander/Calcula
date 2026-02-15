@@ -1,35 +1,13 @@
 //! FILENAME: app/extensions/BuiltIn/StandardMenus/InsertMenu.ts
-import { useCallback, useState } from 'react';
+import { useCallback } from 'react';
 import type { MenuDefinition } from '../../../src/api/ui';
-import { restoreFocusToGrid } from '../../../src/api/events';
+import { showDialog } from '../../../src/api/ui';
 
-export interface InsertMenuHandlers {
-  handleInsertPivotTable: () => void;
-  handlePivotDialogClose: () => void;
-  handlePivotCreated: (pivotId: number) => void;
-}
+const PIVOT_DIALOG_ID = 'pivot:createDialog';
 
-export function useInsertMenu(): { menu: MenuDefinition; handlers: InsertMenuHandlers; isPivotDialogOpen: boolean } {
-  const [isPivotDialogOpen, setIsPivotDialogOpen] = useState(false);
-
+export function useInsertMenu(): { menu: MenuDefinition } {
   const handleInsertPivotTable = useCallback(() => {
-    console.log('[InsertMenu] handleInsertPivotTable called');
-    setIsPivotDialogOpen(true);
-  }, []);
-
-  const handlePivotDialogClose = useCallback(() => {
-    setIsPivotDialogOpen(false);
-    restoreFocusToGrid();
-  }, []);
-
-  const handlePivotCreated = useCallback((pivotId: number) => {
-    console.log('[InsertMenu] Pivot table created with ID:', pivotId);
-    setIsPivotDialogOpen(false);
-
-    // Emit event for Layout to show the PivotEditor sidebar
-    window.dispatchEvent(new CustomEvent('pivot:created', {
-      detail: { pivotId }
-    }));
+    showDialog(PIVOT_DIALOG_ID);
   }, []);
 
   const menu: MenuDefinition = {
@@ -41,13 +19,5 @@ export function useInsertMenu(): { menu: MenuDefinition; handlers: InsertMenuHan
     ],
   };
 
-  return {
-    menu,
-    handlers: {
-      handleInsertPivotTable,
-      handlePivotDialogClose,
-      handlePivotCreated,
-    },
-    isPivotDialogOpen,
-  };
+  return { menu };
 }

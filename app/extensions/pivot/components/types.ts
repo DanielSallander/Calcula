@@ -42,41 +42,41 @@ export type ValuesPosition = 'columns' | 'rows';
 
 // Field configuration matching PivotFieldConfig in pivot_commands.rs
 export interface PivotFieldConfig {
-  source_index: FieldIndex;
+  sourceIndex: FieldIndex;
   name: string;
-  sort_order?: SortOrder;
-  show_subtotals?: boolean;
+  sortOrder?: SortOrder;
+  showSubtotals?: boolean;
   collapsed?: boolean;
-  hidden_items?: string[];
+  hiddenItems?: string[];
 }
 
 // Value field configuration matching ValueFieldConfig in pivot_commands.rs
 export interface ValueFieldConfig {
-  source_index: FieldIndex;
+  sourceIndex: FieldIndex;
   name: string;
-  aggregation: AggregationType;  // Changed from 'string' to 'AggregationType'
-  number_format?: string;
-  show_values_as?: ShowValuesAs;
+  aggregation: AggregationType;
+  numberFormat?: string;
+  showValuesAs?: ShowValuesAs;
 }
 
 // Layout configuration matching LayoutConfig in pivot_commands.rs
 export interface LayoutConfig {
-  show_row_grand_totals?: boolean;
-  show_column_grand_totals?: boolean;
-  report_layout?: ReportLayout;
-  repeat_row_labels?: boolean;
-  show_empty_rows?: boolean;
-  show_empty_cols?: boolean;
-  values_position?: ValuesPosition;
+  showRowGrandTotals?: boolean;
+  showColumnGrandTotals?: boolean;
+  reportLayout?: ReportLayout;
+  repeatRowLabels?: boolean;
+  showEmptyRows?: boolean;
+  showEmptyCols?: boolean;
+  valuesPosition?: ValuesPosition;
 }
 
 // Update request matching UpdatePivotFieldsRequest in pivot_commands.rs
 export interface UpdatePivotFieldsRequest {
-  pivot_id: PivotId;
-  row_fields?: PivotFieldConfig[];
-  column_fields?: PivotFieldConfig[];
-  value_fields?: ValueFieldConfig[];
-  filter_fields?: PivotFieldConfig[];
+  pivotId: PivotId;
+  rowFields?: PivotFieldConfig[];
+  columnFields?: PivotFieldConfig[];
+  valueFields?: ValueFieldConfig[];
+  filterFields?: PivotFieldConfig[];
   layout?: LayoutConfig;
 }
 

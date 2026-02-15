@@ -18,6 +18,7 @@ export {
 
   // Navigation
   findCtrlArrowTarget,
+  detectDataRegion,
   indexToCol,
   colToIndex,
 

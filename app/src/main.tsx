@@ -6,11 +6,10 @@
 import React from "react";
 import ReactDOM from "react-dom/client";
 import { App } from "./shell";
-import { loadExtensions } from "../extensions";
 import "./index.css";
 
-// Load feature extensions (pivot, etc.)
-loadExtensions();
+// NOTE: Feature extensions (pivot, etc.) are loaded in useExtensionInitializer
+// AFTER bootstrapShell() so that services (DialogExtensions, etc.) are available.
 
 // Render the application
 ReactDOM.createRoot(document.getElementById("root")!).render(

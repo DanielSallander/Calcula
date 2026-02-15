@@ -983,6 +983,7 @@ pub fn run() {
             commands::has_content_in_range,
             // Navigation commands
             commands::find_ctrl_arrow_target,
+            commands::detect_data_region,
             // Dimension commands
             commands::set_column_width,
             commands::get_column_width,

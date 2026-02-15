@@ -418,7 +418,7 @@ function drawPivotCell(
   };
 
   // Draw background
-  const bgColor = getPivotBackgroundColor(cell.background_style, theme, rowIndex);
+  const bgColor = getPivotBackgroundColor(cell.backgroundStyle, theme, rowIndex);
   ctx.fillStyle = bgColor;
   ctx.fillRect(x, y, width, height);
 
@@ -428,8 +428,8 @@ function drawPivotCell(
   ctx.strokeRect(x + 0.5, y + 0.5, width - 1, height - 1);
 
   // Handle FilterLabel - bold, right-aligned text
-  if (cell.cell_type === 'FilterLabel') {
-    const displayText = cell.formatted_value || getCellDisplayValue(cell.value) || '';
+  if (cell.cellType === 'FilterLabel') {
+    const displayText = cell.formattedValue || getCellDisplayValue(cell.value) || '';
     if (displayText) {
       ctx.fillStyle = theme.filterText;
       ctx.font = `600 ${theme.fontSize}px ${theme.fontFamily}`;
@@ -445,9 +445,9 @@ function drawPivotCell(
   }
 
   // Handle FilterDropdown specially
-  if (cell.cell_type === 'FilterDropdown') {
+  if (cell.cellType === 'FilterDropdown') {
     const buttonY = y + Math.floor((height - FILTER_BUTTON_HEIGHT) / 2);
-    const displayText = cell.formatted_value || getCellDisplayValue(cell.value) || '(All)';
+    const displayText = cell.formattedValue || getCellDisplayValue(cell.value) || '(All)';
     const buttonResult = drawFilterDropdownButton(
       ctx,
       x + CELL_PADDING_X,
@@ -463,7 +463,7 @@ function drawPivotCell(
       ...buttonResult.buttonBounds,
       x: x + CELL_PADDING_X,
       y: buttonY,
-      fieldIndex: cell.filter_field_index ?? -1,
+      fieldIndex: cell.filterFieldIndex ?? -1,
       row: rowIndex,
       col: colIndex,
     };
@@ -476,17 +476,17 @@ function drawPivotCell(
   let textMaxWidth = width - CELL_PADDING_X * 2;
 
   // Handle expand/collapse icon for row headers
-  if (cell.cell_type === 'RowHeader' && cell.is_expandable) {
-    const iconX = x + CELL_PADDING_X + (cell.indent_level || 0) * 16;
+  if (cell.cellType === 'RowHeader' && cell.isExpandable) {
+    const iconX = x + CELL_PADDING_X + (cell.indentLevel || 0) * 16;
     const iconY = y + (height - EXPAND_ICON_SIZE) / 2;
 
-    // is_collapsed means currently collapsed (show + icon)
-    // !is_collapsed means currently expanded (show - icon)
+    // isCollapsed means currently collapsed (show + icon)
+    // !isCollapsed means currently expanded (show - icon)
     drawExpandCollapseIcon(
       ctx,
       iconX,
       iconY,
-      cell.is_collapsed,
+      cell.isCollapsed,
       theme,
       options.isHoveredIcon || false
     );
@@ -498,23 +498,23 @@ function drawPivotCell(
       height: EXPAND_ICON_SIZE,
       row: rowIndex,
       col: colIndex,
-      isExpanded: !cell.is_collapsed,
+      isExpanded: !cell.isCollapsed,
     };
 
     textX = iconX + EXPAND_ICON_SIZE + EXPAND_ICON_PADDING;
     textMaxWidth = width - (textX - x) - CELL_PADDING_X;
-  } else if (cell.indent_level && cell.indent_level > 0) {
+  } else if (cell.indentLevel && cell.indentLevel > 0) {
     // Apply indentation without icon
-    textX += cell.indent_level * 16;
-    textMaxWidth -= cell.indent_level * 16;
+    textX += cell.indentLevel * 16;
+    textMaxWidth -= cell.indentLevel * 16;
   }
 
   // Draw text
-  const displayText = cell.formatted_value || getCellDisplayValue(cell.value);
+  const displayText = cell.formattedValue || getCellDisplayValue(cell.value);
   if (displayText) {
-    const textColor = getPivotTextColor(cell.cell_type, cell.background_style, theme);
-    const fontWeight = getFontWeight(cell.cell_type, cell.background_style);
-    const textAlign = getTextAlign(cell.cell_type);
+    const textColor = getPivotTextColor(cell.cellType, cell.backgroundStyle, theme);
+    const fontWeight = getFontWeight(cell.cellType, cell.backgroundStyle);
+    const textAlign = getTextAlign(cell.cellType);
 
     ctx.fillStyle = textColor;
     ctx.font = `${fontWeight} ${theme.fontSize}px ${theme.fontFamily}`;
@@ -619,8 +619,8 @@ export function renderPivotView(
     }
 
     const cellKey = `${rowIndex}-${colIndex}`;
-    const isHoveredFilter = cell.filter_field_index !== undefined &&
-      cell.filter_field_index === hoveredFilterFieldIndex;
+    const isHoveredFilter = cell.filterFieldIndex !== undefined &&
+      cell.filterFieldIndex === hoveredFilterFieldIndex;
     const isHoveredIcon = hoveredIconKey === cellKey;
 
     const cellResult = drawPivotCell(
@@ -645,7 +645,7 @@ export function renderPivotView(
     }
 
     if (cellResult.filterButtonBounds) {
-      const filterKey = `filter-${cell.filter_field_index}`;
+      const filterKey = `filter-${cell.filterFieldIndex}`;
       interactiveBounds.filterButtons.set(filterKey, cellResult.filterButtonBounds);
     }
   };
@@ -734,23 +734,23 @@ export function measurePivotColumnWidth(
   for (const row of pivotView.rows) {
     if (colIndex < row.cells.length) {
       const cell = row.cells[colIndex];
-      const displayText = cell.formatted_value || getCellDisplayValue(cell.value);
+      const displayText = cell.formattedValue || getCellDisplayValue(cell.value);
       if (displayText) {
         const textWidth = ctx.measureText(displayText).width;
         let totalWidth = textWidth + CELL_PADDING_X * 2;
 
         // Account for indentation
-        if (cell.indent_level) {
-          totalWidth += cell.indent_level * 16;
+        if (cell.indentLevel) {
+          totalWidth += cell.indentLevel * 16;
         }
 
         // Account for expand/collapse icon
-        if (cell.is_expandable) {
+        if (cell.isExpandable) {
           totalWidth += EXPAND_ICON_SIZE + EXPAND_ICON_PADDING;
         }
 
         // Account for filter label - ensure bold font is measured correctly
-        if (cell.cell_type === 'FilterLabel') {
+        if (cell.cellType === 'FilterLabel') {
           ctx.font = `600 ${theme.fontSize}px ${theme.fontFamily}`;
           const filterTextWidth = ctx.measureText(displayText).width;
           totalWidth = filterTextWidth + CELL_PADDING_X * 2;
@@ -758,7 +758,7 @@ export function measurePivotColumnWidth(
         }
 
         // Account for filter dropdown button width
-        if (cell.cell_type === 'FilterDropdown') {
+        if (cell.cellType === 'FilterDropdown') {
           totalWidth = Math.max(totalWidth, FILTER_BUTTON_MIN_WIDTH + CELL_PADDING_X * 2);
         }
 

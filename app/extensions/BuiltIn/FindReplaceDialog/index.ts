@@ -9,6 +9,7 @@ import { CoreCommands } from "../../../src/api/commands";
 // FIX: Import from API layer, not directly from Shell
 import { DialogExtensions } from "../../../src/api/ui";
 import { FindReplaceDialog } from "./FindReplaceDialog";
+import { useFindStore } from "./useFindStore";
 
 // ============================================================================
 // Extension State
@@ -35,11 +36,15 @@ function activate(context: ExtensionContext): void {
   });
 
   // Register commands
+  // NOTE: Must sync BOTH the Zustand store (for component state) and
+  // DialogExtensions (for Shell dialog container rendering).
   context.commands.register(CoreCommands.FIND, () => {
+    useFindStore.getState().open(false);
     DialogExtensions.openDialog("find-replace", { mode: "find" });
   });
 
   context.commands.register(CoreCommands.REPLACE, () => {
+    useFindStore.getState().open(true);
     DialogExtensions.openDialog("find-replace", { mode: "replace" });
   });
 

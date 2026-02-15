@@ -26,7 +26,7 @@ export function LayoutOptions({
     (e: React.ChangeEvent<HTMLSelectElement>) => {
       onChange({
         ...layout,
-        report_layout: e.target.value as ReportLayout,
+        reportLayout: e.target.value as ReportLayout,
       });
     },
     [layout, onChange]
@@ -36,7 +36,7 @@ export function LayoutOptions({
     (e: React.ChangeEvent<HTMLSelectElement>) => {
       onChange({
         ...layout,
-        values_position: e.target.value as ValuesPosition,
+        valuesPosition: e.target.value as ValuesPosition,
       });
     },
     [layout, onChange]
@@ -49,8 +49,8 @@ export function LayoutOptions({
       <label className={styles.layoutOption}>
         <input
           type="checkbox"
-          checked={layout.show_row_grand_totals ?? true}
-          onChange={handleCheckboxChange('show_row_grand_totals')}
+          checked={layout.showRowGrandTotals ?? true}
+          onChange={handleCheckboxChange('showRowGrandTotals')}
         />
         Show row grand totals
       </label>
@@ -58,8 +58,8 @@ export function LayoutOptions({
       <label className={styles.layoutOption}>
         <input
           type="checkbox"
-          checked={layout.show_column_grand_totals ?? true}
-          onChange={handleCheckboxChange('show_column_grand_totals')}
+          checked={layout.showColumnGrandTotals ?? true}
+          onChange={handleCheckboxChange('showColumnGrandTotals')}
         />
         Show column grand totals
       </label>
@@ -67,8 +67,8 @@ export function LayoutOptions({
       <label className={styles.layoutOption}>
         <input
           type="checkbox"
-          checked={layout.repeat_row_labels ?? false}
-          onChange={handleCheckboxChange('repeat_row_labels')}
+          checked={layout.repeatRowLabels ?? false}
+          onChange={handleCheckboxChange('repeatRowLabels')}
         />
         Repeat row labels
       </label>
@@ -76,8 +76,8 @@ export function LayoutOptions({
       <label className={styles.layoutOption}>
         <input
           type="checkbox"
-          checked={layout.show_empty_rows ?? false}
-          onChange={handleCheckboxChange('show_empty_rows')}
+          checked={layout.showEmptyRows ?? false}
+          onChange={handleCheckboxChange('showEmptyRows')}
         />
         Show empty rows
       </label>
@@ -85,8 +85,8 @@ export function LayoutOptions({
       <label className={styles.layoutOption}>
         <input
           type="checkbox"
-          checked={layout.show_empty_cols ?? false}
-          onChange={handleCheckboxChange('show_empty_cols')}
+          checked={layout.showEmptyCols ?? false}
+          onChange={handleCheckboxChange('showEmptyCols')}
         />
         Show empty columns
       </label>
@@ -94,7 +94,7 @@ export function LayoutOptions({
       <div className={styles.layoutOption}>
         Report layout:
         <select
-          value={layout.report_layout ?? 'compact'}
+          value={layout.reportLayout ?? 'compact'}
           onChange={handleReportLayoutChange}
         >
           <option value="compact">Compact</option>
@@ -106,7 +106,7 @@ export function LayoutOptions({
       <div className={styles.layoutOption}>
         Values position:
         <select
-          value={layout.values_position ?? 'columns'}
+          value={layout.valuesPosition ?? 'columns'}
           onChange={handleValuesPositionChange}
         >
           <option value="columns">Columns</option>

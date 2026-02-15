@@ -46,7 +46,10 @@ export interface TaskPaneService {
   close(): void;
   isOpen(): boolean;
   getManuallyClosed(): string[];
+  markManuallyClosed(viewId: string): void;
   clearManuallyClosed(viewId: string): void;
+  addActiveContextKey(key: TaskPaneContextKey): void;
+  removeActiveContextKey(key: TaskPaneContextKey): void;
   onRegistryChange(listener: () => void): () => void;
 }
 
@@ -84,6 +87,9 @@ let overlayService: OverlayService | undefined;
 let useIsTaskPaneOpenHook: () => boolean = () => false;
 let useOpenTaskPaneActionHook: () => () => void = () => () => {};
 let useCloseTaskPaneActionHook: () => () => void = () => () => {};
+let useTaskPaneOpenPaneIdsHook: () => string[] = () => [];
+let useTaskPaneManuallyClosedHook: () => string[] = () => [];
+let useTaskPaneActiveContextKeysHook: () => TaskPaneContextKey[] = () => [];
 
 /**
  * Register the TaskPane service implementation (called by Shell at startup).
@@ -113,10 +119,16 @@ export function registerTaskPaneHooks(hooks: {
   useIsOpen: () => boolean;
   useOpenAction: () => () => void;
   useCloseAction: () => () => void;
+  useOpenPaneIds?: () => string[];
+  useManuallyClosed?: () => string[];
+  useActiveContextKeys?: () => TaskPaneContextKey[];
 }): void {
   useIsTaskPaneOpenHook = hooks.useIsOpen;
   useOpenTaskPaneActionHook = hooks.useOpenAction;
   useCloseTaskPaneActionHook = hooks.useCloseAction;
+  if (hooks.useOpenPaneIds) useTaskPaneOpenPaneIdsHook = hooks.useOpenPaneIds;
+  if (hooks.useManuallyClosed) useTaskPaneManuallyClosedHook = hooks.useManuallyClosed;
+  if (hooks.useActiveContextKeys) useTaskPaneActiveContextKeysHook = hooks.useActiveContextKeys;
 }
 
 // ============================================================================
@@ -345,6 +357,18 @@ export function clearTaskPaneManuallyClosed(viewId: string): void {
   taskPaneService?.clearManuallyClosed(viewId);
 }
 
+export function markTaskPaneManuallyClosed(viewId: string): void {
+  taskPaneService?.markManuallyClosed(viewId);
+}
+
+export function addTaskPaneContextKey(key: TaskPaneContextKey): void {
+  taskPaneService?.addActiveContextKey(key);
+}
+
+export function removeTaskPaneContextKey(key: TaskPaneContextKey): void {
+  taskPaneService?.removeActiveContextKey(key);
+}
+
 // React hooks (delegate to registered implementations)
 // Default no-op hooks are used before shell initialization completes
 export function useIsTaskPaneOpen(): boolean {
@@ -357,6 +381,18 @@ export function useOpenTaskPaneAction(): () => void {
 
 export function useCloseTaskPaneAction(): () => void {
   return useCloseTaskPaneActionHook();
+}
+
+export function useTaskPaneOpenPaneIds(): string[] {
+  return useTaskPaneOpenPaneIdsHook();
+}
+
+export function useTaskPaneManuallyClosed(): string[] {
+  return useTaskPaneManuallyClosedHook();
+}
+
+export function useTaskPaneActiveContextKeys(): TaskPaneContextKey[] {
+  return useTaskPaneActiveContextKeysHook();
 }
 
 // ============================================================================

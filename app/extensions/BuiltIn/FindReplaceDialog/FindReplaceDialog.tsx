@@ -20,11 +20,12 @@ import {
   cellEvents,
   columnToLetter,
 } from "../../../src/api";
+import type { DialogProps } from "../../../src/api/uiTypes";
 // Extension-local state management
 import { useFindStore } from "./useFindStore";
 import * as S from "./FindReplaceDialog.styles";
 
-export function FindReplaceDialog(): React.ReactElement | null {
+export function FindReplaceDialog(props: DialogProps): React.ReactElement | null {
   // Core dispatch for grid primitives (selection, scroll)
   const dispatch = useGridDispatch();
 
@@ -235,12 +236,13 @@ export function FindReplaceDialog(): React.ReactElement | null {
     }
   }, [searchValue, replaceValue, options.caseSensitive, options.matchEntireCell, setMatches]);
 
-  // Handle close
+  // Handle close - sync both Zustand store and DialogExtensions registry
   const handleClose = useCallback(() => {
     close();
+    props.onClose();
     setSearchValue("");
     setReplaceValue("");
-  }, [close]);
+  }, [close, props]);
 
   // Handle key down - stop propagation to prevent grid keyboard handler from intercepting
   const handleKeyDown = useCallback(

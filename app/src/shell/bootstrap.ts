@@ -28,6 +28,8 @@ import {
   type GridContextMenuItem,
 } from "../api/extensions";
 
+import { shallow } from "zustand/shallow";
+
 // Shell implementations
 import { useTaskPaneStore } from "./TaskPane/useTaskPaneStore";
 import { TaskPaneExtensions as TaskPaneExtensionsImpl } from "./registries/taskPaneExtensions";
@@ -75,7 +77,10 @@ export function bootstrapShell(): void {
     close: () => useTaskPaneStore.getState().close(),
     isOpen: () => useTaskPaneStore.getState().isOpen,
     getManuallyClosed: () => useTaskPaneStore.getState().manuallyClosed,
+    markManuallyClosed: (viewId) => useTaskPaneStore.getState().markManuallyClosed(viewId),
     clearManuallyClosed: (viewId) => useTaskPaneStore.getState().clearManuallyClosed(viewId),
+    addActiveContextKey: (key) => useTaskPaneStore.getState().addActiveContextKey(key),
+    removeActiveContextKey: (key) => useTaskPaneStore.getState().removeActiveContextKey(key),
     onRegistryChange: (listener) => TaskPaneExtensionsImpl.onRegistryChange(listener),
   };
   registerTaskPaneService(taskPaneService);
@@ -85,6 +90,12 @@ export function bootstrapShell(): void {
     useIsOpen: () => useTaskPaneStore((state) => state.isOpen),
     useOpenAction: () => useTaskPaneStore((state) => state.open),
     useCloseAction: () => useTaskPaneStore((state) => state.close),
+    useOpenPaneIds: () => useTaskPaneStore(
+      (state) => state.openPanes.map((p) => p.viewId),
+      shallow,
+    ),
+    useManuallyClosed: () => useTaskPaneStore((state) => state.manuallyClosed),
+    useActiveContextKeys: () => useTaskPaneStore((state) => state.activeContextKeys),
   });
 
   // Dialog Service - maps getOpenDialogs to getVisibleDialogs

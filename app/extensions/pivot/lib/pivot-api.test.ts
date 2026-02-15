@@ -71,21 +71,21 @@ describe("pivot-api utilities", () => {
     it("creates config with defaults", () => {
       const config = createFieldConfig(0, "Region");
       expect(config).toEqual({
-        source_index: 0,
+        sourceIndex: 0,
         name: "Region",
-        sort_order: "asc",
-        show_subtotals: true,
+        sortOrder: "asc",
+        showSubtotals: true,
         collapsed: false,
-        hidden_items: [],
+        hiddenItems: [],
       });
     });
 
     it("allows overriding defaults", () => {
       const config = createFieldConfig(1, "Product", {
-        sort_order: "desc",
+        sortOrder: "desc",
         collapsed: true,
       });
-      expect(config.sort_order).toBe("desc");
+      expect(config.sortOrder).toBe("desc");
       expect(config.collapsed).toBe(true);
     });
   });
@@ -94,11 +94,11 @@ describe("pivot-api utilities", () => {
     it("creates config with defaults", () => {
       const config = createValueFieldConfig(2, "Sales");
       expect(config).toEqual({
-        source_index: 2,
+        sourceIndex: 2,
         name: "Sales",
         aggregation: "sum",
-        number_format: undefined,
-        show_values_as: "normal",
+        numberFormat: undefined,
+        showValuesAs: "normal",
       });
     });
 

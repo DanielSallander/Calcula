@@ -22,6 +22,9 @@ export const CoreCommands = {
   REPLACE: "core.edit.replace",
   CLEAR_CONTENTS: "core.edit.clearContents",
 
+  // Format
+  FORMAT_CELLS: "core.format.cells",
+
   // Grid
   MERGE_CELLS: "core.grid.merge",
   UNMERGE_CELLS: "core.grid.unmerge",

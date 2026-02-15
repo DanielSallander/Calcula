@@ -5,6 +5,87 @@ use crate::AppState;
 use engine::CellValue;
 use tauri::State;
 
+/// Detect the contiguous data region around a given cell (Excel's CurrentRegion).
+///
+/// Expands outward from the starting cell in all directions, stopping when
+/// an entire row (within the current column span) or an entire column
+/// (within the current row span) is empty. Iterates until stable because
+/// expanding rows can reveal new columns and vice versa.
+///
+/// Returns `None` if the starting cell is empty and has no adjacent data.
+#[tauri::command]
+pub fn detect_data_region(
+    state: State<AppState>,
+    row: u32,
+    col: u32,
+) -> Option<(u32, u32, u32, u32)> {
+    let grid = state.grid.lock().unwrap();
+
+    // Helper: does this cell have content?
+    let has_content = |r: u32, c: u32| -> bool {
+        grid.get_cell(r, c)
+            .map(|cell| cell.formula.is_some() || !matches!(cell.value, CellValue::Empty))
+            .unwrap_or(false)
+    };
+
+    // Helper: is an entire row empty within a column range?
+    let row_empty = |r: u32, sc: u32, ec: u32| -> bool {
+        for c in sc..=ec {
+            if has_content(r, c) {
+                return false;
+            }
+        }
+        true
+    };
+
+    // Helper: is an entire column empty within a row range?
+    let col_empty = |c: u32, sr: u32, er: u32| -> bool {
+        for r in sr..=er {
+            if has_content(r, c) {
+                return false;
+            }
+        }
+        true
+    };
+
+    let mut sr = row;
+    let mut er = row;
+    let mut sc = col;
+    let mut ec = col;
+
+    loop {
+        let prev = (sr, er, sc, ec);
+
+        // Expand up
+        while sr > 0 && !row_empty(sr - 1, sc, ec) {
+            sr -= 1;
+        }
+        // Expand down
+        while er < grid.max_row && !row_empty(er + 1, sc, ec) {
+            er += 1;
+        }
+        // Expand left
+        while sc > 0 && !col_empty(sc - 1, sr, er) {
+            sc -= 1;
+        }
+        // Expand right
+        while ec < grid.max_col && !col_empty(ec + 1, sr, er) {
+            ec += 1;
+        }
+
+        if (sr, er, sc, ec) == prev {
+            break;
+        }
+    }
+
+    // If the region is just the starting cell and it's empty, no region found
+    if sr == er && sc == ec && !has_content(row, col) {
+        return None;
+    }
+
+    Some((sr, sc, er, ec))
+}
+
 /// Find the target cell for Ctrl+Arrow navigation (Excel-like behavior).
 /// 
 /// Excel's Ctrl+Arrow behavior:

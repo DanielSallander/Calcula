@@ -1,8 +1,8 @@
 //! FILENAME: app/extensions/pivot/components/CreatePivotDialog.tsx
 
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { pivot } from '../../../src/api/pivot';
-import { addSheet, getSheets, setActiveSheetApi, indexToCol, colToIndex } from '../../../src/api';
+import { addSheet, getSheets, setActiveSheetApi, indexToCol, colToIndex, detectDataRegion, useGridState } from '../../../src/api';
 import { emitAppEvent, AppEvents } from '../../../src/api/events';
 
 // ============================================================================
@@ -140,45 +140,112 @@ export function CreatePivotDialog({
   onCreated,
   selection,
 }: CreatePivotDialogProps): React.ReactElement | null {
+  // Read current grid selection (active cell) for auto-detection
+  const gridState = useGridState();
+
   // Form state
   const [sourceRange, setSourceRange] = useState('');
   const [destinationType, setDestinationType] = useState<DestinationType>('new');
   const [existingDestination, setExistingDestination] = useState('');
   const [newSheetName, setNewSheetName] = useState('');
-  
+
   // UI state
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [sheets, setSheets] = useState<{ index: number; name: string }[]>([]);
   const [currentSheetName, setCurrentSheetName] = useState('Sheet1');
-  
+
   // Track if we've initialized the default sheet name for this dialog open
   const [hasInitializedSheetName, setHasInitializedSheetName] = useState(false);
+  // Track if we've run auto-detection for this dialog open
+  const [hasAutoDetected, setHasAutoDetected] = useState(false);
 
-  // Load sheets on mount and reset initialization flag
+  // Cell picker mode: when true, dialog collapses so user can click a cell
+  const [isPicking, setIsPicking] = useState(false);
+  // Snapshot the selection at the moment picking started so we can detect changes
+  const pickStartSelRef = useRef<{ endRow: number; endCol: number } | null>(null);
+
+  // Load sheets on mount and reset initialization flags
   useEffect(() => {
     if (isOpen) {
       setHasInitializedSheetName(false);
+      setHasAutoDetected(false);
+      setIsPicking(false);
       loadSheets();
     } else {
       // Reset state when dialog closes
       setHasInitializedSheetName(false);
+      setHasAutoDetected(false);
+      setIsPicking(false);
     }
   }, [isOpen]);
 
-  // Initialize source range from selection
+  // Cell picker: detect when the user clicks a new cell while in picking mode
   useEffect(() => {
-    if (isOpen && selection) {
-      const range = selectionToRange(
-        selection.startRow,
-        selection.startCol,
-        selection.endRow,
-        selection.endCol
-      );
-      const fullRange = buildSheetRange(currentSheetName, range);
-      setSourceRange(fullRange);
-    }
-  }, [isOpen, selection, currentSheetName]);
+    if (!isPicking || !gridState.selection) return;
+
+    const sel = gridState.selection;
+    const start = pickStartSelRef.current;
+
+    // Skip if selection hasn't actually changed from the picker start
+    if (start && sel.endRow === start.endRow && sel.endCol === start.endCol) return;
+
+    // Use the active sheet name from grid state
+    const sheetName = gridState.sheetContext?.activeSheetName ?? currentSheetName;
+
+    const cellRef = buildSheetRange(sheetName, toA1Notation(sel.endRow, sel.endCol));
+    setExistingDestination(cellRef);
+    setDestinationType('existing');
+    setIsPicking(false);
+  }, [isPicking, gridState.selection]);
+
+  // Auto-detect the contiguous data region around the active cell
+  useEffect(() => {
+    if (!isOpen || hasAutoDetected || !currentSheetName) return;
+
+    // Use the prop selection or grid state selection for the active cell
+    const sel = selection ?? gridState.selection;
+    if (!sel) return;
+
+    // The active cell is the end of the selection (where the cursor sits)
+    const activeRow = sel.endRow;
+    const activeCol = sel.endCol;
+
+    setHasAutoDetected(true);
+
+    detectDataRegion(activeRow, activeCol)
+      .then((region) => {
+        if (region) {
+          const [startRow, startCol, endRow, endCol] = region;
+          const range = selectionToRange(startRow, startCol, endRow, endCol);
+          const fullRange = buildSheetRange(currentSheetName, range);
+          setSourceRange(fullRange);
+        } else if (sel) {
+          // Fallback: use the current selection as-is
+          const range = selectionToRange(
+            sel.startRow,
+            sel.startCol,
+            sel.endRow,
+            sel.endCol
+          );
+          const fullRange = buildSheetRange(currentSheetName, range);
+          setSourceRange(fullRange);
+        }
+      })
+      .catch((err) => {
+        console.error('[CreatePivotDialog] Auto-detect failed, using selection:', err);
+        if (sel) {
+          const range = selectionToRange(
+            sel.startRow,
+            sel.startCol,
+            sel.endRow,
+            sel.endCol
+          );
+          const fullRange = buildSheetRange(currentSheetName, range);
+          setSourceRange(fullRange);
+        }
+      });
+  }, [isOpen, hasAutoDetected, currentSheetName, selection, gridState.selection]);
 
   // Generate default new sheet name ONLY once when sheets are loaded
   useEffect(() => {
@@ -279,24 +346,24 @@ export function CreatePivotDialog({
       }
 
       console.log('[CreatePivotDialog] Creating pivot table:', {
-        source_range: sourceRange,
-        destination_cell: destinationCell,
-        destination_sheet: destinationSheetIndex,
+        sourceRange,
+        destinationCell,
+        destinationSheet: destinationSheetIndex,
       });
 
-      // Create the pivot table - NOW WITH destination_sheet!
+      // Create the pivot table
       const view = await pivot.create({
-        source_range: sourceRange,
-        destination_cell: destinationCell,
-        destination_sheet: destinationSheetIndex,  // <-- KEY FIX!
-        has_headers: true,
+        sourceRange: sourceRange,
+        destinationCell: destinationCell,
+        destinationSheet: destinationSheetIndex,
+        hasHeaders: true,
       });
 
-      console.log('[CreatePivotDialog] Pivot table created:', view.pivot_id, 'rows:', view.row_count, 'cols:', view.col_count);
+      console.log('[CreatePivotDialog] Pivot table created:', view.pivotId, 'rows:', view.rowCount, 'cols:', view.colCount);
 
       // Notify parent and close
       if (onCreated) {
-        onCreated(view.pivot_id);
+        onCreated(view.pivotId);
       }
       handleClose();
 
@@ -333,9 +400,24 @@ export function CreatePivotDialog({
     }
   };
 
+  const startPicking = useCallback(() => {
+    // Snapshot the current selection so we can detect a real change
+    const sel = gridState.selection;
+    pickStartSelRef.current = sel ? { endRow: sel.endRow, endCol: sel.endCol } : null;
+    setIsPicking(true);
+  }, [gridState.selection]);
+
+  const cancelPicking = useCallback(() => {
+    setIsPicking(false);
+  }, []);
+
   const handleKeyDown = (e: React.KeyboardEvent) => {
     if (e.key === 'Escape') {
-      handleClose();
+      if (isPicking) {
+        cancelPicking();
+      } else {
+        handleClose();
+      }
     } else if (e.key === 'Enter' && !isLoading) {
       handleCreate();
     }
@@ -345,10 +427,27 @@ export function CreatePivotDialog({
     return null;
   }
 
+  // Collapsed picker bar: shown when user is picking a cell on the grid
+  if (isPicking) {
+    return (
+      <div style={styles.pickerBar} onKeyDown={handleKeyDown}>
+        <span style={styles.pickerLabel}>
+          Select a destination cell on the grid...
+        </span>
+        <span style={styles.pickerValue}>
+          {existingDestination || '(click a cell)'}
+        </span>
+        <button style={styles.pickerCancelBtn} onClick={cancelPicking}>
+          Cancel
+        </button>
+      </div>
+    );
+  }
+
   return (
     <div style={styles.overlay} onClick={handleClose}>
-      <div 
-        style={styles.dialog} 
+      <div
+        style={styles.dialog}
         onClick={e => e.stopPropagation()}
         onKeyDown={handleKeyDown}
       >
@@ -435,14 +534,24 @@ export function CreatePivotDialog({
               
               {destinationType === 'existing' && (
                 <div style={styles.subField}>
-                  <input
-                    type="text"
-                    style={styles.inputSmall}
-                    value={existingDestination}
-                    onChange={e => setExistingDestination(e.target.value)}
-                    placeholder="e.g., Sheet2!F1"
-                    disabled={isLoading}
-                  />
+                  <div style={styles.inputWithPicker}>
+                    <input
+                      type="text"
+                      style={styles.inputSmall}
+                      value={existingDestination}
+                      onChange={e => setExistingDestination(e.target.value)}
+                      placeholder="e.g., Sheet2!F1"
+                      disabled={isLoading}
+                    />
+                    <button
+                      style={styles.pickButton}
+                      onClick={startPicking}
+                      disabled={isLoading}
+                      title="Click to select a cell on the grid"
+                    >
+                      [^]
+                    </button>
+                  </div>
                 </div>
               )}
             </div>
@@ -629,6 +738,60 @@ const styles: Record<string, React.CSSProperties> = {
   buttonDisabled: {
     opacity: 0.6,
     cursor: 'not-allowed',
+  },
+  inputWithPicker: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: '4px',
+  },
+  pickButton: {
+    padding: '6px 8px',
+    fontSize: '13px',
+    backgroundColor: '#3c3c3c',
+    border: '1px solid #454545',
+    borderRadius: '4px',
+    color: '#cccccc',
+    cursor: 'pointer',
+    lineHeight: 1,
+    flexShrink: 0,
+  },
+  pickerBar: {
+    position: 'fixed',
+    bottom: '40px',
+    left: '50%',
+    transform: 'translateX(-50%)',
+    display: 'flex',
+    alignItems: 'center',
+    gap: '12px',
+    padding: '10px 16px',
+    backgroundColor: '#2d2d2d',
+    border: '1px solid #0e639c',
+    borderRadius: '6px',
+    boxShadow: '0 4px 16px rgba(0, 0, 0, 0.4)',
+    zIndex: 10000,
+  },
+  pickerLabel: {
+    fontSize: '13px',
+    color: '#cccccc',
+  },
+  pickerValue: {
+    fontSize: '13px',
+    fontWeight: 600,
+    color: '#ffffff',
+    padding: '4px 8px',
+    backgroundColor: '#1e1e1e',
+    border: '1px solid #454545',
+    borderRadius: '4px',
+    minWidth: '80px',
+  },
+  pickerCancelBtn: {
+    padding: '4px 12px',
+    fontSize: '12px',
+    backgroundColor: 'transparent',
+    border: '1px solid #454545',
+    borderRadius: '4px',
+    color: '#cccccc',
+    cursor: 'pointer',
   },
 };
 

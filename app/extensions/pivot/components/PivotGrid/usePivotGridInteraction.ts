@@ -187,15 +187,15 @@ export function usePivotGridInteraction(
       try {
         // Build the filter field config for the specific field
         const filterFieldConfig = {
-          source_index: fieldIndex,
-          name: pivotView.filter_rows.find(fr => fr.field_index === fieldIndex)?.field_name || '',
-          hidden_items: hiddenItems.length > 0 ? hiddenItems : undefined,
+          sourceIndex: fieldIndex,
+          name: pivotView.filterRows.find(fr => fr.fieldIndex === fieldIndex)?.fieldName || '',
+          hiddenItems: hiddenItems.length > 0 ? hiddenItems : undefined,
         };
 
         // Call API to update pivot fields
         await pivot.updateFields({
-          pivot_id: pivotId,
-          filter_fields: [filterFieldConfig],
+          pivotId: pivotId,
+          filterFields: [filterFieldConfig],
         });
 
         // Close dropdown
@@ -227,8 +227,8 @@ export function usePivotGridInteraction(
       const clickedFilter = findClickedFilterButton(canvasX, canvasY);
       if (clickedFilter) {
         // Find the filter row metadata from pivotView
-        const filterRowMeta = pivotView.filter_rows?.find(
-          (fr) => fr.field_index === clickedFilter.fieldIndex
+        const filterRowMeta = pivotView.filterRows?.find(
+          (fr) => fr.fieldIndex === clickedFilter.fieldIndex
         );
 
         // Fetch unique values from backend API (always fresh)
@@ -240,13 +240,13 @@ export function usePivotGridInteraction(
 
           // Build filterRow with fetched unique values
           const filterRow: FilterRowData = {
-            field_index: clickedFilter.fieldIndex,
-            field_name: response.fieldName,
-            unique_values: response.uniqueValues,
+            fieldIndex: clickedFilter.fieldIndex,
+            fieldName: response.fieldName,
+            uniqueValues: response.uniqueValues,
             // Use existing selected values from metadata, or default to all selected
-            selected_values: filterRowMeta?.selected_values ?? response.uniqueValues,
-            display_value: filterRowMeta?.display_value ?? '(All)',
-            view_row: filterRowMeta?.view_row ?? 0,
+            selectedValues: filterRowMeta?.selectedValues ?? response.uniqueValues,
+            displayValue: filterRowMeta?.displayValue ?? '(All)',
+            viewRow: filterRowMeta?.viewRow ?? 0,
           };
 
           // Convert canvas coords to screen coords for dropdown positioning

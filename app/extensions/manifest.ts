@@ -13,6 +13,7 @@ import type { ExtensionModule } from "../src/api/contract";
 
 import FindReplaceExtension from "./BuiltIn/FindReplaceDialog";
 import StandardMenusExtension from "./BuiltIn/StandardMenus";
+import FormatCellsExtension from "./BuiltIn/FormatCellsDialog";
 
 // ============================================================================
 // Built-in Extension Manifest
@@ -27,6 +28,8 @@ export const builtInExtensions: ExtensionModule[] = [
   StandardMenusExtension,
   // FindReplace depends on Edit menu being registered
   FindReplaceExtension,
+  // FormatCells depends on Format menu being registered
+  FormatCellsExtension,
 ];
 
 /**

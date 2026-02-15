@@ -6,6 +6,7 @@
 import type { ExtensionModule, ExtensionContext } from "../../../src/api/contract";
 import { registerMenu, type MenuDefinition } from "../../../src/api/ui";
 import { CoreCommands } from "../../../src/api/commands";
+import { registerFormatMenu } from "./FormatMenu";
 
 // ============================================================================
 // Extension State
@@ -65,9 +66,10 @@ function activate(context: ExtensionContext): void {
 
   console.log("[StandardMenusExtension] Activating...");
 
-  // Only register Edit menu here
+  // Only register Edit and Format menus here
   // File, View, Insert are handled by StandardMenus.tsx component (hook-based)
   registerEditMenu(context);
+  registerFormatMenu();
 
   isActivated = true;
   console.log("[StandardMenusExtension] Activated successfully.");

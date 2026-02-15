@@ -8,6 +8,8 @@ import {
   openTaskPane,
   closeTaskPane,
   getTaskPaneManuallyClosed,
+  addTaskPaneContextKey,
+  removeTaskPaneContextKey,
 } from "../../../src/api";
 import type { LayoutConfig, AggregationType } from "../../../src/api";
 import { PIVOT_PANE_ID } from "../manifest";
@@ -122,11 +124,16 @@ export function handleSelectionChange(
       return;
     }
     lastCheckedSelection = { row, col };
+    removeTaskPaneContextKey("pivot");
     closeTaskPane(PIVOT_PANE_ID);
     return;
   }
 
-  // Cell IS in a pivot region - check if manually closed
+  // Cell IS in a pivot region - set context key (even if manually closed,
+  // so the View menu knows we're in a pivot area)
+  addTaskPaneContextKey("pivot");
+
+  // Check if manually closed
   if (manuallyClosed.includes(PIVOT_PANE_ID)) {
     lastCheckedSelection = { row, col };
     return;
@@ -193,13 +200,13 @@ async function checkPivotAtSelection(
       }));
 
       const initialLayout: LayoutConfig = {
-        show_row_grand_totals: config.layout.show_row_grand_totals,
-        show_column_grand_totals: config.layout.show_column_grand_totals,
-        report_layout: config.layout.report_layout,
-        repeat_row_labels: config.layout.repeat_row_labels,
-        show_empty_rows: config.layout.show_empty_rows,
-        show_empty_cols: config.layout.show_empty_cols,
-        values_position: config.layout.values_position,
+        showRowGrandTotals: config.layout.showRowGrandTotals,
+        showColumnGrandTotals: config.layout.showColumnGrandTotals,
+        reportLayout: config.layout.reportLayout,
+        repeatRowLabels: config.layout.repeatRowLabels,
+        showEmptyRows: config.layout.showEmptyRows,
+        showEmptyCols: config.layout.showEmptyCols,
+        valuesPosition: config.layout.valuesPosition,
       };
 
       const paneData: PivotEditorViewData = {
@@ -220,6 +227,24 @@ async function checkPivotAtSelection(
     console.error("[Pivot Extension] Failed to check pivot at selection:", error);
   } finally {
     checkInProgress = false;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Force Recheck (called when pane is reopened via View menu)
+// ---------------------------------------------------------------------------
+
+/**
+ * Force a re-check of the current selection against pivot regions.
+ * Resets lastCheckedSelection so the handler re-fetches data.
+ * Called when the user reopens the pivot pane via the View menu.
+ */
+export function forceRecheck(): void {
+  const savedSelection = lastCheckedSelection;
+  lastCheckedSelection = null;
+  checkInProgress = false;
+  if (savedSelection) {
+    handleSelectionChange({ endRow: savedSelection.row, endCol: savedSelection.col });
   }
 }
 

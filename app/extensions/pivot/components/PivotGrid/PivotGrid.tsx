@@ -209,8 +209,8 @@ export const PivotGrid: React.FC<PivotGridProps> = ({
     ctx.scale(dpr, dpr);
 
     // Calculate visible range
-    const frozenRowCount = pivotView.column_header_row_count || 0;
-    const frozenColCount = pivotView.row_label_col_count || 0;
+    const frozenRowCount = pivotView.columnHeaderRowCount || 0;
+    const frozenColCount = pivotView.rowLabelColCount || 0;
 
     // Calculate visible rows
     let frozenHeight = 0;
@@ -438,10 +438,10 @@ export const PivotGrid: React.FC<PivotGridProps> = ({
       {/* Filter Dropdown Overlay */}
       {activeFilterDropdown && (
         <FilterDropdown
-          fieldName={activeFilterDropdown.filterRow.field_name}
+          fieldName={activeFilterDropdown.filterRow.fieldName}
           fieldIndex={activeFilterDropdown.fieldIndex}
-          uniqueValues={activeFilterDropdown.filterRow.unique_values}
-          selectedValues={activeFilterDropdown.filterRow.selected_values}
+          uniqueValues={activeFilterDropdown.filterRow.uniqueValues}
+          selectedValues={activeFilterDropdown.filterRow.selectedValues}
           anchorRect={activeFilterDropdown.anchorRect}
           onApply={handleApplyFilter}
           onClose={handleCloseFilterDropdown}

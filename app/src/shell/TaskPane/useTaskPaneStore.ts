@@ -66,6 +66,10 @@ export interface TaskPaneActions {
   markManuallyClosed: (viewId: string) => void;
   /** Clear manually closed state for a view */
   clearManuallyClosed: (viewId: string) => void;
+  /** Add a context key to the active set (no-op if already present) */
+  addActiveContextKey: (key: TaskPaneContextKey) => void;
+  /** Remove a context key from the active set (no-op if not present) */
+  removeActiveContextKey: (key: TaskPaneContextKey) => void;
   /** Reset all state */
   reset: () => void;
 }
@@ -188,6 +192,20 @@ export const useTaskPaneStore = create<TaskPaneState & TaskPaneActions>()(
       clearManuallyClosed: (viewId: string) => {
         const current = get().manuallyClosed;
         set({ manuallyClosed: current.filter((id) => id !== viewId) });
+      },
+
+      addActiveContextKey: (key: TaskPaneContextKey) => {
+        const current = get().activeContextKeys;
+        if (!current.includes(key)) {
+          set({ activeContextKeys: [...current, key] });
+        }
+      },
+
+      removeActiveContextKey: (key: TaskPaneContextKey) => {
+        const current = get().activeContextKeys;
+        if (current.includes(key)) {
+          set({ activeContextKeys: current.filter((k) => k !== key) });
+        }
       },
 
       reset: () => {

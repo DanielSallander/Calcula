@@ -5,9 +5,20 @@
 // - The Shell (Layout.tsx) listens for FREEZE_CHANGED events and dispatches to Core state.
 
 import { useCallback, useEffect, useState } from 'react';
-import type { MenuDefinition } from '../../../src/api/ui';
+import type { MenuDefinition, MenuItemDefinition } from '../../../src/api/ui';
 import { freezePanes, loadFreezePanesConfig } from '../../../src/api/grid';
-import { useIsTaskPaneOpen, useOpenTaskPaneAction, useCloseTaskPaneAction } from '../../../src/api/ui';
+import {
+  useIsTaskPaneOpen,
+  useOpenTaskPaneAction,
+  useCloseTaskPaneAction,
+  useTaskPaneOpenPaneIds,
+  useTaskPaneManuallyClosed,
+  useTaskPaneActiveContextKeys,
+  TaskPaneExtensions,
+  closeTaskPane as closeTaskPaneById,
+  clearTaskPaneManuallyClosed,
+  markTaskPaneManuallyClosed,
+} from '../../../src/api/ui';
 
 export interface ViewMenuHandlers {
   handleFreezeTopRow: () => Promise<void>;
@@ -28,6 +39,11 @@ export function useViewMenu(): { menu: MenuDefinition; handlers: ViewMenuHandler
   const isTaskPaneOpen = useIsTaskPaneOpen();
   const openTaskPane = useOpenTaskPaneAction();
   const closeTaskPane = useCloseTaskPaneAction();
+
+  // Task pane view state for dynamic Show/Hide items
+  const openPaneIds = useTaskPaneOpenPaneIds();
+  const manuallyClosed = useTaskPaneManuallyClosed();
+  const activeContextKeys = useTaskPaneActiveContextKeys();
 
   useEffect(() => {
     const loadFreezeState = async () => {
@@ -105,21 +121,76 @@ export function useViewMenu(): { menu: MenuDefinition; handlers: ViewMenuHandler
     }
   }, []);
 
+  // ---------------------------------------------------------------------------
+  // Dynamic Show/Hide items for task pane views based on active context
+  // ---------------------------------------------------------------------------
+
+  const allViews = TaskPaneExtensions.getAllViews();
+  const dynamicPaneItems: MenuItemDefinition[] = [];
+
+  for (const view of allViews) {
+    if (view.closable === false) continue;
+
+    // Only show items for views whose context keys match the active context
+    const isContextActive = view.contextKeys.some(
+      (key) => key === "always" || activeContextKeys.includes(key),
+    );
+    if (!isContextActive) continue;
+
+    const isPaneVisible = isTaskPaneOpen && openPaneIds.includes(view.id);
+
+    dynamicPaneItems.push({
+      id: `view.showPane.${view.id}`,
+      label: `Show ${view.title}`,
+      action: () => {
+        clearTaskPaneManuallyClosed(view.id);
+        window.dispatchEvent(
+          new CustomEvent("taskpane:requestReopen", { detail: { viewId: view.id } }),
+        );
+      },
+      hidden: isPaneVisible,
+    });
+
+    dynamicPaneItems.push({
+      id: `view.hidePane.${view.id}`,
+      label: `Hide ${view.title}`,
+      action: () => {
+        markTaskPaneManuallyClosed(view.id);
+        closeTaskPaneById(view.id);
+      },
+      hidden: !isPaneVisible,
+    });
+  }
+
+  // ---------------------------------------------------------------------------
+  // Build menu
+  // ---------------------------------------------------------------------------
+
+  const items: MenuItemDefinition[] = [
+    { id: 'view.showTaskpane', label: 'Show Taskpane', action: openTaskPane, hidden: isTaskPaneOpen },
+    { id: 'view.hideTaskpane', label: 'Hide Taskpane', action: closeTaskPane, hidden: !isTaskPaneOpen },
+  ];
+
+  if (dynamicPaneItems.length > 0) {
+    items.push({ id: 'view.sepPanes', label: '', separator: true });
+    items.push(...dynamicPaneItems);
+  }
+
+  items.push(
+    { id: 'view.sep1', label: '', separator: true },
+    { id: 'view.freezeRow', label: 'Freeze Top Row', action: handleFreezeTopRow, checked: freezeState.row },
+    { id: 'view.freezeCol', label: 'Freeze First Column', action: handleFreezeFirstColumn, checked: freezeState.col },
+    { id: 'view.sep2', label: '', separator: true },
+    { id: 'view.freezeBoth', label: 'Freeze Top Row and First Column', action: handleFreezeBoth, checked: freezeState.row && freezeState.col },
+    { id: 'view.sep3', label: '', separator: true },
+    { id: 'view.unfreeze', label: 'Unfreeze Panes', action: handleUnfreeze, disabled: !freezeState.row && !freezeState.col },
+  );
+
   const menu: MenuDefinition = {
     id: 'view',
     label: 'View',
     order: 30,
-    items: [
-      { id: 'view.showTaskpane', label: 'Show Taskpane', action: openTaskPane, hidden: isTaskPaneOpen },
-      { id: 'view.hideTaskpane', label: 'Hide Taskpane', action: closeTaskPane, hidden: !isTaskPaneOpen },
-      { id: 'view.sep1', label: '', separator: true },
-      { id: 'view.freezeRow', label: 'Freeze Top Row', action: handleFreezeTopRow, checked: freezeState.row },
-      { id: 'view.freezeCol', label: 'Freeze First Column', action: handleFreezeFirstColumn, checked: freezeState.col },
-      { id: 'view.sep2', label: '', separator: true },
-      { id: 'view.freezeBoth', label: 'Freeze Top Row and First Column', action: handleFreezeBoth, checked: freezeState.row && freezeState.col },
-      { id: 'view.sep3', label: '', separator: true },
-      { id: 'view.unfreeze', label: 'Unfreeze Panes', action: handleUnfreeze, disabled: !freezeState.row && !freezeState.col },
-    ],
+    items,
   };
 
   return {

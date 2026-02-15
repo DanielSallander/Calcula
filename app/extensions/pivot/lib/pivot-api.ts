@@ -87,70 +87,70 @@ export type ValuesPosition = "columns" | "rows";
 /** Request to create a new pivot table */
 export interface CreatePivotRequest {
   /** Source range in A1 notation (e.g., "A1:D100") */
-  source_range: string;
+  sourceRange: string;
   /** Destination cell in A1 notation (e.g., "F1") */
-  destination_cell: string;
+  destinationCell: string;
   /** Optional: sheet index for source data (defaults to active sheet) */
-  source_sheet?: number;
+  sourceSheet?: number;
   /** Optional: sheet index for destination (defaults to active sheet) */
-  destination_sheet?: number;
+  destinationSheet?: number;
   /** Whether first row contains headers (default: true) */
-  has_headers?: boolean;
+  hasHeaders?: boolean;
 }
 
 /** Field configuration for row/column areas */
 export interface PivotFieldConfig {
   /** Source column index (0-based) */
-  source_index: number;
+  sourceIndex: number;
   /** Display name */
   name: string;
   /** Sort order */
-  sort_order?: SortOrder;
+  sortOrder?: SortOrder;
   /** Whether to show subtotals */
-  show_subtotals?: boolean;
+  showSubtotals?: boolean;
   /** Whether field is collapsed */
   collapsed?: boolean;
   /** Items to hide (filter out) */
-  hidden_items?: string[];
+  hiddenItems?: string[];
 }
 
 /** Value field configuration */
 export interface ValueFieldConfig {
   /** Source column index (0-based) */
-  source_index: number;
+  sourceIndex: number;
   /** Display name */
   name: string;
   /** Aggregation type */
   aggregation: AggregationType;
   /** Number format string */
-  number_format?: string;
+  numberFormat?: string;
   /** Show values as */
-  show_values_as?: ShowValuesAs;
+  showValuesAs?: ShowValuesAs;
 }
 
 /** Layout configuration */
 export interface LayoutConfig {
-  show_row_grand_totals?: boolean;
-  show_column_grand_totals?: boolean;
-  report_layout?: ReportLayout;
-  repeat_row_labels?: boolean;
-  show_empty_rows?: boolean;
-  show_empty_cols?: boolean;
-  values_position?: ValuesPosition;
+  showRowGrandTotals?: boolean;
+  showColumnGrandTotals?: boolean;
+  reportLayout?: ReportLayout;
+  repeatRowLabels?: boolean;
+  showEmptyRows?: boolean;
+  showEmptyCols?: boolean;
+  valuesPosition?: ValuesPosition;
 }
 
 /** Request to update pivot table fields */
 export interface UpdatePivotFieldsRequest {
   /** Pivot table ID */
-  pivot_id: PivotId;
+  pivotId: PivotId;
   /** Row fields (optional - if undefined, keep existing) */
-  row_fields?: PivotFieldConfig[];
+  rowFields?: PivotFieldConfig[];
   /** Column fields (optional) */
-  column_fields?: PivotFieldConfig[];
+  columnFields?: PivotFieldConfig[];
   /** Value fields (optional) */
-  value_fields?: ValueFieldConfig[];
+  valueFields?: ValueFieldConfig[];
   /** Filter fields (optional) */
-  filter_fields?: PivotFieldConfig[];
+  filterFields?: PivotFieldConfig[];
   /** Layout options (optional) */
   layout?: LayoutConfig;
 }
@@ -158,11 +158,11 @@ export interface UpdatePivotFieldsRequest {
 /** Request to toggle a group's expand/collapse state */
 export interface ToggleGroupRequest {
   /** Pivot table ID */
-  pivot_id: PivotId;
+  pivotId: PivotId;
   /** Whether this is a row (true) or column (false) group */
-  is_row: boolean;
+  isRow: boolean;
   /** The field index to toggle */
-  field_index: number;
+  fieldIndex: number;
   /** The specific value to toggle (optional - if undefined, toggle all) */
   value?: string;
 }
@@ -208,22 +208,22 @@ export type PivotColumnType = "RowLabel" | "Data" | "Subtotal" | "GrandTotal";
 
 /** Cell data from the backend */
 export interface PivotCellData {
-  cell_type: PivotCellType;
+  cellType: PivotCellType;
   value: PivotCellValue;
-  formatted_value: string;
-  indent_level: number;
-  is_bold: boolean;
-  is_expandable: boolean;
-  is_collapsed: boolean;
-  background_style: BackgroundStyle;
-  number_format?: string;
-  filter_field_index?: number;
+  formattedValue: string;
+  indentLevel: number;
+  isBold: boolean;
+  isExpandable: boolean;
+  isCollapsed: boolean;
+  backgroundStyle: BackgroundStyle;
+  numberFormat?: string;
+  filterFieldIndex?: number;
 }
 
 /** Row data from the backend */
 export interface PivotRowData {
-  view_row: number;
-  row_type: PivotRowType;
+  viewRow: number;
+  rowType: PivotRowType;
   depth: number;
   visible: boolean;
   cells: PivotCellData[];
@@ -231,47 +231,47 @@ export interface PivotRowData {
 
 /** Column descriptor from the backend */
 export interface PivotColumnData {
-  view_col: number;
-  col_type: PivotColumnType;
+  viewCol: number;
+  colType: PivotColumnType;
   depth: number;
-  width_hint: number;
+  widthHint: number;
 }
 
 /** Filter row metadata */
 export interface FilterRowData {
-  field_index: number;
-  field_name: string;
-  selected_values: string[];
-  unique_values: string[];
-  display_value: string;
-  view_row: number;
+  fieldIndex: number;
+  fieldName: string;
+  selectedValues: string[];
+  uniqueValues: string[];
+  displayValue: string;
+  viewRow: number;
 }
 
 /** Complete pivot view response */
 export interface PivotViewResponse {
-  pivot_id: PivotId;
+  pivotId: PivotId;
   version: number;
-  row_count: number;
-  col_count: number;
-  row_label_col_count: number;
-  column_header_row_count: number;
-  filter_row_count: number;
-  filter_rows: FilterRowData[];
+  rowCount: number;
+  colCount: number;
+  rowLabelColCount: number;
+  columnHeaderRowCount: number;
+  filterRowCount: number;
+  filterRows: FilterRowData[];
   rows: PivotRowData[];
   columns: PivotColumnData[];
 }
 
 /** Source data response for drill-down */
 export interface SourceDataResponse {
-  pivot_id: PivotId;
+  pivotId: PivotId;
   headers: string[];
   rows: string[][];
-  total_count: number;
-  is_truncated: boolean;
+  totalCount: number;
+  isTruncated: boolean;
 }
 
 /** Group path for drill-down operations */
-export type GroupPath = Array<[number, number]>; // [field_index, value_id]
+export type GroupPath = Array<[number, number]>; // [fieldIndex, valueId]
 
 /** Source field info from pivot region check */
 export interface SourceFieldInfo {
@@ -504,15 +504,15 @@ export function isFilterRow(rowType: PivotRowType): boolean {
 export function createFieldConfig(
   sourceIndex: number,
   name: string,
-  options?: Partial<Omit<PivotFieldConfig, "source_index" | "name">>
+  options?: Partial<Omit<PivotFieldConfig, "sourceIndex" | "name">>
 ): PivotFieldConfig {
   return {
-    source_index: sourceIndex,
+    sourceIndex,
     name,
-    sort_order: options?.sort_order ?? "asc",
-    show_subtotals: options?.show_subtotals ?? true,
+    sortOrder: options?.sortOrder ?? "asc",
+    showSubtotals: options?.showSubtotals ?? true,
     collapsed: options?.collapsed ?? false,
-    hidden_items: options?.hidden_items ?? [],
+    hiddenItems: options?.hiddenItems ?? [],
   };
 }
 
@@ -523,14 +523,14 @@ export function createValueFieldConfig(
   sourceIndex: number,
   name: string,
   aggregation: AggregationType = "sum",
-  options?: Partial<Omit<ValueFieldConfig, "source_index" | "name" | "aggregation">>
+  options?: Partial<Omit<ValueFieldConfig, "sourceIndex" | "name" | "aggregation">>
 ): ValueFieldConfig {
   return {
-    source_index: sourceIndex,
+    sourceIndex,
     name,
     aggregation,
-    number_format: options?.number_format,
-    show_values_as: options?.show_values_as ?? "normal",
+    numberFormat: options?.numberFormat,
+    showValuesAs: options?.showValuesAs ?? "normal",
   };
 }
 
@@ -541,13 +541,13 @@ export function createLayoutConfig(
   options?: Partial<LayoutConfig>
 ): LayoutConfig {
   return {
-    show_row_grand_totals: options?.show_row_grand_totals ?? true,
-    show_column_grand_totals: options?.show_column_grand_totals ?? true,
-    report_layout: options?.report_layout ?? "compact",
-    repeat_row_labels: options?.repeat_row_labels ?? false,
-    show_empty_rows: options?.show_empty_rows ?? false,
-    show_empty_cols: options?.show_empty_cols ?? false,
-    values_position: options?.values_position ?? "columns",
+    showRowGrandTotals: options?.showRowGrandTotals ?? true,
+    showColumnGrandTotals: options?.showColumnGrandTotals ?? true,
+    reportLayout: options?.reportLayout ?? "compact",
+    repeatRowLabels: options?.repeatRowLabels ?? false,
+    showEmptyRows: options?.showEmptyRows ?? false,
+    showEmptyCols: options?.showEmptyCols ?? false,
+    valuesPosition: options?.valuesPosition ?? "columns",
   };
 }
 

@@ -103,12 +103,12 @@ async function handleApplyFilter(
   try {
     // Update the pivot with the new filter configuration
     await pivot.updateFields({
-      pivot_id: currentFilterState.pivotId,
-      filter_fields: [
+      pivotId: currentFilterState.pivotId,
+      filterFields: [
         {
-          source_index: fieldIndex,
+          sourceIndex: fieldIndex,
           name: currentFilterState.fieldName,
-          hidden_items: hiddenItems.length > 0 ? hiddenItems : undefined,
+          hiddenItems: hiddenItems.length > 0 ? hiddenItems : undefined,
         },
       ],
     });

@@ -59,12 +59,12 @@ export function usePivotEditorState({
   // Build the update request from current state
   const buildUpdateRequest = useCallback((): UpdatePivotFieldsRequest => {
     const rowFields: PivotFieldConfig[] = rows.map((f) => ({
-      source_index: f.sourceIndex,
+      sourceIndex: f.sourceIndex,
       name: f.name,
     }));
 
     const columnFields: PivotFieldConfig[] = columns.map((f) => ({
-      source_index: f.sourceIndex,
+      sourceIndex: f.sourceIndex,
       name: f.name,
     }));
 
@@ -72,27 +72,27 @@ export function usePivotEditorState({
       const aggregation = f.aggregation ?? getDefaultAggregation(f.isNumeric);
       const displayName = f.customName || getValueFieldDisplayName(f.name, aggregation);
       return {
-        source_index: f.sourceIndex,
+        sourceIndex: f.sourceIndex,
         name: displayName,
         aggregation,
-        number_format: f.numberFormat,
-        show_values_as: f.showValuesAs,
+        numberFormat: f.numberFormat,
+        showValuesAs: f.showValuesAs,
       };
     });
 
     // Build filter fields with hidden items
     const filterFields: PivotFieldConfig[] = filters.map((f) => ({
-      source_index: f.sourceIndex,
+      sourceIndex: f.sourceIndex,
       name: f.name,
-      hidden_items: f.hiddenItems,
+      hiddenItems: f.hiddenItems,
     }));
 
     return {
-      pivot_id: pivotId,
-      row_fields: rowFields,
-      column_fields: columnFields,
-      value_fields: valueFields,
-      filter_fields: filterFields,
+      pivotId: pivotId,
+      rowFields: rowFields,
+      columnFields: columnFields,
+      valueFields: valueFields,
+      filterFields: filterFields,
       layout,
     };
   }, [pivotId, rows, columns, values, filters, layout]);

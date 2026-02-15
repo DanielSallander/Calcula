@@ -239,9 +239,12 @@ export interface FormattingOptions {
   italic?: boolean;
   underline?: boolean;
   strikethrough?: boolean;
+  fontSize?: number;
+  fontFamily?: string;
   textColor?: string;
   backgroundColor?: string;
   textAlign?: "left" | "center" | "right" | "general";
+  verticalAlign?: "top" | "middle" | "bottom";
   numberFormat?: string;
   wrapText?: boolean;
   textRotation?: "none" | "rotate90" | "rotate270";

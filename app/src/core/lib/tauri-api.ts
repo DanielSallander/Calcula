@@ -199,6 +199,20 @@ export async function findCtrlArrowTarget(
   });
 }
 
+/**
+ * Detect the contiguous data region around a cell (Excel's CurrentRegion).
+ * Returns [startRow, startCol, endRow, endCol] or null if the cell is isolated/empty.
+ */
+export async function detectDataRegion(
+  row: number,
+  col: number
+): Promise<[number, number, number, number] | null> {
+  return invoke<[number, number, number, number] | null>("detect_data_region", {
+    row,
+    col,
+  });
+}
+
 // ============================================================================
 // Dimension Operations
 // ============================================================================
@@ -274,9 +288,12 @@ export async function applyFormatting(
       italic: formatting.italic,
       underline: formatting.underline,
       strikethrough: formatting.strikethrough,
+      fontSize: formatting.fontSize,
+      fontFamily: formatting.fontFamily,
       textColor: formatting.textColor,
       backgroundColor: formatting.backgroundColor,
       textAlign: formatting.textAlign,
+      verticalAlign: formatting.verticalAlign,
       numberFormat: formatting.numberFormat,
       wrapText: formatting.wrapText,
       textRotation: formatting.textRotation,

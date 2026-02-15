@@ -46,6 +46,7 @@ import {
   handleSelectionChange,
   updateCachedRegions,
   resetSelectionHandlerState,
+  forceRecheck,
 } from "./handlers/selectionHandler";
 import type { PivotRegionData } from "./types";
 import { getPivotRegionsForSheet, getPivotAtCell } from "./lib/pivot-api";
@@ -286,6 +287,16 @@ export function registerPivotExtension(): void {
   const handleGridRefreshForRegions = () => { refreshPivotRegions(false); };
   window.addEventListener("grid:refresh", handleGridRefreshForRegions);
   cleanupFunctions.push(() => window.removeEventListener("grid:refresh", handleGridRefreshForRegions));
+
+  // Listen for task pane reopen requests (e.g., from View menu "Show" action)
+  const handleReopenRequest = (e: Event) => {
+    const detail = (e as CustomEvent<{ viewId: string }>).detail;
+    if (detail?.viewId === PIVOT_PANE_ID) {
+      forceRecheck();
+    }
+  };
+  window.addEventListener("taskpane:requestReopen", handleReopenRequest);
+  cleanupFunctions.push(() => window.removeEventListener("taskpane:requestReopen", handleReopenRequest));
 
   // Initial region load
   refreshPivotRegions(false);
