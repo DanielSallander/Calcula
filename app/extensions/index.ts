@@ -3,6 +3,7 @@
 // CONTEXT: Called from main.tsx to register all extensions before rendering.
 
 import { registerPivotExtension, unregisterPivotExtension } from "./Pivot";
+import { registerTableExtension, unregisterTableExtension } from "./Table";
 
 /**
  * Load all extensions.
@@ -14,6 +15,7 @@ export function loadExtensions(): void {
   // Load built-in extensions
   // Note: StandardMenus and FindReplace are now loaded via ExtensionManager
   registerPivotExtension();
+  registerTableExtension();
 
   // Future: Load user extensions from config
 
@@ -28,6 +30,7 @@ export function unloadExtensions(): void {
   console.log("[Extensions] Unloading extensions...");
 
   // Unload in reverse order
+  unregisterTableExtension();
   unregisterPivotExtension();
 
   console.log("[Extensions] All extensions unloaded");
@@ -35,3 +38,4 @@ export function unloadExtensions(): void {
 
 // Re-export individual extension registration functions for granular control
 export { registerPivotExtension, unregisterPivotExtension };
+export { registerTableExtension, unregisterTableExtension };

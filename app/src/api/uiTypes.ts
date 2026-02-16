@@ -47,6 +47,8 @@ export interface MenuDefinition {
   order: number;
   /** Menu items */
   items: MenuItemDefinition[];
+  /** Whether the entire menu is hidden (used for contextual menus) */
+  hidden?: boolean;
 }
 
 // ============================================================================
@@ -59,6 +61,7 @@ export interface MenuDefinition {
  */
 export type TaskPaneContextKey =
   | "pivot"           // Selection is within a pivot table
+  | "table"           // Selection is within a table
   | "chart"           // Selection is within a chart
   | "comment"         // Cell has a comment
   | "formatting"      // Formatting pane requested

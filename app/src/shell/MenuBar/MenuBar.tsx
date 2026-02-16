@@ -89,7 +89,7 @@ export function MenuBar(): React.ReactElement {
 
   return (
     <S.MenuBarContainer ref={menuBarRef}>
-      {menus.map((menu) => (
+      {menus.filter((menu) => !menu.hidden).map((menu) => (
         <S.MenuContainer key={menu.id}>
           <S.MenuButton
             $isOpen={openMenu === menu.id}

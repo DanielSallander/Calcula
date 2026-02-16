@@ -28,7 +28,7 @@ import {
   type GridContextMenuItem,
 } from "../api/extensions";
 
-import { shallow } from "zustand/shallow";
+import { useShallow } from "zustand/react/shallow";
 
 // Shell implementations
 import { useTaskPaneStore } from "./TaskPane/useTaskPaneStore";
@@ -91,8 +91,7 @@ export function bootstrapShell(): void {
     useOpenAction: () => useTaskPaneStore((state) => state.open),
     useCloseAction: () => useTaskPaneStore((state) => state.close),
     useOpenPaneIds: () => useTaskPaneStore(
-      (state) => state.openPanes.map((p) => p.viewId),
-      shallow,
+      useShallow((state) => state.openPanes.map((p) => p.viewId)),
     ),
     useManuallyClosed: () => useTaskPaneStore((state) => state.manuallyClosed),
     useActiveContextKeys: () => useTaskPaneStore((state) => state.activeContextKeys),
