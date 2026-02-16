@@ -5,7 +5,8 @@ use crate::api_types::{CellData, FormattingParams, FormattingResult, StyleData, 
 use crate::commands::utils::get_cell_internal_with_merge;
 use crate::{format_cell_value, AppState};
 use engine::{
-    Cell, CellValue, Color, CurrencyPosition, NumberFormat, TextAlign, TextRotation, VerticalAlign,
+    BorderLineStyle, BorderStyle, Cell, CellValue, Color, CurrencyPosition, NumberFormat,
+    TextAlign, TextRotation, VerticalAlign,
 };
 use tauri::State;
 
@@ -206,6 +207,20 @@ pub fn apply_formatting(
                 new_style.number_format = parse_number_format(format);
             }
 
+            // Apply border formatting
+            if let Some(ref border) = params.border_top {
+                new_style.borders.top = parse_border_side(border);
+            }
+            if let Some(ref border) = params.border_right {
+                new_style.borders.right = parse_border_side(border);
+            }
+            if let Some(ref border) = params.border_bottom {
+                new_style.borders.bottom = parse_border_side(border);
+            }
+            if let Some(ref border) = params.border_left {
+                new_style.borders.left = parse_border_side(border);
+            }
+
             // Get or create style index
             let new_style_index = styles.get_or_create(new_style.clone());
 
@@ -332,6 +347,33 @@ fn parse_text_rotation(rotation: &str) -> TextRotation {
                 TextRotation::None
             }
         }
+    }
+}
+
+/// Parse a border side parameter into a BorderStyle.
+fn parse_border_side(param: &crate::api_types::BorderSideParam) -> BorderStyle {
+    let line_style = match param.style.as_str() {
+        "none" => BorderLineStyle::None,
+        "thin" | "medium" | "thick" => BorderLineStyle::Solid,
+        "dashed" => BorderLineStyle::Dashed,
+        "dotted" => BorderLineStyle::Dotted,
+        "double" => BorderLineStyle::Double,
+        _ => BorderLineStyle::None,
+    };
+    let width: u8 = match param.style.as_str() {
+        "none" => 0,
+        "thin" => 1,
+        "medium" => 2,
+        "thick" => 3,
+        "dashed" | "dotted" | "double" => 1,
+        _ => 0,
+    };
+    let color = Color::from_hex(&param.color).unwrap_or(Color::new(0, 0, 0));
+
+    BorderStyle {
+        width,
+        color,
+        style: line_style,
     }
 }
 

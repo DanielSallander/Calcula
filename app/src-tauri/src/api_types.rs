@@ -39,6 +39,15 @@ pub struct CellUpdateInput {
     pub value: String,
 }
 
+/// A single border side (top, right, bottom, or left).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BorderSideData {
+    pub style: String,
+    pub color: String,
+    pub width: u8,
+}
+
 /// Style data returned to the frontend.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -56,6 +65,10 @@ pub struct StyleData {
     pub number_format: String,
     pub wrap_text: bool,
     pub text_rotation: String,
+    pub border_top: BorderSideData,
+    pub border_right: BorderSideData,
+    pub border_bottom: BorderSideData,
+    pub border_left: BorderSideData,
 }
 
 /// Dimension data for column widths and row heights.
@@ -64,6 +77,14 @@ pub struct StyleData {
 pub struct DimensionData {
     pub index: u32,
     pub size: f64,
+}
+
+/// A single border side for formatting parameters.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BorderSideParam {
+    pub style: String,
+    pub color: String,
 }
 
 /// Formatting parameters for cell styling.
@@ -85,6 +106,10 @@ pub struct FormattingParams {
     pub number_format: Option<String>,
     pub wrap_text: Option<bool>,
     pub text_rotation: Option<String>,
+    pub border_top: Option<BorderSideParam>,
+    pub border_right: Option<BorderSideParam>,
+    pub border_bottom: Option<BorderSideParam>,
+    pub border_left: Option<BorderSideParam>,
 }
 
 /// Result from apply_formatting that includes both updated cells and new styles.
@@ -323,7 +348,31 @@ pub struct SortRangeResult {
 // Conversion helpers: API types <--> Engine types
 // ============================================================================
 
-use engine::{CellStyle, NumberFormat, TextAlign, TextRotation, VerticalAlign};
+use engine::{BorderLineStyle, CellStyle, NumberFormat, TextAlign, TextRotation, VerticalAlign};
+
+fn border_side_to_data(side: &engine::BorderStyle) -> BorderSideData {
+    let style_str = if side.style == BorderLineStyle::None || side.width == 0 {
+        "none".to_string()
+    } else {
+        match side.style {
+            BorderLineStyle::None => "none".to_string(),
+            BorderLineStyle::Solid => match side.width {
+                0 => "none".to_string(),
+                1 => "thin".to_string(),
+                2 => "medium".to_string(),
+                _ => "thick".to_string(),
+            },
+            BorderLineStyle::Dashed => "dashed".to_string(),
+            BorderLineStyle::Dotted => "dotted".to_string(),
+            BorderLineStyle::Double => "double".to_string(),
+        }
+    };
+    BorderSideData {
+        style: style_str,
+        color: side.color.to_css(),
+        width: side.width,
+    }
+}
 
 impl From<&CellStyle> for StyleData {
     fn from(style: &CellStyle) -> Self {
@@ -355,6 +404,10 @@ impl From<&CellStyle> for StyleData {
                 TextRotation::Rotate270 => "rotate270".to_string(),
                 TextRotation::Custom(angle) => format!("custom:{}", angle),
             },
+            border_top: border_side_to_data(&style.borders.top),
+            border_right: border_side_to_data(&style.borders.right),
+            border_bottom: border_side_to_data(&style.borders.bottom),
+            border_left: border_side_to_data(&style.borders.left),
         }
     }
 }

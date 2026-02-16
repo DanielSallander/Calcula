@@ -193,6 +193,15 @@ export interface DimensionData {
 }
 
 /**
+ * A single border side (top, right, bottom, or left).
+ */
+export interface BorderSideData {
+  style: string;
+  color: string;
+  width: number;
+}
+
+/**
  * Style data from the backend.
  * Uses camelCase to match Rust's serde(rename_all = "camelCase").
  */
@@ -210,7 +219,20 @@ export interface StyleData {
   numberFormat: string;
   wrapText: boolean;
   textRotation: string;
+  borderTop: BorderSideData;
+  borderRight: BorderSideData;
+  borderBottom: BorderSideData;
+  borderLeft: BorderSideData;
 }
+
+/**
+ * Default border side data (no border).
+ */
+export const DEFAULT_BORDER_SIDE: BorderSideData = {
+  style: "none",
+  color: "#000000",
+  width: 0,
+};
 
 /**
  * Default style data for cells without custom styling.
@@ -229,7 +251,19 @@ export const DEFAULT_STYLE: StyleData = {
   numberFormat: "General",
   wrapText: false,
   textRotation: "none",
+  borderTop: { ...DEFAULT_BORDER_SIDE },
+  borderRight: { ...DEFAULT_BORDER_SIDE },
+  borderBottom: { ...DEFAULT_BORDER_SIDE },
+  borderLeft: { ...DEFAULT_BORDER_SIDE },
 };
+
+/**
+ * Border side parameter for formatting.
+ */
+export interface BorderSideParam {
+  style: string;
+  color: string;
+}
 
 /**
  * Formatting options for applying styles to cells.
@@ -248,6 +282,10 @@ export interface FormattingOptions {
   numberFormat?: string;
   wrapText?: boolean;
   textRotation?: "none" | "rotate90" | "rotate270";
+  borderTop?: BorderSideParam;
+  borderRight?: BorderSideParam;
+  borderBottom?: BorderSideParam;
+  borderLeft?: BorderSideParam;
 }
 
 /**

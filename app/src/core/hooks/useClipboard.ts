@@ -20,6 +20,7 @@ import {
   getCellsInRows,
   getCellsInCols,
   hasContentInRange,
+  setCellStyle,
 } from "../lib/tauri-api";
 import type { CellUpdateInput } from "../lib/tauri-api";
 import { cellEvents } from "../lib/cellEvents";
@@ -235,9 +236,12 @@ export function useClipboard(): UseClipboardReturn {
     // Track if we're using internal clipboard (for deciding whether to clear after paste)
     let usingInternalClipboard = false;
 
+    // Normalize line endings for comparison (Windows clipboard uses \r\n)
+    const normalizedSystemText = textToPaste?.replace(/\r\n/g, "\n") ?? null;
+
     if (
       internalClipboard &&
-      (!textToPaste || textToPaste === internalClipboard.text)
+      (!normalizedSystemText || normalizedSystemText === internalClipboard.text)
     ) {
       // Use internal clipboard (preserves formulas, formatting, etc.)
       cellsToPaste = internalClipboard.cells;
@@ -307,6 +311,14 @@ export function useClipboard(): UseClipboardReturn {
           try {
             const tIpc = performance.now();
             const updatedCells = await updateCell(destRow, destCol, value);
+
+            // Apply source cell's style when using internal clipboard
+            // Always set the style (even to 0) so target cell formatting is replaced
+            if (usingInternalClipboard) {
+              const styleIdx = sourceCell?.styleIndex ?? 0;
+              await setCellStyle(destRow, destCol, styleIdx);
+            }
+
             totalIpcMs += performance.now() - tIpc;
             cellCount++;
 
@@ -390,6 +402,12 @@ export function useClipboard(): UseClipboardReturn {
 
       // Commit the undo transaction
       await commitUndoTransaction();
+
+      // Refresh style cache so the canvas picks up any new styles from pasted cells
+      if (usingInternalClipboard) {
+        window.dispatchEvent(new CustomEvent("styles:refresh"));
+        window.dispatchEvent(new CustomEvent("grid:refresh"));
+      }
 
       // Update selection to cover the pasted range
       const pastedEndRow = targetRow + actualPasteHeight - 1;
@@ -493,6 +511,11 @@ export function useClipboard(): UseClipboardReturn {
 
             try {
               const updatedCells = await updateCell(destRow, destCol, value);
+
+              // Copy style from source cell
+              const styleIdx = sourceCell?.styleIndex ?? 0;
+              await setCellStyle(destRow, destCol, styleIdx);
+
               for (const cell of updatedCells) {
                 if (cell.sheetIndex !== undefined) continue;
                 cellEvents.emit({
@@ -541,6 +564,10 @@ export function useClipboard(): UseClipboardReturn {
 
         // Commit the undo transaction
         await commitUndoTransaction();
+
+        // Refresh style cache so the canvas picks up styles from moved cells
+        window.dispatchEvent(new CustomEvent("styles:refresh"));
+        window.dispatchEvent(new CustomEvent("grid:refresh"));
 
         // 5. Update selection to new position
         dispatch(setSelection({
@@ -609,6 +636,14 @@ export function useClipboard(): UseClipboardReturn {
         }
         if (updates.length > 0) {
           await updateCellsBatch(updates);
+        }
+
+        // 3b. Copy styles from source cells to target rows
+        for (const cell of sourceCells) {
+          if (cell.styleIndex > 0) {
+            const newRow = targetRow + (cell.row - minRow);
+            await setCellStyle(newRow, cell.col, cell.styleIndex);
+          }
         }
 
         // 4. Clear source rows (excluding overlap with target)
@@ -704,6 +739,14 @@ export function useClipboard(): UseClipboardReturn {
         }
         if (updates.length > 0) {
           await updateCellsBatch(updates);
+        }
+
+        // 3b. Copy styles from source cells to target columns
+        for (const cell of sourceCells) {
+          if (cell.styleIndex > 0) {
+            const newCol = targetCol + (cell.col - minCol);
+            await setCellStyle(cell.row, newCol, cell.styleIndex);
+          }
         }
 
         // 4. Clear source columns (excluding overlap with target)

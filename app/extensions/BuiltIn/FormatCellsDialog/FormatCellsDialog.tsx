@@ -78,6 +78,10 @@ export function FormatCellsDialog(props: DialogProps): React.ReactElement | null
               ? "general"
               : style.numberFormat,
             backgroundColor: style.backgroundColor,
+            borderTop: style.borderTop ? { style: style.borderTop.style, color: style.borderTop.color } : undefined,
+            borderRight: style.borderRight ? { style: style.borderRight.style, color: style.borderRight.color } : undefined,
+            borderBottom: style.borderBottom ? { style: style.borderBottom.style, color: style.borderBottom.color } : undefined,
+            borderLeft: style.borderLeft ? { style: style.borderLeft.style, color: style.borderLeft.color } : undefined,
           });
         }
 
@@ -129,6 +133,10 @@ export function FormatCellsDialog(props: DialogProps): React.ReactElement | null
         numberFormat: store.numberFormat,
         wrapText: store.wrapText,
         textRotation: store.textRotation as "none" | "rotate90" | "rotate270",
+        borderTop: { style: store.borderTop.style, color: store.borderTop.color },
+        borderRight: { style: store.borderRight.style, color: store.borderRight.color },
+        borderBottom: { style: store.borderBottom.style, color: store.borderBottom.color },
+        borderLeft: { style: store.borderLeft.style, color: store.borderLeft.color },
       });
 
       // Apply protection
@@ -151,6 +159,10 @@ export function FormatCellsDialog(props: DialogProps): React.ReactElement | null
           formula: cell.formula,
         });
       }
+
+      // Trigger style cache and grid data refresh so the canvas picks up new styles
+      window.dispatchEvent(new CustomEvent("styles:refresh"));
+      window.dispatchEvent(new CustomEvent("grid:refresh"));
 
       reset();
       onClose();

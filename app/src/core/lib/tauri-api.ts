@@ -262,8 +262,7 @@ export async function setCellStyle(
   col: number,
   styleIndex: number
 ): Promise<CellData> {
-  // FIXED: Mapped 'styleIndex' to 'style_index' to match Rust command signature
-  return invoke<CellData>("set_cell_style", { row, col, style_index: styleIndex });
+  return invoke<CellData>("set_cell_style", { row, col, styleIndex });
 }
 
 export async function applyFormatting(
@@ -297,6 +296,10 @@ export async function applyFormatting(
       numberFormat: formatting.numberFormat,
       wrapText: formatting.wrapText,
       textRotation: formatting.textRotation,
+      borderTop: formatting.borderTop,
+      borderRight: formatting.borderRight,
+      borderBottom: formatting.borderBottom,
+      borderLeft: formatting.borderLeft,
     },
   });
   console.log(

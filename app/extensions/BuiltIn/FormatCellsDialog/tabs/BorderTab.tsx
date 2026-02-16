@@ -93,10 +93,6 @@ export function BorderTab(): React.ReactElement {
 
   return (
     <Container>
-      <InfoBanner>
-        Border rendering coming soon. Configure borders here for when support is added.
-      </InfoBanner>
-
       <MainLayout>
         {/* Left: Line style and color */}
         <LeftPanel>
@@ -201,16 +197,6 @@ const Container = styled.div`
   display: flex;
   flex-direction: column;
   gap: 8px;
-`;
-
-const InfoBanner = styled.div`
-  padding: 6px 10px;
-  font-size: 11px;
-  color: ${v("--text-secondary")};
-  background: ${v("--grid-bg")};
-  border: 1px solid ${v("--border-default")};
-  border-radius: 4px;
-  font-style: italic;
 `;
 
 const MainLayout = styled.div`

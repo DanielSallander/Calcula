@@ -118,6 +118,18 @@ export function useSpreadsheetStyles(canvasRef: React.RefObject<GridCanvasHandle
     }
   }, [refreshStyles, canvasRef]);
 
+  /**
+   * Listen for "styles:refresh" events dispatched by extensions (e.g., FormatCellsDialog)
+   * or undo/redo to keep the style cache in sync with the backend.
+   */
+  useEffect(() => {
+    const handler = () => {
+      handleCellsUpdated();
+    };
+    window.addEventListener("styles:refresh", handler);
+    return () => window.removeEventListener("styles:refresh", handler);
+  }, [handleCellsUpdated]);
+
   return {
     styleCache,
     styleCacheVersion,

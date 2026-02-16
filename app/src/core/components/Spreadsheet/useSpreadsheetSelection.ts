@@ -285,7 +285,10 @@ export function useSpreadsheetSelection({
         await canvas.refreshCells();
         canvas.redraw();
       }
-      
+
+      // Refresh style cache (undo may revert formatting changes)
+      window.dispatchEvent(new CustomEvent("styles:refresh"));
+
       // Emit event to update any listeners (e.g., formula bar)
       if (result.updatedCells.length > 0) {
         const firstCell = result.updatedCells[0];
@@ -315,7 +318,10 @@ export function useSpreadsheetSelection({
         await canvas.refreshCells();
         canvas.redraw();
       }
-      
+
+      // Refresh style cache (redo may re-apply formatting changes)
+      window.dispatchEvent(new CustomEvent("styles:refresh"));
+
       // Emit event to update any listeners (e.g., formula bar)
       if (result.updatedCells.length > 0) {
         const firstCell = result.updatedCells[0];
