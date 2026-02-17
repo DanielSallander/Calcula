@@ -370,18 +370,21 @@ export function CreateChartDialog({
         throw new Error("Invalid chart configuration.");
       }
 
-      // Calculate placement: place chart 2 rows below the data range
-      const chartStartRow = parsed.endRow + 2;
-      const chartStartCol = parsed.startCol;
-      const chartEndRow = chartStartRow + 19; // ~20 rows high
-      const chartEndCol = chartStartCol + 9;  // ~10 cols wide
+      // Calculate pixel placement: place chart 2 rows below the data range
+      // Uses default cell sizes for approximate positioning. User can move/resize freely.
+      const defaultCellWidth = 100;
+      const defaultCellHeight = 24;
+      const chartX = parsed.startCol * defaultCellWidth;
+      const chartY = (parsed.endRow + 2) * defaultCellHeight;
+      const chartWidth = 600;   // Default chart width in pixels
+      const chartHeight = 400;  // Default chart height in pixels
 
       const chart = createChart(currentSpec, {
         sheetIndex: currentSheetIndex,
-        startRow: chartStartRow,
-        startCol: chartStartCol,
-        endRow: chartEndRow,
-        endCol: chartEndCol,
+        x: chartX,
+        y: chartY,
+        width: chartWidth,
+        height: chartHeight,
       });
 
       console.log("[CreateChartDialog] Chart created:", chart.name, chart);

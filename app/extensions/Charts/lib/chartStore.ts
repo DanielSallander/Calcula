@@ -2,6 +2,7 @@
 // PURPOSE: In-memory chart store for tracking chart definitions.
 // CONTEXT: Temporary frontend-only store. Same pattern as tableStore.ts.
 //          Will be replaced with backend API calls when Rust chart persistence is added.
+//          Charts are free-floating objects positioned by pixel coordinates.
 
 import {
   removeGridRegionsByType,
@@ -30,10 +31,10 @@ export function createChart(
   spec: ChartSpec,
   placement: {
     sheetIndex: number;
-    startRow: number;
-    startCol: number;
-    endRow: number;
-    endCol: number;
+    x: number;
+    y: number;
+    width: number;
+    height: number;
   },
 ): ChartDefinition {
   const id = nextChartId++;
@@ -41,37 +42,14 @@ export function createChart(
     chartId: id,
     name: `Chart ${id}`,
     sheetIndex: placement.sheetIndex,
-    startRow: placement.startRow,
-    startCol: placement.startCol,
-    endRow: placement.endRow,
-    endCol: placement.endCol,
+    x: placement.x,
+    y: placement.y,
+    width: placement.width,
+    height: placement.height,
     spec,
   };
   charts.push(chart);
   return chart;
-}
-
-/**
- * Find the chart at a given cell position.
- * Returns null if no chart contains the cell.
- */
-export function getChartAtCell(
-  row: number,
-  col: number,
-  sheetIndex?: number,
-): ChartDefinition | null {
-  for (const chart of charts) {
-    if (
-      (sheetIndex === undefined || chart.sheetIndex === sheetIndex) &&
-      row >= chart.startRow &&
-      row <= chart.endRow &&
-      col >= chart.startCol &&
-      col <= chart.endCol
-    ) {
-      return chart;
-    }
-  }
-  return null;
 }
 
 /**
@@ -109,36 +87,36 @@ export function deleteChart(chartId: number): void {
 }
 
 /**
- * Move a chart to a new grid position.
+ * Move a chart to a new pixel position.
  */
 export function moveChart(
   chartId: number,
-  startRow: number,
-  startCol: number,
+  x: number,
+  y: number,
 ): void {
   const chart = charts.find((c) => c.chartId === chartId);
   if (chart) {
-    const rowSpan = chart.endRow - chart.startRow;
-    const colSpan = chart.endCol - chart.startCol;
-    chart.startRow = startRow;
-    chart.startCol = startCol;
-    chart.endRow = startRow + rowSpan;
-    chart.endCol = startCol + colSpan;
+    chart.x = x;
+    chart.y = y;
   }
 }
 
 /**
- * Resize a chart's region.
+ * Resize a chart (full bounds update to support all corner resize).
  */
 export function resizeChart(
   chartId: number,
-  endRow: number,
-  endCol: number,
+  x: number,
+  y: number,
+  width: number,
+  height: number,
 ): void {
   const chart = charts.find((c) => c.chartId === chartId);
   if (chart) {
-    chart.endRow = endRow;
-    chart.endCol = endCol;
+    chart.x = x;
+    chart.y = y;
+    chart.width = width;
+    chart.height = height;
   }
 }
 
@@ -152,99 +130,16 @@ export function resetChartStore(): void {
 }
 
 // ============================================================================
-// Structural Change Handlers
-// ============================================================================
-
-/**
- * Shift chart boundaries when rows are inserted.
- * Charts entirely below the insertion point are shifted down.
- * Charts spanning the insertion point expand.
- */
-export function shiftChartsForRowInsert(fromRow: number, count: number): void {
-  for (const chart of charts) {
-    if (chart.startRow > fromRow) {
-      chart.startRow += count;
-      chart.endRow += count;
-    } else if (chart.endRow >= fromRow) {
-      chart.endRow += count;
-    }
-  }
-}
-
-/**
- * Shift chart boundaries when columns are inserted.
- */
-export function shiftChartsForColInsert(fromCol: number, count: number): void {
-  for (const chart of charts) {
-    if (chart.startCol > fromCol) {
-      chart.startCol += count;
-      chart.endCol += count;
-    } else if (chart.endCol >= fromCol) {
-      chart.endCol += count;
-    }
-  }
-}
-
-/**
- * Shift chart boundaries when rows are deleted.
- * Charts fully within the deleted range are removed.
- */
-export function shiftChartsForRowDelete(fromRow: number, count: number): void {
-  const deleteEnd = fromRow + count;
-
-  charts = charts.filter(
-    (c) => !(c.startRow >= fromRow && c.endRow < deleteEnd),
-  );
-
-  for (const chart of charts) {
-    if (chart.startRow >= deleteEnd) {
-      chart.startRow -= count;
-      chart.endRow -= count;
-    } else if (chart.startRow >= fromRow) {
-      chart.startRow = fromRow;
-      chart.endRow -= count;
-    } else if (chart.endRow >= deleteEnd) {
-      chart.endRow -= count;
-    } else if (chart.endRow >= fromRow) {
-      chart.endRow = Math.max(fromRow - 1, chart.startRow);
-    }
-  }
-}
-
-/**
- * Shift chart boundaries when columns are deleted.
- * Charts fully within the deleted range are removed.
- */
-export function shiftChartsForColDelete(fromCol: number, count: number): void {
-  const deleteEnd = fromCol + count;
-
-  charts = charts.filter(
-    (c) => !(c.startCol >= fromCol && c.endCol < deleteEnd),
-  );
-
-  for (const chart of charts) {
-    if (chart.startCol >= deleteEnd) {
-      chart.startCol -= count;
-      chart.endCol -= count;
-    } else if (chart.startCol >= fromCol) {
-      chart.startCol = fromCol;
-      chart.endCol -= count;
-    } else if (chart.endCol >= deleteEnd) {
-      chart.endCol -= count;
-    } else if (chart.endCol >= fromCol) {
-      chart.endCol = Math.max(fromCol - 1, chart.startCol);
-    }
-  }
-}
-
-// ============================================================================
 // Grid Overlay Sync
 // ============================================================================
 
 /**
  * Sync all chart definitions to the grid overlay system.
- * Call this after any mutation (create, resize, delete, spec change)
+ * Call this after any mutation (create, move, resize, delete, spec change)
  * so the canvas renders charts correctly.
+ *
+ * Charts use the `floating` field on GridRegion for pixel-based positioning.
+ * The cell-based fields (startRow etc.) are set to 0 since they're unused.
  */
 export function syncChartRegions(): void {
   removeGridRegionsByType("chart");
@@ -252,10 +147,16 @@ export function syncChartRegions(): void {
   const regions: GridRegion[] = charts.map((chart) => ({
     id: `chart-${chart.chartId}`,
     type: "chart",
-    startRow: chart.startRow,
-    startCol: chart.startCol,
-    endRow: chart.endRow,
-    endCol: chart.endCol,
+    startRow: 0,
+    startCol: 0,
+    endRow: 0,
+    endCol: 0,
+    floating: {
+      x: chart.x,
+      y: chart.y,
+      width: chart.width,
+      height: chart.height,
+    },
     data: {
       chartId: chart.chartId,
       name: chart.name,

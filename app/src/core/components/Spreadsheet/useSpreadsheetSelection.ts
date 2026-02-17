@@ -363,6 +363,7 @@ export function useSpreadsheetSelection({
     handleMouseMove: baseHandleMouseMove,
     handleMouseUp: baseHandleMouseUp,
     handleDoubleClick: getDoubleClickCell,
+    isOverFloatingOverlay,
   } = useMouseSelection({
     containerRef,
     scrollRef,
@@ -421,6 +422,13 @@ export function useSpreadsheetSelection({
         return;
       }
 
+      // Check if clicking on a floating overlay (e.g., chart) - skip cell interceptor logic
+      // and go directly to baseHandleMouseDown which handles overlay move/resize
+      if (isOverFloatingOverlay(mouseX, mouseY)) {
+        baseHandleMouseDown(event);
+        return;
+      }
+
       // Get cell from click position to check for extension click interceptors
       const { getCellFromPixel } = await import("../../lib/gridRenderer");
       const clickedCell = getCellFromPixel(mouseX, mouseY, state.config, state.viewport, state.dimensions);
@@ -441,7 +449,7 @@ export function useSpreadsheetSelection({
 
       baseHandleMouseDown(event);
     },
-    [baseHandleMouseDown, isOverFillHandle, startFillDrag, state.config, state.viewport, state.dimensions]
+    [baseHandleMouseDown, isOverFillHandle, startFillDrag, isOverFloatingOverlay, state.config, state.viewport, state.dimensions]
   );
 
   const handleMouseMove = useCallback(

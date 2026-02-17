@@ -31,6 +31,13 @@ export interface GridRegion {
   endCol: number;
   /** Extension-defined metadata */
   data?: Record<string, unknown>;
+  /**
+   * Pixel-based positioning for free-floating overlays.
+   * When set, the overlay is positioned by pixel coordinates relative to the
+   * sheet origin (top-left of cell A1) rather than by cell coordinates.
+   * The startRow/startCol/endRow/endCol fields are ignored for floating overlays.
+   */
+  floating?: { x: number; y: number; width: number; height: number };
 }
 
 // ============================================================================
@@ -65,6 +72,8 @@ export interface OverlayHitTestContext {
   canvasY: number;
   row: number;
   col: number;
+  /** Pre-computed canvas bounds for floating overlays. Only set when region.floating is defined. */
+  floatingCanvasBounds?: { x: number; y: number; width: number; height: number };
 }
 
 /** A function that tests whether a point falls within an overlay region. */
@@ -172,14 +181,30 @@ export function onRegionChange(handler: RegionChangeHandler): () => void {
 }
 
 /**
+ * Request a canvas redraw for overlay changes.
+ * Use this when overlay visual state changes (e.g., cached render completed)
+ * without the grid regions themselves changing.
+ */
+export function requestOverlayRedraw(): void {
+  notifyRegionChange();
+}
+
+/**
  * Hit-test: find which overlay region (if any) is at the given position.
  * Tests in reverse priority order so the topmost overlay wins.
+ *
+ * For floating overlays, pass scrollX/scrollY/rowHeaderWidth/colHeaderHeight
+ * so that pixel-based canvas bounds can be computed for hit-testing.
  */
 export function hitTestOverlays(
   canvasX: number,
   canvasY: number,
   row: number,
-  col: number
+  col: number,
+  scrollX?: number,
+  scrollY?: number,
+  rowHeaderWidth?: number,
+  colHeaderHeight?: number,
 ): GridRegion | null {
   const renderers = getOverlayRenderers().reverse();
 
@@ -188,7 +213,20 @@ export function hitTestOverlays(
 
     const matchingRegions = gridRegions.filter((r) => r.type === renderer.type);
     for (const region of matchingRegions) {
-      if (renderer.hitTest({ region, canvasX, canvasY, row, col })) {
+      // Pre-compute canvas bounds for floating overlays
+      let floatingCanvasBounds: { x: number; y: number; width: number; height: number } | undefined;
+      if (region.floating && scrollX != null && scrollY != null) {
+        const rhw = rowHeaderWidth ?? 50;
+        const chh = colHeaderHeight ?? 24;
+        floatingCanvasBounds = {
+          x: rhw + region.floating.x - scrollX,
+          y: chh + region.floating.y - scrollY,
+          width: region.floating.width,
+          height: region.floating.height,
+        };
+      }
+
+      if (renderer.hitTest({ region, canvasX, canvasY, row, col, floatingCanvasBounds })) {
         return region;
       }
     }
@@ -289,4 +327,22 @@ export function overlayGetRowHeaderWidth(ctx: OverlayRenderContext): number {
 /** Get the column header height from the overlay context. */
 export function overlayGetColHeaderHeight(ctx: OverlayRenderContext): number {
   return ctx.config.colHeaderHeight ?? 24;
+}
+
+/**
+ * Convert sheet pixel coordinates to canvas pixel coordinates.
+ * Sheet coordinates: (0,0) = top-left of cell A1.
+ * Canvas coordinates: (0,0) = top-left of the canvas element.
+ */
+export function overlaySheetToCanvas(
+  ctx: OverlayRenderContext,
+  sheetX: number,
+  sheetY: number,
+): { canvasX: number; canvasY: number } {
+  const rhw = ctx.config.rowHeaderWidth ?? 50;
+  const chh = ctx.config.colHeaderHeight ?? 24;
+  return {
+    canvasX: rhw + sheetX - ctx.viewport.scrollX,
+    canvasY: chh + sheetY - ctx.viewport.scrollY,
+  };
 }

@@ -192,8 +192,10 @@ export interface UseMouseSelectionReturn {
   isRefResizing: boolean;
   /** Whether a selection is being dragged to move cells */
   isSelectionDragging: boolean;
-  /** Whether an overlay region (table) is being resized */
+  /** Whether an overlay region (table/chart) is being resized */
   isOverlayResizing: boolean;
+  /** Whether a floating overlay is being moved */
+  isOverlayMoving: boolean;
   /** Preview selection showing where cells would land during drag */
   selectionDragPreview: Selection | null;
   /** Current cursor style to use */
@@ -206,6 +208,8 @@ export interface UseMouseSelectionReturn {
   handleMouseUp: () => void;
   /** Handle double-click on the grid */
   handleDoubleClick: (event: React.MouseEvent<HTMLElement>) => { row: number; col: number } | null;
+  /** Check if a canvas position is over a floating overlay (e.g., chart) */
+  isOverFloatingOverlay: (mouseX: number, mouseY: number) => boolean;
 }
 
 /**

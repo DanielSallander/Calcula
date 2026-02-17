@@ -658,6 +658,24 @@ export const GridCanvas = forwardRef<GridCanvasHandle, GridCanvasProps>(
     }, [refreshCells, draw, insertionAnimation]);
 
     /**
+     * Listen for app:grid-refresh events (from extensions via emitAppEvent).
+     * Extensions use AppEvents.GRID_REFRESH to request a canvas redraw after
+     * overlay state changes (e.g., chart selection, async render completion).
+     * This only redraws—no cell data refresh needed since overlays don't change cells.
+     */
+    useEffect(() => {
+      const handleAppGridRefresh = () => {
+        draw(animationOffsetRef.current, insertionAnimation);
+      };
+
+      window.addEventListener('app:grid-refresh', handleAppGridRefresh);
+
+      return () => {
+        window.removeEventListener('app:grid-refresh', handleAppGridRefresh);
+      };
+    }, [draw, insertionAnimation]);
+
+    /**
      * Listen for sheet switch events during formula mode.
      * When user switches sheets while editing a formula (Point Mode),
      * we need to refresh cells to show the new sheet's data.

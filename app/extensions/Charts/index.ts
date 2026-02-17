@@ -1,14 +1,13 @@
 //! FILENAME: app/extensions/Charts/index.ts
 // PURPOSE: Chart extension entry point.
 // CONTEXT: Registers all chart functionality with the extension system.
+//          Charts are free-floating overlays that can be moved and resized.
 
 import {
   ExtensionRegistry,
   DialogExtensions,
   onAppEvent,
   AppEvents,
-  registerEditGuard,
-  registerCellClickInterceptor,
 } from "../../src/api";
 import {
   registerGridOverlay,
@@ -26,16 +25,15 @@ import {
 import {
   handleSelectionChange,
   resetSelectionHandlerState,
+  selectChart,
 } from "./handlers/selectionHandler";
 import {
   resetChartStore,
   syncChartRegions,
-  getChartAtCell,
   getAllCharts,
-  shiftChartsForRowInsert,
-  shiftChartsForColInsert,
-  shiftChartsForRowDelete,
-  shiftChartsForColDelete,
+  moveChart,
+  resizeChart,
+  getChartById,
 } from "./lib/chartStore";
 import { renderChart, hitTestChart, invalidateChartCache, invalidateAllChartCaches } from "./rendering/chartRenderer";
 import { ChartEvents } from "./lib/chartEvents";
@@ -71,29 +69,6 @@ export function registerChartExtension(): void {
     }),
   );
 
-  // Register edit guard to block editing in chart regions
-  cleanupFunctions.push(
-    registerEditGuard(async (row: number, col: number) => {
-      const chart = getChartAtCell(row, col);
-      if (chart) {
-        return { blocked: true, message: "Cannot edit cells occupied by a chart." };
-      }
-      return null;
-    }),
-  );
-
-  // Register click interceptor for chart selection
-  cleanupFunctions.push(
-    registerCellClickInterceptor(async (row: number, col: number) => {
-      const chart = getChartAtCell(row, col);
-      if (chart) {
-        // Selection handler will pick up the change via onSelectionChange
-        return false; // Let normal selection happen so selectionHandler fires
-      }
-      return false;
-    }),
-  );
-
   // Sync chart regions when charts change
   const handleChartChanged = () => {
     syncChartRegions();
@@ -120,37 +95,95 @@ export function registerChartExtension(): void {
     }),
   );
 
-  // Listen for structural changes to update chart boundaries
-  cleanupFunctions.push(
-    onAppEvent<{ row: number; count: number }>(AppEvents.ROWS_INSERTED, ({ row, count }) => {
-      shiftChartsForRowInsert(row, count);
-      syncChartRegions();
-      invalidateAllChartCaches();
-    }),
-  );
-  cleanupFunctions.push(
-    onAppEvent<{ col: number; count: number }>(AppEvents.COLUMNS_INSERTED, ({ col, count }) => {
-      shiftChartsForColInsert(col, count);
-      syncChartRegions();
-      invalidateAllChartCaches();
-    }),
-  );
-  cleanupFunctions.push(
-    onAppEvent<{ row: number; count: number }>(AppEvents.ROWS_DELETED, ({ row, count }) => {
-      shiftChartsForRowDelete(row, count);
-      syncChartRegions();
-      invalidateAllChartCaches();
-    }),
-  );
-  cleanupFunctions.push(
-    onAppEvent<{ col: number; count: number }>(AppEvents.COLUMNS_DELETED, ({ col, count }) => {
-      shiftChartsForColDelete(col, count);
-      syncChartRegions();
-      invalidateAllChartCaches();
-    }),
-  );
+  // -----------------------------------------------------------------------
+  // Floating Object Events (move/resize from Core mouse handlers)
+  // -----------------------------------------------------------------------
 
-  // Subscribe to selection changes
+  // Handle floating object selection (mousedown on chart body)
+  const handleFloatingSelected = (e: Event) => {
+    const detail = (e as CustomEvent).detail;
+    if (detail.regionType !== "chart") return;
+    const chartId = detail.data?.chartId as number;
+    if (chartId != null) {
+      selectChart(chartId);
+      emitAppEvent(AppEvents.GRID_REFRESH);
+    }
+  };
+  window.addEventListener("floatingObject:selected", handleFloatingSelected);
+  cleanupFunctions.push(() => {
+    window.removeEventListener("floatingObject:selected", handleFloatingSelected);
+  });
+
+  // Handle floating object move preview (live position update during drag)
+  const handleMovePreview = (e: Event) => {
+    const detail = (e as CustomEvent).detail;
+    if (detail.regionType !== "chart") return;
+    const chartId = detail.data?.chartId as number;
+    if (chartId != null) {
+      moveChart(chartId, detail.x, detail.y);
+      syncChartRegions();
+      emitAppEvent(AppEvents.GRID_REFRESH);
+    }
+  };
+  window.addEventListener("floatingObject:movePreview", handleMovePreview);
+  cleanupFunctions.push(() => {
+    window.removeEventListener("floatingObject:movePreview", handleMovePreview);
+  });
+
+  // Handle floating object move complete
+  const handleMoveComplete = (e: Event) => {
+    const detail = (e as CustomEvent).detail;
+    if (detail.regionType !== "chart") return;
+    const chartId = detail.data?.chartId as number;
+    if (chartId != null) {
+      moveChart(chartId, detail.x, detail.y);
+      syncChartRegions();
+      invalidateChartCache(chartId);
+      emitAppEvent(AppEvents.GRID_REFRESH);
+    }
+  };
+  window.addEventListener("floatingObject:moveComplete", handleMoveComplete);
+  cleanupFunctions.push(() => {
+    window.removeEventListener("floatingObject:moveComplete", handleMoveComplete);
+  });
+
+  // Handle floating object resize preview (live size update during drag)
+  // NOTE: We do NOT invalidate the chart cache here. The renderer will stretch
+  // the existing cached image to the new dimensions for instant visual feedback.
+  // The cache is only invalidated on resizeComplete to trigger a proper re-render.
+  const handleResizePreview = (e: Event) => {
+    const detail = (e as CustomEvent).detail;
+    if (detail.regionType !== "chart") return;
+    const chartId = detail.data?.chartId as number;
+    if (chartId != null) {
+      resizeChart(chartId, detail.x, detail.y, detail.width, detail.height);
+      syncChartRegions();
+      emitAppEvent(AppEvents.GRID_REFRESH);
+    }
+  };
+  window.addEventListener("floatingObject:resizePreview", handleResizePreview);
+  cleanupFunctions.push(() => {
+    window.removeEventListener("floatingObject:resizePreview", handleResizePreview);
+  });
+
+  // Handle floating object resize complete
+  const handleResizeComplete = (e: Event) => {
+    const detail = (e as CustomEvent).detail;
+    if (detail.regionType !== "chart") return;
+    const chartId = detail.data?.chartId as number;
+    if (chartId != null) {
+      resizeChart(chartId, detail.x, detail.y, detail.width, detail.height);
+      syncChartRegions();
+      invalidateChartCache(chartId);
+      emitAppEvent(AppEvents.GRID_REFRESH);
+    }
+  };
+  window.addEventListener("floatingObject:resizeComplete", handleResizeComplete);
+  cleanupFunctions.push(() => {
+    window.removeEventListener("floatingObject:resizeComplete", handleResizeComplete);
+  });
+
+  // Subscribe to selection changes (deselect chart when user clicks on grid)
   cleanupFunctions.push(
     ExtensionRegistry.onSelectionChange(handleSelectionChange),
   );

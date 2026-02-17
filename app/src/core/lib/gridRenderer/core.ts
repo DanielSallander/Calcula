@@ -49,6 +49,8 @@ export interface GridRegion {
   endRow: number;
   endCol: number;
   data?: Record<string, unknown>;
+  /** Pixel-based positioning for free-floating overlays. */
+  floating?: { x: number; y: number; width: number; height: number };
 }
 
 /** Context passed to overlay render functions during grid paint. */

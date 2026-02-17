@@ -111,11 +111,12 @@ export interface ChartDefinition {
   name: string;
   /** Sheet index where the chart is rendered. */
   sheetIndex: number;
-  /** Grid region the chart occupies (0-indexed, inclusive). */
-  startRow: number;
-  startCol: number;
-  endRow: number;
-  endCol: number;
+  /** Position in sheet pixels (from top-left of cell A1). */
+  x: number;
+  y: number;
+  /** Size in pixels. */
+  width: number;
+  height: number;
   /** The chart specification. */
   spec: ChartSpec;
 }

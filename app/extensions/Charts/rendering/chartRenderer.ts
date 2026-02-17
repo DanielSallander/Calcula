@@ -3,17 +3,16 @@
 // CONTEXT: Registered with registerGridOverlay(). Called synchronously every frame
 //          by the core canvas renderer. Uses async data fetching with cache to avoid
 //          blocking the render loop.
+//          Charts are free-floating overlays positioned by pixel coordinates.
 
 import {
-  overlayGetColumnX,
-  overlayGetRowY,
-  overlayGetColumnsWidth,
-  overlayGetRowsHeight,
   overlayGetRowHeaderWidth,
   overlayGetColHeaderHeight,
+  overlaySheetToCanvas,
+  requestOverlayRedraw,
   type OverlayRenderContext,
+  type OverlayHitTestContext,
 } from "../../../src/api/gridOverlays";
-import { emitAppEvent, AppEvents } from "../../../src/api/events";
 
 import { getChartById } from "../lib/chartStore";
 import { readChartData } from "../lib/chartDataReader";
@@ -68,6 +67,7 @@ export function removeChartFromCache(chartId: number): void {
 /**
  * Render function registered with registerGridOverlay().
  * Called synchronously for each chart region visible in the viewport.
+ * Charts use floating pixel-based positioning.
  */
 export function renderChart(overlayCtx: OverlayRenderContext): void {
   const { ctx, region } = overlayCtx;
@@ -77,21 +77,27 @@ export function renderChart(overlayCtx: OverlayRenderContext): void {
   const chart = getChartById(chartId);
   if (!chart) return;
 
+  // Floating overlays use pixel coordinates
+  if (!region.floating) return;
+
   const rowHeaderWidth = overlayGetRowHeaderWidth(overlayCtx);
   const colHeaderHeight = overlayGetColHeaderHeight(overlayCtx);
 
-  // Calculate pixel position and dimensions
-  const startX = overlayGetColumnX(overlayCtx, region.startCol);
-  const startY = overlayGetRowY(overlayCtx, region.startRow);
-  const chartWidth = overlayGetColumnsWidth(overlayCtx, region.startCol, region.endCol);
-  const chartHeight = overlayGetRowsHeight(overlayCtx, region.startRow, region.endRow);
+  // Convert sheet pixel position to canvas pixel position
+  const { canvasX, canvasY } = overlaySheetToCanvas(
+    overlayCtx,
+    region.floating.x,
+    region.floating.y,
+  );
+  const chartWidth = region.floating.width;
+  const chartHeight = region.floating.height;
 
-  const endX = startX + chartWidth;
-  const endY = startY + chartHeight;
+  const endX = canvasX + chartWidth;
+  const endY = canvasY + chartHeight;
 
   // Skip if not visible
   if (endX < rowHeaderWidth || endY < colHeaderHeight) return;
-  if (startX > overlayCtx.canvasWidth || startY > overlayCtx.canvasHeight) return;
+  if (canvasX > overlayCtx.canvasWidth || canvasY > overlayCtx.canvasHeight) return;
 
   // Clip to cell area (not over headers)
   ctx.save();
@@ -106,7 +112,7 @@ export function renderChart(overlayCtx: OverlayRenderContext): void {
 
   // Draw white background
   ctx.fillStyle = "#ffffff";
-  ctx.fillRect(startX, startY, chartWidth, chartHeight);
+  ctx.fillRect(canvasX, canvasY, chartWidth, chartHeight);
 
   // Check cache
   const dpr = window.devicePixelRatio || 1;
@@ -115,20 +121,23 @@ export function renderChart(overlayCtx: OverlayRenderContext): void {
   const currentVersion = chartVersions.get(chartId) ?? 0;
   const cached = chartCanvasCache.get(chartId);
 
-  if (
-    cached &&
-    cached.version === currentVersion &&
-    cached.width === pxWidth &&
-    cached.height === pxHeight
-  ) {
-    // Cache hit - draw instantly
-    ctx.drawImage(cached.canvas, startX, startY, chartWidth, chartHeight);
+  if (cached && cached.version === currentVersion) {
+    // Version matches - draw cached image (stretched if dimensions differ during resize)
+    ctx.drawImage(cached.canvas, canvasX, canvasY, chartWidth, chartHeight);
   } else if (pendingRenders.has(chartId)) {
-    // Render in progress - draw placeholder
-    drawPlaceholder(ctx, startX, startY, chartWidth, chartHeight, chart.name);
+    // Render in progress - stretch old cache if available, otherwise placeholder
+    if (cached) {
+      ctx.drawImage(cached.canvas, canvasX, canvasY, chartWidth, chartHeight);
+    } else {
+      drawPlaceholder(ctx, canvasX, canvasY, chartWidth, chartHeight, chart.name);
+    }
   } else {
-    // Cache miss - draw placeholder and kick off async render
-    drawPlaceholder(ctx, startX, startY, chartWidth, chartHeight, chart.name);
+    // Cache miss - show old cache stretched or placeholder, kick off async render
+    if (cached) {
+      ctx.drawImage(cached.canvas, canvasX, canvasY, chartWidth, chartHeight);
+    } else {
+      drawPlaceholder(ctx, canvasX, canvasY, chartWidth, chartHeight, chart.name);
+    }
     renderChartAsync(chartId, pxWidth, pxHeight, chartWidth, chartHeight, dpr, currentVersion);
   }
 
@@ -137,8 +146,8 @@ export function renderChart(overlayCtx: OverlayRenderContext): void {
   ctx.lineWidth = 1;
   ctx.setLineDash([]);
   ctx.strokeRect(
-    Math.floor(startX) + 0.5,
-    Math.floor(startY) + 0.5,
+    Math.floor(canvasX) + 0.5,
+    Math.floor(canvasY) + 0.5,
     chartWidth - 1,
     chartHeight - 1,
   );
@@ -148,10 +157,10 @@ export function renderChart(overlayCtx: OverlayRenderContext): void {
     ctx.strokeStyle = "#0e639c";
     ctx.lineWidth = 2;
     ctx.setLineDash([]);
-    ctx.strokeRect(startX + 1, startY + 1, chartWidth - 2, chartHeight - 2);
+    ctx.strokeRect(canvasX + 1, canvasY + 1, chartWidth - 2, chartHeight - 2);
 
     // Resize handles at corners
-    drawResizeHandles(ctx, startX, startY, chartWidth, chartHeight);
+    drawResizeHandles(ctx, canvasX, canvasY, chartWidth, chartHeight);
   }
 
   ctx.restore();
@@ -163,12 +172,21 @@ export function renderChart(overlayCtx: OverlayRenderContext): void {
 
 /**
  * Hit-test for chart overlay regions.
+ * Uses pixel-based bounds for floating overlays.
  */
-export function hitTestChart(hitCtx: {
-  region: { startRow: number; startCol: number; endRow: number; endCol: number };
-  row: number;
-  col: number;
-}): boolean {
+export function hitTestChart(hitCtx: OverlayHitTestContext): boolean {
+  // Use pre-computed canvas bounds for floating overlays
+  if (hitCtx.floatingCanvasBounds) {
+    const b = hitCtx.floatingCanvasBounds;
+    return (
+      hitCtx.canvasX >= b.x &&
+      hitCtx.canvasX <= b.x + b.width &&
+      hitCtx.canvasY >= b.y &&
+      hitCtx.canvasY <= b.y + b.height
+    );
+  }
+
+  // Fallback for non-floating (should not happen for charts now)
   return (
     hitCtx.row >= hitCtx.region.startRow &&
     hitCtx.row <= hitCtx.region.endRow &&
@@ -228,8 +246,11 @@ async function renderChartAsync(
       height: pxHeight,
     });
 
-    // Trigger a re-render so the cached chart gets composited
-    emitAppEvent(AppEvents.GRID_REFRESH);
+    // Trigger a canvas redraw so the cached chart gets composited.
+    // Uses requestOverlayRedraw (fires onRegionChange listeners) which is more
+    // reliable than emitAppEvent from async code, as event listener closures
+    // may hold stale draw references.
+    requestOverlayRedraw();
   } catch (err) {
     console.error(`[Charts] Failed to render chart ${chartId}:`, err);
   } finally {

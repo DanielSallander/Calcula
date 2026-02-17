@@ -1,57 +1,53 @@
 //! FILENAME: app/extensions/Charts/handlers/selectionHandler.ts
 // PURPOSE: Track selection context for the Chart extension.
-// CONTEXT: Detects when the active cell is within a chart region and manages
-//          the "chart" task pane context key for contextual UI.
+// CONTEXT: Detects when a floating chart is selected (via move/resize handlers)
+//          and manages the "chart" task pane context key for contextual UI.
+//          With floating charts, selection is driven by floatingObject events from Core,
+//          not by cell-based position checking.
 
 import {
   addTaskPaneContextKey,
   removeTaskPaneContextKey,
 } from "../../../src/api";
-import { getChartAtCell } from "../lib/chartStore";
 
 // ============================================================================
 // State
 // ============================================================================
 
 let currentChartId: number | null = null;
-let lastCheckedSelection: { row: number; col: number } | null = null;
 
 // ============================================================================
-// Selection Handler
+// Selection Management
 // ============================================================================
 
 /**
+ * Select a chart by ID. Called when a floating chart is clicked.
+ */
+export function selectChart(chartId: number): void {
+  if (currentChartId === chartId) return;
+  currentChartId = chartId;
+  addTaskPaneContextKey("chart");
+}
+
+/**
+ * Deselect any selected chart. Called when user clicks on the grid (not on a chart).
+ */
+export function deselectChart(): void {
+  if (currentChartId !== null) {
+    currentChartId = null;
+    removeTaskPaneContextKey("chart");
+  }
+}
+
+/**
  * Handle selection changes from the extension registry.
- * Checks if the active cell is within a chart and updates context.
+ * When the user clicks on a cell (not on a chart), deselect any selected chart.
  */
 export function handleSelectionChange(
-  selection: { endRow: number; endCol: number } | null,
+  _selection: { endRow: number; endCol: number } | null,
 ): void {
-  if (!selection) return;
-
-  const row = selection.endRow;
-  const col = selection.endCol;
-
-  // Skip if already checked this cell
-  if (
-    lastCheckedSelection?.row === row &&
-    lastCheckedSelection?.col === col
-  ) {
-    return;
-  }
-  lastCheckedSelection = { row, col };
-
-  const chart = getChartAtCell(row, col);
-
-  if (chart) {
-    currentChartId = chart.chartId;
-    addTaskPaneContextKey("chart");
-  } else {
-    if (currentChartId !== null) {
-      currentChartId = null;
-      removeTaskPaneContextKey("chart");
-    }
-  }
+  // If user selected a cell, deselect any chart
+  deselectChart();
 }
 
 /**
@@ -62,7 +58,7 @@ export function isChartSelected(chartId: number): boolean {
 }
 
 /**
- * Get the ID of the chart the selection is currently within.
+ * Get the ID of the currently selected chart.
  */
 export function getCurrentChartId(): number | null {
   return currentChartId;
@@ -73,5 +69,4 @@ export function getCurrentChartId(): number | null {
  */
 export function resetSelectionHandlerState(): void {
   currentChartId = null;
-  lastCheckedSelection = null;
 }
