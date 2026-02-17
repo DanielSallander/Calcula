@@ -9,6 +9,7 @@ import { useGridContext } from "../../state/GridContext";
 import * as S from "./InlineEditor.styles";
 import { toggleReferenceAtCursor } from "../../lib/formulaRefToggle";
 import { getGlobalEditingValue, getArrowRefCursor, isHoveringOverReferenceBorder } from "../../hooks/useEditing";
+import { isFormulaAutocompleteVisible, AutocompleteEvents } from "../../../api/formulaAutocomplete";
 
 /**
  * Global flag to prevent blur from committing during sheet tab navigation.
@@ -242,9 +243,30 @@ export function InlineEditor(props: InlineEditorProps): React.ReactElement | nul
     (event: React.ChangeEvent<HTMLInputElement>) => {
       if (!disabled) {
         onValueChange(event.target.value);
+
+        // Emit autocomplete input event with cursor position and anchor rect
+        const inputEl = inputRef.current;
+        console.log("[InlineEditor] handleChange, dispatching autocomplete:input for:", event.target.value);
+        if (inputEl) {
+          window.dispatchEvent(
+            new CustomEvent(AutocompleteEvents.INPUT, {
+              detail: {
+                value: event.target.value,
+                cursorPosition: inputEl.selectionStart ?? event.target.value.length,
+                anchorRect: {
+                  x: position.x,
+                  y: position.y + position.height,
+                  width: position.width,
+                  height: position.height,
+                },
+                source: "inline",
+              },
+            })
+          );
+        }
       }
     },
-    [onValueChange, disabled]
+    [onValueChange, disabled, position.x, position.y, position.width, position.height]
   );
 
   /**
@@ -255,6 +277,21 @@ export function InlineEditor(props: InlineEditorProps): React.ReactElement | nul
     async (event: React.KeyboardEvent<HTMLInputElement>) => {
       if (disabled || isCommittingRef.current) {
         return;
+      }
+
+      // Intercept keys for formula autocomplete when the dropdown is visible
+      if (isFormulaAutocompleteVisible()) {
+        const autocompleteKeys = ["ArrowUp", "ArrowDown", "Tab", "Escape", "Enter"];
+        if (autocompleteKeys.includes(event.key)) {
+          event.preventDefault();
+          event.stopPropagation();
+          window.dispatchEvent(
+            new CustomEvent(AutocompleteEvents.KEY, {
+              detail: { key: event.key },
+            })
+          );
+          return;
+        }
       }
 
       switch (event.key) {
@@ -416,6 +453,12 @@ export function InlineEditor(props: InlineEditorProps): React.ReactElement | nul
         return;
       }
 
+      // Don't commit if the autocomplete dropdown is visible (user may be clicking an item)
+      if (isFormulaAutocompleteVisible()) {
+        console.log("[InlineEditor] Blur prevented - autocomplete visible");
+        return;
+      }
+
       // FIX: Check if cursor is hovering over a reference border (about to start a drag)
       // The blur fires BEFORE the mousedown handler can set preventBlurCommit, so we
       // check the hover state to know if the click was on a reference border.
@@ -497,6 +540,26 @@ export function InlineEditor(props: InlineEditorProps): React.ReactElement | nul
       window.removeEventListener("formula:referenceInserted", handleReferenceInserted);
     };
   }, []);
+
+  /**
+   * Listen for autocomplete accepted events.
+   * When the user selects a function from the autocomplete dropdown,
+   * update the input value and restore the cursor position.
+   */
+  useEffect(() => {
+    const handleAccepted = (e: Event) => {
+      const { newValue, newCursorPosition } = (e as CustomEvent).detail;
+      onValueChange(newValue);
+      requestAnimationFrame(() => {
+        if (inputRef.current) {
+          inputRef.current.setSelectionRange(newCursorPosition, newCursorPosition);
+        }
+      });
+    };
+
+    window.addEventListener(AutocompleteEvents.ACCEPTED, handleAccepted);
+    return () => window.removeEventListener(AutocompleteEvents.ACCEPTED, handleAccepted);
+  }, [onValueChange]);
 
   /**
    * Auto-focus the input when editing starts or when triggered by sheet switch.

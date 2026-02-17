@@ -226,6 +226,21 @@ export type {
   AnchorRect,
 } from "./uiTypes";
 
+// ============================================================================
+// Formula Autocomplete API
+// ============================================================================
+
+export {
+  isFormulaAutocompleteVisible,
+  setFormulaAutocompleteVisible,
+  AutocompleteEvents,
+} from "./formulaAutocomplete";
+export type {
+  AutocompleteInputPayload,
+  AutocompleteKeyPayload,
+  AutocompleteAcceptedPayload,
+} from "./formulaAutocomplete";
+
 // Style Interceptors
 export {
   registerStyleInterceptor,

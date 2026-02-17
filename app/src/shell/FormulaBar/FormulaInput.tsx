@@ -12,6 +12,7 @@ import { useEditing, setGlobalIsEditing, getGlobalEditingValue } from "../../api
 import { toggleReferenceAtCursor } from "../../core/lib/formulaRefToggle";
 import { parseFormulaReferences } from "../../core/lib/formulaRefParser";
 import { setFormulaReferences, clearFormulaReferences } from "../../core/state/gridActions";
+import { isFormulaAutocompleteVisible, AutocompleteEvents } from "../../api/formulaAutocomplete";
 import * as S from './FormulaInput.styles';
 
 export function FormulaInput(): React.ReactElement {
@@ -82,12 +83,52 @@ export function FormulaInput(): React.ReactElement {
     }
   }, [editing, state.selection, dispatch]);
 
+  // Listen for autocomplete accepted events to update the formula bar value
+  React.useEffect(() => {
+    const handleAccepted = (e: Event) => {
+      const { newValue, newCursorPosition } = (e as CustomEvent).detail;
+      setDisplayValue(newValue);
+      if (editing) {
+        updateValue(newValue);
+      }
+      requestAnimationFrame(() => {
+        if (inputRef.current) {
+          inputRef.current.setSelectionRange(newCursorPosition, newCursorPosition);
+        }
+      });
+    };
+
+    window.addEventListener(AutocompleteEvents.ACCEPTED, handleAccepted);
+    return () => window.removeEventListener(AutocompleteEvents.ACCEPTED, handleAccepted);
+  }, [editing, updateValue]);
+
   const handleChange = useCallback(
     (e: React.ChangeEvent<HTMLInputElement>) => {
       const newValue = e.target.value;
       setDisplayValue(newValue);
       if (editing) {
         updateValue(newValue);
+      }
+
+      // Emit autocomplete input event with cursor position and anchor rect
+      const inputEl = inputRef.current;
+      if (inputEl) {
+        const rect = inputEl.getBoundingClientRect();
+        window.dispatchEvent(
+          new CustomEvent(AutocompleteEvents.INPUT, {
+            detail: {
+              value: newValue,
+              cursorPosition: inputEl.selectionStart ?? newValue.length,
+              anchorRect: {
+                x: rect.left,
+                y: rect.bottom,
+                width: rect.width,
+                height: rect.height,
+              },
+              source: "formulaBar",
+            },
+          })
+        );
       }
     },
     [editing, updateValue]
@@ -109,6 +150,20 @@ export function FormulaInput(): React.ReactElement {
   const handleKeyDown = useCallback(
     async (e: React.KeyboardEvent<HTMLInputElement>) => {
       e.stopPropagation();
+
+      // Intercept keys for formula autocomplete when the dropdown is visible
+      if (isFormulaAutocompleteVisible()) {
+        const autocompleteKeys = ["ArrowUp", "ArrowDown", "Tab", "Escape", "Enter"];
+        if (autocompleteKeys.includes(e.key)) {
+          e.preventDefault();
+          window.dispatchEvent(
+            new CustomEvent(AutocompleteEvents.KEY, {
+              detail: { key: e.key },
+            })
+          );
+          return;
+        }
+      }
 
       if (e.key === "Enter") {
         e.preventDefault();
