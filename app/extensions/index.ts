@@ -4,6 +4,7 @@
 
 import { registerPivotExtension, unregisterPivotExtension } from "./Pivot";
 import { registerTableExtension, unregisterTableExtension } from "./Table";
+import { registerChartExtension, unregisterChartExtension } from "./Charts";
 
 /**
  * Load all extensions.
@@ -16,6 +17,7 @@ export function loadExtensions(): void {
   // Note: StandardMenus and FindReplace are now loaded via ExtensionManager
   registerPivotExtension();
   registerTableExtension();
+  registerChartExtension();
 
   // Future: Load user extensions from config
 
@@ -30,6 +32,7 @@ export function unloadExtensions(): void {
   console.log("[Extensions] Unloading extensions...");
 
   // Unload in reverse order
+  unregisterChartExtension();
   unregisterTableExtension();
   unregisterPivotExtension();
 
@@ -39,3 +42,4 @@ export function unloadExtensions(): void {
 // Re-export individual extension registration functions for granular control
 export { registerPivotExtension, unregisterPivotExtension };
 export { registerTableExtension, unregisterTableExtension };
+export { registerChartExtension, unregisterChartExtension };
