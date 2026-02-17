@@ -21,8 +21,9 @@ import {
   getCellsInCols,
   hasContentInRange,
   setCellStyle,
+  shiftFormulasBatch,
 } from "../lib/tauri-api";
-import type { CellUpdateInput } from "../lib/tauri-api";
+import type { CellUpdateInput, FormulaShiftInput } from "../lib/tauri-api";
 import { cellEvents } from "../lib/cellEvents";
 import { setClipboard, clearClipboard, setSelection } from "../state/gridActions";
 import type { Selection, CellData, ClipboardMode } from "../types";
@@ -282,6 +283,42 @@ export function useClipboard(): UseClipboardReturn {
     // Track if this was a cut operation (need to check before we potentially modify internalClipboard)
     const wasCutOperation = usingInternalClipboard && internalClipboard?.isCut;
 
+    // Shift formulas for copy operations (not cut).
+    // Copy adjusts relative references based on offset; cut moves cells as-is.
+    const shiftedFormulaMap = new Map<string, string>();
+    if (usingInternalClipboard && !wasCutOperation && internalClipboard) {
+      const sourceSel = internalClipboard.sourceSelection;
+      const sourceMinRow = Math.min(sourceSel.startRow, sourceSel.endRow);
+      const sourceMinCol = Math.min(sourceSel.startCol, sourceSel.endCol);
+      const rowDelta = targetRow - sourceMinRow;
+      const colDelta = targetCol - sourceMinCol;
+
+      if (rowDelta !== 0 || colDelta !== 0) {
+        const formulaEntries: { r: number; c: number; formula: string }[] = [];
+        for (let r = 0; r < pasteHeight; r++) {
+          for (let c = 0; c < pasteWidth; c++) {
+            const cell = cellsToPaste![r]?.[c];
+            if (cell?.formula) {
+              formulaEntries.push({ r, c, formula: cell.formula });
+            }
+          }
+        }
+
+        if (formulaEntries.length > 0) {
+          const inputs: FormulaShiftInput[] = formulaEntries.map((e) => ({
+            formula: e.formula,
+            rowDelta,
+            colDelta,
+          }));
+          const shiftedFormulas = await shiftFormulasBatch(inputs);
+          for (let i = 0; i < formulaEntries.length; i++) {
+            const { r, c } = formulaEntries[i];
+            shiftedFormulaMap.set(`${r},${c}`, shiftedFormulas[i]);
+          }
+        }
+      }
+    }
+
     try {
       // Begin undo transaction so all paste changes are a single undo entry
       const transactionDesc = wasCutOperation
@@ -306,7 +343,7 @@ export function useClipboard(): UseClipboardReturn {
           }
 
           const sourceCell = cellsToPaste[r]?.[c];
-          const value = sourceCell?.formula || sourceCell?.display || "";
+          const value = shiftedFormulaMap.get(`${r},${c}`) ?? sourceCell?.formula ?? sourceCell?.display ?? "";
 
           try {
             const tIpc = performance.now();
