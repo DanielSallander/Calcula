@@ -41,6 +41,12 @@ export const AppEvents = {
   CONTEXT_MENU_REQUEST: "app:context-menu-request",
   CONTEXT_MENU_CLOSE: "app:context-menu-close",
 
+  // Structure events (row/column insert/delete)
+  ROWS_INSERTED: "app:rows-inserted",
+  COLUMNS_INSERTED: "app:columns-inserted",
+  ROWS_DELETED: "app:rows-deleted",
+  COLUMNS_DELETED: "app:columns-deleted",
+
   // Navigation events
   NAVIGATE_TO_CELL: "app:navigate-to-cell",
 

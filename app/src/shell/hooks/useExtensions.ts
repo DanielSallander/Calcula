@@ -6,7 +6,7 @@
 import { useState, useEffect, useSyncExternalStore, useCallback } from "react";
 import { ExtensionManager, type LoadedExtension } from "../registries/ExtensionManager";
 import { bootstrapShell } from "../bootstrap";
-import { loadExtensions } from "../../../extensions";
+import { loadExtensions, unloadExtensions } from "../../../extensions";
 
 // ============================================================================
 // useExtensions Hook
@@ -98,6 +98,9 @@ export function useExtensionInitializer(): {
 
     return () => {
       mounted = false;
+      // Unload extensions so React StrictMode double-mount doesn't
+      // register duplicate event listeners
+      unloadExtensions();
     };
   }, []);
 

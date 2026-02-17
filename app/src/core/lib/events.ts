@@ -34,6 +34,12 @@ export const AppEvents = {
   // Grid events
   GRID_REFRESH: "app:grid-refresh",
 
+  // Structure events (row/column insert/delete)
+  ROWS_INSERTED: "app:rows-inserted",
+  COLUMNS_INSERTED: "app:columns-inserted",
+  ROWS_DELETED: "app:rows-deleted",
+  COLUMNS_DELETED: "app:columns-deleted",
+
   // Sheet events
   SHEET_CHANGED: "app:sheet-changed",
 

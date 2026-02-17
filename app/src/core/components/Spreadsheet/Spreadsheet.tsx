@@ -312,6 +312,9 @@ function SpreadsheetContent({
         formula: null,
       });
 
+      // Notify extensions about the structural change
+      emitAppEvent(AppEvents.ROWS_INSERTED, { row: startRow, count });
+
       canvasRef.current?.redraw();
     } catch (error) {
       console.error("[Spreadsheet] Failed to insert rows:", error);
@@ -346,6 +349,9 @@ function SpreadsheetContent({
         newValue: "",
         formula: null,
       });
+
+      // Notify extensions about the structural change
+      emitAppEvent(AppEvents.COLUMNS_INSERTED, { col: startCol, count });
 
       canvasRef.current?.redraw();
     } catch (error) {
@@ -382,6 +388,9 @@ function SpreadsheetContent({
         formula: null,
       });
 
+      // Notify extensions about the structural change
+      emitAppEvent(AppEvents.ROWS_DELETED, { row: startRow, count });
+
       canvasRef.current?.redraw();
     } catch (error) {
       console.error("[Spreadsheet] Failed to delete rows:", error);
@@ -416,6 +425,9 @@ function SpreadsheetContent({
         newValue: "",
         formula: null,
       });
+
+      // Notify extensions about the structural change
+      emitAppEvent(AppEvents.COLUMNS_DELETED, { col: startCol, count });
 
       canvasRef.current?.redraw();
     } catch (error) {
@@ -476,6 +488,32 @@ function SpreadsheetContent({
 
       const mouseX = event.clientX - rect.left;
       const mouseY = event.clientY - rect.top;
+
+      // Check if right-click is on the corner (select-all area)
+      const isCornerClick = mouseX < (config.rowHeaderWidth || 50) && mouseY < (config.colHeaderHeight || 24);
+
+      if (isCornerClick) {
+        // Build context with all-cells selection directly to avoid stale state
+        const allSelection: Selection = {
+          startRow: 0,
+          startCol: 0,
+          endRow: config.totalRows - 1,
+          endCol: config.totalCols - 1,
+          type: "cells",
+        };
+
+        emitAppEvent(AppEvents.CONTEXT_MENU_REQUEST, {
+          position: { x: event.clientX, y: event.clientY },
+          context: {
+            selection: allSelection,
+            clickedCell: null,
+            isWithinSelection: true,
+            sheetIndex: gridState.sheetContext.activeSheetIndex,
+            sheetName: gridState.sheetContext.activeSheetName,
+          } as GridMenuContext,
+        });
+        return;
+      }
 
       const clickedCell = getCellFromPixel(
         mouseX,

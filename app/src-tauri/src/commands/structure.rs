@@ -196,6 +196,163 @@ fn shift_pivot_regions_for_row_delete(state: &AppState, pivot_state: &PivotState
     regions.retain(|r| !regions_to_remove.contains(&r.id));
 }
 
+/// ============================================================================
+// TABLE BOUNDARY SHIFT HELPERS
+// ============================================================================
+
+/// Shift table boundaries when rows are inserted.
+/// Tables entirely below the insertion point are shifted down.
+/// Tables spanning the insertion point (including at start_row) expand.
+fn shift_table_boundaries_for_row_insert(state: &AppState, from_row: u32, count: u32, sheet_index: usize) {
+    let mut tables = state.tables.lock().unwrap();
+
+    if let Some(sheet_tables) = tables.get_mut(&sheet_index) {
+        for table in sheet_tables.values_mut() {
+            if table.start_row > from_row {
+                // Insertion is strictly before the table - shift entire table down
+                table.start_row += count;
+                table.end_row += count;
+            } else if table.end_row >= from_row {
+                // Insertion is inside the table (including at start_row) - expand
+                table.end_row += count;
+            }
+        }
+    }
+}
+
+/// Shift table boundaries when columns are inserted.
+/// Tables entirely to the right of the insertion point are shifted right.
+/// Tables spanning the insertion point (including at start_col) expand.
+fn shift_table_boundaries_for_col_insert(state: &AppState, from_col: u32, count: u32, sheet_index: usize) {
+    let mut tables = state.tables.lock().unwrap();
+
+    if let Some(sheet_tables) = tables.get_mut(&sheet_index) {
+        for table in sheet_tables.values_mut() {
+            if table.start_col > from_col {
+                // Insertion is strictly before the table - shift entire table right
+                table.start_col += count;
+                table.end_col += count;
+            } else if table.end_col >= from_col {
+                // Insertion is inside the table (including at start_col) - expand
+                table.end_col += count;
+            }
+        }
+    }
+}
+
+/// Shift table boundaries when rows are deleted.
+/// Tables fully within the deleted range are removed.
+fn shift_table_boundaries_for_row_delete(state: &AppState, from_row: u32, count: u32, sheet_index: usize) {
+    let mut tables = state.tables.lock().unwrap();
+    let mut table_names = state.table_names.lock().unwrap();
+
+    let delete_end = from_row + count;
+
+    if let Some(sheet_tables) = tables.get_mut(&sheet_index) {
+        // Collect IDs of tables to remove (fully within deleted range)
+        let to_remove: Vec<u64> = sheet_tables
+            .values()
+            .filter(|t| t.start_row >= from_row && t.end_row < delete_end)
+            .map(|t| t.id)
+            .collect();
+
+        // Remove from name registry
+        for id in &to_remove {
+            if let Some(table) = sheet_tables.get(id) {
+                table_names.remove(&table.name.to_uppercase());
+            }
+        }
+
+        // Remove fully deleted tables
+        for id in &to_remove {
+            sheet_tables.remove(id);
+        }
+
+        // Shift remaining table boundaries
+        for table in sheet_tables.values_mut() {
+            if table.start_row >= delete_end {
+                // Entire table is below deleted range - shift up
+                table.start_row -= count;
+                table.end_row -= count;
+            } else if table.start_row >= from_row {
+                // Table starts within deleted range but extends beyond - shrink from top
+                table.start_row = from_row;
+                table.end_row -= count;
+            } else if table.end_row >= delete_end {
+                // Table spans entire deleted range - shrink
+                table.end_row -= count;
+            } else if table.end_row >= from_row {
+                // Table end is within deleted range - shrink from bottom
+                table.end_row = from_row.saturating_sub(1);
+            }
+        }
+    }
+}
+
+/// Shift table boundaries when columns are deleted.
+/// Tables fully within the deleted range are removed.
+fn shift_table_boundaries_for_col_delete(state: &AppState, from_col: u32, count: u32, sheet_index: usize) {
+    let mut tables = state.tables.lock().unwrap();
+    let mut table_names = state.table_names.lock().unwrap();
+
+    let delete_end = from_col + count;
+
+    if let Some(sheet_tables) = tables.get_mut(&sheet_index) {
+        // Collect IDs of tables to remove (fully within deleted range)
+        let to_remove: Vec<u64> = sheet_tables
+            .values()
+            .filter(|t| t.start_col >= from_col && t.end_col < delete_end)
+            .map(|t| t.id)
+            .collect();
+
+        // Remove from name registry
+        for id in &to_remove {
+            if let Some(table) = sheet_tables.get(id) {
+                table_names.remove(&table.name.to_uppercase());
+            }
+        }
+
+        // Remove fully deleted tables
+        for id in &to_remove {
+            sheet_tables.remove(id);
+        }
+
+        // Shift remaining table boundaries and truncate columns
+        for table in sheet_tables.values_mut() {
+            if table.start_col >= delete_end {
+                // Entire table is right of deleted range - shift left
+                table.start_col -= count;
+                table.end_col -= count;
+            } else if table.start_col >= from_col {
+                // Table starts within deleted range but extends beyond - shrink from left
+                let cols_removed = (delete_end - table.start_col) as usize;
+                // Remove columns from the beginning
+                for _ in 0..cols_removed.min(table.columns.len()) {
+                    table.columns.remove(0);
+                }
+                table.start_col = from_col;
+                table.end_col -= count;
+            } else if table.end_col >= delete_end {
+                // Table spans entire deleted range - shrink and remove middle columns
+                let first_col_idx = (from_col - table.start_col) as usize;
+                let cols_to_remove = count as usize;
+                for _ in 0..cols_to_remove.min(table.columns.len().saturating_sub(first_col_idx)) {
+                    if first_col_idx < table.columns.len() {
+                        table.columns.remove(first_col_idx);
+                    }
+                }
+                table.end_col -= count;
+            } else if table.end_col >= from_col {
+                // Table end is within deleted range - shrink from right
+                let cols_to_remove = (table.end_col - from_col + 1) as usize;
+                let keep_count = table.columns.len().saturating_sub(cols_to_remove);
+                table.columns.truncate(keep_count);
+                table.end_col = from_col.saturating_sub(1);
+            }
+        }
+    }
+}
+
 /// Shift protected regions when columns are deleted.
 fn shift_pivot_regions_for_col_delete(state: &AppState, pivot_state: &PivotState, from_col: u32, count: u32, sheet_index: usize) {
     let mut regions = state.protected_regions.lock().unwrap();
@@ -505,12 +662,15 @@ pub fn insert_rows(
     
     // === UPDATE PIVOT REGIONS ===
     shift_pivot_regions_for_row_insert(&state, &pivot_state, row, count, active_sheet);
-    
+
+    // === UPDATE TABLE BOUNDARIES ===
+    shift_table_boundaries_for_row_insert(&state, row, count, active_sheet);
+
     // Re-acquire locks for result building
     let grid = state.grid.lock().map_err(|e| e.to_string())?;
     let styles = state.style_registry.lock().map_err(|e| e.to_string())?;
     let merged_regions = state.merged_regions.lock().map_err(|e| e.to_string())?;
-    
+
     // Return updated cells with merge info
     let mut result: Vec<CellData> = Vec::new();
     for r in 0..=grid.max_row {
@@ -654,12 +814,15 @@ pub fn insert_columns(
     
     // === UPDATE PIVOT REGIONS ===
     shift_pivot_regions_for_col_insert(&state, &pivot_state, col, count, active_sheet);
-    
+
+    // === UPDATE TABLE BOUNDARIES ===
+    shift_table_boundaries_for_col_insert(&state, col, count, active_sheet);
+
     // Re-acquire locks for result building
     let grid = state.grid.lock().map_err(|e| e.to_string())?;
     let styles = state.style_registry.lock().map_err(|e| e.to_string())?;
     let merged_regions = state.merged_regions.lock().map_err(|e| e.to_string())?;
-    
+
     // Return updated cells with merge info
     let mut result: Vec<CellData> = Vec::new();
     for r in 0..=grid.max_row {
@@ -1260,7 +1423,10 @@ pub fn delete_rows(
     
     // === UPDATE PIVOT REGIONS ===
     shift_pivot_regions_for_row_delete(&state, &pivot_state, row, count, active_sheet);
-    
+
+    // === UPDATE TABLE BOUNDARIES ===
+    shift_table_boundaries_for_row_delete(&state, row, count, active_sheet);
+
     // Re-acquire locks for result building
     let grid = state.grid.lock().map_err(|e| e.to_string())?;
     let styles = state.style_registry.lock().map_err(|e| e.to_string())?;
@@ -1433,7 +1599,10 @@ pub fn delete_columns(
     
     // === UPDATE PIVOT REGIONS ===
     shift_pivot_regions_for_col_delete(&state, &pivot_state, col, count, active_sheet);
-    
+
+    // === UPDATE TABLE BOUNDARIES ===
+    shift_table_boundaries_for_col_delete(&state, col, count, active_sheet);
+
     // Re-acquire locks for result building
     let grid = state.grid.lock().map_err(|e| e.to_string())?;
     let styles = state.style_registry.lock().map_err(|e| e.to_string())?;

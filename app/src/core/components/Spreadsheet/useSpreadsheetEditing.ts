@@ -71,6 +71,29 @@ export function useSpreadsheetEditing({
     }
   }, [lastError, showStatus]);
 
+  // FIX: Ensure the grid container has focus during cross-sheet formula editing.
+  // When editing a formula and navigating to a different sheet (to pick cell references),
+  // InlineEditor is not rendered (isOnDifferentSheet check returns null).
+  // After inserting a reference by clicking a cell or after a sheet switch in formula mode,
+  // focus can be lost (e.g., on the sheet tab or body). Without focus on the container,
+  // pressing Enter/Escape won't reach handleContainerKeyDown and the commit won't happen.
+  // This listener ensures the container gets focus. If InlineEditor IS rendered (same sheet),
+  // it will reclaim focus via its own setTimeout(0) handler, so this is safe in all cases.
+  useEffect(() => {
+    const handleFocusRestoreForEditing = () => {
+      if (isEditing) {
+        focusContainerRef.current?.focus();
+      }
+    };
+
+    window.addEventListener("formula:referenceInserted", handleFocusRestoreForEditing);
+    window.addEventListener("sheet:formulaModeSwitch", handleFocusRestoreForEditing);
+    return () => {
+      window.removeEventListener("formula:referenceInserted", handleFocusRestoreForEditing);
+      window.removeEventListener("sheet:formulaModeSwitch", handleFocusRestoreForEditing);
+    };
+  }, [isEditing, focusContainerRef]);
+
   // FIX: Listen for formula bar commit events from FormulaInput (shell layer)
   // FormulaInput can't directly call moveActiveCell since it's in the shell layer,
   // so it dispatches an event that we handle here to move the cell and restore focus

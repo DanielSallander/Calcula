@@ -305,7 +305,10 @@ export function gridReducer(state: GridState, action: GridAction): GridState {
       // FIX: For column/row selections, do NOT scroll to make the "active cell" visible.
       // In Excel, selecting column B does NOT scroll to the bottom of the sheet.
       // Only perform scroll-to-visible for regular cell selections.
-      if (type === "columns" || type === "rows") {
+      // Also skip scroll for "select all" (entire sheet selected) - viewport should stay put.
+      const isSelectAll = clampedSelection.startRow === 0 && clampedSelection.startCol === 0
+        && clampedSelection.endRow === maxRow && clampedSelection.endCol === maxCol;
+      if (type === "columns" || type === "rows" || isSelectAll) {
         return {
           ...state,
           selection: clampedSelection,

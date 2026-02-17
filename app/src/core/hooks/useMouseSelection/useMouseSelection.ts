@@ -27,6 +27,7 @@ import { createFormulaHeaderHandlers } from "./editing/formulaHeaderHandlers";
 import { createReferenceDragHandlers } from "./editing/referenceDragHandlers";
 import { createReferenceResizeHandlers } from "./editing/referenceResizeHandlers";
 import { createResizeHandlers } from "./layout/resizeHandlers";
+import { createOverlayResizeHandlers, type OverlayResizeHandlers } from "./layout/overlayResizeHandlers";
 import { createFillHandleCursorChecker } from "./utils/fillHandleUtils";
 import { createSelectionDragHandlers } from "./selection/selectionDragHandlers";
 import { isGlobalFormulaMode, isEditingFormula, setHoveringOverReferenceBorder } from "../../hooks/useEditing";
@@ -95,6 +96,7 @@ export function useMouseSelection(props: UseMouseSelectionProps): UseMouseSelect
   const [isRefDragging, setIsRefDragging] = useState(false);
   const [isRefResizing, setIsRefResizing] = useState(false);
   const [isSelectionDragging, setIsSelectionDragging] = useState(false);
+  const [isOverlayResizing, setIsOverlayResizing] = useState(false);
   const [selectionDragPreview, setSelectionDragPreview] = useState<Selection | null>(null);
 
   // Default to "default" to ensure we have a valid starting state
@@ -112,6 +114,7 @@ export function useMouseSelection(props: UseMouseSelectionProps): UseMouseSelect
   const refDragStartRef = useRef<CellPosition | null>(null);
   const refResizeStartRef = useRef<CellPosition | null>(null);
   const selectionDragRef = useRef<SelectionDragState | null>(null);
+  const overlayResizeStateRef = useRef<{ region: import("../../../../api/gridOverlays").GridRegion; currentEndRow: number; currentEndCol: number } | null>(null);
 
   // -------------------------------------------------------------------------
   // Side Effects
@@ -156,6 +159,17 @@ export function useMouseSelection(props: UseMouseSelectionProps): UseMouseSelect
     setIsResizing,
     setCursorStyle,
     resizeStateRef,
+  });
+
+  // eslint-disable-next-line react-hooks/refs -- Refs are captured in closures for event-time access, not read during render
+  const overlayResizeHandlers = createOverlayResizeHandlers({
+    config,
+    viewport,
+    dimensions,
+    containerRef,
+    setIsOverlayResizing,
+    setCursorStyle,
+    overlayResizeStateRef,
   });
 
   // eslint-disable-next-line react-hooks/refs -- Refs are captured in closures for event-time access, not read during render
@@ -317,6 +331,11 @@ export function useMouseSelection(props: UseMouseSelectionProps): UseMouseSelect
         return;
       }
 
+      // Priority 1.5: Check for overlay (table) resize handle
+      if (overlayResizeHandlers.handleOverlayResizeMouseDown(mouseX, mouseY, event)) {
+        return;
+      }
+
       // FIX: Check formula mode synchronously at event time, not just from props
       // The isFormulaMode prop might be stale if the user just typed "+" and
       // React hasn't re-rendered yet. isGlobalFormulaMode() checks the actual
@@ -371,6 +390,17 @@ export function useMouseSelection(props: UseMouseSelectionProps): UseMouseSelect
           return;
         }
 
+        // Normal mode: select all (corner click)
+        if (mouseX < (config.rowHeaderWidth || 50) && mouseY < (config.colHeaderHeight || 24)) {
+          event.preventDefault();
+          if (onCommitBeforeSelect) {
+            await onCommitBeforeSelect();
+          }
+          // Use single dispatch with endRow/endCol to avoid scroll-to-end behavior
+          onSelectCell(0, 0, "cells", config.totalRows - 1, config.totalCols - 1);
+          return;
+        }
+
         // Normal mode: select column
         if (await headerSelectionHandlers.handleColumnHeaderMouseDown(mouseX, mouseY, event.shiftKey, event)) {
           return;
@@ -388,6 +418,7 @@ export function useMouseSelection(props: UseMouseSelectionProps): UseMouseSelect
       isFormulaMode,
       selection,
       resizeHandlers,
+      overlayResizeHandlers,
       cellSelectionHandlers,
       headerSelectionHandlers,
       formulaHandlers,
@@ -417,6 +448,12 @@ export function useMouseSelection(props: UseMouseSelectionProps): UseMouseSelect
       // Handle resize operation - skip here, global handler will handle it
       // This prevents double-handling with different coordinate calculations
       if (isResizing) {
+        return;
+      }
+
+      // Handle overlay resize operation (table resize drag)
+      if (isOverlayResizing && overlayResizeStateRef.current) {
+        overlayResizeHandlers.handleOverlayResizeMouseMove(mouseX, mouseY);
         return;
       }
 
@@ -451,7 +488,7 @@ export function useMouseSelection(props: UseMouseSelectionProps): UseMouseSelect
       }
 
       // Update cursor based on position (when not dragging)
-      if (!isDragging && !isFormulaDragging && !isResizing && !isRefDragging && !isRefResizing && !isSelectionDragging) {
+      if (!isDragging && !isFormulaDragging && !isResizing && !isRefDragging && !isRefResizing && !isSelectionDragging && !isOverlayResizing) {
         // Check fill handle first (highest priority for crosshair)
         if (isOverFillHandle(mouseX, mouseY)) {
           setCursorStyle("crosshair");
@@ -476,6 +513,10 @@ export function useMouseSelection(props: UseMouseSelectionProps): UseMouseSelect
           // Only when NOT editing a formula
           setCursorStyle("move");
           setHoveringOverReferenceBorder(false);
+        } else if (overlayResizeHandlers.checkOverlayResizeHandle(mouseX, mouseY)) {
+          // Check if over an overlay (table) resize handle
+          setCursorStyle("nwse-resize");
+          setHoveringOverReferenceBorder(false);
         } else {
           setHoveringOverReferenceBorder(false);
           // Check for resize handles
@@ -483,22 +524,28 @@ export function useMouseSelection(props: UseMouseSelectionProps): UseMouseSelect
           if (colResize) {
             resizeHandlers.updateCursorForPosition(mouseX, mouseY);
           } else {
+            // Check if over corner (select-all button) - show pointer
+            if (mouseX < (config.rowHeaderWidth || 50) && mouseY < (config.colHeaderHeight || 24)) {
+              setCursorStyle("pointer");
+            }
             // Check if over column header (not resize handle) - show down arrow
-            const headerCol = getColumnFromHeader(mouseX, mouseY, config, viewport, dimensions);
-            if (headerCol !== null) {
-              setCursorStyle(COLUMN_SELECT_CURSOR);
-            } else {
-              // Check if over row header (not resize handle) - show right arrow
-              const headerRow = getRowFromHeader(mouseX, mouseY, config, viewport, dimensions);
-              if (headerRow !== null) {
-                setCursorStyle(ROW_SELECT_CURSOR);
+            else {
+              const headerCol = getColumnFromHeader(mouseX, mouseY, config, viewport, dimensions);
+              if (headerCol !== null) {
+                setCursorStyle(COLUMN_SELECT_CURSOR);
               } else {
-                // Check if over a cell (standard cell cursor)
-                const cell = getCellFromPixel(mouseX, mouseY, config, viewport, dimensions);
-                if (cell) {
-                  setCursorStyle("cell");
+                // Check if over row header (not resize handle) - show right arrow
+                const headerRow = getRowFromHeader(mouseX, mouseY, config, viewport, dimensions);
+                if (headerRow !== null) {
+                  setCursorStyle(ROW_SELECT_CURSOR);
                 } else {
-                  setCursorStyle("default");
+                  // Check if over a cell (standard cell cursor)
+                  const cell = getCellFromPixel(mouseX, mouseY, config, viewport, dimensions);
+                  if (cell) {
+                    setCursorStyle("cell");
+                  } else {
+                    setCursorStyle("default");
+                  }
                 }
               }
             }
@@ -531,7 +578,7 @@ export function useMouseSelection(props: UseMouseSelectionProps): UseMouseSelect
       }
 
       // Check if we need to start/stop auto-scroll
-      if (isDragging || isFormulaDragging || isRefDragging || isRefResizing || isSelectionDragging) {
+      if (isDragging || isFormulaDragging || isRefDragging || isRefResizing || isSelectionDragging || isOverlayResizing) {
         const { deltaX, deltaY } = calculateAutoScrollDelta(mouseX, mouseY, rect, config);
         if (deltaX !== 0 || deltaY !== 0) {
           startAutoScroll();
@@ -552,8 +599,10 @@ export function useMouseSelection(props: UseMouseSelectionProps): UseMouseSelect
       isRefDragging,
       isRefResizing,
       isSelectionDragging,
+      isOverlayResizing,
       isOverFillHandle,
       resizeHandlers,
+      overlayResizeHandlers,
       headerSelectionHandlers,
       formulaHandlers,
       formulaHeaderHandlers,
@@ -573,6 +622,13 @@ export function useMouseSelection(props: UseMouseSelectionProps): UseMouseSelect
     // End resize operation
     if (isResizing) {
       resizeHandlers.handleResizeMouseUp();
+      return;
+    }
+
+    // End overlay resize operation (table resize)
+    if (isOverlayResizing) {
+      overlayResizeHandlers.handleOverlayResizeMouseUp();
+      stopAutoScroll();
       return;
     }
 
@@ -631,7 +687,9 @@ export function useMouseSelection(props: UseMouseSelectionProps): UseMouseSelect
     isRefDragging,
     isRefResizing,
     isSelectionDragging,
+    isOverlayResizing,
     resizeHandlers,
+    overlayResizeHandlers,
     formulaHandlers,
     formulaHeaderHandlers,
     referenceDragHandlers,
@@ -682,6 +740,9 @@ export function useMouseSelection(props: UseMouseSelectionProps): UseMouseSelect
     const handleGlobalMouseUp = () => {
       if (isResizing) {
         resizeHandlers.handleResizeMouseUp();
+      } else if (isOverlayResizing) {
+        overlayResizeHandlers.handleOverlayResizeMouseUp();
+        stopAutoScroll();
       } else if (isRefDragging) {
         handleMouseUp();
       } else if (isRefResizing) {
@@ -704,14 +765,14 @@ export function useMouseSelection(props: UseMouseSelectionProps): UseMouseSelect
     return () => {
       window.removeEventListener("mouseup", handleGlobalMouseUp);
     };
-  }, [isDragging, isFormulaDragging, isResizing, isRefDragging, isRefResizing, isSelectionDragging, handleMouseUp, resizeHandlers, stopAutoScroll, onDragEnd]);
+  }, [isDragging, isFormulaDragging, isResizing, isRefDragging, isRefResizing, isSelectionDragging, isOverlayResizing, handleMouseUp, resizeHandlers, overlayResizeHandlers, stopAutoScroll, onDragEnd]);
 
   /**
    * Global mouse move handler for tracking mouse during drag outside component.
    */
   useEffect(() => {
     const handleGlobalMouseMove = (event: MouseEvent) => {
-      if (!isDragging && !isFormulaDragging && !isResizing && !isRefDragging && !isRefResizing && !isSelectionDragging) {
+      if (!isDragging && !isFormulaDragging && !isResizing && !isRefDragging && !isRefResizing && !isSelectionDragging && !isOverlayResizing) {
         return;
       }
 
@@ -728,6 +789,12 @@ export function useMouseSelection(props: UseMouseSelectionProps): UseMouseSelect
       // Handle resize during global mouse move
       if (isResizing && resizeStateRef.current) {
         resizeHandlers.handleResizeMouseMove(mouseX, mouseY);
+        return;
+      }
+
+      // Handle overlay resize during global mouse move (table resize)
+      if (isOverlayResizing && overlayResizeStateRef.current) {
+        overlayResizeHandlers.handleOverlayResizeMouseMove(mouseX, mouseY);
         return;
       }
 
@@ -792,7 +859,7 @@ export function useMouseSelection(props: UseMouseSelectionProps): UseMouseSelect
       }
     };
 
-    if (isDragging || isFormulaDragging || isResizing || isRefDragging || isRefResizing || isSelectionDragging) {
+    if (isDragging || isFormulaDragging || isResizing || isRefDragging || isRefResizing || isSelectionDragging || isOverlayResizing) {
       window.addEventListener("mousemove", handleGlobalMouseMove);
     }
 
@@ -806,11 +873,13 @@ export function useMouseSelection(props: UseMouseSelectionProps): UseMouseSelect
     isRefDragging,
     isRefResizing,
     isSelectionDragging,
+    isOverlayResizing,
     config,
     viewport,
     dimensions,
     containerRef,
     resizeHandlers,
+    overlayResizeHandlers,
     formulaHeaderHandlers,
     referenceDragHandlers,
     referenceResizeHandlers,
@@ -839,6 +908,7 @@ export function useMouseSelection(props: UseMouseSelectionProps): UseMouseSelect
     isRefDragging,
     isRefResizing,
     isSelectionDragging,
+    isOverlayResizing,
     selectionDragPreview,
     cursorStyle,
     handleMouseDown,

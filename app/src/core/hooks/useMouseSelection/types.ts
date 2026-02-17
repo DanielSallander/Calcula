@@ -112,8 +112,8 @@ export interface UseMouseSelectionProps {
   currentSheetName?: string;
   /** Sheet where the formula is being edited */
   formulaSourceSheetName?: string;
-  /** Callback to select a single cell */
-  onSelectCell: (row: number, col: number, type?: SelectionType) => void;
+  /** Callback to select a single cell (or range if endRow/endCol provided) */
+  onSelectCell: (row: number, col: number, type?: SelectionType, endRow?: number, endCol?: number) => void;
   /** Callback to extend selection to a cell */
   onExtendTo: (row: number, col: number) => void;
   /** Callback when scroll position should change */
@@ -192,6 +192,8 @@ export interface UseMouseSelectionReturn {
   isRefResizing: boolean;
   /** Whether a selection is being dragged to move cells */
   isSelectionDragging: boolean;
+  /** Whether an overlay region (table) is being resized */
+  isOverlayResizing: boolean;
   /** Preview selection showing where cells would land during drag */
   selectionDragPreview: Selection | null;
   /** Current cursor style to use */

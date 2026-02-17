@@ -11,6 +11,7 @@ import { getViewportCells } from "../../lib/tauri-api";
 import type { GridConfig, Viewport, Selection, EditingCell, CellDataMap, FormulaReference, DimensionOverrides, StyleDataMap, ClipboardMode, InsertionAnimation, FreezeConfig } from "../../types";
 import { cellKey, createEmptyDimensionOverrides, DEFAULT_FREEZE_CONFIG } from "../../types";
 import type { GridTheme } from "../../lib/gridRenderer";
+import { getGridRegions, getOverlayRenderers, onRegionChange } from "../../../api/gridOverlays";
 import * as S from "./GridCanvas.styles";
 
 /**
@@ -428,8 +429,8 @@ export const GridCanvas = forwardRef<GridCanvasHandle, GridCanvasProps>(
         animationOffset,
         currentInsertionAnimation,
         freezeConfig,
-        [], // overlayRegions
-        [], // overlayRenderers
+        getGridRegions(),
+        getOverlayRenderers(),
         currentSheetName, // FIX: Pass current sheet for cross-sheet reference highlighting
       );
 
@@ -717,6 +718,17 @@ export const GridCanvas = forwardRef<GridCanvasHandle, GridCanvasProps>(
         draw(0, null);
       }
     }, [draw, clipboardSelection, clipboardMode, insertionAnimation]);
+
+    /**
+     * Listen for overlay region changes (e.g., table created/resized/deleted)
+     * and trigger a redraw so the overlay renderers pick up the new data.
+     */
+    useEffect(() => {
+      const cleanup = onRegionChange(() => {
+        draw(animationOffsetRef.current, insertionAnimation);
+      });
+      return cleanup;
+    }, [draw, insertionAnimation]);
 
     /**
      * Expose imperative methods via ref.
