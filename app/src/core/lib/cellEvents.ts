@@ -5,6 +5,7 @@
 // when cells change without tight coupling between editing and rendering.
 
 import type { CellChangeEvent } from "../types";
+import { AppEvents, emitAppEvent } from "./events";
 
 /**
  * Callback type for cell change listeners.
@@ -17,6 +18,7 @@ export type CellChangeListener = (event: CellChangeEvent) => void;
  */
 class CellEventEmitter {
   private listeners: Set<CellChangeListener> = new Set();
+  private cellsUpdatedPending = false;
 
   /**
    * Subscribe to cell change events.
@@ -32,6 +34,8 @@ class CellEventEmitter {
 
   /**
    * Emit a cell change event to all listeners.
+   * Also schedules a debounced CELLS_UPDATED app event so extensions
+   * (e.g. Charts) can react to data changes.
    * @param event - The cell change event
    */
   emit(event: CellChangeEvent): void {
@@ -42,6 +46,16 @@ class CellEventEmitter {
         console.error("Error in cell change listener:", error);
       }
     });
+
+    // Debounce CELLS_UPDATED via requestAnimationFrame so bulk operations
+    // (paste, undo, fill) coalesce into a single event per frame.
+    if (!this.cellsUpdatedPending) {
+      this.cellsUpdatedPending = true;
+      requestAnimationFrame(() => {
+        this.cellsUpdatedPending = false;
+        emitAppEvent(AppEvents.CELLS_UPDATED);
+      });
+    }
   }
 
   /**

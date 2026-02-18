@@ -3,7 +3,7 @@
 // CONTEXT: Called by chartRenderer to paint a bar chart onto an OffscreenCanvas
 //          or a preview canvas. Draws axes, grid lines, bars, title, and legend.
 
-import type { ChartSpec, ParsedChartData } from "../types";
+import type { ChartSpec, ParsedChartData, BarRect } from "../types";
 import type { ChartRenderTheme } from "./chartTheme";
 import { getSeriesColor } from "./chartTheme";
 import { createLinearScale, createBandScale } from "./scales";
@@ -342,6 +342,91 @@ function drawBars(
   }
 }
 
+// ============================================================================
+// Bar Geometry (for hit-testing)
+// ============================================================================
+
+/**
+ * Compute the bounding rectangles of all bars, clipped to the plot area.
+ * Returns the same geometry that drawBars() renders, but as data instead of pixels.
+ * Used by hit-testing and selection highlight rendering.
+ */
+export function computeBarRects(
+  data: ParsedChartData,
+  spec: ChartSpec,
+  layout: BarChartLayout,
+  theme: ChartRenderTheme,
+): BarRect[] {
+  const { plotArea } = layout;
+  const rects: BarRect[] = [];
+
+  const numSeries = data.series.length;
+  if (numSeries === 0) return rects;
+
+  const allValues = data.series.flatMap((s) => s.values);
+  const dataMin = allValues.length > 0 ? Math.min(...allValues) : 0;
+  const dataMax = allValues.length > 0 ? Math.max(...allValues) : 1;
+
+  const yMin = spec.yAxis.min ?? dataMin;
+  const yMax = spec.yAxis.max ?? dataMax;
+
+  const yScale = createLinearScale(
+    [yMin, yMax],
+    [plotArea.y + plotArea.height, plotArea.y],
+  );
+
+  const xScale = createBandScale(
+    data.categories,
+    [plotArea.x, plotArea.x + plotArea.width],
+    0.3,
+  );
+
+  const groupWidth = xScale.bandwidth;
+  const barWidth = Math.max(
+    (groupWidth - theme.barGap * (numSeries - 1)) / numSeries,
+    2,
+  );
+  const zeroY = yScale.scale(0);
+
+  for (let ci = 0; ci < data.categories.length; ci++) {
+    const category = data.categories[ci];
+    const groupX = xScale.scale(category);
+
+    for (let si = 0; si < numSeries; si++) {
+      const value = data.series[si].values[ci] ?? 0;
+      const barX = groupX + si * (barWidth + theme.barGap);
+      const barTop = yScale.scale(value);
+      const barHeight = Math.abs(zeroY - barTop);
+      const barY = value >= 0 ? barTop : zeroY;
+
+      // Clip bar to plot area (same as drawBars)
+      const clippedY = Math.max(barY, plotArea.y);
+      const clippedBottom = Math.min(barY + barHeight, plotArea.y + plotArea.height);
+      const clippedHeight = clippedBottom - clippedY;
+
+      if (clippedHeight <= 0) continue;
+
+      rects.push({
+        seriesIndex: si,
+        categoryIndex: ci,
+        x: barX,
+        y: clippedY,
+        width: barWidth,
+        height: clippedHeight,
+        value,
+        seriesName: data.series[si].name,
+        categoryName: category,
+      });
+    }
+  }
+
+  return rects;
+}
+
+// ============================================================================
+// Drawing Helpers
+// ============================================================================
+
 function drawTitle(
   ctx: CanvasRenderingContext2D,
   title: string,
@@ -456,7 +541,7 @@ function truncateText(
   return truncated + "...";
 }
 
-function formatTickValue(value: number): string {
+export function formatTickValue(value: number): string {
   if (Math.abs(value) >= 1_000_000) return (value / 1_000_000).toFixed(1) + "M";
   if (Math.abs(value) >= 1_000) return (value / 1_000).toFixed(1) + "K";
   if (Number.isInteger(value)) return value.toString();

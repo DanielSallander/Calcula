@@ -1,5 +1,6 @@
 //! FILENAME: app/extensions/Charts/rendering/chartRenderer.ts
-// PURPOSE: Grid overlay render function for charts with OffscreenCanvas caching.
+// PURPOSE: Grid overlay render function for charts with OffscreenCanvas caching,
+//          tooltip rendering, and hierarchical selection highlighting.
 // CONTEXT: Registered with registerGridOverlay(). Called synchronously every frame
 //          by the core canvas renderer. Uses async data fetching with cache to avoid
 //          blocking the render loop.
@@ -10,15 +11,25 @@ import {
   overlayGetColHeaderHeight,
   overlaySheetToCanvas,
   requestOverlayRedraw,
+  getGridRegions,
   type OverlayRenderContext,
   type OverlayHitTestContext,
 } from "../../../src/api/gridOverlays";
 
-import { getChartById } from "../lib/chartStore";
+import { getChartById, getAllCharts } from "../lib/chartStore";
 import { readChartData } from "../lib/chartDataReader";
-import { paintBarChart, computeLayout } from "./barChartPainter";
+import {
+  paintBarChart,
+  computeLayout,
+  computeBarRects,
+  formatTickValue,
+  type BarChartLayout,
+} from "./barChartPainter";
 import { DEFAULT_CHART_THEME } from "./chartTheme";
-import { isChartSelected } from "../handlers/selectionHandler";
+import { getSeriesColor } from "./chartTheme";
+import { isChartSelected, getSubSelection } from "../handlers/selectionHandler";
+import { hitTestBarChart } from "./chartHitTesting";
+import type { ParsedChartData, BarRect, ChartHitResult } from "../types";
 
 // ============================================================================
 // OffscreenCanvas Cache
@@ -58,6 +69,151 @@ export function removeChartFromCache(chartId: number): void {
   chartCanvasCache.delete(chartId);
   chartVersions.delete(chartId);
   pendingRenders.delete(chartId);
+  chartDataCache.delete(chartId);
+}
+
+// ============================================================================
+// Chart Data Cache (persists across canvas invalidation)
+// ============================================================================
+
+interface CachedChartData {
+  data: ParsedChartData;
+  layout: BarChartLayout;
+  barRects: BarRect[];
+  logicalWidth: number;
+  logicalHeight: number;
+}
+
+const chartDataCache = new Map<number, CachedChartData>();
+
+/**
+ * Get cached chart data for hit-testing. Returns null if not yet rendered.
+ */
+export function getCachedChartData(chartId: number): CachedChartData | null {
+  return chartDataCache.get(chartId) ?? null;
+}
+
+// ============================================================================
+// Viewport Params Cache (updated during sync render)
+// ============================================================================
+
+let cachedScrollX = 0;
+let cachedScrollY = 0;
+let cachedRowHeaderWidth = 50;
+let cachedColHeaderHeight = 24;
+
+/**
+ * Convert canvas coordinates to chart-local coordinates.
+ * Uses cached viewport params from the most recent render call.
+ */
+export function getChartLocalCoords(
+  chartId: number,
+  canvasX: number,
+  canvasY: number,
+): { localX: number; localY: number } | null {
+  const chart = getChartById(chartId);
+  if (!chart) return null;
+
+  const chartCanvasX = cachedRowHeaderWidth + chart.x - cachedScrollX;
+  const chartCanvasY = cachedColHeaderHeight + chart.y - cachedScrollY;
+
+  return {
+    localX: canvasX - chartCanvasX,
+    localY: canvasY - chartCanvasY,
+  };
+}
+
+// ============================================================================
+// Hover State
+// ============================================================================
+
+let hoverState: {
+  chartId: number;
+  hitResult: ChartHitResult;
+  canvasX: number;
+  canvasY: number;
+} | null = null;
+
+/**
+ * Handle mouse move over the grid area. Performs hit-testing against chart
+ * regions and bar rects to determine if the mouse is hovering over a bar.
+ * Requests a redraw if hover state changes.
+ */
+export function handleChartMouseMove(canvasX: number, canvasY: number): void {
+  const charts = getAllCharts();
+  if (charts.length === 0) {
+    if (hoverState !== null) {
+      hoverState = null;
+      requestOverlayRedraw();
+    }
+    return;
+  }
+
+  // Check if mouse is over any chart region
+  const regions = getGridRegions().filter((r) => r.type === "chart");
+  let foundHover = false;
+
+  for (const region of regions) {
+    if (!region.floating) continue;
+    const chartId = region.data?.chartId as number;
+    if (chartId == null) continue;
+
+    // Compute canvas bounds for this chart
+    const chartCanvasX = cachedRowHeaderWidth + region.floating.x - cachedScrollX;
+    const chartCanvasY = cachedColHeaderHeight + region.floating.y - cachedScrollY;
+    const chartWidth = region.floating.width;
+    const chartHeight = region.floating.height;
+
+    // Check if mouse is within chart bounds
+    if (
+      canvasX >= chartCanvasX &&
+      canvasX <= chartCanvasX + chartWidth &&
+      canvasY >= chartCanvasY &&
+      canvasY <= chartCanvasY + chartHeight
+    ) {
+      // Get chart-local coordinates
+      const localX = canvasX - chartCanvasX;
+      const localY = canvasY - chartCanvasY;
+
+      // Hit-test against bar rects
+      const cachedData = chartDataCache.get(chartId);
+      if (cachedData) {
+        const hitResult = hitTestBarChart(localX, localY, cachedData.barRects, cachedData.layout);
+
+        if (hitResult.type === "bar") {
+          const changed =
+            hoverState === null ||
+            hoverState.chartId !== chartId ||
+            hoverState.hitResult.seriesIndex !== hitResult.seriesIndex ||
+            hoverState.hitResult.categoryIndex !== hitResult.categoryIndex;
+
+          hoverState = { chartId, hitResult, canvasX, canvasY };
+          if (changed) requestOverlayRedraw();
+          foundHover = true;
+          break;
+        }
+      }
+    }
+  }
+
+  if (!foundHover && hoverState !== null) {
+    hoverState = null;
+    requestOverlayRedraw();
+  } else if (foundHover && hoverState) {
+    // Update canvas position even if same bar (for tooltip tracking)
+    hoverState.canvasX = canvasX;
+    hoverState.canvasY = canvasY;
+  }
+}
+
+/**
+ * Clear hover state when mouse leaves the grid area.
+ */
+export function handleChartMouseLeave(): void {
+  if (hoverState !== null) {
+    hoverState = null;
+    requestOverlayRedraw();
+  }
 }
 
 // ============================================================================
@@ -82,6 +238,12 @@ export function renderChart(overlayCtx: OverlayRenderContext): void {
 
   const rowHeaderWidth = overlayGetRowHeaderWidth(overlayCtx);
   const colHeaderHeight = overlayGetColHeaderHeight(overlayCtx);
+
+  // Cache viewport params for mouse coordinate conversion
+  cachedScrollX = overlayCtx.viewport.scrollX;
+  cachedScrollY = overlayCtx.viewport.scrollY;
+  cachedRowHeaderWidth = rowHeaderWidth;
+  cachedColHeaderHeight = colHeaderHeight;
 
   // Convert sheet pixel position to canvas pixel position
   const { canvasX, canvasY } = overlaySheetToCanvas(
@@ -110,11 +272,11 @@ export function renderChart(overlayCtx: OverlayRenderContext): void {
   );
   ctx.clip();
 
-  // Draw white background
+  // 1. Draw white background
   ctx.fillStyle = "#ffffff";
   ctx.fillRect(canvasX, canvasY, chartWidth, chartHeight);
 
-  // Check cache
+  // 2. Draw cached chart image
   const dpr = window.devicePixelRatio || 1;
   const pxWidth = Math.round(chartWidth * dpr);
   const pxHeight = Math.round(chartHeight * dpr);
@@ -122,17 +284,14 @@ export function renderChart(overlayCtx: OverlayRenderContext): void {
   const cached = chartCanvasCache.get(chartId);
 
   if (cached && cached.version === currentVersion) {
-    // Version matches - draw cached image (stretched if dimensions differ during resize)
     ctx.drawImage(cached.canvas, canvasX, canvasY, chartWidth, chartHeight);
   } else if (pendingRenders.has(chartId)) {
-    // Render in progress - stretch old cache if available, otherwise placeholder
     if (cached) {
       ctx.drawImage(cached.canvas, canvasX, canvasY, chartWidth, chartHeight);
     } else {
       drawPlaceholder(ctx, canvasX, canvasY, chartWidth, chartHeight, chart.name);
     }
   } else {
-    // Cache miss - show old cache stretched or placeholder, kick off async render
     if (cached) {
       ctx.drawImage(cached.canvas, canvasX, canvasY, chartWidth, chartHeight);
     } else {
@@ -141,7 +300,16 @@ export function renderChart(overlayCtx: OverlayRenderContext): void {
     renderChartAsync(chartId, pxWidth, pxHeight, chartWidth, chartHeight, dpr, currentVersion);
   }
 
-  // Draw border
+  // 3. Draw selection highlights (series/data point dimming + outlines)
+  const cachedData = chartDataCache.get(chartId);
+  if (isChartSelected(chartId) && cachedData) {
+    const subSel = getSubSelection();
+    if (subSel.level === "series" || subSel.level === "dataPoint") {
+      drawSelectionHighlights(ctx, canvasX, canvasY, cachedData, chart.spec, subSel.level, subSel.seriesIndex, subSel.categoryIndex);
+    }
+  }
+
+  // 4. Draw border
   ctx.strokeStyle = "#d0d0d0";
   ctx.lineWidth = 1;
   ctx.setLineDash([]);
@@ -152,7 +320,7 @@ export function renderChart(overlayCtx: OverlayRenderContext): void {
     chartHeight - 1,
   );
 
-  // Draw selection border if chart is selected
+  // 5. Draw selection border if chart is selected
   if (isChartSelected(chartId)) {
     ctx.strokeStyle = "#0e639c";
     ctx.lineWidth = 2;
@@ -161,6 +329,11 @@ export function renderChart(overlayCtx: OverlayRenderContext): void {
 
     // Resize handles at corners
     drawResizeHandles(ctx, canvasX, canvasY, chartWidth, chartHeight);
+  }
+
+  // 6. Draw tooltip (always on top)
+  if (hoverState && hoverState.chartId === chartId && hoverState.hitResult.type === "bar") {
+    drawTooltip(ctx, canvasX, canvasY, chartWidth, chartHeight, hoverState);
   }
 
   ctx.restore();
@@ -238,7 +411,7 @@ async function renderChartAsync(
 
     paintBarChart(offCtx, data, chart.spec, layout, DEFAULT_CHART_THEME);
 
-    // Store in cache
+    // Store in canvas cache
     chartCanvasCache.set(chartId, {
       canvas: offscreen,
       version,
@@ -246,16 +419,234 @@ async function renderChartAsync(
       height: pxHeight,
     });
 
+    // Store in data cache (separate, persists across canvas invalidation)
+    const barRects = computeBarRects(data, chart.spec, layout, DEFAULT_CHART_THEME);
+    chartDataCache.set(chartId, {
+      data,
+      layout,
+      barRects,
+      logicalWidth,
+      logicalHeight,
+    });
+
     // Trigger a canvas redraw so the cached chart gets composited.
-    // Uses requestOverlayRedraw (fires onRegionChange listeners) which is more
-    // reliable than emitAppEvent from async code, as event listener closures
-    // may hold stale draw references.
     requestOverlayRedraw();
   } catch (err) {
     console.error(`[Charts] Failed to render chart ${chartId}:`, err);
   } finally {
     pendingRenders.delete(chartId);
   }
+}
+
+// ============================================================================
+// Selection Highlight Drawing
+// ============================================================================
+
+/**
+ * Draw semi-transparent overlays to dim non-selected bars and highlight selected ones.
+ * Called during the sync render pass, drawn on top of the cached chart image.
+ */
+function drawSelectionHighlights(
+  ctx: CanvasRenderingContext2D,
+  chartX: number,
+  chartY: number,
+  cachedData: CachedChartData,
+  spec: import("../types").ChartSpec,
+  level: "series" | "dataPoint",
+  selSeriesIndex?: number,
+  selCategoryIndex?: number,
+): void {
+  const { barRects } = cachedData;
+  if (barRects.length === 0) return;
+
+  for (const bar of barRects) {
+    const bx = chartX + bar.x;
+    const by = chartY + bar.y;
+
+    const isSelected =
+      level === "series"
+        ? bar.seriesIndex === selSeriesIndex
+        : bar.seriesIndex === selSeriesIndex && bar.categoryIndex === selCategoryIndex;
+
+    if (isSelected) {
+      // Draw highlight outline on selected bars
+      ctx.strokeStyle = "#0e639c";
+      ctx.lineWidth = 2;
+      ctx.setLineDash([]);
+      ctx.strokeRect(bx, by, bar.width, bar.height);
+    } else {
+      // Dim non-selected bars with semi-transparent white overlay
+      ctx.fillStyle = "rgba(255, 255, 255, 0.55)";
+      ctx.fillRect(bx, by, bar.width, bar.height);
+    }
+  }
+
+  // Draw selection handles on selected bars (small squares at corners)
+  if (level === "dataPoint" && selSeriesIndex != null && selCategoryIndex != null) {
+    const selectedBar = barRects.find(
+      (b) => b.seriesIndex === selSeriesIndex && b.categoryIndex === selCategoryIndex,
+    );
+    if (selectedBar) {
+      drawBarSelectionHandles(ctx, chartX + selectedBar.x, chartY + selectedBar.y, selectedBar.width, selectedBar.height);
+    }
+  }
+}
+
+/**
+ * Draw small selection handles at corners and midpoints of a selected bar.
+ */
+function drawBarSelectionHandles(
+  ctx: CanvasRenderingContext2D,
+  x: number,
+  y: number,
+  w: number,
+  h: number,
+): void {
+  const size = 5;
+  const half = size / 2;
+  ctx.fillStyle = "#0e639c";
+
+  // Four corners
+  ctx.fillRect(x - half, y - half, size, size);
+  ctx.fillRect(x + w - half, y - half, size, size);
+  ctx.fillRect(x - half, y + h - half, size, size);
+  ctx.fillRect(x + w - half, y + h - half, size, size);
+
+  // Midpoints of top and bottom edges
+  ctx.fillRect(x + w / 2 - half, y - half, size, size);
+  ctx.fillRect(x + w / 2 - half, y + h - half, size, size);
+}
+
+// ============================================================================
+// Tooltip Drawing
+// ============================================================================
+
+/**
+ * Draw a tooltip near the hovered bar showing series name, category, and value.
+ * Drawn on the main canvas during the sync render pass.
+ */
+function drawTooltip(
+  ctx: CanvasRenderingContext2D,
+  chartX: number,
+  chartY: number,
+  chartWidth: number,
+  chartHeight: number,
+  hover: NonNullable<typeof hoverState>,
+): void {
+  const { hitResult, canvasX, canvasY } = hover;
+  if (hitResult.type !== "bar") return;
+
+  const seriesName = hitResult.seriesName ?? "";
+  const categoryName = hitResult.categoryName ?? "";
+  const value = hitResult.value ?? 0;
+  const valueStr = formatTickValue(value);
+
+  const font = "11px 'Segoe UI', system-ui, sans-serif";
+  const boldFont = "600 11px 'Segoe UI', system-ui, sans-serif";
+  const lineHeight = 16;
+  const paddingX = 10;
+  const paddingY = 8;
+  const offsetX = 12;
+  const offsetY = -20;
+
+  // Measure text widths
+  ctx.font = boldFont;
+  const nameWidth = ctx.measureText(seriesName).width;
+  ctx.font = font;
+  const detailText = `${categoryName}: ${valueStr}`;
+  const detailWidth = ctx.measureText(detailText).width;
+
+  const tooltipWidth = Math.max(nameWidth, detailWidth) + paddingX * 2;
+  const tooltipHeight = lineHeight * 2 + paddingY * 2;
+
+  // Position: offset from cursor, clamped within chart bounds
+  let tx = canvasX + offsetX;
+  let ty = canvasY + offsetY - tooltipHeight;
+
+  // Clamp to chart bounds
+  const chartRight = chartX + chartWidth;
+  const chartBottom = chartY + chartHeight;
+
+  if (tx + tooltipWidth > chartRight) {
+    tx = canvasX - offsetX - tooltipWidth;
+  }
+  if (tx < chartX) {
+    tx = chartX + 4;
+  }
+  if (ty < chartY) {
+    ty = canvasY + 20;
+  }
+  if (ty + tooltipHeight > chartBottom) {
+    ty = chartBottom - tooltipHeight - 4;
+  }
+
+  // Draw shadow
+  ctx.save();
+  ctx.shadowColor = "rgba(0, 0, 0, 0.15)";
+  ctx.shadowBlur = 8;
+  ctx.shadowOffsetX = 0;
+  ctx.shadowOffsetY = 2;
+
+  // Draw rounded rect background
+  const radius = 4;
+  ctx.fillStyle = "#ffffff";
+  ctx.beginPath();
+  ctx.moveTo(tx + radius, ty);
+  ctx.lineTo(tx + tooltipWidth - radius, ty);
+  ctx.quadraticCurveTo(tx + tooltipWidth, ty, tx + tooltipWidth, ty + radius);
+  ctx.lineTo(tx + tooltipWidth, ty + tooltipHeight - radius);
+  ctx.quadraticCurveTo(tx + tooltipWidth, ty + tooltipHeight, tx + tooltipWidth - radius, ty + tooltipHeight);
+  ctx.lineTo(tx + radius, ty + tooltipHeight);
+  ctx.quadraticCurveTo(tx, ty + tooltipHeight, tx, ty + tooltipHeight - radius);
+  ctx.lineTo(tx, ty + radius);
+  ctx.quadraticCurveTo(tx, ty, tx + radius, ty);
+  ctx.closePath();
+  ctx.fill();
+
+  ctx.restore(); // remove shadow for text and border
+
+  // Draw border
+  ctx.strokeStyle = "#e0e0e0";
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  ctx.moveTo(tx + radius, ty);
+  ctx.lineTo(tx + tooltipWidth - radius, ty);
+  ctx.quadraticCurveTo(tx + tooltipWidth, ty, tx + tooltipWidth, ty + radius);
+  ctx.lineTo(tx + tooltipWidth, ty + tooltipHeight - radius);
+  ctx.quadraticCurveTo(tx + tooltipWidth, ty + tooltipHeight, tx + tooltipWidth - radius, ty + tooltipHeight);
+  ctx.lineTo(tx + radius, ty + tooltipHeight);
+  ctx.quadraticCurveTo(tx, ty + tooltipHeight, tx, ty + tooltipHeight - radius);
+  ctx.lineTo(tx, ty + radius);
+  ctx.quadraticCurveTo(tx, ty, tx + radius, ty);
+  ctx.closePath();
+  ctx.stroke();
+
+  // Draw color swatch
+  const swatchSize = 8;
+  const swatchX = tx + paddingX;
+  const swatchY = ty + paddingY + (lineHeight - swatchSize) / 2;
+  const chart = getChartById(hover.chartId);
+  if (chart && hitResult.seriesIndex != null) {
+    const color = getSeriesColor(
+      chart.spec.palette,
+      hitResult.seriesIndex,
+      chart.spec.series[hitResult.seriesIndex]?.color ?? null,
+    );
+    ctx.fillStyle = color;
+    ctx.fillRect(swatchX, swatchY, swatchSize, swatchSize);
+  }
+
+  // Draw series name (bold)
+  ctx.fillStyle = "#333333";
+  ctx.font = boldFont;
+  ctx.textAlign = "left";
+  ctx.textBaseline = "top";
+  ctx.fillText(seriesName, swatchX + swatchSize + 5, ty + paddingY);
+
+  // Draw category: value
+  ctx.font = font;
+  ctx.fillStyle = "#666666";
+  ctx.fillText(detailText, tx + paddingX, ty + paddingY + lineHeight);
 }
 
 // ============================================================================

@@ -601,17 +601,6 @@ export function renderGrid(
     drawCellText(state);
   }
 
-  // Render overlays using INJECTED data (not imported from API)
-  const sortedRenderers = [...overlayRenderers].sort(
-    (a, b) => (a.priority ?? 0) - (b.priority ?? 0)
-  );
-  for (const renderer of sortedRenderers) {
-    const matchingRegions = overlayRegions.filter(r => r.type === renderer.type);
-    for (const region of matchingRegions) {
-      renderer.render({ ctx, region, config, viewport, dimensions: dims, canvasWidth: width, canvasHeight: height });
-    }
-  }
-
   if (formulaReferences.length > 0) {
     drawFormulaReferences(state);
   }
@@ -629,6 +618,18 @@ export function renderGrid(
 
   if (clipboardSelection && clipboardMode && clipboardMode !== "none") {
     drawClipboardSelection(state);
+  }
+
+  // Render overlays AFTER selection so that charts and other overlays
+  // paint on top of selection borders, preventing them from bleeding through.
+  const sortedRenderers = [...overlayRenderers].sort(
+    (a, b) => (a.priority ?? 0) - (b.priority ?? 0)
+  );
+  for (const renderer of sortedRenderers) {
+    const matchingRegions = overlayRegions.filter(r => r.type === renderer.type);
+    for (const region of matchingRegions) {
+      renderer.render({ ctx, region, config, viewport, dimensions: dims, canvasWidth: width, canvasHeight: height });
+    }
   }
 
   drawColumnHeaders(state);

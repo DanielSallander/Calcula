@@ -2,6 +2,7 @@
 // PURPOSE: Chart extension entry point.
 // CONTEXT: Registers all chart functionality with the extension system.
 //          Charts are free-floating overlays that can be moved and resized.
+//          Handles mousemove for tooltips and deferred clicks for hierarchical selection.
 
 import {
   ExtensionRegistry,
@@ -26,6 +27,12 @@ import {
   handleSelectionChange,
   resetSelectionHandlerState,
   selectChart,
+  isChartSelected,
+  advanceSelection,
+  resetSubSelection,
+  setPendingClick,
+  clearPendingClick,
+  consumePendingClick,
 } from "./handlers/selectionHandler";
 import {
   resetChartStore,
@@ -33,9 +40,18 @@ import {
   getAllCharts,
   moveChart,
   resizeChart,
-  getChartById,
 } from "./lib/chartStore";
-import { renderChart, hitTestChart, invalidateChartCache, invalidateAllChartCaches } from "./rendering/chartRenderer";
+import {
+  renderChart,
+  hitTestChart,
+  invalidateChartCache,
+  invalidateAllChartCaches,
+  handleChartMouseMove,
+  handleChartMouseLeave,
+  getChartLocalCoords,
+  getCachedChartData,
+} from "./rendering/chartRenderer";
+import { hitTestBarChart } from "./rendering/chartHitTesting";
 import { ChartEvents } from "./lib/chartEvents";
 
 // ============================================================================
@@ -43,6 +59,16 @@ import { ChartEvents } from "./lib/chartEvents";
 // ============================================================================
 
 let cleanupFunctions: Array<() => void> = [];
+
+/** Cached reference to the grid container element for coordinate conversion. */
+let gridContainer: HTMLElement | null = null;
+
+/** Last known mouse position in canvas coordinates. */
+let lastCanvasX = 0;
+let lastCanvasY = 0;
+
+/** requestAnimationFrame guard for throttling mousemove redraws. */
+let rafPending = false;
 
 /**
  * Register the chart extension.
@@ -90,6 +116,7 @@ export function registerChartExtension(): void {
       const charts = getAllCharts();
       if (charts.length > 0) {
         invalidateAllChartCaches();
+        resetSubSelection();
         emitAppEvent(AppEvents.GRID_REFRESH);
       }
     }),
@@ -104,10 +131,17 @@ export function registerChartExtension(): void {
     const detail = (e as CustomEvent).detail;
     if (detail.regionType !== "chart") return;
     const chartId = detail.data?.chartId as number;
-    if (chartId != null) {
+    if (chartId == null) return;
+
+    if (isChartSelected(chartId)) {
+      // Chart is already selected: set pending click for deferred sub-selection.
+      // The actual sub-selection advance happens on mouseup (if not a drag).
+      setPendingClick(chartId, lastCanvasX, lastCanvasY);
+    } else {
+      // First click: select the chart (Level 1)
       selectChart(chartId);
-      emitAppEvent(AppEvents.GRID_REFRESH);
     }
+    emitAppEvent(AppEvents.GRID_REFRESH);
   };
   window.addEventListener("floatingObject:selected", handleFloatingSelected);
   cleanupFunctions.push(() => {
@@ -120,6 +154,8 @@ export function registerChartExtension(): void {
     if (detail.regionType !== "chart") return;
     const chartId = detail.data?.chartId as number;
     if (chartId != null) {
+      // Clear pending click - this is a drag, not a click
+      clearPendingClick();
       moveChart(chartId, detail.x, detail.y);
       syncChartRegions();
       emitAppEvent(AppEvents.GRID_REFRESH);
@@ -136,6 +172,8 @@ export function registerChartExtension(): void {
     if (detail.regionType !== "chart") return;
     const chartId = detail.data?.chartId as number;
     if (chartId != null) {
+      // Clear pending click - move completed, not a click
+      clearPendingClick();
       moveChart(chartId, detail.x, detail.y);
       syncChartRegions();
       invalidateChartCache(chartId);
@@ -188,6 +226,72 @@ export function registerChartExtension(): void {
     ExtensionRegistry.onSelectionChange(handleSelectionChange),
   );
 
+  // -----------------------------------------------------------------------
+  // Mousemove for Tooltips
+  // -----------------------------------------------------------------------
+
+  const handleMouseMove = (e: MouseEvent) => {
+    // Find the grid container if not cached yet
+    if (!gridContainer) {
+      gridContainer = document.querySelector("canvas")?.parentElement ?? null;
+    }
+    if (!gridContainer) return;
+
+    const rect = gridContainer.getBoundingClientRect();
+
+    // Convert to canvas-relative coordinates
+    const canvasX = e.clientX - rect.left;
+    const canvasY = e.clientY - rect.top;
+
+    // Store last position for use in click handler
+    lastCanvasX = canvasX;
+    lastCanvasY = canvasY;
+
+    // Skip if mouse is outside the grid container
+    if (canvasX < 0 || canvasY < 0 || canvasX > rect.width || canvasY > rect.height) {
+      handleChartMouseLeave();
+      return;
+    }
+
+    // Throttle: only process one mousemove per animation frame
+    if (!rafPending) {
+      rafPending = true;
+      requestAnimationFrame(() => {
+        rafPending = false;
+        handleChartMouseMove(lastCanvasX, lastCanvasY);
+      });
+    }
+  };
+  window.addEventListener("mousemove", handleMouseMove);
+  cleanupFunctions.push(() => {
+    window.removeEventListener("mousemove", handleMouseMove);
+  });
+
+  // -----------------------------------------------------------------------
+  // Mouseup for Deferred Click Detection (hierarchical selection)
+  // -----------------------------------------------------------------------
+
+  const handleMouseUp = () => {
+    const click = consumePendingClick();
+    if (!click) return;
+
+    // A click (not a drag) occurred on an already-selected chart.
+    // Hit-test to determine what sub-element was clicked.
+    const cachedData = getCachedChartData(click.chartId);
+    if (!cachedData) return;
+
+    const local = getChartLocalCoords(click.chartId, click.canvasX, click.canvasY);
+    if (!local) return;
+
+    const hitResult = hitTestBarChart(local.localX, local.localY, cachedData.barRects, cachedData.layout);
+    advanceSelection(click.chartId, hitResult);
+    emitAppEvent(AppEvents.GRID_REFRESH);
+  };
+  window.addEventListener("mouseup", handleMouseUp);
+  cleanupFunctions.push(() => {
+    window.removeEventListener("mouseup", handleMouseUp);
+  });
+
   console.log("[Chart Extension] Registered successfully");
 }
 
@@ -205,6 +309,7 @@ export function unregisterChartExtension(): void {
   // Reset handler state
   resetSelectionHandlerState();
   resetChartStore();
+  gridContainer = null;
 
   // Remove chart overlay regions
   removeGridRegionsByType("chart");

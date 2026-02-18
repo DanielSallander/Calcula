@@ -136,3 +136,48 @@ export interface ParsedChartData {
     color: string | null;
   }>;
 }
+
+// ============================================================================
+// Hit-Testing & Interaction
+// ============================================================================
+
+/** Result of hit-testing a point within a chart. */
+export interface ChartHitResult {
+  /** What type of chart element was hit. */
+  type: "bar" | "plotArea" | "title" | "legend" | "axis" | "none";
+  /** Series index (set when type is "bar"). */
+  seriesIndex?: number;
+  /** Category index (set when type is "bar"). */
+  categoryIndex?: number;
+  /** Data value (set when type is "bar"). */
+  value?: number;
+  /** Series name (set when type is "bar"). */
+  seriesName?: string;
+  /** Category label (set when type is "bar"). */
+  categoryName?: string;
+}
+
+/** Hierarchical selection level within a chart. */
+export type ChartSelectionLevel = "none" | "chart" | "series" | "dataPoint";
+
+/** Sub-selection state within a selected chart. */
+export interface ChartSubSelection {
+  level: ChartSelectionLevel;
+  /** Selected series index (set at "series" and "dataPoint" levels). */
+  seriesIndex?: number;
+  /** Selected category index (set at "dataPoint" level). */
+  categoryIndex?: number;
+}
+
+/** A computed bar rectangle with metadata, used for hit-testing. */
+export interface BarRect {
+  seriesIndex: number;
+  categoryIndex: number;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  value: number;
+  seriesName: string;
+  categoryName: string;
+}
