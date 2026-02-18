@@ -9,7 +9,6 @@ import {
   getColumnWidth,
   getRowHeight,
   getColumnsWidth,
-  getRowsHeight,
   calculateColumnX,
   calculateRowY,
   createDimensionGetterFromMap,
@@ -262,8 +261,11 @@ export function overlayGetColumnWidth(ctx: OverlayRenderContext, col: number): n
   );
 }
 
-/** Get the height of a specific row, accounting for custom heights. */
+/** Get the height of a specific row, accounting for custom heights and hidden rows. */
 export function overlayGetRowHeight(ctx: OverlayRenderContext, row: number): number {
+  if (ctx.dimensions.hiddenRows && ctx.dimensions.hiddenRows.has(row)) {
+    return 0;
+  }
   return getRowHeight(
     row,
     ctx.config.defaultCellHeight ?? 24,
@@ -285,12 +287,17 @@ export function overlayGetColumnX(ctx: OverlayRenderContext, col: number): numbe
   );
 }
 
-/** Get the Y pixel coordinate of a row's top edge, relative to the canvas. */
+/** Get the Y pixel coordinate of a row's top edge, relative to the canvas. Accounts for hidden rows. */
 export function overlayGetRowY(ctx: OverlayRenderContext, row: number): number {
-  const getHeight = createDimensionGetterFromMap(
+  const baseGetHeight = createDimensionGetterFromMap(
     ctx.config.defaultCellHeight ?? 24,
     ctx.dimensions.rowHeights
   );
+  // Wrap the getter to return 0 for hidden rows
+  const hiddenRows = ctx.dimensions.hiddenRows;
+  const getHeight = hiddenRows && hiddenRows.size > 0
+    ? (r: number) => hiddenRows.has(r) ? 0 : baseGetHeight(r)
+    : baseGetHeight;
   return calculateRowY(
     row,
     ctx.config.colHeaderHeight ?? 24,
@@ -309,14 +316,16 @@ export function overlayGetColumnsWidth(ctx: OverlayRenderContext, startCol: numb
   );
 }
 
-/** Get the total height of a range of rows (inclusive). */
+/** Get the total height of a range of rows (inclusive). Accounts for hidden rows. */
 export function overlayGetRowsHeight(ctx: OverlayRenderContext, startRow: number, endRow: number): number {
-  return getRowsHeight(
-    startRow,
-    endRow,
-    ctx.config.defaultCellHeight ?? 24,
-    ctx.dimensions.rowHeights
-  );
+  const defaultHeight = ctx.config.defaultCellHeight ?? 24;
+  const hiddenRows = ctx.dimensions.hiddenRows;
+  let height = 0;
+  for (let row = startRow; row <= endRow; row++) {
+    if (hiddenRows && hiddenRows.has(row)) continue;
+    height += ctx.dimensions.rowHeights.get(row) ?? defaultHeight;
+  }
+  return height;
 }
 
 /** Get the row header width from the overlay context. */

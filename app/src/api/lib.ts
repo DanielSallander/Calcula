@@ -66,6 +66,8 @@ export {
   getUndoState,
   undo,
   redo,
+  beginUndoTransaction,
+  commitUndoTransaction,
 
   // Find & Replace
   findAll,
@@ -199,6 +201,39 @@ export type {
 
 // Comment helper exports
 export { DEFAULT_COMMENT_AUTHOR } from "../core/types";
+
+// ============================================================================
+// AutoFilter API
+// ============================================================================
+
+export {
+  applyAutoFilter,
+  clearColumnCriteria,
+  clearAutoFilterCriteria,
+  reapplyAutoFilter,
+  removeAutoFilter,
+  getAutoFilter,
+  getAutoFilterRange,
+  getHiddenRows,
+  isRowFiltered,
+  getFilterUniqueValues,
+  setColumnFilterValues,
+  setColumnCustomFilter,
+  setColumnTopBottomFilter,
+  setColumnDynamicFilter,
+} from "./backend";
+
+// AutoFilter type exports
+export type {
+  AutoFilterInfo,
+  AutoFilterResult,
+  FilterCriteria,
+  FilterOn,
+  DynamicFilterCriteria,
+  FilterOperator,
+  UniqueValue,
+  UniqueValuesResult,
+} from "./backend";
 
 // ============================================================================
 // Pivot API - Pivot table operations

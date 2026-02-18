@@ -33,6 +33,8 @@ export interface MenuItemDefinition {
   shortcut?: string;
   /** Whether the item is hidden */
   hidden?: boolean;
+  /** Sub-menu items (renders a flyout submenu on hover) */
+  children?: MenuItemDefinition[];
 }
 
 /**

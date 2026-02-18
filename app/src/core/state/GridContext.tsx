@@ -9,6 +9,7 @@ import type { ReactNode } from "react";
 import type { GridState } from "../types";
 import type { GridAction } from "./gridActions";
 import { gridReducer, getInitialState } from "./gridReducer";
+import { setGridDispatchRef } from "../../api/gridDispatch";
 
 /**
  * Context value interface combining state and dispatch.
@@ -39,6 +40,9 @@ interface GridProviderProps {
  */
 export function GridProvider({ children, initialState }: GridProviderProps): React.ReactElement {
   const [state, dispatch] = useReducer(gridReducer, initialState || getInitialState());
+
+  // Expose dispatch globally so non-React code (extensions) can dispatch actions
+  setGridDispatchRef(dispatch);
 
   const value: GridContextValue = {
     state,

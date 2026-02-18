@@ -63,7 +63,7 @@ export function calculateVisibleRange(
 
   while (startRow < totalRows) {
     const rowHeight = getRowHeight(startRow, config, dims);
-    if (rowHeight <= 0) break; // Safety check
+    if (rowHeight <= 0) { startRow++; continue; } // Skip hidden rows
     if (accumulatedHeight + rowHeight > scrollY) {
       break;
     }
@@ -91,7 +91,7 @@ export function calculateVisibleRange(
 
   while (endRow < totalRows && heightAccum < visibleHeight) {
     const rowHeight = getRowHeight(endRow, config, dims);
-    if (rowHeight <= 0) break; // Safety check
+    if (rowHeight <= 0) { endRow++; continue; } // Skip hidden rows
     heightAccum += rowHeight;
     endRow++;
   }
@@ -273,10 +273,10 @@ export function calculateFrozenLeftRange(
   // Find starting row based on scroll
   let accumulatedHeight = 0;
   let startRow = startRowAfterFrozen;
-  
+
   while (startRow < totalRows) {
     const rowHeight = getRowHeight(startRow, config, dims);
-    if (rowHeight <= 0) break;
+    if (rowHeight <= 0) { startRow++; continue; } // Skip hidden rows
     if (accumulatedHeight + rowHeight > scrollY) {
       break;
     }
@@ -284,15 +284,17 @@ export function calculateFrozenLeftRange(
     startRow++;
   }
   const offsetY = -(scrollY - accumulatedHeight);
-  
+
   // Find ending row
   let endRow = startRow;
   let heightAccum = offsetY;
   while (endRow < totalRows && heightAccum < scrollableHeight) {
-    heightAccum += getRowHeight(endRow, config, dims);
+    const rowHeight = getRowHeight(endRow, config, dims);
+    if (rowHeight <= 0) { endRow++; continue; } // Skip hidden rows
+    heightAccum += rowHeight;
     endRow++;
   }
-  
+
   return {
     startRow: Math.max(startRowAfterFrozen, startRow),
     endRow: Math.min(endRow, totalRows - 1),
@@ -362,10 +364,10 @@ export function calculateScrollableRange(
   // Find starting row based on scroll
   let accumulatedHeight = 0;
   let startRow = startRowAfterFrozen;
-  
+
   while (startRow < totalRows) {
     const rowHeight = getRowHeight(startRow, config, dims);
-    if (rowHeight <= 0) break;
+    if (rowHeight <= 0) { startRow++; continue; } // Skip hidden rows
     if (accumulatedHeight + rowHeight > scrollY) {
       break;
     }
@@ -373,7 +375,7 @@ export function calculateScrollableRange(
     startRow++;
   }
   const offsetY = -(scrollY - accumulatedHeight);
-  
+
   // Find ending column
   let endCol = startCol;
   let widthAccum = offsetX;
@@ -386,10 +388,12 @@ export function calculateScrollableRange(
   let endRow = startRow;
   let heightAccum = offsetY;
   while (endRow < totalRows && heightAccum < scrollableHeight) {
-    heightAccum += getRowHeight(endRow, config, dims);
+    const rowHeight = getRowHeight(endRow, config, dims);
+    if (rowHeight <= 0) { endRow++; continue; } // Skip hidden rows
+    heightAccum += rowHeight;
     endRow++;
   }
-  
+
   return {
     startRow: Math.max(startRowAfterFrozen, startRow),
     endRow: Math.min(endRow, totalRows - 1),

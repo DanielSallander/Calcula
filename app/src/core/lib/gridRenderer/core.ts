@@ -1,7 +1,6 @@
 //! FILENAME: app/src/core/lib/gridRenderer/core.ts
 // PURPOSE: Main rendering orchestration function
 // CONTEXT: Coordinates all rendering phases for the grid
-// FIX: Removed API import - overlays are now passed as parameters
 
 import type {
   GridConfig,
@@ -33,8 +32,6 @@ import {
 } from "./layout/viewport";
 import { getColumnWidth, getRowHeight } from "./layout/dimensions";
 import { cellKey } from "../../../core/types";
-
-// REMOVED: import { getGridRegions, getOverlayRenderers } from "../../../api/gridOverlays";
 
 // ============================================================================
 // Overlay Types (defined locally in Core for type safety)

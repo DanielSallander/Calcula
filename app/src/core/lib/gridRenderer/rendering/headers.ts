@@ -104,7 +104,7 @@ export function drawColumnHeaders(state: RenderState): void {
 
       x += colWidth;
     }
-    
+
     // Draw freeze pane separator line on headers
     ctx.strokeStyle = "#666666";
     ctx.lineWidth = 2;
@@ -185,7 +185,7 @@ export function drawColumnHeaders(state: RenderState): void {
 
         x += colWidth;
       }
-      
+
       ctx.restore();
     }
   } else {
@@ -291,6 +291,10 @@ export function drawRowHeaders(state: RenderState): void {
     isEntireRowSelected = selection.type === "rows";
   }
 
+  // When rows are hidden (e.g. by AutoFilter), show row numbers in blue
+  const hasHiddenRows = dimensions && dimensions.hiddenRows && dimensions.hiddenRows.size > 0;
+  const filteredTextColor = "#0066cc";
+
   // Check for freeze panes
   const hasFrozenRows = freezeConfig && freezeConfig.freezeRow !== null && freezeConfig.freezeRow > 0;
   const freezeRow = hasFrozenRows ? freezeConfig!.freezeRow! : 0;
@@ -302,7 +306,8 @@ export function drawRowHeaders(state: RenderState): void {
     let y = colHeaderHeight;
     for (let row = 0; row < freezeRow && row < totalRows; row++) {
       const rowHeight = getRowHeight(row, config, dimensions);
-      
+      if (rowHeight <= 0) continue; // Skip hidden rows
+
       // Highlight if row is in selection
       const isSelected = row >= selMinRow && row <= selMaxRow;
       const isFullySelected = isSelected && isEntireRowSelected;
@@ -324,7 +329,7 @@ export function drawRowHeaders(state: RenderState): void {
       ctx.stroke();
 
       // Draw row number (1-based)
-      ctx.fillStyle = isFullySelected ? theme.headerHighlightText : isSelected ? "#1a5fb4" : theme.headerText;
+      ctx.fillStyle = isFullySelected ? theme.headerHighlightText : isSelected ? "#1a5fb4" : hasHiddenRows ? filteredTextColor : theme.headerText;
       ctx.fillText(String(row + 1), rowHeaderWidth / 2, y + rowHeight / 2);
 
       y += rowHeight;
@@ -356,7 +361,7 @@ export function drawRowHeaders(state: RenderState): void {
       let startRow = freezeRow;
       while (startRow < totalRows) {
         const rowHeight = getRowHeight(startRow, config, dimensions);
-        if (rowHeight <= 0) break;
+        if (rowHeight <= 0) { startRow++; continue; } // Skip hidden rows
         if (accumulatedHeight + rowHeight > scrollY) {
           break;
         }
@@ -364,12 +369,14 @@ export function drawRowHeaders(state: RenderState): void {
         startRow++;
       }
       const offsetY = -(scrollY - accumulatedHeight);
-      
+
       // Find end row
       let endRow = startRow;
       let heightAccum = offsetY;
       while (endRow < totalRows && heightAccum < scrollableHeight) {
-        heightAccum += getRowHeight(endRow, config, dimensions);
+        const rowHeight = getRowHeight(endRow, config, dimensions);
+        if (rowHeight <= 0) { endRow++; continue; } // Skip hidden rows
+        heightAccum += rowHeight;
         endRow++;
       }
       
@@ -377,7 +384,8 @@ export function drawRowHeaders(state: RenderState): void {
       y = scrollableStartY + offsetY;
       for (let row = startRow; row <= endRow && row < totalRows; row++) {
         const rowHeight = getRowHeight(row, config, dimensions);
-        
+        if (rowHeight <= 0) continue; // Skip hidden rows
+
         // Skip if completely outside visible area
         if (y + rowHeight < scrollableStartY || y > height) {
           y += rowHeight;
@@ -405,7 +413,7 @@ export function drawRowHeaders(state: RenderState): void {
         ctx.stroke();
 
         // Draw row number (1-based)
-        ctx.fillStyle = isFullySelected ? theme.headerHighlightText : isSelected ? "#1a5fb4" : theme.headerText;
+        ctx.fillStyle = isFullySelected ? theme.headerHighlightText : isSelected ? "#1a5fb4" : hasHiddenRows ? filteredTextColor : theme.headerText;
         ctx.fillText(String(row + 1), rowHeaderWidth / 2, y + rowHeight / 2);
 
         y += rowHeight;
@@ -427,6 +435,7 @@ export function drawRowHeaders(state: RenderState): void {
 
     for (let row = range.startRow; row <= range.endRow && row < totalRows; row++) {
       const rowHeight = getRowHeight(row, config, dimensions);
+      if (rowHeight <= 0) continue; // Skip hidden rows
 
       // Apply animation offset for rows at or after the change point
       const y = row >= rowAnimIndex && rowAnimIndex >= 0 ? baseY + rowAnimOffset : baseY;
@@ -458,7 +467,7 @@ export function drawRowHeaders(state: RenderState): void {
       ctx.stroke();
 
       // Draw row number (1-based)
-      ctx.fillStyle = isFullySelected ? theme.headerHighlightText : isSelected ? "#1a5fb4" : theme.headerText;
+      ctx.fillStyle = isFullySelected ? theme.headerHighlightText : isSelected ? "#1a5fb4" : hasHiddenRows ? filteredTextColor : theme.headerText;
       ctx.fillText(String(row + 1), rowHeaderWidth / 2, y + rowHeight / 2);
 
       baseY += rowHeight;

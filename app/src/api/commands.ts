@@ -24,6 +24,8 @@ export const CoreCommands = {
 
   // Format
   FORMAT_CELLS: "core.format.cells",
+  FORMAT_PAINTER: "core.format.painter",
+  FORMAT_PAINTER_LOCK: "core.format.painterLock",
 
   // Grid
   MERGE_CELLS: "core.grid.merge",

@@ -62,6 +62,8 @@ export interface DimensionOverrides {
   columnWidths: Map<number, number>;
   /** Custom row heights (row index -> height) */
   rowHeights: Map<number, number>;
+  /** Set of row indices that are hidden (e.g., by AutoFilter) */
+  hiddenRows?: Set<number>;
 }
 
 /**
@@ -71,6 +73,7 @@ export function createEmptyDimensionOverrides(): DimensionOverrides {
   return {
     columnWidths: new Map(),
     rowHeights: new Map(),
+    hiddenRows: new Set(),
   };
 }
 

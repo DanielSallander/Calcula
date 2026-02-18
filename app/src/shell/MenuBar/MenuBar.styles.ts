@@ -116,6 +116,36 @@ export const Shortcut = styled.span`
   margin-left: 24px;
 `;
 
+export const RightContent = styled.span`
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-left: auto;
+`;
+
+export const SubmenuArrow = styled.span`
+  font-size: 10px;
+  color: ${v('--menu-shortcut-text')};
+  margin-left: 8px;
+`;
+
+export const SubMenuContainer = styled.div`
+  position: relative;
+`;
+
+export const SubMenuDropdown = styled.div`
+  position: absolute;
+  top: -4px;
+  left: 100%;
+  min-width: 220px;
+  background-color: ${v('--menu-dropdown-bg')};
+  border: 1px solid ${v('--menu-border')};
+  border-radius: 4px;
+  padding: 4px 0;
+  z-index: 1001;
+  box-shadow: 0 4px 12px ${v('--menu-shadow')};
+`;
+
 export const Separator = styled.div`
   height: 1px;
   background-color: ${v('--menu-separator')};

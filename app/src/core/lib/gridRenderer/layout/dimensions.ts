@@ -32,6 +32,10 @@ export function getRowHeight(
   dimensions: DimensionOverrides
 ): number {
   const dims = ensureDimensions(dimensions);
+  // Hidden rows have zero height (filtered out by AutoFilter, etc.)
+  if (dims.hiddenRows && dims.hiddenRows.has(row)) {
+    return 0;
+  }
   const customHeight = dims.rowHeights.get(row);
   if (customHeight !== undefined && customHeight > 0) {
     return customHeight;

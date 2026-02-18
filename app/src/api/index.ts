@@ -54,6 +54,7 @@ export {
   setSheetContext,
   setActiveSheet,
   setFreezeConfig,
+  setHiddenRows,
 } from "./grid";
 
 export type { GridAction, SetSelectionPayload } from "./grid";
@@ -76,6 +77,9 @@ export {
   indexToCol,
   colToIndex,
   setActiveSheet as setActiveSheetApi,
+  setCellStyle,
+  beginUndoTransaction,
+  commitUndoTransaction,
 } from "./lib";
 
 export type {
@@ -83,6 +87,38 @@ export type {
   AggregationType,
   SheetInfo,
   SheetsResult,
+} from "./lib";
+
+// ============================================================================
+// AutoFilter API
+// ============================================================================
+
+export {
+  applyAutoFilter,
+  clearColumnCriteria,
+  clearAutoFilterCriteria,
+  reapplyAutoFilter,
+  removeAutoFilter,
+  getAutoFilter,
+  getAutoFilterRange,
+  getHiddenRows,
+  isRowFiltered,
+  getFilterUniqueValues,
+  setColumnFilterValues,
+  setColumnCustomFilter,
+  setColumnTopBottomFilter,
+  setColumnDynamicFilter,
+} from "./lib";
+
+export type {
+  AutoFilterInfo,
+  AutoFilterResult,
+  FilterCriteria,
+  FilterOn,
+  DynamicFilterCriteria,
+  FilterOperator,
+  UniqueValue,
+  UniqueValuesResult,
 } from "./lib";
 
 // ============================================================================
@@ -96,6 +132,12 @@ export { cellEvents } from "./cellEvents";
 // ============================================================================
 
 export { columnToLetter, letterToColumn, isFormulaExpectingReference } from "./types";
+
+// ============================================================================
+// Grid Dispatch Bridge (for non-React code)
+// ============================================================================
+
+export { dispatchGridAction } from "./gridDispatch";
 
 // ============================================================================
 // Edit Guards
@@ -240,6 +282,26 @@ export type {
   AutocompleteKeyPayload,
   AutocompleteAcceptedPayload,
 } from "./formulaAutocomplete";
+
+// ============================================================================
+// Grid Overlays
+// ============================================================================
+
+export {
+  registerGridOverlay,
+  addGridRegions,
+  removeGridRegionsByType,
+  overlayGetColumnX,
+  overlayGetRowY,
+  overlayGetColumnWidth,
+  overlayGetRowHeight,
+  overlayGetColumnsWidth,
+  overlayGetRowsHeight,
+  type GridRegion,
+  type OverlayRegistration,
+  type OverlayRenderContext,
+  type OverlayHitTestContext,
+} from "./gridOverlays";
 
 // Style Interceptors
 export {

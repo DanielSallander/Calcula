@@ -36,6 +36,7 @@ export {
   setSheetContext,
   setActiveSheet,
   setFreezeConfig,
+  setHiddenRows,
 } from "../core/state/gridActions";
 
 // Re-export action types

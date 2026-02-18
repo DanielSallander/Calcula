@@ -1065,6 +1065,17 @@ export function gridReducer(state: GridState, action: GridAction): GridState {
       };
     }
 
+    case GRID_ACTIONS.SET_HIDDEN_ROWS: {
+      const hiddenRows = new Set(action.payload.rows);
+      return {
+        ...state,
+        dimensions: {
+          ...state.dimensions,
+          hiddenRows,
+        },
+      };
+    }
+
     default: {
       return state;
     }

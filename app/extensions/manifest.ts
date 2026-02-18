@@ -15,6 +15,7 @@ import FindReplaceExtension from "./BuiltIn/FindReplaceDialog";
 import StandardMenusExtension from "./BuiltIn/StandardMenus";
 import FormatCellsExtension from "./BuiltIn/FormatCellsDialog";
 import FormulaAutocompleteExtension from "./BuiltIn/FormulaAutocomplete";
+import FormatPainterExtension from "./BuiltIn/FormatPainter";
 
 // ============================================================================
 // Built-in Extension Manifest
@@ -31,6 +32,8 @@ export const builtInExtensions: ExtensionModule[] = [
   FindReplaceExtension,
   // FormatCells depends on Format menu being registered
   FormatCellsExtension,
+  // Format Painter (depends on Edit menu being registered)
+  FormatPainterExtension,
   // Formula Autocomplete (Intellisense)
   FormulaAutocompleteExtension,
 ];

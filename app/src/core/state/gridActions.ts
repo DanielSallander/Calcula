@@ -48,6 +48,7 @@ export const GRID_ACTIONS = {
   SET_SHEET_CONTEXT: "SET_SHEET_CONTEXT",
   SET_ACTIVE_SHEET: "SET_ACTIVE_SHEET",
   SET_FREEZE_CONFIG: "SET_FREEZE_CONFIG",
+  SET_HIDDEN_ROWS: "SET_HIDDEN_ROWS",
 } as const;
 
 // Action interfaces
@@ -203,6 +204,12 @@ export interface SetFreezeConfigAction {
   payload: FreezeConfig;
 }
 
+// Hidden rows action interface
+export interface SetHiddenRowsAction {
+  type: typeof GRID_ACTIONS.SET_HIDDEN_ROWS;
+  payload: { rows: number[] };
+}
+
 // Union type of all actions
 export type GridAction =
   | SetSelectionAction
@@ -232,7 +239,8 @@ export type GridAction =
   | ClearClipboardAction
   | SetSheetContextAction
   | SetActiveSheetAction
-  | SetFreezeConfigAction;
+  | SetFreezeConfigAction
+  | SetHiddenRowsAction;
 
 // Action creators
 
@@ -553,5 +561,16 @@ export function setFreezeConfig(
   return {
     type: GRID_ACTIONS.SET_FREEZE_CONFIG,
     payload: { freezeRow, freezeCol },
+  };
+}
+
+/**
+ * Set which rows are hidden (e.g., by AutoFilter).
+ * @param rows - Array of row indices to hide (empty array to show all)
+ */
+export function setHiddenRows(rows: number[]): SetHiddenRowsAction {
+  return {
+    type: GRID_ACTIONS.SET_HIDDEN_ROWS,
+    payload: { rows },
   };
 }
