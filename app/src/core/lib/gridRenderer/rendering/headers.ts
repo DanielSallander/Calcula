@@ -4,9 +4,32 @@
 //UPDATED: Added freeze pane support for proper header positioning
 
 import type { RenderState } from "../types";
+import type { DimensionOverrides } from "../../../types";
 import { calculateVisibleRange, calculateFreezePaneLayout } from "../layout/viewport";
 import { getColumnWidth, getRowHeight } from "../layout/dimensions";
 import { columnToLetter } from "../../../types";
+
+/** Color for the double-line indicator drawn at hidden row/column boundaries. */
+const HIDDEN_INDICATOR_COLOR = "#4a4a4a";
+/** Line width for the hidden boundary indicator. */
+const HIDDEN_INDICATOR_WIDTH = 2;
+
+/**
+ * Check if the next column after `col` is hidden (for drawing double-line indicator).
+ * Scans forward to see if at least one immediately following column is hidden.
+ */
+function hasHiddenColAfter(col: number, dims?: DimensionOverrides): boolean {
+  if (!dims?.hiddenCols || dims.hiddenCols.size === 0) return false;
+  return dims.hiddenCols.has(col + 1);
+}
+
+/**
+ * Check if the next row after `row` is hidden (for drawing double-line indicator).
+ */
+function hasHiddenRowAfter(row: number, dims?: DimensionOverrides): boolean {
+  if (!dims?.hiddenRows || dims.hiddenRows.size === 0) return false;
+  return dims.hiddenRows.has(row + 1);
+}
 
 /**
  * Draw the corner cell (intersection of row and column headers).
@@ -66,18 +89,23 @@ export function drawColumnHeaders(state: RenderState): void {
     isEntireColumnSelected = selection.type === "columns";
   }
 
+  // When columns are hidden, show column letters in blue (like rows)
+  const hasHiddenCols = dimensions && dimensions.hiddenCols && dimensions.hiddenCols.size > 0;
+  const filteredColTextColor = "#0066cc";
+
   // Check for freeze panes
   const hasFrozenCols = freezeConfig && freezeConfig.freezeCol !== null && freezeConfig.freezeCol > 0;
   const freezeCol = hasFrozenCols ? freezeConfig!.freezeCol! : 0;
-  
+
   if (hasFrozenCols) {
     const layout = calculateFreezePaneLayout(freezeConfig!, config, dimensions);
-    
+
     // 1. Draw frozen column headers (no scroll, fixed position)
     let x = rowHeaderWidth;
     for (let col = 0; col < freezeCol && col < totalCols; col++) {
       const colWidth = getColumnWidth(col, config, dimensions);
-      
+      if (colWidth <= 0) continue; // Skip hidden columns
+
       // Highlight if column is in selection
       const isSelected = col >= selMinCol && col <= selMaxCol;
       const isFullySelected = isSelected && isEntireColumnSelected;
@@ -98,8 +126,18 @@ export function drawColumnHeaders(state: RenderState): void {
       ctx.lineTo(x + colWidth + 0.5, colHeaderHeight);
       ctx.stroke();
 
+      // Draw hidden column indicator (double-line) if next column is hidden
+      if (hasHiddenColAfter(col, dimensions)) {
+        ctx.strokeStyle = HIDDEN_INDICATOR_COLOR;
+        ctx.lineWidth = HIDDEN_INDICATOR_WIDTH;
+        ctx.beginPath();
+        ctx.moveTo(x + colWidth + 0.5, 0);
+        ctx.lineTo(x + colWidth + 0.5, colHeaderHeight);
+        ctx.stroke();
+      }
+
       // Draw column letter
-      ctx.fillStyle = isFullySelected ? theme.headerHighlightText : isSelected ? "#1a5fb4" : theme.headerText;
+      ctx.fillStyle = isFullySelected ? theme.headerHighlightText : isSelected ? "#1a5fb4" : hasHiddenCols ? filteredColTextColor : theme.headerText;
       ctx.fillText(columnToLetter(col), x + colWidth / 2, colHeaderHeight / 2);
 
       x += colWidth;
@@ -112,26 +150,26 @@ export function drawColumnHeaders(state: RenderState): void {
     ctx.moveTo(rowHeaderWidth + layout.frozenColsWidth, 0);
     ctx.lineTo(rowHeaderWidth + layout.frozenColsWidth, colHeaderHeight);
     ctx.stroke();
-    
+
     // 2. Draw scrollable column headers (with scroll offset, clipped)
     const scrollableStartX = rowHeaderWidth + layout.frozenColsWidth;
     const scrollableWidth = width - scrollableStartX;
-    
+
     if (scrollableWidth > 0) {
       ctx.save();
       ctx.beginPath();
       ctx.rect(scrollableStartX, 0, scrollableWidth, colHeaderHeight);
       ctx.clip();
-      
+
       // Calculate visible range for scrollable area
       const scrollX = viewport.scrollX || 0;
-      
+
       // Find first visible scrollable column
       let accumulatedWidth = 0;
       let startCol = freezeCol;
       while (startCol < totalCols) {
         const colWidth = getColumnWidth(startCol, config, dimensions);
-        if (colWidth <= 0) break;
+        if (colWidth <= 0) { startCol++; continue; } // Skip hidden columns
         if (accumulatedWidth + colWidth > scrollX) {
           break;
         }
@@ -139,20 +177,23 @@ export function drawColumnHeaders(state: RenderState): void {
         startCol++;
       }
       const offsetX = -(scrollX - accumulatedWidth);
-      
+
       // Find end column
       let endCol = startCol;
       let widthAccum = offsetX;
       while (endCol < totalCols && widthAccum < scrollableWidth) {
-        widthAccum += getColumnWidth(endCol, config, dimensions);
+        const colWidth = getColumnWidth(endCol, config, dimensions);
+        if (colWidth <= 0) { endCol++; continue; } // Skip hidden columns
+        widthAccum += colWidth;
         endCol++;
       }
-      
+
       // Draw scrollable headers
       x = scrollableStartX + offsetX;
       for (let col = startCol; col <= endCol && col < totalCols; col++) {
         const colWidth = getColumnWidth(col, config, dimensions);
-        
+        if (colWidth <= 0) continue; // Skip hidden columns
+
         // Skip if completely outside visible area
         if (x + colWidth < scrollableStartX || x > width) {
           x += colWidth;
@@ -179,8 +220,18 @@ export function drawColumnHeaders(state: RenderState): void {
         ctx.lineTo(x + colWidth + 0.5, colHeaderHeight);
         ctx.stroke();
 
+        // Draw hidden column indicator (double-line)
+        if (hasHiddenColAfter(col, dimensions)) {
+          ctx.strokeStyle = HIDDEN_INDICATOR_COLOR;
+          ctx.lineWidth = HIDDEN_INDICATOR_WIDTH;
+          ctx.beginPath();
+          ctx.moveTo(x + colWidth + 0.5, 0);
+          ctx.lineTo(x + colWidth + 0.5, colHeaderHeight);
+          ctx.stroke();
+        }
+
         // Draw column letter
-        ctx.fillStyle = isFullySelected ? theme.headerHighlightText : isSelected ? "#1a5fb4" : theme.headerText;
+        ctx.fillStyle = isFullySelected ? theme.headerHighlightText : isSelected ? "#1a5fb4" : hasHiddenCols ? filteredColTextColor : theme.headerText;
         ctx.fillText(columnToLetter(col), x + colWidth / 2, colHeaderHeight / 2);
 
         x += colWidth;
@@ -202,6 +253,7 @@ export function drawColumnHeaders(state: RenderState): void {
 
     for (let col = range.startCol; col <= range.endCol && col < totalCols; col++) {
       const colWidth = getColumnWidth(col, config, dimensions);
+      if (colWidth <= 0) continue; // Skip hidden columns
 
       // Apply animation offset for columns at or after the change point
       const x = col >= colAnimIndex && colAnimIndex >= 0 ? baseX + colAnimOffset : baseX;
@@ -232,8 +284,18 @@ export function drawColumnHeaders(state: RenderState): void {
       ctx.lineTo(x + colWidth + 0.5, colHeaderHeight);
       ctx.stroke();
 
+      // Draw hidden column indicator (double-line)
+      if (hasHiddenColAfter(col, dimensions)) {
+        ctx.strokeStyle = HIDDEN_INDICATOR_COLOR;
+        ctx.lineWidth = HIDDEN_INDICATOR_WIDTH;
+        ctx.beginPath();
+        ctx.moveTo(x + colWidth + 0.5, 0);
+        ctx.lineTo(x + colWidth + 0.5, colHeaderHeight);
+        ctx.stroke();
+      }
+
       // Draw column letter
-      ctx.fillStyle = isFullySelected ? theme.headerHighlightText : isSelected ? "#1a5fb4" : theme.headerText;
+      ctx.fillStyle = isFullySelected ? theme.headerHighlightText : isSelected ? "#1a5fb4" : hasHiddenCols ? filteredColTextColor : theme.headerText;
       ctx.fillText(columnToLetter(col), x + colWidth / 2, colHeaderHeight / 2);
 
       baseX += colWidth;
@@ -301,7 +363,7 @@ export function drawRowHeaders(state: RenderState): void {
   
   if (hasFrozenRows) {
     const layout = calculateFreezePaneLayout(freezeConfig!, config, dimensions);
-    
+
     // 1. Draw frozen row headers (no scroll, fixed position)
     let y = colHeaderHeight;
     for (let row = 0; row < freezeRow && row < totalRows; row++) {
@@ -328,13 +390,23 @@ export function drawRowHeaders(state: RenderState): void {
       ctx.lineTo(rowHeaderWidth, y + rowHeight + 0.5);
       ctx.stroke();
 
+      // Draw hidden row indicator (double-line)
+      if (hasHiddenRowAfter(row, dimensions)) {
+        ctx.strokeStyle = HIDDEN_INDICATOR_COLOR;
+        ctx.lineWidth = HIDDEN_INDICATOR_WIDTH;
+        ctx.beginPath();
+        ctx.moveTo(0, y + rowHeight + 0.5);
+        ctx.lineTo(rowHeaderWidth, y + rowHeight + 0.5);
+        ctx.stroke();
+      }
+
       // Draw row number (1-based)
       ctx.fillStyle = isFullySelected ? theme.headerHighlightText : isSelected ? "#1a5fb4" : hasHiddenRows ? filteredTextColor : theme.headerText;
       ctx.fillText(String(row + 1), rowHeaderWidth / 2, y + rowHeight / 2);
 
       y += rowHeight;
     }
-    
+
     // Draw freeze pane separator line on headers
     ctx.strokeStyle = "#666666";
     ctx.lineWidth = 2;
@@ -342,20 +414,20 @@ export function drawRowHeaders(state: RenderState): void {
     ctx.moveTo(0, colHeaderHeight + layout.frozenRowsHeight);
     ctx.lineTo(rowHeaderWidth, colHeaderHeight + layout.frozenRowsHeight);
     ctx.stroke();
-    
+
     // 2. Draw scrollable row headers (with scroll offset, clipped)
     const scrollableStartY = colHeaderHeight + layout.frozenRowsHeight;
     const scrollableHeight = height - scrollableStartY;
-    
+
     if (scrollableHeight > 0) {
       ctx.save();
       ctx.beginPath();
       ctx.rect(0, scrollableStartY, rowHeaderWidth, scrollableHeight);
       ctx.clip();
-      
+
       // Calculate visible range for scrollable area
       const scrollY = viewport.scrollY || 0;
-      
+
       // Find first visible scrollable row
       let accumulatedHeight = 0;
       let startRow = freezeRow;
@@ -379,7 +451,7 @@ export function drawRowHeaders(state: RenderState): void {
         heightAccum += rowHeight;
         endRow++;
       }
-      
+
       // Draw scrollable headers
       y = scrollableStartY + offsetY;
       for (let row = startRow; row <= endRow && row < totalRows; row++) {
@@ -412,13 +484,23 @@ export function drawRowHeaders(state: RenderState): void {
         ctx.lineTo(rowHeaderWidth, y + rowHeight + 0.5);
         ctx.stroke();
 
+        // Draw hidden row indicator (double-line)
+        if (hasHiddenRowAfter(row, dimensions)) {
+          ctx.strokeStyle = HIDDEN_INDICATOR_COLOR;
+          ctx.lineWidth = HIDDEN_INDICATOR_WIDTH;
+          ctx.beginPath();
+          ctx.moveTo(0, y + rowHeight + 0.5);
+          ctx.lineTo(rowHeaderWidth, y + rowHeight + 0.5);
+          ctx.stroke();
+        }
+
         // Draw row number (1-based)
         ctx.fillStyle = isFullySelected ? theme.headerHighlightText : isSelected ? "#1a5fb4" : hasHiddenRows ? filteredTextColor : theme.headerText;
         ctx.fillText(String(row + 1), rowHeaderWidth / 2, y + rowHeight / 2);
 
         y += rowHeight;
       }
-      
+
       ctx.restore();
     }
   } else {
@@ -465,6 +547,16 @@ export function drawRowHeaders(state: RenderState): void {
       ctx.moveTo(0, y + rowHeight + 0.5);
       ctx.lineTo(rowHeaderWidth, y + rowHeight + 0.5);
       ctx.stroke();
+
+      // Draw hidden row indicator (double-line)
+      if (hasHiddenRowAfter(row, dimensions)) {
+        ctx.strokeStyle = HIDDEN_INDICATOR_COLOR;
+        ctx.lineWidth = HIDDEN_INDICATOR_WIDTH;
+        ctx.beginPath();
+        ctx.moveTo(0, y + rowHeight + 0.5);
+        ctx.lineTo(rowHeaderWidth, y + rowHeight + 0.5);
+        ctx.stroke();
+      }
 
       // Draw row number (1-based)
       ctx.fillStyle = isFullySelected ? theme.headerHighlightText : isSelected ? "#1a5fb4" : hasHiddenRows ? filteredTextColor : theme.headerText;

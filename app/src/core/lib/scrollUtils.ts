@@ -56,6 +56,7 @@ export function getColumnWidthFromDimensions(
   config: GridConfig,
   dimensions?: DimensionOverrides
 ): number {
+  if (dimensions?.hiddenCols?.has(col)) return 0;
   if (dimensions?.columnWidths?.has(col)) {
     return dimensions.columnWidths.get(col)!;
   }
@@ -70,6 +71,7 @@ export function getRowHeightFromDimensions(
   config: GridConfig,
   dimensions?: DimensionOverrides
 ): number {
+  if (dimensions?.hiddenRows?.has(row)) return 0;
   if (dimensions?.rowHeights?.has(row)) {
     return dimensions.rowHeights.get(row)!;
   }
@@ -86,8 +88,11 @@ export function getColumnXPosition(
   config: GridConfig,
   dimensions?: DimensionOverrides
 ): number {
-  // Fast path: no custom dimensions
-  if (!dimensions?.columnWidths || dimensions.columnWidths.size === 0) {
+  const hasCustomWidths = dimensions?.columnWidths && dimensions.columnWidths.size > 0;
+  const hasHiddenCols = dimensions?.hiddenCols && dimensions.hiddenCols.size > 0;
+
+  // Fast path: no custom dimensions and no hidden columns
+  if (!hasCustomWidths && !hasHiddenCols) {
     return col * config.defaultCellWidth;
   }
 
@@ -95,11 +100,31 @@ export function getColumnXPosition(
   let x = col * config.defaultCellWidth;
 
   // Adjust for any custom widths in columns before target
-  dimensions.columnWidths.forEach((width, c) => {
-    if (c < col) {
-      x += width - config.defaultCellWidth;
-    }
-  });
+  if (hasCustomWidths) {
+    dimensions!.columnWidths.forEach((width, c) => {
+      if (c < col) {
+        x += width - config.defaultCellWidth;
+      }
+    });
+  }
+
+  // Subtract default width for each hidden column before target
+  if (hasHiddenCols) {
+    dimensions!.hiddenCols!.forEach((c) => {
+      if (c < col) {
+        // If column has custom width, we already added (customWidth - default) above,
+        // but the column is hidden so its actual contribution should be 0.
+        // We need to subtract back the full effective width.
+        const customWidth = dimensions!.columnWidths?.get(c);
+        if (customWidth !== undefined) {
+          // Undo the custom width adjustment and remove the base default
+          x -= customWidth;
+        } else {
+          x -= config.defaultCellWidth;
+        }
+      }
+    });
+  }
 
   return x;
 }
@@ -114,8 +139,11 @@ export function getRowYPosition(
   config: GridConfig,
   dimensions?: DimensionOverrides
 ): number {
-  // Fast path: no custom dimensions
-  if (!dimensions?.rowHeights || dimensions.rowHeights.size === 0) {
+  const hasCustomHeights = dimensions?.rowHeights && dimensions.rowHeights.size > 0;
+  const hasHiddenRows = dimensions?.hiddenRows && dimensions.hiddenRows.size > 0;
+
+  // Fast path: no custom dimensions and no hidden rows
+  if (!hasCustomHeights && !hasHiddenRows) {
     return row * config.defaultCellHeight;
   }
 
@@ -123,11 +151,27 @@ export function getRowYPosition(
   let y = row * config.defaultCellHeight;
 
   // Adjust for any custom heights in rows before target
-  dimensions.rowHeights.forEach((height, r) => {
-    if (r < row) {
-      y += height - config.defaultCellHeight;
-    }
-  });
+  if (hasCustomHeights) {
+    dimensions!.rowHeights.forEach((height, r) => {
+      if (r < row) {
+        y += height - config.defaultCellHeight;
+      }
+    });
+  }
+
+  // Subtract default height for each hidden row before target
+  if (hasHiddenRows) {
+    dimensions!.hiddenRows!.forEach((r) => {
+      if (r < row) {
+        const customHeight = dimensions!.rowHeights?.get(r);
+        if (customHeight !== undefined) {
+          y -= customHeight;
+        } else {
+          y -= config.defaultCellHeight;
+        }
+      }
+    });
+  }
 
   return y;
 }
@@ -167,6 +211,27 @@ export function calculateMaxScroll(
     dimensions.rowHeights.forEach((height, row) => {
       if (row < totalRows) {
         totalContentHeight += height - defaultCellHeight;
+      }
+    });
+  }
+
+  // Subtract width for hidden columns
+  if (dimensions?.hiddenCols) {
+    dimensions.hiddenCols.forEach((col) => {
+      if (col < totalCols) {
+        const customWidth = dimensions.columnWidths?.get(col);
+        // Remove the full effective width (custom or default) since column is hidden
+        totalContentWidth -= customWidth ?? defaultCellWidth;
+      }
+    });
+  }
+
+  // Subtract height for hidden rows
+  if (dimensions?.hiddenRows) {
+    dimensions.hiddenRows.forEach((row) => {
+      if (row < totalRows) {
+        const customHeight = dimensions.rowHeights?.get(row);
+        totalContentHeight -= customHeight ?? defaultCellHeight;
       }
     });
   }

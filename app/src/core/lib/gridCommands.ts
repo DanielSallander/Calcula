@@ -4,7 +4,7 @@
 // command handlers (cut, copy, paste, etc.) and provide selection utilities.
 // Shell and Extensions import these through the API layer.
 
-import type { Selection } from "../types";
+import type { Selection, DimensionOverrides } from "../types";
 
 // ============================================================================
 // Grid Menu Context Type
@@ -22,6 +22,8 @@ export interface GridMenuContext {
   sheetIndex: number;
   /** Active sheet name */
   sheetName: string;
+  /** Current dimension overrides (for hidden rows/cols state) */
+  dimensions: DimensionOverrides;
 }
 
 // ============================================================================

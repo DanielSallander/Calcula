@@ -435,6 +435,141 @@ export function registerCoreGridContextMenu(): void {
   });
 
   // -------------------------------------------------------------------------
+  // Format Group - Hide/Unhide Rows and Columns
+  // -------------------------------------------------------------------------
+  gridExtensions.registerContextMenuItem({
+    id: "core:hideRows",
+    label: "Hide",
+    group: GridMenuGroups.FORMAT,
+    order: 30,
+    visible: (ctx) => ctx.selection?.type === "rows",
+    onClick: (ctx) => {
+      if (!ctx.selection || ctx.selection.type !== "rows") return;
+
+      const minRow = Math.min(ctx.selection.startRow, ctx.selection.endRow);
+      const maxRow = Math.max(ctx.selection.startRow, ctx.selection.endRow);
+      const currentManual = ctx.dimensions.manuallyHiddenRows ?? new Set<number>();
+      const newManual = new Set(currentManual);
+
+      for (let r = minRow; r <= maxRow; r++) {
+        newManual.add(r);
+      }
+
+      window.dispatchEvent(new CustomEvent("grid:set-manually-hidden-rows", {
+        detail: { rows: Array.from(newManual) },
+      }));
+      window.dispatchEvent(new CustomEvent("grid:refresh"));
+    },
+  });
+
+  gridExtensions.registerContextMenuItem({
+    id: "core:unhideRows",
+    label: "Unhide",
+    group: GridMenuGroups.FORMAT,
+    order: 31,
+    visible: (ctx) => {
+      if (ctx.selection?.type !== "rows") return false;
+      const manuallyHidden = ctx.dimensions.manuallyHiddenRows;
+      if (!manuallyHidden || manuallyHidden.size === 0) return false;
+
+      const minRow = Math.min(ctx.selection.startRow, ctx.selection.endRow);
+      const maxRow = Math.max(ctx.selection.startRow, ctx.selection.endRow);
+
+      // Show "Unhide" if any manually hidden row exists in the range (inclusive of boundaries)
+      for (let r = minRow; r <= maxRow; r++) {
+        if (manuallyHidden.has(r)) return true;
+      }
+      // Also check rows between the selected rows (e.g., selecting row 1 and 3 to unhide row 2)
+      for (const hr of manuallyHidden) {
+        if (hr >= minRow && hr <= maxRow) return true;
+      }
+      return false;
+    },
+    separatorAfter: true,
+    onClick: (ctx) => {
+      if (!ctx.selection || ctx.selection.type !== "rows") return;
+
+      const minRow = Math.min(ctx.selection.startRow, ctx.selection.endRow);
+      const maxRow = Math.max(ctx.selection.startRow, ctx.selection.endRow);
+      const currentManual = ctx.dimensions.manuallyHiddenRows ?? new Set<number>();
+      const newManual = new Set(currentManual);
+
+      // Remove all manually hidden rows within the selected range
+      for (let r = minRow; r <= maxRow; r++) {
+        newManual.delete(r);
+      }
+
+      window.dispatchEvent(new CustomEvent("grid:set-manually-hidden-rows", {
+        detail: { rows: Array.from(newManual) },
+      }));
+      window.dispatchEvent(new CustomEvent("grid:refresh"));
+    },
+  });
+
+  gridExtensions.registerContextMenuItem({
+    id: "core:hideCols",
+    label: "Hide",
+    group: GridMenuGroups.FORMAT,
+    order: 32,
+    visible: (ctx) => ctx.selection?.type === "columns",
+    onClick: (ctx) => {
+      if (!ctx.selection || ctx.selection.type !== "columns") return;
+
+      const minCol = Math.min(ctx.selection.startCol, ctx.selection.endCol);
+      const maxCol = Math.max(ctx.selection.startCol, ctx.selection.endCol);
+      const currentManual = ctx.dimensions.manuallyHiddenCols ?? new Set<number>();
+      const newManual = new Set(currentManual);
+
+      for (let c = minCol; c <= maxCol; c++) {
+        newManual.add(c);
+      }
+
+      window.dispatchEvent(new CustomEvent("grid:set-manually-hidden-cols", {
+        detail: { cols: Array.from(newManual) },
+      }));
+      window.dispatchEvent(new CustomEvent("grid:refresh"));
+    },
+  });
+
+  gridExtensions.registerContextMenuItem({
+    id: "core:unhideCols",
+    label: "Unhide",
+    group: GridMenuGroups.FORMAT,
+    order: 33,
+    visible: (ctx) => {
+      if (ctx.selection?.type !== "columns") return false;
+      const manuallyHidden = ctx.dimensions.manuallyHiddenCols;
+      if (!manuallyHidden || manuallyHidden.size === 0) return false;
+
+      const minCol = Math.min(ctx.selection.startCol, ctx.selection.endCol);
+      const maxCol = Math.max(ctx.selection.startCol, ctx.selection.endCol);
+
+      for (const hc of manuallyHidden) {
+        if (hc >= minCol && hc <= maxCol) return true;
+      }
+      return false;
+    },
+    separatorAfter: true,
+    onClick: (ctx) => {
+      if (!ctx.selection || ctx.selection.type !== "columns") return;
+
+      const minCol = Math.min(ctx.selection.startCol, ctx.selection.endCol);
+      const maxCol = Math.max(ctx.selection.startCol, ctx.selection.endCol);
+      const currentManual = ctx.dimensions.manuallyHiddenCols ?? new Set<number>();
+      const newManual = new Set(currentManual);
+
+      for (let c = minCol; c <= maxCol; c++) {
+        newManual.delete(c);
+      }
+
+      window.dispatchEvent(new CustomEvent("grid:set-manually-hidden-cols", {
+        detail: { cols: Array.from(newManual) },
+      }));
+      window.dispatchEvent(new CustomEvent("grid:refresh"));
+    },
+  });
+
+  // -------------------------------------------------------------------------
   // Developer Group (only in dev mode)
   // -------------------------------------------------------------------------
   if (import.meta.env.DEV) {

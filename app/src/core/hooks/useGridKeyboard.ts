@@ -102,7 +102,7 @@ export function useGridKeyboard(options: UseGridKeyboardOptions): void {
     onCommand,
   } = options;
   const { state, dispatch } = useGridContext();
-  const { config, viewport, selection } = state;
+  const { config, viewport, selection, dimensions } = state;
 
   /**
    * Handle navigation to a cell, expanding to merged region if needed.
@@ -240,13 +240,31 @@ export function useGridKeyboard(options: UseGridKeyboardOptions): void {
       const maxColBound = config.totalCols - 1;
 
       try {
-        const [targetRow, targetCol] = await findCtrlArrowTarget(
+        let [targetRow, targetCol] = await findCtrlArrowTarget(
           currentRow,
           currentCol,
           direction,
           maxRowBound,
           maxColBound
         );
+
+        // Skip hidden rows/cols if the target lands on one
+        if (dimensions.hiddenRows && dimensions.hiddenRows.size > 0 &&
+            (direction === "up" || direction === "down")) {
+          const dir = direction === "down" ? 1 : -1;
+          while (targetRow >= 0 && targetRow <= maxRowBound && dimensions.hiddenRows.has(targetRow)) {
+            targetRow += dir;
+          }
+          targetRow = clamp(targetRow, 0, maxRowBound);
+        }
+        if (dimensions.hiddenCols && dimensions.hiddenCols.size > 0 &&
+            (direction === "left" || direction === "right")) {
+          const dir = direction === "right" ? 1 : -1;
+          while (targetCol >= 0 && targetCol <= maxColBound && dimensions.hiddenCols.has(targetCol)) {
+            targetCol += dir;
+          }
+          targetCol = clamp(targetCol, 0, maxColBound);
+        }
 
         fnLog.exit('handleCtrlArrow', `target=(${targetRow}, ${targetCol})`);
 
@@ -256,7 +274,7 @@ export function useGridKeyboard(options: UseGridKeyboardOptions): void {
         console.error("[useGridKeyboard] Ctrl+Arrow navigation failed:", error);
       }
     },
-    [selection, config.totalRows, config.totalCols, navigateToCell]
+    [selection, config.totalRows, config.totalCols, dimensions, navigateToCell]
   );
 
   /**
@@ -314,13 +332,31 @@ export function useGridKeyboard(options: UseGridKeyboardOptions): void {
       }
 
       // Calculate target position from the appropriate edge
-      const targetRow = clamp(startRow + deltaRow, 0, maxRow);
-      const targetCol = clamp(startCol + deltaCol, 0, maxCol);
+      let targetRow = clamp(startRow + deltaRow, 0, maxRow);
+      let targetCol = clamp(startCol + deltaCol, 0, maxCol);
+
+      // Skip hidden rows when navigating vertically
+      if (deltaRow !== 0 && dimensions.hiddenRows && dimensions.hiddenRows.size > 0) {
+        const dir = deltaRow > 0 ? 1 : -1;
+        while (targetRow >= 0 && targetRow <= maxRow && dimensions.hiddenRows.has(targetRow)) {
+          targetRow += dir;
+        }
+        targetRow = clamp(targetRow, 0, maxRow);
+      }
+
+      // Skip hidden columns when navigating horizontally
+      if (deltaCol !== 0 && dimensions.hiddenCols && dimensions.hiddenCols.size > 0) {
+        const dir = deltaCol > 0 ? 1 : -1;
+        while (targetCol >= 0 && targetCol <= maxCol && dimensions.hiddenCols.has(targetCol)) {
+          targetCol += dir;
+        }
+        targetCol = clamp(targetCol, 0, maxCol);
+      }
 
       // Use merge-aware navigation
       await navigateToCell(targetRow, targetCol, extend);
     },
-    [selection, config.totalRows, config.totalCols, navigateToCell]
+    [selection, config.totalRows, config.totalCols, dimensions, navigateToCell]
   );
 
   /**

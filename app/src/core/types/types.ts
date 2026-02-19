@@ -62,8 +62,14 @@ export interface DimensionOverrides {
   columnWidths: Map<number, number>;
   /** Custom row heights (row index -> height) */
   rowHeights: Map<number, number>;
-  /** Set of row indices that are hidden (e.g., by AutoFilter) */
+  /** Combined set of all hidden row indices (filter + manual) */
   hiddenRows?: Set<number>;
+  /** Combined set of all hidden column indices (manual only for now) */
+  hiddenCols?: Set<number>;
+  /** Rows hidden by user action (distinct from filter-hidden) */
+  manuallyHiddenRows?: Set<number>;
+  /** Columns hidden by user action */
+  manuallyHiddenCols?: Set<number>;
 }
 
 /**
@@ -74,6 +80,9 @@ export function createEmptyDimensionOverrides(): DimensionOverrides {
     columnWidths: new Map(),
     rowHeights: new Map(),
     hiddenRows: new Set(),
+    hiddenCols: new Set(),
+    manuallyHiddenRows: new Set(),
+    manuallyHiddenCols: new Set(),
   };
 }
 
@@ -778,6 +787,8 @@ export function calculateFreezePaneLayout(
   // Calculate width of frozen columns
   if (freezeCol !== null && freezeCol > 0) {
     for (let col = 0; col < freezeCol; col++) {
+      // Skip hidden columns
+      if (dimensions.hiddenCols && dimensions.hiddenCols.has(col)) continue;
       const customWidth = dimensions.columnWidths.get(col);
       frozenColsWidth +=
         customWidth !== undefined && customWidth > 0 ? customWidth : defaultCellWidth;
@@ -787,6 +798,8 @@ export function calculateFreezePaneLayout(
   // Calculate height of frozen rows
   if (freezeRow !== null && freezeRow > 0) {
     for (let row = 0; row < freezeRow; row++) {
+      // Skip hidden rows
+      if (dimensions.hiddenRows && dimensions.hiddenRows.has(row)) continue;
       const customHeight = dimensions.rowHeights.get(row);
       frozenRowsHeight +=
         customHeight !== undefined && customHeight > 0 ? customHeight : defaultCellHeight;

@@ -6,7 +6,7 @@
 import React, { useCallback, useEffect, useRef } from "react";
 import { useGridState, useGridContext } from "../../state";
 // FIX: Removed openFind import to resolve SyntaxError
-import { setViewportDimensions, setAllDimensions, setSelection } from "../../state/gridActions";
+import { setViewportDimensions, setAllDimensions, setSelection, setManuallyHiddenRows, setManuallyHiddenCols } from "../../state/gridActions";
 import type { Selection, Viewport, VirtualBounds } from "../../types";
 import { GridCanvas } from "../Grid";
 import { InlineEditor } from "../InlineEditor";
@@ -174,6 +174,28 @@ function SpreadsheetContent({
       window.removeEventListener("dimensions:refresh", handleDimensionsRefresh);
     };
   }, [refreshDimensions]);
+
+  // -------------------------------------------------------------------------
+  // Hide/Unhide Row/Column Listeners (from context menu)
+  // -------------------------------------------------------------------------
+  useEffect(() => {
+    const handleHideRows = (event: Event) => {
+      const { rows } = (event as CustomEvent<{ rows: number[] }>).detail;
+      dispatch(setManuallyHiddenRows(rows));
+    };
+    const handleHideCols = (event: Event) => {
+      const { cols } = (event as CustomEvent<{ cols: number[] }>).detail;
+      dispatch(setManuallyHiddenCols(cols));
+    };
+
+    window.addEventListener("grid:set-manually-hidden-rows", handleHideRows);
+    window.addEventListener("grid:set-manually-hidden-cols", handleHideCols);
+
+    return () => {
+      window.removeEventListener("grid:set-manually-hidden-rows", handleHideRows);
+      window.removeEventListener("grid:set-manually-hidden-cols", handleHideCols);
+    };
+  }, [dispatch]);
 
   // -------------------------------------------------------------------------
   // Sheet Switch Listener (for normal sheet switching without page reload)
@@ -510,6 +532,7 @@ function SpreadsheetContent({
             isWithinSelection: true,
             sheetIndex: gridState.sheetContext.activeSheetIndex,
             sheetName: gridState.sheetContext.activeSheetName,
+            dimensions,
           } as GridMenuContext,
         });
         return;
@@ -531,6 +554,7 @@ function SpreadsheetContent({
           : false,
         sheetIndex: gridState.sheetContext.activeSheetIndex,
         sheetName: gridState.sheetContext.activeSheetName,
+        dimensions,
       };
 
       // Emit event for Shell to handle rendering

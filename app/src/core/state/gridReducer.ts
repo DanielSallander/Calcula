@@ -1066,12 +1066,60 @@ export function gridReducer(state: GridState, action: GridAction): GridState {
     }
 
     case GRID_ACTIONS.SET_HIDDEN_ROWS: {
-      const hiddenRows = new Set(action.payload.rows);
+      // Union filter-hidden rows with manually-hidden rows
+      const filterHiddenRows = new Set(action.payload.rows);
+      const manuallyHidden = state.dimensions.manuallyHiddenRows ?? new Set<number>();
+      const combinedHidden = new Set([...filterHiddenRows, ...manuallyHidden]);
       return {
         ...state,
         dimensions: {
           ...state.dimensions,
+          hiddenRows: combinedHidden,
+        },
+      };
+    }
+
+    case GRID_ACTIONS.SET_HIDDEN_COLS: {
+      const hiddenCols = new Set(action.payload.cols);
+      return {
+        ...state,
+        dimensions: {
+          ...state.dimensions,
+          hiddenCols,
+        },
+      };
+    }
+
+    case GRID_ACTIONS.SET_MANUALLY_HIDDEN_ROWS: {
+      const manuallyHiddenRows = new Set(action.payload.rows);
+      // Derive filter-hidden rows: old hiddenRows minus old manuallyHiddenRows
+      const oldManual = state.dimensions.manuallyHiddenRows ?? new Set<number>();
+      const oldHidden = state.dimensions.hiddenRows ?? new Set<number>();
+      const filterHidden = new Set<number>();
+      oldHidden.forEach((r) => {
+        if (!oldManual.has(r)) filterHidden.add(r);
+      });
+      // Recompute combined: filter + new manual
+      const hiddenRows = new Set([...filterHidden, ...manuallyHiddenRows]);
+      return {
+        ...state,
+        dimensions: {
+          ...state.dimensions,
+          manuallyHiddenRows,
           hiddenRows,
+        },
+      };
+    }
+
+    case GRID_ACTIONS.SET_MANUALLY_HIDDEN_COLS: {
+      const manuallyHiddenCols = new Set(action.payload.cols);
+      // For columns, hiddenCols = manuallyHiddenCols (no filter-hidden cols yet)
+      return {
+        ...state,
+        dimensions: {
+          ...state.dimensions,
+          manuallyHiddenCols,
+          hiddenCols: manuallyHiddenCols,
         },
       };
     }

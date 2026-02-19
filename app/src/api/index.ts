@@ -55,6 +55,9 @@ export {
   setActiveSheet,
   setFreezeConfig,
   setHiddenRows,
+  setHiddenCols,
+  setManuallyHiddenRows,
+  setManuallyHiddenCols,
 } from "./grid";
 
 export type { GridAction, SetSelectionPayload } from "./grid";

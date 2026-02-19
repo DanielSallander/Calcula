@@ -16,6 +16,10 @@ export function getColumnWidth(
   dimensions: DimensionOverrides
 ): number {
   const dims = ensureDimensions(dimensions);
+  // Hidden columns have zero width
+  if (dims.hiddenCols && dims.hiddenCols.has(col)) {
+    return 0;
+  }
   const customWidth = dims.columnWidths.get(col);
   if (customWidth !== undefined && customWidth > 0) {
     return customWidth;

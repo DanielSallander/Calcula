@@ -188,12 +188,12 @@ export function getCellFromPixel(
   // Find the physical column under the cursor
   while (col < totalCols) {
     currentColWidth = getColumnWidth(col, config, dims);
-    if (currentColWidth <= 0) break; 
-    
+    if (currentColWidth <= 0) { col++; continue; } // Skip hidden columns
+
     if (accumulatedWidth + currentColWidth > contentX) {
       break;
     }
-    
+
     accumulatedWidth += currentColWidth;
     col++;
   }
@@ -228,7 +228,7 @@ export function getCellFromPixel(
   // Find the physical row under the cursor
   while (row < totalRows) {
     currentRowHeight = getRowHeight(row, config, dims);
-    if (currentRowHeight <= 0) break;
+    if (currentRowHeight <= 0) { row++; continue; } // Skip hidden rows
 
     if (accumulatedHeight + currentRowHeight > contentY) {
       break;
@@ -353,7 +353,7 @@ export function getColumnFromHeader(
   let accumulatedWidth = 0;
   while (col < totalCols) {
     const colWidth = getColumnWidth(col, config, dims);
-    if (colWidth <= 0) break;
+    if (colWidth <= 0) { col++; continue; } // Skip hidden columns
     if (accumulatedWidth + colWidth > contentX) {
       return col;
     }
@@ -379,7 +379,7 @@ export function getRowFromHeader(
   const totalRows = config.totalRows || 1000;
 
   if (pixelX >= rowHeaderWidth || pixelY < colHeaderHeight) return null;
-  
+
   const dims = ensureDimensions(dimensions);
   const scrollY = viewport.scrollY || 0;
 
@@ -388,7 +388,7 @@ export function getRowFromHeader(
   let accumulatedHeight = 0;
   while (row < totalRows) {
     const rowHeight = getRowHeight(row, config, dims);
-    if (rowHeight <= 0) break;
+    if (rowHeight <= 0) { row++; continue; } // Skip hidden rows
     if (accumulatedHeight + rowHeight > contentY) {
       return row;
     }

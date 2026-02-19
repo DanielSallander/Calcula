@@ -47,7 +47,7 @@ export function calculateVisibleRange(
 
   while (startCol < totalCols) {
     const colWidth = getColumnWidth(startCol, config, dims);
-    if (colWidth <= 0) break; // Safety check
+    if (colWidth <= 0) { startCol++; continue; } // Skip hidden columns
     if (accumulatedWidth + colWidth > scrollX) {
       break;
     }
@@ -79,7 +79,7 @@ export function calculateVisibleRange(
 
   while (endCol < totalCols && widthAccum < visibleWidth) {
     const colWidth = getColumnWidth(endCol, config, dims);
-    if (colWidth <= 0) break; // Safety check
+    if (colWidth <= 0) { endCol++; continue; } // Skip hidden columns
     widthAccum += colWidth;
     endCol++;
   }
@@ -208,10 +208,10 @@ export function calculateFrozenTopRange(
   // Find starting column based on scroll
   let accumulatedWidth = 0;
   let startCol = startColAfterFrozen;
-  
+
   while (startCol < totalCols) {
     const colWidth = getColumnWidth(startCol, config, dims);
-    if (colWidth <= 0) break;
+    if (colWidth <= 0) { startCol++; continue; } // Skip hidden columns
     if (accumulatedWidth + colWidth > scrollX) {
       break;
     }
@@ -219,15 +219,17 @@ export function calculateFrozenTopRange(
     startCol++;
   }
   const offsetX = -(scrollX - accumulatedWidth);
-  
+
   // Find ending column
   let endCol = startCol;
   let widthAccum = offsetX;
   while (endCol < totalCols && widthAccum < scrollableWidth) {
-    widthAccum += getColumnWidth(endCol, config, dims);
+    const colWidth = getColumnWidth(endCol, config, dims);
+    if (colWidth <= 0) { endCol++; continue; } // Skip hidden columns
+    widthAccum += colWidth;
     endCol++;
   }
-  
+
   return {
     startRow: 0,
     endRow: freezeRow - 1,
@@ -349,10 +351,10 @@ export function calculateScrollableRange(
   // Find starting column based on scroll
   let accumulatedWidth = 0;
   let startCol = startColAfterFrozen;
-  
+
   while (startCol < totalCols) {
     const colWidth = getColumnWidth(startCol, config, dims);
-    if (colWidth <= 0) break;
+    if (colWidth <= 0) { startCol++; continue; } // Skip hidden columns
     if (accumulatedWidth + colWidth > scrollX) {
       break;
     }
@@ -360,7 +362,7 @@ export function calculateScrollableRange(
     startCol++;
   }
   const offsetX = -(scrollX - accumulatedWidth);
-  
+
   // Find starting row based on scroll
   let accumulatedHeight = 0;
   let startRow = startRowAfterFrozen;
@@ -380,7 +382,9 @@ export function calculateScrollableRange(
   let endCol = startCol;
   let widthAccum = offsetX;
   while (endCol < totalCols && widthAccum < scrollableWidth) {
-    widthAccum += getColumnWidth(endCol, config, dims);
+    const colWidth = getColumnWidth(endCol, config, dims);
+    if (colWidth <= 0) { endCol++; continue; } // Skip hidden columns
+    widthAccum += colWidth;
     endCol++;
   }
   

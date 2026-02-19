@@ -49,6 +49,9 @@ export const GRID_ACTIONS = {
   SET_ACTIVE_SHEET: "SET_ACTIVE_SHEET",
   SET_FREEZE_CONFIG: "SET_FREEZE_CONFIG",
   SET_HIDDEN_ROWS: "SET_HIDDEN_ROWS",
+  SET_HIDDEN_COLS: "SET_HIDDEN_COLS",
+  SET_MANUALLY_HIDDEN_ROWS: "SET_MANUALLY_HIDDEN_ROWS",
+  SET_MANUALLY_HIDDEN_COLS: "SET_MANUALLY_HIDDEN_COLS",
 } as const;
 
 // Action interfaces
@@ -204,10 +207,25 @@ export interface SetFreezeConfigAction {
   payload: FreezeConfig;
 }
 
-// Hidden rows action interface
+// Hidden rows/cols action interfaces
 export interface SetHiddenRowsAction {
   type: typeof GRID_ACTIONS.SET_HIDDEN_ROWS;
   payload: { rows: number[] };
+}
+
+export interface SetHiddenColsAction {
+  type: typeof GRID_ACTIONS.SET_HIDDEN_COLS;
+  payload: { cols: number[] };
+}
+
+export interface SetManuallyHiddenRowsAction {
+  type: typeof GRID_ACTIONS.SET_MANUALLY_HIDDEN_ROWS;
+  payload: { rows: number[] };
+}
+
+export interface SetManuallyHiddenColsAction {
+  type: typeof GRID_ACTIONS.SET_MANUALLY_HIDDEN_COLS;
+  payload: { cols: number[] };
 }
 
 // Union type of all actions
@@ -240,7 +258,10 @@ export type GridAction =
   | SetSheetContextAction
   | SetActiveSheetAction
   | SetFreezeConfigAction
-  | SetHiddenRowsAction;
+  | SetHiddenRowsAction
+  | SetHiddenColsAction
+  | SetManuallyHiddenRowsAction
+  | SetManuallyHiddenColsAction;
 
 // Action creators
 
@@ -572,5 +593,38 @@ export function setHiddenRows(rows: number[]): SetHiddenRowsAction {
   return {
     type: GRID_ACTIONS.SET_HIDDEN_ROWS,
     payload: { rows },
+  };
+}
+
+/**
+ * Set which columns are hidden (combined set).
+ * @param cols - Array of column indices to hide (empty array to show all)
+ */
+export function setHiddenCols(cols: number[]): SetHiddenColsAction {
+  return {
+    type: GRID_ACTIONS.SET_HIDDEN_COLS,
+    payload: { cols },
+  };
+}
+
+/**
+ * Set which rows are manually hidden by the user (distinct from filter-hidden).
+ * @param rows - Array of row indices manually hidden
+ */
+export function setManuallyHiddenRows(rows: number[]): SetManuallyHiddenRowsAction {
+  return {
+    type: GRID_ACTIONS.SET_MANUALLY_HIDDEN_ROWS,
+    payload: { rows },
+  };
+}
+
+/**
+ * Set which columns are manually hidden by the user.
+ * @param cols - Array of column indices manually hidden
+ */
+export function setManuallyHiddenCols(cols: number[]): SetManuallyHiddenColsAction {
+  return {
+    type: GRID_ACTIONS.SET_MANUALLY_HIDDEN_COLS,
+    payload: { cols },
   };
 }
