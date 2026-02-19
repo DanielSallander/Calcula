@@ -236,54 +236,124 @@ export function renderOutlineBar(
     ctx.rect(0, colHeaderH, outlineBarW, canvasHeight - colHeaderH);
     ctx.clip();
 
-    type BracketState = { startY: number; level: number };
-    const openBrackets: Map<number, BracketState> = new Map();
+    const rowAboveLeft = info.settings.summaryRowPosition === "aboveLeft";
 
-    for (const sym of info.rowSymbols) {
-      const rowY = rowYMap.get(sym.row);
-      if (rowY === undefined) continue;
+    if (rowAboveLeft) {
+      // AboveLeft: button row is at the TOP of the group.
+      // Bracket extends downward from button to last detail row.
+      type PendingBracket = { buttonCenterY: number; endY: number; isCollapsed: boolean };
+      const pendingBrackets: Map<number, PendingBracket> = new Map();
 
-      const rh = dimensions.rowHeights.get(sym.row) ?? defaultRowH;
-      const rowCenterY = rowY + rh / 2;
+      for (const sym of info.rowSymbols) {
+        const rowY = rowYMap.get(sym.row);
+        if (rowY === undefined) continue;
 
-      if (sym.level > 0 && !sym.isButtonRow) {
-        if (!openBrackets.has(sym.level)) {
-          openBrackets.set(sym.level, { startY: rowY, level: sym.level });
+        const rh = dimensions.rowHeights.get(sym.row) ?? defaultRowH;
+        const rowCenterY = rowY + rh / 2;
+
+        if (sym.isButtonRow && sym.level > 0) {
+          // Close any existing pending bracket at this level
+          const existing = pendingBrackets.get(sym.level);
+          if (existing) {
+            const bx = bracketPosForLevel(sym.level);
+            ctx.strokeStyle = COLOR_BRACKET;
+            ctx.lineWidth = 1.5;
+            ctx.beginPath();
+            ctx.moveTo(bx + 0.5, existing.buttonCenterY);
+            ctx.lineTo(bx + 0.5, existing.endY);
+            ctx.stroke();
+          }
+
+          // Draw toggle button
+          const btnCx = buttonPosForLevel(sym.level);
+          drawToggleButton(ctx, btnCx, rowCenterY, sym.isCollapsed);
+
+          // Horizontal tick from bracket line to button
+          const bx = bracketPosForLevel(sym.level);
+          ctx.strokeStyle = COLOR_BRACKET;
+          ctx.lineWidth = 1.5;
+          ctx.beginPath();
+          ctx.moveTo(bx + 0.5, rowCenterY);
+          ctx.lineTo(bx + BUTTON_SIZE / 2 + 2, rowCenterY);
+          ctx.stroke();
+
+          // Open new pending bracket
+          pendingBrackets.set(sym.level, {
+            buttonCenterY: rowCenterY,
+            endY: rowY + rh,
+            isCollapsed: sym.isCollapsed,
+          });
+        } else if (sym.level > 0) {
+          // Extend pending bracket to cover this detail row
+          const pending = pendingBrackets.get(sym.level);
+          if (pending) {
+            pending.endY = rowY + rh;
+          }
         }
       }
 
-      if (sym.isButtonRow && sym.level > 0) {
-        const bx = bracketPosForLevel(sym.level);
-        const bracket = openBrackets.get(sym.level);
-        const startY = bracket ? bracket.startY : rowY;
-
+      // Draw remaining pending brackets
+      for (const [level, pending] of pendingBrackets) {
+        const bx = bracketPosForLevel(level);
         ctx.strokeStyle = COLOR_BRACKET;
         ctx.lineWidth = 1.5;
         ctx.beginPath();
-        ctx.moveTo(bx + 0.5, Math.max(startY, colHeaderH));
-        ctx.lineTo(bx + 0.5, rowCenterY);
+        ctx.moveTo(bx + 0.5, pending.buttonCenterY);
+        ctx.lineTo(bx + 0.5, pending.endY);
         ctx.stroke();
-
-        ctx.beginPath();
-        ctx.moveTo(bx + 0.5, rowCenterY);
-        ctx.lineTo(bx + BUTTON_SIZE / 2 + 2, rowCenterY);
-        ctx.stroke();
-
-        const btnCx = buttonPosForLevel(sym.level);
-        drawToggleButton(ctx, btnCx, rowCenterY, sym.isCollapsed);
-
-        openBrackets.delete(sym.level);
       }
-    }
+    } else {
+      // BelowRight: button row is at the BOTTOM of the group.
+      // Bracket extends upward from first detail row to button.
+      type BracketState = { startY: number; level: number };
+      const openBrackets: Map<number, BracketState> = new Map();
 
-    for (const [level, bracket] of openBrackets) {
-      const bx = bracketPosForLevel(level);
-      ctx.strokeStyle = COLOR_BRACKET;
-      ctx.lineWidth = 1.5;
-      ctx.beginPath();
-      ctx.moveTo(bx + 0.5, Math.max(bracket.startY, colHeaderH));
-      ctx.lineTo(bx + 0.5, canvasHeight);
-      ctx.stroke();
+      for (const sym of info.rowSymbols) {
+        const rowY = rowYMap.get(sym.row);
+        if (rowY === undefined) continue;
+
+        const rh = dimensions.rowHeights.get(sym.row) ?? defaultRowH;
+        const rowCenterY = rowY + rh / 2;
+
+        if (sym.level > 0 && !sym.isButtonRow) {
+          if (!openBrackets.has(sym.level)) {
+            openBrackets.set(sym.level, { startY: rowY, level: sym.level });
+          }
+        }
+
+        if (sym.isButtonRow && sym.level > 0) {
+          const bx = bracketPosForLevel(sym.level);
+          const bracket = openBrackets.get(sym.level);
+          const startY = bracket ? bracket.startY : rowY;
+
+          ctx.strokeStyle = COLOR_BRACKET;
+          ctx.lineWidth = 1.5;
+          ctx.beginPath();
+          ctx.moveTo(bx + 0.5, Math.max(startY, colHeaderH));
+          ctx.lineTo(bx + 0.5, rowCenterY);
+          ctx.stroke();
+
+          ctx.beginPath();
+          ctx.moveTo(bx + 0.5, rowCenterY);
+          ctx.lineTo(bx + BUTTON_SIZE / 2 + 2, rowCenterY);
+          ctx.stroke();
+
+          const btnCx = buttonPosForLevel(sym.level);
+          drawToggleButton(ctx, btnCx, rowCenterY, sym.isCollapsed);
+
+          openBrackets.delete(sym.level);
+        }
+      }
+
+      for (const [level, bracket] of openBrackets) {
+        const bx = bracketPosForLevel(level);
+        ctx.strokeStyle = COLOR_BRACKET;
+        ctx.lineWidth = 1.5;
+        ctx.beginPath();
+        ctx.moveTo(bx + 0.5, Math.max(bracket.startY, colHeaderH));
+        ctx.lineTo(bx + 0.5, canvasHeight);
+        ctx.stroke();
+      }
     }
 
     ctx.restore();
@@ -325,58 +395,128 @@ export function renderOutlineBar(
     ctx.rect(rowHeaderW, 0, canvasWidth - rowHeaderW, outlineBarH);
     ctx.clip();
 
-    type BracketState = { startX: number; level: number };
-    const openBrackets: Map<number, BracketState> = new Map();
+    const colAboveLeft = info.settings.summaryColPosition === "aboveLeft";
 
-    for (const sym of info.colSymbols) {
-      const colX = colXMap.get(sym.col);
-      if (colX === undefined) continue;
+    if (colAboveLeft) {
+      // AboveLeft: button column is at the LEFT of the group.
+      // Bracket extends rightward from button to last detail column.
+      type PendingBracket = { buttonCenterX: number; endX: number; isCollapsed: boolean };
+      const pendingBrackets: Map<number, PendingBracket> = new Map();
 
-      const cw = dimensions.columnWidths.get(sym.col) ?? defaultColW;
-      const colCenterX = colX + cw / 2;
+      for (const sym of info.colSymbols) {
+        const colX = colXMap.get(sym.col);
+        if (colX === undefined) continue;
 
-      if (sym.level > 0 && !sym.isButtonCol) {
-        if (!openBrackets.has(sym.level)) {
-          openBrackets.set(sym.level, { startX: colX, level: sym.level });
+        const cw = dimensions.columnWidths.get(sym.col) ?? defaultColW;
+        const colCenterX = colX + cw / 2;
+
+        if (sym.isButtonCol && sym.level > 0) {
+          // Close any existing pending bracket at this level
+          const existing = pendingBrackets.get(sym.level);
+          if (existing) {
+            const by = bracketPosForLevel(sym.level);
+            ctx.strokeStyle = COLOR_BRACKET;
+            ctx.lineWidth = 1.5;
+            ctx.beginPath();
+            ctx.moveTo(existing.buttonCenterX, by + 0.5);
+            ctx.lineTo(existing.endX, by + 0.5);
+            ctx.stroke();
+          }
+
+          // Draw toggle button
+          const btnCy = buttonPosForLevel(sym.level);
+          drawToggleButton(ctx, colCenterX, btnCy, sym.isCollapsed);
+
+          // Vertical tick from bracket line to button
+          const by = bracketPosForLevel(sym.level);
+          ctx.strokeStyle = COLOR_BRACKET;
+          ctx.lineWidth = 1.5;
+          ctx.beginPath();
+          ctx.moveTo(colCenterX, by + 0.5);
+          ctx.lineTo(colCenterX, by + BUTTON_SIZE / 2 + 2);
+          ctx.stroke();
+
+          // Open new pending bracket
+          pendingBrackets.set(sym.level, {
+            buttonCenterX: colCenterX,
+            endX: colX + cw,
+            isCollapsed: sym.isCollapsed,
+          });
+        } else if (sym.level > 0) {
+          // Extend pending bracket to cover this detail column
+          const pending = pendingBrackets.get(sym.level);
+          if (pending) {
+            pending.endX = colX + cw;
+          }
         }
       }
 
-      if (sym.isButtonCol && sym.level > 0) {
-        const by = bracketPosForLevel(sym.level);
-        const bracket = openBrackets.get(sym.level);
-        const startX = bracket ? bracket.startX : colX;
-
-        // Horizontal bracket line
+      // Draw remaining pending brackets
+      for (const [level, pending] of pendingBrackets) {
+        const by = bracketPosForLevel(level);
         ctx.strokeStyle = COLOR_BRACKET;
         ctx.lineWidth = 1.5;
         ctx.beginPath();
-        ctx.moveTo(Math.max(startX, rowHeaderW), by + 0.5);
-        ctx.lineTo(colCenterX, by + 0.5);
+        ctx.moveTo(pending.buttonCenterX, by + 0.5);
+        ctx.lineTo(pending.endX, by + 0.5);
         ctx.stroke();
-
-        // Vertical tick at right end
-        ctx.beginPath();
-        ctx.moveTo(colCenterX, by + 0.5);
-        ctx.lineTo(colCenterX, by + BUTTON_SIZE / 2 + 2);
-        ctx.stroke();
-
-        // +/- toggle button
-        const btnCy = buttonPosForLevel(sym.level);
-        drawToggleButton(ctx, colCenterX, btnCy, sym.isCollapsed);
-
-        openBrackets.delete(sym.level);
       }
-    }
+    } else {
+      // BelowRight: button column is at the RIGHT of the group.
+      // Bracket extends leftward from first detail column to button.
+      type BracketState = { startX: number; level: number };
+      const openBrackets: Map<number, BracketState> = new Map();
 
-    // Close any brackets that extend beyond visible range
-    for (const [level, bracket] of openBrackets) {
-      const by = bracketPosForLevel(level);
-      ctx.strokeStyle = COLOR_BRACKET;
-      ctx.lineWidth = 1.5;
-      ctx.beginPath();
-      ctx.moveTo(Math.max(bracket.startX, rowHeaderW), by + 0.5);
-      ctx.lineTo(canvasWidth, by + 0.5);
-      ctx.stroke();
+      for (const sym of info.colSymbols) {
+        const colX = colXMap.get(sym.col);
+        if (colX === undefined) continue;
+
+        const cw = dimensions.columnWidths.get(sym.col) ?? defaultColW;
+        const colCenterX = colX + cw / 2;
+
+        if (sym.level > 0 && !sym.isButtonCol) {
+          if (!openBrackets.has(sym.level)) {
+            openBrackets.set(sym.level, { startX: colX, level: sym.level });
+          }
+        }
+
+        if (sym.isButtonCol && sym.level > 0) {
+          const by = bracketPosForLevel(sym.level);
+          const bracket = openBrackets.get(sym.level);
+          const startX = bracket ? bracket.startX : colX;
+
+          // Horizontal bracket line
+          ctx.strokeStyle = COLOR_BRACKET;
+          ctx.lineWidth = 1.5;
+          ctx.beginPath();
+          ctx.moveTo(Math.max(startX, rowHeaderW), by + 0.5);
+          ctx.lineTo(colCenterX, by + 0.5);
+          ctx.stroke();
+
+          // Vertical tick at right end
+          ctx.beginPath();
+          ctx.moveTo(colCenterX, by + 0.5);
+          ctx.lineTo(colCenterX, by + BUTTON_SIZE / 2 + 2);
+          ctx.stroke();
+
+          // +/- toggle button
+          const btnCy = buttonPosForLevel(sym.level);
+          drawToggleButton(ctx, colCenterX, btnCy, sym.isCollapsed);
+
+          openBrackets.delete(sym.level);
+        }
+      }
+
+      // Close any brackets that extend beyond visible range
+      for (const [level, bracket] of openBrackets) {
+        const by = bracketPosForLevel(level);
+        ctx.strokeStyle = COLOR_BRACKET;
+        ctx.lineWidth = 1.5;
+        ctx.beginPath();
+        ctx.moveTo(Math.max(bracket.startX, rowHeaderW), by + 0.5);
+        ctx.lineTo(canvasWidth, by + 0.5);
+        ctx.stroke();
+      }
     }
 
     ctx.restore();

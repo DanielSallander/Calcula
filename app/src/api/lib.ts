@@ -260,6 +260,17 @@ export type {
 } from "./backend";
 
 // ============================================================================
+// Grouping / Outline Settings API
+// ============================================================================
+
+export {
+  getOutlineSettings,
+  setOutlineSettings,
+} from "./backend";
+
+export type { SummaryPosition } from "./backend";
+
+// ============================================================================
 // Pivot API - Pivot table operations
 // ============================================================================
 

@@ -144,12 +144,15 @@ export {
   getHiddenRowsByGroup,
   getHiddenColsByGroup,
   clearOutline,
+  getOutlineSettings,
+  setOutlineSettings,
 } from "./lib";
 
 export type {
   GroupResult,
   OutlineInfo,
   OutlineSettings,
+  SummaryPosition,
   RowOutlineSymbol,
   ColOutlineSymbol,
   RowGroup,

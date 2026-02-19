@@ -17,6 +17,7 @@ import {
   getHiddenRowsByGroup,
   getHiddenColsByGroup,
   clearOutline as apiClearOutline,
+  setOutlineSettings as apiSetOutlineSettings,
   setGroupHiddenRows,
   setGroupHiddenCols,
   updateConfig,
@@ -26,6 +27,7 @@ import {
 
 import type {
   OutlineInfo,
+  OutlineSettings,
   GroupResult,
   Viewport,
 } from "../../../src/api";
@@ -288,6 +290,12 @@ export async function performShowLevel(rowLevel: number): Promise<void> {
 /** Show columns only up to the given outline level. */
 export async function performShowColLevel(colLevel: number): Promise<void> {
   const result = await apiShowOutlineLevel(undefined, colLevel);
+  await applyGroupResult(result);
+}
+
+/** Update outline settings (summary row/col direction). */
+export async function performSetOutlineSettings(settings: OutlineSettings): Promise<void> {
+  const result = await apiSetOutlineSettings(settings);
   await applyGroupResult(result);
 }
 

@@ -9,7 +9,9 @@ import {
   onAppEvent,
   AppEvents,
   ExtensionRegistry,
+  DialogExtensions,
 } from "../../src/api";
+import { GroupSettingsDialog } from "./components/GroupSettingsDialog";
 import { renderOutlineBar, buttonPosForLevel } from "./rendering/outlineBarRenderer";
 import {
   resetGroupingState,
@@ -259,7 +261,15 @@ export function registerGroupingExtension(): void {
   );
   cleanupFns.push(unregOverlay);
 
-  // 2. Register grid context menu items
+  // 2. Register group settings dialog
+  DialogExtensions.registerDialog({
+    id: "group-settings",
+    component: GroupSettingsDialog,
+    priority: 100,
+  });
+  cleanupFns.push(() => DialogExtensions.unregisterDialog("group-settings"));
+
+  // 3. Register grid context menu items
   const unregContextMenu = registerGroupingContextMenuItems();
   cleanupFns.push(unregContextMenu);
 

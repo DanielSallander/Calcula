@@ -6,6 +6,7 @@
 import {
   registerMenuItem,
   gridExtensions,
+  DialogExtensions,
   type GridContextMenuItem,
 } from "../../../src/api";
 import {
@@ -107,6 +108,20 @@ export function registerGroupingMenuItems(
     label: "Clear Outline",
     action: () => {
       performClearOutline();
+    },
+  });
+
+  registerMenuItem("data", {
+    id: "data:outline:settingsSeparator",
+    label: "",
+    separator: true,
+  });
+
+  registerMenuItem("data", {
+    id: "data:outline:settings",
+    label: "Group Settings...",
+    action: () => {
+      DialogExtensions.openDialog("group-settings");
     },
   });
 }
