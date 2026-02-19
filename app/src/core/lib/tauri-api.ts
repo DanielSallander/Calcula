@@ -1162,3 +1162,147 @@ export async function clearCommentsInRange(
     endCol,
   });
 }
+
+// ============================================================================
+// Grouping / Outline API
+// ============================================================================
+
+export interface OutlineSettings {
+  summaryRowPosition: "belowRight" | "aboveLeft";
+  summaryColPosition: "belowRight" | "aboveLeft";
+  showOutlineSymbols: boolean;
+  autoStyles: boolean;
+}
+
+export interface RowGroup {
+  startRow: number;
+  endRow: number;
+  level: number;
+  collapsed: boolean;
+}
+
+export interface ColumnGroup {
+  startCol: number;
+  endCol: number;
+  level: number;
+  collapsed: boolean;
+}
+
+export interface SheetOutline {
+  rowGroups: RowGroup[];
+  columnGroups: ColumnGroup[];
+  settings: OutlineSettings;
+  maxRowLevel: number;
+  maxColLevel: number;
+}
+
+export interface RowOutlineSymbol {
+  row: number;
+  level: number;
+  isCollapsed: boolean;
+  isButtonRow: boolean;
+  isHidden: boolean;
+}
+
+export interface ColOutlineSymbol {
+  col: number;
+  level: number;
+  isCollapsed: boolean;
+  isButtonCol: boolean;
+  isHidden: boolean;
+}
+
+export interface OutlineInfo {
+  rowSymbols: RowOutlineSymbol[];
+  colSymbols: ColOutlineSymbol[];
+  maxRowLevel: number;
+  maxColLevel: number;
+  settings: OutlineSettings;
+}
+
+export interface GroupResult {
+  success: boolean;
+  outline?: SheetOutline;
+  error?: string;
+  hiddenRowsChanged: number[];
+  hiddenColsChanged: number[];
+}
+
+/** Group rows (create or increment outline level). */
+export async function groupRows(startRow: number, endRow: number): Promise<GroupResult> {
+  return invoke<GroupResult>("group_rows", { params: { startRow, endRow } });
+}
+
+/** Ungroup rows (remove or decrement outline level). */
+export async function ungroupRows(startRow: number, endRow: number): Promise<GroupResult> {
+  return invoke<GroupResult>("ungroup_rows", { startRow, endRow });
+}
+
+/** Group columns (create or increment outline level). */
+export async function groupColumns(startCol: number, endCol: number): Promise<GroupResult> {
+  return invoke<GroupResult>("group_columns", { params: { startCol, endCol } });
+}
+
+/** Ungroup columns (remove or decrement outline level). */
+export async function ungroupColumns(startCol: number, endCol: number): Promise<GroupResult> {
+  return invoke<GroupResult>("ungroup_columns", { startCol, endCol });
+}
+
+/** Collapse the group(s) containing the given row (hides detail rows). */
+export async function collapseRowGroup(row: number): Promise<GroupResult> {
+  return invoke<GroupResult>("collapse_row_group", { row });
+}
+
+/** Expand the group(s) containing the given row (shows detail rows). */
+export async function expandRowGroup(row: number): Promise<GroupResult> {
+  return invoke<GroupResult>("expand_row_group", { row });
+}
+
+/** Collapse the group(s) containing the given column. */
+export async function collapseColumnGroup(col: number): Promise<GroupResult> {
+  return invoke<GroupResult>("collapse_column_group", { col });
+}
+
+/** Expand the group(s) containing the given column. */
+export async function expandColumnGroup(col: number): Promise<GroupResult> {
+  return invoke<GroupResult>("expand_column_group", { col });
+}
+
+/**
+ * Collapse/expand groups to show only rows/columns up to the given level.
+ * Pass undefined for either dimension to leave it unchanged.
+ */
+export async function showOutlineLevel(
+  rowLevel?: number,
+  colLevel?: number,
+): Promise<GroupResult> {
+  return invoke<GroupResult>("show_outline_level", {
+    rowLevel: rowLevel ?? null,
+    colLevel: colLevel ?? null,
+  });
+}
+
+/** Get outline symbols for a viewport range (used for rendering the outline bar). */
+export async function getOutlineInfo(
+  startRow: number,
+  endRow: number,
+  startCol: number,
+  endCol: number,
+): Promise<OutlineInfo> {
+  return invoke<OutlineInfo>("get_outline_info", { startRow, endRow, startCol, endCol });
+}
+
+/** Get all rows currently hidden by outline group collapse. */
+export async function getHiddenRowsByGroup(): Promise<number[]> {
+  return invoke<number[]>("get_hidden_rows_by_group");
+}
+
+/** Get all columns currently hidden by outline group collapse. */
+export async function getHiddenColsByGroup(): Promise<number[]> {
+  return invoke<number[]>("get_hidden_cols_by_group");
+}
+
+/** Remove all outline/grouping for the current sheet. */
+export async function clearOutline(): Promise<GroupResult> {
+  return invoke<GroupResult>("clear_outline");
+}

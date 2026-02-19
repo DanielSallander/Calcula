@@ -553,8 +553,13 @@ export function useMouseSelection(props: UseMouseSelectionProps): UseMouseSelect
           if (colResize) {
             resizeHandlers.updateCursorForPosition(mouseX, mouseY);
           } else {
+            const outlineBarW = config.outlineBarWidth ?? 0;
+            // Check if over outline bar area - show pointer (clickable buttons)
+            if (outlineBarW > 0 && mouseX < outlineBarW) {
+              setCursorStyle("pointer");
+            }
             // Check if over corner (select-all button) - show pointer
-            if (mouseX < (config.rowHeaderWidth || 50) && mouseY < (config.colHeaderHeight || 24)) {
+            else if (mouseX < (config.rowHeaderWidth || 50) && mouseY < (config.colHeaderHeight || 24)) {
               setCursorStyle("pointer");
             }
             // Check if over column header (not resize handle) - show down arrow

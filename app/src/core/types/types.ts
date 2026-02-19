@@ -62,14 +62,18 @@ export interface DimensionOverrides {
   columnWidths: Map<number, number>;
   /** Custom row heights (row index -> height) */
   rowHeights: Map<number, number>;
-  /** Combined set of all hidden row indices (filter + manual) */
+  /** Combined set of all hidden row indices (filter + manual + group) */
   hiddenRows?: Set<number>;
-  /** Combined set of all hidden column indices (manual only for now) */
+  /** Combined set of all hidden column indices (manual + group) */
   hiddenCols?: Set<number>;
-  /** Rows hidden by user action (distinct from filter-hidden) */
+  /** Rows hidden by user action (distinct from filter-hidden and group-hidden) */
   manuallyHiddenRows?: Set<number>;
   /** Columns hidden by user action */
   manuallyHiddenCols?: Set<number>;
+  /** Rows hidden by outline group collapse */
+  groupHiddenRows?: Set<number>;
+  /** Columns hidden by outline group collapse */
+  groupHiddenCols?: Set<number>;
 }
 
 /**
@@ -83,6 +87,8 @@ export function createEmptyDimensionOverrides(): DimensionOverrides {
     hiddenCols: new Set(),
     manuallyHiddenRows: new Set(),
     manuallyHiddenCols: new Set(),
+    groupHiddenRows: new Set(),
+    groupHiddenCols: new Set(),
   };
 }
 
@@ -114,7 +120,7 @@ export interface GridConfig {
   defaultCellWidth: number;
   /** Default cell height in pixels */
   defaultCellHeight: number;
-  /** Row header width in pixels */
+  /** Row header width in pixels (includes outlineBarWidth on the left) */
   rowHeaderWidth: number;
   /** Column header height in pixels */
   colHeaderHeight: number;
@@ -126,6 +132,18 @@ export interface GridConfig {
   minColumnWidth: number;
   /** Minimum row height when resizing */
   minRowHeight: number;
+  /**
+   * Width of the outline/grouping bar on the left side of row headers (pixels).
+   * When > 0, row numbers are right-aligned to the remaining space.
+   * Managed by the Grouping extension; default is 0 (no outline bar).
+   */
+  outlineBarWidth?: number;
+  /**
+   * Height of the outline/grouping bar above column headers (pixels).
+   * When > 0, column letters are pushed down to make room.
+   * Managed by the Grouping extension; default is 0 (no outline bar).
+   */
+  outlineBarHeight?: number;
 }
 
 /**
@@ -140,6 +158,8 @@ export const DEFAULT_GRID_CONFIG: GridConfig = {
   totalCols: 16384, // Excel's column limit (XFD)
   minColumnWidth: 20,
   minRowHeight: 16,
+  outlineBarWidth: 0,
+  outlineBarHeight: 0,
 };
 
 /**

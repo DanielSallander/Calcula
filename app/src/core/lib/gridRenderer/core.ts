@@ -34,6 +34,24 @@ import { getColumnWidth, getRowHeight } from "./layout/dimensions";
 import { cellKey } from "../../../core/types";
 
 // ============================================================================
+// Post-Header Overlay Types
+// ============================================================================
+
+/**
+ * A renderer that paints on top of all headers (row, column, and corner).
+ * Called AFTER drawCorner() so it can overlay the header margin area.
+ * Used by the Grouping extension to render the outline bar.
+ */
+export type GlobalOverlayRendererFn = (
+  ctx: CanvasRenderingContext2D,
+  config: GridConfig,
+  viewport: Viewport,
+  dimensions: DimensionOverrides,
+  canvasWidth: number,
+  canvasHeight: number,
+) => void;
+
+// ============================================================================
 // Overlay Types (defined locally in Core for type safety)
 // ============================================================================
 
@@ -498,6 +516,8 @@ export function renderGrid(
   overlayRenderers: OverlayRegistration[] = [],
   // FIX: Sheet context for cross-sheet reference highlighting
   currentSheetName?: string,
+  // Post-header renderers run AFTER all headers are drawn (e.g. outline bar)
+  postHeaderRenderers: GlobalOverlayRendererFn[] = [],
 ): void {
   const rowHeaderWidth = config.rowHeaderWidth || 50;
   const colHeaderHeight = config.colHeaderHeight || 24;
@@ -632,4 +652,9 @@ export function renderGrid(
   drawColumnHeaders(state);
   drawRowHeaders(state);
   drawCorner(state);
+
+  // Post-header renderers: draw on top of all headers (e.g. outline bar)
+  for (const renderer of postHeaderRenderers) {
+    renderer(ctx, config, viewport, dims, width, height);
+  }
 }

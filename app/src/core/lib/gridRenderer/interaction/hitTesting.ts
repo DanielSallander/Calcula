@@ -277,10 +277,11 @@ export function getColumnResizeHandle(
 ): number | null {
   const rowHeaderWidth = config.rowHeaderWidth || 50;
   const colHeaderHeight = config.colHeaderHeight || 24;
+  const outlineBarHeight = config.outlineBarHeight ?? 0;
   const totalCols = config.totalCols || 100;
-  const handleWidth = 6; 
+  const handleWidth = 6;
 
-  if (pixelY >= colHeaderHeight) return null;
+  if (pixelY >= colHeaderHeight || pixelY < outlineBarHeight) return null;
   if (pixelX < rowHeaderWidth) return null;
 
   const dims = ensureDimensions(dimensions);
@@ -310,9 +311,11 @@ export function getRowResizeHandle(
   const rowHeaderWidth = config.rowHeaderWidth || 50;
   const colHeaderHeight = config.colHeaderHeight || 24;
   const totalRows = config.totalRows || 1000;
-  const handleHeight = 6; 
+  const handleHeight = 6;
+  const outlineBarWidth = config.outlineBarWidth ?? 0;
 
-  if (pixelX >= rowHeaderWidth) return null;
+  // Must be in the row number area (after outline bar, before cell area)
+  if (pixelX < outlineBarWidth || pixelX >= rowHeaderWidth) return null;
   if (pixelY < colHeaderHeight) return null;
 
   const dims = ensureDimensions(dimensions);
@@ -341,9 +344,10 @@ export function getColumnFromHeader(
 ): number | null {
   const rowHeaderWidth = config.rowHeaderWidth || 50;
   const colHeaderHeight = config.colHeaderHeight || 24;
+  const outlineBarHeight = config.outlineBarHeight ?? 0;
   const totalCols = config.totalCols || 100;
 
-  if (pixelY >= colHeaderHeight || pixelX < rowHeaderWidth) return null;
+  if (pixelY >= colHeaderHeight || pixelY < outlineBarHeight || pixelX < rowHeaderWidth) return null;
   
   const dims = ensureDimensions(dimensions);
   const scrollX = viewport.scrollX || 0;
@@ -377,8 +381,10 @@ export function getRowFromHeader(
   const rowHeaderWidth = config.rowHeaderWidth || 50;
   const colHeaderHeight = config.colHeaderHeight || 24;
   const totalRows = config.totalRows || 1000;
+  const outlineBarWidth = config.outlineBarWidth ?? 0;
 
-  if (pixelX >= rowHeaderWidth || pixelY < colHeaderHeight) return null;
+  // Must be within the row number area (after outline bar, before cell area)
+  if (pixelX < outlineBarWidth || pixelX >= rowHeaderWidth || pixelY < colHeaderHeight) return null;
 
   const dims = ensureDimensions(dimensions);
   const scrollY = viewport.scrollY || 0;

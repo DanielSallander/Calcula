@@ -27,8 +27,9 @@ export * from "./interaction/hitTesting";
 // Re-export reference conversion functions
 export * from "./references/conversion";
 
-// Re-export main render function
+// Re-export main render function and post-header overlay type
 export { renderGrid } from "./core";
+export type { GlobalOverlayRendererFn } from "./core";
 
 // Re-export columnToLetter from types for backward compatibility
 export { columnToLetter } from "../../types";

@@ -180,14 +180,22 @@ impl SheetOutline {
         level
     }
 
-    /// Get hidden rows based on collapsed groups
+    /// Get hidden rows based on collapsed groups.
+    /// The summary row (button row) is excluded so the user can still click +
+    /// to expand the group.
     pub fn get_hidden_rows(&self) -> HashSet<u32> {
         let mut hidden = HashSet::new();
 
         for group in &self.row_groups {
             if group.collapsed {
+                let summary_row = match self.settings.summary_row_position {
+                    SummaryPosition::BelowRight => group.end_row,
+                    SummaryPosition::AboveLeft => group.start_row,
+                };
                 for row in group.start_row..=group.end_row {
-                    hidden.insert(row);
+                    if row != summary_row {
+                        hidden.insert(row);
+                    }
                 }
             }
         }
@@ -195,14 +203,22 @@ impl SheetOutline {
         hidden
     }
 
-    /// Get hidden columns based on collapsed groups
+    /// Get hidden columns based on collapsed groups.
+    /// The summary column (button column) is excluded so the user can still
+    /// click + to expand the group.
     pub fn get_hidden_cols(&self) -> HashSet<u32> {
         let mut hidden = HashSet::new();
 
         for group in &self.column_groups {
             if group.collapsed {
+                let summary_col = match self.settings.summary_col_position {
+                    SummaryPosition::BelowRight => group.end_col,
+                    SummaryPosition::AboveLeft => group.start_col,
+                };
                 for col in group.start_col..=group.end_col {
-                    hidden.insert(col);
+                    if col != summary_col {
+                        hidden.insert(col);
+                    }
                 }
             }
         }
@@ -379,7 +395,10 @@ pub fn group_rows(
     GroupResult::ok(outline.clone())
 }
 
-/// Ungroup rows (remove or decrement outline level)
+/// Ungroup rows – Excel-style partial ungroup.
+/// If the selected range is a subset of a group, the group is split: the
+/// selected rows are removed from the group and any remaining rows above
+/// and/or below stay grouped.
 #[tauri::command]
 pub fn ungroup_rows(
     state: State<AppState>,
@@ -394,26 +413,51 @@ pub fn ungroup_rows(
         None => return GroupResult::err("No outline exists for this sheet"),
     };
 
-    let start = start_row.min(end_row);
-    let end = start_row.max(end_row);
+    let sel_start = start_row.min(end_row);
+    let sel_end = start_row.max(end_row);
 
-    // Remove groups that match exactly or are contained within the range
-    let initial_len = outline.row_groups.len();
-    outline.row_groups.retain(|g| {
-        !(g.start_row >= start && g.end_row <= end)
-    });
+    // Find the highest-level group that overlaps the selection
+    let target_level = outline
+        .row_groups
+        .iter()
+        .filter(|g| g.start_row <= sel_end && g.end_row >= sel_start)
+        .map(|g| g.level)
+        .max()
+        .unwrap_or(0);
 
-    if outline.row_groups.len() == initial_len {
-        // No exact match - try to find and reduce level of overlapping groups
-        for group in &mut outline.row_groups {
-            if group.start_row >= start && group.end_row <= end {
-                if group.level > 1 {
-                    group.level -= 1;
-                }
-            }
-        }
+    if target_level == 0 {
+        return GroupResult::err("No group overlaps the selected rows");
     }
 
+    // Process groups at that level that overlap the selection
+    let mut new_groups: Vec<RowGroup> = Vec::new();
+    let mut modified = false;
+
+    outline.row_groups.retain(|g| {
+        if g.level != target_level || g.start_row > sel_end || g.end_row < sel_start {
+            return true; // keep unaffected groups
+        }
+
+        modified = true;
+
+        // Part above the selection stays grouped
+        if g.start_row < sel_start {
+            new_groups.push(RowGroup::new(g.start_row, sel_start - 1, g.level));
+        }
+        // Part below the selection stays grouped
+        if g.end_row > sel_end {
+            new_groups.push(RowGroup::new(sel_end + 1, g.end_row, g.level));
+        }
+
+        false // remove the original group
+    });
+
+    if !modified {
+        return GroupResult::err("No group at this level overlaps the selected rows");
+    }
+
+    outline.row_groups.extend(new_groups);
+    outline.sort_groups();
     outline.recalculate_max_levels();
 
     let hidden_rows: Vec<u32> = outline.get_hidden_rows().into_iter().collect();
@@ -454,7 +498,8 @@ pub fn group_columns(
     GroupResult::ok(outline.clone())
 }
 
-/// Ungroup columns (remove or decrement outline level)
+/// Ungroup columns – Excel-style partial ungroup.
+/// If the selected range is a subset of a group, the group is split.
 #[tauri::command]
 pub fn ungroup_columns(
     state: State<AppState>,
@@ -469,32 +514,56 @@ pub fn ungroup_columns(
         None => return GroupResult::err("No outline exists for this sheet"),
     };
 
-    let start = start_col.min(end_col);
-    let end = start_col.max(end_col);
+    let sel_start = start_col.min(end_col);
+    let sel_end = start_col.max(end_col);
 
-    // Remove groups that match exactly or are contained within the range
-    let initial_len = outline.column_groups.len();
-    outline.column_groups.retain(|g| {
-        !(g.start_col >= start && g.end_col <= end)
-    });
+    let target_level = outline
+        .column_groups
+        .iter()
+        .filter(|g| g.start_col <= sel_end && g.end_col >= sel_start)
+        .map(|g| g.level)
+        .max()
+        .unwrap_or(0);
 
-    if outline.column_groups.len() == initial_len {
-        for group in &mut outline.column_groups {
-            if group.start_col >= start && group.end_col <= end {
-                if group.level > 1 {
-                    group.level -= 1;
-                }
-            }
-        }
+    if target_level == 0 {
+        return GroupResult::err("No group overlaps the selected columns");
     }
 
+    let mut new_groups: Vec<ColumnGroup> = Vec::new();
+    let mut modified = false;
+
+    outline.column_groups.retain(|g| {
+        if g.level != target_level || g.start_col > sel_end || g.end_col < sel_start {
+            return true;
+        }
+
+        modified = true;
+
+        if g.start_col < sel_start {
+            new_groups.push(ColumnGroup::new(g.start_col, sel_start - 1, g.level));
+        }
+        if g.end_col > sel_end {
+            new_groups.push(ColumnGroup::new(sel_end + 1, g.end_col, g.level));
+        }
+
+        false
+    });
+
+    if !modified {
+        return GroupResult::err("No group at this level overlaps the selected columns");
+    }
+
+    outline.column_groups.extend(new_groups);
+    outline.sort_groups();
     outline.recalculate_max_levels();
 
     let hidden_cols: Vec<u32> = outline.get_hidden_cols().into_iter().collect();
     GroupResult::ok_with_changes(outline.clone(), Vec::new(), hidden_cols)
 }
 
-/// Collapse a row group
+/// Collapse a row group.
+/// Only collapses the group whose button (summary) row matches, so that
+/// nested groups can be collapsed independently.
 #[tauri::command]
 pub fn collapse_row_group(
     state: State<AppState>,
@@ -510,10 +579,15 @@ pub fn collapse_row_group(
 
     let before_hidden = outline.get_hidden_rows();
 
-    // Find and collapse groups containing this row
+    // Only collapse the group whose button row matches (not all groups
+    // containing this row).  This lets nested groups collapse independently.
     let mut found = false;
     for group in &mut outline.row_groups {
-        if group.contains_row(row) && !group.collapsed {
+        let is_button = match outline.settings.summary_row_position {
+            SummaryPosition::BelowRight => group.end_row == row,
+            SummaryPosition::AboveLeft => group.start_row == row,
+        };
+        if is_button && !group.collapsed {
             group.collapsed = true;
             found = true;
         }
@@ -529,7 +603,8 @@ pub fn collapse_row_group(
     GroupResult::ok_with_changes(outline.clone(), newly_hidden, Vec::new())
 }
 
-/// Expand a row group
+/// Expand a row group.
+/// Only expands the group whose button (summary) row matches.
 #[tauri::command]
 pub fn expand_row_group(
     state: State<AppState>,
@@ -545,10 +620,13 @@ pub fn expand_row_group(
 
     let before_hidden = outline.get_hidden_rows();
 
-    // Find and expand groups containing this row
     let mut found = false;
     for group in &mut outline.row_groups {
-        if group.contains_row(row) && group.collapsed {
+        let is_button = match outline.settings.summary_row_position {
+            SummaryPosition::BelowRight => group.end_row == row,
+            SummaryPosition::AboveLeft => group.start_row == row,
+        };
+        if is_button && group.collapsed {
             group.collapsed = false;
             found = true;
         }
@@ -564,7 +642,8 @@ pub fn expand_row_group(
     GroupResult::ok_with_changes(outline.clone(), newly_visible, Vec::new())
 }
 
-/// Collapse a column group
+/// Collapse a column group.
+/// Only collapses the group whose button (summary) column matches.
 #[tauri::command]
 pub fn collapse_column_group(
     state: State<AppState>,
@@ -582,7 +661,11 @@ pub fn collapse_column_group(
 
     let mut found = false;
     for group in &mut outline.column_groups {
-        if group.contains_col(col) && !group.collapsed {
+        let is_button = match outline.settings.summary_col_position {
+            SummaryPosition::BelowRight => group.end_col == col,
+            SummaryPosition::AboveLeft => group.start_col == col,
+        };
+        if is_button && !group.collapsed {
             group.collapsed = true;
             found = true;
         }
@@ -598,7 +681,8 @@ pub fn collapse_column_group(
     GroupResult::ok_with_changes(outline.clone(), Vec::new(), newly_hidden)
 }
 
-/// Expand a column group
+/// Expand a column group.
+/// Only expands the group whose button (summary) column matches.
 #[tauri::command]
 pub fn expand_column_group(
     state: State<AppState>,
@@ -616,7 +700,11 @@ pub fn expand_column_group(
 
     let mut found = false;
     for group in &mut outline.column_groups {
-        if group.contains_col(col) && group.collapsed {
+        let is_button = match outline.settings.summary_col_position {
+            SummaryPosition::BelowRight => group.end_col == col,
+            SummaryPosition::AboveLeft => group.start_col == col,
+        };
+        if is_button && group.collapsed {
             group.collapsed = false;
             found = true;
         }
@@ -913,6 +1001,7 @@ mod tests {
     #[test]
     fn test_sheet_outline_hidden_rows() {
         let mut outline = SheetOutline::new();
+        // Default summary position is BelowRight, so end_row is the summary row
         outline.row_groups.push(RowGroup {
             start_row: 1,
             end_row: 3,
@@ -929,7 +1018,8 @@ mod tests {
         let hidden = outline.get_hidden_rows();
         assert!(hidden.contains(&1));
         assert!(hidden.contains(&2));
-        assert!(hidden.contains(&3));
+        // end_row (3) is the summary row and must stay visible
+        assert!(!hidden.contains(&3));
         assert!(!hidden.contains(&5));
         assert!(!hidden.contains(&6));
     }

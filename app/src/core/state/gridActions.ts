@@ -52,6 +52,8 @@ export const GRID_ACTIONS = {
   SET_HIDDEN_COLS: "SET_HIDDEN_COLS",
   SET_MANUALLY_HIDDEN_ROWS: "SET_MANUALLY_HIDDEN_ROWS",
   SET_MANUALLY_HIDDEN_COLS: "SET_MANUALLY_HIDDEN_COLS",
+  SET_GROUP_HIDDEN_ROWS: "SET_GROUP_HIDDEN_ROWS",
+  SET_GROUP_HIDDEN_COLS: "SET_GROUP_HIDDEN_COLS",
 } as const;
 
 // Action interfaces
@@ -228,6 +230,16 @@ export interface SetManuallyHiddenColsAction {
   payload: { cols: number[] };
 }
 
+export interface SetGroupHiddenRowsAction {
+  type: typeof GRID_ACTIONS.SET_GROUP_HIDDEN_ROWS;
+  payload: { rows: number[] };
+}
+
+export interface SetGroupHiddenColsAction {
+  type: typeof GRID_ACTIONS.SET_GROUP_HIDDEN_COLS;
+  payload: { cols: number[] };
+}
+
 // Union type of all actions
 export type GridAction =
   | SetSelectionAction
@@ -261,7 +273,9 @@ export type GridAction =
   | SetHiddenRowsAction
   | SetHiddenColsAction
   | SetManuallyHiddenRowsAction
-  | SetManuallyHiddenColsAction;
+  | SetManuallyHiddenColsAction
+  | SetGroupHiddenRowsAction
+  | SetGroupHiddenColsAction;
 
 // Action creators
 
@@ -625,6 +639,30 @@ export function setManuallyHiddenRows(rows: number[]): SetManuallyHiddenRowsActi
 export function setManuallyHiddenCols(cols: number[]): SetManuallyHiddenColsAction {
   return {
     type: GRID_ACTIONS.SET_MANUALLY_HIDDEN_COLS,
+    payload: { cols },
+  };
+}
+
+/**
+ * Set which rows are hidden due to outline group collapse.
+ * The combined hiddenRows set is recomputed in the reducer.
+ * @param rows - Array of all row indices currently hidden by groups
+ */
+export function setGroupHiddenRows(rows: number[]): SetGroupHiddenRowsAction {
+  return {
+    type: GRID_ACTIONS.SET_GROUP_HIDDEN_ROWS,
+    payload: { rows },
+  };
+}
+
+/**
+ * Set which columns are hidden due to outline group collapse.
+ * The combined hiddenCols set is recomputed in the reducer.
+ * @param cols - Array of all column indices currently hidden by groups
+ */
+export function setGroupHiddenCols(cols: number[]): SetGroupHiddenColsAction {
+  return {
+    type: GRID_ACTIONS.SET_GROUP_HIDDEN_COLS,
     payload: { cols },
   };
 }

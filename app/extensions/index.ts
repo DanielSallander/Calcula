@@ -6,6 +6,7 @@ import { registerPivotExtension, unregisterPivotExtension } from "./Pivot";
 import { registerTableExtension, unregisterTableExtension } from "./Table";
 import { registerChartExtension, unregisterChartExtension } from "./Charts";
 import { registerAutoFilterExtension, unregisterAutoFilterExtension } from "./AutoFilter";
+import { registerGroupingExtension, unregisterGroupingExtension } from "./Grouping";
 
 /**
  * Load all extensions.
@@ -20,6 +21,7 @@ export function loadExtensions(): void {
   registerTableExtension();
   registerChartExtension();
   registerAutoFilterExtension();
+  registerGroupingExtension();
 
   // Future: Load user extensions from config
 
@@ -34,6 +36,7 @@ export function unloadExtensions(): void {
   console.log("[Extensions] Unloading extensions...");
 
   // Unload in reverse order
+  unregisterGroupingExtension();
   unregisterAutoFilterExtension();
   unregisterChartExtension();
   unregisterTableExtension();
@@ -47,3 +50,4 @@ export { registerPivotExtension, unregisterPivotExtension };
 export { registerTableExtension, unregisterTableExtension };
 export { registerChartExtension, unregisterChartExtension };
 export { registerAutoFilterExtension, unregisterAutoFilterExtension };
+export { registerGroupingExtension, unregisterGroupingExtension };

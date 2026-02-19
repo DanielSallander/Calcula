@@ -57,6 +57,10 @@ export function drawColumnHeaders(state: RenderState): void {
   const { ctx, width, height, config, viewport, theme, selection, dimensions, freezeConfig, insertionAnimation } = state;
   const rowHeaderWidth = config.rowHeaderWidth || 50;
   const colHeaderHeight = config.colHeaderHeight || 24;
+  const outlineBarH = config.outlineBarHeight ?? 0;
+  const colLetterY = outlineBarH > 0
+    ? outlineBarH + (colHeaderHeight - outlineBarH) / 2
+    : colHeaderHeight / 2;
   const totalCols = config.totalCols || 100;
 
   // Calculate column insertion/deletion animation offset (same logic as cells.ts)
@@ -138,7 +142,7 @@ export function drawColumnHeaders(state: RenderState): void {
 
       // Draw column letter
       ctx.fillStyle = isFullySelected ? theme.headerHighlightText : isSelected ? "#1a5fb4" : hasHiddenCols ? filteredColTextColor : theme.headerText;
-      ctx.fillText(columnToLetter(col), x + colWidth / 2, colHeaderHeight / 2);
+      ctx.fillText(columnToLetter(col), x + colWidth / 2, colLetterY);
 
       x += colWidth;
     }
@@ -232,7 +236,7 @@ export function drawColumnHeaders(state: RenderState): void {
 
         // Draw column letter
         ctx.fillStyle = isFullySelected ? theme.headerHighlightText : isSelected ? "#1a5fb4" : hasHiddenCols ? filteredColTextColor : theme.headerText;
-        ctx.fillText(columnToLetter(col), x + colWidth / 2, colHeaderHeight / 2);
+        ctx.fillText(columnToLetter(col), x + colWidth / 2, colLetterY);
 
         x += colWidth;
       }
@@ -296,7 +300,7 @@ export function drawColumnHeaders(state: RenderState): void {
 
       // Draw column letter
       ctx.fillStyle = isFullySelected ? theme.headerHighlightText : isSelected ? "#1a5fb4" : hasHiddenCols ? filteredColTextColor : theme.headerText;
-      ctx.fillText(columnToLetter(col), x + colWidth / 2, colHeaderHeight / 2);
+      ctx.fillText(columnToLetter(col), x + colWidth / 2, colLetterY);
 
       baseX += colWidth;
     }
@@ -401,8 +405,11 @@ export function drawRowHeaders(state: RenderState): void {
       }
 
       // Draw row number (1-based)
+      // If an outline bar is present, center the number in the right portion of the header
+      const outlineBarW1 = config.outlineBarWidth ?? 0;
+      const numberCenterX1 = outlineBarW1 + (rowHeaderWidth - outlineBarW1) / 2;
       ctx.fillStyle = isFullySelected ? theme.headerHighlightText : isSelected ? "#1a5fb4" : hasHiddenRows ? filteredTextColor : theme.headerText;
-      ctx.fillText(String(row + 1), rowHeaderWidth / 2, y + rowHeight / 2);
+      ctx.fillText(String(row + 1), numberCenterX1, y + rowHeight / 2);
 
       y += rowHeight;
     }
@@ -495,8 +502,10 @@ export function drawRowHeaders(state: RenderState): void {
         }
 
         // Draw row number (1-based)
+        const outlineBarW2 = config.outlineBarWidth ?? 0;
+        const numberCenterX2 = outlineBarW2 + (rowHeaderWidth - outlineBarW2) / 2;
         ctx.fillStyle = isFullySelected ? theme.headerHighlightText : isSelected ? "#1a5fb4" : hasHiddenRows ? filteredTextColor : theme.headerText;
-        ctx.fillText(String(row + 1), rowHeaderWidth / 2, y + rowHeight / 2);
+        ctx.fillText(String(row + 1), numberCenterX2, y + rowHeight / 2);
 
         y += rowHeight;
       }
@@ -559,15 +568,17 @@ export function drawRowHeaders(state: RenderState): void {
       }
 
       // Draw row number (1-based)
+      const outlineBarW3 = config.outlineBarWidth ?? 0;
+      const numberCenterX3 = outlineBarW3 + (rowHeaderWidth - outlineBarW3) / 2;
       ctx.fillStyle = isFullySelected ? theme.headerHighlightText : isSelected ? "#1a5fb4" : hasHiddenRows ? filteredTextColor : theme.headerText;
-      ctx.fillText(String(row + 1), rowHeaderWidth / 2, y + rowHeight / 2);
+      ctx.fillText(String(row + 1), numberCenterX3, y + rowHeight / 2);
 
       baseY += rowHeight;
     }
 
     ctx.restore();
   }
-  
+
   // Draw right border of header column
   ctx.strokeStyle = theme.headerBorder;
   ctx.lineWidth = 1;

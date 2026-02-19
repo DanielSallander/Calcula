@@ -1092,15 +1092,16 @@ export function gridReducer(state: GridState, action: GridAction): GridState {
 
     case GRID_ACTIONS.SET_MANUALLY_HIDDEN_ROWS: {
       const manuallyHiddenRows = new Set(action.payload.rows);
-      // Derive filter-hidden rows: old hiddenRows minus old manuallyHiddenRows
+      // Derive filter-hidden rows: old hiddenRows minus old manuallyHiddenRows minus old groupHiddenRows
       const oldManual = state.dimensions.manuallyHiddenRows ?? new Set<number>();
+      const oldGroup = state.dimensions.groupHiddenRows ?? new Set<number>();
       const oldHidden = state.dimensions.hiddenRows ?? new Set<number>();
       const filterHidden = new Set<number>();
       oldHidden.forEach((r) => {
-        if (!oldManual.has(r)) filterHidden.add(r);
+        if (!oldManual.has(r) && !oldGroup.has(r)) filterHidden.add(r);
       });
-      // Recompute combined: filter + new manual
-      const hiddenRows = new Set([...filterHidden, ...manuallyHiddenRows]);
+      // Recompute combined: filter + new manual + group
+      const hiddenRows = new Set([...filterHidden, ...manuallyHiddenRows, ...oldGroup]);
       return {
         ...state,
         dimensions: {
@@ -1113,13 +1114,52 @@ export function gridReducer(state: GridState, action: GridAction): GridState {
 
     case GRID_ACTIONS.SET_MANUALLY_HIDDEN_COLS: {
       const manuallyHiddenCols = new Set(action.payload.cols);
-      // For columns, hiddenCols = manuallyHiddenCols (no filter-hidden cols yet)
+      // hiddenCols = manuallyHiddenCols ∪ groupHiddenCols
+      const groupHiddenColsForManual = state.dimensions.groupHiddenCols ?? new Set<number>();
+      const hiddenColsForManual = new Set([...manuallyHiddenCols, ...groupHiddenColsForManual]);
       return {
         ...state,
         dimensions: {
           ...state.dimensions,
           manuallyHiddenCols,
-          hiddenCols: manuallyHiddenCols,
+          hiddenCols: hiddenColsForManual,
+        },
+      };
+    }
+
+    case GRID_ACTIONS.SET_GROUP_HIDDEN_ROWS: {
+      const groupHiddenRows = new Set(action.payload.rows);
+      // Combined hiddenRows = filterHidden ∪ manuallyHidden ∪ groupHidden
+      // Derive filter-hidden: old hiddenRows minus old manuallyHiddenRows minus old groupHiddenRows
+      const oldManualRows = state.dimensions.manuallyHiddenRows ?? new Set<number>();
+      const oldGroupRows = state.dimensions.groupHiddenRows ?? new Set<number>();
+      const oldHiddenRows = state.dimensions.hiddenRows ?? new Set<number>();
+      const filterHiddenRows = new Set<number>();
+      oldHiddenRows.forEach((r) => {
+        if (!oldManualRows.has(r) && !oldGroupRows.has(r)) filterHiddenRows.add(r);
+      });
+      const combinedHiddenRows = new Set([...filterHiddenRows, ...oldManualRows, ...groupHiddenRows]);
+      return {
+        ...state,
+        dimensions: {
+          ...state.dimensions,
+          groupHiddenRows,
+          hiddenRows: combinedHiddenRows,
+        },
+      };
+    }
+
+    case GRID_ACTIONS.SET_GROUP_HIDDEN_COLS: {
+      const groupHiddenCols = new Set(action.payload.cols);
+      // hiddenCols = manuallyHiddenCols ∪ groupHiddenCols
+      const manualColsForGroup = state.dimensions.manuallyHiddenCols ?? new Set<number>();
+      const hiddenColsForGroup = new Set([...manualColsForGroup, ...groupHiddenCols]);
+      return {
+        ...state,
+        dimensions: {
+          ...state.dimensions,
+          groupHiddenCols,
+          hiddenCols: hiddenColsForGroup,
         },
       };
     }

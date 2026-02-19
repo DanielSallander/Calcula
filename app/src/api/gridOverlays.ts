@@ -355,3 +355,35 @@ export function overlaySheetToCanvas(
     canvasY: chh + sheetY - ctx.viewport.scrollY,
   };
 }
+
+// ============================================================================
+// Post-Header Overlay Registry
+// ============================================================================
+// These renderers are called AFTER all headers (row, column, corner) are drawn.
+// Used by the Grouping extension to render the outline bar on top of headers.
+
+export type { GlobalOverlayRendererFn } from "../core/lib/gridRenderer";
+
+const postHeaderOverlayRegistry = new Map<string, GlobalOverlayRendererFn>();
+
+/**
+ * Register a renderer that runs after all headers are drawn.
+ * Used for features like the outline/grouping bar that overlay the row header area.
+ * @returns A cleanup function that unregisters the renderer.
+ */
+export function registerPostHeaderOverlay(
+  id: string,
+  fn: GlobalOverlayRendererFn,
+): () => void {
+  postHeaderOverlayRegistry.set(id, fn);
+  return () => {
+    postHeaderOverlayRegistry.delete(id);
+  };
+}
+
+/**
+ * Get all registered post-header overlay renderers in insertion order.
+ */
+export function getPostHeaderOverlayRenderers(): GlobalOverlayRendererFn[] {
+  return Array.from(postHeaderOverlayRegistry.values());
+}

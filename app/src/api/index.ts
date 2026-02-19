@@ -58,6 +58,8 @@ export {
   setHiddenCols,
   setManuallyHiddenRows,
   setManuallyHiddenCols,
+  setGroupHiddenRows,
+  setGroupHiddenCols,
 } from "./grid";
 
 export type { GridAction, SetSelectionPayload } from "./grid";
@@ -122,6 +124,37 @@ export type {
   FilterOperator,
   UniqueValue,
   UniqueValuesResult,
+} from "./lib";
+
+// ============================================================================
+// Grouping / Outline API
+// ============================================================================
+
+export {
+  groupRows,
+  ungroupRows,
+  groupColumns,
+  ungroupColumns,
+  collapseRowGroup,
+  expandRowGroup,
+  collapseColumnGroup,
+  expandColumnGroup,
+  showOutlineLevel,
+  getOutlineInfo,
+  getHiddenRowsByGroup,
+  getHiddenColsByGroup,
+  clearOutline,
+} from "./lib";
+
+export type {
+  GroupResult,
+  OutlineInfo,
+  OutlineSettings,
+  RowOutlineSymbol,
+  ColOutlineSymbol,
+  RowGroup,
+  ColumnGroup,
+  SheetOutline,
 } from "./lib";
 
 // ============================================================================
@@ -300,10 +333,13 @@ export {
   overlayGetRowHeight,
   overlayGetColumnsWidth,
   overlayGetRowsHeight,
+  registerPostHeaderOverlay,
   type GridRegion,
+  requestOverlayRedraw,
   type OverlayRegistration,
   type OverlayRenderContext,
   type OverlayHitTestContext,
+  type GlobalOverlayRendererFn,
 } from "./gridOverlays";
 
 // Style Interceptors
@@ -321,3 +357,6 @@ export type {
   BaseStyleInfo,
   StyleInterceptorFn,
 } from "./styleInterceptors";
+
+// Core types re-exported for extension use
+export type { Viewport, GridConfig, DimensionOverrides } from "./types";

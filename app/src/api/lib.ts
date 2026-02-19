@@ -124,6 +124,21 @@ export {
   hasComment,
   clearAllComments,
   clearCommentsInRange,
+
+  // Grouping / Outline
+  groupRows,
+  ungroupRows,
+  groupColumns,
+  ungroupColumns,
+  collapseRowGroup,
+  expandRowGroup,
+  collapseColumnGroup,
+  expandColumnGroup,
+  showOutlineLevel,
+  getOutlineInfo,
+  getHiddenRowsByGroup,
+  getHiddenColsByGroup,
+  clearOutline,
 } from "../core/lib/tauri-api";
 
 // Type exports from tauri-api
@@ -139,6 +154,15 @@ export type {
   FreezeConfig as TauriFreezeConfig,
   MergedRegion as TauriMergedRegion,
   MergeResult,
+  // Grouping types
+  GroupResult,
+  OutlineInfo,
+  OutlineSettings,
+  RowOutlineSymbol,
+  ColOutlineSymbol,
+  RowGroup,
+  ColumnGroup,
+  SheetOutline,
 } from "../core/lib/tauri-api";
 
 // Named range type exports

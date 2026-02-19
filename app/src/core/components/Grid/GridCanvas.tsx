@@ -11,7 +11,7 @@ import { getViewportCells } from "../../lib/tauri-api";
 import type { GridConfig, Viewport, Selection, EditingCell, CellDataMap, FormulaReference, DimensionOverrides, StyleDataMap, ClipboardMode, InsertionAnimation, FreezeConfig } from "../../types";
 import { cellKey, createEmptyDimensionOverrides, DEFAULT_FREEZE_CONFIG } from "../../types";
 import type { GridTheme } from "../../lib/gridRenderer";
-import { getGridRegions, getOverlayRenderers, onRegionChange } from "../../../api/gridOverlays";
+import { getGridRegions, getOverlayRenderers, getPostHeaderOverlayRenderers, onRegionChange } from "../../../api/gridOverlays";
 import * as S from "./GridCanvas.styles";
 
 /**
@@ -431,7 +431,8 @@ export const GridCanvas = forwardRef<GridCanvasHandle, GridCanvasProps>(
         freezeConfig,
         getGridRegions(),
         getOverlayRenderers(),
-        currentSheetName, // FIX: Pass current sheet for cross-sheet reference highlighting
+        currentSheetName,
+        getPostHeaderOverlayRenderers(),
       );
 
       const perfDrawMs = performance.now() - perfDrawStart;
