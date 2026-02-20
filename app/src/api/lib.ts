@@ -11,6 +11,7 @@ export {
   getViewportCells,
   getCell,
   updateCell,
+  updateCellsBatch,
   clearCell,
   clearRange,
   getGridBounds,
@@ -154,6 +155,7 @@ export type {
   FreezeConfig as TauriFreezeConfig,
   MergedRegion as TauriMergedRegion,
   MergeResult,
+  CellUpdateInput,
   // Grouping types
   GroupResult,
   OutlineInfo,
@@ -257,6 +259,18 @@ export type {
   FilterOperator,
   UniqueValue,
   UniqueValuesResult,
+} from "./backend";
+
+// ============================================================================
+// Remove Duplicates API
+// ============================================================================
+
+export {
+  removeDuplicates,
+} from "./backend";
+
+export type {
+  RemoveDuplicatesResult,
 } from "./backend";
 
 // ============================================================================

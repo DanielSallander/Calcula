@@ -73,6 +73,7 @@ export {
   replaceAll,
   replaceSingle,
   getCell,
+  getViewportCells,
   getMergeInfo,
   detectDataRegion,
   getSheets,
@@ -85,6 +86,8 @@ export {
   setCellStyle,
   beginUndoTransaction,
   commitUndoTransaction,
+  removeDuplicates,
+  updateCellsBatch,
 } from "./lib";
 
 export type {
@@ -92,6 +95,8 @@ export type {
   AggregationType,
   SheetInfo,
   SheetsResult,
+  RemoveDuplicatesResult,
+  CellUpdateInput,
 } from "./lib";
 
 // ============================================================================

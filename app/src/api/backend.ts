@@ -5,6 +5,7 @@
 // This file is the ONLY place that should import from @tauri-apps/api/core.
 
 import { invoke } from "@tauri-apps/api/core";
+import type { CellData } from "../core/types";
 
 // ============================================================================
 // Types
@@ -2391,4 +2392,50 @@ export async function resolveStructuredReference(
   reference: string
 ): Promise<StructuredRefResult> {
   return invoke<StructuredRefResult>("resolve_structured_reference", { reference });
+}
+
+// ============================================================================
+// Remove Duplicates
+// ============================================================================
+
+/**
+ * Result of the remove_duplicates command.
+ */
+export interface RemoveDuplicatesResult {
+  success: boolean;
+  duplicatesRemoved: number;
+  uniqueRemaining: number;
+  updatedCells: CellData[];
+  error: string | null;
+}
+
+/**
+ * Remove duplicate rows from a range based on specified key columns.
+ * Keeps the first occurrence of each unique combination.
+ * @param startRow - Start row (0-based)
+ * @param startCol - Start column (0-based)
+ * @param endRow - End row (0-based, inclusive)
+ * @param endCol - End column (0-based, inclusive)
+ * @param keyColumns - Absolute column indices to use as duplicate keys
+ * @param hasHeaders - Whether the first row is a header
+ * @returns Result with counts and updated cells
+ */
+export async function removeDuplicates(
+  startRow: number,
+  startCol: number,
+  endRow: number,
+  endCol: number,
+  keyColumns: number[],
+  hasHeaders: boolean,
+): Promise<RemoveDuplicatesResult> {
+  return invoke<RemoveDuplicatesResult>("remove_duplicates", {
+    params: {
+      startRow,
+      startCol,
+      endRow,
+      endCol,
+      keyColumns,
+      hasHeaders,
+    },
+  });
 }

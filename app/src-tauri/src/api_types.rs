@@ -469,3 +469,41 @@ fn format_number_format_name(format: &NumberFormat) -> String {
         NumberFormat::Custom { format } => format!("Custom ({})", format),
     }
 }
+
+// ============================================================================
+// Remove Duplicates (Excel-compatible)
+// ============================================================================
+
+/// Parameters for remove_duplicates command.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RemoveDuplicatesParams {
+    /// Start row of range (0-based)
+    pub start_row: u32,
+    /// Start column of range (0-based)
+    pub start_col: u32,
+    /// End row of range (0-based, inclusive)
+    pub end_row: u32,
+    /// End column of range (0-based, inclusive)
+    pub end_col: u32,
+    /// Absolute column indices to use as duplicate keys
+    pub key_columns: Vec<u32>,
+    /// Whether the first row is a header (excluded from evaluation)
+    pub has_headers: bool,
+}
+
+/// Result of remove_duplicates command.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RemoveDuplicatesResult {
+    /// Whether the operation was successful
+    pub success: bool,
+    /// Number of duplicate rows removed
+    pub duplicates_removed: u32,
+    /// Number of unique rows remaining
+    pub unique_remaining: u32,
+    /// Updated cells after removal
+    pub updated_cells: Vec<CellData>,
+    /// Error message if operation failed
+    pub error: Option<String>,
+}

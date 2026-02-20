@@ -976,6 +976,7 @@ pub fn run() {
             commands::clear_range,
             commands::clear_range_with_options,
             commands::sort_range,
+            commands::remove_duplicates,
             commands::get_grid_bounds,
             commands::get_cell_count,
             commands::get_cells_in_rows,

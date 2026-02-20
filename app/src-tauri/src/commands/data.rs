@@ -2,8 +2,9 @@
 // PURPOSE: Core operations for reading and writing cell data.
 
 use crate::api_types::{
-    CellData, ClearApplyTo, ClearRangeParams, ClearRangeResult, MergedRegion, SortDataOption,
-    SortField, SortOn, SortOrientation, SortRangeParams, SortRangeResult,
+    CellData, ClearApplyTo, ClearRangeParams, ClearRangeResult, MergedRegion,
+    RemoveDuplicatesParams, RemoveDuplicatesResult, SortDataOption, SortField, SortOn,
+    SortOrientation, SortRangeParams, SortRangeResult,
 };
 use crate::commands::utils::get_cell_internal_with_merge;
 use crate::{
@@ -2224,4 +2225,239 @@ pub fn has_content_in_range(
             && col <= end_col
             && (cell.formula.is_some() || !matches!(cell.value, engine::CellValue::Empty))
     })
+}
+
+// ============================================================================
+// Remove Duplicates
+// ============================================================================
+
+/// Remove duplicate rows from a range based on specified key columns.
+/// Keeps the first occurrence of each unique combination and removes subsequent matches.
+/// Comparison is case-insensitive, value-based (not formatting), and whitespace-sensitive.
+#[tauri::command]
+pub fn remove_duplicates(
+    state: State<AppState>,
+    params: RemoveDuplicatesParams,
+) -> RemoveDuplicatesResult {
+    let mut grid = state.grid.lock().unwrap();
+    let mut grids = state.grids.lock().unwrap();
+    let active_sheet = *state.active_sheet.lock().unwrap();
+    let styles = state.style_registry.lock().unwrap();
+    let mut undo_stack = state.undo_stack.lock().unwrap();
+    let merged_regions = state.merged_regions.lock().unwrap();
+
+    let RemoveDuplicatesParams {
+        start_row,
+        start_col,
+        end_row,
+        end_col,
+        key_columns,
+        has_headers,
+    } = params;
+
+    // Validate key_columns
+    if key_columns.is_empty() {
+        return RemoveDuplicatesResult {
+            success: false,
+            duplicates_removed: 0,
+            unique_remaining: 0,
+            updated_cells: vec![],
+            error: Some("At least one column must be selected".to_string()),
+        };
+    }
+
+    // Normalize coordinates
+    let min_row = start_row.min(end_row);
+    let max_row = start_row.max(end_row);
+    let min_col = start_col.min(end_col);
+    let max_col = start_col.max(end_col);
+
+    // Check for merged cells in the range
+    for region in merged_regions.iter() {
+        if region.start_row <= max_row
+            && region.end_row >= min_row
+            && region.start_col <= max_col
+            && region.end_col >= min_col
+        {
+            let fully_inside = region.start_row >= min_row
+                && region.end_row <= max_row
+                && region.start_col >= min_col
+                && region.end_col <= max_col;
+            if !fully_inside {
+                return RemoveDuplicatesResult {
+                    success: false,
+                    duplicates_removed: 0,
+                    unique_remaining: 0,
+                    updated_cells: vec![],
+                    error: Some(
+                        "Cannot remove duplicates in a range that partially overlaps with merged cells"
+                            .to_string(),
+                    ),
+                };
+            }
+        }
+    }
+
+    // Determine data start row (skip header if present)
+    let data_start_row = if has_headers { min_row + 1 } else { min_row };
+
+    if data_start_row > max_row {
+        return RemoveDuplicatesResult {
+            success: true,
+            duplicates_removed: 0,
+            unique_remaining: 0,
+            updated_cells: vec![],
+            error: None,
+        };
+    }
+
+    // Collect all data rows with their cell data
+    let mut rows: Vec<(u32, Vec<Option<engine::Cell>>)> = Vec::new();
+    for row in data_start_row..=max_row {
+        let mut row_data: Vec<Option<engine::Cell>> = Vec::new();
+        for col in min_col..=max_col {
+            row_data.push(grid.get_cell(row, col).cloned());
+        }
+        rows.push((row, row_data));
+    }
+
+    // Build comparison keys and identify unique rows
+    // Key = lowercase display values of key columns
+    let mut seen: HashSet<Vec<String>> = HashSet::new();
+    let mut unique_indices: Vec<usize> = Vec::new();
+
+    for (idx, (_row, row_data)) in rows.iter().enumerate() {
+        let key: Vec<String> = key_columns
+            .iter()
+            .map(|&abs_col| {
+                if abs_col < min_col || abs_col > max_col {
+                    return String::new();
+                }
+                let col_offset = (abs_col - min_col) as usize;
+                match row_data.get(col_offset) {
+                    Some(Some(cell)) => {
+                        // Use simple value format (no formatting applied) for comparison
+                        // This ensures $10.00 (Currency) matches 10 (General)
+                        crate::format_cell_value_simple(&cell.value).to_lowercase()
+                    }
+                    _ => String::new(), // Empty cells are valid values
+                }
+            })
+            .collect();
+
+        if seen.insert(key) {
+            // First occurrence - keep this row
+            unique_indices.push(idx);
+        }
+    }
+
+    let total_rows = rows.len() as u32;
+    let unique_count = unique_indices.len() as u32;
+    let duplicates_removed = total_rows - unique_count;
+
+    // If no duplicates, return early
+    if duplicates_removed == 0 {
+        return RemoveDuplicatesResult {
+            success: true,
+            duplicates_removed: 0,
+            unique_remaining: total_rows,
+            updated_cells: vec![],
+            error: None,
+        };
+    }
+
+    // Begin undo transaction
+    undo_stack.begin_transaction(format!(
+        "Remove duplicates ({},{}) to ({},{})",
+        min_row, min_col, max_row, max_col
+    ));
+
+    // Compact: write unique rows back to the top of the data range
+    let mut updated_cells = Vec::new();
+
+    for (new_idx, &orig_idx) in unique_indices.iter().enumerate() {
+        let target_row = data_start_row + new_idx as u32;
+        let row_data = &rows[orig_idx].1;
+
+        for (col_offset, cell_opt) in row_data.iter().enumerate() {
+            let target_col = min_col + col_offset as u32;
+
+            // Record undo for the target cell
+            let prev_cell = grid.get_cell(target_row, target_col).cloned();
+            undo_stack.record_cell_change(target_row, target_col, prev_cell);
+
+            if let Some(cell) = cell_opt {
+                grid.set_cell(target_row, target_col, cell.clone());
+                if active_sheet < grids.len() {
+                    grids[active_sheet].set_cell(target_row, target_col, cell.clone());
+                }
+
+                let style = styles.get(cell.style_index);
+                let display = format_cell_value(&cell.value, style);
+
+                updated_cells.push(CellData {
+                    row: target_row,
+                    col: target_col,
+                    display,
+                    formula: cell.formula.clone(),
+                    style_index: cell.style_index,
+                    row_span: 1,
+                    col_span: 1,
+                    sheet_index: None,
+                });
+            } else {
+                grid.clear_cell(target_row, target_col);
+                if active_sheet < grids.len() {
+                    grids[active_sheet].clear_cell(target_row, target_col);
+                }
+
+                updated_cells.push(CellData {
+                    row: target_row,
+                    col: target_col,
+                    display: String::new(),
+                    formula: None,
+                    style_index: 0,
+                    row_span: 1,
+                    col_span: 1,
+                    sheet_index: None,
+                });
+            }
+        }
+    }
+
+    // Clear leftover rows at the bottom (rows that were compacted away)
+    let first_empty_row = data_start_row + unique_count;
+    for row in first_empty_row..=max_row {
+        for col in min_col..=max_col {
+            let prev_cell = grid.get_cell(row, col).cloned();
+            if prev_cell.is_some() {
+                undo_stack.record_cell_change(row, col, prev_cell);
+                grid.clear_cell(row, col);
+                if active_sheet < grids.len() {
+                    grids[active_sheet].clear_cell(row, col);
+                }
+            }
+
+            updated_cells.push(CellData {
+                row,
+                col,
+                display: String::new(),
+                formula: None,
+                style_index: 0,
+                row_span: 1,
+                col_span: 1,
+                sheet_index: None,
+            });
+        }
+    }
+
+    undo_stack.commit_transaction();
+
+    RemoveDuplicatesResult {
+        success: true,
+        duplicates_removed,
+        unique_remaining: unique_count,
+        updated_cells,
+        error: None,
+    }
 }

@@ -7,6 +7,8 @@ import { registerTableExtension, unregisterTableExtension } from "./Table";
 import { registerChartExtension, unregisterChartExtension } from "./Charts";
 import { registerAutoFilterExtension, unregisterAutoFilterExtension } from "./AutoFilter";
 import { registerGroupingExtension, unregisterGroupingExtension } from "./Grouping";
+import { registerRemoveDuplicatesExtension, unregisterRemoveDuplicatesExtension } from "./RemoveDuplicates";
+import { registerTextToColumnsExtension, unregisterTextToColumnsExtension } from "./TextToColumns";
 
 /**
  * Load all extensions.
@@ -22,6 +24,8 @@ export function loadExtensions(): void {
   registerChartExtension();
   registerAutoFilterExtension();
   registerGroupingExtension();
+  registerRemoveDuplicatesExtension();
+  registerTextToColumnsExtension();
 
   // Future: Load user extensions from config
 
@@ -36,6 +40,8 @@ export function unloadExtensions(): void {
   console.log("[Extensions] Unloading extensions...");
 
   // Unload in reverse order
+  unregisterTextToColumnsExtension();
+  unregisterRemoveDuplicatesExtension();
   unregisterGroupingExtension();
   unregisterAutoFilterExtension();
   unregisterChartExtension();
@@ -51,3 +57,5 @@ export { registerTableExtension, unregisterTableExtension };
 export { registerChartExtension, unregisterChartExtension };
 export { registerAutoFilterExtension, unregisterAutoFilterExtension };
 export { registerGroupingExtension, unregisterGroupingExtension };
+export { registerRemoveDuplicatesExtension, unregisterRemoveDuplicatesExtension };
+export { registerTextToColumnsExtension, unregisterTextToColumnsExtension };
