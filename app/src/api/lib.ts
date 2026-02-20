@@ -105,6 +105,7 @@ export {
   getInvalidCells,
   getValidationListValues,
   hasInCellDropdown,
+  validatePendingValue,
 
   // Comments
   addComment,
@@ -274,6 +275,19 @@ export type {
 } from "./backend";
 
 // ============================================================================
+// Goal Seek API
+// ============================================================================
+
+export {
+  goalSeek,
+} from "./backend";
+
+export type {
+  GoalSeekParams,
+  GoalSeekResult,
+} from "./backend";
+
+// ============================================================================
 // Grouping / Outline Settings API
 // ============================================================================
 
@@ -358,3 +372,57 @@ export type {
   PivotRegionData,
   FieldUniqueValuesResponse,
 } from "../../extensions/Pivot/lib/pivot-api";
+
+// ============================================================================
+// Conditional Formatting API
+// ============================================================================
+
+export {
+  addConditionalFormat,
+  updateConditionalFormat,
+  deleteConditionalFormat,
+  reorderConditionalFormats,
+  getConditionalFormat,
+  getAllConditionalFormats,
+  evaluateConditionalFormats,
+  clearConditionalFormatsInRange,
+} from "./backend";
+
+export type {
+  CFValueType,
+  ColorScalePoint,
+  ColorScaleRule,
+  DataBarDirection,
+  DataBarAxisPosition,
+  DataBarRule,
+  IconSetType,
+  ThresholdOperator,
+  IconSetThreshold,
+  IconSetRule,
+  CellValueOperator,
+  CellValueRule,
+  TextRuleType,
+  ContainsTextRule,
+  TopBottomType,
+  TopBottomRule,
+  AverageRuleType,
+  AboveAverageRule,
+  TimePeriod,
+  TimePeriodRule,
+  ExpressionRule,
+  DuplicateValuesRule,
+  UniqueValuesRule,
+  BlankCellsRule,
+  NoBlanksRule,
+  ErrorCellsRule,
+  NoErrorsRule,
+  ConditionalFormatRule,
+  ConditionalFormat,
+  ConditionalFormatRange,
+  ConditionalFormatDefinition,
+  CFResult,
+  CellConditionalFormat,
+  EvaluateCFResult,
+  AddCFParams,
+  UpdateCFParams,
+} from "./backend";

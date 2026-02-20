@@ -507,3 +507,57 @@ pub struct RemoveDuplicatesResult {
     /// Error message if operation failed
     pub error: Option<String>,
 }
+
+// ============================================================================
+// Goal Seek (single-variable solver)
+// ============================================================================
+
+fn default_max_iterations() -> u32 {
+    100
+}
+
+fn default_tolerance() -> f64 {
+    0.001
+}
+
+/// Parameters for goal_seek command.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GoalSeekParams {
+    /// Row of the target cell (must contain a formula), 0-based
+    pub target_row: u32,
+    /// Column of the target cell, 0-based
+    pub target_col: u32,
+    /// The numeric value we want the target cell to evaluate to
+    pub target_value: f64,
+    /// Row of the variable cell (must be a constant), 0-based
+    pub variable_row: u32,
+    /// Column of the variable cell, 0-based
+    pub variable_col: u32,
+    /// Maximum number of iterations (default: 100)
+    #[serde(default = "default_max_iterations")]
+    pub max_iterations: u32,
+    /// Convergence tolerance (default: 0.001)
+    #[serde(default = "default_tolerance")]
+    pub tolerance: f64,
+}
+
+/// Result of goal_seek command.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GoalSeekResult {
+    /// Whether a solution was found within tolerance
+    pub found_solution: bool,
+    /// The final value placed in the variable cell
+    pub variable_value: f64,
+    /// The final evaluated value of the target cell
+    pub target_result: f64,
+    /// Number of iterations performed
+    pub iterations: u32,
+    /// The original value of the variable cell (for reverting)
+    pub original_variable_value: f64,
+    /// Updated cells (the variable cell + target cell + any dependents)
+    pub updated_cells: Vec<CellData>,
+    /// Error message if goal seek failed validation
+    pub error: Option<String>,
+}

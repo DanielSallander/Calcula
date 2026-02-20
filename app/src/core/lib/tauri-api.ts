@@ -980,6 +980,22 @@ export async function hasInCellDropdown(
   return invoke<boolean>("has_in_cell_dropdown", { row, col });
 }
 
+/**
+ * Validate a pending (not yet committed) value against a cell's validation rule.
+ * Used by commit guards to validate before writing to the grid.
+ */
+export async function validatePendingValue(
+  row: number,
+  col: number,
+  pendingValue: string
+): Promise<CellValidationResult> {
+  return invoke<CellValidationResult>("validate_pending_value", {
+    row,
+    col,
+    pendingValue,
+  });
+}
+
 // ============================================================================
 // Comments / Notes
 // ============================================================================

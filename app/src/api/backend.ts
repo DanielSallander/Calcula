@@ -2439,3 +2439,55 @@ export async function removeDuplicates(
     },
   });
 }
+
+// ============================================================================
+// Goal Seek (single-variable solver)
+// ============================================================================
+
+/** Parameters for the goal_seek command. */
+export interface GoalSeekParams {
+  /** Row of the target cell (must contain a formula), 0-based */
+  targetRow: number;
+  /** Column of the target cell, 0-based */
+  targetCol: number;
+  /** The numeric value we want the target cell to evaluate to */
+  targetValue: number;
+  /** Row of the variable cell (must be a constant), 0-based */
+  variableRow: number;
+  /** Column of the variable cell, 0-based */
+  variableCol: number;
+  /** Maximum number of iterations (default: 100) */
+  maxIterations?: number;
+  /** Convergence tolerance (default: 0.001) */
+  tolerance?: number;
+}
+
+/** Result of the goal_seek command. */
+export interface GoalSeekResult {
+  /** Whether a solution was found within tolerance */
+  foundSolution: boolean;
+  /** The final value placed in the variable cell */
+  variableValue: number;
+  /** The final evaluated value of the target cell */
+  targetResult: number;
+  /** Number of iterations performed */
+  iterations: number;
+  /** The original value of the variable cell (for reverting) */
+  originalVariableValue: number;
+  /** Updated cells (the variable cell + target cell + any dependents) */
+  updatedCells: CellData[];
+  /** Error message if goal seek failed validation */
+  error: string | null;
+}
+
+/**
+ * Run Goal Seek: iteratively adjust a variable cell until a target formula
+ * evaluates to the desired value.
+ * @param params - Goal seek parameters
+ * @returns Result with solution status and updated cells
+ */
+export async function goalSeek(
+  params: GoalSeekParams,
+): Promise<GoalSeekResult> {
+  return invoke<GoalSeekResult>("goal_seek", { params });
+}

@@ -826,3 +826,72 @@ pub fn has_in_cell_dropdown(
 
     false
 }
+
+/// Validate a pending (not yet committed) value against a cell's validation rule.
+/// This is used by the commit guard system to validate before writing to the grid.
+#[tauri::command]
+pub fn validate_pending_value(
+    state: State<AppState>,
+    row: u32,
+    col: u32,
+    pending_value: String,
+) -> CellValidationResult {
+    let active_sheet = *state.active_sheet.lock().unwrap();
+    let validations = state.data_validations.lock().unwrap();
+    let grids = state.grids.lock().unwrap();
+    let sheet_names = state.sheet_names.lock().unwrap();
+
+    // Get the validation rule for this cell
+    let validation = if let Some(sheet_validations) = validations.get(&active_sheet) {
+        get_validation_for_cell(sheet_validations, row, col).cloned()
+    } else {
+        None
+    };
+
+    let validation = match validation {
+        Some(v) => v,
+        None => {
+            return CellValidationResult {
+                is_valid: true,
+                error_alert: None,
+            };
+        }
+    };
+
+    // Parse the pending value string into a CellValue
+    let cell_value = if pending_value.is_empty() {
+        CellValue::Empty
+    } else if pending_value.starts_with('=') {
+        // Formula values - can't validate until evaluated, assume valid
+        return CellValidationResult {
+            is_valid: true,
+            error_alert: None,
+        };
+    } else if let Ok(n) = pending_value.parse::<f64>() {
+        CellValue::Number(n)
+    } else if pending_value.eq_ignore_ascii_case("true") {
+        CellValue::Boolean(true)
+    } else if pending_value.eq_ignore_ascii_case("false") {
+        CellValue::Boolean(false)
+    } else {
+        CellValue::Text(pending_value)
+    };
+
+    // Create a resolver for list sources
+    let grids_ref = &grids;
+    let sheet_names_ref = &sheet_names;
+    let resolver = |source: &ListSource| -> Vec<String> {
+        resolve_list_source(source, grids_ref, sheet_names_ref, active_sheet)
+    };
+
+    let is_valid = validate_cell_value(&cell_value, &validation, Some(&resolver));
+
+    CellValidationResult {
+        is_valid,
+        error_alert: if !is_valid && validation.error_alert.show_alert {
+            Some(validation.error_alert.clone())
+        } else {
+            None
+        },
+    }
+}

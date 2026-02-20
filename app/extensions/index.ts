@@ -9,6 +9,9 @@ import { registerAutoFilterExtension, unregisterAutoFilterExtension } from "./Au
 import { registerGroupingExtension, unregisterGroupingExtension } from "./Grouping";
 import { registerRemoveDuplicatesExtension, unregisterRemoveDuplicatesExtension } from "./RemoveDuplicates";
 import { registerTextToColumnsExtension, unregisterTextToColumnsExtension } from "./TextToColumns";
+import { registerDataValidationExtension, unregisterDataValidationExtension } from "./DataValidation";
+import { registerConditionalFormattingExtension, unregisterConditionalFormattingExtension } from "./ConditionalFormatting";
+import { registerGoalSeekExtension, unregisterGoalSeekExtension } from "./GoalSeek";
 
 /**
  * Load all extensions.
@@ -26,6 +29,9 @@ export function loadExtensions(): void {
   registerGroupingExtension();
   registerRemoveDuplicatesExtension();
   registerTextToColumnsExtension();
+  registerDataValidationExtension();
+  registerConditionalFormattingExtension();
+  registerGoalSeekExtension();
 
   // Future: Load user extensions from config
 
@@ -40,6 +46,9 @@ export function unloadExtensions(): void {
   console.log("[Extensions] Unloading extensions...");
 
   // Unload in reverse order
+  unregisterGoalSeekExtension();
+  unregisterConditionalFormattingExtension();
+  unregisterDataValidationExtension();
   unregisterTextToColumnsExtension();
   unregisterRemoveDuplicatesExtension();
   unregisterGroupingExtension();
@@ -59,3 +68,6 @@ export { registerAutoFilterExtension, unregisterAutoFilterExtension };
 export { registerGroupingExtension, unregisterGroupingExtension };
 export { registerRemoveDuplicatesExtension, unregisterRemoveDuplicatesExtension };
 export { registerTextToColumnsExtension, unregisterTextToColumnsExtension };
+export { registerDataValidationExtension, unregisterDataValidationExtension };
+export { registerConditionalFormattingExtension, unregisterConditionalFormattingExtension };
+export { registerGoalSeekExtension, unregisterGoalSeekExtension };

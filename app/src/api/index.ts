@@ -100,6 +100,19 @@ export type {
 } from "./lib";
 
 // ============================================================================
+// Goal Seek API
+// ============================================================================
+
+export {
+  goalSeek,
+} from "./lib";
+
+export type {
+  GoalSeekParams,
+  GoalSeekResult,
+} from "./lib";
+
+// ============================================================================
 // AutoFilter API
 // ============================================================================
 
@@ -188,6 +201,13 @@ export { dispatchGridAction } from "./gridDispatch";
 // ============================================================================
 
 export { registerEditGuard } from "./editGuards";
+
+// ============================================================================
+// Commit Guards
+// ============================================================================
+
+export { registerCommitGuard } from "./commitGuards";
+export type { CommitGuardResult, CommitGuardFn } from "./commitGuards";
 
 // ============================================================================
 // Cell Click Interceptors
@@ -342,6 +362,9 @@ export {
   overlayGetColumnsWidth,
   overlayGetRowsHeight,
   registerPostHeaderOverlay,
+  getGridRegions,
+  overlayGetRowHeaderWidth,
+  overlayGetColHeaderHeight,
   type GridRegion,
   requestOverlayRedraw,
   type OverlayRegistration,
@@ -368,3 +391,106 @@ export type {
 
 // Core types re-exported for extension use
 export type { Viewport, GridConfig, DimensionOverrides } from "./types";
+
+// ============================================================================
+// Data Validation API
+// ============================================================================
+
+export {
+  setDataValidation,
+  clearDataValidation,
+  getDataValidation,
+  getAllDataValidations,
+  validateCell,
+  getValidationPrompt,
+  getInvalidCells,
+  getValidationListValues,
+  hasInCellDropdown,
+  validatePendingValue,
+  // Helpers
+  DEFAULT_ERROR_ALERT,
+  DEFAULT_PROMPT,
+  DEFAULT_VALIDATION,
+  createWholeNumberRule,
+  createDecimalRule,
+  createListRule,
+  createListRuleFromRange,
+  createTextLengthRule,
+  createCustomRule,
+  createDateRule,
+  createTimeRule,
+} from "./lib";
+
+export type {
+  DataValidationType,
+  DataValidationOperator,
+  DataValidationAlertStyle,
+  NumericRule,
+  DateRule,
+  TimeRule,
+  ListSource,
+  ListRule,
+  CustomRule,
+  DataValidationRule,
+  DataValidationErrorAlert,
+  DataValidationPrompt,
+  DataValidation,
+  ValidationRange,
+  DataValidationResult,
+  InvalidCellsResult,
+  CellValidationResult,
+} from "./lib";
+
+// ============================================================================
+// Conditional Formatting API
+// ============================================================================
+
+export {
+  addConditionalFormat,
+  updateConditionalFormat,
+  deleteConditionalFormat,
+  reorderConditionalFormats,
+  getConditionalFormat,
+  getAllConditionalFormats,
+  evaluateConditionalFormats,
+  clearConditionalFormatsInRange,
+} from "./lib";
+
+export type {
+  CFValueType,
+  ColorScalePoint,
+  ColorScaleRule,
+  DataBarDirection,
+  DataBarAxisPosition,
+  DataBarRule,
+  IconSetType,
+  ThresholdOperator,
+  IconSetThreshold,
+  IconSetRule,
+  CellValueOperator,
+  CellValueRule,
+  TextRuleType,
+  ContainsTextRule,
+  TopBottomType,
+  TopBottomRule,
+  AverageRuleType,
+  AboveAverageRule,
+  TimePeriod,
+  TimePeriodRule,
+  ExpressionRule,
+  DuplicateValuesRule,
+  UniqueValuesRule,
+  BlankCellsRule,
+  NoBlanksRule,
+  ErrorCellsRule,
+  NoErrorsRule,
+  ConditionalFormatRule,
+  ConditionalFormat,
+  ConditionalFormatRange,
+  ConditionalFormatDefinition,
+  CFResult,
+  CellConditionalFormat,
+  EvaluateCFResult,
+  AddCFParams,
+  UpdateCFParams,
+} from "./lib";

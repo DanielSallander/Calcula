@@ -43,6 +43,7 @@ import {
 import type { EditingCell, CellUpdateResult, FormulaReference } from "../types";
 import { isFormulaExpectingReference, FORMULA_REFERENCE_COLORS } from "../types";
 import { checkEditGuards } from "../lib/editGuards";
+import { checkCommitGuards } from "../lib/commitGuards";
 import {
   parseFormulaReferences,
   parseFormulaReferencesWithPositions,
@@ -1260,6 +1261,31 @@ export function useEditing(): UseEditingReturn {
 
       // Smart formula completion - auto-close parentheses, etc.
       const valueToCommit = autoCompleteFormula(editing.value);
+
+      // === COMMIT GUARD CHECK ===
+      // Extensions (e.g., Data Validation) can register guards that validate
+      // the pending value before it is written to the grid.
+      const guardResult = await checkCommitGuards(editing.row, editing.col, valueToCommit);
+      if (guardResult) {
+        if (guardResult.action === "block") {
+          // Cancel: stop editing, revert to previous value
+          setGlobalIsEditing(false);
+          setGlobalEditingValue("");
+          resetArrowRefState();
+          dispatch(stopEditing());
+          dispatch(clearFormulaReferences());
+          setIsCommitting(false);
+          commitInProgressRef.current = false;
+          return null;
+        }
+        if (guardResult.action === "retry") {
+          // Retry: keep in edit mode, let user correct the value
+          setIsCommitting(false);
+          commitInProgressRef.current = false;
+          return null;
+        }
+        // action === "allow" -- fall through to normal commit
+      }
 
       const updatedCells = await updateCell(editing.row, editing.col, valueToCommit);
       const perfT3UpdateCell = performance.now();
