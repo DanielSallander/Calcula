@@ -7,7 +7,7 @@
 // REFACTOR: Imports from api layer instead of core internals
 
 import React, { useCallback, useRef, useEffect } from "react";
-import { useGridContext, getCell, getMergeInfo } from "../../api";
+import { useGridContext, getCell, getMergeInfo, isSheetProtected, getCellProtection } from "../../api";
 import { useEditing, setGlobalIsEditing, getGlobalEditingValue } from "../../api/editing";
 import { toggleReferenceAtCursor } from "../../core/lib/formulaRefToggle";
 import { parseFormulaReferences } from "../../core/lib/formulaRefParser";
@@ -58,12 +58,28 @@ export function FormulaInput(): React.ReactElement {
           
           const cell = await getCell(cellRow, cellCol);
           if (cell) {
-            const content = cell.formula || cell.display || "";
+            let content = cell.formula || cell.display || "";
+
+            // Formula hiding: if sheet is protected and cell has formulaHidden, show blank
+            if (cell.formula && cell.formula.startsWith("=")) {
+              try {
+                const [sheetProt, cellProt] = await Promise.all([
+                  isSheetProtected(),
+                  getCellProtection(cellRow, cellCol),
+                ]);
+                if (sheetProt && cellProt.formulaHidden) {
+                  content = "";
+                }
+              } catch {
+                // Ignore errors - show formula as fallback
+              }
+            }
+
             setDisplayValue(content);
 
             // FIX: Parse formula references for passive highlighting when selecting a formula cell
-            if (cell.formula && cell.formula.startsWith("=")) {
-              const refs = parseFormulaReferences(cell.formula, true);
+            if (content && content.startsWith("=")) {
+              const refs = parseFormulaReferences(content, true);
               dispatch(setFormulaReferences(refs));
             } else {
               dispatch(clearFormulaReferences());

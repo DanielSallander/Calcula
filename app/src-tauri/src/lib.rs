@@ -74,6 +74,7 @@ pub use protection::{
     ProtectionResult, ProtectionCheckResult, ProtectionStatus,
     ProtectionStorage, CellProtectionStorage,
     ProtectSheetParams, AddAllowEditRangeParams, SetCellProtectionParams,
+    WorkbookProtection, WorkbookProtectionResult, WorkbookProtectionStatus,
 };
 pub use grouping::{
     RowGroup, ColumnGroup, SheetOutline, OutlineSettings, SummaryPosition,
@@ -173,6 +174,8 @@ pub struct AppState {
     pub sheet_protection: Mutex<protection::ProtectionStorage>,
     /// Cell-level protection per sheet: sheet_index -> (row, col) -> CellProtection
     pub cell_protection: Mutex<protection::CellProtectionStorage>,
+    /// Workbook-level structural protection (prevents add/delete/rename/move sheets)
+    pub workbook_protection: Mutex<protection::WorkbookProtection>,
     /// Row/column grouping (outlines) per sheet
     pub outlines: Mutex<grouping::OutlineStorage>,
     /// Conditional formatting rules per sheet
@@ -242,6 +245,7 @@ pub fn create_app_state() -> AppState {
         hyperlinks: Mutex::new(HashMap::new()),
         sheet_protection: Mutex::new(HashMap::new()),
         cell_protection: Mutex::new(HashMap::new()),
+        workbook_protection: Mutex::new(protection::WorkbookProtection::default()),
         outlines: Mutex::new(HashMap::new()),
         conditional_formats: Mutex::new(HashMap::new()),
         next_cf_rule_id: Mutex::new(1),
@@ -1160,6 +1164,11 @@ pub fn run() {
             protection::set_cell_protection,
             protection::get_cell_protection,
             protection::verify_edit_range_password,
+            // Workbook protection commands
+            protection::protect_workbook,
+            protection::unprotect_workbook,
+            protection::is_workbook_protected,
+            protection::get_workbook_protection_status,
             // Grouping (Outline) commands
             grouping::group_rows,
             grouping::ungroup_rows,

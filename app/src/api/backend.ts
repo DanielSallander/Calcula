@@ -1296,6 +1296,64 @@ export async function verifyEditRangePassword(
 }
 
 // ============================================================================
+// Workbook Protection Commands
+// ============================================================================
+
+/**
+ * Workbook protection status summary.
+ */
+export interface WorkbookProtectionStatus {
+  isProtected: boolean;
+  hasPassword: boolean;
+}
+
+/**
+ * Result of a workbook protection operation.
+ */
+export interface WorkbookProtectionResult {
+  success: boolean;
+  error?: string;
+}
+
+/**
+ * Protect the workbook structure (prevent adding/deleting/renaming/moving sheets).
+ * @param password - Optional password for protection
+ * @returns Result of the operation
+ */
+export async function protectWorkbook(
+  password?: string
+): Promise<WorkbookProtectionResult> {
+  return invoke<WorkbookProtectionResult>("protect_workbook", { password });
+}
+
+/**
+ * Unprotect the workbook structure.
+ * @param password - Password if the workbook is password-protected
+ * @returns Result of the operation
+ */
+export async function unprotectWorkbook(
+  password?: string
+): Promise<WorkbookProtectionResult> {
+  return invoke<WorkbookProtectionResult>("unprotect_workbook", { password });
+}
+
+/**
+ * Check if the workbook is protected.
+ * @returns true if the workbook structure is protected
+ */
+export async function isWorkbookProtected(): Promise<boolean> {
+  return invoke<boolean>("is_workbook_protected", {});
+}
+
+/**
+ * Get workbook protection status.
+ * @returns Workbook protection status summary
+ */
+export async function getWorkbookProtectionStatus(): Promise<WorkbookProtectionStatus> {
+  return invoke<WorkbookProtectionStatus>("get_workbook_protection_status", {});
+}
+
+// ============================================================================
 // Grouping (Outline) Commands
 // ============================================================================
 

@@ -426,3 +426,47 @@ export type {
   AddCFParams,
   UpdateCFParams,
 } from "./backend";
+
+// ============================================================================
+// Protection API
+// ============================================================================
+
+export {
+  // Sheet protection
+  protectSheet,
+  unprotectSheet,
+  updateProtectionOptions,
+  addAllowEditRange,
+  removeAllowEditRange,
+  getAllowEditRanges,
+  getProtectionStatus,
+  isSheetProtected,
+  canEditCell,
+  canPerformAction,
+  setCellProtection,
+  getCellProtection,
+  verifyEditRangePassword,
+  // Workbook protection
+  protectWorkbook,
+  unprotectWorkbook,
+  isWorkbookProtected,
+  getWorkbookProtectionStatus,
+  // Defaults
+  DEFAULT_PROTECTION_OPTIONS,
+  DEFAULT_CELL_PROTECTION,
+} from "./backend";
+
+export type {
+  SheetProtectionOptions,
+  AllowEditRange,
+  SheetProtection,
+  CellProtection,
+  ProtectionResult,
+  ProtectionCheckResult,
+  ProtectionStatus,
+  ProtectSheetParams,
+  AddAllowEditRangeParams,
+  SetCellProtectionParams,
+  WorkbookProtectionStatus,
+  WorkbookProtectionResult,
+} from "./backend";

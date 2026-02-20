@@ -751,6 +751,139 @@ pub fn get_sheet_protection(
     protection_storage.get(&sheet_index)
 }
 
+// ============================================================================
+// WORKBOOK PROTECTION
+// ============================================================================
+
+/// Workbook-level structural protection (prevents adding/deleting/renaming/moving sheets)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkbookProtection {
+    /// Whether workbook structure protection is enabled
+    pub protected: bool,
+    /// Password hash (SHA-256 of password + salt)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub password_hash: Option<String>,
+    /// Salt for password hashing
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub password_salt: Option<String>,
+}
+
+impl Default for WorkbookProtection {
+    fn default() -> Self {
+        Self {
+            protected: false,
+            password_hash: None,
+            password_salt: None,
+        }
+    }
+}
+
+/// Result of a workbook protection operation
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkbookProtectionResult {
+    pub success: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+impl WorkbookProtectionResult {
+    pub fn ok() -> Self {
+        Self {
+            success: true,
+            error: None,
+        }
+    }
+
+    pub fn err(message: impl Into<String>) -> Self {
+        Self {
+            success: false,
+            error: Some(message.into()),
+        }
+    }
+}
+
+/// Workbook protection status summary
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkbookProtectionStatus {
+    pub is_protected: bool,
+    pub has_password: bool,
+}
+
+// ============================================================================
+// WORKBOOK PROTECTION COMMANDS
+// ============================================================================
+
+/// Protect the workbook structure
+#[tauri::command]
+pub fn protect_workbook(
+    state: State<AppState>,
+    password: Option<String>,
+) -> WorkbookProtectionResult {
+    let mut wb_protection = state.workbook_protection.lock().unwrap();
+
+    if wb_protection.protected {
+        return WorkbookProtectionResult::err("Workbook is already protected");
+    }
+
+    wb_protection.protected = true;
+
+    if let Some(pwd) = password {
+        if !pwd.is_empty() {
+            let salt = generate_salt();
+            wb_protection.password_hash = Some(hash_password(&pwd, &salt));
+            wb_protection.password_salt = Some(salt);
+        }
+    }
+
+    WorkbookProtectionResult::ok()
+}
+
+/// Unprotect the workbook structure
+#[tauri::command]
+pub fn unprotect_workbook(
+    state: State<AppState>,
+    password: Option<String>,
+) -> WorkbookProtectionResult {
+    let mut wb_protection = state.workbook_protection.lock().unwrap();
+
+    if !wb_protection.protected {
+        return WorkbookProtectionResult::err("Workbook is not protected");
+    }
+
+    // Check password if required
+    if let (Some(hash), Some(salt)) = (&wb_protection.password_hash, &wb_protection.password_salt) {
+        let provided = password.unwrap_or_default();
+        if !verify_password(&provided, salt, hash) {
+            return WorkbookProtectionResult::err("Incorrect password");
+        }
+    }
+
+    wb_protection.protected = false;
+    wb_protection.password_hash = None;
+    wb_protection.password_salt = None;
+
+    WorkbookProtectionResult::ok()
+}
+
+/// Check if the workbook is protected
+#[tauri::command]
+pub fn is_workbook_protected(state: State<AppState>) -> bool {
+    state.workbook_protection.lock().unwrap().protected
+}
+
+/// Get workbook protection status
+#[tauri::command]
+pub fn get_workbook_protection_status(state: State<AppState>) -> WorkbookProtectionStatus {
+    let wb_protection = state.workbook_protection.lock().unwrap();
+    WorkbookProtectionStatus {
+        is_protected: wb_protection.protected,
+        has_password: wb_protection.password_hash.is_some(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -870,5 +1003,13 @@ mod tests {
         let cp2 = CellProtection::unlocked();
         assert!(!cp2.locked);
         assert!(!cp2.formula_hidden);
+    }
+
+    #[test]
+    fn test_workbook_protection_default() {
+        let wb = WorkbookProtection::default();
+        assert!(!wb.protected);
+        assert!(wb.password_hash.is_none());
+        assert!(wb.password_salt.is_none());
     }
 }
