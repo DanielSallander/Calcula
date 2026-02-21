@@ -538,3 +538,19 @@ export type {
   WorkbookProtectionStatus,
   WorkbookProtectionResult,
 } from "./lib";
+
+// ============================================================================
+// Tracing API (Trace Precedents / Trace Dependents)
+// ============================================================================
+
+export {
+  tracePrecedents,
+  traceDependents,
+} from "./lib";
+
+export type {
+  TraceCellRef,
+  TraceRange,
+  TraceCrossSheetRef,
+  TraceResult,
+} from "./lib";

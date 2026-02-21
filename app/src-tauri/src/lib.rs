@@ -40,6 +40,7 @@ pub mod grouping;
 pub mod conditional_formatting;
 pub mod tables;
 pub mod goal_seek;
+pub mod tracing;
 
 pub use api_types::{CellData, StyleData, DimensionData, FormattingParams, MergedRegion};
 pub use logging::{init_log_file, get_log_path, next_seq, write_log, write_log_raw};
@@ -1215,6 +1216,9 @@ pub fn run() {
             tables::resolve_structured_reference,
             // Goal Seek command
             goal_seek::goal_seek,
+            // Tracing commands (Trace Precedents / Trace Dependents)
+            tracing::trace_precedents,
+            tracing::trace_dependents,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

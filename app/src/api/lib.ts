@@ -470,3 +470,19 @@ export type {
   WorkbookProtectionStatus,
   WorkbookProtectionResult,
 } from "./backend";
+
+// ============================================================================
+// Tracing API (Trace Precedents / Trace Dependents)
+// ============================================================================
+
+export {
+  tracePrecedents,
+  traceDependents,
+} from "./backend";
+
+export type {
+  TraceCellRef,
+  TraceRange,
+  TraceCrossSheetRef,
+  TraceResult,
+} from "./backend";

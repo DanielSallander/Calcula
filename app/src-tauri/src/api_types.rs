@@ -561,3 +561,62 @@ pub struct GoalSeekResult {
     /// Error message if goal seek failed validation
     pub error: Option<String>,
 }
+
+// ============================================================================
+// Trace Precedents / Trace Dependents
+// ============================================================================
+
+/// A single cell reference in a trace result.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TraceCellRef {
+    pub row: u32,
+    pub col: u32,
+    /// Whether this cell currently displays an error value
+    pub is_error: bool,
+    /// The display value (for UI tooltips)
+    pub display: String,
+}
+
+/// A contiguous range that feeds into a formula (or is fed by a cell).
+/// When multiple individual cells form a contiguous rectangle, they are
+/// grouped into a single TraceRange for visual compactness.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TraceRange {
+    pub start_row: u32,
+    pub start_col: u32,
+    pub end_row: u32,
+    pub end_col: u32,
+    /// Whether ANY cell in this range has an error value
+    pub has_error: bool,
+}
+
+/// A cross-sheet reference in a trace result.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TraceCrossSheetRef {
+    pub sheet_name: String,
+    pub sheet_index: usize,
+    pub row: u32,
+    pub col: u32,
+    /// Whether this cell has an error
+    pub is_error: bool,
+}
+
+/// Result of tracing precedents or dependents for a single cell.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TraceResult {
+    /// The cell being traced
+    pub source_row: u32,
+    pub source_col: u32,
+    /// Same-sheet individual cell references (ungrouped singletons)
+    pub cells: Vec<TraceCellRef>,
+    /// Same-sheet range references (grouped contiguous regions)
+    pub ranges: Vec<TraceRange>,
+    /// Cross-sheet references
+    pub cross_sheet_refs: Vec<TraceCrossSheetRef>,
+    /// Whether the source cell itself is in error
+    pub source_is_error: bool,
+}

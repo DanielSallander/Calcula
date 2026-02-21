@@ -2549,3 +2549,76 @@ export async function goalSeek(
 ): Promise<GoalSeekResult> {
   return invoke<GoalSeekResult>("goal_seek", { params });
 }
+
+// ============================================================================
+// Tracing (Trace Precedents / Trace Dependents)
+// ============================================================================
+
+/** A single cell reference in a trace result. */
+export interface TraceCellRef {
+  row: number;
+  col: number;
+  /** Whether this cell currently displays an error value */
+  isError: boolean;
+  /** The display value (for UI tooltips) */
+  display: string;
+}
+
+/** A contiguous range grouped for visual compactness. */
+export interface TraceRange {
+  startRow: number;
+  startCol: number;
+  endRow: number;
+  endCol: number;
+  /** Whether any cell in this range has an error value */
+  hasError: boolean;
+}
+
+/** A cross-sheet reference in a trace result. */
+export interface TraceCrossSheetRef {
+  sheetName: string;
+  sheetIndex: number;
+  row: number;
+  col: number;
+  /** Whether this cell has an error */
+  isError: boolean;
+}
+
+/** Result of tracing precedents or dependents for a single cell. */
+export interface TraceResult {
+  /** The cell being traced */
+  sourceRow: number;
+  sourceCol: number;
+  /** Same-sheet individual cell references */
+  cells: TraceCellRef[];
+  /** Same-sheet range references (grouped contiguous regions) */
+  ranges: TraceRange[];
+  /** Cross-sheet references */
+  crossSheetRefs: TraceCrossSheetRef[];
+  /** Whether the source cell itself is in error */
+  sourceIsError: boolean;
+}
+
+/**
+ * Trace Precedents: get cells and ranges that supply data TO the given cell's formula.
+ * @param row - Row index (0-based)
+ * @param col - Column index (0-based)
+ */
+export async function tracePrecedents(
+  row: number,
+  col: number,
+): Promise<TraceResult> {
+  return invoke<TraceResult>("trace_precedents", { row, col });
+}
+
+/**
+ * Trace Dependents: get formula cells that rely ON the given cell.
+ * @param row - Row index (0-based)
+ * @param col - Column index (0-based)
+ */
+export async function traceDependents(
+  row: number,
+  col: number,
+): Promise<TraceResult> {
+  return invoke<TraceResult>("trace_dependents", { row, col });
+}
