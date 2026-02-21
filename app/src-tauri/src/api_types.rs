@@ -563,6 +563,79 @@ pub struct GoalSeekResult {
 }
 
 // ============================================================================
+// Data Consolidation
+// ============================================================================
+
+/// Aggregation function for data consolidation.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum ConsolidationFunction {
+    Sum,
+    Count,
+    Average,
+    Max,
+    Min,
+    Product,
+    CountNums,
+    StdDev,
+    StdDevP,
+    Var,
+    VarP,
+}
+
+/// A single source range reference for consolidation.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConsolidationSourceRange {
+    /// Sheet index (0-based)
+    pub sheet_index: usize,
+    /// Start row (0-based)
+    pub start_row: u32,
+    /// Start column (0-based)
+    pub start_col: u32,
+    /// End row (0-based, inclusive)
+    pub end_row: u32,
+    /// End column (0-based, inclusive)
+    pub end_col: u32,
+}
+
+/// Parameters for the consolidate_data command.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConsolidateParams {
+    /// Aggregation function to apply
+    pub function: ConsolidationFunction,
+    /// Source ranges to consolidate
+    pub source_ranges: Vec<ConsolidationSourceRange>,
+    /// Destination sheet index (0-based)
+    pub dest_sheet_index: usize,
+    /// Destination start row (0-based)
+    pub dest_row: u32,
+    /// Destination start column (0-based)
+    pub dest_col: u32,
+    /// Use top row as column headers for category matching
+    pub use_top_row: bool,
+    /// Use left column as row headers for category matching
+    pub use_left_column: bool,
+}
+
+/// Result of the consolidate_data command.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConsolidateResult {
+    /// Whether the operation was successful
+    pub success: bool,
+    /// Number of output rows written
+    pub rows_written: u32,
+    /// Number of output columns written
+    pub cols_written: u32,
+    /// Updated cells in the destination range
+    pub updated_cells: Vec<CellData>,
+    /// Error message if operation failed
+    pub error: Option<String>,
+}
+
+// ============================================================================
 // Trace Precedents / Trace Dependents
 // ============================================================================
 

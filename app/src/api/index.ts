@@ -571,3 +571,18 @@ export {
 export type {
   EvalStepState,
 } from "./lib";
+
+// ============================================================================
+// Data Consolidation API
+// ============================================================================
+
+export {
+  consolidateData,
+} from "./lib";
+
+export type {
+  ConsolidationFunction,
+  ConsolidationSourceRange,
+  ConsolidateParams,
+  ConsolidateResult,
+} from "./lib";

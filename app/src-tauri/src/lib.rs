@@ -42,6 +42,7 @@ pub mod tables;
 pub mod goal_seek;
 pub mod tracing;
 pub mod evaluate_formula;
+pub mod consolidate;
 
 pub use api_types::{CellData, StyleData, DimensionData, FormattingParams, MergedRegion};
 pub use logging::{init_log_file, get_log_path, next_seq, write_log, write_log_raw};
@@ -1218,6 +1219,8 @@ pub fn run() {
             tables::resolve_structured_reference,
             // Goal Seek command
             goal_seek::goal_seek,
+            // Data Consolidation command
+            consolidate::consolidate_data,
             // Tracing commands (Trace Precedents / Trace Dependents)
             tracing::trace_precedents,
             tracing::trace_dependents,

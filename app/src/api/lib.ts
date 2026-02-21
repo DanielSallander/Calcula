@@ -503,3 +503,18 @@ export {
 export type {
   EvalStepState,
 } from "./backend";
+
+// ============================================================================
+// Data Consolidation API
+// ============================================================================
+
+export {
+  consolidateData,
+} from "./backend";
+
+export type {
+  ConsolidationFunction,
+  ConsolidationSourceRange,
+  ConsolidateParams,
+  ConsolidateResult,
+} from "./backend";

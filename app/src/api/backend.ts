@@ -2698,3 +2698,79 @@ export async function evalFormulaClose(
 ): Promise<boolean> {
   return invoke<boolean>("eval_formula_close", { sessionId });
 }
+
+// ============================================================================
+// Data Consolidation
+// ============================================================================
+
+/** Aggregation function for data consolidation. */
+export type ConsolidationFunction =
+  | "sum"
+  | "count"
+  | "average"
+  | "max"
+  | "min"
+  | "product"
+  | "countNums"
+  | "stdDev"
+  | "stdDevP"
+  | "var"
+  | "varP";
+
+/** A single source range for consolidation. */
+export interface ConsolidationSourceRange {
+  /** Sheet index (0-based) */
+  sheetIndex: number;
+  /** Start row (0-based) */
+  startRow: number;
+  /** Start column (0-based) */
+  startCol: number;
+  /** End row (0-based, inclusive) */
+  endRow: number;
+  /** End column (0-based, inclusive) */
+  endCol: number;
+}
+
+/** Parameters for the consolidate_data command. */
+export interface ConsolidateParams {
+  /** Aggregation function to apply */
+  function: ConsolidationFunction;
+  /** Source ranges to consolidate */
+  sourceRanges: ConsolidationSourceRange[];
+  /** Destination sheet index (0-based) */
+  destSheetIndex: number;
+  /** Destination start row (0-based) */
+  destRow: number;
+  /** Destination start column (0-based) */
+  destCol: number;
+  /** Use top row as column headers for category matching */
+  useTopRow: boolean;
+  /** Use left column as row headers for category matching */
+  useLeftColumn: boolean;
+}
+
+/** Result of the consolidate_data command. */
+export interface ConsolidateResult {
+  /** Whether the operation was successful */
+  success: boolean;
+  /** Number of output rows written */
+  rowsWritten: number;
+  /** Number of output columns written */
+  colsWritten: number;
+  /** Updated cells in the destination range */
+  updatedCells: CellData[];
+  /** Error message if operation failed */
+  error: string | null;
+}
+
+/**
+ * Consolidate data from multiple sheet ranges using the specified aggregation function.
+ * Supports both "by position" (same-size ranges) and "by category" (header matching) modes.
+ * @param params - Consolidation parameters
+ * @returns Result with written cell count and updated cells
+ */
+export async function consolidateData(
+  params: ConsolidateParams,
+): Promise<ConsolidateResult> {
+  return invoke<ConsolidateResult>("consolidate_data", { params });
+}
