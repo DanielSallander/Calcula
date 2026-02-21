@@ -770,7 +770,6 @@ export async function shiftFormulasBatch(
 import type {
   NamedRange,
   NamedRangeResult,
-  ResolvedRange,
   DataValidation,
   DataValidationResult,
   DataValidationPrompt,
@@ -785,19 +784,13 @@ import type {
 export async function createNamedRange(
   name: string,
   sheetIndex: number | null,
-  startRow: number,
-  startCol: number,
-  endRow: number,
-  endCol: number,
+  refersTo: string,
   comment?: string
 ): Promise<NamedRangeResult> {
   return invoke<NamedRangeResult>("create_named_range", {
     name,
     sheetIndex,
-    startRow,
-    startCol,
-    endRow,
-    endCol,
+    refersTo,
     comment: comment ?? null,
   });
 }
@@ -808,19 +801,13 @@ export async function createNamedRange(
 export async function updateNamedRange(
   name: string,
   sheetIndex: number | null,
-  startRow: number,
-  startCol: number,
-  endRow: number,
-  endCol: number,
+  refersTo: string,
   comment?: string
 ): Promise<NamedRangeResult> {
   return invoke<NamedRangeResult>("update_named_range", {
     name,
     sheetIndex,
-    startRow,
-    startCol,
-    endRow,
-    endCol,
+    refersTo,
     comment: comment ?? null,
   });
 }
@@ -847,15 +834,22 @@ export async function getAllNamedRanges(): Promise<NamedRange[]> {
 }
 
 /**
- * Resolve a named range to its coordinates for formula evaluation.
+ * Find a named range that matches the given selection coordinates.
+ * Used by NameBox to display the name instead of the cell address.
  */
-export async function resolveNamedRange(
-  name: string,
-  currentSheetIndex: number
-): Promise<ResolvedRange | null> {
-  return invoke<ResolvedRange | null>("resolve_named_range", {
-    name,
-    currentSheetIndex,
+export async function getNamedRangeForSelection(
+  sheetIndex: number,
+  startRow: number,
+  startCol: number,
+  endRow: number,
+  endCol: number
+): Promise<NamedRange | null> {
+  return invoke<NamedRange | null>("get_named_range_for_selection", {
+    sheetIndex,
+    startRow,
+    startCol,
+    endRow,
+    endCol,
   });
 }
 

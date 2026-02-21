@@ -902,11 +902,10 @@ fn parser_error_on_unclosed_function() {
 }
 
 #[test]
-fn parser_error_on_invalid_cell_ref() {
-    // "ABC" without a row number
-    let result = parse("=ABC");
-    assert!(result.is_err());
-    assert!(result.unwrap_err().message.contains("missing row"));
+fn parser_column_only_identifier_is_named_ref() {
+    // "ABC" without a row number is now parsed as a named reference
+    let result = parse("=ABC").unwrap();
+    assert_eq!(result, Expression::NamedRef { name: "ABC".to_string() });
 }
 
 #[test]
@@ -1153,4 +1152,195 @@ fn test_parse_sum_with_row_ref() {
         }
         _ => panic!("Expected FunctionCall"),
     }
+}
+
+// ========================================
+// PARSER TESTS - NAMED REFERENCES
+// ========================================
+
+#[test]
+fn parser_parses_underscore_name_as_named_ref() {
+    // Names with underscores are always named references
+    let result = parse("=Tax_Rate").unwrap();
+    assert_eq!(
+        result,
+        Expression::NamedRef { name: "TAX_RATE".to_string() }
+    );
+}
+
+#[test]
+fn parser_parses_named_ref_in_expression() {
+    // Revenue - Costs should parse as BinaryOp with two NamedRefs
+    let result = parse("=Revenue - Costs").unwrap();
+    assert_eq!(
+        result,
+        Expression::BinaryOp {
+            left: Box::new(Expression::NamedRef { name: "REVENUE".to_string() }),
+            op: BinaryOperator::Subtract,
+            right: Box::new(Expression::NamedRef { name: "COSTS".to_string() }),
+        }
+    );
+}
+
+#[test]
+fn parser_parses_named_ref_in_function() {
+    // SUM(SalesData) should parse with NamedRef as function argument
+    let result = parse("=SUM(SalesData)").unwrap();
+    assert_eq!(
+        result,
+        Expression::FunctionCall {
+            func: BuiltinFunction::Sum,
+            args: vec![Expression::NamedRef { name: "SALESDATA".to_string() }],
+        }
+    );
+}
+
+#[test]
+fn parser_parses_dotted_name_as_named_ref() {
+    // Names with dots like Q1.Sales are named references
+    let result = parse("=Q1.Sales").unwrap();
+    assert_eq!(
+        result,
+        Expression::NamedRef { name: "Q1.SALES".to_string() }
+    );
+}
+
+#[test]
+fn parser_parses_backslash_name_as_named_ref() {
+    // Names starting with \ are named references
+    let result = parse("=\\TaxRate").unwrap();
+    assert_eq!(
+        result,
+        Expression::NamedRef { name: "\\TAXRATE".to_string() }
+    );
+}
+
+#[test]
+fn parser_parses_a1_as_cell_ref_not_named_ref() {
+    // A1 is a valid cell reference, not a named reference
+    let result = parse("=A1").unwrap();
+    assert_eq!(
+        result,
+        Expression::CellRef {
+            sheet: None,
+            col: "A".to_string(),
+            row: 1,
+            col_absolute: false,
+            row_absolute: false,
+        }
+    );
+}
+
+#[test]
+fn parser_parses_xfd1_as_cell_ref() {
+    // XFD is column 16384 (max), so XFD1 is a valid cell reference
+    let result = parse("=XFD1").unwrap();
+    assert_eq!(
+        result,
+        Expression::CellRef {
+            sheet: None,
+            col: "XFD".to_string(),
+            row: 1,
+            col_absolute: false,
+            row_absolute: false,
+        }
+    );
+}
+
+#[test]
+fn parser_parses_xfe1_as_named_ref() {
+    // XFE is column 16385 (beyond max), so XFE1 is a named reference
+    let result = parse("=XFE1").unwrap();
+    assert_eq!(
+        result,
+        Expression::NamedRef { name: "XFE1".to_string() }
+    );
+}
+
+#[test]
+fn parser_parses_pure_letters_as_named_ref() {
+    // Pure letters without row digits (and not followed by : or $) are named refs
+    let result = parse("=REVENUE").unwrap();
+    assert_eq!(
+        result,
+        Expression::NamedRef { name: "REVENUE".to_string() }
+    );
+}
+
+#[test]
+fn parser_parses_single_letter_not_followed_by_colon_as_named_ref() {
+    // Single letter "A" without : or $ is a named ref (no row to form a cell ref)
+    let result = parse("=A + 1").unwrap();
+    assert_eq!(
+        result,
+        Expression::BinaryOp {
+            left: Box::new(Expression::NamedRef { name: "A".to_string() }),
+            op: BinaryOperator::Add,
+            right: Box::new(Expression::Literal(Value::Number(1.0))),
+        }
+    );
+}
+
+#[test]
+fn parser_parses_column_ref_still_works() {
+    // A:B should still parse as a column reference, not named refs
+    let result = parse("=A:B").unwrap();
+    assert_eq!(
+        result,
+        Expression::ColumnRef {
+            sheet: None,
+            start_col: "A".to_string(),
+            end_col: "B".to_string(),
+            start_absolute: false,
+            end_absolute: false,
+        }
+    );
+}
+
+#[test]
+fn parser_named_ref_with_cell_and_named_ref_mixed() {
+    // A1 * TaxRate mixes a cell ref with a named ref
+    let result = parse("=A1 * TaxRate").unwrap();
+    assert_eq!(
+        result,
+        Expression::BinaryOp {
+            left: Box::new(Expression::CellRef {
+                sheet: None,
+                col: "A".to_string(),
+                row: 1,
+                col_absolute: false,
+                row_absolute: false,
+            }),
+            op: BinaryOperator::Multiply,
+            right: Box::new(Expression::NamedRef { name: "TAXRATE".to_string() }),
+        }
+    );
+}
+
+#[test]
+fn parser_parses_row_beyond_limit_as_named_ref() {
+    // Row 1048577 is beyond Excel's max row, but column "A" is valid.
+    // The identifier "A1048577" has col="A" (col 1, valid) and row=1048577 (> 1048576).
+    // is_valid_cell_ref_identifier returns false -> NamedRef.
+    let result = parse("=A1048577").unwrap();
+    assert_eq!(
+        result,
+        Expression::NamedRef { name: "A1048577".to_string() }
+    );
+}
+
+#[test]
+fn parser_parses_max_row_as_cell_ref() {
+    // Row 1048576 is Excel's max row, should still be a valid cell ref
+    let result = parse("=A1048576").unwrap();
+    assert_eq!(
+        result,
+        Expression::CellRef {
+            sheet: None,
+            col: "A".to_string(),
+            row: 1048576,
+            col_absolute: false,
+            row_absolute: false,
+        }
+    );
 }

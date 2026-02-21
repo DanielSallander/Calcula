@@ -858,20 +858,16 @@ export interface MergeResult {
 /**
  * A named range definition.
  * Can be workbook-scoped (sheetIndex = null) or sheet-scoped.
+ * The `refersTo` field stores the formula string (e.g., "=Sheet1!$A$1:$B$10",
+ * "=0.25", or "=OFFSET(A1,0,0,COUNTA(A:A),1)").
  */
 export interface NamedRange {
   /** The name identifier (e.g., "SalesData", "TaxRate") */
   name: string;
   /** Sheet index for sheet-scoped names, null for workbook-scoped */
   sheetIndex: number | null;
-  /** Start row of the range (0-indexed) */
-  startRow: number;
-  /** Start column of the range (0-indexed) */
-  startCol: number;
-  /** End row of the range (0-indexed, inclusive) */
-  endRow: number;
-  /** End column of the range (0-indexed, inclusive) */
-  endCol: number;
+  /** The formula this name refers to (e.g., "=Sheet1!$A$1:$B$10" or "=0.25") */
+  refersTo: string;
   /** Optional comment/description */
   comment?: string;
 }
@@ -883,17 +879,6 @@ export interface NamedRangeResult {
   success: boolean;
   namedRange: NamedRange | null;
   error: string | null;
-}
-
-/**
- * Resolved range coordinates for formula evaluation.
- */
-export interface ResolvedRange {
-  sheetIndex: number;
-  startRow: number;
-  startCol: number;
-  endRow: number;
-  endCol: number;
 }
 
 // ============================================================================

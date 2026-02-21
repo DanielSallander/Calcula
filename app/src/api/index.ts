@@ -179,6 +179,25 @@ export type {
 } from "./lib";
 
 // ============================================================================
+// Named Ranges API
+// ============================================================================
+
+export {
+  createNamedRange,
+  updateNamedRange,
+  deleteNamedRange,
+  getNamedRange,
+  getAllNamedRanges,
+  getNamedRangeForSelection,
+  renameNamedRange,
+} from "./lib";
+
+export type {
+  NamedRange,
+  NamedRangeResult,
+} from "./lib";
+
+// ============================================================================
 // Cell Events
 // ============================================================================
 

@@ -3,14 +3,14 @@
 //! CONTEXT: Allows users to define names for cell ranges that can be used in formulas.
 
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
-use std::sync::Mutex;
 use tauri::State;
 
 use crate::AppState;
 
 /// A named range definition.
 /// Can be workbook-scoped (sheet_index = None) or sheet-scoped.
+/// The `refers_to` field stores the formula string (e.g., "=Sheet1!$A$1:$B$10",
+/// "=0.25", or "=OFFSET(A1,0,0,COUNTA(A:A),1)").
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct NamedRange {
@@ -18,14 +18,8 @@ pub struct NamedRange {
     pub name: String,
     /// Sheet index for sheet-scoped names, None for workbook-scoped
     pub sheet_index: Option<usize>,
-    /// Start row of the range (0-indexed)
-    pub start_row: u32,
-    /// Start column of the range (0-indexed)
-    pub start_col: u32,
-    /// End row of the range (0-indexed, inclusive)
-    pub end_row: u32,
-    /// End column of the range (0-indexed, inclusive)
-    pub end_col: u32,
+    /// The formula this name refers to (e.g., "=Sheet1!$A$1:$B$10" or "=0.25")
+    pub refers_to: String,
     /// Optional comment/description
     pub comment: Option<String>,
 }
@@ -37,17 +31,6 @@ pub struct NamedRangeResult {
     pub success: bool,
     pub named_range: Option<NamedRange>,
     pub error: Option<String>,
-}
-
-/// Resolved range coordinates for formula evaluation.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ResolvedRange {
-    pub sheet_index: usize,
-    pub start_row: u32,
-    pub start_col: u32,
-    pub end_row: u32,
-    pub end_col: u32,
 }
 
 impl NamedRange {
@@ -150,10 +133,7 @@ pub fn create_named_range(
     state: State<AppState>,
     name: String,
     sheet_index: Option<usize>,
-    start_row: u32,
-    start_col: u32,
-    end_row: u32,
-    end_col: u32,
+    refers_to: String,
     comment: Option<String>,
 ) -> NamedRangeResult {
     // Validate name
@@ -180,10 +160,7 @@ pub fn create_named_range(
     let named_range = NamedRange {
         name: name.clone(),
         sheet_index,
-        start_row,
-        start_col,
-        end_row,
-        end_col,
+        refers_to,
         comment,
     };
 
@@ -202,10 +179,7 @@ pub fn update_named_range(
     state: State<AppState>,
     name: String,
     sheet_index: Option<usize>,
-    start_row: u32,
-    start_col: u32,
-    end_row: u32,
-    end_col: u32,
+    refers_to: String,
     comment: Option<String>,
 ) -> NamedRangeResult {
     let mut named_ranges = state.named_ranges.lock().unwrap();
@@ -222,10 +196,7 @@ pub fn update_named_range(
     let named_range = NamedRange {
         name: name.clone(),
         sheet_index,
-        start_row,
-        start_col,
-        end_row,
-        end_col,
+        refers_to,
         comment,
     };
 
@@ -281,39 +252,114 @@ pub fn get_all_named_ranges(
     named_ranges.values().cloned().collect()
 }
 
-/// Resolve a named range to its coordinates for formula evaluation.
-/// Takes into account the current sheet context for sheet-scoped names.
+/// Find a named range that matches the given selection coordinates.
+/// Used by NameBox to display the name instead of the cell address.
+/// Checks `refers_to` formulas that resolve to simple ranges matching the selection.
 #[tauri::command]
-pub fn resolve_named_range(
+pub fn get_named_range_for_selection(
     state: State<AppState>,
-    name: String,
-    current_sheet_index: usize,
-) -> Option<ResolvedRange> {
+    sheet_index: usize,
+    start_row: u32,
+    start_col: u32,
+    end_row: u32,
+    end_col: u32,
+) -> Option<NamedRange> {
     let named_ranges = state.named_ranges.lock().unwrap();
-    let key = name.to_uppercase();
+    let sheet_names = state.sheet_names.lock().unwrap();
+    let current_sheet_name = sheet_names.get(sheet_index).cloned().unwrap_or_default();
 
-    if let Some(nr) = named_ranges.get(&key) {
-        // For sheet-scoped names, check if it matches the current sheet
+    // Build the expected refers_to patterns to match against.
+    // We try to match by parsing each name's refers_to formula.
+    let mut best_match: Option<&NamedRange> = None;
+
+    for nr in named_ranges.values() {
+        // Skip sheet-scoped names that don't match the current sheet
         if let Some(scope_sheet) = nr.sheet_index {
-            if scope_sheet != current_sheet_index {
-                // This sheet-scoped name is not visible from the current sheet
-                return None;
+            if scope_sheet != sheet_index {
+                continue;
             }
         }
 
-        // Determine the actual sheet index
-        let sheet_index = nr.sheet_index.unwrap_or(current_sheet_index);
-
-        Some(ResolvedRange {
-            sheet_index,
-            start_row: nr.start_row,
-            start_col: nr.start_col,
-            end_row: nr.end_row,
-            end_col: nr.end_col,
-        })
-    } else {
-        None
+        // Try to parse the refers_to formula and see if it matches our coordinates
+        let formula = &nr.refers_to;
+        if let Ok(parsed) = parser::parse(formula) {
+            if range_matches_selection(
+                &parsed,
+                &current_sheet_name,
+                start_row,
+                start_col,
+                end_row,
+                end_col,
+            ) {
+                // Prefer sheet-scoped matches over workbook-scoped
+                if nr.sheet_index.is_some() {
+                    return Some(nr.clone());
+                }
+                best_match = Some(nr);
+            }
+        }
     }
+
+    best_match.cloned()
+}
+
+/// Check if a parsed expression matches the given selection coordinates.
+fn range_matches_selection(
+    expr: &parser::ast::Expression,
+    current_sheet_name: &str,
+    start_row: u32,
+    start_col: u32,
+    end_row: u32,
+    end_col: u32,
+) -> bool {
+    match expr {
+        parser::ast::Expression::CellRef { sheet, col, row, .. } => {
+            // Single cell: check if selection is also a single cell
+            if start_row != end_row || start_col != end_col {
+                return false;
+            }
+            // Sheet must match (None means current sheet)
+            if let Some(s) = sheet {
+                if !s.eq_ignore_ascii_case(current_sheet_name) {
+                    return false;
+                }
+            }
+            let col_idx = col_letters_to_index(col);
+            let row_idx = row.saturating_sub(1); // Parser uses 1-indexed
+            row_idx == start_row && col_idx == start_col
+        }
+        parser::ast::Expression::Range { sheet, start, end } => {
+            if let Some(s) = sheet {
+                if !s.eq_ignore_ascii_case(current_sheet_name) {
+                    return false;
+                }
+            }
+            if let (
+                parser::ast::Expression::CellRef { col: sc, row: sr, .. },
+                parser::ast::Expression::CellRef { col: ec, row: er, .. },
+            ) = (start.as_ref(), end.as_ref())
+            {
+                let sc_idx = col_letters_to_index(sc);
+                let sr_idx = sr.saturating_sub(1);
+                let ec_idx = col_letters_to_index(ec);
+                let er_idx = er.saturating_sub(1);
+                sr_idx == start_row && sc_idx == start_col && er_idx == end_row && ec_idx == end_col
+            } else {
+                false
+            }
+        }
+        _ => false,
+    }
+}
+
+/// Convert column letters to 0-based column index.
+fn col_letters_to_index(letters: &str) -> u32 {
+    let mut result: u32 = 0;
+    for ch in letters.chars() {
+        let val = (ch.to_ascii_uppercase() as u32) - ('A' as u32) + 1;
+        result = result * 26 + val;
+    }
+    result.saturating_sub(1) // Convert to 0-based
 }
 
 /// Rename a named range.

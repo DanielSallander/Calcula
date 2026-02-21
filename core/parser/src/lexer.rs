@@ -174,7 +174,9 @@ impl<'a> Lexer<'a> {
         let mut ident = String::from(first_char);
 
         while let Some(&ch) = self.input.peek() {
-            if is_letter(ch) || ch.is_ascii_digit() {
+            // Allow letters, digits, and '.' as continuation characters.
+            // '.' supports defined names like "Q1.Sales".
+            if is_letter(ch) || ch.is_ascii_digit() || ch == '.' {
                 ident.push(ch);
                 self.input.next();
             } else {
@@ -190,6 +192,9 @@ impl<'a> Lexer<'a> {
     }
 }
 
+/// Returns true if `ch` can start an identifier.
+/// Supports: ASCII letters, underscore (for names like _private),
+/// and backslash (for Excel-style names like \TaxRate).
 fn is_letter(ch: char) -> bool {
-    ch.is_ascii_alphabetic() || ch == '_'
+    ch.is_ascii_alphabetic() || ch == '_' || ch == '\\'
 }

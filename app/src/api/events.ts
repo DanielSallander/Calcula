@@ -50,6 +50,9 @@ export const AppEvents = {
   // Navigation events
   NAVIGATE_TO_CELL: "app:navigate-to-cell",
 
+  // Named ranges
+  NAMED_RANGES_CHANGED: "app:named-ranges-changed",
+
   // Blur commit prevention
   PREVENT_BLUR_COMMIT: "app:prevent-blur-commit",
 } as const;

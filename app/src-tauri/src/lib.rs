@@ -48,7 +48,7 @@ pub use api_types::{CellData, StyleData, DimensionData, FormattingParams, Merged
 pub use logging::{init_log_file, get_log_path, next_seq, write_log, write_log_raw};
 pub use engine::{Transaction, CellChange};
 pub use sheets::FreezeConfig;
-pub use named_ranges::{NamedRange, NamedRangeResult, ResolvedRange};
+pub use named_ranges::{NamedRange, NamedRangeResult};
 pub use data_validation::{
     DataValidation, DataValidationType, DataValidationOperator, DataValidationAlertStyle,
     DataValidationRule, DataValidationErrorAlert, DataValidationPrompt,
@@ -410,6 +410,13 @@ pub fn convert_expr(expr: &ParserExpr) -> EngineExpr {
             func: convert_builtin_function(func),
             args: args.iter().map(convert_expr).collect(),
         },
+        // NamedRef nodes should have been resolved before reaching convert_expr.
+        // If one reaches here, it means the name was not found — produce #NAME? error
+        // by calling a Custom function (which the evaluator maps to CellError::Name).
+        ParserExpr::NamedRef { name } => EngineExpr::FunctionCall {
+            func: EngineBuiltinFn::Custom(format!("_UNRESOLVED_{}", name)),
+            args: vec![],
+        },
     }
 }
 
@@ -542,6 +549,127 @@ fn extract_references_recursive(expr: &ParserExpr, grid: &Grid, refs: &mut Extra
             for arg in args {
                 extract_references_recursive(arg, grid, refs);
             }
+        }
+        // NamedRef nodes should be resolved before reference extraction.
+        // If one is still present, it means the name couldn't be resolved — skip.
+        ParserExpr::NamedRef { .. } => {}
+    }
+}
+
+// ============================================================================
+// NAMED REFERENCE RESOLUTION (AST SPLICING)
+// ============================================================================
+
+/// Resolves all `NamedRef` nodes in a parser AST by splicing in the parsed
+/// `refers_to` sub-ASTs from the named ranges map. This implements "macro-expansion"
+/// style name resolution: `=SUM(SalesData)` where SalesData = `=Sheet1!$A$1:$A$10`
+/// becomes `SUM(Range(Sheet1!A1:A10))`.
+///
+/// Circular references are detected via the `visited` set. If a name refers to
+/// itself (directly or indirectly), the NamedRef is replaced with an error literal.
+pub fn resolve_names_in_ast(
+    ast: &ParserExpr,
+    named_ranges: &HashMap<String, named_ranges::NamedRange>,
+    current_sheet_index: usize,
+    visited: &mut HashSet<String>,
+) -> ParserExpr {
+    match ast {
+        ParserExpr::NamedRef { name } => {
+            let key = name.to_uppercase();
+
+            // Circular reference detection
+            if visited.contains(&key) {
+                return ParserExpr::Literal(ParserValue::Number(f64::NAN));
+            }
+
+            // Look up the name (scope-aware: prefer sheet-scoped, then workbook-scoped)
+            let nr = named_ranges
+                .values()
+                .find(|nr| {
+                    let nr_key = nr.name.to_uppercase();
+                    if nr_key != key {
+                        return false;
+                    }
+                    // Sheet-scoped name matching current sheet
+                    nr.sheet_index == Some(current_sheet_index)
+                })
+                .or_else(|| {
+                    // Fall back to workbook-scoped
+                    named_ranges.values().find(|nr| {
+                        let nr_key = nr.name.to_uppercase();
+                        nr_key == key && nr.sheet_index.is_none()
+                    })
+                });
+
+            match nr {
+                Some(nr) => {
+                    // Parse the refers_to formula
+                    match parse_formula(&nr.refers_to) {
+                        Ok(sub_ast) => {
+                            // Recursively resolve names in the sub-AST
+                            visited.insert(key.clone());
+                            let resolved = resolve_names_in_ast(
+                                &sub_ast,
+                                named_ranges,
+                                current_sheet_index,
+                                visited,
+                            );
+                            visited.remove(&key);
+                            resolved
+                        }
+                        Err(_) => {
+                            // Parse error in refers_to — treat as #NAME? error
+                            ParserExpr::Literal(ParserValue::Number(f64::NAN))
+                        }
+                    }
+                }
+                None => {
+                    // Name not found — leave as NamedRef (will become #NAME? in convert_expr)
+                    ast.clone()
+                }
+            }
+        }
+        ParserExpr::Literal(_) => ast.clone(),
+        ParserExpr::CellRef { .. } => ast.clone(),
+        ParserExpr::ColumnRef { .. } => ast.clone(),
+        ParserExpr::RowRef { .. } => ast.clone(),
+        ParserExpr::BinaryOp { left, op, right } => ParserExpr::BinaryOp {
+            left: Box::new(resolve_names_in_ast(left, named_ranges, current_sheet_index, visited)),
+            op: *op,
+            right: Box::new(resolve_names_in_ast(right, named_ranges, current_sheet_index, visited)),
+        },
+        ParserExpr::UnaryOp { op, operand } => ParserExpr::UnaryOp {
+            op: *op,
+            operand: Box::new(resolve_names_in_ast(operand, named_ranges, current_sheet_index, visited)),
+        },
+        ParserExpr::FunctionCall { func, args } => ParserExpr::FunctionCall {
+            func: func.clone(),
+            args: args
+                .iter()
+                .map(|a| resolve_names_in_ast(a, named_ranges, current_sheet_index, visited))
+                .collect(),
+        },
+        ParserExpr::Range { sheet, start, end } => ParserExpr::Range {
+            sheet: sheet.clone(),
+            start: Box::new(resolve_names_in_ast(start, named_ranges, current_sheet_index, visited)),
+            end: Box::new(resolve_names_in_ast(end, named_ranges, current_sheet_index, visited)),
+        },
+    }
+}
+
+/// Checks if a parser AST contains any NamedRef nodes that need resolution.
+pub fn ast_has_named_refs(ast: &ParserExpr) -> bool {
+    match ast {
+        ParserExpr::NamedRef { .. } => true,
+        ParserExpr::Literal(_) | ParserExpr::CellRef { .. }
+        | ParserExpr::ColumnRef { .. } | ParserExpr::RowRef { .. } => false,
+        ParserExpr::BinaryOp { left, right, .. } => {
+            ast_has_named_refs(left) || ast_has_named_refs(right)
+        }
+        ParserExpr::UnaryOp { operand, .. } => ast_has_named_refs(operand),
+        ParserExpr::FunctionCall { args, .. } => args.iter().any(ast_has_named_refs),
+        ParserExpr::Range { start, end, .. } => {
+            ast_has_named_refs(start) || ast_has_named_refs(end)
         }
     }
 }
@@ -1096,7 +1224,7 @@ pub fn run() {
             named_ranges::delete_named_range,
             named_ranges::get_named_range,
             named_ranges::get_all_named_ranges,
-            named_ranges::resolve_named_range,
+            named_ranges::get_named_range_for_selection,
             named_ranges::rename_named_range,
             // Data validation commands
             data_validation::set_data_validation,

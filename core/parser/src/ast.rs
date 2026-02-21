@@ -80,6 +80,12 @@ pub enum Expression {
     /// The function is resolved to a `BuiltinFunction` enum at parse time
     /// to avoid heap-allocating and string-comparing on every evaluation.
     FunctionCall { func: BuiltinFunction, args: Vec<Expression> },
+
+    /// A named reference like Tax_Rate, SalesData, or Q1.Sales.
+    /// Represents a user-defined name that will be resolved during evaluation
+    /// to a cell range, constant, or formula via the name resolution system.
+    /// The name is stored uppercased for case-insensitive matching.
+    NamedRef { name: String },
 }
 
 /// Built-in spreadsheet functions resolved at parse time.

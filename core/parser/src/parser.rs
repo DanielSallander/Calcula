@@ -288,8 +288,8 @@ impl<'a> Parser<'a> {
                 self.parse_sheet_reference(sheet_name)
             }
 
-            // Identifier: could be a cell reference, range, column reference, 
-            // function call, or sheet reference prefix
+            // Identifier: could be a cell reference, range, column reference,
+            // function call, sheet reference prefix, or named reference
             Token::Identifier(name) => {
                 self.advance();
 
@@ -304,12 +304,21 @@ impl<'a> Parser<'a> {
                     return self.parse_function_call(name);
                 }
 
+                // Check if this identifier could be part of a valid cell reference.
+                // Names containing _, ., \, or with column part beyond XFD (16384)
+                // are treated as named references (defined names).
+                if !Self::is_valid_cell_ref_identifier(&name) {
+                    return Ok(Expression::NamedRef { name });
+                }
+
+                // From here, the identifier has a valid column/cell pattern.
+
                 // Check if it's a range or column reference (followed by ':')
                 if self.current_token == Token::Colon {
                     return self.parse_range_or_column_ref(None, name, false);
                 }
 
-                // FIX: Handle column-only identifier followed by $ (absolute row marker).
+                // Handle column-only identifier followed by $ (absolute row marker).
                 // This covers patterns like D$2, AA$100 where the lexer splits the
                 // reference into Identifier("D"), Dollar, Number(2) because $ is not
                 // alphanumeric and stops identifier scanning.
@@ -342,7 +351,14 @@ impl<'a> Parser<'a> {
                     )));
                 }
 
-                // Otherwise it's a simple cell reference
+                // If identifier is column-only (no digits) and not followed by : or $,
+                // it cannot be a cell reference. Treat as a named reference.
+                // Examples: =REVENUE + 1, =A (where A is a defined name)
+                if is_col_only {
+                    return Ok(Expression::NamedRef { name });
+                }
+
+                // Otherwise it's a simple cell reference (letters + digits like A1, AA100)
                 self.parse_cell_ref(None, name, false, false)
             }
 
@@ -813,6 +829,67 @@ impl<'a> Parser<'a> {
         self.expect(Token::RParen)?;
 
         Ok(Expression::FunctionCall { func, args })
+    }
+
+    /// Checks whether an identifier could be part of a valid cell reference.
+    /// Returns false for names that contain non-alphanumeric characters
+    /// (underscores, periods, backslashes) or have a column part beyond XFD (16384).
+    /// Column-only identifiers (all letters) with a valid column are considered
+    /// valid because they might be part of a column reference (A:B) or followed
+    /// by a $ row marker (D$2) — handled by subsequent logic in parse_primary.
+    fn is_valid_cell_ref_identifier(name: &str) -> bool {
+        // Names with non-alphanumeric characters are always defined names
+        if !name.chars().all(|c| c.is_ascii_alphanumeric()) {
+            return false;
+        }
+
+        // Split into letter prefix and digit suffix
+        let col_part: String = name.chars().take_while(|c| c.is_ascii_alphabetic()).collect();
+        let rest: &str = &name[col_part.len()..];
+
+        // Must start with at least one letter
+        if col_part.is_empty() {
+            return false;
+        }
+
+        // If there are non-digit characters after the digit part, not a valid cell ref
+        // (e.g., "Q1SALES" has letters after digits)
+        if !rest.is_empty() && !rest.chars().all(|c| c.is_ascii_digit()) {
+            return false;
+        }
+
+        // Check column part is within Excel's range (A=1 to XFD=16384)
+        let col_num = Self::col_letters_to_number(&col_part);
+        if col_num > 16384 {
+            return false;
+        }
+
+        // If column-only (no digits), it could be a column reference handled later
+        if rest.is_empty() {
+            return true;
+        }
+
+        // Check row part is within Excel's range (1 to 1048576)
+        if let Ok(row) = rest.parse::<u32>() {
+            row >= 1 && row <= 1048576
+        } else {
+            false
+        }
+    }
+
+    /// Converts column letters to a 1-based column number.
+    /// A=1, B=2, ..., Z=26, AA=27, AB=28, ..., XFD=16384
+    /// Returns u32::MAX on overflow (any 4+ letter column exceeds 16384 anyway).
+    fn col_letters_to_number(letters: &str) -> u32 {
+        let mut result: u32 = 0;
+        for ch in letters.chars() {
+            let val = (ch.to_ascii_uppercase() as u32) - ('A' as u32) + 1;
+            result = match result.checked_mul(26).and_then(|r| r.checked_add(val)) {
+                Some(r) => r,
+                None => return u32::MAX,
+            };
+        }
+        result
     }
 
     /// Splits a cell reference string like "A1" or "AA100" into column and row parts.

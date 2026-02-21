@@ -14,6 +14,7 @@ import { registerConditionalFormattingExtension, unregisterConditionalFormatting
 import { registerGoalSeekExtension, unregisterGoalSeekExtension } from "./GoalSeek";
 import { registerProtectionExtension, unregisterProtectionExtension } from "./Protection";
 import { registerTracingExtension, unregisterTracingExtension } from "./Tracing";
+import { registerDefinedNamesExtension, unregisterDefinedNamesExtension } from "./DefinedNames";
 import { registerEvaluateFormulaExtension, unregisterEvaluateFormulaExtension } from "./EvaluateFormula";
 import { registerConsolidateExtension, unregisterConsolidateExtension } from "./Consolidate";
 
@@ -38,6 +39,7 @@ export function loadExtensions(): void {
   registerGoalSeekExtension();
   registerProtectionExtension();
   registerTracingExtension();
+  registerDefinedNamesExtension();
   registerEvaluateFormulaExtension();
   registerConsolidateExtension();
 
@@ -56,6 +58,7 @@ export function unloadExtensions(): void {
   // Unload in reverse order
   unregisterConsolidateExtension();
   unregisterEvaluateFormulaExtension();
+  unregisterDefinedNamesExtension();
   unregisterTracingExtension();
   unregisterProtectionExtension();
   unregisterGoalSeekExtension();
@@ -85,5 +88,6 @@ export { registerConditionalFormattingExtension, unregisterConditionalFormatting
 export { registerGoalSeekExtension, unregisterGoalSeekExtension };
 export { registerProtectionExtension, unregisterProtectionExtension };
 export { registerTracingExtension, unregisterTracingExtension };
+export { registerDefinedNamesExtension, unregisterDefinedNamesExtension };
 export { registerEvaluateFormulaExtension, unregisterEvaluateFormulaExtension };
 export { registerConsolidateExtension, unregisterConsolidateExtension };

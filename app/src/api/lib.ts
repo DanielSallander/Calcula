@@ -92,7 +92,7 @@ export {
   deleteNamedRange,
   getNamedRange,
   getAllNamedRanges,
-  resolveNamedRange,
+  getNamedRangeForSelection,
   renameNamedRange,
 
   // Data validation
@@ -172,7 +172,6 @@ export type {
 export type {
   NamedRange,
   NamedRangeResult,
-  ResolvedRange,
 } from "../core/types";
 
 // Data validation type exports

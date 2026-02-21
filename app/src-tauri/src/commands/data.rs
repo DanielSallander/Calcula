@@ -231,7 +231,23 @@ pub fn update_cell(
         // Extract references for dependency tracking AND cache the AST
         match parser::parse(formula) {
             Ok(parsed) => {
-                let refs = extract_all_references(&parsed, &grid);
+                // Resolve named references (AST splicing) before extracting refs or evaluating.
+                let resolved = if crate::ast_has_named_refs(&parsed) {
+                    let named_ranges_map = state.named_ranges.lock().unwrap();
+                    let mut visited = HashSet::new();
+                    let resolved = crate::resolve_names_in_ast(
+                        &parsed,
+                        &named_ranges_map,
+                        active_sheet,
+                        &mut visited,
+                    );
+                    drop(named_ranges_map);
+                    resolved
+                } else {
+                    parsed
+                };
+
+                let refs = extract_all_references(&resolved, &grid);
 
                 update_dependencies(
                     (row, col),
@@ -277,7 +293,7 @@ pub fn update_cell(
                 );
 
                 // PERF: Convert the already-parsed AST directly instead of re-parsing.
-                let engine_ast = crate::convert_expr(&parsed);
+                let engine_ast = crate::convert_expr(&resolved);
                 cell.set_cached_ast(engine_ast.clone());
                 let result = evaluate_formula_multi_sheet_with_ast(
                     &grids,
@@ -826,7 +842,23 @@ pub fn update_cells_batch(
         if let Some(ref formula) = cell.formula {
             match parser::parse(formula) {
                 Ok(parsed) => {
-                    let refs = extract_all_references(&parsed, &grid);
+                    // Resolve named references (AST splicing)
+                    let resolved = if crate::ast_has_named_refs(&parsed) {
+                        let named_ranges_map = state.named_ranges.lock().unwrap();
+                        let mut visited = HashSet::new();
+                        let resolved = crate::resolve_names_in_ast(
+                            &parsed,
+                            &named_ranges_map,
+                            active_sheet,
+                            &mut visited,
+                        );
+                        drop(named_ranges_map);
+                        resolved
+                    } else {
+                        parsed
+                    };
+
+                    let refs = extract_all_references(&resolved, &grid);
 
                     update_dependencies(
                         (row, col),
@@ -870,7 +902,7 @@ pub fn update_cells_batch(
 
                     // PERF: Convert the already-parsed AST directly instead of re-parsing.
                     // This eliminates a redundant parse_formula() call per cell.
-                    let engine_ast = crate::convert_expr(&parsed);
+                    let engine_ast = crate::convert_expr(&resolved);
                     cell.set_cached_ast(engine_ast.clone());
                     let result = evaluate_formula_multi_sheet_with_ast(
                         &grids,
