@@ -554,3 +554,20 @@ export type {
   TraceCrossSheetRef,
   TraceResult,
 } from "./lib";
+
+// ============================================================================
+// Evaluate Formula API (step-by-step formula debugger)
+// ============================================================================
+
+export {
+  evalFormulaInit,
+  evalFormulaEvaluate,
+  evalFormulaStepIn,
+  evalFormulaStepOut,
+  evalFormulaRestart,
+  evalFormulaClose,
+} from "./lib";
+
+export type {
+  EvalStepState,
+} from "./lib";

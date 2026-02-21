@@ -41,6 +41,7 @@ pub mod conditional_formatting;
 pub mod tables;
 pub mod goal_seek;
 pub mod tracing;
+pub mod evaluate_formula;
 
 pub use api_types::{CellData, StyleData, DimensionData, FormattingParams, MergedRegion};
 pub use logging::{init_log_file, get_log_path, next_seq, write_log, write_log_raw};
@@ -972,6 +973,7 @@ pub fn run() {
         .manage(create_app_state())
         .manage(FileState::default())
         .manage(pivot::PivotState::new())
+        .manage(evaluate_formula::EvalFormulaState::new())
         .invoke_handler(tauri::generate_handler![
             // Grid commands
             commands::get_viewport_cells,
@@ -1219,6 +1221,13 @@ pub fn run() {
             // Tracing commands (Trace Precedents / Trace Dependents)
             tracing::trace_precedents,
             tracing::trace_dependents,
+            // Evaluate Formula commands (step-by-step formula debugger)
+            evaluate_formula::eval_formula_init,
+            evaluate_formula::eval_formula_evaluate,
+            evaluate_formula::eval_formula_step_in,
+            evaluate_formula::eval_formula_step_out,
+            evaluate_formula::eval_formula_restart,
+            evaluate_formula::eval_formula_close,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

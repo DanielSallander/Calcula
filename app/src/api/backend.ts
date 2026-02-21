@@ -2622,3 +2622,79 @@ export async function traceDependents(
 ): Promise<TraceResult> {
   return invoke<TraceResult>("trace_dependents", { row, col });
 }
+
+// ============================================================================
+// Evaluate Formula (step-by-step formula debugger)
+// ============================================================================
+
+/** State returned by every evaluate-formula command. */
+export interface EvalStepState {
+  sessionId: string;
+  formulaDisplay: string;
+  underlineStart: number;
+  underlineEnd: number;
+  canEvaluate: boolean;
+  canStepIn: boolean;
+  canStepOut: boolean;
+  isComplete: boolean;
+  cellReference: string;
+  stepInTarget: string | null;
+  evaluationResult: string | null;
+  error: string | null;
+}
+
+/**
+ * Initialize evaluate-formula session for the given cell.
+ * Returns an error state if the cell has no formula.
+ */
+export async function evalFormulaInit(
+  row: number,
+  col: number,
+): Promise<EvalStepState> {
+  return invoke<EvalStepState>("eval_formula_init", { row, col });
+}
+
+/**
+ * Evaluate the currently underlined sub-expression and advance.
+ */
+export async function evalFormulaEvaluate(
+  sessionId: string,
+): Promise<EvalStepState> {
+  return invoke<EvalStepState>("eval_formula_evaluate", { sessionId });
+}
+
+/**
+ * Step into a referenced cell's formula (push a stack frame).
+ */
+export async function evalFormulaStepIn(
+  sessionId: string,
+): Promise<EvalStepState> {
+  return invoke<EvalStepState>("eval_formula_step_in", { sessionId });
+}
+
+/**
+ * Step out of the current cell's formula back to the caller (pop frame).
+ */
+export async function evalFormulaStepOut(
+  sessionId: string,
+): Promise<EvalStepState> {
+  return invoke<EvalStepState>("eval_formula_step_out", { sessionId });
+}
+
+/**
+ * Restart evaluation from the beginning (re-parse original formula).
+ */
+export async function evalFormulaRestart(
+  sessionId: string,
+): Promise<EvalStepState> {
+  return invoke<EvalStepState>("eval_formula_restart", { sessionId });
+}
+
+/**
+ * Close and clean up the evaluation session.
+ */
+export async function evalFormulaClose(
+  sessionId: string,
+): Promise<boolean> {
+  return invoke<boolean>("eval_formula_close", { sessionId });
+}

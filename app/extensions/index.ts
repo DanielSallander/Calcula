@@ -14,6 +14,7 @@ import { registerConditionalFormattingExtension, unregisterConditionalFormatting
 import { registerGoalSeekExtension, unregisterGoalSeekExtension } from "./GoalSeek";
 import { registerProtectionExtension, unregisterProtectionExtension } from "./Protection";
 import { registerTracingExtension, unregisterTracingExtension } from "./Tracing";
+import { registerEvaluateFormulaExtension, unregisterEvaluateFormulaExtension } from "./EvaluateFormula";
 
 /**
  * Load all extensions.
@@ -36,6 +37,7 @@ export function loadExtensions(): void {
   registerGoalSeekExtension();
   registerProtectionExtension();
   registerTracingExtension();
+  registerEvaluateFormulaExtension();
 
   // Future: Load user extensions from config
 
@@ -50,6 +52,7 @@ export function unloadExtensions(): void {
   console.log("[Extensions] Unloading extensions...");
 
   // Unload in reverse order
+  unregisterEvaluateFormulaExtension();
   unregisterTracingExtension();
   unregisterProtectionExtension();
   unregisterGoalSeekExtension();
@@ -79,3 +82,4 @@ export { registerConditionalFormattingExtension, unregisterConditionalFormatting
 export { registerGoalSeekExtension, unregisterGoalSeekExtension };
 export { registerProtectionExtension, unregisterProtectionExtension };
 export { registerTracingExtension, unregisterTracingExtension };
+export { registerEvaluateFormulaExtension, unregisterEvaluateFormulaExtension };

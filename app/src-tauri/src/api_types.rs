@@ -620,3 +620,37 @@ pub struct TraceResult {
     /// Whether the source cell itself is in error
     pub source_is_error: bool,
 }
+
+// ============================================================================
+// Evaluate Formula (step-by-step formula debugger)
+// ============================================================================
+
+/// State returned for each step of the Evaluate Formula debugger session.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EvalStepState {
+    /// Unique session identifier
+    pub session_id: String,
+    /// Current formula display text (with partial evaluations inlined)
+    pub formula_display: String,
+    /// Character position where the underline starts (0-based)
+    pub underline_start: usize,
+    /// Character position where the underline ends (exclusive)
+    pub underline_end: usize,
+    /// Can click [Evaluate] button
+    pub can_evaluate: bool,
+    /// Can click [Step In] (current node is a cell ref with a formula)
+    pub can_step_in: bool,
+    /// Can click [Step Out] (currently inside a stepped-in frame)
+    pub can_step_out: bool,
+    /// Evaluation has completed (AST reduced to a single value)
+    pub is_complete: bool,
+    /// Which cell we're evaluating (e.g., "$A$1")
+    pub cell_reference: String,
+    /// If step-in is available, which cell it would enter
+    pub step_in_target: Option<String>,
+    /// Final result when evaluation is complete
+    pub evaluation_result: Option<String>,
+    /// Error message if something went wrong
+    pub error: Option<String>,
+}

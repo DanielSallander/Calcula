@@ -486,3 +486,20 @@ export type {
   TraceCrossSheetRef,
   TraceResult,
 } from "./backend";
+
+// ============================================================================
+// Evaluate Formula API (step-by-step formula debugger)
+// ============================================================================
+
+export {
+  evalFormulaInit,
+  evalFormulaEvaluate,
+  evalFormulaStepIn,
+  evalFormulaStepOut,
+  evalFormulaRestart,
+  evalFormulaClose,
+} from "./backend";
+
+export type {
+  EvalStepState,
+} from "./backend";
