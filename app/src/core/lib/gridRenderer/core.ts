@@ -32,6 +32,7 @@ import {
 } from "./layout/viewport";
 import { getColumnWidth, getRowHeight } from "./layout/dimensions";
 import { cellKey } from "../../../core/types";
+import { hasCellDecorations, applyCellDecorations } from "../../../api/cellDecorations";
 
 // ============================================================================
 // Post-Header Overlay Types
@@ -321,7 +322,7 @@ function drawCellTextZone(
   clipWidth: number,
   clipHeight: number
 ): void {
-  const { ctx, config, theme, cells, editing, dimensions, styleCache } = state;
+  const { ctx, config, viewport, theme, cells, editing, dimensions, styleCache } = state;
   const totalRows = config.totalRows || 1000;
   const totalCols = config.totalCols || 100;
   const paddingX = 4;
@@ -409,14 +410,19 @@ function drawCellTextZone(
       ctx.rect(cellLeft, cellTop, cellRight - cellLeft, cellBottom - cellTop);
       ctx.clip();
       
-      if (cellStyle && cellStyle.backgroundColor && 
-          cellStyle.backgroundColor !== "#ffffff" && 
+      if (cellStyle && cellStyle.backgroundColor &&
+          cellStyle.backgroundColor !== "#ffffff" &&
           cellStyle.backgroundColor !== "#FFFFFF" &&
           cellStyle.backgroundColor !== "transparent") {
         ctx.fillStyle = cellStyle.backgroundColor;
         ctx.fillRect(cellLeft, cellTop, cellRight - cellLeft, cellBottom - cellTop);
       }
-      
+
+      // Draw cell decorations (e.g., sparklines) between background and text
+      if (hasCellDecorations()) {
+        applyCellDecorations({ ctx, row, col, cellLeft, cellTop, cellRight, cellBottom, config, viewport, dimensions });
+      }
+
       const fontWeight = cellStyle?.bold ? "bold" : "normal";
       const fontStyle = cellStyle?.italic ? "italic" : "normal";
       const fontSize = cellStyle?.fontSize ?? theme.cellFontSize;

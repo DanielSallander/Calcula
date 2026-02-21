@@ -15,6 +15,10 @@ import {
   applyStyleInterceptors,
   type BaseStyleInfo
 } from "../../../../api/styleInterceptors";
+import {
+  hasCellDecorations,
+  applyCellDecorations,
+} from "../../../../api/cellDecorations";
 
 /**
  * Draw text with ellipsis truncation if it exceeds the available width.
@@ -531,6 +535,11 @@ export function drawCellText(state: RenderState): void {
       }
       if (bRight && bRight.style !== "none" && bRight.width > 0) {
         drawBorderLine(ctx, cellRight, cellTop, cellRight, cellBottom, bRight);
+      }
+
+      // Draw cell decorations (e.g., sparklines) between background/borders and text
+      if (hasCellDecorations()) {
+        applyCellDecorations({ ctx, row, col, cellLeft, cellTop, cellRight, cellBottom, config, viewport, dimensions });
       }
 
       // If cell has no text to display, restore and skip text rendering
