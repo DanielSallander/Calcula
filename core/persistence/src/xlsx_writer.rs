@@ -1,6 +1,6 @@
 //! FILENAME: core/persistence/src/xlsx_writer.rs
 
-use crate::{PersistenceError, SavedCellValue, Workbook};
+use crate::{CalculaMeta, PersistenceError, SavedCellValue, Workbook, META_SHEET_NAME};
 use engine::style::{
     CellStyle, Color, NumberFormat, TextAlign, TextRotation, VerticalAlign,
 };
@@ -79,6 +79,17 @@ pub fn save_xlsx(workbook: &Workbook, path: &Path) -> Result<(), PersistenceErro
                 }
             }
         }
+    }
+
+    // Write Calcula metadata sheet (tables, etc.) if there is any metadata
+    if !workbook.tables.is_empty() {
+        let meta = CalculaMeta::new(workbook.tables.clone());
+        let json = meta.to_json();
+
+        let meta_ws = xlsx.add_worksheet();
+        meta_ws.set_name(META_SHEET_NAME)?;
+        meta_ws.write_string(0, 0, &json)?;
+        meta_ws.set_hidden(true);
     }
 
     xlsx.save(path)?;

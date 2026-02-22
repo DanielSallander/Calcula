@@ -2403,6 +2403,44 @@ export async function convertToRange(tableId: number): Promise<TableResult> {
 }
 
 /**
+ * Check if a cell edit should trigger table auto-expansion.
+ * Returns the updated table if expansion occurred, null otherwise.
+ */
+export async function checkTableAutoExpand(
+  row: number,
+  col: number
+): Promise<Table | null> {
+  return invoke<Table | null>("check_table_auto_expand", { row, col });
+}
+
+/**
+ * Validate and enforce header uniqueness after a cell edit on a header row.
+ * Auto-fills empty names and deduplicates conflicting names.
+ */
+export async function enforceTableHeader(
+  tableId: number,
+  columnIndex: number,
+  newValue: string
+): Promise<TableResult> {
+  return invoke<TableResult>("enforce_table_header", { tableId, columnIndex, newValue });
+}
+
+/**
+ * Set a calculated column formula that auto-fills to all data rows.
+ * @param tableId - ID of the table
+ * @param columnName - Name of the column
+ * @param formula - The formula to set (empty string to clear)
+ * @returns TableResult with updated table
+ */
+export async function setCalculatedColumn(
+  tableId: number,
+  columnName: string,
+  formula: string
+): Promise<TableResult> {
+  return invoke<TableResult>("set_calculated_column", { tableId, columnName, formula });
+}
+
+/**
  * Get a table by ID.
  * @param tableId - ID of the table
  * @returns The table or null if not found

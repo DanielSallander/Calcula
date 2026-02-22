@@ -20,8 +20,11 @@
 //!   row_ref        --> "$"? NUMBER ":" "$"? NUMBER
 //!   function_call  --> IDENTIFIER "(" arguments? ")"
 //!   arguments      --> expression ("," expression)*
+//!   table_ref      --> IDENTIFIER "[" table_spec "]" | "[" table_spec "]"
+//!   table_spec     --> "@" column_name | "#" special | column_name | nested_spec
+//!   column_name    --> IDENTIFIER | "[" IDENTIFIER "]"
 
-use crate::ast::{BinaryOperator, BuiltinFunction, Expression, UnaryOperator, Value};
+use crate::ast::{BinaryOperator, BuiltinFunction, Expression, TableSpecifier, UnaryOperator, Value};
 use crate::lexer::Lexer;
 use crate::token::Token;
 
@@ -289,7 +292,7 @@ impl<'a> Parser<'a> {
             }
 
             // Identifier: could be a cell reference, range, column reference,
-            // function call, sheet reference prefix, or named reference
+            // function call, sheet reference prefix, table reference, or named reference
             Token::Identifier(name) => {
                 self.advance();
 
@@ -302,6 +305,11 @@ impl<'a> Parser<'a> {
                 // Check if it's a function call (followed by '(')
                 if self.current_token == Token::LParen {
                     return self.parse_function_call(name);
+                }
+
+                // Check if it's a structured table reference (followed by '[')
+                if self.current_token == Token::LBracket {
+                    return self.parse_table_reference(name);
                 }
 
                 // Check if this identifier could be part of a valid cell reference.
@@ -360,6 +368,11 @@ impl<'a> Parser<'a> {
 
                 // Otherwise it's a simple cell reference (letters + digits like A1, AA100)
                 self.parse_cell_ref(None, name, false, false)
+            }
+
+            // Standalone structured reference: [@Column] (implies current table)
+            Token::LBracket => {
+                return self.parse_table_reference(String::new());
             }
 
             // Parenthesized expression
@@ -829,6 +842,275 @@ impl<'a> Parser<'a> {
         self.expect(Token::RParen)?;
 
         Ok(Expression::FunctionCall { func, args })
+    }
+
+    // ========================================================================
+    // STRUCTURED TABLE REFERENCE PARSING
+    // ========================================================================
+
+    /// Parses a structured table reference.
+    /// Called when we see `Identifier [` or standalone `[`.
+    ///
+    /// Supported syntax:
+    ///   Table1[Column]           -> Column specifier
+    ///   Table1[@Column]          -> This-row column
+    ///   Table1[#All]             -> All rows
+    ///   Table1[#Data]            -> Data rows only
+    ///   Table1[#Headers]         -> Header row
+    ///   Table1[#Totals]          -> Totals row
+    ///   Table1[[#Headers],[Col]] -> Special + column combo
+    ///   [@Column]                -> This-row (table inferred from context)
+    ///   [Column]                 -> Column (table inferred from context)
+    fn parse_table_reference(&mut self, table_name: String) -> ParseResult<Expression> {
+        // Consume the '['
+        self.expect(Token::LBracket)?;
+
+        let specifier = self.parse_table_specifier()?;
+
+        // Consume the closing ']'
+        self.expect(Token::RBracket)?;
+
+        Ok(Expression::TableRef {
+            table_name,
+            specifier,
+        })
+    }
+
+    /// Parses the content inside brackets for a table reference.
+    fn parse_table_specifier(&mut self) -> ParseResult<TableSpecifier> {
+        // Check for @ prefix (this-row reference)
+        if self.current_token == Token::At {
+            self.advance();
+            return self.parse_this_row_specifier();
+        }
+
+        // Check for # prefix (special specifier like #All, #Data, etc.)
+        // The # character is not a token, so it will appear as part of an identifier
+        // or we need to handle it specially. Actually in our lexer # is an Illegal char.
+        // Let's check for [#All] pattern: the lexer sees # as Illegal('#').
+        // Instead, we handle this by checking for LBracket (nested brackets).
+        if self.current_token == Token::LBracket {
+            // Nested bracket: could be [[#Specifier],[Column]] or [[Col1]:[Col2]]
+            return self.parse_nested_bracket_specifier();
+        }
+
+        // Check for Illegal('#') which starts special specifiers
+        if let Token::Illegal('#') = self.current_token {
+            self.advance();
+            return self.parse_special_specifier();
+        }
+
+        // Plain column reference: [ColumnName]
+        let col_name = self.parse_bracket_content()?;
+
+        // Check if followed by ] : [ for column range
+        if self.current_token == Token::RBracket {
+            // Peek ahead: is this ] followed by : [ for a range?
+            // No, the ] will be consumed by the caller. Just return the column.
+            return Ok(TableSpecifier::Column(col_name));
+        }
+
+        // Check for comma (special + column combo like [#Headers],[Col])
+        if self.current_token == Token::Comma {
+            // Shouldn't get here for plain column, but handle gracefully
+            return Ok(TableSpecifier::Column(col_name));
+        }
+
+        Ok(TableSpecifier::Column(col_name))
+    }
+
+    /// Parses a this-row specifier after @ has been consumed.
+    fn parse_this_row_specifier(&mut self) -> ParseResult<TableSpecifier> {
+        // After @, we could have:
+        //   @Column      -> ThisRow("Column")
+        //   @[Column]    -> ThisRow("Column")  (bracketed form)
+
+        if self.current_token == Token::LBracket {
+            // Bracketed form: @[Column]
+            self.advance(); // consume [
+            let col_name = self.parse_bracket_content()?;
+            self.expect(Token::RBracket)?; // consume inner ]
+
+            // Check for range: @[Col1]:@[Col2] or @[Col1]:[Col2]
+            if self.current_token == Token::Colon {
+                self.advance();
+                let end_col = self.parse_range_end_column()?;
+                return Ok(TableSpecifier::ThisRowRange(col_name, end_col));
+            }
+
+            return Ok(TableSpecifier::ThisRow(col_name));
+        }
+
+        // Unbracketed form: @ColumnName (identifier follows)
+        if let Token::Identifier(name) = self.current_token.clone() {
+            self.advance();
+
+            // Check for range: @Col1:@Col2
+            if self.current_token == Token::Colon {
+                self.advance();
+                let end_col = self.parse_range_end_column()?;
+                return Ok(TableSpecifier::ThisRowRange(name, end_col));
+            }
+
+            return Ok(TableSpecifier::ThisRow(name));
+        }
+
+        Err(ParseError::new("Expected column name after '@' in table reference"))
+    }
+
+    /// Parses the end column of a column range after ':' has been consumed.
+    /// Handles @[Col], @Col, [Col], and bare Col forms.
+    fn parse_range_end_column(&mut self) -> ParseResult<String> {
+        // @[Col] or @Col
+        if self.current_token == Token::At {
+            self.advance();
+        }
+
+        if self.current_token == Token::LBracket {
+            self.advance();
+            let name = self.parse_bracket_content()?;
+            self.expect(Token::RBracket)?;
+            return Ok(name);
+        }
+
+        if let Token::Identifier(name) = self.current_token.clone() {
+            self.advance();
+            return Ok(name);
+        }
+
+        Err(ParseError::new("Expected column name in table range reference"))
+    }
+
+    /// Parses nested bracket specifiers like [[#Headers],[Col]] or [[Col1]:[Col2]].
+    fn parse_nested_bracket_specifier(&mut self) -> ParseResult<TableSpecifier> {
+        self.advance(); // consume outer [
+
+        // Check for #specifier inside
+        if let Token::Illegal('#') = self.current_token {
+            self.advance();
+            let special = self.parse_special_specifier()?;
+            self.expect(Token::RBracket)?; // close the [#...]
+
+            // Check for comma followed by column
+            if self.current_token == Token::Comma {
+                self.advance();
+                // Expect [ColumnName]
+                self.expect(Token::LBracket)?;
+                let col_name = self.parse_bracket_content()?;
+                self.expect(Token::RBracket)?;
+                return Ok(TableSpecifier::SpecialColumn(Box::new(special), col_name));
+            }
+
+            // Just a special specifier in nested brackets
+            return Ok(special);
+        }
+
+        // Column range: [Col1]:[Col2]
+        let col1 = self.parse_bracket_content()?;
+        self.expect(Token::RBracket)?; // close [Col1]
+
+        if self.current_token == Token::Colon {
+            self.advance();
+            self.expect(Token::LBracket)?;
+            let col2 = self.parse_bracket_content()?;
+            self.expect(Token::RBracket)?;
+            return Ok(TableSpecifier::ColumnRange(col1, col2));
+        }
+
+        // Single column in nested brackets (unusual but valid)
+        Ok(TableSpecifier::Column(col1))
+    }
+
+    /// Parses a special specifier keyword after '#' has been consumed.
+    fn parse_special_specifier(&mut self) -> ParseResult<TableSpecifier> {
+        // The text after # should be an identifier: All, Data, Headers, Totals, This Row
+        if let Token::Identifier(name) = self.current_token.clone() {
+            self.advance();
+            match name.to_uppercase().as_str() {
+                "ALL" => Ok(TableSpecifier::AllRows),
+                "DATA" => Ok(TableSpecifier::DataRows),
+                "HEADERS" => Ok(TableSpecifier::Headers),
+                "TOTALS" => Ok(TableSpecifier::Totals),
+                "THIS" => {
+                    // Expect "Row" to follow for "#This Row"
+                    if let Token::Identifier(row_word) = self.current_token.clone() {
+                        if row_word.to_uppercase() == "ROW" {
+                            self.advance();
+                            // #This Row is equivalent to this-row with no column
+                            // In practice it's used in combination: [#This Row],[Column]
+                            // We'll treat it similarly to a this-row marker
+                            return Ok(TableSpecifier::DataRows); // Placeholder - resolved at use site
+                        }
+                    }
+                    Err(ParseError::new("Expected 'Row' after '#This' in table reference"))
+                }
+                _ => Err(ParseError::new(format!(
+                    "Unknown table specifier: #{}",
+                    name
+                ))),
+            }
+        } else {
+            Err(ParseError::new("Expected specifier name after '#'"))
+        }
+    }
+
+    /// Reads bracket content as a string until we hit ']', ',', or ':'.
+    /// This handles column names that may contain spaces or special characters.
+    fn parse_bracket_content(&mut self) -> ParseResult<String> {
+        let mut content = String::new();
+
+        loop {
+            match &self.current_token {
+                Token::RBracket | Token::Comma | Token::Colon => break,
+                Token::EOF => {
+                    return Err(ParseError::new("Unexpected end of input in table reference"));
+                }
+                Token::Identifier(s) => {
+                    if !content.is_empty() {
+                        content.push(' ');
+                    }
+                    content.push_str(s);
+                    self.advance();
+                }
+                Token::Number(n) => {
+                    if !content.is_empty() {
+                        content.push(' ');
+                    }
+                    // Format integer numbers without decimal point
+                    if *n == (*n as i64) as f64 {
+                        content.push_str(&format!("{}", *n as i64));
+                    } else {
+                        content.push_str(&format!("{}", n));
+                    }
+                    self.advance();
+                }
+                Token::String(s) => {
+                    if !content.is_empty() {
+                        content.push(' ');
+                    }
+                    content.push_str(s);
+                    self.advance();
+                }
+                // Consume other tokens as part of the column name
+                Token::Plus => { content.push('+'); self.advance(); }
+                Token::Minus => { content.push('-'); self.advance(); }
+                Token::Asterisk => { content.push('*'); self.advance(); }
+                Token::Slash => { content.push('/'); self.advance(); }
+                Token::Ampersand => { content.push('&'); self.advance(); }
+                Token::Dollar => { content.push('$'); self.advance(); }
+                Token::Exclamation => { content.push('!'); self.advance(); }
+                _ => {
+                    // Unknown token in bracket content — stop
+                    break;
+                }
+            }
+        }
+
+        if content.is_empty() {
+            return Err(ParseError::new("Empty column name in table reference"));
+        }
+
+        Ok(content)
     }
 
     /// Checks whether an identifier could be part of a valid cell reference.

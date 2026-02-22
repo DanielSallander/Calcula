@@ -12,7 +12,7 @@ import {
 } from "../../../src/api";
 import type { DialogProps } from "../../../src/api";
 import { emitAppEvent } from "../../../src/api/events";
-import { createTable } from "../lib/tableStore";
+import { createTableAsync } from "../lib/tableStore";
 import { TableEvents } from "../lib/tableEvents";
 
 // ============================================================================
@@ -201,8 +201,8 @@ export function CreateTableDialog({
         );
       }
 
-      // Create the table in the in-memory store
-      const table = createTable({
+      // Create the table via the Rust backend
+      const table = await createTableAsync({
         sheetIndex: currentSheetIndex,
         startRow: parsed.startRow,
         startCol: parsed.startCol,
@@ -211,10 +211,14 @@ export function CreateTableDialog({
         hasHeaders,
       });
 
+      if (!table) {
+        throw new Error("Failed to create table. The range may overlap with an existing table.");
+      }
+
       console.log("[CreateTableDialog] Table created:", table.name, table);
 
       // Emit event so other components can react
-      emitAppEvent(TableEvents.TABLE_CREATED, { tableId: table.tableId });
+      emitAppEvent(TableEvents.TABLE_CREATED, { tableId: table.id });
 
       handleClose();
     } catch (err) {

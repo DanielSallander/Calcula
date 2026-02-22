@@ -5,6 +5,7 @@ use tauri::State;
 use crate::{AppState, evaluate_formula, format_cell_value};
 use crate::api_types::CellData;
 use crate::{log_enter, log_exit, log_enter_info, log_exit_info, log_debug, log_warn};
+use engine;
 
 // ============================================================================
 // CALCULATION MODE COMMANDS
@@ -66,14 +67,47 @@ pub fn calculate_now(state: State<AppState>) -> Result<Vec<CellData>, String> {
         })
         .collect();
 
+    // Lock table state once for all formula evaluations
+    let tables_map = state.tables.lock().unwrap();
+    let table_names_map = state.table_names.lock().unwrap();
+    let named_ranges_map = state.named_ranges.lock().unwrap();
+
     // Re-evaluate each formula using multi-sheet context
     for (row, col, formula) in formula_cells {
-        let result = evaluate_formula_multi_sheet(
-            &grids,
-            &sheet_names,
-            active_sheet,
-            &formula,
-        );
+        // Parse, resolve names and table refs, then evaluate
+        let result = match parser::parse(&formula) {
+            Ok(parsed) => {
+                // Resolve named references
+                let resolved = if crate::ast_has_named_refs(&parsed) {
+                    let mut visited = std::collections::HashSet::new();
+                    crate::resolve_names_in_ast(&parsed, &named_ranges_map, active_sheet, &mut visited)
+                } else {
+                    parsed
+                };
+
+                // Resolve structured table references
+                let resolved = if crate::ast_has_table_refs(&resolved) {
+                    let ctx = crate::TableRefContext {
+                        tables: &tables_map,
+                        table_names: &table_names_map,
+                        current_sheet_index: active_sheet,
+                        current_row: row,
+                    };
+                    crate::resolve_table_refs_in_ast(&resolved, &ctx)
+                } else {
+                    resolved
+                };
+
+                let engine_ast = crate::convert_expr(&resolved);
+                crate::evaluate_formula_multi_sheet_with_ast(
+                    &grids,
+                    &sheet_names,
+                    active_sheet,
+                    &engine_ast,
+                )
+            }
+            Err(_) => engine::CellValue::Error(engine::CellError::Value),
+        };
 
         if let Some(cell) = grid.get_cell(row, col) {
             let mut updated = cell.clone();

@@ -30,12 +30,16 @@ pub enum Token {
     // Delimiters
     LParen,
     RParen,
+    LBracket,
+    RBracket,
     Comma,
     Colon,
     /// Sheet reference separator: !
     Exclamation,
     /// Absolute reference marker: $
     Dollar,
+    /// @ operator for structured references (this-row)
+    At,
 
     // Special
     EOF,
@@ -68,6 +72,9 @@ impl std::fmt::Display for Token {
             Token::Colon => write!(f, ":"),
             Token::Exclamation => write!(f, "!"),
             Token::Dollar => write!(f, "$"),
+            Token::At => write!(f, "@"),
+            Token::LBracket => write!(f, "["),
+            Token::RBracket => write!(f, "]"),
             Token::EOF => write!(f, "EOF"),
             Token::Illegal(c) => write!(f, "ILLEGAL({})", c),
         }

@@ -86,6 +86,37 @@ pub enum Expression {
     /// to a cell range, constant, or formula via the name resolution system.
     /// The name is stored uppercased for case-insensitive matching.
     NamedRef { name: String },
+
+    /// A structured table reference like Table1[Revenue], [@Price], or Table1[#All].
+    /// Resolved during the table-reference resolution pass before evaluation.
+    TableRef {
+        table_name: String,
+        specifier: TableSpecifier,
+    },
+}
+
+/// Specifier for structured table references.
+/// Determines which part of the table a structured reference refers to.
+#[derive(Debug, PartialEq, Clone)]
+pub enum TableSpecifier {
+    /// A single column reference: Table1[Revenue]
+    Column(String),
+    /// This-row reference: [@Revenue] (resolves to a single cell in the formula's row)
+    ThisRow(String),
+    /// Column range: Table1[[Col1]:[Col2]]
+    ColumnRange(String, String),
+    /// This-row column range: [@[Col1]:[Col2]] or [@Col1]:[@Col2]
+    ThisRowRange(String, String),
+    /// Special specifier: [#All] - entire table including headers and totals
+    AllRows,
+    /// Special specifier: [#Data] - data body only
+    DataRows,
+    /// Special specifier: [#Headers] - header row only
+    Headers,
+    /// Special specifier: [#Totals] - totals row only
+    Totals,
+    /// Special specifier combined with column: [#Headers],[Revenue]
+    SpecialColumn(Box<TableSpecifier>, String),
 }
 
 /// Built-in spreadsheet functions resolved at parse time.

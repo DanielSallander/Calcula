@@ -13,7 +13,8 @@ use engine::{
 };
 use parser::ast::{
     BinaryOperator as ParserBinaryOp, BuiltinFunction as ParserBuiltinFn,
-    Expression as ParserExpr, UnaryOperator as ParserUnaryOp, Value as ParserValue,
+    Expression as ParserExpr, TableSpecifier as ParserTableSpecifier,
+    UnaryOperator as ParserUnaryOp, Value as ParserValue,
 };
 use parser::parse as parse_formula;
 use std::collections::{HashMap, HashSet};
@@ -445,6 +446,19 @@ pub fn convert_expr(expr: &ParserExpr) -> EngineExpr {
             func: EngineBuiltinFn::Custom(format!("_UNRESOLVED_{}", name)),
             args: vec![],
         },
+        // TableRef nodes should have been resolved before reaching convert_expr.
+        // If one reaches here unresolved, produce #NAME? error.
+        ParserExpr::TableRef { table_name, .. } => {
+            let display = if table_name.is_empty() {
+                "TABLE_REF".to_string()
+            } else {
+                table_name.clone()
+            };
+            EngineExpr::FunctionCall {
+                func: EngineBuiltinFn::Custom(format!("_UNRESOLVED_{}", display)),
+                args: vec![],
+            }
+        }
     }
 }
 
@@ -581,6 +595,9 @@ fn extract_references_recursive(expr: &ParserExpr, grid: &Grid, refs: &mut Extra
         // NamedRef nodes should be resolved before reference extraction.
         // If one is still present, it means the name couldn't be resolved — skip.
         ParserExpr::NamedRef { .. } => {}
+        // TableRef nodes should be resolved before reference extraction.
+        // If still present, skip (will produce #NAME? during evaluation).
+        ParserExpr::TableRef { .. } => {}
     }
 }
 
@@ -682,6 +699,8 @@ pub fn resolve_names_in_ast(
             start: Box::new(resolve_names_in_ast(start, named_ranges, current_sheet_index, visited)),
             end: Box::new(resolve_names_in_ast(end, named_ranges, current_sheet_index, visited)),
         },
+        // TableRef is resolved separately by resolve_table_refs_in_ast — pass through
+        ParserExpr::TableRef { .. } => ast.clone(),
     }
 }
 
@@ -690,7 +709,8 @@ pub fn ast_has_named_refs(ast: &ParserExpr) -> bool {
     match ast {
         ParserExpr::NamedRef { .. } => true,
         ParserExpr::Literal(_) | ParserExpr::CellRef { .. }
-        | ParserExpr::ColumnRef { .. } | ParserExpr::RowRef { .. } => false,
+        | ParserExpr::ColumnRef { .. } | ParserExpr::RowRef { .. }
+        | ParserExpr::TableRef { .. } => false,
         ParserExpr::BinaryOp { left, right, .. } => {
             ast_has_named_refs(left) || ast_has_named_refs(right)
         }
@@ -698,6 +718,559 @@ pub fn ast_has_named_refs(ast: &ParserExpr) -> bool {
         ParserExpr::FunctionCall { args, .. } => args.iter().any(ast_has_named_refs),
         ParserExpr::Range { start, end, .. } => {
             ast_has_named_refs(start) || ast_has_named_refs(end)
+        }
+    }
+}
+
+/// Checks if a parser AST contains any TableRef nodes that need resolution.
+pub fn ast_has_table_refs(ast: &ParserExpr) -> bool {
+    match ast {
+        ParserExpr::TableRef { .. } => true,
+        ParserExpr::Literal(_) | ParserExpr::CellRef { .. }
+        | ParserExpr::ColumnRef { .. } | ParserExpr::RowRef { .. }
+        | ParserExpr::NamedRef { .. } => false,
+        ParserExpr::BinaryOp { left, right, .. } => {
+            ast_has_table_refs(left) || ast_has_table_refs(right)
+        }
+        ParserExpr::UnaryOp { operand, .. } => ast_has_table_refs(operand),
+        ParserExpr::FunctionCall { args, .. } => args.iter().any(ast_has_table_refs),
+        ParserExpr::Range { start, end, .. } => {
+            ast_has_table_refs(start) || ast_has_table_refs(end)
+        }
+    }
+}
+
+// ============================================================================
+// TABLE REFERENCE RESOLUTION (AST SPLICING)
+// ============================================================================
+
+/// Context needed to resolve structured table references.
+pub struct TableRefContext<'a> {
+    /// All tables indexed by sheet_index -> table_id -> Table
+    pub tables: &'a tables::TableStorage,
+    /// Table name registry: uppercase_name -> (sheet_index, table_id)
+    pub table_names: &'a tables::TableNameRegistry,
+    /// The sheet index where the formula cell lives
+    pub current_sheet_index: usize,
+    /// The row of the formula cell (0-indexed) — needed for @ (this-row) references
+    pub current_row: u32,
+}
+
+/// Resolves all `TableRef` nodes in a parser AST by converting them to
+/// `CellRef` or `Range` nodes based on the table definitions.
+///
+/// Table references like `Table1[Revenue]` become `Range(CellRef(data_start_row, col)..CellRef(data_end_row, col))`.
+/// This-row references like `[@Revenue]` become `CellRef(current_row, col)`.
+pub fn resolve_table_refs_in_ast(
+    ast: &ParserExpr,
+    ctx: &TableRefContext,
+) -> ParserExpr {
+    match ast {
+        ParserExpr::TableRef { table_name, specifier } => {
+            resolve_single_table_ref(table_name, specifier, ctx)
+        }
+        ParserExpr::Literal(_) => ast.clone(),
+        ParserExpr::CellRef { .. } => ast.clone(),
+        ParserExpr::ColumnRef { .. } => ast.clone(),
+        ParserExpr::RowRef { .. } => ast.clone(),
+        ParserExpr::NamedRef { .. } => ast.clone(),
+        ParserExpr::BinaryOp { left, op, right } => ParserExpr::BinaryOp {
+            left: Box::new(resolve_table_refs_in_ast(left, ctx)),
+            op: *op,
+            right: Box::new(resolve_table_refs_in_ast(right, ctx)),
+        },
+        ParserExpr::UnaryOp { op, operand } => ParserExpr::UnaryOp {
+            op: *op,
+            operand: Box::new(resolve_table_refs_in_ast(operand, ctx)),
+        },
+        ParserExpr::FunctionCall { func, args } => ParserExpr::FunctionCall {
+            func: func.clone(),
+            args: args.iter().map(|a| resolve_table_refs_in_ast(a, ctx)).collect(),
+        },
+        ParserExpr::Range { sheet, start, end } => ParserExpr::Range {
+            sheet: sheet.clone(),
+            start: Box::new(resolve_table_refs_in_ast(start, ctx)),
+            end: Box::new(resolve_table_refs_in_ast(end, ctx)),
+        },
+    }
+}
+
+/// Resolves a single TableRef node to CellRef/Range based on table metadata.
+fn resolve_single_table_ref(
+    table_name: &str,
+    specifier: &ParserTableSpecifier,
+    ctx: &TableRefContext,
+) -> ParserExpr {
+    // Find the table
+    let table = if table_name.is_empty() {
+        // Empty table name — infer from current cell position
+        find_table_at_cell(ctx.tables, ctx.current_sheet_index, ctx.current_row)
+    } else {
+        find_table_by_name(table_name, ctx.tables, ctx.table_names)
+    };
+
+    let table = match table {
+        Some(t) => t,
+        None => {
+            // Table not found — leave as unresolvable (will become #NAME?)
+            return ParserExpr::NamedRef {
+                name: if table_name.is_empty() {
+                    "TABLE_REF".to_string()
+                } else {
+                    table_name.to_string()
+                },
+            };
+        }
+    };
+
+    // Convert 0-based grid columns to 1-based A1 column letters
+    match specifier {
+        ParserTableSpecifier::Column(col_name) => {
+            resolve_column_ref(&table, col_name, false)
+        }
+        ParserTableSpecifier::ThisRow(col_name) => {
+            resolve_this_row_ref(&table, col_name, ctx.current_row)
+        }
+        ParserTableSpecifier::ColumnRange(start_col, end_col) => {
+            resolve_column_range(&table, start_col, end_col, false)
+        }
+        ParserTableSpecifier::ThisRowRange(start_col, end_col) => {
+            resolve_this_row_range(&table, start_col, end_col, ctx.current_row)
+        }
+        ParserTableSpecifier::AllRows => {
+            make_range(None, table.start_row, table.start_col, table.end_row, table.end_col)
+        }
+        ParserTableSpecifier::DataRows => {
+            make_range(None, table.data_start_row(), table.start_col, table.data_end_row(), table.end_col)
+        }
+        ParserTableSpecifier::Headers => {
+            if table.style_options.header_row {
+                make_range(None, table.start_row, table.start_col, table.start_row, table.end_col)
+            } else {
+                // No header row — return error
+                ParserExpr::NamedRef { name: "_UNRESOLVED_HEADERS".to_string() }
+            }
+        }
+        ParserTableSpecifier::Totals => {
+            if table.style_options.total_row {
+                make_range(None, table.end_row, table.start_col, table.end_row, table.end_col)
+            } else {
+                ParserExpr::NamedRef { name: "_UNRESOLVED_TOTALS".to_string() }
+            }
+        }
+        ParserTableSpecifier::SpecialColumn(special_spec, col_name) => {
+            resolve_special_column(&table, special_spec, col_name, ctx.current_row)
+        }
+    }
+}
+
+/// Finds a table by name using the name registry.
+fn find_table_by_name<'a>(
+    name: &str,
+    tables: &'a tables::TableStorage,
+    table_names: &tables::TableNameRegistry,
+) -> Option<&'a tables::Table> {
+    let key = name.to_uppercase();
+    let (sheet_index, table_id) = table_names.get(&key)?;
+    tables.get(sheet_index)?.get(table_id)
+}
+
+/// Finds the table that contains the given cell (for implicit table name resolution).
+fn find_table_at_cell(
+    tables: &tables::TableStorage,
+    sheet_index: usize,
+    current_row: u32,
+) -> Option<&tables::Table> {
+    // Look through all tables on the current sheet
+    if let Some(sheet_tables) = tables.get(&sheet_index) {
+        for table in sheet_tables.values() {
+            if current_row >= table.start_row && current_row <= table.end_row {
+                return Some(table);
+            }
+        }
+    }
+    None
+}
+
+/// Converts a 0-indexed column number to 1-based A1-style column letters.
+fn index_to_col_letters(col_index: u32) -> String {
+    let mut result = String::new();
+    let mut n = col_index + 1; // Convert to 1-based
+    while n > 0 {
+        n -= 1;
+        result.insert(0, (b'A' + (n % 26) as u8) as char);
+        n /= 26;
+    }
+    result
+}
+
+/// Resolves Table1[Column] to a Range over the data rows of that column.
+fn resolve_column_ref(
+    table: &tables::Table,
+    col_name: &str,
+    _include_headers: bool,
+) -> ParserExpr {
+    match table.get_column_index(col_name) {
+        Some(col_idx) => {
+            let abs_col = table.start_col + col_idx as u32;
+            make_range(
+                None,
+                table.data_start_row(),
+                abs_col,
+                table.data_end_row(),
+                abs_col,
+            )
+        }
+        None => ParserExpr::NamedRef {
+            name: format!("_UNRESOLVED_{}_{}", table.name, col_name),
+        },
+    }
+}
+
+/// Resolves [@Column] to a single CellRef at the current row.
+fn resolve_this_row_ref(
+    table: &tables::Table,
+    col_name: &str,
+    current_row: u32,
+) -> ParserExpr {
+    match table.get_column_index(col_name) {
+        Some(col_idx) => {
+            let abs_col = table.start_col + col_idx as u32;
+            let col_letters = index_to_col_letters(abs_col);
+            // Row is 1-indexed in the AST
+            ParserExpr::CellRef {
+                sheet: None,
+                col: col_letters,
+                row: current_row + 1,
+                col_absolute: true,
+                row_absolute: true,
+            }
+        }
+        None => ParserExpr::NamedRef {
+            name: format!("_UNRESOLVED_{}_{}", table.name, col_name),
+        },
+    }
+}
+
+/// Resolves Table1[[Col1]:[Col2]] to a Range spanning those columns.
+fn resolve_column_range(
+    table: &tables::Table,
+    start_col: &str,
+    end_col: &str,
+    _include_headers: bool,
+) -> ParserExpr {
+    let start_idx = table.get_column_index(start_col);
+    let end_idx = table.get_column_index(end_col);
+
+    match (start_idx, end_idx) {
+        (Some(si), Some(ei)) => {
+            let abs_start_col = table.start_col + si as u32;
+            let abs_end_col = table.start_col + ei as u32;
+            make_range(
+                None,
+                table.data_start_row(),
+                abs_start_col,
+                table.data_end_row(),
+                abs_end_col,
+            )
+        }
+        _ => ParserExpr::NamedRef {
+            name: format!("_UNRESOLVED_{}_RANGE", table.name),
+        },
+    }
+}
+
+/// Resolves [@Col1]:[@Col2] to a Range on the current row spanning those columns.
+fn resolve_this_row_range(
+    table: &tables::Table,
+    start_col: &str,
+    end_col: &str,
+    current_row: u32,
+) -> ParserExpr {
+    let start_idx = table.get_column_index(start_col);
+    let end_idx = table.get_column_index(end_col);
+
+    match (start_idx, end_idx) {
+        (Some(si), Some(ei)) => {
+            let abs_start_col = table.start_col + si as u32;
+            let abs_end_col = table.start_col + ei as u32;
+            make_range(
+                None,
+                current_row,
+                abs_start_col,
+                current_row,
+                abs_end_col,
+            )
+        }
+        _ => ParserExpr::NamedRef {
+            name: format!("_UNRESOLVED_{}_RANGE", table.name),
+        },
+    }
+}
+
+/// Resolves [#Headers],[Column] or [#Totals],[Column] combinations.
+fn resolve_special_column(
+    table: &tables::Table,
+    special: &ParserTableSpecifier,
+    col_name: &str,
+    _current_row: u32,
+) -> ParserExpr {
+    let col_idx = match table.get_column_index(col_name) {
+        Some(idx) => idx,
+        None => {
+            return ParserExpr::NamedRef {
+                name: format!("_UNRESOLVED_{}_{}", table.name, col_name),
+            };
+        }
+    };
+    let abs_col = table.start_col + col_idx as u32;
+
+    match special.as_ref() {
+        ParserTableSpecifier::Headers => {
+            if table.style_options.header_row {
+                make_range(None, table.start_row, abs_col, table.start_row, abs_col)
+            } else {
+                ParserExpr::NamedRef { name: "_UNRESOLVED_HEADERS".to_string() }
+            }
+        }
+        ParserTableSpecifier::Totals => {
+            if table.style_options.total_row {
+                make_range(None, table.end_row, abs_col, table.end_row, abs_col)
+            } else {
+                ParserExpr::NamedRef { name: "_UNRESOLVED_TOTALS".to_string() }
+            }
+        }
+        ParserTableSpecifier::AllRows => {
+            make_range(None, table.start_row, abs_col, table.end_row, abs_col)
+        }
+        ParserTableSpecifier::DataRows => {
+            make_range(None, table.data_start_row(), abs_col, table.data_end_row(), abs_col)
+        }
+        _ => ParserExpr::NamedRef {
+            name: format!("_UNRESOLVED_SPECIAL_{}", table.name),
+        },
+    }
+}
+
+/// Creates a Range expression from 0-indexed row/col coordinates.
+/// Uses absolute references ($) for stability.
+fn make_range(
+    sheet: Option<String>,
+    start_row: u32,
+    start_col: u32,
+    end_row: u32,
+    end_col: u32,
+) -> ParserExpr {
+    let start_col_letters = index_to_col_letters(start_col);
+    let end_col_letters = index_to_col_letters(end_col);
+
+    // If it's a single cell, return CellRef instead of Range
+    if start_row == end_row && start_col == end_col {
+        return ParserExpr::CellRef {
+            sheet,
+            col: start_col_letters,
+            row: start_row + 1, // AST uses 1-indexed rows
+            col_absolute: true,
+            row_absolute: true,
+        };
+    }
+
+    ParserExpr::Range {
+        sheet,
+        start: Box::new(ParserExpr::CellRef {
+            sheet: None,
+            col: start_col_letters,
+            row: start_row + 1, // AST uses 1-indexed rows
+            col_absolute: true,
+            row_absolute: true,
+        }),
+        end: Box::new(ParserExpr::CellRef {
+            sheet: None,
+            col: end_col_letters,
+            row: end_row + 1,
+            col_absolute: true,
+            row_absolute: true,
+        }),
+    }
+}
+
+// ============================================================================
+// AST-to-formula serialization (for Convert to Range, etc.)
+// ============================================================================
+
+/// Converts a parser AST node back to a formula string.
+/// Used by Convert to Range to rewrite table references as A1-style references.
+pub fn expression_to_formula(expr: &ParserExpr) -> String {
+    match expr {
+        ParserExpr::Literal(val) => match val {
+            ParserValue::Number(n) => {
+                // Format without trailing zeros for integers
+                if *n == (*n as i64) as f64 && n.abs() < 1e15 {
+                    format!("{}", *n as i64)
+                } else {
+                    format!("{}", n)
+                }
+            }
+            ParserValue::String(s) => format!("\"{}\"", s),
+            ParserValue::Boolean(b) => if *b { "TRUE" } else { "FALSE" }.to_string(),
+        },
+        ParserExpr::CellRef { sheet, col, row, col_absolute, row_absolute } => {
+            let mut s = String::new();
+            if let Some(sheet_name) = sheet {
+                if sheet_name.contains(' ') || sheet_name.contains('\'') {
+                    s.push_str(&format!("'{}'!", sheet_name));
+                } else {
+                    s.push_str(&format!("{}!", sheet_name));
+                }
+            }
+            if *col_absolute { s.push('$'); }
+            s.push_str(col);
+            if *row_absolute { s.push('$'); }
+            s.push_str(&row.to_string());
+            s
+        }
+        ParserExpr::Range { sheet, start, end } => {
+            let mut s = String::new();
+            if let Some(sheet_name) = sheet {
+                if sheet_name.contains(' ') || sheet_name.contains('\'') {
+                    s.push_str(&format!("'{}'!", sheet_name));
+                } else {
+                    s.push_str(&format!("{}!", sheet_name));
+                }
+            }
+            // Start CellRef without sheet prefix (sheet is on the Range node)
+            s.push_str(&expression_to_formula_no_sheet(start));
+            s.push(':');
+            s.push_str(&expression_to_formula_no_sheet(end));
+            s
+        }
+        ParserExpr::ColumnRef { sheet, start_col, end_col, start_absolute, end_absolute } => {
+            let mut s = String::new();
+            if let Some(sheet_name) = sheet {
+                if sheet_name.contains(' ') || sheet_name.contains('\'') {
+                    s.push_str(&format!("'{}'!", sheet_name));
+                } else {
+                    s.push_str(&format!("{}!", sheet_name));
+                }
+            }
+            if *start_absolute { s.push('$'); }
+            s.push_str(start_col);
+            s.push(':');
+            if *end_absolute { s.push('$'); }
+            s.push_str(end_col);
+            s
+        }
+        ParserExpr::RowRef { sheet, start_row, end_row, start_absolute, end_absolute } => {
+            let mut s = String::new();
+            if let Some(sheet_name) = sheet {
+                if sheet_name.contains(' ') || sheet_name.contains('\'') {
+                    s.push_str(&format!("'{}'!", sheet_name));
+                } else {
+                    s.push_str(&format!("{}!", sheet_name));
+                }
+            }
+            if *start_absolute { s.push('$'); }
+            s.push_str(&start_row.to_string());
+            s.push(':');
+            if *end_absolute { s.push('$'); }
+            s.push_str(&end_row.to_string());
+            s
+        }
+        ParserExpr::BinaryOp { left, op, right } => {
+            format!("{}{}{}", expression_to_formula(left), op, expression_to_formula(right))
+        }
+        ParserExpr::UnaryOp { op, operand } => {
+            format!("{}{}", op, expression_to_formula(operand))
+        }
+        ParserExpr::FunctionCall { func, args } => {
+            let func_name = builtin_function_to_name(func);
+            let arg_strs: Vec<String> = args.iter().map(|a| expression_to_formula(a)).collect();
+            format!("{}({})", func_name, arg_strs.join(","))
+        }
+        ParserExpr::NamedRef { name } => name.clone(),
+        ParserExpr::TableRef { table_name, specifier } => {
+            // Should not appear after resolution, but handle gracefully
+            let spec_str = table_specifier_to_string(specifier);
+            if table_name.is_empty() {
+                format!("[{}]", spec_str)
+            } else {
+                format!("{}[{}]", table_name, spec_str)
+            }
+        }
+    }
+}
+
+/// Helper: serializes a CellRef without its sheet prefix (for Range start/end).
+fn expression_to_formula_no_sheet(expr: &ParserExpr) -> String {
+    match expr {
+        ParserExpr::CellRef { col, row, col_absolute, row_absolute, .. } => {
+            let mut s = String::new();
+            if *col_absolute { s.push('$'); }
+            s.push_str(col);
+            if *row_absolute { s.push('$'); }
+            s.push_str(&row.to_string());
+            s
+        }
+        _ => expression_to_formula(expr),
+    }
+}
+
+/// Converts a BuiltinFunction enum variant back to its canonical name string.
+fn builtin_function_to_name(func: &ParserBuiltinFn) -> String {
+    match func {
+        ParserBuiltinFn::Sum => "SUM".to_string(),
+        ParserBuiltinFn::Average => "AVERAGE".to_string(),
+        ParserBuiltinFn::Min => "MIN".to_string(),
+        ParserBuiltinFn::Max => "MAX".to_string(),
+        ParserBuiltinFn::Count => "COUNT".to_string(),
+        ParserBuiltinFn::CountA => "COUNTA".to_string(),
+        ParserBuiltinFn::If => "IF".to_string(),
+        ParserBuiltinFn::And => "AND".to_string(),
+        ParserBuiltinFn::Or => "OR".to_string(),
+        ParserBuiltinFn::Not => "NOT".to_string(),
+        ParserBuiltinFn::True => "TRUE".to_string(),
+        ParserBuiltinFn::False => "FALSE".to_string(),
+        ParserBuiltinFn::Abs => "ABS".to_string(),
+        ParserBuiltinFn::Round => "ROUND".to_string(),
+        ParserBuiltinFn::Floor => "FLOOR".to_string(),
+        ParserBuiltinFn::Ceiling => "CEILING".to_string(),
+        ParserBuiltinFn::Sqrt => "SQRT".to_string(),
+        ParserBuiltinFn::Power => "POWER".to_string(),
+        ParserBuiltinFn::Mod => "MOD".to_string(),
+        ParserBuiltinFn::Int => "INT".to_string(),
+        ParserBuiltinFn::Sign => "SIGN".to_string(),
+        ParserBuiltinFn::Len => "LEN".to_string(),
+        ParserBuiltinFn::Upper => "UPPER".to_string(),
+        ParserBuiltinFn::Lower => "LOWER".to_string(),
+        ParserBuiltinFn::Trim => "TRIM".to_string(),
+        ParserBuiltinFn::Concatenate => "CONCATENATE".to_string(),
+        ParserBuiltinFn::Left => "LEFT".to_string(),
+        ParserBuiltinFn::Right => "RIGHT".to_string(),
+        ParserBuiltinFn::Mid => "MID".to_string(),
+        ParserBuiltinFn::Rept => "REPT".to_string(),
+        ParserBuiltinFn::Text => "TEXT".to_string(),
+        ParserBuiltinFn::IsNumber => "ISNUMBER".to_string(),
+        ParserBuiltinFn::IsText => "ISTEXT".to_string(),
+        ParserBuiltinFn::IsBlank => "ISBLANK".to_string(),
+        ParserBuiltinFn::IsError => "ISERROR".to_string(),
+        ParserBuiltinFn::XLookup => "XLOOKUP".to_string(),
+        ParserBuiltinFn::Custom(name) => name.clone(),
+    }
+}
+
+/// Converts a TableSpecifier to its string representation for formula display.
+fn table_specifier_to_string(spec: &ParserTableSpecifier) -> String {
+    match spec {
+        ParserTableSpecifier::Column(name) => format!("[{}]", name),
+        ParserTableSpecifier::ThisRow(name) => format!("[@{}]", name),
+        ParserTableSpecifier::ColumnRange(start, end) => format!("[{}]:[{}]", start, end),
+        ParserTableSpecifier::ThisRowRange(start, end) => format!("[@{}]:[@{}]", start, end),
+        ParserTableSpecifier::AllRows => "[#All]".to_string(),
+        ParserTableSpecifier::DataRows => "[#Data]".to_string(),
+        ParserTableSpecifier::Headers => "[#Headers]".to_string(),
+        ParserTableSpecifier::Totals => "[#Totals]".to_string(),
+        ParserTableSpecifier::SpecialColumn(special, col) => {
+            format!("{},{}", table_specifier_to_string(special), col)
         }
     }
 }
@@ -1369,6 +1942,9 @@ pub fn run() {
             tables::toggle_totals_row,
             tables::resize_table,
             tables::convert_to_range,
+            tables::check_table_auto_expand,
+            tables::enforce_table_header,
+            tables::set_calculated_column,
             tables::get_table,
             tables::get_table_by_name,
             tables::get_table_at_cell,

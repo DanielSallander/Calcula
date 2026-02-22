@@ -2373,6 +2373,8 @@ dependencies = [
  "calamine",
  "engine",
  "rust_xlsxwriter",
+ "serde",
+ "serde_json",
  "thiserror 1.0.69",
 ]
 

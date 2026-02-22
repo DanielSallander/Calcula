@@ -176,6 +176,8 @@ pub fn delete_sheet(state: State<AppState>, index: usize) -> Result<SheetsResult
     let mut active_sheet = state.active_sheet.lock().unwrap();
     let mut current_grid = state.grid.lock().unwrap();
     let mut freeze_configs = state.freeze_configs.lock().unwrap();
+    let mut tables = state.tables.lock().unwrap();
+    let mut table_names = state.table_names.lock().unwrap();
 
     if sheet_names.len() <= 1 {
         return Err("Cannot delete the last sheet".to_string());
@@ -189,6 +191,32 @@ pub fn delete_sheet(state: State<AppState>, index: usize) -> Result<SheetsResult
 
     if old_active < grids.len() {
         grids[old_active] = current_grid.clone();
+    }
+
+    // Remove tables on the deleted sheet and update name registry
+    if let Some(sheet_tables) = tables.remove(&index) {
+        for table in sheet_tables.values() {
+            table_names.remove(&table.name.to_uppercase());
+        }
+    }
+
+    // Re-key tables for sheets above the deleted index (shift down by 1)
+    let keys_to_shift: Vec<usize> = tables.keys().filter(|&&k| k > index).cloned().collect();
+    for old_key in keys_to_shift {
+        if let Some(sheet_tables) = tables.remove(&old_key) {
+            let new_key = old_key - 1;
+            // Update sheet_index on each table and in the name registry
+            for table in sheet_tables.values() {
+                if let Some(entry) = table_names.get_mut(&table.name.to_uppercase()) {
+                    entry.0 = new_key;
+                }
+            }
+            let mut updated_tables = sheet_tables;
+            for table in updated_tables.values_mut() {
+                table.sheet_index = new_key;
+            }
+            tables.insert(new_key, updated_tables);
+        }
     }
 
     sheet_names.remove(index);

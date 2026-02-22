@@ -1,6 +1,6 @@
 //! FILENAME: core/persistence/src/xlsx_reader.rs
 
-use crate::{PersistenceError, SavedCell, SavedCellValue, Sheet, Workbook};
+use crate::{CalculaMeta, PersistenceError, SavedCell, SavedCellValue, Sheet, Workbook, META_SHEET_NAME};
 use calamine::{open_workbook, Data, Reader, Xlsx};
 use engine::style::CellStyle;
 use std::collections::HashMap;
@@ -17,8 +17,25 @@ pub fn load_xlsx(path: &Path) -> Result<Workbook, PersistenceError> {
     }
 
     let mut sheets = Vec::new();
+    let mut tables = Vec::new();
 
     for sheet_name in &sheet_names {
+        // Check if this is the Calcula metadata sheet
+        if sheet_name == META_SHEET_NAME {
+            // Extract metadata (tables, etc.) from the hidden sheet
+            if let Ok(range) = workbook.worksheet_range(sheet_name) {
+                if let Some(row) = range.rows().next() {
+                    if let Some(Data::String(json)) = row.first() {
+                        if let Some(meta) = CalculaMeta::from_json(json) {
+                            tables = meta.tables;
+                        }
+                    }
+                }
+            }
+            // Don't add metadata sheet to the visible sheets list
+            continue;
+        }
+
         let range = workbook
             .worksheet_range(sheet_name)
             .map_err(|e| PersistenceError::InvalidFormat(e.to_string()))?;
@@ -72,5 +89,6 @@ pub fn load_xlsx(path: &Path) -> Result<Workbook, PersistenceError> {
     Ok(Workbook {
         sheets,
         active_sheet: 0,
+        tables,
     })
 }

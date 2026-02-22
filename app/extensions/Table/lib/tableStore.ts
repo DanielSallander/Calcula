@@ -1,94 +1,233 @@
 //! FILENAME: app/extensions/Table/lib/tableStore.ts
-// PURPOSE: In-memory table store for tracking table definitions.
-// CONTEXT: Temporary frontend-only store. Will be replaced with backend API
-//          calls (like pivot/lib/pivot-api.ts) when Rust table support is added.
+// PURPOSE: Table store backed by the Rust backend via Tauri commands.
+// CONTEXT: All table state lives in the Rust backend. This module provides
+//          async wrappers and keeps the grid overlay regions in sync.
 
 import {
   removeGridRegionsByType,
   addGridRegions,
   type GridRegion,
 } from "../../../src/api/gridOverlays";
+import {
+  createTable as backendCreateTable,
+  deleteTable as backendDeleteTable,
+  getTable as backendGetTable,
+  getTableAtCell as backendGetTableAtCell,
+  getAllTables as backendGetAllTables,
+  updateTableStyle as backendUpdateTableStyle,
+  toggleTotalsRow as backendToggleTotalsRow,
+  resizeTable as backendResizeTable,
+  convertToRange as backendConvertToRange,
+  checkTableAutoExpand as backendCheckAutoExpand,
+  enforceTableHeader as backendEnforceTableHeader,
+  setCalculatedColumn as backendSetCalculatedColumn,
+  type Table,
+  type TableResult,
+  type TableStyleOptions,
+  type CreateTableParams,
+} from "../../../src/api/backend";
+
+// Re-export backend types for consumers
+export type { Table, TableResult, TableStyleOptions };
 
 // ============================================================================
-// Types
+// Legacy type alias (for gradual migration of callers)
 // ============================================================================
 
-export interface TableOptions {
-  headerRow: boolean;
-  totalRow: boolean;
-  bandedRows: boolean;
-  bandedColumns: boolean;
-  firstColumn: boolean;
-  lastColumn: boolean;
-}
+/**
+ * TableDefinition is now just the backend Table type.
+ * Kept as an alias for backwards compatibility with existing handlers.
+ */
+export type TableDefinition = Table;
 
-export interface TableDefinition {
-  /** Unique table ID */
-  tableId: number;
-  /** Table name (e.g., "Table1") */
-  name: string;
-  /** Sheet index where the table lives */
+/**
+ * TableOptions maps to the backend TableStyleOptions.
+ */
+export type TableOptions = TableStyleOptions;
+
+// ============================================================================
+// Cache (local mirror of backend state for sync operations)
+// ============================================================================
+
+let cachedTables: Table[] = [];
+
+// ============================================================================
+// Store Operations (async, backed by Rust)
+// ============================================================================
+
+/**
+ * Create a new table via the backend.
+ * The backend reads header text from the grid and enforces uniqueness.
+ */
+export async function createTableAsync(params: {
   sheetIndex: number;
-  /** Table region (0-indexed, inclusive) */
   startRow: number;
   startCol: number;
   endRow: number;
   endCol: number;
-  /** Whether the first row is a header row */
   hasHeaders: boolean;
-  /** Display options */
-  options: TableOptions;
-}
-
-// ============================================================================
-// Store State
-// ============================================================================
-
-let nextTableId = 1;
-let tables: TableDefinition[] = [];
-
-// ============================================================================
-// Store Operations
-// ============================================================================
-
-/**
- * Create a new table and add it to the store.
- * Returns the created table definition.
- */
-export function createTable(
-  def: Omit<TableDefinition, "tableId" | "name" | "options">,
-): TableDefinition {
-  const id = nextTableId++;
-  const name = `Table${id}`;
-  const table: TableDefinition = {
-    ...def,
-    tableId: id,
-    name,
-    options: {
-      headerRow: def.hasHeaders,
-      totalRow: false,
-      bandedRows: true,
-      bandedColumns: false,
-      firstColumn: false,
-      lastColumn: false,
-    },
+}): Promise<Table | null> {
+  const createParams: CreateTableParams = {
+    name: "", // Empty = auto-generate
+    startRow: params.startRow,
+    startCol: params.startCol,
+    endRow: params.endRow,
+    endCol: params.endCol,
+    hasHeaders: params.hasHeaders,
   };
-  tables.push(table);
-  return table;
+  const result = await backendCreateTable(createParams);
+  if (result.success && result.table) {
+    await refreshCache();
+    return result.table;
+  }
+  console.error("[TableStore] create failed:", result.error);
+  return null;
 }
 
 /**
- * Find the table at a given cell position.
- * Returns null if no table contains the cell.
+ * Delete a table via the backend.
+ */
+export async function deleteTableAsync(tableId: number): Promise<boolean> {
+  const result = await backendDeleteTable(tableId);
+  if (result.success) {
+    await refreshCache();
+  }
+  return result.success;
+}
+
+/**
+ * Convert a table to a normal range via the backend.
+ */
+export async function convertToRangeAsync(tableId: number): Promise<boolean> {
+  const result = await backendConvertToRange(tableId);
+  if (result.success) {
+    await refreshCache();
+  }
+  return result.success;
+}
+
+/**
+ * Update table style options via the backend.
+ */
+export async function updateTableStyleAsync(
+  tableId: number,
+  options: Partial<TableStyleOptions>,
+): Promise<Table | null> {
+  // Merge with current options
+  const table = cachedTables.find((t) => t.id === tableId);
+  if (!table) return null;
+
+  const merged: TableStyleOptions = { ...table.styleOptions, ...options };
+  const result = await backendUpdateTableStyle({
+    tableId,
+    styleOptions: merged,
+  });
+  if (result.success && result.table) {
+    await refreshCache();
+    return result.table;
+  }
+  return null;
+}
+
+/**
+ * Toggle the totals row via the backend.
+ */
+export async function toggleTotalsRowAsync(
+  tableId: number,
+  show: boolean,
+): Promise<Table | null> {
+  const result = await backendToggleTotalsRow(tableId, show);
+  if (result.success && result.table) {
+    await refreshCache();
+    return result.table;
+  }
+  return null;
+}
+
+/**
+ * Resize a table via the backend.
+ */
+export async function resizeTableAsync(
+  tableId: number,
+  startRow: number,
+  startCol: number,
+  endRow: number,
+  endCol: number,
+): Promise<boolean> {
+  const result = await backendResizeTable({
+    tableId,
+    startRow,
+    startCol,
+    endRow,
+    endCol,
+  });
+  if (result.success) {
+    await refreshCache();
+  }
+  return result.success;
+}
+
+/**
+ * Check if a cell edit should trigger table auto-expansion.
+ * Returns the expanded table if expansion occurred.
+ */
+export async function checkAutoExpand(
+  row: number,
+  col: number,
+): Promise<Table | null> {
+  const expanded = await backendCheckAutoExpand(row, col);
+  if (expanded) {
+    await refreshCache();
+  }
+  return expanded;
+}
+
+/**
+ * Enforce header uniqueness after user edits a header cell.
+ */
+export async function enforceHeaderAsync(
+  tableId: number,
+  columnIndex: number,
+  newValue: string,
+): Promise<Table | null> {
+  const result = await backendEnforceTableHeader(tableId, columnIndex, newValue);
+  if (result.success && result.table) {
+    await refreshCache();
+    return result.table;
+  }
+  return null;
+}
+
+/**
+ * Set a calculated column formula that auto-fills to all data rows.
+ */
+export async function setCalculatedColumnAsync(
+  tableId: number,
+  columnName: string,
+  formula: string,
+): Promise<Table | null> {
+  const result = await backendSetCalculatedColumn(tableId, columnName, formula);
+  if (result.success && result.table) {
+    await refreshCache();
+    return result.table;
+  }
+  return null;
+}
+
+// ============================================================================
+// Synchronous Accessors (read from local cache)
+// ============================================================================
+
+/**
+ * Find the table at a given cell position (from cache).
  */
 export function getTableAtCell(
   row: number,
   col: number,
-  sheetIndex?: number,
-): TableDefinition | null {
-  for (const table of tables) {
+  _sheetIndex?: number,
+): Table | null {
+  for (const table of cachedTables) {
     if (
-      (sheetIndex === undefined || table.sheetIndex === sheetIndex) &&
       row >= table.startRow &&
       row <= table.endRow &&
       col >= table.startCol &&
@@ -101,60 +240,88 @@ export function getTableAtCell(
 }
 
 /**
- * Find a table by its ID.
+ * Find a table by its ID (from cache).
  */
-export function getTableById(tableId: number): TableDefinition | null {
-  return tables.find((t) => t.tableId === tableId) ?? null;
+export function getTableById(tableId: number): Table | null {
+  return cachedTables.find((t) => t.id === tableId) ?? null;
 }
 
 /**
- * Get all table definitions.
+ * Get all table definitions (from cache).
  */
-export function getAllTables(): TableDefinition[] {
-  return [...tables];
+export function getAllTables(): Table[] {
+  return [...cachedTables];
+}
+
+// ============================================================================
+// Legacy synchronous wrappers (deprecated - use async versions)
+// ============================================================================
+
+/**
+ * @deprecated Use createTableAsync instead
+ */
+export function createTable(
+  def: { sheetIndex: number; startRow: number; startCol: number; endRow: number; endCol: number; hasHeaders: boolean },
+): { tableId: number; name: string } {
+  // Fire-and-forget async call; return placeholder for legacy callers
+  const placeholder = { tableId: -1, name: "Table" };
+  createTableAsync(def).catch(console.error);
+  return placeholder as any;
 }
 
 /**
- * Update display options for a table.
+ * @deprecated Use deleteTableAsync instead
+ */
+export function deleteTable(tableId: number): void {
+  deleteTableAsync(tableId).catch(console.error);
+}
+
+/**
+ * @deprecated Use updateTableStyleAsync instead
  */
 export function updateTableOptions(
   tableId: number,
-  options: Partial<TableOptions>,
+  options: Partial<TableStyleOptions>,
 ): void {
-  const table = tables.find((t) => t.tableId === tableId);
-  if (table) {
-    table.options = { ...table.options, ...options };
-  }
+  updateTableStyleAsync(tableId, options).catch(console.error);
 }
 
 /**
- * Delete a table from the store.
- */
-export function deleteTable(tableId: number): void {
-  tables = tables.filter((t) => t.tableId !== tableId);
-}
-
-/**
- * Resize a table's region.
+ * @deprecated Use resizeTableAsync instead
  */
 export function resizeTable(
   tableId: number,
   endRow: number,
   endCol: number,
 ): void {
-  const table = tables.find((t) => t.tableId === tableId);
+  const table = cachedTables.find((t) => t.id === tableId);
   if (table) {
-    table.endRow = endRow;
-    table.endCol = endCol;
+    resizeTableAsync(tableId, table.startRow, table.startCol, endRow, endCol).catch(console.error);
   }
 }
 
+// ============================================================================
+// Cache Management
+// ============================================================================
+
 /**
- * Reset the entire table store (used during extension deactivation).
+ * Refresh the local cache from the backend and sync overlay regions.
+ */
+export async function refreshCache(): Promise<void> {
+  try {
+    cachedTables = await backendGetAllTables();
+  } catch (err) {
+    console.error("[TableStore] Failed to refresh cache:", err);
+    cachedTables = [];
+  }
+  syncTableRegions();
+}
+
+/**
+ * Reset the store (used during extension deactivation).
  */
 export function resetTableStore(): void {
-  tables = [];
-  nextTableId = 1;
+  cachedTables = [];
   removeGridRegionsByType("table");
 }
 
@@ -162,104 +329,36 @@ export function resetTableStore(): void {
 // Structural Change Handlers
 // ============================================================================
 
+// Structural changes (row/col insert/delete) are handled by the backend
+// via resize_table calls. The frontend just needs to refresh the cache.
+
 /**
- * Shift table boundaries when rows are inserted.
- * Tables entirely below the insertion point are shifted down.
- * Tables spanning the insertion point (including at startRow) expand.
+ * Refresh cache after rows are inserted.
+ * The backend is the source of truth for table boundaries.
  */
-export function shiftTablesForRowInsert(fromRow: number, count: number): void {
-  for (const table of tables) {
-    if (table.startRow > fromRow) {
-      // Insertion is strictly before the table - shift entire table down
-      table.startRow += count;
-      table.endRow += count;
-    } else if (table.endRow >= fromRow) {
-      // Insertion is inside the table (including at startRow) - expand
-      table.endRow += count;
-    }
-  }
+export function shiftTablesForRowInsert(_fromRow: number, _count: number): void {
+  refreshCache().catch(console.error);
 }
 
 /**
- * Shift table boundaries when columns are inserted.
- * Tables entirely to the right of the insertion point are shifted right.
- * Tables spanning the insertion point (including at startCol) expand.
+ * Refresh cache after columns are inserted.
  */
-export function shiftTablesForColInsert(fromCol: number, count: number): void {
-  for (const table of tables) {
-    if (table.startCol > fromCol) {
-      // Insertion is strictly before the table - shift entire table right
-      table.startCol += count;
-      table.endCol += count;
-    } else if (table.endCol >= fromCol) {
-      // Insertion is inside the table (including at startCol) - expand
-      table.endCol += count;
-    }
-  }
+export function shiftTablesForColInsert(_fromCol: number, _count: number): void {
+  refreshCache().catch(console.error);
 }
 
 /**
- * Shift table boundaries when rows are deleted.
- * Tables fully within the deleted range are removed.
+ * Refresh cache after rows are deleted.
  */
-export function shiftTablesForRowDelete(fromRow: number, count: number): void {
-  const deleteEnd = fromRow + count;
-
-  // Remove tables fully within the deleted range
-  tables = tables.filter(
-    (t) => !(t.startRow >= fromRow && t.endRow < deleteEnd),
-  );
-
-  // Shift remaining table boundaries
-  for (const table of tables) {
-    if (table.startRow >= deleteEnd) {
-      // Entire table is below deleted range - shift up
-      table.startRow -= count;
-      table.endRow -= count;
-    } else if (table.startRow >= fromRow) {
-      // Table starts within deleted range but extends beyond - shrink from top
-      table.startRow = fromRow;
-      table.endRow -= count;
-    } else if (table.endRow >= deleteEnd) {
-      // Table spans entire deleted range - shrink
-      table.endRow -= count;
-    } else if (table.endRow >= fromRow) {
-      // Table end is within deleted range - shrink from bottom
-      table.endRow = Math.max(fromRow - 1, table.startRow);
-    }
-  }
+export function shiftTablesForRowDelete(_fromRow: number, _count: number): void {
+  refreshCache().catch(console.error);
 }
 
 /**
- * Shift table boundaries when columns are deleted.
- * Tables fully within the deleted range are removed.
+ * Refresh cache after columns are deleted.
  */
-export function shiftTablesForColDelete(fromCol: number, count: number): void {
-  const deleteEnd = fromCol + count;
-
-  // Remove tables fully within the deleted range
-  tables = tables.filter(
-    (t) => !(t.startCol >= fromCol && t.endCol < deleteEnd),
-  );
-
-  // Shift remaining table boundaries
-  for (const table of tables) {
-    if (table.startCol >= deleteEnd) {
-      // Entire table is right of deleted range - shift left
-      table.startCol -= count;
-      table.endCol -= count;
-    } else if (table.startCol >= fromCol) {
-      // Table starts within deleted range but extends beyond - shrink from left
-      table.startCol = fromCol;
-      table.endCol -= count;
-    } else if (table.endCol >= deleteEnd) {
-      // Table spans entire deleted range - shrink
-      table.endCol -= count;
-    } else if (table.endCol >= fromCol) {
-      // Table end is within deleted range - shrink from right
-      table.endCol = Math.max(fromCol - 1, table.startCol);
-    }
-  }
+export function shiftTablesForColDelete(_fromCol: number, _count: number): void {
+  refreshCache().catch(console.error);
 }
 
 // ============================================================================
@@ -268,25 +367,26 @@ export function shiftTablesForColDelete(fromCol: number, count: number): void {
 
 /**
  * Sync all table definitions to the grid overlay system.
- * Call this after any mutation (create, resize, delete, options change)
- * so the canvas renders table borders correctly.
+ * Call this after any mutation so the canvas renders table borders correctly.
  */
 export function syncTableRegions(): void {
   // Remove old table overlay regions
   removeGridRegionsByType("table");
 
-  // Convert all tables to grid regions
-  const regions: GridRegion[] = tables.map((table) => ({
-    id: `table-${table.tableId}`,
+  // Convert all cached tables to grid regions
+  const regions: GridRegion[] = cachedTables.map((table) => ({
+    id: `table-${table.id}`,
     type: "table",
     startRow: table.startRow,
     startCol: table.startCol,
     endRow: table.endRow,
     endCol: table.endCol,
     data: {
-      tableId: table.tableId,
+      tableId: table.id,
       name: table.name,
-      hasHeaders: table.hasHeaders,
+      hasHeaders: table.styleOptions.headerRow,
+      columns: table.columns,
+      styleOptions: table.styleOptions,
     },
   }));
 

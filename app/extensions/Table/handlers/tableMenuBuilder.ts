@@ -6,10 +6,12 @@
 import type { MenuDefinition } from "../../../src/api/ui";
 import { registerMenu } from "../../../src/api/ui";
 import {
-  updateTableOptions,
-  deleteTable,
-  type TableDefinition,
-  type TableOptions,
+  updateTableStyleAsync,
+  toggleTotalsRowAsync,
+  deleteTableAsync,
+  convertToRangeAsync,
+  type Table,
+  type TableStyleOptions,
 } from "../lib/tableStore";
 import { emitAppEvent } from "../../../src/api/events";
 import { TableEvents } from "../lib/tableEvents";
@@ -24,20 +26,32 @@ const TABLE_MENU_ORDER = 45; // After Insert (40)
  * @param hidden - Whether the menu should be hidden
  */
 export function buildTableMenu(
-  table: TableDefinition | null,
+  table: Table | null,
   hidden: boolean,
 ): MenuDefinition {
-  const opts = table?.options;
+  const opts = table?.styleOptions;
 
-  const toggleOption = (key: keyof TableOptions) => {
+  const toggleOption = (key: keyof TableStyleOptions) => {
     if (!table || !opts) return;
-    const newValue = !opts[key];
-    updateTableOptions(table.tableId, { [key]: newValue });
-    // Re-register menu with updated toggle state
-    const updatedOpts = { ...opts, [key]: newValue };
-    const updatedTable: TableDefinition = { ...table, options: updatedOpts };
-    registerMenu(buildTableMenu(updatedTable, false));
-    emitAppEvent(TableEvents.TABLE_DEFINITIONS_UPDATED);
+
+    if (key === "totalRow") {
+      // Total row toggle needs special handling (expands/contracts table bounds)
+      const newValue = !opts.totalRow;
+      toggleTotalsRowAsync(table.id, newValue).then((updated) => {
+        if (updated) {
+          registerMenu(buildTableMenu(updated, false));
+          emitAppEvent(TableEvents.TABLE_DEFINITIONS_UPDATED);
+        }
+      });
+    } else {
+      const newValue = !opts[key];
+      updateTableStyleAsync(table.id, { [key]: newValue }).then((updated) => {
+        if (updated) {
+          registerMenu(buildTableMenu(updated, false));
+          emitAppEvent(TableEvents.TABLE_DEFINITIONS_UPDATED);
+        }
+      });
+    }
   };
 
   return {
@@ -96,11 +110,20 @@ export function buildTableMenu(
         id: "table.convertToRange",
         label: "Convert to Range",
         action: () => {
-          if (table) {
-            deleteTable(table.tableId);
-            registerMenu(buildTableMenu(null, true));
-            emitAppEvent(TableEvents.TABLE_DEFINITIONS_UPDATED);
-          }
+          if (!table) return;
+          // Confirmation dialog — matches Excel behavior
+          const confirmed = window.confirm(
+            "Do you want to convert the table to a normal range?\n\n" +
+            "Structured references in formulas will be converted to cell references."
+          );
+          if (!confirmed) return;
+
+          convertToRangeAsync(table.id).then((success) => {
+            if (success) {
+              registerMenu(buildTableMenu(null, true));
+              emitAppEvent(TableEvents.TABLE_DEFINITIONS_UPDATED);
+            }
+          });
         },
         disabled: !table,
       },
@@ -110,9 +133,12 @@ export function buildTableMenu(
         label: "Delete Table",
         action: () => {
           if (table) {
-            deleteTable(table.tableId);
-            registerMenu(buildTableMenu(null, true));
-            emitAppEvent(TableEvents.TABLE_DEFINITIONS_UPDATED);
+            deleteTableAsync(table.id).then((success) => {
+              if (success) {
+                registerMenu(buildTableMenu(null, true));
+                emitAppEvent(TableEvents.TABLE_DEFINITIONS_UPDATED);
+              }
+            });
           }
         },
         disabled: !table,

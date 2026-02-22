@@ -47,7 +47,7 @@ export function handleSelectionChange(
 
   if (table) {
     // Selection is within a table
-    currentTableId = table.tableId;
+    currentTableId = table.id;
     addTaskPaneContextKey("table");
     // Register menu as visible with current table's options
     registerMenu(buildTableMenu(table, false));

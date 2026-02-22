@@ -224,6 +224,11 @@ impl<'a> Evaluator<'a> {
             Expression::BinaryOp { left, op, right } => self.eval_binary_op(left, op, right),
             Expression::UnaryOp { op, operand } => self.eval_unary_op(op, operand),
             Expression::FunctionCall { func, args } => self.eval_function(func, args),
+            Expression::TableRef { .. } => {
+                // TableRef should be resolved before evaluation reaches the engine.
+                // If it arrives here unresolved, return #NAME? error.
+                EvalResult::Error(CellError::Name)
+            }
         }
     }
 

@@ -249,6 +249,24 @@ pub fn update_cell(
                     parsed
                 };
 
+                // Resolve structured table references (e.g., Table1[Revenue], [@Price])
+                let resolved = if crate::ast_has_table_refs(&resolved) {
+                    let tables_map = state.tables.lock().unwrap();
+                    let table_names_map = state.table_names.lock().unwrap();
+                    let ctx = crate::TableRefContext {
+                        tables: &tables_map,
+                        table_names: &table_names_map,
+                        current_sheet_index: active_sheet,
+                        current_row: row,
+                    };
+                    let resolved = crate::resolve_table_refs_in_ast(&resolved, &ctx);
+                    drop(table_names_map);
+                    drop(tables_map);
+                    resolved
+                } else {
+                    resolved
+                };
+
                 let refs = extract_all_references(&resolved, &grid);
 
                 update_dependencies(
@@ -392,6 +410,11 @@ pub fn update_cell(
             .map(|r| ((r.start_row, r.start_col), r))
             .collect();
 
+        // Lock table state for cascade recalculation (needed to resolve table refs in slow path)
+        let cascade_tables = state.tables.lock().unwrap();
+        let cascade_table_names = state.table_names.lock().unwrap();
+        let cascade_named_ranges = state.named_ranges.lock().unwrap();
+
         // Get direct cell dependents
         let mut recalc_order = get_recalculation_order((row, col), &dependents_map);
 
@@ -427,8 +450,30 @@ pub fn update_cell(
                         )
                     } else {
                         perf_cache_misses += 1;
-                        // Slow path: parse and cache the AST for future use
-                        if let Ok(engine_ast) = parse_formula_to_engine_ast(formula) {
+                        // Slow path: parse, resolve refs, and cache the AST for future use
+                        if let Ok(engine_ast) = {
+                            // Parse and resolve names + table refs before converting
+                            parser::parse(formula).map(|parsed| {
+                                let resolved = if crate::ast_has_named_refs(&parsed) {
+                                    let mut visited = HashSet::new();
+                                    crate::resolve_names_in_ast(&parsed, &cascade_named_ranges, active_sheet, &mut visited)
+                                } else {
+                                    parsed
+                                };
+                                let resolved = if crate::ast_has_table_refs(&resolved) {
+                                    let ctx = crate::TableRefContext {
+                                        tables: &cascade_tables,
+                                        table_names: &cascade_table_names,
+                                        current_sheet_index: active_sheet,
+                                        current_row: dep_row,
+                                    };
+                                    crate::resolve_table_refs_in_ast(&resolved, &ctx)
+                                } else {
+                                    resolved
+                                };
+                                crate::convert_expr(&resolved)
+                            }).map_err(|e| format!("{}", e))
+                        } {
                             let result = evaluate_formula_multi_sheet_with_ast(
                                 &grids,
                                 &sheet_names,
@@ -866,6 +911,24 @@ pub fn update_cells_batch(
                         parsed
                     };
 
+                    // Resolve structured table references
+                    let resolved = if crate::ast_has_table_refs(&resolved) {
+                        let tables_map = state.tables.lock().unwrap();
+                        let table_names_map = state.table_names.lock().unwrap();
+                        let ctx = crate::TableRefContext {
+                            tables: &tables_map,
+                            table_names: &table_names_map,
+                            current_sheet_index: active_sheet,
+                            current_row: row,
+                        };
+                        let resolved = crate::resolve_table_refs_in_ast(&resolved, &ctx);
+                        drop(table_names_map);
+                        drop(tables_map);
+                        resolved
+                    } else {
+                        resolved
+                    };
+
                     let refs = extract_all_references(&resolved, &grid);
 
                     update_dependencies(
@@ -1021,6 +1084,11 @@ pub fn update_cells_batch(
             }
         }
 
+        // Lock table state for cascade recalculation
+        let batch_tables = state.tables.lock().unwrap();
+        let batch_table_names = state.table_names.lock().unwrap();
+        let batch_named_ranges = state.named_ranges.lock().unwrap();
+
         // Recalculate all dependents
         for (dep_row, dep_col) in &all_recalc_order {
             if let Some(dep_cell) = grid.get_cell(*dep_row, *dep_col) {
@@ -1033,7 +1101,29 @@ pub fn update_cells_batch(
                             cached_ast,
                         )
                     } else {
-                        if let Ok(engine_ast) = parse_formula_to_engine_ast(formula) {
+                        // Slow path: parse, resolve refs, and cache AST
+                        if let Ok(engine_ast) = {
+                            parser::parse(formula).map(|parsed| {
+                                let resolved = if crate::ast_has_named_refs(&parsed) {
+                                    let mut visited = HashSet::new();
+                                    crate::resolve_names_in_ast(&parsed, &batch_named_ranges, active_sheet, &mut visited)
+                                } else {
+                                    parsed
+                                };
+                                let resolved = if crate::ast_has_table_refs(&resolved) {
+                                    let ctx = crate::TableRefContext {
+                                        tables: &batch_tables,
+                                        table_names: &batch_table_names,
+                                        current_sheet_index: active_sheet,
+                                        current_row: *dep_row,
+                                    };
+                                    crate::resolve_table_refs_in_ast(&resolved, &ctx)
+                                } else {
+                                    resolved
+                                };
+                                crate::convert_expr(&resolved)
+                            }).map_err(|e| format!("{}", e))
+                        } {
                             let result = evaluate_formula_multi_sheet_with_ast(
                                 &grids,
                                 &sheet_names,

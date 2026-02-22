@@ -51,6 +51,26 @@ pub enum Expression {
         func: BuiltinFunction,
         args: Vec<Expression>,
     },
+    /// A structured table reference (should be resolved before evaluation).
+    /// If it reaches the engine unresolved, it produces a #NAME? error.
+    TableRef {
+        table_name: String,
+        specifier: TableSpecifier,
+    },
+}
+
+/// Specifier for structured table references (mirrors parser::ast::TableSpecifier).
+#[derive(Debug, Clone, PartialEq)]
+pub enum TableSpecifier {
+    Column(String),
+    ThisRow(String),
+    ColumnRange(String, String),
+    ThisRowRange(String, String),
+    AllRows,
+    DataRows,
+    Headers,
+    Totals,
+    SpecialColumn(Box<TableSpecifier>, String),
 }
 
 /// Built-in spreadsheet functions resolved at parse time.
@@ -301,6 +321,10 @@ fn extract_recursive(expr: &Expression, deps: &mut HashSet<CellCoord>, bounds: G
                 extract_recursive(arg, deps, bounds);
             }
         }
+
+        // TableRef should be resolved before dependency extraction.
+        // If still present, skip (will produce #NAME? during evaluation).
+        Expression::TableRef { .. } => {}
     }
 }
 
@@ -411,6 +435,9 @@ fn extract_recursive_with_sheets(
                 extract_recursive_with_sheets(arg, deps, bounds);
             }
         }
+
+        // TableRef should be resolved before dependency extraction.
+        Expression::TableRef { .. } => {}
     }
 }
 

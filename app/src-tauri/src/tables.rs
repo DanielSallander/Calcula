@@ -382,6 +382,70 @@ fn generate_table_name(existing_names: &TableNameRegistry) -> String {
     }
 }
 
+/// Ensure all header names are unique. Appends incrementing digit for duplicates.
+/// E.g., ["Revenue", "Cost", "Revenue"] -> ["Revenue", "Cost", "Revenue2"]
+fn ensure_unique_headers(names: &[String]) -> Vec<String> {
+    let mut result: Vec<String> = Vec::with_capacity(names.len());
+    for name in names {
+        let unique = ensure_unique_header(name, &result);
+        result.push(unique);
+    }
+    result
+}
+
+/// Returns a unique header name by appending a digit if the name already exists.
+/// Empty names are replaced with "Column{N}" where N is the count + 1.
+fn ensure_unique_header(name: &str, existing: &[String]) -> String {
+    let base = if name.trim().is_empty() {
+        format!("Column{}", existing.len() + 1)
+    } else {
+        name.to_string()
+    };
+
+    let lower = base.to_lowercase();
+    let has_conflict = existing.iter().any(|n| n.to_lowercase() == lower);
+    if !has_conflict {
+        return base;
+    }
+
+    // Append incrementing digit
+    let mut counter = 2;
+    loop {
+        let candidate = format!("{}{}", base, counter);
+        let cand_lower = candidate.to_lowercase();
+        if !existing.iter().any(|n| n.to_lowercase() == cand_lower) {
+            return candidate;
+        }
+        counter += 1;
+    }
+}
+
+/// Build a SUBTOTAL formula for a totals row cell.
+/// Uses the 100-series function numbers which ignore hidden/filtered rows.
+/// Returns None for TotalsRowFunction::None.
+fn build_subtotal_formula(
+    function: &TotalsRowFunction,
+    table_name: &str,
+    column_name: &str,
+) -> Option<String> {
+    let code = match function {
+        TotalsRowFunction::None => return None,
+        TotalsRowFunction::Average => 101,
+        TotalsRowFunction::Count => 102,
+        TotalsRowFunction::CountNumbers => 103,
+        TotalsRowFunction::Max => 104,
+        TotalsRowFunction::Min => 105,
+        TotalsRowFunction::Sum => 109,
+        TotalsRowFunction::StdDev => 107,
+        TotalsRowFunction::Var => 110,
+        TotalsRowFunction::Custom => return None, // Custom uses custom_formula directly
+    };
+
+    // For now, use A1-style range references until structured references are in the formula engine.
+    // The formula text stores the structured reference for display purposes.
+    Some(format!("=SUBTOTAL({},{}[{}])", code, table_name, column_name))
+}
+
 /// Validate table name
 fn is_valid_table_name(name: &str) -> bool {
     if name.is_empty() || name.len() > 255 {
@@ -447,19 +511,36 @@ pub fn create_table(
         }
     }
 
-    // Create columns from range
+    // Read header text from grid cells (or generate generic names)
+    let grid = state.grid.lock().unwrap();
     let col_count = (max_col - min_col + 1) as usize;
-    let columns: Vec<TableColumn> = (0..col_count)
-        .map(|i| {
-            let name = if params.has_headers {
-                // In a real implementation, we'd read header from grid
-                format!("Column{}", i + 1)
-            } else {
-                format!("Column{}", i + 1)
-            };
-            TableColumn::new(i as u32, name)
-        })
+    let mut header_names: Vec<String> = Vec::with_capacity(col_count);
+
+    for i in 0..col_count {
+        let col_idx = min_col + i as u32;
+        let raw_name = if params.has_headers {
+            grid.get_cell(min_row, col_idx)
+                .and_then(|c| match &c.value {
+                    engine::CellValue::Text(s) if !s.trim().is_empty() => Some(s.trim().to_string()),
+                    engine::CellValue::Number(n) => Some(format!("{}", n)),
+                    engine::CellValue::Boolean(b) => Some(if *b { "TRUE".to_string() } else { "FALSE".to_string() }),
+                    _ => None,
+                })
+                .unwrap_or_else(|| format!("Column{}", i + 1))
+        } else {
+            format!("Column{}", i + 1)
+        };
+        header_names.push(raw_name);
+    }
+
+    // Enforce header uniqueness: append incrementing digit for duplicates
+    let unique_names = ensure_unique_headers(&header_names);
+    let columns: Vec<TableColumn> = unique_names
+        .into_iter()
+        .enumerate()
+        .map(|(i, name)| TableColumn::new(i as u32, name))
         .collect();
+    drop(grid);
 
     // Create style options
     let style_options = params.style_options.unwrap_or(TableStyleOptions {
@@ -691,22 +772,27 @@ pub fn rename_table_column(
         None => return TableResult::err("Table not found"),
     };
 
-    // Check for duplicate name
-    if table.get_column_by_name(&new_name).is_some() {
-        return TableResult::err("Column name already exists");
-    }
-
     let idx = match table.get_column_index(&old_name) {
         Some(i) => i,
         None => return TableResult::err("Column not found"),
     };
 
-    table.columns[idx].name = new_name;
+    // Collect existing names excluding the column being renamed
+    let existing: Vec<String> = table.columns.iter()
+        .enumerate()
+        .filter(|(i, _)| *i != idx)
+        .map(|(_, c)| c.name.clone())
+        .collect();
+
+    // Enforce non-empty and uniqueness
+    let final_name = ensure_unique_header(&new_name, &existing);
+    table.columns[idx].name = final_name;
 
     TableResult::ok(table.clone())
 }
 
-/// Set totals row function for a column
+/// Set totals row function for a column.
+/// Also writes the corresponding SUBTOTAL formula into the totals row cell.
 #[tauri::command]
 pub fn set_totals_row_function(
     state: State<AppState>,
@@ -714,6 +800,8 @@ pub fn set_totals_row_function(
 ) -> TableResult {
     let active_sheet = *state.active_sheet.lock().unwrap();
     let mut tables = state.tables.lock().unwrap();
+    let mut grid = state.grid.lock().unwrap();
+    let mut grids = state.grids.lock().unwrap();
 
     let sheet_tables = match tables.get_mut(&active_sheet) {
         Some(t) => t,
@@ -730,13 +818,46 @@ pub fn set_totals_row_function(
         None => return TableResult::err("Column not found"),
     };
 
-    table.columns[idx].totals_row_function = params.function;
-    table.columns[idx].totals_row_formula = params.custom_formula;
+    table.columns[idx].totals_row_function = params.function.clone();
+    table.columns[idx].totals_row_formula = params.custom_formula.clone();
+
+    // Write formula into the totals row cell (if totals row is visible)
+    if table.style_options.total_row {
+        let totals_row = table.end_row;
+        let cell_col = table.start_col + idx as u32;
+        let table_name = table.name.clone();
+        let col_name = table.columns[idx].name.clone();
+
+        let formula = if params.function == TotalsRowFunction::Custom {
+            params.custom_formula.clone()
+        } else {
+            build_subtotal_formula(&params.function, &table_name, &col_name)
+        };
+
+        match formula {
+            Some(formula_str) => {
+                let cell = engine::Cell::new_formula(formula_str);
+                grid.set_cell(totals_row, cell_col, cell.clone());
+                if active_sheet < grids.len() {
+                    grids[active_sheet].set_cell(totals_row, cell_col, cell);
+                }
+            }
+            None => {
+                // Function is "None" - clear the cell
+                grid.clear_cell(totals_row, cell_col);
+                if active_sheet < grids.len() {
+                    grids[active_sheet].clear_cell(totals_row, cell_col);
+                }
+            }
+        }
+    }
 
     TableResult::ok(table.clone())
 }
 
-/// Toggle totals row visibility
+/// Toggle totals row visibility.
+/// When enabling, expands the table and writes SUBTOTAL formulas into the totals row cells.
+/// When disabling, clears the totals row cells and shrinks the table.
 #[tauri::command]
 pub fn toggle_totals_row(
     state: State<AppState>,
@@ -745,6 +866,8 @@ pub fn toggle_totals_row(
 ) -> TableResult {
     let active_sheet = *state.active_sheet.lock().unwrap();
     let mut tables = state.tables.lock().unwrap();
+    let mut grid = state.grid.lock().unwrap();
+    let mut grids = state.grids.lock().unwrap();
 
     let sheet_tables = match tables.get_mut(&active_sheet) {
         Some(t) => t,
@@ -761,12 +884,41 @@ pub fn toggle_totals_row(
     if show && !was_shown {
         // Adding totals row - expand range
         table.end_row += 1;
-    } else if !show && was_shown {
-        // Removing totals row - shrink range
-        table.end_row -= 1;
-    }
+        table.style_options.total_row = true;
 
-    table.style_options.total_row = show;
+        // Write SUBTOTAL formulas for columns that have a function set
+        let totals_row = table.end_row;
+        let table_name = table.name.clone();
+        for (i, col) in table.columns.iter().enumerate() {
+            let cell_col = table.start_col + i as u32;
+            if col.totals_row_function != TotalsRowFunction::None {
+                let formula = if col.totals_row_function == TotalsRowFunction::Custom {
+                    col.totals_row_formula.clone()
+                } else {
+                    build_subtotal_formula(&col.totals_row_function, &table_name, &col.name)
+                };
+                if let Some(formula_str) = formula {
+                    let cell = engine::Cell::new_formula(formula_str);
+                    grid.set_cell(totals_row, cell_col, cell.clone());
+                    if active_sheet < grids.len() {
+                        grids[active_sheet].set_cell(totals_row, cell_col, cell);
+                    }
+                }
+            }
+        }
+    } else if !show && was_shown {
+        // Removing totals row - clear cells first, then shrink range
+        let totals_row = table.end_row;
+        for i in 0..table.columns.len() {
+            let cell_col = table.start_col + i as u32;
+            grid.clear_cell(totals_row, cell_col);
+            if active_sheet < grids.len() {
+                grids[active_sheet].clear_cell(totals_row, cell_col);
+            }
+        }
+        table.end_row -= 1;
+        table.style_options.total_row = false;
+    }
 
     TableResult::ok(table.clone())
 }
@@ -830,14 +982,202 @@ pub fn resize_table(
     TableResult::ok(table.clone())
 }
 
-/// Convert table to range (delete table but keep data)
+/// Convert table to range: rewrite all structured references that mention this
+/// table into absolute A1 references, then remove the table from the registry.
+/// Cell data and formatting are preserved.
 #[tauri::command]
 pub fn convert_to_range(
     state: State<AppState>,
     table_id: u64,
 ) -> TableResult {
-    // Same as delete_table but conceptually different
-    delete_table(state, table_id)
+    let active_sheet = *state.active_sheet.lock().unwrap();
+    let mut tables = state.tables.lock().unwrap();
+    let mut table_names = state.table_names.lock().unwrap();
+    let mut grids = state.grids.lock().unwrap();
+    let mut grid = state.grid.lock().unwrap();
+
+    // Find the table
+    let table = match tables
+        .get(&active_sheet)
+        .and_then(|st| st.get(&table_id))
+    {
+        Some(t) => t.clone(),
+        None => return TableResult::err("Table not found"),
+    };
+
+    let table_name_upper = table.name.to_uppercase();
+
+    // Scan ALL cells in ALL sheets for formulas that reference this table.
+    // We check the formula text for the table name (case-insensitive) as a
+    // fast filter before parsing.
+    for (sheet_idx, sheet_grid) in grids.iter_mut().enumerate() {
+        // Collect cells that need formula rewriting
+        let formula_cells: Vec<(u32, u32, String)> = sheet_grid
+            .cells
+            .iter()
+            .filter_map(|(&(row, col), cell)| {
+                cell.formula.as_ref().and_then(|f| {
+                    let f_upper = f.to_uppercase();
+                    // Check if formula mentions the table name or uses standalone @ refs
+                    if f_upper.contains(&table_name_upper) || f_upper.contains("[@") {
+                        Some((row, col, f.clone()))
+                    } else {
+                        None
+                    }
+                })
+            })
+            .collect();
+
+        for (row, col, formula_str) in formula_cells {
+            // Parse the formula
+            let parsed = match parser::parse(&formula_str) {
+                Ok(ast) => ast,
+                Err(_) => continue, // Can't parse — leave as-is
+            };
+
+            // Check if the AST actually contains table refs
+            if !crate::ast_has_table_refs(&parsed) {
+                continue;
+            }
+
+            // Build a context for resolution — using the formula cell's row
+            let ctx = crate::TableRefContext {
+                tables: &tables,
+                table_names: &table_names,
+                current_sheet_index: sheet_idx,
+                current_row: row,
+            };
+
+            // Resolve table refs → CellRef/Range nodes
+            let resolved = crate::resolve_table_refs_in_ast(&parsed, &ctx);
+
+            // Serialize back to formula string
+            let new_formula = format!("={}", crate::expression_to_formula(&resolved));
+
+            // Update the cell's formula (keep existing value/style)
+            if let Some(cell) = sheet_grid.get_cell(row, col) {
+                let mut updated = cell.clone();
+                updated.formula = Some(new_formula.clone());
+                sheet_grid.set_cell(row, col, updated.clone());
+
+                // Also update the primary grid if this is the active sheet
+                if sheet_idx == active_sheet {
+                    grid.set_cell(row, col, updated);
+                }
+            }
+        }
+    }
+
+    // Remove the table from the registry
+    if let Some(sheet_tables) = tables.get_mut(&active_sheet) {
+        sheet_tables.remove(&table_id);
+    }
+    table_names.remove(&table_name_upper);
+
+    TableResult::ok_empty()
+}
+
+/// Check if a cell edit should trigger table auto-expansion.
+/// Returns Some(table) with updated boundaries if expansion occurred, None otherwise.
+#[tauri::command]
+pub fn check_table_auto_expand(
+    state: State<AppState>,
+    row: u32,
+    col: u32,
+) -> Option<Table> {
+    let active_sheet = *state.active_sheet.lock().unwrap();
+    let mut tables = state.tables.lock().unwrap();
+
+    let sheet_tables = tables.get_mut(&active_sheet)?;
+
+    // Find a table adjacent to this cell
+    let table_id = {
+        let mut found = None;
+        for (id, table) in sheet_tables.iter() {
+            let data_end = table.data_end_row();
+            // Row expansion: cell is one row below the data area, within column range
+            if row == data_end + 1
+                && col >= table.start_col
+                && col <= table.end_col
+            {
+                found = Some((*id, "row"));
+                break;
+            }
+            // Column expansion: cell is one column right of the table, within row range
+            if col == table.end_col + 1
+                && row >= table.start_row
+                && row <= table.end_row
+            {
+                found = Some((*id, "col"));
+                break;
+            }
+        }
+        found
+    };
+
+    let (table_id, expand_type) = table_id?;
+    let table = sheet_tables.get_mut(&table_id)?;
+
+    match expand_type {
+        "row" => {
+            table.end_row += 1;
+        }
+        "col" => {
+            let new_col_id = table.columns.iter().map(|c| c.id).max().unwrap_or(0) + 1;
+            let existing_names: Vec<String> = table.columns.iter().map(|c| c.name.clone()).collect();
+            let new_name = ensure_unique_header(
+                &format!("Column{}", table.columns.len() + 1),
+                &existing_names,
+            );
+            table.columns.push(TableColumn::new(new_col_id, new_name));
+            table.end_col += 1;
+        }
+        _ => return None,
+    }
+
+    Some(table.clone())
+}
+
+/// Validate and enforce header uniqueness after a cell edit on a header row.
+/// If the header name was cleared, auto-fills with a placeholder.
+/// If the name conflicts with another column, auto-appends a digit.
+/// Returns the final (possibly corrected) header name and the updated table.
+#[tauri::command]
+pub fn enforce_table_header(
+    state: State<AppState>,
+    table_id: u64,
+    column_index: u32,
+    new_value: String,
+) -> TableResult {
+    let active_sheet = *state.active_sheet.lock().unwrap();
+    let mut tables = state.tables.lock().unwrap();
+
+    let sheet_tables = match tables.get_mut(&active_sheet) {
+        Some(t) => t,
+        None => return TableResult::err("No tables on this sheet"),
+    };
+
+    let table = match sheet_tables.get_mut(&table_id) {
+        Some(t) => t,
+        None => return TableResult::err("Table not found"),
+    };
+
+    let col_relative = column_index as usize;
+    if col_relative >= table.columns.len() {
+        return TableResult::err("Column index out of range");
+    }
+
+    // Collect existing names excluding this column
+    let existing: Vec<String> = table.columns.iter()
+        .enumerate()
+        .filter(|(i, _)| *i != col_relative)
+        .map(|(_, c)| c.name.clone())
+        .collect();
+
+    let final_name = ensure_unique_header(&new_value, &existing);
+    table.columns[col_relative].name = final_name;
+
+    TableResult::ok(table.clone())
 }
 
 /// Get a table by ID
@@ -932,6 +1272,62 @@ pub fn resolve_structured_reference(
         Some(resolved) => StructuredRefResult::ok(resolved),
         None => StructuredRefResult::err("Invalid column or specifier"),
     }
+}
+
+/// Set a calculated column formula that auto-fills to all data rows.
+/// When a user enters a formula in one data cell of a table column,
+/// this propagates it to all other data rows in that column.
+#[tauri::command]
+pub fn set_calculated_column(
+    state: State<AppState>,
+    table_id: u64,
+    column_name: String,
+    formula: String,
+) -> TableResult {
+    let active_sheet = *state.active_sheet.lock().unwrap();
+    let mut tables = state.tables.lock().unwrap();
+    let mut grid = state.grid.lock().unwrap();
+    let mut grids = state.grids.lock().unwrap();
+
+    let table = match tables.get_mut(&active_sheet).and_then(|t| t.get_mut(&table_id)) {
+        Some(t) => t,
+        None => return TableResult::err("Table not found"),
+    };
+
+    // Find the column
+    let col_idx = match table.get_column_index(&column_name) {
+        Some(idx) => idx,
+        None => return TableResult::err("Column not found"),
+    };
+
+    // Store the formula on the column definition
+    table.columns[col_idx].calculated_formula = if formula.is_empty() {
+        None
+    } else {
+        Some(formula.clone())
+    };
+
+    let abs_col = table.start_col + col_idx as u32;
+    let data_start = table.data_start_row();
+    let data_end = table.data_end_row();
+    let table_clone = table.clone();
+
+    // Write the formula to all data rows in this column
+    if !formula.is_empty() {
+        for row in data_start..=data_end {
+            let mut cell = engine::Cell::new_formula(formula.clone());
+            // Preserve existing style
+            if let Some(existing) = grid.get_cell(row, abs_col) {
+                cell.style_index = existing.style_index;
+            }
+            grid.set_cell(row, abs_col, cell.clone());
+            if active_sheet < grids.len() {
+                grids[active_sheet].set_cell(row, abs_col, cell);
+            }
+        }
+    }
+
+    TableResult::ok(table_clone)
 }
 
 // ============================================================================

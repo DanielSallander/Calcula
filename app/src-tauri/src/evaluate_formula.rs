@@ -653,9 +653,38 @@ pub fn eval_formula_init(
         None => return error_state(&session_id, "Cell is empty."),
     };
 
-    // Parse the formula into an engine AST
+    // Parse the formula into an engine AST (resolve table refs first)
     let ast = match parse_formula(&formula) {
-        Ok(parser_ast) => convert_expr(&parser_ast),
+        Ok(parser_ast) => {
+            // Resolve named references
+            let resolved = if crate::ast_has_named_refs(&parser_ast) {
+                let named_ranges_map = state.named_ranges.lock().unwrap();
+                let mut visited = std::collections::HashSet::new();
+                let r = crate::resolve_names_in_ast(&parser_ast, &named_ranges_map, active_sheet, &mut visited);
+                drop(named_ranges_map);
+                r
+            } else {
+                parser_ast
+            };
+            // Resolve table references
+            let resolved = if crate::ast_has_table_refs(&resolved) {
+                let tables_map = state.tables.lock().unwrap();
+                let table_names_map = state.table_names.lock().unwrap();
+                let ctx = crate::TableRefContext {
+                    tables: &tables_map,
+                    table_names: &table_names_map,
+                    current_sheet_index: active_sheet,
+                    current_row: row,
+                };
+                let r = crate::resolve_table_refs_in_ast(&resolved, &ctx);
+                drop(table_names_map);
+                drop(tables_map);
+                r
+            } else {
+                resolved
+            };
+            convert_expr(&resolved)
+        }
         Err(e) => return error_state(&session_id, &format!("Parse error: {}", e)),
     };
 
@@ -773,9 +802,27 @@ pub fn eval_formula_step_in(
         None => return error_state(&session_id, "Target cell is empty."),
     };
 
-    // Parse the target formula
+    // Parse the target formula (resolve table refs)
     let target_ast = match parse_formula(&target_formula) {
-        Ok(parser_ast) => convert_expr(&parser_ast),
+        Ok(parser_ast) => {
+            let resolved = if crate::ast_has_table_refs(&parser_ast) {
+                let tables_map = state.tables.lock().unwrap();
+                let table_names_map = state.table_names.lock().unwrap();
+                let ctx = crate::TableRefContext {
+                    tables: &tables_map,
+                    table_names: &table_names_map,
+                    current_sheet_index: target_sheet,
+                    current_row: row_0,
+                };
+                let r = crate::resolve_table_refs_in_ast(&parser_ast, &ctx);
+                drop(table_names_map);
+                drop(tables_map);
+                r
+            } else {
+                parser_ast
+            };
+            convert_expr(&resolved)
+        }
         Err(e) => return error_state(&session_id, &format!("Parse error: {}", e)),
     };
 
@@ -864,9 +911,27 @@ pub fn eval_formula_restart(
     let col = bottom.col;
     let sheet_index = bottom.sheet_index;
 
-    // Re-parse the formula
+    // Re-parse the formula (resolve table refs)
     let ast = match parse_formula(&formula) {
-        Ok(parser_ast) => convert_expr(&parser_ast),
+        Ok(parser_ast) => {
+            let resolved = if crate::ast_has_table_refs(&parser_ast) {
+                let tables_map = state.tables.lock().unwrap();
+                let table_names_map = state.table_names.lock().unwrap();
+                let ctx = crate::TableRefContext {
+                    tables: &tables_map,
+                    table_names: &table_names_map,
+                    current_sheet_index: sheet_index,
+                    current_row: row,
+                };
+                let r = crate::resolve_table_refs_in_ast(&parser_ast, &ctx);
+                drop(table_names_map);
+                drop(tables_map);
+                r
+            } else {
+                parser_ast
+            };
+            convert_expr(&resolved)
+        }
         Err(e) => return error_state(&session_id, &format!("Parse error: {}", e)),
     };
 
