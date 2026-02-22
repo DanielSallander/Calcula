@@ -88,6 +88,10 @@ export {
   commitUndoTransaction,
   removeDuplicates,
   updateCellsBatch,
+  // Clipboard
+  getInternalClipboard,
+  // Formula shifting
+  shiftFormulasBatch,
 } from "./lib";
 
 export type {
@@ -97,6 +101,8 @@ export type {
   SheetsResult,
   RemoveDuplicatesResult,
   CellUpdateInput,
+  FormulaShiftInput,
+  ClipboardData,
 } from "./lib";
 
 // ============================================================================
@@ -604,4 +610,16 @@ export type {
   ConsolidationSourceRange,
   ConsolidateParams,
   ConsolidateResult,
+} from "./lib";
+
+// ============================================================================
+// Number Format Preview API
+// ============================================================================
+
+export {
+  previewNumberFormat,
+} from "./lib";
+
+export type {
+  PreviewResult,
 } from "./lib";

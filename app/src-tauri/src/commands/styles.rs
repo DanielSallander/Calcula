@@ -1,11 +1,11 @@
 //! FILENAME: app/src-tauri/src/commands/styles.rs
 // PURPOSE: Styling operations, formatting, and style definitions.
 
-use crate::api_types::{CellData, FormattingParams, FormattingResult, StyleData, StyleEntry};
+use crate::api_types::{CellData, FormattingParams, FormattingResult, PreviewResult, StyleData, StyleEntry};
 use crate::commands::utils::get_cell_internal_with_merge;
-use crate::{format_cell_value, AppState};
+use crate::{format_cell_value_with_color, AppState};
 use engine::{
-    BorderLineStyle, BorderStyle, Cell, CellValue, Color, CurrencyPosition, NumberFormat,
+    BorderLineStyle, BorderStyle, Cell, CellStyle, CellValue, Color, CurrencyPosition, NumberFormat,
     TextAlign, TextRotation, VerticalAlign,
 };
 use tauri::State;
@@ -54,7 +54,7 @@ pub fn set_cell_style(
         let mut updated_cell = cell.clone();
         updated_cell.style_index = style_index;
         grid.set_cell(row, col, updated_cell.clone());
-        
+
         if active_sheet < grids.len() {
             grids[active_sheet].set_cell(row, col, updated_cell.clone());
         }
@@ -63,12 +63,13 @@ pub fn set_cell_style(
         undo_stack.record_cell_change(row, col, previous_cell);
 
         let style = styles.get(style_index);
-        let display = format_cell_value(&updated_cell.value, style);
+        let result = format_cell_value_with_color(&updated_cell.value, style);
 
         Some(CellData {
             row,
             col,
-            display,
+            display: result.text,
+            display_color: result.color,
             formula: updated_cell.formula,
             style_index,
             row_span,
@@ -84,7 +85,7 @@ pub fn set_cell_style(
             cached_ast: None,
         };
         grid.set_cell(row, col, cell.clone());
-        
+
         if active_sheet < grids.len() {
             grids[active_sheet].set_cell(row, col, cell);
         }
@@ -96,6 +97,7 @@ pub fn set_cell_style(
             row,
             col,
             display: String::new(),
+            display_color: None,
             formula: None,
             style_index,
             row_span,
@@ -130,7 +132,7 @@ pub fn apply_formatting(
         for col in &params.cols {
             let row = *row;
             let col = *col;
-            
+
             // Record previous state for undo
             let previous_cell = grid.get_cell(row, col).cloned();
 
@@ -228,7 +230,7 @@ pub fn apply_formatting(
             let mut updated_cell = cell;
             updated_cell.style_index = new_style_index;
             grid.set_cell(row, col, updated_cell.clone());
-            
+
             if active_sheet < grids.len() {
                 grids[active_sheet].set_cell(row, col, updated_cell.clone());
             }
@@ -236,7 +238,7 @@ pub fn apply_formatting(
             // Record undo
             undo_stack.record_cell_change(row, col, previous_cell);
 
-            let display = format_cell_value(&updated_cell.value, &new_style);
+            let fmt_result = format_cell_value_with_color(&updated_cell.value, &new_style);
 
             // Get merge span info
             let merge_info = merged_regions.iter().find(|r| r.start_row == row && r.start_col == col);
@@ -249,7 +251,8 @@ pub fn apply_formatting(
             updated_cells.push(CellData {
                 row,
                 col,
-                display,
+                display: fmt_result.text,
+                display_color: fmt_result.color,
                 formula: updated_cell.formula,
                 style_index: new_style_index,
                 row_span,
@@ -276,7 +279,22 @@ pub fn apply_formatting(
     })
 }
 
-/// Parse a number format string.
+/// Preview a custom number format string against a sample value.
+/// Used by the Format Cells dialog for live preview.
+#[tauri::command]
+pub fn preview_number_format(format_string: String, sample_value: f64) -> PreviewResult {
+    let nf = NumberFormat::Custom { format: format_string };
+    let style = CellStyle::new().with_number_format(nf);
+    let result = format_cell_value_with_color(&CellValue::Number(sample_value), &style);
+    PreviewResult {
+        display: result.text,
+        color: result.color,
+    }
+}
+
+/// Parse a number format string into a NumberFormat enum.
+/// Recognizes known preset names (e.g., "general", "currency_usd") and treats
+/// anything else containing format characters as a custom format string.
 fn parse_number_format(format: &str) -> NumberFormat {
     match format.to_lowercase().as_str() {
         "general" => NumberFormat::General,
@@ -320,8 +338,32 @@ fn parse_number_format(format: &str) -> NumberFormat {
         "time_12h" => NumberFormat::Time {
             format: "hh:mm:ss AM/PM".to_string(),
         },
-        _ => NumberFormat::General,
+        _ => {
+            // Check if this looks like a custom format string
+            if is_custom_format_string(format) {
+                NumberFormat::Custom {
+                    format: format.to_string(),
+                }
+            } else {
+                NumberFormat::General
+            }
+        }
     }
+}
+
+/// Check if a string looks like a custom number format string.
+fn is_custom_format_string(s: &str) -> bool {
+    s.contains('0')
+        || s.contains('#')
+        || s.contains('?')
+        || s.contains('@')
+        || s.contains(';')
+        || s.starts_with('[')
+        || s.contains("yy")
+        || s.contains("mm")
+        || s.contains("dd")
+        || s.contains("hh")
+        || s.contains("ss")
 }
 
 /// Parse a text rotation string.

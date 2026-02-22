@@ -32,7 +32,7 @@ import type { Selection, CellData, ClipboardMode } from "../types";
  * Internal clipboard data structure.
  * We store both the raw text and structured cell data.
  */
-interface ClipboardData {
+export interface ClipboardData {
   /** Source selection when copy/cut was performed */
   sourceSelection: Selection;
   /** Cell data matrix [row][col] relative to source selection */
@@ -71,6 +71,14 @@ export interface UseClipboardReturn {
 
 // Module-level clipboard storage (persists across hook instances)
 let internalClipboard: ClipboardData | null = null;
+
+/**
+ * Get the current internal clipboard data.
+ * Used by Paste Special to access structured clipboard content.
+ */
+export function getInternalClipboard(): ClipboardData | null {
+  return internalClipboard;
+}
 
 /**
  * Hook for clipboard operations.

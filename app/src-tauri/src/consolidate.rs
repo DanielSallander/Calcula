@@ -153,6 +153,7 @@ fn build_cell_data(
         row,
         col,
         display,
+        display_color: None,
         formula: cell.formula.clone(),
         style_index: cell.style_index,
         row_span,

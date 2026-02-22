@@ -497,6 +497,11 @@ export function drawCellText(state: RenderState): void {
         textAlign = "right";
       }
 
+      // Apply format-driven color override (e.g., [Red] from custom number format)
+      if (cell.displayColor && isValidColor(cell.displayColor)) {
+        textColor = cell.displayColor;
+      }
+
       if (baseCellStyle.textAlign === "general" || baseCellStyle.textAlign === "") {
         if (isErrorValue(displayValue)) {
           textColor = theme.cellTextError;

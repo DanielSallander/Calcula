@@ -425,6 +425,16 @@ export function useGridKeyboard(options: UseGridKeyboardOptions): void {
         return;
       }
 
+      // Handle Ctrl+Alt+V - Paste Special
+      if (modKey && altKey && key.toLowerCase() === 'v' && onCommand) {
+        event.preventDefault();
+        event.stopPropagation();
+        eventLog.keyboard('Grid', 'handleKeyDown', 'Ctrl+Alt+V', ['Ctrl', 'Alt']);
+        onCommand('clipboard.pasteSpecial');
+        fnLog.exit('handleKeyDown', 'paste special');
+        return;
+      }
+
       // Handle clipboard shortcuts
       if (modKey && !altKey) {
         switch (key.toLowerCase()) {

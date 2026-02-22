@@ -81,4 +81,25 @@ export const NUMBER_FORMAT_CATEGORIES: NumberFormatCategory[] = [
       { label: "1:30:00 PM (12h)", value: "time_12h", example: "1:30:00 PM" },
     ],
   },
+  {
+    id: "custom",
+    label: "Custom",
+    description:
+      "Custom formats let you create your own number format using format codes. " +
+      "Use 0 for required digits, # for optional digits, and ; to separate positive, negative, zero, and text sections.",
+    formats: [
+      { label: "#,##0", value: "#,##0", example: "1,235" },
+      { label: "#,##0.00", value: "#,##0.00", example: "1,234.50" },
+      { label: "#,##0;(#,##0)", value: "#,##0;(#,##0)", example: "1,235" },
+      { label: "#,##0;[Red](#,##0)", value: "#,##0;[Red](#,##0)", example: "1,235" },
+      { label: "$#,##0.00", value: "$#,##0.00", example: "$1,234.50" },
+      { label: "0%", value: "0%", example: "50%" },
+      { label: "0.00%", value: "0.00%", example: "50.00%" },
+      { label: "0.00E+00", value: "0.00E+00", example: "1.23E+03" },
+      { label: "#,##0.0,", value: "#,##0.0,", example: "1,234.5" },
+      { label: "0.00;[Red]-0.00", value: "0.00;[Red]-0.00", example: "1234.50" },
+      { label: '0.00" kr"', value: '0.00" kr"', example: "1234.50 kr" },
+      { label: ";;;", value: ";;;", example: "(hidden)" },
+    ],
+  },
 ];

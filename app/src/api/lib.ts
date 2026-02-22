@@ -3,6 +3,13 @@
 // CONTEXT: Extensions call these functions to interact with the Tauri backend.
 
 // ============================================================================
+// Clipboard API - Internal clipboard access for extensions
+// ============================================================================
+
+export { getInternalClipboard } from "../core/hooks/useClipboard";
+export type { ClipboardData } from "../core/hooks/useClipboard";
+
+// ============================================================================
 // Tauri API - Core spreadsheet operations
 // ============================================================================
 
@@ -86,6 +93,9 @@ export {
   getMergedRegions,
   getMergeInfo,
 
+  // Formula shifting
+  shiftFormulasBatch,
+
   // Named ranges
   createNamedRange,
   updateNamedRange,
@@ -141,6 +151,9 @@ export {
   getHiddenRowsByGroup,
   getHiddenColsByGroup,
   clearOutline,
+
+  // Number format preview
+  previewNumberFormat,
 } from "../core/lib/tauri-api";
 
 // Type exports from tauri-api
@@ -157,6 +170,7 @@ export type {
   MergedRegion as TauriMergedRegion,
   MergeResult,
   CellUpdateInput,
+  FormulaShiftInput,
   // Grouping types
   GroupResult,
   OutlineInfo,
@@ -166,6 +180,7 @@ export type {
   RowGroup,
   ColumnGroup,
   SheetOutline,
+  PreviewResult,
 } from "../core/lib/tauri-api";
 
 // Named range type exports

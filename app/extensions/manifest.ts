@@ -16,6 +16,7 @@ import StandardMenusExtension from "./BuiltIn/StandardMenus";
 import FormatCellsExtension from "./BuiltIn/FormatCellsDialog";
 import FormulaAutocompleteExtension from "./BuiltIn/FormulaAutocomplete";
 import FormatPainterExtension from "./BuiltIn/FormatPainter";
+import PasteSpecialExtension from "./BuiltIn/PasteSpecial";
 
 // ============================================================================
 // Built-in Extension Manifest
@@ -34,6 +35,8 @@ export const builtInExtensions: ExtensionModule[] = [
   FormatCellsExtension,
   // Format Painter (depends on Edit menu being registered)
   FormatPainterExtension,
+  // Paste Special (depends on Edit menu being registered)
+  PasteSpecialExtension,
   // Formula Autocomplete (Intellisense)
   FormulaAutocompleteExtension,
 ];

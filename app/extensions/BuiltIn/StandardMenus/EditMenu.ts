@@ -24,6 +24,7 @@ export function registerEditMenu(): void {
       { id: 'edit.cut', label: 'Cut', commandId: CoreCommands.CUT, shortcut: 'Ctrl+X' },
       { id: 'edit.copy', label: 'Copy', commandId: CoreCommands.COPY, shortcut: 'Ctrl+C' },
       { id: 'edit.paste', label: 'Paste', commandId: CoreCommands.PASTE, shortcut: 'Ctrl+V' },
+      { id: 'edit.pasteSpecial', label: 'Paste Special...', commandId: CoreCommands.PASTE_SPECIAL, shortcut: 'Ctrl+Alt+V' },
       { id: 'edit.sep2', label: '', separator: true },
       { id: 'edit.find', label: 'Find...', commandId: CoreCommands.FIND, shortcut: 'Ctrl+F' },
       { id: 'edit.replace', label: 'Replace...', commandId: CoreCommands.REPLACE, shortcut: 'Ctrl+H' },

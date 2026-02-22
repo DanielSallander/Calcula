@@ -4,6 +4,7 @@
 
 pub mod cell;
 pub mod coord;
+pub mod custom_format;
 pub mod dependency_extractor;
 pub mod dependency_graph;
 pub mod evaluator;
@@ -15,11 +16,12 @@ pub mod undo;
 // Re-export commonly used types at the crate root
 pub use cell::{Cell, CellError, CellValue};
 pub use coord::{a1_to_coord, col_to_index, coord_to_a1, index_to_col, CellCoord};
+pub use custom_format::{FormatColor, FormatResult, format_color_to_css};
 pub use dependency_extractor::{extract_dependencies, BinaryOperator, BuiltinFunction, Expression, UnaryOperator, Value};
 pub use dependency_graph::{CycleError, DependencyGraph};
 pub use evaluator::{EvalResult, Evaluator};
 pub use grid::Grid;
-pub use number_format::format_number;
+pub use number_format::{format_number, format_number_with_color, format_text_with_color};
 pub use style::{
     BorderLineStyle, BorderStyle, Borders, CellStyle, Color, CurrencyPosition, FontStyle,
     NumberFormat, StyleRegistry, TextAlign, TextRotation, VerticalAlign,

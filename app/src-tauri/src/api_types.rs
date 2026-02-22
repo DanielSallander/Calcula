@@ -12,6 +12,10 @@ pub struct CellData {
     pub row: u32,
     pub col: u32,
     pub display: String,
+    /// Optional color override from number format (e.g., [Red] in custom format).
+    /// CSS hex color string like "#ff0000". None when no format color applies.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub display_color: Option<String>,
     pub formula: Option<String>,
     pub style_index: usize,
     /// Number of rows this cell spans (1 = normal, >1 = merged master cell)
@@ -466,7 +470,7 @@ fn format_number_format_name(format: &NumberFormat) -> String {
         }
         NumberFormat::Date { format } => format!("Date ({})", format),
         NumberFormat::Time { format } => format!("Time ({})", format),
-        NumberFormat::Custom { format } => format!("Custom ({})", format),
+        NumberFormat::Custom { format } => format.clone(),
     }
 }
 
@@ -726,4 +730,19 @@ pub struct EvalStepState {
     pub evaluation_result: Option<String>,
     /// Error message if something went wrong
     pub error: Option<String>,
+}
+
+// ============================================================================
+// Custom Number Format Preview
+// ============================================================================
+
+/// Result of previewing a custom number format.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PreviewResult {
+    /// The formatted display string
+    pub display: String,
+    /// Optional color from format tokens (CSS hex)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub color: Option<String>,
 }

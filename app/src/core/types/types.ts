@@ -202,6 +202,8 @@ export interface CellData {
   col: number;
   /** Display value (formatted for presentation) */
   display: string;
+  /** Color override from custom number format tokens like [Red] */
+  displayColor?: string;
   /** Original formula if cell contains a formula */
   formula: string | null;
   /** Style index for looking up formatting */

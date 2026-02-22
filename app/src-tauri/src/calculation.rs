@@ -92,6 +92,7 @@ pub fn calculate_now(state: State<AppState>) -> Result<Vec<CellData>, String> {
                 row,
                 col,
                 display,
+                display_color: None,
                 formula: updated.formula,
                 style_index: updated.style_index,
                 row_span: 1,

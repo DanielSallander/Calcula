@@ -3,6 +3,7 @@
 //! CONTEXT: This module handles the conversion of raw numeric values to
 //! formatted display strings based on the cell's NumberFormat setting.
 
+use crate::custom_format::{self, FormatResult};
 use crate::style::{CurrencyPosition, NumberFormat};
 
 /// Format a number according to the specified format.
@@ -230,23 +231,37 @@ fn format_time_number(value: f64, format: &str) -> String {
         .replace("am/pm", if is_pm { "pm" } else { "am" })
 }
 
-/// Format a number using a custom format string.
-/// Supports basic patterns like "0.00", "#,##0", etc.
+/// Format a number using a custom format string (full Excel-compatible engine).
 fn format_custom(value: f64, format: &str) -> String {
-    // Basic custom format support
-    // Count decimal places from format
-    let decimal_places = if let Some(dot_pos) = format.find('.') {
-        format[dot_pos + 1..]
-            .chars()
-            .take_while(|c| *c == '0' || *c == '#')
-            .count() as u8
-    } else {
-        0
-    };
+    custom_format::format_custom_value(value, format).text
+}
 
-    let use_thousands = format.contains(',');
+/// Format a number and return both the display string and optional color override.
+/// The color is only returned for Custom formats that include [Color] tokens.
+pub fn format_number_with_color(value: f64, format: &NumberFormat) -> FormatResult {
+    match format {
+        NumberFormat::Custom { format: custom_fmt } => {
+            custom_format::format_custom_value(value, custom_fmt)
+        }
+        other => FormatResult {
+            text: format_number(value, other),
+            color: None,
+        },
+    }
+}
 
-    format_decimal(value, decimal_places, use_thousands)
+/// Format a text value using the text section of a custom format.
+/// For non-Custom formats, returns the text as-is with no color.
+pub fn format_text_with_color(text: &str, format: &NumberFormat) -> FormatResult {
+    match format {
+        NumberFormat::Custom { format: custom_fmt } => {
+            custom_format::format_custom_text(text, custom_fmt)
+        }
+        _ => FormatResult {
+            text: text.to_string(),
+            color: None,
+        },
+    }
 }
 
 /// Predefined number formats for common use cases.

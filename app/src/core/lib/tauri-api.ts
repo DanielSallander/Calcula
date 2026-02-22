@@ -1316,3 +1316,21 @@ export async function getHiddenColsByGroup(): Promise<number[]> {
 export async function clearOutline(): Promise<GroupResult> {
   return invoke<GroupResult>("clear_outline");
 }
+
+// ============================================================================
+// Number Format Preview
+// ============================================================================
+
+/** Result from previewing a custom number format. */
+export interface PreviewResult {
+  display: string;
+  color?: string;
+}
+
+/** Preview how a custom number format string will format a sample value. */
+export async function previewNumberFormat(
+  formatString: string,
+  sampleValue: number,
+): Promise<PreviewResult> {
+  return invoke<PreviewResult>("preview_number_format", { formatString, sampleValue });
+}

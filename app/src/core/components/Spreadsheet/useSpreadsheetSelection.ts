@@ -34,6 +34,7 @@ import type { FormattingOptions } from "../../types";
 import { checkCellClickInterceptors } from "../../lib/cellClickInterceptors";
 import { setColumnWidth, setRowHeight } from "../../state/gridActions";
 import { cellEvents } from "../../lib/cellEvents";
+import { CommandRegistry } from "../../../api/commands";
 import type { GridCanvasHandle } from "../Grid";
 
 type GridState = ReturnType<typeof useGridState>;
@@ -765,6 +766,11 @@ export function useSpreadsheetSelection({
       // Fill
       case 'edit.fillDown':
         await handleFillDown();
+        break;
+
+      // Paste Special
+      case 'clipboard.pasteSpecial':
+        await CommandRegistry.execute('core.clipboard.pasteSpecial');
         break;
 
       default:

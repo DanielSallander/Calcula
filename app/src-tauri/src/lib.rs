@@ -3,7 +3,8 @@
 // CONTEXT: Uses a generic ProtectedRegion system for extension-owned cell regions.
 
 use engine::{
-    format_number, Cell, CellError, CellStyle, CellValue, Evaluator, Grid, NumberFormat,
+    format_number, format_number_with_color, format_text_with_color, format_color_to_css,
+    Cell, CellError, CellStyle, CellValue, Evaluator, Grid, NumberFormat,
     StyleRegistry, MultiSheetContext,
 };
 use engine::{
@@ -262,19 +263,46 @@ pub fn create_app_state() -> AppState {
 // CELL FORMATTING
 // ============================================================================
 
+/// Result of formatting a cell value: display text + optional color from format.
+pub struct CellDisplayResult {
+    pub text: String,
+    pub color: Option<String>,
+}
+
 pub fn format_cell_value(value: &CellValue, style: &CellStyle) -> String {
+    format_cell_value_with_color(value, style).text
+}
+
+/// Format a cell value and return both display text and optional color override.
+/// The color is only populated for Custom formats that include [Color] tokens.
+pub fn format_cell_value_with_color(value: &CellValue, style: &CellStyle) -> CellDisplayResult {
     match value {
-        CellValue::Empty => String::new(),
+        CellValue::Empty => CellDisplayResult { text: String::new(), color: None },
         CellValue::Number(n) => {
-            let result = format_number(*n, &style.number_format);
+            let result = format_number_with_color(*n, &style.number_format);
             if !matches!(style.number_format, NumberFormat::General) {
-                log_debug!("FMT", "num={} fmt={:?} --> {}", n, style.number_format, result);
+                log_debug!("FMT", "num={} fmt={:?} --> {}", n, style.number_format, result.text);
             }
-            result
+            CellDisplayResult {
+                text: result.text,
+                color: result.color.map(|c| format_color_to_css(&c).to_string()),
+            }
         },
-        CellValue::Text(s) => s.clone(),
-        CellValue::Boolean(b) => if *b { "TRUE" } else { "FALSE" }.to_string(),
-        CellValue::Error(e) => format!("#{:?}", e).to_uppercase(),
+        CellValue::Text(s) => {
+            let result = format_text_with_color(s, &style.number_format);
+            CellDisplayResult {
+                text: result.text,
+                color: result.color.map(|c| format_color_to_css(&c).to_string()),
+            }
+        },
+        CellValue::Boolean(b) => CellDisplayResult {
+            text: if *b { "TRUE" } else { "FALSE" }.to_string(),
+            color: None,
+        },
+        CellValue::Error(e) => CellDisplayResult {
+            text: format!("#{:?}", e).to_uppercase(),
+            color: None,
+        },
     }
 }
 
@@ -1134,6 +1162,7 @@ pub fn run() {
             commands::get_all_styles,
             commands::set_cell_style,
             commands::apply_formatting,
+            commands::preview_number_format,
             commands::get_style_count,
             commands::insert_rows,
             commands::insert_columns,
