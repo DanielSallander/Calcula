@@ -63,6 +63,7 @@ export interface MenuDefinition {
  */
 export type TaskPaneContextKey =
   | "pivot"           // Selection is within a pivot table
+  | "tablix"          // Selection is within a tablix
   | "table"           // Selection is within a table
   | "chart"           // Selection is within a chart
   | "comment"         // Cell has a comment

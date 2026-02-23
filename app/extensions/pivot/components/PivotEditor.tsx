@@ -6,8 +6,18 @@ import { DropZones } from './DropZones';
 import { LayoutOptions } from './LayoutOptions';
 import { ValueFieldSettingsModal, type ValueFieldSettings } from './ValueFieldSettingsModal';
 import { NumberFormatModal } from './NumberFormatModal';
+import { ComponentToggle } from '../../_shared/components/ComponentToggle';
+import type { ComponentType } from '../../_shared/components/ComponentToggle';
 import { usePivotEditorState } from './usePivotEditorState';
 import { pivot } from '../../../src/api/pivot';
+import { convertPivotToTablix } from '../../Tablix/lib/tablix-api';
+import {
+  openTaskPane,
+  addTaskPaneContextKey,
+  removeTaskPaneContextKey,
+  showToast,
+  emitAppEvent,
+} from '../../../src/api';
 import type {
   SourceField,
   ZoneField,
@@ -106,6 +116,24 @@ export function PivotEditor({
     }
   }, [numberFormatIndex, handleNumberFormatChange]);
 
+  // Handle component type toggle (Pivot -> Tablix conversion)
+  const handleComponentConvert = useCallback(async (targetType: ComponentType) => {
+    if (targetType !== 'tablix') return;
+    try {
+      const result = await convertPivotToTablix(pivotId);
+      // Switch context keys and task panes
+      removeTaskPaneContextKey('pivot');
+      addTaskPaneContextKey('tablix');
+      // Emit events to refresh regions
+      emitAppEvent('app:tablix-regions-updated', {});
+      // Open the Tablix editor pane
+      openTaskPane('tablix-editor');
+    } catch (error) {
+      console.error('Failed to convert Pivot to Tablix:', error);
+      showToast('Failed to convert to Tablix. Please try again.', { variant: 'error' });
+    }
+  }, [pivotId]);
+
   // Notify Layout when filter fields change so it can show the FilterBar
   useEffect(() => {
     window.dispatchEvent(
@@ -132,6 +160,8 @@ export function PivotEditor({
           </button>
         )}
       </div>
+
+      <ComponentToggle currentType="pivot" onConvert={handleComponentConvert} />
 
       <div className={styles.content}>
         <FieldList

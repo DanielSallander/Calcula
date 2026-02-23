@@ -32,6 +32,7 @@ pub mod sheets;
 pub mod undo_commands;
 pub mod merge_commands;
 pub mod pivot;
+pub mod tablix;
 pub mod named_ranges;
 pub mod data_validation;
 pub mod comments;
@@ -1025,7 +1026,7 @@ fn resolve_special_column(
     };
     let abs_col = table.start_col + col_idx as u32;
 
-    match special.as_ref() {
+    match special {
         ParserTableSpecifier::Headers => {
             if table.style_options.header_row {
                 make_range(None, table.start_row, abs_col, table.start_row, abs_col)
@@ -1703,6 +1704,7 @@ pub fn run() {
         .manage(create_app_state())
         .manage(FileState::default())
         .manage(pivot::PivotState::new())
+        .manage(tablix::TablixState::new())
         .manage(evaluate_formula::EvalFormulaState::new())
         .invoke_handler(tauri::generate_handler![
             // Grid commands
@@ -1950,6 +1952,18 @@ pub fn run() {
             tables::get_table_at_cell,
             tables::get_all_tables,
             tables::resolve_structured_reference,
+            // Tablix commands
+            tablix::create_tablix,
+            tablix::update_tablix_fields,
+            tablix::get_tablix_view,
+            tablix::delete_tablix,
+            tablix::toggle_tablix_group,
+            tablix::get_tablix_at_cell,
+            tablix::get_tablix_regions_for_sheet,
+            tablix::convert_pivot_to_tablix,
+            tablix::convert_tablix_to_pivot,
+            tablix::refresh_tablix_cache,
+            tablix::get_tablix_field_unique_values,
             // Goal Seek command
             goal_seek::goal_seek,
             // Data Consolidation command

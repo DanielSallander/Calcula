@@ -148,6 +148,14 @@ fn find_next_recursive(expr: &Expression, path: &mut Vec<usize>) -> Option<NextN
             })
         }
 
+        // Table references should be resolved before step evaluation.
+        // If still present, treat as a non-cell-ref node to resolve.
+        Expression::TableRef { .. } => Some(NextNode {
+            path: path.clone(),
+            is_cell_ref: false,
+            cell_ref_info: None,
+        }),
+
         // Function calls: special handling for IF short-circuit
         Expression::FunctionCall { func, args } => {
             if matches!(func, BuiltinFunction::If) && args.len() >= 2 {
@@ -366,6 +374,13 @@ fn build_display_recursive(
             }
             output.push(')');
         }
+
+        Expression::TableRef { table_name, specifier } => {
+            output.push_str(table_name);
+            output.push('[');
+            output.push_str(&table_specifier_to_display(specifier));
+            output.push(']');
+        }
     }
 
     if is_target {
@@ -385,6 +400,22 @@ fn value_to_display(val: &Value) -> String {
         }
         Value::String(s) => format!("\"{}\"", s),
         Value::Boolean(b) => if *b { "TRUE" } else { "FALSE" }.to_string(),
+    }
+}
+
+fn table_specifier_to_display(spec: &engine::TableSpecifier) -> String {
+    match spec {
+        engine::TableSpecifier::Column(col) => col.clone(),
+        engine::TableSpecifier::ThisRow(col) => format!("@{}", col),
+        engine::TableSpecifier::ColumnRange(start, end) => format!("{}:{}", start, end),
+        engine::TableSpecifier::ThisRowRange(start, end) => format!("@{}:@{}", start, end),
+        engine::TableSpecifier::AllRows => "#All".to_string(),
+        engine::TableSpecifier::DataRows => "#Data".to_string(),
+        engine::TableSpecifier::Headers => "#Headers".to_string(),
+        engine::TableSpecifier::Totals => "#Totals".to_string(),
+        engine::TableSpecifier::SpecialColumn(special, col) => {
+            format!("{},{}", table_specifier_to_display(special), col)
+        }
     }
 }
 

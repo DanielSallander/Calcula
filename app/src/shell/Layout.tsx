@@ -14,6 +14,7 @@ import { TaskPaneContainer } from "./TaskPane";
 import { DialogContainer } from "./DialogContainer";
 import { OverlayContainer } from "./OverlayContainer";
 import { GridContextMenuHost } from "./Overlays/GridContextMenuHost";
+import { ToastContainer } from "./Toast/Toast";
 // GridProvider is a special case - it's the root React context that must wrap everything
 import { GridProvider } from "../core/state/GridContext";
 // Actions and hooks are imported from the API layer
@@ -189,6 +190,9 @@ function LayoutInner(): React.ReactElement {
 
       {/* Grid Context Menu - Shell handles rendering, Core emits events */}
       <GridContextMenuHost />
+
+      {/* Toast Notifications */}
+      <ToastContainer />
     </div>
   );
 }

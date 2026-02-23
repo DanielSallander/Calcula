@@ -3,6 +3,7 @@ members = [
     "engine",
     "parser",
     "persistence",
-    "pivot-engine"
+    "pivot-engine",
+    "tablix-engine"
 ]
 resolver = "2"

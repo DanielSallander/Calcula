@@ -319,6 +319,134 @@ export async function refreshAllPivotTables<TResponse>(): Promise<TResponse> {
 }
 
 // ============================================================================
+// Tablix Commands
+// ============================================================================
+
+export type TablixId = number;
+
+/**
+ * Create a new tablix from a source range.
+ * @param request - The tablix creation request
+ * @returns The initial tablix view response
+ */
+export async function createTablix<TRequest, TResponse>(
+  request: TRequest
+): Promise<TResponse> {
+  return invoke<TResponse>("create_tablix", { request });
+}
+
+/**
+ * Update tablix field configuration.
+ * @param request - The field update request
+ * @returns The updated tablix view response
+ */
+export async function updateTablixFields<TRequest, TResponse>(
+  request: TRequest
+): Promise<TResponse> {
+  return invoke<TResponse>("update_tablix_fields", { request });
+}
+
+/**
+ * Get the current view of a tablix.
+ * @param tablixId - Optional tablix ID (uses active tablix if not specified)
+ * @returns The current tablix view
+ */
+export async function getTablixView<TResponse>(
+  tablixId?: TablixId
+): Promise<TResponse> {
+  return invoke<TResponse>("get_tablix_view", { tablixId });
+}
+
+/**
+ * Delete a tablix.
+ * @param tablixId - The tablix ID to delete
+ */
+export async function deleteTablix(tablixId: TablixId): Promise<void> {
+  return invoke<void>("delete_tablix", { tablixId });
+}
+
+/**
+ * Toggle a tablix group's expand/collapse state.
+ * @param request - The toggle request
+ * @returns The updated tablix view response
+ */
+export async function toggleTablixGroup<TRequest, TResponse>(
+  request: TRequest
+): Promise<TResponse> {
+  return invoke<TResponse>("toggle_tablix_group", { request });
+}
+
+/**
+ * Check if a cell is within a tablix region.
+ * @param row - Row index (0-based)
+ * @param col - Column index (0-based)
+ * @returns Tablix region info if cell is in a tablix, null otherwise
+ */
+export async function getTablixAtCell<TResponse>(
+  row: number,
+  col: number
+): Promise<TResponse | null> {
+  return invoke<TResponse | null>("get_tablix_at_cell", { row, col });
+}
+
+/**
+ * Get all tablix regions for the current sheet.
+ * @returns Array of tablix region data
+ */
+export async function getTablixRegionsForSheet<TResponse>(): Promise<TResponse[]> {
+  return invoke<TResponse[]>("get_tablix_regions_for_sheet", {});
+}
+
+/**
+ * Convert a pivot table to a tablix.
+ * @param request - Conversion request with pivot ID
+ * @returns Conversion response with new tablix ID
+ */
+export async function convertPivotToTablix<TRequest, TResponse>(
+  request: TRequest
+): Promise<TResponse> {
+  return invoke<TResponse>("convert_pivot_to_tablix", { request });
+}
+
+/**
+ * Convert a tablix to a pivot table.
+ * @param request - Conversion request with tablix ID
+ * @returns Conversion response with new pivot ID and migrated detail fields
+ */
+export async function convertTablixToPivot<TRequest, TResponse>(
+  request: TRequest
+): Promise<TResponse> {
+  return invoke<TResponse>("convert_tablix_to_pivot", { request });
+}
+
+/**
+ * Refresh the tablix cache from current grid data.
+ * @param tablixId - The tablix ID to refresh
+ * @returns The refreshed tablix view
+ */
+export async function refreshTablixCache<TResponse>(
+  tablixId: TablixId
+): Promise<TResponse> {
+  return invoke<TResponse>("refresh_tablix_cache", { tablixId });
+}
+
+/**
+ * Get unique values for a specific field in a tablix.
+ * @param tablixId - The tablix ID
+ * @param fieldIndex - The source field index
+ * @returns The unique values response
+ */
+export async function getTablixFieldUniqueValues<TResponse>(
+  tablixId: TablixId,
+  fieldIndex: number
+): Promise<TResponse> {
+  return invoke<TResponse>("get_tablix_field_unique_values", {
+    tablixId,
+    fieldIndex,
+  });
+}
+
+// ============================================================================
 // Clear Range Commands
 // ============================================================================
 

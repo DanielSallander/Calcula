@@ -89,6 +89,7 @@ dependencies = [
  "regex",
  "serde",
  "serde_json",
+ "tablix-engine",
  "tauri",
  "tauri-build",
  "tauri-plugin-dialog",
@@ -3545,6 +3546,15 @@ dependencies = [
  "pkg-config",
  "toml 0.8.2",
  "version-compare",
+]
+
+[[package]]
+name = "tablix-engine"
+version = "0.1.0"
+dependencies = [
+ "engine",
+ "pivot-engine",
+ "serde",
 ]
 
 [[package]]

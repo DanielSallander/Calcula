@@ -17,6 +17,7 @@ import { registerTracingExtension, unregisterTracingExtension } from "./Tracing"
 import { registerDefinedNamesExtension, unregisterDefinedNamesExtension } from "./DefinedNames";
 import { registerEvaluateFormulaExtension, unregisterEvaluateFormulaExtension } from "./EvaluateFormula";
 import { registerConsolidateExtension, unregisterConsolidateExtension } from "./Consolidate";
+import { registerTablixExtension, unregisterTablixExtension } from "./Tablix";
 
 /**
  * Load all extensions.
@@ -42,6 +43,7 @@ export function loadExtensions(): void {
   registerDefinedNamesExtension();
   registerEvaluateFormulaExtension();
   registerConsolidateExtension();
+  registerTablixExtension();
 
   // Future: Load user extensions from config
 
@@ -56,6 +58,7 @@ export function unloadExtensions(): void {
   console.log("[Extensions] Unloading extensions...");
 
   // Unload in reverse order
+  unregisterTablixExtension();
   unregisterConsolidateExtension();
   unregisterEvaluateFormulaExtension();
   unregisterDefinedNamesExtension();
@@ -91,3 +94,4 @@ export { registerTracingExtension, unregisterTracingExtension };
 export { registerDefinedNamesExtension, unregisterDefinedNamesExtension };
 export { registerEvaluateFormulaExtension, unregisterEvaluateFormulaExtension };
 export { registerConsolidateExtension, unregisterConsolidateExtension };
+export { registerTablixExtension, unregisterTablixExtension };
