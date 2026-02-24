@@ -407,26 +407,80 @@ fn convert_builtin_function(func: &ParserBuiltinFn) -> EngineBuiltinFn {
 pub fn convert_expr(expr: &ParserExpr) -> EngineExpr {
     match expr {
         ParserExpr::Literal(v) => EngineExpr::Literal(convert_value(v)),
-        ParserExpr::CellRef { sheet, col, row, .. } => EngineExpr::CellRef {
-            sheet: sheet.clone(),
-            col: col.clone(),
-            row: *row,
-        },
-        ParserExpr::Range { sheet, start, end } => EngineExpr::Range {
-            sheet: sheet.clone(),
-            start: Box::new(convert_expr(start)),
-            end: Box::new(convert_expr(end)),
-        },
-        ParserExpr::ColumnRef { sheet, start_col, end_col, .. } => EngineExpr::ColumnRef {
-            sheet: sheet.clone(),
-            start_col: start_col.clone(),
-            end_col: end_col.clone(),
-        },
-        ParserExpr::RowRef { sheet, start_row, end_row, .. } => EngineExpr::RowRef {
-            sheet: sheet.clone(),
-            start_row: *start_row,
-            end_row: *end_row,
-        },
+        ParserExpr::CellRef { sheet, col, row, .. } => {
+            // Wildcard '*' sheet means all sheets — convert to Sheet3DRef
+            if sheet.as_deref() == Some("*") {
+                return EngineExpr::Sheet3DRef {
+                    start_sheet: "*".to_string(),
+                    end_sheet: "*".to_string(),
+                    reference: Box::new(EngineExpr::CellRef {
+                        sheet: None,
+                        col: col.clone(),
+                        row: *row,
+                    }),
+                };
+            }
+            EngineExpr::CellRef {
+                sheet: sheet.clone(),
+                col: col.clone(),
+                row: *row,
+            }
+        }
+        ParserExpr::Range { sheet, start, end } => {
+            // Wildcard '*' sheet means all sheets — convert to Sheet3DRef
+            if sheet.as_deref() == Some("*") {
+                return EngineExpr::Sheet3DRef {
+                    start_sheet: "*".to_string(),
+                    end_sheet: "*".to_string(),
+                    reference: Box::new(EngineExpr::Range {
+                        sheet: None,
+                        start: Box::new(convert_expr(start)),
+                        end: Box::new(convert_expr(end)),
+                    }),
+                };
+            }
+            EngineExpr::Range {
+                sheet: sheet.clone(),
+                start: Box::new(convert_expr(start)),
+                end: Box::new(convert_expr(end)),
+            }
+        }
+        ParserExpr::ColumnRef { sheet, start_col, end_col, .. } => {
+            if sheet.as_deref() == Some("*") {
+                return EngineExpr::Sheet3DRef {
+                    start_sheet: "*".to_string(),
+                    end_sheet: "*".to_string(),
+                    reference: Box::new(EngineExpr::ColumnRef {
+                        sheet: None,
+                        start_col: start_col.clone(),
+                        end_col: end_col.clone(),
+                    }),
+                };
+            }
+            EngineExpr::ColumnRef {
+                sheet: sheet.clone(),
+                start_col: start_col.clone(),
+                end_col: end_col.clone(),
+            }
+        }
+        ParserExpr::RowRef { sheet, start_row, end_row, .. } => {
+            if sheet.as_deref() == Some("*") {
+                return EngineExpr::Sheet3DRef {
+                    start_sheet: "*".to_string(),
+                    end_sheet: "*".to_string(),
+                    reference: Box::new(EngineExpr::RowRef {
+                        sheet: None,
+                        start_row: *start_row,
+                        end_row: *end_row,
+                    }),
+                };
+            }
+            EngineExpr::RowRef {
+                sheet: sheet.clone(),
+                start_row: *start_row,
+                end_row: *end_row,
+            }
+        }
         ParserExpr::BinaryOp { left, op, right } => EngineExpr::BinaryOp {
             left: Box::new(convert_expr(left)),
             op: convert_binary_op(op),
@@ -446,6 +500,12 @@ pub fn convert_expr(expr: &ParserExpr) -> EngineExpr {
         ParserExpr::NamedRef { name } => EngineExpr::FunctionCall {
             func: EngineBuiltinFn::Custom(format!("_UNRESOLVED_{}", name)),
             args: vec![],
+        },
+        // 3D cross-sheet reference: Sheet1:Sheet5!A1 or 'Jan:Dec'!A1:B10
+        ParserExpr::Sheet3DRef { start_sheet, end_sheet, reference } => EngineExpr::Sheet3DRef {
+            start_sheet: start_sheet.clone(),
+            end_sheet: end_sheet.clone(),
+            reference: Box::new(convert_expr(reference)),
         },
         // TableRef nodes should have been resolved before reaching convert_expr.
         // If one reaches here unresolved, produce #NAME? error.
@@ -593,6 +653,17 @@ fn extract_references_recursive(expr: &ParserExpr, grid: &Grid, refs: &mut Extra
                 extract_references_recursive(arg, grid, refs);
             }
         }
+        // 3D cross-sheet reference: tag inner cells with each bookend sheet
+        ParserExpr::Sheet3DRef { start_sheet, end_sheet, reference } => {
+            // Extract the inner reference's cells (without sheet context)
+            let mut inner_refs = ExtractedRefs::new();
+            extract_references_recursive(reference, grid, &mut inner_refs);
+            // Tag each cell with both bookend sheets as cross-sheet dependencies
+            for (row, col) in &inner_refs.cells {
+                refs.cross_sheet_cells.insert((start_sheet.clone(), *row, *col));
+                refs.cross_sheet_cells.insert((end_sheet.clone(), *row, *col));
+            }
+        }
         // NamedRef nodes should be resolved before reference extraction.
         // If one is still present, it means the name couldn't be resolved — skip.
         ParserExpr::NamedRef { .. } => {}
@@ -700,6 +771,12 @@ pub fn resolve_names_in_ast(
             start: Box::new(resolve_names_in_ast(start, named_ranges, current_sheet_index, visited)),
             end: Box::new(resolve_names_in_ast(end, named_ranges, current_sheet_index, visited)),
         },
+        // 3D cross-sheet reference: recurse into inner reference
+        ParserExpr::Sheet3DRef { start_sheet, end_sheet, reference } => ParserExpr::Sheet3DRef {
+            start_sheet: start_sheet.clone(),
+            end_sheet: end_sheet.clone(),
+            reference: Box::new(resolve_names_in_ast(reference, named_ranges, current_sheet_index, visited)),
+        },
         // TableRef is resolved separately by resolve_table_refs_in_ast — pass through
         ParserExpr::TableRef { .. } => ast.clone(),
     }
@@ -720,6 +797,7 @@ pub fn ast_has_named_refs(ast: &ParserExpr) -> bool {
         ParserExpr::Range { start, end, .. } => {
             ast_has_named_refs(start) || ast_has_named_refs(end)
         }
+        ParserExpr::Sheet3DRef { reference, .. } => ast_has_named_refs(reference),
     }
 }
 
@@ -738,6 +816,7 @@ pub fn ast_has_table_refs(ast: &ParserExpr) -> bool {
         ParserExpr::Range { start, end, .. } => {
             ast_has_table_refs(start) || ast_has_table_refs(end)
         }
+        ParserExpr::Sheet3DRef { reference, .. } => ast_has_table_refs(reference),
     }
 }
 
@@ -792,6 +871,12 @@ pub fn resolve_table_refs_in_ast(
             sheet: sheet.clone(),
             start: Box::new(resolve_table_refs_in_ast(start, ctx)),
             end: Box::new(resolve_table_refs_in_ast(end, ctx)),
+        },
+        // 3D cross-sheet reference: recurse into inner reference
+        ParserExpr::Sheet3DRef { start_sheet, end_sheet, reference } => ParserExpr::Sheet3DRef {
+            start_sheet: start_sheet.clone(),
+            end_sheet: end_sheet.clone(),
+            reference: Box::new(resolve_table_refs_in_ast(reference, ctx)),
         },
     }
 }
@@ -1189,6 +1274,20 @@ pub fn expression_to_formula(expr: &ParserExpr) -> String {
             format!("{}({})", func_name, arg_strs.join(","))
         }
         ParserExpr::NamedRef { name } => name.clone(),
+        ParserExpr::Sheet3DRef { start_sheet, end_sheet, reference } => {
+            let mut s = String::new();
+            let combined = format!("{}:{}", start_sheet, end_sheet);
+            // Quote if either sheet name contains spaces or special chars
+            if start_sheet.contains(' ') || end_sheet.contains(' ')
+                || start_sheet.contains('\'') || end_sheet.contains('\'')
+            {
+                s.push_str(&format!("'{}'!", combined));
+            } else {
+                s.push_str(&format!("{}!", combined));
+            }
+            s.push_str(&expression_to_formula(reference));
+            s
+        }
         ParserExpr::TableRef { table_name, specifier } => {
             // Should not appear after resolution, but handle gracefully
             let spec_str = table_specifier_to_string(specifier);
@@ -1276,6 +1375,303 @@ fn table_specifier_to_string(spec: &ParserTableSpecifier) -> String {
     }
 }
 
+// ============================================================================
+// 3D REFERENCE BOOKEND REPAIR
+// ============================================================================
+
+/// Repairs 3D reference bookends in a formula after a sheet is deleted.
+/// - If the deleted sheet is a bookend, shrink to the adjacent sheet.
+/// - If both bookends become invalid (single-sheet 3D ref deleted), returns None
+///   to indicate the formula should show #REF!.
+/// Returns Some(new_formula) if the formula was modified, None if it should become #REF!,
+/// or the original formula unchanged if no 3D refs were affected.
+pub fn repair_3d_refs_on_delete(
+    formula: &str,
+    deleted_name: &str,
+    sheet_names_after: &[String],
+) -> Option<String> {
+    let ast = match parse_formula(formula) {
+        Ok(ast) => ast,
+        Err(_) => return Some(formula.to_string()),
+    };
+
+    let (new_ast, had_ref_error) = repair_3d_delete_recursive(&ast, deleted_name, sheet_names_after);
+    if had_ref_error {
+        return None; // Entire formula becomes #REF!
+    }
+
+    let new_formula = format!("={}", expression_to_formula(&new_ast));
+    Some(new_formula)
+}
+
+/// Recursively walks a parser AST and repairs Sheet3DRef bookends after sheet deletion.
+/// Returns (new_ast, had_ref_error).
+fn repair_3d_delete_recursive(
+    ast: &ParserExpr,
+    deleted_name: &str,
+    sheet_names_after: &[String],
+) -> (ParserExpr, bool) {
+    match ast {
+        ParserExpr::Sheet3DRef { start_sheet, end_sheet, reference } => {
+            let del_upper = deleted_name.to_uppercase();
+            let start_is_deleted = start_sheet.to_uppercase() == del_upper;
+            let end_is_deleted = end_sheet.to_uppercase() == del_upper;
+
+            if start_is_deleted && end_is_deleted {
+                // Both bookends are the deleted sheet — #REF!
+                return (ast.clone(), true);
+            }
+
+            let new_start = if start_is_deleted {
+                // Find the next sheet after the deleted one in the post-delete order
+                // The "next" sheet is the one that was immediately after the deleted sheet
+                // in the original order. In the post-delete list, we look for the sheet
+                // that's now adjacent to where the deleted sheet was.
+                find_adjacent_sheet(deleted_name, end_sheet, sheet_names_after, true)
+            } else {
+                Some(start_sheet.clone())
+            };
+
+            let new_end = if end_is_deleted {
+                find_adjacent_sheet(deleted_name, start_sheet, sheet_names_after, false)
+            } else {
+                Some(end_sheet.clone())
+            };
+
+            match (new_start, new_end) {
+                (Some(s), Some(e)) => {
+                    let (new_ref, err) = repair_3d_delete_recursive(reference, deleted_name, sheet_names_after);
+                    if err { return (ast.clone(), true); }
+                    (ParserExpr::Sheet3DRef {
+                        start_sheet: s,
+                        end_sheet: e,
+                        reference: Box::new(new_ref),
+                    }, false)
+                }
+                _ => (ast.clone(), true), // Can't find replacement — #REF!
+            }
+        }
+        ParserExpr::BinaryOp { left, op, right } => {
+            let (new_left, l_err) = repair_3d_delete_recursive(left, deleted_name, sheet_names_after);
+            let (new_right, r_err) = repair_3d_delete_recursive(right, deleted_name, sheet_names_after);
+            (ParserExpr::BinaryOp {
+                left: Box::new(new_left),
+                op: *op,
+                right: Box::new(new_right),
+            }, l_err || r_err)
+        }
+        ParserExpr::UnaryOp { op, operand } => {
+            let (new_op, err) = repair_3d_delete_recursive(operand, deleted_name, sheet_names_after);
+            (ParserExpr::UnaryOp { op: *op, operand: Box::new(new_op) }, err)
+        }
+        ParserExpr::FunctionCall { func, args } => {
+            let mut new_args = Vec::new();
+            let mut any_err = false;
+            for arg in args {
+                let (new_arg, err) = repair_3d_delete_recursive(arg, deleted_name, sheet_names_after);
+                any_err = any_err || err;
+                new_args.push(new_arg);
+            }
+            (ParserExpr::FunctionCall { func: func.clone(), args: new_args }, any_err)
+        }
+        ParserExpr::Range { sheet, start, end } => {
+            let (new_start, s_err) = repair_3d_delete_recursive(start, deleted_name, sheet_names_after);
+            let (new_end, e_err) = repair_3d_delete_recursive(end, deleted_name, sheet_names_after);
+            (ParserExpr::Range {
+                sheet: sheet.clone(),
+                start: Box::new(new_start),
+                end: Box::new(new_end),
+            }, s_err || e_err)
+        }
+        // Leaf nodes — no 3D refs to repair
+        _ => (ast.clone(), false),
+    }
+}
+
+/// Finds the sheet adjacent to the deleted one, constrained by the other bookend.
+/// If `toward_start` is true, finds the first sheet in post-delete order.
+/// If `toward_start` is false, finds the last sheet before the other bookend.
+fn find_adjacent_sheet(
+    _deleted_name: &str,
+    other_bookend: &str,
+    sheet_names_after: &[String],
+    toward_start: bool,
+) -> Option<String> {
+    // The remaining bookend is `other_bookend`. We just need the first (or last)
+    // sheet in the post-delete order. Since the deleted sheet is already removed
+    // from sheet_names_after, the adjacent sheet is the first/last in the range
+    // that includes the other bookend.
+    let other_upper = other_bookend.to_uppercase();
+    let other_idx = sheet_names_after.iter()
+        .position(|s| s.to_uppercase() == other_upper)?;
+
+    if toward_start {
+        // The start bookend was deleted — new start is the sheet at the same position
+        // (which was the next sheet after the deleted one in the original order)
+        // In the simplest case, the first sheet in the remaining names works
+        if other_idx > 0 {
+            Some(sheet_names_after[0].clone())
+        } else {
+            Some(sheet_names_after[0].clone())
+        }
+    } else {
+        // The end bookend was deleted — new end is the sheet just before other_bookend's position
+        // in the post-delete order, or the last sheet
+        if other_idx < sheet_names_after.len() - 1 {
+            Some(sheet_names_after[sheet_names_after.len() - 1].clone())
+        } else {
+            Some(sheet_names_after[sheet_names_after.len() - 1].clone())
+        }
+    }
+}
+
+/// Repairs 3D reference bookends in a formula after a sheet is renamed.
+/// Updates any bookend that matches the old name to use the new name.
+pub fn repair_3d_refs_on_rename(formula: &str, old_name: &str, new_name: &str) -> String {
+    let ast = match parse_formula(formula) {
+        Ok(ast) => ast,
+        Err(_) => return formula.to_string(),
+    };
+
+    let new_ast = repair_3d_rename_recursive(&ast, old_name, new_name);
+    format!("={}", expression_to_formula(&new_ast))
+}
+
+/// Recursively walks a parser AST and updates Sheet3DRef bookend names.
+fn repair_3d_rename_recursive(ast: &ParserExpr, old_name: &str, new_name: &str) -> ParserExpr {
+    let old_upper = old_name.to_uppercase();
+    match ast {
+        ParserExpr::Sheet3DRef { start_sheet, end_sheet, reference } => {
+            let new_start = if start_sheet.to_uppercase() == old_upper {
+                new_name.to_string()
+            } else {
+                start_sheet.clone()
+            };
+            let new_end = if end_sheet.to_uppercase() == old_upper {
+                new_name.to_string()
+            } else {
+                end_sheet.clone()
+            };
+            ParserExpr::Sheet3DRef {
+                start_sheet: new_start,
+                end_sheet: new_end,
+                reference: Box::new(repair_3d_rename_recursive(reference, old_name, new_name)),
+            }
+        }
+        // Also update regular cross-sheet refs (CellRef, Range, ColumnRef, RowRef with sheet=Some)
+        ParserExpr::CellRef { sheet: Some(s), col, row, col_absolute, row_absolute } => {
+            let new_sheet = if s.to_uppercase() == old_upper {
+                new_name.to_string()
+            } else {
+                s.clone()
+            };
+            ParserExpr::CellRef {
+                sheet: Some(new_sheet),
+                col: col.clone(),
+                row: *row,
+                col_absolute: *col_absolute,
+                row_absolute: *row_absolute,
+            }
+        }
+        ParserExpr::Range { sheet: Some(s), start, end } => {
+            let new_sheet = if s.to_uppercase() == old_upper {
+                new_name.to_string()
+            } else {
+                s.clone()
+            };
+            ParserExpr::Range {
+                sheet: Some(new_sheet),
+                start: Box::new(repair_3d_rename_recursive(start, old_name, new_name)),
+                end: Box::new(repair_3d_rename_recursive(end, old_name, new_name)),
+            }
+        }
+        ParserExpr::ColumnRef { sheet: Some(s), start_col, end_col, start_absolute, end_absolute } => {
+            let new_sheet = if s.to_uppercase() == old_upper {
+                new_name.to_string()
+            } else {
+                s.clone()
+            };
+            ParserExpr::ColumnRef {
+                sheet: Some(new_sheet),
+                start_col: start_col.clone(),
+                end_col: end_col.clone(),
+                start_absolute: *start_absolute,
+                end_absolute: *end_absolute,
+            }
+        }
+        ParserExpr::RowRef { sheet: Some(s), start_row, end_row, start_absolute, end_absolute } => {
+            let new_sheet = if s.to_uppercase() == old_upper {
+                new_name.to_string()
+            } else {
+                s.clone()
+            };
+            ParserExpr::RowRef {
+                sheet: Some(new_sheet),
+                start_row: *start_row,
+                end_row: *end_row,
+                start_absolute: *start_absolute,
+                end_absolute: *end_absolute,
+            }
+        }
+        ParserExpr::BinaryOp { left, op, right } => ParserExpr::BinaryOp {
+            left: Box::new(repair_3d_rename_recursive(left, old_name, new_name)),
+            op: *op,
+            right: Box::new(repair_3d_rename_recursive(right, old_name, new_name)),
+        },
+        ParserExpr::UnaryOp { op, operand } => ParserExpr::UnaryOp {
+            op: *op,
+            operand: Box::new(repair_3d_rename_recursive(operand, old_name, new_name)),
+        },
+        ParserExpr::FunctionCall { func, args } => ParserExpr::FunctionCall {
+            func: func.clone(),
+            args: args.iter().map(|a| repair_3d_rename_recursive(a, old_name, new_name)).collect(),
+        },
+        ParserExpr::Range { sheet: None, start, end } => ParserExpr::Range {
+            sheet: None,
+            start: Box::new(repair_3d_rename_recursive(start, old_name, new_name)),
+            end: Box::new(repair_3d_rename_recursive(end, old_name, new_name)),
+        },
+        // Leaf nodes — no changes
+        _ => ast.clone(),
+    }
+}
+
+/// Scans all formula cells across all grids and applies a repair function.
+/// Used by sheet delete/rename to update 3D reference bookends.
+pub fn repair_all_formulas(
+    grids: &mut [Grid],
+    repair_fn: &dyn Fn(&str) -> Option<String>,
+) {
+    for grid in grids.iter_mut() {
+        let formula_cells: Vec<((u32, u32), String)> = grid.cells.iter()
+            .filter_map(|((r, c), cell)| {
+                cell.formula.as_ref().map(|f| ((*r, *c), f.clone()))
+            })
+            .collect();
+
+        for ((row, col), formula) in formula_cells {
+            match repair_fn(&formula) {
+                Some(new_formula) => {
+                    if new_formula != formula {
+                        if let Some(cell) = grid.cells.get_mut(&(row, col)) {
+                            cell.formula = Some(new_formula);
+                            // Clear cached AST since formula changed
+                            cell.cached_ast = None;
+                        }
+                    }
+                }
+                None => {
+                    // Formula should become #REF!
+                    if let Some(cell) = grid.cells.get_mut(&(row, col)) {
+                        cell.value = CellValue::Error(CellError::Ref);
+                        cell.cached_ast = None;
+                    }
+                }
+            }
+        }
+    }
+}
+
 pub fn evaluate_formula(grid: &Grid, formula: &str) -> CellValue {
     match parse_formula(formula) {
         Ok(parser_ast) => {
@@ -1316,12 +1712,7 @@ pub fn evaluate_formula_multi_sheet(
             let current_grid = &grids[current_sheet_index];
             let current_sheet_name = &sheet_names[current_sheet_index];
 
-            let mut context = engine::MultiSheetContext::new(current_sheet_name.clone());
-            for (i, grid) in grids.iter().enumerate() {
-                if i < sheet_names.len() {
-                    context.add_grid(sheet_names[i].clone(), grid);
-                }
-            }
+            let context = create_multi_sheet_context(grids, sheet_names, current_sheet_name);
 
             let evaluator = Evaluator::with_multi_sheet(current_grid, context);
             evaluator.evaluate(&engine_ast).to_cell_value()
@@ -1348,12 +1739,7 @@ pub fn evaluate_formula_multi_sheet_with_ast(
     let current_grid = &grids[current_sheet_index];
     let current_sheet_name = &sheet_names[current_sheet_index];
 
-    let mut context = engine::MultiSheetContext::new(current_sheet_name.clone());
-    for (i, grid) in grids.iter().enumerate() {
-        if i < sheet_names.len() {
-            context.add_grid(sheet_names[i].clone(), grid);
-        }
-    }
+    let context = create_multi_sheet_context(grids, sheet_names, current_sheet_name);
 
     let evaluator = Evaluator::with_multi_sheet(current_grid, context);
     evaluator.evaluate(ast).to_cell_value()
@@ -1404,6 +1790,8 @@ pub fn create_multi_sheet_context<'a>(
             context.add_grid(sheet_names[i].clone(), grid);
         }
     }
+    // Populate sheet_order for 3D reference evaluation
+    context.sheet_order = sheet_names.to_vec();
     context
 }
 

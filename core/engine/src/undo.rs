@@ -246,6 +246,7 @@ mod tests {
             formula: None,
             value: CellValue::Number(val),
             style_index: 0,
+            cached_ast: None,
         }
     }
 

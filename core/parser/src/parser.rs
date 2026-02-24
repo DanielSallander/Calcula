@@ -284,11 +284,26 @@ impl<'a> Parser<'a> {
                 Ok(Expression::Literal(Value::Boolean(b)))
             }
 
-            // Quoted identifier - must be a sheet reference
-            Token::QuotedIdentifier(sheet_name) => {
+            // Quoted identifier - sheet reference or 3D sheet range reference
+            Token::QuotedIdentifier(name) => {
                 self.advance();
                 self.expect(Token::Exclamation)?;
-                self.parse_sheet_reference(sheet_name)
+
+                // Check for 3D reference: if the quoted identifier contains ':'
+                // it is a sheet range like 'Jan:Dec'!A1 or 'Jan 2023:Dec 2023'!A1
+                if let Some(colon_pos) = name.find(':') {
+                    let start_sheet = name[..colon_pos].to_string();
+                    let end_sheet = name[colon_pos + 1..].to_string();
+                    let inner = self.parse_reference_only()?;
+                    return Ok(Expression::Sheet3DRef {
+                        start_sheet,
+                        end_sheet,
+                        reference: Box::new(inner),
+                    });
+                }
+
+                // Single sheet reference (existing behavior)
+                self.parse_sheet_reference(name)
             }
 
             // Identifier: could be a cell reference, range, column reference,
@@ -316,6 +331,29 @@ impl<'a> Parser<'a> {
                 // Names containing _, ., \, or with column part beyond XFD (16384)
                 // are treated as named references (defined names).
                 if !Self::is_valid_cell_ref_identifier(&name) {
+                    // Before returning NamedRef, check for 3D reference pattern:
+                    // Sheet1:Sheet3!ref (unquoted sheet names that aren't valid cell refs)
+                    if self.current_token == Token::Colon {
+                        self.advance(); // consume ':'
+                        if let Token::Identifier(end_name) = self.current_token.clone() {
+                            self.advance(); // consume end sheet name
+                            if self.current_token == Token::Exclamation {
+                                self.advance(); // consume '!'
+                                let inner = self.parse_reference_only()?;
+                                return Ok(Expression::Sheet3DRef {
+                                    start_sheet: name.to_uppercase(),
+                                    end_sheet: end_name.to_uppercase(),
+                                    reference: Box::new(inner),
+                                });
+                            }
+                            return Err(ParseError::new(format!(
+                                "Expected '!' after sheet range '{}:{}'", name, end_name
+                            )));
+                        }
+                        return Err(ParseError::new(format!(
+                            "Unexpected ':' after '{}'", name
+                        )));
+                    }
                     return Ok(Expression::NamedRef { name });
                 }
 
@@ -536,6 +574,77 @@ impl<'a> Parser<'a> {
         }
     }
 
+    /// Parses a reference after a sheet prefix (or 3D sheet range prefix) has been consumed.
+    /// Returns CellRef, Range, ColumnRef, or RowRef with sheet=None.
+    /// This is the same logic as parse_sheet_reference but always uses sheet=None,
+    /// since the sheet context is provided by the caller (e.g., Sheet3DRef wrapper).
+    fn parse_reference_only(&mut self) -> ParseResult<Expression> {
+        match self.current_token.clone() {
+            // $ - absolute reference
+            Token::Dollar => {
+                self.advance();
+                self.parse_absolute_reference(None)
+            }
+
+            // Number - must be a row reference like 1:5
+            Token::Number(n) => {
+                self.advance();
+                if self.current_token == Token::Colon {
+                    self.parse_row_reference(None, n, false)
+                } else {
+                    Err(ParseError::new(
+                        "Expected ':' after row number in reference",
+                    ))
+                }
+            }
+
+            // Identifier - cell ref, range, or column ref
+            Token::Identifier(name) => {
+                self.advance();
+
+                if self.current_token == Token::Colon {
+                    self.parse_range_or_column_ref(None, name, false)
+                } else {
+                    // Handle column-only identifier followed by $ (absolute row marker)
+                    // e.g., D$2
+                    let is_col_only = name.chars().all(|c| c.is_ascii_alphabetic());
+                    if is_col_only && self.current_token == Token::Dollar {
+                        self.advance(); // consume $
+                        if let Token::Number(n) = self.current_token.clone() {
+                            self.advance();
+                            let row = n as u32;
+                            if row == 0 {
+                                return Err(ParseError::new("Row number must be >= 1"));
+                            }
+                            if self.current_token == Token::Colon {
+                                return self.parse_range_continuation(
+                                    None, name, row, false, true,
+                                );
+                            }
+                            return Ok(Expression::CellRef {
+                                sheet: None,
+                                col: name.to_uppercase(),
+                                row,
+                                col_absolute: false,
+                                row_absolute: true,
+                            });
+                        }
+                        return Err(ParseError::new(format!(
+                            "Expected row number after $, found {:?}",
+                            self.current_token
+                        )));
+                    }
+                    self.parse_cell_ref(None, name, false, false)
+                }
+            }
+
+            _ => Err(ParseError::new(format!(
+                "Expected cell reference after '!', found {:?}",
+                self.current_token
+            ))),
+        }
+    }
+
     /// Parses a cell reference from an identifier string like "A1" or "AA100".
     fn parse_cell_ref(
         &self, 
@@ -597,6 +706,18 @@ impl<'a> Parser<'a> {
         let end_has_dollar_row = end_is_col_only && self.current_token == Token::Dollar;
 
         if start_is_col_only && end_is_col_only && !end_has_dollar_row {
+            // Check for 3D reference: Sheet1:Sheet2!ref
+            // If the next token is '!', this is a 3D sheet range, not a column reference.
+            if self.current_token == Token::Exclamation {
+                self.advance(); // consume !
+                let inner = self.parse_reference_only()?;
+                return Ok(Expression::Sheet3DRef {
+                    start_sheet: start_identifier.to_uppercase(),
+                    end_sheet: end_identifier.to_uppercase(),
+                    reference: Box::new(inner),
+                });
+            }
+
             // Column reference like A:B or $A:$B
             Ok(Expression::ColumnRef {
                 sheet,

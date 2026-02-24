@@ -87,6 +87,16 @@ pub enum Expression {
     /// The name is stored uppercased for case-insensitive matching.
     NamedRef { name: String },
 
+    /// A 3D (cross-sheet) reference like Sheet1:Sheet5!A1 or 'Jan:Dec'!A1:B10.
+    /// Aggregates data across the same spatial coordinates on multiple contiguous
+    /// worksheet tabs. The inner reference (CellRef, Range, ColumnRef, or RowRef)
+    /// has sheet=None because the sheet range is defined by start_sheet..end_sheet.
+    Sheet3DRef {
+        start_sheet: String,
+        end_sheet: String,
+        reference: Box<Expression>,
+    },
+
     /// A structured table reference like Table1[Revenue], [@Price], or Table1[#All].
     /// Resolved during the table-reference resolution pass before evaluation.
     TableRef {

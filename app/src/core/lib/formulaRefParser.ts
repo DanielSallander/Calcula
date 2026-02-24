@@ -42,22 +42,58 @@ function letterToColumnIndex(letters: string): number {
 }
 
 /**
- * Extract sheet name from a matched reference prefix.
- * Handles both quoted ('Sheet Name'!) and unquoted (Sheet1!) formats.
+ * Result of extracting sheet info from a reference prefix.
+ * For 3D references (Sheet1:Sheet3!), both startSheet and endSheet are set.
+ * For regular cross-sheet references (Sheet1!), only startSheet is set.
  */
-function extractSheetName(prefix: string | undefined): string | undefined {
-  if (!prefix) return undefined;
+interface SheetPrefixInfo {
+  /** The sheet name (or start sheet for 3D refs) */
+  sheetName?: string;
+  /** The end sheet name for 3D references */
+  endSheetName?: string;
+  /** Whether this is a 3D (cross-sheet range) reference */
+  is3D: boolean;
+}
+
+/**
+ * Extract sheet name from a matched reference prefix.
+ * Handles: unquoted (Sheet1!), quoted ('Sheet Name'!),
+ * 3D unquoted (Sheet1:Sheet3!), and 3D quoted ('Jan:Dec'!).
+ */
+function extractSheetInfo(prefix: string | undefined): SheetPrefixInfo {
+  if (!prefix) return { is3D: false };
 
   // Remove the trailing !
   const withoutBang = prefix.slice(0, -1);
 
+  let name: string;
   // Check if it's quoted
   if (withoutBang.startsWith("'") && withoutBang.endsWith("'")) {
     // Remove quotes and unescape internal quotes
-    return withoutBang.slice(1, -1).replace(/''/g, "'");
+    name = withoutBang.slice(1, -1).replace(/''/g, "'");
+  } else {
+    name = withoutBang;
   }
 
-  return withoutBang;
+  // Check for 3D reference (contains colon separating two sheet names)
+  const colonIdx = name.indexOf(":");
+  if (colonIdx > 0 && colonIdx < name.length - 1) {
+    return {
+      sheetName: name.substring(0, colonIdx),
+      endSheetName: name.substring(colonIdx + 1),
+      is3D: true,
+    };
+  }
+
+  return { sheetName: name, is3D: false };
+}
+
+/**
+ * Legacy helper: Extract sheet name from a matched reference prefix.
+ * For backward compatibility with code that only needs the sheet name string.
+ */
+function extractSheetName(prefix: string | undefined): string | undefined {
+  return extractSheetInfo(prefix).sheetName;
 }
 
 /**
@@ -77,13 +113,13 @@ export function parseFormulaReferences(
   const refs: FormulaReference[] = [];
 
   // Match cell references optionally preceded by a sheet prefix.
-  // Group 1: Sheet prefix with ! (optional) - e.g., "Sheet1!" or "'Sheet Name'!"
+  // Group 1: Sheet prefix with ! (optional) - e.g., "Sheet1!", "'Sheet Name'!", "Sheet1:Sheet3!", "'Jan:Dec'!"
   // Group 2: First column letters
   // Group 3: First row number
   // Group 4: Second column letters (for ranges, optional)
   // Group 5: Second row number (for ranges, optional)
   const refPattern =
-    /((?:'[^']*'|[A-Za-z_][A-Za-z0-9_]*)!)?\$?([A-Z]{1,3})\$?(\d{1,7})(?::\$?([A-Z]{1,3})\$?(\d{1,7}))?/gi;
+    /((?:'[^']*'|[A-Za-z_][A-Za-z0-9_]*(?::[A-Za-z_][A-Za-z0-9_]*)?)!)?\$?([A-Z]{1,3})\$?(\d{1,7})(?::\$?([A-Z]{1,3})\$?(\d{1,7}))?/gi;
 
   let match;
   let colorIndex = 0;
@@ -132,18 +168,17 @@ export function parseFormulaReferencesWithPositions(
   const refs: FormulaReferenceWithPosition[] = [];
 
   // Enhanced pattern that captures the $ markers for absolute references
-  // Group 1: Sheet prefix with ! (optional)
+  // Group 1: Sheet prefix with ! (optional) - supports 3D refs (Sheet1:Sheet3! or 'Jan:Dec'!)
   // Group 2: $ before first column (optional)
   // Group 3: First column letters
   // Group 4: $ before first row (optional)
   // Group 5: First row number
-  // Group 6: Second part of range (optional): :$?COL$?ROW
-  // Group 7: $ before second column (optional)
-  // Group 8: Second column letters (optional)
-  // Group 9: $ before second row (optional)
-  // Group 10: Second row number (optional)
+  // Group 6: $ before second column (optional, range part)
+  // Group 7: Second column letters (optional)
+  // Group 8: $ before second row (optional)
+  // Group 9: Second row number (optional)
   const refPattern =
-    /((?:'[^']*'|[A-Za-z_][A-Za-z0-9_]*)!)?(\$)?([A-Z]{1,3})(\$)?(\d{1,7})(?::(\$)?([A-Z]{1,3})(\$)?(\d{1,7}))?/gi;
+    /((?:'[^']*'|[A-Za-z_][A-Za-z0-9_]*(?::[A-Za-z_][A-Za-z0-9_]*)?)!)?(\$)?([A-Z]{1,3})(\$)?(\d{1,7})(?::(\$)?([A-Z]{1,3})(\$)?(\d{1,7}))?/gi;
 
   let match;
   let colorIndex = 0;

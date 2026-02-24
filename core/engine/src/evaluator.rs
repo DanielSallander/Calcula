@@ -145,6 +145,9 @@ pub struct MultiSheetContext<'a> {
     pub grids: HashMap<String, &'a Grid>,
     /// The current/default sheet name (for references without sheet prefix)
     pub current_sheet: String,
+    /// Ordered list of sheet names matching the workbook's tab order.
+    /// Required for 3D references to determine which sheets fall between bookends.
+    pub sheet_order: Vec<String>,
 }
 
 impl<'a> MultiSheetContext<'a> {
@@ -153,6 +156,7 @@ impl<'a> MultiSheetContext<'a> {
         MultiSheetContext {
             grids: HashMap::new(),
             current_sheet,
+            sheet_order: Vec::new(),
         }
     }
 
@@ -170,6 +174,27 @@ impl<'a> MultiSheetContext<'a> {
     /// Gets the current/default grid.
     pub fn get_current_grid(&self) -> Option<&&'a Grid> {
         self.grids.get(&self.current_sheet.to_uppercase())
+    }
+
+    /// Gets all sheet names between start and end (inclusive) based on tab order.
+    /// Returns an empty Vec if either sheet is not found in the order.
+    pub fn get_sheets_in_range(&self, start: &str, end: &str) -> Vec<String> {
+        let start_upper = start.to_uppercase();
+        let end_upper = end.to_uppercase();
+
+        let start_idx = self.sheet_order.iter()
+            .position(|s| s.to_uppercase() == start_upper);
+        let end_idx = self.sheet_order.iter()
+            .position(|s| s.to_uppercase() == end_upper);
+
+        match (start_idx, end_idx) {
+            (Some(si), Some(ei)) => {
+                let min = si.min(ei);
+                let max = si.max(ei);
+                self.sheet_order[min..=max].to_vec()
+            }
+            _ => Vec::new(),
+        }
     }
 }
 
@@ -224,6 +249,9 @@ impl<'a> Evaluator<'a> {
             Expression::BinaryOp { left, op, right } => self.eval_binary_op(left, op, right),
             Expression::UnaryOp { op, operand } => self.eval_unary_op(op, operand),
             Expression::FunctionCall { func, args } => self.eval_function(func, args),
+            Expression::Sheet3DRef { start_sheet, end_sheet, reference } => {
+                self.eval_3d_ref(start_sheet, end_sheet, reference)
+            }
             Expression::TableRef { .. } => {
                 // TableRef should be resolved before evaluation reaches the engine.
                 // If it arrives here unresolved, return #NAME? error.
@@ -401,6 +429,47 @@ impl<'a> Evaluator<'a> {
         }
 
         EvalResult::Array(values)
+    }
+
+    /// Evaluates a 3D (cross-sheet) reference.
+    /// Collects values from the same spatial coordinates across all sheets
+    /// between start_sheet and end_sheet (inclusive, based on tab order).
+    fn eval_3d_ref(
+        &self,
+        start_sheet: &str,
+        end_sheet: &str,
+        reference: &Expression,
+    ) -> EvalResult {
+        let ctx = match &self.multi_sheet {
+            Some(ctx) => ctx,
+            None => return EvalResult::Error(CellError::Ref),
+        };
+
+        // Wildcard: "*" means all sheets in the workbook
+        let sheets = if start_sheet == "*" && end_sheet == "*" {
+            ctx.sheet_order.clone()
+        } else {
+            ctx.get_sheets_in_range(start_sheet, end_sheet)
+        };
+        if sheets.is_empty() {
+            return EvalResult::Error(CellError::Ref);
+        }
+
+        // Collect values from each sheet by evaluating the inner reference
+        // against that sheet's grid using a temporary single-sheet evaluator.
+        let mut all_values = Vec::new();
+        for sheet_name in &sheets {
+            if let Some(grid) = ctx.get_grid(sheet_name) {
+                let sheet_eval = Evaluator::new(grid);
+                let result = sheet_eval.evaluate(reference);
+                match result {
+                    EvalResult::Array(vals) => all_values.extend(vals),
+                    other => all_values.push(other),
+                }
+            }
+        }
+
+        EvalResult::Array(all_values)
     }
 
     /// Evaluates a binary operation.
@@ -2127,5 +2196,316 @@ mod tests {
         ]);
         let result = eval.evaluate(&expr);
         assert_eq!(result, EvalResult::Error(CellError::Value));
+    }
+
+    // ==================== 3D Reference Tests ====================
+
+    /// Helper: creates three grids with data in A1 for 3D reference tests.
+    /// Sheet1!A1 = 10, Sheet2!A1 = 20, Sheet3!A1 = 30
+    fn make_3d_grids() -> (Grid, Grid, Grid) {
+        let mut g1 = Grid::new();
+        g1.set_cell(0, 0, Cell::new_number(10.0));
+
+        let mut g2 = Grid::new();
+        g2.set_cell(0, 0, Cell::new_number(20.0));
+
+        let mut g3 = Grid::new();
+        g3.set_cell(0, 0, Cell::new_number(30.0));
+
+        (g1, g2, g3)
+    }
+
+    /// Helper: builds a MultiSheetContext with sheet_order for 3D tests.
+    fn make_3d_context<'a>(
+        g1: &'a Grid,
+        g2: &'a Grid,
+        g3: &'a Grid,
+    ) -> MultiSheetContext<'a> {
+        let mut ctx = MultiSheetContext::new("Sheet1".to_string());
+        ctx.add_grid("Sheet1".to_string(), g1);
+        ctx.add_grid("Sheet2".to_string(), g2);
+        ctx.add_grid("Sheet3".to_string(), g3);
+        ctx.sheet_order = vec![
+            "Sheet1".to_string(),
+            "Sheet2".to_string(),
+            "Sheet3".to_string(),
+        ];
+        ctx
+    }
+
+    #[test]
+    fn test_3d_ref_single_cell_sum() {
+        // =SUM(Sheet1:Sheet3!A1) should sum 10 + 20 + 30 = 60
+        let (g1, g2, g3) = make_3d_grids();
+        let ctx = make_3d_context(&g1, &g2, &g3);
+        let eval = Evaluator::with_multi_sheet(&g1, ctx);
+
+        let expr = Expression::FunctionCall {
+            func: BuiltinFunction::Sum,
+            args: vec![Expression::Sheet3DRef {
+                start_sheet: "Sheet1".to_string(),
+                end_sheet: "Sheet3".to_string(),
+                reference: Box::new(Expression::CellRef {
+                    sheet: None,
+                    col: "A".to_string(),
+                    row: 1,
+                }),
+            }],
+        };
+        let result = eval.evaluate(&expr);
+        assert_eq!(result, EvalResult::Number(60.0));
+    }
+
+    #[test]
+    fn test_3d_ref_partial_range() {
+        // =SUM(Sheet1:Sheet2!A1) should sum 10 + 20 = 30 (only first two sheets)
+        let (g1, g2, g3) = make_3d_grids();
+        let ctx = make_3d_context(&g1, &g2, &g3);
+        let eval = Evaluator::with_multi_sheet(&g1, ctx);
+
+        let expr = Expression::FunctionCall {
+            func: BuiltinFunction::Sum,
+            args: vec![Expression::Sheet3DRef {
+                start_sheet: "Sheet1".to_string(),
+                end_sheet: "Sheet2".to_string(),
+                reference: Box::new(Expression::CellRef {
+                    sheet: None,
+                    col: "A".to_string(),
+                    row: 1,
+                }),
+            }],
+        };
+        let result = eval.evaluate(&expr);
+        assert_eq!(result, EvalResult::Number(30.0));
+    }
+
+    #[test]
+    fn test_3d_ref_reversed_bookends() {
+        // =SUM(Sheet3:Sheet1!A1) - reversed order should still include all 3 sheets
+        let (g1, g2, g3) = make_3d_grids();
+        let ctx = make_3d_context(&g1, &g2, &g3);
+        let eval = Evaluator::with_multi_sheet(&g1, ctx);
+
+        let expr = Expression::FunctionCall {
+            func: BuiltinFunction::Sum,
+            args: vec![Expression::Sheet3DRef {
+                start_sheet: "Sheet3".to_string(),
+                end_sheet: "Sheet1".to_string(),
+                reference: Box::new(Expression::CellRef {
+                    sheet: None,
+                    col: "A".to_string(),
+                    row: 1,
+                }),
+            }],
+        };
+        let result = eval.evaluate(&expr);
+        assert_eq!(result, EvalResult::Number(60.0));
+    }
+
+    #[test]
+    fn test_3d_ref_with_range() {
+        // =SUM(Sheet1:Sheet3!A1:A2) with A1 and A2 on each sheet
+        let mut g1 = Grid::new();
+        g1.set_cell(0, 0, Cell::new_number(1.0));
+        g1.set_cell(1, 0, Cell::new_number(2.0));
+
+        let mut g2 = Grid::new();
+        g2.set_cell(0, 0, Cell::new_number(10.0));
+        g2.set_cell(1, 0, Cell::new_number(20.0));
+
+        let mut g3 = Grid::new();
+        g3.set_cell(0, 0, Cell::new_number(100.0));
+        g3.set_cell(1, 0, Cell::new_number(200.0));
+
+        let mut ctx = MultiSheetContext::new("Sheet1".to_string());
+        ctx.add_grid("Sheet1".to_string(), &g1);
+        ctx.add_grid("Sheet2".to_string(), &g2);
+        ctx.add_grid("Sheet3".to_string(), &g3);
+        ctx.sheet_order = vec![
+            "Sheet1".to_string(),
+            "Sheet2".to_string(),
+            "Sheet3".to_string(),
+        ];
+
+        let eval = Evaluator::with_multi_sheet(&g1, ctx);
+
+        // =SUM(Sheet1:Sheet3!A1:A2) = (1+2) + (10+20) + (100+200) = 333
+        let expr = Expression::FunctionCall {
+            func: BuiltinFunction::Sum,
+            args: vec![Expression::Sheet3DRef {
+                start_sheet: "Sheet1".to_string(),
+                end_sheet: "Sheet3".to_string(),
+                reference: Box::new(Expression::Range {
+                    sheet: None,
+                    start: Box::new(Expression::CellRef {
+                        sheet: None,
+                        col: "A".to_string(),
+                        row: 1,
+                    }),
+                    end: Box::new(Expression::CellRef {
+                        sheet: None,
+                        col: "A".to_string(),
+                        row: 2,
+                    }),
+                }),
+            }],
+        };
+        let result = eval.evaluate(&expr);
+        assert_eq!(result, EvalResult::Number(333.0));
+    }
+
+    #[test]
+    fn test_3d_ref_average() {
+        // =AVERAGE(Sheet1:Sheet3!A1) = (10+20+30)/3 = 20
+        let (g1, g2, g3) = make_3d_grids();
+        let ctx = make_3d_context(&g1, &g2, &g3);
+        let eval = Evaluator::with_multi_sheet(&g1, ctx);
+
+        let expr = Expression::FunctionCall {
+            func: BuiltinFunction::Average,
+            args: vec![Expression::Sheet3DRef {
+                start_sheet: "Sheet1".to_string(),
+                end_sheet: "Sheet3".to_string(),
+                reference: Box::new(Expression::CellRef {
+                    sheet: None,
+                    col: "A".to_string(),
+                    row: 1,
+                }),
+            }],
+        };
+        let result = eval.evaluate(&expr);
+        assert_eq!(result, EvalResult::Number(20.0));
+    }
+
+    #[test]
+    fn test_3d_ref_max_min() {
+        // =MAX(Sheet1:Sheet3!A1) = 30, =MIN(Sheet1:Sheet3!A1) = 10
+        let (g1, g2, g3) = make_3d_grids();
+
+        // MAX
+        let ctx = make_3d_context(&g1, &g2, &g3);
+        let eval = Evaluator::with_multi_sheet(&g1, ctx);
+
+        let expr_max = Expression::FunctionCall {
+            func: BuiltinFunction::Max,
+            args: vec![Expression::Sheet3DRef {
+                start_sheet: "Sheet1".to_string(),
+                end_sheet: "Sheet3".to_string(),
+                reference: Box::new(Expression::CellRef {
+                    sheet: None,
+                    col: "A".to_string(),
+                    row: 1,
+                }),
+            }],
+        };
+        assert_eq!(eval.evaluate(&expr_max), EvalResult::Number(30.0));
+
+        // MIN (need new context since with_multi_sheet takes ownership)
+        let ctx2 = make_3d_context(&g1, &g2, &g3);
+        let eval2 = Evaluator::with_multi_sheet(&g1, ctx2);
+
+        let expr_min = Expression::FunctionCall {
+            func: BuiltinFunction::Min,
+            args: vec![Expression::Sheet3DRef {
+                start_sheet: "Sheet1".to_string(),
+                end_sheet: "Sheet3".to_string(),
+                reference: Box::new(Expression::CellRef {
+                    sheet: None,
+                    col: "A".to_string(),
+                    row: 1,
+                }),
+            }],
+        };
+        assert_eq!(eval2.evaluate(&expr_min), EvalResult::Number(10.0));
+    }
+
+    #[test]
+    fn test_3d_ref_count() {
+        // =COUNT(Sheet1:Sheet3!A1) = 3
+        let (g1, g2, g3) = make_3d_grids();
+        let ctx = make_3d_context(&g1, &g2, &g3);
+        let eval = Evaluator::with_multi_sheet(&g1, ctx);
+
+        let expr = Expression::FunctionCall {
+            func: BuiltinFunction::Count,
+            args: vec![Expression::Sheet3DRef {
+                start_sheet: "Sheet1".to_string(),
+                end_sheet: "Sheet3".to_string(),
+                reference: Box::new(Expression::CellRef {
+                    sheet: None,
+                    col: "A".to_string(),
+                    row: 1,
+                }),
+            }],
+        };
+        let result = eval.evaluate(&expr);
+        assert_eq!(result, EvalResult::Number(3.0));
+    }
+
+    #[test]
+    fn test_3d_ref_invalid_sheet_returns_ref_error() {
+        // =SUM(Sheet1:NonExistent!A1) -> #REF! (unknown bookend)
+        let (g1, g2, g3) = make_3d_grids();
+        let ctx = make_3d_context(&g1, &g2, &g3);
+        let eval = Evaluator::with_multi_sheet(&g1, ctx);
+
+        let expr = Expression::FunctionCall {
+            func: BuiltinFunction::Sum,
+            args: vec![Expression::Sheet3DRef {
+                start_sheet: "Sheet1".to_string(),
+                end_sheet: "NonExistent".to_string(),
+                reference: Box::new(Expression::CellRef {
+                    sheet: None,
+                    col: "A".to_string(),
+                    row: 1,
+                }),
+            }],
+        };
+        let result = eval.evaluate(&expr);
+        // The 3D ref returns Array([]); SUM of empty = 0
+        // But get_sheets_in_range returns empty vec, so eval_3d_ref returns #REF!
+        assert_eq!(result, EvalResult::Error(CellError::Ref));
+    }
+
+    #[test]
+    fn test_3d_ref_no_multi_sheet_context() {
+        // 3D ref without multi-sheet context -> #REF!
+        let grid = Grid::new();
+        let eval = Evaluator::new(&grid);
+
+        let expr = Expression::Sheet3DRef {
+            start_sheet: "Sheet1".to_string(),
+            end_sheet: "Sheet3".to_string(),
+            reference: Box::new(Expression::CellRef {
+                sheet: None,
+                col: "A".to_string(),
+                row: 1,
+            }),
+        };
+        let result = eval.evaluate(&expr);
+        assert_eq!(result, EvalResult::Error(CellError::Ref));
+    }
+
+    #[test]
+    fn test_3d_ref_case_insensitive() {
+        // Sheet names should be case-insensitive
+        let (g1, g2, g3) = make_3d_grids();
+        let ctx = make_3d_context(&g1, &g2, &g3);
+        let eval = Evaluator::with_multi_sheet(&g1, ctx);
+
+        let expr = Expression::FunctionCall {
+            func: BuiltinFunction::Sum,
+            args: vec![Expression::Sheet3DRef {
+                start_sheet: "sheet1".to_string(),
+                end_sheet: "SHEET3".to_string(),
+                reference: Box::new(Expression::CellRef {
+                    sheet: None,
+                    col: "A".to_string(),
+                    row: 1,
+                }),
+            }],
+        };
+        let result = eval.evaluate(&expr);
+        assert_eq!(result, EvalResult::Number(60.0));
     }
 }

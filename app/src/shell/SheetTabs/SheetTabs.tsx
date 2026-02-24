@@ -166,13 +166,58 @@ export function SheetTabs({ onSheetChange }: SheetTabsProps): React.ReactElement
     [isInFormulaMode, activeIndex]
   );
 
-  const handleSheetClick = useCallback(
-    async (index: number) => {
-      if (index === activeIndex) return;
+  /**
+   * Format a sheet name for use in formula references.
+   * Quotes the name if it contains spaces or special characters.
+   */
+  const formatSheetForFormula = useCallback((name: string): string => {
+    if (/[\s'![\]]/.test(name) || /^\d/.test(name)) {
+      return `'${name.replace(/'/g, "''")}'`;
+    }
+    return name;
+  }, []);
 
-      console.log("[SheetTabs] Sheet click, index:", index, "isInFormulaMode:", isInFormulaMode);
+  const handleSheetClick = useCallback(
+    async (index: number, event?: React.MouseEvent) => {
+      if (index === activeIndex && !(event?.shiftKey && isInFormulaMode)) return;
+
+      console.log("[SheetTabs] Sheet click, index:", index, "isInFormulaMode:", isInFormulaMode, "shift:", event?.shiftKey);
 
       try {
+        // Shift+Click in formula mode: insert 3D reference prefix
+        if (isInFormulaMode && event?.shiftKey) {
+          const startSheet = sheets[activeIndex]?.name;
+          const endSheet = sheets[index]?.name;
+          if (startSheet && endSheet) {
+            // Build the 3D reference prefix
+            const needsQuoting = /[\s'![\]]/.test(startSheet) || /[\s'![\]]/.test(endSheet);
+            let prefix: string;
+            if (needsQuoting) {
+              prefix = `'${startSheet.replace(/'/g, "''")}:${endSheet.replace(/'/g, "''")}'!`;
+            } else {
+              prefix = `${startSheet}:${endSheet}!`;
+            }
+
+            // Insert the 3D prefix into the formula bar
+            const formulaBar = document.querySelector('[data-formula-bar="true"]') as HTMLInputElement;
+            if (formulaBar) {
+              const cursorPos = formulaBar.selectionStart ?? formulaBar.value.length;
+              const before = formulaBar.value.substring(0, cursorPos);
+              const after = formulaBar.value.substring(cursorPos);
+              formulaBar.value = before + prefix + after;
+              // Trigger input event so React picks up the change
+              formulaBar.dispatchEvent(new Event('input', { bubbles: true }));
+              // Position cursor after the prefix
+              const newPos = cursorPos + prefix.length;
+              formulaBar.setSelectionRange(newPos, newPos);
+              formulaBar.focus();
+            }
+
+            console.log("[SheetTabs] Inserted 3D reference prefix:", prefix);
+          }
+          return;
+        }
+
         // When in formula mode, we need special handling
         if (isInFormulaMode) {
           console.log("[SheetTabs] Formula mode - switching without reload");
@@ -472,7 +517,7 @@ export function SheetTabs({ onSheetChange }: SheetTabsProps): React.ReactElement
                 $isFormulaSource={isSourceSheet}
                 $isFormulaTarget={isTargetSheet}
                 onMouseDown={(e) => handleTabMouseDown(e, sheet.index)}
-                onClick={() => handleSheetClick(sheet.index)}
+                onClick={(e) => handleSheetClick(sheet.index, e)}
                 onContextMenu={(e) => handleContextMenu(e, sheet.index)}
                 onDoubleClick={() => handleDoubleClick(sheet.index)}
                 title={

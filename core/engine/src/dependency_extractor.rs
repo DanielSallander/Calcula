@@ -51,6 +51,14 @@ pub enum Expression {
         func: BuiltinFunction,
         args: Vec<Expression>,
     },
+    /// A 3D cross-sheet reference: Sheet1:Sheet5!A1 or 'Jan:Dec'!A1:B10.
+    /// The inner reference has sheet=None; the sheet range is on this node.
+    Sheet3DRef {
+        start_sheet: String,
+        end_sheet: String,
+        reference: Box<Expression>,
+    },
+
     /// A structured table reference (should be resolved before evaluation).
     /// If it reaches the engine unresolved, it produces a #NAME? error.
     TableRef {
@@ -181,6 +189,25 @@ pub struct SheetCellRef {
     pub sheet: Option<String>,
     pub row: u32,
     pub col: u32,
+}
+
+/// Gets all sheet names between start and end (inclusive) based on tab order.
+/// Returns an empty Vec if either sheet is not found.
+pub fn get_sheets_in_range(start: &str, end: &str, sheet_order: &[String]) -> Vec<String> {
+    let start_upper = start.to_uppercase();
+    let end_upper = end.to_uppercase();
+
+    let start_idx = sheet_order.iter().position(|s| s.to_uppercase() == start_upper);
+    let end_idx = sheet_order.iter().position(|s| s.to_uppercase() == end_upper);
+
+    match (start_idx, end_idx) {
+        (Some(si), Some(ei)) => {
+            let min = si.min(ei);
+            let max = si.max(ei);
+            sheet_order[min..=max].to_vec()
+        }
+        _ => Vec::new(),
+    }
 }
 
 /// Extracts all cell dependencies from an AST expression.
@@ -322,6 +349,12 @@ fn extract_recursive(expr: &Expression, deps: &mut HashSet<CellCoord>, bounds: G
             }
         }
 
+        // 3D references span multiple sheets - for backward compat (same-sheet only),
+        // extract the inner reference's cells without sheet context.
+        Expression::Sheet3DRef { reference, .. } => {
+            extract_recursive(reference, deps, bounds);
+        }
+
         // TableRef should be resolved before dependency extraction.
         // If still present, skip (will produce #NAME? during evaluation).
         Expression::TableRef { .. } => {}
@@ -436,9 +469,63 @@ fn extract_recursive_with_sheets(
             }
         }
 
+        // 3D references: extract the inner reference's cells tagged with each sheet
+        // in the range. Without sheet_order info, we tag with start and end sheets.
+        Expression::Sheet3DRef { start_sheet, end_sheet, reference } => {
+            // Extract the inner reference's cells (without sheet prefix)
+            let mut inner_deps = HashSet::new();
+            extract_recursive(reference, &mut inner_deps, bounds);
+
+            // Tag each cell with both bookend sheets as dependencies.
+            // Full expansion requires sheet_order which is not available here.
+            // The caller can use extract_3d_dependencies() for full expansion.
+            for (row, col) in &inner_deps {
+                deps.insert(SheetCellRef {
+                    sheet: Some(start_sheet.clone()),
+                    row: *row,
+                    col: *col,
+                });
+                deps.insert(SheetCellRef {
+                    sheet: Some(end_sheet.clone()),
+                    row: *row,
+                    col: *col,
+                });
+            }
+        }
+
         // TableRef should be resolved before dependency extraction.
         Expression::TableRef { .. } => {}
     }
+}
+
+/// Extracts all dependencies from a 3D reference, expanding across all sheets in range.
+/// This provides full expansion when sheet_order is known.
+pub fn extract_3d_dependencies(
+    start_sheet: &str,
+    end_sheet: &str,
+    inner_ref: &Expression,
+    sheet_order: &[String],
+    bounds: GridBounds,
+) -> HashSet<SheetCellRef> {
+    let mut deps = HashSet::new();
+    let sheets = get_sheets_in_range(start_sheet, end_sheet, sheet_order);
+
+    // Extract inner reference cells (without sheet context)
+    let mut inner_deps = HashSet::new();
+    extract_recursive(inner_ref, &mut inner_deps, bounds);
+
+    // Tag each cell with each sheet in the range
+    for sheet_name in sheets {
+        for (row, col) in &inner_deps {
+            deps.insert(SheetCellRef {
+                sheet: Some(sheet_name.clone()),
+                row: *row,
+                col: *col,
+            });
+        }
+    }
+
+    deps
 }
 
 #[cfg(test)]
@@ -752,6 +839,170 @@ mod tests {
         assert_eq!(deps.len(), 4);
         for dep in &deps {
             assert_eq!(dep.sheet, Some("Sheet2".to_string()));
+        }
+    }
+
+    // ==================== 3D Reference Dependency Tests ====================
+
+    #[test]
+    fn test_get_sheets_in_range() {
+        let order = vec![
+            "Sheet1".to_string(),
+            "Sheet2".to_string(),
+            "Sheet3".to_string(),
+            "Sheet4".to_string(),
+        ];
+
+        // Normal range
+        let result = get_sheets_in_range("Sheet1", "Sheet3", &order);
+        assert_eq!(result, vec!["Sheet1", "Sheet2", "Sheet3"]);
+
+        // Reversed range
+        let result = get_sheets_in_range("Sheet3", "Sheet1", &order);
+        assert_eq!(result, vec!["Sheet1", "Sheet2", "Sheet3"]);
+
+        // Single sheet
+        let result = get_sheets_in_range("Sheet2", "Sheet2", &order);
+        assert_eq!(result, vec!["Sheet2"]);
+
+        // Non-existent sheet
+        let result = get_sheets_in_range("Sheet1", "NoSheet", &order);
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn test_get_sheets_in_range_case_insensitive() {
+        let order = vec![
+            "Sheet1".to_string(),
+            "Sheet2".to_string(),
+            "Sheet3".to_string(),
+        ];
+
+        let result = get_sheets_in_range("sheet1", "SHEET3", &order);
+        assert_eq!(result, vec!["Sheet1", "Sheet2", "Sheet3"]);
+    }
+
+    #[test]
+    fn test_extract_3d_ref_backward_compat() {
+        // 3D ref in backward-compat mode (no sheet info, just cell coords)
+        let expr = Expression::Sheet3DRef {
+            start_sheet: "Sheet1".to_string(),
+            end_sheet: "Sheet3".to_string(),
+            reference: Box::new(Expression::CellRef {
+                sheet: None,
+                col: "A".to_string(),
+                row: 1,
+            }),
+        };
+
+        let deps = extract_dependencies(&expr);
+        // Should extract just A1 (0,0) without sheet info
+        assert_eq!(deps, set_of(&[(0, 0)]));
+    }
+
+    #[test]
+    fn test_extract_3d_ref_with_sheets() {
+        // 3D ref with sheet context - should tag with both bookend sheets
+        let expr = Expression::Sheet3DRef {
+            start_sheet: "Sheet1".to_string(),
+            end_sheet: "Sheet3".to_string(),
+            reference: Box::new(Expression::CellRef {
+                sheet: None,
+                col: "A".to_string(),
+                row: 1,
+            }),
+        };
+
+        let deps = extract_dependencies_with_sheets(&expr, GridBounds::default());
+        // Should have 2 entries: A1 tagged with Sheet1, A1 tagged with Sheet3
+        assert_eq!(deps.len(), 2);
+        assert!(deps.contains(&SheetCellRef {
+            sheet: Some("Sheet1".to_string()),
+            row: 0,
+            col: 0,
+        }));
+        assert!(deps.contains(&SheetCellRef {
+            sheet: Some("Sheet3".to_string()),
+            row: 0,
+            col: 0,
+        }));
+    }
+
+    #[test]
+    fn test_extract_3d_dependencies_full() {
+        // Full expansion with sheet_order
+        let sheet_order = vec![
+            "Sheet1".to_string(),
+            "Sheet2".to_string(),
+            "Sheet3".to_string(),
+        ];
+
+        let inner_ref = Expression::CellRef {
+            sheet: None,
+            col: "B".to_string(),
+            row: 2,
+        };
+
+        let deps = extract_3d_dependencies(
+            "Sheet1",
+            "Sheet3",
+            &inner_ref,
+            &sheet_order,
+            GridBounds::default(),
+        );
+
+        // Should have 3 entries: B2 on Sheet1, Sheet2, Sheet3
+        assert_eq!(deps.len(), 3);
+        for sheet in &["Sheet1", "Sheet2", "Sheet3"] {
+            assert!(deps.contains(&SheetCellRef {
+                sheet: Some(sheet.to_string()),
+                row: 1,  // B2 -> row 1 (0-based)
+                col: 1,  // B -> col 1
+            }));
+        }
+    }
+
+    #[test]
+    fn test_extract_3d_dependencies_range() {
+        // 3D ref with range: Sheet1:Sheet2!A1:B2
+        let sheet_order = vec![
+            "Sheet1".to_string(),
+            "Sheet2".to_string(),
+            "Sheet3".to_string(),
+        ];
+
+        let inner_ref = Expression::Range {
+            sheet: None,
+            start: Box::new(Expression::CellRef {
+                sheet: None,
+                col: "A".to_string(),
+                row: 1,
+            }),
+            end: Box::new(Expression::CellRef {
+                sheet: None,
+                col: "B".to_string(),
+                row: 2,
+            }),
+        };
+
+        let deps = extract_3d_dependencies(
+            "Sheet1",
+            "Sheet2",
+            &inner_ref,
+            &sheet_order,
+            GridBounds::default(),
+        );
+
+        // 4 cells (A1, A2, B1, B2) x 2 sheets = 8 entries
+        assert_eq!(deps.len(), 8);
+        for sheet in &["Sheet1", "Sheet2"] {
+            for (r, c) in &[(0u32, 0u32), (0, 1), (1, 0), (1, 1)] {
+                assert!(deps.contains(&SheetCellRef {
+                    sheet: Some(sheet.to_string()),
+                    row: *r,
+                    col: *c,
+                }));
+            }
         }
     }
 }

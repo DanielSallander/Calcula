@@ -8,7 +8,7 @@ use std::collections::HashMap;
 use std::sync::Mutex;
 
 use engine::{
-    BinaryOperator, BuiltinFunction, CellValue, Evaluator, Expression, MultiSheetContext,
+    BinaryOperator, BuiltinFunction, CellValue, Evaluator, Expression,
     UnaryOperator, Value,
 };
 use engine::coord::{col_to_index, index_to_col};
@@ -151,6 +151,13 @@ fn find_next_recursive(expr: &Expression, path: &mut Vec<usize>) -> Option<NextN
         // Table references should be resolved before step evaluation.
         // If still present, treat as a non-cell-ref node to resolve.
         Expression::TableRef { .. } => Some(NextNode {
+            path: path.clone(),
+            is_cell_ref: false,
+            cell_ref_info: None,
+        }),
+
+        // 3D references: treat as a single node to resolve
+        Expression::Sheet3DRef { .. } => Some(NextNode {
             path: path.clone(),
             is_cell_ref: false,
             cell_ref_info: None,
@@ -381,6 +388,18 @@ fn build_display_recursive(
             output.push_str(&table_specifier_to_display(specifier));
             output.push(']');
         }
+
+        Expression::Sheet3DRef { start_sheet, end_sheet, reference } => {
+            // Format sheet range prefix
+            if start_sheet.contains(' ') || end_sheet.contains(' ') {
+                output.push_str(&format!("'{}:{}'!", start_sheet, end_sheet));
+            } else {
+                output.push_str(&format!("{}:{}!", start_sheet, end_sheet));
+            }
+            let mut child_path = current_path.to_vec();
+            child_path.push(0);
+            build_display_recursive(reference, target_path, &child_path, output, underline);
+        }
     }
 
     if is_target {
@@ -476,12 +495,7 @@ fn evaluate_single_node(
     let current_grid = &grids[sheet_index];
     let current_sheet_name = &sheet_names[sheet_index];
 
-    let mut context = MultiSheetContext::new(current_sheet_name.clone());
-    for (i, grid) in grids.iter().enumerate() {
-        if i < sheet_names.len() {
-            context.add_grid(sheet_names[i].clone(), grid);
-        }
-    }
+    let context = crate::create_multi_sheet_context(grids, sheet_names, current_sheet_name);
 
     let evaluator = Evaluator::with_multi_sheet(current_grid, context);
     let result = evaluator.evaluate(&engine_ast);

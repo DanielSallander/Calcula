@@ -1344,3 +1344,221 @@ fn parser_parses_max_row_as_cell_ref() {
         }
     );
 }
+
+// ========================================
+// PARSER TESTS - 3D REFERENCES
+// ========================================
+
+#[test]
+fn test_parse_3d_ref_cell() {
+    // =Sheet1:Sheet3!A1
+    let result = parse("=Sheet1:Sheet3!A1").unwrap();
+    match result {
+        Expression::Sheet3DRef { start_sheet, end_sheet, reference } => {
+            assert_eq!(start_sheet, "SHEET1");
+            assert_eq!(end_sheet, "SHEET3");
+            assert_eq!(*reference, Expression::CellRef {
+                sheet: None,
+                col: "A".to_string(),
+                row: 1,
+                col_absolute: false,
+                row_absolute: false,
+            });
+        }
+        _ => panic!("Expected Sheet3DRef, got {:?}", result),
+    }
+}
+
+#[test]
+fn test_parse_3d_ref_range() {
+    // =Sheet1:Sheet3!A1:B10
+    let result = parse("=Sheet1:Sheet3!A1:B10").unwrap();
+    match result {
+        Expression::Sheet3DRef { start_sheet, end_sheet, reference } => {
+            assert_eq!(start_sheet, "SHEET1");
+            assert_eq!(end_sheet, "SHEET3");
+            match *reference {
+                Expression::Range { sheet, .. } => {
+                    assert_eq!(sheet, None);
+                }
+                _ => panic!("Expected Range inner reference"),
+            }
+        }
+        _ => panic!("Expected Sheet3DRef, got {:?}", result),
+    }
+}
+
+#[test]
+fn test_parse_3d_ref_quoted() {
+    // ='Jan 2023:Dec 2023'!A1
+    let result = parse("='Jan 2023:Dec 2023'!A1").unwrap();
+    match result {
+        Expression::Sheet3DRef { start_sheet, end_sheet, reference } => {
+            assert_eq!(start_sheet, "Jan 2023");
+            assert_eq!(end_sheet, "Dec 2023");
+            assert_eq!(*reference, Expression::CellRef {
+                sheet: None,
+                col: "A".to_string(),
+                row: 1,
+                col_absolute: false,
+                row_absolute: false,
+            });
+        }
+        _ => panic!("Expected Sheet3DRef, got {:?}", result),
+    }
+}
+
+#[test]
+fn test_parse_3d_ref_quoted_simple() {
+    // ='Jan:Dec'!B4
+    let result = parse("='Jan:Dec'!B4").unwrap();
+    match result {
+        Expression::Sheet3DRef { start_sheet, end_sheet, reference } => {
+            assert_eq!(start_sheet, "Jan");
+            assert_eq!(end_sheet, "Dec");
+            assert_eq!(*reference, Expression::CellRef {
+                sheet: None,
+                col: "B".to_string(),
+                row: 4,
+                col_absolute: false,
+                row_absolute: false,
+            });
+        }
+        _ => panic!("Expected Sheet3DRef, got {:?}", result),
+    }
+}
+
+#[test]
+fn test_parse_3d_ref_in_function() {
+    // =SUM(Sheet1:Sheet3!A1:A10)
+    let result = parse("=SUM(Sheet1:Sheet3!A1:A10)").unwrap();
+    match result {
+        Expression::FunctionCall { func, args } => {
+            assert_eq!(func, BuiltinFunction::Sum);
+            assert_eq!(args.len(), 1);
+            match &args[0] {
+                Expression::Sheet3DRef { start_sheet, end_sheet, reference } => {
+                    assert_eq!(start_sheet, "SHEET1");
+                    assert_eq!(end_sheet, "SHEET3");
+                    assert!(matches!(**reference, Expression::Range { .. }));
+                }
+                _ => panic!("Expected Sheet3DRef as function argument"),
+            }
+        }
+        _ => panic!("Expected FunctionCall, got {:?}", result),
+    }
+}
+
+#[test]
+fn test_parse_3d_ref_column_ref() {
+    // =Sheet1:Sheet3!A:B should parse as 3D with ColumnRef inner
+    let result = parse("=Sheet1:Sheet3!A:B").unwrap();
+    match result {
+        Expression::Sheet3DRef { start_sheet, end_sheet, reference } => {
+            assert_eq!(start_sheet, "SHEET1");
+            assert_eq!(end_sheet, "SHEET3");
+            assert_eq!(*reference, Expression::ColumnRef {
+                sheet: None,
+                start_col: "A".to_string(),
+                end_col: "B".to_string(),
+                start_absolute: false,
+                end_absolute: false,
+            });
+        }
+        _ => panic!("Expected Sheet3DRef, got {:?}", result),
+    }
+}
+
+#[test]
+fn test_parse_3d_ref_row_ref() {
+    // =Sheet1:Sheet3!1:5 should parse as 3D with RowRef inner
+    let result = parse("=Sheet1:Sheet3!1:5").unwrap();
+    match result {
+        Expression::Sheet3DRef { start_sheet, end_sheet, reference } => {
+            assert_eq!(start_sheet, "SHEET1");
+            assert_eq!(end_sheet, "SHEET3");
+            assert_eq!(*reference, Expression::RowRef {
+                sheet: None,
+                start_row: 1,
+                end_row: 5,
+                start_absolute: false,
+                end_absolute: false,
+            });
+        }
+        _ => panic!("Expected Sheet3DRef, got {:?}", result),
+    }
+}
+
+#[test]
+fn test_parse_3d_ref_absolute() {
+    // =Sheet1:Sheet3!$A$1:$B$10
+    let result = parse("=Sheet1:Sheet3!$A$1:$B$10").unwrap();
+    match result {
+        Expression::Sheet3DRef { start_sheet, end_sheet, reference } => {
+            assert_eq!(start_sheet, "SHEET1");
+            assert_eq!(end_sheet, "SHEET3");
+            match *reference {
+                Expression::Range { sheet, ref start, ref end } => {
+                    assert_eq!(sheet, None);
+                    match start.as_ref() {
+                        Expression::CellRef { col_absolute, row_absolute, .. } => {
+                            assert!(*col_absolute);
+                            assert!(*row_absolute);
+                        }
+                        _ => panic!("Expected CellRef start"),
+                    }
+                    match end.as_ref() {
+                        Expression::CellRef { col_absolute, row_absolute, .. } => {
+                            assert!(*col_absolute);
+                            assert!(*row_absolute);
+                        }
+                        _ => panic!("Expected CellRef end"),
+                    }
+                }
+                _ => panic!("Expected Range inner reference"),
+            }
+        }
+        _ => panic!("Expected Sheet3DRef, got {:?}", result),
+    }
+}
+
+#[test]
+fn test_parse_column_ref_not_confused_with_3d_ref() {
+    // =A:B should still parse as ColumnRef, not Sheet3DRef
+    let result = parse("=A:B").unwrap();
+    assert!(matches!(result, Expression::ColumnRef { .. }));
+}
+
+#[test]
+fn test_parse_3d_ref_sum_quoted_range() {
+    // =SUM('Jan:Dec'!B4) - quoted 3D in function
+    let result = parse("=SUM('Jan:Dec'!B4)").unwrap();
+    match result {
+        Expression::FunctionCall { func, args } => {
+            assert_eq!(func, BuiltinFunction::Sum);
+            assert_eq!(args.len(), 1);
+            match &args[0] {
+                Expression::Sheet3DRef { start_sheet, end_sheet, .. } => {
+                    assert_eq!(start_sheet, "Jan");
+                    assert_eq!(end_sheet, "Dec");
+                }
+                _ => panic!("Expected Sheet3DRef"),
+            }
+        }
+        _ => panic!("Expected FunctionCall"),
+    }
+}
+
+#[test]
+fn test_parse_3d_ref_with_range_and_spaces() {
+    // ='Q1 Sales:Q4 Sales'!A1:A10
+    let result = parse("='Q1 Sales:Q4 Sales'!A1:A10").unwrap();
+    match result {
+        Expression::Sheet3DRef { start_sheet, end_sheet, reference } => {
+            assert_eq!(start_sheet, "Q1 Sales");
+            assert_eq!(end_sheet, "Q4 Sales");
+            assert!(matches!(*reference, Expression::Range { .. }));
+        }
+        _ => panic!("Expected Sheet3DRef, got {:?}", result),
+    }
+}

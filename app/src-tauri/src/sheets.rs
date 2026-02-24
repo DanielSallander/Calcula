@@ -188,6 +188,7 @@ pub fn delete_sheet(state: State<AppState>, index: usize) -> Result<SheetsResult
     }
 
     let old_active = *active_sheet;
+    let deleted_name = sheet_names[index].clone();
 
     if old_active < grids.len() {
         grids[old_active] = current_grid.clone();
@@ -223,6 +224,12 @@ pub fn delete_sheet(state: State<AppState>, index: usize) -> Result<SheetsResult
     if index < grids.len() {
         grids.remove(index);
     }
+
+    // Repair 3D reference bookends in all formulas
+    let names_after = sheet_names.clone();
+    crate::repair_all_formulas(&mut grids, &|formula| {
+        crate::repair_3d_refs_on_delete(formula, &deleted_name, &names_after)
+    });
     if index < freeze_configs.len() {
         freeze_configs.remove(index);
     }
@@ -274,6 +281,8 @@ pub fn rename_sheet(state: State<AppState>, index: usize, new_name: String) -> R
     let mut sheet_names = state.sheet_names.lock().unwrap();
     let active_sheet = *state.active_sheet.lock().unwrap();
     let freeze_configs = state.freeze_configs.lock().unwrap();
+    let mut grids = state.grids.lock().unwrap();
+    let mut current_grid = state.grid.lock().unwrap();
 
     if index >= sheet_names.len() {
         return Err(format!("Sheet index {} out of range", index));
@@ -290,7 +299,25 @@ pub fn rename_sheet(state: State<AppState>, index: usize, new_name: String) -> R
         }
     }
 
-    sheet_names[index] = trimmed_name;
+    let old_name = sheet_names[index].clone();
+    sheet_names[index] = trimmed_name.clone();
+
+    // Sync current grid before repairing formulas
+    if active_sheet < grids.len() {
+        grids[active_sheet] = current_grid.clone();
+    }
+
+    // Repair cross-sheet and 3D reference bookends in all formulas
+    let old = old_name.clone();
+    let new_n = trimmed_name.clone();
+    crate::repair_all_formulas(&mut grids, &|formula| {
+        Some(crate::repair_3d_refs_on_rename(formula, &old, &new_n))
+    });
+
+    // Sync back the active grid
+    if active_sheet < grids.len() {
+        *current_grid = grids[active_sheet].clone();
+    }
 
     let sheets: Vec<SheetInfo> = sheet_names
         .iter()
