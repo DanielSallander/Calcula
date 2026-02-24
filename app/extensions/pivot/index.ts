@@ -24,6 +24,8 @@ import {
   overlayGetRowY,
   overlayGetColumnsWidth,
   overlayGetRowsHeight,
+  overlayGetColumnWidth,
+  overlayGetRowHeight,
   overlayGetRowHeaderWidth,
   overlayGetColHeaderHeight,
   type GridRegion,
@@ -52,34 +54,94 @@ import {
   forceRecheck,
 } from "./handlers/selectionHandler";
 import type { PivotRegionData } from "./types";
-import { getPivotRegionsForSheet, getPivotAtCell } from "./lib/pivot-api";
+import { getPivotRegionsForSheet, getPivotAtCell, getPivotView, togglePivotGroup } from "./lib/pivot-api";
+import type { PivotViewResponse } from "./lib/pivot-api";
+import { drawPivotCell, DEFAULT_PIVOT_THEME } from "./rendering/pivot";
+import type { PivotCellDrawResult } from "./rendering/pivot";
+
+// ============================================================================
+// Pivot View Data Cache
+// ============================================================================
+
+/** Cache of the latest PivotViewResponse for each pivot table. */
+const pivotViewCache = new Map<number, PivotViewResponse>();
+
+/**
+ * Store a PivotViewResponse in the cache for use by the overlay renderer.
+ */
+export function cachePivotView(pivotId: number, view: PivotViewResponse): void {
+  pivotViewCache.set(pivotId, view);
+}
+
+// ============================================================================
+// Expand/Collapse Icon Bounds (populated during overlay rendering)
+// ============================================================================
+
+interface StoredIconBounds {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  gridRow: number;
+  gridCol: number;
+  isExpanded: boolean;
+  pivotId: number;
+}
+
+/** Map of icon bounds keyed by "pivotId-gridRow-gridCol", updated every render. */
+const overlayIconBounds = new Map<string, StoredIconBounds>();
+
+/** Clear all stored icon bounds (called at start of each render cycle). */
+function clearOverlayIconBounds(): void {
+  overlayIconBounds.clear();
+}
+
+/** Cache of pivot region bounds keyed by pivotId, for coordinate conversion in click handlers. */
+const gridRegionsCache = new Map<number, { startRow: number; startCol: number; endRow: number; endCol: number }>();
+
+/** Cached reference to the grid canvas element, captured during overlay rendering. */
+let cachedCanvasElement: HTMLCanvasElement | null = null;
+
+/**
+ * Fetch and cache pivot view data for all non-empty pivot regions.
+ */
+async function refreshPivotViewCache(regions: PivotRegionData[]): Promise<void> {
+  for (const r of regions) {
+    if (!r.isEmpty) {
+      try {
+        const view = await getPivotView(r.pivotId);
+        pivotViewCache.set(r.pivotId, view);
+      } catch (e) {
+        console.error(`[Pivot Extension] Failed to fetch view for pivot ${r.pivotId}:`, e);
+      }
+    } else {
+      pivotViewCache.delete(r.pivotId);
+    }
+  }
+}
 
 // ============================================================================
 // Pivot Placeholder Overlay Renderer
 // ============================================================================
 
 /**
- * Draw pivot table placeholder for empty pivot regions.
- * Shows a white rectangle with a light border to indicate the reserved area.
- * Uses API dimension helpers — no direct access to core types.
+ * Draw a white background over the pivot region to hide underlying grid lines.
+ * Called for ALL pivot regions (both empty and populated).
  */
-function drawPivotPlaceholder(overlayCtx: OverlayRenderContext): void {
+function drawPivotBackground(overlayCtx: OverlayRenderContext): void {
   const { ctx, region } = overlayCtx;
   const rowHeaderWidth = overlayGetRowHeaderWidth(overlayCtx);
   const colHeaderHeight = overlayGetColHeaderHeight(overlayCtx);
 
-  // Calculate pixel positions using API helpers
   const startX = overlayGetColumnX(overlayCtx, region.startCol);
   const startY = overlayGetRowY(overlayCtx, region.startRow);
   const regionWidth = overlayGetColumnsWidth(overlayCtx, region.startCol, region.endCol);
   const regionHeight = overlayGetRowsHeight(overlayCtx, region.startRow, region.endRow);
 
-  // Only draw if visible
   if (startX + regionWidth < rowHeaderWidth || startY + regionHeight < colHeaderHeight) {
     return;
   }
 
-  // Clip to cell area (not headers)
   ctx.save();
   ctx.beginPath();
   ctx.rect(
@@ -90,11 +152,9 @@ function drawPivotPlaceholder(overlayCtx: OverlayRenderContext): void {
   );
   ctx.clip();
 
-  // Draw white background
   ctx.fillStyle = "#ffffff";
   ctx.fillRect(startX, startY, regionWidth, regionHeight);
 
-  // Draw light gray border
   ctx.strokeStyle = "#d0d0d0";
   ctx.lineWidth = 1;
   ctx.setLineDash([]);
@@ -105,7 +165,138 @@ function drawPivotPlaceholder(overlayCtx: OverlayRenderContext): void {
     regionHeight - 1,
   );
 
-  // Draw "PivotTable" text in center (like Excel's placeholder)
+  ctx.restore();
+}
+
+/**
+ * Draw styled pivot cells for a non-empty pivot region.
+ * This renders the pivot data with Excel-like styling (no grid lines,
+ * banded rows, bold headers, hierarchy indentation, expand/collapse icons).
+ */
+function drawStyledPivotView(overlayCtx: OverlayRenderContext, pivotView: PivotViewResponse): void {
+  const { ctx, region } = overlayCtx;
+  const rowHeaderWidth = overlayGetRowHeaderWidth(overlayCtx);
+  const colHeaderHeight = overlayGetColHeaderHeight(overlayCtx);
+  const canvasWidth = ctx.canvas.width / (window.devicePixelRatio || 1);
+  const canvasHeight = ctx.canvas.height / (window.devicePixelRatio || 1);
+
+  const theme = DEFAULT_PIVOT_THEME;
+
+  ctx.save();
+  ctx.beginPath();
+  ctx.rect(
+    rowHeaderWidth,
+    colHeaderHeight,
+    canvasWidth - rowHeaderWidth,
+    canvasHeight - colHeaderHeight,
+  );
+  ctx.clip();
+
+  for (let i = 0; i < pivotView.rows.length; i++) {
+    const row = pivotView.rows[i];
+    if (!row.visible) continue;
+
+    const gridRow = region.startRow + i;
+    const y = overlayGetRowY(overlayCtx, gridRow);
+    const height = overlayGetRowHeight(overlayCtx, gridRow);
+
+    // Skip rows completely outside visible area
+    if (y + height < colHeaderHeight || y > canvasHeight) continue;
+
+    for (let j = 0; j < row.cells.length; j++) {
+      const cell = row.cells[j];
+      const gridCol = region.startCol + j;
+      const x = overlayGetColumnX(overlayCtx, gridCol);
+      const width = overlayGetColumnWidth(overlayCtx, gridCol);
+
+      // Skip cells completely outside visible area
+      if (x + width < rowHeaderWidth || x > canvasWidth) continue;
+
+      const cellResult: PivotCellDrawResult = drawPivotCell(ctx, cell, x, y, width, height, i, j, theme);
+
+      // Store expand/collapse icon bounds for click handling
+      if (cellResult.iconBounds) {
+        const pivotId = (region.data?.pivotId as number) ?? 0;
+        const key = `${pivotId}-${gridRow}-${gridCol}`;
+        overlayIconBounds.set(key, {
+          x: cellResult.iconBounds.x,
+          y: cellResult.iconBounds.y,
+          width: cellResult.iconBounds.width,
+          height: cellResult.iconBounds.height,
+          gridRow,
+          gridCol,
+          isExpanded: cellResult.iconBounds.isExpanded,
+          pivotId,
+        });
+      }
+    }
+  }
+
+  // Draw separator line between row labels and data columns
+  const rowLabelColCount = pivotView.rowLabelColCount || 0;
+  if (rowLabelColCount > 0) {
+    const separatorCol = region.startCol + rowLabelColCount;
+    const sepX = overlayGetColumnX(overlayCtx, separatorCol);
+    if (sepX > rowHeaderWidth && sepX < canvasWidth) {
+      ctx.strokeStyle = theme.borderColor;
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      const regionY = overlayGetRowY(overlayCtx, region.startRow);
+      const regionEndY = overlayGetRowY(overlayCtx, region.startRow + pivotView.rows.length);
+      ctx.moveTo(Math.floor(sepX) + 0.5, Math.max(regionY, colHeaderHeight));
+      ctx.lineTo(Math.floor(sepX) + 0.5, Math.min(regionEndY, canvasHeight));
+      ctx.stroke();
+    }
+  }
+
+  // Draw separator line below header rows
+  const headerRowCount = pivotView.columnHeaderRowCount || 0;
+  if (headerRowCount > 0) {
+    const headerEndRow = region.startRow + headerRowCount;
+    const sepY = overlayGetRowY(overlayCtx, headerEndRow);
+    if (sepY > colHeaderHeight && sepY < canvasHeight) {
+      ctx.strokeStyle = theme.headerBorderColor;
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      const regionX = overlayGetColumnX(overlayCtx, region.startCol);
+      const regionEndX = overlayGetColumnX(overlayCtx, region.startCol + (pivotView.rows[0]?.cells.length || 0));
+      ctx.moveTo(Math.max(regionX, rowHeaderWidth), Math.floor(sepY) - 0.5);
+      ctx.lineTo(Math.min(regionEndX, canvasWidth), Math.floor(sepY) - 0.5);
+      ctx.stroke();
+    }
+  }
+
+  ctx.restore();
+}
+
+/**
+ * Draw placeholder text for empty pivot regions.
+ * Shows "Click in this area to work with the PivotTable report".
+ */
+function drawPivotPlaceholderText(overlayCtx: OverlayRenderContext): void {
+  const { ctx, region } = overlayCtx;
+  const rowHeaderWidth = overlayGetRowHeaderWidth(overlayCtx);
+  const colHeaderHeight = overlayGetColHeaderHeight(overlayCtx);
+
+  const startX = overlayGetColumnX(overlayCtx, region.startCol);
+  const startY = overlayGetRowY(overlayCtx, region.startRow);
+  const regionWidth = overlayGetColumnsWidth(overlayCtx, region.startCol, region.endCol);
+  const regionHeight = overlayGetRowsHeight(overlayCtx, region.startRow, region.endRow);
+
+  if (startX + regionWidth < rowHeaderWidth || startY + regionHeight < colHeaderHeight) {
+    return;
+  }
+
+  ctx.save();
+  ctx.beginPath();
+  ctx.rect(
+    rowHeaderWidth,
+    colHeaderHeight,
+    ctx.canvas.width / (window.devicePixelRatio || 1) - rowHeaderWidth,
+    ctx.canvas.height / (window.devicePixelRatio || 1) - colHeaderHeight,
+  );
+  ctx.clip();
+
   ctx.fillStyle = "#888888";
   ctx.font = "12px system-ui, -apple-system, sans-serif";
   ctx.textAlign = "center";
@@ -114,12 +305,11 @@ function drawPivotPlaceholder(overlayCtx: OverlayRenderContext): void {
   const centerX = startX + regionWidth / 2;
   const centerY = startY + regionHeight / 2;
 
-  // Only draw text if there's enough space
-  if (regionWidth > 80 && regionHeight > 30) {
-    ctx.fillText("PivotTable", centerX, centerY - 8);
+  if (regionWidth > 120 && regionHeight > 30) {
+    ctx.fillText("Click in this area to work with", centerX, centerY - 8);
     ctx.font = "11px system-ui, -apple-system, sans-serif";
     ctx.fillStyle = "#aaaaaa";
-    ctx.fillText("Drag fields to build", centerX, centerY + 8);
+    ctx.fillText("the PivotTable report", centerX, centerY + 8);
   }
 
   ctx.restore();
@@ -136,6 +326,20 @@ function drawPivotPlaceholder(overlayCtx: OverlayRenderContext): void {
 async function refreshPivotRegions(triggerRepaint: boolean = false): Promise<void> {
   try {
     const regions = await getPivotRegionsForSheet();
+
+    // Fetch and cache pivot view data for styled rendering
+    await refreshPivotViewCache(regions);
+
+    // Update grid regions cache for coordinate conversion in click handlers
+    gridRegionsCache.clear();
+    for (const r of regions) {
+      gridRegionsCache.set(r.pivotId, {
+        startRow: r.startRow,
+        startCol: r.startCol,
+        endRow: r.endRow,
+        endCol: r.endCol,
+      });
+    }
 
     const gridRegions: GridRegion[] = regions.map((r: PivotRegionData) => ({
       id: `pivot-${r.pivotId}`,
@@ -206,6 +410,59 @@ export function registerPivotExtension(): void {
     })
   );
 
+  // Register click interceptor - handle expand/collapse icon clicks
+  cleanupFunctions.push(
+    registerCellClickInterceptor(async (row, col, event) => {
+      // Check if click is within any stored expand/collapse icon bounds
+      if (!cachedCanvasElement) return false;
+      const canvas = cachedCanvasElement;
+
+      const rect = canvas.getBoundingClientRect();
+      const canvasX = event.clientX - rect.left;
+      const canvasY = event.clientY - rect.top;
+
+      for (const bounds of overlayIconBounds.values()) {
+        if (
+          canvasX >= bounds.x &&
+          canvasX <= bounds.x + bounds.width &&
+          canvasY >= bounds.y &&
+          canvasY <= bounds.y + bounds.height
+        ) {
+          // Found a matching icon - toggle expand/collapse
+          const cachedView = pivotViewCache.get(bounds.pivotId);
+          if (!cachedView) return false;
+
+          // Find the pivot-relative row/col
+          const pivotRowIndex = bounds.gridRow - (gridRegionsCache.get(bounds.pivotId)?.startRow ?? 0);
+          const pivotColIndex = bounds.gridCol - (gridRegionsCache.get(bounds.pivotId)?.startCol ?? 0);
+
+          const pivotRow = cachedView.rows[pivotRowIndex];
+          if (!pivotRow) return false;
+          const cell = pivotRow.cells[pivotColIndex];
+          if (!cell) return false;
+
+          const itemLabel = cell.formattedValue;
+          const fieldIndex = pivotColIndex; // col position maps to row field index
+
+          try {
+            await togglePivotGroup({
+              pivotId: bounds.pivotId,
+              isRow: true,
+              fieldIndex,
+              value: itemLabel,
+            });
+            // Trigger refresh to reload pivot data
+            window.dispatchEvent(new CustomEvent("pivot:refresh"));
+          } catch (error) {
+            console.error("[Pivot Extension] Failed to toggle expand/collapse:", error);
+          }
+          return true;
+        }
+      }
+      return false;
+    })
+  );
+
   // Register click interceptor - handle filter dropdown clicks
   cleanupFunctions.push(
     registerCellClickInterceptor(async (row, col, event) => {
@@ -238,8 +495,26 @@ export function registerPivotExtension(): void {
     registerGridOverlay({
       type: "pivot",
       render: (ctx: OverlayRenderContext) => {
+        // Clear icon bounds at start of each render cycle
+        clearOverlayIconBounds();
+
+        // Cache reference to the canvas element for use in click handlers
+        cachedCanvasElement = ctx.ctx.canvas;
+
+        // Always draw white background to hide underlying grid lines and cell text
+        drawPivotBackground(ctx);
+
         if (ctx.region.data?.isEmpty) {
-          drawPivotPlaceholder(ctx);
+          drawPivotPlaceholderText(ctx);
+        } else {
+          // Draw styled pivot cells with Excel-like appearance
+          const pivotId = ctx.region.data?.pivotId as number | undefined;
+          if (pivotId !== undefined) {
+            const cachedView = pivotViewCache.get(pivotId);
+            if (cachedView) {
+              drawStyledPivotView(ctx, cachedView);
+            }
+          }
         }
       },
       hitTest: (hitCtx) => {

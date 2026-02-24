@@ -19,6 +19,8 @@ export interface FieldPillMenuProps {
   aggregation?: AggregationType;
   onMoveUp: () => void;
   onMoveDown: () => void;
+  onMoveToBeginning: () => void;
+  onMoveToEnd: () => void;
   onMoveTo: (targetZone: DropZoneType) => void;
   onRemove: () => void;
   onValueFieldSettings?: () => void;
@@ -131,6 +133,8 @@ export function FieldPillMenu({
   aggregation,
   onMoveUp,
   onMoveDown,
+  onMoveToBeginning,
+  onMoveToEnd,
   onMoveTo,
   onRemove,
   onValueFieldSettings,
@@ -238,7 +242,7 @@ export function FieldPillMenu({
       {/* Separator before move/remove actions */}
       {isValues && <div className={menuStyles.separator} />}
 
-      {/* Move up/down */}
+      {/* Move up/down/beginning/end */}
       <button
         className={menuStyles.menuItem}
         onClick={() => handleAction(onMoveUp)}
@@ -254,6 +258,22 @@ export function FieldPillMenu({
       >
         <span className={menuStyles.icon}>{'\u2193'}</span>
         <span className={menuStyles.label}>Move Down</span>
+      </button>
+      <button
+        className={menuStyles.menuItem}
+        onClick={() => handleAction(onMoveToBeginning)}
+        disabled={!canMoveUp}
+      >
+        <span className={menuStyles.icon}>{'\u21E7'}</span>
+        <span className={menuStyles.label}>Move to Beginning</span>
+      </button>
+      <button
+        className={menuStyles.menuItem}
+        onClick={() => handleAction(onMoveToEnd)}
+        disabled={!canMoveDown}
+      >
+        <span className={menuStyles.icon}>{'\u21E9'}</span>
+        <span className={menuStyles.label}>Move to End</span>
       </button>
 
       <div className={menuStyles.separator} />

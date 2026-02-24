@@ -15,6 +15,7 @@ import type {
 import { getDefaultAggregation, getValueFieldDisplayName } from './types';
 import { emitAppEvent, onAppEvent } from '../../../src/api';
 import { PivotEvents } from '../lib/pivotEvents';
+import { registerDragOutRemoval } from '../../_shared/components/useDragDrop';
 import type { ValueFieldSettings } from './ValueFieldSettingsModal';
 
 interface UsePivotEditorStateOptions {
@@ -220,6 +221,20 @@ export function usePivotEditorState({
     },
     [getZoneSetter, scheduleUpdate]
   );
+
+  // Keep a stable ref to handleRemove for the drag-out removal callback
+  const handleRemoveRef = useRef(handleRemove);
+  handleRemoveRef.current = handleRemove;
+
+  // Register drag-out removal: when a field pill is dragged out of a zone
+  // and released in empty space, remove it from the report
+  useEffect(() => {
+    return registerDragOutRemoval((field: DragField) => {
+      if (field.fromZone !== undefined && field.fromIndex !== undefined) {
+        handleRemoveRef.current(field.fromZone, field.fromIndex);
+      }
+    });
+  }, []);
 
   // Handle reorder within zone
   const handleReorder = useCallback(

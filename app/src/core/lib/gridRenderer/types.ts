@@ -122,4 +122,6 @@ export interface RenderState {
   formulaSourceSheetName?: string;
   /** Preview selection showing where cells will be moved during drag */
   selectionDragPreview?: Selection | null;
+  /** Regions where grid lines should be suppressed (e.g., pivot tables, charts) */
+  overlayRegionBounds?: Array<{ startRow: number; startCol: number; endRow: number; endCol: number }>;
 }

@@ -148,25 +148,46 @@ function getMergedCellHeight(
   return totalHeight;
 }
 
+function getOverlayGapsForZone(
+  overlayRegionBounds: Array<{ startRow: number; startCol: number; endRow: number; endCol: number }>,
+  lineType: "vertical" | "horizontal",
+  lineIndex: number,
+): Array<{ start: number; end: number }> {
+  const gaps: Array<{ start: number; end: number }> = [];
+  for (const region of overlayRegionBounds) {
+    if (lineType === "vertical") {
+      if (lineIndex > region.startCol && lineIndex <= region.endCol) {
+        gaps.push({ start: region.startRow, end: region.endRow + 1 });
+      }
+    } else {
+      if (lineIndex > region.startRow && lineIndex <= region.endRow) {
+        gaps.push({ start: region.startCol, end: region.endCol + 1 });
+      }
+    }
+  }
+  return gaps;
+}
+
 function getLineSegments(
   cells: Map<string, { rowSpan?: number; colSpan?: number }>,
   lineType: "vertical" | "horizontal",
   lineIndex: number,
   perpStart: number,
-  perpEnd: number
+  perpEnd: number,
+  overlayRegionBounds?: Array<{ startRow: number; startCol: number; endRow: number; endCol: number }>,
 ): Array<{ start: number; end: number }> {
   const gaps: Array<{ start: number; end: number }> = [];
-  
+
   for (const [key, cell] of cells.entries()) {
     const rowSpan = cell.rowSpan ?? 1;
     const colSpan = cell.colSpan ?? 1;
-    
+
     if (rowSpan <= 1 && colSpan <= 1) continue;
-    
+
     const parts = key.split(",");
     const masterRow = parseInt(parts[0], 10);
     const masterCol = parseInt(parts[1], 10);
-    
+
     if (lineType === "vertical") {
       if (
         colSpan > 1 &&
@@ -185,27 +206,32 @@ function getLineSegments(
       }
     }
   }
-  
+
+  // Also add gaps from overlay regions
+  if (overlayRegionBounds && overlayRegionBounds.length > 0) {
+    gaps.push(...getOverlayGapsForZone(overlayRegionBounds, lineType, lineIndex));
+  }
+
   if (gaps.length === 0) {
     return [{ start: perpStart, end: perpEnd + 1 }];
   }
-  
+
   gaps.sort((a, b) => a.start - b.start);
-  
+
   const segments: Array<{ start: number; end: number }> = [];
   let current = perpStart;
-  
+
   for (const gap of gaps) {
     if (gap.start > current) {
       segments.push({ start: current, end: gap.start });
     }
     current = Math.max(current, gap.end);
   }
-  
+
   if (current <= perpEnd) {
     segments.push({ start: current, end: perpEnd + 1 });
   }
-  
+
   return segments;
 }
 
@@ -238,7 +264,7 @@ function drawGridLinesZone(
   clipWidth: number,
   clipHeight: number
 ): void {
-  const { ctx, config, theme, dimensions, cells } = state;
+  const { ctx, config, theme, dimensions, cells, overlayRegionBounds } = state;
   const totalRows = config.totalRows || 1000;
   const totalCols = config.totalCols || 100;
   
@@ -253,9 +279,10 @@ function drawGridLinesZone(
         "vertical",
         col,
         range.startRow,
-        range.endRow
+        range.endRow,
+        overlayRegionBounds,
       );
-      
+
       for (const segment of segments) {
         let segmentStartY = clipY + range.offsetY;
         for (let r = range.startRow; r < segment.start; r++) {
@@ -287,7 +314,8 @@ function drawGridLinesZone(
         "horizontal",
         row,
         range.startCol,
-        range.endCol
+        range.endCol,
+        overlayRegionBounds,
       );
       
       for (const segment of segments) {
@@ -558,6 +586,10 @@ export function renderGrid(
     // FIX: Pass sheet context for cross-sheet reference highlighting
     currentSheetName,
     formulaSourceSheetName: editing?.sourceSheetName,
+    // Pass overlay region bounds for grid line suppression
+    overlayRegionBounds: overlayRegions
+      .filter(r => !r.floating)
+      .map(r => ({ startRow: r.startRow, startCol: r.startCol, endRow: r.endRow, endCol: r.endCol })),
   };
 
   ctx.fillStyle = theme.cellBackground;

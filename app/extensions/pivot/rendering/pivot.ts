@@ -63,48 +63,48 @@ export interface PivotTheme {
 }
 
 export const DEFAULT_PIVOT_THEME: PivotTheme = {
-  // Text colors
-  headerText: '#1f2937',
-  labelText: '#374151',
-  valueText: '#111827',
-  totalText: '#1f2937',
-  grandTotalText: '#1f2937',
-  filterText: '#374151',
+  // Text colors (Excel default: dark text everywhere except header)
+  headerText: '#ffffff',
+  labelText: '#333333',
+  valueText: '#333333',
+  totalText: '#333333',
+  grandTotalText: '#333333',
+  filterText: '#333333',
 
-  // Background colors
-  headerBackground: '#f3f4f6',
-  labelBackground: '#f9fafb',
+  // Background colors (Excel default "Medium Style 2 - Blue")
+  headerBackground: '#5B9BD5',
+  labelBackground: '#ffffff',
   valueBackground: '#ffffff',
-  totalBackground: '#e5e7eb',
-  grandTotalBackground: '#d1d5db',
+  totalBackground: '#ffffff',
+  grandTotalBackground: '#ffffff',
   filterRowBackground: '#fef3c7',
 
-  // Alternating
-  alternateRowBackground: '#f9fafb',
+  // Alternating rows (Excel default: very subtle light blue-grey)
+  alternateRowBackground: '#DDEBF7',
 
-  // Borders
-  borderColor: '#e5e7eb',
-  headerBorderColor: '#d1d5db',
+  // Borders (subtle, matching Excel's thin lines)
+  borderColor: '#9BC2E6',
+  headerBorderColor: '#5B9BD5',
 
   // Filter button
   filterButtonBackground: '#ffffff',
-  filterButtonBorder: '#d1d5db',
-  filterButtonHoverBackground: '#f3f4f6',
-  filterDropdownArrow: '#6b7280',
+  filterButtonBorder: '#9BC2E6',
+  filterButtonHoverBackground: '#DDEBF7',
+  filterDropdownArrow: '#595959',
 
   // Icons
-  iconColor: '#6b7280',
-  iconHoverColor: '#374151',
+  iconColor: '#595959',
+  iconHoverColor: '#333333',
 
   // Selection
   selectionBackground: 'rgba(59, 130, 246, 0.1)',
   selectionBorder: '#3b82f6',
 
-  // Font
-  fontFamily: 'Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif',
+  // Font (Calibri is Excel's default; fall back to system fonts)
+  fontFamily: 'Calibri, "Segoe UI", -apple-system, BlinkMacSystemFont, sans-serif',
   fontSize: 13,
   headerFontSize: 13,
-  headerFontWeight: '600',
+  headerFontWeight: '700',
 };
 
 export interface PivotCellDrawResult {
@@ -182,6 +182,7 @@ const EXPAND_ICON_SIZE = 12;
 const EXPAND_ICON_PADDING = 4;
 
 const CELL_PADDING_X = 6;
+const INDENT_SIZE = 20; // pixels per indent level
 
 // Default cell dimensions for pivot tables
 const DEFAULT_PIVOT_CELL_WIDTH = 100;
@@ -240,9 +241,13 @@ function getPivotTextColor(
 
 function getFontWeight(
   cellType: PivotCellType | undefined,
-  backgroundStyle: BackgroundStyle | undefined
+  backgroundStyle: BackgroundStyle | undefined,
+  isBold?: boolean,
+  isExpandable?: boolean
 ): string {
   if (
+    isBold ||
+    isExpandable || // Parent group headers are bold (like Excel)
     backgroundStyle === 'Header' ||
     backgroundStyle === 'Subtotal' ||
     backgroundStyle === 'Total' ||
@@ -308,32 +313,29 @@ function drawExpandCollapseIcon(
   const centerY = y + size / 2;
 
   ctx.save();
-  ctx.strokeStyle = color;
-  ctx.fillStyle = color;
-  ctx.lineWidth = 1.5;
 
-  // Draw box
-  ctx.strokeRect(x + 1, y + 1, size - 2, size - 2);
+  // White fill for icon background (makes it stand out)
+  ctx.fillStyle = '#ffffff';
+  ctx.fillRect(x + 0.5, y + 0.5, size - 1, size - 1);
+
+  // Draw box border
+  ctx.strokeStyle = color;
+  ctx.lineWidth = 1;
+  ctx.strokeRect(x + 0.5, y + 0.5, size - 1, size - 1);
 
   // Draw minus (always present)
-  const lineY = centerY;
-  const lineStartX = x + 3;
-  const lineEndX = x + size - 3;
-
+  ctx.strokeStyle = color;
+  ctx.lineWidth = 1;
   ctx.beginPath();
-  ctx.moveTo(lineStartX, lineY);
-  ctx.lineTo(lineEndX, lineY);
+  ctx.moveTo(x + 3, centerY);
+  ctx.lineTo(x + size - 3, centerY);
   ctx.stroke();
 
   // Draw vertical line for plus (collapsed state)
   if (isCollapsed) {
-    const lineX = centerX;
-    const lineStartY = y + 3;
-    const lineEndY = y + size - 3;
-
     ctx.beginPath();
-    ctx.moveTo(lineX, lineStartY);
-    ctx.lineTo(lineX, lineEndY);
+    ctx.moveTo(centerX, y + 3);
+    ctx.lineTo(centerX, y + size - 3);
     ctx.stroke();
   }
 
@@ -400,7 +402,7 @@ interface DrawCellOptions {
   isHoveredIcon?: boolean;
 }
 
-function drawPivotCell(
+export function drawPivotCell(
   ctx: CanvasRenderingContext2D,
   cell: PivotCellData,
   x: number,
@@ -422,10 +424,41 @@ function drawPivotCell(
   ctx.fillStyle = bgColor;
   ctx.fillRect(x, y, width, height);
 
-  // Draw border
-  ctx.strokeStyle = theme.borderColor;
-  ctx.lineWidth = 1;
-  ctx.strokeRect(x + 0.5, y + 0.5, width - 1, height - 1);
+  // Draw contextual borders (Excel-like: no full grid lines)
+  if (cell.backgroundStyle === 'Header') {
+    // Header cells: thin bottom border in theme color
+    ctx.strokeStyle = theme.headerBorderColor;
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(x, Math.floor(y + height) - 0.5);
+    ctx.lineTo(x + width, Math.floor(y + height) - 0.5);
+    ctx.stroke();
+  } else if (
+    cell.backgroundStyle === 'Subtotal' ||
+    cell.backgroundStyle === 'Total'
+  ) {
+    // Subtotal/Total: thin top border only (Excel-like minimal separator)
+    ctx.strokeStyle = theme.borderColor;
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(x, Math.floor(y) + 0.5);
+    ctx.lineTo(x + width, Math.floor(y) + 0.5);
+    ctx.stroke();
+  } else if (cell.backgroundStyle === 'GrandTotal') {
+    // Grand total: thin top border (same as subtotal, just bold text distinguishes it)
+    ctx.strokeStyle = theme.borderColor;
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(x, Math.floor(y) + 0.5);
+    ctx.lineTo(x + width, Math.floor(y) + 0.5);
+    ctx.stroke();
+  } else if (cell.backgroundStyle === 'FilterRow') {
+    // Filter rows: keep full border
+    ctx.strokeStyle = theme.borderColor;
+    ctx.lineWidth = 1;
+    ctx.strokeRect(x + 0.5, y + 0.5, width - 1, height - 1);
+  }
+  // Normal/Alternate data cells: no borders (clean Excel-like look)
 
   // Handle FilterLabel - bold, right-aligned text
   if (cell.cellType === 'FilterLabel') {
@@ -477,7 +510,7 @@ function drawPivotCell(
 
   // Handle expand/collapse icon for row headers
   if (cell.cellType === 'RowHeader' && cell.isExpandable) {
-    const iconX = x + CELL_PADDING_X + (cell.indentLevel || 0) * 16;
+    const iconX = x + CELL_PADDING_X + (cell.indentLevel || 0) * INDENT_SIZE;
     const iconY = y + (height - EXPAND_ICON_SIZE) / 2;
 
     // isCollapsed means currently collapsed (show + icon)
@@ -505,15 +538,15 @@ function drawPivotCell(
     textMaxWidth = width - (textX - x) - CELL_PADDING_X;
   } else if (cell.indentLevel && cell.indentLevel > 0) {
     // Apply indentation without icon
-    textX += cell.indentLevel * 16;
-    textMaxWidth -= cell.indentLevel * 16;
+    textX += cell.indentLevel * INDENT_SIZE;
+    textMaxWidth -= cell.indentLevel * INDENT_SIZE;
   }
 
   // Draw text
   const displayText = cell.formattedValue || getCellDisplayValue(cell.value);
   if (displayText) {
     const textColor = getPivotTextColor(cell.cellType, cell.backgroundStyle, theme);
-    const fontWeight = getFontWeight(cell.cellType, cell.backgroundStyle);
+    const fontWeight = getFontWeight(cell.cellType, cell.backgroundStyle, cell.isBold, cell.isExpandable);
     const textAlign = getTextAlign(cell.cellType);
 
     ctx.fillStyle = textColor;
@@ -708,6 +741,30 @@ export function renderPivotView(
     ctx.restore();
   }
 
+  // Draw separator lines between frozen and scrollable areas
+  // (drawn last so they overlay cell content at the boundaries)
+  if (frozenColCount > 0 && frozenWidth > 0) {
+    ctx.save();
+    ctx.strokeStyle = theme.borderColor;
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(Math.floor(frozenWidth) + 0.5, 0);
+    ctx.lineTo(Math.floor(frozenWidth) + 0.5, canvasHeight);
+    ctx.stroke();
+    ctx.restore();
+  }
+
+  if (frozenRowCount > 0 && frozenHeight > 0) {
+    ctx.save();
+    ctx.strokeStyle = theme.headerBorderColor;
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.moveTo(0, Math.floor(frozenHeight) - 0.5);
+    ctx.lineTo(canvasWidth, Math.floor(frozenHeight) - 0.5);
+    ctx.stroke();
+    ctx.restore();
+  }
+
   return { interactiveBounds };
 }
 
@@ -741,7 +798,7 @@ export function measurePivotColumnWidth(
 
         // Account for indentation
         if (cell.indentLevel) {
-          totalWidth += cell.indentLevel * 16;
+          totalWidth += cell.indentLevel * INDENT_SIZE;
         }
 
         // Account for expand/collapse icon

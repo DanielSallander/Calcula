@@ -111,6 +111,18 @@ export function ZoneFieldItem({
     }
   }, [zone, index, totalFieldsInZone, onReorder]);
 
+  const handleMoveToBeginning = useCallback(() => {
+    if (index > 0) {
+      onReorder(zone, index, 0);
+    }
+  }, [zone, index, onReorder]);
+
+  const handleMoveToEnd = useCallback(() => {
+    if (index < totalFieldsInZone - 1) {
+      onReorder(zone, index, totalFieldsInZone);
+    }
+  }, [zone, index, totalFieldsInZone, onReorder]);
+
   const handleMoveTo = useCallback(
     (targetZone: DropZoneType) => {
       if (onMoveField) {
@@ -149,6 +161,13 @@ export function ZoneFieldItem({
         >
           {'\u25BC'}
         </button>
+        <button
+          className={styles.zoneFieldRemove}
+          onClick={handleRemove}
+          title="Remove field"
+        >
+          {'\u00D7'}
+        </button>
       </div>
       {showMenu && (
         <FieldPillMenu
@@ -159,6 +178,8 @@ export function ZoneFieldItem({
           aggregation={field.aggregation}
           onMoveUp={handleMoveUp}
           onMoveDown={handleMoveDown}
+          onMoveToBeginning={handleMoveToBeginning}
+          onMoveToEnd={handleMoveToEnd}
           onMoveTo={handleMoveTo}
           onRemove={handleRemove}
           onValueFieldSettings={

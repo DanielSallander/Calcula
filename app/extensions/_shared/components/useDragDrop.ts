@@ -37,6 +37,24 @@ let dragPreview: HTMLElement | null = null;
 const dropZoneRefs: Map<DropZoneType, DropZoneRef> = new Map();
 const subscribers: Set<() => void> = new Set();
 
+// Callback invoked when a field from a zone is dropped outside all drop zones
+let dragOutRemovalCallback: ((field: DragField) => void) | null = null;
+
+/**
+ * Register a callback for drag-out removal.
+ * When a field pill from a drop zone is dragged and released outside any zone,
+ * this callback fires so the host can remove the field from the report.
+ * Returns a cleanup function.
+ */
+export function registerDragOutRemoval(cb: (field: DragField) => void): () => void {
+  dragOutRemovalCallback = cb;
+  return () => {
+    if (dragOutRemovalCallback === cb) {
+      dragOutRemovalCallback = null;
+    }
+  };
+}
+
 function notifySubscribers() {
   subscribers.forEach((fn) => fn());
 }
@@ -121,6 +139,13 @@ function handleGlobalMouseUp(e: MouseEvent) {
       insertIndex = dropZone.getInsertIndex(e.clientY);
     }
     dropZone.onDrop(globalDragState.dragData, insertIndex);
+  } else if (
+    dragOutRemovalCallback &&
+    globalDragState.dragData.fromZone !== undefined &&
+    globalDragState.dragData.fromIndex !== undefined
+  ) {
+    // Field was dragged out of a zone and released in empty space - remove it
+    dragOutRemovalCallback(globalDragState.dragData);
   }
 
   // Clean up

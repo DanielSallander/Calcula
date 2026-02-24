@@ -63,28 +63,57 @@ export function isLineInsideMerge(
 }
 
 /**
- * Get segments of a line that should be drawn, excluding merged cell interiors.
+ * Compute gaps from overlay regions (e.g., pivot tables) that should suppress grid lines.
+ * For vertical lines: gaps are row ranges where the line falls inside an overlay's column span.
+ * For horizontal lines: gaps are column ranges where the line falls inside an overlay's row span.
+ */
+function getOverlayGaps(
+  overlayRegionBounds: Array<{ startRow: number; startCol: number; endRow: number; endCol: number }>,
+  lineType: "vertical" | "horizontal",
+  lineIndex: number,
+): Array<{ start: number; end: number }> {
+  const gaps: Array<{ start: number; end: number }> = [];
+  for (const region of overlayRegionBounds) {
+    if (lineType === "vertical") {
+      // Suppress vertical lines that fall inside the overlay's column range
+      if (lineIndex > region.startCol && lineIndex <= region.endCol) {
+        gaps.push({ start: region.startRow, end: region.endRow + 1 });
+      }
+    } else {
+      // Suppress horizontal lines that fall inside the overlay's row range
+      if (lineIndex > region.startRow && lineIndex <= region.endRow) {
+        gaps.push({ start: region.startCol, end: region.endCol + 1 });
+      }
+    }
+  }
+  return gaps;
+}
+
+/**
+ * Get segments of a line that should be drawn, excluding merged cell interiors
+ * and overlay region interiors.
  */
 function getLineSegments(
   cells: Map<string, { rowSpan?: number; colSpan?: number }>,
   lineType: "vertical" | "horizontal",
   lineIndex: number,
   perpStart: number,
-  perpEnd: number
+  perpEnd: number,
+  overlayRegionBounds?: Array<{ startRow: number; startCol: number; endRow: number; endCol: number }>,
 ): Array<{ start: number; end: number }> {
   // Collect all merge regions that intersect this line
   const gaps: Array<{ start: number; end: number }> = [];
-  
+
   for (const [key, cell] of cells.entries()) {
     const rowSpan = cell.rowSpan ?? 1;
     const colSpan = cell.colSpan ?? 1;
-    
+
     if (rowSpan <= 1 && colSpan <= 1) continue;
-    
+
     const parts = key.split(",");
     const masterRow = parseInt(parts[0], 10);
     const masterCol = parseInt(parts[1], 10);
-    
+
     if (lineType === "vertical") {
       // Check if this vertical line is inside a merged cell's column span
       if (
@@ -107,29 +136,34 @@ function getLineSegments(
       }
     }
   }
-  
+
+  // Also add gaps from overlay regions (pivot tables, charts, etc.)
+  if (overlayRegionBounds && overlayRegionBounds.length > 0) {
+    gaps.push(...getOverlayGaps(overlayRegionBounds, lineType, lineIndex));
+  }
+
   if (gaps.length === 0) {
     return [{ start: perpStart, end: perpEnd + 1 }];
   }
-  
+
   // Sort gaps by start position
   gaps.sort((a, b) => a.start - b.start);
-  
+
   // Build segments by excluding gaps
   const segments: Array<{ start: number; end: number }> = [];
   let current = perpStart;
-  
+
   for (const gap of gaps) {
     if (gap.start > current) {
       segments.push({ start: current, end: gap.start });
     }
     current = Math.max(current, gap.end);
   }
-  
+
   if (current <= perpEnd) {
     segments.push({ start: current, end: perpEnd + 1 });
   }
-  
+
   return segments;
 }
 
@@ -138,7 +172,7 @@ function getLineSegments(
  * Handles merged cells by not drawing internal grid lines.
  */
 export function drawGridLines(state: RenderState): void {
-  const { ctx, width, height, config, viewport, theme, dimensions, cells, insertionAnimation } = state;
+  const { ctx, width, height, config, viewport, theme, dimensions, cells, insertionAnimation, overlayRegionBounds } = state;
   const rowHeaderWidth = config.rowHeaderWidth || 50;
   const colHeaderHeight = config.colHeaderHeight || 24;
   const totalRows = config.totalRows || 1000;
@@ -174,13 +208,14 @@ export function drawGridLines(state: RenderState): void {
     const x = col >= colAnimIndex && colAnimIndex >= 0 ? baseX + colAnimOffset : baseX;
 
     if (x >= rowHeaderWidth && x <= width) {
-      // Get segments that should be drawn (excluding merged cell interiors)
+      // Get segments that should be drawn (excluding merged cell and overlay interiors)
       const segments = getLineSegments(
         cells as Map<string, { rowSpan?: number; colSpan?: number }>,
         "vertical",
         col,
         range.startRow,
-        range.endRow
+        range.endRow,
+        overlayRegionBounds,
       );
 
       for (const segment of segments) {
@@ -217,13 +252,14 @@ export function drawGridLines(state: RenderState): void {
     const y = row >= rowAnimIndex && rowAnimIndex >= 0 ? baseY + rowAnimOffset : baseY;
 
     if (y >= colHeaderHeight && y <= height) {
-      // Get segments that should be drawn (excluding merged cell interiors)
+      // Get segments that should be drawn (excluding merged cell and overlay interiors)
       const segments = getLineSegments(
         cells as Map<string, { rowSpan?: number; colSpan?: number }>,
         "horizontal",
         row,
         range.startCol,
-        range.endCol
+        range.endCol,
+        overlayRegionBounds,
       );
 
       for (const segment of segments) {

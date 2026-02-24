@@ -12,6 +12,7 @@ import type {
   AggregationType,
 } from '../../_shared/components/types';
 import { getDefaultAggregation, getValueFieldDisplayName } from '../../_shared/components/types';
+import { registerDragOutRemoval } from '../../_shared/components/useDragDrop';
 import type { DataFieldMode, TablixId, TablixLayoutConfig } from '../types';
 import type {
   UpdateTablixFieldsRequest,
@@ -230,6 +231,20 @@ export function useTablixEditorState({
     },
     [getZoneSetter, scheduleUpdate]
   );
+
+  // Keep a stable ref to handleRemove for the drag-out removal callback
+  const handleRemoveRef = useRef(handleRemove);
+  handleRemoveRef.current = handleRemove;
+
+  // Register drag-out removal: when a field pill is dragged out of a zone
+  // and released in empty space, remove it from the report
+  useEffect(() => {
+    return registerDragOutRemoval((field: DragField) => {
+      if (field.fromZone !== undefined && field.fromIndex !== undefined) {
+        handleRemoveRef.current(field.fromZone, field.fromIndex);
+      }
+    });
+  }, []);
 
   // Handle reorder within zone
   const handleReorder = useCallback(

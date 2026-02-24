@@ -53,12 +53,21 @@ export const styles = {
     padding: 12px;
 
     &::-webkit-scrollbar {
-      width: 4px;
+      width: 6px;
+    }
+
+    &::-webkit-scrollbar-track {
+      background: transparent;
     }
 
     &::-webkit-scrollbar-thumb {
+      background: transparent;
+      border-radius: 6px;
+      transition: background 0.2s;
+    }
+
+    &:hover::-webkit-scrollbar-thumb {
       background: #c1c1c1;
-      border-radius: 4px;
     }
 
     &::-webkit-scrollbar-thumb:hover {
@@ -88,12 +97,21 @@ export const styles = {
     overflow-x: hidden;
 
     &::-webkit-scrollbar {
-      width: 4px;
+      width: 6px;
+    }
+
+    &::-webkit-scrollbar-track {
+      background: transparent;
     }
 
     &::-webkit-scrollbar-thumb {
+      background: transparent;
+      border-radius: 6px;
+      transition: background 0.2s;
+    }
+
+    &:hover::-webkit-scrollbar-thumb {
       background: #c1c1c1;
-      border-radius: 4px;
     }
 
     &::-webkit-scrollbar-thumb:hover {
@@ -116,7 +134,11 @@ export const styles = {
     }
 
     &:hover {
-      background: #f5f5f5;
+      background: #f0f0f0;
+    }
+
+    &:active {
+      background: #e8e8e8;
     }
 
     &.dragging {
@@ -130,6 +152,8 @@ export const styles = {
     cursor: pointer;
     flex-shrink: 0;
     accent-color: #005fb8;
+    width: 16px;
+    height: 16px;
   `,
 
   fieldName: css`
@@ -171,12 +195,21 @@ export const styles = {
     flex-direction: column;
 
     &::-webkit-scrollbar {
-      width: 4px;
+      width: 6px;
+    }
+
+    &::-webkit-scrollbar-track {
+      background: transparent;
     }
 
     &::-webkit-scrollbar-thumb {
+      background: transparent;
+      border-radius: 6px;
+      transition: background 0.2s;
+    }
+
+    &:hover::-webkit-scrollbar-thumb {
       background: #c1c1c1;
-      border-radius: 4px;
     }
 
     &::-webkit-scrollbar-thumb:hover {
@@ -224,16 +257,18 @@ export const styles = {
     display: flex;
     align-items: center;
     padding: 4px 8px;
-    background: #ebebeb;
+    background: #f0f0f0;
+    border: 1px solid transparent;
     border-radius: 4px;
     margin-bottom: 4px;
     cursor: grab;
     user-select: none;
     font-size: 11px;
-    transition: background 0.1s ease;
+    transition: background 0.1s ease, border-color 0.1s ease;
 
     &:hover {
-      background: #e0e0e0;
+      background: #e8e8e8;
+      border-color: #d0d0d0;
     }
 
     &.dragging {
