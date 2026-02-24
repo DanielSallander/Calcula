@@ -29,6 +29,8 @@ import {
 import { useExtensionInitializer, useExtensions } from "./hooks/useExtensions";
 // Hook-based menus that need to be rendered inside React tree
 import { StandardMenus } from "../../extensions/BuiltIn/StandardMenus/StandardMenus";
+// DEV ONLY: Mock data loader for testing - remove these imports when done testing
+import { loadMockData, shouldLoadMockData } from "./utils/mockData";
 
 /**
  * Loading screen shown while extensions are initializing.
@@ -118,6 +120,20 @@ function LayoutInner(): React.ReactElement {
     });
     return cleanup;
   }, [dispatch]);
+
+  // DEV ONLY: Load mock data on mount if environment variable is set
+  // DELETE THIS BLOCK when done testing
+  useEffect(() => {
+    if (shouldLoadMockData()) {
+      // Small delay to ensure grid is fully initialized
+      const timer = setTimeout(() => {
+        loadMockData().catch((error) => {
+          console.error("[Layout] Failed to load mock data:", error);
+        });
+      }, 500);
+      return () => clearTimeout(timer);
+    }
+  }, []);
 
   return (
     <div
