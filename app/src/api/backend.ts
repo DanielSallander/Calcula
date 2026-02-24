@@ -318,6 +318,66 @@ export async function refreshAllPivotTables<TResponse>(): Promise<TResponse> {
   return invoke<TResponse>("refresh_all_pivot_tables", {});
 }
 
+/**
+ * Set a pivot item's expand/collapse state.
+ */
+export async function setPivotItemExpanded<TRequest, TResponse>(
+  request: TRequest
+): Promise<TResponse> {
+  return invoke<TResponse>("set_pivot_item_expanded", { request });
+}
+
+/**
+ * Expand or collapse all items at a specific field level.
+ */
+export async function expandCollapseLevel<TRequest, TResponse>(
+  request: TRequest
+): Promise<TResponse> {
+  return invoke<TResponse>("expand_collapse_level", { request });
+}
+
+/**
+ * Expand or collapse all fields in the entire pivot table.
+ */
+export async function expandCollapseAll<TRequest, TResponse>(
+  request: TRequest
+): Promise<TResponse> {
+  return invoke<TResponse>("expand_collapse_all", { request });
+}
+
+/**
+ * Apply grouping (date, number binning, or manual) to a pivot field.
+ */
+export async function groupPivotField<TRequest, TResponse>(
+  request: TRequest
+): Promise<TResponse> {
+  return invoke<TResponse>("group_pivot_field", { request });
+}
+
+/**
+ * Create a manual group on a pivot field.
+ */
+export async function createManualGroup<TRequest, TResponse>(
+  request: TRequest
+): Promise<TResponse> {
+  return invoke<TResponse>("create_manual_group", { request });
+}
+
+/**
+ * Remove all grouping from a pivot field.
+ */
+export async function ungroupPivotField<TRequest, TResponse>(
+  request: TRequest
+): Promise<TResponse> {
+  return invoke<TResponse>("ungroup_pivot_field", { request });
+}
+
+export async function drillThroughToSheet<TRequest, TResponse>(
+  request: TRequest
+): Promise<TResponse> {
+  return invoke<TResponse>("drill_through_to_sheet", { request });
+}
+
 // ============================================================================
 // Tablix Commands
 // ============================================================================

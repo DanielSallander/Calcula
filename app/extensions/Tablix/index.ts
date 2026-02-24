@@ -160,7 +160,7 @@ let lastCheckedSelection: { row: number; col: number } | null = null;
 let checkInProgress = false;
 
 function updateCachedRegions(regions: TablixRegionData[]): void {
-  cachedRegions = regions;
+  cachedRegions = Array.isArray(regions) ? regions : [];
 }
 
 function findTablixRegionAtCell(row: number, col: number): TablixRegionData | null {

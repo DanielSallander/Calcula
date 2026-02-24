@@ -43,7 +43,7 @@ let debounceTimer: ReturnType<typeof setTimeout> | null = null;
  * Called when a `pivot:regionsUpdated` event fires.
  */
 export function updateCachedRegions(regions: PivotRegionData[]): void {
-  cachedRegions = regions;
+  cachedRegions = Array.isArray(regions) ? regions : [];
   // Regions arrived, so clear the just-created flag
   justCreatedPivot = false;
 }
@@ -62,8 +62,9 @@ export function setJustCreatedPivot(value: boolean): void {
 
 /**
  * Fast local check if a cell is within any cached pivot region.
+ * Exported so other pivot handlers (e.g., context menu) can reuse the cache.
  */
-function findPivotRegionAtCell(
+export function findPivotRegionAtCell(
   row: number,
   col: number,
 ): PivotRegionData | null {

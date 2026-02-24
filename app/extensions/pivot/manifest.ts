@@ -11,6 +11,7 @@ import type {
 import { emitAppEvent } from "../../src/api";
 import { PivotEditorView } from "./components/PivotEditorView";
 import { CreatePivotDialog } from "./components/CreatePivotDialog";
+import { GroupDialog } from "./components/GroupDialog";
 import { FilterDropdown } from "./components/FilterDropdown";
 import type { DialogProps, OverlayProps } from "../../src/api";
 import React from "react";
@@ -73,6 +74,26 @@ function CreatePivotDialogWrapper(props: DialogProps): React.ReactElement {
 export const PivotDialogDefinition: DialogDefinition = {
   id: PIVOT_DIALOG_ID,
   component: CreatePivotDialogWrapper,
+  priority: 100,
+};
+
+// ============================================================================
+// Group Dialog Registration
+// ============================================================================
+
+export const PIVOT_GROUP_DIALOG_ID = "pivot:groupDialog";
+
+function GroupDialogWrapper(props: DialogProps): React.ReactElement {
+  return React.createElement(GroupDialog, {
+    isOpen: props.isOpen,
+    onClose: props.onClose,
+    data: props.data,
+  });
+}
+
+export const PivotGroupDialogDefinition: DialogDefinition = {
+  id: PIVOT_GROUP_DIALOG_ID,
+  component: GroupDialogWrapper,
   priority: 100,
 };
 

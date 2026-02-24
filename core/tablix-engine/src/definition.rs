@@ -12,6 +12,7 @@
 use serde::{Deserialize, Serialize};
 use engine::CellCoord;
 use pivot_engine::{AggregationType, FieldIndex, PivotField, PivotFilter};
+use pivot_engine::definition::SubtotalLocation;
 
 /// Unique identifier for a tablix within a workbook.
 pub type TablixId = u32;
@@ -129,6 +130,10 @@ pub struct TablixLayout {
 
     /// Show groups even when they contain no data.
     pub show_empty_groups: bool,
+
+    /// Where subtotals are placed relative to their group items.
+    #[serde(default)]
+    pub subtotal_location: SubtotalLocation,
 }
 
 impl Default for TablixLayout {
@@ -139,6 +144,7 @@ impl Default for TablixLayout {
             group_layout: GroupLayout::Block,
             repeat_group_labels: false,
             show_empty_groups: false,
+            subtotal_location: SubtotalLocation::AtBottom,
         }
     }
 }

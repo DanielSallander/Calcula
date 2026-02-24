@@ -383,14 +383,18 @@ pub struct PivotFieldConfig {
     pub sort_order: Option<String>,
     /// Whether to show subtotals
     pub show_subtotals: Option<bool>,
-    /// Whether field is collapsed
+    /// Whether field is collapsed (field-level: collapses ALL items)
     pub collapsed: Option<bool>,
     /// Items to hide (filter out)
     pub hidden_items: Option<Vec<String>>,
-    /// Whether to show all items (including empty)
+    /// Per-item collapse tracking: specific item labels that are collapsed
+    pub collapsed_items: Option<Vec<String>>,
+    /// Whether to show all items (including empty / items with no data)
     pub show_all_items: Option<bool>,
     /// Subtotals configuration
     pub subtotals: Option<Subtotals>,
+    /// Grouping configuration for this field
+    pub grouping: Option<FieldGroupingConfig>,
 }
 
 /// Value field configuration
@@ -729,6 +733,9 @@ pub struct PivotCellData {
     pub background_style: String,
     pub number_format: Option<String>,
     pub filter_field_index: Option<usize>,
+    /// Group path for drill-down: (field_index, value_id) pairs identifying this cell's data.
+    #[serde(default)]
+    pub group_path: Vec<(usize, u32)>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -977,6 +984,128 @@ pub struct FieldUniqueValuesResponse {
     pub field_index: usize,
     pub field_name: String,
     pub unique_values: Vec<String>,
+}
+
+// ============================================================================
+// EXPAND/COLLAPSE AND GROUPING REQUEST TYPES
+// ============================================================================
+
+/// Request to expand or collapse all items at a specific field level.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExpandCollapseLevelRequest {
+    /// Pivot table ID
+    pub pivot_id: PivotId,
+    /// Whether this targets row fields (true) or column fields (false)
+    pub is_row: bool,
+    /// The field index within the axis (0-based position)
+    pub field_index: usize,
+    /// true = expand all items, false = collapse all items
+    pub expand: bool,
+}
+
+/// Request to expand or collapse all fields in the entire pivot table.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExpandCollapseAllRequest {
+    /// Pivot table ID
+    pub pivot_id: PivotId,
+    /// true = expand all, false = collapse all
+    pub expand: bool,
+}
+
+/// Grouping configuration for a field (sent from frontend).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", tag = "type")]
+pub enum FieldGroupingConfig {
+    /// No grouping
+    None,
+    /// Group dates by time periods
+    DateGrouping {
+        /// Levels: "year", "quarter", "month", "week", "day"
+        levels: Vec<String>,
+    },
+    /// Group numbers into equal-width bins
+    NumberBinning {
+        start: f64,
+        end: f64,
+        interval: f64,
+    },
+    /// Manual grouping (user-defined groups)
+    ManualGrouping {
+        groups: Vec<ManualGroupConfig>,
+        ungrouped_name: Option<String>,
+    },
+}
+
+/// Manual group definition (sent from frontend).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ManualGroupConfig {
+    pub name: String,
+    pub members: Vec<String>,
+}
+
+/// Request to apply grouping to a pivot field.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GroupFieldRequest {
+    /// Pivot table ID
+    pub pivot_id: PivotId,
+    /// Field index (source column index)
+    pub field_index: usize,
+    /// Grouping configuration
+    pub grouping: FieldGroupingConfig,
+}
+
+/// Request to create a manual group on a field.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CreateManualGroupRequest {
+    /// Pivot table ID
+    pub pivot_id: PivotId,
+    /// Field index (source column index)
+    pub field_index: usize,
+    /// Name for the new group
+    pub group_name: String,
+    /// Items to include in the group
+    pub member_items: Vec<String>,
+}
+
+/// Request to remove all grouping from a field.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UngroupFieldRequest {
+    /// Pivot table ID
+    pub pivot_id: PivotId,
+    /// Field index (source column index)
+    pub field_index: usize,
+}
+
+/// Request to perform a drill-through (creates a new sheet with detail rows).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DrillThroughRequest {
+    /// Pivot table ID
+    pub pivot_id: PivotId,
+    /// Group path: (field_index, value_id) pairs identifying the cell
+    pub group_path: Vec<(usize, u32)>,
+    /// Maximum number of records to include
+    pub max_records: Option<usize>,
+}
+
+/// Response for a drill-through operation.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DrillThroughResponse {
+    /// Name of the new sheet
+    pub sheet_name: String,
+    /// Index of the new sheet
+    pub sheet_index: usize,
+    /// Number of data rows written
+    pub row_count: usize,
+    /// Number of columns written
+    pub col_count: usize,
 }
 
 use std::collections::HashMap;

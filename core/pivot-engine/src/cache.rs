@@ -95,23 +95,28 @@ impl OrderedFloat {
 pub struct FieldCache {
     /// The source column index this cache represents.
     pub source_index: FieldIndex,
-    
+
     /// Display name (from header row).
     pub name: String,
-    
+
     /// Map from value to its unique ID (for deduplication during build).
     value_to_id: HashMap<CacheValue, ValueId>,
-    
+
     /// Ordered list of unique values (indexed by ValueId).
     /// This allows O(1) lookup from ID to value.
     id_to_value: Vec<CacheValue>,
-    
+
     /// Pre-sorted order of ValueIds (ascending by value).
     /// Used for fast sorted iteration.
     sorted_ids_asc: Vec<ValueId>,
-    
+
     /// Whether the sorted indices need rebuilding.
     sort_dirty: bool,
+
+    /// Optional display label overrides for values (used by date/number grouping).
+    /// When present, get_value_label uses this map instead of the raw CacheValue display.
+    #[serde(default)]
+    pub label_map: HashMap<ValueId, String>,
 }
 
 impl FieldCache {
@@ -123,6 +128,7 @@ impl FieldCache {
             id_to_value: Vec::new(),
             sorted_ids_asc: Vec::new(),
             sort_dirty: true,
+            label_map: HashMap::new(),
         }
     }
     
@@ -459,7 +465,16 @@ pub struct PivotCache {
     /// Bitmap of which records pass the current filters.
     /// Length = records.len(), true = included.
     pub filter_mask: Vec<bool>,
-    
+
+    /// Virtual fields created by grouping transforms (date grouping, number binning, manual grouping).
+    /// Indexed starting at fields.len(), so virtual field i is at index fields.len() + i.
+    /// Each virtual field maps source record indices to transformed ValueIds.
+    pub virtual_fields: Vec<FieldCache>,
+
+    /// Mapping from source record index to virtual field ValueIds.
+    /// virtual_records[virtual_field_index][record_index] = ValueId
+    pub virtual_records: Vec<Vec<ValueId>>,
+
     /// Statistics for optimization decisions.
     pub stats: CacheStats,
 }
@@ -487,6 +502,8 @@ impl PivotCache {
             aggregates: HashMap::new(),
             aggregates_dirty: true,
             filter_mask: Vec::new(),
+            virtual_fields: Vec::new(),
+            virtual_records: Vec::new(),
             stats: CacheStats::default(),
         }
     }
@@ -750,6 +767,17 @@ impl PivotCache {
             .zip(self.filter_mask.iter())
             .filter_map(|(record, &included)| if included { Some(record) } else { None })
     }
+
+    /// Returns an iterator over filtered records with their indices.
+    pub fn filtered_records_indexed(&self) -> impl Iterator<Item = (usize, &CacheRecord)> {
+        self.records
+            .iter()
+            .enumerate()
+            .zip(self.filter_mask.iter())
+            .filter_map(|((idx, record), &included)| {
+                if included { Some((idx, record)) } else { None }
+            })
+    }
     
     /// Gets or computes the aggregate for a group key.
     pub fn get_aggregate(
@@ -793,10 +821,21 @@ impl PivotCache {
                 continue;
             }
             
-            // Build the full group key
+            // Build the full group key (supports virtual fields via virtual_records)
+            let base_field_count = self.fields.len();
             let group_values: Vec<ValueId> = all_group_fields
                 .iter()
-                .map(|&fi| record.values.get(fi).copied().unwrap_or(VALUE_ID_EMPTY))
+                .map(|&fi| {
+                    if fi < base_field_count {
+                        record.values.get(fi).copied().unwrap_or(VALUE_ID_EMPTY)
+                    } else {
+                        let vi = fi - base_field_count;
+                        self.virtual_records.get(vi)
+                            .and_then(|vr| vr.get(i))
+                            .copied()
+                            .unwrap_or(VALUE_ID_EMPTY)
+                    }
+                })
                 .collect();
             
             // Collect value field data
@@ -917,7 +956,7 @@ impl PivotCache {
         if let Some(field) = self.fields.get(field_index) {
             let mut numeric_count = 0;
             let mut total_count = 0;
-            
+
             for id in 0..field.unique_count() as ValueId {
                 if let Some(value) = field.get_value(id) {
                     match value {
@@ -930,14 +969,236 @@ impl PivotCache {
                     }
                 }
             }
-            
+
             if total_count == 0 {
                 return false;
             }
-            
+
             (numeric_count as f64 / total_count as f64) > 0.5
         } else {
             false
         }
     }
+
+    /// Clears all virtual fields and records (called before re-building grouping transforms).
+    pub fn clear_virtual_fields(&mut self) {
+        self.virtual_fields.clear();
+        self.virtual_records.clear();
+    }
+
+    /// Adds a virtual field and returns its "virtual index" (0-based within virtual_fields).
+    /// The effective field index for lookups is `self.fields.len() + virtual_index`.
+    pub fn add_virtual_field(&mut self, name: String) -> usize {
+        let vf_index = self.virtual_fields.len();
+        let source_index = self.fields.len() + vf_index;
+        self.virtual_fields.push(FieldCache::new(source_index, name));
+        // Pre-allocate record mapping for this virtual field
+        self.virtual_records.push(vec![VALUE_ID_EMPTY; self.records.len()]);
+        vf_index
+    }
+
+    /// Sets the virtual field value for a specific record.
+    pub fn set_virtual_record_value(&mut self, vf_index: usize, record_index: usize, value: CacheValue) {
+        if vf_index < self.virtual_fields.len() && record_index < self.records.len() {
+            let value_id = self.virtual_fields[vf_index].intern(value);
+            self.virtual_records[vf_index][record_index] = value_id;
+        }
+    }
+
+    /// Gets a field by effective index (source fields first, then virtual fields).
+    pub fn get_field(&self, effective_index: usize) -> Option<&FieldCache> {
+        if effective_index < self.fields.len() {
+            self.fields.get(effective_index)
+        } else {
+            let vi = effective_index - self.fields.len();
+            self.virtual_fields.get(vi)
+        }
+    }
+
+    /// Gets a field by effective index (mutable).
+    pub fn get_field_mut(&mut self, effective_index: usize) -> Option<&mut FieldCache> {
+        let base_len = self.fields.len();
+        if effective_index < base_len {
+            self.fields.get_mut(effective_index)
+        } else {
+            let vi = effective_index - base_len;
+            self.virtual_fields.get_mut(vi)
+        }
+    }
+
+    /// Gets the ValueId for a record at an effective field index (source or virtual).
+    pub fn get_record_value_id(&self, record_index: usize, effective_field_index: usize) -> ValueId {
+        if effective_field_index < self.fields.len() {
+            self.records.get(record_index)
+                .and_then(|r| r.values.get(effective_field_index))
+                .copied()
+                .unwrap_or(VALUE_ID_EMPTY)
+        } else {
+            let vi = effective_field_index - self.fields.len();
+            self.virtual_records.get(vi)
+                .and_then(|vr| vr.get(record_index))
+                .copied()
+                .unwrap_or(VALUE_ID_EMPTY)
+        }
+    }
+}
+
+// ============================================================================
+// DATE PARSING HELPERS
+// ============================================================================
+
+/// Parsed date components for date grouping.
+#[derive(Debug, Clone, Copy)]
+pub struct ParsedDate {
+    pub year: i32,
+    pub month: u32,
+    pub day: u32,
+}
+
+impl ParsedDate {
+    /// Returns the quarter (1-4) based on the month.
+    pub fn quarter(&self) -> u32 {
+        (self.month - 1) / 3 + 1
+    }
+
+    /// Returns the ISO week number (approximate, 1-53).
+    pub fn week(&self) -> u32 {
+        // Simple day-of-year based ISO week approximation
+        let doy = self.day_of_year();
+        ((doy + 6) / 7).min(53).max(1)
+    }
+
+    /// Returns the approximate day of year (1-366).
+    fn day_of_year(&self) -> u32 {
+        let days_before_month = [0, 31, 59, 90, 120, 151, 181, 212, 243, 273, 304, 334];
+        let m = (self.month as usize).min(12).max(1) - 1;
+        let mut doy = days_before_month[m] + self.day;
+        // Leap year adjustment for months after February
+        if self.month > 2 && is_leap_year(self.year) {
+            doy += 1;
+        }
+        doy
+    }
+}
+
+fn is_leap_year(year: i32) -> bool {
+    (year % 4 == 0 && year % 100 != 0) || (year % 400 == 0)
+}
+
+/// Attempts to parse a CacheValue as a date.
+/// Supports:
+/// - Number: Excel serial date (days since 1899-12-30)
+/// - Text: ISO 8601 "YYYY-MM-DD", "YYYY/MM/DD", "MM/DD/YYYY", "DD.MM.YYYY"
+pub fn parse_cache_value_as_date(value: &CacheValue) -> Option<ParsedDate> {
+    match value {
+        CacheValue::Number(n) => excel_serial_to_date(n.as_f64()),
+        CacheValue::Text(s) => parse_date_string(s),
+        _ => None,
+    }
+}
+
+/// Converts an Excel serial date number to (year, month, day).
+/// Excel serial date: 1 = 1900-01-01, but we handle the Lotus 1-2-3 bug
+/// where 1900 is incorrectly treated as a leap year.
+fn excel_serial_to_date(serial: f64) -> Option<ParsedDate> {
+    let serial = serial.floor() as i64;
+    if serial < 1 || serial > 2958465 {
+        return None; // Out of range
+    }
+
+    // Adjust for Excel's Lotus 1-2-3 leap year bug (Feb 29, 1900 doesn't exist)
+    let adjusted = if serial > 60 { serial - 1 } else { serial };
+
+    // Convert from days-since-1900-01-01 to days-since-0001-01-01
+    // 1900-01-01 is day 693596 in the proleptic Gregorian calendar
+    let days = adjusted + 693595;
+
+    // Use the algorithm to convert from days to y/m/d
+    let l = days + 68569;
+    let n = (4 * l) / 146097;
+    let l = l - (146097 * n + 3) / 4;
+    let i = (4000 * (l + 1)) / 1461001;
+    let l = l - (1461 * i) / 4 + 31;
+    let j = (80 * l) / 2447;
+    let d = l - (2447 * j) / 80;
+    let l = j / 11;
+    let m = j + 2 - 12 * l;
+    let y = 100 * (n - 49) + i + l;
+
+    Some(ParsedDate {
+        year: y as i32,
+        month: m as u32,
+        day: d as u32,
+    })
+}
+
+/// Parses a date string in common formats.
+fn parse_date_string(s: &str) -> Option<ParsedDate> {
+    let s = s.trim();
+    if s.is_empty() {
+        return None;
+    }
+
+    // Try ISO 8601: YYYY-MM-DD or YYYY/MM/DD
+    if s.len() >= 10 {
+        let sep = s.as_bytes()[4];
+        if sep == b'-' || sep == b'/' {
+            let parts: Vec<&str> = if sep == b'-' { s.split('-').collect() } else { s.split('/').collect() };
+            if parts.len() >= 3 {
+                if let (Ok(y), Ok(m), Ok(d)) = (
+                    parts[0].parse::<i32>(),
+                    parts[1].parse::<u32>(),
+                    parts[2].get(..2).unwrap_or(parts[2]).parse::<u32>(),
+                ) {
+                    if m >= 1 && m <= 12 && d >= 1 && d <= 31 {
+                        return Some(ParsedDate { year: y, month: m, day: d });
+                    }
+                }
+            }
+        }
+    }
+
+    // Try MM/DD/YYYY
+    if let Some(result) = try_parse_mdy(s, '/') {
+        return Some(result);
+    }
+
+    // Try DD.MM.YYYY
+    if let Some(result) = try_parse_dmy(s, '.') {
+        return Some(result);
+    }
+
+    None
+}
+
+fn try_parse_mdy(s: &str, sep: char) -> Option<ParsedDate> {
+    let parts: Vec<&str> = s.split(sep).collect();
+    if parts.len() >= 3 {
+        if let (Ok(m), Ok(d), Ok(y)) = (
+            parts[0].parse::<u32>(),
+            parts[1].parse::<u32>(),
+            parts[2].parse::<i32>(),
+        ) {
+            if m >= 1 && m <= 12 && d >= 1 && d <= 31 && y >= 1900 {
+                return Some(ParsedDate { year: y, month: m, day: d });
+            }
+        }
+    }
+    None
+}
+
+fn try_parse_dmy(s: &str, sep: char) -> Option<ParsedDate> {
+    let parts: Vec<&str> = s.split(sep).collect();
+    if parts.len() >= 3 {
+        if let (Ok(d), Ok(m), Ok(y)) = (
+            parts[0].parse::<u32>(),
+            parts[1].parse::<u32>(),
+            parts[2].parse::<i32>(),
+        ) {
+            if m >= 1 && m <= 12 && d >= 1 && d <= 31 && y >= 1900 {
+                return Some(ParsedDate { year: y, month: m, day: d });
+            }
+        }
+    }
+    None
 }

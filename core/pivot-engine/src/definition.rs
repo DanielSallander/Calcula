@@ -52,22 +52,36 @@ impl Default for AggregationType {
 pub struct PivotField {
     /// Index of the source column (0-based from source range).
     pub source_index: FieldIndex,
-    
+
     /// Display name (defaults to column header from source).
     pub name: String,
-    
+
     /// Sort order for this field's items.
     pub sort_order: SortOrder,
-    
+
     /// Whether to show subtotals for this field.
     pub show_subtotals: bool,
-    
-    /// Whether this field is collapsed in the view.
+
+    /// Whether this field is collapsed in the view (field-level: collapses ALL items).
     pub collapsed: bool,
-    
+
     /// Specific items that are hidden (filtered out).
     /// Stores the string representation of hidden values.
     pub hidden_items: Vec<String>,
+
+    /// Per-item collapse tracking. Stores string labels of individually collapsed items.
+    /// When an item label is in this list, that specific item is collapsed even if
+    /// the field-level `collapsed` is false.
+    #[serde(default)]
+    pub collapsed_items: Vec<String>,
+
+    /// Whether to show items with no data (Cartesian product of all unique values).
+    #[serde(default)]
+    pub show_all_items: bool,
+
+    /// Grouping configuration for this field (date, number, or manual grouping).
+    #[serde(default)]
+    pub grouping: FieldGrouping,
 }
 
 impl PivotField {
@@ -79,8 +93,74 @@ impl PivotField {
             show_subtotals: true,
             collapsed: false,
             hidden_items: Vec::new(),
+            collapsed_items: Vec::new(),
+            show_all_items: false,
+            grouping: FieldGrouping::None,
         }
     }
+}
+
+// ============================================================================
+// FIELD GROUPING
+// ============================================================================
+
+/// Grouping configuration for a pivot field.
+/// Allows transforming raw values into hierarchical buckets.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum FieldGrouping {
+    /// No grouping - use raw source values.
+    None,
+    /// Group date values by time periods (Year, Quarter, Month, etc.).
+    DateGrouping {
+        /// Which date levels to include in the hierarchy.
+        levels: Vec<DateGroupLevel>,
+    },
+    /// Group numeric values into equal-width bins.
+    NumberBinning {
+        /// Starting value for the first bin.
+        start: f64,
+        /// Ending value for the last bin.
+        end: f64,
+        /// Width of each bin.
+        interval: f64,
+    },
+    /// User-defined manual grouping of items.
+    ManualGrouping {
+        /// The manual groups: each maps a group name to its member items.
+        groups: Vec<ManualGroup>,
+        /// Name for the auto-generated group containing ungrouped items.
+        #[serde(default = "default_ungrouped_name")]
+        ungrouped_name: String,
+    },
+}
+
+fn default_ungrouped_name() -> String {
+    "Other".to_string()
+}
+
+impl Default for FieldGrouping {
+    fn default() -> Self {
+        FieldGrouping::None
+    }
+}
+
+/// Levels for date grouping hierarchy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum DateGroupLevel {
+    Year,
+    Quarter,
+    Month,
+    Week,
+    Day,
+}
+
+/// A user-defined manual group: combines specific items under a parent label.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ManualGroup {
+    /// Display name of the group (e.g., "Group1", "Eastern Region").
+    pub name: String,
+    /// The member item labels that belong to this group.
+    pub members: Vec<String>,
 }
 
 /// Represents a value field with its aggregation function.

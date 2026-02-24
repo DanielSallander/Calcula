@@ -12,11 +12,15 @@
 
 use std::collections::HashMap;
 use pivot_engine::cache::{
-    AggregateAccumulator, CacheRecord, CacheValue,
-    PivotCache, ValueId, VALUE_ID_EMPTY,
+    AggregateAccumulator, CacheRecord, CacheValue, OrderedFloat,
+    PivotCache, ValueId, VALUE_ID_EMPTY, parse_cache_value_as_date,
 };
 use pivot_engine::definition::{
-    AggregationType, FieldIndex, PivotField, SortOrder,
+    AggregationType, DateGroupLevel, FieldGrouping, FieldIndex,
+    ManualGroup, PivotField, SortOrder, SubtotalLocation,
+};
+use pivot_engine::engine::{
+    format_date_level_name, date_to_cache_value, record_value_at,
 };
 use crate::definition::{DataFieldMode, GroupLayout, TablixDefinition};
 use crate::view::{
@@ -103,11 +107,17 @@ pub struct TablixCalculator<'a> {
     /// Flattened column axis items.
     col_items: Vec<FlatColItem>,
 
-    /// Row group field indices.
+    /// Row group field indices (updated after grouping transforms).
     row_field_indices: Vec<FieldIndex>,
 
-    /// Column group field indices.
+    /// Column group field indices (updated after grouping transforms).
     col_field_indices: Vec<FieldIndex>,
+
+    /// Effective row fields after grouping transforms.
+    effective_row_fields: Vec<PivotField>,
+
+    /// Effective column fields after grouping transforms.
+    effective_col_fields: Vec<PivotField>,
 }
 
 impl<'a> TablixCalculator<'a> {
@@ -131,6 +141,8 @@ impl<'a> TablixCalculator<'a> {
             col_items: Vec::new(),
             row_field_indices,
             col_field_indices,
+            effective_row_fields: Vec::new(),
+            effective_col_fields: Vec::new(),
         }
     }
 
@@ -139,11 +151,16 @@ impl<'a> TablixCalculator<'a> {
         // Step 1: Apply filters
         self.apply_filters();
 
-        // Step 2: Build row axis tree
-        let row_tree = self.build_axis_tree(&self.definition.row_groups.clone());
+        // Step 1.5: Apply grouping transforms (creates virtual fields)
+        self.apply_grouping_transforms();
+
+        // Step 2: Build row axis tree (using effective fields)
+        let row_fields = self.effective_row_fields.clone();
+        let col_fields = self.effective_col_fields.clone();
+        let row_tree = self.build_axis_tree(&row_fields);
 
         // Step 3: Build column axis tree
-        let col_tree = self.build_axis_tree(&self.definition.column_groups.clone());
+        let col_tree = self.build_axis_tree(&col_fields);
 
         // Step 4: Flatten row tree with detail row collection
         self.row_items = self.flatten_row_tree(&row_tree);
@@ -210,6 +227,346 @@ impl<'a> TablixCalculator<'a> {
     }
 
     // ========================================================================
+    // GROUPING TRANSFORMS
+    // ========================================================================
+
+    /// Applies grouping transforms (date, number binning, manual) to row and column fields.
+    /// Creates virtual fields in the cache and builds effective field lists.
+    fn apply_grouping_transforms(&mut self) {
+        self.cache.clear_virtual_fields();
+
+        let row_fields = self.definition.row_groups.clone();
+        let col_fields = self.definition.column_groups.clone();
+
+        self.effective_row_fields = self.transform_field_list_for_grouping(&row_fields);
+        self.effective_col_fields = self.transform_field_list_for_grouping(&col_fields);
+
+        // Update field indices to match effective fields
+        self.row_field_indices = self.effective_row_fields.iter().map(|f| f.source_index).collect();
+        self.col_field_indices = self.effective_col_fields.iter().map(|f| f.source_index).collect();
+    }
+
+    /// Transforms a list of fields, expanding any that have grouping configuration.
+    fn transform_field_list_for_grouping(&mut self, fields: &[PivotField]) -> Vec<PivotField> {
+        let mut effective = Vec::new();
+
+        for field in fields {
+            match &field.grouping {
+                FieldGrouping::None => {
+                    effective.push(field.clone());
+                }
+                FieldGrouping::DateGrouping { levels } => {
+                    let levels = levels.clone();
+                    self.apply_date_grouping_transform(field, &levels, &mut effective);
+                }
+                FieldGrouping::NumberBinning { start, end, interval } => {
+                    let (s, e, i) = (*start, *end, *interval);
+                    self.apply_number_binning_transform(field, s, e, i, &mut effective);
+                }
+                FieldGrouping::ManualGrouping { groups, ungrouped_name } => {
+                    let groups = groups.clone();
+                    let ungrouped = ungrouped_name.clone();
+                    self.apply_manual_grouping_transform(field, &groups, &ungrouped, &mut effective);
+                }
+            }
+        }
+
+        effective
+    }
+
+    /// Applies date grouping: creates virtual fields for each date level.
+    fn apply_date_grouping_transform(
+        &mut self,
+        field: &PivotField,
+        levels: &[DateGroupLevel],
+        effective: &mut Vec<PivotField>,
+    ) {
+        if levels.is_empty() {
+            effective.push(field.clone());
+            return;
+        }
+
+        let base_field_count = self.cache.fields.len();
+
+        // Create virtual fields for each date level
+        let mut vf_info: Vec<(DateGroupLevel, usize, usize)> = Vec::new();
+        for &level in levels {
+            let name = format_date_level_name(&field.name, level);
+            let vf_idx = self.cache.add_virtual_field(name);
+            let effective_index = base_field_count + vf_idx;
+            vf_info.push((level, vf_idx, effective_index));
+        }
+
+        // First pass: collect parsed dates from all records
+        let record_count = self.cache.records.len();
+        let mut parsed_dates: Vec<Option<pivot_engine::cache::ParsedDate>> = Vec::with_capacity(record_count);
+
+        for record in &self.cache.records {
+            let value_id = record.values
+                .get(field.source_index)
+                .copied()
+                .unwrap_or(VALUE_ID_EMPTY);
+            let parsed = if let Some(field_cache) = self.cache.fields.get(field.source_index) {
+                if let Some(cache_value) = field_cache.get_value(value_id) {
+                    parse_cache_value_as_date(cache_value)
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+            parsed_dates.push(parsed);
+        }
+
+        // Pre-intern month and quarter labels in order so they get sorted IDs
+        for &(level, vf_idx, _) in &vf_info {
+            match level {
+                DateGroupLevel::Month => {
+                    let month_names = [
+                        "Jan", "Feb", "Mar", "Apr", "May", "Jun",
+                        "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+                    ];
+                    for (i, name) in month_names.iter().enumerate() {
+                        let month_num = (i + 1) as f64;
+                        let vid = self.cache.virtual_fields[vf_idx]
+                            .intern(CacheValue::Number(OrderedFloat(month_num)));
+                        self.cache.virtual_fields[vf_idx]
+                            .label_map.insert(vid, name.to_string());
+                    }
+                }
+                DateGroupLevel::Quarter => {
+                    for q in 1..=4u32 {
+                        let vid = self.cache.virtual_fields[vf_idx]
+                            .intern(CacheValue::Number(OrderedFloat(q as f64)));
+                        self.cache.virtual_fields[vf_idx]
+                            .label_map.insert(vid, format!("Q{}", q));
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        // Second pass: populate virtual field values for each record
+        for (record_idx, parsed) in parsed_dates.iter().enumerate() {
+            for &(level, vf_idx, _) in &vf_info {
+                let cache_value = if let Some(date) = parsed {
+                    date_to_cache_value(date, level)
+                } else {
+                    CacheValue::Empty
+                };
+                self.cache.set_virtual_record_value(vf_idx, record_idx, cache_value);
+            }
+        }
+
+        // Add label_map entries for Year/Week/Day values
+        for &(level, vf_idx, _) in &vf_info {
+            match level {
+                DateGroupLevel::Year | DateGroupLevel::Week | DateGroupLevel::Day => {
+                    let field_cache = &self.cache.virtual_fields[vf_idx];
+                    let count = field_cache.unique_count();
+                    let mut labels = Vec::new();
+                    for id in 0..count as ValueId {
+                        if let Some(CacheValue::Number(n)) = field_cache.get_value(id) {
+                            let label = match level {
+                                DateGroupLevel::Year => format!("{}", n.as_f64() as i64),
+                                DateGroupLevel::Week => format!("W{:02}", n.as_f64() as u32),
+                                DateGroupLevel::Day => format!("{}", n.as_f64() as u32),
+                                _ => unreachable!(),
+                            };
+                            labels.push((id, label));
+                        }
+                    }
+                    for (id, label) in labels {
+                        self.cache.virtual_fields[vf_idx].label_map.insert(id, label);
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        // Create effective PivotField entries for each date level
+        for &(level, _, effective_index) in &vf_info {
+            let name = format_date_level_name(&field.name, level);
+            let mut vf_field = PivotField::new(effective_index, name);
+            vf_field.sort_order = field.sort_order;
+            vf_field.show_subtotals = field.show_subtotals;
+            vf_field.collapsed = false;
+            vf_field.collapsed_items = Vec::new();
+            vf_field.show_all_items = field.show_all_items;
+            effective.push(vf_field);
+        }
+    }
+
+    /// Applies number binning: creates a virtual field with bin labels.
+    fn apply_number_binning_transform(
+        &mut self,
+        field: &PivotField,
+        start: f64,
+        end: f64,
+        interval: f64,
+        effective: &mut Vec<PivotField>,
+    ) {
+        if interval <= 0.0 || start >= end {
+            effective.push(field.clone());
+            return;
+        }
+
+        let base_field_count = self.cache.fields.len();
+        let name = field.name.clone();
+        let vf_idx = self.cache.add_virtual_field(name.clone());
+        let effective_index = base_field_count + vf_idx;
+
+        // Pre-compute bin labels and pre-intern them in order
+        let bin_count = ((end - start) / interval).ceil() as usize;
+        for bin_idx in 0..bin_count {
+            let bin_start = start + (bin_idx as f64) * interval;
+            let bin_end = (bin_start + interval).min(end);
+            let label = if bin_start.fract() == 0.0 && bin_end.fract() == 0.0 {
+                if bin_end - bin_start == 1.0 {
+                    format!("{}", bin_start as i64)
+                } else {
+                    format!("{}-{}", bin_start as i64, (bin_end - 1.0) as i64)
+                }
+            } else {
+                format!("{:.2}-{:.2}", bin_start, bin_end)
+            };
+            let vid = self.cache.virtual_fields[vf_idx]
+                .intern(CacheValue::Number(OrderedFloat(bin_idx as f64)));
+            self.cache.virtual_fields[vf_idx].label_map.insert(vid, label);
+        }
+
+        // Pre-intern overflow bin labels
+        let under_vid = self.cache.virtual_fields[vf_idx]
+            .intern(CacheValue::Number(OrderedFloat(-1.0)));
+        self.cache.virtual_fields[vf_idx]
+            .label_map.insert(under_vid, format!("<{}", start));
+        let over_vid = self.cache.virtual_fields[vf_idx]
+            .intern(CacheValue::Number(OrderedFloat(bin_count as f64)));
+        self.cache.virtual_fields[vf_idx]
+            .label_map.insert(over_vid, format!(">{}", end));
+
+        // Collect numeric values from records
+        let record_count = self.cache.records.len();
+        let mut record_values: Vec<Option<f64>> = Vec::with_capacity(record_count);
+
+        for record in &self.cache.records {
+            let value_id = record.values
+                .get(field.source_index)
+                .copied()
+                .unwrap_or(VALUE_ID_EMPTY);
+            let numeric = if let Some(field_cache) = self.cache.fields.get(field.source_index) {
+                match field_cache.get_value(value_id) {
+                    Some(CacheValue::Number(n)) => Some(n.as_f64()),
+                    _ => None,
+                }
+            } else {
+                None
+            };
+            record_values.push(numeric);
+        }
+
+        // Populate virtual field with bin values
+        for (record_idx, numeric) in record_values.iter().enumerate() {
+            let cache_value = if let Some(val) = numeric {
+                if *val < start {
+                    CacheValue::Number(OrderedFloat(-1.0))
+                } else if *val >= end {
+                    CacheValue::Number(OrderedFloat(bin_count as f64))
+                } else {
+                    let bin_idx = ((val - start) / interval).floor() as usize;
+                    let bin_idx = bin_idx.min(bin_count - 1);
+                    CacheValue::Number(OrderedFloat(bin_idx as f64))
+                }
+            } else {
+                CacheValue::Empty
+            };
+            self.cache.set_virtual_record_value(vf_idx, record_idx, cache_value);
+        }
+
+        // Create effective PivotField
+        let mut vf_field = PivotField::new(effective_index, name);
+        vf_field.sort_order = field.sort_order;
+        vf_field.show_subtotals = field.show_subtotals;
+        vf_field.collapsed = false;
+        vf_field.collapsed_items = Vec::new();
+        vf_field.show_all_items = field.show_all_items;
+        effective.push(vf_field);
+    }
+
+    /// Applies manual grouping: creates a virtual parent field with group names.
+    fn apply_manual_grouping_transform(
+        &mut self,
+        field: &PivotField,
+        groups: &[ManualGroup],
+        ungrouped_name: &str,
+        effective: &mut Vec<PivotField>,
+    ) {
+        if groups.is_empty() {
+            effective.push(field.clone());
+            return;
+        }
+
+        let base_field_count = self.cache.fields.len();
+        let name = format!("{} (Group)", field.name);
+        let vf_idx = self.cache.add_virtual_field(name.clone());
+        let effective_index = base_field_count + vf_idx;
+
+        // Build a map from member label to group name
+        let mut member_to_group: HashMap<String, String> = HashMap::new();
+        for group in groups {
+            for member in &group.members {
+                member_to_group.insert(member.clone(), group.name.clone());
+            }
+        }
+
+        // First pass: collect labels for each record
+        let record_count = self.cache.records.len();
+        let mut record_labels: Vec<String> = Vec::with_capacity(record_count);
+
+        for record in &self.cache.records {
+            let value_id = record.values
+                .get(field.source_index)
+                .copied()
+                .unwrap_or(VALUE_ID_EMPTY);
+            let label = if let Some(field_cache) = self.cache.fields.get(field.source_index) {
+                match field_cache.get_value(value_id) {
+                    Some(CacheValue::Text(s)) => s.clone(),
+                    Some(CacheValue::Number(n)) => format!("{}", n.as_f64()),
+                    Some(CacheValue::Boolean(b)) => {
+                        if *b { "TRUE" } else { "FALSE" }.to_string()
+                    }
+                    _ => String::new(),
+                }
+            } else {
+                String::new()
+            };
+            record_labels.push(label);
+        }
+
+        // Second pass: assign group names to virtual field
+        for (record_idx, label) in record_labels.iter().enumerate() {
+            let group_name = member_to_group
+                .get(label)
+                .cloned()
+                .unwrap_or_else(|| ungrouped_name.to_string());
+            self.cache.set_virtual_record_value(
+                vf_idx,
+                record_idx,
+                CacheValue::Text(group_name),
+            );
+        }
+
+        // Add the virtual group field BEFORE the original field (creates hierarchy)
+        let mut group_field = PivotField::new(effective_index, name);
+        group_field.sort_order = field.sort_order;
+        group_field.show_subtotals = true;
+        effective.push(group_field);
+
+        // Keep the original field as the detail level under the group
+        effective.push(field.clone());
+    }
+
+    // ========================================================================
     // AXIS TREE BUILDING (reuses pivot patterns)
     // ========================================================================
 
@@ -228,12 +585,20 @@ impl<'a> TablixCalculator<'a> {
         let mut unique_per_level: Vec<HashMap<ValueId, bool>> =
             vec![HashMap::new(); fields.len()];
 
-        for record in self.cache.filtered_records() {
+        let base_field_count = self.cache.fields.len();
+        for (record_idx, record) in self.cache.records.iter().enumerate() {
+            if !self.cache.filter_mask[record_idx] {
+                continue;
+            }
+
             for (level, field) in fields.iter().enumerate() {
-                let value_id = record.values
-                    .get(field.source_index)
-                    .copied()
-                    .unwrap_or(VALUE_ID_EMPTY);
+                let value_id = record_value_at(
+                    record,
+                    record_idx,
+                    field.source_index,
+                    base_field_count,
+                    &self.cache.virtual_records,
+                );
                 unique_per_level[level].insert(value_id, true);
             }
         }
@@ -253,25 +618,34 @@ impl<'a> TablixCalculator<'a> {
         }
 
         let field = &fields[level];
-        let field_cache = match self.cache.fields.get(field.source_index) {
+        let field_cache = match self.cache.get_field(field.source_index) {
             Some(fc) => fc,
             None => return Vec::new(),
         };
 
-        let values_at_level = match unique_values.get(level) {
-            Some(v) => v,
-            None => return Vec::new(),
+        // If show_all_items, use ALL unique values from field cache (Cartesian product)
+        let all_values_map: HashMap<ValueId, bool>;
+        let values_at_level = if field.show_all_items {
+            all_values_map = (0..field_cache.unique_count() as ValueId)
+                .map(|id| (id, true))
+                .collect();
+            &all_values_map
+        } else {
+            match unique_values.get(level) {
+                Some(v) => v,
+                None => return Vec::new(),
+            }
         };
 
         let mut sorted_ids: Vec<ValueId> = values_at_level.keys().copied().collect();
-        self.sort_value_ids(&mut sorted_ids, field.source_index, &field.sort_order);
+        self.sort_value_ids_fc(&mut sorted_ids, field_cache, &field.sort_order);
 
         let mut nodes = Vec::with_capacity(sorted_ids.len());
 
         for value_id in sorted_ids {
-            let label = self.get_value_label(field.source_index, value_id);
+            let label = self.get_value_label_fc(field_cache, value_id);
             let mut node = AxisNode::new(value_id, field.source_index, label, level);
-            node.is_collapsed = field.collapsed;
+            node.is_collapsed = field.collapsed || field.collapsed_items.contains(&node.label);
             node.show_subtotal = field.show_subtotals && level < fields.len() - 1;
 
             if level < fields.len() - 1 {
@@ -296,16 +670,24 @@ impl<'a> TablixCalculator<'a> {
         let mut unique_per_level: Vec<HashMap<ValueId, bool>> =
             vec![HashMap::new(); fields.len()];
 
-        'records: for record in self.cache.filtered_records() {
+        let base_field_count = self.cache.fields.len();
+        'records: for (record_idx, record) in self.cache.records.iter().enumerate() {
+            if !self.cache.filter_mask[record_idx] {
+                continue;
+            }
+
             for (level, &parent_value) in parent_path.iter().enumerate() {
                 if level >= fields.len() {
                     break;
                 }
                 let field_idx = fields[level].source_index;
-                let record_value = record.values
-                    .get(field_idx)
-                    .copied()
-                    .unwrap_or(VALUE_ID_EMPTY);
+                let record_value = record_value_at(
+                    record,
+                    record_idx,
+                    field_idx,
+                    base_field_count,
+                    &self.cache.virtual_records,
+                );
                 if record_value != parent_value {
                     continue 'records;
                 }
@@ -313,10 +695,13 @@ impl<'a> TablixCalculator<'a> {
 
             for level in start_level..fields.len() {
                 let field_idx = fields[level].source_index;
-                let value_id = record.values
-                    .get(field_idx)
-                    .copied()
-                    .unwrap_or(VALUE_ID_EMPTY);
+                let value_id = record_value_at(
+                    record,
+                    record_idx,
+                    field_idx,
+                    base_field_count,
+                    &self.cache.virtual_records,
+                );
                 unique_per_level[level].insert(value_id, true);
             }
         }
@@ -324,12 +709,12 @@ impl<'a> TablixCalculator<'a> {
         unique_per_level
     }
 
-    fn sort_value_ids(&self, ids: &mut Vec<ValueId>, field_index: FieldIndex, sort_order: &SortOrder) {
-        let field_cache = match self.cache.fields.get(field_index) {
-            Some(fc) => fc,
-            None => return,
-        };
-
+    fn sort_value_ids_fc(
+        &self,
+        ids: &mut Vec<ValueId>,
+        field_cache: &pivot_engine::cache::FieldCache,
+        sort_order: &SortOrder,
+    ) {
         match sort_order {
             SortOrder::Ascending => {
                 ids.sort_by(|&a, &b| self.compare_values(field_cache, a, b));
@@ -378,10 +763,29 @@ impl<'a> TablixCalculator<'a> {
         if value_id == VALUE_ID_EMPTY {
             return "(blank)".to_string();
         }
-        let field_cache = match self.cache.fields.get(field_index) {
+        let field_cache = match self.cache.get_field(field_index) {
             Some(fc) => fc,
             None => return "(unknown)".to_string(),
         };
+        self.get_value_label_fc(field_cache, value_id)
+    }
+
+    /// Gets the display label for a value from a specific field cache.
+    /// Checks label_map first (used by date/number grouping for friendly names).
+    fn get_value_label_fc(
+        &self,
+        field_cache: &pivot_engine::cache::FieldCache,
+        value_id: ValueId,
+    ) -> String {
+        if value_id == VALUE_ID_EMPTY {
+            return "(blank)".to_string();
+        }
+
+        // Check for custom label override (used by date grouping, number binning)
+        if let Some(label) = field_cache.label_map.get(&value_id) {
+            return label.clone();
+        }
+
         match field_cache.get_value(value_id) {
             Some(CacheValue::Empty) => "(blank)".to_string(),
             Some(CacheValue::Number(n)) => format!("{}", n.as_f64()),
@@ -415,7 +819,7 @@ impl<'a> TablixCalculator<'a> {
     /// Flattens the row axis tree, collecting matching source rows at each leaf node.
     fn flatten_row_tree(&self, tree: &[AxisNode]) -> Vec<FlatRowItem> {
         let mut items = Vec::new();
-        let fields = &self.definition.row_groups;
+        let fields = &self.effective_row_fields;
         let has_detail = self.definition.has_detail_fields();
 
         self.flatten_row_nodes(tree, &mut items, &[], 0, fields, has_detail);
@@ -469,6 +873,10 @@ impl<'a> TablixCalculator<'a> {
                 padded_values.push(VALUE_ID_EMPTY);
             }
 
+            let subtotal_location = self.definition.layout.subtotal_location;
+            let wants_subtotal = node.show_subtotal && has_children
+                && !matches!(subtotal_location, SubtotalLocation::Off);
+
             items.push(FlatRowItem {
                 group_values: padded_values,
                 label: node.label.clone(),
@@ -479,6 +887,26 @@ impl<'a> TablixCalculator<'a> {
                 is_collapsed: node.is_collapsed,
                 detail_rows,
             });
+
+            // SubtotalLocation::AtTop: insert subtotal BEFORE children
+            if wants_subtotal && matches!(subtotal_location, SubtotalLocation::AtTop) {
+                let mut subtotal_values = parent_values.to_vec();
+                subtotal_values.push(node.value_id);
+                while subtotal_values.len() < total_levels {
+                    subtotal_values.push(VALUE_ID_EMPTY);
+                }
+
+                items.push(FlatRowItem {
+                    group_values: subtotal_values,
+                    label: format!("{} Total", node.label),
+                    depth,
+                    is_subtotal: true,
+                    is_grand_total: false,
+                    has_children: false,
+                    is_collapsed: false,
+                    detail_rows: Vec::new(),
+                });
+            }
 
             // Recurse into children
             if has_children && !node.is_collapsed {
@@ -498,8 +926,8 @@ impl<'a> TablixCalculator<'a> {
                 );
             }
 
-            // Subtotal after children
-            if node.show_subtotal && has_children {
+            // SubtotalLocation::AtBottom: insert subtotal AFTER children
+            if wants_subtotal && matches!(subtotal_location, SubtotalLocation::AtBottom) {
                 let mut subtotal_values = parent_values.to_vec();
                 subtotal_values.push(node.value_id);
                 while subtotal_values.len() < total_levels {
@@ -527,8 +955,13 @@ impl<'a> TablixCalculator<'a> {
         fields: &[PivotField],
     ) -> Vec<u32> {
         let mut rows = Vec::new();
+        let base_field_count = self.cache.fields.len();
 
-        for record in self.cache.filtered_records() {
+        for (record_idx, record) in self.cache.records.iter().enumerate() {
+            if !self.cache.filter_mask[record_idx] {
+                continue;
+            }
+
             let mut matches = true;
             for (level, &gv) in group_values.iter().enumerate() {
                 if gv == VALUE_ID_EMPTY {
@@ -536,10 +969,13 @@ impl<'a> TablixCalculator<'a> {
                 }
                 if level < fields.len() {
                     let field_idx = fields[level].source_index;
-                    let record_value = record.values
-                        .get(field_idx)
-                        .copied()
-                        .unwrap_or(VALUE_ID_EMPTY);
+                    let record_value = record_value_at(
+                        record,
+                        record_idx,
+                        field_idx,
+                        base_field_count,
+                        &self.cache.virtual_records,
+                    );
                     if record_value != gv {
                         matches = false;
                         break;
@@ -560,7 +996,7 @@ impl<'a> TablixCalculator<'a> {
 
     fn flatten_col_tree(&self, tree: &[AxisNode]) -> Vec<FlatColItem> {
         let mut items = Vec::new();
-        let fields = &self.definition.column_groups;
+        let fields = &self.effective_col_fields;
 
         self.flatten_col_nodes(tree, &mut items, &[], 0, fields, -1);
 
@@ -601,6 +1037,10 @@ impl<'a> TablixCalculator<'a> {
 
             let has_children = !node.children.is_empty();
 
+            let subtotal_location = self.definition.layout.subtotal_location;
+            let wants_subtotal = node.show_subtotal && has_children
+                && !matches!(subtotal_location, SubtotalLocation::Off);
+
             items.push(FlatColItem {
                 group_values,
                 label: node.label.clone(),
@@ -610,6 +1050,25 @@ impl<'a> TablixCalculator<'a> {
                 has_children,
                 parent_index,
             });
+
+            // SubtotalLocation::AtTop: insert subtotal BEFORE children
+            if wants_subtotal && matches!(subtotal_location, SubtotalLocation::AtTop) {
+                let mut subtotal_values = parent_values.to_vec();
+                subtotal_values.push(node.value_id);
+                while subtotal_values.len() < total_levels {
+                    subtotal_values.push(VALUE_ID_EMPTY);
+                }
+
+                items.push(FlatColItem {
+                    group_values: subtotal_values,
+                    label: format!("{} Total", node.label),
+                    depth,
+                    is_subtotal: true,
+                    is_grand_total: false,
+                    has_children: false,
+                    parent_index: my_index,
+                });
+            }
 
             if has_children {
                 let child_parent: Vec<ValueId> = parent_values
@@ -628,7 +1087,8 @@ impl<'a> TablixCalculator<'a> {
                 );
             }
 
-            if node.show_subtotal && has_children {
+            // SubtotalLocation::AtBottom: insert subtotal AFTER children
+            if wants_subtotal && matches!(subtotal_location, SubtotalLocation::AtBottom) {
                 let mut subtotal_values = parent_values.to_vec();
                 subtotal_values.push(node.value_id);
                 while subtotal_values.len() < total_levels {
@@ -685,20 +1145,20 @@ impl<'a> TablixCalculator<'a> {
         match self.definition.layout.group_layout {
             GroupLayout::Stepped => {
                 // All row groups in one column with indentation
-                if self.definition.row_groups.is_empty() { 0 } else { 1 }
+                if self.effective_row_fields.is_empty() { 0 } else { 1 }
             }
             GroupLayout::Block => {
                 // Each row group gets its own column
-                self.definition.row_groups.len().max(if self.definition.row_groups.is_empty() { 0 } else { 1 })
+                self.effective_row_fields.len().max(if self.effective_row_fields.is_empty() { 0 } else { 1 })
             }
         }
     }
 
     fn calculate_col_header_rows(&self) -> usize {
-        if self.definition.column_groups.is_empty() {
+        if self.effective_col_fields.is_empty() {
             1 // Just one row for data field names
         } else {
-            let base = self.definition.column_groups.len();
+            let base = self.effective_col_fields.len();
             if self.definition.data_fields.len() > 1 {
                 base + 1
             } else {
@@ -913,12 +1373,12 @@ impl<'a> TablixCalculator<'a> {
 
             // Corner cells for row group columns
             for i in 0..row_group_cols {
-                if i < self.definition.row_groups.len() {
+                if i < self.effective_row_fields.len() {
                     let name = match self.definition.layout.group_layout {
-                        GroupLayout::Block => self.definition.row_groups[i].name.clone(),
+                        GroupLayout::Block => self.effective_row_fields[i].name.clone(),
                         GroupLayout::Stepped => {
                             if i == 0 {
-                                self.definition.row_groups
+                                self.effective_row_fields
                                     .iter()
                                     .map(|f| f.name.as_str())
                                     .collect::<Vec<_>>()
@@ -976,7 +1436,7 @@ impl<'a> TablixCalculator<'a> {
 
                 // Column group headers at this level
                 for (ci, col_item) in self.col_items.iter().enumerate() {
-                    if header_row < self.definition.column_groups.len() {
+                    if header_row < self.effective_col_fields.len() {
                         if col_item.depth as usize == header_row {
                             let mut cell = TablixViewCell::column_group_header(col_item.label.clone());
                             // Span across data fields
@@ -1478,14 +1938,18 @@ impl<'a> TablixCalculator<'a> {
         value_field_index: FieldIndex,
         aggregation: AggregationType,
     ) -> f64 {
-        let row_fields = &self.definition.row_groups;
-        let col_fields = &self.definition.column_groups;
+        let row_fields = &self.effective_row_fields;
+        let col_fields = &self.effective_col_fields;
 
         let mut acc = AggregateAccumulator::new();
 
-        for record in self.cache.filtered_records() {
-            if !self.record_matches_group(record, row_values, row_fields)
-                || !self.record_matches_group(record, col_values, col_fields)
+        for (record_idx, record) in self.cache.records.iter().enumerate() {
+            if !self.cache.filter_mask[record_idx] {
+                continue;
+            }
+
+            if !self.record_matches_group(record, record_idx, row_values, row_fields)
+                || !self.record_matches_group(record, record_idx, col_values, col_fields)
             {
                 continue;
             }
@@ -1519,34 +1983,40 @@ impl<'a> TablixCalculator<'a> {
         row_values: &[ValueId],
         col_values: &[ValueId],
     ) -> usize {
-        let row_fields = &self.definition.row_groups;
-        let col_fields = &self.definition.column_groups;
+        let row_fields = &self.effective_row_fields;
+        let col_fields = &self.effective_col_fields;
 
-        self.cache.filtered_records()
-            .filter(|record| {
-                self.record_matches_group(record, row_values, row_fields)
-                    && self.record_matches_group(record, col_values, col_fields)
+        self.cache.records.iter().enumerate()
+            .filter(|(record_idx, record)| {
+                self.cache.filter_mask[*record_idx]
+                    && self.record_matches_group(record, *record_idx, row_values, row_fields)
+                    && self.record_matches_group(record, *record_idx, col_values, col_fields)
             })
             .count()
     }
 
-    /// Checks if a record matches a group's values.
+    /// Checks if a record matches a group's values (supports virtual fields).
     fn record_matches_group(
         &self,
         record: &CacheRecord,
+        record_idx: usize,
         group_values: &[ValueId],
         fields: &[PivotField],
     ) -> bool {
+        let base_field_count = self.cache.fields.len();
         for (level, &gv) in group_values.iter().enumerate() {
             if gv == VALUE_ID_EMPTY {
                 continue; // Wildcard
             }
             if level < fields.len() {
                 let field_idx = fields[level].source_index;
-                let record_value = record.values
-                    .get(field_idx)
-                    .copied()
-                    .unwrap_or(VALUE_ID_EMPTY);
+                let record_value = record_value_at(
+                    record,
+                    record_idx,
+                    field_idx,
+                    base_field_count,
+                    &self.cache.virtual_records,
+                );
                 if record_value != gv {
                     return false;
                 }

@@ -1,7 +1,7 @@
 //! FILENAME: app/extensions/pivot/components/PivotGrid/PivotGrid.tsx
 import React, { useRef, useEffect, useState, useCallback, useMemo } from 'react';
 import type { PivotViewResponse } from '../../lib/pivot-api';
-import { getPivotView } from '../../lib/pivot-api';
+import { getPivotView, togglePivotGroup } from '../../lib/pivot-api';
 import {
   renderPivotView,
   createPivotTheme,
@@ -161,15 +161,40 @@ export const PivotGrid: React.FC<PivotGridProps> = ({
 
   const handleExpandCollapse = useCallback(
     async (row: number, col: number, isExpanded: boolean) => {
-      // Toggle the expanded state
+      if (!pivotView) return;
+
+      // Look up the cell data to find the item label
+      const rowData = pivotView.rows[row];
+      if (!rowData) return;
+      const cell = rowData.cells[col];
+      if (!cell) return;
+
+      // The formatted value is the item label for this row header
+      const itemLabel = cell.formattedValue;
+
+      // Determine field index: col position maps to a row field (for row headers)
+      // In compact layout, all fields are in col 0 with indent levels
+      // In outline/tabular, each field has its own column
+      const fieldIndex = col;
+
       const newExpandedState = !isExpanded;
       onExpandCollapse?.(row, col, newExpandedState);
 
-      // TODO: Call API to toggle expand/collapse and refresh view
-      // For now, just trigger a refresh
-      await fetchPivotData();
+      try {
+        // Call API with per-item toggle (value = item label)
+        await togglePivotGroup({
+          pivotId,
+          isRow: true,
+          fieldIndex,
+          value: itemLabel,
+        });
+        await fetchPivotData();
+      } catch (error) {
+        console.error('Failed to toggle expand/collapse:', error);
+        await fetchPivotData();
+      }
     },
-    [onExpandCollapse, fetchPivotData]
+    [pivotId, pivotView, onExpandCollapse, fetchPivotData]
   );
 
   const {

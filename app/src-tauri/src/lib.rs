@@ -2210,6 +2210,13 @@ pub fn run() {
             pivot::set_pivot_item_visibility,
             pivot::get_all_pivot_tables,
             pivot::refresh_all_pivot_tables,
+            pivot::set_pivot_item_expanded,
+            pivot::expand_collapse_level,
+            pivot::expand_collapse_all,
+            pivot::group_pivot_field,
+            pivot::create_manual_group,
+            pivot::ungroup_pivot_field,
+            pivot::drill_through_to_sheet,
             // Named range commands
             named_ranges::create_named_range,
             named_ranges::update_named_range,

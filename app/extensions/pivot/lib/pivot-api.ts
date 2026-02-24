@@ -40,6 +40,13 @@ import {
   setPivotItemVisibility as apiSetPivotItemVisibility,
   getAllPivotTables as apiGetAllPivotTables,
   refreshAllPivotTables as apiRefreshAllPivotTables,
+  setPivotItemExpanded as apiSetPivotItemExpanded,
+  expandCollapseLevel as apiExpandCollapseLevel,
+  expandCollapseAll as apiExpandCollapseAll,
+  groupPivotField as apiGroupPivotField,
+  createManualGroup as apiCreateManualGroup,
+  ungroupPivotField as apiUngroupPivotField,
+  drillThroughToSheet as apiDrillThroughToSheet,
 } from "../../../src/api/backend";
 
 // ============================================================================
@@ -108,10 +115,16 @@ export interface PivotFieldConfig {
   sortOrder?: SortOrder;
   /** Whether to show subtotals */
   showSubtotals?: boolean;
-  /** Whether field is collapsed */
+  /** Whether field is collapsed (field-level: collapses ALL items) */
   collapsed?: boolean;
   /** Items to hide (filter out) */
   hiddenItems?: string[];
+  /** Per-item collapse tracking: specific item labels that are collapsed */
+  collapsedItems?: string[];
+  /** Whether to show all items (including items with no data) */
+  showAllItems?: boolean;
+  /** Grouping configuration for this field */
+  grouping?: FieldGroupingConfig;
 }
 
 /** Value field configuration */
@@ -218,6 +231,8 @@ export interface PivotCellData {
   backgroundStyle: BackgroundStyle;
   numberFormat?: string;
   filterFieldIndex?: number;
+  /** Group path for drill-down: [fieldIndex, valueId] pairs identifying this cell's data */
+  groupPath?: Array<[number, number]>;
 }
 
 /** Row data from the backend */
@@ -1012,4 +1027,179 @@ export async function getAllPivotTables(): Promise<PivotTableInfo[]> {
  */
 export async function refreshAllPivotTables(): Promise<PivotViewResponse[]> {
   return apiRefreshAllPivotTables<PivotViewResponse[]>();
+}
+
+// ============================================================================
+// EXPAND/COLLAPSE AND GROUPING TYPES
+// ============================================================================
+
+/** Date group level for date grouping */
+export type DateGroupLevel = "year" | "quarter" | "month" | "week" | "day";
+
+/** Manual group definition */
+export interface ManualGroupConfig {
+  name: string;
+  members: string[];
+}
+
+/** Grouping configuration for a field */
+export type FieldGroupingConfig =
+  | { type: "None" }
+  | { type: "DateGrouping"; levels: DateGroupLevel[] }
+  | { type: "NumberBinning"; start: number; end: number; interval: number }
+  | {
+      type: "ManualGrouping";
+      groups: ManualGroupConfig[];
+      ungroupedName?: string;
+    };
+
+/** Request to set a pivot item's expand/collapse state */
+export interface SetItemExpandedRequest {
+  pivotId: PivotId;
+  fieldIndex: number;
+  itemName: string;
+  isExpanded: boolean;
+}
+
+/** Request to expand or collapse all items at a specific field level */
+export interface ExpandCollapseLevelRequest {
+  pivotId: PivotId;
+  isRow: boolean;
+  fieldIndex: number;
+  expand: boolean;
+}
+
+/** Request to expand or collapse all fields in the pivot table */
+export interface ExpandCollapseAllRequest {
+  pivotId: PivotId;
+  expand: boolean;
+}
+
+// ============================================================================
+// EXPAND/COLLAPSE AND GROUPING API FUNCTIONS
+// ============================================================================
+
+/**
+ * Sets the expand/collapse state of a specific pivot item.
+ */
+export async function setPivotItemExpanded(
+  request: SetItemExpandedRequest
+): Promise<PivotViewResponse> {
+  return apiSetPivotItemExpanded<SetItemExpandedRequest, PivotViewResponse>(request);
+}
+
+/**
+ * Expands or collapses all items at a specific field level.
+ */
+export async function expandCollapseLevel(
+  request: ExpandCollapseLevelRequest
+): Promise<PivotViewResponse> {
+  return apiExpandCollapseLevel<ExpandCollapseLevelRequest, PivotViewResponse>(request);
+}
+
+/**
+ * Expands or collapses all fields in the entire pivot table.
+ */
+export async function expandCollapseAll(
+  request: ExpandCollapseAllRequest
+): Promise<PivotViewResponse> {
+  return apiExpandCollapseAll<ExpandCollapseAllRequest, PivotViewResponse>(request);
+}
+
+// ============================================================================
+// GROUPING TYPES
+// ============================================================================
+
+/** Manual group configuration */
+export interface ManualGroupConfig {
+  name: string;
+  members: string[];
+}
+
+/** Grouping configuration for a pivot field (tagged union via "type" key) */
+export type FieldGroupingConfig =
+  | { type: "none" }
+  | { type: "dateGrouping"; levels: DateGroupLevel[] }
+  | { type: "numberBinning"; start: number; end: number; interval: number }
+  | { type: "manualGrouping"; groups: ManualGroupConfig[]; ungroupedName?: string };
+
+/** Request to apply grouping to a field */
+export interface GroupFieldRequest {
+  pivotId: PivotId;
+  fieldIndex: number;
+  grouping: FieldGroupingConfig;
+}
+
+/** Request to create a manual group on a field */
+export interface CreateManualGroupRequest {
+  pivotId: PivotId;
+  fieldIndex: number;
+  groupName: string;
+  memberItems: string[];
+}
+
+/** Request to remove grouping from a field */
+export interface UngroupFieldRequest {
+  pivotId: PivotId;
+  fieldIndex: number;
+}
+
+// ============================================================================
+// GROUPING API FUNCTIONS
+// ============================================================================
+
+/**
+ * Applies grouping (date, number binning, or manual) to a pivot field.
+ */
+export async function groupPivotField(
+  request: GroupFieldRequest
+): Promise<PivotViewResponse> {
+  return apiGroupPivotField<GroupFieldRequest, PivotViewResponse>(request);
+}
+
+/**
+ * Creates a manual group on a pivot field.
+ */
+export async function createManualGroup(
+  request: CreateManualGroupRequest
+): Promise<PivotViewResponse> {
+  return apiCreateManualGroup<CreateManualGroupRequest, PivotViewResponse>(request);
+}
+
+/**
+ * Removes all grouping from a pivot field.
+ */
+export async function ungroupPivotField(
+  request: UngroupFieldRequest
+): Promise<PivotViewResponse> {
+  return apiUngroupPivotField<UngroupFieldRequest, PivotViewResponse>(request);
+}
+
+// ============================================================================
+// Drill-Through (creates new sheet with matching source data)
+// ============================================================================
+
+/** Request for drill-through to a new sheet. */
+export interface DrillThroughRequest {
+  pivotId: PivotId;
+  groupPath: Array<[number, number]>;
+  maxRecords?: number;
+}
+
+/** Response from drill-through operation. */
+export interface DrillThroughResponse {
+  sheetName: string;
+  sheetIndex: number;
+  rowCount: number;
+  colCount: number;
+}
+
+/**
+ * Performs a drill-through: creates a new sheet with the matching source data rows.
+ * Typically triggered by double-clicking on a data cell in the pivot table.
+ */
+export async function drillThroughToSheet(
+  request: DrillThroughRequest
+): Promise<DrillThroughResponse> {
+  return apiDrillThroughToSheet<DrillThroughRequest, DrillThroughResponse>(request);
 }

@@ -17,7 +17,6 @@ import {
   addTaskPaneContextKey,
   removeTaskPaneContextKey,
   showToast,
-  emitAppEvent,
 } from '../../../src/api';
 import type { SourceField, ZoneField } from '../../_shared/components/types';
 import type { TablixId, TablixLayoutConfig } from '../types';
@@ -103,8 +102,8 @@ export function TablixEditor({
       // Switch context keys and task panes
       removeTaskPaneContextKey('tablix');
       addTaskPaneContextKey('pivot');
-      // Emit events to refresh regions
-      emitAppEvent('app:pivot-regions-updated', {});
+      // Trigger pivot region refresh so the new pivot regions are fetched
+      window.dispatchEvent(new Event('pivot:refresh'));
       // Open the Pivot editor pane
       openTaskPane('pivot-editor');
     } catch (error) {

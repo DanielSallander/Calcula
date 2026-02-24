@@ -18,6 +18,7 @@ import { registerDefinedNamesExtension, unregisterDefinedNamesExtension } from "
 import { registerEvaluateFormulaExtension, unregisterEvaluateFormulaExtension } from "./EvaluateFormula";
 import { registerConsolidateExtension, unregisterConsolidateExtension } from "./Consolidate";
 import { registerTablixExtension, unregisterTablixExtension } from "./Tablix";
+import { registerSortingExtension, unregisterSortingExtension } from "./Sorting";
 
 /**
  * Load all extensions.
@@ -32,6 +33,7 @@ export function loadExtensions(): void {
   registerTableExtension();
   registerChartExtension();
   registerAutoFilterExtension();
+  registerSortingExtension();
   registerGroupingExtension();
   registerRemoveDuplicatesExtension();
   registerTextToColumnsExtension();
@@ -70,6 +72,7 @@ export function unloadExtensions(): void {
   unregisterTextToColumnsExtension();
   unregisterRemoveDuplicatesExtension();
   unregisterGroupingExtension();
+  unregisterSortingExtension();
   unregisterAutoFilterExtension();
   unregisterChartExtension();
   unregisterTableExtension();
@@ -94,4 +97,5 @@ export { registerTracingExtension, unregisterTracingExtension };
 export { registerDefinedNamesExtension, unregisterDefinedNamesExtension };
 export { registerEvaluateFormulaExtension, unregisterEvaluateFormulaExtension };
 export { registerConsolidateExtension, unregisterConsolidateExtension };
+export { registerSortingExtension, unregisterSortingExtension };
 export { registerTablixExtension, unregisterTablixExtension };

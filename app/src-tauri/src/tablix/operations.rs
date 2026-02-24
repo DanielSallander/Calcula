@@ -2,7 +2,7 @@
 //! Core operations for tablix - converts between engine types and API types.
 
 use crate::tablix::types::*;
-use pivot_engine::definition::{AggregationType, PivotField, PivotFilter, SortOrder};
+use pivot_engine::definition::{AggregationType, FieldGrouping, PivotField, PivotFilter, SortOrder};
 use pivot_engine::cache::CacheValue;
 use tablix_engine::{
     TablixDefinition, TablixLayout, GroupLayout,
@@ -160,6 +160,9 @@ pub fn parse_field_config(config: &TablixFieldConfig) -> PivotField {
         show_subtotals: config.show_subtotals.unwrap_or(true),
         collapsed: config.collapsed.unwrap_or(false),
         hidden_items: config.hidden_items.clone().unwrap_or_default(),
+        collapsed_items: Vec::new(),
+        show_all_items: false,
+        grouping: Default::default(),
     }
 }
 
@@ -210,6 +213,7 @@ pub fn parse_layout_config(config: &TablixLayoutConfig, existing: &TablixLayout)
         },
         repeat_group_labels: config.repeat_group_labels.unwrap_or(existing.repeat_group_labels),
         show_empty_groups: config.show_empty_groups.unwrap_or(existing.show_empty_groups),
+        subtotal_location: existing.subtotal_location,
     }
 }
 

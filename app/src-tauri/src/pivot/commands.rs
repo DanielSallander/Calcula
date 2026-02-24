@@ -8,6 +8,7 @@ use crate::pivot::utils::*;
 use crate::{log_debug, log_info, AppState};
 use crate::pivot::types::PivotState;
 use pivot_engine::{drill_down, CacheValue, PivotDefinition, PivotId, VALUE_ID_EMPTY};
+use crate::sheets::FreezeConfig;
 use tauri::State;
 
 // ============================================================================
@@ -266,14 +267,36 @@ pub fn toggle_pivot_group(
     }
 
     let field = &mut fields[request.field_index];
-    field.collapsed = !field.collapsed;
 
-    log_debug!(
-        "PIVOT",
-        "toggled field {} collapsed={}",
-        field.name,
-        field.collapsed
-    );
+    if let Some(ref item_name) = request.value {
+        // Per-item toggle: toggle a specific item in collapsed_items
+        if field.collapsed_items.contains(item_name) {
+            field.collapsed_items.retain(|s| s != item_name);
+        } else {
+            field.collapsed_items.push(item_name.clone());
+        }
+        // If toggling a specific item, clear field-level collapse
+        field.collapsed = false;
+
+        log_debug!(
+            "PIVOT",
+            "toggled item '{}' in field {} (collapsed_items count={})",
+            item_name,
+            field.name,
+            field.collapsed_items.len()
+        );
+    } else {
+        // Field-level toggle: toggle all items, clear per-item overrides
+        field.collapsed = !field.collapsed;
+        field.collapsed_items.clear();
+
+        log_debug!(
+            "PIVOT",
+            "toggled field {} collapsed={}",
+            field.name,
+            field.collapsed
+        );
+    }
 
     // Bump version
     definition.bump_version();
@@ -979,6 +1002,9 @@ pub fn update_pivot_layout(
     }
     if let Some(ref desc) = request.layout.alt_text_description {
         definition.layout.alt_text_description = Some(desc.clone());
+    }
+    if let Some(ref loc) = request.layout.subtotal_location {
+        definition.layout.subtotal_location = api_subtotal_location_to_engine(loc);
     }
 
     // Bump version
@@ -1851,6 +1877,164 @@ pub fn get_all_pivot_tables(
         .collect()
 }
 
+/// Sets the expand/collapse state of a specific pivot item.
+#[tauri::command]
+pub fn set_pivot_item_expanded(
+    state: State<AppState>,
+    pivot_state: State<'_, PivotState>,
+    request: SetItemExpandedRequest,
+) -> Result<PivotViewResponse, String> {
+    log_info!(
+        "PIVOT",
+        "set_pivot_item_expanded pivot_id={} field_idx={} item='{}' expanded={}",
+        request.pivot_id,
+        request.field_index,
+        request.item_name,
+        request.is_expanded
+    );
+
+    let mut pivot_tables = pivot_state.pivot_tables.lock().unwrap();
+    let (definition, cache) = pivot_tables
+        .get_mut(&request.pivot_id)
+        .ok_or_else(|| format!("Pivot table {} not found", request.pivot_id))?;
+
+    // Search in both row_fields and column_fields for the matching field_index
+    let mut found = false;
+    for field in definition.row_fields.iter_mut().chain(definition.column_fields.iter_mut()) {
+        if field.source_index == request.field_index {
+            if request.is_expanded {
+                field.collapsed_items.retain(|s| s != &request.item_name);
+            } else if !field.collapsed_items.contains(&request.item_name) {
+                field.collapsed_items.push(request.item_name.clone());
+            }
+            // Clear field-level collapse when setting per-item state
+            field.collapsed = false;
+            found = true;
+            break;
+        }
+    }
+
+    if !found {
+        return Err(format!(
+            "Field with source_index {} not found in row or column fields",
+            request.field_index
+        ));
+    }
+
+    definition.bump_version();
+
+    let view = safe_calculate_pivot(definition, cache);
+    let response = view_to_response(&view, definition, cache);
+
+    let destination = definition.destination;
+    let pivot_id = definition.id;
+    let dest_sheet_idx = resolve_dest_sheet_index(&state, definition);
+
+    drop(pivot_tables);
+
+    update_pivot_in_grid(&state, pivot_id, dest_sheet_idx, destination, &view);
+    update_pivot_region(&state, pivot_id, dest_sheet_idx, destination, &view);
+
+    Ok(response)
+}
+
+/// Expands or collapses all items at a specific field level.
+#[tauri::command]
+pub fn expand_collapse_level(
+    state: State<AppState>,
+    pivot_state: State<'_, PivotState>,
+    request: ExpandCollapseLevelRequest,
+) -> Result<PivotViewResponse, String> {
+    log_info!(
+        "PIVOT",
+        "expand_collapse_level pivot_id={} is_row={} field_idx={} expand={}",
+        request.pivot_id,
+        request.is_row,
+        request.field_index,
+        request.expand
+    );
+
+    let mut pivot_tables = pivot_state.pivot_tables.lock().unwrap();
+    let (definition, cache) = pivot_tables
+        .get_mut(&request.pivot_id)
+        .ok_or_else(|| format!("Pivot table {} not found", request.pivot_id))?;
+
+    let fields = if request.is_row {
+        &mut definition.row_fields
+    } else {
+        &mut definition.column_fields
+    };
+
+    if request.field_index >= fields.len() {
+        return Err(format!(
+            "Field index {} out of range (max {})",
+            request.field_index,
+            fields.len().saturating_sub(1)
+        ));
+    }
+
+    let field = &mut fields[request.field_index];
+    field.collapsed = !request.expand;
+    field.collapsed_items.clear();
+
+    definition.bump_version();
+
+    let view = safe_calculate_pivot(definition, cache);
+    let response = view_to_response(&view, definition, cache);
+
+    let destination = definition.destination;
+    let pivot_id = definition.id;
+    let dest_sheet_idx = resolve_dest_sheet_index(&state, definition);
+
+    drop(pivot_tables);
+
+    update_pivot_in_grid(&state, pivot_id, dest_sheet_idx, destination, &view);
+    update_pivot_region(&state, pivot_id, dest_sheet_idx, destination, &view);
+
+    Ok(response)
+}
+
+/// Expands or collapses ALL fields in the entire pivot table.
+#[tauri::command]
+pub fn expand_collapse_all(
+    state: State<AppState>,
+    pivot_state: State<'_, PivotState>,
+    request: ExpandCollapseAllRequest,
+) -> Result<PivotViewResponse, String> {
+    log_info!(
+        "PIVOT",
+        "expand_collapse_all pivot_id={} expand={}",
+        request.pivot_id,
+        request.expand
+    );
+
+    let mut pivot_tables = pivot_state.pivot_tables.lock().unwrap();
+    let (definition, cache) = pivot_tables
+        .get_mut(&request.pivot_id)
+        .ok_or_else(|| format!("Pivot table {} not found", request.pivot_id))?;
+
+    for field in definition.row_fields.iter_mut().chain(definition.column_fields.iter_mut()) {
+        field.collapsed = !request.expand;
+        field.collapsed_items.clear();
+    }
+
+    definition.bump_version();
+
+    let view = safe_calculate_pivot(definition, cache);
+    let response = view_to_response(&view, definition, cache);
+
+    let destination = definition.destination;
+    let pivot_id = definition.id;
+    let dest_sheet_idx = resolve_dest_sheet_index(&state, definition);
+
+    drop(pivot_tables);
+
+    update_pivot_in_grid(&state, pivot_id, dest_sheet_idx, destination, &view);
+    update_pivot_region(&state, pivot_id, dest_sheet_idx, destination, &view);
+
+    Ok(response)
+}
+
 /// Refreshes all pivot tables in the workbook.
 #[tauri::command]
 pub fn refresh_all_pivot_tables(
@@ -1943,5 +2127,305 @@ fn show_values_as_to_api(show_as: pivot_engine::ShowValuesAs) -> Option<ShowAsRu
         calculation,
         base_field: None,
         base_item: None,
+    })
+}
+
+// ============================================================================
+// GROUPING COMMANDS
+// ============================================================================
+
+/// Applies grouping (date, number binning, or manual) to a pivot field.
+#[tauri::command]
+pub fn group_pivot_field(
+    state: State<AppState>,
+    pivot_state: State<'_, PivotState>,
+    request: GroupFieldRequest,
+) -> Result<PivotViewResponse, String> {
+    log_info!(
+        "PIVOT",
+        "group_pivot_field pivot_id={} field_index={} grouping={:?}",
+        request.pivot_id,
+        request.field_index,
+        request.grouping
+    );
+
+    let mut pivot_tables = pivot_state.pivot_tables.lock().unwrap();
+    let (definition, cache) = pivot_tables
+        .get_mut(&request.pivot_id)
+        .ok_or_else(|| format!("Pivot table {} not found", request.pivot_id))?;
+
+    // Find the field in row_fields or column_fields by source_index
+    let field = definition
+        .row_fields
+        .iter_mut()
+        .chain(definition.column_fields.iter_mut())
+        .find(|f| f.source_index == request.field_index);
+
+    let field = match field {
+        Some(f) => f,
+        None => return Err(format!("Field with source_index {} not found", request.field_index)),
+    };
+
+    // Apply the grouping configuration
+    field.grouping = api_grouping_config_to_engine(&request.grouping);
+
+    definition.bump_version();
+
+    let view = safe_calculate_pivot(definition, cache);
+    let response = view_to_response(&view, definition, cache);
+
+    let destination = definition.destination;
+    let pivot_id = definition.id;
+    let dest_sheet_idx = resolve_dest_sheet_index(&state, definition);
+
+    drop(pivot_tables);
+
+    update_pivot_in_grid(&state, pivot_id, dest_sheet_idx, destination, &view);
+    update_pivot_region(&state, pivot_id, dest_sheet_idx, destination, &view);
+
+    Ok(response)
+}
+
+/// Creates a manual group on a pivot field (adds items to a named group).
+#[tauri::command]
+pub fn create_manual_group(
+    state: State<AppState>,
+    pivot_state: State<'_, PivotState>,
+    request: CreateManualGroupRequest,
+) -> Result<PivotViewResponse, String> {
+    log_info!(
+        "PIVOT",
+        "create_manual_group pivot_id={} field_index={} group_name={} members={:?}",
+        request.pivot_id,
+        request.field_index,
+        request.group_name,
+        request.member_items
+    );
+
+    let mut pivot_tables = pivot_state.pivot_tables.lock().unwrap();
+    let (definition, cache) = pivot_tables
+        .get_mut(&request.pivot_id)
+        .ok_or_else(|| format!("Pivot table {} not found", request.pivot_id))?;
+
+    // Find the field in row_fields or column_fields by source_index
+    let field = definition
+        .row_fields
+        .iter_mut()
+        .chain(definition.column_fields.iter_mut())
+        .find(|f| f.source_index == request.field_index);
+
+    let field = match field {
+        Some(f) => f,
+        None => return Err(format!("Field with source_index {} not found", request.field_index)),
+    };
+
+    // Initialize or extend manual grouping
+    match &mut field.grouping {
+        pivot_engine::FieldGrouping::ManualGrouping { groups, .. } => {
+            // Add to existing manual grouping
+            groups.push(pivot_engine::ManualGroup {
+                name: request.group_name,
+                members: request.member_items,
+            });
+        }
+        _ => {
+            // Create new manual grouping
+            field.grouping = pivot_engine::FieldGrouping::ManualGrouping {
+                groups: vec![pivot_engine::ManualGroup {
+                    name: request.group_name,
+                    members: request.member_items,
+                }],
+                ungrouped_name: "Other".to_string(),
+            };
+        }
+    }
+
+    definition.bump_version();
+
+    let view = safe_calculate_pivot(definition, cache);
+    let response = view_to_response(&view, definition, cache);
+
+    let destination = definition.destination;
+    let pivot_id = definition.id;
+    let dest_sheet_idx = resolve_dest_sheet_index(&state, definition);
+
+    drop(pivot_tables);
+
+    update_pivot_in_grid(&state, pivot_id, dest_sheet_idx, destination, &view);
+    update_pivot_region(&state, pivot_id, dest_sheet_idx, destination, &view);
+
+    Ok(response)
+}
+
+/// Removes all grouping from a pivot field.
+#[tauri::command]
+pub fn ungroup_pivot_field(
+    state: State<AppState>,
+    pivot_state: State<'_, PivotState>,
+    request: UngroupFieldRequest,
+) -> Result<PivotViewResponse, String> {
+    log_info!(
+        "PIVOT",
+        "ungroup_pivot_field pivot_id={} field_index={}",
+        request.pivot_id,
+        request.field_index
+    );
+
+    let mut pivot_tables = pivot_state.pivot_tables.lock().unwrap();
+    let (definition, cache) = pivot_tables
+        .get_mut(&request.pivot_id)
+        .ok_or_else(|| format!("Pivot table {} not found", request.pivot_id))?;
+
+    // Find the field in row_fields or column_fields by source_index
+    let field = definition
+        .row_fields
+        .iter_mut()
+        .chain(definition.column_fields.iter_mut())
+        .find(|f| f.source_index == request.field_index);
+
+    let field = match field {
+        Some(f) => f,
+        None => return Err(format!("Field with source_index {} not found", request.field_index)),
+    };
+
+    // Reset grouping to None
+    field.grouping = pivot_engine::FieldGrouping::None;
+
+    definition.bump_version();
+
+    let view = safe_calculate_pivot(definition, cache);
+    let response = view_to_response(&view, definition, cache);
+
+    let destination = definition.destination;
+    let pivot_id = definition.id;
+    let dest_sheet_idx = resolve_dest_sheet_index(&state, definition);
+
+    drop(pivot_tables);
+
+    update_pivot_in_grid(&state, pivot_id, dest_sheet_idx, destination, &view);
+    update_pivot_region(&state, pivot_id, dest_sheet_idx, destination, &view);
+
+    Ok(response)
+}
+
+/// Performs a drill-through: creates a new sheet with the matching source data rows.
+#[tauri::command]
+pub fn drill_through_to_sheet(
+    state: State<AppState>,
+    pivot_state: State<'_, PivotState>,
+    request: DrillThroughRequest,
+) -> Result<DrillThroughResponse, String> {
+    log_info!(
+        "PIVOT",
+        "drill_through_to_sheet pivot_id={} path_len={}",
+        request.pivot_id,
+        request.group_path.len()
+    );
+
+    let pivot_tables = pivot_state.pivot_tables.lock().unwrap();
+    let (definition, cache) = pivot_tables
+        .get(&request.pivot_id)
+        .ok_or_else(|| format!("Pivot table {} not found", request.pivot_id))?;
+
+    let max = request.max_records.unwrap_or(10000);
+    let result = drill_down(definition, cache, &request.group_path, max);
+
+    // Gather header names and source data
+    let headers: Vec<String> = cache.fields.iter().map(|f| f.name.clone()).collect();
+    let col_count = headers.len();
+
+    // Read source row data from the grid
+    let grids = state.grids.lock().unwrap();
+    let source_sheet_idx = 0;
+    let grid = grids
+        .get(source_sheet_idx)
+        .ok_or_else(|| "Source sheet not found".to_string())?;
+
+    let (start_row, start_col) = definition.source_start;
+    let data_start = if definition.source_has_headers {
+        start_row + 1
+    } else {
+        start_row
+    };
+
+    // Build row data as CellValues
+    let mut row_data: Vec<Vec<engine::CellValue>> = Vec::with_capacity(result.source_rows.len());
+    for &src_row in &result.source_rows {
+        let grid_row = data_start + src_row;
+        let mut row = Vec::with_capacity(col_count);
+        for c in 0..col_count {
+            let col = start_col + c as u32;
+            let cv = grid
+                .get_cell(grid_row, col)
+                .map(|cell| cell.value.clone())
+                .unwrap_or(engine::CellValue::Empty);
+            row.push(cv);
+        }
+        row_data.push(row);
+    }
+
+    let data_row_count = row_data.len();
+
+    drop(grids);
+    drop(pivot_tables);
+
+    // Create new sheet
+    let mut sheet_names = state.sheet_names.lock().unwrap();
+    let mut grids = state.grids.lock().unwrap();
+    let mut active_sheet = state.active_sheet.lock().unwrap();
+    let mut current_grid = state.grid.lock().unwrap();
+    let mut freeze_configs = state.freeze_configs.lock().unwrap();
+
+    // Generate a unique sheet name
+    let base_name = "DrillThrough";
+    let sheet_name = {
+        let mut counter = 1;
+        loop {
+            let candidate = if counter == 1 {
+                base_name.to_string()
+            } else {
+                format!("{}{}", base_name, counter)
+            };
+            if !sheet_names.contains(&candidate) {
+                break candidate;
+            }
+            counter += 1;
+        }
+    };
+
+    // Save current active grid
+    let old_index = *active_sheet;
+    if old_index < grids.len() {
+        grids[old_index] = current_grid.clone();
+    }
+
+    // Create and populate the new grid
+    let mut new_grid = engine::grid::Grid::new();
+
+    // Write headers
+    for (c, header) in headers.iter().enumerate() {
+        new_grid.set_cell(0, c as u32, engine::Cell::new_text(header.clone()));
+    }
+
+    // Write data rows
+    for (r, row) in row_data.iter().enumerate() {
+        for (c, cv) in row.iter().enumerate() {
+            new_grid.set_cell((r + 1) as u32, c as u32, engine::Cell { formula: None, value: cv.clone(), style_index: 0, cached_ast: None });
+        }
+    }
+
+    sheet_names.push(sheet_name.clone());
+    grids.push(new_grid.clone());
+    freeze_configs.push(FreezeConfig::default());
+
+    let new_index = sheet_names.len() - 1;
+    *active_sheet = new_index;
+    *current_grid = new_grid;
+
+    Ok(DrillThroughResponse {
+        sheet_name,
+        sheet_index: new_index,
+        row_count: data_row_count,
+        col_count,
     })
 }

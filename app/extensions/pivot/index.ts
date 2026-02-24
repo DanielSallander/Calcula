@@ -34,14 +34,17 @@ import {
   PivotManifest,
   PivotPaneDefinition,
   PivotDialogDefinition,
+  PivotGroupDialogDefinition,
   PivotFilterOverlayDefinition,
   PIVOT_PANE_ID,
   PIVOT_DIALOG_ID,
+  PIVOT_GROUP_DIALOG_ID,
   PIVOT_FILTER_OVERLAY_ID,
 } from "./manifest";
 
 import { handlePivotCreated } from "./handlers/pivotCreatedHandler";
 import { handleOpenFilterMenu } from "./handlers/filterMenuHandler";
+import { registerPivotContextMenuItems } from "./handlers/pivotContextMenu";
 import {
   handleSelectionChange,
   updateCachedRegions,
@@ -180,6 +183,10 @@ export function registerPivotExtension(): void {
 
   // Register dialogs
   DialogExtensions.registerDialog(PivotDialogDefinition);
+  DialogExtensions.registerDialog(PivotGroupDialogDefinition);
+
+  // Register context menu items for right-click in pivot regions
+  cleanupFunctions.push(registerPivotContextMenuItems());
 
   // Register overlays
   OverlayExtensions.registerOverlay(PivotFilterOverlayDefinition);
@@ -325,10 +332,11 @@ export function unregisterPivotExtension(): void {
   ExtensionRegistry.unregisterAddIn(PivotManifest.id);
   TaskPaneExtensions.unregisterView(PIVOT_PANE_ID);
   DialogExtensions.unregisterDialog(PIVOT_DIALOG_ID);
+  DialogExtensions.unregisterDialog(PIVOT_GROUP_DIALOG_ID);
   OverlayExtensions.unregisterOverlay(PIVOT_FILTER_OVERLAY_ID);
 
   console.log("[Pivot Extension] Unregistered successfully");
 }
 
 // Re-export for convenience
-export { PIVOT_PANE_ID, PIVOT_DIALOG_ID, PIVOT_FILTER_OVERLAY_ID };
+export { PIVOT_PANE_ID, PIVOT_DIALOG_ID, PIVOT_GROUP_DIALOG_ID, PIVOT_FILTER_OVERLAY_ID };

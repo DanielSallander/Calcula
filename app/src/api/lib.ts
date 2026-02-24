@@ -277,6 +277,22 @@ export type {
 } from "./backend";
 
 // ============================================================================
+// Sort API
+// ============================================================================
+
+export {
+  sortRange,
+  sortRangeByColumn,
+} from "./backend";
+
+export type {
+  SortField,
+  SortOn,
+  SortDataOption,
+  SortOrientation,
+} from "./backend";
+
+// ============================================================================
 // Remove Duplicates API
 // ============================================================================
 
@@ -342,6 +358,15 @@ export {
   createFieldConfig,
   createValueFieldConfig,
   createLayoutConfig,
+
+  // Expand/Collapse and Grouping
+  setPivotItemExpanded,
+  expandCollapseLevel,
+  expandCollapseAll,
+  groupPivotField,
+  createManualGroup,
+  ungroupPivotField,
+  drillThroughToSheet,
 } from "../../extensions/Pivot/lib/pivot-api";
 
 // ============================================================================
@@ -385,6 +410,17 @@ export type {
   PivotRegionInfo,
   PivotRegionData,
   FieldUniqueValuesResponse,
+  SetItemExpandedRequest,
+  ExpandCollapseLevelRequest,
+  ExpandCollapseAllRequest,
+  DateGroupLevel,
+  ManualGroupConfig,
+  FieldGroupingConfig,
+  GroupFieldRequest,
+  CreateManualGroupRequest,
+  UngroupFieldRequest,
+  DrillThroughRequest,
+  DrillThroughResponse,
 } from "../../extensions/Pivot/lib/pivot-api";
 
 // ============================================================================

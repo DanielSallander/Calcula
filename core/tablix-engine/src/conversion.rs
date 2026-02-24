@@ -49,6 +49,7 @@ pub fn pivot_to_tablix(pivot: &PivotDefinition) -> TablixDefinition {
         },
         repeat_group_labels: pivot.layout.repeat_row_labels,
         show_empty_groups: pivot.layout.show_empty_rows,
+        subtotal_location: pivot.layout.subtotal_location,
     };
 
     TablixDefinition {

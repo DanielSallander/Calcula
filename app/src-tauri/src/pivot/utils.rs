@@ -1,9 +1,9 @@
 //! FILENAME: app/src-tauri/src/pivot/utils.rs
 use crate::pivot::types::*;
 use pivot_engine::{
-    AggregationType, CacheValue, FilterCondition, PivotCache, PivotDefinition, PivotField,
-    PivotFilter, PivotLayout, PivotView, ReportLayout, ShowValuesAs, SortOrder, ValueField,
-    ValuesPosition, VALUE_ID_EMPTY,
+    AggregationType, CacheValue, DateGroupLevel, FieldGrouping, FilterCondition, ManualGroup,
+    PivotCache, PivotDefinition, PivotField, PivotFilter, PivotLayout, PivotView, ReportLayout,
+    ShowValuesAs, SortOrder, SubtotalLocation, ValueField, ValuesPosition, VALUE_ID_EMPTY,
 };
 
 // ============================================================================
@@ -129,7 +129,19 @@ pub(crate) fn config_to_pivot_field(config: &PivotFieldConfig) -> PivotField {
     if let Some(ref hidden) = config.hidden_items {
         field.hidden_items = hidden.clone();
     }
-    
+
+    if let Some(ref collapsed_items) = config.collapsed_items {
+        field.collapsed_items = collapsed_items.clone();
+    }
+
+    if let Some(show_all) = config.show_all_items {
+        field.show_all_items = show_all;
+    }
+
+    if let Some(ref grouping_config) = config.grouping {
+        field.grouping = api_grouping_config_to_engine(grouping_config);
+    }
+
     field
 }
 
@@ -224,6 +236,23 @@ pub(crate) fn apply_layout_config(layout: &mut PivotLayout, config: &LayoutConfi
     }
 }
 
+/// Converts API SubtotalLocationType to engine SubtotalLocation.
+pub(crate) fn api_subtotal_location_to_engine(loc: &SubtotalLocationType) -> SubtotalLocation {
+    match loc {
+        SubtotalLocationType::AtTop => SubtotalLocation::AtTop,
+        SubtotalLocationType::AtBottom => SubtotalLocation::AtBottom,
+        SubtotalLocationType::Off => SubtotalLocation::Off,
+    }
+}
+
+/// Converts engine SubtotalLocation to API SubtotalLocationType.
+pub(crate) fn engine_subtotal_location_to_api(loc: SubtotalLocation) -> SubtotalLocationType {
+    match loc {
+        SubtotalLocation::AtTop => SubtotalLocationType::AtTop,
+        SubtotalLocation::AtBottom | SubtotalLocation::Off => SubtotalLocationType::AtBottom,
+    }
+}
+
 // ============================================================================
 // REVERSE CONVERTERS (engine types to strings)
 // ============================================================================
@@ -280,6 +309,49 @@ pub(crate) fn cache_value_to_string(value: &CacheValue) -> String {
     }
 }
 
+/// Converts an API FieldGroupingConfig to the engine FieldGrouping type.
+pub(crate) fn api_grouping_config_to_engine(config: &FieldGroupingConfig) -> FieldGrouping {
+    match config {
+        FieldGroupingConfig::None => FieldGrouping::None,
+        FieldGroupingConfig::DateGrouping { levels } => {
+            let engine_levels: Vec<DateGroupLevel> = levels
+                .iter()
+                .filter_map(|s| match s.to_lowercase().as_str() {
+                    "year" => Some(DateGroupLevel::Year),
+                    "quarter" => Some(DateGroupLevel::Quarter),
+                    "month" => Some(DateGroupLevel::Month),
+                    "week" => Some(DateGroupLevel::Week),
+                    "day" => Some(DateGroupLevel::Day),
+                    _ => None,
+                })
+                .collect();
+            FieldGrouping::DateGrouping { levels: engine_levels }
+        }
+        FieldGroupingConfig::NumberBinning { start, end, interval } => {
+            FieldGrouping::NumberBinning {
+                start: *start,
+                end: *end,
+                interval: *interval,
+            }
+        }
+        FieldGroupingConfig::ManualGrouping { groups, ungrouped_name } => {
+            let engine_groups: Vec<ManualGroup> = groups
+                .iter()
+                .map(|g| ManualGroup {
+                    name: g.name.clone(),
+                    members: g.members.clone(),
+                })
+                .collect();
+            FieldGrouping::ManualGrouping {
+                groups: engine_groups,
+                ungrouped_name: ungrouped_name
+                    .clone()
+                    .unwrap_or_else(|| "Other".to_string()),
+            }
+        }
+    }
+}
+
 /// Converts engine PivotView to response format, including filter row data with unique values
 pub(crate) fn view_to_response(
     view: &PivotView,
@@ -316,6 +388,11 @@ pub(crate) fn view_to_response(
                     background_style: format!("{:?}", cell.background_style),
                     number_format: cell.number_format.clone(),
                     filter_field_index: cell.filter_field_index,
+                    group_path: cell
+                        .group_path
+                        .iter()
+                        .map(|(fi, vid)| (*fi, *vid))
+                        .collect(),
                 })
                 .collect();
 

@@ -49,6 +49,15 @@ import {
   setPivotItemVisibility,
   getAllPivotTables,
   refreshAllPivotTables,
+
+  // Expand/Collapse and Grouping
+  setPivotItemExpanded,
+  expandCollapseLevel,
+  expandCollapseAll,
+  groupPivotField,
+  createManualGroup,
+  ungroupPivotField,
+  drillThroughToSheet,
 } from '../../extensions/Pivot/lib/pivot-api';
 
 // Re-export types so extensions can import them from this module
@@ -120,6 +129,18 @@ export type {
   ClearPivotFilterRequest,
   SortPivotFieldRequest,
   SetItemVisibilityRequest,
+  // Expand/Collapse and Grouping types
+  SetItemExpandedRequest,
+  ExpandCollapseLevelRequest,
+  ExpandCollapseAllRequest,
+  DateGroupLevel,
+  ManualGroupConfig,
+  FieldGroupingConfig,
+  GroupFieldRequest,
+  CreateManualGroupRequest,
+  UngroupFieldRequest,
+  DrillThroughRequest,
+  DrillThroughResponse,
 } from '../../extensions/Pivot/lib/pivot-api';
 
 export type {
@@ -261,4 +282,33 @@ export const pivot = {
 
   /** Refreshes all pivot tables in the workbook. */
   refreshAll: refreshAllPivotTables,
+
+  // ---------------------------------------------------------------------------
+  // Expand/Collapse and Grouping
+  // ---------------------------------------------------------------------------
+
+  /** Sets the expand/collapse state of a specific pivot item. */
+  setItemExpanded: setPivotItemExpanded,
+
+  /** Expands or collapses all items at a specific field level. */
+  expandCollapseLevel,
+
+  /** Expands or collapses all fields in the entire pivot table. */
+  expandCollapseAll,
+
+  /** Applies grouping (date, number binning, or manual) to a pivot field. */
+  groupPivotField,
+
+  /** Creates a manual group on a pivot field. */
+  createManualGroup,
+
+  /** Removes all grouping from a pivot field. */
+  ungroupPivotField,
+
+  // ---------------------------------------------------------------------------
+  // Drill-Through
+  // ---------------------------------------------------------------------------
+
+  /** Drill through a data cell to a new sheet with matching source rows. */
+  drillThroughToSheet,
 };
