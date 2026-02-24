@@ -1,8 +1,7 @@
 //! FILENAME: app/extensions/_shared/components/ZoneFieldItem.tsx
 import React, { useCallback, useState, useMemo } from 'react';
 import { styles } from './EditorStyles';
-import { AggregationMenu } from './AggregationMenu';
-import { ValueFieldContextMenu } from './ValueFieldContextMenu';
+import { FieldPillMenu } from './FieldPillMenu';
 import { useDraggable } from './useDragDrop';
 import {
   type ZoneField,
@@ -16,8 +15,11 @@ interface ZoneFieldItemProps {
   field: ZoneField;
   zone: DropZoneType;
   index: number;
+  totalFieldsInZone: number;
   onRemove: (zone: DropZoneType, index: number) => void;
+  onReorder: (zone: DropZoneType, fromIndex: number, toIndex: number) => void;
   onAggregationChange?: (index: number, aggregation: AggregationType) => void;
+  onMoveField?: (fromZone: DropZoneType, fromIndex: number, toZone: DropZoneType) => void;
   // Legacy props kept for API compatibility - not used with mouse-based drag
   onDragStart?: (field: DragField) => void;
   onDragEnd?: () => void;
@@ -31,13 +33,15 @@ export function ZoneFieldItem({
   field,
   zone,
   index,
+  totalFieldsInZone,
   onRemove,
+  onReorder,
   onAggregationChange,
+  onMoveField,
   onOpenValueSettings,
   onOpenNumberFormat,
 }: ZoneFieldItemProps): React.ReactElement {
-  const [showAggMenu, setShowAggMenu] = useState(false);
-  const [showContextMenu, setShowContextMenu] = useState(false);
+  const [showMenu, setShowMenu] = useState(false);
   const [menuPosition, setMenuPosition] = useState({ x: 0, y: 0 });
 
   const displayName =
@@ -64,19 +68,29 @@ export function ZoneFieldItem({
 
   const handleDropdownClick = useCallback(
     (e: React.MouseEvent) => {
-      if (zone !== 'values' || !onAggregationChange) return;
-
       const rect = (e.target as HTMLElement).getBoundingClientRect();
       setMenuPosition({
         x: rect.left,
         y: rect.bottom + 4,
       });
-      setShowAggMenu(true);
+      setShowMenu(true);
     },
-    [zone, onAggregationChange]
+    []
   );
 
-  const handleAggregationSelect = useCallback(
+  const handleContextMenu = useCallback(
+    (e: React.MouseEvent) => {
+      e.preventDefault();
+      setMenuPosition({
+        x: e.clientX,
+        y: e.clientY,
+      });
+      setShowMenu(true);
+    },
+    []
+  );
+
+  const handleAggregationChange = useCallback(
     (aggregation: AggregationType) => {
       if (onAggregationChange) {
         onAggregationChange(index, aggregation);
@@ -85,19 +99,25 @@ export function ZoneFieldItem({
     [index, onAggregationChange]
   );
 
-  const handleContextMenu = useCallback(
-    (e: React.MouseEvent) => {
-      // Only show context menu for values zone
-      if (zone !== 'values') return;
+  const handleMoveUp = useCallback(() => {
+    if (index > 0) {
+      onReorder(zone, index, index - 1);
+    }
+  }, [zone, index, onReorder]);
 
-      e.preventDefault();
-      setMenuPosition({
-        x: e.clientX,
-        y: e.clientY,
-      });
-      setShowContextMenu(true);
+  const handleMoveDown = useCallback(() => {
+    if (index < totalFieldsInZone - 1) {
+      onReorder(zone, index, index + 2);
+    }
+  }, [zone, index, totalFieldsInZone, onReorder]);
+
+  const handleMoveTo = useCallback(
+    (targetZone: DropZoneType) => {
+      if (onMoveField) {
+        onMoveField(zone, index, targetZone);
+      }
     },
-    [zone]
+    [zone, index, onMoveField]
   );
 
   const handleValueFieldSettings = useCallback(() => {
@@ -122,38 +142,35 @@ export function ZoneFieldItem({
         <span className={styles.zoneFieldName} title={displayName}>
           {displayName}
         </span>
-        {zone === 'values' && onAggregationChange && (
-          <button
-            className={styles.zoneFieldDropdown}
-            onClick={handleDropdownClick}
-            title="Change aggregation"
-          >
-            v
-          </button>
-        )}
         <button
-          className={styles.zoneFieldRemove}
-          onClick={handleRemove}
-          title="Remove field"
+          className={styles.zoneFieldDropdown}
+          onClick={handleDropdownClick}
+          title="Field options"
         >
-          x
+          {'\u25BC'}
         </button>
       </div>
-      {showAggMenu && field.aggregation && (
-        <AggregationMenu
-          currentAggregation={field.aggregation}
+      {showMenu && (
+        <FieldPillMenu
           position={menuPosition}
-          onSelect={handleAggregationSelect}
-          onClose={() => setShowAggMenu(false)}
-        />
-      )}
-      {showContextMenu && zone === 'values' && (
-        <ValueFieldContextMenu
-          position={menuPosition}
-          onValueFieldSettings={handleValueFieldSettings}
-          onNumberFormat={handleNumberFormat}
+          zone={zone}
+          fieldIndex={index}
+          totalFieldsInZone={totalFieldsInZone}
+          aggregation={field.aggregation}
+          onMoveUp={handleMoveUp}
+          onMoveDown={handleMoveDown}
+          onMoveTo={handleMoveTo}
           onRemove={handleRemove}
-          onClose={() => setShowContextMenu(false)}
+          onValueFieldSettings={
+            zone === 'values' ? handleValueFieldSettings : undefined
+          }
+          onNumberFormat={
+            zone === 'values' ? handleNumberFormat : undefined
+          }
+          onAggregationChange={
+            zone === 'values' ? handleAggregationChange : undefined
+          }
+          onClose={() => setShowMenu(false)}
         />
       )}
     </>

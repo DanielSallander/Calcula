@@ -89,5 +89,16 @@ export function getValueFieldDisplayName(
   const aggLabel =
     AGGREGATION_OPTIONS.find((opt) => opt.value === aggregation)?.label ||
     'Sum';
-  return `${aggLabel} of ${name}`;
+
+  // Strip any existing aggregation prefix to prevent "Sum of Sum of Y"
+  let baseName = name;
+  for (const opt of AGGREGATION_OPTIONS) {
+    const prefix = `${opt.label} of `;
+    if (baseName.startsWith(prefix)) {
+      baseName = baseName.substring(prefix.length);
+      break;
+    }
+  }
+
+  return `${aggLabel} of ${baseName}`;
 }

@@ -13,6 +13,8 @@ import type {
   PivotId,
 } from './types';
 import { getDefaultAggregation, getValueFieldDisplayName } from './types';
+import { emitAppEvent, onAppEvent } from '../../../src/api';
+import { PivotEvents } from '../lib/pivotEvents';
 import type { ValueFieldSettings } from './ValueFieldSettingsModal';
 
 interface UsePivotEditorStateOptions {
@@ -304,6 +306,65 @@ export function usePivotEditorState({
     [scheduleUpdate]
   );
 
+  // Broadcast layout state to the Design ribbon tab
+  useEffect(() => {
+    if (isInitialMount.current) return;
+    emitAppEvent(PivotEvents.PIVOT_LAYOUT_STATE, { pivotId, layout });
+  }, [pivotId, layout]);
+
+  // Also broadcast on initial mount so the Design tab picks up existing state
+  useEffect(() => {
+    emitAppEvent(PivotEvents.PIVOT_LAYOUT_STATE, { pivotId, layout });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pivotId]);
+
+  // Listen for layout changes from the Design ribbon tab
+  useEffect(() => {
+    return onAppEvent<{ pivotId: PivotId; layout: LayoutConfig }>(
+      PivotEvents.PIVOT_LAYOUT_CHANGED,
+      (detail) => {
+        if (detail.pivotId === pivotId) {
+          setLayout(detail.layout);
+          scheduleUpdate();
+        }
+      }
+    );
+  }, [pivotId, scheduleUpdate]);
+
+  // Handle moving a field from one zone to another (via pill menu)
+  const handleMoveField = useCallback(
+    (fromZone: DropZoneType, fromIndex: number, toZone: DropZoneType) => {
+      const fromSetter = getZoneSetter(fromZone);
+      const toSetter = getZoneSetter(toZone);
+
+      let movedField: ZoneField | undefined;
+
+      fromSetter((prev) => {
+        movedField = prev[fromIndex];
+        return prev.filter((_, i) => i !== fromIndex);
+      });
+
+      // Use queueMicrotask to ensure removal state is processed before add
+      queueMicrotask(() => {
+        if (!movedField) return;
+        const field = { ...movedField };
+
+        if (toZone === 'values') {
+          field.aggregation = field.aggregation ?? getDefaultAggregation(field.isNumeric);
+        } else {
+          field.aggregation = undefined;
+          field.customName = undefined;
+          field.numberFormat = undefined;
+          field.showValuesAs = undefined;
+        }
+
+        toSetter((prev) => [...prev, field]);
+        scheduleUpdate();
+      });
+    },
+    [getZoneSetter, scheduleUpdate]
+  );
+
   // Drag handlers
   const handleDragStart = useCallback((field: DragField) => {
     setDraggingField(field);
@@ -326,6 +387,7 @@ export function usePivotEditorState({
     handleDrop,
     handleRemove,
     handleReorder,
+    handleMoveField,
     handleAggregationChange,
     handleValueFieldSettings,
     handleNumberFormatChange,

@@ -18,6 +18,7 @@ interface DropZonesProps {
   onRemove: (zone: DropZoneType, index: number) => void;
   onReorder: (zone: DropZoneType, fromIndex: number, toIndex: number) => void;
   onValuesAggregationChange: (index: number, aggregation: AggregationType) => void;
+  onMoveField?: (fromZone: DropZoneType, fromIndex: number, toZone: DropZoneType) => void;
   onOpenValueSettings?: (index: number) => void;
   onOpenNumberFormat?: (index: number) => void;
   onDragStart: (field: DragField) => void;
@@ -33,6 +34,7 @@ export function DropZones({
   onRemove,
   onReorder,
   onValuesAggregationChange,
+  onMoveField,
   onOpenValueSettings,
   onOpenNumberFormat,
   onDragStart,
@@ -46,10 +48,10 @@ export function DropZones({
           zone="filters"
           title="Filters"
           fields={filters}
-          fullWidth
           onDrop={onDrop}
           onRemove={onRemove}
           onReorder={onReorder}
+          onMoveField={onMoveField}
           onDragStart={onDragStart}
           onDragEnd={onDragEnd}
         />
@@ -60,6 +62,7 @@ export function DropZones({
           onDrop={onDrop}
           onRemove={onRemove}
           onReorder={onReorder}
+          onMoveField={onMoveField}
           onDragStart={onDragStart}
           onDragEnd={onDragEnd}
         />
@@ -70,6 +73,7 @@ export function DropZones({
           onDrop={onDrop}
           onRemove={onRemove}
           onReorder={onReorder}
+          onMoveField={onMoveField}
           onDragStart={onDragStart}
           onDragEnd={onDragEnd}
         />
@@ -77,11 +81,11 @@ export function DropZones({
           zone="values"
           title="Values"
           fields={values}
-          fullWidth
           onDrop={onDrop}
           onRemove={onRemove}
           onReorder={onReorder}
           onAggregationChange={onValuesAggregationChange}
+          onMoveField={onMoveField}
           onOpenValueSettings={onOpenValueSettings}
           onOpenNumberFormat={onOpenNumberFormat}
           onDragStart={onDragStart}

@@ -10,9 +10,10 @@ import {
   getTaskPaneManuallyClosed,
   addTaskPaneContextKey,
   removeTaskPaneContextKey,
+  ExtensionRegistry,
 } from "../../../src/api";
 import type { LayoutConfig, AggregationType } from "../../../src/api";
-import { PIVOT_PANE_ID } from "../manifest";
+import { PIVOT_PANE_ID, PivotDesignTabDefinition, PIVOT_DESIGN_TAB_ID } from "../manifest";
 import type { SourceField, ZoneField, PivotEditorViewData, PivotRegionData } from "../types";
 
 // ---------------------------------------------------------------------------
@@ -33,6 +34,9 @@ let checkInProgress = false;
 
 /** Debounce timer for selection changes within a pivot region. */
 let debounceTimer: ReturnType<typeof setTimeout> | null = null;
+
+/** Whether the Design ribbon tab is currently registered. */
+let designTabRegistered = false;
 
 // ---------------------------------------------------------------------------
 // State mutators (called by other handlers / extension index)
@@ -127,12 +131,22 @@ export function handleSelectionChange(
     lastCheckedSelection = { row, col };
     removeTaskPaneContextKey("pivot");
     closeTaskPane(PIVOT_PANE_ID);
+    // Hide the Design ribbon tab
+    if (designTabRegistered) {
+      ExtensionRegistry.unregisterRibbonTab(PIVOT_DESIGN_TAB_ID);
+      designTabRegistered = false;
+    }
     return;
   }
 
   // Cell IS in a pivot region - set context key (even if manually closed,
   // so the View menu knows we're in a pivot area)
   addTaskPaneContextKey("pivot");
+  // Show the Design ribbon tab
+  if (!designTabRegistered) {
+    ExtensionRegistry.registerRibbonTab(PivotDesignTabDefinition);
+    designTabRegistered = true;
+  }
 
   // Check if manually closed
   if (manuallyClosed.includes(PIVOT_PANE_ID)) {
@@ -265,5 +279,9 @@ export function resetSelectionHandlerState(): void {
   if (debounceTimer !== null) {
     clearTimeout(debounceTimer);
     debounceTimer = null;
+  }
+  if (designTabRegistered) {
+    ExtensionRegistry.unregisterRibbonTab(PIVOT_DESIGN_TAB_ID);
+    designTabRegistered = false;
   }
 }

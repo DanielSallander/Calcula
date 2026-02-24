@@ -3,7 +3,6 @@ import React, { useCallback, useState, useEffect } from 'react';
 import { styles } from './PivotEditor.styles';
 import { FieldList } from './FieldList';
 import { DropZones } from './DropZones';
-import { LayoutOptions } from './LayoutOptions';
 import { ValueFieldSettingsModal, type ValueFieldSettings } from './ValueFieldSettingsModal';
 import { NumberFormatModal } from './NumberFormatModal';
 import { ComponentToggle } from '../../_shared/components/ComponentToggle';
@@ -70,15 +69,14 @@ export function PivotEditor({
     columns,
     rows,
     values,
-    layout,
     handleFieldToggle,
     handleDrop,
     handleRemove,
     handleReorder,
     handleAggregationChange,
+    handleMoveField,
     handleValueFieldSettings,
     handleNumberFormatChange,
-    handleLayoutChange,
     handleDragStart,
     handleDragEnd,
   } = usePivotEditorState({
@@ -180,13 +178,12 @@ export function PivotEditor({
           onRemove={handleRemove}
           onReorder={handleReorder}
           onValuesAggregationChange={handleAggregationChange}
+          onMoveField={handleMoveField}
           onOpenValueSettings={handleOpenValueSettings}
           onOpenNumberFormat={handleOpenNumberFormat}
           onDragStart={handleDragStart}
           onDragEnd={handleDragEnd}
         />
-
-        <LayoutOptions layout={layout} onChange={handleLayoutChange} />
       </div>
 
       {/* Value Field Settings Modal */}

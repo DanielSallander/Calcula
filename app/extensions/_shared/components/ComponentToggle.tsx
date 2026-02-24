@@ -16,10 +16,11 @@ const toggleStyles = {
   container: css`
     display: flex;
     align-items: center;
-    padding: 6px 12px;
+    padding: 8px 12px;
     background: #f0f4f8;
-    border-bottom: 1px solid #e0e0e0;
-    gap: 4px;
+    border-bottom: 1px solid #e5e5e5;
+    gap: 6px;
+    font-family: 'Segoe UI Variable', 'Segoe UI', system-ui, sans-serif;
   `,
   label: css`
     font-size: 11px;
@@ -28,25 +29,26 @@ const toggleStyles = {
   `,
   buttonGroup: css`
     display: flex;
-    border: 1px solid #c0c8d0;
+    border: 1px solid #d0d0d0;
     border-radius: 4px;
     overflow: hidden;
     flex: 1;
   `,
   button: css`
     flex: 1;
-    padding: 4px 10px;
+    padding: 5px 10px;
     border: none;
     background: #fff;
     font-size: 11px;
     font-weight: 500;
+    font-family: inherit;
     cursor: pointer;
     color: #555;
-    transition: all 0.15s;
+    transition: all 0.1s ease;
     white-space: nowrap;
 
     &:first-child {
-      border-right: 1px solid #c0c8d0;
+      border-right: 1px solid #d0d0d0;
     }
 
     &:hover:not(.active):not(:disabled) {
@@ -54,7 +56,7 @@ const toggleStyles = {
     }
 
     &.active {
-      background: #0078d4;
+      background: #005fb8;
       color: #fff;
       cursor: default;
     }

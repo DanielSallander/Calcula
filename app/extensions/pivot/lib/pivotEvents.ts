@@ -10,6 +10,10 @@ export const PivotEvents = {
   PIVOT_REGIONS_UPDATED: "app:pivot-regions-updated",
   /** Emitted to open the filter dropdown menu for a pivot field */
   PIVOT_OPEN_FILTER_MENU: "app:pivot-open-filter-menu",
+  /** Emitted by the PivotEditor to broadcast current layout state to the Design tab */
+  PIVOT_LAYOUT_STATE: "app:pivot-layout-state",
+  /** Emitted by the Design tab when the user changes a layout option */
+  PIVOT_LAYOUT_CHANGED: "app:pivot-layout-changed",
 } as const;
 
 export type PivotEventType = (typeof PivotEvents)[keyof typeof PivotEvents];

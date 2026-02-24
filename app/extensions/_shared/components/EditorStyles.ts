@@ -1,6 +1,7 @@
 //! FILENAME: app/extensions/_shared/components/EditorStyles.ts
 // PURPOSE: Shared editor styles for Pivot and Tablix field editors.
 // CONTEXT: Emotion CSS-in-JS styles for the field list, drop zones, and related UI.
+// DESIGN: Windows 11 Fluent Design with Segoe UI, 4px/8px radii, subtle hover states.
 
 import { css } from '@emotion/css';
 
@@ -10,10 +11,9 @@ export const styles = {
     flex-direction: column;
     width: 320px;
     height: 100%;
-    background: #f8f9fa;
-    border-left: 1px solid #e0e0e0;
-    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto,
-      sans-serif;
+    background: #f9f9f9;
+    border-left: 1px solid #e5e5e5;
+    font-family: 'Segoe UI Variable', 'Segoe UI', system-ui, sans-serif;
     font-size: 12px;
     overflow: hidden;
   `,
@@ -24,23 +24,26 @@ export const styles = {
     justify-content: space-between;
     padding: 12px 16px;
     background: #fff;
-    border-bottom: 1px solid #e0e0e0;
+    border-bottom: 1px solid #e5e5e5;
+    font-family: 'Segoe UI Variable', 'Segoe UI', system-ui, sans-serif;
     font-weight: 600;
     font-size: 14px;
-    color: #333;
+    color: #1a1a1a;
   `,
 
   closeButton: css`
     background: none;
     border: none;
     cursor: pointer;
-    padding: 4px;
+    padding: 4px 6px;
     color: #666;
-    font-size: 18px;
+    font-size: 16px;
     line-height: 1;
+    border-radius: 4px;
 
     &:hover {
-      color: #333;
+      background: #e5e5e5;
+      color: #1a1a1a;
     }
   `,
 
@@ -48,6 +51,19 @@ export const styles = {
     flex: 1;
     overflow-y: auto;
     padding: 12px;
+
+    &::-webkit-scrollbar {
+      width: 4px;
+    }
+
+    &::-webkit-scrollbar-thumb {
+      background: #c1c1c1;
+      border-radius: 4px;
+    }
+
+    &::-webkit-scrollbar-thumb:hover {
+      background: #a0a0a0;
+    }
   `,
 
   section: css`
@@ -70,6 +86,19 @@ export const styles = {
     max-height: 200px;
     overflow-y: auto;
     overflow-x: hidden;
+
+    &::-webkit-scrollbar {
+      width: 4px;
+    }
+
+    &::-webkit-scrollbar-thumb {
+      background: #c1c1c1;
+      border-radius: 4px;
+    }
+
+    &::-webkit-scrollbar-thumb:hover {
+      background: #a0a0a0;
+    }
   `,
 
   fieldItem: css`
@@ -79,7 +108,7 @@ export const styles = {
     cursor: grab;
     user-select: none;
     border-bottom: 1px solid #f0f0f0;
-    transition: background 0.15s;
+    transition: background 0.1s ease;
     box-sizing: border-box;
 
     &:last-child {
@@ -92,7 +121,7 @@ export const styles = {
 
     &.dragging {
       opacity: 0.5;
-      background: #e8f4fc;
+      background: #e5f3ff;
     }
   `,
 
@@ -100,11 +129,12 @@ export const styles = {
     margin-right: 8px;
     cursor: pointer;
     flex-shrink: 0;
+    accent-color: #005fb8;
   `,
 
   fieldName: css`
     flex: 1;
-    color: #333;
+    color: #1a1a1a;
     font-size: 12px;
     overflow: hidden;
     text-overflow: ellipsis;
@@ -122,7 +152,7 @@ export const styles = {
   dropZonesContainer: css`
     display: grid;
     grid-template-columns: 1fr 1fr;
-    grid-template-rows: minmax(50px, auto) minmax(70px, 1fr) minmax(70px, 1fr) minmax(50px, auto);
+    grid-auto-rows: minmax(60px, 1fr);
     gap: 6px;
     min-height: 260px;
   `,
@@ -130,7 +160,7 @@ export const styles = {
   dropZone: css`
     background: #fff;
     border: 1px solid #d4d4d4;
-    border-radius: 2px;
+    border-radius: 4px;
     min-height: 50px;
     max-height: 100px;
     padding: 6px 8px;
@@ -141,16 +171,20 @@ export const styles = {
     flex-direction: column;
 
     &::-webkit-scrollbar {
-      width: 6px;
+      width: 4px;
     }
 
     &::-webkit-scrollbar-thumb {
       background: #c1c1c1;
-      border-radius: 3px;
+      border-radius: 4px;
+    }
+
+    &::-webkit-scrollbar-thumb:hover {
+      background: #a0a0a0;
     }
 
     &.drag-over {
-      border-color: #0078d4;
+      border-color: #005fb8;
       background: #e5f3ff;
       border-width: 2px;
       padding: 5px 7px;
@@ -190,15 +224,16 @@ export const styles = {
     display: flex;
     align-items: center;
     padding: 4px 8px;
-    background: #f0f0f0;
-    border-radius: 3px;
+    background: #ebebeb;
+    border-radius: 4px;
     margin-bottom: 4px;
     cursor: grab;
     user-select: none;
     font-size: 11px;
+    transition: background 0.1s ease;
 
     &:hover {
-      background: #e8e8e8;
+      background: #e0e0e0;
     }
 
     &.dragging {
@@ -215,6 +250,7 @@ export const styles = {
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
+    min-width: 0;
   `,
 
   zoneFieldRemove: css`
@@ -226,9 +262,11 @@ export const styles = {
     font-size: 14px;
     line-height: 1;
     margin-left: 4px;
+    border-radius: 2px;
 
     &:hover {
       color: #d32f2f;
+      background: #ffebee;
     }
   `,
 
@@ -236,13 +274,17 @@ export const styles = {
     background: none;
     border: none;
     cursor: pointer;
-    padding: 2px 4px;
+    padding: 2px 6px;
     color: #666;
-    font-size: 10px;
-    margin-left: 4px;
+    font-size: 8px;
+    margin-left: auto;
+    border-radius: 2px;
+    flex-shrink: 0;
+    line-height: 1;
 
     &:hover {
-      color: #333;
+      background: #d8d8d8;
+      color: #1a1a1a;
     }
   `,
 
@@ -250,8 +292,8 @@ export const styles = {
     position: absolute;
     background: #fff;
     border: 1px solid #e0e0e0;
-    border-radius: 4px;
-    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+    border-radius: 8px;
+    box-shadow: 0 4px 16px rgba(0, 0, 0, 0.14);
     z-index: 1000;
     min-width: 150px;
     padding: 4px 0;
@@ -273,8 +315,8 @@ export const styles = {
     }
 
     &.selected {
-      background: #e8f4fc;
-      color: #0078d4;
+      background: #e5f3ff;
+      color: #005fb8;
     }
   `,
 
@@ -293,14 +335,21 @@ export const styles = {
 
     input {
       margin-right: 8px;
+      accent-color: #005fb8;
     }
 
     select {
       margin-left: 8px;
       padding: 4px 8px;
       border: 1px solid #e0e0e0;
-      border-radius: 3px;
+      border-radius: 4px;
       font-size: 11px;
+      font-family: inherit;
+
+      &:focus {
+        outline: none;
+        border-color: #005fb8;
+      }
     }
   `,
 };

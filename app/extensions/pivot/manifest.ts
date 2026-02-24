@@ -10,6 +10,7 @@ import type {
 } from "../../src/api";
 import { emitAppEvent } from "../../src/api";
 import { PivotEditorView } from "./components/PivotEditorView";
+import { PivotDesignTab } from "./components/PivotDesignTab";
 import { CreatePivotDialog } from "./components/CreatePivotDialog";
 import { GroupDialog } from "./components/GroupDialog";
 import { FilterDropdown } from "./components/FilterDropdown";
@@ -31,6 +32,15 @@ export const PivotManifest: AddInManifest = {
   ribbonTabs: [],
   ribbonGroups: [],
   commands: [],
+};
+
+// Design ribbon tab - registered dynamically when pivot is selected
+export const PIVOT_DESIGN_TAB_ID = "pivot-design";
+export const PivotDesignTabDefinition = {
+  id: PIVOT_DESIGN_TAB_ID,
+  label: "Design",
+  order: 500,
+  component: PivotDesignTab,
 };
 
 // ============================================================================

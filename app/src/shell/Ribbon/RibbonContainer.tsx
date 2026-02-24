@@ -19,15 +19,19 @@ export function RibbonContainer(): React.ReactElement {
       const registeredTabs = ExtensionRegistry.getRibbonTabs();
       setTabs(registeredTabs);
 
-      // Set first tab as active if none selected
-      if (registeredTabs.length > 0 && !activeTabId) {
-        setActiveTabId(registeredTabs[0].id);
-      }
+      setActiveTabId((current) => {
+        // If no tabs, clear active
+        if (registeredTabs.length === 0) return null;
+        // If current tab still exists, keep it
+        if (current && registeredTabs.some((t) => t.id === current)) return current;
+        // Otherwise select first tab
+        return registeredTabs[0].id;
+      });
     };
 
     updateTabs();
     return ExtensionRegistry.onRegistryChange(updateTabs);
-  }, [activeTabId]);
+  }, []);
 
   // Build context for ribbon components
   const context: RibbonContext = {
@@ -78,6 +82,9 @@ export function RibbonContainer(): React.ReactElement {
               borderTopRightRadius: "4px",
               cursor: "pointer",
               fontWeight: activeTabId === tab.id ? 600 : 400,
+              fontSize: "12px",
+              color: "#333",
+              fontFamily: "'Segoe UI Variable', 'Segoe UI', system-ui, sans-serif",
               borderBottom:
                 activeTabId === tab.id ? "1px solid #fff" : "none",
               marginBottom: "-1px",
