@@ -13,6 +13,7 @@ import type {
   MenuDefinition,
   MenuItemDefinition,
   TaskPaneContextKey,
+  StatusBarItemDefinition,
 } from "./uiTypes";
 
 // Re-export types from the canonical contract layer (api/uiTypes.ts)
@@ -28,6 +29,8 @@ export type {
   AnchorRect,
   MenuDefinition,
   MenuItemDefinition,
+  StatusBarItemDefinition,
+  StatusBarAlignment,
 } from "./uiTypes";
 
 // ============================================================================
@@ -437,4 +440,61 @@ export function hideOverlay(overlayId: string): void {
 
 export function hideAllOverlays(): void {
   OverlayExtensions.hideAllOverlays();
+}
+
+// ============================================================================
+// Status Bar Registry (Self-contained, like MenuRegistry)
+// ============================================================================
+
+class StatusBarRegistry {
+  private items: Map<string, StatusBarItemDefinition> = new Map();
+  private listeners: Set<() => void> = new Set();
+
+  registerItem(definition: StatusBarItemDefinition): void {
+    this.items.set(definition.id, definition);
+    this.notify();
+  }
+
+  unregisterItem(id: string): void {
+    if (this.items.delete(id)) {
+      this.notify();
+    }
+  }
+
+  getItems(): StatusBarItemDefinition[] {
+    return Array.from(this.items.values()).sort(
+      (a, b) => (b.priority ?? 0) - (a.priority ?? 0),
+    );
+  }
+
+  subscribe(callback: () => void): () => void {
+    this.listeners.add(callback);
+    return () => this.listeners.delete(callback);
+  }
+
+  private notify(): void {
+    this.listeners.forEach((cb) => cb());
+  }
+}
+
+const statusBarRegistry = new StatusBarRegistry();
+
+// ============================================================================
+// Status Bar API Exports
+// ============================================================================
+
+export function registerStatusBarItem(definition: StatusBarItemDefinition): void {
+  statusBarRegistry.registerItem(definition);
+}
+
+export function unregisterStatusBarItem(id: string): void {
+  statusBarRegistry.unregisterItem(id);
+}
+
+export function getStatusBarItems(): StatusBarItemDefinition[] {
+  return statusBarRegistry.getItems();
+}
+
+export function subscribeToStatusBar(callback: () => void): () => void {
+  return statusBarRegistry.subscribe(callback);
 }

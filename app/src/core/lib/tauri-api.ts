@@ -1334,3 +1334,34 @@ export async function previewNumberFormat(
 ): Promise<PreviewResult> {
   return invoke<PreviewResult>("preview_number_format", { formatString, sampleValue });
 }
+
+// ============================================================================
+// Status Bar Aggregation
+// ============================================================================
+
+/** Result of computing aggregations over a selected range. */
+export interface SelectionAggregationResult {
+  sum: number | null;
+  average: number | null;
+  min: number | null;
+  max: number | null;
+  count: number;
+  numericalCount: number;
+}
+
+/** Compute aggregations (sum, average, count, etc.) for a cell selection range. */
+export async function getSelectionAggregations(
+  startRow: number,
+  startCol: number,
+  endRow: number,
+  endCol: number,
+  selectionType: string,
+): Promise<SelectionAggregationResult> {
+  return invoke<SelectionAggregationResult>("get_selection_aggregations", {
+    startRow,
+    startCol,
+    endRow,
+    endCol,
+    selectionType,
+  });
+}

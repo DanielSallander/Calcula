@@ -173,3 +173,26 @@ export interface OverlayDefinition {
   /** Z-index layer */
   layer?: OverlayLayer;
 }
+
+// ============================================================================
+// Status Bar Types
+// ============================================================================
+
+/**
+ * Alignment zone for status bar items.
+ */
+export type StatusBarAlignment = "left" | "right";
+
+/**
+ * Definition of a status bar item that can be registered by extensions.
+ */
+export interface StatusBarItemDefinition {
+  /** Unique identifier for this status bar item */
+  id: string;
+  /** The React component to render in the status bar */
+  component: React.ComponentType;
+  /** Which side of the status bar to render on */
+  alignment: StatusBarAlignment;
+  /** Priority for ordering (higher = rendered first within its alignment zone) */
+  priority?: number;
+}

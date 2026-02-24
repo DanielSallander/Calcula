@@ -154,6 +154,9 @@ export {
 
   // Number format preview
   previewNumberFormat,
+
+  // Status bar aggregation
+  getSelectionAggregations,
 } from "../core/lib/tauri-api";
 
 // Type exports from tauri-api
@@ -181,6 +184,7 @@ export type {
   ColumnGroup,
   SheetOutline,
   PreviewResult,
+  SelectionAggregationResult,
 } from "../core/lib/tauri-api";
 
 // Named range type exports

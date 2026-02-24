@@ -55,6 +55,9 @@ export const AppEvents = {
 
   // Blur commit prevention
   PREVENT_BLUR_COMMIT: "app:prevent-blur-commit",
+
+  // Status bar context menu
+  STATUS_BAR_CONTEXT_MENU: "app:status-bar-context-menu",
 } as const;
 
 export type AppEventName = (typeof AppEvents)[keyof typeof AppEvents];

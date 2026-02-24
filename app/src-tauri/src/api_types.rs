@@ -746,3 +746,26 @@ pub struct PreviewResult {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub color: Option<String>,
 }
+
+// ============================================================================
+// Status Bar Aggregation
+// ============================================================================
+
+/// Result of computing aggregations over a selected range.
+/// Numeric aggregations (sum, average, min, max) are None when no numeric cells exist.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SelectionAggregationResult {
+    /// Sum of all numeric values
+    pub sum: Option<f64>,
+    /// Average of all numeric values
+    pub average: Option<f64>,
+    /// Minimum numeric value
+    pub min: Option<f64>,
+    /// Maximum numeric value
+    pub max: Option<f64>,
+    /// Count of all non-empty cells
+    pub count: u32,
+    /// Count of numeric cells only
+    pub numerical_count: u32,
+}

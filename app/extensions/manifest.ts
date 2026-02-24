@@ -17,6 +17,7 @@ import FormatCellsExtension from "./BuiltIn/FormatCellsDialog";
 import FormulaAutocompleteExtension from "./BuiltIn/FormulaAutocomplete";
 import FormatPainterExtension from "./BuiltIn/FormatPainter";
 import PasteSpecialExtension from "./BuiltIn/PasteSpecial";
+import StatusBarAggregationExtension from "./BuiltIn/StatusBarAggregation";
 
 // ============================================================================
 // Built-in Extension Manifest
@@ -39,6 +40,8 @@ export const builtInExtensions: ExtensionModule[] = [
   PasteSpecialExtension,
   // Formula Autocomplete (Intellisense)
   FormulaAutocompleteExtension,
+  // Status Bar Aggregation (Average, Count, Sum for selections)
+  StatusBarAggregationExtension,
 ];
 
 /**

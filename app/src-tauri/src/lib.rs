@@ -46,6 +46,7 @@ pub mod goal_seek;
 pub mod tracing;
 pub mod evaluate_formula;
 pub mod consolidate;
+pub mod status_bar;
 
 pub use api_types::{CellData, StyleData, DimensionData, FormattingParams, MergedRegion};
 pub use logging::{init_log_file, get_log_path, next_seq, write_log, write_log_raw};
@@ -2373,6 +2374,8 @@ pub fn run() {
             evaluate_formula::eval_formula_step_out,
             evaluate_formula::eval_formula_restart,
             evaluate_formula::eval_formula_close,
+            // Status bar aggregation command
+            status_bar::get_selection_aggregations,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

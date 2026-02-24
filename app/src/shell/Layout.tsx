@@ -15,6 +15,7 @@ import { DialogContainer } from "./DialogContainer";
 import { OverlayContainer } from "./OverlayContainer";
 import { GridContextMenuHost } from "./Overlays/GridContextMenuHost";
 import { ToastContainer } from "./Toast/Toast";
+import { StatusBar } from "./StatusBar";
 // GridProvider is a special case - it's the root React context that must wrap everything
 import { GridProvider } from "../core/state/GridContext";
 // Actions and hooks are imported from the API layer
@@ -180,23 +181,7 @@ function LayoutInner(): React.ReactElement {
       <SheetTabs />
 
       {/* Status Bar */}
-      <div
-        style={{
-          height: "24px",
-          backgroundColor: "#217346",
-          display: "flex",
-          alignItems: "center",
-          justifyContent: "space-between",
-          padding: "0 12px",
-          fontSize: "12px",
-          color: "#ffffff",
-        }}
-      >
-        <span>Ready</span>
-        <span style={{ opacity: 0.8 }}>
-          Extensions: {activeCount} active{errorCount > 0 ? `, ${errorCount} error` : ""}
-        </span>
-      </div>
+      <StatusBar activeCount={activeCount} errorCount={errorCount} />
 
       {/* Dynamic Dialogs from DialogExtensions (registered by extensions) */}
       <DialogContainer />

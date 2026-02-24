@@ -92,6 +92,8 @@ export {
   getInternalClipboard,
   // Formula shifting
   shiftFormulasBatch,
+  // Status bar aggregation
+  getSelectionAggregations,
 } from "./lib";
 
 export type {
@@ -103,6 +105,7 @@ export type {
   CellUpdateInput,
   FormulaShiftInput,
   ClipboardData,
+  SelectionAggregationResult,
 } from "./lib";
 
 // ============================================================================
@@ -344,6 +347,11 @@ export {
   TaskPaneExtensions,
   DialogExtensions,
   OverlayExtensions,
+  // Status Bar API
+  registerStatusBarItem,
+  unregisterStatusBarItem,
+  getStatusBarItems,
+  subscribeToStatusBar,
 } from "./ui";
 
 // ============================================================================
@@ -362,6 +370,8 @@ export type {
   OverlayProps,
   OverlayLayer,
   AnchorRect,
+  StatusBarItemDefinition,
+  StatusBarAlignment,
 } from "./uiTypes";
 
 // ============================================================================
