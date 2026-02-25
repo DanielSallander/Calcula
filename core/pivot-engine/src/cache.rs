@@ -866,8 +866,10 @@ impl PivotCache {
                 updates.push((full_key.clone(), acc_idx, numeric_value));
             }
             
-            // Store updates for subtotals at each level
-            for level in 0..all_group_fields.len() {
+            // Store updates for subtotals at each level.
+            // Skip the last level because subtotal_at_level(len-1) produces
+            // the same key as the full key, which would double-count records.
+            for level in 0..all_group_fields.len().saturating_sub(1) {
                 let subtotal_key = full_key.subtotal_at_level(level);
                 for (acc_idx, &numeric_value) in value_data.iter().enumerate() {
                     updates.push((subtotal_key.clone(), acc_idx, numeric_value));

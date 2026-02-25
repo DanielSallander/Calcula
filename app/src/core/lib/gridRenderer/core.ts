@@ -88,6 +88,8 @@ export interface OverlayRegistration {
   type: string;
   render: OverlayRendererFn;
   priority?: number;
+  /** When true, renders BEFORE the selection layer so selection draws on top. */
+  renderBelowSelection?: boolean;
 }
 
 // ============================================================================
@@ -667,6 +669,25 @@ export function renderGrid(
   // Draw selection drag preview (shows where cells will move to)
   drawSelectionDragPreview(state);
 
+  // Split overlays into two groups:
+  // - belowSelection: cell-based overlays (e.g., pivot) that render BEFORE selection
+  //   so the standard selection highlight draws on top of them
+  // - aboveSelection: floating overlays (e.g., charts) that render AFTER selection
+  //   to prevent selection borders from bleeding through
+  const sortedRenderers = [...overlayRenderers].sort(
+    (a, b) => (a.priority ?? 0) - (b.priority ?? 0)
+  );
+  const belowSelectionRenderers = sortedRenderers.filter(r => r.renderBelowSelection === true);
+  const aboveSelectionRenderers = sortedRenderers.filter(r => r.renderBelowSelection !== true);
+
+  // Render below-selection overlays (e.g., pivot tables)
+  for (const renderer of belowSelectionRenderers) {
+    const matchingRegions = overlayRegions.filter(r => r.type === renderer.type);
+    for (const region of matchingRegions) {
+      renderer.render({ ctx, region, config, viewport, dimensions: dims, canvasWidth: width, canvasHeight: height });
+    }
+  }
+
   if (selection) {
     drawSelection(state);
   }
@@ -675,12 +696,8 @@ export function renderGrid(
     drawClipboardSelection(state);
   }
 
-  // Render overlays AFTER selection so that charts and other overlays
-  // paint on top of selection borders, preventing them from bleeding through.
-  const sortedRenderers = [...overlayRenderers].sort(
-    (a, b) => (a.priority ?? 0) - (b.priority ?? 0)
-  );
-  for (const renderer of sortedRenderers) {
+  // Render above-selection overlays (e.g., charts)
+  for (const renderer of aboveSelectionRenderers) {
     const matchingRegions = overlayRegions.filter(r => r.type === renderer.type);
     for (const region of matchingRegions) {
       renderer.render({ ctx, region, config, viewport, dimensions: dims, canvasWidth: width, canvasHeight: height });

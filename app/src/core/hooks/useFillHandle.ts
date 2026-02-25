@@ -14,6 +14,7 @@ import type { Selection, GridConfig } from "../types";
 import { getColumnWidth, getRowHeight, getColumnX, getRowY, calculateVisibleRange } from "../lib/gridRenderer";
 import { calculateAutoScrollDelta } from "./useMouseSelection/utils/autoScrollUtils";
 import { DEFAULT_AUTO_SCROLL_CONFIG } from "./useMouseSelection/constants";
+import { getGridRegions } from "../../api/gridOverlays";
 
 /**
  * Fill direction enumeration.
@@ -531,9 +532,28 @@ export function useFillHandle(props: UseFillHandleProps): UseFillHandleReturn {
 
   /**
    * Check if mouse position is over the fill handle.
+   * Returns false when the selection is inside a grid region (e.g., pivot table).
    */
   const isOverFillHandle = useCallback(
     (mouseX: number, mouseY: number): boolean => {
+      // Block fill handle when selection is inside a grid region (e.g., pivot table)
+      if (selection) {
+        const regions = getGridRegions();
+        const selMinRow = Math.min(selection.startRow, selection.endRow);
+        const selMaxRow = Math.max(selection.startRow, selection.endRow);
+        const selMinCol = Math.min(selection.startCol, selection.endCol);
+        const selMaxCol = Math.max(selection.startCol, selection.endCol);
+        for (const region of regions) {
+          if (region.floating) continue;
+          if (
+            selMinRow >= region.startRow && selMaxRow <= region.endRow &&
+            selMinCol >= region.startCol && selMaxCol <= region.endCol
+          ) {
+            return false;
+          }
+        }
+      }
+
       const handlePos = getFillHandlePosition();
       if (!handlePos || !handlePos.visible) return false;
 

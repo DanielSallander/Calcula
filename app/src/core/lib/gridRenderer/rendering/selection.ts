@@ -206,19 +206,36 @@ export function drawSelection(state: RenderState): void {
 
   // Draw fill handle (small square in bottom-right corner of selection)
   // Only draw if the bottom-right corner is in the visible/clipped area
-  const handleSize = 8;
-  const handleX = borderX2 - handleSize / 2;
-  const handleY = borderY2 - handleSize / 2;
-  
-  if (handleX > rowHeaderWidth && handleY > colHeaderHeight &&
-      handleX < width && handleY < height) {
-    // White background for fill handle
-    ctx.fillStyle = "#ffffff";
-    ctx.fillRect(handleX - handleSize / 2, handleY - handleSize / 2, handleSize, handleSize);
-    // Green border for fill handle
-    ctx.strokeStyle = "#16a34a";
-    ctx.lineWidth = 2;
-    ctx.strokeRect(handleX - handleSize / 2, handleY - handleSize / 2, handleSize, handleSize);
+  // Skip fill handle when selection is inside an overlay region (e.g., pivot table)
+  const { overlayRegionBounds } = state;
+  let selectionInOverlay = false;
+  if (overlayRegionBounds && overlayRegionBounds.length > 0) {
+    for (const region of overlayRegionBounds) {
+      if (
+        minRow >= region.startRow && maxRow <= region.endRow &&
+        minCol >= region.startCol && maxCol <= region.endCol
+      ) {
+        selectionInOverlay = true;
+        break;
+      }
+    }
+  }
+
+  if (!selectionInOverlay) {
+    const handleSize = 8;
+    const handleX = borderX2 - handleSize / 2;
+    const handleY = borderY2 - handleSize / 2;
+
+    if (handleX > rowHeaderWidth && handleY > colHeaderHeight &&
+        handleX < width && handleY < height) {
+      // White background for fill handle
+      ctx.fillStyle = "#ffffff";
+      ctx.fillRect(handleX - handleSize / 2, handleY - handleSize / 2, handleSize, handleSize);
+      // Green border for fill handle
+      ctx.strokeStyle = "#16a34a";
+      ctx.lineWidth = 2;
+      ctx.strokeRect(handleX - handleSize / 2, handleY - handleSize / 2, handleSize, handleSize);
+    }
   }
 }
 

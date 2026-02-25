@@ -741,7 +741,6 @@ export function useEditing(): UseEditingReturn {
       const guardResult = await checkEditGuards(row, col);
       if (guardResult?.blocked) {
         console.log("[useEditing] Edit blocked by guard");
-        window.alert(guardResult.message || "This cell cannot be edited.");
         return;
       }
 
@@ -837,7 +836,6 @@ export function useEditing(): UseEditingReturn {
       const guardResult = await checkEditGuards(row, col);
       if (guardResult?.blocked) {
         console.log("[useEditing] Edit blocked by guard");
-        window.alert(guardResult.message || "This cell cannot be edited.");
         return;
       }
 

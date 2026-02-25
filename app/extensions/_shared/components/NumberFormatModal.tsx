@@ -3,6 +3,7 @@
 // CONTEXT: Provides preset formats for currency, percentage, and general numbers
 
 import React, { useState, useCallback, useRef } from "react";
+import { createPortal } from "react-dom";
 import { css } from "@emotion/css";
 
 export interface NumberFormatOption {
@@ -248,7 +249,7 @@ export function NumberFormatModal({
 
   if (!isOpen) return null;
 
-  return (
+  return createPortal(
     <div className={modalStyles.overlay} onClick={onCancel}>
       <div
         ref={modalRef}
@@ -312,6 +313,7 @@ export function NumberFormatModal({
           </button>
         </div>
       </div>
-    </div>
+    </div>,
+    document.body
   );
 }

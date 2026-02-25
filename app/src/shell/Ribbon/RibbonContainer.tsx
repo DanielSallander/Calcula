@@ -108,14 +108,15 @@ export function RibbonContainer(): React.ReactElement {
         )}
       </div>
 
-      {/* Tab Content Area */}
+      {/* Tab Content Area - fixed height to prevent grid jumping when tabs change */}
       <div
         style={{
-          minHeight: "80px",
+          height: "80px",
           padding: "8px",
           backgroundColor: "#fff",
           display: "flex",
           gap: "16px",
+          overflow: "hidden",
         }}
       >
         {groups.length > 0 ? (

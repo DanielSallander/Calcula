@@ -958,8 +958,16 @@ impl<'a> PivotCalculator<'a> {
             }
 
             let has_children = !node.children.is_empty();
+            // In compact layout, parent rows already show subtotal values in
+            // their data cells (same group_values), so the separate subtotal
+            // row is redundant.  Only generate it in Outline/Tabular layouts.
+            let layout_wants_subtotal = !matches!(
+                self.definition.layout.report_layout,
+                ReportLayout::Compact
+            );
             let wants_subtotal = node.show_subtotal && has_children
-                && !matches!(subtotal_location, SubtotalLocation::Off);
+                && !matches!(subtotal_location, SubtotalLocation::Off)
+                && layout_wants_subtotal;
 
             // Build the subtotal item lazily (used for both AtTop and AtBottom)
             let build_subtotal = || {

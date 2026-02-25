@@ -251,6 +251,12 @@ export type { CommitGuardResult, CommitGuardFn } from "./commitGuards";
 export { registerCellClickInterceptor } from "./cellClickInterceptors";
 
 // ============================================================================
+// Cell Double-Click Interceptors
+// ============================================================================
+
+export { registerCellDoubleClickInterceptor } from "./cellDoubleClickInterceptors";
+
+// ============================================================================
 // Events
 // ============================================================================
 
@@ -397,6 +403,7 @@ export {
   registerGridOverlay,
   addGridRegions,
   removeGridRegionsByType,
+  replaceGridRegionsByType,
   overlayGetColumnX,
   overlayGetRowY,
   overlayGetColumnWidth,

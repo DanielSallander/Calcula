@@ -118,7 +118,7 @@ export const TabIcon = styled.span`
   align-items: center;
 `;
 
-export const TabCloseButton = styled.button`
+export const TabCloseButton = styled.span`
   display: flex;
   align-items: center;
   justify-content: center;

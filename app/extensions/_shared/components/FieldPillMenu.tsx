@@ -4,6 +4,7 @@
 // that provides Value Field Settings, aggregation, move, and remove actions.
 
 import React, { useEffect, useRef, useCallback } from 'react';
+import { createPortal } from 'react-dom';
 import { css } from '@emotion/css';
 import type {
   DropZoneType,
@@ -188,7 +189,7 @@ export function FieldPillMenu({
   const canMoveDown = fieldIndex < totalFieldsInZone - 1;
   const otherZones = ALL_ZONES.filter((z) => z !== zone);
 
-  return (
+  return createPortal(
     <div
       ref={menuRef}
       className={menuStyles.container}
@@ -302,6 +303,7 @@ export function FieldPillMenu({
         <span className={menuStyles.icon}>&#10005;</span>
         <span className={menuStyles.label}>Remove Field</span>
       </button>
-    </div>
+    </div>,
+    document.body
   );
 }

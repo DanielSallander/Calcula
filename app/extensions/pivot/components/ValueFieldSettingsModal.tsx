@@ -3,6 +3,7 @@
 // CONTEXT: Allows changing aggregation type, custom name, and show values as
 
 import React, { useState, useCallback, useEffect, useRef } from "react";
+import { createPortal } from "react-dom";
 import { css } from "@emotion/css";
 import {
   type AggregationType,
@@ -11,11 +12,13 @@ import {
   AGGREGATION_OPTIONS,
   getValueFieldDisplayName,
 } from "./types";
+import { NumberFormatModal } from "../../_shared/components/NumberFormatModal";
 
 export interface ValueFieldSettings {
   customName: string;
   aggregation: AggregationType;
   showValuesAs: ShowValuesAs;
+  numberFormat?: string;
 }
 
 export interface ValueFieldSettingsModalProps {
@@ -169,6 +172,33 @@ const modalStyles = {
     font-size: 11px;
     margin-top: 4px;
   `,
+  formatButton: css`
+    padding: 8px 12px;
+    border: 1px solid #d0d0d0;
+    border-radius: 4px;
+    font-size: 13px;
+    background: #fff;
+    cursor: pointer;
+    transition: all 0.15s;
+    width: 100%;
+    text-align: left;
+
+    &:hover {
+      background: #f5f5f5;
+      border-color: #b0b0b0;
+    }
+
+    &:focus {
+      outline: none;
+      border-color: #0078d4;
+    }
+  `,
+  formatDisplay: css`
+    color: #888;
+    font-size: 11px;
+    margin-top: 4px;
+    font-family: "SF Mono", Consolas, monospace;
+  `,
 };
 
 export function ValueFieldSettingsModal({
@@ -190,6 +220,8 @@ export function ValueFieldSettingsModal({
     field.aggregation || "sum"
   );
   const [showValuesAs, setShowValuesAs] = useState<ShowValuesAs>("normal");
+  const [numberFormat, setNumberFormat] = useState<string>(field.numberFormat || "");
+  const [isNumberFormatOpen, setIsNumberFormatOpen] = useState(false);
 
   // Reset local state when the modal opens or when the field changes.
   // Uses render-time derived state pattern (prev-prop comparison) instead of
@@ -206,6 +238,7 @@ export function ValueFieldSettingsModal({
     setCustomName(name);
     setAggregation(field.aggregation || "sum");
     setShowValuesAs("normal");
+    setNumberFormat(field.numberFormat || "");
     setPrevIsOpen(isOpen);
     setPrevFieldKey(fieldKey);
   } else if (!isOpen && prevIsOpen) {
@@ -231,13 +264,27 @@ export function ValueFieldSettingsModal({
     setPrevAggregation(aggregation);
   }
 
+  const handleOpenNumberFormat = useCallback(() => {
+    setIsNumberFormatOpen(true);
+  }, []);
+
+  const handleSaveNumberFormat = useCallback((format: string) => {
+    setNumberFormat(format);
+    setIsNumberFormatOpen(false);
+  }, []);
+
+  const handleCancelNumberFormat = useCallback(() => {
+    setIsNumberFormatOpen(false);
+  }, []);
+
   const handleSave = useCallback(() => {
     onSave({
       customName,
       aggregation,
       showValuesAs,
+      numberFormat,
     });
-  }, [customName, aggregation, showValuesAs, onSave]);
+  }, [customName, aggregation, showValuesAs, numberFormat, onSave]);
 
   const handleKeyDown = useCallback(
     (event: React.KeyboardEvent) => {
@@ -252,7 +299,7 @@ export function ValueFieldSettingsModal({
 
   if (!isOpen) return null;
 
-  return (
+  return createPortal(
     <div className={modalStyles.overlay} onClick={onCancel}>
       <div
         ref={modalRef}
@@ -316,6 +363,22 @@ export function ValueFieldSettingsModal({
               ))}
             </select>
           </div>
+
+          <div className={modalStyles.field}>
+            <label className={modalStyles.label}>Number Format</label>
+            {numberFormat && (
+              <div className={modalStyles.formatDisplay}>
+                Current: {numberFormat || "General"}
+              </div>
+            )}
+            <button
+              type="button"
+              className={modalStyles.formatButton}
+              onClick={handleOpenNumberFormat}
+            >
+              Number Format...
+            </button>
+          </div>
         </div>
 
         <div className={modalStyles.footer}>
@@ -333,6 +396,15 @@ export function ValueFieldSettingsModal({
           </button>
         </div>
       </div>
-    </div>
+
+      {/* Number Format Modal (nested) */}
+      <NumberFormatModal
+        isOpen={isNumberFormatOpen}
+        currentFormat={numberFormat}
+        onSave={handleSaveNumberFormat}
+        onCancel={handleCancelNumberFormat}
+      />
+    </div>,
+    document.body
   );
 }

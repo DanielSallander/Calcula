@@ -18,8 +18,8 @@ import { TablixEvents } from './lib/tablixEvents';
 
 import {
   registerGridOverlay,
-  setGridRegions,
   removeGridRegionsByType,
+  replaceGridRegionsByType,
   overlayGetColumnX,
   overlayGetRowY,
   overlayGetColumnsWidth,
@@ -132,8 +132,7 @@ async function refreshTablixRegions(triggerRepaint: boolean = false): Promise<vo
       data: { isEmpty: r.isEmpty, tablixId: r.tablixId },
     }));
 
-    removeGridRegionsByType('tablix');
-    setGridRegions(gridRegions);
+    replaceGridRegionsByType('tablix', gridRegions);
 
     emitAppEvent(TablixEvents.TABLIX_REGIONS_UPDATED, { regions });
 

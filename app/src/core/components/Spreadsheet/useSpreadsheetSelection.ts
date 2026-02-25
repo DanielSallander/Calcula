@@ -32,6 +32,8 @@ import {
 } from "../../lib/tauri-api";
 import type { FormattingOptions } from "../../types";
 import { checkCellClickInterceptors } from "../../lib/cellClickInterceptors";
+import { checkCellDoubleClickInterceptors } from "../../lib/cellDoubleClickInterceptors";
+import { checkEditGuards } from "../../lib/editGuards";
 import { setColumnWidth, setRowHeight } from "../../state/gridActions";
 import { cellEvents } from "../../lib/cellEvents";
 import { CommandRegistry } from "../../../api/commands";
@@ -246,6 +248,13 @@ export function useSpreadsheetSelection({
   const handleDeleteContents = useCallback(async () => {
     if (!selection) {
       console.log("[useSpreadsheetSelection] No selection to clear");
+      return;
+    }
+
+    // Check if any cell in the selection is edit-guarded (e.g., pivot region)
+    const guardResult = await checkEditGuards(selection.endRow, selection.endCol);
+    if (guardResult?.blocked) {
+      console.log("[useSpreadsheetSelection] Delete blocked by edit guard");
       return;
     }
 
@@ -813,6 +822,16 @@ export function useSpreadsheetSelection({
     async (event: React.MouseEvent<HTMLDivElement>) => {
       const cell = getDoubleClickCell(event);
       if (cell) {
+        // Check if any extension intercepts the double-click (e.g., pivot expand/collapse)
+        const intercepted = await checkCellDoubleClickInterceptors(
+          cell.row,
+          cell.col,
+          { clientX: event.clientX, clientY: event.clientY }
+        );
+        if (intercepted) {
+          return;
+        }
+
         // First expand selection to cover merged region (for visual feedback)
         await selectCellWithMergeExpansion(cell.row, cell.col);
         // FIX: Call startEdit directly with the clicked coordinates

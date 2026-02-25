@@ -79,8 +79,10 @@ export function TaskPaneContainer(): React.ReactElement {
     : null;
 
   // Handle view updates (e.g., pivot fields changed)
+  // Dispatch pivot:refresh so the pivot extension re-fetches view data AND repaints.
+  // (grid:refresh alone would fetch data with triggerRepaint=false, missing the repaint.)
   const handleViewUpdate = useCallback(() => {
-    window.dispatchEvent(new CustomEvent("grid:refresh"));
+    window.dispatchEvent(new CustomEvent("pivot:refresh"));
   }, []);
 
   // Handle close from within the view

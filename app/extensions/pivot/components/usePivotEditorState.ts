@@ -6,6 +6,7 @@ import type {
   DragField,
   DropZoneType,
   AggregationType,
+  ShowValuesAs,
   LayoutConfig,
   UpdatePivotFieldsRequest,
   PivotFieldConfig,
@@ -79,7 +80,7 @@ export function usePivotEditorState({
         name: displayName,
         aggregation,
         numberFormat: f.numberFormat,
-        showValuesAs: f.showValuesAs,
+        showValuesAs: f.showValuesAs as ShowValuesAs | undefined,
       };
     });
 
@@ -275,6 +276,7 @@ export function usePivotEditorState({
                 aggregation: settings.aggregation,
                 customName: settings.customName,
                 showValuesAs: settings.showValuesAs,
+                numberFormat: settings.numberFormat,
               }
             : f
         )

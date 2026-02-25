@@ -99,6 +99,13 @@ export interface OverlayRegistration {
   hitTest?: OverlayHitTestFn;
   /** Priority for render ordering (higher = later = on top). Default: 0 */
   priority?: number;
+  /**
+   * When true, this overlay renders BEFORE the selection layer instead of after.
+   * Use this for cell-based overlays (e.g., pivot tables) that should appear
+   * underneath the standard selection highlight, so selection looks identical
+   * to regular grid cells. Default: false (renders after selection).
+   */
+  renderBelowSelection?: boolean;
 }
 
 // ============================================================================
@@ -151,6 +158,20 @@ export function addGridRegions(regions: GridRegion[]): void {
 export function removeGridRegionsByType(type: string): void {
   gridRegions = gridRegions.filter((r) => r.type !== type);
   notifyRegionChange();
+}
+
+/**
+ * Atomically replace all regions of a given type with new ones.
+ * Fires region change listeners only once (not twice like remove+add).
+ * This prevents intermediate renders where regions are briefly empty.
+ *
+ * @param notify - If false, skips notifying listeners. Use this when a
+ *   subsequent event (e.g., grid:refresh) will trigger the redraw anyway,
+ *   to avoid an intermediate draw with stale cell data.
+ */
+export function replaceGridRegionsByType(type: string, regions: GridRegion[], notify = true): void {
+  gridRegions = [...gridRegions.filter((r) => r.type !== type), ...regions];
+  if (notify) notifyRegionChange();
 }
 
 /** Get all current grid regions. */
@@ -362,7 +383,8 @@ export function overlaySheetToCanvas(
 // These renderers are called AFTER all headers (row, column, corner) are drawn.
 // Used by the Grouping extension to render the outline bar on top of headers.
 
-export type { GlobalOverlayRendererFn } from "../core/lib/gridRenderer";
+import type { GlobalOverlayRendererFn } from "../core/lib/gridRenderer";
+export type { GlobalOverlayRendererFn };
 
 const postHeaderOverlayRegistry = new Map<string, GlobalOverlayRendererFn>();
 

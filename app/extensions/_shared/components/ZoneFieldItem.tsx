@@ -62,12 +62,14 @@ export function ZoneFieldItem({
 
   const { isDragging, dragHandleProps } = useDraggable(dragData, displayName);
 
-  const handleRemove = useCallback(() => {
+  const handleRemove = useCallback((e: React.MouseEvent) => {
+    e.stopPropagation();
     onRemove(zone, index);
   }, [zone, index, onRemove]);
 
   const handleDropdownClick = useCallback(
     (e: React.MouseEvent) => {
+      e.stopPropagation();
       const rect = (e.target as HTMLElement).getBoundingClientRect();
       setMenuPosition({
         x: rect.left,
@@ -181,7 +183,7 @@ export function ZoneFieldItem({
           onMoveToBeginning={handleMoveToBeginning}
           onMoveToEnd={handleMoveToEnd}
           onMoveTo={handleMoveTo}
-          onRemove={handleRemove}
+          onRemove={() => onRemove(zone, index)}
           onValueFieldSettings={
             zone === 'values' ? handleValueFieldSettings : undefined
           }

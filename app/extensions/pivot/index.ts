@@ -8,18 +8,20 @@ import {
   DialogExtensions,
   OverlayExtensions,
   onAppEvent,
-  AppEvents,
   emitAppEvent,
   registerEditGuard,
   registerCellClickInterceptor,
+  registerCellDoubleClickInterceptor,
 } from "../../src/api";
 
 import { PivotEvents } from "./lib/pivotEvents";
 
 import {
   registerGridOverlay,
-  setGridRegions,
+  addGridRegions,
   removeGridRegionsByType,
+  replaceGridRegionsByType,
+  requestOverlayRedraw,
   overlayGetColumnX,
   overlayGetRowY,
   overlayGetColumnsWidth,
@@ -103,6 +105,24 @@ const gridRegionsCache = new Map<number, { startRow: number; startCol: number; e
 let cachedCanvasElement: HTMLCanvasElement | null = null;
 
 /**
+ * Previous region bounds per pivotId, used during transitions.
+ * When a pivot collapses, the overlay's white background is extended to cover
+ * max(old, new) bounds so stale cells from the frontend cache aren't visible
+ * while refreshCells() is still in flight.
+ */
+const transitionBounds = new Map<number, { endRow: number; endCol: number }>();
+let transitionCleanupTimer: ReturnType<typeof setTimeout> | null = null;
+
+/**
+ * Re-entry guard for refreshPivotRegions.
+ * When refreshPivotRegions(true) dispatches "grid:refresh", the pivot extension's
+ * own grid:refresh listener would trigger another refreshPivotRegions(false) call.
+ * This flag prevents that redundant second call from executing.
+ */
+let isRefreshingPivotRegions = false;
+
+
+/**
  * Fetch and cache pivot view data for all non-empty pivot regions.
  */
 async function refreshPivotViewCache(regions: PivotRegionData[]): Promise<void> {
@@ -127,6 +147,9 @@ async function refreshPivotViewCache(regions: PivotRegionData[]): Promise<void> 
 /**
  * Draw a white background over the pivot region to hide underlying grid lines.
  * Called for ALL pivot regions (both empty and populated).
+ *
+ * During transitions (collapse/expand), the white background is extended to cover
+ * max(current, previous) bounds so stale cells aren't briefly visible.
  */
 function drawPivotBackground(overlayCtx: OverlayRenderContext): void {
   const { ctx, region } = overlayCtx;
@@ -135,10 +158,24 @@ function drawPivotBackground(overlayCtx: OverlayRenderContext): void {
 
   const startX = overlayGetColumnX(overlayCtx, region.startCol);
   const startY = overlayGetRowY(overlayCtx, region.startRow);
-  const regionWidth = overlayGetColumnsWidth(overlayCtx, region.startCol, region.endCol);
-  const regionHeight = overlayGetRowsHeight(overlayCtx, region.startRow, region.endRow);
 
-  if (startX + regionWidth < rowHeaderWidth || startY + regionHeight < colHeaderHeight) {
+  // During transitions, extend the white fill to cover the old (larger) region
+  // so stale cached cells aren't visible while refreshCells is in flight.
+  const pivotId = region.data?.pivotId as number | undefined;
+  let fillEndRow = region.endRow;
+  let fillEndCol = region.endCol;
+  if (pivotId !== undefined) {
+    const prev = transitionBounds.get(pivotId);
+    if (prev) {
+      fillEndRow = Math.max(fillEndRow, prev.endRow);
+      fillEndCol = Math.max(fillEndCol, prev.endCol);
+    }
+  }
+
+  const fillWidth = overlayGetColumnsWidth(overlayCtx, region.startCol, fillEndCol);
+  const fillHeight = overlayGetRowsHeight(overlayCtx, region.startRow, fillEndRow);
+
+  if (startX + fillWidth < rowHeaderWidth || startY + fillHeight < colHeaderHeight) {
     return;
   }
 
@@ -152,9 +189,13 @@ function drawPivotBackground(overlayCtx: OverlayRenderContext): void {
   );
   ctx.clip();
 
+  // White fill over extended area (covers stale cells during transition)
   ctx.fillStyle = "#ffffff";
-  ctx.fillRect(startX, startY, regionWidth, regionHeight);
+  ctx.fillRect(startX, startY, fillWidth, fillHeight);
 
+  // Border only around the actual current region
+  const regionWidth = overlayGetColumnsWidth(overlayCtx, region.startCol, region.endCol);
+  const regionHeight = overlayGetRowsHeight(overlayCtx, region.startRow, region.endRow);
   ctx.strokeStyle = "#d0d0d0";
   ctx.lineWidth = 1;
   ctx.setLineDash([]);
@@ -315,6 +356,7 @@ function drawPivotPlaceholderText(overlayCtx: OverlayRenderContext): void {
   ctx.restore();
 }
 
+
 // ============================================================================
 // Pivot Region Management
 // ============================================================================
@@ -324,11 +366,25 @@ function drawPivotPlaceholderText(overlayCtx: OverlayRenderContext): void {
  * Also dispatches the PIVOT_REGIONS_UPDATED event for other components.
  */
 async function refreshPivotRegions(triggerRepaint: boolean = false): Promise<void> {
+  // Re-entry guard: when we dispatch "grid:refresh" below, the pivot extension's
+  // own grid:refresh listener would call us again. Skip that redundant call.
+  if (isRefreshingPivotRegions) return;
+  isRefreshingPivotRegions = true;
+
   try {
     const regions = await getPivotRegionsForSheet();
 
     // Fetch and cache pivot view data for styled rendering
     await refreshPivotViewCache(regions);
+
+    // Save current region bounds as transition bounds before updating.
+    // This allows the overlay renderer to draw a white background over the
+    // max(old, new) area, preventing stale cells from briefly showing through.
+    if (triggerRepaint) {
+      for (const [pivotId, bounds] of gridRegionsCache.entries()) {
+        transitionBounds.set(pivotId, { endRow: bounds.endRow, endCol: bounds.endCol });
+      }
+    }
 
     // Update grid regions cache for coordinate conversion in click handlers
     gridRegionsCache.clear();
@@ -351,21 +407,38 @@ async function refreshPivotRegions(triggerRepaint: boolean = false): Promise<voi
       data: { isEmpty: r.isEmpty, pivotId: r.pivotId },
     }));
 
-    // Replace all pivot regions in the overlay system
-    removeGridRegionsByType("pivot");
-    setGridRegions(gridRegions);
+    // Atomically replace pivot regions and always notify listeners so the overlay
+    // redraws immediately with the freshly-cached pivotViewCache data.
+    // The transition bounds mechanism covers the old (larger) region area with a
+    // white fill, so stale cells underneath are hidden even before refreshCells()
+    // completes from the grid:refresh below.
+    replaceGridRegionsByType("pivot", gridRegions);
 
     // Notify other components (selection handler, etc.)
     emitAppEvent(PivotEvents.PIVOT_REGIONS_UPDATED, { regions });
 
-    // Only trigger grid repaint when NOT already inside a grid:refresh cycle
+    // Trigger a full grid refresh (cell data re-fetch + redraw) when pivot regions change.
+    // This is needed because when a pivot table collapses/expands, cells outside the new
+    // region need to be cleared from the canvas cell cache. The window "grid:refresh" event
+    // triggers refreshCells() in GridCanvas, unlike AppEvents.GRID_REFRESH which only redraws.
     if (triggerRepaint) {
-      emitAppEvent(AppEvents.GRID_REFRESH);
+      window.dispatchEvent(new CustomEvent("grid:refresh"));
+
+      // Clear transition bounds after a short delay, giving refreshCells() time to
+      // complete so the stale cells are gone before we stop extending the white fill.
+      if (transitionCleanupTimer) clearTimeout(transitionCleanupTimer);
+      transitionCleanupTimer = setTimeout(() => {
+        transitionBounds.clear();
+        transitionCleanupTimer = null;
+        requestOverlayRedraw();
+      }, 150);
     }
   } catch (error) {
     console.error("[Pivot Extension] Failed to fetch pivot regions:", error);
     removeGridRegionsByType("pivot");
     emitAppEvent(PivotEvents.PIVOT_REGIONS_UPDATED, { regions: [] });
+  } finally {
+    isRefreshingPivotRegions = false;
   }
 }
 
@@ -490,7 +563,74 @@ export function registerPivotExtension(): void {
     })
   );
 
+  // Register double-click interceptor - toggle hierarchy on header double-click,
+  // and silently block edit mode for all pivot cells.
+  cleanupFunctions.push(
+    registerCellDoubleClickInterceptor(async (row, col, event) => {
+      // Check if double-click is on a +/- icon → just consume it (no toggle).
+      // The single-click interceptor already handled the toggle; if we toggled
+      // again here the state would flip back (double-toggle bug).
+      if (cachedCanvasElement) {
+        const rect = cachedCanvasElement.getBoundingClientRect();
+        const canvasX = event.clientX - rect.left;
+        const canvasY = event.clientY - rect.top;
+
+        for (const bounds of overlayIconBounds.values()) {
+          if (
+            canvasX >= bounds.x &&
+            canvasX <= bounds.x + bounds.width &&
+            canvasY >= bounds.y &&
+            canvasY <= bounds.y + bounds.height
+          ) {
+            // Consume the double-click without toggling again
+            return true;
+          }
+        }
+      }
+
+      // Check if double-click is on an expandable row header → toggle hierarchy
+      for (const [pivotId, regionBounds] of gridRegionsCache.entries()) {
+        if (
+          row >= regionBounds.startRow && row <= regionBounds.endRow &&
+          col >= regionBounds.startCol && col <= regionBounds.endCol
+        ) {
+          const cachedView = pivotViewCache.get(pivotId);
+          if (!cachedView) return true; // In a pivot region, block edit
+
+          const pivotRowIndex = row - regionBounds.startRow;
+          const pivotColIndex = col - regionBounds.startCol;
+          const pivotRow = cachedView.rows[pivotRowIndex];
+          if (!pivotRow) return true;
+          const cell = pivotRow.cells[pivotColIndex];
+          if (!cell) return true;
+
+          // If this cell is an expandable row header, toggle it
+          if (cell.cellType === "RowHeader" && cell.isExpandable) {
+            try {
+              await togglePivotGroup({
+                pivotId,
+                isRow: true,
+                fieldIndex: pivotColIndex,
+                value: cell.formattedValue,
+              });
+              window.dispatchEvent(new CustomEvent("pivot:refresh"));
+            } catch (error) {
+              console.error("[Pivot Extension] Failed to toggle hierarchy on double-click:", error);
+            }
+          }
+
+          // Any cell in a pivot region: consume double-click (no edit mode)
+          return true;
+        }
+      }
+
+      return false;
+    })
+  );
+
   // Register grid overlay renderer for pivot placeholder regions
+  // renderBelowSelection: true ensures the core selection highlight draws ON TOP
+  // of pivot cells, making selection look identical to regular grid cells.
   cleanupFunctions.push(
     registerGridOverlay({
       type: "pivot",
@@ -526,8 +666,59 @@ export function registerPivotExtension(): void {
         );
       },
       priority: 10,
+      renderBelowSelection: true,
     })
   );
+
+  // Track cursor state to avoid redundant style changes
+  let currentCursorOverride = false;
+
+  // Add mousemove handler for cursor changes on expand/collapse icon hover
+  const handleCanvasMouseMove = (event: MouseEvent) => {
+    if (!cachedCanvasElement) return;
+    const rect = cachedCanvasElement.getBoundingClientRect();
+    const canvasX = event.clientX - rect.left;
+    const canvasY = event.clientY - rect.top;
+
+    let isOverIcon = false;
+    for (const bounds of overlayIconBounds.values()) {
+      if (
+        canvasX >= bounds.x &&
+        canvasX <= bounds.x + bounds.width &&
+        canvasY >= bounds.y &&
+        canvasY <= bounds.y + bounds.height
+      ) {
+        isOverIcon = true;
+        break;
+      }
+    }
+
+    if (isOverIcon && !currentCursorOverride) {
+      cachedCanvasElement.style.cursor = "pointer";
+      currentCursorOverride = true;
+    } else if (!isOverIcon && currentCursorOverride) {
+      cachedCanvasElement.style.cursor = "";
+      currentCursorOverride = false;
+    }
+  };
+
+  // Attach the mousemove handler to the document (canvas may not exist yet)
+  // We use document-level listener and check if event target is the canvas
+  const handleDocMouseMove = (event: MouseEvent) => {
+    if (cachedCanvasElement && (event.target === cachedCanvasElement || cachedCanvasElement.contains(event.target as Node))) {
+      handleCanvasMouseMove(event);
+    } else if (currentCursorOverride && cachedCanvasElement) {
+      cachedCanvasElement.style.cursor = "";
+      currentCursorOverride = false;
+    }
+  };
+  document.addEventListener("mousemove", handleDocMouseMove);
+  cleanupFunctions.push(() => {
+    document.removeEventListener("mousemove", handleDocMouseMove);
+    if (cachedCanvasElement && currentCursorOverride) {
+      cachedCanvasElement.style.cursor = "";
+    }
+  });
 
   // Subscribe to events
   cleanupFunctions.push(
@@ -599,6 +790,13 @@ export function unregisterPivotExtension(): void {
 
   // Reset handler state
   resetSelectionHandlerState();
+
+  // Clear transition state
+  transitionBounds.clear();
+  if (transitionCleanupTimer) {
+    clearTimeout(transitionCleanupTimer);
+    transitionCleanupTimer = null;
+  }
 
   // Clear overlay regions
   removeGridRegionsByType("pivot");

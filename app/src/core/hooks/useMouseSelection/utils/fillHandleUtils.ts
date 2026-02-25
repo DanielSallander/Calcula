@@ -6,6 +6,7 @@
 import type { GridConfig, Viewport, Selection, DimensionOverrides } from "../../../types";
 import { calculateVisibleRange, getColumnWidth, getRowHeight, getColumnX, getRowY } from "../../../lib/gridRenderer";
 import { ensureDimensions } from "../../../lib/gridRenderer/styles/styleUtils";
+import { getGridRegions } from "../../../../api/gridOverlays";
 
 interface FillHandleCursorDependencies {
   config: GridConfig;
@@ -29,6 +30,24 @@ export function createFillHandleCursorChecker(
   return (mouseX: number, mouseY: number): boolean => {
     if (!selection) {
       return false;
+    }
+
+    // Block fill handle cursor when selection is inside a grid region (e.g., pivot table)
+    const regions = getGridRegions();
+    if (regions.length > 0) {
+      const selMinRow = Math.min(selection.startRow, selection.endRow);
+      const selMaxRow = Math.max(selection.startRow, selection.endRow);
+      const selMinCol = Math.min(selection.startCol, selection.endCol);
+      const selMaxCol = Math.max(selection.startCol, selection.endCol);
+      for (const region of regions) {
+        if (region.floating) continue;
+        if (
+          selMinRow >= region.startRow && selMaxRow <= region.endRow &&
+          selMinCol >= region.startCol && selMaxCol <= region.endCol
+        ) {
+          return false;
+        }
+      }
     }
 
     const rowHeaderWidth = config.rowHeaderWidth || 50;
