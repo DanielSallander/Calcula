@@ -1,8 +1,9 @@
 //! FILENAME: app/src-tauri/src/pivot/operations.rs
+use crate::commands::styles::parse_number_format;
 use crate::pivot::utils::col_index_to_letter;
 use crate::{log_debug, log_info, AppState, ProtectedRegion};
 use pivot_engine::{calculate_pivot, PivotCache, PivotDefinition, PivotId, PivotView};
-use engine::{Cell, CellValue};
+use engine::{Cell, CellStyle, CellValue, StyleRegistry};
 
 // ============================================================================
 // CONSTANTS
@@ -153,14 +154,17 @@ pub(crate) fn get_pivot_region(state: &AppState, pivot_id: PivotId) -> Option<Pr
     regions.iter().find(|r| r.region_type == "pivot" && r.owner_id == pivot_id as u64).cloned()
 }
 
-/// Writes pivot view cells to the destination grid
+/// Writes pivot view cells to the destination grid.
+/// Uses the StyleRegistry to create proper cell styles when pivot cells
+/// have a number_format, so that number formatting displays correctly.
 pub(crate) fn write_pivot_to_grid(
     grid: &mut engine::Grid,
     view: &PivotView,
     destination: (u32, u32),
+    styles: &mut StyleRegistry,
 ) {
     let (dest_row, dest_col) = destination;
-    
+
     log_debug!(
         "PIVOT",
         "write_pivot_to_grid: dest=({},{}) view_size={}x{}",
@@ -169,49 +173,54 @@ pub(crate) fn write_pivot_to_grid(
         view.row_count,
         view.col_count
     );
-    
+
     // If view is empty, nothing to write
     if view.row_count == 0 || view.col_count == 0 {
         log_debug!("PIVOT", "Empty view, nothing to write to grid");
         return;
     }
-    
+
     // Iterate through all rows (not just visible, since we need grid positions to be correct)
     for (row_idx, row_descriptor) in view.rows.iter().enumerate() {
         if !row_descriptor.visible {
             continue;
         }
-        
+
         // Get the cells for this row
         if row_idx >= view.cells.len() {
             continue;
         }
         let row_cells = &view.cells[row_idx];
-        
+
         for (col_idx, pivot_cell) in row_cells.iter().enumerate() {
             let grid_row = dest_row + row_idx as u32;
             let grid_col = dest_col + col_idx as u32;
-            
-            // Use formatted_value for display if available, otherwise use the raw value
-            let display_text = if !pivot_cell.formatted_value.is_empty() {
-                pivot_cell.formatted_value.clone()
-            } else {
-                match &pivot_cell.value {
-                    pivot_engine::PivotCellValue::Empty => String::new(),
-                    pivot_engine::PivotCellValue::Number(n) => n.to_string(),
-                    pivot_engine::PivotCellValue::Text(s) => s.clone(),
-                    pivot_engine::PivotCellValue::Boolean(b) => if *b { "TRUE".to_string() } else { "FALSE".to_string() },
-                    pivot_engine::PivotCellValue::Error(e) => format!("#{}", e),
+
+            // Create the cell with the correct value type so number formatting
+            // and status-bar aggregations (sum, average) work properly.
+            let mut cell = match &pivot_cell.value {
+                pivot_engine::PivotCellValue::Empty => Cell::new(),
+                pivot_engine::PivotCellValue::Number(n) => Cell::new_number(*n),
+                pivot_engine::PivotCellValue::Text(s) => {
+                    if s.is_empty() {
+                        Cell::new()
+                    } else {
+                        Cell::new_text(s.clone())
+                    }
                 }
+                pivot_engine::PivotCellValue::Boolean(b) => Cell::new_boolean(*b),
+                pivot_engine::PivotCellValue::Error(e) => Cell::new_text(format!("#{}", e)),
             };
-            
-            // Create the cell - for now we use text cells with the formatted value
-            let cell = if display_text.is_empty() {
-                Cell::new()
-            } else {
-                Cell::new_text(display_text)
-            };
-            
+
+            // Apply number format from the pivot definition via the style registry
+            if let Some(ref fmt) = pivot_cell.number_format {
+                if !fmt.is_empty() {
+                    let nf = parse_number_format(fmt);
+                    let style = CellStyle::new().with_number_format(nf);
+                    cell.style_index = styles.get_or_create(style);
+                }
+            }
+
             grid.set_cell(grid_row, grid_col, cell);
         }
     }
@@ -290,7 +299,8 @@ pub(crate) fn update_pivot_in_grid(
 ) {
     // Get old region before writing new data
     let old_region = get_pivot_region(state, pivot_id);
-    
+
+    let mut styles = state.style_registry.lock().unwrap();
     let mut grids = state.grids.lock().unwrap();
     if let Some(dest_grid) = grids.get_mut(dest_sheet_idx) {
         // Clear old pivot area first if it exists
@@ -305,9 +315,9 @@ pub(crate) fn update_pivot_in_grid(
                 );
             }
         }
-        
+
         // Write new pivot data
-        write_pivot_to_grid(dest_grid, view, destination);
+        write_pivot_to_grid(dest_grid, view, destination, &mut styles);
         
         // Sync to state.grid if this is the active sheet
         let active_sheet = *state.active_sheet.lock().unwrap();

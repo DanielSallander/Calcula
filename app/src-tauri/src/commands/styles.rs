@@ -295,7 +295,7 @@ pub fn preview_number_format(format_string: String, sample_value: f64) -> Previe
 /// Parse a number format string into a NumberFormat enum.
 /// Recognizes known preset names (e.g., "general", "currency_usd") and treats
 /// anything else containing format characters as a custom format string.
-fn parse_number_format(format: &str) -> NumberFormat {
+pub(crate) fn parse_number_format(format: &str) -> NumberFormat {
     match format.to_lowercase().as_str() {
         "general" => NumberFormat::General,
         "number" => NumberFormat::Number {
@@ -339,8 +339,12 @@ fn parse_number_format(format: &str) -> NumberFormat {
             format: "hh:mm:ss AM/PM".to_string(),
         },
         _ => {
-            // Check if this looks like a custom format string
-            if is_custom_format_string(format) {
+            // Try to recognize common Excel-style format codes before falling
+            // through to the custom format engine (which has known issues with
+            // large numbers).
+            if let Some(recognized) = try_parse_format_code(format) {
+                recognized
+            } else if is_custom_format_string(format) {
                 NumberFormat::Custom {
                     format: format.to_string(),
                 }
@@ -349,6 +353,92 @@ fn parse_number_format(format: &str) -> NumberFormat {
             }
         }
     }
+}
+
+/// Attempts to parse a format code string (e.g., "0.00", "#,##0", "$#,##0.00")
+/// into a typed NumberFormat variant. Returns None if the format is not
+/// a recognized pattern, in which case the caller should fall back to Custom.
+fn try_parse_format_code(format: &str) -> Option<NumberFormat> {
+    let trimmed = format.trim();
+
+    // Percentage formats: "0%", "0.0%", "0.00%", etc.
+    if trimmed.ends_with('%') {
+        let before_pct = &trimmed[..trimmed.len() - 1];
+        if let Some(decimals) = count_decimal_places(before_pct) {
+            return Some(NumberFormat::Percentage {
+                decimal_places: decimals,
+            });
+        }
+    }
+
+    // Currency formats with $ prefix: "$#,##0", "$#,##0.00", etc.
+    if trimmed.starts_with('$') {
+        let after_symbol = &trimmed[1..];
+        if let Some((decimals, _has_sep)) = parse_number_pattern(after_symbol) {
+            return Some(NumberFormat::Currency {
+                decimal_places: decimals,
+                symbol: "$".to_string(),
+                symbol_position: CurrencyPosition::Before,
+            });
+        }
+    }
+
+    // Currency formats with [$SYMBOL] prefix: "[$EUR] #,##0.00", "[$SEK] #,##0.00"
+    if trimmed.starts_with("[$") {
+        if let Some(bracket_end) = trimmed.find(']') {
+            let symbol = trimmed[2..bracket_end].trim().to_string();
+            let rest = trimmed[bracket_end + 1..].trim();
+            if let Some((decimals, _has_sep)) = parse_number_pattern(rest) {
+                return Some(NumberFormat::Currency {
+                    decimal_places: decimals,
+                    symbol: format!("{} ", symbol),
+                    symbol_position: CurrencyPosition::Before,
+                });
+            }
+        }
+    }
+
+    // Plain number formats: "0", "0.00", "#,##0", "#,##0.00", etc.
+    if let Some((decimals, has_separator)) = parse_number_pattern(trimmed) {
+        return Some(NumberFormat::Number {
+            decimal_places: decimals,
+            use_thousands_separator: has_separator,
+        });
+    }
+
+    None
+}
+
+/// Parses a number pattern like "0", "0.00", "#,##0", "#,##0.00" and returns
+/// (decimal_places, has_thousands_separator). Returns None if the pattern
+/// doesn't match a pure number format.
+fn parse_number_pattern(s: &str) -> Option<(u8, bool)> {
+    // Must only contain: 0, #, comma, period
+    if s.is_empty() || !s.chars().all(|c| c == '0' || c == '#' || c == ',' || c == '.') {
+        return None;
+    }
+
+    let has_separator = s.contains(',');
+    let decimals = if let Some(dot_pos) = s.find('.') {
+        let frac = &s[dot_pos + 1..];
+        // All fraction chars should be '0' (fixed-place digits)
+        if frac.chars().all(|c| c == '0') {
+            frac.len() as u8
+        } else {
+            return None;
+        }
+    } else {
+        0
+    };
+
+    Some((decimals, has_separator))
+}
+
+/// Counts the number of decimal places in a simple numeric format like "0",
+/// "0.0", "0.00". Returns None if the format is not a simple numeric pattern.
+fn count_decimal_places(s: &str) -> Option<u8> {
+    // For percentage patterns, just delegate to parse_number_pattern
+    parse_number_pattern(s).map(|(decimals, _)| decimals)
 }
 
 /// Check if a string looks like a custom number format string.

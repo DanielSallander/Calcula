@@ -1,5 +1,7 @@
 //! FILENAME: app/src-tauri/src/pivot/utils.rs
+use crate::commands::styles::parse_number_format;
 use crate::pivot::types::*;
+use engine::format_number;
 use pivot_engine::{
     AggregationType, CacheValue, DateGroupLevel, FieldGrouping, FilterCondition, ManualGroup,
     PivotCache, PivotDefinition, PivotField, PivotFilter, PivotLayout, PivotView, ReportLayout,
@@ -380,7 +382,12 @@ pub(crate) fn view_to_response(
                             PivotCellValueData::Error(e.clone())
                         }
                     },
-                    formatted_value: cell.formatted_value.clone(),
+                    formatted_value: match (&cell.value, &cell.number_format) {
+                        (pivot_engine::PivotCellValue::Number(n), Some(fmt)) if !fmt.is_empty() => {
+                            format_number(*n, &parse_number_format(fmt))
+                        }
+                        _ => cell.formatted_value.clone(),
+                    },
                     indent_level: cell.indent_level,
                     is_bold: cell.is_bold,
                     is_expandable: cell.is_expandable,

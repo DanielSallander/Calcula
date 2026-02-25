@@ -92,8 +92,9 @@ pub fn create_pivot_table(
 
     // Write pivot output to destination grid (empty for now, but reserves the space)
     {
+        let mut styles = state.style_registry.lock().unwrap();
         let mut grids = state.grids.lock().unwrap();
-        
+
         // Verify destination sheet exists
         if dest_sheet_idx >= grids.len() {
             return Err(format!(
@@ -102,9 +103,9 @@ pub fn create_pivot_table(
                 grids.len()
             ));
         }
-        
+
         if let Some(dest_grid) = grids.get_mut(dest_sheet_idx) {
-            write_pivot_to_grid(dest_grid, &view, destination);
+            write_pivot_to_grid(dest_grid, &view, destination, &mut styles);
             log_info!(
                 "PIVOT",
                 "wrote pivot output to grids[{}] at ({},{}) size {}x{}",
