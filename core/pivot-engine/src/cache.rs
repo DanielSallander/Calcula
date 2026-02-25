@@ -866,20 +866,38 @@ impl PivotCache {
                 updates.push((full_key.clone(), acc_idx, numeric_value));
             }
             
-            // Store updates for subtotals at each level.
-            // Skip the last level because subtotal_at_level(len-1) produces
-            // the same key as the full key, which would double-count records.
-            for level in 0..all_group_fields.len().saturating_sub(1) {
-                let subtotal_key = full_key.subtotal_at_level(level);
-                for (acc_idx, &numeric_value) in value_data.iter().enumerate() {
-                    updates.push((subtotal_key.clone(), acc_idx, numeric_value));
+            // Generate subtotal keys for all (row_level, col_level) combinations.
+            // row_level = number of specific row field values kept (0 = all rows totaled)
+            // col_level = number of specific col field values kept (0 = all cols totaled)
+            // This ensures we have aggregates for every intersection type:
+            //   - Row subtotals with specific columns (e.g., Grand Total row + "Female" col)
+            //   - Column subtotals with specific rows
+            //   - Grand total (row_level=0, col_level=0)
+            let row_count = row_field_indices.len();
+            let col_count = col_field_indices.len();
+
+            for row_level in 0..=row_count {
+                for col_level in 0..=col_count {
+                    // Skip the full key (already handled above)
+                    if row_level == row_count && col_level == col_count {
+                        continue;
+                    }
+
+                    let mut key_values = group_values.clone();
+                    // Zero out row fields beyond row_level
+                    for i in row_level..row_count {
+                        key_values[i] = VALUE_ID_EMPTY;
+                    }
+                    // Zero out col fields beyond col_level
+                    for i in col_level..col_count {
+                        key_values[row_count + i] = VALUE_ID_EMPTY;
+                    }
+
+                    let subtotal_key = GroupKey::new(key_values);
+                    for (acc_idx, &numeric_value) in value_data.iter().enumerate() {
+                        updates.push((subtotal_key.clone(), acc_idx, numeric_value));
+                    }
                 }
-            }
-            
-            // Store updates for grand total
-            let grand_total_key = GroupKey::grand_total(all_group_fields.len());
-            for (acc_idx, &numeric_value) in value_data.iter().enumerate() {
-                updates.push((grand_total_key.clone(), acc_idx, numeric_value));
             }
         }
         

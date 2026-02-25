@@ -286,6 +286,7 @@ export const styles = {
     text-overflow: ellipsis;
     white-space: nowrap;
     min-width: 0;
+    color: #1a1a1a;
   `,
 
   zoneFieldRemove: css`
