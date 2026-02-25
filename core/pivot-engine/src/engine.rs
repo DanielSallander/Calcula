@@ -1388,7 +1388,16 @@ impl<'a> PivotCalculator<'a> {
                 // Show column field values at appropriate level
                 for item in &self.col_items {
                     let cell = if item.depth == header_row {
-                        PivotViewCell::column_header(item.label.clone())
+                        let mut ch = PivotViewCell::column_header(item.label.clone());
+                        // Set group_path so context menu handlers can identify the field
+                        let mut gp = Vec::new();
+                        for (i, &val) in item.group_values.iter().enumerate() {
+                            if val != VALUE_ID_EMPTY && i < item.field_indices.len() {
+                                gp.push((item.field_indices[i], val));
+                            }
+                        }
+                        ch.group_path = gp;
+                        ch
                     } else if item.depth > header_row {
                         // Parent level - might need spanning
                         PivotViewCell::corner()
@@ -1440,7 +1449,16 @@ impl<'a> PivotCalculator<'a> {
                     );
                     cell.is_expandable = item.has_children;
                     cell.is_collapsed = item.is_collapsed;
-                    
+
+                    // Set group_path so context menu handlers can identify the field
+                    let mut gp = Vec::new();
+                    for (i, &val) in item.group_values.iter().enumerate() {
+                        if val != VALUE_ID_EMPTY && i < item.field_indices.len() {
+                            gp.push((item.field_indices[i], val));
+                        }
+                    }
+                    cell.group_path = gp;
+
                     if item.is_subtotal {
                         cell = cell.as_total();
                         cell.cell_type = PivotCellType::RowSubtotal;
@@ -1448,10 +1466,18 @@ impl<'a> PivotCalculator<'a> {
                         cell = cell.as_total();
                         cell.cell_type = PivotCellType::GrandTotalRow;
                     }
-                    
+
                     cells.push(cell);
                 }
                 ReportLayout::Outline | ReportLayout::Tabular => {
+                    // Pre-build group_path for this row item
+                    let mut row_gp = Vec::new();
+                    for (i, &val) in item.group_values.iter().enumerate() {
+                        if val != VALUE_ID_EMPTY && i < item.field_indices.len() {
+                            row_gp.push((item.field_indices[i], val));
+                        }
+                    }
+
                     for col in 0..row_label_cols {
                         if col == item.depth {
                             let mut cell = PivotViewCell::row_header(
@@ -1460,18 +1486,21 @@ impl<'a> PivotCalculator<'a> {
                             );
                             cell.is_expandable = item.has_children;
                             cell.is_collapsed = item.is_collapsed;
-                            
+                            cell.group_path = row_gp.clone();
+
                             if item.is_subtotal || item.is_grand_total {
                                 cell = cell.as_total();
                             }
-                            
+
                             cells.push(cell);
-                        } else if col < item.depth 
+                        } else if col < item.depth
                             && repeat_row_labels
                             && matches!(report_layout, ReportLayout::Tabular) {
                             // Repeat parent labels in tabular layout
                             let parent_label = self.get_parent_label_at_depth(&row_items, row_idx, col);
-                            cells.push(PivotViewCell::row_header(parent_label, 0));
+                            let mut cell = PivotViewCell::row_header(parent_label, 0);
+                            cell.group_path = row_gp.clone();
+                            cells.push(cell);
                         } else {
                             cells.push(PivotViewCell::blank());
                         }

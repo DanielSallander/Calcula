@@ -172,34 +172,42 @@ export function registerPivotContextMenuItems(): () => void {
           id: "pivot:sort:aToZ",
           label: "Sort A to Z",
           onClick: async (ctx) => {
-            const cellData = await getClickedCellData(ctx);
-            if (!cellData) return;
-            const { pivotInfo, cell } = cellData;
-            const fieldIndex = cell.groupPath?.[cell.groupPath.length - 1]?.[0];
-            if (fieldIndex === undefined) return;
-            await sortPivotField({
-              pivotId: pivotInfo.pivotId,
-              fieldIndex,
-              sortBy: "ascending",
-            });
-            window.dispatchEvent(new Event("pivot:refresh"));
+            try {
+              const cellData = await getClickedCellData(ctx);
+              if (!cellData) return;
+              const { pivotInfo, cell } = cellData;
+              const fieldIndex = cell.groupPath?.[cell.groupPath.length - 1]?.[0];
+              if (fieldIndex === undefined) return;
+              await sortPivotField({
+                pivotId: pivotInfo.pivotId,
+                fieldIndex,
+                sortBy: "ascending",
+              });
+              window.dispatchEvent(new Event("pivot:refresh"));
+            } catch (e) {
+              console.error("[PivotMenu] Failed to sort A to Z:", e);
+            }
           },
         },
         {
           id: "pivot:sort:zToA",
           label: "Sort Z to A",
           onClick: async (ctx) => {
-            const cellData = await getClickedCellData(ctx);
-            if (!cellData) return;
-            const { pivotInfo, cell } = cellData;
-            const fieldIndex = cell.groupPath?.[cell.groupPath.length - 1]?.[0];
-            if (fieldIndex === undefined) return;
-            await sortPivotField({
-              pivotId: pivotInfo.pivotId,
-              fieldIndex,
-              sortBy: "descending",
-            });
-            window.dispatchEvent(new Event("pivot:refresh"));
+            try {
+              const cellData = await getClickedCellData(ctx);
+              if (!cellData) return;
+              const { pivotInfo, cell } = cellData;
+              const fieldIndex = cell.groupPath?.[cell.groupPath.length - 1]?.[0];
+              if (fieldIndex === undefined) return;
+              await sortPivotField({
+                pivotId: pivotInfo.pivotId,
+                fieldIndex,
+                sortBy: "descending",
+              });
+              window.dispatchEvent(new Event("pivot:refresh"));
+            } catch (e) {
+              console.error("[PivotMenu] Failed to sort Z to A:", e);
+            }
           },
         },
         {
@@ -379,66 +387,78 @@ export function registerPivotContextMenuItems(): () => void {
           id: "pivot:ec:expand",
           label: "Expand",
           onClick: async (ctx) => {
-            const cellData = await getClickedCellData(ctx);
-            if (!cellData) return;
-            const { pivotInfo, cell } = cellData;
-            if (cell.cellType !== "RowHeader" && cell.cellType !== "ColumnHeader") return;
-            if (!cell.isExpandable || !cell.isCollapsed) return;
+            try {
+              const cellData = await getClickedCellData(ctx);
+              if (!cellData) return;
+              const { pivotInfo, cell } = cellData;
+              if (cell.cellType !== "RowHeader" && cell.cellType !== "ColumnHeader") return;
+              if (!cell.isExpandable || !cell.isCollapsed) return;
 
-            const fieldIndex = cell.groupPath?.[cell.groupPath.length - 1]?.[0];
-            if (fieldIndex === undefined) return;
+              const fieldIndex = cell.groupPath?.[cell.groupPath.length - 1]?.[0];
+              if (fieldIndex === undefined) return;
 
-            await setPivotItemExpanded({
-              pivotId: pivotInfo.pivotId,
-              fieldIndex,
-              itemName: cell.formattedValue || "",
-              isExpanded: true,
-            });
-            window.dispatchEvent(new Event("pivot:refresh"));
+              await setPivotItemExpanded({
+                pivotId: pivotInfo.pivotId,
+                fieldIndex,
+                itemName: cell.formattedValue || "",
+                isExpanded: true,
+              });
+              window.dispatchEvent(new Event("pivot:refresh"));
+            } catch (e) {
+              console.error("[PivotMenu] Failed to expand item:", e);
+            }
           },
         },
         {
           id: "pivot:ec:collapse",
           label: "Collapse",
           onClick: async (ctx) => {
-            const cellData = await getClickedCellData(ctx);
-            if (!cellData) return;
-            const { pivotInfo, cell } = cellData;
-            if (cell.cellType !== "RowHeader" && cell.cellType !== "ColumnHeader") return;
-            if (!cell.isExpandable || cell.isCollapsed) return;
+            try {
+              const cellData = await getClickedCellData(ctx);
+              if (!cellData) return;
+              const { pivotInfo, cell } = cellData;
+              if (cell.cellType !== "RowHeader" && cell.cellType !== "ColumnHeader") return;
+              if (!cell.isExpandable || cell.isCollapsed) return;
 
-            const fieldIndex = cell.groupPath?.[cell.groupPath.length - 1]?.[0];
-            if (fieldIndex === undefined) return;
+              const fieldIndex = cell.groupPath?.[cell.groupPath.length - 1]?.[0];
+              if (fieldIndex === undefined) return;
 
-            await setPivotItemExpanded({
-              pivotId: pivotInfo.pivotId,
-              fieldIndex,
-              itemName: cell.formattedValue || "",
-              isExpanded: false,
-            });
-            window.dispatchEvent(new Event("pivot:refresh"));
+              await setPivotItemExpanded({
+                pivotId: pivotInfo.pivotId,
+                fieldIndex,
+                itemName: cell.formattedValue || "",
+                isExpanded: false,
+              });
+              window.dispatchEvent(new Event("pivot:refresh"));
+            } catch (e) {
+              console.error("[PivotMenu] Failed to collapse item:", e);
+            }
           },
         },
         {
           id: "pivot:ec:expandField",
           label: "Expand Entire Field",
           onClick: async (ctx) => {
-            const cellData = await getClickedCellData(ctx);
-            if (!cellData) return;
-            const { pivotInfo, cell } = cellData;
-            if (cell.cellType !== "RowHeader" && cell.cellType !== "ColumnHeader") return;
+            try {
+              const cellData = await getClickedCellData(ctx);
+              if (!cellData) return;
+              const { pivotInfo, cell } = cellData;
+              if (cell.cellType !== "RowHeader" && cell.cellType !== "ColumnHeader") return;
 
-            const isRow = cell.cellType === "RowHeader";
-            const fieldIndex = cell.groupPath?.[cell.groupPath.length - 1]?.[0];
-            if (fieldIndex === undefined) return;
+              const isRow = cell.cellType === "RowHeader";
+              const fieldIndex = cell.groupPath?.[cell.groupPath.length - 1]?.[0];
+              if (fieldIndex === undefined) return;
 
-            await expandCollapseLevel({
-              pivotId: pivotInfo.pivotId,
-              isRow,
-              fieldIndex,
-              expand: true,
-            });
-            window.dispatchEvent(new Event("pivot:refresh"));
+              await expandCollapseLevel({
+                pivotId: pivotInfo.pivotId,
+                isRow,
+                fieldIndex,
+                expand: true,
+              });
+              window.dispatchEvent(new Event("pivot:refresh"));
+            } catch (e) {
+              console.error("[PivotMenu] Failed to expand entire field:", e);
+            }
           },
         },
         {
@@ -446,22 +466,26 @@ export function registerPivotContextMenuItems(): () => void {
           label: "Collapse Entire Field",
           separatorAfter: true,
           onClick: async (ctx) => {
-            const cellData = await getClickedCellData(ctx);
-            if (!cellData) return;
-            const { pivotInfo, cell } = cellData;
-            if (cell.cellType !== "RowHeader" && cell.cellType !== "ColumnHeader") return;
+            try {
+              const cellData = await getClickedCellData(ctx);
+              if (!cellData) return;
+              const { pivotInfo, cell } = cellData;
+              if (cell.cellType !== "RowHeader" && cell.cellType !== "ColumnHeader") return;
 
-            const isRow = cell.cellType === "RowHeader";
-            const fieldIndex = cell.groupPath?.[cell.groupPath.length - 1]?.[0];
-            if (fieldIndex === undefined) return;
+              const isRow = cell.cellType === "RowHeader";
+              const fieldIndex = cell.groupPath?.[cell.groupPath.length - 1]?.[0];
+              if (fieldIndex === undefined) return;
 
-            await expandCollapseLevel({
-              pivotId: pivotInfo.pivotId,
-              isRow,
-              fieldIndex,
-              expand: false,
-            });
-            window.dispatchEvent(new Event("pivot:refresh"));
+              await expandCollapseLevel({
+                pivotId: pivotInfo.pivotId,
+                isRow,
+                fieldIndex,
+                expand: false,
+              });
+              window.dispatchEvent(new Event("pivot:refresh"));
+            } catch (e) {
+              console.error("[PivotMenu] Failed to collapse entire field:", e);
+            }
           },
         },
         {

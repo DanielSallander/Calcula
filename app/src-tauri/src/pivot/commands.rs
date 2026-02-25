@@ -1966,15 +1966,17 @@ pub fn expand_collapse_level(
         &mut definition.column_fields
     };
 
-    if request.field_index >= fields.len() {
-        return Err(format!(
-            "Field index {} out of range (max {})",
-            request.field_index,
-            fields.len().saturating_sub(1)
-        ));
-    }
-
-    let field = &mut fields[request.field_index];
+    // Match by source_index (the value from groupPath), not positional index
+    let field = fields
+        .iter_mut()
+        .find(|f| f.source_index == request.field_index)
+        .ok_or_else(|| {
+            format!(
+                "Field with source_index {} not found in {} fields",
+                request.field_index,
+                if request.is_row { "row" } else { "column" }
+            )
+        })?;
     field.collapsed = !request.expand;
     field.collapsed_items.clear();
 
