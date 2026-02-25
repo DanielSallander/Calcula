@@ -80,8 +80,8 @@ export interface GridMenuContext {
 export interface GridContextMenuItem {
   /** Unique identifier */
   id: string;
-  /** Display label */
-  label: string;
+  /** Display label (static string or function for dynamic labels) */
+  label: string | ((context: GridMenuContext) => string);
   /** Optional keyboard shortcut hint (display only) */
   shortcut?: string;
   /** Optional icon */
@@ -98,6 +98,8 @@ export interface GridContextMenuItem {
   separatorAfter?: boolean;
   /** Click handler */
   onClick: (context: GridMenuContext) => void | Promise<void>;
+  /** Sub-menu items. When present, this item acts as a sub-menu trigger. */
+  children?: GridContextMenuItem[];
 }
 
 /** Available grid command names */

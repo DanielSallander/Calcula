@@ -39,6 +39,8 @@ import {
   PivotPaneDefinition,
   PivotDialogDefinition,
   PivotGroupDialogDefinition,
+  PivotFieldSettingsDialogDefinition,
+  PivotOptionsDialogDefinition,
   PivotFilterOverlayDefinition,
   PIVOT_PANE_ID,
   PIVOT_DIALOG_ID,
@@ -73,6 +75,14 @@ const pivotViewCache = new Map<number, PivotViewResponse>();
  */
 export function cachePivotView(pivotId: number, view: PivotViewResponse): void {
   pivotViewCache.set(pivotId, view);
+}
+
+/**
+ * Get a cached PivotViewResponse by pivotId (synchronous).
+ * Used by context menu helpers for synchronous cell type checks.
+ */
+export function getCachedPivotView(pivotId: number): PivotViewResponse | undefined {
+  return pivotViewCache.get(pivotId);
 }
 
 // ============================================================================
@@ -461,6 +471,8 @@ export function registerPivotExtension(): void {
   // Register dialogs
   DialogExtensions.registerDialog(PivotDialogDefinition);
   DialogExtensions.registerDialog(PivotGroupDialogDefinition);
+  DialogExtensions.registerDialog(PivotFieldSettingsDialogDefinition);
+  DialogExtensions.registerDialog(PivotOptionsDialogDefinition);
 
   // Register context menu items for right-click in pivot regions
   cleanupFunctions.push(registerPivotContextMenuItems());

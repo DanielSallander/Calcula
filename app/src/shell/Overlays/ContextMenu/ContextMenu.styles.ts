@@ -31,6 +31,7 @@ export const MenuItem = styled.button<{ disabled?: boolean }>`
   text-align: left;
   gap: 8px;
   outline: none;
+  position: relative;
 
   ${(props) =>
     props.disabled
@@ -70,8 +71,38 @@ export const Shortcut = styled.span`
   padding-left: 16px;
 `;
 
+export const SubMenuIndicator = styled.span`
+  color: ${v("--text-secondary")};
+  font-size: 10px;
+  margin-left: auto;
+  padding-left: 12px;
+  line-height: 1;
+`;
+
 export const Separator = styled.div`
   height: 1px;
   background-color: ${v("--ctx-menu-separator")};
   margin: 4px 0;
+`;
+
+export const SearchInput = styled.input`
+  display: block;
+  width: calc(100% - 16px);
+  margin: 4px 8px 4px 8px;
+  padding: 5px 8px;
+  border: 1px solid ${v("--ctx-menu-border")};
+  border-radius: 3px;
+  font-size: 12px;
+  color: ${v("--text-primary")};
+  background-color: ${v("--ctx-menu-bg")};
+  outline: none;
+  box-sizing: border-box;
+
+  &:focus {
+    border-color: #0078d4;
+  }
+
+  &::placeholder {
+    color: ${v("--text-disabled")};
+  }
 `;

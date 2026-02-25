@@ -17,8 +17,8 @@ import type { GridMenuContext } from "../../core/lib/gridCommands";
 export interface GridContextMenuItem {
   /** Unique identifier */
   id: string;
-  /** Display label */
-  label: string;
+  /** Display label (static string or function for dynamic labels) */
+  label: string | ((context: GridMenuContext) => string);
   /** Optional keyboard shortcut hint (display only) */
   shortcut?: string;
   /** Optional icon */
@@ -35,6 +35,8 @@ export interface GridContextMenuItem {
   separatorAfter?: boolean;
   /** Click handler */
   onClick: (context: GridMenuContext) => void | Promise<void>;
+  /** Sub-menu items. When present, this item acts as a sub-menu trigger. */
+  children?: GridContextMenuItem[];
 }
 
 /** Groups for organizing menu items */
@@ -112,6 +114,26 @@ class GridExtensionRegistry {
   }
 
   /**
+   * Resolve a single item: resolve label, disabled, and recursively process children.
+   */
+  private resolveItem(item: GridContextMenuItem, context: GridMenuContext): GridContextMenuItem {
+    return {
+      ...item,
+      label: typeof item.label === "function" ? item.label(context) : item.label,
+      disabled: typeof item.disabled === "function" ? item.disabled(context) : item.disabled,
+      children: item.children
+        ? item.children
+            .filter((child) => {
+              if (child.visible === undefined) return true;
+              if (typeof child.visible === "function") return child.visible(context);
+              return child.visible;
+            })
+            .map((child) => this.resolveItem(child, context))
+        : undefined,
+    };
+  }
+
+  /**
    * Get context menu items filtered and sorted for display.
    * @param context The current grid context
    */
@@ -123,14 +145,8 @@ class GridExtensionRegistry {
         if (typeof item.visible === "function") return item.visible(context);
         return item.visible;
       })
-      // Resolve disabled state
-      .map((item) => ({
-        ...item,
-        disabled:
-          typeof item.disabled === "function"
-            ? item.disabled(context)
-            : item.disabled,
-      }));
+      // Resolve labels, disabled state, and children
+      .map((item) => this.resolveItem(item, context));
 
     // Sort by group then by order within group
     return items.sort((a, b) => {

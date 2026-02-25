@@ -13,6 +13,8 @@ import { PivotEditorView } from "./components/PivotEditorView";
 import { PivotDesignTab } from "./components/PivotDesignTab";
 import { CreatePivotDialog } from "./components/CreatePivotDialog";
 import { GroupDialog } from "./components/GroupDialog";
+import { FieldSettingsDialog } from "./components/FieldSettingsDialog";
+import { PivotOptionsDialog } from "./components/PivotOptionsDialog";
 import { FilterDropdown } from "./components/FilterDropdown";
 import type { DialogProps, OverlayProps } from "../../src/api";
 import React from "react";
@@ -104,6 +106,46 @@ function GroupDialogWrapper(props: DialogProps): React.ReactElement {
 export const PivotGroupDialogDefinition: DialogDefinition = {
   id: PIVOT_GROUP_DIALOG_ID,
   component: GroupDialogWrapper,
+  priority: 100,
+};
+
+// ============================================================================
+// Field Settings Dialog Registration
+// ============================================================================
+
+export const PIVOT_FIELD_SETTINGS_DIALOG_ID = "pivot:fieldSettingsDialog";
+
+function FieldSettingsDialogWrapper(props: DialogProps): React.ReactElement {
+  return React.createElement(FieldSettingsDialog, {
+    isOpen: props.isOpen,
+    onClose: props.onClose,
+    data: props.data,
+  });
+}
+
+export const PivotFieldSettingsDialogDefinition: DialogDefinition = {
+  id: PIVOT_FIELD_SETTINGS_DIALOG_ID,
+  component: FieldSettingsDialogWrapper,
+  priority: 100,
+};
+
+// ============================================================================
+// PivotTable Options Dialog Registration
+// ============================================================================
+
+export const PIVOT_OPTIONS_DIALOG_ID = "pivot:pivotOptionsDialog";
+
+function PivotOptionsDialogWrapper(props: DialogProps): React.ReactElement {
+  return React.createElement(PivotOptionsDialog, {
+    isOpen: props.isOpen,
+    onClose: props.onClose,
+    data: props.data,
+  });
+}
+
+export const PivotOptionsDialogDefinition: DialogDefinition = {
+  id: PIVOT_OPTIONS_DIALOG_ID,
+  component: PivotOptionsDialogWrapper,
   priority: 100,
 };
 
