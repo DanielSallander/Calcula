@@ -59,15 +59,19 @@ export function RibbonContainer(): React.ReactElement {
       style={{
         backgroundColor: "#f3f3f3",
         borderBottom: "1px solid #d0d0d0",
+        overflow: "hidden",
       }}
     >
-      {/* Tab Headers */}
+      {/* Tab Headers - fixed height to prevent layout shift when contextual tabs appear */}
       <div
         style={{
           display: "flex",
           gap: "4px",
-          padding: "4px 8px 0 8px",
+          padding: "0 8px",
           borderBottom: "1px solid #d0d0d0",
+          height: "30px",
+          alignItems: "flex-end",
+          overflow: "hidden",
         }}
       >
         {tabs.map((tab) => (
