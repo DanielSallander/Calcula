@@ -175,7 +175,8 @@ export const PivotGrid: React.FC<PivotGridProps> = ({
       // Determine field index: col position maps to a row field (for row headers)
       // In compact layout, all fields are in col 0 with indent levels
       // In outline/tabular, each field has its own column
-      const fieldIndex = col;
+      // Use indentLevel when > 0 (compact layout), otherwise fall back to col
+      const fieldIndex = cell.indentLevel || col;
 
       const newExpandedState = !isExpanded;
       onExpandCollapse?.(row, col, newExpandedState);

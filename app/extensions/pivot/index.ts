@@ -515,7 +515,9 @@ export function registerPivotExtension(): void {
           if (!cell) return false;
 
           const itemLabel = cell.formattedValue;
-          const fieldIndex = pivotColIndex; // col position maps to row field index
+          // In compact layout, all row headers share col 0 but have different indent levels.
+          // Use indentLevel to determine the correct field index in row_fields.
+          const fieldIndex = cell.indentLevel || pivotColIndex;
 
           try {
             await togglePivotGroup({
@@ -610,7 +612,7 @@ export function registerPivotExtension(): void {
               await togglePivotGroup({
                 pivotId,
                 isRow: true,
-                fieldIndex: pivotColIndex,
+                fieldIndex: cell.indentLevel || pivotColIndex,
                 value: cell.formattedValue,
               });
               window.dispatchEvent(new CustomEvent("pivot:refresh"));
