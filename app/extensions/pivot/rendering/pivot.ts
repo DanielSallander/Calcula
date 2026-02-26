@@ -611,12 +611,12 @@ export function drawPivotCell(
       ctx.fill();
     }
 
-    // Store interactive bounds for the entire cell (clickable like Excel)
+    // Store interactive bounds for just the dropdown button (not the entire cell)
     result.headerFilterBounds = {
-      x,
-      y,
-      width,
-      height,
+      x: btnX,
+      y: btnY,
+      width: btnSize,
+      height: btnSize,
       zone,
       row: rowIndex,
       col: colIndex,

@@ -108,10 +108,25 @@ interface StoredHeaderFilterBounds {
 /** Map of header filter button bounds keyed by "pivotId-zone", updated every render. */
 const overlayHeaderFilterBounds = new Map<string, StoredHeaderFilterBounds>();
 
+interface StoredFilterDropdownBounds {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  fieldIndex: number;
+  pivotId: number;
+  gridRow: number;
+  gridCol: number;
+}
+
+/** Map of filter dropdown button bounds keyed by "pivotId-fieldIndex", updated every render. */
+const overlayFilterDropdownBounds = new Map<string, StoredFilterDropdownBounds>();
+
 /** Clear all stored icon bounds (called at start of each render cycle). */
 function clearOverlayIconBounds(): void {
   overlayIconBounds.clear();
   overlayHeaderFilterBounds.clear();
+  overlayFilterDropdownBounds.clear();
 }
 
 /** Cache of pivot region bounds keyed by pivotId, for coordinate conversion in click handlers. */
@@ -312,6 +327,22 @@ function drawStyledPivotView(overlayCtx: OverlayRenderContext, pivotView: PivotV
           isExpanded: cellResult.iconBounds.isExpanded,
           isRow: cellResult.iconBounds.isRow,
           pivotId,
+        });
+      }
+
+      // Store filter dropdown button bounds for click handling
+      if (cellResult.filterButtonBounds) {
+        const pivotId = (region.data?.pivotId as number) ?? 0;
+        const fdKey = `${pivotId}-${cellResult.filterButtonBounds.fieldIndex}`;
+        overlayFilterDropdownBounds.set(fdKey, {
+          x: cellResult.filterButtonBounds.x,
+          y: cellResult.filterButtonBounds.y,
+          width: cellResult.filterButtonBounds.width,
+          height: cellResult.filterButtonBounds.height,
+          fieldIndex: cellResult.filterButtonBounds.fieldIndex,
+          pivotId,
+          gridRow: gridRow,
+          gridCol: gridCol,
         });
       }
 
@@ -622,26 +653,42 @@ export function registerPivotExtension(): void {
 
   // Register click interceptor - handle filter dropdown clicks
   cleanupFunctions.push(
-    registerCellClickInterceptor(async (row, col, event) => {
-      try {
-        const pivotInfo = await getPivotAtCell(row, col);
-        if (!pivotInfo?.filterZones) return false;
+    registerCellClickInterceptor(async (_row, _col, event) => {
+      if (!cachedCanvasElement) return false;
 
-        for (const zone of pivotInfo.filterZones) {
-          if (zone.row === row && zone.col === col) {
-            emitAppEvent(PivotEvents.PIVOT_OPEN_FILTER_MENU, {
-              fieldIndex: zone.fieldIndex,
-              fieldName: zone.fieldName,
-              row: zone.row,
-              col: zone.col,
-              anchorX: event.clientX,
-              anchorY: event.clientY,
-            });
-            return true;
+      const rect = cachedCanvasElement.getBoundingClientRect();
+      const canvasX = event.clientX - rect.left;
+      const canvasY = event.clientY - rect.top;
+
+      for (const bounds of overlayFilterDropdownBounds.values()) {
+        if (
+          canvasX >= bounds.x &&
+          canvasX <= bounds.x + bounds.width &&
+          canvasY >= bounds.y &&
+          canvasY <= bounds.y + bounds.height
+        ) {
+          try {
+            const pivotInfo = await getPivotAtCell(bounds.gridRow, bounds.gridCol);
+            if (!pivotInfo?.filterZones) return false;
+
+            for (const zone of pivotInfo.filterZones) {
+              if (zone.fieldIndex === bounds.fieldIndex) {
+                emitAppEvent(PivotEvents.PIVOT_OPEN_FILTER_MENU, {
+                  fieldIndex: zone.fieldIndex,
+                  fieldName: zone.fieldName,
+                  row: zone.row,
+                  col: zone.col,
+                  anchorX: event.clientX,
+                  anchorY: event.clientY,
+                });
+                return true;
+              }
+            }
+          } catch (error) {
+            console.error("[Pivot Extension] Failed to check pivot filter:", error);
           }
+          return false;
         }
-      } catch (error) {
-        console.error("[Pivot Extension] Failed to check pivot filter:", error);
       }
       return false;
     })
@@ -809,6 +856,20 @@ export function registerPivotExtension(): void {
 
     if (!isOverInteractive) {
       for (const bounds of overlayHeaderFilterBounds.values()) {
+        if (
+          canvasX >= bounds.x &&
+          canvasX <= bounds.x + bounds.width &&
+          canvasY >= bounds.y &&
+          canvasY <= bounds.y + bounds.height
+        ) {
+          isOverInteractive = true;
+          break;
+        }
+      }
+    }
+
+    if (!isOverInteractive) {
+      for (const bounds of overlayFilterDropdownBounds.values()) {
         if (
           canvasX >= bounds.x &&
           canvasX <= bounds.x + bounds.width &&

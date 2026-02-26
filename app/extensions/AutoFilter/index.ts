@@ -16,7 +16,7 @@ import {
   indexToCol,
   type OverlayRegistration,
 } from "../../src/api";
-import { renderFilterChevrons, hitTestFilterChevron } from "./rendering/filterChevronRenderer";
+import { renderFilterChevrons, hitTestFilterChevron, isClickOnChevronButton, isMouseOverAnyChevronButton, getFilterChevronCanvas } from "./rendering/filterChevronRenderer";
 import {
   refreshFilterState,
   setCurrentSelection,
@@ -90,6 +90,9 @@ export function registerAutoFilterExtension(): void {
     if (row !== info.startRow) return false;
     if (col < info.startCol || col > info.endCol) return false;
 
+    // Only intercept if the click is on the actual chevron button, not the whole cell
+    if (!isClickOnChevronButton(col, event.clientX, event.clientY)) return false;
+
     const currentOpen = getOpenDropdownCol();
     if (currentOpen === col) {
       // Close the dropdown if clicking the same chevron
@@ -140,7 +143,33 @@ export function registerAutoFilterExtension(): void {
   window.addEventListener("keydown", handleKeyDown, true);
   cleanupFns.push(() => window.removeEventListener("keydown", handleKeyDown, true));
 
-  // 6. Subscribe to events
+  // 6. Mousemove handler for pointer cursor on chevron hover
+  let chevronCursorOverride = false;
+  const handleChevronMouseMove = (event: MouseEvent) => {
+    const canvas = getFilterChevronCanvas();
+    if (!canvas) return;
+
+    const isTarget = event.target === canvas || canvas.contains(event.target as Node);
+    if (isTarget && isMouseOverAnyChevronButton(event.clientX, event.clientY)) {
+      if (!chevronCursorOverride) {
+        canvas.style.cursor = "pointer";
+        chevronCursorOverride = true;
+      }
+    } else if (chevronCursorOverride) {
+      canvas.style.cursor = "";
+      chevronCursorOverride = false;
+    }
+  };
+  document.addEventListener("mousemove", handleChevronMouseMove);
+  cleanupFns.push(() => {
+    document.removeEventListener("mousemove", handleChevronMouseMove);
+    if (chevronCursorOverride) {
+      const canvas = getFilterChevronCanvas();
+      if (canvas) canvas.style.cursor = "";
+    }
+  });
+
+  // 7. Subscribe to events
   const unsubSheet = onAppEvent(AppEvents.SHEET_CHANGED, () => {
     hideOverlay(OVERLAY_ID);
     setOpenDropdownCol(null);
@@ -153,7 +182,7 @@ export function registerAutoFilterExtension(): void {
   });
   cleanupFns.push(unsubSelection);
 
-  // 7. Load initial filter state
+  // 8. Load initial filter state
   refreshFilterState();
 
   console.log("[AutoFilter] Registered successfully.");

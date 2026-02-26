@@ -16,6 +16,10 @@ import { getAutoFilterInfo } from "../lib/filterStore";
 const BUTTON_SIZE = 18;
 const BUTTON_MARGIN = 2;
 
+// Module-level storage for chevron button bounds (populated during render, read during click)
+let cachedCanvas: HTMLCanvasElement | null = null;
+const chevronBoundsMap = new Map<number, { x: number; y: number; width: number; height: number }>();
+
 /**
  * Render filter dropdown chevrons/funnels on header cells.
  * Called by the grid overlay system during each paint cycle.
@@ -26,6 +30,10 @@ export function renderFilterChevrons(ctx: OverlayRenderContext): void {
 
   const canvasCtx = ctx.ctx;
   const headerRow = info.startRow;
+
+  // Cache canvas and clear previous bounds for this render cycle
+  cachedCanvas = canvasCtx.canvas;
+  chevronBoundsMap.clear();
 
   for (let col = info.startCol; col <= info.endCol; col++) {
     const colX = overlayGetColumnX(ctx, col);
@@ -38,6 +46,9 @@ export function renderFilterChevrons(ctx: OverlayRenderContext): void {
     // Position the button in the bottom-right corner of the header cell
     const btnX = colX + colWidth - BUTTON_SIZE - BUTTON_MARGIN;
     const btnY = rowY + rowHeight - BUTTON_SIZE - BUTTON_MARGIN;
+
+    // Store button bounds for pixel-level click detection
+    chevronBoundsMap.set(col, { x: btnX, y: btnY, width: BUTTON_SIZE, height: BUTTON_SIZE });
 
     // Check if this column has an active filter
     const relCol = col - info.startCol;
@@ -138,6 +149,56 @@ export function hitTestFilterChevron(ctx: OverlayHitTestContext): boolean {
   if (ctx.col < info.startCol || ctx.col > info.endCol) return false;
 
   return true;
+}
+
+/**
+ * Check if a click at (clientX, clientY) lands on the chevron button for a specific column.
+ * Uses pixel-level bounds stored during the last render cycle.
+ */
+export function isClickOnChevronButton(col: number, clientX: number, clientY: number): boolean {
+  if (!cachedCanvas) return false;
+  const bounds = chevronBoundsMap.get(col);
+  if (!bounds) return false;
+
+  const rect = cachedCanvas.getBoundingClientRect();
+  const canvasX = clientX - rect.left;
+  const canvasY = clientY - rect.top;
+
+  return (
+    canvasX >= bounds.x &&
+    canvasX <= bounds.x + bounds.width &&
+    canvasY >= bounds.y &&
+    canvasY <= bounds.y + bounds.height
+  );
+}
+
+/**
+ * Check if a mouse position at (clientX, clientY) is over ANY chevron button.
+ * Used for cursor changes on hover.
+ */
+export function isMouseOverAnyChevronButton(clientX: number, clientY: number): boolean {
+  if (!cachedCanvas) return false;
+
+  const rect = cachedCanvas.getBoundingClientRect();
+  const canvasX = clientX - rect.left;
+  const canvasY = clientY - rect.top;
+
+  for (const bounds of chevronBoundsMap.values()) {
+    if (
+      canvasX >= bounds.x &&
+      canvasX <= bounds.x + bounds.width &&
+      canvasY >= bounds.y &&
+      canvasY <= bounds.y + bounds.height
+    ) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/** Get the cached canvas element (for cursor management). */
+export function getFilterChevronCanvas(): HTMLCanvasElement | null {
+  return cachedCanvas;
 }
 
 /**
