@@ -1020,7 +1020,7 @@ impl<'a> PivotCalculator<'a> {
         depth: usize,
         parent_index: i32,
         fields: &[PivotField],
-        _is_row: bool,
+        is_row: bool,
     ) {
         let subtotal_location = self.definition.layout.subtotal_location;
 
@@ -1045,9 +1045,13 @@ impl<'a> PivotCalculator<'a> {
                 self.definition.layout.report_layout,
                 ReportLayout::Compact
             );
+            // For columns, the parent item already acts as the subtotal column
+            // (same group_values → same aggregate), so don't generate a
+            // redundant separate subtotal column.
             let wants_subtotal = node.show_subtotal && has_children
                 && !matches!(subtotal_location, SubtotalLocation::Off)
-                && layout_wants_subtotal;
+                && layout_wants_subtotal
+                && is_row;
 
             // Build the subtotal item lazily (used for both AtTop and AtBottom)
             let build_subtotal = || {
@@ -1102,7 +1106,7 @@ impl<'a> PivotCalculator<'a> {
                     depth + 1,
                     my_index,
                     fields,
-                    _is_row,
+                    is_row,
                 );
             }
 
@@ -1339,12 +1343,14 @@ impl<'a> PivotCalculator<'a> {
         } else {
             // One row per column field level, plus one for values if multiple
             let base = self.effective_col_fields.len();
-            if self.definition.value_fields.len() > 1
+            let value_rows = if self.definition.value_fields.len() > 1
                 && matches!(self.definition.layout.values_position, ValuesPosition::Columns) {
                 base + 1
             } else {
                 base.max(1)
-            }
+            };
+            // +1 for the "Column Labels" row above the actual column value headers
+            value_rows + 1
         }
     }
     
@@ -1432,13 +1438,52 @@ impl<'a> PivotCalculator<'a> {
         col_header_rows: usize,
     ) {
         let filter_row_offset = view.filter_row_count;
-        
+        let has_col_fields = !self.effective_col_fields.is_empty();
+        // When column fields exist, the first header row is the "Column Labels" row
+        // and actual column value rows start at offset 1.
+        let value_row_offset: usize = if has_col_fields { 1 } else { 0 };
+
         for header_row in 0..col_header_rows {
             let mut cells = Vec::new();
-            
+            let is_last_header = header_row == col_header_rows - 1;
+
+            // --- "Column Labels" row (Excel-like): first header row when column fields exist ---
+            if has_col_fields && header_row == 0 {
+                // Corner cells - empty
+                for _col in 0..row_label_cols {
+                    cells.push(PivotViewCell::corner());
+                }
+
+                // First data column: ColumnLabelHeader with "Column Labels" text + dropdown
+                let data_col_count = view.col_count.saturating_sub(row_label_cols);
+                if data_col_count > 0 {
+                    cells.push(PivotViewCell::column_label_header("Column Labels".to_string()));
+                    // Fill remaining data columns with corner cells
+                    for _ in 1..data_col_count {
+                        cells.push(PivotViewCell::corner());
+                    }
+                }
+
+                let descriptor = PivotRowDescriptor {
+                    view_row: filter_row_offset + header_row,
+                    row_type: PivotRowType::ColumnHeader,
+                    depth: 0,
+                    visible: true,
+                    parent_index: None,
+                    children_indices: Vec::new(),
+                    group_values: Vec::new(),
+                };
+                view.add_row(cells, descriptor);
+                continue;
+            }
+
+            // --- Regular header rows (column value headers or value field names) ---
+            // The depth index into column values (offset by the "Column Labels" row)
+            let value_depth = header_row - value_row_offset;
+
             // Corner cells (row label column headers)
             for col in 0..row_label_cols {
-                if header_row == col_header_rows - 1 {
+                if is_last_header {
                     // Last header row - show row field names with filter dropdown
                     let label = match self.definition.layout.report_layout {
                         ReportLayout::Compact => {
@@ -1472,13 +1517,8 @@ impl<'a> PivotCalculator<'a> {
                     cells.push(PivotViewCell::corner());
                 }
             }
-            
-            // Column header cells
-            // Track whether the first cell in the last header row has been marked
-            // as ColumnLabelHeader (for the dropdown arrow)
-            let mut first_col_header_marked = false;
-            let is_last_header = header_row == col_header_rows - 1;
 
+            // Column header cells
             if self.col_items.is_empty() {
                 // No column fields - show value field names (or blank if no values)
                 if self.definition.value_fields.is_empty() {
@@ -1499,22 +1539,11 @@ impl<'a> PivotCalculator<'a> {
                 }
             } else {
                 // Show column field values at appropriate level
+                // All cells are regular ColumnHeader (filter dropdown is on the
+                // "Column Labels" row above)
                 for item in &self.col_items {
-                    let cell = if item.depth == header_row {
-                        // Use ColumnLabelHeader for the first column header at the
-                        // last header row depth (it gets the dropdown arrow)
-                        let use_label_header = is_last_header
-                            && !first_col_header_marked
-                            && !self.effective_col_fields.is_empty();
-                        if use_label_header {
-                            first_col_header_marked = true;
-                        }
-
-                        let mut ch = if use_label_header {
-                            PivotViewCell::column_label_header(item.label.clone())
-                        } else {
-                            PivotViewCell::column_header(item.label.clone())
-                        };
+                    let cell = if item.depth == value_depth {
+                        let mut ch = PivotViewCell::column_header(item.label.clone());
                         // Set group_path so context menu handlers can identify the field
                         let mut gp = Vec::new();
                         for (i, &val) in item.group_values.iter().enumerate() {
@@ -1524,16 +1553,37 @@ impl<'a> PivotCalculator<'a> {
                         }
                         ch.group_path = gp;
                         ch
-                    } else if item.depth > header_row {
+                    } else if item.depth > value_depth {
                         // Parent level - might need spanning
                         PivotViewCell::corner()
+                    } else if is_last_header
+                        && (item.is_subtotal || item.is_grand_total || item.has_children)
+                    {
+                        // Subtotal/grand total/parent-group columns don't have
+                        // child-level headers so show their label in the last row.
+                        // Parent-group columns (has_children) act as subtotals and
+                        // need the "Total" suffix appended.
+                        let label = if item.has_children && !item.is_subtotal {
+                            format!("{} Total", item.label)
+                        } else {
+                            item.label.clone()
+                        };
+                        let mut ch = PivotViewCell::column_header(label);
+                        let mut gp = Vec::new();
+                        for (i, &val) in item.group_values.iter().enumerate() {
+                            if val != VALUE_ID_EMPTY && i < item.field_indices.len() {
+                                gp.push((item.field_indices[i], val));
+                            }
+                        }
+                        ch.group_path = gp;
+                        ch
                     } else {
                         PivotViewCell::blank()
                     };
                     cells.push(cell);
                 }
             }
-            
+
             let descriptor = PivotRowDescriptor {
                 view_row: filter_row_offset + header_row,
                 row_type: PivotRowType::ColumnHeader,
@@ -1543,7 +1593,7 @@ impl<'a> PivotCalculator<'a> {
                 children_indices: Vec::new(),
                 group_values: Vec::new(),
             };
-            
+
             view.add_row(cells, descriptor);
         }
     }
