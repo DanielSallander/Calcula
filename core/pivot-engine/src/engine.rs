@@ -1609,18 +1609,13 @@ impl<'a> PivotCalculator<'a> {
                 for (col_idx, item) in self.col_items.iter().enumerate() {
                     let cell = if item.depth == value_depth {
                         if item.has_children && !item.is_collapsed {
-                            // EXPANDED total column (children visible) – the
-                            // group label was shown at the first child position.
+                            // EXPANDED total column (children visible) – show
+                            // subtotal label at its own depth level row.
                             current_group = Some(col_idx);
-                            if is_last_header {
-                                // Show "X Total" in the bottom-most header row
-                                let label = format!("{} Total", item.label);
-                                let mut ch = PivotViewCell::column_header(label);
-                                ch.group_path = Self::build_group_path(item);
-                                ch
-                            } else {
-                                PivotViewCell::blank()
-                            }
+                            let label = format!("{} Total", item.label);
+                            let mut ch = PivotViewCell::column_header(label);
+                            ch.group_path = Self::build_group_path(item);
+                            ch
                         } else {
                             // Leaf, grand total, or COLLAPSED parent – show
                             // label at own position (with expand icon if collapsed)
@@ -1659,26 +1654,9 @@ impl<'a> PivotCalculator<'a> {
                         }
                     } else {
                         // item.depth < value_depth – shallower column.
-                        // Collapsed items already show their label+icon at
-                        // their own depth row, so skip the "Total" label here.
-                        if item.is_collapsed {
-                            PivotViewCell::blank()
-                        } else if is_last_header
-                            && (item.is_subtotal
-                                || item.is_grand_total
-                                || item.has_children)
-                        {
-                            let label = if item.has_children && !item.is_subtotal {
-                                format!("{} Total", item.label)
-                            } else {
-                                item.label.clone()
-                            };
-                            let mut ch = PivotViewCell::column_header(label);
-                            ch.group_path = Self::build_group_path(item);
-                            ch
-                        } else {
-                            PivotViewCell::blank()
-                        }
+                        // Label was already shown at the correct depth row;
+                        // fill remaining header rows with header-styled empty cells.
+                        PivotViewCell::column_header(String::new())
                     };
                     cells.push(cell);
                 }
