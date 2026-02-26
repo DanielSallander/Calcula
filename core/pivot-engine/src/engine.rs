@@ -18,7 +18,8 @@ use crate::cache::{
 };
 use crate::definition::{
     AggregationType, DateGroupLevel, FieldGrouping, FieldIndex, ManualGroup,
-    PivotDefinition, PivotField, ReportLayout, SubtotalLocation, ValuesPosition,
+    PivotDefinition, PivotField, ReportLayout, ShowValuesAs, SubtotalLocation,
+    ValuesPosition,
 };
 use crate::view::{
     BackgroundStyle, FilterRowInfo, PivotCellType, PivotColumnDescriptor,
@@ -144,6 +145,9 @@ pub struct PivotCalculator<'a> {
 
     /// Effective column fields after grouping transforms.
     effective_col_fields: Vec<PivotField>,
+
+    /// Pre-computed grand totals for each value field (for show_values_as).
+    grand_totals: Vec<f64>,
 }
 
 impl<'a> PivotCalculator<'a> {
@@ -177,6 +181,7 @@ impl<'a> PivotCalculator<'a> {
             value_field_indices,
             effective_row_fields: Vec::new(),
             effective_col_fields: Vec::new(),
+            grand_totals: Vec::new(),
         }
     }
     
@@ -201,8 +206,82 @@ impl<'a> PivotCalculator<'a> {
         // Step 4: Handle multiple value fields positioning
         self.apply_values_position();
 
+        // Step 4.5: Pre-compute grand totals for show_values_as
+        self.precompute_grand_totals();
+
         // Step 5: Generate the view
         self.generate_view()
+    }
+
+    /// Pre-computes grand totals for each value field (used by show_values_as).
+    fn precompute_grand_totals(&mut self) {
+        self.grand_totals = self.definition.value_fields.iter().enumerate().map(|(vf_idx, vf)| {
+            self.compute_aggregate(&[], &[], vf_idx, vf.aggregation)
+        }).collect();
+    }
+
+    /// Applies the show_values_as transformation to a raw aggregate value.
+    fn transform_show_values_as(
+        &mut self,
+        value: f64,
+        row_values: &[ValueId],
+        col_values: &[ValueId],
+        vf_idx: usize,
+        aggregation: AggregationType,
+        show_as: ShowValuesAs,
+    ) -> f64 {
+        match show_as {
+            ShowValuesAs::Normal => value,
+            ShowValuesAs::PercentOfGrandTotal => {
+                let gt = self.grand_totals.get(vf_idx).copied().unwrap_or(0.0);
+                if gt != 0.0 { value / gt } else { 0.0 }
+            }
+            ShowValuesAs::PercentOfRowTotal => {
+                // Row total = aggregate for this row across all columns
+                let row_total = self.compute_aggregate(row_values, &[], vf_idx, aggregation);
+                if row_total != 0.0 { value / row_total } else { 0.0 }
+            }
+            ShowValuesAs::PercentOfColumnTotal => {
+                // Column total = aggregate for this column across all rows
+                let col_total = self.compute_aggregate(&[], col_values, vf_idx, aggregation);
+                if col_total != 0.0 { value / col_total } else { 0.0 }
+            }
+            ShowValuesAs::PercentOfParentRow => {
+                // Parent row total: remove the deepest row grouping level
+                if row_values.len() > 1 {
+                    let parent_row = &row_values[..row_values.len() - 1];
+                    let parent_total = self.compute_aggregate(parent_row, col_values, vf_idx, aggregation);
+                    if parent_total != 0.0 { value / parent_total } else { 0.0 }
+                } else {
+                    // No parent - use grand total across columns
+                    let gt = self.compute_aggregate(&[], col_values, vf_idx, aggregation);
+                    if gt != 0.0 { value / gt } else { 0.0 }
+                }
+            }
+            ShowValuesAs::PercentOfParentColumn => {
+                // Parent column total: remove the deepest column grouping level
+                if col_values.len() > 1 {
+                    let parent_col = &col_values[..col_values.len() - 1];
+                    let parent_total = self.compute_aggregate(row_values, parent_col, vf_idx, aggregation);
+                    if parent_total != 0.0 { value / parent_total } else { 0.0 }
+                } else {
+                    // No parent - use grand total across rows
+                    let gt = self.compute_aggregate(row_values, &[], vf_idx, aggregation);
+                    if gt != 0.0 { value / gt } else { 0.0 }
+                }
+            }
+            ShowValuesAs::Index => {
+                // Index = (cell * grand_total) / (row_total * col_total)
+                let gt = self.grand_totals.get(vf_idx).copied().unwrap_or(0.0);
+                let row_total = self.compute_aggregate(row_values, &[], vf_idx, aggregation);
+                let col_total = self.compute_aggregate(&[], col_values, vf_idx, aggregation);
+                let denominator = row_total * col_total;
+                if denominator != 0.0 { (value * gt) / denominator } else { 0.0 }
+            }
+            // Difference and RunningTotal require base field/item context
+            // which we don't have yet - return value unchanged for now
+            ShowValuesAs::Difference | ShowValuesAs::PercentDifference | ShowValuesAs::RunningTotal => value,
+        }
     }
     
     /// Applies definition filters to the cache.
@@ -1625,10 +1704,29 @@ impl<'a> PivotCalculator<'a> {
                     vf_idx,
                     vf.aggregation,
                 );
-                
-                let mut cell = PivotViewCell::data(aggregate);
+
+                // Apply show_values_as transformation
+                let display_value = self.transform_show_values_as(
+                    aggregate,
+                    &row_item.group_values,
+                    &[],
+                    vf_idx,
+                    vf.aggregation,
+                    vf.show_values_as,
+                );
+
+                let mut cell = PivotViewCell::data(display_value);
                 cell.number_format = vf.number_format.clone();
-                
+
+                // Override number format for percentage-based show_values_as
+                if matches!(vf.show_values_as,
+                    ShowValuesAs::PercentOfGrandTotal | ShowValuesAs::PercentOfRowTotal |
+                    ShowValuesAs::PercentOfColumnTotal | ShowValuesAs::PercentOfParentRow |
+                    ShowValuesAs::PercentOfParentColumn
+                ) {
+                    cell.number_format = Some("0.00%".to_string());
+                }
+
                 if row_item.is_subtotal {
                     cell.cell_type = PivotCellType::RowSubtotal;
                     cell.background_style = BackgroundStyle::Subtotal;
@@ -1637,7 +1735,7 @@ impl<'a> PivotCalculator<'a> {
                     cell.background_style = BackgroundStyle::GrandTotal;
                     cell.is_bold = true;
                 }
-                
+
                 cells.push(cell);
             }
         } else {
@@ -1654,16 +1752,35 @@ impl<'a> PivotCalculator<'a> {
                 let vf_idx = vf_idx.min(value_fields.len().saturating_sub(1));
                 
                 let vf = &value_fields[vf_idx];
-                
+
                 let aggregate = self.compute_aggregate(
                     &row_item.group_values,
                     &col_group_values,
                     vf_idx,
                     vf.aggregation,
                 );
-                
-                let mut cell = PivotViewCell::data(aggregate);
+
+                // Apply show_values_as transformation
+                let display_value = self.transform_show_values_as(
+                    aggregate,
+                    &row_item.group_values,
+                    &col_group_values,
+                    vf_idx,
+                    vf.aggregation,
+                    vf.show_values_as,
+                );
+
+                let mut cell = PivotViewCell::data(display_value);
                 cell.number_format = vf.number_format.clone();
+
+                // Override number format for percentage-based show_values_as
+                if matches!(vf.show_values_as,
+                    ShowValuesAs::PercentOfGrandTotal | ShowValuesAs::PercentOfRowTotal |
+                    ShowValuesAs::PercentOfColumnTotal | ShowValuesAs::PercentOfParentRow |
+                    ShowValuesAs::PercentOfParentColumn
+                ) {
+                    cell.number_format = Some("0.00%".to_string());
+                }
                 
                 // Determine cell type and styling
                 let is_row_total = row_item.is_subtotal || row_item.is_grand_total;

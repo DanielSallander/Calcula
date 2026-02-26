@@ -109,6 +109,8 @@ const modalStyles = {
     border: 1px solid #d0d0d0;
     border-radius: 4px;
     font-size: 13px;
+    color: #333;
+    background: #fff;
     box-sizing: border-box;
 
     &:focus {
@@ -123,6 +125,7 @@ const modalStyles = {
     border: 1px solid #d0d0d0;
     border-radius: 4px;
     font-size: 13px;
+    color: #333;
     background: #fff;
     cursor: pointer;
     box-sizing: border-box;
@@ -130,6 +133,11 @@ const modalStyles = {
     &:focus {
       outline: none;
       border-color: #0078d4;
+    }
+
+    option {
+      color: #333;
+      background: #fff;
     }
   `,
   footer: css`
@@ -231,13 +239,11 @@ export function ValueFieldSettingsModal({
 
   const fieldKey = `${field.sourceIndex}-${field.aggregation}`;
   if (isOpen && (!prevIsOpen || fieldKey !== prevFieldKey)) {
-    const name = getValueFieldDisplayName(
-      field.name,
-      field.aggregation || "sum"
-    );
+    const agg = field.aggregation || "sum";
+    const name = field.customName || getValueFieldDisplayName(field.name, agg);
     setCustomName(name);
-    setAggregation(field.aggregation || "sum");
-    setShowValuesAs("normal");
+    setAggregation(agg);
+    setShowValuesAs((field.showValuesAs as ShowValuesAs) || "normal");
     setNumberFormat(field.numberFormat || "");
     setPrevIsOpen(isOpen);
     setPrevFieldKey(fieldKey);
