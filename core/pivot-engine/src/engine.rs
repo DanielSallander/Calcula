@@ -22,8 +22,9 @@ use crate::definition::{
     ValuesPosition,
 };
 use crate::view::{
-    BackgroundStyle, FilterRowInfo, PivotCellType, PivotColumnDescriptor,
-    PivotColumnType, PivotRowDescriptor, PivotRowType, PivotView, PivotViewCell,
+    BackgroundStyle, FilterRowInfo, HeaderFieldSummary, PivotCellType,
+    PivotColumnDescriptor, PivotColumnType, PivotRowDescriptor, PivotRowType,
+    PivotView, PivotViewCell,
 };
 
 // ============================================================================
@@ -1162,7 +1163,24 @@ impl<'a> PivotCalculator<'a> {
         
         // Update column_header_row_count to include filter rows
         view.column_header_row_count = col_header_rows + filter_row_count;
-        
+
+        // Populate row/column field summaries for header filter dropdowns
+        view.row_field_summaries = self.effective_row_fields.iter().map(|f| {
+            HeaderFieldSummary {
+                field_index: f.source_index,
+                field_name: f.name.clone(),
+                has_active_filter: !f.hidden_items.is_empty(),
+            }
+        }).collect();
+
+        view.column_field_summaries = self.effective_col_fields.iter().map(|f| {
+            HeaderFieldSummary {
+                field_index: f.source_index,
+                field_name: f.name.clone(),
+                has_active_filter: !f.hidden_items.is_empty(),
+            }
+        }).collect();
+
         view
     }
     
@@ -1421,7 +1439,7 @@ impl<'a> PivotCalculator<'a> {
             // Corner cells (row label column headers)
             for col in 0..row_label_cols {
                 if header_row == col_header_rows - 1 {
-                    // Last header row - show row field names (use effective fields for grouped names)
+                    // Last header row - show row field names with filter dropdown
                     let label = match self.definition.layout.report_layout {
                         ReportLayout::Compact => {
                             // Combine all row field names
@@ -1438,25 +1456,41 @@ impl<'a> PivotCalculator<'a> {
                                 .unwrap_or_default()
                         }
                     };
-                    cells.push(PivotViewCell::column_header(label));
+                    // Use RowLabelHeader for the last corner cell (it gets the dropdown arrow)
+                    let is_last_corner = match self.definition.layout.report_layout {
+                        ReportLayout::Compact => true, // Only one corner cell in compact
+                        ReportLayout::Outline | ReportLayout::Tabular => {
+                            col == row_label_cols - 1
+                        }
+                    };
+                    if is_last_corner && !self.effective_row_fields.is_empty() {
+                        cells.push(PivotViewCell::row_label_header(label));
+                    } else {
+                        cells.push(PivotViewCell::column_header(label));
+                    }
                 } else {
                     cells.push(PivotViewCell::corner());
                 }
             }
             
             // Column header cells
+            // Track whether the first cell in the last header row has been marked
+            // as ColumnLabelHeader (for the dropdown arrow)
+            let mut first_col_header_marked = false;
+            let is_last_header = header_row == col_header_rows - 1;
+
             if self.col_items.is_empty() {
                 // No column fields - show value field names (or blank if no values)
                 if self.definition.value_fields.is_empty() {
                     // No value fields - add blank header
-                    if header_row == col_header_rows - 1 {
+                    if is_last_header {
                         cells.push(PivotViewCell::column_header(String::new()));
                     } else {
                         cells.push(PivotViewCell::corner());
                     }
                 } else {
                     for vf in &self.definition.value_fields {
-                        if header_row == col_header_rows - 1 {
+                        if is_last_header {
                             cells.push(PivotViewCell::column_header(vf.name.clone()));
                         } else {
                             cells.push(PivotViewCell::corner());
@@ -1467,7 +1501,20 @@ impl<'a> PivotCalculator<'a> {
                 // Show column field values at appropriate level
                 for item in &self.col_items {
                     let cell = if item.depth == header_row {
-                        let mut ch = PivotViewCell::column_header(item.label.clone());
+                        // Use ColumnLabelHeader for the first column header at the
+                        // last header row depth (it gets the dropdown arrow)
+                        let use_label_header = is_last_header
+                            && !first_col_header_marked
+                            && !self.effective_col_fields.is_empty();
+                        if use_label_header {
+                            first_col_header_marked = true;
+                        }
+
+                        let mut ch = if use_label_header {
+                            PivotViewCell::column_label_header(item.label.clone())
+                        } else {
+                            PivotViewCell::column_header(item.label.clone())
+                        };
                         // Set group_path so context menu handlers can identify the field
                         let mut gp = Vec::new();
                         for (i, &val) in item.group_values.iter().enumerate() {

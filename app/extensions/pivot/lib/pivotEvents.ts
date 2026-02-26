@@ -10,6 +10,8 @@ export const PivotEvents = {
   PIVOT_REGIONS_UPDATED: "app:pivot-regions-updated",
   /** Emitted to open the filter dropdown menu for a pivot field */
   PIVOT_OPEN_FILTER_MENU: "app:pivot-open-filter-menu",
+  /** Emitted to open the header filter dropdown (Row Labels / Column Labels) */
+  PIVOT_OPEN_HEADER_FILTER_MENU: "app:pivot-open-header-filter-menu",
   /** Emitted by the PivotEditor to broadcast current layout state to the Design tab */
   PIVOT_LAYOUT_STATE: "app:pivot-layout-state",
   /** Emitted by the Design tab when the user changes a layout option */

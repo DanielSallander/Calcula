@@ -31,7 +31,8 @@ export interface SelectionRange {
 export interface UsePivotGridInteractionOptions {
   pivotId: PivotId;
   pivotView: PivotViewResponse | null;
-  canvasRef: React.RefObject<HTMLCanvasElement | null>;
+  /** Ref to the element that receives pointer events (e.g. the scroll container overlaying the canvas) */
+  eventTargetRef: React.RefObject<HTMLElement | null>;
   interactiveBounds: PivotInteractiveBounds | null;
   onExpandCollapse?: (row: number, col: number, isExpanded: boolean) => void;
   onSelectionChange?: (selection: SelectionRange | null) => void;
@@ -51,12 +52,13 @@ export interface UsePivotGridInteractionResult {
   // Hover state
   hoveredFilterFieldIndex: number | null;
   hoveredIconKey: string | null;
+  hoveredHeaderFilterKey: string | null;
 
   // Event handlers
-  handleCanvasClick: (e: React.MouseEvent<HTMLCanvasElement>) => void;
-  handleCanvasMouseMove: (e: React.MouseEvent<HTMLCanvasElement>) => void;
+  handleCanvasClick: (e: React.MouseEvent<HTMLElement>) => void;
+  handleCanvasMouseMove: (e: React.MouseEvent<HTMLElement>) => void;
   handleCanvasMouseLeave: () => void;
-  handleCanvasDoubleClick: (e: React.MouseEvent<HTMLCanvasElement>) => void;
+  handleCanvasDoubleClick: (e: React.MouseEvent<HTMLElement>) => void;
   handleKeyDown: (e: React.KeyboardEvent) => void;
 
   // Actions
@@ -73,7 +75,7 @@ export function usePivotGridInteraction(
   const {
     pivotId,
     pivotView,
-    canvasRef,
+    eventTargetRef,
     interactiveBounds,
     onExpandCollapse,
     onSelectionChange,
@@ -90,6 +92,7 @@ export function usePivotGridInteraction(
   // Hover state
   const [hoveredFilterFieldIndex, setHoveredFilterFieldIndex] = useState<number | null>(null);
   const [hoveredIconKey, setHoveredIconKey] = useState<string | null>(null);
+  const [hoveredHeaderFilterKey, setHoveredHeaderFilterKey] = useState<string | null>(null);
 
   // Redraw trigger
   const redrawRequestedRef = useRef(false);
@@ -172,6 +175,28 @@ export function usePivotGridInteraction(
     [interactiveBounds]
   );
 
+  const findClickedHeaderFilterButton = useCallback(
+    (canvasX: number, canvasY: number): {
+      zone: 'row' | 'column';
+      key: string;
+    } | null => {
+      if (!interactiveBounds?.headerFilterButtons) return null;
+
+      for (const [key, bounds] of interactiveBounds.headerFilterButtons) {
+        if (
+          canvasX >= bounds.x &&
+          canvasX <= bounds.x + bounds.width &&
+          canvasY >= bounds.y &&
+          canvasY <= bounds.y + bounds.height
+        ) {
+          return { zone: bounds.zone, key };
+        }
+      }
+      return null;
+    },
+    [interactiveBounds]
+  );
+
   // ==========================================================================
   // FILTER DROPDOWN HANDLERS
   // ==========================================================================
@@ -215,15 +240,15 @@ export function usePivotGridInteraction(
   // ==========================================================================
 
   const handleCanvasClick = useCallback(
-    async (e: React.MouseEvent<HTMLCanvasElement>) => {
-      const canvas = canvasRef.current;
-      if (!canvas || !pivotView) return;
+    async (e: React.MouseEvent<HTMLElement>) => {
+      const el = eventTargetRef.current;
+      if (!el || !pivotView) return;
 
-      const rect = canvas.getBoundingClientRect();
+      const rect = el.getBoundingClientRect();
       const canvasX = e.clientX - rect.left;
       const canvasY = e.clientY - rect.top;
 
-      // 1. Check filter button clicks FIRST
+      // 1. Check filter button clicks (filter row dropdowns)
       const clickedFilter = findClickedFilterButton(canvasX, canvasY);
       if (clickedFilter) {
         // Find the filter row metadata from pivotView
@@ -286,9 +311,10 @@ export function usePivotGridInteraction(
       }
     },
     [
-      canvasRef,
+      eventTargetRef,
       pivotId,
       pivotView,
+      interactiveBounds,
       findClickedFilterButton,
       findClickedExpandIcon,
       onExpandCollapse,
@@ -298,11 +324,11 @@ export function usePivotGridInteraction(
   );
 
   const handleCanvasMouseMove = useCallback(
-    (e: React.MouseEvent<HTMLCanvasElement>) => {
-      const canvas = canvasRef.current;
-      if (!canvas) return;
+    (e: React.MouseEvent<HTMLElement>) => {
+      const el = eventTargetRef.current;
+      if (!el) return;
 
-      const rect = canvas.getBoundingClientRect();
+      const rect = el.getBoundingClientRect();
       const canvasX = e.clientX - rect.left;
       const canvasY = e.clientY - rect.top;
 
@@ -335,8 +361,21 @@ export function usePivotGridInteraction(
         cursorStyle = 'pointer';
       }
 
+      // Check header filter button hover
+      const hoveredHeaderFilter = findClickedHeaderFilterButton(canvasX, canvasY);
+      const newHoveredHeaderFilterKey = hoveredHeaderFilter?.key ?? null;
+
+      if (newHoveredHeaderFilterKey !== hoveredHeaderFilterKey) {
+        setHoveredHeaderFilterKey(newHoveredHeaderFilterKey);
+        needsRedraw = true;
+      }
+
+      if (hoveredHeaderFilter) {
+        cursorStyle = 'pointer';
+      }
+
       // Update cursor
-      canvas.style.cursor = cursorStyle;
+      el.style.cursor = cursorStyle;
 
       // Request redraw if hover state changed
       if (needsRedraw) {
@@ -344,11 +383,13 @@ export function usePivotGridInteraction(
       }
     },
     [
-      canvasRef,
+      eventTargetRef,
       findClickedFilterButton,
       findClickedExpandIcon,
+      findClickedHeaderFilterButton,
       hoveredFilterFieldIndex,
       hoveredIconKey,
+      hoveredHeaderFilterKey,
       requestRedraw,
     ]
   );
@@ -366,13 +407,18 @@ export function usePivotGridInteraction(
       needsRedraw = true;
     }
 
+    if (hoveredHeaderFilterKey !== null) {
+      setHoveredHeaderFilterKey(null);
+      needsRedraw = true;
+    }
+
     if (needsRedraw) {
       requestRedraw();
     }
-  }, [hoveredFilterFieldIndex, hoveredIconKey, requestRedraw]);
+  }, [hoveredFilterFieldIndex, hoveredIconKey, hoveredHeaderFilterKey, requestRedraw]);
 
   const handleCanvasDoubleClick = useCallback(
-    (_e: React.MouseEvent<HTMLCanvasElement>) => {
+    (_e: React.MouseEvent<HTMLElement>) => {
       // TODO: Implement double-click behavior (e.g., expand all, drill-through)
     },
     []
@@ -380,11 +426,13 @@ export function usePivotGridInteraction(
 
   const handleKeyDown = useCallback(
     (e: React.KeyboardEvent) => {
-      // Close filter dropdown on Escape
-      if (e.key === 'Escape' && activeFilterDropdown) {
-        e.preventDefault();
-        setActiveFilterDropdown(null);
-        return;
+      // Close filter dropdowns on Escape
+      if (e.key === 'Escape') {
+        if (activeFilterDropdown) {
+          e.preventDefault();
+          setActiveFilterDropdown(null);
+          return;
+        }
       }
 
       // TODO: Implement keyboard navigation
@@ -422,6 +470,7 @@ export function usePivotGridInteraction(
     // Hover state
     hoveredFilterFieldIndex,
     hoveredIconKey,
+    hoveredHeaderFilterKey,
 
     // Event handlers
     handleCanvasClick,

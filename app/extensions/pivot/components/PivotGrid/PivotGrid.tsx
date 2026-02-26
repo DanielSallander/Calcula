@@ -57,6 +57,7 @@ export const PivotGrid: React.FC<PivotGridProps> = ({
   // Refs
   const containerRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
+  const scrollContainerRef = useRef<HTMLDivElement>(null);
 
   // State
   const [pivotView, setPivotView] = useState<PivotViewResponse | null>(null);
@@ -204,6 +205,7 @@ export const PivotGrid: React.FC<PivotGridProps> = ({
     handleApplyFilter,
     hoveredFilterFieldIndex,
     hoveredIconKey,
+    hoveredHeaderFilterKey,
     handleCanvasClick,
     handleCanvasMouseMove,
     handleCanvasMouseLeave,
@@ -211,7 +213,7 @@ export const PivotGrid: React.FC<PivotGridProps> = ({
   } = usePivotGridInteraction({
     pivotId,
     pivotView,
-    canvasRef,
+    eventTargetRef: scrollContainerRef,
     interactiveBounds,
     onExpandCollapse: handleExpandCollapse,
     onRefresh: fetchPivotData,
@@ -304,6 +306,7 @@ export const PivotGrid: React.FC<PivotGridProps> = ({
       frozenColCount,
       hoveredFilterFieldIndex,
       hoveredIconKey,
+      hoveredHeaderFilterKey,
     };
 
     const result = renderPivotView(
@@ -324,6 +327,7 @@ export const PivotGrid: React.FC<PivotGridProps> = ({
     colWidths,
     hoveredFilterFieldIndex,
     hoveredIconKey,
+    hoveredHeaderFilterKey,
     theme,
   ]);
 
@@ -426,14 +430,31 @@ export const PivotGrid: React.FC<PivotGridProps> = ({
       tabIndex={0}
       onKeyDown={handleKeyDown}
     >
-      {/* Scroll container */}
+      {/* Canvas layer (render only, no event handlers) */}
+      <canvas
+        ref={canvasRef}
+        style={{
+          position: 'absolute',
+          top: 0,
+          left: 0,
+          width: canvasSize.width,
+          height: canvasSize.height,
+          pointerEvents: 'none',
+        }}
+      />
+
+      {/* Scroll container (on top, receives all pointer events) */}
       <div
+        ref={scrollContainerRef}
         style={{
           position: 'absolute',
           inset: 0,
           overflow: 'auto',
         }}
         onScroll={handleScroll}
+        onClick={handleCanvasClick}
+        onMouseMove={handleCanvasMouseMove}
+        onMouseLeave={handleCanvasMouseLeave}
       >
         {/* Scroll spacer */}
         <div
@@ -444,22 +465,6 @@ export const PivotGrid: React.FC<PivotGridProps> = ({
           }}
         />
       </div>
-
-      {/* Canvas layer */}
-      <canvas
-        ref={canvasRef}
-        style={{
-          position: 'absolute',
-          top: 0,
-          left: 0,
-          width: canvasSize.width,
-          height: canvasSize.height,
-          pointerEvents: 'auto',
-        }}
-        onClick={handleCanvasClick}
-        onMouseMove={handleCanvasMouseMove}
-        onMouseLeave={handleCanvasMouseLeave}
-      />
 
       {/* Filter Dropdown Overlay */}
       {activeFilterDropdown && (
@@ -473,6 +478,7 @@ export const PivotGrid: React.FC<PivotGridProps> = ({
           onClose={handleCloseFilterDropdown}
         />
       )}
+
     </div>
   );
 };

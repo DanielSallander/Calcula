@@ -480,6 +480,27 @@ pub(crate) fn view_to_response(
         })
         .collect();
 
+    // Build row/column field summaries for header filter dropdowns
+    let row_field_summaries: Vec<HeaderFieldSummaryData> = view
+        .row_field_summaries
+        .iter()
+        .map(|s| HeaderFieldSummaryData {
+            field_index: s.field_index,
+            field_name: s.field_name.clone(),
+            has_active_filter: s.has_active_filter,
+        })
+        .collect();
+
+    let column_field_summaries: Vec<HeaderFieldSummaryData> = view
+        .column_field_summaries
+        .iter()
+        .map(|s| HeaderFieldSummaryData {
+            field_index: s.field_index,
+            field_name: s.field_name.clone(),
+            has_active_filter: s.has_active_filter,
+        })
+        .collect();
+
     PivotViewResponse {
         pivot_id: view.pivot_id,
         version: view.version,
@@ -489,6 +510,8 @@ pub(crate) fn view_to_response(
         column_header_row_count: view.column_header_row_count,
         filter_row_count: view.filter_row_count,
         filter_rows,
+        row_field_summaries,
+        column_field_summaries,
         rows,
         columns,
     }

@@ -83,6 +83,7 @@ export type {
   PivotRowData,
   PivotColumnData,
   FilterRowData,
+  HeaderFieldSummary,
   PivotViewResponse,
   SourceDataResponse,
   GroupPath,

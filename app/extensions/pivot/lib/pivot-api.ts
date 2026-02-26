@@ -201,7 +201,9 @@ export type PivotCellType =
   | "GrandTotalColumn"
   | "Blank"
   | "FilterLabel"
-  | "FilterDropdown";
+  | "FilterDropdown"
+  | "RowLabelHeader"
+  | "ColumnLabelHeader";
 
 /** Background style for cells */
 export type BackgroundStyle = 
@@ -262,6 +264,13 @@ export interface FilterRowData {
   viewRow: number;
 }
 
+/** Summary info about a row or column field for header filter dropdowns */
+export interface HeaderFieldSummary {
+  fieldIndex: number;
+  fieldName: string;
+  hasActiveFilter: boolean;
+}
+
 /** Complete pivot view response */
 export interface PivotViewResponse {
   pivotId: PivotId;
@@ -272,6 +281,8 @@ export interface PivotViewResponse {
   columnHeaderRowCount: number;
   filterRowCount: number;
   filterRows: FilterRowData[];
+  rowFieldSummaries: HeaderFieldSummary[];
+  columnFieldSummaries: HeaderFieldSummary[];
   rows: PivotRowData[];
   columns: PivotColumnData[];
 }
@@ -476,7 +487,8 @@ export function getCellDisplayValue(value: PivotCellValue): string {
  * Checks if a cell is a header cell (row or column).
  */
 export function isHeaderCell(cellType: PivotCellType): boolean {
-  return cellType === "RowHeader" || cellType === "ColumnHeader" || cellType === "Corner";
+  return cellType === "RowHeader" || cellType === "ColumnHeader" || cellType === "Corner"
+    || cellType === "RowLabelHeader" || cellType === "ColumnLabelHeader";
 }
 
 /**

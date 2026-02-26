@@ -694,6 +694,8 @@ pub struct PivotViewResponse {
     pub column_header_row_count: usize,
     pub filter_row_count: usize,
     pub filter_rows: Vec<FilterRowData>,
+    pub row_field_summaries: Vec<HeaderFieldSummaryData>,
+    pub column_field_summaries: Vec<HeaderFieldSummaryData>,
     pub rows: Vec<PivotRowData>,
     pub columns: Vec<PivotColumnData>,
 }
@@ -708,6 +710,18 @@ pub struct FilterRowData {
     pub unique_values: Vec<String>,
     pub display_value: String,
     pub view_row: usize,
+}
+
+/// Summary info about a row or column field for header filter dropdowns.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HeaderFieldSummaryData {
+    /// The source field index.
+    pub field_index: usize,
+    /// Display name of the field.
+    pub field_name: String,
+    /// Whether this field currently has an active filter (hidden items).
+    pub has_active_filter: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -16,6 +16,8 @@ import { GroupDialog } from "./components/GroupDialog";
 import { FieldSettingsDialog } from "./components/FieldSettingsDialog";
 import { PivotOptionsDialog } from "./components/PivotOptionsDialog";
 import { FilterDropdown } from "./components/FilterDropdown";
+import { PivotHeaderFilterDropdown } from "./components/PivotHeaderFilterDropdown";
+import type { HeaderFieldSummary } from "./lib/pivot-api";
 import type { DialogProps, OverlayProps } from "../../src/api";
 import React from "react";
 import { PivotEvents } from "./lib/pivotEvents";
@@ -176,5 +178,34 @@ function FilterDropdownWrapper(props: OverlayProps): React.ReactElement {
 export const PivotFilterOverlayDefinition: OverlayDefinition = {
   id: PIVOT_FILTER_OVERLAY_ID,
   component: FilterDropdownWrapper,
+  layer: "dropdown",
+};
+
+// ============================================================================
+// Header Filter Overlay (Row Labels / Column Labels dropdown)
+// ============================================================================
+
+export const PIVOT_HEADER_FILTER_OVERLAY_ID = "pivot:headerFilterDropdown";
+
+function HeaderFilterDropdownWrapper(props: OverlayProps): React.ReactElement {
+  const data = props.data ?? {};
+  const onApply = () => {
+    // Close the overlay and refresh the grid
+    props.onClose();
+    window.dispatchEvent(new CustomEvent("pivot:refresh"));
+  };
+  return React.createElement(PivotHeaderFilterDropdown, {
+    zone: (data.zone as 'row' | 'column') ?? 'row',
+    fields: (data.fields as HeaderFieldSummary[]) ?? [],
+    pivotId: (data.pivotId as number) ?? 0,
+    anchorRect: props.anchorRect ?? { x: 0, y: 0, width: 260, height: 0 },
+    onClose: props.onClose,
+    onApply,
+  });
+}
+
+export const PivotHeaderFilterOverlayDefinition: OverlayDefinition = {
+  id: PIVOT_HEADER_FILTER_OVERLAY_ID,
+  component: HeaderFilterDropdownWrapper,
   layer: "dropdown",
 };

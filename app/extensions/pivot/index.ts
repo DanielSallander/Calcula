@@ -42,14 +42,17 @@ import {
   PivotFieldSettingsDialogDefinition,
   PivotOptionsDialogDefinition,
   PivotFilterOverlayDefinition,
+  PivotHeaderFilterOverlayDefinition,
   PIVOT_PANE_ID,
   PIVOT_DIALOG_ID,
   PIVOT_GROUP_DIALOG_ID,
   PIVOT_FILTER_OVERLAY_ID,
+  PIVOT_HEADER_FILTER_OVERLAY_ID,
 } from "./manifest";
 
 import { handlePivotCreated } from "./handlers/pivotCreatedHandler";
 import { handleOpenFilterMenu } from "./handlers/filterMenuHandler";
+import { handleOpenHeaderFilterMenu } from "./handlers/headerFilterMenuHandler";
 import { registerPivotContextMenuItems } from "./handlers/pivotContextMenu";
 import {
   handleSelectionChange,
@@ -103,9 +106,22 @@ interface StoredIconBounds {
 /** Map of icon bounds keyed by "pivotId-gridRow-gridCol", updated every render. */
 const overlayIconBounds = new Map<string, StoredIconBounds>();
 
+interface StoredHeaderFilterBounds {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  zone: 'row' | 'column';
+  pivotId: number;
+}
+
+/** Map of header filter button bounds keyed by "pivotId-zone", updated every render. */
+const overlayHeaderFilterBounds = new Map<string, StoredHeaderFilterBounds>();
+
 /** Clear all stored icon bounds (called at start of each render cycle). */
 function clearOverlayIconBounds(): void {
   overlayIconBounds.clear();
+  overlayHeaderFilterBounds.clear();
 }
 
 /** Cache of pivot region bounds keyed by pivotId, for coordinate conversion in click handlers. */
@@ -233,6 +249,10 @@ function drawStyledPivotView(overlayCtx: OverlayRenderContext, pivotView: PivotV
 
   const theme = DEFAULT_PIVOT_THEME;
 
+  // Pre-compute whether each zone has active filters (for header filter icon)
+  const rowHasActiveFilter = pivotView.rowFieldSummaries?.some(f => f.hasActiveFilter) ?? false;
+  const colHasActiveFilter = pivotView.columnFieldSummaries?.some(f => f.hasActiveFilter) ?? false;
+
   ctx.save();
   ctx.beginPath();
   ctx.rect(
@@ -263,7 +283,15 @@ function drawStyledPivotView(overlayCtx: OverlayRenderContext, pivotView: PivotV
       // Skip cells completely outside visible area
       if (x + width < rowHeaderWidth || x > canvasWidth) continue;
 
-      const cellResult: PivotCellDrawResult = drawPivotCell(ctx, cell, x, y, width, height, i, j, theme);
+      // Determine active filter state for header filter cells
+      const cellHasActiveFilter =
+        cell.cellType === 'RowLabelHeader' ? rowHasActiveFilter :
+        cell.cellType === 'ColumnLabelHeader' ? colHasActiveFilter :
+        false;
+
+      const cellResult: PivotCellDrawResult = drawPivotCell(ctx, cell, x, y, width, height, i, j, theme, {
+        hasActiveFilter: cellHasActiveFilter,
+      });
 
       // Store expand/collapse icon bounds for click handling
       if (cellResult.iconBounds) {
@@ -277,6 +305,20 @@ function drawStyledPivotView(overlayCtx: OverlayRenderContext, pivotView: PivotV
           gridRow,
           gridCol,
           isExpanded: cellResult.iconBounds.isExpanded,
+          pivotId,
+        });
+      }
+
+      // Store header filter button bounds for click handling
+      if (cellResult.headerFilterBounds) {
+        const pivotId = (region.data?.pivotId as number) ?? 0;
+        const hfKey = `${pivotId}-${cellResult.headerFilterBounds.zone}`;
+        overlayHeaderFilterBounds.set(hfKey, {
+          x: cellResult.headerFilterBounds.x,
+          y: cellResult.headerFilterBounds.y,
+          width: cellResult.headerFilterBounds.width,
+          height: cellResult.headerFilterBounds.height,
+          zone: cellResult.headerFilterBounds.zone,
           pivotId,
         });
       }
@@ -479,6 +521,7 @@ export function registerPivotExtension(): void {
 
   // Register overlays
   OverlayExtensions.registerOverlay(PivotFilterOverlayDefinition);
+  OverlayExtensions.registerOverlay(PivotHeaderFilterOverlayDefinition);
 
   // Register edit guard - block editing in pivot regions
   cleanupFunctions.push(
@@ -572,6 +615,36 @@ export function registerPivotExtension(): void {
         }
       } catch (error) {
         console.error("[Pivot Extension] Failed to check pivot filter:", error);
+      }
+      return false;
+    })
+  );
+
+  // Register click interceptor - handle header filter button clicks (Row Labels / Column Labels)
+  cleanupFunctions.push(
+    registerCellClickInterceptor(async (_row, _col, event) => {
+      if (!cachedCanvasElement) return false;
+
+      const rect = cachedCanvasElement.getBoundingClientRect();
+      const canvasX = event.clientX - rect.left;
+      const canvasY = event.clientY - rect.top;
+
+      for (const bounds of overlayHeaderFilterBounds.values()) {
+        if (
+          canvasX >= bounds.x &&
+          canvasX <= bounds.x + bounds.width &&
+          canvasY >= bounds.y &&
+          canvasY <= bounds.y + bounds.height
+        ) {
+          // Found a matching header filter button - open header filter dropdown
+          emitAppEvent(PivotEvents.PIVOT_OPEN_HEADER_FILTER_MENU, {
+            pivotId: bounds.pivotId,
+            zone: bounds.zone,
+            anchorX: event.clientX,
+            anchorY: event.clientY + 2,
+          });
+          return true;
+        }
       }
       return false;
     })
@@ -694,7 +767,7 @@ export function registerPivotExtension(): void {
     const canvasX = event.clientX - rect.left;
     const canvasY = event.clientY - rect.top;
 
-    let isOverIcon = false;
+    let isOverInteractive = false;
     for (const bounds of overlayIconBounds.values()) {
       if (
         canvasX >= bounds.x &&
@@ -702,15 +775,29 @@ export function registerPivotExtension(): void {
         canvasY >= bounds.y &&
         canvasY <= bounds.y + bounds.height
       ) {
-        isOverIcon = true;
+        isOverInteractive = true;
         break;
       }
     }
 
-    if (isOverIcon && !currentCursorOverride) {
+    if (!isOverInteractive) {
+      for (const bounds of overlayHeaderFilterBounds.values()) {
+        if (
+          canvasX >= bounds.x &&
+          canvasX <= bounds.x + bounds.width &&
+          canvasY >= bounds.y &&
+          canvasY <= bounds.y + bounds.height
+        ) {
+          isOverInteractive = true;
+          break;
+        }
+      }
+    }
+
+    if (isOverInteractive && !currentCursorOverride) {
       cachedCanvasElement.style.cursor = "pointer";
       currentCursorOverride = true;
-    } else if (!isOverIcon && currentCursorOverride) {
+    } else if (!isOverInteractive && currentCursorOverride) {
       cachedCanvasElement.style.cursor = "";
       currentCursorOverride = false;
     }
@@ -748,6 +835,16 @@ export function registerPivotExtension(): void {
       anchorX: number;
       anchorY: number;
     }>(PivotEvents.PIVOT_OPEN_FILTER_MENU, handleOpenFilterMenu)
+  );
+
+  // Subscribe to header filter menu events (Row Labels / Column Labels)
+  cleanupFunctions.push(
+    onAppEvent<{
+      pivotId: number;
+      zone: 'row' | 'column';
+      anchorX: number;
+      anchorY: number;
+    }>(PivotEvents.PIVOT_OPEN_HEADER_FILTER_MENU, handleOpenHeaderFilterMenu)
   );
 
   // Subscribe to selection changes to show/hide the pivot editor pane
@@ -821,9 +918,10 @@ export function unregisterPivotExtension(): void {
   DialogExtensions.unregisterDialog(PIVOT_DIALOG_ID);
   DialogExtensions.unregisterDialog(PIVOT_GROUP_DIALOG_ID);
   OverlayExtensions.unregisterOverlay(PIVOT_FILTER_OVERLAY_ID);
+  OverlayExtensions.unregisterOverlay(PIVOT_HEADER_FILTER_OVERLAY_ID);
 
   console.log("[Pivot Extension] Unregistered successfully");
 }
 
 // Re-export for convenience
-export { PIVOT_PANE_ID, PIVOT_DIALOG_ID, PIVOT_GROUP_DIALOG_ID, PIVOT_FILTER_OVERLAY_ID };
+export { PIVOT_PANE_ID, PIVOT_DIALOG_ID, PIVOT_GROUP_DIALOG_ID, PIVOT_FILTER_OVERLAY_ID, PIVOT_HEADER_FILTER_OVERLAY_ID };

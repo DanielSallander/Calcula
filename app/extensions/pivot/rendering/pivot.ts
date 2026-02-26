@@ -126,6 +126,15 @@ export interface PivotCellDrawResult {
     row: number;
     col: number;
   } | null;
+  headerFilterBounds: {
+    x: number;
+    y: number;
+    width: number;
+    height: number;
+    zone: 'row' | 'column';
+    row: number;
+    col: number;
+  } | null;
 }
 
 export interface PivotInteractiveBounds {
@@ -147,6 +156,15 @@ export interface PivotInteractiveBounds {
     row: number;
     col: number;
   }>;
+  headerFilterButtons: Map<string, {
+    x: number;
+    y: number;
+    width: number;
+    height: number;
+    zone: 'row' | 'column';
+    row: number;
+    col: number;
+  }>;
 }
 
 export interface PivotRenderOptions {
@@ -162,6 +180,7 @@ export interface PivotRenderOptions {
   frozenColCount: number;
   hoveredFilterFieldIndex?: number | null;
   hoveredIconKey?: string | null;
+  hoveredHeaderFilterKey?: string | null;
 }
 
 export interface PivotRenderResult {
@@ -183,6 +202,7 @@ const EXPAND_ICON_PADDING = 4;
 
 const CELL_PADDING_X = 6;
 const INDENT_SIZE = 20; // pixels per indent level
+const HEADER_FILTER_ARROW_AREA = 20; // width of dropdown arrow area on header filter cells
 
 // Default cell dimensions for pivot tables
 const DEFAULT_PIVOT_CELL_WIDTH = 100;
@@ -226,6 +246,11 @@ function getPivotTextColor(
     return theme.filterText;
   }
 
+  // Header filter cells (Row Labels / Column Labels)
+  if (cellType === 'RowLabelHeader' || cellType === 'ColumnLabelHeader') {
+    return theme.headerText;
+  }
+
   switch (backgroundStyle) {
     case 'Header':
       return theme.headerText;
@@ -252,7 +277,9 @@ function getFontWeight(
     backgroundStyle === 'Subtotal' ||
     backgroundStyle === 'Total' ||
     backgroundStyle === 'GrandTotal' ||
-    cellType === 'FilterLabel'
+    cellType === 'FilterLabel' ||
+    cellType === 'RowLabelHeader' ||
+    cellType === 'ColumnLabelHeader'
   ) {
     return '600';
   }
@@ -400,6 +427,8 @@ function drawFilterDropdownButton(
 interface DrawCellOptions {
   isHoveredFilterButton?: boolean;
   isHoveredIcon?: boolean;
+  isHoveredHeaderFilter?: boolean;
+  hasActiveFilter?: boolean;
 }
 
 export function drawPivotCell(
@@ -417,6 +446,7 @@ export function drawPivotCell(
   const result: PivotCellDrawResult = {
     iconBounds: null,
     filterButtonBounds: null,
+    headerFilterBounds: null,
   };
 
   // Draw background
@@ -504,6 +534,95 @@ export function drawPivotCell(
     return result;
   }
 
+  // Handle RowLabelHeader / ColumnLabelHeader (header cells with dropdown arrow)
+  if (cell.cellType === 'RowLabelHeader' || cell.cellType === 'ColumnLabelHeader') {
+    const zone: 'row' | 'column' = cell.cellType === 'RowLabelHeader' ? 'row' : 'column';
+    const displayText = cell.formattedValue || getCellDisplayValue(cell.value) || '';
+    const arrowAreaWidth = HEADER_FILTER_ARROW_AREA;
+    const textMaxWidth = width - CELL_PADDING_X * 2 - arrowAreaWidth;
+
+    // Draw text
+    ctx.fillStyle = theme.headerText;
+    ctx.font = `${theme.headerFontWeight} ${theme.headerFontSize}px ${theme.fontFamily}`;
+    ctx.textAlign = 'left';
+    ctx.textBaseline = 'middle';
+    const textY = y + height / 2;
+    const truncatedText = truncateText(ctx, displayText, textMaxWidth);
+    ctx.fillText(truncatedText, x + CELL_PADDING_X, textY);
+
+    // Draw dropdown button on the right side of the cell
+    const isHovered = options.isHoveredHeaderFilter || false;
+    const hasFilter = options.hasActiveFilter || false;
+    const btnMargin = 3;
+    const btnSize = height - btnMargin * 2;
+    const btnX = x + width - btnSize - btnMargin;
+    const btnY = y + btnMargin;
+
+    // Button background - blue tint when filter is active
+    if (hasFilter) {
+      ctx.fillStyle = isHovered ? '#d0e2f4' : '#e8f0fe';
+    } else if (isHovered) {
+      ctx.fillStyle = 'rgba(0, 0, 0, 0.12)';
+    } else {
+      ctx.fillStyle = 'rgba(0, 0, 0, 0.06)';
+    }
+    ctx.beginPath();
+    ctx.roundRect(btnX, btnY, btnSize, btnSize, 2);
+    ctx.fill();
+
+    // Button border - blue when filter is active
+    if (hasFilter) {
+      ctx.strokeStyle = isHovered ? '#1565c0' : '#1a73e8';
+    } else {
+      ctx.strokeStyle = isHovered ? 'rgba(0, 0, 0, 0.25)' : 'rgba(0, 0, 0, 0.15)';
+    }
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.roundRect(btnX + 0.5, btnY + 0.5, btnSize - 1, btnSize - 1, 2);
+    ctx.stroke();
+
+    // Draw icon: funnel when filter active, dropdown arrow otherwise
+    const iconCx = btnX + btnSize / 2;
+    const iconCy = btnY + btnSize / 2;
+
+    if (hasFilter) {
+      // Funnel icon (matching AutoFilter style)
+      ctx.fillStyle = '#1a73e8';
+      ctx.beginPath();
+      ctx.moveTo(iconCx - 5, iconCy - 4);  // Top-left
+      ctx.lineTo(iconCx + 5, iconCy - 4);  // Top-right
+      ctx.lineTo(iconCx + 1, iconCy);       // Narrow right
+      ctx.lineTo(iconCx + 1, iconCy + 4);   // Stem right
+      ctx.lineTo(iconCx - 1, iconCy + 4);   // Stem left
+      ctx.lineTo(iconCx - 1, iconCy);       // Narrow left
+      ctx.closePath();
+      ctx.fill();
+    } else {
+      // Dropdown triangle
+      const triSize = 7;
+      ctx.fillStyle = theme.headerText;
+      ctx.beginPath();
+      ctx.moveTo(iconCx - triSize / 2, iconCy - triSize / 3);
+      ctx.lineTo(iconCx + triSize / 2, iconCy - triSize / 3);
+      ctx.lineTo(iconCx, iconCy + triSize / 2);
+      ctx.closePath();
+      ctx.fill();
+    }
+
+    // Store interactive bounds for the entire cell (clickable like Excel)
+    result.headerFilterBounds = {
+      x,
+      y,
+      width,
+      height,
+      zone,
+      row: rowIndex,
+      col: colIndex,
+    };
+
+    return result;
+  }
+
   // Calculate text position
   let textX = x + CELL_PADDING_X;
   let textMaxWidth = width - CELL_PADDING_X * 2;
@@ -584,6 +703,7 @@ export function renderPivotView(
   const interactiveBounds: PivotInteractiveBounds = {
     expandCollapseIcons: new Map(),
     filterButtons: new Map(),
+    headerFilterButtons: new Map(),
   };
 
   const {
@@ -599,6 +719,7 @@ export function renderPivotView(
     frozenColCount,
     hoveredFilterFieldIndex,
     hoveredIconKey,
+    hoveredHeaderFilterKey,
   } = options;
 
   // Clear canvas
@@ -629,6 +750,10 @@ export function renderPivotView(
     return calculateColumnXWithFreeze(colIndex, positionConfig);
   };
 
+  // Pre-compute whether each zone has active filters
+  const rowHasActiveFilter = pivotView.rowFieldSummaries?.some(f => f.hasActiveFilter) ?? false;
+  const colHasActiveFilter = pivotView.columnFieldSummaries?.some(f => f.hasActiveFilter) ?? false;
+
   // Render cells in four quadrants:
   // 1. Frozen corner (top-left)
   // 2. Frozen top (scrolls horizontally)
@@ -655,6 +780,13 @@ export function renderPivotView(
     const isHoveredFilter = cell.filterFieldIndex !== undefined &&
       cell.filterFieldIndex === hoveredFilterFieldIndex;
     const isHoveredIcon = hoveredIconKey === cellKey;
+    const isHoveredHeaderFilter = hoveredHeaderFilterKey === cellKey;
+
+    // Determine active filter state for header filter cells
+    const cellHasActiveFilter =
+      cell.cellType === 'RowLabelHeader' ? rowHasActiveFilter :
+      cell.cellType === 'ColumnLabelHeader' ? colHasActiveFilter :
+      false;
 
     const cellResult = drawPivotCell(
       ctx,
@@ -669,6 +801,8 @@ export function renderPivotView(
       {
         isHoveredFilterButton: isHoveredFilter,
         isHoveredIcon,
+        isHoveredHeaderFilter,
+        hasActiveFilter: cellHasActiveFilter,
       }
     );
 
@@ -680,6 +814,10 @@ export function renderPivotView(
     if (cellResult.filterButtonBounds) {
       const filterKey = `filter-${cell.filterFieldIndex}`;
       interactiveBounds.filterButtons.set(filterKey, cellResult.filterButtonBounds);
+    }
+
+    if (cellResult.headerFilterBounds) {
+      interactiveBounds.headerFilterButtons.set(cellKey, cellResult.headerFilterBounds);
     }
   };
 
@@ -817,6 +955,11 @@ export function measurePivotColumnWidth(
         // Account for filter dropdown button width
         if (cell.cellType === 'FilterDropdown') {
           totalWidth = Math.max(totalWidth, FILTER_BUTTON_MIN_WIDTH + CELL_PADDING_X * 2);
+        }
+
+        // Account for header filter dropdown arrow area
+        if (cell.cellType === 'RowLabelHeader' || cell.cellType === 'ColumnLabelHeader') {
+          totalWidth += HEADER_FILTER_ARROW_AREA;
         }
 
         maxContentWidth = Math.max(maxContentWidth, totalWidth);

@@ -44,6 +44,10 @@ pub enum PivotCellType {
     FilterLabel,
     /// Filter dropdown button (right side of filter row).
     FilterDropdown,
+    /// Row label header with filter dropdown (shows row field names + dropdown arrow).
+    RowLabelHeader,
+    /// Column label header with filter dropdown (shows "Column Labels" + dropdown arrow).
+    ColumnLabelHeader,
 }
 
 /// Display value for a pivot cell.
@@ -263,6 +267,46 @@ impl PivotViewCell {
         }
     }
     
+    /// Creates a row label header cell with filter dropdown capability.
+    /// Displayed in the last header row's corner area (shows row field names).
+    pub fn row_label_header(label: String) -> Self {
+        PivotViewCell {
+            value: PivotCellValue::Text(label.clone()),
+            formatted_value: label,
+            cell_type: PivotCellType::RowLabelHeader,
+            indent_level: 0,
+            is_collapsed: false,
+            is_expandable: false,
+            number_format: None,
+            row_span: 1,
+            col_span: 1,
+            is_bold: true,
+            background_style: BackgroundStyle::Header,
+            group_path: Vec::new(),
+            filter_field_index: None,
+        }
+    }
+
+    /// Creates a column label header cell with filter dropdown capability.
+    /// Displayed in the last header row's data columns area (first column header).
+    pub fn column_label_header(label: String) -> Self {
+        PivotViewCell {
+            value: PivotCellValue::Text(label.clone()),
+            formatted_value: label,
+            cell_type: PivotCellType::ColumnLabelHeader,
+            indent_level: 0,
+            is_collapsed: false,
+            is_expandable: false,
+            number_format: None,
+            row_span: 1,
+            col_span: 1,
+            is_bold: true,
+            background_style: BackgroundStyle::Header,
+            group_path: Vec::new(),
+            filter_field_index: None,
+        }
+    }
+
     /// Sets expandable state.
     pub fn with_expandable(mut self, expandable: bool, collapsed: bool) -> Self {
         self.is_expandable = expandable;
@@ -411,6 +455,22 @@ pub struct FilterRowInfo {
 }
 
 // ============================================================================
+// HEADER FIELD SUMMARY (for row/column label filter dropdowns)
+// ============================================================================
+
+/// Summary info about a row or column field, used by the frontend
+/// for the "Row Labels" / "Column Labels" filter dropdowns.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HeaderFieldSummary {
+    /// The source field index.
+    pub field_index: usize,
+    /// Display name of the field.
+    pub field_name: String,
+    /// Whether this field currently has an active filter (hidden items).
+    pub has_active_filter: bool,
+}
+
+// ============================================================================
 // MAIN VIEW STRUCT
 // ============================================================================
 
@@ -448,7 +508,13 @@ pub struct PivotView {
     
     /// Metadata for filter rows (for frontend interaction).
     pub filter_rows: Vec<FilterRowInfo>,
-    
+
+    /// Row field summaries (for the "Row Labels" header filter dropdown).
+    pub row_field_summaries: Vec<HeaderFieldSummary>,
+
+    /// Column field summaries (for the "Column Labels" header filter dropdown).
+    pub column_field_summaries: Vec<HeaderFieldSummary>,
+
     /// Indicates if the view is a partial/windowed view.
     pub is_windowed: bool,
     
@@ -476,6 +542,8 @@ impl PivotView {
             column_header_row_count: 0,
             filter_row_count: 0,
             filter_rows: Vec::new(),
+            row_field_summaries: Vec::new(),
+            column_field_summaries: Vec::new(),
             is_windowed: false,
             total_row_count: None,
             window_start_row: None,
@@ -623,6 +691,8 @@ impl PivotView {
         windowed.column_header_row_count = self.column_header_row_count;
         windowed.filter_row_count = self.filter_row_count;
         windowed.filter_rows = self.filter_rows.clone();
+        windowed.row_field_summaries = self.row_field_summaries.clone();
+        windowed.column_field_summaries = self.column_field_summaries.clone();
         windowed.version = self.version;
         
         for &idx in &windowed_indices {
