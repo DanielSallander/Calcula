@@ -1566,13 +1566,18 @@ impl<'a> PivotCalculator<'a> {
                         cells.push(PivotViewCell::column_header(label));
                     }
                 } else if has_col_fields && col == 0 {
-                    // Non-last header rows: show column field name label with
-                    // dropdown in the first corner cell (stacked like Excel)
+                    // Non-last header rows: show column field name label in corner cell.
+                    // Only the FIRST header row gets the dropdown arrow (ColumnLabelHeader).
+                    // Subsequent rows use plain ColumnHeader (same styling, no dropdown).
                     let field_label = self.effective_col_fields
                         .get(value_depth)
                         .map(|f| f.name.clone())
                         .unwrap_or_default();
-                    cells.push(PivotViewCell::column_label_header(field_label));
+                    if header_row == 0 {
+                        cells.push(PivotViewCell::column_label_header(field_label));
+                    } else {
+                        cells.push(PivotViewCell::column_header(field_label));
+                    }
                 } else {
                     cells.push(PivotViewCell::corner());
                 }
