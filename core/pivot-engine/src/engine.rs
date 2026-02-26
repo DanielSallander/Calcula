@@ -1552,6 +1552,9 @@ impl<'a> PivotCalculator<'a> {
                             }
                         }
                         ch.group_path = gp;
+                        ch.is_expandable = item.has_children;
+                        ch.is_collapsed = item.is_collapsed;
+                        ch.indent_level = item.depth as u8;
                         ch
                     } else if item.depth > value_depth {
                         // Parent level - might need spanning

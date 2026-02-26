@@ -34,7 +34,7 @@ export interface UsePivotGridInteractionOptions {
   /** Ref to the element that receives pointer events (e.g. the scroll container overlaying the canvas) */
   eventTargetRef: React.RefObject<HTMLElement | null>;
   interactiveBounds: PivotInteractiveBounds | null;
-  onExpandCollapse?: (row: number, col: number, isExpanded: boolean) => void;
+  onExpandCollapse?: (row: number, col: number, isExpanded: boolean, isRow: boolean) => void;
   onSelectionChange?: (selection: SelectionRange | null) => void;
   onRefresh?: () => void;
 }
@@ -151,6 +151,7 @@ export function usePivotGridInteraction(
       row: number;
       col: number;
       isExpanded: boolean;
+      isRow: boolean;
       key: string;
     } | null => {
       if (!interactiveBounds?.expandCollapseIcons) return null;
@@ -166,6 +167,7 @@ export function usePivotGridInteraction(
             row: bounds.row,
             col: bounds.col,
             isExpanded: bounds.isExpanded,
+            isRow: bounds.isRow,
             key,
           };
         }
@@ -297,7 +299,7 @@ export function usePivotGridInteraction(
       // 2. Check expand/collapse icon clicks
       const clickedIcon = findClickedExpandIcon(canvasX, canvasY);
       if (clickedIcon) {
-        onExpandCollapse?.(clickedIcon.row, clickedIcon.col, clickedIcon.isExpanded);
+        onExpandCollapse?.(clickedIcon.row, clickedIcon.col, clickedIcon.isExpanded, clickedIcon.isRow);
         return;
       }
 

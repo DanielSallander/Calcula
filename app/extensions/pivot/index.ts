@@ -100,6 +100,7 @@ interface StoredIconBounds {
   gridRow: number;
   gridCol: number;
   isExpanded: boolean;
+  isRow: boolean;
   pivotId: number;
 }
 
@@ -305,6 +306,7 @@ function drawStyledPivotView(overlayCtx: OverlayRenderContext, pivotView: PivotV
           gridRow,
           gridCol,
           isExpanded: cellResult.iconBounds.isExpanded,
+          isRow: cellResult.iconBounds.isRow,
           pivotId,
         });
       }
@@ -571,13 +573,16 @@ export function registerPivotExtension(): void {
 
           const itemLabel = cell.formattedValue;
           // In compact layout, all row headers share col 0 but have different indent levels.
-          // Use indentLevel to determine the correct field index in row_fields.
-          const fieldIndex = cell.indentLevel || pivotColIndex;
+          // Use indentLevel to determine the correct field index.
+          // For columns, indentLevel carries the column field depth directly.
+          const fieldIndex = bounds.isRow
+            ? (cell.indentLevel || pivotColIndex)
+            : cell.indentLevel;
 
           try {
             await togglePivotGroup({
               pivotId: bounds.pivotId,
-              isRow: true,
+              isRow: bounds.isRow,
               fieldIndex,
               value: itemLabel,
             });

@@ -27,7 +27,7 @@ export interface PivotGridProps {
   minColumnWidth?: number;
   maxColumnWidth?: number;
   onCellClick?: (row: number, col: number, cell: unknown) => void;
-  onExpandCollapse?: (row: number, col: number, newExpandedState: boolean) => void;
+  onExpandCollapse?: (row: number, col: number, newExpandedState: boolean, isRow: boolean) => void;
   className?: string;
   style?: React.CSSProperties;
 }
@@ -161,38 +161,36 @@ export const PivotGrid: React.FC<PivotGridProps> = ({
   // ==========================================================================
 
   const handleExpandCollapse = useCallback(
-    async (row: number, col: number, isExpanded: boolean) => {
+    async (row: number, col: number, isExpanded: boolean, isRow: boolean) => {
       if (!pivotView) return;
 
-      // Look up the cell data to find the item label
       const rowData = pivotView.rows[row];
       if (!rowData) return;
       const cell = rowData.cells[col];
       if (!cell) return;
 
-      // The formatted value is the item label for this row header
       const itemLabel = cell.formattedValue;
 
-      // Determine field index: col position maps to a row field (for row headers)
-      // In compact layout, all fields are in col 0 with indent levels
-      // In outline/tabular, each field has its own column
-      // Use indentLevel when > 0 (compact layout), otherwise fall back to col
-      const fieldIndex = cell.indentLevel || col;
+      // Determine field index:
+      // For row headers: indentLevel for compact layout, col for outline/tabular
+      // For column headers: indentLevel carries the column field depth (set by backend)
+      const fieldIndex = isRow
+        ? (cell.indentLevel || col)
+        : cell.indentLevel;
 
       const newExpandedState = !isExpanded;
-      onExpandCollapse?.(row, col, newExpandedState);
+      onExpandCollapse?.(row, col, newExpandedState, isRow);
 
       try {
-        // Call API with per-item toggle (value = item label)
         await togglePivotGroup({
           pivotId,
-          isRow: true,
+          isRow,
           fieldIndex,
           value: itemLabel,
         });
         await fetchPivotData();
       } catch (error) {
-        console.error('Failed to toggle expand/collapse:', error);
+        console.error('[Pivot] Failed to toggle expand/collapse:', error);
         await fetchPivotData();
       }
     },

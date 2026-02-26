@@ -116,6 +116,7 @@ export interface PivotCellDrawResult {
     row: number;
     col: number;
     isExpanded: boolean;
+    isRow: boolean;
   } | null;
   filterButtonBounds: {
     x: number;
@@ -146,6 +147,7 @@ export interface PivotInteractiveBounds {
     row: number;
     col: number;
     isExpanded: boolean;
+    isRow: boolean;
   }>;
   filterButtons: Map<string, {
     x: number;
@@ -651,6 +653,34 @@ export function drawPivotCell(
       row: rowIndex,
       col: colIndex,
       isExpanded: !cell.isCollapsed,
+      isRow: true,
+    };
+
+    textX = iconX + EXPAND_ICON_SIZE + EXPAND_ICON_PADDING;
+    textMaxWidth = width - (textX - x) - CELL_PADDING_X;
+  } else if (cell.cellType === 'ColumnHeader' && cell.isExpandable) {
+    // Handle expand/collapse icon for column headers
+    const iconX = x + CELL_PADDING_X;
+    const iconY = y + (height - EXPAND_ICON_SIZE) / 2;
+
+    drawExpandCollapseIcon(
+      ctx,
+      iconX,
+      iconY,
+      cell.isCollapsed,
+      theme,
+      options.isHoveredIcon || false
+    );
+
+    result.iconBounds = {
+      x: iconX,
+      y: iconY,
+      width: EXPAND_ICON_SIZE,
+      height: EXPAND_ICON_SIZE,
+      row: rowIndex,
+      col: colIndex,
+      isExpanded: !cell.isCollapsed,
+      isRow: false,
     };
 
     textX = iconX + EXPAND_ICON_SIZE + EXPAND_ICON_PADDING;
