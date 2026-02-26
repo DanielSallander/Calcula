@@ -3,6 +3,7 @@
 // CONTEXT: Subscribes to selection changes and CELLS_UPDATED events,
 //          debounces, and calls the Rust backend for computation.
 //          Includes a circuit breaker to gracefully handle missing backend commands.
+//          Supports multi-selection (Ctrl+Click additional ranges).
 
 import { useState, useEffect, useRef, useCallback } from "react";
 import {
@@ -13,16 +14,75 @@ import {
   type SelectionAggregationResult,
 } from "../../../src/api";
 
+interface SelectionRange {
+  startRow: number;
+  startCol: number;
+  endRow: number;
+  endCol: number;
+}
+
 interface SelectionInfo {
   startRow: number;
   startCol: number;
   endRow: number;
   endCol: number;
   type: string;
+  additionalRanges?: SelectionRange[];
 }
 
 function isMultiCellSelection(sel: SelectionInfo): boolean {
-  return sel.startRow !== sel.endRow || sel.startCol !== sel.endCol;
+  // Multi-cell if the main range spans multiple cells OR there are additional ranges
+  return sel.startRow !== sel.endRow || sel.startCol !== sel.endCol ||
+    (sel.additionalRanges !== undefined && sel.additionalRanges.length > 0);
+}
+
+/**
+ * Combine multiple aggregation results into one.
+ * sum = total sum, count = total count, average = total sum / total numericalCount,
+ * min = global min, max = global max.
+ */
+function combineAggregations(results: SelectionAggregationResult[]): SelectionAggregationResult {
+  let totalSum = 0;
+  let hasNumeric = false;
+  let totalCount = 0;
+  let totalNumericalCount = 0;
+  let globalMin = Infinity;
+  let globalMax = -Infinity;
+
+  for (const r of results) {
+    totalCount += r.count;
+    totalNumericalCount += r.numericalCount;
+    if (r.sum !== null) {
+      totalSum += r.sum;
+      hasNumeric = true;
+    }
+    if (r.min !== null && r.min < globalMin) {
+      globalMin = r.min;
+    }
+    if (r.max !== null && r.max > globalMax) {
+      globalMax = r.max;
+    }
+  }
+
+  if (!hasNumeric) {
+    return {
+      sum: null,
+      average: null,
+      min: null,
+      max: null,
+      count: totalCount,
+      numericalCount: totalNumericalCount,
+    };
+  }
+
+  return {
+    sum: totalSum,
+    average: totalNumericalCount > 0 ? totalSum / totalNumericalCount : null,
+    min: globalMin === Infinity ? null : globalMin,
+    max: globalMax === -Infinity ? null : globalMax,
+    count: totalCount,
+    numericalCount: totalNumericalCount,
+  };
 }
 
 /** Wrap a promise with a timeout to prevent indefinite hangs. */
@@ -61,19 +121,36 @@ export function useSelectionAggregation(): SelectionAggregationResult | null {
     }
 
     try {
-      const data = await withTimeout(
-        getSelectionAggregations(
-          sel.startRow,
-          sel.startCol,
-          sel.endRow,
-          sel.endCol,
-          sel.type,
-        ),
-        IPC_TIMEOUT_MS,
+      // Build the list of ranges to aggregate
+      const ranges: SelectionRange[] = [
+        { startRow: sel.startRow, startCol: sel.startCol, endRow: sel.endRow, endCol: sel.endCol },
+      ];
+      if (sel.additionalRanges) {
+        ranges.push(...sel.additionalRanges);
+      }
+
+      // Fetch aggregations for all ranges in parallel
+      const promises = ranges.map((range) =>
+        withTimeout(
+          getSelectionAggregations(
+            range.startRow,
+            range.startCol,
+            range.endRow,
+            range.endCol,
+            sel.type,
+          ),
+          IPC_TIMEOUT_MS,
+        )
       );
+
+      const results = await Promise.all(promises);
+
+      // Combine results if multiple ranges, otherwise use single result directly
+      const combined = results.length === 1 ? results[0] : combineAggregations(results);
+
       // Success - reset circuit breaker
       failCountRef.current = 0;
-      setResult(data);
+      setResult(combined);
     } catch (err) {
       failCountRef.current += 1;
       if (failCountRef.current >= CIRCUIT_BREAKER_THRESHOLD) {
@@ -112,6 +189,7 @@ export function useSelectionAggregation(): SelectionAggregationResult | null {
         endRow: sel.endRow,
         endCol: sel.endCol,
         type: sel.type,
+        additionalRanges: sel.additionalRanges,
       } : null;
       selectionRef.current = info;
       if (info && isMultiCellSelection(info)) {

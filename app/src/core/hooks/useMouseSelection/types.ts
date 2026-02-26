@@ -116,6 +116,8 @@ export interface UseMouseSelectionProps {
   onSelectCell: (row: number, col: number, type?: SelectionType, endRow?: number, endCol?: number) => void;
   /** Callback to extend selection to a cell */
   onExtendTo: (row: number, col: number) => void;
+  /** Callback to add a cell/range to the selection (Ctrl+Click multi-select) */
+  onAddToSelection?: (row: number, col: number, endRow?: number, endCol?: number) => void;
   /** Callback when scroll position should change */
   onScroll: (scrollX: number, scrollY: number) => void;
   /** Callback when selection drag ends */

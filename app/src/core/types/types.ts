@@ -20,6 +20,17 @@ export type SelectionType = "cells" | "columns" | "rows";
 export type ClipboardMode = "none" | "copy" | "cut";
 
 /**
+ * A simple rectangular range, used for additional selection ranges
+ * in multi-selection scenarios (Ctrl+Click).
+ */
+export interface SelectionRange {
+  startRow: number;
+  startCol: number;
+  endRow: number;
+  endCol: number;
+}
+
+/**
  * Represents the currently selected cell or range.
  * startRow/startCol is the anchor point, endRow/endCol is the active cell.
  */
@@ -34,6 +45,8 @@ export interface Selection {
   endCol: number;
   /** Type of selection (cells, columns, or rows) */
   type: SelectionType;
+  /** Additional selection ranges from Ctrl+Click multi-selection */
+  additionalRanges?: SelectionRange[];
 }
 
 /**

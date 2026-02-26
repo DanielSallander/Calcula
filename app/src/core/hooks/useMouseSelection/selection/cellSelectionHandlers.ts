@@ -18,6 +18,8 @@ interface CellSelectionDependencies {
   /** FIX: Updated signature to accept optional endRow/endCol for merged cells */
   onSelectCell: (row: number, col: number, type?: SelectionType, endRow?: number, endCol?: number) => void;
   onExtendTo: (row: number, col: number) => void;
+  /** Callback to add to selection (Ctrl+Click multi-select) */
+  onAddToSelection?: (row: number, col: number, endRow?: number, endCol?: number) => void;
   onCommitBeforeSelect?: () => Promise<void>;
   setIsDragging: (value: boolean) => void;
   dragStartRef: React.MutableRefObject<CellPosition | null>;
@@ -64,6 +66,7 @@ export function createCellSelectionHandlers(deps: CellSelectionDependencies): Ce
     selection,
     onSelectCell,
     onExtendTo,
+    onAddToSelection,
     onCommitBeforeSelect,
     setIsDragging,
     dragStartRef,
@@ -133,6 +136,13 @@ export function createCellSelectionHandlers(deps: CellSelectionDependencies): Ce
       // Shift-click extends selection
       // For merged cells, extend to the farthest corner of the merge
       onExtendTo(effectiveEndRow, effectiveEndCol);
+    } else if (event.ctrlKey && onAddToSelection && !isRightClick) {
+      // Ctrl+Click adds to selection (multi-select)
+      if (isMergedCell) {
+        onAddToSelection(effectiveStartRow, effectiveStartCol, effectiveEndRow, effectiveEndCol);
+      } else {
+        onAddToSelection(row, col);
+      }
     } else {
       // Regular click (or right-click outside selection) starts new selection
       if (isMergedCell) {

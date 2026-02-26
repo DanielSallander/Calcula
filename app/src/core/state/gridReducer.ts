@@ -393,6 +393,40 @@ export function gridReducer(state: GridState, action: GridAction): GridState {
       };
     }
 
+    case GRID_ACTIONS.ADD_TO_SELECTION: {
+      const { row, col, endRow: payloadEndRow, endCol: payloadEndCol } = action.payload;
+      const maxRow = state.config.totalRows - 1;
+      const maxCol = state.config.totalCols - 1;
+
+      // Accumulate all previous ranges (existing additional + current main selection)
+      const previousRanges: Array<{ startRow: number; startCol: number; endRow: number; endCol: number }> = [];
+      if (state.selection) {
+        if (state.selection.additionalRanges) {
+          previousRanges.push(...state.selection.additionalRanges);
+        }
+        previousRanges.push({
+          startRow: state.selection.startRow,
+          startCol: state.selection.startCol,
+          endRow: state.selection.endRow,
+          endCol: state.selection.endCol,
+        });
+      }
+
+      const newSelection: Selection = {
+        startRow: clamp(row, 0, maxRow),
+        startCol: clamp(col, 0, maxCol),
+        endRow: clamp(payloadEndRow ?? row, 0, maxRow),
+        endCol: clamp(payloadEndCol ?? col, 0, maxCol),
+        type: "cells",
+        additionalRanges: previousRanges.length > 0 ? previousRanges : undefined,
+      };
+
+      return {
+        ...state,
+        selection: newSelection,
+      };
+    }
+
     case GRID_ACTIONS.CLEAR_SELECTION: {
       return {
         ...state,

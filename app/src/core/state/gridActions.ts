@@ -21,6 +21,7 @@ import type {
 // Action type constants
 export const GRID_ACTIONS = {
   SET_SELECTION: "SET_SELECTION",
+  ADD_TO_SELECTION: "ADD_TO_SELECTION",
   CLEAR_SELECTION: "CLEAR_SELECTION",
   EXTEND_SELECTION: "EXTEND_SELECTION",
   MOVE_SELECTION: "MOVE_SELECTION",
@@ -69,6 +70,18 @@ export interface SetSelectionPayload {
 export interface SetSelectionAction {
   type: typeof GRID_ACTIONS.SET_SELECTION;
   payload: SetSelectionPayload;
+}
+
+export interface AddToSelectionPayload {
+  row: number;
+  col: number;
+  endRow?: number;
+  endCol?: number;
+}
+
+export interface AddToSelectionAction {
+  type: typeof GRID_ACTIONS.ADD_TO_SELECTION;
+  payload: AddToSelectionPayload;
 }
 
 export interface ClearSelectionAction {
@@ -243,6 +256,7 @@ export interface SetGroupHiddenColsAction {
 // Union type of all actions
 export type GridAction =
   | SetSelectionAction
+  | AddToSelectionAction
   | ClearSelectionAction
   | ExtendSelectionAction
   | MoveSelectionAction
@@ -345,6 +359,22 @@ export function setSelection(
       endCol: endCol!,
       type,
     },
+  };
+}
+
+/**
+ * Add a cell/range to the current selection (Ctrl+Click multi-select).
+ * Saves the current main selection as an additional range and starts a new active selection.
+ */
+export function addToSelection(
+  row: number,
+  col: number,
+  endRow?: number,
+  endCol?: number
+): AddToSelectionAction {
+  return {
+    type: GRID_ACTIONS.ADD_TO_SELECTION,
+    payload: { row, col, endRow, endCol },
   };
 }
 

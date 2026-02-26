@@ -237,6 +237,71 @@ export function drawSelection(state: RenderState): void {
       ctx.strokeRect(handleX - handleSize / 2, handleY - handleSize / 2, handleSize, handleSize);
     }
   }
+
+  // Draw additional selection ranges (from Ctrl+Click multi-select)
+  if (selection.additionalRanges && selection.additionalRanges.length > 0) {
+    for (const range of selection.additionalRanges) {
+      const addMinRow = Math.min(range.startRow, range.endRow);
+      const addMaxRow = Math.max(range.startRow, range.endRow);
+      const addMinCol = Math.min(range.startCol, range.endCol);
+      const addMaxCol = Math.max(range.startCol, range.endCol);
+
+      const addX1 = getColumnXWithFreeze(addMinCol, config, dimensions, viewport, freezeConfig);
+      const addY1 = getRowYWithFreeze(addMinRow, config, dimensions, viewport, freezeConfig);
+      const addX2 = getColumnXWithFreeze(addMaxCol, config, dimensions, viewport, freezeConfig) +
+                    getColumnWidth(addMaxCol, config, dimensions);
+      const addY2 = getRowYWithFreeze(addMaxRow, config, dimensions, viewport, freezeConfig) +
+                    getRowHeight(addMaxRow, config, dimensions);
+
+      // Clip to visible area
+      let addClipX1 = Math.max(addX1, rowHeaderWidth);
+      let addClipY1 = Math.max(addY1, colHeaderHeight);
+      let addClipX2 = Math.min(addX2, width);
+      let addClipY2 = Math.min(addY2, height);
+
+      // Freeze pane clipping
+      if (hasFrozenCols || hasFrozenRows) {
+        const layout = calculateFreezePaneLayout(freezeConfig!, config, dimensions);
+        const frozenColBoundary = rowHeaderWidth + layout.frozenColsWidth;
+        const frozenRowBoundary = colHeaderHeight + layout.frozenRowsHeight;
+        const freezeCol = freezeConfig!.freezeCol ?? 0;
+        const freezeRow = freezeConfig!.freezeRow ?? 0;
+
+        if (hasFrozenCols && addMinCol >= freezeCol) {
+          addClipX1 = Math.max(addClipX1, frozenColBoundary);
+        }
+        if (hasFrozenRows && addMinRow >= freezeRow) {
+          addClipY1 = Math.max(addClipY1, frozenRowBoundary);
+        }
+        if (hasFrozenCols && addMaxCol < freezeCol) {
+          addClipX2 = Math.min(addClipX2, frozenColBoundary);
+        }
+        if (hasFrozenRows && addMaxRow < freezeRow) {
+          addClipY2 = Math.min(addClipY2, frozenRowBoundary);
+        }
+      }
+
+      if (addClipX1 >= addClipX2 || addClipY1 >= addClipY2) {
+        continue;
+      }
+
+      // Draw fill for additional range (same style as main selection)
+      ctx.fillStyle = theme.selectionBackground;
+      ctx.fillRect(addClipX1, addClipY1, addClipX2 - addClipX1, addClipY2 - addClipY1);
+
+      // Draw border for additional range
+      ctx.strokeStyle = theme.selectionBorder;
+      ctx.lineWidth = 2;
+      const addBorderX1 = addClipX1 + 1;
+      const addBorderY1 = addClipY1 + 1;
+      const addBorderX2 = addClipX2 - 1;
+      const addBorderY2 = addClipY2 - 1;
+
+      if (addBorderX2 > addBorderX1 && addBorderY2 > addBorderY1) {
+        ctx.strokeRect(addBorderX1, addBorderY1, addBorderX2 - addBorderX1, addBorderY2 - addBorderY1);
+      }
+    }
+  }
 }
 
 /**

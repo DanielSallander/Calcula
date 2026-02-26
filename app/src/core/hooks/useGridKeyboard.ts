@@ -209,31 +209,37 @@ export function useGridKeyboard(options: UseGridKeyboardOptions): void {
       const minCol = Math.min(selection.startCol, selection.endCol);
       const maxCol = Math.max(selection.startCol, selection.endCol);
 
-      // Determine starting position based on direction
-      // Use startCol/startRow as the "entry point" for the current position
+      // Determine starting position based on direction and extend mode
       let currentRow: number;
       let currentCol: number;
 
-      switch (direction) {
-        case "up":
-          currentRow = minRow;  // Start from top edge
-          currentCol = selection.startCol;  // Preserve entry column
-          break;
-        case "down":
-          currentRow = maxRow;  // Start from bottom edge
-          currentCol = selection.startCol;  // Preserve entry column
-          break;
-        case "left":
-          currentRow = selection.startRow;  // Preserve entry row
-          currentCol = minCol;  // Start from left edge
-          break;
-        case "right":
-          currentRow = selection.startRow;  // Preserve entry row
-          currentCol = maxCol;  // Start from right edge
-          break;
-        default:
-          currentRow = selection.startRow;
-          currentCol = selection.startCol;
+      if (extend) {
+        // When extending (Ctrl+Shift+Arrow), start from the active cell
+        currentRow = selection.endRow;
+        currentCol = selection.endCol;
+      } else {
+        // When not extending, use selection bounds for merged cell edge exit
+        switch (direction) {
+          case "up":
+            currentRow = minRow;
+            currentCol = selection.startCol;
+            break;
+          case "down":
+            currentRow = maxRow;
+            currentCol = selection.startCol;
+            break;
+          case "left":
+            currentRow = selection.startRow;
+            currentCol = minCol;
+            break;
+          case "right":
+            currentRow = selection.startRow;
+            currentCol = maxCol;
+            break;
+          default:
+            currentRow = selection.startRow;
+            currentCol = selection.startCol;
+        }
       }
 
       const maxRowBound = config.totalRows - 1;
@@ -294,41 +300,39 @@ export function useGridKeyboard(options: UseGridKeyboardOptions): void {
       const maxRow = config.totalRows - 1;
       const maxCol = config.totalCols - 1;
 
-      // Get the normalized bounds of the current selection
-      // This handles both regular cells and merged cells
-      const minRow = Math.min(selection.startRow, selection.endRow);
-      const maxRowSel = Math.max(selection.startRow, selection.endRow);
-      const minCol = Math.min(selection.startCol, selection.endCol);
-      const maxColSel = Math.max(selection.startCol, selection.endCol);
-
-      // Calculate starting position based on direction of movement
-      // This ensures we exit from the correct edge of a merged cell
-      // while preserving the entry point for the perpendicular axis
       let startRow: number;
       let startCol: number;
 
-      if (deltaRow < 0) {
-        // Moving up - start from top edge
-        startRow = minRow;
-      } else if (deltaRow > 0) {
-        // Moving down - start from bottom edge
-        startRow = maxRowSel;
+      if (extend) {
+        // EXTENDING: Always start from the active cell (endRow/endCol).
+        // This ensures that pressing a perpendicular arrow while extending
+        // preserves the selection extent on both axes.
+        // e.g., Shift+Down from A1 gives A1:A2, then Shift+Right gives A1:B2 (not A1:B1)
+        startRow = selection.endRow;
+        startCol = selection.endCol;
       } else {
-        // No vertical movement - preserve the entry row (startRow)
-        startRow = selection.startRow;
-      }
+        // NOT EXTENDING: Use selection bounds to exit from the correct edge
+        // of a merged cell, preserving entry point for the perpendicular axis
+        const minRow = Math.min(selection.startRow, selection.endRow);
+        const maxRowSel = Math.max(selection.startRow, selection.endRow);
+        const minCol = Math.min(selection.startCol, selection.endCol);
+        const maxColSel = Math.max(selection.startCol, selection.endCol);
 
-      if (deltaCol < 0) {
-        // Moving left - start from left edge
-        startCol = minCol;
-      } else if (deltaCol > 0) {
-        // Moving right - start from right edge
-        startCol = maxColSel;
-      } else {
-        // No horizontal movement - preserve the entry column (startCol)
-        // This is the key fix: when exiting a merged cell vertically,
-        // we stay in the same column we entered from
-        startCol = selection.startCol;
+        if (deltaRow < 0) {
+          startRow = minRow;       // Moving up - start from top edge
+        } else if (deltaRow > 0) {
+          startRow = maxRowSel;    // Moving down - start from bottom edge
+        } else {
+          startRow = selection.startRow; // No vertical movement - preserve entry row
+        }
+
+        if (deltaCol < 0) {
+          startCol = minCol;       // Moving left - start from left edge
+        } else if (deltaCol > 0) {
+          startCol = maxColSel;    // Moving right - start from right edge
+        } else {
+          startCol = selection.startCol; // No horizontal movement - preserve entry column
+        }
       }
 
       // Calculate target position from the appropriate edge

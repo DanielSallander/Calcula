@@ -76,7 +76,8 @@ export function useSpreadsheetSelection({
     moveActiveCell,
     getSelectionReference,
     selectColumn,
-    selectRow
+    selectRow,
+    addCellToSelection,
   } = useSelection();
 
   const {
@@ -386,6 +387,7 @@ export function useSpreadsheetSelection({
     currentSheetName: sheetContext.activeSheetName,
     formulaSourceSheetName: state.editing?.sourceSheetName,
     onSelectCell: selectCell,
+    onAddToSelection: addCellToSelection,
     onExtendTo: handleExtendTo,  // FIX: Use merge-aware extension for drag selection
     onScroll: handleScrollUpdate,
     onDragEnd: handleDragEnd,

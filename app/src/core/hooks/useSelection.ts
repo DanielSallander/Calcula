@@ -13,7 +13,7 @@
 
 import { useCallback } from "react";
 import { useGridContext } from "../state/GridContext";
-import { setSelection, extendSelection, moveSelection } from "../state/gridActions";
+import { setSelection, extendSelection, moveSelection, addToSelection } from "../state/gridActions";
 import { indexToCol, getMergeInfo, getMergedRegions } from "../lib/tauri-api";
 import type { Selection, SelectionType } from "../types";
 import { stateLog } from '../../utils/component-logger';
@@ -44,6 +44,8 @@ export interface UseSelectionReturn {
   selectRow: (row: number, extend?: boolean) => void;
   /** Select a cell, expanding to cover any merged region */
   selectCellWithMergeExpansion: (row: number, col: number, type?: SelectionType) => Promise<void>;
+  /** Add a cell/range to the selection (Ctrl+Click multi-select) */
+  addCellToSelection: (row: number, col: number, endRow?: number, endCol?: number) => void;
 }
 
 /**
@@ -426,6 +428,19 @@ export function useSelection(): UseSelectionReturn {
     [selection]
   );
 
+  /**
+   * Add a cell or range to the current selection (Ctrl+Click).
+   * The current main selection is saved as an additional range, and
+   * the new cell becomes the new active selection.
+   */
+  const addCellToSelection = useCallback(
+    (row: number, col: number, endRow?: number, endCol?: number) => {
+      stateLog.action('Selection', 'addCellToSelection', `row=${row} col=${col} endRow=${endRow} endCol=${endCol}`);
+      dispatch(addToSelection(row, col, endRow, endCol));
+    },
+    [dispatch]
+  );
+
   return {
     selection,
     selectCell,
@@ -438,5 +453,6 @@ export function useSelection(): UseSelectionReturn {
     isActiveCell,
     selectColumn,
     selectRow,
+    addCellToSelection,
   };
 }
