@@ -337,9 +337,16 @@ pub(crate) fn update_pivot_in_grid(
                 }
             }
             
-            // Copy new cells to state.grid
-            for ((r, c), cell) in dest_grid.cells.iter() {
-                grid.set_cell(*r, *c, cell.clone());
+            // Copy only the new pivot region cells to state.grid (not the entire grid)
+            let (dest_row, dest_col) = destination;
+            let end_row = dest_row + view.row_count as u32;
+            let end_col = dest_col + view.col_count as u32;
+            for row in dest_row..end_row {
+                for col in dest_col..end_col {
+                    if let Some(cell) = dest_grid.get_cell(row, col) {
+                        grid.set_cell(row, col, cell.clone());
+                    }
+                }
             }
             grid.recalculate_bounds();
             log_debug!("PIVOT", "synced pivot cells to state.grid (active sheet)");

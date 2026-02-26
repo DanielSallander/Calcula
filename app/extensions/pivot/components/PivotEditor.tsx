@@ -53,11 +53,17 @@ export function PivotEditor({
 
   const handleUpdate = useCallback(async (request: UpdatePivotFieldsRequest) => {
     try {
+      const t0 = performance.now();
       await pivot.updateFields(request);
+      const ipcMs = performance.now() - t0;
       // Notify parent that the pivot view has been updated
       if (onViewUpdate) {
         onViewUpdate();
       }
+      const totalMs = performance.now() - t0;
+      console.log(
+        `[PERF][pivot] handleUpdate pivot_id=${request.pivotId} | ipc=${ipcMs.toFixed(1)}ms total=${totalMs.toFixed(1)}ms`
+      );
     } catch (error) {
       console.error('Failed to update pivot fields:', error);
     }

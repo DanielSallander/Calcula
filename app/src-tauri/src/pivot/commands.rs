@@ -5,10 +5,11 @@
 use crate::pivot::operations::*;
 use crate::pivot::types::*;
 use crate::pivot::utils::*;
-use crate::{log_debug, log_info, AppState};
+use crate::{log_debug, log_info, log_perf, AppState};
 use crate::pivot::types::PivotState;
 use pivot_engine::{drill_down, CacheValue, PivotDefinition, PivotId, VALUE_ID_EMPTY};
 use crate::sheets::FreezeConfig;
+use std::time::Instant;
 use tauri::State;
 
 // ============================================================================
@@ -199,33 +200,49 @@ pub fn update_pivot_fields(
     // Bump version for cache invalidation
     definition.bump_version();
 
+    let t_total = Instant::now();
+
     // Recalculate view
+    let t0 = Instant::now();
     let view = safe_calculate_pivot(definition, cache);
+    let calc_ms = t0.elapsed().as_secs_f64() * 1000.0;
+
+    let t1 = Instant::now();
     let response = view_to_response(&view, definition, cache);
-    
+    let serialize_ms = t1.elapsed().as_secs_f64() * 1000.0;
+
     // Get destination info before dropping pivot_tables lock
     let destination = definition.destination;
     let pivot_id = definition.id;
-    
+
     // Resolve destination sheet index from definition
     let dest_sheet_idx = resolve_dest_sheet_index(&state, definition);
-    
-    drop(pivot_tables);
-    
-    // Update pivot in grid (clears old region, writes new view)
-    update_pivot_in_grid(&state, pivot_id, dest_sheet_idx, destination, &view);
-    
-    // Update pivot region tracking
-    update_pivot_region(&state, pivot_id, dest_sheet_idx, destination, &view);
 
-    log_info!(
+    drop(pivot_tables);
+
+    // Update pivot in grid (clears old region, writes new view)
+    let t2 = Instant::now();
+    update_pivot_in_grid(&state, pivot_id, dest_sheet_idx, destination, &view);
+    let grid_write_ms = t2.elapsed().as_secs_f64() * 1000.0;
+
+    // Update pivot region tracking
+    let t3 = Instant::now();
+    update_pivot_region(&state, pivot_id, dest_sheet_idx, destination, &view);
+    let region_ms = t3.elapsed().as_secs_f64() * 1000.0;
+
+    let total_ms = t_total.elapsed().as_secs_f64() * 1000.0;
+
+    log_perf!(
         "PIVOT",
-        "updated pivot_id={} version={} rows={} cols={} filters={}",
+        "update_pivot_fields pivot_id={} rows={}x{} | calc={:.1}ms serialize={:.1}ms grid_write={:.1}ms region={:.1}ms TOTAL={:.1}ms",
         request.pivot_id,
-        response.version,
         response.row_count,
         response.col_count,
-        response.filter_rows.len()
+        calc_ms,
+        serialize_ms,
+        grid_write_ms,
+        region_ms,
+        total_ms
     );
 
     Ok(response)
@@ -326,24 +343,47 @@ pub fn toggle_pivot_group(
     // Bump version
     definition.bump_version();
 
+    let t_total = Instant::now();
+
     // Recalculate view
+    let t0 = Instant::now();
     let view = safe_calculate_pivot(definition, cache);
+    let calc_ms = t0.elapsed().as_secs_f64() * 1000.0;
+
+    let t1 = Instant::now();
     let response = view_to_response(&view, definition, cache);
-    
+    let serialize_ms = t1.elapsed().as_secs_f64() * 1000.0;
+
     // Get destination info
     let destination = definition.destination;
     let pivot_id = definition.id;
-    
+
     // Resolve destination sheet index from definition
     let dest_sheet_idx = resolve_dest_sheet_index(&state, definition);
-    
+
     drop(pivot_tables);
-    
+
     // Update pivot in grid (clears old region, writes new view)
+    let t2 = Instant::now();
     update_pivot_in_grid(&state, pivot_id, dest_sheet_idx, destination, &view);
-    
+    let grid_write_ms = t2.elapsed().as_secs_f64() * 1000.0;
+
     // Update pivot region tracking
     update_pivot_region(&state, pivot_id, dest_sheet_idx, destination, &view);
+
+    let total_ms = t_total.elapsed().as_secs_f64() * 1000.0;
+
+    log_perf!(
+        "PIVOT",
+        "toggle_pivot_group pivot_id={} rows={}x{} | calc={:.1}ms serialize={:.1}ms grid_write={:.1}ms TOTAL={:.1}ms",
+        request.pivot_id,
+        response.row_count,
+        response.col_count,
+        calc_ms,
+        serialize_ms,
+        grid_write_ms,
+        total_ms
+    );
 
     Ok(response)
 }
@@ -371,8 +411,26 @@ pub fn get_pivot_view(
         .get_mut(&id)
         .ok_or_else(|| format!("Pivot table {} not found", id))?;
 
+    let t0 = Instant::now();
     let view = safe_calculate_pivot(definition, cache);
-    Ok(view_to_response(&view, definition, cache))
+    let calc_ms = t0.elapsed().as_secs_f64() * 1000.0;
+
+    let t1 = Instant::now();
+    let response = view_to_response(&view, definition, cache);
+    let serialize_ms = t1.elapsed().as_secs_f64() * 1000.0;
+
+    log_perf!(
+        "PIVOT",
+        "get_pivot_view pivot_id={} rows={}x{} | calc={:.1}ms serialize={:.1}ms TOTAL={:.1}ms",
+        id,
+        response.row_count,
+        response.col_count,
+        calc_ms,
+        serialize_ms,
+        calc_ms + serialize_ms
+    );
+
+    Ok(response)
 }
 
 /// Deletes a pivot table

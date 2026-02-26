@@ -787,11 +787,13 @@ impl PivotCache {
         col_field_indices: &[FieldIndex],
         value_field_indices: &[FieldIndex],
     ) -> Option<&Vec<AggregateAccumulator>> {
-        // Check if we need to recompute
-        if self.aggregates_dirty || !self.aggregates.contains_key(group_key) {
+        // Only recompute when dirty (field config changed).
+        // A missing key after computation means no data exists for that
+        // combination - do NOT recompute, just return None.
+        if self.aggregates_dirty {
             self.compute_aggregates(row_field_indices, col_field_indices, value_field_indices);
         }
-        
+
         self.aggregates.get(group_key)
     }
     

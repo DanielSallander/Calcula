@@ -19,7 +19,7 @@ use crate::cache::{
 use crate::definition::{
     AggregationType, DateGroupLevel, FieldGrouping, FieldIndex, ManualGroup,
     PivotDefinition, PivotField, ReportLayout, ShowValuesAs, SubtotalLocation,
-    ValuesPosition,
+    ValueField, ValuesPosition,
 };
 use crate::view::{
     BackgroundStyle, FilterRowInfo, HeaderFieldSummary, PivotCellType,
@@ -1688,17 +1688,20 @@ impl<'a> PivotCalculator<'a> {
             self.generate_single_data_row(view, row_label_cols);
             return;
         }
-        
-        // Clone what we need to avoid borrow conflicts
+
+        // Clone what we need to avoid borrow conflicts - once, not per-row
         let row_items = self.row_items.clone();
+        let col_items = self.col_items.clone();
+        let value_fields = self.definition.value_fields.clone();
+        let values_position = self.definition.layout.values_position;
         let report_layout = self.definition.layout.report_layout;
         let repeat_row_labels = self.definition.layout.repeat_row_labels;
         let base_row_offset = view.row_count;
-        
+
         for (row_idx, item) in row_items.iter().enumerate() {
             let view_row = view.row_count;
             let mut cells = Vec::new();
-            
+
             // Generate row label cells
             match report_layout {
                 ReportLayout::Compact => {
@@ -1766,10 +1769,10 @@ impl<'a> PivotCalculator<'a> {
                     }
                 }
             }
-            
-            // Generate data cells
-            self.generate_data_cells_for_row(&mut cells, item);
-            
+
+            // Generate data cells (using pre-cloned col_items/value_fields)
+            self.generate_data_cells_for_row(&mut cells, item, &col_items, &value_fields, values_position);
+
             // Create row descriptor
             let row_type = if item.is_grand_total {
                 PivotRowType::GrandTotal
@@ -1778,7 +1781,7 @@ impl<'a> PivotCalculator<'a> {
             } else {
                 PivotRowType::Data
             };
-            
+
             let descriptor = PivotRowDescriptor {
                 view_row,
                 row_type,
@@ -1792,7 +1795,7 @@ impl<'a> PivotCalculator<'a> {
                 children_indices: Vec::new(),
                 group_values: item.group_values.clone(),
             };
-            
+
             view.add_row(cells, descriptor);
         }
     }
@@ -1818,14 +1821,14 @@ impl<'a> PivotCalculator<'a> {
     /// Generates a single data row when there are no row fields.
     fn generate_single_data_row(&mut self, view: &mut PivotView, row_label_cols: usize) {
         let mut cells = Vec::new();
-        
+
         // Row label (just "Total" or empty)
         for _ in 0..row_label_cols {
             let mut cell = PivotViewCell::row_header("Total".to_string(), 0);
             cell = cell.as_total();
             cells.push(cell);
         }
-        
+
         // Create a grand total row item
         let grand_total_item = FlatAxisItem {
             group_values: vec![VALUE_ID_EMPTY; self.row_field_indices.len().max(1)],
@@ -1838,8 +1841,12 @@ impl<'a> PivotCalculator<'a> {
             parent_index: -1,
             field_indices: self.row_field_indices.clone(),
         };
-        
-        self.generate_data_cells_for_row(&mut cells, &grand_total_item);
+
+        // Clone once for this single row
+        let col_items = self.col_items.clone();
+        let value_fields = self.definition.value_fields.clone();
+        let values_position = self.definition.layout.values_position;
+        self.generate_data_cells_for_row(&mut cells, &grand_total_item, &col_items, &value_fields, values_position);
         
         let descriptor = PivotRowDescriptor {
             view_row: view.row_count,
@@ -1855,11 +1862,15 @@ impl<'a> PivotCalculator<'a> {
     }
     
     /// Generates data cells for a row by iterating through columns.
-    fn generate_data_cells_for_row(&mut self, cells: &mut Vec<PivotViewCell>, row_item: &FlatAxisItem) {
-        // Clone col_items to avoid borrow conflicts
-        let col_items = self.col_items.clone();
-        let value_fields = self.definition.value_fields.clone();
-        let values_position = self.definition.layout.values_position;
+    /// Accepts pre-cloned col_items/value_fields to avoid cloning per-row.
+    fn generate_data_cells_for_row(
+        &mut self,
+        cells: &mut Vec<PivotViewCell>,
+        row_item: &FlatAxisItem,
+        col_items: &[FlatAxisItem],
+        value_fields: &[ValueField],
+        values_position: ValuesPosition,
+    ) {
         
         // Handle case with no value fields - generate blank cells
         if value_fields.is_empty() {
@@ -1868,7 +1879,7 @@ impl<'a> PivotCalculator<'a> {
                 cells.push(PivotViewCell::blank());
             } else {
                 // Generate blank cells for each column
-                for _ in &col_items {
+                for _ in col_items {
                     cells.push(PivotViewCell::blank());
                 }
             }
@@ -1920,7 +1931,7 @@ impl<'a> PivotCalculator<'a> {
             }
         } else {
             // Generate cell for each column item
-            for col_item in &col_items {
+            for col_item in col_items {
                 // Determine which value field this column represents
                 let (vf_idx, col_group_values) = extract_value_field_from_column(
                     col_item,

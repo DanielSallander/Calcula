@@ -63,30 +63,19 @@ import {
 import type { PivotRegionData } from "./types";
 import { getPivotRegionsForSheet, getPivotAtCell, getPivotView, togglePivotGroup } from "./lib/pivot-api";
 import type { PivotViewResponse } from "./lib/pivot-api";
+import {
+  cachePivotView,
+  setCachedPivotView,
+  getCachedPivotView,
+  deleteCachedPivotView,
+  isCacheFresh,
+  consumeFreshFlag,
+} from "./lib/pivotViewStore";
 import { drawPivotCell, DEFAULT_PIVOT_THEME } from "./rendering/pivot";
 import type { PivotCellDrawResult } from "./rendering/pivot";
 
-// ============================================================================
-// Pivot View Data Cache
-// ============================================================================
-
-/** Cache of the latest PivotViewResponse for each pivot table. */
-const pivotViewCache = new Map<number, PivotViewResponse>();
-
-/**
- * Store a PivotViewResponse in the cache for use by the overlay renderer.
- */
-export function cachePivotView(pivotId: number, view: PivotViewResponse): void {
-  pivotViewCache.set(pivotId, view);
-}
-
-/**
- * Get a cached PivotViewResponse by pivotId (synchronous).
- * Used by context menu helpers for synchronous cell type checks.
- */
-export function getCachedPivotView(pivotId: number): PivotViewResponse | undefined {
-  return pivotViewCache.get(pivotId);
-}
+// Re-export cache accessors so existing consumers (e.g., context menu) keep working
+export { cachePivotView, getCachedPivotView };
 
 // ============================================================================
 // Expand/Collapse Icon Bounds (populated during overlay rendering)
@@ -151,18 +140,29 @@ let isRefreshingPivotRegions = false;
 
 /**
  * Fetch and cache pivot view data for all non-empty pivot regions.
+ * Skips the IPC call if the cache already has data for the pivot (e.g., from
+ * a preceding updatePivotFields or togglePivotGroup call that cached the result).
  */
 async function refreshPivotViewCache(regions: PivotRegionData[]): Promise<void> {
   for (const r of regions) {
     if (!r.isEmpty) {
+      // Only skip the fetch if the cache was JUST populated by updatePivotFields
+      // or togglePivotGroup in this same refresh cycle (fresh flag set).
+      // Other refresh paths (filters, dialogs, context menu) must always re-fetch.
+      if (isCacheFresh(r.pivotId)) {
+        const existing = getCachedPivotView(r.pivotId);
+        consumeFreshFlag(r.pivotId);
+        console.log(`[PERF][pivot] refreshPivotViewCache pivot_id=${r.pivotId} SKIPPED (fresh cache v${existing?.version})`);
+        continue;
+      }
       try {
         const view = await getPivotView(r.pivotId);
-        pivotViewCache.set(r.pivotId, view);
+        setCachedPivotView(r.pivotId, view);
       } catch (e) {
         console.error(`[Pivot Extension] Failed to fetch view for pivot ${r.pivotId}:`, e);
       }
     } else {
-      pivotViewCache.delete(r.pivotId);
+      deleteCachedPivotView(r.pivotId);
     }
   }
 }
@@ -242,6 +242,7 @@ function drawPivotBackground(overlayCtx: OverlayRenderContext): void {
  * banded rows, bold headers, hierarchy indentation, expand/collapse icons).
  */
 function drawStyledPivotView(overlayCtx: OverlayRenderContext, pivotView: PivotViewResponse): void {
+  const t0 = performance.now();
   const { ctx, region } = overlayCtx;
   const rowHeaderWidth = overlayGetRowHeaderWidth(overlayCtx);
   const colHeaderHeight = overlayGetColHeaderHeight(overlayCtx);
@@ -264,6 +265,8 @@ function drawStyledPivotView(overlayCtx: OverlayRenderContext, pivotView: PivotV
   );
   ctx.clip();
 
+  let cellsDrawn = 0;
+  let cellsSkipped = 0;
   for (let i = 0; i < pivotView.rows.length; i++) {
     const row = pivotView.rows[i];
     if (!row.visible) continue;
@@ -282,8 +285,9 @@ function drawStyledPivotView(overlayCtx: OverlayRenderContext, pivotView: PivotV
       const width = overlayGetColumnWidth(overlayCtx, gridCol);
 
       // Skip cells completely outside visible area
-      if (x + width < rowHeaderWidth || x > canvasWidth) continue;
+      if (x + width < rowHeaderWidth || x > canvasWidth) { cellsSkipped++; continue; }
 
+      cellsDrawn++;
       // Determine active filter state for header filter cells
       const cellHasActiveFilter =
         cell.cellType === 'RowLabelHeader' ? rowHasActiveFilter :
@@ -362,6 +366,11 @@ function drawStyledPivotView(overlayCtx: OverlayRenderContext, pivotView: PivotV
   }
 
   ctx.restore();
+
+  const drawMs = performance.now() - t0;
+  console.log(
+    `[PERF][pivot] drawStyledPivotView rows=${pivotView.rows.length} cols=${pivotView.rows[0]?.cells.length ?? 0} | drawn=${cellsDrawn} skipped=${cellsSkipped} | render=${drawMs.toFixed(1)}ms`
+  );
 }
 
 /**
@@ -425,11 +434,16 @@ async function refreshPivotRegions(triggerRepaint: boolean = false): Promise<voi
   if (isRefreshingPivotRegions) return;
   isRefreshingPivotRegions = true;
 
+  const tTotal = performance.now();
   try {
+    const t0 = performance.now();
     const regions = await getPivotRegionsForSheet();
+    const regionsMs = performance.now() - t0;
 
     // Fetch and cache pivot view data for styled rendering
+    const t1 = performance.now();
     await refreshPivotViewCache(regions);
+    const cacheMs = performance.now() - t1;
 
     // Save current region bounds as transition bounds before updating.
     // This allows the overlay renderer to draw a white background over the
@@ -487,6 +501,11 @@ async function refreshPivotRegions(triggerRepaint: boolean = false): Promise<voi
         requestOverlayRedraw();
       }, 150);
     }
+
+    const totalMs = performance.now() - tTotal;
+    console.log(
+      `[PERF][pivot] refreshPivotRegions repaint=${triggerRepaint} regions=${regions.length} | getRegions=${regionsMs.toFixed(1)}ms viewCache=${cacheMs.toFixed(1)}ms TOTAL=${totalMs.toFixed(1)}ms`
+    );
   } catch (error) {
     console.error("[Pivot Extension] Failed to fetch pivot regions:", error);
     removeGridRegionsByType("pivot");
@@ -559,7 +578,7 @@ export function registerPivotExtension(): void {
           canvasY <= bounds.y + bounds.height
         ) {
           // Found a matching icon - toggle expand/collapse
-          const cachedView = pivotViewCache.get(bounds.pivotId);
+          const cachedView = getCachedPivotView(bounds.pivotId);
           if (!cachedView) return false;
 
           // Find the pivot-relative row/col
@@ -689,7 +708,7 @@ export function registerPivotExtension(): void {
           row >= regionBounds.startRow && row <= regionBounds.endRow &&
           col >= regionBounds.startCol && col <= regionBounds.endCol
         ) {
-          const cachedView = pivotViewCache.get(pivotId);
+          const cachedView = getCachedPivotView(pivotId);
           if (!cachedView) return true; // In a pivot region, block edit
 
           const pivotRowIndex = row - regionBounds.startRow;
@@ -745,7 +764,7 @@ export function registerPivotExtension(): void {
           // Draw styled pivot cells with Excel-like appearance
           const pivotId = ctx.region.data?.pivotId as number | undefined;
           if (pivotId !== undefined) {
-            const cachedView = pivotViewCache.get(pivotId);
+            const cachedView = getCachedPivotView(pivotId);
             if (cachedView) {
               drawStyledPivotView(ctx, cachedView);
             }
