@@ -187,6 +187,7 @@ export const PivotGrid: React.FC<PivotGridProps> = ({
           isRow,
           fieldIndex,
           value: itemLabel,
+          groupPath: cell.groupPath,
         });
         await fetchPivotData();
       } catch (error) {

@@ -269,8 +269,32 @@ pub fn toggle_pivot_group(
 
     let field = &mut fields[request.field_index];
 
-    if let Some(ref item_name) = request.value {
-        // Per-item toggle: toggle a specific item in collapsed_items
+    if let Some(ref group_path) = request.group_path {
+        // Path-specific toggle: use the full group path as key so that
+        // e.g. "Female under Gothenburg" is independent of "Female under Stockholm".
+        let path_key = group_path
+            .iter()
+            .map(|(fi, vi)| format!("{}:{}", fi, vi))
+            .collect::<Vec<_>>()
+            .join("/");
+
+        if field.collapsed_items.contains(&path_key) {
+            field.collapsed_items.retain(|s| s != &path_key);
+        } else {
+            field.collapsed_items.push(path_key.clone());
+        }
+        // If toggling a specific item, clear field-level collapse
+        field.collapsed = false;
+
+        log_debug!(
+            "PIVOT",
+            "toggled path '{}' in field {} (collapsed_items count={})",
+            path_key,
+            field.name,
+            field.collapsed_items.len()
+        );
+    } else if let Some(ref item_name) = request.value {
+        // Legacy per-item toggle: toggle a specific item in collapsed_items
         if field.collapsed_items.contains(item_name) {
             field.collapsed_items.retain(|s| s != item_name);
         } else {

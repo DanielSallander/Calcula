@@ -786,10 +786,28 @@ impl<'a> PivotCalculator<'a> {
         for value_id in sorted_ids {
             // Get display label
             let label = self.get_value_label(field_cache, value_id);
-            
+
             let mut node = AxisNode::new(value_id, field.source_index, label.clone(), level);
-            // Per-item collapse: field-level collapses ALL, or check individual item
-            node.is_collapsed = field.collapsed || field.collapsed_items.contains(&label);
+
+            // Build the path-based key for this item (e.g. "0:3/1:5" for
+            // field0-value3 / field1-value5). This allows path-specific collapse
+            // so that toggling "Female under Gothenburg" doesn't affect "Female
+            // under Stockholm".
+            let path_key = {
+                let mut parts: Vec<String> = parent_path
+                    .iter()
+                    .enumerate()
+                    .map(|(i, &vid)| format!("{}:{}", fields[i].source_index, vid))
+                    .collect();
+                parts.push(format!("{}:{}", field.source_index, value_id));
+                parts.join("/")
+            };
+
+            // Per-item collapse: field-level collapses ALL, or check individual
+            // item by path key or legacy label match.
+            node.is_collapsed = field.collapsed
+                || field.collapsed_items.contains(&path_key)
+                || field.collapsed_items.contains(&label);
             node.show_subtotal = field.show_subtotals && level < fields.len() - 1;
             
             // Build children if not at leaf level
@@ -1025,8 +1043,6 @@ impl<'a> PivotCalculator<'a> {
         let subtotal_location = self.definition.layout.subtotal_location;
 
         for node in nodes {
-            let my_index = items.len() as i32;
-
             // Build group values up to this level
             let mut group_values = parent_values.to_vec();
             group_values.push(node.value_id);
@@ -1053,66 +1069,109 @@ impl<'a> PivotCalculator<'a> {
                 && layout_wants_subtotal
                 && is_row;
 
-            // Build the subtotal item lazily (used for both AtTop and AtBottom)
-            let build_subtotal = || {
-                let mut subtotal_values = parent_values.to_vec();
-                subtotal_values.push(node.value_id);
-                while subtotal_values.len() < total_levels {
-                    subtotal_values.push(VALUE_ID_EMPTY);
-                }
-                FlatAxisItem {
-                    group_values: subtotal_values,
-                    label: format!("{} Total", node.label),
-                    depth,
-                    is_subtotal: true,
-                    is_grand_total: false,
-                    has_children: false,
-                    is_collapsed: false,
-                    parent_index: my_index,
-                    field_indices: fields.iter().map(|f| f.source_index).collect(),
-                }
-            };
+            let child_parent_values: Vec<ValueId> = parent_values
+                .iter()
+                .chain(std::iter::once(&node.value_id))
+                .copied()
+                .collect();
 
-            // SubtotalLocation::AtTop: insert subtotal BEFORE children
-            if wants_subtotal && matches!(subtotal_location, SubtotalLocation::AtTop) {
-                items.push(build_subtotal());
-            }
+            // For columns: place children BEFORE the parent item so that
+            // the total/parent column appears at the end of its group
+            // (matching Excel's default behaviour).
+            if !is_row && has_children && !node.is_collapsed {
+                // Record where children start so we can fix up parent_index
+                let child_start = items.len();
 
-            // Add the main item
-            items.push(FlatAxisItem {
-                group_values: group_values.clone(),
-                label: node.label.clone(),
-                depth,
-                is_subtotal: false,
-                is_grand_total: false,
-                has_children,
-                is_collapsed: node.is_collapsed,
-                parent_index,
-                field_indices: fields.iter().map(|f| f.source_index).collect(),
-            });
-
-            // Recurse into children if not collapsed
-            if has_children && !node.is_collapsed {
-                let child_parent_values: Vec<ValueId> = parent_values
-                    .iter()
-                    .chain(std::iter::once(&node.value_id))
-                    .copied()
-                    .collect();
-
+                // Recurse into children first (they get a placeholder parent_index)
                 self.flatten_nodes(
                     &node.children,
                     items,
                     &child_parent_values,
                     depth + 1,
-                    my_index,
+                    i32::MIN, // placeholder – fixed up below
                     fields,
                     is_row,
                 );
-            }
 
-            // SubtotalLocation::AtBottom (default): insert subtotal AFTER children
-            if wants_subtotal && matches!(subtotal_location, SubtotalLocation::AtBottom) {
-                items.push(build_subtotal());
+                // Now push the parent item (total column) after its children
+                let my_index = items.len() as i32;
+                items.push(FlatAxisItem {
+                    group_values: group_values.clone(),
+                    label: node.label.clone(),
+                    depth,
+                    is_subtotal: false,
+                    is_grand_total: false,
+                    has_children,
+                    is_collapsed: node.is_collapsed,
+                    parent_index,
+                    field_indices: fields.iter().map(|f| f.source_index).collect(),
+                });
+
+                // Fix up direct children's parent_index from placeholder to actual
+                for i in child_start..(my_index as usize) {
+                    if items[i].parent_index == i32::MIN {
+                        items[i].parent_index = my_index;
+                    }
+                }
+            } else {
+                // Rows, or columns without expanded children: original order
+                let my_index = items.len() as i32;
+
+                // Build the subtotal item lazily (used for both AtTop and AtBottom)
+                let build_subtotal = || {
+                    let mut subtotal_values = parent_values.to_vec();
+                    subtotal_values.push(node.value_id);
+                    while subtotal_values.len() < total_levels {
+                        subtotal_values.push(VALUE_ID_EMPTY);
+                    }
+                    FlatAxisItem {
+                        group_values: subtotal_values,
+                        label: format!("{} Total", node.label),
+                        depth,
+                        is_subtotal: true,
+                        is_grand_total: false,
+                        has_children: false,
+                        is_collapsed: false,
+                        parent_index: my_index,
+                        field_indices: fields.iter().map(|f| f.source_index).collect(),
+                    }
+                };
+
+                // SubtotalLocation::AtTop: insert subtotal BEFORE children
+                if wants_subtotal && matches!(subtotal_location, SubtotalLocation::AtTop) {
+                    items.push(build_subtotal());
+                }
+
+                // Add the main item
+                items.push(FlatAxisItem {
+                    group_values: group_values.clone(),
+                    label: node.label.clone(),
+                    depth,
+                    is_subtotal: false,
+                    is_grand_total: false,
+                    has_children,
+                    is_collapsed: node.is_collapsed,
+                    parent_index,
+                    field_indices: fields.iter().map(|f| f.source_index).collect(),
+                });
+
+                // Recurse into children if not collapsed
+                if has_children && !node.is_collapsed {
+                    self.flatten_nodes(
+                        &node.children,
+                        items,
+                        &child_parent_values,
+                        depth + 1,
+                        my_index,
+                        fields,
+                        is_row,
+                    );
+                }
+
+                // SubtotalLocation::AtBottom (default): insert subtotal AFTER children
+                if wants_subtotal && matches!(subtotal_location, SubtotalLocation::AtBottom) {
+                    items.push(build_subtotal());
+                }
             }
         }
     }
@@ -1343,17 +1402,44 @@ impl<'a> PivotCalculator<'a> {
         } else {
             // One row per column field level, plus one for values if multiple
             let base = self.effective_col_fields.len();
-            let value_rows = if self.definition.value_fields.len() > 1
+            if self.definition.value_fields.len() > 1
                 && matches!(self.definition.layout.values_position, ValuesPosition::Columns) {
                 base + 1
             } else {
                 base.max(1)
-            };
-            // +1 for the "Column Labels" row above the actual column value headers
-            value_rows + 1
+            }
+            // No extra "+1" row: field name labels are shown stacked in the
+            // corner cells of each value header row (like Excel).
         }
     }
     
+    /// Walks up the parent chain to find the ancestor at `target_depth`.
+    fn find_ancestor_at_depth(
+        col_items: &[FlatAxisItem],
+        idx: usize,
+        target_depth: usize,
+    ) -> Option<usize> {
+        let item = &col_items[idx];
+        if item.depth == target_depth {
+            return Some(idx);
+        }
+        if item.depth < target_depth || item.parent_index < 0 {
+            return None;
+        }
+        Self::find_ancestor_at_depth(col_items, item.parent_index as usize, target_depth)
+    }
+
+    /// Builds the group_path vector from a FlatAxisItem's group_values.
+    fn build_group_path(item: &FlatAxisItem) -> Vec<(usize, ValueId)> {
+        let mut gp = Vec::new();
+        for (i, &val) in item.group_values.iter().enumerate() {
+            if val != VALUE_ID_EMPTY && i < item.field_indices.len() {
+                gp.push((item.field_indices[i], val));
+            }
+        }
+        gp
+    }
+
     /// Generates column descriptors.
     fn generate_column_descriptors(&self, row_label_cols: usize) -> Vec<PivotColumnDescriptor> {
         let mut descriptors = Vec::new();
@@ -1439,47 +1525,13 @@ impl<'a> PivotCalculator<'a> {
     ) {
         let filter_row_offset = view.filter_row_count;
         let has_col_fields = !self.effective_col_fields.is_empty();
-        // When column fields exist, the first header row is the "Column Labels" row
-        // and actual column value rows start at offset 1.
-        let value_row_offset: usize = if has_col_fields { 1 } else { 0 };
 
         for header_row in 0..col_header_rows {
             let mut cells = Vec::new();
             let is_last_header = header_row == col_header_rows - 1;
 
-            // --- "Column Labels" row (Excel-like): first header row when column fields exist ---
-            if has_col_fields && header_row == 0 {
-                // Corner cells - empty
-                for _col in 0..row_label_cols {
-                    cells.push(PivotViewCell::corner());
-                }
-
-                // First data column: ColumnLabelHeader with "Column Labels" text + dropdown
-                let data_col_count = view.col_count.saturating_sub(row_label_cols);
-                if data_col_count > 0 {
-                    cells.push(PivotViewCell::column_label_header("Column Labels".to_string()));
-                    // Fill remaining data columns with corner cells
-                    for _ in 1..data_col_count {
-                        cells.push(PivotViewCell::corner());
-                    }
-                }
-
-                let descriptor = PivotRowDescriptor {
-                    view_row: filter_row_offset + header_row,
-                    row_type: PivotRowType::ColumnHeader,
-                    depth: 0,
-                    visible: true,
-                    parent_index: None,
-                    children_indices: Vec::new(),
-                    group_values: Vec::new(),
-                };
-                view.add_row(cells, descriptor);
-                continue;
-            }
-
-            // --- Regular header rows (column value headers or value field names) ---
-            // The depth index into column values (offset by the "Column Labels" row)
-            let value_depth = header_row - value_row_offset;
+            // The depth index into column values (each header row maps to one level)
+            let value_depth = header_row;
 
             // Corner cells (row label column headers)
             for col in 0..row_label_cols {
@@ -1513,6 +1565,14 @@ impl<'a> PivotCalculator<'a> {
                     } else {
                         cells.push(PivotViewCell::column_header(label));
                     }
+                } else if has_col_fields && col == 0 {
+                    // Non-last header rows: show column field name label with
+                    // dropdown in the first corner cell (stacked like Excel)
+                    let field_label = self.effective_col_fields
+                        .get(value_depth)
+                        .map(|f| f.name.clone())
+                        .unwrap_or_default();
+                    cells.push(PivotViewCell::column_label_header(field_label));
                 } else {
                     cells.push(PivotViewCell::corner());
                 }
@@ -1538,50 +1598,87 @@ impl<'a> PivotCalculator<'a> {
                     }
                 }
             } else {
-                // Show column field values at appropriate level
-                // All cells are regular ColumnHeader (filter dropdown is on the
-                // "Column Labels" row above)
-                for item in &self.col_items {
+                // Show column field values at appropriate level.
+                // Because total/parent columns are placed AFTER their children,
+                // parent labels must appear at the first child's column position.
+                // Exception: collapsed parents have no visible children, so their
+                // label + expand icon stays at their own column position.
+                let col_items_snap = self.col_items.clone();
+                let mut current_group: Option<usize> = None;
+
+                for (col_idx, item) in self.col_items.iter().enumerate() {
                     let cell = if item.depth == value_depth {
-                        let mut ch = PivotViewCell::column_header(item.label.clone());
-                        // Set group_path so context menu handlers can identify the field
-                        let mut gp = Vec::new();
-                        for (i, &val) in item.group_values.iter().enumerate() {
-                            if val != VALUE_ID_EMPTY && i < item.field_indices.len() {
-                                gp.push((item.field_indices[i], val));
+                        if item.has_children && !item.is_collapsed {
+                            // EXPANDED total column (children visible) – the
+                            // group label was shown at the first child position.
+                            current_group = Some(col_idx);
+                            if is_last_header {
+                                // Show "X Total" in the bottom-most header row
+                                let label = format!("{} Total", item.label);
+                                let mut ch = PivotViewCell::column_header(label);
+                                ch.group_path = Self::build_group_path(item);
+                                ch
+                            } else {
+                                PivotViewCell::blank()
                             }
-                        }
-                        ch.group_path = gp;
-                        ch.is_expandable = item.has_children;
-                        ch.is_collapsed = item.is_collapsed;
-                        ch.indent_level = item.depth as u8;
-                        ch
-                    } else if item.depth > value_depth {
-                        // Parent level - might need spanning
-                        PivotViewCell::corner()
-                    } else if is_last_header
-                        && (item.is_subtotal || item.is_grand_total || item.has_children)
-                    {
-                        // Subtotal/grand total/parent-group columns don't have
-                        // child-level headers so show their label in the last row.
-                        // Parent-group columns (has_children) act as subtotals and
-                        // need the "Total" suffix appended.
-                        let label = if item.has_children && !item.is_subtotal {
-                            format!("{} Total", item.label)
                         } else {
-                            item.label.clone()
-                        };
-                        let mut ch = PivotViewCell::column_header(label);
-                        let mut gp = Vec::new();
-                        for (i, &val) in item.group_values.iter().enumerate() {
-                            if val != VALUE_ID_EMPTY && i < item.field_indices.len() {
-                                gp.push((item.field_indices[i], val));
-                            }
+                            // Leaf, grand total, or COLLAPSED parent – show
+                            // label at own position (with expand icon if collapsed)
+                            current_group = None;
+                            let mut ch = PivotViewCell::column_header(item.label.clone());
+                            ch.group_path = Self::build_group_path(item);
+                            ch.is_expandable = item.has_children;
+                            ch.is_collapsed = item.is_collapsed;
+                            ch.indent_level = item.depth as u8;
+                            ch
                         }
-                        ch.group_path = gp;
-                        ch
+                    } else if item.depth > value_depth {
+                        // Item is deeper than this header row. Check whether
+                        // it is the first column of a new group at value_depth.
+                        let ancestor = Self::find_ancestor_at_depth(
+                            &col_items_snap, col_idx, value_depth,
+                        );
+                        if let Some(anc_idx) = ancestor {
+                            if current_group != Some(anc_idx) {
+                                // First column of a new group – show ancestor label
+                                current_group = Some(anc_idx);
+                                let anc = &col_items_snap[anc_idx];
+                                let mut ch = PivotViewCell::column_header(
+                                    anc.label.clone(),
+                                );
+                                ch.group_path = Self::build_group_path(anc);
+                                ch.is_expandable = anc.has_children;
+                                ch.is_collapsed = anc.is_collapsed;
+                                ch.indent_level = anc.depth as u8;
+                                ch
+                            } else {
+                                PivotViewCell::corner()
+                            }
+                        } else {
+                            PivotViewCell::corner()
+                        }
                     } else {
-                        PivotViewCell::blank()
+                        // item.depth < value_depth – shallower column.
+                        // Collapsed items already show their label+icon at
+                        // their own depth row, so skip the "Total" label here.
+                        if item.is_collapsed {
+                            PivotViewCell::blank()
+                        } else if is_last_header
+                            && (item.is_subtotal
+                                || item.is_grand_total
+                                || item.has_children)
+                        {
+                            let label = if item.has_children && !item.is_subtotal {
+                                format!("{} Total", item.label)
+                            } else {
+                                item.label.clone()
+                            };
+                            let mut ch = PivotViewCell::column_header(label);
+                            ch.group_path = Self::build_group_path(item);
+                            ch
+                        } else {
+                            PivotViewCell::blank()
+                        }
                     };
                     cells.push(cell);
                 }

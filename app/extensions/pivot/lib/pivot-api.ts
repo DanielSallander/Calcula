@@ -178,6 +178,9 @@ export interface ToggleGroupRequest {
   fieldIndex: number;
   /** The specific value to toggle (optional - if undefined, toggle all) */
   value?: string;
+  /** Full group path for path-specific toggle: [fieldIndex, valueId] pairs.
+   *  When provided, only the exact item at this path is toggled. */
+  groupPath?: Array<[number, number]>;
 }
 
 /** Cell value types */

@@ -585,6 +585,9 @@ export function registerPivotExtension(): void {
               isRow: bounds.isRow,
               fieldIndex,
               value: itemLabel,
+              // Send full group path so that toggling "Female under Gothenburg"
+              // doesn't affect "Female under Stockholm"
+              groupPath: cell.groupPath,
             });
             // Trigger refresh to reload pivot data
             window.dispatchEvent(new CustomEvent("pivot:refresh"));

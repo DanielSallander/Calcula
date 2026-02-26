@@ -486,6 +486,11 @@ pub struct ToggleGroupRequest {
     pub field_index: usize,
     /// The specific value to toggle (optional - if None, toggle all)
     pub value: Option<String>,
+    /// Full group path for path-specific toggle: (field_index, value_id) pairs.
+    /// When provided, only the exact item at this path is toggled (not other
+    /// items with the same label under different parents).
+    #[serde(default)]
+    pub group_path: Option<Vec<(usize, u32)>>,
 }
 
 // ============================================================================
