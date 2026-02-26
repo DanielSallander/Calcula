@@ -300,14 +300,15 @@ pub fn toggle_pivot_group(
         } else {
             field.collapsed_items.push(path_key.clone());
         }
-        // If toggling a specific item, clear field-level collapse
-        field.collapsed = false;
+        // Keep field.collapsed unchanged: collapsed_items acts as an
+        // exception list relative to the field-level state.
 
         log_debug!(
             "PIVOT",
-            "toggled path '{}' in field {} (collapsed_items count={})",
+            "toggled path '{}' in field {} collapsed={} (collapsed_items count={})",
             path_key,
             field.name,
+            field.collapsed,
             field.collapsed_items.len()
         );
     } else if let Some(ref item_name) = request.value {
@@ -317,8 +318,8 @@ pub fn toggle_pivot_group(
         } else {
             field.collapsed_items.push(item_name.clone());
         }
-        // If toggling a specific item, clear field-level collapse
-        field.collapsed = false;
+        // Keep field.collapsed unchanged: collapsed_items acts as an
+        // exception list relative to the field-level state.
 
         log_debug!(
             "PIVOT",

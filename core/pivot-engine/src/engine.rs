@@ -803,11 +803,17 @@ impl<'a> PivotCalculator<'a> {
                 parts.join("/")
             };
 
-            // Per-item collapse: field-level collapses ALL, or check individual
-            // item by path key or legacy label match.
-            node.is_collapsed = field.collapsed
-                || field.collapsed_items.contains(&path_key)
+            // Per-item collapse: when field.collapsed is true, ALL items are
+            // collapsed EXCEPT those listed in collapsed_items (exception list).
+            // When field.collapsed is false, only items listed in
+            // collapsed_items are collapsed.
+            let in_items = field.collapsed_items.contains(&path_key)
                 || field.collapsed_items.contains(&label);
+            node.is_collapsed = if field.collapsed {
+                !in_items // field collapsed: items in list are the EXCEPTIONS (expanded)
+            } else {
+                in_items // field expanded: items in list are collapsed
+            };
             node.show_subtotal = field.show_subtotals && level < fields.len() - 1;
             
             // Build children if not at leaf level

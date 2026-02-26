@@ -11,6 +11,7 @@ interface Selection {
   startCol: number;
   endRow: number;
   endCol: number;
+  type?: "cells" | "columns" | "rows";
 }
 import {
   applyAutoFilter,
@@ -152,7 +153,7 @@ export async function toggleFilter(): Promise<void> {
     const minCol = Math.min(sel.startCol, sel.endCol);
     const maxCol = Math.max(sel.startCol, sel.endCol);
 
-    // If single cell or single row, detect the data region
+    // If single cell, detect the data region
     if (minRow === maxRow && minCol === maxCol) {
       const region = await detectDataRegion(minRow, minCol);
       if (region) {
@@ -163,6 +164,15 @@ export async function toggleFilter(): Promise<void> {
         startCol = minCol;
         endRow = minRow;
         endCol = minCol;
+      }
+    } else if (sel.type === "rows") {
+      // Entire row selection: detect the data region starting from the first
+      // selected row to avoid applying filters across empty columns.
+      const region = await detectDataRegion(minRow, 0);
+      if (region) {
+        [startRow, startCol, endRow, endCol] = region;
+      } else {
+        return; // No data in the selected rows
       }
     } else {
       startRow = minRow;
