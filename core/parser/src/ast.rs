@@ -181,6 +181,7 @@ pub enum BuiltinFunction {
 
     // Lookup & Reference functions
     XLookup,
+    XLookups,
 
     /// Fallback for unrecognized function names (future extensions/plugins).
     Custom(String),
@@ -232,6 +233,7 @@ impl BuiltinFunction {
             "ISERROR" => BuiltinFunction::IsError,
 
             "XLOOKUP" => BuiltinFunction::XLookup,
+            "XLOOKUPS" => BuiltinFunction::XLookups,
 
             _ => BuiltinFunction::Custom(name.to_uppercase()),
         }

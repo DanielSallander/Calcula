@@ -132,6 +132,7 @@ pub enum BuiltinFunction {
 
     // Lookup & Reference functions
     XLookup,
+    XLookups,
 
     /// Fallback for unrecognized function names (future extensions/plugins).
     Custom(String),

@@ -704,6 +704,7 @@ impl<'a> Evaluator<'a> {
 
             // Lookup & Reference functions
             BuiltinFunction::XLookup => self.fn_xlookup(args),
+            BuiltinFunction::XLookups => self.fn_xlookups(args),
 
             // Unknown/custom functions
             BuiltinFunction::Custom(_) => EvalResult::Error(CellError::Name),
@@ -1354,6 +1355,192 @@ impl<'a> Evaluator<'a> {
                 }
             }
         }
+    }
+
+    /// Checks whether an Expression is a range-like expression (produces an array).
+    /// Used by XLOOKUPS to detect criteria pairs vs return_array.
+    fn is_range_expression(expr: &Expression) -> bool {
+        matches!(
+            expr,
+            Expression::Range { .. } | Expression::ColumnRef { .. } | Expression::RowRef { .. }
+        )
+    }
+
+    /// XLOOKUPS: Multi-criteria XLOOKUP.
+    /// Syntax: XLOOKUPS(value1, array1, [value2, array2, ...], return_array, [match_mode], [search_mode])
+    ///
+    /// Criteria are specified as (lookup_value, lookup_array) pairs. The end of
+    /// criteria is detected when two consecutive range arguments appear — the
+    /// second one is the return_array.
+    fn fn_xlookups(&self, args: &[Expression]) -> EvalResult {
+        // Minimum 3 args: value1, array1, return_array
+        if args.len() < 3 {
+            return EvalResult::Error(CellError::Value);
+        }
+
+        // ----------------------------------------------------------------
+        // Phase 1: Parse criteria pairs and detect return_array
+        // ----------------------------------------------------------------
+        let mut criteria_exprs: Vec<(usize, usize)> = Vec::new(); // (value_idx, array_idx) pairs
+        let mut return_array_idx: Option<usize> = None;
+        let mut i = 0;
+
+        while i < args.len() {
+            // Expect a scalar (lookup_value)
+            if Self::is_range_expression(&args[i]) {
+                // Two consecutive ranges: previous array was the last lookup_array,
+                // this one is the return_array.
+                return_array_idx = Some(i);
+                break;
+            }
+
+            // Need at least one more arg for the lookup_array
+            if i + 1 >= args.len() {
+                return EvalResult::Error(CellError::Value);
+            }
+
+            // The next arg should be a range (lookup_array)
+            if !Self::is_range_expression(&args[i + 1]) {
+                return EvalResult::Error(CellError::Value);
+            }
+
+            criteria_exprs.push((i, i + 1));
+            i += 2;
+
+            // Check if next arg is another range (= return_array)
+            if i < args.len() && Self::is_range_expression(&args[i]) {
+                return_array_idx = Some(i);
+                break;
+            }
+        }
+
+        // Must have at least one criteria pair and a return_array
+        if criteria_exprs.is_empty() || return_array_idx.is_none() {
+            return EvalResult::Error(CellError::Value);
+        }
+        let ret_idx = return_array_idx.unwrap();
+
+        // ----------------------------------------------------------------
+        // Phase 2: Evaluate all criteria and the return array
+        // ----------------------------------------------------------------
+        let mut criteria: Vec<(EvalResult, Vec<EvalResult>)> = Vec::new();
+        for &(val_idx, arr_idx) in &criteria_exprs {
+            let lookup_val = self.evaluate(&args[val_idx]);
+            if let EvalResult::Error(e) = &lookup_val {
+                return EvalResult::Error(e.clone());
+            }
+            let lookup_arr = self.evaluate(&args[arr_idx]).flatten();
+            criteria.push((lookup_val, lookup_arr));
+        }
+
+        let return_array = self.evaluate(&args[ret_idx]).flatten();
+
+        // Validate all lookup arrays have the same length
+        let expected_len = criteria[0].1.len();
+        for (_, arr) in &criteria {
+            if arr.len() != expected_len {
+                return EvalResult::Error(CellError::Value);
+            }
+        }
+        if return_array.len() != expected_len {
+            return EvalResult::Error(CellError::Value);
+        }
+
+        // ----------------------------------------------------------------
+        // Phase 3: Parse optional match_mode and search_mode
+        // ----------------------------------------------------------------
+        let remaining_start = ret_idx + 1;
+
+        let match_mode: i32 = if remaining_start < args.len() {
+            match self.evaluate(&args[remaining_start]).as_number() {
+                Some(n) => n as i32,
+                None => return EvalResult::Error(CellError::Value),
+            }
+        } else {
+            0
+        };
+
+        let search_mode: i32 = if remaining_start + 1 < args.len() {
+            match self.evaluate(&args[remaining_start + 1]).as_number() {
+                Some(n) => n as i32,
+                None => return EvalResult::Error(CellError::Value),
+            }
+        } else {
+            1
+        };
+
+        // Validate match_mode
+        if !matches!(match_mode, 0 | -1 | 1 | 2) {
+            return EvalResult::Error(CellError::Value);
+        }
+        // Approximate match modes don't apply to multi-criteria
+        if criteria.len() > 1 && matches!(match_mode, -1 | 1) {
+            return EvalResult::Error(CellError::Value);
+        }
+        // Validate search_mode
+        if !matches!(search_mode, 1 | -1 | 2 | -2) {
+            return EvalResult::Error(CellError::Value);
+        }
+
+        // ----------------------------------------------------------------
+        // Phase 4: Search for a matching row
+        // ----------------------------------------------------------------
+
+        // For single-criterion with approximate match, delegate to XLOOKUP helpers
+        if criteria.len() == 1 {
+            let (ref val, ref arr) = criteria[0];
+            let found_index = match match_mode {
+                0 => self.xlookup_exact(val, arr, search_mode),
+                -1 => self.xlookup_approx_smaller(val, arr, search_mode),
+                1 => self.xlookup_approx_larger(val, arr, search_mode),
+                2 => self.xlookup_wildcard(val, arr, search_mode),
+                _ => None,
+            };
+            return match found_index {
+                Some(idx) if idx < return_array.len() => return_array[idx].clone(),
+                _ => EvalResult::Error(CellError::NA),
+            };
+        }
+
+        // Multi-criteria: linear scan with direction from search_mode
+        // (binary search modes 2/-2 fall back to linear for multi-criteria)
+        let len = expected_len;
+        let indices: Box<dyn Iterator<Item = usize>> = if search_mode == -1 {
+            Box::new((0..len).rev())
+        } else {
+            Box::new(0..len)
+        };
+
+        for idx in indices {
+            let all_match = criteria.iter().all(|(val, arr)| {
+                match match_mode {
+                    0 => self.xlookup_values_equal(val, &arr[idx]),
+                    2 => {
+                        // Wildcard: if lookup_val is text, use wildcard matching
+                        if let EvalResult::Text(pattern) = val {
+                            if let EvalResult::Text(s) = &arr[idx] {
+                                self.xlookup_wildcard_match(
+                                    &pattern.to_uppercase(),
+                                    &s.to_uppercase(),
+                                )
+                            } else {
+                                false
+                            }
+                        } else {
+                            // Non-text values: fall back to exact match
+                            self.xlookup_values_equal(val, &arr[idx])
+                        }
+                    }
+                    _ => false, // -1, 1 already rejected above for multi-criteria
+                }
+            });
+
+            if all_match {
+                return return_array[idx].clone();
+            }
+        }
+
+        EvalResult::Error(CellError::NA)
     }
 
     /// Exact match search for XLOOKUP (match_mode = 0).
@@ -2196,6 +2383,217 @@ mod tests {
         ]);
         let result = eval.evaluate(&expr);
         assert_eq!(result, EvalResult::Error(CellError::Value));
+    }
+
+    // ==================== XLOOKUPS (Multi-Criteria) Tests ====================
+
+    /// Helper: creates a grid for XLOOKUPS multi-criteria tests.
+    /// Column A (names): Alice, Bob, Alice, Charlie, Bob
+    /// Column B (depts): Sales, Engineering, Engineering, Sales, Sales
+    /// Column C (scores): 85, 92, 78, 95, 88
+    fn make_xlookups_grid() -> Grid {
+        let mut grid = Grid::new();
+        // Column A: names
+        grid.set_cell(0, 0, Cell::new_text("Alice".to_string()));
+        grid.set_cell(1, 0, Cell::new_text("Bob".to_string()));
+        grid.set_cell(2, 0, Cell::new_text("Alice".to_string()));
+        grid.set_cell(3, 0, Cell::new_text("Charlie".to_string()));
+        grid.set_cell(4, 0, Cell::new_text("Bob".to_string()));
+        // Column B: departments
+        grid.set_cell(0, 1, Cell::new_text("Sales".to_string()));
+        grid.set_cell(1, 1, Cell::new_text("Engineering".to_string()));
+        grid.set_cell(2, 1, Cell::new_text("Engineering".to_string()));
+        grid.set_cell(3, 1, Cell::new_text("Sales".to_string()));
+        grid.set_cell(4, 1, Cell::new_text("Sales".to_string()));
+        // Column C: scores
+        grid.set_cell(0, 2, Cell::new_number(85.0));
+        grid.set_cell(1, 2, Cell::new_number(92.0));
+        grid.set_cell(2, 2, Cell::new_number(78.0));
+        grid.set_cell(3, 2, Cell::new_number(95.0));
+        grid.set_cell(4, 2, Cell::new_number(88.0));
+        grid
+    }
+
+    /// Helper to build an XLOOKUPS expression.
+    fn xlookups_expr(args: Vec<Expression>) -> Expression {
+        Expression::FunctionCall {
+            func: BuiltinFunction::XLookups,
+            args,
+        }
+    }
+
+    /// Helper to build a Range expression for a column range like A1:A5.
+    fn col_range(col: &str, start_row: u32, end_row: u32) -> Expression {
+        Expression::Range {
+            sheet: None,
+            start: Box::new(Expression::CellRef {
+                sheet: None,
+                col: col.to_string(),
+                row: start_row,
+            }),
+            end: Box::new(Expression::CellRef {
+                sheet: None,
+                col: col.to_string(),
+                row: end_row,
+            }),
+        }
+    }
+
+    #[test]
+    fn test_xlookups_two_criteria_exact() {
+        let grid = make_xlookups_grid();
+        let eval = Evaluator::new(&grid);
+
+        // =XLOOKUPS("Alice", A1:A5, "Engineering", B1:B5, C1:C5) -> 78.0
+        let expr = xlookups_expr(vec![
+            Expression::Literal(Value::String("Alice".to_string())),
+            col_range("A", 1, 5),
+            Expression::Literal(Value::String("Engineering".to_string())),
+            col_range("B", 1, 5),
+            col_range("C", 1, 5),
+        ]);
+        let result = eval.evaluate(&expr);
+        assert_eq!(result, EvalResult::Number(78.0));
+    }
+
+    #[test]
+    fn test_xlookups_two_criteria_first_match() {
+        let grid = make_xlookups_grid();
+        let eval = Evaluator::new(&grid);
+
+        // =XLOOKUPS("Bob", A1:A5, "Sales", B1:B5, C1:C5) -> 88.0
+        // Bob+Sales is row 5 (index 4)
+        let expr = xlookups_expr(vec![
+            Expression::Literal(Value::String("Bob".to_string())),
+            col_range("A", 1, 5),
+            Expression::Literal(Value::String("Sales".to_string())),
+            col_range("B", 1, 5),
+            col_range("C", 1, 5),
+        ]);
+        let result = eval.evaluate(&expr);
+        assert_eq!(result, EvalResult::Number(88.0));
+    }
+
+    #[test]
+    fn test_xlookups_single_criterion_fallback() {
+        let grid = make_xlookups_grid();
+        let eval = Evaluator::new(&grid);
+
+        // =XLOOKUPS("Charlie", A1:A5, C1:C5) -> 95.0
+        // Single criterion: behaves like XLOOKUP
+        let expr = xlookups_expr(vec![
+            Expression::Literal(Value::String("Charlie".to_string())),
+            col_range("A", 1, 5),
+            col_range("C", 1, 5),
+        ]);
+        let result = eval.evaluate(&expr);
+        assert_eq!(result, EvalResult::Number(95.0));
+    }
+
+    #[test]
+    fn test_xlookups_no_match_returns_na() {
+        let grid = make_xlookups_grid();
+        let eval = Evaluator::new(&grid);
+
+        // =XLOOKUPS("Charlie", A1:A5, "Engineering", B1:B5, C1:C5) -> #N/A
+        // Charlie is only in Sales, not Engineering
+        let expr = xlookups_expr(vec![
+            Expression::Literal(Value::String("Charlie".to_string())),
+            col_range("A", 1, 5),
+            Expression::Literal(Value::String("Engineering".to_string())),
+            col_range("B", 1, 5),
+            col_range("C", 1, 5),
+        ]);
+        let result = eval.evaluate(&expr);
+        assert_eq!(result, EvalResult::Error(CellError::NA));
+    }
+
+    #[test]
+    fn test_xlookups_reverse_search() {
+        let grid = make_xlookups_grid();
+        let eval = Evaluator::new(&grid);
+
+        // =XLOOKUPS("Alice", A1:A5, C1:C5, , -1) -> search last-to-first
+        // Alice appears at index 0 (85) and index 2 (78); reverse returns index 2 first
+        let expr = xlookups_expr(vec![
+            Expression::Literal(Value::String("Alice".to_string())),
+            col_range("A", 1, 5),
+            col_range("C", 1, 5),
+            Expression::Literal(Value::Number(0.0)),  // match_mode = exact
+            Expression::Literal(Value::Number(-1.0)), // search_mode = last-to-first
+        ]);
+        let result = eval.evaluate(&expr);
+        assert_eq!(result, EvalResult::Number(78.0));
+    }
+
+    #[test]
+    fn test_xlookups_wildcard_multi_criteria() {
+        let grid = make_xlookups_grid();
+        let eval = Evaluator::new(&grid);
+
+        // =XLOOKUPS("A*", A1:A5, "Eng*", B1:B5, C1:C5, 2) -> 78.0
+        // Wildcard: "A*" matches Alice, "Eng*" matches Engineering -> row 3 (index 2)
+        let expr = xlookups_expr(vec![
+            Expression::Literal(Value::String("A*".to_string())),
+            col_range("A", 1, 5),
+            Expression::Literal(Value::String("Eng*".to_string())),
+            col_range("B", 1, 5),
+            col_range("C", 1, 5),
+            Expression::Literal(Value::Number(2.0)), // match_mode = wildcard
+        ]);
+        let result = eval.evaluate(&expr);
+        assert_eq!(result, EvalResult::Number(78.0));
+    }
+
+    #[test]
+    fn test_xlookups_too_few_args() {
+        let grid = Grid::new();
+        let eval = Evaluator::new(&grid);
+
+        // =XLOOKUPS("X", A1:A5) -> #VALUE! (no return_array)
+        let expr = xlookups_expr(vec![
+            Expression::Literal(Value::String("X".to_string())),
+            col_range("A", 1, 5),
+        ]);
+        let result = eval.evaluate(&expr);
+        assert_eq!(result, EvalResult::Error(CellError::Value));
+    }
+
+    #[test]
+    fn test_xlookups_approx_rejected_for_multi_criteria() {
+        let grid = make_xlookups_grid();
+        let eval = Evaluator::new(&grid);
+
+        // =XLOOKUPS("Alice", A1:A5, "Sales", B1:B5, C1:C5, -1) -> #VALUE!
+        // Approximate match mode is not supported for multi-criteria
+        let expr = xlookups_expr(vec![
+            Expression::Literal(Value::String("Alice".to_string())),
+            col_range("A", 1, 5),
+            Expression::Literal(Value::String("Sales".to_string())),
+            col_range("B", 1, 5),
+            col_range("C", 1, 5),
+            Expression::Literal(Value::Number(-1.0)), // match_mode = approx smaller
+        ]);
+        let result = eval.evaluate(&expr);
+        assert_eq!(result, EvalResult::Error(CellError::Value));
+    }
+
+    #[test]
+    fn test_xlookups_case_insensitive() {
+        let grid = make_xlookups_grid();
+        let eval = Evaluator::new(&grid);
+
+        // =XLOOKUPS("alice", A1:A5, "engineering", B1:B5, C1:C5) -> 78.0
+        // Case insensitive matching
+        let expr = xlookups_expr(vec![
+            Expression::Literal(Value::String("alice".to_string())),
+            col_range("A", 1, 5),
+            Expression::Literal(Value::String("engineering".to_string())),
+            col_range("B", 1, 5),
+            col_range("C", 1, 5),
+        ]);
+        let result = eval.evaluate(&expr);
+        assert_eq!(result, EvalResult::Number(78.0));
     }
 
     // ==================== 3D Reference Tests ====================

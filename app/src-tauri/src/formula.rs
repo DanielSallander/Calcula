@@ -158,6 +158,12 @@ pub fn get_functions_by_category(category: String) -> FunctionListResult {
                 description: "Searches a range or array and returns the corresponding item".to_string(),
                 category: "Lookup & Reference".to_string(),
             },
+            FunctionInfo {
+                name: "XLOOKUPS".to_string(),
+                syntax: "XLOOKUPS(lookup_value1, lookup_array1, [lookup_value2, lookup_array2, ...], return_array, [match_mode], [search_mode])".to_string(),
+                description: "Multi-criteria lookup: searches multiple arrays simultaneously and returns the corresponding item from the return array".to_string(),
+                category: "Lookup & Reference".to_string(),
+            },
         ],
         "info" | "information" => vec![
             FunctionInfo {

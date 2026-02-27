@@ -476,6 +476,7 @@ fn builtin_fn_name(func: &BuiltinFunction) -> String {
         BuiltinFunction::IsBlank => "ISBLANK".to_string(),
         BuiltinFunction::IsError => "ISERROR".to_string(),
         BuiltinFunction::XLookup => "XLOOKUP".to_string(),
+        BuiltinFunction::XLookups => "XLOOKUPS".to_string(),
         BuiltinFunction::Custom(name) => name.clone(),
     }
 }

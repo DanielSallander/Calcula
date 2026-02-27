@@ -17,6 +17,7 @@ const COMMON_FUNCTIONS: Record<string, number> = {
   MAX: 80,
   MIN: 75,
   XLOOKUP: 70,
+  XLOOKUPS: 68,
   CONCATENATE: 65,
   COUNTA: 60,
   ROUND: 55,

@@ -401,6 +401,7 @@ fn convert_builtin_function(func: &ParserBuiltinFn) -> EngineBuiltinFn {
         ParserBuiltinFn::IsBlank => EngineBuiltinFn::IsBlank,
         ParserBuiltinFn::IsError => EngineBuiltinFn::IsError,
         ParserBuiltinFn::XLookup => EngineBuiltinFn::XLookup,
+        ParserBuiltinFn::XLookups => EngineBuiltinFn::XLookups,
         ParserBuiltinFn::Custom(name) => EngineBuiltinFn::Custom(name.clone()),
     }
 }
@@ -1355,6 +1356,7 @@ fn builtin_function_to_name(func: &ParserBuiltinFn) -> String {
         ParserBuiltinFn::IsBlank => "ISBLANK".to_string(),
         ParserBuiltinFn::IsError => "ISERROR".to_string(),
         ParserBuiltinFn::XLookup => "XLOOKUP".to_string(),
+        ParserBuiltinFn::XLookups => "XLOOKUPS".to_string(),
         ParserBuiltinFn::Custom(name) => name.clone(),
     }
 }
