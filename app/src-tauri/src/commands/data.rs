@@ -8,11 +8,11 @@ use crate::api_types::{
 };
 use crate::commands::utils::get_cell_internal_with_merge;
 use crate::{
-    clear_ui_effects_for_cell, evaluate_formula_multi_sheet,
-    evaluate_formula_multi_sheet_with_ast, evaluate_formula_with_effects,
+    evaluate_formula_multi_sheet,
+    evaluate_formula_multi_sheet_with_ast, evaluate_formula_with_context,
     extract_all_references, format_cell_value, get_column_row_dependents,
     get_recalculation_order, parse_cell_input, parse_formula_to_engine_ast,
-    process_ui_effects, update_column_dependencies, update_cross_sheet_dependencies,
+    update_column_dependencies, update_cross_sheet_dependencies,
     update_dependencies, update_row_dependencies, AppState, log_perf
 };
 use engine::{self, Grid, StyleRegistry};
@@ -137,7 +137,7 @@ pub fn update_cell(
     let mut grid = state.grid.lock().unwrap();
     let mut grids = state.grids.lock().unwrap();
     let active_sheet = *state.active_sheet.lock().unwrap();
-    let styles = state.style_registry.lock().unwrap();
+    let mut styles = state.style_registry.lock().unwrap();
     let mut dependents_map = state.dependents.lock().unwrap();
     let mut dependencies_map = state.dependencies.lock().unwrap();
     let mut column_dependents_map = state.column_dependents.lock().unwrap();
@@ -217,43 +217,6 @@ pub fn update_cell(
             col_span,
             sheet_index: None,
         });
-
-        // Clear any UI effects from the deleted cell
-        {
-            let mut ui_registry = state.ui_effect_registry.lock().unwrap();
-            let clear_result = clear_ui_effects_for_cell(
-                (active_sheet, row, col),
-                &mut ui_registry,
-            );
-            // Revert row heights for targets that no longer have any source
-            if !clear_result.affected_rows.is_empty() {
-                let mut rh = state.row_heights.lock().unwrap();
-                for (sheet_idx, target_row) in &clear_result.affected_rows {
-                    if *sheet_idx == active_sheet {
-                        if !ui_registry.row_height_sources.contains_key(&(*sheet_idx, *target_row)) {
-                            rh.remove(target_row);
-                            dimension_changes.push(DimensionData { index: *target_row, size: 0.0, dimension_type: "row".to_string() });
-                        }
-                    }
-                }
-            }
-            // Revert column widths for targets that no longer have any source
-            if !clear_result.affected_cols.is_empty() {
-                let mut cw = state.column_widths.lock().unwrap();
-                for (sheet_idx, target_col) in &clear_result.affected_cols {
-                    if *sheet_idx == active_sheet {
-                        if !ui_registry.column_width_sources.contains_key(&(*sheet_idx, *target_col)) {
-                            cw.remove(target_col);
-                            dimension_changes.push(DimensionData { index: *target_col, size: 0.0, dimension_type: "column".to_string() });
-                        }
-                    }
-                }
-            }
-            // Note: fill color revert could be done here too, but for now
-            // clearing the cell that caused the fill color is sufficient.
-            // The target cell keeps its last fill color (similar to how dimensions
-            // revert to default when source is removed).
-        }
 
         // Record undo after successful change
         undo_stack.record_cell_change(row, col, previous_cell);
@@ -365,93 +328,14 @@ pub fn update_cell(
                     row_heights: Some(rh_map),
                     column_widths: Some(cw_map),
                 };
-                let styles_lock = state.style_registry.lock().unwrap();
-                let (result, effects) = evaluate_formula_with_effects(
+                cell.value = evaluate_formula_with_context(
                     &grids,
                     &sheet_names,
                     active_sheet,
                     &engine_ast,
                     eval_ctx,
-                    Some(&styles_lock),
+                    Some(&styles),
                 );
-                drop(styles_lock);
-                cell.value = result;
-
-                // Process UI effects (e.g., SET.ROW.HEIGHT, SET.COLUMN.WIDTH, SET.CELL.FILLCOLOR)
-                if !effects.is_empty() {
-                    let mut ui_registry = state.ui_effect_registry.lock().unwrap();
-                    let mut rh = state.row_heights.lock().unwrap();
-                    let mut cw = state.column_widths.lock().unwrap();
-
-                    // Clear previous effects for this cell before registering new ones
-                    clear_ui_effects_for_cell((active_sheet, row, col), &mut ui_registry);
-
-                    let effect_result = process_ui_effects(
-                        &effects,
-                        (active_sheet, row, col),
-                        &mut ui_registry,
-                        &mut rh,
-                        &mut cw,
-                    );
-
-                    if effect_result.has_conflict {
-                        cell.value = engine::CellValue::Error(engine::CellError::Conflict);
-                    }
-
-                    for (index, size, is_column) in &effect_result.dimension_changes {
-                        dimension_changes.push(DimensionData {
-                            index: *index,
-                            size: *size,
-                            dimension_type: if *is_column { "column".to_string() } else { "row".to_string() },
-                        });
-                    }
-
-                    // Apply fill color changes
-                    if !effect_result.fill_color_changes.is_empty() {
-                        drop(rh);
-                        drop(cw);
-                        drop(ui_registry);
-                        let mut style_reg = state.style_registry.lock().unwrap();
-                        for (target_row, target_col, r, g, b, a) in &effect_result.fill_color_changes {
-                            let color = engine::Color::with_alpha(*r, *g, *b, *a);
-                            let old_style_index = grid.get_cell(*target_row, *target_col)
-                                .map(|c| c.style_index)
-                                .unwrap_or(0);
-                            let mut new_style = style_reg.get(old_style_index).clone();
-                            new_style.background = color;
-                            let new_style_index = style_reg.get_or_create(new_style);
-
-                            // Update the target cell's style
-                            if let Some(existing) = grid.get_cell(*target_row, *target_col) {
-                                let mut updated = existing.clone();
-                                updated.style_index = new_style_index;
-                                grid.set_cell(*target_row, *target_col, updated);
-                            } else {
-                                let mut new_cell = engine::Cell::default();
-                                new_cell.style_index = new_style_index;
-                                grid.set_cell(*target_row, *target_col, new_cell);
-                            }
-
-                            // Also update in grids array
-                            if let Some(g) = grids.get_mut(active_sheet) {
-                                if let Some(existing) = g.get_cell(*target_row, *target_col) {
-                                    let mut updated = existing.clone();
-                                    updated.style_index = new_style_index;
-                                    g.set_cell(*target_row, *target_col, updated);
-                                } else {
-                                    let mut new_cell = engine::Cell::default();
-                                    new_cell.style_index = new_style_index;
-                                    g.set_cell(*target_row, *target_col, new_cell);
-                                }
-                            }
-                        }
-                        needs_style_refresh = true;
-                    }
-                } else {
-                    // Formula has no UI effects — clear any previous UI effects from this cell
-                    let mut ui_registry = state.ui_effect_registry.lock().unwrap();
-                    clear_ui_effects_for_cell((active_sheet, row, col), &mut ui_registry);
-                }
             }
             Err(_e) => {
                 // Formula parse error - dependencies won't be tracked
@@ -885,6 +769,38 @@ pub fn update_cell(
             perf_t3_stored.duration_since(perf_t2_parsed).as_secs_f64() * 1000.0,
             perf_tend.duration_since(perf_t0).as_secs_f64() * 1000.0
         );
+    }
+
+    // Re-evaluate computed properties affected by changed cells
+    {
+        let cp_dependents = state.computed_prop_dependents.lock().unwrap();
+        if !cp_dependents.is_empty() {
+            // Collect all cells that changed (primary + recalculated dependents)
+            let changed_cells: Vec<(usize, u32, u32)> = updated_cells.iter()
+                .map(|c| (c.sheet_index.unwrap_or(active_sheet), c.row, c.col))
+                .collect();
+
+            let mut cp_storage = state.computed_properties.lock().unwrap();
+            let mut rh = state.row_heights.lock().unwrap();
+            let mut cw = state.column_widths.lock().unwrap();
+
+            let (cp_dim_changes, cp_style_refresh) =
+                crate::computed_properties::re_evaluate_for_changed_cells(
+                    &changed_cells,
+                    &mut cp_storage,
+                    &cp_dependents,
+                    &mut grids,
+                    &mut grid,
+                    &sheet_names,
+                    active_sheet,
+                    &mut rh,
+                    &mut cw,
+                    &mut styles,
+                );
+
+            dimension_changes.extend(cp_dim_changes);
+            needs_style_refresh = needs_style_refresh || cp_style_refresh;
+        }
     }
 
     Ok(UpdateCellResult { cells: updated_cells, dimension_changes, needs_style_refresh })

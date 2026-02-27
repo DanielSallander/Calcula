@@ -5,7 +5,7 @@
 // This file is the ONLY place that should import from @tauri-apps/api/core.
 
 import { invoke } from "@tauri-apps/api/core";
-import type { CellData } from "../core/types";
+import type { CellData, DimensionData } from "../core/types";
 
 // ============================================================================
 // Types
@@ -2999,4 +2999,93 @@ export async function consolidateData(
   params: ConsolidateParams,
 ): Promise<ConsolidateResult> {
   return invoke<ConsolidateResult>("consolidate_data", { params });
+}
+
+// ============================================================================
+// Computed Properties API
+// ============================================================================
+
+/** A single computed property (formula-driven attribute). */
+export interface ComputedPropertyData {
+  id: number;
+  attribute: string;
+  formula: string;
+  currentValue?: string;
+}
+
+/** Result from add/update/remove computed property operations. */
+export interface ComputedPropertyResult {
+  success: boolean;
+  properties: ComputedPropertyData[];
+  dimensionChanges: DimensionData[];
+  needsStyleRefresh: boolean;
+}
+
+/**
+ * Get computed properties for a target (column, row, or cell).
+ */
+export async function getComputedProperties(
+  targetType: string,
+  index: number,
+  index2?: number,
+): Promise<ComputedPropertyData[]> {
+  return invoke<ComputedPropertyData[]>("get_computed_properties", {
+    targetType,
+    index,
+    index2: index2 ?? null,
+  });
+}
+
+/**
+ * Get available attributes for a target type.
+ */
+export async function getAvailableAttributes(
+  targetType: string,
+): Promise<string[]> {
+  return invoke<string[]>("get_available_attributes", { targetType });
+}
+
+/**
+ * Add a computed property to a target.
+ */
+export async function addComputedProperty(
+  targetType: string,
+  index: number,
+  index2: number | null,
+  attribute: string,
+  formula: string,
+): Promise<ComputedPropertyResult> {
+  return invoke<ComputedPropertyResult>("add_computed_property", {
+    targetType,
+    index,
+    index2,
+    attribute,
+    formula,
+  });
+}
+
+/**
+ * Update an existing computed property.
+ */
+export async function updateComputedProperty(
+  propId: number,
+  attribute: string,
+  formula: string,
+): Promise<ComputedPropertyResult> {
+  return invoke<ComputedPropertyResult>("update_computed_property", {
+    propId,
+    attribute,
+    formula,
+  });
+}
+
+/**
+ * Remove a computed property by ID.
+ */
+export async function removeComputedProperty(
+  propId: number,
+): Promise<ComputedPropertyResult> {
+  return invoke<ComputedPropertyResult>("remove_computed_property", {
+    propId,
+  });
 }

@@ -225,6 +225,10 @@ export { cellEvents } from "./cellEvents";
 
 export { columnToLetter, letterToColumn, isFormulaExpectingReference } from "./types";
 
+// Formula reference parsing
+export { parseFormulaReferences } from "../core/lib/formulaRefParser";
+export type { FormulaReferenceWithPosition } from "../core/lib/formulaRefParser";
+
 // ============================================================================
 // Grid Dispatch Bridge (for non-React code)
 // ============================================================================

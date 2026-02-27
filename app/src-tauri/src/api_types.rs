@@ -784,3 +784,30 @@ pub struct SelectionAggregationResult {
     /// Count of numeric cells only
     pub numerical_count: u32,
 }
+
+// ============================================================================
+// Computed Properties types
+// ============================================================================
+
+/// A single computed property as returned to / received from the frontend.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ComputedPropertyData {
+    pub id: u64,
+    pub attribute: String,
+    pub formula: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub current_value: Option<String>,
+}
+
+/// Result from add/update/remove computed property operations.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ComputedPropertyResult {
+    pub success: bool,
+    pub properties: Vec<ComputedPropertyData>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub dimension_changes: Vec<DimensionData>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub needs_style_refresh: bool,
+}

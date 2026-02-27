@@ -183,11 +183,6 @@ pub enum BuiltinFunction {
     XLookup,
     XLookups,
 
-    // UI functions (worksheet-manipulating formulas)
-    SetRowHeight,
-    SetColumnWidth,
-    SetCellFillColor,
-
     // UI GET functions (read worksheet state)
     GetRowHeight,
     GetColumnWidth,
@@ -249,9 +244,7 @@ impl BuiltinFunction {
             "XLOOKUP" => BuiltinFunction::XLookup,
             "XLOOKUPS" => BuiltinFunction::XLookups,
 
-            "SET.ROW.HEIGHT" | "SETROWHEIGHT" => BuiltinFunction::SetRowHeight,
-            "SET.COLUMN.WIDTH" | "SETCOLUMNWIDTH" => BuiltinFunction::SetColumnWidth,
-            "SET.CELL.FILLCOLOR" | "SETCELLFILLCOLOR" => BuiltinFunction::SetCellFillColor,
+
 
             "GET.ROW.HEIGHT" | "GETROWHEIGHT" => BuiltinFunction::GetRowHeight,
             "GET.COLUMN.WIDTH" | "GETCOLUMNWIDTH" => BuiltinFunction::GetColumnWidth,

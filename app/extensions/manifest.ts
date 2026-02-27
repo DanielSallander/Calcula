@@ -18,6 +18,7 @@ import FormulaAutocompleteExtension from "./BuiltIn/FormulaAutocomplete";
 import FormatPainterExtension from "./BuiltIn/FormatPainter";
 import PasteSpecialExtension from "./BuiltIn/PasteSpecial";
 import StatusBarAggregationExtension from "./BuiltIn/StatusBarAggregation";
+import ComputedPropertiesExtension from "./BuiltIn/ComputedProperties";
 
 // ============================================================================
 // Built-in Extension Manifest
@@ -42,6 +43,8 @@ export const builtInExtensions: ExtensionModule[] = [
   FormulaAutocompleteExtension,
   // Status Bar Aggregation (Average, Count, Sum for selections)
   StatusBarAggregationExtension,
+  // Computed Properties (formula-driven attributes for columns, rows, cells)
+  ComputedPropertiesExtension,
 ];
 
 /**

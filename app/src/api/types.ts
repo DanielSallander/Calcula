@@ -35,6 +35,11 @@ export type {
 
   // Merged cells
   MergedRegion,
+
+  // Computed Properties
+  ComputedPropertyTargetType,
+  ComputedPropertyData,
+  ComputedPropertyResult,
 } from "../core/types";
 
 // Re-export default config and utility functions

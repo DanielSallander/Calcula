@@ -2,7 +2,7 @@
 // PURPOSE: Calculation mode commands for manual/automatic recalculation.
 
 use tauri::State;
-use crate::{AppState, evaluate_formula, format_cell_value};
+use crate::{AppState, evaluate_formula_with_context, format_cell_value};
 use crate::api_types::CellData;
 use crate::{log_enter, log_exit, log_enter_info, log_exit_info, log_debug, log_warn};
 use engine;
@@ -47,14 +47,11 @@ pub fn get_calculation_mode(state: State<AppState>) -> String {
 /// Recalculate all formulas in the grid.
 #[tauri::command]
 pub fn calculate_now(state: State<AppState>) -> Result<Vec<CellData>, String> {
-    use crate::{evaluate_formula_with_effects, clear_ui_effects_for_cell, process_ui_effects, format_cell_value};
-    use crate::api_types::CellData;
-
     let mut grid = state.grid.lock().unwrap();
     let mut grids = state.grids.lock().unwrap();
     let sheet_names = state.sheet_names.lock().unwrap();
     let active_sheet = *state.active_sheet.lock().unwrap();
-    let styles = state.style_registry.lock().unwrap();
+    let mut styles = state.style_registry.lock().unwrap();
 
     let mut updated_cells = Vec::new();
 
@@ -71,7 +68,6 @@ pub fn calculate_now(state: State<AppState>) -> Result<Vec<CellData>, String> {
     let tables_map = state.tables.lock().unwrap();
     let table_names_map = state.table_names.lock().unwrap();
     let named_ranges_map = state.named_ranges.lock().unwrap();
-    let mut ui_registry = state.ui_effect_registry.lock().unwrap();
     let mut row_heights = state.row_heights.lock().unwrap();
     let mut column_widths = state.column_widths.lock().unwrap();
 
@@ -86,7 +82,7 @@ pub fn calculate_now(state: State<AppState>) -> Result<Vec<CellData>, String> {
         };
 
         // Parse, resolve names and table refs, then evaluate
-        let (result, effects) = match parser::parse(&formula) {
+        let result = match parser::parse(&formula) {
             Ok(parsed) => {
                 // Resolve named references
                 let resolved = if crate::ast_has_named_refs(&parsed) {
@@ -110,7 +106,7 @@ pub fn calculate_now(state: State<AppState>) -> Result<Vec<CellData>, String> {
                 };
 
                 let engine_ast = crate::convert_expr(&resolved);
-                evaluate_formula_with_effects(
+                evaluate_formula_with_context(
                     &grids,
                     &sheet_names,
                     active_sheet,
@@ -119,28 +115,12 @@ pub fn calculate_now(state: State<AppState>) -> Result<Vec<CellData>, String> {
                     Some(&styles),
                 )
             }
-            Err(_) => (engine::CellValue::Error(engine::CellError::Value), Vec::new()),
+            Err(_) => engine::CellValue::Error(engine::CellError::Value),
         };
-
-        // Process UI effects
-        let mut final_result = result;
-        if !effects.is_empty() {
-            clear_ui_effects_for_cell((active_sheet, row, col), &mut ui_registry);
-            let effect_result = process_ui_effects(
-                &effects,
-                (active_sheet, row, col),
-                &mut ui_registry,
-                &mut row_heights,
-                &mut column_widths,
-            );
-            if effect_result.has_conflict {
-                final_result = engine::CellValue::Error(engine::CellError::Conflict);
-            }
-        }
 
         if let Some(cell) = grid.get_cell(row, col) {
             let mut updated = cell.clone();
-            updated.value = final_result;
+            updated.value = result;
             grid.set_cell(row, col, updated.clone());
 
             // Keep grids vector in sync
@@ -163,6 +143,25 @@ pub fn calculate_now(state: State<AppState>) -> Result<Vec<CellData>, String> {
                 sheet_index: None,
             });
         }
+    }
+
+    // Re-evaluate all computed properties for this sheet
+    {
+        let mut cp_storage = state.computed_properties.lock().unwrap();
+        let (_dim_changes, _style_refresh) =
+            crate::computed_properties::re_evaluate_all_properties(
+                &mut cp_storage,
+                &mut grids,
+                &mut grid,
+                &sheet_names,
+                active_sheet,
+                &mut row_heights,
+                &mut column_widths,
+                &mut styles,
+            );
+        // Note: calculate_now returns Vec<CellData>, not UpdateCellResult.
+        // Dimension changes and style refresh are handled by the frontend
+        // re-fetching viewport data after recalculation.
     }
 
     Ok(updated_cells)

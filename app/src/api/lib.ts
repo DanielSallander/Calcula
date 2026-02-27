@@ -572,3 +572,20 @@ export type {
   ConsolidateParams,
   ConsolidateResult,
 } from "./backend";
+
+// ============================================================================
+// Computed Properties API
+// ============================================================================
+
+export {
+  getComputedProperties,
+  getAvailableAttributes,
+  addComputedProperty,
+  updateComputedProperty,
+  removeComputedProperty,
+} from "./backend";
+
+export type {
+  ComputedPropertyData,
+  ComputedPropertyResult,
+} from "./backend";

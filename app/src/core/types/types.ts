@@ -1843,3 +1843,26 @@ export function createDynamicFilter(
     filterOutBlanks: false,
   };
 }
+
+// ============================================================================
+// Computed Properties types
+// ============================================================================
+
+/** Target type for computed properties. */
+export type ComputedPropertyTargetType = "column" | "row" | "cell";
+
+/** A single computed property (formula-driven attribute). */
+export interface ComputedPropertyData {
+  id: number;
+  attribute: string;
+  formula: string;
+  currentValue?: string;
+}
+
+/** Result from add/update/remove computed property operations. */
+export interface ComputedPropertyResult {
+  success: boolean;
+  properties: ComputedPropertyData[];
+  dimensionChanges: DimensionData[];
+  needsStyleRefresh: boolean;
+}
