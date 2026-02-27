@@ -478,6 +478,13 @@ fn builtin_fn_name(func: &BuiltinFunction) -> String {
         BuiltinFunction::XLookup => "XLOOKUP".to_string(),
         BuiltinFunction::XLookups => "XLOOKUPS".to_string(),
         BuiltinFunction::SetRowHeight => "SET.ROW.HEIGHT".to_string(),
+        BuiltinFunction::SetColumnWidth => "SET.COLUMN.WIDTH".to_string(),
+        BuiltinFunction::SetCellFillColor => "SET.CELL.FILLCOLOR".to_string(),
+        BuiltinFunction::GetRowHeight => "GET.ROW.HEIGHT".to_string(),
+        BuiltinFunction::GetColumnWidth => "GET.COLUMN.WIDTH".to_string(),
+        BuiltinFunction::GetCellFillColor => "GET.CELL.FILLCOLOR".to_string(),
+        BuiltinFunction::Row => "ROW".to_string(),
+        BuiltinFunction::Column => "COLUMN".to_string(),
         BuiltinFunction::Custom(name) => name.clone(),
     }
 }

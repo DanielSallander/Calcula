@@ -136,6 +136,17 @@ pub enum BuiltinFunction {
 
     // UI functions (worksheet-manipulating formulas)
     SetRowHeight,
+    SetColumnWidth,
+    SetCellFillColor,
+
+    // UI GET functions (read worksheet state)
+    GetRowHeight,
+    GetColumnWidth,
+    GetCellFillColor,
+
+    // Reference functions
+    Row,
+    Column,
 
     /// Fallback for unrecognized function names (future extensions/plugins).
     Custom(String),

@@ -30,6 +30,7 @@ import {
   setActiveSheet,
   setSelection,
   setRowHeight,
+  setColumnWidth,
 } from "../../core/state/gridActions";
 import { updateCell, getCell, setActiveSheet as setActiveSheetApi, getMergeInfo } from "../lib/tauri-api";
 import { cellEvents } from "../lib/cellEvents";
@@ -1291,11 +1292,20 @@ export function useEditing(): UseEditingReturn {
       const perfT3UpdateCell = performance.now();
       const primaryCell = updatedCells[0];
 
-      // Apply dimension changes from UI formulas (e.g., SET.ROW.HEIGHT)
+      // Apply dimension changes from UI formulas (e.g., SET.ROW.HEIGHT, SET.COLUMN.WIDTH)
       if (updateResult.dimensionChanges && updateResult.dimensionChanges.length > 0) {
         for (const dim of updateResult.dimensionChanges) {
-          dispatch(setRowHeight(dim.index, dim.size));
+          if (dim.dimensionType === "column") {
+            dispatch(setColumnWidth(dim.index, dim.size));
+          } else {
+            dispatch(setRowHeight(dim.index, dim.size));
+          }
         }
+      }
+
+      // Refresh style cache if fill colors or other styles were changed by UI formulas
+      if (updateResult.needsStyleRefresh) {
+        window.dispatchEvent(new Event("styles:refresh"));
       }
 
       // FIX: Clear global flag and arrow reference state when editing stops

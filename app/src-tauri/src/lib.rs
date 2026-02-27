@@ -135,12 +135,18 @@ pub struct ProtectedRegion {
 pub struct UiEffectRegistry {
     /// Row height effects: (sheet_index, target_row) -> set of source cells (sheet_index, row, col)
     pub row_height_sources: HashMap<(usize, u32), HashSet<(usize, u32, u32)>>,
+    /// Column width effects: (sheet_index, target_col) -> set of source cells
+    pub column_width_sources: HashMap<(usize, u32), HashSet<(usize, u32, u32)>>,
+    /// Fill color effects: (sheet_index, target_row, target_col) -> set of source cells
+    pub fill_color_sources: HashMap<(usize, u32, u32), HashSet<(usize, u32, u32)>>,
 }
 
 impl UiEffectRegistry {
     pub fn new() -> Self {
         UiEffectRegistry {
             row_height_sources: HashMap::new(),
+            column_width_sources: HashMap::new(),
+            fill_color_sources: HashMap::new(),
         }
     }
 }
@@ -421,6 +427,13 @@ fn convert_builtin_function(func: &ParserBuiltinFn) -> EngineBuiltinFn {
         ParserBuiltinFn::XLookup => EngineBuiltinFn::XLookup,
         ParserBuiltinFn::XLookups => EngineBuiltinFn::XLookups,
         ParserBuiltinFn::SetRowHeight => EngineBuiltinFn::SetRowHeight,
+        ParserBuiltinFn::SetColumnWidth => EngineBuiltinFn::SetColumnWidth,
+        ParserBuiltinFn::SetCellFillColor => EngineBuiltinFn::SetCellFillColor,
+        ParserBuiltinFn::GetRowHeight => EngineBuiltinFn::GetRowHeight,
+        ParserBuiltinFn::GetColumnWidth => EngineBuiltinFn::GetColumnWidth,
+        ParserBuiltinFn::GetCellFillColor => EngineBuiltinFn::GetCellFillColor,
+        ParserBuiltinFn::Row => EngineBuiltinFn::Row,
+        ParserBuiltinFn::Column => EngineBuiltinFn::Column,
         ParserBuiltinFn::Custom(name) => EngineBuiltinFn::Custom(name.clone()),
     }
 }
@@ -1377,6 +1390,13 @@ fn builtin_function_to_name(func: &ParserBuiltinFn) -> String {
         ParserBuiltinFn::XLookup => "XLOOKUP".to_string(),
         ParserBuiltinFn::XLookups => "XLOOKUPS".to_string(),
         ParserBuiltinFn::SetRowHeight => "SET.ROW.HEIGHT".to_string(),
+        ParserBuiltinFn::SetColumnWidth => "SET.COLUMN.WIDTH".to_string(),
+        ParserBuiltinFn::SetCellFillColor => "SET.CELL.FILLCOLOR".to_string(),
+        ParserBuiltinFn::GetRowHeight => "GET.ROW.HEIGHT".to_string(),
+        ParserBuiltinFn::GetColumnWidth => "GET.COLUMN.WIDTH".to_string(),
+        ParserBuiltinFn::GetCellFillColor => "GET.CELL.FILLCOLOR".to_string(),
+        ParserBuiltinFn::Row => "ROW".to_string(),
+        ParserBuiltinFn::Column => "COLUMN".to_string(),
         ParserBuiltinFn::Custom(name) => name.clone(),
     }
 }
@@ -1775,6 +1795,8 @@ pub fn evaluate_formula_with_effects(
     sheet_names: &[String],
     current_sheet_index: usize,
     ast: &EngineExpr,
+    eval_ctx: engine::EvalContext,
+    style_registry: Option<&engine::StyleRegistry>,
 ) -> (CellValue, Vec<engine::UiEffect>) {
     if current_sheet_index >= grids.len() || current_sheet_index >= sheet_names.len() {
         return (CellValue::Error(CellError::Ref), Vec::new());
@@ -1783,23 +1805,39 @@ pub fn evaluate_formula_with_effects(
     let current_grid = &grids[current_sheet_index];
     let current_sheet_name = &sheet_names[current_sheet_index];
     let context = create_multi_sheet_context(grids, sheet_names, current_sheet_name);
-    let evaluator = Evaluator::with_multi_sheet(current_grid, context);
+    let mut evaluator = Evaluator::with_context(current_grid, context, eval_ctx);
+    if let Some(sr) = style_registry {
+        evaluator.set_styles(sr);
+    }
     let result = evaluator.evaluate(ast).to_cell_value();
     let effects = evaluator.take_ui_effects();
     (result, effects)
 }
 
+/// Result of processing UI effects.
+pub struct UiEffectProcessResult {
+    /// Dimension changes: (index, size, is_column)
+    pub dimension_changes: Vec<(u32, f64, bool)>,
+    /// Fill color changes: (target_row, target_col, r, g, b, a)
+    pub fill_color_changes: Vec<(u32, u32, u8, u8, u8, u8)>,
+    /// Whether any conflict was detected
+    pub has_conflict: bool,
+}
+
 /// Process UI effects from a formula evaluation.
-/// Registers effects in the registry, detects conflicts, and applies row heights.
-/// Returns: list of (row, height) changes applied, and whether any conflict was found.
+/// Registers effects in the registry, detects conflicts, and applies changes.
 pub fn process_ui_effects(
     effects: &[engine::UiEffect],
     source_cell: (usize, u32, u32), // (sheet_index, row, col)
     registry: &mut UiEffectRegistry,
     row_heights: &mut HashMap<u32, f64>,
-) -> (Vec<(u32, f64)>, bool) {
-    let mut height_changes: Vec<(u32, f64)> = Vec::new();
-    let mut has_conflict = false;
+    column_widths: &mut HashMap<u32, f64>,
+) -> UiEffectProcessResult {
+    let mut result = UiEffectProcessResult {
+        dimension_changes: Vec::new(),
+        fill_color_changes: Vec::new(),
+        has_conflict: false,
+    };
 
     for effect in effects {
         match effect {
@@ -1812,37 +1850,92 @@ pub fn process_ui_effects(
                     sources.insert(source_cell);
 
                     if sources.len() > 1 {
-                        has_conflict = true;
+                        result.has_conflict = true;
                     } else {
                         row_heights.insert(target_row, *height);
-                        height_changes.push((target_row, *height));
+                        result.dimension_changes.push((target_row, *height, false));
                     }
+                }
+            }
+            engine::UiEffect::SetColumnWidth { cols, width } => {
+                for &target_col in cols {
+                    let key = (source_cell.0, target_col);
+                    let sources = registry.column_width_sources
+                        .entry(key)
+                        .or_insert_with(HashSet::new);
+                    sources.insert(source_cell);
+
+                    if sources.len() > 1 {
+                        result.has_conflict = true;
+                    } else {
+                        column_widths.insert(target_col, *width);
+                        result.dimension_changes.push((target_col, *width, true));
+                    }
+                }
+            }
+            engine::UiEffect::SetCellFillColor { target_row, target_col, r, g, b, a } => {
+                let key = (source_cell.0, *target_row, *target_col);
+                let sources = registry.fill_color_sources
+                    .entry(key)
+                    .or_insert_with(HashSet::new);
+                sources.insert(source_cell);
+
+                if sources.len() > 1 {
+                    result.has_conflict = true;
+                } else {
+                    result.fill_color_changes.push((*target_row, *target_col, *r, *g, *b, *a));
                 }
             }
         }
     }
 
-    (height_changes, has_conflict)
+    result
+}
+
+/// Result of clearing UI effects for a cell.
+pub struct ClearEffectsResult {
+    /// Affected row height targets: (sheet_index, target_row)
+    pub affected_rows: Vec<(usize, u32)>,
+    /// Affected column width targets: (sheet_index, target_col)
+    pub affected_cols: Vec<(usize, u32)>,
+    /// Affected fill color targets: (sheet_index, target_row, target_col)
+    pub affected_fill_colors: Vec<(usize, u32, u32)>,
 }
 
 /// Clear all UI effects for a specific source cell from the registry.
 /// Called when a cell with a UI formula is deleted or cleared.
-/// Returns the set of target rows that were affected (may need height reset).
 pub fn clear_ui_effects_for_cell(
     source_cell: (usize, u32, u32),
     registry: &mut UiEffectRegistry,
-) -> Vec<(usize, u32)> {
-    let mut affected_targets = Vec::new();
+) -> ClearEffectsResult {
+    let mut result = ClearEffectsResult {
+        affected_rows: Vec::new(),
+        affected_cols: Vec::new(),
+        affected_fill_colors: Vec::new(),
+    };
 
     registry.row_height_sources.retain(|key, sources| {
         if sources.remove(&source_cell) {
-            affected_targets.push(*key);
+            result.affected_rows.push(*key);
         }
         !sources.is_empty()
     });
 
-    // Also collect targets that were fully removed (empty source sets are removed by retain)
-    affected_targets
+    registry.column_width_sources.retain(|key, sources| {
+        if sources.remove(&source_cell) {
+            result.affected_cols.push(*key);
+        }
+        !sources.is_empty()
+    });
+
+    registry.fill_color_sources.retain(|key, sources| {
+        if sources.remove(&source_cell) {
+            result.affected_fill_colors.push(*key);
+        }
+        !sources.is_empty()
+    });
+
+    result
 }
 
 /// Evaluates a formula AST using a pre-built evaluator. This is the fastest path

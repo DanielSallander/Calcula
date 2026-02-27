@@ -81,6 +81,8 @@ pub struct StyleData {
 pub struct DimensionData {
     pub index: u32,
     pub size: f64,
+    /// "row" or "column" — identifies the dimension type for the frontend.
+    pub dimension_type: String,
 }
 
 /// A single border side for formatting parameters.
@@ -161,6 +163,9 @@ pub struct UpdateCellResult {
     pub cells: Vec<CellData>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub dimension_changes: Vec<DimensionData>,
+    /// When true, the frontend should refresh its style cache (e.g., after SET.CELL.FILLCOLOR).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub needs_style_refresh: bool,
 }
 
 /// A merged cell region definition.

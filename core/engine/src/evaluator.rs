@@ -22,6 +22,7 @@ use crate::cell::{CellError, CellValue};
 use crate::coord::col_to_index;
 use crate::dependency_extractor::{BinaryOperator, BuiltinFunction, Expression, UnaryOperator, Value};
 use crate::grid::Grid;
+use crate::style::StyleRegistry;
 use std::cell::RefCell;
 use std::collections::HashMap;
 
@@ -210,6 +211,36 @@ pub enum UiEffect {
         rows: Vec<u32>,
         height: f64,
     },
+    /// Set the width of one or more columns.
+    /// Columns are 0-indexed internally (converted from 1-indexed user input).
+    SetColumnWidth {
+        cols: Vec<u32>,
+        width: f64,
+    },
+    /// Set the background fill color of a target cell.
+    /// Target coordinates are 0-indexed.
+    SetCellFillColor {
+        target_row: u32,
+        target_col: u32,
+        r: u8,
+        g: u8,
+        b: u8,
+        a: u8,
+    },
+}
+
+/// Optional evaluation context providing the current cell's position
+/// and external state needed by GET/UI functions.
+#[derive(Debug, Clone, Default)]
+pub struct EvalContext {
+    /// The 0-indexed row of the cell currently being evaluated.
+    pub current_row: Option<u32>,
+    /// The 0-indexed column of the cell currently being evaluated.
+    pub current_col: Option<u32>,
+    /// Row heights: row_index (0-indexed) -> height in pixels (for GET.ROW.HEIGHT).
+    pub row_heights: Option<HashMap<u32, f64>>,
+    /// Column widths: col_index (0-indexed) -> width in pixels (for GET.COLUMN.WIDTH).
+    pub column_widths: Option<HashMap<u32, f64>>,
 }
 
 /// The formula evaluator.
@@ -221,6 +252,10 @@ pub struct Evaluator<'a> {
     /// Side-effects collected during evaluation.
     /// Uses RefCell for interior mutability since evaluate() takes &self.
     ui_effects: RefCell<Vec<UiEffect>>,
+    /// Evaluation context: current cell position + external state for GET/UI functions.
+    context: EvalContext,
+    /// Optional style registry reference for GET.CELL.FILLCOLOR.
+    styles: Option<&'a StyleRegistry>,
 }
 
 impl<'a> Evaluator<'a> {
@@ -231,6 +266,8 @@ impl<'a> Evaluator<'a> {
             grid,
             multi_sheet: None,
             ui_effects: RefCell::new(Vec::new()),
+            context: EvalContext::default(),
+            styles: None,
         }
     }
 
@@ -240,7 +277,25 @@ impl<'a> Evaluator<'a> {
             grid,
             multi_sheet: Some(context),
             ui_effects: RefCell::new(Vec::new()),
+            context: EvalContext::default(),
+            styles: None,
         }
+    }
+
+    /// Creates a new Evaluator with multi-sheet support and evaluation context.
+    pub fn with_context(grid: &'a Grid, multi_sheet: MultiSheetContext<'a>, eval_ctx: EvalContext) -> Self {
+        Evaluator {
+            grid,
+            multi_sheet: Some(multi_sheet),
+            ui_effects: RefCell::new(Vec::new()),
+            context: eval_ctx,
+            styles: None,
+        }
+    }
+
+    /// Sets the style registry reference for GET.CELL.FILLCOLOR.
+    pub fn set_styles(&mut self, style_registry: &'a StyleRegistry) {
+        self.styles = Some(style_registry);
     }
 
     /// Drain and return all collected UI effects.
@@ -731,8 +786,19 @@ impl<'a> Evaluator<'a> {
             BuiltinFunction::XLookup => self.fn_xlookup(args),
             BuiltinFunction::XLookups => self.fn_xlookups(args),
 
-            // UI functions
+            // UI SET functions
             BuiltinFunction::SetRowHeight => self.fn_set_row_height(args),
+            BuiltinFunction::SetColumnWidth => self.fn_set_column_width(args),
+            BuiltinFunction::SetCellFillColor => self.fn_set_cell_fillcolor(args),
+
+            // UI GET functions
+            BuiltinFunction::GetRowHeight => self.fn_get_row_height(args),
+            BuiltinFunction::GetColumnWidth => self.fn_get_column_width(args),
+            BuiltinFunction::GetCellFillColor => self.fn_get_cell_fillcolor(args),
+
+            // Reference functions
+            BuiltinFunction::Row => self.fn_row(args),
+            BuiltinFunction::Column => self.fn_column(args),
 
             // Unknown/custom functions
             BuiltinFunction::Custom(_) => EvalResult::Error(CellError::Name),
@@ -1837,6 +1903,266 @@ impl<'a> Evaluator<'a> {
     // =========================================================================
     // UI Functions
     // =========================================================================
+
+    /// ROW([cell_ref])
+    /// With no arguments, returns the 1-indexed row of the current cell.
+    /// With a cell_ref argument, returns the 1-indexed row of that reference.
+    fn fn_row(&self, args: &[Expression]) -> EvalResult {
+        if args.is_empty() {
+            match self.context.current_row {
+                Some(r) => EvalResult::Number((r + 1) as f64),
+                None => EvalResult::Error(CellError::Value),
+            }
+        } else if args.len() == 1 {
+            match &args[0] {
+                Expression::CellRef { row, .. } => EvalResult::Number(*row as f64),
+                _ => EvalResult::Error(CellError::Value),
+            }
+        } else {
+            EvalResult::Error(CellError::Value)
+        }
+    }
+
+    /// COLUMN([cell_ref])
+    /// With no arguments, returns the 1-indexed column of the current cell.
+    /// With a cell_ref argument, returns the 1-indexed column of that reference.
+    fn fn_column(&self, args: &[Expression]) -> EvalResult {
+        if args.is_empty() {
+            match self.context.current_col {
+                Some(c) => EvalResult::Number((c + 1) as f64),
+                None => EvalResult::Error(CellError::Value),
+            }
+        } else if args.len() == 1 {
+            match &args[0] {
+                Expression::CellRef { col, .. } => {
+                    let col_idx = col_to_index(col);
+                    EvalResult::Number((col_idx + 1) as f64)
+                }
+                _ => EvalResult::Error(CellError::Value),
+            }
+        } else {
+            EvalResult::Error(CellError::Value)
+        }
+    }
+
+    /// SET.COLUMN.WIDTH(cols, width)
+    /// cols: single column number or array of column numbers (1-indexed)
+    /// width: width in pixels (must be positive)
+    /// Returns the width value. The actual column width change is a side-effect.
+    fn fn_set_column_width(&self, args: &[Expression]) -> EvalResult {
+        if args.len() != 2 {
+            return EvalResult::Error(CellError::Value);
+        }
+
+        let width_result = self.evaluate(&args[1]);
+        let width = match width_result.as_number() {
+            Some(w) if w > 0.0 => w,
+            Some(_) => return EvalResult::Error(CellError::Value),
+            None => {
+                if let EvalResult::Error(e) = width_result {
+                    return EvalResult::Error(e);
+                }
+                return EvalResult::Error(CellError::Value);
+            }
+        };
+
+        let cols_result = self.evaluate(&args[0]);
+        let mut cols: Vec<u32> = Vec::new();
+
+        match &cols_result {
+            EvalResult::Number(n) => {
+                let n = *n;
+                if n < 1.0 || n != n.floor() {
+                    return EvalResult::Error(CellError::Value);
+                }
+                cols.push((n as u32) - 1);
+            }
+            EvalResult::Array(arr) => {
+                for item in arr.iter() {
+                    match item.as_number() {
+                        Some(n) if n >= 1.0 && n == n.floor() => {
+                            cols.push((n as u32) - 1);
+                        }
+                        _ => return EvalResult::Error(CellError::Value),
+                    }
+                }
+            }
+            EvalResult::Error(e) => return EvalResult::Error(e.clone()),
+            _ => return EvalResult::Error(CellError::Value),
+        }
+
+        if cols.is_empty() {
+            return EvalResult::Error(CellError::Value);
+        }
+
+        self.ui_effects.borrow_mut().push(UiEffect::SetColumnWidth { cols, width });
+        EvalResult::Number(width)
+    }
+
+    /// GET.ROW.HEIGHT(row_number)
+    /// Returns the current height of the specified row (1-indexed) in pixels.
+    /// Falls back to default height (24.0) if no custom height is set.
+    fn fn_get_row_height(&self, args: &[Expression]) -> EvalResult {
+        if args.len() != 1 {
+            return EvalResult::Error(CellError::Value);
+        }
+        let row_result = self.evaluate(&args[0]);
+        match row_result.as_number() {
+            Some(n) if n >= 1.0 && n == n.floor() => {
+                let row_idx = (n as u32) - 1;
+                let height = self.context.row_heights
+                    .as_ref()
+                    .and_then(|m| m.get(&row_idx).copied())
+                    .unwrap_or(24.0);
+                EvalResult::Number(height)
+            }
+            Some(_) => EvalResult::Error(CellError::Value),
+            None => {
+                if let EvalResult::Error(e) = row_result {
+                    return EvalResult::Error(e);
+                }
+                EvalResult::Error(CellError::Value)
+            }
+        }
+    }
+
+    /// GET.COLUMN.WIDTH(col_number)
+    /// Returns the current width of the specified column (1-indexed) in pixels.
+    /// Falls back to default width (100.0) if no custom width is set.
+    fn fn_get_column_width(&self, args: &[Expression]) -> EvalResult {
+        if args.len() != 1 {
+            return EvalResult::Error(CellError::Value);
+        }
+        let col_result = self.evaluate(&args[0]);
+        match col_result.as_number() {
+            Some(n) if n >= 1.0 && n == n.floor() => {
+                let col_idx = (n as u32) - 1;
+                let width = self.context.column_widths
+                    .as_ref()
+                    .and_then(|m| m.get(&col_idx).copied())
+                    .unwrap_or(100.0);
+                EvalResult::Number(width)
+            }
+            Some(_) => EvalResult::Error(CellError::Value),
+            None => {
+                if let EvalResult::Error(e) = col_result {
+                    return EvalResult::Error(e);
+                }
+                EvalResult::Error(CellError::Value)
+            }
+        }
+    }
+
+    /// SET.CELL.FILLCOLOR(cell_ref, color)
+    /// Supports:
+    /// - 2 args: (cell_ref, "#FF0000") — hex string
+    /// - 4 args: (cell_ref, R, G, B) — RGB values 0-255
+    /// - 5 args: (cell_ref, R, G, B, A) — RGBA values 0-255
+    /// Returns the hex color string. The fill color change is a side-effect.
+    fn fn_set_cell_fillcolor(&self, args: &[Expression]) -> EvalResult {
+        if args.len() < 2 || args.len() == 3 || args.len() > 5 {
+            return EvalResult::Error(CellError::Value);
+        }
+
+        // Extract target cell coordinates from the first argument (must be CellRef)
+        let (target_row, target_col) = match &args[0] {
+            Expression::CellRef { col, row, .. } => {
+                let col_idx = col_to_index(col);
+                let row_idx = row - 1; // 1-indexed -> 0-indexed
+                (row_idx, col_idx as u32)
+            }
+            _ => return EvalResult::Error(CellError::Value),
+        };
+
+        let (r, g, b, a) = if args.len() == 2 {
+            // Hex string form
+            let color_result = self.evaluate(&args[1]);
+            let hex_str = match &color_result {
+                EvalResult::Text(s) => s.clone(),
+                EvalResult::Error(e) => return EvalResult::Error(e.clone()),
+                _ => return EvalResult::Error(CellError::Value),
+            };
+            let hex = hex_str.trim_start_matches('#');
+            if hex.len() == 6 {
+                let rv = u8::from_str_radix(&hex[0..2], 16);
+                let gv = u8::from_str_radix(&hex[2..4], 16);
+                let bv = u8::from_str_radix(&hex[4..6], 16);
+                match (rv, gv, bv) {
+                    (Ok(r), Ok(g), Ok(b)) => (r, g, b, 255u8),
+                    _ => return EvalResult::Error(CellError::Value),
+                }
+            } else if hex.len() == 8 {
+                let rv = u8::from_str_radix(&hex[0..2], 16);
+                let gv = u8::from_str_radix(&hex[2..4], 16);
+                let bv = u8::from_str_radix(&hex[4..6], 16);
+                let av = u8::from_str_radix(&hex[6..8], 16);
+                match (rv, gv, bv, av) {
+                    (Ok(r), Ok(g), Ok(b), Ok(a)) => (r, g, b, a),
+                    _ => return EvalResult::Error(CellError::Value),
+                }
+            } else {
+                return EvalResult::Error(CellError::Value);
+            }
+        } else {
+            // RGB/RGBA numeric form (4 or 5 args)
+            let mut components = Vec::new();
+            for i in 1..args.len() {
+                let val = self.evaluate(&args[i]);
+                match val.as_number() {
+                    Some(n) if n >= 0.0 && n <= 255.0 && n == n.floor() => {
+                        components.push(n as u8);
+                    }
+                    _ => return EvalResult::Error(CellError::Value),
+                }
+            }
+            if components.len() == 3 {
+                (components[0], components[1], components[2], 255u8)
+            } else {
+                (components[0], components[1], components[2], components[3])
+            }
+        };
+
+        self.ui_effects.borrow_mut().push(UiEffect::SetCellFillColor {
+            target_row,
+            target_col,
+            r, g, b, a,
+        });
+
+        // Return the hex color as the cell's display value
+        if a == 255 {
+            EvalResult::Text(format!("#{:02x}{:02x}{:02x}", r, g, b))
+        } else {
+            EvalResult::Text(format!("#{:02x}{:02x}{:02x}{:02x}", r, g, b, a))
+        }
+    }
+
+    /// GET.CELL.FILLCOLOR(cell_ref)
+    /// Returns the hex color string of the cell's background fill color.
+    fn fn_get_cell_fillcolor(&self, args: &[Expression]) -> EvalResult {
+        if args.len() != 1 {
+            return EvalResult::Error(CellError::Value);
+        }
+
+        let (row_idx, col_idx) = match &args[0] {
+            Expression::CellRef { col, row, .. } => {
+                (row - 1, col_to_index(col) as u32)
+            }
+            _ => return EvalResult::Error(CellError::Value),
+        };
+
+        let style_registry = match &self.styles {
+            Some(sr) => sr,
+            None => return EvalResult::Text(String::new()),
+        };
+
+        let style_index = self.grid
+            .get_cell(row_idx, col_idx)
+            .map(|c| c.style_index)
+            .unwrap_or(0);
+
+        let style = style_registry.get(style_index);
+        EvalResult::Text(style.background.to_css())
+    }
 
     /// SET.ROW.HEIGHT(rows, height)
     /// rows: single row number or array of row numbers (1-indexed, user-facing)

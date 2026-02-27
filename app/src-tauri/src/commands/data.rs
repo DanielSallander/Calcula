@@ -155,6 +155,7 @@ pub fn update_cell(
 
     let mut updated_cells = Vec::new();
     let mut dimension_changes: Vec<DimensionData> = Vec::new();
+    let mut needs_style_refresh = false;
 
     // Record previous state for undo BEFORE making any changes
     let previous_cell = grid.get_cell(row, col).cloned();
@@ -220,28 +221,44 @@ pub fn update_cell(
         // Clear any UI effects from the deleted cell
         {
             let mut ui_registry = state.ui_effect_registry.lock().unwrap();
-            let affected = clear_ui_effects_for_cell(
+            let clear_result = clear_ui_effects_for_cell(
                 (active_sheet, row, col),
                 &mut ui_registry,
             );
             // Revert row heights for targets that no longer have any source
-            if !affected.is_empty() {
+            if !clear_result.affected_rows.is_empty() {
                 let mut rh = state.row_heights.lock().unwrap();
-                for (sheet_idx, target_row) in &affected {
+                for (sheet_idx, target_row) in &clear_result.affected_rows {
                     if *sheet_idx == active_sheet {
                         if !ui_registry.row_height_sources.contains_key(&(*sheet_idx, *target_row)) {
                             rh.remove(target_row);
-                            dimension_changes.push(DimensionData { index: *target_row, size: 0.0 });
+                            dimension_changes.push(DimensionData { index: *target_row, size: 0.0, dimension_type: "row".to_string() });
                         }
                     }
                 }
             }
+            // Revert column widths for targets that no longer have any source
+            if !clear_result.affected_cols.is_empty() {
+                let mut cw = state.column_widths.lock().unwrap();
+                for (sheet_idx, target_col) in &clear_result.affected_cols {
+                    if *sheet_idx == active_sheet {
+                        if !ui_registry.column_width_sources.contains_key(&(*sheet_idx, *target_col)) {
+                            cw.remove(target_col);
+                            dimension_changes.push(DimensionData { index: *target_col, size: 0.0, dimension_type: "column".to_string() });
+                        }
+                    }
+                }
+            }
+            // Note: fill color revert could be done here too, but for now
+            // clearing the cell that caused the fill color is sufficient.
+            // The target cell keeps its last fill color (similar to how dimensions
+            // revert to default when source is removed).
         }
 
         // Record undo after successful change
         undo_stack.record_cell_change(row, col, previous_cell);
 
-        return Ok(UpdateCellResult { cells: updated_cells, dimension_changes });
+        return Ok(UpdateCellResult { cells: updated_cells, dimension_changes, needs_style_refresh });
     }
 
     // Parse the input
@@ -339,35 +356,96 @@ pub fn update_cell(
                 // PERF: Convert the already-parsed AST directly instead of re-parsing.
                 let engine_ast = crate::convert_expr(&resolved);
                 cell.set_cached_ast(engine_ast.clone());
+                // Build EvalContext with current cell position and dimension state
+                let rh_map = state.row_heights.lock().unwrap().clone();
+                let cw_map = state.column_widths.lock().unwrap().clone();
+                let eval_ctx = engine::EvalContext {
+                    current_row: Some(row),
+                    current_col: Some(col),
+                    row_heights: Some(rh_map),
+                    column_widths: Some(cw_map),
+                };
+                let styles_lock = state.style_registry.lock().unwrap();
                 let (result, effects) = evaluate_formula_with_effects(
                     &grids,
                     &sheet_names,
                     active_sheet,
                     &engine_ast,
+                    eval_ctx,
+                    Some(&styles_lock),
                 );
+                drop(styles_lock);
                 cell.value = result;
 
-                // Process UI effects (e.g., SET.ROW.HEIGHT)
+                // Process UI effects (e.g., SET.ROW.HEIGHT, SET.COLUMN.WIDTH, SET.CELL.FILLCOLOR)
                 if !effects.is_empty() {
                     let mut ui_registry = state.ui_effect_registry.lock().unwrap();
                     let mut rh = state.row_heights.lock().unwrap();
+                    let mut cw = state.column_widths.lock().unwrap();
 
                     // Clear previous effects for this cell before registering new ones
                     clear_ui_effects_for_cell((active_sheet, row, col), &mut ui_registry);
 
-                    let (height_changes, has_conflict) = process_ui_effects(
+                    let effect_result = process_ui_effects(
                         &effects,
                         (active_sheet, row, col),
                         &mut ui_registry,
                         &mut rh,
+                        &mut cw,
                     );
 
-                    if has_conflict {
+                    if effect_result.has_conflict {
                         cell.value = engine::CellValue::Error(engine::CellError::Conflict);
                     }
 
-                    for (target_row, height) in &height_changes {
-                        dimension_changes.push(DimensionData { index: *target_row, size: *height });
+                    for (index, size, is_column) in &effect_result.dimension_changes {
+                        dimension_changes.push(DimensionData {
+                            index: *index,
+                            size: *size,
+                            dimension_type: if *is_column { "column".to_string() } else { "row".to_string() },
+                        });
+                    }
+
+                    // Apply fill color changes
+                    if !effect_result.fill_color_changes.is_empty() {
+                        drop(rh);
+                        drop(cw);
+                        drop(ui_registry);
+                        let mut style_reg = state.style_registry.lock().unwrap();
+                        for (target_row, target_col, r, g, b, a) in &effect_result.fill_color_changes {
+                            let color = engine::Color::with_alpha(*r, *g, *b, *a);
+                            let old_style_index = grid.get_cell(*target_row, *target_col)
+                                .map(|c| c.style_index)
+                                .unwrap_or(0);
+                            let mut new_style = style_reg.get(old_style_index).clone();
+                            new_style.background = color;
+                            let new_style_index = style_reg.get_or_create(new_style);
+
+                            // Update the target cell's style
+                            if let Some(existing) = grid.get_cell(*target_row, *target_col) {
+                                let mut updated = existing.clone();
+                                updated.style_index = new_style_index;
+                                grid.set_cell(*target_row, *target_col, updated);
+                            } else {
+                                let mut new_cell = engine::Cell::default();
+                                new_cell.style_index = new_style_index;
+                                grid.set_cell(*target_row, *target_col, new_cell);
+                            }
+
+                            // Also update in grids array
+                            if let Some(g) = grids.get_mut(active_sheet) {
+                                if let Some(existing) = g.get_cell(*target_row, *target_col) {
+                                    let mut updated = existing.clone();
+                                    updated.style_index = new_style_index;
+                                    g.set_cell(*target_row, *target_col, updated);
+                                } else {
+                                    let mut new_cell = engine::Cell::default();
+                                    new_cell.style_index = new_style_index;
+                                    g.set_cell(*target_row, *target_col, new_cell);
+                                }
+                            }
+                        }
+                        needs_style_refresh = true;
                     }
                 } else {
                     // Formula has no UI effects — clear any previous UI effects from this cell
@@ -809,7 +887,7 @@ pub fn update_cell(
         );
     }
 
-    Ok(UpdateCellResult { cells: updated_cells, dimension_changes })
+    Ok(UpdateCellResult { cells: updated_cells, dimension_changes, needs_style_refresh })
 }
 
 /// Batch update multiple cells in a single operation.

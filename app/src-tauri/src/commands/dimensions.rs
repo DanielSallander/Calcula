@@ -37,7 +37,7 @@ pub fn get_all_column_widths(state: State<AppState>) -> Vec<DimensionData> {
     let widths = state.column_widths.lock().unwrap();
     widths
         .iter()
-        .map(|(&index, &size)| DimensionData { index, size })
+        .map(|(&index, &size)| DimensionData { index, size, dimension_type: "column".to_string() })
         .collect()
 }
 
@@ -73,6 +73,6 @@ pub fn get_all_row_heights(state: State<AppState>) -> Vec<DimensionData> {
     let heights = state.row_heights.lock().unwrap();
     heights
         .iter()
-        .map(|(&index, &size)| DimensionData { index, size })
+        .map(|(&index, &size)| DimensionData { index, size, dimension_type: "row".to_string() })
         .collect()
 }

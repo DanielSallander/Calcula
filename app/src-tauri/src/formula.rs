@@ -164,6 +164,18 @@ pub fn get_functions_by_category(category: String) -> FunctionListResult {
                 description: "Multi-criteria lookup: searches multiple arrays simultaneously and returns the corresponding item from the return array".to_string(),
                 category: "Lookup & Reference".to_string(),
             },
+            FunctionInfo {
+                name: "ROW".to_string(),
+                syntax: "ROW([cell_ref])".to_string(),
+                description: "Returns the row number of a cell reference, or the current row if no argument is given.".to_string(),
+                category: "Lookup & Reference".to_string(),
+            },
+            FunctionInfo {
+                name: "COLUMN".to_string(),
+                syntax: "COLUMN([cell_ref])".to_string(),
+                description: "Returns the column number of a cell reference, or the current column if no argument is given.".to_string(),
+                category: "Lookup & Reference".to_string(),
+            },
         ],
         "info" | "information" => vec![
             FunctionInfo {
@@ -202,6 +214,36 @@ pub fn get_functions_by_category(category: String) -> FunctionListResult {
                 name: "SET.ROW.HEIGHT".to_string(),
                 syntax: "SET.ROW.HEIGHT(rows, height)".to_string(),
                 description: "Sets the height of specified rows. Rows can be a single number or an array. Returns the height value.".to_string(),
+                category: "UI".to_string(),
+            },
+            FunctionInfo {
+                name: "SET.COLUMN.WIDTH".to_string(),
+                syntax: "SET.COLUMN.WIDTH(cols, width)".to_string(),
+                description: "Sets the width of specified columns. Cols can be a single number or an array. Returns the width value.".to_string(),
+                category: "UI".to_string(),
+            },
+            FunctionInfo {
+                name: "SET.CELL.FILLCOLOR".to_string(),
+                syntax: "SET.CELL.FILLCOLOR(cell_ref, color)".to_string(),
+                description: "Sets the background fill color of a cell. Color can be a hex string (#FF0000) or individual R,G,B[,A] values. Returns the color string.".to_string(),
+                category: "UI".to_string(),
+            },
+            FunctionInfo {
+                name: "GET.ROW.HEIGHT".to_string(),
+                syntax: "GET.ROW.HEIGHT(row)".to_string(),
+                description: "Returns the height in pixels of the specified row (1-indexed). Returns the default height (24) if not customized.".to_string(),
+                category: "UI".to_string(),
+            },
+            FunctionInfo {
+                name: "GET.COLUMN.WIDTH".to_string(),
+                syntax: "GET.COLUMN.WIDTH(col)".to_string(),
+                description: "Returns the width in pixels of the specified column (1-indexed). Returns the default width (100) if not customized.".to_string(),
+                category: "UI".to_string(),
+            },
+            FunctionInfo {
+                name: "GET.CELL.FILLCOLOR".to_string(),
+                syntax: "GET.CELL.FILLCOLOR(cell_ref)".to_string(),
+                description: "Returns the background fill color of a cell as a CSS color string (hex or rgba).".to_string(),
                 category: "UI".to_string(),
             },
         ],
@@ -283,6 +325,15 @@ pub fn get_function_template(function_name: String) -> String {
         
         // UI functions
         "SET.ROW.HEIGHT" | "SETROWHEIGHT" => "=SET.ROW.HEIGHT(, )".to_string(),
+        "SET.COLUMN.WIDTH" | "SETCOLUMNWIDTH" => "=SET.COLUMN.WIDTH(, )".to_string(),
+        "SET.CELL.FILLCOLOR" | "SETCELLFILLCOLOR" => "=SET.CELL.FILLCOLOR(, )".to_string(),
+        "GET.ROW.HEIGHT" | "GETROWHEIGHT" => "=GET.ROW.HEIGHT()".to_string(),
+        "GET.COLUMN.WIDTH" | "GETCOLUMNWIDTH" => "=GET.COLUMN.WIDTH()".to_string(),
+        "GET.CELL.FILLCOLOR" | "GETCELLFILLCOLOR" => "=GET.CELL.FILLCOLOR()".to_string(),
+
+        // Reference functions
+        "ROW" => "=ROW()".to_string(),
+        "COLUMN" => "=COLUMN()".to_string(),
 
         // Default: generic function call
         _ => format!("={}()", function_name.to_uppercase()),

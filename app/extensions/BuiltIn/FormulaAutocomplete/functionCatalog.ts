@@ -31,7 +31,14 @@ const COMMON_FUNCTIONS: Record<string, number> = {
   ISNUMBER: 15,
   ISBLANK: 10,
   ABS: 5,
+  ROW: 38,
+  COLUMN: 37,
   "SET.ROW.HEIGHT": 3,
+  "SET.COLUMN.WIDTH": 3,
+  "SET.CELL.FILLCOLOR": 2,
+  "GET.ROW.HEIGHT": 2,
+  "GET.COLUMN.WIDTH": 2,
+  "GET.CELL.FILLCOLOR": 2,
 };
 
 // ============================================================================

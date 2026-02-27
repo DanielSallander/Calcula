@@ -238,6 +238,8 @@ export interface UpdateCellResult {
   cells: CellData[];
   /** Row/column dimension changes triggered by UI formulas */
   dimensionChanges: DimensionData[];
+  /** Whether cell styles changed and frontend should refresh style cache */
+  needsStyleRefresh?: boolean;
 }
 
 /**
@@ -248,6 +250,8 @@ export interface DimensionData {
   index: number;
   /** Size (width or height) in pixels */
   size: number;
+  /** Whether this is a "row" or "column" dimension */
+  dimensionType: string;
 }
 
 /**

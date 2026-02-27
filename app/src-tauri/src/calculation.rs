@@ -73,9 +73,18 @@ pub fn calculate_now(state: State<AppState>) -> Result<Vec<CellData>, String> {
     let named_ranges_map = state.named_ranges.lock().unwrap();
     let mut ui_registry = state.ui_effect_registry.lock().unwrap();
     let mut row_heights = state.row_heights.lock().unwrap();
+    let mut column_widths = state.column_widths.lock().unwrap();
 
     // Re-evaluate each formula using multi-sheet context
     for (row, col, formula) in formula_cells {
+        // Build EvalContext for this cell
+        let eval_ctx = engine::EvalContext {
+            current_row: Some(row),
+            current_col: Some(col),
+            row_heights: Some(row_heights.clone()),
+            column_widths: Some(column_widths.clone()),
+        };
+
         // Parse, resolve names and table refs, then evaluate
         let (result, effects) = match parser::parse(&formula) {
             Ok(parsed) => {
@@ -106,6 +115,8 @@ pub fn calculate_now(state: State<AppState>) -> Result<Vec<CellData>, String> {
                     &sheet_names,
                     active_sheet,
                     &engine_ast,
+                    eval_ctx,
+                    Some(&styles),
                 )
             }
             Err(_) => (engine::CellValue::Error(engine::CellError::Value), Vec::new()),
@@ -115,13 +126,14 @@ pub fn calculate_now(state: State<AppState>) -> Result<Vec<CellData>, String> {
         let mut final_result = result;
         if !effects.is_empty() {
             clear_ui_effects_for_cell((active_sheet, row, col), &mut ui_registry);
-            let (_height_changes, has_conflict) = process_ui_effects(
+            let effect_result = process_ui_effects(
                 &effects,
                 (active_sheet, row, col),
                 &mut ui_registry,
                 &mut row_heights,
+                &mut column_widths,
             );
-            if has_conflict {
+            if effect_result.has_conflict {
                 final_result = engine::CellValue::Error(engine::CellError::Conflict);
             }
         }
