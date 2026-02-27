@@ -130,6 +130,21 @@ pub struct ProtectedRegion {
     pub end_col: u32,
 }
 
+/// Tracks which cells produce UI effects on which targets.
+/// Used for conflict detection: if two cells target the same row, both get #CONFLICT.
+pub struct UiEffectRegistry {
+    /// Row height effects: (sheet_index, target_row) -> set of source cells (sheet_index, row, col)
+    pub row_height_sources: HashMap<(usize, u32), HashSet<(usize, u32, u32)>>,
+}
+
+impl UiEffectRegistry {
+    pub fn new() -> Self {
+        UiEffectRegistry {
+            row_height_sources: HashMap::new(),
+        }
+    }
+}
+
 pub struct AppState {
     /// Multiple grids, one per sheet
     pub grids: Mutex<Vec<Grid>>,
@@ -195,6 +210,8 @@ pub struct AppState {
     pub table_names: Mutex<tables::TableNameRegistry>,
     /// Next table ID
     pub next_table_id: Mutex<u64>,
+    /// Registry tracking UI formula effects for conflict detection
+    pub ui_effect_registry: Mutex<UiEffectRegistry>,
 }
 
 impl AppState {
@@ -259,6 +276,7 @@ pub fn create_app_state() -> AppState {
         tables: Mutex::new(HashMap::new()),
         table_names: Mutex::new(HashMap::new()),
         next_table_id: Mutex::new(1),
+        ui_effect_registry: Mutex::new(UiEffectRegistry::new()),
     }
 }
 
@@ -402,6 +420,7 @@ fn convert_builtin_function(func: &ParserBuiltinFn) -> EngineBuiltinFn {
         ParserBuiltinFn::IsError => EngineBuiltinFn::IsError,
         ParserBuiltinFn::XLookup => EngineBuiltinFn::XLookup,
         ParserBuiltinFn::XLookups => EngineBuiltinFn::XLookups,
+        ParserBuiltinFn::SetRowHeight => EngineBuiltinFn::SetRowHeight,
         ParserBuiltinFn::Custom(name) => EngineBuiltinFn::Custom(name.clone()),
     }
 }
@@ -1357,6 +1376,7 @@ fn builtin_function_to_name(func: &ParserBuiltinFn) -> String {
         ParserBuiltinFn::IsError => "ISERROR".to_string(),
         ParserBuiltinFn::XLookup => "XLOOKUP".to_string(),
         ParserBuiltinFn::XLookups => "XLOOKUPS".to_string(),
+        ParserBuiltinFn::SetRowHeight => "SET.ROW.HEIGHT".to_string(),
         ParserBuiltinFn::Custom(name) => name.clone(),
     }
 }
@@ -1746,6 +1766,83 @@ pub fn evaluate_formula_multi_sheet_with_ast(
 
     let evaluator = Evaluator::with_multi_sheet(current_grid, context);
     evaluator.evaluate(ast).to_cell_value()
+}
+
+/// Evaluates a formula AST and also returns any UI side-effects.
+/// Used when the formula may contain UI functions like SET.ROW.HEIGHT.
+pub fn evaluate_formula_with_effects(
+    grids: &[Grid],
+    sheet_names: &[String],
+    current_sheet_index: usize,
+    ast: &EngineExpr,
+) -> (CellValue, Vec<engine::UiEffect>) {
+    if current_sheet_index >= grids.len() || current_sheet_index >= sheet_names.len() {
+        return (CellValue::Error(CellError::Ref), Vec::new());
+    }
+
+    let current_grid = &grids[current_sheet_index];
+    let current_sheet_name = &sheet_names[current_sheet_index];
+    let context = create_multi_sheet_context(grids, sheet_names, current_sheet_name);
+    let evaluator = Evaluator::with_multi_sheet(current_grid, context);
+    let result = evaluator.evaluate(ast).to_cell_value();
+    let effects = evaluator.take_ui_effects();
+    (result, effects)
+}
+
+/// Process UI effects from a formula evaluation.
+/// Registers effects in the registry, detects conflicts, and applies row heights.
+/// Returns: list of (row, height) changes applied, and whether any conflict was found.
+pub fn process_ui_effects(
+    effects: &[engine::UiEffect],
+    source_cell: (usize, u32, u32), // (sheet_index, row, col)
+    registry: &mut UiEffectRegistry,
+    row_heights: &mut HashMap<u32, f64>,
+) -> (Vec<(u32, f64)>, bool) {
+    let mut height_changes: Vec<(u32, f64)> = Vec::new();
+    let mut has_conflict = false;
+
+    for effect in effects {
+        match effect {
+            engine::UiEffect::SetRowHeight { rows, height } => {
+                for &target_row in rows {
+                    let key = (source_cell.0, target_row);
+                    let sources = registry.row_height_sources
+                        .entry(key)
+                        .or_insert_with(HashSet::new);
+                    sources.insert(source_cell);
+
+                    if sources.len() > 1 {
+                        has_conflict = true;
+                    } else {
+                        row_heights.insert(target_row, *height);
+                        height_changes.push((target_row, *height));
+                    }
+                }
+            }
+        }
+    }
+
+    (height_changes, has_conflict)
+}
+
+/// Clear all UI effects for a specific source cell from the registry.
+/// Called when a cell with a UI formula is deleted or cleared.
+/// Returns the set of target rows that were affected (may need height reset).
+pub fn clear_ui_effects_for_cell(
+    source_cell: (usize, u32, u32),
+    registry: &mut UiEffectRegistry,
+) -> Vec<(usize, u32)> {
+    let mut affected_targets = Vec::new();
+
+    registry.row_height_sources.retain(|key, sources| {
+        if sources.remove(&source_cell) {
+            affected_targets.push(*key);
+        }
+        !sources.is_empty()
+    });
+
+    // Also collect targets that were fully removed (empty source sets are removed by retain)
+    affected_targets
 }
 
 /// Evaluates a formula AST using a pre-built evaluator. This is the fastest path

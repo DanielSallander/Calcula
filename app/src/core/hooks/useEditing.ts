@@ -21,14 +21,15 @@ import { autoCompleteFormula } from "../lib/formulaCompletion";
 import { setExtendMode } from "./useGridKeyboard";
 import { useCallback, useState, useEffect, useRef } from "react";
 import { useGridContext } from "../state/GridContext";
-import { 
-  startEditing as startEditingAction, 
-  updateEditing, 
+import {
+  startEditing as startEditingAction,
+  updateEditing,
   stopEditing,
   setFormulaReferences,
   clearFormulaReferences,
   setActiveSheet,
   setSelection,
+  setRowHeight,
 } from "../../core/state/gridActions";
 import { updateCell, getCell, setActiveSheet as setActiveSheetApi, getMergeInfo } from "../lib/tauri-api";
 import { cellEvents } from "../lib/cellEvents";
@@ -1285,9 +1286,17 @@ export function useEditing(): UseEditingReturn {
         // action === "allow" -- fall through to normal commit
       }
 
-      const updatedCells = await updateCell(editing.row, editing.col, valueToCommit);
+      const updateResult = await updateCell(editing.row, editing.col, valueToCommit);
+      const updatedCells = updateResult.cells;
       const perfT3UpdateCell = performance.now();
       const primaryCell = updatedCells[0];
+
+      // Apply dimension changes from UI formulas (e.g., SET.ROW.HEIGHT)
+      if (updateResult.dimensionChanges && updateResult.dimensionChanges.length > 0) {
+        for (const dim of updateResult.dimensionChanges) {
+          dispatch(setRowHeight(dim.index, dim.size));
+        }
+      }
 
       // FIX: Clear global flag and arrow reference state when editing stops
       console.log("[commitEdit] SUCCESS - clearing globalIsEditing, was:", globalIsEditing);
@@ -1337,7 +1346,7 @@ export function useEditing(): UseEditingReturn {
           `dispatch=${(perfT5Dispatch - perfT4Events).toFixed(1)}ms ` +
           `TOTAL=${(perfT5Dispatch - perfT0).toFixed(1)}ms`
         );
-        
+
         const result: CellUpdateResult = {
           success: true,
           row: primaryCell.row,
@@ -1346,12 +1355,12 @@ export function useEditing(): UseEditingReturn {
           formula: primaryCell.formula ?? null,
           updatedCells,
         };
-        
+
         return result;
       } else {
         dispatch(stopEditing());
         dispatch(clearFormulaReferences());
-        
+
         const result: CellUpdateResult = {
           success: true,
           row: editing.row,

@@ -134,6 +134,9 @@ pub enum BuiltinFunction {
     XLookup,
     XLookups,
 
+    // UI functions (worksheet-manipulating formulas)
+    SetRowHeight,
+
     /// Fallback for unrecognized function names (future extensions/plugins).
     Custom(String),
 }

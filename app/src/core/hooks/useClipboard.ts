@@ -355,7 +355,8 @@ export function useClipboard(): UseClipboardReturn {
 
           try {
             const tIpc = performance.now();
-            const updatedCells = await updateCell(destRow, destCol, value);
+            const updateResult = await updateCell(destRow, destCol, value);
+            const updatedCells = updateResult.cells;
 
             // Apply source cell's style when using internal clipboard
             // Always set the style (even to 0) so target cell formatting is replaced
@@ -555,7 +556,8 @@ export function useClipboard(): UseClipboardReturn {
             const value = sourceCell?.formula || sourceCell?.display || "";
 
             try {
-              const updatedCells = await updateCell(destRow, destCol, value);
+              const updateResult = await updateCell(destRow, destCol, value);
+              const updatedCells = updateResult.cells;
 
               // Copy style from source cell
               const styleIdx = sourceCell?.styleIndex ?? 0;

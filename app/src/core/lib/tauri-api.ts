@@ -12,6 +12,7 @@ import type {
   FormattingOptions,
   FormattingResult,
   FunctionInfo,
+  UpdateCellResult,
 } from "../types";
 
 // ============================================================================
@@ -67,12 +68,12 @@ export async function updateCell(
   row: number,
   col: number,
   input: string
-): Promise<CellData[]> {
+): Promise<UpdateCellResult> {
   const t0 = performance.now();
   // FIXED: Mapped 'input' to 'value' to match Rust command signature
-  const result = await invoke<CellData[]>("update_cell", { row, col, value: input });
+  const result = await invoke<UpdateCellResult>("update_cell", { row, col, value: input });
   const dt = performance.now() - t0;
-  console.log(`[PERF][bridge] updateCell(${row},${col}) => ${result.length} cells | ipc=${dt.toFixed(1)}ms`);
+  console.log(`[PERF][bridge] updateCell(${row},${col}) => ${result.cells.length} cells | ipc=${dt.toFixed(1)}ms`);
   return result;
 }
 

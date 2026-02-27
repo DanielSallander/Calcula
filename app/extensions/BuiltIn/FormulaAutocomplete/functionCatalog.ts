@@ -31,6 +31,7 @@ const COMMON_FUNCTIONS: Record<string, number> = {
   ISNUMBER: 15,
   ISBLANK: 10,
   ABS: 5,
+  "SET.ROW.HEIGHT": 3,
 };
 
 // ============================================================================

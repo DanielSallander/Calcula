@@ -2,17 +2,18 @@
 // PURPOSE: Core operations for reading and writing cell data.
 
 use crate::api_types::{
-    CellData, ClearApplyTo, ClearRangeParams, ClearRangeResult, MergedRegion,
+    CellData, ClearApplyTo, ClearRangeParams, ClearRangeResult, DimensionData, MergedRegion,
     RemoveDuplicatesParams, RemoveDuplicatesResult, SortDataOption, SortField, SortOn,
-    SortOrientation, SortRangeParams, SortRangeResult,
+    SortOrientation, SortRangeParams, SortRangeResult, UpdateCellResult,
 };
 use crate::commands::utils::get_cell_internal_with_merge;
 use crate::{
-    evaluate_formula_multi_sheet, evaluate_formula_multi_sheet_with_ast,
+    clear_ui_effects_for_cell, evaluate_formula_multi_sheet,
+    evaluate_formula_multi_sheet_with_ast, evaluate_formula_with_effects,
     extract_all_references, format_cell_value, get_column_row_dependents,
     get_recalculation_order, parse_cell_input, parse_formula_to_engine_ast,
-    update_column_dependencies, update_cross_sheet_dependencies, update_dependencies,
-    update_row_dependencies, AppState, log_perf
+    process_ui_effects, update_column_dependencies, update_cross_sheet_dependencies,
+    update_dependencies, update_row_dependencies, AppState, log_perf
 };
 use engine::{self, Grid, StyleRegistry};
 use std::collections::HashSet;
@@ -108,14 +109,15 @@ fn get_cell_internal(grid: &Grid, styles: &StyleRegistry, row: u32, col: u32) ->
 }
 
 /// Update a cell with new content.
-/// Returns all cells that were updated (including dependent cells).
+/// Returns all cells that were updated (including dependent cells),
+/// plus any dimension changes triggered by UI formulas.
 #[tauri::command]
 pub fn update_cell(
     state: State<AppState>,
     row: u32,
     col: u32,
     value: String,
-) -> Result<Vec<CellData>, String> {
+) -> Result<UpdateCellResult, String> {
     use std::time::Instant;
     let perf_t0 = Instant::now();
 
@@ -152,6 +154,7 @@ pub fn update_cell(
     let current_sheet_name = sheet_names.get(active_sheet).cloned().unwrap_or_default();
 
     let mut updated_cells = Vec::new();
+    let mut dimension_changes: Vec<DimensionData> = Vec::new();
 
     // Record previous state for undo BEFORE making any changes
     let previous_cell = grid.get_cell(row, col).cloned();
@@ -214,10 +217,31 @@ pub fn update_cell(
             sheet_index: None,
         });
 
+        // Clear any UI effects from the deleted cell
+        {
+            let mut ui_registry = state.ui_effect_registry.lock().unwrap();
+            let affected = clear_ui_effects_for_cell(
+                (active_sheet, row, col),
+                &mut ui_registry,
+            );
+            // Revert row heights for targets that no longer have any source
+            if !affected.is_empty() {
+                let mut rh = state.row_heights.lock().unwrap();
+                for (sheet_idx, target_row) in &affected {
+                    if *sheet_idx == active_sheet {
+                        if !ui_registry.row_height_sources.contains_key(&(*sheet_idx, *target_row)) {
+                            rh.remove(target_row);
+                            dimension_changes.push(DimensionData { index: *target_row, size: 0.0 });
+                        }
+                    }
+                }
+            }
+        }
+
         // Record undo after successful change
         undo_stack.record_cell_change(row, col, previous_cell);
 
-        return Ok(updated_cells);
+        return Ok(UpdateCellResult { cells: updated_cells, dimension_changes });
     }
 
     // Parse the input
@@ -315,13 +339,41 @@ pub fn update_cell(
                 // PERF: Convert the already-parsed AST directly instead of re-parsing.
                 let engine_ast = crate::convert_expr(&resolved);
                 cell.set_cached_ast(engine_ast.clone());
-                let result = evaluate_formula_multi_sheet_with_ast(
+                let (result, effects) = evaluate_formula_with_effects(
                     &grids,
                     &sheet_names,
                     active_sheet,
                     &engine_ast,
                 );
                 cell.value = result;
+
+                // Process UI effects (e.g., SET.ROW.HEIGHT)
+                if !effects.is_empty() {
+                    let mut ui_registry = state.ui_effect_registry.lock().unwrap();
+                    let mut rh = state.row_heights.lock().unwrap();
+
+                    // Clear previous effects for this cell before registering new ones
+                    clear_ui_effects_for_cell((active_sheet, row, col), &mut ui_registry);
+
+                    let (height_changes, has_conflict) = process_ui_effects(
+                        &effects,
+                        (active_sheet, row, col),
+                        &mut ui_registry,
+                        &mut rh,
+                    );
+
+                    if has_conflict {
+                        cell.value = engine::CellValue::Error(engine::CellError::Conflict);
+                    }
+
+                    for (target_row, height) in &height_changes {
+                        dimension_changes.push(DimensionData { index: *target_row, size: *height });
+                    }
+                } else {
+                    // Formula has no UI effects — clear any previous UI effects from this cell
+                    let mut ui_registry = state.ui_effect_registry.lock().unwrap();
+                    clear_ui_effects_for_cell((active_sheet, row, col), &mut ui_registry);
+                }
             }
             Err(_e) => {
                 // Formula parse error - dependencies won't be tracked
@@ -757,7 +809,7 @@ pub fn update_cell(
         );
     }
 
-    Ok(updated_cells)
+    Ok(UpdateCellResult { cells: updated_cells, dimension_changes })
 }
 
 /// Batch update multiple cells in a single operation.

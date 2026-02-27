@@ -20,6 +20,7 @@ pub enum CellError {
     NA,         // Value not available (#N/A)
     Parse,      // Formula parsing error
     Circular,   // Circular dependency detected
+    Conflict,   // Conflicting UI effects (e.g., two formulas setting same row height)
 }
 
 /// Represents the calculated result or raw data within a cell.
@@ -151,6 +152,7 @@ impl Cell {
             }
             CellValue::Error(e) => match e {
                 CellError::NA => "#N/A".to_string(),
+                CellError::Conflict => "#CONFLICT".to_string(),
                 other => format!("#{:?}", other).to_uppercase(),
             },
         }

@@ -153,6 +153,16 @@ pub struct FunctionListResult {
     pub functions: Vec<FunctionInfo>,
 }
 
+/// Result from update_cell that includes both updated cells and optional dimension changes.
+/// Dimension changes are only present when UI formulas (like SET.ROW.HEIGHT) are evaluated.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdateCellResult {
+    pub cells: Vec<CellData>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub dimension_changes: Vec<DimensionData>,
+}
+
 /// A merged cell region definition.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
 #[serde(rename_all = "camelCase")]

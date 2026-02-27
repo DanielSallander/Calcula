@@ -183,6 +183,9 @@ pub enum BuiltinFunction {
     XLookup,
     XLookups,
 
+    // UI functions (worksheet-manipulating formulas)
+    SetRowHeight,
+
     /// Fallback for unrecognized function names (future extensions/plugins).
     Custom(String),
 }
@@ -234,6 +237,8 @@ impl BuiltinFunction {
 
             "XLOOKUP" => BuiltinFunction::XLookup,
             "XLOOKUPS" => BuiltinFunction::XLookups,
+
+            "SET.ROW.HEIGHT" | "SETROWHEIGHT" => BuiltinFunction::SetRowHeight,
 
             _ => BuiltinFunction::Custom(name.to_uppercase()),
         }

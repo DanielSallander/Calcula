@@ -197,6 +197,14 @@ pub fn get_functions_by_category(category: String) -> FunctionListResult {
                 category: "Information".to_string(),
             },
         ],
+        "ui" => vec![
+            FunctionInfo {
+                name: "SET.ROW.HEIGHT".to_string(),
+                syntax: "SET.ROW.HEIGHT(rows, height)".to_string(),
+                description: "Sets the height of specified rows. Rows can be a single number or an array. Returns the height value.".to_string(),
+                category: "UI".to_string(),
+            },
+        ],
         _ => vec![],
     };
 
@@ -212,7 +220,7 @@ pub fn get_all_functions() -> FunctionListResult {
     let mut all_functions = Vec::new();
     
     // Collect from all categories
-    for category in &["math", "logical", "text", "lookup", "info"] {
+    for category in &["math", "logical", "text", "lookup", "info", "ui"] {
         let result = get_functions_by_category(category.to_string());
         all_functions.extend(result.functions);
     }
@@ -273,6 +281,9 @@ pub fn get_function_template(function_name: String) -> String {
         "ISBLANK" => "=ISBLANK()".to_string(),
         "ISERROR" => "=ISERROR()".to_string(),
         
+        // UI functions
+        "SET.ROW.HEIGHT" | "SETROWHEIGHT" => "=SET.ROW.HEIGHT(, )".to_string(),
+
         // Default: generic function call
         _ => format!("={}()", function_name.to_uppercase()),
     };

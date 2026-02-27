@@ -230,6 +230,17 @@ export interface CellData {
 }
 
 /**
+ * Result from update_cell that includes both updated cells and optional dimension changes.
+ * Dimension changes are triggered by UI formulas (like SET.ROW.HEIGHT).
+ */
+export interface UpdateCellResult {
+  /** All cells that were updated (primary + dependents) */
+  cells: CellData[];
+  /** Row/column dimension changes triggered by UI formulas */
+  dimensionChanges: DimensionData[];
+}
+
+/**
  * Dimension data for columns/rows from backend.
  */
 export interface DimensionData {

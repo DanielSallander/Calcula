@@ -477,6 +477,7 @@ fn builtin_fn_name(func: &BuiltinFunction) -> String {
         BuiltinFunction::IsError => "ISERROR".to_string(),
         BuiltinFunction::XLookup => "XLOOKUP".to_string(),
         BuiltinFunction::XLookups => "XLOOKUPS".to_string(),
+        BuiltinFunction::SetRowHeight => "SET.ROW.HEIGHT".to_string(),
         BuiltinFunction::Custom(name) => name.clone(),
     }
 }
@@ -619,7 +620,7 @@ fn build_step_state(
             // Check if Step In is available
             let (can_step_in, step_in_target) = if next_node.is_cell_ref {
                 if let Some(ref info) = next_node.cell_ref_info {
-                    let (target_sheet, row_0, col_0, has_formula) =
+                    let (_target_sheet, row_0, col_0, has_formula) =
                         check_step_in_target(info, grids, sheet_names, frame.sheet_index);
                     if has_formula {
                         (true, Some(format_cell_ref(row_0, col_0)))

@@ -22,6 +22,7 @@ use crate::cell::{CellError, CellValue};
 use crate::coord::col_to_index;
 use crate::dependency_extractor::{BinaryOperator, BuiltinFunction, Expression, UnaryOperator, Value};
 use crate::grid::Grid;
+use std::cell::RefCell;
 use std::collections::HashMap;
 
 /// The result of evaluating an expression.
@@ -198,12 +199,28 @@ impl<'a> MultiSheetContext<'a> {
     }
 }
 
+/// A UI side-effect produced during formula evaluation.
+/// These effects are collected by the evaluator and processed
+/// by the caller (in app/src-tauri) after evaluation completes.
+#[derive(Debug, Clone)]
+pub enum UiEffect {
+    /// Set the height of one or more rows.
+    /// Rows are 0-indexed internally (converted from 1-indexed user input).
+    SetRowHeight {
+        rows: Vec<u32>,
+        height: f64,
+    },
+}
+
 /// The formula evaluator.
 /// Holds a reference to the grid for cell lookups.
 pub struct Evaluator<'a> {
     grid: &'a Grid,
     /// Optional multi-sheet context for cross-sheet references
     multi_sheet: Option<MultiSheetContext<'a>>,
+    /// Side-effects collected during evaluation.
+    /// Uses RefCell for interior mutability since evaluate() takes &self.
+    ui_effects: RefCell<Vec<UiEffect>>,
 }
 
 impl<'a> Evaluator<'a> {
@@ -213,6 +230,7 @@ impl<'a> Evaluator<'a> {
         Evaluator {
             grid,
             multi_sheet: None,
+            ui_effects: RefCell::new(Vec::new()),
         }
     }
 
@@ -221,7 +239,14 @@ impl<'a> Evaluator<'a> {
         Evaluator {
             grid,
             multi_sheet: Some(context),
+            ui_effects: RefCell::new(Vec::new()),
         }
+    }
+
+    /// Drain and return all collected UI effects.
+    /// Called by the orchestrator after evaluation completes.
+    pub fn take_ui_effects(&self) -> Vec<UiEffect> {
+        self.ui_effects.borrow_mut().drain(..).collect()
     }
 
     /// Gets the grid for a given sheet name, or the current grid if None.
@@ -705,6 +730,9 @@ impl<'a> Evaluator<'a> {
             // Lookup & Reference functions
             BuiltinFunction::XLookup => self.fn_xlookup(args),
             BuiltinFunction::XLookups => self.fn_xlookups(args),
+
+            // UI functions
+            BuiltinFunction::SetRowHeight => self.fn_set_row_height(args),
 
             // Unknown/custom functions
             BuiltinFunction::Custom(_) => EvalResult::Error(CellError::Name),
@@ -1804,6 +1832,73 @@ impl<'a> Evaluator<'a> {
             }
             _ => false,
         }
+    }
+
+    // =========================================================================
+    // UI Functions
+    // =========================================================================
+
+    /// SET.ROW.HEIGHT(rows, height)
+    /// rows: single row number or array of row numbers (1-indexed, user-facing)
+    /// height: height in pixels (must be positive)
+    /// Returns the height value. The actual row height change is a side-effect
+    /// collected via the ui_effects channel and applied by the orchestrator.
+    fn fn_set_row_height(&self, args: &[Expression]) -> EvalResult {
+        if args.len() != 2 {
+            return EvalResult::Error(CellError::Value);
+        }
+
+        // Evaluate the height argument
+        let height_result = self.evaluate(&args[1]);
+        let height = match height_result.as_number() {
+            Some(h) if h > 0.0 => h,
+            Some(_) => return EvalResult::Error(CellError::Value),
+            None => {
+                if let EvalResult::Error(e) = height_result {
+                    return EvalResult::Error(e);
+                }
+                return EvalResult::Error(CellError::Value);
+            }
+        };
+
+        // Evaluate the rows argument — can be a single number or array
+        let rows_result = self.evaluate(&args[0]);
+        let mut rows: Vec<u32> = Vec::new();
+
+        match &rows_result {
+            EvalResult::Number(n) => {
+                let n = *n;
+                if n < 1.0 || n != n.floor() {
+                    return EvalResult::Error(CellError::Value);
+                }
+                rows.push((n as u32) - 1); // Convert 1-indexed to 0-indexed
+            }
+            EvalResult::Array(arr) => {
+                for item in arr.iter() {
+                    match item.as_number() {
+                        Some(n) if n >= 1.0 && n == n.floor() => {
+                            rows.push((n as u32) - 1);
+                        }
+                        _ => return EvalResult::Error(CellError::Value),
+                    }
+                }
+            }
+            EvalResult::Error(e) => return EvalResult::Error(e.clone()),
+            _ => return EvalResult::Error(CellError::Value),
+        }
+
+        if rows.is_empty() {
+            return EvalResult::Error(CellError::Value);
+        }
+
+        // Push the side-effect for the orchestrator to process
+        self.ui_effects.borrow_mut().push(UiEffect::SetRowHeight {
+            rows,
+            height,
+        });
+
+        // Return the height as the cell's display value
+        EvalResult::Number(height)
     }
 }
 

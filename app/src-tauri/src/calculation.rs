@@ -15,7 +15,7 @@ use engine;
 #[tauri::command]
 pub fn set_calculation_mode(state: State<AppState>, mode: String) -> String {
     log_enter_info!("CMD", "set_calculation_mode", "mode={}", mode);
-    
+
     let valid_mode = match mode.to_lowercase().as_str() {
         "automatic" | "auto" => "automatic".to_string(),
         "manual" => "manual".to_string(),
@@ -24,10 +24,10 @@ pub fn set_calculation_mode(state: State<AppState>, mode: String) -> String {
             "automatic".to_string()
         }
     };
-    
+
     let mut calc_mode = state.calculation_mode.lock().unwrap();
     *calc_mode = valid_mode.clone();
-    
+
     log_exit_info!("CMD", "set_calculation_mode", "set to {}", valid_mode);
     valid_mode
 }
@@ -36,10 +36,10 @@ pub fn set_calculation_mode(state: State<AppState>, mode: String) -> String {
 #[tauri::command]
 pub fn get_calculation_mode(state: State<AppState>) -> String {
     log_enter!("CMD", "get_calculation_mode");
-    
+
     let calc_mode = state.calculation_mode.lock().unwrap();
     let mode = calc_mode.clone();
-    
+
     log_exit!("CMD", "get_calculation_mode", "mode={}", mode);
     mode
 }
@@ -47,9 +47,9 @@ pub fn get_calculation_mode(state: State<AppState>) -> String {
 /// Recalculate all formulas in the grid.
 #[tauri::command]
 pub fn calculate_now(state: State<AppState>) -> Result<Vec<CellData>, String> {
-    use crate::{evaluate_formula_multi_sheet, format_cell_value};
+    use crate::{evaluate_formula_with_effects, clear_ui_effects_for_cell, process_ui_effects, format_cell_value};
     use crate::api_types::CellData;
-    
+
     let mut grid = state.grid.lock().unwrap();
     let mut grids = state.grids.lock().unwrap();
     let sheet_names = state.sheet_names.lock().unwrap();
@@ -71,11 +71,13 @@ pub fn calculate_now(state: State<AppState>) -> Result<Vec<CellData>, String> {
     let tables_map = state.tables.lock().unwrap();
     let table_names_map = state.table_names.lock().unwrap();
     let named_ranges_map = state.named_ranges.lock().unwrap();
+    let mut ui_registry = state.ui_effect_registry.lock().unwrap();
+    let mut row_heights = state.row_heights.lock().unwrap();
 
     // Re-evaluate each formula using multi-sheet context
     for (row, col, formula) in formula_cells {
         // Parse, resolve names and table refs, then evaluate
-        let result = match parser::parse(&formula) {
+        let (result, effects) = match parser::parse(&formula) {
             Ok(parsed) => {
                 // Resolve named references
                 let resolved = if crate::ast_has_named_refs(&parsed) {
@@ -99,21 +101,36 @@ pub fn calculate_now(state: State<AppState>) -> Result<Vec<CellData>, String> {
                 };
 
                 let engine_ast = crate::convert_expr(&resolved);
-                crate::evaluate_formula_multi_sheet_with_ast(
+                evaluate_formula_with_effects(
                     &grids,
                     &sheet_names,
                     active_sheet,
                     &engine_ast,
                 )
             }
-            Err(_) => engine::CellValue::Error(engine::CellError::Value),
+            Err(_) => (engine::CellValue::Error(engine::CellError::Value), Vec::new()),
         };
+
+        // Process UI effects
+        let mut final_result = result;
+        if !effects.is_empty() {
+            clear_ui_effects_for_cell((active_sheet, row, col), &mut ui_registry);
+            let (_height_changes, has_conflict) = process_ui_effects(
+                &effects,
+                (active_sheet, row, col),
+                &mut ui_registry,
+                &mut row_heights,
+            );
+            if has_conflict {
+                final_result = engine::CellValue::Error(engine::CellError::Conflict);
+            }
+        }
 
         if let Some(cell) = grid.get_cell(row, col) {
             let mut updated = cell.clone();
-            updated.value = result;
+            updated.value = final_result;
             grid.set_cell(row, col, updated.clone());
-            
+
             // Keep grids vector in sync
             if active_sheet < grids.len() {
                 grids[active_sheet].set_cell(row, col, updated.clone());
@@ -143,10 +160,10 @@ pub fn calculate_now(state: State<AppState>) -> Result<Vec<CellData>, String> {
 #[tauri::command]
 pub fn calculate_sheet(state: State<AppState>) -> Result<Vec<CellData>, String> {
     log_enter_info!("CMD", "calculate_sheet");
-    
+
     // For now, calculate_sheet does the same as calculate_now since we have a single sheet
     let result = calculate_now(state);
-    
+
     log_exit_info!("CMD", "calculate_sheet", "done");
     result
 }
