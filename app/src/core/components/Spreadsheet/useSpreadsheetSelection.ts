@@ -24,6 +24,9 @@ import {
   redo as redoApi,
   applyFormatting,
   getStyle,
+  getAllStyles,
+  getCellsInCols,
+  getCellsInRows,
   updateCell,
   updateCellsBatch,
   beginUndoTransaction,
@@ -31,10 +34,11 @@ import {
   type CellUpdateInput,
 } from "../../lib/tauri-api";
 import type { FormattingOptions } from "../../types";
+import { DEFAULT_THEME, measureOptimalColumnWidth, measureOptimalRowHeight } from "../../lib/gridRenderer";
 import { checkCellClickInterceptors } from "../../lib/cellClickInterceptors";
 import { checkCellDoubleClickInterceptors } from "../../lib/cellDoubleClickInterceptors";
 import { checkEditGuards } from "../../lib/editGuards";
-import { setColumnWidth, setRowHeight } from "../../state/gridActions";
+import { setColumnWidth, setRowHeight, setManuallyHiddenCols, setManuallyHiddenRows } from "../../state/gridActions";
 import { cellEvents } from "../../lib/cellEvents";
 import { CommandRegistry } from "../../../api/commands";
 import type { GridCanvasHandle } from "../Grid";
@@ -240,6 +244,184 @@ export function useSpreadsheetSelection({
     [dispatch, canvasRef]
   );
 
+  // -------------------------------------------------------------------------
+  // Auto-Fit Column (double-click on resize handle)
+  // -------------------------------------------------------------------------
+  const handleAutoFitColumn = useCallback(
+    async (col: number) => {
+      // Determine which columns to auto-fit:
+      // If selection is type "columns" and the clicked column is within it,
+      // auto-fit ALL selected columns individually. Otherwise just the one.
+      const columnsToFit: number[] = [];
+
+      if (selection?.type === "columns") {
+        const minCol = Math.min(selection.startCol, selection.endCol);
+        const maxCol = Math.max(selection.startCol, selection.endCol);
+        if (col >= minCol && col <= maxCol) {
+          for (let c = minCol; c <= maxCol; c++) {
+            columnsToFit.push(c);
+          }
+          if (selection.additionalRanges) {
+            for (const range of selection.additionalRanges) {
+              const rMin = Math.min(range.startCol, range.endCol);
+              const rMax = Math.max(range.startCol, range.endCol);
+              for (let c = rMin; c <= rMax; c++) {
+                if (!columnsToFit.includes(c)) columnsToFit.push(c);
+              }
+            }
+          }
+        } else {
+          columnsToFit.push(col);
+        }
+      } else {
+        columnsToFit.push(col);
+      }
+
+      try {
+        await beginUndoTransaction("Auto-fit columns");
+        const styles = await getAllStyles();
+        const theme = { cellFontFamily: DEFAULT_THEME.cellFontFamily, cellFontSize: DEFAULT_THEME.cellFontSize };
+
+        for (const c of columnsToFit) {
+          const cells = await getCellsInCols(c, c);
+          const optimalWidth = measureOptimalColumnWidth(c, cells, styles, theme, config.minColumnWidth);
+          dispatch(setColumnWidth(c, optimalWidth));
+          await setColumnWidthApi(c, optimalWidth);
+        }
+
+        await commitUndoTransaction();
+      } catch (err) {
+        console.error("Failed to auto-fit columns:", err);
+      }
+
+      canvasRef.current?.redraw();
+    },
+    [selection, config.minColumnWidth, dispatch, canvasRef]
+  );
+
+  // -------------------------------------------------------------------------
+  // Auto-Fit Row (double-click on resize handle)
+  // -------------------------------------------------------------------------
+  const handleAutoFitRow = useCallback(
+    async (row: number) => {
+      const rowsToFit: number[] = [];
+
+      if (selection?.type === "rows") {
+        const minRow = Math.min(selection.startRow, selection.endRow);
+        const maxRow = Math.max(selection.startRow, selection.endRow);
+        if (row >= minRow && row <= maxRow) {
+          for (let r = minRow; r <= maxRow; r++) {
+            rowsToFit.push(r);
+          }
+          if (selection.additionalRanges) {
+            for (const range of selection.additionalRanges) {
+              const rMin = Math.min(range.startRow, range.endRow);
+              const rMax = Math.max(range.startRow, range.endRow);
+              for (let r = rMin; r <= rMax; r++) {
+                if (!rowsToFit.includes(r)) rowsToFit.push(r);
+              }
+            }
+          }
+        } else {
+          rowsToFit.push(row);
+        }
+      } else {
+        rowsToFit.push(row);
+      }
+
+      try {
+        await beginUndoTransaction("Auto-fit rows");
+        const styles = await getAllStyles();
+        const theme = { cellFontFamily: DEFAULT_THEME.cellFontFamily, cellFontSize: DEFAULT_THEME.cellFontSize };
+
+        for (const r of rowsToFit) {
+          const cells = await getCellsInRows(r, r);
+          const optimalHeight = measureOptimalRowHeight(
+            cells,
+            styles,
+            dimensions?.columnWidths ?? new Map(),
+            config.defaultCellWidth,
+            theme,
+            config.minRowHeight
+          );
+          dispatch(setRowHeight(r, optimalHeight));
+          await setRowHeightApi(r, optimalHeight);
+        }
+
+        await commitUndoTransaction();
+      } catch (err) {
+        console.error("Failed to auto-fit rows:", err);
+      }
+
+      canvasRef.current?.redraw();
+    },
+    [selection, dimensions?.columnWidths, config.defaultCellWidth, config.minRowHeight, dispatch, canvasRef]
+  );
+
+  // -------------------------------------------------------------------------
+  // Batch Column/Row Resize (uniform resize for multi-select + drag)
+  // -------------------------------------------------------------------------
+  const handleBatchColumnResize = useCallback(
+    async (cols: number[], width: number) => {
+      try {
+        await beginUndoTransaction("Resize columns");
+        for (const col of cols) {
+          dispatch(setColumnWidth(col, width));
+          await setColumnWidthApi(col, width);
+        }
+        await commitUndoTransaction();
+      } catch (err) {
+        console.error("Failed to batch resize columns:", err);
+      }
+      canvasRef.current?.redraw();
+    },
+    [dispatch, canvasRef]
+  );
+
+  const handleBatchRowResize = useCallback(
+    async (rows: number[], height: number) => {
+      try {
+        await beginUndoTransaction("Resize rows");
+        for (const row of rows) {
+          dispatch(setRowHeight(row, height));
+          await setRowHeightApi(row, height);
+        }
+        await commitUndoTransaction();
+      } catch (err) {
+        console.error("Failed to batch resize rows:", err);
+      }
+      canvasRef.current?.redraw();
+    },
+    [dispatch, canvasRef]
+  );
+
+  // -------------------------------------------------------------------------
+  // Hide Columns/Rows (drag to zero width/height)
+  // -------------------------------------------------------------------------
+  const handleHideColumns = useCallback(
+    (cols: number[]) => {
+      const currentHidden = new Set(dimensions?.manuallyHiddenCols ?? []);
+      for (const col of cols) {
+        currentHidden.add(col);
+      }
+      dispatch(setManuallyHiddenCols(Array.from(currentHidden)));
+      canvasRef.current?.redraw();
+    },
+    [dimensions?.manuallyHiddenCols, dispatch, canvasRef]
+  );
+
+  const handleHideRows = useCallback(
+    (rows: number[]) => {
+      const currentHidden = new Set(dimensions?.manuallyHiddenRows ?? []);
+      for (const row of rows) {
+        currentHidden.add(row);
+      }
+      dispatch(setManuallyHiddenRows(Array.from(currentHidden)));
+      canvasRef.current?.redraw();
+    },
+    [dimensions?.manuallyHiddenRows, dispatch, canvasRef]
+  );
+
   // Handle fill handle double-click (auto-fill to edge)
   const handleFillHandleDoubleClick = useCallback(() => {
     autoFillToEdge();
@@ -404,6 +586,12 @@ export function useSpreadsheetSelection({
     onCommitBeforeSelect: onCommitBeforeSelect,
     onColumnResize: handleColumnResize,
     onRowResize: handleRowResize,
+    onAutoFitColumn: handleAutoFitColumn,
+    onAutoFitRow: handleAutoFitRow,
+    onBatchColumnResize: handleBatchColumnResize,
+    onBatchRowResize: handleBatchRowResize,
+    onHideColumns: handleHideColumns,
+    onHideRows: handleHideRows,
     onSelectColumn: selectColumn,
     onSelectRow: selectRow,
     onFillHandleDoubleClick: handleFillHandleDoubleClick,

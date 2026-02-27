@@ -148,6 +148,18 @@ export interface UseMouseSelectionProps {
   onColumnResize?: (col: number, width: number) => void;
   /** Callback when row height changes */
   onRowResize?: (row: number, height: number) => void;
+  /** Callback when column resize handle is double-clicked (auto-fit) */
+  onAutoFitColumn?: (col: number) => void;
+  /** Callback when row resize handle is double-clicked (auto-fit) */
+  onAutoFitRow?: (row: number) => void;
+  /** Callback to apply uniform width to multiple columns */
+  onBatchColumnResize?: (cols: number[], width: number) => void;
+  /** Callback to apply uniform height to multiple rows */
+  onBatchRowResize?: (rows: number[], height: number) => void;
+  /** Callback to hide columns by dragging to zero width */
+  onHideColumns?: (cols: number[]) => void;
+  /** Callback to hide rows by dragging to zero height */
+  onHideRows?: (rows: number[]) => void;
   /** Callback to select entire column */
   onSelectColumn?: (col: number, extend?: boolean) => void;
   /** Callback to select entire row */

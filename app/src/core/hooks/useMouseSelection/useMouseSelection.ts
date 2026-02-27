@@ -16,7 +16,7 @@ import type {
   SelectionDragState,
 } from "./types";
 import type { Selection } from "../../types";
-import { getCellFromPixel, getColumnFromHeader, getRowFromHeader } from "../../lib/gridRenderer";
+import { getCellFromPixel, getColumnFromHeader, getRowFromHeader, getColumnResizeHandle, getRowResizeHandle } from "../../lib/gridRenderer";
 import { calculateAutoScrollDelta } from "./utils/autoScrollUtils";
 import { getCellFromMousePosition } from "./utils/cellUtils";
 import { useAutoScroll } from "./selection/useAutoScroll";
@@ -73,6 +73,12 @@ export function useMouseSelection(props: UseMouseSelectionProps): UseMouseSelect
     onCommitBeforeSelect,
     onColumnResize,
     onRowResize,
+    onAutoFitColumn,
+    onAutoFitRow,
+    onBatchColumnResize,
+    onBatchRowResize,
+    onHideColumns,
+    onHideRows,
     onSelectColumn,
     onSelectRow,
     onFillHandleDoubleClick,
@@ -158,8 +164,13 @@ export function useMouseSelection(props: UseMouseSelectionProps): UseMouseSelect
     config,
     viewport,
     dimensions,
+    selection,
     onColumnResize,
     onRowResize,
+    onBatchColumnResize,
+    onBatchRowResize,
+    onHideColumns,
+    onHideRows,
     setIsResizing,
     setCursorStyle,
     resizeStateRef,
@@ -765,6 +776,24 @@ export function useMouseSelection(props: UseMouseSelectionProps): UseMouseSelect
         return null;
       }
 
+      // Check if double-click is on a column resize handle -> auto-fit column(s)
+      const colResizeHandle = getColumnResizeHandle(mouseX, mouseY, config, viewport, dimensions);
+      if (colResizeHandle !== null) {
+        if (onAutoFitColumn) {
+          onAutoFitColumn(colResizeHandle);
+        }
+        return null;
+      }
+
+      // Check if double-click is on a row resize handle -> auto-fit row(s)
+      const rowResizeHandle = getRowResizeHandle(mouseX, mouseY, config, viewport, dimensions);
+      if (rowResizeHandle !== null) {
+        if (onAutoFitRow) {
+          onAutoFitRow(rowResizeHandle);
+        }
+        return null;
+      }
+
       // Check if double-click is on fill handle
       if (isOverFillHandle(mouseX, mouseY)) {
         console.log("[useMouseSelection] Double-click on fill handle detected");
@@ -778,7 +807,7 @@ export function useMouseSelection(props: UseMouseSelectionProps): UseMouseSelect
 
       return getCellFromPixel(mouseX, mouseY, config, viewport, dimensions);
     },
-    [containerRef, config, viewport, dimensions, overlayMoveHandlers, isOverFillHandle, onFillHandleDoubleClick]
+    [containerRef, config, viewport, dimensions, overlayMoveHandlers, isOverFillHandle, onFillHandleDoubleClick, onAutoFitColumn, onAutoFitRow]
   );
 
   // -------------------------------------------------------------------------

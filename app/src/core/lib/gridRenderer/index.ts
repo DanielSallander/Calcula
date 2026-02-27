@@ -13,6 +13,7 @@ export * from "./styles/cellFormatting";
 // Re-export layout utilities
 export * from "./layout/dimensions";
 export * from "./layout/viewport";
+export * from "./layout/autoFit";
 
 // Re-export rendering functions
 export * from "./rendering/headers";
