@@ -105,6 +105,8 @@ export interface CreatePivotRequest {
   destinationSheet?: number;
   /** Whether first row contains headers (default: true) */
   hasHeaders?: boolean;
+  /** Optional: friendly name for the pivot table */
+  name?: string;
 }
 
 /** Field configuration for row/column areas */
@@ -351,6 +353,7 @@ export interface PivotRegionInfo {
 /** Pivot region data for rendering placeholders */
 export interface PivotRegionData {
   pivotId: PivotId;
+  name: string;
   startRow: number;
   startCol: number;
   endRow: number;

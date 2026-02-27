@@ -60,6 +60,18 @@ export function setJustCreatedPivot(value: boolean): void {
   justCreatedPivot = value;
 }
 
+/**
+ * Ensure the Design ribbon tab is registered.
+ * Called by pivotCreatedHandler so the tab appears immediately on creation,
+ * regardless of whether the selection handler has run yet.
+ */
+export function ensureDesignTabRegistered(): void {
+  if (!designTabRegistered) {
+    ExtensionRegistry.registerRibbonTab(PivotDesignTabDefinition);
+    designTabRegistered = true;
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
@@ -126,6 +138,12 @@ export function handleSelectionChange(
     // Cell is NOT in any pivot region - close pivot pane if open
     // BUT skip if a pivot was just created (regions not yet cached)
     if (justCreatedPivot) {
+      // Register Design tab even though regions aren't cached yet —
+      // we know the user just created a pivot and is inside it.
+      if (!designTabRegistered) {
+        ExtensionRegistry.registerRibbonTab(PivotDesignTabDefinition);
+        designTabRegistered = true;
+      }
       return;
     }
     lastCheckedSelection = { row, col };

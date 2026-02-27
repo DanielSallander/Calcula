@@ -144,6 +144,7 @@ export function CreatePivotDialog({
   const gridState = useGridState();
 
   // Form state
+  const [pivotName, setPivotName] = useState('');
   const [sourceRange, setSourceRange] = useState('');
   const [destinationType, setDestinationType] = useState<DestinationType>('new');
   const [existingDestination, setExistingDestination] = useState('');
@@ -172,6 +173,13 @@ export function CreatePivotDialog({
       setHasAutoDetected(false);
       setIsPicking(false);
       loadSheets();
+      // Generate default pivot name based on existing pivot tables
+      pivot.getAll().then((all) => {
+        const count = all.length;
+        setPivotName(`PivotTable${count + 1}`);
+      }).catch(() => {
+        setPivotName('PivotTable1');
+      });
     } else {
       // Reset state when dialog closes
       setHasInitializedSheetName(false);
@@ -274,6 +282,7 @@ export function CreatePivotDialog({
     setError(null);
     setIsLoading(false);
     setNewSheetName(''); // Reset for next open
+    setPivotName(''); // Reset for next open
     onClose();
   }, [onClose]);
 
@@ -357,6 +366,7 @@ export function CreatePivotDialog({
         destinationCell: destinationCell,
         destinationSheet: destinationSheetIndex,
         hasHeaders: true,
+        name: pivotName.trim() || undefined,
       });
 
       console.log('[CreatePivotDialog] Pivot table created:', view.pivotId, 'rows:', view.rowCount, 'cols:', view.colCount);
@@ -465,6 +475,22 @@ export function CreatePivotDialog({
 
         {/* Content */}
         <div style={styles.content}>
+          {/* Pivot Table Name */}
+          <div style={styles.fieldGroup}>
+            <label style={styles.label}>
+              PivotTable Name:
+            </label>
+            <input
+              type="text"
+              style={styles.inputSmall}
+              value={pivotName}
+              onChange={e => setPivotName(e.target.value)}
+              placeholder="e.g., PivotTable1"
+              disabled={isLoading}
+              autoFocus
+            />
+          </div>
+
           {/* Source Range */}
           <div style={styles.fieldGroup}>
             <label style={styles.label}>
@@ -477,7 +503,6 @@ export function CreatePivotDialog({
               onChange={e => setSourceRange(e.target.value)}
               placeholder="e.g., Sheet1!A1:D100"
               disabled={isLoading}
-              autoFocus
             />
             <span style={styles.hint}>
               Include the sheet name and range (e.g., Sheet1!A1:D100)

@@ -9,7 +9,7 @@ import { pivot } from "../../../src/api/pivot";
 import { openTaskPane, clearTaskPaneManuallyClosed } from "../../../src/api";
 import { PIVOT_PANE_ID } from "../manifest";
 import type { SourceField, PivotEditorViewData } from "../types";
-import { setJustCreatedPivot } from "./selectionHandler";
+import { setJustCreatedPivot, ensureDesignTabRegistered } from "./selectionHandler";
 
 /**
  * Handle the pivot:created event.
@@ -25,6 +25,9 @@ export async function handlePivotCreated(detail: { pivotId: number }): Promise<v
 
   // Prevent the selection handler from closing the pane before regions are cached
   setJustCreatedPivot(true);
+
+  // Show the Design ribbon tab immediately — don't wait for selection handler
+  ensureDesignTabRegistered();
 
   try {
     const sourceData = await pivot.getSourceData(pivotId, [], 1);

@@ -6,8 +6,6 @@
 
 import {
   gridExtensions,
-  emitAppEvent,
-  AppEvents,
   showDialog,
   closeTaskPane,
   openTaskPane,
@@ -42,7 +40,10 @@ import {
   removePivotHierarchy,
   updatePivotFields,
   getPivotFieldInfo,
+  updatePivotProperties,
 } from "../lib/pivot-api";
+
+import { deleteCachedPivotView } from "../lib/pivotViewStore";
 
 import {
   PIVOT_GROUP_DIALOG_ID,
@@ -60,6 +61,7 @@ const CONTEXT_ITEM_IDS = [
   "pivot:formatCells",
   "pivot:refresh",
   "pivot:delete",
+  "pivot:rename",
   "pivot:sort",
   "pivot:filter",
   "pivot:subtotal",
@@ -152,9 +154,32 @@ export function registerPivotContextMenuItems(): () => void {
       onClick: async (ctx) => {
         const pivotId = getPivotIdFromContext(ctx);
         if (pivotId === null) return;
+        // Clean up frontend cache before backend delete
+        deleteCachedPivotView(pivotId);
         await deletePivotTable(pivotId);
+        // Close task pane if the deleted pivot was being edited
+        closeTaskPane(PIVOT_PANE_ID);
+        // Refresh overlay regions + trigger grid cell re-fetch
         window.dispatchEvent(new Event("pivot:refresh"));
-        emitAppEvent(AppEvents.GRID_REFRESH);
+      },
+    },
+
+    // ------------------------------------------------------------------
+    // 4b. Rename PivotTable
+    // ------------------------------------------------------------------
+    {
+      id: "pivot:rename",
+      label: "Rename PivotTable...",
+      group: "pivot",
+      order: 45,
+      visible: isInPivotRegion,
+      onClick: async (ctx) => {
+        const pivotId = getPivotIdFromContext(ctx);
+        if (pivotId === null) return;
+        const newName = window.prompt("Enter a new name for this PivotTable:");
+        if (newName === null || newName.trim() === "") return;
+        await updatePivotProperties({ pivotId, name: newName.trim() });
+        window.dispatchEvent(new Event("pivot:refresh"));
       },
     },
 

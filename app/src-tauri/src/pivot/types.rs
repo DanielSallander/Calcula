@@ -989,6 +989,7 @@ pub struct SourceFieldInfo {
 #[serde(rename_all = "camelCase")]
 pub struct PivotRegionData {
     pub pivot_id: PivotId,
+    pub name: String,
     pub start_row: u32,
     pub start_col: u32,
     pub end_row: u32,

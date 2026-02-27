@@ -74,6 +74,7 @@ pub fn create_pivot_table(
     let mut definition = PivotDefinition::new(pivot_id, source_start, source_end);
     definition.source_has_headers = has_headers;
     definition.destination = destination;
+    definition.name = request.name.or_else(|| Some(format!("PivotTable{}", pivot_id)));
 
     // Store destination sheet in definition
     {
@@ -773,13 +774,17 @@ pub fn get_pivot_regions_for_sheet(
         .filter(|r| r.region_type == "pivot" && r.sheet_index == active_sheet)
         .map(|r| {
             let pid = r.owner_id as PivotId;
-            let is_empty = pivot_tables
+            let (is_empty, name) = pivot_tables
                 .get(&pid)
-                .map(|(def, _)| !has_fields_configured(def))
-                .unwrap_or(true);
+                .map(|(def, _)| (
+                    !has_fields_configured(def),
+                    def.name.clone().unwrap_or_else(|| format!("PivotTable{}", pid)),
+                ))
+                .unwrap_or_else(|| (true, format!("PivotTable{}", pid)));
 
             PivotRegionData {
                 pivot_id: pid,
+                name,
                 start_row: r.start_row,
                 start_col: r.start_col,
                 end_row: r.end_row,

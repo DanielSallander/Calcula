@@ -44,6 +44,7 @@ export interface PivotEditorViewData {
  */
 export interface PivotRegionData {
   pivotId: number;
+  name: string;
   startRow: number;
   startCol: number;
   endRow: number;

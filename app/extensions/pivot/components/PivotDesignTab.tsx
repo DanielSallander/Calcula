@@ -3,10 +3,11 @@
 // CONTEXT: Appears in the ribbon when a pivot table is selected. Communicates
 // with the PivotEditor via custom events (PIVOT_LAYOUT_STATE / PIVOT_LAYOUT_CHANGED).
 
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { css } from '@emotion/css';
 import { onAppEvent, emitAppEvent } from '../../../src/api';
 import { PivotEvents } from '../lib/pivotEvents';
+import { getPivotTableInfo, updatePivotProperties } from '../lib/pivot-api';
 import type { LayoutConfig, ReportLayout, ValuesPosition, PivotId } from './types';
 import type { RibbonContext } from '../../../src/api/extensions';
 
@@ -99,6 +100,26 @@ const tabStyles = {
       border-color: #005fb8;
     }
   `,
+  nameInput: css`
+    padding: 3px 6px;
+    border: 1px solid #d0d0d0;
+    border-radius: 4px;
+    font-size: 11px;
+    font-family: inherit;
+    background: #fff;
+    color: #1a1a1a;
+    min-width: 120px;
+    max-width: 180px;
+
+    &:hover {
+      border-color: #999;
+    }
+
+    &:focus {
+      outline: none;
+      border-color: #005fb8;
+    }
+  `,
 };
 
 // ============================================================================
@@ -116,6 +137,9 @@ export function PivotDesignTab({
   context: RibbonContext;
 }): React.ReactElement {
   const [layoutState, setLayoutState] = useState<LayoutState | null>(null);
+  const [pivotName, setPivotName] = useState('');
+  const [savedName, setSavedName] = useState('');
+  const nameInputRef = useRef<HTMLInputElement>(null);
 
   // Listen for layout state broadcasts from the PivotEditor
   useEffect(() => {
@@ -127,15 +151,45 @@ export function PivotDesignTab({
     );
   }, []);
 
+  // Fetch pivot name whenever pivotId changes
+  useEffect(() => {
+    if (!layoutState) return;
+    const { pivotId } = layoutState;
+    let cancelled = false;
+    getPivotTableInfo(pivotId).then((info) => {
+      if (cancelled) return;
+      setPivotName(info.name);
+      setSavedName(info.name);
+    }).catch(() => { /* ignore fetch errors */ });
+    return () => { cancelled = true; };
+  }, [layoutState?.pivotId]); // eslint-disable-line react-hooks/exhaustive-deps
+
   // Clear state when pivot is deselected (no layout state for 500ms)
   useEffect(() => {
     const handleClear = () => {
       setLayoutState(null);
+      setPivotName('');
+      setSavedName('');
     };
 
     window.addEventListener('pivot:deselected', handleClear);
     return () => window.removeEventListener('pivot:deselected', handleClear);
   }, []);
+
+  const savePivotName = useCallback(() => {
+    if (!layoutState || pivotName === savedName) return;
+    const trimmed = pivotName.trim();
+    if (trimmed === '') {
+      // Revert to saved name if empty
+      setPivotName(savedName);
+      return;
+    }
+    setSavedName(trimmed);
+    setPivotName(trimmed);
+    updatePivotProperties({ pivotId: layoutState.pivotId, name: trimmed }).then(() => {
+      window.dispatchEvent(new Event('pivot:refresh'));
+    }).catch(() => { /* ignore save errors */ });
+  }, [layoutState, pivotName, savedName]);
 
   const updateLayout = useCallback(
     (updates: Partial<LayoutConfig>) => {
@@ -162,6 +216,29 @@ export function PivotDesignTab({
 
   return (
     <div className={tabStyles.container}>
+      {/* PivotTable Name Group */}
+      <div className={tabStyles.group}>
+        <div className={tabStyles.groupContent}>
+          <div className={tabStyles.selectLabel}>
+            <input
+              ref={nameInputRef}
+              type="text"
+              className={tabStyles.nameInput}
+              value={pivotName}
+              onChange={(e) => setPivotName(e.target.value)}
+              onBlur={savePivotName}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') {
+                  savePivotName();
+                  nameInputRef.current?.blur();
+                }
+              }}
+            />
+          </div>
+        </div>
+        <div className={tabStyles.groupLabel}>PivotTable Name</div>
+      </div>
+
       {/* Grand Totals Group */}
       <div className={tabStyles.group}>
         <div className={tabStyles.groupContent}>

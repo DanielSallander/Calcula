@@ -7,6 +7,7 @@ import {
   TaskPaneExtensions,
   DialogExtensions,
   OverlayExtensions,
+  AppEvents,
   onAppEvent,
   emitAppEvent,
   registerEditGuard,
@@ -406,7 +407,8 @@ function drawStyledPivotView(overlayCtx: OverlayRenderContext, pivotView: PivotV
 
 /**
  * Draw placeholder text for empty pivot regions.
- * Shows "Click in this area to work with the PivotTable report".
+ * Shows the pivot table name in a bordered box at the top
+ * and "Click in this area to work with the PivotTable report" centered.
  */
 function drawPivotPlaceholderText(overlayCtx: OverlayRenderContext): void {
   const { ctx, region } = overlayCtx;
@@ -432,15 +434,44 @@ function drawPivotPlaceholderText(overlayCtx: OverlayRenderContext): void {
   );
   ctx.clip();
 
-  ctx.fillStyle = "#888888";
+  // Draw pivot name box at top center of region
+  const pivotName = (region.data?.name as string) || "PivotTable";
+  const nameBoxPadding = 8;
   ctx.font = "12px system-ui, -apple-system, sans-serif";
+  const nameWidth = ctx.measureText(pivotName).width;
+  const nameBoxWidth = nameWidth + nameBoxPadding * 2;
+  const nameBoxHeight = 24;
+  const nameBoxX = startX + (regionWidth - nameBoxWidth) / 2;
+  const nameBoxY = startY + 10;
+
+  // Name box background
+  ctx.fillStyle = "#ffffff";
+  ctx.fillRect(nameBoxX, nameBoxY, nameBoxWidth, nameBoxHeight);
+  // Name box border
+  ctx.strokeStyle = "#b0b0b0";
+  ctx.lineWidth = 1;
+  ctx.setLineDash([]);
+  ctx.strokeRect(
+    Math.floor(nameBoxX) + 0.5,
+    Math.floor(nameBoxY) + 0.5,
+    nameBoxWidth,
+    nameBoxHeight,
+  );
+  // Name text
+  ctx.fillStyle = "#333333";
   ctx.textAlign = "center";
   ctx.textBaseline = "middle";
+  ctx.fillText(pivotName, nameBoxX + nameBoxWidth / 2, nameBoxY + nameBoxHeight / 2);
 
+  // Draw centered instruction text below the name box
   const centerX = startX + regionWidth / 2;
-  const centerY = startY + regionHeight / 2;
+  const centerY = startY + regionHeight / 2 + 10;
 
-  if (regionWidth > 120 && regionHeight > 30) {
+  if (regionWidth > 120 && regionHeight > 60) {
+    ctx.fillStyle = "#888888";
+    ctx.font = "12px system-ui, -apple-system, sans-serif";
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
     ctx.fillText("Click in this area to work with", centerX, centerY - 8);
     ctx.font = "11px system-ui, -apple-system, sans-serif";
     ctx.fillStyle = "#aaaaaa";
@@ -503,7 +534,7 @@ async function refreshPivotRegions(triggerRepaint: boolean = false): Promise<voi
       startCol: r.startCol,
       endRow: r.endRow,
       endCol: r.endCol,
-      data: { isEmpty: r.isEmpty, pivotId: r.pivotId },
+      data: { isEmpty: r.isEmpty, pivotId: r.pivotId, name: r.name },
     }));
 
     // Atomically replace pivot regions and always notify listeners so the overlay
@@ -959,6 +990,15 @@ export function registerPivotExtension(): void {
   const handleGridRefreshForRegions = () => { refreshPivotRegions(false); };
   window.addEventListener("grid:refresh", handleGridRefreshForRegions);
   cleanupFunctions.push(() => window.removeEventListener("grid:refresh", handleGridRefreshForRegions));
+
+  // Refresh pivot regions when the active sheet changes (e.g., after creating a
+  // pivot on a new sheet). Without this, the placeholder overlay never appears
+  // because the sheet switch happens after the initial region load.
+  cleanupFunctions.push(
+    onAppEvent(AppEvents.SHEET_CHANGED, () => {
+      refreshPivotRegions(false);
+    })
+  );
 
   // Listen for task pane reopen requests (e.g., from View menu "Show" action)
   const handleReopenRequest = (e: Event) => {
