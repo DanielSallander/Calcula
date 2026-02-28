@@ -3,7 +3,7 @@
 // CONTEXT: Contains complex logic for handling key events in both the container and inputs.
 
 import { useCallback, useEffect, useState } from "react";
-import { useEditing, getGlobalEditingValue, setGlobalIsEditing } from "../../hooks";
+import { useEditing, getGlobalEditingValue, setGlobalIsEditing, isGlobalFormulaMode } from "../../hooks";
 import { useGridState } from "../../state";
 import { toggleReferenceAtCursor } from "../../lib/formulaRefToggle";
 import { updateCellsBatch, beginUndoTransaction, commitUndoTransaction, type CellUpdateInput } from "../../lib/tauri-api";
@@ -119,8 +119,11 @@ export function useSpreadsheetEditing({
     };
   }, [moveActiveCell, scrollToSelection, focusContainerRef]);
 
+  // FIX: Also check isGlobalFormulaMode() synchronously to prevent committing
+  // when React state is stale. This handles the race where the user types an operator
+  // (e.g., comma) and immediately clicks a cell before React re-renders.
   const handleCommitBeforeSelect = useCallback(async () => {
-    if (isEditing && !isFormulaMode) {
+    if (isEditing && !isFormulaMode && !isGlobalFormulaMode()) {
       await commitEdit();
     }
   }, [isEditing, isFormulaMode, commitEdit]);

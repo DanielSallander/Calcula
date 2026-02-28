@@ -1051,15 +1051,17 @@ export function gridReducer(state: GridState, action: GridAction): GridState {
     }
 
     case GRID_ACTIONS.SET_CLIPBOARD: {
-      const { mode, selection } = action.payload as {
+      const { mode, selection, sourceSheetIndex } = action.payload as {
         mode: ClipboardMode;
         selection: Selection | null;
+        sourceSheetIndex?: number;
       };
       return {
         ...state,
         clipboard: {
           mode,
           selection,
+          sourceSheetIndex: sourceSheetIndex ?? state.sheetContext.activeSheetIndex,
         },
       };
     }
@@ -1070,6 +1072,7 @@ export function gridReducer(state: GridState, action: GridAction): GridState {
         clipboard: {
           mode: "none",
           selection: null,
+          sourceSheetIndex: null,
         },
       };
     }

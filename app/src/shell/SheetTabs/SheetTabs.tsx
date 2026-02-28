@@ -25,6 +25,7 @@ import {
   // Types and utilities
   isFormulaExpectingReference,
 } from "../../api";
+import { isGlobalFormulaMode, getGlobalCursorPosition } from "../../api/editing";
 import type {
   SheetInfo,
   SheetsResult,
@@ -67,7 +68,10 @@ export function SheetTabs({ onSheetChange }: SheetTabsProps): React.ReactElement
   const contextMenuRef = useRef<HTMLDivElement>(null);
 
   // Check if we're in formula reference mode
-  const isInFormulaMode = editing !== null && isFormulaExpectingReference(editing.value);
+  // FIX: Use BOTH React state AND synchronous global check. React state may be stale
+  // if the user types an operator (e.g., comma) and immediately clicks a sheet tab
+  // before React re-renders. The global check uses module-level state updated synchronously.
+  const isInFormulaMode = (editing !== null && isFormulaExpectingReference(editing.value)) || isGlobalFormulaMode();
 
   // Register core menu items on first render
   useEffect(() => {
@@ -151,10 +155,15 @@ export function SheetTabs({ onSheetChange }: SheetTabsProps): React.ReactElement
    * Handle mousedown on sheet tabs.
    * CRITICAL: When in formula mode, set the global flag to prevent blur commit.
    * This flag is checked by InlineEditor's blur handler.
+   * FIX: Check isGlobalFormulaMode() at event time for synchronous detection,
+   * in addition to the React-derived isInFormulaMode from the render closure.
    */
   const handleTabMouseDown = useCallback(
     (e: React.MouseEvent, sheetIndex: number) => {
-      if (isInFormulaMode && sheetIndex !== activeIndex) {
+      // FIX: Check BOTH the closure value AND the synchronous global state.
+      // The closure value may be stale if React hasn't re-rendered since the last keystroke.
+      const isCurrentlyFormulaMode = isInFormulaMode || isGlobalFormulaMode();
+      if (isCurrentlyFormulaMode && sheetIndex !== activeIndex) {
         console.log("[SheetTabs] Formula mode mousedown - setting prevent blur flag");
         // Set the global flag BEFORE blur fires
         emitAppEvent(AppEvents.PREVENT_BLUR_COMMIT, true);
@@ -179,13 +188,17 @@ export function SheetTabs({ onSheetChange }: SheetTabsProps): React.ReactElement
 
   const handleSheetClick = useCallback(
     async (index: number, event?: React.MouseEvent) => {
-      if (index === activeIndex && !(event?.shiftKey && isInFormulaMode)) return;
+      // FIX: Check BOTH the closure value AND the synchronous global state at event time.
+      // The closure value may be stale if React hasn't re-rendered since the last keystroke.
+      const isCurrentlyFormulaMode = isInFormulaMode || isGlobalFormulaMode();
 
-      console.log("[SheetTabs] Sheet click, index:", index, "isInFormulaMode:", isInFormulaMode, "shift:", event?.shiftKey);
+      if (index === activeIndex && !(event?.shiftKey && isCurrentlyFormulaMode)) return;
+
+      console.log("[SheetTabs] Sheet click, index:", index, "isCurrentlyFormulaMode:", isCurrentlyFormulaMode, "shift:", event?.shiftKey);
 
       try {
         // Shift+Click in formula mode: insert 3D reference prefix
-        if (isInFormulaMode && event?.shiftKey) {
+        if (isCurrentlyFormulaMode && event?.shiftKey) {
           const startSheet = sheets[activeIndex]?.name;
           const endSheet = sheets[index]?.name;
           if (startSheet && endSheet) {
@@ -219,7 +232,7 @@ export function SheetTabs({ onSheetChange }: SheetTabsProps): React.ReactElement
         }
 
         // When in formula mode, we need special handling
-        if (isInFormulaMode) {
+        if (isCurrentlyFormulaMode) {
           console.log("[SheetTabs] Formula mode - switching without reload");
           
           // Just update the backend's active sheet for cell selection
@@ -252,13 +265,20 @@ export function SheetTabs({ onSheetChange }: SheetTabsProps): React.ReactElement
           
           // Focus the formula bar since InlineEditor won't render on target sheet
           // This matches Excel behavior where formula bar stays active during cross-sheet selection
+          // FIX: Clear preventBlurCommit AFTER focus is stable on the formula bar.
+          // On the target sheet, InlineEditor returns null and can't clear the flag itself.
           setTimeout(() => {
             const formulaBar = document.querySelector('[data-formula-bar="true"]') as HTMLInputElement;
             if (formulaBar) {
               formulaBar.focus();
+              // FIX: Use tracked cursor position instead of always placing at end
+              const cursorPos = getGlobalCursorPosition();
               const len = formulaBar.value.length;
-              formulaBar.setSelectionRange(len, len);
+              const pos = Math.min(cursorPos, len);
+              formulaBar.setSelectionRange(pos, pos);
             }
+            // Clear the flag after focus is stable
+            emitAppEvent(AppEvents.PREVENT_BLUR_COMMIT, false);
           }, 50);
           
           // DO NOT reload - stay in edit mode for formula reference selection
@@ -293,6 +313,12 @@ export function SheetTabs({ onSheetChange }: SheetTabsProps): React.ReactElement
             newSheetName: newActiveSheet?.name || "",
           }
         }));
+
+        // Notify extensions (AutoFilter, Grouping, etc.) that the active sheet changed
+        emitAppEvent(AppEvents.SHEET_CHANGED, {
+          sheetIndex: result.activeIndex,
+          sheetName: newActiveSheet?.name || "",
+        });
       } catch (err) {
         console.error("[SheetTabs] setActiveSheet error:", err);
         // Clear the prevent flag on error
@@ -335,6 +361,12 @@ export function SheetTabs({ onSheetChange }: SheetTabsProps): React.ReactElement
           newSheetName: newActiveSheet?.name || "",
         }
       }));
+
+      // Notify extensions that the active sheet changed
+      emitAppEvent(AppEvents.SHEET_CHANGED, {
+        sheetIndex: result.activeIndex,
+        sheetName: newActiveSheet?.name || "",
+      });
     } catch (err) {
       console.error("[SheetTabs] addSheet error:", err);
       alert("Failed to add sheet: " + String(err));
@@ -376,6 +408,12 @@ export function SheetTabs({ onSheetChange }: SheetTabsProps): React.ReactElement
             newSheetName: newActiveSheet?.name || "",
           }
         }));
+
+        // Notify extensions that the active sheet changed
+        emitAppEvent(AppEvents.SHEET_CHANGED, {
+          sheetIndex: result.activeIndex,
+          sheetName: newActiveSheet?.name || "",
+        });
       } catch (err) {
         console.error("[SheetTabs] deleteSheet error:", err);
         alert("Failed to delete sheet: " + String(err));

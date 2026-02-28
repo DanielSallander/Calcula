@@ -4,7 +4,7 @@
 
 export { useViewport } from "./useViewport";
 export { useSelection } from "./useSelection";
-export { useEditing, getGlobalEditingValue, setGlobalIsEditing } from "./useEditing";
+export { useEditing, getGlobalEditingValue, setGlobalIsEditing, isGlobalFormulaMode, setGlobalCursorPosition, getGlobalCursorPosition } from "./useEditing";
 export { useGridKeyboard } from "./useGridKeyboard";
 export { useMouseSelection } from "./useMouseSelection";
 export { useCellEvents } from "./useCellEvents";

@@ -199,7 +199,7 @@ export interface SetAllDimensionsAction {
 
 export interface SetClipboardAction {
   type: typeof GRID_ACTIONS.SET_CLIPBOARD;
-  payload: { mode: ClipboardMode; selection: Selection | null };
+  payload: { mode: ClipboardMode; selection: Selection | null; sourceSheetIndex?: number };
 }
 
 export interface ClearClipboardAction {
@@ -597,11 +597,12 @@ export function setAllDimensions(
  */
 export function setClipboard(
   mode: ClipboardMode,
-  selection: Selection | null
+  selection: Selection | null,
+  sourceSheetIndex?: number
 ): SetClipboardAction {
   return {
     type: GRID_ACTIONS.SET_CLIPBOARD,
-    payload: { mode, selection },
+    payload: { mode, selection, sourceSheetIndex },
   };
 }
 

@@ -76,11 +76,20 @@ let globalIsEditing = false;
 let globalEditingValue = "";
 
 /**
+ * MODULE-LEVEL variable for synchronous cursor position tracking.
+ * FIX: This allows checking the character before the cursor in the formula,
+ * enabling correct formula mode detection when the cursor is mid-formula
+ * (e.g., =XLOOKUP(A2,Sheet1!A:A,|) where | is the cursor before closing paren).
+ */
+let globalCursorPosition: number = 0;
+
+/**
  * MODULE-LEVEL state for arrow key reference navigation.
  * When navigating cell references with arrow keys in formula mode, we track:
  * - The current cursor position (where arrow keys navigate from)
  * - The insert index (where the reference starts in the formula string)
  * - The color assigned to the current arrow-navigated reference
+ * - The suffix (text after the cursor when arrow nav started, to preserve on replacement)
  * This allows replacing the current reference when pressing additional arrow keys,
  * rather than appending new references.
  */
@@ -88,6 +97,7 @@ let arrowRefCursor: { row: number; col: number } | null = null;
 let arrowRefAnchor: { row: number; col: number } | null = null;
 let arrowRefInsertIndex: number = 0;
 let arrowRefColor: string | null = null;
+let arrowRefSuffix: string = "";
 
 /**
  * Set the global editing flag. Used internally by the hook.
@@ -96,6 +106,7 @@ export function setGlobalIsEditing(value: boolean): void {
   globalIsEditing = value;
   if (!value) {
     globalEditingValue = "";
+    globalCursorPosition = 0;
   }
 }
 
@@ -121,12 +132,29 @@ export function getGlobalEditingValue(): string {
 }
 
 /**
+ * Set the global cursor position. Updated synchronously when the cursor moves.
+ * FIX: This enables cursor-position-aware formula mode detection, so
+ * =XLOOKUP(A2,Sheet1!A:A,|) correctly detects formula mode at the cursor.
+ */
+export function setGlobalCursorPosition(pos: number): void {
+  globalCursorPosition = pos;
+}
+
+/**
+ * Get the global cursor position.
+ */
+export function getGlobalCursorPosition(): number {
+  return globalCursorPosition;
+}
+
+/**
  * Check if currently in formula mode synchronously.
  * FIX: This checks the global editing value immediately, without waiting for React state.
  * Use this in event handlers where the React state might be stale.
+ * FIX: Now uses cursor position to correctly detect formula mode when cursor is mid-formula.
  */
 export function isGlobalFormulaMode(): boolean {
-  return globalIsEditing && isFormulaExpectingReference(globalEditingValue);
+  return globalIsEditing && isFormulaExpectingReference(globalEditingValue, globalCursorPosition);
 }
 
 /**
@@ -175,6 +203,7 @@ export function resetArrowRefState(): void {
   arrowRefAnchor = null;
   arrowRefInsertIndex = 0;
   arrowRefColor = null;
+  arrowRefSuffix = "";
 }
 
 /**
@@ -597,7 +626,7 @@ export function useEditing(): UseEditingReturn {
   /**
    * Check if currently in formula mode (expecting a reference).
    */
-  const isFormulaMode = editing !== null && isFormulaExpectingReference(editing.value);
+  const isFormulaMode = editing !== null && isFormulaExpectingReference(editing.value, globalCursorPosition);
 
   /**
    * Get the source sheet name (where the formula is being edited).
@@ -790,9 +819,10 @@ export function useEditing(): UseEditingReturn {
         }
       }
       
-      // FIX: Update global editing value synchronously for formula mode detection
+      // FIX: Update global editing value and cursor position synchronously for formula mode detection
       setGlobalEditingValue(value);
-      
+      globalCursorPosition = value.length; // Cursor starts at end of value
+
       // FIX: Clear old references, then re-parse from the formula being edited.
       // This replaces the passive (faint) selection highlights with active (full) edit highlights.
       dispatch(clearFormulaReferences());
@@ -879,9 +909,10 @@ export function useEditing(): UseEditingReturn {
           console.error("[useEditing] Failed to get merge info:", error);
         }
         
-        // FIX: Update global editing value synchronously for formula mode detection
+        // FIX: Update global editing value and cursor position synchronously for formula mode detection
         setGlobalEditingValue(initialValue);
-        
+        globalCursorPosition = initialValue.length;
+
         dispatch(
           startEditingAction({
             row: editRow,
@@ -929,17 +960,22 @@ export function useEditing(): UseEditingReturn {
    */
   const insertReference = useCallback(
     (row: number, col: number) => {
-      if (!editing || !isFormulaExpectingReference(editing.value)) {
+      // FIX: Use globalCursorPosition for cursor-aware formula mode detection
+      if (!editing || !isFormulaExpectingReference(globalEditingValue, globalCursorPosition)) {
         return;
       }
 
       const targetSheet = getTargetSheetName();
       const sourceSheet = getSourceSheetName();
       const reference = rangeToReference(row, col, row, col, targetSheet, sourceSheet);
-      const newValue = editing.value + reference;
 
-      // FIX: Update global value synchronously
+      // FIX: Insert at cursor position instead of appending to end
+      const cursorPos = globalCursorPosition;
+      const newValue = editing.value.substring(0, cursorPos) + reference + editing.value.substring(cursorPos);
+
+      // FIX: Update global value and cursor position synchronously
       setGlobalEditingValue(newValue);
+      globalCursorPosition = cursorPos + reference.length;
       dispatch(updateEditing(newValue));
 
       // FIX: Include sheetName for cross-sheet reference highlighting
@@ -959,7 +995,8 @@ export function useEditing(): UseEditingReturn {
       // FIX: Set up arrow cursor state so arrow keys can continue from this cell
       arrowRefCursor = { row, col };
       arrowRefAnchor = { row, col };
-      arrowRefInsertIndex = editing.value.length; // Where the reference starts
+      arrowRefInsertIndex = cursorPos; // Where the reference starts (at cursor position)
+      arrowRefSuffix = editing.value.substring(cursorPos); // Text after cursor to preserve
       arrowRefColor = color;
 
       // FIX: Dispatch event to restore focus to the InlineEditor
@@ -975,17 +1012,22 @@ export function useEditing(): UseEditingReturn {
    */
   const insertRangeReference = useCallback(
     (startRow: number, startCol: number, endRow: number, endCol: number) => {
-      if (!editing || !isFormulaExpectingReference(editing.value)) {
+      // FIX: Use globalCursorPosition for cursor-aware formula mode detection
+      if (!editing || !isFormulaExpectingReference(globalEditingValue, globalCursorPosition)) {
         return;
       }
 
       const targetSheet = getTargetSheetName();
       const sourceSheet = getSourceSheetName();
       const reference = rangeToReference(startRow, startCol, endRow, endCol, targetSheet, sourceSheet);
-      const newValue = editing.value + reference;
 
-      // FIX: Update global value synchronously
+      // FIX: Insert at cursor position instead of appending to end
+      const cursorPos = globalCursorPosition;
+      const newValue = editing.value.substring(0, cursorPos) + reference + editing.value.substring(cursorPos);
+
+      // FIX: Update global value and cursor position synchronously
       setGlobalEditingValue(newValue);
+      globalCursorPosition = cursorPos + reference.length;
       dispatch(updateEditing(newValue));
 
       // FIX: Include sheetName for cross-sheet reference highlighting
@@ -1014,17 +1056,22 @@ export function useEditing(): UseEditingReturn {
    */
   const insertColumnReference = useCallback(
     (col: number) => {
-      if (!editing || !isFormulaExpectingReference(editing.value)) {
+      // FIX: Use globalCursorPosition for cursor-aware formula mode detection
+      if (!editing || !isFormulaExpectingReference(globalEditingValue, globalCursorPosition)) {
         return;
       }
 
       const targetSheet = getTargetSheetName();
       const sourceSheet = getSourceSheetName();
       const reference = columnToReference(col, targetSheet, sourceSheet);
-      const newValue = editing.value + reference;
-      
-      // FIX: Update global value synchronously
+
+      // FIX: Insert at cursor position instead of appending to end
+      const cursorPos = globalCursorPosition;
+      const newValue = editing.value.substring(0, cursorPos) + reference + editing.value.substring(cursorPos);
+
+      // FIX: Update global value and cursor position synchronously
       setGlobalEditingValue(newValue);
+      globalCursorPosition = cursorPos + reference.length;
       dispatch(updateEditing(newValue));
 
       // FIX: Use limited bounds instead of totalRows to prevent performance issues
@@ -1058,17 +1105,22 @@ export function useEditing(): UseEditingReturn {
    */
   const insertColumnRangeReference = useCallback(
     (startCol: number, endCol: number) => {
-      if (!editing || !isFormulaExpectingReference(editing.value)) {
+      // FIX: Use globalCursorPosition for cursor-aware formula mode detection
+      if (!editing || !isFormulaExpectingReference(globalEditingValue, globalCursorPosition)) {
         return;
       }
 
       const targetSheet = getTargetSheetName();
       const sourceSheet = getSourceSheetName();
       const reference = columnRangeToReference(startCol, endCol, targetSheet, sourceSheet);
-      const newValue = editing.value + reference;
 
-      // FIX: Update global value synchronously
+      // FIX: Insert at cursor position instead of appending to end
+      const cursorPos = globalCursorPosition;
+      const newValue = editing.value.substring(0, cursorPos) + reference + editing.value.substring(cursorPos);
+
+      // FIX: Update global value and cursor position synchronously
       setGlobalEditingValue(newValue);
+      globalCursorPosition = cursorPos + reference.length;
       dispatch(updateEditing(newValue));
 
       // FIX: Use limited bounds instead of totalRows to prevent performance issues
@@ -1102,17 +1154,22 @@ export function useEditing(): UseEditingReturn {
    */
   const insertRowReference = useCallback(
     (row: number) => {
-      if (!editing || !isFormulaExpectingReference(editing.value)) {
+      // FIX: Use globalCursorPosition for cursor-aware formula mode detection
+      if (!editing || !isFormulaExpectingReference(globalEditingValue, globalCursorPosition)) {
         return;
       }
 
       const targetSheet = getTargetSheetName();
       const sourceSheet = getSourceSheetName();
       const reference = rowToReference(row, targetSheet, sourceSheet);
-      const newValue = editing.value + reference;
-      
-      // FIX: Update global value synchronously
+
+      // FIX: Insert at cursor position instead of appending to end
+      const cursorPos = globalCursorPosition;
+      const newValue = editing.value.substring(0, cursorPos) + reference + editing.value.substring(cursorPos);
+
+      // FIX: Update global value and cursor position synchronously
       setGlobalEditingValue(newValue);
+      globalCursorPosition = cursorPos + reference.length;
       dispatch(updateEditing(newValue));
 
       // FIX: Use limited bounds instead of totalCols to prevent performance issues
@@ -1144,17 +1201,22 @@ export function useEditing(): UseEditingReturn {
    */
   const insertRowRangeReference = useCallback(
     (startRow: number, endRow: number) => {
-      if (!editing || !isFormulaExpectingReference(editing.value)) {
+      // FIX: Use globalCursorPosition for cursor-aware formula mode detection
+      if (!editing || !isFormulaExpectingReference(globalEditingValue, globalCursorPosition)) {
         return;
       }
 
       const targetSheet = getTargetSheetName();
       const sourceSheet = getSourceSheetName();
       const reference = rowRangeToReference(startRow, endRow, targetSheet, sourceSheet);
-      const newValue = editing.value + reference;
 
-      // FIX: Update global value synchronously
+      // FIX: Insert at cursor position instead of appending to end
+      const cursorPos = globalCursorPosition;
+      const newValue = editing.value.substring(0, cursorPos) + reference + editing.value.substring(cursorPos);
+
+      // FIX: Update global value and cursor position synchronously
       setGlobalEditingValue(newValue);
+      globalCursorPosition = cursorPos + reference.length;
       dispatch(updateEditing(newValue));
 
       // FIX: Use limited bounds instead of totalCols to prevent performance issues
@@ -1562,7 +1624,8 @@ export function useEditing(): UseEditingReturn {
       // 1. Formula is expecting a reference (e.g., "=" or "=A1+")
       // 2. OR we're already in arrow navigation mode (e.g., just pressed arrow to get "=B1")
       const isInArrowNavMode = arrowRefCursor !== null;
-      const isExpectingRef = isFormulaExpectingReference(editing.value);
+      // FIX: Use cursor-aware formula mode detection
+      const isExpectingRef = isFormulaExpectingReference(globalEditingValue, globalCursorPosition);
 
       if (!isExpectingRef && !isInArrowNavMode) {
         return;
@@ -1577,7 +1640,9 @@ export function useEditing(): UseEditingReturn {
         // Starting a new arrow navigation from the editing cell
         newRow = editing.row;
         newCol = editing.col;
-        arrowRefInsertIndex = editing.value.length;
+        // FIX: Use cursor position instead of value length, and capture suffix to preserve
+        arrowRefInsertIndex = globalCursorPosition;
+        arrowRefSuffix = editing.value.substring(globalCursorPosition);
         // Get a new color for this arrow navigation session
         color = getNextReferenceColor();
         arrowRefColor = color;
@@ -1636,11 +1701,12 @@ export function useEditing(): UseEditingReturn {
         reference = cellToReference(newRow, newCol, targetSheet, sourceSheet);
       }
 
-      // Replace the formula from the insert index with the new reference
-      const newValue = editing.value.substring(0, arrowRefInsertIndex) + reference;
+      // Replace the formula from the insert index with the new reference, preserving suffix
+      const newValue = editing.value.substring(0, arrowRefInsertIndex) + reference + arrowRefSuffix;
 
-      // Update the value synchronously
+      // Update the value and cursor position synchronously
       setGlobalEditingValue(newValue);
+      globalCursorPosition = arrowRefInsertIndex + reference.length;
       dispatch(updateEditing(newValue));
 
       // Update formula references for highlighting

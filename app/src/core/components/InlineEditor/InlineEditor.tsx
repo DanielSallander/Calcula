@@ -8,7 +8,7 @@ import { isFormulaExpectingReference, createEmptyDimensionOverrides } from "../.
 import { useGridContext } from "../../state/GridContext";
 import * as S from "./InlineEditor.styles";
 import { toggleReferenceAtCursor } from "../../lib/formulaRefToggle";
-import { getGlobalEditingValue, getArrowRefCursor, isHoveringOverReferenceBorder } from "../../hooks/useEditing";
+import { getGlobalEditingValue, getArrowRefCursor, isHoveringOverReferenceBorder, isGlobalFormulaMode, setGlobalCursorPosition, getGlobalCursorPosition } from "../../hooks/useEditing";
 import { isFormulaAutocompleteVisible, AutocompleteEvents } from "../../../api/formulaAutocomplete";
 
 /**
@@ -244,15 +244,19 @@ export function InlineEditor(props: InlineEditorProps): React.ReactElement | nul
       if (!disabled) {
         onValueChange(event.target.value);
 
-        // Emit autocomplete input event with cursor position and anchor rect
+        // FIX: Track cursor position globally for cursor-aware formula mode detection
         const inputEl = inputRef.current;
+        const cursorPos = inputEl?.selectionStart ?? event.target.value.length;
+        setGlobalCursorPosition(cursorPos);
+
+        // Emit autocomplete input event with cursor position and anchor rect
         console.log("[InlineEditor] handleChange, dispatching autocomplete:input for:", event.target.value);
         if (inputEl) {
           window.dispatchEvent(
             new CustomEvent(AutocompleteEvents.INPUT, {
               detail: {
                 value: event.target.value,
-                cursorPosition: inputEl.selectionStart ?? event.target.value.length,
+                cursorPosition: cursorPos,
                 anchorRect: {
                   x: position.x,
                   y: position.y + position.height,
@@ -268,6 +272,16 @@ export function InlineEditor(props: InlineEditorProps): React.ReactElement | nul
     },
     [onValueChange, disabled, position.x, position.y, position.width, position.height]
   );
+
+  /**
+   * FIX: Track cursor position changes from arrow keys, mouse clicks within input, etc.
+   * This ensures globalCursorPosition stays accurate even when the value doesn't change.
+   */
+  const handleSelect = useCallback(() => {
+    if (inputRef.current) {
+      setGlobalCursorPosition(inputRef.current.selectionStart ?? inputRef.current.value.length);
+    }
+  }, []);
 
   /**
    * Handle keyboard events.
@@ -398,7 +412,8 @@ export function InlineEditor(props: InlineEditorProps): React.ReactElement | nul
           // instead of moving the cursor within the text
           const currentVal = getGlobalEditingValue() || editing.value;
           const isInArrowNavMode = getArrowRefCursor() !== null;
-          const isExpectingRef = isFormulaExpectingReference(currentVal);
+          // FIX: Use cursor-aware check for formula mode detection
+          const isExpectingRef = isFormulaExpectingReference(currentVal, getGlobalCursorPosition());
 
           // Continue arrow navigation if:
           // 1. Formula is expecting a reference (e.g., "=" or "=A1+")
@@ -467,10 +482,14 @@ export function InlineEditor(props: InlineEditorProps): React.ReactElement | nul
         return;
       }
 
-      // Check the actual input value at blur time (not closure) to determine formula mode
+      // FIX: Check BOTH the DOM input value AND the synchronous global state.
+      // The DOM value may be stale if React hasn't re-rendered this controlled input yet
+      // (e.g., user typed a comma in the formula bar but InlineEditor hasn't re-rendered).
+      // isGlobalFormulaMode() checks the module-level globalEditingValue which is updated
+      // synchronously when the user types.
       const currentValue = event.target.value;
-      const isCurrentlyInFormulaMode = isFormulaExpectingReference(currentValue);
-      
+      const isCurrentlyInFormulaMode = isFormulaExpectingReference(currentValue) || isGlobalFormulaMode();
+
       if (isCurrentlyInFormulaMode) {
         console.log("[InlineEditor] Blur prevented - formula mode active, value:", currentValue);
         return;
@@ -583,10 +602,13 @@ export function InlineEditor(props: InlineEditorProps): React.ReactElement | nul
           }
 
           inputRef.current.focus();
-          // Place cursor at end of text
+          // FIX: Place cursor at tracked position instead of always at end
+          // This preserves cursor position after reference insertions mid-formula
+          const cursorPos = getGlobalCursorPosition();
           const len = inputRef.current.value.length;
-          inputRef.current.setSelectionRange(len, len);
-          console.log("[InlineEditor] Focused input, cursor at position:", len);
+          const pos = Math.min(cursorPos, len);
+          inputRef.current.setSelectionRange(pos, pos);
+          console.log("[InlineEditor] Focused input, cursor at position:", pos);
 
           // FIX: Clear the prevent flag AFTER focus is restored
           // This prevents blur from committing during the race between
@@ -624,6 +646,7 @@ export function InlineEditor(props: InlineEditorProps): React.ReactElement | nul
       onChange={handleChange}
       onKeyDown={handleKeyDown}
       onBlur={handleBlur}
+      onSelect={handleSelect}
       disabled={disabled}
       spellCheck={false}
       autoComplete="off"

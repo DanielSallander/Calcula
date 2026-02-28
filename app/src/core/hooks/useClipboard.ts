@@ -85,7 +85,7 @@ export function getInternalClipboard(): ClipboardData | null {
  */
 export function useClipboard(): UseClipboardReturn {
   const { state, dispatch } = useGridContext();
-  const { selection, config, clipboard } = state;
+  const { selection, config, clipboard, sheetContext } = state;
   
   // Ref to track cut source for clearing after paste
   const cutSourceRef = useRef<Selection | null>(null);
@@ -161,7 +161,7 @@ export function useClipboard(): UseClipboardReturn {
       };
 
       // Update state for visual feedback (marching ants border)
-      dispatch(setClipboard("copy", { ...selection }));
+      dispatch(setClipboard("copy", { ...selection }, sheetContext.activeSheetIndex));
 
       // Also write to system clipboard
       try {
@@ -176,7 +176,7 @@ export function useClipboard(): UseClipboardReturn {
     } catch (error) {
       console.error("[Clipboard] Copy failed:", error);
     }
-  }, [selection, getCellRange, cellsToText, dispatch]);
+  }, [selection, getCellRange, cellsToText, dispatch, sheetContext.activeSheetIndex]);
 
   /**
    * Cut selected cells to clipboard.
@@ -205,7 +205,7 @@ export function useClipboard(): UseClipboardReturn {
       cutSourceRef.current = { ...selection };
 
       // Update state for visual feedback (marching ants border)
-      dispatch(setClipboard("cut", { ...selection }));
+      dispatch(setClipboard("cut", { ...selection }, sheetContext.activeSheetIndex));
 
       // Also write to system clipboard
       try {
@@ -217,7 +217,7 @@ export function useClipboard(): UseClipboardReturn {
     } catch (error) {
       console.error("[Clipboard] Cut failed:", error);
     }
-  }, [selection, getCellRange, cellsToText, dispatch]);
+  }, [selection, getCellRange, cellsToText, dispatch, sheetContext.activeSheetIndex]);
 
   /**
    * Paste clipboard contents to current selection.
@@ -838,13 +838,18 @@ export function useClipboard(): UseClipboardReturn {
     [config.totalRows, dispatch]
   );
 
+  // Only show marching ants on the sheet where the copy/cut originated
+  const isOnSourceSheet =
+    clipboard?.sourceSheetIndex != null &&
+    clipboard.sourceSheetIndex === sheetContext.activeSheetIndex;
+
   return {
     cut,
     copy,
     paste,
     hasClipboardData,
-    clipboardMode: clipboard?.mode || "none",
-    clipboardSelection: clipboard?.selection || null,
+    clipboardMode: isOnSourceSheet ? (clipboard?.mode || "none") : "none",
+    clipboardSelection: isOnSourceSheet ? (clipboard?.selection || null) : null,
     clearClipboardState,
     moveCells,
     moveRows,

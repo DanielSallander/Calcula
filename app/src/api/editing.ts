@@ -7,5 +7,8 @@ export {
   useEditing,
   setGlobalIsEditing,
   getGlobalIsEditing,
-  getGlobalEditingValue
+  getGlobalEditingValue,
+  isGlobalFormulaMode,
+  setGlobalCursorPosition,
+  getGlobalCursorPosition,
 } from "../core/hooks/useEditing";

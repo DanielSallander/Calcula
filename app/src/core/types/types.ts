@@ -589,6 +589,8 @@ export interface ResizeHandle {
 export interface ClipboardState {
   mode: ClipboardMode;
   selection: Selection | null;
+  /** Sheet index where the copy/cut originated, so marching ants only show on that sheet */
+  sourceSheetIndex: number | null;
 }
 
 // ============================================================================
@@ -668,6 +670,7 @@ export function createInitialGridState(): GridState {
     clipboard: {
       mode: "none",
       selection: null,
+      sourceSheetIndex: null,
     },
     sheetContext: {
       activeSheetIndex: 0,
@@ -723,20 +726,30 @@ export function isFormula(value: string): boolean {
  * - "=SUM(A1:B2)"
  * - "Hello"
  */
-export function isFormulaExpectingReference(value: string): boolean {
+export function isFormulaExpectingReference(value: string, cursorPosition?: number): boolean {
   if (!isFormula(value)) {
     return false;
   }
 
-  const trimmed = value.trim();
+  // If cursor position is provided and within the string (not at the end),
+  // check only the text before the cursor. This handles cases like
+  // =XLOOKUP(A2,Sheet1!A:A,|) where cursor is before ) but after ,
+  const textToCheck = (cursorPosition !== undefined && cursorPosition < value.length)
+    ? value.substring(0, cursorPosition).trim()
+    : value.trim();
 
   // Just "=" - definitely expecting a reference
-  if (trimmed === "=") {
+  if (textToCheck === "=") {
     return true;
   }
 
-  // Get the last character
-  const lastChar = trimmed[trimmed.length - 1];
+  // Empty text before cursor (shouldn't happen, but guard)
+  if (textToCheck.length === 0) {
+    return false;
+  }
+
+  // Get the last character of the text to check
+  const lastChar = textToCheck[textToCheck.length - 1];
 
   // Check if last char is an operator or delimiter that expects a reference
   const expectingChars = [

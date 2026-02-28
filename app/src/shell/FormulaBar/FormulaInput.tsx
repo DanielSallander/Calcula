@@ -8,7 +8,7 @@
 
 import React, { useCallback, useRef, useEffect } from "react";
 import { useGridContext, getCell, getMergeInfo, isSheetProtected, getCellProtection } from "../../api";
-import { useEditing, setGlobalIsEditing, getGlobalEditingValue } from "../../api/editing";
+import { useEditing, setGlobalIsEditing, getGlobalEditingValue, setGlobalCursorPosition, getGlobalCursorPosition } from "../../api/editing";
 import { toggleReferenceAtCursor } from "../../core/lib/formulaRefToggle";
 import { parseFormulaReferences } from "../../core/lib/formulaRefParser";
 import { setFormulaReferences, clearFormulaReferences } from "../../core/state/gridActions";
@@ -126,15 +126,19 @@ export function FormulaInput(): React.ReactElement {
         updateValue(newValue);
       }
 
-      // Emit autocomplete input event with cursor position and anchor rect
+      // FIX: Track cursor position globally for cursor-aware formula mode detection
       const inputEl = inputRef.current;
+      const cursorPos = inputEl?.selectionStart ?? newValue.length;
+      setGlobalCursorPosition(cursorPos);
+
+      // Emit autocomplete input event with cursor position and anchor rect
       if (inputEl) {
         const rect = inputEl.getBoundingClientRect();
         window.dispatchEvent(
           new CustomEvent(AutocompleteEvents.INPUT, {
             detail: {
               value: newValue,
-              cursorPosition: inputEl.selectionStart ?? newValue.length,
+              cursorPosition: cursorPos,
               anchorRect: {
                 x: rect.left,
                 y: rect.bottom,
@@ -161,6 +165,16 @@ export function FormulaInput(): React.ReactElement {
 
   const handleBlur = useCallback(() => {
     setIsFocused(false);
+  }, []);
+
+  /**
+   * FIX: Track cursor position changes from arrow keys, mouse clicks within input, etc.
+   * This ensures globalCursorPosition stays accurate even when the value doesn't change.
+   */
+  const handleSelect = useCallback(() => {
+    if (inputRef.current) {
+      setGlobalCursorPosition(inputRef.current.selectionStart ?? inputRef.current.value.length);
+    }
   }, []);
 
   const handleKeyDown = useCallback(
@@ -253,6 +267,7 @@ export function FormulaInput(): React.ReactElement {
       onBlur={handleBlur}
       onKeyDown={handleKeyDown}
       onMouseDown={handleMouseDown}
+      onSelect={handleSelect}
       $isFocused={isFocused}
       data-formula-bar="true"
       placeholder=""
