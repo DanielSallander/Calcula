@@ -209,6 +209,10 @@ pub fn apply_formatting(
                 new_style.number_format = parse_number_format(format);
             }
 
+            if let Some(checkbox) = params.checkbox {
+                new_style.checkbox = checkbox;
+            }
+
             // Apply border formatting
             if let Some(ref border) = params.border_top {
                 new_style.borders.top = parse_border_side(border);

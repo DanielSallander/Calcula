@@ -5,7 +5,7 @@
 // ARCHITECTURE: Part of the API layer - the bridge between Core and Extensions.
 //              Follows the exact same pattern as styleInterceptors.ts.
 
-import type { GridConfig, Viewport, DimensionOverrides } from "./types";
+import type { GridConfig, Viewport, DimensionOverrides, StyleDataMap } from "./types";
 
 // ============================================================================
 // Types
@@ -33,6 +33,12 @@ export interface CellDecorationContext {
   viewport: Viewport;
   /** Dimension overrides (custom column widths, row heights) */
   dimensions: DimensionOverrides;
+  /** Display value of the cell (e.g., "TRUE", "FALSE", "") */
+  display: string;
+  /** Style index of the cell (for looking up full style data) */
+  styleIndex: number;
+  /** Style cache for looking up full style data by index */
+  styleCache: StyleDataMap;
 }
 
 /**

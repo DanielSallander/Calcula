@@ -8,4 +8,7 @@ export {
   type CellClickInterceptorFn,
   registerCellClickInterceptor,
   checkCellClickInterceptors,
+  type CellCursorInterceptorFn,
+  registerCellCursorInterceptor,
+  getCellCursorOverride,
 } from "../core/lib/cellClickInterceptors";

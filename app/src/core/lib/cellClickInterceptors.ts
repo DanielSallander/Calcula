@@ -70,3 +70,45 @@ export async function checkCellClickInterceptors(
   }
   return false;
 }
+
+// ============================================================================
+// Cell Cursor Interceptors
+// ============================================================================
+
+/**
+ * Synchronous function that returns a CSS cursor string for a cell,
+ * or null to use the default cursor.
+ */
+export type CellCursorInterceptorFn = (row: number, col: number) => string | null;
+
+const cursorInterceptors = new Set<CellCursorInterceptorFn>();
+
+/**
+ * Register a cell cursor interceptor.
+ * @param interceptor - Function that returns a cursor string or null.
+ * @returns A cleanup function that unregisters the interceptor.
+ */
+export function registerCellCursorInterceptor(
+  interceptor: CellCursorInterceptorFn
+): () => void {
+  cursorInterceptors.add(interceptor);
+  return () => {
+    cursorInterceptors.delete(interceptor);
+  };
+}
+
+/**
+ * Check all registered cursor interceptors for a cell.
+ * Returns the first non-null cursor, or null for default.
+ */
+export function getCellCursorOverride(row: number, col: number): string | null {
+  for (const interceptor of cursorInterceptors) {
+    try {
+      const cursor = interceptor(row, col);
+      if (cursor) return cursor;
+    } catch (error) {
+      console.error("Error in cell cursor interceptor:", error);
+    }
+  }
+  return null;
+}

@@ -782,6 +782,18 @@ export function useGridKeyboard(options: UseGridKeyboardOptions): void {
           fnLog.exit('handleKeyDown', 'select row');
           return;
         }
+
+        if (!modKey && !shiftKey && !altKey) {
+          // Bare Space - Toggle checkbox (if active cell has checkbox formatting)
+          event.preventDefault();
+          event.stopPropagation();
+          eventLog.keyboard('Grid', 'handleKeyDown', 'Space', []);
+          if (onCommand) {
+            onCommand('checkbox.toggle');
+          }
+          fnLog.exit('handleKeyDown', 'checkbox toggle');
+          return;
+        }
       }
 
       let deltaRow = 0;

@@ -542,9 +542,9 @@ export function drawCellText(state: RenderState): void {
         drawBorderLine(ctx, cellRight, cellTop, cellRight, cellBottom, bRight);
       }
 
-      // Draw cell decorations (e.g., sparklines) between background/borders and text
+      // Draw cell decorations (e.g., sparklines, checkboxes) between background/borders and text
       if (hasCellDecorations()) {
-        applyCellDecorations({ ctx, row, col, cellLeft, cellTop, cellRight, cellBottom, config, viewport, dimensions });
+        applyCellDecorations({ ctx, row, col, cellLeft, cellTop, cellRight, cellBottom, config, viewport, dimensions, display: displayValue, styleIndex, styleCache });
       }
 
       // If cell has no text to display, restore and skip text rendering

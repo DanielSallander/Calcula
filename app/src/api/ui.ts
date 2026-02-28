@@ -141,20 +141,42 @@ export function registerTaskPaneHooks(hooks: {
 class MenuRegistry {
   private menus: Map<string, MenuDefinition> = new Map();
   private listeners: Set<() => void> = new Set();
+  /** Items added via registerMenuItem, keyed by menu id. Survive re-registration. */
+  private dynamicItems: Map<string, MenuItemDefinition[]> = new Map();
 
   registerMenu(menu: MenuDefinition): void {
     this.menus.set(menu.id, menu);
+    // Re-append any dynamically registered items so they survive re-registration
+    const dynamic = this.dynamicItems.get(menu.id);
+    if (dynamic) {
+      for (const item of dynamic) {
+        if (!menu.items.some((existing) => existing.id === item.id)) {
+          menu.items.push(item);
+        }
+      }
+    }
     this.notify();
   }
 
   registerMenuItem(menuId: string, item: MenuItemDefinition): void {
+    // Track as dynamic item so it survives menu re-registration
+    let dynamic = this.dynamicItems.get(menuId);
+    if (!dynamic) {
+      dynamic = [];
+      this.dynamicItems.set(menuId, dynamic);
+    }
+    if (!dynamic.some((existing) => existing.id === item.id)) {
+      dynamic.push(item);
+    }
+
     const menu = this.menus.get(menuId);
     if (menu) {
-      menu.items.push(item);
+      if (!menu.items.some((existing) => existing.id === item.id)) {
+        menu.items.push(item);
+      }
       this.notify();
-    } else {
-      console.warn(`[MenuRegistry] Cannot register item. Menu '${menuId}' not found.`);
     }
+    // If menu doesn't exist yet, the item will be appended when registerMenu is called
   }
 
   getMenus(): MenuDefinition[] {

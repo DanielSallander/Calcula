@@ -21,6 +21,7 @@ export type {
   // Cell data
   CellData,
   StyleData,
+  StyleDataMap,
   DimensionData,
 
   // Formatting

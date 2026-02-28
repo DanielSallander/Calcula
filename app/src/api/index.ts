@@ -252,7 +252,7 @@ export type { CommitGuardResult, CommitGuardFn } from "./commitGuards";
 // Cell Click Interceptors
 // ============================================================================
 
-export { registerCellClickInterceptor } from "./cellClickInterceptors";
+export { registerCellClickInterceptor, registerCellCursorInterceptor } from "./cellClickInterceptors";
 
 // ============================================================================
 // Cell Double-Click Interceptors

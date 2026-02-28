@@ -3,8 +3,11 @@
 // CONTEXT: Re-exports grid state hooks and actions from core.
 // UPDATED: Removed Find actions - Find state now lives in the FindReplaceDialog extension.
 
-// Re-export the context hook
-export { useGridContext, useGridState, useGridDispatch } from "../core/state/GridContext";
+// Re-export the context hook and non-React state getter
+export { useGridContext, useGridState, useGridDispatch, getGridStateSnapshot } from "../core/state/GridContext";
+
+// Re-export hit-testing for extensions
+export { getCellFromPixel } from "../core/lib/gridRenderer";
 
 // Re-export grid actions (Find actions removed - they live in FindReplaceDialog extension)
 export {

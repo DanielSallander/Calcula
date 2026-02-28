@@ -9,6 +9,7 @@ export {
   useGridContext,
   useGridState,
   useGridDispatch,
+  getGridStateSnapshot,
 } from "../core/state/GridContext";
 
 // Grid action creators used by extensions and shell

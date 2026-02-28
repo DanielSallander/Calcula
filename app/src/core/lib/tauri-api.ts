@@ -301,6 +301,7 @@ export async function applyFormatting(
       borderRight: formatting.borderRight,
       borderBottom: formatting.borderBottom,
       borderLeft: formatting.borderLeft,
+      checkbox: formatting.checkbox,
     },
   });
   console.log(

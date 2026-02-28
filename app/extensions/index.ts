@@ -19,6 +19,7 @@ import { registerEvaluateFormulaExtension, unregisterEvaluateFormulaExtension } 
 import { registerConsolidateExtension, unregisterConsolidateExtension } from "./Consolidate";
 import { registerTablixExtension, unregisterTablixExtension } from "./Tablix";
 import { registerSortingExtension, unregisterSortingExtension } from "./Sorting";
+import { registerCheckboxExtension, unregisterCheckboxExtension } from "./Checkbox";
 
 /**
  * Load all extensions.
@@ -46,6 +47,7 @@ export function loadExtensions(): void {
   registerEvaluateFormulaExtension();
   registerConsolidateExtension();
   registerTablixExtension();
+  registerCheckboxExtension();
 
   // Future: Load user extensions from config
 
@@ -60,6 +62,7 @@ export function unloadExtensions(): void {
   console.log("[Extensions] Unloading extensions...");
 
   // Unload in reverse order
+  unregisterCheckboxExtension();
   unregisterTablixExtension();
   unregisterConsolidateExtension();
   unregisterEvaluateFormulaExtension();
@@ -99,3 +102,4 @@ export { registerEvaluateFormulaExtension, unregisterEvaluateFormulaExtension };
 export { registerConsolidateExtension, unregisterConsolidateExtension };
 export { registerSortingExtension, unregisterSortingExtension };
 export { registerTablixExtension, unregisterTablixExtension };
+export { registerCheckboxExtension, unregisterCheckboxExtension };

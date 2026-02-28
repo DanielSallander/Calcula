@@ -633,8 +633,9 @@ export function useSpreadsheetSelection({
       const { getCellFromPixel } = await import("../../lib/gridRenderer");
       const clickedCell = getCellFromPixel(mouseX, mouseY, state.config, state.viewport, state.dimensions);
 
-      if (clickedCell) {
+      if (clickedCell && !isEditing) {
         // Let extensions intercept the click (e.g., pivot filter dropdowns)
+        // Skip when editing so formula cell references work normally
         const intercepted = await checkCellClickInterceptors(
           clickedCell.row,
           clickedCell.col,
@@ -649,7 +650,7 @@ export function useSpreadsheetSelection({
 
       baseHandleMouseDown(event);
     },
-    [baseHandleMouseDown, isOverFillHandle, startFillDrag, isOverFloatingOverlay, state.config, state.viewport, state.dimensions]
+    [baseHandleMouseDown, isOverFillHandle, startFillDrag, isOverFloatingOverlay, isEditing, state.config, state.viewport, state.dimensions]
   );
 
   const handleMouseMove = useCallback(

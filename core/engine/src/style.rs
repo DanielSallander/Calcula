@@ -214,6 +214,7 @@ pub struct CellStyle {
     pub wrap_text: bool,
     pub text_rotation: TextRotation,
     pub indent: u8, // Number of indent levels (each level = ~8px)
+    pub checkbox: bool, // In-cell checkbox presentation mode
 }
 
 impl CellStyle {
@@ -229,6 +230,7 @@ impl CellStyle {
             wrap_text: false,
             text_rotation: TextRotation::None,
             indent: 0,
+            checkbox: false,
         }
     }
 
@@ -295,6 +297,12 @@ impl CellStyle {
     /// Create a style with strikethrough text.
     pub fn with_strikethrough(mut self, strikethrough: bool) -> Self {
         self.font.strikethrough = strikethrough;
+        self
+    }
+
+    /// Create a style with checkbox presentation mode.
+    pub fn with_checkbox(mut self, checkbox: bool) -> Self {
+        self.checkbox = checkbox;
         self
     }
 }

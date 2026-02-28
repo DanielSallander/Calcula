@@ -38,11 +38,22 @@ interface GridProviderProps {
  * @param children - Child components that will have access to the context
  * @param initialState - Optional initial state override for testing
  */
+// Module-level state ref for non-React access (e.g., extensions)
+let gridStateRef: GridState | null = null;
+
+/** Get the current grid state snapshot (for use outside React components). */
+export function getGridStateSnapshot(): GridState | null {
+  return gridStateRef;
+}
+
 export function GridProvider({ children, initialState }: GridProviderProps): React.ReactElement {
   const [state, dispatch] = useReducer(gridReducer, initialState || getInitialState());
 
   // Expose dispatch globally so non-React code (extensions) can dispatch actions
   setGridDispatchRef(dispatch);
+
+  // Keep state ref up to date for non-React consumers
+  gridStateRef = state;
 
   const value: GridContextValue = {
     state,
