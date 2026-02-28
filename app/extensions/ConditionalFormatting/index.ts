@@ -22,11 +22,12 @@ import {
 } from "./lib/cfStore";
 import { conditionalFormattingInterceptor } from "./lib/cfInterceptor";
 import { setMenuSelection, registerCFMenuItems } from "./handlers/homeMenuBuilder";
-import { QUICK_CF_DIALOG_ID, RULES_MANAGER_DIALOG_ID } from "./handlers/homeMenuBuilder";
+import { QUICK_CF_DIALOG_ID, RULES_MANAGER_DIALOG_ID, NEW_RULE_DIALOG_ID } from "./handlers/homeMenuBuilder";
 import { renderDataBars } from "./rendering/dataBarRenderer";
 import { renderIconSets } from "./rendering/iconSetRenderer";
 import { QuickCFDialog } from "./components/QuickCFDialog";
 import { RulesManagerDialog } from "./components/RulesManagerDialog";
+import { NewRuleDialog } from "./components/NewRuleDialog";
 
 // ============================================================================
 // Cleanup tracking
@@ -41,11 +42,15 @@ const cleanupFns: (() => void)[] = [];
 export function registerConditionalFormattingExtension(): void {
   console.log("[ConditionalFormatting] Registering...");
 
-  // 1. Register style interceptor (priority 10 = runs after base styles)
+  // 1. Register style interceptor
+  // Priority 100: runs AFTER all other interceptors (Table=5, Checkbox=5).
+  // This ensures Conditional Formatting overrides Computed Properties
+  // (which apply at the base styleIndex level, before interceptors) and
+  // other feature interceptors when they set the same style properties.
   const unregInterceptor = registerStyleInterceptor(
     "conditional-formatting",
     conditionalFormattingInterceptor,
-    10
+    100
   );
   cleanupFns.push(unregInterceptor);
 
@@ -79,6 +84,13 @@ export function registerConditionalFormattingExtension(): void {
     priority: 50,
   });
   cleanupFns.push(() => unregisterDialog(RULES_MANAGER_DIALOG_ID));
+
+  registerDialog({
+    id: NEW_RULE_DIALOG_ID,
+    component: NewRuleDialog,
+    priority: 50,
+  });
+  cleanupFns.push(() => unregisterDialog(NEW_RULE_DIALOG_ID));
 
   // 5. Register menu items
   registerCFMenuItems();

@@ -84,12 +84,6 @@ export async function evaluateViewport(
   endRow: number,
   endCol: number
 ): Promise<void> {
-  if (state.rules.length === 0) {
-    state.evaluationCache.clear();
-    syncOverlayRegions();
-    return;
-  }
-
   // Add buffer around viewport for smoother scrolling
   const bufferRows = 20;
   const bufferCols = 5;
@@ -97,6 +91,21 @@ export async function evaluateViewport(
   const evalStartCol = Math.max(0, startCol - bufferCols);
   const evalEndRow = endRow + bufferRows;
   const evalEndCol = endCol + bufferCols;
+
+  // Always track the viewport range so future invalidations can re-evaluate
+  // (even when there are no rules yet — the first rule add needs this)
+  state.viewportRange = {
+    startRow: evalStartRow,
+    startCol: evalStartCol,
+    endRow: evalEndRow,
+    endCol: evalEndCol,
+  };
+
+  if (state.rules.length === 0) {
+    state.evaluationCache.clear();
+    syncOverlayRegions();
+    return;
+  }
 
   try {
     const result = await evaluateConditionalFormats(
@@ -118,12 +127,6 @@ export async function evaluateViewport(
       }
     }
 
-    state.viewportRange = {
-      startRow: evalStartRow,
-      startCol: evalStartCol,
-      endRow: evalEndRow,
-      endCol: evalEndCol,
-    };
     state.dirty = false;
 
     syncOverlayRegions();
@@ -149,12 +152,13 @@ export function invalidateCache(): void {
     clearTimeout(debounceTimer);
   }
 
-  debounceTimer = setTimeout(() => {
+  debounceTimer = setTimeout(async () => {
     debounceTimer = null;
     if (state.dirty && state.viewportRange) {
       const vp = state.viewportRange;
-      evaluateViewport(vp.startRow, vp.startCol, vp.endRow, vp.endCol);
+      await evaluateViewport(vp.startRow, vp.startCol, vp.endRow, vp.endCol);
     }
+    markSheetDirty();
     requestOverlayRedraw();
   }, 200);
 }
@@ -168,10 +172,9 @@ export async function invalidateAndRefresh(): Promise<void> {
 
   await refreshRules();
 
-  if (state.viewportRange) {
-    const vp = state.viewportRange;
-    await evaluateViewport(vp.startRow, vp.startCol, vp.endRow, vp.endCol);
-  }
+  // Use tracked viewport or a sensible default for the first evaluation
+  const vp = state.viewportRange ?? { startRow: 0, startCol: 0, endRow: 100, endCol: 30 };
+  await evaluateViewport(vp.startRow, vp.startCol, vp.endRow, vp.endCol);
 
   markSheetDirty();
   requestOverlayRedraw();

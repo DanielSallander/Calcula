@@ -1,6 +1,6 @@
 //! FILENAME: app/extensions/ConditionalFormatting/handlers/homeMenuBuilder.ts
-// PURPOSE: Registers Conditional Formatting menu items in the Home menu.
-// CONTEXT: Adds "Conditional Formatting" menu with quick-apply actions and management options.
+// PURPOSE: Registers Conditional Formatting menu items in the Format menu.
+// CONTEXT: Adds "Conditional Formatting" submenu with quick-apply actions and management options.
 
 import {
   registerMenuItem,
@@ -25,6 +25,7 @@ import {
 
 export const QUICK_CF_DIALOG_ID = "cf-quick-dialog";
 export const RULES_MANAGER_DIALOG_ID = "cf-rules-manager";
+export const NEW_RULE_DIALOG_ID = "cf-new-rule-dialog";
 
 // Module-level selection cache (updated by index.ts via onSelectionChange)
 let currentSelection: {
@@ -99,19 +100,19 @@ async function handleClearAllRules(): Promise<void> {
 }
 
 /**
- * Register Conditional Formatting menu items into the Home menu.
+ * Register Conditional Formatting menu items into the Format menu.
  */
 export function registerCFMenuItems(): void {
   // Separator before CF items
-  registerMenuItem("home", {
-    id: "home:cf-separator",
+  registerMenuItem("format", {
+    id: "format:cf-separator",
     label: "",
     separator: true,
   });
 
   // Main Conditional Formatting menu with submenus
-  registerMenuItem("home", {
-    id: "home:conditionalFormatting",
+  registerMenuItem("format", {
+    id: "format:conditionalFormatting",
     label: "Conditional Formatting",
     children: [
       // ---- Highlight Cells Rules ----
@@ -147,24 +148,12 @@ export function registerCFMenuItems(): void {
           {
             id: "cf:duplicateValues",
             label: "Duplicate Values...",
-            action: () => {
-              const preset = PRESET_STYLES[0];
-              addQuickRule(
-                { type: "duplicateValues" },
-                { backgroundColor: preset.backgroundColor, textColor: preset.textColor }
-              );
-            },
+            action: () => showQuickDialog("duplicateValues"),
           },
           {
             id: "cf:uniqueValues",
             label: "Unique Values...",
-            action: () => {
-              const preset = PRESET_STYLES[2];
-              addQuickRule(
-                { type: "uniqueValues" },
-                { backgroundColor: preset.backgroundColor, textColor: preset.textColor }
-              );
-            },
+            action: () => showQuickDialog("uniqueValues"),
           },
         ],
       },
@@ -196,25 +185,13 @@ export function registerCFMenuItems(): void {
           },
           {
             id: "cf:aboveAverage",
-            label: "Above Average",
-            action: () => {
-              const preset = PRESET_STYLES[2];
-              addQuickRule(
-                { type: "aboveAverage", ruleType: "aboveAverage" },
-                { backgroundColor: preset.backgroundColor, textColor: preset.textColor }
-              );
-            },
+            label: "Above Average...",
+            action: () => showQuickDialog("aboveAverage"),
           },
           {
             id: "cf:belowAverage",
-            label: "Below Average",
-            action: () => {
-              const preset = PRESET_STYLES[0];
-              addQuickRule(
-                { type: "aboveAverage", ruleType: "belowAverage" },
-                { backgroundColor: preset.backgroundColor, textColor: preset.textColor }
-              );
-            },
+            label: "Below Average...",
+            action: () => showQuickDialog("belowAverage"),
           },
         ],
       },
@@ -352,7 +329,7 @@ export function registerCFMenuItems(): void {
       {
         id: "cf:newRule",
         label: "New Rule...",
-        action: () => showDialog(QUICK_CF_DIALOG_ID, { ruleType: "newRule", selection: getSelectionRange() }),
+        action: () => showDialog(NEW_RULE_DIALOG_ID, { selection: getSelectionRange() }),
       },
 
       // ---- Clear Rules ----

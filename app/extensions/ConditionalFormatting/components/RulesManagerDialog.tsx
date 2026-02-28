@@ -32,6 +32,7 @@ const overlayStyle: React.CSSProperties = {
 
 const dialogStyle: React.CSSProperties = {
   backgroundColor: "#f0f0f0",
+  color: "#333",
   border: "1px solid #888",
   borderRadius: 4,
   boxShadow: "0 4px 16px rgba(0, 0, 0, 0.3)",
@@ -88,6 +89,7 @@ const toolButtonStyle: React.CSSProperties = {
   fontSize: 12,
   cursor: "pointer",
   backgroundColor: "#fff",
+  color: "#333",
 };
 
 const buttonRowStyle: React.CSSProperties = {
@@ -104,6 +106,7 @@ const buttonStyle: React.CSSProperties = {
   fontSize: 13,
   cursor: "pointer",
   backgroundColor: "#fff",
+  color: "#333",
 };
 
 const primaryButtonStyle: React.CSSProperties = {

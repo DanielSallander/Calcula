@@ -1,6 +1,11 @@
 //! FILENAME: app/extensions/BuiltIn/ComputedProperties/index.ts
 // PURPOSE: Computed Properties extension module.
 // CONTEXT: Registers the Computed Properties dialog and context menu item.
+//
+// PRECEDENCE: Computed Properties are applied at the base styleIndex level
+//   (before the style interceptor pipeline). Conditional Formatting runs as
+//   a style interceptor and will override Computed Properties for any style
+//   property it explicitly sets (backgroundColor, textColor, bold, etc.).
 
 import type {
   ExtensionModule,

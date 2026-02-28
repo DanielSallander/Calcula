@@ -8,15 +8,106 @@ import * as S from './MenuBar.styles';
 // Re-export for external consumers
 export type { MenuItem, Menu } from './MenuBar.types';
 
+// ============================================================================
+// Recursive helper: find shortcut match at any nesting depth
+// ============================================================================
+
+function findShortcutItem(
+  items: UI.MenuItemDefinition[],
+  keyCombo: string
+): UI.MenuItemDefinition | null {
+  for (const item of items) {
+    if (item.shortcut && normalizeShortcut(item.shortcut) === keyCombo && !item.disabled) {
+      return item;
+    }
+    if (item.children) {
+      const found = findShortcutItem(item.children, keyCombo);
+      if (found) return found;
+    }
+  }
+  return null;
+}
+
+// ============================================================================
+// RecursiveMenuItem - self-contained component for any nesting depth
+// ============================================================================
+
+interface RecursiveMenuItemProps {
+  item: UI.MenuItemDefinition;
+  index: number;
+  executeMenuItem: (item: UI.MenuItemDefinition) => void;
+}
+
+function RecursiveMenuItem({ item, index, executeMenuItem }: RecursiveMenuItemProps): React.ReactElement {
+  const [isSubmenuOpen, setIsSubmenuOpen] = useState(false);
+
+  if (item.separator) {
+    return <S.Separator key={`sep-${index}`} />;
+  }
+
+  const hasChildren = item.children && item.children.length > 0;
+
+  return (
+    <S.SubMenuContainer
+      onMouseEnter={() => { if (hasChildren) setIsSubmenuOpen(true); }}
+      onMouseLeave={() => { if (hasChildren) setIsSubmenuOpen(false); }}
+    >
+      <S.MenuItemButton
+        $disabled={item.disabled}
+        onClick={() => {
+          if (hasChildren) {
+            if (item.action || item.commandId) {
+              executeMenuItem(item);
+            }
+          } else {
+            executeMenuItem(item);
+          }
+        }}
+        disabled={item.disabled}
+      >
+        <S.MenuItemContent>
+          {item.checked !== undefined && (
+            <S.Checkmark>{item.checked ? '[x]' : '[ ]'}</S.Checkmark>
+          )}
+          <span>{item.label}</span>
+        </S.MenuItemContent>
+        <S.RightContent>
+          {item.shortcut && (
+            <S.Shortcut>{item.shortcut}</S.Shortcut>
+          )}
+          {hasChildren && (
+            <S.SubmenuArrow>&#9656;</S.SubmenuArrow>
+          )}
+        </S.RightContent>
+      </S.MenuItemButton>
+
+      {hasChildren && isSubmenuOpen && (
+        <S.SubMenuDropdown>
+          {item.children!.filter(child => !child.hidden).map((child, childIndex) => (
+            <RecursiveMenuItem
+              key={child.id || childIndex}
+              item={child}
+              index={childIndex}
+              executeMenuItem={executeMenuItem}
+            />
+          ))}
+        </S.SubMenuDropdown>
+      )}
+    </S.SubMenuContainer>
+  );
+}
+
+// ============================================================================
+// MenuBar
+// ============================================================================
+
 export function MenuBar(): React.ReactElement {
   const [openMenu, setOpenMenu] = useState<string | null>(null);
-  const [openSubmenu, setOpenSubmenu] = useState<string | null>(null);
   const [menus, setMenus] = useState<UI.MenuDefinition[]>(() => UI.getMenus());
   const menuBarRef = useRef<HTMLDivElement>(null);
 
   const closeAll = useCallback(() => {
     setOpenMenu(null);
-    setOpenSubmenu(null);
   }, []);
 
   const executeMenuItem = useCallback((item: UI.MenuItemDefinition) => {
@@ -53,7 +144,7 @@ export function MenuBar(): React.ReactElement {
     return () => document.removeEventListener('mousedown', handleClickOutside);
   }, [closeAll]);
 
-  // 3. Dynamic Keyboard Shortcuts
+  // 3. Dynamic Keyboard Shortcuts (recursive search through all nesting depths)
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
       const target = e.target as HTMLElement;
@@ -67,26 +158,11 @@ export function MenuBar(): React.ReactElement {
       if (!keyCombo) return;
 
       for (const menu of menus) {
-        for (const item of menu.items) {
-          if (item.shortcut && normalizeShortcut(item.shortcut) === keyCombo) {
-             if (item.disabled) return;
-
-             e.preventDefault();
-             executeMenuItem(item);
-             return;
-          }
-          // Also check children for shortcuts
-          if (item.children) {
-            for (const child of item.children) {
-              if (child.shortcut && normalizeShortcut(child.shortcut) === keyCombo) {
-                if (child.disabled) return;
-
-                e.preventDefault();
-                executeMenuItem(child);
-                return;
-              }
-            }
-          }
+        const match = findShortcutItem(menu.items, keyCombo);
+        if (match) {
+          e.preventDefault();
+          executeMenuItem(match);
+          return;
         }
       }
     };
@@ -100,88 +176,13 @@ export function MenuBar(): React.ReactElement {
       closeAll();
     } else {
       setOpenMenu(menuId);
-      setOpenSubmenu(null);
     }
   };
 
   const handleMenuHover = (menuId: string) => {
     if (openMenu) {
       setOpenMenu(menuId);
-      setOpenSubmenu(null);
     }
-  };
-
-  const renderMenuItem = (item: UI.MenuItemDefinition, index: number) => {
-    if (item.separator) {
-      return <S.Separator key={`sep-${index}`} />;
-    }
-
-    const hasChildren = item.children && item.children.length > 0;
-
-    return (
-      <S.SubMenuContainer
-        key={item.id || index}
-        onMouseEnter={() => hasChildren && setOpenSubmenu(item.id)}
-        onMouseLeave={() => hasChildren && setOpenSubmenu(null)}
-      >
-        <S.MenuItemButton
-          $disabled={item.disabled}
-          onClick={() => {
-            if (hasChildren) {
-              // Items with children: clicking the main item still executes its action/command
-              if (item.action || item.commandId) {
-                executeMenuItem(item);
-              }
-            } else {
-              executeMenuItem(item);
-            }
-          }}
-          disabled={item.disabled}
-        >
-          <S.MenuItemContent>
-            {item.checked !== undefined && (
-              <S.Checkmark>{item.checked ? '[x]' : '[ ]'}</S.Checkmark>
-            )}
-            <span>{item.label}</span>
-          </S.MenuItemContent>
-          <S.RightContent>
-            {item.shortcut && (
-              <S.Shortcut>{item.shortcut}</S.Shortcut>
-            )}
-            {hasChildren && (
-              <S.SubmenuArrow>&#9656;</S.SubmenuArrow>
-            )}
-          </S.RightContent>
-        </S.MenuItemButton>
-
-        {hasChildren && openSubmenu === item.id && (
-          <S.SubMenuDropdown>
-            {item.children!.filter(child => !child.hidden).map((child, childIndex) =>
-              child.separator ? (
-                <S.Separator key={`sub-sep-${childIndex}`} />
-              ) : (
-                <S.MenuItemButton
-                  key={child.id || childIndex}
-                  $disabled={child.disabled}
-                  onClick={() => executeMenuItem(child)}
-                  disabled={child.disabled}
-                >
-                  <S.MenuItemContent>
-                    {child.checked !== undefined && (
-                      <S.Checkmark>{child.checked ? '[x]' : '[ ]'}</S.Checkmark>
-                    )}
-                    <span>{child.label}</span>
-                  </S.MenuItemContent>
-                  {child.shortcut && (
-                    <S.Shortcut>{child.shortcut}</S.Shortcut>
-                  )}
-                </S.MenuItemButton>
-              )
-            )}
-          </S.SubMenuDropdown>
-        )}
-      </S.SubMenuContainer>
-    );
   };
 
   return (
@@ -198,9 +199,14 @@ export function MenuBar(): React.ReactElement {
 
           {openMenu === menu.id && (
             <S.Dropdown>
-              {menu.items.filter(item => !item.hidden).map((item, index) =>
-                renderMenuItem(item, index)
-              )}
+              {menu.items.filter(item => !item.hidden).map((item, index) => (
+                <RecursiveMenuItem
+                  key={item.id || index}
+                  item={item}
+                  index={index}
+                  executeMenuItem={executeMenuItem}
+                />
+              ))}
             </S.Dropdown>
           )}
         </S.MenuContainer>
@@ -215,14 +221,14 @@ function normalizeShortcut(shortcut: string): string {
 
 function parseKeyboardEvent(e: KeyboardEvent): string | null {
   if (!e.ctrlKey && !e.metaKey) return null;
-  
+
   const parts = [];
   if (e.ctrlKey || e.metaKey) parts.push('ctrl');
   if (e.shiftKey) parts.push('shift');
   if (e.altKey) parts.push('alt');
-  
+
   if (['Control', 'Meta', 'Shift', 'Alt'].includes(e.key)) return null;
-  
+
   parts.push(e.key.toLowerCase());
   return parts.join('+');
 }

@@ -1,6 +1,6 @@
 //! FILENAME: app/extensions/ConditionalFormatting/components/QuickCFDialog.tsx
 // PURPOSE: Quick configuration dialog for adding a conditional formatting rule.
-// CONTEXT: Opened from the Home > Conditional Formatting menu for threshold-based rules.
+// CONTEXT: Opened from the Format > Conditional Formatting menu for threshold-based rules.
 
 import React, { useState, useCallback } from "react";
 import type { DialogProps } from "../../../src/api";
@@ -35,6 +35,7 @@ const overlayStyle: React.CSSProperties = {
 
 const dialogStyle: React.CSSProperties = {
   backgroundColor: "#f0f0f0",
+  color: "#333",
   border: "1px solid #888",
   borderRadius: 4,
   boxShadow: "0 4px 16px rgba(0, 0, 0, 0.3)",
@@ -63,6 +64,8 @@ const inputStyle: React.CSSProperties = {
   border: "1px solid #aaa",
   borderRadius: 3,
   fontSize: 13,
+  color: "#333",
+  backgroundColor: "#fff",
 };
 
 const selectStyle: React.CSSProperties = {
@@ -71,6 +74,8 @@ const selectStyle: React.CSSProperties = {
   border: "1px solid #aaa",
   borderRadius: 3,
   fontSize: 13,
+  color: "#333",
+  backgroundColor: "#fff",
 };
 
 const buttonRowStyle: React.CSSProperties = {
@@ -87,6 +92,7 @@ const buttonStyle: React.CSSProperties = {
   fontSize: 13,
   cursor: "pointer",
   backgroundColor: "#fff",
+  color: "#333",
 };
 
 const primaryButtonStyle: React.CSSProperties = {
@@ -99,6 +105,18 @@ const primaryButtonStyle: React.CSSProperties = {
 // ============================================================================
 // Rule Type Definitions
 // ============================================================================
+
+/** Rule types that use a text input */
+const INPUT_RULE_TYPES = [
+  "greaterThan", "lessThan", "between", "equalTo", "textContains",
+  "top10Items", "top10Percent", "bottom10Items", "bottom10Percent",
+  "newRule",
+];
+
+/** Rule types that use a dropdown instead of text input */
+const DROPDOWN_RULE_TYPES = [
+  "duplicateValues", "uniqueValues", "aboveAverage", "belowAverage",
+];
 
 interface QuickRuleDef {
   title: string;
@@ -119,6 +137,10 @@ const RULE_DEFS: Record<string, QuickRuleDef> = {
   bottom10Items: { title: "Bottom 10 Items", label1: "Format cells that rank in the BOTTOM:" },
   bottom10Percent: { title: "Bottom 10%", label1: "Format cells that rank in the BOTTOM:" },
   newRule: { title: "New Rule", label1: "Enter a formula:" },
+  duplicateValues: { title: "Duplicate Values", label1: "Format cells that contain:" },
+  uniqueValues: { title: "Unique Values", label1: "Format cells that contain:" },
+  aboveAverage: { title: "Above Average", label1: "Format cells that are:" },
+  belowAverage: { title: "Below Average", label1: "Format cells that are:" },
 };
 
 // ============================================================================
@@ -133,6 +155,18 @@ export const QuickCFDialog: React.FC<DialogProps> = ({ isOpen, onClose, data }) 
   const [value1, setValue1] = useState(ruleType.includes("10") ? "10" : "");
   const [value2, setValue2] = useState("");
   const [formatIndex, setFormatIndex] = useState(0);
+
+  // Dropdown state for duplicate/unique and above/below average
+  const [dropdownValue, setDropdownValue] = useState(() => {
+    if (ruleType === "duplicateValues") return "duplicate";
+    if (ruleType === "uniqueValues") return "unique";
+    if (ruleType === "aboveAverage") return "aboveAverage";
+    if (ruleType === "belowAverage") return "belowAverage";
+    return "";
+  });
+
+  const isDropdownType = DROPDOWN_RULE_TYPES.includes(ruleType);
+  const isInputType = INPUT_RULE_TYPES.includes(ruleType);
 
   const handleOk = useCallback(async () => {
     if (!selection) {
@@ -178,6 +212,19 @@ export const QuickCFDialog: React.FC<DialogProps> = ({ isOpen, onClose, data }) 
       case "newRule":
         rule = { type: "expression", formula: value1 };
         break;
+      case "duplicateValues":
+      case "uniqueValues":
+        rule = dropdownValue === "unique"
+          ? { type: "uniqueValues" }
+          : { type: "duplicateValues" };
+        break;
+      case "aboveAverage":
+      case "belowAverage":
+        rule = {
+          type: "aboveAverage",
+          ruleType: dropdownValue as "aboveAverage" | "belowAverage" | "equalOrAboveAverage" | "equalOrBelowAverage" | "oneStdDevAbove" | "oneStdDevBelow" | "twoStdDevAbove" | "twoStdDevBelow" | "threeStdDevAbove" | "threeStdDevBelow",
+        };
+        break;
       default:
         onClose();
         return;
@@ -193,7 +240,7 @@ export const QuickCFDialog: React.FC<DialogProps> = ({ isOpen, onClose, data }) 
     await invalidateAndRefresh();
     onClose();
     restoreFocusToGrid();
-  }, [ruleType, value1, value2, formatIndex, selection, onClose]);
+  }, [ruleType, value1, value2, formatIndex, dropdownValue, selection, onClose]);
 
   const handleCancel = useCallback(() => {
     onClose();
@@ -211,17 +258,61 @@ export const QuickCFDialog: React.FC<DialogProps> = ({ isOpen, onClose, data }) 
           <span style={{ fontSize: 13, minWidth: 0, flex: 1 }}>{def.label1}</span>
         </div>
 
-        <div style={rowStyle}>
-          <input
-            type="text"
-            style={inputStyle}
-            value={value1}
-            onChange={(e) => setValue1(e.target.value)}
-            placeholder={def.placeholder1 || "Enter value"}
-            autoFocus
-            onKeyDown={(e) => { if (e.key === "Enter") handleOk(); if (e.key === "Escape") handleCancel(); }}
-          />
-        </div>
+        {/* Dropdown for duplicate/unique values */}
+        {(ruleType === "duplicateValues" || ruleType === "uniqueValues") && (
+          <div style={rowStyle}>
+            <select
+              style={selectStyle}
+              value={dropdownValue}
+              onChange={(e) => setDropdownValue(e.target.value)}
+              autoFocus
+              onKeyDown={(e) => { if (e.key === "Enter") handleOk(); if (e.key === "Escape") handleCancel(); }}
+            >
+              <option value="duplicate">Duplicate</option>
+              <option value="unique">Unique</option>
+            </select>
+            <span style={{ fontSize: 13 }}>values in the selected range</span>
+          </div>
+        )}
+
+        {/* Dropdown for above/below average */}
+        {(ruleType === "aboveAverage" || ruleType === "belowAverage") && (
+          <div style={rowStyle}>
+            <select
+              style={selectStyle}
+              value={dropdownValue}
+              onChange={(e) => setDropdownValue(e.target.value)}
+              autoFocus
+              onKeyDown={(e) => { if (e.key === "Enter") handleOk(); if (e.key === "Escape") handleCancel(); }}
+            >
+              <option value="aboveAverage">Above Average</option>
+              <option value="belowAverage">Below Average</option>
+              <option value="equalOrAboveAverage">Equal or Above Average</option>
+              <option value="equalOrBelowAverage">Equal or Below Average</option>
+              <option value="oneStdDevAbove">1 Std Dev Above</option>
+              <option value="oneStdDevBelow">1 Std Dev Below</option>
+              <option value="twoStdDevAbove">2 Std Dev Above</option>
+              <option value="twoStdDevBelow">2 Std Dev Below</option>
+              <option value="threeStdDevAbove">3 Std Dev Above</option>
+              <option value="threeStdDevBelow">3 Std Dev Below</option>
+            </select>
+          </div>
+        )}
+
+        {/* Text input for value-based rules */}
+        {isInputType && (
+          <div style={rowStyle}>
+            <input
+              type="text"
+              style={inputStyle}
+              value={value1}
+              onChange={(e) => setValue1(e.target.value)}
+              placeholder={def.placeholder1 || "Enter value"}
+              autoFocus
+              onKeyDown={(e) => { if (e.key === "Enter") handleOk(); if (e.key === "Escape") handleCancel(); }}
+            />
+          </div>
+        )}
 
         {def.label2 && (
           <>

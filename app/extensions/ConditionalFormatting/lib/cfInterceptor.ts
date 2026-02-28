@@ -2,6 +2,12 @@
 // PURPOSE: Style interceptor for conditional formatting.
 // CONTEXT: Registered with the style interceptor pipeline to dynamically
 //          override cell styles at render time based on evaluation results.
+//
+// PRECEDENCE: Conditional Formatting overrides Computed Properties.
+//   Computed Properties modify the cell's base styleIndex, which feeds into the
+//   rendering pipeline as the "base style". This interceptor runs AFTER base
+//   styles are resolved, so any properties returned here will override values
+//   set by Computed Properties (backgroundColor, textColor, bold, italic, etc.).
 
 import type { IStyleOverride, CellCoords } from "../../../src/api/styleInterceptors";
 import { getEvaluationForCell } from "./cfStore";
