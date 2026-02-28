@@ -843,8 +843,12 @@ pub fn update_cells_batch(
     let mut undo_stack = state.undo_stack.lock().unwrap();
     let merged_regions = state.merged_regions.lock().unwrap();
 
-    // Begin undo transaction so all batch changes are a single undo entry
-    undo_stack.begin_transaction(format!("Batch update {} cells", updates.len()));
+    // Only open a new undo transaction if one isn't already open
+    // (e.g. the frontend may have called beginUndoTransaction for cut+paste)
+    let opened_transaction = !undo_stack.has_open_transaction();
+    if opened_transaction {
+        undo_stack.begin_transaction(format!("Batch update {} cells", updates.len()));
+    }
     let perf_t1_locks = Instant::now();
 
     let current_sheet_name = sheet_names.get(active_sheet).cloned().unwrap_or_default();
@@ -932,8 +936,10 @@ pub fn update_cells_batch(
         // Parse the input
         let mut cell = parse_cell_input(value);
 
-        // Preserve existing style
-        if let Some(existing) = grid.get_cell(row, col) {
+        // Apply explicit style from input if provided, otherwise preserve existing
+        if let Some(explicit_style) = update.style_index {
+            cell.style_index = explicit_style;
+        } else if let Some(existing) = grid.get_cell(row, col) {
             cell.style_index = existing.style_index;
         }
 
@@ -1353,8 +1359,10 @@ pub fn update_cells_batch(
         );
     }
 
-    // Commit the undo transaction
-    undo_stack.commit_transaction();
+    // Only commit if we opened the transaction ourselves
+    if opened_transaction {
+        undo_stack.commit_transaction();
+    }
 
     Ok(updated_cells)
 }

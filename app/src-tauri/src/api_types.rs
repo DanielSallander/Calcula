@@ -41,6 +41,9 @@ pub struct CellUpdateInput {
     pub row: u32,
     pub col: u32,
     pub value: String,
+    /// Optional style index to apply. When None, preserves existing style.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub style_index: Option<usize>,
 }
 
 /// A single border side (top, right, bottom, or left).

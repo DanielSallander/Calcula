@@ -334,11 +334,9 @@ export function useClipboard(): UseClipboardReturn {
         : `Paste ${pasteHeight * pasteWidth} cells`;
       await beginUndoTransaction(transactionDesc);
 
-      // Paste cells
+      // Build batch updates array (single IPC call instead of one per cell)
       const perfPasteStart = performance.now();
-      let cellCount = 0;
-      let totalIpcMs = 0;
-      let totalEventsMs = 0;
+      const batchUpdates: CellUpdateInput[] = [];
 
       for (let r = 0; r < pasteHeight; r++) {
         for (let c = 0; c < pasteWidth; c++) {
@@ -353,49 +351,28 @@ export function useClipboard(): UseClipboardReturn {
           const sourceCell = cellsToPaste[r]?.[c];
           const value = shiftedFormulaMap.get(`${r},${c}`) ?? sourceCell?.formula ?? sourceCell?.display ?? "";
 
-          try {
-            const tIpc = performance.now();
-            const updateResult = await updateCell(destRow, destCol, value);
-            const updatedCells = updateResult.cells;
+          const update: CellUpdateInput = { row: destRow, col: destCol, value };
 
-            // Apply source cell's style when using internal clipboard
-            // Always set the style (even to 0) so target cell formatting is replaced
-            if (usingInternalClipboard) {
-              const styleIdx = sourceCell?.styleIndex ?? 0;
-              await setCellStyle(destRow, destCol, styleIdx);
-            }
-
-            totalIpcMs += performance.now() - tIpc;
-            cellCount++;
-
-            // Emit events for same-sheet cells only (skip cross-sheet dependents)
-            const tEvt = performance.now();
-            for (const cell of updatedCells) {
-              if (cell.sheetIndex !== undefined) {
-                continue; // Skip cross-sheet cells
-              }
-              cellEvents.emit({
-                row: cell.row,
-                col: cell.col,
-                oldValue: undefined,
-                newValue: cell.display,
-                formula: cell.formula ?? null,
-              });
-            }
-            totalEventsMs += performance.now() - tEvt;
-          } catch (err) {
-            console.error(`[Clipboard] Failed to paste cell (${destRow}, ${destCol}):`, err);
+          // Include style index when pasting from internal clipboard
+          if (usingInternalClipboard) {
+            update.styleIndex = sourceCell?.styleIndex ?? 0;
           }
+
+          batchUpdates.push(update);
         }
       }
 
-      const perfPasteLoop = performance.now();
+      // Single batch IPC call for all cells
+      try {
+        await updateCellsBatch(batchUpdates);
+      } catch (err) {
+        console.error(`[Clipboard] Failed to batch paste ${batchUpdates.length} cells:`, err);
+      }
+
+      const perfPasteEnd = performance.now();
       console.log(
-        `[PERF][paste] ${cellCount} cells | ` +
-        `loop=${(perfPasteLoop - perfPasteStart).toFixed(1)}ms ` +
-        `ipcTotal=${totalIpcMs.toFixed(1)}ms ` +
-        `ipcAvg=${(totalIpcMs / Math.max(cellCount, 1)).toFixed(2)}ms ` +
-        `eventsTotal=${totalEventsMs.toFixed(1)}ms`
+        `[PERF][paste] ${batchUpdates.length} cells | ` +
+        `batch IPC=${(perfPasteEnd - perfPasteStart).toFixed(1)}ms`
       );
 
       // If this was a cut operation, clear the source cells
@@ -418,13 +395,6 @@ export function useClipboard(): UseClipboardReturn {
             if (!overlaps) {
               try {
                 await clearCell(r, c);
-                cellEvents.emit({
-                  row: r,
-                  col: c,
-                  oldValue: undefined,
-                  newValue: "",
-                  formula: null,
-                });
               } catch (err) {
                 console.error(`[Clipboard] Failed to clear cut source (${r}, ${c}):`, err);
               }
@@ -449,10 +419,10 @@ export function useClipboard(): UseClipboardReturn {
       // Commit the undo transaction
       await commitUndoTransaction();
 
-      // Refresh style cache so the canvas picks up any new styles from pasted cells
+      // Refresh grid after paste (single viewport refresh for all pasted cells)
+      window.dispatchEvent(new CustomEvent("grid:refresh"));
       if (usingInternalClipboard) {
         window.dispatchEvent(new CustomEvent("styles:refresh"));
-        window.dispatchEvent(new CustomEvent("grid:refresh"));
       }
 
       // Update selection to cover the pasted range

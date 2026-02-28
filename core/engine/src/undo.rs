@@ -91,6 +91,13 @@ impl UndoStack {
         }
     }
 
+    /// Check if a transaction is currently open.
+    /// Used by batch operations to avoid premature commit when an outer
+    /// transaction was already opened by the caller.
+    pub fn has_open_transaction(&self) -> bool {
+        self.current_transaction.is_some()
+    }
+
     /// Begin a new transaction for batching multiple changes.
     /// If a transaction is already open, this is a no-op (nested calls ignored).
     pub fn begin_transaction(&mut self, description: impl Into<String>) {

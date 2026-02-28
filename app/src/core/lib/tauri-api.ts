@@ -84,6 +84,8 @@ export interface CellUpdateInput {
   row: number;
   col: number;
   value: string;
+  /** Optional style index. When provided, overrides the cell's style. */
+  styleIndex?: number;
 }
 
 /**
