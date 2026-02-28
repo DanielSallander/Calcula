@@ -347,8 +347,25 @@ export function drawCellText(state: RenderState): void {
       // Look up cell data
       const cell = cells.get(key);
 
-      // No cell data at all - skip
+      // No cell data at all - but still apply cell decorations (e.g., sparklines)
+      // for cells that have no backend data but may have extension-drawn content.
       if (!cell) {
+        if (hasCellDecorations()) {
+          const cellLeft = Math.max(x, rowHeaderWidth);
+          const cellTop = Math.max(y, colHeaderHeight);
+          const cellRight = Math.min(x + colWidth, width);
+          const cellBottom = Math.min(y + rowHeight, height);
+          if (cellRight > cellLeft && cellBottom > cellTop) {
+            applyCellDecorations({
+              ctx, row, col,
+              cellLeft, cellTop, cellRight, cellBottom,
+              config, viewport, dimensions,
+              display: "",
+              styleIndex: 0,
+              styleCache,
+            });
+          }
+        }
         baseX += colWidth;
         continue;
       }
@@ -356,23 +373,26 @@ export function drawCellText(state: RenderState): void {
       const displayValue = cell.display ?? "";
       const isEmpty = displayValue === "";
 
-      // For empty cells with default style, skip entirely
+      // For empty cells with default style, skip entirely (unless cell decorations exist)
+      const hasDecorations = hasCellDecorations();
       if (isEmpty) {
         const si = cell.styleIndex ?? 0;
-        if (si === 0) {
+        if (si === 0 && !hasDecorations) {
           baseX += colWidth;
           continue;
         }
         // Cell has a non-default style - check if it has a visible background or borders
-        const emptyStyle = getStyleFromCache(styleCache, si);
-        const hasBg = isValidColor(emptyStyle.backgroundColor) && !isDefaultBackgroundColor(emptyStyle.backgroundColor);
-        const hasBorder = (emptyStyle.borderTop && emptyStyle.borderTop.style !== "none" && emptyStyle.borderTop.width > 0) ||
-          (emptyStyle.borderRight && emptyStyle.borderRight.style !== "none" && emptyStyle.borderRight.width > 0) ||
-          (emptyStyle.borderBottom && emptyStyle.borderBottom.style !== "none" && emptyStyle.borderBottom.width > 0) ||
-          (emptyStyle.borderLeft && emptyStyle.borderLeft.style !== "none" && emptyStyle.borderLeft.width > 0);
-        if (!hasBg && !hasBorder) {
-          baseX += colWidth;
-          continue;
+        if (si !== 0) {
+          const emptyStyle = getStyleFromCache(styleCache, si);
+          const hasBg = isValidColor(emptyStyle.backgroundColor) && !isDefaultBackgroundColor(emptyStyle.backgroundColor);
+          const hasBorder = (emptyStyle.borderTop && emptyStyle.borderTop.style !== "none" && emptyStyle.borderTop.width > 0) ||
+            (emptyStyle.borderRight && emptyStyle.borderRight.style !== "none" && emptyStyle.borderRight.width > 0) ||
+            (emptyStyle.borderBottom && emptyStyle.borderBottom.style !== "none" && emptyStyle.borderBottom.width > 0) ||
+            (emptyStyle.borderLeft && emptyStyle.borderLeft.style !== "none" && emptyStyle.borderLeft.width > 0);
+          if (!hasBg && !hasBorder && !hasDecorations) {
+            baseX += colWidth;
+            continue;
+          }
         }
       }
 

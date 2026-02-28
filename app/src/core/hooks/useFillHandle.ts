@@ -835,6 +835,27 @@ export function useFillHandle(props: UseFillHandleProps): UseFillHandleReturn {
 
       console.log("[FillHandle] Fill complete");
 
+      // Emit FILL_COMPLETED event for extensions (e.g., sparklines)
+      if (finalRange && fillState.direction) {
+        import("../../api/events").then(({ emitAppEvent, AppEvents }) => {
+          emitAppEvent(AppEvents.FILL_COMPLETED, {
+            sourceRange: {
+              startRow: selMinRow,
+              startCol: selMinCol,
+              endRow: selMaxRow,
+              endCol: selMaxCol,
+            },
+            targetRange: {
+              startRow: finalRange.startRow,
+              startCol: finalRange.startCol,
+              endRow: finalRange.endRow,
+              endCol: finalRange.endCol,
+            },
+            direction: fillState.direction,
+          });
+        });
+      }
+
       if (finalRange) {
         dispatch(setSelection({
           startRow: finalRange.startRow,
@@ -1018,6 +1039,25 @@ export function useFillHandle(props: UseFillHandleProps): UseFillHandleReturn {
       }
 
       console.log("[FillHandle] autoFillToEdge complete");
+
+      // Emit FILL_COMPLETED event for extensions (e.g., sparklines)
+      import("../../api/events").then(({ emitAppEvent, AppEvents }) => {
+        emitAppEvent(AppEvents.FILL_COMPLETED, {
+          sourceRange: {
+            startRow: selMinRow,
+            startCol: selMinCol,
+            endRow: selMaxRow,
+            endCol: selMaxCol,
+          },
+          targetRange: {
+            startRow: selMinRow,
+            startCol: selMinCol,
+            endRow: edgeRow,
+            endCol: selMaxCol,
+          },
+          direction: "down" as const,
+        });
+      });
 
       dispatch(setSelection({
         startRow: selMinRow,

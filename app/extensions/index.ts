@@ -20,6 +20,7 @@ import { registerConsolidateExtension, unregisterConsolidateExtension } from "./
 import { registerTablixExtension, unregisterTablixExtension } from "./Tablix";
 import { registerSortingExtension, unregisterSortingExtension } from "./Sorting";
 import { registerCheckboxExtension, unregisterCheckboxExtension } from "./Checkbox";
+import { registerSparklineExtension, unregisterSparklineExtension } from "./Sparklines";
 
 /**
  * Load all extensions.
@@ -48,6 +49,7 @@ export function loadExtensions(): void {
   registerConsolidateExtension();
   registerTablixExtension();
   registerCheckboxExtension();
+  registerSparklineExtension();
 
   // Future: Load user extensions from config
 
@@ -62,6 +64,7 @@ export function unloadExtensions(): void {
   console.log("[Extensions] Unloading extensions...");
 
   // Unload in reverse order
+  unregisterSparklineExtension();
   unregisterCheckboxExtension();
   unregisterTablixExtension();
   unregisterConsolidateExtension();
@@ -103,3 +106,4 @@ export { registerConsolidateExtension, unregisterConsolidateExtension };
 export { registerSortingExtension, unregisterSortingExtension };
 export { registerTablixExtension, unregisterTablixExtension };
 export { registerCheckboxExtension, unregisterCheckboxExtension };
+export { registerSparklineExtension, unregisterSparklineExtension };

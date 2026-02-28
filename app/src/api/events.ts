@@ -58,7 +58,17 @@ export const AppEvents = {
 
   // Status bar context menu
   STATUS_BAR_CONTEXT_MENU: "app:status-bar-context-menu",
+
+  // Fill handle events
+  FILL_COMPLETED: "app:fill-completed",
 } as const;
+
+/** Payload emitted with FILL_COMPLETED event. */
+export interface FillCompletedPayload {
+  sourceRange: { startRow: number; startCol: number; endRow: number; endCol: number };
+  targetRange: { startRow: number; startCol: number; endRow: number; endCol: number };
+  direction: "down" | "up" | "right" | "left";
+}
 
 export type AppEventName = (typeof AppEvents)[keyof typeof AppEvents];
 

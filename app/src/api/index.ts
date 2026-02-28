@@ -265,7 +265,7 @@ export { registerCellDoubleClickInterceptor } from "./cellDoubleClickInterceptor
 // ============================================================================
 
 export { AppEvents, emitAppEvent, onAppEvent, restoreFocusToGrid } from "./events";
-export type { AppEventName } from "./events";
+export type { AppEventName, FillCompletedPayload } from "./events";
 
 // ============================================================================
 // Extension Registry & Extensions
@@ -425,6 +425,20 @@ export {
   type OverlayHitTestContext,
   type GlobalOverlayRendererFn,
 } from "./gridOverlays";
+
+// Cell Decorations
+export {
+  registerCellDecoration,
+  unregisterCellDecoration,
+  hasCellDecorations,
+  applyCellDecorations,
+} from "./cellDecorations";
+
+export type {
+  CellDecorationContext,
+  CellDecorationFn,
+  CellDecorationRegistration,
+} from "./cellDecorations";
 
 // Style Interceptors
 export {
