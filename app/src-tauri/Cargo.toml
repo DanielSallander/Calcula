@@ -23,6 +23,7 @@ parser = { path = "../../core/parser" }
 persistence = { path = "../../core/persistence" }
 pivot-engine = { path = "../../core/pivot-engine" }
 tablix-engine = { path = "../../core/tablix-engine" }
+script-engine = { path = "../../core/script-engine" }
 tauri-plugin-log = "2"
 log = "0.4"
 chrono = "0.4"

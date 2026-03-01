@@ -23,6 +23,7 @@ import { registerCheckboxExtension, unregisterCheckboxExtension } from "./Checkb
 import { registerSparklineExtension, unregisterSparklineExtension } from "./Sparklines";
 import { registerReviewExtension, unregisterReviewExtension } from "./Review";
 import { registerCalculationOptionsExtension, unregisterCalculationOptionsExtension } from "./CalculationOptions";
+import { registerScriptEditorExtension, unregisterScriptEditorExtension } from "./ScriptEditor";
 
 /**
  * Load all extensions.
@@ -54,6 +55,7 @@ export function loadExtensions(): void {
   registerCheckboxExtension();
   registerSparklineExtension();
   registerReviewExtension();
+  registerScriptEditorExtension();
 
   // Future: Load user extensions from config
 
@@ -68,6 +70,7 @@ export function unloadExtensions(): void {
   console.log("[Extensions] Unloading extensions...");
 
   // Unload in reverse order
+  unregisterScriptEditorExtension();
   unregisterReviewExtension();
   unregisterSparklineExtension();
   unregisterCheckboxExtension();
@@ -115,3 +118,4 @@ export { registerCheckboxExtension, unregisterCheckboxExtension };
 export { registerSparklineExtension, unregisterSparklineExtension };
 export { registerReviewExtension, unregisterReviewExtension };
 export { registerCalculationOptionsExtension, unregisterCalculationOptionsExtension };
+export { registerScriptEditorExtension, unregisterScriptEditorExtension };

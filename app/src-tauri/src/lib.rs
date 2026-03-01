@@ -33,6 +33,7 @@ pub mod undo_commands;
 pub mod merge_commands;
 pub mod pivot;
 pub mod tablix;
+pub mod scripting;
 pub mod named_ranges;
 pub mod data_validation;
 pub mod comments;
@@ -2124,6 +2125,7 @@ pub fn run() {
         .manage(pivot::PivotState::new())
         .manage(tablix::TablixState::new())
         .manage(evaluate_formula::EvalFormulaState::new())
+        .manage(scripting::ScriptState::new())
         .invoke_handler(tauri::generate_handler![
             // Grid commands
             commands::get_viewport_cells,
@@ -2428,6 +2430,10 @@ pub fn run() {
             computed_properties::add_computed_property,
             computed_properties::update_computed_property,
             computed_properties::remove_computed_property,
+            // Scripting commands
+            scripting::run_script,
+            scripting::get_script_security_level,
+            scripting::set_script_security_level,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
