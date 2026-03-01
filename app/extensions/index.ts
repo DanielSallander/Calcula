@@ -22,6 +22,7 @@ import { registerSortingExtension, unregisterSortingExtension } from "./Sorting"
 import { registerCheckboxExtension, unregisterCheckboxExtension } from "./Checkbox";
 import { registerSparklineExtension, unregisterSparklineExtension } from "./Sparklines";
 import { registerReviewExtension, unregisterReviewExtension } from "./Review";
+import { registerCalculationOptionsExtension, unregisterCalculationOptionsExtension } from "./CalculationOptions";
 
 /**
  * Load all extensions.
@@ -47,6 +48,7 @@ export function loadExtensions(): void {
   registerTracingExtension();
   registerDefinedNamesExtension();
   registerEvaluateFormulaExtension();
+  registerCalculationOptionsExtension();
   registerConsolidateExtension();
   registerTablixExtension();
   registerCheckboxExtension();
@@ -71,6 +73,7 @@ export function unloadExtensions(): void {
   unregisterCheckboxExtension();
   unregisterTablixExtension();
   unregisterConsolidateExtension();
+  unregisterCalculationOptionsExtension();
   unregisterEvaluateFormulaExtension();
   unregisterDefinedNamesExtension();
   unregisterTracingExtension();
@@ -111,3 +114,4 @@ export { registerTablixExtension, unregisterTablixExtension };
 export { registerCheckboxExtension, unregisterCheckboxExtension };
 export { registerSparklineExtension, unregisterSparklineExtension };
 export { registerReviewExtension, unregisterReviewExtension };
+export { registerCalculationOptionsExtension, unregisterCalculationOptionsExtension };

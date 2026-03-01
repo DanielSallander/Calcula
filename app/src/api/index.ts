@@ -322,6 +322,7 @@ export {
   registerMenuItem,
   getMenus,
   subscribeToMenus,
+  notifyMenusChanged,
   // Task Pane API
   registerTaskPane,
   unregisterTaskPane,
@@ -739,4 +740,15 @@ export {
 
 export type {
   PreviewResult,
+} from "./lib";
+
+// ============================================================================
+// Calculation API
+// ============================================================================
+
+export {
+  setCalculationMode,
+  getCalculationMode,
+  calculateNow,
+  calculateSheet,
 } from "./lib";

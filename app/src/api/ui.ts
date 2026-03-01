@@ -188,6 +188,10 @@ class MenuRegistry {
     return () => this.listeners.delete(callback);
   }
 
+  notifyChanged(): void {
+    this.notify();
+  }
+
   private notify(): void {
     this.listeners.forEach((cb) => cb());
   }
@@ -213,6 +217,14 @@ export function getMenus(): MenuDefinition[] {
 
 export function subscribeToMenus(callback: () => void): () => void {
   return menuRegistry.subscribe(callback);
+}
+
+/**
+ * Notify menu subscribers that menu item properties have changed.
+ * Call this after mutating properties (e.g. `checked`, `disabled`) on existing items.
+ */
+export function notifyMenusChanged(): void {
+  menuRegistry.notifyChanged();
 }
 
 // ============================================================================
