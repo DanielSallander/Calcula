@@ -137,6 +137,24 @@ export {
   clearAllComments,
   clearCommentsInRange,
 
+  // Notes
+  addNote,
+  updateNote,
+  deleteNote,
+  getNote,
+  getNoteById,
+  getAllNotes,
+  getNoteIndicators,
+  getNoteIndicatorsInRange,
+  resizeNote,
+  toggleNoteVisibility,
+  showAllNotes,
+  moveNote,
+  hasNote,
+  clearAllNotes,
+  clearNotesInRange,
+  convertNoteToComment,
+
   // Grouping / Outline
   groupRows,
   ungroupRows,
@@ -246,6 +264,20 @@ export type {
 
 // Comment helper exports
 export { DEFAULT_COMMENT_AUTHOR } from "../core/types";
+
+// Note type exports
+export type {
+  Note,
+  NoteResult,
+  NoteIndicator,
+  AddNoteParams,
+  UpdateNoteParams,
+  ResizeNoteParams,
+  CellAnnotationType,
+} from "../core/types";
+
+// Note helper exports
+export { DEFAULT_NOTE_SIZE, DEFAULT_NOTE_AUTHOR } from "../core/types";
 
 // ============================================================================
 // AutoFilter API

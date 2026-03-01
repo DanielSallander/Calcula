@@ -36,6 +36,7 @@ pub mod tablix;
 pub mod named_ranges;
 pub mod data_validation;
 pub mod comments;
+pub mod notes;
 pub mod autofilter;
 pub mod hyperlinks;
 pub mod protection;
@@ -174,6 +175,8 @@ pub struct AppState {
     pub data_validations: Mutex<data_validation::ValidationStorage>,
     /// Comments per sheet: sheet_index -> (row, col) -> Comment
     pub comments: Mutex<comments::CommentStorage>,
+    /// Notes per sheet: sheet_index -> (row, col) -> Note
+    pub notes: Mutex<notes::NoteStorage>,
     /// AutoFilters per sheet: sheet_index -> AutoFilter
     pub auto_filters: Mutex<autofilter::AutoFilterStorage>,
     /// Hyperlinks per sheet: sheet_index -> (row, col) -> Hyperlink
@@ -257,6 +260,7 @@ pub fn create_app_state() -> AppState {
         named_ranges: Mutex::new(HashMap::new()),
         data_validations: Mutex::new(HashMap::new()),
         comments: Mutex::new(HashMap::new()),
+        notes: Mutex::new(HashMap::new()),
         auto_filters: Mutex::new(HashMap::new()),
         hyperlinks: Mutex::new(HashMap::new()),
         sheet_protection: Mutex::new(HashMap::new()),
@@ -2281,6 +2285,23 @@ pub fn run() {
             comments::has_comment,
             comments::clear_all_comments,
             comments::clear_comments_in_range,
+            // Note commands
+            notes::add_note,
+            notes::update_note,
+            notes::delete_note,
+            notes::get_note,
+            notes::get_note_by_id,
+            notes::get_all_notes,
+            notes::get_note_indicators,
+            notes::get_note_indicators_in_range,
+            notes::resize_note,
+            notes::toggle_note_visibility,
+            notes::show_all_notes,
+            notes::move_note,
+            notes::has_note,
+            notes::clear_all_notes,
+            notes::clear_notes_in_range,
+            notes::convert_note_to_comment,
             // AutoFilter commands
             autofilter::apply_auto_filter,
             autofilter::clear_column_criteria,

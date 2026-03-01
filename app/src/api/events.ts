@@ -61,6 +61,9 @@ export const AppEvents = {
 
   // Fill handle events
   FILL_COMPLETED: "app:fill-completed",
+
+  // Annotation events (comments and notes)
+  ANNOTATIONS_CHANGED: "app:annotations-changed",
 } as const;
 
 /** Payload emitted with FILL_COMPLETED event. */

@@ -1452,6 +1452,94 @@ export const DEFAULT_COMMENT_AUTHOR = {
 };
 
 // ============================================================================
+// Notes (Legacy Yellow Sticky Notes)
+// ============================================================================
+
+/**
+ * A legacy note (yellow sticky note) attached to a cell.
+ */
+export interface Note {
+  id: string;
+  row: number;
+  col: number;
+  sheetIndex: number;
+  authorName: string;
+  content: string;
+  richContent?: string;
+  width: number;
+  height: number;
+  visible: boolean;
+  createdAt: string;
+  modifiedAt?: string;
+}
+
+/**
+ * Result of a note operation.
+ */
+export interface NoteResult {
+  success: boolean;
+  note: Note | null;
+  error: string | null;
+}
+
+/**
+ * Parameters for adding a note.
+ */
+export interface AddNoteParams {
+  row: number;
+  col: number;
+  authorName: string;
+  content: string;
+  richContent?: string;
+  width?: number;
+  height?: number;
+}
+
+/**
+ * Parameters for updating a note.
+ */
+export interface UpdateNoteParams {
+  noteId: string;
+  content: string;
+  richContent?: string;
+}
+
+/**
+ * Parameters for resizing a note.
+ */
+export interface ResizeNoteParams {
+  noteId: string;
+  width: number;
+  height: number;
+}
+
+/**
+ * Information about cells with notes (for indicators).
+ */
+export interface NoteIndicator {
+  row: number;
+  col: number;
+  visible: boolean;
+}
+
+/**
+ * The type of annotation on a cell.
+ */
+export type CellAnnotationType = "comment" | "note" | null;
+
+/**
+ * Default note dimensions.
+ */
+export const DEFAULT_NOTE_SIZE = { width: 200, height: 100 };
+
+/**
+ * Default note author info.
+ */
+export const DEFAULT_NOTE_AUTHOR = {
+  name: "User",
+};
+
+// ============================================================================
 // Clear Range Options (Excel-compatible)
 // ============================================================================
 

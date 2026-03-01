@@ -457,7 +457,7 @@ export type {
 } from "./styleInterceptors";
 
 // Core types re-exported for extension use
-export type { Viewport, GridConfig, DimensionOverrides } from "./types";
+export type { Selection, SelectionType, Viewport, GridConfig, DimensionOverrides } from "./types";
 
 // ============================================================================
 // Data Validation API
@@ -506,6 +506,81 @@ export type {
   DataValidationResult,
   InvalidCellsResult,
   CellValidationResult,
+} from "./lib";
+
+// ============================================================================
+// Comments API
+// ============================================================================
+
+export {
+  addComment,
+  updateComment,
+  deleteComment,
+  getComment,
+  getCommentById,
+  getAllComments,
+  getCommentsForSheet,
+  getCommentIndicators,
+  getCommentIndicatorsInRange,
+  resolveComment,
+  addReply,
+  updateReply,
+  deleteReply,
+  moveComment,
+  getCommentCount,
+  hasComment,
+  clearAllComments,
+  clearCommentsInRange,
+  DEFAULT_COMMENT_AUTHOR,
+} from "./lib";
+
+export type {
+  Comment,
+  CommentReply,
+  CommentMention,
+  CommentContentType,
+  CommentResult,
+  ReplyResult,
+  CommentIndicator,
+  AddCommentParams,
+  UpdateCommentParams,
+  AddReplyParams,
+  UpdateReplyParams,
+} from "./lib";
+
+// ============================================================================
+// Notes API
+// ============================================================================
+
+export {
+  addNote,
+  updateNote,
+  deleteNote,
+  getNote,
+  getNoteById,
+  getAllNotes,
+  getNoteIndicators,
+  getNoteIndicatorsInRange,
+  resizeNote,
+  toggleNoteVisibility,
+  showAllNotes,
+  moveNote,
+  hasNote,
+  clearAllNotes,
+  clearNotesInRange,
+  convertNoteToComment,
+  DEFAULT_NOTE_SIZE,
+  DEFAULT_NOTE_AUTHOR,
+} from "./lib";
+
+export type {
+  Note,
+  NoteResult,
+  NoteIndicator,
+  AddNoteParams,
+  UpdateNoteParams,
+  ResizeNoteParams,
+  CellAnnotationType,
 } from "./lib";
 
 // ============================================================================

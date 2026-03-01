@@ -323,18 +323,33 @@ pub struct CommentIndicator {
 // TAURI COMMANDS
 // ============================================================================
 
-/// Add a comment to a cell.
+/// Add a comment to a cell. Fails if the cell already has a note (mutual exclusivity).
 #[tauri::command]
 pub fn add_comment(
     state: State<AppState>,
     params: AddCommentParams,
 ) -> CommentResult {
     let active_sheet = *state.active_sheet.lock().unwrap();
+    let key = (params.row, params.col);
+
+    // Mutual exclusivity: check if cell has a note
+    {
+        let notes = state.notes.lock().unwrap();
+        if let Some(sheet_notes) = notes.get(&active_sheet) {
+            if sheet_notes.contains_key(&key) {
+                return CommentResult {
+                    success: false,
+                    comment: None,
+                    error: Some("Cell already has a Note. Delete or convert it first.".to_string()),
+                };
+            }
+        }
+    }
+
     let mut comments = state.comments.lock().unwrap();
 
     // Check if a comment already exists at this cell
     let sheet_comments = comments.entry(active_sheet).or_insert_with(HashMap::new);
-    let key = (params.row, params.col);
 
     if sheet_comments.contains_key(&key) {
         return CommentResult {

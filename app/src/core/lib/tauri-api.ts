@@ -1007,6 +1007,12 @@ import type {
   UpdateCommentParams,
   AddReplyParams,
   UpdateReplyParams,
+  Note,
+  NoteResult,
+  NoteIndicator,
+  AddNoteParams,
+  UpdateNoteParams,
+  ResizeNoteParams,
 } from "../types";
 
 /**
@@ -1175,6 +1181,163 @@ export async function clearCommentsInRange(
     endRow,
     endCol,
   });
+}
+
+// ============================================================================
+// Notes (Legacy Yellow Sticky Notes)
+// ============================================================================
+
+/**
+ * Add a note to a cell.
+ */
+export async function addNote(params: AddNoteParams): Promise<NoteResult> {
+  console.log(`[tauri-api] addNote(${params.row}, ${params.col})`);
+  return invoke<NoteResult>("add_note", { params });
+}
+
+/**
+ * Update an existing note's content.
+ */
+export async function updateNote(params: UpdateNoteParams): Promise<NoteResult> {
+  console.log(`[tauri-api] updateNote(${params.noteId})`);
+  return invoke<NoteResult>("update_note", { params });
+}
+
+/**
+ * Delete a note.
+ */
+export async function deleteNote(noteId: string): Promise<NoteResult> {
+  console.log(`[tauri-api] deleteNote(${noteId})`);
+  return invoke<NoteResult>("delete_note", { noteId });
+}
+
+/**
+ * Get a note at a specific cell.
+ */
+export async function getNote(row: number, col: number): Promise<Note | null> {
+  return invoke<Note | null>("get_note", { row, col });
+}
+
+/**
+ * Get a note by ID.
+ */
+export async function getNoteById(noteId: string): Promise<Note | null> {
+  return invoke<Note | null>("get_note_by_id", { noteId });
+}
+
+/**
+ * Get all notes for the current sheet.
+ */
+export async function getAllNotes(): Promise<Note[]> {
+  return invoke<Note[]>("get_all_notes");
+}
+
+/**
+ * Get note indicators for the current sheet.
+ */
+export async function getNoteIndicators(): Promise<NoteIndicator[]> {
+  return invoke<NoteIndicator[]>("get_note_indicators");
+}
+
+/**
+ * Get note indicators for a viewport range.
+ */
+export async function getNoteIndicatorsInRange(
+  startRow: number,
+  startCol: number,
+  endRow: number,
+  endCol: number
+): Promise<NoteIndicator[]> {
+  return invoke<NoteIndicator[]>("get_note_indicators_in_range", {
+    startRow,
+    startCol,
+    endRow,
+    endCol,
+  });
+}
+
+/**
+ * Resize a note's box dimensions.
+ */
+export async function resizeNote(params: ResizeNoteParams): Promise<NoteResult> {
+  console.log(`[tauri-api] resizeNote(${params.noteId})`);
+  return invoke<NoteResult>("resize_note", { params });
+}
+
+/**
+ * Toggle the visibility of a single note.
+ */
+export async function toggleNoteVisibility(
+  noteId: string,
+  visible: boolean
+): Promise<NoteResult> {
+  return invoke<NoteResult>("toggle_note_visibility", { noteId, visible });
+}
+
+/**
+ * Show or hide all notes on the current sheet.
+ */
+export async function showAllNotes(visible: boolean): Promise<number> {
+  console.log(`[tauri-api] showAllNotes(${visible})`);
+  return invoke<number>("show_all_notes", { visible });
+}
+
+/**
+ * Move a note to a different cell.
+ */
+export async function moveNote(
+  noteId: string,
+  newRow: number,
+  newCol: number
+): Promise<NoteResult> {
+  console.log(`[tauri-api] moveNote(${noteId}, ${newRow}, ${newCol})`);
+  return invoke<NoteResult>("move_note", { noteId, newRow, newCol });
+}
+
+/**
+ * Check if a cell has a note.
+ */
+export async function hasNote(row: number, col: number): Promise<boolean> {
+  return invoke<boolean>("has_note", { row, col });
+}
+
+/**
+ * Clear all notes from the current sheet.
+ */
+export async function clearAllNotes(): Promise<number> {
+  console.log("[tauri-api] clearAllNotes");
+  return invoke<number>("clear_all_notes");
+}
+
+/**
+ * Clear notes in a range.
+ */
+export async function clearNotesInRange(
+  startRow: number,
+  startCol: number,
+  endRow: number,
+  endCol: number
+): Promise<number> {
+  console.log(
+    `[tauri-api] clearNotesInRange(${startRow}, ${startCol}, ${endRow}, ${endCol})`
+  );
+  return invoke<number>("clear_notes_in_range", {
+    startRow,
+    startCol,
+    endRow,
+    endCol,
+  });
+}
+
+/**
+ * Convert a note to a threaded comment.
+ */
+export async function convertNoteToComment(
+  noteId: string,
+  authorEmail: string
+): Promise<CommentResult> {
+  console.log(`[tauri-api] convertNoteToComment(${noteId})`);
+  return invoke<CommentResult>("convert_note_to_comment", { noteId, authorEmail });
 }
 
 // ============================================================================
