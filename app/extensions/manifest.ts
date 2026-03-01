@@ -19,6 +19,7 @@ import FormatPainterExtension from "./BuiltIn/FormatPainter";
 import PasteSpecialExtension from "./BuiltIn/PasteSpecial";
 import StatusBarAggregationExtension from "./BuiltIn/StatusBarAggregation";
 import ComputedPropertiesExtension from "./BuiltIn/ComputedProperties";
+import CellBookmarksExtension from "./BuiltIn/CellBookmarks";
 
 // ============================================================================
 // Built-in Extension Manifest
@@ -45,6 +46,8 @@ export const builtInExtensions: ExtensionModule[] = [
   StatusBarAggregationExtension,
   // Computed Properties (formula-driven attributes for columns, rows, cells)
   ComputedPropertiesExtension,
+  // Cell Bookmarks (mark, navigate, manage bookmarks - extensibility test)
+  CellBookmarksExtension,
 ];
 
 /**
