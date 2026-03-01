@@ -9,7 +9,7 @@
 
 import type { ExtensionModule } from "../../../src/api/contract";
 import { OverlayExtensions } from "../../../src/api/ui";
-import { onAppEvent } from "../../../src/api/events";
+import { onAppEvent, AppEvents } from "../../../src/api/events";
 import {
   setFormulaAutocompleteVisible,
   AutocompleteEvents,
@@ -20,6 +20,7 @@ import type {
 } from "../../../src/api/formulaAutocomplete";
 import { FormulaAutocompleteOverlay } from "./FormulaAutocompleteOverlay";
 import { useAutocompleteStore } from "./useAutocompleteStore";
+import { reloadNamedRanges } from "./functionCatalog";
 
 const OVERLAY_ID = "formula-autocomplete";
 
@@ -67,6 +68,14 @@ function activate(): void {
   cleanups.push(
     onAppEvent(AutocompleteEvents.DISMISS, () => {
       useAutocompleteStore.getState().reset();
+    })
+  );
+
+  // 6. Listen for named range changes to refresh the cached list
+  cleanups.push(
+    onAppEvent(AppEvents.NAMED_RANGES_CHANGED, () => {
+      console.log("[FormulaAutocomplete] Named ranges changed, reloading...");
+      reloadNamedRanges();
     })
   );
 }

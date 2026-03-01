@@ -5,7 +5,7 @@
 import React, { useRef, useEffect } from "react";
 import type { OverlayProps } from "../../../src/api/uiTypes";
 import { useAutocompleteStore } from "./useAutocompleteStore";
-import type { ScoredFunction } from "./functionCatalog";
+import type { ScoredSuggestion } from "./functionCatalog";
 import type { FunctionInfo } from "../../../src/api/types";
 import * as S from "./FormulaAutocompleteOverlay.styles";
 
@@ -71,7 +71,7 @@ export function FormulaAutocompleteOverlay(_props: OverlayProps): React.ReactEle
 
   return (
     <>
-      {/* Function Dropdown */}
+      {/* Suggestion Dropdown */}
       {visible && items.length > 0 && (
         <S.DropdownContainer
           ref={listRef}
@@ -85,7 +85,7 @@ export function FormulaAutocompleteOverlay(_props: OverlayProps): React.ReactEle
         >
           {items.map((item, idx) => (
             <DropdownItem
-              key={item.info.name}
+              key={`${item.kind}-${item.name}`}
               item={item}
               isSelected={idx === selectedIndex}
               onAccept={() => accept(idx)}
@@ -117,6 +117,7 @@ export function FormulaAutocompleteOverlay(_props: OverlayProps): React.ReactEle
 
 /**
  * A single item in the dropdown list.
+ * Handles both function and named range suggestions.
  */
 function DropdownItem({
   item,
@@ -124,11 +125,18 @@ function DropdownItem({
   onAccept,
   onHover,
 }: {
-  item: ScoredFunction;
+  item: ScoredSuggestion;
   isSelected: boolean;
   onAccept: () => void;
   onHover: () => void;
 }): React.ReactElement {
+  const categoryTag = item.kind === "function"
+    ? (item.info?.category ?? "")
+    : "Named Range";
+  const description = item.kind === "function"
+    ? (item.info?.description ?? "")
+    : (item.refersTo ?? "");
+
   return (
     <S.DropdownItem
       $isSelected={isSelected}
@@ -139,10 +147,10 @@ function DropdownItem({
       onMouseEnter={onHover}
     >
       <S.FunctionNameContainer>
-        <HighlightedName name={item.info.name} ranges={item.matchRanges} />
+        <HighlightedName name={item.name} ranges={item.matchRanges} />
       </S.FunctionNameContainer>
-      <S.CategoryTag>{item.info.category}</S.CategoryTag>
-      <S.Description>{item.info.description}</S.Description>
+      <S.CategoryTag>{categoryTag}</S.CategoryTag>
+      <S.Description>{description}</S.Description>
     </S.DropdownItem>
   );
 }

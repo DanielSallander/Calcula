@@ -13,8 +13,8 @@ import type { AutocompleteInputPayload } from "../../../src/api/formulaAutocompl
 import { isFormulaExpectingReference } from "../../../src/api/types";
 import { parseTokenAtCursor } from "./tokenParser";
 import type { TokenContext } from "./tokenParser";
-import { filterFunctions, loadFunctionCatalog, getFunctionByName } from "./functionCatalog";
-import type { ScoredFunction } from "./functionCatalog";
+import { filterSuggestions, loadFunctionCatalog, loadNamedRanges, getFunctionByName } from "./functionCatalog";
+import type { ScoredSuggestion } from "./functionCatalog";
 import type { FunctionInfo } from "../../../src/api/types";
 
 // ============================================================================
@@ -25,8 +25,8 @@ interface AutocompleteState {
   // --- Dropdown state ---
   /** Whether the function list dropdown is visible */
   visible: boolean;
-  /** Filtered and scored function list */
-  items: ScoredFunction[];
+  /** Filtered and scored suggestion list (functions + named ranges) */
+  items: ScoredSuggestion[];
   /** Currently selected (highlighted) index in the dropdown */
   selectedIndex: number;
   /** Current token context from the parser */
@@ -76,10 +76,13 @@ export const useAutocompleteStore = create<AutocompleteState>((set, get) => ({
   currentCursorPosition: 0,
 
   /**
-   * Load the function catalog from the backend (called once at activation).
+   * Load the function catalog and named ranges from the backend (called once at activation).
    */
   loadFunctions: async () => {
-    await loadFunctionCatalog();
+    await Promise.all([
+      loadFunctionCatalog(),
+      loadNamedRanges(),
+    ]);
   },
 
   /**
@@ -137,15 +140,15 @@ export const useAutocompleteStore = create<AutocompleteState>((set, get) => ({
 
     // --- Update dropdown ---
     if (!isRefMode && context.shouldTrigger && context.token.length > 0) {
-      const items = filterFunctions(context.token);
-      console.log("[FormulaAutocomplete] filterFunctions('" + context.token + "') returned", items.length, "items");
+      const items = filterSuggestions(context.token);
+      console.log("[FormulaAutocomplete] filterSuggestions('" + context.token + "') returned", items.length, "items");
       if (items.length > 0) {
         // Preserve selected index if the same item is still in the list
         const prev = get();
         let newIndex = 0;
         if (prev.visible && prev.items.length > 0 && prev.selectedIndex < prev.items.length) {
-          const prevName = prev.items[prev.selectedIndex].info.name;
-          const sameIdx = items.findIndex((it) => it.info.name === prevName);
+          const prevName = prev.items[prev.selectedIndex].name;
+          const sameIdx = items.findIndex((it) => it.name === prevName);
           if (sameIdx >= 0) {
             newIndex = sameIdx;
           }
@@ -210,8 +213,8 @@ export const useAutocompleteStore = create<AutocompleteState>((set, get) => ({
   },
 
   /**
-   * Accept the selected function: replace the partial token in the formula
-   * with the full function name + "(" and emit the ACCEPTED event.
+   * Accept the selected suggestion: replace the partial token in the formula
+   * with the full name. Functions get "(" appended; named ranges do not.
    */
   accept: (index?: number) => {
     const state = get();
@@ -219,15 +222,15 @@ export const useAutocompleteStore = create<AutocompleteState>((set, get) => ({
     const item = state.items[idx];
     if (!item || !state.tokenContext) return;
 
-    const fnName = item.info.name;
     const { tokenStart } = state.tokenContext;
     const value = state.currentValue;
     const cursorPos = state.currentCursorPosition;
 
-    // Replace the partial token with the full function name + "("
+    // Functions get "(" appended; named ranges are inserted as-is
+    const insertion = item.kind === "function" ? item.name + "(" : item.name;
+
     const before = value.substring(0, tokenStart);
     const after = value.substring(cursorPos);
-    const insertion = fnName + "(";
     const newValue = before + insertion + after;
     const newCursorPosition = tokenStart + insertion.length;
 
@@ -238,18 +241,30 @@ export const useAutocompleteStore = create<AutocompleteState>((set, get) => ({
       })
     );
 
-    // Hide dropdown, show argument hints for the just-inserted function
-    set({
-      visible: false,
-      items: [],
-      selectedIndex: 0,
-      tokenContext: null,
-      argumentHintVisible: true,
-      argumentHintFunction: item.info,
-      argumentHintIndex: 0,
-      currentValue: newValue,
-      currentCursorPosition: newCursorPosition,
-    });
+    if (item.kind === "function" && item.info) {
+      // Hide dropdown, show argument hints for the just-inserted function
+      set({
+        visible: false,
+        items: [],
+        selectedIndex: 0,
+        tokenContext: null,
+        argumentHintVisible: true,
+        argumentHintFunction: item.info,
+        argumentHintIndex: 0,
+        currentValue: newValue,
+        currentCursorPosition: newCursorPosition,
+      });
+    } else {
+      // Named range: just hide everything
+      set({
+        visible: false,
+        items: [],
+        selectedIndex: 0,
+        tokenContext: null,
+        currentValue: newValue,
+        currentCursorPosition: newCursorPosition,
+      });
+    }
     setFormulaAutocompleteVisible(false);
   },
 

@@ -1,6 +1,7 @@
 //! FILENAME: app/src-tauri/src/commands/data.rs
 // PURPOSE: Core operations for reading and writing cell data.
 
+use crate::log_debug;
 use crate::api_types::{
     CellData, ClearApplyTo, ClearRangeParams, ClearRangeResult, DimensionData, MergedRegion,
     RemoveDuplicatesParams, RemoveDuplicatesResult, SortDataOption, SortField, SortOn,
@@ -273,6 +274,9 @@ pub fn update_cell(
 
                 let refs = extract_all_references(&resolved, &grid);
 
+                log_debug!("DEPS", "update_cell({},{}) formula='{}' extracted_refs: cells={:?} cross_sheet={:?} columns={:?} rows={:?}",
+                    row, col, formula, refs.cells, refs.cross_sheet_cells, refs.columns, refs.rows);
+
                 update_dependencies(
                     (row, col),
                     refs.cells,
@@ -431,6 +435,9 @@ pub fn update_cell(
 
         // Get direct cell dependents
         let mut recalc_order = get_recalculation_order((row, col), &dependents_map);
+
+        log_debug!("DEPS", "cascade for ({},{}) recalc_order={:?} dependents_entry={:?}",
+            row, col, recalc_order, dependents_map.get(&(row, col)));
 
         // Also get column/row dependents (formulas with column or row references)
         // Use a HashSet for O(1) lookup instead of O(n) Vec::contains
@@ -632,12 +639,37 @@ pub fn update_cell(
                                     updated_dep.clone(),
                                 );
 
-                                // Format the display value and add to updated_cells with sheet_index
+                                // If the dependent is on the active sheet, also update the
+                                // active-sheet grid mutex so both stay in sync. This happens
+                                // when a named range's refers_to contains a sheet prefix
+                                // pointing to the same sheet (e.g., =Sheet1!$E$2*10).
+                                let is_same_sheet = *dep_sheet_idx == active_sheet;
+                                if is_same_sheet {
+                                    grid.set_cell(*dep_row, *dep_col, updated_dep.clone());
+                                }
+
+                                // Format the display value and add to updated_cells
                                 let dep_style = styles.get(updated_dep.style_index);
                                 let dep_display = format_cell_value(&updated_dep.value, dep_style);
 
-                                // For cross-sheet cells, use default span (1,1) since merged_regions
-                                // is currently tracked per-active-sheet only
+                                // Same-sheet deps: use merge span info and sheet_index=None
+                                // so the frontend emits cell events for re-rendering.
+                                // Cross-sheet deps: use default span (1,1) and sheet_index=Some
+                                // since they're on other sheets and will be fetched on switch.
+                                let (dep_row_span, dep_col_span, dep_sheet_index) = if is_same_sheet {
+                                    let span = if let Some(region) = merge_lookup.get(&(*dep_row, *dep_col)) {
+                                        (
+                                            region.end_row - region.start_row + 1,
+                                            region.end_col - region.start_col + 1,
+                                        )
+                                    } else {
+                                        (1, 1)
+                                    };
+                                    (span.0, span.1, None)
+                                } else {
+                                    (1, 1, Some(*dep_sheet_idx))
+                                };
+
                                 updated_cells.push(CellData {
                                     row: *dep_row,
                                     col: *dep_col,
@@ -645,9 +677,9 @@ pub fn update_cell(
                                     display_color: None,
                                     formula: updated_dep.formula.clone(),
                                     style_index: updated_dep.style_index,
-                                    row_span: 1,
-                                    col_span: 1,
-                                    sheet_index: Some(*dep_sheet_idx),
+                                    row_span: dep_row_span,
+                                    col_span: dep_col_span,
+                                    sheet_index: dep_sheet_index,
                                 });
 
                                 // Add this updated cell to the work queue so its dependents also get recalculated
