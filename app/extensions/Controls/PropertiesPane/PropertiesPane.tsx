@@ -1,0 +1,259 @@
+//! FILENAME: app/extensions/Controls/PropertiesPane/PropertiesPane.tsx
+// PURPOSE: Properties Pane task pane component for editing control properties.
+// CONTEXT: Shows when a control is selected in design mode. Supports static and formula values.
+
+import React, { useState, useEffect, useCallback, useRef } from "react";
+import type { TaskPaneViewProps } from "../../../src/api";
+import { PropertyRow } from "./PropertyRow";
+import {
+  getPropertyDefinitions,
+  type ControlPropertyValue,
+  type ControlMetadata,
+} from "../lib/types";
+import {
+  getControlMetadata,
+  setControlProperty,
+} from "../lib/controlApi";
+import { listScripts } from "../../ScriptEditor/lib/scriptApi";
+
+// ============================================================================
+// Styles
+// ============================================================================
+
+const containerStyle: React.CSSProperties = {
+  display: "flex",
+  flexDirection: "column",
+  height: "100%",
+  fontFamily: "Segoe UI, Tahoma, sans-serif",
+  fontSize: 12,
+  backgroundColor: "#FAFAFA",
+};
+
+const headerStyle: React.CSSProperties = {
+  display: "flex",
+  alignItems: "center",
+  justifyContent: "space-between",
+  padding: "8px 10px",
+  borderBottom: "1px solid #E0E0E0",
+  backgroundColor: "#FFF",
+  flexShrink: 0,
+};
+
+const titleStyle: React.CSSProperties = {
+  fontWeight: 600,
+  fontSize: 13,
+  color: "#333",
+};
+
+const subtitleStyle: React.CSSProperties = {
+  fontSize: 11,
+  color: "#888",
+};
+
+const propertiesListStyle: React.CSSProperties = {
+  flex: 1,
+  overflow: "auto",
+};
+
+const emptyStateStyle: React.CSSProperties = {
+  display: "flex",
+  alignItems: "center",
+  justifyContent: "center",
+  height: "100%",
+  color: "#999",
+  fontSize: 12,
+  padding: 20,
+  textAlign: "center",
+};
+
+const sectionHeaderStyle: React.CSSProperties = {
+  padding: "6px 10px",
+  fontSize: 11,
+  fontWeight: 600,
+  color: "#666",
+  backgroundColor: "#F0F0F0",
+  borderBottom: "1px solid #E0E0E0",
+};
+
+// ============================================================================
+// Component
+// ============================================================================
+
+export const PropertiesPane: React.FC<TaskPaneViewProps> = ({ data }) => {
+  const [metadata, setMetadata] = useState<ControlMetadata | null>(null);
+  const [scripts, setScripts] = useState<Array<{ id: string; name: string }>>([]);
+  const [loading, setLoading] = useState(true);
+  const mountedRef = useRef(true);
+
+  // Extract cell location from data passed when opening the pane
+  const row = (data?.row as number) ?? -1;
+  const col = (data?.col as number) ?? -1;
+  const sheetIndex = (data?.sheetIndex as number) ?? 0;
+  const controlType = (data?.controlType as string) ?? "";
+
+  // Load control metadata and scripts
+  useEffect(() => {
+    mountedRef.current = true;
+    setLoading(true);
+
+    const load = async () => {
+      try {
+        const [meta, scriptList] = await Promise.all([
+          row >= 0 && col >= 0
+            ? getControlMetadata(sheetIndex, row, col)
+            : Promise.resolve(null),
+          listScripts(),
+        ]);
+        if (!mountedRef.current) return;
+        setMetadata(meta);
+        setScripts(scriptList.map((s) => ({ id: s.id, name: s.name })));
+      } catch (err) {
+        console.error("[Controls] Failed to load properties:", err);
+      } finally {
+        if (mountedRef.current) setLoading(false);
+      }
+    };
+
+    load();
+
+    return () => {
+      mountedRef.current = false;
+    };
+  }, [row, col, sheetIndex]);
+
+  // Handle property change
+  const handlePropertyChange = useCallback(
+    async (key: string, valueType: "static" | "formula", value: string) => {
+      if (row < 0 || col < 0) return;
+
+      try {
+        const updatedMeta = await setControlProperty(
+          sheetIndex,
+          row,
+          col,
+          controlType,
+          key,
+          valueType,
+          value,
+        );
+        if (mountedRef.current) {
+          setMetadata(updatedMeta);
+        }
+
+        // For visual properties, trigger a style refresh so the button redraws
+        if (["text", "fill", "color", "borderColor", "fontSize"].includes(key)) {
+          window.dispatchEvent(new CustomEvent("styles:refresh"));
+        }
+
+        // For embedded toggle, dispatch event so index.ts can handle the mode switch
+        if (key === "embedded") {
+          window.dispatchEvent(new CustomEvent("controls:embedded-changed", {
+            detail: { sheetIndex, row, col, embedded: value === "true" },
+          }));
+        }
+      } catch (err) {
+        console.error("[Controls] Failed to set property:", err);
+      }
+    },
+    [row, col, sheetIndex, controlType],
+  );
+
+  // Get property definitions for this control type
+  const propDefs = getPropertyDefinitions(controlType || metadata?.controlType || "");
+
+  if (row < 0 || col < 0) {
+    return (
+      <div style={containerStyle}>
+        <div style={emptyStateStyle}>
+          Select a control in Design Mode to view its properties.
+        </div>
+      </div>
+    );
+  }
+
+  if (loading) {
+    return (
+      <div style={containerStyle}>
+        <div style={emptyStateStyle}>Loading properties...</div>
+      </div>
+    );
+  }
+
+  const typeLabel =
+    controlType === "button"
+      ? "Button"
+      : controlType || metadata?.controlType || "Control";
+
+  return (
+    <div style={containerStyle}>
+      {/* Header */}
+      <div style={headerStyle}>
+        <div>
+          <div style={titleStyle}>{typeLabel} Properties</div>
+          <div style={subtitleStyle}>
+            Cell ({row}, {col})
+          </div>
+        </div>
+      </div>
+
+      {/* Properties list */}
+      <div style={propertiesListStyle}>
+        {propDefs.length === 0 ? (
+          <div style={emptyStateStyle}>No properties available for this control type.</div>
+        ) : (
+          <>
+            {/* Visual properties */}
+            <div style={sectionHeaderStyle}>Appearance</div>
+            {propDefs
+              .filter((d) => d.inputType !== "script" && d.inputType !== "boolean")
+              .map((def) => (
+                <PropertyRow
+                  key={def.key}
+                  definition={def}
+                  value={metadata?.properties[def.key]}
+                  scripts={scripts}
+                  onChange={handlePropertyChange}
+                />
+              ))}
+
+            {/* Layout properties */}
+            {propDefs.some((d) => d.inputType === "boolean") && (
+              <>
+                <div style={sectionHeaderStyle}>Layout</div>
+                {propDefs
+                  .filter((d) => d.inputType === "boolean")
+                  .map((def) => (
+                    <PropertyRow
+                      key={def.key}
+                      definition={def}
+                      value={metadata?.properties[def.key]}
+                      scripts={scripts}
+                      onChange={handlePropertyChange}
+                    />
+                  ))}
+              </>
+            )}
+
+            {/* Action properties */}
+            {propDefs.some((d) => d.inputType === "script") && (
+              <>
+                <div style={sectionHeaderStyle}>Actions</div>
+                {propDefs
+                  .filter((d) => d.inputType === "script")
+                  .map((def) => (
+                    <PropertyRow
+                      key={def.key}
+                      definition={def}
+                      value={metadata?.properties[def.key]}
+                      scripts={scripts}
+                      onChange={handlePropertyChange}
+                    />
+                  ))}
+              </>
+            )}
+          </>
+        )}
+      </div>
+    </div>
+  );
+};

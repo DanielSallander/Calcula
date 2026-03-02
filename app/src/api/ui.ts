@@ -150,7 +150,10 @@ class MenuRegistry {
     const dynamic = this.dynamicItems.get(menu.id);
     if (dynamic) {
       for (const item of dynamic) {
-        if (!menu.items.some((existing) => existing.id === item.id)) {
+        const existing = menu.items.find((e) => e.id === item.id);
+        if (existing) {
+          this.mergeChildren(existing, item);
+        } else {
           menu.items.push(item);
         }
       }
@@ -165,18 +168,38 @@ class MenuRegistry {
       dynamic = [];
       this.dynamicItems.set(menuId, dynamic);
     }
-    if (!dynamic.some((existing) => existing.id === item.id)) {
+    const existingDynamic = dynamic.find((existing) => existing.id === item.id);
+    if (existingDynamic) {
+      // Merge children from the new item into the existing one
+      this.mergeChildren(existingDynamic, item);
+    } else {
       dynamic.push(item);
     }
 
     const menu = this.menus.get(menuId);
     if (menu) {
-      if (!menu.items.some((existing) => existing.id === item.id)) {
+      const existingMenu = menu.items.find((existing) => existing.id === item.id);
+      if (existingMenu) {
+        this.mergeChildren(existingMenu, item);
+      } else {
         menu.items.push(item);
       }
       this.notify();
     }
     // If menu doesn't exist yet, the item will be appended when registerMenu is called
+  }
+
+  /** Merge children from source into target, avoiding duplicate IDs. */
+  private mergeChildren(target: MenuItemDefinition, source: MenuItemDefinition): void {
+    if (!source.children || source.children.length === 0) return;
+    if (!target.children) {
+      target.children = [];
+    }
+    for (const child of source.children) {
+      if (!target.children.some((existing) => existing.id === child.id)) {
+        target.children.push(child);
+      }
+    }
   }
 
   getMenus(): MenuDefinition[] {

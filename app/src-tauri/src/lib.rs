@@ -50,6 +50,7 @@ pub mod evaluate_formula;
 pub mod consolidate;
 pub mod status_bar;
 pub mod computed_properties;
+pub mod controls;
 
 pub use api_types::{CellData, StyleData, DimensionData, FormattingParams, MergedRegion};
 pub use logging::{init_log_file, get_log_path, next_seq, write_log, write_log_raw};
@@ -208,6 +209,8 @@ pub struct AppState {
     pub computed_prop_dependencies: Mutex<computed_properties::ComputedPropDependencies>,
     /// Reverse map: cell -> set of prop_ids that depend on it (for re-evaluation triggers)
     pub computed_prop_dependents: Mutex<computed_properties::ComputedPropDependents>,
+    /// Control metadata: (sheet_index, row, col) -> ControlMetadata
+    pub controls: Mutex<controls::ControlStorage>,
 }
 
 impl AppState {
@@ -277,6 +280,7 @@ pub fn create_app_state() -> AppState {
         next_computed_prop_id: Mutex::new(1),
         computed_prop_dependencies: Mutex::new(HashMap::new()),
         computed_prop_dependents: Mutex::new(HashMap::new()),
+        controls: Mutex::new(HashMap::new()),
     }
 }
 
@@ -2439,6 +2443,12 @@ pub fn run() {
             scripting::save_script,
             scripting::delete_script,
             scripting::rename_script,
+            // Control metadata commands
+            controls::get_control_metadata,
+            controls::set_control_property,
+            controls::set_control_metadata,
+            controls::remove_control_metadata,
+            controls::get_all_controls,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

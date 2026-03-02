@@ -215,6 +215,7 @@ pub struct CellStyle {
     pub text_rotation: TextRotation,
     pub indent: u8, // Number of indent levels (each level = ~8px)
     pub checkbox: bool, // In-cell checkbox presentation mode
+    pub button: bool, // In-cell button control presentation mode
 }
 
 impl CellStyle {
@@ -231,6 +232,7 @@ impl CellStyle {
             text_rotation: TextRotation::None,
             indent: 0,
             checkbox: false,
+            button: false,
         }
     }
 

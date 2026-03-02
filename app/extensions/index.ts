@@ -24,6 +24,7 @@ import { registerSparklineExtension, unregisterSparklineExtension } from "./Spar
 import { registerReviewExtension, unregisterReviewExtension } from "./Review";
 import { registerCalculationOptionsExtension, unregisterCalculationOptionsExtension } from "./CalculationOptions";
 import { registerScriptEditorExtension, unregisterScriptEditorExtension } from "./ScriptEditor";
+import { registerControlsExtension, unregisterControlsExtension } from "./Controls";
 
 /**
  * Load all extensions.
@@ -56,6 +57,7 @@ export function loadExtensions(): void {
   registerSparklineExtension();
   registerReviewExtension();
   registerScriptEditorExtension();
+  registerControlsExtension();
 
   // Future: Load user extensions from config
 
@@ -70,6 +72,7 @@ export function unloadExtensions(): void {
   console.log("[Extensions] Unloading extensions...");
 
   // Unload in reverse order
+  unregisterControlsExtension();
   unregisterScriptEditorExtension();
   unregisterReviewExtension();
   unregisterSparklineExtension();
@@ -119,3 +122,4 @@ export { registerSparklineExtension, unregisterSparklineExtension };
 export { registerReviewExtension, unregisterReviewExtension };
 export { registerCalculationOptionsExtension, unregisterCalculationOptionsExtension };
 export { registerScriptEditorExtension, unregisterScriptEditorExtension };
+export { registerControlsExtension, unregisterControlsExtension };

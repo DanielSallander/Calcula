@@ -212,6 +212,9 @@ pub fn apply_formatting(
             if let Some(checkbox) = params.checkbox {
                 new_style.checkbox = checkbox;
             }
+            if let Some(button) = params.button {
+                new_style.button = button;
+            }
 
             // Apply border formatting
             if let Some(ref border) = params.border_top {

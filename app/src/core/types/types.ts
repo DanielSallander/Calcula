@@ -286,6 +286,7 @@ export interface StyleData {
   borderBottom: BorderSideData;
   borderLeft: BorderSideData;
   checkbox: boolean;
+  button: boolean;
 }
 
 /**
@@ -319,6 +320,7 @@ export const DEFAULT_STYLE: StyleData = {
   borderBottom: { ...DEFAULT_BORDER_SIDE },
   borderLeft: { ...DEFAULT_BORDER_SIDE },
   checkbox: false,
+  button: false,
 };
 
 /**
@@ -351,6 +353,7 @@ export interface FormattingOptions {
   borderBottom?: BorderSideParam;
   borderLeft?: BorderSideParam;
   checkbox?: boolean;
+  button?: boolean;
 }
 
 /**
