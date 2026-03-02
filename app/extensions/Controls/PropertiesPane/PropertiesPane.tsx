@@ -91,6 +91,21 @@ export const PropertiesPane: React.FC<TaskPaneViewProps> = ({ data }) => {
   const sheetIndex = (data?.sheetIndex as number) ?? 0;
   const controlType = (data?.controlType as string) ?? "";
 
+  // Re-read trigger: incremented when external changes (e.g., drag resize) update metadata
+  const [reloadTrigger, setReloadTrigger] = useState(0);
+
+  // Listen for external metadata refreshes (e.g., after drag-resize persists new bounds)
+  useEffect(() => {
+    const handler = (e: Event) => {
+      const detail = (e as CustomEvent).detail;
+      if (detail?.row === row && detail?.col === col) {
+        setReloadTrigger((prev) => prev + 1);
+      }
+    };
+    window.addEventListener("controls:metadata-refresh", handler);
+    return () => window.removeEventListener("controls:metadata-refresh", handler);
+  }, [row, col]);
+
   // Load control metadata and scripts
   useEffect(() => {
     mountedRef.current = true;
@@ -119,7 +134,7 @@ export const PropertiesPane: React.FC<TaskPaneViewProps> = ({ data }) => {
     return () => {
       mountedRef.current = false;
     };
-  }, [row, col, sheetIndex]);
+  }, [row, col, sheetIndex, reloadTrigger]);
 
   // Handle property change
   const handlePropertyChange = useCallback(
@@ -140,9 +155,19 @@ export const PropertiesPane: React.FC<TaskPaneViewProps> = ({ data }) => {
           setMetadata(updatedMeta);
         }
 
-        // For visual properties, trigger a style refresh so the button redraws
+        // For visual properties, invalidate the floating cache and trigger redraw
         if (["text", "fill", "color", "borderColor", "fontSize"].includes(key)) {
+          window.dispatchEvent(new CustomEvent("controls:invalidate-cache", {
+            detail: { sheetIndex, row, col },
+          }));
           window.dispatchEvent(new CustomEvent("styles:refresh"));
+        }
+
+        // For size properties, notify the floating store so the overlay updates
+        if (["width", "height"].includes(key)) {
+          window.dispatchEvent(new CustomEvent("controls:bounds-changed", {
+            detail: { sheetIndex, row, col },
+          }));
         }
 
         // For embedded toggle, dispatch event so index.ts can handle the mode switch

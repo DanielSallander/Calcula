@@ -555,10 +555,16 @@ export function useMouseSelection(props: UseMouseSelectionProps): UseMouseSelect
           // Check if over an overlay (table/chart) resize handle
           setCursorStyle("nwse-resize");
           setHoveringOverReferenceBorder(false);
-        } else if (overlayMoveHandlers.checkOverlayBody(mouseX, mouseY)) {
-          // Check if over a floating overlay body (for moving)
-          setCursorStyle("move");
-          setHoveringOverReferenceBorder(false);
+        } else if ((() => {
+          const hoverRegion = overlayMoveHandlers.checkOverlayBody(mouseX, mouseY);
+          if (hoverRegion) {
+            // Show "move" cursor only if the overlay is movable
+            setCursorStyle(hoverRegion.data?.movable === false ? "pointer" : "move");
+            setHoveringOverReferenceBorder(false);
+            return true;
+          }
+          return false;
+        })()) {
         } else {
           setHoveringOverReferenceBorder(false);
           // Check for resize handles

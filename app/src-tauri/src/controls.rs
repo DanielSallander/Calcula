@@ -4,7 +4,8 @@
 //          The button/checkbox bool in CellStyle handles fast rendering checks;
 //          this module stores richer metadata like onSelect scripts and formula properties.
 
-use crate::AppState;
+use crate::{AppState, format_cell_value_simple, parse_formula, convert_expr, create_multi_sheet_context};
+use engine::{CellValue, Evaluator};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use tauri::State;
@@ -142,4 +143,60 @@ pub fn get_all_controls(
             metadata: meta.clone(),
         })
         .collect()
+}
+
+/// Resolve formula-type properties for a control.
+/// Returns a map of property name -> resolved string value.
+/// Static properties are returned as-is; formula properties are evaluated.
+#[tauri::command]
+pub fn resolve_control_properties(
+    state: State<AppState>,
+    sheet_index: usize,
+    row: u32,
+    col: u32,
+) -> HashMap<String, String> {
+    let controls = state.controls.lock().unwrap();
+    let meta = match controls.get(&(sheet_index, row, col)) {
+        Some(m) => m.clone(),
+        None => return HashMap::new(),
+    };
+    // Release the controls lock before acquiring grids
+    drop(controls);
+
+    let grids = state.grids.lock().unwrap();
+    let sheet_names = state.sheet_names.lock().unwrap();
+
+    // Build evaluator once for all formulas
+    let evaluator = if sheet_index < grids.len() && sheet_index < sheet_names.len() {
+        let current_grid = &grids[sheet_index];
+        let current_sheet_name = &sheet_names[sheet_index];
+        let context = create_multi_sheet_context(&grids, &sheet_names, current_sheet_name);
+        Some(Evaluator::with_multi_sheet(current_grid, context))
+    } else {
+        None
+    };
+
+    let mut resolved = HashMap::new();
+    for (key, prop) in &meta.properties {
+        if prop.value_type == "formula" && prop.value.starts_with('=') {
+            // Evaluate the formula
+            let display = if let Some(ref ev) = evaluator {
+                match parse_formula(&prop.value) {
+                    Ok(parser_ast) => {
+                        let engine_ast = convert_expr(&parser_ast);
+                        let cell_value: CellValue = ev.evaluate(&engine_ast).to_cell_value();
+                        format_cell_value_simple(&cell_value)
+                    }
+                    Err(_) => prop.value.clone(),
+                }
+            } else {
+                prop.value.clone()
+            };
+            resolved.insert(key.clone(), display);
+        } else {
+            resolved.insert(key.clone(), prop.value.clone());
+        }
+    }
+
+    resolved
 }

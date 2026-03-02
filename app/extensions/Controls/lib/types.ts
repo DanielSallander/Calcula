@@ -86,6 +86,20 @@ export const BUTTON_PROPERTIES: PropertyDefinition[] = [
     supportsFormula: true,
   },
   {
+    key: "width",
+    label: "Width",
+    inputType: "number",
+    defaultValue: "80",
+    supportsFormula: true,
+  },
+  {
+    key: "height",
+    label: "Height",
+    inputType: "number",
+    defaultValue: "28",
+    supportsFormula: true,
+  },
+  {
     key: "embedded",
     label: "Embedded",
     inputType: "boolean",

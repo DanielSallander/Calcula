@@ -1,9 +1,11 @@
 //! FILENAME: app/extensions/Controls/PropertiesPane/PropertyRow.tsx
 // PURPOSE: A single property editor row in the Properties Pane.
-// CONTEXT: Supports static values, formula mode, color pickers, and script selection.
+// CONTEXT: Auto-detects formula mode when value starts with "=".
+//          Supports "'" escape: typing "'=" stores a literal "=" as static text.
 
 import React, { useState, useEffect, useCallback } from "react";
 import type { ControlPropertyValue, PropertyDefinition } from "../lib/types";
+import { FormulaPropertyInput } from "./FormulaPropertyInput";
 
 // ============================================================================
 // Styles
@@ -30,15 +32,6 @@ const labelStyle: React.CSSProperties = {
   fontSize: 11,
 };
 
-const modeToggleStyle: React.CSSProperties = {
-  fontSize: 10,
-  color: "#0078d4",
-  cursor: "pointer",
-  border: "none",
-  background: "none",
-  padding: "0 2px",
-};
-
 const inputStyle: React.CSSProperties = {
   width: "100%",
   padding: "3px 6px",
@@ -48,13 +41,6 @@ const inputStyle: React.CSSProperties = {
   fontFamily: "Segoe UI, Tahoma, sans-serif",
   outline: "none",
   boxSizing: "border-box",
-};
-
-const formulaInputStyle: React.CSSProperties = {
-  ...inputStyle,
-  fontFamily: "Consolas, 'Courier New', monospace",
-  backgroundColor: "#FFFBE6",
-  borderColor: "#D4A017",
 };
 
 const colorInputContainerStyle: React.CSSProperties = {
@@ -87,6 +73,42 @@ const checkboxContainerStyle: React.CSSProperties = {
 };
 
 // ============================================================================
+// Helpers
+// ============================================================================
+
+/**
+ * Build the display value from stored property data.
+ * If the stored value is static but starts with "=", prefix with "'" so
+ * the user sees the escape character (mirroring Excel behaviour).
+ */
+function toDisplayValue(val: ControlPropertyValue | undefined, defaultValue: string): string {
+  const v = val?.value ?? defaultValue;
+  if (val?.valueType === "static" && v.startsWith("=")) {
+    return "'" + v;
+  }
+  return v;
+}
+
+/**
+ * Determine valueType and stored value from the user's display input.
+ * - "'..." → static, value = rest after "'"
+ * - "=..." → formula
+ * - anything else → static
+ */
+function fromDisplayValue(
+  displayValue: string,
+  supportsFormula: boolean,
+): { valueType: "static" | "formula"; value: string } {
+  if (displayValue.startsWith("'")) {
+    return { valueType: "static", value: displayValue.slice(1) };
+  }
+  if (supportsFormula && displayValue.startsWith("=")) {
+    return { valueType: "formula", value: displayValue };
+  }
+  return { valueType: "static", value: displayValue };
+}
+
+// ============================================================================
 // Props
 // ============================================================================
 
@@ -107,29 +129,30 @@ export const PropertyRow: React.FC<PropertyRowProps> = ({
   scripts,
   onChange,
 }) => {
-  const currentValue = value?.value ?? definition.defaultValue;
-  const isFormula = value?.valueType === "formula";
-  const [localValue, setLocalValue] = useState(currentValue);
-  const [formulaMode, setFormulaMode] = useState(isFormula);
+  const displayValue = toDisplayValue(value, definition.defaultValue);
+  const [localValue, setLocalValue] = useState(displayValue);
 
   // Sync local state when external value changes
   useEffect(() => {
-    setLocalValue(value?.value ?? definition.defaultValue);
-    setFormulaMode(value?.valueType === "formula");
+    setLocalValue(toDisplayValue(value, definition.defaultValue));
   }, [value, definition.defaultValue]);
 
+  // Commit: determine valueType from the display value
   const handleCommit = useCallback(
     (newValue: string) => {
-      const vType = formulaMode ? "formula" : "static";
-      onChange(definition.key, vType, newValue);
+      const { valueType, value: storedValue } = fromDisplayValue(
+        newValue,
+        definition.supportsFormula,
+      );
+      onChange(definition.key, valueType, storedValue);
     },
-    [formulaMode, onChange, definition.key],
+    [onChange, definition.key, definition.supportsFormula],
   );
 
+  // Plain input handlers (for non-formula inputs like boolean, script, plain text/number)
   const handleInputChange = useCallback(
     (e: React.ChangeEvent<HTMLInputElement | HTMLSelectElement>) => {
-      const newVal = e.target.value;
-      setLocalValue(newVal);
+      setLocalValue(e.target.value);
     },
     [],
   );
@@ -147,39 +170,57 @@ export const PropertyRow: React.FC<PropertyRowProps> = ({
     [localValue, handleCommit],
   );
 
-  const toggleFormulaMode = useCallback(() => {
-    if (!definition.supportsFormula) return;
-    const newMode = !formulaMode;
-    setFormulaMode(newMode);
-    // If switching to formula mode, prefix with = if not already
-    if (newMode && !localValue.startsWith("=")) {
-      const newVal = "=" + localValue;
-      setLocalValue(newVal);
-      onChange(definition.key, "formula", newVal);
-    } else if (!newMode && localValue.startsWith("=")) {
-      const newVal = localValue.slice(1);
-      setLocalValue(newVal);
-      onChange(definition.key, "static", newVal);
-    }
-  }, [formulaMode, localValue, definition, onChange]);
-
-  // Render different input types
+  // ---------------------------------------------------------------
+  // Render the appropriate input widget
+  // ---------------------------------------------------------------
   const renderInput = () => {
-    // Formula mode overrides all input types
-    if (formulaMode) {
+    // For properties that support formulas: use the smart FormulaPropertyInput
+    // that auto-activates autocomplete and Point mode when value starts with "=".
+    if (definition.supportsFormula) {
+      const isFormulaLike = localValue.startsWith("=") || localValue.startsWith("'");
+
+      // Color properties: show the color swatch alongside when not in formula mode
+      if (definition.inputType === "color" && !isFormulaLike) {
+        return (
+          <div style={colorInputContainerStyle}>
+            <input
+              type="color"
+              style={colorSwatchStyle}
+              value={localValue || "#000000"}
+              onChange={(e) => {
+                setLocalValue(e.target.value);
+                handleCommit(e.target.value);
+              }}
+            />
+            <FormulaPropertyInput
+              value={localValue}
+              onChange={(newVal) => setLocalValue(newVal)}
+              onCommit={(newVal) => {
+                setLocalValue(newVal);
+                handleCommit(newVal);
+              }}
+              inputType={definition.inputType}
+              placeholder={definition.defaultValue}
+            />
+          </div>
+        );
+      }
+
       return (
-        <input
-          type="text"
-          style={formulaInputStyle}
+        <FormulaPropertyInput
           value={localValue}
-          onChange={handleInputChange}
-          onBlur={handleInputBlur}
-          onKeyDown={handleKeyDown}
-          placeholder="=formula"
+          onChange={(newVal) => setLocalValue(newVal)}
+          onCommit={(newVal) => {
+            setLocalValue(newVal);
+            handleCommit(newVal);
+          }}
+          inputType={definition.inputType}
+          placeholder={definition.defaultValue}
         />
       );
     }
 
+    // Non-formula inputs
     switch (definition.inputType) {
       case "color":
         return (
@@ -273,18 +314,6 @@ export const PropertyRow: React.FC<PropertyRowProps> = ({
     <div style={rowStyle}>
       <div style={labelRowStyle}>
         <span style={labelStyle}>{definition.label}</span>
-        {definition.supportsFormula && (
-          <button
-            style={{
-              ...modeToggleStyle,
-              fontWeight: formulaMode ? 700 : 400,
-            }}
-            onClick={toggleFormulaMode}
-            title={formulaMode ? "Switch to static value" : "Switch to formula"}
-          >
-            {formulaMode ? "fx" : "fx"}
-          </button>
-        )}
       </div>
       {renderInput()}
     </div>

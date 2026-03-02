@@ -114,11 +114,15 @@ export function registerControlsExtension(): void {
   );
   cleanupFns.push(unregCellChange);
 
-  // 6. Refresh style cache on data/style changes
-  const unregDataChanged = onAppEvent(AppEvents.DATA_CHANGED, () => {
+  // 6. Re-evaluate formula-driven properties whenever cells are updated.
+  //    CELLS_UPDATED fires reliably on every cell change (typing, paste,
+  //    undo/redo, fill, delete, scripts, etc.) via the Core cellEvents system.
+  const unregCellsUpdated = onAppEvent(AppEvents.CELLS_UPDATED, () => {
     refreshStyleCache();
+    invalidateAllFloatingButtonCaches();
+    emitAppEvent(AppEvents.GRID_REFRESH);
   });
-  cleanupFns.push(unregDataChanged);
+  cleanupFns.push(unregCellsUpdated);
 
   // 7. Register Properties Pane as a task pane
   registerTaskPane({
@@ -209,7 +213,33 @@ export function registerControlsExtension(): void {
   cleanupFns.push(() => window.removeEventListener("controls:embedded-changed", handleEmbeddedChanged));
 
   // -----------------------------------------------------------------------
-  // 16. Load existing floating controls on startup
+  // 16. Handle cache invalidation from PropertiesPane (visual property edits)
+  // -----------------------------------------------------------------------
+  const handleCacheInvalidation = (e: Event) => {
+    const detail = (e as CustomEvent).detail;
+    if (detail) {
+      const controlId = makeFloatingControlId(detail.sheetIndex, detail.row, detail.col);
+      invalidateFloatingButtonCache(controlId);
+      emitAppEvent(AppEvents.GRID_REFRESH);
+    }
+  };
+  window.addEventListener("controls:invalidate-cache", handleCacheInvalidation);
+  cleanupFns.push(() => window.removeEventListener("controls:invalidate-cache", handleCacheInvalidation));
+
+  // -----------------------------------------------------------------------
+  // 17. Handle bounds changes from PropertiesPane (width/height edits)
+  // -----------------------------------------------------------------------
+  const handleBoundsChanged = (e: Event) => {
+    const detail = (e as CustomEvent).detail;
+    if (detail) {
+      updateFloatingBoundsFromMetadata(detail.sheetIndex, detail.row, detail.col);
+    }
+  };
+  window.addEventListener("controls:bounds-changed", handleBoundsChanged);
+  cleanupFns.push(() => window.removeEventListener("controls:bounds-changed", handleBoundsChanged));
+
+  // -----------------------------------------------------------------------
+  // 18. Load existing floating controls on startup
   // -----------------------------------------------------------------------
   loadFloatingControls();
 
@@ -259,9 +289,8 @@ async function insertButton(): Promise<void> {
   const cellHeight = getRowHeight(row, defaultCellHeight, rowHeights);
 
   // Button size: at least the cell size, with a reasonable minimum
-  // Height min 50 matches MIN_FLOATING_SIZE in the core resize handlers
   const btnWidth = Math.max(cellWidth, 80);
-  const btnHeight = Math.max(cellHeight, 50);
+  const btnHeight = Math.max(cellHeight, 28);
 
   // Create control metadata with floating defaults
   await setControlMetadata(sheetIndex, row, col, {
@@ -399,10 +428,43 @@ async function persistFloatingPosition(controlId: string): Promise<void> {
   if (!ctrl) return;
 
   const { setControlProperty } = await import("./lib/controlApi");
-  await setControlProperty(ctrl.sheetIndex, ctrl.row, ctrl.col, ctrl.controlType, "x", "static", String(ctrl.x));
-  await setControlProperty(ctrl.sheetIndex, ctrl.row, ctrl.col, ctrl.controlType, "y", "static", String(ctrl.y));
-  await setControlProperty(ctrl.sheetIndex, ctrl.row, ctrl.col, ctrl.controlType, "width", "static", String(ctrl.width));
-  await setControlProperty(ctrl.sheetIndex, ctrl.row, ctrl.col, ctrl.controlType, "height", "static", String(ctrl.height));
+  await setControlProperty(ctrl.sheetIndex, ctrl.row, ctrl.col, ctrl.controlType, "x", "static", String(Math.round(ctrl.x)));
+  await setControlProperty(ctrl.sheetIndex, ctrl.row, ctrl.col, ctrl.controlType, "y", "static", String(Math.round(ctrl.y)));
+  await setControlProperty(ctrl.sheetIndex, ctrl.row, ctrl.col, ctrl.controlType, "width", "static", String(Math.round(ctrl.width)));
+  await setControlProperty(ctrl.sheetIndex, ctrl.row, ctrl.col, ctrl.controlType, "height", "static", String(Math.round(ctrl.height)));
+
+  // Notify PropertiesPane to re-read metadata (e.g., after drag-resize)
+  window.dispatchEvent(new CustomEvent("controls:metadata-refresh", {
+    detail: { row: ctrl.row, col: ctrl.col },
+  }));
+}
+
+/**
+ * Update a floating control's bounds from its backend metadata.
+ * Called when width/height are changed from the PropertiesPane.
+ */
+async function updateFloatingBoundsFromMetadata(
+  sheetIndex: number,
+  row: number,
+  col: number,
+): Promise<void> {
+  const controlId = makeFloatingControlId(sheetIndex, row, col);
+  const ctrl = getFloatingControl(controlId);
+  if (!ctrl) return;
+
+  const metadata = await getControlMetadata(sheetIndex, row, col);
+  if (!metadata) return;
+
+  const newWidth = parseFloat(metadata.properties.width?.value ?? String(ctrl.width));
+  const newHeight = parseFloat(metadata.properties.height?.value ?? String(ctrl.height));
+
+  if (!isNaN(newWidth) && newWidth > 0) ctrl.width = newWidth;
+  if (!isNaN(newHeight) && newHeight > 0) ctrl.height = newHeight;
+
+  resizeFloatingControl(controlId, ctrl.x, ctrl.y, ctrl.width, ctrl.height);
+  syncFloatingControlRegions();
+  invalidateFloatingButtonCache(controlId);
+  emitAppEvent(AppEvents.GRID_REFRESH);
 }
 
 /**
@@ -542,7 +604,7 @@ async function handleEmbeddedToggle(
     const cellHeight = getRowHeight(row, defaultCellHeight, rowHeights);
 
     const btnWidth = Math.max(cellWidth, 80);
-    const btnHeight = Math.max(cellHeight, 50);
+    const btnHeight = Math.max(cellHeight, 28);
 
     // Remove button formatting and clear cell text
     await applyFormatting([row], [col], { button: false });

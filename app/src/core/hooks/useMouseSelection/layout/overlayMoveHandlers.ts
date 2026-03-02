@@ -144,6 +144,21 @@ export function createOverlayMoveHandlers(
     if (!region || !region.floating) return false;
 
     event.preventDefault();
+
+    // Notify extensions that a floating overlay was selected (always)
+    window.dispatchEvent(new CustomEvent("floatingObject:selected", {
+      detail: {
+        regionId: region.id,
+        regionType: region.type,
+        data: region.data,
+      },
+    }));
+
+    // Only start a move drag if the region is movable (extensions set this via data)
+    if (region.data?.movable === false) {
+      return true; // consumed the click, but no drag
+    }
+
     setIsOverlayMoving(true);
     setCursorStyle("move");
 
@@ -157,15 +172,6 @@ export function createOverlayMoveHandlers(
       currentY: region.floating.y,
       hasMoved: false,
     };
-
-    // Notify extensions that a floating overlay was selected
-    window.dispatchEvent(new CustomEvent("floatingObject:selected", {
-      detail: {
-        regionId: region.id,
-        regionType: region.type,
-        data: region.data,
-      },
-    }));
 
     return true;
   };

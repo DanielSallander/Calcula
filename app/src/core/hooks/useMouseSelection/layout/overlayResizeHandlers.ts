@@ -14,7 +14,7 @@ import { getCellFromPixel } from "../../../lib/gridRenderer";
 const HANDLE_HIT_SIZE = 10;
 
 /** Minimum floating overlay size in pixels */
-const MIN_FLOATING_SIZE = 50;
+const MIN_FLOATING_SIZE = 16;
 
 /** Which corner or edge is being dragged */
 type ResizeCorner = "top-left" | "top-right" | "bottom-left" | "bottom-right";
@@ -174,6 +174,9 @@ export function createOverlayResizeHandlers(
     for (const region of regions) {
       // Floating overlay: check all 4 corners
       if (region.floating) {
+        // Skip if region is not resizable
+        if (region.data?.resizable === false) continue;
+
         const corners = getFloatingCornerPixels(region, config, viewport);
         if (!corners) continue;
 
@@ -215,6 +218,8 @@ export function createOverlayResizeHandlers(
     // Check floating overlays first (all 4 corners)
     for (const region of regions) {
       if (!region.floating) continue;
+      // Skip if region is not resizable (extensions set this via data)
+      if (region.data?.resizable === false) continue;
 
       const corners = getFloatingCornerPixels(region, config, viewport);
       if (!corners) continue;

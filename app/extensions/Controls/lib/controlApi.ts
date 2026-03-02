@@ -77,3 +77,20 @@ export async function getAllControls(
 ): Promise<ControlEntry[]> {
   return invokeBackend<ControlEntry[]>("get_all_controls", { sheetIndex });
 }
+
+/**
+ * Resolve all formula-type properties for a control.
+ * Returns a map of property name -> resolved display value.
+ * Static properties are returned as-is; formula properties are evaluated.
+ */
+export async function resolveControlProperties(
+  sheetIndex: number,
+  row: number,
+  col: number,
+): Promise<Record<string, string>> {
+  return invokeBackend<Record<string, string>>("resolve_control_properties", {
+    sheetIndex,
+    row,
+    col,
+  });
+}

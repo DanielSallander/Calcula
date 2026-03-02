@@ -2449,6 +2449,7 @@ pub fn run() {
             controls::set_control_metadata,
             controls::remove_control_metadata,
             controls::get_all_controls,
+            controls::resolve_control_properties,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

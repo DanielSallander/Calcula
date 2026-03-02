@@ -13,7 +13,7 @@ import {
   overlaySheetToCanvas,
 } from "../../../src/api/gridOverlays";
 import { getDesignMode } from "../lib/designMode";
-import { getControlMetadata } from "../lib/controlApi";
+import { resolveControlProperties } from "../lib/controlApi";
 import { isFloatingControlSelected } from "./floatingSelection";
 
 // ============================================================================
@@ -31,14 +31,25 @@ interface CachedButtonData {
 const buttonDataCache = new Map<string, CachedButtonData>();
 const pendingFetches = new Set<string>();
 
+/**
+ * Set of control IDs whose cached data is stale.
+ * Stale entries are kept visible during rendering while a re-fetch is
+ * in progress, preventing a visible "blink" to default values.
+ */
+const staleEntries = new Set<string>();
+
 /** Invalidate cached data for a specific control. */
 export function invalidateFloatingButtonCache(controlId: string): void {
-  buttonDataCache.delete(controlId);
+  staleEntries.add(controlId);
+  pendingFetches.delete(controlId);
 }
 
 /** Invalidate all cached button data. */
 export function invalidateAllFloatingButtonCaches(): void {
-  buttonDataCache.clear();
+  // Mark all as stale but keep old data visible until re-fetched
+  for (const key of buttonDataCache.keys()) {
+    staleEntries.add(key);
+  }
   pendingFetches.clear();
 }
 
@@ -118,15 +129,17 @@ export function renderFloatingButton(overlayCtx: OverlayRenderContext): void {
   );
   ctx.clip();
 
-  // Get cached button data or trigger async fetch
+  // Get cached button data or trigger async fetch.
+  // Stale entries are re-fetched but the old data stays visible to avoid blink.
   const controlId = region.id;
   let data = buttonDataCache.get(controlId);
-  if (!data && !pendingFetches.has(controlId)) {
+  const isStale = staleEntries.has(controlId);
+
+  if ((!data || isStale) && !pendingFetches.has(controlId)) {
     fetchButtonData(controlId, sheetIndex, row, col);
-    // Use defaults for first render
-    data = { text: "Button", fill: "#e0e0e0", color: "#000000", borderColor: "#999999", fontSize: 11 };
   }
   if (!data) {
+    // Truly new control with no cache at all — use hard-coded defaults
     data = { text: "Button", fill: "#e0e0e0", color: "#000000", borderColor: "#999999", fontSize: 11 };
   }
 
@@ -231,17 +244,38 @@ async function fetchButtonData(
 ): Promise<void> {
   pendingFetches.add(controlId);
   try {
-    const meta = await getControlMetadata(sheetIndex, row, col);
-    if (!meta) return;
+    // Use resolveControlProperties to evaluate formula-type properties
+    const resolved = await resolveControlProperties(sheetIndex, row, col);
+    if (!resolved || Object.keys(resolved).length === 0) return;
 
-    const props = meta.properties;
     buttonDataCache.set(controlId, {
-      text: props.text?.value ?? "Button",
-      fill: props.fill?.value ?? "#e0e0e0",
-      color: props.color?.value ?? "#000000",
-      borderColor: props.borderColor?.value ?? "#999999",
-      fontSize: parseInt(props.fontSize?.value ?? "11", 10) || 11,
+      text: resolved.text ?? "Button",
+      fill: resolved.fill ?? "#e0e0e0",
+      color: resolved.color ?? "#000000",
+      borderColor: resolved.borderColor ?? "#999999",
+      fontSize: parseInt(resolved.fontSize ?? "11", 10) || 11,
     });
+    staleEntries.delete(controlId);
+
+    // Update floating control dimensions if width/height are resolved
+    const resolvedWidth = resolved.width ? parseFloat(resolved.width) : NaN;
+    const resolvedHeight = resolved.height ? parseFloat(resolved.height) : NaN;
+    if (!isNaN(resolvedWidth) || !isNaN(resolvedHeight)) {
+      const {
+        getFloatingControl,
+        resizeFloatingControl,
+        syncFloatingControlRegions,
+      } = await import("../lib/floatingStore");
+      const ctrl = getFloatingControl(controlId);
+      if (ctrl) {
+        const w = !isNaN(resolvedWidth) && resolvedWidth > 0 ? resolvedWidth : ctrl.width;
+        const h = !isNaN(resolvedHeight) && resolvedHeight > 0 ? resolvedHeight : ctrl.height;
+        if (w !== ctrl.width || h !== ctrl.height) {
+          resizeFloatingControl(controlId, ctrl.x, ctrl.y, w, h);
+          syncFloatingControlRegions();
+        }
+      }
+    }
 
     // Request redraw to show fetched data
     const { requestOverlayRedraw } = await import("../../../src/api/gridOverlays");

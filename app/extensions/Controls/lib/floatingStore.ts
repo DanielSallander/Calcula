@@ -8,6 +8,7 @@ import {
   replaceGridRegionsByType,
   type GridRegion,
 } from "../../../src/api/gridOverlays";
+import { getDesignMode } from "./designMode";
 
 // ============================================================================
 // Types
@@ -137,6 +138,8 @@ export function syncFloatingControlRegions(): void {
       row: ctrl.row,
       col: ctrl.col,
       controlType: ctrl.controlType,
+      movable: getDesignMode(),
+      resizable: getDesignMode(),
     },
   }));
 
