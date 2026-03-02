@@ -5,6 +5,8 @@
 // This file is the ONLY place that should import from @tauri-apps/api/core.
 
 import { invoke } from "@tauri-apps/api/core";
+import { emit, listen } from "@tauri-apps/api/event";
+import type { UnlistenFn } from "@tauri-apps/api/event";
 import type { CellData, DimensionData } from "../core/types";
 
 // ============================================================================
@@ -35,6 +37,38 @@ export type InvokeArgs = Record<string, unknown>;
 export async function invokeBackend<T>(cmd: string, args: InvokeArgs = {}): Promise<T> {
   return invoke<T>(cmd, args);
 }
+
+// ============================================================================
+// Cross-Window Event API (Tauri Events)
+// ============================================================================
+
+/**
+ * Emit a Tauri event that can be received by ALL windows.
+ * Use this for cross-window communication (e.g., script editor <-> main window).
+ *
+ * @param event - Event name (use a namespace prefix like "script-editor:")
+ * @param payload - Optional payload to send with the event
+ */
+export async function emitTauriEvent<T = unknown>(event: string, payload?: T): Promise<void> {
+  await emit(event, payload);
+}
+
+/**
+ * Listen for a Tauri event from any window.
+ * Returns an unlisten function to remove the listener.
+ *
+ * @param event - Event name to listen for
+ * @param callback - Callback invoked with the event payload
+ * @returns Promise resolving to an unlisten function
+ */
+export function listenTauriEvent<T = unknown>(
+  event: string,
+  callback: (payload: T) => void,
+): Promise<UnlistenFn> {
+  return listen<T>(event, (ev) => callback(ev.payload));
+}
+
+export type { UnlistenFn };
 
 // ============================================================================
 // Pivot Table Commands

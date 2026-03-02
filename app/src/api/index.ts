@@ -268,6 +268,13 @@ export { AppEvents, emitAppEvent, onAppEvent, restoreFocusToGrid } from "./event
 export type { AppEventName, FillCompletedPayload } from "./events";
 
 // ============================================================================
+// Cross-Window Events (Tauri)
+// ============================================================================
+
+export { emitTauriEvent, listenTauriEvent } from "./backend";
+export type { UnlistenFn } from "./backend";
+
+// ============================================================================
 // Extension Registry & Extensions
 // ============================================================================
 

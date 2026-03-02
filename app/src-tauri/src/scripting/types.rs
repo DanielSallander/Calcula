@@ -53,6 +53,7 @@ pub struct RunScriptRequest {
 #[serde(rename_all = "camelCase", tag = "type")]
 pub enum RunScriptResponse {
     /// Script completed successfully
+    #[serde(rename_all = "camelCase")]
     Success {
         /// Console output lines collected during execution
         output: Vec<String>,
@@ -62,6 +63,7 @@ pub enum RunScriptResponse {
         duration_ms: u64,
     },
     /// Script encountered an error
+    #[serde(rename_all = "camelCase")]
     Error {
         /// The error message
         message: String,

@@ -1,6 +1,6 @@
 //! FILENAME: app/extensions/ScriptEditor/index.ts
 // PURPOSE: Script Editor extension entry point.
-// CONTEXT: Registers the task pane and Developer menu item.
+// CONTEXT: Registers the task pane, Developer menu items, and cross-window event bridge.
 //          Called from extensions/index.ts during app initialization.
 
 import {
@@ -11,6 +11,8 @@ import {
   showTaskPaneContainer,
 } from "../../src/api";
 import { ScriptEditorPane } from "./components/ScriptEditorPane";
+import { openAdvancedEditor } from "./lib/openEditorWindow";
+import { onGridNeedsRefresh } from "./lib/crossWindowEvents";
 
 // ============================================================================
 // Constants
@@ -42,7 +44,7 @@ export function registerScriptEditorExtension(): void {
   });
   cleanupFns.push(() => unregisterTaskPane(SCRIPT_PANE_ID));
 
-  // 2. Register Developer menu
+  // 2. Register Developer menu (simple + advanced editor)
   registerMenu({
     id: "developer",
     label: "Developer",
@@ -56,7 +58,27 @@ export function registerScriptEditorExtension(): void {
           showTaskPaneContainer();
         },
       },
+      {
+        id: "developer:advancedScriptEditor",
+        label: "Advanced Script Editor",
+        action: () => {
+          openAdvancedEditor("");
+        },
+      },
     ],
+  });
+
+  // 3. Listen for grid refresh requests from the Advanced Editor window.
+  //    The Monaco editor window uses Tauri events (cross-window) instead of
+  //    DOM CustomEvents. We bridge them here: Tauri event -> DOM event.
+  let unlistenGridRefresh: (() => void) | undefined;
+  onGridNeedsRefresh(() => {
+    window.dispatchEvent(new CustomEvent("grid:refresh"));
+  }).then((fn) => {
+    unlistenGridRefresh = fn;
+  });
+  cleanupFns.push(() => {
+    unlistenGridRefresh?.();
   });
 
   console.log("[ScriptEditor] Registered successfully.");

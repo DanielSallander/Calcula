@@ -40,8 +40,20 @@ pub fn run_script(
     match &result {
         script_engine::ScriptResult::Success { cells_modified, .. } => {
             if *cells_modified > 0 && !modified_grids.is_empty() {
+                // Clone the active sheet grid before moving modified_grids
+                let active_grid_clone = modified_grids.get(active_sheet).cloned();
+
+                // Update the multi-sheet grids vector (original behavior)
                 let mut app_grids = state.grids.lock().map_err(|e| e.to_string())?;
                 *app_grids = modified_grids;
+                drop(app_grids);
+
+                // Sync the active sheet into state.grid so that
+                // get_viewport_cells / get_cell return the updated data
+                if let Some(grid) = active_grid_clone {
+                    let mut app_grid = state.grid.lock().map_err(|e| e.to_string())?;
+                    *app_grid = grid;
+                }
             }
         }
         _ => {}

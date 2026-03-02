@@ -28,5 +28,13 @@ export default defineConfig({
     target: ['es2021', 'chrome100', 'safari13'],
     minify: !process.env.TAURI_DEBUG ? 'esbuild' : false,
     sourcemap: !!process.env.TAURI_DEBUG,
+    rollupOptions: {
+      input: {
+        // eslint-disable-next-line @typescript-eslint/naming-convention
+        main: path.resolve(__dirname, 'index.html'),
+        // eslint-disable-next-line @typescript-eslint/naming-convention
+        editor: path.resolve(__dirname, 'editor.html'),
+      },
+    },
   },
 });

@@ -5,6 +5,7 @@
 import React, { useState, useCallback, useRef, useEffect } from "react";
 import type { TaskPaneViewProps } from "../../../src/api";
 import { runScript } from "../lib/scriptApi";
+import { openAdvancedEditor } from "../lib/openEditorWindow";
 import type { RunScriptResponse } from "../types";
 
 // ============================================================================
@@ -108,6 +109,16 @@ const clearButtonStyle: React.CSSProperties = {
   borderRadius: 2,
   backgroundColor: "transparent",
   color: "#666",
+};
+
+const advancedEditorButtonStyle: React.CSSProperties = {
+  padding: "4px 10px",
+  fontSize: 11,
+  cursor: "pointer",
+  border: "1px solid #0078D4",
+  borderRadius: 2,
+  backgroundColor: "transparent",
+  color: "#0078D4",
 };
 
 // ============================================================================
@@ -279,6 +290,15 @@ export function ScriptEditorPane(
       React.createElement(
         "div",
         { style: { display: "flex", gap: 6, alignItems: "center" } },
+        React.createElement(
+          "button",
+          {
+            style: advancedEditorButtonStyle,
+            onClick: () => openAdvancedEditor(source),
+            title: "Open in Advanced Editor with IntelliSense",
+          },
+          "Advanced Editor",
+        ),
         React.createElement(
           "span",
           {
