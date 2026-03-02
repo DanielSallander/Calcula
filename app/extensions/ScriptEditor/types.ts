@@ -36,3 +36,21 @@ export interface ScriptError {
 
 /** Union type for script execution results. */
 export type RunScriptResponse = ScriptSuccess | ScriptError;
+
+// ============================================================================
+// Script Module Types
+// ============================================================================
+
+/** Lightweight script summary (for listing without source code). */
+export interface ScriptSummary {
+  id: string;
+  name: string;
+}
+
+/** Full script module stored in the workbook. */
+export interface WorkbookScript {
+  id: string;
+  name: string;
+  description: string | null;
+  source: string;
+}

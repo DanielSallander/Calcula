@@ -6,4 +6,4 @@ pub mod types;
 pub mod commands;
 
 pub use commands::*;
-pub use types::ScriptState;
+pub use types::{ScriptState, ScriptSummary, WorkbookScript};

@@ -6,7 +6,7 @@
 use tauri::State;
 
 use crate::AppState;
-use super::types::{ScriptState, RunScriptRequest, RunScriptResponse};
+use super::types::{ScriptState, ScriptSummary, RunScriptRequest, RunScriptResponse, WorkbookScript};
 
 /// Execute a script against the current spreadsheet state.
 ///
@@ -106,5 +106,101 @@ pub fn set_script_security_level(
         .security_level
         .lock()
         .map_err(|e| e.to_string())? = level;
+    Ok(())
+}
+
+// ============================================================================
+// Script Module CRUD Commands
+// ============================================================================
+
+/// List all saved script modules (lightweight: id + name only).
+#[tauri::command]
+pub fn list_scripts(
+    script_state: State<ScriptState>,
+) -> Result<Vec<ScriptSummary>, String> {
+    let scripts = script_state
+        .workbook_scripts
+        .lock()
+        .map_err(|e| e.to_string())?;
+
+    let mut summaries: Vec<ScriptSummary> = scripts
+        .values()
+        .map(|s| ScriptSummary {
+            id: s.id.clone(),
+            name: s.name.clone(),
+        })
+        .collect();
+
+    // Sort by name for consistent ordering
+    summaries.sort_by(|a, b| a.name.cmp(&b.name));
+    Ok(summaries)
+}
+
+/// Get a single script module by ID (includes source code).
+#[tauri::command]
+pub fn get_script(
+    script_state: State<ScriptState>,
+    id: String,
+) -> Result<WorkbookScript, String> {
+    let scripts = script_state
+        .workbook_scripts
+        .lock()
+        .map_err(|e| e.to_string())?;
+
+    scripts
+        .get(&id)
+        .cloned()
+        .ok_or_else(|| format!("Script '{}' not found", id))
+}
+
+/// Save (create or update) a script module.
+#[tauri::command]
+pub fn save_script(
+    script_state: State<ScriptState>,
+    script: WorkbookScript,
+) -> Result<(), String> {
+    let mut scripts = script_state
+        .workbook_scripts
+        .lock()
+        .map_err(|e| e.to_string())?;
+
+    scripts.insert(script.id.clone(), script);
+    Ok(())
+}
+
+/// Delete a script module by ID.
+#[tauri::command]
+pub fn delete_script(
+    script_state: State<ScriptState>,
+    id: String,
+) -> Result<(), String> {
+    let mut scripts = script_state
+        .workbook_scripts
+        .lock()
+        .map_err(|e| e.to_string())?;
+
+    if scripts.remove(&id).is_none() {
+        return Err(format!("Script '{}' not found", id));
+    }
+    Ok(())
+}
+
+/// Rename a script module.
+#[tauri::command]
+pub fn rename_script(
+    script_state: State<ScriptState>,
+    id: String,
+    new_name: String,
+) -> Result<(), String> {
+    let mut scripts = script_state
+        .workbook_scripts
+        .lock()
+        .map_err(|e| e.to_string())?;
+
+    let script = scripts
+        .get_mut(&id)
+        .ok_or_else(|| format!("Script '{}' not found", id))?;
+
+    script.name = new_name;
     Ok(())
 }

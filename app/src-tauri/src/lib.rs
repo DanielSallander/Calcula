@@ -2434,6 +2434,11 @@ pub fn run() {
             scripting::run_script,
             scripting::get_script_security_level,
             scripting::set_script_security_level,
+            scripting::list_scripts,
+            scripting::get_script,
+            scripting::save_script,
+            scripting::delete_script,
+            scripting::rename_script,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

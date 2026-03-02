@@ -38,6 +38,14 @@ pub struct WorkbookScript {
     pub source: String,
 }
 
+/// Lightweight summary of a script (for listing without source code).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ScriptSummary {
+    pub id: String,
+    pub name: String,
+}
+
 /// Request payload for running a script.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]

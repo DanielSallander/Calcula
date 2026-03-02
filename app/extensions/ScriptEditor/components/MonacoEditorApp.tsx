@@ -1,6 +1,7 @@
 //! FILENAME: app/extensions/ScriptEditor/components/MonacoEditorApp.tsx
 // PURPOSE: Root component for the Advanced Script Editor window.
-// CONTEXT: Renders a Monaco editor with IntelliSense, console output, and a Run button.
+// CONTEXT: Renders a Monaco editor with IntelliSense, console output, a Run button,
+//          and a module navigation pane for managing multiple script modules.
 //          This is mounted as a standalone React app in a separate Tauri window.
 
 import React, { useState, useCallback, useRef, useEffect } from "react";
@@ -9,13 +10,15 @@ import type { editor } from "monaco-editor";
 import * as monaco from "monaco-editor";
 import editorWorker from "monaco-editor/esm/vs/editor/editor.worker?worker";
 import tsWorker from "monaco-editor/esm/vs/language/typescript/ts.worker?worker";
-import { runScript } from "../lib/scriptApi";
+import { runScript, getScript, saveScript } from "../lib/scriptApi";
 import type { RunScriptResponse } from "../types";
 import {
   onOpenWithCode,
   emitGridNeedsRefresh,
   emitEditorClosed,
 } from "../lib/crossWindowEvents";
+import { useModuleStore } from "../lib/useModuleStore";
+import { ModuleNavigationPane } from "./ModuleNavigationPane";
 // Vite ?raw import: loads the .d.ts file content as a plain string
 import calculaDts from "../calcula.d.ts?raw";
 
@@ -72,6 +75,27 @@ const toolbarRightStyle: React.CSSProperties = {
   gap: 10,
 };
 
+const toggleNavButtonStyle: React.CSSProperties = {
+  display: "flex",
+  alignItems: "center",
+  justifyContent: "center",
+  width: 28,
+  height: 24,
+  border: "1px solid #555",
+  borderRadius: 3,
+  backgroundColor: "transparent",
+  color: "#BBBBBB",
+  fontSize: 14,
+  cursor: "pointer",
+};
+
+const toggleNavButtonActiveStyle: React.CSSProperties = {
+  ...toggleNavButtonStyle,
+  backgroundColor: "#094771",
+  borderColor: "#094771",
+  color: "#FFFFFF",
+};
+
 const runButtonStyle: React.CSSProperties = {
   padding: "5px 16px",
   fontSize: 13,
@@ -87,6 +111,22 @@ const runButtonDisabledStyle: React.CSSProperties = {
   ...runButtonStyle,
   opacity: 0.5,
   cursor: "not-allowed",
+};
+
+const mainContentStyle: React.CSSProperties = {
+  display: "flex",
+  flexDirection: "row",
+  flex: 1,
+  minHeight: 0,
+  overflow: "hidden",
+};
+
+const editorPanelStyle: React.CSSProperties = {
+  display: "flex",
+  flexDirection: "column",
+  flex: 1,
+  minWidth: 0,
+  overflow: "hidden",
 };
 
 const editorContainerStyle: React.CSSProperties = {
@@ -147,21 +187,11 @@ const statusTextStyle: React.CSSProperties = {
   color: "#888",
 };
 
-// ============================================================================
-// Default Script
-// ============================================================================
-
-const DEFAULT_SCRIPT = `// Calcula Script Editor
-// Use the Calcula API to read/write spreadsheet data.
-// IntelliSense: Type "Calcula." to see available methods.
-
-// Read a cell value (row, col are 0-based)
-const value = Calcula.getCellValue(0, 0);
-Calcula.log("Cell A1 =", value);
-
-// Write a value
-// Calcula.setCellValue(0, 1, "Hello from script!");
-`;
+const activeModuleNameStyle: React.CSSProperties = {
+  fontSize: 12,
+  color: "#999",
+  fontStyle: "italic",
+};
 
 // ============================================================================
 // Console Line Component
@@ -194,13 +224,84 @@ function ConsoleLine({
 // ============================================================================
 
 export function MonacoEditorApp(): React.ReactElement {
-  const [source, setSource] = useState(DEFAULT_SCRIPT);
+  const [source, setSource] = useState("");
   const [isRunning, setIsRunning] = useState(false);
   const [consoleLines, setConsoleLines] = useState<ConsoleEntry[]>([]);
   const [lastRunInfo, setLastRunInfo] = useState<string>("");
   const editorRef = useRef<editor.IStandaloneCodeEditor | null>(null);
+  const monacoRef = useRef<typeof monaco | null>(null);
   const consoleEndRef = useRef<HTMLDivElement>(null);
   const handleRunRef = useRef<() => void>(() => {});
+
+  // Module store
+  const {
+    modules,
+    activeModuleId,
+    loaded,
+    navPaneVisible,
+    toggleNavPane,
+    loadModules,
+    markDirty,
+  } = useModuleStore();
+
+  // Map of module ID -> Monaco model URI, for per-module undo history
+  const modelMapRef = useRef<Map<string, monaco.Uri>>(new Map());
+
+  // Track last saved source per module to detect dirty state
+  const savedSourceRef = useRef<Map<string, string>>(new Map());
+
+  // Active module name for toolbar display
+  const activeModuleName = modules.find((m) => m.id === activeModuleId)?.name ?? "";
+
+  // ---- Load modules on mount ----
+  useEffect(() => {
+    loadModules();
+  }, [loadModules]);
+
+  // ---- Load active module source when activeModuleId changes ----
+  useEffect(() => {
+    if (!activeModuleId || !loaded) return;
+
+    const loadSource = async (): Promise<void> => {
+      try {
+        const script = await getScript(activeModuleId);
+        const newSource = script.source;
+        setSource(newSource);
+        savedSourceRef.current.set(activeModuleId, newSource);
+
+        // Switch or create Monaco model for this module
+        if (editorRef.current && monacoRef.current) {
+          const m = monacoRef.current;
+          let modelUri = modelMapRef.current.get(activeModuleId);
+          let model: editor.ITextModel | null = null;
+
+          if (modelUri) {
+            model = m.editor.getModel(modelUri);
+          }
+
+          if (!model) {
+            // Create a new model for this module
+            modelUri = m.Uri.parse(`file:///${activeModuleId}.js`);
+            model = m.editor.createModel(newSource, "javascript", modelUri);
+            modelMapRef.current.set(activeModuleId, modelUri);
+          } else {
+            // Model exists — update its content only if different
+            const currentModelValue = model.getValue();
+            if (currentModelValue !== newSource) {
+              model.setValue(newSource);
+            }
+          }
+
+          editorRef.current.setModel(model);
+          editorRef.current.focus();
+        }
+      } catch (err) {
+        console.error("[MonacoEditorApp] Failed to load module:", err);
+      }
+    };
+
+    loadSource();
+  }, [activeModuleId, loaded]);
 
   // Auto-scroll console to bottom on new output
   useEffect(() => {
@@ -221,6 +322,19 @@ export function MonacoEditorApp(): React.ReactElement {
 
     // Notify main window when this window closes
     const handleBeforeUnload = (): void => {
+      // Auto-save current module before closing
+      if (activeModuleId) {
+        const currentSource = editorRef.current?.getValue() ?? source;
+        const mod = modules.find((m) => m.id === activeModuleId);
+        if (mod) {
+          saveScript({
+            id: activeModuleId,
+            name: mod.name,
+            description: null,
+            source: currentSource,
+          });
+        }
+      }
       emitEditorClosed();
     };
     window.addEventListener("beforeunload", handleBeforeUnload);
@@ -229,22 +343,48 @@ export function MonacoEditorApp(): React.ReactElement {
       unlisten?.();
       window.removeEventListener("beforeunload", handleBeforeUnload);
     };
-  }, []);
+  }, [activeModuleId, modules, source]);
+
+  // ---- Save current module (helper for before-switch and before-run) ----
+  const saveCurrentModule = useCallback(async () => {
+    if (!activeModuleId) return;
+    const currentSource = editorRef.current?.getValue() ?? source;
+    const mod = modules.find((m) => m.id === activeModuleId);
+    if (!mod) return;
+
+    await saveScript({
+      id: activeModuleId,
+      name: mod.name,
+      description: null,
+      source: currentSource,
+    });
+    savedSourceRef.current.set(activeModuleId, currentSource);
+
+    // Mark clean in store
+    const { markClean } = useModuleStore.getState();
+    markClean(activeModuleId);
+  }, [activeModuleId, source, modules]);
 
   // Run script handler
   const handleRun = useCallback(async () => {
     const code = editorRef.current?.getValue() ?? source;
     if (isRunning || !code.trim()) return;
 
+    // Auto-save before running
+    await saveCurrentModule();
+
     setIsRunning(true);
     setLastRunInfo("");
     setConsoleLines((prev) => [
       ...prev,
-      { text: "--- Running script ---", type: "info" },
+      { text: `--- Running ${activeModuleName || "script"} ---`, type: "info" },
     ]);
 
     try {
-      const result: RunScriptResponse = await runScript(code);
+      const result: RunScriptResponse = await runScript(
+        code,
+        activeModuleName || "script.js",
+      );
 
       if (result.type === "success") {
         const newLines: ConsoleEntry[] = result.output.map((line) => ({
@@ -290,7 +430,7 @@ export function MonacoEditorApp(): React.ReactElement {
     } finally {
       setIsRunning(false);
     }
-  }, [source, isRunning]);
+  }, [source, isRunning, activeModuleName, saveCurrentModule]);
 
   // Keep ref in sync for Monaco keybinding
   useEffect(() => {
@@ -303,41 +443,93 @@ export function MonacoEditorApp(): React.ReactElement {
   }, []);
 
   // Monaco editor mount callback
-  const handleEditorMount: OnMount = (editor, monaco) => {
-    editorRef.current = editor;
+  const handleEditorMount: OnMount = (ed, m) => {
+    editorRef.current = ed;
+    monacoRef.current = m;
 
     // Register Calcula API types for IntelliSense
-    monaco.languages.typescript.javascriptDefaults.addExtraLib(
+    m.languages.typescript.javascriptDefaults.addExtraLib(
       calculaDts,
       "calcula.d.ts",
     );
 
     // Configure JavaScript language service
-    monaco.languages.typescript.javascriptDefaults.setDiagnosticsOptions({
+    m.languages.typescript.javascriptDefaults.setDiagnosticsOptions({
       noSemanticValidation: false,
       noSyntaxValidation: false,
     });
 
-    monaco.languages.typescript.javascriptDefaults.setCompilerOptions({
-      target: monaco.languages.typescript.ScriptTarget.ESNext,
+    m.languages.typescript.javascriptDefaults.setCompilerOptions({
+      target: m.languages.typescript.ScriptTarget.ESNext,
       allowNonTsExtensions: true,
       allowJs: true,
       checkJs: true,
     });
 
     // Ctrl+Enter keybinding to run script
-    editor.addAction({
+    ed.addAction({
       id: "calcula.runScript",
       label: "Run Script",
-      keybindings: [monaco.KeyMod.CtrlCmd | monaco.KeyCode.Enter],
+      keybindings: [m.KeyMod.CtrlCmd | m.KeyCode.Enter],
       run: () => {
         handleRunRef.current();
       },
     });
 
+    // Ctrl+S to save current module
+    ed.addAction({
+      id: "calcula.saveModule",
+      label: "Save Module",
+      keybindings: [m.KeyMod.CtrlCmd | m.KeyCode.KeyS],
+      run: () => {
+        saveCurrentModule();
+      },
+    });
+
+    // If we already have an activeModuleId loaded, create/set the model now
+    const currentActiveId = useModuleStore.getState().activeModuleId;
+    if (currentActiveId && source) {
+      const modelUri = m.Uri.parse(`file:///${currentActiveId}.js`);
+      let model = m.editor.getModel(modelUri);
+      if (!model) {
+        model = m.editor.createModel(source, "javascript", modelUri);
+        modelMapRef.current.set(currentActiveId, modelUri);
+      }
+      ed.setModel(model);
+    }
+
     // Focus editor on mount
-    editor.focus();
+    ed.focus();
   };
+
+  // ---- Editor onChange: track dirty state ----
+  const handleEditorChange = useCallback(
+    (value: string | undefined) => {
+      if (value === undefined) return;
+      setSource(value);
+
+      if (activeModuleId) {
+        const saved = savedSourceRef.current.get(activeModuleId);
+        if (saved !== undefined && value !== saved) {
+          markDirty(activeModuleId);
+        }
+      }
+    },
+    [activeModuleId, markDirty],
+  );
+
+  // ---- Navigation pane callbacks ----
+  const handleModuleSelect = useCallback(
+    (_moduleId: string) => {
+      // The store already updated activeModuleId.
+      // The useEffect on activeModuleId will load the source.
+    },
+    [],
+  );
+
+  const handleBeforeSwitch = useCallback(async () => {
+    await saveCurrentModule();
+  }, [saveCurrentModule]);
 
   // ---- Render ----
 
@@ -352,11 +544,32 @@ export function MonacoEditorApp(): React.ReactElement {
       React.createElement(
         "div",
         { style: toolbarLeftStyle },
+        // Toggle nav pane button
+        React.createElement(
+          "button",
+          {
+            style: navPaneVisible
+              ? toggleNavButtonActiveStyle
+              : toggleNavButtonStyle,
+            onClick: toggleNavPane,
+            title: navPaneVisible ? "Hide Modules" : "Show Modules",
+          },
+          // Simple sidebar icon using text
+          "\u2261", // hamburger-like icon
+        ),
         React.createElement(
           "span",
           { style: { fontWeight: 600, fontSize: 14, color: "#E0E0E0" } },
           "Calcula Script Editor",
         ),
+        // Active module name
+        activeModuleName
+          ? React.createElement(
+              "span",
+              { style: activeModuleNameStyle },
+              `- ${activeModuleName}`,
+            )
+          : null,
       ),
       React.createElement(
         "div",
@@ -382,65 +595,83 @@ export function MonacoEditorApp(): React.ReactElement {
       ),
     ),
 
-    // Monaco Editor
+    // Main content: Navigation Pane + Editor/Console
     React.createElement(
       "div",
-      { style: editorContainerStyle },
-      React.createElement(Editor, {
-        defaultLanguage: "javascript",
-        defaultValue: source,
-        theme: "vs-dark",
-        onMount: handleEditorMount,
-        onChange: (value) => {
-          if (value !== undefined) setSource(value);
-        },
-        options: {
-          fontSize: 14,
-          fontFamily: "Consolas, 'Courier New', monospace",
-          minimap: { enabled: true },
-          scrollBeyondLastLine: false,
-          wordWrap: "on",
-          tabSize: 2,
-          automaticLayout: true,
-          suggestOnTriggerCharacters: true,
-          quickSuggestions: true,
-          lineNumbers: "on",
-          renderLineHighlight: "all",
-          bracketPairColorization: { enabled: true },
-          padding: { top: 8 },
-        },
-      }),
-    ),
+      { style: mainContentStyle },
 
-    // Console Output Panel
-    React.createElement(
-      "div",
-      { style: consoleContainerStyle },
+      // Navigation Pane (conditionally rendered)
+      navPaneVisible && loaded
+        ? React.createElement(ModuleNavigationPane, {
+            onModuleSelect: handleModuleSelect,
+            onBeforeSwitch: handleBeforeSwitch,
+          })
+        : null,
+
+      // Editor + Console panel
       React.createElement(
         "div",
-        { style: consoleHeaderStyle },
-        React.createElement("span", null, "Console Output"),
+        { style: editorPanelStyle },
+
+        // Monaco Editor
         React.createElement(
-          "button",
-          {
-            style: clearButtonStyle,
-            onClick: handleClearConsole,
-            title: "Clear console",
-          },
-          "Clear",
-        ),
-      ),
-      React.createElement(
-        "div",
-        { style: consoleOutputStyle },
-        consoleLines.map((entry, i) =>
-          React.createElement(ConsoleLine, {
-            key: i,
-            text: entry.text,
-            type: entry.type,
+          "div",
+          { style: editorContainerStyle },
+          React.createElement(Editor, {
+            defaultLanguage: "javascript",
+            defaultValue: source,
+            theme: "vs-dark",
+            onMount: handleEditorMount,
+            onChange: handleEditorChange,
+            options: {
+              fontSize: 14,
+              fontFamily: "Consolas, 'Courier New', monospace",
+              minimap: { enabled: true },
+              scrollBeyondLastLine: false,
+              wordWrap: "on",
+              tabSize: 2,
+              automaticLayout: true,
+              suggestOnTriggerCharacters: true,
+              quickSuggestions: true,
+              lineNumbers: "on",
+              renderLineHighlight: "all",
+              bracketPairColorization: { enabled: true },
+              padding: { top: 8 },
+            },
           }),
         ),
-        React.createElement("div", { ref: consoleEndRef }),
+
+        // Console Output Panel
+        React.createElement(
+          "div",
+          { style: consoleContainerStyle },
+          React.createElement(
+            "div",
+            { style: consoleHeaderStyle },
+            React.createElement("span", null, "Console Output"),
+            React.createElement(
+              "button",
+              {
+                style: clearButtonStyle,
+                onClick: handleClearConsole,
+                title: "Clear console",
+              },
+              "Clear",
+            ),
+          ),
+          React.createElement(
+            "div",
+            { style: consoleOutputStyle },
+            consoleLines.map((entry, i) =>
+              React.createElement(ConsoleLine, {
+                key: i,
+                text: entry.text,
+                type: entry.type,
+              }),
+            ),
+            React.createElement("div", { ref: consoleEndRef }),
+          ),
+        ),
       ),
     ),
   );
