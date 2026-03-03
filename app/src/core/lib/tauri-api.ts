@@ -790,13 +790,15 @@ export async function createNamedRange(
   name: string,
   sheetIndex: number | null,
   refersTo: string,
-  comment?: string
+  comment?: string,
+  folder?: string
 ): Promise<NamedRangeResult> {
   return invoke<NamedRangeResult>("create_named_range", {
     name,
     sheetIndex,
     refersTo,
     comment: comment ?? null,
+    folder: folder ?? null,
   });
 }
 
@@ -807,13 +809,15 @@ export async function updateNamedRange(
   name: string,
   sheetIndex: number | null,
   refersTo: string,
-  comment?: string
+  comment?: string,
+  folder?: string
 ): Promise<NamedRangeResult> {
   return invoke<NamedRangeResult>("update_named_range", {
     name,
     sheetIndex,
     refersTo,
     comment: comment ?? null,
+    folder: folder ?? null,
   });
 }
 

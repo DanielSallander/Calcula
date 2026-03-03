@@ -22,6 +22,8 @@ pub struct NamedRange {
     pub refers_to: String,
     /// Optional comment/description
     pub comment: Option<String>,
+    /// Optional folder for organizational grouping in the Name Manager
+    pub folder: Option<String>,
 }
 
 /// Result of a named range operation.
@@ -135,6 +137,7 @@ pub fn create_named_range(
     sheet_index: Option<usize>,
     refers_to: String,
     comment: Option<String>,
+    folder: Option<String>,
 ) -> NamedRangeResult {
     // Validate name
     if !NamedRange::is_valid_name(&name) {
@@ -162,6 +165,7 @@ pub fn create_named_range(
         sheet_index,
         refers_to,
         comment,
+        folder,
     };
 
     named_ranges.insert(key, named_range.clone());
@@ -181,6 +185,7 @@ pub fn update_named_range(
     sheet_index: Option<usize>,
     refers_to: String,
     comment: Option<String>,
+    folder: Option<String>,
 ) -> NamedRangeResult {
     let mut named_ranges = state.named_ranges.lock().unwrap();
 
@@ -198,6 +203,7 @@ pub fn update_named_range(
         sheet_index,
         refers_to,
         comment,
+        folder,
     };
 
     named_ranges.insert(key, named_range.clone());

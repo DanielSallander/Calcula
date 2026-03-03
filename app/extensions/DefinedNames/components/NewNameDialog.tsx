@@ -156,11 +156,13 @@ export function NewNameDialog(props: DialogProps): React.ReactElement | null {
   const editRefersTo = data?.editRefersTo as string | undefined;
   const editSheetIndex = data?.editSheetIndex as number | null | undefined;
   const editComment = data?.editComment as string | undefined;
+  const editFolder = data?.editFolder as string | undefined;
 
   const [name, setName] = useState("");
   const [scopeIndex, setScopeIndex] = useState<number | null>(null);
   const [refersTo, setRefersTo] = useState("");
   const [comment, setComment] = useState("");
+  const [folder, setFolder] = useState("");
   const [sheetNames, setSheetNames] = useState<string[]>([]);
   const [validationError, setValidationError] = useState<string | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
@@ -179,10 +181,12 @@ export function NewNameDialog(props: DialogProps): React.ReactElement | null {
       setScopeIndex(editSheetIndex ?? null);
       setRefersTo(editRefersTo ?? "");
       setComment(editComment ?? "");
+      setFolder(editFolder ?? "");
     } else {
       setName("");
       setScopeIndex(null);
       setComment("");
+      setFolder("");
       // Auto-populate refersTo from current selection
       if (gridState.selection) {
         const sel = gridState.selection;
@@ -202,7 +206,7 @@ export function NewNameDialog(props: DialogProps): React.ReactElement | null {
     }
     setValidationError(null);
     setIsSubmitting(false);
-  }, [isOpen, mode, editName, editRefersTo, editSheetIndex, editComment]);
+  }, [isOpen, mode, editName, editRefersTo, editSheetIndex, editComment, editFolder]);
 
   const handleBackdropClick = useCallback(
     (e: React.MouseEvent) => {
@@ -250,7 +254,8 @@ export function NewNameDialog(props: DialogProps): React.ReactElement | null {
           editName,
           scopeIndex,
           refersTo.trim(),
-          comment || undefined
+          comment || undefined,
+          folder || undefined
         );
         if (!result.success) {
           setValidationError(result.error ?? "Failed to update named range.");
@@ -262,7 +267,8 @@ export function NewNameDialog(props: DialogProps): React.ReactElement | null {
           name,
           scopeIndex,
           refersTo.trim(),
-          comment || undefined
+          comment || undefined,
+          folder || undefined
         );
         if (!result.success) {
           setValidationError(result.error ?? "Failed to create named range.");
@@ -277,7 +283,7 @@ export function NewNameDialog(props: DialogProps): React.ReactElement | null {
       setValidationError(`Error: ${error}`);
       setIsSubmitting(false);
     }
-  }, [name, scopeIndex, refersTo, comment, mode, editName, onClose]);
+  }, [name, scopeIndex, refersTo, comment, folder, mode, editName, onClose]);
 
   if (!isOpen) return null;
 
@@ -329,6 +335,18 @@ export function NewNameDialog(props: DialogProps): React.ReactElement | null {
                 </option>
               ))}
             </select>
+          </div>
+
+          <div style={styles.field}>
+            <label style={styles.label}>Folder:</label>
+            <input
+              style={styles.input}
+              type="text"
+              value={folder}
+              onChange={(e) => setFolder(e.target.value)}
+              placeholder="(optional)"
+              onKeyDown={(e) => e.stopPropagation()}
+            />
           </div>
 
           <div style={styles.field}>

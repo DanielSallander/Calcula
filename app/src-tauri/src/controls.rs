@@ -4,10 +4,14 @@
 //          The button/checkbox bool in CellStyle handles fast rendering checks;
 //          this module stores richer metadata like onSelect scripts and formula properties.
 
-use crate::{AppState, format_cell_value_simple, parse_formula, convert_expr, create_multi_sheet_context};
+use crate::{
+    AppState, format_cell_value_simple, parse_formula, convert_expr, create_multi_sheet_context,
+    ast_has_named_refs, resolve_names_in_ast, ast_has_table_refs, resolve_table_refs_in_ast,
+    TableRefContext,
+};
 use engine::{CellValue, Evaluator};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use tauri::State;
 
 // ============================================================================
@@ -183,7 +187,41 @@ pub fn resolve_control_properties(
             let display = if let Some(ref ev) = evaluator {
                 match parse_formula(&prop.value) {
                     Ok(parser_ast) => {
-                        let engine_ast = convert_expr(&parser_ast);
+                        // Resolve named references (AST splicing)
+                        let resolved = if ast_has_named_refs(&parser_ast) {
+                            let named_ranges_map = state.named_ranges.lock().unwrap();
+                            let mut visited = HashSet::new();
+                            let r = resolve_names_in_ast(
+                                &parser_ast,
+                                &named_ranges_map,
+                                sheet_index,
+                                &mut visited,
+                            );
+                            drop(named_ranges_map);
+                            r
+                        } else {
+                            parser_ast
+                        };
+
+                        // Resolve structured table references
+                        let resolved = if ast_has_table_refs(&resolved) {
+                            let tables_map = state.tables.lock().unwrap();
+                            let table_names_map = state.table_names.lock().unwrap();
+                            let ctx = TableRefContext {
+                                tables: &tables_map,
+                                table_names: &table_names_map,
+                                current_sheet_index: sheet_index,
+                                current_row: row,
+                            };
+                            let r = resolve_table_refs_in_ast(&resolved, &ctx);
+                            drop(table_names_map);
+                            drop(tables_map);
+                            r
+                        } else {
+                            resolved
+                        };
+
+                        let engine_ast = convert_expr(&resolved);
                         let cell_value: CellValue = ev.evaluate(&engine_ast).to_cell_value();
                         format_cell_value_simple(&cell_value)
                     }

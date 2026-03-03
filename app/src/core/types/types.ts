@@ -931,6 +931,8 @@ export interface NamedRange {
   refersTo: string;
   /** Optional comment/description */
   comment?: string;
+  /** Optional folder for organizational grouping in the Name Manager */
+  folder?: string;
 }
 
 /**

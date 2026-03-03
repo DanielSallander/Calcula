@@ -156,6 +156,15 @@ export function registerControlsExtension(): void {
   });
   cleanupFns.push(unregCellsUpdated);
 
+  // 6b. Re-evaluate formula-driven properties whenever named ranges change.
+  //     Named ranges can be referenced in control property formulas (e.g., =test).
+  const unregNamedRangesChanged = onAppEvent(AppEvents.NAMED_RANGES_CHANGED, () => {
+    invalidateAllFloatingButtonCaches();
+    invalidateAllShapeCaches();
+    emitAppEvent(AppEvents.GRID_REFRESH);
+  });
+  cleanupFns.push(unregNamedRangesChanged);
+
   // 7. Register Properties Pane as a task pane
   registerTaskPane({
     id: PROPERTIES_PANE_ID,
