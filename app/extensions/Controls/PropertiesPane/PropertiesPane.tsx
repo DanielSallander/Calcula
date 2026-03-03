@@ -15,6 +15,7 @@ import {
   setControlProperty,
 } from "../lib/controlApi";
 import { listScripts } from "../../ScriptEditor/lib/scriptApi";
+import { getShapeDefinition } from "../Shape/shapeCatalog";
 
 // ============================================================================
 // Styles
@@ -156,7 +157,9 @@ export const PropertiesPane: React.FC<TaskPaneViewProps> = ({ data }) => {
         }
 
         // For visual properties, invalidate the floating cache and trigger redraw
-        if (["text", "fill", "color", "borderColor", "fontSize"].includes(key)) {
+        if (["text", "fill", "color", "borderColor", "fontSize",
+             "stroke", "strokeWidth", "textColor", "fontBold", "fontItalic",
+             "textAlign", "opacity", "rotation", "shapeType"].includes(key)) {
           window.dispatchEvent(new CustomEvent("controls:invalidate-cache", {
             detail: { sheetIndex, row, col },
           }));
@@ -204,10 +207,18 @@ export const PropertiesPane: React.FC<TaskPaneViewProps> = ({ data }) => {
     );
   }
 
-  const typeLabel =
-    controlType === "button"
-      ? "Button"
-      : controlType || metadata?.controlType || "Control";
+  const typeLabel = (() => {
+    if (controlType === "button") return "Button";
+    if (controlType === "shape") {
+      const shapeType = metadata?.properties?.shapeType?.value;
+      if (shapeType) {
+        const shapeDef = getShapeDefinition(shapeType);
+        return shapeDef?.label ?? "Shape";
+      }
+      return "Shape";
+    }
+    return controlType || metadata?.controlType || "Control";
+  })();
 
   return (
     <div style={containerStyle}>

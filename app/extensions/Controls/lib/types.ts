@@ -2,6 +2,8 @@
 // PURPOSE: TypeScript type definitions for the Controls extension.
 // CONTEXT: Mirrors Rust controls.rs types for frontend use.
 
+import { SHAPE_PROPERTIES } from "../Shape/shapeProperties";
+
 // ============================================================================
 // Control Property Types
 // ============================================================================
@@ -127,6 +129,8 @@ export function getPropertyDefinitions(controlType: string): PropertyDefinition[
   switch (controlType) {
     case "button":
       return BUTTON_PROPERTIES;
+    case "shape":
+      return SHAPE_PROPERTIES;
     default:
       return [];
   }

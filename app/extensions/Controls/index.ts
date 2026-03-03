@@ -36,6 +36,13 @@ import {
   invalidateAllFloatingButtonCaches,
 } from "./Button/floatingRenderer";
 import {
+  renderFloatingShape,
+  hitTestFloatingShape,
+  invalidateShapeCache,
+  invalidateAllShapeCaches,
+} from "./Shape/shapeRenderer";
+import { getShapeCategories, getShapeDefinition } from "./Shape/shapeCatalog";
+import {
   selectFloatingControl,
   deselectFloatingControl,
   getSelectedFloatingControl,
@@ -73,6 +80,30 @@ const cleanupFns: (() => void)[] = [];
 
 /** Reference to the design mode menu item for toggling its checked state. */
 let designModeMenuItem: { checked?: boolean } | null = null;
+
+// ============================================================================
+// Overlay Dispatchers (route render/hitTest by controlType)
+// ============================================================================
+
+import type { OverlayRenderContext, OverlayHitTestContext } from "../../src/api/gridOverlays";
+
+function renderFloatingControl(overlayCtx: OverlayRenderContext): void {
+  const controlType = overlayCtx.region.data?.controlType;
+  if (controlType === "shape") {
+    renderFloatingShape(overlayCtx);
+  } else {
+    renderFloatingButton(overlayCtx);
+  }
+}
+
+function hitTestFloatingControl(hitCtx: OverlayHitTestContext): boolean {
+  const controlType = hitCtx.region.data?.controlType;
+  if (controlType === "shape") {
+    return hitTestFloatingShape(hitCtx);
+  } else {
+    return hitTestFloatingButton(hitCtx);
+  }
+}
 
 // ============================================================================
 // Registration
@@ -120,6 +151,7 @@ export function registerControlsExtension(): void {
   const unregCellsUpdated = onAppEvent(AppEvents.CELLS_UPDATED, () => {
     refreshStyleCache();
     invalidateAllFloatingButtonCaches();
+    invalidateAllShapeCaches();
     emitAppEvent(AppEvents.GRID_REFRESH);
   });
   cleanupFns.push(unregCellsUpdated);
@@ -146,6 +178,22 @@ export function registerControlsExtension(): void {
         action: insertButton,
       },
     ],
+  });
+
+  // 8b. Register Insert > Shapes menu with subcategories
+  const shapeCategories = getShapeCategories();
+  registerMenuItem("insert", {
+    id: "insert.shapes",
+    label: "Shapes",
+    children: shapeCategories.map((category) => ({
+      id: `insert.shapes.${category.id}`,
+      label: category.label,
+      children: category.shapes.map((shape) => ({
+        id: `insert.shapes.${category.id}.${shape.id}`,
+        label: shape.label,
+        action: () => insertShape(shape.id),
+      })),
+    })),
   });
 
   // 9. Register Developer > Design Mode menu item
@@ -189,8 +237,8 @@ export function registerControlsExtension(): void {
   // -----------------------------------------------------------------------
   const unregOverlay = registerGridOverlay({
     type: "floating-control",
-    render: renderFloatingButton,
-    hitTest: hitTestFloatingButton,
+    render: renderFloatingControl,
+    hitTest: hitTestFloatingControl,
     priority: 12, // Above table (5), below charts (15)
   });
   cleanupFns.push(unregOverlay);
@@ -220,6 +268,7 @@ export function registerControlsExtension(): void {
     if (detail) {
       const controlId = makeFloatingControlId(detail.sheetIndex, detail.row, detail.col);
       invalidateFloatingButtonCache(controlId);
+      invalidateShapeCache(controlId);
       emitAppEvent(AppEvents.GRID_REFRESH);
     }
   };
@@ -337,6 +386,95 @@ function getCurrentSelectionFromInterceptor() {
 }
 
 // ============================================================================
+// Insert Shape Action (Always Floating)
+// ============================================================================
+
+/**
+ * Insert a shape control on the current selection.
+ * Creates a floating shape positioned at the selected cell's location.
+ */
+async function insertShape(shapeType: string): Promise<void> {
+  const { restoreFocusToGrid } = await import("../../src/api/events");
+  const { getGridStateSnapshot } = await import("../../src/api/grid");
+  const { getColumnWidth, getRowHeight } = await import("../../src/api/dimensions");
+
+  const shapeDef = getShapeDefinition(shapeType);
+  if (!shapeDef) return;
+
+  // Get current selection
+  const sel = getCurrentSelectionFromInterceptor();
+  if (!sel) return;
+
+  const row = sel.endRow;
+  const col = sel.endCol;
+
+  // Get grid state for position calculation
+  const gridState = getGridStateSnapshot();
+  if (!gridState) return;
+
+  const sheetIndex = gridState.config?.activeSheet ?? 0;
+  const defaultCellWidth = gridState.config?.defaultCellWidth ?? 100;
+  const defaultCellHeight = gridState.config?.defaultCellHeight ?? 24;
+  const columnWidths = gridState.dimensions?.columnWidths ?? new Map();
+  const rowHeights = gridState.dimensions?.rowHeights ?? new Map();
+
+  // Calculate pixel position from cell bounds (sheet coordinates, no scroll)
+  let cellX = 0;
+  for (let c = 0; c < col; c++) {
+    cellX += getColumnWidth(c, defaultCellWidth, columnWidths);
+  }
+  let cellY = 0;
+  for (let r = 0; r < row; r++) {
+    cellY += getRowHeight(r, defaultCellHeight, rowHeights);
+  }
+
+  const shapeWidth = shapeDef.defaultWidth;
+  const shapeHeight = shapeDef.defaultHeight;
+
+  // Create control metadata for the shape
+  await setControlMetadata(sheetIndex, row, col, {
+    controlType: "shape",
+    properties: {
+      shapeType: { valueType: "static", value: shapeType },
+      fill: { valueType: "static", value: "#4472C4" },
+      stroke: { valueType: "static", value: "#2F528F" },
+      strokeWidth: { valueType: "static", value: "1" },
+      text: { valueType: "static", value: "" },
+      textColor: { valueType: "static", value: "#FFFFFF" },
+      fontSize: { valueType: "static", value: "11" },
+      fontBold: { valueType: "static", value: "false" },
+      fontItalic: { valueType: "static", value: "false" },
+      textAlign: { valueType: "static", value: "center" },
+      opacity: { valueType: "static", value: "1" },
+      rotation: { valueType: "static", value: "0" },
+      x: { valueType: "static", value: String(cellX) },
+      y: { valueType: "static", value: String(cellY) },
+      width: { valueType: "static", value: String(shapeWidth) },
+      height: { valueType: "static", value: String(shapeHeight) },
+    },
+  });
+
+  // Add to floating store
+  const controlId = makeFloatingControlId(sheetIndex, row, col);
+  addFloatingControl({
+    id: controlId,
+    sheetIndex,
+    row,
+    col,
+    x: cellX,
+    y: cellY,
+    width: shapeWidth,
+    height: shapeHeight,
+    controlType: "shape",
+  });
+
+  // Sync overlay regions and refresh
+  syncFloatingControlRegions();
+  emitAppEvent(AppEvents.GRID_REFRESH);
+  restoreFocusToGrid();
+}
+
+// ============================================================================
 // Floating Object Event Handlers
 // ============================================================================
 
@@ -351,20 +489,25 @@ function setupFloatingObjectEvents(): void {
     const controlCol = detail.data?.col as number;
     const controlSheet = detail.data?.sheetIndex as number;
 
-    if (getDesignMode()) {
-      // Design mode: select the control and show properties
+    const ctrlType = detail.data?.controlType ?? "button";
+
+    if (getDesignMode() || ctrlType === "shape") {
+      // Design mode or shape: select the control and show properties
+      // (shapes are always selectable regardless of design mode)
       selectFloatingControl(controlId);
       lastPropertiesCell = { row: controlRow, col: controlCol };
       openTaskPane(PROPERTIES_PANE_ID, {
         row: controlRow,
         col: controlCol,
         sheetIndex: controlSheet,
-        controlType: detail.data?.controlType ?? "button",
+        controlType: ctrlType,
       });
       emitAppEvent(AppEvents.GRID_REFRESH);
     } else {
-      // Run mode: execute the button's onSelect script
-      executeFloatingButtonAction(controlSheet, controlRow, controlCol);
+      // Run mode: only buttons execute scripts
+      if (ctrlType === "button") {
+        executeFloatingButtonAction(controlSheet, controlRow, controlCol);
+      }
     }
   };
   window.addEventListener("floatingObject:selected", handleFloatingSelected);
@@ -701,7 +844,10 @@ async function loadFloatingControls(): Promise<void> {
     const controls = await getAllControls(sheetIndex);
     for (const entry of controls) {
       const props = entry.metadata.properties;
-      const isEmbedded = props.embedded?.value !== "false"; // default to embedded for legacy
+      // Buttons default to embedded for legacy; shapes are always floating
+      const isEmbedded = entry.metadata.controlType === "button"
+        ? (props.embedded?.value !== "false")
+        : false;
 
       if (!isEmbedded) {
         const x = parseFloat(props.x?.value ?? "0");
@@ -928,5 +1074,6 @@ export function unregisterControlsExtension(): void {
   resetFloatingStore();
   deselectFloatingControl();
   invalidateAllFloatingButtonCaches();
+  invalidateAllShapeCaches();
   console.log("[Controls] Unregistered");
 }
