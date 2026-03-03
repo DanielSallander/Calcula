@@ -1,6 +1,7 @@
 //! FILENAME: app/src/shell/Overlays/GridContextMenuHost.tsx
 // PURPOSE: Shell component that listens for context menu events from Core
 // CONTEXT: Implements Inversion of Control - Core emits events, Shell renders UI
+//          Also renders a MiniFormatToolbar above the context menu (Excel-style).
 
 import React, { useState, useEffect, useCallback } from "react";
 import {
@@ -13,6 +14,7 @@ import {
   type GridContextMenuItem,
 } from "../../api";
 import { ContextMenu, type ContextMenuItem } from "./ContextMenu";
+import { MiniFormatToolbar } from "./MiniFormatToolbar";
 
 interface ContextMenuState {
   position: { x: number; y: number };
@@ -41,6 +43,14 @@ function mapItem(
     onClick: () => item.onClick(context),
     children: item.children?.map((child) => mapItem(child, context, onClose)),
   };
+}
+
+/** Check if the context menu is for cell(s), not row/column headers */
+function isCellSelection(context: GridMenuContext): boolean {
+  const sel = context.selection;
+  if (!sel) return false;
+  // Show mini toolbar only for cell selections, not row/column header selections
+  return sel.type === "cells";
 }
 
 export function GridContextMenuHost(): React.ReactElement | null {
@@ -92,13 +102,23 @@ export function GridContextMenuHost(): React.ReactElement | null {
   }
 
   const items = getMenuItems();
+  const showMiniToolbar = isCellSelection(menuState.context);
 
   return (
-    <ContextMenu
-      position={menuState.position}
-      items={items}
-      onClose={handleClose}
-      showSearch={items.length > SEARCH_THRESHOLD}
-    />
+    <>
+      {showMiniToolbar && (
+        <MiniFormatToolbar
+          position={menuState.position}
+          context={menuState.context}
+          onClose={handleClose}
+        />
+      )}
+      <ContextMenu
+        position={menuState.position}
+        items={items}
+        onClose={handleClose}
+        showSearch={items.length > SEARCH_THRESHOLD}
+      />
+    </>
   );
 }

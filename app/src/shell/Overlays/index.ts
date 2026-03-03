@@ -7,3 +7,6 @@ export type {
   ContextMenuItem,
   ContextMenuPosition,
 } from "./ContextMenu";
+
+export { MiniFormatToolbar } from "./MiniFormatToolbar";
+export type { MiniFormatToolbarProps } from "./MiniFormatToolbar";
