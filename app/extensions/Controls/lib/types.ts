@@ -41,7 +41,7 @@ export interface PropertyDefinition {
   /** Display label in the Properties Pane */
   label: string;
   /** Input type for static values */
-  inputType: "text" | "color" | "number" | "script" | "boolean";
+  inputType: "text" | "color" | "number" | "script" | "code" | "boolean";
   /** Default static value */
   defaultValue: string;
   /** Whether this property supports formula mode */
@@ -109,7 +109,7 @@ export const BUTTON_PROPERTIES: PropertyDefinition[] = [
   {
     key: "onSelect",
     label: "OnSelect",
-    inputType: "script",
+    inputType: "code",
     defaultValue: "",
     supportsFormula: false,
   },

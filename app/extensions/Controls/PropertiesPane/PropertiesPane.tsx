@@ -230,7 +230,7 @@ export const PropertiesPane: React.FC<TaskPaneViewProps> = ({ data }) => {
             {/* Visual properties */}
             <div style={sectionHeaderStyle}>Appearance</div>
             {propDefs
-              .filter((d) => d.inputType !== "script" && d.inputType !== "boolean")
+              .filter((d) => d.inputType !== "script" && d.inputType !== "code" && d.inputType !== "boolean")
               .map((def) => (
                 <PropertyRow
                   key={def.key}
@@ -260,11 +260,11 @@ export const PropertiesPane: React.FC<TaskPaneViewProps> = ({ data }) => {
             )}
 
             {/* Action properties */}
-            {propDefs.some((d) => d.inputType === "script") && (
+            {propDefs.some((d) => d.inputType === "script" || d.inputType === "code") && (
               <>
                 <div style={sectionHeaderStyle}>Actions</div>
                 {propDefs
-                  .filter((d) => d.inputType === "script")
+                  .filter((d) => d.inputType === "script" || d.inputType === "code")
                   .map((def) => (
                     <PropertyRow
                       key={def.key}

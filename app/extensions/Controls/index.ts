@@ -468,10 +468,47 @@ async function updateFloatingBoundsFromMetadata(
 }
 
 /**
- * Execute a floating button's onSelect script.
+ * Sanitize a script module name into a valid JavaScript identifier.
+ */
+function sanitizeScriptName(name: string): string {
+  let sanitized = name.replace(/[^a-zA-Z0-9_]/g, "_");
+  if (sanitized && /^[0-9]/.test(sanitized)) {
+    sanitized = "_" + sanitized;
+  }
+  return sanitized || "_unnamed";
+}
+
+/**
+ * Build a preamble that wraps all script modules as callable functions.
+ * Each module's source is wrapped as: function ModuleName() { ...source... }
+ */
+async function buildScriptPreamble(): Promise<string> {
+  const { listScripts, getScript } = await import("../ScriptEditor/lib/scriptApi");
+  const summaries = await listScripts();
+  if (summaries.length === 0) return "";
+
+  const parts: string[] = [];
+  for (const summary of summaries) {
+    try {
+      const script = await getScript(summary.id);
+      if (script && script.source) {
+        const fnName = sanitizeScriptName(script.name);
+        parts.push(`function ${fnName}() {\n${script.source}\n}`);
+      }
+    } catch {
+      // Skip modules that fail to load
+    }
+  }
+  return parts.length > 0 ? parts.join("\n") + "\n" : "";
+}
+
+/**
+ * Execute a floating button's OnSelect action.
+ * The onSelect value is inline code that runs directly in the script engine.
+ * Custom script modules from the Script Editor are available as callable functions.
  */
 async function executeFloatingButtonAction(sheetIndex: number, row: number, col: number): Promise<void> {
-  const { runScript, getScript } = await import("../ScriptEditor/lib/scriptApi");
+  const { runScript } = await import("../ScriptEditor/lib/scriptApi");
 
   const metadata = await getControlMetadata(sheetIndex, row, col);
   if (!metadata) return;
@@ -480,17 +517,17 @@ async function executeFloatingButtonAction(sheetIndex: number, row: number, col:
   if (!onSelect || !onSelect.value) return;
 
   try {
-    const script = await getScript(onSelect.value);
-    if (script && script.source) {
-      const result = await runScript(script.source, script.name || "button_script.js");
-      if (result.type === "success" && result.cellsModified > 0) {
-        window.dispatchEvent(new CustomEvent("grid:refresh"));
-      } else if (result.type === "error") {
-        console.error(`[Controls] Button script error: ${result.message}`);
-      }
+    // Prepend script modules as callable functions, then append the OnSelect code
+    const preamble = await buildScriptPreamble();
+    const fullSource = preamble + onSelect.value;
+    const result = await runScript(fullSource, "button_onSelect.js");
+    if (result.type === "success" && result.cellsModified > 0) {
+      window.dispatchEvent(new CustomEvent("grid:refresh"));
+    } else if (result.type === "error") {
+      console.error(`[Controls] Button OnSelect error: ${result.message}`);
     }
   } catch (err) {
-    console.error("[Controls] Failed to execute floating button script:", err);
+    console.error("[Controls] Failed to execute floating button OnSelect:", err);
   }
 }
 

@@ -6,6 +6,7 @@
 import React, { useState, useEffect, useCallback } from "react";
 import type { ControlPropertyValue, PropertyDefinition } from "../lib/types";
 import { FormulaPropertyInput } from "./FormulaPropertyInput";
+import { CodePropertyInput } from "./CodePropertyInput";
 
 // ============================================================================
 // Styles
@@ -274,6 +275,19 @@ export const PropertyRow: React.FC<PropertyRowProps> = ({
             />
             {localValue === "true" ? "Yes" : "No"}
           </label>
+        );
+
+      case "code":
+        return (
+          <CodePropertyInput
+            value={localValue}
+            onChange={(newVal) => setLocalValue(newVal)}
+            onCommit={(newVal) => {
+              setLocalValue(newVal);
+              handleCommit(newVal);
+            }}
+            scripts={scripts}
+          />
         );
 
       case "script":
