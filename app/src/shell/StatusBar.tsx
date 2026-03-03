@@ -1,7 +1,7 @@
 //! FILENAME: app/src/shell/StatusBar.tsx
 // PURPOSE: Status bar component at the bottom of the application.
-// CONTEXT: Renders "Ready" text on the left, extension count on the right,
-//          and any registered status bar items from extensions.
+// CONTEXT: Renders "Ready" text on the left, extension items on the right
+//          (including zoom slider registered by the ZoomSlider extension).
 
 import React, { useState, useEffect, useCallback } from "react";
 import {
@@ -13,11 +13,11 @@ import {
 } from "../api";
 
 interface StatusBarProps {
-  activeCount: number;
-  errorCount: number;
+  activeCount?: number;
+  errorCount?: number;
 }
 
-export function StatusBar({ activeCount, errorCount }: StatusBarProps): React.ReactElement {
+export function StatusBar(_props: StatusBarProps): React.ReactElement {
   const [items, setItems] = useState<StatusBarItemDefinition[]>(() => getStatusBarItems());
 
   const refresh = useCallback(() => {
@@ -65,9 +65,6 @@ export function StatusBar({ activeCount, errorCount }: StatusBarProps): React.Re
         {rightItems.map((item) => (
           <item.component key={item.id} />
         ))}
-        <span style={{ opacity: 0.8 }}>
-          Extensions: {activeCount} active{errorCount > 0 ? `, ${errorCount} error` : ""}
-        </span>
       </div>
     </div>
   );

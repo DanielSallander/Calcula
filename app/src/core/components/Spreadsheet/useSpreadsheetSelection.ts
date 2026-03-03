@@ -606,14 +606,16 @@ export function useSpreadsheetSelection({
     onMoveCells: moveCells,
     onMoveRows: moveRows,
     onMoveColumns: moveColumns,
+    zoom: state.zoom,
   });
 
   // Wrap mouse handlers to include fill handle logic and extension click interception
   const handleMouseDown = useCallback(
     async (event: React.MouseEvent<HTMLElement>) => {
       const rect = event.currentTarget.getBoundingClientRect();
-      const mouseX = event.clientX - rect.left;
-      const mouseY = event.clientY - rect.top;
+      const z = state.zoom;
+      const mouseX = (event.clientX - rect.left) / z;
+      const mouseY = (event.clientY - rect.top) / z;
 
       // Check if clicking on fill handle
       if (isOverFillHandle(mouseX, mouseY)) {
@@ -650,14 +652,15 @@ export function useSpreadsheetSelection({
 
       baseHandleMouseDown(event);
     },
-    [baseHandleMouseDown, isOverFillHandle, startFillDrag, isOverFloatingOverlay, isEditing, state.config, state.viewport, state.dimensions]
+    [baseHandleMouseDown, isOverFillHandle, startFillDrag, isOverFloatingOverlay, isEditing, state.config, state.viewport, state.dimensions, state.zoom]
   );
 
   const handleMouseMove = useCallback(
     (event: React.MouseEvent<HTMLElement>) => {
       const rect = event.currentTarget.getBoundingClientRect();
-      const mouseX = event.clientX - rect.left;
-      const mouseY = event.clientY - rect.top;
+      const z = state.zoom;
+      const mouseX = (event.clientX - rect.left) / z;
+      const mouseY = (event.clientY - rect.top) / z;
 
       // Handle fill drag
       if (fillState.isDragging) {
@@ -667,7 +670,7 @@ export function useSpreadsheetSelection({
 
       baseHandleMouseMove(event);
     },
-    [baseHandleMouseMove, fillState.isDragging, updateFillDrag]
+    [baseHandleMouseMove, fillState.isDragging, updateFillDrag, state.zoom]
   );
 
   const handleMouseUp = useCallback(() => {
@@ -697,8 +700,9 @@ export function useSpreadsheetSelection({
       const rect = containerRef.current?.getBoundingClientRect();
       if (!rect) return;
 
-      const mouseX = event.clientX - rect.left;
-      const mouseY = event.clientY - rect.top;
+      const z = state.zoom;
+      const mouseX = (event.clientX - rect.left) / z;
+      const mouseY = (event.clientY - rect.top) / z;
       updateFillDrag(mouseX, mouseY);
     };
 
@@ -713,7 +717,7 @@ export function useSpreadsheetSelection({
       window.removeEventListener("mousemove", handleGlobalMouseMove);
       window.removeEventListener("mouseup", handleGlobalMouseUp);
     };
-  }, [fillState.isDragging, containerRef, updateFillDrag, completeFill]);
+  }, [fillState.isDragging, containerRef, updateFillDrag, completeFill, state.zoom]);
 
   // -------------------------------------------------------------------------
   // Command handler for formatting, fill, and data entry shortcuts

@@ -45,6 +45,7 @@ export {
   setManuallyHiddenCols,
   setGroupHiddenRows,
   setGroupHiddenCols,
+  setZoom,
 } from "../core/state/gridActions";
 
 // Re-export action types

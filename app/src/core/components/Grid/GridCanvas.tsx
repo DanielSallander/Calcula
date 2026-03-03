@@ -54,6 +54,8 @@ export interface GridCanvasProps {
   className?: string;
   /** Current sheet name for cross-sheet reference highlighting */
   currentSheetName?: string;
+  /** Zoom factor (1.0 = 100%) */
+  zoom?: number;
 }
 
 /**
@@ -161,6 +163,7 @@ export const GridCanvas = forwardRef<GridCanvasHandle, GridCanvasProps>(
       onMouseUp,
       className,
       currentSheetName,
+      zoom = 1,
     } = props;
 
     const containerRef = useRef<HTMLDivElement | null>(null);
@@ -259,7 +262,7 @@ export const GridCanvas = forwardRef<GridCanvasHandle, GridCanvasProps>(
         return null;
       }
 
-      const range = calculateVisibleRange(viewport, config, canvasSize.width, canvasSize.height, dims);
+      const range = calculateVisibleRange(viewport, config, canvasSize.width / zoom, canvasSize.height / zoom, dims);
 
       // Calculate the base range from scroll position
       let startRow = Math.max(0, range.startRow - CELL_BUFFER);
@@ -276,7 +279,7 @@ export const GridCanvas = forwardRef<GridCanvasHandle, GridCanvasProps>(
       }
 
       return { startRow, endRow, startCol, endCol };
-    }, [viewport, config, canvasSize.width, canvasSize.height, dims, freezeConfig]);
+    }, [viewport, config, canvasSize.width, canvasSize.height, dims, freezeConfig, zoom]);
 
     /**
      * Check if we need to fetch new cells based on scroll position.
@@ -382,19 +385,6 @@ export const GridCanvas = forwardRef<GridCanvasHandle, GridCanvasProps>(
     }, [fetchCells]);
 
     /**
-     * Clear the canvas.
-     */
-    const clear = useCallback(() => {
-      if (context && canvasSize.width > 0 && canvasSize.height > 0) {
-        // Use theme background if available, otherwise default to white.
-        // Note: Canvas API requires explicit color strings, we are not using CSS vars here for performance/logic reasons.
-        // Ideally this should map to theme.backgroundColor.
-        context.fillStyle = "#ffffff"; 
-        context.fillRect(0, 0, canvasSize.width, canvasSize.height);
-      }
-    }, [context, canvasSize.width, canvasSize.height]);
-
-    /**
      * Draw the grid content using the grid renderer.
      * Accepts optional animation offset for marching ants and insertion animation.
      */
@@ -405,14 +395,23 @@ export const GridCanvas = forwardRef<GridCanvasHandle, GridCanvasProps>(
 
       const perfDrawStart = performance.now();
 
-      // Clear the canvas
-      clear();
+      // Apply zoom + DPR transform before drawing
+      const dpr = window.devicePixelRatio || 1;
+      context.setTransform(dpr * zoom, 0, 0, dpr * zoom, 0, 0);
+
+      // Effective logical dimensions at this zoom level
+      const effectiveWidth = canvasSize.width / zoom;
+      const effectiveHeight = canvasSize.height / zoom;
+
+      // Clear the canvas at effective dimensions
+      context.fillStyle = "#ffffff";
+      context.fillRect(0, 0, effectiveWidth, effectiveHeight);
 
       // Render the grid with cell data, formula references, style cache, fill preview, selection drag preview, clipboard, insertion animation, freeze config, and sheet context
       renderGrid(
         context,
-        canvasSize.width,
-        canvasSize.height,
+        effectiveWidth,
+        effectiveHeight,
         config,
         viewport,
         selection,
@@ -439,7 +438,7 @@ export const GridCanvas = forwardRef<GridCanvasHandle, GridCanvasProps>(
       if (perfDrawMs > 5) {
         console.log(`[PERF] draw ms=${perfDrawMs.toFixed(1)}`);
       }
-    }, [context, canvasSize.width, canvasSize.height, config, viewport, selection, editing, cells, theme, formulaReferences, dims, styleCache, fillPreviewRange, selectionDragPreview, clipboardSelection, clipboardMode, freezeConfig, clear, currentSheetName]);
+    }, [context, canvasSize.width, canvasSize.height, config, viewport, selection, editing, cells, theme, formulaReferences, dims, styleCache, fillPreviewRange, selectionDragPreview, clipboardSelection, clipboardMode, freezeConfig, currentSheetName, zoom]);
 
     /**
      * Start row insertion animation.

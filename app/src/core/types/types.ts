@@ -11,6 +11,15 @@
 //          per Microkernel Architecture (Find is a feature, not a kernel primitive)
 
 /**
+ * Zoom constants.
+ */
+export const ZOOM_MIN = 0.1;
+export const ZOOM_MAX = 5.0;
+export const ZOOM_DEFAULT = 1.0;
+export const ZOOM_STEP = 0.1;
+export const ZOOM_PRESETS = [0.25, 0.5, 0.75, 1.0, 1.25, 1.5, 2.0, 3.0, 4.0];
+
+/**
  * Type of selection: cells, entire column(s), or entire row(s).
  */
 export type SelectionType = "cells" | "columns" | "rows";
@@ -637,6 +646,8 @@ export interface GridState {
   sheetContext: SheetContext;
   /** Freeze panes configuration */
   freezeConfig: FreezeConfig;
+  /** Zoom factor (1.0 = 100%, 0.5 = 50%, 2.0 = 200%) */
+  zoom: number;
 }
 
 /**
@@ -680,6 +691,7 @@ export function createInitialGridState(): GridState {
       activeSheetName: "Sheet1",
     },
     freezeConfig: { ...DEFAULT_FREEZE_CONFIG },
+    zoom: ZOOM_DEFAULT,
   };
 }
 

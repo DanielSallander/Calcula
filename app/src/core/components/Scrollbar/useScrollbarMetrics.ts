@@ -30,6 +30,8 @@ export interface UseScrollbarMetricsOptions {
   viewportDimensions: ViewportDimensions;
   /** How often to refresh used range from backend (ms) */
   refreshInterval?: number;
+  /** Zoom factor (1.0 = 100%) */
+  zoom?: number;
 }
 
 const SCROLLBAR_SIZE = 14;
@@ -46,6 +48,7 @@ export function useScrollbarMetrics({
   viewport,
   viewportDimensions,
   refreshInterval = 2000,
+  zoom = 1,
 }: UseScrollbarMetricsOptions): ScrollbarMetrics {
   const [usedRange, setUsedRange] = useState<{ maxRow: number; maxCol: number }>({
     maxRow: 0,
@@ -97,14 +100,17 @@ export function useScrollbarMetrics({
     };
   }
 
-  // Available viewport size (minus headers and scrollbar space)
+  // Available viewport size in logical (unzoomed) pixels.
+  // The scrollbar and the CSS container are in physical pixels,
+  // so we subtract SCROLLBAR_SIZE first, then divide by zoom to get
+  // the logical space available for cell content.
   const availableWidth = Math.max(
     1,
-    viewportDimensions.width - config.rowHeaderWidth - SCROLLBAR_SIZE
+    (viewportDimensions.width - SCROLLBAR_SIZE) / zoom - config.rowHeaderWidth
   );
   const availableHeight = Math.max(
     1,
-    viewportDimensions.height - config.colHeaderHeight - SCROLLBAR_SIZE
+    (viewportDimensions.height - SCROLLBAR_SIZE) / zoom - config.colHeaderHeight
   );
 
   // Calculate how many rows/cols fit in the viewport

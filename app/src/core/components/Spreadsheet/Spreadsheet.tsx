@@ -6,7 +6,8 @@
 import React, { useCallback, useEffect, useRef } from "react";
 import { useGridState, useGridContext } from "../../state";
 // FIX: Removed openFind import to resolve SyntaxError
-import { setViewportDimensions, setAllDimensions, setSelection, setManuallyHiddenRows, setManuallyHiddenCols } from "../../state/gridActions";
+import { setViewportDimensions, setAllDimensions, setSelection, setManuallyHiddenRows, setManuallyHiddenCols, setZoom } from "../../state/gridActions";
+import { ZOOM_MIN, ZOOM_MAX, ZOOM_STEP } from "../../types";
 import type { Selection, Viewport, VirtualBounds } from "../../types";
 import { GridCanvas } from "../Grid";
 import { InlineEditor } from "../InlineEditor";
@@ -508,8 +509,9 @@ function SpreadsheetContent({
         return;
       }
 
-      const mouseX = event.clientX - rect.left;
-      const mouseY = event.clientY - rect.top;
+      const z = gridState.zoom;
+      const mouseX = (event.clientX - rect.left) / z;
+      const mouseY = (event.clientY - rect.top) / z;
 
       // Check if right-click is on the corner (select-all area)
       const isCornerClick = mouseX < (config.rowHeaderWidth || 50) && mouseY < (config.colHeaderHeight || 24);
@@ -625,6 +627,7 @@ function SpreadsheetContent({
     config: gridState.config,
     viewport: gridState.viewport,
     viewportDimensions: gridState.viewportDimensions,
+    zoom: gridState.zoom,
   });
 
   const handleHorizontalScroll = useCallback(
@@ -656,6 +659,15 @@ function SpreadsheetContent({
   const handleWheel = useCallback(
     (event: React.WheelEvent<HTMLDivElement>) => {
       event.preventDefault();
+
+      // Ctrl+Wheel: zoom in/out
+      if (event.ctrlKey || event.metaKey) {
+        const delta = event.deltaY > 0 ? -ZOOM_STEP : ZOOM_STEP;
+        const currentZoom = gridState.zoom;
+        const newZoom = Math.round((currentZoom + delta) * 100) / 100;
+        dispatch(setZoom(Math.max(ZOOM_MIN, Math.min(ZOOM_MAX, newZoom))));
+        return;
+      }
 
       const deltaX = event.deltaX;
       const deltaY = event.deltaY;
@@ -692,16 +704,17 @@ function SpreadsheetContent({
       handleScrollEvent,
       gridState.viewport.scrollX,
       gridState.viewport.scrollY,
+      gridState.zoom,
       scrollbarMetrics,
+      dispatch,
     ]
   );
 
   const viewportWidth =
-    gridState.viewportDimensions.width - config.rowHeaderWidth - SCROLLBAR_SIZE;
+    (gridState.viewportDimensions.width - SCROLLBAR_SIZE) / gridState.zoom - config.rowHeaderWidth;
   const viewportHeight =
-    gridState.viewportDimensions.height -
-    config.colHeaderHeight -
-    SCROLLBAR_SIZE;
+    (gridState.viewportDimensions.height - SCROLLBAR_SIZE) / gridState.zoom -
+    config.colHeaderHeight;
 
   return (
     <S.SpreadsheetContainer
@@ -738,6 +751,7 @@ function SpreadsheetContent({
             selectionDragPreview={selectionDragPreview}
             freezeConfig={freezeConfig}
             currentSheetName={gridState.sheetContext.activeSheetName}
+            zoom={gridState.zoom}
           />
 
           {editing && isEditing && (
@@ -746,6 +760,7 @@ function SpreadsheetContent({
               viewport={viewport}
               editing={editing}
               dimensions={dimensions}
+              zoom={gridState.zoom}
               onValueChange={handleInlineValueChange}
               onCommit={handleInlineCommit}
               onCancel={handleInlineCancel}

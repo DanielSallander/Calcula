@@ -20,6 +20,7 @@ import PasteSpecialExtension from "./BuiltIn/PasteSpecial";
 import StatusBarAggregationExtension from "./BuiltIn/StatusBarAggregation";
 import ComputedPropertiesExtension from "./BuiltIn/ComputedProperties";
 import CellBookmarksExtension from "./BuiltIn/CellBookmarks";
+import ZoomSliderExtension from "./BuiltIn/ZoomSlider";
 
 // ============================================================================
 // Built-in Extension Manifest
@@ -48,6 +49,8 @@ export const builtInExtensions: ExtensionModule[] = [
   ComputedPropertiesExtension,
   // Cell Bookmarks (mark, navigate, manage bookmarks - extensibility test)
   CellBookmarksExtension,
+  // Zoom Slider (Excel-style zoom control in status bar)
+  ZoomSliderExtension,
 ];
 
 /**

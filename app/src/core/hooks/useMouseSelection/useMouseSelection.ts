@@ -93,6 +93,7 @@ export function useMouseSelection(props: UseMouseSelectionProps): UseMouseSelect
     onMoveCells,
     onMoveRows,
     onMoveColumns,
+    zoom = 1,
   } = props;
 
   // -------------------------------------------------------------------------
@@ -349,8 +350,8 @@ export function useMouseSelection(props: UseMouseSelectionProps): UseMouseSelect
         return;
       }
       const rect = containerRef.current.getBoundingClientRect();
-      const mouseX = event.clientX - rect.left;
-      const mouseY = event.clientY - rect.top;
+      const mouseX = (event.clientX - rect.left) / zoom;
+      const mouseY = (event.clientY - rect.top) / zoom;
 
       // Priority 1: Check for resize handle
       if (resizeHandlers.handleResizeMouseDown(mouseX, mouseY, event)) {
@@ -446,6 +447,7 @@ export function useMouseSelection(props: UseMouseSelectionProps): UseMouseSelect
     },
     [
       containerRef,
+      zoom,
       isFormulaMode,
       selection,
       resizeHandlers,
@@ -471,8 +473,8 @@ export function useMouseSelection(props: UseMouseSelectionProps): UseMouseSelect
         return;
       }
       const rect = containerRef.current.getBoundingClientRect();
-      const mouseX = event.clientX - rect.left;
-      const mouseY = event.clientY - rect.top;
+      const mouseX = (event.clientX - rect.left) / zoom;
+      const mouseY = (event.clientY - rect.top) / zoom;
 
       // Update last mouse position for auto-scroll
       lastMousePosRef.current = { x: mouseX, y: mouseY };
@@ -642,6 +644,7 @@ export function useMouseSelection(props: UseMouseSelectionProps): UseMouseSelect
     },
     [
       containerRef,
+      zoom,
       config,
       viewport,
       dimensions,
@@ -774,8 +777,8 @@ export function useMouseSelection(props: UseMouseSelectionProps): UseMouseSelect
         return null;
       }
       const rect = containerRef.current.getBoundingClientRect();
-      const mouseX = event.clientX - rect.left;
-      const mouseY = event.clientY - rect.top;
+      const mouseX = (event.clientX - rect.left) / zoom;
+      const mouseY = (event.clientY - rect.top) / zoom;
 
       // Check if double-click is on a floating overlay (e.g., chart) - block editing
       if (overlayMoveHandlers.checkOverlayBody(mouseX, mouseY)) {
@@ -813,7 +816,7 @@ export function useMouseSelection(props: UseMouseSelectionProps): UseMouseSelect
 
       return getCellFromPixel(mouseX, mouseY, config, viewport, dimensions);
     },
-    [containerRef, config, viewport, dimensions, overlayMoveHandlers, isOverFillHandle, onFillHandleDoubleClick, onAutoFitColumn, onAutoFitRow]
+    [containerRef, zoom, config, viewport, dimensions, overlayMoveHandlers, isOverFillHandle, onFillHandleDoubleClick, onAutoFitColumn, onAutoFitRow]
   );
 
   // -------------------------------------------------------------------------
@@ -871,8 +874,8 @@ export function useMouseSelection(props: UseMouseSelectionProps): UseMouseSelect
       }
 
       const rect = containerRef.current.getBoundingClientRect();
-      const mouseX = event.clientX - rect.left;
-      const mouseY = event.clientY - rect.top;
+      const mouseX = (event.clientX - rect.left) / zoom;
+      const mouseY = (event.clientY - rect.top) / zoom;
 
       lastMousePosRef.current = { x: mouseX, y: mouseY };
 
@@ -971,6 +974,7 @@ export function useMouseSelection(props: UseMouseSelectionProps): UseMouseSelect
     isSelectionDragging,
     isOverlayResizing,
     isOverlayMoving,
+    zoom,
     config,
     viewport,
     dimensions,

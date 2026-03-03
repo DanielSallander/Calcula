@@ -64,6 +64,9 @@ export const AppEvents = {
 
   // Annotation events (comments and notes)
   ANNOTATIONS_CHANGED: "app:annotations-changed",
+
+  // Zoom events
+  ZOOM_CHANGED: "app:zoom-changed",
 } as const;
 
 /** Payload emitted with FILL_COMPLETED event. */

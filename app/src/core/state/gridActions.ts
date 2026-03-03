@@ -17,6 +17,7 @@ import type {
   ClipboardMode,
   FreezeConfig,
 } from "../types";
+import { ZOOM_MIN, ZOOM_MAX } from "../types";
 
 // Action type constants
 export const GRID_ACTIONS = {
@@ -55,6 +56,7 @@ export const GRID_ACTIONS = {
   SET_MANUALLY_HIDDEN_COLS: "SET_MANUALLY_HIDDEN_COLS",
   SET_GROUP_HIDDEN_ROWS: "SET_GROUP_HIDDEN_ROWS",
   SET_GROUP_HIDDEN_COLS: "SET_GROUP_HIDDEN_COLS",
+  SET_ZOOM: "SET_ZOOM",
 } as const;
 
 // Action interfaces
@@ -253,6 +255,11 @@ export interface SetGroupHiddenColsAction {
   payload: { cols: number[] };
 }
 
+export interface SetZoomAction {
+  type: typeof GRID_ACTIONS.SET_ZOOM;
+  payload: { zoom: number };
+}
+
 // Union type of all actions
 export type GridAction =
   | SetSelectionAction
@@ -289,7 +296,8 @@ export type GridAction =
   | SetManuallyHiddenRowsAction
   | SetManuallyHiddenColsAction
   | SetGroupHiddenRowsAction
-  | SetGroupHiddenColsAction;
+  | SetGroupHiddenColsAction
+  | SetZoomAction;
 
 // Action creators
 
@@ -695,5 +703,16 @@ export function setGroupHiddenCols(cols: number[]): SetGroupHiddenColsAction {
   return {
     type: GRID_ACTIONS.SET_GROUP_HIDDEN_COLS,
     payload: { cols },
+  };
+}
+
+/**
+ * Set the zoom level.
+ * @param zoom - Zoom factor (1.0 = 100%). Clamped to ZOOM_MIN..ZOOM_MAX.
+ */
+export function setZoom(zoom: number): SetZoomAction {
+  return {
+    type: GRID_ACTIONS.SET_ZOOM,
+    payload: { zoom: Math.max(ZOOM_MIN, Math.min(ZOOM_MAX, zoom)) },
   };
 }

@@ -60,6 +60,7 @@ export {
   setManuallyHiddenCols,
   setGroupHiddenRows,
   setGroupHiddenCols,
+  setZoom,
 } from "./grid";
 
 export type { GridAction, SetSelectionPayload } from "./grid";
@@ -223,7 +224,7 @@ export { cellEvents } from "./cellEvents";
 // Types (utility functions & types)
 // ============================================================================
 
-export { columnToLetter, letterToColumn, isFormulaExpectingReference } from "./types";
+export { columnToLetter, letterToColumn, isFormulaExpectingReference, ZOOM_MIN, ZOOM_MAX, ZOOM_DEFAULT, ZOOM_STEP, ZOOM_PRESETS } from "./types";
 
 // Formula reference parsing
 export { parseFormulaReferences } from "../core/lib/formulaRefParser";

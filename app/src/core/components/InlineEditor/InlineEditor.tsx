@@ -51,6 +51,8 @@ export interface InlineEditorProps {
   onArrowKeyReference?: (direction: "up" | "down" | "left" | "right", extend?: boolean) => void;
   /** Callback when Ctrl+Enter is pressed (to fill selected range with current entry) */
   onCtrlEnter?: () => Promise<void>;
+  /** Zoom factor (1.0 = 100%) */
+  zoom?: number;
 }
 
 /**
@@ -217,6 +219,7 @@ export function InlineEditor(props: InlineEditorProps): React.ReactElement | nul
     disabled = false,
     onArrowKeyReference,
     onCtrlEnter,
+    zoom = 1,
   } = props;
 
   const inputRef = useRef<HTMLInputElement | null>(null);
@@ -233,8 +236,15 @@ export function InlineEditor(props: InlineEditorProps): React.ReactElement | nul
   // Ensure we have valid dimensions
   const dims = dimensions || createEmptyDimensionOverrides();
 
-  // Calculate position
-  const position = calculateEditorPosition(editing, config, viewport, dims);
+  // Calculate position in logical coords then scale by zoom for CSS positioning
+  const logicalPos = calculateEditorPosition(editing, config, viewport, dims);
+  const position = {
+    x: logicalPos.x * zoom,
+    y: logicalPos.y * zoom,
+    width: logicalPos.width * zoom,
+    height: logicalPos.height * zoom,
+    visible: logicalPos.visible,
+  };
 
   /**
    * Handle input value changes.
@@ -642,6 +652,7 @@ export function InlineEditor(props: InlineEditorProps): React.ReactElement | nul
       $y={position.y}
       $width={position.width}
       $height={position.height}
+      $zoom={zoom}
       value={editing.value}
       onChange={handleChange}
       onKeyDown={handleKeyDown}

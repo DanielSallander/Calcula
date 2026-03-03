@@ -188,6 +188,8 @@ export interface UseMouseSelectionProps {
   onMoveRows?: (sourceStartRow: number, sourceEndRow: number, targetRow: number) => Promise<void>;
   /** Callback to reorder columns (structural move) */
   onMoveColumns?: (sourceStartCol: number, sourceEndCol: number, targetCol: number) => Promise<void>;
+  /** Zoom factor (1.0 = 100%) — divides mouse coordinates before hit-testing */
+  zoom?: number;
 }
 
 /**

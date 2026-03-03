@@ -1201,6 +1201,13 @@ export function gridReducer(state: GridState, action: GridAction): GridState {
       };
     }
 
+    case GRID_ACTIONS.SET_ZOOM: {
+      return {
+        ...state,
+        zoom: action.payload.zoom,
+      };
+    }
+
     default: {
       return state;
     }

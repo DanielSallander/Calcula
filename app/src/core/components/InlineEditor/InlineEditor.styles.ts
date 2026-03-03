@@ -9,6 +9,7 @@ export interface EditorInputProps {
   $y: number;
   $width: number;
   $height: number;
+  $zoom?: number;
 }
 
 export const EditorInput = styled.input<EditorInputProps>`
@@ -17,16 +18,16 @@ export const EditorInput = styled.input<EditorInputProps>`
   top: ${(p) => p.$y}px;
   width: ${(p) => p.$width}px;
   height: ${(p) => p.$height}px;
-  
+
   /* Layout & Spacing */
-  padding: 0 4px;
+  padding: 0 ${(p) => 4 * (p.$zoom ?? 1)}px;
   margin: 0;
   box-sizing: border-box;
-  
+
   /* Typography */
   font-family: ${v('--font-family-sans')};
-  font-size: ${v('--font-size-cell')};
-  line-height: calc(${(p) => p.$height}px - 4px);
+  font-size: calc(${v('--font-size-cell')} * ${(p) => p.$zoom ?? 1});
+  line-height: calc(${(p) => p.$height}px - ${(p) => 4 * (p.$zoom ?? 1)}px);
   
   /* Appearance */
   border: 2px solid ${v('--accent-color')};

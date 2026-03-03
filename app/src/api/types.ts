@@ -50,6 +50,11 @@ export {
   columnToLetter,
   letterToColumn,
   isFormulaExpectingReference,
+  ZOOM_MIN,
+  ZOOM_MAX,
+  ZOOM_DEFAULT,
+  ZOOM_STEP,
+  ZOOM_PRESETS,
 } from "../core/types";
 
 export type {
