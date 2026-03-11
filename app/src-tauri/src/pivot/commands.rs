@@ -166,20 +166,24 @@ pub fn update_pivot_fields(
         .get_mut(&request.pivot_id)
         .ok_or_else(|| format!("Pivot table {} not found", request.pivot_id))?;
 
-    // Update row fields
+    // Update row fields (preserving collapse state for fields that remain)
     if let Some(ref row_configs) = request.row_fields {
+        let old_row_fields = definition.row_fields.clone();
         definition.row_fields = row_configs
             .iter()
             .map(config_to_pivot_field)
             .collect();
+        preserve_collapse_state(&mut definition.row_fields, &old_row_fields);
     }
 
-    // Update column fields
+    // Update column fields (preserving collapse state for fields that remain)
     if let Some(ref col_configs) = request.column_fields {
+        let old_col_fields = definition.column_fields.clone();
         definition.column_fields = col_configs
             .iter()
             .map(config_to_pivot_field)
             .collect();
+        preserve_collapse_state(&mut definition.column_fields, &old_col_fields);
     }
 
     // Update value fields
@@ -2989,7 +2993,8 @@ pub async fn update_bi_pivot_fields(
         .get_mut(&pivot_id)
         .ok_or_else(|| format!("Pivot {} not found", pivot_id))?;
 
-    // Row fields
+    // Row fields (preserving collapse state for fields that remain)
+    let old_row_fields = definition.row_fields.clone();
     if use_synthetic_dim {
         // Synthetic "Total" dimension as the only row field
         definition.row_fields = vec![PivotField::new(0, "Total".to_string())];
@@ -3003,8 +3008,10 @@ pub async fn update_bi_pivot_fields(
             })
             .collect();
     }
+    preserve_collapse_state(&mut definition.row_fields, &old_row_fields);
 
-    // Column fields
+    // Column fields (preserving collapse state for fields that remain)
+    let old_col_fields = definition.column_fields.clone();
     definition.column_fields = request
         .column_fields
         .iter()
@@ -3016,6 +3023,7 @@ pub async fn update_bi_pivot_fields(
             )
         })
         .collect();
+    preserve_collapse_state(&mut definition.column_fields, &old_col_fields);
 
     // Value fields — measures map to cache columns after group_by columns
     // Use "[MeasureName]" format so the frontend can extract the measure name

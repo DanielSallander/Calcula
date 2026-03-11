@@ -44,10 +44,18 @@ export function ZoneFieldItem({
   const [showMenu, setShowMenu] = useState(false);
   const [menuPosition, setMenuPosition] = useState({ x: 0, y: 0 });
 
-  const displayName =
-    zone === 'values' && field.aggregation
-      ? getValueFieldDisplayName(field.name, field.aggregation)
-      : field.name;
+  const isBiField = field.sourceIndex === -1;
+  let displayName: string;
+  if (zone === 'values' && field.aggregation && !isBiField) {
+    displayName = getValueFieldDisplayName(field.name, field.aggregation);
+  } else {
+    let raw = field.customName || field.name;
+    // Strip brackets from BI measure names: "[Sum of Linetotal]" -> "Sum of Linetotal"
+    if (isBiField && raw.startsWith('[') && raw.endsWith(']')) {
+      raw = raw.substring(1, raw.length - 1);
+    }
+    displayName = raw;
+  }
 
   const dragData: DragField = useMemo(
     () => ({

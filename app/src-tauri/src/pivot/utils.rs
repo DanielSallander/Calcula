@@ -104,6 +104,22 @@ pub(crate) fn col_index_to_letter(col: u32) -> String {
 }
 
 // ============================================================================
+// COLLAPSE STATE PRESERVATION
+// ============================================================================
+
+/// Carry over collapse state (collapsed flag + per-item collapsed_items) from
+/// old fields to new fields that match by name.  Fields that were removed or
+/// added keep the default (expanded) state.
+pub(crate) fn preserve_collapse_state(new_fields: &mut [PivotField], old_fields: &[PivotField]) {
+    for new_field in new_fields.iter_mut() {
+        if let Some(old) = old_fields.iter().find(|o| o.name == new_field.name) {
+            new_field.collapsed = old.collapsed;
+            new_field.collapsed_items = old.collapsed_items.clone();
+        }
+    }
+}
+
+// ============================================================================
 // CONFIG CONVERTERS
 // ============================================================================
 
