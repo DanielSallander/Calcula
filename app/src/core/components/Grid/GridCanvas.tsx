@@ -436,7 +436,7 @@ export const GridCanvas = forwardRef<GridCanvasHandle, GridCanvasProps>(
 
       const perfDrawMs = performance.now() - perfDrawStart;
       if (perfDrawMs > 5) {
-        console.log(`[PERF] draw ms=${perfDrawMs.toFixed(1)}`);
+        console.log(`[PERF] draw ms=${perfDrawMs.toFixed(1)}`, new Error().stack?.split('\n').slice(1, 4).join(' <- '));
       }
     }, [context, canvasSize.width, canvasSize.height, config, viewport, selection, editing, cells, theme, formulaReferences, dims, styleCache, fillPreviewRange, selectionDragPreview, clipboardSelection, clipboardMode, freezeConfig, currentSheetName, zoom]);
 

@@ -635,6 +635,16 @@ export function useSpreadsheetSelection({
       const { getCellFromPixel } = await import("../../lib/gridRenderer");
       const clickedCell = getCellFromPixel(mouseX, mouseY, state.config, state.viewport, state.dimensions);
 
+      // FIX: Track if mouseup occurs during the async interceptor check.
+      // Without this, a fast click-release can leave isDragging stuck at true:
+      // 1. mousedown → async interceptor check starts
+      // 2. mouseup fires → isDragging is still false → nothing cleaned up
+      // 3. interceptor check completes → baseHandleMouseDown sets isDragging=true
+      // 4. drag state is stuck because mouseup already fired
+      let mouseUpDuringAsyncCheck = false;
+      const onEarlyMouseUp = () => { mouseUpDuringAsyncCheck = true; };
+      window.addEventListener("mouseup", onEarlyMouseUp, { once: true });
+
       if (clickedCell && !isEditing) {
         // Let extensions intercept the click (e.g., pivot filter dropdowns)
         // Skip when editing so formula cell references work normally
@@ -644,15 +654,24 @@ export function useSpreadsheetSelection({
           { clientX: event.clientX, clientY: event.clientY }
         );
         if (intercepted) {
+          window.removeEventListener("mouseup", onEarlyMouseUp);
           event.preventDefault();
           event.stopPropagation();
           return;
         }
       }
 
+      window.removeEventListener("mouseup", onEarlyMouseUp);
+
       baseHandleMouseDown(event);
+
+      // If mouseup already occurred during the async gap, immediately end the drag
+      // so the drag state doesn't get stuck. The cell selection still happened above.
+      if (mouseUpDuringAsyncCheck) {
+        baseHandleMouseUp();
+      }
     },
-    [baseHandleMouseDown, isOverFillHandle, startFillDrag, isOverFloatingOverlay, isEditing, state.config, state.viewport, state.dimensions, state.zoom]
+    [baseHandleMouseDown, baseHandleMouseUp, isOverFillHandle, startFillDrag, isOverFloatingOverlay, isEditing, state.config, state.viewport, state.dimensions, state.zoom]
   );
 
   const handleMouseMove = useCallback(

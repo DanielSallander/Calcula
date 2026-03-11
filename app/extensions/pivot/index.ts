@@ -215,8 +215,12 @@ function drawPivotBackground(overlayCtx: OverlayRenderContext): void {
     }
   }
 
+  // PERF FIX: Compute fill dimensions using incremental Y instead of
+  // overlayGetRowsHeight which loops over all rows (O(n) for 19000 rows).
+  // Use endY - startY which is just one overlayGetRowY call.
+  const fillEndY = overlayGetRowY(overlayCtx, fillEndRow + 1);
   const fillWidth = overlayGetColumnsWidth(overlayCtx, region.startCol, fillEndCol);
-  const fillHeight = overlayGetRowsHeight(overlayCtx, region.startRow, fillEndRow);
+  const fillHeight = fillEndY - startY;
 
   if (startX + fillWidth < rowHeaderWidth || startY + fillHeight < colHeaderHeight) {
     return;
@@ -238,7 +242,8 @@ function drawPivotBackground(overlayCtx: OverlayRenderContext): void {
 
   // Border only around the actual current region
   const regionWidth = overlayGetColumnsWidth(overlayCtx, region.startCol, region.endCol);
-  const regionHeight = overlayGetRowsHeight(overlayCtx, region.startRow, region.endRow);
+  const regionEndY = overlayGetRowY(overlayCtx, region.endRow + 1);
+  const regionHeight = regionEndY - startY;
   ctx.strokeStyle = "#d0d0d0";
   ctx.lineWidth = 1;
   ctx.setLineDash([]);
@@ -271,6 +276,42 @@ function drawStyledPivotView(overlayCtx: OverlayRenderContext, pivotView: PivotV
   const rowHasActiveFilter = pivotView.rowFieldSummaries?.some(f => f.hasActiveFilter) ?? false;
   const colHasActiveFilter = pivotView.columnFieldSummaries?.some(f => f.hasActiveFilter) ?? false;
 
+  // ---------------------------------------------------------------------------
+  // PERF FIX: Pre-compute column X positions and widths (columns are few).
+  // This avoids calling overlayGetColumnX per cell which loops from col 0 each time.
+  // ---------------------------------------------------------------------------
+  const numCols = pivotView.rows[0]?.cells.length ?? 0;
+  const colXPositions: number[] = new Array(numCols);
+  const colWidthValues: number[] = new Array(numCols);
+  for (let j = 0; j < numCols; j++) {
+    const gridCol = region.startCol + j;
+    colXPositions[j] = overlayGetColumnX(overlayCtx, gridCol);
+    colWidthValues[j] = overlayGetColumnWidth(overlayCtx, gridCol);
+  }
+
+  // ---------------------------------------------------------------------------
+  // PERF FIX: Compute row Y positions incrementally instead of O(row) per cell.
+  // overlayGetRowY loops from row 0 to the target row each time - with 19000 rows
+  // and 46 visible cells that's 874,000 iterations. Instead, compute Y for the
+  // first row once (O(startRow)), then accumulate heights: O(totalRows) total.
+  // ---------------------------------------------------------------------------
+  const numRows = pivotView.rows.length;
+  const rowYPositions: number[] = new Array(numRows);
+  const rowHeightValues: number[] = new Array(numRows);
+  let runningY = overlayGetRowY(overlayCtx, region.startRow);
+  for (let i = 0; i < numRows; i++) {
+    const gridRow = region.startRow + i;
+    const h = overlayGetRowHeight(overlayCtx, gridRow);
+    rowYPositions[i] = runningY;
+    rowHeightValues[i] = h;
+    runningY += h;
+  }
+  // runningY now equals the Y position just past the last row (used for separator lines)
+  const regionEndY = runningY;
+  const regionStartY = rowYPositions[0] ?? 0;
+
+  const tPrecompute = performance.now() - t0;
+
   ctx.save();
   ctx.beginPath();
   ctx.rect(
@@ -283,22 +324,23 @@ function drawStyledPivotView(overlayCtx: OverlayRenderContext, pivotView: PivotV
 
   let cellsDrawn = 0;
   let cellsSkipped = 0;
-  for (let i = 0; i < pivotView.rows.length; i++) {
+  for (let i = 0; i < numRows; i++) {
     const row = pivotView.rows[i];
     if (!row.visible) continue;
 
     const gridRow = region.startRow + i;
-    const y = overlayGetRowY(overlayCtx, gridRow);
-    const height = overlayGetRowHeight(overlayCtx, gridRow);
+    const y = rowYPositions[i];
+    const height = rowHeightValues[i];
 
     // Skip rows completely outside visible area
-    if (y + height < colHeaderHeight || y > canvasHeight) continue;
+    if (y + height < colHeaderHeight) continue;
+    if (y > canvasHeight) break; // Rows are sequential, no more visible rows after this
 
     for (let j = 0; j < row.cells.length; j++) {
       const cell = row.cells[j];
       const gridCol = region.startCol + j;
-      const x = overlayGetColumnX(overlayCtx, gridCol);
-      const width = overlayGetColumnWidth(overlayCtx, gridCol);
+      const x = colXPositions[j];
+      const width = colWidthValues[j];
 
       // Skip cells completely outside visible area
       if (x + width < rowHeaderWidth || x > canvasWidth) { cellsSkipped++; continue; }
@@ -366,15 +408,12 @@ function drawStyledPivotView(overlayCtx: OverlayRenderContext, pivotView: PivotV
   // Draw separator line between row labels and data columns
   const rowLabelColCount = pivotView.rowLabelColCount || 0;
   if (rowLabelColCount > 0) {
-    const separatorCol = region.startCol + rowLabelColCount;
-    const sepX = overlayGetColumnX(overlayCtx, separatorCol);
+    const sepX = colXPositions[rowLabelColCount] ?? overlayGetColumnX(overlayCtx, region.startCol + rowLabelColCount);
     if (sepX > rowHeaderWidth && sepX < canvasWidth) {
       ctx.strokeStyle = theme.borderColor;
       ctx.lineWidth = 1;
       ctx.beginPath();
-      const regionY = overlayGetRowY(overlayCtx, region.startRow);
-      const regionEndY = overlayGetRowY(overlayCtx, region.startRow + pivotView.rows.length);
-      ctx.moveTo(Math.floor(sepX) + 0.5, Math.max(regionY, colHeaderHeight));
+      ctx.moveTo(Math.floor(sepX) + 0.5, Math.max(regionStartY, colHeaderHeight));
       ctx.lineTo(Math.floor(sepX) + 0.5, Math.min(regionEndY, canvasHeight));
       ctx.stroke();
     }
@@ -382,15 +421,16 @@ function drawStyledPivotView(overlayCtx: OverlayRenderContext, pivotView: PivotV
 
   // Draw separator line below header rows
   const headerRowCount = pivotView.columnHeaderRowCount || 0;
-  if (headerRowCount > 0) {
-    const headerEndRow = region.startRow + headerRowCount;
-    const sepY = overlayGetRowY(overlayCtx, headerEndRow);
+  if (headerRowCount > 0 && headerRowCount < numRows) {
+    const sepY = rowYPositions[headerRowCount];
     if (sepY > colHeaderHeight && sepY < canvasHeight) {
       ctx.strokeStyle = theme.headerBorderColor;
       ctx.lineWidth = 2;
       ctx.beginPath();
-      const regionX = overlayGetColumnX(overlayCtx, region.startCol);
-      const regionEndX = overlayGetColumnX(overlayCtx, region.startCol + (pivotView.rows[0]?.cells.length || 0));
+      const regionX = colXPositions[0] ?? 0;
+      const regionEndX = colXPositions[numCols - 1] !== undefined
+        ? colXPositions[numCols - 1] + colWidthValues[numCols - 1]
+        : overlayGetColumnX(overlayCtx, region.startCol + numCols);
       ctx.moveTo(Math.max(regionX, rowHeaderWidth), Math.floor(sepY) - 0.5);
       ctx.lineTo(Math.min(regionEndX, canvasWidth), Math.floor(sepY) - 0.5);
       ctx.stroke();
@@ -401,7 +441,7 @@ function drawStyledPivotView(overlayCtx: OverlayRenderContext, pivotView: PivotV
 
   const drawMs = performance.now() - t0;
   console.log(
-    `[PERF][pivot] drawStyledPivotView rows=${pivotView.rows.length} cols=${pivotView.rows[0]?.cells.length ?? 0} | drawn=${cellsDrawn} skipped=${cellsSkipped} | render=${drawMs.toFixed(1)}ms`
+    `[PERF][pivot] drawStyledPivotView rows=${numRows} cols=${numCols} | drawn=${cellsDrawn} skipped=${cellsSkipped} | precompute=${tPrecompute.toFixed(1)}ms render=${drawMs.toFixed(1)}ms`
   );
 }
 

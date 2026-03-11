@@ -126,6 +126,7 @@ export function handleSelectionChange(
 
   // Skip if a check is already in progress
   if (checkInProgress) {
+    console.log(`[PERF][pivot-sel] handleSelectionChange(${row},${col}) SKIPPED (checkInProgress)`);
     return;
   }
 
@@ -194,8 +195,10 @@ async function checkPivotAtSelection(
   checkInProgress = true;
   lastCheckedSelection = { row, col };
 
+  const t0 = performance.now();
   try {
     const pivotInfo = await pivot.getAtCell(row, col);
+    console.log(`[PERF][pivot-sel] checkPivotAtSelection(${row},${col}) getAtCell=${(performance.now() - t0).toFixed(1)}ms found=${!!pivotInfo}`);
 
     if (pivotInfo) {
       // Convert source fields from backend format
