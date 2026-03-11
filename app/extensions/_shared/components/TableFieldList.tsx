@@ -3,6 +3,7 @@
 // CONTEXT: Replaces FieldList when a BI model is present.
 
 import React, { useState, useMemo, useCallback } from 'react';
+import ReactDOM from 'react-dom';
 import { css } from '@emotion/css';
 import { styles } from './EditorStyles';
 import { useDraggable } from './useDragDrop';
@@ -142,6 +143,38 @@ const treeStyles = {
   `,
 };
 
+const folderMenuStyles = {
+  container: css`
+    position: fixed;
+    background: #fff;
+    border: 1px solid #d0d7de;
+    border-radius: 8px;
+    box-shadow: 0 8px 24px rgba(140, 149, 159, 0.2);
+    z-index: 10000;
+    min-width: 150px;
+    padding: 4px 0;
+    font-family: 'Segoe UI Variable', 'Segoe UI', system-ui, sans-serif;
+    font-size: 12px;
+  `,
+  item: css`
+    display: block;
+    width: 100%;
+    padding: 6px 12px;
+    text-align: left;
+    background: none;
+    border: none;
+    cursor: pointer;
+    color: #24292f;
+    font-size: 12px;
+    font-family: inherit;
+    transition: background 0.08s;
+
+    &:hover {
+      background: #f6f8fa;
+    }
+  `,
+};
+
 // --- Sub-components ---
 
 /** A single field item (column or measure) with checkbox and drag support. */
@@ -202,6 +235,8 @@ function FolderNode({
   childCount,
   isExpanded,
   onToggleExpand,
+  onExpandAll,
+  onCollapseAll,
   children,
 }: {
   name: string;
@@ -209,11 +244,24 @@ function FolderNode({
   childCount: number;
   isExpanded: boolean;
   onToggleExpand: () => void;
+  onExpandAll: () => void;
+  onCollapseAll: () => void;
   children: React.ReactNode;
 }) {
+  const [contextMenu, setContextMenu] = useState<{ x: number; y: number } | null>(null);
+
+  const handleContextMenu = useCallback((e: React.MouseEvent) => {
+    e.preventDefault();
+    setContextMenu({ x: e.clientX, y: e.clientY });
+  }, []);
+
   return (
     <div>
-      <div className={treeStyles.folderHeader} onClick={onToggleExpand}>
+      <div
+        className={treeStyles.folderHeader}
+        onClick={onToggleExpand}
+        onContextMenu={handleContextMenu}
+      >
         <span
           className={`${treeStyles.folderArrow} ${!isExpanded ? treeStyles.folderArrowCollapsed : ''}`}
         >
@@ -226,7 +274,69 @@ function FolderNode({
       {isExpanded && (
         <div className={treeStyles.folderChildren}>{children}</div>
       )}
+      {contextMenu && (
+        <FolderContextMenu
+          position={contextMenu}
+          onExpandAll={() => { onExpandAll(); setContextMenu(null); }}
+          onCollapseAll={() => { onCollapseAll(); setContextMenu(null); }}
+          onClose={() => setContextMenu(null)}
+        />
+      )}
     </div>
+  );
+}
+
+/** Context menu for folder nodes (Expand All / Collapse All). */
+function FolderContextMenu({
+  position,
+  onExpandAll,
+  onCollapseAll,
+  onClose,
+}: {
+  position: { x: number; y: number };
+  onExpandAll: () => void;
+  onCollapseAll: () => void;
+  onClose: () => void;
+}) {
+  const menuRef = React.useRef<HTMLDivElement>(null);
+
+  React.useEffect(() => {
+    function handleClickOutside(e: MouseEvent) {
+      if (menuRef.current && !menuRef.current.contains(e.target as Node)) {
+        onClose();
+      }
+    }
+    function handleKeyDown(e: KeyboardEvent) {
+      if (e.key === 'Escape') onClose();
+    }
+    const timeoutId = setTimeout(() => {
+      document.addEventListener('mousedown', handleClickOutside);
+      document.addEventListener('keydown', handleKeyDown);
+    }, 0);
+    return () => {
+      clearTimeout(timeoutId);
+      document.removeEventListener('mousedown', handleClickOutside);
+      document.removeEventListener('keydown', handleKeyDown);
+    };
+  }, [onClose]);
+
+  const adjustedX = Math.min(position.x, window.innerWidth - 180);
+  const adjustedY = Math.min(position.y, window.innerHeight - 80);
+
+  return ReactDOM.createPortal(
+    <div
+      ref={menuRef}
+      className={folderMenuStyles.container}
+      style={{ left: adjustedX, top: adjustedY }}
+    >
+      <button className={folderMenuStyles.item} onClick={onExpandAll}>
+        Expand All
+      </button>
+      <button className={folderMenuStyles.item} onClick={onCollapseAll}>
+        Collapse All
+      </button>
+    </div>,
+    document.body
   );
 }
 
@@ -260,6 +370,19 @@ export function TableFieldList({
       }
       return next;
     });
+  }, []);
+
+  const expandAll = useCallback(() => {
+    const set = new Set<string>();
+    set.add('__measures__');
+    for (const t of biModel.tables) {
+      set.add(t.name);
+    }
+    setExpandedFolders(set);
+  }, [biModel.tables]);
+
+  const collapseAll = useCallback(() => {
+    setExpandedFolders(new Set<string>());
   }, []);
 
   const query = searchQuery.toLowerCase().trim();
@@ -316,6 +439,8 @@ export function TableFieldList({
                 childCount={filteredMeasures.length}
                 isExpanded={!!query || expandedFolders.has('__measures__')}
                 onToggleExpand={() => toggleFolder('__measures__')}
+                onExpandAll={expandAll}
+                onCollapseAll={collapseAll}
               >
                 {filteredMeasures.map((m) => (
                   <TreeFieldItem
@@ -340,6 +465,8 @@ export function TableFieldList({
                 childCount={table.columns.length}
                 isExpanded={!!query || expandedFolders.has(table.name)}
                 onToggleExpand={() => toggleFolder(table.name)}
+                onExpandAll={expandAll}
+                onCollapseAll={collapseAll}
               >
                 {table.columns.map((col) => {
                   const colKey = `${table.name}.${col.name}`;
