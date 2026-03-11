@@ -11,10 +11,7 @@ import {
   addTaskPaneContextKey,
   removeTaskPaneContextKey,
   openTaskPane,
-  gridExtensions,
-  GridMenuGroups,
 } from "../../src/api";
-import type { GridMenuContext } from "../../src/api";
 
 import { BiManifest, BiPaneDefinition, BI_PANE_ID } from "./manifest";
 import { getRegionAtCell } from "./lib/bi-api";
@@ -60,19 +57,7 @@ export function registerBiExtension(): void {
     }),
   );
 
-  // 4. Register context menu item to open the BI pane
-  gridExtensions.registerContextMenuItem({
-    id: "bi.openPane",
-    label: "Business Intelligence...",
-    group: GridMenuGroups.DATA,
-    order: 900,
-    onClick: (_context: GridMenuContext) => {
-      addTaskPaneContextKey("bi");
-      openTaskPane(BI_PANE_ID);
-    },
-  });
-
-  // 5. Register Model Dialog (for "Get Data > Calcula Model")
+  // 4. Register Model Dialog (for "Get Data > Calcula Model")
   DialogExtensions.registerDialog({
     id: MODEL_DIALOG_ID,
     component: ModelDialog,
@@ -109,7 +94,6 @@ export function unregisterBiExtension(): void {
   removeTaskPaneContextKey("bi");
 
   // Unregister from registries
-  gridExtensions.unregisterContextMenuItem("bi.openPane");
   DialogExtensions.unregisterDialog(MODEL_DIALOG_ID);
   TaskPaneExtensions.unregisterView(BI_PANE_ID);
   ExtensionRegistry.unregisterAddIn(BiManifest.id);

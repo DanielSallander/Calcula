@@ -9,32 +9,34 @@ import type { SourceField, DragField } from './types';
 const searchStyles = {
   container: css`
     padding: 6px 8px;
-    border-bottom: 1px solid #e0e0e0;
-    background: #fafafa;
+    border-bottom: 1px solid #eaeef2;
+    background: #f6f8fa;
   `,
   input: css`
     width: 100%;
-    padding: 6px 8px;
-    border: 1px solid #d4d4d4;
-    border-radius: 3px;
+    padding: 5px 8px;
+    border: 1px solid #d0d7de;
+    border-radius: 6px;
     font-size: 12px;
     font-family: inherit;
     outline: none;
     background: #fff;
-    transition: border-color 0.15s;
+    transition: border-color 0.15s, box-shadow 0.15s;
+    box-sizing: border-box;
 
     &:focus {
-      border-color: #0078d4;
+      border-color: #0969da;
+      box-shadow: 0 0 0 2px rgba(9, 105, 218, 0.15);
     }
 
     &::placeholder {
-      color: #999;
+      color: #8b949e;
     }
   `,
   noResults: css`
     padding: 12px;
     text-align: center;
-    color: #666;
+    color: #656d76;
     font-size: 11px;
     font-style: italic;
   `,

@@ -24,7 +24,6 @@ import {
   getFieldIndexForCell,
   getItemLabelForCell,
   getClickedCellData,
-  getCachedCellData,
 } from "./pivotContextMenuHelpers";
 
 import {
@@ -57,7 +56,6 @@ import {
 // ============================================================================
 
 const CONTEXT_ITEM_IDS = [
-  "pivot:copy",
   "pivot:formatCells",
   "pivot:refresh",
   "pivot:delete",
@@ -87,29 +85,7 @@ export function registerPivotContextMenuItems(): () => void {
   const items: GridContextMenuItem[] = [
 
     // ------------------------------------------------------------------
-    // 1. Copy
-    // ------------------------------------------------------------------
-    {
-      id: "pivot:copy",
-      label: "Copy",
-      shortcut: "Ctrl+C",
-      group: "pivot",
-      order: 10,
-      visible: isInPivotRegion,
-      onClick: async (ctx) => {
-        const cached = getCachedCellData(ctx);
-        if (!cached) return;
-        const text = cached.cell.formattedValue || "";
-        try {
-          await navigator.clipboard.writeText(text);
-        } catch (e) {
-          console.error("[PivotMenu] Failed to copy to clipboard:", e);
-        }
-      },
-    },
-
-    // ------------------------------------------------------------------
-    // 2. Format Cells... (stub)
+    // 1. Format Cells... (stub)
     // ------------------------------------------------------------------
     {
       id: "pivot:formatCells",

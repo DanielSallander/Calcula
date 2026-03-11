@@ -18,7 +18,7 @@ const insertIndicatorStyle = css`
   left: 0;
   right: 0;
   height: 2px;
-  background: #0078d4;
+  background: #0969da;
   pointer-events: none;
   z-index: 10;
 
@@ -28,7 +28,7 @@ const insertIndicatorStyle = css`
     position: absolute;
     width: 6px;
     height: 6px;
-    background: #0078d4;
+    background: #0969da;
     border-radius: 50%;
     top: -2px;
   }

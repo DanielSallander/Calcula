@@ -41,26 +41,30 @@ interface TableFieldListProps {
 const treeStyles = {
   searchContainer: css`
     padding: 6px 8px;
-    border-bottom: 1px solid #e0e0e0;
-    background: #fafafa;
+    border-bottom: 1px solid #eaeef2;
+    background: #f6f8fa;
   `,
   searchInput: css`
     width: 100%;
-    padding: 6px 8px;
-    border: 1px solid #d4d4d4;
-    border-radius: 3px;
+    padding: 5px 8px;
+    border: 1px solid #d0d7de;
+    border-radius: 6px;
     font-size: 12px;
     font-family: inherit;
     outline: none;
     background: #fff;
-    transition: border-color 0.15s;
-    &:focus { border-color: #0078d4; }
-    &::placeholder { color: #999; }
+    transition: border-color 0.15s, box-shadow 0.15s;
+    box-sizing: border-box;
+    &:focus {
+      border-color: #0969da;
+      box-shadow: 0 0 0 2px rgba(9, 105, 218, 0.15);
+    }
+    &::placeholder { color: #8b949e; }
   `,
   noResults: css`
     padding: 12px;
     text-align: center;
-    color: #666;
+    color: #656d76;
     font-size: 11px;
     font-style: italic;
   `,
@@ -68,20 +72,21 @@ const treeStyles = {
     display: flex;
     align-items: center;
     gap: 4px;
-    padding: 4px 8px;
+    padding: 5px 8px;
     cursor: pointer;
     user-select: none;
     font-weight: 600;
     font-size: 12px;
-    color: #333;
-    border-radius: 3px;
-    &:hover { background: #ebebeb; }
+    color: #24292f;
+    border-radius: 4px;
+    transition: background 0.1s;
+    &:hover { background: #f6f8fa; }
   `,
   folderArrow: css`
     font-size: 10px;
     width: 14px;
     text-align: center;
-    color: #666;
+    color: #656d76;
     transition: transform 0.15s;
   `,
   folderArrowCollapsed: css`
@@ -97,7 +102,7 @@ const treeStyles = {
   `,
   folderCount: css`
     font-size: 10px;
-    color: #999;
+    color: #8b949e;
     font-weight: 400;
   `,
   folderChildren: css`
@@ -110,27 +115,28 @@ const treeStyles = {
     padding: 3px 8px 3px 12px;
     cursor: grab;
     user-select: none;
-    border-radius: 3px;
+    border-radius: 4px;
     font-size: 12px;
-    &:hover { background: #f0f0f0; }
-    &.dragging { opacity: 0.5; }
+    transition: background 0.1s;
+    &:hover { background: #f6f8fa; }
+    &.dragging { opacity: 0.4; }
   `,
   fieldCheckbox: css`
     width: 14px;
     height: 14px;
     cursor: pointer;
-    accent-color: #0078d4;
+    accent-color: #0969da;
   `,
   fieldName: css`
     flex: 1;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
-    color: #333;
+    color: #24292f;
   `,
   fieldTypeIcon: css`
     font-size: 10px;
-    color: #888;
+    color: #8b949e;
     min-width: 16px;
     text-align: center;
   `,

@@ -43,9 +43,9 @@ const menuStyles = {
   container: css`
     position: fixed;
     background: #fff;
-    border: 1px solid #d0d0d0;
-    border-radius: 6px;
-    box-shadow: 0 4px 16px rgba(0, 0, 0, 0.14);
+    border: 1px solid #d0d7de;
+    border-radius: 8px;
+    box-shadow: 0 8px 24px rgba(140, 149, 159, 0.2);
     z-index: 10000;
     min-width: 200px;
     max-height: 400px;
@@ -63,22 +63,23 @@ const menuStyles = {
     background: none;
     border: none;
     cursor: pointer;
-    color: #333;
+    color: #24292f;
     gap: 8px;
     font-size: 12px;
     font-family: inherit;
+    transition: background 0.08s;
 
     &:hover {
-      background: #f0f0f0;
+      background: #f6f8fa;
     }
 
     &:focus {
       outline: none;
-      background: #e8e8e8;
+      background: #eaeef2;
     }
 
     &:disabled {
-      color: #aaa;
+      color: #8b949e;
       cursor: default;
 
       &:hover {
@@ -87,30 +88,30 @@ const menuStyles = {
     }
   `,
   menuItemSelected: css`
-    background: #e8f4fc;
-    color: #005fb8;
+    background: #ddf4ff;
+    color: #0969da;
 
     &:hover {
-      background: #d6ecf8;
+      background: #d0efff;
     }
   `,
   separator: css`
     height: 1px;
-    background: #e0e0e0;
+    background: #d8dee4;
     margin: 4px 0;
   `,
   sectionLabel: css`
     padding: 4px 12px 2px;
     font-size: 10px;
     font-weight: 600;
-    color: #888;
+    color: #8b949e;
     text-transform: uppercase;
     letter-spacing: 0.3px;
   `,
   icon: css`
     width: 16px;
     text-align: center;
-    color: #666;
+    color: #656d76;
     font-size: 13px;
     flex-shrink: 0;
   `,
@@ -118,10 +119,10 @@ const menuStyles = {
     flex: 1;
   `,
   danger: css`
-    color: #d32f2f;
+    color: #cf222e;
 
     &:hover {
-      background: #ffebee;
+      background: #ffebe9;
     }
   `,
 };
