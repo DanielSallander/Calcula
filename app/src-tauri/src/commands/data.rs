@@ -12,7 +12,7 @@ use crate::{
     evaluate_formula_multi_sheet,
     evaluate_formula_multi_sheet_with_ast, evaluate_formula_with_context,
     extract_all_references, format_cell_value, get_column_row_dependents,
-    get_recalculation_order, parse_cell_input, parse_formula_to_engine_ast,
+    get_recalculation_order, parse_cell_input,
     update_column_dependencies, update_cross_sheet_dependencies,
     update_dependencies, update_row_dependencies, AppState, log_perf
 };
@@ -91,6 +91,7 @@ pub fn get_cell(state: State<AppState>, row: u32, col: u32) -> Option<CellData> 
 }
 
 /// Internal helper for getting cell data without merge info (for backward compatibility).
+#[allow(dead_code)]
 fn get_cell_internal(grid: &Grid, styles: &StyleRegistry, row: u32, col: u32) -> Option<CellData> {
     let cell = grid.get_cell(row, col)?;
     let style = styles.get(cell.style_index);
@@ -1302,7 +1303,7 @@ pub fn update_cells_batch(
             processed.insert((active_sheet, *dep_row, *dep_col));
         }
 
-        while let Some((source_sheet_idx, source_sheet_name, source_row, source_col)) =
+        while let Some((_source_sheet_idx, source_sheet_name, source_row, source_col)) =
             work_queue.pop()
         {
             let cross_sheet_key = (source_sheet_name.clone(), source_row, source_col);
@@ -1569,7 +1570,7 @@ pub fn clear_range_with_options(
     let mut grid = state.grid.lock().unwrap();
     let mut grids = state.grids.lock().unwrap();
     let active_sheet = *state.active_sheet.lock().unwrap();
-    let mut style_registry = state.style_registry.lock().unwrap();
+    let style_registry = state.style_registry.lock().unwrap();
     let mut dependents_map = state.dependents.lock().unwrap();
     let mut dependencies_map = state.dependencies.lock().unwrap();
     let mut column_dependents_map = state.column_dependents.lock().unwrap();
@@ -1977,7 +1978,7 @@ pub fn sort_range(state: State<AppState>, params: SortRangeParams) -> SortRangeR
             let mut updated_cells = Vec::new();
             let sorted_count = rows.len() as u32;
 
-            for (new_row_idx, (original_row, row_data)) in rows.iter().enumerate() {
+            for (new_row_idx, (_original_row, row_data)) in rows.iter().enumerate() {
                 let target_row = data_start_row + new_row_idx as u32;
 
                 for (col_offset, cell_opt) in row_data.iter().enumerate() {
@@ -2075,7 +2076,7 @@ pub fn sort_range(state: State<AppState>, params: SortRangeParams) -> SortRangeR
             let mut updated_cells = Vec::new();
             let sorted_count = cols.len() as u32;
 
-            for (new_col_idx, (original_col, col_data)) in cols.iter().enumerate() {
+            for (new_col_idx, (_original_col, col_data)) in cols.iter().enumerate() {
                 let target_col = data_start_col + new_col_idx as u32;
 
                 for (row_offset, cell_opt) in col_data.iter().enumerate() {
@@ -2208,8 +2209,6 @@ fn compare_cells(
     match_case: bool,
     styles: &StyleRegistry,
 ) -> std::cmp::Ordering {
-    use engine::CellValue;
-
     match field.sort_on {
         SortOn::Value => {
             // Compare by cell value

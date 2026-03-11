@@ -8,7 +8,7 @@ use std::collections::HashMap;
 use std::sync::Mutex;
 
 use engine::{
-    BinaryOperator, BuiltinFunction, CellValue, Evaluator, Expression,
+    BinaryOperator, BuiltinFunction, Evaluator, Expression,
     UnaryOperator, Value,
 };
 use engine::coord::{col_to_index, index_to_col};
@@ -16,7 +16,7 @@ use parser::parse as parse_formula;
 use tauri::State;
 
 use crate::api_types::EvalStepState;
-use crate::{convert_expr, format_cell_value_simple, AppState};
+use crate::{convert_expr, AppState};
 
 // ============================================================================
 // Managed State

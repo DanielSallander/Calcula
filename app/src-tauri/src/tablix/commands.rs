@@ -6,8 +6,8 @@ use crate::tablix::operations::{
 };
 use crate::tablix::types::*;
 use crate::pivot::utils::{parse_range, parse_cell_ref, col_index_to_letter};
-use crate::{log_debug, log_info, AppState};
-use pivot_engine::{PivotCache, PivotDefinition, CacheValue};
+use crate::{log_info, AppState};
+use pivot_engine::{PivotCache, CacheValue};
 use tablix_engine::{
     calculate_tablix, TablixDefinition, TablixView,
     pivot_to_tablix, tablix_to_pivot,
@@ -252,7 +252,7 @@ pub fn toggle_tablix_group(
 /// Checks if a cell is inside a tablix region.
 #[tauri::command]
 pub fn get_tablix_at_cell(
-    state: State<AppState>,
+    _state: State<AppState>,
     tablix_state: State<'_, TablixState>,
     row: u32,
     col: u32,
@@ -306,7 +306,7 @@ pub fn get_tablix_at_cell(
 /// Gets all tablix regions for the current sheet.
 #[tauri::command]
 pub fn get_tablix_regions_for_sheet(
-    state: State<AppState>,
+    _state: State<AppState>,
     tablix_state: State<'_, TablixState>,
 ) -> Result<Vec<TablixRegionData>, String> {
     let tables = tablix_state.tablix_tables.lock().unwrap();

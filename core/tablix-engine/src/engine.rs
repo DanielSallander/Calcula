@@ -35,6 +35,7 @@ use crate::view::{
 
 /// A node in the axis tree (row or column hierarchy).
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 struct AxisNode {
     value_id: ValueId,
     field_index: FieldIndex,
@@ -81,6 +82,7 @@ struct FlatRowItem {
 }
 
 /// A flattened column group item.
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 struct FlatColItem {
     group_values: Vec<ValueId>,
@@ -1167,6 +1169,7 @@ impl<'a> TablixCalculator<'a> {
         }
     }
 
+    #[allow(dead_code)]
     fn calculate_data_columns(&self) -> usize {
         if self.col_items.is_empty() {
             // No column groups: one column per data field
@@ -1196,7 +1199,7 @@ impl<'a> TablixCalculator<'a> {
 
         // Data columns
         if self.col_items.is_empty() {
-            for (i, df) in self.definition.data_fields.iter().enumerate() {
+            for (i, _df) in self.definition.data_fields.iter().enumerate() {
                 let col_idx = row_group_cols + i;
                 descriptors.push(TablixColumnDescriptor {
                     view_col: col_idx,
@@ -1435,7 +1438,7 @@ impl<'a> TablixCalculator<'a> {
                 }
 
                 // Column group headers at this level
-                for (ci, col_item) in self.col_items.iter().enumerate() {
+                for (_ci, col_item) in self.col_items.iter().enumerate() {
                     if header_row < self.effective_col_fields.len() {
                         if col_item.depth as usize == header_row {
                             let mut cell = TablixViewCell::column_group_header(col_item.label.clone());
@@ -1460,7 +1463,7 @@ impl<'a> TablixCalculator<'a> {
                         }
                     } else {
                         // Data field name row (when multiple data fields)
-                        for (df_idx, df) in self.definition.data_fields.iter().enumerate() {
+                        for (_df_idx, df) in self.definition.data_fields.iter().enumerate() {
                             cells.push(TablixViewCell::column_group_header(df.name.clone()));
                         }
                         if self.definition.data_fields.is_empty() {
@@ -1495,7 +1498,7 @@ impl<'a> TablixCalculator<'a> {
         // Clone row_items to avoid borrow issues
         let row_items = self.row_items.clone();
 
-        for (ri, row_item) in row_items.iter().enumerate() {
+        for (_ri, row_item) in row_items.iter().enumerate() {
             if row_item.is_grand_total || row_item.is_subtotal {
                 // Generate aggregated total row
                 let cells = self.generate_total_row(
@@ -1689,7 +1692,7 @@ impl<'a> TablixCalculator<'a> {
         cells: &mut Vec<TablixViewCell>,
         source_row: u32,
         total_cols: usize,
-        data_field_count: usize,
+        _data_field_count: usize,
         is_alternate: bool,
     ) {
         let record = self.cache.records.iter().find(|r| r.source_row == source_row);
@@ -1760,7 +1763,7 @@ impl<'a> TablixCalculator<'a> {
             }
         } else {
             // With column groups - detail cell for each column group x data field
-            for col_item in &self.col_items {
+            for _col_item in &self.col_items {
                 for df in &self.definition.data_fields {
                     let cell = if let Some(rec) = record {
                         let value_id = rec.values
@@ -1832,7 +1835,7 @@ impl<'a> TablixCalculator<'a> {
         // Total label spanning all row group columns
         match self.definition.layout.group_layout {
             GroupLayout::Stepped => {
-                let mut cell = TablixViewCell::row_group_header(row_item.label.clone(), 0)
+                let cell = TablixViewCell::row_group_header(row_item.label.clone(), 0)
                     .as_total();
                 cells.push(cell);
             }
@@ -1867,7 +1870,7 @@ impl<'a> TablixCalculator<'a> {
         cells: &mut Vec<TablixViewCell>,
         row_group_values: &[ValueId],
         total_cols: usize,
-        data_field_count: usize,
+        _data_field_count: usize,
     ) {
         if self.col_items.is_empty() {
             // No column groups

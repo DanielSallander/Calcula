@@ -2,7 +2,6 @@
 // PURPOSE: Styling operations, formatting, and style definitions.
 
 use crate::api_types::{CellData, FormattingParams, FormattingResult, PreviewResult, StyleData, StyleEntry};
-use crate::commands::utils::get_cell_internal_with_merge;
 use crate::{format_cell_value_with_color, AppState};
 use engine::{
     BorderLineStyle, BorderStyle, Cell, CellStyle, CellValue, Color, CurrencyPosition, NumberFormat,

@@ -3,7 +3,6 @@
 //! CONTEXT: Implements FilterOn types, FilterCriteria, DynamicFilterCriteria,
 //! and AutoFilter management with full Excel API compatibility.
 
-use crate::api_types::CellData;
 use crate::{format_cell_value, AppState};
 use engine::{CellValue, Grid};
 use serde::{Deserialize, Serialize};

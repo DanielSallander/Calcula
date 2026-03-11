@@ -6,7 +6,7 @@
 
 use serde::{Deserialize, Serialize};
 use pivot_engine::definition::{
-    AggregationType, PivotDefinition, PivotField, ValueField,
+    PivotDefinition, PivotField, ValueField,
 };
 use crate::definition::{DataFieldMode, TablixDataField, TablixDefinition, TablixLayout, GroupLayout};
 

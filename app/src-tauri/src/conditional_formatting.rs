@@ -977,7 +977,7 @@ fn evaluate_time_period(cell_value: Option<&CellValue>, period: &TimePeriod) -> 
         None => return false,
     };
 
-    use chrono::{Datelike, Local, Weekday};
+    use chrono::{Datelike, Local};
     let today = Local::now().date_naive();
 
     match period {

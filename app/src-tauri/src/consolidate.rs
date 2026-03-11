@@ -9,7 +9,7 @@ use tauri::State;
 
 use crate::api_types::{
     CellData, ConsolidateParams, ConsolidateResult, ConsolidationFunction,
-    ConsolidationSourceRange, MergedRegion,
+    MergedRegion,
 };
 use crate::{format_cell_value, AppState};
 use engine::{Cell, CellValue, Grid, StyleRegistry};

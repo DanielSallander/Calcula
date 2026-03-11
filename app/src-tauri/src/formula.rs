@@ -2,10 +2,8 @@
 // PURPOSE: Formula library commands - function catalog and templates
 // FORMAT: seq|level|category|message
 
-use tauri::State;
 use crate::api_types::{FunctionInfo, FunctionListResult};
 use crate::logging::{log_enter, log_exit};
-use crate::AppState;
 
 /// Get list of available functions by category.
 #[tauri::command]

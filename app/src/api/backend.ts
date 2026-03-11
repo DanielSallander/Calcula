@@ -3123,3 +3123,150 @@ export async function removeComputedProperty(
     propId,
   });
 }
+
+// ============================================================================
+// Business Intelligence Commands
+// ============================================================================
+
+/** Model metadata returned after loading a BI data model. */
+export interface BiModelInfo {
+  tables: BiTableInfo[];
+  measures: BiMeasureInfo[];
+  relationships: BiRelationshipInfo[];
+}
+
+export interface BiTableInfo {
+  name: string;
+  columns: BiColumnInfo[];
+}
+
+export interface BiColumnInfo {
+  name: string;
+  dataType: string;
+}
+
+export interface BiMeasureInfo {
+  name: string;
+  table: string;
+}
+
+export interface BiRelationshipInfo {
+  name: string;
+  fromTable: string;
+  fromColumn: string;
+  toTable: string;
+  toColumn: string;
+}
+
+export interface BiQueryRequest {
+  measures: string[];
+  groupBy: BiColumnRef[];
+  filters: BiFilter[];
+}
+
+export interface BiColumnRef {
+  table: string;
+  column: string;
+}
+
+export interface BiFilter {
+  column: string;
+  table: string;
+  operator: string;
+  value: string;
+}
+
+export interface BiQueryResult {
+  columns: string[];
+  rows: (string | null)[][];
+  rowCount: number;
+}
+
+export interface BiInsertRequest {
+  sheetIndex: number;
+  startRow: number;
+  startCol: number;
+}
+
+export interface BiInsertResponse {
+  startRow: number;
+  startCol: number;
+  endRow: number;
+  endCol: number;
+  regionId: string;
+}
+
+export interface BiRegionInfo {
+  regionId: string;
+  startRow: number;
+  startCol: number;
+  endRow: number;
+  endCol: number;
+}
+
+export interface BiConnectRequest {
+  connectionString: string;
+}
+
+export interface BiBindRequest {
+  modelTable: string;
+  schema: string;
+  sourceTable: string;
+}
+
+/** Load a BI data model JSON file. */
+export async function biLoadModel(path: string): Promise<BiModelInfo> {
+  return invoke<BiModelInfo>("bi_load_model", { path });
+}
+
+/** Connect to a PostgreSQL database. */
+export async function biConnect(
+  request: BiConnectRequest,
+): Promise<string> {
+  return invoke<string>("bi_connect", { request });
+}
+
+/** Bind a model table to a database schema/table. */
+export async function biBindTable(
+  request: BiBindRequest,
+): Promise<string> {
+  return invoke<string>("bi_bind_table", { request });
+}
+
+/** Execute a BI query and return results. */
+export async function biQuery(
+  request: BiQueryRequest,
+): Promise<BiQueryResult> {
+  return invoke<BiQueryResult>("bi_query", { request });
+}
+
+/** Insert BI query results into the grid as a locked region. */
+export async function biInsertResult(
+  request: BiInsertRequest,
+  queryResult: BiQueryResult,
+  queryRequest: BiQueryRequest,
+): Promise<BiInsertResponse> {
+  return invoke<BiInsertResponse>("bi_insert_result", {
+    request,
+    queryResult,
+    queryRequest,
+  });
+}
+
+/** Refresh the BI query — re-execute and update the locked region. */
+export async function biRefresh(): Promise<BiQueryResult> {
+  return invoke<BiQueryResult>("bi_refresh", {});
+}
+
+/** Get the currently loaded model info, or null if none. */
+export async function biGetModelInfo(): Promise<BiModelInfo | null> {
+  return invoke<BiModelInfo | null>("bi_get_model_info", {});
+}
+
+/** Check if a cell is within a BI protected region. */
+export async function biGetRegionAtCell(
+  row: number,
+  col: number,
+): Promise<BiRegionInfo | null> {
+  return invoke<BiRegionInfo | null>("bi_get_region_at_cell", { row, col });
+}

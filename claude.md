@@ -184,3 +184,7 @@ When developing a new feature, ask these three questions:
 - Financial functions (PMT, NPV, IRR)
 - Statistical functions (AVERAGE, STDEV)
 - Pivot Tables
+
+## Development environment
+In order for Rust environment to work it must first be set using the script:
+core\setup-rust-env.ps1

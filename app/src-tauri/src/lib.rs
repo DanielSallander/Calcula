@@ -3,7 +3,7 @@
 // CONTEXT: Uses a generic ProtectedRegion system for extension-owned cell regions.
 
 use engine::{
-    format_number, format_number_with_color, format_text_with_color, format_color_to_css,
+    format_number_with_color, format_text_with_color, format_color_to_css,
     Cell, CellError, CellStyle, CellValue, Evaluator, Grid, NumberFormat,
     StyleRegistry, MultiSheetContext,
 };
@@ -32,6 +32,7 @@ pub mod sheets;
 pub mod undo_commands;
 pub mod merge_commands;
 pub mod pivot;
+pub mod bi;
 pub mod tablix;
 pub mod scripting;
 pub mod named_ranges;
@@ -215,7 +216,7 @@ pub struct AppState {
 
 impl AppState {
     /// Get the active grid (convenience method)
-    pub fn get_active_grid(&self) -> std::sync::MutexGuard<Grid> {
+    pub fn get_active_grid(&self) -> std::sync::MutexGuard<'_, Grid> {
         self.grid.lock().unwrap()
     }
     
@@ -2127,6 +2128,7 @@ pub fn run() {
         .manage(create_app_state())
         .manage(FileState::default())
         .manage(pivot::PivotState::new())
+        .manage(bi::BiState::new())
         .manage(tablix::TablixState::new())
         .manage(evaluate_formula::EvalFormulaState::new())
         .manage(scripting::ScriptState::new())
@@ -2261,6 +2263,15 @@ pub fn run() {
             named_ranges::get_all_named_ranges,
             named_ranges::get_named_range_for_selection,
             named_ranges::rename_named_range,
+            // BI (Business Intelligence) commands
+            bi::bi_load_model,
+            bi::bi_connect,
+            bi::bi_bind_table,
+            bi::bi_query,
+            bi::bi_insert_result,
+            bi::bi_refresh,
+            bi::bi_get_model_info,
+            bi::bi_get_region_at_cell,
             // Data validation commands
             data_validation::set_data_validation,
             data_validation::clear_data_validation,

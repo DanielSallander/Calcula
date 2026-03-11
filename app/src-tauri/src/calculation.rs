@@ -4,7 +4,7 @@
 use tauri::State;
 use crate::{AppState, evaluate_formula_with_context, format_cell_value};
 use crate::api_types::CellData;
-use crate::{log_enter, log_exit, log_enter_info, log_exit_info, log_debug, log_warn};
+use crate::{log_enter, log_exit, log_enter_info, log_exit_info, log_warn};
 use engine;
 
 // ============================================================================

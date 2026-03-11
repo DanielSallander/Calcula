@@ -2,10 +2,10 @@
 //! Core operations for tablix - converts between engine types and API types.
 
 use crate::tablix::types::*;
-use pivot_engine::definition::{AggregationType, FieldGrouping, PivotField, PivotFilter, SortOrder};
+use pivot_engine::definition::{AggregationType, PivotField, SortOrder};
 use pivot_engine::cache::CacheValue;
 use tablix_engine::{
-    TablixDefinition, TablixLayout, GroupLayout,
+    TablixLayout, GroupLayout,
     TablixDataField, DataFieldMode,
     TablixView, TablixViewCell, TablixCellValue, TablixCellType,
     TablixBackgroundStyle, TablixRowType, TablixColumnType,

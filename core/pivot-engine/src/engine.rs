@@ -34,16 +34,17 @@ use crate::view::{
 /// A node in the axis tree (row or column hierarchy).
 /// Each node represents a unique value at a specific field level.
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 struct AxisNode {
     /// The interned value ID from the cache.
     value_id: ValueId,
-    
+
     /// The field index this node belongs to.
     field_index: FieldIndex,
-    
+
     /// Display label for this node.
     label: String,
-    
+
     /// Depth in the tree (0 = root level).
     depth: usize,
     
@@ -71,6 +72,7 @@ impl AxisNode {
     }
     
     /// Creates a "Total" node for grand totals or subtotals.
+    #[allow(dead_code)]
     fn total(label: String, depth: usize) -> Self {
         AxisNode {
             value_id: VALUE_ID_EMPTY,

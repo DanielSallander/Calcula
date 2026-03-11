@@ -69,6 +69,7 @@ export type TaskPaneContextKey =
   | "comment"         // Cell has a comment
   | "formatting"      // Formatting pane requested
   | "properties"      // Generic properties pane
+  | "bi"              // BI (Business Intelligence) pane
   | "always";         // Always available
 
 /**

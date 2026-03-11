@@ -987,7 +987,7 @@ fn render_number_tokens(
     frac_str: &str,
     int_placeholder_count: usize,
     is_negative: bool,
-    section: &FormatSection,
+    _section: &FormatSection,
 ) -> String {
     let mut result = String::new();
     let int_digits: Vec<char> = int_str.chars().collect();

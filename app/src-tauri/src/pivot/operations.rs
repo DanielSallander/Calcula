@@ -1,7 +1,7 @@
 //! FILENAME: app/src-tauri/src/pivot/operations.rs
 use crate::commands::styles::parse_number_format;
 use crate::pivot::utils::col_index_to_letter;
-use crate::{log_debug, log_info, AppState, ProtectedRegion};
+use crate::{log_debug, AppState, ProtectedRegion};
 use pivot_engine::{calculate_pivot, PivotCache, PivotDefinition, PivotId, PivotView};
 use engine::{Cell, CellStyle, CellValue, StyleRegistry};
 

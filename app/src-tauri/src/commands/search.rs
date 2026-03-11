@@ -2,7 +2,6 @@
 // PURPOSE: Find and replace functionality.
 
 use crate::api_types::CellData;
-use crate::commands::utils::get_cell_internal_with_merge;
 use crate::{format_cell_value, AppState};
 use engine::CellValue;
 use tauri::State;

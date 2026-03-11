@@ -248,6 +248,7 @@ pub(crate) fn api_subtotal_location_to_engine(loc: &SubtotalLocationType) -> Sub
 }
 
 /// Converts engine SubtotalLocation to API SubtotalLocationType.
+#[allow(dead_code)]
 pub(crate) fn engine_subtotal_location_to_api(loc: SubtotalLocation) -> SubtotalLocationType {
     match loc {
         SubtotalLocation::AtTop => SubtotalLocationType::AtTop,

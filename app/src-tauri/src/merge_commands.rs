@@ -4,7 +4,6 @@
 
 use crate::api_types::{CellData, MergedRegion, MergeResult};
 use crate::{format_cell_value, AppState};
-use std::collections::HashSet;
 use tauri::State;
 
 /// Merge cells in the specified range.

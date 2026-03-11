@@ -920,6 +920,7 @@ impl PivotCache {
     }
     
     /// Updates aggregates for a single group key.
+    #[allow(dead_code)]
     fn update_aggregates_for_key(
         &mut self,
         key: &GroupKey,

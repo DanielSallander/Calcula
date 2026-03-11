@@ -7,7 +7,7 @@ use crate::pivot::types::*;
 use crate::pivot::utils::*;
 use crate::{log_debug, log_info, log_perf, AppState};
 use crate::pivot::types::PivotState;
-use pivot_engine::{drill_down, CacheValue, PivotDefinition, PivotId, VALUE_ID_EMPTY};
+use pivot_engine::{drill_down, PivotDefinition, PivotId, VALUE_ID_EMPTY};
 use crate::sheets::FreezeConfig;
 use std::time::Instant;
 use tauri::State;
@@ -393,7 +393,7 @@ pub fn toggle_pivot_group(
 /// Gets the current view of a pivot table
 #[tauri::command]
 pub fn get_pivot_view(
-    state: State<AppState>,
+    _state: State<AppState>,
     pivot_state: State<'_, PivotState>,
     pivot_id: Option<PivotId>,
 ) -> Result<PivotViewResponse, String> {
@@ -798,7 +798,7 @@ pub fn get_pivot_regions_for_sheet(
 /// Get unique values for a pivot field (for filter dropdowns)
 #[tauri::command]
 pub fn get_pivot_field_unique_values(
-    state: State<AppState>,
+    _state: State<AppState>,
     pivot_state: State<'_, PivotState>,
     pivot_id: PivotId,
     field_index: usize,
@@ -857,7 +857,7 @@ pub fn get_pivot_field_unique_values(
 /// Gets pivot table properties and info.
 #[tauri::command]
 pub fn get_pivot_table_info(
-    state: State<AppState>,
+    _state: State<AppState>,
     pivot_state: State<'_, PivotState>,
     pivot_id: PivotId,
 ) -> Result<PivotTableInfo, String> {
@@ -887,7 +887,7 @@ pub fn get_pivot_table_info(
 /// Updates pivot table properties.
 #[tauri::command]
 pub fn update_pivot_properties(
-    state: State<AppState>,
+    _state: State<AppState>,
     pivot_state: State<'_, PivotState>,
     request: UpdatePivotPropertiesRequest,
 ) -> Result<PivotTableInfo, String> {
@@ -934,7 +934,7 @@ pub fn update_pivot_properties(
 /// Gets pivot layout ranges (data body, row labels, column labels, filter axis).
 #[tauri::command]
 pub fn get_pivot_layout_ranges(
-    state: State<AppState>,
+    _state: State<AppState>,
     pivot_state: State<'_, PivotState>,
     pivot_id: PivotId,
 ) -> Result<PivotLayoutRanges, String> {
@@ -1120,7 +1120,7 @@ pub fn update_pivot_layout(
 /// Gets all hierarchies info for a pivot table.
 #[tauri::command]
 pub fn get_pivot_hierarchies(
-    state: State<AppState>,
+    _state: State<AppState>,
     pivot_state: State<'_, PivotState>,
     pivot_id: PivotId,
 ) -> Result<PivotHierarchiesInfo, String> {
@@ -1793,7 +1793,7 @@ pub fn sort_pivot_field(
 /// Gets pivot field info including items and filters.
 #[tauri::command]
 pub fn get_pivot_field_info(
-    state: State<AppState>,
+    _state: State<AppState>,
     pivot_state: State<'_, PivotState>,
     pivot_id: PivotId,
     field_index: usize,
@@ -1940,7 +1940,7 @@ pub fn set_pivot_item_visibility(
 /// Gets a list of all pivot tables in the workbook.
 #[tauri::command]
 pub fn get_all_pivot_tables(
-    state: State<AppState>,
+    _state: State<AppState>,
     pivot_state: State<'_, PivotState>,
 ) -> Vec<PivotTableInfo> {
     log_debug!("PIVOT", "get_all_pivot_tables");
