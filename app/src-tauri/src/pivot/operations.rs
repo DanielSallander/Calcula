@@ -4,6 +4,13 @@ use crate::pivot::utils::col_index_to_letter;
 use crate::{log_debug, AppState, ProtectedRegion};
 use pivot_engine::{calculate_pivot, PivotCache, PivotDefinition, PivotId, PivotView};
 use engine::{Cell, CellStyle, CellValue, StyleRegistry};
+use arrow::array::{
+    Array, BooleanArray, Date32Array, Decimal128Array,
+    Float32Array, Float64Array, Int16Array, Int32Array, Int64Array,
+    StringArray, TimestampMicrosecondArray,
+};
+use arrow::datatypes::DataType as ArrowDataType;
+use arrow::record_batch::RecordBatch;
 
 // ============================================================================
 // CONSTANTS
@@ -109,6 +116,147 @@ pub(crate) fn build_cache_from_grid(
     }
     
     Ok((cache, headers))
+}
+
+/// Builds a PivotCache from Arrow RecordBatches (BI query results).
+/// Each column in the batch becomes a cache field.
+pub(crate) fn build_cache_from_arrow_batches(
+    pivot_id: PivotId,
+    batches: &[RecordBatch],
+) -> Result<PivotCache, String> {
+    if batches.is_empty() {
+        return Ok(PivotCache::new(pivot_id, 0));
+    }
+
+    let schema = batches[0].schema();
+    let field_count = schema.fields().len();
+    let mut cache = PivotCache::new(pivot_id, field_count);
+
+    // Set field names from schema
+    for (i, field) in schema.fields().iter().enumerate() {
+        cache.set_field_name(i, field.name().clone());
+    }
+
+    // Add records from all batches
+    let mut source_row: u32 = 0;
+    for batch in batches {
+        for row_idx in 0..batch.num_rows() {
+            let mut values: Vec<CellValue> = Vec::with_capacity(field_count);
+            for col_idx in 0..batch.num_columns() {
+                let col = batch.column(col_idx);
+                values.push(arrow_cell_to_value(col.as_ref(), row_idx));
+            }
+            cache.add_record(source_row, &values);
+            source_row += 1;
+        }
+    }
+
+    Ok(cache)
+}
+
+/// Convert an Arrow array cell to a CellValue for the PivotCache.
+fn arrow_cell_to_value(array: &dyn Array, idx: usize) -> CellValue {
+    if array.is_null(idx) {
+        return CellValue::Empty;
+    }
+    match array.data_type() {
+        ArrowDataType::Int16 => {
+            let a = array.as_any().downcast_ref::<Int16Array>().unwrap();
+            CellValue::Number(a.value(idx) as f64)
+        }
+        ArrowDataType::Int32 => {
+            let a = array.as_any().downcast_ref::<Int32Array>().unwrap();
+            CellValue::Number(a.value(idx) as f64)
+        }
+        ArrowDataType::Int64 => {
+            let a = array.as_any().downcast_ref::<Int64Array>().unwrap();
+            CellValue::Number(a.value(idx) as f64)
+        }
+        ArrowDataType::Float32 => {
+            let a = array.as_any().downcast_ref::<Float32Array>().unwrap();
+            CellValue::Number(a.value(idx) as f64)
+        }
+        ArrowDataType::Float64 => {
+            let a = array.as_any().downcast_ref::<Float64Array>().unwrap();
+            CellValue::Number(a.value(idx))
+        }
+        ArrowDataType::Utf8 => {
+            let a = array.as_any().downcast_ref::<StringArray>().unwrap();
+            CellValue::Text(a.value(idx).to_string())
+        }
+        ArrowDataType::Boolean => {
+            let a = array.as_any().downcast_ref::<BooleanArray>().unwrap();
+            CellValue::Boolean(a.value(idx))
+        }
+        ArrowDataType::Date32 => {
+            let a = array.as_any().downcast_ref::<Date32Array>().unwrap();
+            let days = a.value(idx);
+            let date = chrono::NaiveDate::from_num_days_from_ce_opt(days + 719_163);
+            match date {
+                Some(d) => CellValue::Text(d.format("%Y-%m-%d").to_string()),
+                None => CellValue::Number(days as f64),
+            }
+        }
+        ArrowDataType::Timestamp(arrow::datatypes::TimeUnit::Microsecond, _) => {
+            let a = array.as_any().downcast_ref::<TimestampMicrosecondArray>().unwrap();
+            let us = a.value(idx);
+            let secs = us / 1_000_000;
+            let nsecs = ((us % 1_000_000) * 1000) as u32;
+            let dt = chrono::DateTime::from_timestamp(secs, nsecs);
+            match dt {
+                Some(d) => CellValue::Text(d.format("%Y-%m-%d %H:%M:%S").to_string()),
+                None => CellValue::Number(us as f64),
+            }
+        }
+        ArrowDataType::Decimal128(_, scale) => {
+            let a = array.as_any().downcast_ref::<Decimal128Array>().unwrap();
+            let raw = a.value(idx);
+            let scale = *scale as u32;
+            let divisor = 10f64.powi(scale as i32);
+            CellValue::Number(raw as f64 / divisor)
+        }
+        _ => CellValue::Text(format!("<unsupported: {:?}>", array.data_type())),
+    }
+}
+
+/// Builds a PivotCache from Arrow RecordBatches with a synthetic "Total"
+/// dimension column prepended. Used when a BI pivot has measures but no
+/// group-by dimensions.
+pub(crate) fn build_cache_with_synthetic_dim(
+    pivot_id: PivotId,
+    batches: &[RecordBatch],
+) -> Result<PivotCache, String> {
+    if batches.is_empty() {
+        let mut cache = PivotCache::new(pivot_id, 1);
+        cache.set_field_name(0, "Total".to_string());
+        return Ok(cache);
+    }
+
+    let schema = batches[0].schema();
+    let orig_field_count = schema.fields().len();
+    let total_fields = orig_field_count + 1; // +1 for synthetic "Total"
+
+    let mut cache = PivotCache::new(pivot_id, total_fields);
+    cache.set_field_name(0, "Total".to_string());
+    for (i, field) in schema.fields().iter().enumerate() {
+        cache.set_field_name(i + 1, field.name().clone());
+    }
+
+    let mut source_row: u32 = 0;
+    for batch in batches {
+        for row_idx in 0..batch.num_rows() {
+            let mut values: Vec<CellValue> = Vec::with_capacity(total_fields);
+            values.push(CellValue::Text("Total".to_string()));
+            for col_idx in 0..batch.num_columns() {
+                let col = batch.column(col_idx);
+                values.push(arrow_cell_to_value(col.as_ref(), row_idx));
+            }
+            cache.add_record(source_row, &values);
+            source_row += 1;
+        }
+    }
+
+    Ok(cache)
 }
 
 /// Resolves the destination sheet index from a pivot definition.

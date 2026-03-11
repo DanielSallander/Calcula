@@ -412,6 +412,18 @@ export async function drillThroughToSheet<TRequest, TResponse>(
   return invoke<TResponse>("drill_through_to_sheet", { request });
 }
 
+export async function createPivotFromBiModel<TRequest, TResponse>(
+  request: TRequest
+): Promise<TResponse> {
+  return invoke<TResponse>("create_pivot_from_bi_model", { request });
+}
+
+export async function updateBiPivotFields<TRequest, TResponse>(
+  request: TRequest
+): Promise<TResponse> {
+  return invoke<TResponse>("update_bi_pivot_fields", { request });
+}
+
 // ============================================================================
 // Tablix Commands
 // ============================================================================

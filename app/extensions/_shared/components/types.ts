@@ -26,6 +26,16 @@ export interface SourceField {
   index: FieldIndex;
   name: string;
   isNumeric: boolean;
+  /** Table name for BI pivots (e.g., "Sales"). Absent for range pivots. */
+  tableName?: string;
+}
+
+// Measure field from a BI model
+export interface MeasureField {
+  name: string;
+  table: string;
+  sourceColumn: string;
+  aggregation: AggregationType;
 }
 
 // Drop zone identifiers

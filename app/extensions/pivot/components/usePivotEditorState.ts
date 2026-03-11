@@ -74,7 +74,12 @@ export function usePivotEditorState({
 
     const valueFields: ValueFieldConfig[] = values.map((f) => {
       const aggregation = f.aggregation ?? getDefaultAggregation(f.isNumeric);
-      const displayName = f.customName || getValueFieldDisplayName(f.name, aggregation);
+      const isBiField = f.sourceIndex === -1;
+      // For BI fields, use the raw name (e.g., "[Revenue]") — no aggregation prefix.
+      // For regular fields, apply aggregation display name (e.g., "Sum of Sales").
+      const displayName = isBiField
+        ? (f.customName || f.name)
+        : (f.customName || getValueFieldDisplayName(f.name, aggregation));
       return {
         sourceIndex: f.sourceIndex,
         name: displayName,
@@ -146,6 +151,9 @@ export function usePivotEditorState({
     (field: SourceField, checked: boolean) => {
       if (checked) {
         // Add to default zone based on field type
+        // For BI fields (sourceIndex === -1), set customName to preserve the original
+        // field name through buildUpdateRequest (prevents "Sum of [Revenue]" mangling)
+        const isBiField = field.index === -1;
         const zoneField: ZoneField = {
           sourceIndex: field.index,
           name: field.name,
@@ -153,6 +161,7 @@ export function usePivotEditorState({
           aggregation: field.isNumeric
             ? getDefaultAggregation(true)
             : undefined,
+          customName: isBiField ? field.name : undefined,
         };
 
         if (field.isNumeric) {
@@ -161,9 +170,12 @@ export function usePivotEditorState({
           setRows((prev) => [...prev, zoneField]);
         }
       } else {
-        // Remove from all zones
+        // Remove from all zones — use name-based match for BI fields (sourceIndex === -1)
+        const isBiField = field.index === -1;
         const removeFromZone = (prev: ZoneField[]) =>
-          prev.filter((f) => f.sourceIndex !== field.index);
+          prev.filter((f) =>
+            isBiField ? f.name !== field.name : f.sourceIndex !== field.index
+          );
 
         setFilters(removeFromZone);
         setColumns(removeFromZone);
@@ -187,6 +199,7 @@ export function usePivotEditorState({
       }
 
       // Create zone field
+      const isBiField = dragField.sourceIndex === -1;
       const zoneField: ZoneField = {
         sourceIndex: dragField.sourceIndex,
         name: dragField.name,
@@ -195,6 +208,7 @@ export function usePivotEditorState({
           zone === 'values'
             ? getDefaultAggregation(dragField.isNumeric)
             : undefined,
+        customName: isBiField ? dragField.name : undefined,
       };
 
       // Add to target zone
@@ -370,7 +384,11 @@ export function usePivotEditorState({
           field.aggregation = field.aggregation ?? getDefaultAggregation(field.isNumeric);
         } else {
           field.aggregation = undefined;
-          field.customName = undefined;
+          // Preserve customName for BI fields (sourceIndex === -1) since it's
+          // the field identifier, not a user-set display name
+          if (field.sourceIndex !== -1) {
+            field.customName = undefined;
+          }
           field.numberFormat = undefined;
           field.showValuesAs = undefined;
         }

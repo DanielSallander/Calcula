@@ -964,6 +964,9 @@ pub struct PivotRegionInfo {
     pub field_configuration: PivotFieldConfiguration,
     /// Filter zones: (row, col, field_index) for each filter dropdown cell
     pub filter_zones: Vec<FilterZoneInfo>,
+    /// BI model metadata — present only for BI-backed pivots
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bi_model: Option<BiPivotModelInfo>,
 }
 
 /// Info about a filter dropdown cell position
@@ -982,6 +985,9 @@ pub struct SourceFieldInfo {
     pub index: usize,
     pub name: String,
     pub is_numeric: bool,
+    /// Table name for BI pivots (e.g., "Sales"). None for range pivots.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub table_name: Option<String>,
 }
 
 /// Pivot region data for rendering
@@ -1141,6 +1147,8 @@ pub struct PivotState {
     pub next_pivot_id: Mutex<PivotId>,
     /// Currently active pivot table ID (for single-pivot operations)
     pub active_pivot_id: Mutex<Option<PivotId>>,
+    /// BI metadata for BI-backed pivots (model tables, measures, last query)
+    pub bi_metadata: Mutex<HashMap<PivotId, BiPivotMetadata>>,
 }
 
 impl PivotState {
@@ -1149,6 +1157,102 @@ impl PivotState {
             pivot_tables: Mutex::new(HashMap::new()),
             next_pivot_id: Mutex::new(1),
             active_pivot_id: Mutex::new(None),
+            bi_metadata: Mutex::new(HashMap::new()),
         }
     }
+}
+
+// ============================================================================
+// BI PIVOT TYPES
+// ============================================================================
+
+/// Request to create a pivot table from a full BI model (all tables + measures).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CreatePivotFromBiModelRequest {
+    pub destination_cell: String,
+    pub destination_sheet: Option<usize>,
+    pub name: Option<String>,
+    /// Optional connection string for auto-connect
+    pub connection_string: Option<String>,
+}
+
+/// Request to update field assignments on a BI-backed pivot table.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdateBiPivotFieldsRequest {
+    pub pivot_id: PivotId,
+    pub row_fields: Vec<BiFieldRef>,
+    pub column_fields: Vec<BiFieldRef>,
+    pub value_fields: Vec<BiValueFieldRef>,
+    pub filter_fields: Vec<BiFieldRef>,
+    pub layout: Option<LayoutConfig>,
+}
+
+/// Reference to a table column (for BI pivot row/column/filter fields).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BiFieldRef {
+    pub table: String,
+    pub column: String,
+}
+
+/// Reference to a model measure (for BI pivot value fields).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BiValueFieldRef {
+    pub measure_name: String,
+}
+
+/// Metadata stored per BI-backed pivot (not serialized to frontend directly).
+#[derive(Debug, Clone)]
+pub struct BiPivotMetadata {
+    /// All tables from the BI model with column metadata
+    pub model_tables: Vec<BiModelTableMeta>,
+    /// Model measures
+    pub measures: Vec<MeasureFieldInfo>,
+    /// Last executed query (for refresh)
+    pub last_query: Option<BiPivotQuery>,
+}
+
+/// Table metadata from a BI model.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BiModelTableMeta {
+    pub name: String,
+    pub columns: Vec<BiModelColumnMeta>,
+}
+
+/// Column metadata from a BI model table.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BiModelColumnMeta {
+    pub name: String,
+    pub data_type: String,
+    pub is_numeric: bool,
+}
+
+/// Measure metadata from a BI model.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MeasureFieldInfo {
+    pub name: String,
+    pub table: String,
+    pub source_column: String,
+    pub aggregation: String,
+}
+
+/// Stored query for BI pivot refresh.
+#[derive(Debug, Clone)]
+pub struct BiPivotQuery {
+    pub measures: Vec<String>,
+    pub group_by: Vec<BiFieldRef>,
+}
+
+/// BI model info sent to the frontend for the field list.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BiPivotModelInfo {
+    pub tables: Vec<BiModelTableMeta>,
+    pub measures: Vec<MeasureFieldInfo>,
 }

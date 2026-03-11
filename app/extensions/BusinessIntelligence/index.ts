@@ -5,7 +5,9 @@
 import {
   ExtensionRegistry,
   TaskPaneExtensions,
+  DialogExtensions,
   registerEditGuard,
+  registerMenuItem,
   addTaskPaneContextKey,
   removeTaskPaneContextKey,
   openTaskPane,
@@ -16,6 +18,9 @@ import type { GridMenuContext } from "../../src/api";
 
 import { BiManifest, BiPaneDefinition, BI_PANE_ID } from "./manifest";
 import { getRegionAtCell } from "./lib/bi-api";
+import { ModelDialog } from "./components/ModelDialog";
+
+const MODEL_DIALOG_ID = "bi:modelDialog";
 
 // ============================================================================
 // Cleanup tracking
@@ -67,6 +72,29 @@ export function registerBiExtension(): void {
     },
   });
 
+  // 5. Register Model Dialog (for "Get Data > Calcula Model")
+  DialogExtensions.registerDialog({
+    id: MODEL_DIALOG_ID,
+    component: ModelDialog,
+    priority: 100,
+  });
+  cleanupFunctions.push(() => DialogExtensions.unregisterDialog(MODEL_DIALOG_ID));
+
+  // 6. Register "Get Data" submenu in the Data menu
+  registerMenuItem("data", {
+    id: "data:getData",
+    label: "Get Data",
+    children: [
+      {
+        id: "data:getData:calculaModel",
+        label: "Calcula Model...",
+        action: () => {
+          DialogExtensions.openDialog(MODEL_DIALOG_ID);
+        },
+      },
+    ],
+  });
+
   console.log("[BI Extension] Registered");
 }
 
@@ -82,6 +110,7 @@ export function unregisterBiExtension(): void {
 
   // Unregister from registries
   gridExtensions.unregisterContextMenuItem("bi.openPane");
+  DialogExtensions.unregisterDialog(MODEL_DIALOG_ID);
   TaskPaneExtensions.unregisterView(BI_PANE_ID);
   ExtensionRegistry.unregisterAddIn(BiManifest.id);
 

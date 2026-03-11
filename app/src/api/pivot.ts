@@ -58,6 +58,9 @@ import {
   createManualGroup,
   ungroupPivotField,
   drillThroughToSheet,
+  // BI Pivot operations
+  createFromBiModel,
+  updateBiFields,
 } from '../../extensions/Pivot/lib/pivot-api';
 
 // Re-export types so extensions can import them from this module
@@ -142,6 +145,15 @@ export type {
   UngroupFieldRequest,
   DrillThroughRequest,
   DrillThroughResponse,
+  // BI Pivot types
+  BiPivotModelInfo,
+  BiModelTable,
+  BiModelColumn,
+  BiMeasureFieldInfo,
+  BiFieldRef,
+  BiValueFieldRef,
+  CreatePivotFromBiModelRequest,
+  UpdateBiPivotFieldsRequest,
 } from '../../extensions/Pivot/lib/pivot-api';
 
 export type {
@@ -312,4 +324,14 @@ export const pivot = {
 
   /** Drill through a data cell to a new sheet with matching source rows. */
   drillThroughToSheet,
+
+  // ---------------------------------------------------------------------------
+  // BI Pivot operations
+  // ---------------------------------------------------------------------------
+
+  /** Creates a new BI pivot from the full model (all tables + measures). */
+  createFromBiModel,
+
+  /** Updates field assignments on a BI-backed pivot (triggers BI engine re-query). */
+  updateBiFields,
 };

@@ -207,29 +207,39 @@ async function checkPivotAtSelection(
 
       const config = pivotInfo.fieldConfiguration;
 
+      const isBiPivot = !!pivotInfo.biModel;
+
+      // For BI pivots, use sourceIndex = -1 so the frontend consistently
+      // uses name-based references (not cache column indices)
+      const biIdx = isBiPivot ? -1 : undefined;
+
       const initialRows: ZoneField[] = config.rowFields.map((f) => ({
-        sourceIndex: f.sourceIndex,
+        sourceIndex: biIdx ?? f.sourceIndex,
         name: f.name,
         isNumeric: f.isNumeric,
+        customName: isBiPivot ? f.name : undefined,
       }));
 
       const initialColumns: ZoneField[] = config.columnFields.map((f) => ({
-        sourceIndex: f.sourceIndex,
+        sourceIndex: biIdx ?? f.sourceIndex,
         name: f.name,
         isNumeric: f.isNumeric,
+        customName: isBiPivot ? f.name : undefined,
       }));
 
       const initialValues: ZoneField[] = config.valueFields.map((f) => ({
-        sourceIndex: f.sourceIndex,
+        sourceIndex: biIdx ?? f.sourceIndex,
         name: f.name,
         isNumeric: f.isNumeric,
         aggregation: f.aggregation as AggregationType | undefined,
+        customName: isBiPivot ? f.name : undefined,
       }));
 
       const initialFilters: ZoneField[] = config.filterFields.map((f) => ({
-        sourceIndex: f.sourceIndex,
+        sourceIndex: biIdx ?? f.sourceIndex,
         name: f.name,
         isNumeric: f.isNumeric,
+        customName: isBiPivot ? f.name : undefined,
       }));
 
       const initialLayout: LayoutConfig = {
@@ -250,6 +260,7 @@ async function checkPivotAtSelection(
         initialValues,
         initialFilters,
         initialLayout,
+        biModel: pivotInfo.biModel,
       };
 
       openTaskPane(PIVOT_PANE_ID, paneData as unknown as Record<string, unknown>);

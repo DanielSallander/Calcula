@@ -8,6 +8,7 @@ import type {
   ZoneField,
   AggregationType,
   SortOrder,
+  MeasureField,
 } from '../../_shared/components/types';
 
 // Re-export shared types used by both Pivot and Tablix
@@ -20,6 +21,7 @@ export type {
   DragField,
   ZoneField,
   AggregationOption,
+  MeasureField,
 } from '../../_shared/components/types';
 export {
   AGGREGATION_OPTIONS,
@@ -99,4 +101,54 @@ export interface PivotEditorState {
   rows: ZoneField[];
   values: ZoneField[];
   layout: LayoutConfig;
+}
+
+// --- BI Pivot Types ---
+
+/** BI model info sent from backend for the hierarchical field list */
+export interface BiPivotModelInfo {
+  tables: BiModelTable[];
+  measures: MeasureField[];
+}
+
+/** Table metadata from a BI model */
+export interface BiModelTable {
+  name: string;
+  columns: BiModelColumn[];
+}
+
+/** Column metadata from a BI model table */
+export interface BiModelColumn {
+  name: string;
+  dataType: string;
+  isNumeric: boolean;
+}
+
+/** Reference to a table column (for BI pivot row/column/filter fields) */
+export interface BiFieldRef {
+  table: string;
+  column: string;
+}
+
+/** Reference to a model measure (for BI pivot value fields) */
+export interface BiValueFieldRef {
+  measureName: string;
+}
+
+/** Request to create a BI model pivot */
+export interface CreatePivotFromBiModelRequest {
+  destinationCell: string;
+  destinationSheet?: number;
+  name?: string;
+  connectionString?: string;
+}
+
+/** Request to update field assignments on a BI-backed pivot */
+export interface UpdateBiPivotFieldsRequest {
+  pivotId: PivotId;
+  rowFields: BiFieldRef[];
+  columnFields: BiFieldRef[];
+  valueFields: BiValueFieldRef[];
+  filterFields: BiFieldRef[];
+  layout?: LayoutConfig;
 }

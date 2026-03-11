@@ -49,6 +49,8 @@ import {
   createManualGroup as apiCreateManualGroup,
   ungroupPivotField as apiUngroupPivotField,
   drillThroughToSheet as apiDrillThroughToSheet,
+  createPivotFromBiModel as apiCreatePivotFromBiModel,
+  updateBiPivotFields as apiUpdateBiPivotFields,
 } from "../../../src/api/backend";
 
 // ============================================================================
@@ -311,6 +313,7 @@ export interface SourceFieldInfo {
   index: number;
   name: string;
   isNumeric: boolean;
+  tableName?: string;
 }
 
 /** Zone field info - represents a field assigned to a zone */
@@ -339,6 +342,59 @@ export interface FilterZoneInfo {
   fieldName: string;
 }
 
+/** BI model info for the hierarchical field list */
+export interface BiPivotModelInfo {
+  tables: BiModelTable[];
+  measures: BiMeasureFieldInfo[];
+}
+
+export interface BiModelTable {
+  name: string;
+  columns: BiModelColumn[];
+}
+
+export interface BiModelColumn {
+  name: string;
+  dataType: string;
+  isNumeric: boolean;
+}
+
+export interface BiMeasureFieldInfo {
+  name: string;
+  table: string;
+  sourceColumn: string;
+  aggregation: string;
+}
+
+/** BI field reference (table + column) */
+export interface BiFieldRef {
+  table: string;
+  column: string;
+}
+
+/** BI value field reference (measure name) */
+export interface BiValueFieldRef {
+  measureName: string;
+}
+
+/** Request to create a BI model pivot */
+export interface CreatePivotFromBiModelRequest {
+  destinationCell: string;
+  destinationSheet?: number;
+  name?: string;
+  connectionString?: string;
+}
+
+/** Request to update BI pivot field assignments */
+export interface UpdateBiPivotFieldsRequest {
+  pivotId: PivotId;
+  rowFields: BiFieldRef[];
+  columnFields: BiFieldRef[];
+  valueFields: BiValueFieldRef[];
+  filterFields: BiFieldRef[];
+  layout?: LayoutConfig;
+}
+
 /** Pivot region info returned when checking if a cell is in a pivot */
 export interface PivotRegionInfo {
   pivotId: PivotId;
@@ -348,6 +404,8 @@ export interface PivotRegionInfo {
   fieldConfiguration: PivotFieldConfiguration;
   /** Filter zones: position info for each filter dropdown cell */
   filterZones: FilterZoneInfo[];
+  /** BI model info - present only for BI-backed pivots */
+  biModel?: BiPivotModelInfo;
 }
 
 /** Pivot region data for rendering placeholders */
@@ -1276,4 +1334,41 @@ export async function drillThroughToSheet(
   request: DrillThroughRequest
 ): Promise<DrillThroughResponse> {
   return apiDrillThroughToSheet<DrillThroughRequest, DrillThroughResponse>(request);
+}
+
+// ============================================================================
+// BI Pivot API Functions
+// ============================================================================
+
+/**
+ * Creates a new BI pivot from the full model (all tables + measures).
+ * The pivot starts empty — data is loaded when the user assigns fields.
+ */
+export async function createFromBiModel(
+  request: CreatePivotFromBiModelRequest
+): Promise<PivotViewResponse> {
+  const t0 = performance.now();
+  const result = await apiCreatePivotFromBiModel<CreatePivotFromBiModelRequest, PivotViewResponse>(request);
+  const dt = performance.now() - t0;
+  cachePivotView(result.pivotId, result);
+  console.log(
+    `[PERF][pivot] createFromBiModel pivot_id=${result.pivotId} | ipc=${dt.toFixed(1)}ms (cached)`
+  );
+  return result;
+}
+
+/**
+ * Updates field assignments on a BI-backed pivot, triggering a BI engine re-query.
+ */
+export async function updateBiFields(
+  request: UpdateBiPivotFieldsRequest
+): Promise<PivotViewResponse> {
+  const t0 = performance.now();
+  const result = await apiUpdateBiPivotFields<UpdateBiPivotFieldsRequest, PivotViewResponse>(request);
+  const dt = performance.now() - t0;
+  cachePivotView(request.pivotId, result);
+  console.log(
+    `[PERF][pivot] updateBiFields pivot_id=${request.pivotId} rows=${result.rowCount}x${result.colCount} | ipc=${dt.toFixed(1)}ms (cached)`
+  );
+  return result;
 }

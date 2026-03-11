@@ -50,7 +50,36 @@ export async function handlePivotCreated(detail: { pivotId: number }): Promise<v
 
     openTaskPane(PIVOT_PANE_ID, paneData as unknown as Record<string, unknown>);
   } catch (error) {
-    console.error("[Pivot Extension] Failed to load pivot source fields:", error);
+    // getSourceData failed — this may be a BI pivot (empty cache).
+    // Try to fetch full pivot info (includes biModel for BI pivots).
+    console.warn("[Pivot Extension] getSourceData failed, trying getAtCell:", error);
+
+    try {
+      const regions = await pivot.getRegionsForSheet();
+      console.log("[Pivot Extension] getRegionsForSheet returned", regions.length, "regions");
+      const region = regions.find((r) => r.pivotId === pivotId);
+      console.log("[Pivot Extension] found region for pivotId", pivotId, ":", region);
+      if (region) {
+        const pivotInfo = await pivot.getAtCell(region.startRow, region.startCol);
+        console.log("[Pivot Extension] getAtCell returned biModel:", pivotInfo?.biModel ? `${pivotInfo.biModel.tables.length} tables, ${pivotInfo.biModel.measures.length} measures` : "null");
+        if (pivotInfo && pivotInfo.biModel) {
+          const paneData: PivotEditorViewData = {
+            pivotId,
+            sourceFields: [],
+            initialRows: [],
+            initialColumns: [],
+            initialValues: [],
+            initialFilters: [],
+            initialLayout: {},
+            biModel: pivotInfo.biModel,
+          };
+          openTaskPane(PIVOT_PANE_ID, paneData as unknown as Record<string, unknown>);
+          return;
+        }
+      }
+    } catch (innerError) {
+      console.warn("[Pivot Extension] getAtCell fallback also failed:", innerError);
+    }
 
     // Open with empty data so user can still see the pane
     const paneData: PivotEditorViewData = {

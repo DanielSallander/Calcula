@@ -2,12 +2,17 @@
 //! PURPOSE: Tauri commands for Pivot Table operations.
 //! CONTEXT: Excel-compatible Pivot Table API implementation.
 
+use crate::bi::types::BiState;
 use crate::pivot::operations::*;
 use crate::pivot::types::*;
 use crate::pivot::utils::*;
 use crate::{log_debug, log_info, log_perf, AppState};
 use crate::pivot::types::PivotState;
-use pivot_engine::{drill_down, PivotDefinition, PivotId, VALUE_ID_EMPTY};
+use engine::CellValue;
+use pivot_engine::{
+    drill_down, AggregationType, PivotCache, PivotDefinition, PivotField, PivotId,
+    ValueField, VALUE_ID_EMPTY,
+};
 use crate::sheets::FreezeConfig;
 use std::time::Instant;
 use tauri::State;
@@ -663,6 +668,7 @@ pub fn get_pivot_at_cell(
                 index: i,
                 name,
                 is_numeric,
+                table_name: None,
             }
         })
         .collect();
@@ -750,12 +756,44 @@ pub fn get_pivot_at_cell(
         })
         .collect();
 
+    // Check if this is a BI-backed pivot and populate bi_model
+    let bi_model = {
+        let bi_meta = pivot_state.bi_metadata.lock().unwrap();
+        bi_meta.get(&pivot_id).map(|meta| {
+            log_info!(
+                "PIVOT",
+                "get_pivot_at_cell: BI pivot_id={}, {} tables, {} measures",
+                pivot_id,
+                meta.model_tables.len(),
+                meta.measures.len()
+            );
+            BiPivotModelInfo {
+                tables: meta.model_tables.clone(),
+                measures: meta.measures.clone(),
+            }
+        })
+    };
+
+    // For BI pivots, filter out the synthetic "Total" row field
+    // (it's an internal implementation detail, not a user-visible field)
+    let field_configuration = if bi_model.is_some() {
+        PivotFieldConfiguration {
+            row_fields: field_configuration.row_fields.into_iter()
+                .filter(|f| f.name != "Total")
+                .collect(),
+            ..field_configuration
+        }
+    } else {
+        field_configuration
+    };
+
     Ok(Some(PivotRegionInfo {
         pivot_id,
         is_empty,
         source_fields,
         field_configuration,
         filter_zones,
+        bi_model,
     }))
 }
 
@@ -1141,6 +1179,7 @@ pub fn get_pivot_hierarchies(
                 index: i,
                 name,
                 is_numeric,
+                table_name: None,
             }
         })
         .collect();
@@ -2519,4 +2558,539 @@ pub fn drill_through_to_sheet(
         row_count: data_row_count,
         col_count,
     })
+}
+
+// ============================================================================
+// BI PIVOT COMMANDS
+// ============================================================================
+
+/// Extracts model metadata (tables + measures) from a BI engine.
+fn extract_bi_model_metadata(
+    engine: &bi_engine::Engine,
+) -> (Vec<BiModelTableMeta>, Vec<MeasureFieldInfo>) {
+    let model = engine.model();
+
+    let tables: Vec<BiModelTableMeta> = model
+        .tables()
+        .iter()
+        .map(|t| {
+            let columns = t
+                .columns()
+                .iter()
+                .map(|c| {
+                    let dt = c.data_type();
+                    let is_numeric = matches!(
+                        dt,
+                        bi_engine::DataType::Int32
+                            | bi_engine::DataType::Int64
+                            | bi_engine::DataType::Float64
+                            | bi_engine::DataType::Decimal(_, _)
+                    );
+                    BiModelColumnMeta {
+                        name: c.name().to_string(),
+                        data_type: format!("{:?}", dt),
+                        is_numeric,
+                    }
+                })
+                .collect();
+            BiModelTableMeta {
+                name: t.name().to_string(),
+                columns,
+            }
+        })
+        .collect();
+
+    let measures: Vec<MeasureFieldInfo> = model
+        .measures()
+        .iter()
+        .map(|m| {
+            let source_column = m.simple_column().unwrap_or("").to_string();
+            let aggregation = m
+                .simple_operation()
+                .map(|op| format!("{:?}", op).to_lowercase())
+                .unwrap_or_else(|| "expression".to_string());
+            MeasureFieldInfo {
+                name: m.name().to_string(),
+                table: m.table().to_string(),
+                source_column,
+                aggregation,
+            }
+        })
+        .collect();
+
+    (tables, measures)
+}
+
+/// Auto-connects the BI engine to a database if not already connected.
+async fn auto_connect_bi(bi_state: &BiState) -> Result<(), String> {
+    let already_connected = bi_state.connector_index.lock().unwrap().is_some();
+    if already_connected {
+        return Ok(());
+    }
+
+    let conn_str = bi_state
+        .connection_string
+        .lock()
+        .unwrap()
+        .clone()
+        .ok_or("No connection string configured. Set a connection string first.")?;
+
+    log_info!("PIVOT", "auto_connect_bi: connecting to {}", conn_str);
+
+    let config = bi_engine::PostgresConfig::new(&conn_str);
+
+    let mut engine = bi_state
+        .engine
+        .lock()
+        .unwrap()
+        .take()
+        .ok_or("No BI model loaded.")?;
+
+    let result = engine.add_postgres(config).await;
+    // ALWAYS put engine back before propagating error
+    *bi_state.engine.lock().unwrap() = Some(engine);
+    let idx = result.map_err(|e| format!("Auto-connect failed: {}", e))?;
+
+    *bi_state.connector_index.lock().unwrap() = Some(idx);
+    log_info!("PIVOT", "auto_connect_bi: connected, connector_index={}", idx);
+    Ok(())
+}
+
+/// Auto-binds model tables that are not yet bound to a database source.
+/// Convention: schema = "BI", source_table = lowercase(model_table_name).
+fn auto_bind_tables(bi_state: &BiState, table_names: &[&str]) -> Result<(), String> {
+    let connector_index = bi_state
+        .connector_index
+        .lock()
+        .unwrap()
+        .ok_or("No database connection.")?;
+
+    let mut eng_lock = bi_state.engine.lock().unwrap();
+    let engine = eng_lock.as_mut().ok_or("No BI model loaded.")?;
+
+    for table_name in table_names {
+        if !engine.registry().has_table(table_name) {
+            let source_table = table_name.to_lowercase();
+            let binding = bi_engine::SourceBinding::new("BI", &source_table);
+            engine.bind_table(*table_name, connector_index, binding);
+            log_info!("PIVOT", "auto_bind: {} -> BI.{}", table_name, source_table);
+        }
+    }
+
+    Ok(())
+}
+
+/// Creates an empty BI pivot from the full model (all tables + measures).
+/// No data query is executed — the field list comes from model metadata.
+#[tauri::command]
+pub async fn create_pivot_from_bi_model(
+    state: State<'_, AppState>,
+    pivot_state: State<'_, PivotState>,
+    bi_state: State<'_, BiState>,
+    request: CreatePivotFromBiModelRequest,
+) -> Result<PivotViewResponse, String> {
+    log_info!(
+        "PIVOT",
+        "create_pivot_from_bi_model dest={} dest_sheet={:?}",
+        request.destination_cell,
+        request.destination_sheet
+    );
+
+    // Store connection string if provided
+    if let Some(ref cs) = request.connection_string {
+        *bi_state.connection_string.lock().unwrap() = Some(cs.clone());
+    }
+
+    // Auto-connect
+    auto_connect_bi(&bi_state).await?;
+
+    // Extract model metadata from engine
+    let (model_tables, measures) = {
+        let eng_lock = bi_state.engine.lock().unwrap();
+        let engine = eng_lock.as_ref().ok_or("No BI model loaded.")?;
+        let result = extract_bi_model_metadata(engine);
+        log_info!(
+            "PIVOT",
+            "extract_bi_model_metadata: {} tables, {} measures",
+            result.0.len(),
+            result.1.len()
+        );
+        for t in &result.0 {
+            log_info!("PIVOT", "  table: {} ({} columns)", t.name, t.columns.len());
+        }
+        for m in &result.1 {
+            log_info!("PIVOT", "  measure: {} (table={})", m.name, m.table);
+        }
+        result
+    };
+
+    // Auto-bind all model tables
+    let table_names: Vec<&str> = model_tables.iter().map(|t| t.name.as_str()).collect();
+    auto_bind_tables(&bi_state, &table_names)?;
+
+    log_info!(
+        "PIVOT",
+        "BI model: {} tables, {} measures",
+        model_tables.len(),
+        measures.len()
+    );
+
+    // Parse destination
+    let destination = parse_cell_ref(&request.destination_cell)?;
+    let dest_sheet_idx = request.destination_sheet.unwrap_or_else(|| {
+        *state.active_sheet.lock().unwrap()
+    });
+
+    // Generate pivot ID
+    let mut next_id = pivot_state.next_pivot_id.lock().unwrap();
+    let pivot_id = *next_id;
+    *next_id += 1;
+    drop(next_id);
+
+    // Create empty definition (no fields yet)
+    let mut definition = PivotDefinition::new(pivot_id, (0, 0), (0, 0));
+    definition.destination = destination;
+    definition.name = request.name.or_else(|| Some(format!("PivotTable{}", pivot_id)));
+    {
+        let sheet_names = state.sheet_names.lock().unwrap();
+        if dest_sheet_idx < sheet_names.len() {
+            definition.destination_sheet = Some(sheet_names[dest_sheet_idx].clone());
+        }
+    }
+
+    // Create empty cache (0 fields)
+    let cache = PivotCache::new(pivot_id, 0);
+
+    // Calculate initial view (will be empty)
+    let mut cache_mut = cache;
+    let view = safe_calculate_pivot(&definition, &mut cache_mut);
+    let response = view_to_response(&view, &definition, &mut cache_mut);
+
+    // Update pivot region tracking
+    update_pivot_region(&state, pivot_id, dest_sheet_idx, destination, &view);
+
+    // Write empty pivot placeholder to grid
+    {
+        let mut styles = state.style_registry.lock().unwrap();
+        let mut grids = state.grids.lock().unwrap();
+        if let Some(dest_grid) = grids.get_mut(dest_sheet_idx) {
+            write_pivot_to_grid(dest_grid, &view, destination, &mut styles);
+            let active_sheet = *state.active_sheet.lock().unwrap();
+            if dest_sheet_idx == active_sheet {
+                let mut grid = state.grid.lock().unwrap();
+                for ((r, c), cell) in dest_grid.cells.iter() {
+                    grid.set_cell(*r, *c, cell.clone());
+                }
+                grid.recalculate_bounds();
+            }
+        }
+    }
+
+    // Store pivot
+    let mut pivot_tables = pivot_state.pivot_tables.lock().unwrap();
+    pivot_tables.insert(pivot_id, (definition, cache_mut));
+    drop(pivot_tables);
+
+    // Set as active pivot
+    *pivot_state.active_pivot_id.lock().unwrap() = Some(pivot_id);
+
+    // Store BI metadata
+    let bi_meta = BiPivotMetadata {
+        model_tables,
+        measures,
+        last_query: None,
+    };
+    pivot_state
+        .bi_metadata
+        .lock()
+        .unwrap()
+        .insert(pivot_id, bi_meta);
+
+    log_info!(
+        "PIVOT",
+        "created BI pivot_id={} (empty - awaiting field configuration)",
+        pivot_id
+    );
+
+    Ok(response)
+}
+
+/// Updates field assignments on a BI-backed pivot, re-querying the BI engine.
+#[tauri::command]
+pub async fn update_bi_pivot_fields(
+    state: State<'_, AppState>,
+    pivot_state: State<'_, PivotState>,
+    bi_state: State<'_, BiState>,
+    request: UpdateBiPivotFieldsRequest,
+) -> Result<PivotViewResponse, String> {
+    let t_total = Instant::now();
+    log_info!("PIVOT", "update_bi_pivot_fields pivot_id={}", request.pivot_id);
+
+    let pivot_id = request.pivot_id;
+
+    // Verify pivot exists and is BI-backed
+    {
+        let bi_meta = pivot_state.bi_metadata.lock().unwrap();
+        if !bi_meta.contains_key(&pivot_id) {
+            return Err(format!("Pivot {} is not a BI-backed pivot", pivot_id));
+        }
+    }
+
+    let has_values = !request.value_fields.is_empty();
+    let has_dimensions = !request.row_fields.is_empty() || !request.column_fields.is_empty();
+
+    // If no fields at all, clear to empty pivot
+    if !has_values && !has_dimensions {
+        log_info!("PIVOT", "No fields assigned, clearing to empty pivot");
+        let mut pivot_tables = pivot_state.pivot_tables.lock().unwrap();
+        let (definition, _cache) = pivot_tables
+            .get_mut(&pivot_id)
+            .ok_or_else(|| format!("Pivot {} not found", pivot_id))?;
+
+        definition.row_fields.clear();
+        definition.column_fields.clear();
+        definition.value_fields.clear();
+        definition.filter_fields.clear();
+        definition.bump_version();
+
+        let empty_cache = PivotCache::new(pivot_id, 0);
+        let view = create_empty_view(pivot_id, definition.version);
+        let response = view_to_response(&view, definition, &mut empty_cache.clone());
+
+        let destination = definition.destination;
+        let dest_sheet_idx = resolve_dest_sheet_index(&state, definition);
+        drop(pivot_tables);
+
+        // Replace cache with empty
+        let mut pt = pivot_state.pivot_tables.lock().unwrap();
+        if let Some((_, cache)) = pt.get_mut(&pivot_id) {
+            *cache = empty_cache;
+        }
+        drop(pt);
+
+        update_pivot_in_grid(&state, pivot_id, dest_sheet_idx, destination, &view);
+        update_pivot_region(&state, pivot_id, dest_sheet_idx, destination, &view);
+        return Ok(response);
+    }
+
+    // If dimensions but no values, show empty too (nothing to aggregate)
+    if !has_values {
+        log_info!("PIVOT", "No value fields, clearing to empty pivot");
+        let mut pivot_tables = pivot_state.pivot_tables.lock().unwrap();
+        let (definition, _) = pivot_tables
+            .get_mut(&pivot_id)
+            .ok_or_else(|| format!("Pivot {} not found", pivot_id))?;
+
+        definition.row_fields.clear();
+        definition.column_fields.clear();
+        definition.value_fields.clear();
+        definition.filter_fields.clear();
+        definition.bump_version();
+
+        let empty_cache = PivotCache::new(pivot_id, 0);
+        let view = create_empty_view(pivot_id, definition.version);
+        let response = view_to_response(&view, definition, &mut empty_cache.clone());
+
+        let destination = definition.destination;
+        let dest_sheet_idx = resolve_dest_sheet_index(&state, definition);
+        drop(pivot_tables);
+
+        let mut pt = pivot_state.pivot_tables.lock().unwrap();
+        if let Some((_, cache)) = pt.get_mut(&pivot_id) {
+            *cache = empty_cache;
+        }
+        drop(pt);
+
+        update_pivot_in_grid(&state, pivot_id, dest_sheet_idx, destination, &view);
+        update_pivot_region(&state, pivot_id, dest_sheet_idx, destination, &view);
+        return Ok(response);
+    }
+
+    // Auto-connect if needed
+    auto_connect_bi(&bi_state).await?;
+
+    // Collect table names referenced in fields for auto-binding
+    let mut referenced_tables: Vec<String> = Vec::new();
+    for f in request.row_fields.iter().chain(request.column_fields.iter()).chain(request.filter_fields.iter()) {
+        if !referenced_tables.contains(&f.table) {
+            referenced_tables.push(f.table.clone());
+        }
+    }
+    let table_refs: Vec<&str> = referenced_tables.iter().map(|s| s.as_str()).collect();
+    auto_bind_tables(&bi_state, &table_refs)?;
+
+    // Build BI engine QueryRequest
+    let query_measures: Vec<String> = request.value_fields.iter().map(|v| v.measure_name.clone()).collect();
+    let query_group_by: Vec<bi_engine::ColumnRef> = request
+        .row_fields
+        .iter()
+        .chain(request.column_fields.iter())
+        .map(|f| bi_engine::ColumnRef::new(&f.table, &f.column))
+        .collect();
+
+    let query_request = bi_engine::QueryRequest {
+        measures: query_measures.clone(),
+        group_by: query_group_by,
+        filters: vec![],
+        lookups: vec![],
+    };
+
+    log_info!(
+        "PIVOT",
+        "BI query: measures={:?}, group_by={} dims",
+        query_measures,
+        request.row_fields.len() + request.column_fields.len()
+    );
+
+    // SAFE ENGINE TAKE: take engine out, drop guard, query, put back
+    let t_query = Instant::now();
+    let engine = bi_state.engine.lock().map_err(|e| e.to_string())?
+        .take()
+        .ok_or("No BI model loaded.")?;
+    // Guard is dropped here — safe to await
+    let query_result = engine.query(query_request).await;
+    // PUT BACK before propagating error
+    *bi_state.engine.lock().unwrap() = Some(engine);
+    let batches = query_result.map_err(|e| format!("BI query failed: {}", e))?;
+    let query_ms = t_query.elapsed().as_secs_f64() * 1000.0;
+
+    log_info!(
+        "PIVOT",
+        "BI query returned {} batches, query_ms={:.1}",
+        batches.len(),
+        query_ms
+    );
+
+    // Build PivotCache from Arrow results
+    let t_cache = Instant::now();
+    let mut cache = build_cache_from_arrow_batches(pivot_id, &batches)?;
+
+    // Handle synthetic dimension for values-only case
+    let use_synthetic_dim = has_values && !has_dimensions;
+    if use_synthetic_dim {
+        log_info!("PIVOT", "Values-only: injecting synthetic 'Total' dimension");
+        // Rebuild cache with synthetic "Total" column prepended
+        cache = build_cache_with_synthetic_dim(pivot_id, &batches)?;
+    }
+    let cache_ms = t_cache.elapsed().as_secs_f64() * 1000.0;
+
+    // Build PivotDefinition field mappings
+    let num_row_fields = request.row_fields.len();
+    let num_col_fields = request.column_fields.len();
+    let _num_value_fields = request.value_fields.len();
+
+    // Cache layout:
+    // [group_by columns (row dims first, then col dims)] [measure columns]
+    // If synthetic dim: [synthetic at 0] [group_by shifted] [measures shifted]
+    let dim_offset: usize = if use_synthetic_dim { 1 } else { 0 };
+
+    let mut pivot_tables = pivot_state.pivot_tables.lock().unwrap();
+    let (definition, stored_cache) = pivot_tables
+        .get_mut(&pivot_id)
+        .ok_or_else(|| format!("Pivot {} not found", pivot_id))?;
+
+    // Row fields
+    if use_synthetic_dim {
+        // Synthetic "Total" dimension as the only row field
+        definition.row_fields = vec![PivotField::new(0, "Total".to_string())];
+    } else {
+        definition.row_fields = request
+            .row_fields
+            .iter()
+            .enumerate()
+            .map(|(i, f)| {
+                PivotField::new(i + dim_offset, format!("{}.{}", f.table, f.column))
+            })
+            .collect();
+    }
+
+    // Column fields
+    definition.column_fields = request
+        .column_fields
+        .iter()
+        .enumerate()
+        .map(|(i, f)| {
+            PivotField::new(
+                num_row_fields + i + dim_offset,
+                format!("{}.{}", f.table, f.column),
+            )
+        })
+        .collect();
+
+    // Value fields — measures map to cache columns after group_by columns
+    // Use "[MeasureName]" format so the frontend can extract the measure name
+    // consistently via toBiValueFieldRef. The BI engine handles aggregation,
+    // so we use Sum as an identity operation on pre-aggregated data.
+    let measure_start = num_row_fields + num_col_fields + dim_offset;
+    definition.value_fields = request
+        .value_fields
+        .iter()
+        .enumerate()
+        .map(|(i, v)| {
+            ValueField::new(
+                measure_start + i,
+                format!("[{}]", v.measure_name),
+                AggregationType::Sum, // SUM of pre-aggregated = identity
+            )
+        })
+        .collect();
+
+    // Filter fields (not implemented for BI pivots yet)
+    definition.filter_fields.clear();
+
+    // Apply layout
+    if let Some(ref layout_config) = request.layout {
+        apply_layout_config(&mut definition.layout, layout_config);
+    }
+
+    definition.bump_version();
+
+    // Calculate pivot view
+    let t_calc = Instant::now();
+    *stored_cache = cache;
+    let view = safe_calculate_pivot(definition, stored_cache);
+    let calc_ms = t_calc.elapsed().as_secs_f64() * 1000.0;
+
+    let response = view_to_response(&view, definition, stored_cache);
+    let destination = definition.destination;
+    let dest_sheet_idx = resolve_dest_sheet_index(&state, definition);
+    drop(pivot_tables);
+
+    // Update grid (clear old region + write new)
+    let t_grid = Instant::now();
+    update_pivot_in_grid(&state, pivot_id, dest_sheet_idx, destination, &view);
+    update_pivot_region(&state, pivot_id, dest_sheet_idx, destination, &view);
+    let grid_ms = t_grid.elapsed().as_secs_f64() * 1000.0;
+
+    // Store last query in bi_metadata
+    {
+        let mut bi_meta = pivot_state.bi_metadata.lock().unwrap();
+        if let Some(meta) = bi_meta.get_mut(&pivot_id) {
+            meta.last_query = Some(BiPivotQuery {
+                measures: request.value_fields.iter().map(|v| v.measure_name.clone()).collect(),
+                group_by: request
+                    .row_fields
+                    .iter()
+                    .chain(request.column_fields.iter())
+                    .cloned()
+                    .collect(),
+            });
+        }
+    }
+
+    let total_ms = t_total.elapsed().as_secs_f64() * 1000.0;
+    log_perf!(
+        "PIVOT",
+        "update_bi_pivot_fields pivot_id={} rows={}x{} | query={:.1}ms cache={:.1}ms calc={:.1}ms grid={:.1}ms TOTAL={:.1}ms",
+        pivot_id,
+        response.row_count,
+        response.col_count,
+        query_ms,
+        cache_ms,
+        calc_ms,
+        grid_ms,
+        total_ms
+    );
+
+    Ok(response)
 }

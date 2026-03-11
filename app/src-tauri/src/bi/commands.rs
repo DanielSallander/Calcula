@@ -206,7 +206,8 @@ fn try_parse_number(s: &str) -> Option<f64> {
 // Tauri Commands
 // ---------------------------------------------------------------------------
 
-/// Load a data model JSON file exported from Calcula Studio.
+/// Load a data model JSON file — supports both raw engine format and
+/// Calcula Studio ModelBundle format (which wraps the model under a "model" key).
 #[tauri::command]
 pub async fn bi_load_model(
     bi_state: State<'_, BiState>,
@@ -214,8 +215,26 @@ pub async fn bi_load_model(
 ) -> Result<BiModelInfo, String> {
     log_info!("BI", "bi_load_model: path={}", path);
 
-    let model = bi_engine::Engine::load_model(Path::new(&path))
-        .map_err(|e| format!("Failed to load model: {}", e))?;
+    // Read the file and detect format
+    let json_str = std::fs::read_to_string(Path::new(&path))
+        .map_err(|e| format!("Failed to read file: {}", e))?;
+
+    let json_value: serde_json::Value = serde_json::from_str(&json_str)
+        .map_err(|e| format!("Failed to parse JSON: {}", e))?;
+
+    // Detect ModelBundle format (has "formatVersion" at top level)
+    let model_json = if json_value.get("formatVersion").is_some() {
+        log_info!("BI", "Detected Calcula Studio ModelBundle format");
+        json_value.get("model")
+            .ok_or_else(|| "ModelBundle missing 'model' field".to_string())?
+            .clone()
+    } else {
+        json_value
+    };
+
+    let model: bi_engine::DataModel = serde_json::from_value(model_json)
+        .map_err(|e| format!("Failed to parse model: {}", e))?;
+    model.validate().map_err(|e| format!("Model validation failed: {}", e))?;
 
     let info = model_to_info(&model);
     let engine = bi_engine::Engine::new(model);
