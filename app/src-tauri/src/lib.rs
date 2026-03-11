@@ -33,7 +33,6 @@ pub mod undo_commands;
 pub mod merge_commands;
 pub mod pivot;
 pub mod bi;
-pub mod tablix;
 pub mod scripting;
 pub mod named_ranges;
 pub mod data_validation;
@@ -2129,7 +2128,6 @@ pub fn run() {
         .manage(FileState::default())
         .manage(pivot::PivotState::new())
         .manage(bi::BiState::new())
-        .manage(tablix::TablixState::new())
         .manage(evaluate_formula::EvalFormulaState::new())
         .manage(scripting::ScriptState::new())
         .invoke_handler(tauri::generate_handler![
@@ -2413,18 +2411,6 @@ pub fn run() {
             tables::get_table_at_cell,
             tables::get_all_tables,
             tables::resolve_structured_reference,
-            // Tablix commands
-            tablix::create_tablix,
-            tablix::update_tablix_fields,
-            tablix::get_tablix_view,
-            tablix::delete_tablix,
-            tablix::toggle_tablix_group,
-            tablix::get_tablix_at_cell,
-            tablix::get_tablix_regions_for_sheet,
-            tablix::convert_pivot_to_tablix,
-            tablix::convert_tablix_to_pivot,
-            tablix::refresh_tablix_cache,
-            tablix::get_tablix_field_unique_values,
             // Goal Seek command
             goal_seek::goal_seek,
             // Data Consolidation command

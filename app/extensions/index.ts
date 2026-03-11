@@ -17,7 +17,6 @@ import { registerTracingExtension, unregisterTracingExtension } from "./Tracing"
 import { registerDefinedNamesExtension, unregisterDefinedNamesExtension } from "./DefinedNames";
 import { registerEvaluateFormulaExtension, unregisterEvaluateFormulaExtension } from "./EvaluateFormula";
 import { registerConsolidateExtension, unregisterConsolidateExtension } from "./Consolidate";
-import { registerTablixExtension, unregisterTablixExtension } from "./Tablix";
 import { registerSortingExtension, unregisterSortingExtension } from "./Sorting";
 import { registerCheckboxExtension, unregisterCheckboxExtension } from "./Checkbox";
 import { registerSparklineExtension, unregisterSparklineExtension } from "./Sparklines";
@@ -53,7 +52,6 @@ export function loadExtensions(): void {
   registerEvaluateFormulaExtension();
   registerCalculationOptionsExtension();
   registerConsolidateExtension();
-  registerTablixExtension();
   registerCheckboxExtension();
   registerSparklineExtension();
   registerReviewExtension();
@@ -80,7 +78,6 @@ export function unloadExtensions(): void {
   unregisterReviewExtension();
   unregisterSparklineExtension();
   unregisterCheckboxExtension();
-  unregisterTablixExtension();
   unregisterConsolidateExtension();
   unregisterCalculationOptionsExtension();
   unregisterEvaluateFormulaExtension();
@@ -119,7 +116,6 @@ export { registerDefinedNamesExtension, unregisterDefinedNamesExtension };
 export { registerEvaluateFormulaExtension, unregisterEvaluateFormulaExtension };
 export { registerConsolidateExtension, unregisterConsolidateExtension };
 export { registerSortingExtension, unregisterSortingExtension };
-export { registerTablixExtension, unregisterTablixExtension };
 export { registerCheckboxExtension, unregisterCheckboxExtension };
 export { registerSparklineExtension, unregisterSparklineExtension };
 export { registerReviewExtension, unregisterReviewExtension };

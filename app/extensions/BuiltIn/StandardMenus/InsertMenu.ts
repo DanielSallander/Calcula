@@ -5,7 +5,6 @@ import { showDialog } from '../../../src/api/ui';
 
 const TABLE_DIALOG_ID = 'table:createDialog';
 const PIVOT_DIALOG_ID = 'pivot:createDialog';
-const TABLIX_DIALOG_ID = 'tablix:createDialog';
 const CHART_DIALOG_ID = 'chart:createDialog';
 
 export function useInsertMenu(): { menu: MenuDefinition } {
@@ -15,10 +14,6 @@ export function useInsertMenu(): { menu: MenuDefinition } {
 
   const handleInsertPivotTable = useCallback(() => {
     showDialog(PIVOT_DIALOG_ID);
-  }, []);
-
-  const handleInsertTablix = useCallback(() => {
-    showDialog(TABLIX_DIALOG_ID);
   }, []);
 
   const handleInsertChart = useCallback(() => {
@@ -33,7 +28,6 @@ export function useInsertMenu(): { menu: MenuDefinition } {
       { id: 'insert.table', label: 'Table...', shortcut: 'Ctrl+T', action: handleInsertTable },
       { id: 'insert.sep1', label: '', separator: true },
       { id: 'insert.pivot', label: 'PivotTable...', action: handleInsertPivotTable },
-      { id: 'insert.tablix', label: 'Tablix...', action: handleInsertTablix },
       { id: 'insert.sep2', label: '', separator: true },
       { id: 'insert.chart', label: 'Chart...', action: handleInsertChart },
     ],
