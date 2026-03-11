@@ -91,6 +91,15 @@ export function LayoutOptions({
         Show empty columns
       </label>
 
+      <label className={styles.layoutOption}>
+        <input
+          type="checkbox"
+          checked={layout.autoFitColumnWidths ?? true}
+          onChange={handleCheckboxChange('autoFitColumnWidths')}
+        />
+        Autofit column widths
+      </label>
+
       <div className={styles.layoutOption}>
         Report layout:
         <select

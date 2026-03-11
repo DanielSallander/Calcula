@@ -454,6 +454,8 @@ pub struct LayoutConfig {
     pub alt_text_title: Option<String>,
     /// Alt text description for accessibility
     pub alt_text_description: Option<String>,
+    /// Automatically resize column widths to fit content
+    pub auto_fit_column_widths: Option<bool>,
 }
 
 /// Request to update pivot table fields

@@ -501,3 +501,68 @@ pub(crate) fn update_pivot_in_grid(
         }
     }
 }
+
+/// Auto-fit column widths for a pivot table based on cell content.
+/// Scans all visible cells in the view and sets each column width to fit
+/// the longest formatted value, using a character-based width estimate.
+pub(crate) fn auto_fit_pivot_columns(
+    state: &AppState,
+    destination: (u32, u32),
+    view: &PivotView,
+) {
+    if view.col_count == 0 || view.row_count == 0 {
+        return;
+    }
+
+    let (_dest_row, dest_col) = destination;
+
+    // Approximate pixel width per character (Segoe UI ~12px font).
+    // Average character width for proportional text is ~6.2px at 12px font size.
+    // The renderer uses CELL_PADDING_X = 6 on each side (12px total).
+    const CHAR_WIDTH: f64 = 6.2;
+    const CELL_PADDING: f64 = 12.0;
+    const MIN_WIDTH: f64 = 40.0;
+    const MAX_WIDTH: f64 = 400.0;
+
+    // Find max formatted_value length per column
+    let mut max_len: Vec<usize> = vec![0; view.col_count];
+
+    for (row_idx, row_desc) in view.rows.iter().enumerate() {
+        if !row_desc.visible {
+            continue;
+        }
+        if row_idx >= view.cells.len() {
+            continue;
+        }
+        let row_cells = &view.cells[row_idx];
+        for (col_idx, cell) in row_cells.iter().enumerate() {
+            if col_idx >= max_len.len() {
+                break;
+            }
+            let len = cell.formatted_value.len();
+            // Account for indent in compact layout (~20px per level = ~3.2 chars)
+            let effective_len = len + (cell.indent_level as usize) * 3;
+            if effective_len > max_len[col_idx] {
+                max_len[col_idx] = effective_len;
+            }
+        }
+    }
+
+    // Apply column widths
+    let mut widths = state.column_widths.lock().unwrap();
+    for (col_idx, &char_len) in max_len.iter().enumerate() {
+        let grid_col = dest_col + col_idx as u32;
+        let width = ((char_len as f64) * CHAR_WIDTH + CELL_PADDING)
+            .max(MIN_WIDTH)
+            .min(MAX_WIDTH);
+        widths.insert(grid_col, width);
+    }
+
+    log_debug!(
+        "PIVOT",
+        "auto_fit_pivot_columns: set {} column widths (cols {}..{})",
+        view.col_count,
+        dest_col,
+        dest_col + view.col_count as u32 - 1
+    );
+}

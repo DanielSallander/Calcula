@@ -335,6 +335,16 @@ export function PivotDesignTab({
             />
             Empty Cols
           </label>
+          <label className={tabStyles.checkboxLabel}>
+            <input
+              type="checkbox"
+              checked={layout.autoFitColumnWidths ?? true}
+              onChange={(e) =>
+                updateLayout({ autoFitColumnWidths: e.target.checked })
+              }
+            />
+            Autofit Columns
+          </label>
         </div>
         <div className={tabStyles.groupLabel}>Display</div>
       </div>

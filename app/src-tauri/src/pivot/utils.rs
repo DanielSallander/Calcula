@@ -252,6 +252,9 @@ pub(crate) fn apply_layout_config(layout: &mut PivotLayout, config: &LayoutConfi
             _ => ValuesPosition::Columns,
         };
     }
+    if let Some(v) = config.auto_fit_column_widths {
+        layout.auto_fit_column_widths = v;
+    }
 }
 
 /// Converts API SubtotalLocationType to engine SubtotalLocation.

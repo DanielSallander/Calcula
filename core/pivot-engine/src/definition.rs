@@ -393,6 +393,10 @@ pub struct PivotLayout {
     /// Alt text description for accessibility.
     #[serde(default)]
     pub alt_text_description: Option<String>,
+
+    /// Automatically resize column widths to fit content.
+    #[serde(default = "default_true")]
+    pub auto_fit_column_widths: bool,
 }
 
 fn default_true() -> bool {
@@ -430,6 +434,7 @@ impl Default for PivotLayout {
             subtotal_location: SubtotalLocation::AtBottom,
             alt_text_title: None,
             alt_text_description: None,
+            auto_fit_column_widths: true,
         }
     }
 }

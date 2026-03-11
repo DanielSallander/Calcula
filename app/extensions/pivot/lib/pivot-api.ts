@@ -156,6 +156,7 @@ export interface LayoutConfig {
   showEmptyRows?: boolean;
   showEmptyCols?: boolean;
   valuesPosition?: ValuesPosition;
+  autoFitColumnWidths?: boolean;
 }
 
 /** Request to update pivot table fields */

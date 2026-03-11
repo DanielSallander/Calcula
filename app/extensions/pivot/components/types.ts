@@ -80,6 +80,7 @@ export interface LayoutConfig {
   showEmptyRows?: boolean;
   showEmptyCols?: boolean;
   valuesPosition?: ValuesPosition;
+  autoFitColumnWidths?: boolean;
 }
 
 // Update request matching UpdatePivotFieldsRequest in pivot_commands.rs

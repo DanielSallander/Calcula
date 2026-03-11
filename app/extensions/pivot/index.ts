@@ -593,6 +593,8 @@ async function refreshPivotRegions(triggerRepaint: boolean = false): Promise<voi
     // triggers refreshCells() in GridCanvas, unlike AppEvents.GRID_REFRESH which only redraws.
     if (triggerRepaint) {
       window.dispatchEvent(new CustomEvent("grid:refresh"));
+      // Also refresh column/row dimensions so auto-fit widths take effect
+      window.dispatchEvent(new CustomEvent("dimensions:refresh"));
 
       // Clear transition bounds after a short delay, giving refreshCells() time to
       // complete so the stale cells are gone before we stop extending the white fill.

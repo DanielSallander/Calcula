@@ -224,6 +224,7 @@ pub fn update_pivot_fields(
     // Get destination info before dropping pivot_tables lock
     let destination = definition.destination;
     let pivot_id = definition.id;
+    let auto_fit = definition.layout.auto_fit_column_widths;
 
     // Resolve destination sheet index from definition
     let dest_sheet_idx = resolve_dest_sheet_index(&state, definition);
@@ -235,6 +236,11 @@ pub fn update_pivot_fields(
     update_pivot_in_grid(&state, pivot_id, dest_sheet_idx, destination, &view);
     let grid_write_ms = t2.elapsed().as_secs_f64() * 1000.0;
 
+    // Auto-fit column widths if enabled
+    if auto_fit {
+        auto_fit_pivot_columns(&state, destination, &view);
+    }
+
     // Update pivot region tracking
     let t3 = Instant::now();
     update_pivot_region(&state, pivot_id, dest_sheet_idx, destination, &view);
@@ -244,10 +250,11 @@ pub fn update_pivot_fields(
 
     log_perf!(
         "PIVOT",
-        "update_pivot_fields pivot_id={} rows={}x{} | calc={:.1}ms serialize={:.1}ms grid_write={:.1}ms region={:.1}ms TOTAL={:.1}ms",
+        "update_pivot_fields pivot_id={} rows={}x{} auto_fit={} | calc={:.1}ms serialize={:.1}ms grid_write={:.1}ms region={:.1}ms TOTAL={:.1}ms",
         request.pivot_id,
         response.row_count,
         response.col_count,
+        auto_fit,
         calc_ms,
         serialize_ms,
         grid_write_ms,
@@ -735,6 +742,7 @@ pub fn get_pivot_at_cell(
         subtotal_location: None,
         alt_text_title: None,
         alt_text_description: None,
+        auto_fit_column_widths: Some(definition.layout.auto_fit_column_widths),
     };
     
     let field_configuration = PivotFieldConfiguration {
@@ -3061,12 +3069,16 @@ pub async fn update_bi_pivot_fields(
 
     let response = view_to_response(&view, definition, stored_cache);
     let destination = definition.destination;
+    let auto_fit = definition.layout.auto_fit_column_widths;
     let dest_sheet_idx = resolve_dest_sheet_index(&state, definition);
     drop(pivot_tables);
 
     // Update grid (clear old region + write new)
     let t_grid = Instant::now();
     update_pivot_in_grid(&state, pivot_id, dest_sheet_idx, destination, &view);
+    if auto_fit {
+        auto_fit_pivot_columns(&state, destination, &view);
+    }
     update_pivot_region(&state, pivot_id, dest_sheet_idx, destination, &view);
     let grid_ms = t_grid.elapsed().as_secs_f64() * 1000.0;
 
