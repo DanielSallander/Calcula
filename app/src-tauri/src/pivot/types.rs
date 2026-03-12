@@ -942,6 +942,10 @@ pub struct ZoneFieldInfo {
     pub is_numeric: bool,
     /// Only present for value fields
     pub aggregation: Option<String>,
+    /// Whether this field is a LOOKUP (attribute) rather than a GROUP field.
+    /// Only relevant for BI-backed pivots.
+    #[serde(default)]
+    pub is_lookup: bool,
 }
 
 /// Current field configuration for the pivot editor
@@ -1189,6 +1193,10 @@ pub struct UpdateBiPivotFieldsRequest {
     pub value_fields: Vec<BiValueFieldRef>,
     pub filter_fields: Vec<BiFieldRef>,
     pub layout: Option<LayoutConfig>,
+    /// All columns toggled to LOOKUP mode ("Table.Column" keys), including
+    /// those not currently in a zone. Persisted for navigation round-trips.
+    #[serde(default)]
+    pub lookup_columns: Vec<String>,
 }
 
 /// Reference to a table column (for BI pivot row/column/filter fields).
@@ -1219,6 +1227,9 @@ pub struct BiPivotMetadata {
     pub measures: Vec<MeasureFieldInfo>,
     /// Last executed query (for refresh)
     pub last_query: Option<BiPivotQuery>,
+    /// All columns the user has toggled to LOOKUP mode ("Table.Column" keys).
+    /// Persists across navigations even for fields not currently in a zone.
+    pub lookup_columns: std::collections::HashSet<String>,
 }
 
 /// Table metadata from a BI model.
@@ -1266,4 +1277,8 @@ pub struct BiPivotQuery {
 pub struct BiPivotModelInfo {
     pub tables: Vec<BiModelTableMeta>,
     pub measures: Vec<MeasureFieldInfo>,
+    /// All columns toggled to LOOKUP mode ("Table.Column" keys).
+    /// Includes fields not currently in a zone.
+    #[serde(default)]
+    pub lookup_columns: Vec<String>,
 }

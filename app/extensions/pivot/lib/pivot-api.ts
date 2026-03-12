@@ -51,6 +51,7 @@ import {
   drillThroughToSheet as apiDrillThroughToSheet,
   createPivotFromBiModel as apiCreatePivotFromBiModel,
   updateBiPivotFields as apiUpdateBiPivotFields,
+  setBiLookupColumns as apiSetBiLookupColumns,
 } from "../../../src/api/backend";
 
 // ============================================================================
@@ -324,6 +325,8 @@ export interface ZoneFieldInfo {
   isNumeric: boolean;
   /** Only present for value fields */
   aggregation?: string;
+  /** Whether this is a LOOKUP (attribute) field rather than GROUP. BI pivots only. */
+  isLookup?: boolean;
 }
 
 /** Current field configuration for the pivot editor */
@@ -347,6 +350,8 @@ export interface FilterZoneInfo {
 export interface BiPivotModelInfo {
   tables: BiModelTable[];
   measures: BiMeasureFieldInfo[];
+  /** All columns toggled to LOOKUP mode ("Table.Column" keys) */
+  lookupColumns?: string[];
 }
 
 export interface BiModelTable {
@@ -396,6 +401,8 @@ export interface UpdateBiPivotFieldsRequest {
   valueFields: BiValueFieldRef[];
   filterFields: BiFieldRef[];
   layout?: LayoutConfig;
+  /** All columns toggled to LOOKUP mode, including those not in zones */
+  lookupColumns?: string[];
 }
 
 /** Pivot region info returned when checking if a cell is in a pivot */
@@ -1374,4 +1381,15 @@ export async function updateBiFields(
     `[PERF][pivot] updateBiFields pivot_id=${request.pivotId} rows=${result.rowCount}x${result.colCount} | ipc=${dt.toFixed(1)}ms (cached)`
   );
   return result;
+}
+
+/**
+ * Persists the set of LOOKUP columns for a BI pivot without re-querying.
+ * Lightweight — only updates metadata, no BI query or grid change.
+ */
+export async function setBiLookupColumns(
+  pivotId: PivotId,
+  lookupColumns: string[]
+): Promise<void> {
+  return apiSetBiLookupColumns(pivotId, lookupColumns);
 }

@@ -64,6 +64,8 @@ export interface ZoneField {
   hiddenItems?: string[];
   // For tablix data fields
   mode?: string;
+  // For BI pivot fields: whether this is a LOOKUP (attribute) rather than GROUP
+  isLookup?: boolean;
 }
 
 // Aggregation option for the dropdown menu

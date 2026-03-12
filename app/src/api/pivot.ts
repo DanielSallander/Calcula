@@ -61,6 +61,7 @@ import {
   // BI Pivot operations
   createFromBiModel,
   updateBiFields,
+  setBiLookupColumns,
 } from '../../extensions/Pivot/lib/pivot-api';
 
 // Re-export types so extensions can import them from this module
@@ -334,4 +335,7 @@ export const pivot = {
 
   /** Updates field assignments on a BI-backed pivot (triggers BI engine re-query). */
   updateBiFields,
+
+  /** Persists LOOKUP column set without re-querying (lightweight metadata update). */
+  setBiLookupColumns,
 };

@@ -221,6 +221,7 @@ async function checkPivotAtSelection(
         name: f.name,
         isNumeric: f.isNumeric,
         customName: isBiPivot ? f.name : undefined,
+        isLookup: f.isLookup || false,
       }));
 
       const initialColumns: ZoneField[] = config.columnFields.map((f) => ({
@@ -228,6 +229,7 @@ async function checkPivotAtSelection(
         name: f.name,
         isNumeric: f.isNumeric,
         customName: isBiPivot ? f.name : undefined,
+        isLookup: f.isLookup || false,
       }));
 
       const initialValues: ZoneField[] = config.valueFields.map((f) => ({
@@ -243,6 +245,7 @@ async function checkPivotAtSelection(
         name: f.name,
         isNumeric: f.isNumeric,
         customName: isBiPivot ? f.name : undefined,
+        isLookup: f.isLookup || false,
       }));
 
       const initialLayout: LayoutConfig = {

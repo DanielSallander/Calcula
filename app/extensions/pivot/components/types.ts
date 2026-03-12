@@ -110,6 +110,8 @@ export interface PivotEditorState {
 export interface BiPivotModelInfo {
   tables: BiModelTable[];
   measures: MeasureField[];
+  /** All columns toggled to LOOKUP mode ("Table.Column" keys) */
+  lookupColumns?: string[];
 }
 
 /** Table metadata from a BI model */
@@ -156,4 +158,6 @@ export interface UpdateBiPivotFieldsRequest {
   valueFields: BiValueFieldRef[];
   filterFields: BiFieldRef[];
   layout?: LayoutConfig;
+  /** All columns toggled to LOOKUP mode, including those not in zones */
+  lookupColumns?: string[];
 }

@@ -64,16 +64,30 @@ export function PivotEditor({
 }: PivotEditorProps): React.ReactElement {
   const isBiPivot = !!biModel;
 
-  // Debug: log biModel data
-  console.log("[PivotEditor] biModel:", isBiPivot, biModel ? `tables=${biModel.tables?.length} measures=${biModel.measures?.length}` : "null");
-
   // Modal state
   const [valueSettingsIndex, setValueSettingsIndex] = useState<number | null>(null);
   const [numberFormatIndex, setNumberFormatIndex] = useState<number | null>(null);
 
   // Lookup state: tracks which columns are in LOOKUP mode (vs GROUP).
   // Key format: "TableName.ColumnName"
-  const [lookupColumns, setLookupColumns] = useState<Set<string>>(() => new Set());
+  // Initialize from: 1) biModel.lookupColumns (full persisted set, including
+  // fields not in zones), 2) zone fields with isLookup flag as fallback.
+  const [lookupColumns, setLookupColumns] = useState<Set<string>>(() => {
+    const set = new Set<string>();
+    // Primary source: full persisted set from backend
+    if (biModel?.lookupColumns) {
+      for (const key of biModel.lookupColumns) {
+        set.add(key);
+      }
+    }
+    // Fallback: zone fields with isLookup (covers edge cases)
+    for (const f of [...initialRows, ...initialColumns, ...initialFilters]) {
+      if (f.isLookup) {
+        set.add(f.name);
+      }
+    }
+    return set;
+  });
 
   const handleUpdate = useCallback(async (request: UpdatePivotFieldsRequest) => {
     try {
@@ -94,6 +108,7 @@ export function PivotEditor({
           valueFields: (request.valueFields ?? []).map((f) => toBiValueFieldRef(f.name)),
           filterFields: (request.filterFields ?? []).filter(isRealBiField).map(toBiRef),
           layout: request.layout,
+          lookupColumns: [...lookupColumns],
         };
         await pivot.updateBiFields(biRequest);
       } else {
@@ -172,21 +187,27 @@ export function PivotEditor({
       const colKey = `${table}.${column}`;
       const isCurrentlyLookup = lookupColumns.has(colKey);
 
-      // If toggling TO lookup, check that at least one other GROUP field
-      // from the same table exists in any zone (rows, columns, filters).
+      // If toggling TO lookup, enforce the guardrail only when the field
+      // is currently in a zone. A LOOKUP field requires at least one GROUP
+      // field from the same table in some zone. For fields not yet in any
+      // zone we allow the toggle freely — the constraint will be checked
+      // when the field is actually added.
       if (!isCurrentlyLookup) {
         const allZoneFields = [...rows, ...columns, ...filters];
-        const sameTableGroupFields = allZoneFields.filter((f) => {
-          if (!f.name.includes('.')) return false;
-          const fieldTable = f.name.substring(0, f.name.indexOf('.'));
-          const fieldKey = f.name;
-          return fieldTable === table && fieldKey !== colKey && !lookupColumns.has(fieldKey);
-        });
-        if (sameTableGroupFields.length === 0) {
-          console.warn(
-            `Cannot set ${colKey} to LOOKUP: no GROUP field from table '${table}' in any zone`
-          );
-          return;
+        const isFieldInZone = allZoneFields.some((f) => f.name === colKey);
+        if (isFieldInZone) {
+          const sameTableGroupFields = allZoneFields.filter((f) => {
+            if (!f.name.includes('.')) return false;
+            const fieldTable = f.name.substring(0, f.name.indexOf('.'));
+            const fieldKey = f.name;
+            return fieldTable === table && fieldKey !== colKey && !lookupColumns.has(fieldKey);
+          });
+          if (sameTableGroupFields.length === 0) {
+            console.warn(
+              `Cannot set ${colKey} to LOOKUP: no GROUP field from table '${table}' in any zone`
+            );
+            return;
+          }
         }
       }
 
@@ -261,6 +282,9 @@ export function PivotEditor({
   // Only fires when the change affects a field that is currently in a zone — avoids
   // a race condition where toggling a badge on a field not yet in a zone would start
   // a concurrent BI query that conflicts with the subsequent field-add query.
+  // Persist lookup columns to backend whenever they change.
+  // Uses a lightweight command (no BI query) for metadata-only updates,
+  // and only triggers a full re-query if the change affects a field in a zone.
   const lookupColumnsRef = React.useRef(lookupColumns);
   useEffect(() => {
     // Skip the initial render
@@ -269,14 +293,19 @@ export function PivotEditor({
     lookupColumnsRef.current = lookupColumns;
 
     if (!isBiPivot) return;
-    // Only re-query if there are active dimension + value fields
+
+    // Always persist the full lookup set via the lightweight command
+    // (no BI query, no grid update, no re-mount).
+    pivot.setBiLookupColumns(pivotId, [...lookupColumns]).catch((err) => {
+      console.error('Failed to persist lookup columns:', err);
+    });
+
+    // Only trigger a full BI re-query if the change affects a field in a zone
+    // AND there are active dimension + value fields.
     const hasDimensions = rows.length > 0 || columns.length > 0;
     const hasValues = values.length > 0;
     if (!hasDimensions || !hasValues) return;
 
-    // Check if the lookup change affects any field currently in a zone.
-    // If the toggled field isn't in rows/columns/filters, skip the update
-    // (the next handleUpdate from field-add will carry the lookup state).
     const allZoneKeys = new Set(
       [...rows, ...columns, ...filters].map((f) => f.name)
     );
@@ -295,6 +324,7 @@ export function PivotEditor({
       columnFields: columns.filter(isRealBiField).map(toBiRef),
       valueFields: values.map((f) => toBiValueFieldRef(f.name)),
       filterFields: filters.filter(isRealBiField).map(toBiRef),
+      lookupColumns: [...lookupColumns],
     };
     pivot.updateBiFields(biRequest).then(() => {
       if (onViewUpdate) onViewUpdate();

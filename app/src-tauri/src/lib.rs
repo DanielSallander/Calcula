@@ -2255,6 +2255,7 @@ pub fn run() {
             pivot::drill_through_to_sheet,
             pivot::create_pivot_from_bi_model,
             pivot::update_bi_pivot_fields,
+            pivot::set_bi_lookup_columns,
             // Named range commands
             named_ranges::create_named_range,
             named_ranges::update_named_range,

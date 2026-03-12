@@ -692,9 +692,10 @@ pub fn get_pivot_at_cell(
             name: f.name.clone(),
             is_numeric,
             aggregation: None,
+            is_lookup: f.is_attribute,
         }
     }).collect();
-    
+
     let column_fields: Vec<ZoneFieldInfo> = definition.column_fields.iter().map(|f| {
         let is_numeric = cache.is_numeric_field(f.source_index);
         ZoneFieldInfo {
@@ -702,9 +703,10 @@ pub fn get_pivot_at_cell(
             name: f.name.clone(),
             is_numeric,
             aggregation: None,
+            is_lookup: f.is_attribute,
         }
     }).collect();
-    
+
     let value_fields: Vec<ZoneFieldInfo> = definition.value_fields.iter().map(|f| {
         let is_numeric = cache.is_numeric_field(f.source_index);
         ZoneFieldInfo {
@@ -712,9 +714,10 @@ pub fn get_pivot_at_cell(
             name: f.name.clone(),
             is_numeric,
             aggregation: Some(aggregation_to_string(f.aggregation)),
+            is_lookup: false,
         }
     }).collect();
-    
+
     let filter_fields: Vec<ZoneFieldInfo> = definition.filter_fields.iter().map(|f| {
         let is_numeric = cache.is_numeric_field(f.field.source_index);
         ZoneFieldInfo {
@@ -722,6 +725,7 @@ pub fn get_pivot_at_cell(
             name: f.field.name.clone(),
             is_numeric,
             aggregation: None,
+            is_lookup: f.field.is_attribute,
         }
     }).collect();
     
@@ -782,6 +786,7 @@ pub fn get_pivot_at_cell(
             BiPivotModelInfo {
                 tables: meta.model_tables.clone(),
                 measures: meta.measures.clone(),
+                lookup_columns: meta.lookup_columns.iter().cloned().collect(),
             }
         })
     };
@@ -2812,6 +2817,7 @@ pub async fn create_pivot_from_bi_model(
         model_tables,
         measures,
         last_query: None,
+        lookup_columns: std::collections::HashSet::new(),
     };
     pivot_state
         .bi_metadata
@@ -3171,7 +3177,7 @@ pub async fn update_bi_pivot_fields(
     update_pivot_region(&state, pivot_id, dest_sheet_idx, destination, &view);
     let grid_ms = t_grid.elapsed().as_secs_f64() * 1000.0;
 
-    // Store last query in bi_metadata (including lookup field info)
+    // Store last query + lookup column set in bi_metadata
     {
         let mut bi_meta = pivot_state.bi_metadata.lock().unwrap();
         if let Some(meta) = bi_meta.get_mut(&pivot_id) {
@@ -3194,6 +3200,8 @@ pub async fn update_bi_pivot_fields(
                 group_by: group_fields,
                 lookups: lookup_fields,
             });
+            // Persist full lookup column set (including fields not in zones)
+            meta.lookup_columns = request.lookup_columns.into_iter().collect();
         }
     }
 
@@ -3213,4 +3221,21 @@ pub async fn update_bi_pivot_fields(
     );
 
     Ok(response)
+}
+
+/// Persists the set of LOOKUP columns for a BI pivot without re-querying.
+/// This is a lightweight call that only updates metadata — no BI query,
+/// no pivot recalculation, no grid update.
+#[tauri::command]
+pub fn set_bi_lookup_columns(
+    pivot_state: State<'_, PivotState>,
+    pivot_id: PivotId,
+    lookup_columns: Vec<String>,
+) -> Result<(), String> {
+    let mut bi_meta = pivot_state.bi_metadata.lock().unwrap();
+    let meta = bi_meta
+        .get_mut(&pivot_id)
+        .ok_or_else(|| format!("No BI metadata for pivot {}", pivot_id))?;
+    meta.lookup_columns = lookup_columns.into_iter().collect();
+    Ok(())
 }

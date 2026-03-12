@@ -424,6 +424,13 @@ export async function updateBiPivotFields<TRequest, TResponse>(
   return invoke<TResponse>("update_bi_pivot_fields", { request });
 }
 
+export async function setBiLookupColumns(
+  pivotId: number,
+  lookupColumns: string[]
+): Promise<void> {
+  return invoke<void>("set_bi_lookup_columns", { pivotId, lookupColumns });
+}
+
 // ============================================================================
 // Clear Range Commands
 // ============================================================================
