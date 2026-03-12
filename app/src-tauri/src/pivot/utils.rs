@@ -375,12 +375,17 @@ pub(crate) fn api_grouping_config_to_engine(config: &FieldGroupingConfig) -> Fie
 }
 
 /// Converts engine PivotView to response format, including filter row data with unique values
+/// Maximum number of rows before auto-windowing kicks in.
+const WINDOW_THRESHOLD: usize = 500;
+/// Number of rows in the initial cell window for large pivots.
+const INITIAL_WINDOW_SIZE: usize = 200;
+
 pub(crate) fn view_to_response(
     view: &PivotView,
     definition: &PivotDefinition,
     cache: &mut PivotCache,
 ) -> PivotViewResponse {
-    let rows: Vec<PivotRowData> = view
+    let all_rows: Vec<PivotRowData> = view
         .cells
         .iter()
         .zip(view.rows.iter())
@@ -449,14 +454,57 @@ pub(crate) fn view_to_response(
         })
         .collect();
 
+    // Compute max_content_sample per column: the longest display string
+    // (with indent padding) so the frontend can measure width from a single
+    // string instead of scanning all cells.
+    let num_cols = view.columns.len();
+    let mut max_samples: Vec<String> = vec![String::new(); num_cols];
+    let mut max_lengths: Vec<usize> = vec![0; num_cols];
+    for row_cells in &view.cells {
+        for (j, cell) in row_cells.iter().enumerate() {
+            if j >= num_cols { break; }
+            let display = if let Some(ref fmt) = cell.number_format {
+                if !fmt.is_empty() {
+                    if let pivot_engine::PivotCellValue::Number(n) = &cell.value {
+                        format_number(*n, &parse_number_format(fmt))
+                    } else {
+                        cell.formatted_value.clone()
+                    }
+                } else {
+                    cell.formatted_value.clone()
+                }
+            } else {
+                cell.formatted_value.clone()
+            };
+            // Approximate effective length: indent adds 2 chars per level,
+            // expandable icon adds 2 chars.
+            let extra = (cell.indent_level as usize) * 2
+                + if cell.is_expandable { 2 } else { 0 };
+            let effective_len = display.len() + extra;
+            if effective_len > max_lengths[j] {
+                max_lengths[j] = effective_len;
+                // Prepend spaces to represent indent + icon padding
+                if extra > 0 {
+                    let mut padded = " ".repeat(extra);
+                    padded.push_str(&display);
+                    max_samples[j] = padded;
+                } else {
+                    max_samples[j] = display;
+                }
+            }
+        }
+    }
+
     let columns: Vec<PivotColumnData> = view
         .columns
         .iter()
-        .map(|col| PivotColumnData {
+        .enumerate()
+        .map(|(i, col)| PivotColumnData {
             view_col: col.view_col,
             col_type: col.col_type,
             depth: col.depth,
             width_hint: col.width_hint,
+            max_content_sample: max_samples.get(i).cloned().unwrap_or_default(),
         })
         .collect();
 
@@ -537,18 +585,130 @@ pub(crate) fn view_to_response(
         })
         .collect();
 
-    PivotViewResponse {
-        pivot_id: view.pivot_id,
-        version: view.version,
-        row_count: view.row_count,
-        col_count: view.col_count,
-        row_label_col_count: view.row_label_col_count,
-        column_header_row_count: view.column_header_row_count,
-        filter_row_count: view.filter_row_count,
-        filter_rows,
-        row_field_summaries,
-        column_field_summaries,
-        rows,
-        columns,
+    let total_rows = all_rows.len();
+    let use_windowing = total_rows > WINDOW_THRESHOLD;
+
+    if use_windowing {
+        // Large pivot: send row descriptors for ALL rows + cells for first window only
+        let row_descriptors: Vec<PivotRowDescriptorData> = all_rows
+            .iter()
+            .map(|r| PivotRowDescriptorData {
+                view_row: r.view_row,
+                row_type: r.row_type,
+                depth: r.depth,
+                visible: r.visible,
+            })
+            .collect();
+
+        let window_end = INITIAL_WINDOW_SIZE.min(total_rows);
+        let windowed_rows: Vec<PivotRowData> = all_rows.into_iter().take(window_end).collect();
+
+        PivotViewResponse {
+            pivot_id: view.pivot_id,
+            version: view.version,
+            row_count: view.row_count,
+            col_count: view.col_count,
+            row_label_col_count: view.row_label_col_count,
+            column_header_row_count: view.column_header_row_count,
+            filter_row_count: view.filter_row_count,
+            filter_rows,
+            row_field_summaries,
+            column_field_summaries,
+            rows: windowed_rows,
+            columns,
+            is_windowed: true,
+            total_row_count: Some(total_rows),
+            window_start_row: Some(0),
+            row_descriptors,
+        }
+    } else {
+        // Small pivot: send everything (no windowing)
+        PivotViewResponse {
+            pivot_id: view.pivot_id,
+            version: view.version,
+            row_count: view.row_count,
+            col_count: view.col_count,
+            row_label_col_count: view.row_label_col_count,
+            column_header_row_count: view.column_header_row_count,
+            filter_row_count: view.filter_row_count,
+            filter_rows,
+            row_field_summaries,
+            column_field_summaries,
+            rows: all_rows,
+            columns,
+            is_windowed: false,
+            total_row_count: None,
+            window_start_row: None,
+            row_descriptors: Vec::new(),
+        }
     }
+}
+
+/// Extract a cell window from a stored PivotView for scroll-triggered fetching.
+pub(crate) fn extract_cell_window(
+    view: &PivotView,
+    start_row: usize,
+    row_count: usize,
+) -> Vec<PivotRowData> {
+    let end_row = (start_row + row_count).min(view.rows.len());
+    view.cells[start_row..end_row]
+        .iter()
+        .zip(view.rows[start_row..end_row].iter())
+        .map(|(cells, descriptor)| {
+            let cell_data: Vec<PivotCellData> = cells
+                .iter()
+                .map(|cell| PivotCellData {
+                    cell_type: cell.cell_type,
+                    value: match &cell.value {
+                        pivot_engine::PivotCellValue::Empty => PivotCellValueData::Empty,
+                        pivot_engine::PivotCellValue::Number(n) => PivotCellValueData::Number(*n),
+                        pivot_engine::PivotCellValue::Text(s) => {
+                            PivotCellValueData::Text(s.clone())
+                        }
+                        pivot_engine::PivotCellValue::Boolean(b) => {
+                            PivotCellValueData::Boolean(*b)
+                        }
+                        pivot_engine::PivotCellValue::Error(e) => {
+                            PivotCellValueData::Text(format!("#{}", e))
+                        }
+                    },
+                    formatted_value: match (&cell.value, &cell.number_format) {
+                        (pivot_engine::PivotCellValue::Number(n), Some(fmt)) if !fmt.is_empty() => {
+                            format_number(*n, &parse_number_format(fmt))
+                        }
+                        _ => String::new(),
+                    },
+                    indent_level: cell.indent_level,
+                    is_bold: cell.is_bold,
+                    is_expandable: cell.is_expandable,
+                    is_collapsed: cell.is_collapsed,
+                    background_style: cell.background_style,
+                    number_format: cell.number_format.clone(),
+                    filter_field_index: cell.filter_field_index,
+                    group_path: match cell.cell_type {
+                        pivot_engine::PivotCellType::RowHeader
+                        | pivot_engine::PivotCellType::ColumnHeader
+                        | pivot_engine::PivotCellType::RowSubtotal
+                        | pivot_engine::PivotCellType::ColumnSubtotal
+                        | pivot_engine::PivotCellType::GrandTotalRow
+                        | pivot_engine::PivotCellType::GrandTotalColumn
+                        | pivot_engine::PivotCellType::GrandTotal => cell
+                            .group_path
+                            .iter()
+                            .map(|(fi, vid)| (*fi, *vid))
+                            .collect(),
+                        _ => Vec::new(),
+                    },
+                })
+                .collect();
+
+            PivotRowData {
+                view_row: descriptor.view_row,
+                row_type: descriptor.row_type,
+                depth: descriptor.depth,
+                visible: descriptor.visible,
+                cells: cell_data,
+            }
+        })
+        .collect()
 }

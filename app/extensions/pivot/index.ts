@@ -62,7 +62,7 @@ import {
   forceRecheck,
 } from "./handlers/selectionHandler";
 import type { PivotRegionData } from "./types";
-import { getPivotRegionsForSheet, getPivotAtCell, getPivotView, togglePivotGroup } from "./lib/pivot-api";
+import { getPivotRegionsForSheet, getPivotAtCell, getPivotView, togglePivotGroup, getPivotCellWindow } from "./lib/pivot-api";
 import type { PivotViewResponse } from "./lib/pivot-api";
 import {
   cachePivotView,
@@ -71,6 +71,8 @@ import {
   deleteCachedPivotView,
   isCacheFresh,
   consumeFreshFlag,
+  getCellWindowCache,
+  ensureCellWindow,
 } from "./lib/pivotViewStore";
 import { drawPivotCell, DEFAULT_PIVOT_THEME } from "./rendering/pivot";
 import type { PivotCellDrawResult } from "./rendering/pivot";
@@ -277,10 +279,21 @@ function drawStyledPivotView(overlayCtx: OverlayRenderContext, pivotView: PivotV
   const colHasActiveFilter = pivotView.columnFieldSummaries?.some(f => f.hasActiveFilter) ?? false;
 
   // ---------------------------------------------------------------------------
+  // WINDOWED MODE SUPPORT
+  // For large pivots, the response contains rowDescriptors (lightweight, all rows)
+  // plus cells for only the first window. Additional cells are fetched on scroll.
+  // ---------------------------------------------------------------------------
+  const isWindowed = pivotView.isWindowed === true;
+  const pivotId = (region.data?.pivotId as number) ?? 0;
+  const cellCache = isWindowed ? getCellWindowCache(pivotId) : undefined;
+
+  // ---------------------------------------------------------------------------
   // PERF FIX: Pre-compute column X positions and widths (columns are few).
   // This avoids calling overlayGetColumnX per cell which loops from col 0 each time.
   // ---------------------------------------------------------------------------
-  const numCols = pivotView.rows[0]?.cells.length ?? 0;
+  const numCols = isWindowed
+    ? (pivotView.colCount ?? pivotView.rows[0]?.cells.length ?? 0)
+    : (pivotView.rows[0]?.cells.length ?? 0);
   const colXPositions: number[] = new Array(numCols);
   const colWidthValues: number[] = new Array(numCols);
   for (let j = 0; j < numCols; j++) {
@@ -295,7 +308,9 @@ function drawStyledPivotView(overlayCtx: OverlayRenderContext, pivotView: PivotV
   // and 46 visible cells that's 874,000 iterations. Instead, compute Y for the
   // first row once (O(startRow)), then accumulate heights: O(totalRows) total.
   // ---------------------------------------------------------------------------
-  const numRows = pivotView.rows.length;
+  const numRows = isWindowed
+    ? (pivotView.totalRowCount ?? pivotView.rows.length)
+    : pivotView.rows.length;
   const rowYPositions: number[] = new Array(numRows);
   const rowHeightValues: number[] = new Array(numRows);
   let runningY = overlayGetRowY(overlayCtx, region.startRow);
@@ -324,9 +339,15 @@ function drawStyledPivotView(overlayCtx: OverlayRenderContext, pivotView: PivotV
 
   let cellsDrawn = 0;
   let cellsSkipped = 0;
+  let firstMissingRow = -1;
+  let lastMissingRow = -1;
+
   for (let i = 0; i < numRows; i++) {
-    const row = pivotView.rows[i];
-    if (!row.visible) continue;
+    // For windowed mode, use row descriptors for visibility; for non-windowed, use rows directly
+    const isVisible = isWindowed
+      ? (pivotView.rowDescriptors?.[i]?.visible ?? true)
+      : (pivotView.rows[i]?.visible ?? true);
+    if (!isVisible) continue;
 
     const gridRow = region.startRow + i;
     const y = rowYPositions[i];
@@ -335,6 +356,27 @@ function drawStyledPivotView(overlayCtx: OverlayRenderContext, pivotView: PivotV
     // Skip rows completely outside visible area
     if (y + height < colHeaderHeight) continue;
     if (y > canvasHeight) break; // Rows are sequential, no more visible rows after this
+
+    // Get the row data: from cell cache (windowed) or directly from response
+    const row = isWindowed
+      ? (cellCache?.getRow(i) ?? null)
+      : (pivotView.rows[i] ?? null);
+
+    if (!row || !row.cells) {
+      // Windowed: cells not yet loaded — draw placeholder background
+      if (isWindowed) {
+        if (firstMissingRow < 0) firstMissingRow = i;
+        lastMissingRow = i;
+        for (let j = 0; j < numCols; j++) {
+          const x = colXPositions[j];
+          const width = colWidthValues[j];
+          if (x + width < rowHeaderWidth || x > canvasWidth) continue;
+          ctx.fillStyle = '#f8f8f8';
+          ctx.fillRect(x, y, width, height);
+        }
+      }
+      continue;
+    }
 
     for (let j = 0; j < row.cells.length; j++) {
       const cell = row.cells[j];
@@ -358,7 +400,6 @@ function drawStyledPivotView(overlayCtx: OverlayRenderContext, pivotView: PivotV
 
       // Store expand/collapse icon bounds for click handling
       if (cellResult.iconBounds) {
-        const pivotId = (region.data?.pivotId as number) ?? 0;
         const key = `${pivotId}-${gridRow}-${gridCol}`;
         overlayIconBounds.set(key, {
           x: cellResult.iconBounds.x,
@@ -375,7 +416,6 @@ function drawStyledPivotView(overlayCtx: OverlayRenderContext, pivotView: PivotV
 
       // Store filter dropdown button bounds for click handling
       if (cellResult.filterButtonBounds) {
-        const pivotId = (region.data?.pivotId as number) ?? 0;
         const fdKey = `${pivotId}-${cellResult.filterButtonBounds.fieldIndex}`;
         overlayFilterDropdownBounds.set(fdKey, {
           x: cellResult.filterButtonBounds.x,
@@ -391,7 +431,6 @@ function drawStyledPivotView(overlayCtx: OverlayRenderContext, pivotView: PivotV
 
       // Store header filter button bounds for click handling
       if (cellResult.headerFilterBounds) {
-        const pivotId = (region.data?.pivotId as number) ?? 0;
         const hfKey = `${pivotId}-${cellResult.headerFilterBounds.zone}`;
         overlayHeaderFilterBounds.set(hfKey, {
           x: cellResult.headerFilterBounds.x,
@@ -403,6 +442,19 @@ function drawStyledPivotView(overlayCtx: OverlayRenderContext, pivotView: PivotV
         });
       }
     }
+  }
+
+  // Trigger async fetch for missing rows in windowed mode
+  if (isWindowed && firstMissingRow >= 0) {
+    const version = pivotView.version;
+    ensureCellWindow(
+      pivotId,
+      version,
+      firstMissingRow,
+      lastMissingRow - firstMissingRow + 1,
+      getPivotCellWindow,
+      () => requestOverlayRedraw()
+    );
   }
 
   // Draw separator line between row labels and data columns

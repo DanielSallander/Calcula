@@ -11,11 +11,20 @@ use crate::pivot::types::PivotState;
 use engine::CellValue;
 use pivot_engine::{
     drill_down, AggregationType, PivotCache, PivotDefinition, PivotField, PivotId,
-    ValueField, VALUE_ID_EMPTY,
+    PivotView, ValueField, VALUE_ID_EMPTY,
 };
 use crate::sheets::FreezeConfig;
 use std::time::Instant;
 use tauri::State;
+
+// ============================================================================
+// HELPERS
+// ============================================================================
+
+/// Store a computed PivotView for later windowed cell fetching.
+fn store_view(pivot_state: &PivotState, pivot_id: PivotId, view: &PivotView) {
+    pivot_state.views.lock().unwrap().insert(pivot_id, view.clone());
+}
 
 // ============================================================================
 // TAURI COMMANDS
@@ -92,6 +101,7 @@ pub fn create_pivot_table(
     // Calculate initial view (will be empty since no fields are configured)
     let mut cache_mut = cache;
     let view = safe_calculate_pivot(&definition, &mut cache_mut);
+    store_view(&pivot_state, pivot_id, &view);
     let response = view_to_response(&view, &definition, &mut cache_mut);
 
     // Update pivot region tracking (tracks even empty pivots with reserved space)
@@ -215,6 +225,7 @@ pub fn update_pivot_fields(
     // Recalculate view
     let t0 = Instant::now();
     let view = safe_calculate_pivot(definition, cache);
+    store_view(&pivot_state, request.pivot_id, &view);
     let calc_ms = t0.elapsed().as_secs_f64() * 1000.0;
 
     let t1 = Instant::now();
@@ -369,6 +380,7 @@ pub fn toggle_pivot_group(
     // Recalculate view
     let t0 = Instant::now();
     let view = safe_calculate_pivot(definition, cache);
+    store_view(&pivot_state, request.pivot_id, &view);
     let calc_ms = t0.elapsed().as_secs_f64() * 1000.0;
 
     let t1 = Instant::now();
@@ -434,6 +446,7 @@ pub fn get_pivot_view(
 
     let t0 = Instant::now();
     let view = safe_calculate_pivot(definition, cache);
+    store_view(&pivot_state, id, &view);
     let calc_ms = t0.elapsed().as_secs_f64() * 1000.0;
 
     let t1 = Instant::now();
@@ -452,6 +465,40 @@ pub fn get_pivot_view(
     );
 
     Ok(response)
+}
+
+/// Fetches a window of cell data from a stored PivotView (for scroll-triggered loading).
+#[tauri::command]
+pub fn get_pivot_cell_window(
+    pivot_state: State<'_, PivotState>,
+    pivot_id: PivotId,
+    start_row: usize,
+    row_count: usize,
+) -> Result<PivotCellWindowResponse, String> {
+    let views = pivot_state.views.lock().unwrap();
+    let view = views
+        .get(&pivot_id)
+        .ok_or_else(|| format!("No cached view for pivot {}", pivot_id))?;
+
+    if start_row >= view.rows.len() {
+        return Ok(PivotCellWindowResponse {
+            pivot_id,
+            version: view.version,
+            start_row,
+            rows: Vec::new(),
+        });
+    }
+
+    let rows = extract_cell_window(view, start_row, row_count);
+    let version = view.version;
+    drop(views);
+
+    Ok(PivotCellWindowResponse {
+        pivot_id,
+        version,
+        start_row,
+        rows,
+    })
 }
 
 /// Deletes a pivot table
@@ -500,6 +547,9 @@ pub fn delete_pivot_table(state: State<AppState>, pivot_state: State<'_, PivotSt
     // Remove pivot table
     let mut pivot_tables = pivot_state.pivot_tables.lock().unwrap();
     pivot_tables.remove(&pivot_id);
+
+    // Remove cached view
+    pivot_state.views.lock().unwrap().remove(&pivot_id);
 
     // Clear active if this was the active pivot
     let mut active = pivot_state.active_pivot_id.lock().unwrap();
@@ -622,13 +672,14 @@ pub fn refresh_pivot_cache(
     definition.bump_version();
 
     let view = safe_calculate_pivot(definition, cache);
+    store_view(&pivot_state, pivot_id, &view);
     let response = view_to_response(&view, definition, cache);
-    
+
     drop(pivot_tables);
-    
+
     // Update pivot in grid (clears old region, writes new view)
     update_pivot_in_grid(&state, pivot_id, dest_sheet_idx, destination, &view);
-    
+
     // Update pivot region tracking
     update_pivot_region(&state, pivot_id, dest_sheet_idx, destination, &view);
 
@@ -1005,6 +1056,7 @@ pub fn get_pivot_layout_ranges(
 
     // Calculate view to get accurate ranges
     let view = safe_calculate_pivot(definition, cache);
+    store_view(&pivot_state, pivot_id, &view);
     let (dest_row, dest_col) = definition.destination;
 
     // If view is empty, return empty ranges
@@ -1159,6 +1211,7 @@ pub fn update_pivot_layout(
 
     // Recalculate view
     let view = safe_calculate_pivot(definition, cache);
+    store_view(&pivot_state, request.pivot_id, &view);
     let response = view_to_response(&view, definition, cache);
 
     // Get destination info
@@ -1342,6 +1395,7 @@ pub fn add_pivot_hierarchy(
 
     // Recalculate view
     let view = safe_calculate_pivot(definition, cache);
+    store_view(&pivot_state, request.pivot_id, &view);
     let response = view_to_response(&view, definition, cache);
 
     let destination = definition.destination;
@@ -1413,6 +1467,7 @@ pub fn remove_pivot_hierarchy(
     definition.bump_version();
 
     let view = safe_calculate_pivot(definition, cache);
+    store_view(&pivot_state, request.pivot_id, &view);
     let response = view_to_response(&view, definition, cache);
 
     let destination = definition.destination;
@@ -1542,6 +1597,7 @@ pub fn move_pivot_field(
     definition.bump_version();
 
     let view = safe_calculate_pivot(definition, cache);
+    store_view(&pivot_state, request.pivot_id, &view);
     let response = view_to_response(&view, definition, cache);
 
     let destination = definition.destination;
@@ -1590,6 +1646,7 @@ pub fn set_pivot_aggregation(
     definition.bump_version();
 
     let view = safe_calculate_pivot(definition, cache);
+    store_view(&pivot_state, request.pivot_id, &view);
     let response = view_to_response(&view, definition, cache);
 
     let destination = definition.destination;
@@ -1637,6 +1694,7 @@ pub fn set_pivot_number_format(
     definition.bump_version();
 
     let view = safe_calculate_pivot(definition, cache);
+    store_view(&pivot_state, request.pivot_id, &view);
     let response = view_to_response(&view, definition, cache);
 
     let destination = definition.destination;
@@ -1728,6 +1786,7 @@ pub fn apply_pivot_filter(
     definition.bump_version();
 
     let view = safe_calculate_pivot(definition, cache);
+    store_view(&pivot_state, request.pivot_id, &view);
     let response = view_to_response(&view, definition, cache);
 
     let destination = definition.destination;
@@ -1781,6 +1840,7 @@ pub fn clear_pivot_filter(
     definition.bump_version();
 
     let view = safe_calculate_pivot(definition, cache);
+    store_view(&pivot_state, request.pivot_id, &view);
     let response = view_to_response(&view, definition, cache);
 
     let destination = definition.destination;
@@ -1835,6 +1895,7 @@ pub fn sort_pivot_field(
     definition.bump_version();
 
     let view = safe_calculate_pivot(definition, cache);
+    store_view(&pivot_state, request.pivot_id, &view);
     let response = view_to_response(&view, definition, cache);
 
     let destination = definition.destination;
@@ -1982,6 +2043,7 @@ pub fn set_pivot_item_visibility(
     definition.bump_version();
 
     let view = safe_calculate_pivot(definition, cache);
+    store_view(&pivot_state, request.pivot_id, &view);
     let response = view_to_response(&view, definition, cache);
 
     let destination = definition.destination;
@@ -2072,6 +2134,7 @@ pub fn set_pivot_item_expanded(
     definition.bump_version();
 
     let view = safe_calculate_pivot(definition, cache);
+    store_view(&pivot_state, request.pivot_id, &view);
     let response = view_to_response(&view, definition, cache);
 
     let destination = definition.destination;
@@ -2130,6 +2193,7 @@ pub fn expand_collapse_level(
     definition.bump_version();
 
     let view = safe_calculate_pivot(definition, cache);
+    store_view(&pivot_state, request.pivot_id, &view);
     let response = view_to_response(&view, definition, cache);
 
     let destination = definition.destination;
@@ -2171,6 +2235,7 @@ pub fn expand_collapse_all(
     definition.bump_version();
 
     let view = safe_calculate_pivot(definition, cache);
+    store_view(&pivot_state, request.pivot_id, &view);
     let response = view_to_response(&view, definition, cache);
 
     let destination = definition.destination;
@@ -2322,6 +2387,7 @@ pub fn group_pivot_field(
     definition.bump_version();
 
     let view = safe_calculate_pivot(definition, cache);
+    store_view(&pivot_state, request.pivot_id, &view);
     let response = view_to_response(&view, definition, cache);
 
     let destination = definition.destination;
@@ -2393,6 +2459,7 @@ pub fn create_manual_group(
     definition.bump_version();
 
     let view = safe_calculate_pivot(definition, cache);
+    store_view(&pivot_state, request.pivot_id, &view);
     let response = view_to_response(&view, definition, cache);
 
     let destination = definition.destination;
@@ -2444,6 +2511,7 @@ pub fn ungroup_pivot_field(
     definition.bump_version();
 
     let view = safe_calculate_pivot(definition, cache);
+    store_view(&pivot_state, request.pivot_id, &view);
     let response = view_to_response(&view, definition, cache);
 
     let destination = definition.destination;
@@ -2785,6 +2853,7 @@ pub async fn create_pivot_from_bi_model(
     // Calculate initial view (will be empty)
     let mut cache_mut = cache;
     let view = safe_calculate_pivot(&definition, &mut cache_mut);
+    store_view(&pivot_state, pivot_id, &view);
     let response = view_to_response(&view, &definition, &mut cache_mut);
 
     // Update pivot region tracking
@@ -3160,6 +3229,7 @@ pub async fn update_bi_pivot_fields(
     let t_calc = Instant::now();
     *stored_cache = cache;
     let view = safe_calculate_pivot(definition, stored_cache);
+    store_view(&pivot_state, pivot_id, &view);
     let calc_ms = t_calc.elapsed().as_secs_f64() * 1000.0;
 
     let t_resp = Instant::now();

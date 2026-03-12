@@ -956,6 +956,16 @@ export function measurePivotColumnWidth(
 
   ctx.font = `${theme.headerFontWeight} ${theme.fontSize}px ${theme.fontFamily}`;
 
+  // Fast path: if the backend provided a max content sample string for this
+  // column, measure just that single string instead of scanning all rows.
+  const column = pivotView.columns?.[colIndex];
+  if (column?.maxContentSample) {
+    const textWidth = ctx.measureText(column.maxContentSample).width;
+    const totalWidth = textWidth + CELL_PADDING_X * 2;
+    maxContentWidth = Math.max(maxContentWidth, totalWidth);
+    return Math.min(maxContentWidth, maxWidth);
+  }
+
   for (const row of pivotView.rows) {
     if (colIndex < row.cells.length) {
       const cell = row.cells[colIndex];

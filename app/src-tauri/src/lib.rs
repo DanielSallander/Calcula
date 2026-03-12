@@ -2222,6 +2222,7 @@ pub fn run() {
             pivot::update_pivot_fields,
             pivot::toggle_pivot_group,
             pivot::get_pivot_view,
+            pivot::get_pivot_cell_window,
             pivot::delete_pivot_table,
             pivot::get_pivot_source_data,
             pivot::refresh_pivot_cache,

@@ -13,9 +13,15 @@
 //! - Aggregates are pre-computed and keyed by group combinations
 
 use std::collections::{HashMap, HashSet};
+use rustc_hash::{FxHashMap, FxHashSet};
+use smallvec::SmallVec;
 use serde::{Deserialize, Serialize};
 use engine::CellValue;
 use crate::definition::{AggregationType, FieldIndex, PivotId};
+
+/// Inline capacity for GroupKey — covers the typical 2-6 field case
+/// without heap allocation.
+pub type GroupKeyVec = SmallVec<[ValueId; 6]>;
 
 // ============================================================================
 // VALUE INTERNING
@@ -237,7 +243,8 @@ pub struct CacheRecord {
 pub struct GroupKey {
     /// ValueIds for each field in the grouping (row fields then column fields).
     /// A VALUE_ID_EMPTY indicates "all values" (for subtotals/grand totals).
-    pub values: Vec<ValueId>,
+    /// Uses SmallVec to avoid heap allocation for the typical 2-6 field case.
+    pub values: GroupKeyVec,
 }
 
 impl std::borrow::Borrow<[ValueId]> for GroupKey {
@@ -248,16 +255,20 @@ impl std::borrow::Borrow<[ValueId]> for GroupKey {
 
 impl GroupKey {
     pub fn new(values: Vec<ValueId>) -> Self {
-        GroupKey { values }
+        GroupKey { values: SmallVec::from_vec(values) }
     }
-    
+
+    pub fn from_slice(slice: &[ValueId]) -> Self {
+        GroupKey { values: SmallVec::from_slice(slice) }
+    }
+
     /// Creates a key for the grand total (all fields are "all values").
     pub fn grand_total(field_count: usize) -> Self {
         GroupKey {
-            values: vec![VALUE_ID_EMPTY; field_count],
+            values: smallvec::smallvec![VALUE_ID_EMPTY; field_count],
         }
     }
-    
+
     /// Creates a subtotal key by setting fields after `level` to "all values".
     pub fn subtotal_at_level(&self, level: usize) -> Self {
         let mut values = self.values.clone();
@@ -448,29 +459,118 @@ pub struct ComputedAggregate {
 // MAIN CACHE STRUCT
 // ============================================================================
 
+/// Layout information for flattening column combinations into array indices.
+/// Enables O(1) column lookups by replacing HashMap with arithmetic indexing.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ColumnLayout {
+    /// Cardinality of each column field (number of unique values).
+    /// The extra +1 slot (for VALUE_ID_EMPTY subtotals) is accounted for in strides.
+    cardinalities: Vec<usize>,
+    /// Strides for index computation. stride[i] = product of (card[j]+1) for j > i.
+    strides: Vec<usize>,
+    /// Total number of column combinations = product of (card[i]+1).
+    pub total_combinations: usize,
+    /// Number of value fields.
+    pub value_count: usize,
+}
+
+impl ColumnLayout {
+    /// Builds a ColumnLayout from column field cardinalities and value count.
+    fn new(col_cardinalities: &[usize], value_count: usize) -> Self {
+        let col_count = col_cardinalities.len();
+        if col_count == 0 {
+            return ColumnLayout {
+                cardinalities: Vec::new(),
+                strides: Vec::new(),
+                total_combinations: 1, // single "no-column" slot
+                value_count,
+            };
+        }
+
+        let mut strides = vec![1usize; col_count];
+        // strides[last] = 1, strides[i] = product of (card[j]+1) for j > i
+        for i in (0..col_count - 1).rev() {
+            strides[i] = strides[i + 1] * (col_cardinalities[i + 1] + 1);
+        }
+        let total = strides[0] * (col_cardinalities[0] + 1);
+
+        ColumnLayout {
+            cardinalities: col_cardinalities.to_vec(),
+            strides,
+            total_combinations: total,
+            value_count,
+        }
+    }
+
+    /// Computes the flat column index for a column key slice.
+    /// VALUE_ID_EMPTY maps to the subtotal slot (= cardinality[i]).
+    #[inline(always)]
+    pub fn col_index(&self, col_key: &[ValueId]) -> usize {
+        let mut idx = 0;
+        for (i, &vid) in col_key.iter().enumerate() {
+            if i >= self.cardinalities.len() {
+                break;
+            }
+            let mapped = if vid == VALUE_ID_EMPTY {
+                self.cardinalities[i]
+            } else {
+                (vid as usize).min(self.cardinalities[i]) // defensive clamp
+            };
+            idx += mapped * self.strides[i];
+        }
+        // Handle col_key shorter than cardinalities (remaining = subtotal slots)
+        for i in col_key.len()..self.cardinalities.len() {
+            idx += self.cardinalities[i] * self.strides[i];
+        }
+        idx
+    }
+
+    /// Returns the flat index into the accumulator array for a specific
+    /// column combination and value field.
+    #[inline(always)]
+    pub fn acc_index(&self, col_key: &[ValueId], value_field_idx: usize) -> usize {
+        self.col_index(col_key) * self.value_count + value_field_idx
+    }
+
+    /// Total number of accumulators per row slot.
+    #[inline(always)]
+    pub fn slot_len(&self) -> usize {
+        self.total_combinations * self.value_count
+    }
+}
+
 /// The main pivot cache structure.
 /// Designed for 1M+ row performance with O(1) lookups after initial build.
+///
+/// Aggregates use a two-level structure: row keys in a HashMap, column
+/// combinations as flat arrays. This reduces HashMap entries by a factor
+/// of `column_combinations` and replaces column hashing with arithmetic.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PivotCache {
     /// The pivot table ID this cache belongs to.
     pub pivot_id: PivotId,
-    
+
     /// Version from the definition (for invalidation checking).
     pub definition_version: u64,
-    
+
     /// Cache for each source field (column).
     pub fields: Vec<FieldCache>,
-    
+
     /// All source records, stored as interned value IDs.
     pub records: Vec<CacheRecord>,
-    
-    /// Pre-computed aggregates keyed by GroupKey.
-    /// The Vec contains one accumulator per value field.
-    aggregates: HashMap<GroupKey, Vec<AggregateAccumulator>>,
-    
+
+    /// Pre-computed aggregates keyed by ROW-only GroupKey.
+    /// Each entry is a flat array of accumulators:
+    ///   slot[col_index * value_count + value_field_idx]
+    /// where col_index is computed via ColumnLayout.
+    aggregates: FxHashMap<GroupKey, Vec<AggregateAccumulator>>,
+
+    /// Column layout for computing flat column indices.
+    col_layout: ColumnLayout,
+
     /// Whether aggregates need recomputation.
     aggregates_dirty: bool,
-    
+
     /// Bitmap of which records pass the current filters.
     /// Length = records.len(), true = included.
     pub filter_mask: Vec<bool>,
@@ -508,7 +608,8 @@ impl PivotCache {
                 .map(|i| FieldCache::new(i, format!("Field{}", i)))
                 .collect(),
             records: Vec::new(),
-            aggregates: HashMap::new(),
+            aggregates: FxHashMap::default(),
+            col_layout: ColumnLayout::default(),
             aggregates_dirty: true,
             filter_mask: Vec::new(),
             virtual_fields: Vec::new(),
@@ -728,7 +829,7 @@ impl PivotCache {
     /// # Returns
     /// A vector of (ValueId, String) pairs for values that exist in filtered records
     pub fn get_unique_values_for_filter_in_data(&self, field_index: FieldIndex) -> Vec<(ValueId, String)> {
-        let mut seen_ids: HashSet<ValueId> = HashSet::new();
+        let mut seen_ids: FxHashSet<ValueId> = FxHashSet::default();
 
         // Collect unique value IDs from filtered records
         for (i, record) in self.records.iter().enumerate() {
@@ -788,7 +889,8 @@ impl PivotCache {
             })
     }
     
-    /// Gets or computes the aggregate for a group key.
+    /// Gets or computes the aggregate for a combined row+col group key.
+    /// Triggers lazy computation if aggregates are dirty.
     pub fn get_aggregate(
         &mut self,
         group_key: &GroupKey,
@@ -796,27 +898,33 @@ impl PivotCache {
         col_field_indices: &[FieldIndex],
         value_field_indices: &[FieldIndex],
     ) -> Option<&Vec<AggregateAccumulator>> {
-        // Only recompute when dirty (field config changed).
-        // A missing key after computation means no data exists for that
-        // combination - do NOT recompute, just return None.
         if self.aggregates_dirty {
             self.compute_aggregates(row_field_indices, col_field_indices, value_field_indices);
         }
 
-        self.aggregates.get(group_key)
+        // Split the combined key into row portion — the HashMap key
+        let row_count = row_field_indices.len();
+        let row_key = &group_key.values[..row_count.min(group_key.values.len())];
+        self.aggregates.get(row_key)
     }
 
-    /// Slice-based aggregate lookup — avoids allocating a GroupKey per call.
-    /// Requires that aggregates are already computed (not dirty).
-    pub fn get_aggregate_by_slice(
-        &self,
-        key_slice: &[ValueId],
-    ) -> Option<&Vec<AggregateAccumulator>> {
-        self.aggregates.get(key_slice)
+    /// Returns the row slot (flat array of all column × value accumulators)
+    /// for the given row key. Use with `col_layout()` for column indexing.
+    pub fn get_row_slot(&self, row_key: &[ValueId]) -> Option<&Vec<AggregateAccumulator>> {
+        self.aggregates.get(row_key)
+    }
+
+    /// Returns the column layout for computing flat column indices.
+    pub fn col_layout(&self) -> &ColumnLayout {
+        &self.col_layout
     }
     
-    /// Computes all aggregates for the current field configuration.
-    /// Single-pass with pre-allocated capacity and slice-based lookups.
+    /// Computes all aggregates using a two-level row/column split.
+    ///
+    /// Row keys stay in a HashMap (high cardinality). Column combinations
+    /// are stored as a flat array per row entry, indexed by arithmetic.
+    /// This reduces HashMap entries by `column_combinations` and replaces
+    /// column hashing with O(1) array indexing.
     fn compute_aggregates(
         &mut self,
         row_field_indices: &[FieldIndex],
@@ -825,23 +933,23 @@ impl PivotCache {
     ) {
         self.aggregates.clear();
 
-        let all_group_fields: Vec<FieldIndex> = row_field_indices
-            .iter()
-            .chain(col_field_indices.iter())
-            .copied()
-            .collect();
-
         let value_count = value_field_indices.len();
         let row_count = row_field_indices.len();
         let col_count = col_field_indices.len();
-        let total_group = row_count + col_count;
         let base_field_count = self.fields.len();
 
-        // Estimate capacity for full keys
-        let estimated_unique = {
+        // Build column layout from field cardinalities
+        let col_cardinalities: Vec<usize> = col_field_indices.iter().map(|&fi| {
+            self.get_field(fi).map(|fc| fc.unique_count()).unwrap_or(1).max(1)
+        }).collect();
+        self.col_layout = ColumnLayout::new(&col_cardinalities, value_count);
+        let slot_len = self.col_layout.slot_len();
+
+        // Estimate row-only capacity
+        let estimated_row_unique = {
             let mut est: usize = 1;
-            for &fi in all_group_fields.iter() {
-                let card = self.fields.get(fi)
+            for &fi in row_field_indices.iter() {
+                let card = self.get_field(fi)
                     .map(|fc| fc.unique_count())
                     .unwrap_or(1)
                     .max(1);
@@ -849,46 +957,67 @@ impl PivotCache {
             }
             est.min(self.records.len()).min(500_000)
         };
-        let subtotal_combos = (row_count + 1) * (col_count + 1);
-        self.aggregates.reserve(estimated_unique * subtotal_combos);
+        let row_subtotal_combos = row_count + 1;
+        self.aggregates.reserve(estimated_row_unique * row_subtotal_combos);
 
         // Reusable buffers
-        let mut group_buf = vec![VALUE_ID_EMPTY; total_group];
+        let mut row_buf = vec![VALUE_ID_EMPTY; row_count];
+        let mut col_buf = vec![VALUE_ID_EMPTY; col_count];
         let mut value_buf: Vec<Option<f64>> = vec![None; value_count];
-        let mut key_buf = vec![VALUE_ID_EMPTY; total_group];
+        let mut row_key_buf = vec![VALUE_ID_EMPTY; row_count];
 
-        // Helper: accumulate into entry via slice-based lookup (no alloc for existing keys)
+        // Helper: accumulate values into a row slot at a given column index
         #[inline(always)]
-        fn accumulate(
-            aggregates: &mut HashMap<GroupKey, Vec<AggregateAccumulator>>,
-            key_slice: &[ValueId],
+        fn accumulate_at(
+            aggregates: &mut FxHashMap<GroupKey, Vec<AggregateAccumulator>>,
+            row_key: &[ValueId],
+            col_index: usize,
             value_buf: &[Option<f64>],
             value_count: usize,
+            slot_len: usize,
         ) {
-            if let Some(accumulators) = aggregates.get_mut(key_slice) {
-                for (acc_idx, &numeric_value) in value_buf.iter().enumerate() {
+            let base = col_index * value_count;
+            if let Some(slot) = aggregates.get_mut(row_key) {
+                for (vi, &numeric_value) in value_buf.iter().enumerate() {
                     if let Some(n) = numeric_value {
-                        accumulators[acc_idx].add_number(n);
+                        slot[base + vi].add_number(n);
                     }
                 }
             } else {
-                let mut accumulators = vec![AggregateAccumulator::new(); value_count];
-                for (acc_idx, &numeric_value) in value_buf.iter().enumerate() {
+                let mut slot = vec![AggregateAccumulator::new(); slot_len];
+                for (vi, &numeric_value) in value_buf.iter().enumerate() {
                     if let Some(n) = numeric_value {
-                        accumulators[acc_idx].add_number(n);
+                        slot[base + vi].add_number(n);
                     }
                 }
-                aggregates.insert(GroupKey::new(key_slice.to_vec()), accumulators);
+                aggregates.insert(GroupKey::from_slice(row_key), slot);
             }
         }
+
+        // Pre-compute column strides for subtotal index calculation
+        let col_layout = &self.col_layout;
+        let col_cards = &col_cardinalities;
 
         for (i, record) in self.records.iter().enumerate() {
             if !self.filter_mask[i] {
                 continue;
             }
 
-            // Fill group values buffer
-            for (slot, &fi) in group_buf.iter_mut().zip(all_group_fields.iter()) {
+            // Fill row values buffer
+            for (slot, &fi) in row_buf.iter_mut().zip(row_field_indices.iter()) {
+                *slot = if fi < base_field_count {
+                    record.values.get(fi).copied().unwrap_or(VALUE_ID_EMPTY)
+                } else {
+                    let vi = fi - base_field_count;
+                    self.virtual_records.get(vi)
+                        .and_then(|vr| vr.get(i))
+                        .copied()
+                        .unwrap_or(VALUE_ID_EMPTY)
+                };
+            }
+
+            // Fill column values buffer
+            for (slot, &fi) in col_buf.iter_mut().zip(col_field_indices.iter()) {
                 *slot = if fi < base_field_count {
                     record.values.get(fi).copied().unwrap_or(VALUE_ID_EMPTY)
                 } else {
@@ -911,26 +1040,43 @@ impl PivotCache {
                 });
             }
 
-            // Full key + all subtotal keys
-            accumulate(&mut self.aggregates, &group_buf, &value_buf, value_count);
-
-            // Subtotal keys for all (row_level, col_level) combinations
+            // For each row subtotal level × each column subtotal level:
+            // - Row subtotals: set trailing row positions to VALUE_ID_EMPTY (HashMap key)
+            // - Column subtotals: compute flat index with VALUE_ID_EMPTY in trailing positions
             for row_level in 0..=row_count {
+                // Build row subtotal key
+                row_key_buf[..row_level.min(row_count)].copy_from_slice(&row_buf[..row_level.min(row_count)]);
+                for j in row_level..row_count {
+                    row_key_buf[j] = VALUE_ID_EMPTY;
+                }
+
                 for col_level in 0..=col_count {
-                    if row_level == row_count && col_level == col_count {
-                        continue; // skip full key (already handled)
-                    }
+                    // Compute column index with subtotal (trailing EMPTY)
+                    let col_idx = if col_level == col_count {
+                        // Full column key
+                        col_layout.col_index(&col_buf)
+                    } else {
+                        // Column subtotal: first col_level values are real, rest are EMPTY
+                        let mut idx = 0;
+                        for ci in 0..col_count {
+                            let mapped = if ci < col_level {
+                                (col_buf[ci] as usize).min(col_cards[ci])
+                            } else {
+                                col_cards[ci] // EMPTY = subtotal slot
+                            };
+                            idx += mapped * col_layout.strides[ci];
+                        }
+                        idx
+                    };
 
-                    // Build subtotal key in-place
-                    key_buf.copy_from_slice(&group_buf);
-                    for j in row_level..row_count {
-                        key_buf[j] = VALUE_ID_EMPTY;
-                    }
-                    for j in col_level..col_count {
-                        key_buf[row_count + j] = VALUE_ID_EMPTY;
-                    }
-
-                    accumulate(&mut self.aggregates, &key_buf, &value_buf, value_count);
+                    accumulate_at(
+                        &mut self.aggregates,
+                        &row_key_buf,
+                        col_idx,
+                        &value_buf,
+                        value_count,
+                        slot_len,
+                    );
                 }
             }
         }

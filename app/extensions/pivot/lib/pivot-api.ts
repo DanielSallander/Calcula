@@ -52,6 +52,7 @@ import {
   createPivotFromBiModel as apiCreatePivotFromBiModel,
   updateBiPivotFields as apiUpdateBiPivotFields,
   setBiLookupColumns as apiSetBiLookupColumns,
+  getPivotCellWindow as apiGetPivotCellWindow,
 } from "../../../src/api/backend";
 
 // ============================================================================
@@ -262,6 +263,10 @@ export interface PivotColumnData {
   colType: PivotColumnType;
   depth: number;
   widthHint: number;
+  /** Longest display string in this column (with indent padding).
+   * When present, the frontend measures this single string instead of
+   * scanning all rows for column auto-sizing. */
+  maxContentSample?: string;
 }
 
 /** Filter row metadata */
@@ -281,6 +286,14 @@ export interface HeaderFieldSummary {
   hasActiveFilter: boolean;
 }
 
+/** Lightweight row descriptor for windowed responses (no cell data). */
+export interface PivotRowDescriptorData {
+  viewRow: number;
+  rowType: PivotRowType;
+  depth: number;
+  visible: boolean;
+}
+
 /** Complete pivot view response */
 export interface PivotViewResponse {
   pivotId: PivotId;
@@ -295,6 +308,22 @@ export interface PivotViewResponse {
   columnFieldSummaries: HeaderFieldSummary[];
   rows: PivotRowData[];
   columns: PivotColumnData[];
+  /** True when the response contains only a window of cells (large pivots). */
+  isWindowed?: boolean;
+  /** For windowed responses: total number of rows in the full view. */
+  totalRowCount?: number;
+  /** For windowed responses: starting row index of the cell window. */
+  windowStartRow?: number;
+  /** For windowed responses: lightweight descriptors for ALL rows (no cells). */
+  rowDescriptors?: PivotRowDescriptorData[];
+}
+
+/** Response for a cell window fetch (scroll-triggered). */
+export interface PivotCellWindowResponse {
+  pivotId: PivotId;
+  version: number;
+  startRow: number;
+  rows: PivotRowData[];
 }
 
 /** Source data response for drill-down */
@@ -486,6 +515,17 @@ export async function getPivotView(pivotId?: PivotId): Promise<PivotViewResponse
     `[PERF][pivot] getPivotView pivot_id=${pivotId ?? 'active'} rows=${result.rowCount}x${result.colCount} | ipc=${dt.toFixed(1)}ms`
   );
   return result;
+}
+
+/**
+ * Fetches a window of cell data from a stored PivotView (scroll-triggered).
+ */
+export async function getPivotCellWindow(
+  pivotId: PivotId,
+  startRow: number,
+  rowCount: number
+): Promise<PivotCellWindowResponse> {
+  return apiGetPivotCellWindow<PivotCellWindowResponse>(pivotId, startRow, rowCount);
 }
 
 /**

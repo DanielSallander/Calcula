@@ -431,6 +431,14 @@ export async function setBiLookupColumns(
   return invoke<void>("set_bi_lookup_columns", { pivotId, lookupColumns });
 }
 
+export async function getPivotCellWindow<TResponse>(
+  pivotId: number,
+  startRow: number,
+  rowCount: number
+): Promise<TResponse> {
+  return invoke<TResponse>("get_pivot_cell_window", { pivotId, startRow, rowCount });
+}
+
 // ============================================================================
 // Clear Range Commands
 // ============================================================================

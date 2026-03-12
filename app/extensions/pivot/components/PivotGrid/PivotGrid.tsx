@@ -105,7 +105,11 @@ export const PivotGrid: React.FC<PivotGridProps> = ({
     if (!pivotView) return;
 
     // Calculate row heights (uniform for now)
-    const heights = pivotView.rows.map(() => defaultRowHeight);
+    // For windowed views, use totalRowCount for full height; otherwise use rows.length
+    const totalRows = pivotView.isWindowed
+      ? (pivotView.totalRowCount ?? pivotView.rows.length)
+      : pivotView.rows.length;
+    const heights = new Array(totalRows).fill(defaultRowHeight);
     setRowHeights(heights);
 
     // Calculate column widths (auto-size based on content)
@@ -113,7 +117,7 @@ export const PivotGrid: React.FC<PivotGridProps> = ({
     if (canvas) {
       const ctx = canvas.getContext('2d');
       if (ctx) {
-        const colCount = pivotView.rows[0]?.cells.length || 0;
+        const colCount = pivotView.colCount || pivotView.rows[0]?.cells.length || 0;
         const widths: number[] = [];
 
         for (let c = 0; c < colCount; c++) {

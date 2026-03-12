@@ -705,6 +705,18 @@ pub struct PivotViewResponse {
     pub column_field_summaries: Vec<HeaderFieldSummaryData>,
     pub rows: Vec<PivotRowData>,
     pub columns: Vec<PivotColumnData>,
+    /// True when the response contains only a window of cells (large pivots).
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub is_windowed: bool,
+    /// For windowed responses: total number of rows in the full view.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub total_row_count: Option<usize>,
+    /// For windowed responses: starting row index of the cell window.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub window_start_row: Option<usize>,
+    /// For windowed responses: lightweight descriptors for ALL rows (no cells).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub row_descriptors: Vec<PivotRowDescriptorData>,
 }
 
 /// Filter row metadata for frontend interaction
@@ -731,6 +743,16 @@ pub struct HeaderFieldSummaryData {
     pub has_active_filter: bool,
 }
 
+/// Lightweight row descriptor for windowed responses (no cell data).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PivotRowDescriptorData {
+    pub view_row: usize,
+    pub row_type: pivot_engine::PivotRowType,
+    pub depth: u8,
+    pub visible: bool,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PivotRowData {
@@ -739,6 +761,16 @@ pub struct PivotRowData {
     pub depth: u8,
     pub visible: bool,
     pub cells: Vec<PivotCellData>,
+}
+
+/// Response for a cell window fetch (scroll-triggered).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PivotCellWindowResponse {
+    pub pivot_id: PivotId,
+    pub version: u64,
+    pub start_row: usize,
+    pub rows: Vec<PivotRowData>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -789,6 +821,10 @@ pub struct PivotColumnData {
     pub col_type: pivot_engine::PivotColumnType,
     pub depth: u8,
     pub width_hint: u16,
+    /// The longest display string in this column (for frontend width measurement
+    /// without scanning all rows). Includes indent padding and icon placeholder.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub max_content_sample: String,
 }
 
 /// Source data response for drill-down
@@ -1155,7 +1191,7 @@ pub struct DrillThroughResponse {
 
 use std::collections::HashMap;
 use std::sync::Mutex;
-use pivot_engine::{PivotCache, PivotDefinition};
+use pivot_engine::{PivotCache, PivotDefinition, PivotView};
 
 /// Managed state for the pivot extension.
 /// Registered separately from AppState to keep the kernel feature-agnostic.
@@ -1168,6 +1204,8 @@ pub struct PivotState {
     pub active_pivot_id: Mutex<Option<PivotId>>,
     /// BI metadata for BI-backed pivots (model tables, measures, last query)
     pub bi_metadata: Mutex<HashMap<PivotId, BiPivotMetadata>>,
+    /// Cached PivotView for each pivot (used for windowed cell fetching)
+    pub views: Mutex<HashMap<PivotId, PivotView>>,
 }
 
 impl PivotState {
@@ -1177,6 +1215,7 @@ impl PivotState {
             next_pivot_id: Mutex::new(1),
             active_pivot_id: Mutex::new(None),
             bi_metadata: Mutex::new(HashMap::new()),
+            views: Mutex::new(HashMap::new()),
         }
     }
 }
