@@ -91,35 +91,52 @@ impl AxisNode {
 struct FlatAxisItem {
     /// The group key values up to and including this level.
     group_values: Vec<ValueId>,
-    
+
     /// Display label.
     label: String,
-    
+
     /// Depth/indent level.
     depth: usize,
-    
+
     /// Whether this is a subtotal row/column.
     is_subtotal: bool,
-    
+
     /// Whether this is the grand total.
     is_grand_total: bool,
-    
+
     /// Whether this item has children (for expand/collapse).
     has_children: bool,
-    
+
     /// Whether this item is collapsed.
     is_collapsed: bool,
-    
+
     /// Parent index in the flat list (-1 for root).
     parent_index: i32,
-    
+
     /// Field indices involved in this grouping.
     field_indices: Vec<FieldIndex>,
+
+    /// Attribute (lookup) field labels to display alongside this item.
+    /// Populated during flattening for items at the depth that owns each attribute.
+    /// One entry per attribute field, in definition order.
+    attribute_labels: Vec<String>,
 }
 
 // ============================================================================
 // PIVOT CALCULATOR
 // ============================================================================
+
+/// Describes an attribute field and its relationship to a parent GROUP field.
+#[derive(Debug, Clone)]
+struct AttributeFieldInfo {
+    /// The attribute field definition.
+    field: PivotField,
+    /// Index of the parent GROUP field in the group-only field list.
+    parent_group_index: usize,
+    /// Resolution map: parent GROUP value_id -> attribute label string.
+    /// Built by scanning the cache once before flattening.
+    resolution: HashMap<ValueId, String>,
+}
 
 /// The main calculation engine for pivot tables.
 pub struct PivotCalculator<'a> {
@@ -141,13 +158,19 @@ pub struct PivotCalculator<'a> {
     /// Value field indices for aggregate lookups.
     value_field_indices: Vec<FieldIndex>,
 
-    /// Effective row fields after grouping transforms.
+    /// Effective row fields after grouping transforms (GROUP fields only).
     /// Date grouping expands one field into multiple (Year, Quarter, Month).
     /// Manual grouping inserts a parent group field before the original.
     effective_row_fields: Vec<PivotField>,
 
-    /// Effective column fields after grouping transforms.
+    /// Effective column fields after grouping transforms (GROUP fields only).
     effective_col_fields: Vec<PivotField>,
+
+    /// Attribute fields for rows (resolved post-tree-build).
+    row_attribute_fields: Vec<AttributeFieldInfo>,
+
+    /// Attribute fields for columns.
+    col_attribute_fields: Vec<AttributeFieldInfo>,
 
     /// Pre-computed grand totals for each value field (for show_values_as).
     grand_totals: Vec<f64>,
@@ -184,6 +207,8 @@ impl<'a> PivotCalculator<'a> {
             value_field_indices,
             effective_row_fields: Vec::new(),
             effective_col_fields: Vec::new(),
+            row_attribute_fields: Vec::new(),
+            col_attribute_fields: Vec::new(),
             grand_totals: Vec::new(),
         }
     }
@@ -193,10 +218,11 @@ impl<'a> PivotCalculator<'a> {
         // Step 1: Apply filters from definition to cache
         self.apply_filters();
 
-        // Step 1.5: Apply grouping transforms (creates virtual fields in cache)
+        // Step 1.5: Apply grouping transforms (creates virtual fields in cache).
+        // This also separates attribute fields from GROUP fields.
         self.apply_grouping_transforms();
 
-        // Step 2: Build axis trees (using effective fields with virtual field indices)
+        // Step 2: Build axis trees (using effective GROUP fields only — attributes excluded)
         let row_fields = self.effective_row_fields.clone();
         let col_fields = self.effective_col_fields.clone();
         let row_tree = self.build_axis_tree(&row_fields);
@@ -205,6 +231,9 @@ impl<'a> PivotCalculator<'a> {
         // Step 3: Flatten trees into ordered lists
         self.row_items = self.flatten_axis_tree(&row_tree, true);
         self.col_items = self.flatten_axis_tree(&col_tree, false);
+
+        // Step 3.5: Resolve attribute labels for each flat item
+        self.resolve_attribute_labels();
 
         // Step 4: Handle multiple value fields positioning
         self.apply_values_position();
@@ -217,6 +246,134 @@ impl<'a> PivotCalculator<'a> {
     }
 
     /// Pre-computes grand totals for each value field (used by show_values_as).
+    /// Builds resolution maps for attribute fields by scanning cache records,
+    /// then populates `attribute_labels` on each FlatAxisItem.
+    fn resolve_attribute_labels(&mut self) {
+        // Build resolution maps for row attributes
+        self.build_attribute_resolution_maps(true);
+        self.build_attribute_resolution_maps(false);
+
+        // Apply to row items
+        let row_attrs = self.row_attribute_fields.clone();
+        let row_group_fields = self.effective_row_fields.clone();
+        for item in &mut self.row_items {
+            item.attribute_labels = Self::resolve_labels_for_item(
+                item,
+                &row_attrs,
+                &row_group_fields,
+                &self.cache,
+            );
+        }
+
+        // Apply to col items
+        let col_attrs = self.col_attribute_fields.clone();
+        let col_group_fields = self.effective_col_fields.clone();
+        for item in &mut self.col_items {
+            item.attribute_labels = Self::resolve_labels_for_item(
+                item,
+                &col_attrs,
+                &col_group_fields,
+                &self.cache,
+            );
+        }
+    }
+
+    /// Scans cache records to build parent_value_id -> attribute_label maps.
+    fn build_attribute_resolution_maps(&mut self, is_row: bool) {
+        // Clone what we need to avoid borrow conflicts
+        let mut attrs = if is_row {
+            self.row_attribute_fields.clone()
+        } else {
+            self.col_attribute_fields.clone()
+        };
+        let group_fields = if is_row {
+            self.effective_row_fields.clone()
+        } else {
+            self.effective_col_fields.clone()
+        };
+
+        if attrs.is_empty() {
+            return;
+        }
+
+        let base_field_count = self.cache.fields.len();
+
+        for (record_idx, record) in self.cache.records.iter().enumerate() {
+            for attr in attrs.iter_mut() {
+                // Get the parent GROUP field's value_id for this record
+                let parent_field = &group_fields[attr.parent_group_index];
+                let parent_vid = record_value_at(
+                    record,
+                    record_idx,
+                    parent_field.source_index,
+                    base_field_count,
+                    &self.cache.virtual_records,
+                );
+
+                // Skip if we already resolved this parent value
+                if attr.resolution.contains_key(&parent_vid) {
+                    continue;
+                }
+
+                // Get the attribute field's value for this record
+                let attr_vid = record_value_at(
+                    record,
+                    record_idx,
+                    attr.field.source_index,
+                    base_field_count,
+                    &self.cache.virtual_records,
+                );
+
+                // Resolve label using the same method as tree node labels
+                if let Some(field_cache) = self.cache.get_field(attr.field.source_index) {
+                    let label = self.get_value_label(field_cache, attr_vid);
+                    attr.resolution.insert(parent_vid, label);
+                }
+            }
+        }
+
+        // Write back
+        if is_row {
+            self.row_attribute_fields = attrs;
+        } else {
+            self.col_attribute_fields = attrs;
+        }
+    }
+
+    /// Resolves attribute labels for a single FlatAxisItem.
+    fn resolve_labels_for_item(
+        item: &FlatAxisItem,
+        attrs: &[AttributeFieldInfo],
+        _group_fields: &[PivotField],
+        _cache: &PivotCache,
+    ) -> Vec<String> {
+        if attrs.is_empty() {
+            return Vec::new();
+        }
+
+        attrs.iter().map(|attr| {
+            if item.is_grand_total {
+                return String::new();
+            }
+            // Get the parent GROUP field's value_id from this item's group_values
+            let parent_vid = item
+                .group_values
+                .get(attr.parent_group_index)
+                .copied()
+                .unwrap_or(VALUE_ID_EMPTY);
+
+            if parent_vid == VALUE_ID_EMPTY {
+                return String::new();
+            }
+
+            // Look up the resolved label
+            attr.resolution
+                .get(&parent_vid)
+                .cloned()
+                .unwrap_or_default()
+        }).collect()
+    }
+
     fn precompute_grand_totals(&mut self) {
         self.grand_totals = self.definition.value_fields.iter().enumerate().map(|(vf_idx, vf)| {
             self.compute_aggregate(&[], &[], vf_idx, vf.aggregation)
@@ -351,20 +508,65 @@ impl<'a> PivotCalculator<'a> {
     // ========================================================================
 
     /// Applies grouping transforms to row and column fields, creating virtual fields in the cache.
-    /// Populates `effective_row_fields` and `effective_col_fields` with the transformed field lists,
-    /// and updates `row_field_indices` / `col_field_indices` to match.
+    /// Populates `effective_row_fields` and `effective_col_fields` with GROUP fields only,
+    /// and separates attribute fields into `row_attribute_fields` / `col_attribute_fields`.
     fn apply_grouping_transforms(&mut self) {
         self.cache.clear_virtual_fields();
 
         let row_fields = self.definition.row_fields.clone();
         let col_fields = self.definition.column_fields.clone();
 
-        self.effective_row_fields = self.transform_field_list_for_grouping(&row_fields);
-        self.effective_col_fields = self.transform_field_list_for_grouping(&col_fields);
+        let all_row_fields = self.transform_field_list_for_grouping(&row_fields);
+        let all_col_fields = self.transform_field_list_for_grouping(&col_fields);
 
-        // Update field indices to match effective fields
+        // Separate GROUP fields from attribute fields.
+        // Attribute fields are stored with a reference to their parent GROUP field
+        // (the immediately preceding non-attribute field).
+        self.effective_row_fields = Vec::new();
+        self.row_attribute_fields = Vec::new();
+        Self::split_group_and_attributes(
+            &all_row_fields,
+            &mut self.effective_row_fields,
+            &mut self.row_attribute_fields,
+        );
+
+        self.effective_col_fields = Vec::new();
+        self.col_attribute_fields = Vec::new();
+        Self::split_group_and_attributes(
+            &all_col_fields,
+            &mut self.effective_col_fields,
+            &mut self.col_attribute_fields,
+        );
+
+        // Update field indices to match effective GROUP fields only
         self.row_field_indices = self.effective_row_fields.iter().map(|f| f.source_index).collect();
         self.col_field_indices = self.effective_col_fields.iter().map(|f| f.source_index).collect();
+    }
+
+    /// Splits a field list into GROUP fields and attribute fields.
+    /// Each attribute field records the index of its parent GROUP field.
+    fn split_group_and_attributes(
+        all_fields: &[PivotField],
+        group_fields: &mut Vec<PivotField>,
+        attribute_fields: &mut Vec<AttributeFieldInfo>,
+    ) {
+        let mut last_group_index: Option<usize> = None;
+
+        for field in all_fields {
+            if field.is_attribute {
+                // Attribute field: associate with the preceding GROUP field
+                let parent_idx = last_group_index.unwrap_or(0);
+                attribute_fields.push(AttributeFieldInfo {
+                    field: field.clone(),
+                    parent_group_index: parent_idx,
+                    resolution: HashMap::new(),
+                });
+            } else {
+                // GROUP field
+                last_group_index = Some(group_fields.len());
+                group_fields.push(field.clone());
+            }
+        }
     }
 
     /// Transforms a list of fields, expanding any that have grouping configuration.
@@ -1031,9 +1233,10 @@ impl<'a> PivotCalculator<'a> {
                 is_collapsed: false,
                 parent_index: -1,
                 field_indices: fields.iter().map(|f| f.source_index).collect(),
+                attribute_labels: Vec::new(),
             });
         }
-        
+
         items
     }
     
@@ -1113,6 +1316,7 @@ impl<'a> PivotCalculator<'a> {
                     is_collapsed: node.is_collapsed,
                     parent_index,
                     field_indices: fields.iter().map(|f| f.source_index).collect(),
+                    attribute_labels: Vec::new(),
                 });
 
                 // Fix up direct children's parent_index from placeholder to actual
@@ -1142,6 +1346,7 @@ impl<'a> PivotCalculator<'a> {
                         is_collapsed: false,
                         parent_index: my_index,
                         field_indices: fields.iter().map(|f| f.source_index).collect(),
+                        attribute_labels: Vec::new(),
                     }
                 };
 
@@ -1161,6 +1366,7 @@ impl<'a> PivotCalculator<'a> {
                     is_collapsed: node.is_collapsed,
                     parent_index,
                     field_indices: fields.iter().map(|f| f.source_index).collect(),
+                    attribute_labels: Vec::new(),
                 });
 
                 // Recurse into children if not collapsed
@@ -1388,15 +1594,18 @@ impl<'a> PivotCalculator<'a> {
     
     /// Calculates how many columns are needed for row labels.
     /// Uses effective fields (which may differ from definition when grouping is active).
+    /// Attribute fields get their own columns in all layouts.
     fn calculate_row_label_columns(&self) -> usize {
+        let attr_count = self.row_attribute_fields.len();
         match self.definition.layout.report_layout {
             ReportLayout::Compact => {
-                // All row fields in one column
-                1.max(if self.effective_row_fields.is_empty() { 0 } else { 1 })
+                // One compact column for GROUP fields + one column per attribute field
+                let group_cols = if self.effective_row_fields.is_empty() { 0 } else { 1 };
+                (group_cols + attr_count).max(1)
             }
             ReportLayout::Outline | ReportLayout::Tabular => {
-                // Each row field gets its own column
-                self.effective_row_fields.len().max(1)
+                // Each GROUP field + each attribute field gets its own column
+                (self.effective_row_fields.len() + attr_count).max(1)
             }
         }
     }
@@ -1542,41 +1751,62 @@ impl<'a> PivotCalculator<'a> {
             let value_depth = header_row;
 
             // Corner cells (row label column headers)
+            let attr_count = self.row_attribute_fields.len();
+            let group_col_count = match self.definition.layout.report_layout {
+                ReportLayout::Compact => {
+                    if self.effective_row_fields.is_empty() { 0 } else { 1 }
+                }
+                ReportLayout::Outline | ReportLayout::Tabular => {
+                    self.effective_row_fields.len()
+                }
+            };
+
             for col in 0..row_label_cols {
+                let is_attr_col = col >= group_col_count;
+
                 if is_last_header {
-                    // Last header row - show row field names with filter dropdown
-                    let label = match self.definition.layout.report_layout {
-                        ReportLayout::Compact => {
-                            // Combine all row field names
-                            self.effective_row_fields
-                                .iter()
-                                .map(|f| f.name.as_str())
-                                .collect::<Vec<_>>()
-                                .join(" / ")
-                        }
-                        ReportLayout::Outline | ReportLayout::Tabular => {
-                            self.effective_row_fields
-                                .get(col)
-                                .map(|f| f.name.clone())
-                                .unwrap_or_default()
-                        }
-                    };
-                    // Use RowLabelHeader for the last corner cell (it gets the dropdown arrow)
-                    let is_last_corner = match self.definition.layout.report_layout {
-                        ReportLayout::Compact => true, // Only one corner cell in compact
-                        ReportLayout::Outline | ReportLayout::Tabular => {
-                            col == row_label_cols - 1
-                        }
-                    };
-                    if is_last_corner && !self.effective_row_fields.is_empty() {
-                        cells.push(PivotViewCell::row_label_header(label));
-                    } else {
+                    if is_attr_col {
+                        // Attribute column header — show attribute field name
+                        let attr_idx = col - group_col_count;
+                        let label = self.row_attribute_fields
+                            .get(attr_idx)
+                            .map(|a| a.field.name.clone())
+                            .unwrap_or_default();
                         cells.push(PivotViewCell::column_header(label));
+                    } else {
+                        // GROUP column header
+                        let label = match self.definition.layout.report_layout {
+                            ReportLayout::Compact => {
+                                // Combine all row GROUP field names
+                                self.effective_row_fields
+                                    .iter()
+                                    .map(|f| f.name.as_str())
+                                    .collect::<Vec<_>>()
+                                    .join(" / ")
+                            }
+                            ReportLayout::Outline | ReportLayout::Tabular => {
+                                self.effective_row_fields
+                                    .get(col)
+                                    .map(|f| f.name.clone())
+                                    .unwrap_or_default()
+                            }
+                        };
+                        // Use RowLabelHeader for the last GROUP corner cell if no attrs,
+                        // or for the compact column (it gets the dropdown arrow)
+                        let is_last_group_col = match self.definition.layout.report_layout {
+                            ReportLayout::Compact => true,
+                            ReportLayout::Outline | ReportLayout::Tabular => {
+                                col == group_col_count.saturating_sub(1) && attr_count == 0
+                            }
+                        };
+                        if is_last_group_col && !self.effective_row_fields.is_empty() && attr_count == 0 {
+                            cells.push(PivotViewCell::row_label_header(label));
+                        } else {
+                            cells.push(PivotViewCell::column_header(label));
+                        }
                     }
                 } else if has_col_fields && col == 0 {
                     // Non-last header rows: show column field name label in corner cell.
-                    // Only the FIRST header row gets the dropdown arrow (ColumnLabelHeader).
-                    // Subsequent rows use plain ColumnHeader (same styling, no dropdown).
                     let field_label = self.effective_col_fields
                         .get(value_depth)
                         .map(|f| f.name.clone())
@@ -1711,6 +1941,7 @@ impl<'a> PivotCalculator<'a> {
             let mut cells = Vec::new();
 
             // Generate row label cells
+            let attr_count = self.row_attribute_fields.len();
             match report_layout {
                 ReportLayout::Compact => {
                     let mut cell = PivotViewCell::row_header(
@@ -1738,6 +1969,19 @@ impl<'a> PivotCalculator<'a> {
                     }
 
                     cells.push(cell);
+
+                    // Attribute columns: one cell per attribute field (after the compact column)
+                    for ai in 0..attr_count {
+                        let label = item.attribute_labels
+                            .get(ai)
+                            .cloned()
+                            .unwrap_or_default();
+                        let mut attr_cell = PivotViewCell::row_header(label, 0);
+                        if item.is_subtotal || item.is_grand_total {
+                            attr_cell = attr_cell.as_total();
+                        }
+                        cells.push(attr_cell);
+                    }
                 }
                 ReportLayout::Outline | ReportLayout::Tabular => {
                     // Pre-build group_path for this row item
@@ -1748,7 +1992,9 @@ impl<'a> PivotCalculator<'a> {
                         }
                     }
 
-                    for col in 0..row_label_cols {
+                    // GROUP field columns
+                    let group_col_count = self.effective_row_fields.len().max(if attr_count > 0 { 0 } else { 1 });
+                    for col in 0..group_col_count {
                         if col == item.depth {
                             let mut cell = PivotViewCell::row_header(
                                 item.label.clone(),
@@ -1774,6 +2020,19 @@ impl<'a> PivotCalculator<'a> {
                         } else {
                             cells.push(PivotViewCell::blank());
                         }
+                    }
+
+                    // Attribute columns: one cell per attribute field
+                    for ai in 0..attr_count {
+                        let label = item.attribute_labels
+                            .get(ai)
+                            .cloned()
+                            .unwrap_or_default();
+                        let mut attr_cell = PivotViewCell::row_header(label, 0);
+                        if item.is_subtotal || item.is_grand_total {
+                            attr_cell = attr_cell.as_total();
+                        }
+                        cells.push(attr_cell);
                     }
                 }
             }
@@ -1848,6 +2107,7 @@ impl<'a> PivotCalculator<'a> {
             is_collapsed: false,
             parent_index: -1,
             field_indices: self.row_field_indices.clone(),
+            attribute_labels: Vec::new(),
         };
 
         // Clone once for this single row
@@ -2143,6 +2403,7 @@ fn expand_axis_for_values(
                 is_collapsed: false,
                 parent_index: -1,
                 field_indices: vec![vf.source_index],
+                attribute_labels: Vec::new(),
             });
         }
         return;

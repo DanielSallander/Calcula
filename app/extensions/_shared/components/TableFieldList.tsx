@@ -15,6 +15,8 @@ export interface BiModelColumn {
   name: string;
   dataType: string;
   isNumeric: boolean;
+  /** Custom lookup resolution expression (e.g., "MAX(category_name)"). */
+  lookupResolution?: string;
 }
 
 export interface BiModelTable {
@@ -31,8 +33,12 @@ interface TableFieldListProps {
   biModel: BiPivotModelInfo;
   usedColumns: Set<string>;    // "TableName.ColumnName" keys
   usedMeasures: Set<string>;   // Measure names
+  /** Set of "TableName.ColumnName" keys for columns marked as LOOKUP */
+  lookupColumns?: Set<string>;
   onColumnToggle: (table: string, column: string, isNumeric: boolean, checked: boolean) => void;
   onMeasureToggle: (measure: MeasureField, checked: boolean) => void;
+  /** Called when user toggles a column between GROUP and LOOKUP mode */
+  onLookupToggle?: (table: string, column: string) => void;
   onDragStart?: (field: DragField) => void;
   onDragEnd?: () => void;
 }
@@ -141,6 +147,30 @@ const treeStyles = {
     min-width: 16px;
     text-align: center;
   `,
+  lookupBadge: css`
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 18px;
+    height: 16px;
+    border-radius: 3px;
+    font-size: 10px;
+    font-weight: 700;
+    cursor: pointer;
+    user-select: none;
+    flex-shrink: 0;
+    transition: background 0.12s, color 0.12s;
+  `,
+  lookupBadgeGroup: css`
+    background: #ddf4ff;
+    color: #0969da;
+    &:hover { background: #b6e3ff; }
+  `,
+  lookupBadgeLookup: css`
+    background: #fff8c5;
+    color: #9a6700;
+    &:hover { background: #fae17d; }
+  `,
 };
 
 const folderMenuStyles = {
@@ -184,14 +214,20 @@ function TreeFieldItem({
   isNumeric,
   isChecked,
   isMeasure,
+  isLookup,
+  lookupResolution,
   onToggle,
+  onLookupToggle,
 }: {
   fieldKey: string;
   name: string;
   isNumeric: boolean;
   isChecked: boolean;
   isMeasure: boolean;
+  isLookup?: boolean;
+  lookupResolution?: string;
   onToggle: (checked: boolean) => void;
+  onLookupToggle?: () => void;
 }) {
   const dragData: DragField = useMemo(
     () => ({
@@ -209,6 +245,19 @@ function TreeFieldItem({
     [onToggle]
   );
 
+  const handleLookupClick = useCallback(
+    (e: React.MouseEvent) => {
+      e.stopPropagation();
+      if (onLookupToggle) onLookupToggle();
+    },
+    [onLookupToggle]
+  );
+
+  // Build tooltip for lookup badge
+  const lookupTooltip = isLookup
+    ? `Lookup${lookupResolution ? ` (${lookupResolution})` : ' (MIN)'} — click to set as Group`
+    : 'Group — click to set as Lookup';
+
   return (
     <div
       {...dragHandleProps}
@@ -221,6 +270,18 @@ function TreeFieldItem({
         onChange={handleChange}
       />
       <span className={treeStyles.fieldName}>{name}</span>
+      {/* G/L toggle badge — only for dimension columns, not measures */}
+      {!isMeasure && onLookupToggle && (
+        <span
+          className={`${treeStyles.lookupBadge} ${
+            isLookup ? treeStyles.lookupBadgeLookup : treeStyles.lookupBadgeGroup
+          }`}
+          title={lookupTooltip}
+          onClick={handleLookupClick}
+        >
+          {isLookup ? 'L' : 'G'}
+        </span>
+      )}
       <span className={treeStyles.fieldTypeIcon}>
         {isMeasure ? '\u03A3' : isNumeric ? '#' : 'Aa'}
       </span>
@@ -346,8 +407,10 @@ export function TableFieldList({
   biModel,
   usedColumns,
   usedMeasures,
+  lookupColumns,
   onColumnToggle,
   onMeasureToggle,
+  onLookupToggle,
 }: TableFieldListProps): React.ReactElement {
   const [searchQuery, setSearchQuery] = useState('');
   const [expandedFolders, setExpandedFolders] = useState<Set<string>>(() => {
@@ -478,8 +541,15 @@ export function TableFieldList({
                       isNumeric={col.isNumeric}
                       isChecked={usedColumns.has(colKey)}
                       isMeasure={false}
+                      isLookup={lookupColumns?.has(colKey)}
+                      lookupResolution={col.lookupResolution}
                       onToggle={(checked) =>
                         onColumnToggle(table.name, col.name, col.isNumeric, checked)
+                      }
+                      onLookupToggle={
+                        onLookupToggle
+                          ? () => onLookupToggle(table.name, col.name)
+                          : undefined
                       }
                     />
                   );

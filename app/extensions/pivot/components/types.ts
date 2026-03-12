@@ -123,12 +123,16 @@ export interface BiModelColumn {
   name: string;
   dataType: string;
   isNumeric: boolean;
+  /** Custom lookup resolution expression (e.g., "MAX(category_name)"). */
+  lookupResolution?: string;
 }
 
 /** Reference to a table column (for BI pivot row/column/filter fields) */
 export interface BiFieldRef {
   table: string;
   column: string;
+  /** When true, this field is a lookup column (resolved post-aggregation). */
+  isLookup?: boolean;
 }
 
 /** Reference to a model measure (for BI pivot value fields) */

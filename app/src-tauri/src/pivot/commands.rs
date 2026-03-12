@@ -2602,6 +2602,7 @@ fn extract_bi_model_metadata(
                         name: c.name().to_string(),
                         data_type: format!("{:?}", dt),
                         is_numeric,
+                        lookup_resolution: c.lookup_resolution().map(|s| s.to_string()),
                     }
                 })
                 .collect();
@@ -2931,27 +2932,80 @@ pub async fn update_bi_pivot_fields(
     let table_refs: Vec<&str> = referenced_tables.iter().map(|s| s.as_str()).collect();
     auto_bind_tables(&bi_state, &table_refs)?;
 
-    // Build BI engine QueryRequest
-    let query_measures: Vec<String> = request.value_fields.iter().map(|v| v.measure_name.clone()).collect();
-    let query_group_by: Vec<bi_engine::ColumnRef> = request
+    // Guardrail: a LOOKUP field must follow at least one GROUP field from the same table.
+    // Check across all zones (row + column fields combined for GROUP coverage).
+    let all_group_tables: std::collections::HashSet<&str> = request
         .row_fields
         .iter()
         .chain(request.column_fields.iter())
+        .filter(|f| !f.is_lookup)
+        .map(|f| f.table.as_str())
+        .collect();
+
+    for f in request.row_fields.iter().chain(request.column_fields.iter()) {
+        if f.is_lookup && !all_group_tables.contains(f.table.as_str()) {
+            return Err(format!(
+                "LOOKUP field '{}.{}' requires at least one GROUP field from table '{}'",
+                f.table, f.column, f.table
+            ));
+        }
+    }
+
+    // Separate GROUP fields from LOOKUP fields across all zones
+    let row_group_fields: Vec<&BiFieldRef> = request.row_fields.iter().filter(|f| !f.is_lookup).collect();
+    let row_lookup_fields: Vec<&BiFieldRef> = request.row_fields.iter().filter(|f| f.is_lookup).collect();
+    let col_group_fields: Vec<&BiFieldRef> = request.column_fields.iter().filter(|f| !f.is_lookup).collect();
+    let col_lookup_fields: Vec<&BiFieldRef> = request.column_fields.iter().filter(|f| f.is_lookup).collect();
+
+    // Build BI engine QueryRequest
+    let query_measures: Vec<String> = request.value_fields.iter().map(|v| v.measure_name.clone()).collect();
+    let query_group_by: Vec<bi_engine::ColumnRef> = row_group_fields
+        .iter()
+        .chain(col_group_fields.iter())
         .map(|f| bi_engine::ColumnRef::new(&f.table, &f.column))
+        .collect();
+
+    // Build lookups from LOOKUP fields. For each lookup, try to auto-infer
+    // the key column (the BI engine handles this when exactly one group_by
+    // column is from the same table). If multiple group_by cols from same
+    // table, the first one is used as explicit key.
+    let query_lookups: Vec<bi_engine::LookupColumn> = row_lookup_fields
+        .iter()
+        .chain(col_lookup_fields.iter())
+        .map(|f| {
+            // Check how many group_by columns are from the same table
+            let same_table_group_count = query_group_by
+                .iter()
+                .filter(|g| g.table == f.table)
+                .count();
+            if same_table_group_count == 1 {
+                // Auto-infer key (exactly one group_by from same table)
+                bi_engine::LookupColumn::new(&f.table, &f.column)
+            } else {
+                // Multiple group_by cols from same table — use first as explicit key
+                let key = query_group_by
+                    .iter()
+                    .find(|g| g.table == f.table)
+                    .map(|g| g.column.clone())
+                    .unwrap_or_default();
+                bi_engine::LookupColumn::with_key(&f.table, &f.column, &key)
+            }
+        })
         .collect();
 
     let query_request = bi_engine::QueryRequest {
         measures: query_measures.clone(),
         group_by: query_group_by,
         filters: vec![],
-        lookups: vec![],
+        lookups: query_lookups,
     };
 
     log_info!(
         "PIVOT",
-        "BI query: measures={:?}, group_by={} dims",
+        "BI query: measures={:?}, group_by={} dims, lookups={} cols",
         query_measures,
-        request.row_fields.len() + request.column_fields.len()
+        row_group_fields.len() + col_group_fields.len(),
+        row_lookup_fields.len() + col_lookup_fields.len()
     );
 
     // SAFE ENGINE TAKE: take engine out, drop guard, query, put back
@@ -2987,14 +3041,34 @@ pub async fn update_bi_pivot_fields(
     let cache_ms = t_cache.elapsed().as_secs_f64() * 1000.0;
 
     // Build PivotDefinition field mappings
-    let num_row_fields = request.row_fields.len();
-    let num_col_fields = request.column_fields.len();
-    let _num_value_fields = request.value_fields.len();
-
-    // Cache layout:
-    // [group_by columns (row dims first, then col dims)] [measure columns]
-    // If synthetic dim: [synthetic at 0] [group_by shifted] [measures shifted]
+    //
+    // Cache layout (BI engine result column order):
+    // [group_by columns (row groups, then col groups)] [measure columns] [lookup columns (row lookups, then col lookups)]
+    // If synthetic dim: [synthetic at 0] [everything shifted by 1]
+    let num_group_by = row_group_fields.len() + col_group_fields.len();
     let dim_offset: usize = if use_synthetic_dim { 1 } else { 0 };
+
+    // Build a mapping from (table, column) -> cache column index.
+    // BI engine result column order: [GROUP BY cols] [Measure cols] [Lookup cols]
+    let num_measures = request.value_fields.len();
+    let mut field_to_cache_idx: std::collections::HashMap<(String, String), usize> =
+        std::collections::HashMap::new();
+
+    // Group-by cols come first: row groups, then col groups
+    let mut cache_idx = dim_offset;
+    for f in row_group_fields.iter().chain(col_group_fields.iter()) {
+        field_to_cache_idx.insert((f.table.clone(), f.column.clone()), cache_idx);
+        cache_idx += 1;
+    }
+    // Measures come next (after group_by, before lookups)
+    let measure_start = num_group_by + dim_offset;
+    // Lookup cols come last (after measures)
+    let lookup_start = num_group_by + num_measures + dim_offset;
+    cache_idx = lookup_start;
+    for f in row_lookup_fields.iter().chain(col_lookup_fields.iter()) {
+        field_to_cache_idx.insert((f.table.clone(), f.column.clone()), cache_idx);
+        cache_idx += 1;
+    }
 
     let mut pivot_tables = pivot_state.pivot_tables.lock().unwrap();
     let (definition, stored_cache) = pivot_tables
@@ -3002,6 +3076,8 @@ pub async fn update_bi_pivot_fields(
         .ok_or_else(|| format!("Pivot {} not found", pivot_id))?;
 
     // Row fields (preserving collapse state for fields that remain)
+    // Lookup fields share the same hierarchy depth as the preceding GROUP field
+    // from the same table (they are attributes, not new grouping levels).
     let old_row_fields = definition.row_fields.clone();
     if use_synthetic_dim {
         // Synthetic "Total" dimension as the only row field
@@ -3010,9 +3086,16 @@ pub async fn update_bi_pivot_fields(
         definition.row_fields = request
             .row_fields
             .iter()
-            .enumerate()
-            .map(|(i, f)| {
-                PivotField::new(i + dim_offset, format!("{}.{}", f.table, f.column))
+            .map(|f| {
+                let idx = *field_to_cache_idx
+                    .get(&(f.table.clone(), f.column.clone()))
+                    .unwrap_or(&0);
+                let name = format!("{}.{}", f.table, f.column);
+                if f.is_lookup {
+                    PivotField::new_attribute(idx, name)
+                } else {
+                    PivotField::new(idx, name)
+                }
             })
             .collect();
     }
@@ -3023,21 +3106,25 @@ pub async fn update_bi_pivot_fields(
     definition.column_fields = request
         .column_fields
         .iter()
-        .enumerate()
-        .map(|(i, f)| {
-            PivotField::new(
-                num_row_fields + i + dim_offset,
-                format!("{}.{}", f.table, f.column),
-            )
+        .map(|f| {
+            let idx = *field_to_cache_idx
+                .get(&(f.table.clone(), f.column.clone()))
+                    .unwrap_or(&0);
+            let name = format!("{}.{}", f.table, f.column);
+            if f.is_lookup {
+                PivotField::new_attribute(idx, name)
+            } else {
+                PivotField::new(idx, name)
+            }
         })
         .collect();
     preserve_collapse_state(&mut definition.column_fields, &old_col_fields);
 
-    // Value fields — measures map to cache columns after group_by columns
+    // Value fields — measures map to cache columns right after group_by columns
+    // (before lookup columns). BI engine result order: [group_by] [measures] [lookups].
     // Use "[MeasureName]" format so the frontend can extract the measure name
     // consistently via toBiValueFieldRef. The BI engine handles aggregation,
     // so we use Sum as an identity operation on pre-aggregated data.
-    let measure_start = num_row_fields + num_col_fields + dim_offset;
     definition.value_fields = request
         .value_fields
         .iter()
@@ -3082,18 +3169,28 @@ pub async fn update_bi_pivot_fields(
     update_pivot_region(&state, pivot_id, dest_sheet_idx, destination, &view);
     let grid_ms = t_grid.elapsed().as_secs_f64() * 1000.0;
 
-    // Store last query in bi_metadata
+    // Store last query in bi_metadata (including lookup field info)
     {
         let mut bi_meta = pivot_state.bi_metadata.lock().unwrap();
         if let Some(meta) = bi_meta.get_mut(&pivot_id) {
+            let group_fields: Vec<BiFieldRef> = request
+                .row_fields
+                .iter()
+                .chain(request.column_fields.iter())
+                .filter(|f| !f.is_lookup)
+                .cloned()
+                .collect();
+            let lookup_fields: Vec<BiFieldRef> = request
+                .row_fields
+                .iter()
+                .chain(request.column_fields.iter())
+                .filter(|f| f.is_lookup)
+                .cloned()
+                .collect();
             meta.last_query = Some(BiPivotQuery {
                 measures: request.value_fields.iter().map(|v| v.measure_name.clone()).collect(),
-                group_by: request
-                    .row_fields
-                    .iter()
-                    .chain(request.column_fields.iter())
-                    .cloned()
-                    .collect(),
+                group_by: group_fields,
+                lookups: lookup_fields,
             });
         }
     }

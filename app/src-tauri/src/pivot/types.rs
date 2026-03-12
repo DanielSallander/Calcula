@@ -1197,6 +1197,10 @@ pub struct UpdateBiPivotFieldsRequest {
 pub struct BiFieldRef {
     pub table: String,
     pub column: String,
+    /// When true, this field is a lookup column (resolved post-aggregation)
+    /// rather than a GROUP BY column.
+    #[serde(default)]
+    pub is_lookup: bool,
 }
 
 /// Reference to a model measure (for BI pivot value fields).
@@ -1232,6 +1236,10 @@ pub struct BiModelColumnMeta {
     pub name: String,
     pub data_type: String,
     pub is_numeric: bool,
+    /// Custom lookup resolution expression (e.g., "MAX(category_name)").
+    /// None means the default resolution (MIN) will be used.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lookup_resolution: Option<String>,
 }
 
 /// Measure metadata from a BI model.
@@ -1249,6 +1257,7 @@ pub struct MeasureFieldInfo {
 pub struct BiPivotQuery {
     pub measures: Vec<String>,
     pub group_by: Vec<BiFieldRef>,
+    pub lookups: Vec<BiFieldRef>,
 }
 
 /// BI model info sent to the frontend for the field list.

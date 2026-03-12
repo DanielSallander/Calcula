@@ -371,6 +371,8 @@ export interface BiMeasureFieldInfo {
 export interface BiFieldRef {
   table: string;
   column: string;
+  /** When true, this field is a lookup column (resolved post-aggregation). */
+  isLookup?: boolean;
 }
 
 /** BI value field reference (measure name) */

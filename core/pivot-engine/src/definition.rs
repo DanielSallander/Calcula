@@ -82,6 +82,13 @@ pub struct PivotField {
     /// Grouping configuration for this field (date, number, or manual grouping).
     #[serde(default)]
     pub grouping: FieldGrouping,
+
+    /// Whether this field is an attribute (lookup) field.
+    /// Attribute fields do NOT create hierarchy levels — they are displayed
+    /// at the same depth as their parent GROUP field in an extra column.
+    /// Used for BI pivot lookup columns that are resolved post-aggregation.
+    #[serde(default)]
+    pub is_attribute: bool,
 }
 
 impl PivotField {
@@ -96,6 +103,23 @@ impl PivotField {
             collapsed_items: Vec::new(),
             show_all_items: false,
             grouping: FieldGrouping::None,
+            is_attribute: false,
+        }
+    }
+
+    /// Creates a new attribute (lookup) field that won't create a hierarchy level.
+    pub fn new_attribute(source_index: FieldIndex, name: String) -> Self {
+        PivotField {
+            source_index,
+            name,
+            sort_order: SortOrder::Ascending,
+            show_subtotals: false,
+            collapsed: false,
+            hidden_items: Vec::new(),
+            collapsed_items: Vec::new(),
+            show_all_items: false,
+            grouping: FieldGrouping::None,
+            is_attribute: true,
         }
     }
 }
