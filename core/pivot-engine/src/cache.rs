@@ -805,26 +805,28 @@ impl PivotCache {
         value_field_indices: &[FieldIndex],
     ) {
         self.aggregates.clear();
-        
+
         let all_group_fields: Vec<FieldIndex> = row_field_indices
             .iter()
             .chain(col_field_indices.iter())
             .copied()
             .collect();
-        
+
         let value_count = value_field_indices.len();
-        
-        // First pass: collect all the data we need from records
-        // This avoids borrowing self mutably while iterating
-        let mut updates: Vec<(GroupKey, usize, Option<f64>)> = Vec::new();
-        
+        let row_count = row_field_indices.len();
+        let col_count = col_field_indices.len();
+        let total_group = row_count + col_count;
+
+        // First pass: extract record data into flat vectors to avoid borrow conflicts.
+        // Each entry: (group_values, value_data).
+        let base_field_count = self.fields.len();
+        let mut record_data: Vec<(Vec<ValueId>, Vec<Option<f64>>)> = Vec::new();
+
         for (i, record) in self.records.iter().enumerate() {
             if !self.filter_mask[i] {
                 continue;
             }
-            
-            // Build the full group key (supports virtual fields via virtual_records)
-            let base_field_count = self.fields.len();
+
             let group_values: Vec<ValueId> = all_group_fields
                 .iter()
                 .map(|&fi| {
@@ -839,82 +841,68 @@ impl PivotCache {
                     }
                 })
                 .collect();
-            
-            // Collect value field data
-            let mut value_data: Vec<Option<f64>> = Vec::with_capacity(value_field_indices.len());
-            for &field_idx in value_field_indices {
-                let value_id = record.values.get(field_idx).copied().unwrap_or(VALUE_ID_EMPTY);
-                let numeric_value = if let Some(field_cache) = self.fields.get(field_idx) {
-                    if let Some(cache_value) = field_cache.get_value(value_id) {
-                        match cache_value {
-                            CacheValue::Number(n) => Some(n.0),
-                            CacheValue::Empty => None,
-                            _ => None, // Non-numeric treated as non-number
-                        }
-                    } else {
-                        None
-                    }
-                } else {
-                    None
-                };
-                value_data.push(numeric_value);
-            }
-            
-            // Generate all keys we need to update
-            let full_key = GroupKey::new(group_values.clone());
-            
-            // Store updates for full key
-            for (acc_idx, &numeric_value) in value_data.iter().enumerate() {
-                updates.push((full_key.clone(), acc_idx, numeric_value));
-            }
-            
-            // Generate subtotal keys for all (row_level, col_level) combinations.
-            // row_level = number of specific row field values kept (0 = all rows totaled)
-            // col_level = number of specific col field values kept (0 = all cols totaled)
-            // This ensures we have aggregates for every intersection type:
-            //   - Row subtotals with specific columns (e.g., Grand Total row + "Female" col)
-            //   - Column subtotals with specific rows
-            //   - Grand total (row_level=0, col_level=0)
-            let row_count = row_field_indices.len();
-            let col_count = col_field_indices.len();
 
+            let value_data: Vec<Option<f64>> = value_field_indices
+                .iter()
+                .map(|&field_idx| {
+                    let value_id = record.values.get(field_idx).copied().unwrap_or(VALUE_ID_EMPTY);
+                    self.fields.get(field_idx).and_then(|fc| {
+                        fc.get_value(value_id).and_then(|cv| match cv {
+                            CacheValue::Number(n) => Some(n.0),
+                            _ => None,
+                        })
+                    })
+                })
+                .collect();
+
+            record_data.push((group_values, value_data));
+        }
+
+        // Second pass: accumulate directly into aggregates HashMap.
+        // Reuse a single key_values buffer to avoid per-key allocation.
+        let mut key_buf = vec![VALUE_ID_EMPTY; total_group];
+
+        for (group_values, value_data) in &record_data {
+            // Full key
+            let full_key = GroupKey::new(group_values.clone());
+            let accumulators = self.aggregates
+                .entry(full_key)
+                .or_insert_with(|| vec![AggregateAccumulator::new(); value_count]);
+            for (acc_idx, &numeric_value) in value_data.iter().enumerate() {
+                if let Some(n) = numeric_value {
+                    accumulators[acc_idx].add_number(n);
+                }
+            }
+
+            // Subtotal keys for all (row_level, col_level) combinations
             for row_level in 0..=row_count {
                 for col_level in 0..=col_count {
-                    // Skip the full key (already handled above)
                     if row_level == row_count && col_level == col_count {
-                        continue;
+                        continue; // skip full key (already handled)
                     }
 
-                    let mut key_values = group_values.clone();
-                    // Zero out row fields beyond row_level
+                    // Build subtotal key in-place
+                    key_buf[..total_group].copy_from_slice(&group_values[..total_group]);
                     for i in row_level..row_count {
-                        key_values[i] = VALUE_ID_EMPTY;
+                        key_buf[i] = VALUE_ID_EMPTY;
                     }
-                    // Zero out col fields beyond col_level
                     for i in col_level..col_count {
-                        key_values[row_count + i] = VALUE_ID_EMPTY;
+                        key_buf[row_count + i] = VALUE_ID_EMPTY;
                     }
 
-                    let subtotal_key = GroupKey::new(key_values);
+                    let subtotal_key = GroupKey::new(key_buf[..total_group].to_vec());
+                    let accumulators = self.aggregates
+                        .entry(subtotal_key)
+                        .or_insert_with(|| vec![AggregateAccumulator::new(); value_count]);
                     for (acc_idx, &numeric_value) in value_data.iter().enumerate() {
-                        updates.push((subtotal_key.clone(), acc_idx, numeric_value));
+                        if let Some(n) = numeric_value {
+                            accumulators[acc_idx].add_number(n);
+                        }
                     }
                 }
             }
         }
-        
-        // Second pass: apply all updates
-        for (key, acc_idx, numeric_value) in updates {
-            let accumulators = self.aggregates
-                .entry(key)
-                .or_insert_with(|| vec![AggregateAccumulator::new(); value_count]);
-            
-            if let Some(n) = numeric_value {
-                accumulators[acc_idx].add_number(n);
-            }
-            // Note: we skip add_non_number for None values to match original behavior
-        }
-        
+
         self.stats.aggregate_groups = self.aggregates.len();
         self.aggregates_dirty = false;
     }

@@ -290,12 +290,8 @@ pub(crate) fn clear_pivot_region_from_grid(
         end_row,
         end_col
     );
-    
-    for row in start_row..=end_row {
-        for col in start_col..=end_col {
-            grid.clear_cell(row, col);
-        }
-    }
+
+    grid.clear_region(start_row, start_col, end_row, end_col);
 }
 
 /// Gets the current protected region for a pivot ID, if it exists.
@@ -477,11 +473,12 @@ pub(crate) fn update_pivot_in_grid(
             // If we cleared old region, clear it from state.grid too
             if let Some(ref region) = old_region {
                 if region.sheet_index == dest_sheet_idx {
-                    for row in region.start_row..=region.end_row {
-                        for col in region.start_col..=region.end_col {
-                            grid.clear_cell(row, col);
-                        }
-                    }
+                    grid.clear_region(
+                        region.start_row,
+                        region.start_col,
+                        region.end_row,
+                        region.end_col,
+                    );
                 }
             }
             

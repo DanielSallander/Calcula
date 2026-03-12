@@ -3154,7 +3154,9 @@ pub async fn update_bi_pivot_fields(
     let view = safe_calculate_pivot(definition, stored_cache);
     let calc_ms = t_calc.elapsed().as_secs_f64() * 1000.0;
 
+    let t_resp = Instant::now();
     let response = view_to_response(&view, definition, stored_cache);
+    let resp_ms = t_resp.elapsed().as_secs_f64() * 1000.0;
     let destination = definition.destination;
     let auto_fit = definition.layout.auto_fit_column_widths;
     let dest_sheet_idx = resolve_dest_sheet_index(&state, definition);
@@ -3198,13 +3200,14 @@ pub async fn update_bi_pivot_fields(
     let total_ms = t_total.elapsed().as_secs_f64() * 1000.0;
     log_perf!(
         "PIVOT",
-        "update_bi_pivot_fields pivot_id={} rows={}x{} | query={:.1}ms cache={:.1}ms calc={:.1}ms grid={:.1}ms TOTAL={:.1}ms",
+        "update_bi_pivot_fields pivot_id={} rows={}x{} | query={:.1}ms cache={:.1}ms calc={:.1}ms resp={:.1}ms grid={:.1}ms TOTAL={:.1}ms",
         pivot_id,
         response.row_count,
         response.col_count,
         query_ms,
         cache_ms,
         calc_ms,
+        resp_ms,
         grid_ms,
         total_ms
     );

@@ -63,6 +63,17 @@ impl Grid {
         }
     }
 
+    /// Clears all cells in the given rectangular region without per-cell
+    /// bounds recalculation. Bounds are recalculated once at the end.
+    pub fn clear_region(&mut self, start_row: u32, start_col: u32, end_row: u32, end_col: u32) {
+        for row in start_row..=end_row {
+            for col in start_col..=end_col {
+                self.cells.remove(&(row, col));
+            }
+        }
+        self.recalculate_bounds();
+    }
+
     /// Recalculates max_row and max_col by scanning all cells.
     /// This is O(n) where n is the number of non-empty cells.
     /// Called automatically when boundary cells are cleared.

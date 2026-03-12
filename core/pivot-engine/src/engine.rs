@@ -12,6 +12,7 @@
 //! 5. Add filter rows at the top if filter fields are configured
 
 use std::collections::HashMap;
+use std::time::Instant;
 use crate::cache::{
     CacheValue, GroupKey, OrderedFloat, PivotCache, ValueId, VALUE_ID_EMPTY,
     parse_cache_value_as_date,
@@ -215,34 +216,63 @@ impl<'a> PivotCalculator<'a> {
     
     /// Executes the full calculation and returns the rendered view.
     pub fn calculate(&mut self) -> PivotView {
+        let t_total = Instant::now();
+
         // Step 1: Apply filters from definition to cache
+        let t0 = Instant::now();
         self.apply_filters();
+        let filters_ms = t0.elapsed().as_secs_f64() * 1000.0;
 
         // Step 1.5: Apply grouping transforms (creates virtual fields in cache).
         // This also separates attribute fields from GROUP fields.
+        let t0 = Instant::now();
         self.apply_grouping_transforms();
+        let grouping_ms = t0.elapsed().as_secs_f64() * 1000.0;
 
         // Step 2: Build axis trees (using effective GROUP fields only — attributes excluded)
+        let t0 = Instant::now();
         let row_fields = self.effective_row_fields.clone();
         let col_fields = self.effective_col_fields.clone();
         let row_tree = self.build_axis_tree(&row_fields);
         let col_tree = self.build_axis_tree(&col_fields);
+        let tree_ms = t0.elapsed().as_secs_f64() * 1000.0;
 
         // Step 3: Flatten trees into ordered lists
+        let t0 = Instant::now();
         self.row_items = self.flatten_axis_tree(&row_tree, true);
         self.col_items = self.flatten_axis_tree(&col_tree, false);
+        let flatten_ms = t0.elapsed().as_secs_f64() * 1000.0;
 
         // Step 3.5: Resolve attribute labels for each flat item
+        let t0 = Instant::now();
         self.resolve_attribute_labels();
+        let attr_ms = t0.elapsed().as_secs_f64() * 1000.0;
 
         // Step 4: Handle multiple value fields positioning
+        let t0 = Instant::now();
         self.apply_values_position();
+        let values_pos_ms = t0.elapsed().as_secs_f64() * 1000.0;
 
         // Step 4.5: Pre-compute grand totals for show_values_as
+        let t0 = Instant::now();
         self.precompute_grand_totals();
+        let grand_totals_ms = t0.elapsed().as_secs_f64() * 1000.0;
 
         // Step 5: Generate the view
-        self.generate_view()
+        let t0 = Instant::now();
+        let view = self.generate_view();
+        let view_ms = t0.elapsed().as_secs_f64() * 1000.0;
+
+        let total_ms = t_total.elapsed().as_secs_f64() * 1000.0;
+
+        eprintln!(
+            "[PERF][pivot-engine] calculate: total={:.1}ms | filters={:.1} grouping={:.1} tree={:.1} flatten={:.1} attr={:.1} values_pos={:.1} grand_totals={:.1} view={:.1} | row_items={} col_items={} records={}",
+            total_ms, filters_ms, grouping_ms, tree_ms, flatten_ms, attr_ms,
+            values_pos_ms, grand_totals_ms, view_ms,
+            self.row_items.len(), self.col_items.len(), self.cache.records.len()
+        );
+
+        view
     }
 
     /// Pre-computes grand totals for each value field (used by show_values_as).
@@ -899,25 +929,19 @@ impl<'a> PivotCalculator<'a> {
         if fields.is_empty() {
             return Vec::new();
         }
-        
-        // Get unique values that actually exist in filtered data
-        let unique_values = self.collect_unique_values_in_data(fields);
-        
-        // Build tree recursively
-        self.build_tree_level(fields, 0, &unique_values, &[])
-    }
-    
-    /// Collects unique value combinations that exist in the filtered data.
-    /// Supports both source fields and virtual fields (from grouping transforms).
-    fn collect_unique_values_in_data(
-        &self,
-        fields: &[PivotField],
-    ) -> Vec<HashMap<ValueId, bool>> {
-        let mut unique_per_level: Vec<HashMap<ValueId, bool>> =
-            vec![HashMap::new(); fields.len()];
 
-        // Also track valid combinations for hierarchical filtering
-        let mut valid_combos: HashMap<Vec<ValueId>, bool> = HashMap::new();
+        // Single-pass: collect unique values per level AND build children index.
+        // children_index[level] maps parent_path_key -> set of child ValueIds.
+        // For level 0, the parent key is empty (0 values).
+        // For level 1, the parent key is (level0_value_id,).
+        // For level N, the parent key is (level0_vid, level1_vid, ..., levelN-1_vid).
+        let num_levels = fields.len();
+        let mut unique_per_level: Vec<HashMap<ValueId, bool>> =
+            vec![HashMap::new(); num_levels];
+        // children_index[level] maps the parent path (as Vec<ValueId>) to the set
+        // of unique child values at that level.
+        let mut children_index: Vec<HashMap<Vec<ValueId>, HashMap<ValueId, bool>>> =
+            vec![HashMap::new(); num_levels];
 
         let base_field_count = self.cache.fields.len();
         for (record_idx, record) in self.cache.records.iter().enumerate() {
@@ -925,8 +949,7 @@ impl<'a> PivotCalculator<'a> {
                 continue;
             }
 
-            let mut combo = Vec::with_capacity(fields.len());
-
+            let mut path = Vec::with_capacity(num_levels);
             for (level, field) in fields.iter().enumerate() {
                 let value_id = record_value_at(
                     record,
@@ -937,34 +960,41 @@ impl<'a> PivotCalculator<'a> {
                 );
 
                 unique_per_level[level].insert(value_id, true);
-                combo.push(value_id);
-            }
 
-            // Track full combination
-            valid_combos.insert(combo, true);
+                // Register this value as a child of its parent path
+                let parent_path = path.clone();
+                children_index[level]
+                    .entry(parent_path)
+                    .or_default()
+                    .insert(value_id, true);
+
+                path.push(value_id);
+            }
         }
 
-        unique_per_level
+        // Build tree recursively using the pre-computed index
+        self.build_tree_level_indexed(fields, 0, &unique_per_level, &children_index, &[])
     }
-    
-    /// Recursively builds one level of the axis tree.
-    fn build_tree_level(
+
+    /// Recursively builds one level of the axis tree using a pre-computed children index.
+    fn build_tree_level_indexed(
         &self,
         fields: &[PivotField],
         level: usize,
         unique_values: &[HashMap<ValueId, bool>],
+        children_index: &[HashMap<Vec<ValueId>, HashMap<ValueId, bool>>],
         parent_path: &[ValueId],
     ) -> Vec<AxisNode> {
         if level >= fields.len() {
             return Vec::new();
         }
-        
+
         let field = &fields[level];
         let field_cache = match self.cache.get_field(field.source_index) {
             Some(fc) => fc,
             None => return Vec::new(),
         };
-        
+
         // Get unique values at this level.
         // If show_all_items is true, use ALL unique values from the field cache
         // (Cartesian product), not just those present in the filtered data.
@@ -974,19 +1004,27 @@ impl<'a> PivotCalculator<'a> {
                 .map(|id| (id, true))
                 .collect();
             &all_values_map
-        } else {
+        } else if level == 0 {
+            // Level 0: use the unique values from the single-pass scan
             match unique_values.get(level) {
                 Some(v) => v,
                 None => return Vec::new(),
             }
+        } else {
+            // Child levels: use the pre-computed children index
+            let parent_key = parent_path.to_vec();
+            match children_index[level].get(&parent_key) {
+                Some(v) => v,
+                None => return Vec::new(),
+            }
         };
-        
+
         // Sort the values based on field's sort order
         let mut sorted_ids: Vec<ValueId> = values_at_level.keys().copied().collect();
         self.sort_value_ids(&mut sorted_ids, field_cache, &field.sort_order);
-        
+
         let mut nodes = Vec::with_capacity(sorted_ids.len());
-        
+
         for value_id in sorted_ids {
             // Get display label
             let label = self.get_value_label(field_cache, value_id);
@@ -1019,87 +1057,27 @@ impl<'a> PivotCalculator<'a> {
                 in_items // field expanded: items in list are collapsed
             };
             node.show_subtotal = field.show_subtotals && level < fields.len() - 1;
-            
+
             // Build children if not at leaf level
             if level < fields.len() - 1 {
                 let mut child_path = parent_path.to_vec();
                 child_path.push(value_id);
-                
-                // Filter unique values for children based on this parent
-                let child_unique = self.filter_unique_for_parent(
+
+                node.children = self.build_tree_level_indexed(
                     fields,
                     level + 1,
-                    &child_path,
-                );
-                
-                node.children = self.build_tree_level(
-                    fields,
-                    level + 1,
-                    &child_unique,
+                    unique_values,
+                    children_index,
                     &child_path,
                 );
             }
-            
+
             nodes.push(node);
         }
-        
+
         nodes
     }
-    
-    /// Filters unique values that exist under a specific parent path.
-    /// Supports both source fields and virtual fields (from grouping transforms).
-    fn filter_unique_for_parent(
-        &self,
-        fields: &[PivotField],
-        start_level: usize,
-        parent_path: &[ValueId],
-    ) -> Vec<HashMap<ValueId, bool>> {
-        let mut unique_per_level: Vec<HashMap<ValueId, bool>> =
-            vec![HashMap::new(); fields.len()];
 
-        let base_field_count = self.cache.fields.len();
-        'records: for (record_idx, record) in self.cache.records.iter().enumerate() {
-            if !self.cache.filter_mask[record_idx] {
-                continue;
-            }
-
-            // Check if record matches parent path
-            for (level, &parent_value) in parent_path.iter().enumerate() {
-                if level >= fields.len() {
-                    break;
-                }
-                let field_idx = fields[level].source_index;
-                let record_value = record_value_at(
-                    record,
-                    record_idx,
-                    field_idx,
-                    base_field_count,
-                    &self.cache.virtual_records,
-                );
-
-                if record_value != parent_value {
-                    continue 'records;
-                }
-            }
-
-            // Record matches - collect unique values from start_level onwards
-            for level in start_level..fields.len() {
-                let field_idx = fields[level].source_index;
-                let value_id = record_value_at(
-                    record,
-                    record_idx,
-                    field_idx,
-                    base_field_count,
-                    &self.cache.virtual_records,
-                );
-
-                unique_per_level[level].insert(value_id, true);
-            }
-        }
-
-        unique_per_level
-    }
-    
     /// Sorts value IDs based on sort order.
     fn sort_value_ids(
         &self,
