@@ -45,6 +45,24 @@ impl Grid {
         self.cells.insert((row, col), cell);
     }
 
+    /// Inserts a cell without updating bounds tracking.
+    /// Use when doing bulk inserts followed by a single `update_bounds()` call.
+    #[inline(always)]
+    pub fn set_cell_unchecked(&mut self, row: u32, col: u32, cell: Cell) {
+        self.cells.insert((row, col), cell);
+    }
+
+    /// Updates max_row/max_col to cover the specified region.
+    /// Call after a batch of `set_cell_unchecked` operations.
+    pub fn update_bounds(&mut self, max_row: u32, max_col: u32) {
+        if max_row > self.max_row {
+            self.max_row = max_row;
+        }
+        if max_col > self.max_col {
+            self.max_col = max_col;
+        }
+    }
+
     /// Retrieves a reference to a cell at the specified coordinates.
     /// Returns None if the cell is empty (not stored).
     pub fn get_cell(&self, row: u32, col: u32) -> Option<&Cell> {

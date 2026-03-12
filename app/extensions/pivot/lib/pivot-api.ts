@@ -191,13 +191,10 @@ export interface ToggleGroupRequest {
   groupPath?: Array<[number, number]>;
 }
 
-/** Cell value types */
-export type PivotCellValue =
-  | { type: "Empty" }
-  | { type: "Number"; data: number }
-  | { type: "Text"; data: string }
-  | { type: "Boolean"; data: boolean }
-  | { type: "Error"; data: string };
+/** Cell value — untagged for compact IPC serialization.
+ * null = empty, number = numeric, string = text (errors prefixed with "#"),
+ * boolean = true/false. */
+export type PivotCellValue = number | string | boolean | null;
 
 /** Cell type identifiers */
 export type PivotCellType =
@@ -232,15 +229,17 @@ export type PivotRowType = "ColumnHeader" | "Data" | "Subtotal" | "GrandTotal" |
 /** Column type identifiers */
 export type PivotColumnType = "RowLabel" | "Data" | "Subtotal" | "GrandTotal";
 
-/** Cell data from the backend */
+/** Cell data from the backend.
+ * Fields with defaults (indentLevel, isBold, isExpandable, isCollapsed)
+ * are omitted from the JSON payload when at their default value to reduce IPC size. */
 export interface PivotCellData {
   cellType: PivotCellType;
   value: PivotCellValue;
-  formattedValue: string;
-  indentLevel: number;
-  isBold: boolean;
-  isExpandable: boolean;
-  isCollapsed: boolean;
+  formattedValue?: string;
+  indentLevel?: number;
+  isBold?: boolean;
+  isExpandable?: boolean;
+  isCollapsed?: boolean;
   backgroundStyle: BackgroundStyle;
   numberFormat?: string;
   filterFieldIndex?: number;
@@ -557,28 +556,17 @@ export async function getPivotFieldUniqueValues(
  * Returns 0 for non-numeric values.
  */
 export function getCellNumericValue(value: PivotCellValue): number {
-  if (value.type === "Number") {
-    return value.data;
-  }
-  return 0;
+  return typeof value === "number" ? value : 0;
 }
 
 /**
  * Extracts the display string from a PivotCellValue.
  */
 export function getCellDisplayValue(value: PivotCellValue): string {
-  switch (value.type) {
-    case "Empty":
-      return "";
-    case "Number":
-      return value.data.toString();
-    case "Text":
-      return value.data;
-    case "Boolean":
-      return value.data ? "TRUE" : "FALSE";
-    case "Error":
-      return `#${value.data}`;
-  }
+  if (value === null || value === undefined) return "";
+  if (typeof value === "number") return value.toString();
+  if (typeof value === "boolean") return value ? "TRUE" : "FALSE";
+  return value; // string (including "#ERROR" prefixed errors)
 }
 
 /**

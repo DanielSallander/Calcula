@@ -112,7 +112,7 @@ pub fn create_pivot_table(
         }
 
         if let Some(dest_grid) = grids.get_mut(dest_sheet_idx) {
-            write_pivot_to_grid(dest_grid, &view, destination, &mut styles);
+            write_pivot_to_grid(dest_grid, None, &view, destination, &mut styles);
             log_info!(
                 "PIVOT",
                 "wrote pivot output to grids[{}] at ({},{}) size {}x{}",
@@ -247,10 +247,12 @@ pub fn update_pivot_fields(
     let region_ms = t3.elapsed().as_secs_f64() * 1000.0;
 
     let total_ms = t_total.elapsed().as_secs_f64() * 1000.0;
+    let payload_bytes = serde_json::to_string(&response).map(|s| s.len()).unwrap_or(0);
+    let payload_kb = payload_bytes as f64 / 1024.0;
 
     log_perf!(
         "PIVOT",
-        "update_pivot_fields pivot_id={} rows={}x{} auto_fit={} | calc={:.1}ms serialize={:.1}ms grid_write={:.1}ms region={:.1}ms TOTAL={:.1}ms",
+        "update_pivot_fields pivot_id={} rows={}x{} auto_fit={} | calc={:.1}ms serialize={:.1}ms grid_write={:.1}ms region={:.1}ms TOTAL={:.1}ms | payload={:.1}KB",
         request.pivot_id,
         response.row_count,
         response.col_count,
@@ -259,7 +261,8 @@ pub fn update_pivot_fields(
         serialize_ms,
         grid_write_ms,
         region_ms,
-        total_ms
+        total_ms,
+        payload_kb
     );
 
     Ok(response)
@@ -2792,14 +2795,13 @@ pub async fn create_pivot_from_bi_model(
         let mut styles = state.style_registry.lock().unwrap();
         let mut grids = state.grids.lock().unwrap();
         if let Some(dest_grid) = grids.get_mut(dest_sheet_idx) {
-            write_pivot_to_grid(dest_grid, &view, destination, &mut styles);
             let active_sheet = *state.active_sheet.lock().unwrap();
             if dest_sheet_idx == active_sheet {
                 let mut grid = state.grid.lock().unwrap();
-                for ((r, c), cell) in dest_grid.cells.iter() {
-                    grid.set_cell(*r, *c, cell.clone());
-                }
+                write_pivot_to_grid(dest_grid, Some(&mut grid), &view, destination, &mut styles);
                 grid.recalculate_bounds();
+            } else {
+                write_pivot_to_grid(dest_grid, None, &view, destination, &mut styles);
             }
         }
     }
@@ -3206,9 +3208,11 @@ pub async fn update_bi_pivot_fields(
     }
 
     let total_ms = t_total.elapsed().as_secs_f64() * 1000.0;
+    let payload_bytes = serde_json::to_string(&response).map(|s| s.len()).unwrap_or(0);
+    let payload_kb = payload_bytes as f64 / 1024.0;
     log_perf!(
         "PIVOT",
-        "update_bi_pivot_fields pivot_id={} rows={}x{} | query={:.1}ms cache={:.1}ms calc={:.1}ms resp={:.1}ms grid={:.1}ms TOTAL={:.1}ms",
+        "update_bi_pivot_fields pivot_id={} rows={}x{} | query={:.1}ms cache={:.1}ms calc={:.1}ms resp={:.1}ms grid={:.1}ms TOTAL={:.1}ms | payload={:.1}KB",
         pivot_id,
         response.row_count,
         response.col_count,
@@ -3217,7 +3221,8 @@ pub async fn update_bi_pivot_fields(
         calc_ms,
         resp_ms,
         grid_ms,
-        total_ms
+        total_ms,
+        payload_kb
     );
 
     Ok(response)

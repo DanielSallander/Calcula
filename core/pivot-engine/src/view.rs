@@ -138,7 +138,7 @@ impl PivotViewCell {
     pub fn data(value: f64) -> Self {
         PivotViewCell {
             value: PivotCellValue::Number(value),
-            formatted_value: format!("{}", value),
+            formatted_value: String::new(), // formatted on-demand by the frontend
             cell_type: PivotCellType::Data,
             indent_level: 0,
             is_collapsed: false,
@@ -156,8 +156,8 @@ impl PivotViewCell {
     /// Creates a row header cell.
     pub fn row_header(label: String, indent: u8) -> Self {
         PivotViewCell {
-            value: PivotCellValue::Text(label.clone()),
-            formatted_value: label,
+            formatted_value: label.clone(),
+            value: PivotCellValue::Text(label),
             cell_type: PivotCellType::RowHeader,
             indent_level: indent,
             is_collapsed: false,
@@ -175,8 +175,8 @@ impl PivotViewCell {
     /// Creates a column header cell.
     pub fn column_header(label: String) -> Self {
         PivotViewCell {
-            value: PivotCellValue::Text(label.clone()),
-            formatted_value: label,
+            formatted_value: label.clone(),
+            value: PivotCellValue::Text(label),
             cell_type: PivotCellType::ColumnHeader,
             indent_level: 0,
             is_collapsed: false,
@@ -232,8 +232,8 @@ impl PivotViewCell {
     /// Creates a filter label cell (left side of filter row).
     pub fn filter_label(field_name: String, field_index: usize) -> Self {
         PivotViewCell {
-            value: PivotCellValue::Text(field_name.clone()),
-            formatted_value: field_name,
+            formatted_value: field_name.clone(),
+            value: PivotCellValue::Text(field_name),
             cell_type: PivotCellType::FilterLabel,
             indent_level: 0,
             is_collapsed: false,
@@ -251,8 +251,8 @@ impl PivotViewCell {
     /// Creates a filter dropdown cell (right side of filter row).
     pub fn filter_dropdown(display_value: String, field_index: usize) -> Self {
         PivotViewCell {
-            value: PivotCellValue::Text(display_value.clone()),
-            formatted_value: display_value,
+            formatted_value: display_value.clone(),
+            value: PivotCellValue::Text(display_value),
             cell_type: PivotCellType::FilterDropdown,
             indent_level: 0,
             is_collapsed: false,
@@ -271,8 +271,8 @@ impl PivotViewCell {
     /// Displayed in the last header row's corner area (shows row field names).
     pub fn row_label_header(label: String) -> Self {
         PivotViewCell {
-            value: PivotCellValue::Text(label.clone()),
-            formatted_value: label,
+            formatted_value: label.clone(),
+            value: PivotCellValue::Text(label),
             cell_type: PivotCellType::RowLabelHeader,
             indent_level: 0,
             is_collapsed: false,
@@ -291,8 +291,8 @@ impl PivotViewCell {
     /// Displayed in the last header row's data columns area (first column header).
     pub fn column_label_header(label: String) -> Self {
         PivotViewCell {
-            value: PivotCellValue::Text(label.clone()),
-            formatted_value: label,
+            formatted_value: label.clone(),
+            value: PivotCellValue::Text(label),
             cell_type: PivotCellType::ColumnLabelHeader,
             indent_level: 0,
             is_collapsed: false,

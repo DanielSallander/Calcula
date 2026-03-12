@@ -11,7 +11,7 @@
 //! 4. Generate the final PivotView with proper cell types and formatting
 //! 5. Add filter rows at the top if filter fields are configured
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::time::Instant;
 use crate::cache::{
     CacheValue, GroupKey, OrderedFloat, PivotCache, ValueId, VALUE_ID_EMPTY,
@@ -175,6 +175,10 @@ pub struct PivotCalculator<'a> {
 
     /// Pre-computed grand totals for each value field (for show_values_as).
     grand_totals: Vec<f64>,
+
+    /// Reusable buffer for building group keys in compute_aggregate.
+    /// Avoids allocating a new Vec per cell (590K+ calls).
+    agg_key_buf: Vec<ValueId>,
 }
 
 impl<'a> PivotCalculator<'a> {
@@ -211,9 +215,10 @@ impl<'a> PivotCalculator<'a> {
             row_attribute_fields: Vec::new(),
             col_attribute_fields: Vec::new(),
             grand_totals: Vec::new(),
+            agg_key_buf: Vec::new(),
         }
     }
-    
+
     /// Executes the full calculation and returns the rendered view.
     pub fn calculate(&mut self) -> PivotView {
         let t_total = Instant::now();
@@ -221,13 +226,13 @@ impl<'a> PivotCalculator<'a> {
         // Step 1: Apply filters from definition to cache
         let t0 = Instant::now();
         self.apply_filters();
-        let filters_ms = t0.elapsed().as_secs_f64() * 1000.0;
+        let _filters_ms = t0.elapsed().as_secs_f64() * 1000.0;
 
         // Step 1.5: Apply grouping transforms (creates virtual fields in cache).
         // This also separates attribute fields from GROUP fields.
         let t0 = Instant::now();
         self.apply_grouping_transforms();
-        let grouping_ms = t0.elapsed().as_secs_f64() * 1000.0;
+        let _grouping_ms = t0.elapsed().as_secs_f64() * 1000.0;
 
         // Step 2: Build axis trees (using effective GROUP fields only — attributes excluded)
         let t0 = Instant::now();
@@ -235,42 +240,43 @@ impl<'a> PivotCalculator<'a> {
         let col_fields = self.effective_col_fields.clone();
         let row_tree = self.build_axis_tree(&row_fields);
         let col_tree = self.build_axis_tree(&col_fields);
-        let tree_ms = t0.elapsed().as_secs_f64() * 1000.0;
+        let _tree_ms = t0.elapsed().as_secs_f64() * 1000.0;
 
         // Step 3: Flatten trees into ordered lists
         let t0 = Instant::now();
         self.row_items = self.flatten_axis_tree(&row_tree, true);
         self.col_items = self.flatten_axis_tree(&col_tree, false);
-        let flatten_ms = t0.elapsed().as_secs_f64() * 1000.0;
+        let _flatten_ms = t0.elapsed().as_secs_f64() * 1000.0;
 
         // Step 3.5: Resolve attribute labels for each flat item
         let t0 = Instant::now();
         self.resolve_attribute_labels();
-        let attr_ms = t0.elapsed().as_secs_f64() * 1000.0;
+        let _attr_ms = t0.elapsed().as_secs_f64() * 1000.0;
 
         // Step 4: Handle multiple value fields positioning
         let t0 = Instant::now();
         self.apply_values_position();
-        let values_pos_ms = t0.elapsed().as_secs_f64() * 1000.0;
+        let _values_pos_ms = t0.elapsed().as_secs_f64() * 1000.0;
 
         // Step 4.5: Pre-compute grand totals for show_values_as
         let t0 = Instant::now();
         self.precompute_grand_totals();
-        let grand_totals_ms = t0.elapsed().as_secs_f64() * 1000.0;
+        let _grand_totals_ms = t0.elapsed().as_secs_f64() * 1000.0;
 
         // Step 5: Generate the view
         let t0 = Instant::now();
         let view = self.generate_view();
-        let view_ms = t0.elapsed().as_secs_f64() * 1000.0;
+        let _view_ms = t0.elapsed().as_secs_f64() * 1000.0;
 
-        let total_ms = t_total.elapsed().as_secs_f64() * 1000.0;
+        let _total_ms = t_total.elapsed().as_secs_f64() * 1000.0;
 
-        eprintln!(
-            "[PERF][pivot-engine] calculate: total={:.1}ms | filters={:.1} grouping={:.1} tree={:.1} flatten={:.1} attr={:.1} values_pos={:.1} grand_totals={:.1} view={:.1} | row_items={} col_items={} records={}",
-            total_ms, filters_ms, grouping_ms, tree_ms, flatten_ms, attr_ms,
-            values_pos_ms, grand_totals_ms, view_ms,
-            self.row_items.len(), self.col_items.len(), self.cache.records.len()
-        );
+        // Uncomment for detailed per-step performance analysis:
+        // eprintln!(
+        //     "[PERF][pivot-engine] calculate: total={:.1}ms | filters={:.1} grouping={:.1} tree={:.1} flatten={:.1} attr={:.1} values_pos={:.1} grand_totals={:.1} view={:.1} | row_items={} col_items={} records={}",
+        //     _total_ms, _filters_ms, _grouping_ms, _tree_ms, _flatten_ms, _attr_ms,
+        //     _values_pos_ms, _grand_totals_ms, _view_ms,
+        //     self.row_items.len(), self.col_items.len(), self.cache.records.len()
+        // );
 
         view
     }
@@ -405,6 +411,9 @@ impl<'a> PivotCalculator<'a> {
     }
 
     fn precompute_grand_totals(&mut self) {
+        // Ensure aggregates are computed once (triggers lazy computation).
+        self.ensure_aggregates_computed();
+
         self.grand_totals = self.definition.value_fields.iter().enumerate().map(|(vf_idx, vf)| {
             self.compute_aggregate(&[], &[], vf_idx, vf.aggregation)
         }).collect();
@@ -936,20 +945,22 @@ impl<'a> PivotCalculator<'a> {
         // For level 1, the parent key is (level0_value_id,).
         // For level N, the parent key is (level0_vid, level1_vid, ..., levelN-1_vid).
         let num_levels = fields.len();
-        let mut unique_per_level: Vec<HashMap<ValueId, bool>> =
-            vec![HashMap::new(); num_levels];
+        let mut unique_per_level: Vec<HashSet<ValueId>> =
+            vec![HashSet::new(); num_levels];
         // children_index[level] maps the parent path (as Vec<ValueId>) to the set
         // of unique child values at that level.
-        let mut children_index: Vec<HashMap<Vec<ValueId>, HashMap<ValueId, bool>>> =
+        let mut children_index: Vec<HashMap<Vec<ValueId>, HashSet<ValueId>>> =
             vec![HashMap::new(); num_levels];
 
         let base_field_count = self.cache.fields.len();
+        // Reusable path buffer — avoids allocating a new Vec per record
+        let mut path = Vec::with_capacity(num_levels);
         for (record_idx, record) in self.cache.records.iter().enumerate() {
             if !self.cache.filter_mask[record_idx] {
                 continue;
             }
 
-            let mut path = Vec::with_capacity(num_levels);
+            path.clear();
             for (level, field) in fields.iter().enumerate() {
                 let value_id = record_value_at(
                     record,
@@ -959,14 +970,18 @@ impl<'a> PivotCalculator<'a> {
                     &self.cache.virtual_records,
                 );
 
-                unique_per_level[level].insert(value_id, true);
+                unique_per_level[level].insert(value_id);
 
-                // Register this value as a child of its parent path
-                let parent_path = path.clone();
-                children_index[level]
-                    .entry(parent_path)
-                    .or_default()
-                    .insert(value_id, true);
+                // Register this value as a child of its parent path.
+                // Only clone the path when inserting a new parent key.
+                let children_at_level = &mut children_index[level];
+                if let Some(children) = children_at_level.get_mut(&path) {
+                    children.insert(value_id);
+                } else {
+                    let mut children = HashSet::new();
+                    children.insert(value_id);
+                    children_at_level.insert(path.clone(), children);
+                }
 
                 path.push(value_id);
             }
@@ -981,8 +996,8 @@ impl<'a> PivotCalculator<'a> {
         &self,
         fields: &[PivotField],
         level: usize,
-        unique_values: &[HashMap<ValueId, bool>],
-        children_index: &[HashMap<Vec<ValueId>, HashMap<ValueId, bool>>],
+        unique_values: &[HashSet<ValueId>],
+        children_index: &[HashMap<Vec<ValueId>, HashSet<ValueId>>],
         parent_path: &[ValueId],
     ) -> Vec<AxisNode> {
         if level >= fields.len() {
@@ -998,12 +1013,10 @@ impl<'a> PivotCalculator<'a> {
         // Get unique values at this level.
         // If show_all_items is true, use ALL unique values from the field cache
         // (Cartesian product), not just those present in the filtered data.
-        let all_values_map: HashMap<ValueId, bool>;
+        let all_values_set: HashSet<ValueId>;
         let values_at_level = if field.show_all_items {
-            all_values_map = (0..field_cache.unique_count() as ValueId)
-                .map(|id| (id, true))
-                .collect();
-            &all_values_map
+            all_values_set = (0..field_cache.unique_count() as ValueId).collect();
+            &all_values_set
         } else if level == 0 {
             // Level 0: use the unique values from the single-pass scan
             match unique_values.get(level) {
@@ -1020,7 +1033,7 @@ impl<'a> PivotCalculator<'a> {
         };
 
         // Sort the values based on field's sort order
-        let mut sorted_ids: Vec<ValueId> = values_at_level.keys().copied().collect();
+        let mut sorted_ids: Vec<ValueId> = values_at_level.iter().copied().collect();
         self.sort_value_ids(&mut sorted_ids, field_cache, &field.sort_order);
 
         let mut nodes = Vec::with_capacity(sorted_ids.len());
@@ -1905,9 +1918,10 @@ impl<'a> PivotCalculator<'a> {
             return;
         }
 
-        // Clone what we need to avoid borrow conflicts - once, not per-row
-        let row_items = self.row_items.clone();
-        let col_items = self.col_items.clone();
+        // Take items out of self to avoid borrow conflicts (zero-cost swap, no clone).
+        // They are restored after the loop.
+        let row_items = std::mem::take(&mut self.row_items);
+        let col_items = std::mem::take(&mut self.col_items);
         let value_fields = self.definition.value_fields.clone();
         let values_position = self.definition.layout.values_position;
         let report_layout = self.definition.layout.report_layout;
@@ -2043,8 +2057,12 @@ impl<'a> PivotCalculator<'a> {
 
             view.add_row(cells, descriptor);
         }
+
+        // Restore items back into self
+        self.row_items = row_items;
+        self.col_items = col_items;
     }
-    
+
     /// Gets parent label at a specific depth for tabular layout.
     fn get_parent_label_at_depth(&self, row_items: &[FlatAxisItem], current_idx: usize, depth: usize) -> String {
         // Walk up the parent chain to find label at depth
@@ -2088,8 +2106,7 @@ impl<'a> PivotCalculator<'a> {
             attribute_labels: Vec::new(),
         };
 
-        // Clone once for this single row
-        let col_items = self.col_items.clone();
+        let col_items = std::mem::take(&mut self.col_items);
         let value_fields = self.definition.value_fields.clone();
         let values_position = self.definition.layout.values_position;
         self.generate_data_cells_for_row(&mut cells, &grand_total_item, &col_items, &value_fields, values_position);
@@ -2105,10 +2122,13 @@ impl<'a> PivotCalculator<'a> {
         };
         
         view.add_row(cells, descriptor);
+
+        // Restore col_items
+        self.col_items = col_items;
     }
-    
+
     /// Generates data cells for a row by iterating through columns.
-    /// Accepts pre-cloned col_items/value_fields to avoid cloning per-row.
+    /// Accepts col_items/value_fields by reference to avoid cloning per-row.
     fn generate_data_cells_for_row(
         &mut self,
         cells: &mut Vec<PivotViewCell>,
@@ -2132,11 +2152,13 @@ impl<'a> PivotCalculator<'a> {
             return;
         }
         
+        // Prepare the row portion of the key buffer once for all columns
+        self.prepare_row_key(&row_item.group_values);
+
         if col_items.is_empty() {
             // No column fields - one cell per value field
             for (vf_idx, vf) in value_fields.iter().enumerate() {
-                let aggregate = self.compute_aggregate(
-                    &row_item.group_values,
+                let aggregate = self.lookup_aggregate_col(
                     &[], // No column grouping
                     vf_idx,
                     vf.aggregation,
@@ -2184,14 +2206,14 @@ impl<'a> PivotCalculator<'a> {
                     value_fields.len(),
                     values_position,
                 );
-                
+
                 // Safety check: ensure vf_idx is valid
                 let vf_idx = vf_idx.min(value_fields.len().saturating_sub(1));
-                
+
                 let vf = &value_fields[vf_idx];
 
-                let aggregate = self.compute_aggregate(
-                    &row_item.group_values,
+                // Use batched lookup: row key already prepared, only overwrites col portion
+                let aggregate = self.lookup_aggregate_col(
                     &col_group_values,
                     vf_idx,
                     vf.aggregation,
@@ -2267,6 +2289,17 @@ impl<'a> PivotCalculator<'a> {
     }
     
     /// Computes the aggregate value for a row/column intersection.
+    /// Ensures aggregates are computed before slice-based lookups.
+    fn ensure_aggregates_computed(&mut self) {
+        // Trigger lazy computation via get_aggregate if needed
+        let ri = self.row_field_indices.clone();
+        let ci = self.col_field_indices.clone();
+        let vi = self.value_field_indices.clone();
+        let key = GroupKey::grand_total(ri.len() + ci.len());
+        // This call is a no-op if aggregates are already computed
+        self.cache.get_aggregate(&key, &ri, &ci, &vi);
+    }
+
     fn compute_aggregate(
         &mut self,
         row_values: &[ValueId],
@@ -2274,35 +2307,67 @@ impl<'a> PivotCalculator<'a> {
         value_field_idx: usize,
         aggregation: AggregationType,
     ) -> f64 {
-        // Build the full group key
-        let mut key_values = row_values.to_vec();
-        key_values.extend_from_slice(col_values);
-        
-        // Pad to expected length
+        // Build the full group key using reusable buffer (avoids alloc per call).
         let expected_len = self.row_field_indices.len() + self.col_field_indices.len();
-        while key_values.len() < expected_len {
-            key_values.push(VALUE_ID_EMPTY);
+        self.agg_key_buf.clear();
+        self.agg_key_buf.extend_from_slice(row_values);
+        self.agg_key_buf.extend_from_slice(col_values);
+
+        // Pad to expected length
+        while self.agg_key_buf.len() < expected_len {
+            self.agg_key_buf.push(VALUE_ID_EMPTY);
         }
-        
+
         // Truncate if too long (can happen with value field dimension)
-        if key_values.len() > expected_len {
-            key_values.truncate(expected_len);
-        }
-        
-        let group_key = GroupKey::new(key_values);
-        
-        // Query cache for pre-computed aggregate
-        if let Some(accumulators) = self.cache.get_aggregate(
-            &group_key,
-            &self.row_field_indices,
-            &self.col_field_indices,
-            &self.value_field_indices,
-        ) {
+        self.agg_key_buf.truncate(expected_len);
+
+        // Slice-based lookup — no Vec allocation needed
+        if let Some(accumulators) = self.cache.get_aggregate_by_slice(&self.agg_key_buf) {
             if let Some(acc) = accumulators.get(value_field_idx) {
                 return acc.compute(aggregation);
             }
         }
-        
+
+        0.0
+    }
+
+    /// Prepares the key buffer with row values, padded to expected length.
+    /// Call once per row, then use `lookup_aggregate_col` for each column.
+    fn prepare_row_key(&mut self, row_values: &[ValueId]) {
+        let row_len = self.row_field_indices.len();
+        let col_len = self.col_field_indices.len();
+        let expected_len = row_len + col_len;
+        self.agg_key_buf.clear();
+        self.agg_key_buf.resize(expected_len, VALUE_ID_EMPTY);
+        let copy_len = row_values.len().min(row_len);
+        self.agg_key_buf[..copy_len].copy_from_slice(&row_values[..copy_len]);
+        // Remaining row slots stay VALUE_ID_EMPTY (for subtotal/grand total rows)
+    }
+
+    /// Looks up an aggregate using the pre-prepared row key, overwriting only
+    /// the column portion. Much faster than compute_aggregate for column iteration.
+    fn lookup_aggregate_col(
+        &mut self,
+        col_values: &[ValueId],
+        value_field_idx: usize,
+        aggregation: AggregationType,
+    ) -> f64 {
+        let row_len = self.row_field_indices.len();
+        let col_len = self.col_field_indices.len();
+        // Overwrite column portion of pre-prepared buffer
+        let copy_len = col_values.len().min(col_len);
+        self.agg_key_buf[row_len..row_len + copy_len].copy_from_slice(&col_values[..copy_len]);
+        // Zero out remaining column slots
+        for j in copy_len..col_len {
+            self.agg_key_buf[row_len + j] = VALUE_ID_EMPTY;
+        }
+
+        if let Some(accumulators) = self.cache.get_aggregate_by_slice(&self.agg_key_buf) {
+            if let Some(acc) = accumulators.get(value_field_idx) {
+                return acc.compute(aggregation);
+            }
+        }
+
         0.0
     }
 }

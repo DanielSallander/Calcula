@@ -1,4 +1,5 @@
 //! FILENAME: app/src-tauri/src/pivot/operations.rs
+use std::collections::HashMap;
 use crate::commands::styles::parse_number_format;
 use crate::pivot::utils::col_index_to_letter;
 use crate::{log_debug, AppState, ProtectedRegion};
@@ -305,6 +306,7 @@ pub(crate) fn get_pivot_region(state: &AppState, pivot_id: PivotId) -> Option<Pr
 /// have a number_format, so that number formatting displays correctly.
 pub(crate) fn write_pivot_to_grid(
     grid: &mut engine::Grid,
+    mut active_grid: Option<&mut engine::Grid>,
     view: &PivotView,
     destination: (u32, u32),
     styles: &mut StyleRegistry,
@@ -313,17 +315,29 @@ pub(crate) fn write_pivot_to_grid(
 
     log_debug!(
         "PIVOT",
-        "write_pivot_to_grid: dest=({},{}) view_size={}x{}",
+        "write_pivot_to_grid: dest=({},{}) view_size={}x{} dual_write={}",
         dest_row,
         dest_col,
         view.row_count,
-        view.col_count
+        view.col_count,
+        active_grid.is_some()
     );
 
     // If view is empty, nothing to write
     if view.row_count == 0 || view.col_count == 0 {
         log_debug!("PIVOT", "Empty view, nothing to write to grid");
         return;
+    }
+
+    // Cache: format string → style_index. Avoids re-parsing + re-looking up
+    // the same number format for every cell (typically only 1-3 unique formats).
+    let mut format_cache: HashMap<String, usize> = HashMap::new();
+
+    // Pre-allocate grid capacity to avoid HashMap resizing during bulk insert.
+    let cell_count = view.row_count * view.col_count;
+    grid.cells.reserve(cell_count);
+    if let Some(ref mut ag) = active_grid {
+        ag.cells.reserve(cell_count);
     }
 
     // Iterate through all rows (not just visible, since we need grid positions to be correct)
@@ -342,35 +356,64 @@ pub(crate) fn write_pivot_to_grid(
             let grid_row = dest_row + row_idx as u32;
             let grid_col = dest_col + col_idx as u32;
 
-            // Create the cell with the correct value type so number formatting
-            // and status-bar aggregations (sum, average) work properly.
-            let mut cell = match &pivot_cell.value {
-                pivot_engine::PivotCellValue::Empty => Cell::new(),
-                pivot_engine::PivotCellValue::Number(n) => Cell::new_number(*n),
+            // Determine CellValue and style_index (shared between both grid writes)
+            let cell_value = match &pivot_cell.value {
+                pivot_engine::PivotCellValue::Empty => CellValue::Empty,
+                pivot_engine::PivotCellValue::Number(n) => CellValue::Number(*n),
                 pivot_engine::PivotCellValue::Text(s) => {
                     if s.is_empty() {
-                        Cell::new()
+                        CellValue::Empty
                     } else {
-                        Cell::new_text(s.clone())
+                        CellValue::Text(s.clone())
                     }
                 }
-                pivot_engine::PivotCellValue::Boolean(b) => Cell::new_boolean(*b),
-                pivot_engine::PivotCellValue::Error(e) => Cell::new_text(format!("#{}", e)),
+                pivot_engine::PivotCellValue::Boolean(b) => CellValue::Boolean(*b),
+                pivot_engine::PivotCellValue::Error(e) => CellValue::Text(format!("#{}", e)),
             };
 
-            // Apply number format from the pivot definition via the style registry
-            if let Some(ref fmt) = pivot_cell.number_format {
+            // Apply number format via cache (avoids re-parsing the same format 98K times)
+            let style_idx = if let Some(ref fmt) = pivot_cell.number_format {
                 if !fmt.is_empty() {
-                    let nf = parse_number_format(fmt);
-                    let style = CellStyle::new().with_number_format(nf);
-                    cell.style_index = styles.get_or_create(style);
+                    *format_cache.entry(fmt.clone()).or_insert_with(|| {
+                        let nf = parse_number_format(fmt);
+                        let style = CellStyle::new().with_number_format(nf);
+                        styles.get_or_create(style)
+                    })
+                } else {
+                    0
                 }
-            }
+            } else {
+                0
+            };
 
-            grid.set_cell(grid_row, grid_col, cell);
+            // Write to both grids using unchecked insert (bounds set once after loop)
+            if let Some(ag) = active_grid.as_deref_mut() {
+                ag.set_cell_unchecked(grid_row, grid_col, Cell {
+                    formula: None,
+                    value: cell_value.clone(),
+                    style_index: style_idx,
+                    cached_ast: None,
+                });
+            }
+            grid.set_cell_unchecked(grid_row, grid_col, Cell {
+                formula: None,
+                value: cell_value,
+                style_index: style_idx,
+                cached_ast: None,
+            });
         }
     }
-    
+
+    // Update bounds once for the entire region (instead of per-cell)
+    if view.row_count > 0 && view.col_count > 0 {
+        let end_row = dest_row + view.row_count as u32 - 1;
+        let end_col = dest_col + view.col_count as u32 - 1;
+        grid.update_bounds(end_row, end_col);
+        if let Some(ag) = active_grid.as_deref_mut() {
+            ag.update_bounds(end_row, end_col);
+        }
+    }
+
     log_debug!(
         "PIVOT",
         "write_pivot_to_grid: wrote {} rows to grid",
@@ -462,18 +505,17 @@ pub(crate) fn update_pivot_in_grid(
             }
         }
 
-        // Write new pivot data
-        write_pivot_to_grid(dest_grid, view, destination, &mut styles);
-        
-        // Sync to state.grid if this is the active sheet
+        // Check if this is the active sheet — if so, write to both grids in one pass
         let active_sheet = *state.active_sheet.lock().unwrap();
-        if dest_sheet_idx == active_sheet {
-            let mut grid = state.grid.lock().unwrap();
-            
-            // If we cleared old region, clear it from state.grid too
+        let is_active = dest_sheet_idx == active_sheet;
+
+        if is_active {
+            let mut active_grid = state.grid.lock().unwrap();
+
+            // Clear old region from active grid too
             if let Some(ref region) = old_region {
                 if region.sheet_index == dest_sheet_idx {
-                    grid.clear_region(
+                    active_grid.clear_region(
                         region.start_row,
                         region.start_col,
                         region.end_row,
@@ -481,20 +523,14 @@ pub(crate) fn update_pivot_in_grid(
                     );
                 }
             }
-            
-            // Copy only the new pivot region cells to state.grid (not the entire grid)
-            let (dest_row, dest_col) = destination;
-            let end_row = dest_row + view.row_count as u32;
-            let end_col = dest_col + view.col_count as u32;
-            for row in dest_row..end_row {
-                for col in dest_col..end_col {
-                    if let Some(cell) = dest_grid.get_cell(row, col) {
-                        grid.set_cell(row, col, cell.clone());
-                    }
-                }
-            }
-            grid.recalculate_bounds();
-            log_debug!("PIVOT", "synced pivot cells to state.grid (active sheet)");
+
+            // Single-pass write to both grids (eliminates second iteration + clones)
+            write_pivot_to_grid(dest_grid, Some(&mut active_grid), view, destination, &mut styles);
+            active_grid.recalculate_bounds();
+            log_debug!("PIVOT", "wrote pivot to both grids in single pass (active sheet)");
+        } else {
+            // Not the active sheet — write to sheet grid only
+            write_pivot_to_grid(dest_grid, None, view, destination, &mut styles);
         }
     }
 }

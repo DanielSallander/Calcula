@@ -230,11 +230,20 @@ pub struct CacheRecord {
 
 /// A key representing a unique combination of row/column field values.
 /// Used to look up pre-computed aggregates.
+///
+/// Implements `Borrow<[ValueId]>` so that HashMap lookups can use a
+/// `&[ValueId]` slice without allocating a new Vec.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct GroupKey {
     /// ValueIds for each field in the grouping (row fields then column fields).
     /// A VALUE_ID_EMPTY indicates "all values" (for subtotals/grand totals).
     pub values: Vec<ValueId>,
+}
+
+impl std::borrow::Borrow<[ValueId]> for GroupKey {
+    fn borrow(&self) -> &[ValueId] {
+        &self.values
+    }
 }
 
 impl GroupKey {
@@ -327,7 +336,7 @@ impl AggregateAccumulator {
     pub fn add_non_number(&mut self) {
         self.count += 1;
     }
-    
+
     /// Computes the final aggregate value.
     pub fn compute(&self, aggregation: AggregationType) -> f64 {
         match aggregation {
@@ -796,8 +805,18 @@ impl PivotCache {
 
         self.aggregates.get(group_key)
     }
+
+    /// Slice-based aggregate lookup — avoids allocating a GroupKey per call.
+    /// Requires that aggregates are already computed (not dirty).
+    pub fn get_aggregate_by_slice(
+        &self,
+        key_slice: &[ValueId],
+    ) -> Option<&Vec<AggregateAccumulator>> {
+        self.aggregates.get(key_slice)
+    }
     
     /// Computes all aggregates for the current field configuration.
+    /// Single-pass with pre-allocated capacity and slice-based lookups.
     fn compute_aggregates(
         &mut self,
         row_field_indices: &[FieldIndex],
@@ -816,63 +835,84 @@ impl PivotCache {
         let row_count = row_field_indices.len();
         let col_count = col_field_indices.len();
         let total_group = row_count + col_count;
-
-        // First pass: extract record data into flat vectors to avoid borrow conflicts.
-        // Each entry: (group_values, value_data).
         let base_field_count = self.fields.len();
-        let mut record_data: Vec<(Vec<ValueId>, Vec<Option<f64>>)> = Vec::new();
+
+        // Estimate capacity for full keys
+        let estimated_unique = {
+            let mut est: usize = 1;
+            for &fi in all_group_fields.iter() {
+                let card = self.fields.get(fi)
+                    .map(|fc| fc.unique_count())
+                    .unwrap_or(1)
+                    .max(1);
+                est = est.saturating_mul(card);
+            }
+            est.min(self.records.len()).min(500_000)
+        };
+        let subtotal_combos = (row_count + 1) * (col_count + 1);
+        self.aggregates.reserve(estimated_unique * subtotal_combos);
+
+        // Reusable buffers
+        let mut group_buf = vec![VALUE_ID_EMPTY; total_group];
+        let mut value_buf: Vec<Option<f64>> = vec![None; value_count];
+        let mut key_buf = vec![VALUE_ID_EMPTY; total_group];
+
+        // Helper: accumulate into entry via slice-based lookup (no alloc for existing keys)
+        #[inline(always)]
+        fn accumulate(
+            aggregates: &mut HashMap<GroupKey, Vec<AggregateAccumulator>>,
+            key_slice: &[ValueId],
+            value_buf: &[Option<f64>],
+            value_count: usize,
+        ) {
+            if let Some(accumulators) = aggregates.get_mut(key_slice) {
+                for (acc_idx, &numeric_value) in value_buf.iter().enumerate() {
+                    if let Some(n) = numeric_value {
+                        accumulators[acc_idx].add_number(n);
+                    }
+                }
+            } else {
+                let mut accumulators = vec![AggregateAccumulator::new(); value_count];
+                for (acc_idx, &numeric_value) in value_buf.iter().enumerate() {
+                    if let Some(n) = numeric_value {
+                        accumulators[acc_idx].add_number(n);
+                    }
+                }
+                aggregates.insert(GroupKey::new(key_slice.to_vec()), accumulators);
+            }
+        }
 
         for (i, record) in self.records.iter().enumerate() {
             if !self.filter_mask[i] {
                 continue;
             }
 
-            let group_values: Vec<ValueId> = all_group_fields
-                .iter()
-                .map(|&fi| {
-                    if fi < base_field_count {
-                        record.values.get(fi).copied().unwrap_or(VALUE_ID_EMPTY)
-                    } else {
-                        let vi = fi - base_field_count;
-                        self.virtual_records.get(vi)
-                            .and_then(|vr| vr.get(i))
-                            .copied()
-                            .unwrap_or(VALUE_ID_EMPTY)
-                    }
-                })
-                .collect();
-
-            let value_data: Vec<Option<f64>> = value_field_indices
-                .iter()
-                .map(|&field_idx| {
-                    let value_id = record.values.get(field_idx).copied().unwrap_or(VALUE_ID_EMPTY);
-                    self.fields.get(field_idx).and_then(|fc| {
-                        fc.get_value(value_id).and_then(|cv| match cv {
-                            CacheValue::Number(n) => Some(n.0),
-                            _ => None,
-                        })
-                    })
-                })
-                .collect();
-
-            record_data.push((group_values, value_data));
-        }
-
-        // Second pass: accumulate directly into aggregates HashMap.
-        // Reuse a single key_values buffer to avoid per-key allocation.
-        let mut key_buf = vec![VALUE_ID_EMPTY; total_group];
-
-        for (group_values, value_data) in &record_data {
-            // Full key
-            let full_key = GroupKey::new(group_values.clone());
-            let accumulators = self.aggregates
-                .entry(full_key)
-                .or_insert_with(|| vec![AggregateAccumulator::new(); value_count]);
-            for (acc_idx, &numeric_value) in value_data.iter().enumerate() {
-                if let Some(n) = numeric_value {
-                    accumulators[acc_idx].add_number(n);
-                }
+            // Fill group values buffer
+            for (slot, &fi) in group_buf.iter_mut().zip(all_group_fields.iter()) {
+                *slot = if fi < base_field_count {
+                    record.values.get(fi).copied().unwrap_or(VALUE_ID_EMPTY)
+                } else {
+                    let vi = fi - base_field_count;
+                    self.virtual_records.get(vi)
+                        .and_then(|vr| vr.get(i))
+                        .copied()
+                        .unwrap_or(VALUE_ID_EMPTY)
+                };
             }
+
+            // Fill value data buffer
+            for (slot, &field_idx) in value_buf.iter_mut().zip(value_field_indices.iter()) {
+                let value_id = record.values.get(field_idx).copied().unwrap_or(VALUE_ID_EMPTY);
+                *slot = self.fields.get(field_idx).and_then(|fc| {
+                    fc.get_value(value_id).and_then(|cv| match cv {
+                        CacheValue::Number(n) => Some(n.0),
+                        _ => None,
+                    })
+                });
+            }
+
+            // Full key + all subtotal keys
+            accumulate(&mut self.aggregates, &group_buf, &value_buf, value_count);
 
             // Subtotal keys for all (row_level, col_level) combinations
             for row_level in 0..=row_count {
@@ -882,23 +922,15 @@ impl PivotCache {
                     }
 
                     // Build subtotal key in-place
-                    key_buf[..total_group].copy_from_slice(&group_values[..total_group]);
-                    for i in row_level..row_count {
-                        key_buf[i] = VALUE_ID_EMPTY;
+                    key_buf.copy_from_slice(&group_buf);
+                    for j in row_level..row_count {
+                        key_buf[j] = VALUE_ID_EMPTY;
                     }
-                    for i in col_level..col_count {
-                        key_buf[row_count + i] = VALUE_ID_EMPTY;
+                    for j in col_level..col_count {
+                        key_buf[row_count + j] = VALUE_ID_EMPTY;
                     }
 
-                    let subtotal_key = GroupKey::new(key_buf[..total_group].to_vec());
-                    let accumulators = self.aggregates
-                        .entry(subtotal_key)
-                        .or_insert_with(|| vec![AggregateAccumulator::new(); value_count]);
-                    for (acc_idx, &numeric_value) in value_data.iter().enumerate() {
-                        if let Some(n) = numeric_value {
-                            accumulators[acc_idx].add_number(n);
-                        }
-                    }
+                    accumulate(&mut self.aggregates, &key_buf, &value_buf, value_count);
                 }
             }
         }

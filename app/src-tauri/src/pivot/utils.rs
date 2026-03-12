@@ -388,7 +388,7 @@ pub(crate) fn view_to_response(
             let cell_data: Vec<PivotCellData> = cells
                 .iter()
                 .map(|cell| PivotCellData {
-                    cell_type: format!("{:?}", cell.cell_type),
+                    cell_type: cell.cell_type,
                     value: match &cell.value {
                         pivot_engine::PivotCellValue::Empty => PivotCellValueData::Empty,
                         pivot_engine::PivotCellValue::Number(n) => PivotCellValueData::Number(*n),
@@ -399,33 +399,49 @@ pub(crate) fn view_to_response(
                             PivotCellValueData::Boolean(*b)
                         }
                         pivot_engine::PivotCellValue::Error(e) => {
-                            PivotCellValueData::Error(e.clone())
+                            PivotCellValueData::Text(format!("#{}", e))
                         }
                     },
+                    // Only include formatted_value when it adds information beyond
+                    // what the frontend can derive from `value` alone (i.e. when a
+                    // number format is applied). Omitting it saves ~20-30 bytes per
+                    // cell on the IPC payload.
                     formatted_value: match (&cell.value, &cell.number_format) {
                         (pivot_engine::PivotCellValue::Number(n), Some(fmt)) if !fmt.is_empty() => {
                             format_number(*n, &parse_number_format(fmt))
                         }
-                        _ => cell.formatted_value.clone(),
+                        _ => String::new(),
                     },
                     indent_level: cell.indent_level,
                     is_bold: cell.is_bold,
                     is_expandable: cell.is_expandable,
                     is_collapsed: cell.is_collapsed,
-                    background_style: format!("{:?}", cell.background_style),
+                    background_style: cell.background_style,
                     number_format: cell.number_format.clone(),
                     filter_field_index: cell.filter_field_index,
-                    group_path: cell
-                        .group_path
-                        .iter()
-                        .map(|(fi, vid)| (*fi, *vid))
-                        .collect(),
+                    // Only include group_path on header cells where the frontend
+                    // needs it for expand/collapse, context menu, and drill-down.
+                    // Data cells skip it to reduce IPC payload (~25-30 bytes/cell).
+                    group_path: match cell.cell_type {
+                        pivot_engine::PivotCellType::RowHeader
+                        | pivot_engine::PivotCellType::ColumnHeader
+                        | pivot_engine::PivotCellType::RowSubtotal
+                        | pivot_engine::PivotCellType::ColumnSubtotal
+                        | pivot_engine::PivotCellType::GrandTotalRow
+                        | pivot_engine::PivotCellType::GrandTotalColumn
+                        | pivot_engine::PivotCellType::GrandTotal => cell
+                            .group_path
+                            .iter()
+                            .map(|(fi, vid)| (*fi, *vid))
+                            .collect(),
+                        _ => Vec::new(),
+                    },
                 })
                 .collect();
 
             PivotRowData {
                 view_row: descriptor.view_row,
-                row_type: format!("{:?}", descriptor.row_type),
+                row_type: descriptor.row_type,
                 depth: descriptor.depth,
                 visible: descriptor.visible,
                 cells: cell_data,
@@ -438,7 +454,7 @@ pub(crate) fn view_to_response(
         .iter()
         .map(|col| PivotColumnData {
             view_col: col.view_col,
-            col_type: format!("{:?}", col.col_type),
+            col_type: col.col_type,
             depth: col.depth,
             width_hint: col.width_hint,
         })

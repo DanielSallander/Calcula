@@ -735,7 +735,7 @@ pub struct HeaderFieldSummaryData {
 #[serde(rename_all = "camelCase")]
 pub struct PivotRowData {
     pub view_row: usize,
-    pub row_type: String,
+    pub row_type: pivot_engine::PivotRowType,
     pub depth: u8,
     pub visible: bool,
     pub cells: Vec<PivotCellData>,
@@ -744,36 +744,49 @@ pub struct PivotRowData {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PivotCellData {
-    pub cell_type: String,
+    pub cell_type: pivot_engine::PivotCellType,
     pub value: PivotCellValueData,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub formatted_value: String,
+    #[serde(default, skip_serializing_if = "is_zero_u8")]
     pub indent_level: u8,
+    #[serde(default, skip_serializing_if = "is_false")]
     pub is_bold: bool,
+    #[serde(default, skip_serializing_if = "is_false")]
     pub is_expandable: bool,
+    #[serde(default, skip_serializing_if = "is_false")]
     pub is_collapsed: bool,
-    pub background_style: String,
+    pub background_style: pivot_engine::BackgroundStyle,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub number_format: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub filter_field_index: Option<usize>,
     /// Group path for drill-down: (field_index, value_id) pairs identifying this cell's data.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub group_path: Vec<(usize, u32)>,
 }
 
+fn is_false(v: &bool) -> bool { !v }
+fn is_zero_u8(v: &u8) -> bool { *v == 0 }
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "type", content = "data")]
+#[serde(untagged)]
 pub enum PivotCellValueData {
+    /// Null value — serializes as JSON `null`
     Empty,
-    Number(f64),
-    Text(String),
+    /// Boolean — serializes as JSON `true`/`false`
     Boolean(bool),
-    Error(String),
+    /// Numeric — serializes as JSON number
+    Number(f64),
+    /// Text or error — serializes as JSON string (errors prefixed with "#")
+    Text(String),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PivotColumnData {
     pub view_col: usize,
-    pub col_type: String,
+    pub col_type: pivot_engine::PivotColumnType,
     pub depth: u8,
     pub width_hint: u16,
 }

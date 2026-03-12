@@ -6,4 +6,5 @@ members = [
     "pivot-engine",
     "script-engine"
 ]
+exclude = ["pivot-bench"]
 resolver = "2"

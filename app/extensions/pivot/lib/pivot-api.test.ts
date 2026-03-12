@@ -16,26 +16,25 @@ import {
 
 describe("pivot-api utilities", () => {
   describe("getCellNumericValue", () => {
-    it("returns number for Number type", () => {
-      const value: PivotCellValue = { type: "Number", data: 42.5 };
-      expect(getCellNumericValue(value)).toBe(42.5);
+    it("returns number for numeric values", () => {
+      expect(getCellNumericValue(42.5)).toBe(42.5);
     });
 
     it("returns 0 for non-numeric types", () => {
-      expect(getCellNumericValue({ type: "Empty" })).toBe(0);
-      expect(getCellNumericValue({ type: "Text", data: "hello" })).toBe(0);
-      expect(getCellNumericValue({ type: "Boolean", data: true })).toBe(0);
+      expect(getCellNumericValue(null)).toBe(0);
+      expect(getCellNumericValue("hello")).toBe(0);
+      expect(getCellNumericValue(true)).toBe(0);
     });
   });
 
   describe("getCellDisplayValue", () => {
     it("handles all value types", () => {
-      expect(getCellDisplayValue({ type: "Empty" })).toBe("");
-      expect(getCellDisplayValue({ type: "Number", data: 123.45 })).toBe("123.45");
-      expect(getCellDisplayValue({ type: "Text", data: "hello" })).toBe("hello");
-      expect(getCellDisplayValue({ type: "Boolean", data: true })).toBe("TRUE");
-      expect(getCellDisplayValue({ type: "Boolean", data: false })).toBe("FALSE");
-      expect(getCellDisplayValue({ type: "Error", data: "VALUE" })).toBe("#VALUE");
+      expect(getCellDisplayValue(null)).toBe("");
+      expect(getCellDisplayValue(123.45)).toBe("123.45");
+      expect(getCellDisplayValue("hello")).toBe("hello");
+      expect(getCellDisplayValue(true)).toBe("TRUE");
+      expect(getCellDisplayValue(false)).toBe("FALSE");
+      expect(getCellDisplayValue("#VALUE")).toBe("#VALUE");
     });
   });
 
