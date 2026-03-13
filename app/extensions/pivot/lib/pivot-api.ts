@@ -542,37 +542,19 @@ export async function updatePivotFields(
 
 /**
  * Toggles the expand/collapse state of a pivot group.
+ * This is a fast sync operation — no loading indicator or cancellation needed.
  */
 export async function togglePivotGroup(
   request: ToggleGroupRequest
 ): Promise<PivotViewResponse> {
-  preserveCurrentView(request.pivotId);
-  setLoading(request.pivotId, "Updating...");
   const t0 = performance.now();
-  try {
-    const result = await apiTogglePivotGroup<ToggleGroupRequest, PivotViewResponse>(request);
-    if (isUserCancelled(request.pivotId)) {
-      clearUserCancelled(request.pivotId);
-      restorePreviousView(request.pivotId);
-      apiRevertPivotOperation(request.pivotId).catch((e) =>
-        console.warn("[pivot] revert failed:", e)
-      );
-      throw new Error("Pivot operation cancelled");
-    }
-    const dt = performance.now() - t0;
-    cachePivotView(request.pivotId, result);
-    clearPreviousView(request.pivotId);
-    console.log(
-      `[PERF][pivot] togglePivotGroup pivot_id=${request.pivotId} rows=${result.rowCount}x${result.colCount} | ipc=${dt.toFixed(1)}ms (cached)`
-    );
-    return result;
-  } catch (err) {
-    restorePreviousView(request.pivotId);
-    clearUserCancelled(request.pivotId);
-    throw err;
-  } finally {
-    clearLoading(request.pivotId);
-  }
+  const result = await apiTogglePivotGroup<ToggleGroupRequest, PivotViewResponse>(request);
+  const dt = performance.now() - t0;
+  cachePivotView(request.pivotId, result);
+  console.log(
+    `[PERF][pivot] togglePivotGroup pivot_id=${request.pivotId} rows=${result.rowCount}x${result.colCount} | ipc=${dt.toFixed(1)}ms (cached)`
+  );
+  return result;
 }
 
 /**

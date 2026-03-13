@@ -107,6 +107,9 @@ interface StoredIconBounds {
 /** Map of icon bounds keyed by "pivotId-gridRow-gridCol", updated every render. */
 const overlayIconBounds = new Map<string, StoredIconBounds>();
 
+/** Extra pixels around icon bounds for easier click targeting (12px icon → 20px hit area). */
+const ICON_HIT_PADDING = 4;
+
 interface StoredHeaderFilterBounds {
   x: number;
   y: number;
@@ -173,17 +176,25 @@ let isRefreshingPivotRegions = false;
  * Skips the IPC call if the cache already has data for the pivot (e.g., from
  * a preceding updatePivotFields or togglePivotGroup call that cached the result).
  */
-async function refreshPivotViewCache(regions: PivotRegionData[]): Promise<void> {
+async function refreshPivotViewCache(regions: PivotRegionData[], allowCachedHit = false): Promise<void> {
   for (const r of regions) {
     if (!r.isEmpty) {
-      // Only skip the fetch if the cache was JUST populated by updatePivotFields
+      // Skip fetch if the cache was JUST populated by updatePivotFields
       // or togglePivotGroup in this same refresh cycle (fresh flag set).
-      // Other refresh paths (filters, dialogs, context menu) must always re-fetch.
       if (isCacheFresh(r.pivotId)) {
         const existing = getCachedPivotView(r.pivotId);
         consumeFreshFlag(r.pivotId);
         console.log(`[PERF][pivot] refreshPivotViewCache pivot_id=${r.pivotId} SKIPPED (fresh cache v${existing?.version})`);
         continue;
+      }
+      // On sheet switch, reuse existing cached view to avoid IPC delay.
+      // The pivot data hasn't changed — we just navigated away and back.
+      if (allowCachedHit) {
+        const existing = getCachedPivotView(r.pivotId);
+        if (existing) {
+          console.log(`[PERF][pivot] refreshPivotViewCache pivot_id=${r.pivotId} REUSED (cached v${existing.version})`);
+          continue;
+        }
       }
       try {
         const view = await getPivotView(r.pivotId);
@@ -695,7 +706,7 @@ function drawPivotPlaceholderText(overlayCtx: OverlayRenderContext): void {
  * Fetch pivot regions from the backend and register them with the overlay system.
  * Also dispatches the PIVOT_REGIONS_UPDATED event for other components.
  */
-async function refreshPivotRegions(triggerRepaint: boolean = false): Promise<void> {
+async function refreshPivotRegions(triggerRepaint: boolean = false, allowCachedHit = false): Promise<void> {
   // Re-entry guard: when we dispatch "grid:refresh" below, the pivot extension's
   // own grid:refresh listener would call us again. Skip that redundant call.
   if (isRefreshingPivotRegions) return;
@@ -709,7 +720,7 @@ async function refreshPivotRegions(triggerRepaint: boolean = false): Promise<voi
 
     // Fetch and cache pivot view data for styled rendering
     const t1 = performance.now();
-    await refreshPivotViewCache(regions);
+    await refreshPivotViewCache(regions, allowCachedHit);
     const cacheMs = performance.now() - t1;
 
     // Save current region bounds as transition bounds before updating.
@@ -876,10 +887,10 @@ export function registerPivotExtension(): void {
 
       for (const bounds of overlayIconBounds.values()) {
         if (
-          canvasX >= bounds.x &&
-          canvasX <= bounds.x + bounds.width &&
-          canvasY >= bounds.y &&
-          canvasY <= bounds.y + bounds.height
+          canvasX >= bounds.x - ICON_HIT_PADDING &&
+          canvasX <= bounds.x + bounds.width + ICON_HIT_PADDING &&
+          canvasY >= bounds.y - ICON_HIT_PADDING &&
+          canvasY <= bounds.y + bounds.height + ICON_HIT_PADDING
         ) {
           // Found a matching icon - toggle expand/collapse
           const cachedView = getCachedPivotView(bounds.pivotId);
@@ -1011,10 +1022,10 @@ export function registerPivotExtension(): void {
 
         for (const bounds of overlayIconBounds.values()) {
           if (
-            canvasX >= bounds.x &&
-            canvasX <= bounds.x + bounds.width &&
-            canvasY >= bounds.y &&
-            canvasY <= bounds.y + bounds.height
+            canvasX >= bounds.x - ICON_HIT_PADDING &&
+            canvasX <= bounds.x + bounds.width + ICON_HIT_PADDING &&
+            canvasY >= bounds.y - ICON_HIT_PADDING &&
+            canvasY <= bounds.y + bounds.height + ICON_HIT_PADDING
           ) {
             // Consume the double-click without toggling again
             return true;
@@ -1121,10 +1132,10 @@ export function registerPivotExtension(): void {
     let isOverInteractive = false;
     for (const bounds of overlayIconBounds.values()) {
       if (
-        canvasX >= bounds.x &&
-        canvasX <= bounds.x + bounds.width &&
-        canvasY >= bounds.y &&
-        canvasY <= bounds.y + bounds.height
+        canvasX >= bounds.x - ICON_HIT_PADDING &&
+        canvasX <= bounds.x + bounds.width + ICON_HIT_PADDING &&
+        canvasY >= bounds.y - ICON_HIT_PADDING &&
+        canvasY <= bounds.y + bounds.height + ICON_HIT_PADDING
       ) {
         isOverInteractive = true;
         break;
@@ -1263,9 +1274,11 @@ export function registerPivotExtension(): void {
   // Refresh pivot regions when the active sheet changes (e.g., after creating a
   // pivot on a new sheet). Without this, the placeholder overlay never appears
   // because the sheet switch happens after the initial region load.
+  // Use allowCachedHit=true so returning to a sheet with an already-cached pivot
+  // renders instantly instead of waiting for an IPC round-trip.
   cleanupFunctions.push(
     onAppEvent(AppEvents.SHEET_CHANGED, () => {
-      refreshPivotRegions(false);
+      refreshPivotRegions(false, /* allowCachedHit */ true);
     })
   );
 

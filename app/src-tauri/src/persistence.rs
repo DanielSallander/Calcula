@@ -225,6 +225,14 @@ pub fn open_file(
         *row_heights = sheet.row_heights.clone();
         deps.clear();
 
+        // Reset per-sheet dimension storage (active sheet dims are in col_widths/row_heights)
+        let mut all_cw = state.all_column_widths.lock().map_err(|e| e.to_string())?;
+        let mut all_rh = state.all_row_heights.lock().map_err(|e| e.to_string())?;
+        all_cw.clear();
+        all_cw.push(std::collections::HashMap::new()); // placeholder for active sheet
+        all_rh.clear();
+        all_rh.push(std::collections::HashMap::new());
+
         // Restore table state
         *tables = new_tables;
         *table_names = new_table_names;
@@ -279,6 +287,14 @@ pub fn new_file(
         col_widths.clear();
         row_heights.clear();
         deps.clear();
+
+        // Reset per-sheet dimension storage
+        let mut all_cw = state.all_column_widths.lock().map_err(|e| e.to_string())?;
+        let mut all_rh = state.all_row_heights.lock().map_err(|e| e.to_string())?;
+        all_cw.clear();
+        all_cw.push(std::collections::HashMap::new());
+        all_rh.clear();
+        all_rh.push(std::collections::HashMap::new());
 
         // Clear table state
         tables.clear();

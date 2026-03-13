@@ -3,6 +3,7 @@
 // CONTEXT: Provides Tauri commands for creating, switching, renaming, deleting sheets,
 //          and managing freeze panes.
 
+use std::collections::HashMap;
 use tauri::State;
 use crate::AppState;
 use serde::{Deserialize, Serialize};
@@ -71,6 +72,10 @@ pub fn set_active_sheet(state: State<AppState>, index: usize) -> Result<SheetsRe
     let mut active_sheet = state.active_sheet.lock().unwrap();
     let mut current_grid = state.grid.lock().unwrap();
     let freeze_configs = state.freeze_configs.lock().unwrap();
+    let mut column_widths = state.column_widths.lock().unwrap();
+    let mut row_heights = state.row_heights.lock().unwrap();
+    let mut all_column_widths = state.all_column_widths.lock().unwrap();
+    let mut all_row_heights = state.all_row_heights.lock().unwrap();
 
     if index >= sheet_names.len() {
         return Err(format!("Sheet index {} out of range", index));
@@ -80,13 +85,31 @@ pub fn set_active_sheet(state: State<AppState>, index: usize) -> Result<SheetsRe
         grids.push(engine::grid::Grid::new());
     }
 
+    // Ensure per-sheet dimension storage is large enough
+    while all_column_widths.len() <= index {
+        all_column_widths.push(HashMap::new());
+    }
+    while all_row_heights.len() <= index {
+        all_row_heights.push(HashMap::new());
+    }
+
     let old_index = *active_sheet;
-    
+
     if old_index != index {
         if old_index < grids.len() {
             grids[old_index] = current_grid.clone();
         }
         *current_grid = grids[index].clone();
+
+        // Swap dimensions: save current to old sheet, load from new sheet
+        if old_index < all_column_widths.len() {
+            all_column_widths[old_index] = std::mem::take(&mut *column_widths);
+        }
+        if old_index < all_row_heights.len() {
+            all_row_heights[old_index] = std::mem::take(&mut *row_heights);
+        }
+        *column_widths = std::mem::take(&mut all_column_widths[index]);
+        *row_heights = std::mem::take(&mut all_row_heights[index]);
     }
 
     *active_sheet = index;
@@ -118,6 +141,10 @@ pub fn add_sheet(state: State<AppState>, name: Option<String>) -> Result<SheetsR
     let mut active_sheet = state.active_sheet.lock().unwrap();
     let mut current_grid = state.grid.lock().unwrap();
     let mut freeze_configs = state.freeze_configs.lock().unwrap();
+    let mut column_widths = state.column_widths.lock().unwrap();
+    let mut row_heights = state.row_heights.lock().unwrap();
+    let mut all_column_widths = state.all_column_widths.lock().unwrap();
+    let mut all_row_heights = state.all_row_heights.lock().unwrap();
 
     let new_name = name.unwrap_or_else(|| {
         let mut counter = sheet_names.len() + 1;
@@ -135,19 +162,33 @@ pub fn add_sheet(state: State<AppState>, name: Option<String>) -> Result<SheetsR
     }
 
     let old_index = *active_sheet;
-    
+
     if old_index < grids.len() {
         grids[old_index] = current_grid.clone();
     }
+
+    // Save current sheet's dimensions before switching
+    while all_column_widths.len() <= old_index {
+        all_column_widths.push(HashMap::new());
+    }
+    while all_row_heights.len() <= old_index {
+        all_row_heights.push(HashMap::new());
+    }
+    all_column_widths[old_index] = std::mem::take(&mut *column_widths);
+    all_row_heights[old_index] = std::mem::take(&mut *row_heights);
 
     sheet_names.push(new_name);
     let new_grid = engine::grid::Grid::new();
     grids.push(new_grid.clone());
     freeze_configs.push(FreezeConfig::default());
-    
+    // New sheet gets empty dimensions
+    all_column_widths.push(HashMap::new());
+    all_row_heights.push(HashMap::new());
+
     let new_index = sheet_names.len() - 1;
     *active_sheet = new_index;
     *current_grid = new_grid;
+    // column_widths and row_heights are already empty from the take above
 
     let sheets: Vec<SheetInfo> = sheet_names
         .iter()
@@ -178,6 +219,10 @@ pub fn delete_sheet(state: State<AppState>, index: usize) -> Result<SheetsResult
     let mut freeze_configs = state.freeze_configs.lock().unwrap();
     let mut tables = state.tables.lock().unwrap();
     let mut table_names = state.table_names.lock().unwrap();
+    let mut column_widths = state.column_widths.lock().unwrap();
+    let mut row_heights = state.row_heights.lock().unwrap();
+    let mut all_column_widths = state.all_column_widths.lock().unwrap();
+    let mut all_row_heights = state.all_row_heights.lock().unwrap();
 
     if sheet_names.len() <= 1 {
         return Err("Cannot delete the last sheet".to_string());
@@ -193,6 +238,16 @@ pub fn delete_sheet(state: State<AppState>, index: usize) -> Result<SheetsResult
     if old_active < grids.len() {
         grids[old_active] = current_grid.clone();
     }
+
+    // Save current dimensions to per-sheet storage before deletion
+    while all_column_widths.len() <= old_active {
+        all_column_widths.push(HashMap::new());
+    }
+    while all_row_heights.len() <= old_active {
+        all_row_heights.push(HashMap::new());
+    }
+    all_column_widths[old_active] = std::mem::take(&mut *column_widths);
+    all_row_heights[old_active] = std::mem::take(&mut *row_heights);
 
     // Remove tables on the deleted sheet and update name registry
     if let Some(sheet_tables) = tables.remove(&index) {
@@ -233,6 +288,12 @@ pub fn delete_sheet(state: State<AppState>, index: usize) -> Result<SheetsResult
     if index < freeze_configs.len() {
         freeze_configs.remove(index);
     }
+    if index < all_column_widths.len() {
+        all_column_widths.remove(index);
+    }
+    if index < all_row_heights.len() {
+        all_row_heights.remove(index);
+    }
 
     let new_active = if old_active >= sheet_names.len() {
         sheet_names.len() - 1
@@ -249,11 +310,19 @@ pub fn delete_sheet(state: State<AppState>, index: usize) -> Result<SheetsResult
     };
 
     *active_sheet = new_active;
-    
+
     if new_active < grids.len() {
         *current_grid = grids[new_active].clone();
     } else {
         *current_grid = engine::grid::Grid::new();
+    }
+
+    // Load new active sheet's dimensions
+    if new_active < all_column_widths.len() {
+        *column_widths = std::mem::take(&mut all_column_widths[new_active]);
+    }
+    if new_active < all_row_heights.len() {
+        *row_heights = std::mem::take(&mut all_row_heights[new_active]);
     }
 
     let sheets: Vec<SheetInfo> = sheet_names

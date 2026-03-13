@@ -385,71 +385,81 @@ pub(crate) fn view_to_response(
     definition: &PivotDefinition,
     cache: &mut PivotCache,
 ) -> PivotViewResponse {
-    let all_rows: Vec<PivotRowData> = view
-        .cells
-        .iter()
-        .zip(view.rows.iter())
-        .map(|(cells, descriptor)| {
-            let cell_data: Vec<PivotCellData> = cells
-                .iter()
-                .map(|cell| PivotCellData {
-                    cell_type: cell.cell_type,
-                    value: match &cell.value {
-                        pivot_engine::PivotCellValue::Empty => PivotCellValueData::Empty,
-                        pivot_engine::PivotCellValue::Number(n) => PivotCellValueData::Number(*n),
-                        pivot_engine::PivotCellValue::Text(s) => {
-                            PivotCellValueData::Text(s.clone())
-                        }
-                        pivot_engine::PivotCellValue::Boolean(b) => {
-                            PivotCellValueData::Boolean(*b)
-                        }
-                        pivot_engine::PivotCellValue::Error(e) => {
-                            PivotCellValueData::Text(format!("#{}", e))
-                        }
-                    },
-                    // Only include formatted_value when it adds information beyond
-                    // what the frontend can derive from `value` alone (i.e. when a
-                    // number format is applied). Omitting it saves ~20-30 bytes per
-                    // cell on the IPC payload.
-                    formatted_value: match (&cell.value, &cell.number_format) {
-                        (pivot_engine::PivotCellValue::Number(n), Some(fmt)) if !fmt.is_empty() => {
-                            format_number(*n, &parse_number_format(fmt))
-                        }
-                        _ => String::new(),
-                    },
-                    indent_level: cell.indent_level,
-                    is_bold: cell.is_bold,
-                    is_expandable: cell.is_expandable,
-                    is_collapsed: cell.is_collapsed,
-                    background_style: cell.background_style,
-                    number_format: cell.number_format.clone(),
-                    filter_field_index: cell.filter_field_index,
-                    // Only include group_path on header cells where the frontend
-                    // needs it for expand/collapse, context menu, and drill-down.
-                    // Data cells skip it to reduce IPC payload (~25-30 bytes/cell).
-                    group_path: match cell.cell_type {
-                        pivot_engine::PivotCellType::RowHeader
-                        | pivot_engine::PivotCellType::ColumnHeader
-                        | pivot_engine::PivotCellType::RowSubtotal
-                        | pivot_engine::PivotCellType::ColumnSubtotal
-                        | pivot_engine::PivotCellType::GrandTotalRow
-                        | pivot_engine::PivotCellType::GrandTotalColumn
-                        | pivot_engine::PivotCellType::GrandTotal => cell
-                            .group_path
-                            .iter()
-                            .map(|(fi, vid)| (*fi, *vid))
-                            .collect(),
-                        _ => Vec::new(),
-                    },
-                })
-                .collect();
+    // Filter to only visible rows (fast-path toggle keeps hidden rows in the view
+    // for re-expansion, but the frontend should only receive visible rows).
+    let visible_indices: Vec<usize> = view.rows.iter().enumerate()
+        .filter(|(_, r)| r.visible)
+        .map(|(i, _)| i)
+        .collect();
+    let total_rows = visible_indices.len();
+    let use_windowing = total_rows > WINDOW_THRESHOLD;
+    let window_end = if use_windowing { INITIAL_WINDOW_SIZE.min(total_rows) } else { total_rows };
 
+    // Helper: convert engine cells to response cells
+    let convert_cells = |cells: &[pivot_engine::PivotViewCell]| -> Vec<PivotCellData> {
+        cells
+            .iter()
+            .map(|cell| PivotCellData {
+                cell_type: cell.cell_type,
+                value: match &cell.value {
+                    pivot_engine::PivotCellValue::Empty => PivotCellValueData::Empty,
+                    pivot_engine::PivotCellValue::Number(n) => PivotCellValueData::Number(*n),
+                    pivot_engine::PivotCellValue::Text(s) => {
+                        PivotCellValueData::Text(s.clone())
+                    }
+                    pivot_engine::PivotCellValue::Boolean(b) => {
+                        PivotCellValueData::Boolean(*b)
+                    }
+                    pivot_engine::PivotCellValue::Error(e) => {
+                        PivotCellValueData::Text(format!("#{}", e))
+                    }
+                },
+                formatted_value: match (&cell.value, &cell.number_format) {
+                    (pivot_engine::PivotCellValue::Number(n), Some(fmt)) if !fmt.is_empty() => {
+                        format_number(*n, &parse_number_format(fmt))
+                    }
+                    _ => String::new(),
+                },
+                indent_level: cell.indent_level,
+                is_bold: cell.is_bold,
+                is_expandable: cell.is_expandable,
+                is_collapsed: cell.is_collapsed,
+                background_style: cell.background_style,
+                number_format: cell.number_format.clone(),
+                filter_field_index: cell.filter_field_index,
+                group_path: match cell.cell_type {
+                    pivot_engine::PivotCellType::RowHeader
+                    | pivot_engine::PivotCellType::ColumnHeader
+                    | pivot_engine::PivotCellType::RowSubtotal
+                    | pivot_engine::PivotCellType::ColumnSubtotal
+                    | pivot_engine::PivotCellType::GrandTotalRow
+                    | pivot_engine::PivotCellType::GrandTotalColumn
+                    | pivot_engine::PivotCellType::GrandTotal => cell
+                        .group_path
+                        .iter()
+                        .map(|(fi, vid)| (*fi, *vid))
+                        .collect(),
+                    _ => Vec::new(),
+                },
+            })
+            .collect()
+    };
+
+    // Only build full PivotRowData (with cells) for the window; rest get empty cells.
+    // For windowed pivots this avoids cloning cell data for 98K+ rows when only ~200 are sent.
+    // Only visible rows are included (invisible rows from fast-path toggle are excluded).
+    let all_rows: Vec<PivotRowData> = visible_indices
+        .iter()
+        .enumerate()
+        .map(|(visible_idx, &orig_idx)| {
+            let descriptor = &view.rows[orig_idx];
+            let cells = &view.cells[orig_idx];
             PivotRowData {
                 view_row: descriptor.view_row,
                 row_type: descriptor.row_type,
                 depth: descriptor.depth,
-                visible: descriptor.visible,
-                cells: cell_data,
+                visible: true,
+                cells: if visible_idx < window_end { convert_cells(cells) } else { Vec::new() },
             }
         })
         .collect();
@@ -585,11 +595,9 @@ pub(crate) fn view_to_response(
         })
         .collect();
 
-    let total_rows = all_rows.len();
-    let use_windowing = total_rows > WINDOW_THRESHOLD;
-
     if use_windowing {
-        // Large pivot: send row descriptors for ALL rows + cells for first window only
+        // Large pivot: send row descriptors for ALL rows + cells for first window only.
+        // Cell data beyond window_end is already empty (skipped during construction above).
         let row_descriptors: Vec<PivotRowDescriptorData> = all_rows
             .iter()
             .map(|r| PivotRowDescriptorData {
@@ -600,7 +608,6 @@ pub(crate) fn view_to_response(
             })
             .collect();
 
-        let window_end = INITIAL_WINDOW_SIZE.min(total_rows);
         let windowed_rows: Vec<PivotRowData> = all_rows.into_iter().take(window_end).collect();
 
         PivotViewResponse {

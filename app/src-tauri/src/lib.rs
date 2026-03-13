@@ -145,8 +145,14 @@ pub struct AppState {
     /// Commands use this for all cell operations
     pub grid: Mutex<Grid>,
     pub style_registry: Mutex<StyleRegistry>,
+    /// Column widths for the currently active sheet (swapped on sheet switch)
     pub column_widths: Mutex<HashMap<u32, f64>>,
+    /// Row heights for the currently active sheet (swapped on sheet switch)
     pub row_heights: Mutex<HashMap<u32, f64>>,
+    /// Per-sheet column widths storage (indexed by sheet index)
+    pub all_column_widths: Mutex<Vec<HashMap<u32, f64>>>,
+    /// Per-sheet row heights storage (indexed by sheet index)
+    pub all_row_heights: Mutex<Vec<HashMap<u32, f64>>>,
     pub dependents: Mutex<HashMap<(u32, u32), HashSet<(u32, u32)>>>,
     pub dependencies: Mutex<HashMap<(u32, u32), HashSet<(u32, u32)>>>,
     /// Calculation mode: "automatic" or "manual"
@@ -248,6 +254,8 @@ pub fn create_app_state() -> AppState {
         style_registry: Mutex::new(StyleRegistry::new()),
         column_widths: Mutex::new(HashMap::new()),
         row_heights: Mutex::new(HashMap::new()),
+        all_column_widths: Mutex::new(vec![HashMap::new()]),
+        all_row_heights: Mutex::new(vec![HashMap::new()]),
         dependents: Mutex::new(HashMap::new()),
         dependencies: Mutex::new(HashMap::new()),
         calculation_mode: Mutex::new("automatic".to_string()),
