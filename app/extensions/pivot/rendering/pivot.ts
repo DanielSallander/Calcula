@@ -388,7 +388,8 @@ function drawFilterDropdownButton(
   height: number,
   displayValue: string,
   theme: PivotTheme,
-  isHovered: boolean
+  isHovered: boolean,
+  hasActiveFilter: boolean = false
 ): { buttonBounds: { x: number; y: number; width: number; height: number } } {
   const comboWidth = Math.max(FILTER_BUTTON_MIN_WIDTH, width);
   const arrowBtnWidth = 18; // compact dropdown arrow button
@@ -396,11 +397,15 @@ function drawFilterDropdownButton(
   ctx.save();
 
   // Draw combo box background (white, full width)
-  ctx.fillStyle = theme.filterButtonBackground;
+  ctx.fillStyle = isHovered ? '#f5f7fa' : theme.filterButtonBackground;
   ctx.fillRect(x, y, comboWidth, height);
 
-  // Draw combo box border
-  ctx.strokeStyle = isHovered ? theme.headerBorderColor : theme.filterButtonBorder;
+  // Draw combo box border — blue tint when filter is active
+  if (hasActiveFilter) {
+    ctx.strokeStyle = isHovered ? '#1565c0' : '#1a73e8';
+  } else {
+    ctx.strokeStyle = isHovered ? theme.headerBorderColor : theme.filterButtonBorder;
+  }
   ctx.lineWidth = 1;
   ctx.strokeRect(x + 0.5, y + 0.5, comboWidth - 1, height - 1);
 
@@ -409,7 +414,7 @@ function drawFilterDropdownButton(
   const textMaxWidth = comboWidth - FILTER_BUTTON_PADDING * 2 - arrowBtnWidth;
   const textY = y + height / 2;
 
-  ctx.fillStyle = theme.filterText;
+  ctx.fillStyle = hasActiveFilter ? '#1a73e8' : theme.filterText;
   ctx.font = `400 ${theme.fontSize}px ${theme.fontFamily}`;
   ctx.textAlign = 'left';
   ctx.textBaseline = 'middle';
@@ -422,29 +427,52 @@ function drawFilterDropdownButton(
   const btnY = y;
 
   // Arrow button background
-  ctx.fillStyle = isHovered ? '#e0e4ea' : '#f0f0f0';
+  if (hasActiveFilter) {
+    ctx.fillStyle = isHovered ? '#d0e2f4' : '#e8f0fe';
+  } else {
+    ctx.fillStyle = isHovered ? '#e0e4ea' : '#f0f0f0';
+  }
   ctx.fillRect(btnX, btnY, arrowBtnWidth, height);
 
   // Arrow button left border (separator from text area)
-  ctx.strokeStyle = isHovered ? theme.headerBorderColor : theme.filterButtonBorder;
+  if (hasActiveFilter) {
+    ctx.strokeStyle = isHovered ? '#1565c0' : '#1a73e8';
+  } else {
+    ctx.strokeStyle = isHovered ? theme.headerBorderColor : theme.filterButtonBorder;
+  }
   ctx.lineWidth = 1;
   ctx.beginPath();
   ctx.moveTo(Math.floor(btnX) + 0.5, btnY);
   ctx.lineTo(Math.floor(btnX) + 0.5, btnY + height);
   ctx.stroke();
 
-  // Draw dropdown triangle centered in the arrow button
+  // Draw icon centered in the arrow button
   const arrowCx = btnX + arrowBtnWidth / 2;
   const arrowCy = btnY + height / 2;
-  const triSize = 5;
 
-  ctx.fillStyle = theme.filterDropdownArrow;
-  ctx.beginPath();
-  ctx.moveTo(arrowCx - triSize, arrowCy - triSize / 2);
-  ctx.lineTo(arrowCx + triSize, arrowCy - triSize / 2);
-  ctx.lineTo(arrowCx, arrowCy + triSize / 2 + 1);
-  ctx.closePath();
-  ctx.fill();
+  if (hasActiveFilter) {
+    // Funnel icon when filter is active (matches header filter style)
+    ctx.fillStyle = '#1a73e8';
+    ctx.beginPath();
+    ctx.moveTo(arrowCx - 5, arrowCy - 4);  // Top-left
+    ctx.lineTo(arrowCx + 5, arrowCy - 4);  // Top-right
+    ctx.lineTo(arrowCx + 1, arrowCy);       // Narrow right
+    ctx.lineTo(arrowCx + 1, arrowCy + 4);   // Stem right
+    ctx.lineTo(arrowCx - 1, arrowCy + 4);   // Stem left
+    ctx.lineTo(arrowCx - 1, arrowCy);       // Narrow left
+    ctx.closePath();
+    ctx.fill();
+  } else {
+    // Dropdown triangle
+    const triSize = 5;
+    ctx.fillStyle = theme.filterDropdownArrow;
+    ctx.beginPath();
+    ctx.moveTo(arrowCx - triSize, arrowCy - triSize / 2);
+    ctx.lineTo(arrowCx + triSize, arrowCy - triSize / 2);
+    ctx.lineTo(arrowCx, arrowCy + triSize / 2 + 1);
+    ctx.closePath();
+    ctx.fill();
+  }
 
   ctx.restore();
 
@@ -459,6 +487,7 @@ interface DrawCellOptions {
   isHoveredIcon?: boolean;
   isHoveredHeaderFilter?: boolean;
   hasActiveFilter?: boolean;
+  hasActiveFilterDropdown?: boolean;
 }
 
 export function drawPivotCell(
@@ -566,7 +595,8 @@ export function drawPivotCell(
       comboH,
       displayText,
       theme,
-      options.isHoveredFilterButton || false
+      options.isHoveredFilterButton || false,
+      options.hasActiveFilterDropdown || false
     );
 
     result.filterButtonBounds = {
@@ -868,6 +898,17 @@ export function renderPivotView(
       cell.cellType === 'ColumnLabelHeader' ? colHasActiveFilter :
       false;
 
+    // Determine active filter state for filter dropdown cells
+    let cellHasActiveFilterDropdown = false;
+    if (cell.cellType === 'FilterDropdown' && cell.filterFieldIndex !== undefined) {
+      const filterRowMeta = pivotView.filterRows?.find(
+        (fr) => fr.fieldIndex === cell.filterFieldIndex
+      );
+      cellHasActiveFilterDropdown = filterRowMeta
+        ? filterRowMeta.selectedValues.length < filterRowMeta.uniqueValues.length
+        : false;
+    }
+
     const cellResult = drawPivotCell(
       ctx,
       cell,
@@ -883,6 +924,7 @@ export function renderPivotView(
         isHoveredIcon,
         isHoveredHeaderFilter,
         hasActiveFilter: cellHasActiveFilter,
+        hasActiveFilterDropdown: cellHasActiveFilterDropdown,
       }
     );
 

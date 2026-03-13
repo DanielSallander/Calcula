@@ -153,6 +153,9 @@ const gridRegionsCache = new Map<number, { startRow: number; startCol: number; e
 /** Cached reference to the grid canvas element, captured during overlay rendering. */
 let cachedCanvasElement: HTMLCanvasElement | null = null;
 
+/** Currently hovered filter dropdown field index (for hover highlight). -1 = none. */
+let hoveredFilterFieldIndex = -1;
+
 /**
  * Previous region bounds per pivotId, used during transitions.
  * When a pivot collapses, the overlay's white background is extended to cover
@@ -587,7 +590,19 @@ function drawStyledPivotView(overlayCtx: OverlayRenderContext, pivotView: PivotV
     // Draw deferred FilterDropdown cells on top of neighboring cells
     for (const fd of deferredFilterDropdowns) {
       cellsDrawn++;
-      const cellResult: PivotCellDrawResult = drawPivotCell(ctx, fd.cell, fd.x, fd.y, fd.width, fd.height, fd.i, fd.j, theme, {});
+      const fdFieldIndex = fd.cell.filterFieldIndex ?? -1;
+      const isHoveredFd = fdFieldIndex === hoveredFilterFieldIndex;
+      // Check if this filter field has active filtering (hidden items)
+      const filterRowMeta = pivotView.filterRows?.find(
+        (fr) => fr.fieldIndex === fdFieldIndex
+      );
+      const hasActiveFdFilter = filterRowMeta
+        ? filterRowMeta.selectedValues.length < filterRowMeta.uniqueValues.length
+        : false;
+      const cellResult: PivotCellDrawResult = drawPivotCell(ctx, fd.cell, fd.x, fd.y, fd.width, fd.height, fd.i, fd.j, theme, {
+        isHoveredFilterButton: isHoveredFd,
+        hasActiveFilterDropdown: hasActiveFdFilter,
+      });
       if (cellResult.filterButtonBounds) {
         const fdKey = `${pivotId}-${cellResult.filterButtonBounds.fieldIndex}`;
         overlayFilterDropdownBounds.set(fdKey, {
@@ -1192,6 +1207,8 @@ export function registerPivotExtension(): void {
       }
     }
 
+    // Track filter dropdown hover for visual highlight
+    let newHoveredFilterFieldIndex = -1;
     if (!isOverInteractive) {
       for (const bounds of overlayFilterDropdownBounds.values()) {
         if (
@@ -1201,6 +1218,7 @@ export function registerPivotExtension(): void {
           canvasY <= bounds.y + bounds.height
         ) {
           isOverInteractive = true;
+          newHoveredFilterFieldIndex = bounds.fieldIndex;
           break;
         }
       }
@@ -1228,6 +1246,12 @@ export function registerPivotExtension(): void {
       cachedCanvasElement.style.cursor = "";
       currentCursorOverride = false;
     }
+
+    // Trigger repaint when filter dropdown hover state changes
+    if (newHoveredFilterFieldIndex !== hoveredFilterFieldIndex) {
+      hoveredFilterFieldIndex = newHoveredFilterFieldIndex;
+      requestOverlayRedraw();
+    }
   };
 
   // Attach the mousemove handler to the document (canvas may not exist yet)
@@ -1235,9 +1259,16 @@ export function registerPivotExtension(): void {
   const handleDocMouseMove = (event: MouseEvent) => {
     if (cachedCanvasElement && (event.target === cachedCanvasElement || cachedCanvasElement.contains(event.target as Node))) {
       handleCanvasMouseMove(event);
-    } else if (currentCursorOverride && cachedCanvasElement) {
-      cachedCanvasElement.style.cursor = "";
-      currentCursorOverride = false;
+    } else if (cachedCanvasElement) {
+      if (currentCursorOverride) {
+        cachedCanvasElement.style.cursor = "";
+        currentCursorOverride = false;
+      }
+      // Clear filter dropdown hover when mouse leaves canvas
+      if (hoveredFilterFieldIndex !== -1) {
+        hoveredFilterFieldIndex = -1;
+        requestOverlayRedraw();
+      }
     }
   };
   document.addEventListener("mousemove", handleDocMouseMove);

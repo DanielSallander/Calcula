@@ -2189,9 +2189,13 @@ impl<'a> PivotCalculator<'a> {
                 if row_item.is_subtotal {
                     cell.cell_type = PivotCellType::RowSubtotal;
                     cell.background_style = BackgroundStyle::Subtotal;
+                    cell.is_bold = true;
                 } else if row_item.is_grand_total {
                     cell.cell_type = PivotCellType::GrandTotal;
                     cell.background_style = BackgroundStyle::GrandTotal;
+                    cell.is_bold = true;
+                } else if row_item.has_children {
+                    // Parent group rows (expandable) get bold data values (like Excel)
                     cell.is_bold = true;
                 }
 
@@ -2264,11 +2268,16 @@ impl<'a> PivotCalculator<'a> {
                 } else if is_row_total {
                     cell.cell_type = PivotCellType::RowSubtotal;
                     cell.background_style = BackgroundStyle::Subtotal;
+                    cell.is_bold = true;
                 } else if is_col_total {
                     cell.cell_type = PivotCellType::ColumnSubtotal;
                     cell.background_style = BackgroundStyle::Subtotal;
+                    cell.is_bold = true;
+                } else if row_item.has_children {
+                    // Parent group rows (expandable) get bold data values (like Excel)
+                    cell.is_bold = true;
                 }
-                
+
                 // Set group path for drill-down
                 let mut group_path = Vec::new();
                 for (i, &val) in row_item.group_values.iter().enumerate() {
