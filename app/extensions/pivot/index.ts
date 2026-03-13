@@ -502,14 +502,31 @@ function drawStyledPivotView(overlayCtx: OverlayRenderContext, pivotView: PivotV
       continue;
     }
 
+    // Collect FilterDropdown cells to draw them last (on top of neighboring cells)
+    const deferredFilterDropdowns: Array<{
+      cell: typeof row.cells[0]; x: number; y: number; width: number; height: number;
+      i: number; j: number; gridRow: number; gridCol: number;
+    }> = [];
+
     for (let j = 0; j < row.cells.length; j++) {
       const cell = row.cells[j];
       const gridCol = region.startCol + j;
       const x = colXPositions[j];
-      const width = colWidthValues[j];
+      // Support colSpan: sum widths of spanned columns (e.g., FilterDropdown spanning row label cols)
+      const span = cell.colSpan && cell.colSpan > 1 ? cell.colSpan : 1;
+      let width = colWidthValues[j];
+      for (let s = 1; s < span && j + s < colWidthValues.length; s++) {
+        width += colWidthValues[j + s];
+      }
 
       // Skip cells completely outside visible area
       if (x + width < rowHeaderWidth || x > canvasWidth) { cellsSkipped++; continue; }
+
+      // Defer FilterDropdown cells to draw them on top of neighboring cells
+      if (cell.cellType === 'FilterDropdown') {
+        deferredFilterDropdowns.push({ cell, x, y, width, height, i, j, gridRow, gridCol });
+        continue;
+      }
 
       cellsDrawn++;
       // Determine active filter state for header filter cells
@@ -563,6 +580,25 @@ function drawStyledPivotView(overlayCtx: OverlayRenderContext, pivotView: PivotV
           height: cellResult.headerFilterBounds.height,
           zone: cellResult.headerFilterBounds.zone,
           pivotId,
+        });
+      }
+    }
+
+    // Draw deferred FilterDropdown cells on top of neighboring cells
+    for (const fd of deferredFilterDropdowns) {
+      cellsDrawn++;
+      const cellResult: PivotCellDrawResult = drawPivotCell(ctx, fd.cell, fd.x, fd.y, fd.width, fd.height, fd.i, fd.j, theme, {});
+      if (cellResult.filterButtonBounds) {
+        const fdKey = `${pivotId}-${cellResult.filterButtonBounds.fieldIndex}`;
+        overlayFilterDropdownBounds.set(fdKey, {
+          x: cellResult.filterButtonBounds.x,
+          y: cellResult.filterButtonBounds.y,
+          width: cellResult.filterButtonBounds.width,
+          height: cellResult.filterButtonBounds.height,
+          fieldIndex: cellResult.filterButtonBounds.fieldIndex,
+          pivotId,
+          gridRow: fd.gridRow,
+          gridCol: fd.gridCol,
         });
       }
     }

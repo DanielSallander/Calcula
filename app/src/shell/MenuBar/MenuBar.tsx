@@ -29,6 +29,21 @@ function findShortcutItem(
 }
 
 // ============================================================================
+// CustomContentRenderer - isolates custom content in its own component scope
+// so that hooks inside the custom content don't bleed into RecursiveMenuItem.
+// ============================================================================
+
+function CustomContentRenderer({
+  render,
+  closeMenu,
+}: {
+  render: (onClose: () => void) => React.ReactNode;
+  closeMenu: () => void;
+}): React.ReactElement {
+  return <>{render(closeMenu)}</>;
+}
+
+// ============================================================================
 // RecursiveMenuItem - self-contained component for any nesting depth
 // ============================================================================
 
@@ -36,16 +51,17 @@ interface RecursiveMenuItemProps {
   item: UI.MenuItemDefinition;
   index: number;
   executeMenuItem: (item: UI.MenuItemDefinition) => void;
+  closeMenu: () => void;
 }
 
-function RecursiveMenuItem({ item, index, executeMenuItem }: RecursiveMenuItemProps): React.ReactElement {
+function RecursiveMenuItem({ item, index, executeMenuItem, closeMenu }: RecursiveMenuItemProps): React.ReactElement {
   const [isSubmenuOpen, setIsSubmenuOpen] = useState(false);
 
   if (item.separator) {
     return <S.Separator key={`sep-${index}`} />;
   }
 
-  const hasChildren = item.children && item.children.length > 0;
+  const hasChildren = (item.children && item.children.length > 0) || !!item.customContent;
 
   return (
     <S.SubMenuContainer
@@ -83,14 +99,17 @@ function RecursiveMenuItem({ item, index, executeMenuItem }: RecursiveMenuItemPr
 
       {hasChildren && isSubmenuOpen && (
         <S.SubMenuDropdown>
-          {item.children!.filter(child => !child.hidden).map((child, childIndex) => (
-            <RecursiveMenuItem
-              key={child.id || childIndex}
-              item={child}
-              index={childIndex}
-              executeMenuItem={executeMenuItem}
-            />
-          ))}
+          {item.customContent
+            ? <CustomContentRenderer render={item.customContent} closeMenu={closeMenu} />
+            : item.children!.filter(child => !child.hidden).map((child, childIndex) => (
+              <RecursiveMenuItem
+                key={child.id || childIndex}
+                item={child}
+                index={childIndex}
+                executeMenuItem={executeMenuItem}
+                closeMenu={closeMenu}
+              />
+            ))}
         </S.SubMenuDropdown>
       )}
     </S.SubMenuContainer>
@@ -109,6 +128,11 @@ export function MenuBar(): React.ReactElement {
   const closeAll = useCallback(() => {
     setOpenMenu(null);
   }, []);
+
+  const closeMenu = useCallback(() => {
+    closeAll();
+    restoreFocusToGrid();
+  }, [closeAll]);
 
   const executeMenuItem = useCallback((item: UI.MenuItemDefinition) => {
     if (item.action) {
@@ -205,6 +229,7 @@ export function MenuBar(): React.ReactElement {
                   item={item}
                   index={index}
                   executeMenuItem={executeMenuItem}
+                  closeMenu={closeMenu}
                 />
               ))}
             </S.Dropdown>

@@ -63,38 +63,38 @@ export interface PivotTheme {
 }
 
 export const DEFAULT_PIVOT_THEME: PivotTheme = {
-  // Text colors (Excel default: dark text everywhere except header)
+  // Text colors
   headerText: '#ffffff',
-  labelText: '#333333',
-  valueText: '#333333',
-  totalText: '#333333',
-  grandTotalText: '#333333',
-  filterText: '#333333',
+  labelText: '#1f2937',
+  valueText: '#374151',
+  totalText: '#1f2937',
+  grandTotalText: '#111827',
+  filterText: '#374151',
 
-  // Background colors (Excel default "Medium Style 2 - Blue")
-  headerBackground: '#5B9BD5',
+  // Background colors — modern blue-grey palette
+  headerBackground: '#4472C4',
   labelBackground: '#ffffff',
   valueBackground: '#ffffff',
-  totalBackground: '#ffffff',
-  grandTotalBackground: '#ffffff',
-  filterRowBackground: '#fef3c7',
+  totalBackground: '#E8EEF7',
+  grandTotalBackground: '#D6E0F0',
+  filterRowBackground: '#f0f4fa',
 
-  // Alternating rows (Excel default: very subtle light blue-grey)
-  alternateRowBackground: '#DDEBF7',
+  // Alternating rows — very subtle banding
+  alternateRowBackground: '#F2F6FC',
 
-  // Borders (subtle, matching Excel's thin lines)
-  borderColor: '#9BC2E6',
-  headerBorderColor: '#5B9BD5',
+  // Borders — light and clean
+  borderColor: '#D5DEEF',
+  headerBorderColor: '#4472C4',
 
   // Filter button
   filterButtonBackground: '#ffffff',
-  filterButtonBorder: '#9BC2E6',
-  filterButtonHoverBackground: '#DDEBF7',
-  filterDropdownArrow: '#595959',
+  filterButtonBorder: '#C5CDE0',
+  filterButtonHoverBackground: '#E8EEF7',
+  filterDropdownArrow: '#4b5563',
 
   // Icons
-  iconColor: '#595959',
-  iconHoverColor: '#333333',
+  iconColor: '#6b7280',
+  iconHoverColor: '#1f2937',
 
   // Selection
   selectionBackground: 'rgba(59, 130, 246, 0.1)',
@@ -340,21 +340,26 @@ function drawExpandCollapseIcon(
   const size = EXPAND_ICON_SIZE;
   const centerX = x + size / 2;
   const centerY = y + size / 2;
+  const radius = 2;
 
   ctx.save();
 
-  // White fill for icon background (makes it stand out)
-  ctx.fillStyle = '#ffffff';
-  ctx.fillRect(x + 0.5, y + 0.5, size - 1, size - 1);
+  // Rounded background
+  ctx.fillStyle = isHovered ? '#e5e7eb' : '#f3f4f6';
+  ctx.beginPath();
+  ctx.roundRect(x + 0.5, y + 0.5, size - 1, size - 1, radius);
+  ctx.fill();
 
-  // Draw box border
-  ctx.strokeStyle = color;
+  // Rounded border
+  ctx.strokeStyle = isHovered ? color : '#d1d5db';
   ctx.lineWidth = 1;
-  ctx.strokeRect(x + 0.5, y + 0.5, size - 1, size - 1);
+  ctx.beginPath();
+  ctx.roundRect(x + 0.5, y + 0.5, size - 1, size - 1, radius);
+  ctx.stroke();
 
   // Draw minus (always present)
   ctx.strokeStyle = color;
-  ctx.lineWidth = 1;
+  ctx.lineWidth = 1.5;
   ctx.beginPath();
   ctx.moveTo(x + 3, centerY);
   ctx.lineTo(x + size - 3, centerY);
@@ -371,6 +376,10 @@ function drawExpandCollapseIcon(
   ctx.restore();
 }
 
+/**
+ * Draw an Excel-style filter dropdown: a combo box spanning the cell width
+ * with a text value on the left and a small dropdown arrow button on the right.
+ */
 function drawFilterDropdownButton(
   ctx: CanvasRenderingContext2D,
   x: number,
@@ -381,22 +390,23 @@ function drawFilterDropdownButton(
   theme: PivotTheme,
   isHovered: boolean
 ): { buttonBounds: { x: number; y: number; width: number; height: number } } {
-  const buttonWidth = Math.max(FILTER_BUTTON_MIN_WIDTH, Math.min(width, FILTER_BUTTON_MAX_WIDTH));
+  const comboWidth = Math.max(FILTER_BUTTON_MIN_WIDTH, width);
+  const arrowBtnWidth = 18; // compact dropdown arrow button
 
   ctx.save();
 
-  // Draw button background
-  ctx.fillStyle = isHovered ? theme.filterButtonHoverBackground : theme.filterButtonBackground;
-  ctx.fillRect(x, y, buttonWidth, height);
+  // Draw combo box background (white, full width)
+  ctx.fillStyle = theme.filterButtonBackground;
+  ctx.fillRect(x, y, comboWidth, height);
 
-  // Draw button border
-  ctx.strokeStyle = theme.filterButtonBorder;
+  // Draw combo box border
+  ctx.strokeStyle = isHovered ? theme.headerBorderColor : theme.filterButtonBorder;
   ctx.lineWidth = 1;
-  ctx.strokeRect(x + 0.5, y + 0.5, buttonWidth - 1, height - 1);
+  ctx.strokeRect(x + 0.5, y + 0.5, comboWidth - 1, height - 1);
 
-  // Draw text
+  // Draw the value text on the left side
   const textX = x + FILTER_BUTTON_PADDING;
-  const textMaxWidth = buttonWidth - FILTER_BUTTON_PADDING * 2 - FILTER_ARROW_SIZE - 4;
+  const textMaxWidth = comboWidth - FILTER_BUTTON_PADDING * 2 - arrowBtnWidth;
   const textY = y + height / 2;
 
   ctx.fillStyle = theme.filterText;
@@ -407,22 +417,40 @@ function drawFilterDropdownButton(
   const truncatedText = truncateText(ctx, displayValue, textMaxWidth);
   ctx.fillText(truncatedText, textX, textY);
 
-  // Draw dropdown arrow (triangle)
-  const arrowX = x + buttonWidth - FILTER_BUTTON_PADDING - FILTER_ARROW_SIZE / 2;
-  const arrowY = y + height / 2;
+  // Draw dropdown arrow button on the right edge (Excel-style)
+  const btnX = x + comboWidth - arrowBtnWidth;
+  const btnY = y;
+
+  // Arrow button background
+  ctx.fillStyle = isHovered ? '#e0e4ea' : '#f0f0f0';
+  ctx.fillRect(btnX, btnY, arrowBtnWidth, height);
+
+  // Arrow button left border (separator from text area)
+  ctx.strokeStyle = isHovered ? theme.headerBorderColor : theme.filterButtonBorder;
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  ctx.moveTo(Math.floor(btnX) + 0.5, btnY);
+  ctx.lineTo(Math.floor(btnX) + 0.5, btnY + height);
+  ctx.stroke();
+
+  // Draw dropdown triangle centered in the arrow button
+  const arrowCx = btnX + arrowBtnWidth / 2;
+  const arrowCy = btnY + height / 2;
+  const triSize = 5;
 
   ctx.fillStyle = theme.filterDropdownArrow;
   ctx.beginPath();
-  ctx.moveTo(arrowX - FILTER_ARROW_SIZE / 2, arrowY - FILTER_ARROW_SIZE / 3);
-  ctx.lineTo(arrowX + FILTER_ARROW_SIZE / 2, arrowY - FILTER_ARROW_SIZE / 3);
-  ctx.lineTo(arrowX, arrowY + FILTER_ARROW_SIZE / 2);
+  ctx.moveTo(arrowCx - triSize, arrowCy - triSize / 2);
+  ctx.lineTo(arrowCx + triSize, arrowCy - triSize / 2);
+  ctx.lineTo(arrowCx, arrowCy + triSize / 2 + 1);
   ctx.closePath();
   ctx.fill();
 
   ctx.restore();
 
+  // The clickable bounds covers the entire combo box (not just the arrow button)
   return {
-    buttonBounds: { x, y, width: buttonWidth, height },
+    buttonBounds: { x, y, width: comboWidth, height },
   };
 }
 
@@ -456,11 +484,11 @@ export function drawPivotCell(
   ctx.fillStyle = bgColor;
   ctx.fillRect(x, y, width, height);
 
-  // Draw contextual borders (Excel-like: no full grid lines)
+  // Draw contextual borders (modern Excel-like styling)
   if (cell.backgroundStyle === 'Header') {
-    // Header cells: thin bottom border in theme color
+    // Header cells: bottom border separating header from data
     ctx.strokeStyle = theme.headerBorderColor;
-    ctx.lineWidth = 1;
+    ctx.lineWidth = 2;
     ctx.beginPath();
     ctx.moveTo(x, Math.floor(y + height) - 0.5);
     ctx.lineTo(x + width, Math.floor(y + height) - 0.5);
@@ -469,28 +497,41 @@ export function drawPivotCell(
     cell.backgroundStyle === 'Subtotal' ||
     cell.backgroundStyle === 'Total'
   ) {
-    // Subtotal/Total: thin top border only (Excel-like minimal separator)
+    // Subtotal/Total: top and bottom border for clear visual grouping
     ctx.strokeStyle = theme.borderColor;
     ctx.lineWidth = 1;
     ctx.beginPath();
     ctx.moveTo(x, Math.floor(y) + 0.5);
     ctx.lineTo(x + width, Math.floor(y) + 0.5);
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.moveTo(x, Math.floor(y + height) - 0.5);
+    ctx.lineTo(x + width, Math.floor(y + height) - 0.5);
     ctx.stroke();
   } else if (cell.backgroundStyle === 'GrandTotal') {
-    // Grand total: thin top border (same as subtotal, just bold text distinguishes it)
-    ctx.strokeStyle = theme.borderColor;
-    ctx.lineWidth = 1;
+    // Grand total: stronger top border + bottom border for visual closure
+    ctx.strokeStyle = theme.headerBorderColor;
+    ctx.lineWidth = 2;
     ctx.beginPath();
     ctx.moveTo(x, Math.floor(y) + 0.5);
     ctx.lineTo(x + width, Math.floor(y) + 0.5);
     ctx.stroke();
+    ctx.strokeStyle = theme.headerBorderColor;
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.moveTo(x, Math.floor(y + height) - 0.5);
+    ctx.lineTo(x + width, Math.floor(y + height) - 0.5);
+    ctx.stroke();
   } else if (cell.backgroundStyle === 'FilterRow') {
-    // Filter rows: keep full border
+    // Filter rows: subtle bottom border only (clean separation)
     ctx.strokeStyle = theme.borderColor;
     ctx.lineWidth = 1;
-    ctx.strokeRect(x + 0.5, y + 0.5, width - 1, height - 1);
+    ctx.beginPath();
+    ctx.moveTo(x, Math.floor(y + height) - 0.5);
+    ctx.lineTo(x + width, Math.floor(y + height) - 0.5);
+    ctx.stroke();
   }
-  // Normal/Alternate data cells: no borders (clean Excel-like look)
+  // Normal/Alternate data cells: no borders (clean modern look)
 
   // Handle FilterLabel - bold, right-aligned text
   if (cell.cellType === 'FilterLabel') {
@@ -509,16 +550,20 @@ export function drawPivotCell(
     return result;
   }
 
-  // Handle FilterDropdown specially
+  // Handle FilterDropdown specially — Excel-style combo box filling the cell
   if (cell.cellType === 'FilterDropdown') {
-    const buttonY = y + Math.floor((height - FILTER_BUTTON_HEIGHT) / 2);
+    const margin = 2;
+    const comboX = x + margin;
+    const comboY = y + margin;
+    const comboW = width - margin * 2;
+    const comboH = height - margin * 2;
     const displayText = cell.formattedValue || getCellDisplayValue(cell.value) || '(All)';
     const buttonResult = drawFilterDropdownButton(
       ctx,
-      x + CELL_PADDING_X,
-      buttonY,
-      width - CELL_PADDING_X * 2,
-      FILTER_BUTTON_HEIGHT,
+      comboX,
+      comboY,
+      comboW,
+      comboH,
       displayText,
       theme,
       options.isHoveredFilterButton || false
@@ -526,8 +571,8 @@ export function drawPivotCell(
 
     result.filterButtonBounds = {
       ...buttonResult.buttonBounds,
-      x: x + CELL_PADDING_X,
-      y: buttonY,
+      x: comboX,
+      y: comboY,
       fieldIndex: cell.filterFieldIndex ?? -1,
       row: rowIndex,
       col: colIndex,
@@ -798,7 +843,12 @@ export function renderPivotView(
 
     const x = getColX(colIndex);
     const y = getRowY(rowIndex);
-    const width = colWidths[colIndex] || DEFAULT_PIVOT_CELL_WIDTH;
+    // Support col_span: sum widths of spanned columns (e.g., FilterDropdown spanning row label cols)
+    const span = cell.colSpan && cell.colSpan > 1 ? cell.colSpan : 1;
+    let width = colWidths[colIndex] || DEFAULT_PIVOT_CELL_WIDTH;
+    for (let s = 1; s < span && colIndex + s < colWidths.length; s++) {
+      width += colWidths[colIndex + s] || DEFAULT_PIVOT_CELL_WIDTH;
+    }
     const height = rowHeights[rowIndex] || DEFAULT_PIVOT_CELL_HEIGHT;
 
     // Skip cells outside visible area
@@ -992,9 +1042,12 @@ export function measurePivotColumnWidth(
           ctx.font = `${theme.headerFontWeight} ${theme.fontSize}px ${theme.fontFamily}`;
         }
 
-        // Account for filter dropdown button width
+        // Account for filter dropdown combo box (text + arrow button area)
         if (cell.cellType === 'FilterDropdown') {
-          totalWidth = Math.max(totalWidth, FILTER_BUTTON_MIN_WIDTH + CELL_PADDING_X * 2);
+          // Arrow button width equals cell height; add margin + padding
+          const arrowBtnWidth = DEFAULT_PIVOT_CELL_HEIGHT;
+          totalWidth = textWidth + FILTER_BUTTON_PADDING * 2 + arrowBtnWidth + 4;
+          totalWidth = Math.max(totalWidth, FILTER_BUTTON_MIN_WIDTH);
         }
 
         // Account for header filter dropdown arrow area

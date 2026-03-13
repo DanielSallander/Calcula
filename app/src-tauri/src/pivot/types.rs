@@ -793,6 +793,9 @@ pub struct PivotCellData {
     pub number_format: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub filter_field_index: Option<usize>,
+    /// Column span for merged cells (e.g., filter dropdown spanning row label columns).
+    #[serde(default, skip_serializing_if = "is_one_u16")]
+    pub col_span: u16,
     /// Group path for drill-down: (field_index, value_id) pairs identifying this cell's data.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub group_path: Vec<(usize, u32)>,
@@ -800,6 +803,7 @@ pub struct PivotCellData {
 
 fn is_false(v: &bool) -> bool { !v }
 fn is_zero_u8(v: &u8) -> bool { *v == 0 }
+fn is_one_u16(v: &u16) -> bool { *v <= 1 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(untagged)]

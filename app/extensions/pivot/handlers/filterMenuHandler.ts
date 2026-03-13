@@ -6,6 +6,7 @@
 import { pivot } from "../../../src/api/pivot";
 import { OverlayExtensions } from "../../../src/api";
 import { PIVOT_FILTER_OVERLAY_ID } from "../manifest";
+import { getCachedPivotView } from "../lib/pivotViewStore";
 
 /**
  * State for tracking the current filter menu.
@@ -54,8 +55,12 @@ export async function handleOpenFilterMenu(detail: {
       // Continue with empty array - user will see "No matching values"
     }
 
-    // All values are selected by default
-    const selectedValues = [...allValues];
+    // Use previously saved filter state if available, otherwise default to all selected
+    const cachedView = getCachedPivotView(pivotInfo.pivotId);
+    const filterRowMeta = cachedView?.filterRows?.find(
+      (fr) => fr.fieldIndex === fieldIndex
+    );
+    const selectedValues = filterRowMeta?.selectedValues ?? [...allValues];
 
     // Store current filter state for the apply callback
     currentFilterState = {

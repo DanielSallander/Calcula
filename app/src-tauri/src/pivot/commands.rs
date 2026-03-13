@@ -3364,12 +3364,16 @@ pub async fn update_bi_pivot_fields(
     let row_lookup_fields: Vec<&BiFieldRef> = request.row_fields.iter().filter(|f| f.is_lookup).collect();
     let col_group_fields: Vec<&BiFieldRef> = request.column_fields.iter().filter(|f| !f.is_lookup).collect();
     let col_lookup_fields: Vec<&BiFieldRef> = request.column_fields.iter().filter(|f| f.is_lookup).collect();
+    // Filter fields are always GROUP BY (not lookups) — they need cache columns
+    // so the pivot engine can read their unique values and apply hidden_items.
+    let filter_group_fields: Vec<&BiFieldRef> = request.filter_fields.iter().collect();
 
     // Build BI engine QueryRequest
     let query_measures: Vec<String> = request.value_fields.iter().map(|v| v.measure_name.clone()).collect();
     let query_group_by: Vec<bi_engine::ColumnRef> = row_group_fields
         .iter()
         .chain(col_group_fields.iter())
+        .chain(filter_group_fields.iter())
         .map(|f| bi_engine::ColumnRef::new(&f.table, &f.column))
         .collect();
 
@@ -3451,9 +3455,9 @@ pub async fn update_bi_pivot_fields(
     // Build PivotDefinition field mappings
     //
     // Cache layout (BI engine result column order):
-    // [group_by columns (row groups, then col groups)] [measure columns] [lookup columns (row lookups, then col lookups)]
+    // [group_by columns (row groups, col groups, filter groups)] [measure columns] [lookup columns]
     // If synthetic dim: [synthetic at 0] [everything shifted by 1]
-    let num_group_by = row_group_fields.len() + col_group_fields.len();
+    let num_group_by = row_group_fields.len() + col_group_fields.len() + filter_group_fields.len();
     let dim_offset: usize = if use_synthetic_dim { 1 } else { 0 };
 
     // Build a mapping from (table, column) -> cache column index.
@@ -3462,9 +3466,9 @@ pub async fn update_bi_pivot_fields(
     let mut field_to_cache_idx: std::collections::HashMap<(String, String), usize> =
         std::collections::HashMap::new();
 
-    // Group-by cols come first: row groups, then col groups
+    // Group-by cols come first: row groups, then col groups, then filter groups
     let mut cache_idx = dim_offset;
-    for f in row_group_fields.iter().chain(col_group_fields.iter()) {
+    for f in row_group_fields.iter().chain(col_group_fields.iter()).chain(filter_group_fields.iter()) {
         field_to_cache_idx.insert((f.table.clone(), f.column.clone()), cache_idx);
         cache_idx += 1;
     }
@@ -3546,8 +3550,32 @@ pub async fn update_bi_pivot_fields(
         })
         .collect();
 
-    // Filter fields (not implemented for BI pivots yet)
-    definition.filter_fields.clear();
+    // Filter fields — same as row/column fields, map BiFieldRef to PivotFilter
+    let old_filter_fields = definition.filter_fields.clone();
+    definition.filter_fields = request
+        .filter_fields
+        .iter()
+        .map(|f| {
+            let idx = *field_to_cache_idx
+                .get(&(f.table.clone(), f.column.clone()))
+                .unwrap_or(&0);
+            let name = format!("{}.{}", f.table, f.column);
+            let field = if f.is_lookup {
+                PivotField::new_attribute(idx, name)
+            } else {
+                PivotField::new(idx, name)
+            };
+            // Preserve hidden_items from the old filter field (if same source_index)
+            let mut filter = pivot_engine::PivotFilter {
+                field,
+                condition: pivot_engine::FilterCondition::ValueList(Vec::new()),
+            };
+            if let Some(old) = old_filter_fields.iter().find(|of| of.field.source_index == idx) {
+                filter.field.hidden_items = old.field.hidden_items.clone();
+            }
+            filter
+        })
+        .collect();
 
     // Apply layout
     if let Some(ref layout_config) = request.layout {

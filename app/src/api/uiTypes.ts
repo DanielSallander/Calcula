@@ -35,6 +35,9 @@ export interface MenuItemDefinition {
   hidden?: boolean;
   /** Sub-menu items (renders a flyout submenu on hover) */
   children?: MenuItemDefinition[];
+  /** Custom content to render as the flyout submenu instead of children.
+   *  Receives an onClose callback to close the entire menu when done. */
+  customContent?: (onClose: () => void) => React.ReactNode;
 }
 
 /**

@@ -41,7 +41,9 @@ import {
   invalidateShapeCache,
   invalidateAllShapeCaches,
 } from "./Shape/shapeRenderer";
-import { getShapeCategories, getShapeDefinition } from "./Shape/shapeCatalog";
+import React from "react";
+import { getShapeDefinition } from "./Shape/shapeCatalog";
+import { ShapeGalleryPanel } from "./Shape/ShapeGalleryOverlay";
 import {
   selectFloatingControl,
   deselectFloatingControl,
@@ -189,20 +191,12 @@ export function registerControlsExtension(): void {
     ],
   });
 
-  // 8b. Register Insert > Shapes menu with subcategories
-  const shapeCategories = getShapeCategories();
+  // 8b. Register Insert > Shapes with gallery submenu
   registerMenuItem("insert", {
     id: "insert.shapes",
     label: "Shapes",
-    children: shapeCategories.map((category) => ({
-      id: `insert.shapes.${category.id}`,
-      label: category.label,
-      children: category.shapes.map((shape) => ({
-        id: `insert.shapes.${category.id}.${shape.id}`,
-        label: shape.label,
-        action: () => insertShape(shape.id),
-      })),
-    })),
+    customContent: (onClose) =>
+      React.createElement(ShapeGalleryPanel, { insertShape, onClose }),
   });
 
   // 9. Register Developer > Design Mode menu item
@@ -297,7 +291,33 @@ export function registerControlsExtension(): void {
   cleanupFns.push(() => window.removeEventListener("controls:bounds-changed", handleBoundsChanged));
 
   // -----------------------------------------------------------------------
-  // 18. Load existing floating controls on startup
+  // 18. Delete selected floating control on Delete/Backspace key
+  // -----------------------------------------------------------------------
+  const handleDeleteKey = (e: KeyboardEvent) => {
+    if (e.key !== "Delete" && e.key !== "Backspace") return;
+
+    // Don't intercept when editing a cell or input field
+    const target = e.target as HTMLElement;
+    if (
+      target.tagName === "INPUT" ||
+      target.tagName === "TEXTAREA" ||
+      target.isContentEditable
+    ) return;
+
+    const selectedId = getSelectedFloatingControl();
+    if (!selectedId) return;
+
+    // Prevent the grid from also handling this key
+    e.preventDefault();
+    e.stopPropagation();
+
+    deleteFloatingControl(selectedId);
+  };
+  document.addEventListener("keydown", handleDeleteKey, true); // capture phase
+  cleanupFns.push(() => document.removeEventListener("keydown", handleDeleteKey, true));
+
+  // -----------------------------------------------------------------------
+  // 19. Load existing floating controls on startup
   // -----------------------------------------------------------------------
   loadFloatingControls();
 
@@ -481,6 +501,38 @@ async function insertShape(shapeType: string): Promise<void> {
   syncFloatingControlRegions();
   emitAppEvent(AppEvents.GRID_REFRESH);
   restoreFocusToGrid();
+}
+
+// ============================================================================
+// Delete Floating Control
+// ============================================================================
+
+/**
+ * Delete a floating control by its store ID.
+ * Removes from in-memory store, backend metadata, and refreshes the grid.
+ */
+async function deleteFloatingControl(controlId: string): Promise<void> {
+  const ctrl = getFloatingControl(controlId);
+  if (!ctrl) return;
+
+  const { removeControlMetadata } = await import("./lib/controlApi");
+
+  // Remove backend metadata
+  await removeControlMetadata(ctrl.sheetIndex, ctrl.row, ctrl.col);
+
+  // Remove from in-memory store
+  removeFloatingControl(controlId);
+
+  // Clear selection and close properties pane
+  deselectFloatingControl();
+  closeTaskPane(PROPERTIES_PANE_ID);
+  lastPropertiesCell = null;
+
+  // Invalidate caches and refresh
+  invalidateFloatingButtonCache(controlId);
+  invalidateShapeCache(controlId);
+  syncFloatingControlRegions();
+  emitAppEvent(AppEvents.GRID_REFRESH);
 }
 
 // ============================================================================

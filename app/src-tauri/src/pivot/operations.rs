@@ -557,7 +557,7 @@ pub(crate) fn auto_fit_pivot_columns(
     const MIN_WIDTH: f64 = 40.0;
     const MAX_WIDTH: f64 = 400.0;
 
-    // Find max formatted_value length per column
+    // Find max display text length per column, including formatted numbers
     let mut max_len: Vec<usize> = vec![0; view.col_count];
 
     for (row_idx, row_desc) in view.rows.iter().enumerate() {
@@ -572,9 +572,39 @@ pub(crate) fn auto_fit_pivot_columns(
             if col_idx >= max_len.len() {
                 break;
             }
-            let len = cell.formatted_value.len();
+            // Get the display text: use formatted number if available,
+            // fall back to formatted_value, then raw number string
+            let display = if let Some(ref fmt) = cell.number_format {
+                if !fmt.is_empty() {
+                    if let pivot_engine::PivotCellValue::Number(n) = &cell.value {
+                        engine::format_number(*n, &parse_number_format(fmt))
+                    } else {
+                        cell.formatted_value.clone()
+                    }
+                } else {
+                    cell.formatted_value.clone()
+                }
+            } else if cell.formatted_value.is_empty() {
+                // No number format and no formatted_value: use raw value string
+                match &cell.value {
+                    pivot_engine::PivotCellValue::Number(n) => {
+                        // Format integers without decimal point
+                        if n.fract() == 0.0 && n.abs() < 1e15 {
+                            format!("{}", *n as i64)
+                        } else {
+                            format!("{}", n)
+                        }
+                    }
+                    _ => cell.formatted_value.clone(),
+                }
+            } else {
+                cell.formatted_value.clone()
+            };
+            let len = display.len();
             // Account for indent in compact layout (~20px per level = ~3.2 chars)
-            let effective_len = len + (cell.indent_level as usize) * 3;
+            let extra = (cell.indent_level as usize) * 3
+                + if cell.is_expandable { 3 } else { 0 };
+            let effective_len = len + extra;
             if effective_len > max_len[col_idx] {
                 max_len[col_idx] = effective_len;
             }

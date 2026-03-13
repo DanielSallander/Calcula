@@ -427,6 +427,7 @@ pub(crate) fn view_to_response(
                 background_style: cell.background_style,
                 number_format: cell.number_format.clone(),
                 filter_field_index: cell.filter_field_index,
+                col_span: cell.col_span,
                 group_path: match cell.cell_type {
                     pivot_engine::PivotCellType::RowHeader
                     | pivot_engine::PivotCellType::ColumnHeader
@@ -692,6 +693,7 @@ pub(crate) fn extract_cell_window(
                     background_style: cell.background_style,
                     number_format: cell.number_format.clone(),
                     filter_field_index: cell.filter_field_index,
+                    col_span: cell.col_span,
                     group_path: match cell.cell_type {
                         pivot_engine::PivotCellType::RowHeader
                         | pivot_engine::PivotCellType::ColumnHeader

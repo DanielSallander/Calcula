@@ -281,6 +281,7 @@ export interface PivotCellData {
   backgroundStyle: BackgroundStyle;
   numberFormat?: string;
   filterFieldIndex?: number;
+  colSpan?: number;
   /** Group path for drill-down: [fieldIndex, valueId] pairs identifying this cell's data */
   groupPath?: Array<[number, number]>;
 }
