@@ -97,6 +97,57 @@ export function deleteCachedPivotView(pivotId: number): void {
 }
 
 // ============================================================================
+// OPERATION SUPERSEDING (newer operation cancels in-flight older one)
+// ============================================================================
+
+/** Monotonically increasing operation sequence per pivot. */
+const operationSeq = new Map<number, number>();
+
+/** Promise of the currently in-flight operation per pivot. */
+const inflightOps = new Map<number, Promise<unknown>>();
+
+/**
+ * Start a new operation for a pivot. Returns the sequence number.
+ * If an operation is already in flight, it will be implicitly superseded
+ * (its sequence check will fail when it completes).
+ */
+export function startOperation(pivotId: number): number {
+  const seq = (operationSeq.get(pivotId) ?? 0) + 1;
+  operationSeq.set(pivotId, seq);
+  return seq;
+}
+
+/**
+ * Check if the given sequence is still the latest operation for this pivot.
+ * Returns false if a newer operation has superseded it.
+ */
+export function isCurrentOperation(pivotId: number, seq: number): boolean {
+  return operationSeq.get(pivotId) === seq;
+}
+
+/**
+ * Get the in-flight operation promise for a pivot (if any).
+ * The caller should await this before starting a new IPC to avoid
+ * concurrent backend operations on the same resource (e.g., BI engine Mutex).
+ */
+export function getInflightOperation(pivotId: number): Promise<unknown> | undefined {
+  return inflightOps.get(pivotId);
+}
+
+/**
+ * Register an in-flight operation promise. Automatically clears when it settles.
+ */
+export function setInflightOperation(pivotId: number, promise: Promise<unknown>): void {
+  inflightOps.set(pivotId, promise);
+  promise.finally(() => {
+    // Only clear if this is still the registered promise (not replaced by a newer one)
+    if (inflightOps.get(pivotId) === promise) {
+      inflightOps.delete(pivotId);
+    }
+  });
+}
+
+// ============================================================================
 // USER CANCELLATION (suppresses result caching after frontend cancel)
 // ============================================================================
 

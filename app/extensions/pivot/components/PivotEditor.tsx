@@ -129,7 +129,9 @@ export function PivotEditor({
       );
     } catch (error) {
       const msg = error instanceof Error ? error.message : String(error);
-      if (msg.includes("cancelled")) {
+      if (msg.includes("superseded")) {
+        // Superseded by a newer operation — do nothing, the newer one will finish
+      } else if (msg.includes("cancelled")) {
         // User cancelled — revert the optimistic zone state
         resetZonesRef.current?.();
       } else {

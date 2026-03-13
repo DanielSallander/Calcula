@@ -20,6 +20,10 @@ import {
   restorePreviousView,
   isUserCancelled,
   clearUserCancelled,
+  startOperation,
+  isCurrentOperation,
+  getInflightOperation,
+  setInflightOperation,
 } from "./pivotViewStore";
 import { requestOverlayRedraw } from "../../../src/api/gridOverlays";
 
@@ -509,11 +513,24 @@ export async function createPivotTable(
 export async function updatePivotFields(
   request: UpdatePivotFieldsRequest
 ): Promise<PivotViewResponse> {
+  // Supersede any in-flight operation for this pivot
+  const seq = startOperation(request.pivotId);
+  apiCancelPivotOperation(request.pivotId).catch(() => {});
+  // Wait for in-flight operation to finish (backend holds exclusive resources like BI engine)
+  const prev = getInflightOperation(request.pivotId);
+  if (prev) await prev.catch(() => {});
+
   preserveCurrentView(request.pivotId);
   setLoading(request.pivotId, "Updating...");
   const t0 = performance.now();
+  const ipcPromise = apiUpdatePivotFields<UpdatePivotFieldsRequest, PivotViewResponse>(request);
+  setInflightOperation(request.pivotId, ipcPromise);
   try {
-    const result = await apiUpdatePivotFields<UpdatePivotFieldsRequest, PivotViewResponse>(request);
+    const result = await ipcPromise;
+    // If superseded by a newer operation, discard this result silently
+    if (!isCurrentOperation(request.pivotId, seq)) {
+      throw new Error("Pivot operation superseded");
+    }
     // If the user cancelled while the IPC was in-flight, revert backend + suppress result
     if (isUserCancelled(request.pivotId)) {
       clearUserCancelled(request.pivotId);
@@ -532,11 +549,18 @@ export async function updatePivotFields(
     );
     return result;
   } catch (err) {
-    restorePreviousView(request.pivotId);
+    // Only restore previous view if this is still the current operation
+    if (isCurrentOperation(request.pivotId, seq)) {
+      restorePreviousView(request.pivotId);
+    }
     clearUserCancelled(request.pivotId);
     throw err;
   } finally {
-    clearLoading(request.pivotId);
+    // Only clear loading if this is still the current operation
+    // (a newer operation will have set its own loading state)
+    if (isCurrentOperation(request.pivotId, seq)) {
+      clearLoading(request.pivotId);
+    }
   }
 }
 
@@ -603,10 +627,20 @@ export async function getPivotSourceData(
  * Refreshes the pivot cache from current grid data.
  */
 export async function refreshPivotCache(pivotId: PivotId): Promise<PivotViewResponse> {
+  const seq = startOperation(pivotId);
+  apiCancelPivotOperation(pivotId).catch(() => {});
+  const prev = getInflightOperation(pivotId);
+  if (prev) await prev.catch(() => {});
+
   preserveCurrentView(pivotId);
   setLoading(pivotId, "Refreshing...");
+  const ipcPromise = apiRefreshPivotCache<PivotViewResponse>(pivotId);
+  setInflightOperation(pivotId, ipcPromise);
   try {
-    const result = await apiRefreshPivotCache<PivotViewResponse>(pivotId);
+    const result = await ipcPromise;
+    if (!isCurrentOperation(pivotId, seq)) {
+      throw new Error("Pivot operation superseded");
+    }
     if (isUserCancelled(pivotId)) {
       clearUserCancelled(pivotId);
       restorePreviousView(pivotId);
@@ -618,11 +652,15 @@ export async function refreshPivotCache(pivotId: PivotId): Promise<PivotViewResp
     clearPreviousView(pivotId);
     return result;
   } catch (err) {
-    restorePreviousView(pivotId);
+    if (isCurrentOperation(pivotId, seq)) {
+      restorePreviousView(pivotId);
+    }
     clearUserCancelled(pivotId);
     throw err;
   } finally {
-    clearLoading(pivotId);
+    if (isCurrentOperation(pivotId, seq)) {
+      clearLoading(pivotId);
+    }
   }
 }
 
@@ -1554,11 +1592,23 @@ export async function createFromBiModel(
 export async function updateBiFields(
   request: UpdateBiPivotFieldsRequest
 ): Promise<PivotViewResponse> {
+  const seq = startOperation(request.pivotId);
+  apiCancelPivotOperation(request.pivotId).catch(() => {});
+  // Wait for in-flight operation — BI engine is taken out of Mutex during async work,
+  // so concurrent operations would fail with "No BI model loaded".
+  const prev = getInflightOperation(request.pivotId);
+  if (prev) await prev.catch(() => {});
+
   preserveCurrentView(request.pivotId);
   setLoading(request.pivotId, "Querying data...");
   const t0 = performance.now();
+  const ipcPromise = apiUpdateBiPivotFields<UpdateBiPivotFieldsRequest, PivotViewResponse>(request);
+  setInflightOperation(request.pivotId, ipcPromise);
   try {
-    const result = await apiUpdateBiPivotFields<UpdateBiPivotFieldsRequest, PivotViewResponse>(request);
+    const result = await ipcPromise;
+    if (!isCurrentOperation(request.pivotId, seq)) {
+      throw new Error("Pivot operation superseded");
+    }
     // If the user cancelled while the IPC was in-flight, revert backend + suppress result
     if (isUserCancelled(request.pivotId)) {
       clearUserCancelled(request.pivotId);
@@ -1576,11 +1626,15 @@ export async function updateBiFields(
     );
     return result;
   } catch (err) {
-    restorePreviousView(request.pivotId);
+    if (isCurrentOperation(request.pivotId, seq)) {
+      restorePreviousView(request.pivotId);
+    }
     clearUserCancelled(request.pivotId);
     throw err;
   } finally {
-    clearLoading(request.pivotId);
+    if (isCurrentOperation(request.pivotId, seq)) {
+      clearLoading(request.pivotId);
+    }
   }
 }
 
