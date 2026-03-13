@@ -1191,7 +1191,45 @@ pub struct DrillThroughResponse {
 
 use std::collections::HashMap;
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use pivot_engine::{PivotCache, PivotDefinition, PivotView};
+
+// ============================================================================
+// PROGRESS & CANCELLATION
+// ============================================================================
+
+/// Event payload emitted via Tauri events during long-running pivot operations.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PivotProgressEvent {
+    pub pivot_id: PivotId,
+    pub stage: String,
+    pub stage_index: u32,
+    pub total_stages: u32,
+}
+
+/// Token used to signal cancellation of an in-progress pivot operation.
+#[derive(Clone)]
+pub struct CancellationToken {
+    cancelled: Arc<AtomicBool>,
+}
+
+impl CancellationToken {
+    pub fn new() -> Self {
+        CancellationToken {
+            cancelled: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
+    pub fn cancel(&self) {
+        self.cancelled.store(true, Ordering::SeqCst);
+    }
+
+    pub fn is_cancelled(&self) -> bool {
+        self.cancelled.load(Ordering::SeqCst)
+    }
+}
 
 /// Managed state for the pivot extension.
 /// Registered separately from AppState to keep the kernel feature-agnostic.
@@ -1206,6 +1244,10 @@ pub struct PivotState {
     pub bi_metadata: Mutex<HashMap<PivotId, BiPivotMetadata>>,
     /// Cached PivotView for each pivot (used for windowed cell fetching)
     pub views: Mutex<HashMap<PivotId, PivotView>>,
+    /// Active cancellation tokens per pivot (set when async operation starts)
+    pub cancellation_tokens: Mutex<HashMap<PivotId, CancellationToken>>,
+    /// Previous states for revert after user-cancel (saved before async operations)
+    pub previous_states: Mutex<HashMap<PivotId, (PivotDefinition, PivotCache)>>,
 }
 
 impl PivotState {
@@ -1216,6 +1258,8 @@ impl PivotState {
             active_pivot_id: Mutex::new(None),
             bi_metadata: Mutex::new(HashMap::new()),
             views: Mutex::new(HashMap::new()),
+            cancellation_tokens: Mutex::new(HashMap::new()),
+            previous_states: Mutex::new(HashMap::new()),
         }
     }
 }

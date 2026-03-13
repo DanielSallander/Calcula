@@ -409,6 +409,18 @@ export function usePivotEditorState({
     setDraggingField(null);
   }, []);
 
+  /** Reset all zones to initial values (used on cancel to revert optimistic state). */
+  const resetZones = useCallback(() => {
+    // Prevent the useEffect from triggering an update for this reset
+    isInitialMount.current = true;
+    setRows(initialRows);
+    setColumns(initialColumns);
+    setValues(initialValues);
+    setFilters(initialFilters);
+    // Re-arm after React processes the state updates
+    setTimeout(() => { isInitialMount.current = false; }, 0);
+  }, [initialRows, initialColumns, initialValues, initialFilters]);
+
   return {
     sourceFields,
     usedFields,
@@ -431,5 +443,6 @@ export function usePivotEditorState({
     handleDragStart,
     handleDragEnd,
     buildUpdateRequest,
+    resetZones,
   };
 }

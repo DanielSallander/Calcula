@@ -15,7 +15,7 @@ use pivot_engine::{
 };
 use crate::sheets::FreezeConfig;
 use std::time::Instant;
-use tauri::State;
+use tauri::{Emitter, State};
 
 // ============================================================================
 // HELPERS
@@ -162,85 +162,225 @@ pub fn create_pivot_table(
     Ok(response)
 }
 
+/// Helper: emit a pivot progress event (best-effort, ignores errors).
+fn emit_pivot_progress(window: &tauri::Window, pivot_id: PivotId, stage: &str, stage_index: u32, total_stages: u32) {
+    let _ = window.emit("pivot:progress", PivotProgressEvent {
+        pivot_id,
+        stage: stage.into(),
+        stage_index,
+        total_stages,
+    });
+}
+
+/// Cancels an in-progress pivot operation (if any).
+/// The operation will be aborted between pipeline stages and the pivot reverts to its previous state.
+#[tauri::command]
+pub fn cancel_pivot_operation(
+    pivot_state: State<'_, PivotState>,
+    pivot_id: PivotId,
+) -> Result<(), String> {
+    let tokens = pivot_state.cancellation_tokens.lock().unwrap();
+    if let Some(token) = tokens.get(&pivot_id) {
+        log_info!("PIVOT", "cancel_pivot_operation pivot_id={}", pivot_id);
+        token.cancel();
+        Ok(())
+    } else {
+        // No active operation — silently succeed (not an error)
+        Ok(())
+    }
+}
+
+/// Reverts a pivot to its pre-operation state.
+/// Called by the frontend when the user cancels AFTER the backend already completed.
+/// Restores the previous definition + cache and re-writes the grid.
+#[tauri::command]
+pub fn revert_pivot_operation(
+    state: State<AppState>,
+    pivot_state: State<'_, PivotState>,
+    pivot_id: PivotId,
+) -> Result<(), String> {
+    let prev = pivot_state.previous_states.lock().unwrap().remove(&pivot_id);
+    if let Some((old_def, old_cache)) = prev {
+        log_info!("PIVOT", "revert_pivot_operation pivot_id={}", pivot_id);
+
+        let dest_sheet_idx = resolve_dest_sheet_index(&state, &old_def);
+        let destination = old_def.destination;
+
+        // Recalculate the old view
+        let mut cache = old_cache;
+        let view = safe_calculate_pivot(&old_def, &mut cache);
+        store_view(&pivot_state, pivot_id, &view);
+
+        // Restore definition + cache
+        {
+            let mut pivot_tables = pivot_state.pivot_tables.lock().unwrap();
+            if let Some((def, c)) = pivot_tables.get_mut(&pivot_id) {
+                *def = old_def;
+                *c = cache;
+            }
+        }
+
+        // Re-write grid with the old view
+        update_pivot_in_grid(&state, pivot_id, dest_sheet_idx, destination, &view);
+        update_pivot_region(&state, pivot_id, dest_sheet_idx, destination, &view);
+
+        Ok(())
+    } else {
+        // No previous state available — nothing to revert
+        Ok(())
+    }
+}
+
 /// Updates the field configuration of an existing pivot table
 #[tauri::command]
-pub fn update_pivot_fields(
-    state: State<AppState>,
+pub async fn update_pivot_fields(
+    window: tauri::Window,
+    state: State<'_, AppState>,
     pivot_state: State<'_, PivotState>,
     request: UpdatePivotFieldsRequest,
 ) -> Result<PivotViewResponse, String> {
     log_info!("PIVOT", "update_pivot_fields pivot_id={}", request.pivot_id);
 
-    let mut pivot_tables = pivot_state.pivot_tables.lock().unwrap();
-    let (definition, cache) = pivot_tables
-        .get_mut(&request.pivot_id)
-        .ok_or_else(|| format!("Pivot table {} not found", request.pivot_id))?;
-
-    // Update row fields (preserving collapse state for fields that remain)
-    if let Some(ref row_configs) = request.row_fields {
-        let old_row_fields = definition.row_fields.clone();
-        definition.row_fields = row_configs
-            .iter()
-            .map(config_to_pivot_field)
-            .collect();
-        preserve_collapse_state(&mut definition.row_fields, &old_row_fields);
-    }
-
-    // Update column fields (preserving collapse state for fields that remain)
-    if let Some(ref col_configs) = request.column_fields {
-        let old_col_fields = definition.column_fields.clone();
-        definition.column_fields = col_configs
-            .iter()
-            .map(config_to_pivot_field)
-            .collect();
-        preserve_collapse_state(&mut definition.column_fields, &old_col_fields);
-    }
-
-    // Update value fields
-    if let Some(ref value_configs) = request.value_fields {
-        definition.value_fields = value_configs
-            .iter()
-            .map(config_to_value_field)
-            .collect();
-    }
-
-    // Update filter fields
-    if let Some(ref filter_configs) = request.filter_fields {
-        definition.filter_fields = filter_configs
-            .iter()
-            .map(config_to_pivot_filter)
-            .collect();
-    }
-
-    // Update layout
-    if let Some(ref layout_config) = request.layout {
-        apply_layout_config(&mut definition.layout, layout_config);
-    }
-
-    // Bump version for cache invalidation
-    definition.bump_version();
-
     let t_total = Instant::now();
 
-    // Recalculate view
-    let t0 = Instant::now();
-    let view = safe_calculate_pivot(definition, cache);
-    store_view(&pivot_state, request.pivot_id, &view);
-    let calc_ms = t0.elapsed().as_secs_f64() * 1000.0;
+    let pivot_id = request.pivot_id;
+
+    // Create cancellation token
+    let token = CancellationToken::new();
+    pivot_state.cancellation_tokens.lock().unwrap().insert(pivot_id, token.clone());
+
+    // 1. Lock briefly: apply field updates, clone old + new state, release lock
+    let (old_definition, old_cache, new_definition, new_cache, dest_sheet_idx) = {
+        let mut pivot_tables = pivot_state.pivot_tables.lock().unwrap();
+        let (definition, cache) = pivot_tables
+            .get_mut(&pivot_id)
+            .ok_or_else(|| format!("Pivot table {} not found", pivot_id))?;
+
+        // Save old state for reversion on cancel (both in-flight and post-completion)
+        let old_definition = definition.clone();
+        let old_cache = cache.clone();
+        pivot_state.previous_states.lock().unwrap()
+            .insert(pivot_id, (old_definition.clone(), old_cache.clone()));
+
+        // Update row fields (preserving collapse state for fields that remain)
+        if let Some(ref row_configs) = request.row_fields {
+            let old_row_fields = definition.row_fields.clone();
+            definition.row_fields = row_configs
+                .iter()
+                .map(config_to_pivot_field)
+                .collect();
+            preserve_collapse_state(&mut definition.row_fields, &old_row_fields);
+        }
+
+        // Update column fields (preserving collapse state for fields that remain)
+        if let Some(ref col_configs) = request.column_fields {
+            let old_col_fields = definition.column_fields.clone();
+            definition.column_fields = col_configs
+                .iter()
+                .map(config_to_pivot_field)
+                .collect();
+            preserve_collapse_state(&mut definition.column_fields, &old_col_fields);
+        }
+
+        // Update value fields
+        if let Some(ref value_configs) = request.value_fields {
+            definition.value_fields = value_configs
+                .iter()
+                .map(config_to_value_field)
+                .collect();
+        }
+
+        // Update filter fields
+        if let Some(ref filter_configs) = request.filter_fields {
+            definition.filter_fields = filter_configs
+                .iter()
+                .map(config_to_pivot_filter)
+                .collect();
+        }
+
+        // Update layout
+        if let Some(ref layout_config) = request.layout {
+            apply_layout_config(&mut definition.layout, layout_config);
+        }
+
+        // Bump version for cache invalidation
+        definition.bump_version();
+
+        let dest_sheet_idx = resolve_dest_sheet_index(&state, definition);
+        let new_def = definition.clone();
+        let new_cache = cache.clone();
+        (old_definition, old_cache, new_def, new_cache, dest_sheet_idx)
+    };
+    // pivot_tables lock released here — UI is unblocked
+
+    // 2. Emit progress: calculating (stage 2 of 4)
+    emit_pivot_progress(&window, pivot_id, "Calculating...", 1, 4);
+
+    // 3. Heavy computation on blocking thread pool (does not hold any Mutex)
+    let definition = new_definition;
+    let mut cache = new_cache;
+    let calc_result = tokio::task::spawn_blocking(move || {
+        let t0 = Instant::now();
+        let view = safe_calculate_pivot(&definition, &mut cache);
+        let calc_ms = t0.elapsed().as_secs_f64() * 1000.0;
+        (view, definition, cache, calc_ms)
+    })
+    .await
+    .map_err(|e| format!("Pivot computation failed: {}", e))?;
+
+    let (view, definition, mut cache, calc_ms) = calc_result;
+
+    // Check cancellation after computation
+    if token.is_cancelled() {
+        log_info!("PIVOT", "update_pivot_fields pivot_id={} CANCELLED after calculation", pivot_id);
+        {
+            let mut pivot_tables = pivot_state.pivot_tables.lock().unwrap();
+            if let Some((def, c)) = pivot_tables.get_mut(&pivot_id) {
+                *def = old_definition;
+                *c = old_cache;
+            }
+        }
+        pivot_state.cancellation_tokens.lock().unwrap().remove(&pivot_id);
+        return Err("Pivot operation cancelled".into());
+    }
+
+    // 4. Emit progress: preparing response (stage 3 of 4)
+    emit_pivot_progress(&window, pivot_id, "Preparing response...", 2, 4);
 
     let t1 = Instant::now();
-    let response = view_to_response(&view, definition, cache);
+    let response = view_to_response(&view, &definition, &mut cache);
     let serialize_ms = t1.elapsed().as_secs_f64() * 1000.0;
-
-    // Get destination info before dropping pivot_tables lock
-    let destination = definition.destination;
-    let pivot_id = definition.id;
     let auto_fit = definition.layout.auto_fit_column_widths;
+    let destination = definition.destination;
 
-    // Resolve destination sheet index from definition
-    let dest_sheet_idx = resolve_dest_sheet_index(&state, definition);
+    // 5. Put updated definition + cache back
+    {
+        let mut pivot_tables = pivot_state.pivot_tables.lock().unwrap();
+        if let Some((def, c)) = pivot_tables.get_mut(&pivot_id) {
+            *def = definition;
+            *c = cache;
+        }
+    }
 
-    drop(pivot_tables);
+    // Store view for windowed cell fetching
+    store_view(&pivot_state, pivot_id, &view);
+
+    // 6. Emit progress: writing to grid (stage 4 of 4)
+    emit_pivot_progress(&window, pivot_id, "Updating grid...", 3, 4);
+
+    // Check cancellation before grid write
+    if token.is_cancelled() {
+        log_info!("PIVOT", "update_pivot_fields pivot_id={} CANCELLED before grid write", pivot_id);
+        {
+            let mut pivot_tables = pivot_state.pivot_tables.lock().unwrap();
+            if let Some((def, c)) = pivot_tables.get_mut(&pivot_id) {
+                *def = old_definition;
+                *c = old_cache;
+            }
+        }
+        pivot_state.cancellation_tokens.lock().unwrap().remove(&pivot_id);
+        return Err("Pivot operation cancelled".into());
+    }
 
     // Update pivot in grid (clears old region, writes new view)
     let t2 = Instant::now();
@@ -257,6 +397,9 @@ pub fn update_pivot_fields(
     update_pivot_region(&state, pivot_id, dest_sheet_idx, destination, &view);
     let region_ms = t3.elapsed().as_secs_f64() * 1000.0;
 
+    // Clean up cancellation token (keep previous_states for potential revert command)
+    pivot_state.cancellation_tokens.lock().unwrap().remove(&pivot_id);
+
     let total_ms = t_total.elapsed().as_secs_f64() * 1000.0;
     let payload_bytes = serde_json::to_string(&response).map(|s| s.len()).unwrap_or(0);
     let payload_kb = payload_bytes as f64 / 1024.0;
@@ -264,7 +407,7 @@ pub fn update_pivot_fields(
     log_perf!(
         "PIVOT",
         "update_pivot_fields pivot_id={} rows={}x{} auto_fit={} | calc={:.1}ms serialize={:.1}ms grid_write={:.1}ms region={:.1}ms TOTAL={:.1}ms | payload={:.1}KB",
-        request.pivot_id,
+        pivot_id,
         response.row_count,
         response.col_count,
         auto_fit,
@@ -281,8 +424,9 @@ pub fn update_pivot_fields(
 
 /// Toggles the expand/collapse state of a pivot group
 #[tauri::command]
-pub fn toggle_pivot_group(
-    state: State<AppState>,
+pub async fn toggle_pivot_group(
+    window: tauri::Window,
+    state: State<'_, AppState>,
     pivot_state: State<'_, PivotState>,
     request: ToggleGroupRequest,
 ) -> Result<PivotViewResponse, String> {
@@ -294,107 +438,169 @@ pub fn toggle_pivot_group(
         request.field_index
     );
 
-    let mut pivot_tables = pivot_state.pivot_tables.lock().unwrap();
-    let (definition, cache) = pivot_tables
-        .get_mut(&request.pivot_id)
-        .ok_or_else(|| format!("Pivot table {} not found", request.pivot_id))?;
-
-    // Get the appropriate field list
-    let fields = if request.is_row {
-        &mut definition.row_fields
-    } else {
-        &mut definition.column_fields
-    };
-
-    // Find and toggle the field
-    if request.field_index >= fields.len() {
-        return Err(format!(
-            "Field index {} out of range (max {})",
-            request.field_index,
-            fields.len().saturating_sub(1)
-        ));
-    }
-
-    let field = &mut fields[request.field_index];
-
-    if let Some(ref group_path) = request.group_path {
-        // Path-specific toggle: use the full group path as key so that
-        // e.g. "Female under Gothenburg" is independent of "Female under Stockholm".
-        let path_key = group_path
-            .iter()
-            .map(|(fi, vi)| format!("{}:{}", fi, vi))
-            .collect::<Vec<_>>()
-            .join("/");
-
-        if field.collapsed_items.contains(&path_key) {
-            field.collapsed_items.retain(|s| s != &path_key);
-        } else {
-            field.collapsed_items.push(path_key.clone());
-        }
-        // Keep field.collapsed unchanged: collapsed_items acts as an
-        // exception list relative to the field-level state.
-
-        log_debug!(
-            "PIVOT",
-            "toggled path '{}' in field {} collapsed={} (collapsed_items count={})",
-            path_key,
-            field.name,
-            field.collapsed,
-            field.collapsed_items.len()
-        );
-    } else if let Some(ref item_name) = request.value {
-        // Legacy per-item toggle: toggle a specific item in collapsed_items
-        if field.collapsed_items.contains(item_name) {
-            field.collapsed_items.retain(|s| s != item_name);
-        } else {
-            field.collapsed_items.push(item_name.clone());
-        }
-        // Keep field.collapsed unchanged: collapsed_items acts as an
-        // exception list relative to the field-level state.
-
-        log_debug!(
-            "PIVOT",
-            "toggled item '{}' in field {} (collapsed_items count={})",
-            item_name,
-            field.name,
-            field.collapsed_items.len()
-        );
-    } else {
-        // Field-level toggle: toggle all items, clear per-item overrides
-        field.collapsed = !field.collapsed;
-        field.collapsed_items.clear();
-
-        log_debug!(
-            "PIVOT",
-            "toggled field {} collapsed={}",
-            field.name,
-            field.collapsed
-        );
-    }
-
-    // Bump version
-    definition.bump_version();
-
     let t_total = Instant::now();
+    let pivot_id = request.pivot_id;
 
-    // Recalculate view
-    let t0 = Instant::now();
-    let view = safe_calculate_pivot(definition, cache);
-    store_view(&pivot_state, request.pivot_id, &view);
-    let calc_ms = t0.elapsed().as_secs_f64() * 1000.0;
+    // Create cancellation token
+    let token = CancellationToken::new();
+    pivot_state.cancellation_tokens.lock().unwrap().insert(pivot_id, token.clone());
+
+    // 1. Lock briefly: apply toggle, clone old + new state, release lock
+    let (old_definition, old_cache, new_definition, new_cache, dest_sheet_idx) = {
+        let mut pivot_tables = pivot_state.pivot_tables.lock().unwrap();
+        let (definition, cache) = pivot_tables
+            .get_mut(&pivot_id)
+            .ok_or_else(|| format!("Pivot table {} not found", pivot_id))?;
+
+        // Save old state for reversion on cancel
+        let old_definition = definition.clone();
+        let old_cache = cache.clone();
+        pivot_state.previous_states.lock().unwrap()
+            .insert(pivot_id, (old_definition.clone(), old_cache.clone()));
+
+        // Get the appropriate field list
+        let fields = if request.is_row {
+            &mut definition.row_fields
+        } else {
+            &mut definition.column_fields
+        };
+
+        // Find and toggle the field
+        if request.field_index >= fields.len() {
+            pivot_state.cancellation_tokens.lock().unwrap().remove(&pivot_id);
+            return Err(format!(
+                "Field index {} out of range (max {})",
+                request.field_index,
+                fields.len().saturating_sub(1)
+            ));
+        }
+
+        let field = &mut fields[request.field_index];
+
+        if let Some(ref group_path) = request.group_path {
+            let path_key = group_path
+                .iter()
+                .map(|(fi, vi)| format!("{}:{}", fi, vi))
+                .collect::<Vec<_>>()
+                .join("/");
+
+            if field.collapsed_items.contains(&path_key) {
+                field.collapsed_items.retain(|s| s != &path_key);
+            } else {
+                field.collapsed_items.push(path_key.clone());
+            }
+
+            log_debug!(
+                "PIVOT",
+                "toggled path '{}' in field {} collapsed={} (collapsed_items count={})",
+                path_key,
+                field.name,
+                field.collapsed,
+                field.collapsed_items.len()
+            );
+        } else if let Some(ref item_name) = request.value {
+            if field.collapsed_items.contains(item_name) {
+                field.collapsed_items.retain(|s| s != item_name);
+            } else {
+                field.collapsed_items.push(item_name.clone());
+            }
+
+            log_debug!(
+                "PIVOT",
+                "toggled item '{}' in field {} (collapsed_items count={})",
+                item_name,
+                field.name,
+                field.collapsed_items.len()
+            );
+        } else {
+            field.collapsed = !field.collapsed;
+            field.collapsed_items.clear();
+
+            log_debug!(
+                "PIVOT",
+                "toggled field {} collapsed={}",
+                field.name,
+                field.collapsed
+            );
+        }
+
+        // Bump version
+        definition.bump_version();
+
+        let dest_sheet_idx = resolve_dest_sheet_index(&state, definition);
+        let new_def = definition.clone();
+        let new_cache = cache.clone();
+        (old_definition, old_cache, new_def, new_cache, dest_sheet_idx)
+    };
+    // pivot_tables lock released here — UI is unblocked
+
+    // 2. Emit progress: calculating (stage 2 of 4)
+    emit_pivot_progress(&window, pivot_id, "Calculating...", 1, 4);
+
+    // 3. Heavy computation on blocking thread pool (does not hold any Mutex)
+    let definition = new_definition;
+    let mut cache = new_cache;
+    let calc_result = tokio::task::spawn_blocking(move || {
+        let t0 = Instant::now();
+        let view = safe_calculate_pivot(&definition, &mut cache);
+        let calc_ms = t0.elapsed().as_secs_f64() * 1000.0;
+        (view, definition, cache, calc_ms)
+    })
+    .await
+    .map_err(|e| format!("Pivot computation failed: {}", e))?;
+
+    let (view, definition, mut cache, calc_ms) = calc_result;
+
+    // Check cancellation after computation
+    if token.is_cancelled() {
+        log_info!("PIVOT", "toggle_pivot_group pivot_id={} CANCELLED after calculation", pivot_id);
+        {
+            let mut pivot_tables = pivot_state.pivot_tables.lock().unwrap();
+            if let Some((def, c)) = pivot_tables.get_mut(&pivot_id) {
+                *def = old_definition;
+                *c = old_cache;
+            }
+        }
+        pivot_state.cancellation_tokens.lock().unwrap().remove(&pivot_id);
+        return Err("Pivot operation cancelled".into());
+    }
+
+    // 4. Emit progress: preparing response (stage 3 of 4)
+    emit_pivot_progress(&window, pivot_id, "Preparing response...", 2, 4);
 
     let t1 = Instant::now();
-    let response = view_to_response(&view, definition, cache);
+    let response = view_to_response(&view, &definition, &mut cache);
     let serialize_ms = t1.elapsed().as_secs_f64() * 1000.0;
-
-    // Get destination info
     let destination = definition.destination;
-    let pivot_id = definition.id;
 
-    // Resolve destination sheet index from definition
-    let dest_sheet_idx = resolve_dest_sheet_index(&state, definition);
+    // 5. Put updated definition + cache back
+    {
+        let mut pivot_tables = pivot_state.pivot_tables.lock().unwrap();
+        if let Some((def, c)) = pivot_tables.get_mut(&pivot_id) {
+            *def = definition;
+            *c = cache;
+        }
+    }
 
-    drop(pivot_tables);
+    // Store view for windowed cell fetching
+    store_view(&pivot_state, pivot_id, &view);
+
+    // 6. Emit progress: writing to grid (stage 4 of 4)
+    emit_pivot_progress(&window, pivot_id, "Updating grid...", 3, 4);
+
+    // Check cancellation before grid write
+    if token.is_cancelled() {
+        log_info!("PIVOT", "toggle_pivot_group pivot_id={} CANCELLED before grid write", pivot_id);
+        {
+            let mut pivot_tables = pivot_state.pivot_tables.lock().unwrap();
+            if let Some((def, c)) = pivot_tables.get_mut(&pivot_id) {
+                *def = old_definition;
+                *c = old_cache;
+            }
+        }
+        pivot_state.cancellation_tokens.lock().unwrap().remove(&pivot_id);
+        return Err("Pivot operation cancelled".into());
+    }
 
     // Update pivot in grid (clears old region, writes new view)
     let t2 = Instant::now();
@@ -404,12 +610,15 @@ pub fn toggle_pivot_group(
     // Update pivot region tracking
     update_pivot_region(&state, pivot_id, dest_sheet_idx, destination, &view);
 
+    // Clean up cancellation token
+    pivot_state.cancellation_tokens.lock().unwrap().remove(&pivot_id);
+
     let total_ms = t_total.elapsed().as_secs_f64() * 1000.0;
 
     log_perf!(
         "PIVOT",
         "toggle_pivot_group pivot_id={} rows={}x{} | calc={:.1}ms serialize={:.1}ms grid_write={:.1}ms TOTAL={:.1}ms",
-        request.pivot_id,
+        pivot_id,
         response.row_count,
         response.col_count,
         calc_ms,
@@ -629,66 +838,152 @@ pub fn get_pivot_source_data(
 
 /// Refreshes the pivot cache from current grid data
 #[tauri::command]
-pub fn refresh_pivot_cache(
-    state: State<AppState>,
+pub async fn refresh_pivot_cache(
+    window: tauri::Window,
+    state: State<'_, AppState>,
     pivot_state: State<'_, PivotState>,
     pivot_id: PivotId,
 ) -> Result<PivotViewResponse, String> {
     log_info!("PIVOT", "refresh_pivot_cache pivot_id={}", pivot_id);
 
-    // First, get the definition to know the source range
-    let pivot_tables = pivot_state.pivot_tables.lock().unwrap();
-    let (definition, _) = pivot_tables
-        .get(&pivot_id)
-        .ok_or_else(|| format!("Pivot table {} not found", pivot_id))?;
+    let t_total = Instant::now();
 
-    let source_start = definition.source_start;
-    let source_end = definition.source_end;
-    let has_headers = definition.source_has_headers;
-    let destination = definition.destination;
-    
-    // Resolve destination sheet index from definition
-    let dest_sheet_idx = resolve_dest_sheet_index(&state, definition);
-    
-    drop(pivot_tables);
+    // Create cancellation token
+    let token = CancellationToken::new();
+    pivot_state.cancellation_tokens.lock().unwrap().insert(pivot_id, token.clone());
 
-    // Get fresh data from grid
-    let grids = state.grids.lock().unwrap();
-    let source_sheet_idx = 0; // TODO: resolve from definition.source_sheet
-    let grid = grids
-        .get(source_sheet_idx)
-        .ok_or_else(|| "Source sheet not found".to_string())?;
+    // 1. Lock briefly: read source info, build new cache from grid, release locks
+    let (old_definition, old_cache, new_definition, new_cache, dest_sheet_idx, destination) = {
+        let pivot_tables = pivot_state.pivot_tables.lock().unwrap();
+        let (definition, cache) = pivot_tables
+            .get(&pivot_id)
+            .ok_or_else(|| format!("Pivot table {} not found", pivot_id))?;
 
-    let (new_cache, _headers) = build_cache_from_grid(grid, source_start, source_end, has_headers)?;
-    drop(grids);
+        let source_start = definition.source_start;
+        let source_end = definition.source_end;
+        let has_headers = definition.source_has_headers;
+        let destination = definition.destination;
+        let dest_sheet_idx = resolve_dest_sheet_index(&state, definition);
 
-    // Update the stored cache
-    let mut pivot_tables = pivot_state.pivot_tables.lock().unwrap();
-    let (definition, cache) = pivot_tables
-        .get_mut(&pivot_id)
-        .ok_or_else(|| format!("Pivot table {} not found", pivot_id))?;
+        // Save old state for reversion on cancel
+        let old_definition = definition.clone();
+        let old_cache = cache.clone();
+        pivot_state.previous_states.lock().unwrap()
+            .insert(pivot_id, (old_definition.clone(), old_cache.clone()));
 
-    *cache = new_cache;
-    definition.bump_version();
+        drop(pivot_tables);
 
-    let view = safe_calculate_pivot(definition, cache);
+        // Get fresh data from grid (needs grids lock, but briefly)
+        let grids = state.grids.lock().unwrap();
+        let source_sheet_idx = 0; // TODO: resolve from definition.source_sheet
+        let grid = grids
+            .get(source_sheet_idx)
+            .ok_or_else(|| "Source sheet not found".to_string())?;
+
+        let (fresh_cache, _headers) = build_cache_from_grid(grid, source_start, source_end, has_headers)?;
+        drop(grids);
+
+        // Update stored cache + bump version
+        let mut pivot_tables = pivot_state.pivot_tables.lock().unwrap();
+        let (definition, cache) = pivot_tables
+            .get_mut(&pivot_id)
+            .ok_or_else(|| format!("Pivot table {} not found", pivot_id))?;
+
+        *cache = fresh_cache;
+        definition.bump_version();
+
+        let new_def = definition.clone();
+        let new_cache = cache.clone();
+        (old_definition, old_cache, new_def, new_cache, dest_sheet_idx, destination)
+    };
+
+    // 2. Emit progress: calculating (stage 2 of 4)
+    emit_pivot_progress(&window, pivot_id, "Calculating...", 1, 4);
+
+    // 3. Heavy computation on blocking thread pool
+    let definition = new_definition;
+    let mut cache = new_cache;
+    let calc_result = tokio::task::spawn_blocking(move || {
+        let t0 = Instant::now();
+        let view = safe_calculate_pivot(&definition, &mut cache);
+        let calc_ms = t0.elapsed().as_secs_f64() * 1000.0;
+        (view, definition, cache, calc_ms)
+    })
+    .await
+    .map_err(|e| format!("Pivot computation failed: {}", e))?;
+
+    let (view, definition, mut cache, calc_ms) = calc_result;
+
+    // Check cancellation after computation
+    if token.is_cancelled() {
+        log_info!("PIVOT", "refresh_pivot_cache pivot_id={} CANCELLED after calculation", pivot_id);
+        {
+            let mut pivot_tables = pivot_state.pivot_tables.lock().unwrap();
+            if let Some((def, c)) = pivot_tables.get_mut(&pivot_id) {
+                *def = old_definition;
+                *c = old_cache;
+            }
+        }
+        pivot_state.cancellation_tokens.lock().unwrap().remove(&pivot_id);
+        return Err("Pivot operation cancelled".into());
+    }
+
+    // 4. Emit progress: preparing response (stage 3 of 4)
+    emit_pivot_progress(&window, pivot_id, "Preparing response...", 2, 4);
+
+    let t1 = Instant::now();
+    let response = view_to_response(&view, &definition, &mut cache);
+    let serialize_ms = t1.elapsed().as_secs_f64() * 1000.0;
+
+    // 5. Put updated definition + cache back
+    {
+        let mut pivot_tables = pivot_state.pivot_tables.lock().unwrap();
+        if let Some((def, c)) = pivot_tables.get_mut(&pivot_id) {
+            *def = definition;
+            *c = cache;
+        }
+    }
+
+    // Store view for windowed cell fetching
     store_view(&pivot_state, pivot_id, &view);
-    let response = view_to_response(&view, definition, cache);
 
-    drop(pivot_tables);
+    // 6. Emit progress: writing to grid (stage 4 of 4)
+    emit_pivot_progress(&window, pivot_id, "Updating grid...", 3, 4);
 
-    // Update pivot in grid (clears old region, writes new view)
+    // Check cancellation before grid write
+    if token.is_cancelled() {
+        log_info!("PIVOT", "refresh_pivot_cache pivot_id={} CANCELLED before grid write", pivot_id);
+        {
+            let mut pivot_tables = pivot_state.pivot_tables.lock().unwrap();
+            if let Some((def, c)) = pivot_tables.get_mut(&pivot_id) {
+                *def = old_definition;
+                *c = old_cache;
+            }
+        }
+        pivot_state.cancellation_tokens.lock().unwrap().remove(&pivot_id);
+        return Err("Pivot operation cancelled".into());
+    }
+
+    // Update pivot in grid
     update_pivot_in_grid(&state, pivot_id, dest_sheet_idx, destination, &view);
 
     // Update pivot region tracking
     update_pivot_region(&state, pivot_id, dest_sheet_idx, destination, &view);
 
-    log_info!(
+    // Clean up cancellation token
+    pivot_state.cancellation_tokens.lock().unwrap().remove(&pivot_id);
+
+    let total_ms = t_total.elapsed().as_secs_f64() * 1000.0;
+
+    log_perf!(
         "PIVOT",
-        "refreshed pivot_id={} version={} rows={}",
+        "refresh_pivot_cache pivot_id={} version={} rows={} | calc={:.1}ms serialize={:.1}ms TOTAL={:.1}ms",
         pivot_id,
         response.version,
-        response.row_count
+        response.row_count,
+        calc_ms,
+        serialize_ms,
+        total_ms
     );
 
     Ok(response)
@@ -2252,8 +2547,9 @@ pub fn expand_collapse_all(
 
 /// Refreshes all pivot tables in the workbook.
 #[tauri::command]
-pub fn refresh_all_pivot_tables(
-    state: State<AppState>,
+pub async fn refresh_all_pivot_tables(
+    window: tauri::Window,
+    state: State<'_, AppState>,
     pivot_state: State<'_, PivotState>,
 ) -> Result<Vec<PivotViewResponse>, String> {
     log_info!("PIVOT", "refresh_all_pivot_tables");
@@ -2265,7 +2561,7 @@ pub fn refresh_all_pivot_tables(
 
     let mut responses = Vec::new();
     for pivot_id in pivot_ids {
-        match refresh_pivot_cache(state.clone(), pivot_state.clone(), pivot_id) {
+        match refresh_pivot_cache(window.clone(), state.clone(), pivot_state.clone(), pivot_id).await {
             Ok(response) => responses.push(response),
             Err(e) => log_debug!("PIVOT", "Failed to refresh pivot {}: {}", pivot_id, e),
         }
@@ -2923,6 +3219,15 @@ pub async fn update_bi_pivot_fields(
         let bi_meta = pivot_state.bi_metadata.lock().unwrap();
         if !bi_meta.contains_key(&pivot_id) {
             return Err(format!("Pivot {} is not a BI-backed pivot", pivot_id));
+        }
+    }
+
+    // Save previous state for revert-on-cancel
+    {
+        let pivot_tables = pivot_state.pivot_tables.lock().unwrap();
+        if let Some((def, cache)) = pivot_tables.get(&pivot_id) {
+            pivot_state.previous_states.lock().unwrap()
+                .insert(pivot_id, (def.clone(), cache.clone()));
         }
     }
 

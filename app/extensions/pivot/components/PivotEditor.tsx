@@ -1,5 +1,5 @@
 //! FILENAME: app/extensions/pivot/components/PivotEditor.tsx
-import React, { useCallback, useState, useEffect, useMemo } from 'react';
+import React, { useCallback, useRef, useState, useEffect, useMemo } from 'react';
 import { styles } from './PivotEditor.styles';
 import { FieldList } from './FieldList';
 import { DropZones } from './DropZones';
@@ -89,6 +89,9 @@ export function PivotEditor({
     return set;
   });
 
+  // Ref to resetZones (set after usePivotEditorState, used in handleUpdate catch)
+  const resetZonesRef = useRef<(() => void) | null>(null);
+
   const handleUpdate = useCallback(async (request: UpdatePivotFieldsRequest) => {
     try {
       const t0 = performance.now();
@@ -125,7 +128,13 @@ export function PivotEditor({
         `[PERF][pivot] handleUpdate pivot_id=${request.pivotId} bi=${isBiPivot} | ipc=${ipcMs.toFixed(1)}ms total=${totalMs.toFixed(1)}ms`
       );
     } catch (error) {
-      console.error('Failed to update pivot fields:', error);
+      const msg = error instanceof Error ? error.message : String(error);
+      if (msg.includes("cancelled")) {
+        // User cancelled — revert the optimistic zone state
+        resetZonesRef.current?.();
+      } else {
+        console.error('Failed to update pivot fields:', error);
+      }
     }
   }, [isBiPivot, lookupColumns, onViewUpdate]);
 
@@ -145,6 +154,7 @@ export function PivotEditor({
     handleNumberFormatChange,
     handleDragStart,
     handleDragEnd,
+    resetZones,
   } = usePivotEditorState({
     pivotId,
     sourceFields,
@@ -155,6 +165,9 @@ export function PivotEditor({
     initialLayout,
     onUpdate: handleUpdate,
   });
+
+  // Wire up the reset ref so handleUpdate's catch block can access it
+  resetZonesRef.current = resetZones;
 
   // BI-specific: compute used columns ("Table.Column" keys) and used measures
   const usedColumnsSet = useMemo(() => {

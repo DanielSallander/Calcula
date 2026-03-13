@@ -2223,6 +2223,8 @@ pub fn run() {
             pivot::toggle_pivot_group,
             pivot::get_pivot_view,
             pivot::get_pivot_cell_window,
+            pivot::cancel_pivot_operation,
+            pivot::revert_pivot_operation,
             pivot::delete_pivot_table,
             pivot::get_pivot_source_data,
             pivot::refresh_pivot_cache,

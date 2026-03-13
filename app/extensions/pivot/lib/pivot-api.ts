@@ -11,7 +11,38 @@
  * sandboxed API layer, maintaining the Microkernel architecture.
  */
 
-import { cachePivotView } from "./pivotViewStore";
+import {
+  cachePivotView,
+  setLoading as _setLoading,
+  clearLoading as _clearLoading,
+  preserveCurrentView,
+  clearPreviousView,
+  restorePreviousView,
+  isUserCancelled,
+  clearUserCancelled,
+} from "./pivotViewStore";
+import { requestOverlayRedraw } from "../../../src/api/gridOverlays";
+
+/**
+ * Pipeline stages (total = 4):
+ *   1. Preparing...     (frontend, before IPC)
+ *   2. Calculating...   (backend, pivot engine)
+ *   3. Preparing response...  (backend, serialization)
+ *   4. Updating grid... (backend, grid write)
+ */
+const TOTAL_STAGES = 4;
+
+/** Set loading state AND trigger an overlay redraw so the indicator appears immediately. */
+function setLoading(pivotId: number, stage: string, stageIndex = 0, totalStages = TOTAL_STAGES): void {
+  _setLoading(pivotId, stage, stageIndex, totalStages);
+  requestOverlayRedraw();
+}
+
+/** Clear loading state AND trigger an overlay redraw to remove the indicator. */
+function clearLoading(pivotId: number): void {
+  _clearLoading(pivotId);
+  requestOverlayRedraw();
+}
 
 import {
   createPivotTable as apiCreatePivotTable,
@@ -53,6 +84,8 @@ import {
   updateBiPivotFields as apiUpdateBiPivotFields,
   setBiLookupColumns as apiSetBiLookupColumns,
   getPivotCellWindow as apiGetPivotCellWindow,
+  cancelPivotOperation as apiCancelPivotOperation,
+  revertPivotOperation as apiRevertPivotOperation,
 } from "../../../src/api/backend";
 
 // ============================================================================
@@ -476,15 +509,35 @@ export async function createPivotTable(
 export async function updatePivotFields(
   request: UpdatePivotFieldsRequest
 ): Promise<PivotViewResponse> {
+  preserveCurrentView(request.pivotId);
+  setLoading(request.pivotId, "Updating...");
   const t0 = performance.now();
-  const result = await apiUpdatePivotFields<UpdatePivotFieldsRequest, PivotViewResponse>(request);
-  const dt = performance.now() - t0;
-  // Cache immediately so refreshPivotViewCache can skip the redundant getPivotView call
-  cachePivotView(request.pivotId, result);
-  console.log(
-    `[PERF][pivot] updatePivotFields pivot_id=${request.pivotId} rows=${result.rowCount}x${result.colCount} | ipc=${dt.toFixed(1)}ms (cached)`
-  );
-  return result;
+  try {
+    const result = await apiUpdatePivotFields<UpdatePivotFieldsRequest, PivotViewResponse>(request);
+    // If the user cancelled while the IPC was in-flight, revert backend + suppress result
+    if (isUserCancelled(request.pivotId)) {
+      clearUserCancelled(request.pivotId);
+      restorePreviousView(request.pivotId);
+      // Revert backend state (definition + grid cells) to pre-operation state
+      apiRevertPivotOperation(request.pivotId).catch((e) =>
+        console.warn("[pivot] revert failed:", e)
+      );
+      throw new Error("Pivot operation cancelled");
+    }
+    const dt = performance.now() - t0;
+    cachePivotView(request.pivotId, result);
+    clearPreviousView(request.pivotId);
+    console.log(
+      `[PERF][pivot] updatePivotFields pivot_id=${request.pivotId} rows=${result.rowCount}x${result.colCount} | ipc=${dt.toFixed(1)}ms (cached)`
+    );
+    return result;
+  } catch (err) {
+    restorePreviousView(request.pivotId);
+    clearUserCancelled(request.pivotId);
+    throw err;
+  } finally {
+    clearLoading(request.pivotId);
+  }
 }
 
 /**
@@ -493,15 +546,33 @@ export async function updatePivotFields(
 export async function togglePivotGroup(
   request: ToggleGroupRequest
 ): Promise<PivotViewResponse> {
+  preserveCurrentView(request.pivotId);
+  setLoading(request.pivotId, "Updating...");
   const t0 = performance.now();
-  const result = await apiTogglePivotGroup<ToggleGroupRequest, PivotViewResponse>(request);
-  const dt = performance.now() - t0;
-  // Cache immediately so refreshPivotViewCache can skip the redundant getPivotView call
-  cachePivotView(request.pivotId, result);
-  console.log(
-    `[PERF][pivot] togglePivotGroup pivot_id=${request.pivotId} rows=${result.rowCount}x${result.colCount} | ipc=${dt.toFixed(1)}ms (cached)`
-  );
-  return result;
+  try {
+    const result = await apiTogglePivotGroup<ToggleGroupRequest, PivotViewResponse>(request);
+    if (isUserCancelled(request.pivotId)) {
+      clearUserCancelled(request.pivotId);
+      restorePreviousView(request.pivotId);
+      apiRevertPivotOperation(request.pivotId).catch((e) =>
+        console.warn("[pivot] revert failed:", e)
+      );
+      throw new Error("Pivot operation cancelled");
+    }
+    const dt = performance.now() - t0;
+    cachePivotView(request.pivotId, result);
+    clearPreviousView(request.pivotId);
+    console.log(
+      `[PERF][pivot] togglePivotGroup pivot_id=${request.pivotId} rows=${result.rowCount}x${result.colCount} | ipc=${dt.toFixed(1)}ms (cached)`
+    );
+    return result;
+  } catch (err) {
+    restorePreviousView(request.pivotId);
+    clearUserCancelled(request.pivotId);
+    throw err;
+  } finally {
+    clearLoading(request.pivotId);
+  }
 }
 
 /**
@@ -550,7 +621,27 @@ export async function getPivotSourceData(
  * Refreshes the pivot cache from current grid data.
  */
 export async function refreshPivotCache(pivotId: PivotId): Promise<PivotViewResponse> {
-  return apiRefreshPivotCache<PivotViewResponse>(pivotId);
+  preserveCurrentView(pivotId);
+  setLoading(pivotId, "Refreshing...");
+  try {
+    const result = await apiRefreshPivotCache<PivotViewResponse>(pivotId);
+    if (isUserCancelled(pivotId)) {
+      clearUserCancelled(pivotId);
+      restorePreviousView(pivotId);
+      apiRevertPivotOperation(pivotId).catch((e) =>
+        console.warn("[pivot] revert failed:", e)
+      );
+      throw new Error("Pivot operation cancelled");
+    }
+    clearPreviousView(pivotId);
+    return result;
+  } catch (err) {
+    restorePreviousView(pivotId);
+    clearUserCancelled(pivotId);
+    throw err;
+  } finally {
+    clearLoading(pivotId);
+  }
 }
 
 /**
@@ -1052,9 +1143,14 @@ export async function getPivotLayoutRanges(pivotId: PivotId): Promise<PivotLayou
 export async function updatePivotLayout(
   request: UpdatePivotLayoutRequest
 ): Promise<PivotViewResponse> {
-  const result = await apiUpdatePivotLayout<UpdatePivotLayoutRequest, PivotViewResponse>(request);
-  cachePivotView(request.pivotId, result);
-  return result;
+  setLoading(request.pivotId, "Updating...");
+  try {
+    const result = await apiUpdatePivotLayout<UpdatePivotLayoutRequest, PivotViewResponse>(request);
+    cachePivotView(request.pivotId, result);
+    return result;
+  } finally {
+    clearLoading(request.pivotId);
+  }
 }
 
 /**
@@ -1070,9 +1166,14 @@ export async function getPivotHierarchies(pivotId: PivotId): Promise<PivotHierar
 export async function addPivotHierarchy(
   request: AddHierarchyRequest
 ): Promise<PivotViewResponse> {
-  const result = await apiAddPivotHierarchy<AddHierarchyRequest, PivotViewResponse>(request);
-  cachePivotView(request.pivotId, result);
-  return result;
+  setLoading(request.pivotId, "Updating...");
+  try {
+    const result = await apiAddPivotHierarchy<AddHierarchyRequest, PivotViewResponse>(request);
+    cachePivotView(request.pivotId, result);
+    return result;
+  } finally {
+    clearLoading(request.pivotId);
+  }
 }
 
 /**
@@ -1081,9 +1182,14 @@ export async function addPivotHierarchy(
 export async function removePivotHierarchy(
   request: RemoveHierarchyRequest
 ): Promise<PivotViewResponse> {
-  const result = await apiRemovePivotHierarchy<RemoveHierarchyRequest, PivotViewResponse>(request);
-  cachePivotView(request.pivotId, result);
-  return result;
+  setLoading(request.pivotId, "Updating...");
+  try {
+    const result = await apiRemovePivotHierarchy<RemoveHierarchyRequest, PivotViewResponse>(request);
+    cachePivotView(request.pivotId, result);
+    return result;
+  } finally {
+    clearLoading(request.pivotId);
+  }
 }
 
 /**
@@ -1092,9 +1198,14 @@ export async function removePivotHierarchy(
 export async function movePivotField(
   request: MoveFieldRequest
 ): Promise<PivotViewResponse> {
-  const result = await apiMovePivotField<MoveFieldRequest, PivotViewResponse>(request);
-  cachePivotView(request.pivotId, result);
-  return result;
+  setLoading(request.pivotId, "Updating...");
+  try {
+    const result = await apiMovePivotField<MoveFieldRequest, PivotViewResponse>(request);
+    cachePivotView(request.pivotId, result);
+    return result;
+  } finally {
+    clearLoading(request.pivotId);
+  }
 }
 
 /**
@@ -1103,9 +1214,14 @@ export async function movePivotField(
 export async function setPivotAggregation(
   request: SetAggregationRequest
 ): Promise<PivotViewResponse> {
-  const result = await apiSetPivotAggregation<SetAggregationRequest, PivotViewResponse>(request);
-  cachePivotView(request.pivotId, result);
-  return result;
+  setLoading(request.pivotId, "Updating...");
+  try {
+    const result = await apiSetPivotAggregation<SetAggregationRequest, PivotViewResponse>(request);
+    cachePivotView(request.pivotId, result);
+    return result;
+  } finally {
+    clearLoading(request.pivotId);
+  }
 }
 
 /**
@@ -1114,9 +1230,14 @@ export async function setPivotAggregation(
 export async function setPivotNumberFormat(
   request: SetNumberFormatRequest
 ): Promise<PivotViewResponse> {
-  const result = await apiSetPivotNumberFormat<SetNumberFormatRequest, PivotViewResponse>(request);
-  cachePivotView(request.pivotId, result);
-  return result;
+  setLoading(request.pivotId, "Updating...");
+  try {
+    const result = await apiSetPivotNumberFormat<SetNumberFormatRequest, PivotViewResponse>(request);
+    cachePivotView(request.pivotId, result);
+    return result;
+  } finally {
+    clearLoading(request.pivotId);
+  }
 }
 
 /**
@@ -1125,9 +1246,14 @@ export async function setPivotNumberFormat(
 export async function applyPivotFilter(
   request: ApplyPivotFilterRequest
 ): Promise<PivotViewResponse> {
-  const result = await apiApplyPivotFilter<ApplyPivotFilterRequest, PivotViewResponse>(request);
-  cachePivotView(request.pivotId, result);
-  return result;
+  setLoading(request.pivotId, "Filtering...");
+  try {
+    const result = await apiApplyPivotFilter<ApplyPivotFilterRequest, PivotViewResponse>(request);
+    cachePivotView(request.pivotId, result);
+    return result;
+  } finally {
+    clearLoading(request.pivotId);
+  }
 }
 
 /**
@@ -1136,9 +1262,14 @@ export async function applyPivotFilter(
 export async function clearPivotFilter(
   request: ClearPivotFilterRequest
 ): Promise<PivotViewResponse> {
-  const result = await apiClearPivotFilter<ClearPivotFilterRequest, PivotViewResponse>(request);
-  cachePivotView(request.pivotId, result);
-  return result;
+  setLoading(request.pivotId, "Filtering...");
+  try {
+    const result = await apiClearPivotFilter<ClearPivotFilterRequest, PivotViewResponse>(request);
+    cachePivotView(request.pivotId, result);
+    return result;
+  } finally {
+    clearLoading(request.pivotId);
+  }
 }
 
 /**
@@ -1147,9 +1278,14 @@ export async function clearPivotFilter(
 export async function sortPivotField(
   request: SortPivotFieldRequest
 ): Promise<PivotViewResponse> {
-  const result = await apiSortPivotField<SortPivotFieldRequest, PivotViewResponse>(request);
-  cachePivotView(request.pivotId, result);
-  return result;
+  setLoading(request.pivotId, "Sorting...");
+  try {
+    const result = await apiSortPivotField<SortPivotFieldRequest, PivotViewResponse>(request);
+    cachePivotView(request.pivotId, result);
+    return result;
+  } finally {
+    clearLoading(request.pivotId);
+  }
 }
 
 /**
@@ -1168,9 +1304,14 @@ export async function getPivotFieldInfo(
 export async function setPivotItemVisibility(
   request: SetItemVisibilityRequest
 ): Promise<PivotViewResponse> {
-  const result = await apiSetPivotItemVisibility<SetItemVisibilityRequest, PivotViewResponse>(request);
-  cachePivotView(request.pivotId, result);
-  return result;
+  setLoading(request.pivotId, "Filtering...");
+  try {
+    const result = await apiSetPivotItemVisibility<SetItemVisibilityRequest, PivotViewResponse>(request);
+    cachePivotView(request.pivotId, result);
+    return result;
+  } finally {
+    clearLoading(request.pivotId);
+  }
 }
 
 /**
@@ -1243,9 +1384,14 @@ export interface ExpandCollapseAllRequest {
 export async function setPivotItemExpanded(
   request: SetItemExpandedRequest
 ): Promise<PivotViewResponse> {
-  const result = await apiSetPivotItemExpanded<SetItemExpandedRequest, PivotViewResponse>(request);
-  cachePivotView(request.pivotId, result);
-  return result;
+  setLoading(request.pivotId, "Updating...");
+  try {
+    const result = await apiSetPivotItemExpanded<SetItemExpandedRequest, PivotViewResponse>(request);
+    cachePivotView(request.pivotId, result);
+    return result;
+  } finally {
+    clearLoading(request.pivotId);
+  }
 }
 
 /**
@@ -1254,9 +1400,14 @@ export async function setPivotItemExpanded(
 export async function expandCollapseLevel(
   request: ExpandCollapseLevelRequest
 ): Promise<PivotViewResponse> {
-  const result = await apiExpandCollapseLevel<ExpandCollapseLevelRequest, PivotViewResponse>(request);
-  cachePivotView(request.pivotId, result);
-  return result;
+  setLoading(request.pivotId, "Updating...");
+  try {
+    const result = await apiExpandCollapseLevel<ExpandCollapseLevelRequest, PivotViewResponse>(request);
+    cachePivotView(request.pivotId, result);
+    return result;
+  } finally {
+    clearLoading(request.pivotId);
+  }
 }
 
 /**
@@ -1265,9 +1416,14 @@ export async function expandCollapseLevel(
 export async function expandCollapseAll(
   request: ExpandCollapseAllRequest
 ): Promise<PivotViewResponse> {
-  const result = await apiExpandCollapseAll<ExpandCollapseAllRequest, PivotViewResponse>(request);
-  cachePivotView(request.pivotId, result);
-  return result;
+  setLoading(request.pivotId, "Updating...");
+  try {
+    const result = await apiExpandCollapseAll<ExpandCollapseAllRequest, PivotViewResponse>(request);
+    cachePivotView(request.pivotId, result);
+    return result;
+  } finally {
+    clearLoading(request.pivotId);
+  }
 }
 
 // ============================================================================
@@ -1318,9 +1474,14 @@ export interface UngroupFieldRequest {
 export async function groupPivotField(
   request: GroupFieldRequest
 ): Promise<PivotViewResponse> {
-  const result = await apiGroupPivotField<GroupFieldRequest, PivotViewResponse>(request);
-  cachePivotView(request.pivotId, result);
-  return result;
+  setLoading(request.pivotId, "Grouping...");
+  try {
+    const result = await apiGroupPivotField<GroupFieldRequest, PivotViewResponse>(request);
+    cachePivotView(request.pivotId, result);
+    return result;
+  } finally {
+    clearLoading(request.pivotId);
+  }
 }
 
 /**
@@ -1329,9 +1490,14 @@ export async function groupPivotField(
 export async function createManualGroup(
   request: CreateManualGroupRequest
 ): Promise<PivotViewResponse> {
-  const result = await apiCreateManualGroup<CreateManualGroupRequest, PivotViewResponse>(request);
-  cachePivotView(request.pivotId, result);
-  return result;
+  setLoading(request.pivotId, "Grouping...");
+  try {
+    const result = await apiCreateManualGroup<CreateManualGroupRequest, PivotViewResponse>(request);
+    cachePivotView(request.pivotId, result);
+    return result;
+  } finally {
+    clearLoading(request.pivotId);
+  }
 }
 
 /**
@@ -1340,9 +1506,14 @@ export async function createManualGroup(
 export async function ungroupPivotField(
   request: UngroupFieldRequest
 ): Promise<PivotViewResponse> {
-  const result = await apiUngroupPivotField<UngroupFieldRequest, PivotViewResponse>(request);
-  cachePivotView(request.pivotId, result);
-  return result;
+  setLoading(request.pivotId, "Ungrouping...");
+  try {
+    const result = await apiUngroupPivotField<UngroupFieldRequest, PivotViewResponse>(request);
+    cachePivotView(request.pivotId, result);
+    return result;
+  } finally {
+    clearLoading(request.pivotId);
+  }
 }
 
 // ============================================================================
@@ -1401,14 +1572,34 @@ export async function createFromBiModel(
 export async function updateBiFields(
   request: UpdateBiPivotFieldsRequest
 ): Promise<PivotViewResponse> {
+  preserveCurrentView(request.pivotId);
+  setLoading(request.pivotId, "Querying data...");
   const t0 = performance.now();
-  const result = await apiUpdateBiPivotFields<UpdateBiPivotFieldsRequest, PivotViewResponse>(request);
-  const dt = performance.now() - t0;
-  cachePivotView(request.pivotId, result);
-  console.log(
-    `[PERF][pivot] updateBiFields pivot_id=${request.pivotId} rows=${result.rowCount}x${result.colCount} | ipc=${dt.toFixed(1)}ms (cached)`
-  );
-  return result;
+  try {
+    const result = await apiUpdateBiPivotFields<UpdateBiPivotFieldsRequest, PivotViewResponse>(request);
+    // If the user cancelled while the IPC was in-flight, revert backend + suppress result
+    if (isUserCancelled(request.pivotId)) {
+      clearUserCancelled(request.pivotId);
+      restorePreviousView(request.pivotId);
+      apiRevertPivotOperation(request.pivotId).catch((e) =>
+        console.warn("[pivot] revert failed:", e)
+      );
+      throw new Error("Pivot operation cancelled");
+    }
+    const dt = performance.now() - t0;
+    cachePivotView(request.pivotId, result);
+    clearPreviousView(request.pivotId);
+    console.log(
+      `[PERF][pivot] updateBiFields pivot_id=${request.pivotId} rows=${result.rowCount}x${result.colCount} | ipc=${dt.toFixed(1)}ms (cached)`
+    );
+    return result;
+  } catch (err) {
+    restorePreviousView(request.pivotId);
+    clearUserCancelled(request.pivotId);
+    throw err;
+  } finally {
+    clearLoading(request.pivotId);
+  }
 }
 
 /**
@@ -1420,4 +1611,11 @@ export async function setBiLookupColumns(
   lookupColumns: string[]
 ): Promise<void> {
   return apiSetBiLookupColumns(pivotId, lookupColumns);
+}
+
+/**
+ * Cancels an in-progress pivot operation. The pivot reverts to its previous state.
+ */
+export async function cancelPivotOperation(pivotId: PivotId): Promise<void> {
+  return apiCancelPivotOperation(pivotId);
 }

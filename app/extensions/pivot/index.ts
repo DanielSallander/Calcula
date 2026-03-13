@@ -16,6 +16,8 @@ import {
 } from "../../src/api";
 
 import { PivotEvents } from "./lib/pivotEvents";
+import type { PivotProgressEvent } from "./lib/pivotEvents";
+import { listenTauriEvent } from "../../src/api/backend";
 
 import {
   registerGridOverlay,
@@ -62,7 +64,7 @@ import {
   forceRecheck,
 } from "./handlers/selectionHandler";
 import type { PivotRegionData } from "./types";
-import { getPivotRegionsForSheet, getPivotAtCell, getPivotView, togglePivotGroup, getPivotCellWindow } from "./lib/pivot-api";
+import { getPivotRegionsForSheet, getPivotAtCell, getPivotView, togglePivotGroup, getPivotCellWindow, cancelPivotOperation } from "./lib/pivot-api";
 import type { PivotViewResponse } from "./lib/pivot-api";
 import {
   cachePivotView,
@@ -73,6 +75,12 @@ import {
   consumeFreshFlag,
   getCellWindowCache,
   ensureCellWindow,
+  isLoading,
+  getLoadingState,
+  setLoading,
+  clearLoading,
+  restorePreviousView,
+  markUserCancelled,
 } from "./lib/pivotViewStore";
 import { drawPivotCell, DEFAULT_PIVOT_THEME } from "./rendering/pivot";
 import type { PivotCellDrawResult } from "./rendering/pivot";
@@ -125,11 +133,15 @@ interface StoredFilterDropdownBounds {
 /** Map of filter dropdown button bounds keyed by "pivotId-fieldIndex", updated every render. */
 const overlayFilterDropdownBounds = new Map<string, StoredFilterDropdownBounds>();
 
+/** Map of cancel button bounds keyed by pivotId, updated every render. */
+const overlayCancelBounds = new Map<number, { x: number; y: number; width: number; height: number }>();
+
 /** Clear all stored icon bounds (called at start of each render cycle). */
 function clearOverlayIconBounds(): void {
   overlayIconBounds.clear();
   overlayHeaderFilterBounds.clear();
   overlayFilterDropdownBounds.clear();
+  overlayCancelBounds.clear();
 }
 
 /** Cache of pivot region bounds keyed by pivotId, for coordinate conversion in click handlers. */
@@ -257,6 +269,107 @@ function drawPivotBackground(overlayCtx: OverlayRenderContext): void {
   );
 
   ctx.restore();
+}
+
+// ============================================================================
+// Loading Overlay
+// ============================================================================
+
+/** Draw a loading overlay on top of the (dimmed) previous pivot view. */
+function drawLoadingOverlay(overlayCtx: OverlayRenderContext, pivotId: number): void {
+  const loadingState = getLoadingState(pivotId);
+  if (!loadingState) return;
+
+  const { ctx, region } = overlayCtx;
+  const startX = overlayGetColumnX(overlayCtx, region.startCol);
+  const startY = overlayGetRowY(overlayCtx, region.startRow);
+  const endY = overlayGetRowY(overlayCtx, region.endRow + 1);
+  const width = overlayGetColumnsWidth(overlayCtx, region.startCol, region.endCol);
+  const height = endY - startY;
+
+  if (width <= 0 || height <= 0) return;
+
+  const rowHeaderWidth = overlayGetRowHeaderWidth(overlayCtx);
+  const colHeaderHeight = overlayGetColHeaderHeight(overlayCtx);
+
+  ctx.save();
+  ctx.beginPath();
+  ctx.rect(
+    rowHeaderWidth,
+    colHeaderHeight,
+    ctx.canvas.width / (window.devicePixelRatio || 1) - rowHeaderWidth,
+    ctx.canvas.height / (window.devicePixelRatio || 1) - colHeaderHeight,
+  );
+  ctx.clip();
+
+  // Semi-transparent overlay to dim the previous view
+  ctx.fillStyle = "rgba(255, 255, 255, 0.6)";
+  ctx.fillRect(startX, startY, width, height);
+
+  // Indeterminate progress bar (3px, animated at top of pivot)
+  const BAR_HEIGHT = 3;
+  const elapsed = performance.now() - loadingState.startedAt;
+  const barWidth = width * 0.3;
+  const period = 1500; // ms for one full sweep
+  const progress = (elapsed % period) / period;
+  // Smooth ease-in-out using sine
+  const eased = 0.5 - 0.5 * Math.cos(progress * Math.PI * 2);
+  const barX = startX + (width - barWidth) * eased;
+
+  ctx.fillStyle = "#5B9BD5";
+  ctx.fillRect(barX, startY, barWidth, BAR_HEIGHT);
+
+  // Build stage text with step indicator, e.g. "Calculating... (2/4)"
+  const { stage, stageIndex, totalStages } = loadingState;
+  const stepText = totalStages > 0
+    ? `${stage} (${stageIndex + 1}/${totalStages})`
+    : stage;
+
+  // Position text and cancel button just below the progress bar (fixed at top)
+  const textY = startY + BAR_HEIGHT + 16;
+  const centerX = startX + width / 2;
+
+  ctx.fillStyle = "#555555";
+  ctx.font = "13px Segoe UI, sans-serif";
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+  ctx.fillText(stepText, centerX, textY);
+
+  // Cancel button (shown after 1s to avoid flicker for fast operations)
+  if (elapsed > 1000) {
+    const btnWidth = 70;
+    const btnHeight = 24;
+    const btnX = centerX - btnWidth / 2;
+    const btnY = textY + 14;
+
+    // Button background
+    ctx.fillStyle = "#e5e7eb";
+    ctx.strokeStyle = "#9ca3af";
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.roundRect(btnX, btnY, btnWidth, btnHeight, 4);
+    ctx.fill();
+    ctx.stroke();
+
+    // Button text
+    ctx.fillStyle = "#374151";
+    ctx.font = "12px Segoe UI, sans-serif";
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    ctx.fillText("Cancel", btnX + btnWidth / 2, btnY + btnHeight / 2);
+
+    // Store bounds for click handler
+    overlayCancelBounds.set(pivotId, { x: btnX, y: btnY, width: btnWidth, height: btnHeight });
+  }
+
+  ctx.restore();
+
+  // Schedule next animation frame to keep the bar moving
+  requestAnimationFrame(() => {
+    if (isLoading(pivotId)) {
+      requestOverlayRedraw();
+    }
+  });
 }
 
 /**
@@ -715,6 +828,41 @@ export function registerPivotExtension(): void {
     })
   );
 
+  // Register click interceptor - handle cancel button clicks during loading
+  cleanupFunctions.push(
+    registerCellClickInterceptor(async (_row, _col, event) => {
+      if (!cachedCanvasElement || overlayCancelBounds.size === 0) return false;
+
+      const rect = cachedCanvasElement.getBoundingClientRect();
+      const canvasX = event.clientX - rect.left;
+      const canvasY = event.clientY - rect.top;
+
+      for (const [pivotId, bounds] of overlayCancelBounds.entries()) {
+        if (
+          canvasX >= bounds.x &&
+          canvasX <= bounds.x + bounds.width &&
+          canvasY >= bounds.y &&
+          canvasY <= bounds.y + bounds.height
+        ) {
+          // Immediately restore previous view on the frontend (instant feedback)
+          // Mark as user-cancelled so the in-flight result is suppressed
+          markUserCancelled(pivotId);
+          clearLoading(pivotId);
+          restorePreviousView(pivotId);
+          overlayCancelBounds.delete(pivotId);
+          requestOverlayRedraw();
+
+          // Also tell the backend to cancel (best-effort, may arrive too late)
+          cancelPivotOperation(pivotId).catch((err) => {
+            console.warn("[Pivot Extension] Cancel failed:", err);
+          });
+          return true;
+        }
+      }
+      return false;
+    })
+  );
+
   // Register click interceptor - handle expand/collapse icon clicks
   cleanupFunctions.push(
     registerCellClickInterceptor(async (row, col, event) => {
@@ -940,6 +1088,10 @@ export function registerPivotExtension(): void {
             if (cachedView) {
               drawStyledPivotView(ctx, cachedView);
             }
+            // Draw loading overlay on top of the (dimmed) previous view
+            if (isLoading(pivotId)) {
+              drawLoadingOverlay(ctx, pivotId);
+            }
           }
         }
       },
@@ -995,6 +1147,21 @@ export function registerPivotExtension(): void {
 
     if (!isOverInteractive) {
       for (const bounds of overlayFilterDropdownBounds.values()) {
+        if (
+          canvasX >= bounds.x &&
+          canvasX <= bounds.x + bounds.width &&
+          canvasY >= bounds.y &&
+          canvasY <= bounds.y + bounds.height
+        ) {
+          isOverInteractive = true;
+          break;
+        }
+      }
+    }
+
+    // Check cancel button hover
+    if (!isOverInteractive) {
+      for (const bounds of overlayCancelBounds.values()) {
         if (
           canvasX >= bounds.x &&
           canvasX <= bounds.x + bounds.width &&
@@ -1072,6 +1239,14 @@ export function registerPivotExtension(): void {
       (detail) => updateCachedRegions(detail.regions)
     )
   );
+
+  // Listen for backend progress events (Tauri events emitted during async pivot operations)
+  listenTauriEvent<PivotProgressEvent>(PivotEvents.PIVOT_PROGRESS, (payload) => {
+    setLoading(payload.pivotId, payload.stage, payload.stageIndex, payload.totalStages);
+    requestOverlayRedraw();
+  }).then((unlisten) => {
+    cleanupFunctions.push(unlisten);
+  });
 
   // Listen for pivot:refresh events (from filter changes, field updates, etc.)
   // These need a repaint since the grid isn't already refreshing.

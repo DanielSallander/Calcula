@@ -16,6 +16,16 @@ export const PivotEvents = {
   PIVOT_LAYOUT_STATE: "app:pivot-layout-state",
   /** Emitted by the Design tab when the user changes a layout option */
   PIVOT_LAYOUT_CHANGED: "app:pivot-layout-changed",
+  /** Emitted by the backend during long-running pivot operations (Tauri event) */
+  PIVOT_PROGRESS: "pivot:progress",
 } as const;
 
 export type PivotEventType = (typeof PivotEvents)[keyof typeof PivotEvents];
+
+/** Payload for pivot:progress Tauri events from the backend. */
+export interface PivotProgressEvent {
+  pivotId: number;
+  stage: string;
+  stageIndex: number;
+  totalStages: number;
+}

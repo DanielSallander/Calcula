@@ -439,6 +439,14 @@ export async function getPivotCellWindow<TResponse>(
   return invoke<TResponse>("get_pivot_cell_window", { pivotId, startRow, rowCount });
 }
 
+export async function cancelPivotOperation(pivotId: number): Promise<void> {
+  return invoke<void>("cancel_pivot_operation", { pivotId });
+}
+
+export async function revertPivotOperation(pivotId: number): Promise<void> {
+  return invoke<void>("revert_pivot_operation", { pivotId });
+}
+
 // ============================================================================
 // Clear Range Commands
 // ============================================================================

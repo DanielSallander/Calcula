@@ -92,6 +92,101 @@ export function getCachedPivotVersion(pivotId: number): number {
 export function deleteCachedPivotView(pivotId: number): void {
   pivotViewCache.delete(pivotId);
   cellWindowCaches.delete(pivotId);
+  loadingPivots.delete(pivotId);
+  previousViews.delete(pivotId);
+}
+
+// ============================================================================
+// USER CANCELLATION (suppresses result caching after frontend cancel)
+// ============================================================================
+
+const userCancelledPivots = new Set<number>();
+
+/** Mark a pivot as user-cancelled so incoming results are suppressed. */
+export function markUserCancelled(pivotId: number): void {
+  userCancelledPivots.add(pivotId);
+}
+
+/** Check if a pivot operation was cancelled by the user. */
+export function isUserCancelled(pivotId: number): boolean {
+  return userCancelledPivots.has(pivotId);
+}
+
+/** Clear the user-cancelled flag (after the operation's Promise settles). */
+export function clearUserCancelled(pivotId: number): void {
+  userCancelledPivots.delete(pivotId);
+}
+
+// ============================================================================
+// LOADING STATE (per-pivot loading indicators)
+// ============================================================================
+
+interface PivotLoadingState {
+  stage: string;
+  stageIndex: number;
+  totalStages: number;
+  startedAt: number;
+}
+
+const loadingPivots = new Map<number, PivotLoadingState>();
+
+/** Mark a pivot as loading with a stage description and optional step info. */
+export function setLoading(
+  pivotId: number,
+  stage: string,
+  stageIndex = 0,
+  totalStages = 0,
+): void {
+  const existing = loadingPivots.get(pivotId);
+  if (existing) {
+    existing.stage = stage;
+    existing.stageIndex = stageIndex;
+    existing.totalStages = totalStages;
+  } else {
+    loadingPivots.set(pivotId, { stage, stageIndex, totalStages, startedAt: performance.now() });
+  }
+}
+
+/** Clear loading state for a pivot. */
+export function clearLoading(pivotId: number): void {
+  loadingPivots.delete(pivotId);
+}
+
+/** Check if a pivot is currently loading. */
+export function isLoading(pivotId: number): boolean {
+  return loadingPivots.has(pivotId);
+}
+
+/** Get loading state details (for rendering the indicator). */
+export function getLoadingState(pivotId: number): PivotLoadingState | undefined {
+  return loadingPivots.get(pivotId);
+}
+
+// ============================================================================
+// PREVIOUS VIEW PRESERVATION (for cancellation reversion)
+// ============================================================================
+
+const previousViews = new Map<number, PivotViewResponse>();
+
+/** Save the current cached view before starting an operation (for cancel reversion). */
+export function preserveCurrentView(pivotId: number): void {
+  const current = pivotViewCache.get(pivotId);
+  if (current) previousViews.set(pivotId, current);
+}
+
+/** Restore the previous view on cancel/error. Returns the restored view or undefined. */
+export function restorePreviousView(pivotId: number): PivotViewResponse | undefined {
+  const prev = previousViews.get(pivotId);
+  if (prev) {
+    pivotViewCache.set(pivotId, prev);
+    previousViews.delete(pivotId);
+  }
+  return prev;
+}
+
+/** Clear the previous view backup after successful completion. */
+export function clearPreviousView(pivotId: number): void {
+  previousViews.delete(pivotId);
 }
 
 // ============================================================================
