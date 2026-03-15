@@ -21,6 +21,7 @@ import StatusBarAggregationExtension from "./BuiltIn/StatusBarAggregation";
 import ComputedPropertiesExtension from "./BuiltIn/ComputedProperties";
 import CellBookmarksExtension from "./BuiltIn/CellBookmarks";
 import ZoomSliderExtension from "./BuiltIn/ZoomSlider";
+import HomeTabExtension from "./BuiltIn/HomeTab";
 
 // ============================================================================
 // Built-in Extension Manifest
@@ -37,6 +38,8 @@ export const builtInExtensions: ExtensionModule[] = [
   FindReplaceExtension,
   // FormatCells depends on Format menu being registered
   FormatCellsExtension,
+  // Home Tab (always-visible ribbon tab with quick-access formatting)
+  HomeTabExtension,
   // Format Painter (depends on Edit menu being registered)
   FormatPainterExtension,
   // Paste Special (depends on Edit menu being registered)

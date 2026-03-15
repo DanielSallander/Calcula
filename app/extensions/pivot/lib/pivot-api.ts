@@ -414,6 +414,8 @@ export interface FilterZoneInfo {
 
 /** BI model info for the hierarchical field list */
 export interface BiPivotModelInfo {
+  /** The connection ID this pivot is associated with. */
+  connectionId: number;
   tables: BiModelTable[];
   measures: BiMeasureFieldInfo[];
   /** All columns toggled to LOOKUP mode ("Table.Column" keys) */
@@ -456,7 +458,8 @@ export interface CreatePivotFromBiModelRequest {
   destinationCell: string;
   destinationSheet?: number;
   name?: string;
-  connectionString?: string;
+  /** The connection ID to use for this BI pivot. */
+  connectionId: number;
 }
 
 /** Request to update BI pivot field assignments */

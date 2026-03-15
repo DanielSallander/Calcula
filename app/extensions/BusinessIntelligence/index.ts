@@ -13,7 +13,13 @@ import {
   openTaskPane,
 } from "../../src/api";
 
-import { BiManifest, BiPaneDefinition, BI_PANE_ID } from "./manifest";
+import {
+  BiManifest,
+  BiPaneDefinition,
+  BI_PANE_ID,
+  ConnectionsPaneDefinition,
+  CONNECTIONS_PANE_ID,
+} from "./manifest";
 import { getRegionAtCell } from "./lib/bi-api";
 import { ModelDialog } from "./components/ModelDialog";
 
@@ -35,8 +41,9 @@ export function registerBiExtension(): void {
   // 1. Register manifest
   ExtensionRegistry.registerAddIn(BiManifest);
 
-  // 2. Register task pane view
+  // 2. Register task pane views
   TaskPaneExtensions.registerView(BiPaneDefinition);
+  TaskPaneExtensions.registerView(ConnectionsPaneDefinition);
 
   // 3. Register edit guard — blocks edits in BI locked regions
   cleanupFunctions.push(
@@ -65,6 +72,16 @@ export function registerBiExtension(): void {
   });
   cleanupFunctions.push(() => DialogExtensions.unregisterDialog(MODEL_DIALOG_ID));
 
+  // 5. Register "Connections" menu item in Data menu
+  registerMenuItem("data", {
+    id: "data:connections",
+    label: "Connections",
+    action: () => {
+      addTaskPaneContextKey("connections");
+      openTaskPane(CONNECTIONS_PANE_ID);
+    },
+  });
+
   // 6. Register "Get Data" submenu in the Data menu
   registerMenuItem("data", {
     id: "data:getData",
@@ -90,12 +107,14 @@ export function unregisterBiExtension(): void {
   cleanupFunctions.forEach((fn) => fn());
   cleanupFunctions = [];
 
-  // Remove context key
+  // Remove context keys
   removeTaskPaneContextKey("bi");
+  removeTaskPaneContextKey("connections");
 
   // Unregister from registries
   DialogExtensions.unregisterDialog(MODEL_DIALOG_ID);
   TaskPaneExtensions.unregisterView(BI_PANE_ID);
+  TaskPaneExtensions.unregisterView(CONNECTIONS_PANE_ID);
   ExtensionRegistry.unregisterAddIn(BiManifest.id);
 
   console.log("[BI Extension] Unregistered");

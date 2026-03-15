@@ -1279,8 +1279,8 @@ pub struct CreatePivotFromBiModelRequest {
     pub destination_cell: String,
     pub destination_sheet: Option<usize>,
     pub name: Option<String>,
-    /// Optional connection string for auto-connect
-    pub connection_string: Option<String>,
+    /// The connection ID to use for this BI pivot.
+    pub connection_id: u64,
 }
 
 /// Request to update field assignments on a BI-backed pivot table.
@@ -1321,6 +1321,8 @@ pub struct BiValueFieldRef {
 /// Metadata stored per BI-backed pivot (not serialized to frontend directly).
 #[derive(Debug, Clone)]
 pub struct BiPivotMetadata {
+    /// The connection ID this pivot is associated with.
+    pub connection_id: u64,
     /// All tables from the BI model with column metadata
     pub model_tables: Vec<BiModelTableMeta>,
     /// Model measures
@@ -1375,6 +1377,8 @@ pub struct BiPivotQuery {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BiPivotModelInfo {
+    /// The connection ID this pivot is associated with.
+    pub connection_id: u64,
     pub tables: Vec<BiModelTableMeta>,
     pub measures: Vec<MeasureFieldInfo>,
     /// All columns toggled to LOOKUP mode ("Table.Column" keys).

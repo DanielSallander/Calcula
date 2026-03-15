@@ -375,6 +375,28 @@ export function PivotEditor({
         )}
       </div>
 
+      {isBiPivot && biModel && (
+        <div style={{
+          padding: '4px 10px',
+          fontSize: '11px',
+          color: '#555',
+          background: '#f0f7ff',
+          borderBottom: '1px solid #d0e4f5',
+          display: 'flex',
+          alignItems: 'center',
+          gap: '6px',
+        }}>
+          <span style={{
+            width: '6px',
+            height: '6px',
+            borderRadius: '50%',
+            background: '#4caf50',
+            display: 'inline-block',
+          }} />
+          <span>Connection #{biModel.connectionId}</span>
+        </div>
+      )}
+
       <div className={styles.content}>
         {isBiPivot && biModel ? (
           <TableFieldList

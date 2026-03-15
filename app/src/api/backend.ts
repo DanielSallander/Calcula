@@ -3032,10 +3032,44 @@ export async function removeComputedProperty(
 }
 
 // ============================================================================
-// Business Intelligence Commands
+// Business Intelligence Commands — Multi-Connection Model
 // ============================================================================
 
-/** Model metadata returned after loading a BI data model. */
+// ---------------------------------------------------------------------------
+// Connection Types
+// ---------------------------------------------------------------------------
+
+export interface ConnectionInfo {
+  id: number;
+  name: string;
+  description: string;
+  connectionType: string;
+  connectionString: string;
+  modelPath: string | null;
+  lastRefreshed: string | null;
+  isConnected: boolean;
+  tableCount: number;
+  measureCount: number;
+}
+
+export interface CreateConnectionRequest {
+  name: string;
+  description?: string;
+  connectionString: string;
+  modelPath: string;
+}
+
+export interface UpdateConnectionRequest {
+  id: number;
+  name?: string;
+  description?: string;
+  connectionString?: string;
+}
+
+// ---------------------------------------------------------------------------
+// BI Model & Query Types
+// ---------------------------------------------------------------------------
+
 export interface BiModelInfo {
   tables: BiTableInfo[];
   measures: BiMeasureInfo[];
@@ -3090,6 +3124,7 @@ export interface BiQueryResult {
 }
 
 export interface BiInsertRequest {
+  connectionId: number;
   sheetIndex: number;
   startRow: number;
   startCol: number;
@@ -3112,7 +3147,7 @@ export interface BiRegionInfo {
 }
 
 export interface BiConnectRequest {
-  connectionString: string;
+  connectionId: number;
 }
 
 export interface BiBindRequest {
@@ -3121,30 +3156,79 @@ export interface BiBindRequest {
   sourceTable: string;
 }
 
-/** Load a BI data model JSON file. */
-export async function biLoadModel(path: string): Promise<BiModelInfo> {
-  return invoke<BiModelInfo>("bi_load_model", { path });
+// ---------------------------------------------------------------------------
+// Connection Management Commands
+// ---------------------------------------------------------------------------
+
+/** Create a new BI connection (loads model, does not connect to DB yet). */
+export async function biCreateConnection(
+  request: CreateConnectionRequest,
+): Promise<ConnectionInfo> {
+  return invoke<ConnectionInfo>("bi_create_connection", { request });
 }
 
-/** Connect to a PostgreSQL database. */
+/** Delete a connection by ID. */
+export async function biDeleteConnection(
+  connectionId: number,
+): Promise<void> {
+  return invoke<void>("bi_delete_connection", { connectionId });
+}
+
+/** Update connection name/description/connection string. */
+export async function biUpdateConnection(
+  request: UpdateConnectionRequest,
+): Promise<ConnectionInfo> {
+  return invoke<ConnectionInfo>("bi_update_connection", { request });
+}
+
+/** Get all connections. */
+export async function biGetConnections(): Promise<ConnectionInfo[]> {
+  return invoke<ConnectionInfo[]>("bi_get_connections", {});
+}
+
+/** Get a single connection by ID. */
+export async function biGetConnection(
+  connectionId: number,
+): Promise<ConnectionInfo> {
+  return invoke<ConnectionInfo>("bi_get_connection", { connectionId });
+}
+
+// ---------------------------------------------------------------------------
+// Connect / Disconnect / Bind Commands
+// ---------------------------------------------------------------------------
+
+/** Connect a connection to its PostgreSQL database. */
 export async function biConnect(
   request: BiConnectRequest,
-): Promise<string> {
-  return invoke<string>("bi_connect", { request });
+): Promise<ConnectionInfo> {
+  return invoke<ConnectionInfo>("bi_connect", { request });
 }
 
-/** Bind a model table to a database schema/table. */
+/** Disconnect a connection (keeps model loaded). */
+export async function biDisconnect(
+  connectionId: number,
+): Promise<ConnectionInfo> {
+  return invoke<ConnectionInfo>("bi_disconnect", { connectionId });
+}
+
+/** Bind a model table to a database schema/table on a specific connection. */
 export async function biBindTable(
+  connectionId: number,
   request: BiBindRequest,
 ): Promise<string> {
-  return invoke<string>("bi_bind_table", { request });
+  return invoke<string>("bi_bind_table", { connectionId, request });
 }
 
-/** Execute a BI query and return results. */
+// ---------------------------------------------------------------------------
+// Query & Insert Commands
+// ---------------------------------------------------------------------------
+
+/** Execute a BI query on a specific connection. */
 export async function biQuery(
+  connectionId: number,
   request: BiQueryRequest,
 ): Promise<BiQueryResult> {
-  return invoke<BiQueryResult>("bi_query", { request });
+  return invoke<BiQueryResult>("bi_query", { connectionId, request });
 }
 
 /** Insert BI query results into the grid as a locked region. */
@@ -3160,14 +3244,22 @@ export async function biInsertResult(
   });
 }
 
-/** Refresh the BI query — re-execute and update the locked region. */
-export async function biRefresh(): Promise<BiQueryResult> {
-  return invoke<BiQueryResult>("bi_refresh", {});
+/** Refresh all queries on a connection. */
+export async function biRefreshConnection(
+  connectionId: number,
+): Promise<BiQueryResult[]> {
+  return invoke<BiQueryResult[]>("bi_refresh_connection", { connectionId });
 }
 
-/** Get the currently loaded model info, or null if none. */
-export async function biGetModelInfo(): Promise<BiModelInfo | null> {
-  return invoke<BiModelInfo | null>("bi_get_model_info", {});
+// ---------------------------------------------------------------------------
+// Model Info & Region Check
+// ---------------------------------------------------------------------------
+
+/** Get model info for a specific connection. */
+export async function biGetModelInfo(
+  connectionId: number,
+): Promise<BiModelInfo | null> {
+  return invoke<BiModelInfo | null>("bi_get_model_info", { connectionId });
 }
 
 /** Check if a cell is within a BI protected region. */

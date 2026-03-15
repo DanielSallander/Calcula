@@ -2,6 +2,9 @@
 // PURPOSE: TypeScript interfaces mirroring Rust BI types (via serde camelCase).
 
 export type {
+  ConnectionInfo,
+  CreateConnectionRequest,
+  UpdateConnectionRequest,
   BiModelInfo,
   BiTableInfo,
   BiColumnInfo,

@@ -1,6 +1,7 @@
 //! FILENAME: app/extensions/BusinessIntelligence/components/ModelDialog.tsx
-// PURPOSE: Dialog for loading a BI model and creating a BI pivot table.
+// PURPOSE: Dialog for creating a BI connection and optionally a pivot table.
 // CONTEXT: Opened from Data > Get Data > Calcula Model menu item.
+//          Creates a named Connection, then offers to create a pivot from it.
 
 import React, { useState, useCallback } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
@@ -13,17 +14,35 @@ import {
   addTaskPaneContextKey,
 } from "../../../src/api";
 import { pivot } from "../../../src/api/pivot";
-import { loadModel, getCachedModelInfo } from "../lib/bi-api";
+import { createConnection, getModelInfo } from "../lib/bi-api";
 import { PIVOT_PANE_ID } from "../../Pivot/manifest";
-import { ensureDesignTabRegistered, setJustCreatedPivot } from "../../Pivot/handlers/selectionHandler";
-import type { BiModelInfo } from "../types";
+import { CONNECTIONS_PANE_ID } from "../manifest";
+import {
+  ensureDesignTabRegistered,
+  setJustCreatedPivot,
+} from "../../Pivot/handlers/selectionHandler";
+import type { BiModelInfo, ConnectionInfo } from "../types";
 import type { PivotEditorViewData } from "../../Pivot/types";
 import type { BiPivotModelInfo } from "../../Pivot/lib/pivot-api";
 
-/** Convert BiModelInfo (from BI extension) to BiPivotModelInfo (for pivot field list). */
-function toBiPivotModelInfo(info: BiModelInfo): BiPivotModelInfo {
-  const numericTypes = new Set(["integer", "int", "bigint", "float", "double", "decimal", "numeric", "real", "smallint"]);
+/** Convert BiModelInfo to BiPivotModelInfo (for pivot field list). */
+function toBiPivotModelInfo(
+  info: BiModelInfo,
+  connectionId: number,
+): BiPivotModelInfo {
+  const numericTypes = new Set([
+    "integer",
+    "int",
+    "bigint",
+    "float",
+    "double",
+    "decimal",
+    "numeric",
+    "real",
+    "smallint",
+  ]);
   return {
+    connectionId,
     tables: info.tables.map((t) => ({
       name: t.name,
       columns: t.columns.map((c) => ({
@@ -139,13 +158,18 @@ const dialogStyles = {
     justifyContent: "flex-end",
     gap: "8px",
   },
-  status: {
-    fontSize: "11px",
-    color: "#666",
-  },
   statusError: {
     fontSize: "11px",
     color: "#d32f2f",
+  },
+  statusSuccess: {
+    fontSize: "11px",
+    color: "#2e7d32",
+  },
+  filePath: {
+    fontSize: "11px",
+    color: "#666",
+    wordBreak: "break-all" as const,
   },
 };
 
@@ -159,16 +183,18 @@ export function ModelDialog({
 }: DialogProps): React.ReactElement | null {
   const gridState = useGridState();
 
-  const [modelInfo, setModelInfo] = useState<BiModelInfo | null>(
-    getCachedModelInfo,
-  );
+  const [connectionName, setConnectionName] = useState("My Connection");
   const [connectionString, setConnectionString] = useState(
     "postgresql://postgres:postgres@localhost:5432/Adventureworks",
   );
+  const [modelPath, setModelPath] = useState("");
+  const [modelInfo, setModelInfo] = useState<BiModelInfo | null>(null);
+  const [createdConnection, setCreatedConnection] =
+    useState<ConnectionInfo | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
 
-  const handleLoadModel = useCallback(async () => {
+  const handleBrowseModel = useCallback(async () => {
     try {
       const path = await open({
         filters: [{ name: "Data Model", extensions: ["json"] }],
@@ -177,19 +203,46 @@ export function ModelDialog({
       });
       if (!path || typeof path !== "string") return;
 
+      setModelPath(path);
+      setError("");
+
+      // Extract name from filename for connection name suggestion
+      const fileName = path.split(/[\\/]/).pop()?.replace(/\.json$/i, "") ?? "";
+      if (fileName && connectionName === "My Connection") {
+        setConnectionName(fileName);
+      }
+    } catch (err) {
+      setError(`Failed to browse: ${err}`);
+    }
+  }, [connectionName]);
+
+  const handleCreateConnection = useCallback(async () => {
+    if (!modelPath) return;
+
+    try {
       setLoading(true);
       setError("");
-      const info = await loadModel(path);
+
+      const conn = await createConnection({
+        name: connectionName,
+        connectionString,
+        modelPath,
+      });
+
+      setCreatedConnection(conn);
+
+      // Fetch model info for display
+      const info = await getModelInfo(conn.id);
       setModelInfo(info);
     } catch (err) {
-      setError(`Failed to load model: ${err}`);
+      setError(`Failed to create connection: ${err}`);
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [connectionName, connectionString, modelPath]);
 
   const handleInsertPivot = useCallback(async () => {
-    if (!modelInfo) return;
+    if (!createdConnection || !modelInfo) return;
 
     try {
       setLoading(true);
@@ -203,19 +256,14 @@ export function ModelDialog({
       const response = await pivot.createFromBiModel({
         destinationCell: cellAddress,
         destinationSheet: gridState.sheetContext?.activeSheet,
-        connectionString: connectionString || undefined,
+        connectionId: createdConnection.id,
       });
 
       const pivotId = response.pivotId;
-
-      // Refresh grid to show the empty pivot placeholder
       window.dispatchEvent(new Event("grid:refresh"));
 
-      // Build biModel directly from the loaded model info — no getAtCell needed.
-      // This avoids timing issues where regions aren't cached yet.
-      const biModel = toBiPivotModelInfo(modelInfo);
+      const biModel = toBiPivotModelInfo(modelInfo, createdConnection.id);
 
-      // Open the pivot editor pane directly with biModel data
       clearTaskPaneManuallyClosed(PIVOT_PANE_ID);
       addTaskPaneContextKey("pivot");
       ensureDesignTabRegistered();
@@ -230,11 +278,10 @@ export function ModelDialog({
         initialLayout: {},
         biModel,
       };
-      openTaskPane(PIVOT_PANE_ID, paneData as unknown as Record<string, unknown>);
-
-      // Prevent the selection handler from closing the pane before regions are cached.
-      // We do NOT emit PIVOT_CREATED because the pivotCreatedHandler would
-      // call openTaskPane again with empty data, overwriting our biModel.
+      openTaskPane(
+        PIVOT_PANE_ID,
+        paneData as unknown as Record<string, unknown>,
+      );
       setJustCreatedPivot(true);
 
       onClose();
@@ -243,7 +290,13 @@ export function ModelDialog({
     } finally {
       setLoading(false);
     }
-  }, [modelInfo, gridState, connectionString, onClose]);
+  }, [createdConnection, modelInfo, gridState, onClose]);
+
+  const handleOpenConnections = useCallback(() => {
+    addTaskPaneContextKey("connections");
+    openTaskPane(CONNECTIONS_PANE_ID);
+    onClose();
+  }, [onClose]);
 
   if (!isOpen) return null;
 
@@ -252,27 +305,65 @@ export function ModelDialog({
   const destCol = sel ? sel.startCol : 0;
   const destCell = `${columnToLetter(destCol)}${destRow + 1}`;
 
+  const hasConnection = createdConnection !== null;
+
   return (
     <div style={dialogStyles.overlay} onClick={onClose}>
       <div style={dialogStyles.dialog} onClick={(e) => e.stopPropagation()}>
         <div style={dialogStyles.header}>Get Data - Calcula Model</div>
 
         <div style={dialogStyles.body}>
-          {/* Model loading */}
+          {/* Connection Name */}
+          <div style={dialogStyles.section}>
+            <span style={dialogStyles.label}>Connection Name</span>
+            <input
+              style={dialogStyles.input}
+              type="text"
+              placeholder="My Connection"
+              value={connectionName}
+              onChange={(e) => setConnectionName(e.target.value)}
+              disabled={hasConnection}
+            />
+          </div>
+
+          {/* Model File */}
           <div style={dialogStyles.section}>
             <span style={dialogStyles.label}>Data Model</span>
             <button
-              style={loading ? dialogStyles.buttonDisabled : dialogStyles.button}
-              onClick={handleLoadModel}
-              disabled={loading}
+              style={
+                loading || hasConnection
+                  ? dialogStyles.buttonDisabled
+                  : dialogStyles.button
+              }
+              onClick={handleBrowseModel}
+              disabled={loading || hasConnection}
             >
-              {modelInfo ? "Change Model..." : "Load Model JSON..."}
+              {modelPath ? "Change Model..." : "Browse..."}
             </button>
+            {modelPath && (
+              <div style={dialogStyles.filePath}>{modelPath}</div>
+            )}
           </div>
 
-          {/* Model summary */}
-          {modelInfo && (
+          {/* Connection String */}
+          <div style={dialogStyles.section}>
+            <span style={dialogStyles.label}>Connection String</span>
+            <input
+              style={dialogStyles.input}
+              type="text"
+              placeholder="postgresql://user:pass@host:5432/db"
+              value={connectionString}
+              onChange={(e) => setConnectionString(e.target.value)}
+              disabled={hasConnection}
+            />
+          </div>
+
+          {/* Connection Created Summary */}
+          {hasConnection && modelInfo && (
             <div style={dialogStyles.modelSummary}>
+              <div style={dialogStyles.statusSuccess}>
+                Connection "{createdConnection.name}" created
+              </div>
               <div>
                 <strong>Tables:</strong>{" "}
                 {modelInfo.tables.map((t) => t.name).join(", ")}
@@ -282,29 +373,20 @@ export function ModelDialog({
                 {modelInfo.measures.map((m) => m.name).join(", ")}
               </div>
               <div>
-                <strong>Relationships:</strong> {modelInfo.relationships.length}
+                <strong>Relationships:</strong>{" "}
+                {modelInfo.relationships.length}
               </div>
             </div>
           )}
 
-          {/* Connection string */}
-          <div style={dialogStyles.section}>
-            <span style={dialogStyles.label}>Connection String</span>
-            <input
-              style={dialogStyles.input}
-              type="text"
-              placeholder="postgresql://user:pass@host:5432/db"
-              value={connectionString}
-              onChange={(e) => setConnectionString(e.target.value)}
-            />
-          </div>
-
           {/* Destination */}
-          <div style={dialogStyles.section}>
-            <span style={dialogStyles.label}>
-              Destination: Cell {destCell}
-            </span>
-          </div>
+          {hasConnection && (
+            <div style={dialogStyles.section}>
+              <span style={dialogStyles.label}>
+                Destination: Cell {destCell}
+              </span>
+            </div>
+          )}
 
           {/* Error */}
           {error && <div style={dialogStyles.statusError}>{error}</div>}
@@ -314,20 +396,42 @@ export function ModelDialog({
           <button style={dialogStyles.button} onClick={onClose}>
             Cancel
           </button>
-          <button
-            style={
-              !modelInfo || loading
-                ? dialogStyles.buttonDisabled
-                : dialogStyles.buttonPrimary
-            }
-            onClick={handleInsertPivot}
-            disabled={!modelInfo || loading}
-          >
-            {loading ? "Creating..." : "Insert PivotTable"}
-          </button>
+
+          {!hasConnection ? (
+            <button
+              style={
+                !modelPath || !connectionName || loading
+                  ? dialogStyles.buttonDisabled
+                  : dialogStyles.buttonPrimary
+              }
+              onClick={handleCreateConnection}
+              disabled={!modelPath || !connectionName || loading}
+            >
+              {loading ? "Creating..." : "Create Connection"}
+            </button>
+          ) : (
+            <>
+              <button
+                style={dialogStyles.button}
+                onClick={handleOpenConnections}
+              >
+                Open Connections
+              </button>
+              <button
+                style={
+                  loading
+                    ? dialogStyles.buttonDisabled
+                    : dialogStyles.buttonPrimary
+                }
+                onClick={handleInsertPivot}
+                disabled={loading}
+              >
+                {loading ? "Creating..." : "Insert PivotTable"}
+              </button>
+            </>
+          )}
         </div>
       </div>
     </div>
   );
 }
-

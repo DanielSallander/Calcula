@@ -6,6 +6,7 @@ import type {
   TaskPaneViewDefinition,
 } from "../../src/api";
 import { BiPane } from "./components/BiPane";
+import { ConnectionsPane } from "./components/ConnectionsPane";
 
 // ============================================================================
 // Extension Manifest
@@ -24,7 +25,7 @@ export const BiManifest: AddInManifest = {
 };
 
 // ============================================================================
-// Task Pane
+// Task Panes
 // ============================================================================
 
 export const BI_PANE_ID = "bi-pane";
@@ -36,5 +37,17 @@ export const BiPaneDefinition: TaskPaneViewDefinition = {
   component: BiPane,
   contextKeys: ["bi"],
   priority: 90,
+  closable: true,
+};
+
+export const CONNECTIONS_PANE_ID = "connections-pane";
+
+export const ConnectionsPaneDefinition: TaskPaneViewDefinition = {
+  id: CONNECTIONS_PANE_ID,
+  title: "Workbook Connections",
+  icon: "[Conn]",
+  component: ConnectionsPane,
+  contextKeys: ["connections"],
+  priority: 85,
   closable: true,
 };

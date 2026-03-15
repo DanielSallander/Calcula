@@ -1,26 +1,25 @@
 //! FILENAME: app/extensions/BusinessIntelligence/components/BiPane.tsx
-// PURPOSE: Task pane for the BI extension — load model, connect, bind, query, insert.
-// CONTEXT: Multi-step wizard UI following the Pivot task pane pattern.
+// PURPOSE: Task pane for the BI extension — connection-aware query workflow.
+// CONTEXT: Multi-step wizard: select connection, bind, query, insert.
 
-import React, { useState, useCallback } from "react";
-import { open } from "@tauri-apps/plugin-dialog";
+import React, { useState, useCallback, useEffect } from "react";
 import type { TaskPaneViewProps } from "../../../src/api";
 import { useGridState, restoreFocusToGrid } from "../../../src/api";
 import {
-  loadModel,
+  getConnections,
   connect,
   bindTable,
   query,
   insertResult,
-  refresh,
-  getCachedQueryResult,
+  refreshConnection,
 } from "../lib/bi-api";
 import type {
-  BiModelInfo,
-  BiTableInfo,
+  ConnectionInfo,
   BiQueryResult,
   BiColumnRef,
+  BiModelInfo,
 } from "../types";
+import { biGetModelInfo } from "../../../src/api/backend";
 
 // ============================================================================
 // Styles
@@ -78,6 +77,14 @@ const styles = {
     color: "#999",
     cursor: "not-allowed" as const,
     whiteSpace: "nowrap" as const,
+  },
+  select: {
+    padding: "5px 8px",
+    fontSize: "12px",
+    border: "1px solid #ccc",
+    borderRadius: "3px",
+    width: "100%",
+    boxSizing: "border-box" as const,
   },
   input: {
     padding: "5px 8px",
@@ -171,16 +178,18 @@ interface TableBinding {
 export function BiPane(_props: TaskPaneViewProps): React.ReactElement {
   const gridState = useGridState();
 
-  // ----- Step State -----
+  // ----- Connection State -----
+  const [connections, setConnections] = useState<ConnectionInfo[]>([]);
+  const [selectedConnectionId, setSelectedConnectionId] = useState<
+    number | null
+  >(null);
   const [modelInfo, setModelInfo] = useState<BiModelInfo | null>(null);
-  const [connected, setConnected] = useState(false);
+
+  // ----- Step State -----
   const [tablesBound, setTablesBound] = useState(false);
   const [inserted, setInserted] = useState(false);
 
   // ----- Form State -----
-  const [connectionString, setConnectionString] = useState(
-    "postgresql://postgres:postgres@localhost:5432/Adventureworks",
-  );
   const [bindings, setBindings] = useState<TableBinding[]>([]);
   const [selectedMeasures, setSelectedMeasures] = useState<Set<string>>(
     new Set(),
@@ -195,7 +204,6 @@ export function BiPane(_props: TaskPaneViewProps): React.ReactElement {
     "info",
   );
 
-  // ----- Helpers -----
   const setStatus = useCallback(
     (msg: string, type: "info" | "error" | "success" = "info") => {
       setStatusMessage(msg);
@@ -204,76 +212,69 @@ export function BiPane(_props: TaskPaneViewProps): React.ReactElement {
     [],
   );
 
+  // Load connections on mount
+  useEffect(() => {
+    getConnections().then(setConnections).catch(console.error);
+  }, []);
+
   // ----- Handlers -----
 
-  const handleLoadModel = useCallback(async () => {
-    try {
-      const path = await open({
-        filters: [{ name: "Data Model", extensions: ["json"] }],
-        multiple: false,
-        directory: false,
-      });
-      if (!path || typeof path !== "string") return;
-
-      setLoading(true);
-      setStatus("Loading model...");
-
-      const info = await loadModel(path);
-      setModelInfo(info);
-
-      // Initialize bindings with model table names
-      const initialBindings: TableBinding[] = info.tables.map((t) => ({
-        modelTable: t.name,
-        schema: "BI",
-        sourceTable: t.name.toLowerCase(),
-      }));
-      setBindings(initialBindings);
-
-      // Select all measures by default
-      setSelectedMeasures(new Set(info.measures.map((m) => m.name)));
-
-      // Reset downstream state
-      setConnected(false);
+  const handleSelectConnection = useCallback(
+    async (connId: number) => {
+      setSelectedConnectionId(connId);
       setTablesBound(false);
       setInserted(false);
       setQueryResult(null);
 
-      setStatus(
-        `Model loaded: ${info.tables.length} tables, ${info.measures.length} measures`,
-        "success",
-      );
-    } catch (error) {
-      setStatus(`Failed to load model: ${error}`, "error");
-    } finally {
-      setLoading(false);
-    }
-  }, [setStatus]);
+      try {
+        setLoading(true);
+        setStatus("Loading model info...");
 
-  const handleConnect = useCallback(async () => {
-    try {
-      setLoading(true);
-      setStatus("Connecting...");
+        // Ensure connected
+        const conn = connections.find((c) => c.id === connId);
+        if (conn && !conn.isConnected) {
+          await connect(connId);
+        }
 
-      const result = await connect({ connectionString });
-      setConnected(true);
-      setTablesBound(false);
-      setInserted(false);
-      setQueryResult(null);
-      setStatus(result, "success");
-    } catch (error) {
-      setStatus(`Connection failed: ${error}`, "error");
-    } finally {
-      setLoading(false);
-    }
-  }, [connectionString, setStatus]);
+        const info = await biGetModelInfo(connId);
+        setModelInfo(info);
+
+        if (info) {
+          const initialBindings: TableBinding[] = info.tables.map((t) => ({
+            modelTable: t.name,
+            schema: "BI",
+            sourceTable: t.name.toLowerCase(),
+          }));
+          setBindings(initialBindings);
+          setSelectedMeasures(
+            new Set(info.measures.map((m) => m.name)),
+          );
+          setStatus(
+            `Model: ${info.tables.length} tables, ${info.measures.length} measures`,
+            "success",
+          );
+        }
+
+        // Refresh connections to update status
+        const conns = await getConnections();
+        setConnections(conns);
+      } catch (error) {
+        setStatus(`Failed: ${error}`, "error");
+      } finally {
+        setLoading(false);
+      }
+    },
+    [connections, setStatus],
+  );
 
   const handleBindTables = useCallback(async () => {
+    if (selectedConnectionId === null) return;
     try {
       setLoading(true);
       setStatus("Binding tables...");
 
       for (const binding of bindings) {
-        await bindTable({
+        await bindTable(selectedConnectionId, {
           modelTable: binding.modelTable,
           schema: binding.schema,
           sourceTable: binding.sourceTable,
@@ -289,14 +290,15 @@ export function BiPane(_props: TaskPaneViewProps): React.ReactElement {
     } finally {
       setLoading(false);
     }
-  }, [bindings, setStatus]);
+  }, [selectedConnectionId, bindings, setStatus]);
 
   const handleQuery = useCallback(async () => {
+    if (selectedConnectionId === null) return;
     try {
       setLoading(true);
       setStatus("Executing query...");
 
-      const result = await query({
+      const result = await query(selectedConnectionId, {
         measures: Array.from(selectedMeasures),
         groupBy: selectedGroupBy,
         filters: [],
@@ -312,12 +314,11 @@ export function BiPane(_props: TaskPaneViewProps): React.ReactElement {
     } finally {
       setLoading(false);
     }
-  }, [selectedMeasures, selectedGroupBy, setStatus]);
+  }, [selectedConnectionId, selectedMeasures, selectedGroupBy, setStatus]);
 
   const handleInsert = useCallback(async () => {
+    if (!queryResult || selectedConnectionId === null) return;
     try {
-      if (!queryResult) return;
-
       setLoading(true);
       setStatus("Inserting into sheet...");
 
@@ -326,6 +327,7 @@ export function BiPane(_props: TaskPaneViewProps): React.ReactElement {
       const startCol = selection ? selection.startCol : 0;
 
       const response = await insertResult({
+        connectionId: selectedConnectionId,
         sheetIndex: gridState.sheetContext?.activeSheet ?? 0,
         startRow,
         startCol,
@@ -337,23 +339,23 @@ export function BiPane(_props: TaskPaneViewProps): React.ReactElement {
         "success",
       );
 
-      // Restore focus so user can see the result
       restoreFocusToGrid();
     } catch (error) {
       setStatus(`Insert failed: ${error}`, "error");
     } finally {
       setLoading(false);
     }
-  }, [queryResult, gridState, setStatus]);
+  }, [queryResult, selectedConnectionId, gridState, setStatus]);
 
   const handleRefresh = useCallback(async () => {
+    if (selectedConnectionId === null) return;
     try {
       setLoading(true);
       setStatus("Refreshing...");
 
-      const result = await refresh();
-      setQueryResult(result);
-      setStatus(`Refreshed: ${result.rowCount} rows`, "success");
+      const results = await refreshConnection(selectedConnectionId);
+      const totalRows = results.reduce((sum, r) => sum + r.rowCount, 0);
+      setStatus(`Refreshed: ${totalRows} rows total`, "success");
 
       restoreFocusToGrid();
     } catch (error) {
@@ -361,7 +363,7 @@ export function BiPane(_props: TaskPaneViewProps): React.ReactElement {
     } finally {
       setLoading(false);
     }
-  }, [setStatus]);
+  }, [selectedConnectionId, setStatus]);
 
   const handleBindingChange = useCallback(
     (idx: number, field: "schema" | "sourceTable", value: string) => {
@@ -403,6 +405,10 @@ export function BiPane(_props: TaskPaneViewProps): React.ReactElement {
     [],
   );
 
+  const selectedConn = connections.find(
+    (c) => c.id === selectedConnectionId,
+  );
+
   // ----- Render -----
 
   return (
@@ -422,17 +428,27 @@ export function BiPane(_props: TaskPaneViewProps): React.ReactElement {
         </div>
       )}
 
-      {/* Step 1: Load Model */}
+      {/* Step 1: Select Connection */}
       <div style={styles.section}>
-        <h4 style={styles.sectionTitle}>1. Data Model</h4>
-        <button
-          style={loading ? styles.buttonDisabled : styles.button}
-          onClick={handleLoadModel}
+        <h4 style={styles.sectionTitle}>1. Connection</h4>
+        <select
+          style={styles.select}
+          value={selectedConnectionId ?? ""}
+          onChange={(e) => {
+            const id = Number(e.target.value);
+            if (id) handleSelectConnection(id);
+          }}
           disabled={loading}
         >
-          Load Model JSON...
-        </button>
-        {modelInfo && (
+          <option value="">Select a connection...</option>
+          {connections.map((c) => (
+            <option key={c.id} value={c.id}>
+              {c.name}{" "}
+              {c.isConnected ? "(connected)" : "(disconnected)"}
+            </option>
+          ))}
+        </select>
+        {selectedConn && modelInfo && (
           <div style={{ fontSize: "11px", color: "#555" }}>
             <div>
               <strong>Tables:</strong>{" "}
@@ -442,220 +458,206 @@ export function BiPane(_props: TaskPaneViewProps): React.ReactElement {
               <strong>Measures:</strong>{" "}
               {modelInfo.measures.map((m) => m.name).join(", ")}
             </div>
-            <div>
-              <strong>Relationships:</strong> {modelInfo.relationships.length}
+          </div>
+        )}
+      </div>
+
+      {/* Step 2: Bind Tables */}
+      {selectedConn && modelInfo && (
+        <div style={styles.section}>
+          <h4 style={styles.sectionTitle}>2. Bind Tables</h4>
+          {bindings.map((b, idx) => (
+            <div key={b.modelTable} style={styles.bindRow}>
+              <span style={{ minWidth: "80px", fontWeight: 500 }}>
+                {b.modelTable}
+              </span>
+              <input
+                style={styles.smallInput}
+                value={b.schema}
+                onChange={(e) =>
+                  handleBindingChange(idx, "schema", e.target.value)
+                }
+                placeholder="Schema"
+                disabled={loading}
+              />
+              <span style={{ color: "#999" }}>.</span>
+              <input
+                style={styles.smallInput}
+                value={b.sourceTable}
+                onChange={(e) =>
+                  handleBindingChange(idx, "sourceTable", e.target.value)
+                }
+                placeholder="Table"
+                disabled={loading}
+              />
             </div>
-          </div>
-        )}
-      </div>
+          ))}
+          <button
+            style={
+              loading || bindings.length === 0
+                ? styles.buttonDisabled
+                : styles.button
+            }
+            onClick={handleBindTables}
+            disabled={loading || bindings.length === 0}
+          >
+            Bind All Tables
+          </button>
+          {tablesBound && (
+            <div style={styles.statusSuccess}>All tables bound</div>
+          )}
+        </div>
+      )}
 
-      {/* Step 2: Connect */}
-      <div style={styles.section}>
-        <h4 style={styles.sectionTitle}>2. Database Connection</h4>
-        <input
-          style={styles.input}
-          type="text"
-          placeholder="Connection string..."
-          value={connectionString}
-          onChange={(e) => setConnectionString(e.target.value)}
-          disabled={!modelInfo || loading}
-        />
-        <button
-          style={
-            !modelInfo || loading ? styles.buttonDisabled : styles.button
-          }
-          onClick={handleConnect}
-          disabled={!modelInfo || loading}
-        >
-          {connected ? "Reconnect" : "Connect"}
-        </button>
-        {connected && (
-          <div style={styles.statusSuccess}>Connected</div>
-        )}
-      </div>
+      {/* Step 3: Query */}
+      {tablesBound && modelInfo && (
+        <div style={styles.section}>
+          <h4 style={styles.sectionTitle}>3. Query</h4>
 
-      {/* Step 3: Bind Tables */}
-      <div style={styles.section}>
-        <h4 style={styles.sectionTitle}>3. Bind Tables</h4>
-        {bindings.map((b, idx) => (
-          <div key={b.modelTable} style={styles.bindRow}>
-            <span style={{ minWidth: "80px", fontWeight: 500 }}>
-              {b.modelTable}
-            </span>
-            <input
-              style={styles.smallInput}
-              value={b.schema}
-              onChange={(e) =>
-                handleBindingChange(idx, "schema", e.target.value)
-              }
-              placeholder="Schema"
-              disabled={!connected || loading}
-            />
-            <span style={{ color: "#999" }}>.</span>
-            <input
-              style={styles.smallInput}
-              value={b.sourceTable}
-              onChange={(e) =>
-                handleBindingChange(idx, "sourceTable", e.target.value)
-              }
-              placeholder="Table"
-              disabled={!connected || loading}
-            />
-          </div>
-        ))}
-        <button
-          style={
-            !connected || loading || bindings.length === 0
-              ? styles.buttonDisabled
-              : styles.button
-          }
-          onClick={handleBindTables}
-          disabled={!connected || loading || bindings.length === 0}
-        >
-          Bind All Tables
-        </button>
-        {tablesBound && (
-          <div style={styles.statusSuccess}>All tables bound</div>
-        )}
-      </div>
-
-      {/* Step 4: Query */}
-      <div style={styles.section}>
-        <h4 style={styles.sectionTitle}>4. Query</h4>
-
-        {/* Measures */}
-        <div style={styles.label}>Measures:</div>
-        {modelInfo?.measures.map((m) => (
-          <label key={m.name} style={styles.checkboxLabel}>
-            <input
-              type="checkbox"
-              style={styles.checkbox}
-              checked={selectedMeasures.has(m.name)}
-              onChange={() => toggleMeasure(m.name)}
-              disabled={!tablesBound || loading}
-            />
-            {m.name}
-            <span style={{ color: "#999", fontSize: "10px" }}>
-              ({m.table})
-            </span>
-          </label>
-        ))}
-
-        {/* Group By */}
-        <div style={{ ...styles.label, marginTop: "8px" }}>Group By:</div>
-        {modelInfo?.tables.map((t: BiTableInfo) =>
-          t.columns.map((c) => (
-            <label
-              key={`${t.name}.${c.name}`}
-              style={styles.checkboxLabel}
-            >
+          {/* Measures */}
+          <div style={styles.label}>Measures:</div>
+          {modelInfo.measures.map((m) => (
+            <label key={m.name} style={styles.checkboxLabel}>
               <input
                 type="checkbox"
                 style={styles.checkbox}
-                checked={selectedGroupBy.some(
-                  (g) => g.table === t.name && g.column === c.name,
-                )}
-                onChange={() => toggleGroupBy(t.name, c.name)}
-                disabled={!tablesBound || loading}
+                checked={selectedMeasures.has(m.name)}
+                onChange={() => toggleMeasure(m.name)}
+                disabled={loading}
               />
-              {t.name}.{c.name}
+              {m.name}
               <span style={{ color: "#999", fontSize: "10px" }}>
-                ({c.dataType})
+                ({m.table})
               </span>
             </label>
-          )),
-        )}
+          ))}
 
-        <div style={styles.row}>
-          <button
-            style={
-              !tablesBound || loading || selectedMeasures.size === 0
-                ? styles.buttonDisabled
-                : styles.buttonPrimary
-            }
-            onClick={handleQuery}
-            disabled={!tablesBound || loading || selectedMeasures.size === 0}
-          >
-            Execute Query
-          </button>
-        </div>
+          {/* Group By */}
+          <div style={{ ...styles.label, marginTop: "8px" }}>
+            Group By:
+          </div>
+          {modelInfo.tables.map((t) =>
+            t.columns.map((c) => (
+              <label
+                key={`${t.name}.${c.name}`}
+                style={styles.checkboxLabel}
+              >
+                <input
+                  type="checkbox"
+                  style={styles.checkbox}
+                  checked={selectedGroupBy.some(
+                    (g) => g.table === t.name && g.column === c.name,
+                  )}
+                  onChange={() => toggleGroupBy(t.name, c.name)}
+                  disabled={loading}
+                />
+                {t.name}.{c.name}
+                <span style={{ color: "#999", fontSize: "10px" }}>
+                  ({c.dataType})
+                </span>
+              </label>
+            )),
+          )}
 
-        {/* Preview */}
-        {queryResult && queryResult.rowCount > 0 && (
-          <div>
-            <div style={styles.label}>
-              Preview ({queryResult.rowCount} rows):
-            </div>
-            <div style={styles.previewContainer}>
-              <table style={styles.table}>
-                <thead>
-                  <tr>
-                    {queryResult.columns.map((col) => (
-                      <th key={col} style={styles.th}>
-                        {col}
-                      </th>
-                    ))}
-                  </tr>
-                </thead>
-                <tbody>
-                  {queryResult.rows.slice(0, 20).map((row, rowIdx) => (
-                    <tr key={rowIdx}>
-                      {row.map((val, colIdx) => (
-                        <td key={colIdx} style={styles.td}>
-                          {val ?? ""}
-                        </td>
+          <div style={styles.row}>
+            <button
+              style={
+                loading || selectedMeasures.size === 0
+                  ? styles.buttonDisabled
+                  : styles.buttonPrimary
+              }
+              onClick={handleQuery}
+              disabled={loading || selectedMeasures.size === 0}
+            >
+              Execute Query
+            </button>
+          </div>
+
+          {/* Preview */}
+          {queryResult && queryResult.rowCount > 0 && (
+            <div>
+              <div style={styles.label}>
+                Preview ({queryResult.rowCount} rows):
+              </div>
+              <div style={styles.previewContainer}>
+                <table style={styles.table}>
+                  <thead>
+                    <tr>
+                      {queryResult.columns.map((col) => (
+                        <th key={col} style={styles.th}>
+                          {col}
+                        </th>
                       ))}
                     </tr>
-                  ))}
-                  {queryResult.rowCount > 20 && (
-                    <tr>
-                      <td
-                        colSpan={queryResult.columns.length}
-                        style={{ ...styles.td, color: "#999", fontStyle: "italic" }}
-                      >
-                        ... and {queryResult.rowCount - 20} more rows
-                      </td>
-                    </tr>
-                  )}
-                </tbody>
-              </table>
+                  </thead>
+                  <tbody>
+                    {queryResult.rows.slice(0, 20).map((row, rowIdx) => (
+                      <tr key={rowIdx}>
+                        {row.map((val, colIdx) => (
+                          <td key={colIdx} style={styles.td}>
+                            {val ?? ""}
+                          </td>
+                        ))}
+                      </tr>
+                    ))}
+                    {queryResult.rowCount > 20 && (
+                      <tr>
+                        <td
+                          colSpan={queryResult.columns.length}
+                          style={{
+                            ...styles.td,
+                            color: "#999",
+                            fontStyle: "italic",
+                          }}
+                        >
+                          ... and {queryResult.rowCount - 20} more rows
+                        </td>
+                      </tr>
+                    )}
+                  </tbody>
+                </table>
+              </div>
             </div>
-          </div>
-        )}
-      </div>
-
-      {/* Step 5: Insert & Refresh */}
-      <div style={styles.section}>
-        <h4 style={styles.sectionTitle}>5. Insert & Refresh</h4>
-        <div style={styles.row}>
-          <button
-            style={
-              !queryResult || loading
-                ? styles.buttonDisabled
-                : styles.buttonPrimary
-            }
-            onClick={handleInsert}
-            disabled={!queryResult || loading}
-          >
-            Insert into Sheet
-          </button>
-          <button
-            style={
-              !inserted || loading ? styles.buttonDisabled : styles.button
-            }
-            onClick={handleRefresh}
-            disabled={!inserted || loading}
-          >
-            Refresh Data
-          </button>
+          )}
         </div>
-        {inserted && (
-          <div style={{ fontSize: "11px", color: "#555" }}>
-            Result is locked. Use Refresh to update. Formulas referencing
-            these cells will recalculate automatically.
+      )}
+
+      {/* Step 4: Insert & Refresh */}
+      {queryResult && selectedConnectionId !== null && (
+        <div style={styles.section}>
+          <h4 style={styles.sectionTitle}>4. Insert & Refresh</h4>
+          <div style={styles.row}>
+            <button
+              style={
+                loading
+                  ? styles.buttonDisabled
+                  : styles.buttonPrimary
+              }
+              onClick={handleInsert}
+              disabled={loading}
+            >
+              Insert into Sheet
+            </button>
+            <button
+              style={
+                !inserted || loading
+                  ? styles.buttonDisabled
+                  : styles.button
+              }
+              onClick={handleRefresh}
+              disabled={!inserted || loading}
+            >
+              Refresh Data
+            </button>
           </div>
-        )}
-      </div>
+          {inserted && (
+            <div style={{ fontSize: "11px", color: "#555" }}>
+              Result is locked. Use Refresh to update. Formulas
+              referencing these cells will recalculate automatically.
+            </div>
+          )}
+        </div>
+      )}
     </div>
   );
 }

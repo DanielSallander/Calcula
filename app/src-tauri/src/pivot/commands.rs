@@ -3,6 +3,7 @@
 //! CONTEXT: Excel-compatible Pivot Table API implementation.
 
 use crate::bi::types::BiState;
+use crate::bi::commands::{auto_connect_bi_connection, auto_bind_tables_on_connection};
 use crate::pivot::operations::*;
 use crate::pivot::types::*;
 use crate::pivot::utils::*;
@@ -1159,6 +1160,7 @@ pub fn get_pivot_at_cell(
                 meta.measures.len()
             );
             BiPivotModelInfo {
+                connection_id: meta.connection_id,
                 tables: meta.model_tables.clone(),
                 measures: meta.measures.clone(),
                 lookup_columns: meta.lookup_columns.iter().cloned().collect(),
@@ -3032,65 +3034,6 @@ fn extract_bi_model_metadata(
     (tables, measures)
 }
 
-/// Auto-connects the BI engine to a database if not already connected.
-async fn auto_connect_bi(bi_state: &BiState) -> Result<(), String> {
-    let already_connected = bi_state.connector_index.lock().unwrap().is_some();
-    if already_connected {
-        return Ok(());
-    }
-
-    let conn_str = bi_state
-        .connection_string
-        .lock()
-        .unwrap()
-        .clone()
-        .ok_or("No connection string configured. Set a connection string first.")?;
-
-    log_info!("PIVOT", "auto_connect_bi: connecting to {}", conn_str);
-
-    let config = bi_engine::PostgresConfig::new(&conn_str);
-
-    let mut engine = bi_state
-        .engine
-        .lock()
-        .unwrap()
-        .take()
-        .ok_or("No BI model loaded.")?;
-
-    let result = engine.add_postgres(config).await;
-    // ALWAYS put engine back before propagating error
-    *bi_state.engine.lock().unwrap() = Some(engine);
-    let idx = result.map_err(|e| format!("Auto-connect failed: {}", e))?;
-
-    *bi_state.connector_index.lock().unwrap() = Some(idx);
-    log_info!("PIVOT", "auto_connect_bi: connected, connector_index={}", idx);
-    Ok(())
-}
-
-/// Auto-binds model tables that are not yet bound to a database source.
-/// Convention: schema = "BI", source_table = lowercase(model_table_name).
-fn auto_bind_tables(bi_state: &BiState, table_names: &[&str]) -> Result<(), String> {
-    let connector_index = bi_state
-        .connector_index
-        .lock()
-        .unwrap()
-        .ok_or("No database connection.")?;
-
-    let mut eng_lock = bi_state.engine.lock().unwrap();
-    let engine = eng_lock.as_mut().ok_or("No BI model loaded.")?;
-
-    for table_name in table_names {
-        if !engine.registry().has_table(table_name) {
-            let source_table = table_name.to_lowercase();
-            let binding = bi_engine::SourceBinding::new("BI", &source_table);
-            engine.bind_table(*table_name, connector_index, binding);
-            log_info!("PIVOT", "auto_bind: {} -> BI.{}", table_name, source_table);
-        }
-    }
-
-    Ok(())
-}
-
 /// Creates an empty BI pivot from the full model (all tables + measures).
 /// No data query is executed — the field list comes from model metadata.
 #[tauri::command]
@@ -3100,25 +3043,24 @@ pub async fn create_pivot_from_bi_model(
     bi_state: State<'_, BiState>,
     request: CreatePivotFromBiModelRequest,
 ) -> Result<PivotViewResponse, String> {
+    let connection_id = request.connection_id;
     log_info!(
         "PIVOT",
-        "create_pivot_from_bi_model dest={} dest_sheet={:?}",
+        "create_pivot_from_bi_model dest={} dest_sheet={:?} conn_id={}",
         request.destination_cell,
-        request.destination_sheet
+        request.destination_sheet,
+        connection_id
     );
 
-    // Store connection string if provided
-    if let Some(ref cs) = request.connection_string {
-        *bi_state.connection_string.lock().unwrap() = Some(cs.clone());
-    }
+    // Auto-connect the connection
+    auto_connect_bi_connection(&bi_state, connection_id).await?;
 
-    // Auto-connect
-    auto_connect_bi(&bi_state).await?;
-
-    // Extract model metadata from engine
+    // Extract model metadata from the connection's engine
     let (model_tables, measures) = {
-        let eng_lock = bi_state.engine.lock().unwrap();
-        let engine = eng_lock.as_ref().ok_or("No BI model loaded.")?;
+        let connections = bi_state.connections.lock().unwrap();
+        let conn = connections.get(&connection_id)
+            .ok_or_else(|| format!("Connection {} not found", connection_id))?;
+        let engine = conn.engine.as_ref().ok_or("No BI model loaded.")?;
         let result = extract_bi_model_metadata(engine);
         log_info!(
             "PIVOT",
@@ -3137,7 +3079,7 @@ pub async fn create_pivot_from_bi_model(
 
     // Auto-bind all model tables
     let table_names: Vec<&str> = model_tables.iter().map(|t| t.name.as_str()).collect();
-    auto_bind_tables(&bi_state, &table_names)?;
+    auto_bind_tables_on_connection(&bi_state, connection_id, &table_names)?;
 
     log_info!(
         "PIVOT",
@@ -3207,6 +3149,7 @@ pub async fn create_pivot_from_bi_model(
 
     // Store BI metadata
     let bi_meta = BiPivotMetadata {
+        connection_id,
         model_tables,
         measures,
         last_query: None,
@@ -3220,8 +3163,9 @@ pub async fn create_pivot_from_bi_model(
 
     log_info!(
         "PIVOT",
-        "created BI pivot_id={} (empty - awaiting field configuration)",
-        pivot_id
+        "created BI pivot_id={} conn_id={} (empty - awaiting field configuration)",
+        pivot_id,
+        connection_id
     );
 
     Ok(response)
@@ -3327,8 +3271,16 @@ pub async fn update_bi_pivot_fields(
         return Ok(response);
     }
 
+    // Get the connection_id from BI metadata
+    let connection_id = {
+        let bi_meta = pivot_state.bi_metadata.lock().unwrap();
+        bi_meta.get(&pivot_id)
+            .map(|m| m.connection_id)
+            .ok_or_else(|| format!("No BI metadata for pivot {}", pivot_id))?
+    };
+
     // Auto-connect if needed
-    auto_connect_bi(&bi_state).await?;
+    auto_connect_bi_connection(&bi_state, connection_id).await?;
 
     // Collect table names referenced in fields for auto-binding
     let mut referenced_tables: Vec<String> = Vec::new();
@@ -3338,7 +3290,7 @@ pub async fn update_bi_pivot_fields(
         }
     }
     let table_refs: Vec<&str> = referenced_tables.iter().map(|s| s.as_str()).collect();
-    auto_bind_tables(&bi_state, &table_refs)?;
+    auto_bind_tables_on_connection(&bi_state, connection_id, &table_refs)?;
 
     // Guardrail: a LOOKUP field must follow at least one GROUP field from the same table.
     // Check across all zones (row + column fields combined for GROUP coverage).
@@ -3420,15 +3372,23 @@ pub async fn update_bi_pivot_fields(
         row_lookup_fields.len() + col_lookup_fields.len()
     );
 
-    // SAFE ENGINE TAKE: take engine out, drop guard, query, put back
+    // SAFE ENGINE TAKE: take engine out of connection, drop guard, query, put back
     let t_query = Instant::now();
-    let engine = bi_state.engine.lock().map_err(|e| e.to_string())?
-        .take()
-        .ok_or("No BI model loaded.")?;
+    let engine = {
+        let mut connections = bi_state.connections.lock().unwrap();
+        let conn = connections.get_mut(&connection_id)
+            .ok_or_else(|| format!("Connection {} not found", connection_id))?;
+        conn.engine.take().ok_or("No BI model loaded.")?
+    };
     // Guard is dropped here — safe to await
     let query_result = engine.query(query_request).await;
     // PUT BACK before propagating error
-    *bi_state.engine.lock().unwrap() = Some(engine);
+    {
+        let mut connections = bi_state.connections.lock().unwrap();
+        if let Some(conn) = connections.get_mut(&connection_id) {
+            conn.engine = Some(engine);
+        }
+    }
     let batches = query_result.map_err(|e| format!("BI query failed: {}", e))?;
     let query_ms = t_query.elapsed().as_secs_f64() * 1000.0;
 
