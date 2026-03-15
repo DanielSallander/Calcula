@@ -3,7 +3,7 @@
 // CONTEXT: This is an empty ribbon shell that add-ins populate via ExtensionRegistry
 // REFACTOR: Imports from api layer instead of core internals
 
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, useRef } from "react";
 import { ExtensionRegistry } from "../../api/extensions";
 import type { RibbonTabDefinition, RibbonContext } from "../../api/extensions";
 import { useGridState } from "../../api/state";
@@ -12,14 +12,29 @@ export function RibbonContainer(): React.ReactElement {
   const state = useGridState();
   const [activeTabId, setActiveTabId] = useState<string | null>(null);
   const [tabs, setTabs] = useState<RibbonTabDefinition[]>([]);
+  const prevTabIdsRef = useRef<Set<string>>(new Set());
 
   // Subscribe to registry changes
   useEffect(() => {
     const updateTabs = () => {
       const registeredTabs = ExtensionRegistry.getRibbonTabs();
+      const prevIds = prevTabIdsRef.current;
+      const newIds = new Set(registeredTabs.map((t) => t.id));
+
+      // Detect newly added contextual tabs (e.g. Design tab when pivot selected)
+      let newlyAddedTab: RibbonTabDefinition | undefined;
+      if (prevIds.size > 0) {
+        newlyAddedTab = registeredTabs.find((t) => !prevIds.has(t.id));
+      }
+
+      prevTabIdsRef.current = newIds;
       setTabs(registeredTabs);
 
       setActiveTabId((current) => {
+        // Auto-activate contextual tabs: if a new tab appeared after initial
+        // load, switch to it. Matches Excel behavior where clicking a pivot
+        // auto-switches to the Design tab.
+        if (newlyAddedTab) return newlyAddedTab.id;
         // If no tabs, clear active
         if (registeredTabs.length === 0) return null;
         // If current tab still exists, keep it

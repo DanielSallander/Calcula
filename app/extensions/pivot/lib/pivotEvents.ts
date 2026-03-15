@@ -16,6 +16,8 @@ export const PivotEvents = {
   PIVOT_LAYOUT_STATE: "app:pivot-layout-state",
   /** Emitted by the Design tab when the user changes a layout option */
   PIVOT_LAYOUT_CHANGED: "app:pivot-layout-changed",
+  /** Emitted by the Design tab on mount to request the PivotEditor re-broadcast layout state */
+  PIVOT_REQUEST_LAYOUT: "app:pivot-request-layout",
   /** Emitted by the backend during long-running pivot operations (Tauri event) */
   PIVOT_PROGRESS: "pivot:progress",
 } as const;

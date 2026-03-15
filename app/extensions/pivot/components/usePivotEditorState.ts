@@ -349,6 +349,14 @@ export function usePivotEditorState({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [pivotId]);
 
+  // Respond to layout state requests from the Design tab (e.g. when it remounts
+  // after the user switches away and back to the Design ribbon tab)
+  useEffect(() => {
+    return onAppEvent(PivotEvents.PIVOT_REQUEST_LAYOUT, () => {
+      emitAppEvent(PivotEvents.PIVOT_LAYOUT_STATE, { pivotId, layout });
+    });
+  }, [pivotId, layout]);
+
   // Listen for layout changes from the Design ribbon tab
   useEffect(() => {
     return onAppEvent<{ pivotId: PivotId; layout: LayoutConfig }>(

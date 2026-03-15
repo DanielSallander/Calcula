@@ -143,12 +143,16 @@ export function PivotDesignTab({
 
   // Listen for layout state broadcasts from the PivotEditor
   useEffect(() => {
-    return onAppEvent<LayoutState>(
+    const unsub = onAppEvent<LayoutState>(
       PivotEvents.PIVOT_LAYOUT_STATE,
       (detail) => {
         setLayoutState(detail);
       }
     );
+    // Request current state in case we missed the initial broadcast
+    // (e.g. user switched to Home tab and back to Design)
+    emitAppEvent(PivotEvents.PIVOT_REQUEST_LAYOUT);
+    return unsub;
   }, []);
 
   // Fetch pivot name whenever pivotId changes
