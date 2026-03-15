@@ -22,6 +22,7 @@ import { listenTauriEvent } from "../../src/api/backend";
 import {
   registerGridOverlay,
   addGridRegions,
+  getGridRegions,
   removeGridRegionsByType,
   replaceGridRegionsByType,
   requestOverlayRedraw,
@@ -172,6 +173,15 @@ let transitionCleanupTimer: ReturnType<typeof setTimeout> | null = null;
  * This flag prevents that redundant second call from executing.
  */
 let isRefreshingPivotRegions = false;
+
+/**
+ * Version counter for structural changes (row/column insert/delete).
+ * Incremented on each sync shift. When refreshPivotRegions completes, it
+ * checks whether the version has changed since it started. If so, the
+ * fetched data may be stale (from before the structural change), so it
+ * is discarded and the sync-shifted regions are preserved.
+ */
+let structuralVersion = 0;
 
 
 /**
@@ -763,16 +773,39 @@ async function refreshPivotRegions(triggerRepaint: boolean = false, allowCachedH
   if (isRefreshingPivotRegions) return;
   isRefreshingPivotRegions = true;
 
+  // Capture the structural version at the START of this refresh.
+  // If a structural change (row/col insert/delete) happens while we are
+  // awaiting IPC, the version will increment and our fetched data is stale.
+  const versionAtStart = structuralVersion;
+
   const tTotal = performance.now();
   try {
     const t0 = performance.now();
     const regions = await getPivotRegionsForSheet();
     const regionsMs = performance.now() - t0;
 
+    // If a structural change occurred while we were fetching, our region
+    // data may be from before the shift.  Discard it — the sync shift
+    // already placed the overlay at the correct position.
+    if (structuralVersion !== versionAtStart) {
+      console.log(
+        `[pivot] refreshPivotRegions: discarding stale result (version ${versionAtStart} → ${structuralVersion})`
+      );
+      return;
+    }
+
     // Fetch and cache pivot view data for styled rendering
     const t1 = performance.now();
     await refreshPivotViewCache(regions, allowCachedHit);
     const cacheMs = performance.now() - t1;
+
+    // Second staleness check after view cache refresh
+    if (structuralVersion !== versionAtStart) {
+      console.log(
+        `[pivot] refreshPivotRegions: discarding stale result after view cache (version ${versionAtStart} → ${structuralVersion})`
+      );
+      return;
+    }
 
     // Save current region bounds as transition bounds before updating.
     // This allows the overlay renderer to draw a white background over the
@@ -843,6 +876,123 @@ async function refreshPivotRegions(triggerRepaint: boolean = false, allowCachedH
     emitAppEvent(PivotEvents.PIVOT_REGIONS_UPDATED, { regions: [] });
   } finally {
     isRefreshingPivotRegions = false;
+  }
+}
+
+// ============================================================================
+// Synchronous region shifting for structural changes
+// ============================================================================
+// When rows/columns are inserted or deleted, we shift the overlay regions
+// synchronously (no IPC) so the pivot renders at the correct position
+// immediately. The subsequent async refreshPivotRegions() confirms the
+// exact bounds from the backend.
+
+function shiftPivotRegionsForColInsert(col: number, count: number): void {
+  structuralVersion++;
+  const pivotRegions = getGridRegions().filter((r) => r.type === "pivot");
+  const shifted = pivotRegions.map((r) => {
+    if (r.startCol >= col) {
+      return { ...r, startCol: r.startCol + count, endCol: r.endCol + count };
+    } else if (r.endCol >= col) {
+      return { ...r, endCol: r.endCol + count };
+    }
+    return r;
+  });
+  replaceGridRegionsByType("pivot", shifted);
+  for (const [, bounds] of gridRegionsCache.entries()) {
+    if (bounds.startCol >= col) {
+      bounds.startCol += count;
+      bounds.endCol += count;
+    } else if (bounds.endCol >= col) {
+      bounds.endCol += count;
+    }
+  }
+}
+
+function shiftPivotRegionsForRowInsert(row: number, count: number): void {
+  structuralVersion++;
+  const pivotRegions = getGridRegions().filter((r) => r.type === "pivot");
+  const shifted = pivotRegions.map((r) => {
+    if (r.startRow >= row) {
+      return { ...r, startRow: r.startRow + count, endRow: r.endRow + count };
+    } else if (r.endRow >= row) {
+      return { ...r, endRow: r.endRow + count };
+    }
+    return r;
+  });
+  replaceGridRegionsByType("pivot", shifted);
+  for (const [, bounds] of gridRegionsCache.entries()) {
+    if (bounds.startRow >= row) {
+      bounds.startRow += count;
+      bounds.endRow += count;
+    } else if (bounds.endRow >= row) {
+      bounds.endRow += count;
+    }
+  }
+}
+
+function shiftPivotRegionsForColDelete(col: number, count: number): void {
+  structuralVersion++;
+  const pivotRegions = getGridRegions().filter((r) => r.type === "pivot");
+  const shifted: GridRegion[] = [];
+  for (const r of pivotRegions) {
+    if (r.startCol >= col + count) {
+      shifted.push({ ...r, startCol: r.startCol - count, endCol: r.endCol - count });
+    } else if (r.startCol >= col) {
+      // Region starts within deleted range — shift start to col, shrink
+      shifted.push({ ...r, startCol: col, endCol: Math.max(col, r.endCol - count) });
+    } else if (r.endCol >= col + count) {
+      shifted.push({ ...r, endCol: r.endCol - count });
+    } else if (r.endCol >= col) {
+      shifted.push({ ...r, endCol: col - 1 });
+    } else {
+      shifted.push(r);
+    }
+  }
+  replaceGridRegionsByType("pivot", shifted);
+  gridRegionsCache.clear();
+  for (const r of shifted) {
+    const pivotId = Number(r.id.replace("pivot-", ""));
+    if (!isNaN(pivotId)) {
+      gridRegionsCache.set(pivotId, {
+        startRow: r.startRow,
+        startCol: r.startCol,
+        endRow: r.endRow,
+        endCol: r.endCol,
+      });
+    }
+  }
+}
+
+function shiftPivotRegionsForRowDelete(row: number, count: number): void {
+  structuralVersion++;
+  const pivotRegions = getGridRegions().filter((r) => r.type === "pivot");
+  const shifted: GridRegion[] = [];
+  for (const r of pivotRegions) {
+    if (r.startRow >= row + count) {
+      shifted.push({ ...r, startRow: r.startRow - count, endRow: r.endRow - count });
+    } else if (r.startRow >= row) {
+      shifted.push({ ...r, startRow: row, endRow: Math.max(row, r.endRow - count) });
+    } else if (r.endRow >= row + count) {
+      shifted.push({ ...r, endRow: r.endRow - count });
+    } else if (r.endRow >= row) {
+      shifted.push({ ...r, endRow: row - 1 });
+    } else {
+      shifted.push(r);
+    }
+  }
+  replaceGridRegionsByType("pivot", shifted);
+  gridRegionsCache.clear();
+  for (const r of shifted) {
+    const pivotId = Number(r.id.replace("pivot-", ""));
+    if (!isNaN(pivotId)) {
+      gridRegionsCache.set(pivotId, {
+        startRow: r.startRow,
+        startCol: r.startCol,
+        endRow: r.endRow,
+        endCol: r.endCol,
+      });
+    }
   }
 }
 
@@ -1346,6 +1496,34 @@ export function registerPivotExtension(): void {
   cleanupFunctions.push(
     onAppEvent(AppEvents.SHEET_CHANGED, () => {
       refreshPivotRegions(false, /* allowCachedHit */ true);
+    })
+  );
+
+  // Shift pivot overlay regions synchronously when rows/columns are
+  // inserted or deleted. The sync shift uses the same arithmetic as the
+  // backend so positions are guaranteed correct. We do NOT call
+  // refreshPivotRegions() here because a concurrent in-progress refresh
+  // could return stale (pre-shift) data and overwrite our shift. The
+  // structuralVersion counter ensures any already-in-flight refresh
+  // discards its results when it finally completes.
+  cleanupFunctions.push(
+    onAppEvent<{ col: number; count: number }>(AppEvents.COLUMNS_INSERTED, (e) => {
+      shiftPivotRegionsForColInsert(e.col, e.count);
+    })
+  );
+  cleanupFunctions.push(
+    onAppEvent<{ row: number; count: number }>(AppEvents.ROWS_INSERTED, (e) => {
+      shiftPivotRegionsForRowInsert(e.row, e.count);
+    })
+  );
+  cleanupFunctions.push(
+    onAppEvent<{ col: number; count: number }>(AppEvents.COLUMNS_DELETED, (e) => {
+      shiftPivotRegionsForColDelete(e.col, e.count);
+    })
+  );
+  cleanupFunctions.push(
+    onAppEvent<{ row: number; count: number }>(AppEvents.ROWS_DELETED, (e) => {
+      shiftPivotRegionsForRowDelete(e.row, e.count);
     })
   );
 

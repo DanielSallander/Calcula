@@ -680,11 +680,51 @@ export function renderGrid(
   const belowSelectionRenderers = sortedRenderers.filter(r => r.renderBelowSelection === true);
   const aboveSelectionRenderers = sortedRenderers.filter(r => r.renderBelowSelection !== true);
 
+  // Compute insertion animation offset so overlays animate in sync with cells.
+  // During an insertion animation, cells at/after the change point are rendered
+  // with an offset that slides them from old to new position. Overlays (e.g.,
+  // pivot tables) need the same offset to stay visually aligned with the cells
+  // they cover.
+  const anim = state.insertionAnimation;
+  let animOverlayOffsetX = 0;
+  let animOverlayOffsetY = 0;
+  let animOverlayThreshold = -1;   // col or row index threshold
+  let animOverlayAxis: "col" | "row" = "col";
+  if (anim) {
+    const totalOffset = anim.targetSize * anim.count;
+    const remainingOffset = (1 - anim.progress) * totalOffset;
+    const signedOffset = anim.direction === "insert" ? -remainingOffset : remainingOffset;
+    animOverlayThreshold = anim.index;
+    if (anim.type === "column") {
+      animOverlayAxis = "col";
+      animOverlayOffsetX = signedOffset;
+    } else {
+      animOverlayAxis = "row";
+      animOverlayOffsetY = signedOffset;
+    }
+  }
+
+  // Helper: render an overlay region, applying insertion animation offset if needed
+  const renderOverlayRegion = (renderer: OverlayRegistration, region: GridRegion) => {
+    const needsOffset = anim && !region.floating && (
+      (animOverlayAxis === "col" && region.startCol >= animOverlayThreshold) ||
+      (animOverlayAxis === "row" && region.startRow >= animOverlayThreshold)
+    );
+    if (needsOffset) {
+      ctx.save();
+      ctx.translate(animOverlayOffsetX, animOverlayOffsetY);
+    }
+    renderer.render({ ctx, region, config, viewport, dimensions: dims, canvasWidth: width, canvasHeight: height });
+    if (needsOffset) {
+      ctx.restore();
+    }
+  };
+
   // Render below-selection overlays (e.g., pivot tables)
   for (const renderer of belowSelectionRenderers) {
     const matchingRegions = overlayRegions.filter(r => r.type === renderer.type);
     for (const region of matchingRegions) {
-      renderer.render({ ctx, region, config, viewport, dimensions: dims, canvasWidth: width, canvasHeight: height });
+      renderOverlayRegion(renderer, region);
     }
   }
 
@@ -700,7 +740,7 @@ export function renderGrid(
   for (const renderer of aboveSelectionRenderers) {
     const matchingRegions = overlayRegions.filter(r => r.type === renderer.type);
     for (const region of matchingRegions) {
-      renderer.render({ ctx, region, config, viewport, dimensions: dims, canvasWidth: width, canvasHeight: height });
+      renderOverlayRegion(renderer, region);
     }
   }
 

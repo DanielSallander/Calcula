@@ -321,6 +321,11 @@ function SpreadsheetContent({
     try {
       await insertRows(startRow, count);
 
+      // Notify extensions about the structural change BEFORE refreshing cells,
+      // so overlays (e.g., pivot tables) can shift their regions synchronously
+      // before the grid redraws.
+      emitAppEvent(AppEvents.ROWS_INSERTED, { row: startRow, count });
+
       // Refresh dimensions from backend (row heights shifted)
       await refreshDimensions();
 
@@ -334,9 +339,6 @@ function SpreadsheetContent({
         newValue: "",
         formula: null,
       });
-
-      // Notify extensions about the structural change
-      emitAppEvent(AppEvents.ROWS_INSERTED, { row: startRow, count });
 
       canvasRef.current?.redraw();
     } catch (error) {
@@ -359,6 +361,11 @@ function SpreadsheetContent({
     try {
       await insertColumns(startCol, count);
 
+      // Notify extensions about the structural change BEFORE refreshing cells,
+      // so overlays (e.g., pivot tables) can shift their regions synchronously
+      // before the grid redraws.
+      emitAppEvent(AppEvents.COLUMNS_INSERTED, { col: startCol, count });
+
       // Refresh dimensions from backend (column widths shifted)
       await refreshDimensions();
 
@@ -372,9 +379,6 @@ function SpreadsheetContent({
         newValue: "",
         formula: null,
       });
-
-      // Notify extensions about the structural change
-      emitAppEvent(AppEvents.COLUMNS_INSERTED, { col: startCol, count });
 
       canvasRef.current?.redraw();
     } catch (error) {
@@ -397,6 +401,11 @@ function SpreadsheetContent({
     try {
       await deleteRows(startRow, count);
 
+      // Notify extensions about the structural change BEFORE refreshing cells,
+      // so overlays (e.g., pivot tables) can shift their regions synchronously
+      // before the grid redraws.
+      emitAppEvent(AppEvents.ROWS_DELETED, { row: startRow, count });
+
       // Refresh dimensions from backend (row heights shifted)
       await refreshDimensions();
 
@@ -410,9 +419,6 @@ function SpreadsheetContent({
         newValue: "",
         formula: null,
       });
-
-      // Notify extensions about the structural change
-      emitAppEvent(AppEvents.ROWS_DELETED, { row: startRow, count });
 
       canvasRef.current?.redraw();
     } catch (error) {
@@ -435,6 +441,11 @@ function SpreadsheetContent({
     try {
       await deleteColumns(startCol, count);
 
+      // Notify extensions about the structural change BEFORE refreshing cells,
+      // so overlays (e.g., pivot tables) can shift their regions synchronously
+      // before the grid redraws.
+      emitAppEvent(AppEvents.COLUMNS_DELETED, { col: startCol, count });
+
       // Refresh dimensions from backend (column widths shifted)
       await refreshDimensions();
 
@@ -448,9 +459,6 @@ function SpreadsheetContent({
         newValue: "",
         formula: null,
       });
-
-      // Notify extensions about the structural change
-      emitAppEvent(AppEvents.COLUMNS_DELETED, { col: startCol, count });
 
       canvasRef.current?.redraw();
     } catch (error) {
