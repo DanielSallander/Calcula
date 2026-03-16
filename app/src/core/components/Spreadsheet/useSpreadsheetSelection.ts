@@ -471,7 +471,12 @@ export function useSpreadsheetSelection({
     try {
       const result = await undoApi();
       console.log(`[useSpreadsheetSelection] Undo complete - ${result.updatedCells.length} cells updated`);
-      
+
+      // For structural restores (insert/delete rows/cols undo), refresh dimensions
+      if (result.structuralRestore || result.mergeChanged) {
+        window.dispatchEvent(new CustomEvent("dimensions:refresh"));
+      }
+
       // Trigger canvas refresh
       const canvas = canvasRef.current;
       if (canvas) {
@@ -504,7 +509,12 @@ export function useSpreadsheetSelection({
     try {
       const result = await redoApi();
       console.log(`[useSpreadsheetSelection] Redo complete - ${result.updatedCells.length} cells updated`);
-      
+
+      // For structural restores, refresh dimensions
+      if (result.structuralRestore || result.mergeChanged) {
+        window.dispatchEvent(new CustomEvent("dimensions:refresh"));
+      }
+
       // Trigger canvas refresh
       const canvas = canvasRef.current;
       if (canvas) {

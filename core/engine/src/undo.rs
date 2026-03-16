@@ -3,11 +3,31 @@
 //! CONTEXT: Stores inverse operations to enable undo. Supports batching
 //! multiple cell changes into a single transaction.
 
-use std::collections::VecDeque;
+use std::collections::{HashMap, HashSet, VecDeque};
 use crate::cell::Cell;
 
 /// Maximum number of undo operations to keep in history.
 const MAX_HISTORY_SIZE: usize = 100;
+
+/// A merged region stored in undo history (engine-level, no dependency on api_types).
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct UndoMergeRegion {
+    pub start_row: u32,
+    pub start_col: u32,
+    pub end_row: u32,
+    pub end_col: u32,
+}
+
+/// Snapshot of grid state for reversing structural changes (insert/delete rows/columns).
+#[derive(Debug, Clone)]
+pub struct GridSnapshot {
+    pub cells: HashMap<(u32, u32), Cell>,
+    pub row_heights: HashMap<u32, f64>,
+    pub column_widths: HashMap<u32, f64>,
+    pub merged_regions: HashSet<UndoMergeRegion>,
+    pub max_row: u32,
+    pub max_col: u32,
+}
 
 /// Represents a single atomic change that can be undone.
 #[derive(Debug, Clone)]
@@ -31,6 +51,13 @@ pub enum CellChange {
         row: u32,
         previous: Option<f64>,
     },
+    /// A merge region was added (undo = remove it).
+    AddMergeRegion(UndoMergeRegion),
+    /// A merge region was removed (undo = add it back).
+    RemoveMergeRegion(UndoMergeRegion),
+    /// Full grid snapshot for structural changes (insert/delete rows/columns).
+    /// Undo = restore the snapshot, Redo = restore the other snapshot.
+    RestoreSnapshot(GridSnapshot),
 }
 
 /// A transaction groups multiple changes into one undoable action.
@@ -152,7 +179,7 @@ impl UndoStack {
     /// Record a row height change.
     pub fn record_row_height_change(&mut self, row: u32, previous: Option<f64>) {
         let change = CellChange::SetRowHeight { row, previous };
-        
+
         if let Some(ref mut transaction) = self.current_transaction {
             transaction.add_change(change);
         } else {
@@ -160,6 +187,39 @@ impl UndoStack {
             transaction.add_change(change);
             self.push_transaction(transaction);
         }
+    }
+
+    /// Record that a merge region was added (for undo of merge).
+    pub fn record_merge_region_added(&mut self, region: UndoMergeRegion) {
+        let change = CellChange::AddMergeRegion(region);
+        if let Some(ref mut transaction) = self.current_transaction {
+            transaction.add_change(change);
+        } else {
+            let mut transaction = Transaction::new("Merge cells".to_string());
+            transaction.add_change(change);
+            self.push_transaction(transaction);
+        }
+    }
+
+    /// Record that a merge region was removed (for undo of unmerge).
+    pub fn record_merge_region_removed(&mut self, region: UndoMergeRegion) {
+        let change = CellChange::RemoveMergeRegion(region);
+        if let Some(ref mut transaction) = self.current_transaction {
+            transaction.add_change(change);
+        } else {
+            let mut transaction = Transaction::new("Unmerge cells".to_string());
+            transaction.add_change(change);
+            self.push_transaction(transaction);
+        }
+    }
+
+    /// Record a full grid snapshot for structural changes.
+    pub fn record_snapshot(&mut self, snapshot: GridSnapshot) {
+        let change = CellChange::RestoreSnapshot(snapshot);
+        if let Some(ref mut transaction) = self.current_transaction {
+            transaction.add_change(change);
+        }
+        // Snapshots should always be within a transaction (caller must begin one)
     }
 
     /// Push a completed transaction onto the undo stack.

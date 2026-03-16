@@ -5,7 +5,7 @@ use crate::api_types::CellData;
 use crate::commands::utils::get_cell_internal_with_merge;
 use crate::AppState;
 use crate::pivot::types::PivotState;
-use engine::Cell;
+use engine::{Cell, GridSnapshot, UndoMergeRegion};
 use once_cell::sync::Lazy;
 use pivot_engine::PivotId;
 use regex::Regex;
@@ -21,6 +21,31 @@ static COL_RANGE_RE: Lazy<Regex> =
     Lazy::new(|| Regex::new(r"(\$?)([A-Za-z]+):(\$?)([A-Za-z]+)").unwrap());
 static CELL_RANGE_RE: Lazy<Regex> =
     Lazy::new(|| Regex::new(r"(\$?)([A-Za-z]+)(\$?)(\d+):(\$?)([A-Za-z]+)(\$?)(\d+)").unwrap());
+
+/// Capture a snapshot of the current grid state for undo.
+fn capture_grid_snapshot(state: &AppState) -> GridSnapshot {
+    let grid = state.grid.lock().unwrap();
+    let row_heights = state.row_heights.lock().unwrap();
+    let column_widths = state.column_widths.lock().unwrap();
+    let merged_regions = state.merged_regions.lock().unwrap();
+
+    GridSnapshot {
+        cells: grid.cells.clone(),
+        row_heights: row_heights.clone(),
+        column_widths: column_widths.clone(),
+        merged_regions: merged_regions
+            .iter()
+            .map(|r| UndoMergeRegion {
+                start_row: r.start_row,
+                start_col: r.start_col,
+                end_row: r.end_row,
+                end_col: r.end_col,
+            })
+            .collect(),
+        max_row: grid.max_row,
+        max_col: grid.max_col,
+    }
+}
 
 /// ============================================================================
 // PROTECTED REGION SHIFT HELPERS
@@ -532,8 +557,7 @@ fn shift_col_dependencies_map(map: &mut HashMap<(u32, u32), HashSet<u32>>, from_
 }
 
 /// Insert rows at the specified position, shifting existing rows down.
-/// NOTE: insert_rows does NOT support undo currently due to complexity of structural changes.
-/// This could be added in a future version.
+/// Uses snapshot-based undo to restore the full grid state on undo.
 #[tauri::command]
 pub fn insert_rows(
     state: State<AppState>,
@@ -541,6 +565,9 @@ pub fn insert_rows(
     row: u32,
     count: u32,
 ) -> Result<Vec<CellData>, String> {
+    // Capture snapshot BEFORE acquiring other locks (helper acquires its own locks)
+    let snapshot = capture_grid_snapshot(&state);
+
     let mut grid = state.grid.lock().map_err(|e| e.to_string())?;
     let mut grids = state.grids.lock().map_err(|e| e.to_string())?;
     let styles = state.style_registry.lock().map_err(|e| e.to_string())?;
@@ -548,7 +575,7 @@ pub fn insert_rows(
     let active_sheet = *state.active_sheet.lock().map_err(|e| e.to_string())?;
     let mut undo_stack = state.undo_stack.lock().map_err(|e| e.to_string())?;
     let merged_regions = state.merged_regions.lock().map_err(|e| e.to_string())?;
-    
+
     // Lock all dependency maps
     let mut dependents_map = state.dependents.lock().map_err(|e| e.to_string())?;
     let mut dependencies_map = state.dependencies.lock().map_err(|e| e.to_string())?;
@@ -557,8 +584,10 @@ pub fn insert_rows(
     let mut row_dependents_map = state.row_dependents.lock().map_err(|e| e.to_string())?;
     let mut row_dependencies_map = state.row_dependencies.lock().map_err(|e| e.to_string())?;
 
-    // Clear undo history for structural changes (complex to reverse)
-    undo_stack.clear();
+    // Record snapshot for undo
+    undo_stack.begin_transaction(format!("Insert {} row(s)", count));
+    undo_stack.record_snapshot(snapshot);
+    undo_stack.commit_transaction();
     
     // First, update formula references in ALL cells that reference rows at or after the insertion point
     let all_cells: Vec<((u32, u32), Cell)> = grid.cells.iter()
@@ -685,7 +714,7 @@ pub fn insert_rows(
 }
 
 /// Insert columns at the specified position, shifting existing columns right.
-/// NOTE: insert_columns does NOT support undo currently due to complexity of structural changes.
+/// Uses snapshot-based undo to restore the full grid state on undo.
 #[tauri::command]
 pub fn insert_columns(
     state: State<AppState>,
@@ -693,6 +722,9 @@ pub fn insert_columns(
     col: u32,
     count: u32,
 ) -> Result<Vec<CellData>, String> {
+    // Capture snapshot BEFORE acquiring other locks
+    let snapshot = capture_grid_snapshot(&state);
+
     let mut grid = state.grid.lock().map_err(|e| e.to_string())?;
     let mut grids = state.grids.lock().map_err(|e| e.to_string())?;
     let styles = state.style_registry.lock().map_err(|e| e.to_string())?;
@@ -700,7 +732,7 @@ pub fn insert_columns(
     let active_sheet = *state.active_sheet.lock().map_err(|e| e.to_string())?;
     let mut undo_stack = state.undo_stack.lock().map_err(|e| e.to_string())?;
     let merged_regions = state.merged_regions.lock().map_err(|e| e.to_string())?;
-    
+
     // Lock all dependency maps
     let mut dependents_map = state.dependents.lock().map_err(|e| e.to_string())?;
     let mut dependencies_map = state.dependencies.lock().map_err(|e| e.to_string())?;
@@ -709,8 +741,10 @@ pub fn insert_columns(
     let mut row_dependents_map = state.row_dependents.lock().map_err(|e| e.to_string())?;
     let mut row_dependencies_map = state.row_dependencies.lock().map_err(|e| e.to_string())?;
 
-    // Clear undo history for structural changes
-    undo_stack.clear();
+    // Record snapshot for undo
+    undo_stack.begin_transaction(format!("Insert {} column(s)", count));
+    undo_stack.record_snapshot(snapshot);
+    undo_stack.commit_transaction();
     
     // First, update formula references in ALL cells
     let all_cells: Vec<((u32, u32), Cell)> = grid.cells.iter()
@@ -1270,7 +1304,7 @@ fn shift_col_dependencies_map_for_delete(map: &mut HashMap<(u32, u32), HashSet<u
 }
 
 /// Delete rows at the specified position, shifting remaining rows up.
-/// NOTE: delete_rows does NOT support undo currently due to complexity of structural changes.
+/// Uses snapshot-based undo to restore the full grid state on undo.
 #[tauri::command]
 pub fn delete_rows(
     state: State<AppState>,
@@ -1278,6 +1312,9 @@ pub fn delete_rows(
     row: u32,
     count: u32,
 ) -> Result<Vec<CellData>, String> {
+    // Capture snapshot BEFORE acquiring other locks
+    let snapshot = capture_grid_snapshot(&state);
+
     let mut grid = state.grid.lock().map_err(|e| e.to_string())?;
     let mut grids = state.grids.lock().map_err(|e| e.to_string())?;
     let styles = state.style_registry.lock().map_err(|e| e.to_string())?;
@@ -1285,7 +1322,7 @@ pub fn delete_rows(
     let active_sheet = *state.active_sheet.lock().map_err(|e| e.to_string())?;
     let mut undo_stack = state.undo_stack.lock().map_err(|e| e.to_string())?;
     let merged_regions = state.merged_regions.lock().map_err(|e| e.to_string())?;
-    
+
     // Lock all dependency maps
     let mut dependents_map = state.dependents.lock().map_err(|e| e.to_string())?;
     let mut dependencies_map = state.dependencies.lock().map_err(|e| e.to_string())?;
@@ -1294,8 +1331,10 @@ pub fn delete_rows(
     let mut row_dependents_map = state.row_dependents.lock().map_err(|e| e.to_string())?;
     let mut row_dependencies_map = state.row_dependencies.lock().map_err(|e| e.to_string())?;
 
-    // Clear undo history for structural changes
-    undo_stack.clear();
+    // Record snapshot for undo
+    undo_stack.begin_transaction(format!("Delete {} row(s)", count));
+    undo_stack.record_snapshot(snapshot);
+    undo_stack.commit_transaction();
     
     // First, remove cells in the deleted rows
     let cells_to_delete: Vec<(u32, u32)> = grid.cells.keys()
@@ -1446,7 +1485,7 @@ pub fn delete_rows(
 }
 
 /// Delete columns at the specified position, shifting remaining columns left.
-/// NOTE: delete_columns does NOT support undo currently due to complexity of structural changes.
+/// Uses snapshot-based undo to restore the full grid state on undo.
 #[tauri::command]
 pub fn delete_columns(
     state: State<AppState>,
@@ -1454,6 +1493,9 @@ pub fn delete_columns(
     col: u32,
     count: u32,
 ) -> Result<Vec<CellData>, String> {
+    // Capture snapshot BEFORE acquiring other locks
+    let snapshot = capture_grid_snapshot(&state);
+
     let mut grid = state.grid.lock().map_err(|e| e.to_string())?;
     let mut grids = state.grids.lock().map_err(|e| e.to_string())?;
     let styles = state.style_registry.lock().map_err(|e| e.to_string())?;
@@ -1461,7 +1503,7 @@ pub fn delete_columns(
     let active_sheet = *state.active_sheet.lock().map_err(|e| e.to_string())?;
     let mut undo_stack = state.undo_stack.lock().map_err(|e| e.to_string())?;
     let merged_regions = state.merged_regions.lock().map_err(|e| e.to_string())?;
-    
+
     // Lock all dependency maps
     let mut dependents_map = state.dependents.lock().map_err(|e| e.to_string())?;
     let mut dependencies_map = state.dependencies.lock().map_err(|e| e.to_string())?;
@@ -1470,8 +1512,10 @@ pub fn delete_columns(
     let mut row_dependents_map = state.row_dependents.lock().map_err(|e| e.to_string())?;
     let mut row_dependencies_map = state.row_dependencies.lock().map_err(|e| e.to_string())?;
 
-    // Clear undo history for structural changes
-    undo_stack.clear();
+    // Record snapshot for undo
+    undo_stack.begin_transaction(format!("Delete {} column(s)", count));
+    undo_stack.record_snapshot(snapshot);
+    undo_stack.commit_transaction();
     
     // First, remove cells in the deleted columns
     let cells_to_delete: Vec<(u32, u32)> = grid.cells.keys()

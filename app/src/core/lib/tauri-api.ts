@@ -471,6 +471,8 @@ export interface UndoResult {
   updatedCells: CellData[];
   canUndo: boolean;
   canRedo: boolean;
+  mergeChanged: boolean;
+  structuralRestore: boolean;
 }
 
 /**

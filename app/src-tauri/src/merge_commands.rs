@@ -4,7 +4,18 @@
 
 use crate::api_types::{CellData, MergedRegion, MergeResult};
 use crate::{format_cell_value, AppState};
+use engine::UndoMergeRegion;
 use tauri::State;
+
+/// Convert an api_types::MergedRegion to an engine::UndoMergeRegion.
+fn to_undo_region(r: &MergedRegion) -> UndoMergeRegion {
+    UndoMergeRegion {
+        start_row: r.start_row,
+        start_col: r.start_col,
+        end_row: r.end_row,
+        end_col: r.end_col,
+    }
+}
 
 /// Merge cells in the specified range.
 /// The top-left cell becomes the "master" cell containing the merged content.
@@ -22,6 +33,7 @@ pub fn merge_cells(
     let active_sheet = *state.active_sheet.lock().map_err(|e| e.to_string())?;
     let styles = state.style_registry.lock().map_err(|e| e.to_string())?;
     let mut merged_regions = state.merged_regions.lock().map_err(|e| e.to_string())?;
+    let mut undo_stack = state.undo_stack.lock().map_err(|e| e.to_string())?;
 
     // Normalize coordinates (ensure start <= end)
     let min_row = start_row.min(end_row);
@@ -60,6 +72,32 @@ pub fn merge_cells(
     // Get the master cell content (top-left)
     let master_cell = grid.get_cell(min_row, min_col).cloned();
     let master_style_index = master_cell.as_ref().map(|c| c.style_index).unwrap_or(0);
+
+    // Record undo: save slave cells that will be cleared + the merge region being added
+    let opened_transaction = !undo_stack.has_open_transaction();
+    if opened_transaction {
+        undo_stack.begin_transaction("Merge cells".to_string());
+    }
+
+    // Record each slave cell's previous state for undo
+    for row in min_row..=max_row {
+        for col in min_col..=max_col {
+            if row == min_row && col == min_col {
+                continue; // Master cell is not cleared
+            }
+            let previous = grid.get_cell(row, col).cloned();
+            if previous.is_some() {
+                undo_stack.record_cell_change(row, col, previous);
+            }
+        }
+    }
+
+    // Record the merge region addition
+    undo_stack.record_merge_region_added(to_undo_region(&new_region));
+
+    if opened_transaction {
+        undo_stack.commit_transaction();
+    }
 
     // Clear all cells in the range except the master
     let mut updated_cells = Vec::new();
@@ -117,6 +155,7 @@ pub fn unmerge_cells(
     let grid = state.grid.lock().map_err(|e| e.to_string())?;
     let styles = state.style_registry.lock().map_err(|e| e.to_string())?;
     let mut merged_regions = state.merged_regions.lock().map_err(|e| e.to_string())?;
+    let mut undo_stack = state.undo_stack.lock().map_err(|e| e.to_string())?;
 
     // Find the merged region containing this cell
     let region_to_remove = merged_regions
@@ -125,6 +164,16 @@ pub fn unmerge_cells(
         .cloned();
 
     if let Some(region) = region_to_remove {
+        // Record undo: the merge region being removed
+        let opened_transaction = !undo_stack.has_open_transaction();
+        if opened_transaction {
+            undo_stack.begin_transaction("Unmerge cells".to_string());
+        }
+        undo_stack.record_merge_region_removed(to_undo_region(&region));
+        if opened_transaction {
+            undo_stack.commit_transaction();
+        }
+
         merged_regions.remove(&region);
 
         // Return the master cell with span reset to 1

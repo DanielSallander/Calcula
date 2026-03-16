@@ -1,9 +1,9 @@
 //! FILENAME: app/src-tauri/src/undo_commands.rs
 // PURPOSE: Tauri commands for undo/redo operations.
 
-use crate::api_types::CellData;
+use crate::api_types::{CellData, MergedRegion};
 use crate::{format_cell_value, AppState};
-use engine::{CellChange, Transaction};
+use engine::{CellChange, GridSnapshot, Transaction, UndoMergeRegion};
 use serde::Serialize;
 use tauri::State;
 
@@ -21,6 +21,10 @@ pub struct UndoResult {
     pub can_undo: bool,
     /// Whether more redo operations are available
     pub can_redo: bool,
+    /// Whether merged regions changed (frontend should refresh merge info)
+    pub merge_changed: bool,
+    /// Whether a structural restore occurred (frontend should do a full refresh)
+    pub structural_restore: bool,
 }
 
 /// Get current undo/redo state
@@ -31,6 +35,26 @@ pub struct UndoState {
     pub can_redo: bool,
     pub undo_description: Option<String>,
     pub redo_description: Option<String>,
+}
+
+/// Convert engine::UndoMergeRegion to api_types::MergedRegion
+fn to_api_region(r: &UndoMergeRegion) -> MergedRegion {
+    MergedRegion {
+        start_row: r.start_row,
+        start_col: r.start_col,
+        end_row: r.end_row,
+        end_col: r.end_col,
+    }
+}
+
+/// Convert api_types::MergedRegion to engine::UndoMergeRegion
+fn to_undo_region(r: &MergedRegion) -> UndoMergeRegion {
+    UndoMergeRegion {
+        start_row: r.start_row,
+        start_col: r.start_col,
+        end_row: r.end_row,
+        end_col: r.end_col,
+    }
 }
 
 /// Begin a transaction for batching multiple changes.
@@ -76,6 +100,7 @@ pub fn undo(state: State<AppState>) -> UndoResult {
     let styles = state.style_registry.lock().unwrap();
     let mut column_widths = state.column_widths.lock().unwrap();
     let mut row_heights = state.row_heights.lock().unwrap();
+    let mut merged_regions = state.merged_regions.lock().unwrap();
 
     let transaction = match undo_stack.pop_undo() {
         Some(t) => t,
@@ -86,13 +111,17 @@ pub fn undo(state: State<AppState>) -> UndoResult {
                 updated_cells: Vec::new(),
                 can_undo: false,
                 can_redo: undo_stack.can_redo(),
+                merge_changed: false,
+                structural_restore: false,
             };
         }
     };
 
     let description = transaction.description.clone();
     let mut updated_cells = Vec::new();
-    
+    let mut merge_changed = false;
+    let mut structural_restore = false;
+
     // Build the inverse transaction for redo
     let mut redo_transaction = Transaction::new(description.clone());
 
@@ -180,6 +209,58 @@ pub fn undo(state: State<AppState>) -> UndoResult {
                     }
                 }
             }
+            CellChange::AddMergeRegion(region) => {
+                // Undo adding a merge = remove it
+                let api_region = to_api_region(region);
+                merged_regions.remove(&api_region);
+                // Record inverse: removing this region (redo will add it back)
+                redo_transaction.add_change(CellChange::RemoveMergeRegion(region.clone()));
+                merge_changed = true;
+            }
+            CellChange::RemoveMergeRegion(region) => {
+                // Undo removing a merge = add it back
+                let api_region = to_api_region(region);
+                merged_regions.insert(api_region);
+                // Record inverse: adding this region (redo will remove it)
+                redo_transaction.add_change(CellChange::AddMergeRegion(region.clone()));
+                merge_changed = true;
+            }
+            CellChange::RestoreSnapshot(snapshot) => {
+                // Save current state as the redo snapshot
+                let current_snapshot = GridSnapshot {
+                    cells: grid.cells.clone(),
+                    row_heights: row_heights.clone(),
+                    column_widths: column_widths.clone(),
+                    merged_regions: merged_regions
+                        .iter()
+                        .map(|r| to_undo_region(r))
+                        .collect(),
+                    max_row: grid.max_row,
+                    max_col: grid.max_col,
+                };
+                redo_transaction.add_change(CellChange::RestoreSnapshot(current_snapshot));
+
+                // Restore from snapshot
+                grid.cells = snapshot.cells.clone();
+                grid.max_row = snapshot.max_row;
+                grid.max_col = snapshot.max_col;
+                *row_heights = snapshot.row_heights.clone();
+                *column_widths = snapshot.column_widths.clone();
+                merged_regions.clear();
+                for r in &snapshot.merged_regions {
+                    merged_regions.insert(to_api_region(r));
+                }
+
+                // Sync grids vector
+                if active_sheet < grids.len() {
+                    grids[active_sheet].cells = grid.cells.clone();
+                    grids[active_sheet].max_row = grid.max_row;
+                    grids[active_sheet].max_col = grid.max_col;
+                }
+
+                structural_restore = true;
+                merge_changed = true;
+            }
         }
     }
 
@@ -192,6 +273,8 @@ pub fn undo(state: State<AppState>) -> UndoResult {
         updated_cells,
         can_undo: undo_stack.can_undo(),
         can_redo: undo_stack.can_redo(),
+        merge_changed,
+        structural_restore,
     }
 }
 
@@ -205,6 +288,7 @@ pub fn redo(state: State<AppState>) -> UndoResult {
     let styles = state.style_registry.lock().unwrap();
     let mut column_widths = state.column_widths.lock().unwrap();
     let mut row_heights = state.row_heights.lock().unwrap();
+    let mut merged_regions = state.merged_regions.lock().unwrap();
 
     let transaction = match undo_stack.pop_redo() {
         Some(t) => t,
@@ -215,13 +299,17 @@ pub fn redo(state: State<AppState>) -> UndoResult {
                 updated_cells: Vec::new(),
                 can_undo: undo_stack.can_undo(),
                 can_redo: false,
+                merge_changed: false,
+                structural_restore: false,
             };
         }
     };
 
     let description = transaction.description.clone();
     let mut updated_cells = Vec::new();
-    
+    let mut merge_changed = false;
+    let mut structural_restore = false;
+
     // Build the inverse transaction for undo
     let mut undo_transaction = Transaction::new(description.clone());
 
@@ -307,6 +395,56 @@ pub fn redo(state: State<AppState>) -> UndoResult {
                     }
                 }
             }
+            CellChange::AddMergeRegion(region) => {
+                // Redo adding a merge = add it back
+                let api_region = to_api_region(region);
+                merged_regions.insert(api_region);
+                undo_transaction.add_change(CellChange::RemoveMergeRegion(region.clone()));
+                merge_changed = true;
+            }
+            CellChange::RemoveMergeRegion(region) => {
+                // Redo removing a merge = remove it
+                let api_region = to_api_region(region);
+                merged_regions.remove(&api_region);
+                undo_transaction.add_change(CellChange::AddMergeRegion(region.clone()));
+                merge_changed = true;
+            }
+            CellChange::RestoreSnapshot(snapshot) => {
+                // Save current state as the undo snapshot
+                let current_snapshot = GridSnapshot {
+                    cells: grid.cells.clone(),
+                    row_heights: row_heights.clone(),
+                    column_widths: column_widths.clone(),
+                    merged_regions: merged_regions
+                        .iter()
+                        .map(|r| to_undo_region(r))
+                        .collect(),
+                    max_row: grid.max_row,
+                    max_col: grid.max_col,
+                };
+                undo_transaction.add_change(CellChange::RestoreSnapshot(current_snapshot));
+
+                // Restore from snapshot
+                grid.cells = snapshot.cells.clone();
+                grid.max_row = snapshot.max_row;
+                grid.max_col = snapshot.max_col;
+                *row_heights = snapshot.row_heights.clone();
+                *column_widths = snapshot.column_widths.clone();
+                merged_regions.clear();
+                for r in &snapshot.merged_regions {
+                    merged_regions.insert(to_api_region(r));
+                }
+
+                // Sync grids vector
+                if active_sheet < grids.len() {
+                    grids[active_sheet].cells = grid.cells.clone();
+                    grids[active_sheet].max_row = grid.max_row;
+                    grids[active_sheet].max_col = grid.max_col;
+                }
+
+                structural_restore = true;
+                merge_changed = true;
+            }
         }
     }
 
@@ -319,6 +457,8 @@ pub fn redo(state: State<AppState>) -> UndoResult {
         updated_cells,
         can_undo: undo_stack.can_undo(),
         can_redo: undo_stack.can_redo(),
+        merge_changed,
+        structural_restore,
     }
 }
 

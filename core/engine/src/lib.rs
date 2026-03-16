@@ -27,7 +27,7 @@ pub use style::{
     NumberFormat, StyleRegistry, TextAlign, TextRotation, VerticalAlign,
 };
 pub use evaluator::MultiSheetContext;
-pub use undo::{UndoStack, Transaction, CellChange};
+pub use undo::{UndoStack, Transaction, CellChange, UndoMergeRegion, GridSnapshot};
 
 #[cfg(test)]
 mod tests {
