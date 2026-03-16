@@ -20,11 +20,33 @@
 
 use crate::cell::{CellError, CellValue};
 use crate::coord::col_to_index;
+use crate::date_serial;
 use crate::dependency_extractor::{BinaryOperator, BuiltinFunction, Expression, UnaryOperator, Value};
 use crate::grid::Grid;
 use crate::style::StyleRegistry;
 
 use std::collections::HashMap;
+
+/// Comparison operator for criteria matching in SUMIF/COUNTIF etc.
+#[derive(Debug, Clone)]
+enum CriteriaOp {
+    Greater,
+    GreaterEqual,
+    Less,
+    LessEqual,
+    NotEqual,
+}
+
+/// Parsed criteria for conditional aggregate functions.
+#[derive(Debug, Clone)]
+enum CriteriaMatch {
+    ExactNumber(f64),
+    ExactBool(bool),
+    ExactText(String),
+    TextNotEqual(String),
+    Compare(CriteriaOp, f64),
+    Wildcard(String),
+}
 
 /// The result of evaluating an expression.
 /// This maps directly to CellValue but is separate to allow for
@@ -705,6 +727,17 @@ impl<'a> Evaluator<'a> {
             BuiltinFunction::Count => self.fn_count(args),
             BuiltinFunction::CountA => self.fn_counta(args),
 
+            // Conditional aggregate functions
+            BuiltinFunction::SumIf => self.fn_sumif(args),
+            BuiltinFunction::SumIfs => self.fn_sumifs(args),
+            BuiltinFunction::CountIf => self.fn_countif(args),
+            BuiltinFunction::CountIfs => self.fn_countifs(args),
+            BuiltinFunction::AverageIf => self.fn_averageif(args),
+            BuiltinFunction::AverageIfs => self.fn_averageifs(args),
+            BuiltinFunction::CountBlank => self.fn_countblank(args),
+            BuiltinFunction::MinIfs => self.fn_minifs(args),
+            BuiltinFunction::MaxIfs => self.fn_maxifs(args),
+
             // Logical functions
             BuiltinFunction::If => self.fn_if(args),
             BuiltinFunction::And => self.fn_and(args),
@@ -712,6 +745,11 @@ impl<'a> Evaluator<'a> {
             BuiltinFunction::Not => self.fn_not(args),
             BuiltinFunction::True => EvalResult::Boolean(true),
             BuiltinFunction::False => EvalResult::Boolean(false),
+            BuiltinFunction::IfError => self.fn_iferror(args),
+            BuiltinFunction::IfNa => self.fn_ifna(args),
+            BuiltinFunction::Ifs => self.fn_ifs(args),
+            BuiltinFunction::Switch => self.fn_switch(args),
+            BuiltinFunction::Xor => self.fn_xor(args),
 
             // Math functions
             BuiltinFunction::Abs => self.fn_abs(args),
@@ -723,6 +761,32 @@ impl<'a> Evaluator<'a> {
             BuiltinFunction::Mod => self.fn_mod(args),
             BuiltinFunction::Int => self.fn_int(args),
             BuiltinFunction::Sign => self.fn_sign(args),
+            BuiltinFunction::SumProduct => self.fn_sumproduct(args),
+            BuiltinFunction::Rand => self.fn_rand(args),
+            BuiltinFunction::RandBetween => self.fn_randbetween(args),
+            BuiltinFunction::Pi => EvalResult::Number(std::f64::consts::PI),
+            BuiltinFunction::Log => self.fn_log(args),
+            BuiltinFunction::Log10 => self.fn_log10(args),
+            BuiltinFunction::Ln => self.fn_ln(args),
+            BuiltinFunction::Exp => self.fn_exp(args),
+            BuiltinFunction::Sin => self.fn_sin(args),
+            BuiltinFunction::Cos => self.fn_cos(args),
+            BuiltinFunction::Tan => self.fn_tan(args),
+            BuiltinFunction::Asin => self.fn_asin(args),
+            BuiltinFunction::Acos => self.fn_acos(args),
+            BuiltinFunction::Atan => self.fn_atan(args),
+            BuiltinFunction::Atan2 => self.fn_atan2(args),
+            BuiltinFunction::RoundUp => self.fn_roundup(args),
+            BuiltinFunction::RoundDown => self.fn_rounddown(args),
+            BuiltinFunction::Trunc => self.fn_trunc(args),
+            BuiltinFunction::Even => self.fn_even(args),
+            BuiltinFunction::Odd => self.fn_odd(args),
+            BuiltinFunction::Gcd => self.fn_gcd(args),
+            BuiltinFunction::Lcm => self.fn_lcm(args),
+            BuiltinFunction::Combin => self.fn_combin(args),
+            BuiltinFunction::Fact => self.fn_fact(args),
+            BuiltinFunction::Degrees => self.fn_degrees(args),
+            BuiltinFunction::Radians => self.fn_radians(args),
 
             // Text functions
             BuiltinFunction::Len => self.fn_len(args),
@@ -735,17 +799,92 @@ impl<'a> Evaluator<'a> {
             BuiltinFunction::Mid => self.fn_mid(args),
             BuiltinFunction::Rept => self.fn_rept(args),
             BuiltinFunction::Text => self.fn_text(args),
+            BuiltinFunction::Find => self.fn_find(args),
+            BuiltinFunction::Search => self.fn_search(args),
+            BuiltinFunction::Substitute => self.fn_substitute(args),
+            BuiltinFunction::Replace => self.fn_replace(args),
+            BuiltinFunction::ValueFn => self.fn_value(args),
+            BuiltinFunction::Exact => self.fn_exact(args),
+            BuiltinFunction::Proper => self.fn_proper(args),
+            BuiltinFunction::Char => self.fn_char(args),
+            BuiltinFunction::Code => self.fn_code(args),
+            BuiltinFunction::Clean => self.fn_clean(args),
+            BuiltinFunction::NumberValue => self.fn_numbervalue(args),
+            BuiltinFunction::TFn => self.fn_t(args),
+
+            // Date & Time functions
+            BuiltinFunction::Today => self.fn_today(args),
+            BuiltinFunction::Now => self.fn_now(args),
+            BuiltinFunction::Date => self.fn_date(args),
+            BuiltinFunction::Year => self.fn_year(args),
+            BuiltinFunction::Month => self.fn_month(args),
+            BuiltinFunction::Day => self.fn_day(args),
+            BuiltinFunction::Hour => self.fn_hour(args),
+            BuiltinFunction::Minute => self.fn_minute(args),
+            BuiltinFunction::Second => self.fn_second(args),
+            BuiltinFunction::DateValue => self.fn_datevalue(args),
+            BuiltinFunction::TimeValue => self.fn_timevalue(args),
+            BuiltinFunction::EDate => self.fn_edate(args),
+            BuiltinFunction::EOMonth => self.fn_eomonth(args),
+            BuiltinFunction::NetworkDays => self.fn_networkdays(args),
+            BuiltinFunction::WorkDay => self.fn_workday(args),
+            BuiltinFunction::DateDif => self.fn_datedif(args),
+            BuiltinFunction::Weekday => self.fn_weekday(args),
+            BuiltinFunction::WeekNum => self.fn_weeknum(args),
 
             // Information functions
             BuiltinFunction::IsNumber => self.fn_isnumber(args),
             BuiltinFunction::IsText => self.fn_istext(args),
             BuiltinFunction::IsBlank => self.fn_isblank(args),
             BuiltinFunction::IsError => self.fn_iserror(args),
+            BuiltinFunction::IsNa => self.fn_isna(args),
+            BuiltinFunction::IsErr => self.fn_iserr(args),
+            BuiltinFunction::IsLogical => self.fn_islogical(args),
+            BuiltinFunction::IsOdd => self.fn_isodd(args),
+            BuiltinFunction::IsEven => self.fn_iseven(args),
+            BuiltinFunction::TypeFn => self.fn_type(args),
+            BuiltinFunction::NFn => self.fn_n(args),
+            BuiltinFunction::Na => EvalResult::Error(CellError::NA),
+            BuiltinFunction::IsFormula => self.fn_isformula(args),
 
             // Lookup & Reference functions
             BuiltinFunction::XLookup => self.fn_xlookup(args),
             BuiltinFunction::XLookups => self.fn_xlookups(args),
+            BuiltinFunction::Index => self.fn_index(args),
+            BuiltinFunction::Match => self.fn_match(args),
+            BuiltinFunction::Choose => self.fn_choose(args),
+            BuiltinFunction::Indirect => self.fn_indirect(args),
+            BuiltinFunction::Offset => self.fn_offset(args),
+            BuiltinFunction::Address => self.fn_address(args),
+            BuiltinFunction::Rows => self.fn_rows(args),
+            BuiltinFunction::Columns => self.fn_columns(args),
+            BuiltinFunction::Transpose => self.fn_transpose(args),
 
+            // Statistical functions
+            BuiltinFunction::Median => self.fn_median(args),
+            BuiltinFunction::Stdev => self.fn_stdev(args),
+            BuiltinFunction::StdevP => self.fn_stdevp(args),
+            BuiltinFunction::Var => self.fn_var(args),
+            BuiltinFunction::VarP => self.fn_varp(args),
+            BuiltinFunction::Large => self.fn_large(args),
+            BuiltinFunction::Small => self.fn_small(args),
+            BuiltinFunction::Rank => self.fn_rank(args),
+            BuiltinFunction::Percentile => self.fn_percentile(args),
+            BuiltinFunction::Quartile => self.fn_quartile(args),
+            BuiltinFunction::Mode => self.fn_mode(args),
+            BuiltinFunction::Frequency => self.fn_frequency(args),
+
+            // Financial functions
+            BuiltinFunction::Pmt => self.fn_pmt(args),
+            BuiltinFunction::Pv => self.fn_pv(args),
+            BuiltinFunction::Fv => self.fn_fv(args),
+            BuiltinFunction::Npv => self.fn_npv(args),
+            BuiltinFunction::Irr => self.fn_irr(args),
+            BuiltinFunction::Rate => self.fn_rate(args),
+            BuiltinFunction::Nper => self.fn_nper(args),
+            BuiltinFunction::Sln => self.fn_sln(args),
+            BuiltinFunction::Db => self.fn_db(args),
+            BuiltinFunction::Ddb => self.fn_ddb(args),
 
             // UI GET functions
             BuiltinFunction::GetRowHeight => self.fn_get_row_height(args),
@@ -1981,6 +2120,1629 @@ impl<'a> Evaluator<'a> {
 
         let style = style_registry.get(style_index);
         EvalResult::Text(style.background.to_css())
+    }
+
+    // ==================== Criteria Matching Infrastructure ====================
+
+    /// Parses a criteria value into a typed matcher.
+    /// Handles: ">5", "<=10", "<>apple", "A*", "?x?", exact match.
+    fn parse_criteria(&self, criteria: &EvalResult) -> CriteriaMatch {
+        match criteria {
+            EvalResult::Number(n) => CriteriaMatch::ExactNumber(*n),
+            EvalResult::Boolean(b) => CriteriaMatch::ExactBool(*b),
+            EvalResult::Text(s) => {
+                let trimmed = s.trim();
+                // Check for comparison operators
+                if let Some(rest) = trimmed.strip_prefix("<>") {
+                    if let Ok(n) = rest.trim().parse::<f64>() {
+                        return CriteriaMatch::Compare(CriteriaOp::NotEqual, n);
+                    }
+                    return CriteriaMatch::TextNotEqual(rest.trim().to_uppercase());
+                }
+                if let Some(rest) = trimmed.strip_prefix("<=") {
+                    if let Ok(n) = rest.trim().parse::<f64>() {
+                        return CriteriaMatch::Compare(CriteriaOp::LessEqual, n);
+                    }
+                }
+                if let Some(rest) = trimmed.strip_prefix(">=") {
+                    if let Ok(n) = rest.trim().parse::<f64>() {
+                        return CriteriaMatch::Compare(CriteriaOp::GreaterEqual, n);
+                    }
+                }
+                if let Some(rest) = trimmed.strip_prefix('<') {
+                    if let Ok(n) = rest.trim().parse::<f64>() {
+                        return CriteriaMatch::Compare(CriteriaOp::Less, n);
+                    }
+                }
+                if let Some(rest) = trimmed.strip_prefix('>') {
+                    if let Ok(n) = rest.trim().parse::<f64>() {
+                        return CriteriaMatch::Compare(CriteriaOp::Greater, n);
+                    }
+                }
+                if let Some(rest) = trimmed.strip_prefix('=') {
+                    if let Ok(n) = rest.trim().parse::<f64>() {
+                        return CriteriaMatch::ExactNumber(n);
+                    }
+                    return CriteriaMatch::ExactText(rest.trim().to_uppercase());
+                }
+                // Check for wildcards
+                if trimmed.contains('*') || trimmed.contains('?') {
+                    return CriteriaMatch::Wildcard(trimmed.to_uppercase());
+                }
+                // Try as number
+                if let Ok(n) = trimmed.parse::<f64>() {
+                    return CriteriaMatch::ExactNumber(n);
+                }
+                CriteriaMatch::ExactText(trimmed.to_uppercase())
+            }
+            _ => CriteriaMatch::ExactText(String::new()),
+        }
+    }
+
+    /// Tests whether a value matches a criteria.
+    fn matches_criteria(&self, value: &EvalResult, criteria: &CriteriaMatch) -> bool {
+        match criteria {
+            CriteriaMatch::ExactNumber(n) => value.as_number().map_or(false, |v| (v - n).abs() < 1e-10),
+            CriteriaMatch::ExactBool(b) => {
+                matches!(value, EvalResult::Boolean(v) if v == b)
+            }
+            CriteriaMatch::ExactText(s) => value.as_text().to_uppercase() == *s,
+            CriteriaMatch::TextNotEqual(s) => value.as_text().to_uppercase() != *s,
+            CriteriaMatch::Compare(op, n) => {
+                if let Some(v) = value.as_number() {
+                    match op {
+                        CriteriaOp::Greater => v > *n,
+                        CriteriaOp::GreaterEqual => v >= *n,
+                        CriteriaOp::Less => v < *n,
+                        CriteriaOp::LessEqual => v <= *n,
+                        CriteriaOp::NotEqual => (v - n).abs() >= 1e-10,
+                    }
+                } else {
+                    false
+                }
+            }
+            CriteriaMatch::Wildcard(pattern) => {
+                let text = value.as_text().to_uppercase();
+                self.xlookup_wildcard_match(pattern, &text)
+            }
+        }
+    }
+
+    /// Evaluates an argument and flattens it into a Vec of individual values.
+    fn eval_flat(&self, arg: &Expression) -> Vec<EvalResult> {
+        self.evaluate(arg).flatten()
+    }
+
+    // ==================== Conditional Aggregate Functions ====================
+
+    fn fn_sumif(&self, args: &[Expression]) -> EvalResult {
+        if args.len() < 2 || args.len() > 3 {
+            return EvalResult::Error(CellError::Value);
+        }
+        let range_vals = self.eval_flat(&args[0]);
+        let criteria = self.parse_criteria(&self.evaluate(&args[1]));
+        let sum_vals = if args.len() == 3 { self.eval_flat(&args[2]) } else { range_vals.clone() };
+        let mut total = 0.0;
+        for (i, val) in range_vals.iter().enumerate() {
+            if self.matches_criteria(val, &criteria) {
+                if let Some(n) = sum_vals.get(i).and_then(|v| v.as_number()) {
+                    total += n;
+                }
+            }
+        }
+        EvalResult::Number(total)
+    }
+
+    fn fn_sumifs(&self, args: &[Expression]) -> EvalResult {
+        // SUMIFS(sum_range, criteria_range1, criteria1, [criteria_range2, criteria2], ...)
+        if args.len() < 3 || (args.len() - 1) % 2 != 0 {
+            return EvalResult::Error(CellError::Value);
+        }
+        let sum_vals = self.eval_flat(&args[0]);
+        let num_criteria = (args.len() - 1) / 2;
+        let mut criteria_data: Vec<(Vec<EvalResult>, CriteriaMatch)> = Vec::new();
+        for i in 0..num_criteria {
+            let range_vals = self.eval_flat(&args[1 + i * 2]);
+            let criteria = self.parse_criteria(&self.evaluate(&args[2 + i * 2]));
+            criteria_data.push((range_vals, criteria));
+        }
+        let mut total = 0.0;
+        for i in 0..sum_vals.len() {
+            let all_match = criteria_data.iter().all(|(range_vals, criteria)| {
+                range_vals.get(i).map_or(false, |v| self.matches_criteria(v, criteria))
+            });
+            if all_match {
+                if let Some(n) = sum_vals[i].as_number() {
+                    total += n;
+                }
+            }
+        }
+        EvalResult::Number(total)
+    }
+
+    fn fn_countif(&self, args: &[Expression]) -> EvalResult {
+        if args.len() != 2 {
+            return EvalResult::Error(CellError::Value);
+        }
+        let range_vals = self.eval_flat(&args[0]);
+        let criteria = self.parse_criteria(&self.evaluate(&args[1]));
+        let count = range_vals.iter().filter(|v| self.matches_criteria(v, &criteria)).count();
+        EvalResult::Number(count as f64)
+    }
+
+    fn fn_countifs(&self, args: &[Expression]) -> EvalResult {
+        // COUNTIFS(criteria_range1, criteria1, [criteria_range2, criteria2], ...)
+        if args.is_empty() || args.len() % 2 != 0 {
+            return EvalResult::Error(CellError::Value);
+        }
+        let num_criteria = args.len() / 2;
+        let mut criteria_data: Vec<(Vec<EvalResult>, CriteriaMatch)> = Vec::new();
+        for i in 0..num_criteria {
+            let range_vals = self.eval_flat(&args[i * 2]);
+            let criteria = self.parse_criteria(&self.evaluate(&args[i * 2 + 1]));
+            criteria_data.push((range_vals, criteria));
+        }
+        let len = criteria_data.first().map_or(0, |(r, _)| r.len());
+        let mut count = 0usize;
+        for i in 0..len {
+            let all_match = criteria_data.iter().all(|(range_vals, criteria)| {
+                range_vals.get(i).map_or(false, |v| self.matches_criteria(v, criteria))
+            });
+            if all_match {
+                count += 1;
+            }
+        }
+        EvalResult::Number(count as f64)
+    }
+
+    fn fn_averageif(&self, args: &[Expression]) -> EvalResult {
+        if args.len() < 2 || args.len() > 3 {
+            return EvalResult::Error(CellError::Value);
+        }
+        let range_vals = self.eval_flat(&args[0]);
+        let criteria = self.parse_criteria(&self.evaluate(&args[1]));
+        let avg_vals = if args.len() == 3 { self.eval_flat(&args[2]) } else { range_vals.clone() };
+        let mut total = 0.0;
+        let mut count = 0usize;
+        for (i, val) in range_vals.iter().enumerate() {
+            if self.matches_criteria(val, &criteria) {
+                if let Some(n) = avg_vals.get(i).and_then(|v| v.as_number()) {
+                    total += n;
+                    count += 1;
+                }
+            }
+        }
+        if count == 0 { EvalResult::Error(CellError::Div0) } else { EvalResult::Number(total / count as f64) }
+    }
+
+    fn fn_averageifs(&self, args: &[Expression]) -> EvalResult {
+        if args.len() < 3 || (args.len() - 1) % 2 != 0 {
+            return EvalResult::Error(CellError::Value);
+        }
+        let avg_vals = self.eval_flat(&args[0]);
+        let num_criteria = (args.len() - 1) / 2;
+        let mut criteria_data: Vec<(Vec<EvalResult>, CriteriaMatch)> = Vec::new();
+        for i in 0..num_criteria {
+            let range_vals = self.eval_flat(&args[1 + i * 2]);
+            let criteria = self.parse_criteria(&self.evaluate(&args[2 + i * 2]));
+            criteria_data.push((range_vals, criteria));
+        }
+        let mut total = 0.0;
+        let mut count = 0usize;
+        for i in 0..avg_vals.len() {
+            let all_match = criteria_data.iter().all(|(range_vals, criteria)| {
+                range_vals.get(i).map_or(false, |v| self.matches_criteria(v, criteria))
+            });
+            if all_match {
+                if let Some(n) = avg_vals[i].as_number() {
+                    total += n;
+                    count += 1;
+                }
+            }
+        }
+        if count == 0 { EvalResult::Error(CellError::Div0) } else { EvalResult::Number(total / count as f64) }
+    }
+
+    fn fn_countblank(&self, args: &[Expression]) -> EvalResult {
+        if args.len() != 1 {
+            return EvalResult::Error(CellError::Value);
+        }
+        let vals = self.eval_flat(&args[0]);
+        let count = vals.iter().filter(|v| {
+            matches!(v, EvalResult::Text(s) if s.is_empty()) || matches!(v, EvalResult::Array(a) if a.is_empty())
+        }).count();
+        // Also count truly empty cells: eval_flat doesn't produce them, but cells not in grid
+        // return empty text. The above check handles it.
+        EvalResult::Number(count as f64)
+    }
+
+    fn fn_minifs(&self, args: &[Expression]) -> EvalResult {
+        if args.len() < 3 || (args.len() - 1) % 2 != 0 {
+            return EvalResult::Error(CellError::Value);
+        }
+        let min_vals = self.eval_flat(&args[0]);
+        let num_criteria = (args.len() - 1) / 2;
+        let mut criteria_data: Vec<(Vec<EvalResult>, CriteriaMatch)> = Vec::new();
+        for i in 0..num_criteria {
+            let range_vals = self.eval_flat(&args[1 + i * 2]);
+            let criteria = self.parse_criteria(&self.evaluate(&args[2 + i * 2]));
+            criteria_data.push((range_vals, criteria));
+        }
+        let mut result = f64::INFINITY;
+        let mut found = false;
+        for i in 0..min_vals.len() {
+            let all_match = criteria_data.iter().all(|(range_vals, criteria)| {
+                range_vals.get(i).map_or(false, |v| self.matches_criteria(v, criteria))
+            });
+            if all_match {
+                if let Some(n) = min_vals[i].as_number() {
+                    result = result.min(n);
+                    found = true;
+                }
+            }
+        }
+        if found { EvalResult::Number(result) } else { EvalResult::Number(0.0) }
+    }
+
+    fn fn_maxifs(&self, args: &[Expression]) -> EvalResult {
+        if args.len() < 3 || (args.len() - 1) % 2 != 0 {
+            return EvalResult::Error(CellError::Value);
+        }
+        let max_vals = self.eval_flat(&args[0]);
+        let num_criteria = (args.len() - 1) / 2;
+        let mut criteria_data: Vec<(Vec<EvalResult>, CriteriaMatch)> = Vec::new();
+        for i in 0..num_criteria {
+            let range_vals = self.eval_flat(&args[1 + i * 2]);
+            let criteria = self.parse_criteria(&self.evaluate(&args[2 + i * 2]));
+            criteria_data.push((range_vals, criteria));
+        }
+        let mut result = f64::NEG_INFINITY;
+        let mut found = false;
+        for i in 0..max_vals.len() {
+            let all_match = criteria_data.iter().all(|(range_vals, criteria)| {
+                range_vals.get(i).map_or(false, |v| self.matches_criteria(v, criteria))
+            });
+            if all_match {
+                if let Some(n) = max_vals[i].as_number() {
+                    result = result.max(n);
+                    found = true;
+                }
+            }
+        }
+        if found { EvalResult::Number(result) } else { EvalResult::Number(0.0) }
+    }
+
+    // ==================== Error Handling & Logic Functions (Batch 4) ====================
+
+    fn fn_iferror(&self, args: &[Expression]) -> EvalResult {
+        if args.len() != 2 { return EvalResult::Error(CellError::Value); }
+        let val = self.evaluate(&args[0]);
+        if matches!(val, EvalResult::Error(_)) { self.evaluate(&args[1]) } else { val }
+    }
+
+    fn fn_ifna(&self, args: &[Expression]) -> EvalResult {
+        if args.len() != 2 { return EvalResult::Error(CellError::Value); }
+        let val = self.evaluate(&args[0]);
+        if matches!(val, EvalResult::Error(CellError::NA)) { self.evaluate(&args[1]) } else { val }
+    }
+
+    fn fn_ifs(&self, args: &[Expression]) -> EvalResult {
+        if args.is_empty() || args.len() % 2 != 0 {
+            return EvalResult::Error(CellError::Value);
+        }
+        for i in (0..args.len()).step_by(2) {
+            let cond = self.evaluate(&args[i]);
+            if let EvalResult::Error(e) = cond { return EvalResult::Error(e); }
+            if cond.as_boolean().unwrap_or(false) {
+                return self.evaluate(&args[i + 1]);
+            }
+        }
+        EvalResult::Error(CellError::NA)
+    }
+
+    fn fn_switch(&self, args: &[Expression]) -> EvalResult {
+        if args.len() < 3 { return EvalResult::Error(CellError::Value); }
+        let expr_val = self.evaluate(&args[0]);
+        if let EvalResult::Error(e) = &expr_val { return EvalResult::Error(e.clone()); }
+        let pairs = &args[1..];
+        let has_default = pairs.len() % 2 != 0;
+        let pair_count = pairs.len() / 2;
+        for i in 0..pair_count {
+            let case_val = self.evaluate(&pairs[i * 2]);
+            if self.eval_values_equal(&expr_val, &case_val) {
+                return self.evaluate(&pairs[i * 2 + 1]);
+            }
+        }
+        if has_default {
+            self.evaluate(pairs.last().unwrap())
+        } else {
+            EvalResult::Error(CellError::NA)
+        }
+    }
+
+    fn eval_values_equal(&self, a: &EvalResult, b: &EvalResult) -> bool {
+        match (a, b) {
+            (EvalResult::Number(x), EvalResult::Number(y)) => (x - y).abs() < 1e-10,
+            (EvalResult::Text(x), EvalResult::Text(y)) => x.to_uppercase() == y.to_uppercase(),
+            (EvalResult::Boolean(x), EvalResult::Boolean(y)) => x == y,
+            _ => false,
+        }
+    }
+
+    fn fn_xor(&self, args: &[Expression]) -> EvalResult {
+        if args.is_empty() { return EvalResult::Error(CellError::Value); }
+        let mut true_count = 0usize;
+        for arg in args {
+            let val = self.evaluate(arg);
+            for item in val.flatten() {
+                if let EvalResult::Error(e) = item { return EvalResult::Error(e); }
+                if item.as_boolean().unwrap_or(false) { true_count += 1; }
+            }
+        }
+        EvalResult::Boolean(true_count % 2 != 0)
+    }
+
+    // ==================== Math Functions (Batch 5) ====================
+
+    fn fn_sumproduct(&self, args: &[Expression]) -> EvalResult {
+        if args.is_empty() { return EvalResult::Error(CellError::Value); }
+        let arrays: Vec<Vec<EvalResult>> = args.iter().map(|a| self.eval_flat(a)).collect();
+        let len = arrays[0].len();
+        if arrays.iter().any(|a| a.len() != len) {
+            return EvalResult::Error(CellError::Value);
+        }
+        let mut total = 0.0;
+        for i in 0..len {
+            let mut product = 1.0;
+            for arr in &arrays {
+                product *= arr[i].as_number().unwrap_or(0.0);
+            }
+            total += product;
+        }
+        EvalResult::Number(total)
+    }
+
+    fn fn_rand(&self, _args: &[Expression]) -> EvalResult {
+        use std::collections::hash_map::RandomState;
+        use std::hash::{BuildHasher, Hasher};
+        let s = RandomState::new();
+        let mut hasher = s.build_hasher();
+        hasher.write_u64(0);
+        let bits = hasher.finish();
+        EvalResult::Number((bits as f64) / (u64::MAX as f64))
+    }
+
+    fn fn_randbetween(&self, args: &[Expression]) -> EvalResult {
+        if args.len() != 2 { return EvalResult::Error(CellError::Value); }
+        let bottom = match self.evaluate(&args[0]).as_number() {
+            Some(n) => n.ceil() as i64,
+            None => return EvalResult::Error(CellError::Value),
+        };
+        let top = match self.evaluate(&args[1]).as_number() {
+            Some(n) => n.floor() as i64,
+            None => return EvalResult::Error(CellError::Value),
+        };
+        if bottom > top { return EvalResult::Error(CellError::Value); }
+        // Generate random using hashing
+        use std::collections::hash_map::RandomState;
+        use std::hash::{BuildHasher, Hasher};
+        let s = RandomState::new();
+        let mut hasher = s.build_hasher();
+        hasher.write_u64(0);
+        let bits = hasher.finish();
+        let range = (top - bottom + 1) as u64;
+        let result = bottom + (bits % range) as i64;
+        EvalResult::Number(result as f64)
+    }
+
+    fn fn_log(&self, args: &[Expression]) -> EvalResult {
+        if args.is_empty() || args.len() > 2 { return EvalResult::Error(CellError::Value); }
+        let n = match self.evaluate(&args[0]).as_number() {
+            Some(n) if n > 0.0 => n,
+            _ => return EvalResult::Error(CellError::Value),
+        };
+        let base = if args.len() == 2 {
+            match self.evaluate(&args[1]).as_number() {
+                Some(b) if b > 0.0 && (b - 1.0).abs() > 1e-10 => b,
+                _ => return EvalResult::Error(CellError::Value),
+            }
+        } else {
+            10.0
+        };
+        EvalResult::Number(n.ln() / base.ln())
+    }
+
+    fn fn_log10(&self, args: &[Expression]) -> EvalResult {
+        if args.len() != 1 { return EvalResult::Error(CellError::Value); }
+        match self.evaluate(&args[0]).as_number() {
+            Some(n) if n > 0.0 => EvalResult::Number(n.log10()),
+            _ => EvalResult::Error(CellError::Value),
+        }
+    }
+
+    fn fn_ln(&self, args: &[Expression]) -> EvalResult {
+        if args.len() != 1 { return EvalResult::Error(CellError::Value); }
+        match self.evaluate(&args[0]).as_number() {
+            Some(n) if n > 0.0 => EvalResult::Number(n.ln()),
+            _ => EvalResult::Error(CellError::Value),
+        }
+    }
+
+    fn fn_exp(&self, args: &[Expression]) -> EvalResult {
+        if args.len() != 1 { return EvalResult::Error(CellError::Value); }
+        match self.evaluate(&args[0]).as_number() {
+            Some(n) => EvalResult::Number(n.exp()),
+            None => EvalResult::Error(CellError::Value),
+        }
+    }
+
+    fn fn_sin(&self, args: &[Expression]) -> EvalResult {
+        if args.len() != 1 { return EvalResult::Error(CellError::Value); }
+        match self.evaluate(&args[0]).as_number() { Some(n) => EvalResult::Number(n.sin()), None => EvalResult::Error(CellError::Value) }
+    }
+    fn fn_cos(&self, args: &[Expression]) -> EvalResult {
+        if args.len() != 1 { return EvalResult::Error(CellError::Value); }
+        match self.evaluate(&args[0]).as_number() { Some(n) => EvalResult::Number(n.cos()), None => EvalResult::Error(CellError::Value) }
+    }
+    fn fn_tan(&self, args: &[Expression]) -> EvalResult {
+        if args.len() != 1 { return EvalResult::Error(CellError::Value); }
+        match self.evaluate(&args[0]).as_number() { Some(n) => EvalResult::Number(n.tan()), None => EvalResult::Error(CellError::Value) }
+    }
+    fn fn_asin(&self, args: &[Expression]) -> EvalResult {
+        if args.len() != 1 { return EvalResult::Error(CellError::Value); }
+        match self.evaluate(&args[0]).as_number() {
+            Some(n) if (-1.0..=1.0).contains(&n) => EvalResult::Number(n.asin()),
+            Some(_) => EvalResult::Error(CellError::Value),
+            None => EvalResult::Error(CellError::Value),
+        }
+    }
+    fn fn_acos(&self, args: &[Expression]) -> EvalResult {
+        if args.len() != 1 { return EvalResult::Error(CellError::Value); }
+        match self.evaluate(&args[0]).as_number() {
+            Some(n) if (-1.0..=1.0).contains(&n) => EvalResult::Number(n.acos()),
+            Some(_) => EvalResult::Error(CellError::Value),
+            None => EvalResult::Error(CellError::Value),
+        }
+    }
+    fn fn_atan(&self, args: &[Expression]) -> EvalResult {
+        if args.len() != 1 { return EvalResult::Error(CellError::Value); }
+        match self.evaluate(&args[0]).as_number() { Some(n) => EvalResult::Number(n.atan()), None => EvalResult::Error(CellError::Value) }
+    }
+    fn fn_atan2(&self, args: &[Expression]) -> EvalResult {
+        if args.len() != 2 { return EvalResult::Error(CellError::Value); }
+        let x = match self.evaluate(&args[0]).as_number() { Some(n) => n, None => return EvalResult::Error(CellError::Value) };
+        let y = match self.evaluate(&args[1]).as_number() { Some(n) => n, None => return EvalResult::Error(CellError::Value) };
+        if x == 0.0 && y == 0.0 { return EvalResult::Error(CellError::Div0); }
+        EvalResult::Number(y.atan2(x))
+    }
+
+    fn fn_roundup(&self, args: &[Expression]) -> EvalResult {
+        if args.len() != 2 { return EvalResult::Error(CellError::Value); }
+        let n = match self.evaluate(&args[0]).as_number() { Some(n) => n, None => return EvalResult::Error(CellError::Value) };
+        let digits = match self.evaluate(&args[1]).as_number() { Some(n) => n as i32, None => return EvalResult::Error(CellError::Value) };
+        let factor = 10f64.powi(digits);
+        EvalResult::Number(if n >= 0.0 { (n * factor).ceil() / factor } else { (n * factor).floor() / factor })
+    }
+
+    fn fn_rounddown(&self, args: &[Expression]) -> EvalResult {
+        if args.len() != 2 { return EvalResult::Error(CellError::Value); }
+        let n = match self.evaluate(&args[0]).as_number() { Some(n) => n, None => return EvalResult::Error(CellError::Value) };
+        let digits = match self.evaluate(&args[1]).as_number() { Some(n) => n as i32, None => return EvalResult::Error(CellError::Value) };
+        let factor = 10f64.powi(digits);
+        EvalResult::Number(if n >= 0.0 { (n * factor).floor() / factor } else { (n * factor).ceil() / factor })
+    }
+
+    fn fn_trunc(&self, args: &[Expression]) -> EvalResult {
+        if args.is_empty() || args.len() > 2 { return EvalResult::Error(CellError::Value); }
+        let n = match self.evaluate(&args[0]).as_number() { Some(n) => n, None => return EvalResult::Error(CellError::Value) };
+        let digits = if args.len() == 2 {
+            match self.evaluate(&args[1]).as_number() { Some(d) => d as i32, None => return EvalResult::Error(CellError::Value) }
+        } else { 0 };
+        let factor = 10f64.powi(digits);
+        EvalResult::Number((n * factor).trunc() / factor)
+    }
+
+    fn fn_even(&self, args: &[Expression]) -> EvalResult {
+        if args.len() != 1 { return EvalResult::Error(CellError::Value); }
+        match self.evaluate(&args[0]).as_number() {
+            Some(n) => {
+                let ceil = if n >= 0.0 { n.ceil() } else { n.floor() };
+                let result = if ceil as i64 % 2 == 0 { ceil } else if n >= 0.0 { ceil + 1.0 } else { ceil - 1.0 };
+                EvalResult::Number(result)
+            }
+            None => EvalResult::Error(CellError::Value),
+        }
+    }
+
+    fn fn_odd(&self, args: &[Expression]) -> EvalResult {
+        if args.len() != 1 { return EvalResult::Error(CellError::Value); }
+        match self.evaluate(&args[0]).as_number() {
+            Some(n) => {
+                if n == 0.0 { return EvalResult::Number(1.0); }
+                let ceil = if n >= 0.0 { n.ceil() } else { n.floor() };
+                let result = if ceil as i64 % 2 != 0 { ceil } else if n >= 0.0 { ceil + 1.0 } else { ceil - 1.0 };
+                EvalResult::Number(result)
+            }
+            None => EvalResult::Error(CellError::Value),
+        }
+    }
+
+    fn fn_gcd(&self, args: &[Expression]) -> EvalResult {
+        if args.is_empty() { return EvalResult::Error(CellError::Value); }
+        fn gcd(a: u64, b: u64) -> u64 { if b == 0 { a } else { gcd(b, a % b) } }
+        let mut result = 0u64;
+        for arg in args {
+            match self.evaluate(arg).as_number() {
+                Some(n) if n >= 0.0 => result = gcd(result, n as u64),
+                _ => return EvalResult::Error(CellError::Value),
+            }
+        }
+        EvalResult::Number(result as f64)
+    }
+
+    fn fn_lcm(&self, args: &[Expression]) -> EvalResult {
+        if args.is_empty() { return EvalResult::Error(CellError::Value); }
+        fn gcd(a: u64, b: u64) -> u64 { if b == 0 { a } else { gcd(b, a % b) } }
+        fn lcm(a: u64, b: u64) -> u64 { if a == 0 || b == 0 { 0 } else { a / gcd(a, b) * b } }
+        let mut result = 1u64;
+        for arg in args {
+            match self.evaluate(arg).as_number() {
+                Some(n) if n >= 0.0 => result = lcm(result, n as u64),
+                _ => return EvalResult::Error(CellError::Value),
+            }
+        }
+        EvalResult::Number(result as f64)
+    }
+
+    fn fn_combin(&self, args: &[Expression]) -> EvalResult {
+        if args.len() != 2 { return EvalResult::Error(CellError::Value); }
+        let n = match self.evaluate(&args[0]).as_number() { Some(v) => v as u64, None => return EvalResult::Error(CellError::Value) };
+        let k = match self.evaluate(&args[1]).as_number() { Some(v) => v as u64, None => return EvalResult::Error(CellError::Value) };
+        if k > n { return EvalResult::Error(CellError::Value); }
+        let k = k.min(n - k);
+        let mut result = 1u64;
+        for i in 0..k { result = result * (n - i) / (i + 1); }
+        EvalResult::Number(result as f64)
+    }
+
+    fn fn_fact(&self, args: &[Expression]) -> EvalResult {
+        if args.len() != 1 { return EvalResult::Error(CellError::Value); }
+        match self.evaluate(&args[0]).as_number() {
+            Some(n) if n >= 0.0 => {
+                let n = n as u64;
+                let mut result = 1u64;
+                for i in 2..=n { result = result.saturating_mul(i); }
+                EvalResult::Number(result as f64)
+            }
+            _ => EvalResult::Error(CellError::Value),
+        }
+    }
+
+    fn fn_degrees(&self, args: &[Expression]) -> EvalResult {
+        if args.len() != 1 { return EvalResult::Error(CellError::Value); }
+        match self.evaluate(&args[0]).as_number() {
+            Some(n) => EvalResult::Number(n.to_degrees()),
+            None => EvalResult::Error(CellError::Value),
+        }
+    }
+
+    fn fn_radians(&self, args: &[Expression]) -> EvalResult {
+        if args.len() != 1 { return EvalResult::Error(CellError::Value); }
+        match self.evaluate(&args[0]).as_number() {
+            Some(n) => EvalResult::Number(n.to_radians()),
+            None => EvalResult::Error(CellError::Value),
+        }
+    }
+
+    // ==================== Text Functions (Batch 6) ====================
+
+    fn fn_find(&self, args: &[Expression]) -> EvalResult {
+        if args.len() < 2 || args.len() > 3 { return EvalResult::Error(CellError::Value); }
+        let find_text = self.evaluate(&args[0]).as_text();
+        let within_text = self.evaluate(&args[1]).as_text();
+        let start = if args.len() == 3 {
+            match self.evaluate(&args[2]).as_number() { Some(n) if n >= 1.0 => (n as usize) - 1, _ => return EvalResult::Error(CellError::Value) }
+        } else { 0 };
+        if start > within_text.len() { return EvalResult::Error(CellError::Value); }
+        match within_text[start..].find(&find_text) {
+            Some(pos) => EvalResult::Number((start + pos + 1) as f64),
+            None => EvalResult::Error(CellError::Value),
+        }
+    }
+
+    fn fn_search(&self, args: &[Expression]) -> EvalResult {
+        if args.len() < 2 || args.len() > 3 { return EvalResult::Error(CellError::Value); }
+        let find_text = self.evaluate(&args[0]).as_text().to_uppercase();
+        let within_text = self.evaluate(&args[1]).as_text().to_uppercase();
+        let start = if args.len() == 3 {
+            match self.evaluate(&args[2]).as_number() { Some(n) if n >= 1.0 => (n as usize) - 1, _ => return EvalResult::Error(CellError::Value) }
+        } else { 0 };
+        if start > within_text.len() { return EvalResult::Error(CellError::Value); }
+        // SEARCH supports wildcards
+        if find_text.contains('*') || find_text.contains('?') {
+            // Try matching at each position
+            for pos in start..within_text.len() {
+                if self.xlookup_wildcard_match(&find_text, &within_text[pos..]) {
+                    return EvalResult::Number((pos + 1) as f64);
+                }
+            }
+            EvalResult::Error(CellError::Value)
+        } else {
+            match within_text[start..].find(&find_text) {
+                Some(pos) => EvalResult::Number((start + pos + 1) as f64),
+                None => EvalResult::Error(CellError::Value),
+            }
+        }
+    }
+
+    fn fn_substitute(&self, args: &[Expression]) -> EvalResult {
+        if args.len() < 3 || args.len() > 4 { return EvalResult::Error(CellError::Value); }
+        let text = self.evaluate(&args[0]).as_text();
+        let old_text = self.evaluate(&args[1]).as_text();
+        let new_text = self.evaluate(&args[2]).as_text();
+        if old_text.is_empty() { return EvalResult::Text(text); }
+        if args.len() == 4 {
+            let instance = match self.evaluate(&args[3]).as_number() { Some(n) if n >= 1.0 => n as usize, _ => return EvalResult::Error(CellError::Value) };
+            let mut count = 0usize;
+            let mut result = String::new();
+            let mut remaining = text.as_str();
+            while let Some(pos) = remaining.find(&old_text) {
+                count += 1;
+                if count == instance {
+                    result.push_str(&remaining[..pos]);
+                    result.push_str(&new_text);
+                    result.push_str(&remaining[pos + old_text.len()..]);
+                    return EvalResult::Text(result);
+                }
+                result.push_str(&remaining[..pos + old_text.len()]);
+                remaining = &remaining[pos + old_text.len()..];
+            }
+            result.push_str(remaining);
+            EvalResult::Text(result)
+        } else {
+            EvalResult::Text(text.replace(&old_text, &new_text))
+        }
+    }
+
+    fn fn_replace(&self, args: &[Expression]) -> EvalResult {
+        if args.len() != 4 { return EvalResult::Error(CellError::Value); }
+        let text = self.evaluate(&args[0]).as_text();
+        let start = match self.evaluate(&args[1]).as_number() { Some(n) if n >= 1.0 => (n as usize) - 1, _ => return EvalResult::Error(CellError::Value) };
+        let num_chars = match self.evaluate(&args[2]).as_number() { Some(n) if n >= 0.0 => n as usize, _ => return EvalResult::Error(CellError::Value) };
+        let new_text = self.evaluate(&args[3]).as_text();
+        let chars: Vec<char> = text.chars().collect();
+        let mut result = String::new();
+        for (i, c) in chars.iter().enumerate() {
+            if i == start { result.push_str(&new_text); }
+            if i < start || i >= start + num_chars { result.push(*c); }
+        }
+        if start >= chars.len() { result.push_str(&new_text); }
+        EvalResult::Text(result)
+    }
+
+    fn fn_value(&self, args: &[Expression]) -> EvalResult {
+        if args.len() != 1 { return EvalResult::Error(CellError::Value); }
+        let text = self.evaluate(&args[0]).as_text();
+        match text.trim().parse::<f64>() {
+            Ok(n) => EvalResult::Number(n),
+            Err(_) => EvalResult::Error(CellError::Value),
+        }
+    }
+
+    fn fn_exact(&self, args: &[Expression]) -> EvalResult {
+        if args.len() != 2 { return EvalResult::Error(CellError::Value); }
+        let a = self.evaluate(&args[0]).as_text();
+        let b = self.evaluate(&args[1]).as_text();
+        EvalResult::Boolean(a == b) // case-sensitive
+    }
+
+    fn fn_proper(&self, args: &[Expression]) -> EvalResult {
+        if args.len() != 1 { return EvalResult::Error(CellError::Value); }
+        let text = self.evaluate(&args[0]).as_text();
+        let mut result = String::new();
+        let mut capitalize_next = true;
+        for c in text.chars() {
+            if c.is_alphanumeric() {
+                if capitalize_next { result.extend(c.to_uppercase()); capitalize_next = false; }
+                else { result.extend(c.to_lowercase()); }
+            } else {
+                result.push(c);
+                capitalize_next = true;
+            }
+        }
+        EvalResult::Text(result)
+    }
+
+    fn fn_char(&self, args: &[Expression]) -> EvalResult {
+        if args.len() != 1 { return EvalResult::Error(CellError::Value); }
+        match self.evaluate(&args[0]).as_number() {
+            Some(n) if n >= 1.0 && n <= 255.0 => EvalResult::Text(String::from(n as u8 as char)),
+            _ => EvalResult::Error(CellError::Value),
+        }
+    }
+
+    fn fn_code(&self, args: &[Expression]) -> EvalResult {
+        if args.len() != 1 { return EvalResult::Error(CellError::Value); }
+        let text = self.evaluate(&args[0]).as_text();
+        match text.chars().next() {
+            Some(c) => EvalResult::Number(c as u32 as f64),
+            None => EvalResult::Error(CellError::Value),
+        }
+    }
+
+    fn fn_clean(&self, args: &[Expression]) -> EvalResult {
+        if args.len() != 1 { return EvalResult::Error(CellError::Value); }
+        let text = self.evaluate(&args[0]).as_text();
+        EvalResult::Text(text.chars().filter(|c| *c as u32 >= 32).collect())
+    }
+
+    fn fn_numbervalue(&self, args: &[Expression]) -> EvalResult {
+        if args.is_empty() || args.len() > 3 { return EvalResult::Error(CellError::Value); }
+        let text = self.evaluate(&args[0]).as_text();
+        let decimal_sep = if args.len() >= 2 { self.evaluate(&args[1]).as_text() } else { ".".to_string() };
+        let group_sep = if args.len() == 3 { self.evaluate(&args[2]).as_text() } else { ",".to_string() };
+        let cleaned = text.replace(&group_sep, "").replace(&decimal_sep, ".");
+        match cleaned.trim().parse::<f64>() {
+            Ok(n) => EvalResult::Number(n),
+            Err(_) => EvalResult::Error(CellError::Value),
+        }
+    }
+
+    fn fn_t(&self, args: &[Expression]) -> EvalResult {
+        if args.len() != 1 { return EvalResult::Error(CellError::Value); }
+        let val = self.evaluate(&args[0]);
+        match val {
+            EvalResult::Text(_) => val,
+            EvalResult::Error(e) => EvalResult::Error(e),
+            _ => EvalResult::Text(String::new()),
+        }
+    }
+
+    // ==================== Date & Time Functions (Batch 2) ====================
+
+    fn fn_today(&self, _args: &[Expression]) -> EvalResult {
+        EvalResult::Number(date_serial::today_serial())
+    }
+
+    fn fn_now(&self, _args: &[Expression]) -> EvalResult {
+        EvalResult::Number(date_serial::now_serial())
+    }
+
+    fn fn_date(&self, args: &[Expression]) -> EvalResult {
+        if args.len() != 3 { return EvalResult::Error(CellError::Value); }
+        let year = match self.evaluate(&args[0]).as_number() { Some(n) => n as i32, None => return EvalResult::Error(CellError::Value) };
+        let month = match self.evaluate(&args[1]).as_number() { Some(n) => n as i32, None => return EvalResult::Error(CellError::Value) };
+        let day = match self.evaluate(&args[2]).as_number() { Some(n) => n as i32, None => return EvalResult::Error(CellError::Value) };
+        EvalResult::Number(date_serial::date_to_serial(year, month, day))
+    }
+
+    fn fn_year(&self, args: &[Expression]) -> EvalResult {
+        if args.len() != 1 { return EvalResult::Error(CellError::Value); }
+        match self.evaluate(&args[0]).as_number() {
+            Some(serial) => { let (y, _, _) = date_serial::serial_to_date(serial as i64); EvalResult::Number(y as f64) }
+            None => EvalResult::Error(CellError::Value),
+        }
+    }
+
+    fn fn_month(&self, args: &[Expression]) -> EvalResult {
+        if args.len() != 1 { return EvalResult::Error(CellError::Value); }
+        match self.evaluate(&args[0]).as_number() {
+            Some(serial) => { let (_, m, _) = date_serial::serial_to_date(serial as i64); EvalResult::Number(m as f64) }
+            None => EvalResult::Error(CellError::Value),
+        }
+    }
+
+    fn fn_day(&self, args: &[Expression]) -> EvalResult {
+        if args.len() != 1 { return EvalResult::Error(CellError::Value); }
+        match self.evaluate(&args[0]).as_number() {
+            Some(serial) => { let (_, _, d) = date_serial::serial_to_date(serial as i64); EvalResult::Number(d as f64) }
+            None => EvalResult::Error(CellError::Value),
+        }
+    }
+
+    fn fn_hour(&self, args: &[Expression]) -> EvalResult {
+        if args.len() != 1 { return EvalResult::Error(CellError::Value); }
+        match self.evaluate(&args[0]).as_number() {
+            Some(serial) => { let (h, _, _) = date_serial::serial_to_time(serial); EvalResult::Number(h as f64) }
+            None => EvalResult::Error(CellError::Value),
+        }
+    }
+
+    fn fn_minute(&self, args: &[Expression]) -> EvalResult {
+        if args.len() != 1 { return EvalResult::Error(CellError::Value); }
+        match self.evaluate(&args[0]).as_number() {
+            Some(serial) => { let (_, m, _) = date_serial::serial_to_time(serial); EvalResult::Number(m as f64) }
+            None => EvalResult::Error(CellError::Value),
+        }
+    }
+
+    fn fn_second(&self, args: &[Expression]) -> EvalResult {
+        if args.len() != 1 { return EvalResult::Error(CellError::Value); }
+        match self.evaluate(&args[0]).as_number() {
+            Some(serial) => { let (_, _, s) = date_serial::serial_to_time(serial); EvalResult::Number(s as f64) }
+            None => EvalResult::Error(CellError::Value),
+        }
+    }
+
+    fn fn_datevalue(&self, args: &[Expression]) -> EvalResult {
+        if args.len() != 1 { return EvalResult::Error(CellError::Value); }
+        let text = self.evaluate(&args[0]).as_text();
+        match date_serial::parse_date_string(&text) {
+            Some(serial) => EvalResult::Number(serial),
+            None => EvalResult::Error(CellError::Value),
+        }
+    }
+
+    fn fn_timevalue(&self, args: &[Expression]) -> EvalResult {
+        if args.len() != 1 { return EvalResult::Error(CellError::Value); }
+        let text = self.evaluate(&args[0]).as_text();
+        match date_serial::parse_time_string(&text) {
+            Some(fraction) => EvalResult::Number(fraction),
+            None => EvalResult::Error(CellError::Value),
+        }
+    }
+
+    fn fn_edate(&self, args: &[Expression]) -> EvalResult {
+        if args.len() != 2 { return EvalResult::Error(CellError::Value); }
+        let serial = match self.evaluate(&args[0]).as_number() { Some(n) => n as i64, None => return EvalResult::Error(CellError::Value) };
+        let months = match self.evaluate(&args[1]).as_number() { Some(n) => n as i32, None => return EvalResult::Error(CellError::Value) };
+        let (y, m, d) = date_serial::serial_to_date(serial);
+        let (ny, nm, nd) = date_serial::add_months(y, m as i32, d, months);
+        EvalResult::Number(date_serial::date_to_serial(ny, nm, nd as i32))
+    }
+
+    fn fn_eomonth(&self, args: &[Expression]) -> EvalResult {
+        if args.len() != 2 { return EvalResult::Error(CellError::Value); }
+        let serial = match self.evaluate(&args[0]).as_number() { Some(n) => n as i64, None => return EvalResult::Error(CellError::Value) };
+        let months = match self.evaluate(&args[1]).as_number() { Some(n) => n as i32, None => return EvalResult::Error(CellError::Value) };
+        let (y, m, _) = date_serial::serial_to_date(serial);
+        let (ny, nm, _) = date_serial::add_months(y, m as i32, 1, months);
+        let last_day = date_serial::days_in_month(ny, nm as u32);
+        EvalResult::Number(date_serial::date_to_serial(ny, nm, last_day as i32))
+    }
+
+    fn fn_networkdays(&self, args: &[Expression]) -> EvalResult {
+        if args.len() < 2 || args.len() > 3 { return EvalResult::Error(CellError::Value); }
+        let start = match self.evaluate(&args[0]).as_number() { Some(n) => n as i64, None => return EvalResult::Error(CellError::Value) };
+        let end = match self.evaluate(&args[1]).as_number() { Some(n) => n as i64, None => return EvalResult::Error(CellError::Value) };
+        let holidays: Vec<i64> = if args.len() == 3 {
+            self.eval_flat(&args[2]).iter().filter_map(|v| v.as_number().map(|n| n as i64)).collect()
+        } else { vec![] };
+        EvalResult::Number(date_serial::networkdays(start, end, &holidays) as f64)
+    }
+
+    fn fn_workday(&self, args: &[Expression]) -> EvalResult {
+        if args.len() < 2 || args.len() > 3 { return EvalResult::Error(CellError::Value); }
+        let start = match self.evaluate(&args[0]).as_number() { Some(n) => n as i64, None => return EvalResult::Error(CellError::Value) };
+        let days = match self.evaluate(&args[1]).as_number() { Some(n) => n as i64, None => return EvalResult::Error(CellError::Value) };
+        let holidays: Vec<i64> = if args.len() == 3 {
+            self.eval_flat(&args[2]).iter().filter_map(|v| v.as_number().map(|n| n as i64)).collect()
+        } else { vec![] };
+        EvalResult::Number(date_serial::workday(start, days, &holidays) as f64)
+    }
+
+    fn fn_datedif(&self, args: &[Expression]) -> EvalResult {
+        if args.len() != 3 { return EvalResult::Error(CellError::Value); }
+        let start = match self.evaluate(&args[0]).as_number() { Some(n) => n as i64, None => return EvalResult::Error(CellError::Value) };
+        let end = match self.evaluate(&args[1]).as_number() { Some(n) => n as i64, None => return EvalResult::Error(CellError::Value) };
+        let unit = self.evaluate(&args[2]).as_text().to_uppercase();
+        if start > end { return EvalResult::Error(CellError::Value); }
+        let (sy, sm, sd) = date_serial::serial_to_date(start);
+        let (ey, em, ed) = date_serial::serial_to_date(end);
+        match unit.as_str() {
+            "Y" => EvalResult::Number(date_serial::datedif_years(sy, sm, sd, ey, em, ed) as f64),
+            "M" => EvalResult::Number(date_serial::datedif_months(sy, sm, sd, ey, em, ed) as f64),
+            "D" => EvalResult::Number((end - start) as f64),
+            "YM" => {
+                let total_months = date_serial::datedif_months(sy, sm, sd, ey, em, ed);
+                EvalResult::Number((total_months % 12) as f64)
+            }
+            "YD" => {
+                let start_this_year = date_serial::date_to_serial(ey, sm as i32, sd as i32) as i64;
+                let diff = if start_this_year <= end { end - start_this_year } else {
+                    let start_prev = date_serial::date_to_serial(ey - 1, sm as i32, sd as i32) as i64;
+                    end - start_prev
+                };
+                EvalResult::Number(diff as f64)
+            }
+            "MD" => {
+                let diff = ed as i32 - sd as i32;
+                EvalResult::Number(if diff >= 0 { diff as f64 } else {
+                    let prev_month_days = date_serial::days_in_month(if em > 1 { ey } else { ey - 1 }, if em > 1 { em - 1 } else { 12 });
+                    (prev_month_days as i32 + diff) as f64
+                })
+            }
+            _ => EvalResult::Error(CellError::Value),
+        }
+    }
+
+    fn fn_weekday(&self, args: &[Expression]) -> EvalResult {
+        if args.is_empty() || args.len() > 2 { return EvalResult::Error(CellError::Value); }
+        let serial = match self.evaluate(&args[0]).as_number() { Some(n) => n as i64, None => return EvalResult::Error(CellError::Value) };
+        let return_type = if args.len() == 2 {
+            match self.evaluate(&args[1]).as_number() { Some(n) => n as i32, None => return EvalResult::Error(CellError::Value) }
+        } else { 1 };
+        let dow = date_serial::weekday(serial); // 0=Sunday .. 6=Saturday
+        let result = match return_type {
+            1 => dow + 1,       // 1=Sunday .. 7=Saturday
+            2 => if dow == 0 { 7 } else { dow }, // 1=Monday .. 7=Sunday
+            3 => if dow == 0 { 6 } else { dow - 1 }, // 0=Monday .. 6=Sunday
+            _ => return EvalResult::Error(CellError::Value),
+        };
+        EvalResult::Number(result as f64)
+    }
+
+    fn fn_weeknum(&self, args: &[Expression]) -> EvalResult {
+        if args.is_empty() || args.len() > 2 { return EvalResult::Error(CellError::Value); }
+        let serial = match self.evaluate(&args[0]).as_number() { Some(n) => n as i64, None => return EvalResult::Error(CellError::Value) };
+        let (y, _, _) = date_serial::serial_to_date(serial);
+        let jan1 = date_serial::date_to_serial(y, 1, 1) as i64;
+        let jan1_dow = date_serial::weekday(jan1);
+        let days_since = serial - jan1;
+        let week = (days_since + jan1_dow as i64) / 7 + 1;
+        EvalResult::Number(week as f64)
+    }
+
+    // ==================== Information Functions (Batch 9) ====================
+
+    fn fn_isna(&self, args: &[Expression]) -> EvalResult {
+        if args.len() != 1 { return EvalResult::Error(CellError::Value); }
+        EvalResult::Boolean(matches!(self.evaluate(&args[0]), EvalResult::Error(CellError::NA)))
+    }
+
+    fn fn_iserr(&self, args: &[Expression]) -> EvalResult {
+        if args.len() != 1 { return EvalResult::Error(CellError::Value); }
+        let val = self.evaluate(&args[0]);
+        EvalResult::Boolean(matches!(val, EvalResult::Error(e) if e != CellError::NA))
+    }
+
+    fn fn_islogical(&self, args: &[Expression]) -> EvalResult {
+        if args.len() != 1 { return EvalResult::Error(CellError::Value); }
+        EvalResult::Boolean(matches!(self.evaluate(&args[0]), EvalResult::Boolean(_)))
+    }
+
+    fn fn_isodd(&self, args: &[Expression]) -> EvalResult {
+        if args.len() != 1 { return EvalResult::Error(CellError::Value); }
+        match self.evaluate(&args[0]).as_number() {
+            Some(n) => EvalResult::Boolean(n as i64 % 2 != 0),
+            None => EvalResult::Error(CellError::Value),
+        }
+    }
+
+    fn fn_iseven(&self, args: &[Expression]) -> EvalResult {
+        if args.len() != 1 { return EvalResult::Error(CellError::Value); }
+        match self.evaluate(&args[0]).as_number() {
+            Some(n) => EvalResult::Boolean(n as i64 % 2 == 0),
+            None => EvalResult::Error(CellError::Value),
+        }
+    }
+
+    fn fn_type(&self, args: &[Expression]) -> EvalResult {
+        if args.len() != 1 { return EvalResult::Error(CellError::Value); }
+        let val = self.evaluate(&args[0]);
+        EvalResult::Number(match val {
+            EvalResult::Number(_) => 1.0,
+            EvalResult::Text(_) => 2.0,
+            EvalResult::Boolean(_) => 4.0,
+            EvalResult::Error(_) => 16.0,
+            EvalResult::Array(_) => 64.0,
+        })
+    }
+
+    fn fn_n(&self, args: &[Expression]) -> EvalResult {
+        if args.len() != 1 { return EvalResult::Error(CellError::Value); }
+        let val = self.evaluate(&args[0]);
+        match val {
+            EvalResult::Number(n) => EvalResult::Number(n),
+            EvalResult::Boolean(b) => EvalResult::Number(if b { 1.0 } else { 0.0 }),
+            EvalResult::Error(e) => EvalResult::Error(e),
+            _ => EvalResult::Number(0.0),
+        }
+    }
+
+    fn fn_isformula(&self, args: &[Expression]) -> EvalResult {
+        if args.len() != 1 { return EvalResult::Error(CellError::Value); }
+        // Check if the referenced cell contains a formula
+        if let Expression::CellRef { col, row, .. } = &args[0] {
+            let col_idx = col_to_index(col);
+            let row_idx = row - 1;
+            let has_formula = self.grid.get_cell(row_idx, col_idx).map_or(false, |c| c.formula.is_some());
+            EvalResult::Boolean(has_formula)
+        } else {
+            EvalResult::Boolean(false)
+        }
+    }
+
+    // ==================== Lookup & Reference Functions (Batch 3) ====================
+
+    fn fn_index(&self, args: &[Expression]) -> EvalResult {
+        if args.len() < 2 || args.len() > 3 { return EvalResult::Error(CellError::Value); }
+        let array = self.eval_flat(&args[0]);
+        let row_num = match self.evaluate(&args[1]).as_number() {
+            Some(n) if n >= 1.0 => (n as usize) - 1,
+            Some(n) if n == 0.0 => 0, // Return entire column/row - simplified to first
+            _ => return EvalResult::Error(CellError::Value),
+        };
+        // Determine array dimensions from the range expression
+        let (_rows, cols) = self.get_range_dimensions(&args[0]);
+        let col_num = if args.len() == 3 {
+            match self.evaluate(&args[2]).as_number() {
+                Some(n) if n >= 1.0 => (n as usize) - 1,
+                Some(n) if n == 0.0 => 0,
+                _ => return EvalResult::Error(CellError::Value),
+            }
+        } else { 0 };
+        if cols <= 1 {
+            // 1D array (single column or row)
+            array.get(row_num).cloned().unwrap_or(EvalResult::Error(CellError::Ref))
+        } else {
+            // 2D array
+            let idx = row_num * cols + col_num;
+            array.get(idx).cloned().unwrap_or(EvalResult::Error(CellError::Ref))
+        }
+    }
+
+    /// Helper to determine rows/cols dimensions of a range expression.
+    fn get_range_dimensions(&self, expr: &Expression) -> (usize, usize) {
+        match expr {
+            Expression::Range { start, end, .. } => {
+                if let (
+                    Expression::CellRef { col: sc, row: sr, .. },
+                    Expression::CellRef { col: ec, row: er, .. },
+                ) = (start.as_ref(), end.as_ref()) {
+                    let sc_idx = col_to_index(sc);
+                    let ec_idx = col_to_index(ec);
+                    let rows = ((*er as i64 - *sr as i64).unsigned_abs() + 1) as usize;
+                    let cols = ((ec_idx as i64 - sc_idx as i64).unsigned_abs() + 1) as usize;
+                    (rows, cols)
+                } else { (1, 1) }
+            }
+            _ => (1, 1),
+        }
+    }
+
+    fn fn_match(&self, args: &[Expression]) -> EvalResult {
+        if args.len() < 2 || args.len() > 3 { return EvalResult::Error(CellError::Value); }
+        let lookup_val = self.evaluate(&args[0]);
+        let lookup_array = self.eval_flat(&args[1]);
+        let match_type = if args.len() == 3 {
+            match self.evaluate(&args[2]).as_number() { Some(n) => n as i32, None => return EvalResult::Error(CellError::Value) }
+        } else { 1 };
+
+        match match_type {
+            0 => {
+                // Exact match (supports wildcards)
+                let is_wildcard = matches!(&lookup_val, EvalResult::Text(s) if s.contains('*') || s.contains('?'));
+                for (i, val) in lookup_array.iter().enumerate() {
+                    if is_wildcard {
+                        let pattern = lookup_val.as_text().to_uppercase();
+                        let text = val.as_text().to_uppercase();
+                        if self.xlookup_wildcard_match(&pattern, &text) {
+                            return EvalResult::Number((i + 1) as f64);
+                        }
+                    } else if self.eval_values_equal(&lookup_val, val) {
+                        return EvalResult::Number((i + 1) as f64);
+                    }
+                }
+                EvalResult::Error(CellError::NA)
+            }
+            1 => {
+                // Sorted ascending, find largest <= lookup_val
+                let mut last_match = None;
+                for (i, val) in lookup_array.iter().enumerate() {
+                    if self.xlookup_compare(val, &lookup_val) != std::cmp::Ordering::Greater {
+                        last_match = Some(i);
+                    }
+                }
+                match last_match {
+                    Some(i) => EvalResult::Number((i + 1) as f64),
+                    None => EvalResult::Error(CellError::NA),
+                }
+            }
+            -1 => {
+                // Sorted descending, find smallest >= lookup_val
+                let mut last_match = None;
+                for (i, val) in lookup_array.iter().enumerate() {
+                    if self.xlookup_compare(val, &lookup_val) != std::cmp::Ordering::Less {
+                        last_match = Some(i);
+                    }
+                }
+                match last_match {
+                    Some(i) => EvalResult::Number((i + 1) as f64),
+                    None => EvalResult::Error(CellError::NA),
+                }
+            }
+            _ => EvalResult::Error(CellError::Value),
+        }
+    }
+
+    fn fn_choose(&self, args: &[Expression]) -> EvalResult {
+        if args.len() < 2 { return EvalResult::Error(CellError::Value); }
+        let idx = match self.evaluate(&args[0]).as_number() {
+            Some(n) if n >= 1.0 && (n as usize) < args.len() => n as usize,
+            _ => return EvalResult::Error(CellError::Value),
+        };
+        self.evaluate(&args[idx])
+    }
+
+    fn fn_indirect(&self, args: &[Expression]) -> EvalResult {
+        // INDIRECT("A1") - parse string as cell reference and evaluate
+        if args.len() < 1 || args.len() > 2 { return EvalResult::Error(CellError::Value); }
+        let ref_text = self.evaluate(&args[0]).as_text();
+        // Simple A1-style reference parsing
+        let ref_text = ref_text.trim().to_uppercase();
+        // Try to parse as cell reference: e.g., "A1", "AB123"
+        let mut col_str = String::new();
+        let mut row_str = String::new();
+        for c in ref_text.chars() {
+            if c.is_ascii_alphabetic() && row_str.is_empty() {
+                col_str.push(c);
+            } else if c.is_ascii_digit() {
+                row_str.push(c);
+            } else {
+                return EvalResult::Error(CellError::Ref);
+            }
+        }
+        if col_str.is_empty() || row_str.is_empty() {
+            return EvalResult::Error(CellError::Ref);
+        }
+        let col_idx = col_to_index(&col_str);
+        let row_idx = match row_str.parse::<u32>() {
+            Ok(r) if r >= 1 => r - 1,
+            _ => return EvalResult::Error(CellError::Ref),
+        };
+        match self.grid.get_cell(row_idx, col_idx) {
+            Some(cell) => match &cell.value {
+                crate::cell::CellValue::Number(n) => EvalResult::Number(*n),
+                crate::cell::CellValue::Text(s) => EvalResult::Text(s.clone()),
+                crate::cell::CellValue::Boolean(b) => EvalResult::Boolean(*b),
+                crate::cell::CellValue::Error(e) => EvalResult::Error(e.clone()),
+                crate::cell::CellValue::Empty => EvalResult::Number(0.0),
+            }
+            None => EvalResult::Number(0.0),
+        }
+    }
+
+    fn fn_offset(&self, args: &[Expression]) -> EvalResult {
+        // OFFSET(reference, rows, cols, [height], [width])
+        if args.len() < 3 || args.len() > 5 { return EvalResult::Error(CellError::Value); }
+        // Get the base cell reference
+        let (base_row, base_col) = match &args[0] {
+            Expression::CellRef { col, row, .. } => ((*row as i64) - 1, col_to_index(col) as i64),
+            _ => return EvalResult::Error(CellError::Value),
+        };
+        let row_offset = match self.evaluate(&args[1]).as_number() { Some(n) => n as i64, None => return EvalResult::Error(CellError::Value) };
+        let col_offset = match self.evaluate(&args[2]).as_number() { Some(n) => n as i64, None => return EvalResult::Error(CellError::Value) };
+        let new_row = base_row + row_offset;
+        let new_col = base_col + col_offset;
+        if new_row < 0 || new_col < 0 { return EvalResult::Error(CellError::Ref); }
+        // For single cell (no height/width), return the cell value
+        let height = if args.len() >= 4 { match self.evaluate(&args[3]).as_number() { Some(n) => n as usize, None => return EvalResult::Error(CellError::Value) } } else { 1 };
+        let width = if args.len() == 5 { match self.evaluate(&args[4]).as_number() { Some(n) => n as usize, None => return EvalResult::Error(CellError::Value) } } else { 1 };
+        if height == 1 && width == 1 {
+            match self.grid.get_cell(new_row as u32, new_col as u32) {
+                Some(cell) => match &cell.value {
+                    crate::cell::CellValue::Number(n) => EvalResult::Number(*n),
+                    crate::cell::CellValue::Text(s) => EvalResult::Text(s.clone()),
+                    crate::cell::CellValue::Boolean(b) => EvalResult::Boolean(*b),
+                    crate::cell::CellValue::Error(e) => EvalResult::Error(e.clone()),
+                    crate::cell::CellValue::Empty => EvalResult::Number(0.0),
+                }
+                None => EvalResult::Number(0.0),
+            }
+        } else {
+            // Return array of values
+            let mut values = Vec::new();
+            for r in 0..height {
+                for c in 0..width {
+                    let cell_row = (new_row + r as i64) as u32;
+                    let cell_col = (new_col + c as i64) as u32;
+                    match self.grid.get_cell(cell_row, cell_col) {
+                        Some(cell) => match &cell.value {
+                            crate::cell::CellValue::Number(n) => values.push(EvalResult::Number(*n)),
+                            crate::cell::CellValue::Text(s) => values.push(EvalResult::Text(s.clone())),
+                            crate::cell::CellValue::Boolean(b) => values.push(EvalResult::Boolean(*b)),
+                            crate::cell::CellValue::Error(e) => values.push(EvalResult::Error(e.clone())),
+                            crate::cell::CellValue::Empty => values.push(EvalResult::Number(0.0)),
+                        }
+                        None => values.push(EvalResult::Number(0.0)),
+                    }
+                }
+            }
+            EvalResult::Array(values)
+        }
+    }
+
+    fn fn_address(&self, args: &[Expression]) -> EvalResult {
+        if args.len() < 2 || args.len() > 5 { return EvalResult::Error(CellError::Value); }
+        let row = match self.evaluate(&args[0]).as_number() { Some(n) if n >= 1.0 => n as u32, _ => return EvalResult::Error(CellError::Value) };
+        let col = match self.evaluate(&args[1]).as_number() { Some(n) if n >= 1.0 => n as u32, _ => return EvalResult::Error(CellError::Value) };
+        let abs_type = if args.len() >= 3 { match self.evaluate(&args[2]).as_number() { Some(n) => n as i32, None => return EvalResult::Error(CellError::Value) } } else { 1 };
+        // Convert col number to letter(s)
+        let col_str = crate::coord::index_to_col(col - 1);
+        let result = match abs_type {
+            1 => format!("${}${}", col_str, row),
+            2 => format!("{}${}", col_str, row),
+            3 => format!("${}{}", col_str, row),
+            4 => format!("{}{}", col_str, row),
+            _ => return EvalResult::Error(CellError::Value),
+        };
+        EvalResult::Text(result)
+    }
+
+    fn fn_rows(&self, args: &[Expression]) -> EvalResult {
+        if args.len() != 1 { return EvalResult::Error(CellError::Value); }
+        let (rows, _) = self.get_range_dimensions(&args[0]);
+        EvalResult::Number(rows as f64)
+    }
+
+    fn fn_columns(&self, args: &[Expression]) -> EvalResult {
+        if args.len() != 1 { return EvalResult::Error(CellError::Value); }
+        let (_, cols) = self.get_range_dimensions(&args[0]);
+        EvalResult::Number(cols as f64)
+    }
+
+    fn fn_transpose(&self, args: &[Expression]) -> EvalResult {
+        if args.len() != 1 { return EvalResult::Error(CellError::Value); }
+        let array = self.eval_flat(&args[0]);
+        let (rows, cols) = self.get_range_dimensions(&args[0]);
+        if rows <= 1 && cols <= 1 {
+            return array.into_iter().next().unwrap_or(EvalResult::Number(0.0));
+        }
+        let mut transposed = Vec::with_capacity(array.len());
+        for c in 0..cols {
+            for r in 0..rows {
+                let idx = r * cols + c;
+                transposed.push(array.get(idx).cloned().unwrap_or(EvalResult::Number(0.0)));
+            }
+        }
+        EvalResult::Array(transposed)
+    }
+
+    // ==================== Statistical Functions (Batch 7) ====================
+
+    fn fn_median(&self, args: &[Expression]) -> EvalResult {
+        match self.collect_numbers(args) {
+            Ok(mut numbers) if !numbers.is_empty() => {
+                numbers.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+                let len = numbers.len();
+                let median = if len % 2 == 0 { (numbers[len / 2 - 1] + numbers[len / 2]) / 2.0 } else { numbers[len / 2] };
+                EvalResult::Number(median)
+            }
+            Ok(_) => EvalResult::Error(CellError::Value),
+            Err(e) => EvalResult::Error(e),
+        }
+    }
+
+    fn fn_stdev(&self, args: &[Expression]) -> EvalResult {
+        match self.collect_numbers(args) {
+            Ok(numbers) if numbers.len() >= 2 => {
+                let mean = numbers.iter().sum::<f64>() / numbers.len() as f64;
+                let variance = numbers.iter().map(|x| (x - mean).powi(2)).sum::<f64>() / (numbers.len() - 1) as f64;
+                EvalResult::Number(variance.sqrt())
+            }
+            Ok(_) => EvalResult::Error(CellError::Div0),
+            Err(e) => EvalResult::Error(e),
+        }
+    }
+
+    fn fn_stdevp(&self, args: &[Expression]) -> EvalResult {
+        match self.collect_numbers(args) {
+            Ok(numbers) if !numbers.is_empty() => {
+                let mean = numbers.iter().sum::<f64>() / numbers.len() as f64;
+                let variance = numbers.iter().map(|x| (x - mean).powi(2)).sum::<f64>() / numbers.len() as f64;
+                EvalResult::Number(variance.sqrt())
+            }
+            Ok(_) => EvalResult::Error(CellError::Div0),
+            Err(e) => EvalResult::Error(e),
+        }
+    }
+
+    fn fn_var(&self, args: &[Expression]) -> EvalResult {
+        match self.collect_numbers(args) {
+            Ok(numbers) if numbers.len() >= 2 => {
+                let mean = numbers.iter().sum::<f64>() / numbers.len() as f64;
+                let variance = numbers.iter().map(|x| (x - mean).powi(2)).sum::<f64>() / (numbers.len() - 1) as f64;
+                EvalResult::Number(variance)
+            }
+            Ok(_) => EvalResult::Error(CellError::Div0),
+            Err(e) => EvalResult::Error(e),
+        }
+    }
+
+    fn fn_varp(&self, args: &[Expression]) -> EvalResult {
+        match self.collect_numbers(args) {
+            Ok(numbers) if !numbers.is_empty() => {
+                let mean = numbers.iter().sum::<f64>() / numbers.len() as f64;
+                let variance = numbers.iter().map(|x| (x - mean).powi(2)).sum::<f64>() / numbers.len() as f64;
+                EvalResult::Number(variance)
+            }
+            Ok(_) => EvalResult::Error(CellError::Div0),
+            Err(e) => EvalResult::Error(e),
+        }
+    }
+
+    fn fn_large(&self, args: &[Expression]) -> EvalResult {
+        if args.len() != 2 { return EvalResult::Error(CellError::Value); }
+        let mut numbers = match self.collect_numbers(&args[0..1]) { Ok(n) => n, Err(e) => return EvalResult::Error(e) };
+        let k = match self.evaluate(&args[1]).as_number() { Some(n) if n >= 1.0 => n as usize, _ => return EvalResult::Error(CellError::Value) };
+        if k > numbers.len() { return EvalResult::Error(CellError::Value); }
+        numbers.sort_by(|a, b| b.partial_cmp(a).unwrap_or(std::cmp::Ordering::Equal));
+        EvalResult::Number(numbers[k - 1])
+    }
+
+    fn fn_small(&self, args: &[Expression]) -> EvalResult {
+        if args.len() != 2 { return EvalResult::Error(CellError::Value); }
+        let mut numbers = match self.collect_numbers(&args[0..1]) { Ok(n) => n, Err(e) => return EvalResult::Error(e) };
+        let k = match self.evaluate(&args[1]).as_number() { Some(n) if n >= 1.0 => n as usize, _ => return EvalResult::Error(CellError::Value) };
+        if k > numbers.len() { return EvalResult::Error(CellError::Value); }
+        numbers.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        EvalResult::Number(numbers[k - 1])
+    }
+
+    fn fn_rank(&self, args: &[Expression]) -> EvalResult {
+        if args.len() < 2 || args.len() > 3 { return EvalResult::Error(CellError::Value); }
+        let number = match self.evaluate(&args[0]).as_number() { Some(n) => n, None => return EvalResult::Error(CellError::Value) };
+        let numbers = match self.collect_numbers(&args[1..2]) { Ok(n) => n, Err(e) => return EvalResult::Error(e) };
+        let order = if args.len() == 3 { match self.evaluate(&args[2]).as_number() { Some(n) => n as i32, None => 0 } } else { 0 };
+        let rank = if order == 0 {
+            // Descending rank
+            numbers.iter().filter(|&&n| n > number).count() + 1
+        } else {
+            // Ascending rank
+            numbers.iter().filter(|&&n| n < number).count() + 1
+        };
+        if !numbers.iter().any(|&n| (n - number).abs() < 1e-10) {
+            return EvalResult::Error(CellError::NA);
+        }
+        EvalResult::Number(rank as f64)
+    }
+
+    fn fn_percentile(&self, args: &[Expression]) -> EvalResult {
+        if args.len() != 2 { return EvalResult::Error(CellError::Value); }
+        let mut numbers = match self.collect_numbers(&args[0..1]) { Ok(n) => n, Err(e) => return EvalResult::Error(e) };
+        let k = match self.evaluate(&args[1]).as_number() { Some(n) if (0.0..=1.0).contains(&n) => n, _ => return EvalResult::Error(CellError::Value) };
+        if numbers.is_empty() { return EvalResult::Error(CellError::Value); }
+        numbers.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        let n = numbers.len() as f64;
+        let rank = k * (n - 1.0);
+        let lower = rank.floor() as usize;
+        let upper = rank.ceil() as usize;
+        let frac = rank - lower as f64;
+        let result = numbers[lower] + frac * (numbers[upper.min(numbers.len() - 1)] - numbers[lower]);
+        EvalResult::Number(result)
+    }
+
+    fn fn_quartile(&self, args: &[Expression]) -> EvalResult {
+        if args.len() != 2 { return EvalResult::Error(CellError::Value); }
+        let quart = match self.evaluate(&args[1]).as_number() {
+            Some(n) if (0.0..=4.0).contains(&n) => n,
+            _ => return EvalResult::Error(CellError::Value),
+        };
+        // Reuse PERCENTILE with k = quart/4
+        let k_val = Expression::Literal(Value::Number(quart / 4.0));
+        self.fn_percentile(&[args[0].clone(), k_val])
+    }
+
+    fn fn_mode(&self, args: &[Expression]) -> EvalResult {
+        match self.collect_numbers(args) {
+            Ok(numbers) if !numbers.is_empty() => {
+                let mut counts: HashMap<i64, usize> = HashMap::new();
+                for &n in &numbers {
+                    // Use fixed-point for bucketing (multiply by 1e10 to handle floats)
+                    let key = (n * 1e10).round() as i64;
+                    *counts.entry(key).or_insert(0) += 1;
+                }
+                let max_count = counts.values().max().copied().unwrap_or(0);
+                if max_count <= 1 { return EvalResult::Error(CellError::NA); }
+                // Return the first value with max count
+                for &n in &numbers {
+                    let key = (n * 1e10).round() as i64;
+                    if counts.get(&key) == Some(&max_count) {
+                        return EvalResult::Number(n);
+                    }
+                }
+                EvalResult::Error(CellError::NA)
+            }
+            Ok(_) => EvalResult::Error(CellError::Value),
+            Err(e) => EvalResult::Error(e),
+        }
+    }
+
+    fn fn_frequency(&self, args: &[Expression]) -> EvalResult {
+        if args.len() != 2 { return EvalResult::Error(CellError::Value); }
+        let data = match self.collect_numbers(&args[0..1]) { Ok(n) => n, Err(e) => return EvalResult::Error(e) };
+        let mut bins = match self.collect_numbers(&args[1..2]) { Ok(n) => n, Err(e) => return EvalResult::Error(e) };
+        bins.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        let mut counts = vec![0.0; bins.len() + 1];
+        for &val in &data {
+            let mut placed = false;
+            for (i, &bin) in bins.iter().enumerate() {
+                if val <= bin { counts[i] += 1.0; placed = true; break; }
+            }
+            if !placed { *counts.last_mut().unwrap() += 1.0; }
+        }
+        EvalResult::Array(counts.into_iter().map(EvalResult::Number).collect())
+    }
+
+    // ==================== Financial Functions (Batch 8) ====================
+
+    fn fn_pmt(&self, args: &[Expression]) -> EvalResult {
+        if args.len() < 3 || args.len() > 5 { return EvalResult::Error(CellError::Value); }
+        let rate = match self.evaluate(&args[0]).as_number() { Some(n) => n, None => return EvalResult::Error(CellError::Value) };
+        let nper = match self.evaluate(&args[1]).as_number() { Some(n) => n, None => return EvalResult::Error(CellError::Value) };
+        let pv = match self.evaluate(&args[2]).as_number() { Some(n) => n, None => return EvalResult::Error(CellError::Value) };
+        let fv = if args.len() >= 4 { self.evaluate(&args[3]).as_number().unwrap_or(0.0) } else { 0.0 };
+        let pmt_type = if args.len() == 5 { self.evaluate(&args[4]).as_number().unwrap_or(0.0) as i32 } else { 0 };
+        if nper == 0.0 { return EvalResult::Error(CellError::Value); }
+        let pmt = if rate.abs() < 1e-10 {
+            -(pv + fv) / nper
+        } else {
+            let pvif = (1.0 + rate).powf(nper);
+            let pmt = rate * (pv * pvif + fv) / (pvif - 1.0);
+            if pmt_type == 1 { -pmt / (1.0 + rate) } else { -pmt }
+        };
+        EvalResult::Number(pmt)
+    }
+
+    fn fn_pv(&self, args: &[Expression]) -> EvalResult {
+        if args.len() < 3 || args.len() > 5 { return EvalResult::Error(CellError::Value); }
+        let rate = match self.evaluate(&args[0]).as_number() { Some(n) => n, None => return EvalResult::Error(CellError::Value) };
+        let nper = match self.evaluate(&args[1]).as_number() { Some(n) => n, None => return EvalResult::Error(CellError::Value) };
+        let pmt = match self.evaluate(&args[2]).as_number() { Some(n) => n, None => return EvalResult::Error(CellError::Value) };
+        let fv = if args.len() >= 4 { self.evaluate(&args[3]).as_number().unwrap_or(0.0) } else { 0.0 };
+        let pmt_type = if args.len() == 5 { self.evaluate(&args[4]).as_number().unwrap_or(0.0) as i32 } else { 0 };
+        if rate.abs() < 1e-10 {
+            EvalResult::Number(-pmt * nper - fv)
+        } else {
+            let pvif = (1.0 + rate).powf(nper);
+            let pv_factor = if pmt_type == 1 { 1.0 + rate } else { 1.0 };
+            EvalResult::Number((-pmt * pv_factor * (pvif - 1.0) / rate - fv) / pvif)
+        }
+    }
+
+    fn fn_fv(&self, args: &[Expression]) -> EvalResult {
+        if args.len() < 3 || args.len() > 5 { return EvalResult::Error(CellError::Value); }
+        let rate = match self.evaluate(&args[0]).as_number() { Some(n) => n, None => return EvalResult::Error(CellError::Value) };
+        let nper = match self.evaluate(&args[1]).as_number() { Some(n) => n, None => return EvalResult::Error(CellError::Value) };
+        let pmt = match self.evaluate(&args[2]).as_number() { Some(n) => n, None => return EvalResult::Error(CellError::Value) };
+        let pv = if args.len() >= 4 { self.evaluate(&args[3]).as_number().unwrap_or(0.0) } else { 0.0 };
+        let pmt_type = if args.len() == 5 { self.evaluate(&args[4]).as_number().unwrap_or(0.0) as i32 } else { 0 };
+        if rate.abs() < 1e-10 {
+            EvalResult::Number(-pv - pmt * nper)
+        } else {
+            let pvif = (1.0 + rate).powf(nper);
+            let pmt_factor = if pmt_type == 1 { 1.0 + rate } else { 1.0 };
+            EvalResult::Number(-pv * pvif - pmt * pmt_factor * (pvif - 1.0) / rate)
+        }
+    }
+
+    fn fn_npv(&self, args: &[Expression]) -> EvalResult {
+        if args.len() < 2 { return EvalResult::Error(CellError::Value); }
+        let rate = match self.evaluate(&args[0]).as_number() { Some(n) => n, None => return EvalResult::Error(CellError::Value) };
+        let mut total = 0.0;
+        let mut period = 1;
+        for arg in &args[1..] {
+            for val in self.eval_flat(arg) {
+                if let Some(cf) = val.as_number() {
+                    total += cf / (1.0 + rate).powi(period);
+                    period += 1;
+                }
+            }
+        }
+        EvalResult::Number(total)
+    }
+
+    fn fn_irr(&self, args: &[Expression]) -> EvalResult {
+        if args.is_empty() || args.len() > 2 { return EvalResult::Error(CellError::Value); }
+        let cashflows: Vec<f64> = self.eval_flat(&args[0]).iter().filter_map(|v| v.as_number()).collect();
+        if cashflows.len() < 2 { return EvalResult::Error(CellError::Value); }
+        let mut guess = if args.len() == 2 { self.evaluate(&args[1]).as_number().unwrap_or(0.1) } else { 0.1 };
+        // Newton's method
+        for _ in 0..100 {
+            let mut npv = 0.0;
+            let mut dnpv = 0.0;
+            for (i, &cf) in cashflows.iter().enumerate() {
+                let pv_factor = (1.0 + guess).powi(i as i32);
+                npv += cf / pv_factor;
+                if i > 0 { dnpv -= (i as f64) * cf / (1.0 + guess).powi(i as i32 + 1); }
+            }
+            if dnpv.abs() < 1e-15 { return EvalResult::Error(CellError::Value); }
+            let new_guess = guess - npv / dnpv;
+            if (new_guess - guess).abs() < 1e-10 { return EvalResult::Number(new_guess); }
+            guess = new_guess;
+        }
+        EvalResult::Error(CellError::Value) // Did not converge
+    }
+
+    fn fn_rate(&self, args: &[Expression]) -> EvalResult {
+        if args.len() < 3 || args.len() > 6 { return EvalResult::Error(CellError::Value); }
+        let nper = match self.evaluate(&args[0]).as_number() { Some(n) => n, None => return EvalResult::Error(CellError::Value) };
+        let pmt = match self.evaluate(&args[1]).as_number() { Some(n) => n, None => return EvalResult::Error(CellError::Value) };
+        let pv = match self.evaluate(&args[2]).as_number() { Some(n) => n, None => return EvalResult::Error(CellError::Value) };
+        let fv = if args.len() >= 4 { self.evaluate(&args[3]).as_number().unwrap_or(0.0) } else { 0.0 };
+        let pmt_type = if args.len() >= 5 { self.evaluate(&args[4]).as_number().unwrap_or(0.0) as i32 } else { 0 };
+        let mut guess = if args.len() == 6 { self.evaluate(&args[5]).as_number().unwrap_or(0.1) } else { 0.1 };
+        // Newton's method
+        for _ in 0..100 {
+            let pvif = (1.0 + guess).powf(nper);
+            let pmt_factor = if pmt_type == 1 { 1.0 + guess } else { 1.0 };
+            let f = pv * pvif + pmt * pmt_factor * (pvif - 1.0) / guess + fv;
+            let df = nper * pv * (1.0 + guess).powf(nper - 1.0) + pmt * pmt_factor * (nper * guess * (1.0 + guess).powf(nper - 1.0) - (pvif - 1.0)) / (guess * guess);
+            if df.abs() < 1e-15 { return EvalResult::Error(CellError::Value); }
+            let new_guess = guess - f / df;
+            if (new_guess - guess).abs() < 1e-10 { return EvalResult::Number(new_guess); }
+            guess = new_guess;
+        }
+        EvalResult::Error(CellError::Value)
+    }
+
+    fn fn_nper(&self, args: &[Expression]) -> EvalResult {
+        if args.len() < 3 || args.len() > 5 { return EvalResult::Error(CellError::Value); }
+        let rate = match self.evaluate(&args[0]).as_number() { Some(n) => n, None => return EvalResult::Error(CellError::Value) };
+        let pmt = match self.evaluate(&args[1]).as_number() { Some(n) => n, None => return EvalResult::Error(CellError::Value) };
+        let pv = match self.evaluate(&args[2]).as_number() { Some(n) => n, None => return EvalResult::Error(CellError::Value) };
+        let fv = if args.len() >= 4 { self.evaluate(&args[3]).as_number().unwrap_or(0.0) } else { 0.0 };
+        let pmt_type = if args.len() == 5 { self.evaluate(&args[4]).as_number().unwrap_or(0.0) as i32 } else { 0 };
+        if rate.abs() < 1e-10 {
+            if pmt.abs() < 1e-10 { return EvalResult::Error(CellError::Value); }
+            return EvalResult::Number(-(pv + fv) / pmt);
+        }
+        let pmt_factor = if pmt_type == 1 { 1.0 + rate } else { 1.0 };
+        let num = -fv + pmt * pmt_factor / rate;
+        let den = pv + pmt * pmt_factor / rate;
+        if num / den <= 0.0 { return EvalResult::Error(CellError::Value); }
+        EvalResult::Number((num / den).ln() / (1.0 + rate).ln())
+    }
+
+    fn fn_sln(&self, args: &[Expression]) -> EvalResult {
+        if args.len() != 3 { return EvalResult::Error(CellError::Value); }
+        let cost = match self.evaluate(&args[0]).as_number() { Some(n) => n, None => return EvalResult::Error(CellError::Value) };
+        let salvage = match self.evaluate(&args[1]).as_number() { Some(n) => n, None => return EvalResult::Error(CellError::Value) };
+        let life = match self.evaluate(&args[2]).as_number() { Some(n) if n > 0.0 => n, _ => return EvalResult::Error(CellError::Value) };
+        EvalResult::Number((cost - salvage) / life)
+    }
+
+    fn fn_db(&self, args: &[Expression]) -> EvalResult {
+        if args.len() < 4 || args.len() > 5 { return EvalResult::Error(CellError::Value); }
+        let cost = match self.evaluate(&args[0]).as_number() { Some(n) => n, None => return EvalResult::Error(CellError::Value) };
+        let salvage = match self.evaluate(&args[1]).as_number() { Some(n) => n, None => return EvalResult::Error(CellError::Value) };
+        let life = match self.evaluate(&args[2]).as_number() { Some(n) if n > 0.0 => n as i32, _ => return EvalResult::Error(CellError::Value) };
+        let period = match self.evaluate(&args[3]).as_number() { Some(n) if n >= 1.0 => n as i32, _ => return EvalResult::Error(CellError::Value) };
+        let month = if args.len() == 5 { match self.evaluate(&args[4]).as_number() { Some(n) => n as i32, None => 12 } } else { 12 };
+        if cost <= 0.0 || life == 0 { return EvalResult::Error(CellError::Value); }
+        let rate = (1.0 - (salvage / cost).powf(1.0 / life as f64) * 1000.0).round() / 1000.0;
+        let mut total_dep = 0.0;
+        let mut current_value = cost;
+        for p in 1..=period {
+            let dep = if p == 1 {
+                cost * rate * month as f64 / 12.0
+            } else if p == life + 1 {
+                current_value * rate * (12 - month) as f64 / 12.0
+            } else {
+                current_value * rate
+            };
+            if p == period { return EvalResult::Number(dep); }
+            total_dep += dep;
+            current_value = cost - total_dep;
+        }
+        EvalResult::Number(0.0)
+    }
+
+    fn fn_ddb(&self, args: &[Expression]) -> EvalResult {
+        if args.len() < 4 || args.len() > 5 { return EvalResult::Error(CellError::Value); }
+        let cost = match self.evaluate(&args[0]).as_number() { Some(n) => n, None => return EvalResult::Error(CellError::Value) };
+        let salvage = match self.evaluate(&args[1]).as_number() { Some(n) => n, None => return EvalResult::Error(CellError::Value) };
+        let life = match self.evaluate(&args[2]).as_number() { Some(n) if n > 0.0 => n, _ => return EvalResult::Error(CellError::Value) };
+        let period = match self.evaluate(&args[3]).as_number() { Some(n) if n >= 1.0 => n, _ => return EvalResult::Error(CellError::Value) };
+        let factor = if args.len() == 5 { self.evaluate(&args[4]).as_number().unwrap_or(2.0) } else { 2.0 };
+        let mut current_value = cost;
+        for p in 1..=(period as i32) {
+            let dep = (current_value * factor / life).min(current_value - salvage).max(0.0);
+            if p == period as i32 { return EvalResult::Number(dep); }
+            current_value -= dep;
+        }
+        EvalResult::Number(0.0)
     }
 
 }

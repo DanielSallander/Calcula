@@ -5,6 +5,7 @@
 pub mod cell;
 pub mod coord;
 pub mod custom_format;
+pub mod date_serial;
 pub mod dependency_extractor;
 pub mod dependency_graph;
 pub mod evaluator;
