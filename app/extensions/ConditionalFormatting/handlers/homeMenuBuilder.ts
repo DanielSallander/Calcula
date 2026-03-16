@@ -2,6 +2,7 @@
 // PURPOSE: Registers Conditional Formatting menu items in the Format menu.
 // CONTEXT: Adds "Conditional Formatting" submenu with quick-apply actions and management options.
 
+import React from "react";
 import {
   registerMenuItem,
   showDialog,
@@ -14,6 +15,7 @@ import type {
   ConditionalFormat,
   ConditionalFormatRange,
   AddCFParams,
+  IconSetType,
 } from "../../../src/api";
 
 import { invalidateAndRefresh } from "../lib/cfStore";
@@ -21,7 +23,11 @@ import {
   PRESET_STYLES,
   PRESET_COLOR_SCALES,
   PRESET_DATA_BAR_COLORS,
+  type PresetColorScale,
 } from "../types";
+import { ColorScaleGallery } from "../components/ColorScaleGallery";
+import { DataBarGallery } from "../components/DataBarGallery";
+import { IconSetGallery } from "../components/IconSetGallery";
 
 export const QUICK_CF_DIALOG_ID = "cf-quick-dialog";
 export const RULES_MANAGER_DIALOG_ID = "cf-rules-manager";
@@ -200,126 +206,82 @@ export function registerCFMenuItems(): void {
       {
         id: "cf:colorScales",
         label: "Color Scales",
-        children: PRESET_COLOR_SCALES.map((preset, idx) => ({
-          id: `cf:colorScale-${idx}`,
-          label: preset.label,
-          action: () => {
-            const rule: ConditionalFormatRule = {
-              type: "colorScale",
-              minPoint: { valueType: "autoMin", color: preset.minColor },
-              ...(preset.midColor
-                ? {
-                    midPoint: {
-                      valueType: "percent",
-                      value: 50,
-                      color: preset.midColor,
-                    },
-                  }
-                : {}),
-              maxPoint: { valueType: "autoMax", color: preset.maxColor },
-            } as ConditionalFormatRule;
-            addQuickRule(rule, {});
-          },
-        })),
+        customContent: (onClose) =>
+          React.createElement(ColorScaleGallery, {
+            onSelect: (preset: PresetColorScale) => {
+              const rule: ConditionalFormatRule = {
+                type: "colorScale",
+                minPoint: { valueType: "autoMin", color: preset.minColor },
+                ...(preset.midColor
+                  ? {
+                      midPoint: {
+                        valueType: "percent",
+                        value: 50,
+                        color: preset.midColor,
+                      },
+                    }
+                  : {}),
+                maxPoint: { valueType: "autoMax", color: preset.maxColor },
+              } as ConditionalFormatRule;
+              addQuickRule(rule, {});
+            },
+            onMoreRules: () => showDialog(NEW_RULE_DIALOG_ID, { selection: getSelectionRange() }),
+            onClose,
+          }),
       },
 
       // ---- Data Bars ----
       {
         id: "cf:dataBars",
         label: "Data Bars",
-        children: PRESET_DATA_BAR_COLORS.map((color, idx) => ({
-          id: `cf:dataBar-${idx}`,
-          label: `Data Bar (${color})`,
-          action: () => {
-            const rule: ConditionalFormatRule = {
-              type: "dataBar",
-              minValueType: "autoMin",
-              maxValueType: "autoMax",
-              fillColor: color,
-              axisPosition: "automatic",
-              direction: "context",
-              showValue: true,
-              gradientFill: true,
-            } as ConditionalFormatRule;
-            addQuickRule(rule, {});
-          },
-        })),
+        customContent: (onClose) =>
+          React.createElement(DataBarGallery, {
+            onSelect: (color: string, gradientFill: boolean) => {
+              const rule: ConditionalFormatRule = {
+                type: "dataBar",
+                minValueType: "autoMin",
+                maxValueType: "autoMax",
+                fillColor: color,
+                axisPosition: "automatic",
+                direction: "context",
+                showValue: true,
+                gradientFill,
+              } as ConditionalFormatRule;
+              addQuickRule(rule, {});
+            },
+            onMoreRules: () => showDialog(NEW_RULE_DIALOG_ID, { selection: getSelectionRange() }),
+            onClose,
+          }),
       },
 
       // ---- Icon Sets ----
       {
         id: "cf:iconSets",
         label: "Icon Sets",
-        children: [
-          {
-            id: "cf:iconSet-trafficLights",
-            label: "Traffic Lights",
-            action: () => {
+        customContent: (onClose) =>
+          React.createElement(IconSetGallery, {
+            onSelect: (iconSetId: IconSetType, iconCount: number) => {
+              // Build evenly-spaced thresholds for the icon count
+              const thresholds = [];
+              for (let i = 1; i < iconCount; i++) {
+                thresholds.push({
+                  valueType: "percent" as const,
+                  value: Math.round((100 * i) / iconCount),
+                  operator: "greaterThanOrEqual" as const,
+                });
+              }
               const rule: ConditionalFormatRule = {
                 type: "iconSet",
-                iconSet: "threeTrafficLights1",
-                thresholds: [
-                  { valueType: "percent", value: 33, operator: "greaterThanOrEqual" },
-                  { valueType: "percent", value: 67, operator: "greaterThanOrEqual" },
-                ],
+                iconSet: iconSetId,
+                thresholds,
                 reverseIcons: false,
                 showIconOnly: false,
               } as ConditionalFormatRule;
               addQuickRule(rule, {});
             },
-          },
-          {
-            id: "cf:iconSet-arrows",
-            label: "Arrows",
-            action: () => {
-              const rule: ConditionalFormatRule = {
-                type: "iconSet",
-                iconSet: "threeArrows",
-                thresholds: [
-                  { valueType: "percent", value: 33, operator: "greaterThanOrEqual" },
-                  { valueType: "percent", value: 67, operator: "greaterThanOrEqual" },
-                ],
-                reverseIcons: false,
-                showIconOnly: false,
-              } as ConditionalFormatRule;
-              addQuickRule(rule, {});
-            },
-          },
-          {
-            id: "cf:iconSet-flags",
-            label: "Flags",
-            action: () => {
-              const rule: ConditionalFormatRule = {
-                type: "iconSet",
-                iconSet: "threeFlags",
-                thresholds: [
-                  { valueType: "percent", value: 33, operator: "greaterThanOrEqual" },
-                  { valueType: "percent", value: 67, operator: "greaterThanOrEqual" },
-                ],
-                reverseIcons: false,
-                showIconOnly: false,
-              } as ConditionalFormatRule;
-              addQuickRule(rule, {});
-            },
-          },
-          {
-            id: "cf:iconSet-stars",
-            label: "Stars",
-            action: () => {
-              const rule: ConditionalFormatRule = {
-                type: "iconSet",
-                iconSet: "threeStars",
-                thresholds: [
-                  { valueType: "percent", value: 33, operator: "greaterThanOrEqual" },
-                  { valueType: "percent", value: 67, operator: "greaterThanOrEqual" },
-                ],
-                reverseIcons: false,
-                showIconOnly: false,
-              } as ConditionalFormatRule;
-              addQuickRule(rule, {});
-            },
-          },
-        ],
+            onMoreRules: () => showDialog(NEW_RULE_DIALOG_ID, { selection: getSelectionRange() }),
+            onClose,
+          }),
       },
 
       // ---- Separator ----
