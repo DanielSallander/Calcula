@@ -6,6 +6,7 @@
 import type {
   ChartSpec,
   ChartSeries,
+  ChartType,
   DataRangeRef,
   SeriesOrientation,
 } from "../types";
@@ -21,9 +22,10 @@ export function buildDefaultSpec(
     series: ChartSeries[];
     orientation: SeriesOrientation;
   },
+  mark: ChartType = "bar",
 ): ChartSpec {
   return {
-    mark: "bar",
+    mark,
     data: dataRange,
     hasHeaders,
     seriesOrientation: autoDetected.orientation,

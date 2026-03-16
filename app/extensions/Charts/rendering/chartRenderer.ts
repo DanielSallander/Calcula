@@ -17,19 +17,32 @@ import {
 } from "../../../src/api/gridOverlays";
 
 import { getChartById, getAllCharts } from "../lib/chartStore";
-import { readChartData } from "../lib/chartDataReader";
+import { readChartDataResolved } from "../lib/chartDataReader";
 import {
   paintBarChart,
-  computeLayout,
+  computeLayout as computeBarLayout,
   computeBarRects,
-  formatTickValue,
-  type BarChartLayout,
 } from "./barChartPainter";
+import { paintLineChart, computeLineLayout, computeLinePointMarkers } from "./lineChartPainter";
+import { paintAreaChart, computeAreaLayout, computeAreaPointMarkers } from "./areaChartPainter";
+import { paintHorizontalBarChart, computeHorizontalBarLayout, computeHorizontalBarRects } from "./horizontalBarChartPainter";
+import { paintPieChart, computePieLayout, computePieSliceArcs } from "./pieChartPainter";
+import { paintScatterChart, computeScatterLayout, computeScatterPointMarkers } from "./scatterChartPainter";
+import { paintWaterfallChart, computeWaterfallLayout, computeWaterfallBarRects } from "./waterfallChartPainter";
+import { paintComboChart, computeComboLayout, computeComboHitGeometry } from "./comboChartPainter";
 import { DEFAULT_CHART_THEME } from "./chartTheme";
 import { getSeriesColor } from "./chartTheme";
 import { isChartSelected, getSubSelection } from "../handlers/selectionHandler";
-import { hitTestBarChart } from "./chartHitTesting";
-import type { ParsedChartData, BarRect, ChartHitResult } from "../types";
+import { hitTestGeometry } from "./chartHitTesting";
+import { formatTickValue } from "./chartPainterUtils";
+import type {
+  ParsedChartData,
+  BarRect,
+  ChartHitResult,
+  ChartLayout,
+  HitGeometry,
+  ChartType,
+} from "../types";
 
 // ============================================================================
 // OffscreenCanvas Cache
@@ -78,7 +91,9 @@ export function removeChartFromCache(chartId: number): void {
 
 interface CachedChartData {
   data: ParsedChartData;
-  layout: BarChartLayout;
+  layout: ChartLayout;
+  hitGeometry: HitGeometry;
+  /** @deprecated Use hitGeometry instead. Kept for selection highlight compat. */
   barRects: BarRect[];
   logicalWidth: number;
   logicalHeight: number;
@@ -136,7 +151,7 @@ let hoverState: {
 
 /**
  * Handle mouse move over the grid area. Performs hit-testing against chart
- * regions and bar rects to determine if the mouse is hovering over a bar.
+ * regions and hit geometry to determine if the mouse is hovering over a data element.
  * Requests a redraw if hover state changes.
  */
 export function handleChartMouseMove(canvasX: number, canvasY: number): void {
@@ -175,12 +190,12 @@ export function handleChartMouseMove(canvasX: number, canvasY: number): void {
       const localX = canvasX - chartCanvasX;
       const localY = canvasY - chartCanvasY;
 
-      // Hit-test against bar rects
+      // Hit-test against geometry
       const cachedData = chartDataCache.get(chartId);
       if (cachedData) {
-        const hitResult = hitTestBarChart(localX, localY, cachedData.barRects, cachedData.layout);
+        const hitResult = hitTestGeometry(localX, localY, cachedData.hitGeometry, cachedData.layout);
 
-        if (hitResult.type === "bar") {
+        if (hitResult.type === "bar" || hitResult.type === "point" || hitResult.type === "slice") {
           const changed =
             hoverState === null ||
             hoverState.chartId !== chartId ||
@@ -200,7 +215,7 @@ export function handleChartMouseMove(canvasX: number, canvasY: number): void {
     hoverState = null;
     requestOverlayRedraw();
   } else if (foundHover && hoverState) {
-    // Update canvas position even if same bar (for tooltip tracking)
+    // Update canvas position even if same element (for tooltip tracking)
     hoverState.canvasX = canvasX;
     hoverState.canvasY = canvasY;
   }
@@ -214,6 +229,107 @@ export function handleChartMouseLeave(): void {
     hoverState = null;
     requestOverlayRedraw();
   }
+}
+
+// ============================================================================
+// Chart Painter Dispatch
+// ============================================================================
+
+/** Paint a chart to a canvas context, dispatching to the correct painter. */
+function paintChart(
+  ctx: CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D,
+  data: ParsedChartData,
+  spec: import("../types").ChartSpec,
+  layout: ChartLayout,
+  theme: import("./chartTheme").ChartRenderTheme,
+): void {
+  switch (spec.mark) {
+    case "bar":
+      paintBarChart(ctx, data, spec, layout, theme);
+      break;
+    case "horizontalBar":
+      paintHorizontalBarChart(ctx, data, spec, layout, theme);
+      break;
+    case "line":
+      paintLineChart(ctx, data, spec, layout, theme);
+      break;
+    case "area":
+      paintAreaChart(ctx, data, spec, layout, theme);
+      break;
+    case "scatter":
+      paintScatterChart(ctx, data, spec, layout, theme);
+      break;
+    case "pie":
+    case "donut":
+      paintPieChart(ctx, data, spec, layout, theme);
+      break;
+    case "waterfall":
+      paintWaterfallChart(ctx, data, spec, layout, theme);
+      break;
+    case "combo":
+      paintComboChart(ctx, data, spec, layout, theme);
+      break;
+  }
+}
+
+/** Compute layout for any chart type. */
+function computeChartLayout(
+  width: number,
+  height: number,
+  spec: import("../types").ChartSpec,
+  data: ParsedChartData,
+  theme: import("./chartTheme").ChartRenderTheme,
+): ChartLayout {
+  switch (spec.mark) {
+    case "bar": return computeBarLayout(width, height, spec, data, theme);
+    case "horizontalBar": return computeHorizontalBarLayout(width, height, spec, data, theme);
+    case "line": return computeLineLayout(width, height, spec, data, theme);
+    case "area": return computeAreaLayout(width, height, spec, data, theme);
+    case "scatter": return computeScatterLayout(width, height, spec, data, theme);
+    case "pie":
+    case "donut": return computePieLayout(width, height, spec, data, theme);
+    case "waterfall": return computeWaterfallLayout(width, height, spec, data, theme);
+    case "combo": return computeComboLayout(width, height, spec, data, theme);
+  }
+}
+
+/** Compute hit geometry for any chart type. */
+function computeChartHitGeometry(
+  data: ParsedChartData,
+  spec: import("../types").ChartSpec,
+  layout: ChartLayout,
+  theme: import("./chartTheme").ChartRenderTheme,
+): HitGeometry {
+  switch (spec.mark) {
+    case "bar":
+      return { type: "bars", rects: computeBarRects(data, spec, layout, theme) };
+    case "horizontalBar":
+      return { type: "bars", rects: computeHorizontalBarRects(data, spec, layout, theme) };
+    case "line":
+      return { type: "points", markers: computeLinePointMarkers(data, spec, layout, theme) };
+    case "area":
+      return { type: "points", markers: computeAreaPointMarkers(data, spec, layout, theme) };
+    case "scatter":
+      return { type: "points", markers: computeScatterPointMarkers(data, spec, layout, theme) };
+    case "pie":
+    case "donut":
+      return { type: "slices", arcs: computePieSliceArcs(data, spec, layout, theme) };
+    case "waterfall":
+      return { type: "bars", rects: computeWaterfallBarRects(data, spec, layout, theme) };
+    case "combo":
+      return computeComboHitGeometry(data, spec, layout, theme);
+  }
+}
+
+/** Extract BarRect[] from HitGeometry for backwards compat with selection highlights. */
+function extractBarRects(geometry: HitGeometry): BarRect[] {
+  if (geometry.type === "bars") return geometry.rects;
+  if (geometry.type === "composite") {
+    for (const g of geometry.groups) {
+      if (g.type === "bars") return g.rects;
+    }
+  }
+  return [];
 }
 
 // ============================================================================
@@ -332,7 +448,8 @@ export function renderChart(overlayCtx: OverlayRenderContext): void {
   }
 
   // 6. Draw tooltip (always on top)
-  if (hoverState && hoverState.chartId === chartId && hoverState.hitResult.type === "bar") {
+  if (hoverState && hoverState.chartId === chartId &&
+    (hoverState.hitResult.type === "bar" || hoverState.hitResult.type === "point" || hoverState.hitResult.type === "slice")) {
     drawTooltip(ctx, canvasX, canvasY, chartWidth, chartHeight, hoverState);
   }
 
@@ -387,8 +504,10 @@ async function renderChartAsync(
     const chart = getChartById(chartId);
     if (!chart) return;
 
-    // Fetch data from the grid
-    const data = await readChartData(chart.spec);
+    // Fetch data from the grid and resolve cell references
+    const resolved = await readChartDataResolved(chart.spec);
+    const data = resolved.data;
+    const spec = resolved.spec;
 
     // Check if version is still current (might have changed during async fetch)
     const currentVersion = chartVersions.get(chartId) ?? 0;
@@ -401,15 +520,15 @@ async function renderChartAsync(
 
     offCtx.scale(dpr, dpr);
 
-    const layout = computeLayout(
+    const layout = computeChartLayout(
       logicalWidth,
       logicalHeight,
-      chart.spec,
+      spec,
       data,
       DEFAULT_CHART_THEME,
     );
 
-    paintBarChart(offCtx, data, chart.spec, layout, DEFAULT_CHART_THEME);
+    paintChart(offCtx, data, spec, layout, DEFAULT_CHART_THEME);
 
     // Store in canvas cache
     chartCanvasCache.set(chartId, {
@@ -420,11 +539,12 @@ async function renderChartAsync(
     });
 
     // Store in data cache (separate, persists across canvas invalidation)
-    const barRects = computeBarRects(data, chart.spec, layout, DEFAULT_CHART_THEME);
+    const hitGeometry = computeChartHitGeometry(data, spec, layout, DEFAULT_CHART_THEME);
     chartDataCache.set(chartId, {
       data,
       layout,
-      barRects,
+      hitGeometry,
+      barRects: extractBarRects(hitGeometry),
       logicalWidth,
       logicalHeight,
     });
@@ -443,7 +563,7 @@ async function renderChartAsync(
 // ============================================================================
 
 /**
- * Draw semi-transparent overlays to dim non-selected bars and highlight selected ones.
+ * Draw semi-transparent overlays to dim non-selected elements and highlight selected ones.
  * Called during the sync render pass, drawn on top of the cached chart image.
  */
 function drawSelectionHighlights(
@@ -456,7 +576,34 @@ function drawSelectionHighlights(
   selSeriesIndex?: number,
   selCategoryIndex?: number,
 ): void {
-  const { barRects } = cachedData;
+  const { hitGeometry } = cachedData;
+
+  if (hitGeometry.type === "bars") {
+    drawBarSelectionHighlights(ctx, chartX, chartY, hitGeometry.rects, level, selSeriesIndex, selCategoryIndex);
+  } else if (hitGeometry.type === "points") {
+    drawPointSelectionHighlights(ctx, chartX, chartY, hitGeometry.markers, level, selSeriesIndex, selCategoryIndex);
+  } else if (hitGeometry.type === "slices") {
+    drawSliceSelectionHighlights(ctx, chartX, chartY, hitGeometry.arcs, level, selSeriesIndex);
+  } else if (hitGeometry.type === "composite") {
+    for (const group of hitGeometry.groups) {
+      if (group.type === "bars") {
+        drawBarSelectionHighlights(ctx, chartX, chartY, group.rects, level, selSeriesIndex, selCategoryIndex);
+      } else if (group.type === "points") {
+        drawPointSelectionHighlights(ctx, chartX, chartY, group.markers, level, selSeriesIndex, selCategoryIndex);
+      }
+    }
+  }
+}
+
+function drawBarSelectionHighlights(
+  ctx: CanvasRenderingContext2D,
+  chartX: number,
+  chartY: number,
+  barRects: BarRect[],
+  level: "series" | "dataPoint",
+  selSeriesIndex?: number,
+  selCategoryIndex?: number,
+): void {
   if (barRects.length === 0) return;
 
   for (const bar of barRects) {
@@ -469,13 +616,11 @@ function drawSelectionHighlights(
         : bar.seriesIndex === selSeriesIndex && bar.categoryIndex === selCategoryIndex;
 
     if (isSelected) {
-      // Draw highlight outline on selected bars
       ctx.strokeStyle = "#0e639c";
       ctx.lineWidth = 2;
       ctx.setLineDash([]);
       ctx.strokeRect(bx, by, bar.width, bar.height);
     } else {
-      // Dim non-selected bars with semi-transparent white overlay
       ctx.fillStyle = "rgba(255, 255, 255, 0.55)";
       ctx.fillRect(bx, by, bar.width, bar.height);
     }
@@ -487,15 +632,96 @@ function drawSelectionHighlights(
       (b) => b.seriesIndex === selSeriesIndex && b.categoryIndex === selCategoryIndex,
     );
     if (selectedBar) {
-      drawBarSelectionHandles(ctx, chartX + selectedBar.x, chartY + selectedBar.y, selectedBar.width, selectedBar.height);
+      drawElementSelectionHandles(ctx, chartX + selectedBar.x, chartY + selectedBar.y, selectedBar.width, selectedBar.height);
+    }
+  }
+}
+
+function drawPointSelectionHighlights(
+  ctx: CanvasRenderingContext2D,
+  chartX: number,
+  chartY: number,
+  markers: import("../types").PointMarker[],
+  level: "series" | "dataPoint",
+  selSeriesIndex?: number,
+  selCategoryIndex?: number,
+): void {
+  if (markers.length === 0) return;
+
+  for (const marker of markers) {
+    const mx = chartX + marker.cx;
+    const my = chartY + marker.cy;
+
+    const isSelected =
+      level === "series"
+        ? marker.seriesIndex === selSeriesIndex
+        : marker.seriesIndex === selSeriesIndex && marker.categoryIndex === selCategoryIndex;
+
+    if (isSelected) {
+      ctx.strokeStyle = "#0e639c";
+      ctx.lineWidth = 2;
+      ctx.setLineDash([]);
+      ctx.beginPath();
+      ctx.arc(mx, my, marker.radius + 3, 0, Math.PI * 2);
+      ctx.stroke();
+    } else {
+      ctx.fillStyle = "rgba(255, 255, 255, 0.55)";
+      ctx.beginPath();
+      ctx.arc(mx, my, marker.radius + 2, 0, Math.PI * 2);
+      ctx.fill();
+    }
+  }
+}
+
+function drawSliceSelectionHighlights(
+  ctx: CanvasRenderingContext2D,
+  chartX: number,
+  chartY: number,
+  arcs: import("../types").SliceArc[],
+  level: "series" | "dataPoint",
+  selSeriesIndex?: number,
+): void {
+  if (arcs.length === 0) return;
+
+  for (const arc of arcs) {
+    const isSelected = arc.seriesIndex === selSeriesIndex;
+
+    if (!isSelected) {
+      // Dim non-selected slices
+      ctx.fillStyle = "rgba(255, 255, 255, 0.55)";
+      ctx.beginPath();
+      ctx.moveTo(chartX + arc.centerX, chartY + arc.centerY);
+      ctx.arc(
+        chartX + arc.centerX,
+        chartY + arc.centerY,
+        arc.outerRadius,
+        arc.startAngle,
+        arc.endAngle,
+      );
+      ctx.closePath();
+      ctx.fill();
+    } else {
+      // Highlight selected slice
+      ctx.strokeStyle = "#0e639c";
+      ctx.lineWidth = 2;
+      ctx.setLineDash([]);
+      ctx.beginPath();
+      ctx.arc(
+        chartX + arc.centerX,
+        chartY + arc.centerY,
+        arc.outerRadius + 2,
+        arc.startAngle,
+        arc.endAngle,
+      );
+      ctx.stroke();
     }
   }
 }
 
 /**
- * Draw small selection handles at corners and midpoints of a selected bar.
+ * Draw small selection handles at corners and midpoints.
  */
-function drawBarSelectionHandles(
+function drawElementSelectionHandles(
   ctx: CanvasRenderingContext2D,
   x: number,
   y: number,
@@ -522,7 +748,7 @@ function drawBarSelectionHandles(
 // ============================================================================
 
 /**
- * Draw a tooltip near the hovered bar showing series name, category, and value.
+ * Draw a tooltip near the hovered element showing series name, category, and value.
  * Drawn on the main canvas during the sync render pass.
  */
 function drawTooltip(
@@ -534,7 +760,6 @@ function drawTooltip(
   hover: NonNullable<typeof hoverState>,
 ): void {
   const { hitResult, canvasX, canvasY } = hover;
-  if (hitResult.type !== "bar") return;
 
   const seriesName = hitResult.seriesName ?? "";
   const categoryName = hitResult.categoryName ?? "";

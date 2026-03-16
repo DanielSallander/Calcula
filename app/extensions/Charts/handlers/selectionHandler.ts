@@ -115,8 +115,8 @@ export function getSubSelection(): ChartSubSelection {
 export function advanceSelection(chartId: number, hitResult: ChartHitResult): void {
   if (currentChartId !== chartId) return;
 
-  if (hitResult.type !== "bar") {
-    // Clicked on non-bar area (plot background, title, etc.) -> back to chart level
+  if (hitResult.type !== "bar" && hitResult.type !== "point" && hitResult.type !== "slice") {
+    // Clicked on non-data area (plot background, title, etc.) -> back to chart level
     subSelection = { level: "chart" };
     return;
   }

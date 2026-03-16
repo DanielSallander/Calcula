@@ -7,8 +7,138 @@
 // Chart Types
 // ============================================================================
 
-/** Supported chart types (starting with bar only). */
-export type ChartType = "bar";
+/** Supported chart types. */
+export type ChartType =
+  | "bar"
+  | "horizontalBar"
+  | "line"
+  | "area"
+  | "scatter"
+  | "pie"
+  | "donut"
+  | "waterfall"
+  | "combo";
+
+/** Chart types that use cartesian axes (X/Y). */
+export type CartesianChartType = "bar" | "horizontalBar" | "line" | "area" | "scatter" | "waterfall" | "combo";
+
+/** Chart types that use polar/radial layout (no axes). */
+export type RadialChartType = "pie" | "donut";
+
+/** Check if a chart type uses cartesian axes. */
+export function isCartesianChart(mark: ChartType): mark is CartesianChartType {
+  return mark !== "pie" && mark !== "donut";
+}
+
+// ============================================================================
+// Mark-Specific Options
+// ============================================================================
+
+/** Options specific to bar and horizontal bar charts. */
+export interface BarMarkOptions {
+  /** Border radius on bars (pixels). Default: 2 */
+  borderRadius?: number;
+  /** Gap between bars in a group (pixels). Default: 2 */
+  barGap?: number;
+}
+
+/** Line interpolation mode. */
+export type LineInterpolation = "linear" | "smooth" | "step";
+
+/** Options specific to line charts. */
+export interface LineMarkOptions {
+  /** Interpolation mode for connecting data points. Default: "linear" */
+  interpolation?: LineInterpolation;
+  /** Line width in pixels. Default: 2 */
+  lineWidth?: number;
+  /** Show point markers at data points. Default: true */
+  showMarkers?: boolean;
+  /** Point marker radius in pixels. Default: 4 */
+  markerRadius?: number;
+}
+
+/** Options specific to area charts. */
+export interface AreaMarkOptions {
+  /** Interpolation mode. Default: "linear" */
+  interpolation?: LineInterpolation;
+  /** Line width in pixels. Default: 2 */
+  lineWidth?: number;
+  /** Fill opacity (0-1). Default: 0.3 */
+  fillOpacity?: number;
+  /** Show point markers. Default: false */
+  showMarkers?: boolean;
+  /** Marker radius in pixels. Default: 4 */
+  markerRadius?: number;
+  /** Stack overlapping areas. Default: false */
+  stacked?: boolean;
+}
+
+/** Scatter point shape. */
+export type PointShape = "circle" | "square" | "diamond" | "triangle";
+
+/** Options specific to scatter charts. */
+export interface ScatterMarkOptions {
+  /** Point shape. Default: "circle" */
+  pointShape?: PointShape;
+  /** Point size (radius in pixels). Default: 5 */
+  pointSize?: number;
+}
+
+/** Options specific to pie and donut charts. */
+export interface PieMarkOptions {
+  /** Inner radius ratio (0 = pie, 0.4-0.7 = donut). Overridden to 0 for "pie", >0 for "donut". */
+  innerRadiusRatio?: number;
+  /** Start angle in degrees. Default: 0 (12 o'clock) */
+  startAngle?: number;
+  /** Padding angle between slices in degrees. Default: 1 */
+  padAngle?: number;
+  /** Show value/percentage labels on slices. Default: true */
+  showLabels?: boolean;
+  /** Label format: "value", "percent", or "both". Default: "percent" */
+  labelFormat?: "value" | "percent" | "both";
+}
+
+/** Waterfall bar classification. */
+export type WaterfallBarType = "increase" | "decrease" | "total";
+
+/** Options specific to waterfall charts. */
+export interface WaterfallMarkOptions {
+  /** Show connector lines between bars. Default: true */
+  showConnectors?: boolean;
+  /** Color for increasing bars. Default: palette-derived green */
+  increaseColor?: string;
+  /** Color for decreasing bars. Default: palette-derived red */
+  decreaseColor?: string;
+  /** Color for total bars. Default: palette-derived blue/gray */
+  totalColor?: string;
+  /** Indices of categories that are totals (running sum resets). */
+  totalIndices?: number[];
+}
+
+/** Mark type override for individual series in a combo chart. */
+export type ComboSeriesMark = "bar" | "line" | "area";
+
+/** Options specific to combo charts. */
+export interface ComboMarkOptions {
+  /** Per-series mark type overrides. Key = series index, value = mark type. */
+  seriesMarks?: Record<number, ComboSeriesMark>;
+  /** Enable secondary (right) Y axis. Default: false */
+  secondaryYAxis?: boolean;
+  /** Series indices that use the secondary Y axis. */
+  secondaryAxisSeries?: number[];
+  /** Secondary Y axis configuration. */
+  secondaryAxis?: AxisSpec;
+}
+
+/** Union of all mark-specific options. */
+export type MarkOptions =
+  | BarMarkOptions
+  | LineMarkOptions
+  | AreaMarkOptions
+  | ScatterMarkOptions
+  | PieMarkOptions
+  | WaterfallMarkOptions
+  | ComboMarkOptions;
 
 /** How series data is oriented within the data range. */
 export type SeriesOrientation = "columns" | "rows";
@@ -25,6 +155,19 @@ export interface DataRangeRef {
   startCol: number;
   endRow: number;
   endCol: number;
+}
+
+/**
+ * Data source for a chart. Can be:
+ * - A `DataRangeRef` object (explicit cell coordinates)
+ * - A string in A1 notation (e.g., "Sheet1!A1:D10")
+ * - A named range name (e.g., "SalesData")
+ */
+export type DataSource = DataRangeRef | string;
+
+/** Type guard: check if a DataSource is a resolved DataRangeRef. */
+export function isDataRangeRef(source: DataSource): source is DataRangeRef {
+  return typeof source === "object" && source !== null && "startRow" in source;
 }
 
 // ============================================================================
@@ -77,8 +220,8 @@ export interface LegendSpec {
 export interface ChartSpec {
   /** Chart type. */
   mark: ChartType;
-  /** Data source range. */
-  data: DataRangeRef;
+  /** Data source: a DataRangeRef, an A1 reference string, or a named range name. */
+  data: DataSource;
   /** Whether the first row/column of the range contains headers. */
   hasHeaders: boolean;
   /** Whether series are laid out in columns or rows. */
@@ -97,6 +240,8 @@ export interface ChartSpec {
   legend: LegendSpec;
   /** Color palette name. */
   palette: string;
+  /** Mark-specific options (type depends on `mark`). */
+  markOptions?: MarkOptions;
 }
 
 // ============================================================================
@@ -127,7 +272,7 @@ export interface ChartDefinition {
 
 /** Parsed chart data ready for rendering. */
 export interface ParsedChartData {
-  /** Category labels (X axis). */
+  /** Category labels (X axis for cartesian, slice labels for radial). */
   categories: string[];
   /** Data series with numeric values, one per category. */
   series: Array<{
@@ -144,16 +289,16 @@ export interface ParsedChartData {
 /** Result of hit-testing a point within a chart. */
 export interface ChartHitResult {
   /** What type of chart element was hit. */
-  type: "bar" | "plotArea" | "title" | "legend" | "axis" | "none";
-  /** Series index (set when type is "bar"). */
+  type: "bar" | "point" | "slice" | "plotArea" | "title" | "legend" | "axis" | "none";
+  /** Series index (set when a data element is hit). */
   seriesIndex?: number;
-  /** Category index (set when type is "bar"). */
+  /** Category/data point index (set when a data element is hit). */
   categoryIndex?: number;
-  /** Data value (set when type is "bar"). */
+  /** Data value. */
   value?: number;
-  /** Series name (set when type is "bar"). */
+  /** Series name. */
   seriesName?: string;
-  /** Category label (set when type is "bar"). */
+  /** Category label. */
   categoryName?: string;
 }
 
@@ -169,6 +314,10 @@ export interface ChartSubSelection {
   categoryIndex?: number;
 }
 
+// ============================================================================
+// Hit Geometry (per chart type)
+// ============================================================================
+
 /** A computed bar rectangle with metadata, used for hit-testing. */
 export interface BarRect {
   seriesIndex: number;
@@ -180,4 +329,52 @@ export interface BarRect {
   value: number;
   seriesName: string;
   categoryName: string;
+}
+
+/** A data point marker (for line, area, scatter charts). */
+export interface PointMarker {
+  seriesIndex: number;
+  categoryIndex: number;
+  cx: number;
+  cy: number;
+  radius: number;
+  value: number;
+  seriesName: string;
+  categoryName: string;
+}
+
+/** A pie/donut slice. */
+export interface SliceArc {
+  seriesIndex: number;
+  startAngle: number;
+  endAngle: number;
+  innerRadius: number;
+  outerRadius: number;
+  centerX: number;
+  centerY: number;
+  value: number;
+  label: string;
+  percent: number;
+}
+
+/** Union of all hit-testable geometry arrays. */
+export type HitGeometry =
+  | { type: "bars"; rects: BarRect[] }
+  | { type: "points"; markers: PointMarker[] }
+  | { type: "slices"; arcs: SliceArc[] }
+  | { type: "composite"; groups: HitGeometry[] };
+
+// ============================================================================
+// Chart Layout (generalized)
+// ============================================================================
+
+/** Shared layout structure for all chart types. */
+export interface ChartLayout {
+  /** Total canvas dimensions. */
+  width: number;
+  height: number;
+  /** Margins around the plot area. */
+  margin: { top: number; right: number; bottom: number; left: number };
+  /** The plot area rect (inside margins). For radial charts, this is the bounding box of the circle. */
+  plotArea: { x: number; y: number; width: number; height: number };
 }

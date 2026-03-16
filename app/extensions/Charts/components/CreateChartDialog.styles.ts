@@ -10,13 +10,13 @@ export const Backdrop = styled.div`
   position: fixed;
   inset: 0;
   z-index: 1050;
-  background: rgba(0, 0, 0, 0.45);
-  display: flex;
-  align-items: center;
-  justify-content: center;
+  pointer-events: none;
 `;
 
 export const DialogContainer = styled.div`
+  position: fixed;
+  z-index: 1051;
+  pointer-events: auto;
   background: ${v("--panel-bg")};
   border: 1px solid ${v("--border-default")};
   border-radius: 8px;
@@ -36,6 +36,12 @@ export const Header = styled.div`
   align-items: center;
   padding: 12px 16px 0 16px;
   flex-shrink: 0;
+  cursor: grab;
+  user-select: none;
+
+  &:active {
+    cursor: grabbing;
+  }
 `;
 
 export const Title = styled.span`
@@ -95,7 +101,6 @@ export const TabContent = styled.div`
   padding: 16px;
   overflow-y: auto;
   flex: 1;
-  min-height: 200px;
 `;
 
 export const Footer = styled.div`
@@ -263,15 +268,16 @@ export const PaletteSwatch = styled.div<{ $color: string }>`
 `;
 
 export const PreviewContainer = styled.div`
-  margin-top: 12px;
+  margin-top: 8px;
   border: 1px solid ${v("--border-default")};
   border-radius: 4px;
   overflow: hidden;
   background: #ffffff;
+  height: 220px;
 `;
 
 export const PreviewCanvas = styled.canvas`
   display: block;
   width: 100%;
-  height: 200px;
+  height: 100%;
 `;

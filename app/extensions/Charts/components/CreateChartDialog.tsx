@@ -3,7 +3,7 @@
 // CONTEXT: Tabbed dialog for creating a chart. Data tab for range/series mapping,
 //          Design tab for visual options, with a live preview canvas.
 
-import React, { useState, useEffect, useCallback, useMemo } from "react";
+import React, { useState, useEffect, useCallback, useMemo, useRef } from "react";
 import {
   detectDataRegion,
   useGridState,
@@ -15,19 +15,29 @@ import { emitAppEvent, AppEvents } from "../../../src/api/events";
 
 import type {
   ChartSpec,
+  ChartType,
   ChartSeries,
   DataRangeRef,
   ParsedChartData,
   SeriesOrientation,
+  MarkOptions,
 } from "../types";
 import { createChart, syncChartRegions } from "../lib/chartStore";
 import { autoDetectSeries } from "../lib/chartDataReader";
-import { readChartData } from "../lib/chartDataReader";
+import { readChartDataResolved } from "../lib/chartDataReader";
 import { buildDefaultSpec } from "../lib/chartSpecDefaults";
 import { ChartEvents } from "../lib/chartEvents";
+import {
+  onSpecChanged,
+  emitSpecUpdated,
+  emitPreviewDataUpdated,
+  onChartSpecEditorClosed,
+} from "../lib/crossWindowEvents";
+import { isSpecEditorWindowOpen, closeSpecEditorWindow } from "../lib/openSpecEditorWindow";
 
 import { DataTab } from "./tabs/DataTab";
 import { DesignTab } from "./tabs/DesignTab";
+import { SpecTab } from "./tabs/SpecTab";
 import { ChartPreview } from "./ChartPreview";
 
 import {
@@ -119,7 +129,7 @@ function parseRangeReference(
 // Component
 // ============================================================================
 
-type TabId = "data" | "design";
+type TabId = "data" | "design" | "spec";
 
 export function CreateChartDialog({
   isOpen,
@@ -138,6 +148,8 @@ export function CreateChartDialog({
   const [series, setSeries] = useState<ChartSeries[]>([]);
 
   // Design tab state (managed as a spec, updated via partial merges)
+  const [mark, setMark] = useState<ChartType>("bar");
+  const [markOptions, setMarkOptions] = useState<MarkOptions | undefined>(undefined);
   const [title, setTitle] = useState<string | null>(null);
   const [palette, setPalette] = useState("default");
   const [xAxis, setXAxis] = useState<ChartSpec["xAxis"]>({
@@ -161,8 +173,9 @@ export function CreateChartDialog({
     position: "bottom",
   });
 
-  // Preview data
+  // Preview data and resolved spec (with cell references like "=A1" resolved)
   const [previewData, setPreviewData] = useState<ParsedChartData | null>(null);
+  const [resolvedSpec, setResolvedSpec] = useState<ChartSpec | null>(null);
 
   // UI state
   const [isLoading, setIsLoading] = useState(false);
@@ -170,6 +183,12 @@ export function CreateChartDialog({
   const [currentSheetName, setCurrentSheetName] = useState("Sheet1");
   const [currentSheetIndex, setCurrentSheetIndex] = useState(0);
   const [hasAutoDetected, setHasAutoDetected] = useState(false);
+  const [specFullView, setSpecFullView] = useState(false);
+
+  // Drag state for movable dialog
+  const [dialogPos, setDialogPos] = useState<{ x: number; y: number } | null>(null);
+  const dragRef = useRef<{ startX: number; startY: number; origX: number; origY: number } | null>(null);
+  const dialogRef = useRef<HTMLDivElement>(null);
 
   // Derive available axes from the parsed range
   const [availableAxes, setAvailableAxes] = useState<Array<{ index: number; label: string }>>([]);
@@ -179,8 +198,8 @@ export function CreateChartDialog({
     const parsed = parseRangeReference(sourceRange);
     if (!parsed) return null;
 
-    return {
-      mark: "bar" as const,
+    const spec: ChartSpec = {
+      mark,
       data: {
         sheetIndex: currentSheetIndex,
         startRow: parsed.startRow,
@@ -198,15 +217,26 @@ export function CreateChartDialog({
       legend,
       palette,
     };
-  }, [sourceRange, hasHeaders, orientation, categoryIndex, series, title, xAxis, yAxis, legend, palette, currentSheetIndex]);
+    if (markOptions) {
+      spec.markOptions = markOptions;
+    }
+    return spec;
+  }, [sourceRange, hasHeaders, orientation, categoryIndex, series, title, xAxis, yAxis, legend, palette, mark, markOptions, currentSheetIndex]);
 
-  // Handle spec updates from the Design tab
+  // Handle spec updates from the Design tab or Spec tab
   const handleSpecChange = useCallback((updates: Partial<ChartSpec>) => {
+    if (updates.mark !== undefined) setMark(updates.mark);
+    if (updates.markOptions !== undefined) setMarkOptions(updates.markOptions);
     if (updates.title !== undefined) setTitle(updates.title);
     if (updates.palette !== undefined) setPalette(updates.palette);
     if (updates.xAxis !== undefined) setXAxis(updates.xAxis);
     if (updates.yAxis !== undefined) setYAxis(updates.yAxis);
     if (updates.legend !== undefined) setLegend(updates.legend);
+    // Spec tab may update data-related fields too
+    if (updates.hasHeaders !== undefined) setHasHeaders(updates.hasHeaders);
+    if (updates.seriesOrientation !== undefined) setOrientation(updates.seriesOrientation);
+    if (updates.categoryIndex !== undefined) setCategoryIndex(updates.categoryIndex);
+    if (updates.series !== undefined) setSeries(updates.series);
   }, []);
 
   // Load sheet info on open
@@ -215,29 +245,45 @@ export function CreateChartDialog({
       setHasAutoDetected(false);
       setError(null);
       setActiveTab("data");
+      setSpecFullView(false);
+      setDialogPos(null); // Reset to centered
       loadSheets();
     }
   }, [isOpen]);
 
-  // Auto-detect data region around the active cell
+  // Use the user's selection as the data range. If the selection is a single
+  // cell, auto-detect the surrounding data region; otherwise use the selection as-is.
   useEffect(() => {
     if (!isOpen || hasAutoDetected || !currentSheetName) return;
 
     const sel = gridState.selection;
     if (!sel) return;
 
-    const activeRow = sel.endRow;
-    const activeCol = sel.endCol;
-
     setHasAutoDetected(true);
 
-    detectDataRegion(activeRow, activeCol)
+    const isSingleCell =
+      sel.startRow === sel.endRow && sel.startCol === sel.endCol;
+
+    if (!isSingleCell) {
+      // User explicitly selected a range — use it directly
+      const range = selectionToRange(
+        sel.startRow,
+        sel.startCol,
+        sel.endRow,
+        sel.endCol,
+      );
+      setSourceRange(buildSheetRange(currentSheetName, range));
+      return;
+    }
+
+    // Single cell: try to auto-detect the surrounding data region
+    detectDataRegion(sel.endRow, sel.endCol)
       .then((region) => {
         if (region) {
           const [startRow, startCol, endRow, endCol] = region;
           const range = selectionToRange(startRow, startCol, endRow, endCol);
           setSourceRange(buildSheetRange(currentSheetName, range));
-        } else if (sel) {
+        } else {
           const range = selectionToRange(
             sel.startRow,
             sel.startCol,
@@ -249,15 +295,13 @@ export function CreateChartDialog({
       })
       .catch((err) => {
         console.error("[CreateChartDialog] Auto-detect failed:", err);
-        if (sel) {
-          const range = selectionToRange(
-            sel.startRow,
-            sel.startCol,
-            sel.endRow,
-            sel.endCol,
-          );
-          setSourceRange(buildSheetRange(currentSheetName, range));
-        }
+        const range = selectionToRange(
+          sel.startRow,
+          sel.startCol,
+          sel.endRow,
+          sel.endCol,
+        );
+        setSourceRange(buildSheetRange(currentSheetName, range));
       });
   }, [isOpen, hasAutoDetected, currentSheetName, gridState.selection]);
 
@@ -314,20 +358,69 @@ export function CreateChartDialog({
       });
   }, [sourceRange, hasHeaders, orientation, currentSheetIndex]);
 
-  // Update preview when spec changes
+  // Update preview when spec changes (also resolves cell references)
   useEffect(() => {
     if (!currentSpec || currentSpec.series.length === 0) {
       setPreviewData(null);
+      setResolvedSpec(null);
       return;
     }
 
-    readChartData(currentSpec)
-      .then(setPreviewData)
+    readChartDataResolved(currentSpec)
+      .then((result) => {
+        setResolvedSpec(result.spec);
+        setPreviewData(result.data);
+      })
       .catch((err) => {
         console.error("[CreateChartDialog] Preview data fetch failed:", err);
         setPreviewData(null);
+        setResolvedSpec(null);
       });
   }, [currentSpec]);
+
+  // Push spec updates to the external spec editor window (if open)
+  useEffect(() => {
+    if (currentSpec && isSpecEditorWindowOpen()) {
+      emitSpecUpdated(currentSpec);
+    }
+  }, [currentSpec]);
+
+  // Push preview data updates to the external spec editor window (if open)
+  useEffect(() => {
+    if (isSpecEditorWindowOpen()) {
+      emitPreviewDataUpdated(previewData);
+    }
+  }, [previewData]);
+
+  // Listen for spec changes from the external spec editor window
+  useEffect(() => {
+    if (!isOpen) return;
+
+    const unlisteners: Array<Promise<() => void>> = [];
+
+    unlisteners.push(
+      onSpecChanged((payload) => {
+        handleSpecChange(payload.spec);
+      }),
+    );
+
+    unlisteners.push(
+      onChartSpecEditorClosed(() => {
+        // External editor closed — no cleanup needed, state is already synced
+      }),
+    );
+
+    return () => {
+      unlisteners.forEach((p) => p.then((unlisten) => unlisten()));
+    };
+  }, [isOpen, handleSpecChange]);
+
+  // Close the external spec editor when the dialog closes
+  useEffect(() => {
+    if (!isOpen) {
+      closeSpecEditorWindow();
+    }
+  }, [isOpen]);
 
   const loadSheets = async () => {
     try {
@@ -410,18 +503,76 @@ export function CreateChartDialog({
     }
   };
 
+  // Drag-to-move: mousedown on header starts drag
+  const handleHeaderMouseDown = useCallback((e: React.MouseEvent) => {
+    // Don't drag when clicking the close button
+    if ((e.target as HTMLElement).closest("button")) return;
+    e.preventDefault();
+
+    const dialog = dialogRef.current;
+    if (!dialog) return;
+
+    const rect = dialog.getBoundingClientRect();
+    const startPos = dialogPos ?? {
+      x: rect.left,
+      y: rect.top,
+    };
+
+    dragRef.current = {
+      startX: e.clientX,
+      startY: e.clientY,
+      origX: startPos.x,
+      origY: startPos.y,
+    };
+
+    const handleMouseMove = (moveEvent: MouseEvent) => {
+      if (!dragRef.current) return;
+      const dx = moveEvent.clientX - dragRef.current.startX;
+      const dy = moveEvent.clientY - dragRef.current.startY;
+      setDialogPos({
+        x: dragRef.current.origX + dx,
+        y: dragRef.current.origY + dy,
+      });
+    };
+
+    const handleMouseUp = () => {
+      dragRef.current = null;
+      document.removeEventListener("mousemove", handleMouseMove);
+      document.removeEventListener("mouseup", handleMouseUp);
+      document.body.style.cursor = "";
+      document.body.style.userSelect = "";
+    };
+
+    document.body.style.cursor = "grabbing";
+    document.body.style.userSelect = "none";
+    document.addEventListener("mousemove", handleMouseMove);
+    document.addEventListener("mouseup", handleMouseUp);
+  }, [dialogPos]);
+
   if (!isOpen) {
     return null;
   }
 
+  const isSpecFullView = activeTab === "spec" && specFullView;
+
+  // Compute dialog positioning style
+  const positionStyle: React.CSSProperties = dialogPos
+    ? { left: dialogPos.x, top: dialogPos.y }
+    : { left: "50%", top: "50%", transform: "translate(-50%, -50%)" };
+
+  const fullViewStyle: React.CSSProperties = isSpecFullView
+    ? { width: "90vw", maxWidth: "1200px", height: "90vh", maxHeight: "90vh" }
+    : {};
+
   return (
-    <Backdrop onClick={handleClose}>
+    <Backdrop>
       <DialogContainer
-        onClick={(e) => e.stopPropagation()}
+        ref={dialogRef}
         onKeyDown={handleKeyDown}
+        style={{ ...positionStyle, ...fullViewStyle }}
       >
-        {/* Header */}
-        <Header>
+        {/* Header — drag handle */}
+        <Header onMouseDown={handleHeaderMouseDown}>
           <Title>Insert Chart</Title>
           <CloseButton onClick={handleClose} aria-label="Close">
             x
@@ -442,10 +593,16 @@ export function CreateChartDialog({
           >
             Design
           </Tab>
+          <Tab
+            $active={activeTab === "spec"}
+            onClick={() => setActiveTab("spec")}
+          >
+            Spec
+          </Tab>
         </TabBar>
 
         {/* Tab Content */}
-        <TabContent>
+        <TabContent style={isSpecFullView ? { display: "flex", flexDirection: "column" } : undefined}>
           {activeTab === "data" && (
             <DataTab
               sourceRange={sourceRange}
@@ -468,10 +625,24 @@ export function CreateChartDialog({
               onSpecChange={handleSpecChange}
             />
           )}
+          {activeTab === "spec" && currentSpec && (
+            <SpecTab
+              spec={currentSpec}
+              onSpecChange={handleSpecChange}
+              isFullView={specFullView}
+              onToggleFullView={() => setSpecFullView((v) => !v)}
+              previewPanel={
+                isSpecFullView && (resolvedSpec ?? currentSpec)
+                  ? <ChartPreview spec={resolvedSpec ?? currentSpec!} data={previewData} />
+                  : undefined
+              }
+              previewData={previewData}
+            />
+          )}
 
-          {/* Preview */}
-          {currentSpec && (
-            <ChartPreview spec={currentSpec} data={previewData} />
+          {/* Preview below tabs (non-full-view only) */}
+          {currentSpec && !isSpecFullView && (
+            <ChartPreview spec={resolvedSpec ?? currentSpec} data={previewData} />
           )}
 
           {/* Error */}

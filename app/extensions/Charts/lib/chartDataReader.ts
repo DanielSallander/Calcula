@@ -12,6 +12,7 @@ import type {
   ParsedChartData,
   SeriesOrientation,
 } from "../types";
+import { resolveDataSource, resolveSpecReferences } from "./dataSourceResolver";
 
 // ============================================================================
 // Public API
@@ -20,38 +21,61 @@ import type {
 /**
  * Read cell data from the grid for a chart spec and parse it into
  * categories + numeric series ready for rendering.
+ *
+ * The spec.data field can be a DataRangeRef, an A1 reference string,
+ * or a named range name. It is resolved to coordinates before reading.
  */
 export async function readChartData(spec: ChartSpec): Promise<ParsedChartData> {
-  const { data, hasHeaders, seriesOrientation, categoryIndex, series } = spec;
+  const resolved = await readChartDataResolved(spec);
+  return resolved.data;
+}
+
+/**
+ * Read chart data AND resolve cell references in the spec (title, axis titles,
+ * series names). Returns both the resolved spec and the parsed data.
+ *
+ * Use this when you need the resolved spec for rendering (e.g., "=A1" in title
+ * resolves to the cell value).
+ */
+export async function readChartDataResolved(spec: ChartSpec): Promise<{
+  spec: ChartSpec;
+  data: ParsedChartData;
+}> {
+  // Resolve cell references (=A1, =Sheet1!B5) in string fields
+  const resolvedSpec = await resolveSpecReferences(spec);
+  const { hasHeaders, seriesOrientation, categoryIndex, series } = resolvedSpec;
+
+  // Resolve the data source to concrete coordinates
+  const dataRef = await resolveDataSource(resolvedSpec.data);
 
   // Fetch all cells in the data range
   const cells = await getViewportCells(
-    data.startRow,
-    data.startCol,
-    data.endRow,
-    data.endCol,
+    dataRef.startRow,
+    dataRef.startCol,
+    dataRef.endRow,
+    dataRef.endCol,
   );
 
   // Build a 2D grid of display values
-  const numRows = data.endRow - data.startRow + 1;
-  const numCols = data.endCol - data.startCol + 1;
+  const numRows = dataRef.endRow - dataRef.startRow + 1;
+  const numCols = dataRef.endCol - dataRef.startCol + 1;
   const grid: string[][] = Array.from({ length: numRows }, () =>
     Array(numCols).fill(""),
   );
 
   for (const cell of cells) {
-    const r = cell.row - data.startRow;
-    const c = cell.col - data.startCol;
+    const r = cell.row - dataRef.startRow;
+    const c = cell.col - dataRef.startCol;
     if (r >= 0 && r < numRows && c >= 0 && c < numCols) {
       grid[r][c] = cell.display;
     }
   }
 
-  if (seriesOrientation === "columns") {
-    return parseColumnOriented(grid, numRows, numCols, hasHeaders, categoryIndex, series);
-  } else {
-    return parseRowOriented(grid, numRows, numCols, hasHeaders, categoryIndex, series);
-  }
+  const parsedData = seriesOrientation === "columns"
+    ? parseColumnOriented(grid, numRows, numCols, hasHeaders, categoryIndex, series)
+    : parseRowOriented(grid, numRows, numCols, hasHeaders, categoryIndex, series);
+
+  return { spec: resolvedSpec, data: parsedData };
 }
 
 /**
