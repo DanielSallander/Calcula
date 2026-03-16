@@ -11,6 +11,10 @@ import {
   getColumnUniqueValues,
   setOpenDropdownCol,
   getAutoFilterInfo,
+  sortByColumn,
+  sortByColor,
+  getUniqueColorsInColumn,
+  applyExpressionFilter,
 } from "../lib/filterStore";
 import { emitAppEvent, restoreFocusToGrid } from "../../../src/api";
 import { FilterEvents } from "../lib/filterEvents";
@@ -27,7 +31,134 @@ import {
   ClearFilterLink,
   SelectAllItem,
   EmptyMessage,
+  SortSection,
+  SortItem,
+  SortIcon,
+  SortByColorContainer,
+  SortByColorSubmenu,
+  SubmenuArrow,
+  ColorSwatchRow,
+  ColorSwatch,
+  SubMenuLabel,
+  SubMenuDivider,
+  NoColorsMessage,
+  ExpressionSection,
+  ExpressionLabel,
+  ExpressionInput,
 } from "./FilterDropdownOverlay.styles";
+
+// ============================================================================
+// Sort Icons (inline SVG)
+// ============================================================================
+
+const SortAscIcon: React.FC = () => (
+  <svg viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">
+    <text x="1" y="6.5" fontSize="5.5" fontWeight="700" fontFamily="system-ui" fill="#1a73e8">A</text>
+    <text x="1" y="13" fontSize="5.5" fontWeight="700" fontFamily="system-ui" fill="#1a73e8">Z</text>
+    <line x1="10" y1="3" x2="10" y2="13" stroke="#555" strokeWidth="1.2" />
+    <polyline points="7.5,5.5 10,3 12.5,5.5" stroke="#555" strokeWidth="1.2" fill="none" strokeLinecap="round" strokeLinejoin="round" />
+  </svg>
+);
+
+const SortDescIcon: React.FC = () => (
+  <svg viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">
+    <text x="1" y="6.5" fontSize="5.5" fontWeight="700" fontFamily="system-ui" fill="#1a73e8">Z</text>
+    <text x="1" y="13" fontSize="5.5" fontWeight="700" fontFamily="system-ui" fill="#1a73e8">A</text>
+    <line x1="10" y1="3" x2="10" y2="13" stroke="#555" strokeWidth="1.2" />
+    <polyline points="7.5,10.5 10,13 12.5,10.5" stroke="#555" strokeWidth="1.2" fill="none" strokeLinecap="round" strokeLinejoin="round" />
+  </svg>
+);
+
+const SortByColorIcon: React.FC = () => (
+  <svg viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">
+    <rect x="1" y="2" width="5" height="4" rx="1" fill="#4285f4" />
+    <rect x="1" y="7.5" width="5" height="4" rx="1" fill="#ea4335" />
+    <line x1="10" y1="3" x2="10" y2="13" stroke="#555" strokeWidth="1.2" />
+    <polyline points="7.5,5.5 10,3 12.5,5.5" stroke="#555" strokeWidth="1.2" fill="none" strokeLinecap="round" strokeLinejoin="round" />
+  </svg>
+);
+
+// ============================================================================
+// Sort By Color Submenu
+// ============================================================================
+
+interface SortByColorProps {
+  absoluteCol: number;
+  onSort: (color: string, sortOn: "cellColor" | "fontColor") => void;
+}
+
+const SortByColorMenu: React.FC<SortByColorProps> = ({ absoluteCol, onSort }) => {
+  const [cellColors, setCellColors] = useState<string[]>([]);
+  const [fontColors, setFontColors] = useState<string[]>([]);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    let cancelled = false;
+    async function load() {
+      const [bg, fg] = await Promise.all([
+        getUniqueColorsInColumn(absoluteCol, "cellColor"),
+        getUniqueColorsInColumn(absoluteCol, "fontColor"),
+      ]);
+      if (!cancelled) {
+        setCellColors(bg);
+        setFontColors(fg);
+        setLoading(false);
+      }
+    }
+    load();
+    return () => { cancelled = true; };
+  }, [absoluteCol]);
+
+  if (loading) {
+    return (
+      <SortByColorSubmenu>
+        <NoColorsMessage>Loading...</NoColorsMessage>
+      </SortByColorSubmenu>
+    );
+  }
+
+  const hasColors = cellColors.length > 0 || fontColors.length > 0;
+
+  if (!hasColors) {
+    return (
+      <SortByColorSubmenu>
+        <NoColorsMessage>No colors found in this column</NoColorsMessage>
+      </SortByColorSubmenu>
+    );
+  }
+
+  return (
+    <SortByColorSubmenu>
+      {cellColors.length > 0 && (
+        <>
+          <SubMenuLabel>Cell Color</SubMenuLabel>
+          {cellColors.map((color) => (
+            <ColorSwatchRow key={`bg-${color}`} onClick={() => onSort(color, "cellColor")}>
+              <ColorSwatch $color={color} />
+              <span>Put on top</span>
+            </ColorSwatchRow>
+          ))}
+        </>
+      )}
+      {cellColors.length > 0 && fontColors.length > 0 && <SubMenuDivider />}
+      {fontColors.length > 0 && (
+        <>
+          <SubMenuLabel>Font Color</SubMenuLabel>
+          {fontColors.map((color) => (
+            <ColorSwatchRow key={`fg-${color}`} onClick={() => onSort(color, "fontColor")}>
+              <ColorSwatch $color={color} />
+              <span>Put on top</span>
+            </ColorSwatchRow>
+          ))}
+        </>
+      )}
+    </SortByColorSubmenu>
+  );
+};
+
+// ============================================================================
+// Main Component Types
+// ============================================================================
 
 interface FilterDropdownState {
   /** All unique values in the column */
@@ -48,7 +179,7 @@ const FilterDropdownOverlay: React.FC<OverlayProps> = ({ onClose, data, anchorRe
   const dropdownData = data as unknown as FilterDropdownData | undefined;
   if (!dropdownData) return null;
 
-  const { relativeCol, columnName } = dropdownData;
+  const { relativeCol, absoluteCol, columnName } = dropdownData;
 
   const [state, setState] = useState<FilterDropdownState>({
     allValues: [],
@@ -58,6 +189,10 @@ const FilterDropdownOverlay: React.FC<OverlayProps> = ({ onClose, data, anchorRe
     searchText: "",
     loading: true,
   });
+
+  const [showColorSubmenu, setShowColorSubmenu] = useState(false);
+  const [expressionText, setExpressionText] = useState("");
+  const colorSubmenuTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const containerRef = useRef<HTMLDivElement>(null);
   const searchRef = useRef<HTMLInputElement>(null);
@@ -91,6 +226,11 @@ const FilterDropdownOverlay: React.FC<OverlayProps> = ({ onClose, data, anchorRe
         // No filter - all values are checked
         checked = new Set(values);
         blanksChecked = true;
+      }
+
+      // Restore expression text if a custom filter is active on this column
+      if (criteria && criteria.filterOn === "custom" && criteria.criterion1) {
+        setExpressionText(criteria.criterion1);
       }
 
       setState({
@@ -204,6 +344,13 @@ const FilterDropdownOverlay: React.FC<OverlayProps> = ({ onClose, data, anchorRe
   };
 
   const handleOk = async () => {
+    // Expression takes precedence over checkbox values when non-empty
+    if (expressionText.trim()) {
+      await applyExpressionFilter(relativeCol, expressionText.trim());
+      handleClose();
+      return;
+    }
+
     const selectedValues = Array.from(state.checkedValues);
     const allSelected =
       selectedValues.length === state.allValues.length &&
@@ -223,6 +370,44 @@ const FilterDropdownOverlay: React.FC<OverlayProps> = ({ onClose, data, anchorRe
   const handleClearFilter = async () => {
     await clearColumnFilter(relativeCol);
     handleClose();
+  };
+
+  // Sort handlers
+  const handleSortAsc = async () => {
+    await sortByColumn(absoluteCol, true);
+    handleClose();
+  };
+
+  const handleSortDesc = async () => {
+    await sortByColumn(absoluteCol, false);
+    handleClose();
+  };
+
+  const handleSortByColor = async (color: string, sortOn: "cellColor" | "fontColor") => {
+    await sortByColor(absoluteCol, color, sortOn);
+    handleClose();
+  };
+
+  // Color submenu hover management
+  const handleColorMouseEnter = () => {
+    if (colorSubmenuTimer.current) clearTimeout(colorSubmenuTimer.current);
+    setShowColorSubmenu(true);
+  };
+
+  const handleColorMouseLeave = () => {
+    colorSubmenuTimer.current = setTimeout(() => setShowColorSubmenu(false), 200);
+  };
+
+  const handleExpressionKeyDown = (e: React.KeyboardEvent) => {
+    if (e.key === "Enter") {
+      e.preventDefault();
+      handleOk();
+    }
+    // Prevent Escape from closing both the input and the dropdown
+    if (e.key === "Escape") {
+      e.stopPropagation();
+      setExpressionText("");
+    }
   };
 
   // Position the dropdown
@@ -250,6 +435,31 @@ const FilterDropdownOverlay: React.FC<OverlayProps> = ({ onClose, data, anchorRe
           Clear Filter from "{columnName}"
         </ClearFilterLink>
       )}
+
+      {/* Sort Section */}
+      <SortSection>
+        <SortItem onClick={handleSortAsc}>
+          <SortIcon><SortAscIcon /></SortIcon>
+          Sort A to Z
+        </SortItem>
+        <SortItem onClick={handleSortDesc}>
+          <SortIcon><SortDescIcon /></SortIcon>
+          Sort Z to A
+        </SortItem>
+        <SortByColorContainer
+          onMouseEnter={handleColorMouseEnter}
+          onMouseLeave={handleColorMouseLeave}
+        >
+          <SortItem>
+            <SortIcon><SortByColorIcon /></SortIcon>
+            Sort by Color
+            <SubmenuArrow>{"\u25B6"}</SubmenuArrow>
+          </SortItem>
+          {showColorSubmenu && (
+            <SortByColorMenu absoluteCol={absoluteCol} onSort={handleSortByColor} />
+          )}
+        </SortByColorContainer>
+      </SortSection>
 
       <SearchContainer>
         <SearchInput
@@ -300,6 +510,18 @@ const FilterDropdownOverlay: React.FC<OverlayProps> = ({ onClose, data, anchorRe
           <EmptyMessage>No matching values</EmptyMessage>
         )}
       </CheckboxList>
+
+      {/* Expression Filter - takes precedence over checkboxes when non-empty */}
+      <ExpressionSection>
+        <ExpressionLabel>Filter by expression{expressionText.trim() ? " (overrides values)" : ""}:</ExpressionLabel>
+        <ExpressionInput
+          type="text"
+          placeholder='e.g. >=100, =*text*, <>0'
+          value={expressionText}
+          onChange={(e) => setExpressionText(e.target.value)}
+          onKeyDown={handleExpressionKeyDown}
+        />
+      </ExpressionSection>
 
       <ButtonRow>
         <ActionButton onClick={handleClose}>Cancel</ActionButton>

@@ -42,7 +42,9 @@ export type GridCommand =
   | "insertRow"
   | "insertColumn"
   | "deleteRow"
-  | "deleteColumn";
+  | "deleteColumn"
+  | "mergeCells"
+  | "unmergeCells";
 
 /** Command registry for direct handler invocation */
 class GridCommandRegistry {

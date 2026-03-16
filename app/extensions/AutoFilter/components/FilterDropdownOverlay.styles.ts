@@ -126,3 +126,164 @@ export const EmptyMessage = styled.div`
   color: #999;
   font-size: 12px;
 `;
+
+// ============================================================================
+// Sort Section
+// ============================================================================
+
+export const SortSection = styled.div`
+  border-bottom: 1px solid var(--menu-border, #e0e0e0);
+  padding: 4px 0;
+`;
+
+export const SortItem = styled.div`
+  display: flex;
+  align-items: center;
+  padding: 5px 12px;
+  cursor: pointer;
+  gap: 8px;
+  font-size: 12px;
+  color: var(--menu-text, #333333);
+
+  &:hover {
+    background: var(--menu-button-hover-bg, #f0f0f0);
+  }
+`;
+
+export const SortIcon = styled.span`
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  flex-shrink: 0;
+
+  svg {
+    width: 16px;
+    height: 16px;
+  }
+`;
+
+export const SortByColorContainer = styled.div`
+  position: relative;
+`;
+
+export const SortByColorSubmenu = styled.div`
+  position: absolute;
+  left: 100%;
+  top: -4px;
+  background: var(--menu-dropdown-bg, #ffffff);
+  border: 1px solid var(--menu-border, #d0d0d0);
+  border-radius: 4px;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+  min-width: 180px;
+  z-index: 10001;
+  padding: 4px 0;
+`;
+
+export const SubmenuArrow = styled.span`
+  margin-left: auto;
+  font-size: 10px;
+  color: #999;
+`;
+
+export const ColorSwatchRow = styled.div`
+  display: flex;
+  align-items: center;
+  padding: 5px 12px;
+  cursor: pointer;
+  gap: 8px;
+  font-size: 12px;
+
+  &:hover {
+    background: var(--menu-button-hover-bg, #f0f0f0);
+  }
+`;
+
+export const ColorSwatch = styled.span<{ $color: string }>`
+  display: inline-block;
+  width: 14px;
+  height: 14px;
+  border-radius: 2px;
+  border: 1px solid #c0c0c0;
+  background: ${(p) => p.$color};
+  flex-shrink: 0;
+`;
+
+export const SubMenuLabel = styled.div`
+  padding: 4px 12px 2px;
+  font-size: 11px;
+  color: #999;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.3px;
+`;
+
+export const SubMenuDivider = styled.div`
+  height: 1px;
+  background: var(--menu-border, #e0e0e0);
+  margin: 4px 0;
+`;
+
+export const NoColorsMessage = styled.div`
+  padding: 8px 12px;
+  font-size: 11px;
+  color: #999;
+  font-style: italic;
+`;
+
+// ============================================================================
+// Expression Filter Section
+// ============================================================================
+
+export const ExpressionSection = styled.div`
+  border-top: 1px solid var(--menu-border, #e0e0e0);
+  padding: 8px;
+`;
+
+export const ExpressionLabel = styled.div`
+  font-size: 11px;
+  color: #666;
+  margin-bottom: 4px;
+`;
+
+export const ExpressionRow = styled.div`
+  display: flex;
+  gap: 4px;
+`;
+
+export const ExpressionInput = styled.input`
+  flex: 1;
+  padding: 4px 6px;
+  border: 1px solid #c0c0c0;
+  border-radius: 3px;
+  font-size: 12px;
+  font-family: "Consolas", "Courier New", monospace;
+  outline: none;
+  box-sizing: border-box;
+
+  &:focus {
+    border-color: #1a73e8;
+    box-shadow: 0 0 0 2px rgba(26, 115, 232, 0.2);
+  }
+`;
+
+export const ExpressionApplyButton = styled.button`
+  padding: 4px 10px;
+  border: 1px solid #1a73e8;
+  border-radius: 3px;
+  background: #1a73e8;
+  color: #ffffff;
+  font-size: 11px;
+  cursor: pointer;
+  white-space: nowrap;
+
+  &:hover {
+    background: #1557b0;
+  }
+
+  &:disabled {
+    opacity: 0.5;
+    cursor: default;
+  }
+`;

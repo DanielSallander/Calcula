@@ -62,6 +62,8 @@ const GRID_COMMAND_MAP: Record<string, GridCommand> = {
   [CoreCommands.INSERT_COLUMN]: "insertColumn",
   [CoreCommands.DELETE_ROW]: "deleteRow",
   [CoreCommands.DELETE_COLUMN]: "deleteColumn",
+  [CoreCommands.MERGE_CELLS]: "mergeCells",
+  [CoreCommands.UNMERGE_CELLS]: "unmergeCells",
 };
 
 // ============================================================================

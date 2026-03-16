@@ -8,7 +8,7 @@
 import { useCallback, useRef, useState, useEffect } from "react";
 import { useGridContext } from "../state/GridContext";
 import { setSelection, scrollBy } from "../state/gridActions";
-import { getCell, getViewportCells, updateCellsBatch, shiftFormulasBatch, type CellUpdateInput, type FormulaShiftInput } from "../lib/tauri-api";
+import { getCell, getViewportCells, updateCellsBatch, shiftFormulasBatch, getMergedRegions, mergeCells, type CellUpdateInput, type FormulaShiftInput, type MergedRegion } from "../lib/tauri-api";
 import { cellEvents } from "../lib/cellEvents";
 import type { Selection, GridConfig } from "../types";
 import { getColumnWidth, getRowHeight, getColumnX, getRowY, calculateVisibleRange } from "../lib/gridRenderer";
@@ -294,6 +294,91 @@ async function processPendingFills(pendingFills: PendingFill[]): Promise<CellUpd
   }
 
   return results;
+}
+
+/**
+ * Replicate merged regions from the source range into the filled target range.
+ * For each source merge, creates corresponding merges in every repetition of the
+ * source pattern that falls within the target range.
+ */
+async function replicateMergeRegions(
+  sourceRange: { startRow: number; startCol: number; endRow: number; endCol: number },
+  targetRange: { startRow: number; startCol: number; endRow: number; endCol: number },
+  direction: FillDirection,
+): Promise<void> {
+  const allMerged = await getMergedRegions();
+
+  // Find merged regions that are fully within the source range
+  const sourceMerges = allMerged.filter(
+    (m) =>
+      m.startRow >= sourceRange.startRow &&
+      m.endRow <= sourceRange.endRow &&
+      m.startCol >= sourceRange.startCol &&
+      m.endCol <= sourceRange.endCol,
+  );
+
+  if (sourceMerges.length === 0) return;
+
+  const sourceRows = sourceRange.endRow - sourceRange.startRow + 1;
+  const sourceCols = sourceRange.endCol - sourceRange.startCol + 1;
+
+  if (direction === "down" || direction === "up") {
+    const fillStart = direction === "down" ? sourceRange.endRow + 1 : targetRange.startRow;
+    const fillEnd = direction === "down" ? targetRange.endRow : sourceRange.startRow - 1;
+    const fillCount = fillEnd - fillStart + 1;
+    if (fillCount <= 0) return;
+
+    const repetitions = Math.ceil(fillCount / sourceRows);
+
+    for (let rep = 0; rep < repetitions; rep++) {
+      for (const m of sourceMerges) {
+        const rowOffset = direction === "down"
+          ? (rep * sourceRows) + (sourceRange.endRow + 1 - sourceRange.startRow)
+          : -((rep + 1) * sourceRows);
+
+        const newStartRow = m.startRow + rowOffset;
+        const newEndRow = m.endRow + rowOffset;
+
+        // Clip to target range
+        if (newStartRow > fillEnd || newEndRow < fillStart) continue;
+        const clippedStartRow = Math.max(newStartRow, fillStart);
+        const clippedEndRow = Math.min(newEndRow, fillEnd);
+
+        // Only merge if we have the full merge height (don't create partial merges)
+        if (clippedEndRow - clippedStartRow !== m.endRow - m.startRow) continue;
+
+        await mergeCells(clippedStartRow, m.startCol, clippedEndRow, m.endCol);
+      }
+    }
+  } else if (direction === "right" || direction === "left") {
+    const fillStart = direction === "right" ? sourceRange.endCol + 1 : targetRange.startCol;
+    const fillEnd = direction === "right" ? targetRange.endCol : sourceRange.startCol - 1;
+    const fillCount = fillEnd - fillStart + 1;
+    if (fillCount <= 0) return;
+
+    const repetitions = Math.ceil(fillCount / sourceCols);
+
+    for (let rep = 0; rep < repetitions; rep++) {
+      for (const m of sourceMerges) {
+        const colOffset = direction === "right"
+          ? (rep * sourceCols) + (sourceRange.endCol + 1 - sourceRange.startCol)
+          : -((rep + 1) * sourceCols);
+
+        const newStartCol = m.startCol + colOffset;
+        const newEndCol = m.endCol + colOffset;
+
+        // Clip to target range
+        if (newStartCol > fillEnd || newEndCol < fillStart) continue;
+        const clippedStartCol = Math.max(newStartCol, fillStart);
+        const clippedEndCol = Math.min(newEndCol, fillEnd);
+
+        // Only merge if we have the full merge width
+        if (clippedEndCol - clippedStartCol !== m.endCol - m.startCol) continue;
+
+        await mergeCells(m.startRow, clippedStartCol, m.endRow, clippedEndCol);
+      }
+    }
+  }
 }
 
 /**
@@ -833,6 +918,15 @@ export function useFillHandle(props: UseFillHandleProps): UseFillHandleReturn {
         );
       }
 
+      // Replicate merge patterns from source to filled range
+      if (finalRange && fillState.direction) {
+        await replicateMergeRegions(
+          { startRow: selMinRow, startCol: selMinCol, endRow: selMaxRow, endCol: selMaxCol },
+          { startRow: finalRange.startRow, startCol: finalRange.startCol, endRow: finalRange.endRow, endCol: finalRange.endCol },
+          fillState.direction,
+        );
+      }
+
       console.log("[FillHandle] Fill complete");
 
       // Emit FILL_COMPLETED event for extensions (e.g., sparklines)
@@ -1037,6 +1131,13 @@ export function useFillHandle(props: UseFillHandleProps): UseFillHandleReturn {
           `TOTAL=${(perfAutoT3 - perfAutoT0).toFixed(1)}ms`
         );
       }
+
+      // Replicate merge patterns from source to filled range
+      await replicateMergeRegions(
+        { startRow: selMinRow, startCol: selMinCol, endRow: selMaxRow, endCol: selMaxCol },
+        { startRow: selMinRow, startCol: selMinCol, endRow: edgeRow, endCol: selMaxCol },
+        "down",
+      );
 
       console.log("[FillHandle] autoFillToEdge complete");
 

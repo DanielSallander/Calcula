@@ -22,6 +22,8 @@ import {
   deleteColumns,
   getAllColumnWidths,
   getAllRowHeights,
+  mergeCells,
+  unmergeCells,
 } from "../../lib/tauri-api";
 import { cellEvents } from "../../lib/cellEvents";
 import { getCellFromPixel } from "../../lib/gridRenderer";
@@ -467,6 +469,47 @@ function SpreadsheetContent({
   }, [selection, canvasRef, refreshDimensions]);
 
   // -------------------------------------------------------------------------
+  // Merge Cells Handler
+  // -------------------------------------------------------------------------
+  const handleMergeCells = useCallback(async () => {
+    if (!selection) return;
+
+    const startRow = Math.min(selection.startRow, selection.endRow);
+    const startCol = Math.min(selection.startCol, selection.endCol);
+    const endRow = Math.max(selection.startRow, selection.endRow);
+    const endCol = Math.max(selection.startCol, selection.endCol);
+
+    // Need at least a 2-cell range to merge
+    if (startRow === endRow && startCol === endCol) return;
+
+    try {
+      await mergeCells(startRow, startCol, endRow, endCol);
+      await canvasRef.current?.refreshCells();
+      canvasRef.current?.redraw();
+    } catch (error) {
+      console.error("[Spreadsheet] Failed to merge cells:", error);
+    }
+  }, [selection, canvasRef]);
+
+  // -------------------------------------------------------------------------
+  // Unmerge Cells Handler
+  // -------------------------------------------------------------------------
+  const handleUnmergeCells = useCallback(async () => {
+    if (!selection) return;
+
+    const row = Math.min(selection.startRow, selection.endRow);
+    const col = Math.min(selection.startCol, selection.endCol);
+
+    try {
+      await unmergeCells(row, col);
+      await canvasRef.current?.refreshCells();
+      canvasRef.current?.redraw();
+    } catch (error) {
+      console.error("[Spreadsheet] Failed to unmerge cells:", error);
+    }
+  }, [selection, canvasRef]);
+
+  // -------------------------------------------------------------------------
   // Register Command Handlers
   // -------------------------------------------------------------------------
   useEffect(() => {
@@ -478,6 +521,8 @@ function SpreadsheetContent({
     gridCommands.register("insertColumn", handleInsertColumn);
     gridCommands.register("deleteRow", handleDeleteRow);
     gridCommands.register("deleteColumn", handleDeleteColumn);
+    gridCommands.register("mergeCells", handleMergeCells);
+    gridCommands.register("unmergeCells", handleUnmergeCells);
 
     return () => {
       gridCommands.unregister("cut");
@@ -488,6 +533,8 @@ function SpreadsheetContent({
       gridCommands.unregister("insertColumn");
       gridCommands.unregister("deleteRow");
       gridCommands.unregister("deleteColumn");
+      gridCommands.unregister("mergeCells");
+      gridCommands.unregister("unmergeCells");
     };
   }, [
     handleCut,
@@ -498,6 +545,8 @@ function SpreadsheetContent({
     handleInsertColumn,
     handleDeleteRow,
     handleDeleteColumn,
+    handleMergeCells,
+    handleUnmergeCells,
   ]);
 
   // -------------------------------------------------------------------------

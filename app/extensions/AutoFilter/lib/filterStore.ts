@@ -31,6 +31,13 @@ import {
   addGridRegions,
   removeGridRegionsByType,
 } from "../../../src/api";
+import {
+  sortRangeByColumn,
+  sortRange,
+  getViewportCells,
+  getStyle,
+  setColumnCustomFilter,
+} from "../../../src/api/lib";
 import { FilterEvents } from "./filterEvents";
 
 // ============================================================================
@@ -284,6 +291,135 @@ export async function refreshFilterState(): Promise<void> {
   }
   emitAppEvent(FilterEvents.FILTER_STATE_REFRESHED);
 }
+
+// ============================================================================
+// Sort Operations (from filter dropdown)
+// ============================================================================
+
+/**
+ * Sort the AutoFilter data range by the given column.
+ * Uses the header row as headers.
+ */
+export async function sortByColumn(absoluteCol: number, ascending: boolean): Promise<void> {
+  if (!state.autoFilterInfo) return;
+  const info = state.autoFilterInfo;
+  try {
+    const result = await sortRangeByColumn<{ success: boolean; error?: string }>(
+      info.startRow,
+      info.startCol,
+      info.endRow,
+      info.endCol,
+      absoluteCol,
+      ascending,
+      true, // hasHeaders
+    );
+    if (result.success) {
+      // Use "grid:refresh" (not "app:grid-refresh") to re-fetch cell data from backend
+      window.dispatchEvent(new CustomEvent("grid:refresh"));
+      // Reapply filter since row order changed
+      await reapplyFilter();
+    }
+  } catch (err) {
+    console.error("[AutoFilter] Sort failed:", err);
+  }
+}
+
+/**
+ * Sort the AutoFilter data range by cell color or font color.
+ * Puts the specified color on top.
+ */
+export async function sortByColor(
+  absoluteCol: number,
+  color: string,
+  sortOn: "cellColor" | "fontColor",
+): Promise<void> {
+  if (!state.autoFilterInfo) return;
+  const info = state.autoFilterInfo;
+  try {
+    const result = await sortRange<{ success: boolean; error?: string }>(
+      info.startRow,
+      info.startCol,
+      info.endRow,
+      info.endCol,
+      [{
+        key: absoluteCol - info.startCol,
+        ascending: true,
+        sortOn,
+        color,
+      }],
+      { hasHeaders: true },
+    );
+    if (result.success) {
+      window.dispatchEvent(new CustomEvent("grid:refresh"));
+      await reapplyFilter();
+    }
+  } catch (err) {
+    console.error("[AutoFilter] Sort by color failed:", err);
+  }
+}
+
+/**
+ * Scan a column for unique background or font colors.
+ * Returns distinct CSS color strings found in the data rows (skipping header).
+ */
+export async function getUniqueColorsInColumn(
+  absoluteCol: number,
+  type: "cellColor" | "fontColor",
+): Promise<string[]> {
+  if (!state.autoFilterInfo) return [];
+  const info = state.autoFilterInfo;
+  const dataStartRow = info.startRow + 1; // skip header
+  const cells = await getViewportCells(dataStartRow, absoluteCol, info.endRow, absoluteCol);
+  const colorSet = new Set<string>();
+
+  for (const cell of cells) {
+    if (cell.styleIndex === 0 && type === "cellColor") continue;
+    try {
+      const style = await getStyle(cell.styleIndex);
+      const color = type === "cellColor" ? style.backgroundColor : style.textColor;
+      if (
+        color &&
+        color !== "transparent" &&
+        color !== "rgba(0, 0, 0, 0)" &&
+        color !== "#000000"
+      ) {
+        colorSet.add(color.toLowerCase());
+      }
+    } catch {
+      // Skip cells with invalid style indices
+    }
+  }
+
+  return Array.from(colorSet);
+}
+
+// ============================================================================
+// Expression Filter
+// ============================================================================
+
+/**
+ * Apply a custom filter expression to a column.
+ * Supports criteria like ">=100", "<>done", "=*text*", etc.
+ */
+export async function applyExpressionFilter(
+  relativeColIndex: number,
+  expression: string,
+): Promise<void> {
+  if (!expression.trim()) return;
+
+  const result = await setColumnCustomFilter(relativeColIndex, expression.trim());
+  if (result.success && result.autoFilter) {
+    state.autoFilterInfo = result.autoFilter;
+    syncOverlayRegion();
+    syncHiddenRows(result);
+    window.dispatchEvent(new CustomEvent("grid:refresh"));
+    emitAppEvent(FilterEvents.FILTER_APPLIED, { column: relativeColIndex });
+  }
+}
+
+// ============================================================================
+// Dropdown State
+// ============================================================================
 
 /**
  * Set which dropdown column is open.
