@@ -3,6 +3,7 @@
 // CONTEXT: Mirrors Rust controls.rs types for frontend use.
 
 import { SHAPE_PROPERTIES } from "../Shape/shapeProperties";
+import { IMAGE_PROPERTIES } from "../Image/imageProperties";
 
 // ============================================================================
 // Control Property Types
@@ -131,6 +132,8 @@ export function getPropertyDefinitions(controlType: string): PropertyDefinition[
       return BUTTON_PROPERTIES;
     case "shape":
       return SHAPE_PROPERTIES;
+    case "image":
+      return IMAGE_PROPERTIES;
     default:
       return [];
   }

@@ -41,6 +41,12 @@ import {
   invalidateShapeCache,
   invalidateAllShapeCaches,
 } from "./Shape/shapeRenderer";
+import {
+  renderFloatingImage,
+  hitTestFloatingImage,
+  invalidateImageCache,
+  invalidateAllImageCaches,
+} from "./Image/imageRenderer";
 import React from "react";
 import { getShapeDefinition } from "./Shape/shapeCatalog";
 import { ShapeGalleryPanel } from "./Shape/ShapeGalleryOverlay";
@@ -93,6 +99,8 @@ function renderFloatingControl(overlayCtx: OverlayRenderContext): void {
   const controlType = overlayCtx.region.data?.controlType;
   if (controlType === "shape") {
     renderFloatingShape(overlayCtx);
+  } else if (controlType === "image") {
+    renderFloatingImage(overlayCtx);
   } else {
     renderFloatingButton(overlayCtx);
   }
@@ -102,6 +110,8 @@ function hitTestFloatingControl(hitCtx: OverlayHitTestContext): boolean {
   const controlType = hitCtx.region.data?.controlType;
   if (controlType === "shape") {
     return hitTestFloatingShape(hitCtx);
+  } else if (controlType === "image") {
+    return hitTestFloatingImage(hitCtx);
   } else {
     return hitTestFloatingButton(hitCtx);
   }
@@ -154,6 +164,7 @@ export function registerControlsExtension(): void {
     refreshStyleCache();
     invalidateAllFloatingButtonCaches();
     invalidateAllShapeCaches();
+    invalidateAllImageCaches();
     emitAppEvent(AppEvents.GRID_REFRESH);
   });
   cleanupFns.push(unregCellsUpdated);
@@ -163,6 +174,7 @@ export function registerControlsExtension(): void {
   const unregNamedRangesChanged = onAppEvent(AppEvents.NAMED_RANGES_CHANGED, () => {
     invalidateAllFloatingButtonCaches();
     invalidateAllShapeCaches();
+    invalidateAllImageCaches();
     emitAppEvent(AppEvents.GRID_REFRESH);
   });
   cleanupFns.push(unregNamedRangesChanged);
@@ -197,6 +209,13 @@ export function registerControlsExtension(): void {
     label: "Shapes",
     customContent: (onClose) =>
       React.createElement(ShapeGalleryPanel, { insertShape, onClose }),
+  });
+
+  // 8c. Register Insert > Image menu item
+  registerMenuItem("insert", {
+    id: "insert.image",
+    label: "Image",
+    action: insertImage,
   });
 
   // 9. Register Developer > Design Mode menu item
@@ -272,6 +291,7 @@ export function registerControlsExtension(): void {
       const controlId = makeFloatingControlId(detail.sheetIndex, detail.row, detail.col);
       invalidateFloatingButtonCache(controlId);
       invalidateShapeCache(controlId);
+      invalidateImageCache(controlId);
       emitAppEvent(AppEvents.GRID_REFRESH);
     }
   };
@@ -504,6 +524,158 @@ async function insertShape(shapeType: string): Promise<void> {
 }
 
 // ============================================================================
+// Insert Image Action (Always Floating)
+// ============================================================================
+
+/**
+ * Insert an image control on the current selection.
+ * Opens a file picker, reads the selected image as a base64 data URL,
+ * and creates a floating image positioned at the selected cell.
+ */
+async function insertImage(): Promise<void> {
+  const { restoreFocusToGrid } = await import("../../src/api/events");
+  const { getGridStateSnapshot } = await import("../../src/api/grid");
+  const { getColumnWidth, getRowHeight } = await import("../../src/api/dimensions");
+
+  // Use a hidden file input to pick an image file
+  const dataUrl = await pickImageFile();
+  if (!dataUrl) return;
+
+  // Get current selection
+  const sel = getCurrentSelectionFromInterceptor();
+  if (!sel) return;
+
+  const row = sel.endRow;
+  const col = sel.endCol;
+
+  // Get grid state for position calculation
+  const gridState = getGridStateSnapshot();
+  if (!gridState) return;
+
+  const sheetIndex = gridState.config?.activeSheet ?? 0;
+  const defaultCellWidth = gridState.config?.defaultCellWidth ?? 100;
+  const defaultCellHeight = gridState.config?.defaultCellHeight ?? 24;
+  const columnWidths = gridState.dimensions?.columnWidths ?? new Map();
+  const rowHeights = gridState.dimensions?.rowHeights ?? new Map();
+
+  // Calculate pixel position from cell bounds (sheet coordinates, no scroll)
+  let cellX = 0;
+  for (let c = 0; c < col; c++) {
+    cellX += getColumnWidth(c, defaultCellWidth, columnWidths);
+  }
+  let cellY = 0;
+  for (let r = 0; r < row; r++) {
+    cellY += getRowHeight(r, defaultCellHeight, rowHeights);
+  }
+
+  // Determine image natural size to set initial dimensions
+  const naturalSize = await getImageNaturalSize(dataUrl);
+  let imgWidth = naturalSize.width;
+  let imgHeight = naturalSize.height;
+
+  // Cap to reasonable max while preserving aspect ratio
+  const maxDim = 400;
+  if (imgWidth > maxDim || imgHeight > maxDim) {
+    const scale = maxDim / Math.max(imgWidth, imgHeight);
+    imgWidth = Math.round(imgWidth * scale);
+    imgHeight = Math.round(imgHeight * scale);
+  }
+
+  // Minimum size
+  imgWidth = Math.max(imgWidth, 50);
+  imgHeight = Math.max(imgHeight, 50);
+
+  // Create control metadata for the image
+  await setControlMetadata(sheetIndex, row, col, {
+    controlType: "image",
+    properties: {
+      src: { valueType: "static", value: dataUrl },
+      opacity: { valueType: "static", value: "1" },
+      rotation: { valueType: "static", value: "0" },
+      x: { valueType: "static", value: String(cellX) },
+      y: { valueType: "static", value: String(cellY) },
+      width: { valueType: "static", value: String(imgWidth) },
+      height: { valueType: "static", value: String(imgHeight) },
+    },
+  });
+
+  // Add to floating store
+  const controlId = makeFloatingControlId(sheetIndex, row, col);
+  addFloatingControl({
+    id: controlId,
+    sheetIndex,
+    row,
+    col,
+    x: cellX,
+    y: cellY,
+    width: imgWidth,
+    height: imgHeight,
+    controlType: "image",
+  });
+
+  // Sync overlay regions and refresh
+  syncFloatingControlRegions();
+  emitAppEvent(AppEvents.GRID_REFRESH);
+  restoreFocusToGrid();
+}
+
+/**
+ * Open a native file picker for image files and return the selected file as a data URL.
+ * Returns null if the user cancels.
+ */
+function pickImageFile(): Promise<string | null> {
+  return new Promise((resolve) => {
+    const input = document.createElement("input");
+    input.type = "file";
+    input.accept = "image/png,image/jpeg,image/gif,image/bmp,image/webp,image/svg+xml";
+    input.style.display = "none";
+    document.body.appendChild(input);
+
+    input.onchange = () => {
+      const file = input.files?.[0];
+      document.body.removeChild(input);
+      if (!file) {
+        resolve(null);
+        return;
+      }
+
+      const reader = new FileReader();
+      reader.onload = () => {
+        resolve(reader.result as string);
+      };
+      reader.onerror = () => {
+        console.error("[Controls] Failed to read image file");
+        resolve(null);
+      };
+      reader.readAsDataURL(file);
+    };
+
+    input.oncancel = () => {
+      document.body.removeChild(input);
+      resolve(null);
+    };
+
+    input.click();
+  });
+}
+
+/**
+ * Get the natural dimensions of an image from its data URL.
+ */
+function getImageNaturalSize(dataUrl: string): Promise<{ width: number; height: number }> {
+  return new Promise((resolve) => {
+    const img = new Image();
+    img.onload = () => {
+      resolve({ width: img.naturalWidth, height: img.naturalHeight });
+    };
+    img.onerror = () => {
+      resolve({ width: 200, height: 150 }); // fallback
+    };
+    img.src = dataUrl;
+  });
+}
+
+// ============================================================================
 // Delete Floating Control
 // ============================================================================
 
@@ -531,6 +703,7 @@ async function deleteFloatingControl(controlId: string): Promise<void> {
   // Invalidate caches and refresh
   invalidateFloatingButtonCache(controlId);
   invalidateShapeCache(controlId);
+  invalidateImageCache(controlId);
   syncFloatingControlRegions();
   emitAppEvent(AppEvents.GRID_REFRESH);
 }
@@ -552,9 +725,9 @@ function setupFloatingObjectEvents(): void {
 
     const ctrlType = detail.data?.controlType ?? "button";
 
-    if (getDesignMode() || ctrlType === "shape") {
-      // Design mode or shape: select the control and show properties
-      // (shapes are always selectable regardless of design mode)
+    if (getDesignMode() || ctrlType === "shape" || ctrlType === "image") {
+      // Design mode, shape, or image: select the control and show properties
+      // (shapes and images are always selectable regardless of design mode)
       selectFloatingControl(controlId);
       lastPropertiesCell = { row: controlRow, col: controlCol };
       openTaskPane(PROPERTIES_PANE_ID, {
@@ -1136,5 +1309,6 @@ export function unregisterControlsExtension(): void {
   deselectFloatingControl();
   invalidateAllFloatingButtonCaches();
   invalidateAllShapeCaches();
+  invalidateAllImageCaches();
   console.log("[Controls] Unregistered");
 }

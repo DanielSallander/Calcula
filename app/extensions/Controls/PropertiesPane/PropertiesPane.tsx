@@ -159,7 +159,7 @@ export const PropertiesPane: React.FC<TaskPaneViewProps> = ({ data }) => {
         // For visual properties, invalidate the floating cache and trigger redraw
         if (["text", "fill", "color", "borderColor", "fontSize",
              "stroke", "strokeWidth", "textColor", "fontBold", "fontItalic",
-             "textAlign", "opacity", "rotation", "shapeType"].includes(key)) {
+             "textAlign", "opacity", "rotation", "shapeType", "src"].includes(key)) {
           window.dispatchEvent(new CustomEvent("controls:invalidate-cache", {
             detail: { sheetIndex, row, col },
           }));
@@ -209,6 +209,7 @@ export const PropertiesPane: React.FC<TaskPaneViewProps> = ({ data }) => {
 
   const typeLabel = (() => {
     if (controlType === "button") return "Button";
+    if (controlType === "image") return "Image";
     if (controlType === "shape") {
       const shapeType = metadata?.properties?.shapeType?.value;
       if (shapeType) {

@@ -138,8 +138,8 @@ export function syncFloatingControlRegions(): void {
       row: ctrl.row,
       col: ctrl.col,
       controlType: ctrl.controlType,
-      movable: getDesignMode() || ctrl.controlType === "shape",
-      resizable: getDesignMode() || ctrl.controlType === "shape",
+      movable: getDesignMode() || ctrl.controlType === "shape" || ctrl.controlType === "image",
+      resizable: getDesignMode() || ctrl.controlType === "shape" || ctrl.controlType === "image",
     },
   }));
 
