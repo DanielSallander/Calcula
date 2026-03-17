@@ -77,6 +77,22 @@ pub fn save_xlsx(workbook: &Workbook, path: &Path) -> Result<(), PersistenceErro
                         worksheet.write_string(*row, *col as u16, "#ERROR!")?;
                     }
                 }
+                SavedCellValue::List(items) => {
+                    let display = format!("[List({})]", items.len());
+                    if let Some(fmt) = format {
+                        worksheet.write_string_with_format(*row, *col as u16, &display, &fmt)?;
+                    } else {
+                        worksheet.write_string(*row, *col as u16, &display)?;
+                    }
+                }
+                SavedCellValue::Dict(entries) => {
+                    let display = format!("[Dict({})]", entries.len());
+                    if let Some(fmt) = format {
+                        worksheet.write_string_with_format(*row, *col as u16, &display, &fmt)?;
+                    } else {
+                        worksheet.write_string(*row, *col as u16, &display)?;
+                    }
+                }
             }
         }
     }

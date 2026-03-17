@@ -32,6 +32,14 @@ function isCellBlank(cell: CellData | null | undefined): boolean {
 }
 
 /**
+ * Check if a cell displays a List or Dict collection value.
+ */
+function isCollectionCell(cell: CellData | null | undefined): boolean {
+  if (!cell?.display) return false;
+  return cell.display.startsWith("[List(") || cell.display.startsWith("[Dict(");
+}
+
+/**
  * Parse a cell's display value as a number.
  * Returns NaN if the value is not numeric.
  */
@@ -193,7 +201,8 @@ export async function executePasteSpecial(
           srcC,
           pasteAttribute,
           operation,
-          shiftedFormulaMap
+          shiftedFormulaMap,
+          clipboard.collectionTexts,
         );
       }
     }
@@ -294,7 +303,8 @@ async function pasteSingleCell(
   srcC: number,
   pasteAttribute: string,
   operation: PasteOperation,
-  shiftedFormulaMap: Map<string, string>
+  shiftedFormulaMap: Map<string, string>,
+  collectionTexts?: Map<string, string>,
 ): Promise<void> {
   try {
     switch (pasteAttribute) {
@@ -305,7 +315,7 @@ async function pasteSingleCell(
         await pasteFormulas(sourceCell, destRow, destCol, srcR, srcC, operation, shiftedFormulaMap);
         break;
       case "values":
-        await pasteValues(sourceCell, destRow, destCol, operation);
+        await pasteValues(sourceCell, destRow, destCol, srcR, srcC, operation, collectionTexts);
         break;
       case "formats":
         await pasteFormats(sourceCell, destRow, destCol);
@@ -407,18 +417,28 @@ async function pasteFormulas(
 
 /**
  * Paste Values: display value only (flattens formulas), no formatting change.
+ * For List/Dict cells, pastes the JSON representation if available.
  */
 async function pasteValues(
   sourceCell: CellData | null,
   destRow: number,
   destCol: number,
-  operation: PasteOperation
+  srcR: number,
+  srcC: number,
+  operation: PasteOperation,
+  collectionTexts?: Map<string, string>,
 ): Promise<void> {
   if (operation !== "none") {
     await pasteWithOperation(sourceCell, destRow, destCol, operation);
   } else {
-    // Use display value (the computed result), never the formula
-    const value = sourceCell?.display ?? "";
+    // For collection cells, use JSON text if available
+    let value = sourceCell?.display ?? "";
+    if (isCollectionCell(sourceCell)) {
+      const jsonText = collectionTexts?.get(`${srcR},${srcC}`);
+      if (jsonText) {
+        value = jsonText;
+      }
+    }
 
     const updatedCells = await updateCell(destRow, destCol, value);
     // Do NOT set style - keep target formatting
@@ -459,6 +479,7 @@ async function pasteFormats(
 
 /**
  * Paste with mathematical operation: read target, compute, write result.
+ * Skips List/Dict collection cells (not meaningful for arithmetic).
  */
 async function pasteWithOperation(
   sourceCell: CellData | null,
@@ -466,8 +487,15 @@ async function pasteWithOperation(
   destCol: number,
   operation: PasteOperation
 ): Promise<void> {
+  // Skip arithmetic for collection cells — they are not numeric
+  if (isCollectionCell(sourceCell)) return;
+
   // Read current target cell value
   const targetCell = await getCell(destRow, destCol);
+
+  // Also skip if target is a collection cell
+  if (isCollectionCell(targetCell)) return;
+
   const targetValue = parseNumeric(targetCell);
   const sourceValue = parseNumeric(sourceCell);
 

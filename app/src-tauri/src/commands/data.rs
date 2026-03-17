@@ -90,6 +90,189 @@ pub fn get_cell(state: State<AppState>, row: u32, col: u32) -> Option<CellData> 
     get_cell_internal_with_merge(&grid, &styles, &merged_regions, row, col)
 }
 
+/// Get the structured contents of a List or Dict cell for preview.
+#[tauri::command]
+pub fn get_cell_collection(
+    state: State<AppState>,
+    row: u32,
+    col: u32,
+) -> crate::api_types::CollectionPreviewResult {
+    use crate::api_types::{CollectionEntry, CollectionItem, CollectionPreviewResult};
+    use engine::cell::{CellValue, DictKey};
+
+    let grid = state.grid.lock().unwrap();
+
+    fn cell_value_to_item(val: &CellValue, depth: usize) -> CollectionItem {
+        if depth > 32 {
+            return CollectionItem::Scalar {
+                display: "...".to_string(),
+            };
+        }
+        match val {
+            CellValue::List(items) => CollectionItem::List {
+                count: items.len(),
+                items: items.iter().map(|i| cell_value_to_item(i, depth + 1)).collect(),
+            },
+            CellValue::Dict(entries) => CollectionItem::Dict {
+                count: entries.len(),
+                entries: entries
+                    .iter()
+                    .map(|(k, v)| {
+                        let key = match k {
+                            DictKey::Text(s) => format!("\"{}\"", s),
+                            DictKey::Number(n) => {
+                                if n.fract() == 0.0 && n.abs() < 1e15 {
+                                    format!("{:.0}", n)
+                                } else {
+                                    format!("{}", n)
+                                }
+                            }
+                            DictKey::Boolean(b) => {
+                                if *b { "TRUE" } else { "FALSE" }.to_string()
+                            }
+                        };
+                        CollectionEntry {
+                            key,
+                            value: cell_value_to_item(v, depth + 1),
+                        }
+                    })
+                    .collect(),
+            },
+            CellValue::Empty => CollectionItem::Scalar {
+                display: String::new(),
+            },
+            CellValue::Number(n) => CollectionItem::Scalar {
+                display: if n.fract() == 0.0 && n.abs() < 1e15 {
+                    format!("{:.0}", n)
+                } else {
+                    format!("{}", n)
+                },
+            },
+            CellValue::Text(s) => CollectionItem::Scalar {
+                display: format!("\"{}\"", s),
+            },
+            CellValue::Boolean(b) => CollectionItem::Scalar {
+                display: if *b { "TRUE" } else { "FALSE" }.to_string(),
+            },
+            CellValue::Error(e) => CollectionItem::Scalar {
+                display: format!("#{:?}", e).to_uppercase(),
+            },
+        }
+    }
+
+    match grid.get_cell(row, col) {
+        Some(cell) => match &cell.value {
+            CellValue::List(items) => CollectionPreviewResult {
+                cell_type: "list".to_string(),
+                root: Some(CollectionItem::List {
+                    count: items.len(),
+                    items: items.iter().map(|i| cell_value_to_item(i, 0)).collect(),
+                }),
+            },
+            CellValue::Dict(entries) => CollectionPreviewResult {
+                cell_type: "dict".to_string(),
+                root: Some(CollectionItem::Dict {
+                    count: entries.len(),
+                    entries: entries
+                        .iter()
+                        .map(|(k, v)| {
+                            let key = match k {
+                                DictKey::Text(s) => format!("\"{}\"", s),
+                                DictKey::Number(n) => {
+                                    if n.fract() == 0.0 && n.abs() < 1e15 {
+                                        format!("{:.0}", n)
+                                    } else {
+                                        format!("{}", n)
+                                    }
+                                }
+                                DictKey::Boolean(b) => {
+                                    if *b { "TRUE" } else { "FALSE" }.to_string()
+                                }
+                            };
+                            CollectionEntry {
+                                key,
+                                value: cell_value_to_item(v, 0),
+                            }
+                        })
+                        .collect(),
+                }),
+            },
+            _ => CollectionPreviewResult {
+                cell_type: "none".to_string(),
+                root: None,
+            },
+        },
+        None => CollectionPreviewResult {
+            cell_type: "none".to_string(),
+            root: None,
+        },
+    }
+}
+
+/// Batch-get JSON text representations for collection cells.
+/// Input: list of {row, col} coordinates.
+/// Output: parallel list of JSON strings (empty string for non-collection cells).
+/// Used by the clipboard system to serialize List/Dict cells for the system clipboard.
+#[tauri::command]
+pub fn get_collection_texts(
+    state: State<AppState>,
+    cells: Vec<(u32, u32)>,
+) -> Vec<String> {
+    use engine::cell::{CellValue, DictKey};
+
+    let grid = state.grid.lock().unwrap();
+
+    fn cell_value_to_json(val: &CellValue, depth: usize) -> serde_json::Value {
+        if depth > 32 {
+            return serde_json::Value::String("...".to_string());
+        }
+        match val {
+            CellValue::Number(n) => {
+                serde_json::Value::Number(serde_json::Number::from_f64(*n).unwrap_or(serde_json::Number::from(0)))
+            }
+            CellValue::Text(s) => serde_json::Value::String(s.clone()),
+            CellValue::Boolean(b) => serde_json::Value::Bool(*b),
+            CellValue::Empty => serde_json::Value::Null,
+            CellValue::Error(e) => serde_json::Value::String(format!("#{:?}", e).to_uppercase()),
+            CellValue::List(items) => {
+                let arr: Vec<serde_json::Value> = items.iter().map(|i| cell_value_to_json(i, depth + 1)).collect();
+                serde_json::Value::Array(arr)
+            }
+            CellValue::Dict(entries) => {
+                let mut map = serde_json::Map::new();
+                for (k, v) in entries.iter() {
+                    let key = match k {
+                        DictKey::Text(s) => s.clone(),
+                        DictKey::Number(n) => {
+                            if n.fract() == 0.0 && n.abs() < 1e15 {
+                                format!("{:.0}", n)
+                            } else {
+                                format!("{}", n)
+                            }
+                        }
+                        DictKey::Boolean(b) => if *b { "true" } else { "false" }.to_string(),
+                    };
+                    map.insert(key, cell_value_to_json(v, depth + 1));
+                }
+                serde_json::Value::Object(map)
+            }
+        }
+    }
+
+    cells.iter().map(|(row, col)| {
+        match grid.get_cell(*row, *col) {
+            Some(cell) => match &cell.value {
+                CellValue::List(_) | CellValue::Dict(_) => {
+                    let json_val = cell_value_to_json(&cell.value, 0);
+                    serde_json::to_string(&json_val).unwrap_or_default()
+                }
+                _ => String::new(),
+            },
+            None => String::new(),
+        }
+    }).collect()
+}
+
 /// Internal helper for getting cell data without merge info (for backward compatibility).
 #[allow(dead_code)]
 fn get_cell_internal(grid: &Grid, styles: &StyleRegistry, row: u32, col: u32) -> Option<CellData> {
@@ -2426,6 +2609,7 @@ fn compare_cell_values(
             CellValue::Text(_) => 1,
             CellValue::Boolean(_) => 2,
             CellValue::Error(_) => 3,
+            CellValue::List(_) | CellValue::Dict(_) => 3, // Sort alongside errors
             CellValue::Empty => 4,
         }
     }

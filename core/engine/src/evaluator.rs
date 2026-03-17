@@ -18,7 +18,7 @@
 //!              LOWER, TRIM, CONCATENATE, LEFT, RIGHT, MID
 //!
 
-use crate::cell::{CellError, CellValue};
+use crate::cell::{CellError, CellValue, DictKey};
 use crate::coord::col_to_index;
 use crate::date_serial;
 use crate::dependency_extractor::{BinaryOperator, BuiltinFunction, Expression, UnaryOperator, Value};
@@ -59,7 +59,12 @@ pub enum EvalResult {
     Error(CellError),
     /// A list of values, used internally for range expansion.
     /// Functions like SUM receive this when given a range argument.
+    /// Arrays are transient — they spill onto the grid.
     Array(Vec<EvalResult>),
+    /// A contained list of values (does NOT spill). Created by COLLECT().
+    List(Vec<EvalResult>),
+    /// A contained key-value collection (does NOT spill). Created by DICT().
+    Dict(Vec<(DictKey, EvalResult)>),
 }
 
 impl EvalResult {
@@ -78,6 +83,14 @@ impl EvalResult {
                     CellValue::Empty
                 }
             }
+            EvalResult::List(items) => {
+                CellValue::List(Box::new(items.iter().map(|i| i.to_cell_value()).collect()))
+            }
+            EvalResult::Dict(entries) => {
+                CellValue::Dict(Box::new(
+                    entries.iter().map(|(k, v)| (k.clone(), v.to_cell_value())).collect()
+                ))
+            }
         }
     }
 
@@ -88,6 +101,7 @@ impl EvalResult {
             EvalResult::Number(n) => Some(*n),
             EvalResult::Boolean(b) => Some(if *b { 1.0 } else { 0.0 }),
             EvalResult::Text(s) => s.trim().parse::<f64>().ok(),
+            // List/Dict are not coercible to number (Python convention)
             _ => None,
         }
     }
@@ -107,6 +121,7 @@ impl EvalResult {
                     None
                 }
             }
+            // List/Dict are not coercible to boolean (Python convention)
             _ => None,
         }
     }
@@ -138,6 +153,8 @@ impl EvalResult {
                     String::new()
                 }
             }
+            EvalResult::List(items) => format!("[List({})]", items.len()),
+            EvalResult::Dict(entries) => format!("[Dict({})]", entries.len()),
         }
     }
 
@@ -160,6 +177,7 @@ impl EvalResult {
                     (arr.len(), 1)
                 }
             }
+            // List and Dict are contained — they do NOT spill
             _ => (1, 1),
         }
     }
@@ -203,6 +221,7 @@ impl EvalResult {
                 }
                 result
             }
+            // List and Dict are opaque to flatten — they are treated as single values
             other => vec![other.clone()],
         }
     }
@@ -365,6 +384,15 @@ impl<'a> Evaluator<'a> {
                 // If it arrives here unresolved, return #NAME? error.
                 EvalResult::Error(CellError::Name)
             }
+            Expression::IndexAccess { target, index } => {
+                self.eval_index_access(target, index)
+            }
+            Expression::ListLiteral { elements } => {
+                self.eval_list_literal(elements)
+            }
+            Expression::DictLiteral { entries } => {
+                self.eval_dict_literal(entries)
+            }
         }
     }
 
@@ -397,6 +425,12 @@ impl<'a> Evaluator<'a> {
             CellValue::Text(s) => EvalResult::Text(s.clone()),
             CellValue::Boolean(b) => EvalResult::Boolean(*b),
             CellValue::Error(e) => EvalResult::Error(e.clone()),
+            CellValue::List(items) => {
+                EvalResult::List(items.iter().map(|i| self.cell_value_to_result(i)).collect())
+            }
+            CellValue::Dict(entries) => {
+                EvalResult::Dict(entries.iter().map(|(k, v)| (k.clone(), self.cell_value_to_result(v))).collect())
+            }
         }
     }
 
@@ -542,6 +576,133 @@ impl<'a> Evaluator<'a> {
     /// Evaluates a 3D (cross-sheet) reference.
     /// Collects values from the same spatial coordinates across all sheets
     /// between start_sheet and end_sheet (inclusive, based on tab order).
+    /// Evaluates subscript access: target[index]
+    /// - List: 0-based integer index, out of bounds → #REF!
+    /// - Dict: key lookup (string/number/boolean), not found → #N/A
+    /// - Array: 0-based integer index into flat array
+    /// - Other: #VALUE!
+    /// Evaluates a list literal: {1, 2, 3} → EvalResult::List
+    fn eval_list_literal(&self, elements: &[Expression]) -> EvalResult {
+        let mut items = Vec::with_capacity(elements.len());
+        for elem in elements {
+            let val = self.evaluate(elem);
+            if let EvalResult::Error(_) = &val {
+                return val;
+            }
+            items.push(val);
+        }
+        EvalResult::List(items)
+    }
+
+    /// Evaluates a dict literal: {"a": 1, "b": 2} → EvalResult::Dict
+    fn eval_dict_literal(&self, entries: &[(Expression, Expression)]) -> EvalResult {
+        let mut result: Vec<(DictKey, EvalResult)> = Vec::with_capacity(entries.len());
+        for (key_expr, val_expr) in entries {
+            let key_val = self.evaluate(key_expr);
+            let value = self.evaluate(val_expr);
+
+            let key = match key_val {
+                EvalResult::Text(s) => DictKey::Text(s),
+                EvalResult::Number(n) => DictKey::Number(n),
+                EvalResult::Boolean(b) => DictKey::Boolean(b),
+                EvalResult::Error(e) => return EvalResult::Error(e),
+                _ => return EvalResult::Error(CellError::Value),
+            };
+
+            if let EvalResult::Error(_) = &value {
+                return value;
+            }
+
+            // Duplicate keys: last value wins
+            if let Some(pos) = result.iter().position(|(k, _)| *k == key) {
+                result[pos] = (key, value);
+            } else {
+                result.push((key, value));
+            }
+        }
+        EvalResult::Dict(result)
+    }
+
+    fn eval_index_access(&self, target: &Expression, index: &Expression) -> EvalResult {
+        let target_val = self.evaluate(target);
+        let index_val = self.evaluate(index);
+
+        // Propagate errors
+        if let EvalResult::Error(_) = &target_val {
+            return target_val;
+        }
+        if let EvalResult::Error(_) = &index_val {
+            return index_val;
+        }
+
+        match target_val {
+            EvalResult::List(items) => {
+                // Index must coerce to integer
+                let idx = match &index_val {
+                    EvalResult::Number(n) => *n,
+                    EvalResult::Boolean(b) => if *b { 1.0 } else { 0.0 },
+                    EvalResult::Text(s) => match s.parse::<f64>() {
+                        Ok(n) => n,
+                        Err(_) => return EvalResult::Error(CellError::Value),
+                    },
+                    _ => return EvalResult::Error(CellError::Value),
+                };
+                let idx = idx as i64;
+                // Support negative indexing (Python convention): -1 = last element
+                let resolved = if idx < 0 {
+                    items.len() as i64 + idx
+                } else {
+                    idx
+                };
+                if resolved < 0 || resolved as usize >= items.len() {
+                    EvalResult::Error(CellError::Ref)
+                } else {
+                    items.into_iter().nth(resolved as usize).unwrap()
+                }
+            }
+            EvalResult::Dict(entries) => {
+                // Coerce index to DictKey
+                let key = match &index_val {
+                    EvalResult::Text(s) => DictKey::Text(s.clone()),
+                    EvalResult::Number(n) => DictKey::Number(*n),
+                    EvalResult::Boolean(b) => DictKey::Boolean(*b),
+                    _ => return EvalResult::Error(CellError::Value),
+                };
+                // Look up key
+                for (k, v) in entries {
+                    if k == key {
+                        return v;
+                    }
+                }
+                EvalResult::Error(CellError::NA)
+            }
+            EvalResult::Array(arr) => {
+                // Flat index into array (treating as 1D list of values)
+                let idx = match &index_val {
+                    EvalResult::Number(n) => *n,
+                    EvalResult::Boolean(b) => if *b { 1.0 } else { 0.0 },
+                    EvalResult::Text(s) => match s.parse::<f64>() {
+                        Ok(n) => n,
+                        Err(_) => return EvalResult::Error(CellError::Value),
+                    },
+                    _ => return EvalResult::Error(CellError::Value),
+                };
+                let idx = idx as i64;
+                let resolved = if idx < 0 {
+                    arr.len() as i64 + idx
+                } else {
+                    idx
+                };
+                if resolved < 0 || resolved as usize >= arr.len() {
+                    EvalResult::Error(CellError::Ref)
+                } else {
+                    arr.into_iter().nth(resolved as usize).unwrap()
+                }
+            }
+            _ => EvalResult::Error(CellError::Value),
+        }
+    }
+
     fn eval_3d_ref(
         &self,
         start_sheet: &str,
@@ -951,46 +1112,102 @@ impl<'a> Evaluator<'a> {
             BuiltinFunction::Unique => self.fn_unique(args),
             BuiltinFunction::Sequence => self.fn_sequence(args),
 
+            // Collection functions (3D cells)
+            BuiltinFunction::Collect => self.fn_collect(args),
+            BuiltinFunction::DictFn => self.fn_dict(args),
+            BuiltinFunction::Keys => self.fn_keys(args),
+            BuiltinFunction::Values => self.fn_values(args),
+            BuiltinFunction::Contains => self.fn_contains(args),
+            BuiltinFunction::IsList => self.fn_islist(args),
+            BuiltinFunction::IsDict => self.fn_isdict(args),
+            BuiltinFunction::Flatten => self.fn_flatten(args),
+            BuiltinFunction::Take => self.fn_take(args),
+            BuiltinFunction::Drop => self.fn_drop(args),
+            BuiltinFunction::Append => self.fn_append(args),
+            BuiltinFunction::Merge => self.fn_merge(args),
+            BuiltinFunction::HStack => self.fn_hstack(args),
+
             // Unknown/custom functions
             BuiltinFunction::Custom(_) => EvalResult::Error(CellError::Name),
         }
     }
 
-    /// Collects numeric values from evaluated arguments, flattening arrays.
+    /// Collects numeric values from evaluated arguments, flattening arrays and unpacking List/Dict.
     fn collect_numbers(&self, args: &[Expression]) -> Result<Vec<f64>, CellError> {
         let mut numbers = Vec::new();
 
         for arg in args {
             let result = self.evaluate(arg);
-            for item in result.flatten() {
-                if let EvalResult::Error(e) = item {
-                    return Err(e);
-                }
-                // Skip non-numeric values in aggregates (like Excel)
-                if let Some(n) = item.as_number() {
-                    numbers.push(n);
-                }
-            }
+            Self::collect_numbers_recursive(result, &mut numbers)?;
         }
 
         Ok(numbers)
     }
 
-    /// Collects all values from arguments, flattening arrays.
+    /// Recursively collects numbers from an EvalResult, unpacking Arrays, Lists, and Dict values.
+    fn collect_numbers_recursive(result: EvalResult, numbers: &mut Vec<f64>) -> Result<(), CellError> {
+        match result {
+            EvalResult::Error(e) => return Err(e),
+            EvalResult::Array(arr) => {
+                for item in arr {
+                    Self::collect_numbers_recursive(item, numbers)?;
+                }
+            }
+            EvalResult::List(items) => {
+                for item in items {
+                    Self::collect_numbers_recursive(item, numbers)?;
+                }
+            }
+            EvalResult::Dict(entries) => {
+                for (_, value) in entries {
+                    Self::collect_numbers_recursive(value, numbers)?;
+                }
+            }
+            other => {
+                if let Some(n) = other.as_number() {
+                    numbers.push(n);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Collects all values from arguments, flattening arrays and unpacking List/Dict.
     fn collect_values(&self, args: &[Expression]) -> Result<Vec<EvalResult>, CellError> {
         let mut values = Vec::new();
 
         for arg in args {
             let result = self.evaluate(arg);
-            for item in result.flatten() {
-                if let EvalResult::Error(e) = item {
-                    return Err(e);
-                }
-                values.push(item);
-            }
+            Self::collect_values_recursive(result, &mut values)?;
         }
 
         Ok(values)
+    }
+
+    /// Recursively collects values from an EvalResult, unpacking Arrays, Lists, and Dict values.
+    fn collect_values_recursive(result: EvalResult, values: &mut Vec<EvalResult>) -> Result<(), CellError> {
+        match result {
+            EvalResult::Error(e) => return Err(e),
+            EvalResult::Array(arr) => {
+                for item in arr {
+                    Self::collect_values_recursive(item, values)?;
+                }
+            }
+            EvalResult::List(items) => {
+                for item in items {
+                    Self::collect_values_recursive(item, values)?;
+                }
+            }
+            EvalResult::Dict(entries) => {
+                for (_, value) in entries {
+                    Self::collect_values_recursive(value, values)?;
+                }
+            }
+            other => {
+                values.push(other);
+            }
+        }
+        Ok(())
     }
 
     // ==================== Aggregate Functions ====================
@@ -1327,8 +1544,15 @@ impl<'a> Evaluator<'a> {
             return EvalResult::Error(CellError::Value);
         }
 
-        let text = self.evaluate(&args[0]).as_text();
-        EvalResult::Number(text.len() as f64)
+        let val = self.evaluate(&args[0]);
+        match &val {
+            EvalResult::List(items) => EvalResult::Number(items.len() as f64),
+            EvalResult::Dict(entries) => EvalResult::Number(entries.len() as f64),
+            _ => {
+                let text = val.as_text();
+                EvalResult::Number(text.len() as f64)
+            }
+        }
     }
 
     fn fn_upper(&self, args: &[Expression]) -> EvalResult {
@@ -3182,6 +3406,8 @@ impl<'a> Evaluator<'a> {
             EvalResult::Boolean(_) => 4.0,
             EvalResult::Error(_) => 16.0,
             EvalResult::Array(_) => 64.0,
+            EvalResult::List(_) => 128.0,
+            EvalResult::Dict(_) => 256.0,
         })
     }
 
@@ -3348,13 +3574,7 @@ impl<'a> Evaluator<'a> {
             _ => return EvalResult::Error(CellError::Ref),
         };
         match self.grid.get_cell(row_idx, col_idx) {
-            Some(cell) => match &cell.value {
-                crate::cell::CellValue::Number(n) => EvalResult::Number(*n),
-                crate::cell::CellValue::Text(s) => EvalResult::Text(s.clone()),
-                crate::cell::CellValue::Boolean(b) => EvalResult::Boolean(*b),
-                crate::cell::CellValue::Error(e) => EvalResult::Error(e.clone()),
-                crate::cell::CellValue::Empty => EvalResult::Number(0.0),
-            }
+            Some(cell) => self.cell_value_to_result(&cell.value),
             None => EvalResult::Number(0.0),
         }
     }
@@ -3377,13 +3597,7 @@ impl<'a> Evaluator<'a> {
         let width = if args.len() == 5 { match self.evaluate(&args[4]).as_number() { Some(n) => n as usize, None => return EvalResult::Error(CellError::Value) } } else { 1 };
         if height == 1 && width == 1 {
             match self.grid.get_cell(new_row as u32, new_col as u32) {
-                Some(cell) => match &cell.value {
-                    crate::cell::CellValue::Number(n) => EvalResult::Number(*n),
-                    crate::cell::CellValue::Text(s) => EvalResult::Text(s.clone()),
-                    crate::cell::CellValue::Boolean(b) => EvalResult::Boolean(*b),
-                    crate::cell::CellValue::Error(e) => EvalResult::Error(e.clone()),
-                    crate::cell::CellValue::Empty => EvalResult::Number(0.0),
-                }
+                Some(cell) => self.cell_value_to_result(&cell.value),
                 None => EvalResult::Number(0.0),
             }
         } else {
@@ -3394,13 +3608,7 @@ impl<'a> Evaluator<'a> {
                     let cell_row = (new_row + r as i64) as u32;
                     let cell_col = (new_col + c as i64) as u32;
                     match self.grid.get_cell(cell_row, cell_col) {
-                        Some(cell) => match &cell.value {
-                            crate::cell::CellValue::Number(n) => values.push(EvalResult::Number(*n)),
-                            crate::cell::CellValue::Text(s) => values.push(EvalResult::Text(s.clone())),
-                            crate::cell::CellValue::Boolean(b) => values.push(EvalResult::Boolean(*b)),
-                            crate::cell::CellValue::Error(e) => values.push(EvalResult::Error(e.clone())),
-                            crate::cell::CellValue::Empty => values.push(EvalResult::Number(0.0)),
-                        }
+                        Some(cell) => values.push(self.cell_value_to_result(&cell.value)),
                         None => values.push(EvalResult::Number(0.0)),
                     }
                 }
@@ -4094,6 +4302,7 @@ impl<'a> Evaluator<'a> {
                 EvalResult::Boolean(b) => (2, if *b { 1.0 } else { 0.0 }, String::new()),
                 EvalResult::Error(_) => (3, 0.0, String::new()),
                 EvalResult::Array(_) => (4, 0.0, String::new()),
+                EvalResult::List(_) | EvalResult::Dict(_) => (5, 0.0, String::new()),
             }
         }
         let (ta, na, sa) = sort_key(a);
@@ -4283,6 +4492,356 @@ impl<'a> Evaluator<'a> {
         }
     }
 
+    // ========================================================================
+    // Collection functions (3D cells)
+    // ========================================================================
+
+    /// COLLECT(value) — wraps an array result into a contained List cell.
+    /// If the argument is already a List or Dict, returns as-is.
+    /// If scalar, wraps in a single-element List.
+    fn fn_collect(&self, args: &[Expression]) -> EvalResult {
+        if args.len() != 1 {
+            return EvalResult::Error(CellError::Value);
+        }
+        let val = self.evaluate(&args[0]);
+        match val {
+            EvalResult::Error(_) => val,
+            EvalResult::Array(arr) => EvalResult::List(Self::array_to_list_items(arr, 0)),
+            EvalResult::List(_) => val,
+            EvalResult::Dict(_) => val,
+            // Scalar → single-element list
+            other => EvalResult::List(vec![other]),
+        }
+    }
+
+    /// Recursively converts Array items to List items, enforcing max nesting depth.
+    fn array_to_list_items(items: Vec<EvalResult>, depth: usize) -> Vec<EvalResult> {
+        if depth >= 32 {
+            return vec![EvalResult::Error(CellError::Value)];
+        }
+        items.into_iter().map(|item| {
+            match item {
+                EvalResult::Array(inner) => {
+                    EvalResult::List(Self::array_to_list_items(inner, depth + 1))
+                }
+                other => other,
+            }
+        }).collect()
+    }
+
+    /// DICT("key1", value1, "key2", value2, ...) — creates a Dict cell from
+    /// alternating key-value pairs. Keys must be scalar (text, number, boolean).
+    /// Duplicate keys: last value wins (Python convention).
+    fn fn_dict(&self, args: &[Expression]) -> EvalResult {
+        if args.is_empty() || args.len() % 2 != 0 {
+            return EvalResult::Error(CellError::Value);
+        }
+
+        let mut entries: Vec<(DictKey, EvalResult)> = Vec::with_capacity(args.len() / 2);
+        let mut i = 0;
+        while i < args.len() {
+            let key_result = self.evaluate(&args[i]);
+            let value_result = self.evaluate(&args[i + 1]);
+
+            // Convert key to DictKey — must be scalar
+            let key = match key_result {
+                EvalResult::Text(s) => DictKey::Text(s),
+                EvalResult::Number(n) => DictKey::Number(n),
+                EvalResult::Boolean(b) => DictKey::Boolean(b),
+                EvalResult::Error(e) => return EvalResult::Error(e),
+                _ => return EvalResult::Error(CellError::Value),
+            };
+
+            if let EvalResult::Error(_) = &value_result {
+                return value_result;
+            }
+
+            // Duplicate keys: replace existing (last value wins)
+            if let Some(pos) = entries.iter().position(|(k, _)| *k == key) {
+                entries[pos] = (key, value_result);
+            } else {
+                entries.push((key, value_result));
+            }
+
+            i += 2;
+        }
+
+        EvalResult::Dict(entries)
+    }
+
+    /// KEYS(collection) - returns array of keys
+    /// For Dict: returns array of key strings
+    /// For List: returns array of 0-based indices
+    fn fn_keys(&self, args: &[Expression]) -> EvalResult {
+        if args.len() != 1 {
+            return EvalResult::Error(CellError::Value);
+        }
+        let val = self.evaluate(&args[0]);
+        match val {
+            EvalResult::Error(_) => val,
+            EvalResult::Dict(entries) => {
+                let keys: Vec<EvalResult> = entries
+                    .into_iter()
+                    .map(|(k, _)| match k {
+                        DictKey::Text(s) => EvalResult::Text(s),
+                        DictKey::Number(n) => EvalResult::Number(n),
+                        DictKey::Boolean(b) => EvalResult::Boolean(b),
+                    })
+                    .collect();
+                EvalResult::Array(keys)
+            }
+            EvalResult::List(items) => {
+                let keys: Vec<EvalResult> = (0..items.len())
+                    .map(|i| EvalResult::Number(i as f64))
+                    .collect();
+                EvalResult::Array(keys)
+            }
+            _ => EvalResult::Error(CellError::Value),
+        }
+    }
+
+    /// VALUES(collection) - returns array of values
+    /// For Dict: returns array of values
+    /// For List: returns array of list elements
+    fn fn_values(&self, args: &[Expression]) -> EvalResult {
+        if args.len() != 1 {
+            return EvalResult::Error(CellError::Value);
+        }
+        let val = self.evaluate(&args[0]);
+        match val {
+            EvalResult::Error(_) => val,
+            EvalResult::Dict(entries) => {
+                let values: Vec<EvalResult> = entries.into_iter().map(|(_, v)| v).collect();
+                EvalResult::Array(values)
+            }
+            EvalResult::List(items) => {
+                EvalResult::Array(items)
+            }
+            _ => EvalResult::Error(CellError::Value),
+        }
+    }
+
+    /// CONTAINS(collection, value) - checks if value exists
+    /// For List: checks if value is in the list
+    /// For Dict: checks if key exists in the dict
+    fn fn_contains(&self, args: &[Expression]) -> EvalResult {
+        if args.len() != 2 {
+            return EvalResult::Error(CellError::Value);
+        }
+        let collection = self.evaluate(&args[0]);
+        let search_val = self.evaluate(&args[1]);
+
+        if let EvalResult::Error(_) = &collection {
+            return collection;
+        }
+        if let EvalResult::Error(_) = &search_val {
+            return search_val;
+        }
+
+        match collection {
+            EvalResult::List(items) => {
+                // Check if any element matches the search value
+                for item in &items {
+                    if Self::eval_results_equal(item, &search_val) {
+                        return EvalResult::Boolean(true);
+                    }
+                }
+                EvalResult::Boolean(false)
+            }
+            EvalResult::Dict(entries) => {
+                // Check if key exists in dict
+                let key = match &search_val {
+                    EvalResult::Text(s) => DictKey::Text(s.clone()),
+                    EvalResult::Number(n) => DictKey::Number(*n),
+                    EvalResult::Boolean(b) => DictKey::Boolean(*b),
+                    _ => return EvalResult::Error(CellError::Value),
+                };
+                EvalResult::Boolean(entries.iter().any(|(k, _)| *k == key))
+            }
+            _ => EvalResult::Error(CellError::Value),
+        }
+    }
+
+    /// ISLIST(value) - returns TRUE if value is a list
+    fn fn_islist(&self, args: &[Expression]) -> EvalResult {
+        if args.len() != 1 {
+            return EvalResult::Error(CellError::Value);
+        }
+        let val = self.evaluate(&args[0]);
+        EvalResult::Boolean(matches!(val, EvalResult::List(_)))
+    }
+
+    /// ISDICT(value) - returns TRUE if value is a dict
+    fn fn_isdict(&self, args: &[Expression]) -> EvalResult {
+        if args.len() != 1 {
+            return EvalResult::Error(CellError::Value);
+        }
+        let val = self.evaluate(&args[0]);
+        EvalResult::Boolean(matches!(val, EvalResult::Dict(_)))
+    }
+
+    /// Helper: compare two EvalResults for equality (used by CONTAINS)
+    fn eval_results_equal(a: &EvalResult, b: &EvalResult) -> bool {
+        match (a, b) {
+            (EvalResult::Number(x), EvalResult::Number(y)) => x == y,
+            (EvalResult::Text(x), EvalResult::Text(y)) => x == y,
+            (EvalResult::Boolean(x), EvalResult::Boolean(y)) => x == y,
+            (EvalResult::Number(n), EvalResult::Boolean(b))
+            | (EvalResult::Boolean(b), EvalResult::Number(n)) => {
+                *n == if *b { 1.0 } else { 0.0 }
+            }
+            _ => false,
+        }
+    }
+
+    /// FLATTEN(list) - recursively flatten nested lists into a single-level list
+    fn fn_flatten(&self, args: &[Expression]) -> EvalResult {
+        if args.len() != 1 {
+            return EvalResult::Error(CellError::Value);
+        }
+        let val = self.evaluate(&args[0]);
+        match val {
+            EvalResult::Error(_) => val,
+            EvalResult::List(items) => {
+                let mut flat = Vec::new();
+                Self::flatten_list_recursive(items, &mut flat, 0);
+                EvalResult::List(flat)
+            }
+            EvalResult::Dict(_) => val, // Dict cannot be flattened
+            other => EvalResult::List(vec![other]), // Scalar → single-element list
+        }
+    }
+
+    fn flatten_list_recursive(items: Vec<EvalResult>, out: &mut Vec<EvalResult>, depth: usize) {
+        if depth > 32 {
+            return;
+        }
+        for item in items {
+            match item {
+                EvalResult::List(nested) => {
+                    Self::flatten_list_recursive(nested, out, depth + 1);
+                }
+                other => out.push(other),
+            }
+        }
+    }
+
+    /// TAKE(list, n) - returns first n elements as a new list
+    fn fn_take(&self, args: &[Expression]) -> EvalResult {
+        if args.len() != 2 {
+            return EvalResult::Error(CellError::Value);
+        }
+        let collection = self.evaluate(&args[0]);
+        let n_val = self.evaluate(&args[1]);
+
+        if let EvalResult::Error(_) = &collection { return collection; }
+        if let EvalResult::Error(_) = &n_val { return n_val; }
+
+        let n = match n_val.as_number() {
+            Some(n) => n as usize,
+            None => return EvalResult::Error(CellError::Value),
+        };
+
+        match collection {
+            EvalResult::List(items) => {
+                let taken: Vec<EvalResult> = items.into_iter().take(n).collect();
+                EvalResult::List(taken)
+            }
+            _ => EvalResult::Error(CellError::Value),
+        }
+    }
+
+    /// DROP(list, n) - removes first n elements, returns rest as a new list
+    fn fn_drop(&self, args: &[Expression]) -> EvalResult {
+        if args.len() != 2 {
+            return EvalResult::Error(CellError::Value);
+        }
+        let collection = self.evaluate(&args[0]);
+        let n_val = self.evaluate(&args[1]);
+
+        if let EvalResult::Error(_) = &collection { return collection; }
+        if let EvalResult::Error(_) = &n_val { return n_val; }
+
+        let n = match n_val.as_number() {
+            Some(n) => n as usize,
+            None => return EvalResult::Error(CellError::Value),
+        };
+
+        match collection {
+            EvalResult::List(items) => {
+                let dropped: Vec<EvalResult> = items.into_iter().skip(n).collect();
+                EvalResult::List(dropped)
+            }
+            _ => EvalResult::Error(CellError::Value),
+        }
+    }
+
+    /// APPEND(list, value) - returns a new list with value appended
+    fn fn_append(&self, args: &[Expression]) -> EvalResult {
+        if args.len() != 2 {
+            return EvalResult::Error(CellError::Value);
+        }
+        let collection = self.evaluate(&args[0]);
+        let value = self.evaluate(&args[1]);
+
+        if let EvalResult::Error(_) = &collection { return collection; }
+        if let EvalResult::Error(_) = &value { return value; }
+
+        match collection {
+            EvalResult::List(mut items) => {
+                items.push(value);
+                EvalResult::List(items)
+            }
+            _ => EvalResult::Error(CellError::Value),
+        }
+    }
+
+    /// MERGE(dict1, dict2) - merges two dicts, second wins on key conflict
+    fn fn_merge(&self, args: &[Expression]) -> EvalResult {
+        if args.len() != 2 {
+            return EvalResult::Error(CellError::Value);
+        }
+        let dict1 = self.evaluate(&args[0]);
+        let dict2 = self.evaluate(&args[1]);
+
+        if let EvalResult::Error(_) = &dict1 { return dict1; }
+        if let EvalResult::Error(_) = &dict2 { return dict2; }
+
+        match (dict1, dict2) {
+            (EvalResult::Dict(mut entries1), EvalResult::Dict(entries2)) => {
+                for (key, value) in entries2 {
+                    if let Some(pos) = entries1.iter().position(|(k, _)| *k == key) {
+                        entries1[pos] = (key, value);
+                    } else {
+                        entries1.push((key, value));
+                    }
+                }
+                EvalResult::Dict(entries1)
+            }
+            _ => EvalResult::Error(CellError::Value),
+        }
+    }
+
+    /// HSTACK(list1, list2) - concatenate two lists
+    fn fn_hstack(&self, args: &[Expression]) -> EvalResult {
+        if args.len() != 2 {
+            return EvalResult::Error(CellError::Value);
+        }
+        let list1 = self.evaluate(&args[0]);
+        let list2 = self.evaluate(&args[1]);
+
+        if let EvalResult::Error(_) = &list1 { return list1; }
+        if let EvalResult::Error(_) = &list2 { return list2; }
+
+        match (list1, list2) {
+            (EvalResult::List(mut items1), EvalResult::List(items2)) => {
+                items1.extend(items2);
+                EvalResult::List(items1)
+            }
+            _ => EvalResult::Error(CellError::Value),
+        }
+    }
+
     fn textjoin_collect(&self, expr: &Expression, ignore_empty: bool, parts: &mut Vec<String>) {
         match expr {
             Expression::Range { start, end, .. } => {
@@ -4314,6 +4873,8 @@ impl<'a> Evaluator<'a> {
                                     CellValue::Number(n) => parts.push(format!("{}", n)),
                                     CellValue::Boolean(b) => parts.push(if *b { "TRUE".to_string() } else { "FALSE".to_string() }),
                                     CellValue::Error(e) => parts.push(format!("{:?}", e)),
+                                    CellValue::List(items) => parts.push(format!("[List({})]", items.len())),
+                                    CellValue::Dict(entries) => parts.push(format!("[Dict({})]", entries.len())),
                                 },
                                 None => {
                                     if !ignore_empty { parts.push(String::new()); }
@@ -4334,6 +4895,8 @@ impl<'a> Evaluator<'a> {
                     EvalResult::Number(n) => parts.push(format!("{}", n)),
                     EvalResult::Boolean(b) => parts.push(if b { "TRUE".to_string() } else { "FALSE".to_string() }),
                     EvalResult::Error(_) => {} // skip errors in TEXTJOIN
+                    EvalResult::List(items) => parts.push(format!("[List({})]", items.len())),
+                    EvalResult::Dict(entries) => parts.push(format!("[Dict({})]", entries.len())),
                     EvalResult::Array(arr) => {
                         for val in arr {
                             match val {

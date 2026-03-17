@@ -64,6 +64,37 @@ export async function getCell(row: number, col: number): Promise<CellData | null
   return result;
 }
 
+/** Structured contents of a List or Dict cell. */
+export interface CollectionItem {
+  type: "scalar" | "list" | "dict";
+  display?: string;
+  count?: number;
+  items?: CollectionItem[];
+  entries?: { key: string; value: CollectionItem }[];
+}
+
+export interface CollectionPreviewResult {
+  cellType: string;
+  root?: CollectionItem;
+}
+
+export async function getCellCollection(
+  row: number,
+  col: number,
+): Promise<CollectionPreviewResult> {
+  return invoke<CollectionPreviewResult>("get_cell_collection", { row, col });
+}
+
+/**
+ * Batch-get JSON text representations for collection cells.
+ * Returns parallel array: JSON string for List/Dict cells, empty string for others.
+ */
+export async function getCollectionTexts(
+  cells: [number, number][],
+): Promise<string[]> {
+  return invoke<string[]>("get_collection_texts", { cells });
+}
+
 export async function updateCell(
   row: number,
   col: number,

@@ -444,6 +444,8 @@ fn cell_value_display(val: &CellValue) -> String {
         CellValue::Boolean(b) => if *b { "TRUE".to_string() } else { "FALSE".to_string() },
         CellValue::Error(e) => format!("#{:?}", e).to_uppercase(),
         CellValue::Empty => String::new(),
+        CellValue::List(items) => format!("[List({})]", items.len()),
+        CellValue::Dict(entries) => format!("[Dict({})]", entries.len()),
     }
 }
 

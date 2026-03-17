@@ -920,6 +920,8 @@ fn cell_value_to_string(value: &CellValue) -> String {
         CellValue::Text(s) => s.to_lowercase(),
         CellValue::Boolean(b) => b.to_string(),
         CellValue::Error(e) => format!("{:?}", e),
+        CellValue::List(items) => format!("[List({})]", items.len()),
+        CellValue::Dict(entries) => format!("[Dict({})]", entries.len()),
     }
 }
 

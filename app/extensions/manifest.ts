@@ -22,6 +22,7 @@ import ComputedPropertiesExtension from "./BuiltIn/ComputedProperties";
 import CellBookmarksExtension from "./BuiltIn/CellBookmarks";
 import ZoomSliderExtension from "./BuiltIn/ZoomSlider";
 import HomeTabExtension from "./BuiltIn/HomeTab";
+import CollectionPreviewExtension from "./BuiltIn/CollectionPreview";
 
 // ============================================================================
 // Built-in Extension Manifest
@@ -54,6 +55,8 @@ export const builtInExtensions: ExtensionModule[] = [
   CellBookmarksExtension,
   // Zoom Slider (Excel-style zoom control in status bar)
   ZoomSliderExtension,
+  // Collection Preview (sidebar panel for List/Dict cells)
+  CollectionPreviewExtension,
 ];
 
 /**

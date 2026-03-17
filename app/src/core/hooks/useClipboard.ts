@@ -22,6 +22,7 @@ import {
   hasContentInRange,
   setCellStyle,
   shiftFormulasBatch,
+  getCollectionTexts,
 } from "../lib/tauri-api";
 import type { CellUpdateInput, FormulaShiftInput } from "../lib/tauri-api";
 import { cellEvents } from "../lib/cellEvents";
@@ -41,6 +42,8 @@ export interface ClipboardData {
   isCut: boolean;
   /** Plain text representation for system clipboard */
   text: string;
+  /** Map of "row,col" (relative) to JSON text for collection cells (List/Dict) */
+  collectionTexts?: Map<string, string>;
 }
 
 /**
@@ -78,6 +81,47 @@ let internalClipboard: ClipboardData | null = null;
  */
 export function getInternalClipboard(): ClipboardData | null {
   return internalClipboard;
+}
+
+/**
+ * Detect collection cells (List/Dict) in a cell matrix and fetch their JSON representations.
+ * Returns a Map keyed by "row,col" (relative to the matrix) with JSON text values.
+ */
+async function fetchCollectionTexts(
+  cells: (CellData | null)[][],
+  selection: Selection,
+): Promise<Map<string, string>> {
+  const result = new Map<string, string>();
+  const minRow = Math.min(selection.startRow, selection.endRow);
+  const minCol = Math.min(selection.startCol, selection.endCol);
+
+  // Collect absolute coordinates of collection cells
+  const collectionCoords: { r: number; c: number; absRow: number; absCol: number }[] = [];
+  for (let r = 0; r < cells.length; r++) {
+    for (let c = 0; c < (cells[r]?.length ?? 0); c++) {
+      const cell = cells[r][c];
+      if (cell?.display && (cell.display.startsWith("[List(") || cell.display.startsWith("[Dict("))) {
+        collectionCoords.push({ r, c, absRow: minRow + r, absCol: minCol + c });
+      }
+    }
+  }
+
+  if (collectionCoords.length === 0) return result;
+
+  try {
+    const coords: [number, number][] = collectionCoords.map(({ absRow, absCol }) => [absRow, absCol]);
+    const jsonTexts = await getCollectionTexts(coords);
+    for (let i = 0; i < collectionCoords.length; i++) {
+      const { r, c } = collectionCoords[i];
+      if (jsonTexts[i]) {
+        result.set(`${r},${c}`, jsonTexts[i]);
+      }
+    }
+  } catch (err) {
+    console.warn("[Clipboard] Failed to fetch collection texts:", err);
+  }
+
+  return result;
 }
 
 /**
@@ -122,13 +166,20 @@ export function useClipboard(): UseClipboardReturn {
 
   /**
    * Convert cell matrix to plain text (tab-separated values).
+   * For List/Dict cells, uses JSON representation instead of display text.
    */
-  const cellsToText = useCallback((cells: (CellData | null)[][]): string => {
+  const cellsToText = useCallback((
+    cells: (CellData | null)[][],
+    collectionTexts?: Map<string, string>,
+  ): string => {
     return cells
-      .map((row) =>
+      .map((row, r) =>
         row
-          .map((cell) => {
+          .map((cell, c) => {
             if (!cell) return "";
+            // Use JSON text for collection cells if available
+            const jsonText = collectionTexts?.get(`${r},${c}`);
+            if (jsonText) return jsonText;
             // Use formula if present, otherwise display value
             return cell.formula || cell.display || "";
           })
@@ -150,7 +201,11 @@ export function useClipboard(): UseClipboardReturn {
 
     try {
       const cells = await getCellRange(selection);
-      const text = cellsToText(cells);
+
+      // Detect collection cells and fetch their JSON representations
+      const collectionTexts = await fetchCollectionTexts(cells, selection);
+
+      const text = cellsToText(cells, collectionTexts);
 
       // Store in internal clipboard
       internalClipboard = {
@@ -158,6 +213,7 @@ export function useClipboard(): UseClipboardReturn {
         cells,
         isCut: false,
         text,
+        collectionTexts: collectionTexts.size > 0 ? collectionTexts : undefined,
       };
 
       // Update state for visual feedback (marching ants border)
@@ -191,7 +247,11 @@ export function useClipboard(): UseClipboardReturn {
 
     try {
       const cells = await getCellRange(selection);
-      const text = cellsToText(cells);
+
+      // Detect collection cells and fetch their JSON representations
+      const collectionTexts = await fetchCollectionTexts(cells, selection);
+
+      const text = cellsToText(cells, collectionTexts);
 
       // Store in internal clipboard with cut flag
       internalClipboard = {
@@ -199,6 +259,7 @@ export function useClipboard(): UseClipboardReturn {
         cells,
         isCut: true,
         text,
+        collectionTexts: collectionTexts.size > 0 ? collectionTexts : undefined,
       };
 
       // Remember cut source for clearing after paste

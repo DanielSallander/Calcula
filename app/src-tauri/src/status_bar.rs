@@ -77,6 +77,10 @@ pub fn get_selection_aggregations(
                         count += 1;
                         // Errors do not contribute to numeric aggregations
                     }
+                    CellValue::List(_) | CellValue::Dict(_) => {
+                        count += 1;
+                        // Collections do not contribute to numeric aggregations
+                    }
                 }
             }
         }

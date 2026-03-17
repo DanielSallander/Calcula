@@ -72,6 +72,7 @@ export type TaskPaneContextKey =
   | "formatting"      // Formatting pane requested
   | "properties"      // Generic properties pane
   | "bi"              // BI (Business Intelligence) pane
+  | "collection"      // Cell contains a List or Dict (3D cell)
   | "always";         // Always available
 
 /**

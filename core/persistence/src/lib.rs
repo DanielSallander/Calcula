@@ -11,7 +11,7 @@ pub use error::PersistenceError;
 pub use xlsx_reader::load_xlsx;
 pub use xlsx_writer::save_xlsx;
 
-use engine::cell::{Cell, CellValue};
+use engine::cell::{Cell, CellValue, DictKey};
 use engine::grid::Grid;
 use engine::style::{CellStyle, StyleRegistry};
 use serde::{Deserialize, Serialize};
@@ -172,6 +172,36 @@ pub enum SavedCellValue {
     Text(String),
     Boolean(bool),
     Error(String),
+    List(Vec<SavedCellValue>),
+    /// Dict entries stored as (serialized_key, value) pairs.
+    /// Key encoding: plain string for text keys, "n:<num>" for numbers, "b:<bool>" for booleans.
+    Dict(Vec<(String, SavedCellValue)>),
+}
+
+/// Serialize a DictKey to a tagged string for persistence.
+fn serialize_dict_key(key: &DictKey) -> String {
+    match key {
+        DictKey::Text(s) => s.clone(),
+        DictKey::Number(n) => format!("n:{}", n),
+        DictKey::Boolean(b) => format!("b:{}", b),
+    }
+}
+
+/// Deserialize a tagged string back to a DictKey.
+fn deserialize_dict_key(s: &str) -> DictKey {
+    if let Some(rest) = s.strip_prefix("n:") {
+        if let Ok(n) = rest.parse::<f64>() {
+            return DictKey::Number(n);
+        }
+    }
+    if let Some(rest) = s.strip_prefix("b:") {
+        if rest == "true" {
+            return DictKey::Boolean(true);
+        } else if rest == "false" {
+            return DictKey::Boolean(false);
+        }
+    }
+    DictKey::Text(s.to_string())
 }
 
 impl SavedCellValue {
@@ -182,6 +212,16 @@ impl SavedCellValue {
             CellValue::Text(s) => SavedCellValue::Text(s.clone()),
             CellValue::Boolean(b) => SavedCellValue::Boolean(*b),
             CellValue::Error(e) => SavedCellValue::Error(format!("{:?}", e)),
+            CellValue::List(items) => {
+                SavedCellValue::List(items.iter().map(SavedCellValue::from_value).collect())
+            }
+            CellValue::Dict(entries) => {
+                SavedCellValue::Dict(
+                    entries.iter().map(|(k, v)| {
+                        (serialize_dict_key(k), SavedCellValue::from_value(v))
+                    }).collect()
+                )
+            }
         }
     }
 
@@ -192,6 +232,16 @@ impl SavedCellValue {
             SavedCellValue::Text(s) => CellValue::Text(s.clone()),
             SavedCellValue::Boolean(b) => CellValue::Boolean(*b),
             SavedCellValue::Error(_) => CellValue::Error(engine::cell::CellError::Value),
+            SavedCellValue::List(items) => {
+                CellValue::List(Box::new(items.iter().map(|i| i.to_value()).collect()))
+            }
+            SavedCellValue::Dict(entries) => {
+                CellValue::Dict(Box::new(
+                    entries.iter().map(|(k, v)| {
+                        (deserialize_dict_key(k), v.to_value())
+                    }).collect()
+                ))
+            }
         }
     }
 }

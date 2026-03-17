@@ -32,6 +32,8 @@ pub enum Token {
     RParen,
     LBracket,
     RBracket,
+    LBrace,
+    RBrace,
     Comma,
     Colon,
     /// Sheet reference separator: !
@@ -75,6 +77,8 @@ impl std::fmt::Display for Token {
             Token::At => write!(f, "@"),
             Token::LBracket => write!(f, "["),
             Token::RBracket => write!(f, "]"),
+            Token::LBrace => write!(f, "{{"),
+            Token::RBrace => write!(f, "}}"),
             Token::EOF => write!(f, "EOF"),
             Token::Illegal(c) => write!(f, "ILLEGAL({})", c),
         }

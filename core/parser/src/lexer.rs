@@ -44,6 +44,8 @@ impl<'a> Lexer<'a> {
             Some('@') => Token::At,
             Some('[') => Token::LBracket,
             Some(']') => Token::RBracket,
+            Some('{') => Token::LBrace,
+            Some('}') => Token::RBrace,
 
             // Handle = and potentially other operators starting with =
             Some('=') => Token::Equals,

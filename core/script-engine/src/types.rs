@@ -77,6 +77,8 @@ pub fn cell_value_to_string(value: &CellValue) -> String {
         CellValue::Text(s) => s.clone(),
         CellValue::Boolean(b) => if *b { "TRUE".to_string() } else { "FALSE".to_string() },
         CellValue::Error(e) => format!("{:?}", e),
+        CellValue::List(items) => format!("[List({})]", items.len()),
+        CellValue::Dict(entries) => format!("[Dict({})]", entries.len()),
     }
 }
 

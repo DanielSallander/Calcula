@@ -65,6 +65,22 @@ pub enum Expression {
         table_name: String,
         specifier: TableSpecifier,
     },
+
+    /// Subscript access into a List or Dict: expr[index]
+    IndexAccess {
+        target: Box<Expression>,
+        index: Box<Expression>,
+    },
+
+    /// List literal: ={1, 2, 3}
+    ListLiteral {
+        elements: Vec<Expression>,
+    },
+
+    /// Dict literal: ={"name": "Alice", "age": 30}
+    DictLiteral {
+        entries: Vec<(Expression, Expression)>,
+    },
 }
 
 /// Specifier for structured table references (mirrors parser::ast::TableSpecifier).
@@ -270,6 +286,21 @@ pub enum BuiltinFunction {
     Sort,
     Unique,
     Sequence,
+
+    // Collection functions (3D cells)
+    Collect,
+    DictFn,
+    Keys,
+    Values,
+    Contains,
+    IsList,
+    IsDict,
+    Flatten,
+    Take,
+    Drop,
+    Append,
+    Merge,
+    HStack,
 
     /// Fallback for unrecognized function names (future extensions/plugins).
     Custom(String),
@@ -496,6 +527,27 @@ fn extract_recursive(expr: &Expression, deps: &mut HashSet<CellCoord>, bounds: G
         // TableRef should be resolved before dependency extraction.
         // If still present, skip (will produce #NAME? during evaluation).
         Expression::TableRef { .. } => {}
+
+        // IndexAccess: recurse into both target and index expressions
+        Expression::IndexAccess { target, index } => {
+            extract_recursive(target, deps, bounds);
+            extract_recursive(index, deps, bounds);
+        }
+
+        // ListLiteral: recurse into all elements
+        Expression::ListLiteral { elements } => {
+            for elem in elements {
+                extract_recursive(elem, deps, bounds);
+            }
+        }
+
+        // DictLiteral: recurse into all keys and values
+        Expression::DictLiteral { entries } => {
+            for (key, value) in entries {
+                extract_recursive(key, deps, bounds);
+                extract_recursive(value, deps, bounds);
+            }
+        }
     }
 }
 
@@ -633,6 +685,27 @@ fn extract_recursive_with_sheets(
 
         // TableRef should be resolved before dependency extraction.
         Expression::TableRef { .. } => {}
+
+        // IndexAccess: recurse into both target and index expressions
+        Expression::IndexAccess { target, index } => {
+            extract_recursive_with_sheets(target, deps, bounds);
+            extract_recursive_with_sheets(index, deps, bounds);
+        }
+
+        // ListLiteral: recurse into all elements
+        Expression::ListLiteral { elements } => {
+            for elem in elements {
+                extract_recursive_with_sheets(elem, deps, bounds);
+            }
+        }
+
+        // DictLiteral: recurse into all keys and values
+        Expression::DictLiteral { entries } => {
+            for (key, value) in entries {
+                extract_recursive_with_sheets(key, deps, bounds);
+                extract_recursive_with_sheets(value, deps, bounds);
+            }
+        }
     }
 }
 

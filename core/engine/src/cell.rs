@@ -10,6 +10,15 @@
 use serde::{Deserialize, Serialize};
 use crate::dependency_extractor::Expression;
 
+/// Represents valid key types for Dict cells.
+/// Follows Python conventions: strings, numbers, and booleans are hashable.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum DictKey {
+    Text(String),
+    Number(f64),
+    Boolean(bool),
+}
+
 /// Represents the possible errors a cell can hold (e.g., #DIV/0!)
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum CellError {
@@ -24,6 +33,10 @@ pub enum CellError {
 }
 
 /// Represents the calculated result or raw data within a cell.
+///
+/// List and Dict variants use Box<Vec<...>> to keep the enum small (~24 bytes).
+/// Normal scalar cells pay zero cost for the existence of these variants —
+/// the heap allocation only happens when a List or Dict is actually created.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum CellValue {
     Empty,
@@ -31,6 +44,12 @@ pub enum CellValue {
     Text(String),
     Boolean(bool),
     Error(CellError),
+    /// An ordered collection of values (Python-style list).
+    /// Created via COLLECT() or curly-brace literal syntax.
+    List(Box<Vec<CellValue>>),
+    /// A key-value collection (Python-style dict).
+    /// Uses Vec to preserve insertion order. Created via DICT() function.
+    Dict(Box<Vec<(DictKey, CellValue)>>),
 }
 
 /// The atomic unit of the spreadsheet.
@@ -155,6 +174,8 @@ impl Cell {
                 CellError::Conflict => "#CONFLICT".to_string(),
                 other => format!("#{:?}", other).to_uppercase(),
             },
+            CellValue::List(items) => format!("[List({})]", items.len()),
+            CellValue::Dict(entries) => format!("[Dict({})]", entries.len()),
         }
     }
 }

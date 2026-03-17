@@ -103,6 +103,26 @@ pub enum Expression {
         table_name: String,
         specifier: TableSpecifier,
     },
+
+    /// Subscript access into a List or Dict cell: expr[index]
+    /// Supports chaining: A1[0]["name"] parses as nested IndexAccess nodes.
+    /// Only allowed after CellRef, FunctionCall, NamedRef, or another IndexAccess.
+    IndexAccess {
+        target: Box<Expression>,
+        index: Box<Expression>,
+    },
+
+    /// List literal: ={1, 2, 3}
+    /// Creates an EvalResult::List from comma-separated expressions.
+    ListLiteral {
+        elements: Vec<Expression>,
+    },
+
+    /// Dict literal: ={"name": "Alice", "age": 30}
+    /// Creates an EvalResult::Dict from colon-separated key:value pairs.
+    DictLiteral {
+        entries: Vec<(Expression, Expression)>,
+    },
 }
 
 /// Specifier for structured table references.
@@ -320,6 +340,21 @@ pub enum BuiltinFunction {
     Unique,
     Sequence,
 
+    // Collection functions (3D cells)
+    Collect,
+    DictFn,
+    Keys,
+    Values,
+    Contains,
+    IsList,
+    IsDict,
+    Flatten,
+    Take,
+    Drop,
+    Append,
+    Merge,
+    HStack,
+
     /// Fallback for unrecognized function names (future extensions/plugins).
     Custom(String),
 }
@@ -514,6 +549,21 @@ impl BuiltinFunction {
             "SORT" => BuiltinFunction::Sort,
             "UNIQUE" => BuiltinFunction::Unique,
             "SEQUENCE" => BuiltinFunction::Sequence,
+
+            // Collection functions (3D cells)
+            "COLLECT" => BuiltinFunction::Collect,
+            "DICT" => BuiltinFunction::DictFn,
+            "KEYS" => BuiltinFunction::Keys,
+            "VALUES" => BuiltinFunction::Values,
+            "CONTAINS" => BuiltinFunction::Contains,
+            "ISLIST" => BuiltinFunction::IsList,
+            "ISDICT" => BuiltinFunction::IsDict,
+            "FLATTEN" => BuiltinFunction::Flatten,
+            "TAKE" => BuiltinFunction::Take,
+            "DROP" => BuiltinFunction::Drop,
+            "APPEND" => BuiltinFunction::Append,
+            "MERGE" => BuiltinFunction::Merge,
+            "HSTACK" => BuiltinFunction::HStack,
 
             _ => BuiltinFunction::Custom(name.to_uppercase()),
         }

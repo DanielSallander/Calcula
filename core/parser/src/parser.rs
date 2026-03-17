@@ -237,6 +237,10 @@ impl<'a> Parser<'a> {
     fn parse_power(&mut self) -> ParseResult<Expression> {
         let left = self.parse_primary()?;
 
+        // Handle postfix subscript access: expr[index]
+        // Only valid after CellRef, FunctionCall, NamedRef, IndexAccess
+        let left = self.parse_index_access_chain(left)?;
+
         if self.current_token == Token::Caret {
             self.advance();
             let right = self.parse_unary()?;
@@ -249,6 +253,38 @@ impl<'a> Parser<'a> {
         }
 
         Ok(left)
+    }
+
+    /// Parses zero or more trailing [index] subscript accesses.
+    /// Only applies to expressions where subscript access makes sense
+    /// (CellRef, FunctionCall, NamedRef, IndexAccess).
+    /// This avoids conflicts with TableRef which handles its own [ ] syntax.
+    fn parse_index_access_chain(&mut self, expr: Expression) -> ParseResult<Expression> {
+        let mut result = expr;
+        loop {
+            // Only allow [index] after expression types that can hold collections
+            if self.current_token != Token::LBracket {
+                break;
+            }
+            match &result {
+                Expression::CellRef { .. }
+                | Expression::FunctionCall { .. }
+                | Expression::NamedRef { .. }
+                | Expression::IndexAccess { .. }
+                | Expression::ListLiteral { .. }
+                | Expression::DictLiteral { .. } => {
+                    self.advance(); // consume '['
+                    let index = self.parse_expression()?;
+                    self.expect(Token::RBracket)?;
+                    result = Expression::IndexAccess {
+                        target: Box::new(result),
+                        index: Box::new(index),
+                    };
+                }
+                _ => break,
+            }
+        }
+        Ok(result)
     }
 
     /// Parses primary expressions (literals, cell refs, function calls, parentheses).
@@ -419,6 +455,57 @@ impl<'a> Parser<'a> {
                 let expr = self.parse_expression()?;
                 self.expect(Token::RParen)?;
                 Ok(expr)
+            }
+
+            // Curly-brace literal: list {1, 2, 3} or dict {"a": 1, "b": 2}
+            Token::LBrace => {
+                self.advance();
+
+                // Empty braces → empty list
+                if self.current_token == Token::RBrace {
+                    self.advance();
+                    return Ok(Expression::ListLiteral { elements: vec![] });
+                }
+
+                // Parse first element
+                let first = self.parse_expression()?;
+
+                // If colon follows → dict mode
+                if self.current_token == Token::Colon {
+                    self.advance();
+                    let first_value = self.parse_expression()?;
+                    let mut entries = vec![(first, first_value)];
+
+                    while self.current_token == Token::Comma {
+                        self.advance();
+                        // Allow trailing comma before }
+                        if self.current_token == Token::RBrace {
+                            break;
+                        }
+                        let key = self.parse_expression()?;
+                        self.expect(Token::Colon)?;
+                        let value = self.parse_expression()?;
+                        entries.push((key, value));
+                    }
+
+                    self.expect(Token::RBrace)?;
+                    Ok(Expression::DictLiteral { entries })
+                } else {
+                    // List mode
+                    let mut elements = vec![first];
+
+                    while self.current_token == Token::Comma {
+                        self.advance();
+                        // Allow trailing comma before }
+                        if self.current_token == Token::RBrace {
+                            break;
+                        }
+                        elements.push(self.parse_expression()?);
+                    }
+
+                    self.expect(Token::RBrace)?;
+                    Ok(Expression::ListLiteral { elements })
+                }
             }
 
             // Error cases

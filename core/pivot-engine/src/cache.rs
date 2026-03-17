@@ -53,6 +53,8 @@ impl From<&CellValue> for CacheValue {
             CellValue::Text(s) => CacheValue::Text(s.clone()),
             CellValue::Boolean(b) => CacheValue::Boolean(*b),
             CellValue::Error(e) => CacheValue::Error(format!("{:?}", e)),
+            CellValue::List(items) => CacheValue::Text(format!("[List({})]", items.len())),
+            CellValue::Dict(entries) => CacheValue::Text(format!("[Dict({})]", entries.len())),
         }
     }
 }

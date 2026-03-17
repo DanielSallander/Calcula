@@ -163,6 +163,65 @@ fn find_next_recursive(expr: &Expression, path: &mut Vec<usize>) -> Option<NextN
             cell_ref_info: None,
         }),
 
+        // IndexAccess: recurse into target first, then index
+        Expression::IndexAccess { target, index } => {
+            path.push(0);
+            if let Some(result) = find_next_recursive(target, path) {
+                return Some(result);
+            }
+            path.pop();
+
+            path.push(1);
+            if let Some(result) = find_next_recursive(index, path) {
+                return Some(result);
+            }
+            path.pop();
+
+            Some(NextNode {
+                path: path.clone(),
+                is_cell_ref: false,
+                cell_ref_info: None,
+            })
+        }
+
+        // ListLiteral: recurse into all elements
+        Expression::ListLiteral { elements } => {
+            for (i, elem) in elements.iter().enumerate() {
+                path.push(i);
+                if let Some(result) = find_next_recursive(elem, path) {
+                    return Some(result);
+                }
+                path.pop();
+            }
+            Some(NextNode {
+                path: path.clone(),
+                is_cell_ref: false,
+                cell_ref_info: None,
+            })
+        }
+
+        // DictLiteral: recurse into all keys and values
+        Expression::DictLiteral { entries } => {
+            for (i, (key, value)) in entries.iter().enumerate() {
+                path.push(i * 2);
+                if let Some(result) = find_next_recursive(key, path) {
+                    return Some(result);
+                }
+                path.pop();
+
+                path.push(i * 2 + 1);
+                if let Some(result) = find_next_recursive(value, path) {
+                    return Some(result);
+                }
+                path.pop();
+            }
+            Some(NextNode {
+                path: path.clone(),
+                is_cell_ref: false,
+                cell_ref_info: None,
+            })
+        }
+
         // Function calls: special handling for IF short-circuit
         Expression::FunctionCall { func, args } => {
             if matches!(func, BuiltinFunction::If) && args.len() >= 2 {
@@ -231,6 +290,9 @@ fn get_node_mut<'a>(ast: &'a mut Expression, path: &[usize]) -> &'a mut Expressi
             Expression::Range { start, end, .. } => {
                 if idx == 0 { start.as_mut() } else { end.as_mut() }
             }
+            Expression::IndexAccess { target, index } => {
+                if idx == 0 { target.as_mut() } else { index.as_mut() }
+            }
             _ => current,
         };
     }
@@ -249,6 +311,9 @@ fn get_node<'a>(ast: &'a Expression, path: &[usize]) -> &'a Expression {
             Expression::FunctionCall { args, .. } => &args[idx],
             Expression::Range { start, end, .. } => {
                 if idx == 0 { start.as_ref() } else { end.as_ref() }
+            }
+            Expression::IndexAccess { target, index } => {
+                if idx == 0 { target.as_ref() } else { index.as_ref() }
             }
             _ => current,
         };
@@ -399,6 +464,47 @@ fn build_display_recursive(
             let mut child_path = current_path.to_vec();
             child_path.push(0);
             build_display_recursive(reference, target_path, &child_path, output, underline);
+        }
+
+        Expression::IndexAccess { target, index } => {
+            let mut child_path = current_path.to_vec();
+            child_path.push(0);
+            build_display_recursive(target, target_path, &child_path, output, underline);
+            output.push('[');
+            let mut idx_path = current_path.to_vec();
+            idx_path.push(1);
+            build_display_recursive(index, target_path, &idx_path, output, underline);
+            output.push(']');
+        }
+
+        Expression::ListLiteral { elements } => {
+            output.push('{');
+            for (i, elem) in elements.iter().enumerate() {
+                if i > 0 {
+                    output.push_str(", ");
+                }
+                let mut child_path = current_path.to_vec();
+                child_path.push(i);
+                build_display_recursive(elem, target_path, &child_path, output, underline);
+            }
+            output.push('}');
+        }
+
+        Expression::DictLiteral { entries } => {
+            output.push('{');
+            for (i, (key, value)) in entries.iter().enumerate() {
+                if i > 0 {
+                    output.push_str(", ");
+                }
+                let mut key_path = current_path.to_vec();
+                key_path.push(i * 2);
+                build_display_recursive(key, target_path, &key_path, output, underline);
+                output.push_str(": ");
+                let mut val_path = current_path.to_vec();
+                val_path.push(i * 2 + 1);
+                build_display_recursive(value, target_path, &val_path, output, underline);
+            }
+            output.push('}');
         }
     }
 
@@ -600,6 +706,19 @@ fn builtin_fn_name(func: &BuiltinFunction) -> String {
         BuiltinFunction::Sort => "SORT".to_string(),
         BuiltinFunction::Unique => "UNIQUE".to_string(),
         BuiltinFunction::Sequence => "SEQUENCE".to_string(),
+        BuiltinFunction::Collect => "COLLECT".to_string(),
+        BuiltinFunction::DictFn => "DICT".to_string(),
+        BuiltinFunction::Keys => "KEYS".to_string(),
+        BuiltinFunction::Values => "VALUES".to_string(),
+        BuiltinFunction::Contains => "CONTAINS".to_string(),
+        BuiltinFunction::IsList => "ISLIST".to_string(),
+        BuiltinFunction::IsDict => "ISDICT".to_string(),
+        BuiltinFunction::Flatten => "FLATTEN".to_string(),
+        BuiltinFunction::Take => "TAKE".to_string(),
+        BuiltinFunction::Drop => "DROP".to_string(),
+        BuiltinFunction::Append => "APPEND".to_string(),
+        BuiltinFunction::Merge => "MERGE".to_string(),
+        BuiltinFunction::HStack => "HSTACK".to_string(),
         BuiltinFunction::Custom(name) => name.clone(),
     }
 }
@@ -642,6 +761,12 @@ fn eval_result_to_value(result: &engine::EvalResult) -> Value {
             } else {
                 Value::Number(0.0)
             }
+        }
+        engine::EvalResult::List(items) => {
+            Value::String(format!("[List({})]", items.len()))
+        }
+        engine::EvalResult::Dict(entries) => {
+            Value::String(format!("[Dict({})]", entries.len()))
         }
     }
 }

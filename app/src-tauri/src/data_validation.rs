@@ -524,6 +524,7 @@ pub fn resolve_list_source(
                             CellValue::Boolean(b) => if *b { "TRUE".to_string() } else { "FALSE".to_string() },
                             CellValue::Empty => continue,
                             CellValue::Error(_) => continue,
+                            CellValue::List(_) | CellValue::Dict(_) => continue,
                         };
                         if !text.is_empty() {
                             values.push(text);

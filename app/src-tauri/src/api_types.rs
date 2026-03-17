@@ -33,6 +33,41 @@ fn default_span() -> u32 {
     1
 }
 
+/// Represents a single item in a collection preview (List or Dict).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[serde(tag = "type")]
+pub enum CollectionItem {
+    /// A scalar value with display text
+    #[serde(rename = "scalar")]
+    Scalar { display: String },
+    /// A nested list
+    #[serde(rename = "list")]
+    List { count: usize, items: Vec<CollectionItem> },
+    /// A nested dict
+    #[serde(rename = "dict")]
+    Dict { count: usize, entries: Vec<CollectionEntry> },
+}
+
+/// A key-value entry in a dict preview.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CollectionEntry {
+    pub key: String,
+    pub value: CollectionItem,
+}
+
+/// Result of get_cell_collection: the structured contents of a List or Dict cell.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CollectionPreviewResult {
+    /// "list", "dict", or "none" if the cell is not a collection
+    pub cell_type: String,
+    /// Root collection item (only present for list/dict cells)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub root: Option<CollectionItem>,
+}
+
 /// Input for batch cell updates.
 /// Used by update_cells_batch for efficient bulk operations.
 #[derive(Debug, Clone, Serialize, Deserialize)]

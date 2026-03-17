@@ -231,6 +231,8 @@ impl Grid {
             CellValue::Text(s) => s.clone(),
             CellValue::Boolean(b) => if *b { "TRUE" } else { "FALSE" }.to_string(),
             CellValue::Error(e) => format!("#{:?}", e).to_uppercase(),
+            CellValue::List(items) => format!("[List({})]", items.len()),
+            CellValue::Dict(entries) => format!("[Dict({})]", entries.len()),
         }
     }
 

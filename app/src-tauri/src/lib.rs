@@ -344,6 +344,14 @@ pub fn format_cell_value_with_color(value: &CellValue, style: &CellStyle) -> Cel
             text: format!("#{:?}", e).to_uppercase(),
             color: None,
         },
+        CellValue::List(items) => CellDisplayResult {
+            text: format!("[List({})]", items.len()),
+            color: None,
+        },
+        CellValue::Dict(entries) => CellDisplayResult {
+            text: format!("[Dict({})]", entries.len()),
+            color: None,
+        },
     }
 }
 
@@ -354,6 +362,8 @@ pub fn format_cell_value_simple(value: &CellValue) -> String {
         CellValue::Text(s) => s.clone(),
         CellValue::Boolean(b) => if *b { "TRUE" } else { "FALSE" }.to_string(),
         CellValue::Error(e) => format!("#{:?}", e).to_uppercase(),
+        CellValue::List(items) => format!("[List({})]", items.len()),
+        CellValue::Dict(entries) => format!("[Dict({})]", entries.len()),
     }
 }
 
@@ -588,6 +598,21 @@ fn convert_builtin_function(func: &ParserBuiltinFn) -> EngineBuiltinFn {
         ParserBuiltinFn::Unique => EngineBuiltinFn::Unique,
         ParserBuiltinFn::Sequence => EngineBuiltinFn::Sequence,
 
+        // Collection functions (3D cells)
+        ParserBuiltinFn::Collect => EngineBuiltinFn::Collect,
+        ParserBuiltinFn::DictFn => EngineBuiltinFn::DictFn,
+        ParserBuiltinFn::Keys => EngineBuiltinFn::Keys,
+        ParserBuiltinFn::Values => EngineBuiltinFn::Values,
+        ParserBuiltinFn::Contains => EngineBuiltinFn::Contains,
+        ParserBuiltinFn::IsList => EngineBuiltinFn::IsList,
+        ParserBuiltinFn::IsDict => EngineBuiltinFn::IsDict,
+        ParserBuiltinFn::Flatten => EngineBuiltinFn::Flatten,
+        ParserBuiltinFn::Take => EngineBuiltinFn::Take,
+        ParserBuiltinFn::Drop => EngineBuiltinFn::Drop,
+        ParserBuiltinFn::Append => EngineBuiltinFn::Append,
+        ParserBuiltinFn::Merge => EngineBuiltinFn::Merge,
+        ParserBuiltinFn::HStack => EngineBuiltinFn::HStack,
+
         ParserBuiltinFn::Custom(name) => EngineBuiltinFn::Custom(name.clone()),
     }
 }
@@ -708,6 +733,16 @@ pub fn convert_expr(expr: &ParserExpr) -> EngineExpr {
                 args: vec![],
             }
         }
+        ParserExpr::IndexAccess { target, index } => EngineExpr::IndexAccess {
+            target: Box::new(convert_expr(target)),
+            index: Box::new(convert_expr(index)),
+        },
+        ParserExpr::ListLiteral { elements } => EngineExpr::ListLiteral {
+            elements: elements.iter().map(|e| convert_expr(e)).collect(),
+        },
+        ParserExpr::DictLiteral { entries } => EngineExpr::DictLiteral {
+            entries: entries.iter().map(|(k, v)| (convert_expr(k), convert_expr(v))).collect(),
+        },
     }
 }
 
@@ -858,6 +893,24 @@ fn extract_references_recursive(expr: &ParserExpr, grid: &Grid, refs: &mut Extra
         // TableRef nodes should be resolved before reference extraction.
         // If still present, skip (will produce #NAME? during evaluation).
         ParserExpr::TableRef { .. } => {}
+        // IndexAccess: recurse into both target and index
+        ParserExpr::IndexAccess { target, index } => {
+            extract_references_recursive(target, grid, refs);
+            extract_references_recursive(index, grid, refs);
+        }
+        // ListLiteral: recurse into all elements
+        ParserExpr::ListLiteral { elements } => {
+            for elem in elements {
+                extract_references_recursive(elem, grid, refs);
+            }
+        }
+        // DictLiteral: recurse into all keys and values
+        ParserExpr::DictLiteral { entries } => {
+            for (key, value) in entries {
+                extract_references_recursive(key, grid, refs);
+                extract_references_recursive(value, grid, refs);
+            }
+        }
     }
 }
 
@@ -967,6 +1020,19 @@ pub fn resolve_names_in_ast(
         },
         // TableRef is resolved separately by resolve_table_refs_in_ast — pass through
         ParserExpr::TableRef { .. } => ast.clone(),
+        ParserExpr::IndexAccess { target, index } => ParserExpr::IndexAccess {
+            target: Box::new(resolve_names_in_ast(target, named_ranges, current_sheet_index, visited)),
+            index: Box::new(resolve_names_in_ast(index, named_ranges, current_sheet_index, visited)),
+        },
+        ParserExpr::ListLiteral { elements } => ParserExpr::ListLiteral {
+            elements: elements.iter().map(|e| resolve_names_in_ast(e, named_ranges, current_sheet_index, visited)).collect(),
+        },
+        ParserExpr::DictLiteral { entries } => ParserExpr::DictLiteral {
+            entries: entries.iter().map(|(k, v)| (
+                resolve_names_in_ast(k, named_ranges, current_sheet_index, visited),
+                resolve_names_in_ast(v, named_ranges, current_sheet_index, visited),
+            )).collect(),
+        },
     }
 }
 
@@ -986,6 +1052,11 @@ pub fn ast_has_named_refs(ast: &ParserExpr) -> bool {
             ast_has_named_refs(start) || ast_has_named_refs(end)
         }
         ParserExpr::Sheet3DRef { reference, .. } => ast_has_named_refs(reference),
+        ParserExpr::IndexAccess { target, index } => {
+            ast_has_named_refs(target) || ast_has_named_refs(index)
+        }
+        ParserExpr::ListLiteral { elements } => elements.iter().any(ast_has_named_refs),
+        ParserExpr::DictLiteral { entries } => entries.iter().any(|(k, v)| ast_has_named_refs(k) || ast_has_named_refs(v)),
     }
 }
 
@@ -996,6 +1067,9 @@ pub fn ast_has_table_refs(ast: &ParserExpr) -> bool {
         ParserExpr::Literal(_) | ParserExpr::CellRef { .. }
         | ParserExpr::ColumnRef { .. } | ParserExpr::RowRef { .. }
         | ParserExpr::NamedRef { .. } => false,
+        ParserExpr::IndexAccess { target, index } => {
+            ast_has_table_refs(target) || ast_has_table_refs(index)
+        }
         ParserExpr::BinaryOp { left, right, .. } => {
             ast_has_table_refs(left) || ast_has_table_refs(right)
         }
@@ -1005,6 +1079,8 @@ pub fn ast_has_table_refs(ast: &ParserExpr) -> bool {
             ast_has_table_refs(start) || ast_has_table_refs(end)
         }
         ParserExpr::Sheet3DRef { reference, .. } => ast_has_table_refs(reference),
+        ParserExpr::ListLiteral { elements } => elements.iter().any(ast_has_table_refs),
+        ParserExpr::DictLiteral { entries } => entries.iter().any(|(k, v)| ast_has_table_refs(k) || ast_has_table_refs(v)),
     }
 }
 
@@ -1065,6 +1141,19 @@ pub fn resolve_table_refs_in_ast(
             start_sheet: start_sheet.clone(),
             end_sheet: end_sheet.clone(),
             reference: Box::new(resolve_table_refs_in_ast(reference, ctx)),
+        },
+        ParserExpr::IndexAccess { target, index } => ParserExpr::IndexAccess {
+            target: Box::new(resolve_table_refs_in_ast(target, ctx)),
+            index: Box::new(resolve_table_refs_in_ast(index, ctx)),
+        },
+        ParserExpr::ListLiteral { elements } => ParserExpr::ListLiteral {
+            elements: elements.iter().map(|e| resolve_table_refs_in_ast(e, ctx)).collect(),
+        },
+        ParserExpr::DictLiteral { entries } => ParserExpr::DictLiteral {
+            entries: entries.iter().map(|(k, v)| (
+                resolve_table_refs_in_ast(k, ctx),
+                resolve_table_refs_in_ast(v, ctx),
+            )).collect(),
         },
     }
 }
@@ -1485,6 +1574,19 @@ pub fn expression_to_formula(expr: &ParserExpr) -> String {
                 format!("{}[{}]", table_name, spec_str)
             }
         }
+        ParserExpr::IndexAccess { target, index } => {
+            format!("{}[{}]", expression_to_formula(target), expression_to_formula(index))
+        }
+        ParserExpr::ListLiteral { elements } => {
+            let inner: Vec<String> = elements.iter().map(|e| expression_to_formula(e)).collect();
+            format!("{{{}}}", inner.join(", "))
+        }
+        ParserExpr::DictLiteral { entries } => {
+            let inner: Vec<String> = entries.iter().map(|(k, v)| {
+                format!("{}: {}", expression_to_formula(k), expression_to_formula(v))
+            }).collect();
+            format!("{{{}}}", inner.join(", "))
+        }
     }
 }
 
@@ -1664,6 +1766,19 @@ fn builtin_function_to_name(func: &ParserBuiltinFn) -> String {
         ParserBuiltinFn::Sort => "SORT".to_string(),
         ParserBuiltinFn::Unique => "UNIQUE".to_string(),
         ParserBuiltinFn::Sequence => "SEQUENCE".to_string(),
+        ParserBuiltinFn::Collect => "COLLECT".to_string(),
+        ParserBuiltinFn::DictFn => "DICT".to_string(),
+        ParserBuiltinFn::Keys => "KEYS".to_string(),
+        ParserBuiltinFn::Values => "VALUES".to_string(),
+        ParserBuiltinFn::Contains => "CONTAINS".to_string(),
+        ParserBuiltinFn::IsList => "ISLIST".to_string(),
+        ParserBuiltinFn::IsDict => "ISDICT".to_string(),
+        ParserBuiltinFn::Flatten => "FLATTEN".to_string(),
+        ParserBuiltinFn::Take => "TAKE".to_string(),
+        ParserBuiltinFn::Drop => "DROP".to_string(),
+        ParserBuiltinFn::Append => "APPEND".to_string(),
+        ParserBuiltinFn::Merge => "MERGE".to_string(),
+        ParserBuiltinFn::HStack => "HSTACK".to_string(),
         ParserBuiltinFn::Custom(name) => name.clone(),
     }
 }
@@ -2431,6 +2546,8 @@ pub fn run() {
             // Grid commands
             commands::get_viewport_cells,
             commands::get_cell,
+            commands::get_cell_collection,
+            commands::get_collection_texts,
             commands::update_cell,
             commands::update_cells_batch,
             commands::clear_cell,

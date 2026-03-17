@@ -15,7 +15,7 @@ pub mod style;
 pub mod undo;
 
 // Re-export commonly used types at the crate root
-pub use cell::{Cell, CellError, CellValue};
+pub use cell::{Cell, CellError, CellValue, DictKey};
 pub use coord::{a1_to_coord, col_to_index, coord_to_a1, index_to_col, CellCoord};
 pub use custom_format::{FormatColor, FormatResult, format_color_to_css};
 pub use dependency_extractor::{extract_dependencies, BinaryOperator, BuiltinFunction, Expression, TableSpecifier, UnaryOperator, Value};

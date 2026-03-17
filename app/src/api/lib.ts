@@ -17,6 +17,8 @@ export {
   // Cell operations
   getViewportCells,
   getCell,
+  getCellCollection,
+  getCollectionTexts,
   updateCell,
   updateCellsBatch,
   clearCell,
@@ -179,6 +181,8 @@ export {
 
 // Type exports from tauri-api
 export type {
+  CollectionItem,
+  CollectionPreviewResult,
   ArrowDirection,
   SheetInfo,
   SheetsResult,

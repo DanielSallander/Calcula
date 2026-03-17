@@ -106,6 +106,8 @@ fn get_header_text(grid: &Grid, row: u32, col: u32) -> String {
             }
             CellValue::Empty => String::new(),
             CellValue::Error(_) => String::new(),
+            CellValue::List(items) => format!("[List({})]", items.len()),
+            CellValue::Dict(entries) => format!("[Dict({})]", entries.len()),
         },
         None => String::new(),
     }
