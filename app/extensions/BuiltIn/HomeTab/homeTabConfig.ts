@@ -81,6 +81,9 @@ export const ALL_ITEMS: HomeTabItem[] = [
   { id: "find", label: "Find & Replace", shortLabel: "Find", tooltip: "Find & Replace (Ctrl+H)", type: "button", icon: "\uD83D\uDD0D", category: "Editing" },
   { id: "clearContents", label: "Clear Contents", shortLabel: "Clear", tooltip: "Clear Contents (Del)", type: "button", icon: "\u2715", category: "Editing" },
 
+  // --- Styles ---
+  { id: "cellStyles", label: "Cell Styles", shortLabel: "Styles", tooltip: "Cell Styles", type: "dropdown", icon: "\uD83C\uDFA8", category: "Styles" },
+
   // --- Insert ---
   { id: "insertRow", label: "Insert Row", tooltip: "Insert Row", type: "button", icon: "+R", category: "Insert" },
   { id: "insertColumn", label: "Insert Column", tooltip: "Insert Column", type: "button", icon: "+C", category: "Insert" },
@@ -125,6 +128,11 @@ export const DEFAULT_LAYOUT: HomeTabLayout = {
       id: "number",
       label: "Number",
       items: ["percentFormat", "commaFormat", "increaseDecimal", "decreaseDecimal"],
+    },
+    {
+      id: "styles",
+      label: "Styles",
+      items: ["cellStyles"],
     },
     {
       id: "editing",

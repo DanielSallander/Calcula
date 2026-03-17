@@ -20,6 +20,8 @@ import {
   type HomeTabLayout,
   type HomeTabItem,
 } from "../homeTabConfig";
+import { CellStylesGallery } from "./CellStylesGallery";
+import type { CellStyleDefinition } from "./CellStylesGallery";
 
 // ============================================================================
 // Styles
@@ -280,6 +282,7 @@ export function HomeTabComponent({
   const [layout, setLayout] = useState<HomeTabLayout>(loadLayout);
   const [currentStyle, setCurrentStyle] = useState<StyleData | null>(null);
   const [openColorPicker, setOpenColorPicker] = useState<string | null>(null);
+  const [cellStylesOpen, setCellStylesOpen] = useState(false);
 
   // Reload layout when the customize dialog saves
   useEffect(() => {
@@ -469,6 +472,14 @@ export function HomeTabComponent({
     [applyFormat, currentStyle]
   );
 
+  // Handle cell style gallery selection
+  const handleCellStyleApply = useCallback(
+    async (formatting: CellStyleDefinition["formatting"]) => {
+      await applyFormat(formatting as Record<string, unknown>);
+    },
+    [applyFormat]
+  );
+
   // Handle color selection
   const handleColorSelect = useCallback(
     async (itemId: string, color: string) => {
@@ -555,6 +566,28 @@ export function HomeTabComponent({
               currentColor={color}
               onColorSelect={(c) => handleColorSelect(item.id, c)}
               onClose={() => setOpenColorPicker(null)}
+            />
+          )}
+        </div>
+      );
+    }
+
+    // Cell Styles gallery dropdown
+    if (item.id === "cellStyles") {
+      return (
+        <div key={item.id} style={{ position: "relative" }}>
+          <button
+            className={btnBase}
+            title={item.tooltip}
+            onClick={() => setCellStylesOpen(!cellStylesOpen)}
+          >
+            <span style={{ fontSize: "11px" }}>{item.icon}</span>
+            <span style={{ fontSize: "10px", marginLeft: "3px" }}>{"\u25BC"}</span>
+          </button>
+          {cellStylesOpen && (
+            <CellStylesGallery
+              onApplyStyle={handleCellStyleApply}
+              onClose={() => setCellStylesOpen(false)}
             />
           )}
         </div>
