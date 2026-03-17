@@ -917,6 +917,32 @@ pub fn get_functions_by_category(category: String) -> FunctionListResult {
                 category: "UI".to_string(),
             },
         ],
+        "dynamic" | "dynamic array" => vec![
+            FunctionInfo {
+                name: "FILTER".to_string(),
+                syntax: "FILTER(array, include, [if_empty])".to_string(),
+                description: "Filters an array based on a Boolean array, returning only matching rows or columns".to_string(),
+                category: "Dynamic Array".to_string(),
+            },
+            FunctionInfo {
+                name: "SORT".to_string(),
+                syntax: "SORT(array, [sort_index], [sort_order], [by_col])".to_string(),
+                description: "Sorts the contents of a range or array by one or more columns".to_string(),
+                category: "Dynamic Array".to_string(),
+            },
+            FunctionInfo {
+                name: "UNIQUE".to_string(),
+                syntax: "UNIQUE(array, [by_col], [exactly_once])".to_string(),
+                description: "Returns unique values from a range or array, removing duplicates".to_string(),
+                category: "Dynamic Array".to_string(),
+            },
+            FunctionInfo {
+                name: "SEQUENCE".to_string(),
+                syntax: "SEQUENCE(rows, [columns], [start], [step])".to_string(),
+                description: "Generates a sequence of numbers in an array".to_string(),
+                category: "Dynamic Array".to_string(),
+            },
+        ],
         _ => vec![],
     };
 
@@ -928,11 +954,11 @@ pub fn get_functions_by_category(category: String) -> FunctionListResult {
 #[tauri::command]
 pub fn get_all_functions() -> FunctionListResult {
     log_enter!("CMD", "get_all_functions");
-    
+
     let mut all_functions = Vec::new();
-    
+
     // Collect from all categories
-    for category in &["math", "logical", "text", "lookup", "info", "date", "statistical", "financial", "ui"] {
+    for category in &["math", "logical", "text", "lookup", "info", "date", "statistical", "financial", "dynamic", "ui"] {
         let result = get_functions_by_category(category.to_string());
         all_functions.extend(result.functions);
     }
@@ -1119,6 +1145,12 @@ pub fn get_function_template(function_name: String) -> String {
         // Reference functions
         "ROW" => "=ROW()".to_string(),
         "COLUMN" => "=COLUMN()".to_string(),
+
+        // Dynamic array functions
+        "FILTER" => "=FILTER(, )".to_string(),
+        "SORT" => "=SORT()".to_string(),
+        "UNIQUE" => "=UNIQUE()".to_string(),
+        "SEQUENCE" => "=SEQUENCE()".to_string(),
 
         // Default: generic function call
         _ => format!("={}()", function_name.to_uppercase()),

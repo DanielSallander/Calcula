@@ -4,7 +4,7 @@
 
 use engine::{
     format_number_with_color, format_text_with_color, format_color_to_css,
-    Cell, CellError, CellStyle, CellValue, Evaluator, Grid, NumberFormat,
+    Cell, CellError, CellStyle, CellValue, EvalResult, Evaluator, Grid, NumberFormat,
     StyleRegistry, MultiSheetContext,
 };
 use engine::{
@@ -217,6 +217,12 @@ pub struct AppState {
     pub computed_prop_dependents: Mutex<computed_properties::ComputedPropDependents>,
     /// Control metadata: (sheet_index, row, col) -> ControlMetadata
     pub controls: Mutex<controls::ControlStorage>,
+    /// Spill tracking: maps (sheet_index, origin_row, origin_col) to list of (row, col) spill cells
+    /// Used by dynamic array functions (FILTER, SORT, UNIQUE, SEQUENCE)
+    pub spill_ranges: Mutex<HashMap<(usize, u32, u32), Vec<(u32, u32)>>>,
+    /// Reverse spill map: (sheet_index, row, col) -> (origin_row, origin_col)
+    /// Used to detect #SPILL! errors when a spill cell is occupied
+    pub spill_hosts: Mutex<HashMap<(usize, u32, u32), (u32, u32)>>,
 }
 
 impl AppState {
@@ -289,6 +295,8 @@ pub fn create_app_state() -> AppState {
         computed_prop_dependencies: Mutex::new(HashMap::new()),
         computed_prop_dependents: Mutex::new(HashMap::new()),
         controls: Mutex::new(HashMap::new()),
+        spill_ranges: Mutex::new(HashMap::new()),
+        spill_hosts: Mutex::new(HashMap::new()),
     }
 }
 
@@ -574,6 +582,11 @@ fn convert_builtin_function(func: &ParserBuiltinFn) -> EngineBuiltinFn {
         // Advanced
         ParserBuiltinFn::Let => EngineBuiltinFn::Let,
         ParserBuiltinFn::TextJoin => EngineBuiltinFn::TextJoin,
+
+        ParserBuiltinFn::Filter => EngineBuiltinFn::Filter,
+        ParserBuiltinFn::Sort => EngineBuiltinFn::Sort,
+        ParserBuiltinFn::Unique => EngineBuiltinFn::Unique,
+        ParserBuiltinFn::Sequence => EngineBuiltinFn::Sequence,
 
         ParserBuiltinFn::Custom(name) => EngineBuiltinFn::Custom(name.clone()),
     }
@@ -1647,6 +1660,10 @@ fn builtin_function_to_name(func: &ParserBuiltinFn) -> String {
         ParserBuiltinFn::Column => "COLUMN".to_string(),
         ParserBuiltinFn::Let => "LET".to_string(),
         ParserBuiltinFn::TextJoin => "TEXTJOIN".to_string(),
+        ParserBuiltinFn::Filter => "FILTER".to_string(),
+        ParserBuiltinFn::Sort => "SORT".to_string(),
+        ParserBuiltinFn::Unique => "UNIQUE".to_string(),
+        ParserBuiltinFn::Sequence => "SEQUENCE".to_string(),
         ParserBuiltinFn::Custom(name) => name.clone(),
     }
 }
@@ -2060,6 +2077,30 @@ pub fn evaluate_formula_with_context(
         evaluator.set_styles(sr);
     }
     evaluator.evaluate(ast).to_cell_value()
+}
+
+/// Evaluates a formula AST with context, returning the raw EvalResult.
+/// Used for dynamic array functions that need spill handling.
+pub fn evaluate_formula_raw(
+    grids: &[Grid],
+    sheet_names: &[String],
+    current_sheet_index: usize,
+    ast: &EngineExpr,
+    eval_ctx: engine::EvalContext,
+    style_registry: Option<&engine::StyleRegistry>,
+) -> EvalResult {
+    if current_sheet_index >= grids.len() || current_sheet_index >= sheet_names.len() {
+        return EvalResult::Error(CellError::Ref);
+    }
+
+    let current_grid = &grids[current_sheet_index];
+    let current_sheet_name = &sheet_names[current_sheet_index];
+    let context = create_multi_sheet_context(grids, sheet_names, current_sheet_name);
+    let mut evaluator = Evaluator::with_context(current_grid, context, eval_ctx);
+    if let Some(sr) = style_registry {
+        evaluator.set_styles(sr);
+    }
+    evaluator.evaluate(ast)
 }
 
 /// Evaluates a formula AST using a pre-built evaluator. This is the fastest path

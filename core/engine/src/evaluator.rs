@@ -146,6 +146,52 @@ impl EvalResult {
         matches!(self, EvalResult::Error(_))
     }
 
+    /// Returns (rows, cols) dimensions if this is an array result suitable for spilling.
+    /// Non-array values return (1, 1).
+    /// A flat Array returns (n, 1). A nested Array of Arrays returns (outer_len, inner_len).
+    pub fn spill_dimensions(&self) -> (usize, usize) {
+        match self {
+            EvalResult::Array(arr) if !arr.is_empty() => {
+                // Check if first element is also an Array (2D)
+                if let EvalResult::Array(inner) = &arr[0] {
+                    (arr.len(), inner.len())
+                } else {
+                    // 1D array: n rows, 1 column
+                    (arr.len(), 1)
+                }
+            }
+            _ => (1, 1),
+        }
+    }
+
+    /// Extract a 2D grid of CellValues for spilling.
+    /// Returns Vec of (row_offset, col_offset, CellValue).
+    pub fn to_spill_values(&self) -> Vec<(u32, u32, CellValue)> {
+        match self {
+            EvalResult::Array(arr) if !arr.is_empty() => {
+                let mut result = Vec::new();
+                for (r, item) in arr.iter().enumerate() {
+                    match item {
+                        EvalResult::Array(inner) => {
+                            // 2D: each item is a row
+                            for (c, val) in inner.iter().enumerate() {
+                                result.push((r as u32, c as u32, val.to_cell_value()));
+                            }
+                        }
+                        _ => {
+                            // 1D: single column
+                            result.push((r as u32, 0, item.to_cell_value()));
+                        }
+                    }
+                }
+                result
+            }
+            _ => {
+                vec![(0, 0, self.to_cell_value())]
+            }
+        }
+    }
+
     /// Flattens an array result into individual values.
     /// Non-array values return a single-element vector.
     pub fn flatten(&self) -> Vec<EvalResult> {
@@ -898,6 +944,12 @@ impl<'a> Evaluator<'a> {
             // Advanced
             BuiltinFunction::Let => self.fn_let(args),
             BuiltinFunction::TextJoin => self.fn_textjoin(args),
+
+            // Dynamic array functions
+            BuiltinFunction::Filter => self.fn_filter(args),
+            BuiltinFunction::Sort => self.fn_sort(args),
+            BuiltinFunction::Unique => self.fn_unique(args),
+            BuiltinFunction::Sequence => self.fn_sequence(args),
 
             // Unknown/custom functions
             BuiltinFunction::Custom(_) => EvalResult::Error(CellError::Name),
@@ -3827,6 +3879,410 @@ impl<'a> Evaluator<'a> {
 
     /// Helper for TEXTJOIN: collects string parts from an expression,
     /// detecting truly empty cells when iterating over ranges.
+    // ==================== Dynamic Array Functions ====================
+
+    /// Helper: extract a 2D grid of values from a range expression.
+    /// Returns (rows, cols, data) where data[row_idx * cols + col_idx] = value.
+    fn eval_range_2d(&self, expr: &Expression) -> (usize, usize, Vec<EvalResult>) {
+        let (rows, cols) = self.get_range_dimensions(expr);
+        let flat = self.eval_flat(expr);
+        (rows, cols, flat)
+    }
+
+    /// FILTER(array, include, [if_empty])
+    /// Returns only the rows (or values) where include is TRUE.
+    fn fn_filter(&self, args: &[Expression]) -> EvalResult {
+        if args.is_empty() || args.len() > 3 {
+            return EvalResult::Error(CellError::Value);
+        }
+
+        let (rows, cols, data) = self.eval_range_2d(&args[0]);
+        let include = self.eval_flat(&args[1]);
+        let (inc_rows, inc_cols) = self.get_range_dimensions(&args[1]);
+
+        // include must be a single column or single row matching the array dimension
+        let filter_by_row = inc_cols == 1 && inc_rows == rows;
+        let filter_by_col = inc_rows == 1 && inc_cols == cols;
+
+        if !filter_by_row && !filter_by_col {
+            return EvalResult::Error(CellError::Value);
+        }
+
+        if filter_by_row {
+            // Filter rows: keep rows where include[i] is truthy
+            let mut result_rows: Vec<Vec<EvalResult>> = Vec::new();
+            for r in 0..rows {
+                let inc_val = include.get(r).cloned().unwrap_or(EvalResult::Boolean(false));
+                let truthy = match &inc_val {
+                    EvalResult::Boolean(b) => *b,
+                    EvalResult::Number(n) => *n != 0.0,
+                    _ => false,
+                };
+                if truthy {
+                    let row_start = r * cols;
+                    let row_data: Vec<EvalResult> = (0..cols)
+                        .map(|c| data.get(row_start + c).cloned().unwrap_or(EvalResult::Number(0.0)))
+                        .collect();
+                    result_rows.push(row_data);
+                }
+            }
+
+            if result_rows.is_empty() {
+                // Return if_empty or #CALC! error
+                if args.len() >= 3 {
+                    return self.evaluate(&args[2]);
+                }
+                return EvalResult::Error(CellError::Value);
+            }
+
+            // Build 2D array: Array of row-Arrays
+            if cols == 1 {
+                // Single column: return flat array
+                EvalResult::Array(result_rows.into_iter().map(|r| r.into_iter().next().unwrap()).collect())
+            } else {
+                EvalResult::Array(result_rows.into_iter().map(|r| EvalResult::Array(r)).collect())
+            }
+        } else {
+            // Filter columns: keep columns where include[j] is truthy
+            let mut kept_cols: Vec<usize> = Vec::new();
+            for c in 0..cols {
+                let inc_val = include.get(c).cloned().unwrap_or(EvalResult::Boolean(false));
+                let truthy = match &inc_val {
+                    EvalResult::Boolean(b) => *b,
+                    EvalResult::Number(n) => *n != 0.0,
+                    _ => false,
+                };
+                if truthy {
+                    kept_cols.push(c);
+                }
+            }
+
+            if kept_cols.is_empty() {
+                if args.len() >= 3 {
+                    return self.evaluate(&args[2]);
+                }
+                return EvalResult::Error(CellError::Value);
+            }
+
+            let mut result_rows: Vec<Vec<EvalResult>> = Vec::new();
+            for r in 0..rows {
+                let row_start = r * cols;
+                let row_data: Vec<EvalResult> = kept_cols
+                    .iter()
+                    .map(|&c| data.get(row_start + c).cloned().unwrap_or(EvalResult::Number(0.0)))
+                    .collect();
+                result_rows.push(row_data);
+            }
+
+            if kept_cols.len() == 1 {
+                EvalResult::Array(result_rows.into_iter().map(|r| r.into_iter().next().unwrap()).collect())
+            } else {
+                EvalResult::Array(result_rows.into_iter().map(|r| EvalResult::Array(r)).collect())
+            }
+        }
+    }
+
+    /// SORT(array, [sort_index], [sort_order], [by_col])
+    /// Returns the array sorted by a given row or column.
+    fn fn_sort(&self, args: &[Expression]) -> EvalResult {
+        if args.is_empty() || args.len() > 4 {
+            return EvalResult::Error(CellError::Value);
+        }
+
+        let (rows, cols, data) = self.eval_range_2d(&args[0]);
+        let sort_index = if args.len() >= 2 {
+            match self.evaluate(&args[1]).as_number() {
+                Some(n) => n as usize,
+                None => return EvalResult::Error(CellError::Value),
+            }
+        } else {
+            1
+        };
+        let sort_order = if args.len() >= 3 {
+            match self.evaluate(&args[2]).as_number() {
+                Some(n) => n as i32,
+                None => return EvalResult::Error(CellError::Value),
+            }
+        } else {
+            1 // ascending
+        };
+        let by_col = if args.len() >= 4 {
+            match self.evaluate(&args[3]).as_boolean() {
+                Some(b) => b,
+                None => return EvalResult::Error(CellError::Value),
+            }
+        } else {
+            false // sort by row (default)
+        };
+
+        if !by_col {
+            // Sort rows by column sort_index
+            if sort_index < 1 || sort_index > cols {
+                return EvalResult::Error(CellError::Value);
+            }
+            let col_idx = sort_index - 1;
+
+            // Build row vectors
+            let mut row_vecs: Vec<Vec<EvalResult>> = (0..rows)
+                .map(|r| {
+                    let start = r * cols;
+                    (0..cols).map(|c| data.get(start + c).cloned().unwrap_or(EvalResult::Number(0.0))).collect()
+                })
+                .collect();
+
+            // Sort by the key column
+            row_vecs.sort_by(|a, b| {
+                let va = &a[col_idx];
+                let vb = &b[col_idx];
+                let cmp = Self::compare_eval_results(va, vb);
+                if sort_order == -1 { cmp.reverse() } else { cmp }
+            });
+
+            if cols == 1 {
+                EvalResult::Array(row_vecs.into_iter().map(|r| r.into_iter().next().unwrap()).collect())
+            } else {
+                EvalResult::Array(row_vecs.into_iter().map(|r| EvalResult::Array(r)).collect())
+            }
+        } else {
+            // Sort columns by row sort_index
+            if sort_index < 1 || sort_index > rows {
+                return EvalResult::Error(CellError::Value);
+            }
+            let row_idx = sort_index - 1;
+
+            // Build column vectors
+            let mut col_vecs: Vec<(usize, Vec<EvalResult>)> = (0..cols)
+                .map(|c| {
+                    let col_data: Vec<EvalResult> = (0..rows)
+                        .map(|r| data.get(r * cols + c).cloned().unwrap_or(EvalResult::Number(0.0)))
+                        .collect();
+                    (c, col_data)
+                })
+                .collect();
+
+            col_vecs.sort_by(|a, b| {
+                let va = &a.1[row_idx];
+                let vb = &b.1[row_idx];
+                let cmp = Self::compare_eval_results(va, vb);
+                if sort_order == -1 { cmp.reverse() } else { cmp }
+            });
+
+            // Rebuild as rows
+            let mut result_rows: Vec<Vec<EvalResult>> = Vec::new();
+            for r in 0..rows {
+                let row_data: Vec<EvalResult> = col_vecs
+                    .iter()
+                    .map(|(_, col_data)| col_data[r].clone())
+                    .collect();
+                result_rows.push(row_data);
+            }
+
+            if rows == 1 {
+                EvalResult::Array(result_rows.into_iter().next().unwrap())
+            } else {
+                EvalResult::Array(result_rows.into_iter().map(|r| EvalResult::Array(r)).collect())
+            }
+        }
+    }
+
+    /// Compare two EvalResults for sorting (numbers < text < booleans < errors).
+    fn compare_eval_results(a: &EvalResult, b: &EvalResult) -> std::cmp::Ordering {
+        fn sort_key(v: &EvalResult) -> (u8, f64, String) {
+            match v {
+                EvalResult::Number(n) => (0, *n, String::new()),
+                EvalResult::Text(s) => (1, 0.0, s.to_uppercase()),
+                EvalResult::Boolean(b) => (2, if *b { 1.0 } else { 0.0 }, String::new()),
+                EvalResult::Error(_) => (3, 0.0, String::new()),
+                EvalResult::Array(_) => (4, 0.0, String::new()),
+            }
+        }
+        let (ta, na, sa) = sort_key(a);
+        let (tb, nb, sb) = sort_key(b);
+        ta.cmp(&tb)
+            .then(na.partial_cmp(&nb).unwrap_or(std::cmp::Ordering::Equal))
+            .then(sa.cmp(&sb))
+    }
+
+    /// UNIQUE(array, [by_col], [exactly_once])
+    /// Returns unique rows (or columns) from the array.
+    fn fn_unique(&self, args: &[Expression]) -> EvalResult {
+        if args.is_empty() || args.len() > 3 {
+            return EvalResult::Error(CellError::Value);
+        }
+
+        let (rows, cols, data) = self.eval_range_2d(&args[0]);
+        let by_col = if args.len() >= 2 {
+            match self.evaluate(&args[1]).as_boolean() {
+                Some(b) => b,
+                None => return EvalResult::Error(CellError::Value),
+            }
+        } else {
+            false
+        };
+        let exactly_once = if args.len() >= 3 {
+            match self.evaluate(&args[2]).as_boolean() {
+                Some(b) => b,
+                None => return EvalResult::Error(CellError::Value),
+            }
+        } else {
+            false
+        };
+
+        if !by_col {
+            // Unique rows
+            let row_vecs: Vec<Vec<EvalResult>> = (0..rows)
+                .map(|r| {
+                    let start = r * cols;
+                    (0..cols).map(|c| data.get(start + c).cloned().unwrap_or(EvalResult::Number(0.0))).collect()
+                })
+                .collect();
+
+            let unique_rows = Self::unique_vectors(&row_vecs, exactly_once);
+
+            if unique_rows.is_empty() {
+                return EvalResult::Error(CellError::Value);
+            }
+
+            if cols == 1 {
+                EvalResult::Array(unique_rows.into_iter().map(|r| r.into_iter().next().unwrap()).collect())
+            } else {
+                EvalResult::Array(unique_rows.into_iter().map(|r| EvalResult::Array(r)).collect())
+            }
+        } else {
+            // Unique columns
+            let col_vecs: Vec<Vec<EvalResult>> = (0..cols)
+                .map(|c| {
+                    (0..rows)
+                        .map(|r| data.get(r * cols + c).cloned().unwrap_or(EvalResult::Number(0.0)))
+                        .collect()
+                })
+                .collect();
+
+            let unique_cols = Self::unique_vectors(&col_vecs, exactly_once);
+
+            if unique_cols.is_empty() {
+                return EvalResult::Error(CellError::Value);
+            }
+
+            // Rebuild as rows
+            let new_cols = unique_cols.len();
+            let mut result_rows: Vec<Vec<EvalResult>> = Vec::new();
+            for r in 0..rows {
+                let row_data: Vec<EvalResult> = unique_cols.iter().map(|col| col[r].clone()).collect();
+                result_rows.push(row_data);
+            }
+
+            if rows == 1 {
+                EvalResult::Array(result_rows.into_iter().next().unwrap())
+            } else if new_cols == 1 {
+                EvalResult::Array(result_rows.into_iter().map(|r| r.into_iter().next().unwrap()).collect())
+            } else {
+                EvalResult::Array(result_rows.into_iter().map(|r| EvalResult::Array(r)).collect())
+            }
+        }
+    }
+
+    /// Helper for UNIQUE: returns unique (or exactly-once) vectors.
+    fn unique_vectors(vecs: &[Vec<EvalResult>], exactly_once: bool) -> Vec<Vec<EvalResult>> {
+        // Build a string key for comparison
+        fn vec_key(v: &[EvalResult]) -> String {
+            v.iter().map(|e| format!("{:?}", e)).collect::<Vec<_>>().join("|")
+        }
+
+        if exactly_once {
+            // Only keep rows that appear exactly once
+            let mut counts: HashMap<String, usize> = HashMap::new();
+            for v in vecs {
+                *counts.entry(vec_key(v)).or_insert(0) += 1;
+            }
+            let mut seen = std::collections::HashSet::new();
+            let mut result = Vec::new();
+            for v in vecs {
+                let key = vec_key(v);
+                if counts.get(&key) == Some(&1) && seen.insert(key) {
+                    result.push(v.clone());
+                }
+            }
+            result
+        } else {
+            // Keep first occurrence of each unique row
+            let mut seen = std::collections::HashSet::new();
+            let mut result = Vec::new();
+            for v in vecs {
+                let key = vec_key(v);
+                if seen.insert(key) {
+                    result.push(v.clone());
+                }
+            }
+            result
+        }
+    }
+
+    /// SEQUENCE(rows, [columns], [start], [step])
+    /// Returns a sequence of numbers arranged in rows and columns.
+    fn fn_sequence(&self, args: &[Expression]) -> EvalResult {
+        if args.is_empty() || args.len() > 4 {
+            return EvalResult::Error(CellError::Value);
+        }
+
+        let seq_rows = match self.evaluate(&args[0]).as_number() {
+            Some(n) if n >= 1.0 => n as usize,
+            _ => return EvalResult::Error(CellError::Value),
+        };
+        let seq_cols = if args.len() >= 2 {
+            match self.evaluate(&args[1]).as_number() {
+                Some(n) if n >= 1.0 => n as usize,
+                _ => return EvalResult::Error(CellError::Value),
+            }
+        } else {
+            1
+        };
+        let start = if args.len() >= 3 {
+            match self.evaluate(&args[2]).as_number() {
+                Some(n) => n,
+                None => return EvalResult::Error(CellError::Value),
+            }
+        } else {
+            1.0
+        };
+        let step = if args.len() >= 4 {
+            match self.evaluate(&args[3]).as_number() {
+                Some(n) => n,
+                None => return EvalResult::Error(CellError::Value),
+            }
+        } else {
+            1.0
+        };
+
+        // Single cell result
+        if seq_rows == 1 && seq_cols == 1 {
+            return EvalResult::Number(start);
+        }
+
+        let mut current = start;
+        if seq_cols == 1 {
+            // Single column: flat array
+            let mut vals = Vec::with_capacity(seq_rows);
+            for _ in 0..seq_rows {
+                vals.push(EvalResult::Number(current));
+                current += step;
+            }
+            EvalResult::Array(vals)
+        } else {
+            // Multi-column: 2D array (Array of row-Arrays)
+            let mut rows_out = Vec::with_capacity(seq_rows);
+            for _ in 0..seq_rows {
+                let mut row = Vec::with_capacity(seq_cols);
+                for _ in 0..seq_cols {
+                    row.push(EvalResult::Number(current));
+                    current += step;
+                }
+                rows_out.push(EvalResult::Array(row));
+            }
+            EvalResult::Array(rows_out)
+        }
+    }
+
     fn textjoin_collect(&self, expr: &Expression, ignore_empty: bool, parts: &mut Vec<String>) {
         match expr {
             Expression::Range { start, end, .. } => {

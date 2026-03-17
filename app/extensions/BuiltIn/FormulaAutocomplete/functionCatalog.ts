@@ -88,6 +88,12 @@ const COMMON_FUNCTIONS: Record<string, number> = {
   XOR: 21,
   TEXTJOIN: 20,
 
+  // Dynamic Array
+  FILTER: 19,
+  SORT: 18,
+  UNIQUE: 17,
+  SEQUENCE: 16,
+
   // Math
   ROUNDUP: 17,
   ROUNDDOWN: 16,

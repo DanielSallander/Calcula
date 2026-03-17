@@ -314,6 +314,12 @@ pub enum BuiltinFunction {
     Let,
     TextJoin,
 
+    // Dynamic array functions
+    Filter,
+    Sort,
+    Unique,
+    Sequence,
+
     /// Fallback for unrecognized function names (future extensions/plugins).
     Custom(String),
 }
@@ -502,6 +508,12 @@ impl BuiltinFunction {
             // Advanced
             "LET" => BuiltinFunction::Let,
             "TEXTJOIN" => BuiltinFunction::TextJoin,
+
+            // Dynamic array functions
+            "FILTER" => BuiltinFunction::Filter,
+            "SORT" => BuiltinFunction::Sort,
+            "UNIQUE" => BuiltinFunction::Unique,
+            "SEQUENCE" => BuiltinFunction::Sequence,
 
             _ => BuiltinFunction::Custom(name.to_uppercase()),
         }

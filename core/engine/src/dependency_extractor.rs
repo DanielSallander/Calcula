@@ -265,6 +265,12 @@ pub enum BuiltinFunction {
     Let,
     TextJoin,
 
+    // Dynamic array functions
+    Filter,
+    Sort,
+    Unique,
+    Sequence,
+
     /// Fallback for unrecognized function names (future extensions/plugins).
     Custom(String),
 }

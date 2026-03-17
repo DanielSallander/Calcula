@@ -10,7 +10,7 @@ use crate::api_types::{
 use crate::commands::utils::get_cell_internal_with_merge;
 use crate::{
     evaluate_formula_multi_sheet,
-    evaluate_formula_multi_sheet_with_ast, evaluate_formula_with_context,
+    evaluate_formula_multi_sheet_with_ast,
     extract_all_references, format_cell_value, get_column_row_dependents,
     get_recalculation_order, parse_cell_input,
     update_column_dependencies, update_cross_sheet_dependencies,
@@ -135,6 +135,17 @@ pub fn update_cell(
         ));
     }
 
+    // Check if cell is a spill cell (part of a dynamic array result)
+    {
+        let spill_hosts = state.spill_hosts.lock().unwrap();
+        if let Some((origin_r, origin_c)) = spill_hosts.get(&(active_sheet_for_region_check, row, col)) {
+            return Err(format!(
+                "Cannot edit cell ({}, {}): it contains a spilled array value from cell ({}, {}). Edit or delete the formula in the source cell instead.",
+                row + 1, col + 1, origin_r + 1, origin_c + 1
+            ));
+        }
+    }
+
     let sheet_names = state.sheet_names.lock().unwrap();
     let mut grid = state.grid.lock().unwrap();
     let mut grids = state.grids.lock().unwrap();
@@ -164,6 +175,26 @@ pub fn update_cell(
 
     // Handle empty value - clear the cell
     if value.trim().is_empty() {
+        // Clear any spill range owned by this cell
+        {
+            let mut spill_ranges = state.spill_ranges.lock().unwrap();
+            let mut spill_hosts = state.spill_hosts.lock().unwrap();
+            if let Some(old_spill_cells) = spill_ranges.remove(&(active_sheet, row, col)) {
+                for (sr, sc) in &old_spill_cells {
+                    spill_hosts.remove(&(active_sheet, *sr, *sc));
+                    grid.cells.remove(&(*sr, *sc));
+                    if active_sheet < grids.len() {
+                        grids[active_sheet].cells.remove(&(*sr, *sc));
+                    }
+                    updated_cells.push(CellData {
+                        row: *sr, col: *sc, display: String::new(),
+                        display_color: None, formula: None, style_index: 0,
+                        row_span: 1, col_span: 1, sheet_index: None,
+                    });
+                }
+            }
+        }
+
         grid.clear_cell(row, col);
         // Also update the grids vector
         if active_sheet < grids.len() {
@@ -333,7 +364,7 @@ pub fn update_cell(
                     row_heights: Some(rh_map),
                     column_widths: Some(cw_map),
                 };
-                cell.value = evaluate_formula_with_context(
+                let raw_result = crate::evaluate_formula_raw(
                     &grids,
                     &sheet_names,
                     active_sheet,
@@ -341,6 +372,93 @@ pub fn update_cell(
                     eval_ctx,
                     Some(&styles),
                 );
+
+                // Clear any previous spill range for this cell
+                {
+                    let mut spill_ranges = state.spill_ranges.lock().unwrap();
+                    let mut spill_hosts = state.spill_hosts.lock().unwrap();
+                    if let Some(old_spill_cells) = spill_ranges.remove(&(active_sheet, row, col)) {
+                        for (sr, sc) in &old_spill_cells {
+                            spill_hosts.remove(&(active_sheet, *sr, *sc));
+                            grid.cells.remove(&(*sr, *sc));
+                            if active_sheet < grids.len() {
+                                grids[active_sheet].cells.remove(&(*sr, *sc));
+                            }
+                            updated_cells.push(CellData {
+                                row: *sr, col: *sc, display: String::new(),
+                                display_color: None, formula: None, style_index: 0,
+                                row_span: 1, col_span: 1, sheet_index: None,
+                            });
+                        }
+                    }
+                }
+
+                // Handle spill for array results
+                let (spill_rows, spill_cols) = raw_result.spill_dimensions();
+                if spill_rows > 1 || spill_cols > 1 {
+                    let spill_values = raw_result.to_spill_values();
+                    let mut spill_blocked = false;
+
+                    // Check if any spill cell is already occupied (not by a previous spill from this cell)
+                    for &(dr, dc, _) in &spill_values {
+                        if dr == 0 && dc == 0 { continue; } // origin cell
+                        let target_r = row + dr;
+                        let target_c = col + dc;
+                        // Check if target is occupied by real data (not empty and not a spill from this origin)
+                        if let Some(existing) = grid.get_cell(target_r, target_c) {
+                            if existing.value != engine::CellValue::Empty {
+                                spill_blocked = true;
+                                break;
+                            }
+                        }
+                    }
+
+                    if spill_blocked {
+                        cell.value = engine::CellValue::Error(engine::CellError::Value);
+                    } else {
+                        // Write the origin cell value (first element)
+                        cell.value = raw_result.to_cell_value();
+
+                        // Write spill cells
+                        let mut new_spill_cells = Vec::new();
+                        let mut spill_ranges = state.spill_ranges.lock().unwrap();
+                        let mut spill_hosts = state.spill_hosts.lock().unwrap();
+
+                        for (dr, dc, cv) in spill_values {
+                            if dr == 0 && dc == 0 { continue; } // skip origin
+                            let target_r = row + dr;
+                            let target_c = col + dc;
+
+                            let spill_cell = engine::Cell {
+                                formula: None,
+                                value: cv.clone(),
+                                style_index: 0,
+                                cached_ast: None,
+                            };
+                            grid.set_cell(target_r, target_c, spill_cell.clone());
+                            if active_sheet < grids.len() {
+                                grids[active_sheet].set_cell(target_r, target_c, spill_cell);
+                            }
+
+                            let style = styles.get(0);
+                            let display = format_cell_value(&cv, style);
+                            updated_cells.push(CellData {
+                                row: target_r, col: target_c, display,
+                                display_color: None, formula: None, style_index: 0,
+                                row_span: 1, col_span: 1, sheet_index: None,
+                            });
+
+                            new_spill_cells.push((target_r, target_c));
+                            spill_hosts.insert((active_sheet, target_r, target_c), (row, col));
+                        }
+
+                        if !new_spill_cells.is_empty() {
+                            spill_ranges.insert((active_sheet, row, col), new_spill_cells);
+                        }
+                    }
+                } else {
+                    cell.value = raw_result.to_cell_value();
+                }
             }
             Err(_e) => {
                 // Formula parse error - dependencies won't be tracked
