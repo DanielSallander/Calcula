@@ -8,7 +8,7 @@
 import { useCallback, useRef, useState, useEffect } from "react";
 import { useGridContext } from "../state/GridContext";
 import { setSelection, scrollBy } from "../state/gridActions";
-import { getCell, getViewportCells, updateCellsBatch, shiftFormulasBatch, getMergedRegions, mergeCells, type CellUpdateInput, type FormulaShiftInput, type MergedRegion } from "../lib/tauri-api";
+import { getCell, getViewportCells, updateCellsBatch, shiftFormulasBatch, getMergedRegions, mergeCells, beginUndoTransaction, commitUndoTransaction, type CellUpdateInput, type FormulaShiftInput, type MergedRegion } from "../lib/tauri-api";
 import { cellEvents } from "../lib/cellEvents";
 import type { Selection, GridConfig } from "../types";
 import { getColumnWidth, getRowHeight, getColumnX, getRowY, calculateVisibleRange } from "../lib/gridRenderer";
@@ -73,9 +73,274 @@ export interface UseFillHandleReturn {
  * Detect pattern in values for auto-fill.
  */
 interface PatternResult {
-  type: "copy" | "increment" | "series" | "text-increment";
+  type: "copy" | "increment" | "series" | "text-increment" | "weekday" | "month" | "date-series";
   baseValues: string[];
   step: number;
+  /** For weekday/month: which list variant (full vs short) */
+  listVariant?: "full" | "short";
+  /** For weekday/month: starting index in the list */
+  startIndex?: number;
+  /** For date-series: parsed dates as [year, month, day] tuples */
+  parsedDates?: [number, number, number][];
+  /** For date-series: the separator used (e.g., "/" or "-") */
+  dateSeparator?: string;
+  /** For date-series: detected format "mdy" | "dmy" | "ymd" */
+  dateFormat?: string;
+}
+
+// ---------------------------------------------------------------------------
+// Weekday / Month name lists
+// ---------------------------------------------------------------------------
+
+const WEEKDAY_FULL = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
+const WEEKDAY_SHORT = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+const MONTH_FULL = [
+  "January", "February", "March", "April", "May", "June",
+  "July", "August", "September", "October", "November", "December",
+];
+const MONTH_SHORT = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+
+/**
+ * Try to find a value in a cyclic list (case-insensitive).
+ * Returns the index or -1 if not found.
+ */
+function findInList(value: string, list: string[]): number {
+  const lower = value.trim().toLowerCase();
+  return list.findIndex((item) => item.toLowerCase() === lower);
+}
+
+/**
+ * Try to detect a weekday or month pattern.
+ */
+function detectNamedSequence(
+  values: string[],
+): PatternResult | null {
+  // Try weekday lists
+  for (const [list, variant] of [[WEEKDAY_FULL, "full"], [WEEKDAY_SHORT, "short"]] as const) {
+    const indices = values.map((v) => findInList(v, list));
+    if (indices.every((i) => i >= 0)) {
+      // All values are weekday names
+      if (values.length === 1) {
+        return {
+          type: "weekday",
+          baseValues: values,
+          step: 1,
+          listVariant: variant,
+          startIndex: indices[0],
+        };
+      }
+      // Check for consistent step
+      const steps: number[] = [];
+      for (let i = 1; i < indices.length; i++) {
+        let diff = indices[i] - indices[i - 1];
+        if (diff <= 0) diff += 7; // wrap around
+        steps.push(diff);
+      }
+      if (steps.every((s) => s === steps[0])) {
+        return {
+          type: "weekday",
+          baseValues: values,
+          step: steps[0],
+          listVariant: variant,
+          startIndex: indices[0],
+        };
+      }
+    }
+  }
+
+  // Try month lists
+  for (const [list, variant] of [[MONTH_FULL, "full"], [MONTH_SHORT, "short"]] as const) {
+    const indices = values.map((v) => findInList(v, list));
+    if (indices.every((i) => i >= 0)) {
+      if (values.length === 1) {
+        return {
+          type: "month",
+          baseValues: values,
+          step: 1,
+          listVariant: variant,
+          startIndex: indices[0],
+        };
+      }
+      const steps: number[] = [];
+      for (let i = 1; i < indices.length; i++) {
+        let diff = indices[i] - indices[i - 1];
+        if (diff <= 0) diff += 12; // wrap around
+        steps.push(diff);
+      }
+      if (steps.every((s) => s === steps[0])) {
+        return {
+          type: "month",
+          baseValues: values,
+          step: steps[0],
+          listVariant: variant,
+          startIndex: indices[0],
+        };
+      }
+    }
+  }
+
+  return null;
+}
+
+// ---------------------------------------------------------------------------
+// Date series detection
+// ---------------------------------------------------------------------------
+
+/**
+ * Try to parse a string as a date. Returns [year, month, day] or null.
+ * Supports: M/D/YYYY, D/M/YYYY, YYYY-MM-DD, M-D-YYYY, D.M.YYYY
+ */
+function tryParseDate(value: string): { ymd: [number, number, number]; sep: string; format: string } | null {
+  const trimmed = value.trim();
+
+  // YYYY-MM-DD or YYYY/MM/DD
+  let m = trimmed.match(/^(\d{4})([-/])(\d{1,2})\2(\d{1,2})$/);
+  if (m) {
+    const [, ys, sep, ms, ds] = m;
+    const y = parseInt(ys, 10);
+    const mo = parseInt(ms, 10);
+    const d = parseInt(ds, 10);
+    if (mo >= 1 && mo <= 12 && d >= 1 && d <= 31) {
+      return { ymd: [y, mo, d], sep, format: "ymd" };
+    }
+  }
+
+  // M/D/YYYY or M-D-YYYY or M.D.YYYY  (assume MDY for slash/dash, DMY for dot)
+  m = trimmed.match(/^(\d{1,2})([-/.])(\d{1,2})\2(\d{4})$/);
+  if (m) {
+    const [, a, sep, b, ys] = m;
+    const y = parseInt(ys, 10);
+    const n1 = parseInt(a, 10);
+    const n2 = parseInt(b, 10);
+
+    if (sep === ".") {
+      // European: D.M.YYYY
+      if (n2 >= 1 && n2 <= 12 && n1 >= 1 && n1 <= 31) {
+        return { ymd: [y, n2, n1], sep, format: "dmy" };
+      }
+    } else {
+      // US: M/D/YYYY or M-D-YYYY
+      if (n1 >= 1 && n1 <= 12 && n2 >= 1 && n2 <= 31) {
+        return { ymd: [y, n1, n2], sep, format: "mdy" };
+      }
+      // Try DMY if MDY doesn't work
+      if (n2 >= 1 && n2 <= 12 && n1 >= 1 && n1 <= 31) {
+        return { ymd: [y, n2, n1], sep, format: "dmy" };
+      }
+    }
+  }
+
+  return null;
+}
+
+/** Convert [year, month, day] to a JS Date for arithmetic. */
+function ymdToDate(ymd: [number, number, number]): Date {
+  return new Date(ymd[0], ymd[1] - 1, ymd[2]);
+}
+
+/** Difference in days between two dates. */
+function daysDiff(a: [number, number, number], b: [number, number, number]): number {
+  const msPerDay = 86400000;
+  return Math.round((ymdToDate(b).getTime() - ymdToDate(a).getTime()) / msPerDay);
+}
+
+/** Add days to a [year, month, day] tuple. */
+function addDays(ymd: [number, number, number], days: number): [number, number, number] {
+  const d = ymdToDate(ymd);
+  d.setDate(d.getDate() + days);
+  return [d.getFullYear(), d.getMonth() + 1, d.getDate()];
+}
+
+/** Add months to a [year, month, day] tuple (clamping day to end of month). */
+function addMonths(ymd: [number, number, number], months: number): [number, number, number] {
+  const d = ymdToDate(ymd);
+  const targetMonth = d.getMonth() + months;
+  d.setMonth(targetMonth);
+  // If the day overflowed (e.g., Jan 31 + 1 month = Mar 3), clamp to end of target month
+  if (d.getMonth() !== ((targetMonth % 12) + 12) % 12) {
+    d.setDate(0); // last day of previous month
+  }
+  return [d.getFullYear(), d.getMonth() + 1, d.getDate()];
+}
+
+/** Format a [year, month, day] tuple back to the original format. */
+function formatDate(ymd: [number, number, number], sep: string, format: string): string {
+  const [y, mo, d] = ymd;
+  const pad = (n: number) => String(n); // no zero-padding (matches common spreadsheet display)
+  switch (format) {
+    case "ymd":
+      return `${y}${sep}${String(mo).padStart(2, "0")}${sep}${String(d).padStart(2, "0")}`;
+    case "dmy":
+      return `${pad(d)}${sep}${pad(mo)}${sep}${y}`;
+    case "mdy":
+    default:
+      return `${pad(mo)}${sep}${pad(d)}${sep}${y}`;
+  }
+}
+
+/**
+ * Try to detect a date series pattern from display values.
+ */
+function detectDateSeries(values: string[]): PatternResult | null {
+  if (values.length === 0) return null;
+
+  const parsed = values.map(tryParseDate);
+  if (parsed.some((p) => p === null)) return null;
+
+  const nonNull = parsed as NonNullable<typeof parsed[0]>[];
+  const sep = nonNull[0].sep;
+  const fmt = nonNull[0].format;
+  const dates = nonNull.map((p) => p.ymd);
+
+  if (values.length === 1) {
+    // Single date: increment by 1 day
+    return {
+      type: "date-series",
+      baseValues: values,
+      step: 1,
+      parsedDates: dates,
+      dateSeparator: sep,
+      dateFormat: fmt,
+    };
+  }
+
+  // Check for consistent day difference
+  const diffs: number[] = [];
+  for (let i = 1; i < dates.length; i++) {
+    diffs.push(daysDiff(dates[i - 1], dates[i]));
+  }
+
+  if (diffs.every((d) => d === diffs[0]) && diffs[0] !== 0) {
+    return {
+      type: "date-series",
+      baseValues: values,
+      step: diffs[0],
+      parsedDates: dates,
+      dateSeparator: sep,
+      dateFormat: fmt,
+    };
+  }
+
+  // Check for consistent month difference (e.g., 1/31, 2/28, 3/31)
+  const monthDiffs: number[] = [];
+  for (let i = 1; i < dates.length; i++) {
+    const [y1, m1] = dates[i - 1];
+    const [y2, m2] = dates[i];
+    monthDiffs.push((y2 - y1) * 12 + (m2 - m1));
+  }
+  if (monthDiffs.every((d) => d === monthDiffs[0]) && monthDiffs[0] !== 0) {
+    // Use negative step to signal "months" mode (step = month count, negated)
+    return {
+      type: "date-series",
+      baseValues: values,
+      step: -monthDiffs[0], // negative = months mode
+      parsedDates: dates,
+      dateSeparator: sep,
+      dateFormat: fmt,
+    };
+  }
+
+  return null;
 }
 
 /**
@@ -86,9 +351,17 @@ function detectPattern(values: string[]): PatternResult {
     return { type: "copy", baseValues: [""], step: 0 };
   }
 
+  // Try weekday/month names first (even for single values)
+  const namedSeq = detectNamedSequence(values);
+  if (namedSeq) return namedSeq;
+
+  // Try date series
+  const dateSeries = detectDateSeries(values);
+  if (dateSeries) return dateSeries;
+
   if (values.length === 1) {
     const val = values[0];
-    
+
     // Check for text + number pattern (e.g., "Item 1")
     const textNumMatch = val.match(/^(.+?)(\d+)$/);
     if (textNumMatch) {
@@ -118,7 +391,7 @@ function detectPattern(values: string[]): PatternResult {
     for (let i = 1; i < numbers.length; i++) {
       diffs.push(numbers[i] - numbers[i - 1]);
     }
-    
+
     // Check if all differences are the same
     const allSameDiff = diffs.every((d) => Math.abs(d - diffs[0]) < 0.0001);
     if (allSameDiff) {
@@ -165,12 +438,12 @@ function generateFillValue(
   switch (pattern.type) {
     case "copy":
       return sourceValues[index % sourceValues.length];
-    
+
     case "increment": {
       const baseNum = parseFloat(sourceValues[0]);
       return String(baseNum + index + 1);
     }
-    
+
     case "series": {
       const lastNum = parseFloat(sourceValues[sourceValues.length - 1]);
       const offset = index - sourceValues.length + 1;
@@ -179,7 +452,7 @@ function generateFillValue(
       }
       return sourceValues[index];
     }
-    
+
     case "text-increment": {
       const prefix = pattern.baseValues[0];
       const baseMatch = sourceValues[sourceValues.length - 1].match(/(\d+)$/);
@@ -190,7 +463,49 @@ function generateFillValue(
       }
       return sourceValues[index];
     }
-    
+
+    case "weekday": {
+      const list = pattern.listVariant === "full" ? WEEKDAY_FULL : WEEKDAY_SHORT;
+      const offset = index - sourceValues.length + 1;
+      if (offset > 0) {
+        const lastIdx = findInList(sourceValues[sourceValues.length - 1], list);
+        const newIdx = ((lastIdx + pattern.step * offset) % 7 + 7) % 7;
+        return list[newIdx];
+      }
+      return sourceValues[index];
+    }
+
+    case "month": {
+      const list = pattern.listVariant === "full" ? MONTH_FULL : MONTH_SHORT;
+      const offset = index - sourceValues.length + 1;
+      if (offset > 0) {
+        const lastIdx = findInList(sourceValues[sourceValues.length - 1], list);
+        const newIdx = ((lastIdx + pattern.step * offset) % 12 + 12) % 12;
+        return list[newIdx];
+      }
+      return sourceValues[index];
+    }
+
+    case "date-series": {
+      const dates = pattern.parsedDates!;
+      const sep = pattern.dateSeparator!;
+      const fmt = pattern.dateFormat!;
+      const offset = index - sourceValues.length + 1;
+      if (offset > 0) {
+        const lastDate = dates[dates.length - 1];
+        if (pattern.step < 0) {
+          // Months mode: step is negated month count
+          const monthStep = -pattern.step;
+          const newDate = addMonths(lastDate, monthStep * offset);
+          return formatDate(newDate, sep, fmt);
+        } else {
+          const newDate = addDays(lastDate, pattern.step * offset);
+          return formatDate(newDate, sep, fmt);
+        }
+      }
+      return sourceValues[index];
+    }
+
     default:
       return sourceValues[index % sourceValues.length];
   }
@@ -208,6 +523,8 @@ interface PendingFill {
   pattern: PatternResult;
   allSourceValues: string[];
   fillIndex: number;
+  /** Style index from the source cell to propagate to the filled cell */
+  sourceStyleIndex: number;
 }
 
 /**
@@ -242,6 +559,7 @@ async function processPendingFills(pendingFills: PendingFill[]): Promise<CellUpd
         row: fill.row,
         col: fill.col,
         value: computeNonFormulaFillValue(fill.pattern, fill.allSourceValues, fill.fillIndex),
+        styleIndex: fill.sourceStyleIndex,
       };
     }
   }
@@ -268,6 +586,7 @@ async function processPendingFills(pendingFills: PendingFill[]): Promise<CellUpd
           row: fill.row,
           col: fill.col,
           value: shiftedFormulas[i],
+          styleIndex: fill.sourceStyleIndex,
         };
       }
       const t4 = performance.now();
@@ -288,6 +607,7 @@ async function processPendingFills(pendingFills: PendingFill[]): Promise<CellUpd
           row: fill.row,
           col: fill.col,
           value: fill.sourceValue,
+          styleIndex: fill.sourceStyleIndex,
         };
       }
     }
@@ -748,20 +1068,26 @@ export function useFillHandle(props: UseFillHandleProps): UseFillHandleReturn {
 
     const finalRange = fillState.previewRange;
 
+    await beginUndoTransaction("Fill series");
     try {
       // OPTIMIZATION: Fetch all source cells in a single IPC call
       const sourceCells = await getViewportCells(selMinRow, selMinCol, selMaxRow, selMaxCol);
 
-      // Build a map for quick lookup: (row, col) -> value
+      // Build maps for quick lookup: (row, col) -> value and (row, col) -> styleIndex
       const cellMap = new Map<string, string>();
+      const styleMap = new Map<string, number>();
       for (const cell of sourceCells) {
         const key = `${cell.row},${cell.col}`;
         cellMap.set(key, cell.formula || cell.display || "");
+        styleMap.set(key, cell.styleIndex ?? 0);
       }
 
       // Helper to get source value from map
       const getSourceValue = (row: number, col: number): string => {
         return cellMap.get(`${row},${col}`) || "";
+      };
+      const getSourceStyle = (row: number, col: number): number => {
+        return styleMap.get(`${row},${col}`) || 0;
       };
 
       // Build source values arrays and collect pending fills
@@ -803,6 +1129,7 @@ export function useFillHandle(props: UseFillHandleProps): UseFillHandleReturn {
                 pattern,
                 allSourceValues: sourceValues[colIdx],
                 fillIndex,
+                sourceStyleIndex: getSourceStyle(sourceRow, c),
               });
             }
           } else {
@@ -822,6 +1149,7 @@ export function useFillHandle(props: UseFillHandleProps): UseFillHandleReturn {
                 pattern,
                 allSourceValues: sourceValues[colIdx].slice().reverse(),
                 fillIndex,
+                sourceStyleIndex: getSourceStyle(sourceRow, c),
               });
             }
           }
@@ -861,6 +1189,7 @@ export function useFillHandle(props: UseFillHandleProps): UseFillHandleReturn {
                 pattern,
                 allSourceValues: sourceValues[rowIdx],
                 fillIndex,
+                sourceStyleIndex: getSourceStyle(r, sourceCol),
               });
             }
           } else {
@@ -880,6 +1209,7 @@ export function useFillHandle(props: UseFillHandleProps): UseFillHandleReturn {
                 pattern,
                 allSourceValues: sourceValues[rowIdx].slice().reverse(),
                 fillIndex,
+                sourceStyleIndex: getSourceStyle(r, sourceCol),
               });
             }
           }
@@ -927,7 +1257,11 @@ export function useFillHandle(props: UseFillHandleProps): UseFillHandleReturn {
         );
       }
 
+      await commitUndoTransaction();
       console.log("[FillHandle] Fill complete");
+
+      // Refresh styles since we propagated styleIndex
+      window.dispatchEvent(new CustomEvent("styles:refresh"));
 
       // Emit FILL_COMPLETED event for extensions (e.g., sparklines)
       if (finalRange && fillState.direction) {
@@ -961,6 +1295,7 @@ export function useFillHandle(props: UseFillHandleProps): UseFillHandleReturn {
       }
     } catch (error) {
       console.error("[FillHandle] Fill failed:", error);
+      await commitUndoTransaction();
     }
 
     setFillState({
@@ -1047,19 +1382,25 @@ export function useFillHandle(props: UseFillHandleProps): UseFillHandleReturn {
 
     console.log("[FillHandle] autoFillToEdge: Filling down to row", edgeRow);
 
+    await beginUndoTransaction("Auto-fill to edge");
     try {
       // OPTIMIZATION: Fetch all source cells in a single IPC call
       const sourceCells = await getViewportCells(selMinRow, selMinCol, selMaxRow, selMaxCol);
 
-      // Build a map for quick lookup
+      // Build maps for quick lookup
       const cellMap = new Map<string, string>();
+      const styleMap = new Map<string, number>();
       for (const cell of sourceCells) {
         const key = `${cell.row},${cell.col}`;
         cellMap.set(key, cell.formula || cell.display || "");
+        styleMap.set(key, cell.styleIndex ?? 0);
       }
 
       const getSourceValue = (row: number, col: number): string => {
         return cellMap.get(`${row},${col}`) || "";
+      };
+      const getSourceStyle = (row: number, col: number): number => {
+        return styleMap.get(`${row},${col}`) || 0;
       };
 
       const sourceValues: string[][] = [];
@@ -1096,6 +1437,7 @@ export function useFillHandle(props: UseFillHandleProps): UseFillHandleReturn {
             pattern,
             allSourceValues: sourceValues[colIdx],
             fillIndex,
+            sourceStyleIndex: getSourceStyle(sourceRow, c),
           });
         }
       }
@@ -1139,7 +1481,11 @@ export function useFillHandle(props: UseFillHandleProps): UseFillHandleReturn {
         "down",
       );
 
+      await commitUndoTransaction();
       console.log("[FillHandle] autoFillToEdge complete");
+
+      // Refresh styles since we propagated styleIndex
+      window.dispatchEvent(new CustomEvent("styles:refresh"));
 
       // Emit FILL_COMPLETED event for extensions (e.g., sparklines)
       import("../../api/events").then(({ emitAppEvent, AppEvents }) => {
@@ -1169,6 +1515,7 @@ export function useFillHandle(props: UseFillHandleProps): UseFillHandleReturn {
       }));
     } catch (error) {
       console.error("[FillHandle] autoFillToEdge failed:", error);
+      await commitUndoTransaction();
     }
   }, [selection, dispatch]);
 
