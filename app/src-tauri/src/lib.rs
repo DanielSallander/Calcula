@@ -571,6 +571,10 @@ fn convert_builtin_function(func: &ParserBuiltinFn) -> EngineBuiltinFn {
         ParserBuiltinFn::Row => EngineBuiltinFn::Row,
         ParserBuiltinFn::Column => EngineBuiltinFn::Column,
 
+        // Advanced
+        ParserBuiltinFn::Let => EngineBuiltinFn::Let,
+        ParserBuiltinFn::TextJoin => EngineBuiltinFn::TextJoin,
+
         ParserBuiltinFn::Custom(name) => EngineBuiltinFn::Custom(name.clone()),
     }
 }
@@ -1641,6 +1645,8 @@ fn builtin_function_to_name(func: &ParserBuiltinFn) -> String {
         ParserBuiltinFn::GetCellFillColor => "GET.CELL.FILLCOLOR".to_string(),
         ParserBuiltinFn::Row => "ROW".to_string(),
         ParserBuiltinFn::Column => "COLUMN".to_string(),
+        ParserBuiltinFn::Let => "LET".to_string(),
+        ParserBuiltinFn::TextJoin => "TEXTJOIN".to_string(),
         ParserBuiltinFn::Custom(name) => name.clone(),
     }
 }

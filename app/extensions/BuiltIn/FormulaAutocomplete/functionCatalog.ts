@@ -81,10 +81,12 @@ const COMMON_FUNCTIONS: Record<string, number> = {
   SECOND: 26,
 
   // Error handling & logic
+  LET: 24,
   IFNA: 24,
   IFS: 23,
   SWITCH: 22,
   XOR: 21,
+  TEXTJOIN: 20,
 
   // Math
   ROUNDUP: 17,

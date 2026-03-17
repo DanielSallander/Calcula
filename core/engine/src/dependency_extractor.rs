@@ -261,6 +261,10 @@ pub enum BuiltinFunction {
     Row,
     Column,
 
+    // Advanced
+    Let,
+    TextJoin,
+
     /// Fallback for unrecognized function names (future extensions/plugins).
     Custom(String),
 }

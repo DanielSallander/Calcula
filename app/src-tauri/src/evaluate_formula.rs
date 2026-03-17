@@ -594,6 +594,8 @@ fn builtin_fn_name(func: &BuiltinFunction) -> String {
         BuiltinFunction::Sln => "SLN".to_string(),
         BuiltinFunction::Db => "DB".to_string(),
         BuiltinFunction::Ddb => "DDB".to_string(),
+        BuiltinFunction::Let => "LET".to_string(),
+        BuiltinFunction::TextJoin => "TEXTJOIN".to_string(),
         BuiltinFunction::Custom(name) => name.clone(),
     }
 }

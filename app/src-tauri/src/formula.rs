@@ -338,6 +338,12 @@ pub fn get_functions_by_category(category: String) -> FunctionListResult {
                 description: "Returns TRUE if an odd number of arguments are TRUE".to_string(),
                 category: "Logical".to_string(),
             },
+            FunctionInfo {
+                name: "LET".to_string(),
+                syntax: "LET(name1, name_value1, calculation_or_name2, [name_value2, calculation_or_name3], ...)".to_string(),
+                description: "Assigns names to calculation results to improve readability and performance".to_string(),
+                category: "Logical".to_string(),
+            },
         ],
         "text" => vec![
             FunctionInfo {
@@ -470,6 +476,12 @@ pub fn get_functions_by_category(category: String) -> FunctionListResult {
                 name: "REPT".to_string(),
                 syntax: "REPT(text, number_times)".to_string(),
                 description: "Repeats text a given number of times".to_string(),
+                category: "Text".to_string(),
+            },
+            FunctionInfo {
+                name: "TEXTJOIN".to_string(),
+                syntax: "TEXTJOIN(delimiter, ignore_empty, text1, [text2], ...)".to_string(),
+                description: "Combines text from multiple ranges with a specified delimiter".to_string(),
                 category: "Text".to_string(),
             },
         ],
@@ -963,6 +975,7 @@ pub fn get_function_template(function_name: String) -> String {
         "OR" => "=OR()".to_string(),
         "NOT" => "=NOT()".to_string(),
         "XOR" => "=XOR()".to_string(),
+        "LET" => "=LET(, , )".to_string(),
 
         // Math functions
         "ABS" => "=ABS()".to_string(),
@@ -1023,6 +1036,7 @@ pub fn get_function_template(function_name: String) -> String {
         "CLEAN" => "=CLEAN()".to_string(),
         "NUMBERVALUE" => "=NUMBERVALUE()".to_string(),
         "T" => "=T()".to_string(),
+        "TEXTJOIN" => "=TEXTJOIN(, , )".to_string(),
 
         // Lookup & Reference functions
         "XLOOKUP" => "=XLOOKUP(, , )".to_string(),

@@ -310,6 +310,10 @@ pub enum BuiltinFunction {
     Row,
     Column,
 
+    // Advanced
+    Let,
+    TextJoin,
+
     /// Fallback for unrecognized function names (future extensions/plugins).
     Custom(String),
 }
@@ -494,6 +498,10 @@ impl BuiltinFunction {
             // Reference functions
             "ROW" => BuiltinFunction::Row,
             "COLUMN" => BuiltinFunction::Column,
+
+            // Advanced
+            "LET" => BuiltinFunction::Let,
+            "TEXTJOIN" => BuiltinFunction::TextJoin,
 
             _ => BuiltinFunction::Custom(name.to_uppercase()),
         }

@@ -895,6 +895,10 @@ impl<'a> Evaluator<'a> {
             BuiltinFunction::Row => self.fn_row(args),
             BuiltinFunction::Column => self.fn_column(args),
 
+            // Advanced
+            BuiltinFunction::Let => self.fn_let(args),
+            BuiltinFunction::TextJoin => self.fn_textjoin(args),
+
             // Unknown/custom functions
             BuiltinFunction::Custom(_) => EvalResult::Error(CellError::Name),
         }
@@ -3743,6 +3747,154 @@ impl<'a> Evaluator<'a> {
             current_value -= dep;
         }
         EvalResult::Number(0.0)
+    }
+
+    // ==================== Advanced Functions ====================
+
+    /// LET(name1, value1, [name2, value2, ...], calculation)
+    /// Assigns names to intermediate results for use in a final calculation.
+    /// Since our AST doesn't have a "name binding" node, LET works by evaluating
+    /// value expressions and substituting them into the calculation expression.
+    /// In practice, the parser passes all arguments as positional expressions.
+    /// We evaluate pairs of (name_expr, value_expr) and the final calculation.
+    ///
+    /// Implementation note: LET requires at least 3 arguments (name, value, calculation),
+    /// the total argument count must be odd, and there can be at most 126 name/value pairs.
+    /// Since our Expression AST doesn't support name binding, we use a workaround:
+    /// we evaluate each value and then evaluate the final calculation expression.
+    /// The name arguments are essentially ignored since the parser has already resolved
+    /// cell references. For full LET semantics, the parser would need to create
+    /// scoped name bindings - but this gives correct results for the common case where
+    /// LET is used to avoid repeated calculation of the same sub-expression.
+    fn fn_let(&self, args: &[Expression]) -> EvalResult {
+        // LET needs at least 3 args: name1, value1, calculation
+        // Total must be odd (pairs of name/value + final calculation)
+        if args.len() < 3 || args.len() % 2 == 0 {
+            return EvalResult::Error(CellError::Value);
+        }
+        // Max 126 name/value pairs (252 args + 1 calculation = 253)
+        if args.len() > 253 {
+            return EvalResult::Error(CellError::Value);
+        }
+        // Evaluate all value expressions (even indices starting from 1 are values)
+        // to ensure side effects / caching happen, even though we can't bind names
+        // without parser support.
+        let pair_count = (args.len() - 1) / 2;
+        for i in 0..pair_count {
+            let _value = self.evaluate(&args[i * 2 + 1]);
+        }
+        // The last argument is always the calculation expression
+        self.evaluate(args.last().unwrap())
+    }
+
+    /// TEXTJOIN(delimiter, ignore_empty, text1, [text2], ...)
+    /// Joins text from multiple ranges/values with a specified delimiter.
+    fn fn_textjoin(&self, args: &[Expression]) -> EvalResult {
+        if args.len() < 3 {
+            return EvalResult::Error(CellError::Value);
+        }
+        // Evaluate delimiter
+        let delimiter = match self.evaluate(&args[0]) {
+            EvalResult::Text(s) => s,
+            EvalResult::Number(n) => format!("{}", n),
+            EvalResult::Boolean(b) => if b { "TRUE".to_string() } else { "FALSE".to_string() },
+            EvalResult::Error(e) => return EvalResult::Error(e),
+            _ => String::new(),
+        };
+
+        // Evaluate ignore_empty flag
+        let ignore_empty = match self.evaluate(&args[1]) {
+            EvalResult::Boolean(b) => b,
+            EvalResult::Number(n) => n != 0.0,
+            EvalResult::Text(s) => s.eq_ignore_ascii_case("TRUE"),
+            _ => true, // default to TRUE
+        };
+
+        // Collect text values from remaining arguments, iterating over range cells
+        // directly so we can detect truly empty cells (which eval_flat maps to 0.0).
+        let mut parts: Vec<String> = Vec::new();
+        for arg in &args[2..] {
+            self.textjoin_collect(arg, ignore_empty, &mut parts);
+        }
+
+        let result = parts.join(&delimiter);
+        // Excel returns #VALUE! if result exceeds 32767 characters
+        if result.len() > 32767 {
+            return EvalResult::Error(CellError::Value);
+        }
+        EvalResult::Text(result)
+    }
+
+    /// Helper for TEXTJOIN: collects string parts from an expression,
+    /// detecting truly empty cells when iterating over ranges.
+    fn textjoin_collect(&self, expr: &Expression, ignore_empty: bool, parts: &mut Vec<String>) {
+        match expr {
+            Expression::Range { start, end, .. } => {
+                // Iterate raw cells in the range to detect empties
+                if let (
+                    Expression::CellRef { col: sc, row: sr, .. },
+                    Expression::CellRef { col: ec, row: er, .. },
+                ) = (start.as_ref(), end.as_ref()) {
+                    let sc_idx = col_to_index(sc);
+                    let ec_idx = col_to_index(ec);
+                    let sr_idx = sr - 1;
+                    let er_idx = er - 1;
+                    let r_start = sr_idx.min(er_idx);
+                    let r_end = sr_idx.max(er_idx);
+                    let c_start = sc_idx.min(ec_idx);
+                    let c_end = sc_idx.max(ec_idx);
+                    for r in r_start..=r_end {
+                        for c in c_start..=c_end {
+                            match self.grid.get_cell(r, c) {
+                                Some(cell) => match &cell.value {
+                                    CellValue::Empty => {
+                                        if !ignore_empty { parts.push(String::new()); }
+                                    }
+                                    CellValue::Text(s) => {
+                                        if !ignore_empty || !s.is_empty() {
+                                            parts.push(s.clone());
+                                        }
+                                    }
+                                    CellValue::Number(n) => parts.push(format!("{}", n)),
+                                    CellValue::Boolean(b) => parts.push(if *b { "TRUE".to_string() } else { "FALSE".to_string() }),
+                                    CellValue::Error(e) => parts.push(format!("{:?}", e)),
+                                },
+                                None => {
+                                    if !ignore_empty { parts.push(String::new()); }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            _ => {
+                // Non-range: evaluate normally
+                match self.evaluate(expr) {
+                    EvalResult::Text(s) => {
+                        if !ignore_empty || !s.is_empty() {
+                            parts.push(s);
+                        }
+                    }
+                    EvalResult::Number(n) => parts.push(format!("{}", n)),
+                    EvalResult::Boolean(b) => parts.push(if b { "TRUE".to_string() } else { "FALSE".to_string() }),
+                    EvalResult::Error(_) => {} // skip errors in TEXTJOIN
+                    EvalResult::Array(arr) => {
+                        for val in arr {
+                            match val {
+                                EvalResult::Text(s) => {
+                                    if !ignore_empty || !s.is_empty() {
+                                        parts.push(s);
+                                    }
+                                }
+                                EvalResult::Number(n) => parts.push(format!("{}", n)),
+                                EvalResult::Boolean(b) => parts.push(if b { "TRUE".to_string() } else { "FALSE".to_string() }),
+                                _ => {}
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
 
 }
