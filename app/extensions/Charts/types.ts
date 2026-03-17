@@ -17,17 +17,21 @@ export type ChartType =
   | "pie"
   | "donut"
   | "waterfall"
-  | "combo";
+  | "combo"
+  | "radar"
+  | "bubble"
+  | "histogram"
+  | "funnel";
 
 /** Chart types that use cartesian axes (X/Y). */
-export type CartesianChartType = "bar" | "horizontalBar" | "line" | "area" | "scatter" | "waterfall" | "combo";
+export type CartesianChartType = "bar" | "horizontalBar" | "line" | "area" | "scatter" | "waterfall" | "combo" | "bubble" | "histogram";
 
 /** Chart types that use polar/radial layout (no axes). */
-export type RadialChartType = "pie" | "donut";
+export type RadialChartType = "pie" | "donut" | "radar";
 
 /** Check if a chart type uses cartesian axes. */
 export function isCartesianChart(mark: ChartType): mark is CartesianChartType {
-  return mark !== "pie" && mark !== "donut";
+  return mark !== "pie" && mark !== "donut" && mark !== "radar" && mark !== "funnel";
 }
 
 // ============================================================================
@@ -130,6 +134,52 @@ export interface ComboMarkOptions {
   secondaryAxis?: AxisSpec;
 }
 
+/** Options specific to radar charts. */
+export interface RadarMarkOptions {
+  /** Show filled polygon behind lines. Default: true */
+  showFill?: boolean;
+  /** Fill opacity (0-1). Default: 0.2 */
+  fillOpacity?: number;
+  /** Line width in pixels. Default: 2 */
+  lineWidth?: number;
+  /** Show point markers at vertices. Default: true */
+  showMarkers?: boolean;
+  /** Point marker radius in pixels. Default: 4 */
+  markerRadius?: number;
+}
+
+/** Options specific to bubble charts. */
+export interface BubbleMarkOptions {
+  /** Index of the series whose values determine bubble size. Default: last series index */
+  sizeSeriesIndex?: number;
+  /** Minimum bubble radius in pixels. Default: 4 */
+  minBubbleSize?: number;
+  /** Maximum bubble radius in pixels. Default: 30 */
+  maxBubbleSize?: number;
+  /** Bubble opacity (0-1). Default: 0.7 */
+  bubbleOpacity?: number;
+}
+
+/** Options specific to histogram charts. */
+export interface HistogramMarkOptions {
+  /** Number of bins. Default: 10 */
+  binCount?: number;
+  /** Border radius on bars (pixels). Default: 1 */
+  borderRadius?: number;
+}
+
+/** Options specific to funnel charts. */
+export interface FunnelMarkOptions {
+  /** Width ratio of the narrowest section (0-1). Default: 0.3 */
+  neckWidthRatio?: number;
+  /** Show value labels on sections. Default: true */
+  showLabels?: boolean;
+  /** Label format: "value", "percent", or "both". Default: "both" */
+  labelFormat?: "value" | "percent" | "both";
+  /** Gap between sections in pixels. Default: 2 */
+  sectionGap?: number;
+}
+
 /** Union of all mark-specific options. */
 export type MarkOptions =
   | BarMarkOptions
@@ -138,7 +188,11 @@ export type MarkOptions =
   | ScatterMarkOptions
   | PieMarkOptions
   | WaterfallMarkOptions
-  | ComboMarkOptions;
+  | ComboMarkOptions
+  | RadarMarkOptions
+  | BubbleMarkOptions
+  | HistogramMarkOptions
+  | FunnelMarkOptions;
 
 /** How series data is oriented within the data range. */
 export type SeriesOrientation = "columns" | "rows";

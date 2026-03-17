@@ -13,7 +13,7 @@ export const chartSpecJsonSchema: object = {
   properties: {
     mark: {
       type: "string",
-      enum: ["bar", "horizontalBar", "line", "area", "scatter", "pie", "donut", "waterfall", "combo"],
+      enum: ["bar", "horizontalBar", "line", "area", "scatter", "pie", "donut", "waterfall", "combo", "radar", "bubble", "histogram", "funnel"],
       description: "Chart type. Determines the visual mark used to represent data.",
     },
     data: {
@@ -72,6 +72,10 @@ export const chartSpecJsonSchema: object = {
         { $ref: "#/definitions/PieMarkOptions" },
         { $ref: "#/definitions/WaterfallMarkOptions" },
         { $ref: "#/definitions/ComboMarkOptions" },
+        { $ref: "#/definitions/RadarMarkOptions" },
+        { $ref: "#/definitions/BubbleMarkOptions" },
+        { $ref: "#/definitions/HistogramMarkOptions" },
+        { $ref: "#/definitions/FunnelMarkOptions" },
       ],
     },
   },
@@ -272,6 +276,49 @@ export const chartSpecJsonSchema: object = {
       },
       additionalProperties: false,
     },
+    RadarMarkOptions: {
+      type: "object",
+      description: "Options for radar (spider) charts.",
+      properties: {
+        showFill: { type: "boolean", description: "Show filled polygon area. Default: true." },
+        fillOpacity: { type: "number", minimum: 0, maximum: 1, description: "Fill opacity (0-1). Default: 0.2." },
+        lineWidth: { type: "number", minimum: 0.5, description: "Line width in pixels. Default: 2." },
+        showMarkers: { type: "boolean", description: "Show point markers at vertices. Default: true." },
+        markerRadius: { type: "number", minimum: 1, description: "Marker radius in pixels. Default: 4." },
+      },
+      additionalProperties: false,
+    },
+    BubbleMarkOptions: {
+      type: "object",
+      description: "Options for bubble charts. Scatter plot with sized bubbles.",
+      properties: {
+        sizeSeriesIndex: { type: "integer", minimum: 0, description: "Series index used for bubble sizes. Default: last series." },
+        minBubbleSize: { type: "number", minimum: 1, description: "Minimum bubble radius in pixels. Default: 4." },
+        maxBubbleSize: { type: "number", minimum: 1, description: "Maximum bubble radius in pixels. Default: 30." },
+        bubbleOpacity: { type: "number", minimum: 0, maximum: 1, description: "Bubble opacity (0-1). Default: 0.7." },
+      },
+      additionalProperties: false,
+    },
+    HistogramMarkOptions: {
+      type: "object",
+      description: "Options for histogram charts. Auto-bins numeric data.",
+      properties: {
+        binCount: { type: "integer", minimum: 2, description: "Number of bins. Default: 10." },
+        borderRadius: { type: "number", minimum: 0, description: "Corner radius on bars in pixels. Default: 1." },
+      },
+      additionalProperties: false,
+    },
+    FunnelMarkOptions: {
+      type: "object",
+      description: "Options for funnel charts. Progressively narrowing sections.",
+      properties: {
+        neckWidthRatio: { type: "number", minimum: 0.05, maximum: 0.95, description: "Narrowest width as ratio of widest. Default: 0.3." },
+        showLabels: { type: "boolean", description: "Show labels on sections. Default: true." },
+        labelFormat: { type: "string", enum: ["value", "percent", "both"], description: "Label format. Default: \"both\"." },
+        sectionGap: { type: "number", minimum: 0, description: "Gap between sections in pixels. Default: 2." },
+      },
+      additionalProperties: false,
+    },
   },
   additionalProperties: false,
 };
@@ -289,7 +336,7 @@ export function generateSpecReference(): string {
   lines.push("");
   lines.push("| Property | Type | Description |");
   lines.push("|----------|------|-------------|");
-  lines.push("| mark | string | Chart type: bar, horizontalBar, line, area, scatter, pie, donut, waterfall, combo |");
+  lines.push("| mark | string | Chart type: bar, horizontalBar, line, area, scatter, pie, donut, waterfall, combo, radar, bubble, histogram, funnel |");
   lines.push("| data | object \\| string | DataRangeRef object, A1 reference string, or named range name |");
   lines.push("| hasHeaders | boolean | First row/column contains header labels |");
   lines.push("| seriesOrientation | string | \"columns\" or \"rows\" |");
@@ -396,6 +443,41 @@ export function generateSpecReference(): string {
   lines.push("| secondaryYAxis | boolean | false | Enable right Y axis |");
   lines.push("| secondaryAxisSeries | number[] | [] | Series using secondary axis |");
   lines.push("| secondaryAxis | AxisSpec | - | Secondary axis config |");
+  lines.push("");
+
+  lines.push("### radar");
+  lines.push("| Property | Type | Default | Description |");
+  lines.push("|----------|------|---------|-------------|");
+  lines.push("| showFill | boolean | true | Show filled polygon area |");
+  lines.push("| fillOpacity | number | 0.2 | Fill opacity (0-1) |");
+  lines.push("| lineWidth | number | 2 | Line width (px) |");
+  lines.push("| showMarkers | boolean | true | Show point markers |");
+  lines.push("| markerRadius | number | 4 | Marker radius (px) |");
+  lines.push("");
+
+  lines.push("### bubble");
+  lines.push("| Property | Type | Default | Description |");
+  lines.push("|----------|------|---------|-------------|");
+  lines.push("| sizeSeriesIndex | integer | last | Series index for bubble sizes |");
+  lines.push("| minBubbleSize | number | 4 | Min bubble radius (px) |");
+  lines.push("| maxBubbleSize | number | 30 | Max bubble radius (px) |");
+  lines.push("| bubbleOpacity | number | 0.7 | Bubble opacity (0-1) |");
+  lines.push("");
+
+  lines.push("### histogram");
+  lines.push("| Property | Type | Default | Description |");
+  lines.push("|----------|------|---------|-------------|");
+  lines.push("| binCount | integer | 10 | Number of bins |");
+  lines.push("| borderRadius | number | 1 | Corner radius on bars (px) |");
+  lines.push("");
+
+  lines.push("### funnel");
+  lines.push("| Property | Type | Default | Description |");
+  lines.push("|----------|------|---------|-------------|");
+  lines.push("| neckWidthRatio | number | 0.3 | Narrowest width ratio (0.05-0.95) |");
+  lines.push("| showLabels | boolean | true | Show section labels |");
+  lines.push("| labelFormat | string | \"both\" | value, percent, or both |");
+  lines.push("| sectionGap | number | 2 | Gap between sections (px) |");
   lines.push("");
 
   lines.push("## Cell References");

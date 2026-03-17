@@ -31,6 +31,10 @@ const CHART_TYPES: Array<{ value: ChartType; label: string }> = [
   { value: "donut", label: "Donut Chart" },
   { value: "waterfall", label: "Waterfall Chart" },
   { value: "combo", label: "Combo Chart" },
+  { value: "radar", label: "Radar Chart" },
+  { value: "bubble", label: "Bubble Chart" },
+  { value: "histogram", label: "Histogram" },
+  { value: "funnel", label: "Funnel Chart" },
 ];
 
 export function DesignTab({ spec, onSpecChange }: DesignTabProps): React.ReactElement {
@@ -338,6 +342,140 @@ function MarkOptions({ spec, onSpecChange }: DesignTabProps): React.ReactElement
           </CheckboxLabel>
           <div style={{ fontSize: "11px", color: "var(--text-secondary)", marginTop: "4px" }}>
             First series renders as bars, others as lines. Customize in Spec tab.
+          </div>
+        </FieldGroup>
+      );
+
+    case "radar":
+      return (
+        <FieldGroup>
+          <Label>Radar Options</Label>
+          <CheckboxLabel>
+            <input
+              type="checkbox"
+              checked={(opts as any).showFill ?? true}
+              onChange={(e) => updateMarkOptions({ showFill: e.target.checked })}
+            />
+            Show fill
+          </CheckboxLabel>
+          <CheckboxLabel>
+            <input
+              type="checkbox"
+              checked={(opts as any).showMarkers ?? true}
+              onChange={(e) => updateMarkOptions({ showMarkers: e.target.checked })}
+            />
+            Show point markers
+          </CheckboxLabel>
+          <div style={{ display: "flex", alignItems: "center", gap: "8px", marginBottom: "4px" }}>
+            <span style={{ fontSize: "12px", color: "var(--text-secondary)" }}>Fill opacity:</span>
+            <Input
+              type="number"
+              min={0}
+              max={1}
+              step={0.1}
+              value={(opts as any).fillOpacity ?? 0.2}
+              onChange={(e) => updateMarkOptions({ fillOpacity: parseFloat(e.target.value) || 0.2 })}
+              style={{ width: "60px" }}
+            />
+          </div>
+        </FieldGroup>
+      );
+
+    case "bubble":
+      return (
+        <FieldGroup>
+          <Label>Bubble Options</Label>
+          <div style={{ display: "flex", alignItems: "center", gap: "8px", marginBottom: "4px" }}>
+            <span style={{ fontSize: "12px", color: "var(--text-secondary)" }}>Min bubble size:</span>
+            <Input
+              type="number"
+              min={1}
+              max={50}
+              value={(opts as any).minBubbleSize ?? 4}
+              onChange={(e) => updateMarkOptions({ minBubbleSize: parseInt(e.target.value, 10) || 4 })}
+              style={{ width: "60px" }}
+            />
+          </div>
+          <div style={{ display: "flex", alignItems: "center", gap: "8px", marginBottom: "4px" }}>
+            <span style={{ fontSize: "12px", color: "var(--text-secondary)" }}>Max bubble size:</span>
+            <Input
+              type="number"
+              min={5}
+              max={100}
+              value={(opts as any).maxBubbleSize ?? 30}
+              onChange={(e) => updateMarkOptions({ maxBubbleSize: parseInt(e.target.value, 10) || 30 })}
+              style={{ width: "60px" }}
+            />
+          </div>
+          <div style={{ display: "flex", alignItems: "center", gap: "8px", marginBottom: "4px" }}>
+            <span style={{ fontSize: "12px", color: "var(--text-secondary)" }}>Opacity:</span>
+            <Input
+              type="number"
+              min={0}
+              max={1}
+              step={0.1}
+              value={(opts as any).bubbleOpacity ?? 0.7}
+              onChange={(e) => updateMarkOptions({ bubbleOpacity: parseFloat(e.target.value) || 0.7 })}
+              style={{ width: "60px" }}
+            />
+          </div>
+        </FieldGroup>
+      );
+
+    case "histogram":
+      return (
+        <FieldGroup>
+          <Label>Histogram Options</Label>
+          <div style={{ display: "flex", alignItems: "center", gap: "8px", marginBottom: "4px" }}>
+            <span style={{ fontSize: "12px", color: "var(--text-secondary)" }}>Number of bins:</span>
+            <Input
+              type="number"
+              min={2}
+              max={100}
+              value={(opts as any).binCount ?? 10}
+              onChange={(e) => updateMarkOptions({ binCount: parseInt(e.target.value, 10) || 10 })}
+              style={{ width: "60px" }}
+            />
+          </div>
+        </FieldGroup>
+      );
+
+    case "funnel":
+      return (
+        <FieldGroup>
+          <Label>Funnel Options</Label>
+          <CheckboxLabel>
+            <input
+              type="checkbox"
+              checked={(opts as any).showLabels ?? true}
+              onChange={(e) => updateMarkOptions({ showLabels: e.target.checked })}
+            />
+            Show labels
+          </CheckboxLabel>
+          {(opts as any).showLabels !== false && (
+            <div style={{ display: "flex", alignItems: "center", gap: "8px", marginBottom: "4px" }}>
+              <span style={{ fontSize: "12px", color: "var(--text-secondary)" }}>Label format:</span>
+              <Select
+                value={(opts as any).labelFormat ?? "both"}
+                onChange={(e) => updateMarkOptions({ labelFormat: e.target.value })}
+              >
+                <option value="value">Value</option>
+                <option value="percent">Percentage</option>
+                <option value="both">Both</option>
+              </Select>
+            </div>
+          )}
+          <div style={{ display: "flex", alignItems: "center", gap: "8px", marginBottom: "4px" }}>
+            <span style={{ fontSize: "12px", color: "var(--text-secondary)" }}>Neck width ratio:</span>
+            <Input
+              type="number"
+              min={0.05}
+              max={0.9}
+              step={0.05}
+              value={(opts as any).neckWidthRatio ?? 0.3}
+              onChange={(e) => updateMarkOptions({ neckWidthRatio: parseFloat(e.target.value) || 0.3 })}
+              style={{ width: "60px" }}
+            />
           </div>
         </FieldGroup>
       );

@@ -30,6 +30,10 @@ import { paintPieChart, computePieLayout, computePieSliceArcs } from "./pieChart
 import { paintScatterChart, computeScatterLayout, computeScatterPointMarkers } from "./scatterChartPainter";
 import { paintWaterfallChart, computeWaterfallLayout, computeWaterfallBarRects } from "./waterfallChartPainter";
 import { paintComboChart, computeComboLayout, computeComboHitGeometry } from "./comboChartPainter";
+import { paintRadarChart, computeRadarLayout, computeRadarPointMarkers } from "./radarChartPainter";
+import { paintBubbleChart, computeBubbleLayout, computeBubblePointMarkers } from "./bubbleChartPainter";
+import { paintHistogramChart, computeHistogramLayout, computeHistogramBarRects } from "./histogramChartPainter";
+import { paintFunnelChart, computeFunnelLayout, computeFunnelBarRects } from "./funnelChartPainter";
 import { DEFAULT_CHART_THEME } from "./chartTheme";
 import { getSeriesColor } from "./chartTheme";
 import { isChartSelected, getSubSelection } from "../handlers/selectionHandler";
@@ -269,6 +273,18 @@ function paintChart(
     case "combo":
       paintComboChart(ctx, data, spec, layout, theme);
       break;
+    case "radar":
+      paintRadarChart(ctx, data, spec, layout, theme);
+      break;
+    case "bubble":
+      paintBubbleChart(ctx, data, spec, layout, theme);
+      break;
+    case "histogram":
+      paintHistogramChart(ctx, data, spec, layout, theme);
+      break;
+    case "funnel":
+      paintFunnelChart(ctx, data, spec, layout, theme);
+      break;
   }
 }
 
@@ -290,6 +306,10 @@ function computeChartLayout(
     case "donut": return computePieLayout(width, height, spec, data, theme);
     case "waterfall": return computeWaterfallLayout(width, height, spec, data, theme);
     case "combo": return computeComboLayout(width, height, spec, data, theme);
+    case "radar": return computeRadarLayout(width, height, spec, data, theme);
+    case "bubble": return computeBubbleLayout(width, height, spec, data, theme);
+    case "histogram": return computeHistogramLayout(width, height, spec, data, theme);
+    case "funnel": return computeFunnelLayout(width, height, spec, data, theme);
   }
 }
 
@@ -318,6 +338,14 @@ function computeChartHitGeometry(
       return { type: "bars", rects: computeWaterfallBarRects(data, spec, layout, theme) };
     case "combo":
       return computeComboHitGeometry(data, spec, layout, theme);
+    case "radar":
+      return { type: "points", markers: computeRadarPointMarkers(data, spec, layout, theme) };
+    case "bubble":
+      return { type: "points", markers: computeBubblePointMarkers(data, spec, layout, theme) };
+    case "histogram":
+      return { type: "bars", rects: computeHistogramBarRects(data, spec, layout, theme) };
+    case "funnel":
+      return { type: "bars", rects: computeFunnelBarRects(data, spec, layout, theme) };
   }
 }
 
