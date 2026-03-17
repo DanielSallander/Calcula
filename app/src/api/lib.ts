@@ -625,3 +625,18 @@ export type {
   ComputedPropertyData,
   ComputedPropertyResult,
 } from "./backend";
+
+// ============================================================================
+// Print / Page Setup API
+// ============================================================================
+
+export {
+  getPageSetup,
+  setPageSetup,
+  getPrintData,
+} from "./backend";
+
+export type {
+  PageSetup,
+  PrintData,
+} from "./backend";

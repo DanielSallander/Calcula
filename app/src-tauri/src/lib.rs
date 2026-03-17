@@ -217,6 +217,8 @@ pub struct AppState {
     pub computed_prop_dependents: Mutex<computed_properties::ComputedPropDependents>,
     /// Control metadata: (sheet_index, row, col) -> ControlMetadata
     pub controls: Mutex<controls::ControlStorage>,
+    /// Page setup settings per sheet (indexed by sheet index)
+    pub page_setups: Mutex<Vec<crate::api_types::PageSetup>>,
     /// Spill tracking: maps (sheet_index, origin_row, origin_col) to list of (row, col) spill cells
     /// Used by dynamic array functions (FILTER, SORT, UNIQUE, SEQUENCE)
     pub spill_ranges: Mutex<HashMap<(usize, u32, u32), Vec<(u32, u32)>>>,
@@ -295,6 +297,7 @@ pub fn create_app_state() -> AppState {
         computed_prop_dependencies: Mutex::new(HashMap::new()),
         computed_prop_dependents: Mutex::new(HashMap::new()),
         controls: Mutex::new(HashMap::new()),
+        page_setups: Mutex::new(vec![crate::api_types::PageSetup::default()]),
         spill_ranges: Mutex::new(HashMap::new()),
         spill_hosts: Mutex::new(HashMap::new()),
     }
@@ -2872,6 +2875,10 @@ pub fn run() {
             controls::remove_control_metadata,
             controls::get_all_controls,
             controls::resolve_control_properties,
+            // Print commands
+            commands::get_page_setup,
+            commands::set_page_setup,
+            commands::get_print_data,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

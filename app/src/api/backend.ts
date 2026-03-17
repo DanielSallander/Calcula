@@ -3269,3 +3269,58 @@ export async function biGetRegionAtCell(
 ): Promise<BiRegionInfo | null> {
   return invoke<BiRegionInfo | null>("bi_get_region_at_cell", { row, col });
 }
+
+// ===========================================================================
+// Print / Page Setup
+// ===========================================================================
+
+/** Page setup configuration for printing. */
+export interface PageSetup {
+  paperSize: string;
+  orientation: string;
+  marginTop: number;
+  marginBottom: number;
+  marginLeft: number;
+  marginRight: number;
+  marginHeader: number;
+  marginFooter: number;
+  scale: number;
+  fitToWidth: number;
+  fitToHeight: number;
+  printGridlines: boolean;
+  printHeadings: boolean;
+  printArea: string;
+  printTitlesRows: string;
+  printTitlesCols: string;
+  centerHorizontally: boolean;
+  centerVertically: boolean;
+  header: string;
+  footer: string;
+}
+
+/** All data needed to render a print preview or print. */
+export interface PrintData {
+  cells: CellData[];
+  styles: import("../core/types").StyleData[];
+  colWidths: number[];
+  rowHeights: number[];
+  mergedRegions: { startRow: number; startCol: number; endRow: number; endCol: number }[];
+  pageSetup: PageSetup;
+  sheetName: string;
+  bounds: [number, number];
+}
+
+/** Get the page setup for the active sheet. */
+export async function getPageSetup(): Promise<PageSetup> {
+  return invoke<PageSetup>("get_page_setup", {});
+}
+
+/** Set the page setup for the active sheet. */
+export async function setPageSetup(setup: PageSetup): Promise<void> {
+  return invoke<void>("set_page_setup", { setup });
+}
+
+/** Get all data needed for printing the active sheet. */
+export async function getPrintData(): Promise<PrintData> {
+  return invoke<PrintData>("get_print_data", {});
+}

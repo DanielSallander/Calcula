@@ -855,3 +855,119 @@ pub struct ComputedPropertyResult {
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub needs_style_refresh: bool,
 }
+
+// ============================================================================
+// Page Setup / Print Settings
+// ============================================================================
+
+/// Page setup configuration for printing, stored per sheet.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PageSetup {
+    /// Paper size: "letter", "a4", "a3", "legal", "tabloid"
+    #[serde(default = "default_paper_size")]
+    pub paper_size: String,
+    /// Page orientation: "portrait" or "landscape"
+    #[serde(default = "default_orientation")]
+    pub orientation: String,
+    /// Margins in inches
+    #[serde(default = "default_margin")]
+    pub margin_top: f64,
+    #[serde(default = "default_margin")]
+    pub margin_bottom: f64,
+    #[serde(default = "default_margin_side")]
+    pub margin_left: f64,
+    #[serde(default = "default_margin_side")]
+    pub margin_right: f64,
+    /// Header/footer margins in inches
+    #[serde(default = "default_header_margin")]
+    pub margin_header: f64,
+    #[serde(default = "default_header_margin")]
+    pub margin_footer: f64,
+    /// Scaling percentage (100 = no scaling)
+    #[serde(default = "default_scale")]
+    pub scale: u32,
+    /// Fit to N pages wide (0 = auto/disabled)
+    #[serde(default)]
+    pub fit_to_width: u32,
+    /// Fit to N pages tall (0 = auto/disabled)
+    #[serde(default)]
+    pub fit_to_height: u32,
+    /// Whether to print gridlines
+    #[serde(default)]
+    pub print_gridlines: bool,
+    /// Whether to print row/column headings
+    #[serde(default)]
+    pub print_headings: bool,
+    /// Print area (e.g., "A1:F20"). Empty = entire sheet.
+    #[serde(default)]
+    pub print_area: String,
+    /// Rows to repeat at top (e.g., "1:2"). Empty = none.
+    #[serde(default)]
+    pub print_titles_rows: String,
+    /// Columns to repeat at left (e.g., "A:B"). Empty = none.
+    #[serde(default)]
+    pub print_titles_cols: String,
+    /// Center content horizontally on page
+    #[serde(default)]
+    pub center_horizontally: bool,
+    /// Center content vertically on page
+    #[serde(default)]
+    pub center_vertically: bool,
+    /// Header text (left|center|right separated by &L, &C, &R)
+    #[serde(default)]
+    pub header: String,
+    /// Footer text
+    #[serde(default = "default_footer")]
+    pub footer: String,
+}
+
+fn default_paper_size() -> String { "a4".to_string() }
+fn default_orientation() -> String { "portrait".to_string() }
+fn default_margin() -> f64 { 0.75 }
+fn default_margin_side() -> f64 { 0.7 }
+fn default_header_margin() -> f64 { 0.3 }
+fn default_scale() -> u32 { 100 }
+fn default_footer() -> String { "Page &P".to_string() }
+
+impl Default for PageSetup {
+    fn default() -> Self {
+        Self {
+            paper_size: default_paper_size(),
+            orientation: default_orientation(),
+            margin_top: default_margin(),
+            margin_bottom: default_margin(),
+            margin_left: default_margin_side(),
+            margin_right: default_margin_side(),
+            margin_header: default_header_margin(),
+            margin_footer: default_header_margin(),
+            scale: default_scale(),
+            fit_to_width: 0,
+            fit_to_height: 0,
+            print_gridlines: false,
+            print_headings: false,
+            print_area: String::new(),
+            print_titles_rows: String::new(),
+            print_titles_cols: String::new(),
+            center_horizontally: false,
+            center_vertically: false,
+            header: String::new(),
+            footer: default_footer(),
+        }
+    }
+}
+
+/// Data needed to render a print preview or execute a print.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PrintData {
+    pub cells: Vec<CellData>,
+    pub styles: Vec<StyleData>,
+    pub col_widths: Vec<f64>,
+    pub row_heights: Vec<f64>,
+    pub merged_regions: Vec<MergedRegion>,
+    pub page_setup: PageSetup,
+    pub sheet_name: String,
+    /// Grid bounds: (max_row, max_col) - 0-indexed
+    pub bounds: (u32, u32),
+}

@@ -4,6 +4,7 @@
 pub mod data;
 pub mod dimensions;
 pub mod nav;
+pub mod print;
 pub mod search;
 pub mod structure;
 pub mod styles;
@@ -13,6 +14,7 @@ pub mod utils;
 pub use data::*;
 pub use dimensions::*;
 pub use nav::*;
+pub use print::*;
 pub use search::*;
 pub use structure::*;
 pub use styles::*;
