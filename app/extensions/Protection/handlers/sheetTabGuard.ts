@@ -48,13 +48,9 @@ export function registerSheetTabProtection(): void {
         return;
       }
       if (context.totalSheets <= 1) return;
-      const confirmed = confirm(`Delete sheet "${context.sheet.name}"?`);
-      if (confirmed) {
-        const event = new CustomEvent("sheet:requestDelete", {
-          detail: { index: context.index },
-        });
-        window.dispatchEvent(event);
-      }
+      window.dispatchEvent(new CustomEvent("sheet:requestDelete", {
+        detail: { index: context.index },
+      }));
     },
   });
 

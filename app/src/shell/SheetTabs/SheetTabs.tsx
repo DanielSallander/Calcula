@@ -12,6 +12,11 @@ import {
   addSheet,
   deleteSheet,
   renameSheet,
+  moveSheet,
+  copySheet,
+  hideSheet,
+  unhideSheet,
+  setTabColor,
   // Extension registry
   sheetExtensions,
   registerCoreSheetContextMenu,
@@ -67,6 +72,27 @@ export function SheetTabs({ onSheetChange }: SheetTabsProps): React.ReactElement
   } | null>(null);
   const contextMenuRef = useRef<HTMLDivElement>(null);
 
+  // Unhide dialog state
+  const [unhideDialog, setUnhideDialog] = useState<{
+    hiddenSheets: SheetInfo[];
+    selectedIndex: number | null;
+  } | null>(null);
+
+  // Delete confirmation dialog state
+  const [deleteConfirm, setDeleteConfirm] = useState<{
+    index: number;
+    name: string;
+  } | null>(null);
+
+  // Drag-to-reorder state
+  const [dragState, setDragState] = useState<{
+    dragging: boolean;
+    sourceIndex: number;
+    currentIndex: number;
+    startX: number;
+  } | null>(null);
+  const tabsAreaRef = useRef<HTMLDivElement>(null);
+
   // Check if we're in formula reference mode
   // FIX: Use BOTH React state AND synchronous global check. React state may be stale
   // if the user types an operator (e.g., comma) and immediately clicks a sheet tab
@@ -86,30 +112,153 @@ export function SheetTabs({ onSheetChange }: SheetTabsProps): React.ReactElement
     loadSheets();
   }, []);
 
+  // Helper: apply a SheetsResult and trigger sheet switch events.
+  // backendHandledSwitch=true means the backend already swapped grids/state for the new active
+  // index, so we must NOT call setActiveSheetApi again (which would do a redundant swap).
+  const applySheetsResult = useCallback(async (
+    result: SheetsResult,
+    { switchSheet = true, backendHandledSwitch = false } = {}
+  ) => {
+    setSheets(result.sheets);
+    if (switchSheet && result.activeIndex !== activeIndex) {
+      if (backendHandledSwitch) {
+        // Backend already swapped - just sync frontend state
+        setActiveIndex(result.activeIndex);
+        const newActive = result.sheets[result.activeIndex];
+        if (newActive) {
+          dispatch(setActiveSheet(result.activeIndex, newActive.name));
+        }
+        onSheetChange?.(result.activeIndex, newActive?.name || "");
+        window.dispatchEvent(new CustomEvent("sheet:normalSwitch", {
+          detail: { newSheetIndex: result.activeIndex, newSheetName: newActive?.name || "" },
+        }));
+        emitAppEvent(AppEvents.SHEET_CHANGED, {
+          sheetIndex: result.activeIndex,
+          sheetName: newActive?.name || "",
+        });
+      } else {
+        // Need to actually switch sheets in backend
+        const switchResult = await setActiveSheetApi(result.activeIndex);
+        setSheets(switchResult.sheets);
+        setActiveIndex(switchResult.activeIndex);
+        const newActive = switchResult.sheets[switchResult.activeIndex];
+        if (newActive) {
+          dispatch(setActiveSheet(switchResult.activeIndex, newActive.name));
+        }
+        onSheetChange?.(switchResult.activeIndex, newActive?.name || "");
+        window.dispatchEvent(new CustomEvent("sheet:normalSwitch", {
+          detail: { newSheetIndex: switchResult.activeIndex, newSheetName: newActive?.name || "" },
+        }));
+        emitAppEvent(AppEvents.SHEET_CHANGED, {
+          sheetIndex: switchResult.activeIndex,
+          sheetName: newActive?.name || "",
+        });
+      }
+    } else {
+      setActiveIndex(result.activeIndex);
+    }
+  }, [activeIndex, dispatch, onSheetChange]);
+
   // Listen for custom events from context menu actions
   useEffect(() => {
     const handleRename = async (e: Event) => {
       const { index, newName } = (e as CustomEvent).detail;
-      await handleRenameSheet(index, newName);
+      await handleRenameSheetRef.current(index, newName);
     };
 
     const handleDelete = async (e: Event) => {
       const { index } = (e as CustomEvent).detail;
-      await handleDeleteSheet(index);
+      await handleDeleteSheetRef.current(index);
     };
 
     const handleAdd = async () => {
-      await handleAddSheet();
+      await handleAddSheetRef.current();
+    };
+
+    const handleMove = async (e: Event) => {
+      const { fromIndex, toIndex } = (e as CustomEvent).detail;
+      try {
+        window.dispatchEvent(new CustomEvent("sheet:reorder", {
+          detail: { fromIndex, toIndex },
+        }));
+        const result = await moveSheet(fromIndex, toIndex);
+        await applySheetsResultRef.current(result, { backendHandledSwitch: true });
+      } catch (err) {
+        console.error("[SheetTabs] moveSheet error:", err);
+        alert("Failed to move sheet: " + String(err));
+      }
+    };
+
+    const handleCopy = async (e: Event) => {
+      const { index } = (e as CustomEvent).detail;
+      try {
+        window.dispatchEvent(new CustomEvent("sheet:beforeSwitch", {
+          detail: { oldSheetIndex: -1, newSheetIndex: -1 },
+        }));
+        const result = await copySheet(index);
+        await applySheetsResultRef.current(result, { backendHandledSwitch: true });
+      } catch (err) {
+        console.error("[SheetTabs] copySheet error:", err);
+        alert("Failed to copy sheet: " + String(err));
+      }
+    };
+
+    const handleHide = async (e: Event) => {
+      const { index } = (e as CustomEvent).detail;
+      try {
+        const result = await hideSheet(index);
+        await applySheetsResultRef.current(result, { backendHandledSwitch: true });
+      } catch (err) {
+        console.error("[SheetTabs] hideSheet error:", err);
+        alert("Failed to hide sheet: " + String(err));
+      }
+    };
+
+    const handleUnhide = async () => {
+      try {
+        const current = await getSheets();
+        const hiddenSheets = current.sheets.filter(s => s.hidden);
+        if (hiddenSheets.length === 0) {
+          alert("No hidden sheets to unhide.");
+          return;
+        }
+        // Open the unhide dialog
+        setUnhideDialog({ hiddenSheets, selectedIndex: hiddenSheets[0].index });
+      } catch (err) {
+        console.error("[SheetTabs] unhideSheet error:", err);
+        alert("Failed to unhide sheet: " + String(err));
+      }
+    };
+
+    const handleTabColor = async (e: Event) => {
+      const { index, color } = (e as CustomEvent).detail;
+      try {
+        const result = await setTabColor(index, color);
+        setSheets(result.sheets);
+      } catch (err) {
+        console.error("[SheetTabs] setTabColor error:", err);
+        alert("Failed to set tab color: " + String(err));
+      }
     };
 
     window.addEventListener("sheet:requestRename", handleRename);
     window.addEventListener("sheet:requestDelete", handleDelete);
     window.addEventListener("sheet:requestAdd", handleAdd);
+    window.addEventListener("sheet:requestMove", handleMove);
+    window.addEventListener("sheet:requestCopy", handleCopy);
+    window.addEventListener("sheet:requestHide", handleHide);
+    window.addEventListener("sheet:requestUnhide", handleUnhide);
+    window.addEventListener("sheet:requestTabColor", handleTabColor);
 
     return () => {
       window.removeEventListener("sheet:requestRename", handleRename);
       window.removeEventListener("sheet:requestDelete", handleDelete);
       window.removeEventListener("sheet:requestAdd", handleAdd);
+      window.removeEventListener("sheet:requestMove", handleMove);
+      window.removeEventListener("sheet:requestCopy", handleCopy);
+      window.removeEventListener("sheet:requestHide", handleHide);
+      window.removeEventListener("sheet:requestUnhide", handleUnhide);
+      window.removeEventListener("sheet:requestTabColor", handleTabColor);
     };
   }, []);
 
@@ -188,6 +337,9 @@ export function SheetTabs({ onSheetChange }: SheetTabsProps): React.ReactElement
 
   const handleSheetClick = useCallback(
     async (index: number, event?: React.MouseEvent) => {
+      // Skip click if we just finished a drag
+      if (dragState?.dragging) return;
+
       // FIX: Check BOTH the closure value AND the synchronous global state at event time.
       // The closure value may be stale if React hasn't re-rendered since the last keystroke.
       const isCurrentlyFormulaMode = isInFormulaMode || isGlobalFormulaMode();
@@ -326,7 +478,7 @@ export function SheetTabs({ onSheetChange }: SheetTabsProps): React.ReactElement
         alert("Failed to switch sheet: " + String(err));
       }
     },
-    [activeIndex, sheets, onSheetChange, isInFormulaMode, dispatch]
+    [activeIndex, sheets, onSheetChange, isInFormulaMode, dispatch, dragState]
   );
 
   const handleAddSheet = useCallback(async () => {
@@ -374,20 +526,25 @@ export function SheetTabs({ onSheetChange }: SheetTabsProps): React.ReactElement
   }, [onSheetChange, isInFormulaMode]);
 
   const handleDeleteSheet = useCallback(
-    async (index: number) => {
+    (index: number) => {
       if (sheets.length <= 1) return;
+      if (isInFormulaMode) return;
 
-      // Don't allow deleting sheets while in formula mode
-      if (isInFormulaMode) {
-        return;
-      }
+      // Show confirmation dialog instead of using confirm()
+      const sheetName = sheets.find(s => s.index === index)?.name || `Sheet ${index}`;
+      setDeleteConfirm({ index, name: sheetName });
+    },
+    [sheets, isInFormulaMode]
+  );
 
+  const executeDeleteSheet = useCallback(
+    async (index: number) => {
       try {
         // Dispatch event BEFORE deleting sheet to save current sheet's state
         window.dispatchEvent(new CustomEvent("sheet:beforeSwitch", {
           detail: {
             oldSheetIndex: activeIndex,
-            newSheetIndex: -1, // New sheet index not known yet
+            newSheetIndex: -1,
           }
         }));
 
@@ -401,7 +558,6 @@ export function SheetTabs({ onSheetChange }: SheetTabsProps): React.ReactElement
         }
         onSheetChange?.(result.activeIndex, newActiveSheet?.name || "");
 
-        // Dispatch event to refresh grid data without full page reload
         window.dispatchEvent(new CustomEvent("sheet:normalSwitch", {
           detail: {
             newSheetIndex: result.activeIndex,
@@ -409,7 +565,6 @@ export function SheetTabs({ onSheetChange }: SheetTabsProps): React.ReactElement
           }
         }));
 
-        // Notify extensions that the active sheet changed
         emitAppEvent(AppEvents.SHEET_CHANGED, {
           sheetIndex: result.activeIndex,
           sheetName: newActiveSheet?.name || "",
@@ -419,7 +574,7 @@ export function SheetTabs({ onSheetChange }: SheetTabsProps): React.ReactElement
         alert("Failed to delete sheet: " + String(err));
       }
     },
-    [sheets.length, onSheetChange, isInFormulaMode]
+    [onSheetChange, activeIndex, dispatch]
   );
 
   const handleRenameSheet = useCallback(
@@ -439,6 +594,17 @@ export function SheetTabs({ onSheetChange }: SheetTabsProps): React.ReactElement
     },
     [isInFormulaMode]
   );
+
+  // Refs to always access the latest handler versions from stable event listeners.
+  // Must be declared AFTER the useCallback definitions to avoid temporal dead zone.
+  const handleDeleteSheetRef = useRef(handleDeleteSheet);
+  handleDeleteSheetRef.current = handleDeleteSheet;
+  const handleRenameSheetRef = useRef(handleRenameSheet);
+  handleRenameSheetRef.current = handleRenameSheet;
+  const handleAddSheetRef = useRef(handleAddSheet);
+  handleAddSheetRef.current = handleAddSheet;
+  const applySheetsResultRef = useRef(applySheetsResult);
+  applySheetsResultRef.current = applySheetsResult;
 
   const handleContextMenu = useCallback(
     (e: React.MouseEvent, index: number) => {
@@ -511,6 +677,96 @@ export function SheetTabs({ onSheetChange }: SheetTabsProps): React.ReactElement
     [contextMenu, sheets, activeIndex]
   );
 
+  // Unhide dialog confirm
+  const handleUnhideConfirm = useCallback(async () => {
+    if (!unhideDialog || unhideDialog.selectedIndex === null) return;
+    try {
+      const result = await unhideSheet(unhideDialog.selectedIndex);
+      setSheets(result.sheets);
+      setActiveIndex(result.activeIndex);
+    } catch (err) {
+      console.error("[SheetTabs] unhideSheet error:", err);
+      alert("Failed to unhide sheet: " + String(err));
+    }
+    setUnhideDialog(null);
+  }, [unhideDialog]);
+
+  // ---------------------------------------------------------------------------
+  // Drag-to-reorder handlers
+  // ---------------------------------------------------------------------------
+
+  /** Get visible tab elements within the TabsArea */
+  const getVisibleTabs = useCallback((): HTMLElement[] => {
+    if (!tabsAreaRef.current) return [];
+    return Array.from(tabsAreaRef.current.querySelectorAll('button[data-sheet-tab]')) as HTMLElement[];
+  }, []);
+
+  /** Resolve a clientX position to a visible-tab drop index */
+  const resolveDropIndex = useCallback((clientX: number): number => {
+    const tabs = getVisibleTabs();
+    if (tabs.length === 0) return 0;
+    for (let i = 0; i < tabs.length; i++) {
+      const rect = tabs[i].getBoundingClientRect();
+      const mid = rect.left + rect.width / 2;
+      if (clientX < mid) return i;
+    }
+    return tabs.length - 1;
+  }, [getVisibleTabs]);
+
+  const handleDragStart = useCallback(
+    (e: React.MouseEvent, sheetIndex: number) => {
+      if (isInFormulaMode || e.button !== 0) return;
+      // Only start drag on left-click, not on context-menu
+      setDragState({
+        dragging: false,
+        sourceIndex: sheetIndex,
+        currentIndex: sheetIndex,
+        startX: e.clientX,
+      });
+    },
+    [isInFormulaMode]
+  );
+
+  // Global mousemove / mouseup for drag
+  useEffect(() => {
+    if (!dragState) return;
+
+    const handleMouseMove = (e: MouseEvent) => {
+      setDragState(prev => {
+        if (!prev) return null;
+        const dragging = prev.dragging || Math.abs(e.clientX - prev.startX) > 5;
+        const dropIdx = resolveDropIndex(e.clientX);
+        // Map visible index back to real sheet index
+        const visibleSheets = sheets.filter(s => !s.hidden);
+        const targetSheet = visibleSheets[dropIdx];
+        const targetRealIndex = targetSheet ? targetSheet.index : prev.currentIndex;
+        return { ...prev, dragging, currentIndex: targetRealIndex };
+      });
+    };
+
+    const handleMouseUp = async () => {
+      if (dragState.dragging && dragState.sourceIndex !== dragState.currentIndex) {
+        try {
+          window.dispatchEvent(new CustomEvent("sheet:reorder", {
+            detail: { fromIndex: dragState.sourceIndex, toIndex: dragState.currentIndex },
+          }));
+          const result = await moveSheet(dragState.sourceIndex, dragState.currentIndex);
+          await applySheetsResult(result, { backendHandledSwitch: true });
+        } catch (err) {
+          console.error("[SheetTabs] drag moveSheet error:", err);
+        }
+      }
+      setDragState(null);
+    };
+
+    document.addEventListener("mousemove", handleMouseMove);
+    document.addEventListener("mouseup", handleMouseUp);
+    return () => {
+      document.removeEventListener("mousemove", handleMouseMove);
+      document.removeEventListener("mouseup", handleMouseUp);
+    };
+  }, [dragState, sheets, resolveDropIndex, applySheetsResult]);
+
   // Determine if we're viewing a different sheet than the formula source
   const isViewingDifferentSheet = isInFormulaMode && 
     editing?.sourceSheetIndex !== undefined && 
@@ -535,11 +791,11 @@ export function SheetTabs({ onSheetChange }: SheetTabsProps): React.ReactElement
       </S.NavArea>
 
       {/* Sheet tabs */}
-      <S.TabsArea>
+      <S.TabsArea ref={tabsAreaRef}>
         {isLoading ? (
           <S.LoadingText>Loading...</S.LoadingText>
         ) : (
-          sheets.map((sheet) => {
+          sheets.filter(s => !s.hidden).map((sheet) => {
             const isSourceSheet = isInFormulaMode &&
               editing?.sourceSheetIndex === sheet.index;
             const isTargetSheet = isInFormulaMode &&
@@ -551,13 +807,22 @@ export function SheetTabs({ onSheetChange }: SheetTabsProps): React.ReactElement
                 key={sheet.index}
                 type="button"
                 tabIndex={-1}
+                data-sheet-tab={sheet.index}
                 $isActive={sheet.index === activeIndex}
                 $isFormulaSource={isSourceSheet}
                 $isFormulaTarget={isTargetSheet}
-                onMouseDown={(e) => handleTabMouseDown(e, sheet.index)}
+                $tabColor={sheet.tabColor || ""}
+                onMouseDown={(e) => {
+                  handleTabMouseDown(e, sheet.index);
+                  handleDragStart(e, sheet.index);
+                }}
                 onClick={(e) => handleSheetClick(sheet.index, e)}
                 onContextMenu={(e) => handleContextMenu(e, sheet.index)}
                 onDoubleClick={() => handleDoubleClick(sheet.index)}
+                style={dragState?.dragging && dragState.sourceIndex === sheet.index
+                  ? { opacity: 0.5 }
+                  : undefined
+                }
                 title={
                   isInFormulaMode
                     ? isSourceSheet
@@ -605,6 +870,25 @@ export function SheetTabs({ onSheetChange }: SheetTabsProps): React.ReactElement
       {/* Scroll bar area */}
       <S.ScrollArea />
 
+      {/* Drag indicator */}
+      {dragState?.dragging && (() => {
+        const tabs = getVisibleTabs();
+        const visibleSheets = sheets.filter(s => !s.hidden);
+        const dropVisibleIdx = visibleSheets.findIndex(s => s.index === dragState.currentIndex);
+        const sourceVisibleIdx = visibleSheets.findIndex(s => s.index === dragState.sourceIndex);
+        if (dropVisibleIdx < 0 || sourceVisibleIdx < 0 || dropVisibleIdx === sourceVisibleIdx) return null;
+        const tabEl = tabs[dropVisibleIdx];
+        if (!tabEl) return null;
+        const tabRect = tabEl.getBoundingClientRect();
+        // Place indicator at the edge between tabs:
+        // Dropping right of source -> right edge of drop target
+        // Dropping left of source -> left edge of drop target
+        const left = dropVisibleIdx > sourceVisibleIdx
+          ? tabRect.right
+          : tabRect.left;
+        return <S.DragIndicator style={{ left: left - 1, top: tabRect.top, height: tabRect.height }} />;
+      })()}
+
       {/* Context Menu */}
       {contextMenu && (
         <S.ContextMenu
@@ -627,6 +911,69 @@ export function SheetTabs({ onSheetChange }: SheetTabsProps): React.ReactElement
             </React.Fragment>
           ))}
         </S.ContextMenu>
+      )}
+
+      {/* Delete Confirmation Dialog */}
+      {deleteConfirm && (
+        <S.DialogOverlay onClick={() => setDeleteConfirm(null)}>
+          <S.DialogBox onClick={(e) => e.stopPropagation()}>
+            <S.DialogTitle>Delete Sheet</S.DialogTitle>
+            <div style={{ fontSize: 12, marginBottom: 16, color: 'var(--text-primary)' }}>
+              Are you sure you want to delete &quot;{deleteConfirm.name}&quot;?
+            </div>
+            <S.DialogButtons>
+              <S.DialogButton onClick={() => setDeleteConfirm(null)}>
+                Cancel
+              </S.DialogButton>
+              <S.DialogButtonPrimary onClick={() => {
+                const idx = deleteConfirm.index;
+                setDeleteConfirm(null);
+                executeDeleteSheet(idx);
+              }}>
+                Delete
+              </S.DialogButtonPrimary>
+            </S.DialogButtons>
+          </S.DialogBox>
+        </S.DialogOverlay>
+      )}
+
+      {/* Unhide Dialog */}
+      {unhideDialog && (
+        <S.DialogOverlay onClick={() => setUnhideDialog(null)}>
+          <S.DialogBox onClick={(e) => e.stopPropagation()}>
+            <S.DialogTitle>Unhide Sheet</S.DialogTitle>
+            <S.DialogList>
+              {unhideDialog.hiddenSheets.map((sheet) => (
+                <S.DialogListItem
+                  key={sheet.index}
+                  $selected={unhideDialog.selectedIndex === sheet.index}
+                  onClick={() => setUnhideDialog(prev =>
+                    prev ? { ...prev, selectedIndex: sheet.index } : null
+                  )}
+                  onDoubleClick={() => {
+                    setUnhideDialog(prev =>
+                      prev ? { ...prev, selectedIndex: sheet.index } : null
+                    );
+                    handleUnhideConfirm();
+                  }}
+                >
+                  {sheet.name}
+                </S.DialogListItem>
+              ))}
+            </S.DialogList>
+            <S.DialogButtons>
+              <S.DialogButton onClick={() => setUnhideDialog(null)}>
+                Cancel
+              </S.DialogButton>
+              <S.DialogButtonPrimary
+                onClick={handleUnhideConfirm}
+                disabled={unhideDialog.selectedIndex === null}
+              >
+                OK
+              </S.DialogButtonPrimary>
+            </S.DialogButtons>
+          </S.DialogBox>
+        </S.DialogOverlay>
       )}
     </S.Container>
   );

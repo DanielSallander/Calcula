@@ -405,6 +405,8 @@ export async function calculateSheet(): Promise<CellData[]> {
 export interface SheetInfo {
   index: number;
   name: string;
+  tabColor?: string;
+  hidden?: boolean;
 }
 
 export interface SheetsResult {
@@ -433,8 +435,27 @@ export async function deleteSheet(index: number): Promise<SheetsResult> {
 }
 
 export async function renameSheet(index: number, newName: string): Promise<SheetsResult> {
-  // FIXED: Mapped 'newName' to 'new_name' to match Rust command signature
-  return invoke<SheetsResult>("rename_sheet", { index, new_name: newName });
+  return invoke<SheetsResult>("rename_sheet", { index, newName });
+}
+
+export async function moveSheet(fromIndex: number, toIndex: number): Promise<SheetsResult> {
+  return invoke<SheetsResult>("move_sheet", { fromIndex, toIndex });
+}
+
+export async function copySheet(sourceIndex: number, newName?: string): Promise<SheetsResult> {
+  return invoke<SheetsResult>("copy_sheet", { sourceIndex, newName: newName ?? null });
+}
+
+export async function hideSheet(index: number): Promise<SheetsResult> {
+  return invoke<SheetsResult>("hide_sheet", { index });
+}
+
+export async function unhideSheet(index: number): Promise<SheetsResult> {
+  return invoke<SheetsResult>("unhide_sheet", { index });
+}
+
+export async function setTabColor(index: number, color: string): Promise<SheetsResult> {
+  return invoke<SheetsResult>("set_tab_color", { index, color });
 }
 
 /**

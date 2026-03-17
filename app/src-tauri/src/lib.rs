@@ -219,6 +219,10 @@ pub struct AppState {
     pub controls: Mutex<controls::ControlStorage>,
     /// Page setup settings per sheet (indexed by sheet index)
     pub page_setups: Mutex<Vec<crate::api_types::PageSetup>>,
+    /// Tab colors per sheet (CSS hex string, empty = no color)
+    pub tab_colors: Mutex<Vec<String>>,
+    /// Hidden state per sheet
+    pub hidden_sheets: Mutex<Vec<bool>>,
     /// Spill tracking: maps (sheet_index, origin_row, origin_col) to list of (row, col) spill cells
     /// Used by dynamic array functions (FILTER, SORT, UNIQUE, SEQUENCE)
     pub spill_ranges: Mutex<HashMap<(usize, u32, u32), Vec<(u32, u32)>>>,
@@ -298,6 +302,8 @@ pub fn create_app_state() -> AppState {
         computed_prop_dependents: Mutex::new(HashMap::new()),
         controls: Mutex::new(HashMap::new()),
         page_setups: Mutex::new(vec![crate::api_types::PageSetup::default()]),
+        tab_colors: Mutex::new(vec![String::new()]),
+        hidden_sheets: Mutex::new(vec![false]),
         spill_ranges: Mutex::new(HashMap::new()),
         spill_hosts: Mutex::new(HashMap::new()),
     }
@@ -2624,6 +2630,11 @@ pub fn run() {
             sheets::rename_sheet,
             sheets::set_freeze_panes,
             sheets::get_freeze_panes,
+            sheets::move_sheet,
+            sheets::copy_sheet,
+            sheets::hide_sheet,
+            sheets::unhide_sheet,
+            sheets::set_tab_color,
             // Find & Replace commands
             commands::find_all,
             commands::count_matches,

@@ -65,6 +65,11 @@ export {
   addSheet,
   deleteSheet,
   renameSheet,
+  moveSheet,
+  copySheet,
+  hideSheet,
+  unhideSheet,
+  setTabColor,
 
   // Row/Column operations
   insertRows,

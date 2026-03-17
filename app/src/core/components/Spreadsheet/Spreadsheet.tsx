@@ -269,13 +269,38 @@ function SpreadsheetContent({
       }, 0);
     };
 
+    // Reorder cached sheet states when sheets are moved
+    const handleSheetReorder = (event: Event) => {
+      const { fromIndex, toIndex } = (event as CustomEvent).detail;
+      // Collect all entries, remap keys to match the rotation, then replace
+      const entries = Array.from(sheetStatesMap.entries());
+      const newMap = new Map<number, SheetState>();
+      for (const [key, value] of entries) {
+        let newKey = key;
+        if (key === fromIndex) {
+          newKey = toIndex;
+        } else if (fromIndex < toIndex) {
+          // Moved right: indices in (from, to] shift left by 1
+          if (key > fromIndex && key <= toIndex) newKey = key - 1;
+        } else {
+          // Moved left: indices in [to, from) shift right by 1
+          if (key >= toIndex && key < fromIndex) newKey = key + 1;
+        }
+        newMap.set(newKey, value);
+      }
+      sheetStatesMap.clear();
+      for (const [k, v] of newMap) sheetStatesMap.set(k, v);
+    };
+
     // Listen for the event that fires BEFORE the sheet switch (to save state)
     window.addEventListener("sheet:beforeSwitch", handleSheetSwitchStart);
     window.addEventListener("sheet:normalSwitch", handleSheetSwitch);
+    window.addEventListener("sheet:reorder", handleSheetReorder);
 
     return () => {
       window.removeEventListener("sheet:beforeSwitch", handleSheetSwitchStart);
       window.removeEventListener("sheet:normalSwitch", handleSheetSwitch);
+      window.removeEventListener("sheet:reorder", handleSheetReorder);
     };
   }, [refreshDimensions, selection, viewport, gridState.virtualBounds, dispatch]);
 
