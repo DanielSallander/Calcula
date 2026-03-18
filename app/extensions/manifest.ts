@@ -24,6 +24,9 @@ import ZoomSliderExtension from "./BuiltIn/ZoomSlider";
 import HomeTabExtension from "./BuiltIn/HomeTab";
 import CollectionPreviewExtension from "./BuiltIn/CollectionPreview";
 
+// Dev-only extensions
+import TestRunnerExtension from "./TestRunner";
+
 // ============================================================================
 // Built-in Extension Manifest
 // ============================================================================
@@ -57,6 +60,8 @@ export const builtInExtensions: ExtensionModule[] = [
   ZoomSliderExtension,
   // Collection Preview (sidebar panel for List/Dict cells)
   CollectionPreviewExtension,
+  // Test Runner (dev-only, macro-based integration tests)
+  ...(import.meta.env.DEV ? [TestRunnerExtension] : []),
 ];
 
 /**
