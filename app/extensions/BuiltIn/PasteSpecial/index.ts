@@ -6,13 +6,17 @@
 import type { ExtensionModule, ExtensionContext } from "../../../src/api/contract";
 import { CoreCommands } from "../../../src/api/commands";
 import { DialogExtensions } from "../../../src/api/ui";
+import { getGridStateSnapshot } from "../../../src/api/state";
+import { getInternalClipboard } from "../../../src/api/lib";
 import { PasteSpecialDialog } from "./PasteSpecialDialog";
+import { executePasteSpecial, executePasteLink } from "./pasteSpecialExecute";
 
 // ============================================================================
 // Extension State
 // ============================================================================
 
 let isActivated = false;
+let storedContext: ExtensionContext | null = null;
 
 // ============================================================================
 // Activation
@@ -38,6 +42,51 @@ function activate(context: ExtensionContext): void {
     DialogExtensions.openDialog("paste-special");
   });
 
+  // Register quick-paste commands (Paste Values, Formulas, Formatting, Link)
+  context.commands.register(CoreCommands.PASTE_VALUES, async () => {
+    const clipboard = getInternalClipboard();
+    const state = getGridStateSnapshot();
+    if (!clipboard || !state?.selection) return;
+    await executePasteSpecial(clipboard, state.selection, {
+      pasteAttribute: "values",
+      operation: "none",
+      skipBlanks: false,
+      transpose: false,
+    }, state.config.totalRows, state.config.totalCols);
+  });
+
+  context.commands.register(CoreCommands.PASTE_FORMULAS, async () => {
+    const clipboard = getInternalClipboard();
+    const state = getGridStateSnapshot();
+    if (!clipboard || !state?.selection) return;
+    await executePasteSpecial(clipboard, state.selection, {
+      pasteAttribute: "formulas",
+      operation: "none",
+      skipBlanks: false,
+      transpose: false,
+    }, state.config.totalRows, state.config.totalCols);
+  });
+
+  context.commands.register(CoreCommands.PASTE_FORMATTING, async () => {
+    const clipboard = getInternalClipboard();
+    const state = getGridStateSnapshot();
+    if (!clipboard || !state?.selection) return;
+    await executePasteSpecial(clipboard, state.selection, {
+      pasteAttribute: "formats",
+      operation: "none",
+      skipBlanks: false,
+      transpose: false,
+    }, state.config.totalRows, state.config.totalCols);
+  });
+
+  context.commands.register(CoreCommands.PASTE_LINK, async () => {
+    const clipboard = getInternalClipboard();
+    const state = getGridStateSnapshot();
+    if (!clipboard || !state?.selection) return;
+    await executePasteLink(clipboard, state.selection, state.config.totalRows, state.config.totalCols);
+  });
+
+  storedContext = context;
   isActivated = true;
   console.log("[PasteSpecialExtension] Activated successfully.");
 }
@@ -53,6 +102,14 @@ function deactivate(): void {
 
   console.log("[PasteSpecialExtension] Deactivating...");
   DialogExtensions.unregisterDialog("paste-special");
+  if (storedContext) {
+    storedContext.commands.unregister(CoreCommands.PASTE_SPECIAL);
+    storedContext.commands.unregister(CoreCommands.PASTE_VALUES);
+    storedContext.commands.unregister(CoreCommands.PASTE_FORMULAS);
+    storedContext.commands.unregister(CoreCommands.PASTE_FORMATTING);
+    storedContext.commands.unregister(CoreCommands.PASTE_LINK);
+    storedContext = null;
+  }
   isActivated = false;
   console.log("[PasteSpecialExtension] Deactivated.");
 }

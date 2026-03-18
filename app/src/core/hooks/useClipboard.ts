@@ -23,11 +23,13 @@ import {
   setCellStyle,
   shiftFormulasBatch,
   getCollectionTexts,
+  getComment,
+  getDataValidation,
 } from "../lib/tauri-api";
 import type { CellUpdateInput, FormulaShiftInput } from "../lib/tauri-api";
 import { cellEvents } from "../lib/cellEvents";
 import { setClipboard, clearClipboard, setSelection } from "../state/gridActions";
-import type { Selection, CellData, ClipboardMode } from "../types";
+import type { Selection, CellData, ClipboardMode, Comment, DataValidation } from "../types";
 
 /**
  * Internal clipboard data structure.
@@ -44,6 +46,10 @@ export interface ClipboardData {
   text: string;
   /** Map of "row,col" (relative) to JSON text for collection cells (List/Dict) */
   collectionTexts?: Map<string, string>;
+  /** Map of "row,col" (relative) to Comment for cells that have comments */
+  comments?: Map<string, Comment>;
+  /** Map of "row,col" (relative) to DataValidation for cells that have validation */
+  validations?: Map<string, DataValidation>;
 }
 
 /**
@@ -119,6 +125,62 @@ async function fetchCollectionTexts(
     }
   } catch (err) {
     console.warn("[Clipboard] Failed to fetch collection texts:", err);
+  }
+
+  return result;
+}
+
+/**
+ * Fetch comments for cells in a selection range.
+ * Returns a Map keyed by "row,col" (relative to the matrix) with Comment values.
+ */
+async function fetchComments(
+  cells: (CellData | null)[][],
+  selection: Selection,
+): Promise<Map<string, Comment>> {
+  const result = new Map<string, Comment>();
+  const minRow = Math.min(selection.startRow, selection.endRow);
+  const minCol = Math.min(selection.startCol, selection.endCol);
+
+  for (let r = 0; r < cells.length; r++) {
+    for (let c = 0; c < (cells[r]?.length ?? 0); c++) {
+      try {
+        const comment = await getComment(minRow + r, minCol + c);
+        if (comment) {
+          result.set(`${r},${c}`, comment);
+        }
+      } catch {
+        // Cell has no comment or API error — skip
+      }
+    }
+  }
+
+  return result;
+}
+
+/**
+ * Fetch data validations for cells in a selection range.
+ * Returns a Map keyed by "row,col" (relative to the matrix) with DataValidation values.
+ */
+async function fetchValidations(
+  cells: (CellData | null)[][],
+  selection: Selection,
+): Promise<Map<string, DataValidation>> {
+  const result = new Map<string, DataValidation>();
+  const minRow = Math.min(selection.startRow, selection.endRow);
+  const minCol = Math.min(selection.startCol, selection.endCol);
+
+  for (let r = 0; r < cells.length; r++) {
+    for (let c = 0; c < (cells[r]?.length ?? 0); c++) {
+      try {
+        const validation = await getDataValidation(minRow + r, minCol + c);
+        if (validation) {
+          result.set(`${r},${c}`, validation);
+        }
+      } catch {
+        // Cell has no validation or API error — skip
+      }
+    }
   }
 
   return result;
@@ -205,6 +267,10 @@ export function useClipboard(): UseClipboardReturn {
       // Detect collection cells and fetch their JSON representations
       const collectionTexts = await fetchCollectionTexts(cells, selection);
 
+      // Fetch comments and validations for paste special support
+      const comments = await fetchComments(cells, selection);
+      const validations = await fetchValidations(cells, selection);
+
       const text = cellsToText(cells, collectionTexts);
 
       // Store in internal clipboard
@@ -214,6 +280,8 @@ export function useClipboard(): UseClipboardReturn {
         isCut: false,
         text,
         collectionTexts: collectionTexts.size > 0 ? collectionTexts : undefined,
+        comments: comments.size > 0 ? comments : undefined,
+        validations: validations.size > 0 ? validations : undefined,
       };
 
       // Update state for visual feedback (marching ants border)
@@ -251,6 +319,10 @@ export function useClipboard(): UseClipboardReturn {
       // Detect collection cells and fetch their JSON representations
       const collectionTexts = await fetchCollectionTexts(cells, selection);
 
+      // Fetch comments and validations for paste special support
+      const comments = await fetchComments(cells, selection);
+      const validations = await fetchValidations(cells, selection);
+
       const text = cellsToText(cells, collectionTexts);
 
       // Store in internal clipboard with cut flag
@@ -260,6 +332,8 @@ export function useClipboard(): UseClipboardReturn {
         isCut: true,
         text,
         collectionTexts: collectionTexts.size > 0 ? collectionTexts : undefined,
+        comments: comments.size > 0 ? comments : undefined,
+        validations: validations.size > 0 ? validations : undefined,
       };
 
       // Remember cut source for clearing after paste

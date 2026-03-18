@@ -14,7 +14,10 @@
  * - "formats": Style/formatting only (font, color, borders, alignment)
  * - "comments": Cell comments/notes only
  * - "validation": Data validation rules only
+ * - "allExceptBorders": Full cell object minus border styles
  * - "columnWidths": Column width dimensions only (ignores cell contents)
+ * - "formulasAndNumberFormats": Formula text + number format only
+ * - "valuesAndNumberFormats": Flattened values + number format only
  */
 export type PasteAttribute =
   | "all"
@@ -23,7 +26,10 @@ export type PasteAttribute =
   | "formats"
   | "comments"
   | "validation"
-  | "columnWidths";
+  | "allExceptBorders"
+  | "columnWidths"
+  | "formulasAndNumberFormats"
+  | "valuesAndNumberFormats";
 
 // ============================================================================
 // Mathematical Operation (The "Operation" Group)

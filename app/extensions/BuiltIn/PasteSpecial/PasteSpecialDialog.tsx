@@ -24,7 +24,10 @@ const PASTE_ATTRIBUTES: { value: PasteAttribute; label: string }[] = [
   { value: "formats", label: "Formats" },
   { value: "comments", label: "Comments" },
   { value: "validation", label: "Validation" },
+  { value: "allExceptBorders", label: "All except borders" },
   { value: "columnWidths", label: "Column widths" },
+  { value: "formulasAndNumberFormats", label: "Formulas and number formats" },
+  { value: "valuesAndNumberFormats", label: "Values and number formats" },
 ];
 
 const OPERATIONS: { value: PasteOperation; label: string }[] = [

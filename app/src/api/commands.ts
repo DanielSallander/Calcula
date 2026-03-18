@@ -15,6 +15,10 @@ export const CoreCommands = {
   COPY: "core.clipboard.copy",
   PASTE: "core.clipboard.paste",
   PASTE_SPECIAL: "core.clipboard.pasteSpecial",
+  PASTE_VALUES: "core.clipboard.pasteValues",
+  PASTE_FORMULAS: "core.clipboard.pasteFormulas",
+  PASTE_FORMATTING: "core.clipboard.pasteFormatting",
+  PASTE_LINK: "core.clipboard.pasteLink",
 
   // Edit
   UNDO: "core.edit.undo",

@@ -33,7 +33,19 @@ function registerEditMenu(context: ExtensionContext): void {
       { id: "edit:sep1", label: "", separator: true },
       { id: "edit:cut", label: "Cut", shortcut: "Ctrl+X", commandId: CoreCommands.CUT },
       { id: "edit:copy", label: "Copy", shortcut: "Ctrl+C", commandId: CoreCommands.COPY },
-      { id: "edit:paste", label: "Paste", shortcut: "Ctrl+V", commandId: CoreCommands.PASTE },
+      {
+        id: "edit:paste",
+        label: "Paste",
+        children: [
+          { id: "edit:paste:paste", label: "Paste", commandId: CoreCommands.PASTE, shortcut: "Ctrl+V" },
+          { id: "edit:paste:values", label: "Paste Values", commandId: CoreCommands.PASTE_VALUES },
+          { id: "edit:paste:formulas", label: "Paste Formulas", commandId: CoreCommands.PASTE_FORMULAS },
+          { id: "edit:paste:formatting", label: "Paste Formatting", commandId: CoreCommands.PASTE_FORMATTING },
+          { id: "edit:paste:link", label: "Paste Link", commandId: CoreCommands.PASTE_LINK },
+          { id: "edit:paste:sep", label: "", separator: true },
+          { id: "edit:paste:special", label: "Paste Special...", commandId: CoreCommands.PASTE_SPECIAL, shortcut: "Ctrl+Alt+V" },
+        ],
+      },
       { id: "edit:sep2", label: "", separator: true },
       {
         id: "edit:find",

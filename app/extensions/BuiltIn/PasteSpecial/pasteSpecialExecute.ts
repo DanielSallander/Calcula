@@ -4,18 +4,22 @@
 //          transpose, skip blanks, paste link) using existing API primitives.
 
 import type { CellData, Selection } from "../../../src/api/types";
-import type { ClipboardData, FormulaShiftInput } from "../../../src/api/lib";
+import type { ClipboardData, FormulaShiftInput, Comment, DataValidation, AddCommentParams } from "../../../src/api/lib";
 import type { PasteSpecialOptions, PasteOperation } from "./types";
 import {
   getCell,
   updateCell,
   setCellStyle,
+  getStyle,
+  applyFormatting,
   getColumnWidth,
   setColumnWidth,
   beginUndoTransaction,
   commitUndoTransaction,
   shiftFormulasBatch,
   indexToCol,
+  addComment,
+  setDataValidation,
 } from "../../../src/api/lib";
 import { cellEvents } from "../../../src/api";
 
@@ -123,7 +127,12 @@ export async function executePasteSpecial(
 
   // Shift formulas for copy operations (not cut)
   const shiftedFormulaMap = new Map<string, string>();
-  if (!clipboard.isCut && (pasteAttribute === "all" || pasteAttribute === "formulas")) {
+  const needsFormulaShift =
+    pasteAttribute === "all" ||
+    pasteAttribute === "formulas" ||
+    pasteAttribute === "allExceptBorders" ||
+    pasteAttribute === "formulasAndNumberFormats";
+  if (!clipboard.isCut && needsFormulaShift) {
     const sourceSel = clipboard.sourceSelection;
     const sourceMinRow = Math.min(sourceSel.startRow, sourceSel.endRow);
     const sourceMinCol = Math.min(sourceSel.startCol, sourceSel.endCol);
@@ -202,7 +211,7 @@ export async function executePasteSpecial(
           pasteAttribute,
           operation,
           shiftedFormulaMap,
-          clipboard.collectionTexts,
+          clipboard,
         );
       }
     }
@@ -304,7 +313,7 @@ async function pasteSingleCell(
   pasteAttribute: string,
   operation: PasteOperation,
   shiftedFormulaMap: Map<string, string>,
-  collectionTexts?: Map<string, string>,
+  clipboard: ClipboardData,
 ): Promise<void> {
   try {
     switch (pasteAttribute) {
@@ -315,18 +324,25 @@ async function pasteSingleCell(
         await pasteFormulas(sourceCell, destRow, destCol, srcR, srcC, operation, shiftedFormulaMap);
         break;
       case "values":
-        await pasteValues(sourceCell, destRow, destCol, srcR, srcC, operation, collectionTexts);
+        await pasteValues(sourceCell, destRow, destCol, srcR, srcC, operation, clipboard.collectionTexts);
         break;
       case "formats":
         await pasteFormats(sourceCell, destRow, destCol);
         break;
       case "comments":
-        // Comments paste is a placeholder - would need comment copy in clipboard
-        console.log("[PasteSpecial] Comments paste not yet implemented");
+        await pasteComments(clipboard, destRow, destCol, srcR, srcC);
         break;
       case "validation":
-        // Validation paste is a placeholder - would need validation copy in clipboard
-        console.log("[PasteSpecial] Validation paste not yet implemented");
+        await pasteValidation(clipboard, destRow, destCol, srcR, srcC);
+        break;
+      case "allExceptBorders":
+        await pasteAllExceptBorders(sourceCell, destRow, destCol, srcR, srcC, operation, shiftedFormulaMap);
+        break;
+      case "formulasAndNumberFormats":
+        await pasteFormulasAndNumberFormats(sourceCell, destRow, destCol, srcR, srcC, operation, shiftedFormulaMap);
+        break;
+      case "valuesAndNumberFormats":
+        await pasteValuesAndNumberFormats(sourceCell, destRow, destCol, srcR, srcC, operation, clipboard.collectionTexts);
         break;
     }
   } catch (err) {
@@ -514,6 +530,204 @@ async function pasteWithOperation(
       newValue: cell.display,
       formula: cell.formula ?? null,
     });
+  }
+}
+
+/**
+ * Paste All Except Borders: paste value/formula + all formatting except borders.
+ */
+async function pasteAllExceptBorders(
+  sourceCell: CellData | null,
+  destRow: number,
+  destCol: number,
+  srcR: number,
+  srcC: number,
+  operation: PasteOperation,
+  shiftedFormulaMap: Map<string, string>
+): Promise<void> {
+  if (operation !== "none") {
+    await pasteWithOperation(sourceCell, destRow, destCol, operation);
+  } else {
+    const value =
+      shiftedFormulaMap.get(`${srcR},${srcC}`) ??
+      sourceCell?.formula ??
+      sourceCell?.display ??
+      "";
+
+    const updatedCells = await updateCell(destRow, destCol, value);
+
+    for (const cell of updatedCells) {
+      if (cell.sheetIndex !== undefined) continue;
+      cellEvents.emit({
+        row: cell.row,
+        col: cell.col,
+        oldValue: undefined,
+        newValue: cell.display,
+        formula: cell.formula ?? null,
+      });
+    }
+  }
+
+  // Apply all style properties except borders
+  if (sourceCell) {
+    const sourceStyle = await getStyle(sourceCell.styleIndex);
+    await applyFormatting([destRow], [destCol], {
+      bold: sourceStyle.bold,
+      italic: sourceStyle.italic,
+      underline: sourceStyle.underline,
+      strikethrough: sourceStyle.strikethrough,
+      fontSize: sourceStyle.fontSize,
+      fontFamily: sourceStyle.fontFamily,
+      textColor: sourceStyle.textColor,
+      backgroundColor: sourceStyle.backgroundColor,
+      textAlign: sourceStyle.textAlign as "left" | "center" | "right" | "general",
+      verticalAlign: sourceStyle.verticalAlign as "top" | "middle" | "bottom",
+      numberFormat: sourceStyle.numberFormat,
+      wrapText: sourceStyle.wrapText,
+      textRotation: sourceStyle.textRotation as "none" | "rotate90" | "rotate270",
+      checkbox: sourceStyle.checkbox,
+      button: sourceStyle.button,
+      // Omit borderTop, borderRight, borderBottom, borderLeft
+    });
+  }
+}
+
+/**
+ * Paste Formulas and Number Formats: formula text + number format, keep other formatting.
+ */
+async function pasteFormulasAndNumberFormats(
+  sourceCell: CellData | null,
+  destRow: number,
+  destCol: number,
+  srcR: number,
+  srcC: number,
+  operation: PasteOperation,
+  shiftedFormulaMap: Map<string, string>
+): Promise<void> {
+  if (operation !== "none") {
+    await pasteWithOperation(sourceCell, destRow, destCol, operation);
+  } else {
+    const value =
+      shiftedFormulaMap.get(`${srcR},${srcC}`) ??
+      sourceCell?.formula ??
+      sourceCell?.display ??
+      "";
+
+    const updatedCells = await updateCell(destRow, destCol, value);
+
+    for (const cell of updatedCells) {
+      if (cell.sheetIndex !== undefined) continue;
+      cellEvents.emit({
+        row: cell.row,
+        col: cell.col,
+        oldValue: undefined,
+        newValue: cell.display,
+        formula: cell.formula ?? null,
+      });
+    }
+  }
+
+  // Copy only the number format from source style
+  if (sourceCell) {
+    const sourceStyle = await getStyle(sourceCell.styleIndex);
+    await applyFormatting([destRow], [destCol], {
+      numberFormat: sourceStyle.numberFormat,
+    });
+  }
+}
+
+/**
+ * Paste Values and Number Formats: display value (flattened) + number format, keep other formatting.
+ */
+async function pasteValuesAndNumberFormats(
+  sourceCell: CellData | null,
+  destRow: number,
+  destCol: number,
+  srcR: number,
+  srcC: number,
+  operation: PasteOperation,
+  collectionTexts?: Map<string, string>,
+): Promise<void> {
+  if (operation !== "none") {
+    await pasteWithOperation(sourceCell, destRow, destCol, operation);
+  } else {
+    let value = sourceCell?.display ?? "";
+    if (isCollectionCell(sourceCell)) {
+      const jsonText = collectionTexts?.get(`${srcR},${srcC}`);
+      if (jsonText) {
+        value = jsonText;
+      }
+    }
+
+    const updatedCells = await updateCell(destRow, destCol, value);
+
+    for (const cell of updatedCells) {
+      if (cell.sheetIndex !== undefined) continue;
+      cellEvents.emit({
+        row: cell.row,
+        col: cell.col,
+        oldValue: undefined,
+        newValue: cell.display,
+        formula: cell.formula ?? null,
+      });
+    }
+  }
+
+  // Copy only the number format from source style
+  if (sourceCell) {
+    const sourceStyle = await getStyle(sourceCell.styleIndex);
+    await applyFormatting([destRow], [destCol], {
+      numberFormat: sourceStyle.numberFormat,
+    });
+  }
+}
+
+/**
+ * Paste Comments: copy comment from source cell to target cell.
+ */
+async function pasteComments(
+  clipboard: ClipboardData,
+  destRow: number,
+  destCol: number,
+  srcR: number,
+  srcC: number,
+): Promise<void> {
+  const comment = clipboard.comments?.get(`${srcR},${srcC}`);
+  if (!comment) return;
+
+  try {
+    const params: AddCommentParams = {
+      row: destRow,
+      col: destCol,
+      authorEmail: comment.authorEmail,
+      authorName: comment.authorName,
+      content: comment.content,
+      richContent: comment.richContent,
+      mentions: comment.mentions,
+    };
+    await addComment(params);
+  } catch (err) {
+    console.error(`[PasteSpecial] Failed to paste comment to (${destRow}, ${destCol}):`, err);
+  }
+}
+
+/**
+ * Paste Validation: copy data validation rule from source cell to target cell.
+ */
+async function pasteValidation(
+  clipboard: ClipboardData,
+  destRow: number,
+  destCol: number,
+  srcR: number,
+  srcC: number,
+): Promise<void> {
+  const validation = clipboard.validations?.get(`${srcR},${srcC}`);
+  if (!validation) return;
+
+  try {
+    await setDataValidation(destRow, destCol, destRow, destCol, validation);
+  } catch (err) {
+    console.error(`[PasteSpecial] Failed to paste validation to (${destRow}, ${destCol}):`, err);
   }
 }
 
