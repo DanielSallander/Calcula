@@ -5,7 +5,8 @@
 import type { ChartSpec, ParsedChartData, BarRect, ChartLayout, HitGeometry } from "../types";
 import type { ChartRenderTheme } from "./chartTheme";
 import { getSeriesColor } from "./chartTheme";
-import { createLinearScale, createBandScale } from "./scales";
+import { resolvePointColor, resolvePointOpacity } from "../lib/encodingResolver";
+import { createLinearScale, createBandScale, createScaleFromSpec } from "./scales";
 import {
   computeCartesianLayout,
   drawChartBackground,
@@ -89,7 +90,8 @@ export function paintHorizontalBarChart(
   const xMin = spec.xAxis.min ?? dataMin;
   const xMax = spec.xAxis.max ?? dataMax;
 
-  const xScale = createLinearScale(
+  const xScale = createScaleFromSpec(
+    spec.xAxis.scale,
     [xMin, xMax],
     [plotArea.x, plotArea.x + plotArea.width], // left to right
   );
@@ -156,7 +158,9 @@ function drawHorizontalBars(
 
     for (let si = 0; si < numSeries; si++) {
       const value = data.series[si].values[ci] ?? 0;
-      const color = getSeriesColor(spec.palette, si, data.series[si].color);
+      const category = data.categories[ci] ?? "";
+      const encoding = spec.series[si]?.encoding;
+      const color = resolvePointColor(encoding, spec.palette, si, data.series[si].color, value, category);
 
       const barY = groupY + si * (barHeight + theme.barGap);
       const barEnd = xScale.scale(value);
@@ -170,6 +174,8 @@ function drawHorizontalBars(
 
       if (clippedWidth <= 0) continue;
 
+      const pointOpacity = resolvePointOpacity(encoding, value, category);
+      if (pointOpacity != null) ctx.globalAlpha = pointOpacity;
       ctx.fillStyle = color;
 
       if (theme.barBorderRadius > 0 && clippedWidth > theme.barBorderRadius * 2) {
@@ -185,6 +191,7 @@ function drawHorizontalBars(
       } else {
         ctx.fillRect(clippedX, barY, clippedWidth, barHeight);
       }
+      if (pointOpacity != null) ctx.globalAlpha = 1;
     }
   }
 }
@@ -217,7 +224,8 @@ export function computeHorizontalBarRects(
   const xMin = spec.xAxis.min ?? dataMin;
   const xMax = spec.xAxis.max ?? dataMax;
 
-  const xScale = createLinearScale(
+  const xScale = createScaleFromSpec(
+    spec.xAxis.scale,
     [xMin, xMax],
     [plotArea.x, plotArea.x + plotArea.width],
   );

@@ -6,7 +6,7 @@
 import type { ChartSpec, ParsedChartData, ChartLayout, BarRect, WaterfallMarkOptions } from "../types";
 import type { ChartRenderTheme } from "./chartTheme";
 import { getSeriesColor } from "./chartTheme";
-import { createLinearScale, createBandScale } from "./scales";
+import { createLinearScale, createBandScale, createScaleFromSpec } from "./scales";
 import {
   computeCartesianLayout,
   drawChartBackground,
@@ -66,7 +66,8 @@ export function paintWaterfallChart(
   const yMin = spec.yAxis.min ?? Math.min(0, minVal);
   const yMax = spec.yAxis.max ?? maxVal;
 
-  const yScale = createLinearScale(
+  const yScale = createScaleFromSpec(
+    spec.yAxis.scale,
     [yMin, yMax],
     [plotArea.y + plotArea.height, plotArea.y],
   );
@@ -282,7 +283,8 @@ export function computeWaterfallBarRects(
   const yMin = spec.yAxis.min ?? Math.min(0, minVal);
   const yMax = spec.yAxis.max ?? maxVal;
 
-  const yScale = createLinearScale(
+  const yScale = createScaleFromSpec(
+    spec.yAxis.scale,
     [yMin, yMax],
     [plotArea.y + plotArea.height, plotArea.y],
   );

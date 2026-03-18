@@ -5,7 +5,7 @@
 import type { ChartSpec, ParsedChartData, ChartLayout, PointMarker, AreaMarkOptions } from "../types";
 import type { ChartRenderTheme } from "./chartTheme";
 import { getSeriesColor } from "./chartTheme";
-import { createLinearScale, createPointScale } from "./scales";
+import { createLinearScale, createPointScale, createScaleFromSpec } from "./scales";
 import {
   computeCartesianLayout,
   drawChartBackground,
@@ -75,7 +75,8 @@ export function paintAreaChart(
   const yMin = spec.yAxis.min ?? dataMin;
   const yMax = spec.yAxis.max ?? dataMax;
 
-  const yScale = createLinearScale(
+  const yScale = createScaleFromSpec(
+    spec.yAxis.scale,
     [yMin, yMax],
     [plotArea.y + plotArea.height, plotArea.y],
   );
@@ -519,7 +520,8 @@ export function computeAreaPointMarkers(
   const yMin = spec.yAxis.min ?? dataMin;
   const yMax = spec.yAxis.max ?? dataMax;
 
-  const yScale = createLinearScale(
+  const yScale = createScaleFromSpec(
+    spec.yAxis.scale,
     [yMin, yMax],
     [plotArea.y + plotArea.height, plotArea.y],
   );

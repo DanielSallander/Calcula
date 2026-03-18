@@ -6,7 +6,7 @@
 import type { ChartSpec, ParsedChartData, ChartLayout, BarRect, HistogramMarkOptions } from "../types";
 import type { ChartRenderTheme } from "./chartTheme";
 import { getSeriesColor } from "./chartTheme";
-import { createLinearScale, createBandScale } from "./scales";
+import { createLinearScale, createBandScale, createScaleFromSpec } from "./scales";
 import {
   computeCartesianLayout,
   drawChartBackground,
@@ -126,7 +126,8 @@ export function paintHistogramChart(
     0.05, // minimal padding for histogram (bars should be adjacent)
   );
 
-  const yScale = createLinearScale(
+  const yScale = createScaleFromSpec(
+    spec.yAxis.scale,
     [0, maxCount],
     [plotArea.y + plotArea.height, plotArea.y],
   );
@@ -279,7 +280,8 @@ export function computeHistogramBarRects(
     0.05,
   );
 
-  const yScale = createLinearScale(
+  const yScale = createScaleFromSpec(
+    spec.yAxis.scale,
     [0, maxCount],
     [plotArea.y + plotArea.height, plotArea.y],
   );

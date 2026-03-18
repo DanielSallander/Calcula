@@ -23,6 +23,8 @@ export const ChartSpecEditorEvents = {
   PREVIEW_DATA_UPDATED: "chart-spec-editor:preview-data-updated",
   /** Editor -> Main: editor window was closed */
   EDITOR_CLOSED: "chart-spec-editor:editor-closed",
+  /** Editor -> Main: editor has mounted and listeners are ready */
+  EDITOR_READY: "chart-spec-editor:editor-ready",
 } as const;
 
 // ============================================================================
@@ -102,4 +104,14 @@ export function onChartSpecEditorClosed(
   callback: () => void,
 ): Promise<UnlistenFn> {
   return listenTauriEvent(ChartSpecEditorEvents.EDITOR_CLOSED, callback);
+}
+
+export async function emitEditorReady(): Promise<void> {
+  await emitTauriEvent(ChartSpecEditorEvents.EDITOR_READY);
+}
+
+export function onEditorReady(
+  callback: () => void,
+): Promise<UnlistenFn> {
+  return listenTauriEvent(ChartSpecEditorEvents.EDITOR_READY, callback);
 }

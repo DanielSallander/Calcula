@@ -18,23 +18,8 @@ import {
 
 import { getChartById, getAllCharts } from "../lib/chartStore";
 import { readChartDataResolved } from "../lib/chartDataReader";
-import {
-  paintBarChart,
-  computeLayout as computeBarLayout,
-  computeBarRects,
-} from "./barChartPainter";
-import { paintLineChart, computeLineLayout, computeLinePointMarkers } from "./lineChartPainter";
-import { paintAreaChart, computeAreaLayout, computeAreaPointMarkers } from "./areaChartPainter";
-import { paintHorizontalBarChart, computeHorizontalBarLayout, computeHorizontalBarRects } from "./horizontalBarChartPainter";
-import { paintPieChart, computePieLayout, computePieSliceArcs } from "./pieChartPainter";
-import { paintScatterChart, computeScatterLayout, computeScatterPointMarkers } from "./scatterChartPainter";
-import { paintWaterfallChart, computeWaterfallLayout, computeWaterfallBarRects } from "./waterfallChartPainter";
-import { paintComboChart, computeComboLayout, computeComboHitGeometry } from "./comboChartPainter";
-import { paintRadarChart, computeRadarLayout, computeRadarPointMarkers } from "./radarChartPainter";
-import { paintBubbleChart, computeBubbleLayout, computeBubblePointMarkers } from "./bubbleChartPainter";
-import { paintHistogramChart, computeHistogramLayout, computeHistogramBarRects } from "./histogramChartPainter";
-import { paintFunnelChart, computeFunnelLayout, computeFunnelBarRects } from "./funnelChartPainter";
-import { DEFAULT_CHART_THEME } from "./chartTheme";
+import { dispatchPaint, dispatchComputeLayout, dispatchComputeGeometry, extractBarRects } from "./chartDispatch";
+import { DEFAULT_CHART_THEME, resolveChartTheme } from "./chartTheme";
 import { getSeriesColor } from "./chartTheme";
 import { isChartSelected, getSubSelection } from "../handlers/selectionHandler";
 import { hitTestGeometry } from "./chartHitTesting";
@@ -45,7 +30,7 @@ import type {
   ChartHitResult,
   ChartLayout,
   HitGeometry,
-  ChartType,
+  TooltipSpec,
 } from "../types";
 
 // ============================================================================
@@ -236,129 +221,8 @@ export function handleChartMouseLeave(): void {
 }
 
 // ============================================================================
-// Chart Painter Dispatch
+// Chart Painter Dispatch (delegated to chartDispatch.ts)
 // ============================================================================
-
-/** Paint a chart to a canvas context, dispatching to the correct painter. */
-function paintChart(
-  ctx: CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D,
-  data: ParsedChartData,
-  spec: import("../types").ChartSpec,
-  layout: ChartLayout,
-  theme: import("./chartTheme").ChartRenderTheme,
-): void {
-  switch (spec.mark) {
-    case "bar":
-      paintBarChart(ctx, data, spec, layout, theme);
-      break;
-    case "horizontalBar":
-      paintHorizontalBarChart(ctx, data, spec, layout, theme);
-      break;
-    case "line":
-      paintLineChart(ctx, data, spec, layout, theme);
-      break;
-    case "area":
-      paintAreaChart(ctx, data, spec, layout, theme);
-      break;
-    case "scatter":
-      paintScatterChart(ctx, data, spec, layout, theme);
-      break;
-    case "pie":
-    case "donut":
-      paintPieChart(ctx, data, spec, layout, theme);
-      break;
-    case "waterfall":
-      paintWaterfallChart(ctx, data, spec, layout, theme);
-      break;
-    case "combo":
-      paintComboChart(ctx, data, spec, layout, theme);
-      break;
-    case "radar":
-      paintRadarChart(ctx, data, spec, layout, theme);
-      break;
-    case "bubble":
-      paintBubbleChart(ctx, data, spec, layout, theme);
-      break;
-    case "histogram":
-      paintHistogramChart(ctx, data, spec, layout, theme);
-      break;
-    case "funnel":
-      paintFunnelChart(ctx, data, spec, layout, theme);
-      break;
-  }
-}
-
-/** Compute layout for any chart type. */
-function computeChartLayout(
-  width: number,
-  height: number,
-  spec: import("../types").ChartSpec,
-  data: ParsedChartData,
-  theme: import("./chartTheme").ChartRenderTheme,
-): ChartLayout {
-  switch (spec.mark) {
-    case "bar": return computeBarLayout(width, height, spec, data, theme);
-    case "horizontalBar": return computeHorizontalBarLayout(width, height, spec, data, theme);
-    case "line": return computeLineLayout(width, height, spec, data, theme);
-    case "area": return computeAreaLayout(width, height, spec, data, theme);
-    case "scatter": return computeScatterLayout(width, height, spec, data, theme);
-    case "pie":
-    case "donut": return computePieLayout(width, height, spec, data, theme);
-    case "waterfall": return computeWaterfallLayout(width, height, spec, data, theme);
-    case "combo": return computeComboLayout(width, height, spec, data, theme);
-    case "radar": return computeRadarLayout(width, height, spec, data, theme);
-    case "bubble": return computeBubbleLayout(width, height, spec, data, theme);
-    case "histogram": return computeHistogramLayout(width, height, spec, data, theme);
-    case "funnel": return computeFunnelLayout(width, height, spec, data, theme);
-  }
-}
-
-/** Compute hit geometry for any chart type. */
-function computeChartHitGeometry(
-  data: ParsedChartData,
-  spec: import("../types").ChartSpec,
-  layout: ChartLayout,
-  theme: import("./chartTheme").ChartRenderTheme,
-): HitGeometry {
-  switch (spec.mark) {
-    case "bar":
-      return { type: "bars", rects: computeBarRects(data, spec, layout, theme) };
-    case "horizontalBar":
-      return { type: "bars", rects: computeHorizontalBarRects(data, spec, layout, theme) };
-    case "line":
-      return { type: "points", markers: computeLinePointMarkers(data, spec, layout, theme) };
-    case "area":
-      return { type: "points", markers: computeAreaPointMarkers(data, spec, layout, theme) };
-    case "scatter":
-      return { type: "points", markers: computeScatterPointMarkers(data, spec, layout, theme) };
-    case "pie":
-    case "donut":
-      return { type: "slices", arcs: computePieSliceArcs(data, spec, layout, theme) };
-    case "waterfall":
-      return { type: "bars", rects: computeWaterfallBarRects(data, spec, layout, theme) };
-    case "combo":
-      return computeComboHitGeometry(data, spec, layout, theme);
-    case "radar":
-      return { type: "points", markers: computeRadarPointMarkers(data, spec, layout, theme) };
-    case "bubble":
-      return { type: "points", markers: computeBubblePointMarkers(data, spec, layout, theme) };
-    case "histogram":
-      return { type: "bars", rects: computeHistogramBarRects(data, spec, layout, theme) };
-    case "funnel":
-      return { type: "bars", rects: computeFunnelBarRects(data, spec, layout, theme) };
-  }
-}
-
-/** Extract BarRect[] from HitGeometry for backwards compat with selection highlights. */
-function extractBarRects(geometry: HitGeometry): BarRect[] {
-  if (geometry.type === "bars") return geometry.rects;
-  if (geometry.type === "composite") {
-    for (const g of geometry.groups) {
-      if (g.type === "bars") return g.rects;
-    }
-  }
-  return [];
-}
 
 // ============================================================================
 // Grid Overlay Render Function
@@ -478,7 +342,10 @@ export function renderChart(overlayCtx: OverlayRenderContext): void {
   // 6. Draw tooltip (always on top)
   if (hoverState && hoverState.chartId === chartId &&
     (hoverState.hitResult.type === "bar" || hoverState.hitResult.type === "point" || hoverState.hitResult.type === "slice")) {
-    drawTooltip(ctx, canvasX, canvasY, chartWidth, chartHeight, hoverState);
+    const tooltipChart = getChartById(chartId);
+    if (!tooltipChart?.spec.tooltip || tooltipChart.spec.tooltip.enabled !== false) {
+      drawTooltip(ctx, canvasX, canvasY, chartWidth, chartHeight, hoverState, tooltipChart?.spec.tooltip);
+    }
   }
 
   ctx.restore();
@@ -548,15 +415,17 @@ async function renderChartAsync(
 
     offCtx.scale(dpr, dpr);
 
-    const layout = computeChartLayout(
+    const theme = resolveChartTheme(spec.config);
+
+    const layout = dispatchComputeLayout(
       logicalWidth,
       logicalHeight,
       spec,
       data,
-      DEFAULT_CHART_THEME,
+      theme,
     );
 
-    paintChart(offCtx, data, spec, layout, DEFAULT_CHART_THEME);
+    dispatchPaint(offCtx, data, spec, layout, theme);
 
     // Store in canvas cache
     chartCanvasCache.set(chartId, {
@@ -567,7 +436,7 @@ async function renderChartAsync(
     });
 
     // Store in data cache (separate, persists across canvas invalidation)
-    const hitGeometry = computeChartHitGeometry(data, spec, layout, DEFAULT_CHART_THEME);
+    const hitGeometry = dispatchComputeGeometry(data, spec, layout, theme);
     chartDataCache.set(chartId, {
       data,
       layout,
@@ -786,13 +655,23 @@ function drawTooltip(
   chartWidth: number,
   chartHeight: number,
   hover: NonNullable<typeof hoverState>,
+  tooltipConfig?: TooltipSpec,
 ): void {
   const { hitResult, canvasX, canvasY } = hover;
 
   const seriesName = hitResult.seriesName ?? "";
   const categoryName = hitResult.categoryName ?? "";
   const value = hitResult.value ?? 0;
-  const valueStr = formatTickValue(value);
+
+  // Determine which fields to show
+  const fields = tooltipConfig?.fields ?? ["series", "category", "value"];
+  const showSeries = fields.includes("series");
+  const showCategory = fields.includes("category");
+  const showValue = fields.includes("value");
+
+  // Format value using custom format if provided, otherwise default
+  const valueFormat = tooltipConfig?.format?.["value"];
+  const valueStr = valueFormat ? formatTooltipNumber(value, valueFormat) : formatTickValue(value);
 
   const font = "11px 'Segoe UI', system-ui, sans-serif";
   const boldFont = "600 11px 'Segoe UI', system-ui, sans-serif";
@@ -802,15 +681,31 @@ function drawTooltip(
   const offsetX = 12;
   const offsetY = -20;
 
-  // Measure text widths
-  ctx.font = boldFont;
-  const nameWidth = ctx.measureText(seriesName).width;
-  ctx.font = font;
-  const detailText = `${categoryName}: ${valueStr}`;
-  const detailWidth = ctx.measureText(detailText).width;
+  // Build tooltip lines
+  const lines: Array<{ text: string; bold: boolean }> = [];
+  if (showSeries && seriesName) {
+    lines.push({ text: seriesName, bold: true });
+  }
+  // Detail line: category and/or value
+  const detailParts: string[] = [];
+  if (showCategory && categoryName) detailParts.push(categoryName);
+  if (showValue) detailParts.push(valueStr);
+  if (detailParts.length > 0) {
+    lines.push({ text: detailParts.join(": "), bold: false });
+  }
 
-  const tooltipWidth = Math.max(nameWidth, detailWidth) + paddingX * 2;
-  const tooltipHeight = lineHeight * 2 + paddingY * 2;
+  if (lines.length === 0) return;
+
+  // Measure text widths
+  let maxLineWidth = 0;
+  for (const line of lines) {
+    ctx.font = line.bold ? boldFont : font;
+    const w = ctx.measureText(line.text).width;
+    if (w > maxLineWidth) maxLineWidth = w;
+  }
+
+  const tooltipWidth = maxLineWidth + paddingX * 2 + (showSeries ? 13 : 0); // 13 = swatch + gap
+  const tooltipHeight = lineHeight * lines.length + paddingY * 2;
 
   // Position: offset from cursor, clamped within chart bounds
   let tx = canvasX + offsetX;
@@ -874,12 +769,13 @@ function drawTooltip(
   ctx.closePath();
   ctx.stroke();
 
-  // Draw color swatch
+  // Draw color swatch (next to first line if series is shown)
   const swatchSize = 8;
   const swatchX = tx + paddingX;
-  const swatchY = ty + paddingY + (lineHeight - swatchSize) / 2;
+  let textStartX = tx + paddingX;
   const chart = getChartById(hover.chartId);
-  if (chart && hitResult.seriesIndex != null) {
+  if (showSeries && chart && hitResult.seriesIndex != null) {
+    const swatchY = ty + paddingY + (lineHeight - swatchSize) / 2;
     const color = getSeriesColor(
       chart.spec.palette,
       hitResult.seriesIndex,
@@ -887,19 +783,61 @@ function drawTooltip(
     );
     ctx.fillStyle = color;
     ctx.fillRect(swatchX, swatchY, swatchSize, swatchSize);
+    textStartX = swatchX + swatchSize + 5;
   }
 
-  // Draw series name (bold)
-  ctx.fillStyle = "#333333";
-  ctx.font = boldFont;
+  // Draw tooltip lines
   ctx.textAlign = "left";
   ctx.textBaseline = "top";
-  ctx.fillText(seriesName, swatchX + swatchSize + 5, ty + paddingY);
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    ctx.font = line.bold ? boldFont : font;
+    ctx.fillStyle = line.bold ? "#333333" : "#666666";
+    const lx = (i === 0 && showSeries) ? textStartX : tx + paddingX;
+    ctx.fillText(line.text, lx, ty + paddingY + i * lineHeight);
+  }
+}
 
-  // Draw category: value
-  ctx.font = font;
-  ctx.fillStyle = "#666666";
-  ctx.fillText(detailText, tx + paddingX, ty + paddingY + lineHeight);
+/**
+ * Format a number using a simple format string for tooltips.
+ * Supports patterns like "$,.2f", ",.0f", "%".
+ */
+function formatTooltipNumber(value: number, fmt: string): string {
+  const trimmed = fmt.trim();
+
+  // Percentage
+  if (trimmed === "%") {
+    return (value * 100).toFixed(1) + "%";
+  }
+
+  // Extract prefix, comma flag, and decimal spec
+  let prefix = "";
+  let rest = trimmed;
+
+  // Leading non-numeric characters are prefix (e.g., "$")
+  const prefixMatch = rest.match(/^([^,.\d]*)/);
+  if (prefixMatch && prefixMatch[1]) {
+    prefix = prefixMatch[1];
+    rest = rest.slice(prefix.length);
+  }
+
+  const useComma = rest.includes(",");
+  rest = rest.replace(",", "");
+
+  // Extract decimal places from ".Nf" pattern
+  const decMatch = rest.match(/\.(\d+)f?/);
+  const decimals = decMatch ? parseInt(decMatch[1], 10) : 2;
+
+  let result = value.toFixed(decimals);
+
+  // Add comma grouping
+  if (useComma) {
+    const parts = result.split(".");
+    parts[0] = parts[0].replace(/\B(?=(\d{3})+(?!\d))/g, ",");
+    result = parts.join(".");
+  }
+
+  return prefix + result;
 }
 
 // ============================================================================

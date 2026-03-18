@@ -5,7 +5,7 @@
 
 import { WebviewWindow } from "@tauri-apps/api/webviewWindow";
 import type { ChartSpec, ParsedChartData } from "../types";
-import { emitOpenWithSpec } from "./crossWindowEvents";
+import { emitOpenWithSpec, onEditorReady } from "./crossWindowEvents";
 
 // ============================================================================
 // State
@@ -51,11 +51,27 @@ export async function openSpecEditorWindow(
     center: true,
   });
 
-  // Send spec once the window has been created and React has mounted
+  // Wait for the editor to signal that its listeners are ready, then send spec.
+  // Falls back to a timeout in case the ready signal is missed.
+  let specSent = false;
+
+  const sendSpec = async () => {
+    if (specSent) return;
+    specSent = true;
+    await emitOpenWithSpec(spec, previewData);
+  };
+
+  // Listen for the editor's "ready" signal (emitted after React mounts + listeners registered)
+  onEditorReady(() => {
+    sendSpec();
+  }).then((unlisten) => {
+    // Clean up listener after spec is sent (or after fallback timeout)
+    setTimeout(unlisten, 10_000);
+  });
+
+  // Fallback: if ready signal never arrives, send after a generous timeout
   specEditorWindow.once("tauri://created", () => {
-    setTimeout(async () => {
-      await emitOpenWithSpec(spec, previewData);
-    }, 600);
+    setTimeout(() => sendSpec(), 3000);
   });
 
   specEditorWindow.once("tauri://error", (e) => {

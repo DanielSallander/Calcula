@@ -187,6 +187,156 @@ export function valuesToAngles(
 }
 
 // ============================================================================
+// Log Scale (value axis)
+// ============================================================================
+
+/**
+ * Create a logarithmic scale mapping [domainMin, domainMax] -> [rangeMin, rangeMax].
+ * Domain values must be > 0. Values <= 0 are clamped to a small epsilon.
+ */
+export function createLogScale(
+  domain: [number, number],
+  range: [number, number],
+): LinearScale {
+  const epsilon = 1e-10;
+  const d0 = Math.max(domain[0], epsilon);
+  const d1 = Math.max(domain[1], epsilon);
+  const logD0 = Math.log10(d0);
+  const logD1 = Math.log10(d1);
+  const [r0, r1] = range;
+  const logSpan = logD1 - logD0 || 1;
+  const rSpan = r1 - r0;
+
+  return {
+    domain: [d0, d1],
+    range: [r0, r1],
+    scale(value: number): number {
+      const v = Math.max(value, epsilon);
+      return r0 + ((Math.log10(v) - logD0) / logSpan) * rSpan;
+    },
+    ticks(count = 5): number[] {
+      const ticks: number[] = [];
+      const logMin = Math.floor(logD0);
+      const logMax = Math.ceil(logD1);
+      // Generate ticks at powers of 10
+      for (let p = logMin; p <= logMax; p++) {
+        const val = Math.pow(10, p);
+        if (val >= d0 && val <= d1) ticks.push(val);
+      }
+      // If too few ticks, add intermediate values (2x, 5x)
+      if (ticks.length < count) {
+        const extras: number[] = [];
+        for (let p = logMin; p <= logMax; p++) {
+          for (const m of [2, 5]) {
+            const val = m * Math.pow(10, p);
+            if (val >= d0 && val <= d1 && !ticks.includes(val)) {
+              extras.push(val);
+            }
+          }
+        }
+        ticks.push(...extras);
+        ticks.sort((a, b) => a - b);
+      }
+      return ticks.length > 0 ? ticks : [d0, d1];
+    },
+  };
+}
+
+// ============================================================================
+// Power Scale (value axis)
+// ============================================================================
+
+/**
+ * Create a power scale mapping [domainMin, domainMax] -> [rangeMin, rangeMax].
+ * @param exponent Power exponent. Default: 2 (quadratic).
+ */
+export function createPowScale(
+  domain: [number, number],
+  range: [number, number],
+  exponent = 2,
+): LinearScale {
+  const [d0, d1] = niceExtent(domain[0], domain[1]);
+  const [r0, r1] = range;
+
+  const sign = (v: number) => (v < 0 ? -1 : 1);
+  const powAbs = (v: number) => sign(v) * Math.pow(Math.abs(v), exponent);
+
+  const pD0 = powAbs(d0);
+  const pD1 = powAbs(d1);
+  const pSpan = pD1 - pD0 || 1;
+  const rSpan = r1 - r0;
+
+  return {
+    domain: [d0, d1],
+    range: [r0, r1],
+    scale(value: number): number {
+      return r0 + ((powAbs(value) - pD0) / pSpan) * rSpan;
+    },
+    ticks(count = 5): number[] {
+      // Reuse linear ticks for power scale (they appear non-linear on screen)
+      const step = niceStep(d0, d1, count);
+      const ticks: number[] = [];
+      const start = Math.ceil(d0 / step) * step;
+      for (let v = start; v <= d1 + step * 0.001; v += step) {
+        ticks.push(Math.round(v * 1e10) / 1e10);
+      }
+      return ticks;
+    },
+  };
+}
+
+// ============================================================================
+// Square Root Scale (value axis)
+// ============================================================================
+
+/**
+ * Create a square root scale (power scale with exponent 0.5).
+ * Useful for area-based encodings where perception is proportional to sqrt.
+ */
+export function createSqrtScale(
+  domain: [number, number],
+  range: [number, number],
+): LinearScale {
+  return createPowScale(domain, range, 0.5);
+}
+
+// ============================================================================
+// Scale Factory
+// ============================================================================
+
+import type { ScaleSpec } from "../types";
+
+/**
+ * Create a scale from a ScaleSpec, falling back to linear if no spec is provided.
+ * This is the primary entry point for painters to create value scales.
+ */
+export function createScaleFromSpec(
+  scaleSpec: ScaleSpec | undefined,
+  domain: [number, number],
+  range: [number, number],
+): LinearScale {
+  const type = scaleSpec?.type ?? "linear";
+
+  // Apply domain override if specified
+  let d: [number, number] = scaleSpec?.domain ?? domain;
+
+  // Reverse range if requested
+  let r: [number, number] = scaleSpec?.reverse ? [range[1], range[0]] : range;
+
+  switch (type) {
+    case "log":
+      return createLogScale(d, r);
+    case "pow":
+      return createPowScale(d, r, scaleSpec?.exponent ?? 2);
+    case "sqrt":
+      return createSqrtScale(d, r);
+    case "linear":
+    default:
+      return createLinearScale(d, r);
+  }
+}
+
+// ============================================================================
 // Helpers
 // ============================================================================
 

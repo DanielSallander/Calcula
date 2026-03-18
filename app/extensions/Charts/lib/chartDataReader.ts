@@ -13,6 +13,7 @@ import type {
   SeriesOrientation,
 } from "../types";
 import { resolveDataSource, resolveSpecReferences } from "./dataSourceResolver";
+import { applyTransforms } from "./chartTransforms";
 
 // ============================================================================
 // Public API
@@ -71,9 +72,14 @@ export async function readChartDataResolved(spec: ChartSpec): Promise<{
     }
   }
 
-  const parsedData = seriesOrientation === "columns"
+  let parsedData = seriesOrientation === "columns"
     ? parseColumnOriented(grid, numRows, numCols, hasHeaders, categoryIndex, series)
     : parseRowOriented(grid, numRows, numCols, hasHeaders, categoryIndex, series);
+
+  // Apply data transforms if specified
+  if (resolvedSpec.transform && resolvedSpec.transform.length > 0) {
+    parsedData = applyTransforms(parsedData, resolvedSpec.transform);
+  }
 
   return { spec: resolvedSpec, data: parsedData };
 }

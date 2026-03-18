@@ -45,6 +45,28 @@ export const DEFAULT_CHART_THEME: ChartRenderTheme = {
   barGap: 2,
 };
 
+/**
+ * Merge user-supplied theme overrides with the default theme.
+ * Only specified fields override defaults.
+ */
+export function mergeTheme(
+  base: ChartRenderTheme,
+  overrides: Partial<ChartRenderTheme> | undefined,
+): ChartRenderTheme {
+  if (!overrides) return base;
+  return { ...base, ...overrides };
+}
+
+/**
+ * Resolve the effective theme for a chart spec.
+ * Merges spec.config.theme overrides with DEFAULT_CHART_THEME.
+ */
+export function resolveChartTheme(
+  config: { theme?: Partial<ChartRenderTheme> } | undefined,
+): ChartRenderTheme {
+  return mergeTheme(DEFAULT_CHART_THEME, config?.theme);
+}
+
 // ============================================================================
 // Color Palettes
 // ============================================================================

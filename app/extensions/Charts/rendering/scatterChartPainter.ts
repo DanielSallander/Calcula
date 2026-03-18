@@ -6,7 +6,8 @@
 import type { ChartSpec, ParsedChartData, ChartLayout, PointMarker, ScatterMarkOptions } from "../types";
 import type { ChartRenderTheme } from "./chartTheme";
 import { getSeriesColor } from "./chartTheme";
-import { createLinearScale, createPointScale } from "./scales";
+import { resolvePointColor, resolvePointOpacity, resolvePointSize } from "../lib/encodingResolver";
+import { createLinearScale, createPointScale, createScaleFromSpec } from "./scales";
 import {
   computeCartesianLayout,
   drawChartBackground,
@@ -55,7 +56,8 @@ export function paintScatterChart(
   const yMin = spec.yAxis.min ?? dataMin;
   const yMax = spec.yAxis.max ?? dataMax;
 
-  const yScale = createLinearScale(
+  const yScale = createScaleFromSpec(
+    spec.yAxis.scale,
     [yMin, yMax],
     [plotArea.y + plotArea.height, plotArea.y],
   );
@@ -87,13 +89,23 @@ export function paintScatterChart(
 
   for (let si = 0; si < data.series.length; si++) {
     const series = data.series[si];
-    const color = getSeriesColor(spec.palette, si, series.color);
-    ctx.fillStyle = color;
+    const encoding = spec.series[si]?.encoding;
 
     for (let ci = 0; ci < data.categories.length; ci++) {
+      const value = series.values[ci] ?? 0;
+      const category = data.categories[ci] ?? "";
+      const color = resolvePointColor(encoding, spec.palette, si, series.color, value, category);
+      const resolvedSize = resolvePointSize(encoding, value, category) ?? pointSize;
+      const pointOpacity = resolvePointOpacity(encoding, value, category);
+
+      if (pointOpacity != null) ctx.globalAlpha = pointOpacity;
+      ctx.fillStyle = color;
+
       const x = xScale.scaleIndex(ci);
-      const y = yScale.scale(series.values[ci] ?? 0);
-      drawPoint(ctx, x, y, pointSize, pointShape);
+      const y = yScale.scale(value);
+      drawPoint(ctx, x, y, resolvedSize, pointShape);
+
+      if (pointOpacity != null) ctx.globalAlpha = 1;
     }
   }
 
@@ -250,7 +262,8 @@ export function computeScatterPointMarkers(
   const yMin = spec.yAxis.min ?? dataMin;
   const yMax = spec.yAxis.max ?? dataMax;
 
-  const yScale = createLinearScale(
+  const yScale = createScaleFromSpec(
+    spec.yAxis.scale,
     [yMin, yMax],
     [plotArea.y + plotArea.height, plotArea.y],
   );

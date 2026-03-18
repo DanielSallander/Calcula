@@ -15,7 +15,7 @@ import type {
 } from "../types";
 import type { ChartRenderTheme } from "./chartTheme";
 import { getSeriesColor } from "./chartTheme";
-import { createLinearScale, createBandScale, createPointScale } from "./scales";
+import { createLinearScale, createBandScale, createPointScale, createScaleFromSpec } from "./scales";
 import type { LinearScale } from "./scales";
 import {
   computeCartesianLayout,
@@ -88,7 +88,8 @@ export function paintComboChart(
   const primaryMin = primaryValues.length > 0 ? Math.min(...primaryValues) : 0;
   const primaryMax = primaryValues.length > 0 ? Math.max(...primaryValues) : 1;
 
-  const yScale = createLinearScale(
+  const yScale = createScaleFromSpec(
+    spec.yAxis.scale,
     [spec.yAxis.min ?? primaryMin, spec.yAxis.max ?? primaryMax],
     [plotArea.y + plotArea.height, plotArea.y],
   );
@@ -99,7 +100,8 @@ export function paintComboChart(
     const secMin = secValues.length > 0 ? Math.min(...secValues) : 0;
     const secMax = secValues.length > 0 ? Math.max(...secValues) : 1;
     const secAxis = opts.secondaryAxis;
-    yScaleSecondary = createLinearScale(
+    yScaleSecondary = createScaleFromSpec(
+      secAxis?.scale,
       [secAxis?.min ?? secMin, secAxis?.max ?? secMax],
       [plotArea.y + plotArea.height, plotArea.y],
     );
@@ -383,7 +385,8 @@ export function computeComboHitGeometry(
   const primaryMin = primaryValues.length > 0 ? Math.min(...primaryValues) : 0;
   const primaryMax = primaryValues.length > 0 ? Math.max(...primaryValues) : 1;
 
-  const yScale = createLinearScale(
+  const yScale = createScaleFromSpec(
+    spec.yAxis.scale,
     [spec.yAxis.min ?? primaryMin, spec.yAxis.max ?? primaryMax],
     [plotArea.y + plotArea.height, plotArea.y],
   );
@@ -395,7 +398,8 @@ export function computeComboHitGeometry(
     const secMin = secValues.length > 0 ? Math.min(...secValues) : 0;
     const secMax = secValues.length > 0 ? Math.max(...secValues) : 1;
     const secAxis = opts.secondaryAxis;
-    yScaleSecondary = createLinearScale(
+    yScaleSecondary = createScaleFromSpec(
+      secAxis?.scale,
       [secAxis?.min ?? secMin, secAxis?.max ?? secMax],
       [plotArea.y + plotArea.height, plotArea.y],
     );

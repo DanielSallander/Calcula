@@ -180,6 +180,40 @@ export interface FunnelMarkOptions {
   sectionGap?: number;
 }
 
+/** Options for rule marks (reference lines). Used in layers. */
+export interface RuleMarkOptions {
+  /** Y value for a horizontal reference line. */
+  y?: number;
+  /** X category index for a vertical reference line. */
+  x?: number;
+  /** Line color. Default: "#999999" */
+  color?: string;
+  /** Stroke width in pixels. Default: 1 */
+  strokeWidth?: number;
+  /** Dash pattern (e.g., [6, 3]). Default: [] (solid) */
+  strokeDash?: number[];
+  /** Label displayed near the line. */
+  label?: string;
+}
+
+/** Options for text marks (annotations). Used in layers. */
+export interface TextMarkOptions {
+  /** X position as category index. */
+  x?: number;
+  /** Y position as data value. */
+  y?: number;
+  /** Text content to display. Supports cell references like "=A1". */
+  text: string;
+  /** Font size in pixels. Default: 11 */
+  fontSize?: number;
+  /** Text color. Default: "#333333" */
+  color?: string;
+  /** Horizontal anchor. Default: "middle" */
+  anchor?: "start" | "middle" | "end";
+  /** Vertical baseline. Default: "middle" */
+  baseline?: "top" | "middle" | "bottom";
+}
+
 /** Union of all mark-specific options. */
 export type MarkOptions =
   | BarMarkOptions
@@ -192,7 +226,9 @@ export type MarkOptions =
   | RadarMarkOptions
   | BubbleMarkOptions
   | HistogramMarkOptions
-  | FunnelMarkOptions;
+  | FunnelMarkOptions
+  | RuleMarkOptions
+  | TextMarkOptions;
 
 /** How series data is oriented within the data range. */
 export type SeriesOrientation = "columns" | "rows";
@@ -236,11 +272,79 @@ export interface ChartSeries {
   sourceIndex: number;
   /** Override color (hex). Null = use palette color. */
   color: string | null;
+  /** Per-data-point visual encoding overrides. */
+  encoding?: SeriesEncoding;
+}
+
+// ============================================================================
+// Conditional Encoding
+// ============================================================================
+
+/** Per-data-point visual property overrides for a series. */
+export interface SeriesEncoding {
+  /** Color override — static, or conditional based on data value/category. */
+  color?: ConditionalValue<string>;
+  /** Opacity override (0-1). */
+  opacity?: ConditionalValue<number>;
+  /** Size override (for scatter/bubble point radius). */
+  size?: ConditionalValue<number>;
+  /** Stroke dash pattern override. */
+  strokeDash?: number[];
+  /** Stroke width override. */
+  strokeWidth?: number;
+}
+
+/**
+ * A value that can be static or conditional.
+ * - Static: just the value (e.g., "#FF0000")
+ * - Conditional: { condition, value, otherwise }
+ */
+export type ConditionalValue<T> =
+  | T
+  | { condition: ValueCondition; value: T; otherwise: T };
+
+/** Condition for conditional encoding, evaluated per data point. */
+export interface ValueCondition {
+  /** Which field to test: "value" (numeric data value) or "category" (category label). */
+  field: "value" | "category";
+  /** Greater than. */
+  gt?: number;
+  /** Less than. */
+  lt?: number;
+  /** Greater than or equal. */
+  gte?: number;
+  /** Less than or equal. */
+  lte?: number;
+  /** Value is one of these. */
+  oneOf?: (string | number)[];
 }
 
 // ============================================================================
 // Axis & Legend
 // ============================================================================
+
+// ============================================================================
+// Scale Specification
+// ============================================================================
+
+/** Scale type for value axes. */
+export type ScaleType = "linear" | "log" | "pow" | "sqrt";
+
+/** Scale configuration for a value axis. */
+export interface ScaleSpec {
+  /** Scale type. Default: "linear" */
+  type?: ScaleType;
+  /** Override data extent [min, max]. Default: auto from data. */
+  domain?: [number, number];
+  /** Include zero in the domain. Default: true for bar, false for line/scatter. */
+  zero?: boolean;
+  /** Extend domain to nice round numbers. Default: true */
+  nice?: boolean;
+  /** Reverse the scale direction. Default: false */
+  reverse?: boolean;
+  /** Exponent for "pow" scale type. Default: 2 */
+  exponent?: number;
+}
 
 /** Axis configuration. */
 export interface AxisSpec {
@@ -256,6 +360,12 @@ export interface AxisSpec {
   min: number | null;
   /** Max value for value axis (null = auto). */
   max: number | null;
+  /** Scale configuration for this axis. */
+  scale?: ScaleSpec;
+  /** Desired number of tick marks. Default: 5 */
+  tickCount?: number;
+  /** Number format string for tick labels (e.g., ",.2f", "$,.0f", "%"). */
+  tickFormat?: string;
 }
 
 /** Legend configuration. */
@@ -264,6 +374,158 @@ export interface LegendSpec {
   visible: boolean;
   /** Legend position. */
   position: "top" | "bottom" | "left" | "right";
+}
+
+// ============================================================================
+// Layer Specification
+// ============================================================================
+
+/** Mark types available in layers (chart types + annotation marks). */
+export type LayerMarkType = ChartType | "rule" | "text";
+
+/** A layer overlaid on the primary chart. */
+export interface LayerSpec {
+  /** Mark type for this layer. */
+  mark: LayerMarkType;
+  /** Layer-specific data source. If omitted, shares the parent chart's data. */
+  data?: DataSource;
+  /** Series definitions for this layer (if omitted, uses parent's series). */
+  series?: ChartSeries[];
+  /** Mark-specific options for this layer. */
+  markOptions?: MarkOptions;
+  /** Opacity for the entire layer (0-1). Default: 1 */
+  opacity?: number;
+}
+
+// ============================================================================
+// Data Transforms
+// ============================================================================
+
+/** Aggregation operations. */
+export type AggregateOp = "sum" | "mean" | "median" | "min" | "max" | "count";
+
+/** Window (running) operations. */
+export type WindowOp = "running_sum" | "running_mean" | "rank";
+
+/** Filter transform: remove data points where the predicate is false. */
+export interface FilterTransform {
+  type: "filter";
+  /** Series name to evaluate. Use "$category" for the category label. */
+  field: string;
+  /**
+   * Predicate string applied to each value: "> 100", "!= 0", "<= 50",
+   * "= someText" (for categories). Supports: >, <, >=, <=, =, !=
+   */
+  predicate: string;
+}
+
+/** Sort transform: reorder data points by a field's values. */
+export interface SortTransform {
+  type: "sort";
+  /** Series name to sort by. Use "$category" for alphabetical category sort. */
+  field: string;
+  /** Sort order. Default: "asc". */
+  order?: "asc" | "desc";
+}
+
+/** Aggregate transform: group by categories and reduce series values. */
+export interface AggregateTransform {
+  type: "aggregate";
+  /** Fields to group by (typically ["$category"] or a subset). */
+  groupBy: string[];
+  /** Aggregation operation. */
+  op: AggregateOp;
+  /** Series name whose values to aggregate. */
+  field: string;
+  /** Name for the resulting series. */
+  as: string;
+}
+
+/** Calculate transform: create a new series from a simple expression. */
+export interface CalculateTransform {
+  type: "calculate";
+  /**
+   * Expression string. Supports references to series by name:
+   * "Revenue * 1.1", "Revenue - Cost", "Revenue / Total * 100"
+   * Available variables: series names (spaces replaced with _), $index, $category.
+   */
+  expr: string;
+  /** Name for the resulting series. */
+  as: string;
+}
+
+/** Window transform: compute a running value over a series. */
+export interface WindowTransform {
+  type: "window";
+  /** Window operation. */
+  op: WindowOp;
+  /** Series name to compute over. */
+  field: string;
+  /** Name for the resulting series. */
+  as: string;
+}
+
+/** Bin transform: group numeric category values into bins. */
+export interface BinTransform {
+  type: "bin";
+  /** Series name whose values to bin. */
+  field: string;
+  /** Number of bins. Default: 10. */
+  binCount?: number;
+  /** Name for the binned category output. */
+  as: string;
+}
+
+/** A data transform step. Applied in sequence before rendering. */
+export type TransformSpec =
+  | FilterTransform
+  | SortTransform
+  | AggregateTransform
+  | CalculateTransform
+  | WindowTransform
+  | BinTransform;
+
+// ============================================================================
+// Deep Theming & Tooltip Config
+// ============================================================================
+
+/**
+ * Override any property of the built-in chart render theme.
+ * All fields are optional — only specified fields override the defaults.
+ */
+export interface ThemeOverrides {
+  background?: string;
+  plotBackground?: string;
+  gridLineColor?: string;
+  gridLineWidth?: number;
+  axisColor?: string;
+  axisLabelColor?: string;
+  axisTitleColor?: string;
+  titleColor?: string;
+  legendTextColor?: string;
+  fontFamily?: string;
+  titleFontSize?: number;
+  axisTitleFontSize?: number;
+  labelFontSize?: number;
+  legendFontSize?: number;
+  barBorderRadius?: number;
+  barGap?: number;
+}
+
+/** Chart-level configuration for theming and defaults. */
+export interface ChartConfig {
+  /** Override any theme property. */
+  theme?: ThemeOverrides;
+}
+
+/** Tooltip display configuration. */
+export interface TooltipSpec {
+  /** Whether tooltips are shown on hover. Default: true. */
+  enabled?: boolean;
+  /** Which fields to display. Default: ["series", "category", "value"]. */
+  fields?: Array<"series" | "category" | "value">;
+  /** Number format overrides per field (e.g., { "value": "$,.2f" }). */
+  format?: Record<string, string>;
 }
 
 // ============================================================================
@@ -296,6 +558,14 @@ export interface ChartSpec {
   palette: string;
   /** Mark-specific options (type depends on `mark`). */
   markOptions?: MarkOptions;
+  /** Additional layers overlaid on the primary chart (annotations, overlays). */
+  layers?: LayerSpec[];
+  /** Data transform pipeline applied after reading data, before rendering. */
+  transform?: TransformSpec[];
+  /** Chart-level configuration (theme overrides, defaults). */
+  config?: ChartConfig;
+  /** Tooltip display configuration. */
+  tooltip?: TooltipSpec;
 }
 
 // ============================================================================

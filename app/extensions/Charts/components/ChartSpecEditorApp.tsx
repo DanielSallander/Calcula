@@ -6,75 +6,19 @@
 //          Includes a Reference panel with full ChartSpec documentation.
 
 import React, { useState, useEffect, useRef, useCallback } from "react";
-import type { ChartSpec, ParsedChartData, ChartLayout } from "../types";
-import { DEFAULT_CHART_THEME } from "../rendering/chartTheme";
-import type { ChartRenderTheme } from "../rendering/chartTheme";
-import { paintBarChart, computeLayout as computeBarLayout } from "../rendering/barChartPainter";
-import { paintLineChart, computeLineLayout } from "../rendering/lineChartPainter";
-import { paintAreaChart, computeAreaLayout } from "../rendering/areaChartPainter";
-import { paintHorizontalBarChart, computeHorizontalBarLayout } from "../rendering/horizontalBarChartPainter";
-import { paintPieChart, computePieLayout } from "../rendering/pieChartPainter";
-import { paintScatterChart, computeScatterLayout } from "../rendering/scatterChartPainter";
-import { paintWaterfallChart, computeWaterfallLayout } from "../rendering/waterfallChartPainter";
-import { paintComboChart, computeComboLayout } from "../rendering/comboChartPainter";
-import { paintRadarChart, computeRadarLayout } from "../rendering/radarChartPainter";
-import { paintBubbleChart, computeBubbleLayout } from "../rendering/bubbleChartPainter";
-import { paintHistogramChart, computeHistogramLayout } from "../rendering/histogramChartPainter";
-import { paintFunnelChart, computeFunnelLayout } from "../rendering/funnelChartPainter";
+import type { ChartSpec, ParsedChartData } from "../types";
+import { resolveChartTheme } from "../rendering/chartTheme";
+import { dispatchPaint, dispatchComputeLayout } from "../rendering/chartDispatch";
 import {
   onOpenWithSpec,
   onSpecUpdated,
   onPreviewDataUpdated,
   emitSpecChanged,
   emitChartSpecEditorClosed,
+  emitEditorReady,
 } from "../lib/crossWindowEvents";
 import { MonacoSpecEditor } from "./MonacoSpecEditor";
 import { generateSpecReference } from "../lib/chartSpecSchema";
-
-// ============================================================================
-// Chart Rendering Helpers (same as ChartPreview)
-// ============================================================================
-
-function computeLayout(
-  w: number, h: number, spec: ChartSpec, data: ParsedChartData, theme: ChartRenderTheme,
-): ChartLayout {
-  switch (spec.mark) {
-    case "bar": return computeBarLayout(w, h, spec, data, theme);
-    case "horizontalBar": return computeHorizontalBarLayout(w, h, spec, data, theme);
-    case "line": return computeLineLayout(w, h, spec, data, theme);
-    case "area": return computeAreaLayout(w, h, spec, data, theme);
-    case "scatter": return computeScatterLayout(w, h, spec, data, theme);
-    case "pie":
-    case "donut": return computePieLayout(w, h, spec, data, theme);
-    case "waterfall": return computeWaterfallLayout(w, h, spec, data, theme);
-    case "combo": return computeComboLayout(w, h, spec, data, theme);
-    case "radar": return computeRadarLayout(w, h, spec, data, theme);
-    case "bubble": return computeBubbleLayout(w, h, spec, data, theme);
-    case "histogram": return computeHistogramLayout(w, h, spec, data, theme);
-    case "funnel": return computeFunnelLayout(w, h, spec, data, theme);
-  }
-}
-
-function paintChart(
-  ctx: CanvasRenderingContext2D, data: ParsedChartData, spec: ChartSpec,
-  layout: ChartLayout, theme: ChartRenderTheme,
-): void {
-  switch (spec.mark) {
-    case "bar": paintBarChart(ctx, data, spec, layout, theme); break;
-    case "horizontalBar": paintHorizontalBarChart(ctx, data, spec, layout, theme); break;
-    case "line": paintLineChart(ctx, data, spec, layout, theme); break;
-    case "area": paintAreaChart(ctx, data, spec, layout, theme); break;
-    case "scatter": paintScatterChart(ctx, data, spec, layout, theme); break;
-    case "pie":
-    case "donut": paintPieChart(ctx, data, spec, layout, theme); break;
-    case "waterfall": paintWaterfallChart(ctx, data, spec, layout, theme); break;
-    case "combo": paintComboChart(ctx, data, spec, layout, theme); break;
-    case "radar": paintRadarChart(ctx, data, spec, layout, theme); break;
-    case "bubble": paintBubbleChart(ctx, data, spec, layout, theme); break;
-    case "histogram": paintHistogramChart(ctx, data, spec, layout, theme); break;
-    case "funnel": paintFunnelChart(ctx, data, spec, layout, theme); break;
-  }
-}
 
 // ============================================================================
 // Styles
@@ -274,9 +218,10 @@ function PreviewCanvas({ spec, data }: {
       return;
     }
 
-    const layout = computeLayout(w, h, spec, data, DEFAULT_CHART_THEME);
+    const theme = resolveChartTheme(spec.config);
+    const layout = dispatchComputeLayout(w, h, spec, data, theme);
     ctx.clearRect(0, 0, w, h);
-    paintChart(ctx, data, spec, layout, DEFAULT_CHART_THEME);
+    dispatchPaint(ctx, data, spec, layout, theme);
   }, [spec, data]);
 
   // Re-render on resize
@@ -297,9 +242,10 @@ function PreviewCanvas({ spec, data }: {
       canvas.height = h * dpr;
       ctx.scale(dpr, dpr);
 
-      const layout = computeLayout(w, h, spec, data, DEFAULT_CHART_THEME);
+      const theme = resolveChartTheme(spec.config);
+      const layout = dispatchComputeLayout(w, h, spec, data, theme);
       ctx.clearRect(0, 0, w, h);
-      paintChart(ctx, data, spec, layout, DEFAULT_CHART_THEME);
+      dispatchPaint(ctx, data, spec, layout, theme);
     });
 
     observer.observe(container);
@@ -397,15 +343,14 @@ export function ChartSpecEditorApp(): React.ReactElement {
   useEffect(() => {
     const unlisteners: Array<Promise<() => void>> = [];
 
-    unlisteners.push(
-      onOpenWithSpec((payload) => {
-        setSpec(payload.spec);
-        setPreviewData(payload.previewData);
-        setJsonText(JSON.stringify(payload.spec, null, 2));
-        setParseError(null);
-        setIsEditing(false);
-      }),
-    );
+    const openPromise = onOpenWithSpec((payload) => {
+      setSpec(payload.spec);
+      setPreviewData(payload.previewData);
+      setJsonText(JSON.stringify(payload.spec, null, 2));
+      setParseError(null);
+      setIsEditing(false);
+    });
+    unlisteners.push(openPromise);
 
     unlisteners.push(
       onSpecUpdated((payload) => {
@@ -422,6 +367,10 @@ export function ChartSpecEditorApp(): React.ReactElement {
         setPreviewData(payload.data);
       }),
     );
+
+    // Signal to the main window that listeners are ready.
+    // Wait for the critical onOpenWithSpec listener to be registered first.
+    openPromise.then(() => emitEditorReady());
 
     const handleBeforeUnload = () => {
       emitChartSpecEditorClosed();
