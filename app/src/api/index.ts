@@ -102,6 +102,20 @@ export {
   shiftFormulasBatch,
   // Status bar aggregation
   getSelectionAggregations,
+  // Merge cells
+  mergeCells,
+  unmergeCells,
+  getMergedRegions,
+  // Row/Column operations
+  insertRows,
+  insertColumns,
+  deleteRows,
+  deleteColumns,
+  getColumnWidth,
+  getRowHeight,
+  // Sorting
+  sortRange,
+  sortRangeByColumn,
 } from "./lib";
 
 export type {

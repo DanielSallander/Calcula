@@ -148,8 +148,8 @@ export const TestRunnerPane: React.FC<TaskPaneViewProps> = () => {
     setRunning(true);
     try {
       await runAllSuites();
-      // Expand all suites after running
-      const names = getRegisteredSuites().map((s) => s.name);
+      // Expand non-skipped suites after running
+      const names = getRegisteredSuites().filter((s) => !s.disabled).map((s) => s.name);
       setExpandedSuites(new Set(names));
     } finally {
       setRunning(false);
@@ -199,6 +199,7 @@ export const TestRunnerPane: React.FC<TaskPaneViewProps> = () => {
   const totalPassed = results.reduce((s, r) => s + r.passed, 0);
   const totalFailed = results.reduce((s, r) => s + r.failed, 0);
   const totalErrors = results.reduce((s, r) => s + r.errors, 0);
+  const totalSkipped = results.reduce((s, r) => s + r.skipped, 0);
   const totalMs = results.reduce((s, r) => s + r.totalMs, 0);
 
   const statusTag = (status: string) => {
@@ -226,12 +227,14 @@ export const TestRunnerPane: React.FC<TaskPaneViewProps> = () => {
         <EmptyState>No results yet. Click &quot;Run All Tests&quot; to start.</EmptyState>
       )}
 
-      {results.map((suite) => (
-        <SuiteBlock key={suite.suiteName}>
+      {results.map((suite) => {
+        const isSkipped = suite.skipped === suite.results.length;
+        return (
+        <SuiteBlock key={suite.suiteName} style={isSkipped ? { opacity: 0.5 } : undefined}>
           <SuiteHeader onClick={() => toggleSuite(suite.suiteName)}>
             {expandedSuites.has(suite.suiteName) ? "v " : "> "}
             {suite.suiteName}
-            {" "}({suite.passed}/{suite.results.length} passed)
+            {isSkipped ? ` (${suite.results.length} skipped)` : ` (${suite.passed}/${suite.results.length} passed)`}
             <RunButton
               style={{ marginLeft: 8, padding: "2px 8px", fontSize: 11 }}
               onClick={(e) => {
@@ -255,11 +258,12 @@ export const TestRunnerPane: React.FC<TaskPaneViewProps> = () => {
               </React.Fragment>
             ))}
         </SuiteBlock>
-      ))}
+        );
+      })}
 
       {results.length > 0 && (
         <Summary>
-          Total: {totalPassed} passed, {totalFailed} failed, {totalErrors} errors ({totalMs.toFixed(0)}ms)
+          Total: {totalPassed} passed, {totalFailed} failed, {totalErrors} errors{totalSkipped > 0 ? `, ${totalSkipped} skipped` : ""} ({totalMs.toFixed(0)}ms)
         </Summary>
       )}
     </Container>

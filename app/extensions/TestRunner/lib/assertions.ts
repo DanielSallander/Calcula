@@ -78,3 +78,56 @@ export function assertTrue(condition: unknown, message: string): void {
     throw new Error(`Assertion failed: ${message}`);
   }
 }
+
+/**
+ * Assert a value is not null/undefined.
+ */
+export function expectNotNull<T>(value: T | null | undefined, message: string): asserts value is T {
+  if (value === null || value === undefined) {
+    throw new Error(`Expected non-null: ${message}`);
+  }
+}
+
+/**
+ * Assert a cell is not empty (exists and has a non-empty display).
+ */
+export function expectCellNotEmpty(cell: CellData | null, cellRef: string): void {
+  if (cell === null || cell.display === "") {
+    throw new Error(`Cell ${cellRef}: expected non-empty, got "${cell?.display ?? "null"}"`);
+  }
+}
+
+/**
+ * Assert a cell's display value contains a substring.
+ */
+export function expectCellContains(cell: CellData | null, substring: string, cellRef: string): void {
+  const display = cell?.display ?? "";
+  if (!display.includes(substring)) {
+    throw new Error(`Cell ${cellRef}: expected display to contain "${substring}", got "${display}"`);
+  }
+}
+
+/**
+ * Assert an array has the expected length.
+ */
+export function expectArrayLength(arr: unknown[], expected: number, message?: string): void {
+  if (arr.length !== expected) {
+    const prefix = message ? `${message}: ` : "";
+    throw new Error(`${prefix}expected array length ${expected}, got ${arr.length}`);
+  }
+}
+
+/**
+ * Assert that an async function throws an error.
+ */
+export async function expectThrows(fn: () => Promise<unknown>, message: string): Promise<void> {
+  let threw = false;
+  try {
+    await fn();
+  } catch {
+    threw = true;
+  }
+  if (!threw) {
+    throw new Error(`Expected to throw: ${message}`);
+  }
+}

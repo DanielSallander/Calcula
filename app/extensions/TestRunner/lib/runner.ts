@@ -179,7 +179,7 @@ async function runSuite(suite: TestSuite): Promise<SuiteResult> {
 
   console.log(`\n  Summary: ${passed} passed, ${failed} failed, ${errors} errors (${totalMs.toFixed(0)}ms)\n`);
 
-  return { suiteName: suite.name, results, totalMs, passed, failed, errors };
+  return { suiteName: suite.name, results, totalMs, passed, failed, errors, skipped: 0 };
 }
 
 /**
@@ -193,6 +193,26 @@ export async function runAllSuites(): Promise<SuiteResult[]> {
   const allResults: SuiteResult[] = [];
 
   for (const suite of registeredSuites) {
+    if (suite.disabled) {
+      const skippedResults: TestResult[] = suite.tests.map((t) => ({
+        name: t.name,
+        suiteName: suite.name,
+        status: "skipped" as const,
+        durationMs: 0,
+        logs: [],
+      }));
+      allResults.push({
+        suiteName: suite.name,
+        results: skippedResults,
+        totalMs: 0,
+        passed: 0,
+        failed: 0,
+        errors: 0,
+        skipped: suite.tests.length,
+      });
+      console.log(`\n[TestRunner] Suite: ${suite.name} [SKIPPED - disabled]`);
+      continue;
+    }
     const result = await runSuite(suite);
     allResults.push(result);
   }
@@ -201,10 +221,11 @@ export async function runAllSuites(): Promise<SuiteResult[]> {
   const totalPassed = allResults.reduce((s, r) => s + r.passed, 0);
   const totalFailed = allResults.reduce((s, r) => s + r.failed, 0);
   const totalErrors = allResults.reduce((s, r) => s + r.errors, 0);
+  const totalSkipped = allResults.reduce((s, r) => s + r.skipped, 0);
   const totalMs = allResults.reduce((s, r) => s + r.totalMs, 0);
 
   console.log("========================================");
-  console.log(`[TestRunner] Overall: ${totalPassed} passed, ${totalFailed} failed, ${totalErrors} errors (${totalMs.toFixed(0)}ms)`);
+  console.log(`[TestRunner] Overall: ${totalPassed} passed, ${totalFailed} failed, ${totalErrors} errors, ${totalSkipped} skipped (${totalMs.toFixed(0)}ms)`);
   console.log("========================================\n");
 
   latestResults = allResults;

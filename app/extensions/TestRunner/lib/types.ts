@@ -58,6 +58,8 @@ export interface TestSuite {
   name: string;
   /** Suite description */
   description?: string;
+  /** When true, the suite is registered but skipped during execution */
+  disabled?: boolean;
   /** Tests in this suite */
   tests: TestMacro[];
   /** Run before each test */
@@ -88,4 +90,5 @@ export interface SuiteResult {
   passed: number;
   failed: number;
   errors: number;
+  skipped: number;
 }
