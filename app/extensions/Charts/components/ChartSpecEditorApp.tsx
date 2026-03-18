@@ -19,6 +19,7 @@ import {
 } from "../lib/crossWindowEvents";
 import { MonacoSpecEditor } from "./MonacoSpecEditor";
 import { generateSpecReference } from "../lib/chartSpecSchema";
+import { generateSpecGuide } from "../lib/chartSpecGuide";
 
 // ============================================================================
 // Styles
@@ -264,56 +265,411 @@ function PreviewCanvas({ spec, data }: {
 // ============================================================================
 
 const referenceContent = generateSpecReference();
+const guideContent = generateSpecGuide();
+
+// ── Inline text renderer (handles **bold** and `code`) ──────────────────
+
+function renderInlineText(text: string, key?: string): React.ReactNode {
+  const parts: React.ReactNode[] = [];
+  let remaining = text;
+  let partKey = 0;
+
+  while (remaining.length > 0) {
+    // Match **bold** or `inline code`
+    const boldMatch = remaining.match(/\*\*(.+?)\*\*/);
+    const codeMatch = remaining.match(/`([^`]+)`/);
+
+    // Find whichever comes first
+    let firstMatch: { index: number; length: number; node: React.ReactNode } | null = null;
+
+    if (boldMatch && boldMatch.index !== undefined) {
+      const idx = boldMatch.index;
+      if (!firstMatch || idx < firstMatch.index) {
+        firstMatch = {
+          index: idx,
+          length: boldMatch[0].length,
+          node: <strong key={`${key}-b-${partKey}`} style={{ color: "#e0e0e0", fontWeight: 600 }}>{boldMatch[1]}</strong>,
+        };
+      }
+    }
+    if (codeMatch && codeMatch.index !== undefined) {
+      const idx = codeMatch.index;
+      if (!firstMatch || idx < firstMatch.index) {
+        firstMatch = {
+          index: idx,
+          length: codeMatch[0].length,
+          node: <code key={`${key}-c-${partKey}`} style={{
+            backgroundColor: "#2d2d2d",
+            padding: "1px 4px",
+            borderRadius: "3px",
+            fontFamily: "'Cascadia Code', Consolas, monospace",
+            fontSize: "12px",
+            color: "#ce9178",
+          }}>{codeMatch[1]}</code>,
+        };
+      }
+    }
+
+    if (!firstMatch) {
+      parts.push(remaining);
+      break;
+    }
+
+    if (firstMatch.index > 0) {
+      parts.push(remaining.slice(0, firstMatch.index));
+    }
+    parts.push(firstMatch.node);
+    partKey++;
+    remaining = remaining.slice(firstMatch.index + firstMatch.length);
+  }
+
+  return parts.length === 1 ? parts[0] : <>{parts}</>;
+}
+
+// ── Markdown-like renderer ──────────────────────────────────────────────
+
+function renderMarkdownContent(content: string): React.ReactNode[] {
+  const lines = content.split("\n");
+  const elements: React.ReactNode[] = [];
+  let i = 0;
+
+  while (i < lines.length) {
+    const line = lines[i];
+
+    // Fenced code block
+    if (line.startsWith("```")) {
+      const lang = line.slice(3).trim();
+      const codeLines: string[] = [];
+      i++;
+      while (i < lines.length && !lines[i].startsWith("```")) {
+        codeLines.push(lines[i]);
+        i++;
+      }
+      i++; // skip closing ```
+      elements.push(
+        <pre key={elements.length} style={{
+          backgroundColor: "#1a1a1a",
+          border: "1px solid #333",
+          borderRadius: "4px",
+          padding: "10px 12px",
+          margin: "6px 0 8px 0",
+          overflow: "auto",
+          fontFamily: "'Cascadia Code', Consolas, monospace",
+          fontSize: "12px",
+          lineHeight: "1.5",
+          color: lang === "json" ? "#ce9178" : "#d4d4d4",
+          whiteSpace: "pre",
+        }}>
+          {codeLines.join("\n")}
+        </pre>,
+      );
+      continue;
+    }
+
+    // Headers
+    if (line.startsWith("# ")) {
+      elements.push(<h1 key={elements.length} style={{ fontSize: "18px", fontWeight: 700, margin: "0 0 12px 0", color: "#e0e0e0", borderBottom: "1px solid #3c3c3c", paddingBottom: "6px" }}>{renderInlineText(line.slice(2))}</h1>);
+      i++;
+      continue;
+    }
+    if (line.startsWith("## ")) {
+      elements.push(<h2 key={elements.length} style={{ fontSize: "15px", fontWeight: 600, margin: "16px 0 8px 0", color: "#569cd6" }}>{renderInlineText(line.slice(3))}</h2>);
+      i++;
+      continue;
+    }
+    if (line.startsWith("### ")) {
+      elements.push(<h3 key={elements.length} style={{ fontSize: "13px", fontWeight: 600, margin: "12px 0 6px 0", color: "#4ec9b0" }}>{renderInlineText(line.slice(4))}</h3>);
+      i++;
+      continue;
+    }
+
+    // Table row
+    if (line.startsWith("|") && line.includes("|")) {
+      const cells = line.split("|").filter(Boolean).map((c) => c.trim());
+      if (cells.every((c) => c.match(/^-+$/))) {
+        i++;
+        continue; // Skip separator rows
+      }
+      const nextLine = i + 1 < lines.length ? lines[i + 1] : "";
+      const isHeader = nextLine.match(/^\|[\s-|]+$/);
+      elements.push(
+        <div key={elements.length} style={{ display: "flex", fontFamily: "'Cascadia Code', Consolas, monospace", fontSize: "11px", lineHeight: "1.8" }}>
+          {cells.map((cell, ci) => (
+            <span key={ci} style={{
+              flex: ci === 0 ? "0 0 160px" : ci === 1 ? "0 0 130px" : "1",
+              fontWeight: isHeader ? 600 : 400,
+              color: ci === 0 ? "#dcdcaa" : ci === 1 ? "#4ec9b0" : "#d4d4d4",
+              overflow: "hidden",
+              textOverflow: "ellipsis",
+              whiteSpace: "nowrap",
+            }}>
+              {renderInlineText(cell)}
+            </span>
+          ))}
+        </div>,
+      );
+      i++;
+      continue;
+    }
+
+    // List items
+    if (line.startsWith("- ")) {
+      elements.push(<div key={elements.length} style={{ paddingLeft: "12px", marginBottom: "2px" }}>{renderInlineText(line)}</div>);
+      i++;
+      continue;
+    }
+    if (/^\d+\.\s/.test(line)) {
+      elements.push(<div key={elements.length} style={{ paddingLeft: "12px", marginBottom: "2px" }}>{renderInlineText(line)}</div>);
+      i++;
+      continue;
+    }
+
+    // Empty line
+    if (line === "") {
+      elements.push(<div key={elements.length} style={{ height: "6px" }} />);
+      i++;
+      continue;
+    }
+
+    // Regular text
+    elements.push(<div key={elements.length}>{renderInlineText(line)}</div>);
+    i++;
+  }
+
+  return elements;
+}
 
 function ReferencePanel(): React.ReactElement {
   return (
     <div style={referencePanelStyle}>
-      {referenceContent.split("\n").map((line, i) => {
-        // Render simple markdown-like formatting
-        if (line.startsWith("# ")) {
-          return <h1 key={i} style={{ fontSize: "18px", fontWeight: 700, margin: "0 0 12px 0", color: "#e0e0e0", borderBottom: "1px solid #3c3c3c", paddingBottom: "6px" }}>{line.slice(2)}</h1>;
-        }
-        if (line.startsWith("## ")) {
-          return <h2 key={i} style={{ fontSize: "15px", fontWeight: 600, margin: "16px 0 8px 0", color: "#569cd6" }}>{line.slice(3)}</h2>;
-        }
-        if (line.startsWith("### ")) {
-          return <h3 key={i} style={{ fontSize: "13px", fontWeight: 600, margin: "12px 0 6px 0", color: "#4ec9b0" }}>{line.slice(4)}</h3>;
-        }
-        if (line.startsWith("|") && line.includes("|")) {
-          // Table row
-          const cells = line.split("|").filter(Boolean).map((c) => c.trim());
-          if (cells.every((c) => c.match(/^-+$/))) {
-            return null; // Skip separator rows
-          }
-          const isHeader = i > 0 && referenceContent.split("\n")[i + 1]?.match(/^\|[\s-|]+$/);
-          return (
-            <div key={i} style={{ display: "flex", fontFamily: "'Cascadia Code', Consolas, monospace", fontSize: "11px", lineHeight: "1.8" }}>
-              {cells.map((cell, ci) => (
-                <span key={ci} style={{
-                  flex: ci === 0 ? "0 0 160px" : ci === 1 ? "0 0 130px" : "1",
-                  fontWeight: isHeader ? 600 : 400,
-                  color: ci === 0 ? "#dcdcaa" : ci === 1 ? "#4ec9b0" : "#d4d4d4",
-                  overflow: "hidden",
-                  textOverflow: "ellipsis",
-                  whiteSpace: "nowrap",
-                }}>
-                  {cell}
-                </span>
-              ))}
-            </div>
-          );
-        }
-        if (line.startsWith("- ")) {
-          return <div key={i} style={{ paddingLeft: "12px", marginBottom: "2px" }}>{line}</div>;
-        }
-        if (line.startsWith("1. ") || line.startsWith("2. ") || line.startsWith("3. ")) {
-          return <div key={i} style={{ paddingLeft: "12px", marginBottom: "2px" }}>{line}</div>;
-        }
-        if (line === "") {
-          return <div key={i} style={{ height: "6px" }} />;
-        }
-        return <div key={i}>{line}</div>;
-      })}
+      {renderMarkdownContent(referenceContent)}
+    </div>
+  );
+}
+
+function GuidePanel(): React.ReactElement {
+  return (
+    <div style={referencePanelStyle}>
+      {renderMarkdownContent(guideContent)}
+    </div>
+  );
+}
+
+// ============================================================================
+// AI Prompt Panel
+// ============================================================================
+
+function AiPromptPanel({ currentSpec }: { currentSpec: string }): React.ReactElement {
+  const [task, setTask] = useState("");
+  const [includeReference, setIncludeReference] = useState(true);
+  const [includeCurrentSpec, setIncludeCurrentSpec] = useState(true);
+  const [includeGuide, setIncludeGuide] = useState(false);
+  const [copied, setCopied] = useState(false);
+  const [showPreview, setShowPreview] = useState(false);
+
+  const buildPrompt = useCallback((): string => {
+    const parts: string[] = [];
+
+    parts.push("I am working with a spreadsheet application called Calcula that has a declarative JSON-based chart specification language (similar to Vega-Lite). I need help with the following task:\n");
+
+    parts.push("## Task\n");
+    parts.push(task || "(no task described)");
+    parts.push("");
+
+    if (includeCurrentSpec && currentSpec) {
+      parts.push("## My Current Chart Spec\n");
+      parts.push("```json");
+      parts.push(currentSpec);
+      parts.push("```\n");
+    }
+
+    if (includeReference) {
+      parts.push("## ChartSpec Reference\n");
+      parts.push(referenceContent);
+      parts.push("");
+    }
+
+    if (includeGuide) {
+      parts.push("## ChartSpec Guide\n");
+      parts.push(guideContent);
+      parts.push("");
+    }
+
+    parts.push("---");
+    parts.push("Please respond with a valid ChartSpec JSON object. Only use properties documented in the reference above.");
+
+    return parts.join("\n");
+  }, [task, includeReference, includeCurrentSpec, includeGuide, currentSpec]);
+
+  const handleCopy = useCallback(async () => {
+    const prompt = buildPrompt();
+    try {
+      await navigator.clipboard.writeText(prompt);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    } catch {
+      // Fallback for older browsers
+      const textarea = document.createElement("textarea");
+      textarea.value = prompt;
+      textarea.style.position = "fixed";
+      textarea.style.opacity = "0";
+      document.body.appendChild(textarea);
+      textarea.select();
+      document.execCommand("copy");
+      document.body.removeChild(textarea);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    }
+  }, [buildPrompt]);
+
+  const prompt = buildPrompt();
+  const charCount = prompt.length;
+  const wordCount = prompt.split(/\s+/).filter(Boolean).length;
+
+  const checkboxStyle: React.CSSProperties = {
+    display: "flex",
+    alignItems: "center",
+    gap: "6px",
+    cursor: "pointer",
+    fontSize: "12px",
+    color: "#ccc",
+  };
+
+  const copyBtnStyle: React.CSSProperties = {
+    padding: "8px 24px",
+    backgroundColor: copied ? "#2ea043" : "#0e639c",
+    color: "#fff",
+    border: "none",
+    borderRadius: "4px",
+    fontSize: "13px",
+    fontWeight: 600,
+    cursor: "pointer",
+    transition: "background-color 0.2s",
+  };
+
+  return (
+    <div style={{ flex: 1, display: "flex", flexDirection: "column", minHeight: 0, overflow: "hidden" }}>
+      {/* Task input area */}
+      <div style={{ padding: "16px 20px 12px", borderBottom: "1px solid #3c3c3c", flexShrink: 0 }}>
+        <div style={{ fontSize: "14px", fontWeight: 600, color: "#e0e0e0", marginBottom: "8px" }}>
+          Describe your chart task
+        </div>
+        <div style={{ fontSize: "11px", color: "#888", marginBottom: "8px" }}>
+          Write what you want to achieve. Your task, current spec, and reference docs will be bundled into a prompt ready to paste into any AI assistant.
+        </div>
+        <textarea
+          value={task}
+          onChange={(e) => setTask(e.target.value)}
+          placeholder={"e.g., Make a bar chart that colors negative values red and positive values green.\nAdd a dashed target line at 500.\nUse a dark theme with larger title font."}
+          style={{
+            width: "100%",
+            height: "100px",
+            backgroundColor: "#252526",
+            color: "#d4d4d4",
+            border: "1px solid #3c3c3c",
+            borderRadius: "4px",
+            padding: "8px 10px",
+            fontSize: "13px",
+            fontFamily: "'Segoe UI', system-ui, sans-serif",
+            lineHeight: "1.5",
+            resize: "vertical",
+            outline: "none",
+            boxSizing: "border-box",
+          }}
+          onFocus={(e) => { e.target.style.borderColor = "#0e639c"; }}
+          onBlur={(e) => { e.target.style.borderColor = "#3c3c3c"; }}
+        />
+      </div>
+
+      {/* Options row */}
+      <div style={{
+        display: "flex",
+        alignItems: "center",
+        gap: "20px",
+        padding: "10px 20px",
+        borderBottom: "1px solid #3c3c3c",
+        flexShrink: 0,
+      }}>
+        <span style={{ fontSize: "12px", color: "#888", marginRight: "4px" }}>Include:</span>
+        <label style={checkboxStyle}>
+          <input type="checkbox" checked={includeCurrentSpec} onChange={(e) => setIncludeCurrentSpec(e.target.checked)} />
+          Current Spec
+        </label>
+        <label style={checkboxStyle}>
+          <input type="checkbox" checked={includeReference} onChange={(e) => setIncludeReference(e.target.checked)} />
+          Reference
+        </label>
+        <label style={checkboxStyle}>
+          <input type="checkbox" checked={includeGuide} onChange={(e) => setIncludeGuide(e.target.checked)} />
+          Guide
+        </label>
+        <div style={{ flex: 1 }} />
+        <button
+          style={{ ...btnStyle, fontSize: "11px" }}
+          onClick={() => setShowPreview(!showPreview)}
+        >
+          {showPreview ? "Hide Preview" : "Show Preview"}
+        </button>
+      </div>
+
+      {/* Preview or info */}
+      {showPreview ? (
+        <div style={{
+          flex: 1,
+          overflow: "auto",
+          minHeight: 0,
+          padding: "12px 20px",
+          backgroundColor: "#1a1a1a",
+        }}>
+          <pre style={{
+            fontFamily: "'Cascadia Code', Consolas, monospace",
+            fontSize: "11px",
+            lineHeight: "1.5",
+            color: "#999",
+            whiteSpace: "pre-wrap",
+            wordBreak: "break-word",
+            margin: 0,
+          }}>
+            {prompt}
+          </pre>
+        </div>
+      ) : (
+        <div style={{
+          flex: 1,
+          display: "flex",
+          flexDirection: "column",
+          alignItems: "center",
+          justifyContent: "center",
+          gap: "16px",
+          padding: "20px",
+          minHeight: 0,
+        }}>
+          <div style={{ fontSize: "13px", color: "#888", textAlign: "center", maxWidth: "400px", lineHeight: "1.6" }}>
+            Describe what you want, then click <strong style={{ color: "#e0e0e0" }}>Copy to Clipboard</strong> to get a complete prompt bundled with the ChartSpec documentation and your current spec.
+            Paste it into ChatGPT, Claude, or any AI assistant.
+          </div>
+          <div style={{ fontSize: "11px", color: "#666", textAlign: "center" }}>
+            The AI will receive everything it needs to produce valid ChartSpec JSON.
+          </div>
+        </div>
+      )}
+
+      {/* Bottom bar: copy button + stats */}
+      <div style={{
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "space-between",
+        padding: "10px 20px",
+        borderTop: "1px solid #3c3c3c",
+        flexShrink: 0,
+      }}>
+        <span style={{ fontSize: "11px", color: "#666" }}>
+          {wordCount.toLocaleString()} words / {charCount.toLocaleString()} chars
+        </span>
+        <button style={copyBtnStyle} onClick={handleCopy}>
+          {copied ? "Copied!" : "Copy to Clipboard"}
+        </button>
+      </div>
     </div>
   );
 }
@@ -322,7 +678,7 @@ function ReferencePanel(): React.ReactElement {
 // View Modes
 // ============================================================================
 
-type ViewMode = "editor" | "reference";
+type ViewMode = "editor" | "reference" | "guide" | "ai-prompt";
 
 // ============================================================================
 // Main App Component
@@ -473,12 +829,24 @@ export function ChartSpecEditorApp(): React.ReactElement {
         >
           Reference
         </button>
+        <button
+          style={viewMode === "guide" ? btnActiveStyle : btnStyle}
+          onClick={() => setViewMode("guide")}
+        >
+          Guide
+        </button>
+        <button
+          style={viewMode === "ai-prompt" ? btnActiveStyle : btnStyle}
+          onClick={() => setViewMode("ai-prompt")}
+        >
+          AI Prompt
+        </button>
         <div style={{ width: "1px", height: "16px", backgroundColor: "#3c3c3c", margin: "0 4px" }} />
         <button style={btnStyle} onClick={handleFormat}>Format</button>
         <button style={btnStyle} onClick={handleReset}>Reset</button>
       </div>
 
-      {/* Content: Editor+Preview or Reference */}
+      {/* Content: Editor+Preview, Reference+Preview, or Guide (full width) */}
       {viewMode === "editor" ? (
         <div ref={splitContainerRef} style={splitContainerStyle}>
           {/* Editor pane */}
@@ -498,9 +866,8 @@ export function ChartSpecEditorApp(): React.ReactElement {
             <PreviewCanvas spec={spec} data={previewData} />
           </div>
         </div>
-      ) : (
+      ) : viewMode === "reference" ? (
         <div style={{ display: "flex", flex: 1, minHeight: 0, overflow: "hidden" }}>
-          {/* Reference panel takes left side, preview stays on right */}
           <div style={{ flex: `0 0 ${splitRatio * 100}%`, display: "flex", flexDirection: "column", minWidth: 0, minHeight: 0 }}>
             <ReferencePanel />
           </div>
@@ -509,6 +876,10 @@ export function ChartSpecEditorApp(): React.ReactElement {
             <PreviewCanvas spec={spec} data={previewData} />
           </div>
         </div>
+      ) : viewMode === "guide" ? (
+        <GuidePanel />
+      ) : (
+        <AiPromptPanel currentSpec={jsonText} />
       )}
 
       {/* Error bar */}
@@ -519,7 +890,12 @@ export function ChartSpecEditorApp(): React.ReactElement {
       {/* Status bar */}
       <div style={statusBarStyle}>
         <span>{spec ? `Type: ${spec.mark}` : "No spec loaded"}</span>
-        <span>{viewMode === "editor" ? `${lineCount} lines` : "Reference"}</span>
+        <span>{
+          viewMode === "editor" ? `${lineCount} lines` :
+          viewMode === "reference" ? "Reference" :
+          viewMode === "guide" ? "Guide" :
+          "AI Prompt"
+        }</span>
       </div>
     </div>
   );
