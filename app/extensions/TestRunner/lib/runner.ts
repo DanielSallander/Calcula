@@ -6,6 +6,8 @@ import {
   getCell,
   updateCellsBatch,
   CommandRegistry,
+  undo as tauriUndo,
+  dispatchGridAction,
 } from "../../../src/api";
 import { getGridStateSnapshot } from "../../../src/api/grid";
 import { setSelection } from "../../../src/api/grid";
@@ -82,7 +84,11 @@ function createTestContext(logs: string[]): TestContext {
     },
 
     setSelection(sel: { startRow: number; startCol: number; endRow: number; endCol: number }) {
-      setSelection(sel);
+      dispatchGridAction(setSelection(sel));
+    },
+
+    async undo() {
+      await tauriUndo();
     },
 
     async settle() {

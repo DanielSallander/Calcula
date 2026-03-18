@@ -1,19 +1,23 @@
 //! FILENAME: app/extensions/TestRunner/lib/suites/formatting.ts
 // PURPOSE: Formatting workflow test suite.
 // CONTEXT: Tests cell styling operations through the API.
+//          Uses dedicated test area to avoid mock data overlap.
 
 import type { TestSuite } from "../types";
 import { assertTrue, expectCellValue } from "../assertions";
+import { TEST_AREA } from "../testArea";
 
 export const formattingSuite: TestSuite = {
   name: "Formatting Operations",
   description: "Tests cell formatting and style verification.",
 
   afterEach: async (ctx) => {
+    const R = TEST_AREA.row;
+    const C = TEST_AREA.col;
     // Clean up test area
     await ctx.setCells([
-      { row: 0, col: 0, value: "" },
-      { row: 0, col: 1, value: "" },
+      { row: R, col: C, value: "" },
+      { row: R, col: C + 1, value: "" },
     ]);
     await ctx.settle();
   },
@@ -23,11 +27,13 @@ export const formattingSuite: TestSuite = {
       name: "Cell retains value after style change",
       description: "Applies bold to a cell and verifies the value is unchanged.",
       run: async (ctx) => {
-        await ctx.setCells([{ row: 0, col: 0, value: "StyledText" }]);
+        const R = TEST_AREA.row;
+        const C = TEST_AREA.col;
+        await ctx.setCells([{ row: R, col: C, value: "StyledText" }]);
         await ctx.settle();
 
         // Select the cell
-        ctx.setSelection({ startRow: 0, startCol: 0, endRow: 0, endCol: 0 });
+        ctx.setSelection({ startRow: R, startCol: C, endRow: R, endCol: C });
         await ctx.settle();
 
         // Try to apply bold (this depends on the formatting extension being loaded)
@@ -39,37 +45,40 @@ export const formattingSuite: TestSuite = {
         await ctx.settle();
 
         // Value should remain unchanged regardless of style
-        const cell = await ctx.getCell(0, 0);
-        expectCellValue(cell, "StyledText", "A1");
+        const cell = await ctx.getCell(R, C);
+        expectCellValue(cell, "StyledText", "TestArea");
       },
     },
     {
       name: "Cell value persists with different data types",
       description: "Checks that numbers, text, and dates are stored correctly.",
       run: async (ctx) => {
+        const R = TEST_AREA.row;
+        const C = TEST_AREA.col;
         await ctx.setCells([
-          { row: 0, col: 0, value: "123.45" },
-          { row: 0, col: 1, value: "Text Value" },
+          { row: R, col: C, value: "123.45" },
+          { row: R, col: C + 1, value: "Text Value" },
         ]);
         await ctx.settle();
 
-        const numCell = await ctx.getCell(0, 0);
+        const numCell = await ctx.getCell(R, C);
         assertTrue(numCell !== null, "Numeric cell should exist");
-        // The display might be "123.45" or formatted differently
         assertTrue(numCell!.display.includes("123"), "Should contain the number");
 
-        const textCell = await ctx.getCell(0, 1);
-        expectCellValue(textCell, "Text Value", "B1");
+        const textCell = await ctx.getCell(R, C + 1);
+        expectCellValue(textCell, "Text Value", "TestArea");
       },
     },
     {
       name: "Style index is set on cells with values",
       description: "Verifies that cells with values have a valid style index.",
       run: async (ctx) => {
-        await ctx.setCells([{ row: 0, col: 0, value: "HasStyle" }]);
+        const R = TEST_AREA.row;
+        const C = TEST_AREA.col;
+        await ctx.setCells([{ row: R, col: C, value: "HasStyle" }]);
         await ctx.settle();
 
-        const cell = await ctx.getCell(0, 0);
+        const cell = await ctx.getCell(R, C);
         assertTrue(cell !== null, "Cell should exist");
         assertTrue(
           typeof cell!.styleIndex === "number",

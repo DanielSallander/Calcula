@@ -23,6 +23,8 @@ export interface TestContext {
   getSelection: () => Selection | null;
   /** Set the active selection */
   setSelection: (sel: { startRow: number; startCol: number; endRow: number; endCol: number }) => void;
+  /** Undo the last action (calls Tauri backend directly) */
+  undo: () => Promise<void>;
   /** Small delay to allow backend round-trips to settle */
   settle: () => Promise<void>;
   /** Log a message to the test output */

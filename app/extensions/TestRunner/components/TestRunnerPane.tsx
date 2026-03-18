@@ -5,6 +5,7 @@
 import React, { useState, useEffect, useCallback } from "react";
 import styled from "styled-components";
 import type { TaskPaneViewProps } from "../../../src/api";
+import { showToast } from "../../../src/api";
 import type { SuiteResult, TestResult } from "../lib/types";
 import {
   getResults,
@@ -13,6 +14,7 @@ import {
   getRegisteredSuites,
   runSuiteByName,
 } from "../lib/runner";
+import { formatResultsForClipboard } from "../lib/formatter";
 
 // ============================================================================
 // Styles
@@ -47,6 +49,19 @@ const RunButton = styled.button`
   &:disabled {
     background: #999;
     cursor: default;
+  }
+`;
+
+const CopyButton = styled.button`
+  padding: 4px 10px;
+  background: #f0f0f0;
+  color: #333;
+  border: 1px solid #ccc;
+  border-radius: 3px;
+  cursor: pointer;
+  font-size: 11px;
+  &:hover {
+    background: #e0e0e0;
   }
 `;
 
@@ -162,6 +177,24 @@ export const TestRunnerPane: React.FC<TaskPaneViewProps> = () => {
     });
   }, []);
 
+  const handleCopyResults = useCallback(async () => {
+    if (results.length === 0) return;
+    const text = formatResultsForClipboard(results);
+    try {
+      await navigator.clipboard.writeText(text);
+      showToast("Results copied to clipboard", { variant: "success" });
+    } catch {
+      // Fallback for environments where clipboard API is restricted
+      const textarea = document.createElement("textarea");
+      textarea.value = text;
+      document.body.appendChild(textarea);
+      textarea.select();
+      document.execCommand("copy");
+      document.body.removeChild(textarea);
+      showToast("Results copied to clipboard", { variant: "success" });
+    }
+  }, [results]);
+
   const suites = getRegisteredSuites();
   const totalPassed = results.reduce((s, r) => s + r.passed, 0);
   const totalFailed = results.reduce((s, r) => s + r.failed, 0);
@@ -181,6 +214,11 @@ export const TestRunnerPane: React.FC<TaskPaneViewProps> = () => {
         <RunButton onClick={handleRunAll} disabled={running}>
           {running ? "Running..." : "Run All Tests"}
         </RunButton>
+        {results.length > 0 && (
+          <CopyButton onClick={handleCopyResults} title="Copy results formatted for AI prompt">
+            Copy
+          </CopyButton>
+        )}
         <span style={{ color: "#888" }}>{suites.length} suite(s) registered</span>
       </Header>
 

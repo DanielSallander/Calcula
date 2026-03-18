@@ -26,6 +26,7 @@ import {
 import { basicSuite } from "./lib/suites/basic";
 import { clipboardSuite } from "./lib/suites/clipboard";
 import { formattingSuite } from "./lib/suites/formatting";
+import { mockDataSuite } from "./lib/suites/mockData";
 
 // ============================================================================
 // Constants
@@ -123,8 +124,15 @@ function activate(context: ExtensionContext): void {
   registerSuite(clipboardSuite);
   registerSuite(formattingSuite);
 
+  // Register mock data suite only when launched with prefilled data
+  if (import.meta.env.VITE_LOAD_MOCK_DATA === "true") {
+    registerSuite(mockDataSuite);
+    console.log("[TestRunner] Mock data detected - registered mock data test suite.");
+  }
+
+  const suiteCount = import.meta.env.VITE_LOAD_MOCK_DATA === "true" ? 4 : 3;
   isActivated = true;
-  console.log("[TestRunner] Activated with 3 built-in test suites.");
+  console.log(`[TestRunner] Activated with ${suiteCount} built-in test suites.`);
 }
 
 function deactivate(): void {

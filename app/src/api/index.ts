@@ -92,6 +92,8 @@ export {
   setCellStyle,
   beginUndoTransaction,
   commitUndoTransaction,
+  undo,
+  redo,
   removeDuplicates,
   updateCellsBatch,
   // Clipboard
