@@ -146,6 +146,10 @@ export function PivotEditor({
     columns,
     rows,
     values,
+    deferUpdate,
+    setDeferUpdate,
+    hasPendingChanges,
+    markPendingChanges,
     handleFieldToggle,
     handleDrop,
     handleRemove,
@@ -156,6 +160,7 @@ export function PivotEditor({
     handleNumberFormatChange,
     handleDragStart,
     handleDragEnd,
+    flushUpdate,
     resetZones,
   } = usePivotEditorState({
     pivotId,
@@ -329,6 +334,12 @@ export function PivotEditor({
     const affectsZone = changed.some((k) => allZoneKeys.has(k));
     if (!affectsZone) return;
 
+    // In deferred mode, just mark pending — don't send the BI query
+    if (deferUpdate) {
+      markPendingChanges();
+      return;
+    }
+
     // Build and send the update request directly (same as handleUpdate logic)
     const isRealBiField = (f: { name: string }) => f.name.includes('.');
     const toBiRef = (f: { name: string }) =>
@@ -346,7 +357,7 @@ export function PivotEditor({
     }).catch((err) => {
       console.error('Failed to update pivot after lookup toggle:', err);
     });
-  }, [lookupColumns, isBiPivot, pivotId, rows, columns, values, filters, onViewUpdate]);
+  }, [lookupColumns, isBiPivot, pivotId, rows, columns, values, filters, onViewUpdate, deferUpdate, markPendingChanges]);
 
   // Notify Layout when filter fields change so it can show the FilterBar
   useEffect(() => {
@@ -433,6 +444,25 @@ export function PivotEditor({
           onDragStart={handleDragStart}
           onDragEnd={handleDragEnd}
         />
+      </div>
+
+      {/* Defer Layout Update footer */}
+      <div className={styles.deferFooter}>
+        <label className={styles.deferCheckboxLabel}>
+          <input
+            type="checkbox"
+            checked={deferUpdate}
+            onChange={(e) => setDeferUpdate(e.target.checked)}
+          />
+          Defer Layout Update
+        </label>
+        <button
+          className={styles.deferUpdateButton}
+          disabled={!deferUpdate || !hasPendingChanges}
+          onClick={flushUpdate}
+        >
+          Update
+        </button>
       </div>
 
       {/* Value Field Settings Modal */}

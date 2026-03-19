@@ -474,7 +474,7 @@ export function TableFieldList({
   const hasResults = filteredMeasures.length > 0 || filteredTables.some((t) => t.columns.length > 0);
 
   return (
-    <div className={styles.section}>
+    <div className={styles.section} style={{ flex: 1, overflow: 'hidden' }}>
       <div className={styles.sectionTitle}>Choose fields to add to report</div>
       <div className={styles.fieldList}>
         {/* Search input */}

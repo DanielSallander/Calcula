@@ -81,6 +81,8 @@ export interface LayoutConfig {
   showEmptyCols?: boolean;
   valuesPosition?: ValuesPosition;
   autoFitColumnWidths?: boolean;
+  /** PivotTable style theme ID (frontend-only for now) */
+  styleId?: string;
 }
 
 // Update request matching UpdatePivotFieldsRequest in pivot_commands.rs

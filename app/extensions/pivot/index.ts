@@ -83,11 +83,36 @@ import {
   restorePreviousView,
   markUserCancelled,
 } from "./lib/pivotViewStore";
-import { drawPivotCell, DEFAULT_PIVOT_THEME } from "./rendering/pivot";
-import type { PivotCellDrawResult } from "./rendering/pivot";
+import { drawPivotCell, DEFAULT_PIVOT_THEME, createPivotTheme } from "./rendering/pivot";
+import type { PivotCellDrawResult, PivotTheme } from "./rendering/pivot";
+import { getThemeOverridesForStyle, DEFAULT_PIVOT_STYLE_ID } from "./components/PivotTableStylesGallery";
 
 // Re-export cache accessors so existing consumers (e.g., context menu) keep working
 export { cachePivotView, getCachedPivotView };
+
+// ============================================================================
+// Per-Pivot Style Theme Tracking
+// ============================================================================
+
+/** Maps pivotId → styleId (selected in the Design tab gallery). */
+const pivotStyleMap = new Map<number, string>();
+
+/** Maps styleId → resolved PivotTheme (cached to avoid recomputing each frame). */
+const resolvedThemeCache = new Map<string, PivotTheme>();
+
+/** Get the PivotTheme for a given pivot, based on its selected style. */
+function getThemeForPivot(pivotId: number): PivotTheme {
+  const styleId = pivotStyleMap.get(pivotId) || DEFAULT_PIVOT_STYLE_ID;
+  if (!styleId) return DEFAULT_PIVOT_THEME;
+
+  let theme = resolvedThemeCache.get(styleId);
+  if (!theme) {
+    const overrides = getThemeOverridesForStyle(styleId);
+    theme = createPivotTheme(overrides);
+    resolvedThemeCache.set(styleId, theme);
+  }
+  return theme;
+}
 
 // ============================================================================
 // Expand/Collapse Icon Bounds (populated during overlay rendering)
@@ -409,7 +434,8 @@ function drawStyledPivotView(overlayCtx: OverlayRenderContext, pivotView: PivotV
   const canvasWidth = ctx.canvas.width / (window.devicePixelRatio || 1);
   const canvasHeight = ctx.canvas.height / (window.devicePixelRatio || 1);
 
-  const theme = DEFAULT_PIVOT_THEME;
+  const pivotId = (region.data?.pivotId as number) ?? 0;
+  const theme = getThemeForPivot(pivotId);
 
   // Pre-compute whether each zone has active filters (for header filter icon)
   const rowHasActiveFilter = pivotView.rowFieldSummaries?.some(f => f.hasActiveFilter) ?? false;
@@ -421,7 +447,6 @@ function drawStyledPivotView(overlayCtx: OverlayRenderContext, pivotView: PivotV
   // plus cells for only the first window. Additional cells are fetched on scroll.
   // ---------------------------------------------------------------------------
   const isWindowed = pivotView.isWindowed === true;
-  const pivotId = (region.data?.pivotId as number) ?? 0;
   const cellCache = isWindowed ? getCellWindowCache(pivotId) : undefined;
 
   // ---------------------------------------------------------------------------
@@ -1537,6 +1562,33 @@ export function registerPivotExtension(): void {
   window.addEventListener("taskpane:requestReopen", handleReopenRequest);
   cleanupFunctions.push(() => window.removeEventListener("taskpane:requestReopen", handleReopenRequest));
 
+  // Track pivot style changes from the Design tab
+  cleanupFunctions.push(
+    onAppEvent<{ pivotId: number; layout: { styleId?: string } }>(
+      PivotEvents.PIVOT_LAYOUT_STATE,
+      (detail) => {
+        if (detail.layout.styleId !== undefined) {
+          const prev = pivotStyleMap.get(detail.pivotId);
+          if (prev !== detail.layout.styleId) {
+            pivotStyleMap.set(detail.pivotId, detail.layout.styleId);
+            requestOverlayRedraw();
+          }
+        }
+      }
+    )
+  );
+  cleanupFunctions.push(
+    onAppEvent<{ pivotId: number; layout: { styleId?: string } }>(
+      PivotEvents.PIVOT_LAYOUT_CHANGED,
+      (detail) => {
+        if (detail.layout.styleId !== undefined) {
+          pivotStyleMap.set(detail.pivotId, detail.layout.styleId);
+          requestOverlayRedraw();
+        }
+      }
+    )
+  );
+
   // Initial region load
   refreshPivotRegions(false);
 
@@ -1563,6 +1615,10 @@ export function unregisterPivotExtension(): void {
     clearTimeout(transitionCleanupTimer);
     transitionCleanupTimer = null;
   }
+
+  // Clear style tracking
+  pivotStyleMap.clear();
+  resolvedThemeCache.clear();
 
   // Clear overlay regions
   removeGridRegionsByType("pivot");

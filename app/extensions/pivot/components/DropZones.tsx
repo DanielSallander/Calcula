@@ -41,7 +41,7 @@ export function DropZones({
   onDragEnd,
 }: DropZonesProps): React.ReactElement {
   return (
-    <div className={styles.section} style={{ flex: 1, minHeight: 0 }}>
+    <div className={styles.section} style={{ flexShrink: 0 }}>
       <div className={styles.sectionTitle}>Drag fields between areas below</div>
       <div className={styles.dropZonesContainer}>
         <DropZone

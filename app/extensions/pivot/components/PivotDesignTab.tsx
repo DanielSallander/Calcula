@@ -10,6 +10,7 @@ import { PivotEvents } from '../lib/pivotEvents';
 import { getPivotTableInfo, updatePivotProperties } from '../lib/pivot-api';
 import type { LayoutConfig, ReportLayout, ValuesPosition, PivotId } from './types';
 import type { RibbonContext } from '../../../src/api/extensions';
+import { PivotTableStylesGallery, DEFAULT_PIVOT_STYLE_ID } from './PivotTableStylesGallery';
 
 // ============================================================================
 // Styles
@@ -146,7 +147,15 @@ export function PivotDesignTab({
     const unsub = onAppEvent<LayoutState>(
       PivotEvents.PIVOT_LAYOUT_STATE,
       (detail) => {
-        setLayoutState(detail);
+        setLayoutState((prev) => ({
+          ...detail,
+          layout: {
+            ...detail.layout,
+            // Preserve styleId if the broadcast doesn't include it
+            // (backend doesn't know about this frontend-only property)
+            styleId: detail.layout.styleId ?? prev?.layout.styleId,
+          },
+        }));
       }
     );
     // Request current state in case we missed the initial broadcast
@@ -269,6 +278,13 @@ export function PivotDesignTab({
         </div>
         <div className={tabStyles.groupLabel}>Grand Totals</div>
       </div>
+
+      {/* PivotTable Styles Group */}
+      <PivotTableStylesGallery
+        selectedStyleId={layout.styleId ?? DEFAULT_PIVOT_STYLE_ID}
+        onStyleSelect={(styleId) => updateLayout({ styleId })}
+        onStyleClear={() => updateLayout({ styleId: '' })}
+      />
 
       {/* Report Layout Group */}
       <div className={tabStyles.group}>

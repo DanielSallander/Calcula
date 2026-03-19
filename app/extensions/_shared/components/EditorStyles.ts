@@ -78,17 +78,18 @@ export const styles = {
 
   content: css`
     flex: 1;
-    overflow-y: auto;
+    overflow: hidden;
     padding: 10px;
     display: flex;
     flex-direction: column;
     gap: 10px;
-    ${scrollbarMixin}
+    min-height: 0;
   `,
 
   section: css`
     display: flex;
     flex-direction: column;
+    min-height: 0;
   `,
 
   sectionTitle: css`
@@ -105,7 +106,6 @@ export const styles = {
     border-radius: 6px;
     flex: 1;
     min-height: 80px;
-    max-height: 40vh;
     overflow-y: auto;
     overflow-x: hidden;
     ${scrollbarMixin}
@@ -170,7 +170,7 @@ export const styles = {
     grid-template-columns: 1fr 1fr;
     grid-template-rows: 1fr 1fr;
     gap: 6px;
-    flex: 1;
+    flex-shrink: 0;
     min-height: 160px;
   `,
 
@@ -339,6 +339,55 @@ export const styles = {
     &.selected {
       background: #ddf4ff;
       color: #0969da;
+    }
+  `,
+
+  deferFooter: css`
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 8px 10px;
+    border-top: 1px solid #d0d7de;
+    background: #fff;
+    flex-shrink: 0;
+  `,
+
+  deferCheckboxLabel: css`
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 11px;
+    color: #24292f;
+    cursor: pointer;
+    user-select: none;
+
+    input {
+      accent-color: #0969da;
+      width: 13px;
+      height: 13px;
+      cursor: pointer;
+    }
+  `,
+
+  deferUpdateButton: css`
+    padding: 4px 14px;
+    font-size: 11px;
+    font-family: inherit;
+    border: 1px solid #d0d7de;
+    border-radius: 4px;
+    background: #f6f8fa;
+    color: #24292f;
+    cursor: pointer;
+    transition: background 0.12s, border-color 0.12s;
+
+    &:hover:not(:disabled) {
+      background: #eaeef2;
+      border-color: #afb8c1;
+    }
+
+    &:disabled {
+      opacity: 0.5;
+      cursor: default;
     }
   `,
 

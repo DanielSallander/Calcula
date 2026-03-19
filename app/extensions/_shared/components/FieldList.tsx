@@ -71,7 +71,7 @@ export function FieldList({
   }, [fields, searchQuery]);
 
   return (
-    <div className={styles.section}>
+    <div className={styles.section} style={{ flex: 1, overflow: 'hidden' }}>
       <div className={styles.sectionTitle}>Choose fields to add to report</div>
       <div className={styles.fieldList}>
         {/* Search input */}

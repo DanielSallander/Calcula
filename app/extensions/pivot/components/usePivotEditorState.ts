@@ -47,6 +47,10 @@ export function usePivotEditorState({
   const [layout, setLayout] = useState<LayoutConfig>(initialLayout);
   const [draggingField, setDraggingField] = useState<DragField | null>(null);
 
+  // Defer Layout Update: when true, changes accumulate without triggering updates
+  const [deferUpdate, setDeferUpdate] = useState(false);
+  const [hasPendingChanges, setHasPendingChanges] = useState(false);
+
   // Track whether we should trigger an update (skip initial render)
   const isInitialMount = useRef(true);
   const pendingUpdate = useRef(false);
@@ -113,16 +117,22 @@ export function usePivotEditorState({
       return;
     }
 
-    if (pendingUpdate.current && onUpdate) {
+    if (pendingUpdate.current) {
       pendingUpdate.current = false;
-      console.log('[PivotEditor] Triggering update with current state:', {
-        rows: rows.length,
-        columns: columns.length,
-        values: values.length,
-      });
-      onUpdate(buildUpdateRequest());
+
+      if (deferUpdate) {
+        // In deferred mode, just mark that changes are pending
+        setHasPendingChanges(true);
+      } else if (onUpdate) {
+        console.log('[PivotEditor] Triggering update with current state:', {
+          rows: rows.length,
+          columns: columns.length,
+          values: values.length,
+        });
+        onUpdate(buildUpdateRequest());
+      }
     }
-  }, [rows, columns, values, filters, layout, onUpdate, buildUpdateRequest]);
+  }, [rows, columns, values, filters, layout, onUpdate, buildUpdateRequest, deferUpdate]);
 
   // Mark that an update should be triggered after state changes
   const scheduleUpdate = useCallback(() => {
@@ -363,7 +373,11 @@ export function usePivotEditorState({
       PivotEvents.PIVOT_LAYOUT_CHANGED,
       (detail) => {
         if (detail.pivotId === pivotId) {
-          setLayout(detail.layout);
+          setLayout((prev) => ({
+            ...detail.layout,
+            // Preserve styleId from the previous state if already set
+            styleId: detail.layout.styleId ?? prev.styleId,
+          }));
           scheduleUpdate();
         }
       }
@@ -417,6 +431,32 @@ export function usePivotEditorState({
     setDraggingField(null);
   }, []);
 
+  /** Mark that there are pending changes (for external callers like BI lookup toggle). */
+  const markPendingChanges = useCallback(() => {
+    setHasPendingChanges(true);
+  }, []);
+
+  /** Manually flush a deferred update (the "Update" button). */
+  const flushUpdate = useCallback(() => {
+    if (onUpdate) {
+      setHasPendingChanges(false);
+      onUpdate(buildUpdateRequest());
+    }
+  }, [onUpdate, buildUpdateRequest]);
+
+  // When deferUpdate is turned OFF and there are pending changes, flush immediately
+  const prevDeferRef = useRef(deferUpdate);
+  useEffect(() => {
+    if (prevDeferRef.current && !deferUpdate && hasPendingChanges) {
+      // Defer was just unchecked with pending changes — flush now
+      if (onUpdate) {
+        setHasPendingChanges(false);
+        onUpdate(buildUpdateRequest());
+      }
+    }
+    prevDeferRef.current = deferUpdate;
+  }, [deferUpdate, hasPendingChanges, onUpdate, buildUpdateRequest]);
+
   /** Reset all zones to initial values (used on cancel to revert optimistic state). */
   const resetZones = useCallback(() => {
     // Prevent the useEffect from triggering an update for this reset
@@ -438,6 +478,10 @@ export function usePivotEditorState({
     values,
     layout,
     draggingField,
+    deferUpdate,
+    setDeferUpdate,
+    hasPendingChanges,
+    markPendingChanges,
     handleFieldToggle,
     handleDrop,
     handleRemove,
@@ -451,6 +495,7 @@ export function usePivotEditorState({
     handleDragStart,
     handleDragEnd,
     buildUpdateRequest,
+    flushUpdate,
     resetZones,
   };
 }
