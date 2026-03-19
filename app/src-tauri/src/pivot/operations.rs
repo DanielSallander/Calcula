@@ -340,7 +340,9 @@ pub(crate) fn write_pivot_to_grid(
         ag.cells.reserve(cell_count);
     }
 
-    // Iterate through all rows (not just visible, since we need grid positions to be correct)
+    // Iterate through all rows, skipping hidden ones.
+    // Use view_row (sequential visible index) for grid positioning so that
+    // collapsed rows don't leave gaps or write cells beyond the pivot region.
     for (row_idx, row_descriptor) in view.rows.iter().enumerate() {
         if !row_descriptor.visible {
             continue;
@@ -353,7 +355,7 @@ pub(crate) fn write_pivot_to_grid(
         let row_cells = &view.cells[row_idx];
 
         for (col_idx, pivot_cell) in row_cells.iter().enumerate() {
-            let grid_row = dest_row + row_idx as u32;
+            let grid_row = dest_row + row_descriptor.view_row as u32;
             let grid_col = dest_col + col_idx as u32;
 
             // Determine CellValue and style_index (shared between both grid writes)

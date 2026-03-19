@@ -607,6 +607,9 @@ pub fn toggle_pivot_group(
             store_view(&pivot_state, pivot_id, view);
             drop(pivot_tables);
 
+            // Clear old cells and write updated view to grid (prevents orphaned cells
+            // when pivot shrinks after collapse)
+            update_pivot_in_grid(&state, pivot_id, dest_sheet_idx, destination, view);
             update_pivot_region(&state, pivot_id, dest_sheet_idx, destination, view);
 
             let total_ms = t_total.elapsed().as_secs_f64() * 1000.0;
@@ -638,7 +641,8 @@ pub fn toggle_pivot_group(
 
     drop(pivot_tables);
 
-    // Update pivot region tracking (bounds may change)
+    // Clear old cells and write updated view to grid, then update region bounds
+    update_pivot_in_grid(&state, pivot_id, dest_sheet_idx, destination, &view);
     update_pivot_region(&state, pivot_id, dest_sheet_idx, destination, &view);
 
     let total_ms = t_total.elapsed().as_secs_f64() * 1000.0;
