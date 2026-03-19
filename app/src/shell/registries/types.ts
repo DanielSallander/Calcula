@@ -70,6 +70,12 @@ export interface RibbonTabDefinition {
   order: number;
   /** Component to render as tab content */
   component: React.ComponentType<{ context: RibbonContext }>;
+  /**
+   * Optional accent color for contextual tabs (e.g. "#217346" green for pivot tabs).
+   * When set, the tab header displays a colored top border and tinted text to
+   * visually group related contextual tabs.
+   */
+  color?: string;
 }
 
 /**

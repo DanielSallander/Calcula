@@ -64,7 +64,12 @@ pub(crate) fn safe_calculate_pivot(definition: &PivotDefinition, cache: &mut Piv
     calculate_pivot(definition, cache)
 }
 
-/// Builds a PivotCache from grid data
+/// Builds a PivotCache from grid data.
+///
+/// When the source range extends well beyond the grid's actual data (e.g. the
+/// user selected entire columns A:D which resolves to A1:D1048576), the end row
+/// is automatically clamped to the last populated row in the grid.  This matches
+/// Excel's behaviour where full-column references only include populated cells.
 pub(crate) fn build_cache_from_grid(
     grid: &engine::Grid,
     start: (u32, u32),
@@ -72,11 +77,28 @@ pub(crate) fn build_cache_from_grid(
     has_headers: bool,
 ) -> Result<(PivotCache, Vec<String>), String> {
     let (start_row, start_col) = start;
-    let (end_row, end_col) = end;
-    
+    let (mut end_row, end_col) = end;
+
+    // Clamp end_row to the grid's last populated row so that full-column
+    // selections (e.g. A:D -> A1:D1048576) don't iterate over a million
+    // empty rows.
+    if end_row > grid.max_row {
+        end_row = grid.max_row;
+    }
+
     let col_count = (end_col - start_col + 1) as usize;
+
+    // If the (clamped) end row is before the start row there is no data.
+    if end_row < start_row {
+        let headers: Vec<String> = (0..col_count)
+            .map(|i| col_index_to_letter(i as u32))
+            .collect();
+        let cache = PivotCache::new(1, col_count);
+        return Ok((cache, headers));
+    }
+
     let data_start_row = if has_headers { start_row + 1 } else { start_row };
-    
+
     // Extract headers
     let headers: Vec<String> = if has_headers {
         (start_col..=end_col)
@@ -91,19 +113,32 @@ pub(crate) fn build_cache_from_grid(
             .map(|i| col_index_to_letter(i as u32))
             .collect()
     };
-    
+
+    // Find the actual last row with data within this column range.
+    // grid.max_row is a global bound — data in other columns may push it
+    // beyond what these specific columns contain.
+    let mut effective_end_row = data_start_row.saturating_sub(1);
+    for row in (data_start_row..=end_row).rev() {
+        let has_data = (start_col..=end_col)
+            .any(|col| grid.get_cell(row, col).is_some());
+        if has_data {
+            effective_end_row = row;
+            break;
+        }
+    }
+
     // Create cache
     let mut cache = PivotCache::new(1, col_count);
-    
+
     // Set field names
     for (i, name) in headers.iter().enumerate() {
         cache.set_field_name(i, name.clone());
     }
-    
-    // Add records
-    for row in data_start_row..=end_row {
+
+    // Add records up to the last row with data
+    for row in data_start_row..=effective_end_row {
         let mut values: Vec<CellValue> = Vec::with_capacity(col_count);
-        
+
         for col in start_col..=end_col {
             let value = grid
                 .get_cell(row, col)
@@ -111,11 +146,11 @@ pub(crate) fn build_cache_from_grid(
                 .unwrap_or(CellValue::Empty);
             values.push(value);
         }
-        
+
         // source_row is u32
         cache.add_record(row - data_start_row, &values);
     }
-    
+
     Ok((cache, headers))
 }
 

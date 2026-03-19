@@ -5,6 +5,10 @@ import { pivot } from '../../../src/api/pivot';
 import { addSheet, getSheets, setActiveSheetApi, indexToCol, colToIndex, detectDataRegion, useGridState } from '../../../src/api';
 import { emitAppEvent, AppEvents } from '../../../src/api/events';
 
+/** Excel-compatible grid limits (0-indexed max values). */
+const MAX_ROW_INDEX = 1048576 - 1; // 1,048,575
+const MAX_COL_INDEX = 16384 - 1;   // 16,383
+
 // ============================================================================
 // Types
 // ============================================================================
@@ -41,7 +45,9 @@ function toA1Notation(row: number, col: number): string {
 }
 
 /**
- * Convert selection to range string (e.g., A1:D100)
+ * Convert selection to range string (e.g., A1:D100).
+ * Detects full-column selections (row 0 to MAX_ROW_INDEX) and produces
+ * column-only notation like "A:D" instead of "A1:D1048576".
  */
 function selectionToRange(
   startRow: number,
@@ -53,6 +59,17 @@ function selectionToRange(
   const maxRow = Math.max(startRow, endRow);
   const minCol = Math.min(startCol, endCol);
   const maxCol = Math.max(startCol, endCol);
+
+  // Full-column selection: rows span the entire grid
+  if (minRow === 0 && maxRow >= MAX_ROW_INDEX) {
+    return `${indexToCol(minCol)}:${indexToCol(maxCol)}`;
+  }
+
+  // Full-row selection: cols span the entire grid
+  if (minCol === 0 && maxCol >= MAX_COL_INDEX) {
+    return `${minRow + 1}:${maxRow + 1}`;
+  }
+
   return `${toA1Notation(minRow, minCol)}:${toA1Notation(maxRow, maxCol)}`;
 }
 

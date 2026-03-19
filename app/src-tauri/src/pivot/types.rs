@@ -679,6 +679,18 @@ pub struct UpdatePivotPropertiesRequest {
     pub use_custom_sort_lists: Option<bool>,
 }
 
+/// Request to change a pivot table's source data range.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChangePivotDataSourceRequest {
+    /// Pivot table ID
+    pub pivot_id: PivotId,
+    /// New source range in A1 notation (e.g., "Sheet1!A1:D100")
+    pub source_range: String,
+    /// Source sheet index (optional, defaults to active sheet)
+    pub source_sheet: Option<usize>,
+}
+
 /// Request to update pivot layout.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]

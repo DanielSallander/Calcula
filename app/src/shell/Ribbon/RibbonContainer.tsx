@@ -89,29 +89,35 @@ export function RibbonContainer(): React.ReactElement {
           overflow: "hidden",
         }}
       >
-        {tabs.map((tab) => (
-          <button
-            key={tab.id}
-            onClick={() => setActiveTabId(tab.id)}
-            style={{
-              padding: "6px 16px",
-              border: "none",
-              backgroundColor: activeTabId === tab.id ? "#fff" : "transparent",
-              borderTopLeftRadius: "4px",
-              borderTopRightRadius: "4px",
-              cursor: "pointer",
-              fontWeight: activeTabId === tab.id ? 600 : 400,
-              fontSize: "12px",
-              color: "#333",
-              fontFamily: "'Segoe UI Variable', 'Segoe UI', system-ui, sans-serif",
-              borderBottom:
-                activeTabId === tab.id ? "1px solid #fff" : "none",
-              marginBottom: "-1px",
-            }}
-          >
-            {tab.label}
-          </button>
-        ))}
+        {tabs.map((tab) => {
+          const isActive = activeTabId === tab.id;
+          const accentColor = tab.color;
+          return (
+            <button
+              key={tab.id}
+              onClick={() => setActiveTabId(tab.id)}
+              style={{
+                padding: "6px 16px",
+                border: "none",
+                backgroundColor: isActive ? "#fff" : "transparent",
+                borderTopLeftRadius: "4px",
+                borderTopRightRadius: "4px",
+                cursor: "pointer",
+                fontWeight: isActive ? 600 : 400,
+                fontSize: "12px",
+                color: accentColor
+                  ? isActive ? accentColor : accentColor + "cc"
+                  : "#333",
+                fontFamily: "'Segoe UI Variable', 'Segoe UI', system-ui, sans-serif",
+                borderBottom: isActive ? "1px solid #fff" : "none",
+                borderTop: accentColor ? `3px solid ${accentColor}` : "none",
+                marginBottom: "-1px",
+              }}
+            >
+              {tab.label}
+            </button>
+          );
+        })}
 
         {tabs.length === 0 && (
           <div

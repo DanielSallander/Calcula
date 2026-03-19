@@ -13,7 +13,13 @@ import {
   ExtensionRegistry,
 } from "../../../src/api";
 import type { LayoutConfig, AggregationType } from "../../../src/api";
-import { PIVOT_PANE_ID, PivotDesignTabDefinition, PIVOT_DESIGN_TAB_ID } from "../manifest";
+import {
+  PIVOT_PANE_ID,
+  PivotDesignTabDefinition,
+  PIVOT_DESIGN_TAB_ID,
+  PivotAnalyzeTabDefinition,
+  PIVOT_ANALYZE_TAB_ID,
+} from "../manifest";
 import type { SourceField, ZoneField, PivotEditorViewData, PivotRegionData } from "../types";
 
 // ---------------------------------------------------------------------------
@@ -35,8 +41,9 @@ let checkInProgress = false;
 /** Debounce timer for selection changes within a pivot region. */
 let debounceTimer: ReturnType<typeof setTimeout> | null = null;
 
-/** Whether the Design ribbon tab is currently registered. */
+/** Whether the contextual pivot ribbon tabs are currently registered. */
 let designTabRegistered = false;
+let analyzeTabRegistered = false;
 
 // ---------------------------------------------------------------------------
 // State mutators (called by other handlers / extension index)
@@ -61,11 +68,15 @@ export function setJustCreatedPivot(value: boolean): void {
 }
 
 /**
- * Ensure the Design ribbon tab is registered.
- * Called by pivotCreatedHandler so the tab appears immediately on creation,
+ * Ensure the contextual pivot ribbon tabs are registered.
+ * Called by pivotCreatedHandler so the tabs appear immediately on creation,
  * regardless of whether the selection handler has run yet.
  */
 export function ensureDesignTabRegistered(): void {
+  if (!analyzeTabRegistered) {
+    ExtensionRegistry.registerRibbonTab(PivotAnalyzeTabDefinition);
+    analyzeTabRegistered = true;
+  }
   if (!designTabRegistered) {
     ExtensionRegistry.registerRibbonTab(PivotDesignTabDefinition);
     designTabRegistered = true;
@@ -139,8 +150,12 @@ export function handleSelectionChange(
     // Cell is NOT in any pivot region - close pivot pane if open
     // BUT skip if a pivot was just created (regions not yet cached)
     if (justCreatedPivot) {
-      // Register Design tab even though regions aren't cached yet —
+      // Register pivot tabs even though regions aren't cached yet —
       // we know the user just created a pivot and is inside it.
+      if (!analyzeTabRegistered) {
+        ExtensionRegistry.registerRibbonTab(PivotAnalyzeTabDefinition);
+        analyzeTabRegistered = true;
+      }
       if (!designTabRegistered) {
         ExtensionRegistry.registerRibbonTab(PivotDesignTabDefinition);
         designTabRegistered = true;
@@ -150,7 +165,11 @@ export function handleSelectionChange(
     lastCheckedSelection = { row, col };
     removeTaskPaneContextKey("pivot");
     closeTaskPane(PIVOT_PANE_ID);
-    // Hide the Design ribbon tab
+    // Hide the contextual pivot ribbon tabs
+    if (analyzeTabRegistered) {
+      ExtensionRegistry.unregisterRibbonTab(PIVOT_ANALYZE_TAB_ID);
+      analyzeTabRegistered = false;
+    }
     if (designTabRegistered) {
       ExtensionRegistry.unregisterRibbonTab(PIVOT_DESIGN_TAB_ID);
       designTabRegistered = false;
@@ -161,7 +180,11 @@ export function handleSelectionChange(
   // Cell IS in a pivot region - set context key (even if manually closed,
   // so the View menu knows we're in a pivot area)
   addTaskPaneContextKey("pivot");
-  // Show the Design ribbon tab
+  // Show the contextual pivot ribbon tabs
+  if (!analyzeTabRegistered) {
+    ExtensionRegistry.registerRibbonTab(PivotAnalyzeTabDefinition);
+    analyzeTabRegistered = true;
+  }
   if (!designTabRegistered) {
     ExtensionRegistry.registerRibbonTab(PivotDesignTabDefinition);
     designTabRegistered = true;
@@ -314,6 +337,10 @@ export function resetSelectionHandlerState(): void {
   if (debounceTimer !== null) {
     clearTimeout(debounceTimer);
     debounceTimer = null;
+  }
+  if (analyzeTabRegistered) {
+    ExtensionRegistry.unregisterRibbonTab(PIVOT_ANALYZE_TAB_ID);
+    analyzeTabRegistered = false;
   }
   if (designTabRegistered) {
     ExtensionRegistry.unregisterRibbonTab(PIVOT_DESIGN_TAB_ID);

@@ -519,6 +519,12 @@ pub struct PivotDefinition {
     /// Whether the first row of source data contains headers.
     pub source_has_headers: bool,
 
+    /// The original source range string as entered by the user (e.g. "A:D").
+    /// Stored so we can display the user's original reference instead of the
+    /// clamped numeric coordinates.
+    #[serde(default)]
+    pub source_range_display: Option<String>,
+
     /// Fields placed in the Row area (ordered from outer to inner).
     pub row_fields: Vec<PivotField>,
 
@@ -573,6 +579,7 @@ impl PivotDefinition {
             source_start,
             source_end,
             source_has_headers: true,
+            source_range_display: None,
             row_fields: Vec::new(),
             column_fields: Vec::new(),
             value_fields: Vec::new(),

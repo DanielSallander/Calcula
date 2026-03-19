@@ -96,7 +96,7 @@ pub fn create_pivot_table(
     );
 
     // Parse ranges
-    let (source_start, source_end) = parse_range(&request.source_range)?;
+    let (source_start, mut source_end) = parse_range(&request.source_range)?;
     let destination = parse_cell_ref(&request.destination_cell)?;
 
     // Get source sheet
@@ -108,7 +108,7 @@ pub fn create_pivot_table(
     let dest_sheet_idx = request.destination_sheet.unwrap_or_else(|| {
         *state.active_sheet.lock().unwrap()
     });
-    
+
     log_info!(
         "PIVOT",
         "source_sheet_idx={} dest_sheet_idx={}",
@@ -121,6 +121,19 @@ pub fn create_pivot_table(
     let grid = grids
         .get(source_sheet_idx)
         .ok_or_else(|| format!("Sheet index {} not found", source_sheet_idx))?;
+
+    // Clamp source_end row to the grid's actual data extent.
+    // This handles full-column selections (e.g. A:D -> A1:D1048576) by
+    // trimming to only the populated rows, matching Excel's behaviour.
+    if source_end.0 > grid.max_row {
+        log_info!(
+            "PIVOT",
+            "clamping source end_row from {} to {} (grid.max_row)",
+            source_end.0,
+            grid.max_row
+        );
+        source_end.0 = grid.max_row;
+    }
 
     let has_headers = request.has_headers.unwrap_or(true);
 
@@ -139,6 +152,7 @@ pub fn create_pivot_table(
     definition.source_has_headers = has_headers;
     definition.destination = destination;
     definition.name = request.name.or_else(|| Some(format!("PivotTable{}", pivot_id)));
+    definition.source_range_display = Some(request.source_range.clone());
 
     // Store destination sheet in definition
     {
@@ -891,7 +905,7 @@ pub async fn refresh_pivot_cache(
             .ok_or_else(|| format!("Pivot table {} not found", pivot_id))?;
 
         let source_start = definition.source_start;
-        let source_end = definition.source_end;
+        let mut source_end = definition.source_end;
         let has_headers = definition.source_has_headers;
         let destination = definition.destination;
         let dest_sheet_idx = resolve_dest_sheet_index(&state, definition);
@@ -910,6 +924,11 @@ pub async fn refresh_pivot_cache(
         let grid = grids
             .get(source_sheet_idx)
             .ok_or_else(|| "Source sheet not found".to_string())?;
+
+        // Clamp source_end row to grid's actual data extent (handles full-column refs)
+        if source_end.0 > grid.max_row {
+            source_end.0 = grid.max_row;
+        }
 
         let (fresh_cache, _headers) = build_cache_from_grid(grid, source_start, source_end, has_headers)?;
         drop(grids);
@@ -1304,7 +1323,8 @@ pub fn get_pivot_table_info(
         .get(&pivot_id)
         .ok_or_else(|| format!("Pivot table {} not found", pivot_id))?;
 
-    let source_range = format_range(definition.source_start, definition.source_end);
+    let source_range = definition.source_range_display.clone()
+        .unwrap_or_else(|| format_range(definition.source_start, definition.source_end));
     let destination = format_cell(definition.destination);
 
     Ok(PivotTableInfo {
@@ -1351,7 +1371,8 @@ pub fn update_pivot_properties(
         definition.use_custom_sort_lists = v;
     }
 
-    let source_range = format_range(definition.source_start, definition.source_end);
+    let source_range = definition.source_range_display.clone()
+        .unwrap_or_else(|| format_range(definition.source_start, definition.source_end));
     let destination = format_cell(definition.destination);
 
     Ok(PivotTableInfo {
@@ -1365,6 +1386,127 @@ pub fn update_pivot_properties(
         use_custom_sort_lists: definition.use_custom_sort_lists,
         has_headers: definition.source_has_headers,
     })
+}
+
+/// Changes the source data range of an existing pivot table.
+/// Parses the new range, rebuilds the cache from the grid, and recalculates.
+#[tauri::command]
+pub async fn change_pivot_data_source(
+    window: tauri::Window,
+    state: State<'_, AppState>,
+    pivot_state: State<'_, PivotState>,
+    request: ChangePivotDataSourceRequest,
+) -> Result<PivotViewResponse, String> {
+    let pivot_id = request.pivot_id;
+    log_info!(
+        "PIVOT",
+        "change_pivot_data_source pivot_id={} new_range={}",
+        pivot_id,
+        request.source_range
+    );
+
+    // Parse the new range
+    let (source_start, mut source_end) = parse_range(&request.source_range)?;
+
+    // Get source sheet
+    let source_sheet_idx = request.source_sheet.unwrap_or_else(|| {
+        *state.active_sheet.lock().unwrap()
+    });
+
+    // Clamp source_end to grid's actual data extent (handles full-column refs)
+    {
+        let grids = state.grids.lock().unwrap();
+        let grid = grids
+            .get(source_sheet_idx)
+            .ok_or_else(|| format!("Sheet index {} not found", source_sheet_idx))?;
+
+        if source_end.0 > grid.max_row {
+            log_info!(
+                "PIVOT",
+                "clamping source end_row from {} to {} (grid.max_row)",
+                source_end.0,
+                grid.max_row
+            );
+            source_end.0 = grid.max_row;
+        }
+    }
+
+    // Update definition and rebuild cache
+    let (definition, cache, dest_sheet_idx, destination) = {
+        let mut pivot_tables = pivot_state.pivot_tables.lock().unwrap();
+        let (definition, _cache) = pivot_tables
+            .get_mut(&pivot_id)
+            .ok_or_else(|| format!("Pivot table {} not found", pivot_id))?;
+
+        // Update source range in definition
+        definition.source_start = source_start;
+        definition.source_end = source_end;
+        definition.source_range_display = Some(request.source_range.clone());
+        definition.bump_version();
+
+        let has_headers = definition.source_has_headers;
+        let destination = definition.destination;
+        let dest_sheet_idx = resolve_dest_sheet_index(&state, definition);
+
+        drop(pivot_tables);
+
+        // Build new cache from grid
+        let grids = state.grids.lock().unwrap();
+        let grid = grids
+            .get(source_sheet_idx)
+            .ok_or_else(|| format!("Sheet index {} not found", source_sheet_idx))?;
+
+        let (fresh_cache, _headers) =
+            build_cache_from_grid(grid, source_start, source_end, has_headers)?;
+        drop(grids);
+
+        // Store the new cache
+        let mut pivot_tables = pivot_state.pivot_tables.lock().unwrap();
+        let (definition, cache) = pivot_tables
+            .get_mut(&pivot_id)
+            .ok_or_else(|| format!("Pivot table {} not found", pivot_id))?;
+        *cache = fresh_cache;
+
+        (definition.clone(), cache.clone(), dest_sheet_idx, destination)
+    };
+
+    // Recalculate pivot
+    emit_pivot_progress(&window, pivot_id, "Calculating...", 1, 4);
+    let mut cache_mut = cache;
+    let mut view = safe_calculate_pivot(&definition, &mut cache_mut);
+    ensure_children_indices(&mut view);
+    store_view(&pivot_state, pivot_id, &view);
+
+    // Write to grid
+    emit_pivot_progress(&window, pivot_id, "Updating grid...", 3, 4);
+    update_pivot_in_grid(&state, pivot_id, dest_sheet_idx, destination, &view);
+    update_pivot_region(&state, pivot_id, dest_sheet_idx, destination, &view);
+
+    // Store updated cache
+    {
+        let mut pivot_tables = pivot_state.pivot_tables.lock().unwrap();
+        if let Some((_def, cache)) = pivot_tables.get_mut(&pivot_id) {
+            *cache = cache_mut;
+        }
+    }
+
+    let mut final_cache = {
+        let pivot_tables = pivot_state.pivot_tables.lock().unwrap();
+        let (_def, cache) = pivot_tables.get(&pivot_id).unwrap();
+        cache.clone()
+    };
+    let response = view_to_response(&view, &definition, &mut final_cache);
+
+    log_info!(
+        "PIVOT",
+        "change_pivot_data_source complete: pivot_id={} new_source={}:{} rows={}",
+        pivot_id,
+        format_cell(source_start),
+        format_cell(source_end),
+        response.row_count
+    );
+
+    Ok(response)
 }
 
 /// Gets pivot layout ranges (data body, row labels, column labels, filter axis).
@@ -2397,7 +2539,8 @@ pub fn get_all_pivot_tables(
 
     pivot_tables.iter()
         .map(|(id, (definition, _))| {
-            let source_range = format_range(definition.source_start, definition.source_end);
+            let source_range = definition.source_range_display.clone()
+                .unwrap_or_else(|| format_range(definition.source_start, definition.source_end));
             let destination = format_cell(definition.destination);
             PivotTableInfo {
                 id: *id,

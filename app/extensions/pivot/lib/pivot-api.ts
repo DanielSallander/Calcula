@@ -90,6 +90,7 @@ import {
   getPivotCellWindow as apiGetPivotCellWindow,
   cancelPivotOperation as apiCancelPivotOperation,
   revertPivotOperation as apiRevertPivotOperation,
+  changePivotDataSource as apiChangePivotDataSource,
 } from "../../../src/api/backend";
 
 // ============================================================================
@@ -1058,6 +1059,13 @@ export interface UpdatePivotPropertiesRequest {
   useCustomSortLists?: boolean;
 }
 
+/** Request to change pivot data source range */
+export interface ChangePivotDataSourceRequest {
+  pivotId: PivotId;
+  sourceRange: string;
+  sourceSheet?: number;
+}
+
 /** Request to update pivot layout */
 export interface UpdatePivotLayoutRequest {
   pivotId: PivotId;
@@ -1152,6 +1160,22 @@ export async function updatePivotProperties(
   request: UpdatePivotPropertiesRequest
 ): Promise<PivotTableInfo> {
   return apiUpdatePivotProperties<UpdatePivotPropertiesRequest, PivotTableInfo>(request);
+}
+
+/**
+ * Changes the pivot table's source data range.
+ */
+export async function changePivotDataSource(
+  request: ChangePivotDataSourceRequest
+): Promise<PivotViewResponse> {
+  setLoading(request.pivotId, "Changing data source...");
+  try {
+    const result = await apiChangePivotDataSource<ChangePivotDataSourceRequest, PivotViewResponse>(request);
+    cachePivotView(request.pivotId, result);
+    return result;
+  } finally {
+    clearLoading(request.pivotId);
+  }
 }
 
 /**

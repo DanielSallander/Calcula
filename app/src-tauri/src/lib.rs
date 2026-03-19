@@ -2663,6 +2663,7 @@ pub fn run() {
             // Pivot table commands - Excel-compatible API
             pivot::get_pivot_table_info,
             pivot::update_pivot_properties,
+            pivot::change_pivot_data_source,
             pivot::get_pivot_layout_ranges,
             pivot::update_pivot_layout,
             pivot::get_pivot_hierarchies,

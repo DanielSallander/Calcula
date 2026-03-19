@@ -221,6 +221,15 @@ export async function updatePivotProperties<TRequest, TResponse>(
 }
 
 /**
+ * Change pivot table data source range.
+ */
+export async function changePivotDataSource<TRequest, TResponse>(
+  request: TRequest
+): Promise<TResponse> {
+  return invoke<TResponse>("change_pivot_data_source", { request });
+}
+
+/**
  * Get pivot layout ranges (data body, row labels, column labels, filter axis).
  */
 export async function getPivotLayoutRanges<TResponse>(

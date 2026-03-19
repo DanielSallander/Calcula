@@ -22,62 +22,84 @@ pub(crate) fn strip_sheet_prefix(reference: &str) -> &str {
     }
 }
 
+/// Excel-compatible max row count (1-indexed).
+const MAX_ROWS: u32 = 1_048_576;
+
 /// Parses a cell reference like "A1" into (row, col) 0-indexed coordinates.
 /// Also handles references with sheet prefixes like "Sheet1!A1".
 pub(crate) fn parse_cell_ref(cell_ref: &str) -> Result<(u32, u32), String> {
     // Strip any sheet prefix first
     let cell_ref = strip_sheet_prefix(cell_ref);
     let cell_ref = cell_ref.trim().to_uppercase();
-    
+
     let col_end = cell_ref
         .chars()
         .take_while(|c| c.is_ascii_alphabetic())
         .count();
-    
+
     if col_end == 0 {
         return Err(format!("Invalid cell reference: no column letters in '{}'", cell_ref));
     }
-    
+
     let col_str = &cell_ref[..col_end];
     let row_str = &cell_ref[col_end..];
-    
+
     if row_str.is_empty() {
         return Err(format!("Invalid cell reference: no row number in '{}'", cell_ref));
     }
-    
+
     let row: u32 = row_str
         .parse()
         .map_err(|_| format!("Invalid row number in '{}'", cell_ref))?;
-    
+
     if row == 0 {
         return Err("Row number must be >= 1".to_string());
     }
-    
+
     let col = col_letter_to_index(col_str);
-    
+
     Ok((row - 1, col)) // Convert to 0-indexed
 }
 
-/// Parses a range like "A1:D10" or "Sheet1!A1:D10" into ((start_row, start_col), (end_row, end_col))
+/// Tries to parse a column-only reference like "A" into a 0-indexed column index.
+/// Returns None if the string contains non-alphabetic characters.
+fn try_parse_col_only(s: &str) -> Option<u32> {
+    let s = s.trim();
+    if s.is_empty() || !s.chars().all(|c| c.is_ascii_alphabetic()) {
+        return None;
+    }
+    Some(col_letter_to_index(&s.to_uppercase()))
+}
+
+/// Parses a range like "A1:D10", "Sheet1!A1:D10", or column-only "A:D"
+/// into ((start_row, start_col), (end_row, end_col)).
+/// Column-only references expand to the full row range (0 to MAX_ROWS-1).
 pub(crate) fn parse_range(range: &str) -> Result<((u32, u32), (u32, u32)), String> {
     // Strip any sheet prefix from the entire range first
     let range = strip_sheet_prefix(range);
-    
+
     let parts: Vec<&str> = range.split(':').collect();
-    
+
     if parts.len() != 2 {
-        return Err(format!("Invalid range format: '{}'. Expected 'A1:B2'", range));
+        return Err(format!("Invalid range format: '{}'. Expected 'A1:B2' or 'A:D'", range));
     }
-    
+
+    // Check if both parts are column-only references (e.g. "A:D")
+    if let (Some(start_col), Some(end_col)) = (try_parse_col_only(parts[0]), try_parse_col_only(parts[1])) {
+        let min_col = start_col.min(end_col);
+        let max_col = start_col.max(end_col);
+        return Ok(((0, min_col), (MAX_ROWS - 1, max_col)));
+    }
+
     let start = parse_cell_ref(parts[0])?;
     let end = parse_cell_ref(parts[1])?;
-    
+
     // Normalize so start <= end
     let start_row = start.0.min(end.0);
     let end_row = start.0.max(end.0);
     let start_col = start.1.min(end.1);
     let end_col = start.1.max(end.1);
-    
+
     Ok(((start_row, start_col), (end_row, end_col)))
 }
 

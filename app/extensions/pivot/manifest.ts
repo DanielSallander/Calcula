@@ -11,6 +11,7 @@ import type {
 import { emitAppEvent } from "../../src/api";
 import { PivotEditorView } from "./components/PivotEditorView";
 import { PivotDesignTab } from "./components/PivotDesignTab";
+import { PivotAnalyzeTab } from "./components/PivotAnalyzeTab";
 import { CreatePivotDialog } from "./components/CreatePivotDialog";
 import { GroupDialog } from "./components/GroupDialog";
 import { FieldSettingsDialog } from "./components/FieldSettingsDialog";
@@ -38,13 +39,27 @@ export const PivotManifest: AddInManifest = {
   commands: [],
 };
 
-// Design ribbon tab - registered dynamically when pivot is selected
+// Accent color for pivot contextual tabs (Excel-style green)
+const PIVOT_TAB_COLOR = "#217346";
+
+// "Pivot Table" analyze ribbon tab - registered dynamically when pivot is selected
+export const PIVOT_ANALYZE_TAB_ID = "pivot-analyze";
+export const PivotAnalyzeTabDefinition = {
+  id: PIVOT_ANALYZE_TAB_ID,
+  label: "Pivot Table",
+  order: 499,
+  component: PivotAnalyzeTab,
+  color: PIVOT_TAB_COLOR,
+};
+
+// "Pivot Table Design" ribbon tab - registered dynamically when pivot is selected
 export const PIVOT_DESIGN_TAB_ID = "pivot-design";
 export const PivotDesignTabDefinition = {
   id: PIVOT_DESIGN_TAB_ID,
-  label: "Design",
+  label: "Pivot Table Design",
   order: 500,
   component: PivotDesignTab,
+  color: PIVOT_TAB_COLOR,
 };
 
 // ============================================================================
