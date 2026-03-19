@@ -7,6 +7,7 @@
 
 import { useCallback, useRef } from "react";
 import { ask } from "@tauri-apps/plugin-dialog";
+import { writeText as tauriWriteText, readText as tauriReadText, writeHtml as tauriWriteHtml } from "@tauri-apps/plugin-clipboard-manager";
 import { useGridContext } from "../state/GridContext";
 import {
   getCell,
@@ -187,6 +188,45 @@ async function fetchValidations(
 }
 
 /**
+ * Convert cell matrix to an HTML table for pasting into Excel and other apps.
+ */
+function cellsToHtml(cells: (CellData | null)[][]): string {
+  const rows = cells.map((row) => {
+    const tds = row.map((cell) => {
+      const value = cell?.display ?? "";
+      // Escape HTML entities
+      const escaped = value
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;")
+        .replace(/"/g, "&quot;");
+      return `<td>${escaped}</td>`;
+    }).join("");
+    return `<tr>${tds}</tr>`;
+  }).join("");
+  return `<table>${rows}</table>`;
+}
+
+/**
+ * Write text and HTML to the system clipboard via Tauri plugin.
+ */
+async function writeToSystemClipboard(text: string, html: string): Promise<void> {
+  try {
+    // Write HTML (which includes alt plain-text fallback)
+    await tauriWriteHtml(html, text);
+    console.log("[Clipboard] Written to system clipboard (HTML + text)");
+  } catch (err) {
+    // Fall back to plain text only
+    try {
+      await tauriWriteText(text);
+      console.log("[Clipboard] Written to system clipboard (text only)");
+    } catch (err2) {
+      console.warn("[Clipboard] Could not write to system clipboard:", err2);
+    }
+  }
+}
+
+/**
  * Hook for clipboard operations.
  */
 export function useClipboard(): UseClipboardReturn {
@@ -287,13 +327,9 @@ export function useClipboard(): UseClipboardReturn {
       // Update state for visual feedback (marching ants border)
       dispatch(setClipboard("copy", { ...selection }, sheetContext.activeSheetIndex));
 
-      // Also write to system clipboard
-      try {
-        await navigator.clipboard.writeText(text);
-        console.log("[Clipboard] Copied to system clipboard");
-      } catch (err) {
-        console.warn("[Clipboard] Could not write to system clipboard:", err);
-      }
+      // Write to system clipboard (HTML for Excel, plain text for Notepad)
+      const html = cellsToHtml(cells);
+      await writeToSystemClipboard(text, html);
 
       // Clear any previous cut source
       cutSourceRef.current = null;
@@ -342,13 +378,9 @@ export function useClipboard(): UseClipboardReturn {
       // Update state for visual feedback (marching ants border)
       dispatch(setClipboard("cut", { ...selection }, sheetContext.activeSheetIndex));
 
-      // Also write to system clipboard
-      try {
-        await navigator.clipboard.writeText(text);
-        console.log("[Clipboard] Cut to system clipboard");
-      } catch (err) {
-        console.warn("[Clipboard] Could not write to system clipboard:", err);
-      }
+      // Write to system clipboard (HTML for Excel, plain text for Notepad)
+      const html = cellsToHtml(cells);
+      await writeToSystemClipboard(text, html);
     } catch (error) {
       console.error("[Clipboard] Cut failed:", error);
     }
@@ -365,10 +397,10 @@ export function useClipboard(): UseClipboardReturn {
 
     console.log("[Clipboard] Pasting to selection:", selection);
 
-    // Try to read from system clipboard first
+    // Try to read from system clipboard first (via Tauri plugin)
     let textToPaste: string | null = null;
     try {
-      textToPaste = await navigator.clipboard.readText();
+      textToPaste = await tauriReadText();
     } catch (err) {
       console.warn("[Clipboard] Could not read from system clipboard:", err);
     }
