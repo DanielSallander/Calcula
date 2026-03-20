@@ -26,6 +26,7 @@ import { registerScriptEditorExtension, unregisterScriptEditorExtension } from "
 import { registerControlsExtension, unregisterControlsExtension } from "./Controls";
 import { registerBiExtension, unregisterBiExtension } from "./BusinessIntelligence";
 import { registerPrintExtension, unregisterPrintExtension } from "./Print";
+import { registerAIChatExtension, unregisterAIChatExtension } from "./AIChat";
 
 /**
  * Load all extensions.
@@ -60,6 +61,7 @@ export function loadExtensions(): void {
   registerControlsExtension();
   registerBiExtension();
   registerPrintExtension();
+  registerAIChatExtension();
 
   // Future: Load user extensions from config
 
@@ -74,6 +76,7 @@ export function unloadExtensions(): void {
   console.log("[Extensions] Unloading extensions...");
 
   // Unload in reverse order
+  unregisterAIChatExtension();
   unregisterPrintExtension();
   unregisterBiExtension();
   unregisterControlsExtension();
@@ -127,3 +130,4 @@ export { registerScriptEditorExtension, unregisterScriptEditorExtension };
 export { registerControlsExtension, unregisterControlsExtension };
 export { registerBiExtension, unregisterBiExtension };
 export { registerPrintExtension, unregisterPrintExtension };
+export { registerAIChatExtension, unregisterAIChatExtension };

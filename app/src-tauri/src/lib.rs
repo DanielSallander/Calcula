@@ -2,6 +2,7 @@
 // PURPOSE: Main library entry point (Tauri Bridge).
 // CONTEXT: Uses a generic ProtectedRegion system for extension-owned cell regions.
 
+use tauri::Manager;
 use engine::{
     format_number_with_color, format_text_with_color, format_color_to_css,
     Cell, CellError, CellStyle, CellValue, EvalResult, Evaluator, Grid, NumberFormat,
@@ -51,6 +52,7 @@ pub mod consolidate;
 pub mod status_bar;
 pub mod computed_properties;
 pub mod controls;
+pub mod mcp;
 
 pub use api_types::{CellData, StyleData, DimensionData, FormattingParams, MergedRegion};
 pub use logging::{init_log_file, get_log_path, next_seq, write_log, write_log_raw};
@@ -2552,6 +2554,7 @@ pub fn run() {
         .manage(bi::BiState::new())
         .manage(evaluate_formula::EvalFormulaState::new())
         .manage(scripting::ScriptState::new())
+        .manage(mcp::McpState::new())
         .invoke_handler(tauri::generate_handler![
             // Grid commands
             commands::get_viewport_cells,
@@ -2622,6 +2625,7 @@ pub fn run() {
             persistence::get_current_file_path,
             persistence::is_file_modified,
             persistence::mark_file_modified,
+            persistence::get_ai_context,
             // Sheet commands
             sheets::get_sheets,
             sheets::get_active_sheet,
@@ -2892,7 +2896,24 @@ pub fn run() {
             commands::get_page_setup,
             commands::set_page_setup,
             commands::get_print_data,
+            // MCP server commands
+            mcp::mcp_start,
+            mcp::mcp_stop,
+            mcp::mcp_status,
+            mcp::mcp_set_port,
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application")
+        .run(|app_handle, event| {
+            if let tauri::RunEvent::Exit = event {
+                // Shut down the MCP server gracefully if running
+                if let Some(state) = app_handle.try_state::<mcp::McpState>() {
+                    if let Ok(ct) = state.cancel_token.lock() {
+                        if let Some(token) = ct.as_ref() {
+                            token.cancel();
+                        }
+                    }
+                }
+            }
+        });
 }

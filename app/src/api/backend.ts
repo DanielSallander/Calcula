@@ -3333,3 +3333,31 @@ export async function setPageSetup(setup: PageSetup): Promise<void> {
 export async function getPrintData(): Promise<PrintData> {
   return invoke<PrintData>("get_print_data", {});
 }
+
+// ============================================================================
+// AI Context Serialization
+// ============================================================================
+
+/** Options for AI context serialization. */
+export interface AiSerializeOptions {
+  /** Approximate maximum character count (0 = no limit). */
+  maxChars?: number;
+  /** Whether to include style descriptions. */
+  includeStyles?: boolean;
+  /** Focus on a specific sheet index (undefined = all sheets). */
+  focusSheet?: number | null;
+  /** Maximum sample rows per sheet. */
+  maxSampleRows?: number;
+  /** Additional context about the current user selection. */
+  selectionContext?: string | null;
+  /** Serialized table definitions JSON. */
+  tablesJson?: string | null;
+}
+
+/**
+ * Get an AI-friendly text description of the current workbook.
+ * Used by the AI chat extension to build context for LLM conversations.
+ */
+export async function getAiContext(options: AiSerializeOptions = {}): Promise<string> {
+  return invoke<string>("get_ai_context", { options });
+}

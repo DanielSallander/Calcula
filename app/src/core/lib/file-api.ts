@@ -3,6 +3,11 @@ import { tracedInvoke } from '../../utils/bridge';
 import { open, save } from '@tauri-apps/plugin-dialog';
 import type { CellData } from '../types/types';
 
+const CALCULA_FILTER = {
+  name: 'Calcula Workbook',
+  extensions: ['cala'],
+};
+
 const XLSX_FILTER = {
   name: 'Excel Workbook',
   extensions: ['xlsx'],
@@ -16,8 +21,8 @@ const ALL_FILTER = {
 export async function saveFileAs(): Promise<string | null> {
   try {
     const path = await save({
-      filters: [XLSX_FILTER, ALL_FILTER],
-      defaultPath: 'Workbook.xlsx',
+      filters: [CALCULA_FILTER, XLSX_FILTER, ALL_FILTER],
+      defaultPath: 'Workbook.cala',
     });
 
     if (path) {
@@ -50,7 +55,7 @@ export async function saveFile(): Promise<string | null> {
 export async function openFile(): Promise<CellData[] | null> {
   try {
     const path = await open({
-      filters: [XLSX_FILTER, ALL_FILTER],
+      filters: [CALCULA_FILTER, XLSX_FILTER, ALL_FILTER],
       multiple: false,
       directory: false,
     });

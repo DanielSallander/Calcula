@@ -4,7 +4,8 @@ members = [
     "parser",
     "persistence",
     "pivot-engine",
-    "script-engine"
+    "script-engine",
+    "calcula-format"
 ]
 exclude = ["pivot-bench"]
 resolver = "2"

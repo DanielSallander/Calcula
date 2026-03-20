@@ -1,0 +1,16 @@
+[package]
+name = "calcula-format"
+version = "0.1.0"
+edition = "2021"
+description = "Calcula native file format (.cala) - ZIP-based structured JSON"
+
+[dependencies]
+engine = { path = "../engine" }
+persistence = { path = "../persistence" }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+zip = { version = "2", default-features = false, features = ["deflate"] }
+thiserror = "1.0"
+
+[dev-dependencies]
+tempfile = "3.10"

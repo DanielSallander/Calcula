@@ -101,6 +101,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "calcula-format"
+version = "0.1.0"
+dependencies = [
+ "engine",
+ "persistence",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 1.0.69",
+ "zip",
+]
+
+[[package]]
 name = "cast"
 version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"

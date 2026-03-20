@@ -9,6 +9,8 @@ use persistence::{
     load_xlsx, save_xlsx, DimensionData, SavedTable, SavedTableColumn, SavedTableStyleOptions,
     Workbook,
 };
+use calcula_format::{save_calcula, load_calcula};
+use calcula_format::ai::{AiSerializeOptions, serialize_for_ai, SheetInput};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Mutex;
@@ -182,7 +184,18 @@ pub fn save_file(
     workbook.tables = collect_tables_for_save(&tables);
 
     let path_buf = PathBuf::from(&path);
-    save_xlsx(&workbook, &path_buf).map_err(|e| e.to_string())?;
+
+    // Route by file extension
+    let ext = path_buf
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_lowercase();
+
+    match ext.as_str() {
+        "cala" => save_calcula(&workbook, &path_buf).map_err(|e| e.to_string())?,
+        _ => save_xlsx(&workbook, &path_buf).map_err(|e| e.to_string())?,
+    }
 
     *file_state.current_path.lock().map_err(|e| e.to_string())? = Some(path_buf);
     *file_state.is_modified.lock().map_err(|e| e.to_string())? = false;
@@ -197,7 +210,18 @@ pub fn open_file(
     path: String,
 ) -> Result<Vec<CellData>, String> {
     let path_buf = PathBuf::from(&path);
-    let workbook = load_xlsx(&path_buf).map_err(|e| e.to_string())?;
+
+    // Route by file extension
+    let ext = path_buf
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_lowercase();
+
+    let workbook = match ext.as_str() {
+        "cala" => load_calcula(&path_buf).map_err(|e| e.to_string())?,
+        _ => load_xlsx(&path_buf).map_err(|e| e.to_string())?,
+    };
 
     if workbook.sheets.is_empty() {
         return Err("No sheets in workbook".to_string());
@@ -327,4 +351,40 @@ pub fn mark_file_modified(file_state: State<FileState>) {
     if let Ok(mut modified) = file_state.is_modified.lock() {
         *modified = true;
     }
+}
+
+// ============================================================================
+// AI CONTEXT SERIALIZATION
+// ============================================================================
+
+#[tauri::command]
+pub fn get_ai_context(
+    state: State<AppState>,
+    options: AiSerializeOptions,
+) -> Result<String, String> {
+    let grids = state.grids.lock().map_err(|e| e.to_string())?;
+    let sheet_names = state.sheet_names.lock().map_err(|e| e.to_string())?;
+    let styles = state.style_registry.lock().map_err(|e| e.to_string())?;
+    let active_grid = state.grid.lock().map_err(|e| e.to_string())?;
+    let active_sheet = *state.active_sheet.lock().map_err(|e| e.to_string())?;
+
+    // Build sheet inputs — use stored grids for non-active sheets, active grid for current
+    let mut sheet_inputs: Vec<SheetInput> = Vec::new();
+    for (i, name) in sheet_names.iter().enumerate() {
+        if i == active_sheet {
+            sheet_inputs.push(SheetInput {
+                name,
+                grid: &active_grid,
+                styles: &styles,
+            });
+        } else if let Some(grid) = grids.get(i) {
+            sheet_inputs.push(SheetInput {
+                name,
+                grid,
+                styles: &styles,
+            });
+        }
+    }
+
+    Ok(serialize_for_ai(&sheet_inputs, &options))
 }
