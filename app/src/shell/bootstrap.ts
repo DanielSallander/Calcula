@@ -8,10 +8,13 @@ import {
   registerTaskPaneService,
   registerDialogService,
   registerOverlayService,
+  registerActivityBarService,
   registerTaskPaneHooks,
+  registerActivityBarHooks,
   type TaskPaneService,
   type DialogService,
   type OverlayService,
+  type ActivityBarService,
 } from "../api/ui";
 
 import {
@@ -45,6 +48,8 @@ import {
   sheetExtensions as sheetExtensionsImpl,
   registerCoreSheetContextMenu,
 } from "./registries/sheetExtensions";
+import { ActivityBarExtensions as ActivityBarExtensionsImpl } from "./registries/activityBarExtensions";
+import { useActivityBarStore } from "./ActivityBar/useActivityBarStore";
 
 let isBootstrapped = false;
 
@@ -128,6 +133,27 @@ export function bootstrapShell(): void {
     onChange: (listener) => OverlayExtensionsImpl.onChange(listener),
   };
   registerOverlayService(overlayService);
+
+  // ActivityBar Service - wraps the Zustand store and ActivityBarExtensions registry
+  const activityBarService: ActivityBarService = {
+    registerView: (definition) => ActivityBarExtensionsImpl.registerView(definition),
+    unregisterView: (viewId) => ActivityBarExtensionsImpl.unregisterView(viewId),
+    getView: (viewId) => ActivityBarExtensionsImpl.getView(viewId),
+    getAllViews: () => ActivityBarExtensionsImpl.getAllViews(),
+    openView: (viewId, data) => useActivityBarStore.getState().openView(viewId, data),
+    closeView: () => useActivityBarStore.getState().close(),
+    toggle: (viewId) => useActivityBarStore.getState().toggle(viewId),
+    isOpen: () => useActivityBarStore.getState().isOpen,
+    getActiveViewId: () => useActivityBarStore.getState().activeViewId,
+    onRegistryChange: (listener) => ActivityBarExtensionsImpl.onRegistryChange(listener),
+  };
+  registerActivityBarService(activityBarService);
+
+  // ActivityBar React hooks
+  registerActivityBarHooks({
+    useIsOpen: () => useActivityBarStore((state) => state.isOpen),
+    useActiveViewId: () => useActivityBarStore((state) => state.activeViewId),
+  });
 
   // =========================================================================
   // Register Extension Services

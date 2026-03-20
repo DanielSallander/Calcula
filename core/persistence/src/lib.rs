@@ -36,6 +36,9 @@ pub struct Workbook {
     pub active_sheet: usize,
     /// Table definitions across all sheets (serialized as JSON in metadata sheet)
     pub tables: Vec<SavedTable>,
+    /// User files stored inside the .cala archive (path -> content).
+    /// Paths are relative, e.g. "README.md" or "docs/notes.txt".
+    pub user_files: HashMap<String, Vec<u8>>,
 }
 
 impl Workbook {
@@ -44,6 +47,7 @@ impl Workbook {
             sheets: vec![Sheet::new("Sheet1".to_string())],
             active_sheet: 0,
             tables: Vec::new(),
+            user_files: HashMap::new(),
         }
     }
 
@@ -52,6 +56,7 @@ impl Workbook {
             sheets: vec![Sheet::from_grid("Sheet1".to_string(), grid, styles, dimensions)],
             active_sheet: 0,
             tables: Vec::new(),
+            user_files: HashMap::new(),
         }
     }
 }

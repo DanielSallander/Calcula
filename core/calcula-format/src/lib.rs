@@ -13,6 +13,8 @@
 //! sheets/0_SheetName/styles.json
 //! sheets/0_SheetName/layout.json
 //! tables/table_1.json
+//! files/README.md              (user files)
+//! files/docs/notes.txt         (user files in folders)
 //! ...
 //! ```
 

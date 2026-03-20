@@ -377,11 +377,22 @@ export function useGridKeyboard(options: UseGridKeyboardOptions): void {
         return;
       }
 
+      // Skip if focus is inside an input, textarea, or contenteditable element
+      // (e.g. file editor in the side panel or task pane)
+      const target = event.target as HTMLElement;
+      if (target) {
+        const tag = target.tagName;
+        if (tag === "INPUT" || tag === "TEXTAREA" || target.isContentEditable) {
+          fnLog.exit('handleKeyDown', 'skipped (focus in form element)');
+          return;
+        }
+      }
+
       // FIX: Check the global editing flag synchronously
       // The isEditing prop may be stale (from React state that hasn't re-rendered yet)
       // but the global flag is updated immediately when editing starts
       const isCurrentlyEditing = isEditing || getGlobalIsEditing();
-      
+
       if (isCurrentlyEditing) {
         fnLog.exit('handleKeyDown', 'skipped (editing active - global check)');
         return;

@@ -33,6 +33,9 @@ pub fn write_calcula(workbook: &Workbook, path: &Path) -> Result<(), FormatError
     if !workbook.tables.is_empty() {
         manifest.features.push("tables".to_string());
     }
+    if !workbook.user_files.is_empty() {
+        manifest.features.push("files".to_string());
+    }
 
     // Write manifest.json
     let manifest_json = serde_json::to_string_pretty(&manifest)?;
@@ -83,6 +86,12 @@ pub fn write_calcula(workbook: &Workbook, path: &Path) -> Result<(), FormatError
             options.clone(),
         )?;
         zip.write_all(table_json.as_bytes())?;
+    }
+
+    // Write user files (stored under files/ prefix)
+    for (path, content) in &workbook.user_files {
+        zip.start_file(format!("files/{}", path), options.clone())?;
+        zip.write_all(content)?;
     }
 
     zip.finish()?;
@@ -180,10 +189,37 @@ pub fn read_calcula(path: &Path) -> Result<Workbook, FormatError> {
         }
     }
 
+    // Read user files (files/ prefix)
+    let mut user_files = std::collections::HashMap::new();
+    if manifest.features.contains(&"files".to_string()) {
+        let file_names: Vec<String> = (0..archive.len())
+            .filter_map(|i| {
+                let entry = archive.by_index(i).ok()?;
+                let name = entry.name().to_string();
+                if name.starts_with("files/") && name.len() > 6 && !name.ends_with('/') {
+                    Some(name)
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        for file_name in file_names {
+            let mut entry = archive.by_name(&file_name)
+                .map_err(|e| FormatError::Zip(e))?;
+            let mut content = Vec::new();
+            entry.read_to_end(&mut content)?;
+            // Strip the "files/" prefix
+            let relative_path = file_name[6..].to_string();
+            user_files.insert(relative_path, content);
+        }
+    }
+
     Ok(Workbook {
         sheets,
         active_sheet: manifest.active_sheet,
         tables,
+        user_files,
     })
 }
 

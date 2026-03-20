@@ -14,6 +14,7 @@ import type {
   MenuItemDefinition,
   TaskPaneContextKey,
   StatusBarItemDefinition,
+  ActivityViewDefinition,
 } from "./uiTypes";
 
 // Re-export types from the canonical contract layer (api/uiTypes.ts)
@@ -31,6 +32,8 @@ export type {
   MenuItemDefinition,
   StatusBarItemDefinition,
   StatusBarAlignment,
+  ActivityViewDefinition,
+  ActivityViewProps,
 } from "./uiTypes";
 
 // ============================================================================
@@ -78,6 +81,19 @@ export interface OverlayService {
   onChange(listener: () => void): () => void;
 }
 
+export interface ActivityBarService {
+  registerView(definition: ActivityViewDefinition): void;
+  unregisterView(viewId: string): void;
+  getView(viewId: string): ActivityViewDefinition | undefined;
+  getAllViews(): ActivityViewDefinition[];
+  openView(viewId: string, data?: Record<string, unknown>): void;
+  closeView(): void;
+  toggle(viewId?: string): void;
+  isOpen(): boolean;
+  getActiveViewId(): string | null;
+  onRegistryChange(listener: () => void): () => void;
+}
+
 // ============================================================================
 // Service Registration (IoC pattern)
 // ============================================================================
@@ -85,6 +101,7 @@ export interface OverlayService {
 let taskPaneService: TaskPaneService | undefined;
 let dialogService: DialogService | undefined;
 let overlayService: OverlayService | undefined;
+let activityBarService: ActivityBarService | undefined;
 
 // React hook providers (optional, registered by Shell)
 let useIsTaskPaneOpenHook: () => boolean = () => false;
@@ -113,6 +130,13 @@ export function registerDialogService(service: DialogService): void {
  */
 export function registerOverlayService(service: OverlayService): void {
   overlayService = service;
+}
+
+/**
+ * Register the ActivityBar service implementation (called by Shell at startup).
+ */
+export function registerActivityBarService(service: ActivityBarService): void {
+  activityBarService = service;
 }
 
 /**
@@ -554,4 +578,92 @@ export function getStatusBarItems(): StatusBarItemDefinition[] {
 
 export function subscribeToStatusBar(callback: () => void): () => void {
   return statusBarRegistry.subscribe(callback);
+}
+
+// ============================================================================
+// Activity Bar React Hooks (delegate to registered implementations)
+// ============================================================================
+
+let useIsActivityBarOpenHook: () => boolean = () => false;
+let useActiveActivityViewIdHook: () => string | null = () => null;
+
+/**
+ * Register React hooks for ActivityBar (called by Shell at startup).
+ */
+export function registerActivityBarHooks(hooks: {
+  useIsOpen: () => boolean;
+  useActiveViewId: () => string | null;
+}): void {
+  useIsActivityBarOpenHook = hooks.useIsOpen;
+  useActiveActivityViewIdHook = hooks.useActiveViewId;
+}
+
+export function useIsActivityBarOpen(): boolean {
+  return useIsActivityBarOpenHook();
+}
+
+export function useActiveActivityViewId(): string | null {
+  return useActiveActivityViewIdHook();
+}
+
+// ============================================================================
+// ActivityBarExtensions Facade
+// ============================================================================
+
+export const ActivityBarExtensions = {
+  registerView(definition: ActivityViewDefinition): void {
+    if (!activityBarService) {
+      console.warn("[API] ActivityBarService not registered. Call registerActivityBarService first.");
+      return;
+    }
+    activityBarService.registerView(definition);
+  },
+
+  unregisterView(viewId: string): void {
+    activityBarService?.unregisterView(viewId);
+  },
+
+  getView(viewId: string): ActivityViewDefinition | undefined {
+    return activityBarService?.getView(viewId);
+  },
+
+  getAllViews(): ActivityViewDefinition[] {
+    return activityBarService?.getAllViews() ?? [];
+  },
+
+  onRegistryChange(listener: () => void): () => void {
+    return activityBarService?.onRegistryChange(listener) ?? (() => {});
+  },
+};
+
+// ============================================================================
+// Activity Bar Function API (convenience wrappers)
+// ============================================================================
+
+export function registerActivityView(definition: ActivityViewDefinition): void {
+  ActivityBarExtensions.registerView(definition);
+}
+
+export function unregisterActivityView(viewId: string): void {
+  ActivityBarExtensions.unregisterView(viewId);
+}
+
+export function openActivityView(viewId: string, data?: Record<string, unknown>): void {
+  activityBarService?.openView(viewId, data);
+}
+
+export function closeActivityView(): void {
+  activityBarService?.closeView();
+}
+
+export function toggleActivityView(viewId?: string): void {
+  activityBarService?.toggle(viewId);
+}
+
+export function isActivityBarOpen(): boolean {
+  return activityBarService?.isOpen() ?? false;
+}
+
+export function getActiveActivityViewId(): string | null {
+  return activityBarService?.getActiveViewId() ?? null;
 }

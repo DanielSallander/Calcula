@@ -11,6 +11,7 @@ import { FormulaBar } from "./FormulaBar";
 import { Spreadsheet } from "../core/components/Spreadsheet";
 import { SheetTabs } from "./SheetTabs";
 import { TaskPaneContainer } from "./TaskPane";
+import { ActivityBar, SidePanel } from "./ActivityBar";
 import { DialogContainer } from "./DialogContainer";
 import { OverlayContainer } from "./OverlayContainer";
 import { GridContextMenuHost } from "./Overlays/GridContextMenuHost";
@@ -159,7 +160,7 @@ function LayoutInner(): React.ReactElement {
       {/* Formula Bar */}
       <FormulaBar />
 
-      {/* Main Content Area - Spreadsheet + Task Pane */}
+      {/* Main Content Area - Activity Bar + Side Panel + Spreadsheet + Task Pane */}
       <div
         style={{
           flex: 1,
@@ -168,12 +169,18 @@ function LayoutInner(): React.ReactElement {
           position: "relative",
         }}
       >
-        {/* Spreadsheet Area - full width, task pane floats over it */}
+        {/* Activity Bar - thin icon strip on the left */}
+        <ActivityBar />
+
+        {/* Side Panel - expandable panel next to Activity Bar */}
+        <SidePanel />
+
+        {/* Spreadsheet Area - fills remaining space */}
         <div style={{ flex: 1, overflow: "hidden" }}>
           <Spreadsheet />
         </div>
 
-        {/* Task Pane - floats over the spreadsheet */}
+        {/* Task Pane - floats over the spreadsheet on the right */}
         <TaskPaneContainer />
       </div>
 

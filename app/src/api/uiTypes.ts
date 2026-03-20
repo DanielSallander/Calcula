@@ -73,6 +73,7 @@ export type TaskPaneContextKey =
   | "properties"      // Generic properties pane
   | "bi"              // BI (Business Intelligence) pane
   | "collection"      // Cell contains a List or Dict (3D cell)
+  | "file-viewer"     // Virtual file viewer requested
   | "always";         // Always available
 
 /**
@@ -199,4 +200,36 @@ export interface StatusBarItemDefinition {
   alignment: StatusBarAlignment;
   /** Priority for ordering (higher = rendered first within its alignment zone) */
   priority?: number;
+}
+
+// ============================================================================
+// Activity Bar Types
+// ============================================================================
+
+/**
+ * Props passed to Activity View components rendered in the Side Panel.
+ */
+export interface ActivityViewProps {
+  /** Callback to close this view */
+  onClose?: () => void;
+  /** Any additional data passed to the view */
+  data?: Record<string, unknown>;
+}
+
+/**
+ * Definition of an Activity View that can be registered by extensions.
+ */
+export interface ActivityViewDefinition {
+  /** Unique identifier (e.g., "explorer", "search", "extensions") */
+  id: string;
+  /** Display title shown in tooltip and panel header */
+  title: string;
+  /** SVG icon as React element for the Activity Bar icon */
+  icon: React.ReactNode;
+  /** The component to render in the Side Panel */
+  component: React.ComponentType<ActivityViewProps>;
+  /** Sort priority (higher = closer to top of Activity Bar). Default: 0 */
+  priority?: number;
+  /** Whether the view appears in the bottom section of the Activity Bar (like VS Code's settings gear) */
+  bottom?: boolean;
 }

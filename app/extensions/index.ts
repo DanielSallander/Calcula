@@ -27,6 +27,10 @@ import { registerControlsExtension, unregisterControlsExtension } from "./Contro
 import { registerBiExtension, unregisterBiExtension } from "./BusinessIntelligence";
 import { registerPrintExtension, unregisterPrintExtension } from "./Print";
 import { registerAIChatExtension, unregisterAIChatExtension } from "./AIChat";
+import { registerFileExplorerExtension, unregisterFileExplorerExtension } from "./FileExplorer";
+import { registerSearchExtension, unregisterSearchExtension } from "./Search";
+import { registerExtensionsManagerExtension, unregisterExtensionsManagerExtension } from "./ExtensionsManager";
+import { registerSettingsExtension, unregisterSettingsExtension } from "./Settings";
 
 /**
  * Load all extensions.
@@ -63,6 +67,12 @@ export function loadExtensions(): void {
   registerPrintExtension();
   registerAIChatExtension();
 
+  // Activity Bar views
+  registerFileExplorerExtension();
+  registerSearchExtension();
+  registerExtensionsManagerExtension();
+  registerSettingsExtension();
+
   // Future: Load user extensions from config
 
   console.log("[Extensions] All extensions loaded");
@@ -76,6 +86,10 @@ export function unloadExtensions(): void {
   console.log("[Extensions] Unloading extensions...");
 
   // Unload in reverse order
+  unregisterSettingsExtension();
+  unregisterExtensionsManagerExtension();
+  unregisterSearchExtension();
+  unregisterFileExplorerExtension();
   unregisterAIChatExtension();
   unregisterPrintExtension();
   unregisterBiExtension();
@@ -131,3 +145,7 @@ export { registerControlsExtension, unregisterControlsExtension };
 export { registerBiExtension, unregisterBiExtension };
 export { registerPrintExtension, unregisterPrintExtension };
 export { registerAIChatExtension, unregisterAIChatExtension };
+export { registerFileExplorerExtension, unregisterFileExplorerExtension };
+export { registerSearchExtension, unregisterSearchExtension };
+export { registerExtensionsManagerExtension, unregisterExtensionsManagerExtension };
+export { registerSettingsExtension, unregisterSettingsExtension };

@@ -309,6 +309,15 @@ export function useSpreadsheetEditing({
 
   const handleContainerKeyDown = useCallback(
     async (event: React.KeyboardEvent<HTMLDivElement>) => {
+      // Skip if focus is inside an input, textarea, or contenteditable element
+      const target = event.target as HTMLElement;
+      if (target) {
+        const tag = target.tagName;
+        if (tag === "INPUT" || tag === "TEXTAREA" || target.isContentEditable) {
+          return;
+        }
+      }
+
       // FIX: Use ONLY the synchronous ref for editing check
       // The ref is updated immediately when editing starts/stops, before React re-renders.
       // This prevents:

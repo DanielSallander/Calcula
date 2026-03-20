@@ -18,6 +18,10 @@ import {
   closeTaskPane as closeTaskPaneById,
   clearTaskPaneManuallyClosed,
   markTaskPaneManuallyClosed,
+  useIsActivityBarOpen,
+  useActiveActivityViewId,
+  toggleActivityView,
+  ActivityBarExtensions,
 } from '../../../src/api/ui';
 
 export interface ViewMenuHandlers {
@@ -121,6 +125,10 @@ export function useViewMenu(): { menu: MenuDefinition; handlers: ViewMenuHandler
     }
   }, []);
 
+  // Activity Bar state
+  const isActivityBarOpen = useIsActivityBarOpen();
+  const activeActivityViewId = useActiveActivityViewId();
+
   // ---------------------------------------------------------------------------
   // Dynamic Show/Hide items for task pane views based on active context
   // ---------------------------------------------------------------------------
@@ -166,10 +174,38 @@ export function useViewMenu(): { menu: MenuDefinition; handlers: ViewMenuHandler
   // Build menu
   // ---------------------------------------------------------------------------
 
-  const items: MenuItemDefinition[] = [
+  // ---------------------------------------------------------------------------
+  // Activity Bar view items
+  // ---------------------------------------------------------------------------
+
+  const activityBarViews = ActivityBarExtensions.getAllViews();
+  const activityBarItems: MenuItemDefinition[] = activityBarViews.map((view) => ({
+    id: `view.activity.${view.id}`,
+    label: view.title,
+    shortcut: view.id === 'explorer' ? 'Ctrl+Shift+E' :
+              view.id === 'search' ? 'Ctrl+Shift+H' :
+              view.id === 'extensions' ? 'Ctrl+Shift+X' : undefined,
+    action: () => toggleActivityView(view.id),
+    checked: isActivityBarOpen && activeActivityViewId === view.id,
+  }));
+
+  // ---------------------------------------------------------------------------
+  // Build menu
+  // ---------------------------------------------------------------------------
+
+  const items: MenuItemDefinition[] = [];
+
+  // Side Bar section
+  if (activityBarItems.length > 0) {
+    items.push(...activityBarItems);
+    items.push({ id: 'view.sepActivity', label: '', separator: true });
+  }
+
+  // Task Pane section
+  items.push(
     { id: 'view.showTaskpane', label: 'Show Taskpane', action: openTaskPane, hidden: isTaskPaneOpen },
     { id: 'view.hideTaskpane', label: 'Hide Taskpane', action: closeTaskPane, hidden: !isTaskPaneOpen },
-  ];
+  );
 
   if (dynamicPaneItems.length > 0) {
     items.push({ id: 'view.sepPanes', label: '', separator: true });

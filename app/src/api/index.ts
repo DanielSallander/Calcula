@@ -392,6 +392,17 @@ export {
   unregisterStatusBarItem,
   getStatusBarItems,
   subscribeToStatusBar,
+  // Activity Bar API
+  registerActivityView,
+  unregisterActivityView,
+  openActivityView,
+  closeActivityView,
+  toggleActivityView,
+  isActivityBarOpen,
+  getActiveActivityViewId,
+  useIsActivityBarOpen,
+  useActiveActivityViewId,
+  ActivityBarExtensions,
 } from "./ui";
 
 // ============================================================================
@@ -412,6 +423,8 @@ export type {
   AnchorRect,
   StatusBarItemDefinition,
   StatusBarAlignment,
+  ActivityViewDefinition,
+  ActivityViewProps,
 } from "./uiTypes";
 
 // ============================================================================

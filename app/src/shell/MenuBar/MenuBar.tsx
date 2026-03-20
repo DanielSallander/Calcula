@@ -178,6 +178,12 @@ export function MenuBar(): React.ReactElement {
 
       if (isInputField && !e.ctrlKey && !e.metaKey) return;
 
+      // Don't intercept standard text editing shortcuts when focus is in an input/textarea
+      if (isInputField && (e.ctrlKey || e.metaKey)) {
+        const k = e.key.toLowerCase();
+        if (k === 'v' || k === 'c' || k === 'x' || k === 'a' || k === 'z' || k === 'y') return;
+      }
+
       const keyCombo = parseKeyboardEvent(e);
       if (!keyCombo) return;
 

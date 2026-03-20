@@ -90,5 +90,6 @@ pub fn load_xlsx(path: &Path) -> Result<Workbook, PersistenceError> {
         sheets,
         active_sheet: 0,
         tables,
+        user_files: HashMap::new(),
     })
 }

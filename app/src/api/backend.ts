@@ -3361,3 +3361,56 @@ export interface AiSerializeOptions {
 export async function getAiContext(options: AiSerializeOptions = {}): Promise<string> {
   return invoke<string>("get_ai_context", { options });
 }
+
+// ============================================================================
+// Virtual Files (stored inside the .cala archive)
+// ============================================================================
+
+export interface VirtualFileEntry {
+  path: string;
+  isDir: boolean;
+  size: number;
+  extension: string;
+}
+
+/**
+ * List all user files stored inside the .cala archive.
+ */
+export async function listVirtualFiles(): Promise<VirtualFileEntry[]> {
+  return invoke<VirtualFileEntry[]>("list_virtual_files");
+}
+
+/**
+ * Read a user file from the virtual filesystem.
+ */
+export async function readVirtualFile(path: string): Promise<string> {
+  return invoke<string>("read_virtual_file", { path });
+}
+
+/**
+ * Create or update a file in the virtual filesystem.
+ */
+export async function createVirtualFile(path: string, content?: string): Promise<void> {
+  return invoke<void>("create_virtual_file", { path, content });
+}
+
+/**
+ * Create a virtual folder.
+ */
+export async function createVirtualFolder(path: string): Promise<void> {
+  return invoke<void>("create_virtual_folder", { path });
+}
+
+/**
+ * Delete a file or folder from the virtual filesystem.
+ */
+export async function deleteVirtualFile(path: string): Promise<void> {
+  return invoke<void>("delete_virtual_file", { path });
+}
+
+/**
+ * Rename a file or folder in the virtual filesystem.
+ */
+export async function renameVirtualFile(oldPath: string, newPath: string): Promise<void> {
+  return invoke<void>("rename_virtual_file", { oldPath, newPath });
+}

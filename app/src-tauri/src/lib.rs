@@ -20,7 +20,7 @@ use parser::ast::{
 use parser::parse as parse_formula;
 use std::collections::{HashMap, HashSet};
 use std::sync::Mutex;
-use persistence::FileState;
+use persistence::{FileState, UserFilesState};
 use engine::UndoStack;
 
 pub mod persistence;
@@ -2550,6 +2550,7 @@ pub fn run() {
         .plugin(tauri_plugin_clipboard_manager::init())
         .manage(create_app_state())
         .manage(FileState::default())
+        .manage(UserFilesState::default())
         .manage(pivot::PivotState::new())
         .manage(bi::BiState::new())
         .manage(evaluate_formula::EvalFormulaState::new())
@@ -2625,6 +2626,12 @@ pub fn run() {
             persistence::get_current_file_path,
             persistence::is_file_modified,
             persistence::mark_file_modified,
+            persistence::list_virtual_files,
+            persistence::read_virtual_file,
+            persistence::create_virtual_file,
+            persistence::create_virtual_folder,
+            persistence::delete_virtual_file,
+            persistence::rename_virtual_file,
             persistence::get_ai_context,
             // Sheet commands
             sheets::get_sheets,

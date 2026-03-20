@@ -22,6 +22,12 @@ pub struct FileState {
     pub is_modified: Mutex<bool>,
 }
 
+/// Virtual filesystem for user files stored inside the .cala archive.
+#[derive(Default)]
+pub struct UserFilesState {
+    pub files: Mutex<HashMap<String, Vec<u8>>>,
+}
+
 // ============================================================================
 // Table <-> SavedTable conversion
 // ============================================================================
@@ -167,6 +173,7 @@ fn restore_tables(
 pub fn save_file(
     state: State<AppState>,
     file_state: State<FileState>,
+    user_files_state: State<UserFilesState>,
     path: String,
 ) -> Result<(), String> {
     let grid = state.grid.lock().map_err(|e| e.to_string())?;
@@ -182,6 +189,7 @@ pub fn save_file(
 
     let mut workbook = Workbook::from_grid(&grid, &styles, &dimensions);
     workbook.tables = collect_tables_for_save(&tables);
+    workbook.user_files = user_files_state.files.lock().map_err(|e| e.to_string())?.clone();
 
     let path_buf = PathBuf::from(&path);
 
@@ -207,6 +215,7 @@ pub fn save_file(
 pub fn open_file(
     state: State<AppState>,
     file_state: State<FileState>,
+    user_files_state: State<UserFilesState>,
     path: String,
 ) -> Result<Vec<CellData>, String> {
     let path_buf = PathBuf::from(&path);
@@ -263,6 +272,9 @@ pub fn open_file(
         *next_table_id = next_id;
     }
 
+    // Restore user files from workbook
+    *user_files_state.files.lock().map_err(|e| e.to_string())? = workbook.user_files;
+
     *file_state.current_path.lock().map_err(|e| e.to_string())? = Some(path_buf);
     *file_state.is_modified.lock().map_err(|e| e.to_string())? = false;
 
@@ -295,6 +307,7 @@ pub fn open_file(
 pub fn new_file(
     state: State<AppState>,
     file_state: State<FileState>,
+    user_files_state: State<UserFilesState>,
 ) -> Result<(), String> {
     {
         let mut grid = state.grid.lock().map_err(|e| e.to_string())?;
@@ -326,6 +339,9 @@ pub fn new_file(
         *next_table_id = 1;
     }
 
+    // Clear user files
+    user_files_state.files.lock().map_err(|e| e.to_string())?.clear();
+
     *file_state.current_path.lock().map_err(|e| e.to_string())? = None;
     *file_state.is_modified.lock().map_err(|e| e.to_string())? = false;
 
@@ -351,6 +367,217 @@ pub fn mark_file_modified(file_state: State<FileState>) {
     if let Ok(mut modified) = file_state.is_modified.lock() {
         *modified = true;
     }
+}
+
+// ============================================================================
+// VIRTUAL FILES (stored inside the .cala archive)
+// ============================================================================
+
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VirtualFileEntry {
+    pub path: String,
+    pub is_dir: bool,
+    pub size: u64,
+    pub extension: String,
+}
+
+/// List all user files stored inside the .cala archive.
+#[tauri::command]
+pub fn list_virtual_files(user_files_state: State<UserFilesState>) -> Result<Vec<VirtualFileEntry>, String> {
+    let files = user_files_state.files.lock().map_err(|e| e.to_string())?;
+
+    let mut entries: Vec<VirtualFileEntry> = Vec::new();
+    let mut seen_dirs: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+    for (path, content) in files.iter() {
+        // Collect parent directories
+        if let Some(dir_path) = path.rsplit_once('/').map(|(d, _)| d.to_string()) {
+            // Add each level of the directory hierarchy
+            let parts: Vec<&str> = dir_path.split('/').collect();
+            for i in 0..parts.len() {
+                let dir = parts[..=i].join("/");
+                if seen_dirs.insert(dir.clone()) {
+                    entries.push(VirtualFileEntry {
+                        path: dir,
+                        is_dir: true,
+                        size: 0,
+                        extension: String::new(),
+                    });
+                }
+            }
+        }
+
+        let extension = std::path::Path::new(path)
+            .extension()
+            .map(|e| e.to_string_lossy().to_string())
+            .unwrap_or_default();
+
+        entries.push(VirtualFileEntry {
+            path: path.clone(),
+            is_dir: false,
+            size: content.len() as u64,
+            extension,
+        });
+    }
+
+    entries.sort_by(|a, b| {
+        b.is_dir.cmp(&a.is_dir).then(a.path.to_lowercase().cmp(&b.path.to_lowercase()))
+    });
+
+    Ok(entries)
+}
+
+/// Read a user file from the virtual filesystem.
+#[tauri::command]
+pub fn read_virtual_file(user_files_state: State<UserFilesState>, path: String) -> Result<String, String> {
+    let files = user_files_state.files.lock().map_err(|e| e.to_string())?;
+
+    let content = files.get(&path)
+        .ok_or_else(|| format!("File not found: {}", path))?;
+
+    String::from_utf8(content.clone())
+        .map_err(|_| "File is not valid UTF-8 text".to_string())
+}
+
+/// Create or update a file in the virtual filesystem.
+#[tauri::command]
+pub fn create_virtual_file(
+    user_files_state: State<UserFilesState>,
+    file_state: State<FileState>,
+    path: String,
+    content: Option<String>,
+) -> Result<(), String> {
+    if path.trim().is_empty() {
+        return Err("Path cannot be empty".to_string());
+    }
+    if path.contains("..") {
+        return Err("Invalid path".to_string());
+    }
+
+    let mut files = user_files_state.files.lock().map_err(|e| e.to_string())?;
+    let bytes = content.unwrap_or_default().into_bytes();
+    files.insert(path, bytes);
+
+    // Mark file as modified
+    if let Ok(mut modified) = file_state.is_modified.lock() {
+        *modified = true;
+    }
+
+    Ok(())
+}
+
+/// Create a virtual folder marker (stores as an empty entry with trailing /).
+#[tauri::command]
+pub fn create_virtual_folder(
+    user_files_state: State<UserFilesState>,
+    file_state: State<FileState>,
+    path: String,
+) -> Result<(), String> {
+    if path.trim().is_empty() {
+        return Err("Path cannot be empty".to_string());
+    }
+    if path.contains("..") {
+        return Err("Invalid path".to_string());
+    }
+
+    // Folders are implicitly created when files exist inside them.
+    // We store a placeholder empty file to represent empty folders.
+    let mut files = user_files_state.files.lock().map_err(|e| e.to_string())?;
+    let folder_marker = format!("{}/.folder", path.trim_end_matches('/'));
+    files.insert(folder_marker, Vec::new());
+
+    // Mark file as modified
+    if let Ok(mut modified) = file_state.is_modified.lock() {
+        *modified = true;
+    }
+
+    Ok(())
+}
+
+/// Delete a file from the virtual filesystem.
+#[tauri::command]
+pub fn delete_virtual_file(
+    user_files_state: State<UserFilesState>,
+    file_state: State<FileState>,
+    path: String,
+) -> Result<(), String> {
+    let mut files = user_files_state.files.lock().map_err(|e| e.to_string())?;
+
+    // If it's a directory, remove all files under it
+    let prefix = format!("{}/", path.trim_end_matches('/'));
+    let keys_to_remove: Vec<String> = files.keys()
+        .filter(|k| **k == path || k.starts_with(&prefix))
+        .cloned()
+        .collect();
+
+    if keys_to_remove.is_empty() {
+        return Err(format!("Not found: {}", path));
+    }
+
+    for key in keys_to_remove {
+        files.remove(&key);
+    }
+
+    // Mark file as modified
+    if let Ok(mut modified) = file_state.is_modified.lock() {
+        *modified = true;
+    }
+
+    Ok(())
+}
+
+/// Rename a file or folder in the virtual filesystem.
+#[tauri::command]
+pub fn rename_virtual_file(
+    user_files_state: State<UserFilesState>,
+    file_state: State<FileState>,
+    old_path: String,
+    new_path: String,
+) -> Result<(), String> {
+    if new_path.trim().is_empty() {
+        return Err("New name cannot be empty".to_string());
+    }
+    if new_path.contains("..") {
+        return Err("Invalid path".to_string());
+    }
+
+    let mut files = user_files_state.files.lock().map_err(|e| e.to_string())?;
+
+    // Check if it's a single file rename
+    if let Some(content) = files.remove(&old_path) {
+        if files.contains_key(&new_path) {
+            // Put it back
+            files.insert(old_path, content);
+            return Err(format!("'{}' already exists", new_path));
+        }
+        files.insert(new_path, content);
+    } else {
+        // It's a folder rename — rename all files under old_path/
+        let old_prefix = format!("{}/", old_path.trim_end_matches('/'));
+        let new_prefix = format!("{}/", new_path.trim_end_matches('/'));
+        let keys_to_rename: Vec<(String, Vec<u8>)> = files.iter()
+            .filter(|(k, _)| k.starts_with(&old_prefix))
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
+
+        if keys_to_rename.is_empty() {
+            return Err(format!("Not found: {}", old_path));
+        }
+
+        for (old_key, content) in keys_to_rename {
+            files.remove(&old_key);
+            let new_key = format!("{}{}", new_prefix, &old_key[old_prefix.len()..]);
+            files.insert(new_key, content);
+        }
+    }
+
+    // Mark file as modified
+    if let Ok(mut modified) = file_state.is_modified.lock() {
+        *modified = true;
+    }
+
+    Ok(())
 }
 
 // ============================================================================
