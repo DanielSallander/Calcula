@@ -21,11 +21,13 @@ import {
   checkTableAutoExpand as backendCheckAutoExpand,
   enforceTableHeader as backendEnforceTableHeader,
   setCalculatedColumn as backendSetCalculatedColumn,
+  convertFormulaToTableRefs as backendConvertFormulaToTableRefs,
   type Table,
   type TableResult,
   type TableStyleOptions,
   type CreateTableParams,
 } from "../../../src/api/backend";
+import { cellEvents } from "../../../src/api";
 
 // Re-export backend types for consumers
 export type { Table, TableResult, TableStyleOptions };
@@ -208,10 +210,41 @@ export async function setCalculatedColumnAsync(
 ): Promise<Table | null> {
   const result = await backendSetCalculatedColumn(tableId, columnName, formula);
   if (result.success && result.table) {
+    // Push computed cell values directly into the canvas via cellEvents.
+    // This bypasses the viewport re-fetch and immediately shows the values,
+    // matching what "Calculate Sheets" does.
+    if (result.computedCells) {
+      for (const cell of result.computedCells) {
+        cellEvents.emit({
+          row: cell.row,
+          col: cell.col,
+          oldValue: undefined,
+          newValue: cell.display,
+          formula: cell.formula ?? null,
+        });
+      }
+    }
     await refreshCache();
     return result.table;
   }
   return null;
+}
+
+/**
+ * Convert cell references in a formula to structured table references.
+ * Same-row cell references within the table range become [@ColumnName] syntax.
+ */
+export async function convertFormulaToTableRefsAsync(
+  tableId: number,
+  formula: string,
+  formulaRow: number,
+): Promise<string> {
+  try {
+    return await backendConvertFormulaToTableRefs(tableId, formula, formulaRow);
+  } catch (err) {
+    console.error("[TableStore] convertFormulaToTableRefs failed:", err);
+    return formula; // Return original formula on error
+  }
 }
 
 // ============================================================================
@@ -220,13 +253,17 @@ export async function setCalculatedColumnAsync(
 
 /**
  * Find the table at a given cell position (from cache).
+ * If sheetIndex is provided, only tables on that sheet are considered.
  */
 export function getTableAtCell(
   row: number,
   col: number,
-  _sheetIndex?: number,
+  sheetIndex?: number,
 ): Table | null {
   for (const table of cachedTables) {
+    if (sheetIndex !== undefined && table.sheetIndex !== sheetIndex) {
+      continue;
+    }
     if (
       row >= table.startRow &&
       row <= table.endRow &&

@@ -34,6 +34,7 @@ import {
 } from "../../core/state/gridActions";
 import { updateCell, getCell, setActiveSheet as setActiveSheetApi, getMergeInfo } from "../lib/tauri-api";
 import { cellEvents } from "../lib/cellEvents";
+import { emitAppEvent, AppEvents } from "../lib/events";
 import {
   rangeToReference,
   columnToReference,
@@ -1404,6 +1405,14 @@ export function useEditing(): UseEditingReturn {
           });
         }
         const perfT4Events = performance.now();
+
+        // Emit EDIT_ENDED so extensions (e.g. Table auto-expand) can react
+        // to the committed edit with full cell context.
+        emitAppEvent(AppEvents.EDIT_ENDED, {
+          row: primaryCell.row,
+          col: primaryCell.col,
+          value: editing.value,
+        });
 
         dispatch(stopEditing());
         dispatch(clearFormulaReferences());

@@ -33,6 +33,7 @@ export const AppEvents = {
 
   // Grid events
   GRID_REFRESH: "app:grid-refresh",
+  GRID_DATA_REFRESH: "grid:refresh",
 
   // Structure events (row/column insert/delete)
   ROWS_INSERTED: "app:rows-inserted",
@@ -44,6 +45,8 @@ export const AppEvents = {
   SHEET_CHANGED: "app:sheet-changed",
 
   // Editing events
+  EDIT_STARTED: "app:edit-started",
+  EDIT_ENDED: "app:edit-ended",
   PREVENT_BLUR_COMMIT: "app:prevent-blur-commit",
 } as const;
 

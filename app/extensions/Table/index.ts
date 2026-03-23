@@ -6,6 +6,7 @@ import {
   ExtensionRegistry,
   DialogExtensions,
   onAppEvent,
+  emitAppEvent,
   AppEvents,
 } from "../../src/api";
 import { registerMenu } from "../../src/api/ui";
@@ -36,6 +37,7 @@ import {
   enforceHeaderAsync,
   resizeTableAsync,
   setCalculatedColumnAsync,
+  convertFormulaToTableRefsAsync,
 } from "./lib/tableStore";
 import { drawTableBorder, hitTestTable } from "./lib/tableOverlayRenderer";
 import { registerTableStyleInterceptor } from "./lib/tableStyleInterceptor";
@@ -163,6 +165,14 @@ export function registerTableExtension(): void {
     ),
   );
 
+  // Refresh table cache when the active sheet changes so tables from
+  // the previous sheet are removed and the new sheet's tables are loaded.
+  cleanupFunctions.push(
+    onAppEvent(AppEvents.SHEET_CHANGED, () => {
+      refreshCache().catch(console.error);
+    }),
+  );
+
   // Subscribe to selection changes to show/hide the Table menu
   cleanupFunctions.push(
     ExtensionRegistry.onSelectionChange(handleSelectionChange),
@@ -192,10 +202,13 @@ async function handleCellEdited(row: number, col: number, value: string): Promis
     const colIndex = col - table.startCol;
     if (colIndex >= 0 && colIndex < table.columns.length) {
       const column = table.columns[colIndex];
+      // Convert cell references to structured table references (e.g., =B2+C2 -> =[@Price]+[@Qty])
+      const converted = await convertFormulaToTableRefsAsync(table.id, value, row);
       // Only auto-fill if the column doesn't already have a calculated formula
       // or if the formula is different from the current one
-      if (!column.calculatedFormula || column.calculatedFormula !== value) {
-        await setCalculatedColumnAsync(table.id, column.name, value);
+      if (!column.calculatedFormula || column.calculatedFormula !== converted) {
+        await setCalculatedColumnAsync(table.id, column.name, converted);
+        emitAppEvent(AppEvents.GRID_DATA_REFRESH);
       }
     }
     return;
@@ -205,7 +218,34 @@ async function handleCellEdited(row: number, col: number, value: string): Promis
   if (!table) {
     const expanded = await checkAutoExpand(row, col);
     if (expanded) {
+      console.log(`[Table] Auto-expand triggered at (${row},${col}), table now: rows=${expanded.startRow}-${expanded.endRow}, cols=${expanded.startCol}-${expanded.endCol}, columns:`, expanded.columns.map(c => c.name));
       syncTableRegions();
+
+      // If the cell that triggered expansion contains a formula, set it as a
+      // calculated column so it auto-fills to all data rows in the table.
+      if (value.startsWith("=")) {
+        const dataStartRow = expanded.startRow + (expanded.styleOptions.headerRow ? 1 : 0);
+        if (row >= dataStartRow && row <= expanded.endRow) {
+          const colIndex = col - expanded.startCol;
+          console.log(`[Table] Formula auto-expand: colIndex=${colIndex}, columns.length=${expanded.columns.length}, value="${value}"`);
+          if (colIndex >= 0 && colIndex < expanded.columns.length) {
+            const column = expanded.columns[colIndex];
+            // Convert cell references to structured table references
+            const converted = await convertFormulaToTableRefsAsync(expanded.id, value, row);
+            console.log(`[Table] Converted formula: "${value}" -> "${converted}"`);
+            await setCalculatedColumnAsync(expanded.id, column.name, converted);
+          }
+        }
+      }
+
+      // Notify that table definitions changed so AutoFilter and other listeners refresh
+      emitAppEvent(TableEvents.TABLE_DEFINITIONS_UPDATED);
+
+      // Re-fetch viewport data and repaint to show computed values + table styling.
+      // Uses GRID_DATA_REFRESH which re-fetches cells from backend (unlike GRID_REFRESH
+      // which only repaints with stale data). The pendingRefreshRef mechanism in
+      // GridCanvas handles the case where a fetch is already in progress.
+      emitAppEvent(AppEvents.GRID_DATA_REFRESH);
     }
   }
 }

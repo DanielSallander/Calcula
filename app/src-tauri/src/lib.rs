@@ -1583,12 +1583,13 @@ pub fn expression_to_formula(expr: &ParserExpr) -> String {
             s
         }
         ParserExpr::TableRef { table_name, specifier } => {
-            // Should not appear after resolution, but handle gracefully
+            // Should not appear after resolution, but handle gracefully.
+            // table_specifier_to_string already wraps in brackets, e.g. [@sales] or [Column].
             let spec_str = table_specifier_to_string(specifier);
             if table_name.is_empty() {
-                format!("[{}]", spec_str)
+                spec_str
             } else {
-                format!("{}[{}]", table_name, spec_str)
+                format!("{}{}", table_name, spec_str)
             }
         }
         ParserExpr::IndexAccess { target, index } => {
@@ -3003,6 +3004,7 @@ pub fn run() {
             tables::get_table_at_cell,
             tables::get_all_tables,
             tables::resolve_structured_reference,
+            tables::convert_formula_to_table_refs,
             // Goal Seek command
             goal_seek::goal_seek,
             // Data Consolidation command

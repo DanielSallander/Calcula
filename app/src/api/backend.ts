@@ -2343,10 +2343,18 @@ export interface Table {
 /**
  * Result of a table operation.
  */
+export interface ComputedCell {
+  row: number;
+  col: number;
+  display: string;
+  formula?: string | null;
+}
+
 export interface TableResult {
   success: boolean;
   table?: Table;
   error?: string;
+  computedCells?: ComputedCell[];
 }
 
 /**
@@ -2626,6 +2634,26 @@ export async function resolveStructuredReference(
   reference: string
 ): Promise<StructuredRefResult> {
   return invoke<StructuredRefResult>("resolve_structured_reference", { reference });
+}
+
+/**
+ * Convert cell references in a formula to structured table references.
+ * Same-row cell references within the table range become [@ColumnName] syntax.
+ * @param tableId - The table ID
+ * @param formula - The formula string (e.g., "=B2+C2")
+ * @param formulaRow - The 0-based row where the formula was entered
+ * @returns The converted formula string (e.g., "=[@Price]+[@Qty]")
+ */
+export async function convertFormulaToTableRefs(
+  tableId: number,
+  formula: string,
+  formulaRow: number,
+): Promise<string> {
+  return invoke<string>("convert_formula_to_table_refs", {
+    tableId,
+    formula,
+    formulaRow,
+  });
 }
 
 // ============================================================================

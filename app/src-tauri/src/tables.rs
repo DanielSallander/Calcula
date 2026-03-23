@@ -6,6 +6,8 @@ use std::collections::HashMap;
 use tauri::State;
 
 use crate::AppState;
+use crate::autofilter::AutoFilter;
+use crate::persistence::UserFilesState;
 
 // ============================================================================
 // TOTALS ROW FUNCTIONS
@@ -235,7 +237,19 @@ pub type TableNameRegistry = HashMap<String, (usize, u64)>;
 // RESULT TYPES
 // ============================================================================
 
-/// Result of a table operation
+/// Lightweight cell update info returned by set_calculated_column
+/// so the frontend can push values into the canvas without a full viewport re-fetch.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ComputedCell {
+    pub row: u32,
+    pub col: u32,
+    pub display: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub formula: Option<String>,
+}
+
+/// Result of a table operation.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TableResult {
@@ -244,6 +258,9 @@ pub struct TableResult {
     pub table: Option<Table>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    /// Computed cell values from set_calculated_column, for direct canvas update.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub computed_cells: Option<Vec<ComputedCell>>,
 }
 
 impl TableResult {
@@ -252,6 +269,7 @@ impl TableResult {
             success: true,
             table: Some(table),
             error: None,
+            computed_cells: None,
         }
     }
 
@@ -260,6 +278,7 @@ impl TableResult {
             success: true,
             table: None,
             error: None,
+            computed_cells: None,
         }
     }
 
@@ -268,6 +287,7 @@ impl TableResult {
             success: false,
             table: None,
             error: Some(message.into()),
+            computed_cells: None,
         }
     }
 }
@@ -549,7 +569,7 @@ pub fn create_table(
     });
 
     // Create table
-    let table = Table {
+    let mut table = Table {
         id: *next_id,
         name: name.clone(),
         sheet_index: active_sheet,
@@ -564,6 +584,15 @@ pub fn create_table(
     };
 
     *next_id += 1;
+
+    // Create an AutoFilter for the table range if show_filter_button is enabled
+    if table.style_options.show_filter_button {
+        let mut auto_filters = state.auto_filters.lock().unwrap();
+        let auto_filter = AutoFilter::new(min_row, min_col, max_row, max_col);
+        auto_filters.insert(active_sheet, auto_filter);
+        // Store a reference ID (using the sheet index as the AutoFilter is per-sheet)
+        table.auto_filter_id = Some(active_sheet as u64);
+    }
 
     // Store table
     table_names.insert(name.to_uppercase(), (active_sheet, table.id));
@@ -1087,6 +1116,8 @@ pub fn check_table_auto_expand(
 ) -> Option<Table> {
     let active_sheet = *state.active_sheet.lock().unwrap();
     let mut tables = state.tables.lock().unwrap();
+    let mut grid = state.grid.lock().unwrap();
+    let mut grids = state.grids.lock().unwrap();
 
     let sheet_tables = tables.get_mut(&active_sheet)?;
 
@@ -1121,16 +1152,60 @@ pub fn check_table_auto_expand(
     match expand_type {
         "row" => {
             table.end_row += 1;
+
+            // Update AutoFilter range if the table has filters
+            if table.style_options.show_filter_button {
+                let mut auto_filters = state.auto_filters.lock().unwrap();
+                if let Some(af) = auto_filters.get_mut(&active_sheet) {
+                    af.end_row = table.end_row;
+                }
+            }
         }
         "col" => {
             let new_col_id = table.columns.iter().map(|c| c.id).max().unwrap_or(0) + 1;
             let existing_names: Vec<String> = table.columns.iter().map(|c| c.name.clone()).collect();
-            let new_name = ensure_unique_header(
-                &format!("Column{}", table.columns.len() + 1),
-                &existing_names,
-            );
+
+            // Try to read the header cell text from the grid for the new column
+            let header_text = if table.style_options.header_row {
+                grid.get_cell(table.start_row, col)
+                    .and_then(|c| match &c.value {
+                        engine::CellValue::Text(s) if !s.trim().is_empty() => Some(s.trim().to_string()),
+                        engine::CellValue::Number(n) => Some(format!("{}", n)),
+                        _ => None,
+                    })
+                    .unwrap_or_else(|| format!("Column{}", table.columns.len() + 1))
+            } else {
+                format!("Column{}", table.columns.len() + 1)
+            };
+
+            let new_name = ensure_unique_header(&header_text, &existing_names);
+
+            // If the header cell is empty, write the generated column name
+            // so it displays with table styling.
+            if table.style_options.header_row {
+                let needs_header = match grid.get_cell(table.start_row, col) {
+                    None => true,
+                    Some(c) => matches!(c.value, engine::CellValue::Empty),
+                };
+                if needs_header {
+                    let cell = engine::Cell::new_text(new_name.clone());
+                    grid.set_cell(table.start_row, col, cell.clone());
+                    if active_sheet < grids.len() {
+                        grids[active_sheet].set_cell(table.start_row, col, cell);
+                    }
+                }
+            }
+
             table.columns.push(TableColumn::new(new_col_id, new_name));
             table.end_col += 1;
+
+            // Update AutoFilter range if the table has filters
+            if table.style_options.show_filter_button {
+                let mut auto_filters = state.auto_filters.lock().unwrap();
+                if let Some(af) = auto_filters.get_mut(&active_sheet) {
+                    af.end_col = table.end_col;
+                }
+            }
         }
         _ => return None,
     }
@@ -1277,17 +1352,18 @@ pub fn resolve_structured_reference(
 /// Set a calculated column formula that auto-fills to all data rows.
 /// When a user enters a formula in one data cell of a table column,
 /// this propagates it to all other data rows in that column.
+/// The formula is parsed, table references resolved per-row, evaluated,
+/// and the computed value is written to each data cell.
 #[tauri::command]
 pub fn set_calculated_column(
     state: State<AppState>,
+    user_files_state: State<UserFilesState>,
     table_id: u64,
     column_name: String,
     formula: String,
 ) -> TableResult {
     let active_sheet = *state.active_sheet.lock().unwrap();
     let mut tables = state.tables.lock().unwrap();
-    let mut grid = state.grid.lock().unwrap();
-    let mut grids = state.grids.lock().unwrap();
 
     let table = match tables.get_mut(&active_sheet).and_then(|t| t.get_mut(&table_id)) {
         Some(t) => t,
@@ -1312,14 +1388,79 @@ pub fn set_calculated_column(
     let data_end = table.data_end_row();
     let table_clone = table.clone();
 
-    // Write the formula to all data rows in this column
+    // Write formulas to all data rows and evaluate them
+    let mut computed = Vec::new();
+
     if !formula.is_empty() {
+        // Parse the formula once
+        let parsed = match parser::parse(&formula) {
+            Ok(ast) => ast,
+            Err(_) => {
+                // If formula doesn't parse, still store it but skip evaluation
+                return TableResult::ok(table_clone);
+            }
+        };
+
+        let mut grid = state.grid.lock().unwrap();
+        let mut grids = state.grids.lock().unwrap();
+        let sheet_names = state.sheet_names.lock().unwrap();
+        let table_names = state.table_names.lock().unwrap();
+        let user_files = user_files_state.files.lock().unwrap();
+        let styles = state.style_registry.lock().unwrap();
+
         for row in data_start..=data_end {
+            // Resolve table references for this specific row
+            let resolved = if crate::ast_has_table_refs(&parsed) {
+                let ctx = crate::TableRefContext {
+                    tables: &tables,
+                    table_names: &table_names,
+                    current_sheet_index: active_sheet,
+                    current_row: row,
+                };
+                crate::resolve_table_refs_in_ast(&parsed, &ctx)
+            } else {
+                parsed.clone()
+            };
+
+            // Convert to engine AST and evaluate
+            let engine_ast = crate::convert_expr(&resolved);
+            let eval_ctx = engine::EvalContext {
+                current_row: Some(row),
+                current_col: Some(abs_col),
+                row_heights: None,
+                column_widths: None,
+            };
+            let result = crate::evaluate_formula_raw_with_files(
+                &grids,
+                &sheet_names,
+                active_sheet,
+                &engine_ast,
+                eval_ctx,
+                Some(&styles),
+                &user_files,
+            );
+
+            // Create cell with formula and evaluated value
             let mut cell = engine::Cell::new_formula(formula.clone());
+            cell.value = result.to_cell_value();
+            cell.set_cached_ast(engine_ast);
+
             // Preserve existing style
             if let Some(existing) = grid.get_cell(row, abs_col) {
                 cell.style_index = existing.style_index;
             }
+
+            // Format display value for frontend
+            let style = styles.get(cell.style_index);
+            let display = crate::format_cell_value(&cell.value, style);
+
+            computed.push(ComputedCell {
+                row,
+                col: abs_col,
+                display,
+                formula: Some(formula.clone()),
+            });
+
             grid.set_cell(row, abs_col, cell.clone());
             if active_sheet < grids.len() {
                 grids[active_sheet].set_cell(row, abs_col, cell);
@@ -1327,7 +1468,116 @@ pub fn set_calculated_column(
         }
     }
 
-    TableResult::ok(table_clone)
+    TableResult {
+        success: true,
+        table: Some(table_clone),
+        error: None,
+        computed_cells: if computed.is_empty() { None } else { Some(computed) },
+    }
+}
+
+/// Convert cell references in a formula to structured table references.
+/// When a user enters a formula in a table data cell, same-row cell references
+/// that fall within the table's column range are converted to [@ColumnName] syntax.
+/// E.g., "=B2+C2" in row 2 of a table with columns B="Price", C="Qty" becomes
+/// "=[@Price]+[@Qty]".
+#[tauri::command]
+pub fn convert_formula_to_table_refs(
+    state: State<AppState>,
+    table_id: u64,
+    formula: String,
+    formula_row: u32,
+) -> String {
+    let active_sheet = *state.active_sheet.lock().unwrap();
+    let tables = state.tables.lock().unwrap();
+
+    let table = match tables
+        .get(&active_sheet)
+        .and_then(|st| st.get(&table_id))
+    {
+        Some(t) => t,
+        None => return formula,
+    };
+
+    // Only convert if the formula row is within the table data area
+    let data_start = table.data_start_row();
+    let data_end = table.data_end_row();
+    if formula_row < data_start || formula_row > data_end {
+        return formula;
+    }
+
+    // Parse the formula
+    let parsed = match parser::parse(&formula) {
+        Ok(ast) => ast,
+        Err(_) => return formula,
+    };
+
+    // Recursively replace cell references that point to the same row and are
+    // within the table column range with [@ColumnName] references.
+    let converted = convert_cell_refs_to_table_refs(&parsed, table, formula_row);
+
+    // Serialize back to formula string
+    format!("={}", crate::expression_to_formula(&converted))
+}
+
+/// Convert column letters (e.g., "A", "B", "AA") to 0-based column index.
+fn col_letters_to_index(col: &str) -> u32 {
+    let mut result: u32 = 0;
+    for c in col.chars() {
+        result = result * 26 + (c.to_ascii_uppercase() as u32 - 'A' as u32 + 1);
+    }
+    result.saturating_sub(1)
+}
+
+/// Recursively walk the AST and replace matching CellRef nodes with TableRef nodes.
+fn convert_cell_refs_to_table_refs(
+    expr: &parser::Expression,
+    table: &Table,
+    formula_row: u32,
+) -> parser::Expression {
+    use parser::Expression;
+    use parser::ast::TableSpecifier;
+
+    match expr {
+        Expression::CellRef { sheet, col, row, col_absolute: _, row_absolute: _ } => {
+            // Only convert same-sheet references (no sheet prefix) on the same row
+            if sheet.is_none() && *row == formula_row + 1 {
+                let col_idx = col_letters_to_index(col);
+                if col_idx >= table.start_col && col_idx <= table.end_col {
+                    let relative = (col_idx - table.start_col) as usize;
+                    if relative < table.columns.len() {
+                        let col_name = &table.columns[relative].name;
+                        return Expression::TableRef {
+                            table_name: String::new(), // Empty = inferred from context
+                            specifier: TableSpecifier::ThisRow(col_name.clone()),
+                        };
+                    }
+                }
+            }
+            expr.clone()
+        }
+        Expression::BinaryOp { op, left, right } => {
+            Expression::BinaryOp {
+                op: op.clone(),
+                left: Box::new(convert_cell_refs_to_table_refs(left, table, formula_row)),
+                right: Box::new(convert_cell_refs_to_table_refs(right, table, formula_row)),
+            }
+        }
+        Expression::UnaryOp { op, operand } => {
+            Expression::UnaryOp {
+                op: op.clone(),
+                operand: Box::new(convert_cell_refs_to_table_refs(operand, table, formula_row)),
+            }
+        }
+        Expression::FunctionCall { func, args } => {
+            Expression::FunctionCall {
+                func: func.clone(),
+                args: args.iter().map(|a| convert_cell_refs_to_table_refs(a, table, formula_row)).collect(),
+            }
+        }
+        // Leave everything else unchanged (Literal, Range, TableRef, etc.)
+        _ => expr.clone(),
+    }
 }
 
 // ============================================================================

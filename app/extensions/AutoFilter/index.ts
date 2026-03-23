@@ -177,6 +177,18 @@ export function registerAutoFilterExtension(): void {
   });
   cleanupFns.push(unsubSheet);
 
+  // Refresh filter state when a table is created or updated (tables create/expand
+  // AutoFilters for their header row so the chevron icons appear on the table headers).
+  const handleTableChanged = () => {
+    refreshFilterState();
+  };
+  window.addEventListener("app:table-created", handleTableChanged);
+  window.addEventListener("app:table-definitions-updated", handleTableChanged);
+  cleanupFns.push(() => {
+    window.removeEventListener("app:table-created", handleTableChanged);
+    window.removeEventListener("app:table-definitions-updated", handleTableChanged);
+  });
+
   const unsubSelection = ExtensionRegistry.onSelectionChange((sel) => {
     setCurrentSelection(sel);
   });

@@ -184,6 +184,8 @@ export const GridCanvas = forwardRef<GridCanvasHandle, GridCanvasProps>(
 
     // Track if a fetch is in progress
     const fetchingRef = useRef<boolean>(false);
+    // Track if a forced refresh was requested while a fetch was in progress
+    const pendingRefreshRef = useRef<boolean>(false);
 
     // Animation state for marching ants
     const animationFrameRef = useRef<number | null>(null);
@@ -318,8 +320,13 @@ export const GridCanvas = forwardRef<GridCanvasHandle, GridCanvasProps>(
         return;
       }
 
-      // Prevent concurrent fetches
+      // Prevent concurrent fetches — if a forced refresh arrives while fetching,
+      // mark it as pending so we re-fetch once the current fetch completes.
       if (fetchingRef.current) {
+        if (force) {
+          console.log('[GridCanvas] fetchCells(force) deferred — fetch in progress, will retry after');
+          pendingRefreshRef.current = true;
+        }
         return;
       }
 
@@ -371,6 +378,15 @@ export const GridCanvas = forwardRef<GridCanvasHandle, GridCanvasProps>(
         console.error("Failed to fetch cells:", error);
       } finally {
         fetchingRef.current = false;
+
+        // If a forced refresh was requested while we were fetching,
+        // trigger another fetch to pick up the latest data.
+        if (pendingRefreshRef.current) {
+          console.log('[GridCanvas] Executing deferred forced refresh');
+          pendingRefreshRef.current = false;
+          lastFetchRef.current = null;
+          fetchCells(true);
+        }
       }
     }, [calculateFetchRange, needsFetch]);
 
