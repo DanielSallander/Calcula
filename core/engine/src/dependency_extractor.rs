@@ -302,6 +302,11 @@ pub enum BuiltinFunction {
     Merge,
     HStack,
 
+    // File functions (virtual file system)
+    FileRead,
+    FileLines,
+    FileExists,
+
     /// Fallback for unrecognized function names (future extensions/plugins).
     Custom(String),
 }

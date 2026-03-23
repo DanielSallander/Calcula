@@ -43,6 +43,7 @@ pub mod autofilter;
 pub mod hyperlinks;
 pub mod protection;
 pub mod grouping;
+pub mod distribution;
 pub mod conditional_formatting;
 pub mod tables;
 pub mod goal_seek;
@@ -623,6 +624,11 @@ fn convert_builtin_function(func: &ParserBuiltinFn) -> EngineBuiltinFn {
         ParserBuiltinFn::Append => EngineBuiltinFn::Append,
         ParserBuiltinFn::Merge => EngineBuiltinFn::Merge,
         ParserBuiltinFn::HStack => EngineBuiltinFn::HStack,
+
+        // File functions
+        ParserBuiltinFn::FileRead => EngineBuiltinFn::FileRead,
+        ParserBuiltinFn::FileLines => EngineBuiltinFn::FileLines,
+        ParserBuiltinFn::FileExists => EngineBuiltinFn::FileExists,
 
         ParserBuiltinFn::Custom(name) => EngineBuiltinFn::Custom(name.clone()),
     }
@@ -1790,6 +1796,9 @@ fn builtin_function_to_name(func: &ParserBuiltinFn) -> String {
         ParserBuiltinFn::Append => "APPEND".to_string(),
         ParserBuiltinFn::Merge => "MERGE".to_string(),
         ParserBuiltinFn::HStack => "HSTACK".to_string(),
+        ParserBuiltinFn::FileRead => "FILEREAD".to_string(),
+        ParserBuiltinFn::FileLines => "FILELINES".to_string(),
+        ParserBuiltinFn::FileExists => "FILEEXISTS".to_string(),
         ParserBuiltinFn::Custom(name) => name.clone(),
     }
 }
@@ -2205,6 +2214,34 @@ pub fn evaluate_formula_with_context(
     evaluator.evaluate(ast).to_cell_value()
 }
 
+/// Like `evaluate_formula_with_context` but with file reader support.
+pub fn evaluate_formula_with_context_and_files(
+    grids: &[Grid],
+    sheet_names: &[String],
+    current_sheet_index: usize,
+    ast: &EngineExpr,
+    eval_ctx: engine::EvalContext,
+    style_registry: Option<&engine::StyleRegistry>,
+    user_files: &HashMap<String, Vec<u8>>,
+) -> CellValue {
+    if current_sheet_index >= grids.len() || current_sheet_index >= sheet_names.len() {
+        return CellValue::Error(CellError::Ref);
+    }
+
+    let current_grid = &grids[current_sheet_index];
+    let current_sheet_name = &sheet_names[current_sheet_index];
+    let context = create_multi_sheet_context(grids, sheet_names, current_sheet_name);
+    let reader = |path: &str| -> Option<String> {
+        user_files.get(path).and_then(|bytes| String::from_utf8(bytes.clone()).ok())
+    };
+    let mut evaluator = Evaluator::with_context(current_grid, context, eval_ctx);
+    if let Some(sr) = style_registry {
+        evaluator.set_styles(sr);
+    }
+    evaluator.set_file_reader(&reader);
+    evaluator.evaluate(ast).to_cell_value()
+}
+
 /// Evaluates a formula AST with context, returning the raw EvalResult.
 /// Used for dynamic array functions that need spill handling.
 pub fn evaluate_formula_raw(
@@ -2229,6 +2266,34 @@ pub fn evaluate_formula_raw(
     evaluator.evaluate(ast)
 }
 
+/// Like `evaluate_formula_raw` but with file reader support.
+pub fn evaluate_formula_raw_with_files(
+    grids: &[Grid],
+    sheet_names: &[String],
+    current_sheet_index: usize,
+    ast: &EngineExpr,
+    eval_ctx: engine::EvalContext,
+    style_registry: Option<&engine::StyleRegistry>,
+    user_files: &HashMap<String, Vec<u8>>,
+) -> EvalResult {
+    if current_sheet_index >= grids.len() || current_sheet_index >= sheet_names.len() {
+        return EvalResult::Error(CellError::Ref);
+    }
+
+    let current_grid = &grids[current_sheet_index];
+    let current_sheet_name = &sheet_names[current_sheet_index];
+    let context = create_multi_sheet_context(grids, sheet_names, current_sheet_name);
+    let reader = |path: &str| -> Option<String> {
+        user_files.get(path).and_then(|bytes| String::from_utf8(bytes.clone()).ok())
+    };
+    let mut evaluator = Evaluator::with_context(current_grid, context, eval_ctx);
+    if let Some(sr) = style_registry {
+        evaluator.set_styles(sr);
+    }
+    evaluator.set_file_reader(&reader);
+    evaluator.evaluate(ast)
+}
+
 /// Evaluates a formula AST using a pre-built evaluator. This is the fastest path
 /// for batch operations where the same evaluator can be reused across many formulas.
 pub fn evaluate_ast_with_evaluator(evaluator: &Evaluator, ast: &EngineExpr) -> CellValue {
@@ -2250,6 +2315,82 @@ pub fn create_evaluator_for_sheet<'a>(
     let current_sheet_name = &sheet_names[current_sheet_index];
     let context = create_multi_sheet_context(grids, sheet_names, current_sheet_name);
     Some(Evaluator::with_multi_sheet(current_grid, context))
+}
+
+/// Creates an Evaluator with multi-sheet context and file reader support.
+pub fn create_evaluator_with_files<'a>(
+    grids: &'a [Grid],
+    sheet_names: &[String],
+    current_sheet_index: usize,
+    file_reader: Option<&'a dyn Fn(&str) -> Option<String>>,
+) -> Option<Evaluator<'a>> {
+    if current_sheet_index >= grids.len() || current_sheet_index >= sheet_names.len() {
+        return None;
+    }
+
+    let current_grid = &grids[current_sheet_index];
+    let current_sheet_name = &sheet_names[current_sheet_index];
+    let context = create_multi_sheet_context(grids, sheet_names, current_sheet_name);
+    let mut evaluator = Evaluator::with_multi_sheet(current_grid, context);
+    if let Some(reader) = file_reader {
+        evaluator.set_file_reader(reader);
+    }
+    Some(evaluator)
+}
+
+/// Like `evaluate_formula_multi_sheet` but with file reader support for FILEREAD/FILELINES/FILEEXISTS.
+pub fn evaluate_formula_multi_sheet_with_files(
+    grids: &[Grid],
+    sheet_names: &[String],
+    current_sheet_index: usize,
+    formula: &str,
+    user_files: &HashMap<String, Vec<u8>>,
+) -> CellValue {
+    if current_sheet_index >= grids.len() || current_sheet_index >= sheet_names.len() {
+        return CellValue::Error(CellError::Ref);
+    }
+
+    match parse_formula(formula) {
+        Ok(parser_ast) => {
+            let engine_ast = convert_expr(&parser_ast);
+            let current_grid = &grids[current_sheet_index];
+            let current_sheet_name = &sheet_names[current_sheet_index];
+            let context = create_multi_sheet_context(grids, sheet_names, current_sheet_name);
+            let reader = |path: &str| -> Option<String> {
+                user_files.get(path).and_then(|bytes| String::from_utf8(bytes.clone()).ok())
+            };
+            let mut evaluator = Evaluator::with_multi_sheet(current_grid, context);
+            evaluator.set_file_reader(&reader);
+            evaluator.evaluate(&engine_ast).to_cell_value()
+        }
+        Err(e) => {
+            log_error!("EVAL", "parse_err formula={} err={}", formula, e);
+            CellValue::Error(CellError::Value)
+        }
+    }
+}
+
+/// Like `evaluate_formula_multi_sheet_with_ast` but with file reader support.
+pub fn evaluate_formula_multi_sheet_with_ast_and_files(
+    grids: &[Grid],
+    sheet_names: &[String],
+    current_sheet_index: usize,
+    ast: &EngineExpr,
+    user_files: &HashMap<String, Vec<u8>>,
+) -> CellValue {
+    if current_sheet_index >= grids.len() || current_sheet_index >= sheet_names.len() {
+        return CellValue::Error(CellError::Ref);
+    }
+
+    let current_grid = &grids[current_sheet_index];
+    let current_sheet_name = &sheet_names[current_sheet_index];
+    let context = create_multi_sheet_context(grids, sheet_names, current_sheet_name);
+    let reader = |path: &str| -> Option<String> {
+        user_files.get(path).and_then(|bytes| String::from_utf8(bytes.clone()).ok())
+    };
+    let mut evaluator = Evaluator::with_multi_sheet(current_grid, context);
+    evaluator.set_file_reader(&reader);
+    evaluator.evaluate(ast).to_cell_value()
 }
 
 /// Parses a formula and converts it to the engine AST.
@@ -2619,6 +2760,7 @@ pub fn run() {
             formula::get_functions_by_category,
             formula::get_all_functions,
             formula::get_function_template,
+            formula::evaluate_expressions,
             // File commands
             persistence::save_file,
             persistence::open_file,
@@ -2908,6 +3050,13 @@ pub fn run() {
             mcp::mcp_stop,
             mcp::mcp_status,
             mcp::mcp_set_port,
+            // Distribution / Package commands
+            distribution::parse_package_info,
+            distribution::browse_packages,
+            distribution::export_as_package,
+            distribution::import_package,
+            distribution::download_package,
+            distribution::publish_package,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")

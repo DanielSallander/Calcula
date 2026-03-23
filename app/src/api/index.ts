@@ -794,3 +794,35 @@ export {
   calculateNow,
   calculateSheet,
 } from "./lib";
+
+// ============================================================================
+// Distribution API
+// ============================================================================
+
+export {
+  registerRegistryProvider,
+  unregisterRegistryProvider,
+  getRegistryProviders,
+  getRegistryProvider,
+  parsePackageInfo,
+  browsePackages,
+  exportAsPackage,
+  importPackage,
+  downloadPackage,
+  publishPackage,
+} from "./distribution";
+
+export type {
+  PackageInfo,
+  PackageContent,
+  DataSourceDeclaration,
+  DataSourceColumn,
+  ImportResult,
+  ImportBinding,
+  PublishResult,
+  RegistryProvider,
+  RegistryQuery,
+  RegistrySearchResult,
+  VersionInfo,
+  UpdateInfo,
+} from "./distribution";

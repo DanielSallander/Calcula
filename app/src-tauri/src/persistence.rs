@@ -14,7 +14,7 @@ use calcula_format::ai::{AiSerializeOptions, serialize_for_ai, SheetInput};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Mutex;
-use tauri::State;
+use tauri::{Emitter, State};
 
 #[derive(Default)]
 pub struct FileState {
@@ -163,6 +163,33 @@ fn restore_tables(
     }
 
     (tables, table_names, max_id + 1)
+}
+
+// ============================================================================
+// PUBLIC HELPERS
+// ============================================================================
+
+/// Build a Workbook from the current AppState (used by save_file and export_as_package).
+pub fn build_workbook_for_save(
+    state: &State<AppState>,
+    user_files_state: &State<UserFilesState>,
+) -> Result<Workbook, String> {
+    let grid = state.grid.lock().map_err(|e| e.to_string())?;
+    let styles = state.style_registry.lock().map_err(|e| e.to_string())?;
+    let col_widths = state.column_widths.lock().map_err(|e| e.to_string())?;
+    let row_heights = state.row_heights.lock().map_err(|e| e.to_string())?;
+    let tables = state.tables.lock().map_err(|e| e.to_string())?;
+
+    let dimensions = DimensionData {
+        column_widths: col_widths.clone(),
+        row_heights: row_heights.clone(),
+    };
+
+    let mut workbook = Workbook::from_grid(&grid, &styles, &dimensions);
+    workbook.tables = collect_tables_for_save(&tables);
+    workbook.user_files = user_files_state.files.lock().map_err(|e| e.to_string())?.clone();
+
+    Ok(workbook)
 }
 
 // ============================================================================
@@ -443,6 +470,7 @@ pub fn read_virtual_file(user_files_state: State<UserFilesState>, path: String) 
 /// Create or update a file in the virtual filesystem.
 #[tauri::command]
 pub fn create_virtual_file(
+    app_handle: tauri::AppHandle,
     user_files_state: State<UserFilesState>,
     file_state: State<FileState>,
     path: String,
@@ -457,12 +485,15 @@ pub fn create_virtual_file(
 
     let mut files = user_files_state.files.lock().map_err(|e| e.to_string())?;
     let bytes = content.unwrap_or_default().into_bytes();
-    files.insert(path, bytes);
+    files.insert(path.clone(), bytes);
 
     // Mark file as modified
     if let Ok(mut modified) = file_state.is_modified.lock() {
         *modified = true;
     }
+
+    // Notify frontend so cells using FILEREAD/FILELINES/FILEEXISTS can recalculate
+    let _ = app_handle.emit("virtual-file-changed", &path);
 
     Ok(())
 }
@@ -498,6 +529,7 @@ pub fn create_virtual_folder(
 /// Delete a file from the virtual filesystem.
 #[tauri::command]
 pub fn delete_virtual_file(
+    app_handle: tauri::AppHandle,
     user_files_state: State<UserFilesState>,
     file_state: State<FileState>,
     path: String,
@@ -524,12 +556,16 @@ pub fn delete_virtual_file(
         *modified = true;
     }
 
+    // Notify frontend so cells using FILEREAD/FILELINES/FILEEXISTS can recalculate
+    let _ = app_handle.emit("virtual-file-changed", &path);
+
     Ok(())
 }
 
 /// Rename a file or folder in the virtual filesystem.
 #[tauri::command]
 pub fn rename_virtual_file(
+    app_handle: tauri::AppHandle,
     user_files_state: State<UserFilesState>,
     file_state: State<FileState>,
     old_path: String,
@@ -576,6 +612,9 @@ pub fn rename_virtual_file(
     if let Ok(mut modified) = file_state.is_modified.lock() {
         *modified = true;
     }
+
+    // Notify frontend so cells using FILEREAD/FILELINES/FILEEXISTS can recalculate
+    let _ = app_handle.emit("virtual-file-changed", &old_path);
 
     Ok(())
 }

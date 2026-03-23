@@ -2,9 +2,10 @@
 // PURPOSE: Calculation mode commands for manual/automatic recalculation.
 
 use tauri::State;
-use crate::{AppState, evaluate_formula_with_context, format_cell_value};
+use crate::{AppState, evaluate_formula_with_context_and_files, format_cell_value};
 use crate::api_types::CellData;
 use crate::{log_enter, log_exit, log_enter_info, log_exit_info, log_warn};
+use crate::persistence::UserFilesState;
 use engine;
 
 // ============================================================================
@@ -46,12 +47,13 @@ pub fn get_calculation_mode(state: State<AppState>) -> String {
 
 /// Recalculate all formulas in the grid.
 #[tauri::command]
-pub fn calculate_now(state: State<AppState>) -> Result<Vec<CellData>, String> {
+pub fn calculate_now(state: State<AppState>, user_files_state: State<UserFilesState>) -> Result<Vec<CellData>, String> {
     let mut grid = state.grid.lock().unwrap();
     let mut grids = state.grids.lock().unwrap();
     let sheet_names = state.sheet_names.lock().unwrap();
     let active_sheet = *state.active_sheet.lock().unwrap();
     let mut styles = state.style_registry.lock().unwrap();
+    let user_files = user_files_state.files.lock().unwrap();
 
     let mut updated_cells = Vec::new();
 
@@ -106,13 +108,14 @@ pub fn calculate_now(state: State<AppState>) -> Result<Vec<CellData>, String> {
                 };
 
                 let engine_ast = crate::convert_expr(&resolved);
-                evaluate_formula_with_context(
+                evaluate_formula_with_context_and_files(
                     &grids,
                     &sheet_names,
                     active_sheet,
                     &engine_ast,
                     eval_ctx,
                     Some(&styles),
+                    &user_files,
                 )
             }
             Err(_) => engine::CellValue::Error(engine::CellError::Value),
@@ -169,11 +172,11 @@ pub fn calculate_now(state: State<AppState>) -> Result<Vec<CellData>, String> {
 
 /// Recalculate all formula cells in the current sheet (same as calculate_now for single-sheet)
 #[tauri::command]
-pub fn calculate_sheet(state: State<AppState>) -> Result<Vec<CellData>, String> {
+pub fn calculate_sheet(state: State<AppState>, user_files_state: State<UserFilesState>) -> Result<Vec<CellData>, String> {
     log_enter_info!("CMD", "calculate_sheet");
 
     // For now, calculate_sheet does the same as calculate_now since we have a single sheet
-    let result = calculate_now(state);
+    let result = calculate_now(state, user_files_state);
 
     log_exit_info!("CMD", "calculate_sheet", "done");
     result

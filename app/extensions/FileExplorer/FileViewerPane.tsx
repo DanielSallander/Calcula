@@ -6,6 +6,7 @@ import React, { useCallback, useEffect, useRef, useState } from "react";
 import type { TaskPaneViewProps } from "../../src/api/uiTypes";
 import { readVirtualFile, createVirtualFile } from "../../src/api/backend";
 import { MarkdownView, getViewMode } from "./FileRenderer";
+import { resolveTemplates, hasTemplates } from "./TemplateResolver";
 
 const h = React.createElement;
 
@@ -45,30 +46,32 @@ export const FileViewerPane: React.FC<TaskPaneViewProps> = ({ data }) => {
   useEffect(() => {
     if (!filePath) return;
 
-    const existing = tabsRef.current.find(t => t.filePath === filePath);
-    if (existing) {
-      // Tab already open — if double-clicked (not preview), pin it
-      if (!isPreview && existing.preview) {
-        setTabs(prev => prev.map(t =>
-          t.filePath === filePath ? { ...t, preview: false } : t
-        ));
-      }
-      setActiveTabId(makeTabId(filePath));
-      return;
-    }
-
-    // If this is a preview open, replace any existing preview tab (unless it's dirty)
-    const newTab: TabState = {
-      filePath,
-      content: "",
-      dirty: false,
-      showSource: true,
-      loading: true,
-      error: null,
-      preview: isPreview,
-    };
-
+    // Use the updater form of setTabs so `prev` is always the latest state,
+    // avoiding race conditions when single-click and double-click fire in quick succession.
     setTabs(prev => {
+      const existingIdx = prev.findIndex(t => t.filePath === filePath);
+
+      if (existingIdx >= 0) {
+        // Tab already open — if double-clicked (not preview), pin it
+        if (!isPreview && prev[existingIdx].preview) {
+          const next = [...prev];
+          next[existingIdx] = { ...next[existingIdx], preview: false };
+          return next;
+        }
+        return prev; // No change needed
+      }
+
+      // New tab
+      const newTab: TabState = {
+        filePath,
+        content: "",
+        dirty: false,
+        showSource: true,
+        loading: true,
+        error: null,
+        preview: isPreview,
+      };
+
       if (isPreview) {
         // Replace existing non-dirty preview tab
         const previewIdx = prev.findIndex(t => t.preview && !t.dirty);
@@ -80,22 +83,24 @@ export const FileViewerPane: React.FC<TaskPaneViewProps> = ({ data }) => {
       }
       return [...prev, newTab];
     });
+
     setActiveTabId(makeTabId(filePath));
 
-    // Load file content
+    // Always attempt to load — the updater above is idempotent for existing tabs,
+    // and the load result uses an updater too, so it safely targets the right tab.
     let cancelled = false;
     readVirtualFile(filePath)
       .then((text) => {
         if (!cancelled) {
           setTabs(prev => prev.map(t =>
-            t.filePath === filePath ? { ...t, content: text, loading: false } : t
+            t.filePath === filePath && t.loading ? { ...t, content: text, loading: false } : t
           ));
         }
       })
       .catch((err) => {
         if (!cancelled) {
           setTabs(prev => prev.map(t =>
-            t.filePath === filePath ? { ...t, error: String(err), loading: false } : t
+            t.filePath === filePath && t.loading ? { ...t, error: String(err), loading: false } : t
           ));
         }
       });
@@ -155,6 +160,41 @@ export const FileViewerPane: React.FC<TaskPaneViewProps> = ({ data }) => {
       return next;
     });
   }, [activeTabId]);
+
+  // Template resolution for preview mode
+  const [resolvedContent, setResolvedContent] = useState<string | null>(null);
+  const [resolving, setResolving] = useState(false);
+
+  useEffect(() => {
+    if (!activeTab || activeTab.showSource || activeTab.loading) {
+      setResolvedContent(null);
+      return;
+    }
+
+    // Only resolve if content has {{ }} templates
+    if (!hasTemplates(activeTab.content)) {
+      setResolvedContent(activeTab.content);
+      return;
+    }
+
+    let cancelled = false;
+    setResolving(true);
+    resolveTemplates(activeTab.content)
+      .then((resolved) => {
+        if (!cancelled) {
+          setResolvedContent(resolved);
+          setResolving(false);
+        }
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setResolvedContent(activeTab.content);
+          setResolving(false);
+        }
+      });
+
+    return () => { cancelled = true; };
+  }, [activeTab?.filePath, activeTab?.showSource, activeTab?.content, activeTab?.loading]);
 
   const handleKeyDown = useCallback((e: React.KeyboardEvent) => {
     if (e.ctrlKey && e.key === "s") {
@@ -236,7 +276,9 @@ export const FileViewerPane: React.FC<TaskPaneViewProps> = ({ data }) => {
   const ext = getExt(fileName);
   const viewMode = getViewMode(ext);
   const langLabel = ext ? ext.toUpperCase() : "TEXT";
-  const isRendered = viewMode === "markdown" && !activeTab.showSource && activeTab.content.trim().length > 0;
+  const contentHasTemplates = hasTemplates(activeTab.content);
+  const isRendered = !activeTab.showSource && activeTab.content.trim().length > 0;
+  const isMarkdownRendered = viewMode === "markdown" && isRendered;
 
   if (activeTab.loading) {
     return h("div", { style: styles.container },
@@ -268,10 +310,10 @@ export const FileViewerPane: React.FC<TaskPaneViewProps> = ({ data }) => {
     // Toolbar
     h("div", { style: styles.toolbar },
       h("div", { style: { display: "flex", gap: 6, alignItems: "center" } },
-        viewMode === "markdown" && h("button", {
+        (viewMode === "markdown" || contentHasTemplates) && h("button", {
           style: styles.toggleButton,
           onClick: () => updateActiveTab({ showSource: !activeTab.showSource }),
-          title: activeTab.showSource ? "Preview" : "Edit source",
+          title: activeTab.showSource ? "Preview (resolve templates)" : "Edit source",
         }, activeTab.showSource ? "Preview" : "Edit"),
         activeTab.dirty && h("button", {
           style: styles.saveButton,
@@ -282,12 +324,20 @@ export const FileViewerPane: React.FC<TaskPaneViewProps> = ({ data }) => {
         h("span", { style: styles.langBadge }, langLabel),
       ),
     ),
-    // Body: rendered markdown or editable textarea
+    // Body: rendered preview or editable textarea
     h("div", { style: styles.body },
-      isRendered
-        ? h("div", { style: styles.renderedBody },
-            h(MarkdownView, { content: activeTab.content }),
+      isRendered && resolving
+        ? h("div", { style: { padding: "10px 12px" } },
+            h("span", { style: styles.loadingText }, "Resolving templates..."),
           )
+        : isMarkdownRendered
+        ? h("div", { style: styles.renderedBody },
+            h(MarkdownView, { content: resolvedContent || activeTab.content }),
+          )
+        : isRendered
+        ? h("pre", {
+            style: styles.previewText,
+          }, resolvedContent || activeTab.content)
         : h("textarea", {
             style: styles.textarea,
             value: activeTab.content,
@@ -432,6 +482,21 @@ const styles: Record<string, React.CSSProperties> = {
     backgroundColor: "#fff",
     fontFamily: "'Cascadia Code', 'Consolas', 'Courier New', monospace",
     boxSizing: "border-box" as const,
+  },
+  previewText: {
+    width: "100%",
+    height: "100%",
+    margin: 0,
+    padding: "10px 12px",
+    overflow: "auto",
+    fontSize: 12,
+    lineHeight: "1.6",
+    color: "#333",
+    backgroundColor: "#fff",
+    fontFamily: "'Cascadia Code', 'Consolas', 'Courier New', monospace",
+    boxSizing: "border-box" as const,
+    whiteSpace: "pre-wrap" as const,
+    wordBreak: "break-word" as const,
   },
   emptyState: {
     display: "flex",

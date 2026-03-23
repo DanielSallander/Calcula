@@ -31,6 +31,8 @@ pub mod ai;
 pub use error::FormatError;
 pub use manifest::{Manifest, SheetEntry};
 
+pub mod package;
+
 use persistence::Workbook;
 
 /// Save a workbook to the `.cala` format (ZIP archive).

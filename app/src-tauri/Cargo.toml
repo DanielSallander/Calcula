@@ -38,6 +38,8 @@ rmcp = { version = "0.16", features = ["server", "transport-streamable-http-serv
 axum = "0.8"
 schemars = "1.0"
 tokio-util = "0.7"
+reqwest = { version = "0.12", features = ["stream", "multipart", "json"] }
+tempfile = "3.10"
 
 [features]
 default = ["custom-protocol"]

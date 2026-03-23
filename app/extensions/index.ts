@@ -31,6 +31,7 @@ import { registerFileExplorerExtension, unregisterFileExplorerExtension } from "
 import { registerSearchExtension, unregisterSearchExtension } from "./Search";
 import { registerExtensionsManagerExtension, unregisterExtensionsManagerExtension } from "./ExtensionsManager";
 import { registerSettingsExtension, unregisterSettingsExtension } from "./Settings";
+import { registerReportStoreExtension, unregisterReportStoreExtension } from "./ReportStore";
 
 /**
  * Load all extensions.
@@ -66,6 +67,7 @@ export function loadExtensions(): void {
   registerBiExtension();
   registerPrintExtension();
   registerAIChatExtension();
+  registerReportStoreExtension();
 
   // Activity Bar views
   registerFileExplorerExtension();
@@ -90,6 +92,7 @@ export function unloadExtensions(): void {
   unregisterExtensionsManagerExtension();
   unregisterSearchExtension();
   unregisterFileExplorerExtension();
+  unregisterReportStoreExtension();
   unregisterAIChatExtension();
   unregisterPrintExtension();
   unregisterBiExtension();
@@ -149,3 +152,4 @@ export { registerFileExplorerExtension, unregisterFileExplorerExtension };
 export { registerSearchExtension, unregisterSearchExtension };
 export { registerExtensionsManagerExtension, unregisterExtensionsManagerExtension };
 export { registerSettingsExtension, unregisterSettingsExtension };
+export { registerReportStoreExtension, unregisterReportStoreExtension };

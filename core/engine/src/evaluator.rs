@@ -312,6 +312,9 @@ pub struct Evaluator<'a> {
     context: EvalContext,
     /// Optional style registry reference for GET.CELL.FILLCOLOR.
     styles: Option<&'a StyleRegistry>,
+    /// Optional file reader for FILEREAD/FILELINES/FILEEXISTS functions.
+    /// The closure takes a file path and returns the file content if it exists.
+    file_reader: Option<&'a dyn Fn(&str) -> Option<String>>,
 }
 
 impl<'a> Evaluator<'a> {
@@ -323,6 +326,7 @@ impl<'a> Evaluator<'a> {
             multi_sheet: None,
             context: EvalContext::default(),
             styles: None,
+            file_reader: None,
         }
     }
 
@@ -333,6 +337,7 @@ impl<'a> Evaluator<'a> {
             multi_sheet: Some(context),
             context: EvalContext::default(),
             styles: None,
+            file_reader: None,
         }
     }
 
@@ -343,12 +348,18 @@ impl<'a> Evaluator<'a> {
             multi_sheet: Some(multi_sheet),
             context: eval_ctx,
             styles: None,
+            file_reader: None,
         }
     }
 
     /// Sets the style registry reference for GET.CELL.FILLCOLOR.
     pub fn set_styles(&mut self, style_registry: &'a StyleRegistry) {
         self.styles = Some(style_registry);
+    }
+
+    /// Sets the file reader closure for FILEREAD/FILELINES/FILEEXISTS functions.
+    pub fn set_file_reader(&mut self, reader: &'a dyn Fn(&str) -> Option<String>) {
+        self.file_reader = Some(reader);
     }
 
     /// Gets the grid for a given sheet name, or the current grid if None.
@@ -1126,6 +1137,11 @@ impl<'a> Evaluator<'a> {
             BuiltinFunction::Append => self.fn_append(args),
             BuiltinFunction::Merge => self.fn_merge(args),
             BuiltinFunction::HStack => self.fn_hstack(args),
+
+            // File functions
+            BuiltinFunction::FileRead => self.fn_file_read(args),
+            BuiltinFunction::FileLines => self.fn_file_lines(args),
+            BuiltinFunction::FileExists => self.fn_file_exists(args),
 
             // Unknown/custom functions
             BuiltinFunction::Custom(_) => EvalResult::Error(CellError::Name),
@@ -4839,6 +4855,52 @@ impl<'a> Evaluator<'a> {
                 EvalResult::List(items1)
             }
             _ => EvalResult::Error(CellError::Value),
+        }
+    }
+
+    // ========================================================================
+    // File functions (virtual file system)
+    // ========================================================================
+
+    /// FILEREAD(path) - returns the text content of a virtual file
+    fn fn_file_read(&self, args: &[Expression]) -> EvalResult {
+        if args.len() != 1 {
+            return EvalResult::Error(CellError::Value);
+        }
+        let path = self.evaluate(&args[0]).as_text();
+        match &self.file_reader {
+            Some(reader) => match reader(&path) {
+                Some(content) => EvalResult::Text(content),
+                None => EvalResult::Error(CellError::NA),
+            },
+            None => EvalResult::Error(CellError::NA),
+        }
+    }
+
+    /// FILELINES(path) - returns the number of lines in a virtual file
+    fn fn_file_lines(&self, args: &[Expression]) -> EvalResult {
+        if args.len() != 1 {
+            return EvalResult::Error(CellError::Value);
+        }
+        let path = self.evaluate(&args[0]).as_text();
+        match &self.file_reader {
+            Some(reader) => match reader(&path) {
+                Some(content) => EvalResult::Number(content.lines().count() as f64),
+                None => EvalResult::Error(CellError::NA),
+            },
+            None => EvalResult::Error(CellError::NA),
+        }
+    }
+
+    /// FILEEXISTS(path) - returns TRUE if a virtual file exists
+    fn fn_file_exists(&self, args: &[Expression]) -> EvalResult {
+        if args.len() != 1 {
+            return EvalResult::Error(CellError::Value);
+        }
+        let path = self.evaluate(&args[0]).as_text();
+        match &self.file_reader {
+            Some(reader) => EvalResult::Boolean(reader(&path).is_some()),
+            None => EvalResult::Boolean(false),
         }
     }
 

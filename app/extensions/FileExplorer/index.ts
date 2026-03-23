@@ -10,7 +10,14 @@ import {
   toggleActivityView,
   registerTaskPane,
   unregisterTaskPane,
+  cellEvents,
+  emitAppEvent,
+  AppEvents,
 } from "../../src/api";
+import {
+  recalculateFormulas,
+  listenForEvent,
+} from "../../src/api/backend";
 import { FileExplorerView } from "./FileExplorerView";
 import { FileViewerPane } from "./FileViewerPane";
 import { FILE_VIEWER_PANE_ID } from "./constants";
@@ -66,6 +73,28 @@ export function registerFileExplorerExtension(): void {
   };
   window.addEventListener("keydown", handleKeyDown, true);
   cleanupFns.push(() => window.removeEventListener("keydown", handleKeyDown, true));
+
+  // Listen for virtual file changes and recalculate formulas using FILEREAD/FILELINES/FILEEXISTS
+  listenForEvent("virtual-file-changed", () => {
+    recalculateFormulas()
+      .then((cells) => {
+        for (const cell of cells) {
+          if (cell.sheetIndex != null) continue;
+          cellEvents.emit({
+            row: cell.row,
+            col: cell.col,
+            newValue: cell.display,
+            formula: cell.formula ?? null,
+          });
+        }
+        emitAppEvent(AppEvents.GRID_REFRESH);
+      })
+      .catch((err) => {
+        console.warn("[FileExplorer] Recalc after file change failed:", err);
+      });
+  }).then((unlisten) => {
+    cleanupFns.push(unlisten);
+  });
 
   console.log("[FileExplorer] Extension registered");
 }

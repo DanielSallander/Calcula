@@ -9,14 +9,16 @@ use crate::api_types::{
 };
 use crate::commands::utils::get_cell_internal_with_merge;
 use crate::{
-    evaluate_formula_multi_sheet,
-    evaluate_formula_multi_sheet_with_ast,
+    evaluate_formula_multi_sheet_with_files,
+    evaluate_formula_multi_sheet_with_ast_and_files,
+    evaluate_formula_raw_with_files,
     extract_all_references, format_cell_value, get_column_row_dependents,
     get_recalculation_order, parse_cell_input,
     update_column_dependencies, update_cross_sheet_dependencies,
     update_dependencies, update_row_dependencies, AppState, log_perf
 };
 use engine::{self, Grid, StyleRegistry};
+use crate::persistence::UserFilesState;
 use std::collections::HashSet;
 use tauri::State;
 
@@ -299,12 +301,16 @@ fn get_cell_internal(grid: &Grid, styles: &StyleRegistry, row: u32, col: u32) ->
 #[tauri::command]
 pub fn update_cell(
     state: State<AppState>,
+    user_files_state: State<UserFilesState>,
     row: u32,
     col: u32,
     value: String,
 ) -> Result<UpdateCellResult, String> {
     use std::time::Instant;
     let perf_t0 = Instant::now();
+
+    // Lock user files for FILEREAD/FILELINES/FILEEXISTS support
+    let user_files = user_files_state.files.lock().unwrap();
 
     // Check if cell is in a protected region (e.g., pivot table, chart)
     let active_sheet_for_region_check = *state.active_sheet.lock().unwrap();
@@ -547,13 +553,14 @@ pub fn update_cell(
                     row_heights: Some(rh_map),
                     column_widths: Some(cw_map),
                 };
-                let raw_result = crate::evaluate_formula_raw(
+                let raw_result = evaluate_formula_raw_with_files(
                     &grids,
                     &sheet_names,
                     active_sheet,
                     &engine_ast,
                     eval_ctx,
                     Some(&styles),
+                    &user_files,
                 );
 
                 // Clear any previous spill range for this cell
@@ -647,7 +654,7 @@ pub fn update_cell(
                 // Formula parse error - dependencies won't be tracked
                 // Still try to evaluate (will return error)
                 let result =
-                    evaluate_formula_multi_sheet(&grids, &sheet_names, active_sheet, formula);
+                    evaluate_formula_multi_sheet_with_files(&grids, &sheet_names, active_sheet, formula, &user_files);
                 cell.value = result;
             }
         }
@@ -765,11 +772,12 @@ pub fn update_cell(
                     let result = if let Some(cached_ast) = dep_cell.get_cached_ast() {
                         perf_cache_hits += 1;
                         // Fast path: use pre-parsed AST
-                        evaluate_formula_multi_sheet_with_ast(
+                        evaluate_formula_multi_sheet_with_ast_and_files(
                             &grids,
                             &sheet_names,
                             active_sheet,
                             cached_ast,
+                            &user_files,
                         )
                     } else {
                         perf_cache_misses += 1;
@@ -797,11 +805,12 @@ pub fn update_cell(
                                 crate::convert_expr(&resolved)
                             }).map_err(|e| format!("{}", e))
                         } {
-                            let result = evaluate_formula_multi_sheet_with_ast(
+                            let result = evaluate_formula_multi_sheet_with_ast_and_files(
                                 &grids,
                                 &sheet_names,
                                 active_sheet,
                                 &engine_ast,
+                                &user_files,
                             );
                             // Cache the AST for next time
                             let mut updated_with_ast = dep_cell.clone();
@@ -841,7 +850,7 @@ pub fn update_cell(
                             continue; // Skip the rest of this iteration
                         }
                         // Fallback to string-based evaluation
-                        evaluate_formula_multi_sheet(&grids, &sheet_names, active_sheet, formula)
+                        evaluate_formula_multi_sheet_with_files(&grids, &sheet_names, active_sheet, formula, &user_files)
                     };
 
                     let mut updated_dep = dep_cell.clone();
@@ -917,19 +926,21 @@ pub fn update_cell(
                             if let Some(ref formula) = dep_cell.formula {
                                 // Use cached AST if available
                                 let result = if let Some(cached_ast) = dep_cell.get_cached_ast() {
-                                    evaluate_formula_multi_sheet_with_ast(
+                                    evaluate_formula_multi_sheet_with_ast_and_files(
                                         &grids,
                                         &sheet_names,
                                         *dep_sheet_idx,
                                         cached_ast,
+                                        &user_files,
                                     )
                                 } else {
                                     // Fallback: parse and evaluate
-                                    evaluate_formula_multi_sheet(
+                                    evaluate_formula_multi_sheet_with_files(
                                         &grids,
                                         &sheet_names,
                                         *dep_sheet_idx,
                                         formula,
+                                        &user_files,
                                     )
                                 };
 
@@ -1022,19 +1033,21 @@ pub fn update_cell(
 
                                 // Use cached AST if available
                                 let result = if let Some(cached_ast) = dep_cell.get_cached_ast() {
-                                    evaluate_formula_multi_sheet_with_ast(
+                                    evaluate_formula_multi_sheet_with_ast_and_files(
                                         &grids,
                                         &sheet_names,
                                         source_sheet_idx,
                                         cached_ast,
+                                        &user_files,
                                     )
                                 } else {
                                     // Fallback: parse and evaluate
-                                    evaluate_formula_multi_sheet(
+                                    evaluate_formula_multi_sheet_with_files(
                                         &grids,
                                         &sheet_names,
                                         source_sheet_idx,
                                         formula,
+                                        &user_files,
                                     )
                                 };
 
@@ -1147,11 +1160,13 @@ pub fn update_cell(
 #[tauri::command]
 pub fn update_cells_batch(
     state: State<AppState>,
+    user_files_state: State<UserFilesState>,
     updates: Vec<crate::api_types::CellUpdateInput>,
 ) -> Result<Vec<CellData>, String> {
     use std::collections::HashMap;
     use std::time::Instant;
     let perf_t0 = Instant::now();
+    let user_files = user_files_state.files.lock().unwrap();
     let perf_batch_size = updates.len();
 
     // Early return for empty batch
@@ -1361,17 +1376,18 @@ pub fn update_cells_batch(
                     // This eliminates a redundant parse_formula() call per cell.
                     let engine_ast = crate::convert_expr(&resolved);
                     cell.set_cached_ast(engine_ast.clone());
-                    let result = evaluate_formula_multi_sheet_with_ast(
+                    let result = evaluate_formula_multi_sheet_with_ast_and_files(
                         &grids,
                         &sheet_names,
                         active_sheet,
                         &engine_ast,
+                        &user_files,
                     );
                     cell.value = result;
                 }
                 Err(_e) => {
                     let result =
-                        evaluate_formula_multi_sheet(&grids, &sheet_names, active_sheet, formula);
+                        evaluate_formula_multi_sheet_with_files(&grids, &sheet_names, active_sheet, formula, &user_files);
                     cell.value = result;
                 }
             }
@@ -1480,11 +1496,12 @@ pub fn update_cells_batch(
             if let Some(dep_cell) = grid.get_cell(*dep_row, *dep_col) {
                 if let Some(ref formula) = dep_cell.formula {
                     let result = if let Some(cached_ast) = dep_cell.get_cached_ast() {
-                        evaluate_formula_multi_sheet_with_ast(
+                        evaluate_formula_multi_sheet_with_ast_and_files(
                             &grids,
                             &sheet_names,
                             active_sheet,
                             cached_ast,
+                            &user_files,
                         )
                     } else {
                         // Slow path: parse, resolve refs, and cache AST
@@ -1510,11 +1527,12 @@ pub fn update_cells_batch(
                                 crate::convert_expr(&resolved)
                             }).map_err(|e| format!("{}", e))
                         } {
-                            let result = evaluate_formula_multi_sheet_with_ast(
+                            let result = evaluate_formula_multi_sheet_with_ast_and_files(
                                 &grids,
                                 &sheet_names,
                                 active_sheet,
                                 &engine_ast,
+                                &user_files,
                             );
                             let mut updated_with_ast = dep_cell.clone();
                             updated_with_ast.set_cached_ast(engine_ast);
@@ -1550,7 +1568,7 @@ pub fn update_cells_batch(
                             });
                             continue;
                         }
-                        evaluate_formula_multi_sheet(&grids, &sheet_names, active_sheet, formula)
+                        evaluate_formula_multi_sheet_with_files(&grids, &sheet_names, active_sheet, formula, &user_files)
                     };
 
                     let mut updated_dep = dep_cell.clone();
@@ -1620,18 +1638,20 @@ pub fn update_cells_batch(
                         if let Some(dep_cell) = grids[*dep_sheet_idx].get_cell(*dep_row, *dep_col) {
                             if let Some(ref formula) = dep_cell.formula {
                                 let result = if let Some(cached_ast) = dep_cell.get_cached_ast() {
-                                    evaluate_formula_multi_sheet_with_ast(
+                                    evaluate_formula_multi_sheet_with_ast_and_files(
                                         &grids,
                                         &sheet_names,
                                         *dep_sheet_idx,
                                         cached_ast,
+                                        &user_files,
                                     )
                                 } else {
-                                    evaluate_formula_multi_sheet(
+                                    evaluate_formula_multi_sheet_with_files(
                                         &grids,
                                         &sheet_names,
                                         *dep_sheet_idx,
                                         formula,
+                                        &user_files,
                                     )
                                 };
 

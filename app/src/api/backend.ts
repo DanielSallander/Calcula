@@ -3414,3 +3414,33 @@ export async function deleteVirtualFile(path: string): Promise<void> {
 export async function renameVirtualFile(oldPath: string, newPath: string): Promise<void> {
   return invoke<void>("rename_virtual_file", { oldPath, newPath });
 }
+
+// ============================================================================
+// Expression Evaluation (for file template resolution)
+// ============================================================================
+
+/**
+ * Evaluate a batch of formula expressions against the current grid state.
+ * Used by the file template system to resolve {{ expression }} blocks.
+ * Errors are returned as strings (e.g., "#REF!", "#NAME?") rather than throwing.
+ */
+export async function evaluateExpressions(expressions: string[]): Promise<string[]> {
+  return invoke<string[]>("evaluate_expressions", { expressions });
+}
+
+/**
+ * Trigger a full recalculation of all formulas in the grid.
+ * Used after virtual file changes so that FILEREAD/FILELINES/FILEEXISTS formulas update.
+ * Returns the list of cells that were updated.
+ */
+export async function recalculateFormulas(): Promise<CellData[]> {
+  return invoke<CellData[]>("calculate_now");
+}
+
+/**
+ * Listen for Tauri backend events (e.g., "virtual-file-changed").
+ * Returns an unlisten function for cleanup.
+ */
+export function listenForEvent(event: string, handler: (payload: unknown) => void): Promise<UnlistenFn> {
+  return listen(event, (e) => handler(e.payload));
+}

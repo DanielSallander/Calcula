@@ -1,9 +1,14 @@
 //! FILENAME: app/src-tauri/src/formula.rs
-// PURPOSE: Formula library commands - function catalog and templates
+// PURPOSE: Formula library commands - function catalog, templates, and expression evaluation
 // FORMAT: seq|level|category|message
 
 use crate::api_types::{FunctionInfo, FunctionListResult};
 use crate::logging::{log_enter, log_exit};
+use crate::AppState;
+use crate::persistence::UserFilesState;
+use tauri::State;
+use parser::parse as parse_formula;
+use engine::{Evaluator, EvalResult};
 
 /// Get list of available functions by category.
 #[tauri::command]
@@ -1021,6 +1026,26 @@ pub fn get_functions_by_category(category: String) -> FunctionListResult {
                 category: "Dynamic Array".to_string(),
             },
         ],
+        "file" => vec![
+            FunctionInfo {
+                name: "FILEREAD".to_string(),
+                syntax: "FILEREAD(path)".to_string(),
+                description: "Returns the text content of a virtual file".to_string(),
+                category: "File".to_string(),
+            },
+            FunctionInfo {
+                name: "FILELINES".to_string(),
+                syntax: "FILELINES(path)".to_string(),
+                description: "Returns the number of lines in a virtual file".to_string(),
+                category: "File".to_string(),
+            },
+            FunctionInfo {
+                name: "FILEEXISTS".to_string(),
+                syntax: "FILEEXISTS(path)".to_string(),
+                description: "Returns TRUE if a virtual file exists".to_string(),
+                category: "File".to_string(),
+            },
+        ],
         _ => vec![],
     };
 
@@ -1036,7 +1061,7 @@ pub fn get_all_functions() -> FunctionListResult {
     let mut all_functions = Vec::new();
 
     // Collect from all categories
-    for category in &["math", "logical", "text", "lookup", "info", "date", "statistical", "financial", "dynamic", "ui"] {
+    for category in &["math", "logical", "text", "lookup", "info", "date", "statistical", "financial", "dynamic", "ui", "file"] {
         let result = get_functions_by_category(category.to_string());
         all_functions.extend(result.functions);
     }
@@ -1243,10 +1268,98 @@ pub fn get_function_template(function_name: String) -> String {
         "MERGE" => "=MERGE(, )".to_string(),
         "HSTACK" => "=HSTACK(, )".to_string(),
 
+        // File functions
+        "FILEREAD" => "=FILEREAD(\"\")".to_string(),
+        "FILELINES" => "=FILELINES(\"\")".to_string(),
+        "FILEEXISTS" => "=FILEEXISTS(\"\")".to_string(),
+
         // Default: generic function call
         _ => format!("={}()", function_name.to_uppercase()),
     };
     
     log_exit!("CMD", "get_function_template", "template={}", template);
     template
+}
+
+// ============================================================================
+// Expression Evaluation (for file template resolution)
+// ============================================================================
+
+/// Evaluate a batch of formula expressions against the current grid state.
+/// Used by the file template system to resolve {{ expression }} blocks.
+/// Each expression is parsed and evaluated independently; errors are returned
+/// as error strings (e.g., "#REF!", "#NAME?") rather than Rust errors.
+#[tauri::command]
+pub fn evaluate_expressions(
+    expressions: Vec<String>,
+    state: State<AppState>,
+    user_files_state: State<UserFilesState>,
+) -> Result<Vec<String>, String> {
+    log_enter!("CMD", "evaluate_expressions", "count={}", expressions.len());
+
+    let grids = state.grids.lock().map_err(|e| e.to_string())?;
+    let sheet_names = state.sheet_names.lock().map_err(|e| e.to_string())?;
+    let active_sheet = *state.active_sheet.lock().map_err(|e| e.to_string())?;
+    let user_files = user_files_state.files.lock().map_err(|e| e.to_string())?;
+
+    if active_sheet >= grids.len() || active_sheet >= sheet_names.len() {
+        return Err("Invalid active sheet index".to_string());
+    }
+
+    let current_grid = &grids[active_sheet];
+    let current_sheet_name = &sheet_names[active_sheet];
+
+    // Build multi-sheet context once for all expressions
+    let context = crate::create_multi_sheet_context(&grids, &sheet_names, current_sheet_name);
+    let reader = |path: &str| -> Option<String> {
+        user_files.get(path).and_then(|bytes| String::from_utf8(bytes.clone()).ok())
+    };
+    let mut evaluator = Evaluator::with_multi_sheet(current_grid, context);
+    evaluator.set_file_reader(&reader);
+
+    let results: Vec<String> = expressions
+        .iter()
+        .map(|expr_str| {
+            // Strip leading = if present (user might write {{ =SUM() }} or {{ SUM() }})
+            let formula = expr_str.trim();
+            let formula = if formula.starts_with('=') { &formula[1..] } else { formula };
+
+            match parse_formula(formula) {
+                Ok(parser_ast) => {
+                    let engine_ast = crate::convert_expr(&parser_ast);
+                    let result = evaluator.evaluate(&engine_ast);
+                    eval_result_to_display(&result)
+                }
+                Err(_) => "#SYNTAX!".to_string(),
+            }
+        })
+        .collect();
+
+    log_exit!("CMD", "evaluate_expressions", "count={}", results.len());
+    Ok(results)
+}
+
+/// Convert an EvalResult to a display string for template resolution.
+fn eval_result_to_display(result: &EvalResult) -> String {
+    match result {
+        EvalResult::Number(n) => {
+            if n.fract() == 0.0 && n.abs() < 1e15 {
+                format!("{}", *n as i64)
+            } else {
+                format!("{}", n)
+            }
+        }
+        EvalResult::Text(s) => s.clone(),
+        EvalResult::Boolean(b) => if *b { "TRUE".to_string() } else { "FALSE".to_string() },
+        EvalResult::Error(e) => format!("#{}", format!("{:?}", e).to_uppercase()),
+        EvalResult::Array(arr) => {
+            if let Some(first) = arr.first() {
+                eval_result_to_display(first)
+            } else {
+                String::new()
+            }
+        }
+        EvalResult::List(items) => format!("[List({})]", items.len()),
+        EvalResult::Dict(entries) => format!("[Dict({})]", entries.len()),
+    }
 }

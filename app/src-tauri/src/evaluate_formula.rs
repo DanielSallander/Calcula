@@ -719,6 +719,9 @@ fn builtin_fn_name(func: &BuiltinFunction) -> String {
         BuiltinFunction::Append => "APPEND".to_string(),
         BuiltinFunction::Merge => "MERGE".to_string(),
         BuiltinFunction::HStack => "HSTACK".to_string(),
+        BuiltinFunction::FileRead => "FILEREAD".to_string(),
+        BuiltinFunction::FileLines => "FILELINES".to_string(),
+        BuiltinFunction::FileExists => "FILEEXISTS".to_string(),
         BuiltinFunction::Custom(name) => name.clone(),
     }
 }

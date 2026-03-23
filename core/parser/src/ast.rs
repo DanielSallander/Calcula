@@ -355,6 +355,11 @@ pub enum BuiltinFunction {
     Merge,
     HStack,
 
+    // File functions (virtual file system)
+    FileRead,
+    FileLines,
+    FileExists,
+
     /// Fallback for unrecognized function names (future extensions/plugins).
     Custom(String),
 }
@@ -564,6 +569,11 @@ impl BuiltinFunction {
             "APPEND" => BuiltinFunction::Append,
             "MERGE" => BuiltinFunction::Merge,
             "HSTACK" => BuiltinFunction::HStack,
+
+            // File functions
+            "FILEREAD" | "FILE.READ" => BuiltinFunction::FileRead,
+            "FILELINES" | "FILE.LINES" => BuiltinFunction::FileLines,
+            "FILEEXISTS" | "FILE.EXISTS" => BuiltinFunction::FileExists,
 
             _ => BuiltinFunction::Custom(name.to_uppercase()),
         }
