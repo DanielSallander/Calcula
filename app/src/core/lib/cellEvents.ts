@@ -47,6 +47,38 @@ class CellEventEmitter {
       }
     });
 
+    this.scheduleCellsUpdated();
+  }
+
+  /**
+   * Emit a batch of cell change events efficiently.
+   * Listeners are called ONCE with the last event (for selection tracking),
+   * while CELLS_UPDATED fires once for all extensions.
+   * Use this for bulk operations (fill, paste) instead of calling emit() per cell.
+   */
+  emitBatch(events: CellChangeEvent[]): void {
+    if (events.length === 0) return;
+
+    // Notify listeners once with a summary — listeners that care about
+    // individual cells (like useSpreadsheetSelection) only need the last event
+    // to update the active cell display.  Listeners that just invalidate caches
+    // (like ConditionalFormatting) only need one call.
+    const lastEvent = events[events.length - 1];
+    this.listeners.forEach((listener) => {
+      try {
+        listener(lastEvent);
+      } catch (error) {
+        console.error("Error in cell change listener:", error);
+      }
+    });
+
+    this.scheduleCellsUpdated();
+  }
+
+  /**
+   * Schedule a debounced CELLS_UPDATED app event via requestAnimationFrame.
+   */
+  private scheduleCellsUpdated(): void {
     // Debounce CELLS_UPDATED via requestAnimationFrame so bulk operations
     // (paste, undo, fill) coalesce into a single event per frame.
     if (!this.cellsUpdatedPending) {

@@ -35,10 +35,20 @@ pub fn get_viewport_cells(
     end_row: u32,
     end_col: u32,
 ) -> Vec<CellData> {
+    use std::collections::HashMap;
+    use std::time::Instant;
+    let perf_t0 = Instant::now();
+
     let grid = state.grid.lock().unwrap();
     let styles = state.style_registry.lock().unwrap();
     let merged_regions = state.merged_regions.lock().unwrap();
-    let mut cells = Vec::new();
+    let perf_t1_locks = Instant::now();
+
+    // Build O(1) merge lookup by master cell (same pattern as update_cells_batch)
+    let merge_lookup: HashMap<(u32, u32), &MergedRegion> = merged_regions
+        .iter()
+        .map(|r| ((r.start_row, r.start_col), r))
+        .collect();
 
     // Track which cells are "slave" cells (part of a merge but not the master)
     let mut slave_cells: HashSet<(u32, u32)> = HashSet::new();
@@ -65,6 +75,8 @@ pub fn get_viewport_cells(
         }
     }
 
+    let mut cells = Vec::new();
+
     for row in start_row..=end_row {
         for col in start_col..=end_col {
             // Skip slave cells - they shouldn't be returned
@@ -72,12 +84,54 @@ pub fn get_viewport_cells(
                 continue;
             }
 
-            if let Some(cell_data) =
-                get_cell_internal_with_merge(&grid, &styles, &merged_regions, row, col)
-            {
-                cells.push(cell_data);
+            // O(1) merge span lookup instead of linear scan
+            let (row_span, col_span) = if let Some(region) = merge_lookup.get(&(row, col)) {
+                (
+                    region.end_row - region.start_row + 1,
+                    region.end_col - region.start_col + 1,
+                )
+            } else {
+                (1, 1)
+            };
+
+            let cell = grid.get_cell(row, col);
+
+            if cell.is_none() && row_span == 1 && col_span == 1 {
+                continue;
             }
+
+            let (display, display_color, formula, style_index) = if let Some(c) = cell {
+                let style = styles.get(c.style_index);
+                let result = crate::format_cell_value_with_color(&c.value, style);
+                (result.text, result.color, c.formula.clone(), c.style_index)
+            } else {
+                (String::new(), None, None, 0)
+            };
+
+            cells.push(CellData {
+                row,
+                col,
+                display,
+                display_color,
+                formula,
+                style_index,
+                row_span,
+                col_span,
+                sheet_index: None,
+            });
         }
+    }
+
+    let perf_tend = Instant::now();
+    let lock_ms = perf_t1_locks.duration_since(perf_t0).as_secs_f64() * 1000.0;
+    let process_ms = perf_tend.duration_since(perf_t1_locks).as_secs_f64() * 1000.0;
+    let total_ms = perf_tend.duration_since(perf_t0).as_secs_f64() * 1000.0;
+    if total_ms > 5.0 {
+        log_perf!("VIEWPORT",
+            "get_viewport_cells({},{})..({},{}) => {} cells | lock_wait={:.2}ms process={:.2}ms TOTAL={:.2}ms",
+            start_row, start_col, end_row, end_col, cells.len(),
+            lock_ms, process_ms, total_ms
+        );
     }
 
     cells

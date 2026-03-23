@@ -1226,17 +1226,17 @@ export function useFillHandle(props: UseFillHandleProps): UseFillHandleReturn {
         const updatedCells = await updateCellsBatch(batchUpdates);
         const perfFillT2 = performance.now();
 
-        // Emit events for all updated cells
-        for (const cell of updatedCells) {
-          if (cell.sheetIndex !== undefined) continue; // Skip cross-sheet cells
-          cellEvents.emit({
+        // Emit batch event for all updated cells (single notification instead of N)
+        const batchEvents = updatedCells
+          .filter((cell) => cell.sheetIndex === undefined)
+          .map((cell) => ({
             row: cell.row,
             col: cell.col,
             oldValue: undefined,
             newValue: cell.display,
             formula: cell.formula ?? null,
-          });
-        }
+          }));
+        cellEvents.emitBatch(batchEvents);
         const perfFillT3 = performance.now();
 
         console.log(
@@ -1259,9 +1259,6 @@ export function useFillHandle(props: UseFillHandleProps): UseFillHandleReturn {
 
       await commitUndoTransaction();
       console.log("[FillHandle] Fill complete");
-
-      // Refresh styles since we propagated styleIndex
-      window.dispatchEvent(new CustomEvent("styles:refresh"));
 
       // Emit FILL_COMPLETED event for extensions (e.g., sparklines)
       if (finalRange && fillState.direction) {
@@ -1452,17 +1449,17 @@ export function useFillHandle(props: UseFillHandleProps): UseFillHandleReturn {
         const updatedCells = await updateCellsBatch(batchUpdates);
         const perfAutoT2 = performance.now();
 
-        // Emit events for all updated cells
-        for (const cell of updatedCells) {
-          if (cell.sheetIndex !== undefined) continue; // Skip cross-sheet cells
-          cellEvents.emit({
+        // Emit batch event for all updated cells (single notification instead of N)
+        const batchEvents = updatedCells
+          .filter((cell) => cell.sheetIndex === undefined)
+          .map((cell) => ({
             row: cell.row,
             col: cell.col,
             oldValue: undefined,
             newValue: cell.display,
             formula: cell.formula ?? null,
-          });
-        }
+          }));
+        cellEvents.emitBatch(batchEvents);
         const perfAutoT3 = performance.now();
 
         console.log(
@@ -1483,9 +1480,6 @@ export function useFillHandle(props: UseFillHandleProps): UseFillHandleReturn {
 
       await commitUndoTransaction();
       console.log("[FillHandle] autoFillToEdge complete");
-
-      // Refresh styles since we propagated styleIndex
-      window.dispatchEvent(new CustomEvent("styles:refresh"));
 
       // Emit FILL_COMPLETED event for extensions (e.g., sparklines)
       import("../../api/events").then(({ emitAppEvent, AppEvents }) => {
