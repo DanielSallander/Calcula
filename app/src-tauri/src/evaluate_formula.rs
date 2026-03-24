@@ -225,12 +225,14 @@ fn find_next_recursive(expr: &Expression, path: &mut Vec<usize>) -> Option<NextN
         // Function calls: special handling for IF short-circuit
         Expression::FunctionCall { func, args } => {
             if matches!(func, BuiltinFunction::If) && args.len() >= 2 {
-                // IF: evaluate condition first
-                path.push(0);
-                if let Some(result) = find_next_recursive(&args[0], path) {
-                    return Some(result);
+                // IF: evaluate condition first (skip range-like conditions)
+                if !matches!(&args[0], Expression::Range { .. } | Expression::ColumnRef { .. } | Expression::RowRef { .. }) {
+                    path.push(0);
+                    if let Some(result) = find_next_recursive(&args[0], path) {
+                        return Some(result);
+                    }
+                    path.pop();
                 }
-                path.pop();
 
                 // Condition is resolved - determine which branch to evaluate
                 if let Expression::Literal(val) = &args[0] {
@@ -242,11 +244,14 @@ fn find_next_recursive(expr: &Expression, path: &mut Vec<usize>) -> Option<NextN
                     let branch_idx = if is_true { 1 } else { 2 };
 
                     if branch_idx < args.len() {
-                        path.push(branch_idx);
-                        if let Some(result) = find_next_recursive(&args[branch_idx], path) {
-                            return Some(result);
+                        // Skip range-like branch args
+                        if !matches!(&args[branch_idx], Expression::Range { .. } | Expression::ColumnRef { .. } | Expression::RowRef { .. }) {
+                            path.push(branch_idx);
+                            if let Some(result) = find_next_recursive(&args[branch_idx], path) {
+                                return Some(result);
+                            }
+                            path.pop();
                         }
-                        path.pop();
                     }
                 }
 
@@ -257,8 +262,17 @@ fn find_next_recursive(expr: &Expression, path: &mut Vec<usize>) -> Option<NextN
                     cell_ref_info: None,
                 })
             } else {
-                // Regular function: check each arg left to right
+                // Regular function: check each arg left to right.
+                // Skip range-like args (Range, ColumnRef, RowRef) — they produce
+                // arrays that cannot be reduced to a scalar Value.  They must be
+                // evaluated together with the enclosing function call.
                 for (i, arg) in args.iter().enumerate() {
+                    match arg {
+                        Expression::Range { .. }
+                        | Expression::ColumnRef { .. }
+                        | Expression::RowRef { .. } => continue,
+                        _ => {}
+                    }
                     path.push(i);
                     if let Some(result) = find_next_recursive(arg, path) {
                         return Some(result);
@@ -266,7 +280,7 @@ fn find_next_recursive(expr: &Expression, path: &mut Vec<usize>) -> Option<NextN
                     path.pop();
                 }
 
-                // All args resolved - evaluate the function
+                // All args resolved (or are ranges) - evaluate the function
                 Some(NextNode {
                     path: path.clone(),
                     is_cell_ref: false,
