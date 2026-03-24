@@ -3,7 +3,7 @@
 // CONTEXT: Appears in the ribbon when a pivot table is selected. Communicates
 // with the PivotEditor via custom events (PIVOT_LAYOUT_STATE / PIVOT_LAYOUT_CHANGED).
 
-import React, { useState, useEffect, useCallback, useRef } from 'react';
+import React, { useState, useEffect, useCallback, useRef, useMemo } from 'react';
 import { css } from '@emotion/css';
 import { onAppEvent, emitAppEvent } from '../../../src/api';
 import { PivotEvents } from '../lib/pivotEvents';
@@ -11,6 +11,7 @@ import { getPivotTableInfo, updatePivotProperties } from '../lib/pivot-api';
 import type { LayoutConfig, ReportLayout, ValuesPosition, PivotId } from './types';
 import type { RibbonContext } from '../../../src/api/extensions';
 import { PivotTableStylesGallery, DEFAULT_PIVOT_STYLE_ID } from './PivotTableStylesGallery';
+import { useRibbonCollapse, RibbonGroup } from '../../../src/api/ribbonCollapse';
 
 // ============================================================================
 // Styles
@@ -19,9 +20,12 @@ import { PivotTableStylesGallery, DEFAULT_PIVOT_STYLE_ID } from './PivotTableSty
 const tabStyles = {
   container: css`
     display: flex;
-    gap: 24px;
+    gap: 0;
     align-items: flex-start;
     height: 100%;
+    width: 100%;
+    min-width: 0;
+    overflow: hidden;
     font-family: 'Segoe UI Variable', 'Segoe UI', system-ui, sans-serif;
     font-size: 12px;
   `,
@@ -34,26 +38,6 @@ const tabStyles = {
     color: #999;
     font-style: italic;
     font-size: 12px;
-  `,
-  group: css`
-    display: flex;
-    flex-direction: column;
-    gap: 4px;
-    padding-right: 24px;
-    border-right: 1px solid #e0e0e0;
-
-    &:last-child {
-      border-right: none;
-      padding-right: 0;
-    }
-  `,
-  groupLabel: css`
-    font-size: 10px;
-    color: #666;
-    text-align: center;
-    margin-top: 4px;
-    text-transform: uppercase;
-    letter-spacing: 0.3px;
   `,
   groupContent: css`
     display: flex;
@@ -124,6 +108,19 @@ const tabStyles = {
 };
 
 // ============================================================================
+// Collapse configuration
+// ============================================================================
+
+// Gallery is NOT included — it uses flex: 1 1 0 and its own ResizeObserver
+// to progressively show fewer thumbnails as the ribbon narrows.
+const GROUP_DEFS = [
+  { collapseOrder: 1, expandedWidth: 160 },   // PivotTable Name
+  { collapseOrder: 2, expandedWidth: 200 },   // Grand Totals
+  { collapseOrder: 3, expandedWidth: 280 },   // Report Layout
+  { collapseOrder: 4, expandedWidth: 340 },   // Display
+];
+
+// ============================================================================
 // Component
 // ============================================================================
 
@@ -141,6 +138,9 @@ export function PivotDesignTab({
   const [pivotName, setPivotName] = useState('');
   const [savedName, setSavedName] = useState('');
   const nameInputRef = useRef<HTMLInputElement>(null);
+  const containerRef = useRef<HTMLDivElement>(null);
+  const groupDefs = useMemo(() => GROUP_DEFS, []);
+  const collapsed = useRibbonCollapse(containerRef, groupDefs, 0, 470);
 
   // Listen for layout state broadcasts from the PivotEditor
   useEffect(() => {
@@ -228,9 +228,9 @@ export function PivotDesignTab({
   const { layout } = layoutState;
 
   return (
-    <div className={tabStyles.container}>
+    <div ref={containerRef} className={tabStyles.container}>
       {/* PivotTable Name Group */}
-      <div className={tabStyles.group}>
+      <RibbonGroup label="PivotTable Name" icon={"\u2699"} collapsed={collapsed[0]}>
         <div className={tabStyles.groupContent}>
           <div className={tabStyles.selectLabel}>
             <input
@@ -249,11 +249,10 @@ export function PivotDesignTab({
             />
           </div>
         </div>
-        <div className={tabStyles.groupLabel}>PivotTable Name</div>
-      </div>
+      </RibbonGroup>
 
       {/* Grand Totals Group */}
-      <div className={tabStyles.group}>
+      <RibbonGroup label="Grand Totals" icon={"\u03A3"} collapsed={collapsed[1]}>
         <div className={tabStyles.groupContent}>
           <label className={tabStyles.checkboxLabel}>
             <input
@@ -276,10 +275,8 @@ export function PivotDesignTab({
             Column Totals
           </label>
         </div>
-        <div className={tabStyles.groupLabel}>Grand Totals</div>
-      </div>
+      </RibbonGroup>
 
-      {/* PivotTable Styles Group */}
       <PivotTableStylesGallery
         selectedStyleId={layout.styleId ?? DEFAULT_PIVOT_STYLE_ID}
         onStyleSelect={(styleId) => updateLayout({ styleId })}
@@ -287,7 +284,7 @@ export function PivotDesignTab({
       />
 
       {/* Report Layout Group */}
-      <div className={tabStyles.group}>
+      <RibbonGroup label="Report Layout" icon={"\u2630"} collapsed={collapsed[2]}>
         <div className={tabStyles.groupContent}>
           <div className={tabStyles.selectLabel}>
             Layout:
@@ -319,11 +316,10 @@ export function PivotDesignTab({
             </select>
           </div>
         </div>
-        <div className={tabStyles.groupLabel}>Report Layout</div>
-      </div>
+      </RibbonGroup>
 
       {/* Display Group */}
-      <div className={tabStyles.group}>
+      <RibbonGroup label="Display" icon={"\u25A3"} collapsed={collapsed[3]}>
         <div className={tabStyles.groupContent}>
           <label className={tabStyles.checkboxLabel}>
             <input
@@ -366,8 +362,7 @@ export function PivotDesignTab({
             Autofit Columns
           </label>
         </div>
-        <div className={tabStyles.groupLabel}>Display</div>
-      </div>
+      </RibbonGroup>
     </div>
   );
 }

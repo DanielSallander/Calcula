@@ -3,7 +3,7 @@
 // CONTEXT: Appears alongside "Pivot Table Design" when a pivot is selected.
 // Contains: Change Data Source, Refresh, Options, Delete.
 
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef, useMemo } from 'react';
 import { css } from '@emotion/css';
 import { onAppEvent, emitAppEvent, showDialog } from '../../../src/api';
 import { PivotEvents } from '../lib/pivotEvents';
@@ -12,6 +12,7 @@ import type { PivotId } from './types';
 import type { RibbonContext } from '../../../src/api/extensions';
 import { ChangeDataSourceDialog } from './ChangeDataSourceDialog';
 import { PIVOT_OPTIONS_DIALOG_ID } from '../manifest';
+import { useRibbonCollapse, RibbonGroup } from '../../../src/api/ribbonCollapse';
 
 // ============================================================================
 // Styles
@@ -20,9 +21,12 @@ import { PIVOT_OPTIONS_DIALOG_ID } from '../manifest';
 const tabStyles = {
   container: css`
     display: flex;
-    gap: 24px;
+    gap: 0;
     align-items: flex-start;
     height: 100%;
+    width: 100%;
+    min-width: 0;
+    overflow: hidden;
     font-family: 'Segoe UI Variable', 'Segoe UI', system-ui, sans-serif;
     font-size: 12px;
   `,
@@ -35,26 +39,6 @@ const tabStyles = {
     color: #999;
     font-style: italic;
     font-size: 12px;
-  `,
-  group: css`
-    display: flex;
-    flex-direction: column;
-    gap: 4px;
-    padding-right: 24px;
-    border-right: 1px solid #e0e0e0;
-
-    &:last-child {
-      border-right: none;
-      padding-right: 0;
-    }
-  `,
-  groupLabel: css`
-    font-size: 10px;
-    color: #666;
-    text-align: center;
-    margin-top: 4px;
-    text-transform: uppercase;
-    letter-spacing: 0.3px;
   `,
   groupContent: css`
     display: flex;
@@ -124,6 +108,16 @@ const tabStyles = {
 };
 
 // ============================================================================
+// Collapse configuration
+// ============================================================================
+
+const GROUP_DEFS = [
+  { collapseOrder: 1, expandedWidth: 200 },   // PivotTable
+  { collapseOrder: 3, expandedWidth: 260 },   // Data
+  { collapseOrder: 2, expandedWidth: 200 },   // Actions
+];
+
+// ============================================================================
 // Component
 // ============================================================================
 
@@ -140,6 +134,10 @@ export function PivotAnalyzeTab({
   const [sourceRange, setSourceRange] = useState('');
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [showChangeSource, setShowChangeSource] = useState(false);
+
+  const containerRef = useRef<HTMLDivElement>(null);
+  const groupDefs = useMemo(() => GROUP_DEFS, []);
+  const collapsed = useRibbonCollapse(containerRef, groupDefs);
 
   // Listen for layout state broadcasts from the PivotEditor (reuses same event)
   useEffect(() => {
@@ -222,9 +220,9 @@ export function PivotAnalyzeTab({
   }
 
   return (
-    <div className={tabStyles.container}>
+    <div ref={containerRef} className={tabStyles.container}>
       {/* PivotTable group: name + source info */}
-      <div className={tabStyles.group}>
+      <RibbonGroup label="PivotTable" icon={"\uD83D\uDCCA"} collapsed={collapsed[0]}>
         <div className={tabStyles.groupContent}>
           <div className={tabStyles.sourceInfo}>
             <span className={tabStyles.sourceLabel}>Data Source:</span>
@@ -233,11 +231,10 @@ export function PivotAnalyzeTab({
             </span>
           </div>
         </div>
-        <div className={tabStyles.groupLabel}>PivotTable</div>
-      </div>
+      </RibbonGroup>
 
       {/* Data group: Change Data Source, Refresh */}
-      <div className={tabStyles.group}>
+      <RibbonGroup label="Data" icon={"\u21BB"} collapsed={collapsed[1]}>
         <div className={tabStyles.groupContent}>
           <button
             className={tabStyles.button}
@@ -270,11 +267,10 @@ export function PivotAnalyzeTab({
             </span>
           </button>
         </div>
-        <div className={tabStyles.groupLabel}>Data</div>
-      </div>
+      </RibbonGroup>
 
       {/* Actions group: Options, Delete */}
-      <div className={tabStyles.group}>
+      <RibbonGroup label="Actions" icon={"\u26A1"} collapsed={collapsed[2]}>
         <div className={tabStyles.groupContent}>
           <button
             className={tabStyles.button}
@@ -293,8 +289,7 @@ export function PivotAnalyzeTab({
             <span className={tabStyles.buttonLabel}>Delete</span>
           </button>
         </div>
-        <div className={tabStyles.groupLabel}>Actions</div>
-      </div>
+      </RibbonGroup>
 
       {/* Change Data Source Dialog */}
       <ChangeDataSourceDialog

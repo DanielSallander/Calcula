@@ -4,7 +4,7 @@
 //          sparkline type, toggling point markers, changing colors, editing data,
 //          and managing groups. Matches Excel's Sparkline Design ribbon layout.
 
-import React, { useState, useEffect, useCallback } from "react";
+import React, { useState, useEffect, useCallback, useRef, useMemo } from "react";
 import { css } from "@emotion/css";
 import { useGridState, showDialog, emitAppEvent, AppEvents } from "../../../src/api";
 import type { RibbonContext } from "../../../src/api/extensions";
@@ -12,6 +12,7 @@ import { getSparklineForCell, updateSparklineGroup, removeSparklineGroup, getAll
 import type { SparklineGroup, SparklineType } from "../types";
 import { SparklineColorPicker } from "./SparklineColorPicker";
 import { SPARKLINE_DIALOG_ID } from "../index";
+import { useRibbonCollapse, RibbonGroup } from "../../../src/api/ribbonCollapse";
 
 // ============================================================================
 // Style presets (predefined color combos for the Style gallery)
@@ -38,6 +39,9 @@ const tabStyles = {
     gap: 0;
     align-items: stretch;
     height: 100%;
+    width: 100%;
+    min-width: 0;
+    overflow: hidden;
     font-family: "Segoe UI Variable", "Segoe UI", system-ui, sans-serif;
     font-size: 12px;
   `,
@@ -50,26 +54,6 @@ const tabStyles = {
     color: #999;
     font-style: italic;
     font-size: 12px;
-  `,
-  group: css`
-    display: flex;
-    flex-direction: column;
-    gap: 2px;
-    padding: 2px 12px;
-    border-right: 1px solid #e0e0e0;
-
-    &:last-child {
-      border-right: none;
-    }
-  `,
-  groupLabel: css`
-    font-size: 10px;
-    color: #666;
-    text-align: center;
-    margin-top: auto;
-    text-transform: uppercase;
-    letter-spacing: 0.3px;
-    padding-top: 2px;
   `,
   groupContent: css`
     display: flex;
@@ -269,6 +253,18 @@ const tabStyles = {
 };
 
 // ============================================================================
+// Collapse configuration
+// ============================================================================
+
+const GROUP_DEFS = [
+  { collapseOrder: 1, expandedWidth: 100 },   // Sparkline
+  { collapseOrder: 2, expandedWidth: 200 },   // Type
+  { collapseOrder: 3, expandedWidth: 240 },   // Show
+  { collapseOrder: 4, expandedWidth: 340 },   // Style
+  { collapseOrder: 5, expandedWidth: 160 },   // Group
+];
+
+// ============================================================================
 // Mini sparkline preview for style gallery
 // ============================================================================
 
@@ -307,6 +303,10 @@ export function SparklineDesignTab({
   // Force re-render when sparkline properties change
   const [, forceUpdate] = useState(0);
 
+  const containerRef = useRef<HTMLDivElement>(null);
+  const groupDefs = useMemo(() => GROUP_DEFS, []);
+  const collapsed = useRibbonCollapse(containerRef, groupDefs);
+
   const entry = sel ? getSparklineForCell(sel.endRow, sel.endCol) : undefined;
   const group = entry?.group;
 
@@ -335,11 +335,11 @@ export function SparklineDesignTab({
   }
 
   return (
-    <div className={tabStyles.container}>
+    <div ref={containerRef} className={tabStyles.container}>
       {/* ================================================================ */}
       {/* Sparkline Group - Edit Data                                       */}
       {/* ================================================================ */}
-      <div className={tabStyles.group}>
+      <RibbonGroup label="Sparkline" icon={"\u270E"} collapsed={collapsed[0]}>
         <div className={tabStyles.groupContent}>
           <button
             className={tabStyles.editDataButton}
@@ -355,13 +355,12 @@ export function SparklineDesignTab({
             Edit Data
           </button>
         </div>
-        <div className={tabStyles.groupLabel}>Sparkline</div>
-      </div>
+      </RibbonGroup>
 
       {/* ================================================================ */}
       {/* Type Group - Line / Column / Win-Loss                             */}
       {/* ================================================================ */}
-      <div className={tabStyles.group}>
+      <RibbonGroup label="Type" icon={"\u2500"} collapsed={collapsed[1]}>
         <div className={tabStyles.groupContent}>
           <div className={tabStyles.typeButtonGroup}>
             <button
@@ -390,13 +389,12 @@ export function SparklineDesignTab({
             </button>
           </div>
         </div>
-        <div className={tabStyles.groupLabel}>Type</div>
-      </div>
+      </RibbonGroup>
 
       {/* ================================================================ */}
       {/* Show Group - Point visibility checkboxes                          */}
       {/* ================================================================ */}
-      <div className={tabStyles.group}>
+      <RibbonGroup label="Show" icon={"\u2611"} collapsed={collapsed[2]}>
         <div className={tabStyles.groupContent}>
           <div className={tabStyles.showGrid}>
             <label className={tabStyles.checkboxLabel}>
@@ -449,13 +447,12 @@ export function SparklineDesignTab({
             </label>
           </div>
         </div>
-        <div className={tabStyles.groupLabel}>Show</div>
-      </div>
+      </RibbonGroup>
 
       {/* ================================================================ */}
       {/* Style Group - Gallery + Color pickers                             */}
       {/* ================================================================ */}
-      <div className={tabStyles.group}>
+      <RibbonGroup label="Style" icon={"\u2728"} collapsed={collapsed[3]}>
         <div className={tabStyles.groupContent}>
           <div className={tabStyles.styleContent}>
             {/* Style presets gallery */}
@@ -498,13 +495,12 @@ export function SparklineDesignTab({
             </div>
           </div>
         </div>
-        <div className={tabStyles.groupLabel}>Style</div>
-      </div>
+      </RibbonGroup>
 
       {/* ================================================================ */}
       {/* Group Group - Group, Ungroup, Clear, Axis                         */}
       {/* ================================================================ */}
-      <div className={tabStyles.group}>
+      <RibbonGroup label="Group" icon={"\u229E"} collapsed={collapsed[4]}>
         <div className={tabStyles.groupContent}>
           <div className={tabStyles.actionButtonGroup}>
             <div className={tabStyles.actionRow}>
@@ -541,8 +537,7 @@ export function SparklineDesignTab({
             </div>
           </div>
         </div>
-        <div className={tabStyles.groupLabel}>Group</div>
-      </div>
+      </RibbonGroup>
     </div>
   );
 }

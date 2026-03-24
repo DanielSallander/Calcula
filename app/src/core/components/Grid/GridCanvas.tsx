@@ -184,8 +184,13 @@ export const GridCanvas = forwardRef<GridCanvasHandle, GridCanvasProps>(
 
     // Track if a fetch is in progress
     const fetchingRef = useRef<boolean>(false);
-    // Track if a forced refresh was requested while a fetch was in progress
+    // Track if a fetch was requested while another was in progress.
+    // When set, the finally block will invalidate the cache and bump
+    // fetchGeneration so the effect re-runs with the current viewport.
     const pendingRefreshRef = useRef<boolean>(false);
+    // Generation counter: incremented to force the fetch effect to re-run
+    // after a deferred fetch completes (works around stale-closure issues).
+    const [fetchGeneration, setFetchGeneration] = useState(0);
 
     // Animation state for marching ants
     const animationFrameRef = useRef<number | null>(null);
@@ -320,13 +325,14 @@ export const GridCanvas = forwardRef<GridCanvasHandle, GridCanvasProps>(
         return;
       }
 
-      // Prevent concurrent fetches — if a forced refresh arrives while fetching,
-      // mark it as pending so we re-fetch once the current fetch completes.
+      // Prevent concurrent fetches — if another fetch is needed while one is
+      // in progress, mark it as pending so we re-fetch once it completes.
+      // This is critical for scroll-triggered fetches: without it, scrolling
+      // back while a fetch is in flight silently drops the new request,
+      // leaving previously-visible rows blank.
       if (fetchingRef.current) {
-        if (force) {
-          console.log('[GridCanvas] fetchCells(force) deferred — fetch in progress, will retry after');
-          pendingRefreshRef.current = true;
-        }
+        console.log(`[GridCanvas] fetchCells(force=${force}) deferred — fetch in progress, will retry after`);
+        pendingRefreshRef.current = true;
         return;
       }
 
@@ -379,13 +385,16 @@ export const GridCanvas = forwardRef<GridCanvasHandle, GridCanvasProps>(
       } finally {
         fetchingRef.current = false;
 
-        // If a forced refresh was requested while we were fetching,
-        // trigger another fetch to pick up the latest data.
+        // If another fetch was requested while we were fetching (scroll or
+        // forced refresh), invalidate the cache and bump the generation
+        // counter so the useEffect re-runs with the CURRENT viewport.
+        // We avoid calling fetchCells(true) here because this closure may
+        // capture a stale viewport, causing it to re-fetch the wrong range.
         if (pendingRefreshRef.current) {
-          console.log('[GridCanvas] Executing deferred forced refresh');
+          console.log('[GridCanvas] Fetch was deferred during in-flight request — scheduling re-fetch');
           pendingRefreshRef.current = false;
           lastFetchRef.current = null;
-          fetchCells(true);
+          setFetchGeneration(g => g + 1);
         }
       }
     }, [calculateFetchRange, needsFetch]);
@@ -639,11 +648,13 @@ export const GridCanvas = forwardRef<GridCanvasHandle, GridCanvasProps>(
     }, [clipboardSelection, clipboardMode, insertionAnimation, draw]);
 
     /**
-     * Fetch cells when viewport or freeze config changes.
+     * Fetch cells when viewport changes or after a deferred fetch completes.
+     * fetchGeneration is bumped when a fetch was dropped due to a concurrent
+     * in-flight request, ensuring we re-fetch with the current viewport.
      */
     useEffect(() => {
       fetchCells();
-    }, [fetchCells]);
+    }, [fetchCells, fetchGeneration]);
 
     /**
      * Refetch cells when freeze config changes to ensure frozen cells are loaded.

@@ -2,7 +2,7 @@
 // PURPOSE: The Home ribbon tab component showing quick-access formatting commands.
 // CONTEXT: Renders configurable groups of formatting buttons in the ribbon.
 
-import React, { useState, useEffect, useCallback, useRef } from "react";
+import React, { useState, useEffect, useCallback, useRef, useMemo } from "react";
 import { css } from "@emotion/css";
 import { useGridState, cellEvents } from "../../../../src/api";
 import { CommandRegistry, CoreCommands } from "../../../../src/api/commands";
@@ -22,6 +22,7 @@ import {
 } from "../homeTabConfig";
 import { CellStylesGallery } from "./CellStylesGallery";
 import type { CellStyleDefinition } from "./CellStylesGallery";
+import { useRibbonCollapse, RibbonGroup } from "../../../../src/api/ribbonCollapse";
 
 // ============================================================================
 // Styles
@@ -37,34 +38,11 @@ const styles = {
     font-size: 12px;
     position: relative;
   `,
-  group: css`
-    display: flex;
-    flex-direction: column;
-    padding: 0 10px;
-    border-right: 1px solid #e0e0e0;
-
-    &:first-child {
-      padding-left: 4px;
-    }
-
-    &:last-child {
-      border-right: none;
-    }
-  `,
   groupContent: css`
     display: flex;
     gap: 3px;
     align-items: center;
     flex: 1;
-  `,
-  groupLabel: css`
-    font-size: 10px;
-    color: #888;
-    text-align: center;
-    padding-top: 2px;
-    text-transform: uppercase;
-    letter-spacing: 0.3px;
-    white-space: nowrap;
   `,
   cogContainer: css`
     position: absolute;
@@ -154,6 +132,38 @@ const colorBtnStyle = css`
     border-color: #c0c0c0;
   }
 `;
+
+// ============================================================================
+// Collapse configuration
+// ============================================================================
+
+/** Collapse priority by group ID. Lower = collapses first. */
+const COLLAPSE_ORDER: Record<string, number> = {
+  styles: 1,
+  colors: 2,
+  editing: 3,
+  insert: 4,
+  number: 5,
+  alignment: 6,
+  font: 7,
+  clipboard: 8,
+};
+
+/** Icons for collapsed group buttons */
+const GROUP_ICONS: Record<string, string> = {
+  clipboard: "\u2702",
+  font: "A",
+  alignment: "\u2261",
+  number: "#",
+  styles: "\u2728",
+  colors: "\uD83C\uDFA8",
+  editing: "\u270E",
+  insert: "+",
+};
+
+/** Estimated expanded width per item in pixels */
+const WIDTH_PER_ITEM = 32;
+const GROUP_PADDING = 24;
 
 // ============================================================================
 // Color Palette (compact for ribbon dropdown)
@@ -283,6 +293,18 @@ export function HomeTabComponent({
   const [currentStyle, setCurrentStyle] = useState<StyleData | null>(null);
   const [openColorPicker, setOpenColorPicker] = useState<string | null>(null);
   const [cellStylesOpen, setCellStylesOpen] = useState(false);
+
+  const containerRef = useRef<HTMLDivElement>(null);
+
+  const groupDefs = useMemo(
+    () =>
+      layout.groups.map((g) => ({
+        collapseOrder: COLLAPSE_ORDER[g.id] ?? 50,
+        expandedWidth: g.items.length * WIDTH_PER_ITEM + GROUP_PADDING,
+      })),
+    [layout.groups],
+  );
+  const collapsed = useRibbonCollapse(containerRef, groupDefs);
 
   // Reload layout when the customize dialog saves
   useEffect(() => {
@@ -616,14 +638,18 @@ export function HomeTabComponent({
   };
 
   return (
-    <div className={styles.container}>
-      {layout.groups.map((group) => (
-        <div key={group.id} className={styles.group}>
+    <div ref={containerRef} className={styles.container}>
+      {layout.groups.map((group, idx) => (
+        <RibbonGroup
+          key={group.id}
+          label={group.label}
+          icon={GROUP_ICONS[group.id] ?? "\u2630"}
+          collapsed={collapsed[idx] ?? false}
+        >
           <div className={styles.groupContent}>
             {group.items.map((itemId) => renderItem(itemId))}
           </div>
-          <div className={styles.groupLabel}>{group.label}</div>
-        </div>
+        </RibbonGroup>
       ))}
 
       {/* Cog wheel icon for customization */}

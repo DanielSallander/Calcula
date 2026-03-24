@@ -9,6 +9,7 @@ import type {
 } from "../../src/api";
 import React from "react";
 import { CreateTableDialog } from "./components/CreateTableDialog";
+import { TableDesignTab } from "./components/TableDesignTab";
 
 // ============================================================================
 // Extension Manifest
@@ -21,6 +22,25 @@ export const TableManifest: AddInManifest = {
   name: "Tables",
   version: "1.0.0",
   description: "Table functionality for Calcula",
+  ribbonTabs: [],
+  ribbonGroups: [],
+  commands: [],
+};
+
+// ============================================================================
+// Contextual Ribbon Tab
+// ============================================================================
+
+// Accent color for table contextual tab (Excel-style blue)
+const TABLE_TAB_COLOR = "#4472c4";
+
+export const TABLE_DESIGN_TAB_ID = "table-design";
+export const TableDesignTabDefinition = {
+  id: TABLE_DESIGN_TAB_ID,
+  label: "Table Design",
+  order: 498,
+  component: TableDesignTab,
+  color: TABLE_TAB_COLOR,
 };
 
 // ============================================================================

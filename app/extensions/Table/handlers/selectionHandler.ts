@@ -1,15 +1,18 @@
 //! FILENAME: app/extensions/Table/handlers/selectionHandler.ts
 // PURPOSE: Track selection context for the Table extension.
-// CONTEXT: Shows/hides the contextual Table menu based on whether the
-//          current selection is within a table region.
+// CONTEXT: Shows/hides the contextual Table Design ribbon tab based on whether
+//          the current selection is within a table region.
 
 import {
   addTaskPaneContextKey,
   removeTaskPaneContextKey,
+  ExtensionRegistry,
+  emitAppEvent,
+  onAppEvent,
 } from "../../../src/api";
-import { registerMenu } from "../../../src/api/ui";
 import { getTableAtCell } from "../lib/tableStore";
-import { buildTableMenu } from "./tableMenuBuilder";
+import { TableDesignTabDefinition, TABLE_DESIGN_TAB_ID } from "../manifest";
+import { TableEvents } from "../lib/tableEvents";
 
 // ============================================================================
 // State
@@ -18,13 +21,19 @@ import { buildTableMenu } from "./tableMenuBuilder";
 let currentTableId: number | null = null;
 let lastCheckedSelection: { row: number; col: number } | null = null;
 
+/** Whether the contextual table ribbon tab is currently registered. */
+let designTabRegistered = false;
+
+/** Cleanup function for the TABLE_REQUEST_STATE listener. */
+let requestStateCleanup: (() => void) | null = null;
+
 // ============================================================================
 // Selection Handler
 // ============================================================================
 
 /**
  * Handle selection changes from the extension registry.
- * Checks if the active cell is within a table and shows/hides the Table menu.
+ * Checks if the active cell is within a table and shows/hides the Table Design ribbon tab.
  */
 export function handleSelectionChange(
   selection: { endRow: number; endCol: number } | null,
@@ -49,17 +58,67 @@ export function handleSelectionChange(
     // Selection is within a table
     currentTableId = table.id;
     addTaskPaneContextKey("table");
-    // Register menu as visible with current table's options
-    registerMenu(buildTableMenu(table, false));
+
+    // Register the contextual ribbon tab if not already registered
+    if (!designTabRegistered) {
+      ExtensionRegistry.registerRibbonTab(TableDesignTabDefinition);
+      designTabRegistered = true;
+    }
+
+    // Broadcast current table state to the ribbon tab
+    emitAppEvent(TableEvents.TABLE_STATE, { table });
   } else {
     // Selection is outside any table
     if (currentTableId !== null) {
       currentTableId = null;
       removeTaskPaneContextKey("table");
-      // Register menu as hidden
-      registerMenu(buildTableMenu(null, true));
+
+      // Unregister the contextual ribbon tab
+      if (designTabRegistered) {
+        ExtensionRegistry.unregisterRibbonTab(TABLE_DESIGN_TAB_ID);
+        designTabRegistered = false;
+      }
+
+      // Notify the ribbon tab that the table is deselected
+      window.dispatchEvent(new Event("table:deselected"));
     }
   }
+}
+
+/**
+ * Ensure the contextual table ribbon tab is registered.
+ * Called after table creation so the tab appears immediately.
+ */
+export function ensureDesignTabRegistered(): void {
+  if (!designTabRegistered) {
+    ExtensionRegistry.registerRibbonTab(TableDesignTabDefinition);
+    designTabRegistered = true;
+  }
+}
+
+/**
+ * Initialize the state request listener.
+ * The ribbon tab can request the current table state when it mounts
+ * (e.g. user switches tabs and comes back).
+ */
+export function initRequestStateListener(): () => void {
+  requestStateCleanup = onAppEvent(TableEvents.TABLE_REQUEST_STATE, () => {
+    if (currentTableId !== null) {
+      const table = getTableAtCell(
+        lastCheckedSelection?.row ?? 0,
+        lastCheckedSelection?.col ?? 0,
+      );
+      if (table) {
+        emitAppEvent(TableEvents.TABLE_STATE, { table });
+      }
+    }
+  });
+  return () => {
+    if (requestStateCleanup) {
+      requestStateCleanup();
+      requestStateCleanup = null;
+    }
+  };
 }
 
 /**
@@ -75,4 +134,12 @@ export function getCurrentTableId(): number | null {
 export function resetSelectionHandlerState(): void {
   currentTableId = null;
   lastCheckedSelection = null;
+  if (designTabRegistered) {
+    ExtensionRegistry.unregisterRibbonTab(TABLE_DESIGN_TAB_ID);
+    designTabRegistered = false;
+  }
+  if (requestStateCleanup) {
+    requestStateCleanup();
+    requestStateCleanup = null;
+  }
 }

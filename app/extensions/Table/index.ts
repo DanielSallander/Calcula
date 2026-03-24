@@ -9,7 +9,6 @@ import {
   emitAppEvent,
   AppEvents,
 } from "../../src/api";
-import { registerMenu } from "../../src/api/ui";
 import {
   registerGridOverlay,
   removeGridRegionsByType,
@@ -25,8 +24,9 @@ import {
 import {
   handleSelectionChange,
   resetSelectionHandlerState,
+  ensureDesignTabRegistered,
+  initRequestStateListener,
 } from "./handlers/selectionHandler";
-import { buildTableMenu } from "./handlers/tableMenuBuilder";
 import {
   resetTableStore,
   syncTableRegions,
@@ -62,9 +62,6 @@ export function registerTableExtension(): void {
   // Register dialog
   DialogExtensions.registerDialog(TableDialogDefinition);
 
-  // Register the contextual Table menu (initially hidden)
-  registerMenu(buildTableMenu(null, true));
-
   // Register style interceptor for table formatting (header, banded rows, etc.)
   cleanupFunctions.push(registerTableStyleInterceptor());
 
@@ -80,6 +77,9 @@ export function registerTableExtension(): void {
     })
   );
 
+  // Initialize the request-state listener for ribbon tab communication
+  cleanupFunctions.push(initRequestStateListener());
+
   // Sync table regions to grid overlay system when tables change
   const handleTableChanged = () => {
     refreshCache().catch(console.error);
@@ -90,6 +90,15 @@ export function registerTableExtension(): void {
   cleanupFunctions.push(() => {
     window.removeEventListener(TableEvents.TABLE_CREATED, handleTableChanged);
     window.removeEventListener(TableEvents.TABLE_DEFINITIONS_UPDATED, handleTableChanged);
+  });
+
+  // Ensure the ribbon tab appears immediately when a table is created
+  const handleTableCreated = () => {
+    ensureDesignTabRegistered();
+  };
+  window.addEventListener(TableEvents.TABLE_CREATED, handleTableCreated);
+  cleanupFunctions.push(() => {
+    window.removeEventListener(TableEvents.TABLE_CREATED, handleTableCreated);
   });
 
   // Listen for overlay resize completion to resize tables via drag handle
@@ -173,7 +182,7 @@ export function registerTableExtension(): void {
     }),
   );
 
-  // Subscribe to selection changes to show/hide the Table menu
+  // Subscribe to selection changes to show/hide the Table Design ribbon tab
   cleanupFunctions.push(
     ExtensionRegistry.onSelectionChange(handleSelectionChange),
   );
@@ -261,7 +270,7 @@ export function unregisterTableExtension(): void {
   cleanupFunctions.forEach((fn) => fn());
   cleanupFunctions = [];
 
-  // Reset handler state
+  // Reset handler state (includes unregistering ribbon tab)
   resetSelectionHandlerState();
   resetTableStore();
 
