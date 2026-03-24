@@ -2904,6 +2904,61 @@ export async function evalFormulaClose(
 }
 
 // ============================================================================
+// Formula Evaluation Plan (visual formula debugger)
+// ============================================================================
+
+/** One node in the formula expression tree. */
+export interface EvalPlanNode {
+  id: string;
+  nodeType: string;
+  label: string;
+  subtitle: string;
+  subtitleCompact: string;
+  subtitleValuesOnly: string;
+  subtitleBare: string;
+  value: string;
+  rawValue: number | null;
+  children: string[];
+  sourceStart: number;
+  sourceEnd: number;
+  evalOrder: number;
+  costPct: number;
+  isLeaf: boolean;
+  /** 1-based step number for display (undefined if not individually evaluated) */
+  stepNumber?: number;
+}
+
+/** One step of the formula reduction sequence. */
+export interface EvalReductionStep {
+  nodeId: string;
+  description: string;
+  formulaBefore: string;
+  formulaAfter: string;
+  highlightStart: number;
+  highlightEnd: number;
+}
+
+/** Complete evaluation plan for a formula. */
+export interface FormulaEvalPlan {
+  formula: string;
+  nodes: EvalPlanNode[];
+  rootId: string;
+  result: string;
+  steps: EvalReductionStep[];
+}
+
+/**
+ * Generate the complete formula evaluation plan for the selected cell.
+ * Returns all nodes, evaluation order, intermediate values, and reduction steps.
+ */
+export async function getFormulaEvalPlan(
+  row: number,
+  col: number,
+): Promise<FormulaEvalPlan> {
+  return invoke<FormulaEvalPlan>("get_formula_eval_plan", { row, col });
+}
+
+// ============================================================================
 // Data Consolidation
 // ============================================================================
 

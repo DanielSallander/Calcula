@@ -49,6 +49,7 @@ pub mod tables;
 pub mod goal_seek;
 pub mod tracing;
 pub mod evaluate_formula;
+pub mod formula_eval_plan;
 pub mod consolidate;
 pub mod status_bar;
 pub mod computed_properties;
@@ -3019,6 +3020,8 @@ pub fn run() {
             evaluate_formula::eval_formula_step_out,
             evaluate_formula::eval_formula_restart,
             evaluate_formula::eval_formula_close,
+            // Formula evaluation plan (visual formula debugger)
+            formula_eval_plan::get_formula_eval_plan,
             // Status bar aggregation command
             status_bar::get_selection_aggregations,
             // Computed Properties commands

@@ -758,6 +758,20 @@ export type {
 } from "./lib";
 
 // ============================================================================
+// Formula Evaluation Plan (visual formula debugger)
+// ============================================================================
+
+export {
+  getFormulaEvalPlan,
+} from "./lib";
+
+export type {
+  EvalPlanNode,
+  EvalReductionStep,
+  FormulaEvalPlan,
+} from "./lib";
+
+// ============================================================================
 // Data Consolidation API
 // ============================================================================
 

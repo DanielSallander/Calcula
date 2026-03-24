@@ -600,6 +600,20 @@ export type {
 } from "./backend";
 
 // ============================================================================
+// Formula Evaluation Plan (visual formula debugger)
+// ============================================================================
+
+export {
+  getFormulaEvalPlan,
+} from "./backend";
+
+export type {
+  EvalPlanNode,
+  EvalReductionStep,
+  FormulaEvalPlan,
+} from "./backend";
+
+// ============================================================================
 // Data Consolidation API
 // ============================================================================
 

@@ -792,6 +792,83 @@ pub struct EvalStepState {
 }
 
 // ============================================================================
+// Formula Evaluation Plan (visual formula debugger)
+// ============================================================================
+
+/// One node in the formula expression tree for the visual debugger.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EvalPlanNode {
+    /// Unique node identifier (e.g., "n0", "n1")
+    pub id: String,
+    /// Node kind: "function", "operator", "literal", "cell_ref", "range", "unary"
+    pub node_type: String,
+    /// Primary display label (function name, operator symbol, cell address, or literal value)
+    pub label: String,
+    /// Secondary info with values and refs (e.g., "452 (#2) + 452 (E2)")
+    pub subtitle: String,
+    /// Compact subtitle: refs only, no values (e.g., "#2 + E2")
+    pub subtitle_compact: String,
+    /// Values only, no refs (e.g., "452 + 452")
+    pub subtitle_values_only: String,
+    /// Bare subtitle: no values, no refs — just structure (e.g., the original arg summary)
+    pub subtitle_bare: String,
+    /// Evaluated value as formatted string
+    pub value: String,
+    /// Raw numeric value if applicable
+    pub raw_value: Option<f64>,
+    /// Child node IDs (inputs to this operation)
+    pub children: Vec<String>,
+    /// Start character offset in reconstructed formula text
+    pub source_start: usize,
+    /// End character offset (exclusive) in reconstructed formula text
+    pub source_end: usize,
+    /// 0-based evaluation order index
+    pub eval_order: usize,
+    /// Relative computation cost (0.0 - 100.0)
+    pub cost_pct: f64,
+    /// Whether this is a leaf node (no children evaluated individually)
+    pub is_leaf: bool,
+    /// 1-based step number for display (None if node was not individually evaluated)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub step_number: Option<usize>,
+}
+
+/// One step of the formula reduction sequence.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EvalReductionStep {
+    /// Which node was evaluated in this step
+    pub node_id: String,
+    /// Human-readable description (e.g., "SUM(A1:A5) = 150")
+    pub description: String,
+    /// Formula text before this step's substitution
+    pub formula_before: String,
+    /// Formula text after substitution
+    pub formula_after: String,
+    /// Start offset of the substituted region in formula_after
+    pub highlight_start: usize,
+    /// End offset of the substituted region in formula_after
+    pub highlight_end: usize,
+}
+
+/// Complete evaluation plan for a formula, returned to the frontend in one call.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FormulaEvalPlan {
+    /// The reconstructed formula text (without leading =)
+    pub formula: String,
+    /// All nodes in the expression tree
+    pub nodes: Vec<EvalPlanNode>,
+    /// ID of the root node
+    pub root_id: String,
+    /// Final evaluated result as formatted string
+    pub result: String,
+    /// Ordered reduction steps
+    pub steps: Vec<EvalReductionStep>,
+}
+
+// ============================================================================
 // Custom Number Format Preview
 // ============================================================================
 

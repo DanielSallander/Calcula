@@ -74,18 +74,18 @@ struct EvalSession {
 // ============================================================================
 
 /// Result of finding the next node to evaluate.
-struct NextNode {
+pub(crate) struct NextNode {
     /// Path to the node (indices into children)
-    path: Vec<usize>,
+    pub(crate) path: Vec<usize>,
     /// Whether this node is a cell reference (eligible for Step In)
-    is_cell_ref: bool,
+    pub(crate) is_cell_ref: bool,
     /// If cell ref, the sheet/col/row
-    cell_ref_info: Option<(Option<String>, String, u32)>,
+    pub(crate) cell_ref_info: Option<(Option<String>, String, u32)>,
 }
 
 /// Find the next (innermost, leftmost) unresolved node in the AST.
 /// Returns None if the entire AST is a single Literal (evaluation complete).
-fn find_next_eval_node(expr: &Expression) -> Option<NextNode> {
+pub(crate) fn find_next_eval_node(expr: &Expression) -> Option<NextNode> {
     let mut path = Vec::new();
     find_next_recursive(expr, &mut path)
 }
@@ -292,7 +292,7 @@ fn find_next_recursive(expr: &Expression, path: &mut Vec<usize>) -> Option<NextN
 }
 
 /// Navigate to a node in the AST by path and return a mutable reference.
-fn get_node_mut<'a>(ast: &'a mut Expression, path: &[usize]) -> &'a mut Expression {
+pub(crate) fn get_node_mut<'a>(ast: &'a mut Expression, path: &[usize]) -> &'a mut Expression {
     let mut current = ast;
     for &idx in path {
         current = match current {
@@ -314,7 +314,7 @@ fn get_node_mut<'a>(ast: &'a mut Expression, path: &[usize]) -> &'a mut Expressi
 }
 
 /// Navigate to a node in the AST by path and return a reference.
-fn get_node<'a>(ast: &'a Expression, path: &[usize]) -> &'a Expression {
+pub(crate) fn get_node<'a>(ast: &'a Expression, path: &[usize]) -> &'a Expression {
     let mut current = ast;
     for &idx in path {
         current = match current {
@@ -341,14 +341,14 @@ fn get_node<'a>(ast: &'a Expression, path: &[usize]) -> &'a Expression {
 
 /// Convert the AST to display with proper underline tracking.
 /// Returns (display_string, underline_start, underline_end).
-fn build_display(ast: &Expression, target_path: &[usize]) -> (String, usize, usize) {
+pub(crate) fn build_display(ast: &Expression, target_path: &[usize]) -> (String, usize, usize) {
     let mut result = String::new();
     let mut underline = (0_usize, 0_usize);
     build_display_recursive(ast, target_path, &[], &mut result, &mut underline);
     (result, underline.0, underline.1)
 }
 
-fn build_display_recursive(
+pub(crate) fn build_display_recursive(
     expr: &Expression,
     target_path: &[usize],
     current_path: &[usize],
@@ -527,7 +527,7 @@ fn build_display_recursive(
     }
 }
 
-fn value_to_display(val: &Value) -> String {
+pub(crate) fn value_to_display(val: &Value) -> String {
     match val {
         Value::Number(n) => {
             if n.fract() == 0.0 && n.abs() < 1e15 {
@@ -542,7 +542,7 @@ fn value_to_display(val: &Value) -> String {
     }
 }
 
-fn table_specifier_to_display(spec: &engine::TableSpecifier) -> String {
+pub(crate) fn table_specifier_to_display(spec: &engine::TableSpecifier) -> String {
     match spec {
         engine::TableSpecifier::Column(col) => col.clone(),
         engine::TableSpecifier::ThisRow(col) => format!("@{}", col),
@@ -558,7 +558,7 @@ fn table_specifier_to_display(spec: &engine::TableSpecifier) -> String {
     }
 }
 
-fn builtin_fn_name(func: &BuiltinFunction) -> String {
+pub(crate) fn builtin_fn_name(func: &BuiltinFunction) -> String {
     match func {
         BuiltinFunction::Sum => "SUM".to_string(),
         BuiltinFunction::Average => "AVERAGE".to_string(),
@@ -745,7 +745,7 @@ fn builtin_fn_name(func: &BuiltinFunction) -> String {
 // ============================================================================
 
 /// Evaluate a single node in the AST and return its result as a Value literal.
-fn evaluate_single_node(
+pub(crate) fn evaluate_single_node(
     expr: &Expression,
     grids: &[engine::Grid],
     sheet_names: &[String],
@@ -763,7 +763,7 @@ fn evaluate_single_node(
     eval_result_to_value(&result)
 }
 
-fn eval_result_to_value(result: &engine::EvalResult) -> Value {
+pub(crate) fn eval_result_to_value(result: &engine::EvalResult) -> Value {
     match result {
         engine::EvalResult::Number(n) => Value::Number(*n),
         engine::EvalResult::Text(s) => Value::String(s.clone()),
@@ -792,7 +792,7 @@ fn eval_result_to_value(result: &engine::EvalResult) -> Value {
 // Helper: format cell reference for display
 // ============================================================================
 
-fn format_cell_ref(row: u32, col: u32) -> String {
+pub(crate) fn format_cell_ref(row: u32, col: u32) -> String {
     let col_letter = index_to_col(col);
     format!("${}${}", col_letter, row + 1)
 }
