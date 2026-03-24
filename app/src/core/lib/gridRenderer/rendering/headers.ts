@@ -8,11 +8,42 @@ import type { DimensionOverrides } from "../../../types";
 import { calculateVisibleRange, calculateFreezePaneLayout } from "../layout/viewport";
 import { getColumnWidth, getRowHeight } from "../layout/dimensions";
 import { columnToLetter } from "../../../types";
+import { getColumnHeaderOverride, type ColumnHeaderOverride } from "../../../../api/columnHeaderOverrides";
 
 /** Color for the double-line indicator drawn at hidden row/column boundaries. */
 const HIDDEN_INDICATOR_COLOR = "#4a4a4a";
 /** Line width for the hidden boundary indicator. */
 const HIDDEN_INDICATOR_WIDTH = 2;
+
+/** Size of the filter dropdown button drawn in column headers. */
+const FILTER_BUTTON_SIZE = 10;
+/** Margin from the right edge for the filter button. */
+const FILTER_BUTTON_MARGIN = 3;
+
+/**
+ * Draw a small filter dropdown chevron in a column header cell.
+ */
+function drawHeaderFilterButton(
+  ctx: CanvasRenderingContext2D,
+  x: number,
+  colWidth: number,
+  colHeaderHeight: number,
+  override: ColumnHeaderOverride,
+): void {
+  const btnX = x + colWidth - FILTER_BUTTON_SIZE - FILTER_BUTTON_MARGIN;
+  const btnY = (colHeaderHeight - FILTER_BUTTON_SIZE) / 2;
+  const centerX = btnX + FILTER_BUTTON_SIZE / 2;
+  const centerY = btnY + FILTER_BUTTON_SIZE / 2;
+
+  // Draw chevron (downward arrow)
+  ctx.beginPath();
+  ctx.moveTo(centerX - 3, centerY - 1);
+  ctx.lineTo(centerX, centerY + 2);
+  ctx.lineTo(centerX + 3, centerY - 1);
+  ctx.strokeStyle = override.hasActiveFilter ? "#1a73e8" : "#666666";
+  ctx.lineWidth = 1.5;
+  ctx.stroke();
+}
 
 /**
  * Check if the next column after `col` is hidden (for drawing double-line indicator).
@@ -72,6 +103,12 @@ export function drawColumnHeaders(state: RenderState): void {
     colAnimIndex = insertionAnimation.index;
     colAnimOffset = insertionAnimation.direction === "insert" ? -remainingOffset : remainingOffset;
   }
+
+  // Calculate the first visible row for column header override detection.
+  // Used by extensions (e.g., Table) to show field names when the header row
+  // has scrolled above the viewport.
+  const visRange = calculateVisibleRange(viewport, config, width, height, dimensions);
+  const viewportStartRow = visRange.startRow;
 
   // Draw header background
   ctx.fillStyle = theme.headerBackground;
@@ -140,9 +177,23 @@ export function drawColumnHeaders(state: RenderState): void {
         ctx.stroke();
       }
 
-      // Draw column letter
+      // Draw column letter (or override text if an extension provides it)
+      const override1 = getColumnHeaderOverride(col, viewportStartRow);
       ctx.fillStyle = isFullySelected ? theme.headerHighlightText : isSelected ? "#1a5fb4" : hasHiddenCols ? filteredColTextColor : theme.headerText;
-      ctx.fillText(columnToLetter(col), x + colWidth / 2, colLetterY);
+      if (override1) {
+        const maxTextW = override1.showFilterButton ? colWidth - FILTER_BUTTON_SIZE - FILTER_BUTTON_MARGIN * 2 : colWidth - 4;
+        ctx.save();
+        ctx.beginPath();
+        ctx.rect(x, 0, colWidth, colHeaderHeight);
+        ctx.clip();
+        ctx.fillText(override1.text, x + Math.min(colWidth, maxTextW) / 2, colLetterY);
+        if (override1.showFilterButton) {
+          drawHeaderFilterButton(ctx, x, colWidth, colHeaderHeight, override1);
+        }
+        ctx.restore();
+      } else {
+        ctx.fillText(columnToLetter(col), x + colWidth / 2, colLetterY);
+      }
 
       x += colWidth;
     }
@@ -234,9 +285,23 @@ export function drawColumnHeaders(state: RenderState): void {
           ctx.stroke();
         }
 
-        // Draw column letter
+        // Draw column letter (or override text)
+        const override2 = getColumnHeaderOverride(col, viewportStartRow);
         ctx.fillStyle = isFullySelected ? theme.headerHighlightText : isSelected ? "#1a5fb4" : hasHiddenCols ? filteredColTextColor : theme.headerText;
-        ctx.fillText(columnToLetter(col), x + colWidth / 2, colLetterY);
+        if (override2) {
+          const maxTextW = override2.showFilterButton ? colWidth - FILTER_BUTTON_SIZE - FILTER_BUTTON_MARGIN * 2 : colWidth - 4;
+          ctx.save();
+          ctx.beginPath();
+          ctx.rect(x, 0, colWidth, colHeaderHeight);
+          ctx.clip();
+          ctx.fillText(override2.text, x + Math.min(colWidth, maxTextW) / 2, colLetterY);
+          if (override2.showFilterButton) {
+            drawHeaderFilterButton(ctx, x, colWidth, colHeaderHeight, override2);
+          }
+          ctx.restore();
+        } else {
+          ctx.fillText(columnToLetter(col), x + colWidth / 2, colLetterY);
+        }
 
         x += colWidth;
       }
@@ -298,9 +363,23 @@ export function drawColumnHeaders(state: RenderState): void {
         ctx.stroke();
       }
 
-      // Draw column letter
+      // Draw column letter (or override text)
+      const override3 = getColumnHeaderOverride(col, viewportStartRow);
       ctx.fillStyle = isFullySelected ? theme.headerHighlightText : isSelected ? "#1a5fb4" : hasHiddenCols ? filteredColTextColor : theme.headerText;
-      ctx.fillText(columnToLetter(col), x + colWidth / 2, colLetterY);
+      if (override3) {
+        const maxTextW = override3.showFilterButton ? colWidth - FILTER_BUTTON_SIZE - FILTER_BUTTON_MARGIN * 2 : colWidth - 4;
+        ctx.save();
+        ctx.beginPath();
+        ctx.rect(x, 0, colWidth, colHeaderHeight);
+        ctx.clip();
+        ctx.fillText(override3.text, x + Math.min(colWidth, maxTextW) / 2, colLetterY);
+        if (override3.showFilterButton) {
+          drawHeaderFilterButton(ctx, x, colWidth, colHeaderHeight, override3);
+        }
+        ctx.restore();
+      } else {
+        ctx.fillText(columnToLetter(col), x + colWidth / 2, colLetterY);
+      }
 
       baseX += colWidth;
     }

@@ -169,6 +169,59 @@ export function registerAutoFilterExtension(): void {
     }
   });
 
+  // 6b. Listen for filter button clicks from the column header area
+  // (dispatched by the Table extension when the table header row is scrolled out of view)
+  const handleFilterHeaderClick = (e: Event) => {
+    const col = (e as CustomEvent).detail?.col;
+    if (col == null) return;
+
+    const info = getAutoFilterInfo();
+    if (!info || !info.enabled) return;
+    if (col < info.startCol || col > info.endCol) return;
+
+    const currentOpen = getOpenDropdownCol();
+    if (currentOpen === col) {
+      hideOverlay(OVERLAY_ID);
+      setOpenDropdownCol(null);
+      emitAppEvent(FilterEvents.FILTER_DROPDOWN_CLOSE);
+      return;
+    }
+
+    const relCol = col - info.startCol;
+    setOpenDropdownCol(col);
+
+    // Position the dropdown below the column header area
+    // Use a fixed Y position since the click was in the column header
+    const canvas = getFilterChevronCanvas();
+    const canvasRect = canvas?.getBoundingClientRect();
+    const colHeaderHeight = 24; // Default column header height
+    const anchorRect = {
+      x: canvasRect ? canvasRect.left + 50 : 100,
+      y: canvasRect ? canvasRect.top + colHeaderHeight : colHeaderHeight,
+      width: 0,
+      height: 0,
+    };
+
+    const columnName = indexToCol(col);
+    const dropdownData: FilterDropdownData = {
+      absoluteCol: col,
+      relativeCol: relCol,
+      columnName,
+      uniqueValues: [],
+      hasBlanks: false,
+      selectedValues: null,
+      includeBlanks: true,
+    };
+
+    emitAppEvent(FilterEvents.FILTER_DROPDOWN_OPEN, { column: col });
+    showOverlay(OVERLAY_ID, {
+      data: dropdownData as unknown as Record<string, unknown>,
+      anchorRect,
+    });
+  };
+  window.addEventListener("table:filterHeaderClick", handleFilterHeaderClick);
+  cleanupFns.push(() => window.removeEventListener("table:filterHeaderClick", handleFilterHeaderClick));
+
   // 7. Subscribe to events
   const unsubSheet = onAppEvent(AppEvents.SHEET_CHANGED, () => {
     hideOverlay(OVERLAY_ID);

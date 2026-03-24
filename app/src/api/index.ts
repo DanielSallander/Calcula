@@ -499,6 +499,21 @@ export type {
   StyleInterceptorFn,
 } from "./styleInterceptors";
 
+// Column Header Overrides
+export {
+  setColumnHeaderOverrideProvider,
+  getColumnHeaderOverride,
+  registerColumnHeaderClickInterceptor,
+  checkColumnHeaderClickInterceptor,
+} from "./columnHeaderOverrides";
+
+export type {
+  ColumnHeaderOverride,
+  ColumnHeaderOverrideProvider,
+  ColumnHeaderClickResult,
+  ColumnHeaderClickInterceptorFn,
+} from "./columnHeaderOverrides";
+
 // Core types re-exported for extension use
 export type { Selection, SelectionType, Viewport, GridConfig, DimensionOverrides } from "./types";
 

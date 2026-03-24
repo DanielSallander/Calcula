@@ -32,11 +32,17 @@ import { createOverlayMoveHandlers, type OverlayMoveHandlers, type OverlayMoveSt
 import { createFillHandleCursorChecker } from "./utils/fillHandleUtils";
 import { createSelectionDragHandlers } from "./selection/selectionDragHandlers";
 import { isGlobalFormulaMode, isEditingFormula, setHoveringOverReferenceBorder } from "../../hooks/useEditing";
+import { getColumnHeaderOverride } from "../../../api/columnHeaderOverrides";
+import { getColumnWidth } from "../../lib/gridRenderer/layout/dimensions";
 
 // Custom cursor data URLs for Excel-style header selection arrows
 const COLUMN_SELECT_CURSOR = `url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='24' height='24' viewBox='0 0 24 24'%3E%3Cpath d='M12 2 L12 18 M12 18 L8 14 M12 18 L16 14' stroke='black' stroke-width='2' fill='none' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E") 12 12, pointer`;
 
 const ROW_SELECT_CURSOR = `url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='24' height='24' viewBox='0 0 24 24'%3E%3Cpath d='M2 12 L18 12 M18 12 L14 8 M18 12 L14 16' stroke='black' stroke-width='2' fill='none' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E") 12 12, pointer`;
+
+// Filter button constants (must match headers.ts and selectionHandler.ts)
+const FILTER_BUTTON_SIZE = 10;
+const FILTER_BUTTON_MARGIN = 3;
 
 /**
  * Hook for managing mouse-based cell selection with drag support.
@@ -587,7 +593,25 @@ export function useMouseSelection(props: UseMouseSelectionProps): UseMouseSelect
             else {
               const headerCol = getColumnFromHeader(mouseX, mouseY, config, viewport, dimensions);
               if (headerCol !== null) {
-                setCursorStyle(COLUMN_SELECT_CURSOR);
+                // Check if hovering over a filter button in column header
+                const override = getColumnHeaderOverride(headerCol, viewport.startRow);
+                if (override?.showFilterButton) {
+                  const rowHeaderWidth = config.rowHeaderWidth || 50;
+                  const scrollX = viewport.scrollX || 0;
+                  let colX = rowHeaderWidth - scrollX;
+                  for (let c = 0; c < headerCol; c++) {
+                    colX += getColumnWidth(c, config, dimensions);
+                  }
+                  const colWidth = getColumnWidth(headerCol, config, dimensions);
+                  const filterBtnLeft = colX + colWidth - FILTER_BUTTON_SIZE - FILTER_BUTTON_MARGIN * 2;
+                  if (mouseX >= filterBtnLeft && mouseX <= colX + colWidth) {
+                    setCursorStyle("pointer");
+                  } else {
+                    setCursorStyle(COLUMN_SELECT_CURSOR);
+                  }
+                } else {
+                  setCursorStyle(COLUMN_SELECT_CURSOR);
+                }
               } else {
                 // Check if over row header (not resize handle) - show right arrow
                 const headerRow = getRowFromHeader(mouseX, mouseY, config, viewport, dimensions);

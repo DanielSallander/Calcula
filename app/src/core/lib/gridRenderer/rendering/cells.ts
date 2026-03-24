@@ -347,15 +347,24 @@ export function drawCellText(state: RenderState): void {
       // Look up cell data
       const cell = cells.get(key);
 
-      // No cell data at all - but still apply cell decorations (e.g., sparklines)
-      // for cells that have no backend data but may have extension-drawn content.
+      // No cell data at all - but still apply style interceptors (e.g., table banding)
+      // and cell decorations (e.g., sparklines) for cells that have no backend data.
       if (!cell) {
-        if (hasCellDecorations()) {
-          const cellLeft = Math.max(x, rowHeaderWidth);
-          const cellTop = Math.max(y, colHeaderHeight);
-          const cellRight = Math.min(x + colWidth, width);
-          const cellBottom = Math.min(y + rowHeight, height);
-          if (cellRight > cellLeft && cellBottom > cellTop) {
+        const cellLeft = Math.max(x, rowHeaderWidth);
+        const cellTop = Math.max(y, colHeaderHeight);
+        const cellRight = Math.min(x + colWidth, width);
+        const cellBottom = Math.min(y + rowHeight, height);
+        if (cellRight > cellLeft && cellBottom > cellTop) {
+          // Apply style interceptors for empty cells (e.g., table banded rows)
+          if (useInterceptors) {
+            const baseStyle: BaseStyleInfo = { styleIndex: 0 };
+            const effective = applyStyleInterceptors("", baseStyle, { row, col });
+            if (effective.backgroundColor && isValidColor(effective.backgroundColor) && !isDefaultBackgroundColor(effective.backgroundColor)) {
+              ctx.fillStyle = effective.backgroundColor;
+              ctx.fillRect(cellLeft, cellTop, cellRight - cellLeft, cellBottom - cellTop);
+            }
+          }
+          if (hasCellDecorations()) {
             applyCellDecorations({
               ctx, row, col,
               cellLeft, cellTop, cellRight, cellBottom,
@@ -373,11 +382,11 @@ export function drawCellText(state: RenderState): void {
       const displayValue = cell.display ?? "";
       const isEmpty = displayValue === "";
 
-      // For empty cells with default style, skip entirely (unless cell decorations exist)
+      // For empty cells with default style, skip entirely (unless interceptors or decorations exist)
       const hasDecorations = hasCellDecorations();
       if (isEmpty) {
         const si = cell.styleIndex ?? 0;
-        if (si === 0 && !hasDecorations) {
+        if (si === 0 && !hasDecorations && !useInterceptors) {
           baseX += colWidth;
           continue;
         }

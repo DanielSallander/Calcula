@@ -11,13 +11,15 @@
 import type { GridConfig, Viewport, Selection, SelectionType, DimensionOverrides } from "../../../types";
 import type { MousePosition, HeaderDragState } from "../types";
 import { getColumnFromHeader, getRowFromHeader } from "../../../lib/gridRenderer";
+import { getColumnWidth } from "../../../lib/gridRenderer/layout/dimensions";
+import { checkColumnHeaderClickInterceptor } from "../../../../api/columnHeaderOverrides";
 
 interface HeaderSelectionDependencies {
   config: GridConfig;
   viewport: Viewport;
   dimensions?: DimensionOverrides;
   selection: Selection | null;
-  onSelectCell: (row: number, col: number, type?: SelectionType) => void;
+  onSelectCell: (row: number, col: number, type?: SelectionType, endRow?: number, endCol?: number) => void;
   onExtendTo: (row: number, col: number) => void;
   onSelectColumn?: (col: number, extend?: boolean) => void;
   onSelectRow?: (row: number, extend?: boolean) => void;
@@ -117,27 +119,55 @@ export function createHeaderSelectionHandlers(deps: HeaderSelectionDependencies)
       return true;
     }
 
+    // Check column header click interceptor (e.g., filter button, table-scoped selection)
+    // Compute the column's canvas X position for hit-testing
+    const rowHeaderWidth = config.rowHeaderWidth || 50;
+    const colHeaderHeight = config.colHeaderHeight || 24;
+    const scrollX = viewport.scrollX || 0;
+    let colX = rowHeaderWidth - scrollX;
+    for (let c = 0; c < headerCol; c++) {
+      colX += getColumnWidth(c, config, dimensions);
+    }
+    const colWidth = getColumnWidth(headerCol, config, dimensions);
+
+    const interceptResult = checkColumnHeaderClickInterceptor(
+      headerCol, mouseX, mouseY, colX, colWidth, colHeaderHeight,
+    );
+    if (interceptResult?.handled) {
+      return true;
+    }
+
     // If we're editing, commit first
     if (onCommitBeforeSelect) {
       await onCommitBeforeSelect();
     }
 
+    // Check if interceptor wants to scope the column selection (e.g., table rows only)
+    const selOverride = interceptResult?.selectionOverride;
+
     if (shiftKey && selection && onSelectColumn) {
       // Extend column selection
       onSelectColumn(headerCol, true);
+    } else if (selOverride) {
+      // Scoped column selection (e.g., only table rows) - single dispatch
+      onSelectCell(selOverride.startRow, headerCol, "columns", selOverride.endRow, headerCol);
     } else if (onSelectColumn) {
       // Select entire column
       onSelectColumn(headerCol, false);
     } else {
       // Fallback: select all rows in this column
-      onSelectCell(0, headerCol, "columns");
-      onExtendTo(config.totalRows - 1, headerCol);
+      onSelectCell(0, headerCol, "columns", config.totalRows - 1, headerCol);
     }
 
     // Start header drag for extending selection (only for left-click)
     if (event.button === 0) {
       setIsDragging(true);
-      headerDragRef.current = { type: "column", startIndex: headerCol };
+      headerDragRef.current = {
+        type: "column",
+        startIndex: headerCol,
+        scopedStartRow: selOverride?.startRow,
+        scopedEndRow: selOverride?.endRow,
+      };
       lastMousePosRef.current = { x: mouseX, y: mouseY };
       // Reset last extended index for new drag operation
       lastExtendedIndex = headerCol;
@@ -212,7 +242,7 @@ export function createHeaderSelectionHandlers(deps: HeaderSelectionDependencies)
       return;
     }
 
-    const { type, startIndex } = headerDragRef.current;
+    const { type, startIndex, scopedEndRow } = headerDragRef.current;
 
     if (type === "column") {
       const currentCol = getColumnFromHeader(mouseX, mouseY, config, viewport, dimensions);
@@ -220,9 +250,9 @@ export function createHeaderSelectionHandlers(deps: HeaderSelectionDependencies)
         // Only update if the column actually changed
         lastExtendedIndex = currentCol;
         // Extend column selection from startIndex (anchor) to currentCol
-        // Do NOT call onSelectCell here - it was already called in handleColumnHeaderMouseDown
-        // Just extend to the new column
-        onExtendTo(config.totalRows - 1, currentCol);
+        // Use scoped end row if set (e.g., table-scoped selection)
+        const endRow = scopedEndRow ?? config.totalRows - 1;
+        onExtendTo(endRow, currentCol);
       }
     } else {
       const currentRow = getRowFromHeader(mouseX, mouseY, config, viewport, dimensions);

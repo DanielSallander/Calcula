@@ -28,6 +28,7 @@ import {
   resetSelectionHandlerState,
   ensureDesignTabRegistered,
   initRequestStateListener,
+  initClickInterceptor,
 } from "./handlers/selectionHandler";
 import {
   resetTableStore,
@@ -82,6 +83,9 @@ export function registerTableExtension(): void {
 
   // Initialize the request-state listener for ribbon tab communication
   cleanupFunctions.push(initRequestStateListener());
+
+  // Initialize the column header click interceptor for filter buttons and table-scoped selection
+  cleanupFunctions.push(initClickInterceptor());
 
   // Sync table regions to grid overlay system when tables change
   const handleTableChanged = () => {

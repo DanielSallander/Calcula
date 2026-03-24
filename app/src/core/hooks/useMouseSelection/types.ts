@@ -36,6 +36,9 @@ export interface ResizeState {
 export interface HeaderDragState {
   type: "column" | "row";
   startIndex: number;
+  /** When set, column drag extends only within this row range (e.g., table-scoped selection). */
+  scopedStartRow?: number;
+  scopedEndRow?: number;
 }
 
 /**
