@@ -5,7 +5,7 @@
 
 import React, { useState, useEffect, useCallback, useRef, useMemo } from "react";
 import { css } from "@emotion/css";
-import { onAppEvent, emitAppEvent, AppEvents } from "../../../src/api";
+import { onAppEvent, emitAppEvent, AppEvents, showDialog } from "../../../src/api";
 import { TableEvents } from "../lib/tableEvents";
 import {
   updateTableStyleAsync,
@@ -275,6 +275,24 @@ export function TableDesignTab({
     });
   }, [table]);
 
+  const handleSummarizeWithPivot = useCallback(() => {
+    if (!table) return;
+    showDialog("pivot:createDialog", {
+      selection: {
+        startRow: table.startRow,
+        startCol: table.startCol,
+        endRow: table.endRow,
+        endCol: table.endCol,
+      },
+      tableName: table.name,
+    });
+  }, [table]);
+
+  const handleRemoveDuplicates = useCallback(() => {
+    if (!table) return;
+    showDialog("table:removeDuplicatesDialog", { table });
+  }, [table]);
+
   const handleStyleSelect = useCallback((_styleId: string) => {
     setSelectedStyleId(_styleId);
   }, []);
@@ -318,7 +336,7 @@ export function TableDesignTab({
   const toolsContent = (
     <div className={tabStyles.groupContentVertical}>
       <div className={tabStyles.groupContent}>
-        <button className={tabStyles.toolButton} disabled>
+        <button className={tabStyles.toolButton} onClick={handleSummarizeWithPivot}>
           Summarize with PivotTable
         </button>
         <button className={tabStyles.toolButton} disabled>
@@ -326,7 +344,7 @@ export function TableDesignTab({
         </button>
       </div>
       <div className={tabStyles.groupContent}>
-        <button className={tabStyles.toolButton} disabled>
+        <button className={tabStyles.toolButton} onClick={handleRemoveDuplicates}>
           Remove Duplicates
         </button>
         <button className={tabStyles.toolButton} onClick={handleConvertToRange}>

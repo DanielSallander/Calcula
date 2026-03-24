@@ -9,6 +9,7 @@ import type {
 } from "../../src/api";
 import React from "react";
 import { CreateTableDialog } from "./components/CreateTableDialog";
+import { RemoveDuplicatesDialog } from "./components/RemoveDuplicatesDialog";
 import { TableDesignTab } from "./components/TableDesignTab";
 
 // ============================================================================
@@ -52,5 +53,13 @@ export const TABLE_DIALOG_ID = "table:createDialog";
 export const TableDialogDefinition: DialogDefinition = {
   id: TABLE_DIALOG_ID,
   component: CreateTableDialog as React.ComponentType<DialogProps>,
+  priority: 100,
+};
+
+export const REMOVE_DUPLICATES_DIALOG_ID = "table:removeDuplicatesDialog";
+
+export const RemoveDuplicatesDialogDefinition: DialogDefinition = {
+  id: REMOVE_DUPLICATES_DIALOG_ID,
+  component: RemoveDuplicatesDialog as React.ComponentType<DialogProps>,
   priority: 100,
 };

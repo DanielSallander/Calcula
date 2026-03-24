@@ -369,6 +369,9 @@ pub struct CreatePivotRequest {
     pub has_headers: Option<bool>,
     /// Optional: name for the pivot table
     pub name: Option<String>,
+    /// Optional: source table name (e.g. "Table1"). When set, the pivot
+    /// dynamically resolves the table's current range on each refresh.
+    pub source_table_name: Option<String>,
 }
 
 /// Field configuration for pivot updates
@@ -880,6 +883,8 @@ pub struct PivotTableInfo {
     pub use_custom_sort_lists: bool,
     /// Source has headers
     pub has_headers: bool,
+    /// Source table name (if linked to a table)
+    pub source_table_name: Option<String>,
 }
 
 /// Range information response.

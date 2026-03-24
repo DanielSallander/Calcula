@@ -568,6 +568,12 @@ pub struct PivotDefinition {
     /// Use custom sort lists when sorting (Excel: useCustomSortLists).
     #[serde(default)]
     pub use_custom_sort_lists: bool,
+
+    /// If the pivot source is a Table, stores the table name (e.g. "Table1").
+    /// When set, `refresh_pivot_cache` resolves the table's current range
+    /// dynamically so that table expansions propagate automatically.
+    #[serde(default)]
+    pub source_table_name: Option<String>,
 }
 
 impl PivotDefinition {
@@ -592,6 +598,7 @@ impl PivotDefinition {
             enable_data_value_editing: false,
             refresh_on_open: false,
             use_custom_sort_lists: false,
+            source_table_name: None,
         }
     }
     

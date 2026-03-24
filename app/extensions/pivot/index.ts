@@ -65,7 +65,7 @@ import {
   forceRecheck,
 } from "./handlers/selectionHandler";
 import type { PivotRegionData } from "./types";
-import { getPivotRegionsForSheet, getPivotAtCell, getPivotView, togglePivotGroup, getPivotCellWindow, cancelPivotOperation } from "./lib/pivot-api";
+import { getPivotRegionsForSheet, getPivotAtCell, getPivotView, togglePivotGroup, getPivotCellWindow, cancelPivotOperation, getAllPivotTables, refreshPivotCache } from "./lib/pivot-api";
 import type { PivotViewResponse } from "./lib/pivot-api";
 import {
   cachePivotView,
@@ -1506,6 +1506,25 @@ export function registerPivotExtension(): void {
   const handlePivotRefresh = () => { refreshPivotRegions(true); };
   window.addEventListener("pivot:refresh", handlePivotRefresh);
   cleanupFunctions.push(() => window.removeEventListener("pivot:refresh", handlePivotRefresh));
+
+  // When a table's definition changes (resize, expand, etc.), refresh any
+  // pivot tables that are linked to that table so their source range stays in sync.
+  const handleTableDefsUpdated = async () => {
+    try {
+      const allPivots = await getAllPivotTables();
+      const tableLinked = allPivots.filter((p) => p.sourceTableName);
+      for (const p of tableLinked) {
+        await refreshPivotCache(p.id);
+      }
+      if (tableLinked.length > 0) {
+        refreshPivotRegions(true);
+      }
+    } catch (err) {
+      console.error("[Pivot Extension] Failed to refresh table-linked pivots:", err);
+    }
+  };
+  window.addEventListener("app:table-definitions-updated", handleTableDefsUpdated);
+  cleanupFunctions.push(() => window.removeEventListener("app:table-definitions-updated", handleTableDefsUpdated));
 
   // Also refresh regions when grid refreshes (sheet switch, etc.)
   // Do NOT trigger another repaint (triggerRepaint=false) to avoid infinite loop.

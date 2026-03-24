@@ -97,6 +97,7 @@ function CreatePivotDialogWrapper(props: DialogProps): React.ReactElement {
     selection: props.data?.selection as
       | { startRow: number; startCol: number; endRow: number; endCol: number }
       | undefined,
+    tableName: props.data?.tableName as string | undefined,
   });
 }
 

@@ -29,6 +29,9 @@ export interface CreatePivotDialogProps {
   } | null;
   /** Current active sheet index */
   activeSheetIndex?: number;
+  /** Source table name (e.g. "Table1"). When set, the pivot source is linked
+   *  to the table and auto-updates when the table expands. */
+  tableName?: string;
 }
 
 type DestinationType = 'new' | 'existing';
@@ -156,6 +159,7 @@ export function CreatePivotDialog({
   onClose,
   onCreated,
   selection,
+  tableName,
 }: CreatePivotDialogProps): React.ReactElement | null {
   // Read current grid selection (active cell) for auto-detection
   const gridState = useGridState();
@@ -172,6 +176,7 @@ export function CreatePivotDialog({
   const [error, setError] = useState<string | null>(null);
   const [sheets, setSheets] = useState<{ index: number; name: string }[]>([]);
   const [currentSheetName, setCurrentSheetName] = useState('Sheet1');
+  const [sourceSheetIndex, setSourceSheetIndex] = useState<number | undefined>(undefined);
 
   // Track if we've initialized the default sheet name for this dialog open
   const [hasInitializedSheetName, setHasInitializedSheetName] = useState(false);
@@ -228,6 +233,13 @@ export function CreatePivotDialog({
   useEffect(() => {
     if (!isOpen || hasAutoDetected || !currentSheetName) return;
 
+    // If a table name is provided, use it directly as the source reference
+    if (tableName) {
+      setHasAutoDetected(true);
+      setSourceRange(tableName);
+      return;
+    }
+
     // Use the prop selection or grid state selection for the active cell
     const sel = selection ?? gridState.selection;
     if (!sel) return;
@@ -270,7 +282,7 @@ export function CreatePivotDialog({
           setSourceRange(fullRange);
         }
       });
-  }, [isOpen, hasAutoDetected, currentSheetName, selection, gridState.selection]);
+  }, [isOpen, hasAutoDetected, currentSheetName, selection, tableName, gridState.selection]);
 
   // Generate default new sheet name ONLY once when sheets are loaded
   useEffect(() => {
@@ -289,6 +301,8 @@ export function CreatePivotDialog({
       const activeSheet = result.sheets.find(s => s.index === result.activeIndex);
       if (activeSheet) {
         setCurrentSheetName(activeSheet.name);
+        // Capture the source sheet index now, before addSheet potentially changes the active sheet
+        setSourceSheetIndex(activeSheet.index);
       }
     } catch (err) {
       console.error('[CreatePivotDialog] Failed to load sheets:', err);
@@ -377,13 +391,30 @@ export function CreatePivotDialog({
         destinationSheet: destinationSheetIndex,
       });
 
+      // When sourced from a table, resolve the range from the table's current
+      // coordinates but still send the cell range for initial cache build.
+      // The sourceTableName links the pivot to the table for future refreshes.
+      let resolvedSourceRange = sourceRange;
+      if (tableName && selection) {
+        // Build an A1 range from the table's coordinates so the backend can parse it
+        const range = selectionToRange(
+          selection.startRow,
+          selection.startCol,
+          selection.endRow,
+          selection.endCol,
+        );
+        resolvedSourceRange = buildSheetRange(currentSheetName, range);
+      }
+
       // Create the pivot table
       const view = await pivot.create({
-        sourceRange: sourceRange,
+        sourceRange: resolvedSourceRange,
         destinationCell: destinationCell,
+        sourceSheet: sourceSheetIndex,
         destinationSheet: destinationSheetIndex,
         hasHeaders: true,
         name: pivotName.trim() || undefined,
+        sourceTableName: tableName || undefined,
       });
 
       console.log('[CreatePivotDialog] Pivot table created:', view.pivotId, 'rows:', view.rowCount, 'cols:', view.colCount);

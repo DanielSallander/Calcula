@@ -19,6 +19,8 @@ import {
   TableManifest,
   TableDialogDefinition,
   TABLE_DIALOG_ID,
+  RemoveDuplicatesDialogDefinition,
+  REMOVE_DUPLICATES_DIALOG_ID,
 } from "./manifest";
 
 import {
@@ -59,8 +61,9 @@ export function registerTableExtension(): void {
   // Register add-in manifest
   ExtensionRegistry.registerAddIn(TableManifest);
 
-  // Register dialog
+  // Register dialogs
   DialogExtensions.registerDialog(TableDialogDefinition);
+  DialogExtensions.registerDialog(RemoveDuplicatesDialogDefinition);
 
   // Register style interceptor for table formatting (header, banded rows, etc.)
   cleanupFunctions.push(registerTableStyleInterceptor());
@@ -280,6 +283,7 @@ export function unregisterTableExtension(): void {
   // Unregister from extension registries
   ExtensionRegistry.unregisterAddIn(TableManifest.id);
   DialogExtensions.unregisterDialog(TABLE_DIALOG_ID);
+  DialogExtensions.unregisterDialog(REMOVE_DUPLICATES_DIALOG_ID);
 
   console.log("[Table Extension] Unregistered successfully");
 }

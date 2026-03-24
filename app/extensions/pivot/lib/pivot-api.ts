@@ -978,6 +978,7 @@ export interface PivotTableInfo {
   refreshOnOpen: boolean;
   useCustomSortLists: boolean;
   hasHeaders: boolean;
+  sourceTableName?: string;
 }
 
 /** Range information */

@@ -152,7 +152,11 @@ pub fn create_pivot_table(
     definition.source_has_headers = has_headers;
     definition.destination = destination;
     definition.name = request.name.or_else(|| Some(format!("PivotTable{}", pivot_id)));
-    definition.source_range_display = Some(request.source_range.clone());
+    // If linked to a table, display the table name; otherwise use the raw range
+    definition.source_range_display = Some(
+        request.source_table_name.clone().unwrap_or_else(|| request.source_range.clone())
+    );
+    definition.source_table_name = request.source_table_name.clone();
 
     // Store destination sheet in definition
     {
@@ -904,11 +908,34 @@ pub async fn refresh_pivot_cache(
             .get(&pivot_id)
             .ok_or_else(|| format!("Pivot table {} not found", pivot_id))?;
 
-        let source_start = definition.source_start;
+        let mut source_start = definition.source_start;
         let mut source_end = definition.source_end;
         let has_headers = definition.source_has_headers;
         let destination = definition.destination;
         let dest_sheet_idx = resolve_dest_sheet_index(&state, definition);
+        let source_table_name = definition.source_table_name.clone();
+
+        // If the pivot is linked to a table, resolve its current range
+        let mut source_sheet_idx: usize = 0; // TODO: resolve from definition.source_sheet
+        if let Some(ref table_name) = source_table_name {
+            let table_names = state.table_names.lock().unwrap();
+            if let Some((sheet_index, table_id)) = table_names.get(&table_name.to_uppercase()) {
+                let tables = state.tables.lock().unwrap();
+                if let Some(sheet_tables) = tables.get(sheet_index) {
+                    if let Some(table) = sheet_tables.get(table_id) {
+                        source_start = (table.start_row, table.start_col);
+                        source_end = (table.end_row, table.end_col);
+                        source_sheet_idx = table.sheet_index;
+                        log_info!(
+                            "PIVOT",
+                            "resolved table '{}' -> ({},{})..({},{}) on sheet {}",
+                            table_name, source_start.0, source_start.1,
+                            source_end.0, source_end.1, source_sheet_idx
+                        );
+                    }
+                }
+            }
+        }
 
         // Save old state for reversion on cancel
         let old_definition = definition.clone();
@@ -920,7 +947,6 @@ pub async fn refresh_pivot_cache(
 
         // Get fresh data from grid (needs grids lock, but briefly)
         let grids = state.grids.lock().unwrap();
-        let source_sheet_idx = 0; // TODO: resolve from definition.source_sheet
         let grid = grids
             .get(source_sheet_idx)
             .ok_or_else(|| "Source sheet not found".to_string())?;
@@ -940,6 +966,9 @@ pub async fn refresh_pivot_cache(
             .ok_or_else(|| format!("Pivot table {} not found", pivot_id))?;
 
         *cache = fresh_cache;
+        // Update stored source coordinates (may have changed if linked to a table)
+        definition.source_start = source_start;
+        definition.source_end = source_end;
         definition.bump_version();
 
         let new_def = definition.clone();
@@ -1337,6 +1366,7 @@ pub fn get_pivot_table_info(
         refresh_on_open: definition.refresh_on_open,
         use_custom_sort_lists: definition.use_custom_sort_lists,
         has_headers: definition.source_has_headers,
+        source_table_name: definition.source_table_name.clone(),
     })
 }
 
@@ -1385,6 +1415,7 @@ pub fn update_pivot_properties(
         refresh_on_open: definition.refresh_on_open,
         use_custom_sort_lists: definition.use_custom_sort_lists,
         has_headers: definition.source_has_headers,
+        source_table_name: definition.source_table_name.clone(),
     })
 }
 
@@ -2552,6 +2583,7 @@ pub fn get_all_pivot_tables(
                 refresh_on_open: definition.refresh_on_open,
                 use_custom_sort_lists: definition.use_custom_sort_lists,
                 has_headers: definition.source_has_headers,
+                source_table_name: definition.source_table_name.clone(),
             }
         })
         .collect()

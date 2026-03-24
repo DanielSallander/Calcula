@@ -110,6 +110,16 @@ export function SheetTabs({ onSheetChange }: SheetTabsProps): React.ReactElement
   // Load sheets on mount
   useEffect(() => {
     loadSheets();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Reload sheets whenever a SHEET_CHANGED event fires from outside
+  // (e.g., when a sheet is added from CreatePivotDialog)
+  useEffect(() => {
+    const handleExternalSheetChange = () => { loadSheets(); };
+    window.addEventListener("app:sheet-changed", handleExternalSheetChange);
+    return () => window.removeEventListener("app:sheet-changed", handleExternalSheetChange);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   // Helper: apply a SheetsResult and trigger sheet switch events.
