@@ -81,6 +81,14 @@ pub enum Expression {
     DictLiteral {
         entries: Vec<(Expression, Expression)>,
     },
+
+    /// A named reference (identifier) not resolved to a cell range.
+    /// Used by LAMBDA parameter names and LET bindings.
+    /// During evaluation, checked against the current scope.
+    /// If not in scope, produces a #NAME? error.
+    NamedRef {
+        name: String,
+    },
 }
 
 /// Specifier for structured table references (mirrors parser::ast::TableSpecifier).
@@ -277,9 +285,16 @@ pub enum BuiltinFunction {
     Row,
     Column,
 
-    // Advanced
+    // Advanced / Lambda
     Let,
     TextJoin,
+    Lambda,
+    Map,
+    Reduce,
+    Scan,
+    MakeArray,
+    ByRow,
+    ByCol,
 
     // Dynamic array functions
     Filter,
@@ -553,6 +568,9 @@ fn extract_recursive(expr: &Expression, deps: &mut HashSet<CellCoord>, bounds: G
                 extract_recursive(value, deps, bounds);
             }
         }
+
+        // NamedRef: no cell dependencies (resolved at evaluation time via scope)
+        Expression::NamedRef { .. } => {}
     }
 }
 
@@ -711,6 +729,9 @@ fn extract_recursive_with_sheets(
                 extract_recursive_with_sheets(value, deps, bounds);
             }
         }
+
+        // NamedRef: no cell dependencies (resolved at evaluation time via scope)
+        Expression::NamedRef { .. } => {}
     }
 }
 

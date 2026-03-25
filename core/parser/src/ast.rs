@@ -330,9 +330,16 @@ pub enum BuiltinFunction {
     Row,
     Column,
 
-    // Advanced
+    // Advanced / Lambda
     Let,
     TextJoin,
+    Lambda,
+    Map,
+    Reduce,
+    Scan,
+    MakeArray,
+    ByRow,
+    ByCol,
 
     // Dynamic array functions
     Filter,
@@ -548,6 +555,13 @@ impl BuiltinFunction {
             // Advanced
             "LET" => BuiltinFunction::Let,
             "TEXTJOIN" => BuiltinFunction::TextJoin,
+            "LAMBDA" => BuiltinFunction::Lambda,
+            "MAP" => BuiltinFunction::Map,
+            "REDUCE" => BuiltinFunction::Reduce,
+            "SCAN" => BuiltinFunction::Scan,
+            "MAKEARRAY" => BuiltinFunction::MakeArray,
+            "BYROW" => BuiltinFunction::ByRow,
+            "BYCOL" => BuiltinFunction::ByCol,
 
             // Dynamic array functions
             "FILTER" => BuiltinFunction::Filter,

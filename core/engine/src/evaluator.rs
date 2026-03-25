@@ -25,6 +25,7 @@ use crate::dependency_extractor::{BinaryOperator, BuiltinFunction, Expression, U
 use crate::grid::Grid;
 use crate::style::StyleRegistry;
 
+use std::cell::RefCell;
 use std::collections::HashMap;
 
 /// Comparison operator for criteria matching in SUMIF/COUNTIF etc.
@@ -65,6 +66,12 @@ pub enum EvalResult {
     List(Vec<EvalResult>),
     /// A contained key-value collection (does NOT spill). Created by DICT().
     Dict(Vec<(DictKey, EvalResult)>),
+    /// A lambda (callable) created by LAMBDA(). Contains parameter names and body expression.
+    /// Does not spill. Invoked by MAP, REDUCE, SCAN, MAKEARRAY, BYROW, BYCOL.
+    Lambda {
+        params: Vec<String>,
+        body: Box<Expression>,
+    },
 }
 
 impl EvalResult {
@@ -90,6 +97,10 @@ impl EvalResult {
                 CellValue::Dict(Box::new(
                     entries.iter().map(|(k, v)| (k.clone(), v.to_cell_value())).collect()
                 ))
+            }
+            EvalResult::Lambda { .. } => {
+                // Lambdas stored in cells display as a text indicator
+                CellValue::Text("#LAMBDA".to_string())
             }
         }
     }
@@ -155,6 +166,7 @@ impl EvalResult {
             }
             EvalResult::List(items) => format!("[List({})]", items.len()),
             EvalResult::Dict(entries) => format!("[Dict({})]", entries.len()),
+            EvalResult::Lambda { .. } => "#LAMBDA".to_string(),
         }
     }
 
@@ -315,6 +327,9 @@ pub struct Evaluator<'a> {
     /// Optional file reader for FILEREAD/FILELINES/FILEEXISTS functions.
     /// The closure takes a file path and returns the file content if it exists.
     file_reader: Option<&'a dyn Fn(&str) -> Option<String>>,
+    /// Scope for LAMBDA/LET name bindings. Names are stored uppercased.
+    /// Uses RefCell for interior mutability so evaluate() can stay &self.
+    scope: RefCell<HashMap<String, EvalResult>>,
 }
 
 impl<'a> Evaluator<'a> {
@@ -327,6 +342,7 @@ impl<'a> Evaluator<'a> {
             context: EvalContext::default(),
             styles: None,
             file_reader: None,
+            scope: RefCell::new(HashMap::new()),
         }
     }
 
@@ -338,6 +354,7 @@ impl<'a> Evaluator<'a> {
             context: EvalContext::default(),
             styles: None,
             file_reader: None,
+            scope: RefCell::new(HashMap::new()),
         }
     }
 
@@ -349,6 +366,7 @@ impl<'a> Evaluator<'a> {
             context: eval_ctx,
             styles: None,
             file_reader: None,
+            scope: RefCell::new(HashMap::new()),
         }
     }
 
@@ -403,6 +421,17 @@ impl<'a> Evaluator<'a> {
             }
             Expression::DictLiteral { entries } => {
                 self.eval_dict_literal(entries)
+            }
+            Expression::NamedRef { name } => {
+                // Check scope first (LAMBDA/LET bindings)
+                let key = name.to_uppercase();
+                let scope = self.scope.borrow();
+                if let Some(val) = scope.get(&key) {
+                    val.clone()
+                } else {
+                    // Unresolved name → #NAME? error
+                    EvalResult::Error(CellError::Name)
+                }
             }
         }
     }
@@ -1113,9 +1142,16 @@ impl<'a> Evaluator<'a> {
             BuiltinFunction::Row => self.fn_row(args),
             BuiltinFunction::Column => self.fn_column(args),
 
-            // Advanced
+            // Advanced / Lambda
             BuiltinFunction::Let => self.fn_let(args),
             BuiltinFunction::TextJoin => self.fn_textjoin(args),
+            BuiltinFunction::Lambda => self.fn_lambda(args),
+            BuiltinFunction::Map => self.fn_map(args),
+            BuiltinFunction::Reduce => self.fn_reduce(args),
+            BuiltinFunction::Scan => self.fn_scan(args),
+            BuiltinFunction::MakeArray => self.fn_makearray(args),
+            BuiltinFunction::ByRow => self.fn_byrow(args),
+            BuiltinFunction::ByCol => self.fn_bycol(args),
 
             // Dynamic array functions
             BuiltinFunction::Filter => self.fn_filter(args),
@@ -3424,6 +3460,7 @@ impl<'a> Evaluator<'a> {
             EvalResult::Array(_) => 64.0,
             EvalResult::List(_) => 128.0,
             EvalResult::Dict(_) => 256.0,
+            EvalResult::Lambda { .. } => 512.0,
         })
     }
 
@@ -4037,11 +4074,8 @@ impl<'a> Evaluator<'a> {
     /// Implementation note: LET requires at least 3 arguments (name, value, calculation),
     /// the total argument count must be odd, and there can be at most 126 name/value pairs.
     /// Since our Expression AST doesn't support name binding, we use a workaround:
-    /// we evaluate each value and then evaluate the final calculation expression.
-    /// The name arguments are essentially ignored since the parser has already resolved
-    /// cell references. For full LET semantics, the parser would need to create
-    /// scoped name bindings - but this gives correct results for the common case where
-    /// LET is used to avoid repeated calculation of the same sub-expression.
+    /// LET(name1, value1, [name2, value2, ...], calculation)
+    /// Binds names to values in a local scope, then evaluates the calculation.
     fn fn_let(&self, args: &[Expression]) -> EvalResult {
         // LET needs at least 3 args: name1, value1, calculation
         // Total must be odd (pairs of name/value + final calculation)
@@ -4052,15 +4086,361 @@ impl<'a> Evaluator<'a> {
         if args.len() > 253 {
             return EvalResult::Error(CellError::Value);
         }
-        // Evaluate all value expressions (even indices starting from 1 are values)
-        // to ensure side effects / caching happen, even though we can't bind names
-        // without parser support.
+
+        // Save previous scope values that might be shadowed
         let pair_count = (args.len() - 1) / 2;
+        let mut saved: Vec<(String, Option<EvalResult>)> = Vec::new();
+
         for i in 0..pair_count {
-            let _value = self.evaluate(&args[i * 2 + 1]);
+            let name = self.extract_param_name(&args[i * 2]);
+            if name.is_empty() {
+                return EvalResult::Error(CellError::Value);
+            }
+            let value = self.evaluate(&args[i * 2 + 1]);
+            if let EvalResult::Error(e) = &value {
+                // Restore saved scope entries before returning error
+                let mut scope = self.scope.borrow_mut();
+                for (k, old) in saved.into_iter().rev() {
+                    match old {
+                        Some(v) => { scope.insert(k, v); }
+                        None => { scope.remove(&k); }
+                    }
+                }
+                return EvalResult::Error(e.clone());
+            }
+            let key = name.to_uppercase();
+            {
+                let mut scope = self.scope.borrow_mut();
+                saved.push((key.clone(), scope.get(&key).cloned()));
+                scope.insert(key, value);
+            }
         }
-        // The last argument is always the calculation expression
-        self.evaluate(args.last().unwrap())
+
+        // Evaluate the calculation expression with bindings in scope
+        let result = self.evaluate(args.last().unwrap());
+
+        // Restore previous scope
+        {
+            let mut scope = self.scope.borrow_mut();
+            for (k, old) in saved.into_iter().rev() {
+                match old {
+                    Some(v) => { scope.insert(k, v); }
+                    None => { scope.remove(&k); }
+                }
+            }
+        }
+
+        result
+    }
+
+    // ==================== Lambda Helper ====================
+
+    /// Extract a parameter name from a NamedRef expression.
+    /// Returns the uppercased name, or empty string if not a NamedRef.
+    fn extract_param_name(&self, expr: &Expression) -> String {
+        if let Expression::NamedRef { name } = expr {
+            name.to_uppercase()
+        } else {
+            String::new()
+        }
+    }
+
+    /// Invoke a lambda with the given argument values bound to its parameters.
+    /// Temporarily binds params in scope, evaluates body, then restores scope.
+    fn invoke_lambda(&self, params: &[String], body: &Expression, args: &[EvalResult]) -> EvalResult {
+        // Save previous scope values and set new bindings
+        let mut saved: Vec<(String, Option<EvalResult>)> = Vec::with_capacity(params.len());
+        {
+            let mut scope = self.scope.borrow_mut();
+            for (i, name) in params.iter().enumerate() {
+                let key = name.to_uppercase();
+                saved.push((key.clone(), scope.get(&key).cloned()));
+                if let Some(val) = args.get(i) {
+                    scope.insert(key, val.clone());
+                }
+            }
+        }
+
+        let result = self.evaluate(body);
+
+        // Restore scope
+        {
+            let mut scope = self.scope.borrow_mut();
+            for (k, old) in saved.into_iter().rev() {
+                match old {
+                    Some(v) => { scope.insert(k, v); }
+                    None => { scope.remove(&k); }
+                }
+            }
+        }
+
+        result
+    }
+
+    // ==================== LAMBDA Functions ====================
+
+    /// LAMBDA([param1], [param2], ..., calculation)
+    /// Creates a callable function. The last argument is the body; all others are parameter names.
+    fn fn_lambda(&self, args: &[Expression]) -> EvalResult {
+        if args.len() < 2 {
+            return EvalResult::Error(CellError::Value);
+        }
+
+        // Extract parameter names from first N-1 args
+        let mut params = Vec::with_capacity(args.len() - 1);
+        for arg in &args[..args.len() - 1] {
+            let name = self.extract_param_name(arg);
+            if name.is_empty() {
+                return EvalResult::Error(CellError::Value);
+            }
+            params.push(name);
+        }
+
+        // The last argument is the body (unevaluated)
+        let body = args.last().unwrap().clone();
+
+        EvalResult::Lambda {
+            params,
+            body: Box::new(body),
+        }
+    }
+
+    /// MAP(array, lambda)
+    /// Applies lambda to each element of the array. Returns an array of results.
+    /// Works with COLLECT: if the lambda returns a List/Dict, each output cell is 3D.
+    fn fn_map(&self, args: &[Expression]) -> EvalResult {
+        if args.len() != 2 {
+            return EvalResult::Error(CellError::Value);
+        }
+
+        let (rows, cols, data) = self.eval_range_2d(&args[0]);
+        let lambda = self.evaluate(&args[1]);
+
+        let (params, body) = match &lambda {
+            EvalResult::Lambda { params, body } => (params.clone(), body.as_ref().clone()),
+            _ => return EvalResult::Error(CellError::Value),
+        };
+
+        if params.len() != 1 {
+            return EvalResult::Error(CellError::Value);
+        }
+
+        // Apply lambda to each element
+        let mut results: Vec<EvalResult> = Vec::with_capacity(rows * cols);
+        for item in &data {
+            let result = self.invoke_lambda(&params, &body, &[item.clone()]);
+            results.push(result);
+        }
+
+        // Reshape to match input dimensions
+        if cols == 1 {
+            EvalResult::Array(results)
+        } else {
+            let mut row_arrays = Vec::with_capacity(rows);
+            for r in 0..rows {
+                let start = r * cols;
+                let end = start + cols;
+                row_arrays.push(EvalResult::Array(results[start..end].to_vec()));
+            }
+            EvalResult::Array(row_arrays)
+        }
+    }
+
+    /// REDUCE(initial_value, array, lambda)
+    /// Reduces an array to a single value by applying lambda(accumulator, element) iteratively.
+    fn fn_reduce(&self, args: &[Expression]) -> EvalResult {
+        if args.len() != 3 {
+            return EvalResult::Error(CellError::Value);
+        }
+
+        let initial = self.evaluate(&args[0]);
+        if let EvalResult::Error(e) = &initial {
+            return EvalResult::Error(e.clone());
+        }
+
+        let flat = self.eval_flat(&args[1]);
+        let lambda = self.evaluate(&args[2]);
+
+        let (params, body) = match &lambda {
+            EvalResult::Lambda { params, body } => (params.clone(), body.as_ref().clone()),
+            _ => return EvalResult::Error(CellError::Value),
+        };
+
+        if params.len() != 2 {
+            return EvalResult::Error(CellError::Value);
+        }
+
+        let mut accumulator = initial;
+        for item in &flat {
+            accumulator = self.invoke_lambda(&params, &body, &[accumulator, item.clone()]);
+            if let EvalResult::Error(_) = &accumulator {
+                return accumulator;
+            }
+        }
+
+        accumulator
+    }
+
+    /// SCAN(initial_value, array, lambda)
+    /// Like REDUCE, but returns an array of all intermediate accumulator values.
+    fn fn_scan(&self, args: &[Expression]) -> EvalResult {
+        if args.len() != 3 {
+            return EvalResult::Error(CellError::Value);
+        }
+
+        let initial = self.evaluate(&args[0]);
+        if let EvalResult::Error(e) = &initial {
+            return EvalResult::Error(e.clone());
+        }
+
+        let flat = self.eval_flat(&args[1]);
+        let lambda = self.evaluate(&args[2]);
+
+        let (params, body) = match &lambda {
+            EvalResult::Lambda { params, body } => (params.clone(), body.as_ref().clone()),
+            _ => return EvalResult::Error(CellError::Value),
+        };
+
+        if params.len() != 2 {
+            return EvalResult::Error(CellError::Value);
+        }
+
+        let mut accumulator = initial;
+        let mut results: Vec<EvalResult> = Vec::with_capacity(flat.len());
+        for item in &flat {
+            accumulator = self.invoke_lambda(&params, &body, &[accumulator, item.clone()]);
+            if let EvalResult::Error(_) = &accumulator {
+                return accumulator;
+            }
+            results.push(accumulator.clone());
+        }
+
+        EvalResult::Array(results)
+    }
+
+    /// MAKEARRAY(rows, cols, lambda)
+    /// Creates an array where each cell is computed by lambda(row_index, col_index).
+    /// Indices are 1-based (Excel convention).
+    fn fn_makearray(&self, args: &[Expression]) -> EvalResult {
+        if args.len() != 3 {
+            return EvalResult::Error(CellError::Value);
+        }
+
+        let rows = match self.evaluate(&args[0]).as_number() {
+            Some(n) if n >= 1.0 && n <= 1048576.0 => n as usize,
+            _ => return EvalResult::Error(CellError::Value),
+        };
+        let cols = match self.evaluate(&args[1]).as_number() {
+            Some(n) if n >= 1.0 && n <= 16384.0 => n as usize,
+            _ => return EvalResult::Error(CellError::Value),
+        };
+
+        let lambda = self.evaluate(&args[2]);
+        let (params, body) = match &lambda {
+            EvalResult::Lambda { params, body } => (params.clone(), body.as_ref().clone()),
+            _ => return EvalResult::Error(CellError::Value),
+        };
+
+        if params.len() != 2 {
+            return EvalResult::Error(CellError::Value);
+        }
+
+        if cols == 1 {
+            // Single column → flat array
+            let mut results = Vec::with_capacity(rows);
+            for r in 0..rows {
+                let result = self.invoke_lambda(&params, &body, &[
+                    EvalResult::Number((r + 1) as f64),
+                    EvalResult::Number(1.0),
+                ]);
+                results.push(result);
+            }
+            EvalResult::Array(results)
+        } else {
+            // Multi-column → 2D array
+            let mut row_arrays = Vec::with_capacity(rows);
+            for r in 0..rows {
+                let mut row = Vec::with_capacity(cols);
+                for c in 0..cols {
+                    let result = self.invoke_lambda(&params, &body, &[
+                        EvalResult::Number((r + 1) as f64),
+                        EvalResult::Number((c + 1) as f64),
+                    ]);
+                    row.push(result);
+                }
+                row_arrays.push(EvalResult::Array(row));
+            }
+            EvalResult::Array(row_arrays)
+        }
+    }
+
+    /// BYROW(array, lambda)
+    /// Applies lambda to each row of the array. Lambda receives a 1D array (the row).
+    /// Returns a single-column array of results.
+    fn fn_byrow(&self, args: &[Expression]) -> EvalResult {
+        if args.len() != 2 {
+            return EvalResult::Error(CellError::Value);
+        }
+
+        let (rows, cols, data) = self.eval_range_2d(&args[0]);
+        let lambda = self.evaluate(&args[1]);
+
+        let (params, body) = match &lambda {
+            EvalResult::Lambda { params, body } => (params.clone(), body.as_ref().clone()),
+            _ => return EvalResult::Error(CellError::Value),
+        };
+
+        if params.len() != 1 {
+            return EvalResult::Error(CellError::Value);
+        }
+
+        let mut results = Vec::with_capacity(rows);
+        for r in 0..rows {
+            // Build the row as a List (so the lambda can use aggregate functions on it)
+            let start = r * cols;
+            let row_data: Vec<EvalResult> = (0..cols)
+                .map(|c| data.get(start + c).cloned().unwrap_or(EvalResult::Number(0.0)))
+                .collect();
+            let row_arg = EvalResult::Array(row_data);
+            let result = self.invoke_lambda(&params, &body, &[row_arg]);
+            results.push(result);
+        }
+
+        EvalResult::Array(results)
+    }
+
+    /// BYCOL(array, lambda)
+    /// Applies lambda to each column of the array. Lambda receives a 1D array (the column).
+    /// Returns a single-row array of results.
+    fn fn_bycol(&self, args: &[Expression]) -> EvalResult {
+        if args.len() != 2 {
+            return EvalResult::Error(CellError::Value);
+        }
+
+        let (rows, cols, data) = self.eval_range_2d(&args[0]);
+        let lambda = self.evaluate(&args[1]);
+
+        let (params, body) = match &lambda {
+            EvalResult::Lambda { params, body } => (params.clone(), body.as_ref().clone()),
+            _ => return EvalResult::Error(CellError::Value),
+        };
+
+        if params.len() != 1 {
+            return EvalResult::Error(CellError::Value);
+        }
+
+        let mut results = Vec::with_capacity(cols);
+        for c in 0..cols {
+            // Build the column as a 1D array
+            let col_data: Vec<EvalResult> = (0..rows)
+                .map(|r| data.get(r * cols + c).cloned().unwrap_or(EvalResult::Number(0.0)))
+                .collect();
+            let col_arg = EvalResult::Array(col_data);
+            let result = self.invoke_lambda(&params, &body, &[col_arg]);
+            results.push(result);
+        }
+
+        EvalResult::Array(results)
     }
 
     /// TEXTJOIN(delimiter, ignore_empty, text1, [text2], ...)
@@ -4318,7 +4698,7 @@ impl<'a> Evaluator<'a> {
                 EvalResult::Boolean(b) => (2, if *b { 1.0 } else { 0.0 }, String::new()),
                 EvalResult::Error(_) => (3, 0.0, String::new()),
                 EvalResult::Array(_) => (4, 0.0, String::new()),
-                EvalResult::List(_) | EvalResult::Dict(_) => (5, 0.0, String::new()),
+                EvalResult::List(_) | EvalResult::Dict(_) | EvalResult::Lambda { .. } => (5, 0.0, String::new()),
             }
         }
         let (ta, na, sa) = sort_key(a);
@@ -4959,6 +5339,7 @@ impl<'a> Evaluator<'a> {
                     EvalResult::Error(_) => {} // skip errors in TEXTJOIN
                     EvalResult::List(items) => parts.push(format!("[List({})]", items.len())),
                     EvalResult::Dict(entries) => parts.push(format!("[Dict({})]", entries.len())),
+                    EvalResult::Lambda { .. } => parts.push("#LAMBDA".to_string()),
                     EvalResult::Array(arr) => {
                         for val in arr {
                             match val {

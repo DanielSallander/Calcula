@@ -4,6 +4,7 @@
 use crate::api_types::{PageSetup, PrintData, CellData, MergedRegion, StyleData};
 use crate::{AppState, format_cell_value};
 use tauri::State;
+use std::fs;
 
 /// Get the page setup for the active sheet.
 #[tauri::command]
@@ -135,4 +136,11 @@ pub fn get_print_data(state: State<AppState>) -> Result<PrintData, String> {
         sheet_name,
         bounds: (max_row, max_col),
     })
+}
+
+/// Write binary data to a file on disk.
+/// Used by PDF export to save the generated PDF.
+#[tauri::command]
+pub fn write_binary_file(path: String, data: Vec<u8>) -> Result<(), String> {
+    fs::write(&path, &data).map_err(|e| format!("Failed to write file '{}': {}", path, e))
 }

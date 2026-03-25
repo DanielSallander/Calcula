@@ -303,6 +303,18 @@ fn assign_ids_recursive(
                 is_leaf: false,
             });
         }
+
+        Expression::NamedRef { name } => {
+            nodes.push(NodeInfo {
+                id: id.clone(),
+                node_type: "named_ref".to_string(),
+                label: name.clone(),
+                subtitle: "parameter".to_string(),
+                children: vec![],
+                path: current_path.to_vec(),
+                is_leaf: true,
+            });
+        }
     }
 
     id
@@ -532,6 +544,10 @@ fn build_spans_recursive(
                 build_spans_recursive(value, &val_path, output, spans);
             }
             output.push('}');
+        }
+
+        Expression::NamedRef { name } => {
+            output.push_str(name);
         }
     }
 

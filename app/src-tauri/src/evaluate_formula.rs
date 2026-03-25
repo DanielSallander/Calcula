@@ -222,6 +222,9 @@ fn find_next_recursive(expr: &Expression, path: &mut Vec<usize>) -> Option<NextN
             })
         }
 
+        // NamedRef: resolved at evaluation time via scope (LAMBDA/LET params)
+        Expression::NamedRef { .. } => None,
+
         // Function calls: special handling for IF short-circuit
         Expression::FunctionCall { func, args } => {
             if matches!(func, BuiltinFunction::If) && args.len() >= 2 {
@@ -520,6 +523,10 @@ pub(crate) fn build_display_recursive(
             }
             output.push('}');
         }
+
+        Expression::NamedRef { name } => {
+            output.push_str(name);
+        }
     }
 
     if is_target {
@@ -736,6 +743,13 @@ pub(crate) fn builtin_fn_name(func: &BuiltinFunction) -> String {
         BuiltinFunction::FileRead => "FILEREAD".to_string(),
         BuiltinFunction::FileLines => "FILELINES".to_string(),
         BuiltinFunction::FileExists => "FILEEXISTS".to_string(),
+        BuiltinFunction::Lambda => "LAMBDA".to_string(),
+        BuiltinFunction::Map => "MAP".to_string(),
+        BuiltinFunction::Reduce => "REDUCE".to_string(),
+        BuiltinFunction::Scan => "SCAN".to_string(),
+        BuiltinFunction::MakeArray => "MAKEARRAY".to_string(),
+        BuiltinFunction::ByRow => "BYROW".to_string(),
+        BuiltinFunction::ByCol => "BYCOL".to_string(),
         BuiltinFunction::Custom(name) => name.clone(),
     }
 }
@@ -784,6 +798,9 @@ pub(crate) fn eval_result_to_value(result: &engine::EvalResult) -> Value {
         }
         engine::EvalResult::Dict(entries) => {
             Value::String(format!("[Dict({})]", entries.len()))
+        }
+        engine::EvalResult::Lambda { .. } => {
+            Value::String("#LAMBDA".to_string())
         }
     }
 }

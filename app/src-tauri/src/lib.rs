@@ -602,9 +602,16 @@ fn convert_builtin_function(func: &ParserBuiltinFn) -> EngineBuiltinFn {
         ParserBuiltinFn::Row => EngineBuiltinFn::Row,
         ParserBuiltinFn::Column => EngineBuiltinFn::Column,
 
-        // Advanced
+        // Advanced / Lambda
         ParserBuiltinFn::Let => EngineBuiltinFn::Let,
         ParserBuiltinFn::TextJoin => EngineBuiltinFn::TextJoin,
+        ParserBuiltinFn::Lambda => EngineBuiltinFn::Lambda,
+        ParserBuiltinFn::Map => EngineBuiltinFn::Map,
+        ParserBuiltinFn::Reduce => EngineBuiltinFn::Reduce,
+        ParserBuiltinFn::Scan => EngineBuiltinFn::Scan,
+        ParserBuiltinFn::MakeArray => EngineBuiltinFn::MakeArray,
+        ParserBuiltinFn::ByRow => EngineBuiltinFn::ByRow,
+        ParserBuiltinFn::ByCol => EngineBuiltinFn::ByCol,
 
         ParserBuiltinFn::Filter => EngineBuiltinFn::Filter,
         ParserBuiltinFn::Sort => EngineBuiltinFn::Sort,
@@ -725,12 +732,11 @@ pub fn convert_expr(expr: &ParserExpr) -> EngineExpr {
             func: convert_builtin_function(func),
             args: args.iter().map(convert_expr).collect(),
         },
-        // NamedRef nodes should have been resolved before reaching convert_expr.
-        // If one reaches here, it means the name was not found — produce #NAME? error
-        // by calling a Custom function (which the evaluator maps to CellError::Name).
-        ParserExpr::NamedRef { name } => EngineExpr::FunctionCall {
-            func: EngineBuiltinFn::Custom(format!("_UNRESOLVED_{}", name)),
-            args: vec![],
+        // NamedRef nodes may survive resolution when used as LAMBDA/LET parameter
+        // names or references to those parameters in the body. The evaluator will
+        // check the current scope for these names; unresolved ones produce #NAME?.
+        ParserExpr::NamedRef { name } => EngineExpr::NamedRef {
+            name: name.clone(),
         },
         // 3D cross-sheet reference: Sheet1:Sheet5!A1 or 'Jan:Dec'!A1:B10
         ParserExpr::Sheet3DRef { start_sheet, end_sheet, reference } => EngineExpr::Sheet3DRef {
@@ -1018,13 +1024,70 @@ pub fn resolve_names_in_ast(
             op: *op,
             operand: Box::new(resolve_names_in_ast(operand, named_ranges, current_sheet_index, visited)),
         },
-        ParserExpr::FunctionCall { func, args } => ParserExpr::FunctionCall {
-            func: func.clone(),
-            args: args
-                .iter()
-                .map(|a| resolve_names_in_ast(a, named_ranges, current_sheet_index, visited))
-                .collect(),
-        },
+        ParserExpr::FunctionCall { func, args } => {
+            // For LAMBDA and LET, parameter name positions must NOT be resolved
+            // as named ranges — they are local bindings that shadow global names.
+            match func {
+                ParserBuiltinFn::Lambda if args.len() >= 2 => {
+                    // LAMBDA(param1, param2, ..., body)
+                    // Collect parameter names to shadow them in the body
+                    let mut param_names: Vec<String> = Vec::new();
+                    for p_arg in &args[..args.len() - 1] {
+                        if let ParserExpr::NamedRef { name } = p_arg {
+                            param_names.push(name.to_uppercase());
+                        }
+                    }
+                    let mut resolved_args: Vec<ParserExpr> = Vec::with_capacity(args.len());
+                    // Parameter name arguments: keep as-is (don't resolve)
+                    for p_arg in &args[..args.len() - 1] {
+                        resolved_args.push(p_arg.clone());
+                    }
+                    // Body: resolve names EXCEPT parameter names
+                    let body = args.last().unwrap();
+                    resolved_args.push(resolve_names_in_ast_with_shadows(
+                        body, named_ranges, current_sheet_index, visited, &param_names,
+                    ));
+                    ParserExpr::FunctionCall {
+                        func: func.clone(),
+                        args: resolved_args,
+                    }
+                }
+                ParserBuiltinFn::Let if args.len() >= 3 && args.len() % 2 == 1 => {
+                    // LET(name1, value1, name2, value2, ..., calculation)
+                    // Collect all LET-bound names to shadow in value exprs and body
+                    let pair_count = (args.len() - 1) / 2;
+                    let mut let_names: Vec<String> = Vec::new();
+                    for i in 0..pair_count {
+                        if let ParserExpr::NamedRef { name } = &args[i * 2] {
+                            let_names.push(name.to_uppercase());
+                        }
+                    }
+                    let mut resolved_args: Vec<ParserExpr> = Vec::with_capacity(args.len());
+                    for (idx, arg) in args.iter().enumerate() {
+                        if idx % 2 == 0 && idx < args.len() - 1 {
+                            // Name positions: keep as-is
+                            resolved_args.push(arg.clone());
+                        } else {
+                            // Value and body positions: resolve with shadows
+                            resolved_args.push(resolve_names_in_ast_with_shadows(
+                                arg, named_ranges, current_sheet_index, visited, &let_names,
+                            ));
+                        }
+                    }
+                    ParserExpr::FunctionCall {
+                        func: func.clone(),
+                        args: resolved_args,
+                    }
+                }
+                _ => ParserExpr::FunctionCall {
+                    func: func.clone(),
+                    args: args
+                        .iter()
+                        .map(|a| resolve_names_in_ast(a, named_ranges, current_sheet_index, visited))
+                        .collect(),
+                },
+            }
+        }
         ParserExpr::Range { sheet, start, end } => ParserExpr::Range {
             sheet: sheet.clone(),
             start: Box::new(resolve_names_in_ast(start, named_ranges, current_sheet_index, visited)),
@@ -1049,6 +1112,109 @@ pub fn resolve_names_in_ast(
             entries: entries.iter().map(|(k, v)| (
                 resolve_names_in_ast(k, named_ranges, current_sheet_index, visited),
                 resolve_names_in_ast(v, named_ranges, current_sheet_index, visited),
+            )).collect(),
+        },
+    }
+}
+
+/// Like `resolve_names_in_ast`, but skips resolution for NamedRef nodes
+/// whose uppercased name is in the `shadows` set. Used for LAMBDA/LET parameters
+/// which should NOT be resolved as global named ranges.
+fn resolve_names_in_ast_with_shadows(
+    ast: &ParserExpr,
+    named_ranges: &HashMap<String, named_ranges::NamedRange>,
+    current_sheet_index: usize,
+    visited: &mut HashSet<String>,
+    shadows: &[String],
+) -> ParserExpr {
+    match ast {
+        ParserExpr::NamedRef { name } => {
+            let key = name.to_uppercase();
+            // If the name is shadowed by a LAMBDA/LET param, keep it as NamedRef
+            if shadows.iter().any(|s| s == &key) {
+                return ast.clone();
+            }
+            // Otherwise, delegate to the normal resolver
+            resolve_names_in_ast(ast, named_ranges, current_sheet_index, visited)
+        }
+        ParserExpr::Literal(_) | ParserExpr::CellRef { .. }
+        | ParserExpr::ColumnRef { .. } | ParserExpr::RowRef { .. }
+        | ParserExpr::TableRef { .. } => ast.clone(),
+        ParserExpr::BinaryOp { left, op, right } => ParserExpr::BinaryOp {
+            left: Box::new(resolve_names_in_ast_with_shadows(left, named_ranges, current_sheet_index, visited, shadows)),
+            op: *op,
+            right: Box::new(resolve_names_in_ast_with_shadows(right, named_ranges, current_sheet_index, visited, shadows)),
+        },
+        ParserExpr::UnaryOp { op, operand } => ParserExpr::UnaryOp {
+            op: *op,
+            operand: Box::new(resolve_names_in_ast_with_shadows(operand, named_ranges, current_sheet_index, visited, shadows)),
+        },
+        ParserExpr::FunctionCall { func, args } => {
+            // For nested LAMBDA/LET inside a shadowed context, extend shadows
+            match func {
+                ParserBuiltinFn::Lambda if args.len() >= 2 => {
+                    let mut inner_shadows: Vec<String> = shadows.to_vec();
+                    for p_arg in &args[..args.len() - 1] {
+                        if let ParserExpr::NamedRef { name } = p_arg {
+                            inner_shadows.push(name.to_uppercase());
+                        }
+                    }
+                    let mut resolved_args: Vec<ParserExpr> = Vec::with_capacity(args.len());
+                    for p_arg in &args[..args.len() - 1] {
+                        resolved_args.push(p_arg.clone());
+                    }
+                    resolved_args.push(resolve_names_in_ast_with_shadows(
+                        args.last().unwrap(), named_ranges, current_sheet_index, visited, &inner_shadows,
+                    ));
+                    ParserExpr::FunctionCall { func: func.clone(), args: resolved_args }
+                }
+                ParserBuiltinFn::Let if args.len() >= 3 && args.len() % 2 == 1 => {
+                    let pair_count = (args.len() - 1) / 2;
+                    let mut inner_shadows: Vec<String> = shadows.to_vec();
+                    for i in 0..pair_count {
+                        if let ParserExpr::NamedRef { name } = &args[i * 2] {
+                            inner_shadows.push(name.to_uppercase());
+                        }
+                    }
+                    let mut resolved_args: Vec<ParserExpr> = Vec::with_capacity(args.len());
+                    for (idx, arg) in args.iter().enumerate() {
+                        if idx % 2 == 0 && idx < args.len() - 1 {
+                            resolved_args.push(arg.clone());
+                        } else {
+                            resolved_args.push(resolve_names_in_ast_with_shadows(
+                                arg, named_ranges, current_sheet_index, visited, &inner_shadows,
+                            ));
+                        }
+                    }
+                    ParserExpr::FunctionCall { func: func.clone(), args: resolved_args }
+                }
+                _ => ParserExpr::FunctionCall {
+                    func: func.clone(),
+                    args: args.iter().map(|a| resolve_names_in_ast_with_shadows(a, named_ranges, current_sheet_index, visited, shadows)).collect(),
+                },
+            }
+        }
+        ParserExpr::Range { sheet, start, end } => ParserExpr::Range {
+            sheet: sheet.clone(),
+            start: Box::new(resolve_names_in_ast_with_shadows(start, named_ranges, current_sheet_index, visited, shadows)),
+            end: Box::new(resolve_names_in_ast_with_shadows(end, named_ranges, current_sheet_index, visited, shadows)),
+        },
+        ParserExpr::Sheet3DRef { start_sheet, end_sheet, reference } => ParserExpr::Sheet3DRef {
+            start_sheet: start_sheet.clone(),
+            end_sheet: end_sheet.clone(),
+            reference: Box::new(resolve_names_in_ast_with_shadows(reference, named_ranges, current_sheet_index, visited, shadows)),
+        },
+        ParserExpr::IndexAccess { target, index } => ParserExpr::IndexAccess {
+            target: Box::new(resolve_names_in_ast_with_shadows(target, named_ranges, current_sheet_index, visited, shadows)),
+            index: Box::new(resolve_names_in_ast_with_shadows(index, named_ranges, current_sheet_index, visited, shadows)),
+        },
+        ParserExpr::ListLiteral { elements } => ParserExpr::ListLiteral {
+            elements: elements.iter().map(|e| resolve_names_in_ast_with_shadows(e, named_ranges, current_sheet_index, visited, shadows)).collect(),
+        },
+        ParserExpr::DictLiteral { entries } => ParserExpr::DictLiteral {
+            entries: entries.iter().map(|(k, v)| (
+                resolve_names_in_ast_with_shadows(k, named_ranges, current_sheet_index, visited, shadows),
+                resolve_names_in_ast_with_shadows(v, named_ranges, current_sheet_index, visited, shadows),
             )).collect(),
         },
     }
@@ -1801,6 +1967,13 @@ fn builtin_function_to_name(func: &ParserBuiltinFn) -> String {
         ParserBuiltinFn::FileRead => "FILEREAD".to_string(),
         ParserBuiltinFn::FileLines => "FILELINES".to_string(),
         ParserBuiltinFn::FileExists => "FILEEXISTS".to_string(),
+        ParserBuiltinFn::Lambda => "LAMBDA".to_string(),
+        ParserBuiltinFn::Map => "MAP".to_string(),
+        ParserBuiltinFn::Reduce => "REDUCE".to_string(),
+        ParserBuiltinFn::Scan => "SCAN".to_string(),
+        ParserBuiltinFn::MakeArray => "MAKEARRAY".to_string(),
+        ParserBuiltinFn::ByRow => "BYROW".to_string(),
+        ParserBuiltinFn::ByCol => "BYCOL".to_string(),
         ParserBuiltinFn::Custom(name) => name.clone(),
     }
 }
@@ -3050,6 +3223,7 @@ pub fn run() {
             commands::get_page_setup,
             commands::set_page_setup,
             commands::get_print_data,
+            commands::write_binary_file,
             // MCP server commands
             mcp::mcp_start,
             mcp::mcp_stop,

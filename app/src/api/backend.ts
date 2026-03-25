@@ -3417,6 +3417,11 @@ export async function getPrintData(): Promise<PrintData> {
   return invoke<PrintData>("get_print_data", {});
 }
 
+/** Write binary data to a file on disk. Used by PDF export. */
+export async function writeBinaryFile(path: string, data: number[]): Promise<void> {
+  return invoke<void>("write_binary_file", { path, data });
+}
+
 // ============================================================================
 // AI Context Serialization
 // ============================================================================

@@ -653,6 +653,7 @@ export {
   getPageSetup,
   setPageSetup,
   getPrintData,
+  writeBinaryFile,
 } from "./backend";
 
 export type {

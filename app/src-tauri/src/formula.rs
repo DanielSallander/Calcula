@@ -349,6 +349,48 @@ pub fn get_functions_by_category(category: String) -> FunctionListResult {
                 description: "Assigns names to calculation results to improve readability and performance".to_string(),
                 category: "Logical".to_string(),
             },
+            FunctionInfo {
+                name: "LAMBDA".to_string(),
+                syntax: "LAMBDA([parameter1, parameter2, ...], calculation)".to_string(),
+                description: "Creates a custom reusable function with parameters".to_string(),
+                category: "Logical".to_string(),
+            },
+            FunctionInfo {
+                name: "MAP".to_string(),
+                syntax: "MAP(array, lambda)".to_string(),
+                description: "Returns an array by applying a LAMBDA to each value in an array".to_string(),
+                category: "Logical".to_string(),
+            },
+            FunctionInfo {
+                name: "REDUCE".to_string(),
+                syntax: "REDUCE(initial_value, array, lambda)".to_string(),
+                description: "Reduces an array to a single value by applying a LAMBDA accumulator".to_string(),
+                category: "Logical".to_string(),
+            },
+            FunctionInfo {
+                name: "SCAN".to_string(),
+                syntax: "SCAN(initial_value, array, lambda)".to_string(),
+                description: "Scans an array by applying a LAMBDA and returns an array of intermediate values".to_string(),
+                category: "Logical".to_string(),
+            },
+            FunctionInfo {
+                name: "MAKEARRAY".to_string(),
+                syntax: "MAKEARRAY(rows, cols, lambda)".to_string(),
+                description: "Returns an array of specified dimensions by applying a LAMBDA".to_string(),
+                category: "Logical".to_string(),
+            },
+            FunctionInfo {
+                name: "BYROW".to_string(),
+                syntax: "BYROW(array, lambda)".to_string(),
+                description: "Applies a LAMBDA to each row in an array and returns an array of results".to_string(),
+                category: "Logical".to_string(),
+            },
+            FunctionInfo {
+                name: "BYCOL".to_string(),
+                syntax: "BYCOL(array, lambda)".to_string(),
+                description: "Applies a LAMBDA to each column in an array and returns an array of results".to_string(),
+                category: "Logical".to_string(),
+            },
         ],
         "text" => vec![
             FunctionInfo {
@@ -1105,6 +1147,13 @@ pub fn get_function_template(function_name: String) -> String {
         "NOT" => "=NOT()".to_string(),
         "XOR" => "=XOR()".to_string(),
         "LET" => "=LET(, , )".to_string(),
+        "LAMBDA" => "=LAMBDA(, )".to_string(),
+        "MAP" => "=MAP(, LAMBDA(, ))".to_string(),
+        "REDUCE" => "=REDUCE(, , LAMBDA(, , ))".to_string(),
+        "SCAN" => "=SCAN(, , LAMBDA(, , ))".to_string(),
+        "MAKEARRAY" => "=MAKEARRAY(, , LAMBDA(, , ))".to_string(),
+        "BYROW" => "=BYROW(, LAMBDA(, ))".to_string(),
+        "BYCOL" => "=BYCOL(, LAMBDA(, ))".to_string(),
 
         // Math functions
         "ABS" => "=ABS()".to_string(),
@@ -1361,5 +1410,6 @@ fn eval_result_to_display(result: &EvalResult) -> String {
         }
         EvalResult::List(items) => format!("[List({})]", items.len()),
         EvalResult::Dict(entries) => format!("[Dict({})]", entries.len()),
+        EvalResult::Lambda { .. } => "#LAMBDA".to_string(),
     }
 }
