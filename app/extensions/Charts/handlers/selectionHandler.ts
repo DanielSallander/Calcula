@@ -14,8 +14,10 @@
 import {
   addTaskPaneContextKey,
   removeTaskPaneContextKey,
+  ExtensionRegistry,
 } from "../../../src/api";
 import type { ChartHitResult, ChartSubSelection, ChartSelectionLevel } from "../types";
+import { CHART_DESIGN_TAB_ID, ChartDesignTabDefinition } from "../manifest";
 
 // ============================================================================
 // State
@@ -24,6 +26,9 @@ import type { ChartHitResult, ChartSubSelection, ChartSelectionLevel } from "../
 let currentChartId: number | null = null;
 
 let subSelection: ChartSubSelection = { level: "none" };
+
+/** Whether the contextual Design ribbon tab is currently registered. */
+let designTabRegistered = false;
 
 /** Pending click state for deferred click detection. */
 let pendingClick: {
@@ -47,6 +52,12 @@ export function selectChart(chartId: number): void {
     currentChartId = chartId;
     subSelection = { level: "chart" };
     addTaskPaneContextKey("chart");
+
+    // Show the contextual Design ribbon tab
+    if (!designTabRegistered) {
+      ExtensionRegistry.registerRibbonTab(ChartDesignTabDefinition);
+      designTabRegistered = true;
+    }
   }
   // If already selected, the pending click mechanism in index.ts
   // will handle advancing the sub-selection after mouseup.
@@ -61,6 +72,12 @@ export function deselectChart(): void {
     subSelection = { level: "none" };
     pendingClick = null;
     removeTaskPaneContextKey("chart");
+
+    // Hide the contextual Design ribbon tab
+    if (designTabRegistered) {
+      ExtensionRegistry.unregisterRibbonTab(CHART_DESIGN_TAB_ID);
+      designTabRegistered = false;
+    }
   }
 }
 
@@ -201,4 +218,8 @@ export function resetSelectionHandlerState(): void {
   currentChartId = null;
   subSelection = { level: "none" };
   pendingClick = null;
+  if (designTabRegistered) {
+    ExtensionRegistry.unregisterRibbonTab(CHART_DESIGN_TAB_ID);
+    designTabRegistered = false;
+  }
 }

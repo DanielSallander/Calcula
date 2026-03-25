@@ -21,10 +21,13 @@ import type {
   ParsedChartData,
   SeriesOrientation,
   MarkOptions,
+  PivotDataSource,
 } from "../types";
+import { isPivotDataSource } from "../types";
 import { createChart, syncChartRegions } from "../lib/chartStore";
 import { autoDetectSeries } from "../lib/chartDataReader";
 import { readChartDataResolved } from "../lib/chartDataReader";
+import { autoDetectPivotSeries } from "../lib/pivotChartDataReader";
 import { buildDefaultSpec } from "../lib/chartSpecDefaults";
 import { ChartEvents } from "../lib/chartEvents";
 import {
@@ -134,8 +137,13 @@ type TabId = "data" | "design" | "spec";
 export function CreateChartDialog({
   isOpen,
   onClose,
+  data: dialogData,
 }: DialogProps): React.ReactElement | null {
   const gridState = useGridState();
+
+  // Pivot mode: when opened with a pivotId, hide the Data tab and use pivot data source
+  const pivotId = (dialogData?.pivotId as number) ?? null;
+  const isPivotMode = pivotId != null;
 
   // Active tab
   const [activeTab, setActiveTab] = useState<TabId>("data");
@@ -195,18 +203,25 @@ export function CreateChartDialog({
 
   // Compose the current spec from all state
   const currentSpec = useMemo((): ChartSpec | null => {
-    const parsed = parseRangeReference(sourceRange);
-    if (!parsed) return null;
+    let dataSource: ChartSpec["data"];
 
-    const spec: ChartSpec = {
-      mark,
-      data: {
+    if (isPivotMode) {
+      dataSource = { type: "pivot" as const, pivotId: pivotId! };
+    } else {
+      const parsed = parseRangeReference(sourceRange);
+      if (!parsed) return null;
+      dataSource = {
         sheetIndex: currentSheetIndex,
         startRow: parsed.startRow,
         startCol: parsed.startCol,
         endRow: parsed.endRow,
         endCol: parsed.endCol,
-      },
+      };
+    }
+
+    const spec: ChartSpec = {
+      mark,
+      data: dataSource,
       hasHeaders,
       seriesOrientation: orientation,
       categoryIndex,
@@ -221,7 +236,7 @@ export function CreateChartDialog({
       spec.markOptions = markOptions;
     }
     return spec;
-  }, [sourceRange, hasHeaders, orientation, categoryIndex, series, title, xAxis, yAxis, legend, palette, mark, markOptions, currentSheetIndex]);
+  }, [sourceRange, hasHeaders, orientation, categoryIndex, series, title, xAxis, yAxis, legend, palette, mark, markOptions, currentSheetIndex, isPivotMode, pivotId]);
 
   // Handle spec updates from the Design tab or Spec tab
   const handleSpecChange = useCallback((updates: Partial<ChartSpec>) => {
@@ -244,17 +259,30 @@ export function CreateChartDialog({
     if (isOpen) {
       setHasAutoDetected(false);
       setError(null);
-      setActiveTab("data");
+      setActiveTab(isPivotMode ? "design" : "data");
       setSpecFullView(false);
       setDialogPos(null); // Reset to centered
       loadSheets();
+
+      // In pivot mode, auto-detect series from the pivot table
+      if (isPivotMode) {
+        autoDetectPivotSeries(pivotId!).then((detected) => {
+          setSeries(detected.series);
+          setTitle(detected.title);
+          if (detected.series.length > 1) {
+            setLegend({ visible: true, position: "bottom" });
+          }
+          setHasAutoDetected(true);
+        }).catch(() => {});
+      }
     }
-  }, [isOpen]);
+  }, [isOpen, isPivotMode, pivotId]);
 
   // Use the user's selection as the data range. If the selection is a single
   // cell, auto-detect the surrounding data region; otherwise use the selection as-is.
+  // Skipped in pivot mode (data comes from the pivot table).
   useEffect(() => {
-    if (!isOpen || hasAutoDetected || !currentSheetName) return;
+    if (!isOpen || hasAutoDetected || !currentSheetName || isPivotMode) return;
 
     const sel = gridState.selection;
     if (!sel) return;
@@ -446,31 +474,39 @@ export function CreateChartDialog({
     setIsLoading(true);
 
     try {
-      if (!sourceRange.trim()) {
-        throw new Error("Please enter a data range for the chart.");
-      }
-
-      const parsed = parseRangeReference(sourceRange);
-      if (!parsed) {
-        throw new Error("Invalid range format. Use a range like Sheet1!A1:D10.");
-      }
-
-      if (series.length === 0) {
-        throw new Error("Please select at least one data series.");
-      }
-
       if (!currentSpec) {
         throw new Error("Invalid chart configuration.");
       }
 
-      // Calculate pixel placement: place chart 2 rows below the data range
-      // Uses default cell sizes for approximate positioning. User can move/resize freely.
+      if (!isPivotMode) {
+        if (!sourceRange.trim()) {
+          throw new Error("Please enter a data range for the chart.");
+        }
+
+        const parsed = parseRangeReference(sourceRange);
+        if (!parsed) {
+          throw new Error("Invalid range format. Use a range like Sheet1!A1:D10.");
+        }
+
+        if (series.length === 0) {
+          throw new Error("Please select at least one data series.");
+        }
+      }
+
+      // Calculate pixel placement
       const defaultCellWidth = 100;
       const defaultCellHeight = 24;
-      const chartX = parsed.startCol * defaultCellWidth;
-      const chartY = (parsed.endRow + 2) * defaultCellHeight;
-      const chartWidth = 600;   // Default chart width in pixels
-      const chartHeight = 400;  // Default chart height in pixels
+      let chartX = 50;
+      let chartY = 50;
+
+      if (!isPivotMode) {
+        const parsed = parseRangeReference(sourceRange)!;
+        chartX = parsed.startCol * defaultCellWidth;
+        chartY = (parsed.endRow + 2) * defaultCellHeight;
+      }
+
+      const chartWidth = 600;
+      const chartHeight = 400;
 
       const chart = createChart(currentSpec, {
         sheetIndex: currentSheetIndex,
@@ -573,7 +609,7 @@ export function CreateChartDialog({
       >
         {/* Header — drag handle */}
         <Header onMouseDown={handleHeaderMouseDown}>
-          <Title>Insert Chart</Title>
+          <Title>{isPivotMode ? "Insert PivotChart" : "Insert Chart"}</Title>
           <CloseButton onClick={handleClose} aria-label="Close">
             x
           </CloseButton>
@@ -581,12 +617,14 @@ export function CreateChartDialog({
 
         {/* Tab Bar */}
         <TabBar>
-          <Tab
-            $active={activeTab === "data"}
-            onClick={() => setActiveTab("data")}
-          >
-            Data
-          </Tab>
+          {!isPivotMode && (
+            <Tab
+              $active={activeTab === "data"}
+              onClick={() => setActiveTab("data")}
+            >
+              Data
+            </Tab>
+          )}
           <Tab
             $active={activeTab === "design"}
             onClick={() => setActiveTab("design")}

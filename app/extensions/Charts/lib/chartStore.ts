@@ -19,6 +19,9 @@ import type { ChartDefinition, ChartSpec } from "../types";
 let nextChartId = 1;
 let charts: ChartDefinition[] = [];
 
+/** Active sheet index used for filtering which charts to render. */
+let activeSheetIndex = 0;
+
 // ============================================================================
 // Store Operations
 // ============================================================================
@@ -121,11 +124,26 @@ export function resizeChart(
 }
 
 /**
+ * Set the active sheet index. Charts on other sheets will be hidden.
+ */
+export function setActiveSheetIndex(sheetIndex: number): void {
+  activeSheetIndex = sheetIndex;
+}
+
+/**
+ * Get the active sheet index.
+ */
+export function getActiveSheetIndex(): number {
+  return activeSheetIndex;
+}
+
+/**
  * Reset the entire chart store (used during extension deactivation).
  */
 export function resetChartStore(): void {
   charts = [];
   nextChartId = 1;
+  activeSheetIndex = 0;
   removeGridRegionsByType("chart");
 }
 
@@ -144,7 +162,10 @@ export function resetChartStore(): void {
 export function syncChartRegions(): void {
   removeGridRegionsByType("chart");
 
-  const regions: GridRegion[] = charts.map((chart) => ({
+  // Only show charts on the active sheet
+  const visibleCharts = charts.filter((c) => c.sheetIndex === activeSheetIndex);
+
+  const regions: GridRegion[] = visibleCharts.map((chart) => ({
     id: `chart-${chart.chartId}`,
     type: "chart",
     startRow: 0,

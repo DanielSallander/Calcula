@@ -1467,6 +1467,7 @@ export function registerPivotExtension(): void {
       col: number;
       anchorX: number;
       anchorY: number;
+      pivotId?: number;
     }>(PivotEvents.PIVOT_OPEN_FILTER_MENU, handleOpenFilterMenu)
   );
 

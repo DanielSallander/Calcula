@@ -248,16 +248,38 @@ export interface DataRangeRef {
 }
 
 /**
+ * A pivot table data source for a PivotChart.
+ * The chart reads its data directly from the pivot table's aggregated output
+ * instead of from a cell range.
+ */
+export interface PivotDataSource {
+  /** Discriminant tag. */
+  type: "pivot";
+  /** The pivot table ID to read data from. */
+  pivotId: number;
+  /** Whether to include subtotal rows as categories. Default: false. */
+  includeSubtotals?: boolean;
+  /** Whether to include grand total row as a category. Default: false. */
+  includeGrandTotal?: boolean;
+}
+
+/**
  * Data source for a chart. Can be:
  * - A `DataRangeRef` object (explicit cell coordinates)
  * - A string in A1 notation (e.g., "Sheet1!A1:D10")
  * - A named range name (e.g., "SalesData")
+ * - A `PivotDataSource` object (reads from a pivot table's aggregated data)
  */
-export type DataSource = DataRangeRef | string;
+export type DataSource = DataRangeRef | string | PivotDataSource;
 
 /** Type guard: check if a DataSource is a resolved DataRangeRef. */
 export function isDataRangeRef(source: DataSource): source is DataRangeRef {
   return typeof source === "object" && source !== null && "startRow" in source;
+}
+
+/** Type guard: check if a DataSource is a PivotDataSource. */
+export function isPivotDataSource(source: DataSource): source is PivotDataSource {
+  return typeof source === "object" && source !== null && "type" in source && (source as PivotDataSource).type === "pivot";
 }
 
 // ============================================================================
@@ -613,7 +635,7 @@ export interface ParsedChartData {
 /** Result of hit-testing a point within a chart. */
 export interface ChartHitResult {
   /** What type of chart element was hit. */
-  type: "bar" | "point" | "slice" | "plotArea" | "title" | "legend" | "axis" | "none";
+  type: "bar" | "point" | "slice" | "plotArea" | "title" | "legend" | "axis" | "filterButton" | "none";
   /** Series index (set when a data element is hit). */
   seriesIndex?: number;
   /** Category/data point index (set when a data element is hit). */
@@ -624,6 +646,8 @@ export interface ChartHitResult {
   seriesName?: string;
   /** Category label. */
   categoryName?: string;
+  /** Field button info (set when a filter button is hit). */
+  fieldButton?: PivotChartFieldButton;
 }
 
 /** Hierarchical selection level within a chart. */
@@ -687,6 +711,36 @@ export type HitGeometry =
   | { type: "points"; markers: PointMarker[] }
   | { type: "slices"; arcs: SliceArc[] }
   | { type: "composite"; groups: HitGeometry[] };
+
+// ============================================================================
+// PivotChart Field Buttons
+// ============================================================================
+
+/** Which pivot area a field button belongs to. */
+export type PivotFieldArea = "filter" | "row" | "column";
+
+/** Metadata about a pivot field for rendering filter buttons on PivotCharts. */
+export interface PivotChartFieldInfo {
+  /** Pivot area (filter, row, column). */
+  area: PivotFieldArea;
+  /** Field index in the pivot table's source fields. */
+  fieldIndex: number;
+  /** Display name of the field. */
+  name: string;
+  /** Whether any filter is currently active on this field. */
+  isFiltered: boolean;
+}
+
+/** A computed filter dropdown button on a PivotChart. */
+export interface PivotChartFieldButton {
+  /** The field this button represents. */
+  field: PivotChartFieldInfo;
+  /** Button bounds in chart-local coordinates. */
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
 
 // ============================================================================
 // Chart Layout (generalized)

@@ -10,6 +10,7 @@ import {
   onAppEvent,
   AppEvents,
 } from "../../src/api";
+import { getActiveSheet } from "../../src/api/lib";
 import {
   registerGridOverlay,
   removeGridRegionsByType,
@@ -33,6 +34,8 @@ import {
   setPendingClick,
   clearPendingClick,
   consumePendingClick,
+  deselectChart,
+  getCurrentChartId,
 } from "./handlers/selectionHandler";
 import {
   resetChartStore,
@@ -40,6 +43,8 @@ import {
   getAllCharts,
   moveChart,
   resizeChart,
+  deleteChart,
+  setActiveSheetIndex,
 } from "./lib/chartStore";
 import {
   renderChart,
@@ -50,9 +55,15 @@ import {
   handleChartMouseLeave,
   getChartLocalCoords,
   getCachedChartData,
+  isHoveringFilterButton,
+  isHoveringDataElement,
+  removeChartFromCache,
 } from "./rendering/chartRenderer";
 import { hitTestBarChart } from "./rendering/chartHitTesting";
 import { ChartEvents } from "./lib/chartEvents";
+import { isPivotDataSource } from "./types";
+import type { PivotChartFieldButton } from "./types";
+import { PivotEvents } from "../Pivot/lib/pivotEvents";
 
 // ============================================================================
 // Extension Lifecycle
@@ -122,6 +133,27 @@ export function registerChartExtension(): void {
     }),
   );
 
+  // Listen for pivot table changes to invalidate pivot-sourced chart caches
+  const handlePivotChanged = () => {
+    const charts = getAllCharts();
+    const pivotCharts = charts.filter((c) => isPivotDataSource(c.spec.data));
+    if (pivotCharts.length > 0) {
+      for (const chart of pivotCharts) {
+        invalidateChartCache(chart.chartId);
+      }
+      resetSubSelection();
+      emitAppEvent(AppEvents.GRID_REFRESH);
+    }
+  };
+  window.addEventListener("pivot:refresh", handlePivotChanged);
+  cleanupFunctions.push(() => {
+    window.removeEventListener("pivot:refresh", handlePivotChanged);
+  });
+
+  cleanupFunctions.push(
+    onAppEvent(PivotEvents.PIVOT_REGIONS_UPDATED, handlePivotChanged),
+  );
+
   // -----------------------------------------------------------------------
   // Floating Object Events (move/resize from Core mouse handlers)
   // -----------------------------------------------------------------------
@@ -140,6 +172,19 @@ export function registerChartExtension(): void {
     } else {
       // First click: select the chart (Level 1)
       selectChart(chartId);
+
+      // Also check if the click landed on a pivot field button -
+      // these should be clickable even on the first click (chart select + button click)
+      const cachedData = getCachedChartData(chartId);
+      if (cachedData?.pivotFieldButtons && cachedData.pivotFieldButtons.length > 0) {
+        const local = getChartLocalCoords(chartId, lastCanvasX, lastCanvasY);
+        if (local) {
+          const btnHit = findClickedFieldButton(local.localX, local.localY, cachedData.pivotFieldButtons);
+          if (btnHit) {
+            setPendingClick(chartId, lastCanvasX, lastCanvasY);
+          }
+        }
+      }
     }
     emitAppEvent(AppEvents.GRID_REFRESH);
   };
@@ -259,6 +304,16 @@ export function registerChartExtension(): void {
       requestAnimationFrame(() => {
         rafPending = false;
         handleChartMouseMove(lastCanvasX, lastCanvasY);
+
+        // Set pointer cursor when hovering over interactive chart elements
+        const canvas = gridContainer?.querySelector("canvas");
+        if (canvas) {
+          if (isHoveringFilterButton() || isHoveringDataElement()) {
+            canvas.style.cursor = "pointer";
+          } else {
+            canvas.style.cursor = "";
+          }
+        }
       });
     }
   };
@@ -283,6 +338,15 @@ export function registerChartExtension(): void {
     const local = getChartLocalCoords(click.chartId, click.canvasX, click.canvasY);
     if (!local) return;
 
+    // Check pivot field buttons first (they take priority)
+    if (cachedData.pivotFieldButtons && cachedData.pivotFieldButtons.length > 0) {
+      const btnHit = findClickedFieldButton(local.localX, local.localY, cachedData.pivotFieldButtons);
+      if (btnHit) {
+        handlePivotFieldButtonClick(click.chartId, btnHit, click.canvasX, click.canvasY);
+        return;
+      }
+    }
+
     const hitResult = hitTestBarChart(local.localX, local.localY, cachedData.barRects, cachedData.layout);
     advanceSelection(click.chartId, hitResult);
     emitAppEvent(AppEvents.GRID_REFRESH);
@@ -291,6 +355,63 @@ export function registerChartExtension(): void {
   cleanupFunctions.push(() => {
     window.removeEventListener("mouseup", handleMouseUp);
   });
+
+  // -----------------------------------------------------------------------
+  // Sheet Change: re-sync chart regions for the new active sheet
+  // -----------------------------------------------------------------------
+
+  // Set initial active sheet
+  getActiveSheet().then((idx) => {
+    setActiveSheetIndex(idx);
+    syncChartRegions();
+    emitAppEvent(AppEvents.GRID_REFRESH);
+  }).catch(() => {});
+
+  cleanupFunctions.push(
+    onAppEvent(AppEvents.SHEET_CHANGED, async () => {
+      try {
+        const idx = await getActiveSheet();
+        setActiveSheetIndex(idx);
+        deselectChart();
+        syncChartRegions();
+        emitAppEvent(AppEvents.GRID_REFRESH);
+      } catch {
+        // Ignore
+      }
+    }),
+  );
+
+  // -----------------------------------------------------------------------
+  // Delete Key: delete selected chart
+  // -----------------------------------------------------------------------
+
+  const handleDeleteKey = (e: KeyboardEvent) => {
+    if (e.key !== "Delete" && e.key !== "Backspace") return;
+
+    // Don't intercept when editing a cell or input field
+    const target = e.target as HTMLElement;
+    if (
+      target.tagName === "INPUT" ||
+      target.tagName === "TEXTAREA" ||
+      target.isContentEditable
+    ) return;
+
+    const chartId = getCurrentChartId();
+    if (chartId == null) return;
+
+    e.preventDefault();
+    e.stopPropagation();
+
+    // Delete the chart
+    deselectChart();
+    deleteChart(chartId);
+    removeChartFromCache(chartId);
+    syncChartRegions();
+    window.dispatchEvent(new CustomEvent(ChartEvents.CHART_DELETED));
+    emitAppEvent(AppEvents.GRID_REFRESH);
+  };
+  document.addEventListener("keydown", handleDeleteKey, true); // capture phase
+  cleanupFunctions.push(() => document.removeEventListener("keydown", handleDeleteKey, true));
 
   console.log("[Chart Extension] Registered successfully");
 }
@@ -319,6 +440,79 @@ export function unregisterChartExtension(): void {
   DialogExtensions.unregisterDialog(CHART_DIALOG_ID);
 
   console.log("[Chart Extension] Unregistered successfully");
+}
+
+// ============================================================================
+// PivotChart Field Button Click Handling
+// ============================================================================
+
+/**
+ * Find which pivot field button was clicked at the given chart-local coordinates.
+ */
+function findClickedFieldButton(
+  localX: number,
+  localY: number,
+  buttons: PivotChartFieldButton[],
+): PivotChartFieldButton | null {
+  for (const btn of buttons) {
+    if (
+      localX >= btn.x &&
+      localX <= btn.x + btn.width &&
+      localY >= btn.y &&
+      localY <= btn.y + btn.height
+    ) {
+      return btn;
+    }
+  }
+  return null;
+}
+
+/**
+ * Handle a click on a pivot chart field button.
+ * Opens the appropriate pivot filter dropdown depending on the field area.
+ */
+function handlePivotFieldButtonClick(
+  chartId: number,
+  button: PivotChartFieldButton,
+  canvasX: number,
+  canvasY: number,
+): void {
+  const chart = getAllCharts().find((c) => c.chartId === chartId);
+  if (!chart || !isPivotDataSource(chart.spec.data)) return;
+
+  const pivotId = chart.spec.data.pivotId;
+
+  // Convert canvas coordinates to screen coordinates for the dropdown anchor
+  if (!gridContainer) {
+    gridContainer = document.querySelector("canvas")?.parentElement ?? null;
+  }
+  const rect = gridContainer?.getBoundingClientRect();
+  const screenX = (rect?.left ?? 0) + canvasX;
+  const screenY = (rect?.top ?? 0) + canvasY;
+
+  if (button.field.area === "filter") {
+    // Filter fields use the value filter dropdown (shows unique values with checkboxes).
+    // We pass pivotId directly so the handler doesn't need cell coordinates.
+    emitAppEvent(PivotEvents.PIVOT_OPEN_FILTER_MENU, {
+      pivotId,
+      fieldIndex: button.field.fieldIndex,
+      fieldName: button.field.name,
+      row: 0,
+      col: 0,
+      anchorX: screenX,
+      anchorY: screenY + 2,
+    });
+  } else {
+    // Row and column fields use the header filter dropdown
+    const zone = button.field.area === "column" ? "column" : "row";
+    emitAppEvent(PivotEvents.PIVOT_OPEN_HEADER_FILTER_MENU, {
+      pivotId,
+      zone,
+      fieldIndex: button.field.fieldIndex,
+      anchorX: screenX,
+      anchorY: screenY + 2,
+    });
+  }
 }
 
 // Re-export for convenience

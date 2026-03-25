@@ -17,10 +17,11 @@ export const chartSpecJsonSchema: object = {
       description: "Chart type. Determines the visual mark used to represent data.",
     },
     data: {
-      description: "Data source. Can be a DataRangeRef object (cell coordinates), an A1 reference string (e.g. \"Sheet1!A1:D10\"), or a named range name (e.g. \"SalesData\").",
+      description: "Data source. Can be a DataRangeRef object (cell coordinates), an A1 reference string (e.g. \"Sheet1!A1:D10\"), a named range name (e.g. \"SalesData\"), or a PivotDataSource for PivotCharts.",
       oneOf: [
         { $ref: "#/definitions/DataRangeRef" },
         { type: "string", description: "A1 reference (e.g. \"Sheet1!A1:D10\") or named range name." },
+        { $ref: "#/definitions/PivotDataSource" },
       ],
     },
     hasHeaders: {
@@ -110,6 +111,18 @@ export const chartSpecJsonSchema: object = {
         startCol: { type: "integer", minimum: 0, description: "Start column (0-based, inclusive)." },
         endRow: { type: "integer", minimum: 0, description: "End row (0-based, inclusive)." },
         endCol: { type: "integer", minimum: 0, description: "End column (0-based, inclusive)." },
+      },
+      additionalProperties: false,
+    },
+    PivotDataSource: {
+      type: "object",
+      description: "Data source that reads from a pivot table's aggregated output. Used for PivotCharts.",
+      required: ["type", "pivotId"],
+      properties: {
+        type: { type: "string", const: "pivot", description: "Discriminant tag. Must be \"pivot\"." },
+        pivotId: { type: "integer", minimum: 0, description: "The pivot table ID to read data from." },
+        includeSubtotals: { type: "boolean", description: "Whether to include subtotal rows as chart categories. Default: false." },
+        includeGrandTotal: { type: "boolean", description: "Whether to include grand total row as a chart category. Default: false." },
       },
       additionalProperties: false,
     },
@@ -706,7 +719,7 @@ export function generateSpecReference(): string {
   lines.push("| Property | Type | Description |");
   lines.push("|----------|------|-------------|");
   lines.push("| mark | string | Chart type: bar, horizontalBar, line, area, scatter, pie, donut, waterfall, combo, radar, bubble, histogram, funnel |");
-  lines.push("| data | object \\| string | DataRangeRef object, A1 reference string, or named range name |");
+  lines.push("| data | object \\| string | DataRangeRef object, A1 reference string, named range name, or PivotDataSource |");
   lines.push("| hasHeaders | boolean | First row/column contains header labels |");
   lines.push("| seriesOrientation | string | \"columns\" or \"rows\" |");
   lines.push("| categoryIndex | integer | Column/row index for category labels |");
@@ -1078,10 +1091,11 @@ export function generateSpecReference(): string {
 
   lines.push("## Data Source Formats");
   lines.push("");
-  lines.push("The `data` field accepts three formats:");
+  lines.push("The `data` field accepts four formats:");
   lines.push("1. **DataRangeRef object**: { sheetIndex: 0, startRow: 0, startCol: 0, endRow: 9, endCol: 3 }");
   lines.push("2. **A1 reference**: \"Sheet1!A1:D10\" or \"A1:D10\"");
   lines.push("3. **Named range**: \"SalesData\"");
+  lines.push("4. **PivotDataSource**: { type: \"pivot\", pivotId: 1 } — reads from a pivot table's aggregated output");
 
   return lines.join("\n");
 }

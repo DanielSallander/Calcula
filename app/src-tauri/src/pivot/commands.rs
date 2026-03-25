@@ -2429,9 +2429,10 @@ pub fn get_pivot_field_info(
     let field_name = cache.field_name(field_index)
         .unwrap_or_else(|| format!("Field{}", field_index + 1));
 
-    // Get hidden items from definition
+    // Get hidden items from definition (search row, column, AND filter fields)
     let hidden_items: Vec<String> = definition.row_fields.iter()
         .chain(definition.column_fields.iter())
+        .chain(definition.filter_fields.iter().map(|f| &f.field))
         .find(|f| f.source_index == field_index)
         .map(|f| f.hidden_items.clone())
         .unwrap_or_default();

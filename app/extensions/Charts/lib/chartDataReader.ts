@@ -12,8 +12,10 @@ import type {
   ParsedChartData,
   SeriesOrientation,
 } from "../types";
+import { isPivotDataSource } from "../types";
 import { resolveDataSource, resolveSpecReferences } from "./dataSourceResolver";
 import { applyTransforms } from "./chartTransforms";
+import { readPivotChartData } from "./pivotChartDataReader";
 
 // ============================================================================
 // Public API
@@ -44,6 +46,20 @@ export async function readChartDataResolved(spec: ChartSpec): Promise<{
 }> {
   // Resolve cell references (=A1, =Sheet1!B5) in string fields
   const resolvedSpec = await resolveSpecReferences(spec);
+
+  // Handle pivot data source: read directly from pivot view
+  if (isPivotDataSource(resolvedSpec.data)) {
+    let parsedData = await readPivotChartData(resolvedSpec.data);
+
+    // Apply data transforms if specified
+    if (resolvedSpec.transform && resolvedSpec.transform.length > 0) {
+      parsedData = applyTransforms(parsedData, resolvedSpec.transform);
+    }
+
+    return { spec: resolvedSpec, data: parsedData };
+  }
+
+  // Standard cell range data source
   const { hasHeaders, seriesOrientation, categoryIndex, series } = resolvedSpec;
 
   // Resolve the data source to concrete coordinates

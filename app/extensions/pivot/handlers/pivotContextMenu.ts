@@ -42,6 +42,8 @@ import {
   updatePivotProperties,
 } from "../lib/pivot-api";
 
+import { CHART_DIALOG_ID } from "../../Charts/manifest";
+
 import { deleteCachedPivotView } from "../lib/pivotViewStore";
 
 import {
@@ -58,6 +60,7 @@ import {
 const CONTEXT_ITEM_IDS = [
   "pivot:formatCells",
   "pivot:refresh",
+  "pivot:insertChart",
   "pivot:delete",
   "pivot:rename",
   "pivot:sort",
@@ -114,6 +117,24 @@ export function registerPivotContextMenuItems(): () => void {
         if (pivotId === null) return;
         await refreshPivotCache(pivotId);
         window.dispatchEvent(new Event("pivot:refresh"));
+      },
+    },
+
+    // ------------------------------------------------------------------
+    // 3b. Insert PivotChart
+    // ------------------------------------------------------------------
+    {
+      id: "pivot:insertChart",
+      label: "PivotChart...",
+      group: "pivot",
+      order: 35,
+      visible: isInPivotRegion,
+      separatorAfter: true,
+      onClick: async (ctx) => {
+        const pivotId = getPivotIdFromContext(ctx);
+        if (pivotId === null) return;
+
+        showDialog(CHART_DIALOG_ID, { pivotId });
       },
     },
 

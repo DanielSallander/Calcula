@@ -31,7 +31,11 @@ import type {
   ChartLayout,
   HitGeometry,
   TooltipSpec,
+  PivotChartFieldButton,
+  PivotChartFieldInfo,
 } from "../types";
+import { isPivotDataSource } from "../types";
+import { fetchPivotChartFields } from "../lib/pivotChartDataReader";
 
 // ============================================================================
 // OffscreenCanvas Cache
@@ -86,6 +90,8 @@ interface CachedChartData {
   barRects: BarRect[];
   logicalWidth: number;
   logicalHeight: number;
+  /** Pivot chart field buttons (only present for pivot-sourced charts). */
+  pivotFieldButtons?: PivotChartFieldButton[];
 }
 
 const chartDataCache = new Map<number, CachedChartData>();
@@ -139,6 +145,22 @@ let hoverState: {
 } | null = null;
 
 /**
+ * Returns true if the mouse is currently hovering over a filter button.
+ */
+export function isHoveringFilterButton(): boolean {
+  return hoverState !== null && hoverState.hitResult.type === "filterButton";
+}
+
+/**
+ * Returns true if the mouse is currently hovering over a data element (bar, point, slice).
+ */
+export function isHoveringDataElement(): boolean {
+  if (!hoverState) return false;
+  const t = hoverState.hitResult.type;
+  return t === "bar" || t === "point" || t === "slice";
+}
+
+/**
  * Handle mouse move over the grid area. Performs hit-testing against chart
  * regions and hit geometry to determine if the mouse is hovering over a data element.
  * Requests a redraw if hover state changes.
@@ -182,6 +204,19 @@ export function handleChartMouseMove(canvasX: number, canvasY: number): void {
       // Hit-test against geometry
       const cachedData = chartDataCache.get(chartId);
       if (cachedData) {
+        // First check pivot field buttons (they are drawn on top)
+        const buttonHit = hitTestPivotFieldButtons(localX, localY, cachedData.pivotFieldButtons);
+        if (buttonHit) {
+          const changed =
+            hoverState === null ||
+            hoverState.chartId !== chartId ||
+            hoverState.hitResult.type !== "filterButton";
+          hoverState = { chartId, hitResult: buttonHit, canvasX, canvasY };
+          if (changed) requestOverlayRedraw();
+          foundHover = true;
+          break;
+        }
+
         const hitResult = hitTestGeometry(localX, localY, cachedData.hitGeometry, cachedData.layout);
 
         if (hitResult.type === "bar" || hitResult.type === "point" || hitResult.type === "slice") {
@@ -317,6 +352,11 @@ export function renderChart(overlayCtx: OverlayRenderContext): void {
     }
   }
 
+  // 3b. Draw pivot chart field buttons (filter dropdowns)
+  if (cachedData?.pivotFieldButtons && cachedData.pivotFieldButtons.length > 0) {
+    drawPivotFieldButtons(ctx, canvasX, canvasY, cachedData.pivotFieldButtons);
+  }
+
   // 4. Draw border
   ctx.strokeStyle = "#d0d0d0";
   ctx.lineWidth = 1;
@@ -417,6 +457,13 @@ async function renderChartAsync(
 
     const theme = resolveChartTheme(spec.config);
 
+    // Fetch pivot field metadata BEFORE layout so we can reserve margin space
+    let pivotFields: PivotChartFieldInfo[] | undefined;
+    if (isPivotDataSource(spec.data)) {
+      pivotFields = await fetchPivotChartFields(spec.data.pivotId);
+      if (pivotFields.length === 0) pivotFields = undefined;
+    }
+
     const layout = dispatchComputeLayout(
       logicalWidth,
       logicalHeight,
@@ -424,6 +471,11 @@ async function renderChartAsync(
       data,
       theme,
     );
+
+    // Inflate margins to make room for pivot field buttons
+    if (pivotFields && pivotFields.length > 0) {
+      adjustLayoutForPivotButtons(layout, pivotFields);
+    }
 
     dispatchPaint(offCtx, data, spec, layout, theme);
 
@@ -437,6 +489,13 @@ async function renderChartAsync(
 
     // Store in data cache (separate, persists across canvas invalidation)
     const hitGeometry = dispatchComputeGeometry(data, spec, layout, theme);
+
+    // Compute button positions using the adjusted layout
+    let pivotFieldButtons: PivotChartFieldButton[] | undefined;
+    if (pivotFields) {
+      pivotFieldButtons = computePivotFieldButtons(pivotFields, layout, spec);
+    }
+
     chartDataCache.set(chartId, {
       data,
       layout,
@@ -444,6 +503,7 @@ async function renderChartAsync(
       barRects: extractBarRects(hitGeometry),
       logicalWidth,
       logicalHeight,
+      pivotFieldButtons,
     });
 
     // Trigger a canvas redraw so the cached chart gets composited.
@@ -887,4 +947,230 @@ function drawResizeHandles(
 
   // Top-left handle
   ctx.fillRect(x, y, handleSize, handleSize);
+}
+
+// ============================================================================
+// PivotChart Field Buttons
+// ============================================================================
+
+const FIELD_BTN_HEIGHT = 20;
+const FIELD_BTN_PADDING_X = 6;
+const FIELD_BTN_FONT = "11px 'Segoe UI', system-ui, sans-serif";
+const FIELD_BTN_ARROW_WIDTH = 12;
+const FIELD_BTN_GAP = 4;
+/** Extra margin added around the plot area for pivot field buttons. */
+const FIELD_BTN_MARGIN = FIELD_BTN_HEIGHT + 10;
+
+/**
+ * Adjust the chart layout margins and plot area to reserve space for
+ * pivot field buttons so they don't overlap chart content.
+ */
+function adjustLayoutForPivotButtons(
+  layout: ChartLayout,
+  fields: PivotChartFieldInfo[],
+): void {
+  const hasFilter = fields.some((f) => f.area === "filter");
+  const hasRow = fields.some((f) => f.area === "row");
+  const hasCol = fields.some((f) => f.area === "column");
+
+  // Reserve space at the top for filter/column buttons
+  if (hasFilter || hasCol) {
+    layout.margin.top += FIELD_BTN_MARGIN;
+    layout.plotArea.y += FIELD_BTN_MARGIN;
+    layout.plotArea.height -= FIELD_BTN_MARGIN;
+  }
+
+  // Reserve space at the bottom for row (axis) buttons
+  if (hasRow) {
+    layout.margin.bottom += FIELD_BTN_MARGIN;
+    layout.plotArea.height -= FIELD_BTN_MARGIN;
+  }
+
+  // Clamp plot area height to a minimum
+  if (layout.plotArea.height < 40) {
+    layout.plotArea.height = 40;
+  }
+}
+
+/**
+ * Compute field button positions based on their area and chart layout.
+ * Buttons are placed in the reserved margin space created by adjustLayoutForPivotButtons.
+ * - Filter fields: top-left, above the plot area
+ * - Row fields: bottom-left, below the plot area (below X axis labels)
+ * - Column fields: top-right, above the plot area
+ */
+function computePivotFieldButtons(
+  fields: PivotChartFieldInfo[],
+  layout: ChartLayout,
+  spec: import("../types").ChartSpec,
+): PivotChartFieldButton[] {
+  const buttons: PivotChartFieldButton[] = [];
+
+  // We need a temporary canvas to measure text
+  const measureCanvas = new OffscreenCanvas(1, 1);
+  const measureCtx = measureCanvas.getContext("2d");
+  if (!measureCtx) return buttons;
+  measureCtx.font = FIELD_BTN_FONT;
+
+  const filterFields = fields.filter((f) => f.area === "filter");
+  const rowFields = fields.filter((f) => f.area === "row");
+  const colFields = fields.filter((f) => f.area === "column");
+
+  // Filter fields: positioned at top-left, in the reserved margin above the plot area.
+  // Place them well above the plot area so they don't overlap Y-axis labels.
+  // The top of the reserved margin is at (plotArea.y - FIELD_BTN_MARGIN).
+  const filterBaseY = layout.plotArea.y - FIELD_BTN_MARGIN;
+  let filterY = filterBaseY;
+  for (const field of filterFields) {
+    const textWidth = measureCtx.measureText(field.name).width;
+    const btnWidth = FIELD_BTN_PADDING_X * 2 + textWidth + FIELD_BTN_ARROW_WIDTH;
+    buttons.push({
+      field,
+      x: 8,
+      y: filterY,
+      width: btnWidth,
+      height: FIELD_BTN_HEIGHT,
+    });
+    filterY += FIELD_BTN_HEIGHT + FIELD_BTN_GAP;
+  }
+
+  // Row fields (Axis): positioned at bottom of chart, in the reserved margin
+  let rowX = layout.plotArea.x;
+  const rowY = layout.height - FIELD_BTN_HEIGHT - 4;
+  for (const field of rowFields) {
+    const textWidth = measureCtx.measureText(field.name).width;
+    const btnWidth = FIELD_BTN_PADDING_X * 2 + textWidth + FIELD_BTN_ARROW_WIDTH;
+    buttons.push({
+      field,
+      x: rowX,
+      y: rowY,
+      width: btnWidth,
+      height: FIELD_BTN_HEIGHT,
+    });
+    rowX += btnWidth + FIELD_BTN_GAP;
+  }
+
+  // Column fields (Legend): positioned at top-right, in the reserved margin above plot area
+  let colX = layout.plotArea.x + layout.plotArea.width;
+  const colY = filterBaseY;
+  // Position from right to left
+  for (let i = colFields.length - 1; i >= 0; i--) {
+    const field = colFields[i];
+    const textWidth = measureCtx.measureText(field.name).width;
+    const btnWidth = FIELD_BTN_PADDING_X * 2 + textWidth + FIELD_BTN_ARROW_WIDTH;
+    colX -= btnWidth;
+    buttons.push({
+      field,
+      x: colX,
+      y: colY,
+      width: btnWidth,
+      height: FIELD_BTN_HEIGHT,
+    });
+    colX -= FIELD_BTN_GAP;
+  }
+
+  return buttons;
+}
+
+/**
+ * Draw pivot chart field buttons on the chart canvas.
+ * Each button shows the field name with a dropdown arrow.
+ */
+function drawPivotFieldButtons(
+  ctx: CanvasRenderingContext2D,
+  chartX: number,
+  chartY: number,
+  buttons: PivotChartFieldButton[],
+): void {
+  for (const btn of buttons) {
+    const bx = chartX + btn.x;
+    const by = chartY + btn.y;
+    const filtered = btn.field.isFiltered;
+
+    // Button background — light blue when filtered, gray when inactive
+    ctx.fillStyle = filtered ? "#e8f0fe" : "#f0f0f0";
+    ctx.strokeStyle = filtered ? "#1a73e8" : "#c0c0c0";
+    ctx.lineWidth = 1;
+
+    // Rounded rect
+    const r = 3;
+    ctx.beginPath();
+    ctx.moveTo(bx + r, by);
+    ctx.lineTo(bx + btn.width - r, by);
+    ctx.quadraticCurveTo(bx + btn.width, by, bx + btn.width, by + r);
+    ctx.lineTo(bx + btn.width, by + btn.height - r);
+    ctx.quadraticCurveTo(bx + btn.width, by + btn.height, bx + btn.width - r, by + btn.height);
+    ctx.lineTo(bx + r, by + btn.height);
+    ctx.quadraticCurveTo(bx, by + btn.height, bx, by + btn.height - r);
+    ctx.lineTo(bx, by + r);
+    ctx.quadraticCurveTo(bx, by, bx + r, by);
+    ctx.closePath();
+    ctx.fill();
+    ctx.stroke();
+
+    // Field name text — blue when filtered
+    ctx.font = FIELD_BTN_FONT;
+    ctx.fillStyle = filtered ? "#1a73e8" : "#333333";
+    ctx.textAlign = "left";
+    ctx.textBaseline = "middle";
+    ctx.fillText(btn.field.name, bx + FIELD_BTN_PADDING_X, by + btn.height / 2);
+
+    // Icon area: funnel when filtered, dropdown chevron when inactive
+    const iconColor = filtered ? "#1a73e8" : "#666666";
+    const iconCx = bx + btn.width - FIELD_BTN_ARROW_WIDTH + 4;
+    const iconCy = by + btn.height / 2;
+
+    if (filtered) {
+      // Funnel icon (matching AutoFilter active style)
+      ctx.fillStyle = iconColor;
+      ctx.beginPath();
+      ctx.moveTo(iconCx - 5, iconCy - 4);  // Top-left
+      ctx.lineTo(iconCx + 5, iconCy - 4);  // Top-right
+      ctx.lineTo(iconCx + 1, iconCy);       // Narrow right
+      ctx.lineTo(iconCx + 1, iconCy + 4);   // Stem right
+      ctx.lineTo(iconCx - 1, iconCy + 4);   // Stem left
+      ctx.lineTo(iconCx - 1, iconCy);       // Narrow left
+      ctx.closePath();
+      ctx.fill();
+    } else {
+      // Dropdown chevron arrow
+      ctx.strokeStyle = iconColor;
+      ctx.lineWidth = 1.5;
+      ctx.lineCap = "round";
+      ctx.lineJoin = "round";
+      ctx.beginPath();
+      ctx.moveTo(iconCx - 4, iconCy - 2);
+      ctx.lineTo(iconCx, iconCy + 2);
+      ctx.lineTo(iconCx + 4, iconCy - 2);
+      ctx.stroke();
+    }
+  }
+}
+
+/**
+ * Hit-test a point against pivot field buttons.
+ * Returns a ChartHitResult with type "filterButton" if a button is hit.
+ */
+function hitTestPivotFieldButtons(
+  localX: number,
+  localY: number,
+  buttons?: PivotChartFieldButton[],
+): ChartHitResult | null {
+  if (!buttons || buttons.length === 0) return null;
+
+  for (const btn of buttons) {
+    if (
+      localX >= btn.x &&
+      localX <= btn.x + btn.width &&
+      localY >= btn.y &&
+      localY <= btn.y + btn.height
+    ) {
+      return {
+        type: "filterButton",
+        fieldButton: btn,
+      };
+    }
+  }
+
+  return null;
 }

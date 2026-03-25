@@ -29,25 +29,30 @@ export async function handleOpenFilterMenu(detail: {
   col: number;
   anchorX: number;
   anchorY: number;
+  pivotId?: number;
 }): Promise<void> {
   const { fieldIndex, fieldName, row, col, anchorX, anchorY } = detail;
 
   console.log("[Pivot Extension] Opening filter menu:", { fieldIndex, fieldName, row, col });
 
   try {
-    // Find the pivot at this cell to get pivotId
-    const pivotInfo = await pivot.getAtCell(row, col);
-    if (!pivotInfo) {
-      console.warn("[Pivot Extension] No pivot found at filter cell");
-      return;
+    // Use provided pivotId (e.g. from PivotChart) or find pivot at cell
+    let resolvedPivotId = detail.pivotId;
+    if (resolvedPivotId == null) {
+      const pivotInfo = await pivot.getAtCell(row, col);
+      if (!pivotInfo) {
+        console.warn("[Pivot Extension] No pivot found at filter cell");
+        return;
+      }
+      resolvedPivotId = pivotInfo.pivotId;
     }
 
-    console.log("[Pivot Extension] Found pivot:", pivotInfo.pivotId);
+    console.log("[Pivot Extension] Found pivot:", resolvedPivotId);
 
     // Get unique values for this field
     let allValues: string[] = [];
     try {
-      const valuesResponse = await pivot.getFieldUniqueValues(pivotInfo.pivotId, fieldIndex);
+      const valuesResponse = await pivot.getFieldUniqueValues(resolvedPivotId, fieldIndex);
       console.log("[Pivot Extension] Got unique values:", valuesResponse);
       allValues = valuesResponse?.uniqueValues ?? [];
     } catch (valuesError) {
@@ -56,7 +61,7 @@ export async function handleOpenFilterMenu(detail: {
     }
 
     // Use previously saved filter state if available, otherwise default to all selected
-    const cachedView = getCachedPivotView(pivotInfo.pivotId);
+    const cachedView = getCachedPivotView(resolvedPivotId);
     const filterRowMeta = cachedView?.filterRows?.find(
       (fr) => fr.fieldIndex === fieldIndex
     );
@@ -64,7 +69,7 @@ export async function handleOpenFilterMenu(detail: {
 
     // Store current filter state for the apply callback
     currentFilterState = {
-      pivotId: pivotInfo.pivotId,
+      pivotId: resolvedPivotId,
       fieldIndex,
       fieldName,
     };
@@ -124,7 +129,8 @@ async function handleApplyFilter(
     // Clear state
     currentFilterState = null;
 
-    // Trigger grid refresh
+    // Trigger pivot and grid refresh
+    window.dispatchEvent(new Event("pivot:refresh"));
     window.dispatchEvent(new CustomEvent("grid:refresh"));
   } catch (error) {
     console.error("[Pivot Extension] Failed to apply filter:", error);
