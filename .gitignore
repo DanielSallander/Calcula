@@ -1,0 +1,21 @@
+# Build artifacts
+/target/
+
+# Cargo lock (library crate)
+# Cargo.lock
+
+# IDE
+.vs/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+Thumbs.db
+Desktop.ini
+.DS_Store
+
+# Environment
+.env
+*.pdb
