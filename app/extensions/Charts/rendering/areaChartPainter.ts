@@ -2,7 +2,7 @@
 // PURPOSE: Pure Canvas 2D area chart drawing.
 // CONTEXT: Like line chart but fills area below each line. Supports stacked areas.
 
-import type { ChartSpec, ParsedChartData, ChartLayout, PointMarker, AreaMarkOptions } from "../types";
+import type { ChartSpec, ParsedChartData, ChartLayout, PointMarker, AreaMarkOptions, StackMode } from "../types";
 import type { ChartRenderTheme } from "./chartTheme";
 import { getSeriesColor } from "./chartTheme";
 import { createLinearScale, createPointScale, createScaleFromSpec } from "./scales";
@@ -48,11 +48,16 @@ export function paintAreaChart(
   const fillOpacity = opts.fillOpacity ?? 0.3;
   const showMarkers = opts.showMarkers ?? false;
   const markerRadius = opts.markerRadius ?? 4;
-  const stacked = opts.stacked ?? false;
+  // Support both old boolean `stacked` and new `stackMode`
+  const stackMode: StackMode = opts.stackMode ?? (opts.stacked ? "stacked" : "none");
+  const stacked = stackMode !== "none";
+  const isPercent = stackMode === "percentStacked";
 
   // Compute scales
   let allValues: number[];
-  if (stacked) {
+  if (isPercent) {
+    allValues = [0, 100];
+  } else if (stacked) {
     // For stacked areas, the Y domain must cover stacked totals
     const stackedTotals: number[] = [];
     for (let ci = 0; ci < data.categories.length; ci++) {
@@ -97,13 +102,29 @@ export function paintAreaChart(
   // For stacked mode, track cumulative values per category
   const cumulativeValues: number[] = new Array(data.categories.length).fill(0);
 
+  // Pre-compute category totals for percent stacking
+  const categoryTotals: number[] = [];
+  if (isPercent) {
+    for (let ci = 0; ci < data.categories.length; ci++) {
+      let total = 0;
+      for (let si = 0; si < data.series.length; si++) {
+        total += Math.abs(data.series[si].values[ci] ?? 0);
+      }
+      categoryTotals.push(total);
+    }
+  }
+
   for (let si = 0; si < data.series.length; si++) {
     const series = data.series[si];
     const points: Array<{ x: number; y: number }> = [];
 
     for (let ci = 0; ci < data.categories.length; ci++) {
-      const rawValue = series.values[ci] ?? 0;
+      let rawValue = series.values[ci] ?? 0;
       const x = xScale.scaleIndex(ci);
+
+      if (isPercent && categoryTotals[ci] > 0) {
+        rawValue = (rawValue / categoryTotals[ci]) * 100;
+      }
 
       if (stacked) {
         cumulativeValues[ci] += rawValue;
@@ -494,12 +515,16 @@ export function computeAreaPointMarkers(
   const { plotArea } = layout;
   const opts = (spec.markOptions ?? {}) as AreaMarkOptions;
   const markerRadius = opts.markerRadius ?? 4;
-  const stacked = opts.stacked ?? false;
+  const stackMode: StackMode = opts.stackMode ?? (opts.stacked ? "stacked" : "none");
+  const stacked = stackMode !== "none";
+  const isPercent = stackMode === "percentStacked";
   const markers: PointMarker[] = [];
 
   // Compute Y scale
   let allValues: number[];
-  if (stacked) {
+  if (isPercent) {
+    allValues = [0, 100];
+  } else if (stacked) {
     const stackedTotals: number[] = [];
     for (let ci = 0; ci < data.categories.length; ci++) {
       let sum = 0;
@@ -531,13 +556,30 @@ export function computeAreaPointMarkers(
     [plotArea.x, plotArea.x + plotArea.width],
   );
 
+  // Pre-compute category totals for percent stacking
+  const categoryTotals: number[] = [];
+  if (isPercent) {
+    for (let ci = 0; ci < data.categories.length; ci++) {
+      let total = 0;
+      for (let si = 0; si < data.series.length; si++) {
+        total += Math.abs(data.series[si].values[ci] ?? 0);
+      }
+      categoryTotals.push(total);
+    }
+  }
+
   // Track cumulative values for stacked mode
   const cumulativeValues: number[] = new Array(data.categories.length).fill(0);
 
   for (let si = 0; si < data.series.length; si++) {
     const series = data.series[si];
     for (let ci = 0; ci < data.categories.length; ci++) {
-      const rawValue = series.values[ci] ?? 0;
+      let rawValue = series.values[ci] ?? 0;
+      const originalValue = rawValue;
+
+      if (isPercent && categoryTotals[ci] > 0) {
+        rawValue = (rawValue / categoryTotals[ci]) * 100;
+      }
 
       let displayValue: number;
       if (stacked) {
@@ -553,7 +595,7 @@ export function computeAreaPointMarkers(
         cx: xScale.scaleIndex(ci),
         cy: yScale.scale(displayValue),
         radius: markerRadius,
-        value: rawValue,
+        value: originalValue,
         seriesName: series.name,
         categoryName: data.categories[ci],
       });

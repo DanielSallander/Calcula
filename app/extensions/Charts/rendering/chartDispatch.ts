@@ -27,6 +27,7 @@ import { paintHistogramChart, computeHistogramLayout, computeHistogramBarRects }
 import { paintFunnelChart, computeFunnelLayout, computeFunnelBarRects } from "./funnelChartPainter";
 import { paintRule } from "./rulePainter";
 import { paintTextMark } from "./textMarkPainter";
+import { paintTrendlines } from "./trendlinePainter";
 
 // ============================================================================
 // Paint Dispatch
@@ -42,6 +43,11 @@ export function dispatchPaint(
 ): void {
   // Paint the primary mark
   paintMark(ctx, data, spec.mark, spec, layout, theme);
+
+  // Paint trendlines (after primary mark, before layers)
+  if (spec.trendlines && spec.trendlines.length > 0) {
+    paintTrendlines(ctx, data, spec, layout, theme);
+  }
 
   // Paint layers (if any)
   if (spec.layers && spec.layers.length > 0) {

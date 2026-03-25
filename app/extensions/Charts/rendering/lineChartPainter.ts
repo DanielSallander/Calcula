@@ -3,7 +3,7 @@
 // CONTEXT: Draws lines connecting data points with optional markers.
 //          Supports linear, smooth (cardinal spline), and step interpolation.
 
-import type { ChartSpec, ParsedChartData, ChartLayout, PointMarker, LineMarkOptions } from "../types";
+import type { ChartSpec, ParsedChartData, ChartLayout, PointMarker, LineMarkOptions, StackMode } from "../types";
 import type { ChartRenderTheme } from "./chartTheme";
 import { getSeriesColor } from "./chartTheme";
 import { createLinearScale, createPointScale, createScaleFromSpec } from "./scales";
@@ -49,14 +49,12 @@ export function paintLineChart(
   const lineWidth = opts.lineWidth ?? 2;
   const showMarkers = opts.showMarkers ?? true;
   const markerRadius = opts.markerRadius ?? 4;
+  const stackMode: StackMode = opts.stackMode ?? "none";
+  const isStacked = stackMode !== "none";
+  const isPercent = stackMode === "percentStacked";
 
   // Compute scales
-  const allValues = data.series.flatMap((s) => s.values);
-  const dataMin = allValues.length > 0 ? Math.min(...allValues) : 0;
-  const dataMax = allValues.length > 0 ? Math.max(...allValues) : 1;
-
-  const yMin = spec.yAxis.min ?? dataMin;
-  const yMax = spec.yAxis.max ?? dataMax;
+  const { yMin, yMax } = computeLineYDomain(data, spec, stackMode);
 
   const yScale = createScaleFromSpec(
     spec.yAxis.scale,
@@ -83,6 +81,45 @@ export function paintLineChart(
   // 4. Axes (reuse cartesian axes with a band scale wrapper)
   drawLineAxes(ctx, xScale, yScale, plotArea, spec, theme);
 
+  // Pre-compute category totals for percent stacking
+  const categoryTotals: number[] = [];
+  if (isPercent) {
+    for (let ci = 0; ci < data.categories.length; ci++) {
+      let total = 0;
+      for (let si = 0; si < data.series.length; si++) {
+        total += Math.abs(data.series[si].values[ci] ?? 0);
+      }
+      categoryTotals.push(total);
+    }
+  }
+
+  // Pre-compute all series points (with stacking)
+  const cumulativeValues: number[] = new Array(data.categories.length).fill(0);
+  const allSeriesPoints: Array<Array<{ x: number; y: number }>> = [];
+
+  for (let si = 0; si < data.series.length; si++) {
+    const series = data.series[si];
+    const points: Array<{ x: number; y: number }> = [];
+
+    for (let ci = 0; ci < data.categories.length; ci++) {
+      let value = series.values[ci] ?? 0;
+      const x = xScale.scaleIndex(ci);
+
+      if (isPercent && categoryTotals[ci] > 0) {
+        value = (value / categoryTotals[ci]) * 100;
+      }
+
+      if (isStacked) {
+        cumulativeValues[ci] += value;
+        points.push({ x, y: yScale.scale(cumulativeValues[ci]) });
+      } else {
+        points.push({ x, y: yScale.scale(value) });
+      }
+    }
+
+    allSeriesPoints.push(points);
+  }
+
   // 5. Lines
   ctx.save();
   ctx.beginPath();
@@ -92,13 +129,7 @@ export function paintLineChart(
   for (let si = 0; si < data.series.length; si++) {
     const series = data.series[si];
     const color = getSeriesColor(spec.palette, si, series.color);
-    const points: Array<{ x: number; y: number }> = [];
-
-    for (let ci = 0; ci < data.categories.length; ci++) {
-      const x = xScale.scaleIndex(ci);
-      const y = yScale.scale(series.values[ci] ?? 0);
-      points.push({ x, y });
-    }
+    const points = allSeriesPoints[si];
 
     if (points.length === 0) continue;
 
@@ -148,6 +179,40 @@ export function paintLineChart(
   if (spec.legend.visible && data.series.length > 1) {
     drawLegend(ctx, data, spec, layout, theme);
   }
+}
+
+// ============================================================================
+// Y Domain Computation (for stacking support)
+// ============================================================================
+
+function computeLineYDomain(
+  data: ParsedChartData,
+  spec: ChartSpec,
+  stackMode: StackMode,
+): { yMin: number; yMax: number } {
+  if (stackMode === "percentStacked") {
+    return { yMin: spec.yAxis.min ?? 0, yMax: spec.yAxis.max ?? 100 };
+  }
+  if (stackMode === "stacked") {
+    let maxPos = 0;
+    let minNeg = 0;
+    for (let ci = 0; ci < data.categories.length; ci++) {
+      let posSum = 0;
+      let negSum = 0;
+      for (let si = 0; si < data.series.length; si++) {
+        const v = data.series[si].values[ci] ?? 0;
+        if (v >= 0) posSum += v;
+        else negSum += v;
+      }
+      maxPos = Math.max(maxPos, posSum);
+      minNeg = Math.min(minNeg, negSum);
+    }
+    return { yMin: spec.yAxis.min ?? minNeg, yMax: spec.yAxis.max ?? maxPos };
+  }
+  const allValues = data.series.flatMap((s) => s.values);
+  const dataMin = allValues.length > 0 ? Math.min(...allValues) : 0;
+  const dataMax = allValues.length > 0 ? Math.max(...allValues) : 1;
+  return { yMin: spec.yAxis.min ?? dataMin, yMax: spec.yAxis.max ?? dataMax };
 }
 
 // ============================================================================
@@ -316,14 +381,12 @@ export function computeLinePointMarkers(
   const { plotArea } = layout;
   const opts = (spec.markOptions ?? {}) as LineMarkOptions;
   const markerRadius = opts.markerRadius ?? 4;
+  const stackMode: StackMode = opts.stackMode ?? "none";
+  const isStacked = stackMode !== "none";
+  const isPercent = stackMode === "percentStacked";
   const markers: PointMarker[] = [];
 
-  const allValues = data.series.flatMap((s) => s.values);
-  const dataMin = allValues.length > 0 ? Math.min(...allValues) : 0;
-  const dataMax = allValues.length > 0 ? Math.max(...allValues) : 1;
-
-  const yMin = spec.yAxis.min ?? dataMin;
-  const yMax = spec.yAxis.max ?? dataMax;
+  const { yMin, yMax } = computeLineYDomain(data, spec, stackMode);
 
   const yScale = createScaleFromSpec(
     spec.yAxis.scale,
@@ -336,17 +399,45 @@ export function computeLinePointMarkers(
     [plotArea.x, plotArea.x + plotArea.width],
   );
 
+  // Pre-compute category totals for percent stacking
+  const categoryTotals: number[] = [];
+  if (isPercent) {
+    for (let ci = 0; ci < data.categories.length; ci++) {
+      let total = 0;
+      for (let si = 0; si < data.series.length; si++) {
+        total += Math.abs(data.series[si].values[ci] ?? 0);
+      }
+      categoryTotals.push(total);
+    }
+  }
+
+  const cumulativeValues: number[] = new Array(data.categories.length).fill(0);
+
   for (let si = 0; si < data.series.length; si++) {
     const series = data.series[si];
     for (let ci = 0; ci < data.categories.length; ci++) {
-      const value = series.values[ci] ?? 0;
+      let value = series.values[ci] ?? 0;
+      const originalValue = value;
+
+      if (isPercent && categoryTotals[ci] > 0) {
+        value = (value / categoryTotals[ci]) * 100;
+      }
+
+      let displayValue: number;
+      if (isStacked) {
+        cumulativeValues[ci] += value;
+        displayValue = cumulativeValues[ci];
+      } else {
+        displayValue = value;
+      }
+
       markers.push({
         seriesIndex: si,
         categoryIndex: ci,
         cx: xScale.scaleIndex(ci),
-        cy: yScale.scale(value),
+        cy: yScale.scale(displayValue),
         radius: markerRadius,
-        value,
+        value: originalValue,
         seriesName: series.name,
         categoryName: data.categories[ci],
       });

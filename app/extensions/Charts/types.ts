@@ -38,12 +38,17 @@ export function isCartesianChart(mark: ChartType): mark is CartesianChartType {
 // Mark-Specific Options
 // ============================================================================
 
+/** Stacking mode for bar, line, and area charts. */
+export type StackMode = "none" | "stacked" | "percentStacked";
+
 /** Options specific to bar and horizontal bar charts. */
 export interface BarMarkOptions {
   /** Border radius on bars (pixels). Default: 2 */
   borderRadius?: number;
   /** Gap between bars in a group (pixels). Default: 2 */
   barGap?: number;
+  /** Stacking mode. Default: "none" */
+  stackMode?: StackMode;
 }
 
 /** Line interpolation mode. */
@@ -59,6 +64,8 @@ export interface LineMarkOptions {
   showMarkers?: boolean;
   /** Point marker radius in pixels. Default: 4 */
   markerRadius?: number;
+  /** Stacking mode. Default: "none" */
+  stackMode?: StackMode;
 }
 
 /** Options specific to area charts. */
@@ -75,6 +82,8 @@ export interface AreaMarkOptions {
   markerRadius?: number;
   /** Stack overlapping areas. Default: false */
   stacked?: boolean;
+  /** Stacking mode (supercedes `stacked` boolean). Default: "none" */
+  stackMode?: StackMode;
 }
 
 /** Scatter point shape. */
@@ -551,6 +560,37 @@ export interface TooltipSpec {
 }
 
 // ============================================================================
+// Trendline Specification
+// ============================================================================
+
+/** Supported trendline types. */
+export type TrendlineType = "linear" | "exponential" | "polynomial" | "power" | "logarithmic" | "movingAverage";
+
+/** Configuration for a trendline drawn on a chart series. */
+export interface TrendlineSpec {
+  /** Trendline type. */
+  type: TrendlineType;
+  /** Index of the series this trendline applies to. Default: 0. */
+  seriesIndex?: number;
+  /** Override color (hex). Null = use series color (darkened). */
+  color?: string | null;
+  /** Line width in pixels. Default: 2 */
+  lineWidth?: number;
+  /** Dash pattern (e.g., [6, 3]). Default: [6, 3] (dashed) */
+  strokeDash?: number[];
+  /** Polynomial degree (only for "polynomial" type). Default: 2 */
+  polynomialDegree?: number;
+  /** Window size for moving average (number of data points). Default: 3 */
+  movingAveragePeriod?: number;
+  /** Show the trendline equation on the chart. Default: false */
+  showEquation?: boolean;
+  /** Show R-squared value on the chart. Default: false */
+  showRSquared?: boolean;
+  /** Optional label. If omitted, auto-generated from type. */
+  label?: string;
+}
+
+// ============================================================================
 // Chart Specification (Vega-Lite inspired)
 // ============================================================================
 
@@ -588,6 +628,8 @@ export interface ChartSpec {
   config?: ChartConfig;
   /** Tooltip display configuration. */
   tooltip?: TooltipSpec;
+  /** Trendlines overlaid on chart series. */
+  trendlines?: TrendlineSpec[];
 }
 
 // ============================================================================

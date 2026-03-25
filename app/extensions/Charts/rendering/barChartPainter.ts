@@ -3,7 +3,7 @@
 // CONTEXT: Called by chartRenderer to paint a bar chart onto an OffscreenCanvas
 //          or a preview canvas. Draws axes, grid lines, bars, title, and legend.
 
-import type { ChartSpec, ParsedChartData, BarRect, ChartLayout, HitGeometry } from "../types";
+import type { ChartSpec, ParsedChartData, BarRect, ChartLayout, HitGeometry, BarMarkOptions, StackMode } from "../types";
 import type { ChartRenderTheme } from "./chartTheme";
 import { getSeriesColor } from "./chartTheme";
 import { resolvePointColor, resolvePointOpacity } from "../lib/encodingResolver";
@@ -48,6 +48,12 @@ export function computeLayout(
  * Paint a bar chart onto a Canvas 2D context.
  * Assumes the context is already sized and scaled (including DPR).
  */
+/** Resolve the stack mode from BarMarkOptions. */
+function getBarStackMode(spec: ChartSpec): StackMode {
+  const opts = (spec.markOptions ?? {}) as BarMarkOptions;
+  return opts.stackMode ?? "none";
+}
+
 export function paintBarChart(
   ctx: CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D,
   data: ParsedChartData,
@@ -56,14 +62,11 @@ export function paintBarChart(
   theme: ChartRenderTheme,
 ): void {
   const { plotArea } = layout;
+  const stackMode = getBarStackMode(spec);
+  const isStacked = stackMode !== "none";
 
   // Compute scales
-  const allValues = data.series.flatMap((s) => s.values);
-  const dataMin = allValues.length > 0 ? Math.min(...allValues) : 0;
-  const dataMax = allValues.length > 0 ? Math.max(...allValues) : 1;
-
-  const yMin = spec.yAxis.min ?? dataMin;
-  const yMax = spec.yAxis.max ?? dataMax;
+  const { yMin, yMax } = computeBarYDomain(data, spec, stackMode);
 
   const yScale = createScaleFromSpec(
     spec.yAxis.scale,
@@ -92,7 +95,11 @@ export function paintBarChart(
   drawCartesianAxes(ctx, xScale, yScale, plotArea, spec, theme);
 
   // 5. Bars
-  drawBars(ctx, data, spec, xScale, yScale, plotArea, theme);
+  if (isStacked) {
+    drawStackedBars(ctx, data, spec, xScale, yScale, plotArea, theme, stackMode);
+  } else {
+    drawBars(ctx, data, spec, xScale, yScale, plotArea, theme);
+  }
 
   // 6. Title
   if (spec.title) {
@@ -103,6 +110,44 @@ export function paintBarChart(
   if (spec.legend.visible && data.series.length > 1) {
     drawLegend(ctx, data, spec, layout, theme);
   }
+}
+
+/** Compute the Y domain, accounting for stacking. */
+function computeBarYDomain(
+  data: ParsedChartData,
+  spec: ChartSpec,
+  stackMode: StackMode,
+): { yMin: number; yMax: number } {
+  if (stackMode === "percentStacked") {
+    return { yMin: spec.yAxis.min ?? 0, yMax: spec.yAxis.max ?? 100 };
+  }
+
+  if (stackMode === "stacked") {
+    // Domain covers stacked totals (positive and negative separately)
+    let maxPos = 0;
+    let minNeg = 0;
+    for (let ci = 0; ci < data.categories.length; ci++) {
+      let posSum = 0;
+      let negSum = 0;
+      for (let si = 0; si < data.series.length; si++) {
+        const v = data.series[si].values[ci] ?? 0;
+        if (v >= 0) posSum += v;
+        else negSum += v;
+      }
+      maxPos = Math.max(maxPos, posSum);
+      minNeg = Math.min(minNeg, negSum);
+    }
+    return {
+      yMin: spec.yAxis.min ?? minNeg,
+      yMax: spec.yAxis.max ?? maxPos,
+    };
+  }
+
+  // Grouped (non-stacked)
+  const allValues = data.series.flatMap((s) => s.values);
+  const dataMin = allValues.length > 0 ? Math.min(...allValues) : 0;
+  const dataMax = allValues.length > 0 ? Math.max(...allValues) : 1;
+  return { yMin: spec.yAxis.min ?? dataMin, yMax: spec.yAxis.max ?? dataMax };
 }
 
 // ============================================================================
@@ -172,6 +217,90 @@ function drawBars(
 }
 
 // ============================================================================
+// Stacked Bar Drawing
+// ============================================================================
+
+function drawStackedBars(
+  ctx: CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D,
+  data: ParsedChartData,
+  spec: ChartSpec,
+  xScale: ReturnType<typeof createBandScale>,
+  yScale: ReturnType<typeof createLinearScale>,
+  plotArea: { x: number; y: number; width: number; height: number },
+  theme: ChartRenderTheme,
+  stackMode: StackMode,
+): void {
+  const numSeries = data.series.length;
+  if (numSeries === 0) return;
+
+  const barWidth = xScale.bandwidth;
+
+  for (let ci = 0; ci < data.categories.length; ci++) {
+    const barX = xScale.scaleIndex(ci);
+
+    // Compute category total for percent stacking
+    let categoryTotal = 0;
+    if (stackMode === "percentStacked") {
+      for (let si = 0; si < numSeries; si++) {
+        categoryTotal += Math.abs(data.series[si].values[ci] ?? 0);
+      }
+    }
+
+    let posY = 0; // cumulative positive value
+    let negY = 0; // cumulative negative value
+
+    for (let si = 0; si < numSeries; si++) {
+      let rawValue = data.series[si].values[ci] ?? 0;
+      const category = data.categories[ci] ?? "";
+      const encoding = spec.series[si]?.encoding;
+      const color = resolvePointColor(encoding, spec.palette, si, data.series[si].color, rawValue, category);
+
+      let value = rawValue;
+      if (stackMode === "percentStacked" && categoryTotal > 0) {
+        value = (rawValue / categoryTotal) * 100;
+      }
+
+      let barTop: number;
+      let barBottom: number;
+
+      if (value >= 0) {
+        barBottom = posY;
+        posY += value;
+        barTop = posY;
+      } else {
+        barTop = negY;
+        negY += value;
+        barBottom = negY;
+      }
+
+      const yTop = yScale.scale(barTop);
+      const yBottom = yScale.scale(barBottom);
+      const barHeight = Math.abs(yBottom - yTop);
+      const barY = Math.min(yTop, yBottom);
+
+      // Clip to plot area
+      const clippedY = Math.max(barY, plotArea.y);
+      const clippedBottom = Math.min(barY + barHeight, plotArea.y + plotArea.height);
+      const clippedHeight = clippedBottom - clippedY;
+
+      if (clippedHeight <= 0) continue;
+
+      const pointOpacity = resolvePointOpacity(encoding, rawValue, category);
+      if (pointOpacity != null) ctx.globalAlpha = pointOpacity;
+      ctx.fillStyle = color;
+
+      if (theme.barBorderRadius > 0 && clippedHeight > theme.barBorderRadius * 2) {
+        drawRoundedRect(ctx, barX, clippedY, barWidth, clippedHeight, theme.barBorderRadius);
+        ctx.fill();
+      } else {
+        ctx.fillRect(barX, clippedY, barWidth, clippedHeight);
+      }
+      if (pointOpacity != null) ctx.globalAlpha = 1;
+    }
+  }
+}
+
+// ============================================================================
 // Bar Geometry (for hit-testing)
 // ============================================================================
 
@@ -188,16 +317,13 @@ export function computeBarRects(
 ): BarRect[] {
   const { plotArea } = layout;
   const rects: BarRect[] = [];
+  const stackMode = getBarStackMode(spec);
+  const isStacked = stackMode !== "none";
 
   const numSeries = data.series.length;
   if (numSeries === 0) return rects;
 
-  const allValues = data.series.flatMap((s) => s.values);
-  const dataMin = allValues.length > 0 ? Math.min(...allValues) : 0;
-  const dataMax = allValues.length > 0 ? Math.max(...allValues) : 1;
-
-  const yMin = spec.yAxis.min ?? dataMin;
-  const yMax = spec.yAxis.max ?? dataMax;
+  const { yMin, yMax } = computeBarYDomain(data, spec, stackMode);
 
   const yScale = createScaleFromSpec(
     spec.yAxis.scale,
@@ -211,42 +337,103 @@ export function computeBarRects(
     0.3,
   );
 
-  const groupWidth = xScale.bandwidth;
-  const barWidth = Math.max(
-    (groupWidth - theme.barGap * (numSeries - 1)) / numSeries,
-    2,
-  );
-  const zeroY = yScale.scale(0);
+  if (isStacked) {
+    // Stacked geometry
+    const barWidth = xScale.bandwidth;
 
-  for (let ci = 0; ci < data.categories.length; ci++) {
-    const category = data.categories[ci];
-    const groupX = xScale.scaleIndex(ci);
+    for (let ci = 0; ci < data.categories.length; ci++) {
+      const category = data.categories[ci];
+      const barX = xScale.scaleIndex(ci);
 
-    for (let si = 0; si < numSeries; si++) {
-      const value = data.series[si].values[ci] ?? 0;
-      const barX = groupX + si * (barWidth + theme.barGap);
-      const barTop = yScale.scale(value);
-      const barHeight = Math.abs(zeroY - barTop);
-      const barY = value >= 0 ? barTop : zeroY;
+      let categoryTotal = 0;
+      if (stackMode === "percentStacked") {
+        for (let si = 0; si < numSeries; si++) {
+          categoryTotal += Math.abs(data.series[si].values[ci] ?? 0);
+        }
+      }
 
-      // Clip bar to plot area (same as drawBars)
-      const clippedY = Math.max(barY, plotArea.y);
-      const clippedBottom = Math.min(barY + barHeight, plotArea.y + plotArea.height);
-      const clippedHeight = clippedBottom - clippedY;
+      let posY = 0;
+      let negY = 0;
 
-      if (clippedHeight <= 0) continue;
+      for (let si = 0; si < numSeries; si++) {
+        const rawValue = data.series[si].values[ci] ?? 0;
+        let value = rawValue;
+        if (stackMode === "percentStacked" && categoryTotal > 0) {
+          value = (rawValue / categoryTotal) * 100;
+        }
 
-      rects.push({
-        seriesIndex: si,
-        categoryIndex: ci,
-        x: barX,
-        y: clippedY,
-        width: barWidth,
-        height: clippedHeight,
-        value,
-        seriesName: data.series[si].name,
-        categoryName: category,
-      });
+        let barTop: number;
+        let barBottom: number;
+        if (value >= 0) {
+          barBottom = posY;
+          posY += value;
+          barTop = posY;
+        } else {
+          barTop = negY;
+          negY += value;
+          barBottom = negY;
+        }
+
+        const yTop = yScale.scale(barTop);
+        const yBottom = yScale.scale(barBottom);
+        const barHeight = Math.abs(yBottom - yTop);
+        const barY = Math.min(yTop, yBottom);
+
+        const clippedY = Math.max(barY, plotArea.y);
+        const clippedBottom = Math.min(barY + barHeight, plotArea.y + plotArea.height);
+        const clippedHeight = clippedBottom - clippedY;
+        if (clippedHeight <= 0) continue;
+
+        rects.push({
+          seriesIndex: si,
+          categoryIndex: ci,
+          x: barX,
+          y: clippedY,
+          width: barWidth,
+          height: clippedHeight,
+          value: rawValue,
+          seriesName: data.series[si].name,
+          categoryName: category,
+        });
+      }
+    }
+  } else {
+    // Grouped geometry (original)
+    const groupWidth = xScale.bandwidth;
+    const barWidth = Math.max(
+      (groupWidth - theme.barGap * (numSeries - 1)) / numSeries,
+      2,
+    );
+    const zeroY = yScale.scale(0);
+
+    for (let ci = 0; ci < data.categories.length; ci++) {
+      const category = data.categories[ci];
+      const groupX = xScale.scaleIndex(ci);
+
+      for (let si = 0; si < numSeries; si++) {
+        const value = data.series[si].values[ci] ?? 0;
+        const barX = groupX + si * (barWidth + theme.barGap);
+        const barTop = yScale.scale(value);
+        const barHeight = Math.abs(zeroY - barTop);
+        const barY = value >= 0 ? barTop : zeroY;
+
+        const clippedY = Math.max(barY, plotArea.y);
+        const clippedBottom = Math.min(barY + barHeight, plotArea.y + plotArea.height);
+        const clippedHeight = clippedBottom - clippedY;
+        if (clippedHeight <= 0) continue;
+
+        rects.push({
+          seriesIndex: si,
+          categoryIndex: ci,
+          x: barX,
+          y: clippedY,
+          width: barWidth,
+          height: clippedHeight,
+          value,
+          seriesName: data.series[si].name,
+          categoryName: category,
+        });
+      }
     }
   }
 

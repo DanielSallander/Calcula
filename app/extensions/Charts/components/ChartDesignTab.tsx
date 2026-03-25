@@ -10,7 +10,7 @@ import { emitAppEvent, AppEvents, showDialog } from "../../../src/api";
 import type { RibbonContext } from "../../../src/api/extensions";
 import { useRibbonCollapse, RibbonGroup } from "../../../src/api/ribbonCollapse";
 
-import type { ChartType, ChartSpec } from "../types";
+import type { ChartType, ChartSpec, StackMode, BarMarkOptions, LineMarkOptions, AreaMarkOptions, TrendlineSpec, TrendlineType, ComboMarkOptions } from "../types";
 import { isPivotDataSource, isCartesianChart } from "../types";
 import { getChartById, updateChartSpec, syncChartRegions } from "../lib/chartStore";
 import { invalidateChartCache } from "../rendering/chartRenderer";
@@ -328,11 +328,13 @@ function ScatterIcon() {
 // ============================================================================
 
 const GROUP_DEFS = [
-  { collapseOrder: 4, expandedWidth: 310 }, // Type
-  { collapseOrder: 3, expandedWidth: 140 }, // Chart Elements
-  { collapseOrder: 2, expandedWidth: 220 }, // Colors
-  { collapseOrder: 1, expandedWidth: 130 }, // Legend
-  { collapseOrder: 5, expandedWidth: 80 },  // Actions
+  { collapseOrder: 6, expandedWidth: 310 }, // Type
+  { collapseOrder: 5, expandedWidth: 140 }, // Chart Elements
+  { collapseOrder: 2, expandedWidth: 120 }, // Stacking
+  { collapseOrder: 1, expandedWidth: 140 }, // Trendline
+  { collapseOrder: 4, expandedWidth: 220 }, // Colors
+  { collapseOrder: 3, expandedWidth: 130 }, // Legend
+  { collapseOrder: 7, expandedWidth: 80 },  // Actions
 ];
 
 // ============================================================================
@@ -400,6 +402,19 @@ export function ChartDesignTab({
   const isPivot = isPivotDataSource(spec.data);
   const cartesian = isCartesianChart(spec.mark);
   const isMainType = MAIN_TYPES.some((t) => t.value === spec.mark);
+
+  // Stacking support for bar, horizontalBar, line, area
+  const supportsStacking = spec.mark === "bar" || spec.mark === "horizontalBar" || spec.mark === "line" || spec.mark === "area";
+  const currentStackMode = getStackModeFromSpec(spec);
+
+  // Trendline support for cartesian charts
+  const supportsTrendline = cartesian && spec.mark !== "waterfall" && spec.mark !== "histogram";
+  const currentTrendline: TrendlineSpec | null = spec.trendlines?.[0] ?? null;
+
+  // Combo / secondary axis
+  const isCombo = spec.mark === "combo";
+  const comboOpts = (isCombo ? spec.markOptions ?? {} : {}) as ComboMarkOptions;
+  const hasSecondaryAxis = comboOpts.secondaryYAxis ?? false;
 
   return (
     <div ref={containerRef} className={s.container}>
@@ -485,9 +500,125 @@ export function ChartDesignTab({
       </RibbonGroup>
 
       {/* ================================================================ */}
+      {/* Stacking: none / stacked / 100% stacked                          */}
+      {/* ================================================================ */}
+      {supportsStacking && (
+        <RibbonGroup label="Stacking" collapsed={collapsed[2]}>
+          <div className={s.groupContent}>
+            <select
+              className={s.select}
+              value={currentStackMode}
+              onChange={(e) => {
+                const mode = e.target.value as StackMode;
+                updateSpec({ markOptions: setStackModeInOptions(spec, mode) });
+              }}
+            >
+              <option value="none">Grouped</option>
+              <option value="stacked">Stacked</option>
+              <option value="percentStacked">100% Stacked</option>
+            </select>
+            {isCombo && (
+              <label className={s.checkLabel}>
+                <input
+                  type="checkbox"
+                  checked={hasSecondaryAxis}
+                  onChange={(e) => {
+                    const opts = { ...comboOpts, secondaryYAxis: e.target.checked };
+                    updateSpec({ markOptions: opts });
+                  }}
+                />
+                2nd Axis
+              </label>
+            )}
+          </div>
+        </RibbonGroup>
+      )}
+      {!supportsStacking && isCombo && (
+        <RibbonGroup label="Axes" collapsed={collapsed[2]}>
+          <div className={s.groupContent}>
+            <label className={s.checkLabel}>
+              <input
+                type="checkbox"
+                checked={hasSecondaryAxis}
+                onChange={(e) => {
+                  const opts = { ...comboOpts, secondaryYAxis: e.target.checked };
+                  updateSpec({ markOptions: opts });
+                }}
+              />
+              Secondary Axis
+            </label>
+          </div>
+        </RibbonGroup>
+      )}
+
+      {/* ================================================================ */}
+      {/* Trendline: type selector                                          */}
+      {/* ================================================================ */}
+      {supportsTrendline && (
+        <RibbonGroup label="Trendline" collapsed={collapsed[3]}>
+          <div className={s.groupContent}>
+            <select
+              className={s.select}
+              value={currentTrendline?.type ?? "none"}
+              onChange={(e) => {
+                const type = e.target.value;
+                if (type === "none") {
+                  updateSpec({ trendlines: [] });
+                } else {
+                  const tl: TrendlineSpec = {
+                    type: type as TrendlineType,
+                    seriesIndex: currentTrendline?.seriesIndex ?? 0,
+                    ...(type === "polynomial" ? { polynomialDegree: currentTrendline?.polynomialDegree ?? 2 } : {}),
+                    ...(type === "movingAverage" ? { movingAveragePeriod: currentTrendline?.movingAveragePeriod ?? 3 } : {}),
+                  };
+                  updateSpec({ trendlines: [tl] });
+                }
+              }}
+            >
+              <option value="none">None</option>
+              <option value="linear">Linear</option>
+              <option value="exponential">Exponential</option>
+              <option value="polynomial">Polynomial</option>
+              <option value="logarithmic">Logarithmic</option>
+              <option value="power">Power</option>
+              <option value="movingAverage">Moving Avg</option>
+            </select>
+            {currentTrendline && (
+              <label className={s.checkLabel}>
+                <input
+                  type="checkbox"
+                  checked={currentTrendline.showEquation ?? false}
+                  onChange={(e) => {
+                    updateSpec({
+                      trendlines: [{ ...currentTrendline, showEquation: e.target.checked }],
+                    });
+                  }}
+                />
+                Equation
+              </label>
+            )}
+            {currentTrendline && (
+              <label className={s.checkLabel}>
+                <input
+                  type="checkbox"
+                  checked={currentTrendline.showRSquared ?? false}
+                  onChange={(e) => {
+                    updateSpec({
+                      trendlines: [{ ...currentTrendline, showRSquared: e.target.checked }],
+                    });
+                  }}
+                />
+                R<sup>2</sup>
+              </label>
+            )}
+          </div>
+        </RibbonGroup>
+      )}
+
+      {/* ================================================================ */}
       {/* Colors: palette swatches                                          */}
       {/* ================================================================ */}
-      <RibbonGroup label="Colors" collapsed={collapsed[2]}>
+      <RibbonGroup label="Colors" collapsed={collapsed[4]}>
         <div className={s.groupContent}>
           <div className={s.paletteGallery}>
             {PALETTE_NAMES.map((name) => {
@@ -513,7 +644,7 @@ export function ChartDesignTab({
       {/* ================================================================ */}
       {/* Legend: position selector                                          */}
       {/* ================================================================ */}
-      <RibbonGroup label="Legend" collapsed={collapsed[3]}>
+      <RibbonGroup label="Legend" collapsed={collapsed[5]}>
         <div className={s.groupContent}>
           {spec.legend.visible && (
             <select
@@ -544,7 +675,7 @@ export function ChartDesignTab({
       {/* ================================================================ */}
       {/* Actions: Edit Chart button                                        */}
       {/* ================================================================ */}
-      <RibbonGroup label="Actions" collapsed={collapsed[4]}>
+      <RibbonGroup label="Actions" collapsed={collapsed[6]}>
         <div className={s.groupContent}>
           <button
             className={s.actionBtn}
@@ -565,4 +696,42 @@ export function ChartDesignTab({
       </RibbonGroup>
     </div>
   );
+}
+
+// ============================================================================
+// Stack Mode Helpers
+// ============================================================================
+
+/** Read the current stack mode from spec.markOptions based on chart type. */
+function getStackModeFromSpec(spec: ChartSpec): StackMode {
+  const opts = spec.markOptions ?? {};
+  switch (spec.mark) {
+    case "bar":
+    case "horizontalBar":
+      return (opts as BarMarkOptions).stackMode ?? "none";
+    case "line":
+      return (opts as LineMarkOptions).stackMode ?? "none";
+    case "area": {
+      const areaOpts = opts as AreaMarkOptions;
+      return areaOpts.stackMode ?? (areaOpts.stacked ? "stacked" : "none");
+    }
+    default:
+      return "none";
+  }
+}
+
+/** Create updated markOptions with a new stack mode, preserving other fields. */
+function setStackModeInOptions(spec: ChartSpec, mode: StackMode): BarMarkOptions | LineMarkOptions | AreaMarkOptions {
+  const opts = spec.markOptions ?? {};
+  switch (spec.mark) {
+    case "bar":
+    case "horizontalBar":
+      return { ...(opts as BarMarkOptions), stackMode: mode };
+    case "line":
+      return { ...(opts as LineMarkOptions), stackMode: mode };
+    case "area":
+      return { ...(opts as AreaMarkOptions), stackMode: mode, stacked: mode !== "none" };
+    default:
+      return opts as BarMarkOptions;
+  }
 }
