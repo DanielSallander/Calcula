@@ -16,6 +16,7 @@ import {
 } from "../../../src/api";
 import type { NamedRange } from "../../../src/api";
 import { formatScope, formatRangeDisplay } from "../lib/nameUtils";
+import { isCustomFunction, formatFunctionSignature } from "../lib/lambdaUtils";
 
 const v = (name: string) => `var(${name})`;
 
@@ -384,19 +385,37 @@ export function NameManagerDialog(
     showDialog("define-name", { mode: "new" });
   }, []);
 
+  const handleNewFunction = useCallback(() => {
+    showDialog("define-function", { mode: "new" });
+  }, []);
+
+  const openEditDialog = useCallback((nr: NamedRange) => {
+    if (isCustomFunction(nr)) {
+      showDialog("define-function", {
+        mode: "edit",
+        editName: nr.name,
+        editRefersTo: nr.refersTo,
+        editSheetIndex: nr.sheetIndex,
+        editComment: nr.comment ?? "",
+      });
+    } else {
+      showDialog("define-name", {
+        mode: "edit",
+        editName: nr.name,
+        editRefersTo: nr.refersTo,
+        editSheetIndex: nr.sheetIndex,
+        editComment: nr.comment ?? "",
+        editFolder: nr.folder ?? "",
+      });
+    }
+  }, []);
+
   const handleEdit = useCallback(() => {
     if (!selectedName) return;
     const nr = names.find((n) => n.name === selectedName);
     if (!nr) return;
-    showDialog("define-name", {
-      mode: "edit",
-      editName: nr.name,
-      editRefersTo: nr.refersTo,
-      editSheetIndex: nr.sheetIndex,
-      editComment: nr.comment ?? "",
-      editFolder: nr.folder ?? "",
-    });
-  }, [selectedName, names]);
+    openEditDialog(nr);
+  }, [selectedName, names, openEditDialog]);
 
   const handleDelete = useCallback(async () => {
     if (!selectedName) return;
@@ -611,6 +630,7 @@ export function NameManagerDialog(
   const renderRow = (nr: NamedRange, inFolder: boolean) => {
     const isSelected = nr.name === selectedName;
     const isBeingDragged = isDragging && dragStart?.name === nr.name;
+    const isFn = isCustomFunction(nr);
     return (
       <tr
         key={nr.name}
@@ -623,10 +643,32 @@ export function NameManagerDialog(
         onClick={() => {
           if (!isDragging) setSelectedName(nr.name);
         }}
-        onDoubleClick={handleEdit}
+        onDoubleClick={() => openEditDialog(nr)}
       >
-        <td style={inFolder ? styles.tdIndented : styles.td}>{nr.name}</td>
-        <td style={styles.td}>{formatRangeDisplay(nr.refersTo)}</td>
+        <td style={inFolder ? styles.tdIndented : styles.td}>
+          {isFn && (
+            <span
+              style={{
+                display: "inline-block",
+                fontSize: 10,
+                fontWeight: 600,
+                padding: "1px 4px",
+                borderRadius: 3,
+                marginRight: 6,
+                background: "var(--accent-primary)",
+                color: "#fff",
+                verticalAlign: "middle",
+                lineHeight: "14px",
+              }}
+            >
+              fn
+            </span>
+          )}
+          {nr.name}
+        </td>
+        <td style={styles.td}>
+          {isFn ? formatFunctionSignature(nr) : formatRangeDisplay(nr.refersTo)}
+        </td>
         <td style={styles.td}>
           {formatScope(nr.sheetIndex, sheetNamesList)}
         </td>
@@ -657,6 +699,9 @@ export function NameManagerDialog(
           <div style={styles.buttonBar}>
             <button style={styles.btn} onClick={handleNew}>
               New...
+            </button>
+            <button style={styles.btn} onClick={handleNewFunction}>
+              New Function...
             </button>
             <button
               style={

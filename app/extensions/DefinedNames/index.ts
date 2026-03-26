@@ -5,6 +5,7 @@
 import { DialogExtensions } from "../../src/api";
 import { NameManagerDialog } from "./components/NameManagerDialog";
 import { NewNameDialog } from "./components/NewNameDialog";
+import { NewFunctionDialog } from "./components/NewFunctionDialog";
 import { registerDefinedNamesMenuItems } from "./handlers/formulasMenuItemBuilder";
 
 const cleanupFns: (() => void)[] = [];
@@ -30,6 +31,14 @@ export function registerDefinedNamesExtension(): void {
     priority: 51,
   });
   cleanupFns.push(() => DialogExtensions.unregisterDialog("define-name"));
+
+  // Register the New/Edit Function dialog
+  DialogExtensions.registerDialog({
+    id: "define-function",
+    component: NewFunctionDialog,
+    priority: 52,
+  });
+  cleanupFns.push(() => DialogExtensions.unregisterDialog("define-function"));
 
   // Register menu items in the Formulas menu
   const cleanupMenus = registerDefinedNamesMenuItems();

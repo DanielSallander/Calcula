@@ -21,21 +21,27 @@ export function registerDefinedNamesMenuItems(): () => void {
 
   cleanups.push(
     registerMenuItem("formulas", {
-      id: "formulas:defineName",
-      label: "Define Name...",
-      action: () => {
-        showDialog("define-name", { mode: "new" });
-      },
-    })
-  );
-
-  cleanups.push(
-    registerMenuItem("formulas", {
       id: "formulas:nameManager",
-      label: "Name Manager...",
+      label: "Name Manager",
       action: () => {
         showDialog("name-manager");
       },
+      children: [
+        {
+          id: "formulas:defineName",
+          label: "Define Name...",
+          action: () => {
+            showDialog("define-name", { mode: "new" });
+          },
+        },
+        {
+          id: "formulas:defineFunction",
+          label: "Define Function...",
+          action: () => {
+            showDialog("define-function", { mode: "new" });
+          },
+        },
+      ],
     })
   );
 
