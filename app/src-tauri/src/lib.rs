@@ -54,6 +54,7 @@ pub mod consolidate;
 pub mod status_bar;
 pub mod computed_properties;
 pub mod controls;
+pub mod slicer;
 pub mod mcp;
 
 pub use api_types::{CellData, StyleData, DimensionData, FormattingParams, MergedRegion};
@@ -2958,6 +2959,7 @@ pub fn run() {
         .manage(bi::BiState::new())
         .manage(evaluate_formula::EvalFormulaState::new())
         .manage(scripting::ScriptState::new())
+        .manage(slicer::SlicerState::new())
         .manage(mcp::McpState::new())
         .invoke_handler(tauri::generate_handler![
             // Grid commands
@@ -3323,6 +3325,15 @@ pub fn run() {
             distribution::import_package,
             distribution::download_package,
             distribution::publish_package,
+            // Slicer commands
+            slicer::create_slicer,
+            slicer::delete_slicer,
+            slicer::update_slicer,
+            slicer::update_slicer_position,
+            slicer::update_slicer_selection,
+            slicer::get_all_slicers,
+            slicer::get_slicers_for_sheet,
+            slicer::get_slicer_items,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")

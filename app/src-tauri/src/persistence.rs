@@ -192,6 +192,94 @@ pub fn build_workbook_for_save(
     Ok(workbook)
 }
 
+/// Build a Workbook from the current AppState including slicer state.
+pub fn build_workbook_for_save_with_slicers(
+    state: &State<AppState>,
+    user_files_state: &State<UserFilesState>,
+    slicer_state: &State<crate::slicer::SlicerState>,
+) -> Result<Workbook, String> {
+    let mut workbook = build_workbook_for_save(state, user_files_state)?;
+    workbook.slicers = collect_slicers_for_save(slicer_state);
+    Ok(workbook)
+}
+
+/// Collect slicers from SlicerState into SavedSlicer format.
+fn collect_slicers_for_save(
+    slicer_state: &State<crate::slicer::SlicerState>,
+) -> Vec<persistence::SavedSlicer> {
+    let slicers = slicer_state.slicers.lock().unwrap();
+    slicers
+        .values()
+        .map(|s| slicer_to_saved(s))
+        .collect()
+}
+
+fn slicer_to_saved(slicer: &crate::slicer::Slicer) -> persistence::SavedSlicer {
+    persistence::SavedSlicer {
+        id: slicer.id,
+        name: slicer.name.clone(),
+        sheet_index: slicer.sheet_index,
+        x: slicer.x,
+        y: slicer.y,
+        width: slicer.width,
+        height: slicer.height,
+        source_type: match slicer.source_type {
+            crate::slicer::SlicerSourceType::Table => persistence::SavedSlicerSourceType::Table,
+            crate::slicer::SlicerSourceType::Pivot => persistence::SavedSlicerSourceType::Pivot,
+        },
+        source_id: slicer.source_id,
+        field_name: slicer.field_name.clone(),
+        selected_items: slicer.selected_items.clone(),
+        show_header: slicer.show_header,
+        columns: slicer.columns,
+        style_preset: slicer.style_preset.clone(),
+    }
+}
+
+fn saved_to_slicer(saved: &persistence::SavedSlicer) -> crate::slicer::Slicer {
+    crate::slicer::Slicer {
+        id: saved.id,
+        name: saved.name.clone(),
+        sheet_index: saved.sheet_index,
+        x: saved.x,
+        y: saved.y,
+        width: saved.width,
+        height: saved.height,
+        source_type: match saved.source_type {
+            persistence::SavedSlicerSourceType::Table => crate::slicer::SlicerSourceType::Table,
+            persistence::SavedSlicerSourceType::Pivot => crate::slicer::SlicerSourceType::Pivot,
+        },
+        source_id: saved.source_id,
+        field_name: saved.field_name.clone(),
+        selected_items: saved.selected_items.clone(),
+        show_header: saved.show_header,
+        columns: saved.columns,
+        style_preset: saved.style_preset.clone(),
+    }
+}
+
+/// Restore slicers from SavedSlicer format into SlicerState.
+fn restore_slicers(
+    saved_slicers: &[persistence::SavedSlicer],
+    slicer_state: &State<crate::slicer::SlicerState>,
+) {
+    let mut slicers = slicer_state.slicers.lock().unwrap();
+    let mut next_id = slicer_state.next_id.lock().unwrap();
+
+    slicers.clear();
+    let mut max_id: u64 = 0;
+
+    for saved in saved_slicers {
+        let slicer = saved_to_slicer(saved);
+        if slicer.id > max_id {
+            max_id = slicer.id;
+        }
+        slicers.insert(slicer.id, slicer);
+    }
+
+    *next_id = max_id + 1;
+}
+
 // ============================================================================
 // COMMANDS
 // ============================================================================
@@ -201,6 +289,7 @@ pub fn save_file(
     state: State<AppState>,
     file_state: State<FileState>,
     user_files_state: State<UserFilesState>,
+    slicer_state: State<crate::slicer::SlicerState>,
     path: String,
 ) -> Result<(), String> {
     let grid = state.grid.lock().map_err(|e| e.to_string())?;
@@ -216,6 +305,7 @@ pub fn save_file(
 
     let mut workbook = Workbook::from_grid(&grid, &styles, &dimensions);
     workbook.tables = collect_tables_for_save(&tables);
+    workbook.slicers = collect_slicers_for_save(&slicer_state);
     workbook.user_files = user_files_state.files.lock().map_err(|e| e.to_string())?.clone();
 
     let path_buf = PathBuf::from(&path);
@@ -243,6 +333,7 @@ pub fn open_file(
     state: State<AppState>,
     file_state: State<FileState>,
     user_files_state: State<UserFilesState>,
+    slicer_state: State<crate::slicer::SlicerState>,
     path: String,
 ) -> Result<Vec<CellData>, String> {
     let path_buf = PathBuf::from(&path);
@@ -299,6 +390,9 @@ pub fn open_file(
         *next_table_id = next_id;
     }
 
+    // Restore slicers from workbook
+    restore_slicers(&workbook.slicers, &slicer_state);
+
     // Restore user files from workbook
     *user_files_state.files.lock().map_err(|e| e.to_string())? = workbook.user_files;
 
@@ -335,6 +429,7 @@ pub fn new_file(
     state: State<AppState>,
     file_state: State<FileState>,
     user_files_state: State<UserFilesState>,
+    slicer_state: State<crate::slicer::SlicerState>,
 ) -> Result<(), String> {
     {
         let mut grid = state.grid.lock().map_err(|e| e.to_string())?;
@@ -365,6 +460,10 @@ pub fn new_file(
         table_names.clear();
         *next_table_id = 1;
     }
+
+    // Clear slicer state
+    slicer_state.slicers.lock().unwrap().clear();
+    *slicer_state.next_id.lock().unwrap() = 1;
 
     // Clear user files
     user_files_state.files.lock().map_err(|e| e.to_string())?.clear();

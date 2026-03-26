@@ -5,6 +5,7 @@
 
 use crate::error::FormatError;
 use crate::features::tables::TableDef;
+use crate::features::slicers::SlicerDef;
 use crate::manifest::Manifest;
 use crate::sheet_data::{cells_to_sheet_data, sheet_data_to_cells, SheetData};
 use crate::sheet_layout::SheetLayout;
@@ -13,7 +14,7 @@ use crate::sheet_styles::{
     serialize_style_registry, SheetStyles,
 };
 
-use persistence::{SavedTable, Workbook};
+use persistence::{SavedSlicer, SavedTable, Workbook};
 use std::io::{Read, Write};
 use std::path::Path;
 use zip::write::FileOptions;
@@ -32,6 +33,9 @@ pub fn write_calcula(workbook: &Workbook, path: &Path) -> Result<(), FormatError
     // Track which features are present
     if !workbook.tables.is_empty() {
         manifest.features.push("tables".to_string());
+    }
+    if !workbook.slicers.is_empty() {
+        manifest.features.push("slicers".to_string());
     }
     if !workbook.user_files.is_empty() {
         manifest.features.push("files".to_string());
@@ -86,6 +90,17 @@ pub fn write_calcula(workbook: &Workbook, path: &Path) -> Result<(), FormatError
             options.clone(),
         )?;
         zip.write_all(table_json.as_bytes())?;
+    }
+
+    // Write slicers
+    for slicer in &workbook.slicers {
+        let slicer_def = SlicerDef::from(slicer);
+        let slicer_json = serde_json::to_string_pretty(&slicer_def)?;
+        zip.start_file(
+            format!("slicers/slicer_{}.json", slicer.id),
+            options.clone(),
+        )?;
+        zip.write_all(slicer_json.as_bytes())?;
     }
 
     // Write user files (stored under files/ prefix)
@@ -189,6 +204,28 @@ pub fn read_calcula(path: &Path) -> Result<Workbook, FormatError> {
         }
     }
 
+    // Read slicers
+    let mut slicers: Vec<SavedSlicer> = Vec::new();
+    if manifest.features.contains(&"slicers".to_string()) {
+        let slicer_names: Vec<String> = (0..archive.len())
+            .filter_map(|i| {
+                let entry = archive.by_index(i).ok()?;
+                let name = entry.name().to_string();
+                if name.starts_with("slicers/") && name.ends_with(".json") {
+                    Some(name)
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        for slicer_name in slicer_names {
+            if let Some(slicer_def) = read_optional_json::<SlicerDef>(&mut archive, &slicer_name)? {
+                slicers.push(SavedSlicer::from(&slicer_def));
+            }
+        }
+    }
+
     // Read user files (files/ prefix)
     let mut user_files = std::collections::HashMap::new();
     if manifest.features.contains(&"files".to_string()) {
@@ -219,6 +256,7 @@ pub fn read_calcula(path: &Path) -> Result<Workbook, FormatError> {
         sheets,
         active_sheet: manifest.active_sheet,
         tables,
+        slicers,
         user_files,
     })
 }
@@ -319,6 +357,7 @@ mod tests {
             sheets: vec![sheet],
             active_sheet: 0,
             tables: vec![],
+            slicers: vec![],
             user_files: HashMap::new(),
         }
     }

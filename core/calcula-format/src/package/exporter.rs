@@ -211,6 +211,7 @@ mod tests {
             sheets: vec![sheet],
             active_sheet: 0,
             tables: vec![],
+            slicers: vec![],
             user_files: HashMap::new(),
         }
     }

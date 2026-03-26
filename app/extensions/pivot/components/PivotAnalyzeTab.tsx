@@ -282,6 +282,14 @@ export function PivotAnalyzeTab({
           </button>
           <button
             className={tabStyles.button}
+            onClick={() => showDialog("slicer:insertDialog", { sourceType: "pivot", sourceId: pivotId })}
+            title="Insert a Slicer for this PivotTable"
+          >
+            <span className={tabStyles.buttonIcon}>&#x25A7;</span>
+            <span className={tabStyles.buttonLabel}>Insert Slicer</span>
+          </button>
+          <button
+            className={tabStyles.button}
             onClick={handleDelete}
             title="Delete this PivotTable"
           >

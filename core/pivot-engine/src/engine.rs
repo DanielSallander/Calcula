@@ -19,8 +19,8 @@ use crate::cache::{
 };
 use crate::definition::{
     AggregationType, DateGroupLevel, FieldGrouping, FieldIndex, ManualGroup,
-    PivotDefinition, PivotField, ReportLayout, ShowValuesAs, SubtotalLocation,
-    ValueField, ValuesPosition,
+    PivotDefinition, PivotField, ReportLayout, ShowValuesAs, SlicerFilter,
+    SubtotalLocation, ValueField, ValuesPosition,
 };
 use crate::view::{
     BackgroundStyle, FilterRowInfo, HeaderFieldSummary, PivotCellType,
@@ -516,7 +516,17 @@ impl<'a> PivotCalculator<'a> {
                 }
             }
         }
-        
+
+        // Collect hidden items from slicer filters (external, no UI)
+        for sf in &self.definition.slicer_filters {
+            if !sf.hidden_items.is_empty() {
+                let hidden_ids = self.resolve_slicer_hidden_items(sf);
+                if !hidden_ids.is_empty() {
+                    hidden_items.push((sf.source_index, hidden_ids));
+                }
+            }
+        }
+
         // Apply to cache
         self.cache.apply_filters(&hidden_items);
     }
@@ -539,6 +549,26 @@ impl<'a> PivotCalculator<'a> {
             }
         }
         
+        ids
+    }
+
+    /// Resolves slicer filter hidden items to ValueIds.
+    fn resolve_slicer_hidden_items(&self, sf: &SlicerFilter) -> Vec<ValueId> {
+        let mut ids = Vec::new();
+
+        if let Some(field_cache) = self.cache.fields.get(sf.source_index) {
+            for hidden_str in &sf.hidden_items {
+                for id in 0..field_cache.unique_count() as ValueId {
+                    if let Some(CacheValue::Text(s)) = field_cache.get_value(id) {
+                        if s == hidden_str {
+                            ids.push(id);
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+
         ids
     }
 

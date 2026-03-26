@@ -2277,10 +2277,24 @@ pub fn apply_pivot_filter(
                 found = true;
             }
         }
-    }
 
-    if !found {
-        log_debug!("PIVOT", "Field {} not found in any hierarchy, filter not applied", request.field_index);
+        if !found {
+            // Field not in any zone — add as slicer filter (external, no UI).
+            // This filters data without adding a visible filter dropdown row.
+            log_debug!("PIVOT", "Field {} not in any zone, adding as slicer filter", request.field_index);
+
+            // Check if a slicer filter for this field already exists
+            if let Some(sf) = definition.slicer_filters.iter_mut()
+                .find(|sf| sf.source_index == request.field_index)
+            {
+                sf.hidden_items = hidden_items;
+            } else {
+                definition.slicer_filters.push(pivot_engine::SlicerFilter {
+                    source_index: request.field_index,
+                    hidden_items,
+                });
+            }
+        }
     }
 
     definition.bump_version();
@@ -2336,6 +2350,8 @@ pub fn clear_pivot_filter(
             filter.field.hidden_items.clear();
         }
     }
+    // Also remove any slicer filters for this field
+    definition.slicer_filters.retain(|sf| sf.source_index != request.field_index);
 
     definition.bump_version();
 

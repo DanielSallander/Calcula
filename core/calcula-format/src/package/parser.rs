@@ -212,6 +212,7 @@ fn read_package_content(
         sheets,
         active_sheet: 0,
         tables,
+        slicers: vec![],
         user_files,
     })
 }

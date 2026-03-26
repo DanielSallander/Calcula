@@ -268,6 +268,16 @@ pub struct PivotFilter {
     pub condition: FilterCondition,
 }
 
+/// An external filter applied by a slicer. Filters data without appearing
+/// in the pivot layout UI (no filter dropdown row).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SlicerFilter {
+    /// Source field index (0-based).
+    pub source_index: FieldIndex,
+    /// Items to hide (same semantics as PivotField::hidden_items).
+    pub hidden_items: Vec<String>,
+}
+
 /// Types of filter conditions.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum FilterCondition {
@@ -537,6 +547,12 @@ pub struct PivotDefinition {
     /// Fields placed in the Filter area (page filters).
     pub filter_fields: Vec<PivotFilter>,
 
+    /// External filters applied by slicers. These filter data without appearing
+    /// in the pivot layout UI (no filter dropdown rows). Each entry maps a
+    /// source field index to hidden item strings.
+    #[serde(default)]
+    pub slicer_filters: Vec<SlicerFilter>,
+
     /// Layout and display options.
     pub layout: PivotLayout,
 
@@ -590,6 +606,7 @@ impl PivotDefinition {
             column_fields: Vec::new(),
             value_fields: Vec::new(),
             filter_fields: Vec::new(),
+            slicer_filters: Vec::new(),
             layout: PivotLayout::default(),
             destination: (0, 0),
             destination_sheet: None,

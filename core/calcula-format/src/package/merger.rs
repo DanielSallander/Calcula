@@ -404,6 +404,7 @@ mod tests {
             }],
             active_sheet: 0,
             tables: vec![],
+            slicers: vec![],
             user_files: HashMap::new(),
         }
     }
@@ -436,6 +437,7 @@ mod tests {
             }],
             active_sheet: 0,
             tables: vec![],
+            slicers: vec![],
             user_files: HashMap::new(),
         }
     }

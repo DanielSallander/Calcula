@@ -288,6 +288,14 @@ export function TableDesignTab({
     });
   }, [table]);
 
+  const handleInsertSlicer = useCallback(() => {
+    if (!table) return;
+    showDialog("slicer:insertDialog", {
+      sourceType: "table",
+      sourceId: table.id,
+    });
+  }, [table]);
+
   const handleRemoveDuplicates = useCallback(() => {
     if (!table) return;
     showDialog("table:removeDuplicatesDialog", { table });
@@ -339,7 +347,7 @@ export function TableDesignTab({
         <button className={tabStyles.toolButton} onClick={handleSummarizeWithPivot}>
           Summarize with PivotTable
         </button>
-        <button className={tabStyles.toolButton} disabled>
+        <button className={tabStyles.toolButton} onClick={handleInsertSlicer}>
           Insert Slicer
         </button>
       </div>

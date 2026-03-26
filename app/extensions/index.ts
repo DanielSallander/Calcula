@@ -33,6 +33,7 @@ import { registerSearchExtension, unregisterSearchExtension } from "./Search";
 import { registerExtensionsManagerExtension, unregisterExtensionsManagerExtension } from "./ExtensionsManager";
 import { registerSettingsExtension, unregisterSettingsExtension } from "./Settings";
 import { registerReportStoreExtension, unregisterReportStoreExtension } from "./ReportStore";
+import { registerSlicerExtension, unregisterSlicerExtension } from "./Slicer";
 
 /**
  * Load all extensions.
@@ -46,6 +47,7 @@ export function loadExtensions(): void {
   registerPivotExtension();
   registerTableExtension();
   registerChartExtension();
+  registerSlicerExtension();
   registerAutoFilterExtension();
   registerSortingExtension();
   registerGroupingExtension();
@@ -118,6 +120,7 @@ export function unloadExtensions(): void {
   unregisterGroupingExtension();
   unregisterSortingExtension();
   unregisterAutoFilterExtension();
+  unregisterSlicerExtension();
   unregisterChartExtension();
   unregisterTableExtension();
   unregisterPivotExtension();
@@ -157,3 +160,4 @@ export { registerSearchExtension, unregisterSearchExtension };
 export { registerExtensionsManagerExtension, unregisterExtensionsManagerExtension };
 export { registerSettingsExtension, unregisterSettingsExtension };
 export { registerReportStoreExtension, unregisterReportStoreExtension };
+export { registerSlicerExtension, unregisterSlicerExtension };

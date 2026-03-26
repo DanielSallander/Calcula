@@ -36,6 +36,8 @@ pub struct Workbook {
     pub active_sheet: usize,
     /// Table definitions across all sheets (serialized as JSON in metadata sheet)
     pub tables: Vec<SavedTable>,
+    /// Slicer definitions across all sheets
+    pub slicers: Vec<SavedSlicer>,
     /// User files stored inside the .cala archive (path -> content).
     /// Paths are relative, e.g. "README.md" or "docs/notes.txt".
     pub user_files: HashMap<String, Vec<u8>>,
@@ -47,6 +49,7 @@ impl Workbook {
             sheets: vec![Sheet::new("Sheet1".to_string())],
             active_sheet: 0,
             tables: Vec::new(),
+            slicers: Vec::new(),
             user_files: HashMap::new(),
         }
     }
@@ -56,6 +59,7 @@ impl Workbook {
             sheets: vec![Sheet::from_grid("Sheet1".to_string(), grid, styles, dimensions)],
             active_sheet: 0,
             tables: Vec::new(),
+            slicers: Vec::new(),
             user_files: HashMap::new(),
         }
     }
@@ -291,6 +295,34 @@ pub struct SavedTableStyleOptions {
     pub first_column: bool,
     pub last_column: bool,
     pub show_filter_button: bool,
+}
+
+/// Serializable slicer source type
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum SavedSlicerSourceType {
+    #[serde(rename = "table")]
+    Table,
+    #[serde(rename = "pivot")]
+    Pivot,
+}
+
+/// Serializable slicer definition
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SavedSlicer {
+    pub id: u64,
+    pub name: String,
+    pub sheet_index: usize,
+    pub x: f64,
+    pub y: f64,
+    pub width: f64,
+    pub height: f64,
+    pub source_type: SavedSlicerSourceType,
+    pub source_id: u64,
+    pub field_name: String,
+    pub selected_items: Option<Vec<String>>,
+    pub show_header: bool,
+    pub columns: u32,
+    pub style_preset: String,
 }
 
 /// Calcula metadata structure stored as JSON in the hidden _calcula_meta sheet.
