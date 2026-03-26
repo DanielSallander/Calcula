@@ -48,7 +48,7 @@ export interface AutocompleteInputPayload {
   value: string;
   cursorPosition: number;
   anchorRect: { x: number; y: number; width: number; height: number };
-  source: "inline" | "formulaBar";
+  source: "inline" | "formulaBar" | "dialog";
 }
 
 export interface AutocompleteKeyPayload {

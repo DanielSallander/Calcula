@@ -12,7 +12,10 @@ import {
   AppEvents,
   emitAppEvent,
   columnToLetter,
+  isFormulaAutocompleteVisible,
+  AutocompleteEvents,
 } from "../../../src/api";
+import type { AutocompleteAcceptedPayload } from "../../../src/api";
 import { isValidName, formatRefersTo } from "../lib/nameUtils";
 
 const v = (name: string) => `var(${name})`;
@@ -149,6 +152,7 @@ const styles = {
 export function NewNameDialog(props: DialogProps): React.ReactElement | null {
   const { isOpen, onClose, data } = props;
   const dialogRef = useRef<HTMLDivElement>(null);
+  const refersToRef = useRef<HTMLInputElement>(null);
   const gridState = useGridState();
 
   const mode = (data?.mode as string) ?? "new";
@@ -222,6 +226,8 @@ export function NewNameDialog(props: DialogProps): React.ReactElement | null {
 
     function onKeyDown(e: KeyboardEvent) {
       if (e.key === "Escape") {
+        // If autocomplete is visible, let it handle Escape first
+        if (isFormulaAutocompleteVisible()) return;
         e.stopPropagation();
         onClose();
       }
@@ -229,6 +235,52 @@ export function NewNameDialog(props: DialogProps): React.ReactElement | null {
     window.addEventListener("keydown", onKeyDown, true);
     return () => window.removeEventListener("keydown", onKeyDown, true);
   }, [isOpen, onClose]);
+
+  // Emit autocomplete input event for the "Refers to" field
+  const emitAutocompleteInput = useCallback((value: string, inputEl: HTMLInputElement) => {
+    const cursorPos = inputEl.selectionStart ?? value.length;
+    const rect = inputEl.getBoundingClientRect();
+    window.dispatchEvent(
+      new CustomEvent(AutocompleteEvents.INPUT, {
+        detail: {
+          value,
+          cursorPosition: cursorPos,
+          anchorRect: {
+            x: rect.left,
+            y: rect.bottom,
+            width: rect.width,
+            height: rect.height,
+          },
+          source: "dialog",
+        },
+      })
+    );
+  }, []);
+
+  // Listen for autocomplete ACCEPTED events to update the refersTo field
+  useEffect(() => {
+    if (!isOpen) return;
+    const handleAccepted = (e: Event) => {
+      const { newValue, newCursorPosition } = (e as CustomEvent<AutocompleteAcceptedPayload>).detail;
+      setRefersTo(newValue);
+      setValidationError(null);
+      requestAnimationFrame(() => {
+        if (refersToRef.current) {
+          refersToRef.current.setSelectionRange(newCursorPosition, newCursorPosition);
+          refersToRef.current.focus();
+        }
+      });
+    };
+    window.addEventListener(AutocompleteEvents.ACCEPTED, handleAccepted);
+    return () => window.removeEventListener(AutocompleteEvents.ACCEPTED, handleAccepted);
+  }, [isOpen]);
+
+  // Dismiss autocomplete when dialog closes
+  useEffect(() => {
+    if (!isOpen) {
+      window.dispatchEvent(new CustomEvent(AutocompleteEvents.DISMISS));
+    }
+  }, [isOpen]);
 
   const handleOk = useCallback(async () => {
     // Validate name
@@ -363,14 +415,48 @@ export function NewNameDialog(props: DialogProps): React.ReactElement | null {
           <div style={styles.field}>
             <label style={styles.label}>Refers to:</label>
             <input
+              ref={refersToRef}
               style={styles.input}
               type="text"
               value={refersTo}
               onChange={(e) => {
-                setRefersTo(e.target.value);
+                const newValue = e.target.value;
+                setRefersTo(newValue);
                 setValidationError(null);
+                if (refersToRef.current) {
+                  emitAutocompleteInput(newValue, refersToRef.current);
+                }
               }}
-              onKeyDown={(e) => e.stopPropagation()}
+              onSelect={() => {
+                // Track cursor position changes (arrow keys, mouse clicks)
+                if (refersToRef.current && refersTo.startsWith("=")) {
+                  emitAutocompleteInput(refersTo, refersToRef.current);
+                }
+              }}
+              onKeyDown={(e) => {
+                e.stopPropagation();
+                // Intercept keys for formula autocomplete when dropdown is visible
+                if (isFormulaAutocompleteVisible()) {
+                  const autocompleteKeys = ["ArrowUp", "ArrowDown", "Tab", "Escape", "Enter"];
+                  if (autocompleteKeys.includes(e.key)) {
+                    e.preventDefault();
+                    window.dispatchEvent(
+                      new CustomEvent(AutocompleteEvents.KEY, {
+                        detail: { key: e.key },
+                      })
+                    );
+                    return;
+                  }
+                }
+              }}
+              onBlur={() => {
+                // Small delay to allow click on autocomplete item before dismissing
+                setTimeout(() => {
+                  if (document.activeElement !== refersToRef.current) {
+                    window.dispatchEvent(new CustomEvent(AutocompleteEvents.DISMISS));
+                  }
+                }, 150);
+              }}
             />
           </div>
 

@@ -192,3 +192,9 @@ export const AREA_TABLE_FEATURES = suiteArea(53);
 export const AREA_PIPELINE_FSA = suiteArea(54);
 /** Suite 55: Pipeline Data Integrity (row 3250) */
 export const AREA_PIPELINE_INTEGRITY = suiteArea(55);
+
+// Phase 16: New Features (LAMBDA, PDF Export)
+/** Suite 56: LAMBDA & Helpers (row 3300) */
+export const AREA_LAMBDA = suiteArea(56);
+/** Suite 57: PDF Export (row 3350) */
+export const AREA_PDF_EXPORT = suiteArea(57);

@@ -34,7 +34,7 @@ interface AutocompleteState {
   /** Position to anchor the dropdown below */
   anchorRect: { x: number; y: number; width: number; height: number } | null;
   /** Which editor emitted the last input event */
-  source: "inline" | "formulaBar" | null;
+  source: "inline" | "formulaBar" | "dialog" | null;
 
   // --- Argument hints state ---
   /** Whether the argument hint tooltip is visible */

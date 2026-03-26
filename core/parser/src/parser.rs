@@ -255,31 +255,58 @@ impl<'a> Parser<'a> {
         Ok(left)
     }
 
-    /// Parses zero or more trailing [index] subscript accesses.
-    /// Only applies to expressions where subscript access makes sense
+    /// Parses zero or more trailing [index] subscript accesses and (args) invocations.
+    /// Only applies to expressions where subscript/invocation makes sense
     /// (CellRef, FunctionCall, NamedRef, IndexAccess).
     /// This avoids conflicts with TableRef which handles its own [ ] syntax.
     fn parse_index_access_chain(&mut self, expr: Expression) -> ParseResult<Expression> {
         let mut result = expr;
         loop {
-            // Only allow [index] after expression types that can hold collections
-            if self.current_token != Token::LBracket {
-                break;
-            }
-            match &result {
-                Expression::CellRef { .. }
-                | Expression::FunctionCall { .. }
-                | Expression::NamedRef { .. }
-                | Expression::IndexAccess { .. }
-                | Expression::ListLiteral { .. }
-                | Expression::DictLiteral { .. } => {
-                    self.advance(); // consume '['
-                    let index = self.parse_expression()?;
-                    self.expect(Token::RBracket)?;
-                    result = Expression::IndexAccess {
-                        target: Box::new(result),
-                        index: Box::new(index),
-                    };
+            match &self.current_token {
+                // Subscript access: expr[index]
+                Token::LBracket => {
+                    match &result {
+                        Expression::CellRef { .. }
+                        | Expression::FunctionCall { .. }
+                        | Expression::NamedRef { .. }
+                        | Expression::IndexAccess { .. }
+                        | Expression::ListLiteral { .. }
+                        | Expression::DictLiteral { .. } => {
+                            self.advance(); // consume '['
+                            let index = self.parse_expression()?;
+                            self.expect(Token::RBracket)?;
+                            result = Expression::IndexAccess {
+                                target: Box::new(result),
+                                index: Box::new(index),
+                            };
+                        }
+                        _ => break,
+                    }
+                }
+                // Invocation: expr(args) — for calling LAMBDA results
+                // Only allow after FunctionCall (e.g., LAMBDA(x, x+1)(10))
+                // or NamedRef (e.g., myLambda(10))
+                Token::LParen => {
+                    match &result {
+                        Expression::FunctionCall { .. } => {
+                            // Parse the invocation arguments
+                            self.advance(); // consume '('
+                            let mut call_args = vec![result];
+                            if self.current_token != Token::RParen {
+                                call_args.push(self.parse_expression()?);
+                                while self.current_token == Token::Comma {
+                                    self.advance();
+                                    call_args.push(self.parse_expression()?);
+                                }
+                            }
+                            self.expect(Token::RParen)?;
+                            result = Expression::FunctionCall {
+                                func: BuiltinFunction::Custom("__INVOKE__".to_string()),
+                                args: call_args,
+                            };
+                        }
+                        _ => break,
+                    }
                 }
                 _ => break,
             }

@@ -1430,14 +1430,106 @@ pub fn update_cells_batch(
                     // This eliminates a redundant parse_formula() call per cell.
                     let engine_ast = crate::convert_expr(&resolved);
                     cell.set_cached_ast(engine_ast.clone());
-                    let result = evaluate_formula_multi_sheet_with_ast_and_files(
+
+                    // Use raw evaluation to get EvalResult for spill handling
+                    let eval_ctx = engine::EvalContext {
+                        current_row: Some(row),
+                        current_col: Some(col),
+                        row_heights: None,
+                        column_widths: None,
+                    };
+                    let raw_result = crate::evaluate_formula_raw_with_files(
                         &grids,
                         &sheet_names,
                         active_sheet,
                         &engine_ast,
+                        eval_ctx,
+                        Some(&styles),
                         &user_files,
                     );
-                    cell.value = result;
+
+                    // Clear any previous spill range for this cell
+                    {
+                        let mut spill_ranges = state.spill_ranges.lock().unwrap();
+                        let mut spill_hosts = state.spill_hosts.lock().unwrap();
+                        if let Some(old_spill_cells) = spill_ranges.remove(&(active_sheet, row, col)) {
+                            for (sr, sc) in &old_spill_cells {
+                                spill_hosts.remove(&(active_sheet, *sr, *sc));
+                                grid.cells.remove(&(*sr, *sc));
+                                if active_sheet < grids.len() {
+                                    grids[active_sheet].cells.remove(&(*sr, *sc));
+                                }
+                                updated_cells.push(CellData {
+                                    row: *sr, col: *sc, display: String::new(),
+                                    display_color: None, formula: None, style_index: 0,
+                                    row_span: 1, col_span: 1, sheet_index: None,
+                                });
+                            }
+                        }
+                    }
+
+                    // Handle spill for array results
+                    let (spill_rows, spill_cols) = raw_result.spill_dimensions();
+                    if spill_rows > 1 || spill_cols > 1 {
+                        let spill_values = raw_result.to_spill_values();
+                        let mut spill_blocked = false;
+
+                        for &(dr, dc, _) in &spill_values {
+                            if dr == 0 && dc == 0 { continue; }
+                            let target_r = row + dr;
+                            let target_c = col + dc;
+                            if let Some(existing) = grid.get_cell(target_r, target_c) {
+                                if existing.value != engine::CellValue::Empty {
+                                    spill_blocked = true;
+                                    break;
+                                }
+                            }
+                        }
+
+                        if spill_blocked {
+                            cell.value = engine::CellValue::Error(engine::CellError::Value);
+                        } else {
+                            cell.value = raw_result.to_cell_value();
+
+                            let mut new_spill_cells = Vec::new();
+                            let mut spill_ranges = state.spill_ranges.lock().unwrap();
+                            let mut spill_hosts = state.spill_hosts.lock().unwrap();
+
+                            for (dr, dc, cv) in spill_values {
+                                if dr == 0 && dc == 0 { continue; }
+                                let target_r = row + dr;
+                                let target_c = col + dc;
+
+                                let spill_cell = engine::Cell {
+                                    formula: None,
+                                    value: cv.clone(),
+                                    style_index: 0,
+                                    cached_ast: None,
+                                };
+                                grid.set_cell(target_r, target_c, spill_cell.clone());
+                                if active_sheet < grids.len() {
+                                    grids[active_sheet].set_cell(target_r, target_c, spill_cell);
+                                }
+
+                                let spill_style = styles.get(0);
+                                let display = format_cell_value(&cv, spill_style);
+                                updated_cells.push(CellData {
+                                    row: target_r, col: target_c, display,
+                                    display_color: None, formula: None, style_index: 0,
+                                    row_span: 1, col_span: 1, sheet_index: None,
+                                });
+
+                                new_spill_cells.push((target_r, target_c));
+                                spill_hosts.insert((active_sheet, target_r, target_c), (row, col));
+                            }
+
+                            if !new_spill_cells.is_empty() {
+                                spill_ranges.insert((active_sheet, row, col), new_spill_cells);
+                            }
+                        }
+                    } else {
+                        cell.value = raw_result.to_cell_value();
+                    }
                 }
                 Err(_e) => {
                     let result =

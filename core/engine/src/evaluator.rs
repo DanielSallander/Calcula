@@ -1179,8 +1179,44 @@ impl<'a> Evaluator<'a> {
             BuiltinFunction::FileLines => self.fn_file_lines(args),
             BuiltinFunction::FileExists => self.fn_file_exists(args),
 
-            // Unknown/custom functions
-            BuiltinFunction::Custom(_) => EvalResult::Error(CellError::Name),
+            // Unknown/custom functions — check scope for LAMBDA bindings
+            BuiltinFunction::Custom(name) => {
+                // __INVOKE__: call-on-expression (e.g., LAMBDA(x, x+1)(10))
+                // args[0] is the callee expression, args[1..] are the invocation arguments
+                if name == "__INVOKE__" {
+                    if args.is_empty() {
+                        return EvalResult::Error(CellError::Value);
+                    }
+                    let callee = self.evaluate(&args[0]);
+                    match callee {
+                        EvalResult::Lambda { params, body } => {
+                            let eval_args: Vec<EvalResult> = args[1..].iter().map(|a| self.evaluate(a)).collect();
+                            if eval_args.len() != params.len() {
+                                return EvalResult::Error(CellError::Value);
+                            }
+                            return self.invoke_lambda(&params, &body, &eval_args);
+                        }
+                        _ => return EvalResult::Error(CellError::Value),
+                    }
+                }
+
+                // Check scope for a LAMBDA bound by LET
+                let key = name.to_uppercase();
+                let maybe_lambda = {
+                    let scope = self.scope.borrow();
+                    scope.get(&key).cloned()
+                };
+                match maybe_lambda {
+                    Some(EvalResult::Lambda { params, body }) => {
+                        let eval_args: Vec<EvalResult> = args.iter().map(|a| self.evaluate(a)).collect();
+                        if eval_args.len() != params.len() {
+                            return EvalResult::Error(CellError::Value);
+                        }
+                        self.invoke_lambda(&params, &body, &eval_args)
+                    }
+                    _ => EvalResult::Error(CellError::Name),
+                }
+            },
         }
     }
 
@@ -4181,8 +4217,10 @@ impl<'a> Evaluator<'a> {
 
     /// LAMBDA([param1], [param2], ..., calculation)
     /// Creates a callable function. The last argument is the body; all others are parameter names.
+    /// With 1 arg: no-param lambda (thunk) — LAMBDA(body)
+    /// With 2+ args: parameterized lambda — LAMBDA(param1, ..., body)
     fn fn_lambda(&self, args: &[Expression]) -> EvalResult {
-        if args.len() < 2 {
+        if args.is_empty() {
             return EvalResult::Error(CellError::Value);
         }
 

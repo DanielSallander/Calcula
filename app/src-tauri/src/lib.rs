@@ -1079,12 +1079,52 @@ pub fn resolve_names_in_ast(
                         args: resolved_args,
                     }
                 }
-                _ => ParserExpr::FunctionCall {
-                    func: func.clone(),
-                    args: args
-                        .iter()
-                        .map(|a| resolve_names_in_ast(a, named_ranges, current_sheet_index, visited))
-                        .collect(),
+                _ => {
+                    // Check if a Custom function name is actually a named range
+                    // (e.g., =testing(5,9) where "testing" is a named LAMBDA).
+                    // If so, resolve it and wrap as __INVOKE__(resolved_lambda, args...).
+                    if let ParserBuiltinFn::Custom(ref custom_name) = func {
+                        let key = custom_name.to_uppercase();
+                        let nr = named_ranges
+                            .values()
+                            .find(|nr| {
+                                let nr_key = nr.name.to_uppercase();
+                                nr_key == key && nr.sheet_index == Some(current_sheet_index)
+                            })
+                            .or_else(|| {
+                                named_ranges.values().find(|nr| {
+                                    let nr_key = nr.name.to_uppercase();
+                                    nr_key == key && nr.sheet_index.is_none()
+                                })
+                            });
+                        if let Some(nr) = nr {
+                            if let Ok(sub_ast) = parse_formula(&nr.refers_to) {
+                                visited.insert(key.clone());
+                                let resolved_callee = resolve_names_in_ast(
+                                    &sub_ast, named_ranges, current_sheet_index, visited,
+                                );
+                                visited.remove(&key);
+                                // Build __INVOKE__(resolved_lambda, arg1, arg2, ...)
+                                let mut invoke_args = vec![resolved_callee];
+                                for a in args {
+                                    invoke_args.push(resolve_names_in_ast(
+                                        a, named_ranges, current_sheet_index, visited,
+                                    ));
+                                }
+                                return ParserExpr::FunctionCall {
+                                    func: ParserBuiltinFn::Custom("__INVOKE__".to_string()),
+                                    args: invoke_args,
+                                };
+                            }
+                        }
+                    }
+                    ParserExpr::FunctionCall {
+                        func: func.clone(),
+                        args: args
+                            .iter()
+                            .map(|a| resolve_names_in_ast(a, named_ranges, current_sheet_index, visited))
+                            .collect(),
+                    }
                 },
             }
         }
@@ -1188,9 +1228,50 @@ fn resolve_names_in_ast_with_shadows(
                     }
                     ParserExpr::FunctionCall { func: func.clone(), args: resolved_args }
                 }
-                _ => ParserExpr::FunctionCall {
-                    func: func.clone(),
-                    args: args.iter().map(|a| resolve_names_in_ast_with_shadows(a, named_ranges, current_sheet_index, visited, shadows)).collect(),
+                _ => {
+                    // Check if a Custom function name is actually a named range
+                    // (e.g., =testing(5,9) where "testing" is a named LAMBDA).
+                    if let ParserBuiltinFn::Custom(ref custom_name) = func {
+                        let key = custom_name.to_uppercase();
+                        // Don't resolve if shadowed by a LAMBDA/LET parameter
+                        if !shadows.iter().any(|s| s == &key) {
+                            let nr = named_ranges
+                                .values()
+                                .find(|nr| {
+                                    let nr_key = nr.name.to_uppercase();
+                                    nr_key == key && nr.sheet_index == Some(current_sheet_index)
+                                })
+                                .or_else(|| {
+                                    named_ranges.values().find(|nr| {
+                                        let nr_key = nr.name.to_uppercase();
+                                        nr_key == key && nr.sheet_index.is_none()
+                                    })
+                                });
+                            if let Some(nr) = nr {
+                                if let Ok(sub_ast) = parse_formula(&nr.refers_to) {
+                                    visited.insert(key.clone());
+                                    let resolved_callee = resolve_names_in_ast_with_shadows(
+                                        &sub_ast, named_ranges, current_sheet_index, visited, shadows,
+                                    );
+                                    visited.remove(&key);
+                                    let mut invoke_args = vec![resolved_callee];
+                                    for a in args {
+                                        invoke_args.push(resolve_names_in_ast_with_shadows(
+                                            a, named_ranges, current_sheet_index, visited, shadows,
+                                        ));
+                                    }
+                                    return ParserExpr::FunctionCall {
+                                        func: ParserBuiltinFn::Custom("__INVOKE__".to_string()),
+                                        args: invoke_args,
+                                    };
+                                }
+                            }
+                        }
+                    }
+                    ParserExpr::FunctionCall {
+                        func: func.clone(),
+                        args: args.iter().map(|a| resolve_names_in_ast_with_shadows(a, named_ranges, current_sheet_index, visited, shadows)).collect(),
+                    }
                 },
             }
         }
@@ -1231,7 +1312,13 @@ pub fn ast_has_named_refs(ast: &ParserExpr) -> bool {
             ast_has_named_refs(left) || ast_has_named_refs(right)
         }
         ParserExpr::UnaryOp { operand, .. } => ast_has_named_refs(operand),
-        ParserExpr::FunctionCall { args, .. } => args.iter().any(ast_has_named_refs),
+        ParserExpr::FunctionCall { func, args } => {
+            // Custom function names might be named ranges pointing to LAMBDAs
+            if matches!(func, ParserBuiltinFn::Custom(_)) {
+                return true;
+            }
+            args.iter().any(ast_has_named_refs)
+        }
         ParserExpr::Range { start, end, .. } => {
             ast_has_named_refs(start) || ast_has_named_refs(end)
         }

@@ -94,6 +94,9 @@ import { tableFeaturesSuite } from "./lib/suites/tableFeatures";
 // Phase 15: Advanced Data Pipelines
 import { pipelineFilterSortSuite } from "./lib/suites/pipelineFilterSort";
 import { pipelineDataIntegritySuite } from "./lib/suites/pipelineDataIntegrity";
+// Phase 16: New Features (LAMBDA, PDF Export)
+import { lambdaSuite } from "./lib/suites/lambda";
+import { pdfExportSuite } from "./lib/suites/pdfExport";
 
 // ============================================================================
 // Constants
@@ -281,13 +284,17 @@ function activate(context: ExtensionContext): void {
   registerSuite(pipelineFilterSortSuite);
   registerSuite(pipelineDataIntegritySuite);
 
+  // Phase 16: New Features (LAMBDA, PDF Export)
+  registerSuite(lambdaSuite);
+  registerSuite(pdfExportSuite);
+
   // Register mock data suite only when launched with prefilled data
   if (import.meta.env.VITE_LOAD_MOCK_DATA === "true") {
     registerSuite(mockDataSuite);
     console.log("[TestRunner] Mock data detected - registered mock data test suite.");
   }
 
-  let suiteCount = 55; // 40 base (Phase 0-9) + 10 (Phase 10-12) + 5 (Phase 13-15)
+  let suiteCount = 57; // 40 base (Phase 0-9) + 10 (Phase 10-12) + 5 (Phase 13-15) + 2 (Phase 16)
   if (import.meta.env.VITE_LOAD_MOCK_DATA === "true") suiteCount++;
   isActivated = true;
   console.log(`[TestRunner] Activated with ${suiteCount} built-in test suites.`);
