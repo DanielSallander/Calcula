@@ -1,6 +1,8 @@
 //! FILENAME: app/extensions/Slicer/components/SlicerOptionsTab.tsx
 // PURPOSE: Contextual ribbon tab shown when a slicer is selected.
-// CONTEXT: Provides controls for slicer name, column count, style, and delete.
+// CONTEXT: Provides controls for slicer name, columns, button size, style gallery,
+//          slicer dimensions, and delete action.
+//          Supports multi-select: shows common values, empty for mixed.
 
 import React, { useState, useEffect, useRef } from "react";
 import { css } from "@emotion/css";
@@ -9,20 +11,34 @@ import { useRibbonCollapse, RibbonGroup } from "../../../src/api/ribbonCollapse"
 import {
   getSlicerById,
   updateSlicerAsync,
+  updateSlicerPositionAsync,
   deleteSlicerAsync,
 } from "../lib/slicerStore";
+import { requestOverlayRedraw } from "../../../src/api/gridOverlays";
+import { showDialog } from "../../../src/api";
+import { SLICER_SETTINGS_DIALOG_ID } from "../manifest";
 import { SlicerEvents } from "../lib/slicerEvents";
 import type { Slicer } from "../lib/slicerTypes";
+import { SlicerStylesGallery } from "./SlicerStylesGallery";
+import { broadcastSelectedSlicers } from "../handlers/selectionHandler";
 
 // ============================================================================
-// Style Presets
+// Helpers
 // ============================================================================
 
-const STYLE_PRESETS = [
-  { id: "SlicerStyleLight1", label: "Light 1", bg: "#f0f4f8", fg: "#2c5282" },
-  { id: "SlicerStyleLight2", label: "Light 2", bg: "#f0fff4", fg: "#276749" },
-  { id: "SlicerStyleDark1", label: "Dark 1", bg: "#2d3748", fg: "#e2e8f0" },
-];
+/** Sentinel for mixed/indeterminate values across multi-selected slicers. */
+const MIXED = Symbol("mixed");
+type MaybeValue<T> = T | typeof MIXED;
+
+/** Get a common value from all slicers, or MIXED if they differ. */
+function commonValue<T>(slicers: Slicer[], getter: (s: Slicer) => T): MaybeValue<T> {
+  if (slicers.length === 0) return MIXED;
+  const first = getter(slicers[0]);
+  for (let i = 1; i < slicers.length; i++) {
+    if (getter(slicers[i]) !== first) return MIXED;
+  }
+  return first;
+}
 
 // ============================================================================
 // Styles
@@ -74,6 +90,10 @@ const tabStyles = {
       border-color: #4472c4;
       outline: none;
     }
+    &:disabled {
+      background: #f5f5f5;
+      color: #999;
+    }
   `,
   label: css`
     font-size: 11px;
@@ -93,20 +113,18 @@ const tabStyles = {
       outline: none;
     }
   `,
-  styleButton: css`
-    padding: 4px 8px;
+  sizeInput: css`
+    padding: 3px 6px;
     border: 1px solid #d0d0d0;
     border-radius: 4px;
     font-size: 11px;
-    cursor: pointer;
-    white-space: nowrap;
-    &:hover {
-      border-color: #888;
+    background: #fff;
+    color: #1a1a1a;
+    width: 60px;
+    &:focus {
+      border-color: #4472c4;
+      outline: none;
     }
-  `,
-  styleButtonActive: css`
-    border-color: #4472c4;
-    border-width: 2px;
   `,
   checkboxLabel: css`
     display: flex;
@@ -118,6 +136,20 @@ const tabStyles = {
     color: #333;
     input {
       cursor: pointer;
+    }
+  `,
+  settingsButton: css`
+    padding: 4px 12px;
+    border: 1px solid #d0d0d0;
+    border-radius: 4px;
+    font-size: 11px;
+    cursor: pointer;
+    background: #fff;
+    color: #1a1a1a;
+    white-space: nowrap;
+    &:hover {
+      background: #e8f0fe;
+      border-color: #4472c4;
     }
   `,
   deleteButton: css`
@@ -136,11 +168,12 @@ const tabStyles = {
   `,
 };
 
-// Group definitions for ribbon collapse (collapseOrder: lower = collapses first)
+// Group definitions for ribbon collapse (collapseOrder: lower = collapses first).
 const SLICER_GROUPS = [
-  { collapseOrder: 3, expandedWidth: 200 }, // Properties
-  { collapseOrder: 2, expandedWidth: 180 }, // Slicer Styles
-  { collapseOrder: 1, expandedWidth: 80 },  // Actions
+  { collapseOrder: 4, expandedWidth: 220 }, // Properties
+  { collapseOrder: 3, expandedWidth: 100 }, // Buttons
+  { collapseOrder: 2, expandedWidth: 140 }, // Size
+  { collapseOrder: 1, expandedWidth: 160 }, // Actions
 ];
 
 // ============================================================================
@@ -153,22 +186,44 @@ export function SlicerOptionsTab({
   context: RibbonContext;
 }): React.ReactElement {
   const containerRef = useRef<HTMLDivElement>(null);
-  const [slicer, setSlicer] = useState<Slicer | null>(null);
+  const [slicers, setSlicers] = useState<Slicer[]>([]);
   const [slicerName, setSlicerName] = useState("");
+  const [headerText, setHeaderText] = useState("");
+  const [widthStr, setWidthStr] = useState("");
+  const [heightStr, setHeightStr] = useState("");
   const collapsedGroups = useRibbonCollapse(containerRef, SLICER_GROUPS);
+
+  const isMulti = slicers.length > 1;
 
   // Listen for slicer selection/deselection events
   useEffect(() => {
     const handleUpdated = (e: Event) => {
-      const detail = (e as CustomEvent).detail as Slicer;
-      if (detail) {
-        setSlicer(detail);
-        setSlicerName(detail.name);
+      const detail = (e as CustomEvent).detail;
+      // The event now sends an array of Slicer objects
+      const arr = Array.isArray(detail) ? detail as Slicer[] : detail ? [detail as Slicer] : [];
+      if (arr.length > 0) {
+        setSlicers(arr);
+
+        if (arr.length === 1) {
+          const s = arr[0];
+          setSlicerName(s.name);
+          setHeaderText(s.headerText ?? s.name);
+          setWidthStr(Math.round(s.width).toString());
+          setHeightStr(Math.round(s.height).toString());
+        } else {
+          // Multi-select: show common values or empty
+          setSlicerName("");
+          setHeaderText("");
+          const cw = commonValue(arr, (s) => Math.round(s.width));
+          setWidthStr(cw === MIXED ? "" : cw.toString());
+          const ch = commonValue(arr, (s) => Math.round(s.height));
+          setHeightStr(ch === MIXED ? "" : ch.toString());
+        }
       }
     };
 
     const handleDeselected = () => {
-      setSlicer(null);
+      setSlicers([]);
     };
 
     window.addEventListener(SlicerEvents.SLICER_UPDATED, handleUpdated);
@@ -179,7 +234,7 @@ export function SlicerOptionsTab({
     };
   }, []);
 
-  if (!slicer) {
+  if (slicers.length === 0) {
     return (
       <div className={tabStyles.disabledMessage}>
         Select a slicer to configure it.
@@ -187,13 +242,26 @@ export function SlicerOptionsTab({
     );
   }
 
+  // Primary slicer (last selected, used for single-slicer-only operations)
+  const primary = slicers[slicers.length - 1];
+
+  // --- Apply to all selected ---
+  const updateAll = async (params: Parameters<typeof updateSlicerAsync>[1]) => {
+    const updates = slicers.map((s) => updateSlicerAsync(s.id, params));
+    await Promise.all(updates);
+    broadcastSelectedSlicers();
+    requestOverlayRedraw();
+  };
+
+  // --- Name (single-select only) ---
   const handleNameBlur = async () => {
+    if (isMulti) return;
     const trimmed = slicerName.trim();
-    if (trimmed && trimmed !== slicer.name) {
-      const updated = await updateSlicerAsync(slicer.id, { name: trimmed });
-      if (updated) setSlicer(updated);
+    if (trimmed && trimmed !== primary.name) {
+      await updateSlicerAsync(primary.id, { name: trimmed });
+      broadcastSelectedSlicers();
     } else {
-      setSlicerName(slicer.name);
+      setSlicerName(primary.name);
     }
   };
 
@@ -203,25 +271,82 @@ export function SlicerOptionsTab({
     }
   };
 
+  // --- Header Text (single-select only) ---
+  const handleHeaderTextBlur = async () => {
+    if (isMulti) return;
+    const trimmed = headerText.trim();
+    const currentHeader = primary.headerText ?? primary.name;
+    if (trimmed !== currentHeader) {
+      const newHeaderText = trimmed === primary.name ? null : (trimmed || null);
+      await updateSlicerAsync(primary.id, { headerText: newHeaderText });
+      broadcastSelectedSlicers();
+      requestOverlayRedraw();
+    }
+  };
+
+  // --- Columns ---
   const handleColumnsChange = async (value: number) => {
-    const updated = await updateSlicerAsync(slicer.id, { columns: value });
-    if (updated) setSlicer(updated);
+    await updateAll({ columns: value });
   };
 
+  // --- Show Header ---
   const handleShowHeaderChange = async (checked: boolean) => {
-    const updated = await updateSlicerAsync(slicer.id, { showHeader: checked });
-    if (updated) setSlicer(updated);
+    await updateAll({ showHeader: checked });
   };
 
+  // --- Style ---
   const handleStyleChange = async (stylePreset: string) => {
-    const updated = await updateSlicerAsync(slicer.id, { stylePreset });
-    if (updated) setSlicer(updated);
+    await updateAll({ stylePreset });
   };
 
-  const handleDelete = async () => {
-    await deleteSlicerAsync(slicer.id);
-    setSlicer(null);
+  // --- Size (width / height) ---
+  const handleWidthBlur = async () => {
+    const val = parseInt(widthStr, 10);
+    if (!isNaN(val) && val >= 60) {
+      const posUpdates = slicers
+        .filter((s) => val !== Math.round(s.width))
+        .map((s) => updateSlicerPositionAsync(s.id, s.x, s.y, val, s.height));
+      await Promise.all(posUpdates);
+      broadcastSelectedSlicers();
+      requestOverlayRedraw();
+    } else {
+      // Reset to common value or empty
+      const cw = commonValue(slicers, (s) => Math.round(s.width));
+      setWidthStr(cw === MIXED ? "" : cw.toString());
+    }
   };
+
+  const handleHeightBlur = async () => {
+    const val = parseInt(heightStr, 10);
+    if (!isNaN(val) && val >= 60) {
+      const posUpdates = slicers
+        .filter((s) => val !== Math.round(s.height))
+        .map((s) => updateSlicerPositionAsync(s.id, s.x, s.y, s.width, val));
+      await Promise.all(posUpdates);
+      broadcastSelectedSlicers();
+      requestOverlayRedraw();
+    } else {
+      const ch = commonValue(slicers, (s) => Math.round(s.height));
+      setHeightStr(ch === MIXED ? "" : ch.toString());
+    }
+  };
+
+  const handleSizeKeyDown = (e: React.KeyboardEvent) => {
+    if (e.key === "Enter") {
+      (e.target as HTMLInputElement).blur();
+    }
+  };
+
+  // --- Delete ---
+  const handleDelete = async () => {
+    await Promise.all(slicers.map((s) => deleteSlicerAsync(s.id)));
+    setSlicers([]);
+  };
+
+  // --- Computed common values for multi-select ---
+  const commonColumns = commonValue(slicers, (s) => s.columns);
+  const commonShowHeader = commonValue(slicers, (s) => s.showHeader);
+  const commonStyle = commonValue(slicers, (s) => s.stylePreset);
 
   return (
     <div ref={containerRef} className={tabStyles.container}>
@@ -236,30 +361,34 @@ export function SlicerOptionsTab({
             <span className={tabStyles.label}>Name:</span>
             <input
               className={tabStyles.nameInput}
-              value={slicerName}
+              value={isMulti ? `(${slicers.length} slicers)` : slicerName}
               onChange={(e) => setSlicerName(e.target.value)}
               onBlur={handleNameBlur}
               onKeyDown={handleNameKeyDown}
+              disabled={isMulti}
+              title={isMulti ? "Name editing not available for multiple slicers" : undefined}
             />
           </div>
           <div className={tabStyles.groupContent}>
-            <span className={tabStyles.label}>Columns:</span>
-            <select
-              className={tabStyles.columnSelect}
-              value={slicer.columns}
-              onChange={(e) => handleColumnsChange(Number(e.target.value))}
-            >
-              {[1, 2, 3, 4, 5].map((n) => (
-                <option key={n} value={n}>
-                  {n}
-                </option>
-              ))}
-            </select>
+            <span className={tabStyles.label}>Header:</span>
+            <input
+              className={tabStyles.nameInput}
+              value={isMulti ? "" : headerText}
+              onChange={(e) => setHeaderText(e.target.value)}
+              onBlur={handleHeaderTextBlur}
+              onKeyDown={handleNameKeyDown}
+              disabled={isMulti}
+              title={isMulti ? "Header editing not available for multiple slicers" : "Header display text (shown in the header bar)"}
+              placeholder={isMulti ? "(multiple)" : undefined}
+            />
           </div>
           <label className={tabStyles.checkboxLabel}>
             <input
               type="checkbox"
-              checked={slicer.showHeader}
+              checked={commonShowHeader === MIXED ? false : commonShowHeader}
+              ref={(el) => {
+                if (el) el.indeterminate = commonShowHeader === MIXED;
+              }}
               onChange={(e) => handleShowHeaderChange(e.target.checked)}
             />
             Show Header
@@ -267,29 +396,72 @@ export function SlicerOptionsTab({
         </div>
       </RibbonGroup>
 
-      {/* Styles Group */}
+      {/* Buttons Group (columns) */}
       <RibbonGroup
-        label="Slicer Styles"
-        icon="S"
+        label="Buttons"
+        icon="B"
         collapsed={collapsedGroups[1]}
       >
-        <div className={tabStyles.groupContent}>
-          {STYLE_PRESETS.map((preset) => (
-            <button
-              key={preset.id}
-              className={`${tabStyles.styleButton} ${
-                slicer.stylePreset === preset.id ? tabStyles.styleButtonActive : ""
-              }`}
-              style={{
-                backgroundColor: preset.bg,
-                color: preset.fg,
-              }}
-              onClick={() => handleStyleChange(preset.id)}
-              title={preset.label}
+        <div className={tabStyles.groupContentVertical}>
+          <div className={tabStyles.groupContent}>
+            <span className={tabStyles.label}>Columns:</span>
+            <select
+              className={tabStyles.columnSelect}
+              value={commonColumns === MIXED ? "" : commonColumns}
+              onChange={(e) => handleColumnsChange(Number(e.target.value))}
             >
-              {preset.label}
-            </button>
-          ))}
+              {commonColumns === MIXED && (
+                <option value="" disabled>-</option>
+              )}
+              {[1, 2, 3, 4, 5].map((n) => (
+                <option key={n} value={n}>
+                  {n}
+                </option>
+              ))}
+            </select>
+          </div>
+        </div>
+      </RibbonGroup>
+
+      {/* Slicer Styles Gallery (self-managing responsive collapse) */}
+      <SlicerStylesGallery
+        selectedStyleId={commonStyle === MIXED ? null : commonStyle}
+        onStyleSelect={handleStyleChange}
+      />
+
+      {/* Size Group */}
+      <RibbonGroup
+        label="Size"
+        icon="Z"
+        collapsed={collapsedGroups[2]}
+      >
+        <div className={tabStyles.groupContentVertical}>
+          <div className={tabStyles.groupContent}>
+            <span className={tabStyles.label}>Width:</span>
+            <input
+              className={tabStyles.sizeInput}
+              value={widthStr}
+              onChange={(e) => setWidthStr(e.target.value)}
+              onBlur={handleWidthBlur}
+              onKeyDown={handleSizeKeyDown}
+              type="number"
+              min={60}
+              placeholder={isMulti ? "-" : undefined}
+            />
+          </div>
+          <div className={tabStyles.groupContent}>
+            <span className={tabStyles.label}>Height:</span>
+            <input
+              className={tabStyles.sizeInput}
+              value={heightStr}
+              onChange={(e) => setHeightStr(e.target.value)}
+              onBlur={handleHeightBlur}
+              onKeyDown={handleSizeKeyDown}
+              type="number"
+              min={60}
+              placeholder={isMulti ? "-" : undefined}
+            />
+          </div>
         </div>
       </RibbonGroup>
 
@@ -297,15 +469,23 @@ export function SlicerOptionsTab({
       <RibbonGroup
         label="Actions"
         icon="A"
-        collapsed={collapsedGroups[2]}
+        collapsed={collapsedGroups[3]}
       >
-        <div className={tabStyles.groupContent}>
+        <div className={tabStyles.groupContentVertical}>
+          <button
+            className={tabStyles.settingsButton}
+            onClick={() => showDialog(SLICER_SETTINGS_DIALOG_ID, { slicerId: primary.id })}
+            title={isMulti ? "Open settings for the last selected slicer" : "Open slicer settings (layout, selection behavior, data display)"}
+            disabled={isMulti}
+          >
+            Settings...
+          </button>
           <button
             className={tabStyles.deleteButton}
             onClick={handleDelete}
-            title="Delete this slicer"
+            title={isMulti ? `Delete ${slicers.length} selected slicers` : "Delete this slicer"}
           >
-            Delete
+            Delete{isMulti ? ` (${slicers.length})` : ""}
           </button>
         </div>
       </RibbonGroup>

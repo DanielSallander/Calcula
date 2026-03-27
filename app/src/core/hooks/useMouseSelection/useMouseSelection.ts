@@ -564,10 +564,11 @@ export function useMouseSelection(props: UseMouseSelectionProps): UseMouseSelect
           setCursorStyle("nwse-resize");
           setHoveringOverReferenceBorder(false);
         } else if ((() => {
-          const hoverRegion = overlayMoveHandlers.checkOverlayBody(mouseX, mouseY);
-          if (hoverRegion) {
-            // Show "move" cursor only if the overlay is movable
-            setCursorStyle(hoverRegion.data?.movable === false ? "pointer" : "move");
+          const hit = overlayMoveHandlers.checkOverlayBody(mouseX, mouseY);
+          if (hit) {
+            // Use cursor from overlay registration if provided, otherwise default logic
+            const defaultCursor = hit.region.data?.movable === false ? "pointer" : "move";
+            setCursorStyle(hit.cursor ?? defaultCursor);
             setHoveringOverReferenceBorder(false);
             return true;
           }

@@ -78,6 +78,12 @@ export interface OverlayHitTestContext {
 /** A function that tests whether a point falls within an overlay region. */
 export type OverlayHitTestFn = (context: OverlayHitTestContext) => boolean;
 
+/**
+ * A function that returns a CSS cursor string for a given position within an overlay.
+ * Return null to use the default cursor logic.
+ */
+export type OverlayCursorFn = (context: OverlayHitTestContext) => string | null;
+
 // ============================================================================
 // Lifecycle Events
 // ============================================================================
@@ -106,6 +112,11 @@ export interface OverlayRegistration {
    * to regular grid cells. Default: false (renders after selection).
    */
   renderBelowSelection?: boolean;
+  /**
+   * Optional callback to provide a CSS cursor string when the mouse hovers
+   * over this overlay. Return null to use the default cursor logic.
+   */
+  getCursor?: OverlayCursorFn;
 }
 
 // ============================================================================
@@ -187,6 +198,11 @@ export function getOverlayRenderers(): OverlayRegistration[] {
   return Array.from(overlayRegistry.values()).sort(
     (a, b) => (a.priority ?? 0) - (b.priority ?? 0)
   );
+}
+
+/** Get the overlay registration for a specific region type. */
+export function getOverlayRegistration(type: string): OverlayRegistration | undefined {
+  return overlayRegistry.get(type);
 }
 
 /**

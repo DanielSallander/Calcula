@@ -306,11 +306,47 @@ pub enum SavedSlicerSourceType {
     Pivot,
 }
 
+/// Serializable slicer selection mode
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum SavedSlicerSelectionMode {
+    #[serde(rename = "standard")]
+    Standard,
+    #[serde(rename = "single")]
+    Single,
+    #[serde(rename = "multi")]
+    Multi,
+}
+
+impl Default for SavedSlicerSelectionMode {
+    fn default() -> Self {
+        SavedSlicerSelectionMode::Standard
+    }
+}
+
+/// Serializable slicer arrangement
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum SavedSlicerArrangement {
+    #[serde(rename = "grid")]
+    Grid,
+    #[serde(rename = "horizontal")]
+    Horizontal,
+    #[serde(rename = "vertical")]
+    Vertical,
+}
+
+impl Default for SavedSlicerArrangement {
+    fn default() -> Self {
+        SavedSlicerArrangement::Vertical
+    }
+}
+
 /// Serializable slicer definition
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SavedSlicer {
     pub id: u64,
     pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub header_text: Option<String>,
     pub sheet_index: usize,
     pub x: f64,
     pub y: f64,
@@ -323,6 +359,42 @@ pub struct SavedSlicer {
     pub show_header: bool,
     pub columns: u32,
     pub style_preset: String,
+    #[serde(default)]
+    pub selection_mode: SavedSlicerSelectionMode,
+    #[serde(default)]
+    pub hide_no_data: bool,
+    #[serde(default = "default_true")]
+    pub indicate_no_data: bool,
+    #[serde(default = "default_true")]
+    pub sort_no_data_last: bool,
+    #[serde(default)]
+    pub force_selection: bool,
+    #[serde(default)]
+    pub show_select_all: bool,
+    #[serde(default)]
+    pub arrangement: SavedSlicerArrangement,
+    #[serde(default)]
+    pub rows: u32,
+    #[serde(default = "default_gap")]
+    pub item_gap: f64,
+    #[serde(default = "default_true")]
+    pub autogrid: bool,
+    #[serde(default)]
+    pub item_padding: f64,
+    #[serde(default = "default_button_radius")]
+    pub button_radius: f64,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+fn default_gap() -> f64 {
+    4.0
+}
+
+fn default_button_radius() -> f64 {
+    2.0
 }
 
 /// Calcula metadata structure stored as JSON in the hidden _calcula_meta sheet.

@@ -3,9 +3,16 @@
 
 export type SlicerSourceType = "table" | "pivot";
 
+/** Selection behavior mode for a slicer. */
+export type SlicerSelectionMode = "standard" | "single" | "multi";
+
+/** Layout arrangement for slicer items. */
+export type SlicerArrangement = "grid" | "horizontal" | "vertical";
+
 export interface Slicer {
   id: number;
   name: string;
+  headerText: string | null;
   sheetIndex: number;
   x: number;
   y: number;
@@ -18,6 +25,18 @@ export interface Slicer {
   showHeader: boolean;
   columns: number;
   stylePreset: string;
+  selectionMode: SlicerSelectionMode;
+  hideNoData: boolean;
+  indicateNoData: boolean;
+  sortNoDataLast: boolean;
+  forceSelection: boolean;
+  showSelectAll: boolean;
+  arrangement: SlicerArrangement;
+  rows: number;
+  itemGap: number;
+  autogrid: boolean;
+  itemPadding: number;
+  buttonRadius: number;
 }
 
 export interface SlicerItem {
@@ -42,7 +61,20 @@ export interface CreateSlicerParams {
 
 export interface UpdateSlicerParams {
   name?: string;
+  headerText?: string | null;
   showHeader?: boolean;
   columns?: number;
   stylePreset?: string;
+  selectionMode?: SlicerSelectionMode;
+  hideNoData?: boolean;
+  indicateNoData?: boolean;
+  sortNoDataLast?: boolean;
+  forceSelection?: boolean;
+  showSelectAll?: boolean;
+  arrangement?: SlicerArrangement;
+  rows?: number;
+  itemGap?: number;
+  autogrid?: boolean;
+  itemPadding?: number;
+  buttonRadius?: number;
 }

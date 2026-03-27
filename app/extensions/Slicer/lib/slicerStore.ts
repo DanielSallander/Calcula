@@ -49,9 +49,11 @@ export async function createSlicerAsync(
 ): Promise<Slicer | null> {
   try {
     const slicer = await api.createSlicer(params);
-    await refreshCache();
-    // Pre-fetch items for immediate rendering
+    // Fetch items BEFORE syncing regions so the first paint shows items
+    cachedSlicers = await api.getAllSlicers();
     await refreshSlicerItems(slicer.id);
+    syncSlicerRegions();
+    requestOverlayRedraw();
     window.dispatchEvent(new CustomEvent(SlicerEvents.SLICER_CREATED, { detail: slicer }));
     return slicer;
   } catch (err) {
@@ -132,6 +134,44 @@ export async function updateSlicerSelectionAsync(
     );
   } catch (err) {
     console.error("[Slicer] Failed to update selection:", err);
+  }
+}
+
+/**
+ * Update the cached position of a slicer without calling the backend.
+ * Used for live drag preview rendering.
+ */
+export function updateCachedSlicerPosition(
+  slicerId: number,
+  x: number,
+  y: number,
+): void {
+  const slicer = cachedSlicers.find((s) => s.id === slicerId);
+  if (slicer) {
+    slicer.x = x;
+    slicer.y = y;
+    syncSlicerRegions();
+  }
+}
+
+/**
+ * Update the cached bounds of a slicer without calling the backend.
+ * Used for live resize preview rendering.
+ */
+export function updateCachedSlicerBounds(
+  slicerId: number,
+  x: number,
+  y: number,
+  width: number,
+  height: number,
+): void {
+  const slicer = cachedSlicers.find((s) => s.id === slicerId);
+  if (slicer) {
+    slicer.x = x;
+    slicer.y = y;
+    slicer.width = width;
+    slicer.height = height;
+    syncSlicerRegions();
   }
 }
 

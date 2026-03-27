@@ -11,6 +11,7 @@ import {
 } from "../../src/api";
 import {
   registerGridOverlay,
+  requestOverlayRedraw,
   type OverlayRenderContext,
 } from "../../src/api/gridOverlays";
 import { getGridStateSnapshot } from "../../src/api/state";
@@ -18,24 +19,46 @@ import { getGridStateSnapshot } from "../../src/api/state";
 import {
   SlicerManifest,
   InsertSlicerDialogDefinition,
+  SlicerSettingsDialogDefinition,
 } from "./manifest";
 
 import {
   selectSlicer,
   handleSelectionChange,
   resetSelectionHandlerState,
+  getSelectedSlicerIds,
+  isSlicerSelected,
+  broadcastSelectedSlicers,
 } from "./handlers/selectionHandler";
+
+import {
+  handleSlicerContextMenu,
+  closeSlicerContextMenu,
+} from "./handlers/slicerContextMenu";
 
 import {
   refreshCache,
   resetStore,
   getSlicerById,
+  getAllSlicers,
   updateSlicerPositionAsync,
   updateSlicerSelectionAsync,
   getCachedItems,
+  updateCachedSlicerPosition,
+  updateCachedSlicerBounds,
+  refreshSlicerItems,
 } from "./lib/slicerStore";
 
-import { renderSlicer, hitTestSlicer, getSlicerHitDetail } from "./rendering/slicerRenderer";
+import {
+  renderSlicer,
+  hitTestSlicer,
+  getSlicerHitDetail,
+  getSlicerCursor,
+  getScrollOffset,
+  setScrollOffset,
+  getMaxScrollOffset,
+  resetScrollOffsets,
+} from "./rendering/slicerRenderer";
 import { applySlicerFilter } from "./lib/slicerFilterBridge";
 import { SlicerEvents } from "./lib/slicerEvents";
 
@@ -48,8 +71,18 @@ let cleanupFunctions: Array<() => void> = [];
 /** Cached reference to grid container for coordinate conversion. */
 let gridContainer: HTMLElement | null = null;
 
-/** Pending click: set on floatingObject:selected, consumed on mouseup. */
-let pendingClick: { slicerId: number } | null = null;
+/** Pending click: set on floatingObject:selected, consumed on mouseup.
+ *  deferNarrow: when true, mouseup should narrow multi-selection to this single slicer. */
+let pendingClick: { slicerId: number; deferNarrow?: boolean } | null = null;
+
+/** Track last mousedown modifier state (since floatingObject:selected doesn't carry it). */
+let lastMousedownCtrl = false;
+
+/**
+ * Snapshot of all selected slicers' positions at drag start.
+ * Used to compute deltas for multi-move.
+ */
+let dragStartPositions: Map<number, { x: number; y: number }> | null = null;
 
 // ============================================================================
 // Extension Lifecycle
@@ -65,8 +98,9 @@ export function registerSlicerExtension(): void {
   // Register add-in manifest
   ExtensionRegistry.registerAddIn(SlicerManifest);
 
-  // Register dialog
+  // Register dialogs
   DialogExtensions.registerDialog(InsertSlicerDialogDefinition);
+  DialogExtensions.registerDialog(SlicerSettingsDialogDefinition);
 
   // Register grid overlay renderer for slicer panels
   cleanupFunctions.push(
@@ -76,6 +110,7 @@ export function registerSlicerExtension(): void {
         renderSlicer(ctx);
       },
       hitTest: hitTestSlicer,
+      getCursor: getSlicerCursor,
       priority: 15, // Above selection and table borders
     }),
   );
@@ -83,6 +118,16 @@ export function registerSlicerExtension(): void {
   // -----------------------------------------------------------------------
   // Floating object events (selection, move, resize)
   // -----------------------------------------------------------------------
+
+  // Capture modifier key state on mousedown (before floatingObject:selected fires).
+  // We use a window-level capture listener so it fires before the Core's handler.
+  const handleMousedownModifiers = (e: MouseEvent) => {
+    lastMousedownCtrl = e.ctrlKey || e.metaKey;
+  };
+  window.addEventListener("mousedown", handleMousedownModifiers, true);
+  cleanupFunctions.push(() => {
+    window.removeEventListener("mousedown", handleMousedownModifiers, true);
+  });
 
   // Handle floating object selection (mousedown on slicer body)
   // Sets a pending click that will be processed on mouseup.
@@ -93,11 +138,30 @@ export function registerSlicerExtension(): void {
     const slicerId = detail.data?.slicerId as number;
     if (slicerId == null) return;
 
-    // Select the slicer (shows contextual ribbon tab)
-    selectSlicer(slicerId);
+    const alreadySelected = isSlicerSelected(slicerId);
+    const wasMultiSelected = getSelectedSlicerIds().size > 1;
 
-    // Set pending click — processed on mouseup if not a drag
-    pendingClick = { slicerId };
+    // If this slicer is already part of a multi-selection and it's a plain
+    // click (no Ctrl), DON'T narrow the selection yet — the user may be
+    // about to drag the group.  We'll narrow to single on mouseup instead.
+    if (alreadySelected && wasMultiSelected && !lastMousedownCtrl) {
+      // Keep multi-selection intact for potential multi-drag.
+      // Ensure the ribbon tab is still showing.
+      broadcastSelectedSlicers();
+    } else {
+      selectSlicer(slicerId, lastMousedownCtrl);
+    }
+
+    // Snapshot positions of ALL selected slicers for potential multi-move
+    dragStartPositions = new Map();
+    for (const id of getSelectedSlicerIds()) {
+      const s = getSlicerById(id);
+      if (s) dragStartPositions.set(id, { x: s.x, y: s.y });
+    }
+
+    // Set pending click — processed on mouseup if not a drag.
+    // deferNarrow = true when we deferred narrowing the multi-selection.
+    pendingClick = { slicerId, deferNarrow: alreadySelected && wasMultiSelected && !lastMousedownCtrl };
   };
   window.addEventListener("floatingObject:selected", handleFloatingSelected);
   cleanupFunctions.push(() => {
@@ -112,23 +176,89 @@ export function registerSlicerExtension(): void {
     // Clear pending click — this was a drag, not a click
     pendingClick = null;
 
-    const slicerId = detail.data?.slicerId as number;
-    if (slicerId == null) return;
+    const primaryId = detail.data?.slicerId as number;
+    if (primaryId == null) return;
 
-    const slicer = getSlicerById(slicerId);
-    if (!slicer) return;
+    const primaryStart = dragStartPositions?.get(primaryId);
+    if (!primaryStart) {
+      // Single slicer move (not multi-selected)
+      const slicer = getSlicerById(primaryId);
+      if (slicer) {
+        updateSlicerPositionAsync(primaryId, detail.x, detail.y, slicer.width, slicer.height)
+          .catch(console.error);
+      }
+    } else {
+      // Multi-move: compute delta from primary slicer and apply to all selected
+      const dx = detail.x - primaryStart.x;
+      const dy = detail.y - primaryStart.y;
 
-    updateSlicerPositionAsync(
-      slicerId,
-      detail.x,
-      detail.y,
-      slicer.width,
-      slicer.height,
-    ).catch(console.error);
+      for (const [id, startPos] of dragStartPositions!) {
+        const slicer = getSlicerById(id);
+        if (!slicer) continue;
+        const newX = Math.max(0, startPos.x + dx);
+        const newY = Math.max(0, startPos.y + dy);
+        updateSlicerPositionAsync(id, newX, newY, slicer.width, slicer.height)
+          .catch(console.error);
+      }
+    }
+
+    dragStartPositions = null;
+    // Re-broadcast so the ribbon tab picks up final positions
+    broadcastSelectedSlicers();
   };
   window.addEventListener("floatingObject:moveComplete", handleMoveComplete);
   cleanupFunctions.push(() => {
     window.removeEventListener("floatingObject:moveComplete", handleMoveComplete);
+  });
+
+  // Handle floating object move preview (smooth drag animation)
+  // NOTE: Do NOT clear pendingClick here! The Core dispatches movePreview for
+  // every mousemove (even <3px). Only moveComplete (which requires >3px movement)
+  // should clear it, so that simple clicks still reach the mouseup handler.
+  const handleMovePreview = (e: Event) => {
+    const detail = (e as CustomEvent).detail;
+    if (detail.regionType !== "slicer") return;
+
+    const primaryId = detail.data?.slicerId as number;
+    if (primaryId == null) return;
+
+    const primaryStart = dragStartPositions?.get(primaryId);
+    if (!primaryStart) {
+      // Single slicer move
+      updateCachedSlicerPosition(primaryId, detail.x, detail.y);
+    } else {
+      // Multi-move: apply same delta to all selected slicers
+      const dx = detail.x - primaryStart.x;
+      const dy = detail.y - primaryStart.y;
+
+      for (const [id, startPos] of dragStartPositions!) {
+        const newX = Math.max(0, startPos.x + dx);
+        const newY = Math.max(0, startPos.y + dy);
+        updateCachedSlicerPosition(id, newX, newY);
+      }
+    }
+
+    requestOverlayRedraw();
+  };
+  window.addEventListener("floatingObject:movePreview", handleMovePreview);
+  cleanupFunctions.push(() => {
+    window.removeEventListener("floatingObject:movePreview", handleMovePreview);
+  });
+
+  // Handle floating object resize preview (smooth resize animation)
+  const handleResizePreview = (e: Event) => {
+    const detail = (e as CustomEvent).detail;
+    if (detail.regionType !== "slicer") return;
+
+    const slicerId = detail.data?.slicerId as number;
+    if (slicerId == null) return;
+
+    updateCachedSlicerBounds(slicerId, detail.x, detail.y, detail.width, detail.height);
+    requestOverlayRedraw();
+  };
+  window.addEventListener("floatingObject:resizePreview", handleResizePreview);
+  cleanupFunctions.push(() => {
+    window.removeEventListener("floatingObject:resizePreview", handleResizePreview);
   });
 
   // Handle floating object resize completion
@@ -159,8 +289,15 @@ export function registerSlicerExtension(): void {
   const handleMouseUp = (e: MouseEvent) => {
     if (!pendingClick) return;
 
-    const { slicerId } = pendingClick;
+    const { slicerId, deferNarrow } = pendingClick;
     pendingClick = null;
+    dragStartPositions = null;
+
+    // If we deferred narrowing a multi-selection to this single slicer
+    // (because the user might have been about to drag the group), do it now.
+    if (deferNarrow) {
+      selectSlicer(slicerId, false);
+    }
 
     // Compute canvas coordinates directly from this mouseup event
     if (!gridContainer) {
@@ -169,15 +306,87 @@ export function registerSlicerExtension(): void {
     if (!gridContainer) return;
 
     const rect = gridContainer.getBoundingClientRect();
-    const canvasX = e.clientX - rect.left;
-    const canvasY = e.clientY - rect.top;
+    // Divide by zoom to convert CSS pixels to logical canvas coordinates
+    // (the core's mouse handling does the same division)
+    const gridState = getGridStateSnapshot();
+    const zoom = gridState?.zoom ?? 1.0;
+    const canvasX = (e.clientX - rect.left) / zoom;
+    const canvasY = (e.clientY - rect.top) / zoom;
 
-    console.log("[Slicer] mouseup click at canvas (%d, %d) for slicer %d", canvasX, canvasY, slicerId);
     handleSlicerClickAt(slicerId, canvasX, canvasY, e.ctrlKey || e.metaKey);
   };
   window.addEventListener("mouseup", handleMouseUp);
   cleanupFunctions.push(() => {
     window.removeEventListener("mouseup", handleMouseUp);
+  });
+
+  // -----------------------------------------------------------------------
+  // Context menu: right-click on slicer
+  // -----------------------------------------------------------------------
+
+  const handleContextMenu = (e: MouseEvent) => {
+    if (!gridContainer) {
+      gridContainer = document.querySelector("canvas")?.parentElement ?? null;
+    }
+    handleSlicerContextMenu(e, gridContainer);
+  };
+  // Use capture phase to intercept before the grid's context menu handler
+  window.addEventListener("contextmenu", handleContextMenu, true);
+  cleanupFunctions.push(() => {
+    window.removeEventListener("contextmenu", handleContextMenu, true);
+  });
+
+  // -----------------------------------------------------------------------
+  // Mouse wheel: scroll slicer item list
+  // -----------------------------------------------------------------------
+
+  const handleWheel = (e: WheelEvent) => {
+    if (!gridContainer) {
+      gridContainer = document.querySelector("canvas")?.parentElement ?? null;
+    }
+    if (!gridContainer) return;
+
+    const rect = gridContainer.getBoundingClientRect();
+    const gridState = getGridStateSnapshot();
+    if (!gridState) return;
+
+    const zoom = gridState.zoom ?? 1.0;
+    const canvasX = (e.clientX - rect.left) / zoom;
+    const canvasY = (e.clientY - rect.top) / zoom;
+
+    const slicers = getAllSlicers();
+    const scrollX = gridState.viewport.scrollX;
+    const scrollY = gridState.viewport.scrollY;
+    const headerWidth = gridState.config.rowHeaderWidth;
+    const headerHeight = gridState.config.colHeaderHeight;
+
+    for (let i = slicers.length - 1; i >= 0; i--) {
+      const slicer = slicers[i];
+      const bx = slicer.x - scrollX + headerWidth;
+      const by = slicer.y - scrollY + headerHeight;
+
+      if (
+        canvasX >= bx && canvasX <= bx + slicer.width &&
+        canvasY >= by && canvasY <= by + slicer.height
+      ) {
+        // Only scroll if the slicer has overflowing content
+        const maxScroll = getMaxScrollOffset(slicer.id);
+        if (maxScroll <= 0) return;
+
+        e.preventDefault();
+        e.stopPropagation();
+
+        const current = getScrollOffset(slicer.id);
+        setScrollOffset(slicer.id, current + e.deltaY);
+        requestOverlayRedraw();
+        return;
+      }
+    }
+  };
+  // Use capture phase so we intercept before the grid scrolls
+  window.addEventListener("wheel", handleWheel, { capture: true, passive: false });
+  cleanupFunctions.push(() => {
+    window.removeEventListener("wheel", handleWheel, true);
   });
 
   // -----------------------------------------------------------------------
@@ -209,7 +418,21 @@ export function registerSlicerExtension(): void {
 
     const slicer = getSlicerById(slicerId);
     if (slicer) {
-      applySlicerFilter(slicer).catch(console.error);
+      applySlicerFilter(slicer).then(() => {
+        // Cross-slicer filtering: refresh items for sibling slicers
+        // (same source) so they show updated has_data state.
+        const siblings = getAllSlicers().filter(
+          (s) =>
+            s.id !== slicerId &&
+            s.sourceType === slicer.sourceType &&
+            s.sourceId === slicer.sourceId,
+        );
+        return Promise.all(
+          siblings.map((s) => refreshSlicerItems(s.id)),
+        );
+      }).then(() => {
+        requestOverlayRedraw();
+      }).catch(console.error);
     }
   };
   window.addEventListener(SlicerEvents.SLICER_SELECTION_CHANGED, handleSelectionChanged);
@@ -238,9 +461,12 @@ export function unregisterSlicerExtension(): void {
   cleanupFunctions = [];
 
   resetSelectionHandlerState();
+  closeSlicerContextMenu();
   resetStore();
+  resetScrollOffsets();
   gridContainer = null;
   pendingClick = null;
+  dragStartPositions = null;
 
   console.log("[Slicer Extension] Unregistered");
 }
@@ -280,12 +506,18 @@ function handleSlicerClickAt(
   };
 
   const hit = getSlicerHitDetail(canvasX, canvasY, bounds, slicerId);
-  console.log("[Slicer] hitDetail: %o, bounds: %o, canvas: (%d, %d)", hit, bounds, canvasX, canvasY);
   if (!hit) return;
 
   switch (hit.type) {
     case "clearButton":
-      // Clear filter (all selected)
+      // Clear filter (all selected) — only if a filter is active
+      if (slicer.selectedItems !== null) {
+        updateSlicerSelectionAsync(slicerId, null).catch(console.error);
+      }
+      break;
+
+    case "selectAll":
+      // Toggle all selected
       updateSlicerSelectionAsync(slicerId, null).catch(console.error);
       break;
 
@@ -302,8 +534,10 @@ function handleSlicerClickAt(
 
 /**
  * Handle click on a slicer item.
- * Click = exclusive select (only that item).
- * Ctrl+click = toggle (additive).
+ * Behavior depends on the slicer's selectionMode:
+ * - "standard": click = exclusive, Ctrl+click = toggle
+ * - "single": click = exclusive only, Ctrl+click ignored
+ * - "multi": click = toggle (like Ctrl+click in standard mode)
  */
 function handleItemClick(
   slicerId: number,
@@ -317,7 +551,13 @@ function handleItemClick(
   const items = getCachedItems(slicerId);
   if (!items) return;
 
-  if (ctrlHeld) {
+  const mode = slicer.selectionMode ?? "standard";
+
+  // Determine if this is a toggle (multi-select) action
+  const isToggle =
+    mode === "multi" || (mode === "standard" && ctrlHeld);
+
+  if (isToggle) {
     // Toggle this item in the current selection
     if (slicer.selectedItems === null) {
       // All selected -> deselect this one item (select all except this one)
@@ -330,10 +570,15 @@ function handleItemClick(
         // Deselect this item
         const newSelection = slicer.selectedItems.filter((v) => v !== itemValue);
         if (newSelection.length === 0) {
-          // Can't deselect all - keep at least this one
-          return;
+          if (slicer.forceSelection) {
+            // Force selection: can't deselect last item
+            return;
+          }
+          // All deselected -> select all (clear filter)
+          updateSlicerSelectionAsync(slicerId, null).catch(console.error);
+        } else {
+          updateSlicerSelectionAsync(slicerId, newSelection).catch(console.error);
         }
-        updateSlicerSelectionAsync(slicerId, newSelection).catch(console.error);
       } else {
         // Add this item to selection
         const newSelection = [...slicer.selectedItems, itemValue];
@@ -352,6 +597,10 @@ function handleItemClick(
       slicer.selectedItems.length === 1 &&
       slicer.selectedItems[0] === itemValue
     ) {
+      if (slicer.forceSelection) {
+        // Force selection: can't clear when only one item selected
+        return;
+      }
       // Clicking the only selected item again -> select all (clear filter)
       updateSlicerSelectionAsync(slicerId, null).catch(console.error);
     } else {

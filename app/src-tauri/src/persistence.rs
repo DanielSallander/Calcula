@@ -218,6 +218,7 @@ fn slicer_to_saved(slicer: &crate::slicer::Slicer) -> persistence::SavedSlicer {
     persistence::SavedSlicer {
         id: slicer.id,
         name: slicer.name.clone(),
+        header_text: slicer.header_text.clone(),
         sheet_index: slicer.sheet_index,
         x: slicer.x,
         y: slicer.y,
@@ -233,6 +234,26 @@ fn slicer_to_saved(slicer: &crate::slicer::Slicer) -> persistence::SavedSlicer {
         show_header: slicer.show_header,
         columns: slicer.columns,
         style_preset: slicer.style_preset.clone(),
+        selection_mode: match slicer.selection_mode {
+            crate::slicer::SlicerSelectionMode::Standard => persistence::SavedSlicerSelectionMode::Standard,
+            crate::slicer::SlicerSelectionMode::Single => persistence::SavedSlicerSelectionMode::Single,
+            crate::slicer::SlicerSelectionMode::Multi => persistence::SavedSlicerSelectionMode::Multi,
+        },
+        hide_no_data: slicer.hide_no_data,
+        indicate_no_data: slicer.indicate_no_data,
+        sort_no_data_last: slicer.sort_no_data_last,
+        force_selection: slicer.force_selection,
+        show_select_all: slicer.show_select_all,
+        arrangement: match slicer.arrangement {
+            crate::slicer::SlicerArrangement::Grid => persistence::SavedSlicerArrangement::Grid,
+            crate::slicer::SlicerArrangement::Horizontal => persistence::SavedSlicerArrangement::Horizontal,
+            crate::slicer::SlicerArrangement::Vertical => persistence::SavedSlicerArrangement::Vertical,
+        },
+        rows: slicer.rows,
+        item_gap: slicer.item_gap,
+        autogrid: slicer.autogrid,
+        item_padding: slicer.item_padding,
+        button_radius: slicer.button_radius,
     }
 }
 
@@ -240,6 +261,7 @@ fn saved_to_slicer(saved: &persistence::SavedSlicer) -> crate::slicer::Slicer {
     crate::slicer::Slicer {
         id: saved.id,
         name: saved.name.clone(),
+        header_text: saved.header_text.clone(),
         sheet_index: saved.sheet_index,
         x: saved.x,
         y: saved.y,
@@ -255,6 +277,26 @@ fn saved_to_slicer(saved: &persistence::SavedSlicer) -> crate::slicer::Slicer {
         show_header: saved.show_header,
         columns: saved.columns,
         style_preset: saved.style_preset.clone(),
+        selection_mode: match saved.selection_mode {
+            persistence::SavedSlicerSelectionMode::Standard => crate::slicer::SlicerSelectionMode::Standard,
+            persistence::SavedSlicerSelectionMode::Single => crate::slicer::SlicerSelectionMode::Single,
+            persistence::SavedSlicerSelectionMode::Multi => crate::slicer::SlicerSelectionMode::Multi,
+        },
+        hide_no_data: saved.hide_no_data,
+        indicate_no_data: saved.indicate_no_data,
+        sort_no_data_last: saved.sort_no_data_last,
+        force_selection: saved.force_selection,
+        show_select_all: saved.show_select_all,
+        arrangement: match saved.arrangement {
+            persistence::SavedSlicerArrangement::Grid => crate::slicer::SlicerArrangement::Grid,
+            persistence::SavedSlicerArrangement::Horizontal => crate::slicer::SlicerArrangement::Horizontal,
+            persistence::SavedSlicerArrangement::Vertical => crate::slicer::SlicerArrangement::Vertical,
+        },
+        rows: saved.rows,
+        item_gap: saved.item_gap,
+        autogrid: saved.autogrid,
+        item_padding: saved.item_padding,
+        button_radius: saved.button_radius,
     }
 }
 

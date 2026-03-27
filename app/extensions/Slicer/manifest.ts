@@ -8,6 +8,7 @@ import type {
 } from "../../src/api";
 import React from "react";
 import { InsertSlicerDialog } from "./components/InsertSlicerDialog";
+import { SlicerSettingsDialog } from "./components/SlicerSettingsDialog";
 import { SlicerOptionsTab } from "./components/SlicerOptionsTab";
 
 // ============================================================================
@@ -46,9 +47,16 @@ export const SlicerOptionsTabDefinition = {
 // ============================================================================
 
 export const INSERT_SLICER_DIALOG_ID = "slicer:insertDialog";
+export const SLICER_SETTINGS_DIALOG_ID = "slicer:settingsDialog";
 
 export const InsertSlicerDialogDefinition: DialogDefinition = {
   id: INSERT_SLICER_DIALOG_ID,
   component: InsertSlicerDialog as React.ComponentType<DialogProps>,
+  priority: 100,
+};
+
+export const SlicerSettingsDialogDefinition: DialogDefinition = {
+  id: SLICER_SETTINGS_DIALOG_ID,
+  component: SlicerSettingsDialog as React.ComponentType<DialogProps>,
   priority: 100,
 };

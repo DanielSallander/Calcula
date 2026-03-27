@@ -20,6 +20,42 @@ pub enum SlicerSourceType {
     Pivot,
 }
 
+/// Selection behavior mode for a slicer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum SlicerSelectionMode {
+    /// Standard: click = exclusive, Ctrl+click = toggle
+    Standard,
+    /// Single: only one item can be selected at a time (no multi-select)
+    Single,
+    /// Multi: single click toggles items (no Ctrl needed)
+    Multi,
+}
+
+impl Default for SlicerSelectionMode {
+    fn default() -> Self {
+        SlicerSelectionMode::Standard
+    }
+}
+
+/// Layout arrangement for slicer items.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum SlicerArrangement {
+    /// Grid layout: items in rows × columns
+    Grid,
+    /// Horizontal: items in a single row, scrolling horizontally
+    Horizontal,
+    /// Vertical: items in a single column, scrolling vertically
+    Vertical,
+}
+
+impl Default for SlicerArrangement {
+    fn default() -> Self {
+        SlicerArrangement::Vertical
+    }
+}
+
 // ============================================================================
 // SLICER DEFINITION
 // ============================================================================
@@ -30,8 +66,11 @@ pub enum SlicerSourceType {
 pub struct Slicer {
     /// Unique slicer ID
     pub id: u64,
-    /// Display name (typically the field name, user can rename)
+    /// Display name (used as programmatic reference, e.g. in scripts)
     pub name: String,
+    /// Header display text (shown in header bar). If None, `name` is displayed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub header_text: Option<String>,
     /// Sheet index where the slicer is placed
     pub sheet_index: usize,
     /// X position in pixels (from sheet origin, top-left of A1)
@@ -57,6 +96,54 @@ pub struct Slicer {
     pub columns: u32,
     /// Style preset name (e.g., "SlicerStyleLight1")
     pub style_preset: String,
+    /// Selection mode: standard, single, or multi
+    #[serde(default)]
+    pub selection_mode: SlicerSelectionMode,
+    /// Hide items that have no matching data (default: false)
+    #[serde(default)]
+    pub hide_no_data: bool,
+    /// Visually indicate items with no data — grayed out (default: true)
+    #[serde(default = "default_true")]
+    pub indicate_no_data: bool,
+    /// Sort items with no data to the end of the list (default: true)
+    #[serde(default = "default_true")]
+    pub sort_no_data_last: bool,
+    /// Force at least one item to always be selected (default: false)
+    #[serde(default)]
+    pub force_selection: bool,
+    /// Show a "Select all" option at the top of the item list (default: false)
+    #[serde(default)]
+    pub show_select_all: bool,
+    /// Layout arrangement: grid, horizontal, or vertical (default: vertical)
+    #[serde(default)]
+    pub arrangement: SlicerArrangement,
+    /// Number of rows (used when arrangement is grid; 0 = auto)
+    #[serde(default)]
+    pub rows: u32,
+    /// Gap between items in pixels (default: 4)
+    #[serde(default = "default_gap")]
+    pub item_gap: f64,
+    /// Auto-compute grid rows/columns from slicer size (default: true)
+    #[serde(default = "default_true")]
+    pub autogrid: bool,
+    /// Internal padding around the item area in pixels (default: 0)
+    #[serde(default)]
+    pub item_padding: f64,
+    /// Corner radius for item buttons in pixels (default: 2)
+    #[serde(default = "default_button_radius")]
+    pub button_radius: f64,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+fn default_gap() -> f64 {
+    4.0
+}
+
+fn default_button_radius() -> f64 {
+    2.0
 }
 
 // ============================================================================
@@ -101,9 +188,22 @@ pub struct CreateSlicerParams {
 #[serde(rename_all = "camelCase")]
 pub struct UpdateSlicerParams {
     pub name: Option<String>,
+    pub header_text: Option<Option<String>>,
     pub show_header: Option<bool>,
     pub columns: Option<u32>,
     pub style_preset: Option<String>,
+    pub selection_mode: Option<SlicerSelectionMode>,
+    pub hide_no_data: Option<bool>,
+    pub indicate_no_data: Option<bool>,
+    pub sort_no_data_last: Option<bool>,
+    pub force_selection: Option<bool>,
+    pub show_select_all: Option<bool>,
+    pub arrangement: Option<SlicerArrangement>,
+    pub rows: Option<u32>,
+    pub item_gap: Option<f64>,
+    pub autogrid: Option<bool>,
+    pub item_padding: Option<f64>,
+    pub button_radius: Option<f64>,
 }
 
 // ============================================================================

@@ -5,7 +5,7 @@
 //          "floatingObject:selected" events so extensions can handle the logic.
 
 import type { GridConfig, Viewport } from "../../../types";
-import { getGridRegions, type GridRegion } from "../../../../api/gridOverlays";
+import { getGridRegions, getOverlayRegistration, type GridRegion } from "../../../../api/gridOverlays";
 
 // ============================================================================
 // Overlay Move State
@@ -48,8 +48,8 @@ interface OverlayMoveDependencies {
 // ============================================================================
 
 export interface OverlayMoveHandlers {
-  /** Check if mouse is over a floating overlay body. Returns the region or null. */
-  checkOverlayBody: (mouseX: number, mouseY: number) => GridRegion | null;
+  /** Check if mouse is over a floating overlay body. Returns the region and optional cursor hint. */
+  checkOverlayBody: (mouseX: number, mouseY: number) => { region: GridRegion; cursor: string | null } | null;
   /** Handle mousedown on a floating overlay body. Returns true if move started. */
   handleOverlayMoveMouseDown: (
     mouseX: number,
@@ -111,7 +111,7 @@ export function createOverlayMoveHandlers(
   const checkOverlayBody = (
     mouseX: number,
     mouseY: number,
-  ): GridRegion | null => {
+  ): { region: GridRegion; cursor: string | null } | null => {
     const regions = getGridRegions();
     // Check in reverse so topmost floating overlays are tested first
     for (let i = regions.length - 1; i >= 0; i--) {
@@ -125,7 +125,20 @@ export function createOverlayMoveHandlers(
         mouseY >= bounds.y &&
         mouseY <= bounds.y + bounds.height
       ) {
-        return region;
+        // Ask the overlay registration for a cursor hint
+        let cursor: string | null = null;
+        const registration = getOverlayRegistration(region.type);
+        if (registration?.getCursor) {
+          cursor = registration.getCursor({
+            region,
+            canvasX: mouseX,
+            canvasY: mouseY,
+            row: 0,
+            col: 0,
+            floatingCanvasBounds: bounds,
+          });
+        }
+        return { region, cursor };
       }
     }
     return null;
@@ -140,9 +153,10 @@ export function createOverlayMoveHandlers(
     mouseY: number,
     event: React.MouseEvent<HTMLElement>,
   ): boolean => {
-    const region = checkOverlayBody(mouseX, mouseY);
-    if (!region || !region.floating) return false;
+    const hit = checkOverlayBody(mouseX, mouseY);
+    if (!hit || !hit.region.floating) return false;
 
+    const region = hit.region;
     event.preventDefault();
 
     // Notify extensions that a floating overlay was selected (always)

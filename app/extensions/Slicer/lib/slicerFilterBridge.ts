@@ -11,8 +11,6 @@ import { emitAppEvent, AppEvents } from "../../../src/api";
  * For pivots: uses pivot field hiddenItems.
  */
 export async function applySlicerFilter(slicer: Slicer): Promise<void> {
-  console.log("[Slicer] applySlicerFilter called: sourceType=%s, sourceId=%d, field=%s, selected=%o",
-    slicer.sourceType, slicer.sourceId, slicer.fieldName, slicer.selectedItems);
   try {
     if (slicer.sourceType === "table") {
       await applyTableFilter(slicer);
@@ -61,8 +59,6 @@ async function applyTableFilter(slicer: Slicer): Promise<void> {
 async function applyPivotFilter(slicer: Slicer): Promise<void> {
   // Resolve field index from field name using pivot hierarchies
   const fieldIndex = await resolveFieldIndex(slicer.sourceId, slicer.fieldName);
-  console.log("[Slicer] applyPivotFilter: pivotId=%d, fieldName=%s, fieldIndex=%d, selectedItems=%o",
-    slicer.sourceId, slicer.fieldName, fieldIndex, slicer.selectedItems);
   if (fieldIndex < 0) {
     console.warn("[Slicer] Could not resolve field index for:", slicer.fieldName);
     return;
@@ -70,19 +66,16 @@ async function applyPivotFilter(slicer: Slicer): Promise<void> {
 
   if (slicer.selectedItems === null) {
     // All selected = clear the filter on this field
-    console.log("[Slicer] Clearing pivot filter for field %d", fieldIndex);
-    const result = await invokeBackend("clear_pivot_filter", {
+    await invokeBackend("clear_pivot_filter", {
       request: {
         pivotId: slicer.sourceId,
         fieldIndex,
       },
     });
-    console.log("[Slicer] clear_pivot_filter result:", result);
   } else {
     // Apply manual filter with selected items
     // The backend computes hidden_items = all_values - selected_items
-    console.log("[Slicer] Applying pivot filter: field=%d, selected=%o", fieldIndex, slicer.selectedItems);
-    const result = await invokeBackend("apply_pivot_filter", {
+    await invokeBackend("apply_pivot_filter", {
       request: {
         pivotId: slicer.sourceId,
         fieldIndex,
@@ -91,7 +84,6 @@ async function applyPivotFilter(slicer: Slicer): Promise<void> {
         },
       },
     });
-    console.log("[Slicer] apply_pivot_filter result:", result);
   }
 
   // Notify the Pivot extension to refresh its overlay regions with the new view data.
