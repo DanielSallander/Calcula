@@ -216,6 +216,14 @@ pub struct SlicerState {
     pub slicers: Mutex<HashMap<u64, Slicer>>,
     /// Next available slicer ID
     pub next_id: Mutex<u64>,
+    /// Computed properties: slicer_id -> list of properties
+    pub computed_properties: Mutex<super::computed::SlicerComputedPropertiesStorage>,
+    /// Next available computed property ID
+    pub next_computed_prop_id: Mutex<u64>,
+    /// Dependency tracking: prop_id -> cells it references
+    pub computed_prop_dependencies: Mutex<super::computed::SlicerComputedPropDependencies>,
+    /// Reverse dependency: cell -> prop_ids
+    pub computed_prop_dependents: Mutex<super::computed::SlicerComputedPropDependents>,
 }
 
 impl SlicerState {
@@ -223,6 +231,10 @@ impl SlicerState {
         Self {
             slicers: Mutex::new(HashMap::new()),
             next_id: Mutex::new(1),
+            computed_properties: Mutex::new(HashMap::new()),
+            next_computed_prop_id: Mutex::new(1),
+            computed_prop_dependencies: Mutex::new(HashMap::new()),
+            computed_prop_dependents: Mutex::new(HashMap::new()),
         }
     }
 }

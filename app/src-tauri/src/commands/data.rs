@@ -19,6 +19,7 @@ use crate::{
 };
 use engine::{self, Grid, StyleRegistry};
 use crate::persistence::UserFilesState;
+use crate::slicer::SlicerState;
 use std::collections::HashSet;
 use tauri::State;
 
@@ -356,6 +357,7 @@ fn get_cell_internal(grid: &Grid, styles: &StyleRegistry, row: u32, col: u32) ->
 pub fn update_cell(
     state: State<AppState>,
     user_files_state: State<UserFilesState>,
+    slicer_state: State<SlicerState>,
     row: u32,
     col: u32,
     value: String,
@@ -497,7 +499,7 @@ pub fn update_cell(
         // Record undo after successful change
         undo_stack.record_cell_change(row, col, previous_cell);
 
-        return Ok(UpdateCellResult { cells: updated_cells, dimension_changes, needs_style_refresh });
+        return Ok(UpdateCellResult { cells: updated_cells, dimension_changes, needs_style_refresh, slicer_changed: false });
     }
 
     // Parse the input
@@ -1204,7 +1206,34 @@ pub fn update_cell(
         }
     }
 
-    Ok(UpdateCellResult { cells: updated_cells, dimension_changes, needs_style_refresh })
+    // Re-evaluate slicer computed properties affected by changed cells
+    let slicer_changed = {
+        let rev_deps = slicer_state.computed_prop_dependents.lock().unwrap();
+        if rev_deps.is_empty() {
+            false
+        } else {
+            drop(rev_deps);
+            let changed_cells: Vec<(usize, u32, u32)> = updated_cells.iter()
+                .map(|c| (c.sheet_index.unwrap_or(active_sheet), c.row, c.col))
+                .collect();
+
+            let rh = state.row_heights.lock().unwrap();
+            let cw = state.column_widths.lock().unwrap();
+
+            let modified = crate::slicer::computed::re_evaluate_slicer_computed_properties(
+                &changed_cells,
+                &grids,
+                &sheet_names,
+                &rh,
+                &cw,
+                &styles,
+                &slicer_state,
+            );
+            !modified.is_empty()
+        }
+    };
+
+    Ok(UpdateCellResult { cells: updated_cells, dimension_changes, needs_style_refresh, slicer_changed })
 }
 
 /// Batch update multiple cells in a single operation.

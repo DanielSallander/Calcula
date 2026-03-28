@@ -3,6 +3,8 @@
 
 pub mod types;
 pub mod commands;
+pub mod computed;
 
 pub use types::*;
 pub use commands::*;
+pub use computed::*;

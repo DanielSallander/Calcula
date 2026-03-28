@@ -7,6 +7,7 @@ import type {
   SlicerItem,
   CreateSlicerParams,
   UpdateSlicerParams,
+  SlicerComputedPropertyResult,
 } from "./slicerTypes";
 
 export async function createSlicer(params: CreateSlicerParams): Promise<Slicer> {
@@ -60,4 +61,58 @@ export async function getSlicersForSheet(sheetIndex: number): Promise<Slicer[]> 
 
 export async function getSlicerItems(slicerId: number): Promise<SlicerItem[]> {
   return invokeBackend<SlicerItem[]>("get_slicer_items", { slicerId });
+}
+
+// ============================================================================
+// Slicer Computed Properties
+// ============================================================================
+
+export async function getSlicerComputedProperties(
+  slicerId: number,
+): Promise<SlicerComputedPropertyResult> {
+  return invokeBackend<SlicerComputedPropertyResult>(
+    "get_slicer_computed_properties",
+    { slicerId },
+  );
+}
+
+export async function getSlicerAvailableAttributes(): Promise<string[]> {
+  return invokeBackend<string[]>("get_slicer_available_attributes");
+}
+
+export async function addSlicerComputedProperty(
+  slicerId: number,
+  attribute: string,
+  formula: string,
+): Promise<SlicerComputedPropertyResult> {
+  return invokeBackend<SlicerComputedPropertyResult>(
+    "add_slicer_computed_property",
+    { slicerId, attribute, formula },
+  );
+}
+
+export async function updateSlicerComputedProperty(
+  propId: number,
+  attribute?: string,
+  formula?: string,
+): Promise<SlicerComputedPropertyResult> {
+  return invokeBackend<SlicerComputedPropertyResult>(
+    "update_slicer_computed_property",
+    { propId, attribute, formula },
+  );
+}
+
+export async function removeSlicerComputedProperty(
+  propId: number,
+): Promise<SlicerComputedPropertyResult> {
+  return invokeBackend<SlicerComputedPropertyResult>(
+    "remove_slicer_computed_property",
+    { propId },
+  );
+}
+
+export async function getSlicerComputedAttributes(
+  slicerId: number,
+): Promise<string[]> {
+  return invokeBackend<string[]>("get_slicer_computed_attributes", { slicerId });
 }

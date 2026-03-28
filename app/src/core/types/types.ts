@@ -249,6 +249,8 @@ export interface UpdateCellResult {
   dimensionChanges: DimensionData[];
   /** Whether cell styles changed and frontend should refresh style cache */
   needsStyleRefresh?: boolean;
+  /** Whether slicer computed properties changed a slicer — refresh slicer overlays */
+  slicerChanged?: boolean;
 }
 
 /**

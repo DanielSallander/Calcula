@@ -208,6 +208,9 @@ pub struct UpdateCellResult {
     /// When true, the frontend should refresh its style cache (e.g., after SET.CELL.FILLCOLOR).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub needs_style_refresh: bool,
+    /// When true, slicer computed properties changed a slicer — frontend should refresh slicer overlays.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub slicer_changed: bool,
 }
 
 /// A merged cell region definition.
@@ -931,6 +934,33 @@ pub struct ComputedPropertyResult {
     pub dimension_changes: Vec<DimensionData>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub needs_style_refresh: bool,
+}
+
+// ============================================================================
+// Slicer Computed Properties types
+// ============================================================================
+
+/// A single slicer computed property as returned to the frontend.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SlicerComputedPropertyData {
+    pub id: u64,
+    pub slicer_id: u64,
+    pub attribute: String,
+    pub formula: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub current_value: Option<String>,
+}
+
+/// Result from slicer computed property operations.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SlicerComputedPropertyResult {
+    pub success: bool,
+    pub properties: Vec<SlicerComputedPropertyData>,
+    /// Whether the slicer was modified and needs redraw
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub slicer_changed: bool,
 }
 
 // ============================================================================

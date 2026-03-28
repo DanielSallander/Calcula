@@ -2,7 +2,7 @@
 //! Slicer definitions serialization.
 //! Each slicer is stored as slicers/slicer_{id}.json.
 
-use persistence::{SavedSlicer, SavedSlicerSourceType, SavedSlicerSelectionMode, SavedSlicerArrangement};
+use persistence::{SavedSlicer, SavedSlicerSourceType, SavedSlicerSelectionMode, SavedSlicerArrangement, SavedSlicerComputedProperty};
 use serde::{Deserialize, Serialize};
 
 /// JSON-friendly slicer definition that uses camelCase for the .cala format.
@@ -50,6 +50,18 @@ pub struct SlicerDef {
     pub item_padding: f64,
     #[serde(default = "default_button_radius")]
     pub button_radius: f64,
+    /// Computed properties (formula-driven attributes)
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub computed_properties: Vec<SlicerComputedPropertyDef>,
+}
+
+/// JSON-friendly computed property definition for the .cala format.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SlicerComputedPropertyDef {
+    pub id: u64,
+    pub attribute: String,
+    pub formula: String,
 }
 
 fn default_selection_mode() -> String {
@@ -113,6 +125,13 @@ impl From<&SavedSlicer> for SlicerDef {
             autogrid: s.autogrid,
             item_padding: s.item_padding,
             button_radius: s.button_radius,
+            computed_properties: s.computed_properties.iter().map(|cp| {
+                SlicerComputedPropertyDef {
+                    id: cp.id,
+                    attribute: cp.attribute.clone(),
+                    formula: cp.formula.clone(),
+                }
+            }).collect(),
         }
     }
 }
@@ -158,6 +177,13 @@ impl From<&SlicerDef> for SavedSlicer {
             autogrid: s.autogrid,
             item_padding: s.item_padding,
             button_radius: s.button_radius,
+            computed_properties: s.computed_properties.iter().map(|cp| {
+                SavedSlicerComputedProperty {
+                    id: cp.id,
+                    attribute: cp.attribute.clone(),
+                    formula: cp.formula.clone(),
+                }
+            }).collect(),
         }
     }
 }

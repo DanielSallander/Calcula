@@ -383,6 +383,17 @@ pub struct SavedSlicer {
     pub item_padding: f64,
     #[serde(default = "default_button_radius")]
     pub button_radius: f64,
+    /// Computed properties (formula-driven attributes)
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub computed_properties: Vec<SavedSlicerComputedProperty>,
+}
+
+/// A saved slicer computed property (formula-driven attribute).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SavedSlicerComputedProperty {
+    pub id: u64,
+    pub attribute: String,
+    pub formula: String,
 }
 
 fn default_true() -> bool {

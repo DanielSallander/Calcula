@@ -9,6 +9,7 @@ import type {
 import React from "react";
 import { InsertSlicerDialog } from "./components/InsertSlicerDialog";
 import { SlicerSettingsDialog } from "./components/SlicerSettingsDialog";
+import { SlicerComputedPropertiesDialog } from "./components/SlicerComputedPropertiesDialog";
 import { SlicerOptionsTab } from "./components/SlicerOptionsTab";
 
 // ============================================================================
@@ -48,6 +49,7 @@ export const SlicerOptionsTabDefinition = {
 
 export const INSERT_SLICER_DIALOG_ID = "slicer:insertDialog";
 export const SLICER_SETTINGS_DIALOG_ID = "slicer:settingsDialog";
+export const SLICER_COMPUTED_PROPS_DIALOG_ID = "slicer:computedPropsDialog";
 
 export const InsertSlicerDialogDefinition: DialogDefinition = {
   id: INSERT_SLICER_DIALOG_ID,
@@ -58,5 +60,11 @@ export const InsertSlicerDialogDefinition: DialogDefinition = {
 export const SlicerSettingsDialogDefinition: DialogDefinition = {
   id: SLICER_SETTINGS_DIALOG_ID,
   component: SlicerSettingsDialog as React.ComponentType<DialogProps>,
+  priority: 100,
+};
+
+export const SlicerComputedPropsDialogDefinition: DialogDefinition = {
+  id: SLICER_COMPUTED_PROPS_DIALOG_ID,
+  component: SlicerComputedPropertiesDialog as React.ComponentType<DialogProps>,
   priority: 100,
 };

@@ -8,6 +8,7 @@ import type { DialogProps } from "../../../src/api";
 import { getSlicerById, updateSlicerAsync } from "../lib/slicerStore";
 import { requestOverlayRedraw } from "../../../src/api/gridOverlays";
 import type { SlicerSelectionMode, SlicerArrangement } from "../lib/slicerTypes";
+import { getSlicerComputedAttributes } from "../lib/slicer-api";
 
 // ============================================================================
 // Toggle Switch Component
@@ -101,6 +102,11 @@ export function SlicerSettingsDialog({
   const [itemPadding, setItemPadding] = useState(0);
   const [buttonRadius, setButtonRadius] = useState(2);
 
+  // Computed attributes (attributes controlled by formulas)
+  const [computedAttrs, setComputedAttrs] = useState<Set<string>>(new Set());
+  const isComputed = (attr: string) => computedAttrs.has(attr);
+  const computedTitle = "Controlled via computed properties";
+
   // Load current settings when dialog opens
   useEffect(() => {
     if (isOpen && slicerId != null) {
@@ -120,6 +126,10 @@ export function SlicerSettingsDialog({
         setItemPadding(slicer.itemPadding);
         setButtonRadius(slicer.buttonRadius);
       }
+      // Fetch which attributes are computed
+      getSlicerComputedAttributes(slicerId).then((attrs) => {
+        setComputedAttrs(new Set(attrs));
+      });
     }
   }, [isOpen, slicerId]);
 
@@ -211,18 +221,26 @@ export function SlicerSettingsDialog({
 
           {/* Data Display Section */}
           <Section title="Data display">
-            <ToggleRow label="Hide items with no data" checked={hideNoData} onChange={setHideNoData} />
+            <ToggleRow
+              label="Hide items with no data"
+              checked={hideNoData}
+              onChange={setHideNoData}
+              disabled={isComputed("hideNoData")}
+              title={isComputed("hideNoData") ? computedTitle : undefined}
+            />
             <ToggleRow
               label="Visually indicate items with no data"
               checked={indicateNoData}
               onChange={setIndicateNoData}
-              disabled={hideNoData}
+              disabled={hideNoData || isComputed("indicateNoData")}
+              title={isComputed("indicateNoData") ? computedTitle : undefined}
             />
             <ToggleRow
               label="Show items with no data last"
               checked={sortNoDataLast}
               onChange={setSortNoDataLast}
-              disabled={hideNoData}
+              disabled={hideNoData || isComputed("sortNoDataLast")}
+              title={isComputed("sortNoDataLast") ? computedTitle : undefined}
             />
           </Section>
 
@@ -256,7 +274,8 @@ export function SlicerSettingsDialog({
                     onChange={setColumns}
                     min={1}
                     max={10}
-                    disabled={autogrid}
+                    disabled={autogrid || isComputed("columns")}
+                    title={isComputed("columns") ? computedTitle : undefined}
                   />
                   <ToggleRow label="Autogrid" checked={autogrid} onChange={setAutogrid} />
                 </>
@@ -268,6 +287,8 @@ export function SlicerSettingsDialog({
                   onChange={setColumns}
                   min={1}
                   max={20}
+                  disabled={isComputed("columns")}
+                  title={isComputed("columns") ? computedTitle : undefined}
                 />
               )}
               {arrangement === "vertical" && (
@@ -290,6 +311,8 @@ export function SlicerSettingsDialog({
                 min={0}
                 max={50}
                 suffix="px"
+                disabled={isComputed("itemGap")}
+                title={isComputed("itemGap") ? computedTitle : undefined}
               />
               <NumberRow
                 label="Inner padding"
@@ -298,6 +321,8 @@ export function SlicerSettingsDialog({
                 min={0}
                 max={30}
                 suffix="px"
+                disabled={isComputed("itemPadding")}
+                title={isComputed("itemPadding") ? computedTitle : undefined}
               />
             </Section>
 
@@ -310,6 +335,8 @@ export function SlicerSettingsDialog({
                 min={0}
                 max={20}
                 suffix="px"
+                disabled={isComputed("buttonRadius")}
+                title={isComputed("buttonRadius") ? computedTitle : undefined}
               />
             </Section>
           </Section>
@@ -343,14 +370,16 @@ function ToggleRow({
   checked,
   onChange,
   disabled,
+  title,
 }: {
   label: string;
   checked: boolean;
   onChange: (v: boolean) => void;
   disabled?: boolean;
+  title?: string;
 }) {
   return (
-    <div style={{ ...s.row, ...(disabled ? s.disabled : {}) }}>
+    <div style={{ ...s.row, ...(disabled ? s.disabled : {}) }} title={title}>
       <span style={s.rowLabel}>{label}</span>
       <Toggle checked={checked} onChange={onChange} disabled={disabled} />
     </div>
@@ -390,6 +419,7 @@ function NumberRow({
   max,
   disabled,
   suffix,
+  title,
 }: {
   label: string;
   value: number;
@@ -398,9 +428,10 @@ function NumberRow({
   max?: number;
   disabled?: boolean;
   suffix?: string;
+  title?: string;
 }) {
   return (
-    <div style={{ ...s.fieldGroup, ...(disabled ? s.disabled : {}) }}>
+    <div style={{ ...s.fieldGroup, ...(disabled ? s.disabled : {}) }} title={title}>
       <span style={s.fieldLabel}>{label}</span>
       <div style={s.numberInputWrapper}>
         <input

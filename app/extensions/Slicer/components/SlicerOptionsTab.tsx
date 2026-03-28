@@ -16,11 +16,12 @@ import {
 } from "../lib/slicerStore";
 import { requestOverlayRedraw } from "../../../src/api/gridOverlays";
 import { showDialog } from "../../../src/api";
-import { SLICER_SETTINGS_DIALOG_ID } from "../manifest";
+import { SLICER_SETTINGS_DIALOG_ID, SLICER_COMPUTED_PROPS_DIALOG_ID } from "../manifest";
 import { SlicerEvents } from "../lib/slicerEvents";
 import type { Slicer } from "../lib/slicerTypes";
 import { SlicerStylesGallery } from "./SlicerStylesGallery";
 import { broadcastSelectedSlicers } from "../handlers/selectionHandler";
+import { getSlicerComputedAttributes } from "../lib/slicer-api";
 
 // ============================================================================
 // Helpers
@@ -166,6 +167,11 @@ const tabStyles = {
       border-color: #c0392b;
     }
   `,
+  computedOverlay: css`
+    opacity: 0.4;
+    pointer-events: none;
+    position: relative;
+  `,
 };
 
 // Group definitions for ribbon collapse (collapseOrder: lower = collapses first).
@@ -191,9 +197,14 @@ export function SlicerOptionsTab({
   const [headerText, setHeaderText] = useState("");
   const [widthStr, setWidthStr] = useState("");
   const [heightStr, setHeightStr] = useState("");
+  const [computedAttrs, setComputedAttrs] = useState<Set<string>>(new Set());
   const collapsedGroups = useRibbonCollapse(containerRef, SLICER_GROUPS);
 
   const isMulti = slicers.length > 1;
+
+  /** Helper: is an attribute controlled by a computed property? */
+  const isComputed = (attr: string) => computedAttrs.has(attr);
+  const computedTitle = "This attribute is controlled via computed properties";
 
   // Listen for slicer selection/deselection events
   useEffect(() => {
@@ -210,6 +221,10 @@ export function SlicerOptionsTab({
           setHeaderText(s.headerText ?? s.name);
           setWidthStr(Math.round(s.width).toString());
           setHeightStr(Math.round(s.height).toString());
+          // Fetch computed attributes for this slicer
+          getSlicerComputedAttributes(s.id).then((attrs) => {
+            setComputedAttrs(new Set(attrs));
+          });
         } else {
           // Multi-select: show common values or empty
           setSlicerName("");
@@ -218,12 +233,14 @@ export function SlicerOptionsTab({
           setWidthStr(cw === MIXED ? "" : cw.toString());
           const ch = commonValue(arr, (s) => Math.round(s.height));
           setHeightStr(ch === MIXED ? "" : ch.toString());
+          setComputedAttrs(new Set());
         }
       }
     };
 
     const handleDeselected = () => {
       setSlicers([]);
+      setComputedAttrs(new Set());
     };
 
     window.addEventListener(SlicerEvents.SLICER_UPDATED, handleUpdated);
@@ -369,7 +386,10 @@ export function SlicerOptionsTab({
               title={isMulti ? "Name editing not available for multiple slicers" : undefined}
             />
           </div>
-          <div className={tabStyles.groupContent}>
+          <div
+            className={`${tabStyles.groupContent} ${isComputed("headerText") ? tabStyles.computedOverlay : ""}`}
+            title={isComputed("headerText") ? computedTitle : undefined}
+          >
             <span className={tabStyles.label}>Header:</span>
             <input
               className={tabStyles.nameInput}
@@ -377,12 +397,15 @@ export function SlicerOptionsTab({
               onChange={(e) => setHeaderText(e.target.value)}
               onBlur={handleHeaderTextBlur}
               onKeyDown={handleNameKeyDown}
-              disabled={isMulti}
-              title={isMulti ? "Header editing not available for multiple slicers" : "Header display text (shown in the header bar)"}
+              disabled={isMulti || isComputed("headerText")}
+              title={isComputed("headerText") ? computedTitle : isMulti ? "Header editing not available for multiple slicers" : "Header display text (shown in the header bar)"}
               placeholder={isMulti ? "(multiple)" : undefined}
             />
           </div>
-          <label className={tabStyles.checkboxLabel}>
+          <label
+            className={`${tabStyles.checkboxLabel} ${isComputed("showHeader") ? tabStyles.computedOverlay : ""}`}
+            title={isComputed("showHeader") ? computedTitle : undefined}
+          >
             <input
               type="checkbox"
               checked={commonShowHeader === MIXED ? false : commonShowHeader}
@@ -390,6 +413,7 @@ export function SlicerOptionsTab({
                 if (el) el.indeterminate = commonShowHeader === MIXED;
               }}
               onChange={(e) => handleShowHeaderChange(e.target.checked)}
+              disabled={isComputed("showHeader")}
             />
             Show Header
           </label>
@@ -403,12 +427,16 @@ export function SlicerOptionsTab({
         collapsed={collapsedGroups[1]}
       >
         <div className={tabStyles.groupContentVertical}>
-          <div className={tabStyles.groupContent}>
+          <div
+            className={`${tabStyles.groupContent} ${isComputed("columns") ? tabStyles.computedOverlay : ""}`}
+            title={isComputed("columns") ? computedTitle : undefined}
+          >
             <span className={tabStyles.label}>Columns:</span>
             <select
               className={tabStyles.columnSelect}
               value={commonColumns === MIXED ? "" : commonColumns}
               onChange={(e) => handleColumnsChange(Number(e.target.value))}
+              disabled={isComputed("columns")}
             >
               {commonColumns === MIXED && (
                 <option value="" disabled>-</option>
@@ -436,7 +464,10 @@ export function SlicerOptionsTab({
         collapsed={collapsedGroups[2]}
       >
         <div className={tabStyles.groupContentVertical}>
-          <div className={tabStyles.groupContent}>
+          <div
+            className={`${tabStyles.groupContent} ${isComputed("width") ? tabStyles.computedOverlay : ""}`}
+            title={isComputed("width") ? computedTitle : undefined}
+          >
             <span className={tabStyles.label}>Width:</span>
             <input
               className={tabStyles.sizeInput}
@@ -447,9 +478,13 @@ export function SlicerOptionsTab({
               type="number"
               min={60}
               placeholder={isMulti ? "-" : undefined}
+              disabled={isComputed("width")}
             />
           </div>
-          <div className={tabStyles.groupContent}>
+          <div
+            className={`${tabStyles.groupContent} ${isComputed("height") ? tabStyles.computedOverlay : ""}`}
+            title={isComputed("height") ? computedTitle : undefined}
+          >
             <span className={tabStyles.label}>Height:</span>
             <input
               className={tabStyles.sizeInput}
@@ -460,6 +495,7 @@ export function SlicerOptionsTab({
               type="number"
               min={60}
               placeholder={isMulti ? "-" : undefined}
+              disabled={isComputed("height")}
             />
           </div>
         </div>
@@ -479,6 +515,14 @@ export function SlicerOptionsTab({
             disabled={isMulti}
           >
             Settings...
+          </button>
+          <button
+            className={tabStyles.settingsButton}
+            onClick={() => showDialog(SLICER_COMPUTED_PROPS_DIALOG_ID, { slicerId: primary.id })}
+            title={isMulti ? "Open computed properties for the last selected slicer" : "Formula-driven attributes for this slicer"}
+            disabled={isMulti}
+          >
+            Computed...
           </button>
           <button
             className={tabStyles.deleteButton}

@@ -20,6 +20,7 @@ import {
   SlicerManifest,
   InsertSlicerDialogDefinition,
   SlicerSettingsDialogDefinition,
+  SlicerComputedPropsDialogDefinition,
 } from "./manifest";
 
 import {
@@ -101,6 +102,7 @@ export function registerSlicerExtension(): void {
   // Register dialogs
   DialogExtensions.registerDialog(InsertSlicerDialogDefinition);
   DialogExtensions.registerDialog(SlicerSettingsDialogDefinition);
+  DialogExtensions.registerDialog(SlicerComputedPropsDialogDefinition);
 
   // Register grid overlay renderer for slicer panels
   cleanupFunctions.push(
@@ -301,7 +303,7 @@ export function registerSlicerExtension(): void {
 
     // Compute canvas coordinates directly from this mouseup event
     if (!gridContainer) {
-      gridContainer = document.querySelector("canvas")?.parentElement ?? null;
+      gridContainer = document.querySelector("[data-grid-area]") as HTMLElement | null;
     }
     if (!gridContainer) return;
 
@@ -326,7 +328,7 @@ export function registerSlicerExtension(): void {
 
   const handleContextMenu = (e: MouseEvent) => {
     if (!gridContainer) {
-      gridContainer = document.querySelector("canvas")?.parentElement ?? null;
+      gridContainer = document.querySelector("[data-grid-area]") as HTMLElement | null;
     }
     handleSlicerContextMenu(e, gridContainer);
   };
@@ -342,7 +344,7 @@ export function registerSlicerExtension(): void {
 
   const handleWheel = (e: WheelEvent) => {
     if (!gridContainer) {
-      gridContainer = document.querySelector("canvas")?.parentElement ?? null;
+      gridContainer = document.querySelector("[data-grid-area]") as HTMLElement | null;
     }
     if (!gridContainer) return;
 
@@ -438,6 +440,20 @@ export function registerSlicerExtension(): void {
   window.addEventListener(SlicerEvents.SLICER_SELECTION_CHANGED, handleSelectionChanged);
   cleanupFunctions.push(() => {
     window.removeEventListener(SlicerEvents.SLICER_SELECTION_CHANGED, handleSelectionChanged);
+  });
+
+  // -----------------------------------------------------------------------
+  // Slicer computed property refresh (triggered when cell changes affect slicers)
+  // -----------------------------------------------------------------------
+
+  const handleSlicerRefresh = () => {
+    refreshCache().then(() => {
+      requestOverlayRedraw();
+    }).catch(console.error);
+  };
+  window.addEventListener("slicers:refresh", handleSlicerRefresh);
+  cleanupFunctions.push(() => {
+    window.removeEventListener("slicers:refresh", handleSlicerRefresh);
   });
 
   // -----------------------------------------------------------------------

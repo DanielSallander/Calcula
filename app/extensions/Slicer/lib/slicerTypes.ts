@@ -78,3 +78,21 @@ export interface UpdateSlicerParams {
   itemPadding?: number;
   buttonRadius?: number;
 }
+
+// ============================================================================
+// Slicer Computed Properties
+// ============================================================================
+
+export interface SlicerComputedPropertyData {
+  id: number;
+  slicerId: number;
+  attribute: string;
+  formula: string;
+  currentValue?: string;
+}
+
+export interface SlicerComputedPropertyResult {
+  success: boolean;
+  properties: SlicerComputedPropertyData[];
+  slicerChanged?: boolean;
+}

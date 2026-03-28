@@ -208,9 +208,24 @@ fn collect_slicers_for_save(
     slicer_state: &State<crate::slicer::SlicerState>,
 ) -> Vec<persistence::SavedSlicer> {
     let slicers = slicer_state.slicers.lock().unwrap();
+    let computed_props = slicer_state.computed_properties.lock().unwrap();
     slicers
         .values()
-        .map(|s| slicer_to_saved(s))
+        .map(|s| {
+            let mut saved = slicer_to_saved(s);
+            // Attach computed properties for this slicer
+            if let Some(props) = computed_props.get(&s.id) {
+                saved.computed_properties = props
+                    .iter()
+                    .map(|p| persistence::SavedSlicerComputedProperty {
+                        id: p.id,
+                        attribute: p.attribute.clone(),
+                        formula: p.formula.clone(),
+                    })
+                    .collect();
+            }
+            saved
+        })
         .collect()
 }
 
@@ -254,6 +269,7 @@ fn slicer_to_saved(slicer: &crate::slicer::Slicer) -> persistence::SavedSlicer {
         autogrid: slicer.autogrid,
         item_padding: slicer.item_padding,
         button_radius: slicer.button_radius,
+        computed_properties: Vec::new(),
     }
 }
 
@@ -307,19 +323,50 @@ fn restore_slicers(
 ) {
     let mut slicers = slicer_state.slicers.lock().unwrap();
     let mut next_id = slicer_state.next_id.lock().unwrap();
+    let mut computed_props = slicer_state.computed_properties.lock().unwrap();
+    let mut next_cprop_id = slicer_state.next_computed_prop_id.lock().unwrap();
 
     slicers.clear();
+    computed_props.clear();
     let mut max_id: u64 = 0;
+    let mut max_cprop_id: u64 = 0;
 
     for saved in saved_slicers {
         let slicer = saved_to_slicer(saved);
         if slicer.id > max_id {
             max_id = slicer.id;
         }
+        let slicer_id = slicer.id;
         slicers.insert(slicer.id, slicer);
+
+        // Restore computed properties
+        if !saved.computed_properties.is_empty() {
+            let props: Vec<crate::slicer::computed::SlicerComputedProperty> = saved
+                .computed_properties
+                .iter()
+                .map(|sp| {
+                    if sp.id > max_cprop_id {
+                        max_cprop_id = sp.id;
+                    }
+                    let cached_ast = parser::parse(&sp.formula)
+                        .ok()
+                        .map(|parsed| crate::convert_expr(&parsed));
+                    crate::slicer::computed::SlicerComputedProperty {
+                        id: sp.id,
+                        slicer_id,
+                        attribute: sp.attribute.clone(),
+                        formula: sp.formula.clone(),
+                        cached_ast,
+                        cached_value: None,
+                    }
+                })
+                .collect();
+            computed_props.insert(slicer_id, props);
+        }
     }
 
     *next_id = max_id + 1;
+    *next_cprop_id = max_cprop_id + 1;
 }
 
 // ============================================================================
@@ -506,6 +553,10 @@ pub fn new_file(
     // Clear slicer state
     slicer_state.slicers.lock().unwrap().clear();
     *slicer_state.next_id.lock().unwrap() = 1;
+    slicer_state.computed_properties.lock().unwrap().clear();
+    *slicer_state.next_computed_prop_id.lock().unwrap() = 1;
+    slicer_state.computed_prop_dependencies.lock().unwrap().clear();
+    slicer_state.computed_prop_dependents.lock().unwrap().clear();
 
     // Clear user files
     user_files_state.files.lock().map_err(|e| e.to_string())?.clear();

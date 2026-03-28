@@ -13,7 +13,7 @@ import {
 } from "../lib/slicerStore";
 import { getGridStateSnapshot } from "../../../src/api/state";
 import { showDialog } from "../../../src/api";
-import { SLICER_SETTINGS_DIALOG_ID } from "../manifest";
+import { SLICER_SETTINGS_DIALOG_ID, SLICER_COMPUTED_PROPS_DIALOG_ID } from "../manifest";
 
 // ============================================================================
 // State
@@ -49,9 +49,11 @@ export function handleSlicerContextMenu(
   const slicerHit = hitTestSlicerAt(canvasX, canvasY);
   if (!slicerHit) return false;
 
-  // Prevent the grid's context menu from showing
+  // Prevent the grid's context menu from showing.
+  // Use stopImmediatePropagation to ensure React's synthetic event doesn't fire.
   e.preventDefault();
   e.stopPropagation();
+  e.stopImmediatePropagation();
 
   contextSlicerId = slicerHit.slicerId;
   showContextMenu(e.clientX, e.clientY, slicerHit.slicerId);
@@ -85,10 +87,12 @@ function hitTestSlicerAt(
   const scrollY = gridState.viewport.scrollY;
   const headerWidth = gridState.config.rowHeaderWidth;
   const headerHeight = gridState.config.colHeaderHeight;
+  const activeSheet = gridState.sheetContext.activeSheetIndex;
 
-  // Check slicers in reverse (topmost first)
+  // Check slicers in reverse (topmost first), only on the active sheet
   for (let i = slicers.length - 1; i >= 0; i--) {
     const slicer = slicers[i];
+    if (slicer.sheetIndex !== activeSheet) continue;
     const bounds = {
       x: slicer.x - scrollX + headerWidth,
       y: slicer.y - scrollY + headerHeight,
@@ -170,6 +174,12 @@ function showContextMenu(clientX: number, clientY: number, slicerId: number): vo
       label: "Slicer Settings...",
       onClick: () => {
         showDialog(SLICER_SETTINGS_DIALOG_ID, { slicerId });
+      },
+    },
+    {
+      label: "Computed Properties...",
+      onClick: () => {
+        showDialog(SLICER_COMPUTED_PROPS_DIALOG_ID, { slicerId });
       },
     },
     {

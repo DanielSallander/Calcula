@@ -82,6 +82,26 @@ pub fn delete_slicer(
     slicers
         .remove(&slicer_id)
         .ok_or_else(|| format!("Slicer {} not found", slicer_id))?;
+
+    // Clean up computed properties for this slicer
+    let mut computed_props = slicer_state.computed_properties.lock().unwrap();
+    if let Some(props) = computed_props.remove(&slicer_id) {
+        let mut deps = slicer_state.computed_prop_dependencies.lock().unwrap();
+        let mut rev_deps = slicer_state.computed_prop_dependents.lock().unwrap();
+        for prop in &props {
+            if let Some(old_cells) = deps.remove(&prop.id) {
+                for cell in &old_cells {
+                    if let Some(prop_set) = rev_deps.get_mut(cell) {
+                        prop_set.remove(&prop.id);
+                        if prop_set.is_empty() {
+                            rev_deps.remove(cell);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     Ok(())
 }
 

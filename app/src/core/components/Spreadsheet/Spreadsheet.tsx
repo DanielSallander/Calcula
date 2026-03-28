@@ -584,6 +584,12 @@ function SpreadsheetContent({
         return;
       }
 
+      // If an overlay (e.g. slicer) already handled the native contextmenu
+      // event via a capture-phase listener, skip the grid context menu.
+      if (event.nativeEvent.defaultPrevented) {
+        return;
+      }
+
       event.preventDefault();
 
       const rect = containerRef.current?.getBoundingClientRect();
@@ -809,6 +815,7 @@ function SpreadsheetContent({
       {/* Grid Area with Scrollbars */}
       <S.GridArea
         ref={containerRef}
+        data-grid-area
         onMouseDown={handleMouseDown}
         onMouseMove={handleMouseMove}
         onMouseUp={handleMouseUp}

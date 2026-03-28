@@ -1371,6 +1371,11 @@ export function useEditing(): UseEditingReturn {
         window.dispatchEvent(new Event("styles:refresh"));
       }
 
+      // Refresh slicer overlays if slicer computed properties changed a slicer
+      if (updateResult.slicerChanged) {
+        window.dispatchEvent(new Event("slicers:refresh"));
+      }
+
       // FIX: Clear global flag and arrow reference state when editing stops
       console.log("[commitEdit] SUCCESS - clearing globalIsEditing, was:", globalIsEditing);
       setGlobalIsEditing(false);

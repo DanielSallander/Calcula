@@ -3334,6 +3334,12 @@ pub fn run() {
             slicer::get_all_slicers,
             slicer::get_slicers_for_sheet,
             slicer::get_slicer_items,
+            slicer::get_slicer_computed_properties,
+            slicer::get_slicer_available_attributes,
+            slicer::add_slicer_computed_property,
+            slicer::update_slicer_computed_property,
+            slicer::remove_slicer_computed_property,
+            slicer::get_slicer_computed_attributes,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
