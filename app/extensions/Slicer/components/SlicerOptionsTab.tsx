@@ -580,8 +580,9 @@ export function SlicerOptionsTab({
           >
             <span className={tabStyles.actionIcon}>
               <svg width="22" height="22" viewBox="0 0 22 22" fill="none" xmlns="http://www.w3.org/2000/svg">
-                <path d="M4 5h14M4 9h10M4 13h12M4 17h8" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round"/>
-                <text x="16" y="16" fontSize="10" fontWeight="bold" fill="#217346" fontFamily="inherit">fx</text>
+                <path d="M3 5h10M3 9h8M3 13h9M3 17h6" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round"/>
+                <path d="M15.5 10.5c.8-2 1.4-3.2 2-3.2s1 .5 1.2.8" stroke="#217346" strokeWidth="1.3" strokeLinecap="round" fill="none"/>
+                <path d="M14 15.5l4-4" stroke="#217346" strokeWidth="1.3" strokeLinecap="round"/>
               </svg>
             </span>
             <span className={tabStyles.actionLabel}>Computed</span>
