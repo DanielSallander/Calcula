@@ -8,6 +8,7 @@ import {
   requestOverlayRedraw,
   type GridRegion,
 } from "../../../src/api/gridOverlays";
+import { getGridStateSnapshot } from "../../../src/api/state";
 import * as api from "./slicer-api";
 import { SlicerEvents } from "./slicerEvents";
 
@@ -216,21 +217,27 @@ export function resetStore(): void {
 // ============================================================================
 
 export function syncSlicerRegions(): void {
-  const regions: GridRegion[] = cachedSlicers.map((slicer) => ({
-    id: `slicer-${slicer.id}`,
-    type: "slicer",
-    startRow: 0,
-    startCol: 0,
-    endRow: 0,
-    endCol: 0,
-    floating: {
-      x: slicer.x,
-      y: slicer.y,
-      width: slicer.width,
-      height: slicer.height,
-    },
-    data: { slicerId: slicer.id },
-  }));
+  // Only register regions for slicers on the active sheet
+  const gridState = getGridStateSnapshot();
+  const activeSheet = gridState?.sheetContext.activeSheetIndex ?? 0;
+
+  const regions: GridRegion[] = cachedSlicers
+    .filter((slicer) => slicer.sheetIndex === activeSheet)
+    .map((slicer) => ({
+      id: `slicer-${slicer.id}`,
+      type: "slicer",
+      startRow: 0,
+      startCol: 0,
+      endRow: 0,
+      endCol: 0,
+      floating: {
+        x: slicer.x,
+        y: slicer.y,
+        width: slicer.width,
+        height: slicer.height,
+      },
+      data: { slicerId: slicer.id },
+    }));
 
   replaceGridRegionsByType("slicer", regions);
 }

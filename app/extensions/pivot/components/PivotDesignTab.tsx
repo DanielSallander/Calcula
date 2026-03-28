@@ -114,10 +114,10 @@ const tabStyles = {
 // Gallery is NOT included — it uses flex: 1 1 0 and its own ResizeObserver
 // to progressively show fewer thumbnails as the ribbon narrows.
 const GROUP_DEFS = [
-  { collapseOrder: 1, expandedWidth: 160 },   // PivotTable Name
-  { collapseOrder: 2, expandedWidth: 200 },   // Grand Totals
-  { collapseOrder: 3, expandedWidth: 280 },   // Report Layout
-  { collapseOrder: 4, expandedWidth: 340 },   // Display
+  { collapseOrder: 1, expandedWidth: 180 },   // PivotTable Name
+  { collapseOrder: 2, expandedWidth: 140 },   // Grand Totals
+  { collapseOrder: 3, expandedWidth: 300 },   // Report Layout
+  { collapseOrder: 4, expandedWidth: 280 },   // Display
 ];
 
 // ============================================================================
@@ -253,7 +253,7 @@ export function PivotDesignTab({
 
       {/* Grand Totals Group */}
       <RibbonGroup label="Grand Totals" icon={"\u03A3"} collapsed={collapsed[1]}>
-        <div className={tabStyles.groupContent}>
+        <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
           <label className={tabStyles.checkboxLabel}>
             <input
               type="checkbox"
@@ -285,7 +285,7 @@ export function PivotDesignTab({
 
       {/* Report Layout Group */}
       <RibbonGroup label="Report Layout" icon={"\u2630"} collapsed={collapsed[2]}>
-        <div className={tabStyles.groupContent}>
+        <div className={tabStyles.groupContent} style={{ gap: 12 }}>
           <div className={tabStyles.selectLabel}>
             Layout:
             <select
@@ -320,47 +320,51 @@ export function PivotDesignTab({
 
       {/* Display Group */}
       <RibbonGroup label="Display" icon={"\u25A3"} collapsed={collapsed[3]}>
-        <div className={tabStyles.groupContent}>
-          <label className={tabStyles.checkboxLabel}>
-            <input
-              type="checkbox"
-              checked={layout.repeatRowLabels ?? false}
-              onChange={(e) =>
-                updateLayout({ repeatRowLabels: e.target.checked })
-              }
-            />
-            Repeat Labels
-          </label>
-          <label className={tabStyles.checkboxLabel}>
-            <input
-              type="checkbox"
-              checked={layout.showEmptyRows ?? false}
-              onChange={(e) =>
-                updateLayout({ showEmptyRows: e.target.checked })
-              }
-            />
-            Empty Rows
-          </label>
-          <label className={tabStyles.checkboxLabel}>
-            <input
-              type="checkbox"
-              checked={layout.showEmptyCols ?? false}
-              onChange={(e) =>
-                updateLayout({ showEmptyCols: e.target.checked })
-              }
-            />
-            Empty Cols
-          </label>
-          <label className={tabStyles.checkboxLabel}>
-            <input
-              type="checkbox"
-              checked={layout.autoFitColumnWidths ?? true}
-              onChange={(e) =>
-                updateLayout({ autoFitColumnWidths: e.target.checked })
-              }
-            />
-            Autofit Columns
-          </label>
+        <div className={tabStyles.groupContent} style={{ gap: 12 }}>
+          <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+            <label className={tabStyles.checkboxLabel}>
+              <input
+                type="checkbox"
+                checked={layout.repeatRowLabels ?? false}
+                onChange={(e) =>
+                  updateLayout({ repeatRowLabels: e.target.checked })
+                }
+              />
+              Repeat Labels
+            </label>
+            <label className={tabStyles.checkboxLabel}>
+              <input
+                type="checkbox"
+                checked={layout.showEmptyRows ?? false}
+                onChange={(e) =>
+                  updateLayout({ showEmptyRows: e.target.checked })
+                }
+              />
+              Empty Rows
+            </label>
+          </div>
+          <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+            <label className={tabStyles.checkboxLabel}>
+              <input
+                type="checkbox"
+                checked={layout.showEmptyCols ?? false}
+                onChange={(e) =>
+                  updateLayout({ showEmptyCols: e.target.checked })
+                }
+              />
+              Empty Cols
+            </label>
+            <label className={tabStyles.checkboxLabel}>
+              <input
+                type="checkbox"
+                checked={layout.autoFitColumnWidths ?? true}
+                onChange={(e) =>
+                  updateLayout({ autoFitColumnWidths: e.target.checked })
+                }
+              />
+              Autofit Columns
+            </label>
+          </div>
         </div>
       </RibbonGroup>
     </div>

@@ -101,28 +101,39 @@ const groupStyles = {
   expanded: css`
     display: flex;
     flex-direction: column;
-    gap: 4px;
-    padding-right: 24px;
+    gap: 2px;
+    padding: 4px 12px 2px 12px;
     border-right: 1px solid #e0e0e0;
     flex-shrink: 0;
+    height: 100%;
+    box-sizing: border-box;
+
+    &:first-child {
+      padding-left: 8px;
+    }
 
     &:last-child {
       border-right: none;
-      padding-right: 0;
+      padding-right: 8px;
     }
   `,
   expandedContent: css`
     display: flex;
     gap: 8px;
     align-items: center;
+    flex: 1;
   `,
   label: css`
     font-size: 10px;
-    color: #666;
+    color: #888;
     text-align: center;
-    margin-top: 4px;
+    margin-top: auto;
+    padding-top: 2px;
     text-transform: uppercase;
-    letter-spacing: 0.3px;
+    letter-spacing: 0.5px;
+    white-space: nowrap;
+    line-height: 1;
+    padding-bottom: 2px;
   `,
 
   // Collapsed group button
@@ -130,9 +141,11 @@ const groupStyles = {
     display: flex;
     flex-direction: column;
     align-items: center;
-    padding-right: 8px;
+    padding: 4px 8px 2px 8px;
     border-right: 1px solid #e0e0e0;
     flex-shrink: 0;
+    height: 100%;
+    box-sizing: border-box;
 
     &:last-child {
       border-right: none;
@@ -295,7 +308,7 @@ export function RibbonGroup({
 
   return (
     <div className={groupStyles.expanded}>
-      {children}
+      <div className={groupStyles.expandedContent}>{children}</div>
       <div className={groupStyles.label}>{label}</div>
     </div>
   );

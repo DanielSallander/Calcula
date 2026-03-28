@@ -70,16 +70,16 @@ const tabStyles = {
     }
   `,
   buttonIcon: css`
-    font-size: 24px;
+    font-size: 22px;
     line-height: 1;
-    height: 28px;
+    height: 26px;
     display: flex;
     align-items: center;
     justify-content: center;
   `,
   buttonLabel: css`
     font-size: 10px;
-    line-height: 1;
+    line-height: 1.2;
   `,
   sourceInfo: css`
     display: flex;
@@ -277,7 +277,12 @@ export function PivotAnalyzeTab({
             onClick={handleOptions}
             title="PivotTable Options"
           >
-            <span className={tabStyles.buttonIcon}>&#x2699;</span>
+            <span className={tabStyles.buttonIcon}>
+              <svg width="22" height="22" viewBox="0 0 22 22" fill="none" xmlns="http://www.w3.org/2000/svg">
+                <path d="M11 14a3 3 0 100-6 3 3 0 000 6z" stroke="currentColor" strokeWidth="1.4"/>
+                <path d="M9.5 2.5l-.4 1.7a7 7 0 00-1.8 1l-1.6-.6L4.2 6.8l1.2 1.2a7 7 0 000 2l-1.2 1.2 1.5 2.2 1.6-.6a7 7 0 001.8 1l.4 1.7h3l.4-1.7a7 7 0 001.8-1l1.6.6 1.5-2.2-1.2-1.2a7 7 0 000-2l1.2-1.2-1.5-2.2-1.6.6a7 7 0 00-1.8-1l-.4-1.7z" stroke="currentColor" strokeWidth="1.2" strokeLinejoin="round"/>
+              </svg>
+            </span>
             <span className={tabStyles.buttonLabel}>Options</span>
           </button>
           <button
@@ -285,13 +290,21 @@ export function PivotAnalyzeTab({
             onClick={() => showDialog("slicer:insertDialog", { sourceType: "pivot", sourceId: pivotId })}
             title="Insert a Slicer for this PivotTable"
           >
-            <span className={tabStyles.buttonIcon}>&#x25A7;</span>
+            <span className={tabStyles.buttonIcon}>
+              <svg width="22" height="22" viewBox="0 0 22 22" fill="none" xmlns="http://www.w3.org/2000/svg">
+                <rect x="2" y="2" width="18" height="18" rx="2" stroke="currentColor" strokeWidth="1.4"/>
+                <line x1="2" y1="7" x2="20" y2="7" stroke="currentColor" strokeWidth="1.2"/>
+                <line x1="2" y1="12" x2="20" y2="12" stroke="currentColor" strokeWidth="1.2"/>
+                <line x1="2" y1="17" x2="20" y2="17" stroke="currentColor" strokeWidth="1.2"/>
+              </svg>
+            </span>
             <span className={tabStyles.buttonLabel}>Insert Slicer</span>
           </button>
           <button
             className={tabStyles.button}
             onClick={handleDelete}
             title="Delete this PivotTable"
+            style={{ color: "#c42b1c" }}
           >
             <span className={tabStyles.buttonIcon}>&#x2716;</span>
             <span className={tabStyles.buttonLabel}>Delete</span>

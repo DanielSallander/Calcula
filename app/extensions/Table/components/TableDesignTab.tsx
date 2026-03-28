@@ -53,7 +53,7 @@ const tabStyles = {
   groupContentVertical: css`
     display: flex;
     flex-direction: column;
-    gap: 2px;
+    gap: 4px;
   `,
   checkboxLabel: css`
     display: flex;
@@ -91,8 +91,8 @@ const tabStyles = {
   toolButton: css`
     display: flex;
     align-items: center;
-    gap: 4px;
-    padding: 3px 8px;
+    gap: 6px;
+    padding: 4px 10px;
     border: 1px solid #d0d0d0;
     border-radius: 4px;
     background: #fff;
@@ -123,8 +123,8 @@ const tabStyles = {
   toolButtonDanger: css`
     display: flex;
     align-items: center;
-    gap: 4px;
-    padding: 3px 8px;
+    gap: 6px;
+    padding: 4px 10px;
     border: 1px solid #d0d0d0;
     border-radius: 4px;
     background: #fff;
@@ -146,7 +146,12 @@ const tabStyles = {
   checkboxColumn: css`
     display: flex;
     flex-direction: column;
-    gap: 3px;
+    gap: 4px;
+  `,
+  fieldLabel: css`
+    font-size: 10px;
+    color: #666;
+    white-space: nowrap;
   `,
 };
 
@@ -159,9 +164,9 @@ const tabStyles = {
 // Gallery is NOT included — it uses flex: 1 1 0 and its own ResizeObserver
 // to progressively show fewer thumbnails as the ribbon narrows.
 const GROUP_DEFS = [
-  { collapseOrder: 1, expandedWidth: 140 },   // Properties
-  { collapseOrder: 2, expandedWidth: 360 },   // Tools
-  { collapseOrder: 3, expandedWidth: 320 },   // Table Style Options
+  { collapseOrder: 1, expandedWidth: 150 },   // Properties
+  { collapseOrder: 2, expandedWidth: 380 },   // Tools
+  { collapseOrder: 3, expandedWidth: 340 },   // Table Style Options
 ];
 
 // ============================================================================
@@ -320,7 +325,7 @@ export function TableDesignTab({
   // Shared content renderers (used in both expanded and collapsed states)
   const propertiesContent = (
     <div className={tabStyles.groupContentVertical}>
-      <span style={{ fontSize: 10, color: "#666" }}>Table Name:</span>
+      <span className={tabStyles.fieldLabel}>Table Name:</span>
       <input
         ref={nameInputRef}
         type="text"
@@ -342,26 +347,22 @@ export function TableDesignTab({
   );
 
   const toolsContent = (
-    <div className={tabStyles.groupContentVertical}>
-      <div className={tabStyles.groupContent}>
-        <button className={tabStyles.toolButton} onClick={handleSummarizeWithPivot}>
-          Summarize with PivotTable
-        </button>
-        <button className={tabStyles.toolButton} onClick={handleInsertSlicer}>
-          Insert Slicer
-        </button>
-      </div>
-      <div className={tabStyles.groupContent}>
-        <button className={tabStyles.toolButton} onClick={handleRemoveDuplicates}>
-          Remove Duplicates
-        </button>
-        <button className={tabStyles.toolButton} onClick={handleConvertToRange}>
-          Convert to Range
-        </button>
-        <button className={tabStyles.toolButtonDanger} onClick={handleDeleteTable}>
-          Delete Table
-        </button>
-      </div>
+    <div className={tabStyles.groupContent} style={{ gap: 4, flexWrap: "wrap" }}>
+      <button className={tabStyles.toolButton} onClick={handleSummarizeWithPivot}>
+        Summarize with PivotTable
+      </button>
+      <button className={tabStyles.toolButton} onClick={handleInsertSlicer}>
+        Insert Slicer
+      </button>
+      <button className={tabStyles.toolButton} onClick={handleRemoveDuplicates}>
+        Remove Duplicates
+      </button>
+      <button className={tabStyles.toolButton} onClick={handleConvertToRange}>
+        Convert to Range
+      </button>
+      <button className={tabStyles.toolButtonDanger} onClick={handleDeleteTable}>
+        Delete Table
+      </button>
     </div>
   );
 

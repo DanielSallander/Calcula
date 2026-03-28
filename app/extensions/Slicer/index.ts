@@ -356,7 +356,8 @@ export function registerSlicerExtension(): void {
     const canvasX = (e.clientX - rect.left) / zoom;
     const canvasY = (e.clientY - rect.top) / zoom;
 
-    const slicers = getAllSlicers();
+    const activeSheet = gridState.sheetContext.activeSheetIndex;
+    const slicers = getAllSlicers().filter((s) => s.sheetIndex === activeSheet);
     const scrollX = gridState.viewport.scrollX;
     const scrollY = gridState.viewport.scrollY;
     const headerWidth = gridState.config.rowHeaderWidth;

@@ -20,7 +20,7 @@ import { SLICER_SETTINGS_DIALOG_ID, SLICER_COMPUTED_PROPS_DIALOG_ID } from "../m
 import { SlicerEvents } from "../lib/slicerEvents";
 import type { Slicer } from "../lib/slicerTypes";
 import { SlicerStylesGallery } from "./SlicerStylesGallery";
-import { broadcastSelectedSlicers } from "../handlers/selectionHandler";
+import { broadcastSelectedSlicers, getSelectedSlicerIds } from "../handlers/selectionHandler";
 import { getSlicerComputedAttributes } from "../lib/slicer-api";
 
 // ============================================================================
@@ -75,7 +75,7 @@ const tabStyles = {
   groupContentVertical: css`
     display: flex;
     flex-direction: column;
-    gap: 2px;
+    gap: 4px;
   `,
   nameInput: css`
     padding: 3px 6px;
@@ -139,33 +139,74 @@ const tabStyles = {
       cursor: pointer;
     }
   `,
-  settingsButton: css`
-    padding: 4px 12px;
-    border: 1px solid #d0d0d0;
+  actionButton: css`
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 2px;
+    padding: 4px 10px;
+    border: 1px solid transparent;
     border-radius: 4px;
-    font-size: 11px;
+    background: transparent;
     cursor: pointer;
-    background: #fff;
-    color: #1a1a1a;
+    font-family: inherit;
+    font-size: 11px;
+    color: #333;
     white-space: nowrap;
+
     &:hover {
-      background: #e8f0fe;
-      border-color: #4472c4;
+      background: #e8e8e8;
+      border-color: #d0d0d0;
+    }
+
+    &:active {
+      background: #d6d6d6;
+    }
+
+    &:disabled {
+      opacity: 0.5;
+      cursor: default;
+      &:hover {
+        background: transparent;
+        border-color: transparent;
+      }
     }
   `,
-  deleteButton: css`
-    padding: 4px 12px;
-    border: 1px solid #d0d0d0;
+  actionButtonDanger: css`
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 2px;
+    padding: 4px 10px;
+    border: 1px solid transparent;
     border-radius: 4px;
-    font-size: 11px;
+    background: transparent;
     cursor: pointer;
-    background: #fff;
-    color: #c0392b;
+    font-family: inherit;
+    font-size: 11px;
+    color: #c42b1c;
     white-space: nowrap;
+
     &:hover {
-      background: #fdecea;
-      border-color: #c0392b;
+      background: #fde7e7;
+      border-color: #e8c4c4;
     }
+
+    &:active {
+      background: #fbd0d0;
+    }
+  `,
+  actionIcon: css`
+    font-size: 22px;
+    line-height: 1;
+    height: 26px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  `,
+  actionLabel: css`
+    font-size: 10px;
+    line-height: 1;
   `,
   computedOverlay: css`
     opacity: 0.4;
@@ -177,9 +218,9 @@ const tabStyles = {
 // Group definitions for ribbon collapse (collapseOrder: lower = collapses first).
 const SLICER_GROUPS = [
   { collapseOrder: 4, expandedWidth: 220 }, // Properties
-  { collapseOrder: 3, expandedWidth: 100 }, // Buttons
-  { collapseOrder: 2, expandedWidth: 140 }, // Size
-  { collapseOrder: 1, expandedWidth: 160 }, // Actions
+  { collapseOrder: 3, expandedWidth: 110 }, // Buttons
+  { collapseOrder: 2, expandedWidth: 150 }, // Size
+  { collapseOrder: 1, expandedWidth: 240 }, // Actions (icon buttons wider)
 ];
 
 // ============================================================================
@@ -206,36 +247,50 @@ export function SlicerOptionsTab({
   const isComputed = (attr: string) => computedAttrs.has(attr);
   const computedTitle = "This attribute is controlled via computed properties";
 
+  // Helper: apply slicer array to local state
+  const applySlicerSelection = (arr: Slicer[]) => {
+    if (arr.length === 0) return;
+    setSlicers(arr);
+
+    if (arr.length === 1) {
+      const s = arr[0];
+      setSlicerName(s.name);
+      setHeaderText(s.headerText ?? s.name);
+      setWidthStr(Math.round(s.width).toString());
+      setHeightStr(Math.round(s.height).toString());
+      getSlicerComputedAttributes(s.id).then((attrs) => {
+        setComputedAttrs(new Set(attrs));
+      });
+    } else {
+      setSlicerName("");
+      setHeaderText("");
+      const cw = commonValue(arr, (s) => Math.round(s.width));
+      setWidthStr(cw === MIXED ? "" : cw.toString());
+      const ch = commonValue(arr, (s) => Math.round(s.height));
+      setHeightStr(ch === MIXED ? "" : ch.toString());
+      setComputedAttrs(new Set());
+    }
+  };
+
   // Listen for slicer selection/deselection events
   useEffect(() => {
+    // Populate initial state from the current selection (the SLICER_UPDATED
+    // event that triggered tab registration fires before this component mounts,
+    // so we read the current selection directly on mount).
+    const selectedIds = getSelectedSlicerIds();
+    if (selectedIds.size > 0) {
+      const initial: Slicer[] = [];
+      for (const id of selectedIds) {
+        const s = getSlicerById(id);
+        if (s) initial.push(s);
+      }
+      applySlicerSelection(initial);
+    }
+
     const handleUpdated = (e: Event) => {
       const detail = (e as CustomEvent).detail;
-      // The event now sends an array of Slicer objects
       const arr = Array.isArray(detail) ? detail as Slicer[] : detail ? [detail as Slicer] : [];
-      if (arr.length > 0) {
-        setSlicers(arr);
-
-        if (arr.length === 1) {
-          const s = arr[0];
-          setSlicerName(s.name);
-          setHeaderText(s.headerText ?? s.name);
-          setWidthStr(Math.round(s.width).toString());
-          setHeightStr(Math.round(s.height).toString());
-          // Fetch computed attributes for this slicer
-          getSlicerComputedAttributes(s.id).then((attrs) => {
-            setComputedAttrs(new Set(attrs));
-          });
-        } else {
-          // Multi-select: show common values or empty
-          setSlicerName("");
-          setHeaderText("");
-          const cw = commonValue(arr, (s) => Math.round(s.width));
-          setWidthStr(cw === MIXED ? "" : cw.toString());
-          const ch = commonValue(arr, (s) => Math.round(s.height));
-          setHeightStr(ch === MIXED ? "" : ch.toString());
-          setComputedAttrs(new Set());
-        }
-      }
+      applySlicerSelection(arr);
     };
 
     const handleDeselected = () => {
@@ -507,29 +562,37 @@ export function SlicerOptionsTab({
         icon="A"
         collapsed={collapsedGroups[3]}
       >
-        <div className={tabStyles.groupContentVertical}>
+        <div className={tabStyles.groupContent}>
           <button
-            className={tabStyles.settingsButton}
+            className={tabStyles.actionButton}
             onClick={() => showDialog(SLICER_SETTINGS_DIALOG_ID, { slicerId: primary.id })}
             title={isMulti ? "Open settings for the last selected slicer" : "Open slicer settings (layout, selection behavior, data display)"}
             disabled={isMulti}
           >
-            Settings...
+            <span className={tabStyles.actionIcon}>&#x2699;</span>
+            <span className={tabStyles.actionLabel}>Settings</span>
           </button>
           <button
-            className={tabStyles.settingsButton}
+            className={tabStyles.actionButton}
             onClick={() => showDialog(SLICER_COMPUTED_PROPS_DIALOG_ID, { slicerId: primary.id })}
             title={isMulti ? "Open computed properties for the last selected slicer" : "Formula-driven attributes for this slicer"}
             disabled={isMulti}
           >
-            Computed...
+            <span className={tabStyles.actionIcon}>
+              <svg width="22" height="22" viewBox="0 0 22 22" fill="none" xmlns="http://www.w3.org/2000/svg">
+                <path d="M4 5h14M4 9h10M4 13h12M4 17h8" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round"/>
+                <text x="16" y="16" fontSize="10" fontWeight="bold" fill="#217346" fontFamily="inherit">fx</text>
+              </svg>
+            </span>
+            <span className={tabStyles.actionLabel}>Computed</span>
           </button>
           <button
-            className={tabStyles.deleteButton}
+            className={tabStyles.actionButtonDanger}
             onClick={handleDelete}
             title={isMulti ? `Delete ${slicers.length} selected slicers` : "Delete this slicer"}
           >
-            Delete{isMulti ? ` (${slicers.length})` : ""}
+            <span className={tabStyles.actionIcon}>&#x2716;</span>
+            <span className={tabStyles.actionLabel}>Delete{isMulti ? ` (${slicers.length})` : ""}</span>
           </button>
         </div>
       </RibbonGroup>
