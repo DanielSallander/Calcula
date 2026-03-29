@@ -225,6 +225,10 @@ fn find_next_recursive(expr: &Expression, path: &mut Vec<usize>) -> Option<NextN
         // NamedRef: resolved at evaluation time via scope (LAMBDA/LET params)
         Expression::NamedRef { .. } => None,
 
+        // SpillRef/ImplicitIntersection: resolved before evaluation
+        Expression::SpillRef { .. } => None,
+        Expression::ImplicitIntersection { .. } => None,
+
         // Function calls: special handling for IF short-circuit
         Expression::FunctionCall { func, args } => {
             if matches!(func, BuiltinFunction::If) && args.len() >= 2 {
@@ -527,6 +531,16 @@ pub(crate) fn build_display_recursive(
         Expression::NamedRef { name } => {
             output.push_str(name);
         }
+
+        Expression::SpillRef { cell } => {
+            build_display_recursive(cell, target_path, current_path, output, underline);
+            output.push('#');
+        }
+
+        Expression::ImplicitIntersection { operand } => {
+            output.push('@');
+            build_display_recursive(operand, target_path, current_path, output, underline);
+        }
     }
 
     if is_target {
@@ -725,8 +739,12 @@ pub(crate) fn builtin_fn_name(func: &BuiltinFunction) -> String {
         BuiltinFunction::TextJoin => "TEXTJOIN".to_string(),
         BuiltinFunction::Filter => "FILTER".to_string(),
         BuiltinFunction::Sort => "SORT".to_string(),
+        BuiltinFunction::SortBy => "SORTBY".to_string(),
         BuiltinFunction::Unique => "UNIQUE".to_string(),
         BuiltinFunction::Sequence => "SEQUENCE".to_string(),
+        BuiltinFunction::RandArray => "RANDARRAY".to_string(),
+        BuiltinFunction::GroupBy => "GROUPBY".to_string(),
+        BuiltinFunction::PivotBy => "PIVOTBY".to_string(),
         BuiltinFunction::Collect => "COLLECT".to_string(),
         BuiltinFunction::DictFn => "DICT".to_string(),
         BuiltinFunction::Keys => "KEYS".to_string(),

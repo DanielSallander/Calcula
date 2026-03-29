@@ -123,6 +123,18 @@ pub enum Expression {
     DictLiteral {
         entries: Vec<(Expression, Expression)>,
     },
+
+    /// Spill range operator: A1# references the entire spill range anchored at the cell.
+    /// Resolved in the Tauri layer before evaluation by replacing with an actual Range.
+    SpillRef {
+        cell: Box<Expression>,
+    },
+
+    /// Implicit intersection operator: @A1:A10 extracts the single value
+    /// at the formula's row (or column) from a multi-cell range.
+    ImplicitIntersection {
+        operand: Box<Expression>,
+    },
 }
 
 /// Specifier for structured table references.
@@ -344,8 +356,12 @@ pub enum BuiltinFunction {
     // Dynamic array functions
     Filter,
     Sort,
+    SortBy,
     Unique,
     Sequence,
+    RandArray,
+    GroupBy,
+    PivotBy,
 
     // Collection functions (3D cells)
     Collect,
@@ -566,8 +582,12 @@ impl BuiltinFunction {
             // Dynamic array functions
             "FILTER" => BuiltinFunction::Filter,
             "SORT" => BuiltinFunction::Sort,
+            "SORTBY" => BuiltinFunction::SortBy,
             "UNIQUE" => BuiltinFunction::Unique,
             "SEQUENCE" => BuiltinFunction::Sequence,
+            "RANDARRAY" => BuiltinFunction::RandArray,
+            "GROUPBY" => BuiltinFunction::GroupBy,
+            "PIVOTBY" => BuiltinFunction::PivotBy,
 
             // Collection functions (3D cells)
             "COLLECT" => BuiltinFunction::Collect,

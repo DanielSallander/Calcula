@@ -13,7 +13,7 @@ export const chartSpecJsonSchema: object = {
   properties: {
     mark: {
       type: "string",
-      enum: ["bar", "horizontalBar", "line", "area", "scatter", "pie", "donut", "waterfall", "combo", "radar", "bubble", "histogram", "funnel"],
+      enum: ["bar", "horizontalBar", "line", "area", "scatter", "pie", "donut", "waterfall", "combo", "radar", "bubble", "histogram", "funnel", "treemap", "stock"],
       description: "Chart type. Determines the visual mark used to represent data.",
     },
     data: {
@@ -77,6 +77,8 @@ export const chartSpecJsonSchema: object = {
         { $ref: "#/definitions/BubbleMarkOptions" },
         { $ref: "#/definitions/HistogramMarkOptions" },
         { $ref: "#/definitions/FunnelMarkOptions" },
+        { $ref: "#/definitions/TreemapMarkOptions" },
+        { $ref: "#/definitions/StockMarkOptions" },
         { $ref: "#/definitions/RuleMarkOptions" },
         { $ref: "#/definitions/TextMarkOptions" },
       ],
@@ -98,6 +100,10 @@ export const chartSpecJsonSchema: object = {
     tooltip: {
       $ref: "#/definitions/TooltipSpec",
       description: "Tooltip display configuration.",
+    },
+    dataLabels: {
+      $ref: "#/definitions/DataLabelSpec",
+      description: "Data labels displayed on chart data points.",
     },
   },
   definitions: {
@@ -487,6 +493,37 @@ export const chartSpecJsonSchema: object = {
       },
       additionalProperties: false,
     },
+    TreemapMarkOptions: {
+      type: "object",
+      description: "Options for treemap charts. Nested rectangles sized by value.",
+      properties: {
+        showLabels: { type: "boolean", description: "Show category labels on tiles. Default: true." },
+        labelFormat: { type: "string", enum: ["category", "value", "both"], description: "Label format. Default: \"both\"." },
+        tileBorderWidth: { type: "number", minimum: 0, description: "Border width between tiles (px). Default: 2." },
+        tileBorderColor: { type: "string", description: "Border color between tiles. Default: \"#ffffff\"." },
+        tileRadius: { type: "number", minimum: 0, description: "Tile corner radius (px). Default: 2." },
+      },
+      additionalProperties: false,
+    },
+    StockMarkOptions: {
+      type: "object",
+      description: "Options for stock (OHLC/Candlestick) charts. Requires 4 series: Open, High, Low, Close.",
+      properties: {
+        style: { type: "string", enum: ["candlestick", "ohlc"], description: "Display style. Default: \"candlestick\"." },
+        upColor: { type: "string", description: "Color for up candles (close > open). Default: \"#4CAF50\"." },
+        downColor: { type: "string", description: "Color for down candles (close < open). Default: \"#E53935\"." },
+        bodyWidth: { type: "number", minimum: 0.1, maximum: 1, description: "Candle body width fraction (0-1). Default: 0.6." },
+        wickWidth: { type: "number", minimum: 0.5, description: "Wick/shadow line width (px). Default: 1." },
+        ohlcIndices: {
+          type: "array",
+          items: { type: "integer", minimum: 0 },
+          minItems: 4,
+          maxItems: 4,
+          description: "Series index mapping [Open, High, Low, Close]. Default: [0, 1, 2, 3].",
+        },
+      },
+      additionalProperties: false,
+    },
     RuleMarkOptions: {
       type: "object",
       description: "Options for rule marks (reference lines). Used in layers.",
@@ -526,7 +563,7 @@ export const chartSpecJsonSchema: object = {
       properties: {
         mark: {
           type: "string",
-          enum: ["bar", "horizontalBar", "line", "area", "scatter", "pie", "donut", "waterfall", "combo", "radar", "bubble", "histogram", "funnel", "rule", "text"],
+          enum: ["bar", "horizontalBar", "line", "area", "scatter", "pie", "donut", "waterfall", "combo", "radar", "bubble", "histogram", "funnel", "treemap", "stock", "rule", "text"],
           description: "Mark type for this layer. Use \"rule\" for reference lines, \"text\" for annotations.",
         },
         data: {
@@ -616,6 +653,42 @@ export const chartSpecJsonSchema: object = {
           type: "object",
           description: "Number format overrides per field (e.g. { \"value\": \"$,.2f\" }).",
           additionalProperties: { type: "string" },
+        },
+      },
+      additionalProperties: false,
+    },
+    DataLabelSpec: {
+      type: "object",
+      description: "Data labels displayed on chart data points (bars, lines, slices, etc.).",
+      required: ["enabled"],
+      properties: {
+        enabled: { type: "boolean", description: "Whether data labels are shown. Default: false." },
+        content: {
+          type: "array",
+          items: { type: "string", enum: ["value", "category", "seriesName", "percent"] },
+          description: "What to display. Default: [\"value\"]. Multiple items are joined by the separator.",
+        },
+        position: {
+          type: "string",
+          enum: ["auto", "above", "below", "center", "inside", "outside"],
+          description: "Label position relative to data point. Default: \"auto\".",
+        },
+        fontSize: { type: "number", minimum: 6, description: "Font size in pixels. Default: 10." },
+        color: { type: "string", description: "Text color (hex). Default: auto-detected from background." },
+        backgroundColor: {
+          type: ["string", "null"],
+          description: "Background color for label badge. Null = no background. Default: null.",
+        },
+        format: { type: "string", description: "Number format string (e.g. \"$,.2f\", \".1%\"). Default: auto." },
+        separator: { type: "string", description: "Separator between multiple content fields. Default: \" - \"." },
+        seriesFilter: {
+          type: ["array", "null"],
+          items: { type: "integer", minimum: 0 },
+          description: "Show labels only for these series indices. Null = all series. Default: null.",
+        },
+        minValue: {
+          type: ["number", "null"],
+          description: "Hide labels for values below this threshold. Null = no threshold. Default: null.",
         },
       },
       additionalProperties: false,
@@ -718,7 +791,7 @@ export function generateSpecReference(): string {
   lines.push("");
   lines.push("| Property | Type | Description |");
   lines.push("|----------|------|-------------|");
-  lines.push("| mark | string | Chart type: bar, horizontalBar, line, area, scatter, pie, donut, waterfall, combo, radar, bubble, histogram, funnel |");
+  lines.push("| mark | string | Chart type: bar, horizontalBar, line, area, scatter, pie, donut, waterfall, combo, radar, bubble, histogram, funnel, treemap, stock |");
   lines.push("| data | object \\| string | DataRangeRef object, A1 reference string, named range name, or PivotDataSource |");
   lines.push("| hasHeaders | boolean | First row/column contains header labels |");
   lines.push("| seriesOrientation | string | \"columns\" or \"rows\" |");
@@ -734,6 +807,7 @@ export function generateSpecReference(): string {
   lines.push("| transform | TransformSpec[] | Data transform pipeline (filter, sort, aggregate, etc.) |");
   lines.push("| config | ChartConfig | Theme overrides (colors, fonts, spacing) |");
   lines.push("| tooltip | TooltipSpec | Tooltip display configuration |");
+  lines.push("| dataLabels | DataLabelSpec | Data labels on data points |");
   lines.push("");
 
   lines.push("## ChartSeries");
@@ -884,6 +958,28 @@ export function generateSpecReference(): string {
   lines.push("| sectionGap | number | 2 | Gap between sections (px) |");
   lines.push("");
 
+  lines.push("### treemap");
+  lines.push("| Property | Type | Default | Description |");
+  lines.push("|----------|------|---------|-------------|");
+  lines.push("| showLabels | boolean | true | Show labels on tiles |");
+  lines.push("| labelFormat | string | \"both\" | category, value, or both |");
+  lines.push("| tileBorderWidth | number | 2 | Border width between tiles (px) |");
+  lines.push("| tileBorderColor | string | \"#ffffff\" | Border color between tiles |");
+  lines.push("| tileRadius | number | 2 | Tile corner radius (px) |");
+  lines.push("");
+
+  lines.push("### stock");
+  lines.push("Requires 4 series in order: Open, High, Low, Close.");
+  lines.push("| Property | Type | Default | Description |");
+  lines.push("|----------|------|---------|-------------|");
+  lines.push("| style | string | \"candlestick\" | candlestick or ohlc |");
+  lines.push("| upColor | string | \"#4CAF50\" | Up candle color |");
+  lines.push("| downColor | string | \"#E53935\" | Down candle color |");
+  lines.push("| bodyWidth | number | 0.6 | Candle body width fraction |");
+  lines.push("| wickWidth | number | 1 | Wick line width (px) |");
+  lines.push("| ohlcIndices | [int,int,int,int] | [0,1,2,3] | Series indices for O,H,L,C |");
+  lines.push("");
+
   lines.push("### rule (reference line)");
   lines.push("| Property | Type | Default | Description |");
   lines.push("|----------|------|---------|-------------|");
@@ -922,6 +1018,27 @@ export function generateSpecReference(): string {
   lines.push("");
   lines.push("Example: Add a target line to a bar chart:");
   lines.push("  \"layers\": [{ \"mark\": \"rule\", \"markOptions\": { \"y\": 1000, \"strokeDash\": [6, 3], \"label\": \"Target\" } }]");
+  lines.push("");
+
+  lines.push("## DataLabelSpec");
+  lines.push("");
+  lines.push("Display values, categories, or percentages directly on chart data points.");
+  lines.push("");
+  lines.push("| Property | Type | Default | Description |");
+  lines.push("|----------|------|---------|-------------|");
+  lines.push("| enabled | boolean | false | Show data labels |");
+  lines.push("| content | string[] | [\"value\"] | What to show: value, category, seriesName, percent |");
+  lines.push("| position | string | \"auto\" | auto, above, below, center, inside, outside |");
+  lines.push("| fontSize | number | 10 | Font size (px) |");
+  lines.push("| color | string | auto | Text color |");
+  lines.push("| backgroundColor | string \\| null | null | Badge background color |");
+  lines.push("| format | string | auto | Number format (e.g. \"$,.2f\") |");
+  lines.push("| separator | string | \" - \" | Separator between content fields |");
+  lines.push("| seriesFilter | number[] \\| null | null | Show only for these series indices |");
+  lines.push("| minValue | number \\| null | null | Hide labels below this value |");
+  lines.push("");
+  lines.push("Example: Show values above bars:");
+  lines.push("  \"dataLabels\": { \"enabled\": true, \"content\": [\"value\"], \"position\": \"above\" }");
   lines.push("");
 
   lines.push("## Data Transforms");

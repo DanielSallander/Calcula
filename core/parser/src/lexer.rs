@@ -42,6 +42,7 @@ impl<'a> Lexer<'a> {
             Some('!') => Token::Exclamation,
             Some('$') => Token::Dollar,
             Some('@') => Token::At,
+            Some('#') => Token::Hash,
             Some('[') => Token::LBracket,
             Some(']') => Token::RBracket,
             Some('{') => Token::LBrace,

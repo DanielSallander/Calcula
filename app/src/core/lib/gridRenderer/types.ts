@@ -15,6 +15,7 @@ import type {
   InsertionAnimation,
   FreezeConfig,
   VisibleRange,
+  SpillRangeInfo,
 } from "../../types";
 
 /**
@@ -124,4 +125,6 @@ export interface RenderState {
   selectionDragPreview?: Selection | null;
   /** Regions where grid lines should be suppressed (e.g., pivot tables, charts) */
   overlayRegionBounds?: Array<{ startRow: number; startCol: number; endRow: number; endCol: number }>;
+  /** Spill ranges for rendering blue borders around dynamic array results */
+  spillRanges?: SpillRangeInfo[];
 }

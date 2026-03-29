@@ -40,8 +40,10 @@ pub enum Token {
     Exclamation,
     /// Absolute reference marker: $
     Dollar,
-    /// @ operator for structured references (this-row)
+    /// @ operator for structured references (this-row) and implicit intersection
     At,
+    /// # operator for spill range references (A1#)
+    Hash,
 
     // Special
     EOF,
@@ -75,6 +77,7 @@ impl std::fmt::Display for Token {
             Token::Exclamation => write!(f, "!"),
             Token::Dollar => write!(f, "$"),
             Token::At => write!(f, "@"),
+            Token::Hash => write!(f, "#"),
             Token::LBracket => write!(f, "["),
             Token::RBracket => write!(f, "]"),
             Token::LBrace => write!(f, "{{"),

@@ -2,7 +2,7 @@
 // PURPOSE: Design tab of the chart dialog. Chart type, title, axis, legend, palette, mark options.
 
 import React from "react";
-import type { ChartSpec, ChartType } from "../../types";
+import type { ChartSpec, ChartType, DataLabelSpec } from "../../types";
 import { isCartesianChart } from "../../types";
 import { PALETTES, PALETTE_NAMES } from "../../rendering/chartTheme";
 import {
@@ -35,6 +35,8 @@ const CHART_TYPES: Array<{ value: ChartType; label: string }> = [
   { value: "bubble", label: "Bubble Chart" },
   { value: "histogram", label: "Histogram" },
   { value: "funnel", label: "Funnel Chart" },
+  { value: "treemap", label: "Treemap" },
+  { value: "stock", label: "Stock (OHLC)" },
 ];
 
 export function DesignTab({ spec, onSpecChange }: DesignTabProps): React.ReactElement {
@@ -173,6 +175,41 @@ export function DesignTab({ spec, onSpecChange }: DesignTabProps): React.ReactEl
               <option value="top">Top</option>
               <option value="right">Right</option>
               <option value="left">Left</option>
+            </Select>
+          </div>
+        )}
+      </FieldGroup>
+
+      {/* Data Labels */}
+      <FieldGroup>
+        <Label>Data Labels</Label>
+        <CheckboxLabel>
+          <input
+            type="checkbox"
+            checked={spec.dataLabels?.enabled ?? false}
+            onChange={(e) => {
+              const dl: DataLabelSpec = { ...(spec.dataLabels ?? { enabled: false }), enabled: e.target.checked };
+              onSpecChange({ dataLabels: dl });
+            }}
+          />
+          Show data labels
+        </CheckboxLabel>
+        {spec.dataLabels?.enabled && (
+          <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
+            <span style={{ fontSize: "12px", color: "var(--text-secondary)" }}>Position:</span>
+            <Select
+              value={spec.dataLabels?.position ?? "auto"}
+              onChange={(e) => {
+                const dl: DataLabelSpec = { ...(spec.dataLabels ?? { enabled: true }), position: e.target.value as DataLabelSpec["position"] };
+                onSpecChange({ dataLabels: dl });
+              }}
+            >
+              <option value="auto">Auto</option>
+              <option value="above">Above</option>
+              <option value="below">Below</option>
+              <option value="center">Center</option>
+              <option value="inside">Inside</option>
+              <option value="outside">Outside</option>
             </Select>
           </div>
         )}
@@ -476,6 +513,54 @@ function MarkOptions({ spec, onSpecChange }: DesignTabProps): React.ReactElement
               onChange={(e) => updateMarkOptions({ neckWidthRatio: parseFloat(e.target.value) || 0.3 })}
               style={{ width: "60px" }}
             />
+          </div>
+        </FieldGroup>
+      );
+
+    case "treemap":
+      return (
+        <FieldGroup>
+          <Label>Treemap Options</Label>
+          <CheckboxLabel>
+            <input
+              type="checkbox"
+              checked={(opts as any).showLabels ?? true}
+              onChange={(e) => updateMarkOptions({ showLabels: e.target.checked })}
+            />
+            Show labels
+          </CheckboxLabel>
+          {(opts as any).showLabels !== false && (
+            <div style={{ display: "flex", alignItems: "center", gap: "8px", marginBottom: "4px" }}>
+              <span style={{ fontSize: "12px", color: "var(--text-secondary)" }}>Label format:</span>
+              <Select
+                value={(opts as any).labelFormat ?? "both"}
+                onChange={(e) => updateMarkOptions({ labelFormat: e.target.value })}
+              >
+                <option value="category">Category only</option>
+                <option value="value">Value only</option>
+                <option value="both">Both</option>
+              </Select>
+            </div>
+          )}
+        </FieldGroup>
+      );
+
+    case "stock":
+      return (
+        <FieldGroup>
+          <Label>Stock Options</Label>
+          <div style={{ display: "flex", alignItems: "center", gap: "8px", marginBottom: "4px" }}>
+            <span style={{ fontSize: "12px", color: "var(--text-secondary)" }}>Style:</span>
+            <Select
+              value={(opts as any).style ?? "candlestick"}
+              onChange={(e) => updateMarkOptions({ style: e.target.value })}
+            >
+              <option value="candlestick">Candlestick</option>
+              <option value="ohlc">OHLC Bars</option>
+            </Select>
+          </div>
+          <div style={{ fontSize: "11px", color: "var(--text-secondary)", marginTop: "4px" }}>
+            Requires 4 series: Open, High, Low, Close
           </div>
         </FieldGroup>
       );

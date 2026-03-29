@@ -13,6 +13,7 @@ import type {
   FormattingResult,
   FunctionInfo,
   UpdateCellResult,
+  SpillRangeInfo,
 } from "../types";
 
 // ============================================================================
@@ -160,6 +161,14 @@ export async function getGridBounds(): Promise<[number, number]> {
 
 export async function getCellCount(): Promise<number> {
   return invoke<number>("get_cell_count");
+}
+
+/**
+ * Get all spill ranges for the active sheet.
+ * Returns bounding boxes for dynamic array formula results.
+ */
+export async function getSpillRanges(): Promise<SpillRangeInfo[]> {
+  return invoke<SpillRangeInfo[]>("get_spill_ranges");
 }
 
 /**

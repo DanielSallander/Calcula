@@ -21,6 +21,7 @@ export * from "./rendering/grid";
 export * from "./rendering/cells";
 export * from "./rendering/selection";
 export * from "./rendering/references";
+export * from "./rendering/spillBorder";
 
 // Re-export interaction functions
 export * from "./interaction/hitTesting";

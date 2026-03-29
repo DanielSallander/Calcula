@@ -213,6 +213,16 @@ pub struct UpdateCellResult {
     pub slicer_changed: bool,
 }
 
+/// Spill range information for visual rendering.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SpillRangeInfo {
+    pub origin_row: u32,
+    pub origin_col: u32,
+    pub end_row: u32,
+    pub end_col: u32,
+}
+
 /// A merged cell region definition.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
 #[serde(rename_all = "camelCase")]

@@ -238,6 +238,14 @@ export interface CellData {
   sheetIndex?: number;
 }
 
+/** Spill range information for visual rendering of dynamic array borders. */
+export interface SpillRangeInfo {
+  originRow: number;
+  originCol: number;
+  endRow: number;
+  endCol: number;
+}
+
 /**
  * Result from update_cell that includes both updated cells and optional dimension changes.
  * Dimension changes are triggered by UI formulas (like SET.ROW.HEIGHT).

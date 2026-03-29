@@ -308,6 +308,18 @@ impl<'a> Parser<'a> {
                         _ => break,
                     }
                 }
+                // Spill range operator: CellRef# references the entire spill range
+                Token::Hash => {
+                    match &result {
+                        Expression::CellRef { .. } => {
+                            self.advance(); // consume '#'
+                            result = Expression::SpillRef {
+                                cell: Box::new(result),
+                            };
+                        }
+                        _ => break,
+                    }
+                }
                 _ => break,
             }
         }
@@ -471,7 +483,21 @@ impl<'a> Parser<'a> {
                 self.parse_cell_ref(None, name, false, false)
             }
 
-            // Standalone structured reference: [@Column] (implies current table)
+            // @ operator: implicit intersection or standalone structured reference
+            Token::At => {
+                self.advance();
+                // If followed by a bracket, it's a structured reference [@Column]
+                if self.current_token == Token::LBracket {
+                    return self.parse_table_reference(String::new());
+                }
+                // Otherwise it's the implicit intersection operator: @A1:A10
+                let operand = self.parse_primary()?;
+                return Ok(Expression::ImplicitIntersection {
+                    operand: Box::new(operand),
+                });
+            }
+
+            // Standalone structured reference: [Column] (implies current table)
             Token::LBracket => {
                 return self.parse_table_reference(String::new());
             }
@@ -1130,7 +1156,7 @@ impl<'a> Parser<'a> {
         }
 
         // Check for Illegal('#') which starts special specifiers
-        if let Token::Illegal('#') = self.current_token {
+        if let Token::Hash = self.current_token {
             self.advance();
             return self.parse_special_specifier();
         }
@@ -1221,7 +1247,7 @@ impl<'a> Parser<'a> {
         self.advance(); // consume outer [
 
         // Check for #specifier inside
-        if let Token::Illegal('#') = self.current_token {
+        if let Token::Hash = self.current_token {
             self.advance();
             let special = self.parse_special_specifier()?;
             self.expect(Token::RBracket)?; // close the [#...]

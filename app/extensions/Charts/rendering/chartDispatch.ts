@@ -25,9 +25,12 @@ import { paintRadarChart, computeRadarLayout, computeRadarPointMarkers } from ".
 import { paintBubbleChart, computeBubbleLayout, computeBubblePointMarkers } from "./bubbleChartPainter";
 import { paintHistogramChart, computeHistogramLayout, computeHistogramBarRects } from "./histogramChartPainter";
 import { paintFunnelChart, computeFunnelLayout, computeFunnelBarRects } from "./funnelChartPainter";
+import { paintTreemapChart, computeTreemapLayout, computeTreemapBarRects } from "./treemapChartPainter";
+import { paintStockChart, computeStockLayout, computeStockBarRects } from "./stockChartPainter";
 import { paintRule } from "./rulePainter";
 import { paintTextMark } from "./textMarkPainter";
 import { paintTrendlines } from "./trendlinePainter";
+import { paintDataLabels } from "./dataLabelPainter";
 
 // ============================================================================
 // Paint Dispatch
@@ -44,7 +47,15 @@ export function dispatchPaint(
   // Paint the primary mark
   paintMark(ctx, data, spec.mark, spec, layout, theme);
 
-  // Paint trendlines (after primary mark, before layers)
+  // Paint data labels (after primary mark)
+  if (spec.dataLabels?.enabled) {
+    const geometry = dispatchComputeGeometry(data, spec, layout, theme);
+    if (geometry) {
+      paintDataLabels(ctx, data, spec, layout, theme, geometry);
+    }
+  }
+
+  // Paint trendlines (after primary mark and data labels, before layers)
   if (spec.trendlines && spec.trendlines.length > 0) {
     paintTrendlines(ctx, data, spec, layout, theme);
   }
@@ -118,6 +129,12 @@ function paintMark(
     case "funnel":
       paintFunnelChart(ctx, data, spec, layout, theme);
       break;
+    case "treemap":
+      paintTreemapChart(ctx, data, spec, layout, theme);
+      break;
+    case "stock":
+      paintStockChart(ctx, data, spec, layout, theme);
+      break;
   }
 }
 
@@ -147,6 +164,8 @@ export function dispatchComputeLayout(
     case "bubble": return computeBubbleLayout(width, height, spec, data, theme);
     case "histogram": return computeHistogramLayout(width, height, spec, data, theme);
     case "funnel": return computeFunnelLayout(width, height, spec, data, theme);
+    case "treemap": return computeTreemapLayout(width, height, spec, data, theme);
+    case "stock": return computeStockLayout(width, height, spec, data, theme);
   }
 }
 
@@ -187,6 +206,10 @@ export function dispatchComputeGeometry(
       return { type: "bars", rects: computeHistogramBarRects(data, spec, layout, theme) };
     case "funnel":
       return { type: "bars", rects: computeFunnelBarRects(data, spec, layout, theme) };
+    case "treemap":
+      return { type: "bars", rects: computeTreemapBarRects(data, spec, layout, theme) };
+    case "stock":
+      return { type: "bars", rects: computeStockBarRects(data, spec, layout, theme) };
   }
 }
 

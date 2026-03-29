@@ -990,6 +990,30 @@ pub fn get_functions_by_category(category: String) -> FunctionListResult {
                 category: "Dynamic Array".to_string(),
             },
             FunctionInfo {
+                name: "SORTBY".to_string(),
+                syntax: "SORTBY(array, by_array1, [sort_order1], [by_array2], [sort_order2], ...)".to_string(),
+                description: "Sorts a range or array based on the values in one or more corresponding ranges or arrays".to_string(),
+                category: "Dynamic Array".to_string(),
+            },
+            FunctionInfo {
+                name: "RANDARRAY".to_string(),
+                syntax: "RANDARRAY([rows], [columns], [min], [max], [whole_number])".to_string(),
+                description: "Returns an array of random numbers between min and max".to_string(),
+                category: "Dynamic Array".to_string(),
+            },
+            FunctionInfo {
+                name: "GROUPBY".to_string(),
+                syntax: "GROUPBY(row_fields, values, function, [field_headers], [total_depth], [sort_order], [filter_array])".to_string(),
+                description: "Groups data by row fields and aggregates values using a specified function".to_string(),
+                category: "Dynamic Array".to_string(),
+            },
+            FunctionInfo {
+                name: "PIVOTBY".to_string(),
+                syntax: "PIVOTBY(row_fields, col_fields, values, function, [field_headers], [row_total_depth], [row_sort_order], [col_total_depth], [col_sort_order], [filter_array])".to_string(),
+                description: "Creates a pivot table by grouping data by row and column fields, aggregating values".to_string(),
+                category: "Dynamic Array".to_string(),
+            },
+            FunctionInfo {
                 name: "COLLECT".to_string(),
                 syntax: "COLLECT(value)".to_string(),
                 description: "Wraps an array result into a contained List cell instead of spilling. Creates a 3D cell.".to_string(),
@@ -1301,8 +1325,12 @@ pub fn get_function_template(function_name: String) -> String {
         // Dynamic array functions
         "FILTER" => "=FILTER(, )".to_string(),
         "SORT" => "=SORT()".to_string(),
+        "SORTBY" => "=SORTBY(, )".to_string(),
         "UNIQUE" => "=UNIQUE()".to_string(),
         "SEQUENCE" => "=SEQUENCE()".to_string(),
+        "RANDARRAY" => "=RANDARRAY()".to_string(),
+        "GROUPBY" => "=GROUPBY(, , )".to_string(),
+        "PIVOTBY" => "=PIVOTBY(, , , )".to_string(),
         "COLLECT" => "=COLLECT()".to_string(),
         "DICT" => "=DICT(, )".to_string(),
         "KEYS" => "=KEYS()".to_string(),

@@ -7,8 +7,8 @@
 
 import React, { useRef, useEffect, useCallback, useImperativeHandle, forwardRef, useState } from "react";
 import { renderGrid, DEFAULT_THEME, calculateVisibleRange } from "../../lib/gridRenderer";
-import { getViewportCells } from "../../lib/tauri-api";
-import type { GridConfig, Viewport, Selection, EditingCell, CellDataMap, FormulaReference, DimensionOverrides, StyleDataMap, ClipboardMode, InsertionAnimation, FreezeConfig } from "../../types";
+import { getViewportCells, getSpillRanges } from "../../lib/tauri-api";
+import type { GridConfig, Viewport, Selection, EditingCell, CellDataMap, FormulaReference, DimensionOverrides, StyleDataMap, ClipboardMode, InsertionAnimation, FreezeConfig, SpillRangeInfo } from "../../types";
 import { cellKey, createEmptyDimensionOverrides, DEFAULT_FREEZE_CONFIG } from "../../types";
 import type { GridTheme } from "../../lib/gridRenderer";
 import { getGridRegions, getOverlayRenderers, getPostHeaderOverlayRenderers, onRegionChange } from "../../../api/gridOverlays";
@@ -173,6 +173,9 @@ export const GridCanvas = forwardRef<GridCanvasHandle, GridCanvasProps>(
 
     // Cell data cache
     const [cells, setCells] = useState<CellDataMap>(new Map());
+
+    // Spill ranges for blue dashed border rendering
+    const [spillRanges, setSpillRanges] = useState<SpillRangeInfo[]>([]);
 
     // Track the last fetched range to avoid redundant fetches
     const lastFetchRef = useRef<{
@@ -375,6 +378,15 @@ export const GridCanvas = forwardRef<GridCanvasHandle, GridCanvasProps>(
         }
 
         setCells(newCells);
+
+        // Fetch spill ranges for blue border rendering (lightweight call)
+        try {
+          const ranges = await getSpillRanges();
+          setSpillRanges(ranges);
+        } catch {
+          // Non-critical: silently ignore spill range fetch failures
+        }
+
         const perfT2Total = performance.now();
         console.log(
           `[PERF] fetchCells range=(${fetchRange.startRow},${fetchRange.startCol})-(${fetchRange.endRow},${fetchRange.endCol}) ` +
@@ -457,13 +469,14 @@ export const GridCanvas = forwardRef<GridCanvasHandle, GridCanvasProps>(
         getOverlayRenderers(),
         currentSheetName,
         getPostHeaderOverlayRenderers(),
+        spillRanges,
       );
 
       const perfDrawMs = performance.now() - perfDrawStart;
       if (perfDrawMs > 5) {
         console.log(`[PERF] draw ms=${perfDrawMs.toFixed(1)}`, new Error().stack?.split('\n').slice(1, 4).join(' <- '));
       }
-    }, [context, canvasSize.width, canvasSize.height, config, viewport, selection, editing, cells, theme, formulaReferences, dims, styleCache, fillPreviewRange, selectionDragPreview, clipboardSelection, clipboardMode, freezeConfig, currentSheetName, zoom]);
+    }, [context, canvasSize.width, canvasSize.height, config, viewport, selection, editing, cells, theme, formulaReferences, dims, styleCache, fillPreviewRange, selectionDragPreview, clipboardSelection, clipboardMode, freezeConfig, currentSheetName, zoom, spillRanges]);
 
     /**
      * Start row insertion animation.

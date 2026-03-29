@@ -315,6 +315,38 @@ fn assign_ids_recursive(
                 is_leaf: true,
             });
         }
+
+        Expression::SpillRef { cell } => {
+            let mut child_path = current_path.to_vec();
+            child_path.push(0);
+            let child_id = assign_ids_recursive(cell, &child_path, nodes, path_to_id, counter);
+
+            nodes.push(NodeInfo {
+                id: id.clone(),
+                node_type: "unary".to_string(),
+                label: "#".to_string(),
+                subtitle: "spill reference".to_string(),
+                children: vec![child_id],
+                path: current_path.to_vec(),
+                is_leaf: false,
+            });
+        }
+
+        Expression::ImplicitIntersection { operand } => {
+            let mut child_path = current_path.to_vec();
+            child_path.push(0);
+            let child_id = assign_ids_recursive(operand, &child_path, nodes, path_to_id, counter);
+
+            nodes.push(NodeInfo {
+                id: id.clone(),
+                node_type: "unary".to_string(),
+                label: "@".to_string(),
+                subtitle: "implicit intersection".to_string(),
+                children: vec![child_id],
+                path: current_path.to_vec(),
+                is_leaf: false,
+            });
+        }
     }
 
     id
@@ -548,6 +580,20 @@ fn build_spans_recursive(
 
         Expression::NamedRef { name } => {
             output.push_str(name);
+        }
+
+        Expression::SpillRef { cell } => {
+            let mut child_path = current_path.to_vec();
+            child_path.push(0);
+            build_spans_recursive(cell, &child_path, output, spans);
+            output.push('#');
+        }
+
+        Expression::ImplicitIntersection { operand } => {
+            output.push('@');
+            let mut child_path = current_path.to_vec();
+            child_path.push(0);
+            build_spans_recursive(operand, &child_path, output, spans);
         }
     }
 

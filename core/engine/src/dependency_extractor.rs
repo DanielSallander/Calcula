@@ -89,6 +89,19 @@ pub enum Expression {
     NamedRef {
         name: String,
     },
+
+    /// Spill range operator: CellRef# references the entire spill range.
+    /// Should be resolved before evaluation; if it reaches the evaluator,
+    /// it produces a #NAME? error.
+    SpillRef {
+        cell: Box<Expression>,
+    },
+
+    /// Implicit intersection operator: @Range extracts the single value
+    /// at the formula's row/column from a multi-cell range.
+    ImplicitIntersection {
+        operand: Box<Expression>,
+    },
 }
 
 /// Specifier for structured table references (mirrors parser::ast::TableSpecifier).
@@ -299,8 +312,12 @@ pub enum BuiltinFunction {
     // Dynamic array functions
     Filter,
     Sort,
+    SortBy,
     Unique,
     Sequence,
+    RandArray,
+    GroupBy,
+    PivotBy,
 
     // Collection functions (3D cells)
     Collect,
@@ -571,6 +588,16 @@ fn extract_recursive(expr: &Expression, deps: &mut HashSet<CellCoord>, bounds: G
 
         // NamedRef: no cell dependencies (resolved at evaluation time via scope)
         Expression::NamedRef { .. } => {}
+
+        // SpillRef: depend on the anchor cell (the spill range is dynamic)
+        Expression::SpillRef { cell } => {
+            extract_recursive(cell, deps, bounds);
+        }
+
+        // ImplicitIntersection: depend on the operand range
+        Expression::ImplicitIntersection { operand } => {
+            extract_recursive(operand, deps, bounds);
+        }
     }
 }
 
@@ -732,6 +759,16 @@ fn extract_recursive_with_sheets(
 
         // NamedRef: no cell dependencies (resolved at evaluation time via scope)
         Expression::NamedRef { .. } => {}
+
+        // SpillRef: depend on the anchor cell
+        Expression::SpillRef { cell } => {
+            extract_recursive_with_sheets(cell, deps, bounds);
+        }
+
+        // ImplicitIntersection: depend on the operand range
+        Expression::ImplicitIntersection { operand } => {
+            extract_recursive_with_sheets(operand, deps, bounds);
+        }
     }
 }
 

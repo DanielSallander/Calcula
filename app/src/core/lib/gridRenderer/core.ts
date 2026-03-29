@@ -15,6 +15,7 @@ import type {
   InsertionAnimation,
   FreezeConfig,
   VisibleRange,
+  SpillRangeInfo,
 } from "../../../core/types";
 import type { GridTheme, RenderState } from "./types";
 import { DEFAULT_THEME } from "./types";
@@ -22,6 +23,7 @@ import { drawCorner, drawColumnHeaders, drawRowHeaders } from "./rendering/heade
 import { drawGridLines } from "./rendering/grid";
 import { drawCellText } from "./rendering/cells";
 import { drawSelection, drawFillPreview, drawClipboardSelection, drawSelectionDragPreview } from "./rendering/selection";
+import { drawSpillBorders } from "./rendering/spillBorder";
 import { drawFormulaReferences } from "./rendering/references";
 import {
   calculateFreezePaneLayout,
@@ -554,6 +556,8 @@ export function renderGrid(
   currentSheetName?: string,
   // Post-header renderers run AFTER all headers are drawn (e.g. outline bar)
   postHeaderRenderers: GlobalOverlayRendererFn[] = [],
+  // Spill range borders for dynamic array formulas
+  spillRanges: SpillRangeInfo[] = [],
 ): void {
   const rowHeaderWidth = config.rowHeaderWidth || 50;
   const colHeaderHeight = config.colHeaderHeight || 24;
@@ -592,6 +596,8 @@ export function renderGrid(
     overlayRegionBounds: overlayRegions
       .filter(r => !r.floating)
       .map(r => ({ startRow: r.startRow, startCol: r.startCol, endRow: r.endRow, endCol: r.endCol })),
+    // Spill ranges for blue dashed borders
+    spillRanges,
   };
 
   ctx.fillStyle = theme.cellBackground;
@@ -727,6 +733,9 @@ export function renderGrid(
       renderOverlayRegion(renderer, region);
     }
   }
+
+  // Draw spill range borders (blue dashed) before selection so selection draws on top
+  drawSpillBorders(state);
 
   if (selection) {
     drawSelection(state);

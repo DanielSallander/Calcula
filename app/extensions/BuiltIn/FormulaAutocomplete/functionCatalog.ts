@@ -91,8 +91,12 @@ const COMMON_FUNCTIONS: Record<string, number> = {
   // Dynamic Array
   FILTER: 19,
   SORT: 18,
+  SORTBY: 18,
   UNIQUE: 17,
   SEQUENCE: 16,
+  RANDARRAY: 16,
+  GROUPBY: 15,
+  PIVOTBY: 15,
   COLLECT: 15,
   DICT: 14,
   KEYS: 13,

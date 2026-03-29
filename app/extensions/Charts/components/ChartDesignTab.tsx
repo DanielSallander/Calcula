@@ -10,7 +10,7 @@ import { emitAppEvent, AppEvents, showDialog } from "../../../src/api";
 import type { RibbonContext } from "../../../src/api/extensions";
 import { useRibbonCollapse, RibbonGroup } from "../../../src/api/ribbonCollapse";
 
-import type { ChartType, ChartSpec, StackMode, BarMarkOptions, LineMarkOptions, AreaMarkOptions, TrendlineSpec, TrendlineType, ComboMarkOptions } from "../types";
+import type { ChartType, ChartSpec, StackMode, BarMarkOptions, LineMarkOptions, AreaMarkOptions, TrendlineSpec, TrendlineType, ComboMarkOptions, DataLabelSpec } from "../types";
 import { isPivotDataSource, isCartesianChart } from "../types";
 import { getChartById, updateChartSpec, syncChartRegions } from "../lib/chartStore";
 import { invalidateChartCache } from "../rendering/chartRenderer";
@@ -258,6 +258,8 @@ const MORE_TYPES: Array<{ value: ChartType; label: string }> = [
   { value: "bubble", label: "Bubble" },
   { value: "histogram", label: "Histogram" },
   { value: "funnel", label: "Funnel" },
+  { value: "treemap", label: "Treemap" },
+  { value: "stock", label: "Stock" },
 ];
 
 // ============================================================================
@@ -495,6 +497,17 @@ export function ChartDesignTab({
                 Axis Labels
               </label>
             )}
+            <label className={s.checkLabel}>
+              <input
+                type="checkbox"
+                checked={spec.dataLabels?.enabled ?? false}
+                onChange={(e) => {
+                  const dl: DataLabelSpec = { ...(spec.dataLabels ?? { enabled: false }), enabled: e.target.checked };
+                  updateSpec({ dataLabels: dl });
+                }}
+              />
+              Data Labels
+            </label>
           </div>
         </div>
       </RibbonGroup>

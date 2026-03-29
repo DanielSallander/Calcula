@@ -616,8 +616,12 @@ fn convert_builtin_function(func: &ParserBuiltinFn) -> EngineBuiltinFn {
 
         ParserBuiltinFn::Filter => EngineBuiltinFn::Filter,
         ParserBuiltinFn::Sort => EngineBuiltinFn::Sort,
+        ParserBuiltinFn::SortBy => EngineBuiltinFn::SortBy,
         ParserBuiltinFn::Unique => EngineBuiltinFn::Unique,
         ParserBuiltinFn::Sequence => EngineBuiltinFn::Sequence,
+        ParserBuiltinFn::RandArray => EngineBuiltinFn::RandArray,
+        ParserBuiltinFn::GroupBy => EngineBuiltinFn::GroupBy,
+        ParserBuiltinFn::PivotBy => EngineBuiltinFn::PivotBy,
 
         // Collection functions (3D cells)
         ParserBuiltinFn::Collect => EngineBuiltinFn::Collect,
@@ -768,6 +772,12 @@ pub fn convert_expr(expr: &ParserExpr) -> EngineExpr {
         ParserExpr::DictLiteral { entries } => EngineExpr::DictLiteral {
             entries: entries.iter().map(|(k, v)| (convert_expr(k), convert_expr(v))).collect(),
         },
+        ParserExpr::SpillRef { cell } => EngineExpr::SpillRef {
+            cell: Box::new(convert_expr(cell)),
+        },
+        ParserExpr::ImplicitIntersection { operand } => EngineExpr::ImplicitIntersection {
+            operand: Box::new(convert_expr(operand)),
+        },
     }
 }
 
@@ -778,6 +788,143 @@ fn col_letter_to_index(col: &str) -> u32 {
         result = result * 26 + val;
     }
     result.saturating_sub(1)
+}
+
+fn index_to_col_letter(mut idx: u32) -> String {
+    let mut result = String::new();
+    loop {
+        result.insert(0, (b'A' + (idx % 26) as u8) as char);
+        if idx < 26 {
+            break;
+        }
+        idx = idx / 26 - 1;
+    }
+    result
+}
+
+/// Checks if an AST contains any SpillRef nodes that need resolution.
+pub fn ast_has_spill_refs(ast: &ParserExpr) -> bool {
+    match ast {
+        ParserExpr::SpillRef { .. } => true,
+        ParserExpr::BinaryOp { left, right, .. } => {
+            ast_has_spill_refs(left) || ast_has_spill_refs(right)
+        }
+        ParserExpr::UnaryOp { operand, .. } => ast_has_spill_refs(operand),
+        ParserExpr::FunctionCall { args, .. } => args.iter().any(ast_has_spill_refs),
+        ParserExpr::Range { start, end, .. } => {
+            ast_has_spill_refs(start) || ast_has_spill_refs(end)
+        }
+        ParserExpr::IndexAccess { target, index } => {
+            ast_has_spill_refs(target) || ast_has_spill_refs(index)
+        }
+        ParserExpr::ImplicitIntersection { operand } => ast_has_spill_refs(operand),
+        ParserExpr::Sheet3DRef { reference, .. } => ast_has_spill_refs(reference),
+        ParserExpr::ListLiteral { elements } => elements.iter().any(ast_has_spill_refs),
+        ParserExpr::DictLiteral { entries } => {
+            entries.iter().any(|(k, v)| ast_has_spill_refs(k) || ast_has_spill_refs(v))
+        }
+        _ => false,
+    }
+}
+
+/// Resolves SpillRef nodes in the AST by replacing them with Range expressions
+/// based on the current spill_ranges state.
+pub fn resolve_spill_refs_in_ast(
+    ast: &ParserExpr,
+    spill_ranges: &HashMap<(usize, u32, u32), Vec<(u32, u32)>>,
+    current_sheet_index: usize,
+) -> ParserExpr {
+    match ast {
+        ParserExpr::SpillRef { cell } => {
+            // Extract the cell reference coordinates
+            if let ParserExpr::CellRef { sheet, col, row, col_absolute, row_absolute } = cell.as_ref() {
+                let col_idx = col_letter_to_index(col);
+                let row_idx = row - 1; // Convert to 0-based
+
+                // Look up the spill range for this cell
+                let key = (current_sheet_index, row_idx, col_idx);
+                if let Some(spill_cells) = spill_ranges.get(&key) {
+                    // Compute the bounding box (origin + all spill cells)
+                    let mut min_row = row_idx;
+                    let mut max_row = row_idx;
+                    let mut min_col = col_idx;
+                    let mut max_col = col_idx;
+                    for &(sr, sc) in spill_cells {
+                        min_row = min_row.min(sr);
+                        max_row = max_row.max(sr);
+                        min_col = min_col.min(sc);
+                        max_col = max_col.max(sc);
+                    }
+
+                    // Build a Range expression
+                    ParserExpr::Range {
+                        sheet: sheet.clone(),
+                        start: Box::new(ParserExpr::CellRef {
+                            sheet: None,
+                            col: index_to_col_letter(min_col),
+                            row: min_row + 1,
+                            col_absolute: *col_absolute,
+                            row_absolute: *row_absolute,
+                        }),
+                        end: Box::new(ParserExpr::CellRef {
+                            sheet: None,
+                            col: index_to_col_letter(max_col),
+                            row: max_row + 1,
+                            col_absolute: *col_absolute,
+                            row_absolute: *row_absolute,
+                        }),
+                    }
+                } else {
+                    // No spill range at this cell - just return the single cell ref
+                    cell.as_ref().clone()
+                }
+            } else {
+                // SpillRef on non-CellRef is invalid
+                ast.clone()
+            }
+        }
+        ParserExpr::BinaryOp { left, op, right } => ParserExpr::BinaryOp {
+            left: Box::new(resolve_spill_refs_in_ast(left, spill_ranges, current_sheet_index)),
+            op: op.clone(),
+            right: Box::new(resolve_spill_refs_in_ast(right, spill_ranges, current_sheet_index)),
+        },
+        ParserExpr::UnaryOp { op, operand } => ParserExpr::UnaryOp {
+            op: op.clone(),
+            operand: Box::new(resolve_spill_refs_in_ast(operand, spill_ranges, current_sheet_index)),
+        },
+        ParserExpr::FunctionCall { func, args } => ParserExpr::FunctionCall {
+            func: func.clone(),
+            args: args.iter().map(|a| resolve_spill_refs_in_ast(a, spill_ranges, current_sheet_index)).collect(),
+        },
+        ParserExpr::Range { sheet, start, end } => ParserExpr::Range {
+            sheet: sheet.clone(),
+            start: Box::new(resolve_spill_refs_in_ast(start, spill_ranges, current_sheet_index)),
+            end: Box::new(resolve_spill_refs_in_ast(end, spill_ranges, current_sheet_index)),
+        },
+        ParserExpr::IndexAccess { target, index } => ParserExpr::IndexAccess {
+            target: Box::new(resolve_spill_refs_in_ast(target, spill_ranges, current_sheet_index)),
+            index: Box::new(resolve_spill_refs_in_ast(index, spill_ranges, current_sheet_index)),
+        },
+        ParserExpr::ImplicitIntersection { operand } => ParserExpr::ImplicitIntersection {
+            operand: Box::new(resolve_spill_refs_in_ast(operand, spill_ranges, current_sheet_index)),
+        },
+        ParserExpr::Sheet3DRef { start_sheet, end_sheet, reference } => ParserExpr::Sheet3DRef {
+            start_sheet: start_sheet.clone(),
+            end_sheet: end_sheet.clone(),
+            reference: Box::new(resolve_spill_refs_in_ast(reference, spill_ranges, current_sheet_index)),
+        },
+        ParserExpr::ListLiteral { elements } => ParserExpr::ListLiteral {
+            elements: elements.iter().map(|e| resolve_spill_refs_in_ast(e, spill_ranges, current_sheet_index)).collect(),
+        },
+        ParserExpr::DictLiteral { entries } => ParserExpr::DictLiteral {
+            entries: entries.iter().map(|(k, v)| (
+                resolve_spill_refs_in_ast(k, spill_ranges, current_sheet_index),
+                resolve_spill_refs_in_ast(v, spill_ranges, current_sheet_index),
+            )).collect(),
+        },
+        // All other nodes (Literal, CellRef, ColumnRef, RowRef, NamedRef, TableRef) pass through
+        _ => ast.clone(),
+    }
 }
 
 // ============================================================================
@@ -935,6 +1082,12 @@ fn extract_references_recursive(expr: &ParserExpr, grid: &Grid, refs: &mut Extra
                 extract_references_recursive(key, grid, refs);
                 extract_references_recursive(value, grid, refs);
             }
+        }
+        ParserExpr::SpillRef { cell } => {
+            extract_references_recursive(cell, grid, refs);
+        }
+        ParserExpr::ImplicitIntersection { operand } => {
+            extract_references_recursive(operand, grid, refs);
         }
     }
 }
@@ -1155,6 +1308,12 @@ pub fn resolve_names_in_ast(
                 resolve_names_in_ast(v, named_ranges, current_sheet_index, visited),
             )).collect(),
         },
+        ParserExpr::SpillRef { cell } => ParserExpr::SpillRef {
+            cell: Box::new(resolve_names_in_ast(cell, named_ranges, current_sheet_index, visited)),
+        },
+        ParserExpr::ImplicitIntersection { operand } => ParserExpr::ImplicitIntersection {
+            operand: Box::new(resolve_names_in_ast(operand, named_ranges, current_sheet_index, visited)),
+        },
     }
 }
 
@@ -1299,6 +1458,12 @@ fn resolve_names_in_ast_with_shadows(
                 resolve_names_in_ast_with_shadows(v, named_ranges, current_sheet_index, visited, shadows),
             )).collect(),
         },
+        ParserExpr::SpillRef { cell } => ParserExpr::SpillRef {
+            cell: Box::new(resolve_names_in_ast_with_shadows(cell, named_ranges, current_sheet_index, visited, shadows)),
+        },
+        ParserExpr::ImplicitIntersection { operand } => ParserExpr::ImplicitIntersection {
+            operand: Box::new(resolve_names_in_ast_with_shadows(operand, named_ranges, current_sheet_index, visited, shadows)),
+        },
     }
 }
 
@@ -1329,6 +1494,8 @@ pub fn ast_has_named_refs(ast: &ParserExpr) -> bool {
         }
         ParserExpr::ListLiteral { elements } => elements.iter().any(ast_has_named_refs),
         ParserExpr::DictLiteral { entries } => entries.iter().any(|(k, v)| ast_has_named_refs(k) || ast_has_named_refs(v)),
+        ParserExpr::SpillRef { cell } => ast_has_named_refs(cell),
+        ParserExpr::ImplicitIntersection { operand } => ast_has_named_refs(operand),
     }
 }
 
@@ -1353,6 +1520,8 @@ pub fn ast_has_table_refs(ast: &ParserExpr) -> bool {
         ParserExpr::Sheet3DRef { reference, .. } => ast_has_table_refs(reference),
         ParserExpr::ListLiteral { elements } => elements.iter().any(ast_has_table_refs),
         ParserExpr::DictLiteral { entries } => entries.iter().any(|(k, v)| ast_has_table_refs(k) || ast_has_table_refs(v)),
+        ParserExpr::SpillRef { cell } => ast_has_table_refs(cell),
+        ParserExpr::ImplicitIntersection { operand } => ast_has_table_refs(operand),
     }
 }
 
@@ -1426,6 +1595,12 @@ pub fn resolve_table_refs_in_ast(
                 resolve_table_refs_in_ast(k, ctx),
                 resolve_table_refs_in_ast(v, ctx),
             )).collect(),
+        },
+        ParserExpr::SpillRef { cell } => ParserExpr::SpillRef {
+            cell: Box::new(resolve_table_refs_in_ast(cell, ctx)),
+        },
+        ParserExpr::ImplicitIntersection { operand } => ParserExpr::ImplicitIntersection {
+            operand: Box::new(resolve_table_refs_in_ast(operand, ctx)),
         },
     }
 }
@@ -1860,6 +2035,12 @@ pub fn expression_to_formula(expr: &ParserExpr) -> String {
             }).collect();
             format!("{{{}}}", inner.join(", "))
         }
+        ParserExpr::SpillRef { cell } => {
+            format!("{}#", expression_to_formula(cell))
+        }
+        ParserExpr::ImplicitIntersection { operand } => {
+            format!("@{}", expression_to_formula(operand))
+        }
     }
 }
 
@@ -2037,8 +2218,12 @@ fn builtin_function_to_name(func: &ParserBuiltinFn) -> String {
         ParserBuiltinFn::TextJoin => "TEXTJOIN".to_string(),
         ParserBuiltinFn::Filter => "FILTER".to_string(),
         ParserBuiltinFn::Sort => "SORT".to_string(),
+        ParserBuiltinFn::SortBy => "SORTBY".to_string(),
         ParserBuiltinFn::Unique => "UNIQUE".to_string(),
         ParserBuiltinFn::Sequence => "SEQUENCE".to_string(),
+        ParserBuiltinFn::RandArray => "RANDARRAY".to_string(),
+        ParserBuiltinFn::GroupBy => "GROUPBY".to_string(),
+        ParserBuiltinFn::PivotBy => "PIVOTBY".to_string(),
         ParserBuiltinFn::Collect => "COLLECT".to_string(),
         ParserBuiltinFn::DictFn => "DICT".to_string(),
         ParserBuiltinFn::Keys => "KEYS".to_string(),
@@ -2964,6 +3149,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             // Grid commands
             commands::get_viewport_cells,
+            commands::get_spill_ranges,
             commands::get_cell,
             commands::get_cell_collection,
             commands::get_collection_texts,

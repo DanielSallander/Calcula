@@ -433,6 +433,92 @@ impl<'a> Evaluator<'a> {
                     EvalResult::Error(CellError::Name)
                 }
             }
+            Expression::SpillRef { .. } => {
+                // SpillRef should be resolved in the Tauri layer before evaluation.
+                // If it reaches here, it means the spill range lookup failed.
+                EvalResult::Error(CellError::Name)
+            }
+            Expression::ImplicitIntersection { operand } => {
+                self.eval_implicit_intersection(operand)
+            }
+        }
+    }
+
+    /// Evaluates the @ implicit intersection operator.
+    /// Extracts the single value from a range at the formula's row or column.
+    fn eval_implicit_intersection(&self, operand: &Expression) -> EvalResult {
+        // Get the formula's position
+        let current_row = self.context.current_row.unwrap_or(0);
+        let current_col = self.context.current_col.unwrap_or(0);
+
+        // Try to determine the range start position from the operand
+        match operand {
+            Expression::Range { start, end, sheet } => {
+                let grid = self.get_grid_for_sheet(sheet);
+                let (start_col_s, start_row) = if let Expression::CellRef { col, row, .. } = start.as_ref() {
+                    (col.clone(), *row)
+                } else {
+                    return self.evaluate(operand);
+                };
+                let (end_col_s, end_row) = if let Expression::CellRef { col, row, .. } = end.as_ref() {
+                    (col.clone(), *row)
+                } else {
+                    return self.evaluate(operand);
+                };
+
+                let start_col_idx = col_to_index(&start_col_s);
+                let end_col_idx = col_to_index(&end_col_s);
+                let start_row_idx = start_row - 1;
+                let end_row_idx = end_row - 1;
+
+                let min_row = start_row_idx.min(end_row_idx);
+                let max_row = start_row_idx.max(end_row_idx);
+                let min_col = start_col_idx.min(end_col_idx);
+                let max_col = start_col_idx.max(end_col_idx);
+
+                let is_single_col = min_col == max_col;
+                let is_single_row = min_row == max_row;
+
+                if is_single_col && current_row >= min_row && current_row <= max_row {
+                    // Vertical range: return cell at formula's row
+                    match grid.get_cell(current_row, min_col) {
+                        Some(cell) => self.cell_value_to_result(&cell.value),
+                        None => EvalResult::Number(0.0),
+                    }
+                } else if is_single_row && current_col >= min_col && current_col <= max_col {
+                    // Horizontal range: return cell at formula's column
+                    match grid.get_cell(min_row, current_col) {
+                        Some(cell) => self.cell_value_to_result(&cell.value),
+                        None => EvalResult::Number(0.0),
+                    }
+                } else if current_row >= min_row && current_row <= max_row
+                       && current_col >= min_col && current_col <= max_col {
+                    // 2D range but formula is inside it: return the intersecting cell
+                    match grid.get_cell(current_row, current_col) {
+                        Some(cell) => self.cell_value_to_result(&cell.value),
+                        None => EvalResult::Number(0.0),
+                    }
+                } else {
+                    // Formula is outside the range - no intersection
+                    EvalResult::Error(CellError::Value)
+                }
+            }
+            _ => {
+                // For non-range operands, evaluate normally
+                let result = self.evaluate(operand);
+                // If result is an array, try to pick the element at the formula's row
+                match &result {
+                    EvalResult::Array(arr) if !arr.is_empty() => {
+                        let idx = current_row as usize;
+                        if idx < arr.len() {
+                            arr[idx].clone()
+                        } else {
+                            EvalResult::Error(CellError::Value)
+                        }
+                    }
+                    _ => result,
+                }
+            }
         }
     }
 
@@ -1156,8 +1242,12 @@ impl<'a> Evaluator<'a> {
             // Dynamic array functions
             BuiltinFunction::Filter => self.fn_filter(args),
             BuiltinFunction::Sort => self.fn_sort(args),
+            BuiltinFunction::SortBy => self.fn_sortby(args),
             BuiltinFunction::Unique => self.fn_unique(args),
             BuiltinFunction::Sequence => self.fn_sequence(args),
+            BuiltinFunction::RandArray => self.fn_randarray(args),
+            BuiltinFunction::GroupBy => self.fn_groupby(args),
+            BuiltinFunction::PivotBy => self.fn_pivotby(args),
 
             // Collection functions (3D cells)
             BuiltinFunction::Collect => self.fn_collect(args),
@@ -4746,6 +4836,77 @@ impl<'a> Evaluator<'a> {
             .then(sa.cmp(&sb))
     }
 
+    /// SORTBY(array, by_array1, [sort_order1], [by_array2], [sort_order2], ...)
+    /// Sorts the rows of array based on one or more by_arrays.
+    fn fn_sortby(&self, args: &[Expression]) -> EvalResult {
+        if args.len() < 2 {
+            return EvalResult::Error(CellError::Value);
+        }
+
+        let (rows, cols, data) = self.eval_range_2d(&args[0]);
+        if rows == 0 {
+            return EvalResult::Error(CellError::Value);
+        }
+
+        // Parse by_array/sort_order pairs
+        let mut sort_keys: Vec<(Vec<EvalResult>, i32)> = Vec::new();
+        let mut i = 1;
+        while i < args.len() {
+            let by_vals = self.eval_flat(&args[i]);
+            if by_vals.len() != rows {
+                return EvalResult::Error(CellError::Value);
+            }
+            let order = if i + 1 < args.len() {
+                match self.evaluate(&args[i + 1]).as_number() {
+                    Some(n) => {
+                        i += 2;
+                        n as i32
+                    }
+                    None => {
+                        // Next arg is not a number, treat as next by_array (order defaults to 1)
+                        i += 1;
+                        1
+                    }
+                }
+            } else {
+                i += 1;
+                1 // ascending
+            };
+            sort_keys.push((by_vals, order));
+        }
+
+        // Build row vectors
+        let mut row_vecs: Vec<(usize, Vec<EvalResult>)> = (0..rows)
+            .map(|r| {
+                let start = r * cols;
+                let row_data: Vec<EvalResult> = (0..cols)
+                    .map(|c| data.get(start + c).cloned().unwrap_or(EvalResult::Number(0.0)))
+                    .collect();
+                (r, row_data)
+            })
+            .collect();
+
+        // Stable sort by all keys (primary first, then secondary, etc.)
+        row_vecs.sort_by(|a, b| {
+            for (by_vals, order) in &sort_keys {
+                let va = &by_vals[a.0];
+                let vb = &by_vals[b.0];
+                let cmp = Self::compare_eval_results(va, vb);
+                let cmp = if *order == -1 { cmp.reverse() } else { cmp };
+                if cmp != std::cmp::Ordering::Equal {
+                    return cmp;
+                }
+            }
+            std::cmp::Ordering::Equal
+        });
+
+        if cols == 1 {
+            EvalResult::Array(row_vecs.into_iter().map(|(_, r)| r.into_iter().next().unwrap()).collect())
+        } else {
+            EvalResult::Array(row_vecs.into_iter().map(|(_, r)| EvalResult::Array(r)).collect())
+        }
+    }
+
     /// UNIQUE(array, [by_col], [exactly_once])
     /// Returns unique rows (or columns) from the array.
     fn fn_unique(&self, args: &[Expression]) -> EvalResult {
@@ -4924,6 +5085,506 @@ impl<'a> Evaluator<'a> {
             }
             EvalResult::Array(rows_out)
         }
+    }
+
+    /// RANDARRAY([rows], [columns], [min], [max], [whole_number])
+    /// Returns an array of random numbers.
+    fn fn_randarray(&self, args: &[Expression]) -> EvalResult {
+        if args.len() > 5 {
+            return EvalResult::Error(CellError::Value);
+        }
+
+        let ra_rows = if !args.is_empty() {
+            match self.evaluate(&args[0]).as_number() {
+                Some(n) if n >= 1.0 => n as usize,
+                Some(_) => return EvalResult::Error(CellError::Value),
+                None => return EvalResult::Error(CellError::Value),
+            }
+        } else {
+            1
+        };
+        let ra_cols = if args.len() >= 2 {
+            match self.evaluate(&args[1]).as_number() {
+                Some(n) if n >= 1.0 => n as usize,
+                Some(_) => return EvalResult::Error(CellError::Value),
+                None => return EvalResult::Error(CellError::Value),
+            }
+        } else {
+            1
+        };
+        let min_val = if args.len() >= 3 {
+            match self.evaluate(&args[2]).as_number() {
+                Some(n) => n,
+                None => return EvalResult::Error(CellError::Value),
+            }
+        } else {
+            0.0
+        };
+        let max_val = if args.len() >= 4 {
+            match self.evaluate(&args[3]).as_number() {
+                Some(n) => n,
+                None => return EvalResult::Error(CellError::Value),
+            }
+        } else {
+            1.0
+        };
+        let whole_number = if args.len() >= 5 {
+            match self.evaluate(&args[4]).as_boolean() {
+                Some(b) => b,
+                None => return EvalResult::Error(CellError::Value),
+            }
+        } else {
+            false
+        };
+
+        if min_val > max_val {
+            return EvalResult::Error(CellError::Value);
+        }
+
+        // Use RandomState for random generation (same approach as RAND)
+        use std::collections::hash_map::RandomState;
+        use std::hash::{BuildHasher, Hasher};
+
+        let gen_random = || -> f64 {
+            let s = RandomState::new();
+            let mut hasher = s.build_hasher();
+            hasher.write_u64(0);
+            let bits = hasher.finish();
+            let unit = (bits as f64) / (u64::MAX as f64); // 0.0 to ~1.0
+            if whole_number {
+                let min_i = min_val.ceil() as i64;
+                let max_i = max_val.floor() as i64;
+                if min_i > max_i {
+                    return min_val; // degenerate
+                }
+                let range = (max_i - min_i + 1) as f64;
+                min_i as f64 + (unit * range).floor()
+            } else {
+                min_val + unit * (max_val - min_val)
+            }
+        };
+
+        // Single cell result
+        if ra_rows == 1 && ra_cols == 1 {
+            return EvalResult::Number(gen_random());
+        }
+
+        if ra_cols == 1 {
+            let vals: Vec<EvalResult> = (0..ra_rows).map(|_| EvalResult::Number(gen_random())).collect();
+            EvalResult::Array(vals)
+        } else {
+            let mut rows_out = Vec::with_capacity(ra_rows);
+            for _ in 0..ra_rows {
+                let row: Vec<EvalResult> = (0..ra_cols).map(|_| EvalResult::Number(gen_random())).collect();
+                rows_out.push(EvalResult::Array(row));
+            }
+            EvalResult::Array(rows_out)
+        }
+    }
+
+    /// GROUPBY(row_fields, values, function, [field_headers], [total_depth], [sort_order], [filter_array])
+    /// Groups rows by row_fields and aggregates values.
+    fn fn_groupby(&self, args: &[Expression]) -> EvalResult {
+        if args.len() < 3 || args.len() > 7 {
+            return EvalResult::Error(CellError::Value);
+        }
+
+        let (rf_rows, rf_cols, rf_data) = self.eval_range_2d(&args[0]);
+        let (v_rows, v_cols, v_data) = self.eval_range_2d(&args[1]);
+
+        // Determine aggregation function
+        let agg_fn_code = self.evaluate(&args[2]);
+        let has_lambda = matches!(&agg_fn_code, EvalResult::Lambda { .. });
+
+        let field_headers = if args.len() >= 4 {
+            match self.evaluate(&args[3]).as_number() {
+                Some(n) => n as i32,
+                None => 0,
+            }
+        } else {
+            0 // no headers
+        };
+        let total_depth = if args.len() >= 5 {
+            match self.evaluate(&args[4]).as_number() {
+                Some(n) => n as i32,
+                None => 0,
+            }
+        } else {
+            0 // no totals
+        };
+        let sort_order = if args.len() >= 6 {
+            match self.evaluate(&args[5]).as_number() {
+                Some(n) => n as i32,
+                None => 0,
+            }
+        } else {
+            0 // preserve original order
+        };
+
+        // Optional filter array
+        let filter_mask: Option<Vec<bool>> = if args.len() >= 7 {
+            let filter_vals = self.eval_flat(&args[6]);
+            Some(filter_vals.iter().map(|v| match v {
+                EvalResult::Boolean(b) => *b,
+                EvalResult::Number(n) => *n != 0.0,
+                _ => true,
+            }).collect())
+        } else {
+            None
+        };
+
+        // Determine data rows (skip header if field_headers > 0)
+        let header_rows = if field_headers > 0 { 1 } else { 0 };
+        if rf_rows <= header_rows || v_rows <= header_rows {
+            return EvalResult::Error(CellError::Value);
+        }
+        if rf_rows != v_rows {
+            return EvalResult::Error(CellError::Value);
+        }
+
+        let data_row_start = header_rows as usize;
+
+        // Collect group keys and values
+        let mut group_order: Vec<String> = Vec::new();
+        let mut groups: HashMap<String, Vec<usize>> = HashMap::new();
+
+        for r in data_row_start..rf_rows {
+            // Apply filter
+            if let Some(ref mask) = filter_mask {
+                if r < mask.len() && !mask[r] {
+                    continue;
+                }
+            }
+
+            // Build group key from row_fields columns
+            let key_parts: Vec<String> = (0..rf_cols)
+                .map(|c| {
+                    let val = &rf_data[r * rf_cols + c];
+                    format!("{:?}", val)
+                })
+                .collect();
+            let key = key_parts.join("|");
+
+            if !groups.contains_key(&key) {
+                group_order.push(key.clone());
+            }
+            groups.entry(key).or_default().push(r);
+        }
+
+        // Sort groups if requested
+        if sort_order == 1 || sort_order == 2 {
+            group_order.sort_by(|a, b| {
+                let ra = groups[a][0];
+                let rb = groups[b][0];
+                let mut cmp = std::cmp::Ordering::Equal;
+                for c in 0..rf_cols {
+                    let va = &rf_data[ra * rf_cols + c];
+                    let vb = &rf_data[rb * rf_cols + c];
+                    cmp = Self::compare_eval_results(va, vb);
+                    if cmp != std::cmp::Ordering::Equal {
+                        break;
+                    }
+                }
+                if sort_order == 2 { cmp.reverse() } else { cmp }
+            });
+        }
+
+        // Build output
+        let mut result_rows: Vec<Vec<EvalResult>> = Vec::new();
+
+        // Header row if requested
+        if field_headers > 0 {
+            let mut header: Vec<EvalResult> = Vec::new();
+            for c in 0..rf_cols {
+                header.push(rf_data[c].clone());
+            }
+            for c in 0..v_cols {
+                header.push(v_data[c].clone());
+            }
+            result_rows.push(header);
+        }
+
+        // Data rows (one per group)
+        for key in &group_order {
+            let row_indices = &groups[key];
+            let first_row = row_indices[0];
+
+            let mut row: Vec<EvalResult> = Vec::new();
+            // Group label columns
+            for c in 0..rf_cols {
+                row.push(rf_data[first_row * rf_cols + c].clone());
+            }
+            // Aggregated value columns
+            for c in 0..v_cols {
+                let vals: Vec<EvalResult> = row_indices.iter()
+                    .map(|&r| v_data[r * v_cols + c].clone())
+                    .collect();
+
+                let agg = if has_lambda {
+                    self.apply_lambda(&agg_fn_code, &[EvalResult::Array(vals)])
+                } else {
+                    Self::aggregate_values(&vals, &agg_fn_code)
+                };
+                row.push(agg);
+            }
+            result_rows.push(row);
+        }
+
+        // Grand total row if total_depth >= 1
+        if total_depth >= 1 && !group_order.is_empty() {
+            let mut total_row: Vec<EvalResult> = Vec::new();
+            for c in 0..rf_cols {
+                if c == 0 {
+                    total_row.push(EvalResult::Text("Grand Total".to_string()));
+                } else {
+                    total_row.push(EvalResult::Text(String::new()));
+                }
+            }
+            for c in 0..v_cols {
+                let all_vals: Vec<EvalResult> = (data_row_start..rf_rows)
+                    .filter(|&r| {
+                        if let Some(ref mask) = filter_mask {
+                            r >= mask.len() || mask[r]
+                        } else {
+                            true
+                        }
+                    })
+                    .map(|r| v_data[r * v_cols + c].clone())
+                    .collect();
+                let agg = if has_lambda {
+                    self.apply_lambda(&agg_fn_code, &[EvalResult::Array(all_vals)])
+                } else {
+                    Self::aggregate_values(&all_vals, &agg_fn_code)
+                };
+                total_row.push(agg);
+            }
+            result_rows.push(total_row);
+        }
+
+        if result_rows.is_empty() {
+            return EvalResult::Error(CellError::Value);
+        }
+
+        let out_cols = rf_cols + v_cols;
+        if out_cols == 1 {
+            EvalResult::Array(result_rows.into_iter().map(|r| r.into_iter().next().unwrap()).collect())
+        } else {
+            EvalResult::Array(result_rows.into_iter().map(|r| EvalResult::Array(r)).collect())
+        }
+    }
+
+    /// Aggregate a list of EvalResults using a numeric function code.
+    /// 0/101=SUM, 1/102=COUNT, 2/103=AVERAGE, 3/104=MAX, 4/105=MIN, 5/106=PRODUCT
+    fn aggregate_values(vals: &[EvalResult], fn_code: &EvalResult) -> EvalResult {
+        let code = match fn_code.as_number() {
+            Some(n) => n as i32,
+            None => return EvalResult::Error(CellError::Value),
+        };
+
+        let nums: Vec<f64> = vals.iter().filter_map(|v| v.as_number()).collect();
+
+        match code {
+            0 | 101 => {
+                // SUM
+                EvalResult::Number(nums.iter().sum())
+            }
+            1 | 102 => {
+                // COUNT
+                EvalResult::Number(nums.len() as f64)
+            }
+            2 | 103 => {
+                // AVERAGE
+                if nums.is_empty() {
+                    EvalResult::Error(CellError::Div0)
+                } else {
+                    EvalResult::Number(nums.iter().sum::<f64>() / nums.len() as f64)
+                }
+            }
+            3 | 104 => {
+                // MAX
+                nums.iter().cloned().reduce(f64::max)
+                    .map(EvalResult::Number)
+                    .unwrap_or(EvalResult::Error(CellError::Value))
+            }
+            4 | 105 => {
+                // MIN
+                nums.iter().cloned().reduce(f64::min)
+                    .map(EvalResult::Number)
+                    .unwrap_or(EvalResult::Error(CellError::Value))
+            }
+            5 | 106 => {
+                // PRODUCT
+                EvalResult::Number(nums.iter().product())
+            }
+            _ => EvalResult::Error(CellError::Value),
+        }
+    }
+
+    /// Apply a lambda to arguments
+    fn apply_lambda(&self, lambda: &EvalResult, apply_args: &[EvalResult]) -> EvalResult {
+        if let EvalResult::Lambda { params, body } = lambda {
+            self.invoke_lambda(params, body, apply_args)
+        } else {
+            EvalResult::Error(CellError::Value)
+        }
+    }
+
+    /// PIVOTBY(row_fields, col_fields, values, function, [field_headers],
+    ///         [row_total_depth], [row_sort_order], [col_total_depth], [col_sort_order], [filter_array])
+    /// Creates a pivot table grouping by rows and columns.
+    fn fn_pivotby(&self, args: &[Expression]) -> EvalResult {
+        if args.len() < 4 || args.len() > 10 {
+            return EvalResult::Error(CellError::Value);
+        }
+
+        let (rf_rows, rf_cols, rf_data) = self.eval_range_2d(&args[0]);
+        let (cf_rows, cf_cols, cf_data) = self.eval_range_2d(&args[1]);
+        let (v_rows, v_cols, v_data) = self.eval_range_2d(&args[2]);
+        let agg_fn_code = self.evaluate(&args[3]);
+        let has_lambda = matches!(&agg_fn_code, EvalResult::Lambda { .. });
+
+        let field_headers = if args.len() >= 5 {
+            self.evaluate(&args[4]).as_number().unwrap_or(0.0) as i32
+        } else { 0 };
+        let row_sort_order = if args.len() >= 7 {
+            self.evaluate(&args[6]).as_number().unwrap_or(0.0) as i32
+        } else { 0 };
+        let col_sort_order = if args.len() >= 9 {
+            self.evaluate(&args[8]).as_number().unwrap_or(0.0) as i32
+        } else { 0 };
+
+        let filter_mask: Option<Vec<bool>> = if args.len() >= 10 {
+            let filter_vals = self.eval_flat(&args[9]);
+            Some(filter_vals.iter().map(|v| match v {
+                EvalResult::Boolean(b) => *b,
+                EvalResult::Number(n) => *n != 0.0,
+                _ => true,
+            }).collect())
+        } else {
+            None
+        };
+
+        let header_rows = if field_headers > 0 { 1 } else { 0 };
+        if rf_rows <= header_rows || cf_rows <= header_rows || v_rows <= header_rows {
+            return EvalResult::Error(CellError::Value);
+        }
+        if rf_rows != cf_rows || rf_rows != v_rows {
+            return EvalResult::Error(CellError::Value);
+        }
+
+        let data_row_start = header_rows as usize;
+
+        // Collect unique row keys and column keys
+        let mut row_key_order: Vec<String> = Vec::new();
+        let mut row_keys_set: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let mut col_key_order: Vec<String> = Vec::new();
+        let mut col_keys_set: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+        // Map (row_key, col_key) -> Vec<row_indices>
+        let mut pivot_map: HashMap<(String, String), Vec<usize>> = HashMap::new();
+
+        for r in data_row_start..rf_rows {
+            if let Some(ref mask) = filter_mask {
+                if r < mask.len() && !mask[r] {
+                    continue;
+                }
+            }
+
+            let rk: Vec<String> = (0..rf_cols).map(|c| format!("{:?}", rf_data[r * rf_cols + c])).collect();
+            let row_key = rk.join("|");
+
+            let ck: Vec<String> = (0..cf_cols).map(|c| format!("{:?}", cf_data[r * cf_cols + c])).collect();
+            let col_key = ck.join("|");
+
+            if row_keys_set.insert(row_key.clone()) {
+                row_key_order.push(row_key.clone());
+            }
+            if col_keys_set.insert(col_key.clone()) {
+                col_key_order.push(col_key.clone());
+            }
+
+            pivot_map.entry((row_key, col_key)).or_default().push(r);
+        }
+
+        // Sort row keys
+        if row_sort_order == 1 || row_sort_order == 2 {
+            row_key_order.sort_by(|a, b| {
+                let cmp = a.cmp(b);
+                if row_sort_order == 2 { cmp.reverse() } else { cmp }
+            });
+        }
+        // Sort column keys
+        if col_sort_order == 1 || col_sort_order == 2 {
+            col_key_order.sort_by(|a, b| {
+                let cmp = a.cmp(b);
+                if col_sort_order == 2 { cmp.reverse() } else { cmp }
+            });
+        }
+
+        // Helper: get the first row index for a key to extract display values
+        let first_row_for_key = |key: &str, data: &[EvalResult], cols: usize| -> Vec<EvalResult> {
+            // Find the first row that produced this key
+            for r in data_row_start..rf_rows {
+                let parts: Vec<String> = (0..cols).map(|c| format!("{:?}", data[r * cols + c])).collect();
+                if parts.join("|") == key {
+                    return (0..cols).map(|c| data[r * cols + c].clone()).collect();
+                }
+            }
+            vec![EvalResult::Text(String::new()); cols]
+        };
+
+        let mut result_rows: Vec<Vec<EvalResult>> = Vec::new();
+
+        // Header row(s): empty cells for row_fields, then col group labels
+        if field_headers > 0 || true {
+            // Always produce a header row for column labels
+            let mut header: Vec<EvalResult> = Vec::new();
+            // Empty cells for row field columns
+            for _ in 0..rf_cols {
+                header.push(EvalResult::Text(String::new()));
+            }
+            // Column group labels
+            for ck in &col_key_order {
+                let col_labels = first_row_for_key(ck, &cf_data, cf_cols);
+                // Use first column of col_fields as label
+                header.push(col_labels.into_iter().next().unwrap_or(EvalResult::Text(String::new())));
+            }
+            result_rows.push(header);
+        }
+
+        // Data rows: one per row group
+        for rk in &row_key_order {
+            let mut row: Vec<EvalResult> = Vec::new();
+            // Row labels
+            let row_labels = first_row_for_key(rk, &rf_data, rf_cols);
+            row.extend(row_labels);
+
+            // Values for each column group
+            for ck in &col_key_order {
+                let key = (rk.clone(), ck.clone());
+                if let Some(indices) = pivot_map.get(&key) {
+                    // Aggregate values (use first value column)
+                    let vals: Vec<EvalResult> = indices.iter()
+                        .map(|&r| v_data[r * v_cols].clone())
+                        .collect();
+                    let agg = if has_lambda {
+                        self.apply_lambda(&agg_fn_code, &[EvalResult::Array(vals)])
+                    } else {
+                        Self::aggregate_values(&vals, &agg_fn_code)
+                    };
+                    row.push(agg);
+                } else {
+                    row.push(EvalResult::Number(0.0));
+                }
+            }
+            result_rows.push(row);
+        }
+
+        if result_rows.is_empty() {
+            return EvalResult::Error(CellError::Value);
+        }
+
+        EvalResult::Array(result_rows.into_iter().map(|r| EvalResult::Array(r)).collect())
     }
 
     // ========================================================================

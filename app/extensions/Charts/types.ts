@@ -21,17 +21,19 @@ export type ChartType =
   | "radar"
   | "bubble"
   | "histogram"
-  | "funnel";
+  | "funnel"
+  | "treemap"
+  | "stock";
 
 /** Chart types that use cartesian axes (X/Y). */
-export type CartesianChartType = "bar" | "horizontalBar" | "line" | "area" | "scatter" | "waterfall" | "combo" | "bubble" | "histogram";
+export type CartesianChartType = "bar" | "horizontalBar" | "line" | "area" | "scatter" | "waterfall" | "combo" | "bubble" | "histogram" | "stock";
 
 /** Chart types that use polar/radial layout (no axes). */
 export type RadialChartType = "pie" | "donut" | "radar";
 
 /** Check if a chart type uses cartesian axes. */
 export function isCartesianChart(mark: ChartType): mark is CartesianChartType {
-  return mark !== "pie" && mark !== "donut" && mark !== "radar" && mark !== "funnel";
+  return mark !== "pie" && mark !== "donut" && mark !== "radar" && mark !== "funnel" && mark !== "treemap";
 }
 
 // ============================================================================
@@ -189,6 +191,43 @@ export interface FunnelMarkOptions {
   sectionGap?: number;
 }
 
+/** Options specific to treemap charts. */
+export interface TreemapMarkOptions {
+  /** Show category labels on tiles. Default: true */
+  showLabels?: boolean;
+  /** Label format: "category", "value", "both". Default: "both" */
+  labelFormat?: "category" | "value" | "both";
+  /** Border width between tiles in pixels. Default: 2 */
+  tileBorderWidth?: number;
+  /** Border color between tiles. Default: "#ffffff" */
+  tileBorderColor?: string;
+  /** Tile corner radius in pixels. Default: 2 */
+  tileRadius?: number;
+}
+
+/** Stock chart display style. */
+export type StockStyle = "candlestick" | "ohlc";
+
+/** Options specific to stock (OHLC/Candlestick) charts. */
+export interface StockMarkOptions {
+  /** Display style. Default: "candlestick" */
+  style?: StockStyle;
+  /** Color for up (close > open) candles/bars. Default: "#4CAF50" */
+  upColor?: string;
+  /** Color for down (close < open) candles/bars. Default: "#E53935" */
+  downColor?: string;
+  /** Candle body width as fraction of available space (0-1). Default: 0.6 */
+  bodyWidth?: number;
+  /** Wick/shadow line width in pixels. Default: 1 */
+  wickWidth?: number;
+  /**
+   * Series index mapping for OHLC data. The data must contain 4 series
+   * in this order: Open, High, Low, Close. These indices refer to the
+   * order within spec.series[]. Default: [0, 1, 2, 3].
+   */
+  ohlcIndices?: [number, number, number, number];
+}
+
 /** Options for rule marks (reference lines). Used in layers. */
 export interface RuleMarkOptions {
   /** Y value for a horizontal reference line. */
@@ -236,6 +275,8 @@ export type MarkOptions =
   | BubbleMarkOptions
   | HistogramMarkOptions
   | FunnelMarkOptions
+  | TreemapMarkOptions
+  | StockMarkOptions
   | RuleMarkOptions
   | TextMarkOptions;
 
@@ -560,6 +601,40 @@ export interface TooltipSpec {
 }
 
 // ============================================================================
+// Data Label Specification
+// ============================================================================
+
+/** Position of data labels relative to data points. */
+export type DataLabelPosition = "auto" | "above" | "below" | "center" | "inside" | "outside";
+
+/** What content to display in data labels. */
+export type DataLabelContent = "value" | "category" | "seriesName" | "percent";
+
+/** Configuration for data labels displayed on chart data points. */
+export interface DataLabelSpec {
+  /** Whether data labels are shown. Default: false. */
+  enabled: boolean;
+  /** What to display. Default: ["value"]. */
+  content?: DataLabelContent[];
+  /** Label position relative to data point. Default: "auto". */
+  position?: DataLabelPosition;
+  /** Font size in pixels. Default: 10. */
+  fontSize?: number;
+  /** Text color. Default: auto (dark on light, light on dark). */
+  color?: string;
+  /** Background color for label badge. Null = no background. Default: null. */
+  backgroundColor?: string | null;
+  /** Number format string (e.g., "$,.2f", ".1%"). Default: auto. */
+  format?: string;
+  /** Separator between multiple content fields. Default: " - ". */
+  separator?: string;
+  /** Show labels only for series indices listed. Null = all series. Default: null. */
+  seriesFilter?: number[] | null;
+  /** Minimum value threshold — hide labels for values below this. Default: null. */
+  minValue?: number | null;
+}
+
+// ============================================================================
 // Trendline Specification
 // ============================================================================
 
@@ -630,6 +705,8 @@ export interface ChartSpec {
   tooltip?: TooltipSpec;
   /** Trendlines overlaid on chart series. */
   trendlines?: TrendlineSpec[];
+  /** Data labels displayed on data points. */
+  dataLabels?: DataLabelSpec;
 }
 
 // ============================================================================

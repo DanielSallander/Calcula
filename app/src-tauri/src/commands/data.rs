@@ -5,7 +5,7 @@ use crate::log_debug;
 use crate::api_types::{
     CellData, ClearApplyTo, ClearRangeParams, ClearRangeResult, DimensionData, MergedRegion,
     RemoveDuplicatesParams, RemoveDuplicatesResult, SortDataOption, SortField, SortOn,
-    SortOrientation, SortRangeParams, SortRangeResult, UpdateCellResult,
+    SortOrientation, SortRangeParams, SortRangeResult, SpillRangeInfo, UpdateCellResult,
 };
 use crate::commands::utils::get_cell_internal_with_merge;
 use crate::{
@@ -25,6 +25,35 @@ use tauri::State;
 
 // Note: Assuming parser is available in the crate root based on usage context
 // If 'parser' is a module, ensure it is imported via `use crate::parser;` if needed.
+
+/// Get spill ranges for the active sheet.
+/// Returns the bounding box of each spill range for visual rendering.
+#[tauri::command]
+pub fn get_spill_ranges(state: State<AppState>) -> Vec<SpillRangeInfo> {
+    let active_sheet = *state.active_sheet.lock().unwrap();
+    let spill_ranges = state.spill_ranges.lock().unwrap();
+    let mut result = Vec::new();
+
+    for (&(sheet_idx, origin_row, origin_col), spill_cells) in spill_ranges.iter() {
+        if sheet_idx != active_sheet {
+            continue;
+        }
+        let mut end_row = origin_row;
+        let mut end_col = origin_col;
+        for &(sr, sc) in spill_cells {
+            end_row = end_row.max(sr);
+            end_col = end_col.max(sc);
+        }
+        result.push(SpillRangeInfo {
+            origin_row,
+            origin_col,
+            end_row,
+            end_col,
+        });
+    }
+
+    result
+}
 
 /// Get cells for a viewport range.
 /// Now includes merged cell span information.
@@ -544,6 +573,20 @@ pub fn update_cell(
                     let resolved = crate::resolve_table_refs_in_ast(&resolved, &ctx);
                     drop(table_names_map);
                     drop(tables_map);
+                    resolved
+                } else {
+                    resolved
+                };
+
+                // Resolve spill range references (e.g., A1# → A1:A5)
+                let resolved = if crate::ast_has_spill_refs(&resolved) {
+                    let spill_ranges_map = state.spill_ranges.lock().unwrap();
+                    let resolved = crate::resolve_spill_refs_in_ast(
+                        &resolved,
+                        &spill_ranges_map,
+                        active_sheet,
+                    );
+                    drop(spill_ranges_map);
                     resolved
                 } else {
                     resolved
@@ -1408,6 +1451,20 @@ pub fn update_cells_batch(
                         let resolved = crate::resolve_table_refs_in_ast(&resolved, &ctx);
                         drop(table_names_map);
                         drop(tables_map);
+                        resolved
+                    } else {
+                        resolved
+                    };
+
+                    // Resolve spill range references
+                    let resolved = if crate::ast_has_spill_refs(&resolved) {
+                        let spill_ranges_map = state.spill_ranges.lock().unwrap();
+                        let resolved = crate::resolve_spill_refs_in_ast(
+                            &resolved,
+                            &spill_ranges_map,
+                            active_sheet,
+                        );
+                        drop(spill_ranges_map);
                         resolved
                     } else {
                         resolved
