@@ -90,7 +90,7 @@ const SUBSCRIPT_OFFSET = 0.2;
  *
  * Returns the total measured width of all runs (may exceed maxWidth).
  */
-function drawRichTextRuns(
+export function drawRichTextRuns(
   ctx: CanvasRenderingContext2D,
   runs: RichTextRun[],
   x: number,

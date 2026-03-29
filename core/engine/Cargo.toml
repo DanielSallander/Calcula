@@ -6,3 +6,6 @@ edition = "2021"
 [dependencies]
 # Serde allows our structs to be converted to/from formats like JSON
 serde = { version = "1.0", features = ["derive"] }
+
+[dev-dependencies]
+serde_json = "1.0"

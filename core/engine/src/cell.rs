@@ -255,3 +255,146 @@ impl Default for Cell {
         Self::new()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_rich_text_run_plain() {
+        let run = RichTextRun::plain("hello".to_string());
+        assert_eq!(run.text, "hello");
+        assert_eq!(run.bold, None);
+        assert_eq!(run.italic, None);
+        assert!(!run.superscript);
+        assert!(!run.subscript);
+    }
+
+    #[test]
+    fn test_rich_text_run_serialization_minimal() {
+        // A plain run should serialize without optional fields
+        let run = RichTextRun::plain("test".to_string());
+        let json = serde_json::to_string(&run).unwrap();
+        assert!(json.contains("\"text\":\"test\""));
+        // Optional None fields should be skipped
+        assert!(!json.contains("bold"));
+        assert!(!json.contains("italic"));
+        assert!(!json.contains("superscript"));
+        assert!(!json.contains("subscript"));
+    }
+
+    #[test]
+    fn test_rich_text_run_serialization_with_overrides() {
+        let run = RichTextRun {
+            text: "bold text".to_string(),
+            bold: Some(true),
+            italic: Some(false),
+            underline: None,
+            strikethrough: None,
+            font_size: Some(14),
+            font_family: None,
+            color: Some(Color::new(255, 0, 0)),
+            superscript: true,
+            subscript: false,
+        };
+        let json = serde_json::to_string(&run).unwrap();
+        assert!(json.contains("\"bold\":true"));
+        assert!(json.contains("\"italic\":false"));
+        assert!(json.contains("\"fontSize\":14"));
+        assert!(json.contains("\"superscript\":true"));
+        // subscript is false so should be skipped
+        assert!(!json.contains("\"subscript\""));
+        // underline is None so should be skipped
+        assert!(!json.contains("\"underline\""));
+    }
+
+    #[test]
+    fn test_rich_text_run_deserialization_camel_case() {
+        let json = r#"{"text":"hi","bold":true,"fontSize":12,"superscript":true}"#;
+        let run: RichTextRun = serde_json::from_str(json).unwrap();
+        assert_eq!(run.text, "hi");
+        assert_eq!(run.bold, Some(true));
+        assert_eq!(run.font_size, Some(12));
+        assert!(run.superscript);
+        assert!(!run.subscript); // default
+        assert_eq!(run.italic, None); // missing = None
+    }
+
+    #[test]
+    fn test_rich_text_run_roundtrip() {
+        let original = RichTextRun {
+            text: "formatted".to_string(),
+            bold: Some(true),
+            italic: Some(true),
+            underline: Some(true),
+            strikethrough: Some(false),
+            font_size: Some(18),
+            font_family: Some("Arial".to_string()),
+            color: Some(Color::new(0, 128, 255)),
+            superscript: false,
+            subscript: true,
+        };
+        let json = serde_json::to_string(&original).unwrap();
+        let restored: RichTextRun = serde_json::from_str(&json).unwrap();
+        assert_eq!(original, restored);
+    }
+
+    #[test]
+    fn test_cell_with_rich_text() {
+        let mut cell = Cell::new_text("Hello World".to_string());
+        assert!(cell.rich_text.is_none());
+
+        cell.rich_text = Some(vec![
+            RichTextRun {
+                text: "Hello ".to_string(),
+                bold: Some(true),
+                ..RichTextRun::plain(String::new())
+            },
+            RichTextRun::plain("World".to_string()),
+        ]);
+
+        assert_eq!(cell.rich_text.as_ref().unwrap().len(), 2);
+        assert_eq!(cell.rich_text.as_ref().unwrap()[0].bold, Some(true));
+        assert_eq!(cell.rich_text.as_ref().unwrap()[1].bold, None);
+    }
+
+    #[test]
+    fn test_cell_clone_preserves_rich_text() {
+        let mut cell = Cell::new_text("test".to_string());
+        cell.rich_text = Some(vec![RichTextRun {
+            text: "test".to_string(),
+            superscript: true,
+            ..RichTextRun::plain(String::new())
+        }]);
+
+        let cloned = cell.clone();
+        assert!(cloned.rich_text.is_some());
+        assert!(cloned.rich_text.as_ref().unwrap()[0].superscript);
+    }
+
+    #[test]
+    fn test_cell_rich_text_serialization_roundtrip() {
+        let mut cell = Cell::new_text("x2".to_string());
+        cell.rich_text = Some(vec![
+            RichTextRun::plain("x".to_string()),
+            RichTextRun {
+                text: "2".to_string(),
+                superscript: true,
+                ..RichTextRun::plain(String::new())
+            },
+        ]);
+
+        let json = serde_json::to_string(&cell).unwrap();
+        let restored: Cell = serde_json::from_str(&json).unwrap();
+        assert_eq!(restored.rich_text.as_ref().unwrap().len(), 2);
+        assert!(restored.rich_text.as_ref().unwrap()[1].superscript);
+    }
+
+    #[test]
+    fn test_cell_without_rich_text_no_field_in_json() {
+        let cell = Cell::new_number(42.0);
+        let json = serde_json::to_string(&cell).unwrap();
+        // rich_text is None, so should not appear in JSON
+        assert!(!json.contains("richText"));
+    }
+}

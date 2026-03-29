@@ -359,4 +359,129 @@ mod tests {
         assert!(matches!(restored[&(2, 0)].value, SavedCellValue::Error(_)));
         assert!(matches!(restored[&(3, 0)].value, SavedCellValue::List(_)));
     }
+
+    #[test]
+    fn test_roundtrip_rich_text() {
+        let mut cells = HashMap::new();
+        cells.insert(
+            (0, 0),
+            SavedCell {
+                value: SavedCellValue::Text("x2".to_string()),
+                formula: None,
+                style_index: 0,
+                rich_text: Some(vec![
+                    RichTextRun::plain("x".to_string()),
+                    RichTextRun {
+                        text: "2".to_string(),
+                        superscript: true,
+                        ..RichTextRun::plain(String::new())
+                    },
+                ]),
+            },
+        );
+
+        let data = cells_to_sheet_data(&cells);
+        let json = serde_json::to_string_pretty(&data).unwrap();
+        let parsed: SheetData = serde_json::from_str(&json).unwrap();
+        let restored = sheet_data_to_cells(&parsed);
+
+        assert_eq!(restored.len(), 1);
+        let cell = &restored[&(0, 0)];
+        let rt = cell.rich_text.as_ref().expect("rich_text should be preserved");
+        assert_eq!(rt.len(), 2);
+        assert_eq!(rt[0].text, "x");
+        assert!(!rt[0].superscript);
+        assert_eq!(rt[1].text, "2");
+        assert!(rt[1].superscript);
+    }
+
+    #[test]
+    fn test_rich_text_with_full_formatting_roundtrip() {
+        use engine::style::Color;
+
+        let mut cells = HashMap::new();
+        cells.insert(
+            (0, 0),
+            SavedCell {
+                value: SavedCellValue::Text("Hello World".to_string()),
+                formula: None,
+                style_index: 1,
+                rich_text: Some(vec![
+                    RichTextRun {
+                        text: "Hello ".to_string(),
+                        bold: Some(true),
+                        italic: Some(true),
+                        underline: Some(true),
+                        strikethrough: None,
+                        font_size: Some(14),
+                        font_family: Some("Arial".to_string()),
+                        color: Some(Color::new(255, 0, 0)),
+                        superscript: false,
+                        subscript: false,
+                    },
+                    RichTextRun {
+                        text: "World".to_string(),
+                        bold: None,
+                        italic: None,
+                        underline: None,
+                        strikethrough: Some(true),
+                        font_size: None,
+                        font_family: None,
+                        color: None,
+                        superscript: false,
+                        subscript: true,
+                    },
+                ]),
+            },
+        );
+
+        let data = cells_to_sheet_data(&cells);
+        let json = serde_json::to_string(&data).unwrap();
+        let parsed: SheetData = serde_json::from_str(&json).unwrap();
+        let restored = sheet_data_to_cells(&parsed);
+
+        let rt = restored[&(0, 0)].rich_text.as_ref().unwrap();
+        assert_eq!(rt.len(), 2);
+        assert_eq!(rt[0].bold, Some(true));
+        assert_eq!(rt[0].font_size, Some(14));
+        assert_eq!(rt[0].color, Some(Color::new(255, 0, 0)));
+        assert!(rt[1].subscript);
+        assert_eq!(rt[1].strikethrough, Some(true));
+    }
+
+    #[test]
+    fn test_empty_rich_text_not_serialized() {
+        // A cell with no rich text and no formula and default style should be skipped
+        let mut cells = HashMap::new();
+        cells.insert(
+            (0, 0),
+            SavedCell {
+                value: SavedCellValue::Empty,
+                formula: None,
+                style_index: 0,
+                rich_text: None,
+            },
+        );
+
+        let data = cells_to_sheet_data(&cells);
+        assert_eq!(data.cells.len(), 0); // Empty cell skipped
+    }
+
+    #[test]
+    fn test_cell_with_only_rich_text_is_preserved() {
+        // A cell that is "empty" value but has rich_text should be kept
+        let mut cells = HashMap::new();
+        cells.insert(
+            (0, 0),
+            SavedCell {
+                value: SavedCellValue::Empty,
+                formula: None,
+                style_index: 0,
+                rich_text: Some(vec![RichTextRun::plain("test".to_string())]),
+            },
+        );
+
+        let data = cells_to_sheet_data(&cells);
+        assert_eq!(data.cells.len(), 1); // Cell with rich text is NOT skipped
+    }
 }

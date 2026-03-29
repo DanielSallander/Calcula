@@ -91,6 +91,7 @@ mod tests {
                 value: SavedCellValue::Number(100.0),
                 formula: None,
                 style_index: 0, // Default — should not appear in styles.json
+                rich_text: None,
             },
         );
 

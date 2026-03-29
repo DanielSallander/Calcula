@@ -165,23 +165,20 @@ impl TestHarness {
     }
 
     /// Add a named range.
-    /// Note: range is stored as coordinates, not a string. This helper parses simple ranges like "A1:D10".
+    /// The range string (e.g., "A1:D10") is stored in `refers_to` as a sheet-qualified formula.
     pub fn add_named_range(&self, name: &str, range: &str, sheet_index: usize) {
         let mut named_ranges = self.state.named_ranges.lock().unwrap();
-
-        // Parse range string to coordinates (simplified parser for tests)
-        let (start_row, start_col, end_row, end_col) = parse_range_for_test(range);
+        let sheet_names = self.state.sheet_names.lock().unwrap();
+        let sheet_name = sheet_names.get(sheet_index).cloned().unwrap_or_else(|| "Sheet1".to_string());
 
         named_ranges.insert(
             name.to_uppercase(),
             NamedRange {
                 name: name.to_string(),
                 sheet_index: Some(sheet_index),
-                start_row,
-                start_col,
-                end_row,
-                end_col,
+                refers_to: format!("={}!{}", sheet_name, range),
                 comment: None,
+                folder: None,
             },
         );
     }
