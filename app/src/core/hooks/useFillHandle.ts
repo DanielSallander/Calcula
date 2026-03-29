@@ -15,6 +15,7 @@ import { getColumnWidth, getRowHeight, getColumnX, getRowY, calculateVisibleRang
 import { calculateAutoScrollDelta } from "./useMouseSelection/utils/autoScrollUtils";
 import { DEFAULT_AUTO_SCROLL_CONFIG } from "./useMouseSelection/constants";
 import { getGridRegions } from "../../api/gridOverlays";
+import { FillListRegistry, type FillListMatch } from "../lib/fillLists";
 
 /**
  * Fill direction enumeration.
@@ -73,7 +74,7 @@ export interface UseFillHandleReturn {
  * Detect pattern in values for auto-fill.
  */
 interface PatternResult {
-  type: "copy" | "increment" | "series" | "text-increment" | "weekday" | "month" | "date-series";
+  type: "copy" | "increment" | "series" | "text-increment" | "weekday" | "month" | "date-series" | "custom-list";
   baseValues: string[];
   step: number;
   /** For weekday/month: which list variant (full vs short) */
@@ -86,10 +87,12 @@ interface PatternResult {
   dateSeparator?: string;
   /** For date-series: detected format "mdy" | "dmy" | "ymd" */
   dateFormat?: string;
+  /** For custom-list: the matched fill list result */
+  fillListMatch?: FillListMatch;
 }
 
 // ---------------------------------------------------------------------------
-// Weekday / Month name lists
+// Weekday / Month name lists (kept for generateFillValue backward compat)
 // ---------------------------------------------------------------------------
 
 const WEEKDAY_FULL = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
@@ -107,79 +110,6 @@ const MONTH_SHORT = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Se
 function findInList(value: string, list: string[]): number {
   const lower = value.trim().toLowerCase();
   return list.findIndex((item) => item.toLowerCase() === lower);
-}
-
-/**
- * Try to detect a weekday or month pattern.
- */
-function detectNamedSequence(
-  values: string[],
-): PatternResult | null {
-  // Try weekday lists
-  for (const [list, variant] of [[WEEKDAY_FULL, "full"], [WEEKDAY_SHORT, "short"]] as const) {
-    const indices = values.map((v) => findInList(v, list));
-    if (indices.every((i) => i >= 0)) {
-      // All values are weekday names
-      if (values.length === 1) {
-        return {
-          type: "weekday",
-          baseValues: values,
-          step: 1,
-          listVariant: variant,
-          startIndex: indices[0],
-        };
-      }
-      // Check for consistent step
-      const steps: number[] = [];
-      for (let i = 1; i < indices.length; i++) {
-        let diff = indices[i] - indices[i - 1];
-        if (diff <= 0) diff += 7; // wrap around
-        steps.push(diff);
-      }
-      if (steps.every((s) => s === steps[0])) {
-        return {
-          type: "weekday",
-          baseValues: values,
-          step: steps[0],
-          listVariant: variant,
-          startIndex: indices[0],
-        };
-      }
-    }
-  }
-
-  // Try month lists
-  for (const [list, variant] of [[MONTH_FULL, "full"], [MONTH_SHORT, "short"]] as const) {
-    const indices = values.map((v) => findInList(v, list));
-    if (indices.every((i) => i >= 0)) {
-      if (values.length === 1) {
-        return {
-          type: "month",
-          baseValues: values,
-          step: 1,
-          listVariant: variant,
-          startIndex: indices[0],
-        };
-      }
-      const steps: number[] = [];
-      for (let i = 1; i < indices.length; i++) {
-        let diff = indices[i] - indices[i - 1];
-        if (diff <= 0) diff += 12; // wrap around
-        steps.push(diff);
-      }
-      if (steps.every((s) => s === steps[0])) {
-        return {
-          type: "month",
-          baseValues: values,
-          step: steps[0],
-          listVariant: variant,
-          startIndex: indices[0],
-        };
-      }
-    }
-  }
-
-  return null;
 }
 
 // ---------------------------------------------------------------------------
@@ -351,11 +281,18 @@ function detectPattern(values: string[]): PatternResult {
     return { type: "copy", baseValues: [""], step: 0 };
   }
 
-  // Try weekday/month names first (even for single values)
-  const namedSeq = detectNamedSequence(values);
-  if (namedSeq) return namedSeq;
+  // Try custom fill lists first (user-defined lists have highest priority)
+  const listMatch = FillListRegistry.matchValues(values);
+  if (listMatch) {
+    return {
+      type: "custom-list",
+      baseValues: values,
+      step: listMatch.step,
+      fillListMatch: listMatch,
+    };
+  }
 
-  // Try date series
+  // Try date series (named sequences are now handled by the fill list registry above)
   const dateSeries = detectDateSeries(values);
   if (dateSeries) return dateSeries;
 
@@ -460,6 +397,22 @@ function generateFillValue(
       const offset = index - sourceValues.length + 1;
       if (offset > 0) {
         return `${prefix}${baseNum + pattern.step * offset}`;
+      }
+      return sourceValues[index];
+    }
+
+    case "custom-list": {
+      const match = pattern.fillListMatch!;
+      const offset = index - sourceValues.length + 1;
+      if (offset > 0) {
+        // Find the index of the last source value in the list
+        const listItems = match.list.items;
+        const lowerItems = listItems.map((item) => item.toLowerCase());
+        const lastVal = sourceValues[sourceValues.length - 1].trim().toLowerCase();
+        const lastIdx = lowerItems.indexOf(lastVal);
+        if (lastIdx >= 0) {
+          return FillListRegistry.generateValue(match, lastIdx, offset);
+        }
       }
       return sourceValues[index];
     }

@@ -519,6 +519,13 @@ export type {
 export type { Selection, SelectionType, Viewport, GridConfig, DimensionOverrides } from "./types";
 
 // ============================================================================
+// Fill Lists API (Custom AutoFill Lists)
+// ============================================================================
+
+export { FillListRegistry } from "./fillLists";
+export type { FillList, FillListMatch } from "./fillLists";
+
+// ============================================================================
 // Data Validation API
 // ============================================================================
 

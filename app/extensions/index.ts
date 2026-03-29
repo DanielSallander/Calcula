@@ -37,6 +37,7 @@ import { registerSlicerExtension, unregisterSlicerExtension } from "./Slicer";
 import { registerFlashFillExtension, unregisterFlashFillExtension } from "./FlashFill";
 import { registerAdvancedFilterExtension, unregisterAdvancedFilterExtension } from "./AdvancedFilter";
 import { registerSubtotalsExtension, unregisterSubtotalsExtension } from "./Subtotals";
+import { registerCustomFillListsExtension, unregisterCustomFillListsExtension } from "./CustomFillLists";
 
 /**
  * Load all extensions.
@@ -69,6 +70,7 @@ export function loadExtensions(): void {
   registerFlashFillExtension();
   registerAdvancedFilterExtension();
   registerSubtotalsExtension();
+  registerCustomFillListsExtension();
   registerCheckboxExtension();
   registerSparklineExtension();
   registerReviewExtension();
@@ -112,6 +114,7 @@ export function unloadExtensions(): void {
   unregisterSparklineExtension();
   unregisterCheckboxExtension();
   unregisterSubtotalsExtension();
+  unregisterCustomFillListsExtension();
   unregisterAdvancedFilterExtension();
   unregisterFlashFillExtension();
   unregisterConsolidateExtension();
@@ -173,3 +176,4 @@ export { registerSlicerExtension, unregisterSlicerExtension };
 export { registerFlashFillExtension, unregisterFlashFillExtension };
 export { registerAdvancedFilterExtension, unregisterAdvancedFilterExtension };
 export { registerSubtotalsExtension, unregisterSubtotalsExtension };
+export { registerCustomFillListsExtension, unregisterCustomFillListsExtension };
