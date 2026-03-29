@@ -3,7 +3,7 @@
 // CONTEXT: Called when user prints via Ctrl+P or File > Print.
 
 import type { PrintData, PageSetup } from "../../../src/api/lib";
-import { indexToCol } from "../../../src/api/lib";
+import { indexToCol, colToIndex } from "../../../src/api/lib";
 
 // ============================================================================
 // Paper sizes in CSS (mm)
@@ -32,6 +32,106 @@ function escapeHtml(text: string): string {
     .replace(/>/g, "&gt;")
     .replace(/"/g, "&quot;");
 }
+
+// ============================================================================
+// Print Area & Title Parsing
+// ============================================================================
+
+interface PrintBounds {
+  startRow: number;
+  endRow: number;
+  startCol: number;
+  endCol: number;
+}
+
+function parsePrintArea(printArea: string): PrintBounds | null {
+  if (!printArea || !printArea.trim()) return null;
+  const match = printArea.trim().match(/^([A-Z]+)(\d+):([A-Z]+)(\d+)$/i);
+  if (!match) return null;
+  return {
+    startCol: colToIndex(match[1].toUpperCase()),
+    startRow: parseInt(match[2]) - 1,
+    endCol: colToIndex(match[3].toUpperCase()),
+    endRow: parseInt(match[4]) - 1,
+  };
+}
+
+function parseTitleRows(spec: string): [number, number] | null {
+  if (!spec || !spec.trim()) return null;
+  const match = spec.trim().match(/^(\d+):(\d+)$/);
+  if (!match) return null;
+  return [parseInt(match[1]) - 1, parseInt(match[2]) - 1];
+}
+
+function parseTitleCols(spec: string): [number, number] | null {
+  if (!spec || !spec.trim()) return null;
+  const match = spec.trim().match(/^([A-Z]+):([A-Z]+)$/i);
+  if (!match) return null;
+  return [colToIndex(match[1].toUpperCase()), colToIndex(match[2].toUpperCase())];
+}
+
+// ============================================================================
+// Three-Section Header/Footer Parsing
+// ============================================================================
+
+interface HeaderFooterSections {
+  left: string;
+  center: string;
+  right: string;
+}
+
+function parseHeaderFooterSections(text: string): HeaderFooterSections {
+  if (!text) return { left: "", center: "", right: "" };
+
+  const hasSections = /&[LCR]/i.test(text);
+  if (!hasSections) {
+    return { left: "", center: text, right: "" };
+  }
+
+  let left = "";
+  let center = "";
+  let right = "";
+  let current: "left" | "center" | "right" = "center";
+
+  let remaining = text;
+  const firstCodeMatch = remaining.match(/&[LCR]/i);
+  if (firstCodeMatch && firstCodeMatch.index !== undefined && firstCodeMatch.index > 0) {
+    center = remaining.slice(0, firstCodeMatch.index);
+    remaining = remaining.slice(firstCodeMatch.index);
+  }
+
+  const parts = remaining.split(/(&[LCR])/i);
+  for (const part of parts) {
+    if (/^&L$/i.test(part)) {
+      current = "left";
+    } else if (/^&C$/i.test(part)) {
+      current = "center";
+    } else if (/^&R$/i.test(part)) {
+      current = "right";
+    } else {
+      if (current === "left") left += part;
+      else if (current === "center") center += part;
+      else right += part;
+    }
+  }
+
+  return { left: left.trim(), center: center.trim(), right: right.trim() };
+}
+
+function replaceDynamicFields(text: string, sheetName: string): string {
+  if (!text) return "";
+  return text
+    .replace(/&P/g, "1") // Page number placeholder (browser handles pagination)
+    .replace(/&N/g, "1") // Total pages placeholder
+    .replace(/&D/g, new Date().toLocaleDateString())
+    .replace(/&T/g, new Date().toLocaleTimeString())
+    .replace(/&F/g, sheetName)
+    .replace(/&A/g, sheetName);
+}
+
+// ============================================================================
+// Cell Style Builder
+// ============================================================================
 
 function buildCellStyle(
   styleData: PrintData["styles"][number],
@@ -105,6 +205,17 @@ function generatePrintHtml(data: PrintData): string {
   const { cells, styles, colWidths, rowHeights, mergedRegions, pageSetup, sheetName, bounds } = data;
   const [maxRow, maxCol] = bounds;
 
+  // Parse print area
+  const printArea = parsePrintArea(pageSetup.printArea);
+  const startRow = printArea?.startRow ?? 0;
+  const endRow = printArea?.endRow ?? maxRow;
+  const startCol = printArea?.startCol ?? 0;
+  const endCol = printArea?.endCol ?? maxCol;
+
+  // Parse print titles
+  const titleRows = parseTitleRows(pageSetup.printTitlesRows);
+  const titleCols = parseTitleCols(pageSetup.printTitlesCols);
+
   // Paper dimensions
   const paper = PAPER_SIZES[pageSetup.paperSize] || PAPER_SIZES.a4;
   const isLandscape = pageSetup.orientation === "landscape";
@@ -138,31 +249,49 @@ function generatePrintHtml(data: PrintData): string {
   // Scale factor
   const scalePct = pageSetup.scale || 100;
 
-  // Header/footer processing
-  const processHeaderFooter = (text: string): string => {
-    if (!text) return "";
-    return text
-      .replace(/&P/g, "1") // Page number placeholder
-      .replace(/&N/g, "1") // Total pages placeholder
-      .replace(/&D/g, new Date().toLocaleDateString())
-      .replace(/&T/g, new Date().toLocaleTimeString())
-      .replace(/&F/g, sheetName)
-      .replace(/&A/g, sheetName);
-  };
+  // Process three-section header/footer
+  const headerSections = parseHeaderFooterSections(pageSetup.header);
+  const footerSections = parseHeaderFooterSections(pageSetup.footer);
+  const headerLeft = replaceDynamicFields(headerSections.left, sheetName);
+  const headerCenter = replaceDynamicFields(headerSections.center, sheetName);
+  const headerRight = replaceDynamicFields(headerSections.right, sheetName);
+  const footerLeft = replaceDynamicFields(footerSections.left, sheetName);
+  const footerCenter = replaceDynamicFields(footerSections.center, sheetName);
+  const footerRight = replaceDynamicFields(footerSections.right, sheetName);
 
-  const footerText = processHeaderFooter(pageSetup.footer);
-  const headerText = processHeaderFooter(pageSetup.header);
+  const hasHeader = headerLeft || headerCenter || headerRight;
+  const hasFooter = footerLeft || footerCenter || footerRight;
 
-  // Build col widths as CSS
-  const colWidthsCss = colWidths.map((w) => `${(w * scalePct) / 100}px`);
+  // Build col widths as CSS (only for print area columns)
+  const colWidthsCss: Record<number, string> = {};
+  for (let c = startCol; c <= endCol; c++) {
+    colWidthsCss[c] = `${((colWidths[c] ?? 100) * scalePct) / 100}px`;
+  }
+  // Also include title columns
+  if (titleCols) {
+    for (let c = titleCols[0]; c <= titleCols[1]; c++) {
+      colWidthsCss[c] = `${((colWidths[c] ?? 100) * scalePct) / 100}px`;
+    }
+  }
 
   // Generate table rows
   const tableRows: string[] = [];
 
+  // Build the list of columns to include
+  const colsList: number[] = [];
+  if (titleCols) {
+    for (let c = titleCols[0]; c <= titleCols[1]; c++) {
+      if (c < startCol || c > endCol) colsList.push(c);
+    }
+  }
+  for (let c = startCol; c <= endCol; c++) {
+    if (!colsList.includes(c)) colsList.push(c);
+  }
+
   // Column headings row (if enabled)
   if (pageSetup.printHeadings) {
     const headingCells = ['<th style="background:#f0f0f0;border:1px solid #ccc;padding:2px 4px;font-weight:bold;font-size:10px;color:#666"></th>'];
-    for (let c = 0; c <= maxCol; c++) {
+    for (const c of colsList) {
       headingCells.push(
         `<th style="background:#f0f0f0;border:1px solid #ccc;padding:2px 4px;font-weight:bold;font-size:10px;color:#666;width:${colWidthsCss[c]};min-width:${colWidthsCss[c]}">${indexToCol(c)}</th>`,
       );
@@ -170,7 +299,7 @@ function generatePrintHtml(data: PrintData): string {
     tableRows.push(`<tr>${headingCells.join("")}</tr>`);
   }
 
-  for (let r = 0; r <= maxRow; r++) {
+  for (let r = startRow; r <= endRow; r++) {
     const rowCells: string[] = [];
 
     // Row heading
@@ -180,7 +309,7 @@ function generatePrintHtml(data: PrintData): string {
       );
     }
 
-    for (let c = 0; c <= maxCol; c++) {
+    for (const c of colsList) {
       const key = `${r},${c}`;
 
       // Skip merged hidden cells
@@ -195,7 +324,7 @@ function generatePrintHtml(data: PrintData): string {
       const colSpan = cell?.colSpan ?? 1;
 
       // Row height
-      const rh = (rowHeights[r] * scalePct) / 100;
+      const rh = ((rowHeights[r] ?? 24) * scalePct) / 100;
       const heightCss = `height:${rh}px`;
 
       // Column width
@@ -212,6 +341,28 @@ function generatePrintHtml(data: PrintData): string {
   }
 
   const centerH = pageSetup.centerHorizontally ? "margin-left:auto;margin-right:auto;" : "";
+
+  // Build three-section header HTML
+  const headerHtml = hasHeader ? `
+  <div class="header-bar">
+    <span class="header-left">${escapeHtml(headerLeft)}</span>
+    <span class="header-center">${escapeHtml(headerCenter)}</span>
+    <span class="header-right">${escapeHtml(headerRight)}</span>
+  </div>` : "";
+
+  // Build three-section footer HTML
+  const footerHtml = hasFooter ? `
+  <div class="footer-bar">
+    <span class="footer-left">${escapeHtml(footerLeft)}</span>
+    <span class="footer-center">${escapeHtml(footerCenter)}</span>
+    <span class="footer-right">${escapeHtml(footerRight)}</span>
+  </div>` : "";
+
+  // Print title info for display
+  const titleInfo: string[] = [];
+  if (titleRows) titleInfo.push(`Rows ${titleRows[0] + 1}-${titleRows[1] + 1} repeat at top`);
+  if (titleCols) titleInfo.push(`Cols ${indexToCol(titleCols[0])}-${indexToCol(titleCols[1])} repeat at left`);
+  if (printArea) titleInfo.push(`Print area: ${pageSetup.printArea}`);
 
   return `<!DOCTYPE html>
 <html>
@@ -233,6 +384,19 @@ function generatePrintHtml(data: PrintData): string {
   @media print {
     body { background: #fff; }
     .no-print { display: none !important; }
+    .header-bar, .footer-bar {
+      position: fixed;
+    }
+    .header-bar {
+      top: 0;
+      left: 0;
+      right: 0;
+    }
+    .footer-bar {
+      bottom: 0;
+      left: 0;
+      right: 0;
+    }
   }
   @media screen {
     body { padding: 20px; background: #e0e0e0; }
@@ -273,6 +437,11 @@ function generatePrintHtml(data: PrintData): string {
       margin-left: auto;
     }
     .toolbar .close-btn:hover { background: #777; }
+    .toolbar .info {
+      font-size: 11px;
+      color: #aaa;
+      margin-left: 8px;
+    }
   }
   table {
     border-collapse: collapse;
@@ -283,27 +452,33 @@ function generatePrintHtml(data: PrintData): string {
     vertical-align: middle;
     white-space: nowrap;
   }
-  .header-text, .footer-text {
+  .header-bar, .footer-bar {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
     font-size: 9pt;
     color: #666;
-    text-align: center;
     padding: 4px 0;
   }
+  .header-left, .footer-left { text-align: left; flex: 1; }
+  .header-center, .footer-center { text-align: center; flex: 1; }
+  .header-right, .footer-right { text-align: right; flex: 1; }
 </style>
 </head>
 <body>
 <div class="toolbar no-print">
   <button onclick="window.print()">Print</button>
   <span>${escapeHtml(sheetName)}</span>
+  ${titleInfo.length > 0 ? `<span class="info">${escapeHtml(titleInfo.join(" | "))}</span>` : ""}
   <button class="close-btn" onclick="window.close()">Close</button>
 </div>
-${headerText ? `<div class="header-text no-print">${escapeHtml(headerText)}</div>` : ""}
+${headerHtml}
 <div class="page-container">
   <table>
     ${tableRows.join("\n    ")}
   </table>
 </div>
-${footerText ? `<div class="footer-text">${escapeHtml(footerText)}</div>` : ""}
+${footerHtml}
 </body>
 </html>`;
 }

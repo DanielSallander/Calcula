@@ -100,6 +100,7 @@ fn evaluate_property(
         current_col: Some(target_col),
         row_heights: Some(row_heights.clone()),
         column_widths: Some(column_widths.clone()),
+        hidden_rows: None,
     };
 
     evaluate_formula_with_context(

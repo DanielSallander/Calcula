@@ -81,6 +81,7 @@ pub fn calculate_now(state: State<AppState>, user_files_state: State<UserFilesSt
             current_col: Some(col),
             row_heights: Some(row_heights.clone()),
             column_widths: Some(column_widths.clone()),
+            hidden_rows: None,
         };
 
         // Parse, resolve names and table refs, then evaluate

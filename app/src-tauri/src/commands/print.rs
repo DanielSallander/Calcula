@@ -138,6 +138,88 @@ pub fn get_print_data(state: State<AppState>) -> Result<PrintData, String> {
     })
 }
 
+/// Insert a manual row page break before the specified row.
+#[tauri::command]
+pub fn insert_row_page_break(state: State<AppState>, row: u32) -> Result<(), String> {
+    let active_sheet = *state.active_sheet.lock().unwrap();
+    let mut page_setups = state.page_setups.lock().unwrap();
+
+    while page_setups.len() <= active_sheet {
+        page_setups.push(PageSetup::default());
+    }
+
+    let setup = &mut page_setups[active_sheet];
+    if !setup.manual_row_breaks.contains(&row) {
+        setup.manual_row_breaks.push(row);
+        setup.manual_row_breaks.sort();
+    }
+    Ok(())
+}
+
+/// Remove a manual row page break at the specified row.
+#[tauri::command]
+pub fn remove_row_page_break(state: State<AppState>, row: u32) -> Result<(), String> {
+    let active_sheet = *state.active_sheet.lock().unwrap();
+    let mut page_setups = state.page_setups.lock().unwrap();
+
+    while page_setups.len() <= active_sheet {
+        page_setups.push(PageSetup::default());
+    }
+
+    let setup = &mut page_setups[active_sheet];
+    setup.manual_row_breaks.retain(|&r| r != row);
+    Ok(())
+}
+
+/// Insert a manual column page break before the specified column.
+#[tauri::command]
+pub fn insert_col_page_break(state: State<AppState>, col: u32) -> Result<(), String> {
+    let active_sheet = *state.active_sheet.lock().unwrap();
+    let mut page_setups = state.page_setups.lock().unwrap();
+
+    while page_setups.len() <= active_sheet {
+        page_setups.push(PageSetup::default());
+    }
+
+    let setup = &mut page_setups[active_sheet];
+    if !setup.manual_col_breaks.contains(&col) {
+        setup.manual_col_breaks.push(col);
+        setup.manual_col_breaks.sort();
+    }
+    Ok(())
+}
+
+/// Remove a manual column page break at the specified column.
+#[tauri::command]
+pub fn remove_col_page_break(state: State<AppState>, col: u32) -> Result<(), String> {
+    let active_sheet = *state.active_sheet.lock().unwrap();
+    let mut page_setups = state.page_setups.lock().unwrap();
+
+    while page_setups.len() <= active_sheet {
+        page_setups.push(PageSetup::default());
+    }
+
+    let setup = &mut page_setups[active_sheet];
+    setup.manual_col_breaks.retain(|&c| c != col);
+    Ok(())
+}
+
+/// Remove all manual page breaks for the active sheet.
+#[tauri::command]
+pub fn reset_all_page_breaks(state: State<AppState>) -> Result<(), String> {
+    let active_sheet = *state.active_sheet.lock().unwrap();
+    let mut page_setups = state.page_setups.lock().unwrap();
+
+    while page_setups.len() <= active_sheet {
+        page_setups.push(PageSetup::default());
+    }
+
+    let setup = &mut page_setups[active_sheet];
+    setup.manual_row_breaks.clear();
+    setup.manual_col_breaks.clear();
+    Ok(())
+}
+
 /// Write binary data to a file on disk.
 /// Used by PDF export to save the generated PDF.
 #[tauri::command]

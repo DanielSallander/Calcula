@@ -1,16 +1,33 @@
 //! FILENAME: app/extensions/Print/index.ts
 // PURPOSE: Print extension entry point.
-// CONTEXT: Registers Page Setup dialog, File menu items, Ctrl+P shortcut, and PDF export.
+// CONTEXT: Registers Page Setup dialog, File menu items, Ctrl+P shortcut, PDF export,
+//          page break preview overlay, and page break management commands.
 
 import {
   DialogExtensions,
   registerMenuItem,
+  registerPostHeaderOverlay,
 } from "../../src/api";
-import { getPrintData, writeBinaryFile } from "../../src/api/lib";
+import {
+  getPrintData,
+  writeBinaryFile,
+  insertRowPageBreak,
+  removeRowPageBreak,
+  insertColPageBreak,
+  removeColPageBreak,
+  resetAllPageBreaks,
+  getPageSetup,
+} from "../../src/api/lib";
 import { save } from "@tauri-apps/plugin-dialog";
 import { PageSetupDialog } from "./components/PageSetupDialog";
 import { executePrint } from "./lib/printGenerator";
 import { generatePdf } from "./lib/pdfGenerator";
+import {
+  renderPageBreakOverlay,
+  togglePageBreakPreview,
+  isPageBreakPreviewEnabled,
+  refreshPageBreakData,
+} from "./lib/pageBreakOverlay";
 
 // ============================================================================
 // Cleanup tracking
@@ -62,6 +79,114 @@ async function handleExportPdf(): Promise<void> {
     console.error("[Print] PDF export failed:", err);
     alert("Failed to export PDF: " + String(err));
   }
+}
+
+// ============================================================================
+// Page Break Preview toggle
+// ============================================================================
+
+function handleTogglePageBreakPreview(): void {
+  const enabled = togglePageBreakPreview();
+  console.log("[Print] Page break preview:", enabled ? "ON" : "OFF");
+  // Trigger grid redraw
+  window.dispatchEvent(new Event("app:grid-refresh"));
+}
+
+// ============================================================================
+// Page Break Management
+// ============================================================================
+
+async function handleInsertRowPageBreak(): Promise<void> {
+  try {
+    // Get the currently selected row from the grid
+    const row = getSelectedRow();
+    if (row === null || row <= 0) {
+      alert("Select a row below row 1 to insert a page break.");
+      return;
+    }
+    await insertRowPageBreak(row);
+    await refreshPageBreakData();
+    window.dispatchEvent(new Event("app:grid-refresh"));
+  } catch (err) {
+    console.error("[Print] Insert row page break failed:", err);
+  }
+}
+
+async function handleRemoveRowPageBreak(): Promise<void> {
+  try {
+    const row = getSelectedRow();
+    if (row === null) return;
+    await removeRowPageBreak(row);
+    await refreshPageBreakData();
+    window.dispatchEvent(new Event("app:grid-refresh"));
+  } catch (err) {
+    console.error("[Print] Remove row page break failed:", err);
+  }
+}
+
+async function handleInsertColPageBreak(): Promise<void> {
+  try {
+    const col = getSelectedCol();
+    if (col === null || col <= 0) {
+      alert("Select a column after column A to insert a page break.");
+      return;
+    }
+    await insertColPageBreak(col);
+    await refreshPageBreakData();
+    window.dispatchEvent(new Event("app:grid-refresh"));
+  } catch (err) {
+    console.error("[Print] Insert col page break failed:", err);
+  }
+}
+
+async function handleRemoveColPageBreak(): Promise<void> {
+  try {
+    const col = getSelectedCol();
+    if (col === null) return;
+    await removeColPageBreak(col);
+    await refreshPageBreakData();
+    window.dispatchEvent(new Event("app:grid-refresh"));
+  } catch (err) {
+    console.error("[Print] Remove col page break failed:", err);
+  }
+}
+
+async function handleResetAllPageBreaks(): Promise<void> {
+  try {
+    await resetAllPageBreaks();
+    await refreshPageBreakData();
+    window.dispatchEvent(new Event("app:grid-refresh"));
+  } catch (err) {
+    console.error("[Print] Reset page breaks failed:", err);
+  }
+}
+
+/** Get the currently selected row from the global selection state. */
+function getSelectedRow(): number | null {
+  // Access selection through the global event system
+  const selEl = document.querySelector("[data-active-row]");
+  if (selEl) {
+    const row = parseInt(selEl.getAttribute("data-active-row") || "");
+    if (!isNaN(row)) return row;
+  }
+  // Fallback: read from window.__calcula_selection if available
+  const sel = (window as Record<string, unknown>).__calcula_selection as
+    | { activeRow?: number }
+    | undefined;
+  return sel?.activeRow ?? null;
+}
+
+/** Get the currently selected column from the global selection state. */
+function getSelectedCol(): number | null {
+  const selEl = document.querySelector("[data-active-col]");
+  if (selEl) {
+    const col = parseInt(selEl.getAttribute("data-active-col") || "");
+    if (!isNaN(col)) return col;
+  }
+  const sel = (window as Record<string, unknown>).__calcula_selection as
+    | { activeCol?: number }
+    | undefined;
+  return sel?.activeCol ?? null;
 }
 
 // ============================================================================
@@ -117,6 +242,57 @@ export function registerPrintExtension(): void {
   };
   window.addEventListener("keydown", handleKeyDown, true);
   cleanupFns.push(() => window.removeEventListener("keydown", handleKeyDown, true));
+
+  // 4. Register page break preview overlay
+  const unregOverlay = registerPostHeaderOverlay(
+    "page-break-preview",
+    renderPageBreakOverlay,
+  );
+  cleanupFns.push(unregOverlay);
+
+  // 5. Add View menu items for page break preview
+  registerMenuItem("view", {
+    id: "view.page-break-separator",
+    label: "",
+    separator: true,
+  });
+
+  registerMenuItem("view", {
+    id: "view.page-break-preview",
+    label: "Page Break Preview",
+    action: handleTogglePageBreakPreview,
+  });
+
+  // 6. Add Page Layout menu items for page breaks
+  registerMenuItem("view", {
+    id: "view.insert-row-page-break",
+    label: "Insert Row Page Break",
+    action: handleInsertRowPageBreak,
+  });
+
+  registerMenuItem("view", {
+    id: "view.insert-col-page-break",
+    label: "Insert Column Page Break",
+    action: handleInsertColPageBreak,
+  });
+
+  registerMenuItem("view", {
+    id: "view.remove-row-page-break",
+    label: "Remove Row Page Break",
+    action: handleRemoveRowPageBreak,
+  });
+
+  registerMenuItem("view", {
+    id: "view.remove-col-page-break",
+    label: "Remove Column Page Break",
+    action: handleRemoveColPageBreak,
+  });
+
+  registerMenuItem("view", {
+    id: "view.reset-all-page-breaks",
+    label: "Reset All Page Breaks",
+    action: handleResetAllPageBreaks,
+  });
 
   console.log("[Print] Registered successfully.");
 }

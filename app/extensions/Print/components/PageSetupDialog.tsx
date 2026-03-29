@@ -11,6 +11,61 @@ import {
 import type { PageSetup } from "../../../src/api/lib";
 
 // ============================================================================
+// Header/Footer Section Parsing
+// ============================================================================
+
+interface HFSections {
+  left: string;
+  center: string;
+  right: string;
+}
+
+/** Parse a header/footer string with &L, &C, &R section codes into parts. */
+function parseHFSections(text: string): HFSections {
+  if (!text) return { left: "", center: "", right: "" };
+
+  const hasSections = /&[LCR]/i.test(text);
+  if (!hasSections) {
+    return { left: "", center: text, right: "" };
+  }
+
+  let left = "";
+  let center = "";
+  let right = "";
+  let current: "left" | "center" | "right" = "center";
+
+  let remaining = text;
+  const firstCodeMatch = remaining.match(/&[LCR]/i);
+  if (firstCodeMatch && firstCodeMatch.index !== undefined && firstCodeMatch.index > 0) {
+    center = remaining.slice(0, firstCodeMatch.index);
+    remaining = remaining.slice(firstCodeMatch.index);
+  }
+
+  const parts = remaining.split(/(&[LCR])/i);
+  for (const part of parts) {
+    if (/^&L$/i.test(part)) current = "left";
+    else if (/^&C$/i.test(part)) current = "center";
+    else if (/^&R$/i.test(part)) current = "right";
+    else {
+      if (current === "left") left += part;
+      else if (current === "center") center += part;
+      else right += part;
+    }
+  }
+
+  return { left: left.trim(), center: center.trim(), right: right.trim() };
+}
+
+/** Combine three sections back into a single string with &L, &C, &R codes. */
+function combineHFSections(sections: HFSections): string {
+  const parts: string[] = [];
+  if (sections.left) parts.push(`&L${sections.left}`);
+  if (sections.center) parts.push(`&C${sections.center}`);
+  if (sections.right) parts.push(`&R${sections.right}`);
+  return parts.join("");
+}
+
+// ============================================================================
 // Styles
 // ============================================================================
 
@@ -31,7 +86,7 @@ const styles = {
     border: `1px solid ${v("--border-default")}`,
     borderRadius: 8,
     boxShadow: "0 12px 40px rgba(0, 0, 0, 0.5)",
-    width: 480,
+    width: 540,
     maxHeight: "85vh",
     display: "flex",
     flexDirection: "column" as const,
@@ -136,6 +191,32 @@ const styles = {
     cursor: "pointer",
     fontWeight: 600,
   },
+  hfGrid: {
+    display: "grid",
+    gridTemplateColumns: "1fr 1fr 1fr",
+    gap: 6,
+    marginBottom: 4,
+  },
+  hfLabel: {
+    fontSize: 11,
+    color: v("--text-secondary"),
+    marginBottom: 2,
+  },
+  hfInput: {
+    width: "100%",
+    padding: "3px 6px",
+    border: `1px solid ${v("--border-default")}`,
+    borderRadius: 4,
+    background: v("--input-bg"),
+    color: v("--text-primary"),
+    fontSize: 12,
+    outline: "none",
+  },
+  hint: {
+    fontSize: 11,
+    color: v("--text-secondary"),
+    marginTop: 4,
+  },
 };
 
 // ============================================================================
@@ -146,6 +227,10 @@ export function PageSetupDialog({ isOpen, onClose }: DialogProps) {
   const [setup, setSetupState] = useState<PageSetup | null>(null);
   const [loading, setLoading] = useState(true);
 
+  // Parsed header/footer sections for the 3-field UI
+  const [headerSections, setHeaderSections] = useState<HFSections>({ left: "", center: "", right: "" });
+  const [footerSections, setFooterSections] = useState<HFSections>({ left: "", center: "", right: "" });
+
   // Load current page setup
   useEffect(() => {
     if (!isOpen) return;
@@ -153,6 +238,8 @@ export function PageSetupDialog({ isOpen, onClose }: DialogProps) {
     getPageSetup()
       .then((ps) => {
         setSetupState(ps);
+        setHeaderSections(parseHFSections(ps.header));
+        setFooterSections(parseHFSections(ps.footer));
         setLoading(false);
       })
       .catch((err) => {
@@ -164,6 +251,33 @@ export function PageSetupDialog({ isOpen, onClose }: DialogProps) {
   const update = useCallback(
     <K extends keyof PageSetup>(key: K, value: PageSetup[K]) => {
       setSetupState((prev) => (prev ? { ...prev, [key]: value } : prev));
+    },
+    [],
+  );
+
+  const updateHeaderSection = useCallback(
+    (section: keyof HFSections, value: string) => {
+      setHeaderSections((prev) => {
+        const next = { ...prev, [section]: value };
+        // Also update the combined header string
+        setSetupState((prevSetup) =>
+          prevSetup ? { ...prevSetup, header: combineHFSections(next) } : prevSetup,
+        );
+        return next;
+      });
+    },
+    [],
+  );
+
+  const updateFooterSection = useCallback(
+    (section: keyof HFSections, value: string) => {
+      setFooterSections((prev) => {
+        const next = { ...prev, [section]: value };
+        setSetupState((prevSetup) =>
+          prevSetup ? { ...prevSetup, footer: combineHFSections(next) } : prevSetup,
+        );
+        return next;
+      });
     },
     [],
   );
@@ -351,28 +465,78 @@ export function PageSetupDialog({ isOpen, onClose }: DialogProps) {
                 </label>
               </div>
 
-              {/* Header/Footer section */}
+              {/* Header/Footer section - three-section layout */}
               <div style={styles.section}>
-                <div style={styles.sectionTitle}>Header / Footer</div>
-                <div style={styles.row}>
-                  <span style={styles.label}>Header:</span>
-                  <input
-                    type="text"
-                    style={styles.input}
-                    value={setup.header}
-                    placeholder="&F = filename, &D = date, &P = page"
-                    onChange={(e) => update("header", e.target.value)}
-                  />
+                <div style={styles.sectionTitle}>Header</div>
+                <div style={styles.hfGrid}>
+                  <div>
+                    <div style={styles.hfLabel}>Left section</div>
+                    <input
+                      type="text"
+                      style={styles.hfInput}
+                      value={headerSections.left}
+                      placeholder=""
+                      onChange={(e) => updateHeaderSection("left", e.target.value)}
+                    />
+                  </div>
+                  <div>
+                    <div style={styles.hfLabel}>Center section</div>
+                    <input
+                      type="text"
+                      style={styles.hfInput}
+                      value={headerSections.center}
+                      placeholder=""
+                      onChange={(e) => updateHeaderSection("center", e.target.value)}
+                    />
+                  </div>
+                  <div>
+                    <div style={styles.hfLabel}>Right section</div>
+                    <input
+                      type="text"
+                      style={styles.hfInput}
+                      value={headerSections.right}
+                      placeholder=""
+                      onChange={(e) => updateHeaderSection("right", e.target.value)}
+                    />
+                  </div>
                 </div>
-                <div style={styles.row}>
-                  <span style={styles.label}>Footer:</span>
-                  <input
-                    type="text"
-                    style={styles.input}
-                    value={setup.footer}
-                    placeholder="&P = page, &N = pages, &D = date"
-                    onChange={(e) => update("footer", e.target.value)}
-                  />
+
+                <div style={{ ...styles.sectionTitle, marginTop: 12 }}>Footer</div>
+                <div style={styles.hfGrid}>
+                  <div>
+                    <div style={styles.hfLabel}>Left section</div>
+                    <input
+                      type="text"
+                      style={styles.hfInput}
+                      value={footerSections.left}
+                      placeholder=""
+                      onChange={(e) => updateFooterSection("left", e.target.value)}
+                    />
+                  </div>
+                  <div>
+                    <div style={styles.hfLabel}>Center section</div>
+                    <input
+                      type="text"
+                      style={styles.hfInput}
+                      value={footerSections.center}
+                      placeholder=""
+                      onChange={(e) => updateFooterSection("center", e.target.value)}
+                    />
+                  </div>
+                  <div>
+                    <div style={styles.hfLabel}>Right section</div>
+                    <input
+                      type="text"
+                      style={styles.hfInput}
+                      value={footerSections.right}
+                      placeholder=""
+                      onChange={(e) => updateFooterSection("right", e.target.value)}
+                    />
+                  </div>
+                </div>
+
+                <div style={styles.hint}>
+                  Codes: &amp;P = page#, &amp;N = total pages, &amp;D = date, &amp;T = time, &amp;F = filename, &amp;A = sheet name
                 </div>
               </div>
             </>

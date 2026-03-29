@@ -651,6 +651,7 @@ pub fn update_cell(
                     current_col: Some(col),
                     row_heights: Some(rh_map),
                     column_widths: Some(cw_map),
+                    hidden_rows: None,
                 };
                 let raw_result = evaluate_formula_raw_with_files(
                     &grids,
@@ -1523,6 +1524,7 @@ pub fn update_cells_batch(
                         current_col: Some(col),
                         row_heights: None,
                         column_widths: None,
+                        hidden_rows: None,
                     };
                     let raw_result = crate::evaluate_formula_raw_with_files(
                         &grids,

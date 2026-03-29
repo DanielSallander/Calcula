@@ -254,6 +254,142 @@ pub fn parse_time_string(text: &str) -> Option<f64> {
     Some((hours as f64 * 3600.0 + minutes as f64 * 60.0 + seconds as f64) / 86400.0)
 }
 
+/// DAYS360: Days between two dates based on a 360-day year.
+/// method=false: US (NASD), method=true: European.
+pub fn days360(start: i64, end: i64, method: bool) -> i64 {
+    let (sy, sm, sd) = serial_to_date(start);
+    let (ey, em, ed) = serial_to_date(end);
+    let mut sd = sd as i32;
+    let mut ed = ed as i32;
+    if method {
+        // European: if day > 30, set to 30
+        if sd > 30 { sd = 30; }
+        if ed > 30 { ed = 30; }
+    } else {
+        // US/NASD method
+        let start_eom = days_in_month(sy, sm) as i32;
+        let end_eom = days_in_month(ey, em) as i32;
+        if sd == start_eom { sd = 30; }
+        if ed == end_eom && (sd == 30 || ed == end_eom) {
+            if sd == 30 { ed = 30; }
+        }
+    }
+    (ey as i64 - sy as i64) * 360 + (em as i64 - sm as i64) * 30 + (ed as i64 - sd as i64)
+}
+
+/// YEARFRAC: Fraction of year between two dates.
+/// basis: 0=US 30/360, 1=actual/actual, 2=actual/360, 3=actual/365, 4=European 30/360
+pub fn yearfrac(start: i64, end: i64, basis: i32) -> f64 {
+    let (lo, hi) = if start <= end { (start, end) } else { (end, start) };
+    let diff = (hi - lo) as f64;
+    match basis {
+        0 => days360(lo, hi, false) as f64 / 360.0,
+        1 => {
+            let (sy, _, _) = serial_to_date(lo);
+            let (ey, _, _) = serial_to_date(hi);
+            if sy == ey {
+                let year_days = if is_leap_year(sy) { 366.0 } else { 365.0 };
+                diff / year_days
+            } else {
+                let num_years = (ey - sy + 1) as f64;
+                let total_days: f64 = (sy..=ey).map(|y| if is_leap_year(y) { 366.0 } else { 365.0 }).sum();
+                diff / (total_days / num_years)
+            }
+        }
+        2 => diff / 360.0,
+        3 => diff / 365.0,
+        4 => days360(lo, hi, true) as f64 / 360.0,
+        _ => 0.0, // caller should validate
+    }
+}
+
+/// ISO 8601 week number (weeks start Monday, week 1 contains Jan 4).
+pub fn iso_weeknum(serial: i64) -> i32 {
+    // Day of week: 1=Mon..7=Sun
+    let dow = weekday(serial); // 0=Sun..6=Sat
+    let dow_iso = if dow == 0 { 7 } else { dow }; // 1=Mon..7=Sun
+
+    // Find Thursday of the current week (ISO week is defined by its Thursday)
+    let thursday = serial + (4 - dow_iso) as i64;
+    let (thy, _, _) = serial_to_date(thursday);
+
+    // Jan 1 of that Thursday's year
+    let jan1 = date_to_serial(thy, 1, 1) as i64;
+    let jan1_dow = weekday(jan1);
+    let jan1_iso = if jan1_dow == 0 { 7 } else { jan1_dow };
+
+    // Thursday of week 1
+    let week1_thursday = jan1 + (4 - jan1_iso) as i64;
+
+    ((thursday - week1_thursday) / 7 + 1) as i32
+}
+
+/// Check if a day is a weekend based on INTL weekend string/number.
+/// weekend param: number 1-7,11-17 or a 7-char string of 0s and 1s (Mon-Sun).
+/// Returns a function-like check. We return the weekend days as a Vec of day-of-week (0=Sun..6=Sat).
+pub fn parse_weekend_intl(weekend: i32) -> Vec<i32> {
+    match weekend {
+        1 => vec![0, 6],       // Saturday, Sunday
+        2 => vec![0, 1],       // Sunday, Monday
+        3 => vec![1, 2],       // Monday, Tuesday
+        4 => vec![2, 3],       // Tuesday, Wednesday
+        5 => vec![3, 4],       // Wednesday, Thursday
+        6 => vec![4, 5],       // Thursday, Friday
+        7 => vec![5, 6],       // Friday, Saturday
+        11 => vec![0],         // Sunday only
+        12 => vec![1],         // Monday only
+        13 => vec![2],         // Tuesday only
+        14 => vec![3],         // Wednesday only
+        15 => vec![4],         // Thursday only
+        16 => vec![5],         // Friday only
+        17 => vec![6],         // Saturday only
+        _ => vec![0, 6],       // default
+    }
+}
+
+/// Parse a 7-char weekend string (e.g., "0000011" where 1=weekend, Mon..Sun order).
+pub fn parse_weekend_string(s: &str) -> Vec<i32> {
+    if s.len() != 7 { return vec![0, 6]; } // default
+    let mut result = Vec::new();
+    for (i, ch) in s.chars().enumerate() {
+        if ch == '1' {
+            // i=0 is Monday (dow=1), i=6 is Sunday (dow=0)
+            let dow = if i == 6 { 0 } else { (i + 1) as i32 };
+            result.push(dow);
+        }
+    }
+    result
+}
+
+/// NETWORKDAYS.INTL with custom weekend definition.
+pub fn networkdays_intl(start: i64, end: i64, weekend_days: &[i32], holidays: &[i64]) -> i64 {
+    let (lo, hi) = if start <= end { (start, end) } else { (end, start) };
+    let sign = if start <= end { 1i64 } else { -1i64 };
+    let mut count = 0i64;
+    for d in lo..=hi {
+        let dow = weekday(d);
+        if !weekend_days.contains(&dow) && !holidays.contains(&d) {
+            count += 1;
+        }
+    }
+    count * sign
+}
+
+/// WORKDAY.INTL with custom weekend definition.
+pub fn workday_intl(start: i64, days: i64, weekend_days: &[i32], holidays: &[i64]) -> i64 {
+    let direction = if days >= 0 { 1i64 } else { -1i64 };
+    let mut remaining = days.abs();
+    let mut current = start;
+    while remaining > 0 {
+        current += direction;
+        let dow = weekday(current);
+        if !weekend_days.contains(&dow) && !holidays.contains(&current) {
+            remaining -= 1;
+        }
+    }
+    current
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

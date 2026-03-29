@@ -339,6 +339,78 @@ pub enum BuiltinFunction {
     FileLines,
     FileExists,
 
+    // Subtotal function
+    Subtotal,
+
+    // Text parsing/conversion functions
+    TextSplit,
+    TextBefore,
+    TextAfter,
+    ValueToText,
+    ArrayToText,
+
+    // Additional date functions
+    Days360,
+    YearFrac,
+    IsoWeekNum,
+    NetworkDaysIntl,
+    WorkDayIntl,
+
+    // Additional statistical functions
+    ModeMult,
+    StdevS,
+    VarS,
+    RankAvg,
+    PercentRank,
+    Trend,
+    Growth,
+    Linest,
+    Logest,
+
+    // Probability distributions
+    NormDist,
+    TDist,
+    ChisqDist,
+    FDist,
+    BinomDist,
+    PoissonDist,
+    ConfidenceNorm,
+    ConfidenceT,
+
+    // Additional financial functions
+    Ipmt,
+    Ppmt,
+    FvSchedule,
+    Xnpv,
+    Xirr,
+    Mirr,
+    Syd,
+    Vdb,
+    Cumipmt,
+    Cumprinc,
+    Effect,
+    Nominal,
+
+    // Modern lookup functions
+    XMatch,
+
+    // Selection functions
+    ChooseCols,
+    ChooseRows,
+
+    // Reference & Info functions
+    Areas,
+    CellFn,
+    FormulaText,
+
+    // Array reshaping functions
+    Expand,
+    VStack,
+    ToCol,
+    ToRow,
+    WrapCols,
+    WrapRows,
+
     /// Fallback for unrecognized function names (future extensions/plugins).
     Custom(String),
 }

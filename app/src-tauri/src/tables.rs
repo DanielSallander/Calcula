@@ -1429,6 +1429,7 @@ pub fn set_calculated_column(
                 current_col: Some(abs_col),
                 row_heights: None,
                 column_widths: None,
+                hidden_rows: None,
             };
             let result = crate::evaluate_formula_raw_with_files(
                 &grids,

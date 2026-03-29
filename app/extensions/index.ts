@@ -34,6 +34,9 @@ import { registerExtensionsManagerExtension, unregisterExtensionsManagerExtensio
 import { registerSettingsExtension, unregisterSettingsExtension } from "./Settings";
 import { registerReportStoreExtension, unregisterReportStoreExtension } from "./ReportStore";
 import { registerSlicerExtension, unregisterSlicerExtension } from "./Slicer";
+import { registerFlashFillExtension, unregisterFlashFillExtension } from "./FlashFill";
+import { registerAdvancedFilterExtension, unregisterAdvancedFilterExtension } from "./AdvancedFilter";
+import { registerSubtotalsExtension, unregisterSubtotalsExtension } from "./Subtotals";
 
 /**
  * Load all extensions.
@@ -63,6 +66,9 @@ export function loadExtensions(): void {
   registerFormulaVisualizerExtension();
   registerCalculationOptionsExtension();
   registerConsolidateExtension();
+  registerFlashFillExtension();
+  registerAdvancedFilterExtension();
+  registerSubtotalsExtension();
   registerCheckboxExtension();
   registerSparklineExtension();
   registerReviewExtension();
@@ -105,6 +111,9 @@ export function unloadExtensions(): void {
   unregisterReviewExtension();
   unregisterSparklineExtension();
   unregisterCheckboxExtension();
+  unregisterSubtotalsExtension();
+  unregisterAdvancedFilterExtension();
+  unregisterFlashFillExtension();
   unregisterConsolidateExtension();
   unregisterCalculationOptionsExtension();
   unregisterFormulaVisualizerExtension();
@@ -161,3 +170,6 @@ export { registerExtensionsManagerExtension, unregisterExtensionsManagerExtensio
 export { registerSettingsExtension, unregisterSettingsExtension };
 export { registerReportStoreExtension, unregisterReportStoreExtension };
 export { registerSlicerExtension, unregisterSlicerExtension };
+export { registerFlashFillExtension, unregisterFlashFillExtension };
+export { registerAdvancedFilterExtension, unregisterAdvancedFilterExtension };
+export { registerSubtotalsExtension, unregisterSubtotalsExtension };

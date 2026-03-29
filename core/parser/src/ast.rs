@@ -383,6 +383,78 @@ pub enum BuiltinFunction {
     FileLines,
     FileExists,
 
+    // Subtotal function
+    Subtotal,
+
+    // Text parsing/conversion functions
+    TextSplit,
+    TextBefore,
+    TextAfter,
+    ValueToText,
+    ArrayToText,
+
+    // Additional date functions
+    Days360,
+    YearFrac,
+    IsoWeekNum,
+    NetworkDaysIntl,
+    WorkDayIntl,
+
+    // Additional statistical functions
+    ModeMult,
+    StdevS,
+    VarS,
+    RankAvg,
+    PercentRank,
+    Trend,
+    Growth,
+    Linest,
+    Logest,
+
+    // Probability distributions
+    NormDist,
+    TDist,
+    ChisqDist,
+    FDist,
+    BinomDist,
+    PoissonDist,
+    ConfidenceNorm,
+    ConfidenceT,
+
+    // Additional financial functions
+    Ipmt,
+    Ppmt,
+    FvSchedule,
+    Xnpv,
+    Xirr,
+    Mirr,
+    Syd,
+    Vdb,
+    Cumipmt,
+    Cumprinc,
+    Effect,
+    Nominal,
+
+    // Modern lookup functions
+    XMatch,
+
+    // Selection functions
+    ChooseCols,
+    ChooseRows,
+
+    // Reference & Info functions
+    Areas,
+    CellFn,
+    FormulaText,
+
+    // Array reshaping functions
+    Expand,
+    VStack,
+    ToCol,
+    ToRow,
+    WrapCols,
+    WrapRows,
+
     /// Fallback for unrecognized function names (future extensions/plugins).
     Custom(String),
 }
@@ -608,6 +680,78 @@ impl BuiltinFunction {
             "FILEREAD" | "FILE.READ" => BuiltinFunction::FileRead,
             "FILELINES" | "FILE.LINES" => BuiltinFunction::FileLines,
             "FILEEXISTS" | "FILE.EXISTS" => BuiltinFunction::FileExists,
+
+            // Subtotal function
+            "SUBTOTAL" => BuiltinFunction::Subtotal,
+
+            // Text parsing/conversion
+            "TEXTSPLIT" => BuiltinFunction::TextSplit,
+            "TEXTBEFORE" => BuiltinFunction::TextBefore,
+            "TEXTAFTER" => BuiltinFunction::TextAfter,
+            "VALUETOTEXT" => BuiltinFunction::ValueToText,
+            "ARRAYTOTEXT" => BuiltinFunction::ArrayToText,
+
+            // Additional date functions
+            "DAYS360" => BuiltinFunction::Days360,
+            "YEARFRAC" => BuiltinFunction::YearFrac,
+            "ISOWEEKNUM" => BuiltinFunction::IsoWeekNum,
+            "NETWORKDAYS.INTL" => BuiltinFunction::NetworkDaysIntl,
+            "WORKDAY.INTL" => BuiltinFunction::WorkDayIntl,
+
+            // Additional statistical functions
+            "MODE.MULT" => BuiltinFunction::ModeMult,
+            "STDEV.S" => BuiltinFunction::StdevS,
+            "VAR.S" => BuiltinFunction::VarS,
+            "RANK.AVG" => BuiltinFunction::RankAvg,
+            "PERCENTRANK" | "PERCENTRANK.INC" => BuiltinFunction::PercentRank,
+            "TREND" => BuiltinFunction::Trend,
+            "GROWTH" => BuiltinFunction::Growth,
+            "LINEST" => BuiltinFunction::Linest,
+            "LOGEST" => BuiltinFunction::Logest,
+
+            // Probability distributions
+            "NORM.DIST" | "NORMDIST" => BuiltinFunction::NormDist,
+            "T.DIST" | "TDIST" => BuiltinFunction::TDist,
+            "CHISQ.DIST" | "CHISQDIST" => BuiltinFunction::ChisqDist,
+            "F.DIST" | "FDIST" => BuiltinFunction::FDist,
+            "BINOM.DIST" | "BINOMDIST" => BuiltinFunction::BinomDist,
+            "POISSON.DIST" | "POISSONDIST" => BuiltinFunction::PoissonDist,
+            "CONFIDENCE.NORM" => BuiltinFunction::ConfidenceNorm,
+            "CONFIDENCE.T" => BuiltinFunction::ConfidenceT,
+
+            // Additional financial functions
+            "IPMT" => BuiltinFunction::Ipmt,
+            "PPMT" => BuiltinFunction::Ppmt,
+            "FVSCHEDULE" => BuiltinFunction::FvSchedule,
+            "XNPV" => BuiltinFunction::Xnpv,
+            "XIRR" => BuiltinFunction::Xirr,
+            "MIRR" => BuiltinFunction::Mirr,
+            "SYD" => BuiltinFunction::Syd,
+            "VDB" => BuiltinFunction::Vdb,
+            "CUMIPMT" => BuiltinFunction::Cumipmt,
+            "CUMPRINC" => BuiltinFunction::Cumprinc,
+            "EFFECT" => BuiltinFunction::Effect,
+            "NOMINAL" => BuiltinFunction::Nominal,
+
+            // Modern lookup
+            "XMATCH" => BuiltinFunction::XMatch,
+
+            // Selection
+            "CHOOSECOLS" => BuiltinFunction::ChooseCols,
+            "CHOOSEROWS" => BuiltinFunction::ChooseRows,
+
+            // Reference & Info
+            "AREAS" => BuiltinFunction::Areas,
+            "CELL" => BuiltinFunction::CellFn,
+            "FORMULATEXT" => BuiltinFunction::FormulaText,
+
+            // Array reshaping
+            "EXPAND" => BuiltinFunction::Expand,
+            "VSTACK" => BuiltinFunction::VStack,
+            "TOCOL" => BuiltinFunction::ToCol,
+            "TOROW" => BuiltinFunction::ToRow,
+            "WRAPCOLS" => BuiltinFunction::WrapCols,
+            "WRAPROWS" => BuiltinFunction::WrapRows,
 
             _ => BuiltinFunction::Custom(name.to_uppercase()),
         }

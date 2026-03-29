@@ -198,3 +198,7 @@ export const AREA_PIPELINE_INTEGRITY = suiteArea(55);
 export const AREA_LAMBDA = suiteArea(56);
 /** Suite 57: PDF Export (row 3350) */
 export const AREA_PDF_EXPORT = suiteArea(57);
+
+// Phase 17: Advanced Filter Extension
+/** Suite 58: Advanced Filter Extension (row 3400) */
+export const AREA_ADVANCED_FILTER = suiteArea(58);

@@ -768,6 +768,7 @@ pub(crate) fn builtin_fn_name(func: &BuiltinFunction) -> String {
         BuiltinFunction::MakeArray => "MAKEARRAY".to_string(),
         BuiltinFunction::ByRow => "BYROW".to_string(),
         BuiltinFunction::ByCol => "BYCOL".to_string(),
+        BuiltinFunction::Subtotal => "SUBTOTAL".to_string(),
         BuiltinFunction::Custom(name) => name.clone(),
     }
 }

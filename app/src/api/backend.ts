@@ -3388,6 +3388,8 @@ export interface PageSetup {
   centerVertically: boolean;
   header: string;
   footer: string;
+  manualRowBreaks: number[];
+  manualColBreaks: number[];
 }
 
 /** All data needed to render a print preview or print. */
@@ -3415,6 +3417,31 @@ export async function setPageSetup(setup: PageSetup): Promise<void> {
 /** Get all data needed for printing the active sheet. */
 export async function getPrintData(): Promise<PrintData> {
   return invoke<PrintData>("get_print_data", {});
+}
+
+/** Insert a manual row page break before the specified row. */
+export async function insertRowPageBreak(row: number): Promise<void> {
+  return invoke<void>("insert_row_page_break", { row });
+}
+
+/** Remove a manual row page break at the specified row. */
+export async function removeRowPageBreak(row: number): Promise<void> {
+  return invoke<void>("remove_row_page_break", { row });
+}
+
+/** Insert a manual column page break before the specified column. */
+export async function insertColPageBreak(col: number): Promise<void> {
+  return invoke<void>("insert_col_page_break", { col });
+}
+
+/** Remove a manual column page break at the specified column. */
+export async function removeColPageBreak(col: number): Promise<void> {
+  return invoke<void>("remove_col_page_break", { col });
+}
+
+/** Remove all manual page breaks for the active sheet. */
+export async function resetAllPageBreaks(): Promise<void> {
+  return invoke<void>("reset_all_page_breaks", {});
 }
 
 /** Write binary data to a file on disk. Used by PDF export. */

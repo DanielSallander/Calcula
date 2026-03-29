@@ -1037,6 +1037,12 @@ pub struct PageSetup {
     /// Footer text
     #[serde(default = "default_footer")]
     pub footer: String,
+    /// Manual row page breaks (0-indexed row numbers where a new page starts)
+    #[serde(default)]
+    pub manual_row_breaks: Vec<u32>,
+    /// Manual column page breaks (0-indexed col numbers where a new page starts)
+    #[serde(default)]
+    pub manual_col_breaks: Vec<u32>,
 }
 
 fn default_paper_size() -> String { "a4".to_string() }
@@ -1070,6 +1076,8 @@ impl Default for PageSetup {
             center_vertically: false,
             header: String::new(),
             footer: default_footer(),
+            manual_row_breaks: Vec::new(),
+            manual_col_breaks: Vec::new(),
         }
     }
 }

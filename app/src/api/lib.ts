@@ -654,6 +654,11 @@ export {
   setPageSetup,
   getPrintData,
   writeBinaryFile,
+  insertRowPageBreak,
+  removeRowPageBreak,
+  insertColPageBreak,
+  removeColPageBreak,
+  resetAllPageBreaks,
 } from "./backend";
 
 export type {

@@ -26,7 +26,7 @@ use crate::grid::Grid;
 use crate::style::StyleRegistry;
 
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 /// Comparison operator for criteria matching in SUMIF/COUNTIF etc.
 #[derive(Debug, Clone)]
@@ -312,6 +312,9 @@ pub struct EvalContext {
     pub row_heights: Option<HashMap<u32, f64>>,
     /// Column widths: col_index (0-indexed) -> width in pixels (for GET.COLUMN.WIDTH).
     pub column_widths: Option<HashMap<u32, f64>>,
+    /// Set of 0-indexed row indices that are hidden (by filter, grouping, or manual hide).
+    /// Used by SUBTOTAL function codes 101-111 to exclude hidden rows.
+    pub hidden_rows: Option<HashSet<u32>>,
 }
 
 /// The formula evaluator.
@@ -1269,6 +1272,78 @@ impl<'a> Evaluator<'a> {
             BuiltinFunction::FileLines => self.fn_file_lines(args),
             BuiltinFunction::FileExists => self.fn_file_exists(args),
 
+            // Subtotal function
+            BuiltinFunction::Subtotal => self.fn_subtotal(args),
+
+            // Text parsing/conversion functions
+            BuiltinFunction::TextSplit => self.fn_textsplit(args),
+            BuiltinFunction::TextBefore => self.fn_textbefore(args),
+            BuiltinFunction::TextAfter => self.fn_textafter(args),
+            BuiltinFunction::ValueToText => self.fn_valuetotext(args),
+            BuiltinFunction::ArrayToText => self.fn_arraytotext(args),
+
+            // Additional date functions
+            BuiltinFunction::Days360 => self.fn_days360(args),
+            BuiltinFunction::YearFrac => self.fn_yearfrac(args),
+            BuiltinFunction::IsoWeekNum => self.fn_isoweeknum(args),
+            BuiltinFunction::NetworkDaysIntl => self.fn_networkdays_intl(args),
+            BuiltinFunction::WorkDayIntl => self.fn_workday_intl(args),
+
+            // Additional statistical functions
+            BuiltinFunction::ModeMult => self.fn_mode_mult(args),
+            BuiltinFunction::StdevS => self.fn_stdev(args),
+            BuiltinFunction::VarS => self.fn_var(args),
+            BuiltinFunction::RankAvg => self.fn_rank_avg(args),
+            BuiltinFunction::PercentRank => self.fn_percentrank(args),
+            BuiltinFunction::Trend => self.fn_trend(args),
+            BuiltinFunction::Growth => self.fn_growth(args),
+            BuiltinFunction::Linest => self.fn_linest(args),
+            BuiltinFunction::Logest => self.fn_logest(args),
+
+            // Probability distributions
+            BuiltinFunction::NormDist => self.fn_norm_dist(args),
+            BuiltinFunction::TDist => self.fn_t_dist(args),
+            BuiltinFunction::ChisqDist => self.fn_chisq_dist(args),
+            BuiltinFunction::FDist => self.fn_f_dist(args),
+            BuiltinFunction::BinomDist => self.fn_binom_dist(args),
+            BuiltinFunction::PoissonDist => self.fn_poisson_dist(args),
+            BuiltinFunction::ConfidenceNorm => self.fn_confidence_norm(args),
+            BuiltinFunction::ConfidenceT => self.fn_confidence_t(args),
+
+            // Additional financial functions
+            BuiltinFunction::Ipmt => self.fn_ipmt(args),
+            BuiltinFunction::Ppmt => self.fn_ppmt(args),
+            BuiltinFunction::FvSchedule => self.fn_fvschedule(args),
+            BuiltinFunction::Xnpv => self.fn_xnpv(args),
+            BuiltinFunction::Xirr => self.fn_xirr(args),
+            BuiltinFunction::Mirr => self.fn_mirr(args),
+            BuiltinFunction::Syd => self.fn_syd(args),
+            BuiltinFunction::Vdb => self.fn_vdb(args),
+            BuiltinFunction::Cumipmt => self.fn_cumipmt(args),
+            BuiltinFunction::Cumprinc => self.fn_cumprinc(args),
+            BuiltinFunction::Effect => self.fn_effect(args),
+            BuiltinFunction::Nominal => self.fn_nominal(args),
+
+            // Modern lookup
+            BuiltinFunction::XMatch => self.fn_xmatch(args),
+
+            // Selection
+            BuiltinFunction::ChooseCols => self.fn_choosecols(args),
+            BuiltinFunction::ChooseRows => self.fn_chooserows(args),
+
+            // Reference & Info
+            BuiltinFunction::Areas => self.fn_areas(args),
+            BuiltinFunction::CellFn => self.fn_cell(args),
+            BuiltinFunction::FormulaText => self.fn_formulatext(args),
+
+            // Array reshaping
+            BuiltinFunction::Expand => self.fn_expand(args),
+            BuiltinFunction::VStack => self.fn_vstack(args),
+            BuiltinFunction::ToCol => self.fn_tocol(args),
+            BuiltinFunction::ToRow => self.fn_torow(args),
+            BuiltinFunction::WrapCols => self.fn_wrapcols(args),
+            BuiltinFunction::WrapRows => self.fn_wraprows(args),
+
             // Unknown/custom functions — check scope for LAMBDA bindings
             BuiltinFunction::Custom(name) => {
                 // __INVOKE__: call-on-expression (e.g., LAMBDA(x, x+1)(10))
@@ -1453,6 +1528,269 @@ impl<'a> Evaluator<'a> {
                 EvalResult::Number(count as f64)
             }
             Err(e) => EvalResult::Error(e),
+        }
+    }
+
+    // ==================== SUBTOTAL Function ====================
+
+    /// SUBTOTAL(function_num, ref1, [ref2], ...)
+    /// Codes 1-11: include manually hidden rows, exclude rows hidden by other SUBTOTAL
+    /// Codes 101-111: exclude all hidden rows
+    /// 1/101=AVERAGE, 2/102=COUNT, 3/103=COUNTA, 4/104=MAX, 5/105=MIN,
+    /// 6/106=PRODUCT, 7/107=STDEV, 8/108=STDEVP, 9/109=SUM, 10/110=VAR, 11/111=VARP
+    fn fn_subtotal(&self, args: &[Expression]) -> EvalResult {
+        if args.len() < 2 {
+            return EvalResult::Error(CellError::Value);
+        }
+
+        // Evaluate function_num
+        let func_num = match self.evaluate(&args[0]) {
+            EvalResult::Number(n) => n as i32,
+            EvalResult::Error(e) => return EvalResult::Error(e),
+            _ => return EvalResult::Error(CellError::Value),
+        };
+
+        // Determine whether to exclude hidden rows (101-111) or not (1-11)
+        let (base_func, exclude_hidden) = if func_num >= 101 && func_num <= 111 {
+            (func_num - 100, true)
+        } else if func_num >= 1 && func_num <= 11 {
+            (func_num, false)
+        } else {
+            return EvalResult::Error(CellError::Value);
+        };
+
+        // Collect values from the range arguments, optionally filtering hidden rows
+        let range_args = &args[1..];
+
+        if exclude_hidden {
+            // Codes 101-111: collect values while skipping hidden rows
+            let values = self.collect_subtotal_values_filtered(range_args);
+            self.apply_subtotal_aggregate(base_func, values)
+        } else {
+            // Codes 1-11: collect all values (don't filter hidden rows)
+            let values = self.collect_subtotal_values(range_args);
+            self.apply_subtotal_aggregate(base_func, values)
+        }
+    }
+
+    /// Collects values from range arguments without filtering hidden rows (codes 1-11).
+    fn collect_subtotal_values(&self, args: &[Expression]) -> Vec<EvalResult> {
+        let mut values = Vec::new();
+        for arg in args {
+            let result = self.evaluate(arg);
+            Self::flatten_into(&mut values, result);
+        }
+        values
+    }
+
+    /// Collects values from range arguments, skipping values in hidden rows (codes 101-111).
+    fn collect_subtotal_values_filtered(&self, args: &[Expression]) -> Vec<EvalResult> {
+        let hidden = match &self.context.hidden_rows {
+            Some(h) if !h.is_empty() => h,
+            _ => return self.collect_subtotal_values(args), // No hidden rows, just collect all
+        };
+
+        let mut values = Vec::new();
+        for arg in args {
+            match arg {
+                Expression::Range { sheet, start, end } => {
+                    let grid = self.get_grid_for_sheet(sheet);
+                    if let (
+                        Expression::CellRef { col: start_col, row: start_row, .. },
+                        Expression::CellRef { col: end_col, row: end_row, .. },
+                    ) = (start.as_ref(), end.as_ref()) {
+                        let sc = col_to_index(start_col);
+                        let ec = col_to_index(end_col);
+                        let sr = start_row - 1;
+                        let er = end_row - 1;
+                        let min_r = sr.min(er);
+                        let max_r = sr.max(er);
+                        let min_c = sc.min(ec);
+                        let max_c = sc.max(ec);
+                        for r in min_r..=max_r {
+                            if hidden.contains(&r) {
+                                continue; // Skip hidden rows
+                            }
+                            for c in min_c..=max_c {
+                                let result = match grid.get_cell(r, c) {
+                                    Some(cell) => self.cell_value_to_result(&cell.value),
+                                    None => EvalResult::Number(0.0),
+                                };
+                                values.push(result);
+                            }
+                        }
+                    }
+                }
+                Expression::CellRef { sheet, col, row } => {
+                    let row_idx = row - 1;
+                    if !hidden.contains(&row_idx) {
+                        let grid = self.get_grid_for_sheet(sheet);
+                        let col_idx = col_to_index(col);
+                        let result = match grid.get_cell(row_idx, col_idx) {
+                            Some(cell) => self.cell_value_to_result(&cell.value),
+                            None => EvalResult::Number(0.0),
+                        };
+                        values.push(result);
+                    }
+                }
+                Expression::ColumnRef { sheet, start_col, end_col } => {
+                    let grid = self.get_grid_for_sheet(sheet);
+                    let sc = col_to_index(start_col);
+                    let ec = col_to_index(end_col);
+                    let min_c = sc.min(ec);
+                    let max_c = sc.max(ec);
+                    for (&(r, c), cell) in &grid.cells {
+                        if c >= min_c && c <= max_c && !hidden.contains(&r) {
+                            values.push(self.cell_value_to_result(&cell.value));
+                        }
+                    }
+                }
+                Expression::RowRef { sheet, start_row, end_row } => {
+                    let grid = self.get_grid_for_sheet(sheet);
+                    let sr = start_row - 1;
+                    let er = end_row - 1;
+                    let min_r = sr.min(er);
+                    let max_r = sr.max(er);
+                    for (&(r, _c), cell) in &grid.cells {
+                        if r >= min_r && r <= max_r && !hidden.contains(&r) {
+                            values.push(self.cell_value_to_result(&cell.value));
+                        }
+                    }
+                }
+                _ => {
+                    // For non-range expressions, just evaluate normally
+                    let result = self.evaluate(arg);
+                    Self::flatten_into(&mut values, result);
+                }
+            }
+        }
+        values
+    }
+
+    /// Flattens an EvalResult into a Vec, expanding arrays/lists.
+    fn flatten_into(values: &mut Vec<EvalResult>, result: EvalResult) {
+        match result {
+            EvalResult::Array(arr) => {
+                for item in arr {
+                    Self::flatten_into(values, item);
+                }
+            }
+            EvalResult::List(items) => {
+                for item in items {
+                    Self::flatten_into(values, item);
+                }
+            }
+            other => values.push(other),
+        }
+    }
+
+    /// Applies the appropriate aggregate function based on the SUBTOTAL function code.
+    fn apply_subtotal_aggregate(&self, base_func: i32, values: Vec<EvalResult>) -> EvalResult {
+        // Extract numbers from values (for numeric aggregates)
+        let extract_numbers = || -> Vec<f64> {
+            values.iter().filter_map(|v| v.as_number()).collect()
+        };
+
+        match base_func {
+            1 => {
+                // AVERAGE
+                let numbers = extract_numbers();
+                if numbers.is_empty() {
+                    EvalResult::Error(CellError::Div0)
+                } else {
+                    let sum: f64 = numbers.iter().sum();
+                    EvalResult::Number(sum / numbers.len() as f64)
+                }
+            }
+            2 => {
+                // COUNT (numeric values only)
+                let numbers = extract_numbers();
+                EvalResult::Number(numbers.len() as f64)
+            }
+            3 => {
+                // COUNTA (non-empty values)
+                let count = values.iter()
+                    .filter(|v| !matches!(v, EvalResult::Text(s) if s.is_empty()))
+                    .count();
+                EvalResult::Number(count as f64)
+            }
+            4 => {
+                // MAX
+                let numbers = extract_numbers();
+                if numbers.is_empty() {
+                    EvalResult::Number(0.0)
+                } else {
+                    EvalResult::Number(numbers.iter().cloned().fold(f64::NEG_INFINITY, f64::max))
+                }
+            }
+            5 => {
+                // MIN
+                let numbers = extract_numbers();
+                if numbers.is_empty() {
+                    EvalResult::Number(0.0)
+                } else {
+                    EvalResult::Number(numbers.iter().cloned().fold(f64::INFINITY, f64::min))
+                }
+            }
+            6 => {
+                // PRODUCT
+                let numbers = extract_numbers();
+                if numbers.is_empty() {
+                    EvalResult::Number(0.0)
+                } else {
+                    EvalResult::Number(numbers.iter().product())
+                }
+            }
+            7 => {
+                // STDEV (sample)
+                let numbers = extract_numbers();
+                if numbers.len() < 2 {
+                    EvalResult::Error(CellError::Div0)
+                } else {
+                    let mean = numbers.iter().sum::<f64>() / numbers.len() as f64;
+                    let variance = numbers.iter().map(|x| (x - mean).powi(2)).sum::<f64>() / (numbers.len() - 1) as f64;
+                    EvalResult::Number(variance.sqrt())
+                }
+            }
+            8 => {
+                // STDEVP (population)
+                let numbers = extract_numbers();
+                if numbers.is_empty() {
+                    EvalResult::Error(CellError::Div0)
+                } else {
+                    let mean = numbers.iter().sum::<f64>() / numbers.len() as f64;
+                    let variance = numbers.iter().map(|x| (x - mean).powi(2)).sum::<f64>() / numbers.len() as f64;
+                    EvalResult::Number(variance.sqrt())
+                }
+            }
+            9 => {
+                // SUM
+                let numbers = extract_numbers();
+                EvalResult::Number(numbers.iter().sum())
+            }
+            10 => {
+                // VAR (sample)
+                let numbers = extract_numbers();
+                if numbers.len() < 2 {
+                    EvalResult::Error(CellError::Div0)
+                } else {
+                    let mean = numbers.iter().sum::<f64>() / numbers.len() as f64;
+                    let variance = numbers.iter().map(|x| (x - mean).powi(2)).sum::<f64>() / (numbers.len() - 1) as f64;
+                    EvalResult::Number(variance)
+                }
+            }
+            11 => {
+                // VARP (population)
+                let numbers = extract_numbers();
+                if numbers.is_empty() {
+                    EvalResult::Error(CellError::Div0)
+                } else {
+                    let mean = numbers.iter().sum::<f64>() / numbers.len() as f64;
+                    let variance = numbers.iter().map(|x| (x - mean).powi(2)).sum::<f64>() / numbers.len() as f64;
+                    EvalResult::Number(variance)
+                }
+            }
+            _ => EvalResult::Error(CellError::Value),
         }
     }
 
@@ -6058,6 +6396,1326 @@ impl<'a> Evaluator<'a> {
         }
     }
 
+    // ==================== Text Parsing/Conversion Functions ====================
+
+    fn fn_textsplit(&self, args: &[Expression]) -> EvalResult {
+        // TEXTSPLIT(text, col_delimiter, [row_delimiter], [ignore_empty], [match_mode], [pad_with])
+        if args.is_empty() || args.len() > 6 { return EvalResult::Error(CellError::Value); }
+        let text = self.evaluate(&args[0]).as_text();
+        let col_delim = if args.len() >= 2 { self.evaluate(&args[1]).as_text() } else { return EvalResult::Error(CellError::Value); };
+        let row_delim = if args.len() >= 3 {
+            let v = self.evaluate(&args[2]);
+            if matches!(v, EvalResult::Boolean(false)) || matches!(v, EvalResult::Number(n) if n == 0.0) || v.as_text().is_empty() {
+                None
+            } else { Some(v.as_text()) }
+        } else { None };
+        let _ignore_empty = if args.len() >= 4 { { let _v = self.evaluate(&args[3]); matches!(_v, EvalResult::Boolean(true)) || matches!(_v, EvalResult::Number(n) if n != 0.0) } } else { false };
+        // Split by rows first, then cols
+        if let Some(ref rd) = row_delim {
+            let rows: Vec<&str> = text.split(rd.as_str()).collect();
+            let mut result: Vec<EvalResult> = Vec::new();
+            for row in &rows {
+                let cols: Vec<&str> = row.split(col_delim.as_str()).collect();
+                result.push(EvalResult::Array(cols.iter().map(|s| EvalResult::Text(s.to_string())).collect()));
+            }
+            EvalResult::Array(result)
+        } else {
+            let parts: Vec<&str> = text.split(col_delim.as_str()).collect();
+            EvalResult::Array(parts.iter().map(|s| EvalResult::Text(s.to_string())).collect())
+        }
+    }
+
+    fn fn_textbefore(&self, args: &[Expression]) -> EvalResult {
+        // TEXTBEFORE(text, delimiter, [instance_num], [match_mode], [match_end], [if_not_found])
+        if args.len() < 2 || args.len() > 6 { return EvalResult::Error(CellError::Value); }
+        let text = self.evaluate(&args[0]).as_text();
+        let delimiter = self.evaluate(&args[1]).as_text();
+        let instance = if args.len() >= 3 { match self.evaluate(&args[2]).as_number() { Some(n) => n as i32, None => 1 } } else { 1 };
+        let if_not_found = if args.len() >= 6 { Some(self.evaluate(&args[5])) } else { None };
+        if instance == 0 { return EvalResult::Error(CellError::Value); }
+        if delimiter.is_empty() { return EvalResult::Text(String::new()); }
+        let positions: Vec<usize> = text.match_indices(&delimiter).map(|(i, _)| i).collect();
+        if instance > 0 {
+            let idx = (instance - 1) as usize;
+            if idx < positions.len() {
+                EvalResult::Text(text[..positions[idx]].to_string())
+            } else {
+                if_not_found.unwrap_or(EvalResult::Error(CellError::NA))
+            }
+        } else {
+            // Negative instance: count from end
+            let idx = (-instance - 1) as usize;
+            if idx < positions.len() {
+                let pos = positions[positions.len() - 1 - idx];
+                EvalResult::Text(text[..pos].to_string())
+            } else {
+                if_not_found.unwrap_or(EvalResult::Error(CellError::NA))
+            }
+        }
+    }
+
+    fn fn_textafter(&self, args: &[Expression]) -> EvalResult {
+        // TEXTAFTER(text, delimiter, [instance_num], [match_mode], [match_end], [if_not_found])
+        if args.len() < 2 || args.len() > 6 { return EvalResult::Error(CellError::Value); }
+        let text = self.evaluate(&args[0]).as_text();
+        let delimiter = self.evaluate(&args[1]).as_text();
+        let instance = if args.len() >= 3 { match self.evaluate(&args[2]).as_number() { Some(n) => n as i32, None => 1 } } else { 1 };
+        let if_not_found = if args.len() >= 6 { Some(self.evaluate(&args[5])) } else { None };
+        if instance == 0 { return EvalResult::Error(CellError::Value); }
+        if delimiter.is_empty() { return EvalResult::Text(text.clone()); }
+        let positions: Vec<usize> = text.match_indices(&delimiter).map(|(i, _)| i).collect();
+        if instance > 0 {
+            let idx = (instance - 1) as usize;
+            if idx < positions.len() {
+                EvalResult::Text(text[positions[idx] + delimiter.len()..].to_string())
+            } else {
+                if_not_found.unwrap_or(EvalResult::Error(CellError::NA))
+            }
+        } else {
+            let idx = (-instance - 1) as usize;
+            if idx < positions.len() {
+                let pos = positions[positions.len() - 1 - idx];
+                EvalResult::Text(text[pos + delimiter.len()..].to_string())
+            } else {
+                if_not_found.unwrap_or(EvalResult::Error(CellError::NA))
+            }
+        }
+    }
+
+    fn fn_valuetotext(&self, args: &[Expression]) -> EvalResult {
+        // VALUETOTEXT(value, [format]) - format: 0=concise (default), 1=strict
+        if args.is_empty() || args.len() > 2 { return EvalResult::Error(CellError::Value); }
+        let val = self.evaluate(&args[0]);
+        let format = if args.len() == 2 { self.evaluate(&args[1]).as_number().unwrap_or(0.0) as i32 } else { 0 };
+        match val {
+            EvalResult::Text(s) => {
+                if format == 1 { EvalResult::Text(format!("\"{}\"", s)) } else { EvalResult::Text(s) }
+            }
+            EvalResult::Number(n) => EvalResult::Text(format_number_clean(n)),
+            EvalResult::Boolean(b) => EvalResult::Text(if b { "TRUE".to_string() } else { "FALSE".to_string() }),
+            EvalResult::Error(e) => EvalResult::Text(format!("{:?}", e)),
+            _ => EvalResult::Text(val.as_text()),
+        }
+    }
+
+    fn fn_arraytotext(&self, args: &[Expression]) -> EvalResult {
+        // ARRAYTOTEXT(array, [format]) - format: 0=concise, 1=strict
+        if args.is_empty() || args.len() > 2 { return EvalResult::Error(CellError::Value); }
+        let values = self.eval_flat(&args[0]);
+        let format = if args.len() == 2 { self.evaluate(&args[1]).as_number().unwrap_or(0.0) as i32 } else { 0 };
+        let parts: Vec<String> = values.iter().map(|v| {
+            match v {
+                EvalResult::Text(s) => {
+                    if format == 1 { format!("\"{}\"", s) } else { s.clone() }
+                }
+                EvalResult::Number(n) => format_number_clean(*n),
+                EvalResult::Boolean(b) => if *b { "TRUE".to_string() } else { "FALSE".to_string() },
+                _ => v.as_text(),
+            }
+        }).collect();
+        let sep = if format == 1 { ", " } else { ", " };
+        let result = if format == 1 {
+            format!("{{{}}}", parts.join(sep))
+        } else {
+            parts.join(sep)
+        };
+        EvalResult::Text(result)
+    }
+
+    // ==================== Additional Date Functions ====================
+
+    fn fn_days360(&self, args: &[Expression]) -> EvalResult {
+        if args.len() < 2 || args.len() > 3 { return EvalResult::Error(CellError::Value); }
+        let start = match self.evaluate(&args[0]).as_number() { Some(n) => n as i64, None => return EvalResult::Error(CellError::Value) };
+        let end = match self.evaluate(&args[1]).as_number() { Some(n) => n as i64, None => return EvalResult::Error(CellError::Value) };
+        let method = if args.len() == 3 { { let _v = self.evaluate(&args[2]); matches!(_v, EvalResult::Boolean(true)) || matches!(_v, EvalResult::Number(n) if n != 0.0) } } else { false };
+        EvalResult::Number(date_serial::days360(start, end, method) as f64)
+    }
+
+    fn fn_yearfrac(&self, args: &[Expression]) -> EvalResult {
+        if args.len() < 2 || args.len() > 3 { return EvalResult::Error(CellError::Value); }
+        let start = match self.evaluate(&args[0]).as_number() { Some(n) => n as i64, None => return EvalResult::Error(CellError::Value) };
+        let end = match self.evaluate(&args[1]).as_number() { Some(n) => n as i64, None => return EvalResult::Error(CellError::Value) };
+        let basis = if args.len() == 3 { match self.evaluate(&args[2]).as_number() { Some(n) => n as i32, None => 0 } } else { 0 };
+        if !(0..=4).contains(&basis) { return EvalResult::Error(CellError::Value); }
+        EvalResult::Number(date_serial::yearfrac(start, end, basis))
+    }
+
+    fn fn_isoweeknum(&self, args: &[Expression]) -> EvalResult {
+        if args.len() != 1 { return EvalResult::Error(CellError::Value); }
+        match self.evaluate(&args[0]).as_number() {
+            Some(serial) => EvalResult::Number(date_serial::iso_weeknum(serial as i64) as f64),
+            None => EvalResult::Error(CellError::Value),
+        }
+    }
+
+    fn fn_networkdays_intl(&self, args: &[Expression]) -> EvalResult {
+        if args.len() < 2 || args.len() > 4 { return EvalResult::Error(CellError::Value); }
+        let start = match self.evaluate(&args[0]).as_number() { Some(n) => n as i64, None => return EvalResult::Error(CellError::Value) };
+        let end = match self.evaluate(&args[1]).as_number() { Some(n) => n as i64, None => return EvalResult::Error(CellError::Value) };
+        let weekend_days = if args.len() >= 3 {
+            let wval = self.evaluate(&args[2]);
+            match wval {
+                EvalResult::Text(s) => date_serial::parse_weekend_string(&s),
+                _ => {
+                    let n = wval.as_number().unwrap_or(1.0) as i32;
+                    date_serial::parse_weekend_intl(n)
+                }
+            }
+        } else { vec![0, 6] };
+        let holidays: Vec<i64> = if args.len() == 4 {
+            self.eval_flat(&args[3]).iter().filter_map(|v| v.as_number().map(|n| n as i64)).collect()
+        } else { vec![] };
+        EvalResult::Number(date_serial::networkdays_intl(start, end, &weekend_days, &holidays) as f64)
+    }
+
+    fn fn_workday_intl(&self, args: &[Expression]) -> EvalResult {
+        if args.len() < 2 || args.len() > 4 { return EvalResult::Error(CellError::Value); }
+        let start = match self.evaluate(&args[0]).as_number() { Some(n) => n as i64, None => return EvalResult::Error(CellError::Value) };
+        let days = match self.evaluate(&args[1]).as_number() { Some(n) => n as i64, None => return EvalResult::Error(CellError::Value) };
+        let weekend_days = if args.len() >= 3 {
+            let wval = self.evaluate(&args[2]);
+            match wval {
+                EvalResult::Text(s) => date_serial::parse_weekend_string(&s),
+                _ => {
+                    let n = wval.as_number().unwrap_or(1.0) as i32;
+                    date_serial::parse_weekend_intl(n)
+                }
+            }
+        } else { vec![0, 6] };
+        let holidays: Vec<i64> = if args.len() == 4 {
+            self.eval_flat(&args[3]).iter().filter_map(|v| v.as_number().map(|n| n as i64)).collect()
+        } else { vec![] };
+        EvalResult::Number(date_serial::workday_intl(start, days, &weekend_days, &holidays) as f64)
+    }
+
+    // ==================== Additional Statistical Functions ====================
+
+    fn fn_mode_mult(&self, args: &[Expression]) -> EvalResult {
+        match self.collect_numbers(args) {
+            Ok(numbers) if !numbers.is_empty() => {
+                let mut counts: HashMap<i64, usize> = HashMap::new();
+                for &n in &numbers {
+                    let key = (n * 1e10).round() as i64;
+                    *counts.entry(key).or_insert(0) += 1;
+                }
+                let max_count = counts.values().max().copied().unwrap_or(0);
+                if max_count <= 1 { return EvalResult::Error(CellError::NA); }
+                let mut seen = HashSet::new();
+                let mut modes: Vec<EvalResult> = Vec::new();
+                for &n in &numbers {
+                    let key = (n * 1e10).round() as i64;
+                    if counts.get(&key) == Some(&max_count) && seen.insert(key) {
+                        modes.push(EvalResult::Number(n));
+                    }
+                }
+                EvalResult::Array(modes)
+            }
+            Ok(_) => EvalResult::Error(CellError::Value),
+            Err(e) => EvalResult::Error(e),
+        }
+    }
+
+    fn fn_rank_avg(&self, args: &[Expression]) -> EvalResult {
+        if args.len() < 2 || args.len() > 3 { return EvalResult::Error(CellError::Value); }
+        let number = match self.evaluate(&args[0]).as_number() { Some(n) => n, None => return EvalResult::Error(CellError::Value) };
+        let numbers = match self.collect_numbers(&args[1..2]) { Ok(n) => n, Err(e) => return EvalResult::Error(e) };
+        let order = if args.len() == 3 { match self.evaluate(&args[2]).as_number() { Some(n) => n as i32, None => 0 } } else { 0 };
+        if !numbers.iter().any(|&n| (n - number).abs() < 1e-10) {
+            return EvalResult::Error(CellError::NA);
+        }
+        let tie_count = numbers.iter().filter(|&&n| (n - number).abs() < 1e-10).count();
+        let rank = if order == 0 {
+            numbers.iter().filter(|&&n| n > number).count() + 1
+        } else {
+            numbers.iter().filter(|&&n| n < number).count() + 1
+        };
+        // Average rank for ties
+        let avg_rank = rank as f64 + (tie_count as f64 - 1.0) / 2.0;
+        EvalResult::Number(avg_rank)
+    }
+
+    fn fn_percentrank(&self, args: &[Expression]) -> EvalResult {
+        if args.len() < 2 || args.len() > 3 { return EvalResult::Error(CellError::Value); }
+        let mut numbers = match self.collect_numbers(&args[0..1]) { Ok(n) => n, Err(e) => return EvalResult::Error(e) };
+        let x = match self.evaluate(&args[1]).as_number() { Some(n) => n, None => return EvalResult::Error(CellError::Value) };
+        let significance = if args.len() == 3 { self.evaluate(&args[2]).as_number().unwrap_or(3.0) as usize } else { 3 };
+        if numbers.is_empty() { return EvalResult::Error(CellError::Value); }
+        numbers.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        if x < numbers[0] || x > numbers[numbers.len() - 1] { return EvalResult::Error(CellError::NA); }
+        let n = numbers.len();
+        // Find position by interpolation
+        let below = numbers.iter().filter(|&&v| v < x).count();
+        let equal = numbers.iter().filter(|&&v| (v - x).abs() < 1e-10).count();
+        let rank = if equal > 0 {
+            below as f64 / (n - 1) as f64
+        } else {
+            // Interpolate between the two nearest values
+            let lower_idx = below - 1;
+            let lower = numbers[lower_idx];
+            let upper = numbers[lower_idx + 1];
+            let frac = (x - lower) / (upper - lower);
+            (lower_idx as f64 + frac) / (n - 1) as f64
+        };
+        let factor = 10f64.powi(significance as i32);
+        EvalResult::Number((rank * factor).trunc() / factor)
+    }
+
+    fn fn_trend(&self, args: &[Expression]) -> EvalResult {
+        // TREND(known_y's, [known_x's], [new_x's], [const])
+        if args.is_empty() || args.len() > 4 { return EvalResult::Error(CellError::Value); }
+        let known_ys = match self.collect_numbers(&args[0..1]) { Ok(n) => n, Err(e) => return EvalResult::Error(e) };
+        let known_xs = if args.len() >= 2 {
+            match self.collect_numbers(&args[1..2]) { Ok(n) => n, Err(e) => return EvalResult::Error(e) }
+        } else {
+            (1..=known_ys.len()).map(|i| i as f64).collect()
+        };
+        let new_xs = if args.len() >= 3 {
+            match self.collect_numbers(&args[2..3]) { Ok(n) => n, Err(e) => return EvalResult::Error(e) }
+        } else {
+            known_xs.clone()
+        };
+        if known_ys.len() != known_xs.len() || known_ys.is_empty() { return EvalResult::Error(CellError::Value); }
+        let n = known_ys.len() as f64;
+        let sum_x: f64 = known_xs.iter().sum();
+        let sum_y: f64 = known_ys.iter().sum();
+        let sum_xy: f64 = known_xs.iter().zip(known_ys.iter()).map(|(x, y)| x * y).sum();
+        let sum_x2: f64 = known_xs.iter().map(|x| x * x).sum();
+        let denom = n * sum_x2 - sum_x * sum_x;
+        if denom.abs() < 1e-10 { return EvalResult::Error(CellError::Div0); }
+        let slope = (n * sum_xy - sum_x * sum_y) / denom;
+        let intercept = (sum_y - slope * sum_x) / n;
+        let results: Vec<EvalResult> = new_xs.iter().map(|x| EvalResult::Number(slope * x + intercept)).collect();
+        if results.len() == 1 { results.into_iter().next().unwrap() } else { EvalResult::Array(results) }
+    }
+
+    fn fn_growth(&self, args: &[Expression]) -> EvalResult {
+        // GROWTH(known_y's, [known_x's], [new_x's], [const])
+        if args.is_empty() || args.len() > 4 { return EvalResult::Error(CellError::Value); }
+        let known_ys = match self.collect_numbers(&args[0..1]) { Ok(n) => n, Err(e) => return EvalResult::Error(e) };
+        let known_xs = if args.len() >= 2 {
+            match self.collect_numbers(&args[1..2]) { Ok(n) => n, Err(e) => return EvalResult::Error(e) }
+        } else {
+            (1..=known_ys.len()).map(|i| i as f64).collect()
+        };
+        let new_xs = if args.len() >= 3 {
+            match self.collect_numbers(&args[2..3]) { Ok(n) => n, Err(e) => return EvalResult::Error(e) }
+        } else {
+            known_xs.clone()
+        };
+        if known_ys.len() != known_xs.len() || known_ys.is_empty() { return EvalResult::Error(CellError::Value); }
+        // Take ln of y values for linear regression
+        let ln_ys: Vec<f64> = known_ys.iter().map(|&y| if y > 0.0 { y.ln() } else { return f64::NAN }).collect();
+        if ln_ys.iter().any(|y| y.is_nan()) { return EvalResult::Error(CellError::Value); }
+        let n = ln_ys.len() as f64;
+        let sum_x: f64 = known_xs.iter().sum();
+        let sum_y: f64 = ln_ys.iter().sum();
+        let sum_xy: f64 = known_xs.iter().zip(ln_ys.iter()).map(|(x, y)| x * y).sum();
+        let sum_x2: f64 = known_xs.iter().map(|x| x * x).sum();
+        let denom = n * sum_x2 - sum_x * sum_x;
+        if denom.abs() < 1e-10 { return EvalResult::Error(CellError::Div0); }
+        let slope = (n * sum_xy - sum_x * sum_y) / denom;
+        let intercept = (sum_y - slope * sum_x) / n;
+        let results: Vec<EvalResult> = new_xs.iter().map(|x| EvalResult::Number((slope * x + intercept).exp())).collect();
+        if results.len() == 1 { results.into_iter().next().unwrap() } else { EvalResult::Array(results) }
+    }
+
+    fn fn_linest(&self, args: &[Expression]) -> EvalResult {
+        // LINEST(known_y's, [known_x's], [const], [stats])
+        if args.is_empty() || args.len() > 4 { return EvalResult::Error(CellError::Value); }
+        let known_ys = match self.collect_numbers(&args[0..1]) { Ok(n) => n, Err(e) => return EvalResult::Error(e) };
+        let known_xs = if args.len() >= 2 {
+            match self.collect_numbers(&args[1..2]) { Ok(n) => n, Err(e) => return EvalResult::Error(e) }
+        } else {
+            (1..=known_ys.len()).map(|i| i as f64).collect()
+        };
+        if known_ys.len() != known_xs.len() || known_ys.is_empty() { return EvalResult::Error(CellError::Value); }
+        let n = known_ys.len() as f64;
+        let sum_x: f64 = known_xs.iter().sum();
+        let sum_y: f64 = known_ys.iter().sum();
+        let sum_xy: f64 = known_xs.iter().zip(known_ys.iter()).map(|(x, y)| x * y).sum();
+        let sum_x2: f64 = known_xs.iter().map(|x| x * x).sum();
+        let denom = n * sum_x2 - sum_x * sum_x;
+        if denom.abs() < 1e-10 { return EvalResult::Error(CellError::Div0); }
+        let slope = (n * sum_xy - sum_x * sum_y) / denom;
+        let intercept = (sum_y - slope * sum_x) / n;
+        // Return [slope, intercept] as array (simplified - full LINEST returns more stats)
+        let stats = if args.len() >= 4 { { let _v = self.evaluate(&args[3]); matches!(_v, EvalResult::Boolean(true)) || matches!(_v, EvalResult::Number(n) if n != 0.0) } } else { false };
+        if stats {
+            let mean_y = sum_y / n;
+            let ss_tot: f64 = known_ys.iter().map(|y| (y - mean_y).powi(2)).sum();
+            let ss_res: f64 = known_xs.iter().zip(known_ys.iter()).map(|(x, y)| (y - (slope * x + intercept)).powi(2)).sum();
+            let r_squared = if ss_tot > 0.0 { 1.0 - ss_res / ss_tot } else { 0.0 };
+            let df = (n - 2.0).max(1.0);
+            let se_y = (ss_res / df).sqrt();
+            let se_slope = se_y / (sum_x2 - sum_x * sum_x / n).sqrt();
+            let se_intercept = se_y * (sum_x2 / (n * (sum_x2 - sum_x * sum_x / n))).sqrt();
+            // Return 5-row array: [slope, intercept], [se_slope, se_intercept], [r2, se_y], [F, df], [ss_reg, ss_res]
+            let ss_reg = ss_tot - ss_res;
+            let f_stat = if ss_res > 0.0 { (ss_reg / 1.0) / (ss_res / df) } else { f64::INFINITY };
+            EvalResult::Array(vec![
+                EvalResult::Array(vec![EvalResult::Number(slope), EvalResult::Number(intercept)]),
+                EvalResult::Array(vec![EvalResult::Number(se_slope), EvalResult::Number(se_intercept)]),
+                EvalResult::Array(vec![EvalResult::Number(r_squared), EvalResult::Number(se_y)]),
+                EvalResult::Array(vec![EvalResult::Number(f_stat), EvalResult::Number(df)]),
+                EvalResult::Array(vec![EvalResult::Number(ss_reg), EvalResult::Number(ss_res)]),
+            ])
+        } else {
+            EvalResult::Array(vec![EvalResult::Number(slope), EvalResult::Number(intercept)])
+        }
+    }
+
+    fn fn_logest(&self, args: &[Expression]) -> EvalResult {
+        // LOGEST(known_y's, [known_x's], [const], [stats])
+        if args.is_empty() || args.len() > 4 { return EvalResult::Error(CellError::Value); }
+        let known_ys = match self.collect_numbers(&args[0..1]) { Ok(n) => n, Err(e) => return EvalResult::Error(e) };
+        let known_xs = if args.len() >= 2 {
+            match self.collect_numbers(&args[1..2]) { Ok(n) => n, Err(e) => return EvalResult::Error(e) }
+        } else {
+            (1..=known_ys.len()).map(|i| i as f64).collect()
+        };
+        if known_ys.len() != known_xs.len() || known_ys.is_empty() { return EvalResult::Error(CellError::Value); }
+        // Take ln of y values
+        let ln_ys: Vec<f64> = known_ys.iter().map(|&y| if y > 0.0 { y.ln() } else { return f64::NAN }).collect();
+        if ln_ys.iter().any(|y| y.is_nan()) { return EvalResult::Error(CellError::Value); }
+        let n = ln_ys.len() as f64;
+        let sum_x: f64 = known_xs.iter().sum();
+        let sum_y: f64 = ln_ys.iter().sum();
+        let sum_xy: f64 = known_xs.iter().zip(ln_ys.iter()).map(|(x, y)| x * y).sum();
+        let sum_x2: f64 = known_xs.iter().map(|x| x * x).sum();
+        let denom = n * sum_x2 - sum_x * sum_x;
+        if denom.abs() < 1e-10 { return EvalResult::Error(CellError::Div0); }
+        let slope = (n * sum_xy - sum_x * sum_y) / denom;
+        let intercept = (sum_y - slope * sum_x) / n;
+        // Return [base, coefficient] where y = coefficient * base^x
+        EvalResult::Array(vec![EvalResult::Number(slope.exp()), EvalResult::Number(intercept.exp())])
+    }
+
+    // ==================== Probability Distribution Functions ====================
+
+    fn fn_norm_dist(&self, args: &[Expression]) -> EvalResult {
+        // NORM.DIST(x, mean, standard_dev, cumulative)
+        if args.len() != 4 { return EvalResult::Error(CellError::Value); }
+        let x = match self.evaluate(&args[0]).as_number() { Some(n) => n, None => return EvalResult::Error(CellError::Value) };
+        let mean = match self.evaluate(&args[1]).as_number() { Some(n) => n, None => return EvalResult::Error(CellError::Value) };
+        let std_dev = match self.evaluate(&args[2]).as_number() { Some(n) if n > 0.0 => n, _ => return EvalResult::Error(CellError::Value) };
+        let cumulative = { let _v = self.evaluate(&args[3]); matches!(_v, EvalResult::Boolean(true)) || matches!(_v, EvalResult::Number(n) if n != 0.0) };
+        let z = (x - mean) / std_dev;
+        if cumulative {
+            EvalResult::Number(norm_cdf(z))
+        } else {
+            // PDF
+            let pdf = (-0.5 * z * z).exp() / (std_dev * (2.0 * std::f64::consts::PI).sqrt());
+            EvalResult::Number(pdf)
+        }
+    }
+
+    fn fn_t_dist(&self, args: &[Expression]) -> EvalResult {
+        // T.DIST(x, deg_freedom, cumulative)
+        if args.len() != 3 { return EvalResult::Error(CellError::Value); }
+        let x = match self.evaluate(&args[0]).as_number() { Some(n) => n, None => return EvalResult::Error(CellError::Value) };
+        let df = match self.evaluate(&args[1]).as_number() { Some(n) if n >= 1.0 => n, _ => return EvalResult::Error(CellError::Value) };
+        let cumulative = { let _v = self.evaluate(&args[2]); matches!(_v, EvalResult::Boolean(true)) || matches!(_v, EvalResult::Number(n) if n != 0.0) };
+        if cumulative {
+            // Use approximation via normal distribution for large df
+            EvalResult::Number(t_cdf(x, df))
+        } else {
+            // PDF of t-distribution
+            let coeff = gamma_ln((df + 1.0) / 2.0) - gamma_ln(df / 2.0) - 0.5 * (df * std::f64::consts::PI).ln();
+            let pdf = (coeff - ((df + 1.0) / 2.0) * (1.0 + x * x / df).ln()).exp();
+            EvalResult::Number(pdf)
+        }
+    }
+
+    fn fn_chisq_dist(&self, args: &[Expression]) -> EvalResult {
+        // CHISQ.DIST(x, deg_freedom, cumulative)
+        if args.len() != 3 { return EvalResult::Error(CellError::Value); }
+        let x = match self.evaluate(&args[0]).as_number() { Some(n) if n >= 0.0 => n, Some(_) => return EvalResult::Error(CellError::Value), None => return EvalResult::Error(CellError::Value) };
+        let df = match self.evaluate(&args[1]).as_number() { Some(n) if n >= 1.0 => n.floor(), _ => return EvalResult::Error(CellError::Value) };
+        let cumulative = { let _v = self.evaluate(&args[2]); matches!(_v, EvalResult::Boolean(true)) || matches!(_v, EvalResult::Number(n) if n != 0.0) };
+        let k = df / 2.0;
+        if cumulative {
+            EvalResult::Number(lower_gamma_regularized(k, x / 2.0))
+        } else {
+            // PDF: (x^(k-1) * e^(-x/2)) / (2^k * Gamma(k))
+            if x == 0.0 && k < 1.0 { return EvalResult::Error(CellError::Value); }
+            let ln_pdf = (k - 1.0) * x.ln() - x / 2.0 - k * 2.0_f64.ln() - gamma_ln(k);
+            EvalResult::Number(ln_pdf.exp())
+        }
+    }
+
+    fn fn_f_dist(&self, args: &[Expression]) -> EvalResult {
+        // F.DIST(x, deg_freedom1, deg_freedom2, cumulative)
+        if args.len() != 4 { return EvalResult::Error(CellError::Value); }
+        let x = match self.evaluate(&args[0]).as_number() { Some(n) if n >= 0.0 => n, Some(_) => return EvalResult::Error(CellError::Value), None => return EvalResult::Error(CellError::Value) };
+        let d1 = match self.evaluate(&args[1]).as_number() { Some(n) if n >= 1.0 => n.floor(), _ => return EvalResult::Error(CellError::Value) };
+        let d2 = match self.evaluate(&args[2]).as_number() { Some(n) if n >= 1.0 => n.floor(), _ => return EvalResult::Error(CellError::Value) };
+        let cumulative = { let _v = self.evaluate(&args[3]); matches!(_v, EvalResult::Boolean(true)) || matches!(_v, EvalResult::Number(n) if n != 0.0) };
+        if cumulative {
+            // CDF using regularized incomplete beta function
+            let z = d1 * x / (d1 * x + d2);
+            EvalResult::Number(regularized_beta(d1 / 2.0, d2 / 2.0, z))
+        } else {
+            // PDF
+            let ln_pdf = (d1 / 2.0) * d1.ln() + (d2 / 2.0) * d2.ln()
+                + (d1 / 2.0 - 1.0) * x.ln()
+                - ((d1 + d2) / 2.0) * (d1 * x + d2).ln()
+                - beta_ln(d1 / 2.0, d2 / 2.0);
+            EvalResult::Number(ln_pdf.exp())
+        }
+    }
+
+    fn fn_binom_dist(&self, args: &[Expression]) -> EvalResult {
+        // BINOM.DIST(number_s, trials, probability_s, cumulative)
+        if args.len() != 4 { return EvalResult::Error(CellError::Value); }
+        let s = match self.evaluate(&args[0]).as_number() { Some(n) if n >= 0.0 => n.floor() as u64, _ => return EvalResult::Error(CellError::Value) };
+        let n = match self.evaluate(&args[1]).as_number() { Some(n) if n >= 0.0 => n.floor() as u64, _ => return EvalResult::Error(CellError::Value) };
+        let p = match self.evaluate(&args[2]).as_number() { Some(n) if (0.0..=1.0).contains(&n) => n, _ => return EvalResult::Error(CellError::Value) };
+        let cumulative = { let _v = self.evaluate(&args[3]); matches!(_v, EvalResult::Boolean(true)) || matches!(_v, EvalResult::Number(n) if n != 0.0) };
+        if s > n { return EvalResult::Error(CellError::Value); }
+        if cumulative {
+            let mut sum = 0.0;
+            for k in 0..=s {
+                sum += binom_pmf(k, n, p);
+            }
+            EvalResult::Number(sum)
+        } else {
+            EvalResult::Number(binom_pmf(s, n, p))
+        }
+    }
+
+    fn fn_poisson_dist(&self, args: &[Expression]) -> EvalResult {
+        // POISSON.DIST(x, mean, cumulative)
+        if args.len() != 3 { return EvalResult::Error(CellError::Value); }
+        let x = match self.evaluate(&args[0]).as_number() { Some(n) if n >= 0.0 => n.floor() as u64, _ => return EvalResult::Error(CellError::Value) };
+        let mean = match self.evaluate(&args[1]).as_number() { Some(n) if n >= 0.0 => n, _ => return EvalResult::Error(CellError::Value) };
+        let cumulative = { let _v = self.evaluate(&args[2]); matches!(_v, EvalResult::Boolean(true)) || matches!(_v, EvalResult::Number(n) if n != 0.0) };
+        if cumulative {
+            let mut sum = 0.0;
+            for k in 0..=x {
+                sum += poisson_pmf(k, mean);
+            }
+            EvalResult::Number(sum)
+        } else {
+            EvalResult::Number(poisson_pmf(x, mean))
+        }
+    }
+
+    fn fn_confidence_norm(&self, args: &[Expression]) -> EvalResult {
+        // CONFIDENCE.NORM(alpha, standard_dev, size)
+        if args.len() != 3 { return EvalResult::Error(CellError::Value); }
+        let alpha = match self.evaluate(&args[0]).as_number() { Some(n) if n > 0.0 && n < 1.0 => n, _ => return EvalResult::Error(CellError::Value) };
+        let std_dev = match self.evaluate(&args[1]).as_number() { Some(n) if n > 0.0 => n, _ => return EvalResult::Error(CellError::Value) };
+        let size = match self.evaluate(&args[2]).as_number() { Some(n) if n >= 1.0 => n.floor(), _ => return EvalResult::Error(CellError::Value) };
+        let z = norm_inv(1.0 - alpha / 2.0);
+        EvalResult::Number(z * std_dev / size.sqrt())
+    }
+
+    fn fn_confidence_t(&self, args: &[Expression]) -> EvalResult {
+        // CONFIDENCE.T(alpha, standard_dev, size)
+        if args.len() != 3 { return EvalResult::Error(CellError::Value); }
+        let alpha = match self.evaluate(&args[0]).as_number() { Some(n) if n > 0.0 && n < 1.0 => n, _ => return EvalResult::Error(CellError::Value) };
+        let std_dev = match self.evaluate(&args[1]).as_number() { Some(n) if n > 0.0 => n, _ => return EvalResult::Error(CellError::Value) };
+        let size = match self.evaluate(&args[2]).as_number() { Some(n) if n >= 2.0 => n.floor(), _ => return EvalResult::Error(CellError::Value) };
+        let df = size - 1.0;
+        let t = t_inv(1.0 - alpha / 2.0, df);
+        EvalResult::Number(t * std_dev / size.sqrt())
+    }
+
+    // ==================== Additional Financial Functions ====================
+
+    fn fn_ipmt(&self, args: &[Expression]) -> EvalResult {
+        // IPMT(rate, per, nper, pv, [fv], [type])
+        if args.len() < 4 || args.len() > 6 { return EvalResult::Error(CellError::Value); }
+        let rate = match self.evaluate(&args[0]).as_number() { Some(n) => n, None => return EvalResult::Error(CellError::Value) };
+        let per = match self.evaluate(&args[1]).as_number() { Some(n) if n >= 1.0 => n, _ => return EvalResult::Error(CellError::Value) };
+        let nper = match self.evaluate(&args[2]).as_number() { Some(n) if n > 0.0 => n, _ => return EvalResult::Error(CellError::Value) };
+        let pv = match self.evaluate(&args[3]).as_number() { Some(n) => n, None => return EvalResult::Error(CellError::Value) };
+        let fv = if args.len() >= 5 { self.evaluate(&args[4]).as_number().unwrap_or(0.0) } else { 0.0 };
+        let pmt_type = if args.len() == 6 { self.evaluate(&args[5]).as_number().unwrap_or(0.0) as i32 } else { 0 };
+        if per > nper { return EvalResult::Error(CellError::Value); }
+        let pmt = calc_pmt(rate, nper, pv, fv, pmt_type);
+        let ipmt = if rate.abs() < 1e-10 {
+            0.0
+        } else if per == 1.0 {
+            if pmt_type == 1 { 0.0 } else { -pv * rate }
+        } else {
+            let fv_at_per = if pmt_type == 1 {
+                pv * (1.0 + rate).powf(per - 1.0) + pmt * (1.0 + rate) * ((1.0 + rate).powf(per - 1.0) - 1.0) / rate
+            } else {
+                pv * (1.0 + rate).powf(per - 1.0) + pmt * ((1.0 + rate).powf(per - 1.0) - 1.0) / rate
+            };
+            if pmt_type == 1 { -fv_at_per * rate / (1.0 + rate) } else { -fv_at_per * rate }
+        };
+        EvalResult::Number(ipmt)
+    }
+
+    fn fn_ppmt(&self, args: &[Expression]) -> EvalResult {
+        // PPMT(rate, per, nper, pv, [fv], [type])
+        if args.len() < 4 || args.len() > 6 { return EvalResult::Error(CellError::Value); }
+        let rate = match self.evaluate(&args[0]).as_number() { Some(n) => n, None => return EvalResult::Error(CellError::Value) };
+        let per = match self.evaluate(&args[1]).as_number() { Some(n) if n >= 1.0 => n, _ => return EvalResult::Error(CellError::Value) };
+        let nper = match self.evaluate(&args[2]).as_number() { Some(n) if n > 0.0 => n, _ => return EvalResult::Error(CellError::Value) };
+        let pv = match self.evaluate(&args[3]).as_number() { Some(n) => n, None => return EvalResult::Error(CellError::Value) };
+        let fv = if args.len() >= 5 { self.evaluate(&args[4]).as_number().unwrap_or(0.0) } else { 0.0 };
+        let pmt_type = if args.len() == 6 { self.evaluate(&args[5]).as_number().unwrap_or(0.0) as i32 } else { 0 };
+        if per > nper { return EvalResult::Error(CellError::Value); }
+        let pmt = calc_pmt(rate, nper, pv, fv, pmt_type);
+        // PPMT = PMT - IPMT
+        let ipmt_args = args.to_vec();
+        let ipmt_result = self.fn_ipmt(&ipmt_args);
+        match ipmt_result.as_number() {
+            Some(ipmt) => EvalResult::Number(pmt - ipmt),
+            None => EvalResult::Error(CellError::Value),
+        }
+    }
+
+    fn fn_fvschedule(&self, args: &[Expression]) -> EvalResult {
+        // FVSCHEDULE(principal, schedule)
+        if args.len() != 2 { return EvalResult::Error(CellError::Value); }
+        let mut principal = match self.evaluate(&args[0]).as_number() { Some(n) => n, None => return EvalResult::Error(CellError::Value) };
+        let rates = self.eval_flat(&args[1]);
+        for r in &rates {
+            match r.as_number() {
+                Some(rate) => principal *= 1.0 + rate,
+                None => return EvalResult::Error(CellError::Value),
+            }
+        }
+        EvalResult::Number(principal)
+    }
+
+    fn fn_xnpv(&self, args: &[Expression]) -> EvalResult {
+        // XNPV(rate, values, dates)
+        if args.len() != 3 { return EvalResult::Error(CellError::Value); }
+        let rate = match self.evaluate(&args[0]).as_number() { Some(n) => n, None => return EvalResult::Error(CellError::Value) };
+        let values = self.eval_flat(&args[1]);
+        let dates = self.eval_flat(&args[2]);
+        if values.len() != dates.len() || values.is_empty() { return EvalResult::Error(CellError::Value); }
+        let d0 = match dates[0].as_number() { Some(n) => n, None => return EvalResult::Error(CellError::Value) };
+        let mut npv = 0.0;
+        for (v, d) in values.iter().zip(dates.iter()) {
+            let val = match v.as_number() { Some(n) => n, None => return EvalResult::Error(CellError::Value) };
+            let date = match d.as_number() { Some(n) => n, None => return EvalResult::Error(CellError::Value) };
+            let years = (date - d0) / 365.0;
+            npv += val / (1.0 + rate).powf(years);
+        }
+        EvalResult::Number(npv)
+    }
+
+    fn fn_xirr(&self, args: &[Expression]) -> EvalResult {
+        // XIRR(values, dates, [guess])
+        if args.len() < 2 || args.len() > 3 { return EvalResult::Error(CellError::Value); }
+        let values: Vec<f64> = self.eval_flat(&args[0]).iter().filter_map(|v| v.as_number()).collect();
+        let dates: Vec<f64> = self.eval_flat(&args[1]).iter().filter_map(|v| v.as_number()).collect();
+        if values.len() != dates.len() || values.is_empty() { return EvalResult::Error(CellError::Value); }
+        let mut rate = if args.len() == 3 { self.evaluate(&args[2]).as_number().unwrap_or(0.1) } else { 0.1 };
+        let d0 = dates[0];
+        // Newton's method
+        for _ in 0..200 {
+            let mut f = 0.0;
+            let mut df = 0.0;
+            for i in 0..values.len() {
+                let years = (dates[i] - d0) / 365.0;
+                let denom = (1.0 + rate).powf(years);
+                if denom.abs() < 1e-15 { continue; }
+                f += values[i] / denom;
+                df -= years * values[i] / ((1.0 + rate) * denom);
+            }
+            if df.abs() < 1e-15 { return EvalResult::Error(CellError::Value); }
+            let new_rate = rate - f / df;
+            if (new_rate - rate).abs() < 1e-10 { return EvalResult::Number(new_rate); }
+            rate = new_rate;
+        }
+        EvalResult::Error(CellError::Value)
+    }
+
+    fn fn_mirr(&self, args: &[Expression]) -> EvalResult {
+        // MIRR(values, finance_rate, reinvest_rate)
+        if args.len() != 3 { return EvalResult::Error(CellError::Value); }
+        let values: Vec<f64> = self.eval_flat(&args[0]).iter().filter_map(|v| v.as_number()).collect();
+        let finance_rate = match self.evaluate(&args[1]).as_number() { Some(n) => n, None => return EvalResult::Error(CellError::Value) };
+        let reinvest_rate = match self.evaluate(&args[2]).as_number() { Some(n) => n, None => return EvalResult::Error(CellError::Value) };
+        if values.is_empty() { return EvalResult::Error(CellError::Value); }
+        let n = values.len() as f64;
+        let mut pv_negative = 0.0;
+        let mut fv_positive = 0.0;
+        for (i, &v) in values.iter().enumerate() {
+            if v < 0.0 {
+                pv_negative += v / (1.0 + finance_rate).powi(i as i32);
+            } else {
+                fv_positive += v * (1.0 + reinvest_rate).powi((values.len() - 1 - i) as i32);
+            }
+        }
+        if pv_negative.abs() < 1e-10 { return EvalResult::Error(CellError::Div0); }
+        let mirr = (-fv_positive / pv_negative).powf(1.0 / (n - 1.0)) - 1.0;
+        EvalResult::Number(mirr)
+    }
+
+    fn fn_syd(&self, args: &[Expression]) -> EvalResult {
+        // SYD(cost, salvage, life, per)
+        if args.len() != 4 { return EvalResult::Error(CellError::Value); }
+        let cost = match self.evaluate(&args[0]).as_number() { Some(n) => n, None => return EvalResult::Error(CellError::Value) };
+        let salvage = match self.evaluate(&args[1]).as_number() { Some(n) => n, None => return EvalResult::Error(CellError::Value) };
+        let life = match self.evaluate(&args[2]).as_number() { Some(n) if n > 0.0 => n, _ => return EvalResult::Error(CellError::Value) };
+        let per = match self.evaluate(&args[3]).as_number() { Some(n) if n >= 1.0 => n, _ => return EvalResult::Error(CellError::Value) };
+        if per > life { return EvalResult::Error(CellError::Value); }
+        let syd = (cost - salvage) * (life - per + 1.0) * 2.0 / (life * (life + 1.0));
+        EvalResult::Number(syd)
+    }
+
+    fn fn_vdb(&self, args: &[Expression]) -> EvalResult {
+        // VDB(cost, salvage, life, start_period, end_period, [factor], [no_switch])
+        if args.len() < 5 || args.len() > 7 { return EvalResult::Error(CellError::Value); }
+        let cost = match self.evaluate(&args[0]).as_number() { Some(n) => n, None => return EvalResult::Error(CellError::Value) };
+        let salvage = match self.evaluate(&args[1]).as_number() { Some(n) => n, None => return EvalResult::Error(CellError::Value) };
+        let life = match self.evaluate(&args[2]).as_number() { Some(n) if n > 0.0 => n, _ => return EvalResult::Error(CellError::Value) };
+        let start_per = match self.evaluate(&args[3]).as_number() { Some(n) if n >= 0.0 => n, _ => return EvalResult::Error(CellError::Value) };
+        let end_per = match self.evaluate(&args[4]).as_number() { Some(n) if n >= start_per => n, _ => return EvalResult::Error(CellError::Value) };
+        let factor = if args.len() >= 6 { self.evaluate(&args[5]).as_number().unwrap_or(2.0) } else { 2.0 };
+        let no_switch = if args.len() == 7 { { let _v = self.evaluate(&args[6]); matches!(_v, EvalResult::Boolean(true)) || matches!(_v, EvalResult::Number(n) if n != 0.0) } } else { false };
+        let mut total_dep = 0.0;
+        let mut current_value = cost;
+        let periods = end_per.ceil() as i32;
+        for p in 1..=periods {
+            let pf = p as f64;
+            let ddb_dep = (current_value * factor / life).min(current_value - salvage).max(0.0);
+            let sln_dep = if life > pf - 1.0 { (current_value - salvage) / (life - pf + 1.0) } else { 0.0 };
+            let dep = if no_switch { ddb_dep } else { ddb_dep.max(sln_dep) };
+            if pf > start_per && pf <= end_per {
+                total_dep += dep;
+            } else if pf > start_per && pf - 1.0 < end_per {
+                // Partial period
+                total_dep += dep * (end_per - pf + 1.0);
+            }
+            current_value -= dep;
+        }
+        EvalResult::Number(total_dep)
+    }
+
+    fn fn_cumipmt(&self, args: &[Expression]) -> EvalResult {
+        // CUMIPMT(rate, nper, pv, start_period, end_period, type)
+        if args.len() != 6 { return EvalResult::Error(CellError::Value); }
+        let rate = match self.evaluate(&args[0]).as_number() { Some(n) if n > 0.0 => n, _ => return EvalResult::Error(CellError::Value) };
+        let nper = match self.evaluate(&args[1]).as_number() { Some(n) if n > 0.0 => n, _ => return EvalResult::Error(CellError::Value) };
+        let pv = match self.evaluate(&args[2]).as_number() { Some(n) if n > 0.0 => n, _ => return EvalResult::Error(CellError::Value) };
+        let start_per = match self.evaluate(&args[3]).as_number() { Some(n) if n >= 1.0 => n as i32, _ => return EvalResult::Error(CellError::Value) };
+        let end_per = match self.evaluate(&args[4]).as_number() { Some(n) if n >= 1.0 => n as i32, _ => return EvalResult::Error(CellError::Value) };
+        let pmt_type = match self.evaluate(&args[5]).as_number() { Some(n) => n as i32, None => return EvalResult::Error(CellError::Value) };
+        if start_per > end_per { return EvalResult::Error(CellError::Value); }
+        let pmt = calc_pmt(rate, nper, pv, 0.0, pmt_type);
+        let mut cum_interest = 0.0;
+        let mut balance = pv;
+        for p in 1..=end_per {
+            let interest = if pmt_type == 1 && p == 1 { 0.0 } else { balance * rate };
+            let principal = pmt + interest; // pmt is negative
+            if p >= start_per { cum_interest += interest; }
+            balance += principal; // balance decreases
+        }
+        EvalResult::Number(-cum_interest)
+    }
+
+    fn fn_cumprinc(&self, args: &[Expression]) -> EvalResult {
+        // CUMPRINC(rate, nper, pv, start_period, end_period, type)
+        if args.len() != 6 { return EvalResult::Error(CellError::Value); }
+        let rate = match self.evaluate(&args[0]).as_number() { Some(n) if n > 0.0 => n, _ => return EvalResult::Error(CellError::Value) };
+        let nper = match self.evaluate(&args[1]).as_number() { Some(n) if n > 0.0 => n, _ => return EvalResult::Error(CellError::Value) };
+        let pv = match self.evaluate(&args[2]).as_number() { Some(n) if n > 0.0 => n, _ => return EvalResult::Error(CellError::Value) };
+        let start_per = match self.evaluate(&args[3]).as_number() { Some(n) if n >= 1.0 => n as i32, _ => return EvalResult::Error(CellError::Value) };
+        let end_per = match self.evaluate(&args[4]).as_number() { Some(n) if n >= 1.0 => n as i32, _ => return EvalResult::Error(CellError::Value) };
+        let pmt_type = match self.evaluate(&args[5]).as_number() { Some(n) => n as i32, None => return EvalResult::Error(CellError::Value) };
+        if start_per > end_per { return EvalResult::Error(CellError::Value); }
+        let pmt = calc_pmt(rate, nper, pv, 0.0, pmt_type);
+        let mut cum_principal = 0.0;
+        let mut balance = pv;
+        for p in 1..=end_per {
+            let interest = if pmt_type == 1 && p == 1 { 0.0 } else { balance * rate };
+            let principal = pmt + interest;
+            if p >= start_per { cum_principal += principal; }
+            balance += principal;
+        }
+        EvalResult::Number(cum_principal)
+    }
+
+    fn fn_effect(&self, args: &[Expression]) -> EvalResult {
+        // EFFECT(nominal_rate, npery)
+        if args.len() != 2 { return EvalResult::Error(CellError::Value); }
+        let nominal = match self.evaluate(&args[0]).as_number() { Some(n) if n > 0.0 => n, _ => return EvalResult::Error(CellError::Value) };
+        let npery = match self.evaluate(&args[1]).as_number() { Some(n) if n >= 1.0 => n.floor(), _ => return EvalResult::Error(CellError::Value) };
+        EvalResult::Number((1.0 + nominal / npery).powf(npery) - 1.0)
+    }
+
+    fn fn_nominal(&self, args: &[Expression]) -> EvalResult {
+        // NOMINAL(effect_rate, npery)
+        if args.len() != 2 { return EvalResult::Error(CellError::Value); }
+        let effect = match self.evaluate(&args[0]).as_number() { Some(n) if n > 0.0 => n, _ => return EvalResult::Error(CellError::Value) };
+        let npery = match self.evaluate(&args[1]).as_number() { Some(n) if n >= 1.0 => n.floor(), _ => return EvalResult::Error(CellError::Value) };
+        EvalResult::Number(npery * ((1.0 + effect).powf(1.0 / npery) - 1.0))
+    }
+
+    // ==================== Modern Lookup Functions ====================
+
+    fn fn_xmatch(&self, args: &[Expression]) -> EvalResult {
+        // XMATCH(lookup_value, lookup_array, [match_mode], [search_mode])
+        if args.len() < 2 || args.len() > 4 { return EvalResult::Error(CellError::Value); }
+        let lookup_val = self.evaluate(&args[0]);
+        let lookup_array = self.eval_flat(&args[1]);
+        let match_mode = if args.len() >= 3 { self.evaluate(&args[2]).as_number().unwrap_or(0.0) as i32 } else { 0 };
+        let search_mode = if args.len() >= 4 { self.evaluate(&args[3]).as_number().unwrap_or(1.0) as i32 } else { 1 };
+        let lookup_text = lookup_val.as_text();
+        let lookup_num = lookup_val.as_number();
+        let indices: Vec<usize> = match search_mode {
+            1 => (0..lookup_array.len()).collect(),
+            -1 => (0..lookup_array.len()).rev().collect(),
+            2 => (0..lookup_array.len()).collect(), // binary search ascending (simplified to linear)
+            -2 => (0..lookup_array.len()).rev().collect(), // binary search descending
+            _ => (0..lookup_array.len()).collect(),
+        };
+        match match_mode {
+            0 => {
+                // Exact match
+                for &i in &indices {
+                    let val = &lookup_array[i];
+                    if let (Some(a), Some(b)) = (lookup_num, val.as_number()) {
+                        if (a - b).abs() < 1e-10 { return EvalResult::Number((i + 1) as f64); }
+                    } else if lookup_text == val.as_text() {
+                        return EvalResult::Number((i + 1) as f64);
+                    }
+                }
+                EvalResult::Error(CellError::NA)
+            }
+            -1 => {
+                // Exact or next smaller
+                let mut best: Option<(usize, f64)> = None;
+                if let Some(lv) = lookup_num {
+                    for &i in &indices {
+                        if let Some(v) = lookup_array[i].as_number() {
+                            if v <= lv {
+                                match best {
+                                    Some((_, bv)) if v > bv => best = Some((i, v)),
+                                    None => best = Some((i, v)),
+                                    _ => {}
+                                }
+                            }
+                        }
+                    }
+                }
+                match best {
+                    Some((i, _)) => EvalResult::Number((i + 1) as f64),
+                    None => EvalResult::Error(CellError::NA),
+                }
+            }
+            1 => {
+                // Exact or next larger
+                let mut best: Option<(usize, f64)> = None;
+                if let Some(lv) = lookup_num {
+                    for &i in &indices {
+                        if let Some(v) = lookup_array[i].as_number() {
+                            if v >= lv {
+                                match best {
+                                    Some((_, bv)) if v < bv => best = Some((i, v)),
+                                    None => best = Some((i, v)),
+                                    _ => {}
+                                }
+                            }
+                        }
+                    }
+                }
+                match best {
+                    Some((i, _)) => EvalResult::Number((i + 1) as f64),
+                    None => EvalResult::Error(CellError::NA),
+                }
+            }
+            2 => {
+                // Wildcard match
+                for &i in &indices {
+                    let val_text = lookup_array[i].as_text();
+                    if wildcard_match(&lookup_text, &val_text) {
+                        return EvalResult::Number((i + 1) as f64);
+                    }
+                }
+                EvalResult::Error(CellError::NA)
+            }
+            _ => EvalResult::Error(CellError::Value),
+        }
+    }
+
+    // ==================== Selection Functions ====================
+
+    fn fn_choosecols(&self, args: &[Expression]) -> EvalResult {
+        // CHOOSECOLS(array, col_num1, [col_num2], ...)
+        if args.len() < 2 { return EvalResult::Error(CellError::Value); }
+        let array = self.eval_as_2d(&args[0]);
+        if array.is_empty() { return EvalResult::Error(CellError::Value); }
+        let num_cols = array[0].len();
+        let mut col_indices: Vec<usize> = Vec::new();
+        for i in 1..args.len() {
+            match self.evaluate(&args[i]).as_number() {
+                Some(n) => {
+                    let idx = n as i32;
+                    let col = if idx > 0 { (idx - 1) as usize } else if idx < 0 { (num_cols as i32 + idx) as usize } else { return EvalResult::Error(CellError::Value); };
+                    if col >= num_cols { return EvalResult::Error(CellError::Value); }
+                    col_indices.push(col);
+                }
+                None => return EvalResult::Error(CellError::Value),
+            }
+        }
+        let result: Vec<EvalResult> = array.iter().map(|row| {
+            let new_row: Vec<EvalResult> = col_indices.iter().map(|&c| row[c].clone()).collect();
+            if new_row.len() == 1 { new_row.into_iter().next().unwrap() } else { EvalResult::Array(new_row) }
+        }).collect();
+        if result.len() == 1 { result.into_iter().next().unwrap() } else { EvalResult::Array(result) }
+    }
+
+    fn fn_chooserows(&self, args: &[Expression]) -> EvalResult {
+        // CHOOSEROWS(array, row_num1, [row_num2], ...)
+        if args.len() < 2 { return EvalResult::Error(CellError::Value); }
+        let array = self.eval_as_2d(&args[0]);
+        if array.is_empty() { return EvalResult::Error(CellError::Value); }
+        let num_rows = array.len();
+        let mut row_indices: Vec<usize> = Vec::new();
+        for i in 1..args.len() {
+            match self.evaluate(&args[i]).as_number() {
+                Some(n) => {
+                    let idx = n as i32;
+                    let row = if idx > 0 { (idx - 1) as usize } else if idx < 0 { (num_rows as i32 + idx) as usize } else { return EvalResult::Error(CellError::Value); };
+                    if row >= num_rows { return EvalResult::Error(CellError::Value); }
+                    row_indices.push(row);
+                }
+                None => return EvalResult::Error(CellError::Value),
+            }
+        }
+        let result: Vec<EvalResult> = row_indices.iter().map(|&r| {
+            let row = &array[r];
+            if row.len() == 1 { row[0].clone() } else { EvalResult::Array(row.clone()) }
+        }).collect();
+        if result.len() == 1 { result.into_iter().next().unwrap() } else { EvalResult::Array(result) }
+    }
+
+    // ==================== Reference & Info Functions ====================
+
+    fn fn_areas(&self, _args: &[Expression]) -> EvalResult {
+        // AREAS(reference) - always returns 1 for a single range reference
+        EvalResult::Number(1.0)
+    }
+
+    fn fn_cell(&self, args: &[Expression]) -> EvalResult {
+        // CELL(info_type, [reference]) - simplified implementation
+        if args.is_empty() || args.len() > 2 { return EvalResult::Error(CellError::Value); }
+        let info_type = self.evaluate(&args[0]).as_text().to_uppercase();
+        if args.len() == 2 {
+            match &args[1] {
+                Expression::CellRef { col, row, .. } => {
+                    match info_type.as_str() {
+                        "ADDRESS" => EvalResult::Text(format!("${}${}", col, row)),
+                        "COL" => EvalResult::Number(col_to_index(col) as f64 + 1.0),
+                        "ROW" => EvalResult::Number(*row as f64),
+                        "CONTENTS" => self.evaluate(&args[1]),
+                        _ => EvalResult::Text(String::new()),
+                    }
+                }
+                _ => EvalResult::Error(CellError::Value),
+            }
+        } else {
+            EvalResult::Error(CellError::Value)
+        }
+    }
+
+    fn fn_formulatext(&self, _args: &[Expression]) -> EvalResult {
+        // FORMULATEXT requires access to the raw formula string which isn't available in the evaluator
+        EvalResult::Error(CellError::NA)
+    }
+
+    // ==================== Array Reshaping Functions ====================
+
+    fn fn_expand(&self, args: &[Expression]) -> EvalResult {
+        // EXPAND(array, rows, [columns], [pad_with])
+        if args.len() < 2 || args.len() > 4 { return EvalResult::Error(CellError::Value); }
+        let source = self.eval_as_2d(&args[0]);
+        let target_rows = match self.evaluate(&args[1]).as_number() { Some(n) if n >= 1.0 => n as usize, _ => return EvalResult::Error(CellError::Value) };
+        let source_cols = if source.is_empty() { 0 } else { source[0].len() };
+        let target_cols = if args.len() >= 3 { match self.evaluate(&args[2]).as_number() { Some(n) if n >= 1.0 => n as usize, _ => source_cols } } else { source_cols };
+        let pad = if args.len() == 4 { self.evaluate(&args[3]) } else { EvalResult::Error(CellError::NA) };
+        let mut result: Vec<EvalResult> = Vec::new();
+        for r in 0..target_rows {
+            let mut row: Vec<EvalResult> = Vec::new();
+            for c in 0..target_cols {
+                if r < source.len() && c < source[r].len() {
+                    row.push(source[r][c].clone());
+                } else {
+                    row.push(pad.clone());
+                }
+            }
+            result.push(if row.len() == 1 { row.into_iter().next().unwrap() } else { EvalResult::Array(row) });
+        }
+        if result.len() == 1 { result.into_iter().next().unwrap() } else { EvalResult::Array(result) }
+    }
+
+    fn fn_vstack(&self, args: &[Expression]) -> EvalResult {
+        // VSTACK(array1, array2, ...) - stack arrays vertically
+        if args.is_empty() { return EvalResult::Error(CellError::Value); }
+        let mut result: Vec<EvalResult> = Vec::new();
+        for arg in args {
+            let rows = self.eval_as_2d(arg);
+            for row in rows {
+                result.push(if row.len() == 1 { row.into_iter().next().unwrap() } else { EvalResult::Array(row) });
+            }
+        }
+        if result.len() == 1 { result.into_iter().next().unwrap() } else { EvalResult::Array(result) }
+    }
+
+    fn fn_tocol(&self, args: &[Expression]) -> EvalResult {
+        // TOCOL(array, [ignore], [scan_by_column])
+        if args.is_empty() || args.len() > 3 { return EvalResult::Error(CellError::Value); }
+        let rows = self.eval_as_2d(&args[0]);
+        let ignore = if args.len() >= 2 { self.evaluate(&args[1]).as_number().unwrap_or(0.0) as i32 } else { 0 };
+        let by_col = if args.len() == 3 { { let _v = self.evaluate(&args[2]); matches!(_v, EvalResult::Boolean(true)) || matches!(_v, EvalResult::Number(n) if n != 0.0) } } else { false };
+        let mut flat: Vec<EvalResult> = Vec::new();
+        if by_col {
+            let max_cols = rows.iter().map(|r| r.len()).max().unwrap_or(0);
+            for c in 0..max_cols {
+                for row in &rows {
+                    if c < row.len() {
+                        flat.push(row[c].clone());
+                    }
+                }
+            }
+        } else {
+            for row in &rows {
+                flat.extend(row.iter().cloned());
+            }
+        }
+        // Filter based on ignore param
+        let filtered: Vec<EvalResult> = flat.into_iter().filter(|v| {
+            match ignore {
+                1 => !matches!(v, EvalResult::Text(s) if s.is_empty()),
+                2 => !matches!(v, EvalResult::Error(_)),
+                3 => !matches!(v, EvalResult::Text(s) if s.is_empty()) && !matches!(v, EvalResult::Error(_)),
+                _ => true,
+            }
+        }).collect();
+        // Return as vertical array (each element is a single-value row)
+        EvalResult::Array(filtered)
+    }
+
+    fn fn_torow(&self, args: &[Expression]) -> EvalResult {
+        // TOROW(array, [ignore], [scan_by_column])
+        if args.is_empty() || args.len() > 3 { return EvalResult::Error(CellError::Value); }
+        let rows = self.eval_as_2d(&args[0]);
+        let ignore = if args.len() >= 2 { self.evaluate(&args[1]).as_number().unwrap_or(0.0) as i32 } else { 0 };
+        let by_col = if args.len() == 3 { { let _v = self.evaluate(&args[2]); matches!(_v, EvalResult::Boolean(true)) || matches!(_v, EvalResult::Number(n) if n != 0.0) } } else { false };
+        let mut flat: Vec<EvalResult> = Vec::new();
+        if by_col {
+            let max_cols = rows.iter().map(|r| r.len()).max().unwrap_or(0);
+            for c in 0..max_cols {
+                for row in &rows {
+                    if c < row.len() {
+                        flat.push(row[c].clone());
+                    }
+                }
+            }
+        } else {
+            for row in &rows {
+                flat.extend(row.iter().cloned());
+            }
+        }
+        let filtered: Vec<EvalResult> = flat.into_iter().filter(|v| {
+            match ignore {
+                1 => !matches!(v, EvalResult::Text(s) if s.is_empty()),
+                2 => !matches!(v, EvalResult::Error(_)),
+                3 => !matches!(v, EvalResult::Text(s) if s.is_empty()) && !matches!(v, EvalResult::Error(_)),
+                _ => true,
+            }
+        }).collect();
+        // Return as a single-row array
+        EvalResult::Array(filtered)
+    }
+
+    fn fn_wrapcols(&self, args: &[Expression]) -> EvalResult {
+        // WRAPCOLS(vector, wrap_count, [pad_with])
+        if args.len() < 2 || args.len() > 3 { return EvalResult::Error(CellError::Value); }
+        let flat = self.eval_flat(&args[0]);
+        let wrap_count = match self.evaluate(&args[1]).as_number() { Some(n) if n >= 1.0 => n as usize, _ => return EvalResult::Error(CellError::Value) };
+        let pad = if args.len() == 3 { self.evaluate(&args[2]) } else { EvalResult::Error(CellError::NA) };
+        let num_cols = (flat.len() + wrap_count - 1) / wrap_count;
+        let mut result: Vec<EvalResult> = Vec::new();
+        for r in 0..wrap_count {
+            let mut row: Vec<EvalResult> = Vec::new();
+            for c in 0..num_cols {
+                let idx = c * wrap_count + r;
+                if idx < flat.len() {
+                    row.push(flat[idx].clone());
+                } else {
+                    row.push(pad.clone());
+                }
+            }
+            result.push(if row.len() == 1 { row.into_iter().next().unwrap() } else { EvalResult::Array(row) });
+        }
+        if result.len() == 1 { result.into_iter().next().unwrap() } else { EvalResult::Array(result) }
+    }
+
+    fn fn_wraprows(&self, args: &[Expression]) -> EvalResult {
+        // WRAPROWS(vector, wrap_count, [pad_with])
+        if args.len() < 2 || args.len() > 3 { return EvalResult::Error(CellError::Value); }
+        let flat = self.eval_flat(&args[0]);
+        let wrap_count = match self.evaluate(&args[1]).as_number() { Some(n) if n >= 1.0 => n as usize, _ => return EvalResult::Error(CellError::Value) };
+        let pad = if args.len() == 3 { self.evaluate(&args[2]) } else { EvalResult::Error(CellError::NA) };
+        let mut result: Vec<EvalResult> = Vec::new();
+        let mut i = 0;
+        while i < flat.len() {
+            let mut row: Vec<EvalResult> = Vec::new();
+            for j in 0..wrap_count {
+                if i + j < flat.len() {
+                    row.push(flat[i + j].clone());
+                } else {
+                    row.push(pad.clone());
+                }
+            }
+            result.push(if row.len() == 1 { row.into_iter().next().unwrap() } else { EvalResult::Array(row) });
+            i += wrap_count;
+        }
+        if result.len() == 1 { result.into_iter().next().unwrap() } else { EvalResult::Array(result) }
+    }
+
+    /// Helper: evaluate an expression as a 2D array (vector of rows, each row is a vector of EvalResult)
+    fn eval_as_2d(&self, expr: &Expression) -> Vec<Vec<EvalResult>> {
+        let result = self.evaluate(expr);
+        match result {
+            EvalResult::Array(items) => {
+                items.into_iter().map(|item| {
+                    match item {
+                        EvalResult::Array(row) => row,
+                        other => vec![other],
+                    }
+                }).collect()
+            }
+            other => vec![vec![other]],
+        }
+    }
+
+}
+
+/// Helper: calculate PMT (shared by IPMT, PPMT, CUMIPMT, CUMPRINC)
+fn calc_pmt(rate: f64, nper: f64, pv: f64, fv: f64, pmt_type: i32) -> f64 {
+    if rate.abs() < 1e-10 {
+        -(pv + fv) / nper
+    } else {
+        let pvif = (1.0 + rate).powf(nper);
+        let pmt = rate * (pv * pvif + fv) / (pvif - 1.0);
+        if pmt_type == 1 { -pmt / (1.0 + rate) } else { -pmt }
+    }
+}
+
+/// Format a number cleanly (no trailing zeros for integers)
+fn format_number_clean(n: f64) -> String {
+    if n == n.floor() && n.abs() < 1e15 {
+        format!("{}", n as i64)
+    } else {
+        format!("{}", n)
+    }
+}
+
+/// Standard normal CDF using the Abramowitz and Stegun approximation
+fn norm_cdf(z: f64) -> f64 {
+    if z < -8.0 { return 0.0; }
+    if z > 8.0 { return 1.0; }
+    let a1 = 0.254829592;
+    let a2 = -0.284496736;
+    let a3 = 1.421413741;
+    let a4 = -1.453152027;
+    let a5 = 1.061405429;
+    let p = 0.3275911;
+    let sign = if z < 0.0 { -1.0 } else { 1.0 };
+    let x = z.abs() / std::f64::consts::SQRT_2;
+    let t = 1.0 / (1.0 + p * x);
+    let y = 1.0 - (((((a5 * t + a4) * t) + a3) * t + a2) * t + a1) * t * (-x * x).exp();
+    0.5 * (1.0 + sign * y)
+}
+
+/// Inverse normal CDF (quantile function) using rational approximation
+fn norm_inv(p: f64) -> f64 {
+    if p <= 0.0 { return f64::NEG_INFINITY; }
+    if p >= 1.0 { return f64::INFINITY; }
+    if (p - 0.5).abs() < 1e-15 { return 0.0; }
+    // Rational approximation (Peter Acklam's algorithm)
+    let a = [-3.969683028665376e1, 2.209460984245205e2, -2.759285104469687e2, 1.383577518672690e2, -3.066479806614716e1, 2.506628277459239e0];
+    let b = [-5.447609879822406e1, 1.615858368580409e2, -1.556989798598866e2, 6.680131188771972e1, -1.328068155288572e1];
+    let c = [-7.784894002430293e-3, -3.223964580411365e-1, -2.400758277161838e0, -2.549732539343734e0, 4.374664141464968e0, 2.938163982698783e0];
+    let d = [7.784695709041462e-3, 3.224671290700398e-1, 2.445134137142996e0, 3.754408661907416e0];
+    let p_low = 0.02425;
+    let p_high = 1.0 - p_low;
+    if p < p_low {
+        let q = (-2.0 * p.ln()).sqrt();
+        (((((c[0]*q+c[1])*q+c[2])*q+c[3])*q+c[4])*q+c[5]) / ((((d[0]*q+d[1])*q+d[2])*q+d[3])*q+1.0)
+    } else if p <= p_high {
+        let q = p - 0.5;
+        let r = q * q;
+        (((((a[0]*r+a[1])*r+a[2])*r+a[3])*r+a[4])*r+a[5])*q / (((((b[0]*r+b[1])*r+b[2])*r+b[3])*r+b[4])*r+1.0)
+    } else {
+        let q = (-2.0 * (1.0 - p).ln()).sqrt();
+        -(((((c[0]*q+c[1])*q+c[2])*q+c[3])*q+c[4])*q+c[5]) / ((((d[0]*q+d[1])*q+d[2])*q+d[3])*q+1.0)
+    }
+}
+
+/// Log-gamma function (Stirling approximation)
+fn gamma_ln(x: f64) -> f64 {
+    // Lanczos approximation
+    let g = 7.0;
+    let coefficients = [0.99999999999980993, 676.5203681218851, -1259.1392167224028, 771.32342877765313, -176.61502916214059, 12.507343278686905, -0.13857109526572012, 9.9843695780195716e-6, 1.5056327351493116e-7];
+    let x = x - 1.0;
+    let mut sum = coefficients[0];
+    for (i, &c) in coefficients.iter().enumerate().skip(1) {
+        sum += c / (x + i as f64);
+    }
+    let t = x + g + 0.5;
+    0.5 * (2.0 * std::f64::consts::PI).ln() + (x + 0.5) * t.ln() - t + sum.ln()
+}
+
+/// Student's t-distribution CDF
+fn t_cdf(x: f64, df: f64) -> f64 {
+    let z = df / (df + x * x);
+    let p = 0.5 * regularized_beta(df / 2.0, 0.5, z);
+    if x >= 0.0 { 1.0 - p } else { p }
+}
+
+/// Inverse t-distribution (using bisection on t_cdf)
+fn t_inv(p: f64, df: f64) -> f64 {
+    if p <= 0.0 { return f64::NEG_INFINITY; }
+    if p >= 1.0 { return f64::INFINITY; }
+    // Start with normal approximation, then refine with bisection
+    let mut lo = -1000.0;
+    let mut hi = 1000.0;
+    for _ in 0..100 {
+        let mid = (lo + hi) / 2.0;
+        if t_cdf(mid, df) < p { lo = mid; } else { hi = mid; }
+    }
+    (lo + hi) / 2.0
+}
+
+/// Regularized incomplete beta function Ix(a,b) using continued fraction
+fn regularized_beta(a: f64, b: f64, x: f64) -> f64 {
+    if x <= 0.0 { return 0.0; }
+    if x >= 1.0 { return 1.0; }
+    let ln_beta = beta_ln(a, b);
+    let front = (a * x.ln() + b * (1.0 - x).ln() - ln_beta).exp() / a;
+    // Use continued fraction (Lentz's method)
+    beta_cf(a, b, x) * front
+}
+
+/// Log of the Beta function
+fn beta_ln(a: f64, b: f64) -> f64 {
+    gamma_ln(a) + gamma_ln(b) - gamma_ln(a + b)
+}
+
+/// Continued fraction for regularized beta
+fn beta_cf(a: f64, b: f64, x: f64) -> f64 {
+    let max_iter = 200;
+    let epsilon = 1e-10;
+    let mut c = 1.0;
+    let mut d = 1.0 - (a + b) * x / (a + 1.0);
+    if d.abs() < 1e-30 { d = 1e-30; }
+    d = 1.0 / d;
+    let mut h = d;
+    for m in 1..=max_iter {
+        let m = m as f64;
+        // Even step
+        let num = m * (b - m) * x / ((a + 2.0 * m - 1.0) * (a + 2.0 * m));
+        d = 1.0 + num * d;
+        if d.abs() < 1e-30 { d = 1e-30; }
+        c = 1.0 + num / c;
+        if c.abs() < 1e-30 { c = 1e-30; }
+        d = 1.0 / d;
+        h *= d * c;
+        // Odd step
+        let num = -(a + m) * (a + b + m) * x / ((a + 2.0 * m) * (a + 2.0 * m + 1.0));
+        d = 1.0 + num * d;
+        if d.abs() < 1e-30 { d = 1e-30; }
+        c = 1.0 + num / c;
+        if c.abs() < 1e-30 { c = 1e-30; }
+        d = 1.0 / d;
+        let delta = d * c;
+        h *= delta;
+        if (delta - 1.0).abs() < epsilon { break; }
+    }
+    h
+}
+
+/// Lower regularized gamma function P(a, x)
+fn lower_gamma_regularized(a: f64, x: f64) -> f64 {
+    if x < 0.0 { return 0.0; }
+    if x == 0.0 { return 0.0; }
+    if x < a + 1.0 {
+        // Series expansion
+        let mut sum = 1.0 / a;
+        let mut term = 1.0 / a;
+        for n in 1..200 {
+            term *= x / (a + n as f64);
+            sum += term;
+            if term.abs() < 1e-10 * sum.abs() { break; }
+        }
+        sum * (-x + a * x.ln() - gamma_ln(a)).exp()
+    } else {
+        // Continued fraction
+        1.0 - upper_gamma_cf(a, x)
+    }
+}
+
+/// Upper incomplete gamma via continued fraction
+fn upper_gamma_cf(a: f64, x: f64) -> f64 {
+    let mut c = 1e-30_f64;
+    let mut d = x + 1.0 - a;
+    if d.abs() < 1e-30 { d = 1e-30; }
+    d = 1.0 / d;
+    let mut h = d;
+    for i in 1..200 {
+        let an = -(i as f64) * (i as f64 - a);
+        let bn = x + 2.0 * i as f64 + 1.0 - a;
+        d = bn + an * d;
+        if d.abs() < 1e-30 { d = 1e-30; }
+        c = bn + an / c;
+        if c.abs() < 1e-30 { c = 1e-30; }
+        d = 1.0 / d;
+        let delta = d * c;
+        h *= delta;
+        if (delta - 1.0).abs() < 1e-10 { break; }
+    }
+    (-x + a * x.ln() - gamma_ln(a)).exp() * h
+}
+
+/// Binomial probability mass function
+fn binom_pmf(k: u64, n: u64, p: f64) -> f64 {
+    if k > n { return 0.0; }
+    let ln_coeff = gamma_ln(n as f64 + 1.0) - gamma_ln(k as f64 + 1.0) - gamma_ln((n - k) as f64 + 1.0);
+    let ln_prob = k as f64 * p.ln() + (n - k) as f64 * (1.0 - p).ln();
+    (ln_coeff + ln_prob).exp()
+}
+
+/// Poisson probability mass function
+fn poisson_pmf(k: u64, lambda: f64) -> f64 {
+    if lambda == 0.0 { return if k == 0 { 1.0 } else { 0.0 }; }
+    (k as f64 * lambda.ln() - lambda - gamma_ln(k as f64 + 1.0)).exp()
+}
+
+/// Simple wildcard matching (* and ?)
+fn wildcard_match(pattern: &str, text: &str) -> bool {
+    let pattern = pattern.to_uppercase();
+    let text = text.to_uppercase();
+    let p: Vec<char> = pattern.chars().collect();
+    let t: Vec<char> = text.chars().collect();
+    let mut dp = vec![vec![false; t.len() + 1]; p.len() + 1];
+    dp[0][0] = true;
+    for i in 1..=p.len() {
+        if p[i-1] == '*' { dp[i][0] = dp[i-1][0]; }
+    }
+    for i in 1..=p.len() {
+        for j in 1..=t.len() {
+            if p[i-1] == '*' {
+                dp[i][j] = dp[i-1][j] || dp[i][j-1];
+            } else if p[i-1] == '?' || p[i-1] == t[j-1] {
+                dp[i][j] = dp[i-1][j-1];
+            }
+        }
+    }
+    dp[p.len()][t.len()]
 }
 
 #[cfg(test)]
@@ -7158,5 +8816,1213 @@ mod tests {
         };
         let result = eval.evaluate(&expr);
         assert_eq!(result, EvalResult::Number(60.0));
+    }
+
+    // ==================== SUBTOTAL Function Tests ====================
+
+    /// Helper: creates a range expression A1:A3
+    fn range_a1_a3() -> Expression {
+        Expression::Range {
+            sheet: None,
+            start: Box::new(Expression::CellRef { sheet: None, col: "A".to_string(), row: 1 }),
+            end: Box::new(Expression::CellRef { sheet: None, col: "A".to_string(), row: 3 }),
+        }
+    }
+
+    /// Helper: creates a SUBTOTAL(func_num, ref) expression
+    fn subtotal_expr(func_num: f64, range: Expression) -> Expression {
+        Expression::FunctionCall {
+            func: BuiltinFunction::Subtotal,
+            args: vec![
+                Expression::Literal(Value::Number(func_num)),
+                range,
+            ],
+        }
+    }
+
+    #[test]
+    fn test_subtotal_9_sum() {
+        // SUBTOTAL(9, A1:A3) = SUM = 10 + 20 + 30 = 60
+        let grid = make_grid();
+        let eval = Evaluator::new(&grid);
+        let expr = subtotal_expr(9.0, range_a1_a3());
+        assert_eq!(eval.evaluate(&expr), EvalResult::Number(60.0));
+    }
+
+    #[test]
+    fn test_subtotal_1_average() {
+        // SUBTOTAL(1, A1:A3) = AVERAGE = 20
+        let grid = make_grid();
+        let eval = Evaluator::new(&grid);
+        let expr = subtotal_expr(1.0, range_a1_a3());
+        assert_eq!(eval.evaluate(&expr), EvalResult::Number(20.0));
+    }
+
+    #[test]
+    fn test_subtotal_2_count() {
+        // SUBTOTAL(2, A1:A3) = COUNT = 3
+        let grid = make_grid();
+        let eval = Evaluator::new(&grid);
+        let expr = subtotal_expr(2.0, range_a1_a3());
+        assert_eq!(eval.evaluate(&expr), EvalResult::Number(3.0));
+    }
+
+    #[test]
+    fn test_subtotal_3_counta() {
+        // SUBTOTAL(3, B1:B3) = COUNTA = 3 (5, 15, "Hello" are all non-empty)
+        let grid = make_grid();
+        let eval = Evaluator::new(&grid);
+        let range_b = Expression::Range {
+            sheet: None,
+            start: Box::new(Expression::CellRef { sheet: None, col: "B".to_string(), row: 1 }),
+            end: Box::new(Expression::CellRef { sheet: None, col: "B".to_string(), row: 3 }),
+        };
+        let expr = subtotal_expr(3.0, range_b);
+        assert_eq!(eval.evaluate(&expr), EvalResult::Number(3.0));
+    }
+
+    #[test]
+    fn test_subtotal_4_max() {
+        // SUBTOTAL(4, A1:A3) = MAX = 30
+        let grid = make_grid();
+        let eval = Evaluator::new(&grid);
+        let expr = subtotal_expr(4.0, range_a1_a3());
+        assert_eq!(eval.evaluate(&expr), EvalResult::Number(30.0));
+    }
+
+    #[test]
+    fn test_subtotal_5_min() {
+        // SUBTOTAL(5, A1:A3) = MIN = 10
+        let grid = make_grid();
+        let eval = Evaluator::new(&grid);
+        let expr = subtotal_expr(5.0, range_a1_a3());
+        assert_eq!(eval.evaluate(&expr), EvalResult::Number(10.0));
+    }
+
+    #[test]
+    fn test_subtotal_6_product() {
+        // SUBTOTAL(6, A1:A3) = PRODUCT = 10 * 20 * 30 = 6000
+        let grid = make_grid();
+        let eval = Evaluator::new(&grid);
+        let expr = subtotal_expr(6.0, range_a1_a3());
+        assert_eq!(eval.evaluate(&expr), EvalResult::Number(6000.0));
+    }
+
+    #[test]
+    fn test_subtotal_109_sum_excludes_hidden() {
+        // SUBTOTAL(109, A1:A3) with row 1 (0-indexed) hidden = 10 + 30 = 40
+        let grid = make_grid();
+        let mut hidden = HashSet::new();
+        hidden.insert(1); // Hide row index 1 (A2 = 20)
+        let ctx = EvalContext {
+            current_row: Some(0),
+            current_col: Some(0),
+            hidden_rows: Some(hidden),
+            ..Default::default()
+        };
+        let ms = MultiSheetContext::new("Sheet1".to_string());
+        let eval = Evaluator::with_context(&grid, ms, ctx);
+        let expr = subtotal_expr(109.0, range_a1_a3());
+        assert_eq!(eval.evaluate(&expr), EvalResult::Number(40.0));
+    }
+
+    #[test]
+    fn test_subtotal_101_average_excludes_hidden() {
+        // SUBTOTAL(101, A1:A3) with row 1 hidden = AVERAGE(10, 30) = 20
+        let grid = make_grid();
+        let mut hidden = HashSet::new();
+        hidden.insert(1); // Hide row index 1 (A2 = 20)
+        let ctx = EvalContext {
+            current_row: Some(0),
+            current_col: Some(0),
+            hidden_rows: Some(hidden),
+            ..Default::default()
+        };
+        let ms = MultiSheetContext::new("Sheet1".to_string());
+        let eval = Evaluator::with_context(&grid, ms, ctx);
+        let expr = subtotal_expr(101.0, range_a1_a3());
+        assert_eq!(eval.evaluate(&expr), EvalResult::Number(20.0));
+    }
+
+    #[test]
+    fn test_subtotal_102_count_excludes_hidden() {
+        // SUBTOTAL(102, A1:A3) with row 1 hidden = COUNT(10, 30) = 2
+        let grid = make_grid();
+        let mut hidden = HashSet::new();
+        hidden.insert(1);
+        let ctx = EvalContext {
+            current_row: Some(0),
+            current_col: Some(0),
+            hidden_rows: Some(hidden),
+            ..Default::default()
+        };
+        let ms = MultiSheetContext::new("Sheet1".to_string());
+        let eval = Evaluator::with_context(&grid, ms, ctx);
+        let expr = subtotal_expr(102.0, range_a1_a3());
+        assert_eq!(eval.evaluate(&expr), EvalResult::Number(2.0));
+    }
+
+    #[test]
+    fn test_subtotal_104_max_excludes_hidden() {
+        // SUBTOTAL(104, A1:A3) with row 2 (0-indexed) hidden = MAX(10, 20) = 20
+        let grid = make_grid();
+        let mut hidden = HashSet::new();
+        hidden.insert(2); // Hide row index 2 (A3 = 30)
+        let ctx = EvalContext {
+            current_row: Some(0),
+            current_col: Some(0),
+            hidden_rows: Some(hidden),
+            ..Default::default()
+        };
+        let ms = MultiSheetContext::new("Sheet1".to_string());
+        let eval = Evaluator::with_context(&grid, ms, ctx);
+        let expr = subtotal_expr(104.0, range_a1_a3());
+        assert_eq!(eval.evaluate(&expr), EvalResult::Number(20.0));
+    }
+
+    #[test]
+    fn test_subtotal_105_min_excludes_hidden() {
+        // SUBTOTAL(105, A1:A3) with row 0 (0-indexed) hidden = MIN(20, 30) = 20
+        let grid = make_grid();
+        let mut hidden = HashSet::new();
+        hidden.insert(0); // Hide row index 0 (A1 = 10)
+        let ctx = EvalContext {
+            current_row: Some(0),
+            current_col: Some(0),
+            hidden_rows: Some(hidden),
+            ..Default::default()
+        };
+        let ms = MultiSheetContext::new("Sheet1".to_string());
+        let eval = Evaluator::with_context(&grid, ms, ctx);
+        let expr = subtotal_expr(105.0, range_a1_a3());
+        assert_eq!(eval.evaluate(&expr), EvalResult::Number(20.0));
+    }
+
+    #[test]
+    fn test_subtotal_9_includes_hidden_rows() {
+        // SUBTOTAL(9, A1:A3) with row 1 hidden = SUM should still be 60 (codes 1-11 include hidden)
+        let grid = make_grid();
+        let mut hidden = HashSet::new();
+        hidden.insert(1);
+        let ctx = EvalContext {
+            current_row: Some(0),
+            current_col: Some(0),
+            hidden_rows: Some(hidden),
+            ..Default::default()
+        };
+        let ms = MultiSheetContext::new("Sheet1".to_string());
+        let eval = Evaluator::with_context(&grid, ms, ctx);
+        let expr = subtotal_expr(9.0, range_a1_a3());
+        assert_eq!(eval.evaluate(&expr), EvalResult::Number(60.0));
+    }
+
+    #[test]
+    fn test_subtotal_invalid_function_num() {
+        // SUBTOTAL(0, A1:A3) should return #VALUE!
+        let grid = make_grid();
+        let eval = Evaluator::new(&grid);
+        let expr = subtotal_expr(0.0, range_a1_a3());
+        assert_eq!(eval.evaluate(&expr), EvalResult::Error(CellError::Value));
+    }
+
+    #[test]
+    fn test_subtotal_invalid_function_num_high() {
+        // SUBTOTAL(112, A1:A3) should return #VALUE!
+        let grid = make_grid();
+        let eval = Evaluator::new(&grid);
+        let expr = subtotal_expr(112.0, range_a1_a3());
+        assert_eq!(eval.evaluate(&expr), EvalResult::Error(CellError::Value));
+    }
+
+    #[test]
+    fn test_subtotal_too_few_args() {
+        // SUBTOTAL(9) with no range should return #VALUE!
+        let grid = make_grid();
+        let eval = Evaluator::new(&grid);
+        let expr = Expression::FunctionCall {
+            func: BuiltinFunction::Subtotal,
+            args: vec![Expression::Literal(Value::Number(9.0))],
+        };
+        assert_eq!(eval.evaluate(&expr), EvalResult::Error(CellError::Value));
+    }
+
+    #[test]
+    fn test_subtotal_multiple_ranges() {
+        // SUBTOTAL(9, A1:A2, A3:A3) = SUM(10, 20, 30) = 60
+        let grid = make_grid();
+        let eval = Evaluator::new(&grid);
+        let expr = Expression::FunctionCall {
+            func: BuiltinFunction::Subtotal,
+            args: vec![
+                Expression::Literal(Value::Number(9.0)),
+                Expression::Range {
+                    sheet: None,
+                    start: Box::new(Expression::CellRef { sheet: None, col: "A".to_string(), row: 1 }),
+                    end: Box::new(Expression::CellRef { sheet: None, col: "A".to_string(), row: 2 }),
+                },
+                Expression::Range {
+                    sheet: None,
+                    start: Box::new(Expression::CellRef { sheet: None, col: "A".to_string(), row: 3 }),
+                    end: Box::new(Expression::CellRef { sheet: None, col: "A".to_string(), row: 3 }),
+                },
+            ],
+        };
+        assert_eq!(eval.evaluate(&expr), EvalResult::Number(60.0));
+    }
+
+    #[test]
+    fn test_subtotal_109_all_hidden() {
+        // SUBTOTAL(109, A1:A3) with ALL rows hidden = SUM of nothing = 0
+        let grid = make_grid();
+        let mut hidden = HashSet::new();
+        hidden.insert(0);
+        hidden.insert(1);
+        hidden.insert(2);
+        let ctx = EvalContext {
+            current_row: Some(0),
+            current_col: Some(0),
+            hidden_rows: Some(hidden),
+            ..Default::default()
+        };
+        let ms = MultiSheetContext::new("Sheet1".to_string());
+        let eval = Evaluator::with_context(&grid, ms, ctx);
+        let expr = subtotal_expr(109.0, range_a1_a3());
+        assert_eq!(eval.evaluate(&expr), EvalResult::Number(0.0));
+    }
+
+    #[test]
+    fn test_subtotal_106_product_excludes_hidden() {
+        // SUBTOTAL(106, A1:A3) with row 1 hidden = PRODUCT(10, 30) = 300
+        let grid = make_grid();
+        let mut hidden = HashSet::new();
+        hidden.insert(1);
+        let ctx = EvalContext {
+            current_row: Some(0),
+            current_col: Some(0),
+            hidden_rows: Some(hidden),
+            ..Default::default()
+        };
+        let ms = MultiSheetContext::new("Sheet1".to_string());
+        let eval = Evaluator::with_context(&grid, ms, ctx);
+        let expr = subtotal_expr(106.0, range_a1_a3());
+        assert_eq!(eval.evaluate(&expr), EvalResult::Number(300.0));
+    }
+
+    // ==================== Helper for new function tests ====================
+
+    fn make_fn_expr(func: BuiltinFunction, args: Vec<Expression>) -> Expression {
+        Expression::FunctionCall { func, args }
+    }
+
+    fn num(n: f64) -> Expression { Expression::Literal(Value::Number(n)) }
+    fn text(s: &str) -> Expression { Expression::Literal(Value::String(s.to_string())) }
+    fn bool_val(b: bool) -> Expression { Expression::Literal(Value::Boolean(b)) }
+
+    fn assert_num(result: &EvalResult, expected: f64, tolerance: f64) {
+        match result {
+            EvalResult::Number(n) => assert!((n - expected).abs() < tolerance, "Expected ~{}, got {}", expected, n),
+            other => panic!("Expected Number(~{}), got {:?}", expected, other),
+        }
+    }
+
+    fn assert_text_eq(result: &EvalResult, expected: &str) {
+        match result {
+            EvalResult::Text(s) => assert_eq!(s, expected, "Expected text '{}', got '{}'", expected, s),
+            other => panic!("Expected Text('{}'), got {:?}", expected, other),
+        }
+    }
+
+    #[allow(dead_code)]
+    fn assert_bool(result: &EvalResult, expected: bool) {
+        assert_eq!(*result, EvalResult::Boolean(expected));
+    }
+
+    fn assert_error(result: &EvalResult) {
+        assert!(matches!(result, EvalResult::Error(_)), "Expected Error, got {:?}", result);
+    }
+
+    // ==================== Text Parsing Tests ====================
+
+    #[test]
+    fn test_textbefore_basic() {
+        let grid = Grid::new();
+        let eval = Evaluator::new(&grid);
+        let expr = make_fn_expr(BuiltinFunction::TextBefore, vec![text("Hello World"), text(" ")]);
+        assert_text_eq(&eval.evaluate(&expr), "Hello");
+    }
+
+    #[test]
+    fn test_textbefore_instance() {
+        let grid = Grid::new();
+        let eval = Evaluator::new(&grid);
+        let expr = make_fn_expr(BuiltinFunction::TextBefore, vec![text("a-b-c-d"), text("-"), num(2.0)]);
+        assert_text_eq(&eval.evaluate(&expr), "a-b");
+    }
+
+    #[test]
+    fn test_textbefore_negative_instance() {
+        let grid = Grid::new();
+        let eval = Evaluator::new(&grid);
+        let expr = make_fn_expr(BuiltinFunction::TextBefore, vec![text("a-b-c-d"), text("-"), num(-1.0)]);
+        assert_text_eq(&eval.evaluate(&expr), "a-b-c");
+    }
+
+    #[test]
+    fn test_textbefore_not_found() {
+        let grid = Grid::new();
+        let eval = Evaluator::new(&grid);
+        let expr = make_fn_expr(BuiltinFunction::TextBefore, vec![text("Hello"), text("X")]);
+        assert_error(&eval.evaluate(&expr));
+    }
+
+    #[test]
+    fn test_textafter_basic() {
+        let grid = Grid::new();
+        let eval = Evaluator::new(&grid);
+        let expr = make_fn_expr(BuiltinFunction::TextAfter, vec![text("Hello World"), text(" ")]);
+        assert_text_eq(&eval.evaluate(&expr), "World");
+    }
+
+    #[test]
+    fn test_textafter_instance() {
+        let grid = Grid::new();
+        let eval = Evaluator::new(&grid);
+        let expr = make_fn_expr(BuiltinFunction::TextAfter, vec![text("a-b-c-d"), text("-"), num(2.0)]);
+        assert_text_eq(&eval.evaluate(&expr), "c-d");
+    }
+
+    #[test]
+    fn test_textsplit_basic() {
+        let grid = Grid::new();
+        let eval = Evaluator::new(&grid);
+        let expr = make_fn_expr(BuiltinFunction::TextSplit, vec![text("a,b,c"), text(",")]);
+        let result = eval.evaluate(&expr);
+        match &result {
+            EvalResult::Array(items) => {
+                assert_eq!(items.len(), 3);
+                assert_eq!(items[0], EvalResult::Text("a".to_string()));
+                assert_eq!(items[1], EvalResult::Text("b".to_string()));
+                assert_eq!(items[2], EvalResult::Text("c".to_string()));
+            }
+            _ => panic!("Expected Array, got {:?}", result),
+        }
+    }
+
+    #[test]
+    fn test_valuetotext_number() {
+        let grid = Grid::new();
+        let eval = Evaluator::new(&grid);
+        let expr = make_fn_expr(BuiltinFunction::ValueToText, vec![num(42.0)]);
+        assert_text_eq(&eval.evaluate(&expr), "42");
+    }
+
+    #[test]
+    fn test_valuetotext_string_strict() {
+        let grid = Grid::new();
+        let eval = Evaluator::new(&grid);
+        let expr = make_fn_expr(BuiltinFunction::ValueToText, vec![text("hi"), num(1.0)]);
+        assert_text_eq(&eval.evaluate(&expr), "\"hi\"");
+    }
+
+    #[test]
+    fn test_arraytotext() {
+        let grid = make_grid();
+        let eval = Evaluator::new(&grid);
+        let expr = make_fn_expr(BuiltinFunction::ArrayToText, vec![
+            Expression::Range {
+                sheet: None,
+                start: Box::new(Expression::CellRef { sheet: None, col: "A".to_string(), row: 1 }),
+                end: Box::new(Expression::CellRef { sheet: None, col: "A".to_string(), row: 3 }),
+            }
+        ]);
+        let result = eval.evaluate(&expr);
+        match &result {
+            EvalResult::Text(s) => assert!(s.contains("10") && s.contains("20") && s.contains("30")),
+            _ => panic!("Expected Text, got {:?}", result),
+        }
+    }
+
+    // ==================== Date Function Tests ====================
+
+    #[test]
+    fn test_days360_us_method() {
+        let grid = Grid::new();
+        let eval = Evaluator::new(&grid);
+        // DATE(2024,1,1) to DATE(2024,7,1) using US method
+        let start = date_serial::date_to_serial(2024, 1, 1);
+        let end = date_serial::date_to_serial(2024, 7, 1);
+        let expr = make_fn_expr(BuiltinFunction::Days360, vec![num(start), num(end)]);
+        let result = eval.evaluate(&expr);
+        assert_num(&result, 180.0, 1.0);
+    }
+
+    #[test]
+    fn test_days360_european() {
+        let grid = Grid::new();
+        let eval = Evaluator::new(&grid);
+        let start = date_serial::date_to_serial(2024, 1, 31);
+        let end = date_serial::date_to_serial(2024, 3, 31);
+        let expr = make_fn_expr(BuiltinFunction::Days360, vec![num(start), num(end), bool_val(true)]);
+        let result = eval.evaluate(&expr);
+        assert_num(&result, 60.0, 1.0);
+    }
+
+    #[test]
+    fn test_yearfrac_basis0() {
+        let grid = Grid::new();
+        let eval = Evaluator::new(&grid);
+        let start = date_serial::date_to_serial(2024, 1, 1);
+        let end = date_serial::date_to_serial(2024, 7, 1);
+        let expr = make_fn_expr(BuiltinFunction::YearFrac, vec![num(start), num(end), num(0.0)]);
+        let result = eval.evaluate(&expr);
+        assert_num(&result, 0.5, 0.01);
+    }
+
+    #[test]
+    fn test_yearfrac_basis1() {
+        let grid = Grid::new();
+        let eval = Evaluator::new(&grid);
+        let start = date_serial::date_to_serial(2024, 1, 1);
+        let end = date_serial::date_to_serial(2025, 1, 1);
+        let expr = make_fn_expr(BuiltinFunction::YearFrac, vec![num(start), num(end), num(1.0)]);
+        let result = eval.evaluate(&expr);
+        assert_num(&result, 1.0, 0.01);
+    }
+
+    #[test]
+    fn test_isoweeknum() {
+        let grid = Grid::new();
+        let eval = Evaluator::new(&grid);
+        // Jan 1, 2024 is a Monday -> ISO week 1
+        let serial = date_serial::date_to_serial(2024, 1, 1);
+        let expr = make_fn_expr(BuiltinFunction::IsoWeekNum, vec![num(serial)]);
+        let result = eval.evaluate(&expr);
+        assert_num(&result, 1.0, 0.1);
+    }
+
+    #[test]
+    fn test_isoweeknum_dec31() {
+        let grid = Grid::new();
+        let eval = Evaluator::new(&grid);
+        // Dec 31, 2024 is a Tuesday -> ISO week 1 of 2025
+        let serial = date_serial::date_to_serial(2024, 12, 31);
+        let expr = make_fn_expr(BuiltinFunction::IsoWeekNum, vec![num(serial)]);
+        let result = eval.evaluate(&expr);
+        assert_num(&result, 1.0, 0.1);
+    }
+
+    #[test]
+    fn test_networkdays_intl_custom_weekend() {
+        let grid = Grid::new();
+        let eval = Evaluator::new(&grid);
+        let start = date_serial::date_to_serial(2024, 1, 1);
+        let end = date_serial::date_to_serial(2024, 1, 7); // 7 days
+        // Weekend = 11 (Sunday only)
+        let expr = make_fn_expr(BuiltinFunction::NetworkDaysIntl, vec![num(start), num(end), num(11.0)]);
+        let result = eval.evaluate(&expr);
+        assert_num(&result, 6.0, 0.1);
+    }
+
+    #[test]
+    fn test_workday_intl() {
+        let grid = Grid::new();
+        let eval = Evaluator::new(&grid);
+        let start = date_serial::date_to_serial(2024, 1, 1);
+        // 5 workdays with default weekends (Sat+Sun)
+        let expr = make_fn_expr(BuiltinFunction::WorkDayIntl, vec![num(start), num(5.0)]);
+        let result = eval.evaluate(&expr);
+        let expected = date_serial::date_to_serial(2024, 1, 8);
+        assert_num(&result, expected, 0.1);
+    }
+
+    // ==================== Statistical Tests ====================
+
+    #[test]
+    fn test_rank_avg_with_ties() {
+        // Set up cells: A1=10, A2=10, A3=20
+        let mut grid = Grid::new();
+        grid.set_cell(0, 0, Cell::new_number(10.0));
+        grid.set_cell(1, 0, Cell::new_number(10.0));
+        grid.set_cell(2, 0, Cell::new_number(20.0));
+        let eval = Evaluator::new(&grid);
+        let expr = make_fn_expr(BuiltinFunction::RankAvg, vec![
+            num(10.0),
+            Expression::Range {
+                sheet: None,
+                start: Box::new(Expression::CellRef { sheet: None, col: "A".to_string(), row: 1 }),
+                end: Box::new(Expression::CellRef { sheet: None, col: "A".to_string(), row: 3 }),
+            },
+        ]);
+        let result = eval.evaluate(&expr);
+        // 10 appears at positions 2 and 3 (descending), average = 2.5
+        assert_num(&result, 2.5, 0.01);
+    }
+
+    #[test]
+    fn test_percentrank() {
+        let mut grid = Grid::new();
+        grid.set_cell(0, 0, Cell::new_number(1.0));
+        grid.set_cell(1, 0, Cell::new_number(2.0));
+        grid.set_cell(2, 0, Cell::new_number(3.0));
+        grid.set_cell(3, 0, Cell::new_number(4.0));
+        grid.set_cell(4, 0, Cell::new_number(5.0));
+        let eval = Evaluator::new(&grid);
+        let expr = make_fn_expr(BuiltinFunction::PercentRank, vec![
+            Expression::Range {
+                sheet: None,
+                start: Box::new(Expression::CellRef { sheet: None, col: "A".to_string(), row: 1 }),
+                end: Box::new(Expression::CellRef { sheet: None, col: "A".to_string(), row: 5 }),
+            },
+            num(3.0),
+        ]);
+        let result = eval.evaluate(&expr);
+        assert_num(&result, 0.5, 0.01);
+    }
+
+    #[test]
+    fn test_mode_mult() {
+        let mut grid = Grid::new();
+        grid.set_cell(0, 0, Cell::new_number(1.0));
+        grid.set_cell(1, 0, Cell::new_number(2.0));
+        grid.set_cell(2, 0, Cell::new_number(2.0));
+        grid.set_cell(3, 0, Cell::new_number(3.0));
+        grid.set_cell(4, 0, Cell::new_number(3.0));
+        let eval = Evaluator::new(&grid);
+        let expr = make_fn_expr(BuiltinFunction::ModeMult, vec![
+            Expression::Range {
+                sheet: None,
+                start: Box::new(Expression::CellRef { sheet: None, col: "A".to_string(), row: 1 }),
+                end: Box::new(Expression::CellRef { sheet: None, col: "A".to_string(), row: 5 }),
+            },
+        ]);
+        let result = eval.evaluate(&expr);
+        match &result {
+            EvalResult::Array(items) => {
+                assert_eq!(items.len(), 2);
+                assert_eq!(items[0], EvalResult::Number(2.0));
+                assert_eq!(items[1], EvalResult::Number(3.0));
+            }
+            _ => panic!("Expected Array, got {:?}", result),
+        }
+    }
+
+    #[test]
+    fn test_stdev_s() {
+        let grid = make_grid();
+        let eval = Evaluator::new(&grid);
+        let expr = make_fn_expr(BuiltinFunction::StdevS, vec![
+            Expression::Range {
+                sheet: None,
+                start: Box::new(Expression::CellRef { sheet: None, col: "A".to_string(), row: 1 }),
+                end: Box::new(Expression::CellRef { sheet: None, col: "A".to_string(), row: 3 }),
+            },
+        ]);
+        let result = eval.evaluate(&expr);
+        assert_num(&result, 10.0, 0.01); // stdev.s of {10,20,30} = 10
+    }
+
+    #[test]
+    fn test_var_s() {
+        let grid = make_grid();
+        let eval = Evaluator::new(&grid);
+        let expr = make_fn_expr(BuiltinFunction::VarS, vec![
+            Expression::Range {
+                sheet: None,
+                start: Box::new(Expression::CellRef { sheet: None, col: "A".to_string(), row: 1 }),
+                end: Box::new(Expression::CellRef { sheet: None, col: "A".to_string(), row: 3 }),
+            },
+        ]);
+        let result = eval.evaluate(&expr);
+        assert_num(&result, 100.0, 0.01); // var.s of {10,20,30} = 100
+    }
+
+    #[test]
+    fn test_trend_linear() {
+        let mut grid = Grid::new();
+        grid.set_cell(0, 0, Cell::new_number(2.0));
+        grid.set_cell(1, 0, Cell::new_number(4.0));
+        grid.set_cell(2, 0, Cell::new_number(6.0));
+        let eval = Evaluator::new(&grid);
+        // TREND({2,4,6}) with default x={1,2,3} -> should predict y=2x
+        let expr = make_fn_expr(BuiltinFunction::Trend, vec![
+            Expression::Range {
+                sheet: None,
+                start: Box::new(Expression::CellRef { sheet: None, col: "A".to_string(), row: 1 }),
+                end: Box::new(Expression::CellRef { sheet: None, col: "A".to_string(), row: 3 }),
+            },
+        ]);
+        let result = eval.evaluate(&expr);
+        match &result {
+            EvalResult::Array(items) => {
+                assert_eq!(items.len(), 3);
+                assert_num(&items[0], 2.0, 0.01);
+                assert_num(&items[1], 4.0, 0.01);
+                assert_num(&items[2], 6.0, 0.01);
+            }
+            _ => panic!("Expected Array, got {:?}", result),
+        }
+    }
+
+    #[test]
+    fn test_linest_basic() {
+        let mut grid = Grid::new();
+        grid.set_cell(0, 0, Cell::new_number(2.0));
+        grid.set_cell(1, 0, Cell::new_number(4.0));
+        grid.set_cell(2, 0, Cell::new_number(6.0));
+        let eval = Evaluator::new(&grid);
+        let expr = make_fn_expr(BuiltinFunction::Linest, vec![
+            Expression::Range {
+                sheet: None,
+                start: Box::new(Expression::CellRef { sheet: None, col: "A".to_string(), row: 1 }),
+                end: Box::new(Expression::CellRef { sheet: None, col: "A".to_string(), row: 3 }),
+            },
+        ]);
+        let result = eval.evaluate(&expr);
+        // Should return [slope, intercept] = [2, 0]
+        match &result {
+            EvalResult::Array(items) => {
+                assert_eq!(items.len(), 2);
+                assert_num(&items[0], 2.0, 0.01);
+                assert_num(&items[1], 0.0, 0.01);
+            }
+            _ => panic!("Expected Array, got {:?}", result),
+        }
+    }
+
+    // ==================== Distribution Tests ====================
+
+    #[test]
+    fn test_norm_dist_cumulative() {
+        let grid = Grid::new();
+        let eval = Evaluator::new(&grid);
+        // NORM.DIST(0, 0, 1, TRUE) = 0.5
+        let expr = make_fn_expr(BuiltinFunction::NormDist, vec![num(0.0), num(0.0), num(1.0), bool_val(true)]);
+        assert_num(&eval.evaluate(&expr), 0.5, 0.001);
+    }
+
+    #[test]
+    fn test_norm_dist_pdf() {
+        let grid = Grid::new();
+        let eval = Evaluator::new(&grid);
+        // NORM.DIST(0, 0, 1, FALSE) = 1/sqrt(2*pi) ≈ 0.3989
+        let expr = make_fn_expr(BuiltinFunction::NormDist, vec![num(0.0), num(0.0), num(1.0), bool_val(false)]);
+        assert_num(&eval.evaluate(&expr), 0.3989, 0.001);
+    }
+
+    #[test]
+    fn test_binom_dist_exact() {
+        let grid = Grid::new();
+        let eval = Evaluator::new(&grid);
+        // BINOM.DIST(3, 10, 0.5, FALSE) ≈ 0.1172
+        let expr = make_fn_expr(BuiltinFunction::BinomDist, vec![num(3.0), num(10.0), num(0.5), bool_val(false)]);
+        assert_num(&eval.evaluate(&expr), 0.1172, 0.001);
+    }
+
+    #[test]
+    fn test_binom_dist_cumulative() {
+        let grid = Grid::new();
+        let eval = Evaluator::new(&grid);
+        // BINOM.DIST(5, 10, 0.5, TRUE) ≈ 0.6230
+        let expr = make_fn_expr(BuiltinFunction::BinomDist, vec![num(5.0), num(10.0), num(0.5), bool_val(true)]);
+        assert_num(&eval.evaluate(&expr), 0.6230, 0.001);
+    }
+
+    #[test]
+    fn test_poisson_dist_exact() {
+        let grid = Grid::new();
+        let eval = Evaluator::new(&grid);
+        // POISSON.DIST(2, 5, FALSE) ≈ 0.0842
+        let expr = make_fn_expr(BuiltinFunction::PoissonDist, vec![num(2.0), num(5.0), bool_val(false)]);
+        assert_num(&eval.evaluate(&expr), 0.0842, 0.001);
+    }
+
+    #[test]
+    fn test_poisson_dist_cumulative() {
+        let grid = Grid::new();
+        let eval = Evaluator::new(&grid);
+        // POISSON.DIST(3, 2, TRUE) ≈ 0.8571
+        let expr = make_fn_expr(BuiltinFunction::PoissonDist, vec![num(3.0), num(2.0), bool_val(true)]);
+        assert_num(&eval.evaluate(&expr), 0.8571, 0.001);
+    }
+
+    #[test]
+    fn test_confidence_norm() {
+        let grid = Grid::new();
+        let eval = Evaluator::new(&grid);
+        // CONFIDENCE.NORM(0.05, 2.5, 50) ≈ 0.6929
+        let expr = make_fn_expr(BuiltinFunction::ConfidenceNorm, vec![num(0.05), num(2.5), num(50.0)]);
+        assert_num(&eval.evaluate(&expr), 0.6929, 0.01);
+    }
+
+    // ==================== Financial Tests ====================
+
+    #[test]
+    fn test_ipmt() {
+        let grid = Grid::new();
+        let eval = Evaluator::new(&grid);
+        // IPMT(0.1/12, 1, 36, 8000)
+        let expr = make_fn_expr(BuiltinFunction::Ipmt, vec![num(0.1/12.0), num(1.0), num(36.0), num(8000.0)]);
+        let result = eval.evaluate(&expr);
+        assert_num(&result, -66.67, 1.0);
+    }
+
+    #[test]
+    fn test_ppmt() {
+        let grid = Grid::new();
+        let eval = Evaluator::new(&grid);
+        // PPMT(0.1/12, 1, 36, 8000)
+        let expr = make_fn_expr(BuiltinFunction::Ppmt, vec![num(0.1/12.0), num(1.0), num(36.0), num(8000.0)]);
+        let result = eval.evaluate(&expr);
+        // PMT ≈ -258.14, IPMT ≈ -66.67, PPMT ≈ -191.47
+        assert_num(&result, -191.47, 2.0);
+    }
+
+    #[test]
+    fn test_fvschedule() {
+        // FVSCHEDULE(1000, {0.09, 0.11, 0.10})
+        let mut g = Grid::new();
+        g.set_cell(0, 0, Cell::new_number(0.09));
+        g.set_cell(1, 0, Cell::new_number(0.11));
+        g.set_cell(2, 0, Cell::new_number(0.10));
+        let eval = Evaluator::new(&g);
+        let expr = make_fn_expr(BuiltinFunction::FvSchedule, vec![
+            num(1000.0),
+            Expression::Range {
+                sheet: None,
+                start: Box::new(Expression::CellRef { sheet: None, col: "A".to_string(), row: 1 }),
+                end: Box::new(Expression::CellRef { sheet: None, col: "A".to_string(), row: 3 }),
+            },
+        ]);
+        let result = eval.evaluate(&expr);
+        // 1000 * 1.09 * 1.11 * 1.10 = 1329.99
+        assert_num(&result, 1329.99, 1.0);
+    }
+
+    #[test]
+    fn test_mirr() {
+        let mut grid = Grid::new();
+        grid.set_cell(0, 0, Cell::new_number(-120000.0));
+        grid.set_cell(1, 0, Cell::new_number(39000.0));
+        grid.set_cell(2, 0, Cell::new_number(30000.0));
+        grid.set_cell(3, 0, Cell::new_number(21000.0));
+        grid.set_cell(4, 0, Cell::new_number(37000.0));
+        grid.set_cell(5, 0, Cell::new_number(46000.0));
+        let eval = Evaluator::new(&grid);
+        let expr = make_fn_expr(BuiltinFunction::Mirr, vec![
+            Expression::Range {
+                sheet: None,
+                start: Box::new(Expression::CellRef { sheet: None, col: "A".to_string(), row: 1 }),
+                end: Box::new(Expression::CellRef { sheet: None, col: "A".to_string(), row: 6 }),
+            },
+            num(0.10),
+            num(0.12),
+        ]);
+        let result = eval.evaluate(&expr);
+        assert_num(&result, 0.1261, 0.01); // Excel returns ~12.61%
+    }
+
+    #[test]
+    fn test_syd() {
+        let grid = Grid::new();
+        let eval = Evaluator::new(&grid);
+        // SYD(30000, 7500, 10, 1) = 30000-7500 * 10/55 = 4090.91
+        let expr = make_fn_expr(BuiltinFunction::Syd, vec![num(30000.0), num(7500.0), num(10.0), num(1.0)]);
+        let result = eval.evaluate(&expr);
+        assert_num(&result, 4090.91, 1.0);
+    }
+
+    #[test]
+    fn test_effect() {
+        let grid = Grid::new();
+        let eval = Evaluator::new(&grid);
+        // EFFECT(0.10, 4) ≈ 0.10381
+        let expr = make_fn_expr(BuiltinFunction::Effect, vec![num(0.10), num(4.0)]);
+        assert_num(&eval.evaluate(&expr), 0.10381, 0.001);
+    }
+
+    #[test]
+    fn test_nominal() {
+        let grid = Grid::new();
+        let eval = Evaluator::new(&grid);
+        // NOMINAL(0.10381, 4) ≈ 0.10
+        let expr = make_fn_expr(BuiltinFunction::Nominal, vec![num(0.10381289), num(4.0)]);
+        assert_num(&eval.evaluate(&expr), 0.10, 0.001);
+    }
+
+    // ==================== Lookup Tests ====================
+
+    #[test]
+    fn test_xmatch_exact() {
+        let mut grid = Grid::new();
+        grid.set_cell(0, 0, Cell::new_number(10.0));
+        grid.set_cell(1, 0, Cell::new_number(20.0));
+        grid.set_cell(2, 0, Cell::new_number(30.0));
+        let eval = Evaluator::new(&grid);
+        let expr = make_fn_expr(BuiltinFunction::XMatch, vec![
+            num(20.0),
+            Expression::Range {
+                sheet: None,
+                start: Box::new(Expression::CellRef { sheet: None, col: "A".to_string(), row: 1 }),
+                end: Box::new(Expression::CellRef { sheet: None, col: "A".to_string(), row: 3 }),
+            },
+        ]);
+        assert_num(&eval.evaluate(&expr), 2.0, 0.01);
+    }
+
+    #[test]
+    fn test_xmatch_not_found() {
+        let mut grid = Grid::new();
+        grid.set_cell(0, 0, Cell::new_number(10.0));
+        grid.set_cell(1, 0, Cell::new_number(20.0));
+        let eval = Evaluator::new(&grid);
+        let expr = make_fn_expr(BuiltinFunction::XMatch, vec![
+            num(99.0),
+            Expression::Range {
+                sheet: None,
+                start: Box::new(Expression::CellRef { sheet: None, col: "A".to_string(), row: 1 }),
+                end: Box::new(Expression::CellRef { sheet: None, col: "A".to_string(), row: 2 }),
+            },
+        ]);
+        assert_error(&eval.evaluate(&expr));
+    }
+
+    #[test]
+    fn test_xmatch_approx_larger() {
+        let mut grid = Grid::new();
+        grid.set_cell(0, 0, Cell::new_number(10.0));
+        grid.set_cell(1, 0, Cell::new_number(20.0));
+        grid.set_cell(2, 0, Cell::new_number(30.0));
+        let eval = Evaluator::new(&grid);
+        // match_mode=1 (next larger)
+        let expr = make_fn_expr(BuiltinFunction::XMatch, vec![
+            num(15.0),
+            Expression::Range {
+                sheet: None,
+                start: Box::new(Expression::CellRef { sheet: None, col: "A".to_string(), row: 1 }),
+                end: Box::new(Expression::CellRef { sheet: None, col: "A".to_string(), row: 3 }),
+            },
+            num(1.0),
+        ]);
+        assert_num(&eval.evaluate(&expr), 2.0, 0.01); // 20 is the next larger
+    }
+
+    // ==================== Selection Tests ====================
+
+    #[test]
+    fn test_chooserows() {
+        let grid = make_grid();
+        let eval = Evaluator::new(&grid);
+        let expr = make_fn_expr(BuiltinFunction::ChooseRows, vec![
+            Expression::Range {
+                sheet: None,
+                start: Box::new(Expression::CellRef { sheet: None, col: "A".to_string(), row: 1 }),
+                end: Box::new(Expression::CellRef { sheet: None, col: "A".to_string(), row: 3 }),
+            },
+            num(1.0),
+            num(3.0),
+        ]);
+        let result = eval.evaluate(&expr);
+        match &result {
+            EvalResult::Array(items) => {
+                assert_eq!(items.len(), 2);
+                assert_eq!(items[0], EvalResult::Number(10.0));
+                assert_eq!(items[1], EvalResult::Number(30.0));
+            }
+            _ => panic!("Expected Array, got {:?}", result),
+        }
+    }
+
+    // ==================== Array Reshaping Tests ====================
+
+    #[test]
+    fn test_vstack() {
+        let mut grid = Grid::new();
+        grid.set_cell(0, 0, Cell::new_number(1.0));
+        grid.set_cell(1, 0, Cell::new_number(2.0));
+        grid.set_cell(0, 1, Cell::new_number(3.0));
+        grid.set_cell(1, 1, Cell::new_number(4.0));
+        let eval = Evaluator::new(&grid);
+        let expr = make_fn_expr(BuiltinFunction::VStack, vec![
+            Expression::Range {
+                sheet: None,
+                start: Box::new(Expression::CellRef { sheet: None, col: "A".to_string(), row: 1 }),
+                end: Box::new(Expression::CellRef { sheet: None, col: "A".to_string(), row: 2 }),
+            },
+            Expression::Range {
+                sheet: None,
+                start: Box::new(Expression::CellRef { sheet: None, col: "B".to_string(), row: 1 }),
+                end: Box::new(Expression::CellRef { sheet: None, col: "B".to_string(), row: 2 }),
+            },
+        ]);
+        let result = eval.evaluate(&expr);
+        match &result {
+            EvalResult::Array(items) => assert_eq!(items.len(), 4),
+            _ => panic!("Expected Array, got {:?}", result),
+        }
+    }
+
+    #[test]
+    fn test_tocol() {
+        let grid = make_grid();
+        let eval = Evaluator::new(&grid);
+        let expr = make_fn_expr(BuiltinFunction::ToCol, vec![
+            Expression::Range {
+                sheet: None,
+                start: Box::new(Expression::CellRef { sheet: None, col: "A".to_string(), row: 1 }),
+                end: Box::new(Expression::CellRef { sheet: None, col: "B".to_string(), row: 2 }),
+            },
+        ]);
+        let result = eval.evaluate(&expr);
+        match &result {
+            EvalResult::Array(items) => {
+                assert_eq!(items.len(), 4);
+                assert_eq!(items[0], EvalResult::Number(10.0));
+                assert_eq!(items[1], EvalResult::Number(5.0));
+                assert_eq!(items[2], EvalResult::Number(20.0));
+                assert_eq!(items[3], EvalResult::Number(15.0));
+            }
+            _ => panic!("Expected Array, got {:?}", result),
+        }
+    }
+
+    #[test]
+    fn test_torow() {
+        let grid = make_grid();
+        let eval = Evaluator::new(&grid);
+        let expr = make_fn_expr(BuiltinFunction::ToRow, vec![
+            Expression::Range {
+                sheet: None,
+                start: Box::new(Expression::CellRef { sheet: None, col: "A".to_string(), row: 1 }),
+                end: Box::new(Expression::CellRef { sheet: None, col: "A".to_string(), row: 3 }),
+            },
+        ]);
+        let result = eval.evaluate(&expr);
+        match &result {
+            EvalResult::Array(items) => assert_eq!(items.len(), 3),
+            _ => panic!("Expected Array, got {:?}", result),
+        }
+    }
+
+    #[test]
+    fn test_wraprows() {
+        let mut grid = Grid::new();
+        for i in 0..6 {
+            grid.set_cell(i, 0, Cell::new_number((i + 1) as f64));
+        }
+        let eval = Evaluator::new(&grid);
+        let expr = make_fn_expr(BuiltinFunction::WrapRows, vec![
+            Expression::Range {
+                sheet: None,
+                start: Box::new(Expression::CellRef { sheet: None, col: "A".to_string(), row: 1 }),
+                end: Box::new(Expression::CellRef { sheet: None, col: "A".to_string(), row: 6 }),
+            },
+            num(3.0),
+        ]);
+        let result = eval.evaluate(&expr);
+        match &result {
+            EvalResult::Array(rows) => {
+                assert_eq!(rows.len(), 2); // 6 elements / 3 per row = 2 rows
+            }
+            _ => panic!("Expected Array, got {:?}", result),
+        }
+    }
+
+    #[test]
+    fn test_wrapcols() {
+        let mut grid = Grid::new();
+        for i in 0..6 {
+            grid.set_cell(i, 0, Cell::new_number((i + 1) as f64));
+        }
+        let eval = Evaluator::new(&grid);
+        let expr = make_fn_expr(BuiltinFunction::WrapCols, vec![
+            Expression::Range {
+                sheet: None,
+                start: Box::new(Expression::CellRef { sheet: None, col: "A".to_string(), row: 1 }),
+                end: Box::new(Expression::CellRef { sheet: None, col: "A".to_string(), row: 6 }),
+            },
+            num(3.0),
+        ]);
+        let result = eval.evaluate(&expr);
+        match &result {
+            EvalResult::Array(rows) => {
+                assert_eq!(rows.len(), 3); // 3 rows (wrap_count)
+            }
+            _ => panic!("Expected Array, got {:?}", result),
+        }
+    }
+
+    #[test]
+    fn test_expand_basic() {
+        let grid = make_grid();
+        let eval = Evaluator::new(&grid);
+        let expr = make_fn_expr(BuiltinFunction::Expand, vec![
+            Expression::Range {
+                sheet: None,
+                start: Box::new(Expression::CellRef { sheet: None, col: "A".to_string(), row: 1 }),
+                end: Box::new(Expression::CellRef { sheet: None, col: "A".to_string(), row: 2 }),
+            },
+            num(4.0), // expand to 4 rows
+        ]);
+        let result = eval.evaluate(&expr);
+        match &result {
+            EvalResult::Array(items) => {
+                assert_eq!(items.len(), 4);
+                assert_eq!(items[0], EvalResult::Number(10.0));
+                assert_eq!(items[1], EvalResult::Number(20.0));
+                // items[2] and [3] should be #N/A (default pad)
+                assert!(matches!(items[2], EvalResult::Error(CellError::NA)));
+                assert!(matches!(items[3], EvalResult::Error(CellError::NA)));
+            }
+            _ => panic!("Expected Array, got {:?}", result),
+        }
+    }
+
+    // ==================== Reference Tests ====================
+
+    #[test]
+    fn test_areas() {
+        let grid = Grid::new();
+        let eval = Evaluator::new(&grid);
+        let expr = make_fn_expr(BuiltinFunction::Areas, vec![
+            Expression::Range {
+                sheet: None,
+                start: Box::new(Expression::CellRef { sheet: None, col: "A".to_string(), row: 1 }),
+                end: Box::new(Expression::CellRef { sheet: None, col: "B".to_string(), row: 5 }),
+            },
+        ]);
+        assert_num(&eval.evaluate(&expr), 1.0, 0.01);
+    }
+
+    #[test]
+    fn test_formulatext_returns_na() {
+        let grid = Grid::new();
+        let eval = Evaluator::new(&grid);
+        let expr = make_fn_expr(BuiltinFunction::FormulaText, vec![
+            Expression::CellRef { sheet: None, col: "A".to_string(), row: 1 },
+        ]);
+        assert_error(&eval.evaluate(&expr));
+    }
+
+    // ==================== Growth / Logest Tests ====================
+
+    #[test]
+    fn test_growth_exponential() {
+        let mut grid = Grid::new();
+        grid.set_cell(0, 0, Cell::new_number(1.0));
+        grid.set_cell(1, 0, Cell::new_number(2.0));
+        grid.set_cell(2, 0, Cell::new_number(4.0));
+        grid.set_cell(3, 0, Cell::new_number(8.0));
+        let eval = Evaluator::new(&grid);
+        // GROWTH with y = {1,2,4,8}, x = {1,2,3,4}
+        let expr = make_fn_expr(BuiltinFunction::Growth, vec![
+            Expression::Range {
+                sheet: None,
+                start: Box::new(Expression::CellRef { sheet: None, col: "A".to_string(), row: 1 }),
+                end: Box::new(Expression::CellRef { sheet: None, col: "A".to_string(), row: 4 }),
+            },
+        ]);
+        let result = eval.evaluate(&expr);
+        match &result {
+            EvalResult::Array(items) => {
+                assert_eq!(items.len(), 4);
+                // Should approximately fit 2^x pattern
+                assert_num(&items[0], 1.0, 0.5);
+                assert_num(&items[3], 8.0, 0.5);
+            }
+            _ => panic!("Expected Array, got {:?}", result),
+        }
+    }
+
+    // ==================== XNPV / XIRR Tests ====================
+
+    #[test]
+    fn test_xnpv() {
+        let mut grid = Grid::new();
+        // values
+        grid.set_cell(0, 0, Cell::new_number(-10000.0));
+        grid.set_cell(1, 0, Cell::new_number(2750.0));
+        grid.set_cell(2, 0, Cell::new_number(4250.0));
+        grid.set_cell(3, 0, Cell::new_number(3250.0));
+        grid.set_cell(4, 0, Cell::new_number(2750.0));
+        // dates
+        let d1 = date_serial::date_to_serial(2024, 1, 1);
+        let d2 = date_serial::date_to_serial(2024, 3, 1);
+        let d3 = date_serial::date_to_serial(2024, 10, 30);
+        let d4 = date_serial::date_to_serial(2025, 2, 15);
+        let d5 = date_serial::date_to_serial(2025, 4, 1);
+        grid.set_cell(0, 1, Cell::new_number(d1));
+        grid.set_cell(1, 1, Cell::new_number(d2));
+        grid.set_cell(2, 1, Cell::new_number(d3));
+        grid.set_cell(3, 1, Cell::new_number(d4));
+        grid.set_cell(4, 1, Cell::new_number(d5));
+        let eval = Evaluator::new(&grid);
+        let expr = make_fn_expr(BuiltinFunction::Xnpv, vec![
+            num(0.09),
+            Expression::Range {
+                sheet: None,
+                start: Box::new(Expression::CellRef { sheet: None, col: "A".to_string(), row: 1 }),
+                end: Box::new(Expression::CellRef { sheet: None, col: "A".to_string(), row: 5 }),
+            },
+            Expression::Range {
+                sheet: None,
+                start: Box::new(Expression::CellRef { sheet: None, col: "B".to_string(), row: 1 }),
+                end: Box::new(Expression::CellRef { sheet: None, col: "B".to_string(), row: 5 }),
+            },
+        ]);
+        let result = eval.evaluate(&expr);
+        // XNPV should return a positive number since sum of cash flows > initial investment
+        match &result {
+            EvalResult::Number(n) => assert!(*n > 0.0, "XNPV should be positive, got {}", n),
+            _ => panic!("Expected Number, got {:?}", result),
+        }
+    }
+
+    // ==================== Cumulative Financial Tests ====================
+
+    #[test]
+    fn test_cumipmt() {
+        let grid = Grid::new();
+        let eval = Evaluator::new(&grid);
+        // CUMIPMT(0.09/12, 30*12, 125000, 1, 1, 0) ≈ interest portion of first payment
+        let expr = make_fn_expr(BuiltinFunction::Cumipmt, vec![
+            num(0.09 / 12.0), num(360.0), num(125000.0), num(1.0), num(1.0), num(0.0),
+        ]);
+        let result = eval.evaluate(&expr);
+        match &result {
+            EvalResult::Number(n) => assert!(*n < 0.0, "CUMIPMT should be negative, got {}", n),
+            _ => panic!("Expected Number, got {:?}", result),
+        }
+    }
+
+    #[test]
+    fn test_cumprinc() {
+        let grid = Grid::new();
+        let eval = Evaluator::new(&grid);
+        // CUMPRINC(0.09/12, 30*12, 125000, 1, 1, 0)
+        let expr = make_fn_expr(BuiltinFunction::Cumprinc, vec![
+            num(0.09 / 12.0), num(360.0), num(125000.0), num(1.0), num(1.0), num(0.0),
+        ]);
+        let result = eval.evaluate(&expr);
+        match &result {
+            EvalResult::Number(n) => assert!(*n < 0.0, "CUMPRINC should be negative, got {}", n),
+            _ => panic!("Expected Number, got {:?}", result),
+        }
+    }
+
+    // ==================== VDB Test ====================
+
+    #[test]
+    fn test_vdb() {
+        let grid = Grid::new();
+        let eval = Evaluator::new(&grid);
+        // VDB(2400, 300, 10, 0, 1) - depreciation in first year
+        let expr = make_fn_expr(BuiltinFunction::Vdb, vec![
+            num(2400.0), num(300.0), num(10.0), num(0.0), num(1.0),
+        ]);
+        let result = eval.evaluate(&expr);
+        match &result {
+            EvalResult::Number(n) => assert!(*n > 0.0, "VDB should be positive, got {}", n),
+            _ => panic!("Expected Number, got {:?}", result),
+        }
     }
 }

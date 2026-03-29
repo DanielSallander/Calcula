@@ -643,6 +643,9 @@ fn convert_builtin_function(func: &ParserBuiltinFn) -> EngineBuiltinFn {
         ParserBuiltinFn::FileLines => EngineBuiltinFn::FileLines,
         ParserBuiltinFn::FileExists => EngineBuiltinFn::FileExists,
 
+        // Subtotal function
+        ParserBuiltinFn::Subtotal => EngineBuiltinFn::Subtotal,
+
         ParserBuiltinFn::Custom(name) => EngineBuiltinFn::Custom(name.clone()),
     }
 }
@@ -2247,6 +2250,7 @@ fn builtin_function_to_name(func: &ParserBuiltinFn) -> String {
         ParserBuiltinFn::MakeArray => "MAKEARRAY".to_string(),
         ParserBuiltinFn::ByRow => "BYROW".to_string(),
         ParserBuiltinFn::ByCol => "BYCOL".to_string(),
+        ParserBuiltinFn::Subtotal => "SUBTOTAL".to_string(),
         ParserBuiltinFn::Custom(name) => name.clone(),
     }
 }
@@ -3499,6 +3503,11 @@ pub fn run() {
             commands::set_page_setup,
             commands::get_print_data,
             commands::write_binary_file,
+            commands::insert_row_page_break,
+            commands::remove_row_page_break,
+            commands::insert_col_page_break,
+            commands::remove_col_page_break,
+            commands::reset_all_page_breaks,
             // MCP server commands
             mcp::mcp_start,
             mcp::mcp_stop,
