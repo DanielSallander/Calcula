@@ -243,6 +243,7 @@ fn clone_sheet_with_remap(
                 value: cell.value.clone(),
                 formula: new_formula,
                 style_index: new_style,
+                rich_text: cell.rich_text.clone(),
             },
         );
     }
@@ -392,6 +393,7 @@ mod tests {
                 value: SavedCellValue::Text("Existing".to_string()),
                 formula: None,
                 style_index: 0,
+                rich_text: None,
             },
         );
         Workbook {
@@ -417,6 +419,7 @@ mod tests {
                 value: SavedCellValue::Text("Dashboard".to_string()),
                 formula: None,
                 style_index: 0,
+                rich_text: None,
             },
         );
         cells.insert(
@@ -425,6 +428,7 @@ mod tests {
                 value: SavedCellValue::Number(100.0),
                 formula: Some("=SalesTable[Revenue]".to_string()),
                 style_index: 0,
+                rich_text: None,
             },
         );
         Workbook {

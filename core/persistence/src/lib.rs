@@ -11,7 +11,7 @@ pub use error::PersistenceError;
 pub use xlsx_reader::load_xlsx;
 pub use xlsx_writer::save_xlsx;
 
-use engine::cell::{Cell, CellValue, DictKey};
+use engine::cell::{Cell, CellValue, DictKey, RichTextRun};
 use engine::grid::Grid;
 use engine::style::{CellStyle, StyleRegistry};
 use serde::{Deserialize, Serialize};
@@ -152,6 +152,8 @@ pub struct SavedCell {
     pub value: SavedCellValue,
     pub formula: Option<String>,
     pub style_index: usize,
+    /// Rich text runs for partial formatting within the cell.
+    pub rich_text: Option<Vec<RichTextRun>>,
 }
 
 impl SavedCell {
@@ -160,6 +162,7 @@ impl SavedCell {
             value: SavedCellValue::from_value(&cell.value),
             formula: cell.formula.clone(),
             style_index: cell.style_index,
+            rich_text: cell.rich_text.clone(),
         }
     }
 
@@ -168,6 +171,7 @@ impl SavedCell {
             value: self.value.to_value(),
             formula: self.formula.clone(),
             style_index: self.style_index,
+            rich_text: self.rich_text.clone(),
             cached_ast: None,
         }
     }

@@ -13,6 +13,7 @@
 //! ```
 
 use crate::cell_ref;
+use engine::cell::RichTextRun;
 use persistence::{SavedCell, SavedCellValue};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
@@ -43,6 +44,10 @@ pub struct CellEntry {
     /// Error message (only for type "e").
     #[serde(skip_serializing_if = "Option::is_none")]
     pub e: Option<String>,
+
+    /// Rich text runs for partial formatting within the cell.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rt: Option<Vec<RichTextRun>>,
 }
 
 fn is_null_value(v: &serde_json::Value) -> bool {
@@ -54,10 +59,11 @@ pub fn cells_to_sheet_data(cells: &HashMap<(u32, u32), SavedCell>) -> SheetData 
     let mut sorted_cells = BTreeMap::new();
 
     for ((row, col), cell) in cells {
-        // Skip completely empty cells (no value, no formula, default style)
+        // Skip completely empty cells (no value, no formula, default style, no rich text)
         if matches!(cell.value, SavedCellValue::Empty)
             && cell.formula.is_none()
             && cell.style_index == 0
+            && cell.rich_text.is_none()
         {
             continue;
         }
@@ -95,6 +101,7 @@ fn saved_cell_to_entry(cell: &SavedCell) -> CellEntry {
         t,
         f: cell.formula.clone(),
         e,
+        rt: cell.rich_text.clone(),
     }
 }
 
@@ -148,6 +155,7 @@ fn entry_to_saved_cell(entry: &CellEntry) -> SavedCell {
         value,
         formula: entry.f.clone(),
         style_index: 0, // Will be set from styles.json
+        rich_text: entry.rt.clone(),
     }
 }
 
@@ -241,6 +249,7 @@ mod tests {
                 value: SavedCellValue::Number(42.5),
                 formula: None,
                 style_index: 0,
+                rich_text: None,
             },
         );
         cells.insert(
@@ -249,6 +258,7 @@ mod tests {
                 value: SavedCellValue::Number(0.0),
                 formula: Some("=B1*2".to_string()),
                 style_index: 1,
+                rich_text: None,
             },
         );
 
@@ -276,6 +286,7 @@ mod tests {
                 value: SavedCellValue::Empty,
                 formula: None,
                 style_index: 0,
+                rich_text: None,
             },
         );
         // Cell with only style should be kept
@@ -285,6 +296,7 @@ mod tests {
                 value: SavedCellValue::Empty,
                 formula: None,
                 style_index: 5,
+                rich_text: None,
             },
         );
 
@@ -302,6 +314,7 @@ mod tests {
                 value: SavedCellValue::Text("hello".to_string()),
                 formula: None,
                 style_index: 1,
+                rich_text: None,
             },
         );
         cells.insert(
@@ -310,6 +323,7 @@ mod tests {
                 value: SavedCellValue::Boolean(true),
                 formula: None,
                 style_index: 1,
+                rich_text: None,
             },
         );
         cells.insert(
@@ -318,6 +332,7 @@ mod tests {
                 value: SavedCellValue::Error("DIV/0".to_string()),
                 formula: None,
                 style_index: 1,
+                rich_text: None,
             },
         );
         cells.insert(
@@ -329,6 +344,7 @@ mod tests {
                 ]),
                 formula: None,
                 style_index: 1,
+                rich_text: None,
             },
         );
 

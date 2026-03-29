@@ -74,6 +74,7 @@ pub fn set_cell_style(
             row_span,
             col_span,
             sheet_index: None,
+            rich_text: None,
         })
     } else {
         // Create a new empty cell with the style
@@ -81,6 +82,7 @@ pub fn set_cell_style(
             value: CellValue::Empty,
             formula: None,
             style_index,
+            rich_text: None,
             cached_ast: None,
         };
         grid.set_cell(row, col, cell.clone());
@@ -102,6 +104,7 @@ pub fn set_cell_style(
             row_span,
             col_span,
             sheet_index: None,
+            rich_text: None,
         })
     }
 }
@@ -144,6 +147,7 @@ pub fn apply_formatting(
                         value: CellValue::Empty,
                         formula: None,
                         style_index: 0,
+                        rich_text: None,
                         cached_ast: None,
                     },
                     0,
@@ -264,6 +268,7 @@ pub fn apply_formatting(
                 row_span,
                 col_span,
                 sheet_index: None,
+                rich_text: None,
             });
         }
     }
@@ -520,4 +525,63 @@ fn parse_border_side(param: &crate::api_types::BorderSideParam) -> BorderStyle {
 pub fn get_style_count(state: State<AppState>) -> usize {
     let styles = state.style_registry.lock().unwrap();
     styles.len()
+}
+
+/// Set rich text runs on a cell.
+/// Replaces any existing rich text. Pass null/empty to clear rich text.
+#[tauri::command]
+pub fn set_cell_rich_text(
+    state: State<AppState>,
+    row: u32,
+    col: u32,
+    runs: Option<Vec<crate::api_types::RichTextRunData>>,
+) -> Option<CellData> {
+    let mut grid = state.grid.lock().unwrap();
+    let mut grids = state.grids.lock().unwrap();
+    let active_sheet = *state.active_sheet.lock().unwrap();
+    let styles = state.style_registry.lock().unwrap();
+    let mut undo_stack = state.undo_stack.lock().unwrap();
+    let merged_regions = state.merged_regions.lock().unwrap();
+
+    // Record undo
+    let previous = grid.get_cell(row, col).cloned();
+    undo_stack.record_cell_change(row, col, previous);
+
+    // Get or create the cell, update rich_text
+    let engine_runs = runs.as_ref().map(|r| crate::api_types::data_to_rich_text_runs(r));
+    let mut cell = grid.get_cell(row, col).cloned().unwrap_or_else(Cell::new);
+    cell.rich_text = engine_runs;
+    grid.set_cell(row, col, cell);
+
+    // Sync to grids vector
+    if active_sheet < grids.len() {
+        if let Some(c) = grid.get_cell(row, col) {
+            grids[active_sheet].set_cell(row, col, c.clone());
+        }
+    }
+
+    // Build response
+    let cell = grid.get_cell(row, col)?;
+    let style = styles.get(cell.style_index);
+    let result = format_cell_value_with_color(&cell.value, style);
+    let (row_span, col_span) = match merged_regions
+        .iter()
+        .find(|m| m.start_row == row && m.start_col == col)
+    {
+        Some(m) => (m.end_row - m.start_row + 1, m.end_col - m.start_col + 1),
+        None => (1, 1),
+    };
+
+    Some(CellData {
+        row,
+        col,
+        display: result.text,
+        display_color: result.color,
+        formula: cell.formula.clone(),
+        style_index: cell.style_index,
+        row_span,
+        col_span,
+        sheet_index: None,
+        rich_text: cell.rich_text.as_ref().map(|r| crate::api_types::rich_text_runs_to_data(r)),
+    })
 }

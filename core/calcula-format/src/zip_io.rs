@@ -292,6 +292,7 @@ mod tests {
                 value: SavedCellValue::Text("Name".to_string()),
                 formula: None,
                 style_index: 1,
+                rich_text: None,
             },
         );
         cells.insert(
@@ -300,6 +301,7 @@ mod tests {
                 value: SavedCellValue::Text("Value".to_string()),
                 formula: None,
                 style_index: 1,
+                rich_text: None,
             },
         );
         cells.insert(
@@ -308,6 +310,7 @@ mod tests {
                 value: SavedCellValue::Text("Revenue".to_string()),
                 formula: None,
                 style_index: 0,
+                rich_text: None,
             },
         );
         cells.insert(
@@ -316,6 +319,7 @@ mod tests {
                 value: SavedCellValue::Number(42500.0),
                 formula: Some("=SUM(C2:C100)".to_string()),
                 style_index: 2,
+                rich_text: None,
             },
         );
         cells.insert(
@@ -324,6 +328,7 @@ mod tests {
                 value: SavedCellValue::Boolean(true),
                 formula: None,
                 style_index: 0,
+                rich_text: None,
             },
         );
 

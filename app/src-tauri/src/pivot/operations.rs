@@ -429,6 +429,7 @@ pub(crate) fn write_pivot_to_grid(
                     formula: None,
                     value: cell_value.clone(),
                     style_index: style_idx,
+                    rich_text: None,
                     cached_ast: None,
                 });
             }
@@ -436,6 +437,7 @@ pub(crate) fn write_pivot_to_grid(
                 formula: None,
                 value: cell_value,
                 style_index: style_idx,
+                rich_text: None,
                 cached_ast: None,
             });
         }

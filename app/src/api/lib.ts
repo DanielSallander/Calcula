@@ -44,6 +44,7 @@ export {
   getStyle,
   getAllStyles,
   setCellStyle,
+  setCellRichText,
   applyFormatting,
   getStyleCount,
 

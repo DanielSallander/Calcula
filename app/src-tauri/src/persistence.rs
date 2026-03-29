@@ -506,6 +506,7 @@ pub fn open_file(
                 row_span: 1,
                 col_span: 1,
                 sheet_index: None,
+                rich_text: None,
             }
         })
         .collect();

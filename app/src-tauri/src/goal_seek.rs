@@ -424,6 +424,7 @@ fn finalize_result(
             row_span,
             col_span,
             sheet_index: None,
+            rich_text: None,
         })
     };
 

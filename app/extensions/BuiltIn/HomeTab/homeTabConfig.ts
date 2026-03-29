@@ -57,6 +57,8 @@ export const ALL_ITEMS: HomeTabItem[] = [
   { id: "italic", label: "Italic", tooltip: "Italic (Ctrl+I)", type: "toggle", icon: "I", category: "Font" },
   { id: "underline", label: "Underline", tooltip: "Underline (Ctrl+U)", type: "toggle", icon: "U", category: "Font" },
   { id: "strikethrough", label: "Strikethrough", tooltip: "Strikethrough", type: "toggle", icon: "S", category: "Font" },
+  { id: "superscript", label: "Superscript", tooltip: "Superscript (Ctrl+Shift+=)", type: "toggle", icon: "x\u00B2", category: "Font" },
+  { id: "subscript", label: "Subscript", tooltip: "Subscript (Ctrl+=)", type: "toggle", icon: "x\u2082", category: "Font" },
   { id: "textColor", label: "Text Color", tooltip: "Font Color", type: "color", icon: "A", category: "Font" },
   { id: "backgroundColor", label: "Fill Color", tooltip: "Fill Color", type: "color", icon: "\u2588", category: "Font" },
   { id: "formatCells", label: "Format Cells", shortLabel: "Format", tooltip: "Format Cells... (Ctrl+1)", type: "button", icon: "\u2630", category: "Font" },
@@ -117,7 +119,7 @@ export const DEFAULT_LAYOUT: HomeTabLayout = {
     {
       id: "font",
       label: "Font",
-      items: ["bold", "italic", "underline", "strikethrough", "textColor", "backgroundColor", "formatCells"],
+      items: ["bold", "italic", "underline", "strikethrough", "superscript", "subscript", "textColor", "backgroundColor", "formatCells"],
     },
     {
       id: "alignment",

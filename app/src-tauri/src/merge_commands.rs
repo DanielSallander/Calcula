@@ -135,6 +135,7 @@ pub fn merge_cells(
         row_span: max_row - min_row + 1,
         col_span: max_col - min_col + 1,
         sheet_index: None,
+        rich_text: None,
     });
 
     Ok(MergeResult {
@@ -195,6 +196,7 @@ pub fn unmerge_cells(
             row_span: 1,
             col_span: 1,
             sheet_index: None,
+            rich_text: None,
         }];
 
         Ok(MergeResult {

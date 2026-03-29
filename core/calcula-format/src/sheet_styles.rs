@@ -50,6 +50,7 @@ pub fn apply_sheet_styles(
                         value: persistence::SavedCellValue::Empty,
                         formula: None,
                         style_index,
+                        rich_text: None,
                     },
                 );
             }
@@ -81,6 +82,7 @@ mod tests {
                 value: SavedCellValue::Text("Header".to_string()),
                 formula: None,
                 style_index: 3,
+                rich_text: None,
             },
         );
         cells.insert(
@@ -104,6 +106,7 @@ mod tests {
                 value: SavedCellValue::Text("Header".to_string()),
                 formula: None,
                 style_index: 0,
+                rich_text: None,
             },
         );
         loaded_cells.insert(
@@ -112,6 +115,7 @@ mod tests {
                 value: SavedCellValue::Number(100.0),
                 formula: None,
                 style_index: 0,
+                rich_text: None,
             },
         );
 

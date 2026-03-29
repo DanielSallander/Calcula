@@ -188,6 +188,7 @@ mod tests {
                 value: SavedCellValue::Text("Name".to_string()),
                 formula: None,
                 style_index: 0,
+                rich_text: None,
             },
         );
         cells.insert(
@@ -196,6 +197,7 @@ mod tests {
                 value: SavedCellValue::Number(100.0),
                 formula: Some("=B2*2".to_string()),
                 style_index: 0,
+                rich_text: None,
             },
         );
 

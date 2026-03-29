@@ -281,6 +281,7 @@ mod tests {
             value,
             formula: None,
             style_index: 0,
+            rich_text: None,
             cached_ast: None,
         }
     }

@@ -90,6 +90,7 @@ export {
   colToIndex,
   setActiveSheet as setActiveSheetApi,
   setCellStyle,
+  setCellRichText,
   beginUndoTransaction,
   commitUndoTransaction,
   undo,

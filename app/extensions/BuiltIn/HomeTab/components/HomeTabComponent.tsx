@@ -11,7 +11,9 @@ import {
   getCell,
   getStyle,
   applyFormatting,
+  setCellRichText,
 } from "../../../../src/api/lib";
+import type { RichTextRun, CellData } from "../../../../src/api/types";
 import type { RibbonContext } from "../../../../src/api/extensions";
 import type { StyleData } from "../../../../src/api/types";
 import {
@@ -291,6 +293,7 @@ export function HomeTabComponent({
   const gridState = useGridState();
   const [layout, setLayout] = useState<HomeTabLayout>(loadLayout);
   const [currentStyle, setCurrentStyle] = useState<StyleData | null>(null);
+  const [currentCellData, setCurrentCellData] = useState<CellData | null>(null);
   const [openColorPicker, setOpenColorPicker] = useState<string | null>(null);
   const [cellStylesOpen, setCellStylesOpen] = useState(false);
 
@@ -323,6 +326,7 @@ export function HomeTabComponent({
     let cancelled = false;
     getCell(sel.startRow, sel.startCol).then((cell) => {
       if (cancelled || !cell) return;
+      setCurrentCellData(cell);
       return getStyle(cell.styleIndex).then((style) => {
         if (!cancelled) setCurrentStyle(style);
       });
@@ -414,6 +418,39 @@ export function HomeTabComponent({
         case "strikethrough":
           await applyFormat({ strikethrough: !(currentStyle?.strikethrough ?? false) });
           break;
+
+        // Superscript / Subscript (rich text operations)
+        case "superscript":
+        case "subscript": {
+          const sel = gridState.selection;
+          if (!sel) break;
+          const isSuperscript = itemId === "superscript";
+          const cellData = await getCell(sel.startRow, sel.startCol);
+          const cellText = cellData?.display ?? "";
+          if (!cellText) break;
+
+          // Check current state from rich text runs
+          const runs = cellData?.richText;
+          const isCurrentlyActive = runs?.length === 1 &&
+            (isSuperscript ? runs[0].superscript : runs[0].subscript);
+
+          if (isCurrentlyActive) {
+            // Turn off: clear rich text
+            await setCellRichText(sel.startRow, sel.startCol, null);
+          } else {
+            // Turn on: wrap entire cell in a single run
+            const run: RichTextRun = {
+              text: cellText,
+              superscript: isSuperscript,
+              subscript: !isSuperscript,
+            };
+            await setCellRichText(sel.startRow, sel.startCol, [run]);
+          }
+          // Refresh cell data
+          const updated = await getCell(sel.startRow, sel.startCol);
+          if (updated) setCurrentCellData(updated);
+          break;
+        }
 
         // Format Cells dialog
         case "formatCells":
@@ -527,10 +564,18 @@ export function HomeTabComponent({
         case "alignLeft": return currentStyle.textAlign === "left";
         case "alignCenter": return currentStyle.textAlign === "center";
         case "alignRight": return currentStyle.textAlign === "right";
+        case "superscript": {
+          const runs = currentCellData?.richText;
+          return !!(runs?.length === 1 && runs[0].superscript);
+        }
+        case "subscript": {
+          const runs = currentCellData?.richText;
+          return !!(runs?.length === 1 && runs[0].subscript);
+        }
         default: return false;
       }
     },
-    [currentStyle]
+    [currentStyle, currentCellData]
   );
 
   // Get current color for color items

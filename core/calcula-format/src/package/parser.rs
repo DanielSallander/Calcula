@@ -293,6 +293,7 @@ mod tests {
                 value: SavedCellValue::Text("Hello".to_string()),
                 formula: None,
                 style_index: 0,
+                rich_text: None,
             },
         );
         cells.insert(
@@ -301,6 +302,7 @@ mod tests {
                 value: SavedCellValue::Number(42.0),
                 formula: Some("=A1+1".to_string()),
                 style_index: 0,
+                rich_text: None,
             },
         );
         let sheet_data = cells_to_sheet_data(&cells);

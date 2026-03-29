@@ -9,6 +9,7 @@
 
 use serde::{Deserialize, Serialize};
 use crate::dependency_extractor::Expression;
+use crate::style::Color;
 
 /// Represents valid key types for Dict cells.
 /// Follows Python conventions: strings, numbers, and booleans are hashable.
@@ -52,6 +53,62 @@ pub enum CellValue {
     Dict(Box<Vec<(DictKey, CellValue)>>),
 }
 
+/// A single run of text with optional formatting overrides.
+/// When a cell has rich_text, the display value is composed of these runs
+/// instead of the plain display string. Each run carries its own formatting
+/// that overrides the cell's base style for that segment of text.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RichTextRun {
+    /// The text content of this run.
+    pub text: String,
+    /// Override: bold (None = inherit from cell style).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bold: Option<bool>,
+    /// Override: italic.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub italic: Option<bool>,
+    /// Override: underline.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub underline: Option<bool>,
+    /// Override: strikethrough.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub strikethrough: Option<bool>,
+    /// Override: font size in points.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub font_size: Option<u8>,
+    /// Override: font family name.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub font_family: Option<String>,
+    /// Override: text color.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub color: Option<Color>,
+    /// Superscript rendering (reduced size, raised baseline).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub superscript: bool,
+    /// Subscript rendering (reduced size, lowered baseline).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub subscript: bool,
+}
+
+impl RichTextRun {
+    /// Create a plain text run with no formatting overrides.
+    pub fn plain(text: String) -> Self {
+        RichTextRun {
+            text,
+            bold: None,
+            italic: None,
+            underline: None,
+            strikethrough: None,
+            font_size: None,
+            font_family: None,
+            color: None,
+            superscript: false,
+            subscript: false,
+        }
+    }
+}
+
 /// The atomic unit of the spreadsheet.
 ///
 /// Cells can optionally cache their parsed formula AST to avoid re-parsing
@@ -62,6 +119,12 @@ pub struct Cell {
     pub formula: Option<String>,
     pub value: CellValue,
     pub style_index: usize,
+    /// Rich text runs for partial formatting within the cell.
+    /// When present, the cell's display text is composed of these runs
+    /// instead of the plain value string. Each run can override
+    /// bold, italic, color, font, superscript, subscript, etc.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rich_text: Option<Vec<RichTextRun>>,
     /// Cached parsed AST for formula cells. Not serialized - regenerated on load.
     #[serde(skip)]
     pub cached_ast: Option<Box<Expression>>,
@@ -73,6 +136,7 @@ impl Clone for Cell {
             formula: self.formula.clone(),
             value: self.value.clone(),
             style_index: self.style_index,
+            rich_text: self.rich_text.clone(),
             cached_ast: self.cached_ast.clone(),
         }
     }
@@ -84,6 +148,7 @@ impl Cell {
             formula: None,
             value: CellValue::Empty,
             style_index: 0,
+            rich_text: None,
             cached_ast: None,
         }
     }
@@ -93,6 +158,7 @@ impl Cell {
             formula: None,
             value: CellValue::Number(num),
             style_index: 0,
+            rich_text: None,
             cached_ast: None,
         }
     }
@@ -102,6 +168,7 @@ impl Cell {
             formula: None,
             value: CellValue::Text(text),
             style_index: 0,
+            rich_text: None,
             cached_ast: None,
         }
     }
@@ -111,6 +178,7 @@ impl Cell {
             formula: Some(formula),
             value: CellValue::Empty,
             style_index: 0,
+            rich_text: None,
             cached_ast: None, // Will be populated on first evaluation
         }
     }
@@ -122,6 +190,7 @@ impl Cell {
             formula: Some(formula),
             value: CellValue::Empty,
             style_index: 0,
+            rich_text: None,
             cached_ast: Some(Box::new(ast)),
         }
     }
@@ -131,6 +200,7 @@ impl Cell {
             formula: None,
             value: CellValue::Boolean(value),
             style_index: 0,
+            rich_text: None,
             cached_ast: None,
         }
     }

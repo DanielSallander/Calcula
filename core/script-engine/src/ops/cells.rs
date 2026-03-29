@@ -68,6 +68,7 @@ pub fn register_cell_ops<'js>(
                         formula: None,
                         value: cell_value,
                         style_index,
+                        rich_text: None,
                         cached_ast: None,
                     };
                     grid.set_cell(row as u32, col as u32, cell);
@@ -148,6 +149,7 @@ pub fn register_cell_ops<'js>(
                                 formula: None,
                                 value: cell_value,
                                 style_index,
+                                rich_text: None,
                                 cached_ast: None,
                             };
                             grid.set_cell(r, c, cell);

@@ -5,6 +5,32 @@
 
 use serde::{Deserialize, Serialize};
 
+/// A single run of rich text with formatting overrides.
+/// Sent to the frontend for Canvas rendering of partially formatted cell text.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RichTextRunData {
+    pub text: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bold: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub italic: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub underline: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub strikethrough: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub font_size: Option<u8>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub font_family: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub color: Option<String>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub superscript: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub subscript: bool,
+}
+
 /// Cell data returned to the frontend.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -27,6 +53,11 @@ pub struct CellData {
     /// Sheet index for cross-sheet updates (None = current active sheet)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub sheet_index: Option<usize>,
+    /// Rich text runs for partial formatting within the cell.
+    /// When present, the renderer should draw each run with its own formatting
+    /// instead of using the cell's base style for the entire display text.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rich_text: Option<Vec<RichTextRunData>>,
 }
 
 fn default_span() -> u32 {
@@ -422,7 +453,43 @@ pub struct SortRangeResult {
 // Conversion helpers: API types <--> Engine types
 // ============================================================================
 
-use engine::{BorderLineStyle, CellStyle, NumberFormat, TextAlign, TextRotation, VerticalAlign};
+use engine::{BorderLineStyle, CellStyle, NumberFormat, RichTextRun, TextAlign, TextRotation, VerticalAlign};
+
+/// Convert engine RichTextRun to API RichTextRunData.
+pub fn rich_text_runs_to_data(runs: &[RichTextRun]) -> Vec<RichTextRunData> {
+    runs.iter()
+        .map(|run| RichTextRunData {
+            text: run.text.clone(),
+            bold: run.bold,
+            italic: run.italic,
+            underline: run.underline,
+            strikethrough: run.strikethrough,
+            font_size: run.font_size,
+            font_family: run.font_family.clone(),
+            color: run.color.map(|c| c.to_css()),
+            superscript: run.superscript,
+            subscript: run.subscript,
+        })
+        .collect()
+}
+
+/// Convert API RichTextRunData back to engine RichTextRun.
+pub fn data_to_rich_text_runs(data: &[RichTextRunData]) -> Vec<RichTextRun> {
+    data.iter()
+        .map(|d| RichTextRun {
+            text: d.text.clone(),
+            bold: d.bold,
+            italic: d.italic,
+            underline: d.underline,
+            strikethrough: d.strikethrough,
+            font_size: d.font_size,
+            font_family: d.font_family.clone(),
+            color: d.color.as_ref().and_then(|c| engine::Color::from_hex(c)),
+            superscript: d.superscript,
+            subscript: d.subscript,
+        })
+        .collect()
+}
 
 fn border_side_to_data(side: &engine::BorderStyle) -> BorderSideData {
     let style_str = if side.style == BorderLineStyle::None || side.width == 0 {

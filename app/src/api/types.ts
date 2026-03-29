@@ -20,6 +20,7 @@ export type {
 
   // Cell data
   CellData,
+  RichTextRun,
   StyleData,
   StyleDataMap,
   DimensionData,

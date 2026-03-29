@@ -170,6 +170,7 @@ mod tests {
             value: CellValue::Number(value),
             formula: Some(formula.to_string()),
             style_index: 0,
+            rich_text: None,
             cached_ast: None,
         }
     }

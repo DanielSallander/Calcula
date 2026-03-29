@@ -253,6 +253,7 @@ pub fn apply_cell_formatting(
                     value: engine::CellValue::Empty,
                     formula: None,
                     style_index: new_index,
+                    rich_text: None,
                     cached_ast: None,
                 };
                 grid.set_cell(row, col, cell.clone());

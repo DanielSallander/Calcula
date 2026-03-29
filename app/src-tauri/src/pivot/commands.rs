@@ -3148,7 +3148,7 @@ pub fn drill_through_to_sheet(
     // Write data rows
     for (r, row) in row_data.iter().enumerate() {
         for (c, cv) in row.iter().enumerate() {
-            new_grid.set_cell((r + 1) as u32, c as u32, engine::Cell { formula: None, value: cv.clone(), style_index: 0, cached_ast: None });
+            new_grid.set_cell((r + 1) as u32, c as u32, engine::Cell { formula: None, value: cv.clone(), style_index: 0, rich_text: None, cached_ast: None });
         }
     }
 

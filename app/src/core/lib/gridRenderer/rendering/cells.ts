@@ -5,6 +5,7 @@
 // UPDATED: Added vertical alignment, text wrapping, text rotation, and empty cell background rendering
 
 import type { RenderState } from "../types";
+import type { RichTextRun } from "../../../types";
 import { calculateVisibleRange } from "../layout/viewport";
 import { getColumnWidth, getRowHeight } from "../layout/dimensions";
 import { getStyleFromCache, isValidColor, isDefaultTextColor, isDefaultBackgroundColor } from "../styles/styleUtils";
@@ -71,6 +72,212 @@ export function drawTextWithTruncation(
   const truncatedText = text.substring(0, low) + ellipsis;
   ctx.fillText(truncatedText, x, y);
   return textWidth; // Return original width for potential overflow indication
+}
+
+/**
+ * Superscript/subscript scale factor relative to base font size.
+ */
+const SCRIPT_SCALE = 0.65;
+/** Superscript vertical offset as fraction of base font size (negative = up). */
+const SUPERSCRIPT_OFFSET = -0.35;
+/** Subscript vertical offset as fraction of base font size (positive = down). */
+const SUBSCRIPT_OFFSET = 0.2;
+
+/**
+ * Draw rich text runs within a cell.
+ * Each run can have its own bold, italic, underline, strikethrough, color,
+ * font size, font family, superscript, and subscript formatting.
+ *
+ * Returns the total measured width of all runs (may exceed maxWidth).
+ */
+function drawRichTextRuns(
+  ctx: CanvasRenderingContext2D,
+  runs: RichTextRun[],
+  x: number,
+  y: number,
+  maxWidth: number,
+  align: "left" | "right" | "center",
+  baseFontSize: number,
+  baseFontFamily: string,
+  baseFontWeight: string,
+  baseFontStyle: string,
+  baseTextColor: string,
+  baseBold: boolean,
+  baseItalic: boolean,
+  baseUnderline: boolean,
+  baseStrikethrough: boolean,
+): number {
+  // First pass: measure all runs to determine total width and check if truncation is needed
+  interface MeasuredRun {
+    run: RichTextRun;
+    fontSize: number;
+    fontFamily: string;
+    fontWeight: string;
+    fontStyle: string;
+    color: string;
+    fontString: string;
+    width: number;
+    hasUnderline: boolean;
+    hasStrikethrough: boolean;
+    superscript: boolean;
+    subscript: boolean;
+  }
+
+  const measured: MeasuredRun[] = [];
+  let totalWidth = 0;
+
+  for (const run of runs) {
+    const isBold = run.bold ?? baseBold;
+    const isItalic = run.italic ?? baseItalic;
+    const isSuperscript = run.superscript === true;
+    const isSubscript = run.subscript === true;
+
+    let fontSize = run.fontSize ?? baseFontSize;
+    if (isSuperscript || isSubscript) {
+      fontSize = Math.round(fontSize * SCRIPT_SCALE);
+    }
+
+    const fontFamily = run.fontFamily ?? baseFontFamily;
+    const fontWeight = isBold ? "bold" : "normal";
+    const fontStyle = isItalic ? "italic" : "normal";
+    const color = run.color ?? baseTextColor;
+    const fontString = `${fontStyle} ${fontWeight} ${fontSize}px ${fontFamily}`;
+
+    ctx.font = fontString;
+    const width = ctx.measureText(run.text).width;
+
+    measured.push({
+      run,
+      fontSize,
+      fontFamily,
+      fontWeight,
+      fontStyle,
+      color,
+      fontString,
+      width,
+      hasUnderline: run.underline ?? baseUnderline,
+      hasStrikethrough: run.strikethrough ?? baseStrikethrough,
+      superscript: isSuperscript,
+      subscript: isSubscript,
+    });
+    totalWidth += width;
+  }
+
+  // Calculate draw start X based on alignment
+  let drawX = x;
+  if (totalWidth <= maxWidth) {
+    if (align === "right") {
+      drawX = x + maxWidth - totalWidth;
+    } else if (align === "center") {
+      drawX = x + (maxWidth - totalWidth) / 2;
+    }
+  }
+
+  // If total exceeds maxWidth, we need truncation with ellipsis
+  const needsTruncation = totalWidth > maxWidth;
+  const ellipsis = "...";
+  let ellipsisWidth = 0;
+  let remainingWidth = maxWidth;
+  if (needsTruncation) {
+    // Measure ellipsis with base font
+    const baseFont = `${baseFontStyle} ${baseFontWeight} ${baseFontSize}px ${baseFontFamily}`;
+    ctx.font = baseFont;
+    ellipsisWidth = ctx.measureText(ellipsis).width;
+    remainingWidth = maxWidth - ellipsisWidth;
+    if (remainingWidth <= 0) {
+      // Not enough room even for ellipsis
+      ctx.font = `${baseFontStyle} ${baseFontWeight} ${baseFontSize}px ${baseFontFamily}`;
+      ctx.fillStyle = baseTextColor;
+      ctx.fillText(ellipsis, x, y);
+      return ellipsisWidth;
+    }
+  }
+
+  // Second pass: draw each run
+  let currentX = drawX;
+  let truncated = false;
+
+  for (const m of measured) {
+    if (truncated) break;
+
+    ctx.font = m.fontString;
+    ctx.fillStyle = m.color;
+
+    let textToDraw = m.run.text;
+    let drawWidth = m.width;
+
+    // Check if this run needs truncation
+    if (needsTruncation && currentX + drawWidth - drawX > remainingWidth) {
+      // Truncate this run
+      const available = remainingWidth - (currentX - drawX);
+      if (available <= 0) {
+        truncated = true;
+        break;
+      }
+      // Binary search for truncation point
+      let low = 0;
+      let high = textToDraw.length;
+      while (low < high) {
+        const mid = Math.ceil((low + high) / 2);
+        const trunc = textToDraw.substring(0, mid);
+        if (ctx.measureText(trunc).width <= available) {
+          low = mid;
+        } else {
+          high = mid - 1;
+        }
+      }
+      textToDraw = textToDraw.substring(0, low);
+      drawWidth = ctx.measureText(textToDraw).width;
+      truncated = true;
+    }
+
+    // Calculate vertical offset for superscript/subscript
+    let runY = y;
+    if (m.superscript) {
+      runY = y + baseFontSize * SUPERSCRIPT_OFFSET;
+    } else if (m.subscript) {
+      runY = y + baseFontSize * SUBSCRIPT_OFFSET;
+    }
+
+    // Draw the text
+    if (textToDraw.length > 0) {
+      ctx.fillText(textToDraw, currentX, runY);
+    }
+
+    // Draw underline
+    if (m.hasUnderline && textToDraw.length > 0) {
+      const underlineY = runY + m.fontSize / 2 + 1;
+      ctx.beginPath();
+      ctx.strokeStyle = m.color;
+      ctx.lineWidth = 1;
+      ctx.moveTo(currentX, underlineY);
+      ctx.lineTo(currentX + drawWidth, underlineY);
+      ctx.stroke();
+    }
+
+    // Draw strikethrough
+    if (m.hasStrikethrough && textToDraw.length > 0) {
+      const strikeY = runY;
+      ctx.beginPath();
+      ctx.strokeStyle = m.color;
+      ctx.lineWidth = 1;
+      ctx.moveTo(currentX, strikeY);
+      ctx.lineTo(currentX + drawWidth, strikeY);
+      ctx.stroke();
+    }
+
+    currentX += drawWidth;
+  }
+
+  // Draw ellipsis if truncated
+  if (truncated) {
+    const baseFont = `${baseFontStyle} ${baseFontWeight} ${baseFontSize}px ${baseFontFamily}`;
+    ctx.font = baseFont;
+    ctx.fillStyle = baseTextColor;
+    ctx.fillText(ellipsis, currentX, y);
+  }
+
+  return totalWidth;
 }
 
 /**
@@ -660,6 +867,32 @@ export function drawCellText(state: RenderState): void {
           const textX = cellLeft + paddingX;
           drawTextWithTruncation(ctx, lines[i], textX, lineY, availableWidth, textAlign);
         }
+
+        ctx.restore();
+        baseX += colWidth;
+        continue;
+      }
+
+      // -----------------------------------------------------------------------
+      // Rich Text rendering (partial formatting within a cell)
+      // -----------------------------------------------------------------------
+      const richTextRuns = (cell as { richText?: RichTextRun[] }).richText;
+      if (richTextRuns && richTextRuns.length > 0) {
+        ctx.textBaseline = "middle";
+        const textX = cellLeft + paddingX;
+        const textY = vAlign === "top"
+          ? cellTop + paddingY + fontSize / 2
+          : vAlign === "bottom"
+            ? cellBottom - paddingY - fontSize / 2
+            : y + actualHeight / 2;
+
+        drawRichTextRuns(
+          ctx, richTextRuns, textX, textY, availableWidth, textAlign,
+          fontSize, fontFamily, fontWeight, fontStyle, textColor,
+          effectiveStyle.bold === true,
+          effectiveStyle.italic === true,
+          hasUnderline, hasStrikethrough,
+        );
 
         ctx.restore();
         baseX += colWidth;

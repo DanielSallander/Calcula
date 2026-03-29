@@ -647,6 +647,7 @@ fn convert_builtin_function(func: &ParserBuiltinFn) -> EngineBuiltinFn {
         ParserBuiltinFn::Subtotal => EngineBuiltinFn::Subtotal,
 
         ParserBuiltinFn::Custom(name) => EngineBuiltinFn::Custom(name.clone()),
+        other => EngineBuiltinFn::Custom(format!("{:?}", other)),
     }
 }
 
@@ -2252,6 +2253,7 @@ fn builtin_function_to_name(func: &ParserBuiltinFn) -> String {
         ParserBuiltinFn::ByCol => "BYCOL".to_string(),
         ParserBuiltinFn::Subtotal => "SUBTOTAL".to_string(),
         ParserBuiltinFn::Custom(name) => name.clone(),
+        other => format!("{:?}", other),
     }
 }
 
@@ -3183,6 +3185,7 @@ pub fn run() {
             commands::get_style,
             commands::get_all_styles,
             commands::set_cell_style,
+            commands::set_cell_rich_text,
             commands::apply_formatting,
             commands::preview_number_format,
             commands::get_style_count,

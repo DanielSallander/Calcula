@@ -217,6 +217,34 @@ export interface SheetContext {
  * Represents cell data from the backend.
  * Uses camelCase to match Rust's serde(rename_all = "camelCase").
  */
+/**
+ * A single run of rich text with formatting overrides.
+ * When a cell has richText, the renderer draws each run with its own formatting
+ * instead of using the cell's base style for the entire display text.
+ */
+export interface RichTextRun {
+  /** The text content of this run */
+  text: string;
+  /** Override: bold (undefined = inherit from cell style) */
+  bold?: boolean;
+  /** Override: italic */
+  italic?: boolean;
+  /** Override: underline */
+  underline?: boolean;
+  /** Override: strikethrough */
+  strikethrough?: boolean;
+  /** Override: font size in points */
+  fontSize?: number;
+  /** Override: font family name */
+  fontFamily?: string;
+  /** Override: text color (CSS hex string) */
+  color?: string;
+  /** Superscript rendering (reduced size, raised baseline) */
+  superscript?: boolean;
+  /** Subscript rendering (reduced size, lowered baseline) */
+  subscript?: boolean;
+}
+
 export interface CellData {
   /** Row index (0-based) */
   row: number;
@@ -236,6 +264,8 @@ export interface CellData {
   colSpan?: number;
   /** Sheet index for cross-sheet updates (undefined = current active sheet) */
   sheetIndex?: number;
+  /** Rich text runs for partial formatting within the cell */
+  richText?: RichTextRun[];
 }
 
 /** Spill range information for visual rendering of dynamic array borders. */

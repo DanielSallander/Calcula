@@ -72,6 +72,7 @@ pub fn load_xlsx(path: &Path) -> Result<Workbook, PersistenceError> {
                         value: saved_value,
                         formula,
                         style_index: 0,
+                        rich_text: None,
                     },
                 );
             }

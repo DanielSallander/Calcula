@@ -770,6 +770,7 @@ pub(crate) fn builtin_fn_name(func: &BuiltinFunction) -> String {
         BuiltinFunction::ByCol => "BYCOL".to_string(),
         BuiltinFunction::Subtotal => "SUBTOTAL".to_string(),
         BuiltinFunction::Custom(name) => name.clone(),
+        other => format!("{:?}", other),
     }
 }
 

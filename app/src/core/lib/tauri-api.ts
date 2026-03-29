@@ -7,6 +7,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import type {
   CellData,
+  RichTextRun,
   StyleData,
   DimensionData,
   FormattingOptions,
@@ -306,6 +307,18 @@ export async function setCellStyle(
   styleIndex: number
 ): Promise<CellData> {
   return invoke<CellData>("set_cell_style", { row, col, styleIndex });
+}
+
+/**
+ * Set rich text runs on a cell for partial formatting.
+ * Pass null to clear rich text and revert to uniform cell style.
+ */
+export async function setCellRichText(
+  row: number,
+  col: number,
+  runs: RichTextRun[] | null
+): Promise<CellData | null> {
+  return invoke<CellData | null>("set_cell_rich_text", { row, col, runs });
 }
 
 export async function applyFormatting(
