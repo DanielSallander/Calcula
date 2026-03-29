@@ -660,6 +660,13 @@ export {
   insertColPageBreak,
   removeColPageBreak,
   resetAllPageBreaks,
+  setPrintArea,
+  clearPrintArea,
+  setPrintTitleRows,
+  clearPrintTitleRows,
+  setPrintTitleCols,
+  clearPrintTitleCols,
+  movePageBreak,
 } from "./backend";
 
 export type {

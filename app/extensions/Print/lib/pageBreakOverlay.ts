@@ -2,6 +2,8 @@
 // PURPOSE: Renders page break preview lines on the grid canvas.
 // CONTEXT: Registered as a post-header overlay by the Print extension.
 //          Shows dashed blue lines at automatic + manual page break positions.
+//          Visualizes print area boundaries with a shaded region.
+//          Supports dragging page break lines to reposition them.
 
 import type { GridConfig, Viewport, DimensionOverrides } from "../../../src/api/types";
 import {
@@ -9,7 +11,7 @@ import {
   calculateRowY,
   createDimensionGetterFromMap,
 } from "../../../src/api/dimensions";
-import { getPageSetup } from "../../../src/api/lib";
+import { getPageSetup, movePageBreak, colToIndex } from "../../../src/api/lib";
 import type { PageSetup } from "../../../src/api/lib";
 
 // ============================================================================
@@ -26,6 +28,27 @@ let computedRowBreaks: number[] = [];
 let computedColBreaks: number[] = [];
 
 // ============================================================================
+// Drag State
+// ============================================================================
+
+interface DragState {
+  active: boolean;
+  direction: "row" | "col";
+  fromIndex: number;
+  currentPixel: number;
+}
+
+let dragState: DragState | null = null;
+let mouseListenersInstalled = false;
+
+// Store last render params for coordinate calculations during drag
+let lastConfig: GridConfig | null = null;
+let lastViewport: Viewport | null = null;
+let lastDimensions: DimensionOverrides | null = null;
+let lastCanvasWidth = 0;
+let lastCanvasHeight = 0;
+
+// ============================================================================
 // Paper sizes in px (at 96 DPI)
 // ============================================================================
 
@@ -39,6 +62,29 @@ const PAPER_SIZES_PX: Record<string, { width: number; height: number }> = {
 
 function inchesToPx(inches: number): number {
   return inches * 96;
+}
+
+// ============================================================================
+// Print Area Parsing
+// ============================================================================
+
+interface PrintAreaBounds {
+  startRow: number;
+  startCol: number;
+  endRow: number;
+  endCol: number;
+}
+
+function parsePrintArea(printArea: string): PrintAreaBounds | null {
+  if (!printArea || !printArea.trim()) return null;
+  const match = printArea.trim().match(/^([A-Z]+)(\d+):([A-Z]+)(\d+)$/i);
+  if (!match) return null;
+  return {
+    startCol: colToIndex(match[1].toUpperCase()),
+    startRow: parseInt(match[2]) - 1,
+    endCol: colToIndex(match[3].toUpperCase()),
+    endRow: parseInt(match[4]) - 1,
+  };
 }
 
 // ============================================================================
@@ -110,6 +156,220 @@ function computeBreakPositions(
 }
 
 // ============================================================================
+// Drag Helpers
+// ============================================================================
+
+const DRAG_HIT_TOLERANCE = 6; // px
+
+/** Find the row index at a given canvas Y coordinate. */
+function canvasYToRow(
+  canvasY: number,
+  colHeaderHeight: number,
+  scrollY: number,
+  getRowH: (row: number) => number,
+  maxRow: number,
+): number {
+  let accY = colHeaderHeight - scrollY;
+  for (let r = 0; r <= maxRow; r++) {
+    const h = getRowH(r);
+    if (canvasY < accY + h) return r;
+    accY += h;
+  }
+  return maxRow;
+}
+
+/** Find the col index at a given canvas X coordinate. */
+function canvasXToCol(
+  canvasX: number,
+  rowHeaderWidth: number,
+  scrollX: number,
+  getColW: (col: number) => number,
+  maxCol: number,
+): number {
+  let accX = rowHeaderWidth - scrollX;
+  for (let c = 0; c <= maxCol; c++) {
+    const w = getColW(c);
+    if (canvasX < accX + w) return c;
+    accX += w;
+  }
+  return maxCol;
+}
+
+function installMouseListeners(): void {
+  if (mouseListenersInstalled) return;
+  mouseListenersInstalled = true;
+
+  const canvas = document.querySelector("canvas");
+  if (!canvas) return;
+
+  canvas.addEventListener("mousedown", handleMouseDown, true);
+  canvas.addEventListener("mousemove", handleMouseMove, true);
+  canvas.addEventListener("mouseup", handleMouseUp, true);
+}
+
+function uninstallMouseListeners(): void {
+  if (!mouseListenersInstalled) return;
+  mouseListenersInstalled = false;
+
+  const canvas = document.querySelector("canvas");
+  if (!canvas) return;
+
+  canvas.removeEventListener("mousedown", handleMouseDown, true);
+  canvas.removeEventListener("mousemove", handleMouseMove, true);
+  canvas.removeEventListener("mouseup", handleMouseUp, true);
+}
+
+function handleMouseDown(e: MouseEvent): void {
+  if (!pageBreakPreviewEnabled || !cachedPageSetup || !lastConfig || !lastViewport || !lastDimensions) return;
+
+  const canvas = e.target as HTMLCanvasElement;
+  const rect = canvas.getBoundingClientRect();
+  const canvasX = e.clientX - rect.left;
+  const canvasY = e.clientY - rect.top;
+
+  const rowHeaderWidth = lastConfig.rowHeaderWidth || 50;
+  const colHeaderHeight = lastConfig.colHeaderHeight || 24;
+  const defaultColWidth = lastConfig.defaultColumnWidth || 100;
+  const defaultRowHeight = lastConfig.defaultRowHeight || 24;
+
+  const getColW = createDimensionGetterFromMap(lastDimensions.columnWidths, defaultColWidth);
+  const getRowH = createDimensionGetterFromMap(lastDimensions.rowHeights, defaultRowHeight);
+
+  const manualRowSet = new Set(cachedPageSetup.manualRowBreaks ?? []);
+  const manualColSet = new Set(cachedPageSetup.manualColBreaks ?? []);
+
+  // Check if click is near a manual row break line
+  for (const r of computedRowBreaks) {
+    if (!manualRowSet.has(r)) continue;
+    const y = calculateRowY(r, colHeaderHeight, lastViewport.scrollY, getRowH);
+    if (Math.abs(canvasY - y) <= DRAG_HIT_TOLERANCE && canvasX > rowHeaderWidth) {
+      e.preventDefault();
+      e.stopPropagation();
+      dragState = { active: true, direction: "row", fromIndex: r, currentPixel: canvasY };
+      canvas.style.cursor = "ns-resize";
+      return;
+    }
+  }
+
+  // Check if click is near a manual col break line
+  for (const c of computedColBreaks) {
+    if (!manualColSet.has(c)) continue;
+    const x = calculateColumnX(c, rowHeaderWidth, lastViewport.scrollX, getColW);
+    if (Math.abs(canvasX - x) <= DRAG_HIT_TOLERANCE && canvasY > colHeaderHeight) {
+      e.preventDefault();
+      e.stopPropagation();
+      dragState = { active: true, direction: "col", fromIndex: c, currentPixel: canvasX };
+      canvas.style.cursor = "ew-resize";
+      return;
+    }
+  }
+}
+
+function handleMouseMove(e: MouseEvent): void {
+  if (!pageBreakPreviewEnabled || !cachedPageSetup || !lastConfig || !lastViewport || !lastDimensions) return;
+
+  const canvas = e.target as HTMLCanvasElement;
+  const rect = canvas.getBoundingClientRect();
+  const canvasX = e.clientX - rect.left;
+  const canvasY = e.clientY - rect.top;
+
+  if (dragState && dragState.active) {
+    // Update drag position
+    if (dragState.direction === "row") {
+      dragState.currentPixel = canvasY;
+    } else {
+      dragState.currentPixel = canvasX;
+    }
+    window.dispatchEvent(new Event("app:grid-refresh"));
+    return;
+  }
+
+  // Hover cursor feedback
+  const rowHeaderWidth = lastConfig.rowHeaderWidth || 50;
+  const colHeaderHeight = lastConfig.colHeaderHeight || 24;
+  const defaultColWidth = lastConfig.defaultColumnWidth || 100;
+  const defaultRowHeight = lastConfig.defaultRowHeight || 24;
+
+  const getColW = createDimensionGetterFromMap(lastDimensions.columnWidths, defaultColWidth);
+  const getRowH = createDimensionGetterFromMap(lastDimensions.rowHeights, defaultRowHeight);
+
+  const manualRowSet = new Set(cachedPageSetup.manualRowBreaks ?? []);
+  const manualColSet = new Set(cachedPageSetup.manualColBreaks ?? []);
+
+  let nearBreak = false;
+
+  for (const r of computedRowBreaks) {
+    if (!manualRowSet.has(r)) continue;
+    const y = calculateRowY(r, colHeaderHeight, lastViewport.scrollY, getRowH);
+    if (Math.abs(canvasY - y) <= DRAG_HIT_TOLERANCE && canvasX > rowHeaderWidth) {
+      canvas.style.cursor = "ns-resize";
+      nearBreak = true;
+      break;
+    }
+  }
+
+  if (!nearBreak) {
+    for (const c of computedColBreaks) {
+      if (!manualColSet.has(c)) continue;
+      const x = calculateColumnX(c, rowHeaderWidth, lastViewport.scrollX, getColW);
+      if (Math.abs(canvasX - x) <= DRAG_HIT_TOLERANCE && canvasY > colHeaderHeight) {
+        canvas.style.cursor = "ew-resize";
+        nearBreak = true;
+        break;
+      }
+    }
+  }
+
+  if (!nearBreak) {
+    // Don't override cursor if we're not near a break
+    // (leave it to the core handler)
+  }
+}
+
+function handleMouseUp(e: MouseEvent): void {
+  if (!dragState || !dragState.active) return;
+
+  const canvas = e.target as HTMLCanvasElement;
+  canvas.style.cursor = "";
+
+  if (!lastConfig || !lastViewport || !lastDimensions) {
+    dragState = null;
+    return;
+  }
+
+  const rowHeaderWidth = lastConfig.rowHeaderWidth || 50;
+  const colHeaderHeight = lastConfig.colHeaderHeight || 24;
+  const defaultColWidth = lastConfig.defaultColumnWidth || 100;
+  const defaultRowHeight = lastConfig.defaultRowHeight || 24;
+
+  const getColW = createDimensionGetterFromMap(lastDimensions.columnWidths, defaultColWidth);
+  const getRowH = createDimensionGetterFromMap(lastDimensions.rowHeights, defaultRowHeight);
+
+  const maxRow = cachedGridBoundsRow;
+  const maxCol = cachedGridBoundsCol;
+
+  let toIndex: number;
+  if (dragState.direction === "row") {
+    toIndex = canvasYToRow(dragState.currentPixel, colHeaderHeight, lastViewport.scrollY, getRowH, maxRow);
+  } else {
+    toIndex = canvasXToCol(dragState.currentPixel, rowHeaderWidth, lastViewport.scrollX, getColW, maxCol);
+  }
+
+  const fromIndex = dragState.fromIndex;
+  const direction = dragState.direction;
+  dragState = null;
+
+  if (toIndex !== fromIndex && toIndex > 0) {
+    movePageBreak(direction, fromIndex, toIndex)
+      .then(() => refreshPageBreakData())
+      .then(() => window.dispatchEvent(new Event("app:grid-refresh")))
+      .catch((err) => console.error("[Print] Move page break failed:", err));
+  } else {
+    window.dispatchEvent(new Event("app:grid-refresh"));
+  }
+}
+
+// ============================================================================
 // Public API
 // ============================================================================
 
@@ -118,6 +378,9 @@ export function togglePageBreakPreview(): boolean {
   pageBreakPreviewEnabled = !pageBreakPreviewEnabled;
   if (pageBreakPreviewEnabled) {
     refreshPageBreakData();
+    installMouseListeners();
+  } else {
+    uninstallMouseListeners();
   }
   return pageBreakPreviewEnabled;
 }
@@ -132,6 +395,9 @@ export function setPageBreakPreviewEnabled(enabled: boolean): void {
   pageBreakPreviewEnabled = enabled;
   if (enabled) {
     refreshPageBreakData();
+    installMouseListeners();
+  } else {
+    uninstallMouseListeners();
   }
 }
 
@@ -145,7 +411,7 @@ export async function refreshPageBreakData(): Promise<void> {
 }
 
 /**
- * Post-header overlay renderer that draws page break lines.
+ * Post-header overlay renderer that draws page break lines and print area shading.
  * Registered via registerPostHeaderOverlay.
  */
 export function renderPageBreakOverlay(
@@ -157,6 +423,13 @@ export function renderPageBreakOverlay(
   canvasHeight: number,
 ): void {
   if (!pageBreakPreviewEnabled || !cachedPageSetup) return;
+
+  // Cache render params for mouse handlers
+  lastConfig = config;
+  lastViewport = viewport;
+  lastDimensions = dimensions;
+  lastCanvasWidth = canvasWidth;
+  lastCanvasHeight = canvasHeight;
 
   const rowHeaderWidth = config.rowHeaderWidth || 50;
   const colHeaderHeight = config.colHeaderHeight || 24;
@@ -185,12 +458,128 @@ export function renderPageBreakOverlay(
 
   ctx.save();
 
+  // Draw print area boundary (shaded region outside print area)
+  const printArea = parsePrintArea(cachedPageSetup.printArea);
+  if (printArea) {
+    const paLeft = calculateColumnX(printArea.startCol, rowHeaderWidth, viewport.scrollX, getColW);
+    const paRight = calculateColumnX(printArea.endCol + 1, rowHeaderWidth, viewport.scrollX, getColW);
+    const paTop = calculateRowY(printArea.startRow, colHeaderHeight, viewport.scrollY, getRowH);
+    const paBottom = calculateRowY(printArea.endRow + 1, colHeaderHeight, viewport.scrollY, getRowH);
+
+    ctx.fillStyle = "rgba(128, 128, 128, 0.15)";
+
+    // Top region (above print area)
+    if (paTop > colHeaderHeight) {
+      ctx.fillRect(rowHeaderWidth, colHeaderHeight, canvasWidth - rowHeaderWidth, paTop - colHeaderHeight);
+    }
+    // Bottom region (below print area)
+    if (paBottom < canvasHeight) {
+      ctx.fillRect(rowHeaderWidth, paBottom, canvasWidth - rowHeaderWidth, canvasHeight - paBottom);
+    }
+    // Left region (left of print area, between top and bottom)
+    if (paLeft > rowHeaderWidth) {
+      const regionTop = Math.max(paTop, colHeaderHeight);
+      const regionBottom = Math.min(paBottom, canvasHeight);
+      ctx.fillRect(rowHeaderWidth, regionTop, paLeft - rowHeaderWidth, regionBottom - regionTop);
+    }
+    // Right region (right of print area, between top and bottom)
+    if (paRight < canvasWidth) {
+      const regionTop = Math.max(paTop, colHeaderHeight);
+      const regionBottom = Math.min(paBottom, canvasHeight);
+      ctx.fillRect(paRight, regionTop, canvasWidth - paRight, regionBottom - regionTop);
+    }
+
+    // Draw print area border
+    ctx.strokeStyle = "#0066cc";
+    ctx.lineWidth = 2;
+    ctx.setLineDash([]);
+    ctx.strokeRect(
+      Math.max(paLeft, rowHeaderWidth),
+      Math.max(paTop, colHeaderHeight),
+      Math.min(paRight, canvasWidth) - Math.max(paLeft, rowHeaderWidth),
+      Math.min(paBottom, canvasHeight) - Math.max(paTop, colHeaderHeight),
+    );
+  }
+
+  // Draw title rows indicator (highlighted strip)
+  if (cachedPageSetup.printTitlesRows) {
+    const match = cachedPageSetup.printTitlesRows.match(/^(\d+):(\d+)$/);
+    if (match) {
+      const titleStartRow = parseInt(match[1]) - 1;
+      const titleEndRow = parseInt(match[2]) - 1;
+      const tTop = calculateRowY(titleStartRow, colHeaderHeight, viewport.scrollY, getRowH);
+      const tBottom = calculateRowY(titleEndRow + 1, colHeaderHeight, viewport.scrollY, getRowH);
+      if (tBottom > colHeaderHeight && tTop < canvasHeight) {
+        ctx.fillStyle = "rgba(0, 120, 212, 0.08)";
+        ctx.fillRect(
+          rowHeaderWidth,
+          Math.max(tTop, colHeaderHeight),
+          canvasWidth - rowHeaderWidth,
+          Math.min(tBottom, canvasHeight) - Math.max(tTop, colHeaderHeight),
+        );
+        // Draw dashed border for title rows
+        ctx.strokeStyle = "#0078d4";
+        ctx.lineWidth = 1;
+        ctx.setLineDash([3, 3]);
+        ctx.strokeRect(
+          rowHeaderWidth,
+          Math.max(tTop, colHeaderHeight),
+          canvasWidth - rowHeaderWidth,
+          Math.min(tBottom, canvasHeight) - Math.max(tTop, colHeaderHeight),
+        );
+      }
+    }
+  }
+
+  // Draw title columns indicator (highlighted strip)
+  if (cachedPageSetup.printTitlesCols) {
+    const match = cachedPageSetup.printTitlesCols.match(/^([A-Z]+):([A-Z]+)$/i);
+    if (match) {
+      const titleStartCol = colToIndex(match[1].toUpperCase());
+      const titleEndCol = colToIndex(match[2].toUpperCase());
+      const tLeft = calculateColumnX(titleStartCol, rowHeaderWidth, viewport.scrollX, getColW);
+      const tRight = calculateColumnX(titleEndCol + 1, rowHeaderWidth, viewport.scrollX, getColW);
+      if (tRight > rowHeaderWidth && tLeft < canvasWidth) {
+        ctx.fillStyle = "rgba(0, 120, 212, 0.08)";
+        ctx.fillRect(
+          Math.max(tLeft, rowHeaderWidth),
+          colHeaderHeight,
+          Math.min(tRight, canvasWidth) - Math.max(tLeft, rowHeaderWidth),
+          canvasHeight - colHeaderHeight,
+        );
+        // Draw dashed border for title columns
+        ctx.strokeStyle = "#0078d4";
+        ctx.lineWidth = 1;
+        ctx.setLineDash([3, 3]);
+        ctx.strokeRect(
+          Math.max(tLeft, rowHeaderWidth),
+          colHeaderHeight,
+          Math.min(tRight, canvasWidth) - Math.max(tLeft, rowHeaderWidth),
+          canvasHeight - colHeaderHeight,
+        );
+      }
+    }
+  }
+
   // Draw horizontal page break lines (at row positions)
   for (const r of rowBreaks) {
+    const isManual = manualRowSet.has(r);
+
+    // If dragging this break, draw at drag position instead
+    if (dragState && dragState.active && dragState.direction === "row" && dragState.fromIndex === r) {
+      ctx.strokeStyle = "#cc3300";
+      ctx.lineWidth = 2;
+      ctx.setLineDash([6, 3]);
+      ctx.beginPath();
+      ctx.moveTo(rowHeaderWidth, dragState.currentPixel);
+      ctx.lineTo(canvasWidth, dragState.currentPixel);
+      ctx.stroke();
+      continue;
+    }
+
     const y = calculateRowY(r, colHeaderHeight, viewport.scrollY, getRowH);
     if (y < colHeaderHeight || y > canvasHeight) continue;
 
-    const isManual = manualRowSet.has(r);
     ctx.strokeStyle = isManual ? "#0066cc" : "#4488cc";
     ctx.lineWidth = isManual ? 2 : 1.5;
     ctx.setLineDash(isManual ? [6, 3] : [4, 4]);
@@ -203,10 +592,23 @@ export function renderPageBreakOverlay(
 
   // Draw vertical page break lines (at column positions)
   for (const c of colBreaks) {
+    const isManual = manualColSet.has(c);
+
+    // If dragging this break, draw at drag position instead
+    if (dragState && dragState.active && dragState.direction === "col" && dragState.fromIndex === c) {
+      ctx.strokeStyle = "#cc3300";
+      ctx.lineWidth = 2;
+      ctx.setLineDash([6, 3]);
+      ctx.beginPath();
+      ctx.moveTo(dragState.currentPixel, colHeaderHeight);
+      ctx.lineTo(dragState.currentPixel, canvasHeight);
+      ctx.stroke();
+      continue;
+    }
+
     const x = calculateColumnX(c, rowHeaderWidth, viewport.scrollX, getColW);
     if (x < rowHeaderWidth || x > canvasWidth) continue;
 
-    const isManual = manualColSet.has(c);
     ctx.strokeStyle = isManual ? "#0066cc" : "#4488cc";
     ctx.lineWidth = isManual ? 2 : 1.5;
     ctx.setLineDash(isManual ? [6, 3] : [4, 4]);

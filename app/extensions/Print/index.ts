@@ -1,13 +1,16 @@
 //! FILENAME: app/extensions/Print/index.ts
 // PURPOSE: Print extension entry point.
 // CONTEXT: Registers Page Setup dialog, File menu items, Ctrl+P shortcut, PDF export,
-//          page break preview overlay, and page break management commands.
+//          page break preview overlay, page break management commands,
+//          print area/titles commands from selection.
 
 import {
   DialogExtensions,
   registerMenuItem,
   registerPostHeaderOverlay,
+  ExtensionRegistry,
 } from "../../src/api";
+import type { Selection } from "../../src/api";
 import {
   getPrintData,
   writeBinaryFile,
@@ -17,6 +20,13 @@ import {
   removeColPageBreak,
   resetAllPageBreaks,
   getPageSetup,
+  setPrintArea,
+  clearPrintArea,
+  setPrintTitleRows,
+  clearPrintTitleRows,
+  setPrintTitleCols,
+  clearPrintTitleCols,
+  indexToCol,
 } from "../../src/api/lib";
 import { save } from "@tauri-apps/plugin-dialog";
 import { PageSetupDialog } from "./components/PageSetupDialog";
@@ -34,6 +44,23 @@ import {
 // ============================================================================
 
 const cleanupFns: (() => void)[] = [];
+
+// ============================================================================
+// Selection tracking
+// ============================================================================
+
+let currentSelection: Selection | null = null;
+
+function getSelectionBounds(): {
+  startRow: number; startCol: number; endRow: number; endCol: number;
+} | null {
+  if (!currentSelection) return null;
+  const sr = Math.min(currentSelection.startRow, currentSelection.endRow);
+  const er = Math.max(currentSelection.startRow, currentSelection.endRow);
+  const sc = Math.min(currentSelection.startCol, currentSelection.endCol);
+  const ec = Math.max(currentSelection.startCol, currentSelection.endCol);
+  return { startRow: sr, startCol: sc, endRow: er, endCol: ec };
+}
 
 // ============================================================================
 // Print handler
@@ -161,23 +188,28 @@ async function handleResetAllPageBreaks(): Promise<void> {
   }
 }
 
-/** Get the currently selected row from the global selection state. */
+/** Get the currently selected row from the tracked selection or fallback. */
 function getSelectedRow(): number | null {
-  // Access selection through the global event system
+  if (currentSelection) {
+    return Math.min(currentSelection.startRow, currentSelection.endRow);
+  }
+  // Fallback: read from DOM
   const selEl = document.querySelector("[data-active-row]");
   if (selEl) {
     const row = parseInt(selEl.getAttribute("data-active-row") || "");
     if (!isNaN(row)) return row;
   }
-  // Fallback: read from window.__calcula_selection if available
   const sel = (window as Record<string, unknown>).__calcula_selection as
     | { activeRow?: number }
     | undefined;
   return sel?.activeRow ?? null;
 }
 
-/** Get the currently selected column from the global selection state. */
+/** Get the currently selected column from the tracked selection or fallback. */
 function getSelectedCol(): number | null {
+  if (currentSelection) {
+    return Math.min(currentSelection.startCol, currentSelection.endCol);
+  }
   const selEl = document.querySelector("[data-active-col]");
   if (selEl) {
     const col = parseInt(selEl.getAttribute("data-active-col") || "");
@@ -187,6 +219,96 @@ function getSelectedCol(): number | null {
     | { activeCol?: number }
     | undefined;
   return sel?.activeCol ?? null;
+}
+
+// ============================================================================
+// Print Area & Titles handlers
+// ============================================================================
+
+async function handleSetPrintArea(): Promise<void> {
+  try {
+    const bounds = getSelectionBounds();
+    if (!bounds) {
+      alert("Select a range of cells first to set as print area.");
+      return;
+    }
+    const rangeStr = await setPrintArea(
+      bounds.startRow, bounds.startCol, bounds.endRow, bounds.endCol,
+    );
+    console.log("[Print] Print area set to:", rangeStr);
+    await refreshPageBreakData();
+    window.dispatchEvent(new Event("app:grid-refresh"));
+  } catch (err) {
+    console.error("[Print] Set print area failed:", err);
+    alert("Failed to set print area: " + String(err));
+  }
+}
+
+async function handleClearPrintArea(): Promise<void> {
+  try {
+    await clearPrintArea();
+    console.log("[Print] Print area cleared");
+    await refreshPageBreakData();
+    window.dispatchEvent(new Event("app:grid-refresh"));
+  } catch (err) {
+    console.error("[Print] Clear print area failed:", err);
+  }
+}
+
+async function handleSetPrintTitleRows(): Promise<void> {
+  try {
+    const bounds = getSelectionBounds();
+    if (!bounds) {
+      alert("Select one or more rows first to set as title rows.");
+      return;
+    }
+    const titleStr = await setPrintTitleRows(bounds.startRow, bounds.endRow);
+    console.log("[Print] Title rows set to:", titleStr);
+    await refreshPageBreakData();
+    window.dispatchEvent(new Event("app:grid-refresh"));
+  } catch (err) {
+    console.error("[Print] Set title rows failed:", err);
+    alert("Failed to set title rows: " + String(err));
+  }
+}
+
+async function handleClearPrintTitleRows(): Promise<void> {
+  try {
+    await clearPrintTitleRows();
+    console.log("[Print] Title rows cleared");
+    await refreshPageBreakData();
+    window.dispatchEvent(new Event("app:grid-refresh"));
+  } catch (err) {
+    console.error("[Print] Clear title rows failed:", err);
+  }
+}
+
+async function handleSetPrintTitleCols(): Promise<void> {
+  try {
+    const bounds = getSelectionBounds();
+    if (!bounds) {
+      alert("Select one or more columns first to set as title columns.");
+      return;
+    }
+    const titleStr = await setPrintTitleCols(bounds.startCol, bounds.endCol);
+    console.log("[Print] Title columns set to:", titleStr);
+    await refreshPageBreakData();
+    window.dispatchEvent(new Event("app:grid-refresh"));
+  } catch (err) {
+    console.error("[Print] Set title cols failed:", err);
+    alert("Failed to set title columns: " + String(err));
+  }
+}
+
+async function handleClearPrintTitleCols(): Promise<void> {
+  try {
+    await clearPrintTitleCols();
+    console.log("[Print] Title columns cleared");
+    await refreshPageBreakData();
+    window.dispatchEvent(new Event("app:grid-refresh"));
+  } catch (err) {
+    console.error("[Print] Clear title cols failed:", err);
+  }
 }
 
 // ============================================================================
@@ -204,7 +326,13 @@ export function registerPrintExtension(): void {
   });
   cleanupFns.push(() => DialogExtensions.unregisterDialog("page-setup"));
 
-  // 2. Add File menu items (Print + Page Setup + Export PDF)
+  // 2. Track selection changes
+  const unsubSelection = ExtensionRegistry.onSelectionChange((sel) => {
+    currentSelection = sel;
+  });
+  cleanupFns.push(unsubSelection);
+
+  // 3. Add File menu items (Print + Page Setup + Export PDF)
   registerMenuItem("file", {
     id: "file.print-separator",
     label: "",
@@ -232,7 +360,7 @@ export function registerPrintExtension(): void {
     },
   });
 
-  // 3. Register Ctrl+P keyboard shortcut
+  // 4. Register Ctrl+P keyboard shortcut
   const handleKeyDown = (e: KeyboardEvent) => {
     if (e.ctrlKey && !e.shiftKey && !e.altKey && e.key === "p") {
       e.preventDefault();
@@ -243,14 +371,14 @@ export function registerPrintExtension(): void {
   window.addEventListener("keydown", handleKeyDown, true);
   cleanupFns.push(() => window.removeEventListener("keydown", handleKeyDown, true));
 
-  // 4. Register page break preview overlay
+  // 5. Register page break preview overlay
   const unregOverlay = registerPostHeaderOverlay(
     "page-break-preview",
     renderPageBreakOverlay,
   );
   cleanupFns.push(unregOverlay);
 
-  // 5. Add View menu items for page break preview
+  // 6. Add View menu items for page break preview
   registerMenuItem("view", {
     id: "view.page-break-separator",
     label: "",
@@ -263,7 +391,7 @@ export function registerPrintExtension(): void {
     action: handleTogglePageBreakPreview,
   });
 
-  // 6. Add Page Layout menu items for page breaks
+  // 7. Add Page Layout menu items for page breaks
   registerMenuItem("view", {
     id: "view.insert-row-page-break",
     label: "Insert Row Page Break",
@@ -294,6 +422,49 @@ export function registerPrintExtension(): void {
     action: handleResetAllPageBreaks,
   });
 
+  // 8. Add Page Layout menu items for Print Area & Titles
+  registerMenuItem("view", {
+    id: "view.print-area-separator",
+    label: "",
+    separator: true,
+  });
+
+  registerMenuItem("view", {
+    id: "view.set-print-area",
+    label: "Set Print Area",
+    action: handleSetPrintArea,
+  });
+
+  registerMenuItem("view", {
+    id: "view.clear-print-area",
+    label: "Clear Print Area",
+    action: handleClearPrintArea,
+  });
+
+  registerMenuItem("view", {
+    id: "view.set-title-rows",
+    label: "Rows to Repeat at Top...",
+    action: handleSetPrintTitleRows,
+  });
+
+  registerMenuItem("view", {
+    id: "view.clear-title-rows",
+    label: "Clear Title Rows",
+    action: handleClearPrintTitleRows,
+  });
+
+  registerMenuItem("view", {
+    id: "view.set-title-cols",
+    label: "Columns to Repeat at Left...",
+    action: handleSetPrintTitleCols,
+  });
+
+  registerMenuItem("view", {
+    id: "view.clear-title-cols",
+    label: "Clear Title Columns",
+    action: handleClearPrintTitleCols,
+  });
+
   console.log("[Print] Registered successfully.");
 }
 
@@ -312,6 +483,7 @@ export function unregisterPrintExtension(): void {
     }
   }
   cleanupFns.length = 0;
+  currentSelection = null;
 
   console.log("[Print] Unregistered.");
 }

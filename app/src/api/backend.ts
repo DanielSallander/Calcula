@@ -3444,6 +3444,45 @@ export async function resetAllPageBreaks(): Promise<void> {
   return invoke<void>("reset_all_page_breaks", {});
 }
 
+/** Set print area from a selection range (0-based). Returns the range string (e.g., "A1:F20"). */
+export async function setPrintArea(
+  startRow: number, startCol: number, endRow: number, endCol: number,
+): Promise<string> {
+  return invoke<string>("set_print_area", { startRow, startCol, endRow, endCol });
+}
+
+/** Clear the print area for the active sheet. */
+export async function clearPrintArea(): Promise<void> {
+  return invoke<void>("clear_print_area", {});
+}
+
+/** Set rows to repeat at top (0-based). Returns the title string (e.g., "1:5"). */
+export async function setPrintTitleRows(startRow: number, endRow: number): Promise<string> {
+  return invoke<string>("set_print_title_rows", { startRow, endRow });
+}
+
+/** Clear print title rows for the active sheet. */
+export async function clearPrintTitleRows(): Promise<void> {
+  return invoke<void>("clear_print_title_rows", {});
+}
+
+/** Set columns to repeat at left (0-based). Returns the title string (e.g., "A:C"). */
+export async function setPrintTitleCols(startCol: number, endCol: number): Promise<string> {
+  return invoke<string>("set_print_title_cols", { startCol, endCol });
+}
+
+/** Clear print title columns for the active sheet. */
+export async function clearPrintTitleCols(): Promise<void> {
+  return invoke<void>("clear_print_title_cols", {});
+}
+
+/** Move a manual page break from one position to another. */
+export async function movePageBreak(
+  direction: "row" | "col", fromIndex: number, toIndex: number,
+): Promise<void> {
+  return invoke<void>("move_page_break", { direction, fromIndex, toIndex });
+}
+
 /** Write binary data to a file on disk. Used by PDF export. */
 export async function writeBinaryFile(path: string, data: number[]): Promise<void> {
   return invoke<void>("write_binary_file", { path, data });

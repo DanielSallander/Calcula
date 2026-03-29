@@ -3511,6 +3511,13 @@ pub fn run() {
             commands::insert_col_page_break,
             commands::remove_col_page_break,
             commands::reset_all_page_breaks,
+            commands::set_print_area,
+            commands::clear_print_area,
+            commands::set_print_title_rows,
+            commands::clear_print_title_rows,
+            commands::set_print_title_cols,
+            commands::clear_print_title_cols,
+            commands::move_page_break,
             // MCP server commands
             mcp::mcp_start,
             mcp::mcp_stop,
