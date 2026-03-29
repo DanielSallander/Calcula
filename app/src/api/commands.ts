@@ -31,6 +31,8 @@ export const CoreCommands = {
   FORMAT_CELLS: "core.format.cells",
   FORMAT_PAINTER: "core.format.painter",
   FORMAT_PAINTER_LOCK: "core.format.painterLock",
+  INCREASE_INDENT: "core.format.increaseIndent",
+  DECREASE_INDENT: "core.format.decreaseIndent",
 
   // Grid
   MERGE_CELLS: "core.grid.merge",

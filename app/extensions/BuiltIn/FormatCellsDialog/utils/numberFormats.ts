@@ -82,6 +82,49 @@ export const NUMBER_FORMAT_CATEGORIES: NumberFormatCategory[] = [
     ],
   },
   {
+    id: "accounting",
+    label: "Accounting",
+    description:
+      "Accounting formats line up the currency symbols and decimal points in a column. " +
+      "Use Currency formats for general monetary values.",
+    formats: [
+      { label: "$ (USD)", value: '_(* #,##0.00_);_(* (#,##0.00);_(* "-"??_);_(@_)', example: "$ 1,234.00" },
+      { label: "$ (no decimals)", value: '_(* #,##0_);_(* (#,##0);_(* "-"_);_(@_)', example: "$ 1,234" },
+      { label: "EUR", value: '_("EUR"* #,##0.00_);_("EUR"* (#,##0.00);_("EUR"* "-"??_);_(@_)', example: "EUR 1,234.00" },
+      { label: "kr (SEK)", value: '_(* #,##0.00" kr"_);_(* (#,##0.00)" kr";_(* "-"??" kr"_);_(@_)', example: "1,234.00 kr" },
+    ],
+  },
+  {
+    id: "fraction",
+    label: "Fraction",
+    description:
+      "Fraction formats display numbers as fractions. Choose the type of fraction you want to display.",
+    formats: [
+      { label: "Up to one digit (1/4)", value: "# ?/?", example: "1234 1/2" },
+      { label: "Up to two digits (21/25)", value: "# ??/??", example: "1234 10/20" },
+      { label: "Up to three digits (312/943)", value: "# ???/???", example: "1234 500/1000" },
+      { label: "Halves (1/2)", value: "# ?/2", example: "1234 1/2" },
+      { label: "Quarters (2/4)", value: "# ?/4", example: "1234 2/4" },
+      { label: "Eighths (4/8)", value: "# ?/8", example: "1234 4/8" },
+      { label: "Sixteenths (8/16)", value: "# ??/16", example: "1234 8/16" },
+      { label: "Tenths (5/10)", value: "# ?/10", example: "1234 5/10" },
+      { label: "Hundredths (50/100)", value: "# ??/100", example: "1234 50/100" },
+    ],
+  },
+  {
+    id: "special",
+    label: "Special",
+    description:
+      "Special formats are useful for tracking list and database values. " +
+      "These formats apply specific patterns for common data types.",
+    formats: [
+      { label: "Zip Code", value: "00000", example: "01234" },
+      { label: "Zip Code + 4", value: "00000-0000", example: "01234-5678" },
+      { label: "Phone Number", value: '[<=9999999]###-####;(###) ###-####', example: "(123) 456-7890" },
+      { label: "Social Security Number", value: "000-00-0000", example: "123-45-6789" },
+    ],
+  },
+  {
     id: "custom",
     label: "Custom",
     description:

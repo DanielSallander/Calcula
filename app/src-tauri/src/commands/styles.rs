@@ -218,6 +218,12 @@ pub fn apply_formatting(
             if let Some(button) = params.button {
                 new_style.button = button;
             }
+            if let Some(indent) = params.indent {
+                new_style.indent = indent;
+            }
+            if let Some(shrink_to_fit) = params.shrink_to_fit {
+                new_style.shrink_to_fit = shrink_to_fit;
+            }
 
             // Apply border formatting
             if let Some(ref border) = params.border_top {

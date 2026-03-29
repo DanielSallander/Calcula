@@ -202,3 +202,7 @@ export const AREA_PDF_EXPORT = suiteArea(57);
 // Phase 17: Advanced Filter Extension
 /** Suite 58: Advanced Filter Extension (row 3400) */
 export const AREA_ADVANCED_FILTER = suiteArea(58);
+
+// Phase 18: Indent & Number Formats
+/** Suite 59: Indent & Formats (row 3450) */
+export const AREA_INDENT_FORMATS = suiteArea(59);

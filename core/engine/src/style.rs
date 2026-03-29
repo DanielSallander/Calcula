@@ -204,6 +204,7 @@ impl Default for FontStyle {
 /// Complete cell style definition.
 /// This is what gets stored in the StyleRegistry.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+#[serde(default)]
 pub struct CellStyle {
     pub font: FontStyle,
     pub background: Color,
@@ -214,6 +215,7 @@ pub struct CellStyle {
     pub wrap_text: bool,
     pub text_rotation: TextRotation,
     pub indent: u8, // Number of indent levels (each level = ~8px)
+    pub shrink_to_fit: bool, // Auto-reduce font size to fit cell width
     pub checkbox: bool, // In-cell checkbox presentation mode
     pub button: bool, // In-cell button control presentation mode
 }
@@ -231,6 +233,7 @@ impl CellStyle {
             wrap_text: false,
             text_rotation: TextRotation::None,
             indent: 0,
+            shrink_to_fit: false,
             checkbox: false,
             button: false,
         }
@@ -449,5 +452,91 @@ mod tests {
         let default = registry.get(0);
         assert!(!default.font.bold);
         assert!(!default.font.italic);
+    }
+
+    #[test]
+    fn test_default_indent_and_shrink_to_fit() {
+        let style = CellStyle::new();
+        assert_eq!(style.indent, 0);
+        assert!(!style.shrink_to_fit);
+    }
+
+    #[test]
+    fn test_indent_styles_are_distinct() {
+        let mut registry = StyleRegistry::new();
+
+        let indent0 = CellStyle::new();
+        let mut indent2 = CellStyle::new();
+        indent2.indent = 2;
+
+        let idx0 = registry.get_or_create(indent0);
+        let idx2 = registry.get_or_create(indent2);
+
+        assert_ne!(idx0, idx2);
+        assert_eq!(registry.get(idx2).indent, 2);
+    }
+
+    #[test]
+    fn test_shrink_to_fit_style_distinct() {
+        let mut registry = StyleRegistry::new();
+
+        let normal = CellStyle::new();
+        let mut shrink = CellStyle::new();
+        shrink.shrink_to_fit = true;
+
+        let idx_normal = registry.get_or_create(normal);
+        let idx_shrink = registry.get_or_create(shrink);
+
+        assert_ne!(idx_normal, idx_shrink);
+        assert!(registry.get(idx_shrink).shrink_to_fit);
+    }
+
+    #[test]
+    fn test_indent_deduplication() {
+        let mut registry = StyleRegistry::new();
+
+        let mut style1 = CellStyle::new();
+        style1.indent = 3;
+        let mut style2 = CellStyle::new();
+        style2.indent = 3;
+
+        let idx1 = registry.get_or_create(style1);
+        let idx2 = registry.get_or_create(style2);
+
+        assert_eq!(idx1, idx2, "Same indent level should deduplicate");
+    }
+
+    #[test]
+    fn test_serde_backward_compat_missing_fields() {
+        // Simulate deserializing a CellStyle JSON that doesn't have indent/shrink_to_fit
+        let json = r#"{
+            "font": {
+                "family": "system-ui",
+                "size": 11,
+                "bold": false,
+                "italic": false,
+                "underline": false,
+                "strikethrough": false,
+                "color": {"r": 0, "g": 0, "b": 0, "a": 255}
+            },
+            "background": {"r": 255, "g": 255, "b": 255, "a": 255},
+            "text_align": "General",
+            "vertical_align": "Middle",
+            "number_format": "General",
+            "borders": {
+                "top": {"width": 0, "color": {"r": 0, "g": 0, "b": 0, "a": 255}, "style": "None"},
+                "right": {"width": 0, "color": {"r": 0, "g": 0, "b": 0, "a": 255}, "style": "None"},
+                "bottom": {"width": 0, "color": {"r": 0, "g": 0, "b": 0, "a": 255}, "style": "None"},
+                "left": {"width": 0, "color": {"r": 0, "g": 0, "b": 0, "a": 255}, "style": "None"}
+            },
+            "wrap_text": false,
+            "text_rotation": "None",
+            "checkbox": false,
+            "button": false
+        }"#;
+
+        let style: CellStyle = serde_json::from_str(json).expect("Should deserialize without indent/shrink_to_fit");
+        assert_eq!(style.indent, 0, "Missing indent should default to 0");
+        assert!(!style.shrink_to_fit, "Missing shrink_to_fit should default to false");
     }
 }

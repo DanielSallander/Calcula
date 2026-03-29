@@ -358,6 +358,8 @@ export async function applyFormatting(
       borderLeft: formatting.borderLeft,
       checkbox: formatting.checkbox,
       button: formatting.button,
+      indent: formatting.indent,
+      shrinkToFit: formatting.shrinkToFit,
     },
   });
   console.log(

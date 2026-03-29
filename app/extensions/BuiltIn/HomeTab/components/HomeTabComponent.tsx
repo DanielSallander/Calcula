@@ -470,6 +470,12 @@ export function HomeTabComponent({
         case "wrapText":
           await applyFormat({ wrapText: !(currentStyle?.wrapText ?? false) });
           break;
+        case "increaseIndent":
+          await applyFormat({ indent: Math.min(15, (currentStyle?.indent ?? 0) + 1) });
+          break;
+        case "decreaseIndent":
+          await applyFormat({ indent: Math.max(0, (currentStyle?.indent ?? 0) - 1) });
+          break;
         case "mergeCells":
           await CommandRegistry.execute(CoreCommands.MERGE_CELLS);
           break;

@@ -144,6 +144,8 @@ pub struct StyleData {
     pub border_left: BorderSideData,
     pub checkbox: bool,
     pub button: bool,
+    pub indent: u8,
+    pub shrink_to_fit: bool,
 }
 
 /// Dimension data for column widths and row heights.
@@ -189,6 +191,8 @@ pub struct FormattingParams {
     pub border_left: Option<BorderSideParam>,
     pub checkbox: Option<bool>,
     pub button: Option<bool>,
+    pub indent: Option<u8>,
+    pub shrink_to_fit: Option<bool>,
 }
 
 /// Result from apply_formatting that includes both updated cells and new styles.
@@ -551,6 +555,8 @@ impl From<&CellStyle> for StyleData {
             border_left: border_side_to_data(&style.borders.left),
             checkbox: style.checkbox,
             button: style.button,
+            indent: style.indent,
+            shrink_to_fit: style.shrink_to_fit,
         }
     }
 }

@@ -73,7 +73,9 @@ export function FormatCellsDialog(props: DialogProps): React.ReactElement | null
             textAlign: style.textAlign,
             verticalAlign: style.verticalAlign,
             wrapText: style.wrapText,
+            shrinkToFit: style.shrinkToFit,
             textRotation: style.textRotation,
+            indent: style.indent,
             numberFormat: style.numberFormat.toLowerCase().includes("general")
               ? "general"
               : style.numberFormat,
@@ -132,7 +134,9 @@ export function FormatCellsDialog(props: DialogProps): React.ReactElement | null
         verticalAlign: store.verticalAlign as "top" | "middle" | "bottom",
         numberFormat: store.numberFormat,
         wrapText: store.wrapText,
+        shrinkToFit: store.shrinkToFit,
         textRotation: store.textRotation as "none" | "rotate90" | "rotate270",
+        indent: store.indent,
         borderTop: { style: store.borderTop.style, color: store.borderTop.color },
         borderRight: { style: store.borderRight.style, color: store.borderRight.color },
         borderBottom: { style: store.borderBottom.style, color: store.borderBottom.color },

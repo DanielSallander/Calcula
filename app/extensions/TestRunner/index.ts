@@ -99,6 +99,8 @@ import { lambdaSuite } from "./lib/suites/lambda";
 import { pdfExportSuite } from "./lib/suites/pdfExport";
 // Phase 17: Advanced Filter Extension
 import { advancedFilterExtensionSuite } from "./lib/suites/advancedFilterExtension";
+// Phase 18: Indent & Number Formats
+import { indentFormatsSuite } from "./lib/suites/indentFormats";
 
 // ============================================================================
 // Constants
@@ -293,13 +295,16 @@ function activate(context: ExtensionContext): void {
   // Phase 17: Advanced Filter Extension
   registerSuite(advancedFilterExtensionSuite);
 
+  // Phase 18: Indent & Number Formats
+  registerSuite(indentFormatsSuite);
+
   // Register mock data suite only when launched with prefilled data
   if (import.meta.env.VITE_LOAD_MOCK_DATA === "true") {
     registerSuite(mockDataSuite);
     console.log("[TestRunner] Mock data detected - registered mock data test suite.");
   }
 
-  let suiteCount = 58; // 40 base (Phase 0-9) + 10 (Phase 10-12) + 5 (Phase 13-15) + 2 (Phase 16) + 1 (Phase 17)
+  let suiteCount = 59; // 40 base (Phase 0-9) + 10 (Phase 10-12) + 5 (Phase 13-15) + 2 (Phase 16) + 1 (Phase 17) + 1 (Phase 18)
   if (import.meta.env.VITE_LOAD_MOCK_DATA === "true") suiteCount++;
   isActivated = true;
   console.log(`[TestRunner] Activated with ${suiteCount} built-in test suites.`);

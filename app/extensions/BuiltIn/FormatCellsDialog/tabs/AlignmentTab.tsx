@@ -31,11 +31,15 @@ export function AlignmentTab(): React.ReactElement {
     textAlign,
     verticalAlign,
     wrapText,
+    shrinkToFit,
     textRotation,
+    indent,
     setTextAlign,
     setVerticalAlign,
     setWrapText,
+    setShrinkToFit,
     setTextRotation,
+    setIndent,
   } = useFormatCellsStore();
 
   return (
@@ -74,6 +78,33 @@ export function AlignmentTab(): React.ReactElement {
         </FieldRow>
       </Section>
 
+      {/* Indent section */}
+      <Section>
+        <SectionTitle>Indent</SectionTitle>
+        <FieldRow>
+          <FieldGroup>
+            <FieldLabel>Indent level:</FieldLabel>
+            <IndentRow>
+              <IndentButton
+                onClick={() => setIndent(Math.max(0, indent - 1))}
+                disabled={indent <= 0}
+                title="Decrease indent"
+              >
+                -
+              </IndentButton>
+              <IndentValue>{indent}</IndentValue>
+              <IndentButton
+                onClick={() => setIndent(Math.min(15, indent + 1))}
+                disabled={indent >= 15}
+                title="Increase indent"
+              >
+                +
+              </IndentButton>
+            </IndentRow>
+          </FieldGroup>
+        </FieldRow>
+      </Section>
+
       {/* Text control section */}
       <Section>
         <SectionTitle>Text control</SectionTitle>
@@ -85,6 +116,14 @@ export function AlignmentTab(): React.ReactElement {
               onChange={(e) => setWrapText(e.target.checked)}
             />
             Wrap text
+          </CheckboxLabel>
+          <CheckboxLabel>
+            <input
+              type="checkbox"
+              checked={shrinkToFit}
+              onChange={(e) => setShrinkToFit(e.target.checked)}
+            />
+            Shrink to fit
           </CheckboxLabel>
         </CheckboxRow>
       </Section>
@@ -112,6 +151,8 @@ export function AlignmentTab(): React.ReactElement {
             style={{
               textAlign: textAlign === "general" ? "left" : (textAlign as React.CSSProperties["textAlign"]),
               verticalAlign: verticalAlign as React.CSSProperties["verticalAlign"],
+              paddingLeft: indent > 0 ? `${indent * 8}px` : undefined,
+              fontSize: shrinkToFit ? "10px" : undefined,
             }}
           >
             Sample Text
@@ -187,6 +228,39 @@ const CheckboxLabel = styled.label`
   font-size: 13px;
   color: ${v("--text-primary")};
   cursor: pointer;
+`;
+
+const IndentRow = styled.div`
+  display: flex;
+  align-items: center;
+  gap: 4px;
+`;
+
+const IndentButton = styled.button<{ disabled?: boolean }>`
+  width: 28px;
+  height: 28px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 16px;
+  font-weight: 600;
+  background: ${v("--grid-bg")};
+  border: 1px solid ${v("--border-default")};
+  border-radius: 4px;
+  color: ${(p) => (p.disabled ? v("--text-disabled") : v("--text-primary"))};
+  cursor: ${(p) => (p.disabled ? "default" : "pointer")};
+  opacity: ${(p) => (p.disabled ? 0.5 : 1)};
+
+  &:hover:not(:disabled) {
+    background: ${v("--panel-bg")};
+  }
+`;
+
+const IndentValue = styled.span`
+  min-width: 28px;
+  text-align: center;
+  font-size: 13px;
+  color: ${v("--text-primary")};
 `;
 
 const PreviewBox = styled.div`

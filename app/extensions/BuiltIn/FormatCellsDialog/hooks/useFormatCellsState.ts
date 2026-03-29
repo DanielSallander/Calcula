@@ -23,7 +23,9 @@ export interface FormatCellsState {
   textAlign: string;
   verticalAlign: string;
   wrapText: boolean;
+  shrinkToFit: boolean;
   textRotation: string;
+  indent: number;
 
   // Number
   numberFormat: string;
@@ -68,7 +70,9 @@ export interface FormatCellsActions {
   setTextAlign: (v: string) => void;
   setVerticalAlign: (v: string) => void;
   setWrapText: (v: boolean) => void;
+  setShrinkToFit: (v: boolean) => void;
   setTextRotation: (v: string) => void;
+  setIndent: (v: number) => void;
   setNumberFormat: (v: string) => void;
   setBackgroundColor: (v: string) => void;
   setLocked: (v: boolean) => void;
@@ -97,7 +101,9 @@ const DEFAULT_STATE: FormatCellsState = {
   textAlign: "general",
   verticalAlign: "middle",
   wrapText: false,
+  shrinkToFit: false,
   textRotation: "none",
+  indent: 0,
   numberFormat: "General",
   backgroundColor: "#ffffff",
   locked: true,
@@ -129,7 +135,9 @@ export const useFormatCellsStore = create<FormatCellsStore>((set) => ({
   setTextAlign: (textAlign) => set({ textAlign }),
   setVerticalAlign: (verticalAlign) => set({ verticalAlign }),
   setWrapText: (wrapText) => set({ wrapText }),
+  setShrinkToFit: (shrinkToFit) => set({ shrinkToFit }),
   setTextRotation: (textRotation) => set({ textRotation }),
+  setIndent: (indent) => set({ indent }),
   setNumberFormat: (numberFormat) => set({ numberFormat }),
   setBackgroundColor: (backgroundColor) => set({ backgroundColor }),
   setLocked: (locked) => set({ locked }),

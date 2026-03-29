@@ -645,8 +645,8 @@ export function drawCellText(state: RenderState): void {
       const cellRight = Math.min(x + actualWidth, width);
       const cellBottom = Math.min(y + actualHeight, height);
 
-      // Available width for text
-      const availableWidth = cellRight - cellLeft - paddingX * 2;
+      // Available width for text (reduced by indent)
+      const availableWidth = cellRight - cellLeft - paddingX * 2 - indentOffset;
 
       if (availableWidth <= 0) {
         baseX += colWidth;
@@ -733,6 +733,10 @@ export function drawCellText(state: RenderState): void {
         textAlign = "right";
       }
 
+      // Calculate indent offset (each level = 8px at zoom 1.0)
+      const indentLevel = (baseCellStyle as { indent?: number }).indent ?? 0;
+      const indentOffset = indentLevel * 8;
+
       // Apply format-driven color override (e.g., [Red] from custom number format)
       if (cell.displayColor && isValidColor(cell.displayColor)) {
         textColor = cell.displayColor;
@@ -788,6 +792,20 @@ export function drawCellText(state: RenderState): void {
         ctx.restore();
         baseX += colWidth;
         continue;
+      }
+
+      // Shrink-to-fit: reduce font size to fit cell width
+      const shrinkToFit = (baseCellStyle as { shrinkToFit?: boolean }).shrinkToFit === true;
+      if (shrinkToFit && availableWidth > 0 && !isEmpty) {
+        const testFont = `${fontStyle} ${fontWeight} ${fontSize}px ${fontFamily}`;
+        ctx.font = testFont;
+        const textWidth = ctx.measureText(displayValue).width;
+        if (textWidth > availableWidth) {
+          const scaledSize = Math.max(1, Math.floor(fontSize * (availableWidth / textWidth)));
+          if (scaledSize < fontSize) {
+            fontSize = scaledSize;
+          }
+        }
       }
 
       // Build font string
@@ -864,8 +882,8 @@ export function drawCellText(state: RenderState): void {
           // Skip lines above the cell
           if (lineY + lineHeight / 2 < cellTop) continue;
 
-          const textX = cellLeft + paddingX;
-          drawTextWithTruncation(ctx, lines[i], textX, lineY, availableWidth, textAlign);
+          const lineTextX = cellLeft + paddingX + indentOffset;
+          drawTextWithTruncation(ctx, lines[i], lineTextX, lineY, availableWidth, textAlign);
         }
 
         ctx.restore();
@@ -879,7 +897,7 @@ export function drawCellText(state: RenderState): void {
       const richTextRuns = (cell as { richText?: RichTextRun[] }).richText;
       if (richTextRuns && richTextRuns.length > 0) {
         ctx.textBaseline = "middle";
-        const textX = cellLeft + paddingX;
+        const textX = cellLeft + paddingX + indentOffset;
         const textY = vAlign === "top"
           ? cellTop + paddingY + fontSize / 2
           : vAlign === "bottom"
@@ -902,7 +920,7 @@ export function drawCellText(state: RenderState): void {
       // -----------------------------------------------------------------------
       // Standard (single-line) rendering with vertical alignment
       // -----------------------------------------------------------------------
-      const textX = cellLeft + paddingX;
+      const textX = cellLeft + paddingX + indentOffset;
       let textY: number;
 
       if (vAlign === "top") {

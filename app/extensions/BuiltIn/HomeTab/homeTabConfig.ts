@@ -68,6 +68,8 @@ export const ALL_ITEMS: HomeTabItem[] = [
   { id: "alignCenter", label: "Center", tooltip: "Center", type: "toggle", icon: "\u2550", category: "Alignment" },
   { id: "alignRight", label: "Align Right", tooltip: "Align Right", type: "toggle", icon: "\u2261", category: "Alignment" },
   { id: "wrapText", label: "Wrap Text", tooltip: "Wrap Text", type: "toggle", icon: "\u21B5", category: "Alignment" },
+  { id: "increaseIndent", label: "Increase Indent", tooltip: "Increase Indent", type: "button", icon: "\u21E5", category: "Alignment" },
+  { id: "decreaseIndent", label: "Decrease Indent", tooltip: "Decrease Indent", type: "button", icon: "\u21E4", category: "Alignment" },
   { id: "mergeCells", label: "Merge Cells", tooltip: "Merge Cells", type: "button", icon: "\u29EA", category: "Alignment" },
 
   // --- Number ---
