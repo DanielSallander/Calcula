@@ -10009,6 +10009,177 @@ mod tests {
         }
     }
 
+    // ==================== IFS Tests ====================
+
+    #[test]
+    fn test_ifs_first_true() {
+        let grid = Grid::new();
+        let eval = Evaluator::new(&grid);
+        // IFS(FALSE, "a", TRUE, "b", TRUE, "c") => "b"
+        let expr = make_fn_expr(BuiltinFunction::Ifs, vec![
+            bool_val(false), text("a"),
+            bool_val(true), text("b"),
+            bool_val(true), text("c"),
+        ]);
+        assert_text_eq(&eval.evaluate(&expr), "b");
+    }
+
+    #[test]
+    fn test_ifs_single_true() {
+        let grid = Grid::new();
+        let eval = Evaluator::new(&grid);
+        // IFS(TRUE, 42) => 42
+        let expr = make_fn_expr(BuiltinFunction::Ifs, vec![
+            bool_val(true), num(42.0),
+        ]);
+        assert_num(&eval.evaluate(&expr), 42.0, 0.01);
+    }
+
+    #[test]
+    fn test_ifs_no_match_returns_na() {
+        let grid = Grid::new();
+        let eval = Evaluator::new(&grid);
+        // IFS(FALSE, "a", FALSE, "b") => #N/A
+        let expr = make_fn_expr(BuiltinFunction::Ifs, vec![
+            bool_val(false), text("a"),
+            bool_val(false), text("b"),
+        ]);
+        assert_error(&eval.evaluate(&expr));
+    }
+
+    #[test]
+    fn test_ifs_odd_args_returns_error() {
+        let grid = Grid::new();
+        let eval = Evaluator::new(&grid);
+        // IFS(TRUE) => #VALUE! (odd number of args)
+        let expr = make_fn_expr(BuiltinFunction::Ifs, vec![bool_val(true)]);
+        assert_error(&eval.evaluate(&expr));
+    }
+
+    #[test]
+    fn test_ifs_with_numeric_condition() {
+        let mut grid = Grid::new();
+        grid.set_cell(0, 0, Cell::new_number(10.0));
+        let eval = Evaluator::new(&grid);
+        // IFS(A1>5, "big", A1<=5, "small") => "big"
+        let expr = make_fn_expr(BuiltinFunction::Ifs, vec![
+            Expression::BinaryOp {
+                op: BinaryOperator::GreaterThan,
+                left: Box::new(Expression::CellRef { sheet: None, col: "A".to_string(), row: 1 }),
+                right: Box::new(num(5.0)),
+            },
+            text("big"),
+            Expression::BinaryOp {
+                op: BinaryOperator::LessEqual,
+                left: Box::new(Expression::CellRef { sheet: None, col: "A".to_string(), row: 1 }),
+                right: Box::new(num(5.0)),
+            },
+            text("small"),
+        ]);
+        assert_text_eq(&eval.evaluate(&expr), "big");
+    }
+
+    #[test]
+    fn test_ifs_empty_returns_error() {
+        let grid = Grid::new();
+        let eval = Evaluator::new(&grid);
+        // IFS() => #VALUE!
+        let expr = make_fn_expr(BuiltinFunction::Ifs, vec![]);
+        assert_error(&eval.evaluate(&expr));
+    }
+
+    // ==================== SWITCH Tests ====================
+
+    #[test]
+    fn test_switch_match_first() {
+        let grid = Grid::new();
+        let eval = Evaluator::new(&grid);
+        // SWITCH(1, 1, "one", 2, "two") => "one"
+        let expr = make_fn_expr(BuiltinFunction::Switch, vec![
+            num(1.0), num(1.0), text("one"), num(2.0), text("two"),
+        ]);
+        assert_text_eq(&eval.evaluate(&expr), "one");
+    }
+
+    #[test]
+    fn test_switch_match_second() {
+        let grid = Grid::new();
+        let eval = Evaluator::new(&grid);
+        // SWITCH(2, 1, "one", 2, "two") => "two"
+        let expr = make_fn_expr(BuiltinFunction::Switch, vec![
+            num(2.0), num(1.0), text("one"), num(2.0), text("two"),
+        ]);
+        assert_text_eq(&eval.evaluate(&expr), "two");
+    }
+
+    #[test]
+    fn test_switch_with_default() {
+        let grid = Grid::new();
+        let eval = Evaluator::new(&grid);
+        // SWITCH(3, 1, "one", 2, "two", "other") => "other"
+        let expr = make_fn_expr(BuiltinFunction::Switch, vec![
+            num(3.0), num(1.0), text("one"), num(2.0), text("two"), text("other"),
+        ]);
+        assert_text_eq(&eval.evaluate(&expr), "other");
+    }
+
+    #[test]
+    fn test_switch_no_match_no_default_returns_na() {
+        let grid = Grid::new();
+        let eval = Evaluator::new(&grid);
+        // SWITCH(3, 1, "one", 2, "two") => #N/A
+        let expr = make_fn_expr(BuiltinFunction::Switch, vec![
+            num(3.0), num(1.0), text("one"), num(2.0), text("two"),
+        ]);
+        assert_error(&eval.evaluate(&expr));
+    }
+
+    #[test]
+    fn test_switch_text_values() {
+        let grid = Grid::new();
+        let eval = Evaluator::new(&grid);
+        // SWITCH("b", "a", 10, "b", 20, "c", 30) => 20
+        let expr = make_fn_expr(BuiltinFunction::Switch, vec![
+            text("b"), text("a"), num(10.0), text("b"), num(20.0), text("c"), num(30.0),
+        ]);
+        assert_num(&eval.evaluate(&expr), 20.0, 0.01);
+    }
+
+    #[test]
+    fn test_switch_case_insensitive_text() {
+        let grid = Grid::new();
+        let eval = Evaluator::new(&grid);
+        // SWITCH("Hello", "hello", "matched") => "matched"
+        let expr = make_fn_expr(BuiltinFunction::Switch, vec![
+            text("Hello"), text("hello"), text("matched"),
+        ]);
+        assert_text_eq(&eval.evaluate(&expr), "matched");
+    }
+
+    #[test]
+    fn test_switch_too_few_args() {
+        let grid = Grid::new();
+        let eval = Evaluator::new(&grid);
+        // SWITCH(1, 2) => #VALUE! (need at least 3 args)
+        let expr = make_fn_expr(BuiltinFunction::Switch, vec![num(1.0), num(2.0)]);
+        assert_error(&eval.evaluate(&expr));
+    }
+
+    #[test]
+    fn test_switch_with_cell_ref() {
+        let mut grid = Grid::new();
+        grid.set_cell(0, 0, Cell::new_text("red".to_string()));
+        let eval = Evaluator::new(&grid);
+        // SWITCH(A1, "red", "#FF0000", "green", "#00FF00", "blue", "#0000FF")
+        let expr = make_fn_expr(BuiltinFunction::Switch, vec![
+            Expression::CellRef { sheet: None, col: "A".to_string(), row: 1 },
+            text("red"), text("#FF0000"),
+            text("green"), text("#00FF00"),
+            text("blue"), text("#0000FF"),
+        ]);
+        assert_text_eq(&eval.evaluate(&expr), "#FF0000");
+    }
+
     // ==================== VDB Test ====================
 
     #[test]
