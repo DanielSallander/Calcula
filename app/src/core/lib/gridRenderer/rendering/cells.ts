@@ -645,6 +645,14 @@ export function drawCellText(state: RenderState): void {
       const cellRight = Math.min(x + actualWidth, width);
       const cellBottom = Math.min(y + actualHeight, height);
 
+      // Get style data from the styleCache using the cell's styleIndex
+      const styleIndex = cell.styleIndex ?? 0;
+      const baseCellStyle = getStyleFromCache(styleCache, styleIndex);
+
+      // Calculate indent offset (each level = 8px at zoom 1.0)
+      const indentLevel = (baseCellStyle as { indent?: number }).indent ?? 0;
+      const indentOffset = indentLevel * 8;
+
       // Available width for text (reduced by indent)
       const availableWidth = cellRight - cellLeft - paddingX * 2 - indentOffset;
 
@@ -652,10 +660,6 @@ export function drawCellText(state: RenderState): void {
         baseX += colWidth;
         continue;
       }
-
-      // Get style data from the styleCache using the cell's styleIndex
-      const styleIndex = cell.styleIndex ?? 0;
-      const baseCellStyle = getStyleFromCache(styleCache, styleIndex);
 
       // Build base style info for interceptors
       let effectiveStyle: BaseStyleInfo = {
@@ -732,10 +736,6 @@ export function drawCellText(state: RenderState): void {
       } else if (baseCellStyle.textAlign === "right") {
         textAlign = "right";
       }
-
-      // Calculate indent offset (each level = 8px at zoom 1.0)
-      const indentLevel = (baseCellStyle as { indent?: number }).indent ?? 0;
-      const indentOffset = indentLevel * 8;
 
       // Apply format-driven color override (e.g., [Red] from custom number format)
       if (cell.displayColor && isValidColor(cell.displayColor)) {

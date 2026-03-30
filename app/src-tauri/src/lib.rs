@@ -237,6 +237,8 @@ pub struct AppState {
     /// Reverse spill map: (sheet_index, row, col) -> (origin_row, origin_col)
     /// Used to detect #SPILL! errors when a spill cell is occupied
     pub spill_hosts: Mutex<HashMap<(usize, u32, u32), (u32, u32)>>,
+    /// Hidden rows set by the Advanced Filter extension (per sheet)
+    pub advanced_filter_hidden_rows: Mutex<HashMap<usize, Vec<u32>>>,
 }
 
 impl AppState {
@@ -315,6 +317,7 @@ pub fn create_app_state() -> AppState {
         hidden_sheets: Mutex::new(vec![false]),
         spill_ranges: Mutex::new(HashMap::new()),
         spill_hosts: Mutex::new(HashMap::new()),
+        advanced_filter_hidden_rows: Mutex::new(HashMap::new()),
     }
 }
 
@@ -3384,6 +3387,8 @@ pub fn run() {
             autofilter::get_auto_filter,
             autofilter::get_auto_filter_range,
             autofilter::get_hidden_rows,
+            autofilter::set_advanced_filter_hidden_rows,
+            autofilter::clear_advanced_filter_hidden_rows,
             autofilter::is_row_filtered,
             autofilter::get_filter_unique_values,
             autofilter::set_column_filter_values,

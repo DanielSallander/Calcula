@@ -11,6 +11,8 @@ import {
   AppEvents,
   indexToCol,
   colToIndex,
+  setAdvancedFilterHiddenRows,
+  clearAdvancedFilterHiddenRows,
 } from "../../../src/api";
 import type { CellData } from "../../../src/api";
 import type {
@@ -347,6 +349,8 @@ export async function executeAdvancedFilter(params: AdvancedFilterParams): Promi
       }
     }
     dispatchGridAction(setHiddenRows(hiddenRows));
+    // Sync to backend so getHiddenRows() returns correct results
+    await setAdvancedFilterHiddenRows(hiddenRows);
     emitAppEvent(AppEvents.GRID_REFRESH);
 
     return {
@@ -392,5 +396,7 @@ export async function executeAdvancedFilter(params: AdvancedFilterParams): Promi
  */
 export function clearAdvancedFilter(): void {
   dispatchGridAction(setHiddenRows([]));
+  // Clear backend state
+  clearAdvancedFilterHiddenRows();
   emitAppEvent(AppEvents.GRID_REFRESH);
 }

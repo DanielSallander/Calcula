@@ -68,9 +68,11 @@ pub enum EvalResult {
     Dict(Vec<(DictKey, EvalResult)>),
     /// A lambda (callable) created by LAMBDA(). Contains parameter names and body expression.
     /// Does not spill. Invoked by MAP, REDUCE, SCAN, MAKEARRAY, BYROW, BYCOL.
+    /// `captured` holds closed-over scope bindings for nested/curried lambdas.
     Lambda {
         params: Vec<String>,
         body: Box<Expression>,
+        captured: HashMap<String, EvalResult>,
     },
 }
 
@@ -1354,12 +1356,12 @@ impl<'a> Evaluator<'a> {
                     }
                     let callee = self.evaluate(&args[0]);
                     match callee {
-                        EvalResult::Lambda { params, body } => {
+                        EvalResult::Lambda { params, body, captured } => {
                             let eval_args: Vec<EvalResult> = args[1..].iter().map(|a| self.evaluate(a)).collect();
                             if eval_args.len() != params.len() {
                                 return EvalResult::Error(CellError::Value);
                             }
-                            return self.invoke_lambda(&params, &body, &eval_args);
+                            return self.invoke_lambda_with_captured(&params, &body, &eval_args, &captured);
                         }
                         _ => return EvalResult::Error(CellError::Value),
                     }
@@ -1372,12 +1374,12 @@ impl<'a> Evaluator<'a> {
                     scope.get(&key).cloned()
                 };
                 match maybe_lambda {
-                    Some(EvalResult::Lambda { params, body }) => {
+                    Some(EvalResult::Lambda { params, body, captured }) => {
                         let eval_args: Vec<EvalResult> = args.iter().map(|a| self.evaluate(a)).collect();
                         if eval_args.len() != params.len() {
                             return EvalResult::Error(CellError::Value);
                         }
-                        self.invoke_lambda(&params, &body, &eval_args)
+                        self.invoke_lambda_with_captured(&params, &body, &eval_args, &captured)
                     }
                     _ => EvalResult::Error(CellError::Name),
                 }
@@ -4610,15 +4612,26 @@ impl<'a> Evaluator<'a> {
     }
 
     /// Invoke a lambda with the given argument values bound to its parameters.
-    /// Temporarily binds params in scope, evaluates body, then restores scope.
-    fn invoke_lambda(&self, params: &[String], body: &Expression, args: &[EvalResult]) -> EvalResult {
-        // Save previous scope values and set new bindings
-        let mut saved: Vec<(String, Option<EvalResult>)> = Vec::with_capacity(params.len());
+    /// Temporarily binds captured scope + params in scope, evaluates body, then restores scope.
+    fn invoke_lambda_with_captured(&self, params: &[String], body: &Expression, args: &[EvalResult], captured: &HashMap<String, EvalResult>) -> EvalResult {
+        // Collect all keys we need to save/restore: captured keys + param keys
+        let mut saved: Vec<(String, Option<EvalResult>)> = Vec::new();
         {
             let mut scope = self.scope.borrow_mut();
+
+            // Apply captured scope (closure bindings)
+            for (key, val) in captured {
+                saved.push((key.clone(), scope.get(key).cloned()));
+                scope.insert(key.clone(), val.clone());
+            }
+
+            // Apply parameter bindings (override captured if same name)
             for (i, name) in params.iter().enumerate() {
                 let key = name.to_uppercase();
-                saved.push((key.clone(), scope.get(&key).cloned()));
+                // Only save if not already saved by captured
+                if !captured.contains_key(&key) {
+                    saved.push((key.clone(), scope.get(&key).cloned()));
+                }
                 if let Some(val) = args.get(i) {
                     scope.insert(key, val.clone());
                 }
@@ -4639,6 +4652,13 @@ impl<'a> Evaluator<'a> {
         }
 
         result
+    }
+
+    /// Invoke a lambda with the given argument values bound to its parameters.
+    /// Temporarily binds params in scope, evaluates body, then restores scope.
+    fn invoke_lambda(&self, params: &[String], body: &Expression, args: &[EvalResult]) -> EvalResult {
+        let empty = HashMap::new();
+        self.invoke_lambda_with_captured(params, body, args, &empty)
     }
 
     // ==================== LAMBDA Functions ====================
@@ -4665,9 +4685,13 @@ impl<'a> Evaluator<'a> {
         // The last argument is the body (unevaluated)
         let body = args.last().unwrap().clone();
 
+        // Capture the current scope for closure support (nested/curried lambdas)
+        let captured = self.scope.borrow().clone();
+
         EvalResult::Lambda {
             params,
             body: Box::new(body),
+            captured,
         }
     }
 
@@ -4683,7 +4707,7 @@ impl<'a> Evaluator<'a> {
         let lambda = self.evaluate(&args[1]);
 
         let (params, body) = match &lambda {
-            EvalResult::Lambda { params, body } => (params.clone(), body.as_ref().clone()),
+            EvalResult::Lambda { params, body, .. } => (params.clone(), body.as_ref().clone()),
             _ => return EvalResult::Error(CellError::Value),
         };
 
@@ -4728,7 +4752,7 @@ impl<'a> Evaluator<'a> {
         let lambda = self.evaluate(&args[2]);
 
         let (params, body) = match &lambda {
-            EvalResult::Lambda { params, body } => (params.clone(), body.as_ref().clone()),
+            EvalResult::Lambda { params, body, .. } => (params.clone(), body.as_ref().clone()),
             _ => return EvalResult::Error(CellError::Value),
         };
 
@@ -4763,7 +4787,7 @@ impl<'a> Evaluator<'a> {
         let lambda = self.evaluate(&args[2]);
 
         let (params, body) = match &lambda {
-            EvalResult::Lambda { params, body } => (params.clone(), body.as_ref().clone()),
+            EvalResult::Lambda { params, body, .. } => (params.clone(), body.as_ref().clone()),
             _ => return EvalResult::Error(CellError::Value),
         };
 
@@ -4803,7 +4827,7 @@ impl<'a> Evaluator<'a> {
 
         let lambda = self.evaluate(&args[2]);
         let (params, body) = match &lambda {
-            EvalResult::Lambda { params, body } => (params.clone(), body.as_ref().clone()),
+            EvalResult::Lambda { params, body, .. } => (params.clone(), body.as_ref().clone()),
             _ => return EvalResult::Error(CellError::Value),
         };
 
@@ -4852,7 +4876,7 @@ impl<'a> Evaluator<'a> {
         let lambda = self.evaluate(&args[1]);
 
         let (params, body) = match &lambda {
-            EvalResult::Lambda { params, body } => (params.clone(), body.as_ref().clone()),
+            EvalResult::Lambda { params, body, .. } => (params.clone(), body.as_ref().clone()),
             _ => return EvalResult::Error(CellError::Value),
         };
 
@@ -4877,7 +4901,7 @@ impl<'a> Evaluator<'a> {
 
     /// BYCOL(array, lambda)
     /// Applies lambda to each column of the array. Lambda receives a 1D array (the column).
-    /// Returns a single-row array of results.
+    /// Returns a single-row 2D array of results (spills horizontally).
     fn fn_bycol(&self, args: &[Expression]) -> EvalResult {
         if args.len() != 2 {
             return EvalResult::Error(CellError::Value);
@@ -4887,7 +4911,7 @@ impl<'a> Evaluator<'a> {
         let lambda = self.evaluate(&args[1]);
 
         let (params, body) = match &lambda {
-            EvalResult::Lambda { params, body } => (params.clone(), body.as_ref().clone()),
+            EvalResult::Lambda { params, body, .. } => (params.clone(), body.as_ref().clone()),
             _ => return EvalResult::Error(CellError::Value),
         };
 
@@ -4906,7 +4930,8 @@ impl<'a> Evaluator<'a> {
             results.push(result);
         }
 
-        EvalResult::Array(results)
+        // Wrap in a 2D array (1 row x N cols) so it spills horizontally
+        EvalResult::Array(vec![EvalResult::Array(results)])
     }
 
     /// TEXTJOIN(delimiter, ignore_empty, text1, [text2], ...)
@@ -5760,8 +5785,8 @@ impl<'a> Evaluator<'a> {
 
     /// Apply a lambda to arguments
     fn apply_lambda(&self, lambda: &EvalResult, apply_args: &[EvalResult]) -> EvalResult {
-        if let EvalResult::Lambda { params, body } = lambda {
-            self.invoke_lambda(params, body, apply_args)
+        if let EvalResult::Lambda { params, body, captured } = lambda {
+            self.invoke_lambda_with_captured(params, body, apply_args, captured)
         } else {
             EvalResult::Error(CellError::Value)
         }

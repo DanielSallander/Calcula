@@ -950,16 +950,50 @@ pub fn get_auto_filter_range(
 }
 
 /// Get all hidden (filtered) rows for the active sheet.
+/// Returns the union of auto-filter hidden rows and advanced-filter hidden rows.
 #[tauri::command]
 pub fn get_hidden_rows(
     state: State<AppState>,
 ) -> Vec<u32> {
     let active_sheet = *state.active_sheet.lock().unwrap();
     let auto_filters = state.auto_filters.lock().unwrap();
+    let adv_hidden = state.advanced_filter_hidden_rows.lock().unwrap();
 
-    auto_filters.get(&active_sheet)
-        .map(|af| af.hidden_rows.iter().copied().collect())
-        .unwrap_or_default()
+    let mut result: HashSet<u32> = HashSet::new();
+
+    if let Some(af) = auto_filters.get(&active_sheet) {
+        result.extend(af.hidden_rows.iter());
+    }
+    if let Some(rows) = adv_hidden.get(&active_sheet) {
+        result.extend(rows.iter());
+    }
+
+    result.into_iter().collect()
+}
+
+/// Set hidden rows for the Advanced Filter on the active sheet.
+#[tauri::command]
+pub fn set_advanced_filter_hidden_rows(
+    state: State<AppState>,
+    rows: Vec<u32>,
+) {
+    let active_sheet = *state.active_sheet.lock().unwrap();
+    let mut adv_hidden = state.advanced_filter_hidden_rows.lock().unwrap();
+    if rows.is_empty() {
+        adv_hidden.remove(&active_sheet);
+    } else {
+        adv_hidden.insert(active_sheet, rows);
+    }
+}
+
+/// Clear advanced filter hidden rows for the active sheet.
+#[tauri::command]
+pub fn clear_advanced_filter_hidden_rows(
+    state: State<AppState>,
+) {
+    let active_sheet = *state.active_sheet.lock().unwrap();
+    let mut adv_hidden = state.advanced_filter_hidden_rows.lock().unwrap();
+    adv_hidden.remove(&active_sheet);
 }
 
 /// Check if a specific row is hidden by the AutoFilter.

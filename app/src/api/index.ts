@@ -159,6 +159,8 @@ export {
   getAutoFilter,
   getAutoFilterRange,
   getHiddenRows,
+  setAdvancedFilterHiddenRows,
+  clearAdvancedFilterHiddenRows,
   isRowFiltered,
   getFilterUniqueValues,
   setColumnFilterValues,

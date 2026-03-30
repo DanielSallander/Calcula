@@ -17,6 +17,21 @@ export const mockDataSuite: TestSuite = {
   name: "Mock Data Verification",
   description: "Verifies the prefilled mock data is loaded correctly (requires yarn tauri:dev:data).",
 
+  // Wait for mock data to be loaded (it loads with a 500ms delay after mount)
+  beforeEach: async (ctx) => {
+    const maxWait = 3000;
+    const interval = 100;
+    let waited = 0;
+    while (waited < maxWait) {
+      const cell = await ctx.getCell(0, 0);
+      if (cell && cell.display && cell.display !== "") {
+        return;
+      }
+      await new Promise((resolve) => setTimeout(resolve, interval));
+      waited += interval;
+    }
+  },
+
   tests: [
     {
       name: "Header row contains expected columns",

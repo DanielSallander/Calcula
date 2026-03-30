@@ -837,6 +837,21 @@ export async function getHiddenRows(): Promise<number[]> {
 }
 
 /**
+ * Set hidden rows for the Advanced Filter on the active sheet.
+ * @param rows - Array of row indices to hide
+ */
+export async function setAdvancedFilterHiddenRows(rows: number[]): Promise<void> {
+  return invoke<void>("set_advanced_filter_hidden_rows", { rows });
+}
+
+/**
+ * Clear advanced filter hidden rows for the active sheet.
+ */
+export async function clearAdvancedFilterHiddenRows(): Promise<void> {
+  return invoke<void>("clear_advanced_filter_hidden_rows", {});
+}
+
+/**
  * Check if a specific row is hidden by the AutoFilter.
  * @param row - Row index (0-based)
  * @returns true if row is filtered/hidden
