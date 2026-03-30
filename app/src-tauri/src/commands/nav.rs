@@ -1,8 +1,9 @@
 //! FILENAME: app/src-tauri/src/commands/nav.rs
-// PURPOSE: Navigation logic (e.g., Ctrl+Arrow).
+// PURPOSE: Navigation logic (e.g., Ctrl+Arrow, Go To Special).
 
 use crate::AppState;
 use engine::CellValue;
+use serde::{Deserialize, Serialize};
 use tauri::State;
 
 /// Detect the contiguous data region around a given cell (Excel's CurrentRegion).
@@ -187,4 +188,157 @@ pub fn find_ctrl_arrow_target(
             }
         }
     }
+}
+
+// ============================================================================
+// Go To Special
+// ============================================================================
+
+/// A cell coordinate returned for Go To Special results.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CellCoord {
+    pub row: u32,
+    pub col: u32,
+}
+
+/// Result of go_to_special command.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GoToSpecialResult {
+    pub cells: Vec<CellCoord>,
+}
+
+/// Find cells matching specific criteria within the used range of the active sheet.
+/// `criteria` can be: "blanks", "formulas", "constants", "errors", "comments", "notes",
+///   "conditionalFormats", "dataValidation"
+/// `search_range` is optional: (startRow, startCol, endRow, endCol). If None, uses entire used range.
+#[tauri::command]
+pub fn go_to_special(
+    state: State<AppState>,
+    criteria: String,
+    search_range: Option<(u32, u32, u32, u32)>,
+) -> GoToSpecialResult {
+    let grid = state.grid.lock().unwrap();
+    let active_sheet = *state.active_sheet.lock().unwrap();
+
+    // Determine search bounds
+    let (sr, sc, er, ec) = search_range.unwrap_or((0, 0, grid.max_row, grid.max_col));
+
+    let mut cells = Vec::new();
+
+    match criteria.as_str() {
+        "blanks" => {
+            for row in sr..=er {
+                for col in sc..=ec {
+                    let is_blank = grid.get_cell(row, col)
+                        .map(|cell| cell.formula.is_none() && matches!(cell.value, CellValue::Empty))
+                        .unwrap_or(true);
+                    if is_blank {
+                        cells.push(CellCoord { row, col });
+                    }
+                }
+            }
+        }
+        "formulas" => {
+            for row in sr..=er {
+                for col in sc..=ec {
+                    let has_formula = grid.get_cell(row, col)
+                        .map(|cell| cell.formula.is_some())
+                        .unwrap_or(false);
+                    if has_formula {
+                        cells.push(CellCoord { row, col });
+                    }
+                }
+            }
+        }
+        "constants" => {
+            for row in sr..=er {
+                for col in sc..=ec {
+                    let is_constant = grid.get_cell(row, col)
+                        .map(|cell| cell.formula.is_none() && !matches!(cell.value, CellValue::Empty))
+                        .unwrap_or(false);
+                    if is_constant {
+                        cells.push(CellCoord { row, col });
+                    }
+                }
+            }
+        }
+        "errors" => {
+            for row in sr..=er {
+                for col in sc..=ec {
+                    let is_error = grid.get_cell(row, col)
+                        .map(|cell| matches!(cell.value, CellValue::Error(_)))
+                        .unwrap_or(false);
+                    if is_error {
+                        cells.push(CellCoord { row, col });
+                    }
+                }
+            }
+        }
+        "comments" => {
+            let comments = state.comments.lock().unwrap();
+            if let Some(sheet_comments) = comments.get(&active_sheet) {
+                for (&(row, col), _) in sheet_comments {
+                    if row >= sr && row <= er && col >= sc && col <= ec {
+                        cells.push(CellCoord { row, col });
+                    }
+                }
+            }
+        }
+        "notes" => {
+            let notes = state.notes.lock().unwrap();
+            if let Some(sheet_notes) = notes.get(&active_sheet) {
+                for (&(row, col), _) in sheet_notes {
+                    if row >= sr && row <= er && col >= sc && col <= ec {
+                        cells.push(CellCoord { row, col });
+                    }
+                }
+            }
+        }
+        "conditionalFormats" => {
+            let cfs = state.conditional_formats.lock().unwrap();
+            if let Some(sheet_cfs) = cfs.get(&active_sheet) {
+                let mut cell_set = std::collections::HashSet::new();
+                for cf in sheet_cfs {
+                    for range in &cf.ranges {
+                        for row in range.start_row..=range.end_row {
+                            for col in range.start_col..=range.end_col {
+                                if row >= sr && row <= er && col >= sc && col <= ec {
+                                    cell_set.insert((row, col));
+                                }
+                            }
+                        }
+                    }
+                }
+                for (row, col) in cell_set {
+                    cells.push(CellCoord { row, col });
+                }
+            }
+        }
+        "dataValidation" => {
+            let validations = state.data_validations.lock().unwrap();
+            if let Some(sheet_validations) = validations.get(&active_sheet) {
+                let mut cell_set = std::collections::HashSet::new();
+                for vr in sheet_validations {
+                    for row in vr.start_row..=vr.end_row {
+                        for col in vr.start_col..=vr.end_col {
+                            if row >= sr && row <= er && col >= sc && col <= ec {
+                                cell_set.insert((row, col));
+                            }
+                        }
+                    }
+                }
+                for (row, col) in cell_set {
+                    cells.push(CellCoord { row, col });
+                }
+            }
+        }
+        _ => {}
+    }
+
+    // Sort by row then col for consistent ordering
+    cells.sort_by(|a, b| a.row.cmp(&b.row).then(a.col.cmp(&b.col)));
+
+    GoToSpecialResult { cells }
 }

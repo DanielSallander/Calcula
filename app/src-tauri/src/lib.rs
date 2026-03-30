@@ -61,6 +61,7 @@ pub use api_types::{CellData, StyleData, DimensionData, FormattingParams, Merged
 pub use logging::{init_log_file, get_log_path, next_seq, write_log, write_log_raw};
 pub use engine::{Transaction, CellChange};
 pub use sheets::FreezeConfig;
+pub use sheets::SplitConfig;
 pub use named_ranges::{NamedRange, NamedRangeResult};
 pub use data_validation::{
     DataValidation, DataValidationType, DataValidationOperator, DataValidationAlertStyle,
@@ -177,6 +178,8 @@ pub struct AppState {
     pub undo_stack: Mutex<UndoStack>,
     /// Freeze pane configurations per sheet
     pub freeze_configs: Mutex<Vec<FreezeConfig>>,
+    /// Split window configurations per sheet
+    pub split_configs: Mutex<Vec<SplitConfig>>,
     /// Merged cell regions for the current sheet
     pub merged_regions: Mutex<HashSet<MergedRegion>>,
     /// Protected regions - cells in these regions cannot be edited directly.
@@ -284,6 +287,7 @@ pub fn create_app_state() -> AppState {
         cross_sheet_dependencies: Mutex::new(HashMap::new()),
         undo_stack: Mutex::new(UndoStack::new()),
         freeze_configs: Mutex::new(vec![FreezeConfig::default()]),
+        split_configs: Mutex::new(vec![SplitConfig::default()]),
         merged_regions: Mutex::new(HashSet::new()),
         protected_regions: Mutex::new(Vec::new()),
         named_ranges: Mutex::new(HashMap::new()),
@@ -3174,6 +3178,7 @@ pub fn run() {
             // Navigation commands
             commands::find_ctrl_arrow_target,
             commands::detect_data_region,
+            commands::go_to_special,
             // Dimension commands
             commands::set_column_width,
             commands::get_column_width,
@@ -3241,6 +3246,8 @@ pub fn run() {
             sheets::rename_sheet,
             sheets::set_freeze_panes,
             sheets::get_freeze_panes,
+            sheets::set_split_window,
+            sheets::get_split_window,
             sheets::move_sheet,
             sheets::copy_sheet,
             sheets::hide_sheet,

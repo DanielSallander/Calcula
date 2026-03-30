@@ -135,6 +135,30 @@ export const DEFAULT_FREEZE_CONFIG: FreezeConfig = {
 };
 
 /**
+ * Split window configuration. Unlike freeze panes, split windows
+ * allow independent scrolling in each quadrant.
+ */
+export interface SplitConfig {
+  /** Row index where the split divides vertically (null = no horizontal split) */
+  splitRow: number | null;
+  /** Column index where the split divides horizontally (null = no vertical split) */
+  splitCol: number | null;
+}
+
+/**
+ * Default split config (no split).
+ */
+export const DEFAULT_SPLIT_CONFIG: SplitConfig = {
+  splitRow: null,
+  splitCol: null,
+};
+
+/**
+ * View mode for the spreadsheet.
+ */
+export type ViewMode = "normal" | "pageLayout" | "pageBreakPreview";
+
+/**
  * Configuration for grid dimensions.
  */
 export interface GridConfig {
@@ -692,6 +716,10 @@ export interface GridState {
   sheetContext: SheetContext;
   /** Freeze panes configuration */
   freezeConfig: FreezeConfig;
+  /** Split window configuration */
+  splitConfig: SplitConfig;
+  /** Current view mode */
+  viewMode: ViewMode;
   /** Zoom factor (1.0 = 100%, 0.5 = 50%, 2.0 = 200%) */
   zoom: number;
 }
@@ -737,6 +765,8 @@ export function createInitialGridState(): GridState {
       activeSheetName: "Sheet1",
     },
     freezeConfig: { ...DEFAULT_FREEZE_CONFIG },
+    splitConfig: { ...DEFAULT_SPLIT_CONFIG },
+    viewMode: "normal",
     zoom: ZOOM_DEFAULT,
   };
 }

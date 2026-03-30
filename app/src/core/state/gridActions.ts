@@ -16,6 +16,8 @@ import type {
   Selection,
   ClipboardMode,
   FreezeConfig,
+  SplitConfig,
+  ViewMode,
 } from "../types";
 import { ZOOM_MIN, ZOOM_MAX } from "../types";
 
@@ -57,6 +59,8 @@ export const GRID_ACTIONS = {
   SET_GROUP_HIDDEN_ROWS: "SET_GROUP_HIDDEN_ROWS",
   SET_GROUP_HIDDEN_COLS: "SET_GROUP_HIDDEN_COLS",
   SET_ZOOM: "SET_ZOOM",
+  SET_SPLIT_CONFIG: "SET_SPLIT_CONFIG",
+  SET_VIEW_MODE: "SET_VIEW_MODE",
 } as const;
 
 // Action interfaces
@@ -260,6 +264,16 @@ export interface SetZoomAction {
   payload: { zoom: number };
 }
 
+export interface SetSplitConfigAction {
+  type: typeof GRID_ACTIONS.SET_SPLIT_CONFIG;
+  payload: SplitConfig;
+}
+
+export interface SetViewModeAction {
+  type: typeof GRID_ACTIONS.SET_VIEW_MODE;
+  payload: { viewMode: ViewMode };
+}
+
 // Union type of all actions
 export type GridAction =
   | SetSelectionAction
@@ -297,7 +311,9 @@ export type GridAction =
   | SetManuallyHiddenColsAction
   | SetGroupHiddenRowsAction
   | SetGroupHiddenColsAction
-  | SetZoomAction;
+  | SetZoomAction
+  | SetSplitConfigAction
+  | SetViewModeAction;
 
 // Action creators
 
@@ -714,5 +730,31 @@ export function setZoom(zoom: number): SetZoomAction {
   return {
     type: GRID_ACTIONS.SET_ZOOM,
     payload: { zoom: Math.max(ZOOM_MIN, Math.min(ZOOM_MAX, zoom)) },
+  };
+}
+
+/**
+ * Set split window configuration.
+ * @param splitRow - Row index for horizontal split (null to remove)
+ * @param splitCol - Column index for vertical split (null to remove)
+ */
+export function setSplitConfig(
+  splitRow: number | null,
+  splitCol: number | null
+): SetSplitConfigAction {
+  return {
+    type: GRID_ACTIONS.SET_SPLIT_CONFIG,
+    payload: { splitRow, splitCol },
+  };
+}
+
+/**
+ * Set the view mode.
+ * @param viewMode - "normal", "pageLayout", or "pageBreakPreview"
+ */
+export function setViewMode(viewMode: ViewMode): SetViewModeAction {
+  return {
+    type: GRID_ACTIONS.SET_VIEW_MODE,
+    payload: { viewMode },
   };
 }

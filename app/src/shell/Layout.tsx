@@ -23,10 +23,13 @@ import { GridProvider } from "../core/state/GridContext";
 import {
   useGridContext,
   setFreezeConfig,
+  setSplitConfig,
+  setViewMode,
   ExtensionRegistry,
   AppEvents,
   onAppEvent,
 } from "../api";
+import type { ViewMode } from "../core/types";
 // Extension management
 import { useExtensionInitializer, useExtensions } from "./hooks/useExtensions";
 // Hook-based menus that need to be rendered inside React tree
@@ -119,6 +122,27 @@ function LayoutInner(): React.ReactElement {
       freezeCol: number | null;
     }>(AppEvents.FREEZE_CHANGED, (detail) => {
       dispatch(setFreezeConfig(detail.freezeRow, detail.freezeCol));
+    });
+    return cleanup;
+  }, [dispatch]);
+
+  // Bridge: sync split window state from API events into Core state.
+  useEffect(() => {
+    const cleanup = onAppEvent<{
+      splitRow: number | null;
+      splitCol: number | null;
+    }>(AppEvents.SPLIT_CHANGED, (detail) => {
+      dispatch(setSplitConfig(detail.splitRow, detail.splitCol));
+    });
+    return cleanup;
+  }, [dispatch]);
+
+  // Bridge: sync view mode from API events into Core state.
+  useEffect(() => {
+    const cleanup = onAppEvent<{
+      viewMode: ViewMode;
+    }>(AppEvents.VIEW_MODE_CHANGED, (detail) => {
+      dispatch(setViewMode(detail.viewMode));
     });
     return cleanup;
   }, [dispatch]);

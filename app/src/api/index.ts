@@ -54,6 +54,8 @@ export {
   setSheetContext,
   setActiveSheet,
   setFreezeConfig,
+  setSplitConfig,
+  setViewMode,
   setHiddenRows,
   setHiddenCols,
   setManuallyHiddenRows,
@@ -334,6 +336,9 @@ export type { ContextMenuRequestPayload } from "./contextMenuTypes";
 // ============================================================================
 
 export { freezePanes, loadFreezePanesConfig } from "./grid";
+export { splitWindow, loadSplitWindowConfig, removeSplitWindow } from "./grid";
+export { goToSpecial } from "./grid";
+export type { GoToSpecialResult, GoToSpecialCriteria } from "./grid";
 
 // ============================================================================
 // Extension Manager

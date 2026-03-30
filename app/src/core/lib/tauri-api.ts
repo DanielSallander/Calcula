@@ -739,6 +739,41 @@ export async function getFreezePanes(): Promise<FreezeConfig> {
 }
 
 // ============================================================================
+// SPLIT WINDOW API
+// ============================================================================
+
+export interface SplitConfig {
+  splitRow: number | null;
+  splitCol: number | null;
+}
+
+export async function setSplitWindow(
+  splitRow: number | null,
+  splitCol: number | null
+): Promise<void> {
+  await invoke<void>("set_split_window", { splitRow, splitCol });
+}
+
+export async function getSplitWindow(): Promise<SplitConfig> {
+  return await invoke<SplitConfig>("get_split_window", {});
+}
+
+// ============================================================================
+// GO TO SPECIAL API
+// ============================================================================
+
+export interface GoToSpecialResult {
+  cells: Array<{ row: number; col: number }>;
+}
+
+export async function goToSpecial(
+  criteria: string,
+  searchRange: [number, number, number, number] | null
+): Promise<GoToSpecialResult> {
+  return await invoke<GoToSpecialResult>("go_to_special", { criteria, searchRange });
+}
+
+// ============================================================================
 // MERGE CELLS API
 // ============================================================================
 

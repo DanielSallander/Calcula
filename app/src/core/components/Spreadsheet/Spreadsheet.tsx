@@ -106,8 +106,8 @@ function SpreadsheetContent({
     selectionDragPreview,
   } = state;
 
-  // 5. Extract freezeConfig from gridState
-  const { freezeConfig } = gridState;
+  // 5. Extract freezeConfig, splitConfig, viewMode from gridState
+  const { freezeConfig, splitConfig, viewMode } = gridState;
 
   // -------------------------------------------------------------------------
   // Helper: Refresh dimensions from backend
@@ -839,6 +839,8 @@ function SpreadsheetContent({
             fillPreviewRange={fillState.previewRange}
             selectionDragPreview={selectionDragPreview}
             freezeConfig={freezeConfig}
+            splitConfig={splitConfig}
+            viewMode={viewMode}
             currentSheetName={gridState.sheetContext.activeSheetName}
             zoom={gridState.zoom}
           />

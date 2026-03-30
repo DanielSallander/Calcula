@@ -20,6 +20,12 @@ export const AppEvents = {
   // Freeze pane events
   FREEZE_CHANGED: "app:freeze-changed",
 
+  // Split window events
+  SPLIT_CHANGED: "app:split-changed",
+
+  // View mode events
+  VIEW_MODE_CHANGED: "app:view-mode-changed",
+
   // Selection events
   SELECTION_CHANGED: "app:selection-changed",
 

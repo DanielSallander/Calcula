@@ -38,6 +38,7 @@ import { registerFlashFillExtension, unregisterFlashFillExtension } from "./Flas
 import { registerAdvancedFilterExtension, unregisterAdvancedFilterExtension } from "./AdvancedFilter";
 import { registerSubtotalsExtension, unregisterSubtotalsExtension } from "./Subtotals";
 import { registerCustomFillListsExtension, unregisterCustomFillListsExtension } from "./CustomFillLists";
+import { registerGoToSpecialExtension, unregisterGoToSpecialExtension } from "./GoToSpecial";
 
 /**
  * Load all extensions.
@@ -71,6 +72,7 @@ export function loadExtensions(): void {
   registerAdvancedFilterExtension();
   registerSubtotalsExtension();
   registerCustomFillListsExtension();
+  registerGoToSpecialExtension();
   registerCheckboxExtension();
   registerSparklineExtension();
   registerReviewExtension();
@@ -114,6 +116,7 @@ export function unloadExtensions(): void {
   unregisterSparklineExtension();
   unregisterCheckboxExtension();
   unregisterSubtotalsExtension();
+  unregisterGoToSpecialExtension();
   unregisterCustomFillListsExtension();
   unregisterAdvancedFilterExtension();
   unregisterFlashFillExtension();
@@ -177,3 +180,4 @@ export { registerFlashFillExtension, unregisterFlashFillExtension };
 export { registerAdvancedFilterExtension, unregisterAdvancedFilterExtension };
 export { registerSubtotalsExtension, unregisterSubtotalsExtension };
 export { registerCustomFillListsExtension, unregisterCustomFillListsExtension };
+export { registerGoToSpecialExtension, unregisterGoToSpecialExtension };

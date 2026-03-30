@@ -14,8 +14,10 @@ import type {
   ClipboardMode,
   InsertionAnimation,
   FreezeConfig,
+  SplitConfig,
   VisibleRange,
   SpillRangeInfo,
+  ViewMode,
 } from "../../../core/types";
 import type { GridTheme, RenderState } from "./types";
 import { DEFAULT_THEME } from "./types";
@@ -558,6 +560,14 @@ export function renderGrid(
   postHeaderRenderers: GlobalOverlayRendererFn[] = [],
   // Spill range borders for dynamic array formulas
   spillRanges: SpillRangeInfo[] = [],
+  // Split window configuration
+  splitConfig?: SplitConfig,
+  // Secondary viewport for split window (top-left pane's independent scroll)
+  splitViewport?: Viewport,
+  // View mode for page layout rendering
+  viewMode?: ViewMode,
+  // Page setup for page layout view
+  pageSetup?: { marginTop: number; marginBottom: number; marginLeft: number; marginRight: number; paperWidth: number; paperHeight: number; header: string; footer: string },
 ): void {
   const rowHeaderWidth = config.rowHeaderWidth || 50;
   const colHeaderHeight = config.colHeaderHeight || 24;
@@ -603,9 +613,100 @@ export function renderGrid(
   ctx.fillStyle = theme.cellBackground;
   ctx.fillRect(0, 0, width, height);
 
-  const hasFreezeRows = freezeConfig && freezeConfig.freezeRow !== null && freezeConfig.freezeRow > 0;
-  const hasFreezeCols = freezeConfig && freezeConfig.freezeCol !== null && freezeConfig.freezeCol > 0;
-  
+  // Split window rendering
+  const hasSplitRows = splitConfig && splitConfig.splitRow !== null && splitConfig.splitRow > 0;
+  const hasSplitCols = splitConfig && splitConfig.splitCol !== null && splitConfig.splitCol > 0;
+
+  if (hasSplitRows || hasSplitCols) {
+    // Split window uses the same layout calculation as freeze panes
+    // but renders a thicker draggable split bar
+    const splitFreezeConfig: FreezeConfig = {
+      freezeRow: splitConfig!.splitRow ?? null,
+      freezeCol: splitConfig!.splitCol ?? null,
+    };
+    const layout = calculateFreezePaneLayout(splitFreezeConfig, config, dims);
+
+    const paneTopX = rowHeaderWidth;
+    const paneTopY = colHeaderHeight;
+    const splitX = rowHeaderWidth + layout.frozenColsWidth;
+    const splitY = colHeaderHeight + layout.frozenRowsHeight;
+    const splitBarSize = 4; // Split bar thickness
+    const mainX = splitX + (hasSplitCols ? splitBarSize : 0);
+    const mainY = splitY + (hasSplitRows ? splitBarSize : 0);
+    const mainWidth = width - mainX;
+    const mainHeight = height - mainY;
+
+    // Use splitViewport for the top/left panes, main viewport for bottom/right
+    const topLeftViewport = splitViewport || { ...viewport, scrollX: 0, scrollY: 0, startRow: 0, startCol: 0, rowCount: 50, colCount: 20 };
+
+    // Bottom-right pane (main scrollable) - uses primary viewport
+    const mainRange = calculateScrollableRange(viewport, splitFreezeConfig, config, width, height, dims);
+    if (mainWidth > 0 && mainHeight > 0) {
+      renderZone(state, mainRange, mainX, mainY, mainWidth, mainHeight);
+    }
+
+    // Left pane (scrolls vertically with main, horizontally with top-left viewport)
+    if (hasSplitCols) {
+      const leftViewport: Viewport = { ...viewport, scrollX: topLeftViewport.scrollX, startRow: viewport.startRow, startCol: topLeftViewport.startCol, rowCount: viewport.rowCount, colCount: 20 };
+      const leftRange = calculateFrozenLeftRange(leftViewport, splitFreezeConfig, config, width, height, dims);
+      if (leftRange && mainHeight > 0) {
+        renderZone(state, leftRange, paneTopX, mainY, layout.frozenColsWidth, mainHeight);
+      }
+    }
+
+    // Top pane (scrolls horizontally with main, vertically with top-left viewport)
+    if (hasSplitRows) {
+      const topViewport: Viewport = { ...viewport, scrollY: topLeftViewport.scrollY, startCol: viewport.startCol, startRow: topLeftViewport.startRow, rowCount: 50, colCount: viewport.colCount };
+      const topRange = calculateFrozenTopRange(topViewport, splitFreezeConfig, config, width, height, dims);
+      if (topRange && mainWidth > 0) {
+        renderZone(state, topRange, mainX, paneTopY, mainWidth, layout.frozenRowsHeight);
+      }
+    }
+
+    // Top-left pane (independent scroll)
+    if (hasSplitRows && hasSplitCols) {
+      const topLeftRange = calculateFrozenTopLeftRange(splitFreezeConfig, config, width, height, dims);
+      if (topLeftRange) {
+        renderZone(state, topLeftRange, paneTopX, paneTopY, layout.frozenColsWidth, layout.frozenRowsHeight);
+      }
+    }
+
+    // Draw split bars (thicker than freeze pane lines)
+    ctx.fillStyle = "#c0c0c0";
+    if (hasSplitCols && layout.frozenColsWidth > 0) {
+      ctx.fillRect(splitX, colHeaderHeight, splitBarSize, height - colHeaderHeight);
+    }
+    if (hasSplitRows && layout.frozenRowsHeight > 0) {
+      ctx.fillRect(rowHeaderWidth, splitY, width - rowHeaderWidth, splitBarSize);
+    }
+    // Draw 3D effect on split bars
+    ctx.strokeStyle = "#999999";
+    ctx.lineWidth = 1;
+    if (hasSplitCols && layout.frozenColsWidth > 0) {
+      ctx.beginPath();
+      ctx.moveTo(splitX + 0.5, colHeaderHeight);
+      ctx.lineTo(splitX + 0.5, height);
+      ctx.stroke();
+      ctx.beginPath();
+      ctx.moveTo(splitX + splitBarSize - 0.5, colHeaderHeight);
+      ctx.lineTo(splitX + splitBarSize - 0.5, height);
+      ctx.stroke();
+    }
+    if (hasSplitRows && layout.frozenRowsHeight > 0) {
+      ctx.beginPath();
+      ctx.moveTo(rowHeaderWidth, splitY + 0.5);
+      ctx.lineTo(width, splitY + 0.5);
+      ctx.stroke();
+      ctx.beginPath();
+      ctx.moveTo(rowHeaderWidth, splitY + splitBarSize - 0.5);
+      ctx.lineTo(width, splitY + splitBarSize - 0.5);
+      ctx.stroke();
+    }
+  }
+
+  const hasFreezeRows = !hasSplitRows && !hasSplitCols && freezeConfig && freezeConfig.freezeRow !== null && freezeConfig.freezeRow > 0;
+  const hasFreezeCols = !hasSplitRows && !hasSplitCols && freezeConfig && freezeConfig.freezeCol !== null && freezeConfig.freezeCol > 0;
+
   if (hasFreezeRows || hasFreezeCols) {
     const layout = calculateFreezePaneLayout(freezeConfig!, config, dims);
     
@@ -659,7 +760,7 @@ export function renderGrid(
       ctx.stroke();
     }
     
-  } else {
+  } else if (!hasSplitRows && !hasSplitCols) {
     drawGridLines(state);
     drawCellText(state);
   }
@@ -761,4 +862,179 @@ export function renderGrid(
   for (const renderer of postHeaderRenderers) {
     renderer(ctx, config, viewport, dims, width, height);
   }
+
+  // Page Layout View: draw page boundaries, margins, and header/footer areas
+  if (viewMode === "pageLayout" && pageSetup) {
+    drawPageLayoutOverlay(ctx, config, viewport, dims, width, height, pageSetup);
+  }
+}
+
+// ============================================================================
+// Page Layout View Rendering
+// ============================================================================
+
+function drawPageLayoutOverlay(
+  ctx: CanvasRenderingContext2D,
+  config: GridConfig,
+  viewport: Viewport,
+  dimensions: DimensionOverrides,
+  canvasWidth: number,
+  canvasHeight: number,
+  pageSetup: { marginTop: number; marginBottom: number; marginLeft: number; marginRight: number; paperWidth: number; paperHeight: number; header: string; footer: string },
+): void {
+  const rowHeaderWidth = config.rowHeaderWidth || 50;
+  const colHeaderHeight = config.colHeaderHeight || 24;
+  const scrollX = viewport.scrollX || 0;
+  const scrollY = viewport.scrollY || 0;
+
+  // Convert paper dimensions (inches at 96 DPI) to pixels
+  const pageWidthPx = pageSetup.paperWidth * 96;
+  const pageHeightPx = pageSetup.paperHeight * 96;
+  const marginTopPx = pageSetup.marginTop * 96;
+  const marginBottomPx = pageSetup.marginBottom * 96;
+  const marginLeftPx = pageSetup.marginLeft * 96;
+  const marginRightPx = pageSetup.marginRight * 96;
+
+  // Draw page boundary lines (blue dashed)
+  ctx.save();
+  ctx.setLineDash([6, 4]);
+  ctx.strokeStyle = "#4472c4";
+  ctx.lineWidth = 1.5;
+
+  // Calculate page breaks based on accumulated column widths and row heights
+  // Vertical page breaks (between columns)
+  let accWidth = 0;
+  const printableWidth = pageWidthPx - marginLeftPx - marginRightPx;
+  let pageStartCol = 0;
+  for (let col = 0; col < (config.totalCols || 100); col++) {
+    const colW = getColumnWidth(col, config, dimensions);
+    accWidth += colW;
+    if (accWidth > printableWidth && col > pageStartCol) {
+      // Draw vertical page break
+      const breakX = rowHeaderWidth + accWidth - colW - scrollX;
+      if (breakX > rowHeaderWidth && breakX < canvasWidth) {
+        ctx.beginPath();
+        ctx.moveTo(Math.floor(breakX) + 0.5, colHeaderHeight);
+        ctx.lineTo(Math.floor(breakX) + 0.5, canvasHeight);
+        ctx.stroke();
+      }
+      accWidth = colW;
+      pageStartCol = col;
+    }
+  }
+
+  // Horizontal page breaks (between rows)
+  let accHeight = 0;
+  const printableHeight = pageHeightPx - marginTopPx - marginBottomPx;
+  let pageStartRow = 0;
+  for (let row = 0; row < (config.totalRows || 1000); row++) {
+    const rowH = getRowHeight(row, config, dimensions);
+    accHeight += rowH;
+    if (accHeight > printableHeight && row > pageStartRow) {
+      // Draw horizontal page break
+      const breakY = colHeaderHeight + accHeight - rowH - scrollY;
+      if (breakY > colHeaderHeight && breakY < canvasHeight) {
+        ctx.beginPath();
+        ctx.moveTo(rowHeaderWidth, Math.floor(breakY) + 0.5);
+        ctx.lineTo(canvasWidth, Math.floor(breakY) + 0.5);
+        ctx.stroke();
+      }
+      accHeight = rowH;
+      pageStartRow = row;
+    }
+  }
+  ctx.setLineDash([]);
+
+  // Draw margin indicators (light gray shading)
+  ctx.fillStyle = "rgba(200, 200, 200, 0.15)";
+  // Top margin area
+  if (marginTopPx > 0) {
+    const marginTopHeight = Math.min(marginTopPx, canvasHeight - colHeaderHeight);
+    const topMarginY = colHeaderHeight - scrollY;
+    if (topMarginY + marginTopHeight > colHeaderHeight) {
+      ctx.fillRect(rowHeaderWidth, Math.max(colHeaderHeight, topMarginY), canvasWidth - rowHeaderWidth, Math.min(marginTopHeight, canvasHeight - colHeaderHeight));
+    }
+  }
+
+  // Draw header text in the top margin
+  if (pageSetup.header) {
+    ctx.fillStyle = "#666666";
+    ctx.font = "10px system-ui, sans-serif";
+    ctx.textBaseline = "middle";
+    const headerY = colHeaderHeight + Math.min(marginTopPx / 2, 15) - scrollY;
+    if (headerY > colHeaderHeight && headerY < canvasHeight) {
+      const parts = parseHeaderFooter(pageSetup.header);
+      if (parts.left) {
+        ctx.textAlign = "left";
+        ctx.fillText(parts.left, rowHeaderWidth + marginLeftPx - scrollX + 4, headerY);
+      }
+      if (parts.center) {
+        ctx.textAlign = "center";
+        ctx.fillText(parts.center, rowHeaderWidth + (canvasWidth - rowHeaderWidth) / 2, headerY);
+      }
+      if (parts.right) {
+        ctx.textAlign = "right";
+        ctx.fillText(parts.right, canvasWidth - marginRightPx + scrollX - 4, headerY);
+      }
+    }
+  }
+
+  // Draw footer text at bottom of page
+  if (pageSetup.footer) {
+    ctx.fillStyle = "#666666";
+    ctx.font = "10px system-ui, sans-serif";
+    ctx.textBaseline = "middle";
+    // Show footer at first page boundary
+    const firstPageBottom = colHeaderHeight + printableHeight + marginTopPx - scrollY;
+    const footerY = firstPageBottom + marginBottomPx / 2;
+    if (footerY > colHeaderHeight && footerY < canvasHeight) {
+      const parts = parseHeaderFooter(pageSetup.footer);
+      if (parts.left) {
+        ctx.textAlign = "left";
+        ctx.fillText(parts.left, rowHeaderWidth + marginLeftPx - scrollX + 4, footerY);
+      }
+      if (parts.center) {
+        ctx.textAlign = "center";
+        ctx.fillText(parts.center, rowHeaderWidth + (canvasWidth - rowHeaderWidth) / 2, footerY);
+      }
+      if (parts.right) {
+        ctx.textAlign = "right";
+        ctx.fillText(parts.right, canvasWidth - marginRightPx + scrollX - 4, footerY);
+      }
+    }
+  }
+
+  ctx.restore();
+}
+
+/**
+ * Parse Excel-style header/footer format codes: &L, &C, &R for left/center/right.
+ * Also replaces &P (page number), &N (total pages), &D (date), &T (time), &F (filename).
+ */
+function parseHeaderFooter(format: string): { left: string; center: string; right: string } {
+  const result = { left: "", center: "", right: "" };
+  if (!format) return result;
+
+  // Split by &L, &C, &R sections
+  const sections = format.split(/&([LCR])/i);
+  let currentSection: "left" | "center" | "right" = "center"; // default is center
+
+  for (let i = 0; i < sections.length; i++) {
+    const section = sections[i];
+    if (section.toUpperCase() === "L") { currentSection = "left"; continue; }
+    if (section.toUpperCase() === "C") { currentSection = "center"; continue; }
+    if (section.toUpperCase() === "R") { currentSection = "right"; continue; }
+
+    // Replace format codes with display values
+    let text = section
+      .replace(/&P/gi, "1")
+      .replace(/&N/gi, "1")
+      .replace(/&D/gi, new Date().toLocaleDateString())
+      .replace(/&T/gi, new Date().toLocaleTimeString())
+      .replace(/&F/gi, "Workbook");
+
+    result[currentSection] += text;
+  }
+
+  return result;
 }

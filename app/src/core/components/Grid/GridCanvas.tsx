@@ -8,8 +8,8 @@
 import React, { useRef, useEffect, useCallback, useImperativeHandle, forwardRef, useState } from "react";
 import { renderGrid, DEFAULT_THEME, calculateVisibleRange } from "../../lib/gridRenderer";
 import { getViewportCells, getSpillRanges } from "../../lib/tauri-api";
-import type { GridConfig, Viewport, Selection, EditingCell, CellDataMap, FormulaReference, DimensionOverrides, StyleDataMap, ClipboardMode, InsertionAnimation, FreezeConfig, SpillRangeInfo } from "../../types";
-import { cellKey, createEmptyDimensionOverrides, DEFAULT_FREEZE_CONFIG } from "../../types";
+import type { GridConfig, Viewport, Selection, EditingCell, CellDataMap, FormulaReference, DimensionOverrides, StyleDataMap, ClipboardMode, InsertionAnimation, FreezeConfig, SplitConfig, SpillRangeInfo, ViewMode } from "../../types";
+import { cellKey, createEmptyDimensionOverrides, DEFAULT_FREEZE_CONFIG, DEFAULT_SPLIT_CONFIG } from "../../types";
 import type { GridTheme } from "../../lib/gridRenderer";
 import { getGridRegions, getOverlayRenderers, getPostHeaderOverlayRenderers, onRegionChange } from "../../../api/gridOverlays";
 import * as S from "./GridCanvas.styles";
@@ -42,6 +42,10 @@ export interface GridCanvasProps {
   clipboardMode?: ClipboardMode;
   /** Freeze panes configuration */
   freezeConfig?: FreezeConfig;
+  /** Split window configuration */
+  splitConfig?: SplitConfig;
+  /** Current view mode */
+  viewMode?: ViewMode;
   /** Optional theme override */
   theme?: GridTheme;
   /** Callback when canvas is clicked */
@@ -157,6 +161,8 @@ export const GridCanvas = forwardRef<GridCanvasHandle, GridCanvasProps>(
       clipboardSelection,
       clipboardMode = "none",
       freezeConfig = DEFAULT_FREEZE_CONFIG,
+      splitConfig = DEFAULT_SPLIT_CONFIG,
+      viewMode = "normal",
       theme = DEFAULT_THEME,
       onMouseDown,
       onMouseMove,
@@ -470,13 +476,16 @@ export const GridCanvas = forwardRef<GridCanvasHandle, GridCanvasProps>(
         currentSheetName,
         getPostHeaderOverlayRenderers(),
         spillRanges,
+        splitConfig,
+        undefined, // splitViewport - reserved for independent split scrolling
+        viewMode,
       );
 
       const perfDrawMs = performance.now() - perfDrawStart;
       if (perfDrawMs > 5) {
         console.log(`[PERF] draw ms=${perfDrawMs.toFixed(1)}`, new Error().stack?.split('\n').slice(1, 4).join(' <- '));
       }
-    }, [context, canvasSize.width, canvasSize.height, config, viewport, selection, editing, cells, theme, formulaReferences, dims, styleCache, fillPreviewRange, selectionDragPreview, clipboardSelection, clipboardMode, freezeConfig, currentSheetName, zoom, spillRanges]);
+    }, [context, canvasSize.width, canvasSize.height, config, viewport, selection, editing, cells, theme, formulaReferences, dims, styleCache, fillPreviewRange, selectionDragPreview, clipboardSelection, clipboardMode, freezeConfig, splitConfig, viewMode, currentSheetName, zoom, spillRanges]);
 
     /**
      * Start row insertion animation.

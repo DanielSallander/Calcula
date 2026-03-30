@@ -1,12 +1,20 @@
 //! FILENAME: app/extensions/BuiltIn/StandardMenus/ViewMenu.ts
 // REFACTORED: All imports now go through app/src/api (The Facade Rule).
-// - Removed: direct imports from core/lib/tauri-api, core/state/gridActions, shell/task-pane
-// - Uses: api/grid.ts for freeze operations, api/ui.ts for task pane hooks
-// - The Shell (Layout.tsx) listens for FREEZE_CHANGED events and dispatches to Core state.
+// UPDATED: Added Split Window, Go To Special, Page Layout View items.
 
 import { useCallback, useEffect, useState } from 'react';
 import type { MenuDefinition, MenuItemDefinition } from '../../../src/api/ui';
-import { freezePanes, loadFreezePanesConfig } from '../../../src/api/grid';
+import {
+  freezePanes,
+  loadFreezePanesConfig,
+  splitWindow,
+  loadSplitWindowConfig,
+  removeSplitWindow,
+} from '../../../src/api/grid';
+import { useGridState } from '../../../src/api/grid';
+import { emitAppEvent, AppEvents } from '../../../src/api/events';
+import { showDialog } from '../../../src/api/ui';
+import type { ViewMode } from '../../../src/core/types';
 import {
   useIsTaskPaneOpen,
   useOpenTaskPaneAction,
@@ -38,6 +46,8 @@ export interface FreezeState {
 
 export function useViewMenu(): { menu: MenuDefinition; handlers: ViewMenuHandlers; freezeState: FreezeState } {
   const [freezeState, setFreezeState] = useState<FreezeState>({ row: false, col: false });
+  const [isSplit, setIsSplit] = useState(false);
+  const gridState = useGridState();
 
   // Task pane state via API hooks (no shell import)
   const isTaskPaneOpen = useIsTaskPaneOpen();
@@ -50,34 +60,29 @@ export function useViewMenu(): { menu: MenuDefinition; handlers: ViewMenuHandler
   const activeContextKeys = useTaskPaneActiveContextKeys();
 
   useEffect(() => {
-    const loadFreezeState = async () => {
-      console.log('[ViewMenu] Loading freeze state...');
+    const loadState = async () => {
       try {
-        // loadFreezePanesConfig fetches from backend AND emits FREEZE_CHANGED
-        // so the Shell bridge in Layout.tsx dispatches setFreezeConfig to Core state.
         const config = await loadFreezePanesConfig();
-        console.log('[ViewMenu] Loaded freeze config:', config);
         const hasRow = config.freezeRow !== null && config.freezeRow > 0;
         const hasCol = config.freezeCol !== null && config.freezeCol > 0;
-        setFreezeState({
-          row: hasRow,
-          col: hasCol,
-        });
+        setFreezeState({ row: hasRow, col: hasCol });
+
+        const splitConfig = await loadSplitWindowConfig();
+        const hasSplit = (splitConfig.splitRow !== null && splitConfig.splitRow > 0) ||
+                         (splitConfig.splitCol !== null && splitConfig.splitCol > 0);
+        setIsSplit(hasSplit);
       } catch (error) {
-        console.error('[ViewMenu] Failed to load freeze state:', error);
+        console.error('[ViewMenu] Failed to load state:', error);
       }
     };
-    loadFreezeState();
+    loadState();
   }, []);
 
   const handleFreezeTopRow = useCallback(async () => {
-    console.log('[ViewMenu] handleFreezeTopRow called, current state:', freezeState);
     try {
       const newRowState = !freezeState.row;
       const freezeRow = newRowState ? 1 : null;
       const freezeCol = freezeState.col ? 1 : null;
-      console.log('[ViewMenu] Calling freezePanes with:', { freezeRow, freezeCol });
-      // freezePanes: calls backend + emits FREEZE_CHANGED + emits GRID_REFRESH
       await freezePanes(freezeRow, freezeCol);
       setFreezeState(prev => ({ ...prev, row: newRowState }));
     } catch (error) {
@@ -86,12 +91,10 @@ export function useViewMenu(): { menu: MenuDefinition; handlers: ViewMenuHandler
   }, [freezeState]);
 
   const handleFreezeFirstColumn = useCallback(async () => {
-    console.log('[ViewMenu] handleFreezeFirstColumn called, current state:', freezeState);
     try {
       const newColState = !freezeState.col;
       const freezeRow = freezeState.row ? 1 : null;
       const freezeCol = newColState ? 1 : null;
-      console.log('[ViewMenu] Calling freezePanes with:', { freezeRow, freezeCol });
       await freezePanes(freezeRow, freezeCol);
       setFreezeState(prev => ({ ...prev, col: newColState }));
     } catch (error) {
@@ -100,13 +103,11 @@ export function useViewMenu(): { menu: MenuDefinition; handlers: ViewMenuHandler
   }, [freezeState]);
 
   const handleFreezeBoth = useCallback(async () => {
-    console.log('[ViewMenu] handleFreezeBoth called, current state:', freezeState);
     try {
       const bothFrozen = freezeState.row && freezeState.col;
       const newState = !bothFrozen;
       const freezeRow = newState ? 1 : null;
       const freezeCol = newState ? 1 : null;
-      console.log('[ViewMenu] Calling freezePanes with:', { freezeRow, freezeCol });
       await freezePanes(freezeRow, freezeCol);
       setFreezeState({ row: newState, col: newState });
     } catch (error) {
@@ -115,14 +116,60 @@ export function useViewMenu(): { menu: MenuDefinition; handlers: ViewMenuHandler
   }, [freezeState]);
 
   const handleUnfreeze = useCallback(async () => {
-    console.log('[ViewMenu] handleUnfreeze called');
     try {
-      console.log('[ViewMenu] Calling freezePanes with:', { freezeRow: null, freezeCol: null });
       await freezePanes(null, null);
       setFreezeState({ row: false, col: false });
     } catch (error) {
       console.error('[ViewMenu] handleUnfreeze error:', error);
     }
+  }, []);
+
+  // Split Window handler: splits at current selection or at row 5 / col 3 if no multi-cell selection
+  const handleSplitWindow = useCallback(async () => {
+    try {
+      if (isSplit) {
+        await removeSplitWindow();
+        setIsSplit(false);
+      } else {
+        const sel = gridState.selection;
+        const splitRow = sel && sel.startRow > 0 ? sel.startRow : 5;
+        const splitCol = sel && sel.startCol > 0 ? sel.startCol : 3;
+        await splitWindow(splitRow, splitCol);
+        setIsSplit(true);
+      }
+    } catch (error) {
+      console.error('[ViewMenu] handleSplitWindow error:', error);
+    }
+  }, [isSplit, gridState.selection]);
+
+  const handleRemoveSplit = useCallback(async () => {
+    try {
+      await removeSplitWindow();
+      setIsSplit(false);
+    } catch (error) {
+      console.error('[ViewMenu] handleRemoveSplit error:', error);
+    }
+  }, []);
+
+  // Go To Special handler
+  const handleGoToSpecial = useCallback(() => {
+    showDialog("go-to-special");
+  }, []);
+
+  // Page Layout View handlers
+  const handleNormalView = useCallback(() => {
+    emitAppEvent(AppEvents.VIEW_MODE_CHANGED, { viewMode: "normal" as ViewMode });
+    emitAppEvent(AppEvents.GRID_REFRESH);
+  }, []);
+
+  const handlePageLayoutView = useCallback(() => {
+    emitAppEvent(AppEvents.VIEW_MODE_CHANGED, { viewMode: "pageLayout" as ViewMode });
+    emitAppEvent(AppEvents.GRID_REFRESH);
+  }, []);
+
+  const handlePageBreakPreview = useCallback(() => {
+    emitAppEvent(AppEvents.VIEW_MODE_CHANGED, { viewMode: "pageBreakPreview" as ViewMode });
+    emitAppEvent(AppEvents.GRID_REFRESH);
   }, []);
 
   // Activity Bar state
@@ -139,7 +186,6 @@ export function useViewMenu(): { menu: MenuDefinition; handlers: ViewMenuHandler
   for (const view of allViews) {
     if (view.closable === false) continue;
 
-    // Only show items for views whose context keys match the active context
     const isContextActive = view.contextKeys.some(
       (key) => key === "always" || activeContextKeys.includes(key),
     );
@@ -171,10 +217,6 @@ export function useViewMenu(): { menu: MenuDefinition; handlers: ViewMenuHandler
   }
 
   // ---------------------------------------------------------------------------
-  // Build menu
-  // ---------------------------------------------------------------------------
-
-  // ---------------------------------------------------------------------------
   // Activity Bar view items
   // ---------------------------------------------------------------------------
 
@@ -193,7 +235,16 @@ export function useViewMenu(): { menu: MenuDefinition; handlers: ViewMenuHandler
   // Build menu
   // ---------------------------------------------------------------------------
 
+  const currentViewMode = gridState.viewMode || "normal";
   const items: MenuItemDefinition[] = [];
+
+  // View Mode section
+  items.push(
+    { id: 'view.normalView', label: 'Normal View', action: handleNormalView, checked: currentViewMode === "normal" },
+    { id: 'view.pageLayoutView', label: 'Page Layout View', action: handlePageLayoutView, checked: currentViewMode === "pageLayout" },
+    { id: 'view.pageBreakPreview', label: 'Page Break Preview', action: handlePageBreakPreview, checked: currentViewMode === "pageBreakPreview" },
+    { id: 'view.sepViews', label: '', separator: true },
+  );
 
   // Side Bar section
   if (activityBarItems.length > 0) {
@@ -212,6 +263,7 @@ export function useViewMenu(): { menu: MenuDefinition; handlers: ViewMenuHandler
     items.push(...dynamicPaneItems);
   }
 
+  // Freeze Panes section
   items.push(
     { id: 'view.sep1', label: '', separator: true },
     { id: 'view.freezeRow', label: 'Freeze Top Row', action: handleFreezeTopRow, checked: freezeState.row },
@@ -220,6 +272,18 @@ export function useViewMenu(): { menu: MenuDefinition; handlers: ViewMenuHandler
     { id: 'view.freezeBoth', label: 'Freeze Top Row and First Column', action: handleFreezeBoth, checked: freezeState.row && freezeState.col },
     { id: 'view.sep3', label: '', separator: true },
     { id: 'view.unfreeze', label: 'Unfreeze Panes', action: handleUnfreeze, disabled: !freezeState.row && !freezeState.col },
+  );
+
+  // Split Window section
+  items.push(
+    { id: 'view.sep4', label: '', separator: true },
+    { id: 'view.split', label: isSplit ? 'Remove Split' : 'Split Window', action: isSplit ? handleRemoveSplit : handleSplitWindow },
+  );
+
+  // Go To Special section
+  items.push(
+    { id: 'view.sep5', label: '', separator: true },
+    { id: 'view.goToSpecial', label: 'Go To Special...', action: handleGoToSpecial, shortcut: 'Ctrl+G' },
   );
 
   const menu: MenuDefinition = {

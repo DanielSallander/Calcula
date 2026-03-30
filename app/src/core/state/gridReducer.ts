@@ -1208,6 +1208,20 @@ export function gridReducer(state: GridState, action: GridAction): GridState {
       };
     }
 
+    case GRID_ACTIONS.SET_SPLIT_CONFIG: {
+      return {
+        ...state,
+        splitConfig: action.payload,
+      };
+    }
+
+    case GRID_ACTIONS.SET_VIEW_MODE: {
+      return {
+        ...state,
+        viewMode: action.payload.viewMode,
+      };
+    }
+
     default: {
       return state;
     }

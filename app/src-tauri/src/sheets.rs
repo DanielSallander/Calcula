@@ -16,6 +16,16 @@ pub struct FreezeConfig {
     pub freeze_col: Option<u32>,
 }
 
+/// Split window configuration for a sheet.
+/// Unlike freeze panes, split windows allow independent scrolling in each quadrant.
+/// The split position is stored as a row/column index.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct SplitConfig {
+    pub split_row: Option<u32>,
+    pub split_col: Option<u32>,
+}
+
 /// Information about a single sheet (sent to frontend)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -203,6 +213,10 @@ pub fn add_sheet(state: State<AppState>, name: Option<String>) -> Result<SheetsR
     let new_grid = engine::grid::Grid::new();
     grids.push(new_grid.clone());
     freeze_configs.push(FreezeConfig::default());
+    {
+        let mut split_configs = state.split_configs.lock().unwrap();
+        split_configs.push(SplitConfig::default());
+    }
     tab_colors.push(String::new());
     hidden_sheets.push(false);
     // New sheet gets empty dimensions
@@ -297,6 +311,12 @@ pub fn delete_sheet(state: State<AppState>, index: usize) -> Result<SheetsResult
     });
     if index < freeze_configs.len() {
         freeze_configs.remove(index);
+    }
+    {
+        let mut split_configs = state.split_configs.lock().unwrap();
+        if index < split_configs.len() {
+            split_configs.remove(index);
+        }
     }
     if index < tab_colors.len() {
         tab_colors.remove(index);
@@ -435,6 +455,40 @@ pub fn get_freeze_panes(state: State<AppState>) -> FreezeConfig {
 }
 
 // ============================================================================
+// Split Window Commands
+// ============================================================================
+
+#[tauri::command]
+pub fn set_split_window(
+    state: State<AppState>,
+    split_row: Option<u32>,
+    split_col: Option<u32>,
+) -> Result<(), String> {
+    let active_sheet = *state.active_sheet.lock().unwrap();
+    let mut split_configs = state.split_configs.lock().unwrap();
+
+    // Ensure split_configs has enough entries
+    while split_configs.len() <= active_sheet {
+        split_configs.push(SplitConfig::default());
+    }
+
+    split_configs[active_sheet] = SplitConfig {
+        split_row,
+        split_col,
+    };
+
+    Ok(())
+}
+
+#[tauri::command]
+pub fn get_split_window(state: State<AppState>) -> SplitConfig {
+    let active_sheet = *state.active_sheet.lock().unwrap();
+    let split_configs = state.split_configs.lock().unwrap();
+
+    split_configs.get(active_sheet).cloned().unwrap_or_default()
+}
+
+// ============================================================================
 // New Commands: Move, Copy, Hide/Unhide, Tab Color
 // ============================================================================
 
@@ -506,6 +560,11 @@ pub fn move_sheet(
     rotate_element(&mut *sheet_names, from_index, to_index);
     rotate_element(&mut *grids, from_index, to_index);
     rotate_element(&mut *freeze_configs, from_index, to_index);
+    {
+        let mut split_configs = state.split_configs.lock().unwrap();
+        ensure_vec_len(&mut split_configs, count);
+        rotate_element(&mut *split_configs, from_index, to_index);
+    }
     rotate_element(&mut *tab_colors, from_index, to_index);
     rotate_element(&mut *hidden_sheets, from_index, to_index);
     rotate_element(&mut *all_column_widths, from_index, to_index);
@@ -616,6 +675,12 @@ pub fn copy_sheet(
     sheet_names.insert(insert_at, copy_name);
     grids.insert(insert_at, cloned_grid.clone());
     freeze_configs.insert(insert_at, cloned_freeze);
+    {
+        let mut split_configs = state.split_configs.lock().unwrap();
+        ensure_vec_len(&mut split_configs, count);
+        let cloned_split = split_configs[source_index].clone();
+        split_configs.insert(insert_at, cloned_split);
+    }
     tab_colors.insert(insert_at, cloned_tab_color);
     hidden_sheets.insert(insert_at, false); // Copy is always visible
     all_column_widths.insert(insert_at, cloned_widths);
