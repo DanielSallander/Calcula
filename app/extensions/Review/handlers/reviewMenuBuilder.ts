@@ -19,6 +19,11 @@ import {
   showAllNotes as showAllNotesApi,
   DEFAULT_COMMENT_AUTHOR,
   DEFAULT_NOTE_AUTHOR,
+  IconNewComment,
+  IconNewNote,
+  IconShowAllComments,
+  IconShowAllNotes,
+  IconDeleteAll,
 } from "../../../src/api";
 import type { MenuItemDefinition } from "../../../src/api";
 import {
@@ -135,12 +140,14 @@ export function registerReviewMenuItems(): void {
     {
       id: "review:newComment",
       label: "New Comment",
+      icon: IconNewComment,
       shortcut: "Ctrl+Alt+M",
       action: newComment,
     },
     {
       id: "review:newNote",
       label: "New Note",
+      icon: IconNewNote,
       shortcut: "Shift+F2",
       action: newNote,
     },
@@ -152,11 +159,13 @@ export function registerReviewMenuItems(): void {
     {
       id: "review:showAllComments",
       label: "Show All Comments",
+      icon: IconShowAllComments,
       action: toggleShowAllComments,
     },
     {
       id: "review:showAllNotes",
       label: "Show All Notes",
+      icon: IconShowAllNotes,
       action: toggleShowAllNotes,
     },
     {
@@ -167,11 +176,13 @@ export function registerReviewMenuItems(): void {
     {
       id: "review:deleteAllComments",
       label: "Delete All Comments in Sheet",
+      icon: IconDeleteAll,
       action: deleteAllComments,
     },
     {
       id: "review:deleteAllNotes",
       label: "Delete All Notes in Sheet",
+      icon: IconDeleteAll,
       action: deleteAllNotes,
     },
   ];

@@ -80,13 +80,12 @@ export const formatButtonStyles: React.CSSProperties = {
   width: "28px",
   height: "28px",
   padding: "4px",
-  border: "1px solid #a0a0a0",
+  border: "1px solid transparent",
   borderRadius: "3px",
-  backgroundColor: "#f8f8f8",
+  backgroundColor: "transparent",
   cursor: "pointer",
   fontSize: "14px",
   color: "#333",
-  boxShadow: "0 1px 2px rgba(0, 0, 0, 0.1)",
 };
 
 /**
@@ -100,14 +99,13 @@ export const largeButtonStyles: React.CSSProperties = {
   width: "48px",
   height: "56px",
   padding: "4px",
-  border: "1px solid #a0a0a0",
+  border: "1px solid transparent",
   borderRadius: "3px",
-  backgroundColor: "#f8f8f8",
+  backgroundColor: "transparent",
   cursor: "pointer",
   fontSize: "11px",
   color: "#333",
   gap: "2px",
-  boxShadow: "0 1px 2px rgba(0, 0, 0, 0.1)",
 };
 
 /**
@@ -120,14 +118,13 @@ export const smallButtonStyles: React.CSSProperties = {
   width: "64px",
   height: "22px",
   padding: "2px 6px",
-  border: "1px solid #a0a0a0",
+  border: "1px solid transparent",
   borderRadius: "3px",
-  backgroundColor: "#f8f8f8",
+  backgroundColor: "transparent",
   cursor: "pointer",
   fontSize: "11px",
   color: "#333",
   gap: "4px",
-  boxShadow: "0 1px 2px rgba(0, 0, 0, 0.1)",
 };
 
 /**
@@ -141,14 +138,13 @@ export const pasteButtonStyles: React.CSSProperties = {
   width: "52px",
   height: "66px",
   padding: "4px",
-  border: "1px solid #a0a0a0",
+  border: "1px solid transparent",
   borderRadius: "3px",
-  backgroundColor: "#f8f8f8",
+  backgroundColor: "transparent",
   cursor: "pointer",
   fontSize: "11px",
   color: "#333",
   gap: "2px",
-  boxShadow: "0 1px 2px rgba(0, 0, 0, 0.1)",
 };
 
 /**
@@ -161,9 +157,9 @@ export const clipboardButtonStyles: React.CSSProperties = {
   width: "24px",
   height: "20px",
   padding: "2px",
-  border: "1px solid #a0a0a0",
+  border: "1px solid transparent",
   borderRadius: "3px",
-  backgroundColor: "#f8f8f8",
+  backgroundColor: "transparent",
   cursor: "pointer",
   fontSize: "11px",
   color: "#333",
@@ -188,9 +184,9 @@ export const colorButtonStyles: React.CSSProperties = {
   width: "32px",
   height: "28px",
   padding: "4px",
-  border: "1px solid #a0a0a0",
+  border: "1px solid transparent",
   borderRadius: "3px",
-  backgroundColor: "#f8f8f8",
+  backgroundColor: "transparent",
   cursor: "pointer",
   fontSize: "14px",
   color: "#333",
@@ -214,7 +210,7 @@ export const numberFormatButtonStyles: React.CSSProperties = {
   width: "90px",
   height: "28px",
   padding: "4px 8px",
-  border: "1px solid #a0a0a0",
+  border: "1px solid #d0d0d0",
   borderRadius: "3px",
   backgroundColor: "#fff",
   cursor: "pointer",
@@ -322,9 +318,9 @@ export const colorSwatchStyles: React.CSSProperties = {
 export const noColorButtonStyles: React.CSSProperties = {
   width: "100%",
   padding: "6px 8px",
-  border: "1px solid #c0c0c0",
+  border: "1px solid #d0d0d0",
   borderRadius: "3px",
-  backgroundColor: "#f8f8f8",
+  backgroundColor: "#fafafa",
   cursor: "pointer",
   fontSize: "11px",
   color: "#333",
@@ -340,8 +336,8 @@ export function getFormatButtonStyle(
 ): React.CSSProperties {
   return {
     ...formatButtonStyles,
-    backgroundColor: isActive ? "#d0e0f0" : "#f8f8f8",
-    borderColor: isActive ? "#0078d4" : "#a0a0a0",
+    backgroundColor: isActive ? "#d0e0f0" : "transparent",
+    borderColor: isActive ? "#0078d4" : "transparent",
     ...additionalStyles,
   };
 }
@@ -367,7 +363,7 @@ export function getNumberFormatButtonStyle(
 ): React.CSSProperties {
   return {
     ...formatButtonStyles,
-    backgroundColor: isActive ? "#d0e0f0" : "#f8f8f8",
-    borderColor: isActive ? "#0078d4" : "#a0a0a0",
+    backgroundColor: isActive ? "#d0e0f0" : "transparent",
+    borderColor: isActive ? "#0078d4" : "transparent",
   };
 }

@@ -104,10 +104,49 @@ export const MenuItemContent = styled.span`
   gap: 8px;
 `;
 
-export const Checkmark = styled.span`
-  font-family: monospace;
-  font-size: 11px;
-  width: 24px;
+export const MenuIcon = styled.span`
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  flex-shrink: 0;
+
+  & > svg {
+    width: 16px;
+    height: 16px;
+  }
+`;
+
+interface CheckIndicatorProps {
+  $checked?: boolean;
+}
+
+export const CheckIndicator = styled.span<CheckIndicatorProps>`
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  border: 1.5px solid ${v('--menu-shortcut-text')};
+  flex-shrink: 0;
+  transition: border-color 0.15s, background-color 0.15s;
+
+  ${({ $checked }) =>
+    $checked &&
+    css`
+      border-color: ${v('--accent-color')};
+
+      &::after {
+        content: '';
+        display: block;
+        width: 8px;
+        height: 8px;
+        border-radius: 50%;
+        background-color: ${v('--accent-color')};
+      }
+    `}
 `;
 
 export const Shortcut = styled.span`

@@ -21,8 +21,8 @@ export interface MenuItemDefinition {
   commandId?: string;
   /** Legacy/Simple way: direct callback */
   action?: () => void;
-  /** Optional icon */
-  icon?: string;
+  /** Optional icon (SVG element or string) */
+  icon?: React.ReactNode;
   /** Whether the item is disabled */
   disabled?: boolean;
   /** Whether the item is checked (for toggle items) */

@@ -2,7 +2,13 @@
 // PURPOSE: Register "Define Name" and "Name Manager" menu items in the Formulas menu.
 // CONTEXT: Adds menu items that open the define name / name manager dialogs.
 
-import { registerMenuItem, showDialog } from "../../../src/api";
+import {
+  registerMenuItem,
+  showDialog,
+  IconNameManager,
+  IconDefineName,
+  IconDefineFunction,
+} from "../../../src/api";
 
 /**
  * Register defined names menu items in the Formulas menu.
@@ -23,6 +29,7 @@ export function registerDefinedNamesMenuItems(): () => void {
     registerMenuItem("formulas", {
       id: "formulas:nameManager",
       label: "Name Manager",
+      icon: IconNameManager,
       action: () => {
         showDialog("name-manager");
       },
@@ -30,6 +37,7 @@ export function registerDefinedNamesMenuItems(): () => void {
         {
           id: "formulas:defineName",
           label: "Define Name...",
+          icon: IconDefineName,
           action: () => {
             showDialog("define-name", { mode: "new" });
           },
@@ -37,6 +45,7 @@ export function registerDefinedNamesMenuItems(): () => void {
         {
           id: "formulas:defineFunction",
           label: "Define Function...",
+          icon: IconDefineFunction,
           action: () => {
             showDialog("define-function", { mode: "new" });
           },

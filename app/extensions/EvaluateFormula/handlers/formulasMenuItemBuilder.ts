@@ -3,7 +3,12 @@
 // CONTEXT: Uses registerMenuItem to append to the existing "formulas" menu
 //          (created by the Tracing extension).
 
-import { registerMenuItem, DialogExtensions } from "../../../src/api";
+import {
+  registerMenuItem,
+  DialogExtensions,
+  IconEvaluateFormula,
+  IconVisualizeFormula,
+} from "../../../src/api";
 
 // ============================================================================
 // State
@@ -41,6 +46,7 @@ export function registerEvaluateFormulaMenuItem(): void {
   registerMenuItem("formulas", {
     id: "formulas:evalFormula",
     label: "Evaluate Formula...",
+    icon: IconEvaluateFormula,
     action: () => {
       const sel = currentSelection;
       DialogExtensions.openDialog("evaluate-formula", {
@@ -48,5 +54,19 @@ export function registerEvaluateFormulaMenuItem(): void {
         activeCol: sel?.activeCol ?? 0,
       });
     },
+    children: [
+      {
+        id: "formulas:formulaVisualizer",
+        label: "Visualize Formula...",
+        icon: IconVisualizeFormula,
+        action: () => {
+          const sel = currentSelection;
+          DialogExtensions.openDialog("formula-visualizer", {
+            activeRow: sel?.activeRow ?? 0,
+            activeCol: sel?.activeCol ?? 0,
+          });
+        },
+      },
+    ],
   });
 }

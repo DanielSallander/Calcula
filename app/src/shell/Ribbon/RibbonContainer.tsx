@@ -72,7 +72,7 @@ export function RibbonContainer(): React.ReactElement {
   return (
     <div
       style={{
-        backgroundColor: "#f3f3f3",
+        backgroundColor: "#f5f5f5",
         borderBottom: "1px solid #d0d0d0",
         overflow: "hidden",
       }}
@@ -145,14 +145,15 @@ export function RibbonContainer(): React.ReactElement {
         }}
       >
         {groups.length > 0 ? (
-          groups.map((group) => (
+          groups.map((group, idx) => (
             <div
               key={group.id}
               style={{
                 display: "flex",
                 flexDirection: "column",
                 borderRight: "1px solid #e0e0e0",
-                paddingRight: "16px",
+                paddingLeft: idx === 0 ? "4px" : "8px",
+                paddingRight: "8px",
               }}
             >
               <div style={{ flex: 1 }}>
@@ -161,9 +162,11 @@ export function RibbonContainer(): React.ReactElement {
               <div
                 style={{
                   fontSize: "11px",
-                  color: "#666",
+                  color: "#888",
                   textAlign: "center",
-                  marginTop: "4px",
+                  marginTop: "2px",
+                  textTransform: "uppercase" as const,
+                  letterSpacing: "0.3px",
                 }}
               >
                 {group.label}

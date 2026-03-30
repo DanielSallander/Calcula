@@ -82,14 +82,15 @@ function RecursiveMenuItem({ item, index, executeMenuItem, closeMenu }: Recursiv
         disabled={item.disabled}
       >
         <S.MenuItemContent>
-          {item.checked !== undefined && (
-            <S.Checkmark>{item.checked ? '[x]' : '[ ]'}</S.Checkmark>
-          )}
+          {item.icon && <S.MenuIcon>{item.icon}</S.MenuIcon>}
           <span>{item.label}</span>
         </S.MenuItemContent>
         <S.RightContent>
           {item.shortcut && (
             <S.Shortcut>{item.shortcut}</S.Shortcut>
+          )}
+          {item.checked !== undefined && (
+            <S.CheckIndicator $checked={item.checked} />
           )}
           {hasChildren && (
             <S.SubmenuArrow>&#9656;</S.SubmenuArrow>

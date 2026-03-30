@@ -9,6 +9,12 @@ import {
   cellEvents,
   emitAppEvent,
   AppEvents,
+  IconCalcOptions,
+  IconCalculate,
+  IconAutomatic,
+  IconManual,
+  IconCalcWorkbook,
+  IconCalcWorksheet,
 } from "../../../src/api";
 import {
   setCalculationMode,
@@ -78,6 +84,7 @@ export function registerCalculationMenuItems(): void {
   const autoItem = {
     id: "formulas:calcOptions:automatic",
     label: "Automatic",
+    icon: IconAutomatic,
     get checked() { return currentMode === "automatic"; },
     action: () => {
       currentMode = "automatic";
@@ -96,6 +103,7 @@ export function registerCalculationMenuItems(): void {
   const manualItem = {
     id: "formulas:calcOptions:manual",
     label: "Manual",
+    icon: IconManual,
     get checked() { return currentMode === "manual"; },
     action: () => {
       currentMode = "manual";
@@ -110,31 +118,39 @@ export function registerCalculationMenuItems(): void {
   registerMenuItem("formulas", {
     id: "formulas:calcOptions",
     label: "Calculation Options",
+    icon: IconCalcOptions,
     children: [autoItem, manualItem],
   });
 
-  // ---- Calculate Worksheet ----
+  // ---- Calculate (with submenu) ----
   registerMenuItem("formulas", {
-    id: "formulas:calculateSheet",
-    label: "Calculate Worksheet",
-    action: () => {
-      calculateSheet().then((cells) => {
-        applyCellUpdates(cells);
-        emitAppEvent(AppEvents.GRID_REFRESH);
-      });
-    },
-  });
-
-  // ---- Calculate Workbook ----
-  registerMenuItem("formulas", {
-    id: "formulas:calculateWorkbook",
-    label: "Calculate Workbook",
-    action: () => {
-      calculateNow().then((cells) => {
-        applyCellUpdates(cells);
-        emitAppEvent(AppEvents.GRID_REFRESH);
-      });
-    },
+    id: "formulas:calculate",
+    label: "Calculate",
+    icon: IconCalculate,
+    children: [
+      {
+        id: "formulas:calculateWorkbook",
+        label: "Calculate Workbook",
+        icon: IconCalcWorkbook,
+        action: () => {
+          calculateNow().then((cells) => {
+            applyCellUpdates(cells);
+            emitAppEvent(AppEvents.GRID_REFRESH);
+          });
+        },
+      },
+      {
+        id: "formulas:calculateSheet",
+        label: "Calculate Worksheet",
+        icon: IconCalcWorksheet,
+        action: () => {
+          calculateSheet().then((cells) => {
+            applyCellUpdates(cells);
+            emitAppEvent(AppEvents.GRID_REFRESH);
+          });
+        },
+      },
+    ],
   });
 }
 

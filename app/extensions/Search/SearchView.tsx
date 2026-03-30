@@ -17,6 +17,25 @@ import {
 import type { ActivityViewProps } from "../../src/api/uiTypes";
 import { useFindStore } from "../BuiltIn/FindReplaceDialog/useFindStore";
 
+// SVG micro-icons for the search panel
+const ChevronUp = () => (
+  <svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+    <path d="M4 10l4-4 4 4" />
+  </svg>
+);
+
+const ChevronDown = () => (
+  <svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+    <path d="M4 6l4 4 4-4" />
+  </svg>
+);
+
+const ChevronRight = () => (
+  <svg width="10" height="10" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+    <path d="M6 4l4 4-4 4" />
+  </svg>
+);
+
 /**
  * Search View - panel-oriented search and replace.
  */
@@ -194,8 +213,8 @@ export function SearchView(_props: ActivityViewProps): React.ReactElement {
             onKeyDown={handleKeyDown}
           />
           <div style={styles.navButtons}>
-            <button style={styles.navButton} onClick={handlePrev} disabled={matches.length === 0} title="Previous (Shift+Enter)">^</button>
-            <button style={styles.navButton} onClick={handleNext} disabled={matches.length === 0} title="Next (Enter)">v</button>
+            <button style={styles.navButton} onClick={handlePrev} disabled={matches.length === 0} title="Previous (Shift+Enter)"><ChevronUp /></button>
+            <button style={styles.navButton} onClick={handleNext} disabled={matches.length === 0} title="Next (Enter)"><ChevronDown /></button>
           </div>
         </div>
 
@@ -211,7 +230,10 @@ export function SearchView(_props: ActivityViewProps): React.ReactElement {
           style={styles.toggleReplace}
           onClick={() => setShowReplace(!showReplace)}
         >
-          {showReplace ? "v" : ">"} Replace
+          <span style={{ display: "inline-flex", transform: showReplace ? "rotate(90deg)" : "none", transition: "transform 0.15s ease" }}>
+            <ChevronRight />
+          </span>
+          Replace
         </button>
 
         {showReplace && (
@@ -250,6 +272,7 @@ export function SearchView(_props: ActivityViewProps): React.ReactElement {
         <label style={styles.checkbox}>
           <input
             type="checkbox"
+            style={styles.checkboxInput}
             checked={options.caseSensitive}
             onChange={(e) => setOptions({ caseSensitive: e.target.checked })}
           />
@@ -258,6 +281,7 @@ export function SearchView(_props: ActivityViewProps): React.ReactElement {
         <label style={styles.checkbox}>
           <input
             type="checkbox"
+            style={styles.checkboxInput}
             checked={options.matchEntireCell}
             onChange={(e) => setOptions({ matchEntireCell: e.target.checked })}
           />
@@ -266,6 +290,7 @@ export function SearchView(_props: ActivityViewProps): React.ReactElement {
         <label style={styles.checkbox}>
           <input
             type="checkbox"
+            style={styles.checkboxInput}
             checked={options.searchFormulas}
             onChange={(e) => setOptions({ searchFormulas: e.target.checked })}
           />
@@ -323,21 +348,26 @@ const styles: Record<string, React.CSSProperties> = {
     fontSize: 12,
     outline: "none",
     fontFamily: "inherit",
+    backgroundColor: "#fff",
+    color: "#333",
   },
   navButtons: {
     display: "flex",
     gap: 2,
   },
   navButton: {
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "center",
     width: 24,
     height: 26,
     padding: 0,
-    border: "1px solid #d0d0d0",
+    border: "1px solid transparent",
     borderRadius: 3,
-    background: "#fff",
+    background: "transparent",
     cursor: "pointer",
     fontSize: 10,
-    color: "#444",
+    color: "#555",
   },
   matchCount: {
     fontSize: 11,
@@ -362,13 +392,14 @@ const styles: Record<string, React.CSSProperties> = {
     marginTop: 2,
   },
   actionButton: {
-    padding: "3px 10px",
+    padding: "4px 12px",
     border: "1px solid #d0d0d0",
     borderRadius: 3,
-    background: "#fff",
+    background: "#fafafa",
     fontSize: 11,
     cursor: "pointer",
     color: "#333",
+    fontFamily: "inherit",
   },
   optionsSection: {
     display: "flex",
@@ -385,6 +416,13 @@ const styles: Record<string, React.CSSProperties> = {
     color: "#444",
     cursor: "pointer",
   },
+  checkboxInput: {
+    accentColor: "#0078d4",
+    width: 14,
+    height: 14,
+    margin: 0,
+    cursor: "pointer",
+  } as React.CSSProperties,
   resultsList: {
     flex: 1,
     display: "flex",

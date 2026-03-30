@@ -2,7 +2,12 @@
 // PURPOSE: Registers the "Formulas" top-level menu with trace commands.
 // CONTEXT: Creates menu items for Trace Precedents, Trace Dependents, and Remove Arrows.
 
-import { registerMenu } from "../../../src/api";
+import {
+  registerMenu,
+  IconTracePrecedents,
+  IconTraceDependents,
+  IconRemoveArrows,
+} from "../../../src/api";
 import type { MenuDefinition } from "../../../src/api";
 import {
   addPrecedentLevel,
@@ -33,6 +38,7 @@ export function registerFormulasMenu(): void {
       {
         id: "formulas:tracePrecedents",
         label: "Trace Precedents",
+        icon: IconTracePrecedents,
         action: () => {
           addPrecedentLevel();
         },
@@ -40,6 +46,7 @@ export function registerFormulasMenu(): void {
       {
         id: "formulas:traceDependents",
         label: "Trace Dependents",
+        icon: IconTraceDependents,
         action: () => {
           addDependentLevel();
         },
@@ -52,6 +59,7 @@ export function registerFormulasMenu(): void {
       {
         id: "formulas:removeArrows",
         label: "Remove Arrows",
+        icon: IconRemoveArrows,
         action: () => {
           removeAllArrows();
         },

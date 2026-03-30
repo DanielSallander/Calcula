@@ -7,6 +7,9 @@ import {
   showDialog,
   hideDialog,
   unprotectSheet,
+  IconProtectSheet,
+  IconProtectWorkbook,
+  IconCellProtection,
 } from "../../../src/api";
 import type { MenuDefinition } from "../../../src/api";
 import {
@@ -78,11 +81,13 @@ function buildReviewMenu(): MenuDefinition {
       {
         id: "review:protectSheet",
         label: sheetProtected ? "Unprotect Sheet" : "Protect Sheet...",
+        icon: IconProtectSheet,
         action: toggleProtectSheet,
       },
       {
         id: "review:protectWorkbook",
         label: workbookProtected ? "Unprotect Workbook" : "Protect Workbook...",
+        icon: IconProtectWorkbook,
         action: toggleProtectWorkbook,
       },
       {
@@ -93,6 +98,7 @@ function buildReviewMenu(): MenuDefinition {
       {
         id: "review:cellProtection",
         label: "Cell Protection...",
+        icon: IconCellProtection,
         action: openCellProtectionDialog,
       },
     ],

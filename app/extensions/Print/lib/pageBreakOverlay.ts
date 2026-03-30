@@ -232,8 +232,8 @@ function handleMouseDown(e: MouseEvent): void {
   const defaultColWidth = lastConfig.defaultColumnWidth || 100;
   const defaultRowHeight = lastConfig.defaultRowHeight || 24;
 
-  const getColW = createDimensionGetterFromMap(lastDimensions.columnWidths, defaultColWidth);
-  const getRowH = createDimensionGetterFromMap(lastDimensions.rowHeights, defaultRowHeight);
+  const getColW = createDimensionGetterFromMap(defaultColWidth, lastDimensions.columnWidths);
+  const getRowH = createDimensionGetterFromMap(defaultRowHeight, lastDimensions.rowHeights);
 
   const manualRowSet = new Set(cachedPageSetup.manualRowBreaks ?? []);
   const manualColSet = new Set(cachedPageSetup.manualColBreaks ?? []);
@@ -290,8 +290,8 @@ function handleMouseMove(e: MouseEvent): void {
   const defaultColWidth = lastConfig.defaultColumnWidth || 100;
   const defaultRowHeight = lastConfig.defaultRowHeight || 24;
 
-  const getColW = createDimensionGetterFromMap(lastDimensions.columnWidths, defaultColWidth);
-  const getRowH = createDimensionGetterFromMap(lastDimensions.rowHeights, defaultRowHeight);
+  const getColW = createDimensionGetterFromMap(defaultColWidth, lastDimensions.columnWidths);
+  const getRowH = createDimensionGetterFromMap(defaultRowHeight, lastDimensions.rowHeights);
 
   const manualRowSet = new Set(cachedPageSetup.manualRowBreaks ?? []);
   const manualColSet = new Set(cachedPageSetup.manualColBreaks ?? []);
@@ -342,8 +342,8 @@ function handleMouseUp(e: MouseEvent): void {
   const defaultColWidth = lastConfig.defaultColumnWidth || 100;
   const defaultRowHeight = lastConfig.defaultRowHeight || 24;
 
-  const getColW = createDimensionGetterFromMap(lastDimensions.columnWidths, defaultColWidth);
-  const getRowH = createDimensionGetterFromMap(lastDimensions.rowHeights, defaultRowHeight);
+  const getColW = createDimensionGetterFromMap(defaultColWidth, lastDimensions.columnWidths);
+  const getRowH = createDimensionGetterFromMap(defaultRowHeight, lastDimensions.rowHeights);
 
   const maxRow = cachedGridBoundsRow;
   const maxCol = cachedGridBoundsCol;
@@ -394,7 +394,10 @@ export function isPageBreakPreviewEnabled(): boolean {
 export function setPageBreakPreviewEnabled(enabled: boolean): void {
   pageBreakPreviewEnabled = enabled;
   if (enabled) {
-    refreshPageBreakData();
+    refreshPageBreakData().then(() => {
+      // Trigger a redraw now that page setup data is available
+      window.dispatchEvent(new Event("app:grid-refresh"));
+    });
     installMouseListeners();
   } else {
     uninstallMouseListeners();
@@ -405,7 +408,9 @@ export function setPageBreakPreviewEnabled(enabled: boolean): void {
 export async function refreshPageBreakData(): Promise<void> {
   try {
     cachedPageSetup = await getPageSetup();
-  } catch {
+    console.log("[PageBreakOverlay] Page setup loaded:", cachedPageSetup);
+  } catch (err) {
+    console.error("[PageBreakOverlay] Failed to load page setup:", err);
     cachedPageSetup = null;
   }
 }
@@ -422,7 +427,14 @@ export function renderPageBreakOverlay(
   canvasWidth: number,
   canvasHeight: number,
 ): void {
-  if (!pageBreakPreviewEnabled || !cachedPageSetup) return;
+  if (!pageBreakPreviewEnabled || !cachedPageSetup) {
+    if (pageBreakPreviewEnabled) {
+      console.log("[PageBreakOverlay] Render skipped: cachedPageSetup is null");
+    }
+    return;
+  }
+
+  console.log("[PageBreakOverlay] Rendering with page setup, viewport:", viewport.startRow, viewport.startCol);
 
   // Cache render params for mouse handlers
   lastConfig = config;
@@ -436,12 +448,12 @@ export function renderPageBreakOverlay(
   const defaultColWidth = config.defaultColumnWidth || 100;
   const defaultRowHeight = config.defaultRowHeight || 24;
 
-  const getColW = createDimensionGetterFromMap(dimensions.columnWidths, defaultColWidth);
-  const getRowH = createDimensionGetterFromMap(dimensions.rowHeights, defaultRowHeight);
+  const getColW = createDimensionGetterFromMap(defaultColWidth, dimensions.columnWidths);
+  const getRowH = createDimensionGetterFromMap(defaultRowHeight, dimensions.rowHeights);
 
   // Determine grid bounds (estimate from viewport)
-  const maxRow = Math.max(viewport.startRow + viewport.visibleRows + 50, cachedGridBoundsRow);
-  const maxCol = Math.max(viewport.startCol + viewport.visibleCols + 20, cachedGridBoundsCol);
+  const maxRow = Math.max(viewport.startRow + viewport.rowCount + 50, cachedGridBoundsRow);
+  const maxCol = Math.max(viewport.startCol + viewport.colCount + 20, cachedGridBoundsCol);
   cachedGridBoundsRow = maxRow;
   cachedGridBoundsCol = maxCol;
 
@@ -452,6 +464,12 @@ export function renderPageBreakOverlay(
 
   computedRowBreaks = rowBreaks;
   computedColBreaks = colBreaks;
+
+  console.log("[PageBreakOverlay] Computed breaks - rows:", rowBreaks, "cols:", colBreaks,
+    "maxRow:", maxRow, "maxCol:", maxCol,
+    "colW sample:", getColW(0), getColW(1), "rowH sample:", getRowH(0), getRowH(1),
+    "canvasSize:", canvasWidth, "x", canvasHeight,
+    "rowHeaderWidth:", rowHeaderWidth, "colHeaderHeight:", colHeaderHeight);
 
   const manualRowSet = new Set(cachedPageSetup.manualRowBreaks ?? []);
   const manualColSet = new Set(cachedPageSetup.manualColBreaks ?? []);

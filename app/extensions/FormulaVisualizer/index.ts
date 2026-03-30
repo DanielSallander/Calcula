@@ -8,10 +8,6 @@ import {
   ExtensionRegistry,
 } from "../../src/api";
 import { FormulaVisualizer } from "./components/FormulaVisualizer";
-import {
-  registerFormulaVisualizerMenuItem,
-  setCurrentSelection,
-} from "./handlers/formulasMenuItemBuilder";
 
 // ============================================================================
 // Cleanup tracking
@@ -34,21 +30,7 @@ export function registerFormulaVisualizerExtension(): void {
   });
   cleanupFns.push(() => DialogExtensions.unregisterDialog("formula-visualizer"));
 
-  // 2. Register menu item in Formulas menu
-  registerFormulaVisualizerMenuItem();
-
-  // 3. Track current selection (for menu item to know active cell)
-  const unsubSelection = ExtensionRegistry.onSelectionChange((sel) => {
-    setCurrentSelection(
-      sel
-        ? {
-            activeRow: sel.startRow,
-            activeCol: sel.startCol,
-          }
-        : null,
-    );
-  });
-  cleanupFns.push(unsubSelection);
+  // 2. Menu item is now registered by EvaluateFormula extension as a submenu child.
 
   console.log("[FormulaVisualizer] Registered successfully.");
 }

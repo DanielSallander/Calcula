@@ -9,6 +9,8 @@ import {
   registerMenuItem,
   registerPostHeaderOverlay,
   ExtensionRegistry,
+  onAppEvent,
+  AppEvents,
 } from "../../src/api";
 import type { Selection } from "../../src/api";
 import {
@@ -34,8 +36,8 @@ import { executePrint } from "./lib/printGenerator";
 import { generatePdf } from "./lib/pdfGenerator";
 import {
   renderPageBreakOverlay,
-  togglePageBreakPreview,
   isPageBreakPreviewEnabled,
+  setPageBreakPreviewEnabled,
   refreshPageBreakData,
 } from "./lib/pageBreakOverlay";
 
@@ -106,17 +108,6 @@ async function handleExportPdf(): Promise<void> {
     console.error("[Print] PDF export failed:", err);
     alert("Failed to export PDF: " + String(err));
   }
-}
-
-// ============================================================================
-// Page Break Preview toggle
-// ============================================================================
-
-function handleTogglePageBreakPreview(): void {
-  const enabled = togglePageBreakPreview();
-  console.log("[Print] Page break preview:", enabled ? "ON" : "OFF");
-  // Trigger grid redraw
-  window.dispatchEvent(new Event("app:grid-refresh"));
 }
 
 // ============================================================================
@@ -378,18 +369,18 @@ export function registerPrintExtension(): void {
   );
   cleanupFns.push(unregOverlay);
 
-  // 6. Add View menu items for page break preview
-  registerMenuItem("view", {
-    id: "view.page-break-separator",
-    label: "",
-    separator: true,
-  });
-
-  registerMenuItem("view", {
-    id: "view.page-break-preview",
-    label: "Page Break Preview",
-    action: handleTogglePageBreakPreview,
-  });
+  // 6. Listen for view mode changes to sync page break preview state
+  const unsubViewMode = onAppEvent<{ viewMode: string }>(
+    AppEvents.VIEW_MODE_CHANGED,
+    (detail) => {
+      const shouldEnable = detail.viewMode === "pageBreakPreview";
+      if (shouldEnable !== isPageBreakPreviewEnabled()) {
+        setPageBreakPreviewEnabled(shouldEnable);
+        console.log("[Print] Page break preview:", shouldEnable ? "ON" : "OFF");
+      }
+    },
+  );
+  cleanupFns.push(unsubViewMode);
 
   // 7. Add Page Layout menu items for page breaks
   registerMenuItem("view", {

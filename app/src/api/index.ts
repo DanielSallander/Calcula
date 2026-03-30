@@ -436,6 +436,35 @@ export type {
 } from "./uiTypes";
 
 // ============================================================================
+// Menu Icons
+// ============================================================================
+
+export {
+  IconTracePrecedents,
+  IconTraceDependents,
+  IconRemoveArrows,
+  IconNameManager,
+  IconEvaluateFormula,
+  IconVisualizeFormula,
+  IconCalcOptions,
+  IconCalculate,
+  IconDefineName,
+  IconDefineFunction,
+  IconAutomatic,
+  IconManual,
+  IconCalcWorksheet,
+  IconCalcWorkbook,
+  IconProtectSheet,
+  IconProtectWorkbook,
+  IconCellProtection,
+  IconNewComment,
+  IconNewNote,
+  IconShowAllComments,
+  IconShowAllNotes,
+  IconDeleteAll,
+} from "./menuIcons";
+
+// ============================================================================
 // Formula Autocomplete API
 // ============================================================================
 
