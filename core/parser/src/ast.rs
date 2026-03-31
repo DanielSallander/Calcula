@@ -395,6 +395,8 @@ pub enum BuiltinFunction {
 
     // Additional date functions
     Days360,
+    Days,
+    Time,
     YearFrac,
     IsoWeekNum,
     NetworkDaysIntl,
@@ -446,6 +448,34 @@ pub enum BuiltinFunction {
     Areas,
     CellFn,
     FormulaText,
+
+    // Lookup functions (legacy)
+    VLookup,
+    HLookup,
+    Lookup,
+
+    // Additional math functions
+    MRound,
+    Quotient,
+    SumSq,
+    Roman,
+    Arabic,
+    Base,
+    Decimal,
+
+    // Additional text functions
+    Dollar,
+    Euro,
+    Fixed,
+    Unichar,
+    Unicode,
+
+    // Additional information functions
+    ErrorType,
+    IsNonText,
+    IsRef,
+    Sheet,
+    Sheets,
 
     // Array reshaping functions
     Expand,
@@ -692,6 +722,8 @@ impl BuiltinFunction {
             "ARRAYTOTEXT" => BuiltinFunction::ArrayToText,
 
             // Additional date functions
+            "DAYS" => BuiltinFunction::Days,
+            "TIME" => BuiltinFunction::Time,
             "DAYS360" => BuiltinFunction::Days360,
             "YEARFRAC" => BuiltinFunction::YearFrac,
             "ISOWEEKNUM" => BuiltinFunction::IsoWeekNum,
@@ -744,6 +776,34 @@ impl BuiltinFunction {
             "AREAS" => BuiltinFunction::Areas,
             "CELL" => BuiltinFunction::CellFn,
             "FORMULATEXT" => BuiltinFunction::FormulaText,
+
+            // Lookup functions (legacy)
+            "VLOOKUP" => BuiltinFunction::VLookup,
+            "HLOOKUP" => BuiltinFunction::HLookup,
+            "LOOKUP" => BuiltinFunction::Lookup,
+
+            // Additional math functions
+            "MROUND" => BuiltinFunction::MRound,
+            "QUOTIENT" => BuiltinFunction::Quotient,
+            "SUMSQ" => BuiltinFunction::SumSq,
+            "ROMAN" => BuiltinFunction::Roman,
+            "ARABIC" => BuiltinFunction::Arabic,
+            "BASE" => BuiltinFunction::Base,
+            "DECIMAL" => BuiltinFunction::Decimal,
+
+            // Additional text functions
+            "DOLLAR" => BuiltinFunction::Dollar,
+            "EURO" => BuiltinFunction::Euro,
+            "FIXED" => BuiltinFunction::Fixed,
+            "UNICHAR" => BuiltinFunction::Unichar,
+            "UNICODE" => BuiltinFunction::Unicode,
+
+            // Additional information functions
+            "ERROR.TYPE" => BuiltinFunction::ErrorType,
+            "ISNONTEXT" => BuiltinFunction::IsNonText,
+            "ISREF" => BuiltinFunction::IsRef,
+            "SHEET" => BuiltinFunction::Sheet,
+            "SHEETS" => BuiltinFunction::Sheets,
 
             // Array reshaping
             "EXPAND" => BuiltinFunction::Expand,

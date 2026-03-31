@@ -351,6 +351,8 @@ pub enum BuiltinFunction {
 
     // Additional date functions
     Days360,
+    Days,
+    Time,
     YearFrac,
     IsoWeekNum,
     NetworkDaysIntl,
@@ -402,6 +404,34 @@ pub enum BuiltinFunction {
     Areas,
     CellFn,
     FormulaText,
+
+    // Lookup functions (legacy)
+    VLookup,
+    HLookup,
+    Lookup,
+
+    // Additional math functions
+    MRound,
+    Quotient,
+    SumSq,
+    Roman,
+    Arabic,
+    Base,
+    Decimal,
+
+    // Additional text functions
+    Dollar,
+    Euro,
+    Fixed,
+    Unichar,
+    Unicode,
+
+    // Additional information functions
+    ErrorType,
+    IsNonText,
+    IsRef,
+    Sheet,
+    Sheets,
 
     // Array reshaping functions
     Expand,

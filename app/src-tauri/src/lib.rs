@@ -653,6 +653,38 @@ fn convert_builtin_function(func: &ParserBuiltinFn) -> EngineBuiltinFn {
         // Subtotal function
         ParserBuiltinFn::Subtotal => EngineBuiltinFn::Subtotal,
 
+        // Additional date functions
+        ParserBuiltinFn::Days => EngineBuiltinFn::Days,
+        ParserBuiltinFn::Time => EngineBuiltinFn::Time,
+
+        // Lookup functions (legacy)
+        ParserBuiltinFn::VLookup => EngineBuiltinFn::VLookup,
+        ParserBuiltinFn::HLookup => EngineBuiltinFn::HLookup,
+        ParserBuiltinFn::Lookup => EngineBuiltinFn::Lookup,
+
+        // Additional math functions
+        ParserBuiltinFn::MRound => EngineBuiltinFn::MRound,
+        ParserBuiltinFn::Quotient => EngineBuiltinFn::Quotient,
+        ParserBuiltinFn::SumSq => EngineBuiltinFn::SumSq,
+        ParserBuiltinFn::Roman => EngineBuiltinFn::Roman,
+        ParserBuiltinFn::Arabic => EngineBuiltinFn::Arabic,
+        ParserBuiltinFn::Base => EngineBuiltinFn::Base,
+        ParserBuiltinFn::Decimal => EngineBuiltinFn::Decimal,
+
+        // Additional text functions
+        ParserBuiltinFn::Dollar => EngineBuiltinFn::Dollar,
+        ParserBuiltinFn::Euro => EngineBuiltinFn::Euro,
+        ParserBuiltinFn::Fixed => EngineBuiltinFn::Fixed,
+        ParserBuiltinFn::Unichar => EngineBuiltinFn::Unichar,
+        ParserBuiltinFn::Unicode => EngineBuiltinFn::Unicode,
+
+        // Additional information functions
+        ParserBuiltinFn::ErrorType => EngineBuiltinFn::ErrorType,
+        ParserBuiltinFn::IsNonText => EngineBuiltinFn::IsNonText,
+        ParserBuiltinFn::IsRef => EngineBuiltinFn::IsRef,
+        ParserBuiltinFn::Sheet => EngineBuiltinFn::Sheet,
+        ParserBuiltinFn::Sheets => EngineBuiltinFn::Sheets,
+
         ParserBuiltinFn::Custom(name) => EngineBuiltinFn::Custom(name.clone()),
         other => EngineBuiltinFn::Custom(format!("{:?}", other)),
     }
