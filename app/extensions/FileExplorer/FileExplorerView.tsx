@@ -14,6 +14,8 @@ import {
   useTaskPaneOpenPaneIds,
   type SheetInfo,
   type NamedRange,
+  onAppEvent,
+  AppEvents,
 } from "../../src/api";
 import {
   getAllTables,
@@ -355,8 +357,8 @@ export function FileExplorerView(_props: ActivityViewProps): React.ReactElement 
   useEffect(() => {
     refresh();
     const handleSheetChange = () => refresh();
-    window.addEventListener("sheets:changed", handleSheetChange);
-    return () => window.removeEventListener("sheets:changed", handleSheetChange);
+    const unsub = onAppEvent(AppEvents.SHEET_CHANGED, handleSheetChange);
+    return unsub;
   }, [refresh]);
 
   const handleNavigateSheet = useCallback(async (index: number) => {
