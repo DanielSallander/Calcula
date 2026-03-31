@@ -15,9 +15,9 @@ import { CodePropertyInput } from "./CodePropertyInput";
 const rowStyle: React.CSSProperties = {
   display: "flex",
   flexDirection: "column",
-  padding: "4px 10px",
-  borderBottom: "1px solid #F0F0F0",
-  gap: 2,
+  padding: "5px 12px",
+  borderBottom: "1px solid #f0f0f0",
+  gap: 3,
 };
 
 const labelRowStyle: React.CSSProperties = {
@@ -25,23 +25,26 @@ const labelRowStyle: React.CSSProperties = {
   alignItems: "center",
   justifyContent: "space-between",
   fontSize: 11,
-  color: "#555",
+  color: "#666",
 };
 
 const labelStyle: React.CSSProperties = {
   fontWeight: 600,
   fontSize: 11,
+  color: "#555",
 };
 
 const inputStyle: React.CSSProperties = {
   width: "100%",
-  padding: "3px 6px",
-  border: "1px solid #D0D0D0",
-  borderRadius: 2,
+  padding: "4px 7px",
+  border: "1px solid #d0d0d0",
+  borderRadius: 3,
   fontSize: 12,
-  fontFamily: "Segoe UI, Tahoma, sans-serif",
+  fontFamily: "'Segoe UI Variable', 'Segoe UI', system-ui, sans-serif",
   outline: "none",
   boxSizing: "border-box",
+  backgroundColor: "#ffffff",
+  transition: "border-color 0.15s",
 };
 
 const colorInputContainerStyle: React.CSSProperties = {
@@ -51,10 +54,10 @@ const colorInputContainerStyle: React.CSSProperties = {
 };
 
 const colorSwatchStyle: React.CSSProperties = {
-  width: 20,
-  height: 20,
-  border: "1px solid #CCC",
-  borderRadius: 2,
+  width: 22,
+  height: 22,
+  border: "1px solid #ccc",
+  borderRadius: 3,
   cursor: "pointer",
   flexShrink: 0,
 };
@@ -62,7 +65,7 @@ const colorSwatchStyle: React.CSSProperties = {
 const scriptSelectStyle: React.CSSProperties = {
   ...inputStyle,
   cursor: "pointer",
-  backgroundColor: "#FFF",
+  backgroundColor: "#ffffff",
 };
 
 const checkboxContainerStyle: React.CSSProperties = {

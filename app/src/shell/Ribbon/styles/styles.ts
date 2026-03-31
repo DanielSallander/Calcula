@@ -30,10 +30,13 @@ export const groupStyles: React.CSSProperties = {
  * Title style for ribbon groups.
  */
 export const groupTitleStyles: React.CSSProperties = {
-  fontSize: "11px",
-  color: "#666",
+  fontSize: "10px",
+  color: "#999",
   textAlign: "center",
   marginTop: "2px",
+  textTransform: "uppercase",
+  letterSpacing: "0.5px",
+  fontWeight: 400,
 };
 
 /**
@@ -41,8 +44,8 @@ export const groupTitleStyles: React.CSSProperties = {
  */
 export const groupSeparatorStyles: React.CSSProperties = {
   width: "1px",
-  backgroundColor: "#d1d1d1",
-  margin: "4px 8px",
+  backgroundColor: "#e5e5e5",
+  margin: "4px 10px",
   alignSelf: "stretch",
 };
 

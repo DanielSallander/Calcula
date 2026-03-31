@@ -104,9 +104,6 @@ export function SettingsView(_props: ActivityViewProps): React.ReactElement {
     ),
 
     // Future sections can be added here
-    h("div", { style: styles.footer },
-      h("span", { style: styles.footerText }, "More settings coming soon"),
-    ),
   );
 }
 
@@ -120,19 +117,20 @@ const styles: Record<string, React.CSSProperties> = {
     flexDirection: "column",
     height: "100%",
     overflow: "auto",
-    padding: "12px 16px",
+    padding: "14px 16px",
+    fontFamily: "'Segoe UI Variable', 'Segoe UI', system-ui, sans-serif",
   },
   section: {
     marginBottom: 24,
   },
   sectionTitle: {
     fontSize: 11,
-    fontWeight: 700,
+    fontWeight: 600,
     textTransform: "uppercase" as const,
-    letterSpacing: "0.05em",
-    color: "#888",
-    marginBottom: 12,
-    paddingBottom: 4,
+    letterSpacing: "0.04em",
+    color: "#777",
+    marginBottom: 14,
+    paddingBottom: 6,
     borderBottom: "1px solid #e0e0e0",
   },
   setting: {
@@ -142,18 +140,18 @@ const styles: Record<string, React.CSSProperties> = {
     fontSize: 12,
     fontWeight: 500,
     color: "#333",
-    marginBottom: 8,
+    marginBottom: 10,
   },
   radioGroup: {
     display: "flex",
     flexDirection: "column",
-    gap: 6,
-    marginLeft: 4,
+    gap: 8,
+    marginLeft: 2,
   },
   radioLabel: {
     display: "flex",
     alignItems: "center",
-    gap: 6,
+    gap: 8,
     fontSize: 12,
     color: "#444",
     cursor: "pointer",
@@ -161,21 +159,12 @@ const styles: Record<string, React.CSSProperties> = {
   radioInput: {
     margin: 0,
     cursor: "pointer",
+    accentColor: "#10b981",
   },
   settingHint: {
     fontSize: 11,
-    color: "#888",
-    marginTop: 8,
-    lineHeight: "1.4",
-    fontStyle: "italic" as const,
-  },
-  footer: {
-    marginTop: "auto",
-    paddingTop: 16,
-  },
-  footerText: {
-    fontSize: 11,
-    color: "#aaa",
-    fontStyle: "italic" as const,
+    color: "#999",
+    marginTop: 10,
+    lineHeight: "1.5",
   },
 };

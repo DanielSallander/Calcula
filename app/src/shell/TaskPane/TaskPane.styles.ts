@@ -122,16 +122,16 @@ export const TabCloseButton = styled.span`
   display: flex;
   align-items: center;
   justify-content: center;
-  width: 16px;
-  height: 16px;
+  width: 18px;
+  height: 18px;
   padding: 0;
   margin-left: 4px;
   border: none;
   border-radius: 3px;
   background: transparent;
   color: #999;
-  font-size: 12px;
   cursor: pointer;
+  transition: background 0.1s, color 0.1s;
 
   &:hover {
     background: #e0e0e0;

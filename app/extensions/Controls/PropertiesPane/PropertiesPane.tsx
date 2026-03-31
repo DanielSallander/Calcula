@@ -25,30 +25,32 @@ const containerStyle: React.CSSProperties = {
   display: "flex",
   flexDirection: "column",
   height: "100%",
-  fontFamily: "Segoe UI, Tahoma, sans-serif",
+  fontFamily: "'Segoe UI Variable', 'Segoe UI', system-ui, sans-serif",
   fontSize: 12,
-  backgroundColor: "#FAFAFA",
+  backgroundColor: "#f8f9fa",
 };
 
 const headerStyle: React.CSSProperties = {
   display: "flex",
   alignItems: "center",
   justifyContent: "space-between",
-  padding: "8px 10px",
-  borderBottom: "1px solid #E0E0E0",
-  backgroundColor: "#FFF",
+  padding: "10px 12px",
+  borderBottom: "1px solid #e0e0e0",
+  backgroundColor: "#ffffff",
   flexShrink: 0,
 };
 
 const titleStyle: React.CSSProperties = {
   fontWeight: 600,
   fontSize: 13,
-  color: "#333",
+  color: "#1a1a1a",
+  letterSpacing: "-0.01em",
 };
 
 const subtitleStyle: React.CSSProperties = {
   fontSize: 11,
-  color: "#888",
+  color: "#999",
+  marginTop: 1,
 };
 
 const propertiesListStyle: React.CSSProperties = {
@@ -61,19 +63,23 @@ const emptyStateStyle: React.CSSProperties = {
   alignItems: "center",
   justifyContent: "center",
   height: "100%",
-  color: "#999",
+  color: "#aaa",
   fontSize: 12,
-  padding: 20,
+  padding: 24,
   textAlign: "center",
+  lineHeight: 1.5,
 };
 
 const sectionHeaderStyle: React.CSSProperties = {
-  padding: "6px 10px",
+  padding: "6px 12px",
   fontSize: 11,
   fontWeight: 600,
-  color: "#666",
-  backgroundColor: "#F0F0F0",
-  borderBottom: "1px solid #E0E0E0",
+  color: "#555",
+  backgroundColor: "#f0f1f3",
+  borderBottom: "1px solid #e0e0e0",
+  borderTop: "1px solid #e0e0e0",
+  letterSpacing: "0.02em",
+  textTransform: "capitalize" as const,
 };
 
 // ============================================================================

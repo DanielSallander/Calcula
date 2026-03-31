@@ -151,9 +151,9 @@ export function RibbonContainer(): React.ReactElement {
               style={{
                 display: "flex",
                 flexDirection: "column",
-                borderRight: "1px solid #e0e0e0",
-                paddingLeft: idx === 0 ? "4px" : "8px",
-                paddingRight: "8px",
+                borderRight: idx < groups.length - 1 ? "1px solid #e5e5e5" : "none",
+                paddingLeft: idx === 0 ? "4px" : "10px",
+                paddingRight: "10px",
               }}
             >
               <div style={{ flex: 1 }}>
@@ -161,12 +161,13 @@ export function RibbonContainer(): React.ReactElement {
               </div>
               <div
                 style={{
-                  fontSize: "11px",
-                  color: "#888",
+                  fontSize: "10px",
+                  color: "#999",
                   textAlign: "center",
                   marginTop: "2px",
                   textTransform: "uppercase" as const,
-                  letterSpacing: "0.3px",
+                  letterSpacing: "0.5px",
+                  fontWeight: 400,
                 }}
               >
                 {group.label}
