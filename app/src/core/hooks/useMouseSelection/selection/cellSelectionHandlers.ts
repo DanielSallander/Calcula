@@ -5,7 +5,7 @@
 // FIX: Right-click within selection now preserves the selection.
 // FIX: Clicking on merged cells now uses single dispatch to avoid stale state.
 
-import type { GridConfig, Viewport, Selection, DimensionOverrides, SelectionType } from "../../../types";
+import type { GridConfig, Viewport, Selection, DimensionOverrides, SelectionType, FreezeConfig } from "../../../types";
 import type { CellPosition, MousePosition, HeaderDragState } from "../types";
 import { getCellFromPixel } from "../../../lib/gridRenderer";
 import { getMergeInfo } from "../../../lib/tauri-api";
@@ -14,6 +14,9 @@ interface CellSelectionDependencies {
   config: GridConfig;
   viewport: Viewport;
   dimensions?: DimensionOverrides;
+  freezeConfig?: FreezeConfig;
+  splitBarSize?: number;
+  splitViewport?: Viewport;
   selection: Selection | null;
   /** FIX: Updated signature to accept optional endRow/endCol for merged cells */
   onSelectCell: (row: number, col: number, type?: SelectionType, endRow?: number, endCol?: number) => void;
@@ -63,6 +66,9 @@ export function createCellSelectionHandlers(deps: CellSelectionDependencies): Ce
     config,
     viewport,
     dimensions,
+    freezeConfig,
+    splitBarSize,
+    splitViewport,
     selection,
     onSelectCell,
     onExtendTo,
@@ -84,7 +90,7 @@ export function createCellSelectionHandlers(deps: CellSelectionDependencies): Ce
     shiftKey: boolean,
     event: React.MouseEvent<HTMLElement>
   ): Promise<boolean> => {
-    const cell = getCellFromPixel(mouseX, mouseY, config, viewport, dimensions);
+    const cell = getCellFromPixel(mouseX, mouseY, config, viewport, dimensions, { freezeConfig, splitBarSize, splitViewport });
 
     if (!cell) {
       // Clicked on header corner or outside grid

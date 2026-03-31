@@ -100,6 +100,9 @@ export function useMouseSelection(props: UseMouseSelectionProps): UseMouseSelect
     onMoveRows,
     onMoveColumns,
     zoom = 1,
+    freezeConfig: propFreezeConfig,
+    splitBarSize: propSplitBarSize = 0,
+    splitViewport: propSplitViewport,
   } = props;
 
   // -------------------------------------------------------------------------
@@ -153,6 +156,9 @@ export function useMouseSelection(props: UseMouseSelectionProps): UseMouseSelect
     config,
     viewport,
     dimensions,
+    freezeConfig: propFreezeConfig,
+    splitBarSize: propSplitBarSize,
+    splitViewport: propSplitViewport,
     lastMousePosRef,
     isDragging,
     isFormulaDragging,
@@ -188,6 +194,9 @@ export function useMouseSelection(props: UseMouseSelectionProps): UseMouseSelect
     config,
     viewport,
     dimensions,
+    freezeConfig: propFreezeConfig,
+    splitBarSize: propSplitBarSize,
+    splitViewport: propSplitViewport,
     containerRef,
     setIsOverlayResizing,
     setCursorStyle,
@@ -209,6 +218,9 @@ export function useMouseSelection(props: UseMouseSelectionProps): UseMouseSelect
     config,
     viewport,
     dimensions,
+    freezeConfig: propFreezeConfig,
+    splitBarSize: propSplitBarSize,
+    splitViewport: propSplitViewport,
     selection,
     onSelectCell,
     onExtendTo,
@@ -241,6 +253,9 @@ export function useMouseSelection(props: UseMouseSelectionProps): UseMouseSelect
     config,
     viewport,
     dimensions,
+    freezeConfig: propFreezeConfig,
+    splitBarSize: propSplitBarSize,
+    splitViewport: propSplitViewport,
     containerRef,
     onInsertReference,
     onInsertRangeReference,
@@ -273,6 +288,9 @@ export function useMouseSelection(props: UseMouseSelectionProps): UseMouseSelect
     config,
     viewport,
     dimensions,
+    freezeConfig: propFreezeConfig,
+    splitBarSize: propSplitBarSize,
+    splitViewport: propSplitViewport,
     containerRef,
     formulaReferences,
     currentSheetName,
@@ -292,6 +310,9 @@ export function useMouseSelection(props: UseMouseSelectionProps): UseMouseSelect
     config,
     viewport,
     dimensions,
+    freezeConfig: propFreezeConfig,
+    splitBarSize: propSplitBarSize,
+    splitViewport: propSplitViewport,
     containerRef,
     formulaReferences,
     currentSheetName,
@@ -311,6 +332,9 @@ export function useMouseSelection(props: UseMouseSelectionProps): UseMouseSelect
     config,
     viewport,
     dimensions,
+    freezeConfig: propFreezeConfig,
+    splitBarSize: propSplitBarSize,
+    splitViewport: propSplitViewport,
     containerRef,
     selection,
     onMoveCells,
@@ -620,7 +644,7 @@ export function useMouseSelection(props: UseMouseSelectionProps): UseMouseSelect
                   setCursorStyle(ROW_SELECT_CURSOR);
                 } else {
                   // Check if over a cell (standard cell cursor)
-                  const cell = getCellFromPixel(mouseX, mouseY, config, viewport, dimensions);
+                  const cell = getCellFromPixel(mouseX, mouseY, config, viewport, dimensions, { freezeConfig: propFreezeConfig, splitBarSize: propSplitBarSize, splitViewport: propSplitViewport });
                   if (cell) {
                     setCursorStyle("cell");
                   } else {
@@ -641,15 +665,18 @@ export function useMouseSelection(props: UseMouseSelectionProps): UseMouseSelect
       else if (isDragging && !headerDragRef.current && dragStartRef.current) {
         // Use midpoint threshold with drag start for direction-aware 50% threshold
         const cell = getCellFromMousePosition(
-          mouseX, 
-          mouseY, 
-          rect, 
-          config, 
-          viewport, 
+          mouseX,
+          mouseY,
+          rect,
+          config,
+          viewport,
           dimensions,
-          { 
+          {
             dragStartRow: dragStartRef.current.row,
             dragStartCol: dragStartRef.current.col,
+            freezeConfig: propFreezeConfig,
+            splitBarSize: propSplitBarSize,
+            splitViewport: propSplitViewport,
           }
         );
         if (cell) {
@@ -839,7 +866,7 @@ export function useMouseSelection(props: UseMouseSelectionProps): UseMouseSelect
         return null;
       }
 
-      return getCellFromPixel(mouseX, mouseY, config, viewport, dimensions);
+      return getCellFromPixel(mouseX, mouseY, config, viewport, dimensions, { freezeConfig: propFreezeConfig, splitBarSize: propSplitBarSize, splitViewport: propSplitViewport });
     },
     [containerRef, zoom, config, viewport, dimensions, overlayMoveHandlers, isOverFillHandle, onFillHandleDoubleClick, onAutoFitColumn, onAutoFitRow]
   );
@@ -959,13 +986,16 @@ export function useMouseSelection(props: UseMouseSelectionProps): UseMouseSelect
           {
             dragStartRow: dragStartRef.current.row,
             dragStartCol: dragStartRef.current.col,
+            freezeConfig: propFreezeConfig,
+            splitBarSize: propSplitBarSize,
+            splitViewport: propSplitViewport,
           }
         );
         if (cell) {
           onExtendTo(cell.row, cell.col);
         }
       } else if (isFormulaDragging && formulaDragStartRef.current && onUpdatePendingReference) {
-        const cell = getCellFromMousePosition(mouseX, mouseY, rect, config, viewport, dimensions);
+        const cell = getCellFromMousePosition(mouseX, mouseY, rect, config, viewport, dimensions, { freezeConfig: propFreezeConfig, splitBarSize: propSplitBarSize, splitViewport: propSplitViewport });
         if (cell) {
           onUpdatePendingReference(
             formulaDragStartRef.current.row,

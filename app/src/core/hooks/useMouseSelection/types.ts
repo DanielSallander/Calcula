@@ -3,7 +3,7 @@
 // CONTEXT: Contains all interfaces and types used across the useMouseSelection
 // module, including configuration, state, props, and return types.
 
-import type { GridConfig, Viewport, Selection, SelectionType, DimensionOverrides, FormulaReference } from "../../types";
+import type { GridConfig, Viewport, Selection, SelectionType, DimensionOverrides, FormulaReference, FreezeConfig } from "../../types";
 import type { ReferenceCorner } from "../../lib/gridRenderer";
 
 /**
@@ -107,6 +107,12 @@ export interface UseMouseSelectionProps {
   selection: Selection | null;
   /** Current dimension overrides */
   dimensions?: DimensionOverrides;
+  /** Effective freeze config (from freeze panes or split window) for hit testing */
+  freezeConfig?: FreezeConfig;
+  /** Split bar thickness in pixels (0 when no split is active) */
+  splitBarSize?: number;
+  /** Independent viewport for split window top/left panes (for hit testing) */
+  splitViewport?: Viewport;
   /** Whether currently in formula editing mode expecting a reference */
   isFormulaMode?: boolean;
   /** Current formula references for hit testing borders */

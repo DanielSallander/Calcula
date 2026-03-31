@@ -28,6 +28,7 @@ import { drawSelection, drawFillPreview, drawClipboardSelection, drawSelectionDr
 import { drawSpillBorders } from "./rendering/spillBorder";
 import { drawFormulaReferences } from "./rendering/references";
 import {
+  calculateVisibleRange,
   calculateFreezePaneLayout,
   calculateFrozenTopLeftRange,
   calculateFrozenTopRange,
@@ -454,7 +455,7 @@ function drawCellTextZone(
 
       // Draw cell decorations (e.g., sparklines) between background and text
       if (hasCellDecorations()) {
-        applyCellDecorations({ ctx, row, col, cellLeft, cellTop, cellRight, cellBottom, config, viewport, dimensions });
+        applyCellDecorations({ ctx, row, col, cellLeft, cellTop, cellRight, cellBottom, config, viewport, dimensions, display: cell.display, styleIndex, styleCache });
       }
 
       const fontWeight = cellStyle?.bold ? "bold" : "normal";
@@ -579,6 +580,16 @@ export function renderGrid(
 
   const styles = styleCache || new Map();
 
+  // When split is active, use the split config as freeze config so that
+  // headers and selection rendering use the freeze-aware code path.
+  const hasSplit = splitConfig &&
+    ((splitConfig.splitRow !== null && splitConfig.splitRow > 0) ||
+     (splitConfig.splitCol !== null && splitConfig.splitCol > 0));
+  const effectiveFreezeConfig = hasSplit
+    ? { freezeRow: splitConfig!.splitRow ?? null, freezeCol: splitConfig!.splitCol ?? null }
+    : (freezeConfig || { freezeRow: null, freezeCol: null });
+  const splitBarThickness = hasSplit ? 4 : 0;
+
   const state: RenderState = {
     ctx,
     width,
@@ -598,7 +609,7 @@ export function renderGrid(
     clipboardMode: clipboardMode || "none",
     clipboardAnimationOffset: clipboardAnimationOffset || 0,
     insertionAnimation: insertionAnimation || undefined,
-    freezeConfig: freezeConfig || { freezeRow: null, freezeCol: null },
+    freezeConfig: effectiveFreezeConfig,
     // FIX: Pass sheet context for cross-sheet reference highlighting
     currentSheetName,
     formulaSourceSheetName: editing?.sourceSheetName,
@@ -608,6 +619,10 @@ export function renderGrid(
       .map(r => ({ startRow: r.startRow, startCol: r.startCol, endRow: r.endRow, endCol: r.endCol })),
     // Spill ranges for blue dashed borders
     spillRanges,
+    // Split bar size for offset calculations in headers and selection
+    splitBarSize: splitBarThickness,
+    // Independent split viewport for headers
+    splitViewport: hasSplit ? splitViewport : undefined,
   };
 
   ctx.fillStyle = theme.cellBackground;
@@ -618,88 +633,84 @@ export function renderGrid(
   const hasSplitCols = splitConfig && splitConfig.splitCol !== null && splitConfig.splitCol > 0;
 
   if (hasSplitRows || hasSplitCols) {
-    // Split window uses the same layout calculation as freeze panes
-    // but renders a thicker draggable split bar
+    // Split windows create independent scrollable panes.
+    // We use calculateFreezePaneLayout only to get the pixel position of the split bar.
+    // Each pane uses calculateVisibleRange with its own viewport for fully independent scrolling.
     const splitFreezeConfig: FreezeConfig = {
       freezeRow: splitConfig!.splitRow ?? null,
       freezeCol: splitConfig!.splitCol ?? null,
     };
     const layout = calculateFreezePaneLayout(splitFreezeConfig, config, dims);
 
-    const paneTopX = rowHeaderWidth;
-    const paneTopY = colHeaderHeight;
-    const splitX = rowHeaderWidth + layout.frozenColsWidth;
-    const splitY = colHeaderHeight + layout.frozenRowsHeight;
-    const splitBarSize = 4; // Split bar thickness
-    const mainX = splitX + (hasSplitCols ? splitBarSize : 0);
-    const mainY = splitY + (hasSplitRows ? splitBarSize : 0);
-    const mainWidth = width - mainX;
-    const mainHeight = height - mainY;
+    const splitBarSize = 4;
+    const topPaneHeight = layout.frozenRowsHeight;
+    const leftPaneWidth = layout.frozenColsWidth;
+    const splitXPixel = rowHeaderWidth + leftPaneWidth;
+    const splitYPixel = colHeaderHeight + topPaneHeight;
+    const bottomPaneTop = splitYPixel + (hasSplitRows ? splitBarSize : 0);
+    const rightPaneLeft = splitXPixel + (hasSplitCols ? splitBarSize : 0);
+    const bottomPaneHeight = height - bottomPaneTop;
+    const rightPaneWidth = width - rightPaneLeft;
 
-    // Use splitViewport for the top/left panes, main viewport for bottom/right
-    const topLeftViewport = splitViewport || { ...viewport, scrollX: 0, scrollY: 0, startRow: 0, startCol: 0, rowCount: 50, colCount: 20 };
+    // Split viewport for top/left panes; falls back to scrollY=0,scrollX=0 if not provided
+    const svp = splitViewport || { ...viewport, scrollX: 0, scrollY: 0, startRow: 0, startCol: 0, rowCount: 50, colCount: 20 };
 
-    // Bottom-right pane (main scrollable) - uses primary viewport
-    const mainRange = calculateScrollableRange(viewport, splitFreezeConfig, config, width, height, dims);
-    if (mainWidth > 0 && mainHeight > 0) {
-      renderZone(state, mainRange, mainX, mainY, mainWidth, mainHeight);
+    // Bottom-right pane: uses main viewport for both axes
+    if (rightPaneWidth > 0 && bottomPaneHeight > 0) {
+      // Trick: add header sizes so calculateVisibleRange subtracts them to get correct pane size
+      const brRange = calculateVisibleRange(viewport, config, rightPaneWidth + rowHeaderWidth, bottomPaneHeight + colHeaderHeight, dims);
+      renderZone(state, brRange, rightPaneLeft, bottomPaneTop, rightPaneWidth, bottomPaneHeight);
     }
 
-    // Left pane (scrolls vertically with main, horizontally with top-left viewport)
-    if (hasSplitCols) {
-      const leftViewport: Viewport = { ...viewport, scrollX: topLeftViewport.scrollX, startRow: viewport.startRow, startCol: topLeftViewport.startCol, rowCount: viewport.rowCount, colCount: 20 };
-      const leftRange = calculateFrozenLeftRange(leftViewport, splitFreezeConfig, config, width, height, dims);
-      if (leftRange && mainHeight > 0) {
-        renderZone(state, leftRange, paneTopX, mainY, layout.frozenColsWidth, mainHeight);
-      }
+    // Bottom-left pane: scrolls vertically with main viewport, horizontally with split viewport
+    if (hasSplitCols && leftPaneWidth > 0 && bottomPaneHeight > 0) {
+      const blViewport: Viewport = { ...viewport, scrollX: svp.scrollX };
+      const blRange = calculateVisibleRange(blViewport, config, leftPaneWidth + rowHeaderWidth, bottomPaneHeight + colHeaderHeight, dims);
+      renderZone(state, blRange, rowHeaderWidth, bottomPaneTop, leftPaneWidth, bottomPaneHeight);
     }
 
-    // Top pane (scrolls horizontally with main, vertically with top-left viewport)
-    if (hasSplitRows) {
-      const topViewport: Viewport = { ...viewport, scrollY: topLeftViewport.scrollY, startCol: viewport.startCol, startRow: topLeftViewport.startRow, rowCount: 50, colCount: viewport.colCount };
-      const topRange = calculateFrozenTopRange(topViewport, splitFreezeConfig, config, width, height, dims);
-      if (topRange && mainWidth > 0) {
-        renderZone(state, topRange, mainX, paneTopY, mainWidth, layout.frozenRowsHeight);
-      }
+    // Top-right pane: scrolls horizontally with main viewport, vertically with split viewport
+    if (hasSplitRows && topPaneHeight > 0 && rightPaneWidth > 0) {
+      const trViewport: Viewport = { ...viewport, scrollY: svp.scrollY };
+      const trRange = calculateVisibleRange(trViewport, config, rightPaneWidth + rowHeaderWidth, topPaneHeight + colHeaderHeight, dims);
+      renderZone(state, trRange, rightPaneLeft, colHeaderHeight, rightPaneWidth, topPaneHeight);
     }
 
-    // Top-left pane (independent scroll)
-    if (hasSplitRows && hasSplitCols) {
-      const topLeftRange = calculateFrozenTopLeftRange(splitFreezeConfig, config, width, height, dims);
-      if (topLeftRange) {
-        renderZone(state, topLeftRange, paneTopX, paneTopY, layout.frozenColsWidth, layout.frozenRowsHeight);
-      }
+    // Top-left pane: independent scroll from split viewport (both axes)
+    if (hasSplitRows && hasSplitCols && topPaneHeight > 0 && leftPaneWidth > 0) {
+      const tlRange = calculateVisibleRange(svp, config, leftPaneWidth + rowHeaderWidth, topPaneHeight + colHeaderHeight, dims);
+      renderZone(state, tlRange, rowHeaderWidth, colHeaderHeight, leftPaneWidth, topPaneHeight);
     }
 
-    // Draw split bars (thicker than freeze pane lines)
+    // Draw split bars
     ctx.fillStyle = "#c0c0c0";
-    if (hasSplitCols && layout.frozenColsWidth > 0) {
-      ctx.fillRect(splitX, colHeaderHeight, splitBarSize, height - colHeaderHeight);
+    if (hasSplitCols && leftPaneWidth > 0) {
+      ctx.fillRect(splitXPixel, colHeaderHeight, splitBarSize, height - colHeaderHeight);
     }
-    if (hasSplitRows && layout.frozenRowsHeight > 0) {
-      ctx.fillRect(rowHeaderWidth, splitY, width - rowHeaderWidth, splitBarSize);
+    if (hasSplitRows && topPaneHeight > 0) {
+      ctx.fillRect(rowHeaderWidth, splitYPixel, width - rowHeaderWidth, splitBarSize);
     }
     // Draw 3D effect on split bars
     ctx.strokeStyle = "#999999";
     ctx.lineWidth = 1;
-    if (hasSplitCols && layout.frozenColsWidth > 0) {
+    if (hasSplitCols && leftPaneWidth > 0) {
       ctx.beginPath();
-      ctx.moveTo(splitX + 0.5, colHeaderHeight);
-      ctx.lineTo(splitX + 0.5, height);
+      ctx.moveTo(splitXPixel + 0.5, colHeaderHeight);
+      ctx.lineTo(splitXPixel + 0.5, height);
       ctx.stroke();
       ctx.beginPath();
-      ctx.moveTo(splitX + splitBarSize - 0.5, colHeaderHeight);
-      ctx.lineTo(splitX + splitBarSize - 0.5, height);
+      ctx.moveTo(splitXPixel + splitBarSize - 0.5, colHeaderHeight);
+      ctx.lineTo(splitXPixel + splitBarSize - 0.5, height);
       ctx.stroke();
     }
-    if (hasSplitRows && layout.frozenRowsHeight > 0) {
+    if (hasSplitRows && topPaneHeight > 0) {
       ctx.beginPath();
-      ctx.moveTo(rowHeaderWidth, splitY + 0.5);
-      ctx.lineTo(width, splitY + 0.5);
+      ctx.moveTo(rowHeaderWidth, splitYPixel + 0.5);
+      ctx.lineTo(width, splitYPixel + 0.5);
       ctx.stroke();
       ctx.beginPath();
-      ctx.moveTo(rowHeaderWidth, splitY + splitBarSize - 0.5);
-      ctx.lineTo(width, splitY + splitBarSize - 0.5);
+      ctx.moveTo(rowHeaderWidth, splitYPixel + splitBarSize - 0.5);
+      ctx.lineTo(width, splitYPixel + splitBarSize - 0.5);
       ctx.stroke();
     }
   }

@@ -4,7 +4,7 @@
 // by dragging corner handles. This allows users to click on a corner handle
 // of a highlighted reference and drag it to change the range bounds.
 
-import type { GridConfig, Viewport, DimensionOverrides, FormulaReference } from "../../../types";
+import type { GridConfig, Viewport, DimensionOverrides, FormulaReference, FreezeConfig } from "../../../types";
 import type { ReferenceCorner } from "../../../lib/gridRenderer";
 import type { CellPosition, MousePosition } from "../types";
 import { getFormulaReferenceCornerAtPixel } from "../../../lib/gridRenderer";
@@ -15,6 +15,9 @@ interface ReferenceResizeDependencies {
   config: GridConfig;
   viewport: Viewport;
   dimensions?: DimensionOverrides;
+  freezeConfig?: FreezeConfig;
+  splitBarSize?: number;
+  splitViewport?: Viewport;
   containerRef: React.RefObject<HTMLElement | null>;
   formulaReferences: FormulaReference[];
   currentSheetName?: string;
@@ -71,6 +74,9 @@ export function createReferenceResizeHandlers(deps: ReferenceResizeDependencies)
     config,
     viewport,
     dimensions,
+    freezeConfig,
+    splitBarSize,
+    splitViewport,
     containerRef,
     formulaReferences,
     currentSheetName,
@@ -160,7 +166,7 @@ export function createReferenceResizeHandlers(deps: ReferenceResizeDependencies)
 
     lastMousePosRef.current = { x: mouseX, y: mouseY };
 
-    const cell = getCellFromMousePosition(mouseX, mouseY, rect, config, viewport, dimensions);
+    const cell = getCellFromMousePosition(mouseX, mouseY, rect, config, viewport, dimensions, { freezeConfig, splitBarSize, splitViewport });
     if (cell) {
       onUpdateRefResize(cell.row, cell.col);
     }
@@ -178,7 +184,7 @@ export function createReferenceResizeHandlers(deps: ReferenceResizeDependencies)
     const mousePos = lastMousePosRef.current;
 
     if (rect && mousePos && onCompleteRefResize) {
-      const cell = getCellFromMousePosition(mousePos.x, mousePos.y, rect, config, viewport, dimensions);
+      const cell = getCellFromMousePosition(mousePos.x, mousePos.y, rect, config, viewport, dimensions, { freezeConfig, splitBarSize, splitViewport });
       if (cell) {
         onCompleteRefResize(cell.row, cell.col);
       }

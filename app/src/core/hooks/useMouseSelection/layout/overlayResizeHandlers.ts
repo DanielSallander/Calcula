@@ -5,7 +5,7 @@
 //          For cell-based overlays: dispatches "overlay:resizeComplete".
 //          For floating overlays: dispatches "floatingObject:resizeComplete".
 
-import type { GridConfig, Viewport, DimensionOverrides } from "../../../types";
+import type { GridConfig, Viewport, DimensionOverrides, FreezeConfig } from "../../../types";
 import { createEmptyDimensionOverrides } from "../../../types";
 import { getGridRegions, type GridRegion } from "../../../../api/gridOverlays";
 import { getCellFromPixel } from "../../../lib/gridRenderer";
@@ -47,6 +47,9 @@ interface OverlayResizeDependencies {
   config: GridConfig;
   viewport: Viewport;
   dimensions?: DimensionOverrides;
+  freezeConfig?: FreezeConfig;
+  splitBarSize?: number;
+  splitViewport?: Viewport;
   containerRef: React.RefObject<HTMLElement | null>;
   setIsOverlayResizing: (value: boolean) => void;
   setCursorStyle: (style: string) => void;
@@ -154,6 +157,9 @@ export function createOverlayResizeHandlers(
     config,
     viewport,
     dimensions,
+    freezeConfig,
+    splitBarSize,
+    splitViewport,
     containerRef,
     setIsOverlayResizing,
     setCursorStyle,
@@ -332,7 +338,7 @@ export function createOverlayResizeHandlers(
     const rect = containerRef.current?.getBoundingClientRect();
     if (!rect) return;
 
-    const cell = getCellFromPixel(mouseX, mouseY, config, viewport, dimensions);
+    const cell = getCellFromPixel(mouseX, mouseY, config, viewport, dimensions, { freezeConfig, splitBarSize, splitViewport });
     if (!cell) return;
 
     // Ensure we don't shrink past the start position

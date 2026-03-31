@@ -1215,6 +1215,13 @@ export function gridReducer(state: GridState, action: GridAction): GridState {
       };
     }
 
+    case GRID_ACTIONS.SET_SPLIT_VIEWPORT: {
+      return {
+        ...state,
+        splitViewport: action.payload,
+      };
+    }
+
     case GRID_ACTIONS.SET_VIEW_MODE: {
       return {
         ...state,

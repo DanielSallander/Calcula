@@ -5,7 +5,7 @@
 // reference border and drag it to change the cell/range it refers to.
 // NOTE: Dragging only works when clicking on the reference border (like Excel).
 
-import type { GridConfig, Viewport, DimensionOverrides, FormulaReference } from "../../../types";
+import type { GridConfig, Viewport, DimensionOverrides, FormulaReference, FreezeConfig } from "../../../types";
 import type { CellPosition, MousePosition } from "../types";
 import { getCellFromPixel, getFormulaReferenceBorderAtPixel } from "../../../lib/gridRenderer";
 import { getCellFromMousePosition } from "../utils/cellUtils";
@@ -15,6 +15,9 @@ interface ReferenceDragDependencies {
   config: GridConfig;
   viewport: Viewport;
   dimensions?: DimensionOverrides;
+  freezeConfig?: FreezeConfig;
+  splitBarSize?: number;
+  splitViewport?: Viewport;
   containerRef: React.RefObject<HTMLElement | null>;
   formulaReferences: FormulaReference[];
   currentSheetName?: string;
@@ -57,6 +60,9 @@ export function createReferenceDragHandlers(deps: ReferenceDragDependencies): Re
     config,
     viewport,
     dimensions,
+    freezeConfig,
+    splitBarSize,
+    splitViewport,
     containerRef,
     formulaReferences,
     currentSheetName,
@@ -123,7 +129,7 @@ export function createReferenceDragHandlers(deps: ReferenceDragDependencies): Re
     const { startRow, startCol } = borderHit.reference;
 
     // Get the actual cell under the cursor for tracking the drag offset
-    const cell = getCellFromPixel(mouseX, mouseY, config, viewport, dimensions);
+    const cell = getCellFromPixel(mouseX, mouseY, config, viewport, dimensions, { freezeConfig, splitBarSize, splitViewport });
     const dragStartRow = cell?.row ?? startRow;
     const dragStartCol = cell?.col ?? startCol;
 
@@ -156,7 +162,7 @@ export function createReferenceDragHandlers(deps: ReferenceDragDependencies): Re
 
     lastMousePosRef.current = { x: mouseX, y: mouseY };
 
-    const cell = getCellFromMousePosition(mouseX, mouseY, rect, config, viewport, dimensions);
+    const cell = getCellFromMousePosition(mouseX, mouseY, rect, config, viewport, dimensions, { freezeConfig, splitBarSize, splitViewport });
     if (cell) {
       onUpdateRefDrag(cell.row, cell.col);
     }
@@ -175,7 +181,7 @@ export function createReferenceDragHandlers(deps: ReferenceDragDependencies): Re
     const mousePos = lastMousePosRef.current;
 
     if (rect && mousePos && onCompleteRefDrag) {
-      const cell = getCellFromMousePosition(mousePos.x, mousePos.y, rect, config, viewport, dimensions);
+      const cell = getCellFromMousePosition(mousePos.x, mousePos.y, rect, config, viewport, dimensions, { freezeConfig, splitBarSize, splitViewport });
       if (cell) {
         onCompleteRefDrag(cell.row, cell.col);
       }

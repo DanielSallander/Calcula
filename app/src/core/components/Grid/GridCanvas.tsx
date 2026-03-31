@@ -44,6 +44,8 @@ export interface GridCanvasProps {
   freezeConfig?: FreezeConfig;
   /** Split window configuration */
   splitConfig?: SplitConfig;
+  /** Independent viewport for split window top/left panes */
+  splitViewport?: Viewport;
   /** Current view mode */
   viewMode?: ViewMode;
   /** Optional theme override */
@@ -162,6 +164,7 @@ export const GridCanvas = forwardRef<GridCanvasHandle, GridCanvasProps>(
       clipboardMode = "none",
       freezeConfig = DEFAULT_FREEZE_CONFIG,
       splitConfig = DEFAULT_SPLIT_CONFIG,
+      splitViewport,
       viewMode = "normal",
       theme = DEFAULT_THEME,
       onMouseDown,
@@ -282,9 +285,9 @@ export const GridCanvas = forwardRef<GridCanvasHandle, GridCanvasProps>(
 
       // Calculate the base range from scroll position
       let startRow = Math.max(0, range.startRow - CELL_BUFFER);
-      const endRow = Math.min(config.totalRows - 1, range.endRow + CELL_BUFFER);
+      let endRow = Math.min(config.totalRows - 1, range.endRow + CELL_BUFFER);
       let startCol = Math.max(0, range.startCol - CELL_BUFFER);
-      const endCol = Math.min(config.totalCols - 1, range.endCol + CELL_BUFFER);
+      let endCol = Math.min(config.totalCols - 1, range.endCol + CELL_BUFFER);
 
       // With freeze panes, always include frozen rows/cols in fetch
       if (freezeConfig.freezeRow !== null && freezeConfig.freezeRow > 0) {
@@ -294,8 +297,24 @@ export const GridCanvas = forwardRef<GridCanvasHandle, GridCanvasProps>(
         startCol = 0; // Always fetch from col 0 to include frozen columns
       }
 
+      // With split window, expand fetch range to cover both panes' visible content
+      const hasSplitRows = splitConfig.splitRow !== null && splitConfig.splitRow > 0;
+      const hasSplitCols = splitConfig.splitCol !== null && splitConfig.splitCol > 0;
+      if ((hasSplitRows || hasSplitCols) && splitViewport) {
+        // Calculate visible range for split viewport panes
+        const splitRange = calculateVisibleRange(splitViewport, config, canvasSize.width / zoom, canvasSize.height / zoom, dims);
+        startRow = Math.min(startRow, Math.max(0, splitRange.startRow - CELL_BUFFER));
+        endRow = Math.max(endRow, Math.min(config.totalRows - 1, splitRange.endRow + CELL_BUFFER));
+        startCol = Math.min(startCol, Math.max(0, splitRange.startCol - CELL_BUFFER));
+        endCol = Math.max(endCol, Math.min(config.totalCols - 1, splitRange.endCol + CELL_BUFFER));
+      } else if (hasSplitRows || hasSplitCols) {
+        // Fallback: no splitViewport yet, fetch from 0
+        if (hasSplitRows) startRow = 0;
+        if (hasSplitCols) startCol = 0;
+      }
+
       return { startRow, endRow, startCol, endCol };
-    }, [viewport, config, canvasSize.width, canvasSize.height, dims, freezeConfig, zoom]);
+    }, [viewport, config, canvasSize.width, canvasSize.height, dims, freezeConfig, splitConfig, splitViewport, zoom]);
 
     /**
      * Check if we need to fetch new cells based on scroll position.
@@ -477,7 +496,7 @@ export const GridCanvas = forwardRef<GridCanvasHandle, GridCanvasProps>(
         getPostHeaderOverlayRenderers(),
         spillRanges,
         splitConfig,
-        undefined, // splitViewport - reserved for independent split scrolling
+        splitViewport,
         viewMode,
       );
 
@@ -485,7 +504,7 @@ export const GridCanvas = forwardRef<GridCanvasHandle, GridCanvasProps>(
       if (perfDrawMs > 5) {
         console.log(`[PERF] draw ms=${perfDrawMs.toFixed(1)}`, new Error().stack?.split('\n').slice(1, 4).join(' <- '));
       }
-    }, [context, canvasSize.width, canvasSize.height, config, viewport, selection, editing, cells, theme, formulaReferences, dims, styleCache, fillPreviewRange, selectionDragPreview, clipboardSelection, clipboardMode, freezeConfig, splitConfig, viewMode, currentSheetName, zoom, spillRanges]);
+    }, [context, canvasSize.width, canvasSize.height, config, viewport, selection, editing, cells, theme, formulaReferences, dims, styleCache, fillPreviewRange, selectionDragPreview, clipboardSelection, clipboardMode, freezeConfig, splitConfig, splitViewport, viewMode, currentSheetName, zoom, spillRanges]);
 
     /**
      * Start row insertion animation.
@@ -686,6 +705,14 @@ export const GridCanvas = forwardRef<GridCanvasHandle, GridCanvasProps>(
       lastFetchRef.current = null;
       fetchCells(true);
     }, [freezeConfig.freezeRow, freezeConfig.freezeCol]);
+
+    /**
+     * Refetch cells when split config changes to ensure split pane cells are loaded.
+     */
+    useEffect(() => {
+      lastFetchRef.current = null;
+      fetchCells(true);
+    }, [splitConfig.splitRow, splitConfig.splitCol]);
 
     /**
      * Listen for grid:refresh events (from MenuBar merge/unmerge, undo/redo, etc.).

@@ -60,6 +60,7 @@ export const GRID_ACTIONS = {
   SET_GROUP_HIDDEN_COLS: "SET_GROUP_HIDDEN_COLS",
   SET_ZOOM: "SET_ZOOM",
   SET_SPLIT_CONFIG: "SET_SPLIT_CONFIG",
+  SET_SPLIT_VIEWPORT: "SET_SPLIT_VIEWPORT",
   SET_VIEW_MODE: "SET_VIEW_MODE",
 } as const;
 
@@ -269,6 +270,11 @@ export interface SetSplitConfigAction {
   payload: SplitConfig;
 }
 
+export interface SetSplitViewportAction {
+  type: typeof GRID_ACTIONS.SET_SPLIT_VIEWPORT;
+  payload: Viewport;
+}
+
 export interface SetViewModeAction {
   type: typeof GRID_ACTIONS.SET_VIEW_MODE;
   payload: { viewMode: ViewMode };
@@ -313,6 +319,7 @@ export type GridAction =
   | SetGroupHiddenColsAction
   | SetZoomAction
   | SetSplitConfigAction
+  | SetSplitViewportAction
   | SetViewModeAction;
 
 // Action creators
@@ -745,6 +752,16 @@ export function setSplitConfig(
   return {
     type: GRID_ACTIONS.SET_SPLIT_CONFIG,
     payload: { splitRow, splitCol },
+  };
+}
+
+/**
+ * Set the split viewport (independent scroll for top/left split panes).
+ */
+export function setSplitViewport(viewport: Viewport): SetSplitViewportAction {
+  return {
+    type: GRID_ACTIONS.SET_SPLIT_VIEWPORT,
+    payload: viewport,
   };
 }
 

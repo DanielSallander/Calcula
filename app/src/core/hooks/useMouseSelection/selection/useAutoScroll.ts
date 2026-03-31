@@ -5,7 +5,7 @@
 // current visible area.
 
 import { useCallback, useRef } from "react";
-import type { GridConfig, Viewport, DimensionOverrides } from "../../../types";
+import type { GridConfig, Viewport, DimensionOverrides, FreezeConfig } from "../../../types";
 import type { MousePosition, CellPosition } from "../types";
 import { DEFAULT_AUTO_SCROLL_CONFIG } from "../constants";
 import { calculateAutoScrollDelta } from "../utils/autoScrollUtils";
@@ -17,6 +17,9 @@ interface UseAutoScrollProps {
   config: GridConfig;
   viewport: Viewport;
   dimensions?: DimensionOverrides;
+  freezeConfig?: FreezeConfig;
+  splitBarSize?: number;
+  splitViewport?: Viewport;
   lastMousePosRef: React.MutableRefObject<MousePosition | null>;
   isDragging: boolean;
   isFormulaDragging: boolean;
@@ -43,6 +46,9 @@ export function useAutoScroll(props: UseAutoScrollProps): UseAutoScrollReturn {
     config,
     viewport,
     dimensions,
+    freezeConfig,
+    splitBarSize,
+    splitViewport,
     lastMousePosRef,
     isDragging,
     isFormulaDragging,
@@ -82,7 +88,7 @@ export function useAutoScroll(props: UseAutoScrollProps): UseAutoScrollReturn {
 
       // Update selection/reference to cell under mouse (with new scroll position)
       if (isFormulaDragging && formulaDragStartRef.current && onUpdatePendingReference) {
-        const cell = getCellFromMousePosition(mouseX, mouseY, rect, config, viewport, dimensions);
+        const cell = getCellFromMousePosition(mouseX, mouseY, rect, config, viewport, dimensions, { freezeConfig, splitBarSize, splitViewport });
         if (cell) {
           onUpdatePendingReference(
             formulaDragStartRef.current.row,
@@ -94,15 +100,18 @@ export function useAutoScroll(props: UseAutoScrollProps): UseAutoScrollReturn {
       } else if (isDragging && dragStartRef.current) {
         // Use direction-aware 50% threshold during auto-scroll
         const cell = getCellFromMousePosition(
-          mouseX, 
-          mouseY, 
-          rect, 
-          config, 
-          viewport, 
+          mouseX,
+          mouseY,
+          rect,
+          config,
+          viewport,
           dimensions,
           {
             dragStartRow: dragStartRef.current.row,
             dragStartCol: dragStartRef.current.col,
+            freezeConfig,
+            splitBarSize,
+            splitViewport,
           }
         );
         if (cell) {
@@ -114,7 +123,7 @@ export function useAutoScroll(props: UseAutoScrollProps): UseAutoScrollReturn {
     // Schedule next frame
     // eslint-disable-next-line react-hooks/immutability -- Self-scheduling timer pattern requires self-reference
     autoScrollRef.current = window.setTimeout(runAutoScroll, DEFAULT_AUTO_SCROLL_CONFIG.intervalMs);
-  }, [isDragging, isFormulaDragging, containerRef, scrollRef, config, viewport, dimensions, lastMousePosRef, formulaDragStartRef, dragStartRef, onScroll, onExtendTo, onUpdatePendingReference]);
+  }, [isDragging, isFormulaDragging, containerRef, scrollRef, config, viewport, dimensions, freezeConfig, splitBarSize, splitViewport, lastMousePosRef, formulaDragStartRef, dragStartRef, onScroll, onExtendTo, onUpdatePendingReference]);
 
   /**
    * Start auto-scroll loop.

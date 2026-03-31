@@ -55,19 +55,6 @@ export const IconButton = styled.button<IconButtonProps>`
   }
 `;
 
-export const CancelIconSpan = styled.span`
-  font-size: 16px;
-  font-weight: bold;
-  line-height: 1;
-  font-family: Arial, sans-serif;
-`;
-
-export const EnterIconSpan = styled.span`
-  font-size: 18px;
-  font-weight: bold;
-  line-height: 1;
-  font-family: Arial, sans-serif;
-`;
 
 export const InsertFunctionIconSpan = styled.span`
   font-size: 14px;

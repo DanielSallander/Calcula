@@ -3,10 +3,10 @@
 // CONTEXT: Core component that orchestrates the spreadsheet experience
 // REFACTOR: Removed legacy Find/Replace event listeners (logic moved to Extensions)
 
-import React, { useCallback, useEffect, useRef } from "react";
+import React, { useCallback, useEffect, useRef, useState } from "react";
 import { useGridState, useGridContext } from "../../state";
 // FIX: Removed openFind import to resolve SyntaxError
-import { setViewportDimensions, setAllDimensions, setSelection, setManuallyHiddenRows, setManuallyHiddenCols, setZoom } from "../../state/gridActions";
+import { setViewportDimensions, setAllDimensions, setSelection, setManuallyHiddenRows, setManuallyHiddenCols, setZoom, setSplitConfig, setSplitViewport } from "../../state/gridActions";
 import { ZOOM_MIN, ZOOM_MAX, ZOOM_STEP } from "../../types";
 import type { Selection, Viewport, VirtualBounds } from "../../types";
 import { GridCanvas } from "../Grid";
@@ -24,9 +24,12 @@ import {
   getAllRowHeights,
   mergeCells,
   unmergeCells,
+  setSplitWindow as backendSetSplitWindow,
 } from "../../lib/tauri-api";
 import { cellEvents } from "../../lib/cellEvents";
 import { getCellFromPixel } from "../../lib/gridRenderer";
+import { calculateFreezePaneLayout } from "../../lib/gridRenderer/layout/viewport";
+import { getColumnWidth, getRowHeight } from "../../lib/gridRenderer/layout/dimensions";
 import type { SpreadsheetContentProps } from "./SpreadsheetTypes";
 import { AppEvents, emitAppEvent } from "../../lib/events";
 import {
@@ -39,6 +42,8 @@ import type { GridMenuContext } from "../../lib/gridCommands";
 import * as S from "./Spreadsheet.styles";
 
 const SCROLLBAR_SIZE = 14;
+const SPLIT_BAR_SIZE = 4;
+const SPLIT_BAR_HIT_TOLERANCE = 4; // Extra pixels on each side for easier clicking
 
 // Debounce delay for resize observer - prevents flickering during task pane animation
 const RESIZE_DEBOUNCE_MS = 150;
@@ -107,7 +112,103 @@ function SpreadsheetContent({
   } = state;
 
   // 5. Extract freezeConfig, splitConfig, viewMode from gridState
-  const { freezeConfig, splitConfig, viewMode } = gridState;
+  const { freezeConfig, splitConfig, splitViewport, viewMode } = gridState;
+
+  // -------------------------------------------------------------------------
+  // Split bar drag state
+  // -------------------------------------------------------------------------
+  const [splitDrag, setSplitDrag] = useState<{
+    axis: "row" | "col";
+    startPixel: number;
+    startValue: number;
+  } | null>(null);
+  const [splitBarCursor, setSplitBarCursor] = useState<string | null>(null);
+
+  /**
+   * Calculate split bar pixel positions for hit testing.
+   */
+  const getSplitBarPositions = useCallback(() => {
+    const hasSplitRows = splitConfig.splitRow !== null && splitConfig.splitRow > 0;
+    const hasSplitCols = splitConfig.splitCol !== null && splitConfig.splitCol > 0;
+    if (!hasSplitRows && !hasSplitCols) return null;
+
+    const splitFreezeConfig = {
+      freezeRow: splitConfig.splitRow ?? null,
+      freezeCol: splitConfig.splitCol ?? null,
+    };
+    const layout = calculateFreezePaneLayout(splitFreezeConfig, config, dimensions);
+    const rowHeaderWidth = config.rowHeaderWidth || 50;
+    const colHeaderHeight = config.colHeaderHeight || 24;
+
+    return {
+      horizontalBarY: hasSplitRows ? colHeaderHeight + layout.frozenRowsHeight : null,
+      verticalBarX: hasSplitCols ? rowHeaderWidth + layout.frozenColsWidth : null,
+      rowHeaderWidth,
+      colHeaderHeight,
+    };
+  }, [splitConfig, config, dimensions]);
+
+  /**
+   * Check if a pixel position is over a split bar.
+   */
+  const hitTestSplitBar = useCallback((mouseX: number, mouseY: number): "row" | "col" | null => {
+    const positions = getSplitBarPositions();
+    if (!positions) return null;
+
+    const { horizontalBarY, verticalBarX, rowHeaderWidth, colHeaderHeight } = positions;
+
+    // Check vertical split bar (col-resize cursor)
+    if (verticalBarX !== null && mouseX >= verticalBarX - SPLIT_BAR_HIT_TOLERANCE &&
+        mouseX <= verticalBarX + SPLIT_BAR_SIZE + SPLIT_BAR_HIT_TOLERANCE &&
+        mouseY > colHeaderHeight) {
+      return "col";
+    }
+
+    // Check horizontal split bar (row-resize cursor)
+    if (horizontalBarY !== null && mouseY >= horizontalBarY - SPLIT_BAR_HIT_TOLERANCE &&
+        mouseY <= horizontalBarY + SPLIT_BAR_SIZE + SPLIT_BAR_HIT_TOLERANCE &&
+        mouseX > rowHeaderWidth) {
+      return "row";
+    }
+
+    return null;
+  }, [getSplitBarPositions]);
+
+  /**
+   * Convert a pixel Y position to the nearest row index for split repositioning.
+   */
+  const pixelYToSplitRow = useCallback((pixelY: number): number => {
+    const colHeaderHeight = config.colHeaderHeight || 24;
+    let accHeight = 0;
+    let row = 0;
+    const targetY = pixelY - colHeaderHeight;
+    while (row < (config.totalRows || 1000)) {
+      const rh = getRowHeight(row, config, dimensions);
+      if (rh <= 0) { row++; continue; }
+      if (accHeight + rh / 2 > targetY) break;
+      accHeight += rh;
+      row++;
+    }
+    return Math.max(1, row);
+  }, [config, dimensions]);
+
+  /**
+   * Convert a pixel X position to the nearest col index for split repositioning.
+   */
+  const pixelXToSplitCol = useCallback((pixelX: number): number => {
+    const rowHeaderWidth = config.rowHeaderWidth || 50;
+    let accWidth = 0;
+    let col = 0;
+    const targetX = pixelX - rowHeaderWidth;
+    while (col < (config.totalCols || 100)) {
+      const cw = getColumnWidth(col, config, dimensions);
+      if (cw <= 0) { col++; continue; }
+      if (accWidth + cw / 2 > targetX) break;
+      accWidth += cw;
+      col++;
+    }
+    return Math.max(1, col);
+  }, [config, dimensions]);
 
   // -------------------------------------------------------------------------
   // Helper: Refresh dimensions from backend
@@ -744,6 +845,21 @@ function SpreadsheetContent({
     [handleScrollEvent, gridState.viewport.scrollX]
   );
 
+  // Split pane scrollbar handlers
+  const handleSplitVerticalScroll = useCallback(
+    (scrollY: number) => {
+      dispatch(setSplitViewport({ ...splitViewport, scrollY }));
+    },
+    [dispatch, splitViewport]
+  );
+
+  const handleSplitHorizontalScroll = useCallback(
+    (scrollX: number) => {
+      dispatch(setSplitViewport({ ...splitViewport, scrollX }));
+    },
+    [dispatch, splitViewport]
+  );
+
   const handleWheel = useCallback(
     (event: React.WheelEvent<HTMLDivElement>) => {
       event.preventDefault();
@@ -760,6 +876,63 @@ function SpreadsheetContent({
       const deltaX = event.deltaX;
       const deltaY = event.deltaY;
 
+      // Detect which split pane the mouse is over
+      const hasSplitRows = splitConfig.splitRow !== null && splitConfig.splitRow > 0;
+      const hasSplitCols = splitConfig.splitCol !== null && splitConfig.splitCol > 0;
+
+      if (hasSplitRows || hasSplitCols) {
+        const rect = containerRef.current?.getBoundingClientRect();
+        if (rect) {
+          const z = gridState.zoom;
+          const mouseX = (event.clientX - rect.left) / z;
+          const mouseY = (event.clientY - rect.top) / z;
+          const positions = getSplitBarPositions();
+
+          const isInTopPane = hasSplitRows && positions?.horizontalBarY != null && mouseY < positions.horizontalBarY;
+          const isInLeftPane = hasSplitCols && positions?.verticalBarX != null && mouseX < positions.verticalBarX;
+
+          // For horizontal split: top pane scrolls splitViewport.scrollY, bottom scrolls main viewport.scrollY
+          // Both panes share horizontal scroll from their respective viewports
+          if (isInTopPane || isInLeftPane) {
+            // Mouse is in a split pane - update splitViewport
+            const newSvpScrollX = isInLeftPane
+              ? Math.max(0, Math.min(scrollbarMetrics.maxScrollX, splitViewport.scrollX + deltaX))
+              : splitViewport.scrollX;
+            const newSvpScrollY = isInTopPane
+              ? Math.max(0, Math.min(scrollbarMetrics.maxScrollY, splitViewport.scrollY + deltaY))
+              : splitViewport.scrollY;
+
+            if (newSvpScrollX !== splitViewport.scrollX || newSvpScrollY !== splitViewport.scrollY) {
+              dispatch(setSplitViewport({ ...splitViewport, scrollX: newSvpScrollX, scrollY: newSvpScrollY }));
+            }
+
+            // If in top pane but NOT in left pane, also scroll main viewport horizontally
+            if (isInTopPane && !isInLeftPane) {
+              const newMainScrollX = Math.max(0, Math.min(scrollbarMetrics.maxScrollX, gridState.viewport.scrollX + deltaX));
+              if (newMainScrollX !== gridState.viewport.scrollX) {
+                const syntheticEvent = {
+                  currentTarget: { scrollLeft: newMainScrollX, scrollTop: gridState.viewport.scrollY },
+                } as unknown as React.UIEvent<HTMLDivElement>;
+                handleScrollEvent(syntheticEvent);
+              }
+            }
+
+            // If in left pane but NOT in top pane, also scroll main viewport vertically
+            if (isInLeftPane && !isInTopPane) {
+              const newMainScrollY = Math.max(0, Math.min(scrollbarMetrics.maxScrollY, gridState.viewport.scrollY + deltaY));
+              if (newMainScrollY !== gridState.viewport.scrollY) {
+                const syntheticEvent = {
+                  currentTarget: { scrollLeft: gridState.viewport.scrollX, scrollTop: newMainScrollY },
+                } as unknown as React.UIEvent<HTMLDivElement>;
+                handleScrollEvent(syntheticEvent);
+              }
+            }
+            return;
+          }
+        }
+      }
+
+      // Default: scroll main viewport (bottom-right pane or no split)
       const newScrollX = Math.max(
         0,
         Math.min(
@@ -795,6 +968,10 @@ function SpreadsheetContent({
       gridState.zoom,
       scrollbarMetrics,
       dispatch,
+      splitConfig,
+      splitViewport,
+      getSplitBarPositions,
+      containerRef,
     ]
   );
 
@@ -803,6 +980,98 @@ function SpreadsheetContent({
   const viewportHeight =
     (gridState.viewportDimensions.height - SCROLLBAR_SIZE) / gridState.zoom -
     config.colHeaderHeight;
+
+  // -------------------------------------------------------------------------
+  // Split bar drag wrappers
+  // -------------------------------------------------------------------------
+  const wrappedMouseDown = useCallback(
+    (event: React.MouseEvent<HTMLDivElement>) => {
+      const rect = containerRef.current?.getBoundingClientRect();
+      if (!rect) { handleMouseDown(event); return; }
+      const z = gridState.zoom;
+      const mouseX = (event.clientX - rect.left) / z;
+      const mouseY = (event.clientY - rect.top) / z;
+
+      const hitBar = hitTestSplitBar(mouseX, mouseY);
+      if (hitBar) {
+        event.preventDefault();
+        event.stopPropagation();
+        setSplitDrag({
+          axis: hitBar,
+          startPixel: hitBar === "row" ? mouseY : mouseX,
+          startValue: hitBar === "row" ? (splitConfig.splitRow ?? 0) : (splitConfig.splitCol ?? 0),
+        });
+        return;
+      }
+      handleMouseDown(event);
+    },
+    [handleMouseDown, hitTestSplitBar, splitConfig, containerRef, gridState.zoom]
+  );
+
+  const wrappedMouseMove = useCallback(
+    (event: React.MouseEvent<HTMLDivElement>) => {
+      const rect = containerRef.current?.getBoundingClientRect();
+      if (!rect) { handleMouseMove(event); return; }
+      const z = gridState.zoom;
+      const mouseX = (event.clientX - rect.left) / z;
+      const mouseY = (event.clientY - rect.top) / z;
+
+      // During split drag, update the split position
+      if (splitDrag) {
+        event.preventDefault();
+        if (splitDrag.axis === "row") {
+          const newRow = pixelYToSplitRow(mouseY);
+          if (newRow !== splitConfig.splitRow) {
+            dispatch(setSplitConfig(newRow, splitConfig.splitCol));
+          }
+        } else {
+          const newCol = pixelXToSplitCol(mouseX);
+          if (newCol !== splitConfig.splitCol) {
+            dispatch(setSplitConfig(splitConfig.splitRow, newCol));
+          }
+        }
+        return;
+      }
+
+      // Check hover over split bar for cursor
+      const hitBar = hitTestSplitBar(mouseX, mouseY);
+      if (hitBar === "col") {
+        setSplitBarCursor("col-resize");
+      } else if (hitBar === "row") {
+        setSplitBarCursor("row-resize");
+      } else if (splitBarCursor) {
+        setSplitBarCursor(null);
+      }
+
+      handleMouseMove(event);
+    },
+    [handleMouseMove, splitDrag, hitTestSplitBar, splitConfig, splitBarCursor,
+     pixelYToSplitRow, pixelXToSplitCol, containerRef, gridState.zoom, dispatch]
+  );
+
+  const wrappedMouseUp = useCallback(
+    (event: React.MouseEvent<HTMLDivElement>) => {
+      if (splitDrag) {
+        // Persist the new split position to backend and emit events for sync
+        backendSetSplitWindow(splitConfig.splitRow, splitConfig.splitCol).then(() => {
+          emitAppEvent(AppEvents.SPLIT_CHANGED, {
+            splitRow: splitConfig.splitRow,
+            splitCol: splitConfig.splitCol,
+          });
+          emitAppEvent(AppEvents.GRID_REFRESH);
+        });
+        setSplitDrag(null);
+        return;
+      }
+      handleMouseUp(event);
+    },
+    [handleMouseUp, splitDrag, splitConfig]
+  );
+
+  // Determine effective cursor: split bar takes priority
+  const effectiveCursor = splitDrag
+    ? (splitDrag.axis === "row" ? "row-resize" : "col-resize")
+    : splitBarCursor;
 
   return (
     <S.SpreadsheetContainer
@@ -816,10 +1085,11 @@ function SpreadsheetContent({
       <S.GridArea
         ref={containerRef}
         data-grid-area
-        onMouseDown={handleMouseDown}
-        onMouseMove={handleMouseMove}
-        onMouseUp={handleMouseUp}
+        onMouseDown={wrappedMouseDown}
+        onMouseMove={wrappedMouseMove}
+        onMouseUp={wrappedMouseUp}
         onDoubleClick={handleDoubleClickEvent}
+        style={effectiveCursor ? { cursor: effectiveCursor } : undefined}
         onWheel={handleWheel}
         onContextMenu={handleContextMenu}
       >
@@ -840,6 +1110,7 @@ function SpreadsheetContent({
             selectionDragPreview={selectionDragPreview}
             freezeConfig={freezeConfig}
             splitConfig={splitConfig}
+            splitViewport={splitViewport}
             viewMode={viewMode}
             currentSheetName={gridState.sheetContext.activeSheetName}
             zoom={gridState.zoom}
@@ -864,32 +1135,160 @@ function SpreadsheetContent({
           )}
         </S.CanvasLayer>
 
-        {/* Vertical Scrollbar */}
-        {scrollbarMetrics.showVertical && (
-          <Scrollbar
-            orientation="vertical"
-            scrollPosition={gridState.viewport.scrollY}
-            contentSize={scrollbarMetrics.contentHeight}
-            viewportSize={viewportHeight > 0 ? viewportHeight : 1}
-            onScroll={handleVerticalScroll}
-            thickness={SCROLLBAR_SIZE}
-          />
-        )}
+        {/* Scrollbars — split mode renders pairs, normal mode renders singles */}
+        {(() => {
+          const hasSplitRows = splitConfig.splitRow !== null && splitConfig.splitRow > 0;
+          const hasSplitCols = splitConfig.splitCol !== null && splitConfig.splitCol > 0;
+          const hasSplit = hasSplitRows || hasSplitCols;
 
-        {/* Horizontal Scrollbar */}
-        {scrollbarMetrics.showHorizontal && (
-          <Scrollbar
-            orientation="horizontal"
-            scrollPosition={gridState.viewport.scrollX}
-            contentSize={scrollbarMetrics.contentWidth}
-            viewportSize={viewportWidth > 0 ? viewportWidth : 1}
-            onScroll={handleHorizontalScroll}
-            thickness={SCROLLBAR_SIZE}
-          />
-        )}
+          if (hasSplit) {
+            const positions = getSplitBarPositions();
+            const z = gridState.zoom;
+            const splitYDom = positions?.horizontalBarY != null ? positions.horizontalBarY * z : 0;
+            const splitXDom = positions?.verticalBarX != null ? positions.verticalBarX * z : 0;
+            const splitBarDom = SPLIT_BAR_SIZE * z;
 
-        {/* Corner piece */}
-        <ScrollbarCorner size={SCROLLBAR_SIZE} />
+            // Compute per-pane viewport sizes (virtual pixels)
+            const splitFreezeConfig = {
+              freezeRow: splitConfig.splitRow ?? null,
+              freezeCol: splitConfig.splitCol ?? null,
+            };
+            const splitLayout = calculateFreezePaneLayout(splitFreezeConfig, config, dimensions);
+            const topPaneVpH = splitLayout.frozenRowsHeight;
+            const bottomPaneVpH = Math.max(1, viewportHeight - topPaneVpH - SPLIT_BAR_SIZE);
+            const leftPaneVpW = splitLayout.frozenColsWidth;
+            const rightPaneVpW = Math.max(1, viewportWidth - leftPaneVpW - SPLIT_BAR_SIZE);
+
+            return (
+              <>
+                {/* Vertical scrollbars */}
+                {scrollbarMetrics.showVertical && hasSplitRows && (
+                  <>
+                    {/* Top pane vertical scrollbar (splitViewport.scrollY) */}
+                    <Scrollbar
+                      orientation="vertical"
+                      scrollPosition={splitViewport.scrollY}
+                      contentSize={scrollbarMetrics.contentHeight}
+                      viewportSize={topPaneVpH > 0 ? topPaneVpH : 1}
+                      onScroll={handleSplitVerticalScroll}
+                      thickness={SCROLLBAR_SIZE}
+                      style={{
+                        top: 0,
+                        right: 0,
+                        bottom: "auto",
+                        height: splitYDom,
+                        width: SCROLLBAR_SIZE,
+                      }}
+                    />
+                    {/* Bottom pane vertical scrollbar (viewport.scrollY) */}
+                    <Scrollbar
+                      orientation="vertical"
+                      scrollPosition={gridState.viewport.scrollY}
+                      contentSize={scrollbarMetrics.contentHeight}
+                      viewportSize={bottomPaneVpH > 0 ? bottomPaneVpH : 1}
+                      onScroll={handleVerticalScroll}
+                      thickness={SCROLLBAR_SIZE}
+                      style={{
+                        top: splitYDom + splitBarDom,
+                        right: 0,
+                        bottom: SCROLLBAR_SIZE,
+                        height: "auto",
+                        width: SCROLLBAR_SIZE,
+                      }}
+                    />
+                  </>
+                )}
+                {scrollbarMetrics.showVertical && !hasSplitRows && (
+                  <Scrollbar
+                    orientation="vertical"
+                    scrollPosition={gridState.viewport.scrollY}
+                    contentSize={scrollbarMetrics.contentHeight}
+                    viewportSize={viewportHeight > 0 ? viewportHeight : 1}
+                    onScroll={handleVerticalScroll}
+                    thickness={SCROLLBAR_SIZE}
+                  />
+                )}
+
+                {/* Horizontal scrollbars */}
+                {scrollbarMetrics.showHorizontal && hasSplitCols && (
+                  <>
+                    {/* Left pane horizontal scrollbar (splitViewport.scrollX) */}
+                    <Scrollbar
+                      orientation="horizontal"
+                      scrollPosition={splitViewport.scrollX}
+                      contentSize={scrollbarMetrics.contentWidth}
+                      viewportSize={leftPaneVpW > 0 ? leftPaneVpW : 1}
+                      onScroll={handleSplitHorizontalScroll}
+                      thickness={SCROLLBAR_SIZE}
+                      style={{
+                        bottom: 0,
+                        left: 0,
+                        right: "auto",
+                        width: splitXDom,
+                        height: SCROLLBAR_SIZE,
+                      }}
+                    />
+                    {/* Right pane horizontal scrollbar (viewport.scrollX) */}
+                    <Scrollbar
+                      orientation="horizontal"
+                      scrollPosition={gridState.viewport.scrollX}
+                      contentSize={scrollbarMetrics.contentWidth}
+                      viewportSize={rightPaneVpW > 0 ? rightPaneVpW : 1}
+                      onScroll={handleHorizontalScroll}
+                      thickness={SCROLLBAR_SIZE}
+                      style={{
+                        bottom: 0,
+                        left: splitXDom + splitBarDom,
+                        right: SCROLLBAR_SIZE,
+                        width: "auto",
+                        height: SCROLLBAR_SIZE,
+                      }}
+                    />
+                  </>
+                )}
+                {scrollbarMetrics.showHorizontal && !hasSplitCols && (
+                  <Scrollbar
+                    orientation="horizontal"
+                    scrollPosition={gridState.viewport.scrollX}
+                    contentSize={scrollbarMetrics.contentWidth}
+                    viewportSize={viewportWidth > 0 ? viewportWidth : 1}
+                    onScroll={handleHorizontalScroll}
+                    thickness={SCROLLBAR_SIZE}
+                  />
+                )}
+
+                <ScrollbarCorner size={SCROLLBAR_SIZE} />
+              </>
+            );
+          }
+
+          // Non-split mode: standard single scrollbars
+          return (
+            <>
+              {scrollbarMetrics.showVertical && (
+                <Scrollbar
+                  orientation="vertical"
+                  scrollPosition={gridState.viewport.scrollY}
+                  contentSize={scrollbarMetrics.contentHeight}
+                  viewportSize={viewportHeight > 0 ? viewportHeight : 1}
+                  onScroll={handleVerticalScroll}
+                  thickness={SCROLLBAR_SIZE}
+                />
+              )}
+              {scrollbarMetrics.showHorizontal && (
+                <Scrollbar
+                  orientation="horizontal"
+                  scrollPosition={gridState.viewport.scrollX}
+                  contentSize={scrollbarMetrics.contentWidth}
+                  viewportSize={viewportWidth > 0 ? viewportWidth : 1}
+                  onScroll={handleHorizontalScroll}
+                  thickness={SCROLLBAR_SIZE}
+                />
+              )}
+              <ScrollbarCorner size={SCROLLBAR_SIZE} />
+            </>
+          );
+        })()}
       </S.GridArea>
 
       {/* Context Menu is now rendered by Shell via GridContextMenuHost */}

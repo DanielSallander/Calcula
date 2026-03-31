@@ -14,11 +14,20 @@ import { useEditing } from "../../api/editing";
 import * as S from './FormulaBar.styles';
 
 function CancelIcon(): React.ReactElement {
-  return <S.CancelIconSpan>X</S.CancelIconSpan>;
+  return (
+    <svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round">
+      <line x1="3" y1="3" x2="11" y2="11" />
+      <line x1="11" y1="3" x2="3" y2="11" />
+    </svg>
+  );
 }
 
 function EnterIcon(): React.ReactElement {
-  return <S.EnterIconSpan>[OK]</S.EnterIconSpan>;
+  return (
+    <svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+      <polyline points="2,7.5 5.5,11 12,3" />
+    </svg>
+  );
 }
 
 function InsertFunctionIcon(): React.ReactElement {

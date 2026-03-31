@@ -4,7 +4,7 @@
 // on cells while in formula editing mode, supporting both single cell
 // and range references via drag selection.
 
-import type { GridConfig, Viewport, DimensionOverrides } from "../../../types";
+import type { GridConfig, Viewport, DimensionOverrides, FreezeConfig } from "../../../types";
 import type { CellPosition, MousePosition } from "../types";
 import { getCellFromPixel } from "../../../lib/gridRenderer";
 import { getCellFromMousePosition } from "../utils/cellUtils";
@@ -13,6 +13,9 @@ interface FormulaDependencies {
   config: GridConfig;
   viewport: Viewport;
   dimensions?: DimensionOverrides;
+  freezeConfig?: FreezeConfig;
+  splitBarSize?: number;
+  splitViewport?: Viewport;
   containerRef: React.RefObject<HTMLElement | null>;
   onInsertReference?: (row: number, col: number) => void;
   onInsertRangeReference?: (startRow: number, startCol: number, endRow: number, endCol: number) => void;
@@ -48,6 +51,9 @@ export function createFormulaHandlers(deps: FormulaDependencies): FormulaHandler
     config,
     viewport,
     dimensions,
+    freezeConfig,
+    splitBarSize,
+    splitViewport,
     containerRef,
     onInsertReference,
     onInsertRangeReference,
@@ -67,7 +73,7 @@ export function createFormulaHandlers(deps: FormulaDependencies): FormulaHandler
     mouseY: number,
     event: React.MouseEvent<HTMLElement>
   ): boolean => {
-    const cell = getCellFromPixel(mouseX, mouseY, config, viewport, dimensions);
+    const cell = getCellFromPixel(mouseX, mouseY, config, viewport, dimensions, { freezeConfig, splitBarSize, splitViewport });
 
     if (!cell) {
       return false;
@@ -101,7 +107,7 @@ export function createFormulaHandlers(deps: FormulaDependencies): FormulaHandler
       return;
     }
 
-    const cell = getCellFromMousePosition(mouseX, mouseY, rect, config, viewport, dimensions);
+    const cell = getCellFromMousePosition(mouseX, mouseY, rect, config, viewport, dimensions, { freezeConfig, splitBarSize, splitViewport });
     if (cell) {
       onUpdatePendingReference(
         formulaDragStartRef.current.row,
@@ -126,7 +132,7 @@ export function createFormulaHandlers(deps: FormulaDependencies): FormulaHandler
     const mousePos = lastMousePosRef.current;
 
     if (rect && mousePos) {
-      const cell = getCellFromMousePosition(mousePos.x, mousePos.y, rect, config, viewport, dimensions);
+      const cell = getCellFromMousePosition(mousePos.x, mousePos.y, rect, config, viewport, dimensions, { freezeConfig, splitBarSize, splitViewport });
       if (cell) {
         const startCell = formulaDragStartRef.current;
         if (startCell.row === cell.row && startCell.col === cell.col) {

@@ -26,17 +26,29 @@ export interface GetCellOptions {
    * Required for relative threshold calculation.
    */
   dragStartRow?: number;
-  
+
   /**
    * The starting column of the drag operation.
    * Required for relative threshold calculation.
    */
   dragStartCol?: number;
-  
+
   /**
    * Freeze pane configuration for coordinate translation.
    */
   freezeConfig?: FreezeConfig;
+
+  /**
+   * Split bar thickness in pixels (0 when no split is active).
+   * Used to offset zone boundary detection when split window is active.
+   */
+  splitBarSize?: number;
+
+  /**
+   * Independent viewport for split window top/left panes.
+   * Provides scroll offsets for hit testing in split pane zones.
+   */
+  splitViewport?: Viewport;
 }
 
 /**
@@ -56,26 +68,29 @@ export function getZoneFromPixel(
   pixelY: number,
   config: GridConfig,
   freezeConfig: FreezeConfig,
-  dimensions?: DimensionOverrides
+  dimensions?: DimensionOverrides,
+  splitBarSize: number = 0
 ): FreezeZone {
   const rowHeaderWidth = config.rowHeaderWidth || 50;
   const colHeaderHeight = config.colHeaderHeight || 24;
-  
+
   // If no freeze, everything is in bottomRight (main scrollable)
   if ((freezeConfig.freezeRow === null || freezeConfig.freezeRow <= 0) &&
       (freezeConfig.freezeCol === null || freezeConfig.freezeCol <= 0)) {
     return "bottomRight";
   }
-  
+
   const layout = calculateFreezePaneLayout(freezeConfig, config, dimensions);
-  
-  const inFrozenCols = freezeConfig.freezeCol !== null && 
-                       freezeConfig.freezeCol > 0 && 
-                       pixelX < rowHeaderWidth + layout.frozenColsWidth;
-  const inFrozenRows = freezeConfig.freezeRow !== null && 
-                       freezeConfig.freezeRow > 0 && 
-                       pixelY < colHeaderHeight + layout.frozenRowsHeight;
-  
+
+  // When split is active, the split bar sits between frozen and scrollable zones.
+  // Include the split bar area in the frozen zone for hit testing purposes.
+  const inFrozenCols = freezeConfig.freezeCol !== null &&
+                       freezeConfig.freezeCol > 0 &&
+                       pixelX < rowHeaderWidth + layout.frozenColsWidth + splitBarSize;
+  const inFrozenRows = freezeConfig.freezeRow !== null &&
+                       freezeConfig.freezeRow > 0 &&
+                       pixelY < colHeaderHeight + layout.frozenRowsHeight + splitBarSize;
+
   if (inFrozenRows && inFrozenCols) {
     return "topLeft";
   } else if (inFrozenRows) {
@@ -115,12 +130,13 @@ export function getCellFromPixel(
   const dragStartRow = options?.dragStartRow;
   const dragStartCol = options?.dragStartCol;
   const freezeConfig = options?.freezeConfig;
-  
+  const splitBar = options?.splitBarSize ?? 0;
+
   // Check if click is on headers
   if (pixelX < rowHeaderWidth || pixelY < colHeaderHeight) {
     return null;
   }
-  
+
   const dims = ensureDimensions(dimensions);
   const scrollX = viewport.scrollX || 0;
   const scrollY = viewport.scrollY || 0;
@@ -130,38 +146,43 @@ export function getCellFromPixel(
   let contentY: number;
   let startCol = 0;
   let startRow = 0;
-  
+
   if (freezeConfig && (freezeConfig.freezeRow !== null || freezeConfig.freezeCol !== null)) {
     const layout = calculateFreezePaneLayout(freezeConfig, config, dims);
-    const zone = getZoneFromPixel(pixelX, pixelY, config, freezeConfig, dims);
-    
+    const zone = getZoneFromPixel(pixelX, pixelY, config, freezeConfig, dims, splitBar);
+    // In split mode, all zones can show any row/col (startCol/startRow stay 0).
+    // In freeze mode, scrollable zones start at freezeCol/freezeRow.
+    const isSplitMode = splitBar > 0;
+    const splitVp = options?.splitViewport;
+
     switch (zone) {
       case "topLeft":
-        // Frozen corner - no scroll offset
-        contentX = pixelX - rowHeaderWidth;
-        contentY = pixelY - colHeaderHeight;
+        // Frozen corner / top-left split pane
+        // In split mode, uses splitViewport scroll; in freeze mode, no scroll
+        contentX = pixelX - rowHeaderWidth + (isSplitMode && splitVp ? (splitVp.scrollX || 0) : 0);
+        contentY = pixelY - colHeaderHeight + (isSplitMode && splitVp ? (splitVp.scrollY || 0) : 0);
         break;
-        
+
       case "topRight":
-        // Frozen rows - horizontal scroll only
-        contentX = pixelX - rowHeaderWidth - layout.frozenColsWidth + scrollX;
-        contentY = pixelY - colHeaderHeight;
-        startCol = freezeConfig.freezeCol ?? 0;
+        // Top-right: horizontal from main scroll, vertical from split viewport (or 0 for freeze)
+        contentX = pixelX - rowHeaderWidth - layout.frozenColsWidth - splitBar + scrollX;
+        contentY = pixelY - colHeaderHeight + (isSplitMode && splitVp ? (splitVp.scrollY || 0) : 0);
+        startCol = isSplitMode ? 0 : (freezeConfig.freezeCol ?? 0);
         break;
-        
+
       case "bottomLeft":
-        // Frozen columns - vertical scroll only
-        contentX = pixelX - rowHeaderWidth;
-        contentY = pixelY - colHeaderHeight - layout.frozenRowsHeight + scrollY;
-        startRow = freezeConfig.freezeRow ?? 0;
+        // Bottom-left: horizontal from split viewport (or 0 for freeze), vertical from main scroll
+        contentX = pixelX - rowHeaderWidth + (isSplitMode && splitVp ? (splitVp.scrollX || 0) : 0);
+        contentY = pixelY - colHeaderHeight - layout.frozenRowsHeight - splitBar + scrollY;
+        startRow = isSplitMode ? 0 : (freezeConfig.freezeRow ?? 0);
         break;
-        
+
       case "bottomRight":
-        // Main scrollable area - both scrolls
-        contentX = pixelX - rowHeaderWidth - layout.frozenColsWidth + scrollX;
-        contentY = pixelY - colHeaderHeight - layout.frozenRowsHeight + scrollY;
-        startCol = freezeConfig.freezeCol ?? 0;
-        startRow = freezeConfig.freezeRow ?? 0;
+        // Main scrollable area - both from main viewport scroll
+        contentX = pixelX - rowHeaderWidth - layout.frozenColsWidth - splitBar + scrollX;
+        contentY = pixelY - colHeaderHeight - layout.frozenRowsHeight - splitBar + scrollY;
+        startCol = isSplitMode ? 0 : (freezeConfig.freezeCol ?? 0);
+        startRow = isSplitMode ? 0 : (freezeConfig.freezeRow ?? 0);
         break;
     }
   } else {

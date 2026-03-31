@@ -127,4 +127,8 @@ export interface RenderState {
   overlayRegionBounds?: Array<{ startRow: number; startCol: number; endRow: number; endCol: number }>;
   /** Spill ranges for rendering blue borders around dynamic array results */
   spillRanges?: SpillRangeInfo[];
+  /** Split bar thickness in pixels (0 when no split is active) */
+  splitBarSize?: number;
+  /** Independent viewport for split window top/left panes */
+  splitViewport?: Viewport;
 }

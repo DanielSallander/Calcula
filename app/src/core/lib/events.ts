@@ -21,6 +21,9 @@ export const AppEvents = {
   // Freeze pane events
   FREEZE_CHANGED: "app:freeze-changed",
 
+  // Split window events
+  SPLIT_CHANGED: "app:split-changed",
+
   // Navigation events
   NAVIGATE_TO_CELL: "app:navigate-to-cell",
 

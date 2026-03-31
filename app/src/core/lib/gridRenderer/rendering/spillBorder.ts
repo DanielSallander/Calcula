@@ -19,7 +19,8 @@ function getColumnXWithFreeze(
   config: GridConfig,
   dimensions: DimensionOverrides,
   viewport: Viewport,
-  freezeConfig?: FreezeConfig
+  freezeConfig?: FreezeConfig,
+  splitBarSize: number = 0
 ): number {
   const rowHeaderWidth = config.rowHeaderWidth || 50;
   const freezeCol = freezeConfig?.freezeCol ?? 0;
@@ -33,7 +34,7 @@ function getColumnXWithFreeze(
   } else if (freezeCol > 0) {
     const layout = calculateFreezePaneLayout(freezeConfig!, config, dimensions);
     const scrollX = viewport.scrollX || 0;
-    let x = rowHeaderWidth + layout.frozenColsWidth;
+    let x = rowHeaderWidth + layout.frozenColsWidth + splitBarSize;
     for (let c = freezeCol; c < col; c++) {
       x += getColumnWidth(c, config, dimensions);
     }
@@ -57,7 +58,8 @@ function getRowYWithFreeze(
   config: GridConfig,
   dimensions: DimensionOverrides,
   viewport: Viewport,
-  freezeConfig?: FreezeConfig
+  freezeConfig?: FreezeConfig,
+  splitBarSize: number = 0
 ): number {
   const colHeaderHeight = config.colHeaderHeight || 24;
   const freezeRow = freezeConfig?.freezeRow ?? 0;
@@ -71,7 +73,7 @@ function getRowYWithFreeze(
   } else if (freezeRow > 0) {
     const layout = calculateFreezePaneLayout(freezeConfig!, config, dimensions);
     const scrollY = viewport.scrollY || 0;
-    let y = colHeaderHeight + layout.frozenRowsHeight;
+    let y = colHeaderHeight + layout.frozenRowsHeight + splitBarSize;
     for (let r = freezeRow; r < row; r++) {
       y += getRowHeight(r, config, dimensions);
     }
@@ -95,7 +97,7 @@ function getRowYWithFreeze(
 export function drawSpillBorders(state: RenderState): void {
   const {
     ctx, width, height, config, viewport, dimensions, freezeConfig,
-    spillRanges,
+    spillRanges, splitBarSize = 0,
   } = state;
 
   if (!spillRanges || spillRanges.length === 0) {
@@ -106,11 +108,11 @@ export function drawSpillBorders(state: RenderState): void {
   const colHeaderHeight = config.colHeaderHeight || 24;
 
   for (const range of spillRanges) {
-    const x1 = getColumnXWithFreeze(range.originCol, config, dimensions, viewport, freezeConfig);
-    const y1 = getRowYWithFreeze(range.originRow, config, dimensions, viewport, freezeConfig);
-    const x2 = getColumnXWithFreeze(range.endCol, config, dimensions, viewport, freezeConfig) +
+    const x1 = getColumnXWithFreeze(range.originCol, config, dimensions, viewport, freezeConfig, splitBarSize);
+    const y1 = getRowYWithFreeze(range.originRow, config, dimensions, viewport, freezeConfig, splitBarSize);
+    const x2 = getColumnXWithFreeze(range.endCol, config, dimensions, viewport, freezeConfig, splitBarSize) +
                getColumnWidth(range.endCol, config, dimensions);
-    const y2 = getRowYWithFreeze(range.endRow, config, dimensions, viewport, freezeConfig) +
+    const y2 = getRowYWithFreeze(range.endRow, config, dimensions, viewport, freezeConfig, splitBarSize) +
                getRowHeight(range.endRow, config, dimensions);
 
     // Clip to visible area (past headers)

@@ -4,7 +4,7 @@
 // to move them to a new location. This allows users to click on a selection
 // border and drag it to reposition the cells (like in Excel).
 
-import type { GridConfig, Viewport, DimensionOverrides, Selection } from "../../../types";
+import type { GridConfig, Viewport, DimensionOverrides, Selection, FreezeConfig } from "../../../types";
 import type { SelectionDragState, CellPosition, MousePosition } from "../types";
 import { getCellFromPixel, getSelectionBorderAtPixel, getRowFromHeader, getColumnFromHeader } from "../../../lib/gridRenderer";
 import { getCellFromMousePosition } from "../utils/cellUtils";
@@ -13,6 +13,9 @@ interface SelectionDragDependencies {
   config: GridConfig;
   viewport: Viewport;
   dimensions?: DimensionOverrides;
+  freezeConfig?: FreezeConfig;
+  splitBarSize?: number;
+  splitViewport?: Viewport;
   containerRef: React.RefObject<HTMLElement | null>;
   selection: Selection | null;
   onMoveCells?: (source: Selection, targetRow: number, targetCol: number) => Promise<void>;
@@ -53,6 +56,9 @@ export function createSelectionDragHandlers(deps: SelectionDragDependencies): Se
     config,
     viewport,
     dimensions,
+    freezeConfig,
+    splitBarSize,
+    splitViewport,
     containerRef,
     selection,
     onMoveCells,
@@ -125,7 +131,7 @@ export function createSelectionDragHandlers(deps: SelectionDragDependencies): Se
       dragStartCol = col ?? Math.min(selection.startCol, selection.endCol);
     } else {
       // For cell selection, get the cell from the grid
-      const cell = getCellFromPixel(mouseX, mouseY, config, viewport, dimensions);
+      const cell = getCellFromPixel(mouseX, mouseY, config, viewport, dimensions, { freezeConfig, splitBarSize, splitViewport });
       dragStartRow = cell?.row ?? Math.min(selection.startRow, selection.endRow);
       dragStartCol = cell?.col ?? Math.min(selection.startCol, selection.endCol);
     }
@@ -206,7 +212,7 @@ export function createSelectionDragHandlers(deps: SelectionDragDependencies): Se
         newTargetRow = Math.max(0, row - offsetRow);
       } else {
         // If not in row header, try to get from cell area
-        const cell = getCellFromMousePosition(mouseX, mouseY, rect, config, viewport, dimensions);
+        const cell = getCellFromMousePosition(mouseX, mouseY, rect, config, viewport, dimensions, { freezeConfig, splitBarSize, splitViewport });
         newTargetRow = cell ? Math.max(0, cell.row - offsetRow) : selectionDragRef.current.targetRow;
       }
       newTargetCol = 0;
@@ -221,7 +227,7 @@ export function createSelectionDragHandlers(deps: SelectionDragDependencies): Se
         newTargetCol = Math.max(0, col - offsetCol);
       } else {
         // If not in column header, try to get from cell area
-        const cell = getCellFromMousePosition(mouseX, mouseY, rect, config, viewport, dimensions);
+        const cell = getCellFromMousePosition(mouseX, mouseY, rect, config, viewport, dimensions, { freezeConfig, splitBarSize, splitViewport });
         newTargetCol = cell ? Math.max(0, cell.col - offsetCol) : selectionDragRef.current.targetCol;
       }
       newTargetRow = 0;
@@ -231,7 +237,7 @@ export function createSelectionDragHandlers(deps: SelectionDragDependencies): Se
       newTargetCol = Math.min(newTargetCol, totalCols - width);
     } else {
       // For cell selection, track both row and column
-      const cell = getCellFromMousePosition(mouseX, mouseY, rect, config, viewport, dimensions);
+      const cell = getCellFromMousePosition(mouseX, mouseY, rect, config, viewport, dimensions, { freezeConfig, splitBarSize, splitViewport });
       if (cell) {
         newTargetRow = Math.max(0, cell.row - offsetRow);
         newTargetCol = Math.max(0, cell.col - offsetCol);

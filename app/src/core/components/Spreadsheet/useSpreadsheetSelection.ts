@@ -69,7 +69,17 @@ export function useSpreadsheetSelection({
   onCommitBeforeSelect
 }: UseSpreadsheetSelectionProps) {
   const [selectedCellContent, setSelectedCellContent] = useState<string>("");
-  const { viewport, config, selection, dimensions, formulaReferences, sheetContext } = state;
+  const { viewport, config, selection, dimensions, formulaReferences, sheetContext, freezeConfig, splitConfig, splitViewport } = state;
+
+  // Compute effective freeze config: when split is active, use split config as freeze config
+  const hasSplit = splitConfig &&
+    ((splitConfig.splitRow !== null && splitConfig.splitRow > 0) ||
+     (splitConfig.splitCol !== null && splitConfig.splitCol > 0));
+  const effectiveFreezeConfig = hasSplit
+    ? { freezeRow: splitConfig!.splitRow ?? null, freezeCol: splitConfig!.splitCol ?? null }
+    : (freezeConfig || undefined);
+  const effectiveSplitBarSize = hasSplit ? 4 : 0;
+  const effectiveSplitViewport = hasSplit ? splitViewport : undefined;
 
   const { scrollToSelection, registerScrollContainer } = useViewport();
 
@@ -574,6 +584,9 @@ export function useSpreadsheetSelection({
     viewport,
     selection,
     dimensions,
+    freezeConfig: effectiveFreezeConfig,
+    splitBarSize: effectiveSplitBarSize,
+    splitViewport: effectiveSplitViewport,
     isFormulaMode,
     formulaReferences,
     currentSheetName: sheetContext.activeSheetName,

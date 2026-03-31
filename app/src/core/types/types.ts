@@ -718,6 +718,8 @@ export interface GridState {
   freezeConfig: FreezeConfig;
   /** Split window configuration */
   splitConfig: SplitConfig;
+  /** Independent viewport for split window top/left panes */
+  splitViewport: Viewport;
   /** Current view mode */
   viewMode: ViewMode;
   /** Zoom factor (1.0 = 100%, 0.5 = 50%, 2.0 = 200%) */
@@ -766,6 +768,7 @@ export function createInitialGridState(): GridState {
     },
     freezeConfig: { ...DEFAULT_FREEZE_CONFIG },
     splitConfig: { ...DEFAULT_SPLIT_CONFIG },
+    splitViewport: { scrollX: 0, scrollY: 0, startRow: 0, startCol: 0, rowCount: 50, colCount: 20 },
     viewMode: "normal",
     zoom: ZOOM_DEFAULT,
   };
