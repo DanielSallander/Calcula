@@ -296,6 +296,122 @@ pub fn apply_formatting(
     })
 }
 
+/// Apply formatting to a range of cells on multiple non-active sheets.
+/// Used for sheet grouping: when the user has multiple sheets selected,
+/// formatting applied on the active sheet is replicated to grouped sheets.
+#[tauri::command]
+pub fn apply_formatting_to_sheets(
+    state: State<AppState>,
+    sheet_indices: Vec<usize>,
+    params: FormattingParams,
+) -> Result<(), String> {
+    let mut grids = state.grids.lock().unwrap();
+    let active_sheet = *state.active_sheet.lock().unwrap();
+    let mut styles = state.style_registry.lock().unwrap();
+    let mut undo_stack = state.undo_stack.lock().unwrap();
+
+    let cell_count = params.rows.len() * params.cols.len();
+
+    for &sheet_idx in &sheet_indices {
+        // Skip the active sheet (already formatted by normal apply_formatting)
+        if sheet_idx == active_sheet || sheet_idx >= grids.len() {
+            continue;
+        }
+
+        undo_stack.begin_transaction(format!(
+            "Format {} cells on sheet {}",
+            cell_count, sheet_idx
+        ));
+
+        let grid = &mut grids[sheet_idx];
+
+        for row in &params.rows {
+            for col in &params.cols {
+                let row = *row;
+                let col = *col;
+
+                let previous_cell = grid.get_cell(row, col).cloned();
+
+                let (cell, old_style_index) = if let Some(existing) = grid.get_cell(row, col) {
+                    (existing.clone(), existing.style_index)
+                } else {
+                    (
+                        Cell {
+                            value: CellValue::Empty,
+                            formula: None,
+                            style_index: 0,
+                            rich_text: None,
+                            cached_ast: None,
+                        },
+                        0,
+                    )
+                };
+
+                let mut new_style = styles.get(old_style_index).clone();
+
+                // Apply all formatting fields (same logic as apply_formatting)
+                if let Some(bold) = params.bold { new_style.font.bold = bold; }
+                if let Some(italic) = params.italic { new_style.font.italic = italic; }
+                if let Some(underline) = params.underline { new_style.font.underline = underline; }
+                if let Some(strikethrough) = params.strikethrough { new_style.font.strikethrough = strikethrough; }
+                if let Some(font_size) = params.font_size { new_style.font.size = font_size; }
+                if let Some(ref font_family) = params.font_family { new_style.font.family = font_family.clone(); }
+                if let Some(ref text_color) = params.text_color {
+                    if let Some(color) = Color::from_hex(text_color) { new_style.font.color = color; }
+                }
+                if let Some(ref bg_color) = params.background_color {
+                    if let Some(color) = Color::from_hex(bg_color) { new_style.background = color; }
+                }
+                if let Some(ref align) = params.text_align {
+                    new_style.text_align = match align.as_str() {
+                        "left" => TextAlign::Left,
+                        "center" => TextAlign::Center,
+                        "right" => TextAlign::Right,
+                        _ => TextAlign::General,
+                    };
+                }
+                if let Some(ref valign) = params.vertical_align {
+                    new_style.vertical_align = match valign.as_str() {
+                        "top" => VerticalAlign::Top,
+                        "middle" => VerticalAlign::Middle,
+                        "bottom" => VerticalAlign::Bottom,
+                        _ => VerticalAlign::Middle,
+                    };
+                }
+                if let Some(wrap) = params.wrap_text { new_style.wrap_text = wrap; }
+                if let Some(ref rotation) = params.text_rotation {
+                    new_style.text_rotation = parse_text_rotation(rotation);
+                }
+                if let Some(ref format) = params.number_format {
+                    new_style.number_format = parse_number_format(format);
+                }
+                if let Some(checkbox) = params.checkbox { new_style.checkbox = checkbox; }
+                if let Some(button) = params.button { new_style.button = button; }
+                if let Some(indent) = params.indent { new_style.indent = indent; }
+                if let Some(shrink_to_fit) = params.shrink_to_fit { new_style.shrink_to_fit = shrink_to_fit; }
+
+                // Apply border formatting
+                if let Some(ref border) = params.border_top { new_style.borders.top = parse_border_side(border); }
+                if let Some(ref border) = params.border_right { new_style.borders.right = parse_border_side(border); }
+                if let Some(ref border) = params.border_bottom { new_style.borders.bottom = parse_border_side(border); }
+                if let Some(ref border) = params.border_left { new_style.borders.left = parse_border_side(border); }
+
+                let new_style_index = styles.get_or_create(new_style);
+
+                let mut updated_cell = cell;
+                updated_cell.style_index = new_style_index;
+                grid.set_cell(row, col, updated_cell);
+
+                undo_stack.record_cell_change(row, col, previous_cell);
+            }
+        }
+
+        undo_stack.commit_transaction();
+    }
+
+    Ok(())
+}
+
 /// Preview a custom number format string against a sample value.
 /// Used by the Format Cells dialog for live preview.
 #[tauri::command]

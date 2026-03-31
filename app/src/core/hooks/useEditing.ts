@@ -32,7 +32,8 @@ import {
   setRowHeight,
   setColumnWidth,
 } from "../../core/state/gridActions";
-import { updateCell, getCell, setActiveSheet as setActiveSheetApi, getMergeInfo } from "../lib/tauri-api";
+import { updateCell, getCell, setActiveSheet as setActiveSheetApi, getMergeInfo, updateCellOnSheets } from "../lib/tauri-api";
+import { isSheetGroupingActive, getGroupedSheetIndices } from "../state/sheetGrouping";
 import { cellEvents } from "../lib/cellEvents";
 import { emitAppEvent, AppEvents } from "../lib/events";
 import {
@@ -1374,6 +1375,19 @@ export function useEditing(): UseEditingReturn {
       // Refresh slicer overlays if slicer computed properties changed a slicer
       if (updateResult.slicerChanged) {
         window.dispatchEvent(new Event("slicers:refresh"));
+      }
+
+      // Sheet grouping: replicate the cell update to all grouped (non-active) sheets
+      if (isSheetGroupingActive()) {
+        const otherSheets = getGroupedSheetIndices(sheetContext.activeSheetIndex);
+        if (otherSheets.length > 0) {
+          try {
+            await updateCellOnSheets(otherSheets, editing.row, editing.col, valueToCommit);
+            console.log("[commitEdit] Replicated to grouped sheets:", otherSheets);
+          } catch (err) {
+            console.error("[commitEdit] Failed to replicate to grouped sheets:", err);
+          }
+        }
       }
 
       // FIX: Clear global flag and arrow reference state when editing stops

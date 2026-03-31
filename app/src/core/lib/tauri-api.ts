@@ -16,6 +16,7 @@ import type {
   UpdateCellResult,
   SpillRangeInfo,
 } from "../types";
+import { isSheetGroupingActive, getSelectedSheetIndices } from "../state/sheetGrouping";
 
 // ============================================================================
 // Cell Operations
@@ -369,11 +370,104 @@ export async function applyFormatting(
     "styles=",
     result.styles.length
   );
+
+  // Sheet grouping: replicate formatting to all grouped (non-active) sheets
+  if (isSheetGroupingActive()) {
+    try {
+      await applyFormattingToSheets(
+        getSelectedSheetIndices(),
+        rows,
+        cols,
+        formatting
+      );
+      console.log("[tauri-api] Replicated formatting to grouped sheets");
+    } catch (err) {
+      console.error("[tauri-api] Failed to replicate formatting to grouped sheets:", err);
+    }
+  }
+
   return result;
 }
 
 export async function getStyleCount(): Promise<number> {
   return invoke<number>("get_style_count");
+}
+
+// ============================================================================
+// Multi-Sheet (Sheet Grouping) Operations
+// ============================================================================
+
+/**
+ * Replicate a cell value update to multiple non-active sheets.
+ * Used when sheet grouping is active.
+ */
+export async function updateCellOnSheets(
+  sheetIndices: number[],
+  row: number,
+  col: number,
+  value: string
+): Promise<void> {
+  return invoke<void>("update_cell_on_sheets", { sheetIndices, row, col, value });
+}
+
+/**
+ * Replicate formatting to multiple non-active sheets.
+ * Used when sheet grouping is active.
+ */
+export async function applyFormattingToSheets(
+  sheetIndices: number[],
+  rows: number[],
+  cols: number[],
+  formatting: FormattingOptions
+): Promise<void> {
+  return invoke<void>("apply_formatting_to_sheets", {
+    sheetIndices,
+    params: {
+      rows,
+      cols,
+      bold: formatting.bold,
+      italic: formatting.italic,
+      underline: formatting.underline,
+      strikethrough: formatting.strikethrough,
+      fontSize: formatting.fontSize,
+      fontFamily: formatting.fontFamily,
+      textColor: formatting.textColor,
+      backgroundColor: formatting.backgroundColor,
+      textAlign: formatting.textAlign,
+      verticalAlign: formatting.verticalAlign,
+      numberFormat: formatting.numberFormat,
+      wrapText: formatting.wrapText,
+      textRotation: formatting.textRotation,
+      borderTop: formatting.borderTop,
+      borderRight: formatting.borderRight,
+      borderBottom: formatting.borderBottom,
+      borderLeft: formatting.borderLeft,
+      checkbox: formatting.checkbox,
+      button: formatting.button,
+      indent: formatting.indent,
+      shrinkToFit: formatting.shrinkToFit,
+    },
+  });
+}
+
+/**
+ * Clear a range of cells on multiple non-active sheets.
+ * Used when sheet grouping is active.
+ */
+export async function clearRangeOnSheets(
+  sheetIndices: number[],
+  startRow: number,
+  startCol: number,
+  endRow: number,
+  endCol: number
+): Promise<void> {
+  return invoke<void>("clear_range_on_sheets", {
+    sheetIndices,
+    startRow,
+    startCol,
+    endRow,
+    endCol,
+  });
 }
 
 // ============================================================================

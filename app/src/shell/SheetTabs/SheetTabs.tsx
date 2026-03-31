@@ -29,6 +29,12 @@ import {
   AppEvents,
   // Types and utilities
   isFormulaExpectingReference,
+  // Sheet grouping
+  setSelectedSheetIndices,
+  clearSheetGrouping,
+  toggleSheetInGroup,
+  isSheetGroupingActive,
+  getSelectedSheetIndices,
 } from "../../api";
 import { isGlobalFormulaMode, getGlobalCursorPosition } from "../../api/editing";
 import type {
@@ -54,6 +60,9 @@ export function SheetTabs({ onSheetChange }: SheetTabsProps): React.ReactElement
   const [activeIndex, setActiveIndex] = useState<number>(0);
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+
+  // Sheet grouping: tracks which sheets are selected (Ctrl+Click)
+  const [groupedSheets, setGroupedSheets] = useState<Set<number>>(new Set());
 
   // Sync local activeIndex with Redux state when it changes from outside
   // This handles the case when commitEdit switches back to the source sheet
@@ -354,6 +363,23 @@ export function SheetTabs({ onSheetChange }: SheetTabsProps): React.ReactElement
       // The closure value may be stale if React hasn't re-rendered since the last keystroke.
       const isCurrentlyFormulaMode = isInFormulaMode || isGlobalFormulaMode();
 
+      // Ctrl+Click: Toggle sheet grouping (multi-select) when NOT in formula mode
+      if (event?.ctrlKey && !isCurrentlyFormulaMode) {
+        const newSelection = toggleSheetInGroup(index, activeIndex);
+        const newSet = new Set(newSelection);
+        setGroupedSheets(newSet);
+        setSelectedSheetIndices(newSelection);
+        console.log("[SheetTabs] Ctrl+Click: groupedSheets =", newSelection);
+        return;
+      }
+
+      // Normal click (no Ctrl): clear sheet grouping
+      if (groupedSheets.size > 1 && !isCurrentlyFormulaMode) {
+        setGroupedSheets(new Set());
+        clearSheetGrouping();
+        console.log("[SheetTabs] Normal click: cleared sheet grouping");
+      }
+
       if (index === activeIndex && !(event?.shiftKey && isCurrentlyFormulaMode)) return;
 
       console.log("[SheetTabs] Sheet click, index:", index, "isCurrentlyFormulaMode:", isCurrentlyFormulaMode, "shift:", event?.shiftKey);
@@ -488,7 +514,7 @@ export function SheetTabs({ onSheetChange }: SheetTabsProps): React.ReactElement
         alert("Failed to switch sheet: " + String(err));
       }
     },
-    [activeIndex, sheets, onSheetChange, isInFormulaMode, dispatch, dragState]
+    [activeIndex, sheets, onSheetChange, isInFormulaMode, dispatch, dragState, groupedSheets]
   );
 
   const handleAddSheet = useCallback(async () => {
@@ -819,6 +845,7 @@ export function SheetTabs({ onSheetChange }: SheetTabsProps): React.ReactElement
                 tabIndex={-1}
                 data-sheet-tab={sheet.index}
                 $isActive={sheet.index === activeIndex}
+                $isGrouped={groupedSheets.has(sheet.index)}
                 $isFormulaSource={isSourceSheet}
                 $isFormulaTarget={isTargetSheet}
                 $tabColor={sheet.tabColor || ""}
@@ -874,6 +901,13 @@ export function SheetTabs({ onSheetChange }: SheetTabsProps): React.ReactElement
           Selecting from: {sheets[activeIndex]?.name} 
           {" --> "}
           {editing?.sourceSheetName || sheets[editing?.sourceSheetIndex ?? 0]?.name}
+        </S.FormulaModeIndicator>
+      )}
+
+      {/* Sheet grouping indicator */}
+      {groupedSheets.size > 1 && !isViewingDifferentSheet && (
+        <S.FormulaModeIndicator>
+          [Group]
         </S.FormulaModeIndicator>
       )}
 

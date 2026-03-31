@@ -48,6 +48,11 @@ export {
   applyFormatting,
   getStyleCount,
 
+  // Multi-Sheet (Sheet Grouping) Operations
+  updateCellOnSheets,
+  applyFormattingToSheets,
+  clearRangeOnSheets,
+
   // Functions
   getFunctionsByCategory,
   getAllFunctions,

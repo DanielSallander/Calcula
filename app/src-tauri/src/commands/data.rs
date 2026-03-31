@@ -3283,3 +3283,148 @@ pub fn remove_duplicates(
         error: None,
     }
 }
+
+/// Replicate a cell value update to multiple non-active sheets.
+/// Used for sheet grouping: when the user has multiple sheets selected,
+/// a value entered on the active sheet is replicated to grouped sheets.
+/// Handles literals directly and formulas by evaluating in each sheet's context.
+#[tauri::command]
+pub fn update_cell_on_sheets(
+    state: State<AppState>,
+    user_files_state: State<UserFilesState>,
+    sheet_indices: Vec<usize>,
+    row: u32,
+    col: u32,
+    value: String,
+) -> Result<(), String> {
+    let user_files = user_files_state.files.lock().unwrap();
+    let sheet_names = state.sheet_names.lock().unwrap();
+    let mut grids = state.grids.lock().unwrap();
+    let active_sheet = *state.active_sheet.lock().unwrap();
+    let mut undo_stack = state.undo_stack.lock().unwrap();
+
+    // Handle empty value - clear the cell on each target sheet
+    if value.trim().is_empty() {
+        for &sheet_idx in &sheet_indices {
+            if sheet_idx == active_sheet || sheet_idx >= grids.len() {
+                continue;
+            }
+            let previous_cell = grids[sheet_idx].get_cell(row, col).cloned();
+            if previous_cell.is_some() {
+                undo_stack.begin_transaction(format!("Clear cell on sheet {}", sheet_idx));
+                undo_stack.record_cell_change(row, col, previous_cell);
+                grids[sheet_idx].clear_cell(row, col);
+                undo_stack.commit_transaction();
+            }
+        }
+        return Ok(());
+    }
+
+    // Parse the input (same logic as update_cell)
+    let cell_template = parse_cell_input(&value);
+    let is_formula = cell_template.formula.is_some();
+
+    // If formula, parse and convert the AST once for reuse across sheets
+    let engine_ast = if let Some(ref formula) = cell_template.formula {
+        match parser::parse(formula) {
+            Ok(parser_ast) => Some(crate::convert_expr(&parser_ast)),
+            Err(_) => None,
+        }
+    } else {
+        None
+    };
+
+    for &sheet_idx in &sheet_indices {
+        if sheet_idx == active_sheet || sheet_idx >= grids.len() {
+            continue;
+        }
+
+        undo_stack.begin_transaction(format!("Update cell on sheet {}", sheet_idx));
+        let previous_cell = grids[sheet_idx].get_cell(row, col).cloned();
+
+        let mut cell = cell_template.clone();
+
+        // Preserve existing style from target sheet
+        if let Some(existing) = grids[sheet_idx].get_cell(row, col) {
+            cell.style_index = existing.style_index;
+        }
+
+        // If formula, evaluate in the context of the target sheet
+        if is_formula {
+            if let Some(ref ast) = engine_ast {
+                let result_value = crate::evaluate_formula_multi_sheet_with_ast_and_files(
+                    &grids,
+                    &sheet_names,
+                    sheet_idx,
+                    ast,
+                    &user_files,
+                );
+                cell.value = result_value;
+                cell.cached_ast = Some(Box::new(ast.clone()));
+            }
+        }
+
+        grids[sheet_idx].set_cell(row, col, cell);
+        undo_stack.record_cell_change(row, col, previous_cell);
+        undo_stack.commit_transaction();
+    }
+
+    Ok(())
+}
+
+/// Clear a range of cells on multiple non-active sheets.
+/// Used for sheet grouping: when the user presses Delete with grouped sheets.
+#[tauri::command]
+pub fn clear_range_on_sheets(
+    state: State<AppState>,
+    sheet_indices: Vec<usize>,
+    start_row: u32,
+    start_col: u32,
+    end_row: u32,
+    end_col: u32,
+) -> Result<(), String> {
+    let mut grids = state.grids.lock().unwrap();
+    let active_sheet = *state.active_sheet.lock().unwrap();
+    let mut undo_stack = state.undo_stack.lock().unwrap();
+
+    for &sheet_idx in &sheet_indices {
+        if sheet_idx == active_sheet || sheet_idx >= grids.len() {
+            continue;
+        }
+
+        let grid = &grids[sheet_idx];
+        let effective_end_row = end_row.min(grid.max_row);
+        let effective_end_col = end_col.min(grid.max_col);
+
+        let cells_to_clear: Vec<(u32, u32)> = grid
+            .cells
+            .keys()
+            .filter(|(r, c)| {
+                *r >= start_row && *r <= effective_end_row && *c >= start_col && *c <= effective_end_col
+            })
+            .cloned()
+            .collect();
+
+        if cells_to_clear.is_empty() {
+            continue;
+        }
+
+        undo_stack.begin_transaction(format!(
+            "Clear range on sheet {}",
+            sheet_idx
+        ));
+
+        let grid = &mut grids[sheet_idx];
+        for (r, c) in cells_to_clear {
+            let previous_cell = grid.get_cell(r, c).cloned();
+            if previous_cell.is_some() {
+                undo_stack.record_cell_change(r, c, previous_cell);
+            }
+            grid.clear_cell(r, c);
+        }
+
+        undo_stack.commit_transaction();
+    }
+
+    Ok(())
+}

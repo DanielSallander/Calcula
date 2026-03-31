@@ -50,6 +50,7 @@ export const TabsArea = styled.div`
 
 interface TabProps {
   $isActive?: boolean;
+  $isGrouped?: boolean;
   $isFormulaSource?: boolean;
   $isFormulaTarget?: boolean;
   $tabColor?: string;
@@ -66,6 +67,8 @@ export const Tab = styled.button<TabProps>`
       : props.$isFormulaTarget
       ? v('--sheet-tab-formula-target-bg')
       : props.$isActive
+      ? v('--sheet-tab-active-bg')
+      : props.$isGrouped
       ? v('--sheet-tab-active-bg')
       : v('--sheet-tab-bg')
   };
@@ -90,6 +93,12 @@ export const Tab = styled.button<TabProps>`
     border-bottom: 1px solid ${v('--sheet-tab-active-bg')};
     margin-bottom: -1px;
     font-weight: 500;
+  `}
+
+  ${props => props.$isGrouped && !props.$isActive && `
+    border-bottom: 1px solid ${v('--sheet-tab-active-bg')};
+    margin-bottom: -1px;
+    font-style: italic;
   `}
 
   ${props => props.$tabColor && `

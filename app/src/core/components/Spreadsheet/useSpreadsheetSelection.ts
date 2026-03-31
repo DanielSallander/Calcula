@@ -20,6 +20,7 @@ import {
   setColumnWidth as setColumnWidthApi,
   setRowHeight as setRowHeightApi,
   clearRange,
+  clearRangeOnSheets,
   undo as undoApi,
   redo as redoApi,
   applyFormatting,
@@ -38,6 +39,7 @@ import { DEFAULT_THEME, measureOptimalColumnWidth, measureOptimalRowHeight } fro
 import { checkCellClickInterceptors } from "../../lib/cellClickInterceptors";
 import { checkCellDoubleClickInterceptors } from "../../lib/cellDoubleClickInterceptors";
 import { checkEditGuards } from "../../lib/editGuards";
+import { isSheetGroupingActive, getSelectedSheetIndices } from "../../state/sheetGrouping";
 import { setColumnWidth, setRowHeight, setManuallyHiddenCols, setManuallyHiddenRows } from "../../state/gridActions";
 import { cellEvents } from "../../lib/cellEvents";
 import { CommandRegistry } from "../../../api/commands";
@@ -461,7 +463,17 @@ export function useSpreadsheetSelection({
     try {
       const clearedCount = await clearRange(minRow, minCol, maxRow, maxCol);
       console.log(`[useSpreadsheetSelection] Clear contents complete - ${clearedCount} cells cleared`);
-      
+
+      // Sheet grouping: replicate clear to all grouped (non-active) sheets
+      if (isSheetGroupingActive()) {
+        try {
+          await clearRangeOnSheets(getSelectedSheetIndices(), minRow, minCol, maxRow, maxCol);
+          console.log("[useSpreadsheetSelection] Replicated clear to grouped sheets");
+        } catch (err) {
+          console.error("[useSpreadsheetSelection] Failed to replicate clear to grouped sheets:", err);
+        }
+      }
+
       // Emit a single event to trigger refresh
       cellEvents.emit({
         row: minRow,

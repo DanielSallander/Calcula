@@ -188,3 +188,10 @@ When developing a new feature, ask these three questions:
 ## Development environment
 In order for Rust environment to work it must first be set using the script:
 core\setup-rust-env.ps1
+
+## Git Commit Messages
+
+When I ask for a commit message, or when starting a conversation, check for uncommitted
+changes using `git diff` and `git status`. Suggest a conventional commit message based
+on the changes. Format: `type(scope): description`. Do not run git commit -- only
+provide the message text so I can paste it into the Source Control input box.

@@ -119,6 +119,10 @@ export {
   // Sorting
   sortRange,
   sortRangeByColumn,
+  // Multi-Sheet (Sheet Grouping) Operations
+  updateCellOnSheets,
+  applyFormattingToSheets,
+  clearRangeOnSheets,
 } from "./lib";
 
 export type {
@@ -300,6 +304,19 @@ export type { AppEventName, FillCompletedPayload } from "./events";
 
 export { emitTauriEvent, listenTauriEvent } from "./backend";
 export type { UnlistenFn } from "./backend";
+
+// ============================================================================
+// Sheet Grouping (Multi-Sheet Selection)
+// ============================================================================
+
+export {
+  getSelectedSheetIndices,
+  setSelectedSheetIndices,
+  isSheetGroupingActive,
+  getGroupedSheetIndices,
+  clearSheetGrouping,
+  toggleSheetInGroup,
+} from "../core/state/sheetGrouping";
 
 // ============================================================================
 // Extension Registry & Extensions
