@@ -10,6 +10,7 @@ import * as S from "./InlineEditor.styles";
 import { toggleReferenceAtCursor } from "../../lib/formulaRefToggle";
 import { getGlobalEditingValue, getArrowRefCursor, isHoveringOverReferenceBorder, isGlobalFormulaMode, setGlobalCursorPosition, getGlobalCursorPosition } from "../../hooks/useEditing";
 import { isFormulaAutocompleteVisible, AutocompleteEvents } from "../../../api/formulaAutocomplete";
+import { isColumnAutocompleteVisible, ColumnAutocompleteEvents } from "../../../api/columnAutocomplete";
 
 /**
  * Global flag to prevent blur from committing during sheet tab navigation.
@@ -259,28 +260,33 @@ export function InlineEditor(props: InlineEditorProps): React.ReactElement | nul
         const cursorPos = inputEl?.selectionStart ?? event.target.value.length;
         setGlobalCursorPosition(cursorPos);
 
-        // Emit autocomplete input event with cursor position and anchor rect
+        // Emit autocomplete input event with cursor position and anchor rect.
+        // Use getBoundingClientRect() for accurate viewport-relative positioning,
+        // matching what FormulaBar and other emitters do.
         console.log("[InlineEditor] handleChange, dispatching autocomplete:input for:", event.target.value);
         if (inputEl) {
+          const rect = inputEl.getBoundingClientRect();
           window.dispatchEvent(
             new CustomEvent(AutocompleteEvents.INPUT, {
               detail: {
                 value: event.target.value,
                 cursorPosition: cursorPos,
                 anchorRect: {
-                  x: position.x,
-                  y: position.y + position.height,
-                  width: position.width,
-                  height: position.height,
+                  x: rect.left,
+                  y: rect.bottom,
+                  width: rect.width,
+                  height: rect.height,
                 },
                 source: "inline",
+                row: editing.row,
+                col: editing.col,
               },
             })
           );
         }
       }
     },
-    [onValueChange, disabled, position.x, position.y, position.width, position.height]
+    [onValueChange, disabled, editing.row, editing.col]
   );
 
   /**
@@ -311,6 +317,21 @@ export function InlineEditor(props: InlineEditorProps): React.ReactElement | nul
           event.stopPropagation();
           window.dispatchEvent(
             new CustomEvent(AutocompleteEvents.KEY, {
+              detail: { key: event.key },
+            })
+          );
+          return;
+        }
+      }
+
+      // Intercept keys for column value autocomplete when its dropdown is visible
+      if (isColumnAutocompleteVisible()) {
+        const columnAutoKeys = ["ArrowUp", "ArrowDown", "Tab", "Escape", "Enter"];
+        if (columnAutoKeys.includes(event.key)) {
+          event.preventDefault();
+          event.stopPropagation();
+          window.dispatchEvent(
+            new CustomEvent(ColumnAutocompleteEvents.KEY, {
               detail: { key: event.key },
             })
           );
@@ -478,9 +499,13 @@ export function InlineEditor(props: InlineEditorProps): React.ReactElement | nul
         return;
       }
 
-      // Don't commit if the autocomplete dropdown is visible (user may be clicking an item)
+      // Don't commit if an autocomplete dropdown is visible (user may be clicking an item)
       if (isFormulaAutocompleteVisible()) {
-        console.log("[InlineEditor] Blur prevented - autocomplete visible");
+        console.log("[InlineEditor] Blur prevented - formula autocomplete visible");
+        return;
+      }
+      if (isColumnAutocompleteVisible()) {
+        console.log("[InlineEditor] Blur prevented - column autocomplete visible");
         return;
       }
 
@@ -588,6 +613,27 @@ export function InlineEditor(props: InlineEditorProps): React.ReactElement | nul
 
     window.addEventListener(AutocompleteEvents.ACCEPTED, handleAccepted);
     return () => window.removeEventListener(AutocompleteEvents.ACCEPTED, handleAccepted);
+  }, [onValueChange]);
+
+  /**
+   * Listen for column autocomplete accepted events.
+   * When the user selects a value from the column autocomplete dropdown,
+   * update the input value and place cursor at the end.
+   */
+  useEffect(() => {
+    const handleColumnAccepted = (e: Event) => {
+      const { newValue } = (e as CustomEvent).detail;
+      onValueChange(newValue);
+      requestAnimationFrame(() => {
+        if (inputRef.current) {
+          const len = newValue.length;
+          inputRef.current.setSelectionRange(len, len);
+        }
+      });
+    };
+
+    window.addEventListener(ColumnAutocompleteEvents.ACCEPTED, handleColumnAccepted);
+    return () => window.removeEventListener(ColumnAutocompleteEvents.ACCEPTED, handleColumnAccepted);
   }, [onValueChange]);
 
   /**

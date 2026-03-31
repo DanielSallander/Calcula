@@ -15,6 +15,7 @@ import FindReplaceExtension from "./BuiltIn/FindReplaceDialog";
 import StandardMenusExtension from "./BuiltIn/StandardMenus";
 import FormatCellsExtension from "./BuiltIn/FormatCellsDialog";
 import FormulaAutocompleteExtension from "./BuiltIn/FormulaAutocomplete";
+import ColumnValueAutocompleteExtension from "./BuiltIn/ColumnValueAutocomplete";
 import FormatPainterExtension from "./BuiltIn/FormatPainter";
 import PasteSpecialExtension from "./BuiltIn/PasteSpecial";
 import StatusBarAggregationExtension from "./BuiltIn/StatusBarAggregation";
@@ -50,6 +51,8 @@ export const builtInExtensions: ExtensionModule[] = [
   PasteSpecialExtension,
   // Formula Autocomplete (Intellisense)
   FormulaAutocompleteExtension,
+  // Column Value Autocomplete (Excel-style same-column suggestions)
+  ColumnValueAutocompleteExtension,
   // Status Bar Aggregation (Average, Count, Sum for selections)
   StatusBarAggregationExtension,
   // Computed Properties (formula-driven attributes for columns, rows, cells)

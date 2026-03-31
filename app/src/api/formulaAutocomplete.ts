@@ -49,6 +49,10 @@ export interface AutocompleteInputPayload {
   cursorPosition: number;
   anchorRect: { x: number; y: number; width: number; height: number };
   source: "inline" | "formulaBar" | "dialog";
+  /** Row of the cell being edited (used by column value autocomplete) */
+  row?: number;
+  /** Column of the cell being edited (used by column value autocomplete) */
+  col?: number;
 }
 
 export interface AutocompleteKeyPayload {

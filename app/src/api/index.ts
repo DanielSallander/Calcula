@@ -76,6 +76,7 @@ export {
   replaceAll,
   replaceSingle,
   getCell,
+  getCellsInCols,
   getViewportCells,
   getMergeInfo,
   detectDataRegion,
