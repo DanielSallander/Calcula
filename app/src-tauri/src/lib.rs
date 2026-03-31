@@ -3238,6 +3238,7 @@ pub fn run() {
             commands::delete_columns,
             commands::shift_formula_for_fill,
             commands::shift_formulas_batch,
+            commands::relocate_cell_references,
             // Undo/Redo commands
             undo_commands::begin_undo_transaction,
             undo_commands::commit_undo_transaction,

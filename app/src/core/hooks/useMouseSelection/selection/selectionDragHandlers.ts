@@ -21,11 +21,15 @@ interface SelectionDragDependencies {
   onMoveCells?: (source: Selection, targetRow: number, targetCol: number) => Promise<void>;
   onMoveRows?: (sourceStartRow: number, sourceEndRow: number, targetRow: number) => Promise<void>;
   onMoveColumns?: (sourceStartCol: number, sourceEndCol: number, targetCol: number) => Promise<void>;
+  onCopyCells?: (source: Selection, targetRow: number, targetCol: number) => Promise<void>;
+  onCopyRows?: (sourceStartRow: number, sourceEndRow: number, targetRow: number) => Promise<void>;
+  onCopyColumns?: (sourceStartCol: number, sourceEndCol: number, targetCol: number) => Promise<void>;
   setIsSelectionDragging: (value: boolean) => void;
   setCursorStyle: (style: string) => void;
   selectionDragRef: React.MutableRefObject<SelectionDragState | null>;
   lastMousePosRef: React.MutableRefObject<MousePosition | null>;
   setSelectionDragPreview: (preview: Selection | null) => void;
+  setSelectionDragMode: (mode: "move" | "copy") => void;
 }
 
 interface SelectionDragHandlers {
@@ -45,6 +49,8 @@ interface SelectionDragHandlers {
   handleSelectionDragCancel: () => void;
   /** Check if mouse is over a selection border (for cursor display) */
   isOverSelectionBorder: (mouseX: number, mouseY: number) => boolean;
+  /** Update copy mode based on Ctrl key state (call during keydown/keyup) */
+  updateCopyMode: (ctrlKey: boolean) => void;
 }
 
 /**
@@ -64,11 +70,15 @@ export function createSelectionDragHandlers(deps: SelectionDragDependencies): Se
     onMoveCells,
     onMoveRows,
     onMoveColumns,
+    onCopyCells,
+    onCopyRows,
+    onCopyColumns,
     setIsSelectionDragging,
     setCursorStyle,
     selectionDragRef,
     lastMousePosRef,
     setSelectionDragPreview,
+    setSelectionDragMode,
   } = deps;
 
   /**
@@ -140,9 +150,11 @@ export function createSelectionDragHandlers(deps: SelectionDragDependencies): Se
     const minRow = Math.min(selection.startRow, selection.endRow);
     const minCol = Math.min(selection.startCol, selection.endCol);
 
+    const isCopy = event.ctrlKey || event.metaKey;
     event.preventDefault();
     setIsSelectionDragging(true);
-    setCursorStyle("move");
+    setCursorStyle(isCopy ? "copy" : "move");
+    setSelectionDragMode(isCopy ? "copy" : "move");
 
     selectionDragRef.current = {
       sourceSelection: { ...selection },
@@ -151,6 +163,7 @@ export function createSelectionDragHandlers(deps: SelectionDragDependencies): Se
       targetCol: minCol,
       offsetRow: dragStartRow - minRow,
       offsetCol: dragStartCol - minCol,
+      copyMode: isCopy,
     };
 
     lastMousePosRef.current = { x: mouseX, y: mouseY };
@@ -271,12 +284,13 @@ export function createSelectionDragHandlers(deps: SelectionDragDependencies): Se
 
     // Capture state and reset refs IMMEDIATELY (synchronously) to prevent
     // the global window mouseup handler from firing a second concurrent call.
-    const { sourceSelection, targetRow, targetCol } = selectionDragRef.current;
+    const { sourceSelection, targetRow, targetCol, copyMode } = selectionDragRef.current;
     selectionDragRef.current = null;
     lastMousePosRef.current = null;
     setIsSelectionDragging(false);
     setCursorStyle("cell");
     setSelectionDragPreview(null);
+    setSelectionDragMode("move");
     stopAutoScroll();
 
     const sourceMinRow = Math.min(sourceSelection.startRow, sourceSelection.endRow);
@@ -289,25 +303,29 @@ export function createSelectionDragHandlers(deps: SelectionDragDependencies): Se
       (sourceSelection.type === "cells" && targetRow === sourceMinRow && targetCol === sourceMinCol);
 
     if (!isSamePosition) {
-      // Execute the move operation
+      // Execute the move or copy operation
       try {
-        if (sourceSelection.type === "rows" && onMoveRows) {
-          await onMoveRows(
-            sourceSelection.startRow,
-            sourceSelection.endRow,
-            targetRow
-          );
-        } else if (sourceSelection.type === "columns" && onMoveColumns) {
-          await onMoveColumns(
-            sourceSelection.startCol,
-            sourceSelection.endCol,
-            targetCol
-          );
-        } else if (sourceSelection.type === "cells" && onMoveCells) {
-          await onMoveCells(sourceSelection, targetRow, targetCol);
+        if (copyMode) {
+          // Ctrl+Drag: copy cells to destination (source stays intact)
+          if (sourceSelection.type === "rows" && onCopyRows) {
+            await onCopyRows(sourceSelection.startRow, sourceSelection.endRow, targetRow);
+          } else if (sourceSelection.type === "columns" && onCopyColumns) {
+            await onCopyColumns(sourceSelection.startCol, sourceSelection.endCol, targetCol);
+          } else if (sourceSelection.type === "cells" && onCopyCells) {
+            await onCopyCells(sourceSelection, targetRow, targetCol);
+          }
+        } else {
+          // Normal drag: move cells (source is cleared)
+          if (sourceSelection.type === "rows" && onMoveRows) {
+            await onMoveRows(sourceSelection.startRow, sourceSelection.endRow, targetRow);
+          } else if (sourceSelection.type === "columns" && onMoveColumns) {
+            await onMoveColumns(sourceSelection.startCol, sourceSelection.endCol, targetCol);
+          } else if (sourceSelection.type === "cells" && onMoveCells) {
+            await onMoveCells(sourceSelection, targetRow, targetCol);
+          }
         }
       } catch (error) {
-        console.error("[SelectionDrag] Move operation failed:", error);
+        console.error(`[SelectionDrag] ${copyMode ? "Copy" : "Move"} operation failed:`, error);
       }
     }
   };
@@ -319,8 +337,20 @@ export function createSelectionDragHandlers(deps: SelectionDragDependencies): Se
     setIsSelectionDragging(false);
     setCursorStyle("cell");
     setSelectionDragPreview(null);
+    setSelectionDragMode("move");
     selectionDragRef.current = null;
     lastMousePosRef.current = null;
+  };
+
+  /**
+   * Update copy mode based on Ctrl key state during an active drag.
+   * Called from keydown/keyup listeners to toggle move/copy in real-time.
+   */
+  const updateCopyMode = (ctrlKey: boolean): void => {
+    if (!selectionDragRef.current) return;
+    selectionDragRef.current.copyMode = ctrlKey;
+    setCursorStyle(ctrlKey ? "copy" : "move");
+    setSelectionDragMode(ctrlKey ? "copy" : "move");
   };
 
   return {
@@ -329,5 +359,6 @@ export function createSelectionDragHandlers(deps: SelectionDragDependencies): Se
     handleSelectionDragMouseUp,
     handleSelectionDragCancel,
     isOverSelectionBorder,
+    updateCopyMode,
   };
 }

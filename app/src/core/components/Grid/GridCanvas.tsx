@@ -36,6 +36,8 @@ export interface GridCanvasProps {
   fillPreviewRange?: Selection | null;
   /** Selection drag preview showing where cells will be moved */
   selectionDragPreview?: Selection | null;
+  /** Whether the current drag is a move or copy (Ctrl held) */
+  selectionDragMode?: "move" | "copy";
   /** Clipboard selection for marching ants */
   clipboardSelection?: Selection | null;
   /** Clipboard mode (none, copy, cut) */
@@ -160,6 +162,7 @@ export const GridCanvas = forwardRef<GridCanvasHandle, GridCanvasProps>(
       styleCache,
       fillPreviewRange,
       selectionDragPreview,
+      selectionDragMode = "move",
       clipboardSelection,
       clipboardMode = "none",
       freezeConfig = DEFAULT_FREEZE_CONFIG,
@@ -485,6 +488,7 @@ export const GridCanvas = forwardRef<GridCanvasHandle, GridCanvasProps>(
         styleCache,
         fillPreviewRange,
         selectionDragPreview,
+        selectionDragMode,
         clipboardSelection,
         clipboardMode,
         animationOffset,
@@ -504,7 +508,7 @@ export const GridCanvas = forwardRef<GridCanvasHandle, GridCanvasProps>(
       if (perfDrawMs > 5) {
         console.log(`[PERF] draw ms=${perfDrawMs.toFixed(1)}`, new Error().stack?.split('\n').slice(1, 4).join(' <- '));
       }
-    }, [context, canvasSize.width, canvasSize.height, config, viewport, selection, editing, cells, theme, formulaReferences, dims, styleCache, fillPreviewRange, selectionDragPreview, clipboardSelection, clipboardMode, freezeConfig, splitConfig, splitViewport, viewMode, currentSheetName, zoom, spillRanges]);
+    }, [context, canvasSize.width, canvasSize.height, config, viewport, selection, editing, cells, theme, formulaReferences, dims, styleCache, fillPreviewRange, selectionDragPreview, selectionDragMode, clipboardSelection, clipboardMode, freezeConfig, splitConfig, splitViewport, viewMode, currentSheetName, zoom, spillRanges]);
 
     /**
      * Start row insertion animation.

@@ -65,6 +65,8 @@ export interface SelectionDragState {
   offsetRow: number;
   /** Offset from mouse position to selection top-left (for smooth dragging) */
   offsetCol: number;
+  /** Whether Ctrl is held (copy mode instead of move) */
+  copyMode: boolean;
 }
 
 /**
@@ -197,6 +199,12 @@ export interface UseMouseSelectionProps {
   onMoveRows?: (sourceStartRow: number, sourceEndRow: number, targetRow: number) => Promise<void>;
   /** Callback to reorder columns (structural move) */
   onMoveColumns?: (sourceStartCol: number, sourceEndCol: number, targetCol: number) => Promise<void>;
+  /** Callback to copy cells to a new position (Ctrl+Drag) */
+  onCopyCells?: (source: Selection, targetRow: number, targetCol: number) => Promise<void>;
+  /** Callback to copy rows to a new position (Ctrl+Drag) */
+  onCopyRows?: (sourceStartRow: number, sourceEndRow: number, targetRow: number) => Promise<void>;
+  /** Callback to copy columns to a new position (Ctrl+Drag) */
+  onCopyColumns?: (sourceStartCol: number, sourceEndCol: number, targetCol: number) => Promise<void>;
   /** Zoom factor (1.0 = 100%) — divides mouse coordinates before hit-testing */
   zoom?: number;
 }
@@ -223,6 +231,8 @@ export interface UseMouseSelectionReturn {
   isOverlayMoving: boolean;
   /** Preview selection showing where cells would land during drag */
   selectionDragPreview: Selection | null;
+  /** Whether the current drag is a move or copy (Ctrl held) */
+  selectionDragMode: "move" | "copy";
   /** Current cursor style to use */
   cursorStyle: string;
   /** Handle mouse down on the grid */

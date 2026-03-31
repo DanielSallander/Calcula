@@ -123,6 +123,8 @@ export interface RenderState {
   formulaSourceSheetName?: string;
   /** Preview selection showing where cells will be moved during drag */
   selectionDragPreview?: Selection | null;
+  /** Whether the current drag is a move or copy */
+  selectionDragMode?: "move" | "copy";
   /** Regions where grid lines should be suppressed (e.g., pivot tables, charts) */
   overlayRegionBounds?: Array<{ startRow: number; startCol: number; endRow: number; endCol: number }>;
   /** Spill ranges for rendering blue borders around dynamic array results */

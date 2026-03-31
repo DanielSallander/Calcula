@@ -975,6 +975,30 @@ export async function shiftFormulasBatch(
   return result.formulas;
 }
 
+/**
+ * Relocate formula references in the current sheet that point into a source range,
+ * making them point to a destination range instead.  Called after a drag-move so
+ * that formulas referencing the moved cells are updated to the new location.
+ */
+export async function relocateCellReferences(
+  srcStartRow: number,
+  srcStartCol: number,
+  srcEndRow: number,
+  srcEndCol: number,
+  destStartRow: number,
+  destStartCol: number,
+): Promise<CellData[]> {
+  const result = await invoke<CellData[]>("relocate_cell_references", {
+    srcStartRow,
+    srcStartCol,
+    srcEndRow,
+    srcEndCol,
+    destStartRow,
+    destStartCol,
+  });
+  return result;
+}
+
 // ============================================================================
 // Named Ranges
 // ============================================================================

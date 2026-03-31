@@ -26,6 +26,7 @@ import {
   getCollectionTexts,
   getComment,
   getDataValidation,
+  relocateCellReferences,
 } from "../lib/tauri-api";
 import type { CellUpdateInput, FormulaShiftInput } from "../lib/tauri-api";
 import { cellEvents } from "../lib/cellEvents";
@@ -77,6 +78,12 @@ export interface UseClipboardReturn {
   moveRows: (sourceStartRow: number, sourceEndRow: number, targetRow: number) => Promise<void>;
   /** Reorder columns (structural move) */
   moveColumns: (sourceStartCol: number, sourceEndCol: number, targetCol: number) => Promise<void>;
+  /** Copy cells from source selection to target position (Ctrl+Drag, source stays intact) */
+  copyCellsDrag: (source: Selection, targetRow: number, targetCol: number) => Promise<void>;
+  /** Copy rows to target position (Ctrl+Drag, source stays intact) */
+  copyRowsDrag: (sourceStartRow: number, sourceEndRow: number, targetRow: number) => Promise<void>;
+  /** Copy columns to target position (Ctrl+Drag, source stays intact) */
+  copyColumnsDrag: (sourceStartCol: number, sourceEndCol: number, targetCol: number) => Promise<void>;
 }
 
 // Module-level clipboard storage (persists across hook instances)
@@ -676,6 +683,30 @@ export function useClipboard(): UseClipboardReturn {
           cellMap.set(`${cell.row},${cell.col}`, cell);
         }
 
+        // 2b. Shift formulas within moved cells to adjust for new position
+        const rowDelta = targetRow - srcMinRow;
+        const colDelta = targetCol - srcMinCol;
+        const formulaCells: { key: string; formula: string }[] = [];
+        for (const cell of sourceCells) {
+          if (cell.formula) {
+            formulaCells.push({ key: `${cell.row},${cell.col}`, formula: cell.formula });
+          }
+        }
+        if (formulaCells.length > 0 && (rowDelta !== 0 || colDelta !== 0)) {
+          const shiftInputs: FormulaShiftInput[] = formulaCells.map(fc => ({
+            formula: fc.formula,
+            rowDelta,
+            colDelta,
+          }));
+          const shiftedFormulas = await shiftFormulasBatch(shiftInputs);
+          for (let i = 0; i < formulaCells.length; i++) {
+            const existing = cellMap.get(formulaCells[i].key);
+            if (existing) {
+              cellMap.set(formulaCells[i].key, { ...existing, formula: shiftedFormulas[i] });
+            }
+          }
+        }
+
         // 3. Write to destination cells
         for (let r = 0; r < height; r++) {
           for (let c = 0; c < width; c++) {
@@ -746,6 +777,29 @@ export function useClipboard(): UseClipboardReturn {
           }
         }
 
+        // 4b. Relocate formula references: update any formula on the sheet that
+        // referenced cells in the source range to point to the destination
+        try {
+          const relocated = await relocateCellReferences(
+            srcMinRow, srcMinCol, srcMaxRow, srcMaxCol,
+            targetRow, targetCol,
+          );
+          for (const cell of relocated) {
+            cellEvents.emit({
+              row: cell.row,
+              col: cell.col,
+              oldValue: undefined,
+              newValue: cell.display,
+              formula: cell.formula ?? null,
+            });
+          }
+          if (relocated.length > 0) {
+            console.log(`[Clipboard] Relocated references in ${relocated.length} formulas`);
+          }
+        } catch (err) {
+          console.error("[Clipboard] Failed to relocate cell references:", err);
+        }
+
         // Commit the undo transaction
         await commitUndoTransaction();
 
@@ -809,11 +863,28 @@ export function useClipboard(): UseClipboardReturn {
         // 2. Clear target rows
         await clearRange(targetRow, 0, targetEndRow, config.totalCols - 1);
 
+        // 2b. Shift formulas within moved cells
+        const rowDelta = targetRow - minRow;
+        const formulaMap = new Map<string, string>();
+        const formulaInputCells = sourceCells.filter(c => c.formula);
+        if (formulaInputCells.length > 0 && rowDelta !== 0) {
+          const shiftInputs: FormulaShiftInput[] = formulaInputCells.map(c => ({
+            formula: c.formula!,
+            rowDelta,
+            colDelta: 0,
+          }));
+          const shifted = await shiftFormulasBatch(shiftInputs);
+          for (let i = 0; i < formulaInputCells.length; i++) {
+            formulaMap.set(`${formulaInputCells[i].row},${formulaInputCells[i].col}`, shifted[i]);
+          }
+        }
+
         // 3. Write source data to target rows
         const updates: CellUpdateInput[] = [];
         for (const cell of sourceCells) {
           const newRow = targetRow + (cell.row - minRow);
-          const value = cell.formula || cell.display || "";
+          const shiftedFormula = formulaMap.get(`${cell.row},${cell.col}`);
+          const value = shiftedFormula || cell.formula || cell.display || "";
           if (value) {
             updates.push({ row: newRow, col: cell.col, value });
           }
@@ -834,7 +905,6 @@ export function useClipboard(): UseClipboardReturn {
         const srcOverlapsTarget =
           minRow <= targetEndRow && maxRow >= targetRow;
         if (srcOverlapsTarget) {
-          // Partial overlap: clear only non-overlapping source rows
           if (minRow < targetRow) {
             await clearRange(minRow, 0, targetRow - 1, config.totalCols - 1);
           }
@@ -843,6 +913,16 @@ export function useClipboard(): UseClipboardReturn {
           }
         } else {
           await clearRange(minRow, 0, maxRow, config.totalCols - 1);
+        }
+
+        // 4b. Relocate external formula references
+        try {
+          await relocateCellReferences(
+            minRow, 0, maxRow, config.totalCols - 1,
+            targetRow, 0,
+          );
+        } catch (err) {
+          console.error("[Clipboard] Failed to relocate cell references:", err);
         }
 
         await commitUndoTransaction();
@@ -912,11 +992,28 @@ export function useClipboard(): UseClipboardReturn {
         // 2. Clear target columns
         await clearRange(0, targetCol, config.totalRows - 1, targetEndCol);
 
+        // 2b. Shift formulas within moved cells
+        const colDelta = targetCol - minCol;
+        const colFormulaMap = new Map<string, string>();
+        const colFormulaCells = sourceCells.filter(c => c.formula);
+        if (colFormulaCells.length > 0 && colDelta !== 0) {
+          const shiftInputs: FormulaShiftInput[] = colFormulaCells.map(c => ({
+            formula: c.formula!,
+            rowDelta: 0,
+            colDelta,
+          }));
+          const shifted = await shiftFormulasBatch(shiftInputs);
+          for (let i = 0; i < colFormulaCells.length; i++) {
+            colFormulaMap.set(`${colFormulaCells[i].row},${colFormulaCells[i].col}`, shifted[i]);
+          }
+        }
+
         // 3. Write source data to target columns
         const updates: CellUpdateInput[] = [];
         for (const cell of sourceCells) {
           const newCol = targetCol + (cell.col - minCol);
-          const value = cell.formula || cell.display || "";
+          const shiftedFormula = colFormulaMap.get(`${cell.row},${cell.col}`);
+          const value = shiftedFormula || cell.formula || cell.display || "";
           if (value) {
             updates.push({ row: cell.row, col: newCol, value });
           }
@@ -947,6 +1044,16 @@ export function useClipboard(): UseClipboardReturn {
           await clearRange(0, minCol, config.totalRows - 1, maxCol);
         }
 
+        // 4b. Relocate external formula references
+        try {
+          await relocateCellReferences(
+            0, minCol, config.totalRows - 1, maxCol,
+            0, targetCol,
+          );
+        } catch (err) {
+          console.error("[Clipboard] Failed to relocate cell references:", err);
+        }
+
         await commitUndoTransaction();
 
         // 5. Emit change event to trigger grid refresh
@@ -975,6 +1082,259 @@ export function useClipboard(): UseClipboardReturn {
     [config.totalRows, dispatch]
   );
 
+  /**
+   * Copy cells from source selection to a new position (Ctrl+Drag).
+   * Source cells remain intact.
+   */
+  const copyCellsDrag = useCallback(
+    async (source: Selection, targetRow: number, targetCol: number): Promise<void> => {
+      console.log("[Clipboard] Copying cells from", source, "to", targetRow, targetCol);
+
+      const srcMinRow = Math.min(source.startRow, source.endRow);
+      const srcMaxRow = Math.max(source.startRow, source.endRow);
+      const srcMinCol = Math.min(source.startCol, source.endCol);
+      const srcMaxCol = Math.max(source.startCol, source.endCol);
+
+      const height = srcMaxRow - srcMinRow + 1;
+      const width = srcMaxCol - srcMinCol + 1;
+
+      const destEndRow = targetRow + height - 1;
+      const destEndCol = targetCol + width - 1;
+      const hasContent = await hasContentInRange(targetRow, targetCol, destEndRow, destEndCol);
+      if (hasContent) {
+        const confirmed = await ask(
+          "There is data in the destination area. Do you want to replace it?",
+          { title: "Calcula", kind: "warning", okLabel: "Yes", cancelLabel: "No" }
+        );
+        if (!confirmed) return;
+      }
+
+      try {
+        await beginUndoTransaction(`Copy ${height * width} cells`);
+
+        const sourceCells = await getViewportCells(srcMinRow, srcMinCol, srcMaxRow, srcMaxCol);
+        const cellMap = new Map<string, CellData>();
+        for (const cell of sourceCells) {
+          cellMap.set(`${cell.row},${cell.col}`, cell);
+        }
+
+        for (let r = 0; r < height; r++) {
+          for (let c = 0; c < width; c++) {
+            const srcRow = srcMinRow + r;
+            const srcCol = srcMinCol + c;
+            const destRow = targetRow + r;
+            const destCol = targetCol + c;
+
+            if (destRow >= config.totalRows || destCol >= config.totalCols) continue;
+
+            const sourceCell = cellMap.get(`${srcRow},${srcCol}`);
+            const value = sourceCell?.formula || sourceCell?.display || "";
+
+            try {
+              const updateResult = await updateCell(destRow, destCol, value);
+              const updatedCells = updateResult.cells;
+              const styleIdx = sourceCell?.styleIndex ?? 0;
+              await setCellStyle(destRow, destCol, styleIdx);
+
+              for (const cell of updatedCells) {
+                if (cell.sheetIndex !== undefined) continue;
+                cellEvents.emit({
+                  row: cell.row,
+                  col: cell.col,
+                  oldValue: undefined,
+                  newValue: cell.display,
+                  formula: cell.formula ?? null,
+                });
+              }
+            } catch (err) {
+              console.error(`[Clipboard] Failed to write cell (${destRow}, ${destCol}):`, err);
+            }
+          }
+        }
+
+        // No source clearing - this is a copy, not a move
+
+        await commitUndoTransaction();
+
+        window.dispatchEvent(new CustomEvent("styles:refresh"));
+        window.dispatchEvent(new CustomEvent("grid:refresh"));
+
+        dispatch(setSelection({
+          startRow: targetRow,
+          startCol: targetCol,
+          endRow: targetRow + height - 1,
+          endCol: targetCol + width - 1,
+          type: source.type,
+        }));
+
+        console.log("[Clipboard] Copy cells (drag) complete");
+      } catch (error) {
+        console.error("[Clipboard] Copy cells (drag) failed:", error);
+      }
+    },
+    [config.totalRows, config.totalCols, dispatch]
+  );
+
+  /**
+   * Copy rows from source position to target position (Ctrl+Drag).
+   * Source rows remain intact.
+   */
+  const copyRowsDrag = useCallback(
+    async (sourceStartRow: number, sourceEndRow: number, targetRow: number): Promise<void> => {
+      console.log("[Clipboard] Copying rows", sourceStartRow, "-", sourceEndRow, "to", targetRow);
+
+      const minRow = Math.min(sourceStartRow, sourceEndRow);
+      const maxRow = Math.max(sourceStartRow, sourceEndRow);
+      const count = maxRow - minRow + 1;
+
+      if (targetRow >= minRow && targetRow <= maxRow) {
+        console.log("[Clipboard] Target is within source range, no-op");
+        return;
+      }
+
+      const targetEndRow = targetRow + count - 1;
+      const hasContent = await hasContentInRange(targetRow, 0, targetEndRow, config.totalCols - 1);
+      if (hasContent) {
+        const confirmed = await ask(
+          "There is data in the destination area. Do you want to replace it?",
+          { title: "Calcula", kind: "warning", okLabel: "Yes", cancelLabel: "No" }
+        );
+        if (!confirmed) return;
+      }
+
+      try {
+        await beginUndoTransaction(`Copy ${count} rows`);
+
+        const sourceCells = await getCellsInRows(minRow, maxRow);
+        await clearRange(targetRow, 0, targetEndRow, config.totalCols - 1);
+
+        const updates: CellUpdateInput[] = [];
+        for (const cell of sourceCells) {
+          const newRow = targetRow + (cell.row - minRow);
+          const value = cell.formula || cell.display || "";
+          if (value) {
+            updates.push({ row: newRow, col: cell.col, value });
+          }
+        }
+        if (updates.length > 0) {
+          await updateCellsBatch(updates);
+        }
+
+        for (const cell of sourceCells) {
+          if (cell.styleIndex > 0) {
+            const newRow = targetRow + (cell.row - minRow);
+            await setCellStyle(newRow, cell.col, cell.styleIndex);
+          }
+        }
+
+        // No source clearing - this is a copy
+
+        await commitUndoTransaction();
+
+        cellEvents.emit({
+          row: -1,
+          col: -1,
+          oldValue: undefined,
+          newValue: "structure_change",
+          formula: null,
+        });
+
+        dispatch(setSelection({
+          startRow: targetRow,
+          startCol: 0,
+          endRow: targetEndRow,
+          endCol: config.totalCols - 1,
+          type: "rows",
+        }));
+
+        console.log("[Clipboard] Copy rows (drag) complete");
+      } catch (error) {
+        console.error("[Clipboard] Copy rows (drag) failed:", error);
+      }
+    },
+    [config.totalCols, dispatch]
+  );
+
+  /**
+   * Copy columns from source position to target position (Ctrl+Drag).
+   * Source columns remain intact.
+   */
+  const copyColumnsDrag = useCallback(
+    async (sourceStartCol: number, sourceEndCol: number, targetCol: number): Promise<void> => {
+      console.log("[Clipboard] Copying columns", sourceStartCol, "-", sourceEndCol, "to", targetCol);
+
+      const minCol = Math.min(sourceStartCol, sourceEndCol);
+      const maxCol = Math.max(sourceStartCol, sourceEndCol);
+      const count = maxCol - minCol + 1;
+
+      if (targetCol >= minCol && targetCol <= maxCol) {
+        console.log("[Clipboard] Target is within source range, no-op");
+        return;
+      }
+
+      const targetEndCol = targetCol + count - 1;
+      const hasContent = await hasContentInRange(0, targetCol, config.totalRows - 1, targetEndCol);
+      if (hasContent) {
+        const confirmed = await ask(
+          "There is data in the destination area. Do you want to replace it?",
+          { title: "Calcula", kind: "warning", okLabel: "Yes", cancelLabel: "No" }
+        );
+        if (!confirmed) return;
+      }
+
+      try {
+        await beginUndoTransaction(`Copy ${count} columns`);
+
+        const sourceCells = await getCellsInCols(minCol, maxCol);
+        await clearRange(0, targetCol, config.totalRows - 1, targetEndCol);
+
+        const updates: CellUpdateInput[] = [];
+        for (const cell of sourceCells) {
+          const newCol = targetCol + (cell.col - minCol);
+          const value = cell.formula || cell.display || "";
+          if (value) {
+            updates.push({ row: cell.row, col: newCol, value });
+          }
+        }
+        if (updates.length > 0) {
+          await updateCellsBatch(updates);
+        }
+
+        for (const cell of sourceCells) {
+          if (cell.styleIndex > 0) {
+            const newCol = targetCol + (cell.col - minCol);
+            await setCellStyle(cell.row, newCol, cell.styleIndex);
+          }
+        }
+
+        // No source clearing - this is a copy
+
+        await commitUndoTransaction();
+
+        cellEvents.emit({
+          row: -1,
+          col: -1,
+          oldValue: undefined,
+          newValue: "structure_change",
+          formula: null,
+        });
+
+        dispatch(setSelection({
+          startRow: 0,
+          startCol: targetCol,
+          endRow: config.totalRows - 1,
+          endCol: targetEndCol,
+          type: "columns",
+        }));
+
+        console.log("[Clipboard] Copy columns (drag) complete");
+      } catch (error) {
+        console.error("[Clipboard] Copy columns (drag) failed:", error);
+      }
+    },
+    [config.totalRows, dispatch]
+  );
+
   // Only show marching ants on the sheet where the copy/cut originated
   const isOnSourceSheet =
     clipboard?.sourceSheetIndex != null &&
@@ -991,5 +1351,8 @@ export function useClipboard(): UseClipboardReturn {
     moveCells,
     moveRows,
     moveColumns,
+    copyCellsDrag,
+    copyRowsDrag,
+    copyColumnsDrag,
   };
 }

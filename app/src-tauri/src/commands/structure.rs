@@ -1651,7 +1651,7 @@ pub fn delete_columns(
     let grid = state.grid.lock().map_err(|e| e.to_string())?;
     let styles = state.style_registry.lock().map_err(|e| e.to_string())?;
     let merged_regions = state.merged_regions.lock().map_err(|e| e.to_string())?;
-    
+
     // Return updated cells with merge info
     let mut result: Vec<CellData> = Vec::new();
     for r in 0..=grid.max_row {
@@ -1661,6 +1661,254 @@ pub fn delete_columns(
             }
         }
     }
-    
+
+    Ok(result)
+}
+
+// ============================================================================
+// CELL REFERENCE RELOCATION (for drag-move operations)
+// ============================================================================
+
+/// Helper: convert a 0-based column index to letters (e.g., 0 -> "A", 25 -> "Z", 26 -> "AA").
+fn index_to_col_letters(mut idx: u32) -> String {
+    let mut result = String::new();
+    loop {
+        result.insert(0, (b'A' + (idx % 26) as u8) as char);
+        if idx < 26 {
+            break;
+        }
+        idx = idx / 26 - 1;
+    }
+    result
+}
+
+/// Rewrite formula references that point into the source range so they point
+/// to the destination range instead.  References outside the source range are
+/// left untouched.  Absolute markers ($) are preserved.
+///
+/// `src_min_row` / `src_min_col` are 0-indexed grid coordinates.
+/// Formula row numbers are 1-indexed (A1 style), so we add 1 when comparing.
+fn relocate_references_in_formula(
+    formula: &str,
+    src_min_row: u32,
+    src_min_col: u32,
+    src_max_row: u32,
+    src_max_col: u32,
+    delta_row: i32,
+    delta_col: i32,
+) -> String {
+    // First pass: cell range references (A1:B5) — must run before single cell refs
+    let result = CELL_RANGE_RE.replace_all(formula, |caps: &regex::Captures| {
+        let s_col_abs = &caps[1];
+        let s_col = &caps[2];
+        let s_row_abs = &caps[3];
+        let s_row: u32 = caps[4].parse().unwrap_or(0);
+
+        let e_col_abs = &caps[5];
+        let e_col = &caps[6];
+        let e_row_abs = &caps[7];
+        let e_row: u32 = caps[8].parse().unwrap_or(0);
+
+        let s_col_idx = col_letters_to_index(s_col);
+        let e_col_idx = col_letters_to_index(e_col);
+
+        // Check if both corners of the range are inside the source range
+        // Row numbers in formulas are 1-indexed, grid is 0-indexed
+        let s_in_range = s_row >= src_min_row + 1 && s_row <= src_max_row + 1
+            && s_col_idx >= src_min_col && s_col_idx <= src_max_col;
+        let e_in_range = e_row >= src_min_row + 1 && e_row <= src_max_row + 1
+            && e_col_idx >= src_min_col && e_col_idx <= src_max_col;
+
+        let new_s_row = if s_in_range { ((s_row as i32) + delta_row).max(1) as u32 } else { s_row };
+        let new_s_col = if s_in_range { index_to_col_letters(((s_col_idx as i32) + delta_col).max(0) as u32) } else { s_col.to_string() };
+        let new_e_row = if e_in_range { ((e_row as i32) + delta_row).max(1) as u32 } else { e_row };
+        let new_e_col = if e_in_range { index_to_col_letters(((e_col_idx as i32) + delta_col).max(0) as u32) } else { e_col.to_string() };
+
+        if !s_in_range && !e_in_range {
+            caps[0].to_string()
+        } else {
+            format!("{}{}{}{}:{}{}{}{}",
+                s_col_abs, new_s_col, s_row_abs, new_s_row,
+                e_col_abs, new_e_col, e_row_abs, new_e_row)
+        }
+    }).to_string();
+
+    // Second pass: single cell references (A1, $B$5, etc.)
+    CELL_REF_RE.replace_all(&result, |caps: &regex::Captures| {
+        let col_abs = &caps[1];
+        let col_letters = &caps[2];
+        let row_abs = &caps[3];
+        let row_num: u32 = caps[4].parse().unwrap_or(0);
+
+        let col_idx = col_letters_to_index(col_letters);
+
+        // Check if this reference is inside the source range (row is 1-indexed)
+        let in_range = row_num >= src_min_row + 1 && row_num <= src_max_row + 1
+            && col_idx >= src_min_col && col_idx <= src_max_col;
+
+        if in_range {
+            let new_row = ((row_num as i32) + delta_row).max(1) as u32;
+            let new_col = index_to_col_letters(((col_idx as i32) + delta_col).max(0) as u32);
+            format!("{}{}{}{}", col_abs, new_col, row_abs, new_row)
+        } else {
+            caps[0].to_string()
+        }
+    }).to_string()
+}
+
+/// Relocate all formula references in the current sheet that point into the
+/// source range, making them point to the destination instead.
+///
+/// This is called after a drag-move operation: the cell data has already been
+/// moved from `(src_start_row, src_start_col)` to `(dest_start_row, dest_start_col)`,
+/// but formulas on the sheet still reference the old coordinates.
+///
+/// Returns the list of cells whose formulas were rewritten (with updated values).
+#[tauri::command]
+pub fn relocate_cell_references(
+    state: State<AppState>,
+    user_files_state: State<crate::UserFilesState>,
+    src_start_row: u32,
+    src_start_col: u32,
+    src_end_row: u32,
+    src_end_col: u32,
+    dest_start_row: u32,
+    dest_start_col: u32,
+) -> Result<Vec<CellData>, String> {
+    let src_min_row = src_start_row.min(src_end_row);
+    let src_max_row = src_start_row.max(src_end_row);
+    let src_min_col = src_start_col.min(src_end_col);
+    let src_max_col = src_start_col.max(src_end_col);
+
+    let delta_row = dest_start_row as i32 - src_min_row as i32;
+    let delta_col = dest_start_col as i32 - src_min_col as i32;
+
+    if delta_row == 0 && delta_col == 0 {
+        return Ok(Vec::new());
+    }
+
+    let sheet_names = state.sheet_names.lock().unwrap();
+    let mut grid = state.grid.lock().unwrap();
+    let mut grids = state.grids.lock().unwrap();
+    let active_sheet = *state.active_sheet.lock().unwrap();
+    let styles = state.style_registry.lock().unwrap();
+    let merged_regions = state.merged_regions.lock().unwrap();
+    let user_files = user_files_state.files.lock().unwrap();
+    let mut dependents_map = state.dependents.lock().unwrap();
+    let mut dependencies_map = state.dependencies.lock().unwrap();
+    let mut column_dependents_map = state.column_dependents.lock().unwrap();
+    let mut column_dependencies_map = state.column_dependencies.lock().unwrap();
+    let mut row_dependents_map = state.row_dependents.lock().unwrap();
+    let mut row_dependencies_map = state.row_dependencies.lock().unwrap();
+    let mut cross_sheet_dependents_map = state.cross_sheet_dependents.lock().unwrap();
+    let mut cross_sheet_dependencies_map = state.cross_sheet_dependencies.lock().unwrap();
+    let mut undo_stack = state.undo_stack.lock().unwrap();
+
+    // Collect cells whose formulas reference the source range
+    let dest_max_row = dest_start_row + (src_max_row - src_min_row);
+    let dest_max_col = dest_start_col + (src_max_col - src_min_col);
+    let mut rewrites: Vec<(u32, u32, String)> = Vec::new();
+
+    for r in 0..=grid.max_row {
+        for c in 0..=grid.max_col {
+            // Skip cells that are IN the destination range (they were just written)
+            if r >= dest_start_row && r <= dest_max_row
+                && c >= dest_start_col && c <= dest_max_col
+            {
+                continue;
+            }
+
+            if let Some(cell) = grid.get_cell(r, c) {
+                if let Some(ref formula) = cell.formula {
+                    let new_formula = relocate_references_in_formula(
+                        formula,
+                        src_min_row,
+                        src_min_col,
+                        src_max_row,
+                        src_max_col,
+                        delta_row,
+                        delta_col,
+                    );
+                    if new_formula != *formula {
+                        rewrites.push((r, c, new_formula));
+                    }
+                }
+            }
+        }
+    }
+
+    // Apply rewrites
+    let mut result: Vec<CellData> = Vec::new();
+
+    for (r, c, new_formula) in &rewrites {
+        // Record undo
+        let prev = grid.get_cell(*r, *c).cloned();
+        undo_stack.record_cell_change(*r, *c, prev.clone());
+
+        // Preserve existing style
+        let existing_style_index = prev.as_ref().map_or(0, |c| c.style_index);
+
+        // Evaluate the new formula
+        let cell_value = crate::evaluate_formula_multi_sheet_with_files(
+            &grids,
+            &sheet_names,
+            active_sheet,
+            new_formula,
+            &user_files,
+        );
+
+        // Build new cell
+        let mut new_cell = Cell {
+            formula: Some(new_formula.clone()),
+            value: cell_value,
+            style_index: existing_style_index,
+            rich_text: prev.as_ref().and_then(|c| c.rich_text.clone()),
+            cached_ast: None,
+        };
+
+        // Parse the formula to extract references for dependency tracking
+        if let Ok(parsed) = parser::parse(new_formula) {
+            let refs = crate::extract_all_references(&parsed, &grid);
+
+            crate::update_dependencies((*r, *c), refs.cells, &mut dependencies_map, &mut dependents_map);
+            crate::update_column_dependencies((*r, *c), refs.columns, &mut column_dependencies_map, &mut column_dependents_map);
+            crate::update_row_dependencies((*r, *c), refs.rows, &mut row_dependencies_map, &mut row_dependents_map);
+
+            // Normalize cross-sheet refs
+            let normalized_cross: HashSet<(String, u32, u32)> = refs
+                .cross_sheet_cells
+                .iter()
+                .filter_map(|(parsed_name, cr, cc)| {
+                    let normalized = sheet_names
+                        .iter()
+                        .find(|name| name.eq_ignore_ascii_case(parsed_name))
+                        .cloned()
+                        .unwrap_or_else(|| parsed_name.clone());
+                    Some((normalized, *cr, *cc))
+                })
+                .collect();
+            crate::update_cross_sheet_dependencies(
+                (active_sheet, *r, *c),
+                normalized_cross,
+                &mut cross_sheet_dependencies_map,
+                &mut cross_sheet_dependents_map,
+            );
+
+            // Cache the AST
+            let engine_ast = crate::convert_expr(&parsed);
+            new_cell.set_cached_ast(engine_ast);
+        }
+
+        grid.set_cell(*r, *c, new_cell.clone());
+        if active_sheet < grids.len() {
+            grids[active_sheet].set_cell(*r, *c, new_cell);
+        }
+
+        // Build CellData for result
+        if let Some(cd) = get_cell_internal_with_merge(&grid, &styles, &merged_regions, *r, *c) {
+            result.push(cd);
+        }
+    }
+
     Ok(result)
 }

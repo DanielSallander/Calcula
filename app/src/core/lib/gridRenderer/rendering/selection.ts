@@ -755,12 +755,13 @@ export function drawFillPreview(state: RenderState): void {
  * Supports freeze panes with proper positioning.
  */
 export function drawSelectionDragPreview(state: RenderState): void {
-  const { ctx, width, height, config, viewport, dimensions, freezeConfig, selectionDragPreview, splitBarSize = 0 } = state;
+  const { ctx, width, height, config, viewport, dimensions, freezeConfig, selectionDragPreview, selectionDragMode = "move", splitBarSize = 0 } = state;
 
   if (!selectionDragPreview) {
     return;
   }
 
+  const isCopy = selectionDragMode === "copy";
   const rowHeaderWidth = config.rowHeaderWidth || 50;
   const colHeaderHeight = config.colHeaderHeight || 24;
 
@@ -786,14 +787,36 @@ export function drawSelectionDragPreview(state: RenderState): void {
     return;
   }
 
-  // Draw semi-transparent blue fill
-  ctx.fillStyle = "rgba(33, 115, 215, 0.15)";
+  // Copy mode: green tint. Move mode: blue tint.
+  ctx.fillStyle = isCopy ? "rgba(22, 163, 74, 0.12)" : "rgba(33, 115, 215, 0.15)";
   ctx.fillRect(visX1, visY1, visX2 - visX1, visY2 - visY1);
 
-  // Draw dashed blue border
-  ctx.strokeStyle = "#2563eb";
+  ctx.strokeStyle = isCopy ? "#16a34a" : "#2563eb";
   ctx.lineWidth = 2;
   ctx.setLineDash([4, 4]);
   ctx.strokeRect(visX1 + 1, visY1 + 1, visX2 - visX1 - 2, visY2 - visY1 - 2);
   ctx.setLineDash([]);
+
+  // Draw "+" badge in copy mode (top-right corner of preview)
+  if (isCopy) {
+    const badgeSize = 16;
+    const badgeX = Math.min(visX2 - 2, width - badgeSize - 2);
+    const badgeY = Math.max(visY1 + 2, colHeaderHeight + 2);
+
+    // Badge background
+    ctx.fillStyle = "#16a34a";
+    ctx.beginPath();
+    ctx.arc(badgeX + badgeSize / 2, badgeY + badgeSize / 2, badgeSize / 2, 0, Math.PI * 2);
+    ctx.fill();
+
+    // "+" symbol
+    ctx.strokeStyle = "#ffffff";
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.moveTo(badgeX + 4, badgeY + badgeSize / 2);
+    ctx.lineTo(badgeX + badgeSize - 4, badgeY + badgeSize / 2);
+    ctx.moveTo(badgeX + badgeSize / 2, badgeY + 4);
+    ctx.lineTo(badgeX + badgeSize / 2, badgeY + badgeSize - 4);
+    ctx.stroke();
+  }
 }

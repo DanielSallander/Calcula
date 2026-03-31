@@ -99,6 +99,9 @@ export function useMouseSelection(props: UseMouseSelectionProps): UseMouseSelect
     onMoveCells,
     onMoveRows,
     onMoveColumns,
+    onCopyCells,
+    onCopyRows,
+    onCopyColumns,
     zoom = 1,
     freezeConfig: propFreezeConfig,
     splitBarSize: propSplitBarSize = 0,
@@ -117,6 +120,7 @@ export function useMouseSelection(props: UseMouseSelectionProps): UseMouseSelect
   const [isOverlayResizing, setIsOverlayResizing] = useState(false);
   const [isOverlayMoving, setIsOverlayMoving] = useState(false);
   const [selectionDragPreview, setSelectionDragPreview] = useState<Selection | null>(null);
+  const [selectionDragMode, setSelectionDragMode] = useState<"move" | "copy">("move");
 
   // Default to "default" to ensure we have a valid starting state
   const [cursorStyle, setCursorStyle] = useState("default");
@@ -340,11 +344,15 @@ export function useMouseSelection(props: UseMouseSelectionProps): UseMouseSelect
     onMoveCells,
     onMoveRows,
     onMoveColumns,
+    onCopyCells,
+    onCopyRows,
+    onCopyColumns,
     setIsSelectionDragging,
     setCursorStyle,
     selectionDragRef,
     lastMousePosRef,
     setSelectionDragPreview,
+    setSelectionDragMode,
   });
 
   // Create fill handle cursor checker
@@ -1047,6 +1055,35 @@ export function useMouseSelection(props: UseMouseSelectionProps): UseMouseSelect
   ]);
 
   /**
+   * Track Ctrl key during selection drag to toggle move/copy mode in real-time.
+   */
+  useEffect(() => {
+    if (!isSelectionDragging) return;
+
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === "Control" || e.key === "Meta") {
+        selectionDragHandlers.updateCopyMode(true);
+      }
+      if (e.key === "Escape") {
+        selectionDragHandlers.handleSelectionDragCancel();
+        stopAutoScroll();
+      }
+    };
+    const handleKeyUp = (e: KeyboardEvent) => {
+      if (e.key === "Control" || e.key === "Meta") {
+        selectionDragHandlers.updateCopyMode(false);
+      }
+    };
+
+    window.addEventListener("keydown", handleKeyDown);
+    window.addEventListener("keyup", handleKeyUp);
+    return () => {
+      window.removeEventListener("keydown", handleKeyDown);
+      window.removeEventListener("keyup", handleKeyUp);
+    };
+  }, [isSelectionDragging, selectionDragHandlers, stopAutoScroll]);
+
+  /**
    * Cleanup on unmount.
    */
   useEffect(() => {
@@ -1076,6 +1113,7 @@ export function useMouseSelection(props: UseMouseSelectionProps): UseMouseSelect
     isOverlayResizing,
     isOverlayMoving,
     selectionDragPreview,
+    selectionDragMode,
     cursorStyle,
     handleMouseDown,
     handleMouseMove,

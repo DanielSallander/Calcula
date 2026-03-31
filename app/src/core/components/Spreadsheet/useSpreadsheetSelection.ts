@@ -131,6 +131,9 @@ export function useSpreadsheetSelection({
     moveCells,
     moveRows,
     moveColumns,
+    copyCellsDrag,
+    copyRowsDrag,
+    copyColumnsDrag,
   } = useClipboard();
 
   // Fill handle hook with auto-scroll support
@@ -583,6 +586,7 @@ export function useSpreadsheetSelection({
     isSelectionDragging,
     isOverlayResizing,
     selectionDragPreview,
+    selectionDragMode,
     cursorStyle,
     handleMouseDown: baseHandleMouseDown,
     handleMouseMove: baseHandleMouseMove,
@@ -641,6 +645,9 @@ export function useSpreadsheetSelection({
     onMoveCells: moveCells,
     onMoveRows: moveRows,
     onMoveColumns: moveColumns,
+    onCopyCells: copyCellsDrag,
+    onCopyRows: copyRowsDrag,
+    onCopyColumns: copyColumnsDrag,
     zoom: state.zoom,
   });
 
@@ -1113,6 +1120,7 @@ export function useSpreadsheetSelection({
     },
     fillState,
     selectionDragPreview,
+    selectionDragMode,
     clipboardHandlers: {
       cut,
       copy,

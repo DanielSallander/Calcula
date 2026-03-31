@@ -109,6 +109,7 @@ function SpreadsheetContent({
     clipboardMode,
     fillState,
     selectionDragPreview,
+    selectionDragMode,
   } = state;
 
   // 5. Extract freezeConfig, splitConfig, viewMode from gridState
@@ -1108,6 +1109,7 @@ function SpreadsheetContent({
             clipboardMode={clipboardMode}
             fillPreviewRange={fillState.previewRange}
             selectionDragPreview={selectionDragPreview}
+            selectionDragMode={selectionDragMode}
             freezeConfig={freezeConfig}
             splitConfig={splitConfig}
             splitViewport={splitViewport}
