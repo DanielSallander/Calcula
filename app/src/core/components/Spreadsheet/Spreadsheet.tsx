@@ -16,6 +16,9 @@ import { useScrollbarMetrics } from "../Scrollbar/useScrollbarMetrics";
 import { useSpreadsheet } from "./useSpreadsheet";
 import {
   clearRange,
+  clearRangeWithOptions,
+  clearCommentsInRange,
+  clearHyperlinksInRange,
   insertRows,
   insertColumns,
   deleteRows,
@@ -436,6 +439,84 @@ function SpreadsheetContent({
   }, [selection]);
 
   // -------------------------------------------------------------------------
+  // Clear Formatting Handler
+  // -------------------------------------------------------------------------
+  const handleClearFormatting = useCallback(async () => {
+    if (!selection) return;
+
+    const minRow = Math.min(selection.startRow, selection.endRow);
+    const maxRow = Math.max(selection.startRow, selection.endRow);
+    const minCol = Math.min(selection.startCol, selection.endCol);
+    const maxCol = Math.max(selection.startCol, selection.endCol);
+
+    try {
+      await clearRangeWithOptions(minRow, minCol, maxRow, maxCol, "formats");
+      cellEvents.emit({ row: minRow, col: minCol, oldValue: undefined, newValue: "", formula: null });
+    } catch (error) {
+      console.error("[Spreadsheet] Failed to clear formatting:", error);
+    }
+  }, [selection]);
+
+  // -------------------------------------------------------------------------
+  // Clear Comments Handler
+  // -------------------------------------------------------------------------
+  const handleClearComments = useCallback(async () => {
+    if (!selection) return;
+
+    const minRow = Math.min(selection.startRow, selection.endRow);
+    const maxRow = Math.max(selection.startRow, selection.endRow);
+    const minCol = Math.min(selection.startCol, selection.endCol);
+    const maxCol = Math.max(selection.startCol, selection.endCol);
+
+    try {
+      await clearCommentsInRange(minRow, minCol, maxRow, maxCol);
+      cellEvents.emit({ row: minRow, col: minCol, oldValue: undefined, newValue: "", formula: null });
+    } catch (error) {
+      console.error("[Spreadsheet] Failed to clear comments:", error);
+    }
+  }, [selection]);
+
+  // -------------------------------------------------------------------------
+  // Clear Hyperlinks Handler
+  // -------------------------------------------------------------------------
+  const handleClearHyperlinks = useCallback(async () => {
+    if (!selection) return;
+
+    const minRow = Math.min(selection.startRow, selection.endRow);
+    const maxRow = Math.max(selection.startRow, selection.endRow);
+    const minCol = Math.min(selection.startCol, selection.endCol);
+    const maxCol = Math.max(selection.startCol, selection.endCol);
+
+    try {
+      await clearHyperlinksInRange(minRow, minCol, maxRow, maxCol);
+      cellEvents.emit({ row: minRow, col: minCol, oldValue: undefined, newValue: "", formula: null });
+    } catch (error) {
+      console.error("[Spreadsheet] Failed to clear hyperlinks:", error);
+    }
+  }, [selection]);
+
+  // -------------------------------------------------------------------------
+  // Clear All Handler (formatting + contents + comments + hyperlinks)
+  // -------------------------------------------------------------------------
+  const handleClearAll = useCallback(async () => {
+    if (!selection) return;
+
+    const minRow = Math.min(selection.startRow, selection.endRow);
+    const maxRow = Math.max(selection.startRow, selection.endRow);
+    const minCol = Math.min(selection.startCol, selection.endCol);
+    const maxCol = Math.max(selection.startCol, selection.endCol);
+
+    try {
+      await clearRangeWithOptions(minRow, minCol, maxRow, maxCol, "all");
+      await clearCommentsInRange(minRow, minCol, maxRow, maxCol);
+      await clearHyperlinksInRange(minRow, minCol, maxRow, maxCol);
+      cellEvents.emit({ row: minRow, col: minCol, oldValue: undefined, newValue: "", formula: null });
+    } catch (error) {
+      console.error("[Spreadsheet] Failed to clear all:", error);
+    }
+  }, [selection]);
+
+  // -------------------------------------------------------------------------
   // Insert Row Handler
   // -------------------------------------------------------------------------
   const handleInsertRow = useCallback(async () => {
@@ -644,6 +725,10 @@ function SpreadsheetContent({
     gridCommands.register("copy", handleCopy);
     gridCommands.register("paste", handlePaste);
     gridCommands.register("clearContents", handleClearContents);
+    gridCommands.register("clearFormatting", handleClearFormatting);
+    gridCommands.register("clearComments", handleClearComments);
+    gridCommands.register("clearHyperlinks", handleClearHyperlinks);
+    gridCommands.register("clearAll", handleClearAll);
     gridCommands.register("insertRow", handleInsertRow);
     gridCommands.register("insertColumn", handleInsertColumn);
     gridCommands.register("deleteRow", handleDeleteRow);
@@ -656,6 +741,10 @@ function SpreadsheetContent({
       gridCommands.unregister("copy");
       gridCommands.unregister("paste");
       gridCommands.unregister("clearContents");
+      gridCommands.unregister("clearFormatting");
+      gridCommands.unregister("clearComments");
+      gridCommands.unregister("clearHyperlinks");
+      gridCommands.unregister("clearAll");
       gridCommands.unregister("insertRow");
       gridCommands.unregister("insertColumn");
       gridCommands.unregister("deleteRow");
@@ -668,6 +757,10 @@ function SpreadsheetContent({
     handleCopy,
     handlePaste,
     handleClearContents,
+    handleClearFormatting,
+    handleClearComments,
+    handleClearHyperlinks,
+    handleClearAll,
     handleInsertRow,
     handleInsertColumn,
     handleDeleteRow,

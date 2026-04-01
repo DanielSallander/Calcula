@@ -26,6 +26,10 @@ export const CoreCommands = {
   FIND: "core.edit.find",
   REPLACE: "core.edit.replace",
   CLEAR_CONTENTS: "core.edit.clearContents",
+  CLEAR_FORMATTING: "core.edit.clearFormatting",
+  CLEAR_COMMENTS: "core.edit.clearComments",
+  CLEAR_HYPERLINKS: "core.edit.clearHyperlinks",
+  CLEAR_ALL: "core.edit.clearAll",
 
   // Format
   FORMAT_CELLS: "core.format.cells",
@@ -64,6 +68,10 @@ const GRID_COMMAND_MAP: Record<string, GridCommand> = {
   [CoreCommands.COPY]: "copy",
   [CoreCommands.PASTE]: "paste",
   [CoreCommands.CLEAR_CONTENTS]: "clearContents",
+  [CoreCommands.CLEAR_FORMATTING]: "clearFormatting",
+  [CoreCommands.CLEAR_COMMENTS]: "clearComments",
+  [CoreCommands.CLEAR_HYPERLINKS]: "clearHyperlinks",
+  [CoreCommands.CLEAR_ALL]: "clearAll",
   [CoreCommands.INSERT_ROW]: "insertRow",
   [CoreCommands.INSERT_COLUMN]: "insertColumn",
   [CoreCommands.DELETE_ROW]: "deleteRow",

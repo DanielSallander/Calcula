@@ -48,6 +48,18 @@ function registerEditMenu(context: ExtensionContext): void {
       },
       { id: "edit:sep2", label: "", separator: true },
       {
+        id: "edit:clear",
+        label: "Clear",
+        children: [
+          { id: "edit:clear:all", label: "Clear All", commandId: CoreCommands.CLEAR_ALL },
+          { id: "edit:clear:formatting", label: "Clear Formatting", commandId: CoreCommands.CLEAR_FORMATTING },
+          { id: "edit:clear:contents", label: "Clear Contents", commandId: CoreCommands.CLEAR_CONTENTS, shortcut: "Del" },
+          { id: "edit:clear:comments", label: "Clear Comments", commandId: CoreCommands.CLEAR_COMMENTS },
+          { id: "edit:clear:hyperlinks", label: "Clear Hyperlinks", commandId: CoreCommands.CLEAR_HYPERLINKS },
+        ],
+      },
+      { id: "edit:sep3", label: "", separator: true },
+      {
         id: "edit:find",
         label: "Find...",
         shortcut: "Ctrl+F",

@@ -518,6 +518,12 @@ export function HomeTabComponent({
         case "clearContents":
           await CommandRegistry.execute(CoreCommands.CLEAR_CONTENTS);
           break;
+        case "clearFormatting":
+          await CommandRegistry.execute(CoreCommands.CLEAR_FORMATTING);
+          break;
+        case "clearAll":
+          await CommandRegistry.execute(CoreCommands.CLEAR_ALL);
+          break;
 
         // Insert
         case "insertRow":

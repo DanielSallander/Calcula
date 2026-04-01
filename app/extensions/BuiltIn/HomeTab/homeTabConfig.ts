@@ -84,6 +84,8 @@ export const ALL_ITEMS: HomeTabItem[] = [
   { id: "redo", label: "Redo", tooltip: "Redo (Ctrl+Y)", type: "button", icon: "\u21B7", category: "Editing" },
   { id: "find", label: "Find & Replace", shortLabel: "Find", tooltip: "Find & Replace (Ctrl+H)", type: "button", icon: "\uD83D\uDD0D", category: "Editing" },
   { id: "clearContents", label: "Clear Contents", shortLabel: "Clear", tooltip: "Clear Contents (Del)", type: "button", icon: "\u2715", category: "Editing" },
+  { id: "clearFormatting", label: "Clear Formatting", shortLabel: "Clear Fmt", tooltip: "Clear Formatting", type: "button", icon: "\u2718", category: "Editing" },
+  { id: "clearAll", label: "Clear All", shortLabel: "Clear All", tooltip: "Clear All (formatting + content + comments)", type: "button", icon: "\u2716", category: "Editing" },
 
   // --- Styles ---
   { id: "cellStyles", label: "Cell Styles", shortLabel: "Styles", tooltip: "Cell Styles", type: "dropdown", icon: "\uD83C\uDFA8", category: "Styles" },
@@ -141,7 +143,7 @@ export const DEFAULT_LAYOUT: HomeTabLayout = {
     {
       id: "editing",
       label: "Editing",
-      items: ["undo", "redo", "find"],
+      items: ["undo", "redo", "find", "clearFormatting", "clearAll"],
     },
   ],
 };

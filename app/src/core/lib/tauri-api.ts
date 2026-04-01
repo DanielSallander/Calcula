@@ -157,6 +157,55 @@ export async function clearRange(
   });
 }
 
+/**
+ * Clear apply to options (Excel-compatible).
+ */
+export type ClearApplyTo =
+  | "all"
+  | "contents"
+  | "formats"
+  | "hyperlinks"
+  | "removeHyperlinks"
+  | "resetContents";
+
+/**
+ * Clear a range with options for what to clear.
+ */
+export async function clearRangeWithOptions(
+  startRow: number,
+  startCol: number,
+  endRow: number,
+  endCol: number,
+  applyTo: ClearApplyTo = "all"
+): Promise<unknown> {
+  return invoke("clear_range_with_options", {
+    params: {
+      startRow,
+      startCol,
+      endRow,
+      endCol,
+      applyTo,
+    },
+  });
+}
+
+/**
+ * Clear all hyperlinks in a range.
+ */
+export async function clearHyperlinksInRange(
+  startRow: number,
+  startCol: number,
+  endRow: number,
+  endCol: number
+): Promise<number> {
+  return invoke<number>("clear_hyperlinks_in_range", {
+    startRow,
+    startCol,
+    endRow,
+    endCol,
+  });
+}
+
 export async function getGridBounds(): Promise<[number, number]> {
   return invoke<[number, number]>("get_grid_bounds");
 }

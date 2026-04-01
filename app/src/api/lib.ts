@@ -24,6 +24,8 @@ export {
   updateCellsBatch,
   clearCell,
   clearRange,
+  clearRangeWithOptions,
+  clearHyperlinksInRange,
   getGridBounds,
   getCellCount,
 
