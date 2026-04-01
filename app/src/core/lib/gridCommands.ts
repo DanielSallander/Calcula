@@ -48,7 +48,11 @@ export type GridCommand =
   | "deleteRow"
   | "deleteColumn"
   | "mergeCells"
-  | "unmergeCells";
+  | "unmergeCells"
+  | "fillDown"
+  | "fillRight"
+  | "fillUp"
+  | "fillLeft";
 
 /** Command registry for direct handler invocation */
 class GridCommandRegistry {

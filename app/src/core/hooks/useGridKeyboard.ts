@@ -585,6 +585,18 @@ export function useGridKeyboard(options: UseGridKeyboardOptions): void {
               return;
             }
             break;
+
+          case 'r':
+            // Ctrl+R - Fill right
+            if (!shiftKey && onCommand) {
+              event.preventDefault();
+              event.stopPropagation();
+              eventLog.keyboard('Grid', 'handleKeyDown', 'Ctrl+R', ['Ctrl']);
+              onCommand('edit.fillRight');
+              fnLog.exit('handleKeyDown', 'fill right');
+              return;
+            }
+            break;
         }
       }
 

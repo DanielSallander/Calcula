@@ -31,6 +31,12 @@ export const CoreCommands = {
   CLEAR_HYPERLINKS: "core.edit.clearHyperlinks",
   CLEAR_ALL: "core.edit.clearAll",
 
+  // Fill
+  FILL_DOWN: "core.edit.fillDown",
+  FILL_RIGHT: "core.edit.fillRight",
+  FILL_UP: "core.edit.fillUp",
+  FILL_LEFT: "core.edit.fillLeft",
+
   // Format
   FORMAT_CELLS: "core.format.cells",
   FORMAT_PAINTER: "core.format.painter",
@@ -78,6 +84,10 @@ const GRID_COMMAND_MAP: Record<string, GridCommand> = {
   [CoreCommands.DELETE_COLUMN]: "deleteColumn",
   [CoreCommands.MERGE_CELLS]: "mergeCells",
   [CoreCommands.UNMERGE_CELLS]: "unmergeCells",
+  [CoreCommands.FILL_DOWN]: "fillDown",
+  [CoreCommands.FILL_RIGHT]: "fillRight",
+  [CoreCommands.FILL_UP]: "fillUp",
+  [CoreCommands.FILL_LEFT]: "fillLeft",
 };
 
 // ============================================================================

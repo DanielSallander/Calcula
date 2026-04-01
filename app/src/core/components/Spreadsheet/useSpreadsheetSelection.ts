@@ -32,7 +32,9 @@ import {
   updateCellsBatch,
   beginUndoTransaction,
   commitUndoTransaction,
+  shiftFormulasBatch,
   type CellUpdateInput,
+  type FormulaShiftInput,
 } from "../../lib/tauri-api";
 import type { FormattingOptions } from "../../types";
 import { DEFAULT_THEME, measureOptimalColumnWidth, measureOptimalRowHeight } from "../../lib/gridRenderer";
@@ -42,6 +44,7 @@ import { checkEditGuards } from "../../lib/editGuards";
 import { isSheetGroupingActive, getSelectedSheetIndices } from "../../state/sheetGrouping";
 import { setColumnWidth, setRowHeight, setManuallyHiddenCols, setManuallyHiddenRows } from "../../state/gridActions";
 import { cellEvents } from "../../lib/cellEvents";
+import { gridCommands } from "../../lib/gridCommands";
 import { CommandRegistry } from "../../../api/commands";
 import { emitAppEvent, AppEvents } from "../../../api/events";
 import type { GridCanvasHandle } from "../Grid";
@@ -871,13 +874,24 @@ export function useSpreadsheetSelection({
       const updates: CellUpdateInput[] = [];
 
       for (let col = minCol; col <= maxCol; col++) {
-        // Read the top cell's content (formula or display value)
         const sourceCell = await getCell(minRow, col);
-        const sourceValue = sourceCell?.formula || sourceCell?.display || "";
+        const sourceFormula = sourceCell?.formula;
+        const sourceDisplay = sourceCell?.display || "";
 
-        // Fill down to all rows below
-        for (let row = minRow + 1; row <= maxRow; row++) {
-          updates.push({ row, col, value: sourceValue });
+        if (sourceFormula) {
+          // Shift formula references for each target row
+          const shiftInputs: FormulaShiftInput[] = [];
+          for (let row = minRow + 1; row <= maxRow; row++) {
+            shiftInputs.push({ formula: sourceFormula, rowDelta: row - minRow, colDelta: 0 });
+          }
+          const shifted = await shiftFormulasBatch(shiftInputs);
+          for (let i = 0; i < shifted.length; i++) {
+            updates.push({ row: minRow + 1 + i, col, value: shifted[i] });
+          }
+        } else {
+          for (let row = minRow + 1; row <= maxRow; row++) {
+            updates.push({ row, col, value: sourceDisplay });
+          }
         }
       }
 
@@ -922,6 +936,264 @@ export function useSpreadsheetSelection({
       console.error("[useSpreadsheetSelection] Fill Down failed:", error);
     }
   }, [selection]);
+
+  /**
+   * Handle Ctrl+R - Fill Right.
+   * Copies the contents and format of the leftmost cell in the selection to cells to the right.
+   */
+  const handleFillRight = useCallback(async () => {
+    if (!selection) return;
+
+    const minRow = Math.min(selection.startRow, selection.endRow);
+    const maxRow = Math.max(selection.startRow, selection.endRow);
+    const minCol = Math.min(selection.startCol, selection.endCol);
+    const maxCol = Math.max(selection.startCol, selection.endCol);
+
+    // Need at least 2 columns selected
+    if (maxCol <= minCol) return;
+
+    try {
+      await beginUndoTransaction("Fill Right");
+
+      const updates: CellUpdateInput[] = [];
+
+      for (let row = minRow; row <= maxRow; row++) {
+        const sourceCell = await getCell(row, minCol);
+        const sourceFormula = sourceCell?.formula;
+        const sourceDisplay = sourceCell?.display || "";
+
+        if (sourceFormula) {
+          const shiftInputs: FormulaShiftInput[] = [];
+          for (let col = minCol + 1; col <= maxCol; col++) {
+            shiftInputs.push({ formula: sourceFormula, rowDelta: 0, colDelta: col - minCol });
+          }
+          const shifted = await shiftFormulasBatch(shiftInputs);
+          for (let i = 0; i < shifted.length; i++) {
+            updates.push({ row, col: minCol + 1 + i, value: shifted[i] });
+          }
+        } else {
+          for (let col = minCol + 1; col <= maxCol; col++) {
+            updates.push({ row, col, value: sourceDisplay });
+          }
+        }
+      }
+
+      if (updates.length > 0) {
+        const updatedCells = await updateCellsBatch(updates);
+        await commitUndoTransaction();
+
+        // Copy formatting from source column
+        for (let row = minRow; row <= maxRow; row++) {
+          const sourceCell = await getCell(row, minCol);
+          if (sourceCell && sourceCell.styleIndex > 0) {
+            const sourceStyle = await getStyle(sourceCell.styleIndex);
+            const targetCols: number[] = [];
+            for (let col = minCol + 1; col <= maxCol; col++) {
+              targetCols.push(col);
+            }
+            await applyFormatting([row], targetCols, {
+              bold: sourceStyle.bold,
+              italic: sourceStyle.italic,
+              underline: sourceStyle.underline,
+              strikethrough: sourceStyle.strikethrough,
+              numberFormat: sourceStyle.numberFormat !== "General" ? sourceStyle.numberFormat : undefined,
+            });
+          }
+        }
+
+        if (updatedCells.length > 0) {
+          cellEvents.emit({
+            row: updatedCells[0].row,
+            col: updatedCells[0].col,
+            oldValue: undefined,
+            newValue: updatedCells[0].display,
+            formula: updatedCells[0].formula ?? null,
+          });
+        }
+      } else {
+        await commitUndoTransaction();
+      }
+    } catch (error) {
+      console.error("[useSpreadsheetSelection] Fill Right failed:", error);
+    }
+  }, [selection]);
+
+  /**
+   * Handle Fill Up.
+   * Copies the contents and format of the bottommost cell in the selection to cells above.
+   */
+  const handleFillUp = useCallback(async () => {
+    if (!selection) return;
+
+    const minRow = Math.min(selection.startRow, selection.endRow);
+    const maxRow = Math.max(selection.startRow, selection.endRow);
+    const minCol = Math.min(selection.startCol, selection.endCol);
+    const maxCol = Math.max(selection.startCol, selection.endCol);
+
+    // Need at least 2 rows selected
+    if (maxRow <= minRow) return;
+
+    try {
+      await beginUndoTransaction("Fill Up");
+
+      const updates: CellUpdateInput[] = [];
+
+      for (let col = minCol; col <= maxCol; col++) {
+        const sourceCell = await getCell(maxRow, col);
+        const sourceFormula = sourceCell?.formula;
+        const sourceDisplay = sourceCell?.display || "";
+
+        if (sourceFormula) {
+          const shiftInputs: FormulaShiftInput[] = [];
+          for (let row = minRow; row < maxRow; row++) {
+            shiftInputs.push({ formula: sourceFormula, rowDelta: row - maxRow, colDelta: 0 });
+          }
+          const shifted = await shiftFormulasBatch(shiftInputs);
+          for (let i = 0; i < shifted.length; i++) {
+            updates.push({ row: minRow + i, col, value: shifted[i] });
+          }
+        } else {
+          for (let row = minRow; row < maxRow; row++) {
+            updates.push({ row, col, value: sourceDisplay });
+          }
+        }
+      }
+
+      if (updates.length > 0) {
+        const updatedCells = await updateCellsBatch(updates);
+        await commitUndoTransaction();
+
+        // Copy formatting from source row (bottom)
+        for (let col = minCol; col <= maxCol; col++) {
+          const sourceCell = await getCell(maxRow, col);
+          if (sourceCell && sourceCell.styleIndex > 0) {
+            const sourceStyle = await getStyle(sourceCell.styleIndex);
+            const targetRows: number[] = [];
+            for (let row = minRow; row < maxRow; row++) {
+              targetRows.push(row);
+            }
+            await applyFormatting(targetRows, [col], {
+              bold: sourceStyle.bold,
+              italic: sourceStyle.italic,
+              underline: sourceStyle.underline,
+              strikethrough: sourceStyle.strikethrough,
+              numberFormat: sourceStyle.numberFormat !== "General" ? sourceStyle.numberFormat : undefined,
+            });
+          }
+        }
+
+        if (updatedCells.length > 0) {
+          cellEvents.emit({
+            row: updatedCells[0].row,
+            col: updatedCells[0].col,
+            oldValue: undefined,
+            newValue: updatedCells[0].display,
+            formula: updatedCells[0].formula ?? null,
+          });
+        }
+      } else {
+        await commitUndoTransaction();
+      }
+    } catch (error) {
+      console.error("[useSpreadsheetSelection] Fill Up failed:", error);
+    }
+  }, [selection]);
+
+  /**
+   * Handle Fill Left.
+   * Copies the contents and format of the rightmost cell in the selection to cells to the left.
+   */
+  const handleFillLeft = useCallback(async () => {
+    if (!selection) return;
+
+    const minRow = Math.min(selection.startRow, selection.endRow);
+    const maxRow = Math.max(selection.startRow, selection.endRow);
+    const minCol = Math.min(selection.startCol, selection.endCol);
+    const maxCol = Math.max(selection.startCol, selection.endCol);
+
+    // Need at least 2 columns selected
+    if (maxCol <= minCol) return;
+
+    try {
+      await beginUndoTransaction("Fill Left");
+
+      const updates: CellUpdateInput[] = [];
+
+      for (let row = minRow; row <= maxRow; row++) {
+        const sourceCell = await getCell(row, maxCol);
+        const sourceFormula = sourceCell?.formula;
+        const sourceDisplay = sourceCell?.display || "";
+
+        if (sourceFormula) {
+          const shiftInputs: FormulaShiftInput[] = [];
+          for (let col = minCol; col < maxCol; col++) {
+            shiftInputs.push({ formula: sourceFormula, rowDelta: 0, colDelta: col - maxCol });
+          }
+          const shifted = await shiftFormulasBatch(shiftInputs);
+          for (let i = 0; i < shifted.length; i++) {
+            updates.push({ row, col: minCol + i, value: shifted[i] });
+          }
+        } else {
+          for (let col = minCol; col < maxCol; col++) {
+            updates.push({ row, col, value: sourceDisplay });
+          }
+        }
+      }
+
+      if (updates.length > 0) {
+        const updatedCells = await updateCellsBatch(updates);
+        await commitUndoTransaction();
+
+        // Copy formatting from source column (right)
+        for (let row = minRow; row <= maxRow; row++) {
+          const sourceCell = await getCell(row, maxCol);
+          if (sourceCell && sourceCell.styleIndex > 0) {
+            const sourceStyle = await getStyle(sourceCell.styleIndex);
+            const targetCols: number[] = [];
+            for (let col = minCol; col < maxCol; col++) {
+              targetCols.push(col);
+            }
+            await applyFormatting([row], targetCols, {
+              bold: sourceStyle.bold,
+              italic: sourceStyle.italic,
+              underline: sourceStyle.underline,
+              strikethrough: sourceStyle.strikethrough,
+              numberFormat: sourceStyle.numberFormat !== "General" ? sourceStyle.numberFormat : undefined,
+            });
+          }
+        }
+
+        if (updatedCells.length > 0) {
+          cellEvents.emit({
+            row: updatedCells[0].row,
+            col: updatedCells[0].col,
+            oldValue: undefined,
+            newValue: updatedCells[0].display,
+            formula: updatedCells[0].formula ?? null,
+          });
+        }
+      } else {
+        await commitUndoTransaction();
+      }
+    } catch (error) {
+      console.error("[useSpreadsheetSelection] Fill Left failed:", error);
+    }
+  }, [selection]);
+
+  // Register fill commands as grid commands (for menu execution via CommandRegistry)
+  useEffect(() => {
+    gridCommands.register("fillDown", handleFillDown);
+    gridCommands.register("fillRight", handleFillRight);
+    gridCommands.register("fillUp", handleFillUp);
+    gridCommands.register("fillLeft", handleFillLeft);
+
+    return () => {
+      gridCommands.unregister("fillDown");
+      gridCommands.unregister("fillRight");
+      gridCommands.unregister("fillUp");
+      gridCommands.unregister("fillLeft");
+    };
+  }, [handleFillDown, handleFillRight, handleFillUp, handleFillLeft]);
 
   /**
    * Handle inserting current date into the active cell.
@@ -1033,6 +1305,15 @@ export function useSpreadsheetSelection({
       case 'edit.fillDown':
         await handleFillDown();
         break;
+      case 'edit.fillRight':
+        await handleFillRight();
+        break;
+      case 'edit.fillUp':
+        await handleFillUp();
+        break;
+      case 'edit.fillLeft':
+        await handleFillLeft();
+        break;
 
       // Paste Special
       case 'clipboard.pasteSpecial':
@@ -1050,7 +1331,7 @@ export function useSpreadsheetSelection({
       default:
         console.warn(`[useSpreadsheetSelection] Unknown command: ${command}`);
     }
-  }, [toggleFormatProperty, applyFormattingToSelection, handleInsertDate, handleInsertTime, handleFillDown, state.showFormulas]);
+  }, [toggleFormatProperty, applyFormattingToSelection, handleInsertDate, handleInsertTime, handleFillDown, handleFillRight, handleFillUp, handleFillLeft, state.showFormulas]);
 
   // Keyboard handling with clipboard shortcuts, ESC to clear clipboard, DELETE to clear contents, and undo/redo
   // FIX: Use focusContainerRef instead of containerRef for keyboard events
