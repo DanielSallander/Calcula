@@ -57,6 +57,16 @@ export async function getViewportCells(
   return result;
 }
 
+/**
+ * Batch-get cell values from arbitrary sheets (for Watch Window).
+ * Each request is [sheetIndex, row, col]. Returns parallel array of results.
+ */
+export async function getWatchCells(
+  requests: [number, number, number][],
+): Promise<(CellData | null)[]> {
+  return invoke<(CellData | null)[]>("get_watch_cells", { requests });
+}
+
 export async function getCell(row: number, col: number): Promise<CellData | null> {
   const t0 = performance.now();
   const result = await invoke<CellData | null>("get_cell", { row, col });

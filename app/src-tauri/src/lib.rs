@@ -3200,6 +3200,7 @@ pub fn run() {
             commands::get_viewport_cells,
             commands::get_spill_ranges,
             commands::get_cell,
+            commands::get_watch_cells,
             commands::get_cell_collection,
             commands::get_collection_texts,
             commands::update_cell,

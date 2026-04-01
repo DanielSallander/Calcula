@@ -180,6 +180,58 @@ pub fn get_cell(state: State<AppState>, row: u32, col: u32) -> Option<CellData> 
     get_cell_internal_with_merge(&grid, &styles, &merged_regions, row, col)
 }
 
+/// Batch-get cell display values from arbitrary sheets (for Watch Window).
+/// Takes a list of (sheetIndex, row, col) and returns parallel list of results.
+/// Note: grids[active_sheet] is stale; we use state.grid for the active sheet.
+#[tauri::command]
+pub fn get_watch_cells(
+    state: State<AppState>,
+    requests: Vec<(usize, u32, u32)>,
+) -> Vec<Option<CellData>> {
+    let grids = state.grids.lock().unwrap();
+    let active_grid = state.grid.lock().unwrap();
+    let active_sheet = *state.active_sheet.lock().unwrap();
+    let styles = state.style_registry.lock().unwrap();
+
+    fn read_cell(
+        grid: &Grid,
+        styles: &StyleRegistry,
+        sheet_index: usize,
+        row: u32,
+        col: u32,
+    ) -> Option<CellData> {
+        grid.get_cell(row, col).map(|c| {
+            let style = styles.get(c.style_index);
+            let r = crate::format_cell_value_with_color(&c.value, style);
+            CellData {
+                row,
+                col,
+                display: r.text,
+                display_color: r.color,
+                formula: c.formula.clone(),
+                style_index: c.style_index,
+                row_span: 1,
+                col_span: 1,
+                sheet_index: Some(sheet_index),
+                rich_text: None,
+            }
+        })
+    }
+
+    requests
+        .iter()
+        .map(|&(sheet_index, row, col)| {
+            if sheet_index == active_sheet {
+                read_cell(&active_grid, &styles, sheet_index, row, col)
+            } else if sheet_index < grids.len() {
+                read_cell(&grids[sheet_index], &styles, sheet_index, row, col)
+            } else {
+                None
+            }
+        })
+        .collect()
+}
+
 /// Get the structured contents of a List or Dict cell for preview.
 #[tauri::command]
 pub fn get_cell_collection(

@@ -41,6 +41,7 @@ import { registerCustomFillListsExtension, unregisterCustomFillListsExtension } 
 import { registerGoToSpecialExtension, unregisterGoToSpecialExtension } from "./GoToSpecial";
 import { registerCsvImportExportExtension, unregisterCsvImportExportExtension } from "./CsvImportExport";
 import { registerScriptNotebookExtension, unregisterScriptNotebookExtension } from "./ScriptNotebook";
+import { registerWatchWindowExtension, unregisterWatchWindowExtension } from "./WatchWindow";
 
 /**
  * Load all extensions.
@@ -81,6 +82,7 @@ export function loadExtensions(): void {
   registerReviewExtension();
   registerScriptEditorExtension();
   registerScriptNotebookExtension();
+  registerWatchWindowExtension();
   registerControlsExtension();
   registerBiExtension();
   registerPrintExtension();
@@ -115,6 +117,7 @@ export function unloadExtensions(): void {
   unregisterPrintExtension();
   unregisterBiExtension();
   unregisterControlsExtension();
+  unregisterWatchWindowExtension();
   unregisterScriptNotebookExtension();
   unregisterScriptEditorExtension();
   unregisterReviewExtension();
@@ -189,3 +192,4 @@ export { registerSubtotalsExtension, unregisterSubtotalsExtension };
 export { registerCustomFillListsExtension, unregisterCustomFillListsExtension };
 export { registerGoToSpecialExtension, unregisterGoToSpecialExtension };
 export { registerCsvImportExportExtension, unregisterCsvImportExportExtension };
+export { registerWatchWindowExtension, unregisterWatchWindowExtension };

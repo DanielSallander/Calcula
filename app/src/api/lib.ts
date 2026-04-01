@@ -17,6 +17,7 @@ export {
   // Cell operations
   getViewportCells,
   getCell,
+  getWatchCells,
   getCellsInCols,
   getCellCollection,
   getCollectionTexts,
