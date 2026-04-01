@@ -93,5 +93,6 @@ pub fn load_xlsx(path: &Path) -> Result<Workbook, PersistenceError> {
         tables,
         slicers: Vec::new(),
         user_files: HashMap::new(),
+        theme: engine::theme::ThemeDefinition::default(),
     })
 }

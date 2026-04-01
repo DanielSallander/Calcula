@@ -1,6 +1,9 @@
 //! FILENAME: app/extensions/BuiltIn/FormatCellsDialog/utils/fontList.ts
 // PURPOSE: Common font names for the Font tab dropdown.
 
+/** Theme font keywords - resolve to the active theme's heading/body fonts. */
+export const THEME_FONTS = ["Body", "Headings"] as const;
+
 export const FONT_LIST: string[] = [
   "system-ui",
   "Arial",

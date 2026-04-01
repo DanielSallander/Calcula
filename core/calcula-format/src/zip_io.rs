@@ -14,6 +14,7 @@ use crate::sheet_styles::{
     serialize_style_registry, SheetStyles,
 };
 
+use engine::theme::ThemeDefinition;
 use persistence::{SavedSlicer, SavedTable, Workbook};
 use std::io::{Read, Write};
 use std::path::Path;
@@ -40,11 +41,17 @@ pub fn write_calcula(workbook: &Workbook, path: &Path) -> Result<(), FormatError
     if !workbook.user_files.is_empty() {
         manifest.features.push("files".to_string());
     }
+    manifest.features.push("theme".to_string());
 
     // Write manifest.json
     let manifest_json = serde_json::to_string_pretty(&manifest)?;
     zip.start_file("manifest.json", options.clone())?;
     zip.write_all(manifest_json.as_bytes())?;
+
+    // Write theme.json (document theme)
+    let theme_json = serde_json::to_string_pretty(&workbook.theme)?;
+    zip.start_file("theme.json", options.clone())?;
+    zip.write_all(theme_json.as_bytes())?;
 
     // Write styles/registry.json (use first sheet's styles as the shared registry)
     if let Some(sheet) = workbook.sheets.first() {
@@ -134,6 +141,10 @@ pub fn read_calcula(path: &Path) -> Result<Workbook, FormatError> {
             manifest.format_version
         )));
     }
+
+    // Read theme.json (document theme)
+    let theme = read_optional_json::<ThemeDefinition>(&mut archive, "theme.json")?
+        .unwrap_or_default();
 
     // Read styles/registry.json
     let style_list = read_optional_json::<Vec<engine::style::CellStyle>>(
@@ -258,6 +269,7 @@ pub fn read_calcula(path: &Path) -> Result<Workbook, FormatError> {
         tables,
         slicers,
         user_files,
+        theme,
     })
 }
 

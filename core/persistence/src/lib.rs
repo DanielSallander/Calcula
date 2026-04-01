@@ -14,6 +14,7 @@ pub use xlsx_writer::save_xlsx;
 use engine::cell::{Cell, CellValue, DictKey, RichTextRun};
 use engine::grid::Grid;
 use engine::style::{CellStyle, StyleRegistry};
+use engine::theme::ThemeDefinition;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
@@ -41,6 +42,8 @@ pub struct Workbook {
     /// User files stored inside the .cala archive (path -> content).
     /// Paths are relative, e.g. "README.md" or "docs/notes.txt".
     pub user_files: HashMap<String, Vec<u8>>,
+    /// Document theme (colors + fonts). Defaults to Office theme.
+    pub theme: ThemeDefinition,
 }
 
 impl Workbook {
@@ -51,6 +54,7 @@ impl Workbook {
             tables: Vec::new(),
             slicers: Vec::new(),
             user_files: HashMap::new(),
+            theme: ThemeDefinition::default(),
         }
     }
 
@@ -61,6 +65,7 @@ impl Workbook {
             tables: Vec::new(),
             slicers: Vec::new(),
             user_files: HashMap::new(),
+            theme: ThemeDefinition::default(),
         }
     }
 }

@@ -7,6 +7,8 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
+use crate::theme::ThemeColor;
+
 /// Text alignment options for cell content.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
 pub enum TextAlign {
@@ -151,7 +153,7 @@ impl Default for Color {
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
 pub struct BorderStyle {
     pub width: u8,           // 0 = no border, 1 = thin, 2 = medium, 3 = thick
-    pub color: Color,
+    pub color: ThemeColor,
     pub style: BorderLineStyle,
 }
 
@@ -184,19 +186,19 @@ pub struct FontStyle {
     pub italic: bool,
     pub underline: bool,
     pub strikethrough: bool,
-    pub color: Color,
+    pub color: ThemeColor,
 }
 
 impl Default for FontStyle {
     fn default() -> Self {
         FontStyle {
-            family: "system-ui".to_string(),
+            family: "Body".to_string(),
             size: 11,
             bold: false,
             italic: false,
             underline: false,
             strikethrough: false,
-            color: Color::black(),
+            color: ThemeColor::default_text(),
         }
     }
 }
@@ -207,7 +209,7 @@ impl Default for FontStyle {
 #[serde(default)]
 pub struct CellStyle {
     pub font: FontStyle,
-    pub background: Color,
+    pub background: ThemeColor,
     pub text_align: TextAlign,
     pub vertical_align: VerticalAlign,
     pub number_format: NumberFormat,
@@ -225,7 +227,7 @@ impl CellStyle {
     pub fn new() -> Self {
         CellStyle {
             font: FontStyle::default(),
-            background: Color::white(),
+            background: ThemeColor::default_background(),
             text_align: TextAlign::General,
             vertical_align: VerticalAlign::Middle,
             number_format: NumberFormat::General,
@@ -252,13 +254,13 @@ impl CellStyle {
     }
 
     /// Create a style with a specific text color.
-    pub fn with_text_color(mut self, color: Color) -> Self {
+    pub fn with_text_color(mut self, color: ThemeColor) -> Self {
         self.font.color = color;
         self
     }
 
     /// Create a style with a specific background color.
-    pub fn with_background(mut self, color: Color) -> Self {
+    pub fn with_background(mut self, color: ThemeColor) -> Self {
         self.background = color;
         self
     }
@@ -509,25 +511,26 @@ mod tests {
     #[test]
     fn test_serde_backward_compat_missing_fields() {
         // Simulate deserializing a CellStyle JSON that doesn't have indent/shrink_to_fit
+        // Colors use ThemeColor enum format (Absolute variant wraps Color)
         let json = r#"{
             "font": {
-                "family": "system-ui",
+                "family": "Body",
                 "size": 11,
                 "bold": false,
                 "italic": false,
                 "underline": false,
                 "strikethrough": false,
-                "color": {"r": 0, "g": 0, "b": 0, "a": 255}
+                "color": {"Absolute": {"r": 0, "g": 0, "b": 0, "a": 255}}
             },
-            "background": {"r": 255, "g": 255, "b": 255, "a": 255},
+            "background": {"Absolute": {"r": 255, "g": 255, "b": 255, "a": 255}},
             "text_align": "General",
             "vertical_align": "Middle",
             "number_format": "General",
             "borders": {
-                "top": {"width": 0, "color": {"r": 0, "g": 0, "b": 0, "a": 255}, "style": "None"},
-                "right": {"width": 0, "color": {"r": 0, "g": 0, "b": 0, "a": 255}, "style": "None"},
-                "bottom": {"width": 0, "color": {"r": 0, "g": 0, "b": 0, "a": 255}, "style": "None"},
-                "left": {"width": 0, "color": {"r": 0, "g": 0, "b": 0, "a": 255}, "style": "None"}
+                "top": {"width": 0, "color": {"Absolute": {"r": 0, "g": 0, "b": 0, "a": 255}}, "style": "None"},
+                "right": {"width": 0, "color": {"Absolute": {"r": 0, "g": 0, "b": 0, "a": 255}}, "style": "None"},
+                "bottom": {"width": 0, "color": {"Absolute": {"r": 0, "g": 0, "b": 0, "a": 255}}, "style": "None"},
+                "left": {"width": 0, "color": {"Absolute": {"r": 0, "g": 0, "b": 0, "a": 255}}, "style": "None"}
             },
             "wrap_text": false,
             "text_rotation": "None",

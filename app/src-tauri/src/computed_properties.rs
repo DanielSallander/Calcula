@@ -271,7 +271,7 @@ fn apply_fill_color(
     style_registry: &mut StyleRegistry,
     row: u32,
     col: u32,
-    color: engine::Color,
+    color: engine::ThemeColor,
 ) {
     let old_style_index = grid.get_cell(row, col)
         .map(|c| c.style_index)
@@ -394,7 +394,7 @@ fn value_as_bool(val: &CellValue) -> bool {
     }
 }
 
-fn parse_color(s: &str) -> Option<engine::Color> {
+fn parse_color(s: &str) -> Option<engine::ThemeColor> {
     let s = s.trim();
     if s.is_empty() {
         return None;
@@ -407,20 +407,20 @@ fn parse_color(s: &str) -> Option<engine::Color> {
                 let r = u8::from_str_radix(&hex[0..1].repeat(2), 16).ok()?;
                 let g = u8::from_str_radix(&hex[1..2].repeat(2), 16).ok()?;
                 let b = u8::from_str_radix(&hex[2..3].repeat(2), 16).ok()?;
-                Some(engine::Color::new(r, g, b))
+                Some(engine::ThemeColor::Absolute(engine::Color::new(r, g, b)))
             }
             6 => {
                 let r = u8::from_str_radix(&hex[0..2], 16).ok()?;
                 let g = u8::from_str_radix(&hex[2..4], 16).ok()?;
                 let b = u8::from_str_radix(&hex[4..6], 16).ok()?;
-                Some(engine::Color::new(r, g, b))
+                Some(engine::ThemeColor::Absolute(engine::Color::new(r, g, b)))
             }
             8 => {
                 let r = u8::from_str_radix(&hex[0..2], 16).ok()?;
                 let g = u8::from_str_radix(&hex[2..4], 16).ok()?;
                 let b = u8::from_str_radix(&hex[4..6], 16).ok()?;
                 let a = u8::from_str_radix(&hex[6..8], 16).ok()?;
-                Some(engine::Color::with_alpha(r, g, b, a))
+                Some(engine::ThemeColor::Absolute(engine::Color::with_alpha(r, g, b, a)))
             }
             _ => None,
         }

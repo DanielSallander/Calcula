@@ -2,7 +2,7 @@
 
 use crate::{CalculaMeta, PersistenceError, SavedCellValue, Workbook, META_SHEET_NAME};
 use engine::style::{
-    CellStyle, Color, NumberFormat, TextAlign, TextRotation, VerticalAlign,
+    CellStyle, NumberFormat, TextAlign, TextRotation, VerticalAlign,
 };
 use rust_xlsxwriter::{Format, FormatAlign, Workbook as XlsxWorkbook};
 use std::path::Path;
@@ -228,16 +228,27 @@ fn convert_number_format(format: &NumberFormat) -> String {
     }
 }
 
-fn color_to_xlsx(color: &Color) -> rust_xlsxwriter::Color {
+fn color_to_xlsx(color: &engine::theme::ThemeColor) -> rust_xlsxwriter::Color {
+    // Resolve theme colors using Office theme for XLSX export
+    let theme = engine::theme::ThemeDefinition::office();
+    let resolved = theme.resolve_color(color);
     rust_xlsxwriter::Color::RGB(
-        ((color.r as u32) << 16) | ((color.g as u32) << 8) | (color.b as u32)
+        ((resolved.r as u32) << 16) | ((resolved.g as u32) << 8) | (resolved.b as u32)
     )
 }
 
-fn is_default_color(color: &Color) -> bool {
-    color.r == 0 && color.g == 0 && color.b == 0 && color.a == 255
+fn is_default_color(color: &engine::theme::ThemeColor) -> bool {
+    match color {
+        engine::theme::ThemeColor::Theme { slot: engine::theme::ThemeColorSlot::Dark1, tint } if tint.0 == 0 => true,
+        engine::theme::ThemeColor::Absolute(c) => c.r == 0 && c.g == 0 && c.b == 0 && c.a == 255,
+        _ => false,
+    }
 }
 
-fn is_default_background(color: &Color) -> bool {
-    color.r == 255 && color.g == 255 && color.b == 255 && color.a == 255
+fn is_default_background(color: &engine::theme::ThemeColor) -> bool {
+    match color {
+        engine::theme::ThemeColor::Theme { slot: engine::theme::ThemeColorSlot::Light1, tint } if tint.0 == 0 => true,
+        engine::theme::ThemeColor::Absolute(c) => c.r == 255 && c.g == 255 && c.b == 255 && c.a == 255,
+        _ => false,
+    }
 }

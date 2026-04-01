@@ -188,6 +188,7 @@ pub fn build_workbook_for_save(
     let mut workbook = Workbook::from_grid(&grid, &styles, &dimensions);
     workbook.tables = collect_tables_for_save(&tables);
     workbook.user_files = user_files_state.files.lock().map_err(|e| e.to_string())?.clone();
+    workbook.theme = state.theme.lock().unwrap().clone();
 
     Ok(workbook)
 }
@@ -396,6 +397,7 @@ pub fn save_file(
     workbook.tables = collect_tables_for_save(&tables);
     workbook.slicers = collect_slicers_for_save(&slicer_state);
     workbook.user_files = user_files_state.files.lock().map_err(|e| e.to_string())?.clone();
+    workbook.theme = state.theme.lock().unwrap().clone();
 
     let path_buf = PathBuf::from(&path);
 
@@ -484,6 +486,9 @@ pub fn open_file(
 
     // Restore user files from workbook
     *user_files_state.files.lock().map_err(|e| e.to_string())? = workbook.user_files;
+
+    // Restore document theme
+    *state.theme.lock().map_err(|e| e.to_string())? = workbook.theme;
 
     *file_state.current_path.lock().map_err(|e| e.to_string())? = Some(path_buf);
     *file_state.is_modified.lock().map_err(|e| e.to_string())? = false;

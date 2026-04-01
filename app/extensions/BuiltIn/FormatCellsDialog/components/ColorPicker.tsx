@@ -1,42 +1,43 @@
 //! FILENAME: app/extensions/BuiltIn/FormatCellsDialog/components/ColorPicker.tsx
-// PURPOSE: Reusable color picker component for the Format Cells dialog.
+// PURPOSE: Theme-aware color picker component for the Format Cells dialog.
+// CONTEXT: Shows theme colors (10x6 grid), standard colors row, and custom color input.
 
 import React, { useState, useRef, useEffect, useCallback } from "react";
 import styled from "styled-components";
+import type { ThemeColorInfo } from "../../../../src/core/types/types";
+import { getThemeColorPalette } from "../../../../src/api/theme";
 
 const v = (name: string) => `var(${name})`;
 
-// Standard color palette (Excel-like)
-const PALETTE_COLORS = [
-  // Row 1 - Theme colors
-  "#000000", "#1a1a2e", "#16213e", "#0f3460", "#533483", "#7c3aed",
-  "#dc2626", "#ea580c", "#d97706", "#65a30d", "#059669", "#0284c7",
-  // Row 2 - Lighter shades
-  "#404040", "#4a4a6a", "#3a5a8e", "#3f6fa0", "#7354a3", "#9d6dfd",
-  "#ef4444", "#f97316", "#eab308", "#84cc16", "#10b981", "#38bdf8",
-  // Row 3 - Even lighter
-  "#808080", "#8a8aaa", "#6a8abe", "#6f9fd0", "#9374c3", "#bd8dff",
-  "#f87171", "#fb923c", "#facc15", "#a3e635", "#34d399", "#7dd3fc",
-  // Row 4 - Light pastel
-  "#bfbfbf", "#babade", "#9abaee", "#9fcff0", "#b394e3", "#ddbdff",
-  "#fca5a5", "#fdba74", "#fde047", "#bef264", "#6ee7b7", "#bae6fd",
-  // Row 5 - Very light
-  "#ffffff", "#e0e0f0", "#d0e0ff", "#d0efff", "#e0d0ff", "#f0e0ff",
-  "#fee2e2", "#fed7aa", "#fef08a", "#d9f99d", "#a7f3d0", "#e0f2fe",
+// Standard colors row (10 fixed colors, not theme-dependent)
+const STANDARD_COLORS = [
+  "#c00000", "#ff0000", "#ffc000", "#ffff00", "#92d050",
+  "#00b050", "#00b0f0", "#0070c0", "#002060", "#7030a0",
 ];
 
 interface ColorPickerProps {
   value: string;
+  /** Current theme slot (e.g. "accent1") if this color is theme-based */
+  themeSlot?: string;
+  /** Current theme tint (permille) if theme-based */
+  themeTint?: number;
+  /** Called when user picks an absolute (non-theme) color */
   onChange: (color: string) => void;
+  /** Called when user picks a theme color. If not provided, falls back to onChange with resolved color. */
+  onThemeColorChange?: (slot: string, tint: number, resolvedColor: string) => void;
   label?: string;
 }
 
 export function ColorPicker({
   value,
+  themeSlot,
+  themeTint,
   onChange,
+  onThemeColorChange,
   label,
 }: ColorPickerProps): React.ReactElement {
   const [isExpanded, setIsExpanded] = useState(false);
+  const [palette, setPalette] = useState<ThemeColorInfo[]>([]);
   const containerRef = useRef<HTMLDivElement>(null);
 
   const handleClickOutside = useCallback((e: MouseEvent) => {
@@ -48,9 +49,34 @@ export function ColorPicker({
   useEffect(() => {
     if (isExpanded) {
       document.addEventListener("mousedown", handleClickOutside);
+      // Load theme palette
+      getThemeColorPalette().then(setPalette).catch(console.error);
     }
     return () => document.removeEventListener("mousedown", handleClickOutside);
   }, [isExpanded, handleClickOutside]);
+
+  const handleThemeColorClick = (info: ThemeColorInfo) => {
+    if (onThemeColorChange) {
+      onThemeColorChange(info.slot, info.tint, info.resolvedColor);
+    } else {
+      onChange(info.resolvedColor);
+    }
+    setIsExpanded(false);
+  };
+
+  const isThemeColorSelected = (info: ThemeColorInfo): boolean => {
+    if (themeSlot && themeSlot === info.slot && (themeTint ?? 0) === info.tint) {
+      return true;
+    }
+    return false;
+  };
+
+  // Split palette into rows: first 10 = base, then 5 rows of 10 tints
+  const baseColors = palette.slice(0, 10);
+  const tintRows = [];
+  for (let i = 10; i < palette.length; i += 10) {
+    tintRows.push(palette.slice(i, i + 10));
+  }
 
   return (
     <Container ref={containerRef}>
@@ -65,12 +91,45 @@ export function ColorPicker({
 
       {isExpanded && (
         <Dropdown onClick={(e) => e.stopPropagation()}>
+          {/* Theme Colors Section */}
+          {baseColors.length > 0 && (
+            <>
+              <SectionLabel>Theme Colors</SectionLabel>
+              <PaletteGrid>
+                {baseColors.map((info) => (
+                  <PaletteCell
+                    key={`${info.slot}-${info.tint}`}
+                    $color={info.resolvedColor}
+                    $selected={isThemeColorSelected(info)}
+                    onClick={() => handleThemeColorClick(info)}
+                    title={info.label}
+                  />
+                ))}
+              </PaletteGrid>
+              {tintRows.map((row, rowIdx) => (
+                <PaletteGrid key={rowIdx}>
+                  {row.map((info) => (
+                    <PaletteCell
+                      key={`${info.slot}-${info.tint}`}
+                      $color={info.resolvedColor}
+                      $selected={isThemeColorSelected(info)}
+                      onClick={() => handleThemeColorClick(info)}
+                      title={info.label}
+                    />
+                  ))}
+                </PaletteGrid>
+              ))}
+            </>
+          )}
+
+          {/* Standard Colors */}
+          <SectionLabel>Standard Colors</SectionLabel>
           <PaletteGrid>
-            {PALETTE_COLORS.map((color) => (
+            {STANDARD_COLORS.map((color) => (
               <PaletteCell
                 key={color}
                 $color={color}
-                $selected={value.toLowerCase() === color.toLowerCase()}
+                $selected={!themeSlot && value.toLowerCase() === color.toLowerCase()}
                 onClick={() => {
                   onChange(color);
                   setIsExpanded(false);
@@ -79,6 +138,8 @@ export function ColorPicker({
               />
             ))}
           </PaletteGrid>
+
+          {/* Custom Color */}
           <CustomColorRow>
             <CustomLabel>Custom:</CustomLabel>
             <CustomInput
@@ -165,16 +226,27 @@ const Dropdown = styled.div`
   min-width: 220px;
 `;
 
+const SectionLabel = styled.div`
+  font-size: 10px;
+  color: ${v("--text-secondary")};
+  margin-bottom: 3px;
+  margin-top: 6px;
+
+  &:first-child {
+    margin-top: 0;
+  }
+`;
+
 const PaletteGrid = styled.div`
   display: grid;
-  grid-template-columns: repeat(12, 1fr);
+  grid-template-columns: repeat(10, 1fr);
   gap: 2px;
-  margin-bottom: 8px;
+  margin-bottom: 1px;
 `;
 
 const PaletteCell = styled.button<{ $color: string; $selected: boolean }>`
-  width: 16px;
-  height: 16px;
+  width: 18px;
+  height: 18px;
   border: ${(p) =>
     p.$selected
       ? `2px solid ${v("--accent-primary")}`
@@ -195,6 +267,7 @@ const CustomColorRow = styled.div`
   align-items: center;
   gap: 6px;
   padding-top: 6px;
+  margin-top: 6px;
   border-top: 1px solid ${v("--border-default")};
 `;
 

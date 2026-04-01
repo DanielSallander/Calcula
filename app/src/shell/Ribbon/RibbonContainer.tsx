@@ -74,7 +74,8 @@ export function RibbonContainer(): React.ReactElement {
       style={{
         backgroundColor: "#f5f5f5",
         borderBottom: "1px solid #d0d0d0",
-        overflow: "hidden",
+        position: "relative",
+        zIndex: 10,
       }}
     >
       {/* Tab Headers - fixed height to prevent layout shift when contextual tabs appear */}
@@ -141,7 +142,6 @@ export function RibbonContainer(): React.ReactElement {
           backgroundColor: "#fff",
           display: "flex",
           gap: "0",
-          overflow: "hidden",
         }}
       >
         {groups.length > 0 ? (

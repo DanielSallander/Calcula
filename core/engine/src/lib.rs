@@ -12,6 +12,7 @@ pub mod evaluator;
 pub mod grid;
 pub mod number_format;
 pub mod style;
+pub mod theme;
 pub mod undo;
 
 // Re-export commonly used types at the crate root
@@ -26,6 +27,9 @@ pub use number_format::{format_number, format_number_with_color, format_text_wit
 pub use style::{
     BorderLineStyle, BorderStyle, Borders, CellStyle, Color, CurrencyPosition, FontStyle,
     NumberFormat, StyleRegistry, TextAlign, TextRotation, VerticalAlign,
+};
+pub use theme::{
+    ThemeColor, ThemeColorSlot, ThemeColors, ThemeDefinition, ThemeFonts, Tint,
 };
 pub use evaluator::MultiSheetContext;
 pub use undo::{UndoStack, Transaction, CellChange, UndoMergeRegion, GridSnapshot};

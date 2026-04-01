@@ -23,6 +23,7 @@ import ComputedPropertiesExtension from "./BuiltIn/ComputedProperties";
 import CellBookmarksExtension from "./BuiltIn/CellBookmarks";
 import ZoomSliderExtension from "./BuiltIn/ZoomSlider";
 import HomeTabExtension from "./BuiltIn/HomeTab";
+import DocumentThemeExtension from "./BuiltIn/DocumentTheme";
 import CollectionPreviewExtension from "./BuiltIn/CollectionPreview";
 
 // Dev-only extensions
@@ -45,6 +46,8 @@ export const builtInExtensions: ExtensionModule[] = [
   FormatCellsExtension,
   // Home Tab (always-visible ribbon tab with quick-access formatting)
   HomeTabExtension,
+  // Document Theme (Page Layout tab with theme gallery, fonts, colors)
+  DocumentThemeExtension,
   // Format Painter (depends on Edit menu being registered)
   FormatPainterExtension,
   // Paste Special (depends on Edit menu being registered)

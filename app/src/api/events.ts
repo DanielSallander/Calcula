@@ -74,6 +74,9 @@ export const AppEvents = {
 
   // Zoom events
   ZOOM_CHANGED: "app:zoom-changed",
+
+  // Theme events
+  THEME_CHANGED: "app:theme-changed",
 } as const;
 
 /** Payload emitted with FILL_COMPLETED event. */

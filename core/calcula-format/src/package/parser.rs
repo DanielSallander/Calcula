@@ -214,6 +214,7 @@ fn read_package_content(
         tables,
         slicers: vec![],
         user_files,
+        theme: engine::theme::ThemeDefinition::default(),
     })
 }
 

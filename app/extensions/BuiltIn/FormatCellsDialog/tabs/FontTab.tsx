@@ -5,8 +5,9 @@
 import React, { useState, useMemo } from "react";
 import styled from "styled-components";
 import { useFormatCellsStore } from "../hooks/useFormatCellsState";
-import { FONT_LIST, FONT_SIZES } from "../utils/fontList";
+import { FONT_LIST, FONT_SIZES, THEME_FONTS } from "../utils/fontList";
 import { ColorPicker } from "../components/ColorPicker";
+import { getCachedTheme } from "../../../../src/api/theme";
 
 const v = (name: string) => `var(${name})`;
 
@@ -36,13 +37,27 @@ export function FontTab(): React.ReactElement {
     setTextColor,
   } = useFormatCellsStore();
 
-  // Font family filter
+  // Theme font resolution for display
+  const theme = getCachedTheme();
+  const themeFontLabels: Record<string, string> = useMemo(() => {
+    if (!theme) return {};
+    return {
+      Body: `Body (${theme.fonts.body})`,
+      Headings: `Headings (${theme.fonts.heading})`,
+    };
+  }, [theme]);
+
+  // Font family filter - theme fonts come first, then regular fonts
   const [fontFilter, setFontFilter] = useState(fontFamily);
   const filteredFonts = useMemo(() => {
-    if (!fontFilter) return FONT_LIST;
+    const allFonts = [...THEME_FONTS, ...FONT_LIST];
+    if (!fontFilter) return allFonts;
     const lower = fontFilter.toLowerCase();
-    return FONT_LIST.filter((f) => f.toLowerCase().includes(lower));
-  }, [fontFilter]);
+    return allFonts.filter((f) => {
+      const label = themeFontLabels[f] || f;
+      return label.toLowerCase().includes(lower) || f.toLowerCase().includes(lower);
+    });
+  }, [fontFilter, themeFontLabels]);
 
   // Font style index
   const currentStyleIndex = FONT_STYLES.findIndex(
@@ -101,9 +116,12 @@ export function FontTab(): React.ReactElement {
                 key={font}
                 $selected={fontFamily === font}
                 onClick={() => handleFontSelect(font)}
-                style={{ fontFamily: font }}
+                style={{ fontFamily: font === "Body" || font === "Headings"
+                  ? (font === "Body" ? theme?.fonts.body : theme?.fonts.heading) || font
+                  : font
+                }}
               >
-                {font}
+                {themeFontLabels[font] || font}
               </ListItem>
             ))}
           </ListBox>

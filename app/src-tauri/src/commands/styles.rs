@@ -5,7 +5,7 @@ use crate::api_types::{CellData, FormattingParams, FormattingResult, PreviewResu
 use crate::{format_cell_value_with_color, AppState};
 use engine::{
     BorderLineStyle, BorderStyle, Cell, CellStyle, CellValue, Color, CurrencyPosition, NumberFormat,
-    TextAlign, TextRotation, VerticalAlign,
+    TextAlign, TextRotation, ThemeColor, VerticalAlign,
 };
 use tauri::State;
 
@@ -13,14 +13,16 @@ use tauri::State;
 #[tauri::command]
 pub fn get_style(state: State<AppState>, index: usize) -> StyleData {
     let styles = state.style_registry.lock().unwrap();
-    StyleData::from(styles.get(index))
+    let theme = state.theme.lock().unwrap();
+    StyleData::from_cell_style(styles.get(index), &theme)
 }
 
 /// Get all styles.
 #[tauri::command]
 pub fn get_all_styles(state: State<AppState>) -> Vec<StyleData> {
     let styles = state.style_registry.lock().unwrap();
-    styles.all_styles().iter().map(StyleData::from).collect()
+    let theme = state.theme.lock().unwrap();
+    styles.all_styles().iter().map(|s| StyleData::from_cell_style(s, &theme)).collect()
 }
 
 /// Set a cell's style index.
@@ -178,12 +180,24 @@ pub fn apply_formatting(
             }
             if let Some(ref text_color) = params.text_color {
                 if let Some(color) = Color::from_hex(text_color) {
-                    new_style.font.color = color;
+                    new_style.font.color = ThemeColor::Absolute(color);
+                }
+            }
+            if let Some(ref text_color_theme) = params.text_color_theme {
+                if let Some(slot) = engine::ThemeColorSlot::from_key(text_color_theme) {
+                    let tint = engine::Tint(params.text_color_tint.unwrap_or(0));
+                    new_style.font.color = ThemeColor::Theme { slot, tint };
                 }
             }
             if let Some(ref bg_color) = params.background_color {
                 if let Some(color) = Color::from_hex(bg_color) {
-                    new_style.background = color;
+                    new_style.background = ThemeColor::Absolute(color);
+                }
+            }
+            if let Some(ref bg_color_theme) = params.bg_color_theme {
+                if let Some(slot) = engine::ThemeColorSlot::from_key(bg_color_theme) {
+                    let tint = engine::Tint(params.bg_color_tint.unwrap_or(0));
+                    new_style.background = ThemeColor::Theme { slot, tint };
                 }
             }
             if let Some(ref align) = params.text_align {
@@ -283,10 +297,11 @@ pub fn apply_formatting(
     undo_stack.commit_transaction();
 
     // Collect all styles
+    let theme = state.theme.lock().unwrap();
     for (index, style) in styles.all_styles().iter().enumerate() {
         updated_styles.push(StyleEntry {
             index,
-            style: StyleData::from(style),
+            style: StyleData::from_cell_style(style, &theme),
         });
     }
 
@@ -357,10 +372,22 @@ pub fn apply_formatting_to_sheets(
                 if let Some(font_size) = params.font_size { new_style.font.size = font_size; }
                 if let Some(ref font_family) = params.font_family { new_style.font.family = font_family.clone(); }
                 if let Some(ref text_color) = params.text_color {
-                    if let Some(color) = Color::from_hex(text_color) { new_style.font.color = color; }
+                    if let Some(color) = Color::from_hex(text_color) { new_style.font.color = ThemeColor::Absolute(color); }
+                }
+                if let Some(ref text_color_theme) = params.text_color_theme {
+                    if let Some(slot) = engine::ThemeColorSlot::from_key(text_color_theme) {
+                        let tint = engine::Tint(params.text_color_tint.unwrap_or(0));
+                        new_style.font.color = ThemeColor::Theme { slot, tint };
+                    }
                 }
                 if let Some(ref bg_color) = params.background_color {
-                    if let Some(color) = Color::from_hex(bg_color) { new_style.background = color; }
+                    if let Some(color) = Color::from_hex(bg_color) { new_style.background = ThemeColor::Absolute(color); }
+                }
+                if let Some(ref bg_color_theme) = params.bg_color_theme {
+                    if let Some(slot) = engine::ThemeColorSlot::from_key(bg_color_theme) {
+                        let tint = engine::Tint(params.bg_color_tint.unwrap_or(0));
+                        new_style.background = ThemeColor::Theme { slot, tint };
+                    }
                 }
                 if let Some(ref align) = params.text_align {
                     new_style.text_align = match align.as_str() {
@@ -633,7 +660,7 @@ fn parse_border_side(param: &crate::api_types::BorderSideParam) -> BorderStyle {
         "dashed" | "dotted" | "double" => 1,
         _ => 0,
     };
-    let color = Color::from_hex(&param.color).unwrap_or(Color::new(0, 0, 0));
+    let color = ThemeColor::Absolute(Color::from_hex(&param.color).unwrap_or(Color::new(0, 0, 0)));
 
     BorderStyle {
         width,

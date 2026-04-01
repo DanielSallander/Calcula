@@ -574,6 +574,28 @@ export type {
 export type { Selection, SelectionType, Viewport, GridConfig, DimensionOverrides } from "./types";
 
 // ============================================================================
+// Theme API
+// ============================================================================
+
+export {
+  getDocumentTheme,
+  setDocumentTheme,
+  listBuiltinThemes,
+  getThemeColorPalette,
+  onThemeChanged,
+  getCachedTheme,
+  clearThemeCache,
+} from "./theme";
+
+export type {
+  ThemeDefinitionData,
+  ThemeColorsData,
+  ThemeFontsData,
+  ThemeColorInfo,
+  SetThemeResult,
+} from "../core/types/types";
+
+// ============================================================================
 // Fill Lists API (Custom AutoFill Lists)
 // ============================================================================
 

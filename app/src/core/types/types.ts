@@ -362,6 +362,72 @@ export interface StyleData {
   button: boolean;
   indent: number;
   shrinkToFit: boolean;
+  /** Theme slot for text color (e.g. "accent1"), undefined if absolute */
+  textColorTheme?: string;
+  /** Theme tint for text color (permille), undefined if absolute */
+  textColorTint?: number;
+  /** Theme slot for background color */
+  bgColorTheme?: string;
+  /** Theme tint for background color */
+  bgColorTint?: number;
+  /** Theme font keyword ("body" or "headings"), undefined if absolute */
+  fontFamilyTheme?: string;
+}
+
+// ============================================================================
+// Document Theme Types
+// ============================================================================
+
+/**
+ * Complete document theme definition (colors + fonts).
+ */
+export interface ThemeDefinitionData {
+  name: string;
+  colors: ThemeColorsData;
+  fonts: ThemeFontsData;
+}
+
+/**
+ * The 12 base theme colors as CSS hex strings.
+ */
+export interface ThemeColorsData {
+  dark1: string;
+  light1: string;
+  dark2: string;
+  light2: string;
+  accent1: string;
+  accent2: string;
+  accent3: string;
+  accent4: string;
+  accent5: string;
+  accent6: string;
+  hyperlink: string;
+  followedHyperlink: string;
+}
+
+/**
+ * Theme font pair (heading + body).
+ */
+export interface ThemeFontsData {
+  heading: string;
+  body: string;
+}
+
+/**
+ * A single entry in the theme color palette (for the color picker).
+ */
+export interface ThemeColorInfo {
+  slot: string;
+  tint: number;
+  resolvedColor: string;
+  label: string;
+}
+
+/**
+ * Result from setDocumentTheme: refreshed style list.
+ */
+export interface SetThemeResult {
+  styles: { index: number; style: StyleData }[];
 }
 
 /**

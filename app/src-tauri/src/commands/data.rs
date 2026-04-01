@@ -2814,11 +2814,11 @@ fn compare_cells(
             // Compare by background color
             let color_a = cell_a.as_ref().map(|c| {
                 let style = styles.get(c.style_index);
-                style.background.to_css()
+                style.background.to_css_default()
             });
             let color_b = cell_b.as_ref().map(|c| {
                 let style = styles.get(c.style_index);
-                style.background.to_css()
+                style.background.to_css_default()
             });
 
             match (color_a, color_b, &field.color) {
@@ -2842,11 +2842,11 @@ fn compare_cells(
             // Compare by font color
             let color_a = cell_a.as_ref().map(|c| {
                 let style = styles.get(c.style_index);
-                style.font.color.to_css()
+                style.font.color.to_css_default()
             });
             let color_b = cell_b.as_ref().map(|c| {
                 let style = styles.get(c.style_index);
-                style.font.color.to_css()
+                style.font.color.to_css_default()
             });
 
             match (color_a, color_b, &field.color) {

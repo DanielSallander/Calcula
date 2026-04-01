@@ -97,12 +97,13 @@ pub fn get_print_data(state: State<AppState>) -> Result<PrintData, String> {
         });
     }
 
-    // Collect all styles using the From<&CellStyle> impl
+    // Collect all styles resolved against the active theme
+    let theme = state.theme.lock().unwrap();
     let style_count = styles.len();
     let mut style_list = Vec::with_capacity(style_count);
     for i in 0..style_count {
         let s = styles.get(i);
-        style_list.push(StyleData::from(s));
+        style_list.push(StyleData::from_cell_style(s, &theme));
     }
 
     // Collect column widths and row heights as arrays

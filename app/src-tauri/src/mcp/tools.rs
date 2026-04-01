@@ -217,12 +217,12 @@ pub fn apply_cell_formatting(
             }
             if let Some(ref color) = params.text_color {
                 if let Some(c) = engine::Color::from_hex(color) {
-                    new_style.font.color = c;
+                    new_style.font.color = engine::ThemeColor::Absolute(c);
                 }
             }
             if let Some(ref color) = params.background_color {
                 if let Some(c) = engine::Color::from_hex(color) {
-                    new_style.background = c;
+                    new_style.background = engine::ThemeColor::Absolute(c);
                 }
             }
             if let Some(ref fmt) = params.number_format {

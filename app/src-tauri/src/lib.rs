@@ -47,6 +47,7 @@ pub mod distribution;
 pub mod conditional_formatting;
 pub mod tables;
 pub mod goal_seek;
+pub mod theme_commands;
 pub mod tracing;
 pub mod evaluate_formula;
 pub mod formula_eval_plan;
@@ -239,6 +240,8 @@ pub struct AppState {
     pub spill_hosts: Mutex<HashMap<(usize, u32, u32), (u32, u32)>>,
     /// Hidden rows set by the Advanced Filter extension (per sheet)
     pub advanced_filter_hidden_rows: Mutex<HashMap<usize, Vec<u32>>>,
+    /// Document theme (colors + fonts). Defaults to Office theme.
+    pub theme: Mutex<engine::ThemeDefinition>,
 }
 
 impl AppState {
@@ -318,6 +321,7 @@ pub fn create_app_state() -> AppState {
         spill_ranges: Mutex::new(HashMap::new()),
         spill_hosts: Mutex::new(HashMap::new()),
         advanced_filter_hidden_rows: Mutex::new(HashMap::new()),
+        theme: Mutex::new(engine::ThemeDefinition::default()),
     }
 }
 
@@ -3593,6 +3597,11 @@ pub fn run() {
             slicer::update_slicer_computed_property,
             slicer::remove_slicer_computed_property,
             slicer::get_slicer_computed_attributes,
+            // Theme commands
+            theme_commands::get_document_theme,
+            theme_commands::set_document_theme,
+            theme_commands::list_builtin_themes,
+            theme_commands::get_theme_color_palette,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")

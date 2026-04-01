@@ -146,6 +146,129 @@ pub struct StyleData {
     pub button: bool,
     pub indent: u8,
     pub shrink_to_fit: bool,
+    /// Theme slot for text color (e.g. "accent1"), None if absolute color.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub text_color_theme: Option<String>,
+    /// Theme tint for text color (permille), None if absolute color.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub text_color_tint: Option<i16>,
+    /// Theme slot for background color, None if absolute color.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bg_color_theme: Option<String>,
+    /// Theme tint for background color, None if absolute color.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bg_color_tint: Option<i16>,
+    /// Theme font keyword ("body" or "headings"), None if absolute font.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub font_family_theme: Option<String>,
+}
+
+// ============================================================================
+// Theme API Types
+// ============================================================================
+
+/// Theme definition data sent to/from the frontend.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ThemeDefinitionData {
+    pub name: String,
+    pub colors: ThemeColorsData,
+    pub fonts: ThemeFontsData,
+}
+
+/// The 12 base theme colors as CSS hex strings.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ThemeColorsData {
+    pub dark1: String,
+    pub light1: String,
+    pub dark2: String,
+    pub light2: String,
+    pub accent1: String,
+    pub accent2: String,
+    pub accent3: String,
+    pub accent4: String,
+    pub accent5: String,
+    pub accent6: String,
+    pub hyperlink: String,
+    pub followed_hyperlink: String,
+}
+
+/// Theme font pair.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ThemeFontsData {
+    pub heading: String,
+    pub body: String,
+}
+
+/// A single entry in the theme color palette (for the color picker).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ThemeColorInfo {
+    pub slot: String,
+    pub tint: i16,
+    pub resolved_color: String,
+    pub label: String,
+}
+
+/// Result from set_document_theme: includes refreshed style list.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SetThemeResult {
+    pub styles: Vec<StyleEntry>,
+}
+
+impl ThemeDefinitionData {
+    pub fn from_theme(theme: &engine::ThemeDefinition) -> Self {
+        ThemeDefinitionData {
+            name: theme.name.clone(),
+            colors: ThemeColorsData {
+                dark1: theme.colors.dark1.to_css(),
+                light1: theme.colors.light1.to_css(),
+                dark2: theme.colors.dark2.to_css(),
+                light2: theme.colors.light2.to_css(),
+                accent1: theme.colors.accent1.to_css(),
+                accent2: theme.colors.accent2.to_css(),
+                accent3: theme.colors.accent3.to_css(),
+                accent4: theme.colors.accent4.to_css(),
+                accent5: theme.colors.accent5.to_css(),
+                accent6: theme.colors.accent6.to_css(),
+                hyperlink: theme.colors.hyperlink.to_css(),
+                followed_hyperlink: theme.colors.followed_hyperlink.to_css(),
+            },
+            fonts: ThemeFontsData {
+                heading: theme.fonts.heading.clone(),
+                body: theme.fonts.body.clone(),
+            },
+        }
+    }
+
+    pub fn to_theme(&self) -> engine::ThemeDefinition {
+        use engine::{Color, ThemeColors, ThemeFonts};
+        let parse = |s: &str| Color::from_hex(s).unwrap_or(Color::black());
+        engine::ThemeDefinition {
+            name: self.name.clone(),
+            colors: ThemeColors {
+                dark1: parse(&self.colors.dark1),
+                light1: parse(&self.colors.light1),
+                dark2: parse(&self.colors.dark2),
+                light2: parse(&self.colors.light2),
+                accent1: parse(&self.colors.accent1),
+                accent2: parse(&self.colors.accent2),
+                accent3: parse(&self.colors.accent3),
+                accent4: parse(&self.colors.accent4),
+                accent5: parse(&self.colors.accent5),
+                accent6: parse(&self.colors.accent6),
+                hyperlink: parse(&self.colors.hyperlink),
+                followed_hyperlink: parse(&self.colors.followed_hyperlink),
+            },
+            fonts: ThemeFonts {
+                heading: self.fonts.heading.clone(),
+                body: self.fonts.body.clone(),
+            },
+        }
+    }
 }
 
 /// Dimension data for column widths and row heights.
@@ -193,6 +316,12 @@ pub struct FormattingParams {
     pub button: Option<bool>,
     pub indent: Option<u8>,
     pub shrink_to_fit: Option<bool>,
+    /// Theme slot for text color (overrides text_color when set)
+    pub text_color_theme: Option<String>,
+    pub text_color_tint: Option<i16>,
+    /// Theme slot for background color (overrides background_color when set)
+    pub bg_color_theme: Option<String>,
+    pub bg_color_tint: Option<i16>,
 }
 
 /// Result from apply_formatting that includes both updated cells and new styles.
@@ -495,7 +624,7 @@ pub fn data_to_rich_text_runs(data: &[RichTextRunData]) -> Vec<RichTextRun> {
         .collect()
 }
 
-fn border_side_to_data(side: &engine::BorderStyle) -> BorderSideData {
+fn border_side_to_data(side: &engine::BorderStyle, theme: &engine::ThemeDefinition) -> BorderSideData {
     let style_str = if side.style == BorderLineStyle::None || side.width == 0 {
         "none".to_string()
     } else {
@@ -514,22 +643,49 @@ fn border_side_to_data(side: &engine::BorderStyle) -> BorderSideData {
     };
     BorderSideData {
         style: style_str,
-        color: side.color.to_css(),
+        color: theme.resolve_color(&side.color).to_css(),
         width: side.width,
     }
 }
 
-impl From<&CellStyle> for StyleData {
-    fn from(style: &CellStyle) -> Self {
+impl StyleData {
+    /// Convert a CellStyle to StyleData, resolving theme colors and fonts.
+    pub fn from_cell_style(style: &CellStyle, theme: &engine::ThemeDefinition) -> Self {
+        use engine::ThemeColor;
+
+        let (text_color, text_color_theme, text_color_tint) = match &style.font.color {
+            ThemeColor::Absolute(_) => (theme.resolve_color(&style.font.color).to_css(), None, None),
+            ThemeColor::Theme { slot, tint } => (
+                theme.resolve_color(&style.font.color).to_css(),
+                Some(slot.key().to_string()),
+                Some(tint.0),
+            ),
+        };
+        let (background_color, bg_color_theme, bg_color_tint) = match &style.background {
+            ThemeColor::Absolute(_) => (theme.resolve_color(&style.background).to_css(), None, None),
+            ThemeColor::Theme { slot, tint } => (
+                theme.resolve_color(&style.background).to_css(),
+                Some(slot.key().to_string()),
+                Some(tint.0),
+            ),
+        };
+
+        let font_family_theme = match style.font.family.as_str() {
+            "Body" | "body" => Some("body".to_string()),
+            "Headings" | "headings" => Some("headings".to_string()),
+            _ => None,
+        };
+        let font_family = theme.resolve_font(&style.font.family).to_string();
+
         StyleData {
             bold: style.font.bold,
             italic: style.font.italic,
             underline: style.font.underline,
             strikethrough: style.font.strikethrough,
             font_size: style.font.size,
-            font_family: style.font.family.clone(),
-            text_color: style.font.color.to_css(),
-            background_color: style.background.to_css(),
+            font_family,
+            text_color,
+            background_color,
             text_align: match style.text_align {
                 TextAlign::General => "general".to_string(),
                 TextAlign::Left => "left".to_string(),
@@ -549,14 +705,19 @@ impl From<&CellStyle> for StyleData {
                 TextRotation::Rotate270 => "rotate270".to_string(),
                 TextRotation::Custom(angle) => format!("custom:{}", angle),
             },
-            border_top: border_side_to_data(&style.borders.top),
-            border_right: border_side_to_data(&style.borders.right),
-            border_bottom: border_side_to_data(&style.borders.bottom),
-            border_left: border_side_to_data(&style.borders.left),
+            border_top: border_side_to_data(&style.borders.top, theme),
+            border_right: border_side_to_data(&style.borders.right, theme),
+            border_bottom: border_side_to_data(&style.borders.bottom, theme),
+            border_left: border_side_to_data(&style.borders.left, theme),
             checkbox: style.checkbox,
             button: style.button,
             indent: style.indent,
             shrink_to_fit: style.shrink_to_fit,
+            text_color_theme,
+            text_color_tint,
+            bg_color_theme,
+            bg_color_tint,
+            font_family_theme,
         }
     }
 }
