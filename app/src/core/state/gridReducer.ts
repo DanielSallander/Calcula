@@ -1229,6 +1229,13 @@ export function gridReducer(state: GridState, action: GridAction): GridState {
       };
     }
 
+    case GRID_ACTIONS.SET_SHOW_FORMULAS: {
+      return {
+        ...state,
+        showFormulas: action.payload.showFormulas,
+      };
+    }
+
     default: {
       return state;
     }

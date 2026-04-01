@@ -7,6 +7,8 @@ import {
   IconTracePrecedents,
   IconTraceDependents,
   IconRemoveArrows,
+  emitAppEvent,
+  AppEvents,
 } from "../../../src/api";
 import type { MenuDefinition } from "../../../src/api";
 import {
@@ -14,6 +16,7 @@ import {
   addDependentLevel,
   removeAllArrows,
 } from "../lib/tracingStore";
+import { getGridStateSnapshot } from "../../../src/api/grid";
 
 // ============================================================================
 // Constants
@@ -62,6 +65,22 @@ export function registerFormulasMenu(): void {
         icon: IconRemoveArrows,
         action: () => {
           removeAllArrows();
+        },
+      },
+      {
+        id: "formulas:sep2",
+        label: "",
+        separator: true,
+      },
+      {
+        id: "formulas:showFormulas",
+        label: "Show Formulas",
+        shortcut: "Ctrl+`",
+        action: () => {
+          const state = getGridStateSnapshot();
+          const newValue = state ? !state.showFormulas : true;
+          emitAppEvent(AppEvents.SHOW_FORMULAS_TOGGLED, { showFormulas: newValue });
+          emitAppEvent(AppEvents.GRID_REFRESH);
         },
       },
     ],

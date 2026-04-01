@@ -25,6 +25,7 @@ import {
   setFreezeConfig,
   setSplitConfig,
   setViewMode,
+  setShowFormulas,
   ExtensionRegistry,
   AppEvents,
   onAppEvent,
@@ -143,6 +144,16 @@ function LayoutInner(): React.ReactElement {
       viewMode: ViewMode;
     }>(AppEvents.VIEW_MODE_CHANGED, (detail) => {
       dispatch(setViewMode(detail.viewMode));
+    });
+    return cleanup;
+  }, [dispatch]);
+
+  // Bridge: sync show formulas mode from API events into Core state.
+  useEffect(() => {
+    const cleanup = onAppEvent<{
+      showFormulas: boolean;
+    }>(AppEvents.SHOW_FORMULAS_TOGGLED, (detail) => {
+      dispatch(setShowFormulas(detail.showFormulas));
     });
     return cleanup;
   }, [dispatch]);

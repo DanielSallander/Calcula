@@ -586,7 +586,11 @@ export function drawCellText(state: RenderState): void {
         continue;
       }
 
-      const displayValue = cell.display ?? "";
+      // In Show Formulas mode, display "=formula" for formula cells
+      const rawDisplay = cell.display ?? "";
+      const displayValue = (state.showFormulas && cell.formula)
+        ? cell.formula
+        : rawDisplay;
       const isEmpty = displayValue === "";
 
       // For empty cells with default style, skip entirely (unless interceptors or decorations exist)
@@ -742,7 +746,10 @@ export function drawCellText(state: RenderState): void {
         textColor = cell.displayColor;
       }
 
-      if (baseCellStyle.textAlign === "general" || baseCellStyle.textAlign === "") {
+      // In Show Formulas mode, force left alignment for formula cells
+      if (state.showFormulas && cell.formula) {
+        textAlign = "left";
+      } else if (baseCellStyle.textAlign === "general" || baseCellStyle.textAlign === "") {
         if (isErrorValue(displayValue)) {
           textColor = theme.cellTextError;
           textAlign = "center";
@@ -895,7 +902,7 @@ export function drawCellText(state: RenderState): void {
       // Rich Text rendering (partial formatting within a cell)
       // -----------------------------------------------------------------------
       const richTextRuns = (cell as { richText?: RichTextRun[] }).richText;
-      if (richTextRuns && richTextRuns.length > 0) {
+      if (richTextRuns && richTextRuns.length > 0 && !state.showFormulas) {
         ctx.textBaseline = "middle";
         const textX = cellLeft + paddingX + indentOffset;
         const textY = vAlign === "top"

@@ -172,6 +172,13 @@ export function useViewMenu(): { menu: MenuDefinition; handlers: ViewMenuHandler
     emitAppEvent(AppEvents.GRID_REFRESH);
   }, []);
 
+  // Show Formulas handler
+  const handleToggleShowFormulas = useCallback(() => {
+    const newValue = !gridState.showFormulas;
+    emitAppEvent(AppEvents.SHOW_FORMULAS_TOGGLED, { showFormulas: newValue });
+    emitAppEvent(AppEvents.GRID_REFRESH);
+  }, [gridState.showFormulas]);
+
   // Activity Bar state
   const isActivityBarOpen = useIsActivityBarOpen();
   const activeActivityViewId = useActiveActivityViewId();
@@ -284,6 +291,12 @@ export function useViewMenu(): { menu: MenuDefinition; handlers: ViewMenuHandler
   items.push(
     { id: 'view.sep5', label: '', separator: true },
     { id: 'view.goToSpecial', label: 'Go To Special...', action: handleGoToSpecial, shortcut: 'Ctrl+G' },
+  );
+
+  // Show Formulas section
+  items.push(
+    { id: 'view.sep6', label: '', separator: true },
+    { id: 'view.showFormulas', label: 'Show Formulas', action: handleToggleShowFormulas, checked: gridState.showFormulas, shortcut: 'Ctrl+`' },
   );
 
   const menu: MenuDefinition = {

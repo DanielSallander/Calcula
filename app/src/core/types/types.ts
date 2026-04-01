@@ -724,6 +724,8 @@ export interface GridState {
   viewMode: ViewMode;
   /** Zoom factor (1.0 = 100%, 0.5 = 50%, 2.0 = 200%) */
   zoom: number;
+  /** Whether to show raw formulas instead of calculated values */
+  showFormulas: boolean;
 }
 
 /**
@@ -771,6 +773,7 @@ export function createInitialGridState(): GridState {
     splitViewport: { scrollX: 0, scrollY: 0, startRow: 0, startCol: 0, rowCount: 50, colCount: 20 },
     viewMode: "normal",
     zoom: ZOOM_DEFAULT,
+    showFormulas: false,
   };
 }
 

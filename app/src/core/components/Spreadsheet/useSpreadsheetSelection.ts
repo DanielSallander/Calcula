@@ -43,6 +43,7 @@ import { isSheetGroupingActive, getSelectedSheetIndices } from "../../state/shee
 import { setColumnWidth, setRowHeight, setManuallyHiddenCols, setManuallyHiddenRows } from "../../state/gridActions";
 import { cellEvents } from "../../lib/cellEvents";
 import { CommandRegistry } from "../../../api/commands";
+import { emitAppEvent, AppEvents } from "../../../api/events";
 import type { GridCanvasHandle } from "../Grid";
 
 type GridState = ReturnType<typeof useGridState>;
@@ -1038,10 +1039,18 @@ export function useSpreadsheetSelection({
         await CommandRegistry.execute('core.clipboard.pasteSpecial');
         break;
 
+      // Show Formulas toggle
+      case 'view.toggleShowFormulas': {
+        const currentShowFormulas = state.showFormulas;
+        emitAppEvent(AppEvents.SHOW_FORMULAS_TOGGLED, { showFormulas: !currentShowFormulas });
+        emitAppEvent(AppEvents.GRID_REFRESH);
+        break;
+      }
+
       default:
         console.warn(`[useSpreadsheetSelection] Unknown command: ${command}`);
     }
-  }, [toggleFormatProperty, applyFormattingToSelection, handleInsertDate, handleInsertTime, handleFillDown]);
+  }, [toggleFormatProperty, applyFormattingToSelection, handleInsertDate, handleInsertTime, handleFillDown, state.showFormulas]);
 
   // Keyboard handling with clipboard shortcuts, ESC to clear clipboard, DELETE to clear contents, and undo/redo
   // FIX: Use focusContainerRef instead of containerRef for keyboard events

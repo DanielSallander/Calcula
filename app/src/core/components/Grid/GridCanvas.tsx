@@ -50,6 +50,8 @@ export interface GridCanvasProps {
   splitViewport?: Viewport;
   /** Current view mode */
   viewMode?: ViewMode;
+  /** Whether to show raw formulas instead of calculated values */
+  showFormulas?: boolean;
   /** Optional theme override */
   theme?: GridTheme;
   /** Callback when canvas is clicked */
@@ -169,6 +171,7 @@ export const GridCanvas = forwardRef<GridCanvasHandle, GridCanvasProps>(
       splitConfig = DEFAULT_SPLIT_CONFIG,
       splitViewport,
       viewMode = "normal",
+      showFormulas = false,
       theme = DEFAULT_THEME,
       onMouseDown,
       onMouseMove,
@@ -502,13 +505,15 @@ export const GridCanvas = forwardRef<GridCanvasHandle, GridCanvasProps>(
         splitConfig,
         splitViewport,
         viewMode,
+        undefined, // pageSetup
+        showFormulas,
       );
 
       const perfDrawMs = performance.now() - perfDrawStart;
       if (perfDrawMs > 5) {
         console.log(`[PERF] draw ms=${perfDrawMs.toFixed(1)}`, new Error().stack?.split('\n').slice(1, 4).join(' <- '));
       }
-    }, [context, canvasSize.width, canvasSize.height, config, viewport, selection, editing, cells, theme, formulaReferences, dims, styleCache, fillPreviewRange, selectionDragPreview, selectionDragMode, clipboardSelection, clipboardMode, freezeConfig, splitConfig, splitViewport, viewMode, currentSheetName, zoom, spillRanges]);
+    }, [context, canvasSize.width, canvasSize.height, config, viewport, selection, editing, cells, theme, formulaReferences, dims, styleCache, fillPreviewRange, selectionDragPreview, selectionDragMode, clipboardSelection, clipboardMode, freezeConfig, splitConfig, splitViewport, viewMode, showFormulas, currentSheetName, zoom, spillRanges]);
 
     /**
      * Start row insertion animation.

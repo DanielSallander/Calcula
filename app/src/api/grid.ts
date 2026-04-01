@@ -48,6 +48,7 @@ export {
   setZoom,
   setSplitConfig,
   setViewMode,
+  setShowFormulas,
 } from "../core/state/gridActions";
 
 // Re-export action types

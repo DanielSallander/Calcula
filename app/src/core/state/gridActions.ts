@@ -62,6 +62,7 @@ export const GRID_ACTIONS = {
   SET_SPLIT_CONFIG: "SET_SPLIT_CONFIG",
   SET_SPLIT_VIEWPORT: "SET_SPLIT_VIEWPORT",
   SET_VIEW_MODE: "SET_VIEW_MODE",
+  SET_SHOW_FORMULAS: "SET_SHOW_FORMULAS",
 } as const;
 
 // Action interfaces
@@ -280,6 +281,11 @@ export interface SetViewModeAction {
   payload: { viewMode: ViewMode };
 }
 
+export interface SetShowFormulasAction {
+  type: typeof GRID_ACTIONS.SET_SHOW_FORMULAS;
+  payload: { showFormulas: boolean };
+}
+
 // Union type of all actions
 export type GridAction =
   | SetSelectionAction
@@ -320,7 +326,8 @@ export type GridAction =
   | SetZoomAction
   | SetSplitConfigAction
   | SetSplitViewportAction
-  | SetViewModeAction;
+  | SetViewModeAction
+  | SetShowFormulasAction;
 
 // Action creators
 
@@ -773,5 +780,16 @@ export function setViewMode(viewMode: ViewMode): SetViewModeAction {
   return {
     type: GRID_ACTIONS.SET_VIEW_MODE,
     payload: { viewMode },
+  };
+}
+
+/**
+ * Toggle or set the Show Formulas mode.
+ * When active, cells display raw formulas instead of calculated values.
+ */
+export function setShowFormulas(showFormulas: boolean): SetShowFormulasAction {
+  return {
+    type: GRID_ACTIONS.SET_SHOW_FORMULAS,
+    payload: { showFormulas },
   };
 }

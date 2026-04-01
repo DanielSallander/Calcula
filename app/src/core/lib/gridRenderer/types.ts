@@ -133,4 +133,6 @@ export interface RenderState {
   splitBarSize?: number;
   /** Independent viewport for split window top/left panes */
   splitViewport?: Viewport;
+  /** Whether to show raw formulas instead of calculated values */
+  showFormulas?: boolean;
 }

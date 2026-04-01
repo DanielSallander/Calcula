@@ -397,7 +397,12 @@ function drawCellTextZone(
       
       const cell = cells.get(key);
       
-      if (!cell || cell.display === "") {
+      // In Show Formulas mode, use "=formula" for formula cells
+      const cellDisplayText = (state.showFormulas && cell?.formula)
+        ? cell.formula
+        : cell?.display ?? "";
+
+      if (!cell || cellDisplayText === "") {
         baseX += colWidth;
         continue;
       }
@@ -455,45 +460,47 @@ function drawCellTextZone(
 
       // Draw cell decorations (e.g., sparklines) between background and text
       if (hasCellDecorations()) {
-        applyCellDecorations({ ctx, row, col, cellLeft, cellTop, cellRight, cellBottom, config, viewport, dimensions, display: cell.display, styleIndex, styleCache });
+        applyCellDecorations({ ctx, row, col, cellLeft, cellTop, cellRight, cellBottom, config, viewport, dimensions, display: cellDisplayText, styleIndex, styleCache });
       }
 
       const fontWeight = cellStyle?.bold ? "bold" : "normal";
       const fontStyle = cellStyle?.italic ? "italic" : "normal";
       const fontSize = cellStyle?.fontSize ?? theme.cellFontSize;
       const fontFamily = cellStyle?.fontFamily ?? theme.cellFontFamily;
-      
+
       ctx.font = `${fontStyle} ${fontWeight} ${fontSize}px ${fontFamily}`;
       ctx.fillStyle = cellStyle?.textColor ?? theme.cellText;
       ctx.textBaseline = "middle";
-      
+
       const textX = cellLeft + paddingX;
       const textY = baseY + actualHeight / 2;
-      
+
       let textAlign: "left" | "right" | "center" = "left";
-      if (cellStyle?.textAlign === "right") {
+      if (state.showFormulas && cell.formula) {
+        textAlign = "left";
+      } else if (cellStyle?.textAlign === "right") {
         textAlign = "right";
       } else if (cellStyle?.textAlign === "center") {
         textAlign = "center";
       } else if (cellStyle?.textAlign === "general" || !cellStyle?.textAlign) {
         const numericPattern = /^-?[\d,]+\.?\d*%?$|^-?\.\d+%?$/;
-        if (numericPattern.test(cell.display.trim())) {
+        if (numericPattern.test(cellDisplayText.trim())) {
           textAlign = "right";
         }
       }
-      
+
       ctx.textAlign = "left";
       let drawX = textX;
-      const textMetrics = ctx.measureText(cell.display);
+      const textMetrics = ctx.measureText(cellDisplayText);
       const textWidth = Math.min(textMetrics.width, availableWidth);
-      
+
       if (textAlign === "right") {
         drawX = cellLeft + (cellRight - cellLeft) - paddingX - textWidth;
       } else if (textAlign === "center") {
         drawX = cellLeft + ((cellRight - cellLeft) - textWidth) / 2;
       }
-      
-      ctx.fillText(cell.display, drawX, textY, availableWidth);
+
+      ctx.fillText(cellDisplayText, drawX, textY, availableWidth);
       
       if (cellStyle?.underline) {
         ctx.beginPath();
@@ -570,6 +577,8 @@ export function renderGrid(
   viewMode?: ViewMode,
   // Page setup for page layout view
   pageSetup?: { marginTop: number; marginBottom: number; marginLeft: number; marginRight: number; paperWidth: number; paperHeight: number; header: string; footer: string },
+  // Show Formulas mode - display raw formulas instead of calculated values
+  showFormulas?: boolean,
 ): void {
   const rowHeaderWidth = config.rowHeaderWidth || 50;
   const colHeaderHeight = config.colHeaderHeight || 24;
@@ -625,6 +634,8 @@ export function renderGrid(
     splitBarSize: splitBarThickness,
     // Independent split viewport for headers
     splitViewport: hasSplit ? splitViewport : undefined,
+    // Show Formulas mode
+    showFormulas: showFormulas || false,
   };
 
   ctx.fillStyle = theme.cellBackground;

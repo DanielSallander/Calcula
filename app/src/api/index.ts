@@ -56,6 +56,7 @@ export {
   setFreezeConfig,
   setSplitConfig,
   setViewMode,
+  setShowFormulas,
   setHiddenRows,
   setHiddenCols,
   setManuallyHiddenRows,

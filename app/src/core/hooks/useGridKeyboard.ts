@@ -635,6 +635,16 @@ export function useGridKeyboard(options: UseGridKeyboardOptions): void {
         return;
       }
 
+      // Handle Ctrl+` - Toggle Show Formulas mode
+      if (modKey && !altKey && !shiftKey && key === '`' && onCommand) {
+        event.preventDefault();
+        event.stopPropagation();
+        eventLog.keyboard('Grid', 'handleKeyDown', 'Ctrl+`', ['Ctrl']);
+        onCommand('view.toggleShowFormulas');
+        fnLog.exit('handleKeyDown', 'toggle show formulas');
+        return;
+      }
+
       // Handle Ctrl+Shift shortcuts for number formats and time insertion
       // On US keyboard, Shift+digit produces the symbol (e.g., Shift+4 = $)
       // Browsers report the shifted symbol as event.key when Ctrl+Shift is held
