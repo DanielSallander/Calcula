@@ -3548,6 +3548,17 @@ pub fn run() {
             scripting::save_script,
             scripting::delete_script,
             scripting::rename_script,
+            // Notebook commands
+            scripting::notebook_create,
+            scripting::notebook_save,
+            scripting::notebook_load,
+            scripting::notebook_list,
+            scripting::notebook_delete,
+            scripting::notebook_run_cell,
+            scripting::notebook_run_all,
+            scripting::notebook_rewind,
+            scripting::notebook_run_from,
+            scripting::notebook_reset_runtime,
             // Control metadata commands
             controls::get_control_metadata,
             controls::set_control_property,

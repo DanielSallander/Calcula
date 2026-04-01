@@ -4,6 +4,8 @@
 
 pub mod types;
 pub mod commands;
+pub mod notebook_commands;
 
 pub use commands::*;
-pub use types::{ScriptState, ScriptSummary, WorkbookScript};
+pub use notebook_commands::*;
+pub use types::{ScriptState, ScriptSummary, WorkbookScript, NotebookDocument, NotebookSummary};

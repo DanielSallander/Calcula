@@ -31,6 +31,10 @@ import {
 import { FILE_VIEWER_PANE_ID } from "./constants";
 import { getSettings } from "../Settings/SettingsView";
 import { MarkdownView, getViewMode } from "./FileRenderer";
+import { listNotebooks, deleteNotebook as deleteNotebookApi } from "../ScriptNotebook/lib/notebookApi";
+import { openActivityView } from "../../src/api";
+import { useNotebookStore } from "../ScriptNotebook/lib/useNotebookStore";
+import type { NotebookSummary } from "../ScriptNotebook/types";
 
 // ============================================================================
 // SVG Icons (minimalistic, 14x14)
@@ -121,6 +125,25 @@ function FilesGroupIcon() {
   return h(Icon, { color: "#78909c" },
     h("path", { d: "M3 2a1 1 0 00-1 1v10a1 1 0 001 1h10a1 1 0 001-1V5l-3-3H3z" }),
     h("path", { d: "M10 2v3h3" }),
+  );
+}
+
+/** Notebooks section header icon */
+function NotebooksGroupIcon() {
+  return h(Icon, { color: "#7e57c2" },
+    h("rect", { x: 3, y: 1, width: 10, height: 14, rx: 1 }),
+    h("line", { x1: 6, y1: 1, x2: 6, y2: 15 }),
+    h("line", { x1: 6, y1: 6, x2: 13, y2: 6 }),
+    h("line", { x1: 6, y1: 10, x2: 13, y2: 10 }),
+  );
+}
+
+/** Single notebook icon */
+function NotebookItemIcon() {
+  return h(Icon, { color: "#7e57c2" },
+    h("rect", { x: 3, y: 1, width: 10, height: 14, rx: 1 }),
+    h("line", { x1: 6, y1: 1, x2: 6, y2: 15 }),
+    h("path", { d: "M8.5 5l2 1.5-2 1.5V5z", fill: "#7e57c2", stroke: "none" }),
   );
 }
 
@@ -296,6 +319,7 @@ export function FileExplorerView(_props: ActivityViewProps): React.ReactElement 
   const [tables, setTables] = useState<Table[]>([]);
   const [namedRanges, setNamedRanges] = useState<NamedRange[]>([]);
   const [virtualFiles, setVirtualFiles] = useState<VirtualFileEntry[]>([]);
+  const [notebooks, setNotebooks] = useState<NotebookSummary[]>([]);
   const [expandedNodes, setExpandedNodes] = useState<Set<string>>(
     new Set(["sheets", "files"])
   );
@@ -338,17 +362,19 @@ export function FileExplorerView(_props: ActivityViewProps): React.ReactElement 
 
   const refresh = useCallback(async () => {
     try {
-      const [sheetsResult, tablesResult, rangesResult, filesResult] = await Promise.all([
+      const [sheetsResult, tablesResult, rangesResult, filesResult, notebooksResult] = await Promise.all([
         getSheets(),
         getAllTables().catch(() => [] as Table[]),
         getAllNamedRanges().catch(() => [] as NamedRange[]),
         listVirtualFiles().catch(() => [] as VirtualFileEntry[]),
+        listNotebooks().catch(() => [] as NotebookSummary[]),
       ]);
       setSheets(sheetsResult.sheets);
       setActiveSheet(sheetsResult.activeIndex);
       setTables(tablesResult);
       setNamedRanges(rangesResult);
       setVirtualFiles(filesResult);
+      setNotebooks(notebooksResult);
     } catch (err) {
       console.error("[FileExplorer] Failed to load data:", err);
     }
@@ -608,6 +634,22 @@ export function FileExplorerView(_props: ActivityViewProps): React.ReactElement 
     };
   }, [dragState, findDropTarget, previewFile, refresh]);
 
+  // ---------- Notebook Handlers ----------
+  const handleOpenNotebook = useCallback((notebookId: string) => {
+    // Open the notebook in the Notebook activity view
+    useNotebookStore.getState().openNotebook(notebookId);
+    openActivityView("script-notebook");
+  }, []);
+
+  const handleDeleteNotebook = useCallback(async (notebookId: string) => {
+    try {
+      await deleteNotebookApi(notebookId);
+      refresh();
+    } catch (err) {
+      console.error("[FileExplorer] Delete notebook failed:", err);
+    }
+  }, [refresh]);
+
   // ---------- Context Menu ----------
   const showContextMenu = useCallback((e: React.MouseEvent, node: TreeNode) => {
     e.preventDefault();
@@ -630,12 +672,16 @@ export function FileExplorerView(_props: ActivityViewProps): React.ReactElement 
       items.push({ label: "Open in Task Pane", action: () => openInTaskPane(node.virtualPath!) });
       items.push({ label: "Rename...", action: () => startRename(node.id, node.virtualPath!, false) });
       items.push({ label: "Delete", action: () => handleDelete(node.virtualPath!) });
+    } else if (node.id.startsWith("notebook-")) {
+      const nbId = node.id.replace("notebook-", "");
+      items.push({ label: "Open", action: () => handleOpenNotebook(nbId) });
+      items.push({ label: "Delete", action: () => handleDeleteNotebook(nbId) });
     }
 
     if (items.length > 0) {
       setContextMenu({ x: e.clientX, y: e.clientY, items });
     }
-  }, [startCreate, startRename, handleDelete, openInTaskPane]);
+  }, [startCreate, startRename, handleDelete, openInTaskPane, handleOpenNotebook, handleDeleteNotebook]);
 
   // ---------- Build file tree ----------
   function buildFileTree(files: VirtualFileEntry[]): TreeNode[] {
@@ -753,6 +799,22 @@ export function FileExplorerView(_props: ActivityViewProps): React.ReactElement 
         label: r.name,
         icon: h(NamedRangeIcon, null),
         detail: r.refersTo,
+      })),
+    });
+  }
+
+  if (notebooks.length > 0) {
+    tree.push({
+      id: "notebooks",
+      label: `Notebooks (${notebooks.length})`,
+      icon: h(NotebooksGroupIcon, null),
+      bold: true,
+      children: notebooks.map((nb) => ({
+        id: `notebook-${nb.id}`,
+        label: nb.name,
+        icon: h(NotebookItemIcon, null),
+        detail: `${nb.cellCount} cell${nb.cellCount !== 1 ? "s" : ""}`,
+        action: () => handleOpenNotebook(nb.id),
       })),
     });
   }

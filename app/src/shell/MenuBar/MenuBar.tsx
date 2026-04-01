@@ -177,6 +177,10 @@ export function MenuBar(): React.ReactElement {
                            target.tagName === 'TEXTAREA' ||
                            target.isContentEditable;
 
+      // Don't intercept any keyboard events when focus is inside a Monaco editor
+      // (e.g., notebook cells, chart spec editor). Monaco handles its own shortcuts.
+      if (target.closest?.(".monaco-editor")) return;
+
       if (isInputField && !e.ctrlKey && !e.metaKey) return;
 
       // Don't intercept standard text editing shortcuts when focus is in an input/textarea

@@ -377,13 +377,17 @@ export function useGridKeyboard(options: UseGridKeyboardOptions): void {
         return;
       }
 
-      // Skip if focus is inside an input, textarea, or contenteditable element
-      // (e.g. file editor in the side panel or task pane)
+      // Skip if focus is inside an input, textarea, contenteditable, or Monaco editor
+      // (e.g. file editor in the side panel, task pane, or notebook cells)
       const target = event.target as HTMLElement;
       if (target) {
         const tag = target.tagName;
         if (tag === "INPUT" || tag === "TEXTAREA" || target.isContentEditable) {
           fnLog.exit('handleKeyDown', 'skipped (focus in form element)');
+          return;
+        }
+        if (target.closest(".monaco-editor")) {
+          fnLog.exit('handleKeyDown', 'skipped (focus in Monaco editor)');
           return;
         }
       }

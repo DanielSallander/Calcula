@@ -40,6 +40,7 @@ import { registerSubtotalsExtension, unregisterSubtotalsExtension } from "./Subt
 import { registerCustomFillListsExtension, unregisterCustomFillListsExtension } from "./CustomFillLists";
 import { registerGoToSpecialExtension, unregisterGoToSpecialExtension } from "./GoToSpecial";
 import { registerCsvImportExportExtension, unregisterCsvImportExportExtension } from "./CsvImportExport";
+import { registerScriptNotebookExtension, unregisterScriptNotebookExtension } from "./ScriptNotebook";
 
 /**
  * Load all extensions.
@@ -79,6 +80,7 @@ export function loadExtensions(): void {
   registerSparklineExtension();
   registerReviewExtension();
   registerScriptEditorExtension();
+  registerScriptNotebookExtension();
   registerControlsExtension();
   registerBiExtension();
   registerPrintExtension();
@@ -113,6 +115,7 @@ export function unloadExtensions(): void {
   unregisterPrintExtension();
   unregisterBiExtension();
   unregisterControlsExtension();
+  unregisterScriptNotebookExtension();
   unregisterScriptEditorExtension();
   unregisterReviewExtension();
   unregisterSparklineExtension();
@@ -169,6 +172,7 @@ export { registerSparklineExtension, unregisterSparklineExtension };
 export { registerReviewExtension, unregisterReviewExtension };
 export { registerCalculationOptionsExtension, unregisterCalculationOptionsExtension };
 export { registerScriptEditorExtension, unregisterScriptEditorExtension };
+export { registerScriptNotebookExtension, unregisterScriptNotebookExtension };
 export { registerControlsExtension, unregisterControlsExtension };
 export { registerBiExtension, unregisterBiExtension };
 export { registerPrintExtension, unregisterPrintExtension };

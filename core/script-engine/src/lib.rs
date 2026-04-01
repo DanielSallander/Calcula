@@ -5,6 +5,7 @@
 //! The engine operates on a ScriptContext (cloned from AppState) and returns
 //! a ScriptResult with the outcome and any modified grid data.
 
+pub mod notebook;
 pub mod ops;
 pub mod runtime;
 pub mod types;
@@ -76,4 +77,5 @@ impl ScriptEngine {
 }
 
 // Re-export key types for consumers
+pub use notebook::NotebookSession;
 pub use types::{ScriptContext, ScriptMeta, ScriptResult};
