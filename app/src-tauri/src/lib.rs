@@ -3280,6 +3280,8 @@ pub fn run() {
             persistence::delete_virtual_file,
             persistence::rename_virtual_file,
             persistence::get_ai_context,
+            persistence::read_text_file,
+            persistence::write_text_file,
             // Sheet commands
             sheets::get_sheets,
             sheets::get_active_sheet,

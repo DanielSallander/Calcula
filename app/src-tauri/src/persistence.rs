@@ -852,3 +852,65 @@ pub fn get_ai_context(
 
     Ok(serialize_for_ai(&sheet_inputs, &options))
 }
+
+// ============================================================================
+// RAW TEXT FILE I/O (for CSV import/export)
+// ============================================================================
+
+/// Read a text file with optional encoding detection.
+/// Supports UTF-8 (with or without BOM), and falls back to Windows-1252 (ANSI).
+#[tauri::command]
+pub fn read_text_file(path: String, encoding: Option<String>) -> Result<String, String> {
+    let path_buf = PathBuf::from(&path);
+    let bytes = std::fs::read(&path_buf).map_err(|e| format!("Failed to read file: {}", e))?;
+
+    let enc = encoding.unwrap_or_default().to_lowercase();
+
+    match enc.as_str() {
+        "utf-8" | "utf8" | "" => {
+            // Try UTF-8 first, strip BOM if present
+            let text = if bytes.starts_with(&[0xEF, 0xBB, 0xBF]) {
+                String::from_utf8(bytes[3..].to_vec())
+            } else {
+                String::from_utf8(bytes.clone())
+            };
+            match text {
+                Ok(s) => Ok(s),
+                Err(_) if enc.is_empty() => {
+                    // Auto-detect: fall back to Windows-1252
+                    Ok(bytes.iter().map(|&b| b as char).collect())
+                }
+                Err(e) => Err(format!("UTF-8 decode error: {}", e)),
+            }
+        }
+        "ansi" | "windows-1252" | "latin1" | "iso-8859-1" => {
+            Ok(bytes.iter().map(|&b| b as char).collect())
+        }
+        _ => Err(format!("Unsupported encoding: {}", enc)),
+    }
+}
+
+/// Write a text string to a file with the specified encoding.
+#[tauri::command]
+pub fn write_text_file(path: String, content: String, encoding: Option<String>) -> Result<(), String> {
+    let path_buf = PathBuf::from(&path);
+
+    let enc = encoding.unwrap_or_default().to_lowercase();
+
+    let bytes = match enc.as_str() {
+        "utf-8-bom" => {
+            let mut bom = vec![0xEF, 0xBB, 0xBF];
+            bom.extend_from_slice(content.as_bytes());
+            bom
+        }
+        "ansi" | "windows-1252" | "latin1" | "iso-8859-1" => {
+            content.chars().map(|c| {
+                let cp = c as u32;
+                if cp <= 255 { cp as u8 } else { b'?' }
+            }).collect()
+        }
+        _ => content.into_bytes(), // UTF-8 (default)
+    };
+
+    std::fs::write(&path_buf, bytes).map_err(|e| format!("Failed to write file: {}", e))
+}

@@ -39,6 +39,7 @@ import { registerAdvancedFilterExtension, unregisterAdvancedFilterExtension } fr
 import { registerSubtotalsExtension, unregisterSubtotalsExtension } from "./Subtotals";
 import { registerCustomFillListsExtension, unregisterCustomFillListsExtension } from "./CustomFillLists";
 import { registerGoToSpecialExtension, unregisterGoToSpecialExtension } from "./GoToSpecial";
+import { registerCsvImportExportExtension, unregisterCsvImportExportExtension } from "./CsvImportExport";
 
 /**
  * Load all extensions.
@@ -73,6 +74,7 @@ export function loadExtensions(): void {
   registerSubtotalsExtension();
   registerCustomFillListsExtension();
   registerGoToSpecialExtension();
+  registerCsvImportExportExtension();
   registerCheckboxExtension();
   registerSparklineExtension();
   registerReviewExtension();
@@ -116,6 +118,7 @@ export function unloadExtensions(): void {
   unregisterSparklineExtension();
   unregisterCheckboxExtension();
   unregisterSubtotalsExtension();
+  unregisterCsvImportExportExtension();
   unregisterGoToSpecialExtension();
   unregisterCustomFillListsExtension();
   unregisterAdvancedFilterExtension();
@@ -181,3 +184,4 @@ export { registerAdvancedFilterExtension, unregisterAdvancedFilterExtension };
 export { registerSubtotalsExtension, unregisterSubtotalsExtension };
 export { registerCustomFillListsExtension, unregisterCustomFillListsExtension };
 export { registerGoToSpecialExtension, unregisterGoToSpecialExtension };
+export { registerCsvImportExportExtension, unregisterCsvImportExportExtension };
