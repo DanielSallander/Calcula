@@ -47,6 +47,9 @@ pub mod distribution;
 pub mod conditional_formatting;
 pub mod tables;
 pub mod goal_seek;
+pub mod scenario_manager;
+pub mod data_tables;
+pub mod solver;
 pub mod theme_commands;
 pub mod tracing;
 pub mod evaluate_formula;
@@ -242,6 +245,8 @@ pub struct AppState {
     pub advanced_filter_hidden_rows: Mutex<HashMap<usize, Vec<u32>>>,
     /// Document theme (colors + fonts). Defaults to Office theme.
     pub theme: Mutex<engine::ThemeDefinition>,
+    /// Scenario Manager: per-sheet list of scenarios
+    pub scenarios: Mutex<HashMap<usize, Vec<api_types::Scenario>>>,
 }
 
 impl AppState {
@@ -322,6 +327,7 @@ pub fn create_app_state() -> AppState {
         spill_hosts: Mutex::new(HashMap::new()),
         advanced_filter_hidden_rows: Mutex::new(HashMap::new()),
         theme: Mutex::new(engine::ThemeDefinition::default()),
+        scenarios: Mutex::new(HashMap::new()),
     }
 }
 
@@ -1033,7 +1039,7 @@ fn col_letter_to_index(col: &str) -> u32 {
     result.saturating_sub(1)
 }
 
-fn index_to_col_letter(mut idx: u32) -> String {
+pub fn column_index_to_letter(mut idx: u32) -> String {
     let mut result = String::new();
     loop {
         result.insert(0, (b'A' + (idx % 26) as u8) as char);
@@ -1104,14 +1110,14 @@ pub fn resolve_spill_refs_in_ast(
                         sheet: sheet.clone(),
                         start: Box::new(ParserExpr::CellRef {
                             sheet: None,
-                            col: index_to_col_letter(min_col),
+                            col: column_index_to_letter(min_col),
                             row: min_row + 1,
                             col_absolute: *col_absolute,
                             row_absolute: *row_absolute,
                         }),
                         end: Box::new(ParserExpr::CellRef {
                             sheet: None,
-                            col: index_to_col_letter(max_col),
+                            col: column_index_to_letter(max_col),
                             row: max_row + 1,
                             col_absolute: *col_absolute,
                             row_absolute: *row_absolute,
@@ -3714,6 +3720,19 @@ pub fn run() {
             tables::convert_formula_to_table_refs,
             // Goal Seek command
             goal_seek::goal_seek,
+            // Scenario Manager commands
+            scenario_manager::scenario_list,
+            scenario_manager::scenario_add,
+            scenario_manager::scenario_delete,
+            scenario_manager::scenario_show,
+            scenario_manager::scenario_summary,
+            scenario_manager::scenario_merge,
+            // Data Tables commands
+            data_tables::data_table_one_var,
+            data_tables::data_table_two_var,
+            // Solver commands
+            solver::solver_solve,
+            solver::solver_revert,
             // Data Consolidation command
             consolidate::consolidate_data,
             // Tracing commands (Trace Precedents / Trace Dependents)

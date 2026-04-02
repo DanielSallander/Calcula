@@ -684,3 +684,66 @@ export type {
   PageSetup,
   PrintData,
 } from "./backend";
+
+// ============================================================================
+// Scenario Manager API
+// ============================================================================
+
+export {
+  scenarioList,
+  scenarioAdd,
+  scenarioDelete,
+  scenarioShow,
+  scenarioSummary,
+  scenarioMerge,
+} from "./backend";
+
+export type {
+  ScenarioCell,
+  Scenario,
+  ScenarioAddParams,
+  ScenarioShowParams,
+  ScenarioDeleteParams,
+  ScenarioSummaryRow,
+  ScenarioSummaryParams,
+  ScenarioSummaryResult,
+  ScenarioShowResult,
+  ScenarioListResult,
+  ScenarioResult,
+} from "./backend";
+
+// ============================================================================
+// Data Tables API
+// ============================================================================
+
+export {
+  dataTableOneVar,
+  dataTableTwoVar,
+} from "./backend";
+
+export type {
+  DataTableOneVarParams,
+  DataTableTwoVarParams,
+  DataTableCellResult,
+  DataTableResult,
+} from "./backend";
+
+// ============================================================================
+// Solver API
+// ============================================================================
+
+export {
+  solverSolve,
+  solverRevert,
+} from "./backend";
+
+export type {
+  SolverObjective,
+  ConstraintOperator,
+  SolverConstraint,
+  SolverMethod,
+  SolverVariableCell,
+  SolverParams,
+  SolverVariableValue,
+  SolverResultData,
+} from "./backend";

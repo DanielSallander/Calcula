@@ -3613,3 +3613,245 @@ export async function recalculateFormulas(): Promise<CellData[]> {
 export function listenForEvent(event: string, handler: (payload: unknown) => void): Promise<UnlistenFn> {
   return listen(event, (e) => handler(e.payload));
 }
+
+// ============================================================================
+// Scenario Manager
+// ============================================================================
+
+/** A single changing cell within a scenario. */
+export interface ScenarioCell {
+  row: number;
+  col: number;
+  value: string;
+}
+
+/** A named scenario. */
+export interface Scenario {
+  name: string;
+  changingCells: ScenarioCell[];
+  comment: string;
+  createdBy: string;
+  sheetIndex: number;
+}
+
+/** Parameters for adding/updating a scenario. */
+export interface ScenarioAddParams {
+  name: string;
+  changingCells: ScenarioCell[];
+  comment: string;
+  sheetIndex: number;
+}
+
+/** Parameters for showing a scenario. */
+export interface ScenarioShowParams {
+  name: string;
+  sheetIndex: number;
+}
+
+/** Parameters for deleting a scenario. */
+export interface ScenarioDeleteParams {
+  name: string;
+  sheetIndex: number;
+}
+
+/** A row in the scenario summary report. */
+export interface ScenarioSummaryRow {
+  cellRef: string;
+  currentValue: string;
+  scenarioValues: string[];
+  isChangingCell: boolean;
+}
+
+/** Parameters for generating a scenario summary. */
+export interface ScenarioSummaryParams {
+  sheetIndex: number;
+  resultCells: ScenarioCell[];
+}
+
+/** Result of scenario summary generation. */
+export interface ScenarioSummaryResult {
+  scenarioNames: string[];
+  rows: ScenarioSummaryRow[];
+  error: string | null;
+}
+
+/** Result of showing a scenario. */
+export interface ScenarioShowResult {
+  updatedCells: CellData[];
+  error: string | null;
+}
+
+/** Result of listing scenarios. */
+export interface ScenarioListResult {
+  scenarios: Scenario[];
+}
+
+/** Generic result for scenario operations. */
+export interface ScenarioResult {
+  success: boolean;
+  error: string | null;
+}
+
+/** List all scenarios for a sheet. */
+export async function scenarioList(sheetIndex: number): Promise<ScenarioListResult> {
+  return invoke<ScenarioListResult>("scenario_list", { sheetIndex });
+}
+
+/** Add or update a scenario. */
+export async function scenarioAdd(params: ScenarioAddParams): Promise<ScenarioResult> {
+  return invoke<ScenarioResult>("scenario_add", { params });
+}
+
+/** Delete a scenario by name. */
+export async function scenarioDelete(params: ScenarioDeleteParams): Promise<ScenarioResult> {
+  return invoke<ScenarioResult>("scenario_delete", { params });
+}
+
+/** Show (apply) a scenario. */
+export async function scenarioShow(params: ScenarioShowParams): Promise<ScenarioShowResult> {
+  return invoke<ScenarioShowResult>("scenario_show", { params });
+}
+
+/** Generate a scenario summary report. */
+export async function scenarioSummary(params: ScenarioSummaryParams): Promise<ScenarioSummaryResult> {
+  return invoke<ScenarioSummaryResult>("scenario_summary", { params });
+}
+
+/** Merge scenarios from one sheet to another. */
+export async function scenarioMerge(
+  sourceSheetIndex: number,
+  targetSheetIndex: number,
+): Promise<ScenarioResult> {
+  return invoke<ScenarioResult>("scenario_merge", { sourceSheetIndex, targetSheetIndex });
+}
+
+// ============================================================================
+// Data Tables (What-If Analysis)
+// ============================================================================
+
+/** Parameters for a one-variable data table. */
+export interface DataTableOneVarParams {
+  sheetIndex: number;
+  startRow: number;
+  startCol: number;
+  endRow: number;
+  endCol: number;
+  rowInputRow?: number;
+  rowInputCol?: number;
+  colInputRow?: number;
+  colInputCol?: number;
+}
+
+/** Parameters for a two-variable data table. */
+export interface DataTableTwoVarParams {
+  sheetIndex: number;
+  startRow: number;
+  startCol: number;
+  endRow: number;
+  endCol: number;
+  rowInputRow: number;
+  rowInputCol: number;
+  colInputRow: number;
+  colInputCol: number;
+}
+
+/** A single computed cell in the data table result. */
+export interface DataTableCellResult {
+  row: number;
+  col: number;
+  value: string;
+  numericValue: number | null;
+}
+
+/** Result of data table calculation. */
+export interface DataTableResult {
+  cells: DataTableCellResult[];
+  updatedCells: CellData[];
+  error: string | null;
+}
+
+/** Calculate a one-variable data table. */
+export async function dataTableOneVar(params: DataTableOneVarParams): Promise<DataTableResult> {
+  return invoke<DataTableResult>("data_table_one_var", { params });
+}
+
+/** Calculate a two-variable data table. */
+export async function dataTableTwoVar(params: DataTableTwoVarParams): Promise<DataTableResult> {
+  return invoke<DataTableResult>("data_table_two_var", { params });
+}
+
+// ============================================================================
+// Solver
+// ============================================================================
+
+/** Solver objective type. */
+export type SolverObjective = "maximize" | "minimize" | "targetValue";
+
+/** Solver constraint operator. */
+export type ConstraintOperator = "lessEqual" | "greaterEqual" | "equal" | "integer" | "binary" | "allDifferent";
+
+/** A single solver constraint. */
+export interface SolverConstraint {
+  cellRow: number;
+  cellCol: number;
+  operator: ConstraintOperator;
+  rhsValue?: number;
+  rhsCellRow?: number;
+  rhsCellCol?: number;
+}
+
+/** Solver method. */
+export type SolverMethod = "grgNonlinear" | "simplexLp" | "evolutionary";
+
+/** A variable cell for the solver. */
+export interface SolverVariableCell {
+  row: number;
+  col: number;
+}
+
+/** Parameters for the solver command. */
+export interface SolverParams {
+  sheetIndex: number;
+  objectiveRow: number;
+  objectiveCol: number;
+  objective: SolverObjective;
+  targetValue?: number;
+  variableCells: SolverVariableCell[];
+  constraints: SolverConstraint[];
+  method: SolverMethod;
+  maxIterations?: number;
+  maxTime?: number;
+  tolerance?: number;
+}
+
+/** A variable cell value in solver results. */
+export interface SolverVariableValue {
+  row: number;
+  col: number;
+  value: number;
+}
+
+/** Solver result. */
+export interface SolverResultData {
+  foundSolution: boolean;
+  objectiveValue: number;
+  variableValues: SolverVariableValue[];
+  iterations: number;
+  statusMessage: string;
+  updatedCells: CellData[];
+  originalValues: SolverVariableValue[];
+  error: string | null;
+}
+
+/** Run the solver. */
+export async function solverSolve(params: SolverParams): Promise<SolverResultData> {
+  return invoke<SolverResultData>("solver_solve", { params });
+}
+
+/** Revert solver results to original values. */
+export async function solverRevert(
+  sheetIndex: number,
+  originalValues: SolverVariableValue[],
+): Promise<SolverResultData> {
+  return invoke<SolverResultData>("solver_revert", { sheetIndex, originalValues });
+}

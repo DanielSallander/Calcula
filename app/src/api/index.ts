@@ -941,3 +941,66 @@ export type {
   VersionInfo,
   UpdateInfo,
 } from "./distribution";
+
+// ============================================================================
+// Scenario Manager
+// ============================================================================
+
+export {
+  scenarioList,
+  scenarioAdd,
+  scenarioDelete,
+  scenarioShow,
+  scenarioSummary,
+  scenarioMerge,
+} from "./lib";
+
+export type {
+  ScenarioCell,
+  Scenario,
+  ScenarioAddParams,
+  ScenarioShowParams,
+  ScenarioDeleteParams,
+  ScenarioSummaryRow,
+  ScenarioSummaryParams,
+  ScenarioSummaryResult,
+  ScenarioShowResult,
+  ScenarioListResult,
+  ScenarioResult,
+} from "./lib";
+
+// ============================================================================
+// Data Tables
+// ============================================================================
+
+export {
+  dataTableOneVar,
+  dataTableTwoVar,
+} from "./lib";
+
+export type {
+  DataTableOneVarParams,
+  DataTableTwoVarParams,
+  DataTableCellResult,
+  DataTableResult,
+} from "./lib";
+
+// ============================================================================
+// Solver
+// ============================================================================
+
+export {
+  solverSolve,
+  solverRevert,
+} from "./lib";
+
+export type {
+  SolverObjective,
+  ConstraintOperator,
+  SolverConstraint,
+  SolverMethod,
+  SolverVariableCell,
+  SolverParams,
+  SolverVariableValue,
+  SolverResultData,
+} from "./lib";

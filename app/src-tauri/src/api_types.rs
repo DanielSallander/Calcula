@@ -1566,3 +1566,341 @@ pub struct PrintData {
     /// Grid bounds: (max_row, max_col) - 0-indexed
     pub bounds: (u32, u32),
 }
+
+// ============================================================================
+// Scenario Manager
+// ============================================================================
+
+/// A single changing cell within a scenario.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ScenarioCell {
+    /// Row (0-based)
+    pub row: u32,
+    /// Column (0-based)
+    pub col: u32,
+    /// The value for this cell in this scenario
+    pub value: String,
+}
+
+/// A named scenario.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Scenario {
+    /// Unique scenario name
+    pub name: String,
+    /// Changing cells with their scenario values
+    pub changing_cells: Vec<ScenarioCell>,
+    /// Optional comment/description
+    pub comment: String,
+    /// Who created this scenario
+    pub created_by: String,
+    /// Sheet index this scenario belongs to (0-based)
+    pub sheet_index: usize,
+}
+
+/// Parameters for adding/updating a scenario.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ScenarioAddParams {
+    /// Scenario name (must be unique within sheet)
+    pub name: String,
+    /// Changing cells with values
+    pub changing_cells: Vec<ScenarioCell>,
+    /// Optional comment
+    pub comment: String,
+    /// Sheet index (0-based)
+    pub sheet_index: usize,
+}
+
+/// Parameters for showing (applying) a scenario.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ScenarioShowParams {
+    /// Name of the scenario to apply
+    pub name: String,
+    /// Sheet index (0-based)
+    pub sheet_index: usize,
+}
+
+/// Parameters for deleting a scenario.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ScenarioDeleteParams {
+    /// Name of the scenario to delete
+    pub name: String,
+    /// Sheet index (0-based)
+    pub sheet_index: usize,
+}
+
+/// A single row in the scenario summary report.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ScenarioSummaryRow {
+    /// Cell reference label (e.g. "$B$2")
+    pub cell_ref: String,
+    /// Current value of this cell
+    pub current_value: String,
+    /// Value in each scenario (parallel to scenario names)
+    pub scenario_values: Vec<String>,
+    /// Whether this is a changing cell (true) or result cell (false)
+    pub is_changing_cell: bool,
+}
+
+/// Parameters for generating a scenario summary report.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ScenarioSummaryParams {
+    /// Sheet index (0-based)
+    pub sheet_index: usize,
+    /// Result cells to include in the summary (rows of formulas)
+    pub result_cells: Vec<ScenarioCell>,
+}
+
+/// Result of scenario summary generation.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ScenarioSummaryResult {
+    /// Names of all scenarios
+    pub scenario_names: Vec<String>,
+    /// Summary rows (changing cells + result cells)
+    pub rows: Vec<ScenarioSummaryRow>,
+    /// Error message if any
+    pub error: Option<String>,
+}
+
+/// Result of showing a scenario.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ScenarioShowResult {
+    /// Updated cells after applying the scenario
+    pub updated_cells: Vec<CellData>,
+    /// Error message if any
+    pub error: Option<String>,
+}
+
+/// Result of listing scenarios.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ScenarioListResult {
+    /// All scenarios for the sheet
+    pub scenarios: Vec<Scenario>,
+}
+
+/// Generic result for scenario operations.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ScenarioResult {
+    pub success: bool,
+    pub error: Option<String>,
+}
+
+// ============================================================================
+// Data Tables (What-If)
+// ============================================================================
+
+/// Parameters for a one-variable data table.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DataTableOneVarParams {
+    /// Sheet index (0-based)
+    pub sheet_index: usize,
+    /// The table range: top-left row (0-based)
+    pub start_row: u32,
+    /// The table range: top-left col (0-based)
+    pub start_col: u32,
+    /// The table range: bottom-right row (0-based, inclusive)
+    pub end_row: u32,
+    /// The table range: bottom-right col (0-based, inclusive)
+    pub end_col: u32,
+    /// Row input cell (if substituting along a row)
+    pub row_input_row: Option<u32>,
+    pub row_input_col: Option<u32>,
+    /// Column input cell (if substituting along a column)
+    pub col_input_row: Option<u32>,
+    pub col_input_col: Option<u32>,
+}
+
+/// Parameters for a two-variable data table.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DataTableTwoVarParams {
+    /// Sheet index (0-based)
+    pub sheet_index: usize,
+    /// The table range: top-left row (0-based)
+    pub start_row: u32,
+    /// The table range: top-left col (0-based)
+    pub start_col: u32,
+    /// The table range: bottom-right row (0-based, inclusive)
+    pub end_row: u32,
+    /// The table range: bottom-right col (0-based, inclusive)
+    pub end_col: u32,
+    /// Row input cell (values in top row)
+    pub row_input_row: u32,
+    pub row_input_col: u32,
+    /// Column input cell (values in left column)
+    pub col_input_row: u32,
+    pub col_input_col: u32,
+}
+
+/// A single computed cell value in the data table result.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DataTableCell {
+    pub row: u32,
+    pub col: u32,
+    pub value: String,
+    pub numeric_value: Option<f64>,
+}
+
+/// Result of data table calculation.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DataTableResult {
+    /// Computed cells
+    pub cells: Vec<DataTableCell>,
+    /// Updated cells for grid refresh
+    pub updated_cells: Vec<CellData>,
+    /// Error message if any
+    pub error: Option<String>,
+}
+
+// ============================================================================
+// Solver
+// ============================================================================
+
+/// Solver objective type.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum SolverObjective {
+    Maximize,
+    Minimize,
+    TargetValue,
+}
+
+/// Solver constraint operator.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum ConstraintOperator {
+    /// <=
+    LessEqual,
+    /// >=
+    GreaterEqual,
+    /// =
+    Equal,
+    /// integer
+    Integer,
+    /// binary (0 or 1)
+    Binary,
+    /// all different
+    AllDifferent,
+}
+
+/// A single solver constraint.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SolverConstraint {
+    /// Cell reference (row, col) for the left-hand side
+    pub cell_row: u32,
+    pub cell_col: u32,
+    /// Operator
+    pub operator: ConstraintOperator,
+    /// Right-hand side value (not used for int/bin/dif)
+    pub rhs_value: Option<f64>,
+    /// Right-hand side cell reference (alternative to rhs_value)
+    pub rhs_cell_row: Option<u32>,
+    pub rhs_cell_col: Option<u32>,
+}
+
+/// Solver method.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum SolverMethod {
+    /// Generalized Reduced Gradient for nonlinear problems
+    GrgNonlinear,
+    /// Simplex for linear problems
+    SimplexLp,
+    /// Evolutionary/genetic algorithm
+    Evolutionary,
+}
+
+/// Parameters for the solver command.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SolverParams {
+    /// Sheet index (0-based)
+    pub sheet_index: usize,
+    /// Objective cell (must contain a formula)
+    pub objective_row: u32,
+    pub objective_col: u32,
+    /// Objective type
+    pub objective: SolverObjective,
+    /// Target value (only used when objective == TargetValue)
+    pub target_value: Option<f64>,
+    /// Variable cells (changing cells)
+    pub variable_cells: Vec<SolverVariableCell>,
+    /// Constraints
+    pub constraints: Vec<SolverConstraint>,
+    /// Solving method
+    pub method: SolverMethod,
+    /// Maximum iterations (default: 1000)
+    #[serde(default = "default_solver_max_iterations")]
+    pub max_iterations: u32,
+    /// Maximum time in seconds (default: 100)
+    #[serde(default = "default_solver_max_time")]
+    pub max_time: u32,
+    /// Convergence tolerance (default: 0.0001)
+    #[serde(default = "default_solver_tolerance")]
+    pub tolerance: f64,
+}
+
+fn default_solver_max_iterations() -> u32 {
+    1000
+}
+
+fn default_solver_max_time() -> u32 {
+    100
+}
+
+fn default_solver_tolerance() -> f64 {
+    0.0001
+}
+
+/// A variable cell for the solver.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SolverVariableCell {
+    pub row: u32,
+    pub col: u32,
+}
+
+/// Solver result.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SolverResult {
+    /// Whether a solution was found
+    pub found_solution: bool,
+    /// Final objective value
+    pub objective_value: f64,
+    /// Final variable values
+    pub variable_values: Vec<SolverVariableValue>,
+    /// Number of iterations
+    pub iterations: u32,
+    /// Solver status message
+    pub status_message: String,
+    /// Updated cells for grid refresh
+    pub updated_cells: Vec<CellData>,
+    /// Original variable values (for reverting)
+    pub original_values: Vec<SolverVariableValue>,
+    /// Error message if any
+    pub error: Option<String>,
+}
+
+/// A variable cell value in solver results.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SolverVariableValue {
+    pub row: u32,
+    pub col: u32,
+    pub value: f64,
+}
