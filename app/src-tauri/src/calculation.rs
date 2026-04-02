@@ -2,10 +2,11 @@
 // PURPOSE: Calculation mode commands for manual/automatic recalculation.
 
 use tauri::State;
-use crate::{AppState, evaluate_formula_with_context_and_files, format_cell_value};
+use crate::{AppState, evaluate_formula_with_pivot, format_cell_value};
 use crate::api_types::CellData;
 use crate::{log_enter, log_exit, log_enter_info, log_exit_info, log_warn};
 use crate::persistence::UserFilesState;
+use crate::pivot::types::PivotState;
 use engine;
 
 // ============================================================================
@@ -47,13 +48,27 @@ pub fn get_calculation_mode(state: State<AppState>) -> String {
 
 /// Recalculate all formulas in the grid.
 #[tauri::command]
-pub fn calculate_now(state: State<AppState>, user_files_state: State<UserFilesState>) -> Result<Vec<CellData>, String> {
+pub fn calculate_now(state: State<AppState>, user_files_state: State<UserFilesState>, pivot_state: State<'_, PivotState>) -> Result<Vec<CellData>, String> {
     let mut grid = state.grid.lock().unwrap();
     let mut grids = state.grids.lock().unwrap();
     let sheet_names = state.sheet_names.lock().unwrap();
     let active_sheet = *state.active_sheet.lock().unwrap();
     let mut styles = state.style_registry.lock().unwrap();
     let user_files = user_files_state.files.lock().unwrap();
+
+    // Build pivot data lookup closure for GETPIVOTDATA
+    let pivot_tables = pivot_state.pivot_tables.lock().unwrap();
+    let pivot_views = pivot_state.views.lock().unwrap();
+    let pivot_data_fn = |data_field: &str, pivot_row: u32, pivot_col: u32, pairs: &[(&str, &str)]| -> Option<f64> {
+        crate::pivot::operations::lookup_pivot_data(
+            &pivot_tables,
+            &pivot_views,
+            data_field,
+            pivot_row,
+            pivot_col,
+            pairs,
+        )
+    };
 
     let mut updated_cells = Vec::new();
 
@@ -109,7 +124,7 @@ pub fn calculate_now(state: State<AppState>, user_files_state: State<UserFilesSt
                 };
 
                 let engine_ast = crate::convert_expr(&resolved);
-                evaluate_formula_with_context_and_files(
+                evaluate_formula_with_pivot(
                     &grids,
                     &sheet_names,
                     active_sheet,
@@ -117,6 +132,7 @@ pub fn calculate_now(state: State<AppState>, user_files_state: State<UserFilesSt
                     eval_ctx,
                     Some(&styles),
                     &user_files,
+                    Some(&pivot_data_fn),
                 )
             }
             Err(_) => engine::CellValue::Error(engine::CellError::Value),
@@ -175,11 +191,11 @@ pub fn calculate_now(state: State<AppState>, user_files_state: State<UserFilesSt
 
 /// Recalculate all formula cells in the current sheet (same as calculate_now for single-sheet)
 #[tauri::command]
-pub fn calculate_sheet(state: State<AppState>, user_files_state: State<UserFilesState>) -> Result<Vec<CellData>, String> {
+pub fn calculate_sheet(state: State<AppState>, user_files_state: State<UserFilesState>, pivot_state: State<'_, PivotState>) -> Result<Vec<CellData>, String> {
     log_enter_info!("CMD", "calculate_sheet");
 
     // For now, calculate_sheet does the same as calculate_now since we have a single sheet
-    let result = calculate_now(state, user_files_state);
+    let result = calculate_now(state, user_files_state, pivot_state);
 
     log_exit_info!("CMD", "calculate_sheet", "done");
     result

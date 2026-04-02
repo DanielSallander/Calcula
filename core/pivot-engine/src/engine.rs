@@ -436,51 +436,287 @@ impl<'a> PivotCalculator<'a> {
                 if gt != 0.0 { value / gt } else { 0.0 }
             }
             ShowValuesAs::PercentOfRowTotal => {
-                // Row total = aggregate for this row across all columns
                 let row_total = self.compute_aggregate(row_values, &[], vf_idx, aggregation);
                 if row_total != 0.0 { value / row_total } else { 0.0 }
             }
             ShowValuesAs::PercentOfColumnTotal => {
-                // Column total = aggregate for this column across all rows
                 let col_total = self.compute_aggregate(&[], col_values, vf_idx, aggregation);
                 if col_total != 0.0 { value / col_total } else { 0.0 }
             }
             ShowValuesAs::PercentOfParentRow => {
-                // Parent row total: remove the deepest row grouping level
                 if row_values.len() > 1 {
                     let parent_row = &row_values[..row_values.len() - 1];
                     let parent_total = self.compute_aggregate(parent_row, col_values, vf_idx, aggregation);
                     if parent_total != 0.0 { value / parent_total } else { 0.0 }
                 } else {
-                    // No parent - use grand total across columns
                     let gt = self.compute_aggregate(&[], col_values, vf_idx, aggregation);
                     if gt != 0.0 { value / gt } else { 0.0 }
                 }
             }
             ShowValuesAs::PercentOfParentColumn => {
-                // Parent column total: remove the deepest column grouping level
                 if col_values.len() > 1 {
                     let parent_col = &col_values[..col_values.len() - 1];
                     let parent_total = self.compute_aggregate(row_values, parent_col, vf_idx, aggregation);
                     if parent_total != 0.0 { value / parent_total } else { 0.0 }
                 } else {
-                    // No parent - use grand total across rows
                     let gt = self.compute_aggregate(row_values, &[], vf_idx, aggregation);
                     if gt != 0.0 { value / gt } else { 0.0 }
                 }
             }
             ShowValuesAs::Index => {
-                // Index = (cell * grand_total) / (row_total * col_total)
                 let gt = self.grand_totals.get(vf_idx).copied().unwrap_or(0.0);
                 let row_total = self.compute_aggregate(row_values, &[], vf_idx, aggregation);
                 let col_total = self.compute_aggregate(&[], col_values, vf_idx, aggregation);
                 let denominator = row_total * col_total;
                 if denominator != 0.0 { (value * gt) / denominator } else { 0.0 }
             }
-            // Difference and RunningTotal require base field/item context
-            // which we don't have yet - return value unchanged for now
-            ShowValuesAs::Difference | ShowValuesAs::PercentDifference | ShowValuesAs::RunningTotal => value,
+            ShowValuesAs::Difference | ShowValuesAs::PercentDifference => {
+                self.compute_difference(value, row_values, col_values, vf_idx, aggregation,
+                    matches!(show_as, ShowValuesAs::PercentDifference))
+            }
+            ShowValuesAs::RunningTotal | ShowValuesAs::PercentOfRunningTotal => {
+                self.compute_running_total(value, row_values, col_values, vf_idx, aggregation,
+                    matches!(show_as, ShowValuesAs::PercentOfRunningTotal))
+            }
+            ShowValuesAs::RankAscending | ShowValuesAs::RankDescending => {
+                self.compute_rank(value, row_values, col_values, vf_idx, aggregation,
+                    matches!(show_as, ShowValuesAs::RankDescending))
+            }
         }
+    }
+
+    /// Finds the base field position and ordered items for a value field's base_field_index.
+    /// Returns (is_row_field, position_in_axis, ordered_item_value_ids).
+    fn resolve_base_field(
+        &self,
+        vf_idx: usize,
+    ) -> Option<(bool, usize, Vec<ValueId>)> {
+        let vf = &self.definition.value_fields[vf_idx];
+        let base_fi = vf.base_field_index?;
+
+        // Check row fields first
+        for (pos, rf) in self.effective_row_fields.iter().enumerate() {
+            if rf.source_index == base_fi {
+                let items = self.get_ordered_items_for_field(base_fi);
+                return Some((true, pos, items));
+            }
+        }
+        // Check column fields
+        for (pos, cf) in self.effective_col_fields.iter().enumerate() {
+            if cf.source_index == base_fi {
+                let items = self.get_ordered_items_for_field(base_fi);
+                return Some((false, pos, items));
+            }
+        }
+        None
+    }
+
+    /// Returns the ordered list of ValueIds for a field (sorted ascending).
+    fn get_ordered_items_for_field(&self, field_index: FieldIndex) -> Vec<ValueId> {
+        if let Some(fc) = self.cache.get_field(field_index) {
+            // Use the field cache's sorted order
+            let mut fc_clone = fc.clone();
+            fc_clone.sorted_ids().to_vec()
+        } else {
+            Vec::new()
+        }
+    }
+
+    /// Finds the ValueId for a named base_item within a field.
+    /// Special values: "(previous)" and "(next)" return None (handled by caller).
+    fn resolve_base_item_id(
+        &self,
+        field_index: FieldIndex,
+        base_item: &str,
+    ) -> Option<ValueId> {
+        if base_item == "(previous)" || base_item == "(next)" {
+            return None; // Sentinel - caller handles positional logic
+        }
+        let fc = self.cache.get_field(field_index)?;
+        // Search by label
+        for vid in 0..fc.unique_count() as ValueId {
+            let label = self.get_value_label(fc, vid);
+            if label == base_item {
+                return Some(vid);
+            }
+        }
+        None
+    }
+
+    /// Computes Difference or PercentDifference from base item.
+    fn compute_difference(
+        &mut self,
+        value: f64,
+        row_values: &[ValueId],
+        col_values: &[ValueId],
+        vf_idx: usize,
+        aggregation: AggregationType,
+        is_percent: bool,
+    ) -> f64 {
+        let resolved = self.resolve_base_field(vf_idx);
+        let (is_row, pos, ordered_items) = match resolved {
+            Some(v) => v,
+            None => return value,
+        };
+
+        let vf = &self.definition.value_fields[vf_idx];
+        let base_item_str = match &vf.base_item {
+            Some(s) => s.clone(),
+            None => return value,
+        };
+
+        // Current item's ValueId at the base field position
+        let current_vid = if is_row {
+            row_values.get(pos).copied().unwrap_or(VALUE_ID_EMPTY)
+        } else {
+            col_values.get(pos).copied().unwrap_or(VALUE_ID_EMPTY)
+        };
+
+        // Determine the target ValueId
+        let base_fi = self.definition.value_fields[vf_idx].base_field_index.unwrap();
+        let target_vid = if base_item_str == "(previous)" || base_item_str == "(next)" {
+            // Find current position in ordered items
+            let current_pos = ordered_items.iter().position(|&v| v == current_vid);
+            match current_pos {
+                Some(cp) => {
+                    if base_item_str == "(previous)" {
+                        if cp == 0 { return f64::NAN; }
+                        ordered_items[cp - 1]
+                    } else {
+                        // "(next)"
+                        if cp + 1 >= ordered_items.len() { return f64::NAN; }
+                        ordered_items[cp + 1]
+                    }
+                }
+                None => return f64::NAN,
+            }
+        } else {
+            match self.resolve_base_item_id(base_fi, &base_item_str) {
+                Some(vid) => vid,
+                None => return f64::NAN,
+            }
+        };
+
+        // Build modified row/col values with the target item substituted
+        let base_value = if is_row {
+            let mut modified = row_values.to_vec();
+            if pos < modified.len() {
+                modified[pos] = target_vid;
+            }
+            self.compute_aggregate(&modified, col_values, vf_idx, aggregation)
+        } else {
+            let mut modified = col_values.to_vec();
+            if pos < modified.len() {
+                modified[pos] = target_vid;
+            }
+            self.compute_aggregate(row_values, &modified, vf_idx, aggregation)
+        };
+
+        if is_percent {
+            if base_value != 0.0 { (value - base_value) / base_value } else { f64::NAN }
+        } else {
+            value - base_value
+        }
+    }
+
+    /// Computes RunningTotal or PercentOfRunningTotal along the base field.
+    fn compute_running_total(
+        &mut self,
+        _value: f64,
+        row_values: &[ValueId],
+        col_values: &[ValueId],
+        vf_idx: usize,
+        aggregation: AggregationType,
+        is_percent: bool,
+    ) -> f64 {
+        let resolved = self.resolve_base_field(vf_idx);
+        let (is_row, pos, ordered_items) = match resolved {
+            Some(v) => v,
+            None => return _value,
+        };
+
+        // Current item's ValueId
+        let current_vid = if is_row {
+            row_values.get(pos).copied().unwrap_or(VALUE_ID_EMPTY)
+        } else {
+            col_values.get(pos).copied().unwrap_or(VALUE_ID_EMPTY)
+        };
+
+        // Sum all values from the first item through the current item
+        let mut running = 0.0;
+        for &vid in &ordered_items {
+            let item_value = if is_row {
+                let mut modified = row_values.to_vec();
+                if pos < modified.len() {
+                    modified[pos] = vid;
+                }
+                self.compute_aggregate(&modified, col_values, vf_idx, aggregation)
+            } else {
+                let mut modified = col_values.to_vec();
+                if pos < modified.len() {
+                    modified[pos] = vid;
+                }
+                self.compute_aggregate(row_values, &modified, vf_idx, aggregation)
+            };
+            running += item_value;
+            if vid == current_vid {
+                break;
+            }
+        }
+
+        if is_percent {
+            let gt = self.grand_totals.get(vf_idx).copied().unwrap_or(0.0);
+            if gt != 0.0 { running / gt } else { 0.0 }
+        } else {
+            running
+        }
+    }
+
+    /// Computes Rank (ascending or descending) among sibling items.
+    fn compute_rank(
+        &mut self,
+        value: f64,
+        row_values: &[ValueId],
+        col_values: &[ValueId],
+        vf_idx: usize,
+        aggregation: AggregationType,
+        descending: bool,
+    ) -> f64 {
+        let resolved = self.resolve_base_field(vf_idx);
+        let (is_row, pos, ordered_items) = match resolved {
+            Some(v) => v,
+            None => return value,
+        };
+
+        // Collect all sibling values (varying only the base field position)
+        let mut sibling_values: Vec<f64> = Vec::with_capacity(ordered_items.len());
+        for &vid in &ordered_items {
+            let item_value = if is_row {
+                let mut modified = row_values.to_vec();
+                if pos < modified.len() {
+                    modified[pos] = vid;
+                }
+                self.compute_aggregate(&modified, col_values, vf_idx, aggregation)
+            } else {
+                let mut modified = col_values.to_vec();
+                if pos < modified.len() {
+                    modified[pos] = vid;
+                }
+                self.compute_aggregate(row_values, &modified, vf_idx, aggregation)
+            };
+            sibling_values.push(item_value);
+        }
+
+        // Count how many items rank above the current value
+        let rank = if descending {
+            // Rank 1 = largest value
+            sibling_values.iter().filter(|&&v| v > value).count() + 1
+        } else {
+            // Rank 1 = smallest value
+            sibling_values.iter().filter(|&&v| v < value).count() + 1
+        };
+
+        rank as f64
     }
     
     /// Applies definition filters to the cache.
@@ -1860,6 +2096,14 @@ impl<'a> PivotCalculator<'a> {
                             cells.push(PivotViewCell::corner());
                         }
                     }
+                    // Add calculated field headers
+                    for cf in &self.definition.calculated_fields {
+                        if is_last_header {
+                            cells.push(PivotViewCell::column_header(cf.name.clone()));
+                        } else {
+                            cells.push(PivotViewCell::corner());
+                        }
+                    }
                 }
             } else {
                 // Show column field values at appropriate level.
@@ -2211,7 +2455,8 @@ impl<'a> PivotCalculator<'a> {
                 if matches!(vf.show_values_as,
                     ShowValuesAs::PercentOfGrandTotal | ShowValuesAs::PercentOfRowTotal |
                     ShowValuesAs::PercentOfColumnTotal | ShowValuesAs::PercentOfParentRow |
-                    ShowValuesAs::PercentOfParentColumn
+                    ShowValuesAs::PercentOfParentColumn | ShowValuesAs::PercentDifference |
+                    ShowValuesAs::PercentOfRunningTotal
                 ) {
                     cell.number_format = Some("0.00%".to_string());
                 }
@@ -2270,7 +2515,8 @@ impl<'a> PivotCalculator<'a> {
                 if matches!(vf.show_values_as,
                     ShowValuesAs::PercentOfGrandTotal | ShowValuesAs::PercentOfRowTotal |
                     ShowValuesAs::PercentOfColumnTotal | ShowValuesAs::PercentOfParentRow |
-                    ShowValuesAs::PercentOfParentColumn
+                    ShowValuesAs::PercentOfParentColumn | ShowValuesAs::PercentDifference |
+                    ShowValuesAs::PercentOfRunningTotal
                 ) {
                     cell.number_format = Some("0.00%".to_string());
                 }
@@ -2321,12 +2567,105 @@ impl<'a> PivotCalculator<'a> {
                     }
                 }
                 cell.group_path = group_path;
-                
+
                 cells.push(cell);
             }
         }
+
+        // Generate calculated field cells
+        if !self.definition.calculated_fields.is_empty() {
+            self.generate_calculated_field_cells(cells, row_item, col_items, value_fields, values_position);
+        }
     }
-    
+
+    /// Generates cells for calculated fields by evaluating their formulas
+    /// against the aggregated values of regular value fields.
+    fn generate_calculated_field_cells(
+        &mut self,
+        cells: &mut Vec<PivotViewCell>,
+        row_item: &FlatAxisItem,
+        col_items: &[FlatAxisItem],
+        value_fields: &[ValueField],
+        _values_position: ValuesPosition,
+    ) {
+        use std::collections::HashMap;
+
+        let calc_fields = self.definition.calculated_fields.clone();
+
+        if col_items.is_empty() {
+            // No column fields - one cell per calculated field
+            // Build value map from all regular value fields at this row
+            let mut field_values: HashMap<String, f64> = HashMap::new();
+            for (vf_idx, vf) in value_fields.iter().enumerate() {
+                let aggregate = self.lookup_aggregate_col(&[], vf_idx, vf.aggregation);
+                // Use the source field name (without "Sum of" prefix) as the lookup key
+                if let Some(fc) = self.cache.get_field(vf.source_index) {
+                    field_values.insert(fc.name.clone(), aggregate);
+                }
+                // Also insert by display name
+                field_values.insert(vf.name.clone(), aggregate);
+            }
+
+            for cf in &calc_fields {
+                let result = crate::calculated::eval_calc_formula(&cf.formula, &field_values)
+                    .unwrap_or(f64::NAN);
+
+                let mut cell = PivotViewCell::data(result);
+                cell.number_format = cf.number_format.clone();
+
+                if row_item.is_subtotal {
+                    cell.cell_type = PivotCellType::RowSubtotal;
+                    cell.background_style = BackgroundStyle::Subtotal;
+                    cell.is_bold = true;
+                } else if row_item.is_grand_total {
+                    cell.cell_type = PivotCellType::GrandTotal;
+                    cell.background_style = BackgroundStyle::GrandTotal;
+                    cell.is_bold = true;
+                }
+
+                cells.push(cell);
+            }
+        } else {
+            // With column fields - one calculated field cell per column item
+            for col_item in col_items {
+                let col_group_values = &col_item.group_values;
+
+                // Build value map from all regular value fields at this intersection
+                let mut field_values: HashMap<String, f64> = HashMap::new();
+                for (vf_idx, vf) in value_fields.iter().enumerate() {
+                    let aggregate = self.lookup_aggregate_col(col_group_values, vf_idx, vf.aggregation);
+                    if let Some(fc) = self.cache.get_field(vf.source_index) {
+                        field_values.insert(fc.name.clone(), aggregate);
+                    }
+                    field_values.insert(vf.name.clone(), aggregate);
+                }
+
+                for cf in &calc_fields {
+                    let result = crate::calculated::eval_calc_formula(&cf.formula, &field_values)
+                        .unwrap_or(f64::NAN);
+
+                    let mut cell = PivotViewCell::data(result);
+                    cell.number_format = cf.number_format.clone();
+
+                    let is_row_total = row_item.is_subtotal || row_item.is_grand_total;
+                    let is_col_total = col_item.is_subtotal || col_item.is_grand_total;
+
+                    if row_item.is_grand_total && col_item.is_grand_total {
+                        cell.cell_type = PivotCellType::GrandTotal;
+                        cell.background_style = BackgroundStyle::GrandTotal;
+                        cell.is_bold = true;
+                    } else if is_row_total || is_col_total {
+                        cell.cell_type = PivotCellType::RowSubtotal;
+                        cell.background_style = BackgroundStyle::Subtotal;
+                        cell.is_bold = true;
+                    }
+
+                    cells.push(cell);
+                }
+            }
+        }
+    }
+
     /// Ensures aggregates are computed before lookups.
     fn ensure_aggregates_computed(&mut self) {
         let ri = self.row_field_indices.clone();

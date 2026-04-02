@@ -668,3 +668,102 @@ pub(crate) fn auto_fit_pivot_columns(
         dest_col + view.col_count as u32 - 1
     );
 }
+
+/// Looks up a value in a pivot table for GETPIVOTDATA.
+/// Searches all pivot tables to find one containing the referenced cell,
+/// then queries it for the matching aggregated value.
+pub fn lookup_pivot_data(
+    pivot_tables: &HashMap<PivotId, (PivotDefinition, PivotCache)>,
+    pivot_views: &HashMap<PivotId, PivotView>,
+    data_field: &str,
+    pivot_row: u32,
+    pivot_col: u32,
+    field_item_pairs: &[(&str, &str)],
+) -> Option<f64> {
+    // Find which pivot table contains the referenced cell
+    let (pivot_id, view) = pivot_views.iter().find(|(_id, v)| {
+        // Check if the cell falls within this view's region
+        // We need the definition to know the destination
+        if let Some((def, _cache)) = pivot_tables.get(_id) {
+            let (dest_row, dest_col) = def.destination;
+            let end_row = dest_row + v.row_count as u32;
+            let end_col = dest_col + v.col_count as u32;
+            pivot_row >= dest_row && pivot_row < end_row
+                && pivot_col >= dest_col && pivot_col < end_col
+        } else {
+            false
+        }
+    })?;
+
+    let (definition, _cache) = pivot_tables.get(pivot_id)?;
+
+    // Find the value field by name (case-insensitive)
+    let data_field_lower = data_field.to_lowercase();
+    let vf_idx = definition.value_fields.iter().position(|vf| {
+        vf.name.to_lowercase() == data_field_lower
+    })?;
+
+    // If no field/item pairs, return the grand total for this value field
+    if field_item_pairs.is_empty() {
+        // Compute grand total by looking at the view's grand total row
+        // Find the grand total value in the view
+        for row_cells in &view.cells {
+            for cell in row_cells {
+                if cell.cell_type == pivot_engine::PivotCellType::GrandTotal {
+                    if let pivot_engine::PivotCellValue::Number(n) = cell.value {
+                        return Some(n);
+                    }
+                }
+            }
+        }
+        return None;
+    }
+
+    // With field/item pairs: we need to find the specific cell in the view
+    // that matches ALL the field/item criteria.
+    // Strategy: search the view cells for a data cell whose row/column headers
+    // match the specified field/item pairs.
+
+    // Build a lookup: for each row, collect its header labels
+    let row_label_cols = view.row_label_col_count;
+    let header_rows = view.column_header_row_count + view.filter_row_count;
+
+    // For each data row, check if its row headers match the criteria
+    for (view_row_idx, row_cells) in view.cells.iter().enumerate() {
+        if view_row_idx < header_rows {
+            continue; // Skip header rows
+        }
+
+        // Collect row header labels for this row
+        let row_headers: Vec<&str> = row_cells.iter()
+            .take(row_label_cols)
+            .filter(|c| matches!(c.cell_type,
+                pivot_engine::PivotCellType::RowHeader | pivot_engine::PivotCellType::RowLabelHeader))
+            .map(|c| c.formatted_value.as_str())
+            .collect();
+
+        // Check if this row matches the field/item criteria for row fields
+        let row_matches = field_item_pairs.iter().all(|(_field, item)| {
+            row_headers.iter().any(|h| h.eq_ignore_ascii_case(item))
+        });
+
+        if !row_matches {
+            continue;
+        }
+
+        // Now find the data cell for the correct value field
+        let data_cells: Vec<&pivot_engine::PivotViewCell> = row_cells.iter()
+            .skip(row_label_cols)
+            .filter(|c| matches!(c.cell_type, pivot_engine::PivotCellType::Data))
+            .collect();
+
+        // The vf_idx-th data cell (in a simple layout) is the one we want
+        if let Some(cell) = data_cells.get(vf_idx) {
+            if let pivot_engine::PivotCellValue::Number(n) = cell.value {
+                return Some(n);
+            }
+        }
+    }
+
+    None
+}

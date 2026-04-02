@@ -19,11 +19,15 @@ export interface ValueFieldSettings {
   aggregation: AggregationType;
   showValuesAs: ShowValuesAs;
   numberFormat?: string;
+  baseField?: string;
+  baseItem?: string;
 }
 
 export interface ValueFieldSettingsModalProps {
   isOpen: boolean;
   field: ZoneField;
+  /** Available row/column fields for base field selection */
+  availableFields?: { name: string; items: string[] }[];
   onSave: (settings: ValueFieldSettings) => void;
   onCancel: () => void;
 }
@@ -38,7 +42,26 @@ const SHOW_VALUES_AS_OPTIONS: { value: ShowValuesAs; label: string }[] = [
   { value: "difference", label: "Difference From" },
   { value: "percent_difference", label: "% Difference From" },
   { value: "running_total", label: "Running Total In" },
+  { value: "percent_of_running_total", label: "% of Running Total In" },
+  { value: "rank_ascending", label: "Rank Smallest to Largest" },
+  { value: "rank_descending", label: "Rank Largest to Smallest" },
   { value: "index", label: "Index" },
+];
+
+/** ShowValuesAs options that require a base field selection */
+const NEEDS_BASE_FIELD: ShowValuesAs[] = [
+  "difference",
+  "percent_difference",
+  "running_total",
+  "percent_of_running_total",
+  "rank_ascending",
+  "rank_descending",
+];
+
+/** ShowValuesAs options that require a base item selection */
+const NEEDS_BASE_ITEM: ShowValuesAs[] = [
+  "difference",
+  "percent_difference",
 ];
 
 const modalStyles = {
@@ -212,6 +235,7 @@ const modalStyles = {
 export function ValueFieldSettingsModal({
   isOpen,
   field,
+  availableFields = [],
   onSave,
   onCancel,
 }: ValueFieldSettingsModalProps): React.ReactElement | null {
@@ -230,6 +254,8 @@ export function ValueFieldSettingsModal({
   const [showValuesAs, setShowValuesAs] = useState<ShowValuesAs>("normal");
   const [numberFormat, setNumberFormat] = useState<string>(field.numberFormat || "");
   const [isNumberFormatOpen, setIsNumberFormatOpen] = useState(false);
+  const [baseField, setBaseField] = useState<string>("");
+  const [baseItem, setBaseItem] = useState<string>("(previous)");
 
   // Reset local state when the modal opens or when the field changes.
   // Uses render-time derived state pattern (prev-prop comparison) instead of
@@ -245,6 +271,8 @@ export function ValueFieldSettingsModal({
     setAggregation(agg);
     setShowValuesAs((field.showValuesAs as ShowValuesAs) || "normal");
     setNumberFormat(field.numberFormat || "");
+    setBaseField(field.baseField || (availableFields.length > 0 ? availableFields[0].name : ""));
+    setBaseItem(field.baseItem || "(previous)");
     setPrevIsOpen(isOpen);
     setPrevFieldKey(fieldKey);
   } else if (!isOpen && prevIsOpen) {
@@ -283,14 +311,22 @@ export function ValueFieldSettingsModal({
     setIsNumberFormatOpen(false);
   }, []);
 
+  const needsBaseField = NEEDS_BASE_FIELD.includes(showValuesAs);
+  const needsBaseItem = NEEDS_BASE_ITEM.includes(showValuesAs);
+
+  // Get items for selected base field
+  const baseFieldItems = availableFields.find(f => f.name === baseField)?.items || [];
+
   const handleSave = useCallback(() => {
     onSave({
       customName,
       aggregation,
       showValuesAs,
       numberFormat,
+      baseField: needsBaseField ? baseField : undefined,
+      baseItem: needsBaseItem ? baseItem : undefined,
     });
-  }, [customName, aggregation, showValuesAs, numberFormat, onSave]);
+  }, [customName, aggregation, showValuesAs, numberFormat, baseField, baseItem, needsBaseField, needsBaseItem, onSave]);
 
   const handleKeyDown = useCallback(
     (event: React.KeyboardEvent) => {
@@ -369,6 +405,46 @@ export function ValueFieldSettingsModal({
               ))}
             </select>
           </div>
+
+          {needsBaseField && availableFields.length > 0 && (
+            <div className={modalStyles.field}>
+              <label className={modalStyles.label}>Base field</label>
+              <select
+                className={modalStyles.select}
+                value={baseField}
+                onChange={(e) => {
+                  setBaseField(e.target.value);
+                  // Reset base item when field changes
+                  setBaseItem("(previous)");
+                }}
+              >
+                {availableFields.map((f) => (
+                  <option key={f.name} value={f.name}>
+                    {f.name}
+                  </option>
+                ))}
+              </select>
+            </div>
+          )}
+
+          {needsBaseItem && baseFieldItems.length > 0 && (
+            <div className={modalStyles.field}>
+              <label className={modalStyles.label}>Base item</label>
+              <select
+                className={modalStyles.select}
+                value={baseItem}
+                onChange={(e) => setBaseItem(e.target.value)}
+              >
+                <option value="(previous)">(previous)</option>
+                <option value="(next)">(next)</option>
+                {baseFieldItems.map((item) => (
+                  <option key={item} value={item}>
+                    {item}
+                  </option>
+                ))}
+              </select>
+            </div>
+          )}
 
           <div className={modalStyles.field}>
             <label className={modalStyles.label}>Number Format</label>

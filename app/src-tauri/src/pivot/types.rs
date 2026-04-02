@@ -350,6 +350,74 @@ pub struct ShowAsRule {
 }
 
 // ============================================================================
+// CALCULATED FIELD / ITEM TYPES
+// ============================================================================
+
+/// Request to add or update a calculated field
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CalculatedFieldRequest {
+    /// Pivot table ID
+    pub pivot_id: u32,
+    /// Display name for the calculated field
+    pub name: String,
+    /// Formula using field names (e.g., "Revenue - Cost")
+    pub formula: String,
+    /// Optional number format
+    pub number_format: Option<String>,
+}
+
+/// Request to update an existing calculated field
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdateCalculatedFieldRequest {
+    /// Pivot table ID
+    pub pivot_id: u32,
+    /// Index of the calculated field to update
+    pub field_index: usize,
+    /// New display name
+    pub name: String,
+    /// New formula
+    pub formula: String,
+    /// Optional number format
+    pub number_format: Option<String>,
+}
+
+/// Request to remove a calculated field
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RemoveCalculatedFieldRequest {
+    /// Pivot table ID
+    pub pivot_id: u32,
+    /// Index of the calculated field to remove
+    pub field_index: usize,
+}
+
+/// Request to add or update a calculated item
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CalculatedItemRequest {
+    /// Pivot table ID
+    pub pivot_id: u32,
+    /// Source index of the field this item belongs to
+    pub field_index: usize,
+    /// Display name for the calculated item
+    pub name: String,
+    /// Formula using other item names (e.g., "East + West")
+    pub formula: String,
+}
+
+/// Request to remove a calculated item
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RemoveCalculatedItemRequest {
+    /// Pivot table ID
+    pub pivot_id: u32,
+    /// Index of the calculated item to remove
+    pub item_index: usize,
+}
+
+// ============================================================================
 // REQUEST TYPES
 // ============================================================================
 

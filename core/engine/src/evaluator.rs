@@ -332,6 +332,10 @@ pub struct Evaluator<'a> {
     /// Optional file reader for FILEREAD/FILELINES/FILEEXISTS functions.
     /// The closure takes a file path and returns the file content if it exists.
     file_reader: Option<&'a dyn Fn(&str) -> Option<String>>,
+    /// Optional pivot data lookup for GETPIVOTDATA function.
+    /// Args: (data_field_name, pivot_cell_row, pivot_cell_col, field_item_pairs: Vec<(field_name, item_value)>)
+    /// Returns: the aggregated value, or None if not found.
+    pivot_data_fn: Option<&'a dyn Fn(&str, u32, u32, &[(&str, &str)]) -> Option<f64>>,
     /// Scope for LAMBDA/LET name bindings. Names are stored uppercased.
     /// Uses RefCell for interior mutability so evaluate() can stay &self.
     scope: RefCell<HashMap<String, EvalResult>>,
@@ -347,6 +351,7 @@ impl<'a> Evaluator<'a> {
             context: EvalContext::default(),
             styles: None,
             file_reader: None,
+            pivot_data_fn: None,
             scope: RefCell::new(HashMap::new()),
         }
     }
@@ -359,6 +364,7 @@ impl<'a> Evaluator<'a> {
             context: EvalContext::default(),
             styles: None,
             file_reader: None,
+            pivot_data_fn: None,
             scope: RefCell::new(HashMap::new()),
         }
     }
@@ -371,6 +377,7 @@ impl<'a> Evaluator<'a> {
             context: eval_ctx,
             styles: None,
             file_reader: None,
+            pivot_data_fn: None,
             scope: RefCell::new(HashMap::new()),
         }
     }
@@ -383,6 +390,14 @@ impl<'a> Evaluator<'a> {
     /// Sets the file reader closure for FILEREAD/FILELINES/FILEEXISTS functions.
     pub fn set_file_reader(&mut self, reader: &'a dyn Fn(&str) -> Option<String>) {
         self.file_reader = Some(reader);
+    }
+
+    /// Sets the pivot data lookup closure for GETPIVOTDATA function.
+    pub fn set_pivot_data_fn(
+        &mut self,
+        f: &'a dyn Fn(&str, u32, u32, &[(&str, &str)]) -> Option<f64>,
+    ) {
+        self.pivot_data_fn = Some(f);
     }
 
     /// Gets the grid for a given sheet name, or the current grid if None.
@@ -1253,6 +1268,7 @@ impl<'a> Evaluator<'a> {
             BuiltinFunction::RandArray => self.fn_randarray(args),
             BuiltinFunction::GroupBy => self.fn_groupby(args),
             BuiltinFunction::PivotBy => self.fn_pivotby(args),
+            BuiltinFunction::GetPivotData => self.fn_getpivotdata(args),
 
             // Collection functions (3D cells)
             BuiltinFunction::Collect => self.fn_collect(args),
@@ -6010,6 +6026,75 @@ impl<'a> Evaluator<'a> {
     /// PIVOTBY(row_fields, col_fields, values, function, [field_headers],
     ///         [row_total_depth], [row_sort_order], [col_total_depth], [col_sort_order], [filter_array])
     /// Creates a pivot table grouping by rows and columns.
+    /// GETPIVOTDATA(data_field, pivot_table, [field1, item1, field2, item2, ...])
+    /// Extracts a value from a pivot table.
+    /// - data_field: string name of the value field (e.g., "Sum of Sales")
+    /// - pivot_table: cell reference to any cell in the pivot table
+    /// - field1, item1, ...: optional pairs of field name and item value
+    fn fn_getpivotdata(&self, args: &[Expression]) -> EvalResult {
+        // Minimum 2 args: data_field, pivot_table_ref
+        if args.len() < 2 {
+            return EvalResult::Error(CellError::Value);
+        }
+
+        // Remaining args must be in pairs (field, item)
+        let extra_args = args.len() - 2;
+        if extra_args % 2 != 0 {
+            return EvalResult::Error(CellError::Value);
+        }
+
+        let pivot_fn = match &self.pivot_data_fn {
+            Some(f) => f,
+            None => return EvalResult::Error(CellError::Ref),
+        };
+
+        // Evaluate data_field name
+        let data_field = match self.evaluate(&args[0]) {
+            EvalResult::Text(s) => s,
+            EvalResult::Number(n) => format!("{}", n),
+            _ => return EvalResult::Error(CellError::Value),
+        };
+
+        // Evaluate pivot_table reference - must be a cell ref
+        let (pivot_row, pivot_col) = match &args[1] {
+            Expression::CellRef { row, col, .. } => {
+                let r = *row;
+                let c = col_to_index(col) as u32;
+                (r, c)
+            }
+            _ => {
+                return EvalResult::Error(CellError::Ref);
+            }
+        };
+
+        // Evaluate field/item pairs
+        let mut pairs: Vec<(String, String)> = Vec::new();
+        for i in (2..args.len()).step_by(2) {
+            let field_name = match self.evaluate(&args[i]) {
+                EvalResult::Text(s) => s,
+                EvalResult::Number(n) => format!("{}", n),
+                _ => return EvalResult::Error(CellError::Value),
+            };
+            let item_value = match self.evaluate(&args[i + 1]) {
+                EvalResult::Text(s) => s,
+                EvalResult::Number(n) => format!("{}", n),
+                _ => return EvalResult::Error(CellError::Value),
+            };
+            pairs.push((field_name, item_value));
+        }
+
+        // Build the pairs as references for the closure
+        let pair_refs: Vec<(&str, &str)> = pairs.iter()
+            .map(|(f, i)| (f.as_str(), i.as_str()))
+            .collect();
+
+        // Call the pivot data lookup
+        match pivot_fn(&data_field, pivot_row, pivot_col, &pair_refs) {
+            Some(value) => EvalResult::Number(value),
+            None => EvalResult::Error(CellError::Ref),
+        }
+    }
+
     fn fn_pivotby(&self, args: &[Expression]) -> EvalResult {
         if args.len() < 4 || args.len() > 10 {
             return EvalResult::Error(CellError::Value);

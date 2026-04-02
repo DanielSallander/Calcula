@@ -362,6 +362,7 @@ pub enum BuiltinFunction {
     RandArray,
     GroupBy,
     PivotBy,
+    GetPivotData,
 
     // Collection functions (3D cells)
     Collect,
@@ -875,6 +876,7 @@ impl BuiltinFunction {
             "RANDARRAY" => BuiltinFunction::RandArray,
             "GROUPBY" => BuiltinFunction::GroupBy,
             "PIVOTBY" => BuiltinFunction::PivotBy,
+            "GETPIVOTDATA" => BuiltinFunction::GetPivotData,
 
             // Collection functions (3D cells)
             "COLLECT" => BuiltinFunction::Collect,

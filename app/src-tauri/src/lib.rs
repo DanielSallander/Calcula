@@ -660,6 +660,7 @@ fn convert_builtin_function(func: &ParserBuiltinFn) -> EngineBuiltinFn {
         ParserBuiltinFn::RandArray => EngineBuiltinFn::RandArray,
         ParserBuiltinFn::GroupBy => EngineBuiltinFn::GroupBy,
         ParserBuiltinFn::PivotBy => EngineBuiltinFn::PivotBy,
+        ParserBuiltinFn::GetPivotData => EngineBuiltinFn::GetPivotData,
 
         // Collection functions (3D cells)
         ParserBuiltinFn::Collect => EngineBuiltinFn::Collect,
@@ -2473,6 +2474,7 @@ fn builtin_function_to_name(func: &ParserBuiltinFn) -> String {
         ParserBuiltinFn::RandArray => "RANDARRAY".to_string(),
         ParserBuiltinFn::GroupBy => "GROUPBY".to_string(),
         ParserBuiltinFn::PivotBy => "PIVOTBY".to_string(),
+        ParserBuiltinFn::GetPivotData => "GETPIVOTDATA".to_string(),
         ParserBuiltinFn::Collect => "COLLECT".to_string(),
         ParserBuiltinFn::DictFn => "DICT".to_string(),
         ParserBuiltinFn::Keys => "KEYS".to_string(),
@@ -2938,6 +2940,38 @@ pub fn evaluate_formula_with_context_and_files(
         evaluator.set_styles(sr);
     }
     evaluator.set_file_reader(&reader);
+    evaluator.evaluate(ast).to_cell_value()
+}
+
+/// Like `evaluate_formula_with_context_and_files` but with pivot data lookup support.
+pub fn evaluate_formula_with_pivot(
+    grids: &[Grid],
+    sheet_names: &[String],
+    current_sheet_index: usize,
+    ast: &EngineExpr,
+    eval_ctx: engine::EvalContext,
+    style_registry: Option<&engine::StyleRegistry>,
+    user_files: &HashMap<String, Vec<u8>>,
+    pivot_data_fn: Option<&dyn Fn(&str, u32, u32, &[(&str, &str)]) -> Option<f64>>,
+) -> CellValue {
+    if current_sheet_index >= grids.len() || current_sheet_index >= sheet_names.len() {
+        return CellValue::Error(CellError::Ref);
+    }
+
+    let current_grid = &grids[current_sheet_index];
+    let current_sheet_name = &sheet_names[current_sheet_index];
+    let context = create_multi_sheet_context(grids, sheet_names, current_sheet_name);
+    let reader = |path: &str| -> Option<String> {
+        user_files.get(path).and_then(|bytes| String::from_utf8(bytes.clone()).ok())
+    };
+    let mut evaluator = Evaluator::with_context(current_grid, context, eval_ctx);
+    if let Some(sr) = style_registry {
+        evaluator.set_styles(sr);
+    }
+    evaluator.set_file_reader(&reader);
+    if let Some(pf) = pivot_data_fn {
+        evaluator.set_pivot_data_fn(pf);
+    }
     evaluator.evaluate(ast).to_cell_value()
 }
 
@@ -3554,6 +3588,12 @@ pub fn run() {
             pivot::create_pivot_from_bi_model,
             pivot::update_bi_pivot_fields,
             pivot::set_bi_lookup_columns,
+            pivot::show_report_filter_pages,
+            pivot::add_calculated_field,
+            pivot::update_calculated_field,
+            pivot::remove_calculated_field,
+            pivot::add_calculated_item,
+            pivot::remove_calculated_item,
             // Named range commands
             named_ranges::create_named_range,
             named_ranges::update_named_range,

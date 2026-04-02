@@ -62,6 +62,14 @@ import {
   createFromBiModel,
   updateBiFields,
   setBiLookupColumns,
+
+  // Calculated Fields / Items
+  addCalculatedField,
+  updateCalculatedField,
+  removeCalculatedField,
+  addCalculatedItem,
+  removeCalculatedItem,
+  showReportFilterPages,
 } from '../../extensions/Pivot/lib/pivot-api';
 
 // Re-export types so extensions can import them from this module
@@ -70,6 +78,8 @@ export type {
   SortOrder,
   AggregationType,
   ShowValuesAs,
+  ShowAsCalculation,
+  ShowAsRule,
   ReportLayout,
   ValuesPosition,
   CreatePivotRequest,

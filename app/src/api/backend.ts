@@ -3855,3 +3855,50 @@ export async function solverRevert(
 ): Promise<SolverResultData> {
   return invoke<SolverResultData>("solver_revert", { sheetIndex, originalValues });
 }
+
+// ============================================================================
+// CALCULATED FIELD / ITEM COMMANDS
+// ============================================================================
+
+/** Generate one sheet per filter value for a pivot table's filter field. */
+export async function showReportFilterPages(
+  pivotId: number,
+  filterFieldIndex: number,
+): Promise<string[]> {
+  return invoke<string[]>("show_report_filter_pages", { pivotId, filterFieldIndex });
+}
+
+/** Add a calculated field to a pivot table. */
+export async function addCalculatedField<TRequest, TResponse>(
+  request: TRequest
+): Promise<TResponse> {
+  return invoke<TResponse>("add_calculated_field", { request });
+}
+
+/** Update an existing calculated field. */
+export async function updateCalculatedField<TRequest, TResponse>(
+  request: TRequest
+): Promise<TResponse> {
+  return invoke<TResponse>("update_calculated_field", { request });
+}
+
+/** Remove a calculated field from a pivot table. */
+export async function removeCalculatedField<TRequest, TResponse>(
+  request: TRequest
+): Promise<TResponse> {
+  return invoke<TResponse>("remove_calculated_field", { request });
+}
+
+/** Add a calculated item to a pivot field. */
+export async function addCalculatedItem<TRequest, TResponse>(
+  request: TRequest
+): Promise<TResponse> {
+  return invoke<TResponse>("add_calculated_item", { request });
+}
+
+/** Remove a calculated item from a pivot table. */
+export async function removeCalculatedItem<TRequest, TResponse>(
+  request: TRequest
+): Promise<TResponse> {
+  return invoke<TResponse>("remove_calculated_item", { request });
+}

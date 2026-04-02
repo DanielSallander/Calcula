@@ -3,10 +3,10 @@
 // CONTEXT: Re-exports types from API and defines extension-specific types.
 
 import type { LayoutConfig, AggregationType } from "../../src/api";
-import type { BiPivotModelInfo } from "../../src/api/pivot";
+import type { BiPivotModelInfo, ShowValuesAs } from "../../src/api/pivot";
 
 // Re-export types from API that the extension uses
-export type { LayoutConfig, AggregationType, BiPivotModelInfo };
+export type { LayoutConfig, AggregationType, BiPivotModelInfo, ShowValuesAs };
 
 /**
  * Source field from the pivot table's data source.
@@ -26,6 +26,10 @@ export interface ZoneField {
   isNumeric: boolean;
   aggregation?: AggregationType;
   customName?: string;
+  showValuesAs?: ShowValuesAs;
+  numberFormat?: string;
+  baseField?: string;
+  baseItem?: string;
 }
 
 /**

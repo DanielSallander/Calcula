@@ -91,6 +91,12 @@ import {
   cancelPivotOperation as apiCancelPivotOperation,
   revertPivotOperation as apiRevertPivotOperation,
   changePivotDataSource as apiChangePivotDataSource,
+  addCalculatedField as apiAddCalculatedField,
+  updateCalculatedField as apiUpdateCalculatedField,
+  removeCalculatedField as apiRemoveCalculatedField,
+  addCalculatedItem as apiAddCalculatedItem,
+  removeCalculatedItem as apiRemoveCalculatedItem,
+  showReportFilterPages as apiShowReportFilterPages,
 } from "../../../src/api/backend";
 
 // ============================================================================
@@ -127,6 +133,9 @@ export type ShowValuesAs =
   | "difference"
   | "percent_difference"
   | "running_total"
+  | "percent_of_running_total"
+  | "rank_ascending"
+  | "rank_descending"
   | "index";
 
 /** Report layout styles */
@@ -174,6 +183,29 @@ export interface PivotFieldConfig {
 }
 
 /** Value field configuration */
+/** Show-as calculation types matching Excel's ShowAsCalculation */
+export type ShowAsCalculation =
+  | "none"
+  | "percentOfGrandTotal"
+  | "percentOfRowTotal"
+  | "percentOfColumnTotal"
+  | "percentOfParentRowTotal"
+  | "percentOfParentColumnTotal"
+  | "differenceFrom"
+  | "percentDifferenceFrom"
+  | "runningTotal"
+  | "percentOfRunningTotal"
+  | "rankAscending"
+  | "rankDescending"
+  | "index";
+
+/** Rule for showing values as a calculation (Excel-compatible) */
+export interface ShowAsRule {
+  calculation: ShowAsCalculation;
+  baseField?: string;
+  baseItem?: string;
+}
+
 export interface ValueFieldConfig {
   /** Source column index (0-based) */
   sourceIndex: number;
@@ -183,8 +215,10 @@ export interface ValueFieldConfig {
   aggregation: AggregationType;
   /** Number format string */
   numberFormat?: string;
-  /** Show values as */
+  /** Show values as (simple string form) */
   showValuesAs?: ShowValuesAs;
+  /** Show as rule with base field/item (Excel-compatible form) */
+  showAs?: ShowAsRule;
 }
 
 /** Layout configuration */
@@ -1683,4 +1717,83 @@ export async function setBiLookupColumns(
  */
 export async function cancelPivotOperation(pivotId: PivotId): Promise<void> {
   return apiCancelPivotOperation(pivotId);
+}
+
+// ============================================================================
+// Calculated Fields / Items
+// ============================================================================
+
+export interface CalculatedFieldRequest {
+  pivotId: number;
+  name: string;
+  formula: string;
+  numberFormat?: string;
+}
+
+export interface UpdateCalculatedFieldRequest {
+  pivotId: number;
+  fieldIndex: number;
+  name: string;
+  formula: string;
+  numberFormat?: string;
+}
+
+export interface RemoveCalculatedFieldRequest {
+  pivotId: number;
+  fieldIndex: number;
+}
+
+export interface CalculatedItemRequest {
+  pivotId: number;
+  fieldIndex: number;
+  name: string;
+  formula: string;
+}
+
+export interface RemoveCalculatedItemRequest {
+  pivotId: number;
+  itemIndex: number;
+}
+
+/** Adds a calculated field to a pivot table. */
+export async function addCalculatedField(
+  request: CalculatedFieldRequest
+): Promise<PivotViewResponse> {
+  return apiAddCalculatedField<CalculatedFieldRequest, PivotViewResponse>(request);
+}
+
+/** Updates an existing calculated field. */
+export async function updateCalculatedField(
+  request: UpdateCalculatedFieldRequest
+): Promise<PivotViewResponse> {
+  return apiUpdateCalculatedField<UpdateCalculatedFieldRequest, PivotViewResponse>(request);
+}
+
+/** Removes a calculated field from a pivot table. */
+export async function removeCalculatedField(
+  request: RemoveCalculatedFieldRequest
+): Promise<PivotViewResponse> {
+  return apiRemoveCalculatedField<RemoveCalculatedFieldRequest, PivotViewResponse>(request);
+}
+
+/** Adds a calculated item to a pivot field. */
+export async function addCalculatedItem(
+  request: CalculatedItemRequest
+): Promise<PivotViewResponse> {
+  return apiAddCalculatedItem<CalculatedItemRequest, PivotViewResponse>(request);
+}
+
+/** Removes a calculated item from a pivot table. */
+export async function removeCalculatedItem(
+  request: RemoveCalculatedItemRequest
+): Promise<PivotViewResponse> {
+  return apiRemoveCalculatedItem<RemoveCalculatedItemRequest, PivotViewResponse>(request);
+}
+
+/** Generates one sheet per unique value of a filter field. */
+export async function showReportFilterPages(
+  pivotId: PivotId,
+  filterFieldIndex: number
+): Promise<string[]> {
+  return apiShowReportFilterPages(pivotId, filterFieldIndex);
 }

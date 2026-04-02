@@ -214,11 +214,36 @@ pub(crate) fn config_to_value_field(config: &ValueFieldConfig) -> ValueField {
             "difference" => ShowValuesAs::Difference,
             "percent_difference" => ShowValuesAs::PercentDifference,
             "running_total" => ShowValuesAs::RunningTotal,
+            "percent_of_running_total" => ShowValuesAs::PercentOfRunningTotal,
+            "rank_ascending" | "rank_asc" => ShowValuesAs::RankAscending,
+            "rank_descending" | "rank_desc" => ShowValuesAs::RankDescending,
             "index" => ShowValuesAs::Index,
             _ => ShowValuesAs::Normal,
         };
     }
-    
+
+    // Handle ShowAsRule (from Excel-compatible API) which includes base_field/base_item
+    if let Some(ref rule) = config.show_as {
+        field.show_values_as = match rule.calculation {
+            crate::pivot::types::ShowAsCalculation::None => ShowValuesAs::Normal,
+            crate::pivot::types::ShowAsCalculation::PercentOfGrandTotal => ShowValuesAs::PercentOfGrandTotal,
+            crate::pivot::types::ShowAsCalculation::PercentOfRowTotal => ShowValuesAs::PercentOfRowTotal,
+            crate::pivot::types::ShowAsCalculation::PercentOfColumnTotal => ShowValuesAs::PercentOfColumnTotal,
+            crate::pivot::types::ShowAsCalculation::PercentOfParentRowTotal => ShowValuesAs::PercentOfParentRow,
+            crate::pivot::types::ShowAsCalculation::PercentOfParentColumnTotal => ShowValuesAs::PercentOfParentColumn,
+            crate::pivot::types::ShowAsCalculation::DifferenceFrom => ShowValuesAs::Difference,
+            crate::pivot::types::ShowAsCalculation::PercentDifferenceFrom => ShowValuesAs::PercentDifference,
+            crate::pivot::types::ShowAsCalculation::RunningTotal => ShowValuesAs::RunningTotal,
+            crate::pivot::types::ShowAsCalculation::PercentOfRunningTotal => ShowValuesAs::PercentOfRunningTotal,
+            crate::pivot::types::ShowAsCalculation::RankAscending => ShowValuesAs::RankAscending,
+            crate::pivot::types::ShowAsCalculation::RankDescending => ShowValuesAs::RankDescending,
+            crate::pivot::types::ShowAsCalculation::Index => ShowValuesAs::Index,
+        };
+        field.base_item = rule.base_item.clone();
+        // base_field is a name string - we need to resolve it to a FieldIndex
+        // This is handled by the caller who has access to field definitions
+    }
+
     field
 }
 

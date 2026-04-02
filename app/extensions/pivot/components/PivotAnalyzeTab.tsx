@@ -7,10 +7,11 @@ import React, { useState, useEffect, useCallback, useRef, useMemo } from 'react'
 import { css } from '@emotion/css';
 import { onAppEvent, emitAppEvent, showDialog } from '../../../src/api';
 import { PivotEvents } from '../lib/pivotEvents';
-import { refreshPivotCache, getPivotTableInfo, deletePivotTable } from '../lib/pivot-api';
+import { refreshPivotCache, getPivotTableInfo, deletePivotTable, addCalculatedField, addCalculatedItem, showReportFilterPages } from '../lib/pivot-api';
 import type { PivotId } from './types';
 import type { RibbonContext } from '../../../src/api/extensions';
 import { ChangeDataSourceDialog } from './ChangeDataSourceDialog';
+import { CalculatedFieldDialog } from './CalculatedFieldDialog';
 import { PIVOT_OPTIONS_DIALOG_ID } from '../manifest';
 import { useRibbonCollapse, RibbonGroup } from '../../../src/api/ribbonCollapse';
 
@@ -115,6 +116,7 @@ const GROUP_DEFS = [
   { collapseOrder: 1, expandedWidth: 200 },   // PivotTable
   { collapseOrder: 3, expandedWidth: 260 },   // Data
   { collapseOrder: 2, expandedWidth: 200 },   // Actions
+  { collapseOrder: 4, expandedWidth: 260 },   // Calculations
 ];
 
 // ============================================================================
@@ -134,6 +136,9 @@ export function PivotAnalyzeTab({
   const [sourceRange, setSourceRange] = useState('');
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [showChangeSource, setShowChangeSource] = useState(false);
+  const [showCalcFieldDialog, setShowCalcFieldDialog] = useState(false);
+  const [showCalcItemDialog, setShowCalcItemDialog] = useState(false);
+  const [sourceFieldNames, setSourceFieldNames] = useState<string[]>([]);
 
   const containerRef = useRef<HTMLDivElement>(null);
   const groupDefs = useMemo(() => GROUP_DEFS, []);
@@ -199,6 +204,68 @@ export function PivotAnalyzeTab({
   const handleOptions = useCallback(() => {
     if (!pivotId) return;
     showDialog(PIVOT_OPTIONS_DIALOG_ID, { pivotId });
+  }, [pivotId]);
+
+  const handleOpenCalcField = useCallback(async () => {
+    if (!pivotId) return;
+    try {
+      const info = await getPivotTableInfo(pivotId);
+      if (info) {
+        setSourceFieldNames(info.sourceFields?.map((f: { name: string }) => f.name) || []);
+      }
+    } catch { /* use empty list */ }
+    setShowCalcFieldDialog(true);
+  }, [pivotId]);
+
+  const handleSaveCalcField = useCallback(async (name: string, formula: string, numberFormat?: string) => {
+    if (!pivotId) return;
+    try {
+      await addCalculatedField({ pivotId, name, formula, numberFormat });
+      window.dispatchEvent(new Event('pivot:refresh'));
+    } catch (err) {
+      console.error('[PivotAnalyzeTab] Add calculated field failed:', err);
+    }
+    setShowCalcFieldDialog(false);
+  }, [pivotId]);
+
+  const handleOpenCalcItem = useCallback(async () => {
+    if (!pivotId) return;
+    try {
+      const info = await getPivotTableInfo(pivotId);
+      if (info) {
+        // For calculated items, we show field item names from the first row field
+        const rowFields = info.rowHierarchies || [];
+        if (rowFields.length > 0) {
+          setSourceFieldNames(rowFields.map((f: { name: string }) => f.name));
+        }
+      }
+    } catch { /* use empty list */ }
+    setShowCalcItemDialog(true);
+  }, [pivotId]);
+
+  const handleSaveCalcItem = useCallback(async (name: string, formula: string) => {
+    if (!pivotId) return;
+    try {
+      // Default to first row field (index 0) - user would select in a full implementation
+      await addCalculatedItem({ pivotId, fieldIndex: 0, name, formula });
+      window.dispatchEvent(new Event('pivot:refresh'));
+    } catch (err) {
+      console.error('[PivotAnalyzeTab] Add calculated item failed:', err);
+    }
+    setShowCalcItemDialog(false);
+  }, [pivotId]);
+
+  const handleReportFilterPages = useCallback(async () => {
+    if (!pivotId) return;
+    try {
+      // Use filter field index 0 (first filter field) by default
+      const sheets = await showReportFilterPages(pivotId, 0);
+      if (sheets.length > 0) {
+        window.dispatchEvent(new Event('sheets:refresh'));
+      }
+    } catch (err) {
+      console.error('[PivotAnalyzeTab] Report filter pages failed:', err);
+    }
   }, [pivotId]);
 
   const handleDelete = useCallback(async () => {
@@ -302,6 +369,23 @@ export function PivotAnalyzeTab({
           </button>
           <button
             className={tabStyles.button}
+            onClick={handleReportFilterPages}
+            title="Show Report Filter Pages - generate one sheet per filter value"
+          >
+            <span className={tabStyles.buttonIcon}>
+              <svg width="22" height="22" viewBox="0 0 22 22" fill="none" xmlns="http://www.w3.org/2000/svg">
+                <rect x="2" y="4" width="14" height="12" rx="1.5" stroke="currentColor" strokeWidth="1.2"/>
+                <rect x="4" y="2" width="14" height="12" rx="1.5" stroke="currentColor" strokeWidth="1.2" fill="#fff"/>
+                <rect x="6" y="0" width="14" height="12" rx="1.5" stroke="currentColor" strokeWidth="1.2" fill="#fff"/>
+                <line x1="6" y1="4" x2="20" y2="4" stroke="currentColor" strokeWidth="1"/>
+                <line x1="6" y1="8" x2="20" y2="8" stroke="currentColor" strokeWidth="1"/>
+                <line x1="12" y1="0" x2="12" y2="12" stroke="currentColor" strokeWidth="1"/>
+              </svg>
+            </span>
+            <span className={tabStyles.buttonLabel}>Filter Pages</span>
+          </button>
+          <button
+            className={tabStyles.button}
             onClick={handleDelete}
             title="Delete this PivotTable"
             style={{ color: "#c42b1c" }}
@@ -312,12 +396,68 @@ export function PivotAnalyzeTab({
         </div>
       </RibbonGroup>
 
+      {/* Calculations group: Calculated Field, Calculated Item */}
+      <RibbonGroup label="Calculations" icon={"fx"} collapsed={collapsed[3]}>
+        <div className={tabStyles.groupContent}>
+          <button
+            className={tabStyles.button}
+            onClick={handleOpenCalcField}
+            title="Insert a Calculated Field"
+          >
+            <span className={tabStyles.buttonIcon}>
+              <svg width="22" height="22" viewBox="0 0 22 22" fill="none" xmlns="http://www.w3.org/2000/svg">
+                <text x="3" y="16" fontSize="14" fontWeight="bold" fontFamily="serif" fill="currentColor">fx</text>
+                <circle cx="16" cy="6" r="5" stroke="#217346" strokeWidth="1.4" fill="none"/>
+                <line x1="16" y1="3.5" x2="16" y2="8.5" stroke="#217346" strokeWidth="1.4" strokeLinecap="round"/>
+                <line x1="13.5" y1="6" x2="18.5" y2="6" stroke="#217346" strokeWidth="1.4" strokeLinecap="round"/>
+              </svg>
+            </span>
+            <span className={tabStyles.buttonLabel}>Calculated Field</span>
+          </button>
+          <button
+            className={tabStyles.button}
+            onClick={handleOpenCalcItem}
+            title="Insert a Calculated Item"
+          >
+            <span className={tabStyles.buttonIcon}>
+              <svg width="22" height="22" viewBox="0 0 22 22" fill="none" xmlns="http://www.w3.org/2000/svg">
+                <rect x="2" y="4" width="12" height="14" rx="1.5" stroke="currentColor" strokeWidth="1.4"/>
+                <line x1="2" y1="8" x2="14" y2="8" stroke="currentColor" strokeWidth="1.2"/>
+                <line x1="2" y1="12" x2="14" y2="12" stroke="currentColor" strokeWidth="1.2"/>
+                <circle cx="16" cy="6" r="5" stroke="#217346" strokeWidth="1.4" fill="none"/>
+                <line x1="16" y1="3.5" x2="16" y2="8.5" stroke="#217346" strokeWidth="1.4" strokeLinecap="round"/>
+                <line x1="13.5" y1="6" x2="18.5" y2="6" stroke="#217346" strokeWidth="1.4" strokeLinecap="round"/>
+              </svg>
+            </span>
+            <span className={tabStyles.buttonLabel}>Calculated Item</span>
+          </button>
+        </div>
+      </RibbonGroup>
+
       {/* Change Data Source Dialog */}
       <ChangeDataSourceDialog
         isOpen={showChangeSource}
         onClose={() => setShowChangeSource(false)}
         pivotId={pivotId}
         onChanged={handleChangeSourceDone}
+      />
+
+      {/* Calculated Field Dialog */}
+      <CalculatedFieldDialog
+        isOpen={showCalcFieldDialog}
+        fieldNames={sourceFieldNames}
+        onSave={handleSaveCalcField}
+        onCancel={() => setShowCalcFieldDialog(false)}
+        title="Insert Calculated Field"
+      />
+
+      {/* Calculated Item Dialog */}
+      <CalculatedFieldDialog
+        isOpen={showCalcItemDialog}
+        fieldNames={sourceFieldNames}
+        onSave={handleSaveCalcItem}
+        onCancel={() => setShowCalcItemDialog(false)}
+        title="Insert Calculated Item"
       />
     </div>
   );

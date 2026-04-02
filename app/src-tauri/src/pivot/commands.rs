@@ -356,6 +356,9 @@ pub async fn update_pivot_fields(
                 .iter()
                 .map(config_to_value_field)
                 .collect();
+
+            // Resolve base_field name -> base_field_index for ShowValuesAs calculations
+            resolve_base_field_indices(&mut definition.value_fields, value_configs, &definition.row_fields, &definition.column_fields);
         }
 
         // Update filter fields
@@ -1781,6 +1784,13 @@ pub fn get_pivot_hierarchies(
         })
         .collect();
 
+    // Collect all pivot fields for base_field name resolution
+    let all_fields: Vec<pivot_engine::PivotField> = definition.row_fields.iter()
+        .chain(definition.column_fields.iter())
+        .chain(definition.filter_fields.iter().map(|f| &f.field))
+        .cloned()
+        .collect();
+
     // Data hierarchies
     let data_hierarchies: Vec<DataHierarchyInfo> = definition.value_fields
         .iter()
@@ -1792,7 +1802,7 @@ pub fn get_pivot_hierarchies(
             summarize_by: aggregation_type_to_api(f.aggregation),
             number_format: f.number_format.clone(),
             position: pos,
-            show_as: show_values_as_to_api(f.show_values_as),
+            show_as: show_values_as_to_api(f, &all_fields),
         })
         .collect();
 
@@ -2827,6 +2837,29 @@ fn api_to_aggregation_type(func: AggregationFunction) -> pivot_engine::Aggregati
     }
 }
 
+/// Resolves base_field names to base_field_index on value fields.
+/// Called after value fields are created from config, to fill in the index
+/// that the engine needs for Difference/RunningTotal/Rank calculations.
+fn resolve_base_field_indices(
+    value_fields: &mut [pivot_engine::ValueField],
+    configs: &[ValueFieldConfig],
+    row_fields: &[pivot_engine::PivotField],
+    col_fields: &[pivot_engine::PivotField],
+) {
+    for (vf, cfg) in value_fields.iter_mut().zip(configs.iter()) {
+        let base_field_name = cfg.show_as.as_ref()
+            .and_then(|rule| rule.base_field.as_ref());
+
+        if let Some(name) = base_field_name {
+            // Search row fields, then column fields
+            let found = row_fields.iter().chain(col_fields.iter())
+                .find(|f| &f.name == name)
+                .map(|f| f.source_index);
+            vf.base_field_index = found;
+        }
+    }
+}
+
 /// Converts engine AggregationType to API AggregationFunction.
 fn aggregation_type_to_api(agg: pivot_engine::AggregationType) -> AggregationFunction {
     match agg {
@@ -2845,8 +2878,8 @@ fn aggregation_type_to_api(agg: pivot_engine::AggregationType) -> AggregationFun
 }
 
 /// Converts engine ShowValuesAs to API ShowAsRule.
-fn show_values_as_to_api(show_as: pivot_engine::ShowValuesAs) -> Option<ShowAsRule> {
-    let calculation = match show_as {
+fn show_values_as_to_api(vf: &pivot_engine::ValueField, fields: &[pivot_engine::PivotField]) -> Option<ShowAsRule> {
+    let calculation = match vf.show_values_as {
         pivot_engine::ShowValuesAs::Normal => return None,
         pivot_engine::ShowValuesAs::PercentOfGrandTotal => ShowAsCalculation::PercentOfGrandTotal,
         pivot_engine::ShowValuesAs::PercentOfRowTotal => ShowAsCalculation::PercentOfRowTotal,
@@ -2856,12 +2889,21 @@ fn show_values_as_to_api(show_as: pivot_engine::ShowValuesAs) -> Option<ShowAsRu
         pivot_engine::ShowValuesAs::Difference => ShowAsCalculation::DifferenceFrom,
         pivot_engine::ShowValuesAs::PercentDifference => ShowAsCalculation::PercentDifferenceFrom,
         pivot_engine::ShowValuesAs::RunningTotal => ShowAsCalculation::RunningTotal,
+        pivot_engine::ShowValuesAs::PercentOfRunningTotal => ShowAsCalculation::PercentOfRunningTotal,
+        pivot_engine::ShowValuesAs::RankAscending => ShowAsCalculation::RankAscending,
+        pivot_engine::ShowValuesAs::RankDescending => ShowAsCalculation::RankDescending,
         pivot_engine::ShowValuesAs::Index => ShowAsCalculation::Index,
     };
+
+    // Resolve base_field name from index
+    let base_field = vf.base_field_index.and_then(|fi| {
+        fields.iter().find(|f| f.source_index == fi).map(|f| f.name.clone())
+    });
+
     Some(ShowAsRule {
         calculation,
-        base_field: None,
-        base_item: None,
+        base_field,
+        base_item: vf.base_item.clone(),
     })
 }
 
@@ -3828,4 +3870,379 @@ pub fn set_bi_lookup_columns(
         .ok_or_else(|| format!("No BI metadata for pivot {}", pivot_id))?;
     meta.lookup_columns = lookup_columns.into_iter().collect();
     Ok(())
+}
+
+// ============================================================================
+// REPORT FILTER PAGES
+// ============================================================================
+
+/// Generates one sheet per unique value of a filter field.
+/// Each sheet contains a static copy of the pivot table filtered to that value.
+#[tauri::command]
+pub fn show_report_filter_pages(
+    state: State<AppState>,
+    pivot_state: State<'_, PivotState>,
+    pivot_id: PivotId,
+    filter_field_index: usize,
+) -> Result<Vec<String>, String> {
+    log_info!(
+        "PIVOT",
+        "show_report_filter_pages pivot_id={} filter_field={}",
+        pivot_id,
+        filter_field_index
+    );
+
+    let pivot_tables = pivot_state.pivot_tables.lock().unwrap();
+    let (definition, cache) = pivot_tables
+        .get(&pivot_id)
+        .ok_or_else(|| format!("Pivot table {} not found", pivot_id))?;
+
+    if filter_field_index >= definition.filter_fields.len() {
+        return Err(format!(
+            "Filter field index {} out of range (max {})",
+            filter_field_index,
+            definition.filter_fields.len().saturating_sub(1)
+        ));
+    }
+
+    let filter_field = &definition.filter_fields[filter_field_index];
+    let field_index = filter_field.field.source_index;
+
+    // Get unique values for this filter field
+    let unique_values = cache.get_unique_values_for_filter(field_index);
+    if unique_values.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let mut created_sheets = Vec::new();
+
+    for (_vid, value_label) in &unique_values {
+        if value_label.is_empty() {
+            continue;
+        }
+
+        // Clone definition and apply the filter for this value
+        let mut filtered_def = definition.clone();
+
+        // Set the filter to show only this value (hide all others)
+        let all_labels: Vec<String> = unique_values.iter()
+            .map(|(_, l)| l.clone())
+            .collect();
+        let hidden: Vec<String> = all_labels.iter()
+            .filter(|l| l.as_str() != value_label.as_str())
+            .cloned()
+            .collect();
+        filtered_def.filter_fields[filter_field_index].field.hidden_items = hidden;
+
+        // Compute the filtered pivot view
+        let mut cache_clone = cache.clone();
+        let view = safe_calculate_pivot(&filtered_def, &mut cache_clone);
+
+        // Create a new sheet with this value's name
+        let sheet_name = sanitize_sheet_name(value_label);
+
+        // Use AppState to create the sheet and write the pivot view
+        let mut sheet_names = state.sheet_names.lock().unwrap();
+        let mut grids = state.grids.lock().unwrap();
+
+        // Skip if sheet already exists
+        if sheet_names.contains(&sheet_name) {
+            continue;
+        }
+
+        let new_grid = engine::Grid::new();
+        sheet_names.push(sheet_name.clone());
+        grids.push(new_grid);
+
+        let sheet_idx = grids.len() - 1;
+
+        // Write the pivot view to the new sheet as static cells
+        let mut styles = state.style_registry.lock().unwrap();
+        if let Some(grid) = grids.get_mut(sheet_idx) {
+            crate::pivot::operations::write_pivot_to_grid(
+                grid,
+                None,
+                &view,
+                (0, 0),
+                &mut styles,
+            );
+        }
+
+        drop(styles);
+        drop(grids);
+        drop(sheet_names);
+
+        created_sheets.push(sheet_name);
+    }
+
+    Ok(created_sheets)
+}
+
+/// Sanitizes a string for use as a sheet name.
+fn sanitize_sheet_name(name: &str) -> String {
+    let sanitized: String = name
+        .chars()
+        .map(|c| match c {
+            '/' | '\\' | '?' | '*' | '[' | ']' | ':' => '_',
+            _ => c,
+        })
+        .take(31) // Excel limit
+        .collect();
+    if sanitized.is_empty() {
+        "Sheet".to_string()
+    } else {
+        sanitized
+    }
+}
+
+// ============================================================================
+// CALCULATED FIELD COMMANDS
+// ============================================================================
+
+/// Adds a calculated field to a pivot table.
+#[tauri::command]
+pub fn add_calculated_field(
+    state: State<AppState>,
+    pivot_state: State<'_, PivotState>,
+    request: CalculatedFieldRequest,
+) -> Result<PivotViewResponse, String> {
+    log_info!(
+        "PIVOT",
+        "add_calculated_field pivot_id={} name={} formula={}",
+        request.pivot_id,
+        request.name,
+        request.formula
+    );
+
+    // Validate the formula parses correctly
+    pivot_engine::calculated::parse_calc_formula(&request.formula)
+        .map_err(|e| format!("Invalid formula: {}", e))?;
+
+    let mut pivot_tables = pivot_state.pivot_tables.lock().unwrap();
+    let (definition, cache) = pivot_tables
+        .get_mut(&request.pivot_id)
+        .ok_or_else(|| format!("Pivot table {} not found", request.pivot_id))?;
+
+    definition.calculated_fields.push(pivot_engine::CalculatedField {
+        name: request.name,
+        formula: request.formula,
+        number_format: request.number_format,
+    });
+
+    definition.bump_version();
+
+    let view = safe_calculate_pivot(definition, cache);
+    store_view(&pivot_state, request.pivot_id, &view);
+    let response = view_to_response(&view, definition, cache);
+
+    let destination = definition.destination;
+    let pivot_id = definition.id;
+    let dest_sheet_idx = resolve_dest_sheet_index(&state, definition);
+
+    drop(pivot_tables);
+
+    update_pivot_in_grid(&state, pivot_id, dest_sheet_idx, destination, &view);
+    update_pivot_region(&state, pivot_id, dest_sheet_idx, destination, &view);
+
+    Ok(response)
+}
+
+/// Updates an existing calculated field.
+#[tauri::command]
+pub fn update_calculated_field(
+    state: State<AppState>,
+    pivot_state: State<'_, PivotState>,
+    request: UpdateCalculatedFieldRequest,
+) -> Result<PivotViewResponse, String> {
+    log_info!(
+        "PIVOT",
+        "update_calculated_field pivot_id={} index={} name={} formula={}",
+        request.pivot_id,
+        request.field_index,
+        request.name,
+        request.formula
+    );
+
+    pivot_engine::calculated::parse_calc_formula(&request.formula)
+        .map_err(|e| format!("Invalid formula: {}", e))?;
+
+    let mut pivot_tables = pivot_state.pivot_tables.lock().unwrap();
+    let (definition, cache) = pivot_tables
+        .get_mut(&request.pivot_id)
+        .ok_or_else(|| format!("Pivot table {} not found", request.pivot_id))?;
+
+    if request.field_index >= definition.calculated_fields.len() {
+        return Err(format!(
+            "Calculated field index {} out of range (max {})",
+            request.field_index,
+            definition.calculated_fields.len().saturating_sub(1)
+        ));
+    }
+
+    definition.calculated_fields[request.field_index] = pivot_engine::CalculatedField {
+        name: request.name,
+        formula: request.formula,
+        number_format: request.number_format,
+    };
+
+    definition.bump_version();
+
+    let view = safe_calculate_pivot(definition, cache);
+    store_view(&pivot_state, request.pivot_id, &view);
+    let response = view_to_response(&view, definition, cache);
+
+    let destination = definition.destination;
+    let pivot_id = definition.id;
+    let dest_sheet_idx = resolve_dest_sheet_index(&state, definition);
+
+    drop(pivot_tables);
+
+    update_pivot_in_grid(&state, pivot_id, dest_sheet_idx, destination, &view);
+    update_pivot_region(&state, pivot_id, dest_sheet_idx, destination, &view);
+
+    Ok(response)
+}
+
+/// Removes a calculated field from a pivot table.
+#[tauri::command]
+pub fn remove_calculated_field(
+    state: State<AppState>,
+    pivot_state: State<'_, PivotState>,
+    request: RemoveCalculatedFieldRequest,
+) -> Result<PivotViewResponse, String> {
+    log_info!(
+        "PIVOT",
+        "remove_calculated_field pivot_id={} index={}",
+        request.pivot_id,
+        request.field_index
+    );
+
+    let mut pivot_tables = pivot_state.pivot_tables.lock().unwrap();
+    let (definition, cache) = pivot_tables
+        .get_mut(&request.pivot_id)
+        .ok_or_else(|| format!("Pivot table {} not found", request.pivot_id))?;
+
+    if request.field_index >= definition.calculated_fields.len() {
+        return Err(format!(
+            "Calculated field index {} out of range (max {})",
+            request.field_index,
+            definition.calculated_fields.len().saturating_sub(1)
+        ));
+    }
+
+    definition.calculated_fields.remove(request.field_index);
+    definition.bump_version();
+
+    let view = safe_calculate_pivot(definition, cache);
+    store_view(&pivot_state, request.pivot_id, &view);
+    let response = view_to_response(&view, definition, cache);
+
+    let destination = definition.destination;
+    let pivot_id = definition.id;
+    let dest_sheet_idx = resolve_dest_sheet_index(&state, definition);
+
+    drop(pivot_tables);
+
+    update_pivot_in_grid(&state, pivot_id, dest_sheet_idx, destination, &view);
+    update_pivot_region(&state, pivot_id, dest_sheet_idx, destination, &view);
+
+    Ok(response)
+}
+
+// ============================================================================
+// CALCULATED ITEM COMMANDS
+// ============================================================================
+
+/// Adds a calculated item to a pivot field.
+#[tauri::command]
+pub fn add_calculated_item(
+    state: State<AppState>,
+    pivot_state: State<'_, PivotState>,
+    request: CalculatedItemRequest,
+) -> Result<PivotViewResponse, String> {
+    log_info!(
+        "PIVOT",
+        "add_calculated_item pivot_id={} field_index={} name={} formula={}",
+        request.pivot_id,
+        request.field_index,
+        request.name,
+        request.formula
+    );
+
+    pivot_engine::calculated::parse_calc_formula(&request.formula)
+        .map_err(|e| format!("Invalid formula: {}", e))?;
+
+    let mut pivot_tables = pivot_state.pivot_tables.lock().unwrap();
+    let (definition, cache) = pivot_tables
+        .get_mut(&request.pivot_id)
+        .ok_or_else(|| format!("Pivot table {} not found", request.pivot_id))?;
+
+    definition.calculated_items.push(pivot_engine::CalculatedItem {
+        field_index: request.field_index,
+        name: request.name,
+        formula: request.formula,
+    });
+
+    definition.bump_version();
+
+    let view = safe_calculate_pivot(definition, cache);
+    store_view(&pivot_state, request.pivot_id, &view);
+    let response = view_to_response(&view, definition, cache);
+
+    let destination = definition.destination;
+    let pivot_id = definition.id;
+    let dest_sheet_idx = resolve_dest_sheet_index(&state, definition);
+
+    drop(pivot_tables);
+
+    update_pivot_in_grid(&state, pivot_id, dest_sheet_idx, destination, &view);
+    update_pivot_region(&state, pivot_id, dest_sheet_idx, destination, &view);
+
+    Ok(response)
+}
+
+/// Removes a calculated item from a pivot table.
+#[tauri::command]
+pub fn remove_calculated_item(
+    state: State<AppState>,
+    pivot_state: State<'_, PivotState>,
+    request: RemoveCalculatedItemRequest,
+) -> Result<PivotViewResponse, String> {
+    log_info!(
+        "PIVOT",
+        "remove_calculated_item pivot_id={} index={}",
+        request.pivot_id,
+        request.item_index
+    );
+
+    let mut pivot_tables = pivot_state.pivot_tables.lock().unwrap();
+    let (definition, cache) = pivot_tables
+        .get_mut(&request.pivot_id)
+        .ok_or_else(|| format!("Pivot table {} not found", request.pivot_id))?;
+
+    if request.item_index >= definition.calculated_items.len() {
+        return Err(format!(
+            "Calculated item index {} out of range (max {})",
+            request.item_index,
+            definition.calculated_items.len().saturating_sub(1)
+        ));
+    }
+
+    definition.calculated_items.remove(request.item_index);
+    definition.bump_version();
+
+    let view = safe_calculate_pivot(definition, cache);
+    store_view(&pivot_state, request.pivot_id, &view);
+    let response = view_to_response(&view, definition, cache);
+
+    let destination = definition.destination;
+    let pivot_id = definition.id;
+    let dest_sheet_idx = resolve_dest_sheet_index(&state, definition);
+
+    drop(pivot_tables);
+
+    update_pivot_in_grid(&state, pivot_id, dest_sheet_idx, destination, &view);
+    update_pivot_region(&state, pivot_id, dest_sheet_idx, destination, &view);
+
+    Ok(response)
 }

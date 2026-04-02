@@ -318,6 +318,7 @@ pub enum BuiltinFunction {
     RandArray,
     GroupBy,
     PivotBy,
+    GetPivotData,
 
     // Collection functions (3D cells)
     Collect,

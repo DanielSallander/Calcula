@@ -15,6 +15,7 @@ pub mod definition;
 pub mod cache;
 pub mod view;
 pub mod engine;
+pub mod calculated;
 
 pub use definition::*;
 pub use cache::*;

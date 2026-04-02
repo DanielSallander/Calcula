@@ -192,18 +192,28 @@ pub struct ManualGroup {
 pub struct ValueField {
     /// Index of the source column (0-based from source range).
     pub source_index: FieldIndex,
-    
+
     /// Display name (e.g., "Sum of Sales").
     pub name: String,
-    
+
     /// The aggregation function to apply.
     pub aggregation: AggregationType,
-    
+
     /// Number format string (e.g., "#,##0.00", "0%").
     pub number_format: Option<String>,
-    
+
     /// Show values as (normal, % of grand total, % of row, etc.).
     pub show_values_as: ShowValuesAs,
+
+    /// Base field index for Difference/RunningTotal/Rank calculations.
+    /// References a row or column field whose items define the comparison axis.
+    #[serde(default)]
+    pub base_field_index: Option<FieldIndex>,
+
+    /// Base item for Difference/PercentDifference calculations.
+    /// Can be a specific item name, "(previous)", or "(next)".
+    #[serde(default)]
+    pub base_item: Option<String>,
 }
 
 impl ValueField {
@@ -214,6 +224,8 @@ impl ValueField {
             aggregation,
             number_format: None,
             show_values_as: ShowValuesAs::Normal,
+            base_field_index: None,
+            base_item: None,
         }
     }
 }
@@ -230,6 +242,9 @@ pub enum ShowValuesAs {
     Difference,
     PercentDifference,
     RunningTotal,
+    PercentOfRunningTotal,
+    RankAscending,
+    RankDescending,
     Index,
 }
 
@@ -506,6 +521,41 @@ impl Default for ValuesPosition {
 }
 
 // ============================================================================
+// CALCULATED FIELDS AND ITEMS
+// ============================================================================
+
+/// A user-defined calculated field that computes from other fields using a formula.
+/// The formula is evaluated post-aggregation: field name references resolve to
+/// the aggregated value of the corresponding value field for the current cell.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CalculatedField {
+    /// Display name for this calculated field (e.g., "Profit").
+    pub name: String,
+
+    /// Formula string using field names (e.g., "Revenue - Cost").
+    /// Supports: field name references, +, -, *, /, parentheses, numeric literals.
+    pub formula: String,
+
+    /// Number format for display (e.g., "#,##0.00").
+    #[serde(default)]
+    pub number_format: Option<String>,
+}
+
+/// A user-defined calculated item within a specific row/column field.
+/// The formula references other items in the same field by name.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CalculatedItem {
+    /// The field this item belongs to (source_index of a row or column field).
+    pub field_index: FieldIndex,
+
+    /// Display name for this item (e.g., "North+South").
+    pub name: String,
+
+    /// Formula using other item names from the same field (e.g., "East + West").
+    pub formula: String,
+}
+
+// ============================================================================
 // MAIN DEFINITION STRUCT
 // ============================================================================
 
@@ -590,6 +640,14 @@ pub struct PivotDefinition {
     /// dynamically so that table expansions propagate automatically.
     #[serde(default)]
     pub source_table_name: Option<String>,
+
+    /// User-defined calculated fields (formulas over aggregated values).
+    #[serde(default)]
+    pub calculated_fields: Vec<CalculatedField>,
+
+    /// User-defined calculated items (synthetic items within a field).
+    #[serde(default)]
+    pub calculated_items: Vec<CalculatedItem>,
 }
 
 impl PivotDefinition {
@@ -616,6 +674,8 @@ impl PivotDefinition {
             refresh_on_open: false,
             use_custom_sort_lists: false,
             source_table_name: None,
+            calculated_fields: Vec::new(),
+            calculated_items: Vec::new(),
         }
     }
     
