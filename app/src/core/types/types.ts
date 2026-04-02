@@ -269,6 +269,16 @@ export interface RichTextRun {
   subscript?: boolean;
 }
 
+/** Accounting layout for split rendering (symbol left, value right). */
+export interface AccountingLayout {
+  /** Currency symbol text (e.g., "$", "EUR") */
+  symbol: string;
+  /** Whether the symbol appears before the value */
+  symbolBefore: boolean;
+  /** Formatted number part (e.g., "1,234.00", "(1,234.00)", "-") */
+  value: string;
+}
+
 export interface CellData {
   /** Row index (0-based) */
   row: number;
@@ -290,6 +300,8 @@ export interface CellData {
   sheetIndex?: number;
   /** Rich text runs for partial formatting within the cell */
   richText?: RichTextRun[];
+  /** Accounting layout for split rendering (symbol left, value right) */
+  accountingLayout?: AccountingLayout;
 }
 
 /** Spill range information for visual rendering of dynamic array borders. */

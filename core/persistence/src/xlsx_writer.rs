@@ -209,6 +209,41 @@ fn convert_number_format(format: &NumberFormat) -> String {
             };
             format!("{}#,##0{}", symbol, decimal_part)
         }
+        NumberFormat::Accounting { decimal_places, symbol, symbol_position } => {
+            let decimal_part = if *decimal_places > 0 {
+                format!(".{}", "0".repeat(*decimal_places as usize))
+            } else {
+                String::new()
+            };
+            let num_fmt = format!("#,##0{}", decimal_part);
+            let dash = if *decimal_places > 0 {
+                format!("\"-\"{}",  "?".repeat(*decimal_places as usize))
+            } else {
+                "\"-\"".to_string()
+            };
+            match symbol_position {
+                engine::style::CurrencyPosition::Before => {
+                    format!(
+                        "_(\"{symbol}\"* {num_fmt}_);_(\"{symbol}\"* ({num_fmt});_(\"{symbol}\"* {dash}_);_(@_)"
+                    )
+                }
+                engine::style::CurrencyPosition::After => {
+                    format!(
+                        "_(* {num_fmt}\" {symbol}\"_);_(* ({num_fmt})\" {symbol}\";_(* {dash}\" {symbol}\"_);_(@_)"
+                    )
+                }
+            }
+        }
+        NumberFormat::Fraction { denominator, max_digits } => {
+            let num_placeholders = "?".repeat(*max_digits as usize);
+            match denominator {
+                Some(d) => format!("# {}/{}", num_placeholders, d),
+                None => {
+                    let den_placeholders = "?".repeat(*max_digits as usize);
+                    format!("# {}/{}", num_placeholders, den_placeholders)
+                }
+            }
+        }
         NumberFormat::Percentage { decimal_places } => {
             let decimal_part = if *decimal_places > 0 {
                 format!(".{}", "0".repeat(*decimal_places as usize))

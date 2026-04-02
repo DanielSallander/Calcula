@@ -88,10 +88,10 @@ export const NUMBER_FORMAT_CATEGORIES: NumberFormatCategory[] = [
       "Accounting formats line up the currency symbols and decimal points in a column. " +
       "Use Currency formats for general monetary values.",
     formats: [
-      { label: "$ (USD)", value: '_(* #,##0.00_);_(* (#,##0.00);_(* "-"??_);_(@_)', example: "$ 1,234.00" },
-      { label: "$ (no decimals)", value: '_(* #,##0_);_(* (#,##0);_(* "-"_);_(@_)', example: "$ 1,234" },
-      { label: "EUR", value: '_("EUR"* #,##0.00_);_("EUR"* (#,##0.00);_("EUR"* "-"??_);_(@_)', example: "EUR 1,234.00" },
-      { label: "kr (SEK)", value: '_(* #,##0.00" kr"_);_(* (#,##0.00)" kr";_(* "-"??" kr"_);_(@_)', example: "1,234.00 kr" },
+      { label: "$ (USD)", value: "accounting_usd", example: "$ 1,234.00" },
+      { label: "$ (no decimals)", value: "accounting_usd_0", example: "$ 1,234" },
+      { label: "EUR", value: "accounting_eur", example: "EUR 1,234.00" },
+      { label: "kr (SEK)", value: "accounting_sek", example: "1,234.00 kr" },
     ],
   },
   {
@@ -100,15 +100,15 @@ export const NUMBER_FORMAT_CATEGORIES: NumberFormatCategory[] = [
     description:
       "Fraction formats display numbers as fractions. Choose the type of fraction you want to display.",
     formats: [
-      { label: "Up to one digit (1/4)", value: "# ?/?", example: "1234 1/2" },
-      { label: "Up to two digits (21/25)", value: "# ??/??", example: "1234 10/20" },
-      { label: "Up to three digits (312/943)", value: "# ???/???", example: "1234 500/1000" },
-      { label: "Halves (1/2)", value: "# ?/2", example: "1234 1/2" },
-      { label: "Quarters (2/4)", value: "# ?/4", example: "1234 2/4" },
-      { label: "Eighths (4/8)", value: "# ?/8", example: "1234 4/8" },
-      { label: "Sixteenths (8/16)", value: "# ??/16", example: "1234 8/16" },
-      { label: "Tenths (5/10)", value: "# ?/10", example: "1234 5/10" },
-      { label: "Hundredths (50/100)", value: "# ??/100", example: "1234 50/100" },
+      { label: "Up to one digit (1/4)", value: "fraction_1", example: "1234 1/2" },
+      { label: "Up to two digits (21/25)", value: "fraction_2", example: "1234 10/20" },
+      { label: "Up to three digits (312/943)", value: "fraction_3", example: "1234 500/1000" },
+      { label: "Halves (1/2)", value: "fraction_halves", example: "1234 1/2" },
+      { label: "Quarters (2/4)", value: "fraction_quarters", example: "1234 2/4" },
+      { label: "Eighths (4/8)", value: "fraction_eighths", example: "1234 4/8" },
+      { label: "Sixteenths (8/16)", value: "fraction_sixteenths", example: "1234 8/16" },
+      { label: "Tenths (5/10)", value: "fraction_tenths", example: "1234 5/10" },
+      { label: "Hundredths (50/100)", value: "fraction_hundredths", example: "1234 50/100" },
     ],
   },
   {

@@ -1,7 +1,7 @@
 //! FILENAME: app/src-tauri/src/commands/utils.rs
 // PURPOSE: Helper functions shared between different command modules.
 
-use crate::api_types::{CellData, MergedRegion};
+use crate::api_types::{AccountingLayout, CellData, MergedRegion};
 use crate::format_cell_value_with_color;
 use engine::{Grid, StyleRegistry};
 use std::collections::HashSet;
@@ -36,13 +36,18 @@ pub(crate) fn get_cell_internal_with_merge(
         return None;
     }
 
-    let (display, display_color, formula, style_index) = if let Some(c) = cell {
+    let (display, display_color, formula, style_index, accounting_layout) = if let Some(c) = cell {
         let style = styles.get(c.style_index);
         let result = format_cell_value_with_color(&c.value, style);
-        (result.text, result.color, c.formula.clone(), c.style_index)
+        let acct = result.accounting.map(|a| AccountingLayout {
+            symbol: a.symbol,
+            symbol_before: a.symbol_before,
+            value: a.value,
+        });
+        (result.text, result.color, c.formula.clone(), c.style_index, acct)
     } else {
         // Empty merge master
-        (String::new(), None, None, 0)
+        (String::new(), None, None, 0, None)
     };
 
     Some(CellData {
@@ -56,5 +61,6 @@ pub(crate) fn get_cell_internal_with_merge(
         col_span,
         sheet_index: None,
         rich_text: None,
+        accounting_layout,
     })
 }

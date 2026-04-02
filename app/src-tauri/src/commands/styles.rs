@@ -66,6 +66,11 @@ pub fn set_cell_style(
         let style = styles.get(style_index);
         let result = format_cell_value_with_color(&updated_cell.value, style);
 
+        let accounting_layout = result.accounting.map(|a| crate::api_types::AccountingLayout {
+            symbol: a.symbol,
+            symbol_before: a.symbol_before,
+            value: a.value,
+        });
         Some(CellData {
             row,
             col,
@@ -77,6 +82,7 @@ pub fn set_cell_style(
             col_span,
             sheet_index: None,
             rich_text: None,
+            accounting_layout,
         })
     } else {
         // Create a new empty cell with the style
@@ -107,6 +113,7 @@ pub fn set_cell_style(
             col_span,
             sheet_index: None,
             rich_text: None,
+            accounting_layout: None,
         })
     }
 }
@@ -280,6 +287,11 @@ pub fn apply_formatting(
             undo_stack.record_cell_change(row, col, previous_cell);
 
             let fmt_result = format_cell_value_with_color(&updated_cell.value, &new_style);
+            let acct_layout = fmt_result.accounting.map(|a| crate::api_types::AccountingLayout {
+                symbol: a.symbol,
+                symbol_before: a.symbol_before,
+                value: a.value,
+            });
 
             // Get merge span info
             let merge_info = merged_regions.iter().find(|r| r.start_row == row && r.start_col == col);
@@ -300,6 +312,7 @@ pub fn apply_formatting(
                 col_span,
                 sheet_index: None,
                 rich_text: None,
+                accounting_layout: acct_layout,
             });
         }
     }
@@ -497,6 +510,35 @@ pub(crate) fn parse_number_format(format: &str) -> NumberFormat {
             symbol: "kr".to_string(),
             symbol_position: CurrencyPosition::After,
         },
+        "accounting_usd" => NumberFormat::Accounting {
+            decimal_places: 2,
+            symbol: "$".to_string(),
+            symbol_position: CurrencyPosition::Before,
+        },
+        "accounting_usd_0" => NumberFormat::Accounting {
+            decimal_places: 0,
+            symbol: "$".to_string(),
+            symbol_position: CurrencyPosition::Before,
+        },
+        "accounting_eur" => NumberFormat::Accounting {
+            decimal_places: 2,
+            symbol: "EUR".to_string(),
+            symbol_position: CurrencyPosition::Before,
+        },
+        "accounting_sek" => NumberFormat::Accounting {
+            decimal_places: 2,
+            symbol: "kr".to_string(),
+            symbol_position: CurrencyPosition::After,
+        },
+        "fraction_1" => NumberFormat::Fraction { denominator: None, max_digits: 1 },
+        "fraction_2" => NumberFormat::Fraction { denominator: None, max_digits: 2 },
+        "fraction_3" => NumberFormat::Fraction { denominator: None, max_digits: 3 },
+        "fraction_halves" => NumberFormat::Fraction { denominator: Some(2), max_digits: 1 },
+        "fraction_quarters" => NumberFormat::Fraction { denominator: Some(4), max_digits: 1 },
+        "fraction_eighths" => NumberFormat::Fraction { denominator: Some(8), max_digits: 1 },
+        "fraction_sixteenths" => NumberFormat::Fraction { denominator: Some(16), max_digits: 2 },
+        "fraction_tenths" => NumberFormat::Fraction { denominator: Some(10), max_digits: 1 },
+        "fraction_hundredths" => NumberFormat::Fraction { denominator: Some(100), max_digits: 2 },
         "percentage" => NumberFormat::Percentage { decimal_places: 2 },
         "scientific" => NumberFormat::Scientific { decimal_places: 2 },
         "date_iso" => NumberFormat::Date {
@@ -810,6 +852,11 @@ pub fn set_cell_rich_text(
     let cell = grid.get_cell(row, col)?;
     let style = styles.get(cell.style_index);
     let result = format_cell_value_with_color(&cell.value, style);
+    let accounting_layout = result.accounting.map(|a| crate::api_types::AccountingLayout {
+        symbol: a.symbol,
+        symbol_before: a.symbol_before,
+        value: a.value,
+    });
     let (row_span, col_span) = match merged_regions
         .iter()
         .find(|m| m.start_row == row && m.start_col == col)
@@ -829,5 +876,6 @@ pub fn set_cell_rich_text(
         col_span,
         sheet_index: None,
         rich_text: cell.rich_text.as_ref().map(|r| crate::api_types::rich_text_runs_to_data(r)),
+        accounting_layout,
     })
 }

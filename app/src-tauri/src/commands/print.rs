@@ -94,6 +94,7 @@ pub fn get_print_data(state: State<AppState>) -> Result<PrintData, String> {
             col_span,
             sheet_index: None,
             rich_text: None,
+                accounting_layout: None,
         });
     }
 

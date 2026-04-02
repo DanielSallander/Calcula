@@ -5,7 +5,7 @@
 // UPDATED: Added vertical alignment, text wrapping, text rotation, and empty cell background rendering
 
 import type { RenderState } from "../types";
-import type { RichTextRun } from "../../../types";
+import type { RichTextRun, AccountingLayout } from "../../../types";
 import { calculateVisibleRange } from "../layout/viewport";
 import { getColumnWidth, getRowHeight } from "../layout/dimensions";
 import { getStyleFromCache, isValidColor, isDefaultTextColor, isDefaultBackgroundColor } from "../styles/styleUtils";
@@ -951,6 +951,43 @@ export function drawCellText(state: RenderState): void {
           effectiveStyle.italic === true,
           hasUnderline, hasStrikethrough,
         );
+
+        ctx.restore();
+        baseX += colWidth;
+        continue;
+      }
+
+      // -----------------------------------------------------------------------
+      // Accounting layout: symbol at left edge, value at right edge
+      // -----------------------------------------------------------------------
+      const acctLayout = (cell as { accountingLayout?: AccountingLayout }).accountingLayout;
+      if (acctLayout) {
+        let acctTextY: number;
+        if (vAlign === "top") {
+          ctx.textBaseline = "top";
+          acctTextY = cellTop + paddingY;
+        } else if (vAlign === "bottom") {
+          ctx.textBaseline = "bottom";
+          acctTextY = cellBottom - paddingY;
+        } else {
+          ctx.textBaseline = "middle";
+          acctTextY = y + actualHeight / 2;
+        }
+
+        const symbolX = cellLeft + paddingX;
+        const valueX = cellLeft + paddingX;
+        const valueWidth = availableWidth;
+
+        if (acctLayout.symbolBefore) {
+          // Symbol left-aligned, value right-aligned
+          ctx.fillText(acctLayout.symbol, symbolX, acctTextY);
+          drawTextWithTruncation(ctx, acctLayout.value, valueX, acctTextY, valueWidth, "right");
+        } else {
+          // Value left-aligned, symbol right-aligned
+          drawTextWithTruncation(ctx, acctLayout.value, valueX, acctTextY, valueWidth, "left");
+          const symbolWidth = ctx.measureText(acctLayout.symbol).width;
+          ctx.fillText(acctLayout.symbol, cellRight - paddingX - symbolWidth, acctTextY);
+        }
 
         ctx.restore();
         baseX += colWidth;

@@ -333,6 +333,16 @@ pub fn create_app_state() -> AppState {
 pub struct CellDisplayResult {
     pub text: String,
     pub color: Option<String>,
+    /// When set, the cell uses accounting layout with split rendering.
+    pub accounting: Option<AccountingLayoutData>,
+}
+
+/// Accounting layout data for split rendering (symbol left, value right).
+#[derive(Debug, Clone)]
+pub struct AccountingLayoutData {
+    pub symbol: String,
+    pub symbol_before: bool,
+    pub value: String,
 }
 
 pub fn format_cell_value(value: &CellValue, style: &CellStyle) -> String {
@@ -343,15 +353,21 @@ pub fn format_cell_value(value: &CellValue, style: &CellStyle) -> String {
 /// The color is only populated for Custom formats that include [Color] tokens.
 pub fn format_cell_value_with_color(value: &CellValue, style: &CellStyle) -> CellDisplayResult {
     match value {
-        CellValue::Empty => CellDisplayResult { text: String::new(), color: None },
+        CellValue::Empty => CellDisplayResult { text: String::new(), color: None, accounting: None },
         CellValue::Number(n) => {
             let result = format_number_with_color(*n, &style.number_format);
             if !matches!(style.number_format, NumberFormat::General) {
                 log_debug!("FMT", "num={} fmt={:?} --> {}", n, style.number_format, result.text);
             }
+            let accounting = result.accounting.map(|p| AccountingLayoutData {
+                symbol: p.symbol,
+                symbol_before: p.symbol_before,
+                value: p.value,
+            });
             CellDisplayResult {
                 text: result.text,
                 color: result.color.map(|c| format_color_to_css(&c).to_string()),
+                accounting,
             }
         },
         CellValue::Text(s) => {
@@ -359,23 +375,28 @@ pub fn format_cell_value_with_color(value: &CellValue, style: &CellStyle) -> Cel
             CellDisplayResult {
                 text: result.text,
                 color: result.color.map(|c| format_color_to_css(&c).to_string()),
+                accounting: None,
             }
         },
         CellValue::Boolean(b) => CellDisplayResult {
             text: if *b { "TRUE" } else { "FALSE" }.to_string(),
             color: None,
+            accounting: None,
         },
         CellValue::Error(e) => CellDisplayResult {
             text: format!("#{:?}", e).to_uppercase(),
             color: None,
+            accounting: None,
         },
         CellValue::List(items) => CellDisplayResult {
             text: format!("[List({})]", items.len()),
             color: None,
+            accounting: None,
         },
         CellValue::Dict(entries) => CellDisplayResult {
             text: format!("[Dict({})]", entries.len()),
             color: None,
+            accounting: None,
         },
     }
 }

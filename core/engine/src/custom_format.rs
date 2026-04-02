@@ -115,6 +115,8 @@ pub struct FormatSection {
     pub has_text_placeholder: bool,
     /// Whether this section has scientific notation
     pub has_scientific: bool,
+    /// Whether this section contains a fraction separator
+    pub has_fraction: bool,
 }
 
 /// A fully parsed custom number format (1-4 sections).
@@ -132,6 +134,8 @@ pub struct ParsedCustomFormat {
 pub struct FormatResult {
     pub text: String,
     pub color: Option<FormatColor>,
+    /// When set, the cell uses accounting layout: symbol left-aligned, value right-aligned.
+    pub accounting: Option<crate::number_format::AccountingParts>,
 }
 
 // ============================================================================
@@ -596,6 +600,7 @@ fn parse_section(section_str: &str) -> Result<FormatSection, String> {
         )
     });
     let has_text_placeholder = tokens.iter().any(|t| matches!(t, FormatToken::TextPlaceholder));
+    let has_fraction = tokens.iter().any(|t| matches!(t, FormatToken::FractionSeparator));
 
     // Calculate scale divisor (trailing commas after last digit placeholder)
     let scale_divisor = count_trailing_comma_scale(&tokens);
@@ -613,6 +618,7 @@ fn parse_section(section_str: &str) -> Result<FormatSection, String> {
         has_digits,
         has_text_placeholder,
         has_scientific,
+        has_fraction,
     })
 }
 
@@ -627,6 +633,7 @@ fn empty_section() -> FormatSection {
         has_digits: false,
         has_text_placeholder: false,
         has_scientific: false,
+        has_fraction: false,
     }
 }
 
@@ -817,6 +824,7 @@ pub fn apply_custom_format_number(value: f64, format: &ParsedCustomFormat) -> Fo
         return FormatResult {
             text: String::new(),
             color: section.color,
+            accounting: None,
         };
     }
 
@@ -831,12 +839,18 @@ pub fn apply_custom_format_number(value: f64, format: &ParsedCustomFormat) -> Fo
         return FormatResult {
             text,
             color: section.color,
+            accounting: None,
         };
     }
 
     // Scientific notation
     if section.has_scientific {
         return format_scientific_section(value, section);
+    }
+
+    // Fraction format
+    if section.has_fraction {
+        return format_fraction_section(value, section);
     }
 
     // Apply scaling
@@ -889,6 +903,7 @@ pub fn apply_custom_format_number(value: f64, format: &ParsedCustomFormat) -> Fo
     FormatResult {
         text,
         color: section.color,
+        accounting: None,
     }
 }
 
@@ -1301,6 +1316,183 @@ fn format_scientific_section(value: f64, section: &FormatSection) -> FormatResul
     FormatResult {
         text,
         color: section.color,
+        accounting: None,
+    }
+}
+
+// ============================================================================
+// FORMATTER — FRACTION
+// ============================================================================
+
+/// Format a value as a fraction using the tokens in the section.
+///
+/// Supported format patterns:
+/// - `# ?/?`    — whole + best-fit fraction (1 digit)
+/// - `# ??/??`  — whole + best-fit fraction (2 digits)
+/// - `# ???/???` — whole + best-fit fraction (3 digits)
+/// - `# ?/4`    — whole + quarters (fixed denominator)
+/// - `?/?`      — improper fraction (no whole part)
+fn format_fraction_section(value: f64, section: &FormatSection) -> FormatResult {
+    use crate::number_format::{fraction_parts};
+
+    // Analyze the tokens to determine:
+    //   1. Whether there are integer placeholders before the fraction part
+    //   2. How many numerator/denominator digit placeholders there are
+    //   3. Whether the denominator is a literal (fixed) number
+    let frac_pos = section.tokens.iter().position(|t| matches!(t, FormatToken::FractionSeparator));
+    let frac_pos = match frac_pos {
+        Some(p) => p,
+        None => {
+            // Should not happen since has_fraction is true, but fallback
+            return FormatResult {
+                text: format_number(value, &NumberFormat::General),
+                color: section.color,
+                accounting: None,
+            };
+        }
+    };
+
+    // Count numerator placeholders (digit tokens before the fraction separator, after any
+    // integer placeholders). We separate integer vs numerator by finding the last non-digit
+    // gap (literal space) before the fraction separator.
+    let mut int_placeholders = 0usize;
+    let mut num_placeholders = 0usize;
+    let mut in_numerator = false;
+
+    for (i, token) in section.tokens.iter().enumerate() {
+        if i >= frac_pos {
+            break;
+        }
+        match token {
+            FormatToken::DigitZero | FormatToken::DigitHash | FormatToken::DigitSpace => {
+                if in_numerator {
+                    num_placeholders += 1;
+                } else {
+                    int_placeholders += 1;
+                }
+            }
+            FormatToken::Literal(s) if s.contains(' ') => {
+                // Space literal separates integer part from numerator
+                if int_placeholders > 0 || num_placeholders > 0 {
+                    // Everything counted so far is the integer part
+                    // What follows is the numerator
+                    in_numerator = true;
+                }
+            }
+            FormatToken::Comma => {
+                // Part of integer section (thousands sep)
+            }
+            _ => {}
+        }
+    }
+
+    // If we never saw a space separator, all pre-fraction digits are the numerator
+    // (improper fraction like "?/?")
+    if !in_numerator {
+        num_placeholders = int_placeholders;
+        int_placeholders = 0;
+    }
+
+    // Analyze denominator tokens after the fraction separator.
+    // Denominator is "dynamic" if it has DigitHash or DigitSpace (e.g., "??/??").
+    // Otherwise, collect all digit chars (from Literal + DigitZero) as a fixed number.
+    let mut den_placeholders = 0usize;
+    let mut has_dynamic_den = false;
+    let mut fixed_denom_str = String::new();
+
+    for token in section.tokens.iter().skip(frac_pos + 1) {
+        match token {
+            FormatToken::DigitHash | FormatToken::DigitSpace => {
+                den_placeholders += 1;
+                has_dynamic_den = true;
+            }
+            FormatToken::DigitZero => {
+                // "0" in denominator: could be placeholder or part of fixed number.
+                // If any DigitHash/DigitSpace is also present, it's a placeholder.
+                // Otherwise it's part of a literal number (e.g., "100").
+                den_placeholders += 1;
+                fixed_denom_str.push('0');
+            }
+            FormatToken::Literal(s) => {
+                for ch in s.chars() {
+                    if ch.is_ascii_digit() {
+                        fixed_denom_str.push(ch);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    // If any dynamic placeholder (# or ?) is present, it's a best-fit denominator.
+    // Otherwise, all digits form a fixed denominator.
+    let fixed_denom: Option<u32> = if has_dynamic_den {
+        None
+    } else if !fixed_denom_str.is_empty() {
+        fixed_denom_str.parse().ok()
+    } else {
+        None
+    };
+
+    // For dynamic denominators, den_placeholders is the digit width.
+    // For fixed denominators, den_placeholders is 0 (irrelevant).
+    let den_display_width = if has_dynamic_den { den_placeholders } else { 0 };
+
+    let max_digits = if has_dynamic_den {
+        den_placeholders.max(num_placeholders) as u8
+    } else {
+        num_placeholders.max(1) as u8
+    };
+
+    let (whole, numer, denom) = fraction_parts(value, fixed_denom, max_digits);
+    let show_whole = int_placeholders > 0;
+    let negative = value < 0.0;
+
+    // Pad numerator and denominator with spaces to match placeholder widths
+    let num_width = if num_placeholders > 0 { num_placeholders } else { 1 };
+    let den_width = if den_display_width > 0 { den_display_width } else { denom.to_string().len() };
+
+    let text = if numer == 0 {
+        // No fractional part — show just the whole number
+        let w = if negative { -(whole.unsigned_abs() as i64) } else { whole as i64 };
+        if show_whole {
+            // Pad right to align with fraction width
+            let frac_space = num_width + 1 + den_width; // "num/den" width
+            format!("{}{}", w, " ".repeat(frac_space + 1))
+        } else {
+            format!("{}", w)
+        }
+    } else if show_whole {
+        let sign = if negative { "-" } else { "" };
+        let abs_whole = whole.unsigned_abs();
+        let numer_s = format!("{:>width$}", numer, width = num_width);
+        let denom_s = if fixed_denom.is_some() {
+            format!("{}", denom)
+        } else {
+            format!("{:<width$}", denom, width = den_width)
+        };
+        if abs_whole == 0 {
+            format!("{}{}/{}", sign, numer_s, denom_s)
+        } else {
+            format!("{}{} {}/{}", sign, abs_whole, numer_s, denom_s)
+        }
+    } else {
+        // Improper fraction
+        let sign = if negative { "-" } else { "" };
+        let total_numer = whole.unsigned_abs() * denom + numer;
+        let numer_s = format!("{:>width$}", total_numer, width = num_width);
+        let denom_s = if fixed_denom.is_some() {
+            format!("{}", denom)
+        } else {
+            format!("{:<width$}", denom, width = den_width)
+        };
+        format!("{}{}/{}", sign, numer_s, denom_s)
+    };
+
+    FormatResult {
+        text,
+        color: section.color,
+        accounting: None,
     }
 }
 
@@ -1434,6 +1626,7 @@ fn format_datetime_section(value: f64, section: &FormatSection) -> FormatResult 
     FormatResult {
         text: result,
         color: section.color,
+        accounting: None,
     }
 }
 
@@ -1572,6 +1765,7 @@ pub fn apply_custom_format_text(text: &str, format: &ParsedCustomFormat) -> Form
             return FormatResult {
                 text: String::new(),
                 color: text_section.color,
+                accounting: None,
             };
         }
 
@@ -1593,12 +1787,14 @@ pub fn apply_custom_format_text(text: &str, format: &ParsedCustomFormat) -> Form
         FormatResult {
             text: result,
             color: text_section.color,
+            accounting: None,
         }
     } else {
         // No text section — display text unformatted
         FormatResult {
             text: text.to_string(),
             color: None,
+            accounting: None,
         }
     }
 }
@@ -1615,6 +1811,7 @@ pub fn format_custom_value(value: f64, format_str: &str) -> FormatResult {
         Err(_) => FormatResult {
             text: format_number(value, &NumberFormat::General),
             color: None,
+            accounting: None,
         },
     }
 }
@@ -1626,6 +1823,7 @@ pub fn format_custom_text(text: &str, format_str: &str) -> FormatResult {
         Err(_) => FormatResult {
             text: text.to_string(),
             color: None,
+            accounting: None,
         },
     }
 }
@@ -2058,5 +2256,49 @@ mod tests {
     fn test_month_name_full() {
         let result = format_custom_value(45306.0, "mmmm d, yyyy");
         assert_eq!(result.text, "January 15, 2024");
+    }
+
+    // ---- Fraction format tests ----
+
+    #[test]
+    fn test_fraction_best_fit_one_digit() {
+        let result = format_custom_value(1.5, "# ?/?");
+        assert_eq!(result.text, "1 1/2");
+    }
+
+    #[test]
+    fn test_fraction_best_fit_two_digit() {
+        let result = format_custom_value(1.0 + 1.0 / 3.0, "# ??/??");
+        assert_eq!(result.text, "1  1/3 ");
+    }
+
+    #[test]
+    fn test_fraction_fixed_denom_halves() {
+        let result = format_custom_value(2.5, "# ?/2");
+        assert_eq!(result.text, "2 1/2");
+    }
+
+    #[test]
+    fn test_fraction_fixed_denom_quarters() {
+        let result = format_custom_value(1.75, "# ?/4");
+        assert_eq!(result.text, "1 3/4");
+    }
+
+    #[test]
+    fn test_fraction_fixed_denom_eighths() {
+        let result = format_custom_value(0.125, "# ?/8");
+        assert_eq!(result.text, "1/8");
+    }
+
+    #[test]
+    fn test_fraction_integer_value() {
+        let result = format_custom_value(5.0, "# ?/?");
+        assert_eq!(result.text.trim(), "5");
+    }
+
+    #[test]
+    fn test_fraction_zero_value() {
+        let result = format_custom_value(0.0, "# ?/?");
+        assert_eq!(result.text.trim(), "0");
     }
 }

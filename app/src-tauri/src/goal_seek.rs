@@ -425,6 +425,7 @@ fn finalize_result(
             col_span,
             sheet_index: None,
             rich_text: None,
+                accounting_layout: None,
         })
     };
 

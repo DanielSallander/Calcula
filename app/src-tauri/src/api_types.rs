@@ -31,6 +31,19 @@ pub struct RichTextRunData {
     pub subscript: bool,
 }
 
+/// Accounting layout data for split rendering in cells.
+/// Symbol is drawn left-aligned, value is drawn right-aligned.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AccountingLayout {
+    /// Currency symbol text (e.g., "$", "EUR")
+    pub symbol: String,
+    /// Whether the symbol appears before the value
+    pub symbol_before: bool,
+    /// Formatted number part (e.g., "1,234.00", "(1,234.00)", "-")
+    pub value: String,
+}
+
 /// Cell data returned to the frontend.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -58,6 +71,10 @@ pub struct CellData {
     /// instead of using the cell's base style for the entire display text.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rich_text: Option<Vec<RichTextRunData>>,
+    /// Accounting layout for split rendering (symbol left, value right).
+    /// When present, the renderer draws symbol at left edge and value at right edge.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub accounting_layout: Option<AccountingLayout>,
 }
 
 fn default_span() -> u32 {
@@ -970,6 +987,22 @@ fn format_number_format_name(format: &NumberFormat) -> String {
             ..
         } => {
             format!("Currency ({}, {} decimals)", symbol, decimal_places)
+        }
+        NumberFormat::Accounting {
+            symbol,
+            decimal_places,
+            ..
+        } => {
+            format!("Accounting ({}, {} decimals)", symbol, decimal_places)
+        }
+        NumberFormat::Fraction {
+            denominator,
+            max_digits,
+        } => {
+            match denominator {
+                Some(d) => format!("Fraction (/{} fixed)", d),
+                None => format!("Fraction (up to {} digits)", max_digits),
+            }
         }
         NumberFormat::Percentage { decimal_places } => {
             format!("Percentage ({} decimals)", decimal_places)

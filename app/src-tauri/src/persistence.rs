@@ -512,6 +512,7 @@ pub fn open_file(
                 col_span: 1,
                 sheet_index: None,
                 rich_text: None,
+                accounting_layout: None,
             }
         })
         .collect();

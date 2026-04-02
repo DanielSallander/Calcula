@@ -53,6 +53,17 @@ pub enum NumberFormat {
         symbol: String,
         symbol_position: CurrencyPosition,
     },
+    Accounting {
+        decimal_places: u8,
+        symbol: String,
+        symbol_position: CurrencyPosition,
+    },
+    Fraction {
+        /// Fixed denominator (e.g., Some(4) for quarters). None = best-fit.
+        denominator: Option<u32>,
+        /// Max digits in numerator/denominator for best-fit (1, 2, or 3).
+        max_digits: u8,
+    },
     Percentage {
         decimal_places: u8,
     },

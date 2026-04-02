@@ -146,6 +146,7 @@ pub fn calculate_now(state: State<AppState>, user_files_state: State<UserFilesSt
                 col_span: 1,
                 sheet_index: None,
                 rich_text: None,
+                accounting_layout: None,
             });
         }
     }

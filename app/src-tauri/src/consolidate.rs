@@ -164,6 +164,7 @@ fn build_cell_data(
         rich_text: cell.rich_text.as_ref().map(|runs| {
             crate::api_types::rich_text_runs_to_data(runs)
         }),
+        accounting_layout: None,
     })
 }
 

@@ -157,6 +157,7 @@ pub fn undo(state: State<AppState>) -> UndoResult {
                             col_span: 1,
                             sheet_index: None,
                             rich_text: None,
+                            accounting_layout: None,
                         });
                     }
                     None => {
@@ -175,6 +176,7 @@ pub fn undo(state: State<AppState>) -> UndoResult {
                             col_span: 1,
                             sheet_index: None,
                             rich_text: None,
+                            accounting_layout: None,
                         });
                     }
                 }
@@ -345,6 +347,7 @@ pub fn redo(state: State<AppState>) -> UndoResult {
                             col_span: 1,
                             sheet_index: None,
                             rich_text: None,
+                            accounting_layout: None,
                         });
                     }
                     None => {
@@ -363,6 +366,7 @@ pub fn redo(state: State<AppState>) -> UndoResult {
                             col_span: 1,
                             sheet_index: None,
                             rich_text: None,
+                            accounting_layout: None,
                         });
                     }
                 }

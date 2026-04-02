@@ -197,6 +197,7 @@ pub fn replace_all(
                     col_span,
                     sheet_index: None,
                     rich_text: None,
+                    accounting_layout: None,
                 });
 
                 replacement_count += 1;
@@ -334,6 +335,7 @@ pub fn replace_single(
                 col_span,
                 sheet_index: None,
                 rich_text: None,
+                accounting_layout: None,
             }));
         }
     }

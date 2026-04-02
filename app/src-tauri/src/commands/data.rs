@@ -130,15 +130,20 @@ pub fn get_viewport_cells(
                 continue;
             }
 
-            let (display, display_color, formula, style_index, rich_text) = if let Some(c) = cell {
+            let (display, display_color, formula, style_index, rich_text, accounting_layout) = if let Some(c) = cell {
                 let style = styles.get(c.style_index);
                 let result = crate::format_cell_value_with_color(&c.value, style);
                 let rt = c.rich_text.as_ref().map(|runs| {
                     crate::api_types::rich_text_runs_to_data(runs)
                 });
-                (result.text, result.color, c.formula.clone(), c.style_index, rt)
+                let acct = result.accounting.map(|a| crate::api_types::AccountingLayout {
+                    symbol: a.symbol,
+                    symbol_before: a.symbol_before,
+                    value: a.value,
+                });
+                (result.text, result.color, c.formula.clone(), c.style_index, rt, acct)
             } else {
-                (String::new(), None, None, 0, None)
+                (String::new(), None, None, 0, None, None)
             };
 
             cells.push(CellData {
@@ -152,6 +157,7 @@ pub fn get_viewport_cells(
                 col_span,
                 sheet_index: None,
                 rich_text,
+                accounting_layout,
             });
         }
     }
@@ -214,6 +220,7 @@ pub fn get_watch_cells(
                 col_span: 1,
                 sheet_index: Some(sheet_index),
                 rich_text: None,
+                accounting_layout: None,
             }
         })
     }
@@ -435,6 +442,7 @@ fn get_cell_internal(grid: &Grid, styles: &StyleRegistry, row: u32, col: u32) ->
         rich_text: cell.rich_text.as_ref().map(|runs| {
             crate::api_types::rich_text_runs_to_data(runs)
         }),
+        accounting_layout: None,
     })
 }
 
@@ -524,6 +532,7 @@ pub fn update_cell(
                         display_color: None, formula: None, style_index: 0,
                         row_span: 1, col_span: 1, sheet_index: None,
                         rich_text: None,
+                        accounting_layout: None,
                     });
                 }
             }
@@ -584,6 +593,7 @@ pub fn update_cell(
             col_span,
             sheet_index: None,
             rich_text: None,
+            accounting_layout: None,
         });
 
         // Record undo after successful change
@@ -740,6 +750,7 @@ pub fn update_cell(
                                 display_color: None, formula: None, style_index: 0,
                                 row_span: 1, col_span: 1, sheet_index: None,
                                 rich_text: None,
+                                accounting_layout: None,
                             });
                         }
                     }
@@ -800,6 +811,7 @@ pub fn update_cell(
                                 display_color: None, formula: None, style_index: 0,
                                 row_span: 1, col_span: 1, sheet_index: None,
                                 rich_text: None,
+                                accounting_layout: None,
                             });
 
                             new_spill_cells.push((target_r, target_c));
@@ -889,6 +901,7 @@ pub fn update_cell(
         col_span,
         sheet_index: None, // Current active sheet
         rich_text: None,
+        accounting_layout: None,
     });
 
     // Record undo after successful change
@@ -1011,6 +1024,7 @@ pub fn update_cell(
                                 col_span: dep_col_span,
                                 sheet_index: None,
                                 rich_text: None,
+                                accounting_layout: None,
                             });
                             perf_eval_total += perf_eval_start.elapsed();
                             continue; // Skip the rest of this iteration
@@ -1053,6 +1067,7 @@ pub fn update_cell(
                         col_span: dep_col_span,
                         sheet_index: None, // Current active sheet
                         rich_text: None,
+                        accounting_layout: None,
                     });
                     perf_eval_total += perf_eval_start.elapsed();
                 }
@@ -1161,6 +1176,7 @@ pub fn update_cell(
                                     col_span: dep_col_span,
                                     sheet_index: dep_sheet_index,
                                     rich_text: None,
+                                    accounting_layout: None,
                                 });
 
                                 // Add this updated cell to the work queue so its dependents also get recalculated
@@ -1242,6 +1258,7 @@ pub fn update_cell(
                                     col_span: 1,
                                     sheet_index: Some(source_sheet_idx),
                                     rich_text: None,
+                                    accounting_layout: None,
                                 });
 
                                 // Add this updated cell to the work queue so its dependents also get recalculated
@@ -1472,6 +1489,7 @@ pub fn update_cells_batch(
                 col_span,
                 sheet_index: None,
                 rich_text: None,
+                accounting_layout: None,
             });
 
             undo_stack.record_cell_change(row, col, previous_cell);
@@ -1622,6 +1640,7 @@ pub fn update_cells_batch(
                                     display_color: None, formula: None, style_index: 0,
                                     row_span: 1, col_span: 1, sheet_index: None,
                                     rich_text: None,
+                                    accounting_layout: None,
                                 });
                             }
                         }
@@ -1678,6 +1697,7 @@ pub fn update_cells_batch(
                                     display_color: None, formula: None, style_index: 0,
                                     row_span: 1, col_span: 1, sheet_index: None,
                                     rich_text: None,
+                                    accounting_layout: None,
                                 });
 
                                 new_spill_cells.push((target_r, target_c));
@@ -1756,6 +1776,7 @@ pub fn update_cells_batch(
             col_span,
             sheet_index: None,
             rich_text: None,
+            accounting_layout: None,
         });
 
         undo_stack.record_cell_change(row, col, previous_cell);
@@ -1874,6 +1895,7 @@ pub fn update_cells_batch(
                                 col_span: dep_col_span,
                                 sheet_index: None,
                                 rich_text: None,
+                                accounting_layout: None,
                             });
                             continue;
                         }
@@ -1912,6 +1934,7 @@ pub fn update_cells_batch(
                         col_span: dep_col_span,
                         sheet_index: None,
                         rich_text: None,
+                        accounting_layout: None,
                     });
                 }
             }
@@ -1987,6 +2010,7 @@ pub fn update_cells_batch(
                                     col_span: 1,
                                     sheet_index: Some(*dep_sheet_idx),
                                     rich_text: None,
+                                    accounting_layout: None,
                                 });
 
                                 if let Some(dep_sheet_name) = sheet_names.get(*dep_sheet_idx) {
@@ -2336,6 +2360,7 @@ pub fn clear_range_with_options(
                     col_span,
                     sheet_index: None,
                     rich_text: None,
+                    accounting_layout: None,
                 });
             }
             ClearApplyTo::Contents => {
@@ -2402,6 +2427,7 @@ pub fn clear_range_with_options(
                         col_span,
                         sheet_index: None,
                         rich_text: None,
+                        accounting_layout: None,
                     });
                 }
             }
@@ -2445,6 +2471,7 @@ pub fn clear_range_with_options(
                         col_span,
                         sheet_index: None,
                         rich_text: None,
+                        accounting_layout: None,
                     });
                 }
             }
@@ -2490,6 +2517,7 @@ pub fn clear_range_with_options(
                             col_span,
                             sheet_index: None,
                             rich_text: None,
+                            accounting_layout: None,
                         });
                     }
                 }
@@ -2644,6 +2672,7 @@ pub fn sort_range(state: State<AppState>, params: SortRangeParams) -> SortRangeR
                             col_span: 1,
                             sheet_index: None,
                             rich_text: None,
+                            accounting_layout: None,
                         });
                     } else {
                         grid.clear_cell(target_row, target_col);
@@ -2662,6 +2691,7 @@ pub fn sort_range(state: State<AppState>, params: SortRangeParams) -> SortRangeR
                             col_span: 1,
                             sheet_index: None,
                             rich_text: None,
+                            accounting_layout: None,
                         });
                     }
                 }
@@ -2744,6 +2774,7 @@ pub fn sort_range(state: State<AppState>, params: SortRangeParams) -> SortRangeR
                             col_span: 1,
                             sheet_index: None,
                             rich_text: None,
+                            accounting_layout: None,
                         });
                     } else {
                         grid.clear_cell(target_row, target_col);
@@ -2762,6 +2793,7 @@ pub fn sort_range(state: State<AppState>, params: SortRangeParams) -> SortRangeR
                             col_span: 1,
                             sheet_index: None,
                             rich_text: None,
+                            accounting_layout: None,
                         });
                     }
                 }
@@ -3274,6 +3306,7 @@ pub fn remove_duplicates(
                     col_span: 1,
                     sheet_index: None,
                     rich_text: None,
+                    accounting_layout: None,
                 });
             } else {
                 grid.clear_cell(target_row, target_col);
@@ -3292,6 +3325,7 @@ pub fn remove_duplicates(
                     col_span: 1,
                     sheet_index: None,
                     rich_text: None,
+                    accounting_layout: None,
                 });
             }
         }
@@ -3321,6 +3355,7 @@ pub fn remove_duplicates(
                 col_span: 1,
                 sheet_index: None,
                 rich_text: None,
+                accounting_layout: None,
             });
         }
     }
