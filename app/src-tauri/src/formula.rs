@@ -1076,6 +1076,45 @@ pub fn get_functions_by_category(category: String) -> FunctionListResult {
                 category: "Financial".to_string(),
             },
         ],
+        "engineering" => vec![
+            FunctionInfo { name: "BIN2DEC".to_string(), syntax: "BIN2DEC(number)".to_string(), description: "Converts a binary number to decimal".to_string(), category: "Engineering".to_string() },
+            FunctionInfo { name: "BIN2HEX".to_string(), syntax: "BIN2HEX(number, [places])".to_string(), description: "Converts a binary number to hexadecimal".to_string(), category: "Engineering".to_string() },
+            FunctionInfo { name: "BIN2OCT".to_string(), syntax: "BIN2OCT(number, [places])".to_string(), description: "Converts a binary number to octal".to_string(), category: "Engineering".to_string() },
+            FunctionInfo { name: "DEC2BIN".to_string(), syntax: "DEC2BIN(number, [places])".to_string(), description: "Converts a decimal number to binary".to_string(), category: "Engineering".to_string() },
+            FunctionInfo { name: "DEC2HEX".to_string(), syntax: "DEC2HEX(number, [places])".to_string(), description: "Converts a decimal number to hexadecimal".to_string(), category: "Engineering".to_string() },
+            FunctionInfo { name: "DEC2OCT".to_string(), syntax: "DEC2OCT(number, [places])".to_string(), description: "Converts a decimal number to octal".to_string(), category: "Engineering".to_string() },
+            FunctionInfo { name: "HEX2BIN".to_string(), syntax: "HEX2BIN(number, [places])".to_string(), description: "Converts a hexadecimal number to binary".to_string(), category: "Engineering".to_string() },
+            FunctionInfo { name: "HEX2DEC".to_string(), syntax: "HEX2DEC(number)".to_string(), description: "Converts a hexadecimal number to decimal".to_string(), category: "Engineering".to_string() },
+            FunctionInfo { name: "HEX2OCT".to_string(), syntax: "HEX2OCT(number, [places])".to_string(), description: "Converts a hexadecimal number to octal".to_string(), category: "Engineering".to_string() },
+            FunctionInfo { name: "OCT2BIN".to_string(), syntax: "OCT2BIN(number, [places])".to_string(), description: "Converts an octal number to binary".to_string(), category: "Engineering".to_string() },
+            FunctionInfo { name: "OCT2DEC".to_string(), syntax: "OCT2DEC(number)".to_string(), description: "Converts an octal number to decimal".to_string(), category: "Engineering".to_string() },
+            FunctionInfo { name: "OCT2HEX".to_string(), syntax: "OCT2HEX(number, [places])".to_string(), description: "Converts an octal number to hexadecimal".to_string(), category: "Engineering".to_string() },
+            FunctionInfo { name: "BITAND".to_string(), syntax: "BITAND(number1, number2)".to_string(), description: "Returns a bitwise AND of two numbers".to_string(), category: "Engineering".to_string() },
+            FunctionInfo { name: "BITOR".to_string(), syntax: "BITOR(number1, number2)".to_string(), description: "Returns a bitwise OR of two numbers".to_string(), category: "Engineering".to_string() },
+            FunctionInfo { name: "BITXOR".to_string(), syntax: "BITXOR(number1, number2)".to_string(), description: "Returns a bitwise XOR of two numbers".to_string(), category: "Engineering".to_string() },
+            FunctionInfo { name: "BITLSHIFT".to_string(), syntax: "BITLSHIFT(number, shift_amount)".to_string(), description: "Returns a number shifted left by the specified bits".to_string(), category: "Engineering".to_string() },
+            FunctionInfo { name: "BITRSHIFT".to_string(), syntax: "BITRSHIFT(number, shift_amount)".to_string(), description: "Returns a number shifted right by the specified bits".to_string(), category: "Engineering".to_string() },
+            FunctionInfo { name: "COMPLEX".to_string(), syntax: "COMPLEX(real_num, i_num, [suffix])".to_string(), description: "Converts real and imaginary coefficients into a complex number".to_string(), category: "Engineering".to_string() },
+            FunctionInfo { name: "IMABS".to_string(), syntax: "IMABS(inumber)".to_string(), description: "Returns the absolute value of a complex number".to_string(), category: "Engineering".to_string() },
+            FunctionInfo { name: "IMAGINARY".to_string(), syntax: "IMAGINARY(inumber)".to_string(), description: "Returns the imaginary coefficient of a complex number".to_string(), category: "Engineering".to_string() },
+            FunctionInfo { name: "IMREAL".to_string(), syntax: "IMREAL(inumber)".to_string(), description: "Returns the real coefficient of a complex number".to_string(), category: "Engineering".to_string() },
+            FunctionInfo { name: "CONVERT".to_string(), syntax: "CONVERT(number, from_unit, to_unit)".to_string(), description: "Converts a number from one measurement system to another".to_string(), category: "Engineering".to_string() },
+            FunctionInfo { name: "DELTA".to_string(), syntax: "DELTA(number1, [number2])".to_string(), description: "Tests whether two values are equal (returns 1 or 0)".to_string(), category: "Engineering".to_string() },
+            FunctionInfo { name: "ERF".to_string(), syntax: "ERF(lower_limit, [upper_limit])".to_string(), description: "Returns the error function".to_string(), category: "Engineering".to_string() },
+            FunctionInfo { name: "ERFC".to_string(), syntax: "ERFC(x)".to_string(), description: "Returns the complementary error function".to_string(), category: "Engineering".to_string() },
+            FunctionInfo { name: "GESTEP".to_string(), syntax: "GESTEP(number, [step])".to_string(), description: "Tests whether a number is greater than a threshold value".to_string(), category: "Engineering".to_string() },
+            FunctionInfo { name: "BESSELI".to_string(), syntax: "BESSELI(x, n)".to_string(), description: "Returns the modified Bessel function In(x)".to_string(), category: "Engineering".to_string() },
+            FunctionInfo { name: "BESSELJ".to_string(), syntax: "BESSELJ(x, n)".to_string(), description: "Returns the Bessel function Jn(x)".to_string(), category: "Engineering".to_string() },
+            FunctionInfo { name: "BESSELK".to_string(), syntax: "BESSELK(x, n)".to_string(), description: "Returns the modified Bessel function Kn(x)".to_string(), category: "Engineering".to_string() },
+            FunctionInfo { name: "BESSELY".to_string(), syntax: "BESSELY(x, n)".to_string(), description: "Returns the Bessel function Yn(x)".to_string(), category: "Engineering".to_string() },
+            FunctionInfo { name: "SERIESSUM".to_string(), syntax: "SERIESSUM(x, n, m, coefficients)".to_string(), description: "Returns the sum of a power series".to_string(), category: "Engineering".to_string() },
+        ],
+        "matrix" => vec![
+            FunctionInfo { name: "MMULT".to_string(), syntax: "MMULT(array1, array2)".to_string(), description: "Returns the matrix product of two arrays".to_string(), category: "Matrix".to_string() },
+            FunctionInfo { name: "MDETERM".to_string(), syntax: "MDETERM(array)".to_string(), description: "Returns the matrix determinant of an array".to_string(), category: "Matrix".to_string() },
+            FunctionInfo { name: "MINVERSE".to_string(), syntax: "MINVERSE(array)".to_string(), description: "Returns the inverse matrix for a given matrix".to_string(), category: "Matrix".to_string() },
+            FunctionInfo { name: "MUNIT".to_string(), syntax: "MUNIT(dimension)".to_string(), description: "Returns the unit matrix for the specified dimension".to_string(), category: "Matrix".to_string() },
+        ],
         "ui" => vec![
             FunctionInfo {
                 name: "GET.ROW.HEIGHT".to_string(),
@@ -1259,7 +1298,7 @@ pub fn get_all_functions() -> FunctionListResult {
     let mut all_functions = Vec::new();
 
     // Collect from all categories
-    for category in &["math", "logical", "text", "lookup", "info", "date", "statistical", "financial", "dynamic", "ui", "file"] {
+    for category in &["math", "logical", "text", "lookup", "info", "date", "statistical", "financial", "engineering", "matrix", "dynamic", "ui", "file"] {
         let result = get_functions_by_category(category.to_string());
         all_functions.extend(result.functions);
     }

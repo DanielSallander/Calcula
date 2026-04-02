@@ -1306,13 +1306,88 @@ impl<'a> Evaluator<'a> {
 
             // Probability distributions
             BuiltinFunction::NormDist => self.fn_norm_dist(args),
+            BuiltinFunction::NormInv => self.fn_norm_inv(args),
+            BuiltinFunction::NormSDist => self.fn_norm_s_dist(args),
+            BuiltinFunction::NormSInv => self.fn_norm_s_inv(args),
             BuiltinFunction::TDist => self.fn_t_dist(args),
+            BuiltinFunction::TDist2T => self.fn_t_dist_2t(args),
+            BuiltinFunction::TDistRT => self.fn_t_dist_rt(args),
+            BuiltinFunction::TInv => self.fn_t_inv(args),
+            BuiltinFunction::TInv2T => self.fn_t_inv_2t(args),
+            BuiltinFunction::TTest => self.fn_t_test(args),
             BuiltinFunction::ChisqDist => self.fn_chisq_dist(args),
+            BuiltinFunction::ChisqDistRT => self.fn_chisq_dist_rt(args),
+            BuiltinFunction::ChisqInv => self.fn_chisq_inv(args),
+            BuiltinFunction::ChisqInvRT => self.fn_chisq_inv_rt(args),
+            BuiltinFunction::ChisqTest => self.fn_chisq_test(args),
             BuiltinFunction::FDist => self.fn_f_dist(args),
+            BuiltinFunction::FDistRT => self.fn_f_dist_rt(args),
+            BuiltinFunction::FInv => self.fn_f_inv(args),
+            BuiltinFunction::FInvRT => self.fn_f_inv_rt(args),
+            BuiltinFunction::FTest => self.fn_f_test(args),
             BuiltinFunction::BinomDist => self.fn_binom_dist(args),
+            BuiltinFunction::BinomInv => self.fn_binom_inv(args),
+            BuiltinFunction::BinomDistRange => self.fn_binom_dist_range(args),
             BuiltinFunction::PoissonDist => self.fn_poisson_dist(args),
+            BuiltinFunction::BetaDist => self.fn_beta_dist(args),
+            BuiltinFunction::BetaInv => self.fn_beta_inv(args),
+            BuiltinFunction::GammaDist => self.fn_gamma_dist(args),
+            BuiltinFunction::GammaInv => self.fn_gamma_inv(args),
+            BuiltinFunction::GammaFn => self.fn_gamma(args),
+            BuiltinFunction::GammaLnFn => self.fn_gammaln(args),
+            BuiltinFunction::WeibullDist => self.fn_weibull_dist(args),
+            BuiltinFunction::ExponDist => self.fn_expon_dist(args),
+            BuiltinFunction::LognormDist => self.fn_lognorm_dist(args),
+            BuiltinFunction::LognormInv => self.fn_lognorm_inv(args),
+            BuiltinFunction::HypgeomDist => self.fn_hypgeom_dist(args),
+            BuiltinFunction::NegbinomDist => self.fn_negbinom_dist(args),
             BuiltinFunction::ConfidenceNorm => self.fn_confidence_norm(args),
             BuiltinFunction::ConfidenceT => self.fn_confidence_t(args),
+
+            // Descriptive/Analytical statistical functions
+            BuiltinFunction::Correl => self.fn_correl(args),
+            BuiltinFunction::Pearson => self.fn_correl(args),
+            BuiltinFunction::Rsq => self.fn_rsq(args),
+            BuiltinFunction::Slope => self.fn_slope(args),
+            BuiltinFunction::Intercept => self.fn_intercept(args),
+            BuiltinFunction::Steyx => self.fn_steyx(args),
+            BuiltinFunction::CovarianceP => self.fn_covariance_p(args),
+            BuiltinFunction::CovarianceS => self.fn_covariance_s(args),
+            BuiltinFunction::Kurt => self.fn_kurt(args),
+            BuiltinFunction::Skew => self.fn_skew(args),
+            BuiltinFunction::SkewP => self.fn_skew_p(args),
+            BuiltinFunction::Avedev => self.fn_avedev(args),
+            BuiltinFunction::Devsq => self.fn_devsq(args),
+            BuiltinFunction::Geomean => self.fn_geomean(args),
+            BuiltinFunction::Harmean => self.fn_harmean(args),
+            BuiltinFunction::Trimmean => self.fn_trimmean(args),
+            BuiltinFunction::Standardize => self.fn_standardize(args),
+            BuiltinFunction::PercentileExc => self.fn_percentile_exc(args),
+            BuiltinFunction::PercentRankExc => self.fn_percentrank_exc(args),
+            BuiltinFunction::QuartileExc => self.fn_quartile_exc(args),
+            BuiltinFunction::Prob => self.fn_prob(args),
+            BuiltinFunction::Fisher => self.fn_fisher(args),
+            BuiltinFunction::FisherInv => self.fn_fisherinv(args),
+            BuiltinFunction::Permut => self.fn_permut(args),
+            BuiltinFunction::PermutationA => self.fn_permutationa(args),
+            BuiltinFunction::Phi => self.fn_phi(args),
+            BuiltinFunction::Gauss => self.fn_gauss(args),
+
+            // Forecasting
+            BuiltinFunction::ForecastLinear => self.fn_forecast_linear(args),
+            BuiltinFunction::ForecastEts => self.fn_forecast_ets(args),
+            BuiltinFunction::ForecastEtsConfint => self.fn_forecast_ets(args),
+            BuiltinFunction::ForecastEtsSeason => self.fn_forecast_ets_season(args),
+            BuiltinFunction::ForecastEtsStat => self.fn_forecast_ets(args),
+
+            // Statistical version variants
+            BuiltinFunction::AverageA => self.fn_averagea(args),
+            BuiltinFunction::MaxA => self.fn_maxa(args),
+            BuiltinFunction::MinA => self.fn_mina(args),
+            BuiltinFunction::StdevA => self.fn_stdeva(args),
+            BuiltinFunction::StdevPA => self.fn_stdevpa(args),
+            BuiltinFunction::VarA => self.fn_vara(args),
+            BuiltinFunction::VarPA => self.fn_varpa(args),
 
             // Additional financial functions
             BuiltinFunction::Ipmt => self.fn_ipmt(args),
@@ -1327,6 +1402,45 @@ impl<'a> Evaluator<'a> {
             BuiltinFunction::Cumprinc => self.fn_cumprinc(args),
             BuiltinFunction::Effect => self.fn_effect(args),
             BuiltinFunction::Nominal => self.fn_nominal(args),
+
+            // Bond & Security financial functions
+            BuiltinFunction::Accrint => self.fn_accrint(args),
+            BuiltinFunction::Accrintm => self.fn_accrintm(args),
+            BuiltinFunction::PriceFn => self.fn_price(args),
+            BuiltinFunction::PriceDisc => self.fn_pricedisc(args),
+            BuiltinFunction::PriceMat => self.fn_pricemat(args),
+            BuiltinFunction::YieldFn => self.fn_yield(args),
+            BuiltinFunction::YieldDisc => self.fn_yielddisc(args),
+            BuiltinFunction::YieldMat => self.fn_yieldmat(args),
+            BuiltinFunction::DurationFn => self.fn_duration(args),
+            BuiltinFunction::Mduration => self.fn_mduration(args),
+            BuiltinFunction::Disc => self.fn_disc(args),
+            BuiltinFunction::Intrate => self.fn_intrate(args),
+            BuiltinFunction::Received => self.fn_received(args),
+            BuiltinFunction::Coupdaybs => self.fn_coupdaybs(args),
+            BuiltinFunction::Coupdays => self.fn_coupdays(args),
+            BuiltinFunction::Coupdaysnc => self.fn_coupdaysnc(args),
+            BuiltinFunction::Coupncd => self.fn_coupncd(args),
+            BuiltinFunction::Coupnum => self.fn_coupnum(args),
+            BuiltinFunction::Couppcd => self.fn_couppcd(args),
+
+            // Treasury bill functions
+            BuiltinFunction::TbillEq => self.fn_tbilleq(args),
+            BuiltinFunction::TbillPrice => self.fn_tbillprice(args),
+            BuiltinFunction::TbillYield => self.fn_tbillyield(args),
+
+            // Other financial functions
+            BuiltinFunction::DollarDe => self.fn_dollarde(args),
+            BuiltinFunction::DollarFr => self.fn_dollarfr(args),
+            BuiltinFunction::Pduration => self.fn_pduration(args),
+            BuiltinFunction::Rri => self.fn_rri(args),
+            BuiltinFunction::Ispmt => self.fn_ispmt(args),
+            BuiltinFunction::Amordegrc => self.fn_amordegrc(args),
+            BuiltinFunction::Amorlinc => self.fn_amorlinc(args),
+            BuiltinFunction::OddfPrice => self.fn_oddfprice(args),
+            BuiltinFunction::OddfYield => self.fn_oddfyield(args),
+            BuiltinFunction::OddlPrice => self.fn_oddlprice(args),
+            BuiltinFunction::OddlYield => self.fn_oddlyield(args),
 
             // Modern lookup
             BuiltinFunction::XMatch => self.fn_xmatch(args),
@@ -1367,6 +1481,77 @@ impl<'a> Evaluator<'a> {
             BuiltinFunction::IsRef => self.fn_isref(args),
             BuiltinFunction::Sheet => self.fn_sheet(args),
             BuiltinFunction::Sheets => self.fn_sheets(args),
+
+            // Engineering functions - Base conversion
+            BuiltinFunction::Bin2Dec => self.fn_bin2dec(args),
+            BuiltinFunction::Bin2Hex => self.fn_bin2hex(args),
+            BuiltinFunction::Bin2Oct => self.fn_bin2oct(args),
+            BuiltinFunction::Dec2Bin => self.fn_dec2bin(args),
+            BuiltinFunction::Dec2Hex => self.fn_dec2hex(args),
+            BuiltinFunction::Dec2Oct => self.fn_dec2oct(args),
+            BuiltinFunction::Hex2Bin => self.fn_hex2bin(args),
+            BuiltinFunction::Hex2Dec => self.fn_hex2dec(args),
+            BuiltinFunction::Hex2Oct => self.fn_hex2oct(args),
+            BuiltinFunction::Oct2Bin => self.fn_oct2bin(args),
+            BuiltinFunction::Oct2Dec => self.fn_oct2dec(args),
+            BuiltinFunction::Oct2Hex => self.fn_oct2hex(args),
+
+            // Engineering functions - Bit operations
+            BuiltinFunction::BitAnd => self.fn_bitand(args),
+            BuiltinFunction::BitOr => self.fn_bitor(args),
+            BuiltinFunction::BitXor => self.fn_bitxor(args),
+            BuiltinFunction::BitLShift => self.fn_bitlshift(args),
+            BuiltinFunction::BitRShift => self.fn_bitrshift(args),
+
+            // Engineering functions - Complex numbers
+            BuiltinFunction::ComplexFn => self.fn_complex(args),
+            BuiltinFunction::ImAbs => self.fn_imabs(args),
+            BuiltinFunction::Imaginary => self.fn_imaginary(args),
+            BuiltinFunction::ImReal => self.fn_imreal(args),
+            BuiltinFunction::ImArgument => self.fn_imargument(args),
+            BuiltinFunction::ImConjugate => self.fn_imconjugate(args),
+            BuiltinFunction::ImCos => self.fn_imcos(args),
+            BuiltinFunction::ImCosh => self.fn_imcosh(args),
+            BuiltinFunction::ImCot => self.fn_imcot(args),
+            BuiltinFunction::ImCsc => self.fn_imcsc(args),
+            BuiltinFunction::ImCsch => self.fn_imcsch(args),
+            BuiltinFunction::ImDiv => self.fn_imdiv(args),
+            BuiltinFunction::ImExp => self.fn_imexp(args),
+            BuiltinFunction::ImLn => self.fn_imln(args),
+            BuiltinFunction::ImLog10 => self.fn_imlog10(args),
+            BuiltinFunction::ImLog2 => self.fn_imlog2(args),
+            BuiltinFunction::ImPower => self.fn_impower(args),
+            BuiltinFunction::ImProduct => self.fn_improduct(args),
+            BuiltinFunction::ImSec => self.fn_imsec(args),
+            BuiltinFunction::ImSech => self.fn_imsech(args),
+            BuiltinFunction::ImSin => self.fn_imsin(args),
+            BuiltinFunction::ImSinh => self.fn_imsinh(args),
+            BuiltinFunction::ImSqrt => self.fn_imsqrt(args),
+            BuiltinFunction::ImSub => self.fn_imsub(args),
+            BuiltinFunction::ImSum => self.fn_imsum(args),
+            BuiltinFunction::ImTan => self.fn_imtan(args),
+
+            // Engineering functions - Bessel
+            BuiltinFunction::BesselI => self.fn_besseli(args),
+            BuiltinFunction::BesselJ => self.fn_besselj(args),
+            BuiltinFunction::BesselK => self.fn_besselk(args),
+            BuiltinFunction::BesselY => self.fn_bessely(args),
+
+            // Engineering functions - Other
+            BuiltinFunction::ConvertFn => self.fn_convert(args),
+            BuiltinFunction::Delta => self.fn_delta(args),
+            BuiltinFunction::Erf => self.fn_erf(args),
+            BuiltinFunction::ErfPrecise => self.fn_erf(args),
+            BuiltinFunction::Erfc => self.fn_erfc(args),
+            BuiltinFunction::ErfcPrecise => self.fn_erfc(args),
+            BuiltinFunction::Gestep => self.fn_gestep(args),
+            BuiltinFunction::SeriesSum => self.fn_seriessum(args),
+
+            // Matrix functions
+            BuiltinFunction::Mmult => self.fn_mmult(args),
+            BuiltinFunction::Mdeterm => self.fn_mdeterm(args),
+            BuiltinFunction::Minverse => self.fn_minverse(args),
+            BuiltinFunction::Munit => self.fn_munit(args),
 
             // Array reshaping
             BuiltinFunction::Expand => self.fn_expand(args),
@@ -6977,6 +7162,953 @@ impl<'a> Evaluator<'a> {
         EvalResult::Number(t * std_dev / size.sqrt())
     }
 
+    // ==================== New Distribution Functions ====================
+
+    fn fn_norm_inv(&self, args: &[Expression]) -> EvalResult {
+        // NORM.INV(probability, mean, standard_dev)
+        if args.len() != 3 { return EvalResult::Error(CellError::Value); }
+        let p = match self.evaluate(&args[0]).as_number() { Some(n) if n > 0.0 && n < 1.0 => n, _ => return EvalResult::Error(CellError::Value) };
+        let mean = match self.evaluate(&args[1]).as_number() { Some(n) => n, None => return EvalResult::Error(CellError::Value) };
+        let std_dev = match self.evaluate(&args[2]).as_number() { Some(n) if n > 0.0 => n, _ => return EvalResult::Error(CellError::Value) };
+        EvalResult::Number(norm_inv(p) * std_dev + mean)
+    }
+
+    fn fn_norm_s_dist(&self, args: &[Expression]) -> EvalResult {
+        // NORM.S.DIST(z, cumulative)
+        if args.len() != 2 { return EvalResult::Error(CellError::Value); }
+        let z = match self.evaluate(&args[0]).as_number() { Some(n) => n, None => return EvalResult::Error(CellError::Value) };
+        let cumulative = { let _v = self.evaluate(&args[1]); matches!(_v, EvalResult::Boolean(true)) || matches!(_v, EvalResult::Number(n) if n != 0.0) };
+        if cumulative {
+            EvalResult::Number(norm_cdf(z))
+        } else {
+            let pdf = (-0.5 * z * z).exp() / (2.0 * std::f64::consts::PI).sqrt();
+            EvalResult::Number(pdf)
+        }
+    }
+
+    fn fn_norm_s_inv(&self, args: &[Expression]) -> EvalResult {
+        // NORM.S.INV(probability)
+        if args.len() != 1 { return EvalResult::Error(CellError::Value); }
+        let p = match self.evaluate(&args[0]).as_number() { Some(n) if n > 0.0 && n < 1.0 => n, _ => return EvalResult::Error(CellError::Value) };
+        EvalResult::Number(norm_inv(p))
+    }
+
+    fn fn_t_dist_2t(&self, args: &[Expression]) -> EvalResult {
+        // T.DIST.2T(x, deg_freedom)
+        if args.len() != 2 { return EvalResult::Error(CellError::Value); }
+        let x = match self.evaluate(&args[0]).as_number() { Some(n) if n >= 0.0 => n, _ => return EvalResult::Error(CellError::Value) };
+        let df = match self.evaluate(&args[1]).as_number() { Some(n) if n >= 1.0 => n.floor(), _ => return EvalResult::Error(CellError::Value) };
+        EvalResult::Number(2.0 * (1.0 - t_cdf(x, df)))
+    }
+
+    fn fn_t_dist_rt(&self, args: &[Expression]) -> EvalResult {
+        // T.DIST.RT(x, deg_freedom)
+        if args.len() != 2 { return EvalResult::Error(CellError::Value); }
+        let x = match self.evaluate(&args[0]).as_number() { Some(n) => n, None => return EvalResult::Error(CellError::Value) };
+        let df = match self.evaluate(&args[1]).as_number() { Some(n) if n >= 1.0 => n.floor(), _ => return EvalResult::Error(CellError::Value) };
+        EvalResult::Number(1.0 - t_cdf(x, df))
+    }
+
+    fn fn_t_inv(&self, args: &[Expression]) -> EvalResult {
+        // T.INV(probability, deg_freedom) - left-tailed
+        if args.len() != 2 { return EvalResult::Error(CellError::Value); }
+        let p = match self.evaluate(&args[0]).as_number() { Some(n) if n > 0.0 && n < 1.0 => n, _ => return EvalResult::Error(CellError::Value) };
+        let df = match self.evaluate(&args[1]).as_number() { Some(n) if n >= 1.0 => n.floor(), _ => return EvalResult::Error(CellError::Value) };
+        EvalResult::Number(t_inv(p, df))
+    }
+
+    fn fn_t_inv_2t(&self, args: &[Expression]) -> EvalResult {
+        // T.INV.2T(probability, deg_freedom) - two-tailed
+        if args.len() != 2 { return EvalResult::Error(CellError::Value); }
+        let p = match self.evaluate(&args[0]).as_number() { Some(n) if n > 0.0 && n < 1.0 => n, _ => return EvalResult::Error(CellError::Value) };
+        let df = match self.evaluate(&args[1]).as_number() { Some(n) if n >= 1.0 => n.floor(), _ => return EvalResult::Error(CellError::Value) };
+        EvalResult::Number(t_inv(1.0 - p / 2.0, df))
+    }
+
+    fn fn_t_test(&self, args: &[Expression]) -> EvalResult {
+        // T.TEST(array1, array2, tails, type)
+        if args.len() != 4 { return EvalResult::Error(CellError::Value); }
+        let arr1 = self.eval_flat(&args[0]);
+        let arr2 = self.eval_flat(&args[1]);
+        let tails = match self.evaluate(&args[2]).as_number() { Some(n) if n == 1.0 || n == 2.0 => n as i32, _ => return EvalResult::Error(CellError::Value) };
+        let test_type = match self.evaluate(&args[3]).as_number() { Some(n) if n >= 1.0 && n <= 3.0 => n as i32, _ => return EvalResult::Error(CellError::Value) };
+        let nums1: Vec<f64> = arr1.iter().filter_map(|v| v.as_number()).collect();
+        let nums2: Vec<f64> = arr2.iter().filter_map(|v| v.as_number()).collect();
+        let n1 = nums1.len() as f64;
+        let n2 = nums2.len() as f64;
+        if n1 < 2.0 || n2 < 2.0 { return EvalResult::Error(CellError::Value); }
+        let mean1: f64 = nums1.iter().sum::<f64>() / n1;
+        let mean2: f64 = nums2.iter().sum::<f64>() / n2;
+        let var1: f64 = nums1.iter().map(|x| (x - mean1).powi(2)).sum::<f64>() / (n1 - 1.0);
+        let var2: f64 = nums2.iter().map(|x| (x - mean2).powi(2)).sum::<f64>() / (n2 - 1.0);
+        let (t_stat, df) = match test_type {
+            1 => {
+                // Paired
+                if nums1.len() != nums2.len() { return EvalResult::Error(CellError::Value); }
+                let diffs: Vec<f64> = nums1.iter().zip(nums2.iter()).map(|(a, b)| a - b).collect();
+                let d_mean = diffs.iter().sum::<f64>() / n1;
+                let d_var = diffs.iter().map(|d| (d - d_mean).powi(2)).sum::<f64>() / (n1 - 1.0);
+                if d_var == 0.0 { return EvalResult::Number(if d_mean == 0.0 { 1.0 } else { 0.0 }); }
+                (d_mean / (d_var / n1).sqrt(), n1 - 1.0)
+            }
+            2 => {
+                // Two-sample equal variance
+                let sp = ((n1 - 1.0) * var1 + (n2 - 1.0) * var2) / (n1 + n2 - 2.0);
+                if sp == 0.0 { return EvalResult::Number(if mean1 == mean2 { 1.0 } else { 0.0 }); }
+                ((mean1 - mean2) / (sp * (1.0 / n1 + 1.0 / n2)).sqrt(), n1 + n2 - 2.0)
+            }
+            3 => {
+                // Two-sample unequal variance (Welch's)
+                let se = var1 / n1 + var2 / n2;
+                if se == 0.0 { return EvalResult::Number(if mean1 == mean2 { 1.0 } else { 0.0 }); }
+                let t = (mean1 - mean2) / se.sqrt();
+                let df = se * se / ((var1 / n1).powi(2) / (n1 - 1.0) + (var2 / n2).powi(2) / (n2 - 1.0));
+                (t, df)
+            }
+            _ => return EvalResult::Error(CellError::Value),
+        };
+        let p = 1.0 - t_cdf(t_stat.abs(), df);
+        EvalResult::Number(if tails == 2 { 2.0 * p } else { p })
+    }
+
+    fn fn_chisq_dist_rt(&self, args: &[Expression]) -> EvalResult {
+        // CHISQ.DIST.RT(x, deg_freedom)
+        if args.len() != 2 { return EvalResult::Error(CellError::Value); }
+        let x = match self.evaluate(&args[0]).as_number() { Some(n) if n >= 0.0 => n, _ => return EvalResult::Error(CellError::Value) };
+        let df = match self.evaluate(&args[1]).as_number() { Some(n) if n >= 1.0 => n.floor(), _ => return EvalResult::Error(CellError::Value) };
+        EvalResult::Number(1.0 - lower_gamma_regularized(df / 2.0, x / 2.0))
+    }
+
+    fn fn_chisq_inv(&self, args: &[Expression]) -> EvalResult {
+        // CHISQ.INV(probability, deg_freedom) - left-tailed
+        if args.len() != 2 { return EvalResult::Error(CellError::Value); }
+        let p = match self.evaluate(&args[0]).as_number() { Some(n) if n >= 0.0 && n < 1.0 => n, _ => return EvalResult::Error(CellError::Value) };
+        let df = match self.evaluate(&args[1]).as_number() { Some(n) if n >= 1.0 => n.floor(), _ => return EvalResult::Error(CellError::Value) };
+        if p == 0.0 { return EvalResult::Number(0.0); }
+        EvalResult::Number(chisq_inv_impl(p, df))
+    }
+
+    fn fn_chisq_inv_rt(&self, args: &[Expression]) -> EvalResult {
+        // CHISQ.INV.RT(probability, deg_freedom) - right-tailed
+        if args.len() != 2 { return EvalResult::Error(CellError::Value); }
+        let p = match self.evaluate(&args[0]).as_number() { Some(n) if n > 0.0 && n <= 1.0 => n, _ => return EvalResult::Error(CellError::Value) };
+        let df = match self.evaluate(&args[1]).as_number() { Some(n) if n >= 1.0 => n.floor(), _ => return EvalResult::Error(CellError::Value) };
+        if p == 1.0 { return EvalResult::Number(0.0); }
+        EvalResult::Number(chisq_inv_impl(1.0 - p, df))
+    }
+
+    fn fn_chisq_test(&self, args: &[Expression]) -> EvalResult {
+        // CHISQ.TEST(actual_range, expected_range)
+        if args.len() != 2 { return EvalResult::Error(CellError::Value); }
+        let actual = self.eval_flat(&args[0]);
+        let expected = self.eval_flat(&args[1]);
+        if actual.len() != expected.len() || actual.is_empty() { return EvalResult::Error(CellError::Value); }
+        let mut chi2 = 0.0;
+        for (a, e) in actual.iter().zip(expected.iter()) {
+            let av = match a.as_number() { Some(n) => n, None => return EvalResult::Error(CellError::Value) };
+            let ev = match e.as_number() { Some(n) if n > 0.0 => n, _ => return EvalResult::Error(CellError::Value) };
+            chi2 += (av - ev).powi(2) / ev;
+        }
+        let df = (actual.len() - 1) as f64;
+        if df < 1.0 { return EvalResult::Error(CellError::Value); }
+        EvalResult::Number(1.0 - lower_gamma_regularized(df / 2.0, chi2 / 2.0))
+    }
+
+    fn fn_f_dist_rt(&self, args: &[Expression]) -> EvalResult {
+        // F.DIST.RT(x, deg_freedom1, deg_freedom2)
+        if args.len() != 3 { return EvalResult::Error(CellError::Value); }
+        let x = match self.evaluate(&args[0]).as_number() { Some(n) if n >= 0.0 => n, _ => return EvalResult::Error(CellError::Value) };
+        let d1 = match self.evaluate(&args[1]).as_number() { Some(n) if n >= 1.0 => n.floor(), _ => return EvalResult::Error(CellError::Value) };
+        let d2 = match self.evaluate(&args[2]).as_number() { Some(n) if n >= 1.0 => n.floor(), _ => return EvalResult::Error(CellError::Value) };
+        let z = d1 * x / (d1 * x + d2);
+        EvalResult::Number(1.0 - regularized_beta(d1 / 2.0, d2 / 2.0, z))
+    }
+
+    fn fn_f_inv(&self, args: &[Expression]) -> EvalResult {
+        // F.INV(probability, deg_freedom1, deg_freedom2) - left-tailed
+        if args.len() != 3 { return EvalResult::Error(CellError::Value); }
+        let p = match self.evaluate(&args[0]).as_number() { Some(n) if n >= 0.0 && n < 1.0 => n, _ => return EvalResult::Error(CellError::Value) };
+        let d1 = match self.evaluate(&args[1]).as_number() { Some(n) if n >= 1.0 => n.floor(), _ => return EvalResult::Error(CellError::Value) };
+        let d2 = match self.evaluate(&args[2]).as_number() { Some(n) if n >= 1.0 => n.floor(), _ => return EvalResult::Error(CellError::Value) };
+        if p == 0.0 { return EvalResult::Number(0.0); }
+        EvalResult::Number(f_inv_impl(p, d1, d2))
+    }
+
+    fn fn_f_inv_rt(&self, args: &[Expression]) -> EvalResult {
+        // F.INV.RT(probability, deg_freedom1, deg_freedom2)
+        if args.len() != 3 { return EvalResult::Error(CellError::Value); }
+        let p = match self.evaluate(&args[0]).as_number() { Some(n) if n > 0.0 && n <= 1.0 => n, _ => return EvalResult::Error(CellError::Value) };
+        let d1 = match self.evaluate(&args[1]).as_number() { Some(n) if n >= 1.0 => n.floor(), _ => return EvalResult::Error(CellError::Value) };
+        let d2 = match self.evaluate(&args[2]).as_number() { Some(n) if n >= 1.0 => n.floor(), _ => return EvalResult::Error(CellError::Value) };
+        if p == 1.0 { return EvalResult::Number(0.0); }
+        EvalResult::Number(f_inv_impl(1.0 - p, d1, d2))
+    }
+
+    fn fn_f_test(&self, args: &[Expression]) -> EvalResult {
+        // F.TEST(array1, array2)
+        if args.len() != 2 { return EvalResult::Error(CellError::Value); }
+        let arr1 = self.eval_flat(&args[0]);
+        let arr2 = self.eval_flat(&args[1]);
+        let nums1: Vec<f64> = arr1.iter().filter_map(|v| v.as_number()).collect();
+        let nums2: Vec<f64> = arr2.iter().filter_map(|v| v.as_number()).collect();
+        let n1 = nums1.len() as f64;
+        let n2 = nums2.len() as f64;
+        if n1 < 2.0 || n2 < 2.0 { return EvalResult::Error(CellError::Value); }
+        let mean1 = nums1.iter().sum::<f64>() / n1;
+        let mean2 = nums2.iter().sum::<f64>() / n2;
+        let var1 = nums1.iter().map(|x| (x - mean1).powi(2)).sum::<f64>() / (n1 - 1.0);
+        let var2 = nums2.iter().map(|x| (x - mean2).powi(2)).sum::<f64>() / (n2 - 1.0);
+        if var2 == 0.0 { return EvalResult::Error(CellError::Div0); }
+        let f = var1 / var2;
+        let d1 = n1 - 1.0;
+        let d2 = n2 - 1.0;
+        let z = d1 * f / (d1 * f + d2);
+        let p = 1.0 - regularized_beta(d1 / 2.0, d2 / 2.0, z);
+        EvalResult::Number(2.0 * p.min(1.0 - p))
+    }
+
+    fn fn_binom_inv(&self, args: &[Expression]) -> EvalResult {
+        // BINOM.INV(trials, probability_s, alpha)
+        if args.len() != 3 { return EvalResult::Error(CellError::Value); }
+        let n = match self.evaluate(&args[0]).as_number() { Some(v) if v >= 0.0 => v.floor() as u64, _ => return EvalResult::Error(CellError::Value) };
+        let p = match self.evaluate(&args[1]).as_number() { Some(v) if (0.0..=1.0).contains(&v) => v, _ => return EvalResult::Error(CellError::Value) };
+        let alpha = match self.evaluate(&args[2]).as_number() { Some(v) if (0.0..=1.0).contains(&v) => v, _ => return EvalResult::Error(CellError::Value) };
+        let mut cum = 0.0;
+        for k in 0..=n {
+            cum += binom_pmf(k, n, p);
+            if cum >= alpha { return EvalResult::Number(k as f64); }
+        }
+        EvalResult::Number(n as f64)
+    }
+
+    fn fn_binom_dist_range(&self, args: &[Expression]) -> EvalResult {
+        // BINOM.DIST.RANGE(trials, probability_s, number_s, [number_s2])
+        if args.len() < 3 || args.len() > 4 { return EvalResult::Error(CellError::Value); }
+        let n = match self.evaluate(&args[0]).as_number() { Some(v) if v >= 0.0 => v.floor() as u64, _ => return EvalResult::Error(CellError::Value) };
+        let p = match self.evaluate(&args[1]).as_number() { Some(v) if (0.0..=1.0).contains(&v) => v, _ => return EvalResult::Error(CellError::Value) };
+        let s1 = match self.evaluate(&args[2]).as_number() { Some(v) if v >= 0.0 => v.floor() as u64, _ => return EvalResult::Error(CellError::Value) };
+        let s2 = if args.len() == 4 {
+            match self.evaluate(&args[3]).as_number() { Some(v) if v >= 0.0 => v.floor() as u64, _ => return EvalResult::Error(CellError::Value) }
+        } else { s1 };
+        if s1 > s2 || s2 > n { return EvalResult::Error(CellError::Value); }
+        let mut sum = 0.0;
+        for k in s1..=s2 { sum += binom_pmf(k, n, p); }
+        EvalResult::Number(sum)
+    }
+
+    fn fn_beta_dist(&self, args: &[Expression]) -> EvalResult {
+        // BETA.DIST(x, alpha, beta, cumulative, [A], [B])
+        if args.len() < 4 || args.len() > 6 { return EvalResult::Error(CellError::Value); }
+        let x = match self.evaluate(&args[0]).as_number() { Some(n) => n, None => return EvalResult::Error(CellError::Value) };
+        let alpha = match self.evaluate(&args[1]).as_number() { Some(n) if n > 0.0 => n, _ => return EvalResult::Error(CellError::Value) };
+        let beta = match self.evaluate(&args[2]).as_number() { Some(n) if n > 0.0 => n, _ => return EvalResult::Error(CellError::Value) };
+        let cumulative = { let _v = self.evaluate(&args[3]); matches!(_v, EvalResult::Boolean(true)) || matches!(_v, EvalResult::Number(n) if n != 0.0) };
+        let a_bound = if args.len() >= 5 { self.evaluate(&args[4]).as_number().unwrap_or(0.0) } else { 0.0 };
+        let b_bound = if args.len() == 6 { self.evaluate(&args[5]).as_number().unwrap_or(1.0) } else { 1.0 };
+        if a_bound >= b_bound { return EvalResult::Error(CellError::Value); }
+        let z = (x - a_bound) / (b_bound - a_bound);
+        if z < 0.0 || z > 1.0 { return EvalResult::Error(CellError::Value); }
+        if cumulative {
+            EvalResult::Number(regularized_beta(alpha, beta, z))
+        } else {
+            let ln_pdf = (alpha - 1.0) * z.ln() + (beta - 1.0) * (1.0 - z).ln() - beta_ln(alpha, beta) - (b_bound - a_bound).ln();
+            EvalResult::Number(ln_pdf.exp())
+        }
+    }
+
+    fn fn_beta_inv(&self, args: &[Expression]) -> EvalResult {
+        // BETA.INV(probability, alpha, beta, [A], [B])
+        if args.len() < 3 || args.len() > 5 { return EvalResult::Error(CellError::Value); }
+        let p = match self.evaluate(&args[0]).as_number() { Some(n) if n >= 0.0 && n <= 1.0 => n, _ => return EvalResult::Error(CellError::Value) };
+        let alpha = match self.evaluate(&args[1]).as_number() { Some(n) if n > 0.0 => n, _ => return EvalResult::Error(CellError::Value) };
+        let beta = match self.evaluate(&args[2]).as_number() { Some(n) if n > 0.0 => n, _ => return EvalResult::Error(CellError::Value) };
+        let a_bound = if args.len() >= 4 { self.evaluate(&args[3]).as_number().unwrap_or(0.0) } else { 0.0 };
+        let b_bound = if args.len() == 5 { self.evaluate(&args[4]).as_number().unwrap_or(1.0) } else { 1.0 };
+        // Bisection on regularized_beta
+        let mut lo = 0.0_f64;
+        let mut hi = 1.0_f64;
+        for _ in 0..100 {
+            let mid = (lo + hi) / 2.0;
+            if regularized_beta(alpha, beta, mid) < p { lo = mid; } else { hi = mid; }
+        }
+        EvalResult::Number(a_bound + (lo + hi) / 2.0 * (b_bound - a_bound))
+    }
+
+    fn fn_gamma_dist(&self, args: &[Expression]) -> EvalResult {
+        // GAMMA.DIST(x, alpha, beta, cumulative)
+        if args.len() != 4 { return EvalResult::Error(CellError::Value); }
+        let x = match self.evaluate(&args[0]).as_number() { Some(n) if n >= 0.0 => n, _ => return EvalResult::Error(CellError::Value) };
+        let alpha = match self.evaluate(&args[1]).as_number() { Some(n) if n > 0.0 => n, _ => return EvalResult::Error(CellError::Value) };
+        let beta = match self.evaluate(&args[2]).as_number() { Some(n) if n > 0.0 => n, _ => return EvalResult::Error(CellError::Value) };
+        let cumulative = { let _v = self.evaluate(&args[3]); matches!(_v, EvalResult::Boolean(true)) || matches!(_v, EvalResult::Number(n) if n != 0.0) };
+        if cumulative {
+            EvalResult::Number(lower_gamma_regularized(alpha, x / beta))
+        } else {
+            if x == 0.0 && alpha < 1.0 { return EvalResult::Error(CellError::Value); }
+            if x == 0.0 { return EvalResult::Number(0.0); }
+            let ln_pdf = (alpha - 1.0) * x.ln() - x / beta - alpha * beta.ln() - gamma_ln(alpha);
+            EvalResult::Number(ln_pdf.exp())
+        }
+    }
+
+    fn fn_gamma_inv(&self, args: &[Expression]) -> EvalResult {
+        // GAMMA.INV(probability, alpha, beta)
+        if args.len() != 3 { return EvalResult::Error(CellError::Value); }
+        let p = match self.evaluate(&args[0]).as_number() { Some(n) if n >= 0.0 && n < 1.0 => n, _ => return EvalResult::Error(CellError::Value) };
+        let alpha = match self.evaluate(&args[1]).as_number() { Some(n) if n > 0.0 => n, _ => return EvalResult::Error(CellError::Value) };
+        let beta = match self.evaluate(&args[2]).as_number() { Some(n) if n > 0.0 => n, _ => return EvalResult::Error(CellError::Value) };
+        if p == 0.0 { return EvalResult::Number(0.0); }
+        // Bisection on gamma CDF
+        let mut lo = 0.0_f64;
+        let mut hi = alpha * beta * 100.0;
+        for _ in 0..200 {
+            let mid = (lo + hi) / 2.0;
+            if lower_gamma_regularized(alpha, mid / beta) < p { lo = mid; } else { hi = mid; }
+        }
+        EvalResult::Number((lo + hi) / 2.0)
+    }
+
+    fn fn_gamma(&self, args: &[Expression]) -> EvalResult {
+        // GAMMA(number)
+        if args.len() != 1 { return EvalResult::Error(CellError::Value); }
+        let x = match self.evaluate(&args[0]).as_number() { Some(n) => n, None => return EvalResult::Error(CellError::Value) };
+        if x <= 0.0 && x == x.floor() { return EvalResult::Error(CellError::Value); }
+        EvalResult::Number(gamma_ln(x).exp())
+    }
+
+    fn fn_gammaln(&self, args: &[Expression]) -> EvalResult {
+        // GAMMALN(x)
+        if args.len() != 1 { return EvalResult::Error(CellError::Value); }
+        let x = match self.evaluate(&args[0]).as_number() { Some(n) if n > 0.0 => n, _ => return EvalResult::Error(CellError::Value) };
+        EvalResult::Number(gamma_ln(x))
+    }
+
+    fn fn_weibull_dist(&self, args: &[Expression]) -> EvalResult {
+        // WEIBULL.DIST(x, alpha, beta, cumulative)
+        if args.len() != 4 { return EvalResult::Error(CellError::Value); }
+        let x = match self.evaluate(&args[0]).as_number() { Some(n) if n >= 0.0 => n, _ => return EvalResult::Error(CellError::Value) };
+        let alpha = match self.evaluate(&args[1]).as_number() { Some(n) if n > 0.0 => n, _ => return EvalResult::Error(CellError::Value) };
+        let beta = match self.evaluate(&args[2]).as_number() { Some(n) if n > 0.0 => n, _ => return EvalResult::Error(CellError::Value) };
+        let cumulative = { let _v = self.evaluate(&args[3]); matches!(_v, EvalResult::Boolean(true)) || matches!(_v, EvalResult::Number(n) if n != 0.0) };
+        if cumulative {
+            EvalResult::Number(1.0 - (-(x / beta).powf(alpha)).exp())
+        } else {
+            if x == 0.0 && alpha < 1.0 { return EvalResult::Error(CellError::Value); }
+            if x == 0.0 { return EvalResult::Number(0.0); }
+            let pdf = (alpha / beta) * (x / beta).powf(alpha - 1.0) * (-(x / beta).powf(alpha)).exp();
+            EvalResult::Number(pdf)
+        }
+    }
+
+    fn fn_expon_dist(&self, args: &[Expression]) -> EvalResult {
+        // EXPON.DIST(x, lambda, cumulative)
+        if args.len() != 3 { return EvalResult::Error(CellError::Value); }
+        let x = match self.evaluate(&args[0]).as_number() { Some(n) if n >= 0.0 => n, _ => return EvalResult::Error(CellError::Value) };
+        let lambda = match self.evaluate(&args[1]).as_number() { Some(n) if n > 0.0 => n, _ => return EvalResult::Error(CellError::Value) };
+        let cumulative = { let _v = self.evaluate(&args[2]); matches!(_v, EvalResult::Boolean(true)) || matches!(_v, EvalResult::Number(n) if n != 0.0) };
+        if cumulative {
+            EvalResult::Number(1.0 - (-lambda * x).exp())
+        } else {
+            EvalResult::Number(lambda * (-lambda * x).exp())
+        }
+    }
+
+    fn fn_lognorm_dist(&self, args: &[Expression]) -> EvalResult {
+        // LOGNORM.DIST(x, mean, standard_dev, cumulative)
+        if args.len() != 4 { return EvalResult::Error(CellError::Value); }
+        let x = match self.evaluate(&args[0]).as_number() { Some(n) if n > 0.0 => n, _ => return EvalResult::Error(CellError::Value) };
+        let mean = match self.evaluate(&args[1]).as_number() { Some(n) => n, None => return EvalResult::Error(CellError::Value) };
+        let std_dev = match self.evaluate(&args[2]).as_number() { Some(n) if n > 0.0 => n, _ => return EvalResult::Error(CellError::Value) };
+        let cumulative = { let _v = self.evaluate(&args[3]); matches!(_v, EvalResult::Boolean(true)) || matches!(_v, EvalResult::Number(n) if n != 0.0) };
+        let z = (x.ln() - mean) / std_dev;
+        if cumulative {
+            EvalResult::Number(norm_cdf(z))
+        } else {
+            let pdf = (-0.5 * z * z).exp() / (x * std_dev * (2.0 * std::f64::consts::PI).sqrt());
+            EvalResult::Number(pdf)
+        }
+    }
+
+    fn fn_lognorm_inv(&self, args: &[Expression]) -> EvalResult {
+        // LOGNORM.INV(probability, mean, standard_dev)
+        if args.len() != 3 { return EvalResult::Error(CellError::Value); }
+        let p = match self.evaluate(&args[0]).as_number() { Some(n) if n > 0.0 && n < 1.0 => n, _ => return EvalResult::Error(CellError::Value) };
+        let mean = match self.evaluate(&args[1]).as_number() { Some(n) => n, None => return EvalResult::Error(CellError::Value) };
+        let std_dev = match self.evaluate(&args[2]).as_number() { Some(n) if n > 0.0 => n, _ => return EvalResult::Error(CellError::Value) };
+        EvalResult::Number((norm_inv(p) * std_dev + mean).exp())
+    }
+
+    fn fn_hypgeom_dist(&self, args: &[Expression]) -> EvalResult {
+        // HYPGEOM.DIST(sample_s, number_sample, population_s, number_pop, cumulative)
+        if args.len() != 5 { return EvalResult::Error(CellError::Value); }
+        let s = match self.evaluate(&args[0]).as_number() { Some(n) if n >= 0.0 => n.floor() as u64, _ => return EvalResult::Error(CellError::Value) };
+        let n_samp = match self.evaluate(&args[1]).as_number() { Some(n) if n >= 0.0 => n.floor() as u64, _ => return EvalResult::Error(CellError::Value) };
+        let pop_s = match self.evaluate(&args[2]).as_number() { Some(n) if n >= 0.0 => n.floor() as u64, _ => return EvalResult::Error(CellError::Value) };
+        let pop = match self.evaluate(&args[3]).as_number() { Some(n) if n >= 1.0 => n.floor() as u64, _ => return EvalResult::Error(CellError::Value) };
+        let cumulative = { let _v = self.evaluate(&args[4]); matches!(_v, EvalResult::Boolean(true)) || matches!(_v, EvalResult::Number(n) if n != 0.0) };
+        if n_samp > pop || pop_s > pop { return EvalResult::Error(CellError::Value); }
+        if cumulative {
+            let mut sum = 0.0;
+            let start = if n_samp > pop - pop_s { n_samp - (pop - pop_s) } else { 0 };
+            for k in start..=s.min(pop_s).min(n_samp) {
+                sum += hypgeom_pmf(k, n_samp, pop_s, pop);
+            }
+            EvalResult::Number(sum)
+        } else {
+            EvalResult::Number(hypgeom_pmf(s, n_samp, pop_s, pop))
+        }
+    }
+
+    fn fn_negbinom_dist(&self, args: &[Expression]) -> EvalResult {
+        // NEGBINOM.DIST(number_f, number_s, probability_s, cumulative)
+        if args.len() != 4 { return EvalResult::Error(CellError::Value); }
+        let f = match self.evaluate(&args[0]).as_number() { Some(n) if n >= 0.0 => n.floor() as u64, _ => return EvalResult::Error(CellError::Value) };
+        let s = match self.evaluate(&args[1]).as_number() { Some(n) if n >= 1.0 => n.floor() as u64, _ => return EvalResult::Error(CellError::Value) };
+        let p = match self.evaluate(&args[2]).as_number() { Some(n) if (0.0..=1.0).contains(&n) => n, _ => return EvalResult::Error(CellError::Value) };
+        let cumulative = { let _v = self.evaluate(&args[3]); matches!(_v, EvalResult::Boolean(true)) || matches!(_v, EvalResult::Number(n) if n != 0.0) };
+        if cumulative {
+            let mut sum = 0.0;
+            for k in 0..=f { sum += negbinom_pmf(k, s, p); }
+            EvalResult::Number(sum)
+        } else {
+            EvalResult::Number(negbinom_pmf(f, s, p))
+        }
+    }
+
+    // ==================== Descriptive/Analytical Statistical Functions ====================
+
+    fn fn_correl(&self, args: &[Expression]) -> EvalResult {
+        // CORREL(array1, array2)
+        if args.len() != 2 { return EvalResult::Error(CellError::Value); }
+        let arr1 = self.eval_flat(&args[0]);
+        let arr2 = self.eval_flat(&args[1]);
+        let nums1: Vec<f64> = arr1.iter().filter_map(|v| v.as_number()).collect();
+        let nums2: Vec<f64> = arr2.iter().filter_map(|v| v.as_number()).collect();
+        let n = nums1.len().min(nums2.len());
+        if n < 2 { return EvalResult::Error(CellError::Value); }
+        let mean1 = nums1[..n].iter().sum::<f64>() / n as f64;
+        let mean2 = nums2[..n].iter().sum::<f64>() / n as f64;
+        let mut sum_xy = 0.0;
+        let mut sum_x2 = 0.0;
+        let mut sum_y2 = 0.0;
+        for i in 0..n {
+            let dx = nums1[i] - mean1;
+            let dy = nums2[i] - mean2;
+            sum_xy += dx * dy;
+            sum_x2 += dx * dx;
+            sum_y2 += dy * dy;
+        }
+        let denom = (sum_x2 * sum_y2).sqrt();
+        if denom == 0.0 { return EvalResult::Error(CellError::Div0); }
+        EvalResult::Number(sum_xy / denom)
+    }
+
+    fn fn_rsq(&self, args: &[Expression]) -> EvalResult {
+        match self.fn_correl(args) {
+            EvalResult::Number(r) => EvalResult::Number(r * r),
+            other => other,
+        }
+    }
+
+    fn fn_slope(&self, args: &[Expression]) -> EvalResult {
+        // SLOPE(known_y's, known_x's)
+        if args.len() != 2 { return EvalResult::Error(CellError::Value); }
+        let ys = self.eval_flat(&args[0]);
+        let xs = self.eval_flat(&args[1]);
+        let y_nums: Vec<f64> = ys.iter().filter_map(|v| v.as_number()).collect();
+        let x_nums: Vec<f64> = xs.iter().filter_map(|v| v.as_number()).collect();
+        let n = y_nums.len().min(x_nums.len());
+        if n < 2 { return EvalResult::Error(CellError::Value); }
+        let mean_x = x_nums[..n].iter().sum::<f64>() / n as f64;
+        let mean_y = y_nums[..n].iter().sum::<f64>() / n as f64;
+        let mut sum_xy = 0.0;
+        let mut sum_x2 = 0.0;
+        for i in 0..n {
+            let dx = x_nums[i] - mean_x;
+            sum_xy += dx * (y_nums[i] - mean_y);
+            sum_x2 += dx * dx;
+        }
+        if sum_x2 == 0.0 { return EvalResult::Error(CellError::Div0); }
+        EvalResult::Number(sum_xy / sum_x2)
+    }
+
+    fn fn_intercept(&self, args: &[Expression]) -> EvalResult {
+        // INTERCEPT(known_y's, known_x's)
+        if args.len() != 2 { return EvalResult::Error(CellError::Value); }
+        let ys = self.eval_flat(&args[0]);
+        let xs = self.eval_flat(&args[1]);
+        let y_nums: Vec<f64> = ys.iter().filter_map(|v| v.as_number()).collect();
+        let x_nums: Vec<f64> = xs.iter().filter_map(|v| v.as_number()).collect();
+        let n = y_nums.len().min(x_nums.len());
+        if n < 2 { return EvalResult::Error(CellError::Value); }
+        let mean_x = x_nums[..n].iter().sum::<f64>() / n as f64;
+        let mean_y = y_nums[..n].iter().sum::<f64>() / n as f64;
+        let mut sum_xy = 0.0;
+        let mut sum_x2 = 0.0;
+        for i in 0..n {
+            let dx = x_nums[i] - mean_x;
+            sum_xy += dx * (y_nums[i] - mean_y);
+            sum_x2 += dx * dx;
+        }
+        if sum_x2 == 0.0 { return EvalResult::Error(CellError::Div0); }
+        let slope = sum_xy / sum_x2;
+        EvalResult::Number(mean_y - slope * mean_x)
+    }
+
+    fn fn_steyx(&self, args: &[Expression]) -> EvalResult {
+        // STEYX(known_y's, known_x's)
+        if args.len() != 2 { return EvalResult::Error(CellError::Value); }
+        let ys = self.eval_flat(&args[0]);
+        let xs = self.eval_flat(&args[1]);
+        let y_nums: Vec<f64> = ys.iter().filter_map(|v| v.as_number()).collect();
+        let x_nums: Vec<f64> = xs.iter().filter_map(|v| v.as_number()).collect();
+        let n = y_nums.len().min(x_nums.len());
+        if n < 3 { return EvalResult::Error(CellError::Value); }
+        let mean_x = x_nums[..n].iter().sum::<f64>() / n as f64;
+        let mean_y = y_nums[..n].iter().sum::<f64>() / n as f64;
+        let mut sum_xy = 0.0;
+        let mut sum_x2 = 0.0;
+        let mut sum_y2 = 0.0;
+        for i in 0..n {
+            let dx = x_nums[i] - mean_x;
+            let dy = y_nums[i] - mean_y;
+            sum_xy += dx * dy;
+            sum_x2 += dx * dx;
+            sum_y2 += dy * dy;
+        }
+        if sum_x2 == 0.0 { return EvalResult::Error(CellError::Div0); }
+        let sse = sum_y2 - sum_xy * sum_xy / sum_x2;
+        EvalResult::Number((sse / (n as f64 - 2.0)).sqrt())
+    }
+
+    fn fn_covariance_p(&self, args: &[Expression]) -> EvalResult {
+        if args.len() != 2 { return EvalResult::Error(CellError::Value); }
+        let arr1 = self.eval_flat(&args[0]);
+        let arr2 = self.eval_flat(&args[1]);
+        let nums1: Vec<f64> = arr1.iter().filter_map(|v| v.as_number()).collect();
+        let nums2: Vec<f64> = arr2.iter().filter_map(|v| v.as_number()).collect();
+        let n = nums1.len().min(nums2.len());
+        if n < 1 { return EvalResult::Error(CellError::Value); }
+        let mean1 = nums1[..n].iter().sum::<f64>() / n as f64;
+        let mean2 = nums2[..n].iter().sum::<f64>() / n as f64;
+        let cov: f64 = (0..n).map(|i| (nums1[i] - mean1) * (nums2[i] - mean2)).sum::<f64>() / n as f64;
+        EvalResult::Number(cov)
+    }
+
+    fn fn_covariance_s(&self, args: &[Expression]) -> EvalResult {
+        if args.len() != 2 { return EvalResult::Error(CellError::Value); }
+        let arr1 = self.eval_flat(&args[0]);
+        let arr2 = self.eval_flat(&args[1]);
+        let nums1: Vec<f64> = arr1.iter().filter_map(|v| v.as_number()).collect();
+        let nums2: Vec<f64> = arr2.iter().filter_map(|v| v.as_number()).collect();
+        let n = nums1.len().min(nums2.len());
+        if n < 2 { return EvalResult::Error(CellError::Value); }
+        let mean1 = nums1[..n].iter().sum::<f64>() / n as f64;
+        let mean2 = nums2[..n].iter().sum::<f64>() / n as f64;
+        let cov: f64 = (0..n).map(|i| (nums1[i] - mean1) * (nums2[i] - mean2)).sum::<f64>() / (n as f64 - 1.0);
+        EvalResult::Number(cov)
+    }
+
+    fn fn_kurt(&self, args: &[Expression]) -> EvalResult {
+        let numbers = match self.collect_numbers(args) { Ok(n) => n, Err(e) => return EvalResult::Error(e) };
+        let n = numbers.len() as f64;
+        if n < 4.0 { return EvalResult::Error(CellError::Value); }
+        let mean = numbers.iter().sum::<f64>() / n;
+        let s2 = numbers.iter().map(|x| (x - mean).powi(2)).sum::<f64>() / (n - 1.0);
+        if s2 == 0.0 { return EvalResult::Error(CellError::Div0); }
+        let s = s2.sqrt();
+        let m4: f64 = numbers.iter().map(|x| ((x - mean) / s).powi(4)).sum();
+        let kurt = (n * (n + 1.0) * m4 / ((n - 1.0) * (n - 2.0) * (n - 3.0))) - (3.0 * (n - 1.0).powi(2)) / ((n - 2.0) * (n - 3.0));
+        EvalResult::Number(kurt)
+    }
+
+    fn fn_skew(&self, args: &[Expression]) -> EvalResult {
+        let numbers = match self.collect_numbers(args) { Ok(n) => n, Err(e) => return EvalResult::Error(e) };
+        let n = numbers.len() as f64;
+        if n < 3.0 { return EvalResult::Error(CellError::Value); }
+        let mean = numbers.iter().sum::<f64>() / n;
+        let s2 = numbers.iter().map(|x| (x - mean).powi(2)).sum::<f64>() / (n - 1.0);
+        if s2 == 0.0 { return EvalResult::Error(CellError::Div0); }
+        let s = s2.sqrt();
+        let m3: f64 = numbers.iter().map(|x| ((x - mean) / s).powi(3)).sum();
+        EvalResult::Number(n * m3 / ((n - 1.0) * (n - 2.0)))
+    }
+
+    fn fn_skew_p(&self, args: &[Expression]) -> EvalResult {
+        let numbers = match self.collect_numbers(args) { Ok(n) => n, Err(e) => return EvalResult::Error(e) };
+        let n = numbers.len() as f64;
+        if n < 3.0 { return EvalResult::Error(CellError::Value); }
+        let mean = numbers.iter().sum::<f64>() / n;
+        let s2 = numbers.iter().map(|x| (x - mean).powi(2)).sum::<f64>() / n;
+        if s2 == 0.0 { return EvalResult::Error(CellError::Div0); }
+        let s = s2.sqrt();
+        let m3: f64 = numbers.iter().map(|x| ((x - mean) / s).powi(3)).sum::<f64>() / n;
+        EvalResult::Number(m3)
+    }
+
+    fn fn_avedev(&self, args: &[Expression]) -> EvalResult {
+        let numbers = match self.collect_numbers(args) { Ok(n) => n, Err(e) => return EvalResult::Error(e) };
+        if numbers.is_empty() { return EvalResult::Error(CellError::Value); }
+        let mean = numbers.iter().sum::<f64>() / numbers.len() as f64;
+        let avedev = numbers.iter().map(|x| (x - mean).abs()).sum::<f64>() / numbers.len() as f64;
+        EvalResult::Number(avedev)
+    }
+
+    fn fn_devsq(&self, args: &[Expression]) -> EvalResult {
+        let numbers = match self.collect_numbers(args) { Ok(n) => n, Err(e) => return EvalResult::Error(e) };
+        if numbers.is_empty() { return EvalResult::Error(CellError::Value); }
+        let mean = numbers.iter().sum::<f64>() / numbers.len() as f64;
+        let devsq = numbers.iter().map(|x| (x - mean).powi(2)).sum::<f64>();
+        EvalResult::Number(devsq)
+    }
+
+    fn fn_geomean(&self, args: &[Expression]) -> EvalResult {
+        let numbers = match self.collect_numbers(args) { Ok(n) => n, Err(e) => return EvalResult::Error(e) };
+        if numbers.is_empty() { return EvalResult::Error(CellError::Value); }
+        if numbers.iter().any(|&x| x <= 0.0) { return EvalResult::Error(CellError::Value); }
+        let log_sum: f64 = numbers.iter().map(|x| x.ln()).sum();
+        EvalResult::Number((log_sum / numbers.len() as f64).exp())
+    }
+
+    fn fn_harmean(&self, args: &[Expression]) -> EvalResult {
+        let numbers = match self.collect_numbers(args) { Ok(n) => n, Err(e) => return EvalResult::Error(e) };
+        if numbers.is_empty() { return EvalResult::Error(CellError::Value); }
+        if numbers.iter().any(|&x| x <= 0.0) { return EvalResult::Error(CellError::Value); }
+        let recip_sum: f64 = numbers.iter().map(|x| 1.0 / x).sum();
+        EvalResult::Number(numbers.len() as f64 / recip_sum)
+    }
+
+    fn fn_trimmean(&self, args: &[Expression]) -> EvalResult {
+        // TRIMMEAN(array, percent)
+        if args.len() != 2 { return EvalResult::Error(CellError::Value); }
+        let arr = self.eval_flat(&args[0]);
+        let percent = match self.evaluate(&args[1]).as_number() { Some(n) if (0.0..1.0).contains(&n) => n, _ => return EvalResult::Error(CellError::Value) };
+        let mut numbers: Vec<f64> = arr.iter().filter_map(|v| v.as_number()).collect();
+        if numbers.is_empty() { return EvalResult::Error(CellError::Value); }
+        numbers.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        let n = numbers.len();
+        let trim = ((n as f64 * percent) / 2.0).floor() as usize;
+        let trimmed = &numbers[trim..n - trim];
+        if trimmed.is_empty() { return EvalResult::Error(CellError::Value); }
+        let sum: f64 = trimmed.iter().sum();
+        EvalResult::Number(sum / trimmed.len() as f64)
+    }
+
+    fn fn_standardize(&self, args: &[Expression]) -> EvalResult {
+        // STANDARDIZE(x, mean, standard_dev)
+        if args.len() != 3 { return EvalResult::Error(CellError::Value); }
+        let x = match self.evaluate(&args[0]).as_number() { Some(n) => n, None => return EvalResult::Error(CellError::Value) };
+        let mean = match self.evaluate(&args[1]).as_number() { Some(n) => n, None => return EvalResult::Error(CellError::Value) };
+        let std_dev = match self.evaluate(&args[2]).as_number() { Some(n) if n > 0.0 => n, _ => return EvalResult::Error(CellError::Value) };
+        EvalResult::Number((x - mean) / std_dev)
+    }
+
+    fn fn_percentile_exc(&self, args: &[Expression]) -> EvalResult {
+        // PERCENTILE.EXC(array, k)
+        if args.len() != 2 { return EvalResult::Error(CellError::Value); }
+        let arr = self.eval_flat(&args[0]);
+        let k = match self.evaluate(&args[1]).as_number() { Some(n) => n, None => return EvalResult::Error(CellError::Value) };
+        let mut numbers: Vec<f64> = arr.iter().filter_map(|v| v.as_number()).collect();
+        let n = numbers.len();
+        if n == 0 { return EvalResult::Error(CellError::Value); }
+        if k <= 1.0 / (n as f64 + 1.0) || k >= n as f64 / (n as f64 + 1.0) { return EvalResult::Error(CellError::Value); }
+        numbers.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        let rank = k * (n as f64 + 1.0) - 1.0;
+        let lo = rank.floor() as usize;
+        let frac = rank - lo as f64;
+        if lo + 1 >= n { return EvalResult::Number(numbers[n - 1]); }
+        EvalResult::Number(numbers[lo] + frac * (numbers[lo + 1] - numbers[lo]))
+    }
+
+    fn fn_percentrank_exc(&self, args: &[Expression]) -> EvalResult {
+        // PERCENTRANK.EXC(array, x, [significance])
+        if args.len() < 2 || args.len() > 3 { return EvalResult::Error(CellError::Value); }
+        let arr = self.eval_flat(&args[0]);
+        let x = match self.evaluate(&args[1]).as_number() { Some(n) => n, None => return EvalResult::Error(CellError::Value) };
+        let sig = if args.len() == 3 { self.evaluate(&args[2]).as_number().unwrap_or(3.0) as i32 } else { 3 };
+        let mut numbers: Vec<f64> = arr.iter().filter_map(|v| v.as_number()).collect();
+        numbers.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        let n = numbers.len();
+        if n == 0 { return EvalResult::Error(CellError::Value); }
+        if x < numbers[0] || x > numbers[n - 1] { return EvalResult::Error(CellError::NA); }
+        let count_less = numbers.iter().filter(|&&v| v < x).count() as f64;
+        let count_equal = numbers.iter().filter(|&&v| v == x).count() as f64;
+        let rank = (count_less + 0.5 * count_equal) / (n as f64 + 1.0);
+        let factor = 10.0_f64.powi(sig);
+        EvalResult::Number((rank * factor).floor() / factor)
+    }
+
+    fn fn_quartile_exc(&self, args: &[Expression]) -> EvalResult {
+        // QUARTILE.EXC(array, quart)
+        if args.len() != 2 { return EvalResult::Error(CellError::Value); }
+        let quart = match self.evaluate(&args[1]).as_number() { Some(n) if n >= 1.0 && n <= 3.0 => n.floor() as i32, _ => return EvalResult::Error(CellError::Value) };
+        let k = quart as f64 / 4.0;
+        // Reuse PERCENTILE.EXC logic
+        let arr = self.eval_flat(&args[0]);
+        let mut numbers: Vec<f64> = arr.iter().filter_map(|v| v.as_number()).collect();
+        let n = numbers.len();
+        if n < 2 { return EvalResult::Error(CellError::Value); }
+        numbers.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        let rank = k * (n as f64 + 1.0) - 1.0;
+        let lo = rank.floor() as usize;
+        let frac = rank - lo as f64;
+        if lo + 1 >= n { return EvalResult::Number(numbers[n - 1]); }
+        EvalResult::Number(numbers[lo] + frac * (numbers[lo + 1] - numbers[lo]))
+    }
+
+    fn fn_prob(&self, args: &[Expression]) -> EvalResult {
+        // PROB(x_range, prob_range, lower_limit, [upper_limit])
+        if args.len() < 3 || args.len() > 4 { return EvalResult::Error(CellError::Value); }
+        let xs = self.eval_flat(&args[0]);
+        let probs = self.eval_flat(&args[1]);
+        let lower = match self.evaluate(&args[2]).as_number() { Some(n) => n, None => return EvalResult::Error(CellError::Value) };
+        let upper = if args.len() == 4 { match self.evaluate(&args[3]).as_number() { Some(n) => n, None => return EvalResult::Error(CellError::Value) } } else { lower };
+        let x_nums: Vec<f64> = xs.iter().filter_map(|v| v.as_number()).collect();
+        let p_nums: Vec<f64> = probs.iter().filter_map(|v| v.as_number()).collect();
+        if x_nums.len() != p_nums.len() || x_nums.is_empty() { return EvalResult::Error(CellError::Value); }
+        let mut sum = 0.0;
+        for i in 0..x_nums.len() {
+            if x_nums[i] >= lower && x_nums[i] <= upper { sum += p_nums[i]; }
+        }
+        EvalResult::Number(sum)
+    }
+
+    fn fn_fisher(&self, args: &[Expression]) -> EvalResult {
+        if args.len() != 1 { return EvalResult::Error(CellError::Value); }
+        let x = match self.evaluate(&args[0]).as_number() { Some(n) if n > -1.0 && n < 1.0 => n, _ => return EvalResult::Error(CellError::Value) };
+        EvalResult::Number(0.5 * ((1.0 + x) / (1.0 - x)).ln())
+    }
+
+    fn fn_fisherinv(&self, args: &[Expression]) -> EvalResult {
+        if args.len() != 1 { return EvalResult::Error(CellError::Value); }
+        let y = match self.evaluate(&args[0]).as_number() { Some(n) => n, None => return EvalResult::Error(CellError::Value) };
+        let e2y = (2.0 * y).exp();
+        EvalResult::Number((e2y - 1.0) / (e2y + 1.0))
+    }
+
+    fn fn_permut(&self, args: &[Expression]) -> EvalResult {
+        // PERMUT(number, number_chosen)
+        if args.len() != 2 { return EvalResult::Error(CellError::Value); }
+        let n = match self.evaluate(&args[0]).as_number() { Some(v) if v >= 0.0 => v.floor() as u64, _ => return EvalResult::Error(CellError::Value) };
+        let k = match self.evaluate(&args[1]).as_number() { Some(v) if v >= 0.0 => v.floor() as u64, _ => return EvalResult::Error(CellError::Value) };
+        if k > n { return EvalResult::Error(CellError::Value); }
+        let result = (gamma_ln(n as f64 + 1.0) - gamma_ln((n - k) as f64 + 1.0)).exp();
+        EvalResult::Number(result.round())
+    }
+
+    fn fn_permutationa(&self, args: &[Expression]) -> EvalResult {
+        // PERMUTATIONA(number, number_chosen)
+        if args.len() != 2 { return EvalResult::Error(CellError::Value); }
+        let n = match self.evaluate(&args[0]).as_number() { Some(v) if v >= 0.0 => v.floor() as u64, _ => return EvalResult::Error(CellError::Value) };
+        let k = match self.evaluate(&args[1]).as_number() { Some(v) if v >= 0.0 => v.floor() as u64, _ => return EvalResult::Error(CellError::Value) };
+        EvalResult::Number((n as f64).powf(k as f64))
+    }
+
+    fn fn_phi(&self, args: &[Expression]) -> EvalResult {
+        // PHI(x) - standard normal PDF
+        if args.len() != 1 { return EvalResult::Error(CellError::Value); }
+        let x = match self.evaluate(&args[0]).as_number() { Some(n) => n, None => return EvalResult::Error(CellError::Value) };
+        EvalResult::Number((-0.5 * x * x).exp() / (2.0 * std::f64::consts::PI).sqrt())
+    }
+
+    fn fn_gauss(&self, args: &[Expression]) -> EvalResult {
+        // GAUSS(z) = NORM.S.DIST(z, TRUE) - 0.5
+        if args.len() != 1 { return EvalResult::Error(CellError::Value); }
+        let z = match self.evaluate(&args[0]).as_number() { Some(n) => n, None => return EvalResult::Error(CellError::Value) };
+        EvalResult::Number(norm_cdf(z) - 0.5)
+    }
+
+    // ==================== Forecasting Functions ====================
+
+    fn fn_forecast_linear(&self, args: &[Expression]) -> EvalResult {
+        // FORECAST.LINEAR(x, known_y's, known_x's)
+        if args.len() != 3 { return EvalResult::Error(CellError::Value); }
+        let x = match self.evaluate(&args[0]).as_number() { Some(n) => n, None => return EvalResult::Error(CellError::Value) };
+        let ys = self.eval_flat(&args[1]);
+        let xs = self.eval_flat(&args[2]);
+        let y_nums: Vec<f64> = ys.iter().filter_map(|v| v.as_number()).collect();
+        let x_nums: Vec<f64> = xs.iter().filter_map(|v| v.as_number()).collect();
+        let n = y_nums.len().min(x_nums.len());
+        if n < 2 { return EvalResult::Error(CellError::Value); }
+        let mean_x = x_nums[..n].iter().sum::<f64>() / n as f64;
+        let mean_y = y_nums[..n].iter().sum::<f64>() / n as f64;
+        let mut sum_xy = 0.0;
+        let mut sum_x2 = 0.0;
+        for i in 0..n {
+            let dx = x_nums[i] - mean_x;
+            sum_xy += dx * (y_nums[i] - mean_y);
+            sum_x2 += dx * dx;
+        }
+        if sum_x2 == 0.0 { return EvalResult::Error(CellError::Div0); }
+        let slope = sum_xy / sum_x2;
+        let intercept = mean_y - slope * mean_x;
+        EvalResult::Number(intercept + slope * x)
+    }
+
+    fn fn_forecast_ets(&self, args: &[Expression]) -> EvalResult {
+        // FORECAST.ETS(target_date, values, timeline, [seasonality], [data_completion], [aggregation])
+        // Simplified: uses double exponential smoothing (Holt) for non-seasonal data
+        if args.len() < 3 { return EvalResult::Error(CellError::Value); }
+        let target = match self.evaluate(&args[0]).as_number() { Some(n) => n, None => return EvalResult::Error(CellError::Value) };
+        let vals = self.eval_flat(&args[1]);
+        let timeline = self.eval_flat(&args[2]);
+        let v_nums: Vec<f64> = vals.iter().filter_map(|v| v.as_number()).collect();
+        let t_nums: Vec<f64> = timeline.iter().filter_map(|v| v.as_number()).collect();
+        let n = v_nums.len().min(t_nums.len());
+        if n < 3 { return EvalResult::Error(CellError::Value); }
+        // Simple Holt double exponential smoothing
+        let alpha = 0.3;
+        let beta = 0.1;
+        let mut level = v_nums[0];
+        let mut trend = v_nums[1] - v_nums[0];
+        for i in 1..n {
+            let new_level = alpha * v_nums[i] + (1.0 - alpha) * (level + trend);
+            let new_trend = beta * (new_level - level) + (1.0 - beta) * trend;
+            level = new_level;
+            trend = new_trend;
+        }
+        let step = if n >= 2 { (t_nums[n - 1] - t_nums[0]) / (n as f64 - 1.0) } else { 1.0 };
+        let h = if step.abs() > 1e-10 { (target - t_nums[n - 1]) / step } else { 1.0 };
+        EvalResult::Number(level + trend * h)
+    }
+
+    fn fn_forecast_ets_season(&self, args: &[Expression]) -> EvalResult {
+        // FORECAST.ETS.SEASONALITY(values, timeline, [data_completion], [aggregation])
+        // Returns detected seasonality period (simplified: returns 1 for no seasonality)
+        if args.len() < 2 { return EvalResult::Error(CellError::Value); }
+        let vals = self.eval_flat(&args[0]);
+        let v_nums: Vec<f64> = vals.iter().filter_map(|v| v.as_number()).collect();
+        if v_nums.len() < 4 { return EvalResult::Number(1.0); }
+        // Simple autocorrelation-based seasonality detection
+        let n = v_nums.len();
+        let mean = v_nums.iter().sum::<f64>() / n as f64;
+        let var: f64 = v_nums.iter().map(|x| (x - mean).powi(2)).sum();
+        if var == 0.0 { return EvalResult::Number(1.0); }
+        let mut best_period = 1;
+        let mut best_acf = 0.0_f64;
+        for period in 2..=(n / 2) {
+            let mut acf = 0.0;
+            for i in 0..(n - period) {
+                acf += (v_nums[i] - mean) * (v_nums[i + period] - mean);
+            }
+            acf /= var;
+            if acf > best_acf { best_acf = acf; best_period = period; }
+        }
+        EvalResult::Number(if best_acf > 0.5 { best_period as f64 } else { 1.0 })
+    }
+
+    // ==================== Statistical Version Variants (include text/logical) ====================
+
+    fn fn_averagea(&self, args: &[Expression]) -> EvalResult {
+        let mut sum = 0.0;
+        let mut count = 0.0;
+        for arg in args {
+            let vals = self.eval_flat(arg);
+            for v in &vals {
+                match v {
+                    EvalResult::Number(n) => { sum += n; count += 1.0; }
+                    EvalResult::Text(_) => { count += 1.0; } // text = 0
+                    EvalResult::Boolean(b) => { sum += if *b { 1.0 } else { 0.0 }; count += 1.0; }
+                    _ => {}
+                }
+            }
+        }
+        if count == 0.0 { return EvalResult::Error(CellError::Value); }
+        EvalResult::Number(sum / count)
+    }
+
+    fn fn_maxa(&self, args: &[Expression]) -> EvalResult {
+        let mut max = f64::NEG_INFINITY;
+        let mut found = false;
+        for arg in args {
+            let vals = self.eval_flat(arg);
+            for v in &vals {
+                let n = match v {
+                    EvalResult::Number(n) => *n,
+                    EvalResult::Text(_) => 0.0,
+                    EvalResult::Boolean(b) => if *b { 1.0 } else { 0.0 },
+                    _ => continue,
+                };
+                found = true;
+                if n > max { max = n; }
+            }
+        }
+        if !found { return EvalResult::Number(0.0); }
+        EvalResult::Number(max)
+    }
+
+    fn fn_mina(&self, args: &[Expression]) -> EvalResult {
+        let mut min = f64::INFINITY;
+        let mut found = false;
+        for arg in args {
+            let vals = self.eval_flat(arg);
+            for v in &vals {
+                let n = match v {
+                    EvalResult::Number(n) => *n,
+                    EvalResult::Text(_) => 0.0,
+                    EvalResult::Boolean(b) => if *b { 1.0 } else { 0.0 },
+                    _ => continue,
+                };
+                found = true;
+                if n < min { min = n; }
+            }
+        }
+        if !found { return EvalResult::Number(0.0); }
+        EvalResult::Number(min)
+    }
+
+    fn collect_numbers_a(&self, args: &[Expression]) -> Vec<f64> {
+        let mut numbers = Vec::new();
+        for arg in args {
+            let vals = self.eval_flat(arg);
+            for v in &vals {
+                match v {
+                    EvalResult::Number(n) => numbers.push(*n),
+                    EvalResult::Text(_) => numbers.push(0.0),
+                    EvalResult::Boolean(b) => numbers.push(if *b { 1.0 } else { 0.0 }),
+                    _ => {}
+                }
+            }
+        }
+        numbers
+    }
+
+    fn fn_stdeva(&self, args: &[Expression]) -> EvalResult {
+        let numbers = self.collect_numbers_a(args);
+        let n = numbers.len() as f64;
+        if n < 2.0 { return EvalResult::Error(CellError::Value); }
+        let mean = numbers.iter().sum::<f64>() / n;
+        let var = numbers.iter().map(|x| (x - mean).powi(2)).sum::<f64>() / (n - 1.0);
+        EvalResult::Number(var.sqrt())
+    }
+
+    fn fn_stdevpa(&self, args: &[Expression]) -> EvalResult {
+        let numbers = self.collect_numbers_a(args);
+        let n = numbers.len() as f64;
+        if n < 1.0 { return EvalResult::Error(CellError::Value); }
+        let mean = numbers.iter().sum::<f64>() / n;
+        let var = numbers.iter().map(|x| (x - mean).powi(2)).sum::<f64>() / n;
+        EvalResult::Number(var.sqrt())
+    }
+
+    fn fn_vara(&self, args: &[Expression]) -> EvalResult {
+        let numbers = self.collect_numbers_a(args);
+        let n = numbers.len() as f64;
+        if n < 2.0 { return EvalResult::Error(CellError::Value); }
+        let mean = numbers.iter().sum::<f64>() / n;
+        let var = numbers.iter().map(|x| (x - mean).powi(2)).sum::<f64>() / (n - 1.0);
+        EvalResult::Number(var)
+    }
+
+    fn fn_varpa(&self, args: &[Expression]) -> EvalResult {
+        let numbers = self.collect_numbers_a(args);
+        let n = numbers.len() as f64;
+        if n < 1.0 { return EvalResult::Error(CellError::Value); }
+        let mean = numbers.iter().sum::<f64>() / n;
+        let var = numbers.iter().map(|x| (x - mean).powi(2)).sum::<f64>() / n;
+        EvalResult::Number(var)
+    }
+
     // ==================== Additional Financial Functions ====================
 
     fn fn_ipmt(&self, args: &[Expression]) -> EvalResult {
@@ -7205,6 +8337,1042 @@ impl<'a> Evaluator<'a> {
         let effect = match self.evaluate(&args[0]).as_number() { Some(n) if n > 0.0 => n, _ => return EvalResult::Error(CellError::Value) };
         let npery = match self.evaluate(&args[1]).as_number() { Some(n) if n >= 1.0 => n.floor(), _ => return EvalResult::Error(CellError::Value) };
         EvalResult::Number(npery * ((1.0 + effect).powf(1.0 / npery) - 1.0))
+    }
+
+    // ==================== Bond & Security Financial Functions ====================
+
+    fn fn_accrint(&self, args: &[Expression]) -> EvalResult {
+        // ACCRINT(issue, first_interest, settlement, rate, par, frequency, [basis])
+        if args.len() < 6 || args.len() > 7 { return EvalResult::Error(CellError::Value); }
+        let issue = match self.evaluate(&args[0]).as_number() { Some(n) => n, None => return EvalResult::Error(CellError::Value) };
+        let _first = match self.evaluate(&args[1]).as_number() { Some(n) => n, None => return EvalResult::Error(CellError::Value) };
+        let settle = match self.evaluate(&args[2]).as_number() { Some(n) => n, None => return EvalResult::Error(CellError::Value) };
+        let rate = match self.evaluate(&args[3]).as_number() { Some(n) if n > 0.0 => n, _ => return EvalResult::Error(CellError::Value) };
+        let par = match self.evaluate(&args[4]).as_number() { Some(n) if n > 0.0 => n, _ => return EvalResult::Error(CellError::Value) };
+        let _freq = match self.evaluate(&args[5]).as_number() { Some(n) if n == 1.0 || n == 2.0 || n == 4.0 => n, _ => return EvalResult::Error(CellError::Value) };
+        let basis = if args.len() == 7 { self.evaluate(&args[6]).as_number().unwrap_or(0.0) as i32 } else { 0 };
+        let days = settle - issue;
+        let year_days = year_basis_days(basis);
+        if days <= 0.0 || year_days <= 0.0 { return EvalResult::Error(CellError::Value); }
+        EvalResult::Number(par * rate * days / year_days)
+    }
+
+    fn fn_accrintm(&self, args: &[Expression]) -> EvalResult {
+        // ACCRINTM(issue, settlement, rate, par, [basis])
+        if args.len() < 4 || args.len() > 5 { return EvalResult::Error(CellError::Value); }
+        let issue = match self.evaluate(&args[0]).as_number() { Some(n) => n, None => return EvalResult::Error(CellError::Value) };
+        let settle = match self.evaluate(&args[1]).as_number() { Some(n) => n, None => return EvalResult::Error(CellError::Value) };
+        let rate = match self.evaluate(&args[2]).as_number() { Some(n) if n > 0.0 => n, _ => return EvalResult::Error(CellError::Value) };
+        let par = match self.evaluate(&args[3]).as_number() { Some(n) if n > 0.0 => n, _ => return EvalResult::Error(CellError::Value) };
+        let basis = if args.len() == 5 { self.evaluate(&args[4]).as_number().unwrap_or(0.0) as i32 } else { 0 };
+        let days = settle - issue;
+        let year_days = year_basis_days(basis);
+        if days <= 0.0 || year_days <= 0.0 { return EvalResult::Error(CellError::Value); }
+        EvalResult::Number(par * rate * days / year_days)
+    }
+
+    fn fn_price(&self, args: &[Expression]) -> EvalResult {
+        // PRICE(settlement, maturity, rate, yld, redemption, frequency, [basis])
+        if args.len() < 6 || args.len() > 7 { return EvalResult::Error(CellError::Value); }
+        let settle = match self.evaluate(&args[0]).as_number() { Some(n) => n, None => return EvalResult::Error(CellError::Value) };
+        let maturity = match self.evaluate(&args[1]).as_number() { Some(n) => n, None => return EvalResult::Error(CellError::Value) };
+        let rate = match self.evaluate(&args[2]).as_number() { Some(n) if n >= 0.0 => n, _ => return EvalResult::Error(CellError::Value) };
+        let yld = match self.evaluate(&args[3]).as_number() { Some(n) if n >= 0.0 => n, _ => return EvalResult::Error(CellError::Value) };
+        let redemption = match self.evaluate(&args[4]).as_number() { Some(n) if n > 0.0 => n, _ => return EvalResult::Error(CellError::Value) };
+        let freq = match self.evaluate(&args[5]).as_number() { Some(n) if n == 1.0 || n == 2.0 || n == 4.0 => n, _ => return EvalResult::Error(CellError::Value) };
+        let basis = if args.len() == 7 { self.evaluate(&args[6]).as_number().unwrap_or(0.0) as i32 } else { 0 };
+        if settle >= maturity { return EvalResult::Error(CellError::Value); }
+        let years = (maturity - settle) / year_basis_days(basis);
+        let n_periods = (years * freq).ceil();
+        let coupon = rate * 100.0 / freq;
+        let yield_per = yld / freq;
+        let mut price = redemption / (1.0 + yield_per).powf(n_periods);
+        for i in 1..=(n_periods as i32) {
+            price += coupon / (1.0 + yield_per).powf(i as f64);
+        }
+        EvalResult::Number(price)
+    }
+
+    fn fn_pricedisc(&self, args: &[Expression]) -> EvalResult {
+        // PRICEDISC(settlement, maturity, discount, redemption, [basis])
+        if args.len() < 4 || args.len() > 5 { return EvalResult::Error(CellError::Value); }
+        let settle = match self.evaluate(&args[0]).as_number() { Some(n) => n, None => return EvalResult::Error(CellError::Value) };
+        let maturity = match self.evaluate(&args[1]).as_number() { Some(n) => n, None => return EvalResult::Error(CellError::Value) };
+        let disc = match self.evaluate(&args[2]).as_number() { Some(n) if n > 0.0 => n, _ => return EvalResult::Error(CellError::Value) };
+        let redemption = match self.evaluate(&args[3]).as_number() { Some(n) if n > 0.0 => n, _ => return EvalResult::Error(CellError::Value) };
+        let basis = if args.len() == 5 { self.evaluate(&args[4]).as_number().unwrap_or(0.0) as i32 } else { 0 };
+        let dsm = maturity - settle;
+        let year_days = year_basis_days(basis);
+        if dsm <= 0.0 { return EvalResult::Error(CellError::Value); }
+        EvalResult::Number(redemption - disc * redemption * dsm / year_days)
+    }
+
+    fn fn_pricemat(&self, args: &[Expression]) -> EvalResult {
+        // PRICEMAT(settlement, maturity, issue, rate, yld, [basis])
+        if args.len() < 5 || args.len() > 6 { return EvalResult::Error(CellError::Value); }
+        let settle = match self.evaluate(&args[0]).as_number() { Some(n) => n, None => return EvalResult::Error(CellError::Value) };
+        let maturity = match self.evaluate(&args[1]).as_number() { Some(n) => n, None => return EvalResult::Error(CellError::Value) };
+        let issue = match self.evaluate(&args[2]).as_number() { Some(n) => n, None => return EvalResult::Error(CellError::Value) };
+        let rate = match self.evaluate(&args[3]).as_number() { Some(n) if n >= 0.0 => n, _ => return EvalResult::Error(CellError::Value) };
+        let yld = match self.evaluate(&args[4]).as_number() { Some(n) if n >= 0.0 => n, _ => return EvalResult::Error(CellError::Value) };
+        let basis = if args.len() == 6 { self.evaluate(&args[5]).as_number().unwrap_or(0.0) as i32 } else { 0 };
+        let year_days = year_basis_days(basis);
+        let dim = (maturity - issue) / year_days;
+        let dis = (settle - issue) / year_days;
+        let dsm = (maturity - settle) / year_days;
+        let denom = 1.0 + dsm * yld;
+        if denom == 0.0 { return EvalResult::Error(CellError::Div0); }
+        EvalResult::Number(((100.0 + dim * rate * 100.0) / denom) - dis * rate * 100.0)
+    }
+
+    fn fn_yield(&self, args: &[Expression]) -> EvalResult {
+        // YIELD(settlement, maturity, rate, pr, redemption, frequency, [basis])
+        if args.len() < 6 || args.len() > 7 { return EvalResult::Error(CellError::Value); }
+        let settle = match self.evaluate(&args[0]).as_number() { Some(n) => n, None => return EvalResult::Error(CellError::Value) };
+        let maturity = match self.evaluate(&args[1]).as_number() { Some(n) => n, None => return EvalResult::Error(CellError::Value) };
+        let rate = match self.evaluate(&args[2]).as_number() { Some(n) if n >= 0.0 => n, _ => return EvalResult::Error(CellError::Value) };
+        let pr = match self.evaluate(&args[3]).as_number() { Some(n) if n > 0.0 => n, _ => return EvalResult::Error(CellError::Value) };
+        let redemption = match self.evaluate(&args[4]).as_number() { Some(n) if n > 0.0 => n, _ => return EvalResult::Error(CellError::Value) };
+        let freq = match self.evaluate(&args[5]).as_number() { Some(n) if n == 1.0 || n == 2.0 || n == 4.0 => n, _ => return EvalResult::Error(CellError::Value) };
+        let basis = if args.len() == 7 { self.evaluate(&args[6]).as_number().unwrap_or(0.0) as i32 } else { 0 };
+        // Bisection to find yield that gives the target price
+        let year_days = year_basis_days(basis);
+        let years = (maturity - settle) / year_days;
+        let n_periods = (years * freq).ceil();
+        let coupon = rate * 100.0 / freq;
+        let mut lo = 0.0_f64;
+        let mut hi = 10.0_f64;
+        for _ in 0..200 {
+            let mid = (lo + hi) / 2.0;
+            let yp = mid / freq;
+            let mut price = redemption / (1.0 + yp).powf(n_periods);
+            for i in 1..=(n_periods as i32) { price += coupon / (1.0 + yp).powf(i as f64); }
+            if price > pr { lo = mid; } else { hi = mid; }
+        }
+        EvalResult::Number((lo + hi) / 2.0)
+    }
+
+    fn fn_yielddisc(&self, args: &[Expression]) -> EvalResult {
+        // YIELDDISC(settlement, maturity, pr, redemption, [basis])
+        if args.len() < 4 || args.len() > 5 { return EvalResult::Error(CellError::Value); }
+        let settle = match self.evaluate(&args[0]).as_number() { Some(n) => n, None => return EvalResult::Error(CellError::Value) };
+        let maturity = match self.evaluate(&args[1]).as_number() { Some(n) => n, None => return EvalResult::Error(CellError::Value) };
+        let pr = match self.evaluate(&args[2]).as_number() { Some(n) if n > 0.0 => n, _ => return EvalResult::Error(CellError::Value) };
+        let redemption = match self.evaluate(&args[3]).as_number() { Some(n) if n > 0.0 => n, _ => return EvalResult::Error(CellError::Value) };
+        let basis = if args.len() == 5 { self.evaluate(&args[4]).as_number().unwrap_or(0.0) as i32 } else { 0 };
+        let dsm = maturity - settle;
+        let year_days = year_basis_days(basis);
+        if dsm <= 0.0 { return EvalResult::Error(CellError::Value); }
+        EvalResult::Number((redemption - pr) / pr * year_days / dsm)
+    }
+
+    fn fn_yieldmat(&self, args: &[Expression]) -> EvalResult {
+        // YIELDMAT(settlement, maturity, issue, rate, pr, [basis])
+        if args.len() < 5 || args.len() > 6 { return EvalResult::Error(CellError::Value); }
+        let settle = match self.evaluate(&args[0]).as_number() { Some(n) => n, None => return EvalResult::Error(CellError::Value) };
+        let maturity = match self.evaluate(&args[1]).as_number() { Some(n) => n, None => return EvalResult::Error(CellError::Value) };
+        let issue = match self.evaluate(&args[2]).as_number() { Some(n) => n, None => return EvalResult::Error(CellError::Value) };
+        let rate = match self.evaluate(&args[3]).as_number() { Some(n) if n >= 0.0 => n, _ => return EvalResult::Error(CellError::Value) };
+        let pr = match self.evaluate(&args[4]).as_number() { Some(n) if n > 0.0 => n, _ => return EvalResult::Error(CellError::Value) };
+        let basis = if args.len() == 6 { self.evaluate(&args[5]).as_number().unwrap_or(0.0) as i32 } else { 0 };
+        let year_days = year_basis_days(basis);
+        let dim = (maturity - issue) / year_days;
+        let dis = (settle - issue) / year_days;
+        let dsm = (maturity - settle) / year_days;
+        if dsm == 0.0 { return EvalResult::Error(CellError::Div0); }
+        let num = (100.0 + dim * rate * 100.0) / pr - 1.0 - dis * rate;
+        EvalResult::Number(num / dsm)
+    }
+
+    fn fn_duration(&self, args: &[Expression]) -> EvalResult {
+        // DURATION(settlement, maturity, coupon, yld, frequency, [basis])
+        if args.len() < 5 || args.len() > 6 { return EvalResult::Error(CellError::Value); }
+        let settle = match self.evaluate(&args[0]).as_number() { Some(n) => n, None => return EvalResult::Error(CellError::Value) };
+        let maturity = match self.evaluate(&args[1]).as_number() { Some(n) => n, None => return EvalResult::Error(CellError::Value) };
+        let coupon_rate = match self.evaluate(&args[2]).as_number() { Some(n) if n >= 0.0 => n, _ => return EvalResult::Error(CellError::Value) };
+        let yld = match self.evaluate(&args[3]).as_number() { Some(n) if n >= 0.0 => n, _ => return EvalResult::Error(CellError::Value) };
+        let freq = match self.evaluate(&args[4]).as_number() { Some(n) if n == 1.0 || n == 2.0 || n == 4.0 => n, _ => return EvalResult::Error(CellError::Value) };
+        let basis = if args.len() == 6 { self.evaluate(&args[5]).as_number().unwrap_or(0.0) as i32 } else { 0 };
+        let year_days = year_basis_days(basis);
+        let years = (maturity - settle) / year_days;
+        let n_periods = (years * freq).ceil() as i32;
+        let coupon = coupon_rate * 100.0 / freq;
+        let yp = yld / freq;
+        let mut price = 0.0;
+        let mut weighted = 0.0;
+        for i in 1..=n_periods {
+            let pv = coupon / (1.0 + yp).powf(i as f64);
+            price += pv;
+            weighted += pv * i as f64 / freq;
+        }
+        let pv_redemption = 100.0 / (1.0 + yp).powf(n_periods as f64);
+        price += pv_redemption;
+        weighted += pv_redemption * n_periods as f64 / freq;
+        if price == 0.0 { return EvalResult::Error(CellError::Div0); }
+        EvalResult::Number(weighted / price)
+    }
+
+    fn fn_mduration(&self, args: &[Expression]) -> EvalResult {
+        // MDURATION = DURATION / (1 + yld/freq)
+        let dur_result = self.fn_duration(args);
+        match dur_result.as_number() {
+            Some(dur) => {
+                let yld = self.evaluate(&args[3]).as_number().unwrap_or(0.0);
+                let freq = self.evaluate(&args[4]).as_number().unwrap_or(1.0);
+                EvalResult::Number(dur / (1.0 + yld / freq))
+            }
+            None => dur_result,
+        }
+    }
+
+    fn fn_disc(&self, args: &[Expression]) -> EvalResult {
+        // DISC(settlement, maturity, pr, redemption, [basis])
+        if args.len() < 4 || args.len() > 5 { return EvalResult::Error(CellError::Value); }
+        let settle = match self.evaluate(&args[0]).as_number() { Some(n) => n, None => return EvalResult::Error(CellError::Value) };
+        let maturity = match self.evaluate(&args[1]).as_number() { Some(n) => n, None => return EvalResult::Error(CellError::Value) };
+        let pr = match self.evaluate(&args[2]).as_number() { Some(n) if n > 0.0 => n, _ => return EvalResult::Error(CellError::Value) };
+        let redemption = match self.evaluate(&args[3]).as_number() { Some(n) if n > 0.0 => n, _ => return EvalResult::Error(CellError::Value) };
+        let basis = if args.len() == 5 { self.evaluate(&args[4]).as_number().unwrap_or(0.0) as i32 } else { 0 };
+        let dsm = maturity - settle;
+        let year_days = year_basis_days(basis);
+        if dsm <= 0.0 { return EvalResult::Error(CellError::Value); }
+        EvalResult::Number((redemption - pr) / redemption * year_days / dsm)
+    }
+
+    fn fn_intrate(&self, args: &[Expression]) -> EvalResult {
+        // INTRATE(settlement, maturity, investment, redemption, [basis])
+        if args.len() < 4 || args.len() > 5 { return EvalResult::Error(CellError::Value); }
+        let settle = match self.evaluate(&args[0]).as_number() { Some(n) => n, None => return EvalResult::Error(CellError::Value) };
+        let maturity = match self.evaluate(&args[1]).as_number() { Some(n) => n, None => return EvalResult::Error(CellError::Value) };
+        let investment = match self.evaluate(&args[2]).as_number() { Some(n) if n > 0.0 => n, _ => return EvalResult::Error(CellError::Value) };
+        let redemption = match self.evaluate(&args[3]).as_number() { Some(n) if n > 0.0 => n, _ => return EvalResult::Error(CellError::Value) };
+        let basis = if args.len() == 5 { self.evaluate(&args[4]).as_number().unwrap_or(0.0) as i32 } else { 0 };
+        let dsm = maturity - settle;
+        let year_days = year_basis_days(basis);
+        if dsm <= 0.0 { return EvalResult::Error(CellError::Value); }
+        EvalResult::Number((redemption - investment) / investment * year_days / dsm)
+    }
+
+    fn fn_received(&self, args: &[Expression]) -> EvalResult {
+        // RECEIVED(settlement, maturity, investment, discount, [basis])
+        if args.len() < 4 || args.len() > 5 { return EvalResult::Error(CellError::Value); }
+        let settle = match self.evaluate(&args[0]).as_number() { Some(n) => n, None => return EvalResult::Error(CellError::Value) };
+        let maturity = match self.evaluate(&args[1]).as_number() { Some(n) => n, None => return EvalResult::Error(CellError::Value) };
+        let investment = match self.evaluate(&args[2]).as_number() { Some(n) if n > 0.0 => n, _ => return EvalResult::Error(CellError::Value) };
+        let disc = match self.evaluate(&args[3]).as_number() { Some(n) if n > 0.0 => n, _ => return EvalResult::Error(CellError::Value) };
+        let basis = if args.len() == 5 { self.evaluate(&args[4]).as_number().unwrap_or(0.0) as i32 } else { 0 };
+        let dsm = maturity - settle;
+        let year_days = year_basis_days(basis);
+        let denom = 1.0 - disc * dsm / year_days;
+        if denom == 0.0 { return EvalResult::Error(CellError::Div0); }
+        EvalResult::Number(investment / denom)
+    }
+
+    fn fn_coupdaybs(&self, args: &[Expression]) -> EvalResult {
+        // COUPDAYBS(settlement, maturity, frequency, [basis]) - days from beginning of coupon period to settlement
+        if args.len() < 3 || args.len() > 4 { return EvalResult::Error(CellError::Value); }
+        let settle = match self.evaluate(&args[0]).as_number() { Some(n) => n, None => return EvalResult::Error(CellError::Value) };
+        let _maturity = match self.evaluate(&args[1]).as_number() { Some(n) => n, None => return EvalResult::Error(CellError::Value) };
+        let freq = match self.evaluate(&args[2]).as_number() { Some(n) if n == 1.0 || n == 2.0 || n == 4.0 => n, _ => return EvalResult::Error(CellError::Value) };
+        let basis = if args.len() == 4 { self.evaluate(&args[3]).as_number().unwrap_or(0.0) as i32 } else { 0 };
+        let period_days = year_basis_days(basis) / freq;
+        let days_in = settle % period_days;
+        EvalResult::Number(days_in.abs())
+    }
+
+    fn fn_coupdays(&self, args: &[Expression]) -> EvalResult {
+        // COUPDAYS(settlement, maturity, frequency, [basis]) - days in coupon period
+        if args.len() < 3 || args.len() > 4 { return EvalResult::Error(CellError::Value); }
+        let _settle = match self.evaluate(&args[0]).as_number() { Some(n) => n, None => return EvalResult::Error(CellError::Value) };
+        let _maturity = match self.evaluate(&args[1]).as_number() { Some(n) => n, None => return EvalResult::Error(CellError::Value) };
+        let freq = match self.evaluate(&args[2]).as_number() { Some(n) if n == 1.0 || n == 2.0 || n == 4.0 => n, _ => return EvalResult::Error(CellError::Value) };
+        let basis = if args.len() == 4 { self.evaluate(&args[3]).as_number().unwrap_or(0.0) as i32 } else { 0 };
+        EvalResult::Number(year_basis_days(basis) / freq)
+    }
+
+    fn fn_coupdaysnc(&self, args: &[Expression]) -> EvalResult {
+        // COUPDAYSNC(settlement, maturity, frequency, [basis]) - days from settlement to next coupon
+        if args.len() < 3 || args.len() > 4 { return EvalResult::Error(CellError::Value); }
+        let settle = match self.evaluate(&args[0]).as_number() { Some(n) => n, None => return EvalResult::Error(CellError::Value) };
+        let _maturity = match self.evaluate(&args[1]).as_number() { Some(n) => n, None => return EvalResult::Error(CellError::Value) };
+        let freq = match self.evaluate(&args[2]).as_number() { Some(n) if n == 1.0 || n == 2.0 || n == 4.0 => n, _ => return EvalResult::Error(CellError::Value) };
+        let basis = if args.len() == 4 { self.evaluate(&args[3]).as_number().unwrap_or(0.0) as i32 } else { 0 };
+        let period_days = year_basis_days(basis) / freq;
+        let days_in = settle % period_days;
+        EvalResult::Number(period_days - days_in.abs())
+    }
+
+    fn fn_coupncd(&self, args: &[Expression]) -> EvalResult {
+        // COUPNCD(settlement, maturity, frequency, [basis]) - next coupon date after settlement
+        if args.len() < 3 || args.len() > 4 { return EvalResult::Error(CellError::Value); }
+        let settle = match self.evaluate(&args[0]).as_number() { Some(n) => n, None => return EvalResult::Error(CellError::Value) };
+        let _maturity = match self.evaluate(&args[1]).as_number() { Some(n) => n, None => return EvalResult::Error(CellError::Value) };
+        let freq = match self.evaluate(&args[2]).as_number() { Some(n) if n == 1.0 || n == 2.0 || n == 4.0 => n, _ => return EvalResult::Error(CellError::Value) };
+        let basis = if args.len() == 4 { self.evaluate(&args[3]).as_number().unwrap_or(0.0) as i32 } else { 0 };
+        let period_days = year_basis_days(basis) / freq;
+        let days_in = settle % period_days;
+        EvalResult::Number(settle + period_days - days_in.abs())
+    }
+
+    fn fn_coupnum(&self, args: &[Expression]) -> EvalResult {
+        // COUPNUM(settlement, maturity, frequency, [basis])
+        if args.len() < 3 || args.len() > 4 { return EvalResult::Error(CellError::Value); }
+        let settle = match self.evaluate(&args[0]).as_number() { Some(n) => n, None => return EvalResult::Error(CellError::Value) };
+        let maturity = match self.evaluate(&args[1]).as_number() { Some(n) => n, None => return EvalResult::Error(CellError::Value) };
+        let freq = match self.evaluate(&args[2]).as_number() { Some(n) if n == 1.0 || n == 2.0 || n == 4.0 => n, _ => return EvalResult::Error(CellError::Value) };
+        let basis = if args.len() == 4 { self.evaluate(&args[3]).as_number().unwrap_or(0.0) as i32 } else { 0 };
+        let year_days = year_basis_days(basis);
+        let years = (maturity - settle) / year_days;
+        EvalResult::Number((years * freq).ceil())
+    }
+
+    fn fn_couppcd(&self, args: &[Expression]) -> EvalResult {
+        // COUPPCD(settlement, maturity, frequency, [basis]) - previous coupon date before settlement
+        if args.len() < 3 || args.len() > 4 { return EvalResult::Error(CellError::Value); }
+        let settle = match self.evaluate(&args[0]).as_number() { Some(n) => n, None => return EvalResult::Error(CellError::Value) };
+        let _maturity = match self.evaluate(&args[1]).as_number() { Some(n) => n, None => return EvalResult::Error(CellError::Value) };
+        let freq = match self.evaluate(&args[2]).as_number() { Some(n) if n == 1.0 || n == 2.0 || n == 4.0 => n, _ => return EvalResult::Error(CellError::Value) };
+        let basis = if args.len() == 4 { self.evaluate(&args[3]).as_number().unwrap_or(0.0) as i32 } else { 0 };
+        let period_days = year_basis_days(basis) / freq;
+        let days_in = settle % period_days;
+        EvalResult::Number(settle - days_in.abs())
+    }
+
+    fn fn_tbilleq(&self, args: &[Expression]) -> EvalResult {
+        // TBILLEQ(settlement, maturity, discount)
+        if args.len() != 3 { return EvalResult::Error(CellError::Value); }
+        let settle = match self.evaluate(&args[0]).as_number() { Some(n) => n, None => return EvalResult::Error(CellError::Value) };
+        let maturity = match self.evaluate(&args[1]).as_number() { Some(n) => n, None => return EvalResult::Error(CellError::Value) };
+        let disc = match self.evaluate(&args[2]).as_number() { Some(n) if n > 0.0 => n, _ => return EvalResult::Error(CellError::Value) };
+        let dsm = maturity - settle;
+        if dsm <= 0.0 { return EvalResult::Error(CellError::Value); }
+        let price = 100.0 * (1.0 - disc * dsm / 360.0);
+        EvalResult::Number((100.0 - price) / price * 365.0 / dsm)
+    }
+
+    fn fn_tbillprice(&self, args: &[Expression]) -> EvalResult {
+        // TBILLPRICE(settlement, maturity, discount)
+        if args.len() != 3 { return EvalResult::Error(CellError::Value); }
+        let settle = match self.evaluate(&args[0]).as_number() { Some(n) => n, None => return EvalResult::Error(CellError::Value) };
+        let maturity = match self.evaluate(&args[1]).as_number() { Some(n) => n, None => return EvalResult::Error(CellError::Value) };
+        let disc = match self.evaluate(&args[2]).as_number() { Some(n) if n > 0.0 => n, _ => return EvalResult::Error(CellError::Value) };
+        let dsm = maturity - settle;
+        if dsm <= 0.0 { return EvalResult::Error(CellError::Value); }
+        EvalResult::Number(100.0 * (1.0 - disc * dsm / 360.0))
+    }
+
+    fn fn_tbillyield(&self, args: &[Expression]) -> EvalResult {
+        // TBILLYIELD(settlement, maturity, pr)
+        if args.len() != 3 { return EvalResult::Error(CellError::Value); }
+        let settle = match self.evaluate(&args[0]).as_number() { Some(n) => n, None => return EvalResult::Error(CellError::Value) };
+        let maturity = match self.evaluate(&args[1]).as_number() { Some(n) => n, None => return EvalResult::Error(CellError::Value) };
+        let pr = match self.evaluate(&args[2]).as_number() { Some(n) if n > 0.0 => n, _ => return EvalResult::Error(CellError::Value) };
+        let dsm = maturity - settle;
+        if dsm <= 0.0 { return EvalResult::Error(CellError::Value); }
+        EvalResult::Number((100.0 - pr) / pr * 360.0 / dsm)
+    }
+
+    fn fn_dollarde(&self, args: &[Expression]) -> EvalResult {
+        // DOLLARDE(fractional_dollar, fraction)
+        if args.len() != 2 { return EvalResult::Error(CellError::Value); }
+        let dollar = match self.evaluate(&args[0]).as_number() { Some(n) => n, None => return EvalResult::Error(CellError::Value) };
+        let frac = match self.evaluate(&args[1]).as_number() { Some(n) if n >= 1.0 => n.floor(), _ => return EvalResult::Error(CellError::Value) };
+        let int_part = dollar.trunc();
+        let frac_part = dollar - int_part;
+        EvalResult::Number(int_part + frac_part * 10.0_f64.powf((frac_part.abs() * frac).log10().ceil()) / frac)
+    }
+
+    fn fn_dollarfr(&self, args: &[Expression]) -> EvalResult {
+        // DOLLARFR(decimal_dollar, fraction)
+        if args.len() != 2 { return EvalResult::Error(CellError::Value); }
+        let dollar = match self.evaluate(&args[0]).as_number() { Some(n) => n, None => return EvalResult::Error(CellError::Value) };
+        let frac = match self.evaluate(&args[1]).as_number() { Some(n) if n >= 1.0 => n.floor(), _ => return EvalResult::Error(CellError::Value) };
+        let int_part = dollar.trunc();
+        let dec_part = dollar - int_part;
+        EvalResult::Number(int_part + dec_part * frac / 10.0_f64.powf((dec_part.abs() * frac).log10().ceil()))
+    }
+
+    fn fn_pduration(&self, args: &[Expression]) -> EvalResult {
+        // PDURATION(rate, pv, fv)
+        if args.len() != 3 { return EvalResult::Error(CellError::Value); }
+        let rate = match self.evaluate(&args[0]).as_number() { Some(n) if n > 0.0 => n, _ => return EvalResult::Error(CellError::Value) };
+        let pv = match self.evaluate(&args[1]).as_number() { Some(n) if n > 0.0 => n, _ => return EvalResult::Error(CellError::Value) };
+        let fv = match self.evaluate(&args[2]).as_number() { Some(n) if n > 0.0 => n, _ => return EvalResult::Error(CellError::Value) };
+        EvalResult::Number((fv.ln() - pv.ln()) / (1.0 + rate).ln())
+    }
+
+    fn fn_rri(&self, args: &[Expression]) -> EvalResult {
+        // RRI(nper, pv, fv)
+        if args.len() != 3 { return EvalResult::Error(CellError::Value); }
+        let nper = match self.evaluate(&args[0]).as_number() { Some(n) if n > 0.0 => n, _ => return EvalResult::Error(CellError::Value) };
+        let pv = match self.evaluate(&args[1]).as_number() { Some(n) if n > 0.0 => n, _ => return EvalResult::Error(CellError::Value) };
+        let fv = match self.evaluate(&args[2]).as_number() { Some(n) if n > 0.0 => n, _ => return EvalResult::Error(CellError::Value) };
+        EvalResult::Number((fv / pv).powf(1.0 / nper) - 1.0)
+    }
+
+    fn fn_ispmt(&self, args: &[Expression]) -> EvalResult {
+        // ISPMT(rate, per, nper, pv)
+        if args.len() != 4 { return EvalResult::Error(CellError::Value); }
+        let rate = match self.evaluate(&args[0]).as_number() { Some(n) => n, None => return EvalResult::Error(CellError::Value) };
+        let per = match self.evaluate(&args[1]).as_number() { Some(n) => n, None => return EvalResult::Error(CellError::Value) };
+        let nper = match self.evaluate(&args[2]).as_number() { Some(n) if n != 0.0 => n, _ => return EvalResult::Error(CellError::Value) };
+        let pv = match self.evaluate(&args[3]).as_number() { Some(n) => n, None => return EvalResult::Error(CellError::Value) };
+        EvalResult::Number(pv * rate * (per / nper - 1.0))
+    }
+
+    fn fn_amordegrc(&self, args: &[Expression]) -> EvalResult {
+        // AMORDEGRC(cost, date_purchased, first_period, salvage, period, rate, [basis])
+        if args.len() < 6 || args.len() > 7 { return EvalResult::Error(CellError::Value); }
+        let cost = match self.evaluate(&args[0]).as_number() { Some(n) if n > 0.0 => n, _ => return EvalResult::Error(CellError::Value) };
+        let _date = match self.evaluate(&args[1]).as_number() { Some(n) => n, None => return EvalResult::Error(CellError::Value) };
+        let _first = match self.evaluate(&args[2]).as_number() { Some(n) => n, None => return EvalResult::Error(CellError::Value) };
+        let salvage = match self.evaluate(&args[3]).as_number() { Some(n) if n >= 0.0 => n, _ => return EvalResult::Error(CellError::Value) };
+        let period = match self.evaluate(&args[4]).as_number() { Some(n) if n >= 0.0 => n.floor(), _ => return EvalResult::Error(CellError::Value) };
+        let rate = match self.evaluate(&args[5]).as_number() { Some(n) if n > 0.0 => n, _ => return EvalResult::Error(CellError::Value) };
+        // French declining balance coefficient
+        let coeff = if rate < 0.04 { 1.0 } else if rate < 0.08 { 1.5 } else if rate < 0.2 { 2.0 } else { 2.5 };
+        let adj_rate = rate * coeff;
+        let mut value = cost;
+        for i in 0..=(period as i32) {
+            if value <= salvage { return EvalResult::Number(0.0); }
+            let dep = (value * adj_rate).round();
+            if i == period as i32 { return EvalResult::Number(dep.min(value - salvage)); }
+            value -= dep;
+        }
+        EvalResult::Number(0.0)
+    }
+
+    fn fn_amorlinc(&self, args: &[Expression]) -> EvalResult {
+        // AMORLINC(cost, date_purchased, first_period, salvage, period, rate, [basis])
+        if args.len() < 6 || args.len() > 7 { return EvalResult::Error(CellError::Value); }
+        let cost = match self.evaluate(&args[0]).as_number() { Some(n) if n > 0.0 => n, _ => return EvalResult::Error(CellError::Value) };
+        let _date = match self.evaluate(&args[1]).as_number() { Some(n) => n, None => return EvalResult::Error(CellError::Value) };
+        let _first = match self.evaluate(&args[2]).as_number() { Some(n) => n, None => return EvalResult::Error(CellError::Value) };
+        let salvage = match self.evaluate(&args[3]).as_number() { Some(n) if n >= 0.0 => n, _ => return EvalResult::Error(CellError::Value) };
+        let period = match self.evaluate(&args[4]).as_number() { Some(n) if n >= 0.0 => n.floor(), _ => return EvalResult::Error(CellError::Value) };
+        let rate = match self.evaluate(&args[5]).as_number() { Some(n) if n > 0.0 => n, _ => return EvalResult::Error(CellError::Value) };
+        let dep = cost * rate;
+        let mut value = cost;
+        for i in 0..=(period as i32) {
+            if value <= salvage { return EvalResult::Number(0.0); }
+            if i == period as i32 { return EvalResult::Number(dep.min(value - salvage)); }
+            value -= dep;
+        }
+        EvalResult::Number(0.0)
+    }
+
+    fn fn_oddfprice(&self, args: &[Expression]) -> EvalResult {
+        // Simplified odd first period bond price
+        if args.len() < 8 { return EvalResult::Error(CellError::Value); }
+        // Fall back to standard PRICE logic
+        self.fn_price(&args[..7.min(args.len())])
+    }
+
+    fn fn_oddfyield(&self, args: &[Expression]) -> EvalResult {
+        if args.len() < 8 { return EvalResult::Error(CellError::Value); }
+        self.fn_yield(&args[..7.min(args.len())])
+    }
+
+    fn fn_oddlprice(&self, args: &[Expression]) -> EvalResult {
+        if args.len() < 7 { return EvalResult::Error(CellError::Value); }
+        self.fn_price(&args[..7.min(args.len())])
+    }
+
+    fn fn_oddlyield(&self, args: &[Expression]) -> EvalResult {
+        if args.len() < 7 { return EvalResult::Error(CellError::Value); }
+        self.fn_yield(&args[..7.min(args.len())])
+    }
+
+    // ==================== Engineering Functions ====================
+
+    fn fn_bin2dec(&self, args: &[Expression]) -> EvalResult {
+        if args.len() != 1 { return EvalResult::Error(CellError::Value); }
+        let s = self.evaluate(&args[0]).as_text();
+        let s = s.trim();
+        if s.len() > 10 || s.chars().any(|c| c != '0' && c != '1') { return EvalResult::Error(CellError::Value); }
+        if s.len() == 10 && s.starts_with('1') {
+            // Two's complement for negative
+            let val = i64::from_str_radix(s, 2).unwrap_or(0) - 1024;
+            EvalResult::Number(val as f64)
+        } else {
+            match i64::from_str_radix(s, 2) {
+                Ok(v) => EvalResult::Number(v as f64),
+                Err(_) => EvalResult::Error(CellError::Value),
+            }
+        }
+    }
+
+    fn fn_bin2hex(&self, args: &[Expression]) -> EvalResult {
+        if args.len() < 1 || args.len() > 2 { return EvalResult::Error(CellError::Value); }
+        let s = self.evaluate(&args[0]).as_text();
+        let s = s.trim();
+        if s.len() > 10 || s.chars().any(|c| c != '0' && c != '1') { return EvalResult::Error(CellError::Value); }
+        let val = if s.len() == 10 && s.starts_with('1') {
+            i64::from_str_radix(s, 2).unwrap_or(0) - 1024
+        } else {
+            i64::from_str_radix(s, 2).unwrap_or(0)
+        };
+        let places = if args.len() == 2 { self.evaluate(&args[1]).as_number().map(|n| n as usize) } else { None };
+        let hex = if val < 0 { format!("{:010X}", (val + 0x10000000000_i64) as u64) } else { format!("{:X}", val) };
+        let result = if let Some(p) = places { format!("{:0>width$}", hex, width = p) } else { hex };
+        EvalResult::Text(result)
+    }
+
+    fn fn_bin2oct(&self, args: &[Expression]) -> EvalResult {
+        if args.len() < 1 || args.len() > 2 { return EvalResult::Error(CellError::Value); }
+        let s = self.evaluate(&args[0]).as_text();
+        let s = s.trim();
+        if s.len() > 10 || s.chars().any(|c| c != '0' && c != '1') { return EvalResult::Error(CellError::Value); }
+        let val = if s.len() == 10 && s.starts_with('1') {
+            i64::from_str_radix(s, 2).unwrap_or(0) - 1024
+        } else {
+            i64::from_str_radix(s, 2).unwrap_or(0)
+        };
+        let places = if args.len() == 2 { self.evaluate(&args[1]).as_number().map(|n| n as usize) } else { None };
+        let oct = if val < 0 { format!("{:010o}", (val + 0o10000000000_i64) as u64) } else { format!("{:o}", val) };
+        let result = if let Some(p) = places { format!("{:0>width$}", oct, width = p) } else { oct };
+        EvalResult::Text(result)
+    }
+
+    fn fn_dec2bin(&self, args: &[Expression]) -> EvalResult {
+        if args.len() < 1 || args.len() > 2 { return EvalResult::Error(CellError::Value); }
+        let val = match self.evaluate(&args[0]).as_number() { Some(n) => n as i64, None => return EvalResult::Error(CellError::Value) };
+        if val < -512 || val > 511 { return EvalResult::Error(CellError::Value); }
+        let places = if args.len() == 2 { self.evaluate(&args[1]).as_number().map(|n| n as usize) } else { None };
+        let bin = if val < 0 { format!("{:010b}", (val + 1024) as u64) } else { format!("{:b}", val) };
+        let result = if let Some(p) = places { format!("{:0>width$}", bin, width = p) } else { bin };
+        EvalResult::Text(result)
+    }
+
+    fn fn_dec2hex(&self, args: &[Expression]) -> EvalResult {
+        if args.len() < 1 || args.len() > 2 { return EvalResult::Error(CellError::Value); }
+        let val = match self.evaluate(&args[0]).as_number() { Some(n) => n as i64, None => return EvalResult::Error(CellError::Value) };
+        if val < -549755813888_i64 || val > 549755813887_i64 { return EvalResult::Error(CellError::Value); }
+        let places = if args.len() == 2 { self.evaluate(&args[1]).as_number().map(|n| n as usize) } else { None };
+        let hex = if val < 0 { format!("{:010X}", (val + 0x10000000000_i64) as u64) } else { format!("{:X}", val) };
+        let result = if let Some(p) = places { format!("{:0>width$}", hex, width = p) } else { hex };
+        EvalResult::Text(result)
+    }
+
+    fn fn_dec2oct(&self, args: &[Expression]) -> EvalResult {
+        if args.len() < 1 || args.len() > 2 { return EvalResult::Error(CellError::Value); }
+        let val = match self.evaluate(&args[0]).as_number() { Some(n) => n as i64, None => return EvalResult::Error(CellError::Value) };
+        if val < -536870912 || val > 536870911 { return EvalResult::Error(CellError::Value); }
+        let places = if args.len() == 2 { self.evaluate(&args[1]).as_number().map(|n| n as usize) } else { None };
+        let oct = if val < 0 { format!("{:010o}", (val + 0o10000000000_i64) as u64) } else { format!("{:o}", val) };
+        let result = if let Some(p) = places { format!("{:0>width$}", oct, width = p) } else { oct };
+        EvalResult::Text(result)
+    }
+
+    fn fn_hex2bin(&self, args: &[Expression]) -> EvalResult {
+        if args.len() < 1 || args.len() > 2 { return EvalResult::Error(CellError::Value); }
+        let s = self.evaluate(&args[0]).as_text();
+        let s = s.trim();
+        if s.len() > 10 { return EvalResult::Error(CellError::Value); }
+        let val = match i64::from_str_radix(s, 16) {
+            Ok(v) => if s.len() == 10 && v >= 0x8000000000_i64 { v - 0x10000000000_i64 } else { v },
+            Err(_) => return EvalResult::Error(CellError::Value),
+        };
+        if val < -512 || val > 511 { return EvalResult::Error(CellError::Value); }
+        let places = if args.len() == 2 { self.evaluate(&args[1]).as_number().map(|n| n as usize) } else { None };
+        let bin = if val < 0 { format!("{:010b}", (val + 1024) as u64) } else { format!("{:b}", val) };
+        let result = if let Some(p) = places { format!("{:0>width$}", bin, width = p) } else { bin };
+        EvalResult::Text(result)
+    }
+
+    fn fn_hex2dec(&self, args: &[Expression]) -> EvalResult {
+        if args.len() != 1 { return EvalResult::Error(CellError::Value); }
+        let s = self.evaluate(&args[0]).as_text();
+        let s = s.trim();
+        if s.len() > 10 { return EvalResult::Error(CellError::Value); }
+        match i64::from_str_radix(s, 16) {
+            Ok(v) => {
+                let val = if s.len() == 10 && v >= 0x8000000000_i64 { v - 0x10000000000_i64 } else { v };
+                EvalResult::Number(val as f64)
+            }
+            Err(_) => EvalResult::Error(CellError::Value),
+        }
+    }
+
+    fn fn_hex2oct(&self, args: &[Expression]) -> EvalResult {
+        if args.len() < 1 || args.len() > 2 { return EvalResult::Error(CellError::Value); }
+        let s = self.evaluate(&args[0]).as_text();
+        let s = s.trim();
+        if s.len() > 10 { return EvalResult::Error(CellError::Value); }
+        let val = match i64::from_str_radix(s, 16) {
+            Ok(v) => if s.len() == 10 && v >= 0x8000000000_i64 { v - 0x10000000000_i64 } else { v },
+            Err(_) => return EvalResult::Error(CellError::Value),
+        };
+        if val < -536870912 || val > 536870911 { return EvalResult::Error(CellError::Value); }
+        let places = if args.len() == 2 { self.evaluate(&args[1]).as_number().map(|n| n as usize) } else { None };
+        let oct = if val < 0 { format!("{:010o}", (val + 0o10000000000_i64) as u64) } else { format!("{:o}", val) };
+        let result = if let Some(p) = places { format!("{:0>width$}", oct, width = p) } else { oct };
+        EvalResult::Text(result)
+    }
+
+    fn fn_oct2bin(&self, args: &[Expression]) -> EvalResult {
+        if args.len() < 1 || args.len() > 2 { return EvalResult::Error(CellError::Value); }
+        let s = self.evaluate(&args[0]).as_text();
+        let s = s.trim();
+        if s.len() > 10 { return EvalResult::Error(CellError::Value); }
+        let val = match i64::from_str_radix(s, 8) {
+            Ok(v) => if s.len() == 10 && v >= 0o4000000000_i64 { v - 0o10000000000_i64 } else { v },
+            Err(_) => return EvalResult::Error(CellError::Value),
+        };
+        if val < -512 || val > 511 { return EvalResult::Error(CellError::Value); }
+        let places = if args.len() == 2 { self.evaluate(&args[1]).as_number().map(|n| n as usize) } else { None };
+        let bin = if val < 0 { format!("{:010b}", (val + 1024) as u64) } else { format!("{:b}", val) };
+        let result = if let Some(p) = places { format!("{:0>width$}", bin, width = p) } else { bin };
+        EvalResult::Text(result)
+    }
+
+    fn fn_oct2dec(&self, args: &[Expression]) -> EvalResult {
+        if args.len() != 1 { return EvalResult::Error(CellError::Value); }
+        let s = self.evaluate(&args[0]).as_text();
+        let s = s.trim();
+        if s.len() > 10 { return EvalResult::Error(CellError::Value); }
+        match i64::from_str_radix(s, 8) {
+            Ok(v) => {
+                let val = if s.len() == 10 && v >= 0o4000000000_i64 { v - 0o10000000000_i64 } else { v };
+                EvalResult::Number(val as f64)
+            }
+            Err(_) => EvalResult::Error(CellError::Value),
+        }
+    }
+
+    fn fn_oct2hex(&self, args: &[Expression]) -> EvalResult {
+        if args.len() < 1 || args.len() > 2 { return EvalResult::Error(CellError::Value); }
+        let s = self.evaluate(&args[0]).as_text();
+        let s = s.trim();
+        if s.len() > 10 { return EvalResult::Error(CellError::Value); }
+        let val = match i64::from_str_radix(s, 8) {
+            Ok(v) => if s.len() == 10 && v >= 0o4000000000_i64 { v - 0o10000000000_i64 } else { v },
+            Err(_) => return EvalResult::Error(CellError::Value),
+        };
+        let places = if args.len() == 2 { self.evaluate(&args[1]).as_number().map(|n| n as usize) } else { None };
+        let hex = if val < 0 { format!("{:010X}", (val + 0x10000000000_i64) as u64) } else { format!("{:X}", val) };
+        let result = if let Some(p) = places { format!("{:0>width$}", hex, width = p) } else { hex };
+        EvalResult::Text(result)
+    }
+
+    // Bit operations
+    fn fn_bitand(&self, args: &[Expression]) -> EvalResult {
+        if args.len() != 2 { return EvalResult::Error(CellError::Value); }
+        let a = match self.evaluate(&args[0]).as_number() { Some(n) if n >= 0.0 && n == n.floor() => n as u64, _ => return EvalResult::Error(CellError::Value) };
+        let b = match self.evaluate(&args[1]).as_number() { Some(n) if n >= 0.0 && n == n.floor() => n as u64, _ => return EvalResult::Error(CellError::Value) };
+        EvalResult::Number((a & b) as f64)
+    }
+
+    fn fn_bitor(&self, args: &[Expression]) -> EvalResult {
+        if args.len() != 2 { return EvalResult::Error(CellError::Value); }
+        let a = match self.evaluate(&args[0]).as_number() { Some(n) if n >= 0.0 && n == n.floor() => n as u64, _ => return EvalResult::Error(CellError::Value) };
+        let b = match self.evaluate(&args[1]).as_number() { Some(n) if n >= 0.0 && n == n.floor() => n as u64, _ => return EvalResult::Error(CellError::Value) };
+        EvalResult::Number((a | b) as f64)
+    }
+
+    fn fn_bitxor(&self, args: &[Expression]) -> EvalResult {
+        if args.len() != 2 { return EvalResult::Error(CellError::Value); }
+        let a = match self.evaluate(&args[0]).as_number() { Some(n) if n >= 0.0 && n == n.floor() => n as u64, _ => return EvalResult::Error(CellError::Value) };
+        let b = match self.evaluate(&args[1]).as_number() { Some(n) if n >= 0.0 && n == n.floor() => n as u64, _ => return EvalResult::Error(CellError::Value) };
+        EvalResult::Number((a ^ b) as f64)
+    }
+
+    fn fn_bitlshift(&self, args: &[Expression]) -> EvalResult {
+        if args.len() != 2 { return EvalResult::Error(CellError::Value); }
+        let num = match self.evaluate(&args[0]).as_number() { Some(n) if n >= 0.0 && n == n.floor() => n as u64, _ => return EvalResult::Error(CellError::Value) };
+        let shift = match self.evaluate(&args[1]).as_number() { Some(n) => n as i32, None => return EvalResult::Error(CellError::Value) };
+        if shift < 0 { EvalResult::Number((num >> (-shift) as u32) as f64) }
+        else { EvalResult::Number((num << shift as u32) as f64) }
+    }
+
+    fn fn_bitrshift(&self, args: &[Expression]) -> EvalResult {
+        if args.len() != 2 { return EvalResult::Error(CellError::Value); }
+        let num = match self.evaluate(&args[0]).as_number() { Some(n) if n >= 0.0 && n == n.floor() => n as u64, _ => return EvalResult::Error(CellError::Value) };
+        let shift = match self.evaluate(&args[1]).as_number() { Some(n) => n as i32, None => return EvalResult::Error(CellError::Value) };
+        if shift < 0 { EvalResult::Number((num << (-shift) as u32) as f64) }
+        else { EvalResult::Number((num >> shift as u32) as f64) }
+    }
+
+    // Complex number functions
+    fn fn_complex(&self, args: &[Expression]) -> EvalResult {
+        if args.len() < 2 || args.len() > 3 { return EvalResult::Error(CellError::Value); }
+        let real = match self.evaluate(&args[0]).as_number() { Some(n) => n, None => return EvalResult::Error(CellError::Value) };
+        let imag = match self.evaluate(&args[1]).as_number() { Some(n) => n, None => return EvalResult::Error(CellError::Value) };
+        let suffix = if args.len() == 3 { let s = self.evaluate(&args[2]).as_text(); if s.is_empty() { "i".to_string() } else { s } } else { "i".to_string() };
+        EvalResult::Text(format_complex(real, imag, &suffix))
+    }
+
+    fn fn_imabs(&self, args: &[Expression]) -> EvalResult {
+        if args.len() != 1 { return EvalResult::Error(CellError::Value); }
+        let (r, i) = match parse_complex_arg(self, &args[0]) { Some(v) => v, None => return EvalResult::Error(CellError::Value) };
+        EvalResult::Number((r * r + i * i).sqrt())
+    }
+
+    fn fn_imaginary(&self, args: &[Expression]) -> EvalResult {
+        if args.len() != 1 { return EvalResult::Error(CellError::Value); }
+        let (_, i) = match parse_complex_arg(self, &args[0]) { Some(v) => v, None => return EvalResult::Error(CellError::Value) };
+        EvalResult::Number(i)
+    }
+
+    fn fn_imreal(&self, args: &[Expression]) -> EvalResult {
+        if args.len() != 1 { return EvalResult::Error(CellError::Value); }
+        let (r, _) = match parse_complex_arg(self, &args[0]) { Some(v) => v, None => return EvalResult::Error(CellError::Value) };
+        EvalResult::Number(r)
+    }
+
+    fn fn_imargument(&self, args: &[Expression]) -> EvalResult {
+        if args.len() != 1 { return EvalResult::Error(CellError::Value); }
+        let (r, i) = match parse_complex_arg(self, &args[0]) { Some(v) => v, None => return EvalResult::Error(CellError::Value) };
+        if r == 0.0 && i == 0.0 { return EvalResult::Error(CellError::Div0); }
+        EvalResult::Number(i.atan2(r))
+    }
+
+    fn fn_imconjugate(&self, args: &[Expression]) -> EvalResult {
+        if args.len() != 1 { return EvalResult::Error(CellError::Value); }
+        let (r, i) = match parse_complex_arg(self, &args[0]) { Some(v) => v, None => return EvalResult::Error(CellError::Value) };
+        EvalResult::Text(format_complex(r, -i, "i"))
+    }
+
+    fn fn_imcos(&self, args: &[Expression]) -> EvalResult {
+        if args.len() != 1 { return EvalResult::Error(CellError::Value); }
+        let (r, i) = match parse_complex_arg(self, &args[0]) { Some(v) => v, None => return EvalResult::Error(CellError::Value) };
+        EvalResult::Text(format_complex(r.cos() * i.cosh(), -r.sin() * i.sinh(), "i"))
+    }
+
+    fn fn_imcosh(&self, args: &[Expression]) -> EvalResult {
+        if args.len() != 1 { return EvalResult::Error(CellError::Value); }
+        let (r, i) = match parse_complex_arg(self, &args[0]) { Some(v) => v, None => return EvalResult::Error(CellError::Value) };
+        EvalResult::Text(format_complex(r.cosh() * i.cos(), r.sinh() * i.sin(), "i"))
+    }
+
+    fn fn_imcot(&self, args: &[Expression]) -> EvalResult {
+        if args.len() != 1 { return EvalResult::Error(CellError::Value); }
+        let (r, i) = match parse_complex_arg(self, &args[0]) { Some(v) => v, None => return EvalResult::Error(CellError::Value) };
+        let denom = (2.0 * r).cos() - (2.0 * i).cosh();
+        if denom.abs() < 1e-15 { return EvalResult::Error(CellError::Div0); }
+        EvalResult::Text(format_complex(-(2.0 * r).sin() / denom, (2.0 * i).sinh() / denom, "i"))
+    }
+
+    fn fn_imcsc(&self, args: &[Expression]) -> EvalResult {
+        if args.len() != 1 { return EvalResult::Error(CellError::Value); }
+        let (r, i) = match parse_complex_arg(self, &args[0]) { Some(v) => v, None => return EvalResult::Error(CellError::Value) };
+        let denom = (2.0 * r).cos() - (2.0 * i).cosh();
+        if denom.abs() < 1e-15 { return EvalResult::Error(CellError::Div0); }
+        EvalResult::Text(format_complex(-2.0 * r.sin() * i.cosh() / denom, 2.0 * r.cos() * i.sinh() / denom, "i"))
+    }
+
+    fn fn_imcsch(&self, args: &[Expression]) -> EvalResult {
+        if args.len() != 1 { return EvalResult::Error(CellError::Value); }
+        let (r, i) = match parse_complex_arg(self, &args[0]) { Some(v) => v, None => return EvalResult::Error(CellError::Value) };
+        let denom = (2.0 * r).cosh() - (2.0 * i).cos();
+        if denom.abs() < 1e-15 { return EvalResult::Error(CellError::Div0); }
+        EvalResult::Text(format_complex(2.0 * r.sinh() * i.cos() / denom, -2.0 * r.cosh() * i.sin() / denom, "i"))
+    }
+
+    fn fn_imdiv(&self, args: &[Expression]) -> EvalResult {
+        if args.len() != 2 { return EvalResult::Error(CellError::Value); }
+        let (r1, i1) = match parse_complex_arg(self, &args[0]) { Some(v) => v, None => return EvalResult::Error(CellError::Value) };
+        let (r2, i2) = match parse_complex_arg(self, &args[1]) { Some(v) => v, None => return EvalResult::Error(CellError::Value) };
+        let denom = r2 * r2 + i2 * i2;
+        if denom == 0.0 { return EvalResult::Error(CellError::Div0); }
+        EvalResult::Text(format_complex((r1 * r2 + i1 * i2) / denom, (i1 * r2 - r1 * i2) / denom, "i"))
+    }
+
+    fn fn_imexp(&self, args: &[Expression]) -> EvalResult {
+        if args.len() != 1 { return EvalResult::Error(CellError::Value); }
+        let (r, i) = match parse_complex_arg(self, &args[0]) { Some(v) => v, None => return EvalResult::Error(CellError::Value) };
+        let er = r.exp();
+        EvalResult::Text(format_complex(er * i.cos(), er * i.sin(), "i"))
+    }
+
+    fn fn_imln(&self, args: &[Expression]) -> EvalResult {
+        if args.len() != 1 { return EvalResult::Error(CellError::Value); }
+        let (r, i) = match parse_complex_arg(self, &args[0]) { Some(v) => v, None => return EvalResult::Error(CellError::Value) };
+        let mag = (r * r + i * i).sqrt();
+        if mag == 0.0 { return EvalResult::Error(CellError::Value); }
+        EvalResult::Text(format_complex(mag.ln(), i.atan2(r), "i"))
+    }
+
+    fn fn_imlog10(&self, args: &[Expression]) -> EvalResult {
+        if args.len() != 1 { return EvalResult::Error(CellError::Value); }
+        let (r, i) = match parse_complex_arg(self, &args[0]) { Some(v) => v, None => return EvalResult::Error(CellError::Value) };
+        let mag = (r * r + i * i).sqrt();
+        if mag == 0.0 { return EvalResult::Error(CellError::Value); }
+        let ln10 = 10.0_f64.ln();
+        EvalResult::Text(format_complex(mag.ln() / ln10, i.atan2(r) / ln10, "i"))
+    }
+
+    fn fn_imlog2(&self, args: &[Expression]) -> EvalResult {
+        if args.len() != 1 { return EvalResult::Error(CellError::Value); }
+        let (r, i) = match parse_complex_arg(self, &args[0]) { Some(v) => v, None => return EvalResult::Error(CellError::Value) };
+        let mag = (r * r + i * i).sqrt();
+        if mag == 0.0 { return EvalResult::Error(CellError::Value); }
+        let ln2 = 2.0_f64.ln();
+        EvalResult::Text(format_complex(mag.ln() / ln2, i.atan2(r) / ln2, "i"))
+    }
+
+    fn fn_impower(&self, args: &[Expression]) -> EvalResult {
+        if args.len() != 2 { return EvalResult::Error(CellError::Value); }
+        let (r, i) = match parse_complex_arg(self, &args[0]) { Some(v) => v, None => return EvalResult::Error(CellError::Value) };
+        let n = match self.evaluate(&args[1]).as_number() { Some(v) => v, None => return EvalResult::Error(CellError::Value) };
+        let mag = (r * r + i * i).sqrt();
+        let theta = i.atan2(r);
+        let new_mag = mag.powf(n);
+        let new_theta = theta * n;
+        EvalResult::Text(format_complex(new_mag * new_theta.cos(), new_mag * new_theta.sin(), "i"))
+    }
+
+    fn fn_improduct(&self, args: &[Expression]) -> EvalResult {
+        let mut rr = 1.0;
+        let mut ri = 0.0;
+        for arg in args {
+            let (r, i) = match parse_complex_arg(self, arg) { Some(v) => v, None => return EvalResult::Error(CellError::Value) };
+            let new_r = rr * r - ri * i;
+            let new_i = rr * i + ri * r;
+            rr = new_r;
+            ri = new_i;
+        }
+        EvalResult::Text(format_complex(rr, ri, "i"))
+    }
+
+    fn fn_imsec(&self, args: &[Expression]) -> EvalResult {
+        if args.len() != 1 { return EvalResult::Error(CellError::Value); }
+        let (r, i) = match parse_complex_arg(self, &args[0]) { Some(v) => v, None => return EvalResult::Error(CellError::Value) };
+        let cos_r = r.cos() * i.cosh();
+        let cos_i = -r.sin() * i.sinh();
+        let denom = cos_r * cos_r + cos_i * cos_i;
+        if denom == 0.0 { return EvalResult::Error(CellError::Div0); }
+        EvalResult::Text(format_complex(cos_r / denom, -cos_i / denom, "i"))
+    }
+
+    fn fn_imsech(&self, args: &[Expression]) -> EvalResult {
+        if args.len() != 1 { return EvalResult::Error(CellError::Value); }
+        let (r, i) = match parse_complex_arg(self, &args[0]) { Some(v) => v, None => return EvalResult::Error(CellError::Value) };
+        let ch_r = r.cosh() * i.cos();
+        let ch_i = r.sinh() * i.sin();
+        let denom = ch_r * ch_r + ch_i * ch_i;
+        if denom == 0.0 { return EvalResult::Error(CellError::Div0); }
+        EvalResult::Text(format_complex(ch_r / denom, -ch_i / denom, "i"))
+    }
+
+    fn fn_imsin(&self, args: &[Expression]) -> EvalResult {
+        if args.len() != 1 { return EvalResult::Error(CellError::Value); }
+        let (r, i) = match parse_complex_arg(self, &args[0]) { Some(v) => v, None => return EvalResult::Error(CellError::Value) };
+        EvalResult::Text(format_complex(r.sin() * i.cosh(), r.cos() * i.sinh(), "i"))
+    }
+
+    fn fn_imsinh(&self, args: &[Expression]) -> EvalResult {
+        if args.len() != 1 { return EvalResult::Error(CellError::Value); }
+        let (r, i) = match parse_complex_arg(self, &args[0]) { Some(v) => v, None => return EvalResult::Error(CellError::Value) };
+        EvalResult::Text(format_complex(r.sinh() * i.cos(), r.cosh() * i.sin(), "i"))
+    }
+
+    fn fn_imsqrt(&self, args: &[Expression]) -> EvalResult {
+        if args.len() != 1 { return EvalResult::Error(CellError::Value); }
+        let (r, i) = match parse_complex_arg(self, &args[0]) { Some(v) => v, None => return EvalResult::Error(CellError::Value) };
+        let mag = (r * r + i * i).sqrt().sqrt();
+        let theta = i.atan2(r) / 2.0;
+        EvalResult::Text(format_complex(mag * theta.cos(), mag * theta.sin(), "i"))
+    }
+
+    fn fn_imsub(&self, args: &[Expression]) -> EvalResult {
+        if args.len() != 2 { return EvalResult::Error(CellError::Value); }
+        let (r1, i1) = match parse_complex_arg(self, &args[0]) { Some(v) => v, None => return EvalResult::Error(CellError::Value) };
+        let (r2, i2) = match parse_complex_arg(self, &args[1]) { Some(v) => v, None => return EvalResult::Error(CellError::Value) };
+        EvalResult::Text(format_complex(r1 - r2, i1 - i2, "i"))
+    }
+
+    fn fn_imsum(&self, args: &[Expression]) -> EvalResult {
+        let mut rr = 0.0;
+        let mut ri = 0.0;
+        for arg in args {
+            let (r, i) = match parse_complex_arg(self, arg) { Some(v) => v, None => return EvalResult::Error(CellError::Value) };
+            rr += r;
+            ri += i;
+        }
+        EvalResult::Text(format_complex(rr, ri, "i"))
+    }
+
+    fn fn_imtan(&self, args: &[Expression]) -> EvalResult {
+        if args.len() != 1 { return EvalResult::Error(CellError::Value); }
+        let (r, i) = match parse_complex_arg(self, &args[0]) { Some(v) => v, None => return EvalResult::Error(CellError::Value) };
+        let denom = (2.0 * r).cos() + (2.0 * i).cosh();
+        if denom.abs() < 1e-15 { return EvalResult::Error(CellError::Div0); }
+        EvalResult::Text(format_complex((2.0 * r).sin() / denom, (2.0 * i).sinh() / denom, "i"))
+    }
+
+    // Bessel functions
+    fn fn_besseli(&self, args: &[Expression]) -> EvalResult {
+        if args.len() != 2 { return EvalResult::Error(CellError::Value); }
+        let x = match self.evaluate(&args[0]).as_number() { Some(n) => n, None => return EvalResult::Error(CellError::Value) };
+        let n = match self.evaluate(&args[1]).as_number() { Some(v) if v >= 0.0 => v.floor() as i32, _ => return EvalResult::Error(CellError::Value) };
+        EvalResult::Number(bessel_i(x, n))
+    }
+
+    fn fn_besselj(&self, args: &[Expression]) -> EvalResult {
+        if args.len() != 2 { return EvalResult::Error(CellError::Value); }
+        let x = match self.evaluate(&args[0]).as_number() { Some(n) => n, None => return EvalResult::Error(CellError::Value) };
+        let n = match self.evaluate(&args[1]).as_number() { Some(v) if v >= 0.0 => v.floor() as i32, _ => return EvalResult::Error(CellError::Value) };
+        EvalResult::Number(bessel_j(x, n))
+    }
+
+    fn fn_besselk(&self, args: &[Expression]) -> EvalResult {
+        if args.len() != 2 { return EvalResult::Error(CellError::Value); }
+        let x = match self.evaluate(&args[0]).as_number() { Some(n) if n > 0.0 => n, _ => return EvalResult::Error(CellError::Value) };
+        let n = match self.evaluate(&args[1]).as_number() { Some(v) if v >= 0.0 => v.floor() as i32, _ => return EvalResult::Error(CellError::Value) };
+        EvalResult::Number(bessel_k(x, n))
+    }
+
+    fn fn_bessely(&self, args: &[Expression]) -> EvalResult {
+        if args.len() != 2 { return EvalResult::Error(CellError::Value); }
+        let x = match self.evaluate(&args[0]).as_number() { Some(n) if n > 0.0 => n, _ => return EvalResult::Error(CellError::Value) };
+        let n = match self.evaluate(&args[1]).as_number() { Some(v) if v >= 0.0 => v.floor() as i32, _ => return EvalResult::Error(CellError::Value) };
+        EvalResult::Number(bessel_y(x, n))
+    }
+
+    // CONVERT
+    fn fn_convert(&self, args: &[Expression]) -> EvalResult {
+        if args.len() != 3 { return EvalResult::Error(CellError::Value); }
+        let number = match self.evaluate(&args[0]).as_number() { Some(n) => n, None => return EvalResult::Error(CellError::Value) };
+        let from = self.evaluate(&args[1]).as_text();
+        let to = self.evaluate(&args[2]).as_text();
+        match convert_units(number, &from, &to) {
+            Some(v) => EvalResult::Number(v),
+            None => EvalResult::Error(CellError::NA),
+        }
+    }
+
+    fn fn_delta(&self, args: &[Expression]) -> EvalResult {
+        if args.len() < 1 || args.len() > 2 { return EvalResult::Error(CellError::Value); }
+        let a = match self.evaluate(&args[0]).as_number() { Some(n) => n, None => return EvalResult::Error(CellError::Value) };
+        let b = if args.len() == 2 { self.evaluate(&args[1]).as_number().unwrap_or(0.0) } else { 0.0 };
+        EvalResult::Number(if (a - b).abs() < 1e-15 { 1.0 } else { 0.0 })
+    }
+
+    fn fn_erf(&self, args: &[Expression]) -> EvalResult {
+        if args.len() < 1 || args.len() > 2 { return EvalResult::Error(CellError::Value); }
+        let lower = if args.len() == 2 {
+            match self.evaluate(&args[0]).as_number() { Some(n) => n, None => return EvalResult::Error(CellError::Value) }
+        } else { 0.0 };
+        let upper = if args.len() == 2 {
+            match self.evaluate(&args[1]).as_number() { Some(n) => n, None => return EvalResult::Error(CellError::Value) }
+        } else {
+            match self.evaluate(&args[0]).as_number() { Some(n) => n, None => return EvalResult::Error(CellError::Value) }
+        };
+        EvalResult::Number(erf_impl(upper) - if args.len() == 2 { erf_impl(lower) } else { 0.0 })
+    }
+
+    fn fn_erfc(&self, args: &[Expression]) -> EvalResult {
+        if args.len() != 1 { return EvalResult::Error(CellError::Value); }
+        let x = match self.evaluate(&args[0]).as_number() { Some(n) => n, None => return EvalResult::Error(CellError::Value) };
+        EvalResult::Number(1.0 - erf_impl(x))
+    }
+
+    fn fn_gestep(&self, args: &[Expression]) -> EvalResult {
+        if args.len() < 1 || args.len() > 2 { return EvalResult::Error(CellError::Value); }
+        let number = match self.evaluate(&args[0]).as_number() { Some(n) => n, None => return EvalResult::Error(CellError::Value) };
+        let step = if args.len() == 2 { self.evaluate(&args[1]).as_number().unwrap_or(0.0) } else { 0.0 };
+        EvalResult::Number(if number >= step { 1.0 } else { 0.0 })
+    }
+
+    fn fn_seriessum(&self, args: &[Expression]) -> EvalResult {
+        // SERIESSUM(x, n, m, coefficients)
+        if args.len() != 4 { return EvalResult::Error(CellError::Value); }
+        let x = match self.evaluate(&args[0]).as_number() { Some(n) => n, None => return EvalResult::Error(CellError::Value) };
+        let n = match self.evaluate(&args[1]).as_number() { Some(v) => v, None => return EvalResult::Error(CellError::Value) };
+        let m = match self.evaluate(&args[2]).as_number() { Some(v) => v, None => return EvalResult::Error(CellError::Value) };
+        let coeffs = self.eval_flat(&args[3]);
+        let mut sum = 0.0;
+        for (i, c) in coeffs.iter().enumerate() {
+            let cv = match c.as_number() { Some(v) => v, None => return EvalResult::Error(CellError::Value) };
+            sum += cv * x.powf(n + m * i as f64);
+        }
+        EvalResult::Number(sum)
+    }
+
+    // ==================== Matrix Functions ====================
+
+    fn fn_mmult(&self, args: &[Expression]) -> EvalResult {
+        if args.len() != 2 { return EvalResult::Error(CellError::Value); }
+        let a = self.eval_as_matrix(&args[0]);
+        let b = self.eval_as_matrix(&args[1]);
+        let a_rows = a.len();
+        if a_rows == 0 { return EvalResult::Error(CellError::Value); }
+        let a_cols = a[0].len();
+        let b_rows = b.len();
+        if b_rows == 0 || a_cols != b_rows { return EvalResult::Error(CellError::Value); }
+        let b_cols = b[0].len();
+        let mut result = Vec::new();
+        for i in 0..a_rows {
+            for j in 0..b_cols {
+                let mut sum = 0.0;
+                for k in 0..a_cols {
+                    sum += a[i][k] * b[k][j];
+                }
+                result.push(EvalResult::Number(sum));
+            }
+        }
+        if a_rows == 1 && b_cols == 1 { return result.into_iter().next().unwrap_or(EvalResult::Error(CellError::Value)); }
+        EvalResult::Array(result)
+    }
+
+    fn fn_mdeterm(&self, args: &[Expression]) -> EvalResult {
+        if args.len() != 1 { return EvalResult::Error(CellError::Value); }
+        let m = self.eval_as_matrix(&args[0]);
+        let n = m.len();
+        if n == 0 || m.iter().any(|r| r.len() != n) { return EvalResult::Error(CellError::Value); }
+        EvalResult::Number(matrix_determinant(&m))
+    }
+
+    fn fn_minverse(&self, args: &[Expression]) -> EvalResult {
+        if args.len() != 1 { return EvalResult::Error(CellError::Value); }
+        let m = self.eval_as_matrix(&args[0]);
+        let n = m.len();
+        if n == 0 || m.iter().any(|r| r.len() != n) { return EvalResult::Error(CellError::Value); }
+        match matrix_inverse(&m) {
+            Some(inv) => {
+                let mut result = Vec::new();
+                for row in &inv {
+                    for &val in row {
+                        result.push(EvalResult::Number(val));
+                    }
+                }
+                EvalResult::Array(result)
+            }
+            None => EvalResult::Error(CellError::Value),
+        }
+    }
+
+    fn fn_munit(&self, args: &[Expression]) -> EvalResult {
+        if args.len() != 1 { return EvalResult::Error(CellError::Value); }
+        let n = match self.evaluate(&args[0]).as_number() { Some(v) if v >= 1.0 => v.floor() as usize, _ => return EvalResult::Error(CellError::Value) };
+        let mut result = Vec::new();
+        for i in 0..n {
+            for j in 0..n {
+                result.push(EvalResult::Number(if i == j { 1.0 } else { 0.0 }));
+            }
+        }
+        EvalResult::Array(result)
+    }
+
+    fn eval_as_matrix(&self, expr: &Expression) -> Vec<Vec<f64>> {
+        let flat = self.eval_flat(expr);
+        // Try to determine matrix dimensions from the expression
+        let n = (flat.len() as f64).sqrt() as usize;
+        if n * n == flat.len() {
+            let mut matrix = Vec::new();
+            for i in 0..n {
+                let mut row = Vec::new();
+                for j in 0..n {
+                    row.push(flat[i * n + j].as_number().unwrap_or(0.0));
+                }
+                matrix.push(row);
+            }
+            matrix
+        } else {
+            // Single row
+            vec![flat.iter().map(|v| v.as_number().unwrap_or(0.0)).collect()]
+        }
     }
 
     // ==================== Modern Lookup Functions ====================
@@ -7748,6 +9916,367 @@ fn binom_pmf(k: u64, n: u64, p: f64) -> f64 {
 fn poisson_pmf(k: u64, lambda: f64) -> f64 {
     if lambda == 0.0 { return if k == 0 { 1.0 } else { 0.0 }; }
     (k as f64 * lambda.ln() - lambda - gamma_ln(k as f64 + 1.0)).exp()
+}
+
+/// Hypergeometric PMF
+fn hypgeom_pmf(k: u64, n: u64, big_k: u64, big_n: u64) -> f64 {
+    let ln_choose = |a: u64, b: u64| -> f64 {
+        if b > a { return f64::NEG_INFINITY; }
+        gamma_ln(a as f64 + 1.0) - gamma_ln(b as f64 + 1.0) - gamma_ln((a - b) as f64 + 1.0)
+    };
+    (ln_choose(big_k, k) + ln_choose(big_n - big_k, n - k) - ln_choose(big_n, n)).exp()
+}
+
+/// Negative binomial PMF
+fn negbinom_pmf(f: u64, s: u64, p: f64) -> f64 {
+    let ln_coeff = gamma_ln((f + s) as f64) - gamma_ln(s as f64) - gamma_ln(f as f64 + 1.0);
+    (ln_coeff + s as f64 * p.ln() + f as f64 * (1.0 - p).ln()).exp()
+}
+
+/// Chi-square inverse via bisection
+fn chisq_inv_impl(p: f64, df: f64) -> f64 {
+    let mut lo = 0.0_f64;
+    let mut hi = df * 10.0 + 100.0;
+    for _ in 0..200 {
+        let mid = (lo + hi) / 2.0;
+        if lower_gamma_regularized(df / 2.0, mid / 2.0) < p { lo = mid; } else { hi = mid; }
+    }
+    (lo + hi) / 2.0
+}
+
+/// F-distribution inverse via bisection
+fn f_inv_impl(p: f64, d1: f64, d2: f64) -> f64 {
+    let mut lo = 0.0_f64;
+    let mut hi = 10000.0_f64;
+    for _ in 0..200 {
+        let mid = (lo + hi) / 2.0;
+        let z = d1 * mid / (d1 * mid + d2);
+        if regularized_beta(d1 / 2.0, d2 / 2.0, z) < p { lo = mid; } else { hi = mid; }
+    }
+    (lo + hi) / 2.0
+}
+
+/// Year basis days for financial functions
+fn year_basis_days(basis: i32) -> f64 {
+    match basis {
+        0 => 360.0,   // US (NASD) 30/360
+        1 => 365.0,   // Actual/actual
+        2 => 360.0,   // Actual/360
+        3 => 365.0,   // Actual/365
+        4 => 360.0,   // European 30/360
+        _ => 360.0,
+    }
+}
+
+/// Parse complex number from string "a+bi" or "a-bi"
+fn parse_complex_str(s: &str) -> Option<(f64, f64)> {
+    let s = s.trim();
+    if s.is_empty() { return None; }
+    // Remove trailing 'i' or 'j'
+    let has_i = s.ends_with('i') || s.ends_with('j');
+    if !has_i {
+        // Pure real
+        return s.parse::<f64>().ok().map(|r| (r, 0.0));
+    }
+    let s = &s[..s.len() - 1]; // strip 'i'/'j'
+    if s.is_empty() || s == "+" { return Some((0.0, 1.0)); }
+    if s == "-" { return Some((0.0, -1.0)); }
+    // Find last + or - that's not at position 0 and not after 'e'/'E'
+    let bytes = s.as_bytes();
+    let mut split_pos = None;
+    for i in (1..bytes.len()).rev() {
+        if (bytes[i] == b'+' || bytes[i] == b'-') && bytes[i - 1] != b'e' && bytes[i - 1] != b'E' {
+            split_pos = Some(i);
+            break;
+        }
+    }
+    match split_pos {
+        Some(pos) => {
+            let real_str = &s[..pos];
+            let imag_str = &s[pos..];
+            let real = real_str.parse::<f64>().ok()?;
+            let imag = if imag_str == "+" { 1.0 } else if imag_str == "-" { -1.0 } else { imag_str.parse::<f64>().ok()? };
+            Some((real, imag))
+        }
+        None => {
+            // Pure imaginary
+            if s == "+" || s.is_empty() { Some((0.0, 1.0)) }
+            else if s == "-" { Some((0.0, -1.0)) }
+            else { s.parse::<f64>().ok().map(|i| (0.0, i)) }
+        }
+    }
+}
+
+/// Parse complex from evaluator argument
+fn parse_complex_arg(eval: &Evaluator, expr: &Expression) -> Option<(f64, f64)> {
+    let result = eval.evaluate(expr);
+    match &result {
+        EvalResult::Number(n) => Some((*n, 0.0)),
+        EvalResult::Text(s) => parse_complex_str(s),
+        _ => None,
+    }
+}
+
+/// Format complex number as string
+fn format_complex(real: f64, imag: f64, suffix: &str) -> String {
+    if imag == 0.0 { return format_number_clean(real); }
+    if real == 0.0 {
+        if imag == 1.0 { return suffix.to_string(); }
+        if imag == -1.0 { return format!("-{}", suffix); }
+        return format!("{}{}", format_number_clean(imag), suffix);
+    }
+    let imag_str = if imag == 1.0 { format!("+{}", suffix) }
+        else if imag == -1.0 { format!("-{}", suffix) }
+        else if imag > 0.0 { format!("+{}{}", format_number_clean(imag), suffix) }
+        else { format!("{}{}", format_number_clean(imag), suffix) };
+    format!("{}{}", format_number_clean(real), imag_str)
+}
+
+/// Error function (erf) using Abramowitz and Stegun approximation
+fn erf_impl(x: f64) -> f64 {
+    let sign = if x < 0.0 { -1.0 } else { 1.0 };
+    let x = x.abs();
+    let t = 1.0 / (1.0 + 0.3275911 * x);
+    let y = 1.0 - (((((1.061405429 * t - 1.453152027) * t) + 1.421413741) * t - 0.284496736) * t + 0.254829592) * t * (-x * x).exp();
+    sign * y
+}
+
+/// Bessel function of the first kind Jn(x) using series expansion
+fn bessel_j(x: f64, n: i32) -> f64 {
+    let mut sum = 0.0;
+    for m in 0..50 {
+        let sign = if m % 2 == 0 { 1.0 } else { -1.0 };
+        let term = sign / (gamma_ln(m as f64 + 1.0).exp() * gamma_ln(m as f64 + n as f64 + 1.0).exp()) * (x / 2.0).powf(2.0 * m as f64 + n as f64);
+        sum += term;
+        if term.abs() < 1e-15 * sum.abs() { break; }
+    }
+    sum
+}
+
+/// Modified Bessel function of the first kind In(x)
+fn bessel_i(x: f64, n: i32) -> f64 {
+    let mut sum = 0.0;
+    for m in 0..50 {
+        let term = 1.0 / (gamma_ln(m as f64 + 1.0).exp() * gamma_ln(m as f64 + n as f64 + 1.0).exp()) * (x / 2.0).powf(2.0 * m as f64 + n as f64);
+        sum += term;
+        if term.abs() < 1e-15 * sum.abs() { break; }
+    }
+    sum
+}
+
+/// Bessel function of the second kind Yn(x)
+fn bessel_y(x: f64, n: i32) -> f64 {
+    // Y_n = (J_n * cos(n*pi) - J_{-n}) / sin(n*pi)
+    // For integer n, use limit: Y_n(x) = (2/pi) * (J_n(x) * (ln(x/2) + 0.5772) - series...)
+    // Simplified approximation for integer orders
+    if n == 0 {
+        let j0 = bessel_j(x, 0);
+        (2.0 / std::f64::consts::PI) * ((x / 2.0).ln() + 0.5772156649) * j0 - (2.0 / std::f64::consts::PI) * bessel_y0_series(x)
+    } else {
+        // Use forward recurrence: Y_{n+1} = (2n/x)*Y_n - Y_{n-1}
+        let y0 = bessel_y(x, 0);
+        let y1 = bessel_y1_approx(x);
+        if n == 1 { return y1; }
+        let mut prev = y0;
+        let mut curr = y1;
+        for k in 1..n {
+            let next = 2.0 * k as f64 / x * curr - prev;
+            prev = curr;
+            curr = next;
+        }
+        curr
+    }
+}
+
+fn bessel_y0_series(x: f64) -> f64 {
+    let mut sum = 0.0;
+    let mut hk = 0.0;
+    for k in 0..30 {
+        if k > 0 { hk += 1.0 / k as f64; }
+        let sign = if k % 2 == 0 { 1.0 } else { -1.0 };
+        let term = sign * hk * (x / 2.0).powf(2.0 * k as f64) / gamma_ln(k as f64 + 1.0).exp().powi(2);
+        sum += term;
+        if k > 0 && term.abs() < 1e-15 { break; }
+    }
+    sum
+}
+
+fn bessel_y1_approx(x: f64) -> f64 {
+    let j1 = bessel_j(x, 1);
+    (2.0 / std::f64::consts::PI) * ((x / 2.0).ln() + 0.5772156649) * j1 - 2.0 / (std::f64::consts::PI * x)
+}
+
+/// Modified Bessel function of the second kind Kn(x)
+fn bessel_k(x: f64, n: i32) -> f64 {
+    // K_n = (pi/2) * (I_{-n} - I_n) / sin(n*pi)
+    // For integer n, use limit
+    if n == 0 {
+        // K_0(x) approx using series
+        let mut sum = -(x / 2.0).ln() * bessel_i(x, 0);
+        let mut hk = 0.0;
+        for k in 0..30 {
+            if k > 0 { hk += 1.0 / k as f64; }
+            let term = hk * (x / 2.0).powf(2.0 * k as f64) / gamma_ln(k as f64 + 1.0).exp().powi(2);
+            sum += term;
+            if k > 0 && term.abs() < 1e-15 { break; }
+        }
+        sum
+    } else {
+        // Recurrence
+        let k0 = bessel_k(x, 0);
+        let k1 = -bessel_i(x, 1).signum() * (1.0 / x + bessel_k(x, 0) * bessel_i(x, 1) / bessel_i(x, 0)).abs();
+        if n == 1 { return k1.abs(); }
+        let mut prev = k0;
+        let mut curr = k1.abs();
+        for k in 1..n {
+            let next = 2.0 * k as f64 / x * curr + prev;
+            prev = curr;
+            curr = next;
+        }
+        curr
+    }
+}
+
+/// Unit conversion for CONVERT function
+fn convert_units(value: f64, from: &str, to: &str) -> Option<f64> {
+    let from_factor = unit_to_base(from)?;
+    let to_factor = unit_to_base(to)?;
+    if from_factor.1 != to_factor.1 { return None; }
+    // Special handling for temperature
+    if from_factor.1 == 8 {
+        let celsius = match from_factor.0 as i32 {
+            1 => value,            // C
+            2 => (value - 32.0) * 5.0 / 9.0,  // F
+            3 => value - 273.15,   // K
+            _ => return None,
+        };
+        return Some(match to_factor.0 as i32 {
+            1 => celsius,
+            2 => celsius * 9.0 / 5.0 + 32.0,
+            3 => celsius + 273.15,
+            _ => return None,
+        });
+    }
+    Some(value * from_factor.0 / to_factor.0)
+}
+
+/// Returns (multiplier_to_base, category_id)
+fn unit_to_base(unit: &str) -> Option<(f64, i32)> {
+    match unit {
+        // Weight (base: kg, category 1)
+        "g" => Some((0.001, 1)), "kg" => Some((1.0, 1)), "mg" => Some((1e-6, 1)),
+        "lbm" | "lb" => Some((0.45359237, 1)), "ozm" | "oz" => Some((0.028349523125, 1)),
+        "stone" => Some((6.35029318, 1)), "ton" => Some((907.18474, 1)),
+        "sg" | "slug" => Some((14.593903, 1)), "grain" => Some((6.479891e-5, 1)),
+        "u" | "Da" => Some((1.66053906660e-27, 1)),
+        // Distance (base: m, category 2)
+        "m" => Some((1.0, 2)), "km" => Some((1000.0, 2)), "cm" => Some((0.01, 2)),
+        "mm" => Some((0.001, 2)), "um" => Some((1e-6, 2)), "nm" => Some((1e-9, 2)),
+        "mi" => Some((1609.344, 2)), "yd" => Some((0.9144, 2)), "ft" => Some((0.3048, 2)),
+        "in" => Some((0.0254, 2)), "Nmi" => Some((1852.0, 2)),
+        "ang" | "Ang" => Some((1e-10, 2)), "ly" => Some((9.4607304725808e15, 2)),
+        "pc" | "parsec" => Some((3.08567758149137e16, 2)),
+        // Time (base: s, category 3)
+        "s" | "sec" => Some((1.0, 3)), "min" | "mn" => Some((60.0, 3)),
+        "hr" => Some((3600.0, 3)), "day" => Some((86400.0, 3)),
+        "yr" => Some((31557600.0, 3)),
+        // Pressure (base: Pa, category 4)
+        "Pa" | "pa" => Some((1.0, 4)), "atm" | "at" => Some((101325.0, 4)),
+        "mmHg" => Some((133.322, 4)), "psi" => Some((6894.757, 4)),
+        "Torr" => Some((133.3224, 4)),
+        // Force (base: N, category 5)
+        "N" => Some((1.0, 5)), "dyn" | "dy" => Some((1e-5, 5)),
+        "lbf" => Some((4.44822, 5)),
+        // Energy (base: J, category 6)
+        "J" => Some((1.0, 6)), "kJ" => Some((1000.0, 6)),
+        "cal" => Some((4.1868, 6)), "kcal" => Some((4186.8, 6)),
+        "eV" | "ev" => Some((1.602176634e-19, 6)), "BTU" | "btu" => Some((1055.06, 6)),
+        "Wh" | "wh" => Some((3600.0, 6)), "kWh" | "kwh" => Some((3600000.0, 6)),
+        "HPh" | "hph" => Some((2684519.5, 6)),
+        // Power (base: W, category 7)
+        "W" | "w" => Some((1.0, 7)), "kW" | "kw" => Some((1000.0, 7)),
+        "HP" | "hp" => Some((745.69987, 7)),
+        // Temperature (special handling, category 8)
+        "C" | "cel" => Some((1.0, 8)), "F" | "fah" => Some((2.0, 8)), "K" | "kel" => Some((3.0, 8)),
+        // Volume (base: L, category 9)
+        "l" | "L" | "lt" => Some((1.0, 9)), "ml" => Some((0.001, 9)),
+        "gal" => Some((3.785411784, 9)), "qt" => Some((0.946352946, 9)),
+        "pt" | "us_pt" => Some((0.473176473, 9)), "cup" => Some((0.236588236, 9)),
+        "tsp" => Some((0.00492892159, 9)), "tbs" => Some((0.0147867648, 9)),
+        "oz_fl" | "fl_oz" => Some((0.0295735296, 9)),
+        "m3" | "m^3" => Some((1000.0, 9)), "ft3" | "ft^3" => Some((28.3168466, 9)),
+        "in3" | "in^3" => Some((0.016387064, 9)),
+        // Speed (base: m/s, category 10)
+        "m/s" => Some((1.0, 10)), "m/h" => Some((1.0 / 3600.0, 10)),
+        "mph" => Some((0.44704, 10)), "kn" | "kph" => Some((0.277778, 10)),
+        // Area (base: m^2, category 11)
+        "m2" | "m^2" => Some((1.0, 11)), "km2" | "km^2" => Some((1e6, 11)),
+        "ft2" | "ft^2" => Some((0.09290304, 11)), "in2" | "in^2" => Some((0.00064516, 11)),
+        "yd2" | "yd^2" => Some((0.83612736, 11)), "mi2" | "mi^2" => Some((2589988.11, 11)),
+        "ha" => Some((10000.0, 11)), "ac" | "acre" => Some((4046.8564224, 11)),
+        "ar" => Some((100.0, 11)), "Morgen" => Some((2500.0, 11)),
+        _ => None,
+    }
+}
+
+/// Matrix determinant using LU decomposition
+fn matrix_determinant(m: &[Vec<f64>]) -> f64 {
+    let n = m.len();
+    if n == 1 { return m[0][0]; }
+    if n == 2 { return m[0][0] * m[1][1] - m[0][1] * m[1][0]; }
+    // Gaussian elimination
+    let mut a: Vec<Vec<f64>> = m.to_vec();
+    let mut det = 1.0;
+    for i in 0..n {
+        // Find pivot
+        let mut max_row = i;
+        for k in (i + 1)..n {
+            if a[k][i].abs() > a[max_row][i].abs() { max_row = k; }
+        }
+        if max_row != i {
+            a.swap(i, max_row);
+            det *= -1.0;
+        }
+        if a[i][i].abs() < 1e-15 { return 0.0; }
+        det *= a[i][i];
+        for k in (i + 1)..n {
+            let factor = a[k][i] / a[i][i];
+            for j in (i + 1)..n {
+                a[k][j] -= factor * a[i][j];
+            }
+        }
+    }
+    det
+}
+
+/// Matrix inverse using Gauss-Jordan elimination
+fn matrix_inverse(m: &[Vec<f64>]) -> Option<Vec<Vec<f64>>> {
+    let n = m.len();
+    let mut aug: Vec<Vec<f64>> = Vec::new();
+    for i in 0..n {
+        let mut row = m[i].clone();
+        for j in 0..n {
+            row.push(if i == j { 1.0 } else { 0.0 });
+        }
+        aug.push(row);
+    }
+    // Forward elimination
+    for i in 0..n {
+        let mut max_row = i;
+        for k in (i + 1)..n {
+            if aug[k][i].abs() > aug[max_row][i].abs() { max_row = k; }
+        }
+        aug.swap(i, max_row);
+        if aug[i][i].abs() < 1e-15 { return None; }
+        let pivot = aug[i][i];
+        for j in 0..(2 * n) { aug[i][j] /= pivot; }
+        for k in 0..n {
+            if k == i { continue; }
+            let factor = aug[k][i];
+            for j in 0..(2 * n) { aug[k][j] -= factor * aug[i][j]; }
+        }
+    }
+    Some(aug.iter().map(|row| row[n..].to_vec()).collect())
 }
 
 /// Simple wildcard matching (* and ?)
