@@ -59,6 +59,7 @@ pub mod status_bar;
 pub mod computed_properties;
 pub mod controls;
 pub mod slicer;
+pub mod timeline_slicer;
 pub mod mcp;
 
 pub use api_types::{CellData, StyleData, DimensionData, FormattingParams, MergedRegion};
@@ -3430,6 +3431,7 @@ pub fn run() {
         .manage(evaluate_formula::EvalFormulaState::new())
         .manage(scripting::ScriptState::new())
         .manage(slicer::SlicerState::new())
+        .manage(timeline_slicer::TimelineSlicerState::new())
         .manage(mcp::McpState::new())
         .invoke_handler(tauri::generate_handler![
             // Grid commands
@@ -3866,6 +3868,19 @@ pub fn run() {
             slicer::update_slicer_computed_property,
             slicer::remove_slicer_computed_property,
             slicer::get_slicer_computed_attributes,
+            // Timeline slicer commands
+            timeline_slicer::create_timeline_slicer,
+            timeline_slicer::delete_timeline_slicer,
+            timeline_slicer::update_timeline_slicer,
+            timeline_slicer::update_timeline_position,
+            timeline_slicer::update_timeline_selection,
+            timeline_slicer::update_timeline_scroll,
+            timeline_slicer::update_timeline_connections,
+            timeline_slicer::get_all_timeline_slicers,
+            timeline_slicer::get_timeline_slicers_for_sheet,
+            timeline_slicer::get_timeline_data,
+            timeline_slicer::get_timeline_selected_items,
+            timeline_slicer::get_pivot_date_fields,
             // Theme commands
             theme_commands::get_document_theme,
             theme_commands::set_document_theme,

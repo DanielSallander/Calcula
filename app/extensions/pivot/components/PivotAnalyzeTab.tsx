@@ -369,6 +369,23 @@ export function PivotAnalyzeTab({
           </button>
           <button
             className={tabStyles.button}
+            onClick={() => showDialog("timelineSlicer:insertDialog", { sourceId: pivotId })}
+            title="Insert a Timeline for this PivotTable"
+          >
+            <span className={tabStyles.buttonIcon}>
+              <svg width="22" height="22" viewBox="0 0 22 22" fill="none" xmlns="http://www.w3.org/2000/svg">
+                <rect x="2" y="5" width="18" height="12" rx="2" stroke="currentColor" strokeWidth="1.4"/>
+                <line x1="2" y1="10" x2="20" y2="10" stroke="currentColor" strokeWidth="1"/>
+                <line x1="7" y1="10" x2="7" y2="17" stroke="currentColor" strokeWidth="0.8" strokeDasharray="1.5 1"/>
+                <line x1="12" y1="10" x2="12" y2="17" stroke="currentColor" strokeWidth="0.8" strokeDasharray="1.5 1"/>
+                <line x1="17" y1="10" x2="17" y2="17" stroke="currentColor" strokeWidth="0.8" strokeDasharray="1.5 1"/>
+                <rect x="8" y="12" width="3" height="3" rx="0.5" fill="currentColor" opacity="0.4"/>
+              </svg>
+            </span>
+            <span className={tabStyles.buttonLabel}>Insert Timeline</span>
+          </button>
+          <button
+            className={tabStyles.button}
             onClick={handleReportFilterPages}
             title="Show Report Filter Pages - generate one sheet per filter value"
           >

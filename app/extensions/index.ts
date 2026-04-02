@@ -37,6 +37,7 @@ import { registerExtensionsManagerExtension, unregisterExtensionsManagerExtensio
 import { registerSettingsExtension, unregisterSettingsExtension } from "./Settings";
 import { registerReportStoreExtension, unregisterReportStoreExtension } from "./ReportStore";
 import { registerSlicerExtension, unregisterSlicerExtension } from "./Slicer";
+import { registerTimelineSlicerExtension, unregisterTimelineSlicerExtension } from "./TimelineSlicer";
 import { registerFlashFillExtension, unregisterFlashFillExtension } from "./FlashFill";
 import { registerAdvancedFilterExtension, unregisterAdvancedFilterExtension } from "./AdvancedFilter";
 import { registerSubtotalsExtension, unregisterSubtotalsExtension } from "./Subtotals";
@@ -59,6 +60,7 @@ export function loadExtensions(): void {
   registerTableExtension();
   registerChartExtension();
   registerSlicerExtension();
+  registerTimelineSlicerExtension();
   registerAutoFilterExtension();
   registerSortingExtension();
   registerGroupingExtension();
@@ -153,6 +155,7 @@ export function unloadExtensions(): void {
   unregisterGroupingExtension();
   unregisterSortingExtension();
   unregisterAutoFilterExtension();
+  unregisterTimelineSlicerExtension();
   unregisterSlicerExtension();
   unregisterChartExtension();
   unregisterTableExtension();
@@ -198,6 +201,7 @@ export { registerExtensionsManagerExtension, unregisterExtensionsManagerExtensio
 export { registerSettingsExtension, unregisterSettingsExtension };
 export { registerReportStoreExtension, unregisterReportStoreExtension };
 export { registerSlicerExtension, unregisterSlicerExtension };
+export { registerTimelineSlicerExtension, unregisterTimelineSlicerExtension };
 export { registerFlashFillExtension, unregisterFlashFillExtension };
 export { registerAdvancedFilterExtension, unregisterAdvancedFilterExtension };
 export { registerSubtotalsExtension, unregisterSubtotalsExtension };
