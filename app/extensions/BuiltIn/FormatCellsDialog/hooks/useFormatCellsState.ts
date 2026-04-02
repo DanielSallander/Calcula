@@ -47,11 +47,13 @@ export interface FormatCellsState {
   locked: boolean;
   formulaHidden: boolean;
 
-  // Border (UI state only - not yet applied)
+  // Border
   borderTop: BorderSide;
   borderRight: BorderSide;
   borderBottom: BorderSide;
   borderLeft: BorderSide;
+  borderDiagonalDown: BorderSide;
+  borderDiagonalUp: BorderSide;
 
   // Active tab
   activeTab: string;
@@ -98,6 +100,8 @@ export interface FormatCellsActions {
   setBorderRight: (v: BorderSide) => void;
   setBorderBottom: (v: BorderSide) => void;
   setBorderLeft: (v: BorderSide) => void;
+  setBorderDiagonalDown: (v: BorderSide) => void;
+  setBorderDiagonalUp: (v: BorderSide) => void;
   setActiveTab: (v: string) => void;
 }
 
@@ -136,6 +140,8 @@ const DEFAULT_STATE: FormatCellsState = {
   borderRight: { ...DEFAULT_BORDER },
   borderBottom: { ...DEFAULT_BORDER },
   borderLeft: { ...DEFAULT_BORDER },
+  borderDiagonalDown: { ...DEFAULT_BORDER },
+  borderDiagonalUp: { ...DEFAULT_BORDER },
   activeTab: "number",
 };
 
@@ -177,5 +183,7 @@ export const useFormatCellsStore = create<FormatCellsStore>((set) => ({
   setBorderRight: (borderRight) => set({ borderRight }),
   setBorderBottom: (borderBottom) => set({ borderBottom }),
   setBorderLeft: (borderLeft) => set({ borderLeft }),
+  setBorderDiagonalDown: (borderDiagonalDown) => set({ borderDiagonalDown }),
+  setBorderDiagonalUp: (borderDiagonalUp) => set({ borderDiagonalUp }),
   setActiveTab: (activeTab) => set({ activeTab }),
 }));

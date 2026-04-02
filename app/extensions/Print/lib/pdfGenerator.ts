@@ -617,6 +617,9 @@ export function generatePdf(data: PrintData): ArrayBuffer {
           drawBorder(doc, style.borderBottom, cx, curY + cellH, cx + cellW, curY + cellH);
           drawBorder(doc, style.borderLeft, cx, curY, cx, curY + cellH);
           drawBorder(doc, style.borderRight, cx + cellW, curY, cx + cellW, curY + cellH);
+          // Diagonal borders
+          if (style.borderDiagonalDown) drawBorder(doc, style.borderDiagonalDown, cx, curY, cx + cellW, curY + cellH);
+          if (style.borderDiagonalUp) drawBorder(doc, style.borderDiagonalUp, cx, curY + cellH, cx + cellW, curY);
         }
 
         // Cell text

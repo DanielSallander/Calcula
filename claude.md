@@ -195,3 +195,6 @@ When I ask for a commit message, or when starting a conversation, check for unco
 changes using `git diff` and `git status`. Suggest a conventional commit message based
 on the changes. Format: `type(scope): description`. Do not run git commit -- only
 provide the message text so I can paste it into the Source Control input box.
+
+## Backward compatibility
+Since we are currently not in production there is no need at all for backward compatibility.

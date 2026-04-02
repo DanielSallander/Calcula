@@ -358,6 +358,8 @@ export interface StyleData {
   borderRight: BorderSideData;
   borderBottom: BorderSideData;
   borderLeft: BorderSideData;
+  borderDiagonalDown: BorderSideData;
+  borderDiagonalUp: BorderSideData;
   checkbox: boolean;
   button: boolean;
   indent: number;
@@ -540,6 +542,8 @@ export const DEFAULT_STYLE: StyleData = {
   borderRight: { ...DEFAULT_BORDER_SIDE },
   borderBottom: { ...DEFAULT_BORDER_SIDE },
   borderLeft: { ...DEFAULT_BORDER_SIDE },
+  borderDiagonalDown: { ...DEFAULT_BORDER_SIDE },
+  borderDiagonalUp: { ...DEFAULT_BORDER_SIDE },
   checkbox: false,
   button: false,
   indent: 0,
@@ -575,6 +579,8 @@ export interface FormattingOptions {
   borderRight?: BorderSideParam;
   borderBottom?: BorderSideParam;
   borderLeft?: BorderSideParam;
+  borderDiagonalDown?: BorderSideParam;
+  borderDiagonalUp?: BorderSideParam;
   checkbox?: boolean;
   button?: boolean;
   indent?: number;

@@ -157,6 +157,8 @@ export function FormatCellsDialog(props: DialogProps): React.ReactElement | null
             borderRight: style.borderRight ? { style: style.borderRight.style, color: style.borderRight.color } : undefined,
             borderBottom: style.borderBottom ? { style: style.borderBottom.style, color: style.borderBottom.color } : undefined,
             borderLeft: style.borderLeft ? { style: style.borderLeft.style, color: style.borderLeft.color } : undefined,
+            borderDiagonalDown: style.borderDiagonalDown ? { style: style.borderDiagonalDown.style, color: style.borderDiagonalDown.color } : undefined,
+            borderDiagonalUp: style.borderDiagonalUp ? { style: style.borderDiagonalUp.style, color: style.borderDiagonalUp.color } : undefined,
           });
         }
 
@@ -214,6 +216,8 @@ export function FormatCellsDialog(props: DialogProps): React.ReactElement | null
         borderRight: { style: store.borderRight.style, color: store.borderRight.color },
         borderBottom: { style: store.borderBottom.style, color: store.borderBottom.color },
         borderLeft: { style: store.borderLeft.style, color: store.borderLeft.color },
+        borderDiagonalDown: { style: store.borderDiagonalDown.style, color: store.borderDiagonalDown.color },
+        borderDiagonalUp: { style: store.borderDiagonalUp.style, color: store.borderDiagonalUp.color },
         fill: buildFillParam(store),
       });
 

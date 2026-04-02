@@ -26,10 +26,14 @@ export function BorderTab(): React.ReactElement {
     borderRight,
     borderBottom,
     borderLeft,
+    borderDiagonalDown,
+    borderDiagonalUp,
     setBorderTop,
     setBorderRight,
     setBorderBottom,
     setBorderLeft,
+    setBorderDiagonalDown,
+    setBorderDiagonalUp,
   } = useFormatCellsStore();
 
   const [lineStyle, setLineStyle] = useState<BorderSide["style"]>("thin");
@@ -46,6 +50,8 @@ export function BorderTab(): React.ReactElement {
       setBorderRight({ style: "none", color: "#000000" });
       setBorderBottom({ style: "none", color: "#000000" });
       setBorderLeft({ style: "none", color: "#000000" });
+      setBorderDiagonalDown({ style: "none", color: "#000000" });
+      setBorderDiagonalUp({ style: "none", color: "#000000" });
     } else {
       setBorderTop(border);
       setBorderRight(border);
@@ -55,7 +61,7 @@ export function BorderTab(): React.ReactElement {
   };
 
   const toggleBorder = (
-    side: "top" | "right" | "bottom" | "left",
+    side: "top" | "right" | "bottom" | "left" | "diagonalDown" | "diagonalUp",
     current: BorderSide,
     setter: (v: BorderSide) => void
   ) => {
@@ -155,6 +161,20 @@ export function BorderTab(): React.ReactElement {
             >
               Right
             </BorderToggle>
+            <BorderToggle
+              $active={borderDiagonalDown.style !== "none"}
+              onClick={() => toggleBorder("diagonalDown", borderDiagonalDown, setBorderDiagonalDown)}
+              title="Diagonal down (top-left to bottom-right)"
+            >
+              Diag \
+            </BorderToggle>
+            <BorderToggle
+              $active={borderDiagonalUp.style !== "none"}
+              onClick={() => toggleBorder("diagonalUp", borderDiagonalUp, setBorderDiagonalUp)}
+              title="Diagonal up (bottom-left to top-right)"
+            >
+              Diag /
+            </BorderToggle>
           </BorderButtonRow>
 
           {/* Preview box */}
@@ -166,6 +186,8 @@ export function BorderTab(): React.ReactElement {
                 borderRight: "2px solid transparent",
                 borderBottom: "2px solid transparent",
                 borderLeft: "2px solid transparent",
+                position: "relative",
+                overflow: "hidden",
                 ...{
                   borderTopColor: borderTop.style !== "none" ? borderTop.color : "transparent",
                   borderTopWidth: borderTop.style !== "none" ? getBorderStyle(borderTop).borderWidth : "2px",
@@ -182,6 +204,30 @@ export function BorderTab(): React.ReactElement {
                 },
               }}
             >
+              {(borderDiagonalDown.style !== "none" || borderDiagonalUp.style !== "none") && (
+                <svg
+                  style={{ position: "absolute", top: 0, left: 0, width: "100%", height: "100%", pointerEvents: "none" }}
+                  viewBox="0 0 80 40"
+                  preserveAspectRatio="none"
+                >
+                  {borderDiagonalDown.style !== "none" && (
+                    <line
+                      x1="0" y1="0" x2="80" y2="40"
+                      stroke={borderDiagonalDown.color}
+                      strokeWidth={borderDiagonalDown.style === "thick" ? 3 : borderDiagonalDown.style === "medium" ? 2 : 1}
+                      strokeDasharray={borderDiagonalDown.style === "dashed" ? "4 2" : borderDiagonalDown.style === "dotted" ? "1 2" : undefined}
+                    />
+                  )}
+                  {borderDiagonalUp.style !== "none" && (
+                    <line
+                      x1="0" y1="40" x2="80" y2="0"
+                      stroke={borderDiagonalUp.color}
+                      strokeWidth={borderDiagonalUp.style === "thick" ? 3 : borderDiagonalUp.style === "medium" ? 2 : 1}
+                      strokeDasharray={borderDiagonalUp.style === "dashed" ? "4 2" : borderDiagonalUp.style === "dotted" ? "1 2" : undefined}
+                    />
+                  )}
+                </svg>
+              )}
               Text
             </PreviewCell>
           </PreviewBox>

@@ -439,27 +439,43 @@ function drawBorderLine(
     // Double border: draw two lines with a gap
     const offset = 1.5;
     const isHorizontal = y1 === y2;
+    const isVertical = x1 === x2;
 
     ctx.lineWidth = 1;
-    ctx.beginPath();
     if (isHorizontal) {
+      ctx.beginPath();
       ctx.moveTo(x1, y1 - offset);
       ctx.lineTo(x2, y2 - offset);
-    } else {
-      ctx.moveTo(x1 - offset, y1);
-      ctx.lineTo(x2 - offset, y2);
-    }
-    ctx.stroke();
-
-    ctx.beginPath();
-    if (isHorizontal) {
+      ctx.stroke();
+      ctx.beginPath();
       ctx.moveTo(x1, y1 + offset);
       ctx.lineTo(x2, y2 + offset);
-    } else {
+      ctx.stroke();
+    } else if (isVertical) {
+      ctx.beginPath();
+      ctx.moveTo(x1 - offset, y1);
+      ctx.lineTo(x2 - offset, y2);
+      ctx.stroke();
+      ctx.beginPath();
       ctx.moveTo(x1 + offset, y1);
       ctx.lineTo(x2 + offset, y2);
+      ctx.stroke();
+    } else {
+      // Diagonal line: offset perpendicular to the line direction
+      const dx = x2 - x1;
+      const dy = y2 - y1;
+      const len = Math.sqrt(dx * dx + dy * dy);
+      const nx = -dy / len * offset;
+      const ny = dx / len * offset;
+      ctx.beginPath();
+      ctx.moveTo(x1 + nx, y1 + ny);
+      ctx.lineTo(x2 + nx, y2 + ny);
+      ctx.stroke();
+      ctx.beginPath();
+      ctx.moveTo(x1 - nx, y1 - ny);
+      ctx.lineTo(x2 - nx, y2 - ny);
+      ctx.stroke();
     }
-    ctx.stroke();
   } else {
     ctx.beginPath();
     ctx.moveTo(x1, y1);
@@ -610,7 +626,9 @@ export function drawCellText(state: RenderState): void {
           const hasBorder = (emptyStyle.borderTop && emptyStyle.borderTop.style !== "none" && emptyStyle.borderTop.width > 0) ||
             (emptyStyle.borderRight && emptyStyle.borderRight.style !== "none" && emptyStyle.borderRight.width > 0) ||
             (emptyStyle.borderBottom && emptyStyle.borderBottom.style !== "none" && emptyStyle.borderBottom.width > 0) ||
-            (emptyStyle.borderLeft && emptyStyle.borderLeft.style !== "none" && emptyStyle.borderLeft.width > 0);
+            (emptyStyle.borderLeft && emptyStyle.borderLeft.style !== "none" && emptyStyle.borderLeft.width > 0) ||
+            (emptyStyle.borderDiagonalDown && emptyStyle.borderDiagonalDown.style !== "none" && emptyStyle.borderDiagonalDown.width > 0) ||
+            (emptyStyle.borderDiagonalUp && emptyStyle.borderDiagonalUp.style !== "none" && emptyStyle.borderDiagonalUp.width > 0);
           if (!hasBg && !hasBorder && !hasDecorations) {
             baseX += colWidth;
             continue;
@@ -780,6 +798,8 @@ export function drawCellText(state: RenderState): void {
       const bRight = baseCellStyle.borderRight;
       const bBottom = baseCellStyle.borderBottom;
       const bLeft = baseCellStyle.borderLeft;
+      const bDiagDown = baseCellStyle.borderDiagonalDown;
+      const bDiagUp = baseCellStyle.borderDiagonalUp;
 
       if (bTop && bTop.style !== "none" && bTop.width > 0) {
         drawBorderLine(ctx, cellLeft, cellTop, cellRight, cellTop, bTop);
@@ -792,6 +812,14 @@ export function drawCellText(state: RenderState): void {
       }
       if (bRight && bRight.style !== "none" && bRight.width > 0) {
         drawBorderLine(ctx, cellRight, cellTop, cellRight, cellBottom, bRight);
+      }
+      // Diagonal down: top-left to bottom-right (\)
+      if (bDiagDown && bDiagDown.style !== "none" && bDiagDown.width > 0) {
+        drawBorderLine(ctx, cellLeft, cellTop, cellRight, cellBottom, bDiagDown);
+      }
+      // Diagonal up: bottom-left to top-right (/)
+      if (bDiagUp && bDiagUp.style !== "none" && bDiagUp.width > 0) {
+        drawBorderLine(ctx, cellLeft, cellBottom, cellRight, cellTop, bDiagUp);
       }
 
       // Draw cell decorations (e.g., sparklines, checkboxes) between background/borders and text

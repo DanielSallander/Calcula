@@ -175,6 +175,10 @@ pub struct Borders {
     pub right: BorderStyle,
     pub bottom: BorderStyle,
     pub left: BorderStyle,
+    /// Diagonal border from top-left to bottom-right (\).
+    pub diagonal_down: BorderStyle,
+    /// Diagonal border from bottom-left to top-right (/).
+    pub diagonal_up: BorderStyle,
 }
 
 /// Pattern type for pattern fills (Excel-compatible set).

@@ -252,6 +252,12 @@ pub fn apply_formatting(
             if let Some(ref border) = params.border_left {
                 new_style.borders.left = parse_border_side(border);
             }
+            if let Some(ref border) = params.border_diagonal_down {
+                new_style.borders.diagonal_down = parse_border_side(border);
+            }
+            if let Some(ref border) = params.border_diagonal_up {
+                new_style.borders.diagonal_up = parse_border_side(border);
+            }
 
             // Apply fill
             if let Some(ref fill_param) = params.fill {
@@ -427,6 +433,8 @@ pub fn apply_formatting_to_sheets(
                 if let Some(ref border) = params.border_right { new_style.borders.right = parse_border_side(border); }
                 if let Some(ref border) = params.border_bottom { new_style.borders.bottom = parse_border_side(border); }
                 if let Some(ref border) = params.border_left { new_style.borders.left = parse_border_side(border); }
+                if let Some(ref border) = params.border_diagonal_down { new_style.borders.diagonal_down = parse_border_side(border); }
+                if let Some(ref border) = params.border_diagonal_up { new_style.borders.diagonal_up = parse_border_side(border); }
 
                 // Apply fill
                 if let Some(ref fill_param) = params.fill { new_style.fill = parse_fill_param(fill_param); }
