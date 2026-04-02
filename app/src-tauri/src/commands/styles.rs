@@ -1,11 +1,11 @@
 //! FILENAME: app/src-tauri/src/commands/styles.rs
 // PURPOSE: Styling operations, formatting, and style definitions.
 
-use crate::api_types::{CellData, FormattingParams, FormattingResult, PreviewResult, StyleData, StyleEntry};
+use crate::api_types::{CellData, FillParam, FormattingParams, FormattingResult, PreviewResult, StyleData, StyleEntry};
 use crate::{format_cell_value_with_color, AppState};
 use engine::{
-    BorderLineStyle, BorderStyle, Cell, CellStyle, CellValue, Color, CurrencyPosition, NumberFormat,
-    TextAlign, TextRotation, ThemeColor, VerticalAlign,
+    BorderLineStyle, BorderStyle, Cell, CellStyle, CellValue, Color, CurrencyPosition, Fill,
+    GradientDirection, NumberFormat, PatternType, TextAlign, TextRotation, ThemeColor, VerticalAlign,
 };
 use tauri::State;
 
@@ -191,13 +191,13 @@ pub fn apply_formatting(
             }
             if let Some(ref bg_color) = params.background_color {
                 if let Some(color) = Color::from_hex(bg_color) {
-                    new_style.background = ThemeColor::Absolute(color);
+                    new_style.fill = Fill::Solid { color: ThemeColor::Absolute(color) };
                 }
             }
             if let Some(ref bg_color_theme) = params.bg_color_theme {
                 if let Some(slot) = engine::ThemeColorSlot::from_key(bg_color_theme) {
                     let tint = engine::Tint(params.bg_color_tint.unwrap_or(0));
-                    new_style.background = ThemeColor::Theme { slot, tint };
+                    new_style.fill = Fill::Solid { color: ThemeColor::Theme { slot, tint } };
                 }
             }
             if let Some(ref align) = params.text_align {
@@ -251,6 +251,11 @@ pub fn apply_formatting(
             }
             if let Some(ref border) = params.border_left {
                 new_style.borders.left = parse_border_side(border);
+            }
+
+            // Apply fill
+            if let Some(ref fill_param) = params.fill {
+                new_style.fill = parse_fill_param(fill_param);
             }
 
             // Get or create style index
@@ -381,12 +386,12 @@ pub fn apply_formatting_to_sheets(
                     }
                 }
                 if let Some(ref bg_color) = params.background_color {
-                    if let Some(color) = Color::from_hex(bg_color) { new_style.background = ThemeColor::Absolute(color); }
+                    if let Some(color) = Color::from_hex(bg_color) { new_style.fill = Fill::Solid { color: ThemeColor::Absolute(color) }; }
                 }
                 if let Some(ref bg_color_theme) = params.bg_color_theme {
                     if let Some(slot) = engine::ThemeColorSlot::from_key(bg_color_theme) {
                         let tint = engine::Tint(params.bg_color_tint.unwrap_or(0));
-                        new_style.background = ThemeColor::Theme { slot, tint };
+                        new_style.fill = Fill::Solid { color: ThemeColor::Theme { slot, tint } };
                     }
                 }
                 if let Some(ref align) = params.text_align {
@@ -422,6 +427,9 @@ pub fn apply_formatting_to_sheets(
                 if let Some(ref border) = params.border_right { new_style.borders.right = parse_border_side(border); }
                 if let Some(ref border) = params.border_bottom { new_style.borders.bottom = parse_border_side(border); }
                 if let Some(ref border) = params.border_left { new_style.borders.left = parse_border_side(border); }
+
+                // Apply fill
+                if let Some(ref fill_param) = params.fill { new_style.fill = parse_fill_param(fill_param); }
 
                 let new_style_index = styles.get_or_create(new_style);
 
@@ -666,6 +674,87 @@ fn parse_border_side(param: &crate::api_types::BorderSideParam) -> BorderStyle {
         width,
         color,
         style: line_style,
+    }
+}
+
+/// Parse a FillParam into a Fill enum.
+fn parse_fill_param(param: &FillParam) -> Fill {
+    match param {
+        FillParam::None => Fill::None,
+        FillParam::Solid { color, color_theme, color_tint } => {
+            let theme_color = parse_theme_or_absolute(color, color_theme.as_deref(), *color_tint);
+            Fill::Solid { color: theme_color }
+        }
+        FillParam::Pattern {
+            pattern_type, fg_color, bg_color,
+            fg_color_theme, fg_color_tint,
+            bg_color_theme, bg_color_tint,
+        } => {
+            Fill::Pattern {
+                pattern_type: parse_pattern_type(pattern_type),
+                fg_color: parse_theme_or_absolute(fg_color, fg_color_theme.as_deref(), *fg_color_tint),
+                bg_color: parse_theme_or_absolute(bg_color, bg_color_theme.as_deref(), *bg_color_tint),
+            }
+        }
+        FillParam::Gradient {
+            color1, color2, direction,
+            color1_theme, color1_tint,
+            color2_theme, color2_tint,
+        } => {
+            Fill::Gradient {
+                color1: parse_theme_or_absolute(color1, color1_theme.as_deref(), *color1_tint),
+                color2: parse_theme_or_absolute(color2, color2_theme.as_deref(), *color2_tint),
+                direction: parse_gradient_direction(direction),
+            }
+        }
+    }
+}
+
+/// Parse a color string with optional theme slot and tint into a ThemeColor.
+fn parse_theme_or_absolute(hex: &str, theme_key: Option<&str>, tint: Option<i16>) -> ThemeColor {
+    if let Some(key) = theme_key {
+        if let Some(slot) = engine::ThemeColorSlot::from_key(key) {
+            return ThemeColor::Theme {
+                slot,
+                tint: engine::Tint(tint.unwrap_or(0)),
+            };
+        }
+    }
+    ThemeColor::Absolute(Color::from_hex(hex).unwrap_or(Color::white()))
+}
+
+fn parse_pattern_type(s: &str) -> PatternType {
+    match s {
+        "solid" => PatternType::Solid,
+        "darkGray" => PatternType::DarkGray,
+        "mediumGray" => PatternType::MediumGray,
+        "lightGray" => PatternType::LightGray,
+        "gray125" => PatternType::Gray125,
+        "gray0625" => PatternType::Gray0625,
+        "darkHorizontal" => PatternType::DarkHorizontal,
+        "darkVertical" => PatternType::DarkVertical,
+        "darkDown" => PatternType::DarkDown,
+        "darkUp" => PatternType::DarkUp,
+        "darkGrid" => PatternType::DarkGrid,
+        "darkTrellis" => PatternType::DarkTrellis,
+        "lightHorizontal" => PatternType::LightHorizontal,
+        "lightVertical" => PatternType::LightVertical,
+        "lightDown" => PatternType::LightDown,
+        "lightUp" => PatternType::LightUp,
+        "lightGrid" => PatternType::LightGrid,
+        "lightTrellis" => PatternType::LightTrellis,
+        _ => PatternType::None,
+    }
+}
+
+fn parse_gradient_direction(s: &str) -> GradientDirection {
+    match s {
+        "horizontal" => GradientDirection::Horizontal,
+        "vertical" => GradientDirection::Vertical,
+        "diagonalDown" => GradientDirection::DiagonalDown,
+        "diagonalUp" => GradientDirection::DiagonalUp,
+        "fromCenter" => GradientDirection::FromCenter,
+        _ => GradientDirection::Horizontal,
     }
 }
 

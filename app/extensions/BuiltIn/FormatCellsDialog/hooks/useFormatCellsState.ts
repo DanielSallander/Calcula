@@ -4,10 +4,13 @@
 // before applying. Loads initial values from the active cell's style.
 
 import { create } from "zustand";
+import type { PatternType, GradientDirection } from "../../../../src/core/types";
 
 // ============================================================================
 // Types
 // ============================================================================
+
+export type FillMode = "none" | "solid" | "gradient" | "pattern";
 
 export interface FormatCellsState {
   // Font
@@ -32,6 +35,13 @@ export interface FormatCellsState {
 
   // Fill
   backgroundColor: string;
+  fillMode: FillMode;
+  gradientColor1: string;
+  gradientColor2: string;
+  gradientDirection: GradientDirection;
+  patternType: PatternType;
+  patternFgColor: string;
+  patternBgColor: string;
 
   // Protection
   locked: boolean;
@@ -75,6 +85,13 @@ export interface FormatCellsActions {
   setIndent: (v: number) => void;
   setNumberFormat: (v: string) => void;
   setBackgroundColor: (v: string) => void;
+  setFillMode: (v: FillMode) => void;
+  setGradientColor1: (v: string) => void;
+  setGradientColor2: (v: string) => void;
+  setGradientDirection: (v: GradientDirection) => void;
+  setPatternType: (v: PatternType) => void;
+  setPatternFgColor: (v: string) => void;
+  setPatternBgColor: (v: string) => void;
   setLocked: (v: boolean) => void;
   setFormulaHidden: (v: boolean) => void;
   setBorderTop: (v: BorderSide) => void;
@@ -106,6 +123,13 @@ const DEFAULT_STATE: FormatCellsState = {
   indent: 0,
   numberFormat: "General",
   backgroundColor: "#ffffff",
+  fillMode: "none" as FillMode,
+  gradientColor1: "#ffffff",
+  gradientColor2: "#4472c4",
+  gradientDirection: "horizontal" as GradientDirection,
+  patternType: "lightGray" as PatternType,
+  patternFgColor: "#000000",
+  patternBgColor: "#ffffff",
   locked: true,
   formulaHidden: false,
   borderTop: { ...DEFAULT_BORDER },
@@ -140,6 +164,13 @@ export const useFormatCellsStore = create<FormatCellsStore>((set) => ({
   setIndent: (indent) => set({ indent }),
   setNumberFormat: (numberFormat) => set({ numberFormat }),
   setBackgroundColor: (backgroundColor) => set({ backgroundColor }),
+  setFillMode: (fillMode) => set({ fillMode }),
+  setGradientColor1: (gradientColor1) => set({ gradientColor1 }),
+  setGradientColor2: (gradientColor2) => set({ gradientColor2 }),
+  setGradientDirection: (gradientDirection) => set({ gradientDirection }),
+  setPatternType: (patternType) => set({ patternType }),
+  setPatternFgColor: (patternFgColor) => set({ patternFgColor }),
+  setPatternBgColor: (patternBgColor) => set({ patternBgColor }),
   setLocked: (locked) => set({ locked }),
   setFormulaHidden: (formulaHidden) => set({ formulaHidden }),
   setBorderTop: (borderTop) => set({ borderTop }),

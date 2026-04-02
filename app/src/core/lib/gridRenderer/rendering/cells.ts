@@ -20,6 +20,7 @@ import {
   hasCellDecorations,
   applyCellDecorations,
 } from "../../../../api/cellDecorations";
+import { drawCellFill } from "../styles/fillRenderer";
 
 /**
  * Draw text with ellipsis truncation if it exceeds the available width.
@@ -604,7 +605,8 @@ export function drawCellText(state: RenderState): void {
         // Cell has a non-default style - check if it has a visible background or borders
         if (si !== 0) {
           const emptyStyle = getStyleFromCache(styleCache, si);
-          const hasBg = isValidColor(emptyStyle.backgroundColor) && !isDefaultBackgroundColor(emptyStyle.backgroundColor);
+          const hasFill = emptyStyle.fill != null && emptyStyle.fill.type !== "none";
+          const hasBg = hasFill || (isValidColor(emptyStyle.backgroundColor) && !isDefaultBackgroundColor(emptyStyle.backgroundColor));
           const hasBorder = (emptyStyle.borderTop && emptyStyle.borderTop.style !== "none" && emptyStyle.borderTop.width > 0) ||
             (emptyStyle.borderRight && emptyStyle.borderRight.style !== "none" && emptyStyle.borderRight.width > 0) ||
             (emptyStyle.borderBottom && emptyStyle.borderBottom.style !== "none" && emptyStyle.borderBottom.width > 0) ||
@@ -764,8 +766,11 @@ export function drawCellText(state: RenderState): void {
       ctx.rect(cellLeft, cellTop, cellRight - cellLeft, cellBottom - cellTop);
       ctx.clip();
 
-      // Draw background color if set (covers entire merged area)
-      if (backgroundColor) {
+      // Draw background: use advanced fill if present, otherwise solid color
+      const cellFill = baseCellStyle.fill;
+      if (cellFill && cellFill.type !== "none") {
+        drawCellFill(ctx, cellFill, cellLeft, cellTop, cellRight - cellLeft, cellBottom - cellTop);
+      } else if (backgroundColor) {
         ctx.fillStyle = backgroundColor;
         ctx.fillRect(cellLeft, cellTop, cellRight - cellLeft, cellBottom - cellTop);
       }

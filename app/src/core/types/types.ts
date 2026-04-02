@@ -372,7 +372,87 @@ export interface StyleData {
   bgColorTint?: number;
   /** Theme font keyword ("body" or "headings"), undefined if absolute */
   fontFamilyTheme?: string;
+  /** Fill data (solid/gradient/pattern). Undefined means no advanced fill. */
+  fill?: FillData;
 }
+
+// ============================================================================
+// Fill Types
+// ============================================================================
+
+/**
+ * Pattern types for pattern fills (Excel-compatible set).
+ */
+export type PatternType =
+  | "none" | "solid"
+  | "darkGray" | "mediumGray" | "lightGray" | "gray125" | "gray0625"
+  | "darkHorizontal" | "darkVertical" | "darkDown" | "darkUp" | "darkGrid" | "darkTrellis"
+  | "lightHorizontal" | "lightVertical" | "lightDown" | "lightUp" | "lightGrid" | "lightTrellis";
+
+/**
+ * Gradient direction presets.
+ */
+export type GradientDirection =
+  | "horizontal" | "vertical" | "diagonalDown" | "diagonalUp" | "fromCenter";
+
+/**
+ * Fill data discriminated union from the backend.
+ */
+export type FillData =
+  | { type: "none" }
+  | {
+      type: "solid";
+      color: string;
+      colorTheme?: string;
+      colorTint?: number;
+    }
+  | {
+      type: "pattern";
+      patternType: PatternType;
+      fgColor: string;
+      bgColor: string;
+      fgColorTheme?: string;
+      fgColorTint?: number;
+      bgColorTheme?: string;
+      bgColorTint?: number;
+    }
+  | {
+      type: "gradient";
+      color1: string;
+      color2: string;
+      direction: GradientDirection;
+      color1Theme?: string;
+      color1Tint?: number;
+      color2Theme?: string;
+      color2Tint?: number;
+    };
+
+/**
+ * Fill parameter sent to the backend for formatting commands.
+ */
+export type FillParam =
+  | { type: "none" }
+  | { type: "solid"; color: string; colorTheme?: string; colorTint?: number }
+  | {
+      type: "pattern";
+      patternType: PatternType;
+      fgColor: string;
+      bgColor: string;
+      fgColorTheme?: string;
+      fgColorTint?: number;
+      bgColorTheme?: string;
+      bgColorTint?: number;
+    }
+  | {
+      type: "gradient";
+      color1: string;
+      color2: string;
+      direction: GradientDirection;
+      color1Theme?: string;
+      color1Tint?: number;
+      color2Theme?: string;
+      color2Tint?: number;
+    };
 
 // ============================================================================
 // Document Theme Types
@@ -499,6 +579,7 @@ export interface FormattingOptions {
   button?: boolean;
   indent?: number;
   shrinkToFit?: boolean;
+  fill?: FillParam;
 }
 
 /**

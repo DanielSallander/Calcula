@@ -136,8 +136,11 @@ fn convert_style_to_format(style: &CellStyle) -> Format {
     if !is_default_color(&style.font.color) {
         format = format.set_font_color(color_to_xlsx(&style.font.color));
     }
-    if !is_default_background(&style.background) {
-        format = format.set_background_color(color_to_xlsx(&style.background));
+    if !style.fill.is_none() {
+        let bg = style.fill.background_color();
+        if !is_default_background(bg) {
+            format = format.set_background_color(color_to_xlsx(bg));
+        }
     }
 
     // Horizontal alignment

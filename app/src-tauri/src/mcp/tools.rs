@@ -222,7 +222,7 @@ pub fn apply_cell_formatting(
             }
             if let Some(ref color) = params.background_color {
                 if let Some(c) = engine::Color::from_hex(color) {
-                    new_style.background = engine::ThemeColor::Absolute(c);
+                    new_style.fill = engine::Fill::Solid { color: engine::ThemeColor::Absolute(c) };
                 }
             }
             if let Some(ref fmt) = params.number_format {

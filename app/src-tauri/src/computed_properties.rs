@@ -277,7 +277,7 @@ fn apply_fill_color(
         .map(|c| c.style_index)
         .unwrap_or(0);
     let mut new_style = style_registry.get(old_style_index).clone();
-    new_style.background = color;
+    new_style.fill = engine::Fill::Solid { color };
     let new_style_index = style_registry.get_or_create(new_style);
 
     if let Some(existing) = grid.get_cell(row, col) {

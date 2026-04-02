@@ -182,10 +182,12 @@ function ColorDropdown({
   currentColor,
   onColorSelect,
   onClose,
+  onMoreOptions,
 }: {
   currentColor: string;
   onColorSelect: (color: string) => void;
   onClose: () => void;
+  onMoreOptions?: () => void;
 }) {
   const ref = useRef<HTMLDivElement>(null);
 
@@ -277,6 +279,32 @@ function ColorDropdown({
           `}
         />
       </div>
+      {onMoreOptions && (
+        <button
+          onClick={() => {
+            onClose();
+            onMoreOptions();
+          }}
+          className={css`
+            display: block;
+            width: 100%;
+            padding: 4px 0;
+            margin-top: 4px;
+            border: none;
+            border-top: 1px solid #e0e0e0;
+            background: none;
+            font-size: 11px;
+            color: #0078d4;
+            cursor: pointer;
+            text-align: center;
+            &:hover {
+              text-decoration: underline;
+            }
+          `}
+        >
+          More Fill Options...
+        </button>
+      )}
     </div>
   );
 }
@@ -645,6 +673,9 @@ export function HomeTabComponent({
               currentColor={color}
               onColorSelect={(c) => handleColorSelect(item.id, c)}
               onClose={() => setOpenColorPicker(null)}
+              onMoreOptions={item.id === "backgroundColor" ? () => {
+                DialogExtensions.openDialog("format-cells", { tab: "fill" });
+              } : undefined}
             />
           )}
         </div>

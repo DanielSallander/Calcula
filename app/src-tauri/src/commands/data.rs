@@ -2863,14 +2863,14 @@ fn compare_cells(
             }
         }
         SortOn::CellColor => {
-            // Compare by background color
+            // Compare by background color (derived from fill)
             let color_a = cell_a.as_ref().map(|c| {
                 let style = styles.get(c.style_index);
-                style.background.to_css_default()
+                style.fill.background_color().to_css_default()
             });
             let color_b = cell_b.as_ref().map(|c| {
                 let style = styles.get(c.style_index);
-                style.background.to_css_default()
+                style.fill.background_color().to_css_default()
             });
 
             match (color_a, color_b, &field.color) {

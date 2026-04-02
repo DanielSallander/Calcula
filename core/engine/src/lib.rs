@@ -25,8 +25,9 @@ pub use evaluator::{EvalContext, EvalResult, Evaluator};
 pub use grid::Grid;
 pub use number_format::{format_number, format_number_with_color, format_text_with_color};
 pub use style::{
-    BorderLineStyle, BorderStyle, Borders, CellStyle, Color, CurrencyPosition, FontStyle,
-    NumberFormat, StyleRegistry, TextAlign, TextRotation, VerticalAlign,
+    BorderLineStyle, BorderStyle, Borders, CellStyle, Color, CurrencyPosition, Fill,
+    FontStyle, GradientDirection, NumberFormat, PatternType, StyleRegistry, TextAlign,
+    TextRotation, VerticalAlign,
 };
 pub use theme::{
     ThemeColor, ThemeColorSlot, ThemeColors, ThemeDefinition, ThemeFonts, Tint,

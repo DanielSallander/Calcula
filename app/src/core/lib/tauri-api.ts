@@ -420,6 +420,7 @@ export async function applyFormatting(
       button: formatting.button,
       indent: formatting.indent,
       shrinkToFit: formatting.shrinkToFit,
+      fill: formatting.fill,
     },
   });
   console.log(
@@ -505,6 +506,7 @@ export async function applyFormattingToSheets(
       button: formatting.button,
       indent: formatting.indent,
       shrinkToFit: formatting.shrinkToFit,
+      fill: formatting.fill,
     },
   });
 }

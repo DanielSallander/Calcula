@@ -161,6 +161,108 @@ pub struct StyleData {
     /// Theme font keyword ("body" or "headings"), None if absolute font.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub font_family_theme: Option<String>,
+    /// Fill data (solid/gradient/pattern). None means legacy solid bg only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fill: Option<FillData>,
+}
+
+// ============================================================================
+// Fill API Types
+// ============================================================================
+
+/// Fill data sent to the frontend.
+/// Represents solid, gradient, or pattern fills.
+/// NOTE: For internally-tagged enums, rename_all on the enum only renames
+/// variant tags. Each variant needs its own rename_all for field names.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type")]
+pub enum FillData {
+    /// No fill (default white background)
+    #[serde(rename = "none")]
+    None,
+    /// Solid color fill
+    #[serde(rename = "solid", rename_all = "camelCase")]
+    Solid {
+        color: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        color_theme: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        color_tint: Option<i16>,
+    },
+    /// Pattern fill
+    #[serde(rename = "pattern", rename_all = "camelCase")]
+    Pattern {
+        pattern_type: String,
+        fg_color: String,
+        bg_color: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        fg_color_theme: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        fg_color_tint: Option<i16>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        bg_color_theme: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        bg_color_tint: Option<i16>,
+    },
+    /// Two-color gradient fill
+    #[serde(rename = "gradient", rename_all = "camelCase")]
+    Gradient {
+        color1: String,
+        color2: String,
+        direction: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        color1_theme: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        color1_tint: Option<i16>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        color2_theme: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        color2_tint: Option<i16>,
+    },
+}
+
+/// Fill parameters for formatting commands (from frontend).
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(tag = "type")]
+pub enum FillParam {
+    #[serde(rename = "none")]
+    None,
+    #[serde(rename = "solid", rename_all = "camelCase")]
+    Solid {
+        color: String,
+        #[serde(default)]
+        color_theme: Option<String>,
+        #[serde(default)]
+        color_tint: Option<i16>,
+    },
+    #[serde(rename = "pattern", rename_all = "camelCase")]
+    Pattern {
+        pattern_type: String,
+        fg_color: String,
+        bg_color: String,
+        #[serde(default)]
+        fg_color_theme: Option<String>,
+        #[serde(default)]
+        fg_color_tint: Option<i16>,
+        #[serde(default)]
+        bg_color_theme: Option<String>,
+        #[serde(default)]
+        bg_color_tint: Option<i16>,
+    },
+    #[serde(rename = "gradient", rename_all = "camelCase")]
+    Gradient {
+        color1: String,
+        color2: String,
+        direction: String,
+        #[serde(default)]
+        color1_theme: Option<String>,
+        #[serde(default)]
+        color1_tint: Option<i16>,
+        #[serde(default)]
+        color2_theme: Option<String>,
+        #[serde(default)]
+        color2_tint: Option<i16>,
+    },
 }
 
 // ============================================================================
@@ -322,6 +424,8 @@ pub struct FormattingParams {
     /// Theme slot for background color (overrides background_color when set)
     pub bg_color_theme: Option<String>,
     pub bg_color_tint: Option<i16>,
+    /// Fill data (solid/gradient/pattern). When set, overrides background_color.
+    pub fill: Option<FillParam>,
 }
 
 /// Result from apply_formatting that includes both updated cells and new styles.
@@ -661,14 +765,9 @@ impl StyleData {
                 Some(tint.0),
             ),
         };
-        let (background_color, bg_color_theme, bg_color_tint) = match &style.background {
-            ThemeColor::Absolute(_) => (theme.resolve_color(&style.background).to_css(), None, None),
-            ThemeColor::Theme { slot, tint } => (
-                theme.resolve_color(&style.background).to_css(),
-                Some(slot.key().to_string()),
-                Some(tint.0),
-            ),
-        };
+        // Derive backgroundColor from fill for legacy frontend compatibility
+        let bg_color = style.fill.background_color();
+        let (background_color, bg_color_theme, bg_color_tint) = resolve_theme_color(bg_color, theme);
 
         let font_family_theme = match style.font.family.as_str() {
             "Body" | "body" => Some("body".to_string()),
@@ -718,8 +817,106 @@ impl StyleData {
             bg_color_theme,
             bg_color_tint,
             font_family_theme,
+            fill: fill_to_data(&style.fill, theme),
         }
     }
+}
+
+/// Convert a Fill to FillData, resolving theme colors.
+fn fill_to_data(fill: &engine::Fill, theme: &engine::ThemeDefinition) -> Option<FillData> {
+    use engine::Fill;
+
+    match fill {
+        Fill::None => None,
+        Fill::Solid { color } => {
+            let (resolved, color_theme, color_tint) = resolve_theme_color(color, theme);
+            Some(FillData::Solid {
+                color: resolved,
+                color_theme,
+                color_tint,
+            })
+        }
+        Fill::Pattern { pattern_type, fg_color, bg_color } => {
+            let (fg_resolved, fg_theme, fg_tint) = resolve_theme_color(fg_color, theme);
+            let (bg_resolved, bg_theme, bg_tint) = resolve_theme_color(bg_color, theme);
+            Some(FillData::Pattern {
+                pattern_type: pattern_type_to_string(pattern_type),
+                fg_color: fg_resolved,
+                bg_color: bg_resolved,
+                fg_color_theme: fg_theme,
+                fg_color_tint: fg_tint,
+                bg_color_theme: bg_theme,
+                bg_color_tint: bg_tint,
+            })
+        }
+        Fill::Gradient { color1, color2, direction } => {
+            let (c1_resolved, c1_theme, c1_tint) = resolve_theme_color(color1, theme);
+            let (c2_resolved, c2_theme, c2_tint) = resolve_theme_color(color2, theme);
+            Some(FillData::Gradient {
+                color1: c1_resolved,
+                color2: c2_resolved,
+                direction: gradient_direction_to_string(direction),
+                color1_theme: c1_theme,
+                color1_tint: c1_tint,
+                color2_theme: c2_theme,
+                color2_tint: c2_tint,
+            })
+        }
+    }
+}
+
+/// Resolve a ThemeColor to (css_string, optional_theme_slot, optional_tint).
+fn resolve_theme_color(
+    color: &engine::ThemeColor,
+    theme: &engine::ThemeDefinition,
+) -> (String, Option<String>, Option<i16>) {
+    use engine::ThemeColor;
+    match color {
+        ThemeColor::Absolute(_) => (theme.resolve_color(color).to_css(), None, None),
+        ThemeColor::Theme { slot, tint } => (
+            theme.resolve_color(color).to_css(),
+            Some(slot.key().to_string()),
+            Some(tint.0),
+        ),
+    }
+}
+
+fn pattern_type_to_string(pt: &engine::PatternType) -> String {
+    use engine::PatternType;
+    match pt {
+        PatternType::None => "none",
+        PatternType::Solid => "solid",
+        PatternType::DarkGray => "darkGray",
+        PatternType::MediumGray => "mediumGray",
+        PatternType::LightGray => "lightGray",
+        PatternType::Gray125 => "gray125",
+        PatternType::Gray0625 => "gray0625",
+        PatternType::DarkHorizontal => "darkHorizontal",
+        PatternType::DarkVertical => "darkVertical",
+        PatternType::DarkDown => "darkDown",
+        PatternType::DarkUp => "darkUp",
+        PatternType::DarkGrid => "darkGrid",
+        PatternType::DarkTrellis => "darkTrellis",
+        PatternType::LightHorizontal => "lightHorizontal",
+        PatternType::LightVertical => "lightVertical",
+        PatternType::LightDown => "lightDown",
+        PatternType::LightUp => "lightUp",
+        PatternType::LightGrid => "lightGrid",
+        PatternType::LightTrellis => "lightTrellis",
+    }
+    .to_string()
+}
+
+fn gradient_direction_to_string(dir: &engine::GradientDirection) -> String {
+    use engine::GradientDirection;
+    match dir {
+        GradientDirection::Horizontal => "horizontal",
+        GradientDirection::Vertical => "vertical",
+        GradientDirection::DiagonalDown => "diagonalDown",
+        GradientDirection::DiagonalUp => "diagonalUp",
+        GradientDirection::FromCenter => "fromCenter",
+    }
+    .to_string()
 }
 
 // ============================================================================

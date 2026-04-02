@@ -15,7 +15,8 @@ import {
   applyFormatting,
 } from "../../../src/api/lib";
 import { setCellProtection, getCellProtection } from "../../../src/api/backend";
-import { useFormatCellsStore } from "./hooks/useFormatCellsState";
+import { useFormatCellsStore, type FillMode } from "./hooks/useFormatCellsState";
+import type { FillData, FillParam, PatternType, GradientDirection } from "../../../src/core/types";
 import { NumberTab } from "./tabs/NumberTab";
 import { AlignmentTab } from "./tabs/AlignmentTab";
 import { FontTab } from "./tabs/FontTab";
@@ -36,6 +37,76 @@ const TABS = [
   { id: "fill", label: "Fill", component: FillTab },
   { id: "protection", label: "Protection", component: ProtectionTab },
 ] as const;
+
+// ============================================================================
+// Fill Helpers
+// ============================================================================
+
+function loadFillFromStyleData(fill: FillData): Partial<{
+  fillMode: FillMode;
+  backgroundColor: string;
+  gradientColor1: string;
+  gradientColor2: string;
+  gradientDirection: GradientDirection;
+  patternType: PatternType;
+  patternFgColor: string;
+  patternBgColor: string;
+}> {
+  switch (fill.type) {
+    case "solid":
+      return { fillMode: "solid", backgroundColor: fill.color };
+    case "gradient":
+      return {
+        fillMode: "gradient",
+        gradientColor1: fill.color1,
+        gradientColor2: fill.color2,
+        gradientDirection: fill.direction,
+      };
+    case "pattern":
+      return {
+        fillMode: "pattern",
+        patternType: fill.patternType,
+        patternFgColor: fill.fgColor,
+        patternBgColor: fill.bgColor,
+      };
+    default:
+      return { fillMode: "none" };
+  }
+}
+
+function buildFillParam(store: {
+  fillMode: FillMode;
+  backgroundColor: string;
+  gradientColor1: string;
+  gradientColor2: string;
+  gradientDirection: GradientDirection;
+  patternType: PatternType;
+  patternFgColor: string;
+  patternBgColor: string;
+}): FillParam | undefined {
+  switch (store.fillMode) {
+    case "solid":
+      return { type: "solid", color: store.backgroundColor };
+    case "gradient":
+      return {
+        type: "gradient",
+        color1: store.gradientColor1,
+        color2: store.gradientColor2,
+        direction: store.gradientDirection,
+      };
+    case "pattern":
+      return {
+        type: "pattern",
+        patternType: store.patternType,
+        fgColor: store.patternFgColor,
+        bgColor: store.patternBgColor,
+      };
+    case "none":
+      return { type: "none" };
+    default:
+      return undefined;
+  }
+}
 
 // ============================================================================
 // Main Dialog Component
@@ -80,6 +151,8 @@ export function FormatCellsDialog(props: DialogProps): React.ReactElement | null
               ? "general"
               : style.numberFormat,
             backgroundColor: style.backgroundColor,
+            // Load fill data
+            ...(style.fill ? loadFillFromStyleData(style.fill) : {}),
             borderTop: style.borderTop ? { style: style.borderTop.style, color: style.borderTop.color } : undefined,
             borderRight: style.borderRight ? { style: style.borderRight.style, color: style.borderRight.color } : undefined,
             borderBottom: style.borderBottom ? { style: style.borderBottom.style, color: style.borderBottom.color } : undefined,
@@ -141,6 +214,7 @@ export function FormatCellsDialog(props: DialogProps): React.ReactElement | null
         borderRight: { style: store.borderRight.style, color: store.borderRight.color },
         borderBottom: { style: store.borderBottom.style, color: store.borderBottom.color },
         borderLeft: { style: store.borderLeft.style, color: store.borderLeft.color },
+        fill: buildFillParam(store),
       });
 
       // Apply protection

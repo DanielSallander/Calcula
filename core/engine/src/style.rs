@@ -177,6 +177,85 @@ pub struct Borders {
     pub left: BorderStyle,
 }
 
+/// Pattern type for pattern fills (Excel-compatible set).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+pub enum PatternType {
+    #[default]
+    None,
+    Solid,
+    DarkGray,       // 75% gray
+    MediumGray,     // 50% gray
+    LightGray,      // 25% gray
+    Gray125,        // 12.5% gray
+    Gray0625,       // 6.25% gray
+    DarkHorizontal,
+    DarkVertical,
+    DarkDown,       // diagonal \
+    DarkUp,         // diagonal /
+    DarkGrid,       // cross-hatch
+    DarkTrellis,    // diagonal cross-hatch
+    LightHorizontal,
+    LightVertical,
+    LightDown,
+    LightUp,
+    LightGrid,
+    LightTrellis,
+}
+
+/// Direction for gradient fills.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+pub enum GradientDirection {
+    #[default]
+    Horizontal, // left to right (0 degrees)
+    Vertical,   // top to bottom (90 degrees)
+    DiagonalDown, // top-left to bottom-right (135 degrees)
+    DiagonalUp,   // bottom-left to top-right (45 degrees)
+    FromCenter,   // radial from center
+}
+
+/// Fill type for cells.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+#[serde(tag = "type", rename_all = "camelCase")]
+pub enum Fill {
+    /// No fill / default white background
+    #[default]
+    None,
+    /// Solid color fill
+    Solid {
+        color: ThemeColor,
+    },
+    /// Pattern fill with foreground pattern on background color
+    Pattern {
+        pattern_type: PatternType,
+        fg_color: ThemeColor,
+        bg_color: ThemeColor,
+    },
+    /// Two-color gradient fill
+    Gradient {
+        color1: ThemeColor,
+        color2: ThemeColor,
+        direction: GradientDirection,
+    },
+}
+
+impl Fill {
+    /// Get the primary background color of this fill (for legacy compatibility).
+    /// Returns the solid color, pattern bg color, gradient first color, or default white.
+    pub fn background_color(&self) -> &ThemeColor {
+        match self {
+            Fill::None => &ThemeColor::DEFAULT_BACKGROUND,
+            Fill::Solid { color } => color,
+            Fill::Pattern { bg_color, .. } => bg_color,
+            Fill::Gradient { color1, .. } => color1,
+        }
+    }
+
+    /// Check if this fill is the default (no fill).
+    pub fn is_none(&self) -> bool {
+        matches!(self, Fill::None)
+    }
+}
+
 /// Font style configuration.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct FontStyle {
@@ -209,7 +288,7 @@ impl Default for FontStyle {
 #[serde(default)]
 pub struct CellStyle {
     pub font: FontStyle,
-    pub background: ThemeColor,
+    pub fill: Fill,
     pub text_align: TextAlign,
     pub vertical_align: VerticalAlign,
     pub number_format: NumberFormat,
@@ -227,7 +306,7 @@ impl CellStyle {
     pub fn new() -> Self {
         CellStyle {
             font: FontStyle::default(),
-            background: ThemeColor::default_background(),
+            fill: Fill::None,
             text_align: TextAlign::General,
             vertical_align: VerticalAlign::Middle,
             number_format: NumberFormat::General,
@@ -259,9 +338,15 @@ impl CellStyle {
         self
     }
 
-    /// Create a style with a specific background color.
+    /// Create a style with a specific solid background color.
     pub fn with_background(mut self, color: ThemeColor) -> Self {
-        self.background = color;
+        self.fill = Fill::Solid { color };
+        self
+    }
+
+    /// Create a style with a specific fill.
+    pub fn with_fill(mut self, fill: Fill) -> Self {
+        self.fill = fill;
         self
     }
 
@@ -510,8 +595,7 @@ mod tests {
 
     #[test]
     fn test_serde_backward_compat_missing_fields() {
-        // Simulate deserializing a CellStyle JSON that doesn't have indent/shrink_to_fit
-        // Colors use ThemeColor enum format (Absolute variant wraps Color)
+        // Simulate deserializing a CellStyle JSON that doesn't have indent/shrink_to_fit/fill
         let json = r#"{
             "font": {
                 "family": "Body",
@@ -522,7 +606,6 @@ mod tests {
                 "strikethrough": false,
                 "color": {"Absolute": {"r": 0, "g": 0, "b": 0, "a": 255}}
             },
-            "background": {"Absolute": {"r": 255, "g": 255, "b": 255, "a": 255}},
             "text_align": "General",
             "vertical_align": "Middle",
             "number_format": "General",
@@ -538,8 +621,9 @@ mod tests {
             "button": false
         }"#;
 
-        let style: CellStyle = serde_json::from_str(json).expect("Should deserialize without indent/shrink_to_fit");
+        let style: CellStyle = serde_json::from_str(json).expect("Should deserialize without indent/shrink_to_fit/fill");
         assert_eq!(style.indent, 0, "Missing indent should default to 0");
         assert!(!style.shrink_to_fit, "Missing shrink_to_fit should default to false");
+        assert!(style.fill.is_none(), "Missing fill should default to None");
     }
 }

@@ -2947,7 +2947,7 @@ impl<'a> Evaluator<'a> {
             .unwrap_or(0);
 
         let style = style_registry.get(style_index);
-        EvalResult::Text(style.background.to_css_default())
+        EvalResult::Text(style.fill.background_color().to_css_default())
     }
 
     // ==================== Criteria Matching Infrastructure ====================

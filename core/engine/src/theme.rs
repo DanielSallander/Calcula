@@ -190,6 +190,9 @@ impl ThemeColor {
     pub const fn default_background() -> Self {
         ThemeColor::Theme { slot: ThemeColorSlot::Light1, tint: Tint(0) }
     }
+
+    /// Static reference to the default background color (for Fill::background_color).
+    pub const DEFAULT_BACKGROUND: ThemeColor = ThemeColor::default_background();
 }
 
 impl Default for ThemeColor {
