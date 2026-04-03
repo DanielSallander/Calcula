@@ -6,7 +6,7 @@
 import type { TestSuite } from "../types";
 import { assertTrue, assertEqual, expectNotNull } from "../assertions";
 import { AREA_UTILITIES } from "../testArea";
-import { indexToCol, colToIndex, detectDataRegion } from "../../../../src/api";
+import { indexToCol, colToIndex, detectDataRegion } from "@api";
 import {
   getGridBounds,
   getCellCount,
@@ -17,7 +17,7 @@ import {
   getStyleCount,
   getAllColumnWidths,
   getAllRowHeights,
-} from "../../../../src/api/lib";
+} from "@api/lib";
 
 const A = AREA_UTILITIES;
 

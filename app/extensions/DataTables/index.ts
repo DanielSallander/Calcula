@@ -2,10 +2,8 @@
 // PURPOSE: Data Tables extension entry point.
 // CONTEXT: Registers the dialog and Data menu items for What-If Data Tables.
 
-import {
-  DialogExtensions,
-  ExtensionRegistry,
-} from "../../src/api";
+import type { ExtensionModule, ExtensionContext } from "@api/contract";
+import { ExtensionRegistry } from "@api";
 import { DataTableDialog } from "./components/DataTableDialog";
 import {
   registerDataTableMenuItems,
@@ -19,20 +17,20 @@ import {
 const cleanupFns: (() => void)[] = [];
 
 // ============================================================================
-// Registration
+// Lifecycle
 // ============================================================================
 
-export function registerDataTablesExtension(): void {
-  console.log("[DataTables] Registering...");
+function activate(context: ExtensionContext): void {
+  console.log("[DataTables] Activating...");
 
-  DialogExtensions.registerDialog({
+  context.ui.dialogs.register({
     id: "data-table",
     component: DataTableDialog,
     priority: 100,
   });
-  cleanupFns.push(() => DialogExtensions.unregisterDialog("data-table"));
+  cleanupFns.push(() => context.ui.dialogs.unregister("data-table"));
 
-  registerDataTableMenuItems();
+  registerDataTableMenuItems(context);
 
   const unsubSelection = ExtensionRegistry.onSelectionChange((sel) => {
     setCurrentSelection(
@@ -48,18 +46,31 @@ export function registerDataTablesExtension(): void {
   });
   cleanupFns.push(unsubSelection);
 
-  console.log("[DataTables] Registered successfully.");
+  console.log("[DataTables] Activated successfully.");
 }
 
-// ============================================================================
-// Unregistration
-// ============================================================================
-
-export function unregisterDataTablesExtension(): void {
-  console.log("[DataTables] Unregistering...");
+function deactivate(): void {
+  console.log("[DataTables] Deactivating...");
   for (const fn of cleanupFns) {
     try { fn(); } catch (err) { console.error("[DataTables] Cleanup error:", err); }
   }
   cleanupFns.length = 0;
-  console.log("[DataTables] Unregistered.");
+  console.log("[DataTables] Deactivated.");
 }
+
+// ============================================================================
+// Extension Module Export
+// ============================================================================
+
+const extension: ExtensionModule = {
+  manifest: {
+    id: "calcula.data-tables",
+    name: "Data Tables",
+    version: "1.0.0",
+    description: "What-If Data Tables for sensitivity analysis.",
+  },
+  activate,
+  deactivate,
+};
+
+export default extension;

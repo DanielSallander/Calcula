@@ -4,8 +4,8 @@
 
 import React, { useState, useEffect, useCallback } from "react";
 import styled from "styled-components";
-import type { TaskPaneViewProps } from "../../../src/api";
-import { showToast } from "../../../src/api";
+import type { TaskPaneViewProps } from "@api";
+import { showToast } from "@api";
 import type { SuiteResult, TestResult } from "../lib/types";
 import {
   getResults,

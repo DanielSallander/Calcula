@@ -1,16 +1,12 @@
 //! FILENAME: app/extensions/Checkbox/index.ts
 // PURPOSE: In-Cell Checkbox extension entry point. Registers/unregisters all components.
-// CONTEXT: Called from extensions/index.ts during app initialization.
+// CONTEXT: Loaded by the ExtensionManager during app initialization.
 
+import type { ExtensionModule, ExtensionContext } from "@api/contract";
 import {
-  registerCellClickInterceptor,
-  registerStyleInterceptor,
-  registerMenuItem,
   ExtensionRegistry,
-  onAppEvent,
   AppEvents,
-} from "../../src/api";
-import { registerCellDecoration } from "../../src/api/cellDecorations";
+} from "@api";
 import { drawCheckbox } from "./rendering";
 import {
   checkboxStyleInterceptor,
@@ -36,18 +32,18 @@ const CHECKBOX_TOGGLE_COMMAND = "checkbox.toggle";
 const cleanupFns: (() => void)[] = [];
 
 // ============================================================================
-// Registration
+// Lifecycle
 // ============================================================================
 
-export function registerCheckboxExtension(): void {
-  console.log("[Checkbox] Registering...");
+function activate(context: ExtensionContext): void {
+  console.log("[Checkbox] Activating...");
 
   // 1. Register cell decoration for rendering checkboxes
-  const unregDecoration = registerCellDecoration("checkbox", drawCheckbox, 10);
+  const unregDecoration = context.grid.decorations.register("checkbox", drawCheckbox, 10);
   cleanupFns.push(unregDecoration);
 
   // 2. Register style interceptor to suppress TRUE/FALSE text
-  const unregStyleInterceptor = registerStyleInterceptor(
+  const unregStyleInterceptor = context.grid.styleInterceptors.register(
     "checkbox",
     checkboxStyleInterceptor,
     5, // Run before conditional formatting (priority 10)
@@ -55,7 +51,7 @@ export function registerCheckboxExtension(): void {
   cleanupFns.push(unregStyleInterceptor);
 
   // 3. Register cell click interceptor for toggling
-  const unregClickInterceptor = registerCellClickInterceptor(checkboxClickInterceptor);
+  const unregClickInterceptor = context.grid.cellClicks.registerClickInterceptor(checkboxClickInterceptor);
   cleanupFns.push(unregClickInterceptor);
 
   // 4. Track selection changes for Spacebar toggling
@@ -73,7 +69,7 @@ export function registerCheckboxExtension(): void {
   cleanupFns.push(unregCellChange);
 
   // 6. Refresh style cache on data/style changes
-  const unregDataChanged = onAppEvent(AppEvents.DATA_CHANGED, () => {
+  const unregDataChanged = context.events.on(AppEvents.DATA_CHANGED, () => {
     refreshStyleCache();
   });
   cleanupFns.push(unregDataChanged);
@@ -88,7 +84,7 @@ export function registerCheckboxExtension(): void {
   });
 
   // 8. Register Insert > Controls > Checkbox menu item
-  registerMenuItem("insert", {
+  context.ui.menus.registerItem("insert", {
     id: "insert.controls",
     label: "Controls",
     children: [
@@ -107,7 +103,7 @@ export function registerCheckboxExtension(): void {
   // 10. Initial style cache load
   refreshStyleCache();
 
-  console.log("[Checkbox] Registered successfully");
+  console.log("[Checkbox] Activated successfully");
 }
 
 // ============================================================================
@@ -236,14 +232,31 @@ async function insertCheckbox(): Promise<void> {
 }
 
 // ============================================================================
-// Unregistration
+// Deactivation
 // ============================================================================
 
-export function unregisterCheckboxExtension(): void {
-  console.log("[Checkbox] Unregistering...");
+function deactivate(): void {
+  console.log("[Checkbox] Deactivating...");
   for (const cleanup of cleanupFns) {
     cleanup();
   }
   cleanupFns.length = 0;
-  console.log("[Checkbox] Unregistered");
+  console.log("[Checkbox] Deactivated");
 }
+
+// ============================================================================
+// Extension Module Export
+// ============================================================================
+
+const extension: ExtensionModule = {
+  manifest: {
+    id: "calcula.checkbox",
+    name: "Checkbox",
+    version: "1.0.0",
+    description: "In-cell checkbox controls for boolean data entry.",
+  },
+  activate,
+  deactivate,
+};
+
+export default extension;

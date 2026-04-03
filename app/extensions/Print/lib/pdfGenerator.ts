@@ -3,8 +3,8 @@
 // CONTEXT: Called when user exports via File > Export to PDF.
 
 import { jsPDF } from "jspdf";
-import type { PrintData } from "../../../src/api/lib";
-import { indexToCol, colToIndex } from "../../../src/api/lib";
+import type { PrintData } from "@api/lib";
+import { indexToCol, colToIndex } from "@api/lib";
 
 // ============================================================================
 // Paper sizes in mm (same as printGenerator.ts)

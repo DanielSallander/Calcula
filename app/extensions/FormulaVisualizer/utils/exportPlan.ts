@@ -1,7 +1,7 @@
 //! FILENAME: app/extensions/FormulaVisualizer/utils/exportPlan.ts
 // PURPOSE: Export the formula evaluation plan as readable YAML text.
 
-import type { FormulaEvalPlan } from "../../../src/api";
+import type { FormulaEvalPlan } from "@api";
 
 export function formatPlanAsYaml(plan: FormulaEvalPlan): string {
   const lines: string[] = [];

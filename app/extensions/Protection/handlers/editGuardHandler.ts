@@ -6,7 +6,7 @@ import {
   canEditCell,
   showDialog,
   type EditGuardResult,
-} from "../../../src/api";
+} from "@api";
 import { isCurrentSheetProtected } from "../lib/protectionStore";
 
 /** Dialog ID for the protection warning modal. */

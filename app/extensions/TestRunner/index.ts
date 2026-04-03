@@ -5,14 +5,14 @@
 //          a task pane for browsing results.
 // NOTE: Default exports an ExtensionModule object per the contract.
 
-import type { ExtensionModule, ExtensionContext } from "../../src/api/contract";
+import type { ExtensionModule, ExtensionContext } from "@api/contract";
 import {
   registerTaskPane,
   unregisterTaskPane,
   openTaskPane,
   registerMenuItem,
   showToast,
-} from "../../src/api";
+} from "@api";
 import { TestRunnerPane } from "./components/TestRunnerPane";
 import {
   registerSuite,

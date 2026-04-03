@@ -1,16 +1,9 @@
 //! FILENAME: app/extensions/DataValidation/index.ts
-// PURPOSE: Data Validation extension entry point. Registers/unregisters all components.
-// CONTEXT: Called from extensions/index.ts during app initialization.
+// PURPOSE: Data Validation extension entry point. ExtensionModule lifecycle.
+// CONTEXT: Activated by the shell during app initialization.
 
+import type { ExtensionModule, ExtensionContext } from "@api/contract";
 import {
-  registerGridOverlay,
-  registerCellClickInterceptor,
-  registerOverlay,
-  unregisterOverlay,
-  registerDialog,
-  unregisterDialog,
-  registerCommitGuard,
-  onAppEvent,
   AppEvents,
   ExtensionRegistry,
   showOverlay,
@@ -20,7 +13,7 @@ import {
   getValidationPrompt,
   hasInCellDropdown,
   type OverlayRegistration,
-} from "../../src/api";
+} from "@api";
 import { renderDropdownChevrons, hitTestDropdownChevron } from "./rendering/dropdownChevronRenderer";
 import { renderInvalidCells, hitTestInvalidCell } from "./rendering/invalidCellRenderer";
 import {
@@ -51,20 +44,26 @@ const ERROR_DIALOG_ID = "data-validation-error";
 const CONFIG_DIALOG_ID = "data-validation-dialog";
 
 // ============================================================================
-// Cleanup tracking
+// State
 // ============================================================================
 
+let isActivated = false;
 const cleanupFns: (() => void)[] = [];
 
 // ============================================================================
-// Registration
+// Lifecycle
 // ============================================================================
 
-export function registerDataValidationExtension(): void {
-  console.log("[DataValidation] Registering...");
+function activate(context: ExtensionContext): void {
+  if (isActivated) {
+    console.warn("[DataValidation] Already activated, skipping.");
+    return;
+  }
+
+  console.log("[DataValidation] Activating...");
 
   // 1. Register grid overlay for dropdown chevrons
-  const unregChevronOverlay = registerGridOverlay({
+  const unregChevronOverlay = context.grid.overlays.register({
     type: "validation-dropdown",
     render: renderDropdownChevrons,
     hitTest: hitTestDropdownChevron,
@@ -73,7 +72,7 @@ export function registerDataValidationExtension(): void {
   cleanupFns.push(unregChevronOverlay);
 
   // 2. Register grid overlay for invalid cell circles
-  const unregInvalidOverlay = registerGridOverlay({
+  const unregInvalidOverlay = context.grid.overlays.register({
     type: "validation-invalid",
     render: renderInvalidCells,
     hitTest: hitTestInvalidCell,
@@ -82,39 +81,39 @@ export function registerDataValidationExtension(): void {
   cleanupFns.push(unregInvalidOverlay);
 
   // 3. Register the list dropdown overlay component
-  registerOverlay({
+  context.ui.overlays.register({
     id: DROPDOWN_OVERLAY_ID,
     component: ListDropdownOverlay,
     layer: "dropdown",
   });
-  cleanupFns.push(() => unregisterOverlay(DROPDOWN_OVERLAY_ID));
+  cleanupFns.push(() => context.ui.overlays.unregister(DROPDOWN_OVERLAY_ID));
 
   // 4. Register the input prompt tooltip overlay
-  registerOverlay({
+  context.ui.overlays.register({
     id: PROMPT_OVERLAY_ID,
     component: InputPromptTooltip,
     layer: "tooltip",
   });
-  cleanupFns.push(() => unregisterOverlay(PROMPT_OVERLAY_ID));
+  cleanupFns.push(() => context.ui.overlays.unregister(PROMPT_OVERLAY_ID));
 
   // 5. Register the error alert dialog
-  registerDialog({
+  context.ui.dialogs.register({
     id: ERROR_DIALOG_ID,
     component: ErrorAlertModal,
     priority: 100,
   });
-  cleanupFns.push(() => unregisterDialog(ERROR_DIALOG_ID));
+  cleanupFns.push(() => context.ui.dialogs.unregister(ERROR_DIALOG_ID));
 
   // 6. Register the config dialog
-  registerDialog({
+  context.ui.dialogs.register({
     id: CONFIG_DIALOG_ID,
     component: DataValidationDialog,
     priority: 50,
   });
-  cleanupFns.push(() => unregisterDialog(CONFIG_DIALOG_ID));
+  cleanupFns.push(() => context.ui.dialogs.unregister(CONFIG_DIALOG_ID));
 
   // 7. Register cell click interceptor for dropdown chevron clicks
-  const unregClick = registerCellClickInterceptor(async (row, col, event) => {
+  const unregClick = context.grid.cellClicks.registerClickInterceptor(async (row, col, event) => {
     // Check if this cell has an in-cell dropdown
     let hasDropdown = false;
     try {
@@ -160,11 +159,11 @@ export function registerDataValidationExtension(): void {
   cleanupFns.push(unregClick);
 
   // 8. Register the commit guard
-  const unregGuard = registerCommitGuard(validationCommitGuard);
+  const unregGuard = context.grid.editGuards.register(validationCommitGuard);
   cleanupFns.push(unregGuard);
 
   // 9. Register data menu items
-  registerDataValidationMenuItems();
+  registerDataValidationMenuItems(context);
 
   // 10. Subscribe to events
 
@@ -214,7 +213,7 @@ export function registerDataValidationExtension(): void {
   cleanupFns.push(unsubSelection);
 
   // Sheet changed: refresh validation state
-  const unsubSheet = onAppEvent(AppEvents.SHEET_CHANGED, () => {
+  const unsubSheet = context.events.on(AppEvents.SHEET_CHANGED, () => {
     hideOverlay(DROPDOWN_OVERLAY_ID);
     hideOverlay(PROMPT_OVERLAY_ID);
     setOpenDropdownCell(null);
@@ -234,7 +233,8 @@ export function registerDataValidationExtension(): void {
   // 11. Load initial validation state
   refreshValidationState();
 
-  console.log("[DataValidation] Registered successfully.");
+  isActivated = true;
+  console.log("[DataValidation] Activated successfully.");
 }
 
 // ============================================================================
@@ -246,11 +246,13 @@ function promptIsVisible(): boolean {
 }
 
 // ============================================================================
-// Unregistration
+// Deactivation
 // ============================================================================
 
-export function unregisterDataValidationExtension(): void {
-  console.log("[DataValidation] Unregistering...");
+function deactivate(): void {
+  if (!isActivated) return;
+
+  console.log("[DataValidation] Deactivating...");
 
   // Clear pending error alert resolver
   clearErrorAlertResolver();
@@ -274,5 +276,23 @@ export function unregisterDataValidationExtension(): void {
   // Reset state
   resetState();
 
-  console.log("[DataValidation] Unregistered.");
+  isActivated = false;
+  console.log("[DataValidation] Deactivated.");
 }
+
+// ============================================================================
+// Extension Module Export
+// ============================================================================
+
+const extension: ExtensionModule = {
+  manifest: {
+    id: "calcula.data-validation",
+    name: "Data Validation",
+    version: "1.0.0",
+    description: "Data validation rules, input prompts, error alerts, dropdown lists, and invalid data highlighting.",
+  },
+  activate,
+  deactivate,
+};
+
+export default extension;

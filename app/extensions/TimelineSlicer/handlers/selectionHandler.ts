@@ -5,9 +5,9 @@ import {
   addTaskPaneContextKey,
   removeTaskPaneContextKey,
   ExtensionRegistry,
-} from "../../../src/api";
+} from "@api";
 import { getTimelineById } from "../lib/timelineSlicerStore";
-import { requestOverlayRedraw } from "../../../src/api/gridOverlays";
+import { requestOverlayRedraw } from "@api/gridOverlays";
 import {
   TIMELINE_OPTIONS_TAB_ID,
   TimelineOptionsTabDefinition,

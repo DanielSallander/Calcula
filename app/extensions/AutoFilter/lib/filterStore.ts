@@ -2,7 +2,7 @@
 // PURPOSE: Module-level state management for the AutoFilter extension.
 // CONTEXT: Stores current filter state and provides functions to modify it.
 
-import type { AutoFilterInfo, AutoFilterResult } from "../../../src/api";
+import type { AutoFilterInfo, AutoFilterResult } from "@api";
 import type { FilterState } from "../types";
 
 /** Minimal selection type for filter operations. */
@@ -30,14 +30,14 @@ import {
   AppEvents,
   addGridRegions,
   removeGridRegionsByType,
-} from "../../../src/api";
+} from "@api";
 import {
   sortRangeByColumn,
   sortRange,
   getViewportCells,
   getStyle,
   setColumnCustomFilter,
-} from "../../../src/api/lib";
+} from "@api/lib";
 import { FilterEvents } from "./filterEvents";
 
 // ============================================================================

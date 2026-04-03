@@ -1,16 +1,11 @@
 //! FILENAME: app/extensions/ScriptNotebook/index.ts
-// PURPOSE: Script Notebook extension entry point.
+// PURPOSE: Script Notebook extension entry point. ExtensionModule lifecycle pattern.
 // CONTEXT: Registers the activity sidebar view and Developer menu item.
 //          Notebooks provide Jupyter-style multi-cell scripting with shared
 //          variables and snapshot-based rewind.
 
 import React from "react";
-import {
-  registerActivityView,
-  unregisterActivityView,
-  toggleActivityView,
-  registerMenuItem,
-} from "../../src/api";
+import type { ExtensionModule, ExtensionContext } from "@api/contract";
 import { NotebookPanel } from "./components/NotebookPanel";
 
 // ============================================================================
@@ -54,34 +49,40 @@ const NotebookIcon = React.createElement(
 );
 
 // ============================================================================
-// Cleanup tracking
+// State
 // ============================================================================
 
+let isActivated = false;
 const cleanupFns: (() => void)[] = [];
 
 // ============================================================================
-// Registration
+// Lifecycle
 // ============================================================================
 
-export function registerScriptNotebookExtension(): void {
-  console.log("[ScriptNotebook] Registering...");
+function activate(context: ExtensionContext): void {
+  if (isActivated) {
+    console.warn("[ScriptNotebook] Already activated, skipping.");
+    return;
+  }
+
+  console.log("[ScriptNotebook] Activating...");
 
   // 1. Register activity sidebar view
-  registerActivityView({
+  context.ui.activityBar.register({
     id: VIEW_ID,
     title: "Notebook",
     icon: NotebookIcon,
     component: NotebookPanel,
     priority: 45,
   });
-  cleanupFns.push(() => unregisterActivityView(VIEW_ID));
+  cleanupFns.push(() => context.ui.activityBar.unregister(VIEW_ID));
 
   // 2. Register Developer menu item
-  registerMenuItem("developer", {
+  context.ui.menus.registerItem("developer", {
     id: "developer:notebook",
     label: "Notebook",
     action: () => {
-      toggleActivityView(VIEW_ID);
+      context.ui.activityBar.toggle(VIEW_ID);
     },
   });
 
@@ -89,7 +90,7 @@ export function registerScriptNotebookExtension(): void {
   const handleKeyDown = (e: KeyboardEvent) => {
     if (e.ctrlKey && e.shiftKey && e.key === "N") {
       e.preventDefault();
-      toggleActivityView(VIEW_ID);
+      context.ui.activityBar.toggle(VIEW_ID);
     }
   };
   window.addEventListener("keydown", handleKeyDown, true);
@@ -97,15 +98,14 @@ export function registerScriptNotebookExtension(): void {
     window.removeEventListener("keydown", handleKeyDown, true),
   );
 
-  console.log("[ScriptNotebook] Registered successfully.");
+  isActivated = true;
+  console.log("[ScriptNotebook] Activated successfully.");
 }
 
-// ============================================================================
-// Unregistration
-// ============================================================================
+function deactivate(): void {
+  if (!isActivated) return;
 
-export function unregisterScriptNotebookExtension(): void {
-  console.log("[ScriptNotebook] Unregistering...");
+  console.log("[ScriptNotebook] Deactivating...");
 
   for (const fn of cleanupFns) {
     try {
@@ -116,5 +116,23 @@ export function unregisterScriptNotebookExtension(): void {
   }
   cleanupFns.length = 0;
 
-  console.log("[ScriptNotebook] Unregistered.");
+  isActivated = false;
+  console.log("[ScriptNotebook] Deactivated.");
 }
+
+// ============================================================================
+// Extension Module Export
+// ============================================================================
+
+const extension: ExtensionModule = {
+  manifest: {
+    id: "calcula.script-notebook",
+    name: "Script Notebook",
+    version: "1.0.0",
+    description: "Jupyter-style multi-cell scripting with shared variables and snapshot-based rewind.",
+  },
+  activate,
+  deactivate,
+};
+
+export default extension;

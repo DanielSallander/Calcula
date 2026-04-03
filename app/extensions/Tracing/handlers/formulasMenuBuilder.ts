@@ -2,21 +2,21 @@
 // PURPOSE: Registers the "Formulas" top-level menu with trace commands.
 // CONTEXT: Creates menu items for Trace Precedents, Trace Dependents, and Remove Arrows.
 
+import type { ExtensionContext } from "@api/contract";
 import {
-  registerMenu,
   IconTracePrecedents,
   IconTraceDependents,
   IconRemoveArrows,
   emitAppEvent,
   AppEvents,
-} from "../../../src/api";
-import type { MenuDefinition } from "../../../src/api";
+} from "@api";
+import type { MenuDefinition } from "@api";
 import {
   addPrecedentLevel,
   addDependentLevel,
   removeAllArrows,
 } from "../lib/tracingStore";
-import { getGridStateSnapshot } from "../../../src/api/grid";
+import { getGridStateSnapshot } from "@api/grid";
 
 // ============================================================================
 // Constants
@@ -32,7 +32,7 @@ const FORMULAS_MENU_ORDER = 45; // After Data (~42), before Conditional Formatti
 /**
  * Register the "Formulas" menu in the menu bar.
  */
-export function registerFormulasMenu(): void {
+export function registerFormulasMenu(context: ExtensionContext): void {
   const menu: MenuDefinition = {
     id: FORMULAS_MENU_ID,
     label: "Formulas",
@@ -86,5 +86,5 @@ export function registerFormulasMenu(): void {
     ],
   };
 
-  registerMenu(menu);
+  context.ui.menus.register(menu);
 }

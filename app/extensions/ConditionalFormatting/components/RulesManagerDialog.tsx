@@ -3,14 +3,14 @@
 // CONTEXT: Lists all CF rules for the current sheet, allows reorder, delete, edit, toggle.
 
 import React, { useState, useEffect, useCallback } from "react";
-import type { DialogProps } from "../../../src/api";
+import type { DialogProps } from "@api";
 import {
   deleteConditionalFormat,
   reorderConditionalFormats,
   updateConditionalFormat,
   restoreFocusToGrid,
-} from "../../../src/api";
-import type { ConditionalFormatDefinition } from "../../../src/api";
+} from "@api";
+import type { ConditionalFormatDefinition } from "@api";
 import { getRules, invalidateAndRefresh } from "../lib/cfStore";
 
 // ============================================================================

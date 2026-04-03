@@ -7,8 +7,8 @@ import {
   getViewportCells,
   indexToCol,
   getStyle,
-} from "../../../src/api/lib";
-import type { Selection } from "../../../src/api/types";
+} from "@api/lib";
+import type { Selection } from "@api/types";
 
 // ============================================================================
 // Range Detection

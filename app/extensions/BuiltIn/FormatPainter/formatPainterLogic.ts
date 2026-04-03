@@ -2,7 +2,7 @@
 // PURPOSE: Core logic for the Format Painter tool: capture source styles, apply to target.
 // CONTEXT: Called by the extension entry point. Uses the public API only (no deep core imports).
 
-import type { Selection } from "../../../src/api/types";
+import type { Selection } from "@api/types";
 import {
   getCell,
   setCellStyle,
@@ -16,7 +16,7 @@ import {
   ExtensionRegistry,
   registerEditGuard,
   dispatchGridAction,
-} from "../../../src/api";
+} from "@api";
 
 import {
   isFormatPainterActive,

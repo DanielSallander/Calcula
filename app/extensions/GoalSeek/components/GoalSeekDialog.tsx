@@ -3,13 +3,13 @@
 // CONTEXT: Two-phase dialog: input form, then result/status display.
 
 import React, { useState, useEffect, useCallback, useRef } from "react";
-import type { DialogProps } from "../../../src/api/uiTypes";
+import type { DialogProps } from "@api/uiTypes";
 import {
   getCell,
   updateCellsBatch,
   goalSeek,
   columnToLetter,
-} from "../../../src/api";
+} from "@api";
 
 // ============================================================================
 // Styles (CSS variables from app theme)

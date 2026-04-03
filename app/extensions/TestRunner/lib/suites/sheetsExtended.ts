@@ -9,14 +9,14 @@ import {
   unhideSheet,
   setTabColor,
   moveSheet,
-} from "../../../../src/api";
+} from "@api";
 import {
   getActiveSheet,
   getSheets,
   addSheet,
   deleteSheet,
   setActiveSheet,
-} from "../../../../src/api/lib";
+} from "@api/lib";
 
 export const sheetsExtendedSuite: TestSuite = {
   name: "Sheet Management Extended",

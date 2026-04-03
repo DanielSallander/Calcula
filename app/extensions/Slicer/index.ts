@@ -3,18 +3,16 @@
 // CONTEXT: Registers all slicer functionality with the extension system:
 //          grid overlays, event handlers, dialog, contextual ribbon tab.
 
+import type { ExtensionModule, ExtensionContext } from "@api/contract";
 import {
   ExtensionRegistry,
-  DialogExtensions,
-  onAppEvent,
   AppEvents,
-} from "../../src/api";
+} from "@api";
 import {
-  registerGridOverlay,
   requestOverlayRedraw,
   type OverlayRenderContext,
-} from "../../src/api/gridOverlays";
-import { getGridStateSnapshot } from "../../src/api/state";
+} from "@api/gridOverlays";
+import { getGridStateSnapshot } from "@api/state";
 
 import {
   SlicerManifest,
@@ -86,27 +84,23 @@ let lastMousedownCtrl = false;
 let dragStartPositions: Map<number, { x: number; y: number }> | null = null;
 
 // ============================================================================
-// Extension Lifecycle
+// Activation
 // ============================================================================
 
-/**
- * Register the slicer extension.
- * Call this during application initialization.
- */
-export function registerSlicerExtension(): void {
+function activate(context: ExtensionContext): void {
   console.log("[Slicer Extension] Registering...");
 
   // Register add-in manifest
   ExtensionRegistry.registerAddIn(SlicerManifest);
 
   // Register dialogs
-  DialogExtensions.registerDialog(InsertSlicerDialogDefinition);
-  DialogExtensions.registerDialog(SlicerSettingsDialogDefinition);
-  DialogExtensions.registerDialog(SlicerComputedPropsDialogDefinition);
+  context.ui.dialogs.register(InsertSlicerDialogDefinition);
+  context.ui.dialogs.register(SlicerSettingsDialogDefinition);
+  context.ui.dialogs.register(SlicerComputedPropsDialogDefinition);
 
   // Register grid overlay renderer for slicer panels
   cleanupFunctions.push(
-    registerGridOverlay({
+    context.grid.overlays.register({
       type: "slicer",
       render: (ctx: OverlayRenderContext) => {
         renderSlicer(ctx);
@@ -405,7 +399,7 @@ export function registerSlicerExtension(): void {
   // -----------------------------------------------------------------------
 
   cleanupFunctions.push(
-    onAppEvent(AppEvents.SHEET_CHANGED, () => {
+    context.events.on(AppEvents.SHEET_CHANGED, () => {
       refreshCache().catch(console.error);
     }),
   );
@@ -466,10 +460,11 @@ export function registerSlicerExtension(): void {
   console.log("[Slicer Extension] Registered successfully");
 }
 
-/**
- * Unregister the slicer extension.
- */
-export function unregisterSlicerExtension(): void {
+// ============================================================================
+// Deactivation
+// ============================================================================
+
+function deactivate(): void {
   console.log("[Slicer Extension] Unregistering...");
 
   for (const cleanup of cleanupFunctions) {
@@ -484,6 +479,9 @@ export function unregisterSlicerExtension(): void {
   gridContainer = null;
   pendingClick = null;
   dragStartPositions = null;
+
+  // Unregister from extension registries
+  ExtensionRegistry.unregisterAddIn(SlicerManifest.id);
 
   console.log("[Slicer Extension] Unregistered");
 }
@@ -625,3 +623,20 @@ function handleItemClick(
     }
   }
 }
+
+// ============================================================================
+// Extension Module Export
+// ============================================================================
+
+const extension: ExtensionModule = {
+  manifest: {
+    id: "calcula.slicer",
+    name: "Slicer",
+    version: "1.0.0",
+    description: "Interactive slicer panels for filtering tables and pivot tables.",
+  },
+  activate,
+  deactivate,
+};
+
+export default extension;

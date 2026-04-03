@@ -2,7 +2,7 @@
 // PURPOSE: Helper functions for named range display, parsing, and validation.
 // CONTEXT: Used by NameManagerDialog and NewNameDialog components.
 
-import { columnToLetter, letterToColumn } from "../../../src/api";
+import { columnToLetter, letterToColumn } from "@api";
 
 /**
  * Build a refersTo formula string from selection coordinates.

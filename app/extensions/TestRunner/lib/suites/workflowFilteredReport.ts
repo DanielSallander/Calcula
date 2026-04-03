@@ -12,7 +12,7 @@ import {
   getHiddenRows,
   clearAutoFilterCriteria,
   sortRangeByColumn,
-} from "../../../../src/api";
+} from "@api";
 
 const A = AREA_WF_FILTERED_REPORT;
 

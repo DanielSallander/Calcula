@@ -17,7 +17,7 @@ import {
   getAllowEditRanges,
   canPerformAction,
   verifyEditRangePassword,
-} from "../../../../src/api";
+} from "@api";
 
 const A = AREA_ADV_PROTECTION;
 

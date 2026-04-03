@@ -19,8 +19,8 @@ import {
   clearConditionalFormatsInRange,
   calculateNow,
   getSelectionAggregations,
-} from "../../../../src/api";
-import { evaluateConditionalFormats } from "../../../../src/api/backend";
+} from "@api";
+import { evaluateConditionalFormats } from "@api/backend";
 
 const A = AREA_PIPELINE_FSA;
 

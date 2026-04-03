@@ -11,8 +11,8 @@ import {
   onAppEvent,
   setColumnHeaderOverrideProvider,
   registerColumnHeaderClickInterceptor,
-} from "../../../src/api";
-import type { ColumnHeaderOverride, ColumnHeaderClickResult } from "../../../src/api";
+} from "@api";
+import type { ColumnHeaderOverride, ColumnHeaderClickResult } from "@api";
 import { getTableAtCell, getAllTables, type Table } from "../lib/tableStore";
 import { TableDesignTabDefinition, TABLE_DESIGN_TAB_ID } from "../manifest";
 import { TableEvents } from "../lib/tableEvents";

@@ -4,9 +4,9 @@
 
 import React, { useState, useEffect } from "react";
 import { css } from "@emotion/css";
-import type { DialogProps } from "../../../src/api";
-import { getSheets } from "../../../src/api";
-import { getAllPivotTables } from "../../../src/api/backend";
+import type { DialogProps } from "@api";
+import { getSheets } from "@api";
+import { getAllPivotTables } from "@api/backend";
 import { getPivotDateFields } from "../lib/timeline-slicer-api";
 import { createTimelineAsync } from "../lib/timelineSlicerStore";
 

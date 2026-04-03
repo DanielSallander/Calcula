@@ -3,10 +3,10 @@
 // CONTEXT: Registered as an overlay via OverlayExtensions. Reads from the Zustand store.
 
 import React, { useRef, useEffect } from "react";
-import type { OverlayProps } from "../../../src/api/uiTypes";
+import type { OverlayProps } from "@api/uiTypes";
 import { useAutocompleteStore } from "./useAutocompleteStore";
 import type { ScoredSuggestion } from "./functionCatalog";
-import type { FunctionInfo } from "../../../src/api/types";
+import type { FunctionInfo } from "@api/types";
 import * as S from "./FormulaAutocompleteOverlay.styles";
 
 const DROPDOWN_WIDTH = 340;

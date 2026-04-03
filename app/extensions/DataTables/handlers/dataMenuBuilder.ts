@@ -1,7 +1,7 @@
 //! FILENAME: app/extensions/DataTables/handlers/dataMenuBuilder.ts
 // PURPOSE: Registers Data Table items in the Data menu.
 
-import { registerMenuItem, DialogExtensions } from "../../../src/api";
+import type { ExtensionContext } from "@api/contract";
 
 // ============================================================================
 // State
@@ -29,13 +29,13 @@ export function setCurrentSelection(
 // Menu Registration
 // ============================================================================
 
-export function registerDataTableMenuItems(): void {
-  registerMenuItem("data", {
+export function registerDataTableMenuItems(context: ExtensionContext): void {
+  context.ui.menus.registerItem("data", {
     id: "data:dataTable",
     label: "What-If Data Table...",
     action: () => {
       const sel = currentSelection;
-      DialogExtensions.openDialog("data-table", {
+      context.ui.dialogs.show("data-table", {
         activeRow: sel?.activeRow ?? 0,
         activeCol: sel?.activeCol ?? 0,
         endRow: sel?.endRow ?? 0,

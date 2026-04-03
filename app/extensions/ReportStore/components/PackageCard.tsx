@@ -2,7 +2,7 @@
 // PURPOSE: Card component displaying package metadata in the browse dialog.
 
 import React from "react";
-import type { PackageInfo } from "../../../src/api/distribution";
+import type { PackageInfo } from "@api/distribution";
 
 interface PackageCardProps {
   pkg: PackageInfo;

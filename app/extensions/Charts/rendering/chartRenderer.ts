@@ -14,7 +14,7 @@ import {
   getGridRegions,
   type OverlayRenderContext,
   type OverlayHitTestContext,
-} from "../../../src/api/gridOverlays";
+} from "@api/gridOverlays";
 
 import { getChartById, getAllCharts } from "../lib/chartStore";
 import { readChartDataResolved } from "../lib/chartDataReader";

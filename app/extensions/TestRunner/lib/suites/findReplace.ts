@@ -5,7 +5,7 @@
 import type { TestSuite } from "../types";
 import { assertTrue, assertEqual, expectCellValue } from "../assertions";
 import { AREA_FIND_REPLACE } from "../testArea";
-import { findAll, replaceAll, replaceSingle } from "../../../../src/api";
+import { findAll, replaceAll, replaceSingle } from "@api";
 
 const A = AREA_FIND_REPLACE;
 

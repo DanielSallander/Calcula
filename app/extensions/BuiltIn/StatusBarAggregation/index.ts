@@ -4,8 +4,8 @@
 //          (Average, Count, Sum, etc.) for the current cell selection.
 // NOTE: Default exports an ExtensionModule object per the contract.
 
-import type { ExtensionModule } from "../../../src/api/contract";
-import { registerStatusBarItem, unregisterStatusBarItem } from "../../../src/api/ui";
+import type { ExtensionModule } from "@api/contract";
+import { registerStatusBarItem, unregisterStatusBarItem } from "@api/ui";
 import { StatusBarAggregationWidget } from "./StatusBarAggregationWidget";
 
 const STATUS_BAR_ITEM_ID = "calcula.statusbar.aggregation";

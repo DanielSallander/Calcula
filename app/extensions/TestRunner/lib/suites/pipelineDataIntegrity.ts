@@ -17,9 +17,9 @@ import {
   addConditionalFormat,
   clearConditionalFormatsInRange,
   getAllConditionalFormats,
-} from "../../../../src/api";
-import { applyFormatting, getStyle } from "../../../../src/api/lib";
-import { evaluateConditionalFormats } from "../../../../src/api/backend";
+} from "@api";
+import { applyFormatting, getStyle } from "@api/lib";
+import { evaluateConditionalFormats } from "@api/backend";
 
 const A = AREA_PIPELINE_INTEGRITY;
 

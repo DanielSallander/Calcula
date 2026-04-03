@@ -1,9 +1,9 @@
 //! FILENAME: app/extensions/pivot/components/CreatePivotDialog.tsx
 
 import React, { useState, useEffect, useCallback, useRef } from 'react';
-import { pivot } from '../../../src/api/pivot';
-import { addSheet, getSheets, setActiveSheetApi, indexToCol, colToIndex, detectDataRegion, useGridState } from '../../../src/api';
-import { emitAppEvent, AppEvents } from '../../../src/api/events';
+import { pivot } from '@api/pivot';
+import { addSheet, getSheets, setActiveSheetApi, indexToCol, colToIndex, detectDataRegion, useGridState } from '@api';
+import { emitAppEvent, AppEvents } from '@api/events';
 
 /** Excel-compatible grid limits (0-indexed max values). */
 const MAX_ROW_INDEX = 1048576 - 1; // 1,048,575

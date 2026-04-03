@@ -2,7 +2,7 @@
 // PURPOSE: Canvas drawing functions for conditional formatting icon sets.
 // CONTEXT: Provides a lookup table mapping (IconSetType, iconIndex) to draw functions.
 
-import type { IconSetType } from "../../../src/api";
+import type { IconSetType } from "@api";
 
 // ============================================================================
 // Shape Primitives

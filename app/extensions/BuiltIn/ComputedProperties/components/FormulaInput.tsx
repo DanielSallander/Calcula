@@ -6,18 +6,18 @@
 import React, { useRef, useCallback, useEffect, useState } from "react";
 import {
   registerCellClickInterceptor,
-} from "../../../../src/api/cellClickInterceptors";
+} from "@api/cellClickInterceptors";
 import {
   isFormulaAutocompleteVisible,
   AutocompleteEvents,
-} from "../../../../src/api/formulaAutocomplete";
-import { dispatchGridAction } from "../../../../src/api/gridDispatch";
+} from "@api/formulaAutocomplete";
+import { dispatchGridAction } from "@api/gridDispatch";
 import {
   setFormulaReferences,
   clearFormulaReferences,
-} from "../../../../src/api/grid";
-import { columnToLetter } from "../../../../src/api/types";
-import { parseFormulaReferences } from "../../../../src/api/index";
+} from "@api/grid";
+import { columnToLetter } from "@api/types";
+import { parseFormulaReferences } from "@api/index";
 
 // ============================================================================
 // Types

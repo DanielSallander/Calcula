@@ -3,14 +3,14 @@
 // CONTEXT: Opened from the Data menu. Configures validation criteria, input messages, and error alerts.
 
 import React, { useState, useEffect, useCallback } from "react";
-import type { DialogProps } from "../../../src/api";
+import type { DialogProps } from "@api";
 import type {
   DataValidationType,
   DataValidationOperator,
   DataValidationAlertStyle,
   DataValidation,
   DataValidationRule,
-} from "../../../src/api";
+} from "@api";
 import {
   getDataValidation,
   setDataValidation,
@@ -26,7 +26,7 @@ import {
   createCustomRule,
   createDateRule,
   createTimeRule,
-} from "../../../src/api";
+} from "@api";
 import { refreshValidationState, getCurrentSelection } from "../lib/validationStore";
 import type { ValidationDialogData } from "../types";
 import { SettingsTab } from "./tabs/SettingsTab";

@@ -13,8 +13,8 @@ import {
   replaceSingle,
   cellEvents,
   columnToLetter,
-} from "../../src/api";
-import type { ActivityViewProps } from "../../src/api/uiTypes";
+} from "@api";
+import type { ActivityViewProps } from "@api/uiTypes";
 import { useFindStore } from "../BuiltIn/FindReplaceDialog/useFindStore";
 
 // SVG micro-icons for the search panel

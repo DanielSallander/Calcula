@@ -2,10 +2,11 @@
 // PURPOSE: Custom Fill Lists extension entry point.
 // CONTEXT: Registers dialog and Edit menu item for managing custom auto-fill series.
 
+import type { ExtensionModule, ExtensionContext } from "@api/contract";
 import {
   DialogExtensions,
   registerMenuItem,
-} from "../../src/api";
+} from "@api";
 import { CustomFillListsDialog } from "./components/CustomFillListsDialog";
 
 // ============================================================================
@@ -15,11 +16,11 @@ import { CustomFillListsDialog } from "./components/CustomFillListsDialog";
 const cleanupFns: (() => void)[] = [];
 
 // ============================================================================
-// Registration
+// Lifecycle
 // ============================================================================
 
-export function registerCustomFillListsExtension(): void {
-  console.log("[CustomFillLists] Registering...");
+function activate(_context: ExtensionContext): void {
+  console.log("[CustomFillLists] Activating...");
 
   // 1. Register dialog
   DialogExtensions.registerDialog({
@@ -38,15 +39,11 @@ export function registerCustomFillListsExtension(): void {
     },
   });
 
-  console.log("[CustomFillLists] Registered successfully.");
+  console.log("[CustomFillLists] Activated successfully.");
 }
 
-// ============================================================================
-// Unregistration
-// ============================================================================
-
-export function unregisterCustomFillListsExtension(): void {
-  console.log("[CustomFillLists] Unregistering...");
+function deactivate(): void {
+  console.log("[CustomFillLists] Deactivating...");
 
   for (const fn of cleanupFns) {
     try {
@@ -57,5 +54,21 @@ export function unregisterCustomFillListsExtension(): void {
   }
   cleanupFns.length = 0;
 
-  console.log("[CustomFillLists] Unregistered.");
+  console.log("[CustomFillLists] Deactivated.");
 }
+
+// ============================================================================
+// Extension Module
+// ============================================================================
+
+const extension: ExtensionModule = {
+  manifest: {
+    id: "calcula.custom-fill-lists",
+    name: "Custom Fill Lists",
+    version: "1.0.0",
+    description: "Manage custom auto-fill series for drag-fill operations.",
+  },
+  activate,
+  deactivate,
+};
+export default extension;

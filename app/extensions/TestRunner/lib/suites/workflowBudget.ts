@@ -18,8 +18,8 @@ import {
   DEFAULT_PROMPT,
   beginUndoTransaction,
   commitUndoTransaction,
-} from "../../../../src/api";
-import { evaluateConditionalFormats } from "../../../../src/api/backend";
+} from "@api";
+import { evaluateConditionalFormats } from "@api/backend";
 
 const A = AREA_WF_BUDGET;
 

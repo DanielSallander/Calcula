@@ -1,15 +1,8 @@
 //! FILENAME: app/extensions/ScriptEditor/index.ts
-// PURPOSE: Script Editor extension entry point.
+// PURPOSE: Script Editor extension entry point. ExtensionModule lifecycle pattern.
 // CONTEXT: Registers the task pane, Developer menu items, and cross-window event bridge.
-//          Called from extensions/index.ts during app initialization.
 
-import {
-  registerTaskPane,
-  unregisterTaskPane,
-  registerMenu,
-  openTaskPane,
-  showTaskPaneContainer,
-} from "../../src/api";
+import type { ExtensionModule, ExtensionContext } from "@api/contract";
 import { ScriptEditorPane } from "./components/ScriptEditorPane";
 import { openAdvancedEditor } from "./lib/openEditorWindow";
 import { onGridNeedsRefresh } from "./lib/crossWindowEvents";
@@ -21,20 +14,26 @@ import { onGridNeedsRefresh } from "./lib/crossWindowEvents";
 const SCRIPT_PANE_ID = "script-editor";
 
 // ============================================================================
-// Cleanup tracking
+// State
 // ============================================================================
 
+let isActivated = false;
 const cleanupFns: (() => void)[] = [];
 
 // ============================================================================
-// Registration
+// Lifecycle
 // ============================================================================
 
-export function registerScriptEditorExtension(): void {
-  console.log("[ScriptEditor] Registering...");
+function activate(context: ExtensionContext): void {
+  if (isActivated) {
+    console.warn("[ScriptEditor] Already activated, skipping.");
+    return;
+  }
+
+  console.log("[ScriptEditor] Activating...");
 
   // 1. Register task pane
-  registerTaskPane({
+  context.ui.taskPanes.register({
     id: SCRIPT_PANE_ID,
     title: "Script Editor",
     component: ScriptEditorPane,
@@ -42,10 +41,10 @@ export function registerScriptEditorExtension(): void {
     priority: 50,
     closable: true,
   });
-  cleanupFns.push(() => unregisterTaskPane(SCRIPT_PANE_ID));
+  cleanupFns.push(() => context.ui.taskPanes.unregister(SCRIPT_PANE_ID));
 
   // 2. Register Developer menu (simple + advanced editor)
-  registerMenu({
+  context.ui.menus.register({
     id: "developer",
     label: "Developer",
     order: 90,
@@ -54,8 +53,8 @@ export function registerScriptEditorExtension(): void {
         id: "developer:scriptEditor",
         label: "Script Editor",
         action: () => {
-          openTaskPane(SCRIPT_PANE_ID);
-          showTaskPaneContainer();
+          context.ui.taskPanes.open(SCRIPT_PANE_ID);
+          context.ui.taskPanes.showContainer();
         },
       },
       {
@@ -81,15 +80,14 @@ export function registerScriptEditorExtension(): void {
     unlistenGridRefresh?.();
   });
 
-  console.log("[ScriptEditor] Registered successfully.");
+  isActivated = true;
+  console.log("[ScriptEditor] Activated successfully.");
 }
 
-// ============================================================================
-// Unregistration
-// ============================================================================
+function deactivate(): void {
+  if (!isActivated) return;
 
-export function unregisterScriptEditorExtension(): void {
-  console.log("[ScriptEditor] Unregistering...");
+  console.log("[ScriptEditor] Deactivating...");
 
   for (const fn of cleanupFns) {
     try {
@@ -100,5 +98,23 @@ export function unregisterScriptEditorExtension(): void {
   }
   cleanupFns.length = 0;
 
-  console.log("[ScriptEditor] Unregistered.");
+  isActivated = false;
+  console.log("[ScriptEditor] Deactivated.");
 }
+
+// ============================================================================
+// Extension Module Export
+// ============================================================================
+
+const extension: ExtensionModule = {
+  manifest: {
+    id: "calcula.script-editor",
+    name: "Script Editor",
+    version: "1.0.0",
+    description: "In-app script editor and advanced Monaco editor for TypeScript scripting.",
+  },
+  activate,
+  deactivate,
+};
+
+export default extension;

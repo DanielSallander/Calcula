@@ -2,9 +2,9 @@
 // PURPOSE: Fetch, cache, and filter the formula function catalog and named ranges.
 // CONTEXT: Provides ranked/filtered results for the autocomplete dropdown.
 
-import { getAllFunctions, getAllNamedRanges } from "../../../src/api/lib";
-import type { FunctionInfo } from "../../../src/api/types";
-import type { NamedRange } from "../../../src/api/lib";
+import { getAllFunctions, getAllNamedRanges } from "@api/lib";
+import type { FunctionInfo } from "@api/types";
+import type { NamedRange } from "@api/lib";
 
 // ============================================================================
 // Common functions that should appear at the top of results

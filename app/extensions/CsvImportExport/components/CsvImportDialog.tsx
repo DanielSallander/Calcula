@@ -3,7 +3,7 @@
 // CONTEXT: Registered as a dialog via DialogExtensions. Opened from Data > Get Data > CSV.
 
 import React, { useState, useEffect, useCallback, useMemo } from "react";
-import type { DialogProps } from "../../../src/api/uiTypes";
+import type { DialogProps } from "@api/uiTypes";
 import {
   updateCellsBatch,
   beginUndoTransaction,
@@ -13,9 +13,9 @@ import {
   addSheet,
   setActiveSheet,
   getSheets,
-} from "../../../src/api";
-import type { CellUpdateInput } from "../../../src/api";
-import { invokeBackend } from "../../../src/api/backend";
+} from "@api";
+import type { CellUpdateInput } from "@api";
+import { invokeBackend } from "@api/backend";
 import { open } from "@tauri-apps/plugin-dialog";
 import {
   parseCsv,

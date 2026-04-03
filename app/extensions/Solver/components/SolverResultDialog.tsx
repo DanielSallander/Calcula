@@ -2,12 +2,12 @@
 // PURPOSE: Solver Result dialog - shows solution status with Accept/Revert options.
 
 import React, { useState, useEffect, useCallback, useRef } from "react";
-import type { DialogProps } from "../../../src/api/uiTypes";
+import type { DialogProps } from "@api/uiTypes";
 import {
   solverRevert,
   columnToLetter,
-} from "../../../src/api";
-import type { SolverResultData, SolverVariableValue } from "../../../src/api";
+} from "@api";
+import type { SolverResultData, SolverVariableValue } from "@api";
 
 // ============================================================================
 // Styles

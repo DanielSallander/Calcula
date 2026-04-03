@@ -5,21 +5,21 @@
 //          narrow bar so the grid is interactive for cell-click reference insertion.
 
 import React, { useEffect, useState, useCallback, useRef } from "react";
-import type { DialogProps } from "../../../src/api/uiTypes";
+import type { DialogProps } from "@api/uiTypes";
 import {
   getComputedProperties,
   getAvailableAttributes,
   addComputedProperty,
   updateComputedProperty,
   removeComputedProperty,
-} from "../../../src/api/lib";
+} from "@api/lib";
 import type {
   ComputedPropertyData,
   ComputedPropertyResult,
-} from "../../../src/api/lib";
-import { columnToLetter } from "../../../src/api/types";
-import { dispatchGridAction } from "../../../src/api/gridDispatch";
-import { setColumnWidth, setRowHeight } from "../../../src/api/grid";
+} from "@api/lib";
+import { columnToLetter } from "@api/types";
+import { dispatchGridAction } from "@api/gridDispatch";
+import { setColumnWidth, setRowHeight } from "@api/grid";
 import { PropertyRow } from "./components/PropertyRow";
 import { FormulaInput } from "./components/FormulaInput";
 

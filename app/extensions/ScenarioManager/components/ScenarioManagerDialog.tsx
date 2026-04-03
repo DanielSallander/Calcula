@@ -2,7 +2,7 @@
 // PURPOSE: Scenario Manager dialog - create, edit, show, and delete scenarios.
 
 import React, { useState, useEffect, useCallback, useRef } from "react";
-import type { DialogProps } from "../../../src/api/uiTypes";
+import type { DialogProps } from "@api/uiTypes";
 import {
   scenarioList,
   scenarioAdd,
@@ -10,8 +10,8 @@ import {
   scenarioShow,
   columnToLetter,
   DialogExtensions,
-} from "../../../src/api";
-import type { Scenario, ScenarioCell } from "../../../src/api";
+} from "@api";
+import type { Scenario, ScenarioCell } from "@api";
 
 // ============================================================================
 // Styles

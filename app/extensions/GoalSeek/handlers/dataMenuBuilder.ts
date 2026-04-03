@@ -1,8 +1,8 @@
 //! FILENAME: app/extensions/GoalSeek/handlers/dataMenuBuilder.ts
 // PURPOSE: Registers the "Goal Seek..." item in the Data menu.
-// CONTEXT: Uses registerMenuItem to append to the existing "data" menu.
+// CONTEXT: Uses ExtensionContext to register menu items and show dialogs.
 
-import { registerMenuItem, DialogExtensions } from "../../../src/api";
+import type { ExtensionContext } from "@api/contract";
 
 // ============================================================================
 // State
@@ -30,19 +30,19 @@ export function setCurrentSelection(
  * Register the "Goal Seek..." item in the Data menu.
  * Assumes the "data" menu was already created by AutoFilter.
  */
-export function registerGoalSeekMenuItem(): void {
-  registerMenuItem("data", {
+export function registerGoalSeekMenuItem(context: ExtensionContext): void {
+  context.ui.menus.registerItem("data", {
     id: "data:goalSeek:separator",
     label: "",
     separator: true,
   });
 
-  registerMenuItem("data", {
+  context.ui.menus.registerItem("data", {
     id: "data:goalSeek",
     label: "Goal Seek...",
     action: () => {
       const sel = currentSelection;
-      DialogExtensions.openDialog("goal-seek", {
+      context.ui.dialogs.show("goal-seek", {
         activeRow: sel?.activeRow ?? 0,
         activeCol: sel?.activeCol ?? 0,
       });

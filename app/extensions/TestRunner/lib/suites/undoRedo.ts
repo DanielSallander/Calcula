@@ -6,7 +6,7 @@
 import type { TestSuite } from "../types";
 import { expectCellValue, expectCellEmpty, assertTrue } from "../assertions";
 import { AREA_UNDO_REDO } from "../testArea";
-import { redo as tauriRedo } from "../../../../src/api";
+import { redo as tauriRedo } from "@api";
 
 const A = AREA_UNDO_REDO;
 

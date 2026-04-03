@@ -2,7 +2,7 @@
 // PURPOSE: Type definitions for the AutoFilter extension.
 // CONTEXT: Used internally by the AutoFilter extension.
 
-import type { AutoFilterInfo } from "../../src/api";
+import type { AutoFilterInfo } from "@api";
 
 /**
  * Module-level state for the AutoFilter extension.

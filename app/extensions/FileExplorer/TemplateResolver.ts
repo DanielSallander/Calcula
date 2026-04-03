@@ -3,7 +3,7 @@
 //          against the spreadsheet grid via the evaluate_expressions Tauri command.
 // CONTEXT: Used by FileViewerPane to render resolved content in preview mode.
 
-import { evaluateExpressions } from "../../src/api/backend";
+import { evaluateExpressions } from "@api/backend";
 
 /** Matches {{ expression }} blocks, non-greedy */
 const TEMPLATE_RE = /\{\{(.+?)\}\}/g;

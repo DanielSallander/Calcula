@@ -5,7 +5,7 @@
 import type { TestSuite } from "../types";
 import { assertTrue, expectCellContains } from "../assertions";
 import { AREA_GOAL_SEEK } from "../testArea";
-import { goalSeek } from "../../../../src/api";
+import { goalSeek } from "@api";
 
 const A = AREA_GOAL_SEEK;
 

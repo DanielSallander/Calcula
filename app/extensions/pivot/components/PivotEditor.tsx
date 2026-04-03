@@ -6,7 +6,7 @@ import { DropZones } from './DropZones';
 import { ValueFieldSettingsModal, type ValueFieldSettings } from './ValueFieldSettingsModal';
 import { NumberFormatModal } from './NumberFormatModal';
 import { usePivotEditorState } from './usePivotEditorState';
-import { pivot } from '../../../src/api/pivot';
+import { pivot } from '@api/pivot';
 import { TableFieldList } from '../../_shared/components/TableFieldList';
 import type {
   SourceField,

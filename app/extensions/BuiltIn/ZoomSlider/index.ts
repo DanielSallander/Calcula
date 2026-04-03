@@ -4,8 +4,8 @@
 //          with +/- buttons, a draggable slider, and a clickable percentage that
 //          opens a preset zoom menu.
 
-import type { ExtensionModule } from "../../../src/api/contract";
-import { registerStatusBarItem, unregisterStatusBarItem } from "../../../src/api/ui";
+import type { ExtensionModule } from "@api/contract";
+import { registerStatusBarItem, unregisterStatusBarItem } from "@api/ui";
 import { ZoomSliderWidget } from "./ZoomSliderWidget";
 
 const STATUS_BAR_ITEM_ID = "calcula.statusbar.zoom";

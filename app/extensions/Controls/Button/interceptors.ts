@@ -4,12 +4,12 @@
 //          suppresses default cell text for button cells,
 //          and changes cursor on hover.
 
-import type { Selection, StyleData } from "../../../src/core/types";
+import type { Selection, StyleData } from "@api";
 import type {
   IStyleOverride,
   BaseStyleInfo,
   CellCoords,
-} from "../../../src/api/styleInterceptors";
+} from "@api/styleInterceptors";
 import { getDesignMode } from "../lib/designMode";
 
 // ============================================================================

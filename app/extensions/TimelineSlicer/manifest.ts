@@ -5,7 +5,7 @@ import type {
   AddInManifest,
   DialogDefinition,
   DialogProps,
-} from "../../src/api";
+} from "@api";
 import React from "react";
 import { InsertTimelineDialog } from "./components/InsertTimelineDialog";
 import { TimelineSlicerSettingsDialog } from "./components/TimelineSlicerSettingsDialog";

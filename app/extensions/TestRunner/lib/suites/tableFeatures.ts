@@ -10,7 +10,7 @@ import {
   deleteTable,
   getAllTables,
   sortRangeByColumn,
-} from "../../../../src/api/backend";
+} from "@api/backend";
 import {
   addConditionalFormat,
   getAllConditionalFormats,
@@ -23,8 +23,8 @@ import {
   DEFAULT_ERROR_ALERT,
   DEFAULT_PROMPT,
   calculateNow,
-} from "../../../../src/api";
-import { evaluateConditionalFormats } from "../../../../src/api/backend";
+} from "@api";
+import { evaluateConditionalFormats } from "@api/backend";
 
 const A = AREA_TABLE_FEATURES;
 

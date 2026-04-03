@@ -2,10 +2,10 @@
 //! PURPOSE: Document Theme extension - Page Layout ribbon tab with theme management.
 //! CONTEXT: Provides theme gallery, theme color/font pickers.
 
-import type { ExtensionModule, ExtensionContext } from "../../../src/api/contract";
-import { ExtensionRegistry } from "../../../src/api/extensions";
-import { AppEvents, onAppEvent } from "../../../src/api/events";
-import { markSheetDirty } from "../../../src/api/styleInterceptors";
+import type { ExtensionModule, ExtensionContext } from "@api/contract";
+import { ExtensionRegistry } from "@api/extensions";
+import { AppEvents, onAppEvent } from "@api/events";
+import { markSheetDirty } from "@api/styleInterceptors";
 import { PageLayoutTab } from "./components/PageLayoutTab";
 
 const PAGE_LAYOUT_TAB_ID = "page-layout";

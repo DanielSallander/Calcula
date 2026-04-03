@@ -2,13 +2,13 @@
 // PURPOSE: Hit-test logic for trace arrows (double-click navigation).
 // CONTEXT: Registered as the hit-test function for the "tracing" grid overlay.
 
-import type { OverlayHitTestContext, OverlayRenderContext } from "../../../src/api";
+import type { OverlayHitTestContext, OverlayRenderContext } from "@api";
 import {
   overlayGetColumnX,
   overlayGetRowY,
   overlayGetColumnWidth,
   overlayGetRowHeight,
-} from "../../../src/api";
+} from "@api";
 import { getArrows } from "../lib/tracingStore";
 import type { TraceArrow } from "../types";
 

@@ -1,7 +1,7 @@
 //! FILENAME: app/extensions/FormulaVisualizer/types.ts
 // PURPOSE: Local types for the FormulaVisualizer extension.
 
-import type { EvalPlanNode } from "../../src/api";
+import type { EvalPlanNode } from "@api";
 
 /** A node with computed layout position and visual state. */
 export interface LayoutNode extends EvalPlanNode {

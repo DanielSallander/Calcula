@@ -5,9 +5,9 @@
 // skip blanks and transpose, and a Paste Link button.
 
 import React, { useState, useCallback } from "react";
-import type { DialogProps } from "../../../src/api/uiTypes";
-import { useGridState } from "../../../src/api";
-import { getInternalClipboard } from "../../../src/api/lib";
+import type { DialogProps } from "@api/uiTypes";
+import { useGridState } from "@api";
+import { getInternalClipboard } from "@api/lib";
 import { executePasteSpecial, executePasteLink } from "./pasteSpecialExecute";
 import type { PasteAttribute, PasteOperation } from "./types";
 import { DEFAULT_PASTE_SPECIAL_OPTIONS } from "./types";

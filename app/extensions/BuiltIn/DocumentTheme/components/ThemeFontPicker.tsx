@@ -3,13 +3,13 @@
 
 import React, { useState, useEffect, useRef, useCallback } from "react";
 import styled from "styled-components";
-import type { ThemeDefinitionData } from "../../../../src/core/types/types";
+import type { ThemeDefinitionData } from "@api";
 import {
   getDocumentTheme,
   setDocumentTheme,
   listBuiltinThemes,
-} from "../../../../src/api/theme";
-import { onAppEvent, AppEvents } from "../../../../src/api/events";
+} from "@api/theme";
+import { onAppEvent, AppEvents } from "@api/events";
 
 const v = (name: string) => `var(${name})`;
 

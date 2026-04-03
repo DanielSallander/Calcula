@@ -12,7 +12,7 @@ import {
   evalFormulaStepOut,
   evalFormulaRestart,
   evalFormulaClose,
-} from "../../../../src/api";
+} from "@api";
 
 const A = AREA_FORMULA_EVAL;
 

@@ -3,12 +3,12 @@
 // CONTEXT: Allows users to set which cells are locked/unlocked before protecting a sheet.
 
 import React, { useState, useEffect } from "react";
-import type { DialogProps } from "../../../src/api";
+import type { DialogProps } from "@api";
 import {
   getCellProtection,
   setCellProtection,
   useGridState,
-} from "../../../src/api";
+} from "@api";
 
 // ============================================================================
 // Styles

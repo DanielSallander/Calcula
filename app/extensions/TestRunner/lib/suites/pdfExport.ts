@@ -7,7 +7,7 @@
 import type { TestSuite } from "../types";
 import { assertTrue, expectNotNull } from "../assertions";
 import { AREA_PDF_EXPORT } from "../testArea";
-import { getPrintData } from "../../../../src/api/backend";
+import { getPrintData } from "@api/backend";
 import { generatePdf } from "../../../Print/lib/pdfGenerator";
 
 const A = AREA_PDF_EXPORT;

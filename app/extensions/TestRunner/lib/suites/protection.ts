@@ -19,7 +19,7 @@ import {
   protectWorkbook,
   unprotectWorkbook,
   isWorkbookProtected,
-} from "../../../../src/api";
+} from "@api";
 
 const A = AREA_PROTECTION;
 

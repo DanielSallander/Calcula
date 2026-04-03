@@ -7,7 +7,7 @@ import {
   removeGridRegionsByType,
   addGridRegions,
   type GridRegion,
-} from "../../../src/api/gridOverlays";
+} from "@api/gridOverlays";
 import {
   createTable as backendCreateTable,
   deleteTable as backendDeleteTable,
@@ -26,8 +26,8 @@ import {
   type TableResult,
   type TableStyleOptions,
   type CreateTableParams,
-} from "../../../src/api/backend";
-import { cellEvents } from "../../../src/api";
+} from "@api/backend";
+import { cellEvents } from "@api";
 
 // Re-export backend types for consumers
 export type { Table, TableResult, TableStyleOptions };

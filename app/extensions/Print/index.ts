@@ -1,18 +1,15 @@
 //! FILENAME: app/extensions/Print/index.ts
-// PURPOSE: Print extension entry point.
+// PURPOSE: Print extension entry point. ExtensionModule lifecycle pattern.
 // CONTEXT: Registers Page Setup dialog, File menu items, Ctrl+P shortcut, PDF export,
 //          page break preview overlay, page break management commands,
 //          print area/titles commands from selection.
 
+import type { ExtensionModule, ExtensionContext } from "@api/contract";
 import {
-  DialogExtensions,
-  registerMenuItem,
-  registerPostHeaderOverlay,
   ExtensionRegistry,
-  onAppEvent,
   AppEvents,
-} from "../../src/api";
-import type { Selection } from "../../src/api";
+} from "@api";
+import type { Selection } from "@api";
 import {
   getPrintData,
   writeBinaryFile,
@@ -29,7 +26,7 @@ import {
   setPrintTitleCols,
   clearPrintTitleCols,
   indexToCol,
-} from "../../src/api/lib";
+} from "@api/lib";
 import { save } from "@tauri-apps/plugin-dialog";
 import { PageSetupDialog } from "./components/PageSetupDialog";
 import { executePrint } from "./lib/printGenerator";
@@ -42,16 +39,16 @@ import {
 } from "./lib/pageBreakOverlay";
 
 // ============================================================================
-// Cleanup tracking
+// State
 // ============================================================================
 
+let isActivated = false;
 const cleanupFns: (() => void)[] = [];
+let currentSelection: Selection | null = null;
 
 // ============================================================================
 // Selection tracking
 // ============================================================================
-
-let currentSelection: Selection | null = null;
 
 function getSelectionBounds(): {
   startRow: number; startCol: number; endRow: number; endCol: number;
@@ -116,7 +113,6 @@ async function handleExportPdf(): Promise<void> {
 
 async function handleInsertRowPageBreak(): Promise<void> {
   try {
-    // Get the currently selected row from the grid
     const row = getSelectedRow();
     if (row === null || row <= 0) {
       alert("Select a row below row 1 to insert a page break.");
@@ -303,19 +299,24 @@ async function handleClearPrintTitleCols(): Promise<void> {
 }
 
 // ============================================================================
-// Registration
+// Lifecycle
 // ============================================================================
 
-export function registerPrintExtension(): void {
-  console.log("[Print] Registering...");
+function activate(context: ExtensionContext): void {
+  if (isActivated) {
+    console.warn("[Print] Already activated, skipping.");
+    return;
+  }
+
+  console.log("[Print] Activating...");
 
   // 1. Register Page Setup dialog
-  DialogExtensions.registerDialog({
+  context.ui.dialogs.register({
     id: "page-setup",
     component: PageSetupDialog,
     priority: 100,
   });
-  cleanupFns.push(() => DialogExtensions.unregisterDialog("page-setup"));
+  cleanupFns.push(() => context.ui.dialogs.unregister("page-setup"));
 
   // 2. Track selection changes
   const unsubSelection = ExtensionRegistry.onSelectionChange((sel) => {
@@ -324,30 +325,30 @@ export function registerPrintExtension(): void {
   cleanupFns.push(unsubSelection);
 
   // 3. Add File menu items (Print + Page Setup + Export PDF)
-  registerMenuItem("file", {
+  context.ui.menus.registerItem("file", {
     id: "file.print-separator",
     label: "",
     separator: true,
   });
 
-  registerMenuItem("file", {
+  context.ui.menus.registerItem("file", {
     id: "file.print",
     label: "Print",
     shortcut: "Ctrl+P",
     action: handlePrint,
   });
 
-  registerMenuItem("file", {
+  context.ui.menus.registerItem("file", {
     id: "file.export-pdf",
     label: "Export to PDF...",
     action: handleExportPdf,
   });
 
-  registerMenuItem("file", {
+  context.ui.menus.registerItem("file", {
     id: "file.page-setup",
     label: "Page Setup...",
     action: () => {
-      DialogExtensions.openDialog("page-setup");
+      context.ui.dialogs.show("page-setup");
     },
   });
 
@@ -363,14 +364,14 @@ export function registerPrintExtension(): void {
   cleanupFns.push(() => window.removeEventListener("keydown", handleKeyDown, true));
 
   // 5. Register page break preview overlay
-  const unregOverlay = registerPostHeaderOverlay(
+  const unregOverlay = context.grid.overlays.register(
     "page-break-preview",
     renderPageBreakOverlay,
   );
   cleanupFns.push(unregOverlay);
 
   // 6. Listen for view mode changes to sync page break preview state
-  const unsubViewMode = onAppEvent<{ viewMode: string }>(
+  const unsubViewMode = context.events.on<{ viewMode: string }>(
     AppEvents.VIEW_MODE_CHANGED,
     (detail) => {
       const shouldEnable = detail.viewMode === "pageBreakPreview";
@@ -383,88 +384,87 @@ export function registerPrintExtension(): void {
   cleanupFns.push(unsubViewMode);
 
   // 7. Add Page Layout menu items for page breaks
-  registerMenuItem("view", {
+  context.ui.menus.registerItem("view", {
     id: "view.insert-row-page-break",
     label: "Insert Row Page Break",
     action: handleInsertRowPageBreak,
   });
 
-  registerMenuItem("view", {
+  context.ui.menus.registerItem("view", {
     id: "view.insert-col-page-break",
     label: "Insert Column Page Break",
     action: handleInsertColPageBreak,
   });
 
-  registerMenuItem("view", {
+  context.ui.menus.registerItem("view", {
     id: "view.remove-row-page-break",
     label: "Remove Row Page Break",
     action: handleRemoveRowPageBreak,
   });
 
-  registerMenuItem("view", {
+  context.ui.menus.registerItem("view", {
     id: "view.remove-col-page-break",
     label: "Remove Column Page Break",
     action: handleRemoveColPageBreak,
   });
 
-  registerMenuItem("view", {
+  context.ui.menus.registerItem("view", {
     id: "view.reset-all-page-breaks",
     label: "Reset All Page Breaks",
     action: handleResetAllPageBreaks,
   });
 
   // 8. Add Page Layout menu items for Print Area & Titles
-  registerMenuItem("view", {
+  context.ui.menus.registerItem("view", {
     id: "view.print-area-separator",
     label: "",
     separator: true,
   });
 
-  registerMenuItem("view", {
+  context.ui.menus.registerItem("view", {
     id: "view.set-print-area",
     label: "Set Print Area",
     action: handleSetPrintArea,
   });
 
-  registerMenuItem("view", {
+  context.ui.menus.registerItem("view", {
     id: "view.clear-print-area",
     label: "Clear Print Area",
     action: handleClearPrintArea,
   });
 
-  registerMenuItem("view", {
+  context.ui.menus.registerItem("view", {
     id: "view.set-title-rows",
     label: "Rows to Repeat at Top...",
     action: handleSetPrintTitleRows,
   });
 
-  registerMenuItem("view", {
+  context.ui.menus.registerItem("view", {
     id: "view.clear-title-rows",
     label: "Clear Title Rows",
     action: handleClearPrintTitleRows,
   });
 
-  registerMenuItem("view", {
+  context.ui.menus.registerItem("view", {
     id: "view.set-title-cols",
     label: "Columns to Repeat at Left...",
     action: handleSetPrintTitleCols,
   });
 
-  registerMenuItem("view", {
+  context.ui.menus.registerItem("view", {
     id: "view.clear-title-cols",
     label: "Clear Title Columns",
     action: handleClearPrintTitleCols,
   });
 
-  console.log("[Print] Registered successfully.");
+  isActivated = true;
+  console.log("[Print] Activated successfully.");
 }
 
-// ============================================================================
-// Unregistration
-// ============================================================================
+function deactivate(): void {
+  if (!isActivated) return;
 
-export function unregisterPrintExtension(): void {
-  console.log("[Print] Unregistering...");
+  console.log("[Print] Deactivating...");
 
   for (const fn of cleanupFns) {
     try {
@@ -476,5 +476,23 @@ export function unregisterPrintExtension(): void {
   cleanupFns.length = 0;
   currentSelection = null;
 
-  console.log("[Print] Unregistered.");
+  isActivated = false;
+  console.log("[Print] Deactivated.");
 }
+
+// ============================================================================
+// Extension Module Export
+// ============================================================================
+
+const extension: ExtensionModule = {
+  manifest: {
+    id: "calcula.print",
+    name: "Print",
+    version: "1.0.0",
+    description: "Print, PDF export, page setup, page breaks, print area, and title rows/columns.",
+  },
+  activate,
+  deactivate,
+};
+
+export default extension;

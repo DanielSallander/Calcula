@@ -1,24 +1,19 @@
 //! FILENAME: app/extensions/Sparklines/index.ts
-// PURPOSE: Sparklines extension entry point. Registers/unregisters all components.
-// CONTEXT: Called from extensions/index.ts during app initialization.
+// PURPOSE: Sparklines extension entry point. ExtensionModule lifecycle pattern.
+// CONTEXT: Registers sparkline rendering, dialog, menu items, and event listeners.
 
+import type { ExtensionModule, ExtensionContext } from "@api/contract";
 import {
-  registerDialog,
-  unregisterDialog,
-  registerMenuItem,
-  showDialog,
-  onAppEvent,
-  AppEvents,
   cellEvents,
+  AppEvents,
   ExtensionRegistry,
-} from "../../src/api";
-import { registerCellDecoration } from "../../src/api/cellDecorations";
+} from "@api";
 import { drawSparkline } from "./rendering";
 import { invalidateDataCache, resetSparklineStore } from "./store";
 import { CreateSparklineDialog } from "./components/CreateSparklineDialog";
 import { handleSelectionChange, resetSelectionHandlerState } from "./handlers/selectionHandler";
 import { handleFillCompleted } from "./handlers/fillHandler";
-import type { FillCompletedPayload } from "../../src/api/events";
+import type { FillCompletedPayload } from "@api/events";
 import type { SparklineType } from "./types";
 
 // ============================================================================
@@ -28,49 +23,55 @@ import type { SparklineType } from "./types";
 export const SPARKLINE_DIALOG_ID = "sparkline:createDialog";
 
 // ============================================================================
-// Cleanup tracking
+// State
 // ============================================================================
 
+let isActivated = false;
 const cleanupFns: (() => void)[] = [];
 
 // ============================================================================
-// Registration
+// Lifecycle
 // ============================================================================
 
-export function registerSparklineExtension(): void {
-  console.log("[Sparklines] Registering...");
+function activate(context: ExtensionContext): void {
+  if (isActivated) {
+    console.warn("[Sparklines] Already activated, skipping.");
+    return;
+  }
+
+  console.log("[Sparklines] Activating...");
 
   // 1. Register cell decoration for rendering sparklines
-  const unregDecoration = registerCellDecoration("sparklines", drawSparkline, 20);
+  const unregDecoration = context.grid.decorations.register("sparklines", drawSparkline, 20);
   cleanupFns.push(unregDecoration);
 
   // 2. Register dialog
-  registerDialog({
+  context.ui.dialogs.register({
     id: SPARKLINE_DIALOG_ID,
     component: CreateSparklineDialog,
     priority: 50,
   });
-  cleanupFns.push(() => unregisterDialog(SPARKLINE_DIALOG_ID));
+  cleanupFns.push(() => context.ui.dialogs.unregister(SPARKLINE_DIALOG_ID));
 
   // 3. Register menu items under Insert > Sparklines
-  registerMenuItem("insert", {
+  context.ui.menus.registerItem("insert", {
     id: "insert.sparklines",
     label: "Sparklines",
     children: [
       {
         id: "insert.sparklines.line",
         label: "Line",
-        action: () => showDialog(SPARKLINE_DIALOG_ID, { sparklineType: "line" as SparklineType }),
+        action: () => context.ui.dialogs.show(SPARKLINE_DIALOG_ID, { sparklineType: "line" as SparklineType }),
       },
       {
         id: "insert.sparklines.column",
         label: "Column",
-        action: () => showDialog(SPARKLINE_DIALOG_ID, { sparklineType: "column" as SparklineType }),
+        action: () => context.ui.dialogs.show(SPARKLINE_DIALOG_ID, { sparklineType: "column" as SparklineType }),
       },
       {
         id: "insert.sparklines.winloss",
         label: "Win/Loss",
-        action: () => showDialog(SPARKLINE_DIALOG_ID, { sparklineType: "winloss" as SparklineType }),
+        action: () => context.ui.dialogs.show(SPARKLINE_DIALOG_ID, { sparklineType: "winloss" as SparklineType }),
       },
     ],
   });
@@ -81,13 +82,13 @@ export function registerSparklineExtension(): void {
   });
   cleanupFns.push(unsubCells);
 
-  const unsubData = onAppEvent(AppEvents.DATA_CHANGED, () => {
+  const unsubData = context.events.on(AppEvents.DATA_CHANGED, () => {
     invalidateDataCache();
   });
   cleanupFns.push(unsubData);
 
   // 5. Reset on sheet change
-  const unsubSheet = onAppEvent(AppEvents.SHEET_CHANGED, () => {
+  const unsubSheet = context.events.on(AppEvents.SHEET_CHANGED, () => {
     invalidateDataCache();
   });
   cleanupFns.push(unsubSheet);
@@ -97,21 +98,20 @@ export function registerSparklineExtension(): void {
   cleanupFns.push(unsubSelection);
 
   // 7. Subscribe to fill-completed events for sparkline propagation
-  const unsubFill = onAppEvent<FillCompletedPayload>(
+  const unsubFill = context.events.on<FillCompletedPayload>(
     AppEvents.FILL_COMPLETED,
     handleFillCompleted,
   );
   cleanupFns.push(unsubFill);
 
-  console.log("[Sparklines] Registered successfully.");
+  isActivated = true;
+  console.log("[Sparklines] Activated successfully.");
 }
 
-// ============================================================================
-// Unregistration
-// ============================================================================
+function deactivate(): void {
+  if (!isActivated) return;
 
-export function unregisterSparklineExtension(): void {
-  console.log("[Sparklines] Unregistering...");
+  console.log("[Sparklines] Deactivating...");
 
   for (const fn of cleanupFns) {
     try {
@@ -125,5 +125,23 @@ export function unregisterSparklineExtension(): void {
   resetSelectionHandlerState();
   resetSparklineStore();
 
-  console.log("[Sparklines] Unregistered.");
+  isActivated = false;
+  console.log("[Sparklines] Deactivated.");
 }
+
+// ============================================================================
+// Extension Module Export
+// ============================================================================
+
+const extension: ExtensionModule = {
+  manifest: {
+    id: "calcula.sparklines",
+    name: "Sparklines",
+    version: "1.0.0",
+    description: "In-cell sparkline charts (line, column, win/loss).",
+  },
+  activate,
+  deactivate,
+};
+
+export default extension;

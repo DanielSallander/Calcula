@@ -8,7 +8,7 @@ import {
   showToast,
   showOverlay,
   type GridMenuContext,
-} from "../../../../src/api";
+} from "@api";
 import {
   addBookmark,
   removeBookmark,

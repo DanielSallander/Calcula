@@ -18,8 +18,8 @@ import {
   convertNoteToComment,
   DEFAULT_COMMENT_AUTHOR,
   DEFAULT_NOTE_AUTHOR,
-} from "../../../src/api";
-import type { GridContextMenuItem, GridMenuContext } from "../../../src/api";
+} from "@api";
+import type { GridContextMenuItem, GridMenuContext } from "@api";
 import {
   getCommentIndicatorAt,
   getNoteIndicatorAt,

@@ -2,15 +2,15 @@
 // PURPOSE: Go To Special dialog - select cells by type (blanks, formulas, etc.)
 
 import React, { useState, useCallback } from "react";
-import type { DialogProps } from "../../../src/api/uiTypes";
+import type { DialogProps } from "@api/uiTypes";
 import {
   goToSpecial,
   useGridDispatch,
   setSelection,
   useGridState,
   restoreFocusToGrid,
-} from "../../../src/api";
-import type { GoToSpecialCriteria } from "../../../src/api";
+} from "@api";
+import type { GoToSpecialCriteria } from "@api";
 
 const CRITERIA_OPTIONS: Array<{ value: GoToSpecialCriteria; label: string }> = [
   { value: "blanks", label: "Blanks" },

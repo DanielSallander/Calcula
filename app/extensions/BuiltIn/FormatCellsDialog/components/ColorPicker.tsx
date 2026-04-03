@@ -4,8 +4,8 @@
 
 import React, { useState, useRef, useEffect, useCallback } from "react";
 import styled from "styled-components";
-import type { ThemeColorInfo } from "../../../../src/core/types/types";
-import { getThemeColorPalette } from "../../../../src/api/theme";
+import type { ThemeColorInfo } from "@api";
+import { getThemeColorPalette } from "@api/theme";
 
 const v = (name: string) => `var(${name})`;
 

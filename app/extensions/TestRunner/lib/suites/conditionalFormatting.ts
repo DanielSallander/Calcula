@@ -12,7 +12,7 @@ import {
   deleteConditionalFormat,
   evaluateConditionalFormats,
   clearConditionalFormatsInRange,
-} from "../../../../src/api";
+} from "@api";
 import type {
   AddCFParams,
   CellValueRule,
@@ -20,7 +20,7 @@ import type {
   ConditionalFormat,
   ConditionalFormatRange,
   DuplicateValuesRule,
-} from "../../../../src/api";
+} from "@api";
 
 const A = AREA_COND_FORMAT;
 

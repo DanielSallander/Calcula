@@ -3,7 +3,7 @@
 // CONTEXT: Shows attribute dropdown + formula input + current value + delete button.
 
 import React, { useState, useCallback } from "react";
-import type { ComputedPropertyData } from "../../../../src/api/lib";
+import type { ComputedPropertyData } from "@api/lib";
 import { FormulaInput } from "./FormulaInput";
 
 interface PropertyRowProps {

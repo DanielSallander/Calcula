@@ -9,7 +9,7 @@ import {
   overlayGetRowHeight,
   type OverlayRenderContext,
   type OverlayHitTestContext,
-} from "../../../src/api";
+} from "@api";
 
 // Circle appearance constants
 const CIRCLE_COLOR = "#ff0000";

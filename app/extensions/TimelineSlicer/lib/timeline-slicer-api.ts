@@ -1,7 +1,7 @@
 //! FILENAME: app/extensions/TimelineSlicer/lib/timeline-slicer-api.ts
 // PURPOSE: Tauri command wrappers for timeline slicer backend operations.
 
-import { invokeBackend } from "../../../src/api/backend";
+import { invokeBackend } from "@api/backend";
 import type {
   TimelineSlicer,
   TimelineDataResponse,

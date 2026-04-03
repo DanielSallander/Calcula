@@ -3,7 +3,7 @@
 // CONTEXT: Part of the 3D cells feature. Listens to selection changes and auto-opens
 //          a task pane showing the structured contents of collection cells.
 
-import type { ExtensionModule, ExtensionContext } from "../../../src/api/contract";
+import type { ExtensionModule, ExtensionContext } from "@api/contract";
 import {
   registerTaskPane,
   unregisterTaskPane,
@@ -13,9 +13,9 @@ import {
   removeTaskPaneContextKey,
   registerMenuItem,
   notifyMenusChanged,
-} from "../../../src/api/ui";
-import { ExtensionRegistry } from "../../../src/api/extensions";
-import { getCellCollection } from "../../../src/api/lib";
+} from "@api/ui";
+import { ExtensionRegistry } from "@api/extensions";
+import { getCellCollection } from "@api/lib";
 import { CollectionPreviewPanel } from "./components/CollectionPreviewPanel";
 
 const PANE_ID = "collection-preview";

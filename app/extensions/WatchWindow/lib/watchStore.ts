@@ -2,8 +2,8 @@
 // PURPOSE: In-memory state for Watch Window items.
 // CONTEXT: Stores watch entries and provides CRUD + refresh operations.
 
-import { getWatchCells, getSheets, columnToLetter } from "../../../src/api";
-import type { CellData } from "../../../src/core/types/types";
+import { getWatchCells, getSheets, columnToLetter } from "@api";
+import type { CellData } from "@api";
 
 // ============================================================================
 // Types

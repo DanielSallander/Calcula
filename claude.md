@@ -176,7 +176,7 @@ When developing a new feature, ask these three questions:
 - Event subscriptions (`events.onSelectionChange`)
 - Generic data access (`getCellValue`, `setCellValue`)
 
-**EXTENSIONS:**
+**EXTENSIONS:** (a few examples)
 - Bold/Italic/Font formatting
 - Sort and Filter
 - Charts and Graphs

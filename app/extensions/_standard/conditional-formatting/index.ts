@@ -3,16 +3,16 @@
 // CONTEXT: Registers the style interceptor and UI components
 // ARCHITECTURE: Extension that uses only the public API
 
-import type { ExtensionModule, ExtensionContext } from "../../../src/api/contract";
+import type { ExtensionModule, ExtensionContext } from "@api/contract";
 import { 
   registerStyleInterceptor, 
   markSheetDirty,
   type IStyleOverride,
   type BaseStyleInfo,
   type CellCoords,
-} from "../../../src/api/styleInterceptors";
-import { onAppEvent, AppEvents, emitAppEvent } from "../../../src/api/events";
-import { registerMenu } from "../../../src/api/ui";
+} from "@api/styleInterceptors";
+import { onAppEvent, AppEvents, emitAppEvent } from "@api/events";
+import { registerMenu } from "@api/ui";
 import type { ConditionalRule, RuleSet, RangeContext } from "./types";
 import { 
   evaluateRule, 

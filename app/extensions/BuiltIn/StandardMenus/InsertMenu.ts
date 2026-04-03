@@ -1,7 +1,7 @@
 //! FILENAME: app/extensions/BuiltIn/StandardMenus/InsertMenu.ts
 import { useCallback } from 'react';
-import type { MenuDefinition } from '../../../src/api/ui';
-import { showDialog } from '../../../src/api/ui';
+import type { MenuDefinition } from '@api/ui';
+import { showDialog } from '@api/ui';
 
 const TABLE_DIALOG_ID = 'table:createDialog';
 const PIVOT_DIALOG_ID = 'pivot:createDialog';

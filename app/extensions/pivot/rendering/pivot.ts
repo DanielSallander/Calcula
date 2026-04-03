@@ -11,7 +11,7 @@ import {
   buildFreezePaneConfig,
   calculateColumnXWithFreeze,
   calculateRowYWithFreeze,
-} from '../../../src/api/dimensions';
+} from '@api/dimensions';
 
 // =============================================================================
 // TYPES

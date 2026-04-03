@@ -3,7 +3,7 @@
 // CONTEXT: Provides synchronous helpers that use cached pivot view data,
 //          plus async helpers for click handlers.
 
-import type { GridMenuContext } from "../../../src/api";
+import type { GridMenuContext } from "@api";
 import { findPivotRegionAtCell } from "./selectionHandler";
 import { getCachedPivotView } from "../index";
 import {

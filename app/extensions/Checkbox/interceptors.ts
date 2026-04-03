@@ -4,8 +4,8 @@
 //          suppresses TRUE/FALSE text display for checkbox cells,
 //          and handles non-boolean input and deletion.
 
-import type { Selection, StyleData } from "../../src/core/types";
-import type { IStyleOverride, BaseStyleInfo, CellCoords } from "../../src/api/styleInterceptors";
+import type { Selection, StyleData } from "@api";
+import type { IStyleOverride, BaseStyleInfo, CellCoords } from "@api/styleInterceptors";
 
 // ============================================================================
 // State

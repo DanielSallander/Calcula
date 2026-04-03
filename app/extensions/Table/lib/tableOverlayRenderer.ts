@@ -12,7 +12,7 @@ import {
   overlayGetRowHeaderWidth,
   overlayGetColHeaderHeight,
   type OverlayRenderContext,
-} from "../../../src/api/gridOverlays";
+} from "@api/gridOverlays";
 
 // ============================================================================
 // Table Border Style Constants

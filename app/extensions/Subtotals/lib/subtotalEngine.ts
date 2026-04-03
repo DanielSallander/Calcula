@@ -13,7 +13,7 @@ import {
   groupRows,
   AppEvents,
   emitAppEvent,
-} from "../../../src/api";
+} from "@api";
 import type { SubtotalConfig } from "../types";
 import { SUBTOTAL_FUNCTIONS } from "../types";
 

@@ -4,7 +4,7 @@
 // before applying. Loads initial values from the active cell's style.
 
 import { create } from "zustand";
-import type { PatternType, GradientDirection } from "../../../../src/core/types";
+import type { PatternType, GradientDirection } from "@api";
 
 // ============================================================================
 // Types

@@ -3,11 +3,11 @@
 // CONTEXT: Registers the Format menu with items for cell formatting.
 
 import React from 'react';
-import { CoreCommands } from '../../../src/api/commands';
-import { registerMenu } from '../../../src/api/ui';
-import type { MenuDefinition } from '../../../src/api/ui';
-import { applyFormatting } from '../../../src/api/lib';
-import { cellEvents, useGridState } from '../../../src/api';
+import { CoreCommands } from '@api/commands';
+import { registerMenu } from '@api/ui';
+import type { MenuDefinition } from '@api/ui';
+import { applyFormatting } from '@api/lib';
+import { cellEvents, useGridState } from '@api';
 import { CellStylesGallery } from '../HomeTab/components/CellStylesGallery';
 import type { CellStyleDefinition } from '../HomeTab/components/CellStylesGallery';
 

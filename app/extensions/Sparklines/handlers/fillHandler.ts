@@ -4,8 +4,8 @@
 //          this handler creates new sparkline groups for the filled cells with
 //          appropriately shifted data ranges.
 
-import type { FillCompletedPayload } from "../../../src/api/events";
-import { emitAppEvent, AppEvents } from "../../../src/api/events";
+import type { FillCompletedPayload } from "@api/events";
+import { emitAppEvent, AppEvents } from "@api/events";
 import {
   getSparklineForCell,
   createSparklineGroup,

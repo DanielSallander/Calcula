@@ -2,19 +2,19 @@
 // PURPOSE: Calculation Options extension entry point.
 // CONTEXT: Registers Calculation Options, Calculate Worksheet, and Calculate Workbook
 //          menu items in the Formulas menu. Controls automatic vs manual calculation mode.
-//          Called from extensions/index.ts during app initialization.
 
+import type { ExtensionModule, ExtensionContext } from "@api/contract";
 import {
   registerCalculationMenuItems,
   syncCalculationMode,
 } from "./handlers/formulasMenuItemBuilder";
 
 // ============================================================================
-// Registration
+// Lifecycle
 // ============================================================================
 
-export function registerCalculationOptionsExtension(): void {
-  console.log("[CalculationOptions] Registering...");
+function activate(_context: ExtensionContext): void {
+  console.log("[CalculationOptions] Activating...");
 
   // 1. Register menu items in Formulas menu
   registerCalculationMenuItems();
@@ -22,13 +22,25 @@ export function registerCalculationOptionsExtension(): void {
   // 2. Sync checked state from backend
   syncCalculationMode();
 
-  console.log("[CalculationOptions] Registered successfully.");
+  console.log("[CalculationOptions] Activated successfully.");
+}
+
+function deactivate(): void {
+  console.log("[CalculationOptions] Deactivated.");
 }
 
 // ============================================================================
-// Unregistration
+// Extension Module
 // ============================================================================
 
-export function unregisterCalculationOptionsExtension(): void {
-  console.log("[CalculationOptions] Unregistered.");
-}
+const extension: ExtensionModule = {
+  manifest: {
+    id: "calcula.calculation-options",
+    name: "Calculation Options",
+    version: "1.0.0",
+    description: "Controls automatic vs manual calculation mode with Formulas menu items.",
+  },
+  activate,
+  deactivate,
+};
+export default extension;

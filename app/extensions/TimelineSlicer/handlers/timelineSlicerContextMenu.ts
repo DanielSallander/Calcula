@@ -1,8 +1,8 @@
 //! FILENAME: app/extensions/TimelineSlicer/handlers/timelineSlicerContextMenu.ts
 // PURPOSE: Context menu handling for timeline slicer right-click.
 
-import { getGridStateSnapshot } from "../../../src/api/state";
-import { showDialog } from "../../../src/api";
+import { getGridStateSnapshot } from "@api/state";
+import { showDialog } from "@api";
 import {
   getAllTimelines,
   getTimelineById,

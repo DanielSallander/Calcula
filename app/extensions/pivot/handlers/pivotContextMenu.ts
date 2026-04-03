@@ -14,7 +14,7 @@ import {
   getTaskPaneManuallyClosed,
   type GridContextMenuItem,
   type GridMenuContext,
-} from "../../../src/api";
+} from "@api";
 
 import {
   isInPivotRegion,

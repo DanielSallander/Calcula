@@ -3,7 +3,7 @@
 
 import React from "react";
 import { css } from "@emotion/css";
-import type { RibbonContext } from "../../../../src/api/extensions";
+import type { RibbonContext } from "@api/extensions";
 import { ThemeGallery } from "./ThemeGallery";
 import { ThemeFontPicker } from "./ThemeFontPicker";
 

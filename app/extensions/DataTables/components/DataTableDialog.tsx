@@ -2,12 +2,12 @@
 // PURPOSE: Data Table dialog - one-variable and two-variable What-If data tables.
 
 import React, { useState, useEffect, useCallback, useRef } from "react";
-import type { DialogProps } from "../../../src/api/uiTypes";
+import type { DialogProps } from "@api/uiTypes";
 import {
   dataTableOneVar,
   dataTableTwoVar,
   columnToLetter,
-} from "../../../src/api";
+} from "@api";
 
 // ============================================================================
 // Styles

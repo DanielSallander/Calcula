@@ -4,10 +4,10 @@
 // NOTE: Default exports an ExtensionModule object per the contract.
 // FIX: Import DialogExtensions from API, not Shell (Facade Rule compliance).
 
-import type { ExtensionModule, ExtensionContext } from "../../../src/api/contract";
-import { CoreCommands } from "../../../src/api/commands";
+import type { ExtensionModule, ExtensionContext } from "@api/contract";
+import { CoreCommands } from "@api/commands";
 // FIX: Import from API layer, not directly from Shell
-import { DialogExtensions } from "../../../src/api/ui";
+import { DialogExtensions } from "@api/ui";
 import { FindReplaceDialog } from "./FindReplaceDialog";
 import { useFindStore } from "./useFindStore";
 

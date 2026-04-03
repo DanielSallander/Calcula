@@ -1,16 +1,14 @@
 //! FILENAME: app/extensions/Tracing/index.ts
 // PURPOSE: Tracing extension entry point (Trace Precedents / Trace Dependents).
 // CONTEXT: Registers the grid overlay, menu, dialog, and event subscriptions.
-//          Called from extensions/index.ts during app initialization.
+//          Activated by the shell during app initialization.
 
+import type { ExtensionModule, ExtensionContext } from "@api/contract";
 import {
-  registerGridOverlay,
-  onAppEvent,
   AppEvents,
   ExtensionRegistry,
-  DialogExtensions,
-} from "../../src/api";
-import type { OverlayRegistration } from "../../src/api";
+} from "@api";
+import type { OverlayRegistration } from "@api";
 import { renderTraceArrows } from "./rendering/traceArrowRenderer";
 import { hitTestTraceArrow } from "./rendering/traceArrowHitTest";
 import { registerFormulasMenu } from "./handlers/formulasMenuBuilder";
@@ -24,20 +22,26 @@ import { GoToDialog } from "./components/GoToDialog";
 const REGION_TYPE = "tracing";
 
 // ============================================================================
-// Cleanup tracking
+// State
 // ============================================================================
 
+let isActivated = false;
 const cleanupFns: (() => void)[] = [];
 
 // ============================================================================
-// Registration
+// Lifecycle
 // ============================================================================
 
-export function registerTracingExtension(): void {
-  console.log("[Tracing] Registering...");
+function activate(context: ExtensionContext): void {
+  if (isActivated) {
+    console.warn("[Tracing] Already activated, skipping.");
+    return;
+  }
+
+  console.log("[Tracing] Activating...");
 
   // 1. Register grid overlay for trace arrows
-  const unregOverlay = registerGridOverlay({
+  const unregOverlay = context.grid.overlays.register({
     type: REGION_TYPE,
     render: renderTraceArrows,
     hitTest: hitTestTraceArrow,
@@ -46,24 +50,24 @@ export function registerTracingExtension(): void {
   cleanupFns.push(unregOverlay);
 
   // 2. Register the "Go To" dialog for cross-sheet navigation
-  DialogExtensions.registerDialog({
+  context.ui.dialogs.register({
     id: "tracing-goto",
     component: GoToDialog,
     priority: 50,
   });
-  cleanupFns.push(() => DialogExtensions.unregisterDialog("tracing-goto"));
+  cleanupFns.push(() => context.ui.dialogs.unregister("tracing-goto"));
 
   // 3. Register the Formulas menu
-  registerFormulasMenu();
+  registerFormulasMenu(context);
 
   // 4. Clear traces on sheet change
-  const unsubSheet = onAppEvent(AppEvents.SHEET_CHANGED, () => {
+  const unsubSheet = context.events.on(AppEvents.SHEET_CHANGED, () => {
     clearTraces();
   });
   cleanupFns.push(unsubSheet);
 
   // 5. Clear traces when cells are updated (dependency graph may have changed)
-  const unsubCells = onAppEvent(AppEvents.CELLS_UPDATED, () => {
+  const unsubCells = context.events.on(AppEvents.CELLS_UPDATED, () => {
     clearTraces();
   });
   cleanupFns.push(unsubCells);
@@ -78,15 +82,18 @@ export function registerTracingExtension(): void {
   });
   cleanupFns.push(unsubSelection);
 
-  console.log("[Tracing] Registered successfully.");
+  isActivated = true;
+  console.log("[Tracing] Activated successfully.");
 }
 
 // ============================================================================
-// Unregistration
+// Deactivation
 // ============================================================================
 
-export function unregisterTracingExtension(): void {
-  console.log("[Tracing] Unregistering...");
+function deactivate(): void {
+  if (!isActivated) return;
+
+  console.log("[Tracing] Deactivating...");
 
   clearTraces();
 
@@ -99,5 +106,23 @@ export function unregisterTracingExtension(): void {
   }
   cleanupFns.length = 0;
 
-  console.log("[Tracing] Unregistered.");
+  isActivated = false;
+  console.log("[Tracing] Deactivated.");
 }
+
+// ============================================================================
+// Extension Module Export
+// ============================================================================
+
+const extension: ExtensionModule = {
+  manifest: {
+    id: "calcula.tracing",
+    name: "Tracing",
+    version: "1.0.0",
+    description: "Trace precedents, trace dependents, and remove arrows for formula auditing.",
+  },
+  activate,
+  deactivate,
+};
+
+export default extension;

@@ -6,9 +6,9 @@
 
 import React, { useState, useEffect, useCallback, useRef, useMemo } from "react";
 import { css } from "@emotion/css";
-import { emitAppEvent, AppEvents, showDialog } from "../../../src/api";
-import type { RibbonContext } from "../../../src/api/extensions";
-import { useRibbonCollapse, RibbonGroup } from "../../../src/api/ribbonCollapse";
+import { emitAppEvent, AppEvents, showDialog } from "@api";
+import type { RibbonContext } from "@api/extensions";
+import { useRibbonCollapse, RibbonGroup } from "@api/ribbonCollapse";
 
 import type { ChartType, ChartSpec, StackMode, BarMarkOptions, LineMarkOptions, AreaMarkOptions, TrendlineSpec, TrendlineType, ComboMarkOptions, DataLabelSpec } from "../types";
 import { isPivotDataSource, isCartesianChart } from "../types";

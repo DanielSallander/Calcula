@@ -11,7 +11,7 @@ import {
   addComputedProperty,
   updateComputedProperty,
   removeComputedProperty,
-} from "../../../../src/api/backend";
+} from "@api/backend";
 
 const A = AREA_COMPUTED_PROPS;
 

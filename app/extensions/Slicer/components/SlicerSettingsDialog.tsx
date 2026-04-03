@@ -4,9 +4,9 @@
 //          Inspired by Power BI's slicer settings panel.
 
 import React, { useState, useEffect } from "react";
-import type { DialogProps } from "../../../src/api";
+import type { DialogProps } from "@api";
 import { getSlicerById, updateSlicerAsync } from "../lib/slicerStore";
-import { requestOverlayRedraw } from "../../../src/api/gridOverlays";
+import { requestOverlayRedraw } from "@api/gridOverlays";
 import type { SlicerSelectionMode, SlicerArrangement } from "../lib/slicerTypes";
 import { getSlicerComputedAttributes } from "../lib/slicer-api";
 

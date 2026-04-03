@@ -8,7 +8,7 @@ import {
   type IStyleOverride,
   type BaseStyleInfo,
   type CellCoords,
-} from "../../../src/api";
+} from "@api";
 import { getTableAtCell, getAllTables, type Table } from "./tableStore";
 
 // ============================================================================

@@ -3,7 +3,7 @@
 // CONTEXT: Provides a textarea for code input, Run button, and console output display.
 
 import React, { useState, useCallback, useRef, useEffect } from "react";
-import type { TaskPaneViewProps } from "../../../src/api";
+import type { TaskPaneViewProps } from "@api";
 import { runScript } from "../lib/scriptApi";
 import { openAdvancedEditor } from "../lib/openEditorWindow";
 import type { RunScriptResponse } from "../types";

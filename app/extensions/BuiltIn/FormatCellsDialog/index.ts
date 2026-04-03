@@ -3,9 +3,9 @@
 // CONTEXT: Registers the Format Cells dialog and the FORMAT_CELLS command.
 // NOTE: Default exports an ExtensionModule object per the contract.
 
-import type { ExtensionModule, ExtensionContext } from "../../../src/api/contract";
-import { CoreCommands } from "../../../src/api/commands";
-import { DialogExtensions } from "../../../src/api/ui";
+import type { ExtensionModule, ExtensionContext } from "@api/contract";
+import { CoreCommands } from "@api/commands";
+import { DialogExtensions } from "@api/ui";
 import { FormatCellsDialog } from "./FormatCellsDialog";
 
 // ============================================================================

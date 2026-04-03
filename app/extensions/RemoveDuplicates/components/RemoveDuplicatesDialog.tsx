@@ -3,13 +3,13 @@
 // CONTEXT: Allows users to select columns, toggle headers, and remove duplicate rows.
 
 import React, { useState, useEffect, useCallback, useRef } from "react";
-import type { DialogProps } from "../../../src/api/uiTypes";
+import type { DialogProps } from "@api/uiTypes";
 import {
   detectDataRegion,
   getViewportCells,
   indexToCol,
   removeDuplicates,
-} from "../../../src/api";
+} from "@api";
 
 // ============================================================================
 // Styles (using CSS variables from the app theme)

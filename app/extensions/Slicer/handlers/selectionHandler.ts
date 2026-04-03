@@ -6,9 +6,9 @@ import {
   addTaskPaneContextKey,
   removeTaskPaneContextKey,
   ExtensionRegistry,
-} from "../../../src/api";
+} from "@api";
 import { getSlicerById } from "../lib/slicerStore";
-import { requestOverlayRedraw } from "../../../src/api/gridOverlays";
+import { requestOverlayRedraw } from "@api/gridOverlays";
 import { SLICER_OPTIONS_TAB_ID, SlicerOptionsTabDefinition } from "../manifest";
 import { SlicerEvents } from "../lib/slicerEvents";
 import type { Slicer } from "../lib/slicerTypes";

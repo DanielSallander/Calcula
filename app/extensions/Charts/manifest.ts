@@ -6,7 +6,7 @@ import type {
   AddInManifest,
   DialogDefinition,
   DialogProps,
-} from "../../src/api";
+} from "@api";
 import React from "react";
 import { CreateChartDialog } from "./components/CreateChartDialog";
 import { ChartDesignTab } from "./components/ChartDesignTab";

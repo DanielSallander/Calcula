@@ -5,7 +5,7 @@
 import type { TestSuite } from "../types";
 import { assertTrue, assertEqual } from "../assertions";
 import { AREA_ADVANCED_FILTER } from "../testArea";
-import { getHiddenRows } from "../../../../src/api";
+import { getHiddenRows } from "@api";
 import {
   executeAdvancedFilter,
   clearAdvancedFilter,

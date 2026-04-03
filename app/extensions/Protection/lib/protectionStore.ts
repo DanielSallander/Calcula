@@ -2,12 +2,12 @@
 // PURPOSE: Module-level state management for the Protection extension.
 // CONTEXT: Caches protection status fetched from the Rust backend for synchronous access.
 
-import type { SheetProtectionOptions } from "../../../src/api";
+import type { SheetProtectionOptions } from "@api";
 import {
   getProtectionStatus,
   isWorkbookProtected as isWorkbookProtectedApi,
   DEFAULT_PROTECTION_OPTIONS,
-} from "../../../src/api";
+} from "@api";
 
 // ============================================================================
 // Module State

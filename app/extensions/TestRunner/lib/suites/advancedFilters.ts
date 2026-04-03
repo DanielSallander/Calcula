@@ -18,7 +18,7 @@ import {
   isRowFiltered,
   getHiddenRows,
   getAutoFilterRange,
-} from "../../../../src/api";
+} from "@api";
 
 const A = AREA_ADV_FILTERS;
 

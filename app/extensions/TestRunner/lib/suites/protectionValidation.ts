@@ -23,7 +23,7 @@ import {
   createListRule,
   DEFAULT_ERROR_ALERT,
   DEFAULT_PROMPT,
-} from "../../../../src/api";
+} from "@api";
 
 const A = AREA_PROTECTION_VALIDATION;
 

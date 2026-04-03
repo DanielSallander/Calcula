@@ -3,8 +3,8 @@
 // CONTEXT: When a user clicks a filter dropdown cell in a pivot table,
 // this handler fetches the unique values and shows the filter overlay.
 
-import { pivot } from "../../../src/api/pivot";
-import { OverlayExtensions } from "../../../src/api";
+import { pivot } from "@api/pivot";
+import { OverlayExtensions } from "@api";
 import { PIVOT_FILTER_OVERLAY_ID } from "../manifest";
 import { getCachedPivotView } from "../lib/pivotViewStore";
 

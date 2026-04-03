@@ -3,8 +3,8 @@
 // CONTEXT: Uses Tauri events (not DOM CustomEvents) to communicate between
 //          the main window and the separate Monaco editor window.
 
-import { emitTauriEvent, listenTauriEvent } from "../../../src/api/backend";
-import type { UnlistenFn } from "../../../src/api/backend";
+import { emitTauriEvent, listenTauriEvent } from "@api/backend";
+import type { UnlistenFn } from "@api/backend";
 
 // ============================================================================
 // Event Names

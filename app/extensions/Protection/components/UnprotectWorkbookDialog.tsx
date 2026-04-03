@@ -3,8 +3,8 @@
 // CONTEXT: Shown when user clicks "Unprotect Workbook" and it has a password.
 
 import React, { useState } from "react";
-import type { DialogProps } from "../../../src/api";
-import { unprotectWorkbook } from "../../../src/api";
+import type { DialogProps } from "@api";
+import { unprotectWorkbook } from "@api";
 import { refreshProtectionState } from "../lib/protectionStore";
 
 // ============================================================================

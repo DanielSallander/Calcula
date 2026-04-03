@@ -3,9 +3,9 @@
 // CONTEXT: This extension registers menu items with commandIds from CoreCommands.
 //          The Shell executes commands via the Command Registry — no direct callbacks.
 
-import { CoreCommands } from '../../../src/api/commands';
-import { registerMenu } from '../../../src/api/ui';
-import type { MenuDefinition } from '../../../src/api/ui';
+import { CoreCommands } from '@api/commands';
+import { registerMenu } from '@api/ui';
+import type { MenuDefinition } from '@api/ui';
 
 /**
  * Register the Edit menu with the Menu Registry.

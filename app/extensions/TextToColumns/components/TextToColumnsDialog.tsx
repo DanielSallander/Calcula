@@ -3,7 +3,7 @@
 // CONTEXT: Registered as a dialog via DialogExtensions. Opened from the Data menu.
 
 import React, { useState, useEffect, useCallback, useRef, useMemo } from "react";
-import type { DialogProps } from "../../../src/api/uiTypes";
+import type { DialogProps } from "@api/uiTypes";
 import {
   detectDataRegion,
   getViewportCells,
@@ -11,8 +11,8 @@ import {
   updateCellsBatch,
   beginUndoTransaction,
   commitUndoTransaction,
-} from "../../../src/api";
-import type { CellUpdateInput } from "../../../src/api";
+} from "@api";
+import type { CellUpdateInput } from "@api";
 import {
   parseAll,
   getMaxColumns,

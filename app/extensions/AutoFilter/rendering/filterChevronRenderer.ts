@@ -9,7 +9,7 @@ import {
   overlayGetRowHeight,
   type OverlayRenderContext,
   type OverlayHitTestContext,
-} from "../../../src/api";
+} from "@api";
 import { getAutoFilterInfo } from "../lib/filterStore";
 
 // Size of the chevron button area (pixels)

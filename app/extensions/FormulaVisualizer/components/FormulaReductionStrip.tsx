@@ -2,7 +2,7 @@
 // PURPOSE: Formula bar that shows progressive reduction with highlighted spans.
 
 import React, { useMemo } from "react";
-import type { FormulaEvalPlan, EvalPlanNode } from "../../../src/api";
+import type { FormulaEvalPlan, EvalPlanNode } from "@api";
 
 const v = (name: string) => `var(${name})`;
 

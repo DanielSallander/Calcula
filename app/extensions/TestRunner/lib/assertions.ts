@@ -2,7 +2,7 @@
 // PURPOSE: Assertion helpers for test macros.
 // CONTEXT: Convenience wrappers that throw descriptive errors on failure.
 
-import type { CellData } from "../../../src/api/types";
+import type { CellData } from "@api/types";
 
 /**
  * Assert a cell's display value matches the expected string.

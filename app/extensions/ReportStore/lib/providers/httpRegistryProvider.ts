@@ -8,8 +8,8 @@ import type {
   PackageInfo,
   VersionInfo,
   UpdateInfo,
-} from "../../../../src/api/distribution";
-import { downloadPackage } from "../../../../src/api/distribution";
+} from "@api/distribution";
+import { downloadPackage } from "@api/distribution";
 
 /** Shape of the /search response from the registry server. */
 interface SearchResponse {

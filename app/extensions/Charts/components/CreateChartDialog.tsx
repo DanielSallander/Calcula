@@ -9,9 +9,9 @@ import {
   useGridState,
   indexToCol,
   getSheets,
-} from "../../../src/api";
-import type { DialogProps } from "../../../src/api";
-import { emitAppEvent, AppEvents } from "../../../src/api/events";
+} from "@api";
+import type { DialogProps } from "@api";
+import { emitAppEvent, AppEvents } from "@api/events";
 
 import type {
   ChartSpec,

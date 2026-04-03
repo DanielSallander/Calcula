@@ -3,8 +3,8 @@
 // CONTEXT: Registers Ctrl+E keyboard shortcut and Data menu item.
 //          Detects patterns from user-provided examples and fills remaining cells.
 
+import type { ExtensionModule, ExtensionContext } from "@api/contract";
 import {
-  ExtensionRegistry,
   getCell,
   updateCellsBatch,
   beginUndoTransaction,
@@ -13,12 +13,12 @@ import {
   emitAppEvent,
   AppEvents,
   showToast,
-} from "../../src/api";
-import { getGridBounds } from "../../src/api/lib";
-import { getGridStateSnapshot } from "../../src/api/grid";
+} from "@api";
+import { getGridBounds } from "@api/lib";
+import { getGridStateSnapshot } from "@api/grid";
 import { learn, applyProgram } from "./lib/patternEngine";
 import type { Example, Program } from "./lib/patternEngine";
-import type { CellData } from "../../src/api/types";
+import type { CellData } from "@api/types";
 
 // ============================================================================
 // Cleanup tracking
@@ -304,14 +304,14 @@ function handleKeyDown(e: KeyboardEvent): void {
 }
 
 // ============================================================================
-// Registration
+// Lifecycle
 // ============================================================================
 
-export function registerFlashFillExtension(): void {
-  console.log("[FlashFill] Registering...");
+function activate(context: ExtensionContext): void {
+  console.log("[FlashFill] Activating...");
 
   // 1. Register command
-  ExtensionRegistry.registerCommand({
+  context.commands.register({
     id: "flashfill.execute",
     name: "Flash Fill",
     shortcut: "Ctrl+E",
@@ -334,15 +334,11 @@ export function registerFlashFillExtension(): void {
   window.addEventListener("keydown", handleKeyDown, true);
   cleanupFns.push(() => window.removeEventListener("keydown", handleKeyDown, true));
 
-  console.log("[FlashFill] Registered successfully.");
+  console.log("[FlashFill] Activated successfully.");
 }
 
-// ============================================================================
-// Unregistration
-// ============================================================================
-
-export function unregisterFlashFillExtension(): void {
-  console.log("[FlashFill] Unregistering...");
+function deactivate(): void {
+  console.log("[FlashFill] Deactivating...");
 
   for (const fn of cleanupFns) {
     try {
@@ -353,5 +349,21 @@ export function unregisterFlashFillExtension(): void {
   }
   cleanupFns.length = 0;
 
-  console.log("[FlashFill] Unregistered.");
+  console.log("[FlashFill] Deactivated.");
 }
+
+// ============================================================================
+// Extension Module
+// ============================================================================
+
+const extension: ExtensionModule = {
+  manifest: {
+    id: "calcula.flash-fill",
+    name: "Flash Fill",
+    version: "1.0.0",
+    description: "Detects patterns from user-provided examples and fills remaining cells (Ctrl+E).",
+  },
+  activate,
+  deactivate,
+};
+export default extension;

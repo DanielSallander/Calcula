@@ -3,7 +3,7 @@
 // CONTEXT: Opened from Formulas menu or right-click "Add Watch".
 
 import React, { useState, useEffect, useCallback, useRef } from "react";
-import type { DialogProps } from "../../../src/api/uiTypes";
+import type { DialogProps } from "@api/uiTypes";
 import {
   onAppEvent,
   AppEvents,
@@ -11,7 +11,7 @@ import {
   emitAppEvent,
   restoreFocusToGrid,
   setActiveSheetApi,
-} from "../../../src/api";
+} from "@api";
 import {
   getItems,
   subscribe,

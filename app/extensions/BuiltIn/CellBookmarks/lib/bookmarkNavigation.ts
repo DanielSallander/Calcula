@@ -10,8 +10,8 @@ import {
   setActiveSheetApi,
   emitAppEvent,
   AppEvents,
-} from "../../../../src/api";
-import { getGridStateSnapshot } from "../../../../src/api/grid";
+} from "@api";
+import { getGridStateSnapshot } from "@api/grid";
 import { getSortedBookmarks } from "./bookmarkStore";
 import type { Bookmark } from "./bookmarkTypes";
 

@@ -8,7 +8,7 @@ import {
   DialogExtensions,
   IconEvaluateFormula,
   IconVisualizeFormula,
-} from "../../../src/api";
+} from "@api";
 
 // ============================================================================
 // State

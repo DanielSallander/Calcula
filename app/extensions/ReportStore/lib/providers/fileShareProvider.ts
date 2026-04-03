@@ -8,8 +8,8 @@ import type {
   PackageInfo,
   VersionInfo,
   UpdateInfo,
-} from "../../../../src/api/distribution";
-import { browsePackages, parsePackageInfo } from "../../../../src/api/distribution";
+} from "@api/distribution";
+import { browsePackages, parsePackageInfo } from "@api/distribution";
 
 /**
  * FileShareProvider scans a local directory for .calp package files.

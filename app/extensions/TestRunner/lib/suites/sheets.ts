@@ -16,7 +16,7 @@ import {
   unhideSheet,
   setTabColor,
   setActiveSheetApi as setActiveSheet,
-} from "../../../../src/api";
+} from "@api";
 
 export const sheetsSuite: TestSuite = {
   name: "Sheet Management",

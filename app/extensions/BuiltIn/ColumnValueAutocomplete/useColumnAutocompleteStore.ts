@@ -8,9 +8,9 @@ import { create } from "zustand";
 import {
   setColumnAutocompleteVisible,
   ColumnAutocompleteEvents,
-} from "../../../src/api/columnAutocomplete";
-import type { AutocompleteInputPayload } from "../../../src/api/formulaAutocomplete";
-import { getCellsInCols } from "../../../src/api/lib";
+} from "@api/columnAutocomplete";
+import type { AutocompleteInputPayload } from "@api/formulaAutocomplete";
+import { getCellsInCols } from "@api/lib";
 
 // ============================================================================
 // Column Value Cache

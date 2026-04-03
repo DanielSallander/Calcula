@@ -5,13 +5,13 @@
 
 import React, { useState, useEffect, useCallback, useRef, useMemo } from 'react';
 import { css } from '@emotion/css';
-import { onAppEvent, emitAppEvent } from '../../../src/api';
+import { onAppEvent, emitAppEvent } from '@api';
 import { PivotEvents } from '../lib/pivotEvents';
 import { getPivotTableInfo, updatePivotProperties } from '../lib/pivot-api';
 import type { LayoutConfig, ReportLayout, ValuesPosition, PivotId } from './types';
-import type { RibbonContext } from '../../../src/api/extensions';
+import type { RibbonContext } from '@api/extensions';
 import { PivotTableStylesGallery, DEFAULT_PIVOT_STYLE_ID } from './PivotTableStylesGallery';
-import { useRibbonCollapse, RibbonGroup } from '../../../src/api/ribbonCollapse';
+import { useRibbonCollapse, RibbonGroup } from '@api/ribbonCollapse';
 
 // ============================================================================
 // Styles

@@ -6,13 +6,13 @@
 
 import React, { useState, useEffect, useCallback, useRef, useMemo } from "react";
 import { css } from "@emotion/css";
-import { useGridState, showDialog, emitAppEvent, AppEvents } from "../../../src/api";
-import type { RibbonContext } from "../../../src/api/extensions";
+import { useGridState, showDialog, emitAppEvent, AppEvents } from "@api";
+import type { RibbonContext } from "@api/extensions";
 import { getSparklineForCell, updateSparklineGroup, removeSparklineGroup, getAllGroups } from "../store";
 import type { SparklineGroup, SparklineType } from "../types";
 import { SparklineColorPicker } from "./SparklineColorPicker";
 import { SPARKLINE_DIALOG_ID } from "../index";
-import { useRibbonCollapse, RibbonGroup } from "../../../src/api/ribbonCollapse";
+import { useRibbonCollapse, RibbonGroup } from "@api/ribbonCollapse";
 
 // ============================================================================
 // Style presets (predefined color combos for the Style gallery)

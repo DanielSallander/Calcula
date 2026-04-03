@@ -5,7 +5,7 @@
 import type { TestSuite } from "../types";
 import { assertTrue, assertEqual, expectNotNull } from "../assertions";
 import { AREA_INDENT_FORMATS } from "../testArea";
-import { applyFormatting, getStyle } from "../../../../src/api/lib";
+import { applyFormatting, getStyle } from "@api/lib";
 
 const A = AREA_INDENT_FORMATS;
 

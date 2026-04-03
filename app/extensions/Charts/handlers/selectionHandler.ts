@@ -15,7 +15,7 @@ import {
   addTaskPaneContextKey,
   removeTaskPaneContextKey,
   ExtensionRegistry,
-} from "../../../src/api";
+} from "@api";
 import type { ChartHitResult, ChartSubSelection, ChartSelectionLevel } from "../types";
 import { CHART_DESIGN_TAB_ID, ChartDesignTabDefinition } from "../manifest";
 

@@ -3,9 +3,9 @@
 // CONTEXT: Shows all loaded extensions with their status
 
 import React, { useCallback, useEffect, useState } from "react";
-import type { ActivityViewProps } from "../../src/api/uiTypes";
-import { ExtensionManager } from "../../src/api";
-import type { LoadedExtension, ExtensionStatus } from "../../src/api";
+import type { ActivityViewProps } from "@api/uiTypes";
+import { ExtensionManager } from "@api";
+import type { LoadedExtension, ExtensionStatus } from "@api";
 
 /** Status badge colors */
 const STATUS_COLORS: Record<ExtensionStatus, { bg: string; text: string }> = {

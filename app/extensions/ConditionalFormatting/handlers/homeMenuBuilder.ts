@@ -3,12 +3,12 @@
 // CONTEXT: Adds "Conditional Formatting" submenu with quick-apply actions and management options.
 
 import React from "react";
+import type { ExtensionContext } from "@api/contract";
 import {
-  registerMenuItem,
   showDialog,
   addConditionalFormat,
   clearConditionalFormatsInRange,
-} from "../../../src/api";
+} from "@api";
 
 import type {
   ConditionalFormatRule,
@@ -16,7 +16,7 @@ import type {
   ConditionalFormatRange,
   AddCFParams,
   IconSetType,
-} from "../../../src/api";
+} from "@api";
 
 import { invalidateAndRefresh } from "../lib/cfStore";
 import {
@@ -108,16 +108,16 @@ async function handleClearAllRules(): Promise<void> {
 /**
  * Register Conditional Formatting menu items into the Format menu.
  */
-export function registerCFMenuItems(): void {
+export function registerCFMenuItems(context: ExtensionContext): void {
   // Separator before CF items
-  registerMenuItem("format", {
+  context.ui.menus.registerItem("format", {
     id: "format:cf-separator",
     label: "",
     separator: true,
   });
 
   // Main Conditional Formatting menu with submenus
-  registerMenuItem("format", {
+  context.ui.menus.registerItem("format", {
     id: "format:conditionalFormatting",
     label: "Conditional Formatting",
     children: [

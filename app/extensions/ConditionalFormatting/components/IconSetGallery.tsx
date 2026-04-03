@@ -4,7 +4,7 @@
 
 import React, { useRef, useEffect } from "react";
 import styled from "styled-components";
-import type { IconSetType } from "../../../src/api";
+import type { IconSetType } from "@api";
 import { drawIcon } from "../rendering/iconShapes";
 
 const v = (name: string) => `var(${name})`;

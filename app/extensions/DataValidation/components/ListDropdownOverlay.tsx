@@ -3,13 +3,13 @@
 // CONTEXT: Shown when the user clicks a dropdown chevron on a list-validated cell.
 
 import React, { useEffect, useState, useRef } from "react";
-import type { OverlayProps } from "../../../src/api";
+import type { OverlayProps } from "@api";
 import {
   getValidationListValues,
   getCell,
   updateCellsBatch,
   cellEvents,
-} from "../../../src/api";
+} from "@api";
 import { setOpenDropdownCell } from "../lib/validationStore";
 import type { ListDropdownData } from "../types";
 

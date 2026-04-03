@@ -1,12 +1,10 @@
 //! FILENAME: app/extensions/TextToColumns/index.ts
 // PURPOSE: Text to Columns extension entry point.
 // CONTEXT: Registers the wizard dialog and Data menu item.
-//          Called from extensions/index.ts during app initialization.
+//          Uses ExtensionModule lifecycle (Path A).
 
-import {
-  DialogExtensions,
-  ExtensionRegistry,
-} from "../../src/api";
+import type { ExtensionModule, ExtensionContext } from "@api/contract";
+import { ExtensionRegistry } from "@api";
 import { TextToColumnsDialog } from "./components/TextToColumnsDialog";
 import {
   registerTextToColumnsMenuItem,
@@ -20,22 +18,22 @@ import {
 const cleanupFns: (() => void)[] = [];
 
 // ============================================================================
-// Registration
+// Activation
 // ============================================================================
 
-export function registerTextToColumnsExtension(): void {
-  console.log("[TextToColumns] Registering...");
+function activate(context: ExtensionContext): void {
+  console.log("[TextToColumns] Activating...");
 
   // 1. Register dialog
-  DialogExtensions.registerDialog({
+  context.ui.dialogs.register({
     id: "text-to-columns",
     component: TextToColumnsDialog,
     priority: 100,
   });
-  cleanupFns.push(() => DialogExtensions.unregisterDialog("text-to-columns"));
+  cleanupFns.push(() => context.ui.dialogs.unregister("text-to-columns"));
 
   // 2. Register menu item in Data menu
-  registerTextToColumnsMenuItem();
+  registerTextToColumnsMenuItem(context);
 
   // 3. Track current selection (for menu item to know active range)
   const unsubSelection = ExtensionRegistry.onSelectionChange((sel) => {
@@ -52,15 +50,15 @@ export function registerTextToColumnsExtension(): void {
   });
   cleanupFns.push(unsubSelection);
 
-  console.log("[TextToColumns] Registered successfully.");
+  console.log("[TextToColumns] Activated successfully.");
 }
 
 // ============================================================================
-// Unregistration
+// Deactivation
 // ============================================================================
 
-export function unregisterTextToColumnsExtension(): void {
-  console.log("[TextToColumns] Unregistering...");
+function deactivate(): void {
+  console.log("[TextToColumns] Deactivating...");
 
   for (const fn of cleanupFns) {
     try {
@@ -71,5 +69,22 @@ export function unregisterTextToColumnsExtension(): void {
   }
   cleanupFns.length = 0;
 
-  console.log("[TextToColumns] Unregistered.");
+  console.log("[TextToColumns] Deactivated.");
 }
+
+// ============================================================================
+// Extension Module Export
+// ============================================================================
+
+const extension: ExtensionModule = {
+  manifest: {
+    id: "calcula.text-to-columns",
+    name: "Text to Columns",
+    version: "1.0.0",
+    description: "Split cell text into multiple columns using delimiters or fixed widths.",
+  },
+  activate,
+  deactivate,
+};
+
+export default extension;

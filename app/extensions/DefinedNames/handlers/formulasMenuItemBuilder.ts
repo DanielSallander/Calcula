@@ -2,23 +2,23 @@
 // PURPOSE: Register "Define Name" and "Name Manager" menu items in the Formulas menu.
 // CONTEXT: Adds menu items that open the define name / name manager dialogs.
 
+import type { ExtensionContext } from "@api/contract";
 import {
-  registerMenuItem,
   showDialog,
   IconNameManager,
   IconDefineName,
   IconDefineFunction,
-} from "../../../src/api";
+} from "@api";
 
 /**
  * Register defined names menu items in the Formulas menu.
  * Returns a cleanup function.
  */
-export function registerDefinedNamesMenuItems(): () => void {
+export function registerDefinedNamesMenuItems(context: ExtensionContext): () => void {
   const cleanups: (() => void)[] = [];
 
   cleanups.push(
-    registerMenuItem("formulas", {
+    context.ui.menus.registerItem("formulas", {
       id: "formulas:separator-names",
       label: "",
       separator: true,
@@ -26,7 +26,7 @@ export function registerDefinedNamesMenuItems(): () => void {
   );
 
   cleanups.push(
-    registerMenuItem("formulas", {
+    context.ui.menus.registerItem("formulas", {
       id: "formulas:nameManager",
       label: "Name Manager",
       icon: IconNameManager,

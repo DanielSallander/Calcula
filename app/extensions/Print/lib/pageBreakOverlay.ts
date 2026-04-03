@@ -5,14 +5,14 @@
 //          Visualizes print area boundaries with a shaded region.
 //          Supports dragging page break lines to reposition them.
 
-import type { GridConfig, Viewport, DimensionOverrides } from "../../../src/api/types";
+import type { GridConfig, Viewport, DimensionOverrides } from "@api/types";
 import {
   calculateColumnX,
   calculateRowY,
   createDimensionGetterFromMap,
-} from "../../../src/api/dimensions";
-import { getPageSetup, movePageBreak, colToIndex } from "../../../src/api/lib";
-import type { PageSetup } from "../../../src/api/lib";
+} from "@api/dimensions";
+import { getPageSetup, movePageBreak, colToIndex } from "@api/lib";
+import type { PageSetup } from "@api/lib";
 
 // ============================================================================
 // State

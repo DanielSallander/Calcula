@@ -5,7 +5,7 @@
 import type { TestSuite } from "../types";
 import { assertTrue, expectNotNull } from "../assertions";
 import { AREA_PRINT } from "../testArea";
-import { getPrintData } from "../../../../src/api/backend";
+import { getPrintData } from "@api/backend";
 
 const A = AREA_PRINT;
 

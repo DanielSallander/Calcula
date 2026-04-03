@@ -3,16 +3,16 @@
 // CONTEXT: Opened from the Format > Conditional Formatting menu for threshold-based rules.
 
 import React, { useState, useCallback } from "react";
-import type { DialogProps } from "../../../src/api";
+import type { DialogProps } from "@api";
 import {
   addConditionalFormat,
   restoreFocusToGrid,
-} from "../../../src/api";
+} from "@api";
 import type {
   ConditionalFormatRule,
   ConditionalFormat,
   ConditionalFormatRange,
-} from "../../../src/api";
+} from "@api";
 import { invalidateAndRefresh } from "../lib/cfStore";
 import { PRESET_STYLES } from "../types";
 

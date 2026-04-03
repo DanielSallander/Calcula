@@ -5,7 +5,7 @@
 import type { TestSuite } from "../types";
 import { assertTrue, assertEqual } from "../assertions";
 import { AREA_TRACING } from "../testArea";
-import { tracePrecedents, traceDependents } from "../../../../src/api";
+import { tracePrecedents, traceDependents } from "@api";
 
 const A = AREA_TRACING;
 

@@ -3,8 +3,8 @@
 // CONTEXT: Handles all paste variants (values, formulas, formats, operations,
 //          transpose, skip blanks, paste link) using existing API primitives.
 
-import type { CellData, Selection } from "../../../src/api/types";
-import type { ClipboardData, FormulaShiftInput, Comment, DataValidation, AddCommentParams } from "../../../src/api/lib";
+import type { CellData, Selection } from "@api/types";
+import type { ClipboardData, FormulaShiftInput, Comment, DataValidation, AddCommentParams } from "@api/lib";
 import type { PasteSpecialOptions, PasteOperation } from "./types";
 import {
   getCell,
@@ -20,8 +20,8 @@ import {
   indexToCol,
   addComment,
   setDataValidation,
-} from "../../../src/api/lib";
-import { cellEvents } from "../../../src/api";
+} from "@api/lib";
+import { cellEvents } from "@api";
 
 // ============================================================================
 // Helpers

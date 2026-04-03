@@ -5,8 +5,8 @@
 import type { TestSuite } from "../types";
 import { assertTrue, assertEqual, expectNotNull } from "../assertions";
 import { AREA_CELL_STYLES } from "../testArea";
-import { previewNumberFormat } from "../../../../src/api";
-import { applyFormatting, getStyle, getAllStyles } from "../../../../src/api/lib";
+import { previewNumberFormat } from "@api";
+import { applyFormatting, getStyle, getAllStyles } from "@api/lib";
 
 const A = AREA_CELL_STYLES;
 

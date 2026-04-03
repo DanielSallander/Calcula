@@ -2,7 +2,7 @@
 // PURPOSE: Type definitions for conditional formatting rules
 // CONTEXT: Defines the structure of formatting rules and conditions
 
-import type { IStyleOverride } from "../../../src/api/styleInterceptors";
+import type { IStyleOverride } from "@api/styleInterceptors";
 
 // ============================================================================
 // Rule Condition Types

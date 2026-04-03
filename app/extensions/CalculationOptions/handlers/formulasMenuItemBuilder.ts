@@ -15,13 +15,13 @@ import {
   IconManual,
   IconCalcWorkbook,
   IconCalcWorksheet,
-} from "../../../src/api";
+} from "@api";
 import {
   setCalculationMode,
   getCalculationMode,
   calculateNow,
   calculateSheet,
-} from "../../../src/api/lib";
+} from "@api/lib";
 
 // ============================================================================
 // State

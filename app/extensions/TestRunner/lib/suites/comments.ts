@@ -14,8 +14,8 @@ import {
   getCommentCount,
   hasComment,
   clearCommentsInRange,
-} from "../../../../src/api";
-import type { AddCommentParams, AddReplyParams } from "../../../../src/api";
+} from "@api";
+import type { AddCommentParams, AddReplyParams } from "@api";
 
 const A = AREA_COMMENTS;
 

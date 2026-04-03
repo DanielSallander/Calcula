@@ -2,8 +2,8 @@
 // PURPOSE: Bridges slicer selection changes to table/pivot filters.
 
 import type { Slicer } from "./slicerTypes";
-import { invokeBackend } from "../../../src/api/backend";
-import { emitAppEvent, AppEvents } from "../../../src/api";
+import { invokeBackend } from "@api/backend";
+import { emitAppEvent, AppEvents } from "@api";
 
 /**
  * Apply the slicer's current selection as a filter on its data source.

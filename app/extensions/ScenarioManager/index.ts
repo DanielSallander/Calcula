@@ -2,10 +2,8 @@
 // PURPOSE: Scenario Manager extension entry point.
 // CONTEXT: Registers the dialog and Data menu items for What-If Analysis.
 
-import {
-  DialogExtensions,
-  ExtensionRegistry,
-} from "../../src/api";
+import type { ExtensionModule, ExtensionContext } from "@api/contract";
+import { ExtensionRegistry } from "@api";
 import { ScenarioManagerDialog } from "./components/ScenarioManagerDialog";
 import { ScenarioSummaryDialog } from "./components/ScenarioSummaryDialog";
 import {
@@ -20,29 +18,29 @@ import {
 const cleanupFns: (() => void)[] = [];
 
 // ============================================================================
-// Registration
+// Lifecycle
 // ============================================================================
 
-export function registerScenarioManagerExtension(): void {
-  console.log("[ScenarioManager] Registering...");
+function activate(context: ExtensionContext): void {
+  console.log("[ScenarioManager] Activating...");
 
   // 1. Register dialogs
-  DialogExtensions.registerDialog({
+  context.ui.dialogs.register({
     id: "scenario-manager",
     component: ScenarioManagerDialog,
     priority: 100,
   });
-  cleanupFns.push(() => DialogExtensions.unregisterDialog("scenario-manager"));
+  cleanupFns.push(() => context.ui.dialogs.unregister("scenario-manager"));
 
-  DialogExtensions.registerDialog({
+  context.ui.dialogs.register({
     id: "scenario-summary",
     component: ScenarioSummaryDialog,
     priority: 100,
   });
-  cleanupFns.push(() => DialogExtensions.unregisterDialog("scenario-summary"));
+  cleanupFns.push(() => context.ui.dialogs.unregister("scenario-summary"));
 
   // 2. Register menu items in Data menu
-  registerScenarioMenuItems();
+  registerScenarioMenuItems(context);
 
   // 3. Track current selection
   const unsubSelection = ExtensionRegistry.onSelectionChange((sel) => {
@@ -59,15 +57,11 @@ export function registerScenarioManagerExtension(): void {
   });
   cleanupFns.push(unsubSelection);
 
-  console.log("[ScenarioManager] Registered successfully.");
+  console.log("[ScenarioManager] Activated successfully.");
 }
 
-// ============================================================================
-// Unregistration
-// ============================================================================
-
-export function unregisterScenarioManagerExtension(): void {
-  console.log("[ScenarioManager] Unregistering...");
+function deactivate(): void {
+  console.log("[ScenarioManager] Deactivating...");
 
   for (const fn of cleanupFns) {
     try {
@@ -78,5 +72,22 @@ export function unregisterScenarioManagerExtension(): void {
   }
   cleanupFns.length = 0;
 
-  console.log("[ScenarioManager] Unregistered.");
+  console.log("[ScenarioManager] Deactivated.");
 }
+
+// ============================================================================
+// Extension Module Export
+// ============================================================================
+
+const extension: ExtensionModule = {
+  manifest: {
+    id: "calcula.scenario-manager",
+    name: "Scenario Manager",
+    version: "1.0.0",
+    description: "What-If Scenario Manager for comparing multiple input sets.",
+  },
+  activate,
+  deactivate,
+};
+
+export default extension;

@@ -12,7 +12,7 @@ import {
   unmergeCells,
   getMergedRegions,
   getAllConditionalFormats,
-} from "../../../../src/api";
+} from "@api";
 
 const A = AREA_EMPTY_RANGE_OPS;
 

@@ -3,12 +3,12 @@
 // CONTEXT: Shown as a popover when adding or editing a bookmark via context menu.
 
 import React, { useState, useEffect, useRef } from "react";
-import type { OverlayProps } from "../../../../src/api";
+import type { OverlayProps } from "@api";
 import { getBookmarkAt, updateBookmark, addBookmark } from "../lib/bookmarkStore";
 import { BOOKMARK_DOT_COLORS, BOOKMARK_COLORS } from "../lib/bookmarkTypes";
 import type { BookmarkColor } from "../lib/bookmarkTypes";
-import { columnToLetter } from "../../../../src/api";
-import { getGridStateSnapshot } from "../../../../src/api/grid";
+import { columnToLetter } from "@api";
+import { getGridStateSnapshot } from "@api/grid";
 
 // ============================================================================
 // Styles

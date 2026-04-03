@@ -3,7 +3,7 @@
 // CONTEXT: Registered via registerCellDecoration. Draws red (note), purple (comment),
 //          or gray (resolved comment) triangles in the top-right corner of annotated cells.
 
-import type { CellDecorationContext } from "../../../src/api";
+import type { CellDecorationContext } from "@api";
 import { getCommentIndicatorAt, getNoteIndicatorAt } from "../lib/annotationStore";
 
 // ============================================================================

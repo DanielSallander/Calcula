@@ -2,13 +2,13 @@
 // PURPOSE: Dialog for mapping package data sources to local data targets.
 
 import React, { useState, useCallback } from "react";
-import type { DialogProps } from "../../../src/api/uiTypes";
+import type { DialogProps } from "@api/uiTypes";
 import type {
   PackageInfo,
   DataSourceDeclaration,
   ImportBinding,
-} from "../../../src/api/distribution";
-import { importPackage, getRegistryProvider } from "../../../src/api/distribution";
+} from "@api/distribution";
+import { importPackage, getRegistryProvider } from "@api/distribution";
 
 const selectStyle: React.CSSProperties = {
   padding: "6px 10px",

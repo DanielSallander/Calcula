@@ -6,7 +6,7 @@ import React from "react";
 import type {
   DataValidationType,
   DataValidationOperator,
-} from "../../../../src/api";
+} from "@api";
 
 // ============================================================================
 // Styles

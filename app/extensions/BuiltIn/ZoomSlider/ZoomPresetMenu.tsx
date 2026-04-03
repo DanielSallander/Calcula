@@ -4,7 +4,7 @@
 //          Provides quick access to common zoom levels and a custom zoom input.
 
 import React, { useState, useEffect, useRef, useCallback } from "react";
-import { ZOOM_MIN, ZOOM_MAX, ZOOM_PRESETS } from "../../../src/api";
+import { ZOOM_MIN, ZOOM_MAX, ZOOM_PRESETS } from "@api";
 
 interface ZoomPresetMenuProps {
   currentZoom: number;

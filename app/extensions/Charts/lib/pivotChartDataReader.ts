@@ -4,13 +4,13 @@
 //          data source instead of reading from a cell range. This module bridges
 //          the pivot view data into the chart rendering pipeline.
 
-import { pivot } from "../../../src/api/pivot";
+import { pivot } from "@api/pivot";
 import type {
   PivotViewResponse,
   PivotRowData,
   PivotCellData,
   PivotColumnData,
-} from "../../../src/api/pivot";
+} from "@api/pivot";
 import type { ParsedChartData, PivotDataSource, ChartSeries, PivotChartFieldInfo } from "../types";
 
 // ============================================================================

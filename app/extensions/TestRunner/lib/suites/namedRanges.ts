@@ -13,7 +13,7 @@ import {
   renameNamedRange,
   updateNamedRange,
   calculateNow,
-} from "../../../../src/api";
+} from "@api";
 
 const A = AREA_NAMED_RANGES;
 

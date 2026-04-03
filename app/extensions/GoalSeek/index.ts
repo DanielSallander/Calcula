@@ -1,12 +1,10 @@
 //! FILENAME: app/extensions/GoalSeek/index.ts
 // PURPOSE: Goal Seek extension entry point.
 // CONTEXT: Registers the dialog and Data menu item.
-//          Called from extensions/index.ts during app initialization.
+//          Uses ExtensionModule lifecycle (Path A).
 
-import {
-  DialogExtensions,
-  ExtensionRegistry,
-} from "../../src/api";
+import type { ExtensionModule, ExtensionContext } from "@api/contract";
+import { ExtensionRegistry } from "@api";
 import { GoalSeekDialog } from "./components/GoalSeekDialog";
 import {
   registerGoalSeekMenuItem,
@@ -20,22 +18,22 @@ import {
 const cleanupFns: (() => void)[] = [];
 
 // ============================================================================
-// Registration
+// Activation
 // ============================================================================
 
-export function registerGoalSeekExtension(): void {
-  console.log("[GoalSeek] Registering...");
+function activate(context: ExtensionContext): void {
+  console.log("[GoalSeek] Activating...");
 
   // 1. Register dialog
-  DialogExtensions.registerDialog({
+  context.ui.dialogs.register({
     id: "goal-seek",
     component: GoalSeekDialog,
     priority: 100,
   });
-  cleanupFns.push(() => DialogExtensions.unregisterDialog("goal-seek"));
+  cleanupFns.push(() => context.ui.dialogs.unregister("goal-seek"));
 
   // 2. Register menu item in Data menu
-  registerGoalSeekMenuItem();
+  registerGoalSeekMenuItem(context);
 
   // 3. Track current selection (for menu item to know active cell)
   const unsubSelection = ExtensionRegistry.onSelectionChange((sel) => {
@@ -50,15 +48,15 @@ export function registerGoalSeekExtension(): void {
   });
   cleanupFns.push(unsubSelection);
 
-  console.log("[GoalSeek] Registered successfully.");
+  console.log("[GoalSeek] Activated successfully.");
 }
 
 // ============================================================================
-// Unregistration
+// Deactivation
 // ============================================================================
 
-export function unregisterGoalSeekExtension(): void {
-  console.log("[GoalSeek] Unregistering...");
+function deactivate(): void {
+  console.log("[GoalSeek] Deactivating...");
 
   for (const fn of cleanupFns) {
     try {
@@ -69,5 +67,22 @@ export function unregisterGoalSeekExtension(): void {
   }
   cleanupFns.length = 0;
 
-  console.log("[GoalSeek] Unregistered.");
+  console.log("[GoalSeek] Deactivated.");
 }
+
+// ============================================================================
+// Extension Module Export
+// ============================================================================
+
+const extension: ExtensionModule = {
+  manifest: {
+    id: "calcula.goal-seek",
+    name: "Goal Seek",
+    version: "1.0.0",
+    description: "Find the input value needed to achieve a desired formula result.",
+  },
+  activate,
+  deactivate,
+};
+
+export default extension;

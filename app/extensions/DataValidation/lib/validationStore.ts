@@ -11,7 +11,7 @@ import {
   emitAppEvent,
   type GridRegion,
   type ValidationRange,
-} from "../../../src/api";
+} from "@api";
 import type { ValidationState } from "../types";
 import { ValidationEvents } from "./validationEvents";
 

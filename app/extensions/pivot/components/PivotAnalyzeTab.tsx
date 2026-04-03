@@ -5,15 +5,15 @@
 
 import React, { useState, useEffect, useCallback, useRef, useMemo } from 'react';
 import { css } from '@emotion/css';
-import { onAppEvent, emitAppEvent, showDialog } from '../../../src/api';
+import { onAppEvent, emitAppEvent, showDialog } from '@api';
 import { PivotEvents } from '../lib/pivotEvents';
 import { refreshPivotCache, getPivotTableInfo, deletePivotTable, addCalculatedField, addCalculatedItem, showReportFilterPages } from '../lib/pivot-api';
 import type { PivotId } from './types';
-import type { RibbonContext } from '../../../src/api/extensions';
+import type { RibbonContext } from '@api/extensions';
 import { ChangeDataSourceDialog } from './ChangeDataSourceDialog';
 import { CalculatedFieldDialog } from './CalculatedFieldDialog';
 import { PIVOT_OPTIONS_DIALOG_ID } from '../manifest';
-import { useRibbonCollapse, RibbonGroup } from '../../../src/api/ribbonCollapse';
+import { useRibbonCollapse, RibbonGroup } from '@api/ribbonCollapse';
 
 // ============================================================================
 // Styles

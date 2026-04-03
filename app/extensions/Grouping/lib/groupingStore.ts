@@ -23,14 +23,14 @@ import {
   updateConfig,
   dispatchGridAction,
   requestOverlayRedraw,
-} from "../../../src/api";
+} from "@api";
 
 import type {
   OutlineInfo,
   OutlineSettings,
   GroupResult,
   Viewport,
-} from "../../../src/api";
+} from "@api";
 
 // ============================================================================
 // Constants

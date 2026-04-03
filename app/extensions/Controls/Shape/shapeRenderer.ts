@@ -6,12 +6,12 @@
 import type {
   OverlayRenderContext,
   OverlayHitTestContext,
-} from "../../../src/api/gridOverlays";
+} from "@api/gridOverlays";
 import {
   overlayGetRowHeaderWidth,
   overlayGetColHeaderHeight,
   overlaySheetToCanvas,
-} from "../../../src/api/gridOverlays";
+} from "@api/gridOverlays";
 import { getDesignMode } from "../lib/designMode";
 import { resolveControlProperties } from "../lib/controlApi";
 import { isFloatingControlSelected } from "../Button/floatingSelection";

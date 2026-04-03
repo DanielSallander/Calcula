@@ -15,7 +15,7 @@ import {
   setCalculationMode,
   getCalculationMode,
   calculateNow,
-} from "../../../../src/api";
+} from "@api";
 
 const A = AREA_FORMULAS;
 

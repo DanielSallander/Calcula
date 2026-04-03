@@ -3,7 +3,7 @@
 // CONTEXT: Two-section dialog: configuration form, then execution.
 
 import React, { useState, useEffect, useCallback, useRef } from "react";
-import type { DialogProps } from "../../../src/api/uiTypes";
+import type { DialogProps } from "@api/uiTypes";
 import {
   getSheets,
   consolidateData,
@@ -12,8 +12,8 @@ import {
   beginUndoTransaction,
   commitUndoTransaction,
   restoreFocusToGrid,
-} from "../../../src/api";
-import type { ConsolidationFunction } from "../../../src/api";
+} from "@api";
+import type { ConsolidationFunction } from "@api";
 import { CONSOLIDATION_FUNCTIONS } from "../types";
 import type { SourceRangeEntry } from "../types";
 

@@ -1,13 +1,13 @@
 //! FILENAME: app/extensions/Sorting/handlers/dataMenuBuilder.ts
 // PURPOSE: Registers sort-related items in the Data menu.
-// CONTEXT: Uses registerMenuItem to append to the existing "data" menu.
+// CONTEXT: Uses ExtensionContext to register menu items and show dialogs.
 
-import { registerMenuItem, DialogExtensions } from "../../../src/api";
+import type { ExtensionContext } from "@api/contract";
 import {
   detectDataRegion,
   sortRangeByColumn,
-} from "../../../src/api/lib";
-import type { SortRangeResult } from "../../../src/core/types";
+} from "@api/lib";
+import type { SortRangeResult } from "@api";
 
 // ============================================================================
 // State
@@ -86,35 +86,35 @@ async function quickSort(ascending: boolean): Promise<void> {
  * Register sort items in the Data menu.
  * Assumes the "data" menu was already created by AutoFilter.
  */
-export function registerSortMenuItems(): void {
+export function registerSortMenuItems(context: ExtensionContext): void {
   // Separator before sort items
-  registerMenuItem("data", {
+  context.ui.menus.registerItem("data", {
     id: "data:sort:separator",
     label: "",
     separator: true,
   });
 
   // Sort A to Z (quick ascending)
-  registerMenuItem("data", {
+  context.ui.menus.registerItem("data", {
     id: "data:sort:ascending",
     label: "Sort A to Z",
     action: () => quickSort(true),
   });
 
   // Sort Z to A (quick descending)
-  registerMenuItem("data", {
+  context.ui.menus.registerItem("data", {
     id: "data:sort:descending",
     label: "Sort Z to A",
     action: () => quickSort(false),
   });
 
   // Custom Sort (opens dialog)
-  registerMenuItem("data", {
+  context.ui.menus.registerItem("data", {
     id: "data:sort:custom",
     label: "Custom Sort...",
     action: () => {
       const sel = currentSelection;
-      DialogExtensions.openDialog("sort-dialog", {
+      context.ui.dialogs.show("sort-dialog", {
         activeRow: sel?.activeRow ?? 0,
         activeCol: sel?.activeCol ?? 0,
       });

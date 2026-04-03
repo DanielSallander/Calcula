@@ -3,15 +3,15 @@
 // CONTEXT: Renders the structured contents of a List or Dict cell in a tree view.
 
 import React, { useEffect, useState, useCallback } from "react";
-import type { TaskPaneViewProps } from "../../../../src/api/uiTypes";
-import { getGridStateSnapshot } from "../../../../src/api/grid";
+import type { TaskPaneViewProps } from "@api/uiTypes";
+import { getGridStateSnapshot } from "@api/grid";
 import {
   getCellCollection,
   type CollectionItem,
   type CollectionPreviewResult,
-} from "../../../../src/api/lib";
-import { onAppEvent, AppEvents } from "../../../../src/api/events";
-import { ExtensionRegistry } from "../../../../src/api/extensions";
+} from "@api/lib";
+import { onAppEvent, AppEvents } from "@api/events";
+import { ExtensionRegistry } from "@api/extensions";
 
 // ============================================================================
 // Styles

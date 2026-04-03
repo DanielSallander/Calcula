@@ -6,16 +6,16 @@
 
 import React, { useState, useEffect, useRef } from "react";
 import { css } from "@emotion/css";
-import type { RibbonContext } from "../../../src/api/extensions";
-import { useRibbonCollapse, RibbonGroup } from "../../../src/api/ribbonCollapse";
+import type { RibbonContext } from "@api/extensions";
+import { useRibbonCollapse, RibbonGroup } from "@api/ribbonCollapse";
 import {
   getSlicerById,
   updateSlicerAsync,
   updateSlicerPositionAsync,
   deleteSlicerAsync,
 } from "../lib/slicerStore";
-import { requestOverlayRedraw } from "../../../src/api/gridOverlays";
-import { showDialog } from "../../../src/api";
+import { requestOverlayRedraw } from "@api/gridOverlays";
+import { showDialog } from "@api";
 import { SLICER_SETTINGS_DIALOG_ID, SLICER_COMPUTED_PROPS_DIALOG_ID } from "../manifest";
 import { SlicerEvents } from "../lib/slicerEvents";
 import type { Slicer } from "../lib/slicerTypes";

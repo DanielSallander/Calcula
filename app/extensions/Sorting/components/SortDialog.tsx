@@ -3,11 +3,11 @@
 // CONTEXT: Opens via Data > Custom Sort menu. Allows hierarchical sort criteria.
 
 import React, { useEffect, useCallback, useRef, useState } from "react";
-import type { DialogProps } from "../../../src/api/uiTypes";
-import { useGridState } from "../../../src/api";
-import { sortRange } from "../../../src/api/lib";
-import type { SortField } from "../../../src/api/lib";
-import type { SortRangeResult } from "../../../src/core/types";
+import type { DialogProps } from "@api/uiTypes";
+import { useGridState } from "@api";
+import { sortRange } from "@api/lib";
+import type { SortField } from "@api/lib";
+import type { SortRangeResult } from "@api";
 import { useSortStore } from "../hooks/useSortState";
 import {
   detectSortRange,

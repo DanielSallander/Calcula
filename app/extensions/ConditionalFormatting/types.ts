@@ -4,7 +4,7 @@
 import type {
   ConditionalFormatDefinition,
   CellConditionalFormat,
-} from "../../src/api";
+} from "@api";
 
 /** Internal state for the conditional formatting extension */
 export interface CFState {

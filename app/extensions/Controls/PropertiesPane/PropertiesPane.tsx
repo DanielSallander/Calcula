@@ -3,7 +3,7 @@
 // CONTEXT: Shows when a control is selected in design mode. Supports static and formula values.
 
 import React, { useState, useEffect, useCallback, useRef } from "react";
-import type { TaskPaneViewProps } from "../../../src/api";
+import type { TaskPaneViewProps } from "@api";
 import { PropertyRow } from "./PropertyRow";
 import {
   getPropertyDefinitions,

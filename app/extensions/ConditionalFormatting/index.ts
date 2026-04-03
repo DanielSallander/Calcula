@@ -1,18 +1,14 @@
 //! FILENAME: app/extensions/ConditionalFormatting/index.ts
-// PURPOSE: Conditional Formatting extension entry point. Registers/unregisters all components.
-// CONTEXT: Called from extensions/index.ts during app initialization.
+// PURPOSE: Conditional Formatting extension entry point. ExtensionModule lifecycle.
+// CONTEXT: Activated by the shell during app initialization.
 
+import type { ExtensionModule, ExtensionContext } from "@api/contract";
 import {
-  registerStyleInterceptor,
-  registerGridOverlay,
-  registerDialog,
-  unregisterDialog,
-  onAppEvent,
   AppEvents,
   ExtensionRegistry,
   cellEvents,
   type OverlayRegistration,
-} from "../../src/api";
+} from "@api";
 
 import {
   refreshRules,
@@ -30,24 +26,30 @@ import { RulesManagerDialog } from "./components/RulesManagerDialog";
 import { NewRuleDialog } from "./components/NewRuleDialog";
 
 // ============================================================================
-// Cleanup tracking
+// State
 // ============================================================================
 
+let isActivated = false;
 const cleanupFns: (() => void)[] = [];
 
 // ============================================================================
-// Registration
+// Lifecycle
 // ============================================================================
 
-export function registerConditionalFormattingExtension(): void {
-  console.log("[ConditionalFormatting] Registering...");
+function activate(context: ExtensionContext): void {
+  if (isActivated) {
+    console.warn("[ConditionalFormatting] Already activated, skipping.");
+    return;
+  }
+
+  console.log("[ConditionalFormatting] Activating...");
 
   // 1. Register style interceptor
   // Priority 100: runs AFTER all other interceptors (Table=5, Checkbox=5).
   // This ensures Conditional Formatting overrides Computed Properties
   // (which apply at the base styleIndex level, before interceptors) and
   // other feature interceptors when they set the same style properties.
-  const unregInterceptor = registerStyleInterceptor(
+  const unregInterceptor = context.grid.styleInterceptors.register(
     "conditional-formatting",
     conditionalFormattingInterceptor,
     100
@@ -55,7 +57,7 @@ export function registerConditionalFormattingExtension(): void {
   cleanupFns.push(unregInterceptor);
 
   // 2. Register grid overlay for data bars
-  const unregDataBarOverlay = registerGridOverlay({
+  const unregDataBarOverlay = context.grid.overlays.register({
     type: "cf-data-bar",
     render: renderDataBars,
     priority: 5,
@@ -63,7 +65,7 @@ export function registerConditionalFormattingExtension(): void {
   cleanupFns.push(unregDataBarOverlay);
 
   // 3. Register grid overlay for icon sets
-  const unregIconSetOverlay = registerGridOverlay({
+  const unregIconSetOverlay = context.grid.overlays.register({
     type: "cf-icon-set",
     render: renderIconSets,
     priority: 6,
@@ -71,29 +73,29 @@ export function registerConditionalFormattingExtension(): void {
   cleanupFns.push(unregIconSetOverlay);
 
   // 4. Register dialogs
-  registerDialog({
+  context.ui.dialogs.register({
     id: QUICK_CF_DIALOG_ID,
     component: QuickCFDialog,
     priority: 50,
   });
-  cleanupFns.push(() => unregisterDialog(QUICK_CF_DIALOG_ID));
+  cleanupFns.push(() => context.ui.dialogs.unregister(QUICK_CF_DIALOG_ID));
 
-  registerDialog({
+  context.ui.dialogs.register({
     id: RULES_MANAGER_DIALOG_ID,
     component: RulesManagerDialog,
     priority: 50,
   });
-  cleanupFns.push(() => unregisterDialog(RULES_MANAGER_DIALOG_ID));
+  cleanupFns.push(() => context.ui.dialogs.unregister(RULES_MANAGER_DIALOG_ID));
 
-  registerDialog({
+  context.ui.dialogs.register({
     id: NEW_RULE_DIALOG_ID,
     component: NewRuleDialog,
     priority: 50,
   });
-  cleanupFns.push(() => unregisterDialog(NEW_RULE_DIALOG_ID));
+  cleanupFns.push(() => context.ui.dialogs.unregister(NEW_RULE_DIALOG_ID));
 
   // 5. Register menu items
-  registerCFMenuItems();
+  registerCFMenuItems(context);
 
   // 6. Subscribe to events
 
@@ -109,7 +111,7 @@ export function registerConditionalFormattingExtension(): void {
   cleanupFns.push(unsubSelection);
 
   // Sheet changed: reset state and reload
-  const unsubSheet = onAppEvent(AppEvents.SHEET_CHANGED, () => {
+  const unsubSheet = context.events.on(AppEvents.SHEET_CHANGED, () => {
     resetState();
     refreshRules().then(() => {
       evaluateViewport(0, 0, 100, 30);
@@ -124,7 +126,7 @@ export function registerConditionalFormattingExtension(): void {
   cleanupFns.push(unsubCells);
 
   // Data changed event: invalidate and re-evaluate
-  const unsubData = onAppEvent(AppEvents.DATA_CHANGED, () => {
+  const unsubData = context.events.on(AppEvents.DATA_CHANGED, () => {
     invalidateCache();
   });
   cleanupFns.push(unsubData);
@@ -135,15 +137,18 @@ export function registerConditionalFormattingExtension(): void {
     evaluateViewport(0, 0, 100, 30);
   });
 
-  console.log("[ConditionalFormatting] Registered successfully.");
+  isActivated = true;
+  console.log("[ConditionalFormatting] Activated successfully.");
 }
 
 // ============================================================================
-// Unregistration
+// Deactivation
 // ============================================================================
 
-export function unregisterConditionalFormattingExtension(): void {
-  console.log("[ConditionalFormatting] Unregistering...");
+function deactivate(): void {
+  if (!isActivated) return;
+
+  console.log("[ConditionalFormatting] Deactivating...");
 
   // Run cleanup functions
   for (const fn of cleanupFns) {
@@ -158,5 +163,23 @@ export function unregisterConditionalFormattingExtension(): void {
   // Reset state
   resetState();
 
-  console.log("[ConditionalFormatting] Unregistered.");
+  isActivated = false;
+  console.log("[ConditionalFormatting] Deactivated.");
 }
+
+// ============================================================================
+// Extension Module Export
+// ============================================================================
+
+const extension: ExtensionModule = {
+  manifest: {
+    id: "calcula.conditional-formatting",
+    name: "Conditional Formatting",
+    version: "1.0.0",
+    description: "Highlight cells, color scales, data bars, icon sets, and rule management for conditional formatting.",
+  },
+  activate,
+  deactivate,
+};
+
+export default extension;

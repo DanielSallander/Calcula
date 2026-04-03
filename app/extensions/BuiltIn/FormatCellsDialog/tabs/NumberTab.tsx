@@ -7,7 +7,7 @@ import { useFormatCellsStore } from "../hooks/useFormatCellsState";
 import {
   NUMBER_FORMAT_CATEGORIES,
 } from "../utils/numberFormats";
-import { previewNumberFormat } from "../../../../src/api";
+import { previewNumberFormat } from "@api";
 
 const v = (name: string) => `var(${name})`;
 

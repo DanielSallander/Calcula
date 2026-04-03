@@ -2,8 +2,8 @@
 // PURPOSE: Generates print-ready HTML from grid data and triggers browser print.
 // CONTEXT: Called when user prints via Ctrl+P or File > Print.
 
-import type { PrintData, PageSetup } from "../../../src/api/lib";
-import { indexToCol, colToIndex } from "../../../src/api/lib";
+import type { PrintData, PageSetup } from "@api/lib";
+import { indexToCol, colToIndex } from "@api/lib";
 
 // ============================================================================
 // Paper sizes in CSS (mm)

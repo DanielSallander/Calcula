@@ -5,7 +5,7 @@
 import type { TestSuite } from "../types";
 import { assertTrue, assertEqual, expectNotNull, expectCellValue } from "../assertions";
 import { AREA_BOUNDARY_VALUES } from "../testArea";
-import { calculateNow } from "../../../../src/api";
+import { calculateNow } from "@api";
 
 const A = AREA_BOUNDARY_VALUES;
 

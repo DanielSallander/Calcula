@@ -3,7 +3,7 @@
 // CONTEXT: When the user selects a cell within a pivot region, we show the editor.
 // When they select outside, we hide it.
 
-import { pivot } from "../../../src/api/pivot";
+import { pivot } from "@api/pivot";
 import {
   openTaskPane,
   closeTaskPane,
@@ -11,8 +11,8 @@ import {
   addTaskPaneContextKey,
   removeTaskPaneContextKey,
   ExtensionRegistry,
-} from "../../../src/api";
-import type { LayoutConfig, AggregationType } from "../../../src/api";
+} from "@api";
+import type { LayoutConfig, AggregationType } from "@api";
 import {
   PIVOT_PANE_ID,
   PivotDesignTabDefinition,

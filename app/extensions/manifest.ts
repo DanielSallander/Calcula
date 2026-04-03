@@ -4,7 +4,7 @@
 //          The ExtensionManager imports from here to load built-ins.
 // NOTE: Runtime extensions will be loaded dynamically via URL import.
 
-import type { ExtensionModule } from "../src/api/contract";
+import type { ExtensionModule } from "@api/contract";
 
 // ============================================================================
 // Built-in Extension Imports
@@ -25,6 +25,58 @@ import ZoomSliderExtension from "./BuiltIn/ZoomSlider";
 import HomeTabExtension from "./BuiltIn/HomeTab";
 import DocumentThemeExtension from "./BuiltIn/DocumentTheme";
 import CollectionPreviewExtension from "./BuiltIn/CollectionPreview";
+
+// Activity Bar views (migrated from Path B)
+import FileExplorerExtension from "./FileExplorer";
+import SearchExtension from "./Search";
+import ExtensionsManagerExtension from "./ExtensionsManager";
+import SettingsExtension from "./Settings";
+
+// Batch 2: Simple dialogs/menus (migrated from Path B)
+import SortingExtension from "./Sorting";
+import RemoveDuplicatesExtension from "./RemoveDuplicates";
+import TextToColumnsExtension from "./TextToColumns";
+import GoalSeekExtension from "./GoalSeek";
+import GoToSpecialExtension from "./GoToSpecial";
+import FlashFillExtension from "./FlashFill";
+import CustomFillListsExtension from "./CustomFillLists";
+import AdvancedFilterExtension from "./AdvancedFilter";
+import SubtotalsExtension from "./Subtotals";
+import CsvImportExportExtension from "./CsvImportExport";
+import WatchWindowExtension from "./WatchWindow";
+import CalculationOptionsExtension from "./CalculationOptions";
+import ReviewExtension from "./Review";
+import EvaluateFormulaExtension from "./EvaluateFormula";
+import FormulaVisualizerExtension from "./FormulaVisualizer";
+
+// Batch 3: Medium complexity (migrated from Path B)
+import DataValidationExtension from "./DataValidation";
+import ConditionalFormattingExtension from "./ConditionalFormatting";
+import ProtectionExtension from "./Protection";
+import TracingExtension from "./Tracing";
+import DefinedNamesExtension from "./DefinedNames";
+import ConsolidateExtension from "./Consolidate";
+import ScenarioManagerExtension from "./ScenarioManager";
+import DataTablesExtension from "./DataTables";
+import SolverExtension from "./Solver";
+import CheckboxExtension from "./Checkbox";
+import SparklinesExtension from "./Sparklines";
+import GroupingExtension from "./Grouping";
+import PrintExtension from "./Print";
+import ScriptEditorExtension from "./ScriptEditor";
+import ScriptNotebookExtension from "./ScriptNotebook";
+
+// Batch 4: Complex extensions (migrated from Path B)
+import ChartExtension from "./Charts";
+import PivotExtension from "./Pivot";
+import TableExtension from "./Table";
+import SlicerExtension from "./Slicer";
+import TimelineSlicerExtension from "./TimelineSlicer";
+import AutoFilterExtension from "./AutoFilter";
+import ControlsExtension from "./Controls";
+import BusinessIntelligenceExtension from "./BusinessIntelligence";
+import AIChatExtension from "./AIChat";
+import ReportStoreExtension from "./ReportStore";
 
 // Dev-only extensions
 import TestRunnerExtension from "./TestRunner";
@@ -66,6 +118,55 @@ export const builtInExtensions: ExtensionModule[] = [
   ZoomSliderExtension,
   // Collection Preview (sidebar panel for List/Dict cells)
   CollectionPreviewExtension,
+  // AutoFilter creates the "data" menu — must load before extensions that add to it
+  AutoFilterExtension,
+  // Activity Bar views
+  FileExplorerExtension,
+  SearchExtension,
+  ExtensionsManagerExtension,
+  SettingsExtension,
+  // Simple dialogs/menus
+  SortingExtension,
+  RemoveDuplicatesExtension,
+  TextToColumnsExtension,
+  GoalSeekExtension,
+  GoToSpecialExtension,
+  FlashFillExtension,
+  CustomFillListsExtension,
+  AdvancedFilterExtension,
+  SubtotalsExtension,
+  CsvImportExportExtension,
+  WatchWindowExtension,
+  CalculationOptionsExtension,
+  ReviewExtension,
+  EvaluateFormulaExtension,
+  FormulaVisualizerExtension,
+  // Medium complexity extensions
+  DataValidationExtension,
+  ConditionalFormattingExtension,
+  ProtectionExtension,
+  TracingExtension,
+  DefinedNamesExtension,
+  ConsolidateExtension,
+  ScenarioManagerExtension,
+  DataTablesExtension,
+  SolverExtension,
+  CheckboxExtension,
+  SparklinesExtension,
+  GroupingExtension,
+  PrintExtension,
+  ScriptEditorExtension,
+  ScriptNotebookExtension,
+  // Complex extensions
+  ChartExtension,
+  PivotExtension,
+  TableExtension,
+  SlicerExtension,
+  TimelineSlicerExtension,
+  ControlsExtension,
+  BusinessIntelligenceExtension,
+  AIChatExtension,
+  ReportStoreExtension,
   // Test Runner (dev-only, macro-based integration tests)
   ...(import.meta.env.DEV ? [TestRunnerExtension] : []),
 ];

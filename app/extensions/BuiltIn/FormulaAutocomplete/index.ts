@@ -7,17 +7,17 @@
 // This avoids depending on app:edit-started/ended events which are not
 // reliably emitted by all editing paths.
 
-import type { ExtensionModule } from "../../../src/api/contract";
-import { OverlayExtensions } from "../../../src/api/ui";
-import { onAppEvent, AppEvents } from "../../../src/api/events";
+import type { ExtensionModule } from "@api/contract";
+import { OverlayExtensions } from "@api/ui";
+import { onAppEvent, AppEvents } from "@api/events";
 import {
   setFormulaAutocompleteVisible,
   AutocompleteEvents,
-} from "../../../src/api/formulaAutocomplete";
+} from "@api/formulaAutocomplete";
 import type {
   AutocompleteInputPayload,
   AutocompleteKeyPayload,
-} from "../../../src/api/formulaAutocomplete";
+} from "@api/formulaAutocomplete";
 import { FormulaAutocompleteOverlay } from "./FormulaAutocompleteOverlay";
 import { useAutocompleteStore } from "./useAutocompleteStore";
 import { reloadNamedRanges } from "./functionCatalog";

@@ -1,12 +1,9 @@
 //! FILENAME: app/extensions/EvaluateFormula/index.ts
 // PURPOSE: Evaluate Formula extension entry point (step-by-step formula debugger).
 // CONTEXT: Registers the dialog, Formulas menu item, and selection tracking.
-//          Called from extensions/index.ts during app initialization.
 
-import {
-  DialogExtensions,
-  ExtensionRegistry,
-} from "../../src/api";
+import type { ExtensionModule, ExtensionContext } from "@api/contract";
+import { ExtensionRegistry } from "@api";
 import { EvaluateFormulaDialog } from "./components/EvaluateFormulaDialog";
 import {
   registerEvaluateFormulaMenuItem,
@@ -20,19 +17,19 @@ import {
 const cleanupFns: (() => void)[] = [];
 
 // ============================================================================
-// Registration
+// Lifecycle
 // ============================================================================
 
-export function registerEvaluateFormulaExtension(): void {
-  console.log("[EvaluateFormula] Registering...");
+function activate(context: ExtensionContext): void {
+  console.log("[EvaluateFormula] Activating...");
 
   // 1. Register dialog
-  DialogExtensions.registerDialog({
+  context.ui.dialogs.register({
     id: "evaluate-formula",
     component: EvaluateFormulaDialog,
     priority: 110,
   });
-  cleanupFns.push(() => DialogExtensions.unregisterDialog("evaluate-formula"));
+  cleanupFns.push(() => context.ui.dialogs.unregister("evaluate-formula"));
 
   // 2. Register menu item in Formulas menu
   registerEvaluateFormulaMenuItem();
@@ -50,15 +47,11 @@ export function registerEvaluateFormulaExtension(): void {
   });
   cleanupFns.push(unsubSelection);
 
-  console.log("[EvaluateFormula] Registered successfully.");
+  console.log("[EvaluateFormula] Activated successfully.");
 }
 
-// ============================================================================
-// Unregistration
-// ============================================================================
-
-export function unregisterEvaluateFormulaExtension(): void {
-  console.log("[EvaluateFormula] Unregistering...");
+function deactivate(): void {
+  console.log("[EvaluateFormula] Deactivating...");
 
   for (const fn of cleanupFns) {
     try {
@@ -69,5 +62,21 @@ export function unregisterEvaluateFormulaExtension(): void {
   }
   cleanupFns.length = 0;
 
-  console.log("[EvaluateFormula] Unregistered.");
+  console.log("[EvaluateFormula] Deactivated.");
 }
+
+// ============================================================================
+// Extension Module
+// ============================================================================
+
+const extension: ExtensionModule = {
+  manifest: {
+    id: "calcula.evaluate-formula",
+    name: "Evaluate Formula",
+    version: "1.0.0",
+    description: "Step-by-step formula debugger for evaluating formulas.",
+  },
+  activate,
+  deactivate,
+};
+export default extension;

@@ -4,8 +4,8 @@
 //          and see setup instructions for connecting AI clients.
 
 import React, { useState, useEffect, useCallback } from "react";
-import type { TaskPaneViewProps } from "../../../src/api";
-import { invokeBackend } from "../../../src/api/backend";
+import type { TaskPaneViewProps } from "@api";
+import { invokeBackend } from "@api/backend";
 
 // ============================================================================
 // Styles

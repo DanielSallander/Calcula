@@ -38,6 +38,18 @@ export type {
   // Merged cells
   MergedRegion,
 
+  // Fill / Pattern
+  FillData,
+  FillParam,
+  PatternType,
+  GradientDirection,
+
+  // View mode
+  ViewMode,
+
+  // Sorting
+  SortRangeResult,
+
   // Computed Properties
   ComputedPropertyTargetType,
   ComputedPropertyData,

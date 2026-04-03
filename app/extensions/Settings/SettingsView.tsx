@@ -3,7 +3,7 @@
 // CONTEXT: Contains user preferences like file explorer open behavior
 
 import React, { useCallback, useEffect, useState } from "react";
-import type { ActivityViewProps } from "../../src/api/uiTypes";
+import type { ActivityViewProps } from "@api/uiTypes";
 
 const h = React.createElement;
 

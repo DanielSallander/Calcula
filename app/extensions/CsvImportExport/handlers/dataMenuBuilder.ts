@@ -2,7 +2,7 @@
 // PURPOSE: Registers "Get Data" menu items in the Data menu for CSV import/export.
 // CONTEXT: Appends items to the existing "data" menu created by AutoFilter.
 
-import { registerMenuItem, DialogExtensions } from "../../../src/api";
+import { registerMenuItem, DialogExtensions } from "@api";
 
 // ============================================================================
 // Menu Registration

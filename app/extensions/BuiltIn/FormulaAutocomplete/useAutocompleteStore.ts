@@ -8,14 +8,14 @@ import { create } from "zustand";
 import {
   setFormulaAutocompleteVisible,
   AutocompleteEvents,
-} from "../../../src/api/formulaAutocomplete";
-import type { AutocompleteInputPayload } from "../../../src/api/formulaAutocomplete";
-import { isFormulaExpectingReference } from "../../../src/api/types";
+} from "@api/formulaAutocomplete";
+import type { AutocompleteInputPayload } from "@api/formulaAutocomplete";
+import { isFormulaExpectingReference } from "@api/types";
 import { parseTokenAtCursor } from "./tokenParser";
 import type { TokenContext } from "./tokenParser";
 import { filterSuggestions, loadFunctionCatalog, loadNamedRanges, getFunctionByName } from "./functionCatalog";
 import type { ScoredSuggestion } from "./functionCatalog";
-import type { FunctionInfo } from "../../../src/api/types";
+import type { FunctionInfo } from "@api/types";
 
 // ============================================================================
 // Store Interface

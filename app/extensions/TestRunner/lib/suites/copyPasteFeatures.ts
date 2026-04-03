@@ -5,8 +5,8 @@
 import type { TestSuite } from "../types";
 import { assertTrue, expectCellValue, expectCellEmpty, expectNotNull } from "../assertions";
 import { AREA_COPYPASTE_FEATURES } from "../testArea";
-import { CoreCommands } from "../../../../src/api/commands";
-import { applyFormatting, getStyle } from "../../../../src/api/lib";
+import { CoreCommands } from "@api/commands";
+import { applyFormatting, getStyle } from "@api/lib";
 
 const A = AREA_COPYPASTE_FEATURES;
 

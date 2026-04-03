@@ -9,7 +9,7 @@ import {
   hideDialog,
   type CommitGuardResult,
   type CellValidationResult,
-} from "../../../src/api";
+} from "@api";
 import type { ErrorAlertData } from "../types";
 
 // ============================================================================

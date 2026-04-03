@@ -3,9 +3,9 @@
 //          shows their fields as checkboxes, and creates one slicer per checked field.
 
 import React, { useState, useEffect, useCallback } from "react";
-import type { DialogProps } from "../../../src/api";
-import { getSheets } from "../../../src/api";
-import { invokeBackend, type Table, getAllPivotTables } from "../../../src/api/backend";
+import type { DialogProps } from "@api";
+import { getSheets } from "@api";
+import { invokeBackend, type Table, getAllPivotTables } from "@api/backend";
 import { createSlicerAsync } from "../lib/slicerStore";
 import type { SlicerSourceType } from "../lib/slicerTypes";
 

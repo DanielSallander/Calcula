@@ -22,7 +22,7 @@ import {
   createWholeNumberRule,
   DEFAULT_ERROR_ALERT,
   DEFAULT_PROMPT,
-} from "../../../../src/api";
+} from "@api";
 
 const A = AREA_WF_PROTECTED_TEMPLATE;
 

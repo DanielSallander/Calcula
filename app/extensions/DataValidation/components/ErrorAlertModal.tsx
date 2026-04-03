@@ -3,7 +3,7 @@
 // CONTEXT: Displayed by the commit guard handler. Shows Stop, Warning, or Information alerts.
 
 import React from "react";
-import type { DialogProps } from "../../../src/api";
+import type { DialogProps } from "@api";
 import type { ErrorAlertData } from "../types";
 import { resolveErrorAlert } from "../handlers/commitGuardHandler";
 

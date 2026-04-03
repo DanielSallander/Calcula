@@ -1,7 +1,7 @@
 //! FILENAME: app/extensions/Solver/handlers/dataMenuBuilder.ts
 // PURPOSE: Registers Solver item in the Data menu.
 
-import { registerMenuItem, DialogExtensions } from "../../../src/api";
+import type { ExtensionContext } from "@api/contract";
 
 // ============================================================================
 // State
@@ -22,13 +22,13 @@ export function setCurrentSelection(
 // Menu Registration
 // ============================================================================
 
-export function registerSolverMenuItems(): void {
-  registerMenuItem("data", {
+export function registerSolverMenuItems(context: ExtensionContext): void {
+  context.ui.menus.registerItem("data", {
     id: "data:solver",
     label: "Solver...",
     action: () => {
       const sel = currentSelection;
-      DialogExtensions.openDialog("solver", {
+      context.ui.dialogs.show("solver", {
         activeRow: sel?.activeRow ?? 0,
         activeCol: sel?.activeCol ?? 0,
       });

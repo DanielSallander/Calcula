@@ -8,7 +8,7 @@ import {
   showOverlay,
   getComment,
   getNote,
-} from "../../../src/api";
+} from "@api";
 import {
   getAllCommentIndicatorsCached,
   getAllNoteIndicatorsCached,

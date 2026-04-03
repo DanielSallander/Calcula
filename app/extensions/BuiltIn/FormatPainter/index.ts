@@ -3,10 +3,10 @@
 // CONTEXT: Registers commands, keyboard shortcuts, and menu items for the Format Painter tool.
 // NOTE: Default exports an ExtensionModule object per the contract.
 
-import type { ExtensionModule, ExtensionContext } from "../../../src/api/contract";
-import { CoreCommands } from "../../../src/api/commands";
-import { ExtensionRegistry } from "../../../src/api/extensions";
-import { registerMenuItem } from "../../../src/api/ui";
+import type { ExtensionModule, ExtensionContext } from "@api/contract";
+import { CoreCommands } from "@api/commands";
+import { ExtensionRegistry } from "@api/extensions";
+import { registerMenuItem } from "@api/ui";
 import { activateFormatPainter, deactivateFormatPainter } from "./formatPainterLogic";
 import { isFormatPainterActive } from "./formatPainterState";
 

@@ -2,18 +2,16 @@
 // PURPOSE: Table extension entry point.
 // CONTEXT: Registers all table functionality with the extension system.
 
+import type { ExtensionModule, ExtensionContext } from "@api/contract";
 import {
   ExtensionRegistry,
-  DialogExtensions,
-  onAppEvent,
-  emitAppEvent,
   AppEvents,
-} from "../../src/api";
+} from "@api";
+import { emitAppEvent } from "@api/events";
 import {
-  registerGridOverlay,
   removeGridRegionsByType,
   type OverlayRenderContext,
-} from "../../src/api/gridOverlays";
+} from "@api/gridOverlays";
 
 import {
   TableManifest,
@@ -47,31 +45,31 @@ import { registerTableStyleInterceptor } from "./lib/tableStyleInterceptor";
 import { TableEvents } from "./lib/tableEvents";
 
 // ============================================================================
-// Extension Lifecycle
+// Module State
 // ============================================================================
 
 let cleanupFunctions: Array<() => void> = [];
 
-/**
- * Register the table extension.
- * Call this during application initialization.
- */
-export function registerTableExtension(): void {
+// ============================================================================
+// Activation
+// ============================================================================
+
+function activate(context: ExtensionContext): void {
   console.log("[Table Extension] Registering...");
 
   // Register add-in manifest
   ExtensionRegistry.registerAddIn(TableManifest);
 
   // Register dialogs
-  DialogExtensions.registerDialog(TableDialogDefinition);
-  DialogExtensions.registerDialog(RemoveDuplicatesDialogDefinition);
+  context.ui.dialogs.register(TableDialogDefinition);
+  context.ui.dialogs.register(RemoveDuplicatesDialogDefinition);
 
   // Register style interceptor for table formatting (header, banded rows, etc.)
   cleanupFunctions.push(registerTableStyleInterceptor());
 
   // Register grid overlay renderer for table borders
   cleanupFunctions.push(
-    registerGridOverlay({
+    context.grid.overlays.register({
       type: "table",
       render: (ctx: OverlayRenderContext) => {
         drawTableBorder(ctx);
@@ -136,29 +134,29 @@ export function registerTableExtension(): void {
 
   // Listen for structural changes (row/column insert/delete) to refresh cache
   cleanupFunctions.push(
-    onAppEvent<{ row: number; count: number }>(AppEvents.ROWS_INSERTED, () => {
+    context.events.on<{ row: number; count: number }>(AppEvents.ROWS_INSERTED, () => {
       refreshCache().catch(console.error);
     }),
   );
   cleanupFunctions.push(
-    onAppEvent<{ col: number; count: number }>(AppEvents.COLUMNS_INSERTED, () => {
+    context.events.on<{ col: number; count: number }>(AppEvents.COLUMNS_INSERTED, () => {
       refreshCache().catch(console.error);
     }),
   );
   cleanupFunctions.push(
-    onAppEvent<{ row: number; count: number }>(AppEvents.ROWS_DELETED, () => {
+    context.events.on<{ row: number; count: number }>(AppEvents.ROWS_DELETED, () => {
       refreshCache().catch(console.error);
     }),
   );
   cleanupFunctions.push(
-    onAppEvent<{ col: number; count: number }>(AppEvents.COLUMNS_DELETED, () => {
+    context.events.on<{ col: number; count: number }>(AppEvents.COLUMNS_DELETED, () => {
       refreshCache().catch(console.error);
     }),
   );
 
   // Listen for cell updates to handle auto-expansion and header enforcement
   cleanupFunctions.push(
-    onAppEvent<{ row: number; col: number; value?: string }>(
+    context.events.on<{ row: number; col: number; value?: string }>(
       AppEvents.CELLS_UPDATED,
       (detail) => {
         // CELLS_UPDATED may carry a single cell or batch info
@@ -171,7 +169,7 @@ export function registerTableExtension(): void {
 
   // Also listen for EDIT_ENDED which fires when the user commits an edit
   cleanupFunctions.push(
-    onAppEvent<{ row: number; col: number; value?: string }>(
+    context.events.on<{ row: number; col: number; value?: string }>(
       AppEvents.EDIT_ENDED,
       (detail) => {
         if (detail && typeof detail === "object" && "row" in detail && "col" in detail) {
@@ -184,7 +182,7 @@ export function registerTableExtension(): void {
   // Refresh table cache when the active sheet changes so tables from
   // the previous sheet are removed and the new sheet's tables are loaded.
   cleanupFunctions.push(
-    onAppEvent(AppEvents.SHEET_CHANGED, () => {
+    context.events.on(AppEvents.SHEET_CHANGED, () => {
       refreshCache().catch(console.error);
     }),
   );
@@ -266,11 +264,11 @@ async function handleCellEdited(row: number, col: number, value: string): Promis
   }
 }
 
-/**
- * Unregister the table extension.
- * Call this during application shutdown or hot reload.
- */
-export function unregisterTableExtension(): void {
+// ============================================================================
+// Deactivation
+// ============================================================================
+
+function deactivate(): void {
   console.log("[Table Extension] Unregistering...");
 
   // Cleanup event listeners
@@ -286,11 +284,26 @@ export function unregisterTableExtension(): void {
 
   // Unregister from extension registries
   ExtensionRegistry.unregisterAddIn(TableManifest.id);
-  DialogExtensions.unregisterDialog(TABLE_DIALOG_ID);
-  DialogExtensions.unregisterDialog(REMOVE_DUPLICATES_DIALOG_ID);
 
   console.log("[Table Extension] Unregistered successfully");
 }
+
+// ============================================================================
+// Extension Module Export
+// ============================================================================
+
+const extension: ExtensionModule = {
+  manifest: {
+    id: "calcula.table",
+    name: "Table",
+    version: "1.0.0",
+    description: "Structured tables with auto-expand, calculated columns, and design tab.",
+  },
+  activate,
+  deactivate,
+};
+
+export default extension;
 
 // Re-export for convenience
 export { TABLE_DIALOG_ID };

@@ -2,12 +2,12 @@
 // PURPOSE: Scenario Summary dialog - shows comparison table of all scenarios.
 
 import React, { useState, useEffect, useCallback, useRef } from "react";
-import type { DialogProps } from "../../../src/api/uiTypes";
+import type { DialogProps } from "@api/uiTypes";
 import {
   scenarioSummary,
   columnToLetter,
-} from "../../../src/api";
-import type { ScenarioSummaryRow, ScenarioCell } from "../../../src/api";
+} from "@api";
+import type { ScenarioSummaryRow, ScenarioCell } from "@api";
 
 // ============================================================================
 // Styles

@@ -5,7 +5,7 @@ import React from "react";
 import styled from "styled-components";
 import { useFormatCellsStore, type FillMode } from "../hooks/useFormatCellsState";
 import { ColorPicker } from "../components/ColorPicker";
-import type { PatternType, GradientDirection } from "../../../../src/core/types";
+import type { PatternType, GradientDirection } from "@api";
 
 const v = (name: string) => `var(${name})`;
 

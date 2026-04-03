@@ -4,12 +4,12 @@
 
 import React, { useState, useCallback } from "react";
 import { css } from "@emotion/css";
-import type { DialogProps } from "../../../src/api";
-import { removeDuplicates } from "../../../src/api/backend";
-import { emitAppEvent, AppEvents } from "../../../src/api";
+import type { DialogProps } from "@api";
+import { removeDuplicates } from "@api/backend";
+import { emitAppEvent, AppEvents } from "@api";
 import { refreshCache } from "../lib/tableStore";
 import { TableEvents } from "../lib/tableEvents";
-import type { Table } from "../../../src/api/backend";
+import type { Table } from "@api/backend";
 
 // ============================================================================
 // Styles

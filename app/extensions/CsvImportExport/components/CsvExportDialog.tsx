@@ -3,14 +3,14 @@
 // CONTEXT: Registered as a dialog via DialogExtensions. Opened from Data menu.
 
 import React, { useState, useCallback } from "react";
-import type { DialogProps } from "../../../src/api/uiTypes";
+import type { DialogProps } from "@api/uiTypes";
 import {
   getViewportCells,
   showToast,
   restoreFocusToGrid,
-} from "../../../src/api";
-import { getGridBounds } from "../../../src/api/lib";
-import { invokeBackend } from "../../../src/api/backend";
+} from "@api";
+import { getGridBounds } from "@api/lib";
+import { invokeBackend } from "@api/backend";
 import { save } from "@tauri-apps/plugin-dialog";
 import { exportToCsv, createDefaultExportOptions } from "../lib/csvExporter";
 

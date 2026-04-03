@@ -3,7 +3,7 @@
 // CONTEXT: Provides case sensitivity toggle and sort orientation (rows vs columns).
 
 import React, { useCallback, useRef, useEffect } from "react";
-import type { SortOrientation } from "../../../src/api/lib";
+import type { SortOrientation } from "@api/lib";
 import * as S from "./SortDialog.styles";
 
 // ============================================================================

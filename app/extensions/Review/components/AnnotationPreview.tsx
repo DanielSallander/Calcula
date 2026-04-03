@@ -3,7 +3,7 @@
 // CONTEXT: Appears when hovering over the annotation triangle indicator.
 
 import React from "react";
-import type { OverlayProps } from "../../../src/api";
+import type { OverlayProps } from "@api";
 
 // ============================================================================
 // Styles

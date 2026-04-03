@@ -5,8 +5,8 @@
 //          applies them as a pivot slicer filter.
 
 import type { TimelineSlicer } from "./timelineSlicerTypes";
-import { invokeBackend } from "../../../src/api/backend";
-import { emitAppEvent, AppEvents } from "../../../src/api";
+import { invokeBackend } from "@api/backend";
+import { emitAppEvent, AppEvents } from "@api";
 import { getTimelineSelectedItems } from "./timeline-slicer-api";
 
 /**

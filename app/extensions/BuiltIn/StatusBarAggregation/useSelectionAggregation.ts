@@ -12,7 +12,7 @@ import {
   onAppEvent,
   getSelectionAggregations,
   type SelectionAggregationResult,
-} from "../../../src/api";
+} from "@api";
 
 interface SelectionRange {
   startRow: number;

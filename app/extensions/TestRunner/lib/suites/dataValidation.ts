@@ -17,7 +17,7 @@ import {
   createTextLengthRule,
   DEFAULT_ERROR_ALERT,
   DEFAULT_PROMPT,
-} from "../../../../src/api";
+} from "@api";
 
 const A = AREA_DATA_VALIDATION;
 

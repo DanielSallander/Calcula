@@ -3,8 +3,8 @@
 // CONTEXT: Prevents adding, deleting, renaming, moving, hiding/unhiding sheets.
 
 import React, { useState } from "react";
-import type { DialogProps } from "../../../src/api";
-import { protectWorkbook } from "../../../src/api";
+import type { DialogProps } from "@api";
+import { protectWorkbook } from "@api";
 import { refreshProtectionState } from "../lib/protectionStore";
 
 // ============================================================================

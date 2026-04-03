@@ -5,7 +5,7 @@
 import type { TestSuite } from "../types";
 import { assertTrue, assertEqual } from "../assertions";
 import { AREA_FREEZE_PANES } from "../testArea";
-import { freezePanes, loadFreezePanesConfig } from "../../../../src/api";
+import { freezePanes, loadFreezePanesConfig } from "@api";
 
 const A = AREA_FREEZE_PANES;
 

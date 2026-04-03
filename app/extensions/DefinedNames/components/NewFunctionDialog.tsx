@@ -5,14 +5,14 @@
 import React, { useState, useEffect, useCallback, useRef } from "react";
 import Editor, { type OnMount } from "@monaco-editor/react";
 import type { editor } from "monaco-editor";
-import type { DialogProps } from "../../../src/api/uiTypes";
+import type { DialogProps } from "@api/uiTypes";
 import {
   createNamedRange,
   updateNamedRange,
   getSheets,
   AppEvents,
   emitAppEvent,
-} from "../../../src/api";
+} from "@api";
 import { isValidName } from "../lib/nameUtils";
 import {
   FUNCTION_FOLDER_NAME,

@@ -4,9 +4,9 @@
 
 import React, { useState, useEffect } from "react";
 import { css } from "@emotion/css";
-import { showDialog } from "../../../src/api";
-import { useRibbonCollapse, RibbonGroup } from "../../../src/api/ribbonCollapse";
-import { requestOverlayRedraw } from "../../../src/api/gridOverlays";
+import { showDialog } from "@api";
+import { useRibbonCollapse, RibbonGroup } from "@api/ribbonCollapse";
+import { requestOverlayRedraw } from "@api/gridOverlays";
 import { TimelineSlicerEvents } from "../lib/timelineSlicerEvents";
 import {
   getTimelineById,

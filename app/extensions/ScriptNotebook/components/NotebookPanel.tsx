@@ -3,7 +3,7 @@
 // CONTEXT: Registered as an ActivityView in the left sidebar.
 
 import React, { useEffect } from "react";
-import type { ActivityViewProps } from "../../../src/api/uiTypes";
+import type { ActivityViewProps } from "@api/uiTypes";
 import { useNotebookStore } from "../lib/useNotebookStore";
 import { NotebookToolbar } from "./NotebookToolbar";
 import { NotebookCell } from "./NotebookCell";

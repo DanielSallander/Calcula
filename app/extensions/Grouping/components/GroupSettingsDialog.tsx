@@ -3,9 +3,9 @@
 // CONTEXT: Allows users to set summary row/column direction (below/right vs above/left).
 
 import React, { useState, useEffect, useCallback, useRef } from "react";
-import type { DialogProps } from "../../../src/api/uiTypes";
-import { getOutlineSettings } from "../../../src/api";
-import type { OutlineSettings, SummaryPosition } from "../../../src/api";
+import type { DialogProps } from "@api/uiTypes";
+import { getOutlineSettings } from "@api";
+import type { OutlineSettings, SummaryPosition } from "@api";
 import { performSetOutlineSettings } from "../lib/groupingStore";
 
 // ============================================================================

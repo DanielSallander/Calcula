@@ -3,7 +3,7 @@
 // CONTEXT: User specifies list range, criteria range, action (filter in place / copy to), unique records.
 
 import React, { useState, useEffect, useCallback } from "react";
-import type { DialogProps } from "../../../src/api";
+import type { DialogProps } from "@api";
 import type { AdvancedFilterDialogData, AdvancedFilterAction } from "../types";
 import {
   executeAdvancedFilter,

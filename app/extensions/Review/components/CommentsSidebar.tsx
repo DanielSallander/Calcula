@@ -3,7 +3,7 @@
 // CONTEXT: Opened via Review menu "Show All Comments" or the comments button.
 
 import React, { useEffect, useState, useCallback } from "react";
-import type { Comment, Note, TaskPaneViewProps } from "../../../src/api";
+import type { Comment, Note, TaskPaneViewProps } from "@api";
 import {
   getAllComments,
   getAllNotes,
@@ -13,7 +13,7 @@ import {
   showOverlay,
   emitAppEvent,
   AppEvents,
-} from "../../../src/api";
+} from "@api";
 import { refreshAnnotationState } from "../lib/annotationStore";
 
 // ============================================================================

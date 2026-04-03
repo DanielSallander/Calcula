@@ -3,18 +3,18 @@
 // UPDATED: Added Split Window, Go To Special, Page Layout View items.
 
 import { useCallback, useEffect, useState } from 'react';
-import type { MenuDefinition, MenuItemDefinition } from '../../../src/api/ui';
+import type { MenuDefinition, MenuItemDefinition } from '@api/ui';
 import {
   freezePanes,
   loadFreezePanesConfig,
   splitWindow,
   loadSplitWindowConfig,
   removeSplitWindow,
-} from '../../../src/api/grid';
-import { useGridState } from '../../../src/api/grid';
-import { emitAppEvent, AppEvents } from '../../../src/api/events';
-import { showDialog } from '../../../src/api/ui';
-import type { ViewMode } from '../../../src/core/types';
+} from '@api/grid';
+import { useGridState } from '@api/grid';
+import { emitAppEvent, AppEvents } from '@api/events';
+import { showDialog } from '@api/ui';
+import type { ViewMode } from '@api';
 import {
   useIsTaskPaneOpen,
   useOpenTaskPaneAction,
@@ -30,7 +30,7 @@ import {
   useActiveActivityViewId,
   toggleActivityView,
   ActivityBarExtensions,
-} from '../../../src/api/ui';
+} from '@api/ui';
 
 export interface ViewMenuHandlers {
   handleFreezeTopRow: () => Promise<void>;

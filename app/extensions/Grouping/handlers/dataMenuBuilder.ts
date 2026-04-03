@@ -1,14 +1,13 @@
 //! FILENAME: app/extensions/Grouping/handlers/dataMenuBuilder.ts
 // PURPOSE: Registers Grouping/Outline items in the Data menu and grid context menu.
-// CONTEXT: Uses registerMenuItem to add to the existing "data" menu (created by AutoFilter).
+// CONTEXT: Uses context.ui.menus.registerItem to add to the existing "data" menu.
 //          Uses gridExtensions.registerContextMenuItem for right-click menu items.
 
+import type { ExtensionContext } from "@api/contract";
 import {
-  registerMenuItem,
   gridExtensions,
-  DialogExtensions,
   type GridContextMenuItem,
-} from "../../../src/api";
+} from "@api";
 import {
   performGroupRows,
   performUngroupRows,
@@ -46,19 +45,21 @@ function normalizeRange(sel: {
  * Register Grouping items into the existing "data" menu.
  * Assumes the "data" menu was already created (e.g., by AutoFilter extension).
  * Items are appended after existing filter items.
+ * @param context - ExtensionContext for UI registration
  * @param getSelection - function to retrieve the current grid selection
  */
 export function registerGroupingMenuItems(
+  context: ExtensionContext,
   getSelection: () => { startRow: number; endRow: number; startCol: number; endCol: number; type?: string } | null
 ): void {
   // Separator before grouping section
-  registerMenuItem("data", {
+  context.ui.menus.registerItem("data", {
     id: "data:outline:separator",
     label: "",
     separator: true,
   });
 
-  registerMenuItem("data", {
+  context.ui.menus.registerItem("data", {
     id: "data:outline:group",
     label: "Group",
     shortcut: "Alt+Shift+Right",
@@ -74,7 +75,7 @@ export function registerGroupingMenuItems(
     },
   });
 
-  registerMenuItem("data", {
+  context.ui.menus.registerItem("data", {
     id: "data:outline:ungroup",
     label: "Ungroup",
     shortcut: "Alt+Shift+Left",
@@ -90,8 +91,8 @@ export function registerGroupingMenuItems(
     },
   });
 
-  // "Show Level" submenu with levels 1–8
-  registerMenuItem("data", {
+  // "Show Level" submenu with levels 1-8
+  context.ui.menus.registerItem("data", {
     id: "data:outline:showLevel",
     label: "Show Level",
     children: Array.from({ length: 8 }, (_, i) => i + 1).map((level) => ({
@@ -103,7 +104,7 @@ export function registerGroupingMenuItems(
     })),
   });
 
-  registerMenuItem("data", {
+  context.ui.menus.registerItem("data", {
     id: "data:outline:clearOutline",
     label: "Clear Outline",
     action: () => {
@@ -111,17 +112,17 @@ export function registerGroupingMenuItems(
     },
   });
 
-  registerMenuItem("data", {
+  context.ui.menus.registerItem("data", {
     id: "data:outline:settingsSeparator",
     label: "",
     separator: true,
   });
 
-  registerMenuItem("data", {
+  context.ui.menus.registerItem("data", {
     id: "data:outline:settings",
     label: "Group Settings...",
     action: () => {
-      DialogExtensions.openDialog("group-settings");
+      context.ui.dialogs.show("group-settings");
     },
   });
 }

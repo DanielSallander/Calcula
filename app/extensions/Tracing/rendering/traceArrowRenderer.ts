@@ -2,7 +2,7 @@
 // PURPOSE: Grid overlay renderer that draws trace arrows on the canvas.
 // CONTEXT: Registered as a grid overlay with priority 25 (above AutoFilter).
 
-import type { OverlayRenderContext } from "../../../src/api";
+import type { OverlayRenderContext } from "@api";
 import { getArrows } from "../lib/tracingStore";
 import { computeArrowPath, getRangeRect } from "../lib/arrowGeometry";
 import { drawCrossSheetIcon } from "./crossSheetIcon";

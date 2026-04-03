@@ -5,7 +5,7 @@
 //          bookmarks and navigate between them.
 // NOTE: Default exports an ExtensionModule object per the contract.
 
-import type { ExtensionModule, ExtensionContext } from "../../../src/api/contract";
+import type { ExtensionModule, ExtensionContext } from "@api/contract";
 import {
   // Cell Decorations
   registerCellDecoration,
@@ -32,8 +32,8 @@ import {
   showOverlay,
   // Double-click interceptor
   registerCellDoubleClickInterceptor,
-} from "../../../src/api";
-import { getGridStateSnapshot } from "../../../src/api/grid";
+} from "@api";
+import { getGridStateSnapshot } from "@api/grid";
 
 // Internal modules
 import { drawBookmarkDot } from "./rendering/bookmarkDecoration";

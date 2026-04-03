@@ -3,8 +3,8 @@
 // CONTEXT: Opened via double-click on a virtual file in the File Explorer
 
 import React, { useCallback, useEffect, useRef, useState } from "react";
-import type { TaskPaneViewProps } from "../../src/api/uiTypes";
-import { readVirtualFile, createVirtualFile } from "../../src/api/backend";
+import type { TaskPaneViewProps } from "@api/uiTypes";
+import { readVirtualFile, createVirtualFile } from "@api/backend";
 import { MarkdownView, getViewMode } from "./FileRenderer";
 import { resolveTemplates, hasTemplates } from "./TemplateResolver";
 

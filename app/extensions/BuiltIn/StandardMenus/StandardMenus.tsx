@@ -4,7 +4,7 @@
 // CONTEXT: Must be rendered inside the React tree (e.g., in Layout.tsx).
 
 import { useEffect } from 'react';
-import { registerMenu } from '../../../src/api/ui';
+import { registerMenu } from '@api/ui';
 import { useFileMenu } from './FileMenu';
 import { useViewMenu } from './ViewMenu';
 import { useInsertMenu } from './InsertMenu';

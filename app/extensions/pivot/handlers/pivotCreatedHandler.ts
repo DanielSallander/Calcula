@@ -5,8 +5,8 @@
 // ARCHITECTURE: Uses api/pivot facade and api UI functions (The Facade Rule).
 // Extensions must NEVER import from shell or core directly.
 
-import { pivot } from "../../../src/api/pivot";
-import { openTaskPane, clearTaskPaneManuallyClosed } from "../../../src/api";
+import { pivot } from "@api/pivot";
+import { openTaskPane, clearTaskPaneManuallyClosed } from "@api";
 import { PIVOT_PANE_ID } from "../manifest";
 import type { SourceField, PivotEditorViewData } from "../types";
 import { setJustCreatedPivot, ensureDesignTabRegistered } from "./selectionHandler";

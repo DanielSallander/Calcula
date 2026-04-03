@@ -6,7 +6,7 @@ import React, { useState, useCallback, useEffect } from "react";
 import { useSelectionAggregation } from "./useSelectionAggregation";
 import { useAggregationPreferences, type AggregationKey } from "./useAggregationPreferences";
 import { AggregationContextMenu } from "./AggregationContextMenu";
-import { AppEvents, onAppEvent } from "../../../src/api";
+import { AppEvents, onAppEvent } from "@api";
 
 /** Format a number for display in the status bar. */
 function formatValue(value: number): string {

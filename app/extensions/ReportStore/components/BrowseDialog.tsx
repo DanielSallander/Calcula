@@ -3,15 +3,15 @@
 
 import React, { useState, useCallback, useEffect } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
-import type { DialogProps } from "../../../src/api/uiTypes";
-import type { PackageInfo, RegistryProvider } from "../../../src/api/distribution";
+import type { DialogProps } from "@api/uiTypes";
+import type { PackageInfo, RegistryProvider } from "@api/distribution";
 import {
   getRegistryProviders,
   getRegistryProvider,
   browsePackages,
   parsePackageInfo,
-} from "../../../src/api/distribution";
-import { DialogExtensions } from "../../../src/api";
+} from "@api/distribution";
+import { DialogExtensions } from "@api";
 import { BINDING_DIALOG_ID } from "../manifest";
 import { PackageCard } from "./PackageCard";
 

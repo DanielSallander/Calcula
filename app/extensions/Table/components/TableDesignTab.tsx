@@ -5,7 +5,7 @@
 
 import React, { useState, useEffect, useCallback, useRef, useMemo } from "react";
 import { css } from "@emotion/css";
-import { onAppEvent, emitAppEvent, AppEvents, showDialog } from "../../../src/api";
+import { onAppEvent, emitAppEvent, AppEvents, showDialog } from "@api";
 import { TableEvents } from "../lib/tableEvents";
 import {
   updateTableStyleAsync,
@@ -15,8 +15,8 @@ import {
   type Table,
   type TableStyleOptions,
 } from "../lib/tableStore";
-import type { RibbonContext } from "../../../src/api/extensions";
-import { useRibbonCollapse, RibbonGroup } from "../../../src/api/ribbonCollapse";
+import type { RibbonContext } from "@api/extensions";
+import { useRibbonCollapse, RibbonGroup } from "@api/ribbonCollapse";
 import { TableStylesGallery, DEFAULT_TABLE_STYLE_ID } from "./TableStylesGallery";
 
 // ============================================================================

@@ -3,8 +3,8 @@
 // CONTEXT: Multi-step wizard: select connection, bind, query, insert.
 
 import React, { useState, useCallback, useEffect } from "react";
-import type { TaskPaneViewProps } from "../../../src/api";
-import { useGridState, restoreFocusToGrid } from "../../../src/api";
+import type { TaskPaneViewProps } from "@api";
+import { useGridState, restoreFocusToGrid } from "@api";
 import {
   getConnections,
   connect,
@@ -19,7 +19,7 @@ import type {
   BiColumnRef,
   BiModelInfo,
 } from "../types";
-import { biGetModelInfo } from "../../../src/api/backend";
+import { biGetModelInfo } from "@api/backend";
 
 // ============================================================================
 // Styles

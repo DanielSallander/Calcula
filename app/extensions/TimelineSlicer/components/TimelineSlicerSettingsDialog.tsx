@@ -3,12 +3,12 @@
 
 import React, { useState, useEffect } from "react";
 import { css } from "@emotion/css";
-import type { DialogProps } from "../../../src/api";
+import type { DialogProps } from "@api";
 import {
   getTimelineById,
   updateTimelineAsync,
 } from "../lib/timelineSlicerStore";
-import { requestOverlayRedraw } from "../../../src/api/gridOverlays";
+import { requestOverlayRedraw } from "@api/gridOverlays";
 import { TimelineStylesGallery } from "./TimelineSlicerStylesGallery";
 
 // ============================================================================

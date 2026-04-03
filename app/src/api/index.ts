@@ -4,6 +4,12 @@
 // UPDATED: Removed Find actions - Find state now lives in the FindReplaceDialog extension.
 
 // ============================================================================
+// API Version
+// ============================================================================
+
+export { API_VERSION } from "./version";
+
+// ============================================================================
 // Commands
 // ============================================================================
 
@@ -14,7 +20,24 @@ export type { ICommandRegistry } from "./commands";
 // Contract (Extension types)
 // ============================================================================
 
-export type { ExtensionContext, ExtensionManifest, ExtensionModule } from "./contract";
+export type {
+  ExtensionContext,
+  ExtensionManifest,
+  ExtensionModule,
+  IMenuAPI,
+  ITaskPaneAPI,
+  IDialogAPI,
+  IOverlayAPI,
+  IStatusBarAPI,
+  IActivityBarAPI,
+  IEventAPI,
+  ICellDecorationAPI,
+  IStyleInterceptorAPI,
+  IGridOverlayAPI,
+  IEditGuardAPI,
+  ICellClickAPI,
+  INotificationAPI,
+} from "./contract";
 
 // ============================================================================
 // Grid API
@@ -572,7 +595,21 @@ export type {
 } from "./columnHeaderOverrides";
 
 // Core types re-exported for extension use
-export type { Selection, SelectionType, Viewport, GridConfig, DimensionOverrides } from "./types";
+export type {
+  Selection,
+  SelectionType,
+  Viewport,
+  GridConfig,
+  DimensionOverrides,
+  CellData,
+  StyleData,
+  FillData,
+  FillParam,
+  PatternType,
+  GradientDirection,
+  ViewMode,
+  SortRangeResult,
+} from "./types";
 
 // ============================================================================
 // Theme API

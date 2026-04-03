@@ -2,16 +2,15 @@
 // PURPOSE: Register the "Review" menu with protection-related actions.
 // CONTEXT: Adds Protect Sheet, Protect Workbook, Cell Protection menu items.
 
+import type { ExtensionContext } from "@api/contract";
 import {
-  registerMenu,
   showDialog,
-  hideDialog,
   unprotectSheet,
   IconProtectSheet,
   IconProtectWorkbook,
   IconCellProtection,
-} from "../../../src/api";
-import type { MenuDefinition } from "../../../src/api";
+} from "@api";
+import type { MenuDefinition } from "@api";
 import {
   isCurrentSheetProtected,
   currentSheetHasPassword,
@@ -33,6 +32,9 @@ const CELL_PROTECTION_DIALOG_ID = "cell-protection-dialog";
 // Menu Actions
 // ============================================================================
 
+/** Store a reference to the context for use in refreshMenu */
+let _context: ExtensionContext | null = null;
+
 async function toggleProtectSheet(): Promise<void> {
   if (isCurrentSheetProtected()) {
     // Sheet is protected - unprotect
@@ -44,7 +46,9 @@ async function toggleProtectSheet(): Promise<void> {
       const result = await unprotectSheet();
       if (result.success) {
         await refreshProtectionState();
-        refreshMenu();
+        if (_context) {
+          refreshMenu(_context);
+        }
       }
     }
   } else {
@@ -106,11 +110,13 @@ function buildReviewMenu(): MenuDefinition {
 }
 
 /** Register the Review menu. */
-export function registerReviewMenu(): void {
-  registerMenu(buildReviewMenu());
+export function registerReviewMenu(context: ExtensionContext): void {
+  _context = context;
+  context.ui.menus.register(buildReviewMenu());
 }
 
 /** Refresh the Review menu (e.g., after protect/unprotect changes labels). */
-export function refreshMenu(): void {
-  registerMenu(buildReviewMenu());
+export function refreshMenu(context: ExtensionContext): void {
+  _context = context;
+  context.ui.menus.register(buildReviewMenu());
 }

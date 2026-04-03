@@ -5,7 +5,7 @@
 import {
   registerMenuItem,
   DialogExtensions,
-} from "../../../src/api";
+} from "@api";
 
 /** Current selection state, updated by the extension's selection listener. */
 let currentSelection: {

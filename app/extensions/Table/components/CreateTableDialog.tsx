@@ -9,9 +9,9 @@ import {
   useGridState,
   indexToCol,
   getSheets,
-} from "../../../src/api";
-import type { DialogProps } from "../../../src/api";
-import { emitAppEvent } from "../../../src/api/events";
+} from "@api";
+import type { DialogProps } from "@api";
+import { emitAppEvent } from "@api/events";
 import { createTableAsync } from "../lib/tableStore";
 import { TableEvents } from "../lib/tableEvents";
 

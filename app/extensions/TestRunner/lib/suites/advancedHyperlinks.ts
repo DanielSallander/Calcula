@@ -13,7 +13,7 @@ import {
   getHyperlinksInRange,
   moveHyperlink,
   clearHyperlinksInRange,
-} from "../../../../src/api/backend";
+} from "@api/backend";
 
 const A = AREA_ADV_HYPERLINKS;
 

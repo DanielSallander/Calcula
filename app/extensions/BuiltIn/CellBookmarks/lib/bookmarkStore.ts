@@ -4,7 +4,7 @@
 //          Provides CRUD operations and change notification for reactivity.
 
 import type { Bookmark, BookmarkColor, BookmarkCreateOptions } from "./bookmarkTypes";
-import { columnToLetter } from "../../../../src/api";
+import { columnToLetter } from "@api";
 
 // ============================================================================
 // Internal State

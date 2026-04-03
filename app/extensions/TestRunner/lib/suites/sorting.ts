@@ -5,7 +5,7 @@
 import type { TestSuite } from "../types";
 import { expectCellValue, assertTrue } from "../assertions";
 import { AREA_SORTING } from "../testArea";
-import { sortRangeByColumn } from "../../../../src/api";
+import { sortRangeByColumn } from "@api";
 
 const A = AREA_SORTING;
 

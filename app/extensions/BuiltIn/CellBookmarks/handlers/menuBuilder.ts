@@ -6,8 +6,8 @@ import {
   registerMenuItem,
   showToast,
   openTaskPane,
-} from "../../../../src/api";
-import { getGridStateSnapshot } from "../../../../src/api/grid";
+} from "@api";
+import { getGridStateSnapshot } from "@api/grid";
 import {
   addBookmark,
   removeBookmark,

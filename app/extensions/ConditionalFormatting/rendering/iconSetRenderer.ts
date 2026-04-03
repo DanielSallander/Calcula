@@ -2,7 +2,7 @@
 // PURPOSE: Grid overlay renderer for conditional formatting icon sets.
 // CONTEXT: Draws small icons inside cells based on the icon index from evaluation results.
 
-import type { OverlayRenderContext, IconSetType } from "../../../src/api";
+import type { OverlayRenderContext, IconSetType } from "@api";
 import {
   overlayGetColumnX,
   overlayGetRowY,
@@ -11,7 +11,7 @@ import {
   overlayGetRowHeaderWidth,
   overlayGetColHeaderHeight,
   getGridRegions,
-} from "../../../src/api";
+} from "@api";
 import { getEvaluationForCell, getRules } from "../lib/cfStore";
 import { drawIcon } from "./iconShapes";
 

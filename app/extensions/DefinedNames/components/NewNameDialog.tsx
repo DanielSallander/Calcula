@@ -3,7 +3,7 @@
 // CONTEXT: Opened from Name Manager or Formulas > Define Name menu item.
 
 import React, { useState, useEffect, useCallback, useRef } from "react";
-import type { DialogProps } from "../../../src/api/uiTypes";
+import type { DialogProps } from "@api/uiTypes";
 import {
   createNamedRange,
   updateNamedRange,
@@ -14,8 +14,8 @@ import {
   columnToLetter,
   isFormulaAutocompleteVisible,
   AutocompleteEvents,
-} from "../../../src/api";
-import type { AutocompleteAcceptedPayload } from "../../../src/api";
+} from "@api";
+import type { AutocompleteAcceptedPayload } from "@api";
 import { isValidName, formatRefersTo } from "../lib/nameUtils";
 
 const v = (name: string) => `var(${name})`;

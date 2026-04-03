@@ -3,10 +3,11 @@
 // CONTEXT: Registers the dialog and Data menu item for automatic subtotals.
 //          Called from extensions/index.ts during app initialization.
 
+import type { ExtensionModule, ExtensionContext } from "@api/contract";
 import {
   DialogExtensions,
   ExtensionRegistry,
-} from "../../src/api";
+} from "@api";
 import { SubtotalsDialog } from "./components/SubtotalsDialog";
 import {
   registerSubtotalsMenuItem,
@@ -20,11 +21,11 @@ import {
 const cleanupFns: (() => void)[] = [];
 
 // ============================================================================
-// Registration
+// Lifecycle
 // ============================================================================
 
-export function registerSubtotalsExtension(): void {
-  console.log("[Subtotals] Registering...");
+function activate(_context: ExtensionContext): void {
+  console.log("[Subtotals] Activating...");
 
   // 1. Register dialog
   DialogExtensions.registerDialog({
@@ -52,15 +53,11 @@ export function registerSubtotalsExtension(): void {
   });
   cleanupFns.push(unsubSelection);
 
-  console.log("[Subtotals] Registered successfully.");
+  console.log("[Subtotals] Activated successfully.");
 }
 
-// ============================================================================
-// Unregistration
-// ============================================================================
-
-export function unregisterSubtotalsExtension(): void {
-  console.log("[Subtotals] Unregistering...");
+function deactivate(): void {
+  console.log("[Subtotals] Deactivating...");
 
   for (const fn of cleanupFns) {
     try {
@@ -71,5 +68,21 @@ export function unregisterSubtotalsExtension(): void {
   }
   cleanupFns.length = 0;
 
-  console.log("[Subtotals] Unregistered.");
+  console.log("[Subtotals] Deactivated.");
 }
+
+// ============================================================================
+// Extension Module
+// ============================================================================
+
+const extension: ExtensionModule = {
+  manifest: {
+    id: "calcula.subtotals",
+    name: "Subtotals",
+    version: "1.0.0",
+    description: "Automatic subtotals with grouping for data ranges.",
+  },
+  activate,
+  deactivate,
+};
+export default extension;

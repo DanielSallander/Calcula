@@ -7,7 +7,7 @@ import {
   removeGridRegionsByType,
   replaceGridRegionsByType,
   type GridRegion,
-} from "../../../src/api/gridOverlays";
+} from "@api/gridOverlays";
 import { getDesignMode } from "./designMode";
 
 // ============================================================================

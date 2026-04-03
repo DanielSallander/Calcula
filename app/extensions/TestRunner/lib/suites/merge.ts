@@ -15,7 +15,7 @@ import {
   unmergeCells,
   getMergedRegions,
   getMergeInfo,
-} from "../../../../src/api";
+} from "@api";
 
 const A = AREA_MERGE;
 

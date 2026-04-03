@@ -8,9 +8,9 @@ import {
   CommandRegistry,
   undo as tauriUndo,
   dispatchGridAction,
-} from "../../../src/api";
-import { getGridStateSnapshot } from "../../../src/api/grid";
-import { setSelection } from "../../../src/api/grid";
+} from "@api";
+import { getGridStateSnapshot } from "@api/grid";
+import { setSelection } from "@api/grid";
 import type { TestSuite, TestContext, TestResult, SuiteResult } from "./types";
 
 // ============================================================================

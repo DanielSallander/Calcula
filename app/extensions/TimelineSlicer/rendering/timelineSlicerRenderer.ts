@@ -9,7 +9,7 @@ import {
   type OverlayRenderContext,
   type OverlayHitTestContext,
   type OverlayCursorFn,
-} from "../../../src/api/gridOverlays";
+} from "@api/gridOverlays";
 import { getTimelineById, getCachedTimelineData } from "../lib/timelineSlicerStore";
 import { isTimelineSelected } from "../handlers/selectionHandler";
 import { TIMELINE_STYLES_BY_ID } from "../components/TimelineSlicerStylesGallery";

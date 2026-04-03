@@ -18,13 +18,13 @@ import {
   deleteColumns,
   getColumnWidth,
   getRowHeight,
-} from "../../../../src/api";
+} from "@api";
 // Import set functions from api/lib (the barrel's setColumnWidth is a grid action creator,
 // but api/lib re-exports the actual Tauri commands from tauri-api)
 import {
   setColumnWidth,
   setRowHeight,
-} from "../../../../src/api/lib";
+} from "@api/lib";
 
 const A = AREA_ROW_COL;
 

@@ -1,7 +1,7 @@
 //! FILENAME: app/extensions/Slicer/lib/slicer-api.ts
 // PURPOSE: Tauri command wrappers for slicer backend operations.
 
-import { invokeBackend } from "../../../src/api/backend";
+import { invokeBackend } from "@api/backend";
 import type {
   Slicer,
   SlicerItem,

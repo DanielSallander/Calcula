@@ -1,7 +1,7 @@
 //! FILENAME: app/extensions/ReportStore/manifest.ts
 // PURPOSE: Extension manifest and dialog definitions for the Report Store.
 
-import type { DialogDefinition } from "../../src/api/uiTypes";
+import type { DialogDefinition } from "@api/uiTypes";
 import { BrowseDialog } from "./components/BrowseDialog";
 import { ExportDialog } from "./components/ExportDialog";
 import { BindingDialog } from "./components/BindingDialog";

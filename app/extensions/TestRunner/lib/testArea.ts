@@ -5,7 +5,7 @@
 //          Each suite gets its own row block (50 rows apart) so they can't
 //          interfere with each other.
 
-import { columnToLetter } from "../../../src/api";
+import { columnToLetter } from "@api";
 
 /**
  * Default test area origin — row 500, col 10 (K501 in spreadsheet notation).

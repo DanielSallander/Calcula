@@ -3,7 +3,7 @@
 // CONTEXT: Rendered in the right side of the status bar. Click opens the task pane.
 
 import React, { useState, useEffect } from "react";
-import { openTaskPane } from "../../../../src/api";
+import { openTaskPane } from "@api";
 import { getBookmarkCount, onChange } from "../lib/bookmarkStore";
 
 const TASK_PANE_ID = "bookmarks-pane";

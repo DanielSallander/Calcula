@@ -4,19 +4,19 @@
 // Loads the active cell's style, allows editing across tabs, and applies on OK.
 
 import React, { useEffect, useCallback, useRef } from "react";
-import type { DialogProps } from "../../../src/api/uiTypes";
+import type { DialogProps } from "@api/uiTypes";
 import {
   useGridState,
   cellEvents,
-} from "../../../src/api";
+} from "@api";
 import {
   getCell,
   getStyle,
   applyFormatting,
-} from "../../../src/api/lib";
-import { setCellProtection, getCellProtection } from "../../../src/api/backend";
+} from "@api/lib";
+import { setCellProtection, getCellProtection } from "@api/backend";
 import { useFormatCellsStore, type FillMode } from "./hooks/useFormatCellsState";
-import type { FillData, FillParam, PatternType, GradientDirection } from "../../../src/core/types";
+import type { FillData, FillParam, PatternType, GradientDirection } from "@api";
 import { NumberTab } from "./tabs/NumberTab";
 import { AlignmentTab } from "./tabs/AlignmentTab";
 import { FontTab } from "./tabs/FontTab";

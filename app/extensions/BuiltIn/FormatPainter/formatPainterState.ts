@@ -3,7 +3,7 @@
 // CONTEXT: Manages active/inactive state, source styles, and cleanup functions.
 // NOTE: Uses module-level variables (not React state) so it works from event handlers.
 
-import type { Selection } from "../../../src/api/types";
+import type { Selection } from "@api/types";
 
 // ============================================================================
 // State

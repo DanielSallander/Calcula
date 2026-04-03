@@ -13,7 +13,7 @@ import {
   getConditionalFormat,
   getAllConditionalFormats,
   clearConditionalFormatsInRange,
-} from "../../../../src/api";
+} from "@api";
 
 const A = AREA_ADV_CF;
 

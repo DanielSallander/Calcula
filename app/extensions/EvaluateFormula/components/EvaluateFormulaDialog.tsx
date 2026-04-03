@@ -4,7 +4,7 @@
 //          Buttons: Evaluate, Step In, Step Out, Restart, Close.
 
 import React, { useState, useEffect, useCallback, useRef } from "react";
-import type { DialogProps } from "../../../src/api/uiTypes";
+import type { DialogProps } from "@api/uiTypes";
 import {
   evalFormulaInit,
   evalFormulaEvaluate,
@@ -12,8 +12,8 @@ import {
   evalFormulaStepOut,
   evalFormulaRestart,
   evalFormulaClose,
-} from "../../../src/api";
-import type { EvalStepState } from "../../../src/api";
+} from "@api";
+import type { EvalStepState } from "@api";
 
 // ============================================================================
 // Styles (CSS variables from app theme)

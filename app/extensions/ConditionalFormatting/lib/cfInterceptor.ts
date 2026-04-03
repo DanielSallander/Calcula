@@ -9,7 +9,7 @@
 //   styles are resolved, so any properties returned here will override values
 //   set by Computed Properties (backgroundColor, textColor, bold, italic, etc.).
 
-import type { IStyleOverride, CellCoords } from "../../../src/api/styleInterceptors";
+import type { IStyleOverride, CellCoords } from "@api/styleInterceptors";
 import { getEvaluationForCell } from "./cfStore";
 
 /**

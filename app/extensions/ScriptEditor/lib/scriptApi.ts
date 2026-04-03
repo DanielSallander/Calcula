@@ -2,7 +2,7 @@
 // PURPOSE: TypeScript bindings for the Tauri script engine commands.
 // CONTEXT: Uses the API facade (src/api/backend.ts) for sandboxed backend access.
 
-import { invokeBackend } from "../../../src/api/backend";
+import { invokeBackend } from "@api/backend";
 import type {
   RunScriptRequest,
   RunScriptResponse,

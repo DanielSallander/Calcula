@@ -1,16 +1,13 @@
 //! FILENAME: app/extensions/Grouping/index.ts
-// PURPOSE: Grouping/Outline extension entry point.
+// PURPOSE: Grouping/Outline extension entry point. ExtensionModule lifecycle pattern.
 // CONTEXT: Registers the outline bar renderer, context menu items, Data menu items,
 //          and outline bar click handler (for +/- buttons and level buttons).
-//          Called from extensions/index.ts during app initialization.
 
+import type { ExtensionModule, ExtensionContext } from "@api/contract";
 import {
-  registerPostHeaderOverlay,
-  onAppEvent,
   AppEvents,
   ExtensionRegistry,
-  DialogExtensions,
-} from "../../src/api";
+} from "@api";
 import { GroupSettingsDialog } from "./components/GroupSettingsDialog";
 import { renderOutlineBar, buttonPosForLevel } from "./rendering/outlineBarRenderer";
 import {
@@ -54,7 +51,7 @@ let currentSelection: {
   type?: string;
 } | null = null;
 
-/** Cleanup functions for all registered listeners. */
+let isActivated = false;
 const cleanupFns: (() => void)[] = [];
 
 // ============================================================================
@@ -248,47 +245,52 @@ function normalizeRange(sel: {
 }
 
 // ============================================================================
-// Registration
+// Lifecycle
 // ============================================================================
 
-export function registerGroupingExtension(): void {
-  console.log("[Grouping] Registering...");
+function activate(context: ExtensionContext): void {
+  if (isActivated) {
+    console.warn("[Grouping] Already activated, skipping.");
+    return;
+  }
+
+  console.log("[Grouping] Activating...");
 
   // 1. Register the post-header overlay renderer
-  const unregOverlay = registerPostHeaderOverlay(
+  const unregOverlay = context.grid.overlays.register(
     "grouping-outline-bar",
     renderOutlineBar,
   );
   cleanupFns.push(unregOverlay);
 
   // 2. Register group settings dialog
-  DialogExtensions.registerDialog({
+  context.ui.dialogs.register({
     id: "group-settings",
     component: GroupSettingsDialog,
     priority: 100,
   });
-  cleanupFns.push(() => DialogExtensions.unregisterDialog("group-settings"));
+  cleanupFns.push(() => context.ui.dialogs.unregister("group-settings"));
 
   // 3. Register grid context menu items
   const unregContextMenu = registerGroupingContextMenuItems();
   cleanupFns.push(unregContextMenu);
 
-  // 3. Register Data menu items (appends to AutoFilter's "data" menu)
-  registerGroupingMenuItems(() => currentSelection);
+  // 4. Register Data menu items (appends to AutoFilter's "data" menu)
+  registerGroupingMenuItems(context, () => currentSelection);
 
-  // 4. Outline bar click handler (capture phase to intercept before grid selection)
+  // 5. Outline bar click handler (capture phase to intercept before grid selection)
   window.addEventListener("mousedown", handleOutlineBarClick, true);
   cleanupFns.push(() =>
     window.removeEventListener("mousedown", handleOutlineBarClick, true),
   );
 
-  // 5. Keyboard shortcuts
+  // 6. Keyboard shortcuts
   window.addEventListener("keydown", handleKeyDown, true);
   cleanupFns.push(() =>
     window.removeEventListener("keydown", handleKeyDown, true),
   );
 
-  // 6. Track current selection
+  // 7. Track current selection
   const unsubSelection = ExtensionRegistry.onSelectionChange((sel) => {
     currentSelection = sel
       ? {
@@ -302,21 +304,20 @@ export function registerGroupingExtension(): void {
   });
   cleanupFns.push(unsubSelection);
 
-  // 7. Reset state on sheet change
-  const unsubSheet = onAppEvent(AppEvents.SHEET_CHANGED, () => {
+  // 8. Reset state on sheet change
+  const unsubSheet = context.events.on(AppEvents.SHEET_CHANGED, () => {
     resetGroupingState();
   });
   cleanupFns.push(unsubSheet);
 
-  console.log("[Grouping] Registered successfully.");
+  isActivated = true;
+  console.log("[Grouping] Activated successfully.");
 }
 
-// ============================================================================
-// Unregistration
-// ============================================================================
+function deactivate(): void {
+  if (!isActivated) return;
 
-export function unregisterGroupingExtension(): void {
-  console.log("[Grouping] Unregistering...");
+  console.log("[Grouping] Deactivating...");
 
   for (const fn of cleanupFns) {
     try {
@@ -328,6 +329,25 @@ export function unregisterGroupingExtension(): void {
   cleanupFns.length = 0;
 
   resetGroupingState();
+  currentSelection = null;
 
-  console.log("[Grouping] Unregistered.");
+  isActivated = false;
+  console.log("[Grouping] Deactivated.");
 }
+
+// ============================================================================
+// Extension Module Export
+// ============================================================================
+
+const extension: ExtensionModule = {
+  manifest: {
+    id: "calcula.grouping",
+    name: "Grouping",
+    version: "1.0.0",
+    description: "Row and column grouping/outline with collapsible groups and level buttons.",
+  },
+  activate,
+  deactivate,
+};
+
+export default extension;

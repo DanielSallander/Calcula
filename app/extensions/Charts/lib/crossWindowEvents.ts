@@ -4,8 +4,8 @@
 //          the separate chart spec editor window. Follows the same pattern
 //          as ScriptEditor/lib/crossWindowEvents.ts.
 
-import { emitTauriEvent, listenTauriEvent } from "../../../src/api/backend";
-import type { UnlistenFn } from "../../../src/api/backend";
+import { emitTauriEvent, listenTauriEvent } from "@api/backend";
+import type { UnlistenFn } from "@api/backend";
 import type { ChartSpec, ParsedChartData } from "../types";
 
 // ============================================================================

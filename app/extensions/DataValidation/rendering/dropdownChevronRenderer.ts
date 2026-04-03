@@ -9,7 +9,7 @@ import {
   overlayGetRowHeight,
   type OverlayRenderContext,
   type OverlayHitTestContext,
-} from "../../../src/api";
+} from "@api";
 
 // Size of the chevron button area (pixels)
 const BUTTON_SIZE = 18;

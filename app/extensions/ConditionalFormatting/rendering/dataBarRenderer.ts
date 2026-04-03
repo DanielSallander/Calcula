@@ -2,7 +2,7 @@
 // PURPOSE: Grid overlay renderer for conditional formatting data bars.
 // CONTEXT: Draws horizontal fill bars inside cells proportional to their data bar percentage.
 
-import type { OverlayRenderContext } from "../../../src/api";
+import type { OverlayRenderContext } from "@api";
 import {
   overlayGetColumnX,
   overlayGetRowY,
@@ -11,9 +11,9 @@ import {
   overlayGetRowHeaderWidth,
   overlayGetColHeaderHeight,
   getGridRegions,
-} from "../../../src/api";
+} from "@api";
 import { getEvaluationForCell, getRules } from "../lib/cfStore";
-import type { DataBarRule } from "../../../src/api";
+import type { DataBarRule } from "@api";
 
 /**
  * Render data bars for all visible cf-data-bar regions.

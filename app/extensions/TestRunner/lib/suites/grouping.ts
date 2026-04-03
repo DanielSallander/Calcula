@@ -15,7 +15,7 @@ import {
   getOutlineInfo,
   getHiddenRowsByGroup,
   clearOutline,
-} from "../../../../src/api";
+} from "@api";
 
 const A = AREA_GROUPING;
 

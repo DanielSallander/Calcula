@@ -5,7 +5,7 @@
 import type { TestSuite } from "../types";
 import { assertTrue, assertEqual, expectCellValue } from "../assertions";
 import { AREA_REMOVE_DUPLICATES } from "../testArea";
-import { removeDuplicates } from "../../../../src/api";
+import { removeDuplicates } from "@api";
 
 const A = AREA_REMOVE_DUPLICATES;
 

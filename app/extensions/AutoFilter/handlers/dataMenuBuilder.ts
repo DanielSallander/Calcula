@@ -2,7 +2,7 @@
 // PURPOSE: Registers the "Data" menu with AutoFilter controls.
 // CONTEXT: Menu is hook-based for dynamic checked/disabled states.
 
-import { registerMenu, type MenuDefinition } from "../../../src/api";
+import type { ExtensionContext } from "@api/contract";
 import {
   toggleFilter,
   clearAllFilters,
@@ -13,8 +13,8 @@ import {
  * Build and register the Data menu.
  * Uses action callbacks for dynamic state (checked/disabled).
  */
-export function registerDataMenu(): void {
-  const dataMenu: MenuDefinition = {
+export function registerDataMenu(context: ExtensionContext): void {
+  context.ui.menus.register({
     id: "data",
     label: "Data",
     order: 42,
@@ -42,7 +42,5 @@ export function registerDataMenu(): void {
         },
       },
     ],
-  };
-
-  registerMenu(dataMenu);
+  });
 }

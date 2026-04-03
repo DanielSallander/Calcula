@@ -2,8 +2,8 @@
 // PURPOSE: Type definitions for the pivot extension.
 // CONTEXT: Re-exports types from API and defines extension-specific types.
 
-import type { LayoutConfig, AggregationType } from "../../src/api";
-import type { BiPivotModelInfo, ShowValuesAs } from "../../src/api/pivot";
+import type { LayoutConfig, AggregationType } from "@api";
+import type { BiPivotModelInfo, ShowValuesAs } from "@api/pivot";
 
 // Re-export types from API that the extension uses
 export type { LayoutConfig, AggregationType, BiPivotModelInfo, ShowValuesAs };

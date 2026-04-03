@@ -8,9 +8,9 @@
 //          When selecting, the dialog collapses to a compact bar and is draggable.
 
 import React, { useState, useEffect, useCallback, useRef } from "react";
-import { useGridState, indexToCol, letterToColumn, ExtensionRegistry } from "../../../src/api";
-import type { DialogProps } from "../../../src/api";
-import { emitAppEvent, AppEvents, restoreFocusToGrid } from "../../../src/api/events";
+import { useGridState, indexToCol, letterToColumn, ExtensionRegistry } from "@api";
+import type { DialogProps } from "@api";
+import { emitAppEvent, AppEvents, restoreFocusToGrid } from "@api/events";
 import { createSparklineGroup, getGroupById, updateSparklineGroup } from "../store";
 import { ensureDesignTabRegistered } from "../handlers/selectionHandler";
 import { validateSparklineRanges } from "../types";

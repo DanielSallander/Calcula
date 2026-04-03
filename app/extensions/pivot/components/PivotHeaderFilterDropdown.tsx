@@ -4,8 +4,8 @@
 //! search, checkbox list, and OK/Cancel buttons.
 
 import React, { useState, useCallback, useRef, useEffect, useMemo } from 'react';
-import { pivot } from '../../../src/api/pivot';
-import type { HeaderFieldSummary, PivotId } from '../../../src/api/pivot';
+import { pivot } from '@api/pivot';
+import type { HeaderFieldSummary, PivotId } from '@api/pivot';
 
 // =============================================================================
 // TYPES

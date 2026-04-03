@@ -7,8 +7,8 @@ import type {
   TaskPaneViewDefinition,
   DialogDefinition,
   OverlayDefinition,
-} from "../../src/api";
-import { emitAppEvent } from "../../src/api";
+} from "@api";
+import { emitAppEvent } from "@api";
 import { PivotEditorView } from "./components/PivotEditorView";
 import { PivotDesignTab } from "./components/PivotDesignTab";
 import { PivotAnalyzeTab } from "./components/PivotAnalyzeTab";
@@ -19,7 +19,7 @@ import { PivotOptionsDialog } from "./components/PivotOptionsDialog";
 import { FilterDropdown } from "./components/FilterDropdown";
 import { PivotHeaderFilterDropdown } from "./components/PivotHeaderFilterDropdown";
 import type { HeaderFieldSummary } from "./lib/pivot-api";
-import type { DialogProps, OverlayProps } from "../../src/api";
+import type { DialogProps, OverlayProps } from "@api";
 import React from "react";
 import { PivotEvents } from "./lib/pivotEvents";
 

@@ -3,8 +3,8 @@
 // CONTEXT: Tracks the active cell for keyboard shortcuts and menu actions.
 //          Closes open overlays when selection moves to a different cell.
 
-import { hideOverlay } from "../../../src/api";
-import type { Selection } from "../../../src/api";
+import { hideOverlay } from "@api";
+import type { Selection } from "@api";
 import { setActiveCellForKeyboard } from "./keyboardHandler";
 import { setCurrentSelectionForMenu } from "../handlers/reviewMenuBuilder";
 import { hidePreview } from "./hoverHandler";

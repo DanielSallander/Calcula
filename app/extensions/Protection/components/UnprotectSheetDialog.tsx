@@ -3,8 +3,8 @@
 // CONTEXT: Shown when user clicks "Unprotect Sheet" and the sheet has a password.
 
 import React, { useState } from "react";
-import type { DialogProps } from "../../../src/api";
-import { unprotectSheet } from "../../../src/api";
+import type { DialogProps } from "@api";
+import { unprotectSheet } from "@api";
 import { refreshProtectionState } from "../lib/protectionStore";
 
 // ============================================================================

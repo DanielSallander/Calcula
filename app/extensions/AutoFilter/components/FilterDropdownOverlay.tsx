@@ -3,7 +3,7 @@
 // CONTEXT: Shows a checkbox list of unique values, search, and Select All.
 
 import React, { useState, useEffect, useMemo, useCallback, useRef } from "react";
-import type { OverlayProps } from "../../../src/api";
+import type { OverlayProps } from "@api";
 import type { FilterDropdownData } from "../types";
 import {
   applyColumnFilter,
@@ -16,7 +16,7 @@ import {
   getUniqueColorsInColumn,
   applyExpressionFilter,
 } from "../lib/filterStore";
-import { emitAppEvent, restoreFocusToGrid } from "../../../src/api";
+import { emitAppEvent, restoreFocusToGrid } from "@api";
 import { FilterEvents } from "../lib/filterEvents";
 import {
   DropdownContainer,

@@ -24,8 +24,8 @@ import {
   IconShowAllComments,
   IconShowAllNotes,
   IconDeleteAll,
-} from "../../../src/api";
-import type { MenuItemDefinition } from "../../../src/api";
+} from "@api";
+import type { MenuItemDefinition } from "@api";
 import {
   refreshAnnotationState,
   getShowAllNotes,

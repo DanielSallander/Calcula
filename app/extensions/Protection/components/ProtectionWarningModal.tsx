@@ -3,7 +3,7 @@
 // CONTEXT: Displayed by the protection edit guard handler.
 
 import React from "react";
-import type { DialogProps } from "../../../src/api";
+import type { DialogProps } from "@api";
 
 // ============================================================================
 // Styles

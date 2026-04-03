@@ -3,12 +3,12 @@
 // CONTEXT: Opened from File > Page Setup menu item.
 
 import React, { useState, useEffect, useCallback } from "react";
-import type { DialogProps } from "../../../src/api/uiTypes";
+import type { DialogProps } from "@api/uiTypes";
 import {
   getPageSetup,
   setPageSetup,
-} from "../../../src/api/lib";
-import type { PageSetup } from "../../../src/api/lib";
+} from "@api/lib";
+import type { PageSetup } from "@api/lib";
 
 // ============================================================================
 // Header/Footer Section Parsing

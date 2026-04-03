@@ -2,25 +2,20 @@
 // PURPOSE: Pivot table extension entry point.
 // CONTEXT: Registers all pivot functionality with the extension system.
 
+import type { ExtensionModule, ExtensionContext } from "@api/contract";
 import {
   ExtensionRegistry,
   TaskPaneExtensions,
-  DialogExtensions,
   OverlayExtensions,
   AppEvents,
-  onAppEvent,
-  emitAppEvent,
-  registerEditGuard,
-  registerCellClickInterceptor,
-  registerCellDoubleClickInterceptor,
-} from "../../src/api";
+} from "@api";
+import { emitAppEvent } from "@api/events";
 
 import { PivotEvents } from "./lib/pivotEvents";
 import type { PivotProgressEvent } from "./lib/pivotEvents";
-import { listenTauriEvent } from "../../src/api/backend";
+import { listenTauriEvent } from "@api/backend";
 
 import {
-  registerGridOverlay,
   addGridRegions,
   getGridRegions,
   removeGridRegionsByType,
@@ -36,7 +31,7 @@ import {
   overlayGetColHeaderHeight,
   type GridRegion,
   type OverlayRenderContext,
-} from "../../src/api/gridOverlays";
+} from "@api/gridOverlays";
 
 import {
   PivotManifest,
@@ -94,10 +89,10 @@ export { cachePivotView, getCachedPivotView };
 // Per-Pivot Style Theme Tracking
 // ============================================================================
 
-/** Maps pivotId → styleId (selected in the Design tab gallery). */
+/** Maps pivotId -> styleId (selected in the Design tab gallery). */
 const pivotStyleMap = new Map<number, string>();
 
-/** Maps styleId → resolved PivotTheme (cached to avoid recomputing each frame). */
+/** Maps styleId -> resolved PivotTheme (cached to avoid recomputing each frame). */
 const resolvedThemeCache = new Map<string, PivotTheme>();
 
 /** Get the PivotTheme for a given pivot, based on its selected style. */
@@ -133,7 +128,7 @@ interface StoredIconBounds {
 /** Map of icon bounds keyed by "pivotId-gridRow-gridCol", updated every render. */
 const overlayIconBounds = new Map<string, StoredIconBounds>();
 
-/** Extra pixels around icon bounds for easier click targeting (12px icon → 20px hit area). */
+/** Extra pixels around icon bounds for easier click targeting (12px icon -> 20px hit area). */
 const ICON_HIT_PADDING = 4;
 
 interface StoredHeaderFilterBounds {
@@ -814,7 +809,7 @@ async function refreshPivotRegions(triggerRepaint: boolean = false, allowCachedH
     // already placed the overlay at the correct position.
     if (structuralVersion !== versionAtStart) {
       console.log(
-        `[pivot] refreshPivotRegions: discarding stale result (version ${versionAtStart} → ${structuralVersion})`
+        `[pivot] refreshPivotRegions: discarding stale result (version ${versionAtStart} -> ${structuralVersion})`
       );
       return;
     }
@@ -827,7 +822,7 @@ async function refreshPivotRegions(triggerRepaint: boolean = false, allowCachedH
     // Second staleness check after view cache refresh
     if (structuralVersion !== versionAtStart) {
       console.log(
-        `[pivot] refreshPivotRegions: discarding stale result after view cache (version ${versionAtStart} → ${structuralVersion})`
+        `[pivot] refreshPivotRegions: discarding stale result after view cache (version ${versionAtStart} -> ${structuralVersion})`
       );
       return;
     }
@@ -1024,35 +1019,35 @@ function shiftPivotRegionsForRowDelete(row: number, count: number): void {
 // Cleanup functions for event listeners
 let cleanupFunctions: Array<() => void> = [];
 
-/**
- * Register the pivot table extension.
- * Call this during application initialization.
- */
-export function registerPivotExtension(): void {
+// ============================================================================
+// Activation
+// ============================================================================
+
+function activate(context: ExtensionContext): void {
   console.log("[Pivot Extension] Registering...");
 
   // Register add-in manifest
   ExtensionRegistry.registerAddIn(PivotManifest);
 
   // Register task pane view
-  TaskPaneExtensions.registerView(PivotPaneDefinition);
+  context.ui.taskPanes.register(PivotPaneDefinition);
 
   // Register dialogs
-  DialogExtensions.registerDialog(PivotDialogDefinition);
-  DialogExtensions.registerDialog(PivotGroupDialogDefinition);
-  DialogExtensions.registerDialog(PivotFieldSettingsDialogDefinition);
-  DialogExtensions.registerDialog(PivotOptionsDialogDefinition);
+  context.ui.dialogs.register(PivotDialogDefinition);
+  context.ui.dialogs.register(PivotGroupDialogDefinition);
+  context.ui.dialogs.register(PivotFieldSettingsDialogDefinition);
+  context.ui.dialogs.register(PivotOptionsDialogDefinition);
 
   // Register context menu items for right-click in pivot regions
   cleanupFunctions.push(registerPivotContextMenuItems());
 
   // Register overlays
-  OverlayExtensions.registerOverlay(PivotFilterOverlayDefinition);
-  OverlayExtensions.registerOverlay(PivotHeaderFilterOverlayDefinition);
+  context.ui.overlays.register(PivotFilterOverlayDefinition);
+  context.ui.overlays.register(PivotHeaderFilterOverlayDefinition);
 
   // Register edit guard - block editing in pivot regions
   cleanupFunctions.push(
-    registerEditGuard(async (row, col) => {
+    context.grid.editGuards.register(async (row, col) => {
       try {
         const pivotInfo = await getPivotAtCell(row, col);
         if (pivotInfo) {
@@ -1067,7 +1062,7 @@ export function registerPivotExtension(): void {
 
   // Register click interceptor - handle cancel button clicks during loading
   cleanupFunctions.push(
-    registerCellClickInterceptor(async (_row, _col, event) => {
+    context.grid.cellClicks.registerClickInterceptor(async (_row, _col, event) => {
       if (!cachedCanvasElement || overlayCancelBounds.size === 0) return false;
 
       const rect = cachedCanvasElement.getBoundingClientRect();
@@ -1102,7 +1097,7 @@ export function registerPivotExtension(): void {
 
   // Register click interceptor - handle expand/collapse icon clicks
   cleanupFunctions.push(
-    registerCellClickInterceptor(async (row, col, event) => {
+    context.grid.cellClicks.registerClickInterceptor(async (row, col, event) => {
       // Check if click is within any stored expand/collapse icon bounds
       if (!cachedCanvasElement) return false;
       const canvas = cachedCanvasElement;
@@ -1163,7 +1158,7 @@ export function registerPivotExtension(): void {
 
   // Register click interceptor - handle filter dropdown clicks
   cleanupFunctions.push(
-    registerCellClickInterceptor(async (_row, _col, event) => {
+    context.grid.cellClicks.registerClickInterceptor(async (_row, _col, event) => {
       if (!cachedCanvasElement) return false;
 
       const rect = cachedCanvasElement.getBoundingClientRect();
@@ -1183,7 +1178,7 @@ export function registerPivotExtension(): void {
 
             for (const zone of pivotInfo.filterZones) {
               if (zone.fieldIndex === bounds.fieldIndex) {
-                emitAppEvent(PivotEvents.PIVOT_OPEN_FILTER_MENU, {
+                context.events.emit(PivotEvents.PIVOT_OPEN_FILTER_MENU, {
                   fieldIndex: zone.fieldIndex,
                   fieldName: zone.fieldName,
                   row: zone.row,
@@ -1206,7 +1201,7 @@ export function registerPivotExtension(): void {
 
   // Register click interceptor - handle header filter button clicks (Row Labels / Column Labels)
   cleanupFunctions.push(
-    registerCellClickInterceptor(async (_row, _col, event) => {
+    context.grid.cellClicks.registerClickInterceptor(async (_row, _col, event) => {
       if (!cachedCanvasElement) return false;
 
       const rect = cachedCanvasElement.getBoundingClientRect();
@@ -1221,7 +1216,7 @@ export function registerPivotExtension(): void {
           canvasY <= bounds.y + bounds.height
         ) {
           // Found a matching header filter button - open header filter dropdown
-          emitAppEvent(PivotEvents.PIVOT_OPEN_HEADER_FILTER_MENU, {
+          context.events.emit(PivotEvents.PIVOT_OPEN_HEADER_FILTER_MENU, {
             pivotId: bounds.pivotId,
             zone: bounds.zone,
             anchorX: event.clientX,
@@ -1237,8 +1232,8 @@ export function registerPivotExtension(): void {
   // Register double-click interceptor - toggle hierarchy on header double-click,
   // and silently block edit mode for all pivot cells.
   cleanupFunctions.push(
-    registerCellDoubleClickInterceptor(async (row, col, event) => {
-      // Check if double-click is on a +/- icon → just consume it (no toggle).
+    context.grid.cellClicks.registerDoubleClickInterceptor(async (row, col, event) => {
+      // Check if double-click is on a +/- icon -> just consume it (no toggle).
       // The single-click interceptor already handled the toggle; if we toggled
       // again here the state would flip back (double-toggle bug).
       if (cachedCanvasElement) {
@@ -1259,7 +1254,7 @@ export function registerPivotExtension(): void {
         }
       }
 
-      // Check if double-click is on an expandable row header → toggle hierarchy
+      // Check if double-click is on an expandable row header -> toggle hierarchy
       for (const [pivotId, regionBounds] of gridRegionsCache.entries()) {
         if (
           row >= regionBounds.startRow && row <= regionBounds.endRow &&
@@ -1303,7 +1298,7 @@ export function registerPivotExtension(): void {
   // renderBelowSelection: true ensures the core selection highlight draws ON TOP
   // of pivot cells, making selection look identical to regular grid cells.
   cleanupFunctions.push(
-    registerGridOverlay({
+    context.grid.overlays.register({
       type: "pivot",
       render: (ctx: OverlayRenderContext) => {
         // Clear icon bounds at start of each render cycle
@@ -1456,11 +1451,11 @@ export function registerPivotExtension(): void {
 
   // Subscribe to events
   cleanupFunctions.push(
-    onAppEvent<{ pivotId: number }>(PivotEvents.PIVOT_CREATED, handlePivotCreated)
+    context.events.on<{ pivotId: number }>(PivotEvents.PIVOT_CREATED, handlePivotCreated)
   );
 
   cleanupFunctions.push(
-    onAppEvent<{
+    context.events.on<{
       fieldIndex: number;
       fieldName: string;
       row: number;
@@ -1473,7 +1468,7 @@ export function registerPivotExtension(): void {
 
   // Subscribe to header filter menu events (Row Labels / Column Labels)
   cleanupFunctions.push(
-    onAppEvent<{
+    context.events.on<{
       pivotId: number;
       zone: 'row' | 'column';
       anchorX: number;
@@ -1488,7 +1483,7 @@ export function registerPivotExtension(): void {
 
   // Subscribe to pivot region updates to cache region bounds locally
   cleanupFunctions.push(
-    onAppEvent<{ regions: PivotRegionData[] }>(
+    context.events.on<{ regions: PivotRegionData[] }>(
       PivotEvents.PIVOT_REGIONS_UPDATED,
       (detail) => updateCachedRegions(detail.regions)
     )
@@ -1539,7 +1534,7 @@ export function registerPivotExtension(): void {
   // Use allowCachedHit=true so returning to a sheet with an already-cached pivot
   // renders instantly instead of waiting for an IPC round-trip.
   cleanupFunctions.push(
-    onAppEvent(AppEvents.SHEET_CHANGED, () => {
+    context.events.on(AppEvents.SHEET_CHANGED, () => {
       refreshPivotRegions(false, /* allowCachedHit */ true);
     })
   );
@@ -1552,22 +1547,22 @@ export function registerPivotExtension(): void {
   // structuralVersion counter ensures any already-in-flight refresh
   // discards its results when it finally completes.
   cleanupFunctions.push(
-    onAppEvent<{ col: number; count: number }>(AppEvents.COLUMNS_INSERTED, (e) => {
+    context.events.on<{ col: number; count: number }>(AppEvents.COLUMNS_INSERTED, (e) => {
       shiftPivotRegionsForColInsert(e.col, e.count);
     })
   );
   cleanupFunctions.push(
-    onAppEvent<{ row: number; count: number }>(AppEvents.ROWS_INSERTED, (e) => {
+    context.events.on<{ row: number; count: number }>(AppEvents.ROWS_INSERTED, (e) => {
       shiftPivotRegionsForRowInsert(e.row, e.count);
     })
   );
   cleanupFunctions.push(
-    onAppEvent<{ col: number; count: number }>(AppEvents.COLUMNS_DELETED, (e) => {
+    context.events.on<{ col: number; count: number }>(AppEvents.COLUMNS_DELETED, (e) => {
       shiftPivotRegionsForColDelete(e.col, e.count);
     })
   );
   cleanupFunctions.push(
-    onAppEvent<{ row: number; count: number }>(AppEvents.ROWS_DELETED, (e) => {
+    context.events.on<{ row: number; count: number }>(AppEvents.ROWS_DELETED, (e) => {
       shiftPivotRegionsForRowDelete(e.row, e.count);
     })
   );
@@ -1584,7 +1579,7 @@ export function registerPivotExtension(): void {
 
   // Track pivot style changes from the Design tab
   cleanupFunctions.push(
-    onAppEvent<{ pivotId: number; layout: { styleId?: string } }>(
+    context.events.on<{ pivotId: number; layout: { styleId?: string } }>(
       PivotEvents.PIVOT_LAYOUT_STATE,
       (detail) => {
         if (detail.layout.styleId !== undefined) {
@@ -1598,7 +1593,7 @@ export function registerPivotExtension(): void {
     )
   );
   cleanupFunctions.push(
-    onAppEvent<{ pivotId: number; layout: { styleId?: string } }>(
+    context.events.on<{ pivotId: number; layout: { styleId?: string } }>(
       PivotEvents.PIVOT_LAYOUT_CHANGED,
       (detail) => {
         if (detail.layout.styleId !== undefined) {
@@ -1615,11 +1610,11 @@ export function registerPivotExtension(): void {
   console.log("[Pivot Extension] Registered successfully");
 }
 
-/**
- * Unregister the pivot table extension.
- * Call this during application shutdown or hot reload.
- */
-export function unregisterPivotExtension(): void {
+// ============================================================================
+// Deactivation
+// ============================================================================
+
+function deactivate(): void {
   console.log("[Pivot Extension] Unregistering...");
 
   // Cleanup event listeners
@@ -1646,13 +1641,28 @@ export function unregisterPivotExtension(): void {
   // Unregister from extension registries
   ExtensionRegistry.unregisterAddIn(PivotManifest.id);
   TaskPaneExtensions.unregisterView(PIVOT_PANE_ID);
-  DialogExtensions.unregisterDialog(PIVOT_DIALOG_ID);
-  DialogExtensions.unregisterDialog(PIVOT_GROUP_DIALOG_ID);
   OverlayExtensions.unregisterOverlay(PIVOT_FILTER_OVERLAY_ID);
   OverlayExtensions.unregisterOverlay(PIVOT_HEADER_FILTER_OVERLAY_ID);
 
   console.log("[Pivot Extension] Unregistered successfully");
 }
+
+// ============================================================================
+// Extension Module Export
+// ============================================================================
+
+const extension: ExtensionModule = {
+  manifest: {
+    id: "calcula.pivot",
+    name: "Pivot Tables",
+    version: "1.0.0",
+    description: "PivotTable functionality for Calcula with styled rendering and interactive expand/collapse.",
+  },
+  activate,
+  deactivate,
+};
+
+export default extension;
 
 // Re-export for convenience
 export { PIVOT_PANE_ID, PIVOT_DIALOG_ID, PIVOT_GROUP_DIALOG_ID, PIVOT_FILTER_OVERLAY_ID, PIVOT_HEADER_FILTER_OVERLAY_ID };

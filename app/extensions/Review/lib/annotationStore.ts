@@ -3,11 +3,11 @@
 // CONTEXT: Caches indicator data fetched from the backend for fast per-cell lookup
 //          during the render loop. Refreshed on sheet change or annotation mutations.
 
-import type { CommentIndicator, NoteIndicator } from "../../../src/api";
+import type { CommentIndicator, NoteIndicator } from "@api";
 import {
   getCommentIndicators,
   getNoteIndicators,
-} from "../../../src/api";
+} from "@api";
 
 // ============================================================================
 // Internal State

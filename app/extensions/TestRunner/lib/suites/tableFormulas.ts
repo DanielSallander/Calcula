@@ -14,8 +14,8 @@ import {
   resizeTable,
   resolveStructuredReference,
   setCalculatedColumn,
-} from "../../../../src/api/backend";
-import { calculateNow } from "../../../../src/api";
+} from "@api/backend";
+import { calculateNow } from "@api";
 
 const A = AREA_TABLE_FORMULAS;
 

@@ -7,8 +7,8 @@ import {
   removeGridRegionsByType,
   requestOverlayRedraw,
   type GridRegion,
-} from "../../../src/api/gridOverlays";
-import { getGridStateSnapshot } from "../../../src/api/state";
+} from "@api/gridOverlays";
+import { getGridStateSnapshot } from "@api/state";
 import * as api from "./slicer-api";
 import { SlicerEvents } from "./slicerEvents";
 

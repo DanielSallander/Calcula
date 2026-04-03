@@ -3,8 +3,8 @@
 // CONTEXT: Uses getViewportCells from the API to fetch data for a chart spec's
 //          data range, then organizes it into categories and numeric series.
 
-import { getViewportCells } from "../../../src/api/lib";
-import { indexToCol } from "../../../src/api";
+import { getViewportCells } from "@api/lib";
+import { indexToCol } from "@api";
 import type {
   ChartSpec,
   ChartSeries,

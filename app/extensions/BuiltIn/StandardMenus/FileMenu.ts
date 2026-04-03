@@ -2,8 +2,8 @@
 // ARCHITECTURE: Uses the System API facade (The Facade Rule).
 // Extensions must ONLY import from app/src/api.
 import { useCallback } from 'react';
-import { workspace } from '../../../src/api/system';
-import type { MenuDefinition } from '../../../src/api/ui';
+import { workspace } from '@api/system';
+import type { MenuDefinition } from '@api/ui';
 
 export interface FileMenuHandlers {
   handleNew: () => Promise<void>;

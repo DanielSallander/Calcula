@@ -14,7 +14,7 @@ import {
   setActiveSheetApi as setActiveSheet,
   unhideSheet,
   calculateNow,
-} from "../../../../src/api";
+} from "@api";
 
 const A = AREA_MULTI_SHEET;
 

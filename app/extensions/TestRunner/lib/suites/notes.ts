@@ -13,8 +13,8 @@ import {
   clearNotesInRange,
   convertNoteToComment,
   getComment,
-} from "../../../../src/api";
-import type { AddNoteParams } from "../../../../src/api";
+} from "@api";
+import type { AddNoteParams } from "@api";
 
 const A = AREA_NOTES;
 

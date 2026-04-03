@@ -9,8 +9,8 @@ import {
   addGridRegions,
   removeGridRegionsByType,
   requestOverlayRedraw,
-} from "../../../src/api";
-import type { TraceResult } from "../../../src/api";
+} from "@api";
+import type { TraceResult } from "@api";
 import type { TraceArrow, TraceDirection } from "../types";
 
 // ============================================================================

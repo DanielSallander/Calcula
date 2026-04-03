@@ -5,7 +5,7 @@
 import type { TestSuite } from "../types";
 import { assertTrue, assertEqual } from "../assertions";
 import { AREA_PAGE_SETUP } from "../testArea";
-import { getPageSetup, setPageSetup } from "../../../../src/api/lib";
+import { getPageSetup, setPageSetup } from "@api/lib";
 
 const A = AREA_PAGE_SETUP;
 

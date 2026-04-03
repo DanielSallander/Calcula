@@ -5,15 +5,15 @@
 
 import React, { useState, useCallback } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
-import type { DialogProps } from "../../../src/api";
+import type { DialogProps } from "@api";
 import {
   useGridState,
   columnToLetter,
   openTaskPane,
   clearTaskPaneManuallyClosed,
   addTaskPaneContextKey,
-} from "../../../src/api";
-import { pivot } from "../../../src/api/pivot";
+} from "@api";
+import { pivot } from "@api/pivot";
 import { createConnection, getModelInfo } from "../lib/bi-api";
 import { PIVOT_PANE_ID } from "../../Pivot/manifest";
 import { CONNECTIONS_PANE_ID } from "../manifest";

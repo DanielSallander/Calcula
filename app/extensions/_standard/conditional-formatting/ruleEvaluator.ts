@@ -2,7 +2,7 @@
 // PURPOSE: Rule evaluation engine for conditional formatting
 // CONTEXT: Evaluates whether a cell value matches a rule's condition
 
-import type { CellCoords } from "../../../src/api/styleInterceptors";
+import type { CellCoords } from "@api/styleInterceptors";
 import type { 
   ConditionalRule, 
   RuleCondition,

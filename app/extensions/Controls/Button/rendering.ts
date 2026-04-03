@@ -3,7 +3,7 @@
 // CONTEXT: Registered as a cell decoration. Draws button graphics
 //          for cells whose style has button=true.
 
-import type { CellDecorationContext } from "../../../src/api/cellDecorations";
+import type { CellDecorationContext } from "@api/cellDecorations";
 import { getDesignMode } from "../lib/designMode";
 
 // ============================================================================

@@ -2,14 +2,14 @@
 // PURPOSE: Dialog for exporting selected objects as a .calp package, with optional publish to registry.
 
 import React, { useState, useCallback, useEffect } from "react";
-import type { DialogProps } from "../../../src/api/uiTypes";
+import type { DialogProps } from "@api/uiTypes";
 import {
   exportAsPackage,
   publishPackage,
   getRegistryProviders,
-} from "../../../src/api/distribution";
-import { getSheets } from "../../../src/api";
-import { getAllTables, type Table } from "../../../src/api/backend";
+} from "@api/distribution";
+import { getSheets } from "@api";
+import { getAllTables, type Table } from "@api/backend";
 import { save } from "@tauri-apps/plugin-dialog";
 
 // ─── Shared styles ──────────────────────────────────────────────────────────

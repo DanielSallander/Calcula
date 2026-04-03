@@ -3,11 +3,11 @@
 // CONTEXT: Opened from Format > Conditional Formatting > New Rule...
 
 import React, { useState, useCallback } from "react";
-import type { DialogProps } from "../../../src/api";
+import type { DialogProps } from "@api";
 import {
   addConditionalFormat,
   restoreFocusToGrid,
-} from "../../../src/api";
+} from "@api";
 import type {
   ConditionalFormatRule,
   ConditionalFormat,
@@ -17,7 +17,7 @@ import type {
   TopBottomType,
   AverageRuleType,
   IconSetType,
-} from "../../../src/api";
+} from "@api";
 import { invalidateAndRefresh } from "../lib/cfStore";
 import { PRESET_STYLES, PRESET_COLOR_SCALES, PRESET_DATA_BAR_COLORS } from "../types";
 

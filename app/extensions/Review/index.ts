@@ -1,21 +1,11 @@
 //! FILENAME: app/extensions/Review/index.ts
 // PURPOSE: Review extension entry point. Registers/unregisters all comment and note components.
-// CONTEXT: Called from extensions/index.ts during app initialization.
 
+import type { ExtensionModule, ExtensionContext } from "@api/contract";
 import {
-  registerCellDecoration,
-  registerCellClickInterceptor,
-  registerOverlay,
-  unregisterOverlay,
-  registerTaskPane,
-  unregisterTaskPane,
-  hideOverlay,
-  hideAllOverlays,
-  onAppEvent,
   AppEvents,
   ExtensionRegistry,
-  emitAppEvent,
-} from "../../src/api";
+} from "@api";
 
 // Rendering
 import { drawAnnotationTriangle } from "./rendering/triangleRenderer";
@@ -56,16 +46,18 @@ const COMMENTS_PANE_ID = "comments-pane";
 // ============================================================================
 
 const cleanupFns: (() => void)[] = [];
+let _context: ExtensionContext | null = null;
 
 // ============================================================================
-// Registration
+// Lifecycle
 // ============================================================================
 
-export function registerReviewExtension(): void {
-  console.log("[Review] Registering...");
+function activate(context: ExtensionContext): void {
+  _context = context;
+  console.log("[Review] Activating...");
 
   // 1. Register cell decoration for triangle indicators
-  const unregDecoration = registerCellDecoration(
+  const unregDecoration = context.grid.decorations.register(
     "annotation-triangles",
     drawAnnotationTriangle,
     5
@@ -73,39 +65,39 @@ export function registerReviewExtension(): void {
   cleanupFns.push(unregDecoration);
 
   // 2. Register overlay components
-  registerOverlay({
+  context.ui.overlays.register({
     id: NOTE_EDITOR_OVERLAY_ID,
     component: NoteEditorOverlay,
     layer: "popover",
   });
-  cleanupFns.push(() => unregisterOverlay(NOTE_EDITOR_OVERLAY_ID));
+  cleanupFns.push(() => context.ui.overlays.unregister(NOTE_EDITOR_OVERLAY_ID));
 
-  registerOverlay({
+  context.ui.overlays.register({
     id: COMMENT_PANEL_OVERLAY_ID,
     component: CommentPanelOverlay,
     layer: "popover",
   });
-  cleanupFns.push(() => unregisterOverlay(COMMENT_PANEL_OVERLAY_ID));
+  cleanupFns.push(() => context.ui.overlays.unregister(COMMENT_PANEL_OVERLAY_ID));
 
-  registerOverlay({
+  context.ui.overlays.register({
     id: ANNOTATION_PREVIEW_OVERLAY_ID,
     component: AnnotationPreview,
     layer: "tooltip",
   });
-  cleanupFns.push(() => unregisterOverlay(ANNOTATION_PREVIEW_OVERLAY_ID));
+  cleanupFns.push(() => context.ui.overlays.unregister(ANNOTATION_PREVIEW_OVERLAY_ID));
 
   // 3. Register task pane for comments sidebar
-  registerTaskPane({
+  context.ui.taskPanes.register({
     id: COMMENTS_PANE_ID,
     title: "Comments",
     component: CommentsSidebar,
     contextKeys: ["comment", "always"],
     closable: true,
   });
-  cleanupFns.push(() => unregisterTaskPane(COMMENTS_PANE_ID));
+  cleanupFns.push(() => context.ui.taskPanes.unregister(COMMENTS_PANE_ID));
 
   // 4. Register cell click interceptor for opening editors on annotated cells
-  const unregClick = registerCellClickInterceptor(handleAnnotationClick);
+  const unregClick = context.grid.cellClicks.registerClickInterceptor(handleAnnotationClick);
   cleanupFns.push(unregClick);
 
   // 5. Subscribe to selection changes
@@ -113,33 +105,33 @@ export function registerReviewExtension(): void {
   cleanupFns.push(unsubSelection);
 
   // 6. Subscribe to sheet changes (refresh indicator cache)
-  const unsubSheet = onAppEvent(AppEvents.SHEET_CHANGED, () => {
-    hideOverlay(NOTE_EDITOR_OVERLAY_ID);
-    hideOverlay(COMMENT_PANEL_OVERLAY_ID);
-    hideOverlay(ANNOTATION_PREVIEW_OVERLAY_ID);
+  const unsubSheet = context.events.on(AppEvents.SHEET_CHANGED, () => {
+    context.ui.overlays.hide(NOTE_EDITOR_OVERLAY_ID);
+    context.ui.overlays.hide(COMMENT_PANEL_OVERLAY_ID);
+    context.ui.overlays.hide(ANNOTATION_PREVIEW_OVERLAY_ID);
     refreshAnnotationState().then(() => {
-      emitAppEvent(AppEvents.GRID_REFRESH);
+      context.events.emit(AppEvents.GRID_REFRESH);
     });
   });
   cleanupFns.push(unsubSheet);
 
   // 7. Subscribe to structure changes (refresh after row/col insert/delete)
-  const unsubRowsInserted = onAppEvent(AppEvents.ROWS_INSERTED, () => {
+  const unsubRowsInserted = context.events.on(AppEvents.ROWS_INSERTED, () => {
     refreshAnnotationState();
   });
   cleanupFns.push(unsubRowsInserted);
 
-  const unsubColsInserted = onAppEvent(AppEvents.COLUMNS_INSERTED, () => {
+  const unsubColsInserted = context.events.on(AppEvents.COLUMNS_INSERTED, () => {
     refreshAnnotationState();
   });
   cleanupFns.push(unsubColsInserted);
 
-  const unsubRowsDeleted = onAppEvent(AppEvents.ROWS_DELETED, () => {
+  const unsubRowsDeleted = context.events.on(AppEvents.ROWS_DELETED, () => {
     refreshAnnotationState();
   });
   cleanupFns.push(unsubRowsDeleted);
 
-  const unsubColsDeleted = onAppEvent(AppEvents.COLUMNS_DELETED, () => {
+  const unsubColsDeleted = context.events.on(AppEvents.COLUMNS_DELETED, () => {
     refreshAnnotationState();
   });
   cleanupFns.push(unsubColsDeleted);
@@ -157,20 +149,16 @@ export function registerReviewExtension(): void {
   // 11. Initial state load
   refreshAnnotationState();
 
-  console.log("[Review] Registered successfully.");
+  console.log("[Review] Activated successfully.");
 }
 
-// ============================================================================
-// Unregistration
-// ============================================================================
-
-export function unregisterReviewExtension(): void {
-  console.log("[Review] Unregistering...");
+function deactivate(): void {
+  console.log("[Review] Deactivating...");
 
   // Close all overlays
-  hideOverlay(NOTE_EDITOR_OVERLAY_ID);
-  hideOverlay(COMMENT_PANEL_OVERLAY_ID);
-  hideOverlay(ANNOTATION_PREVIEW_OVERLAY_ID);
+  _context?.ui.overlays.hide(NOTE_EDITOR_OVERLAY_ID);
+  _context?.ui.overlays.hide(COMMENT_PANEL_OVERLAY_ID);
+  _context?.ui.overlays.hide(ANNOTATION_PREVIEW_OVERLAY_ID);
 
   // Unregister context menu items
   unregisterAnnotationContextMenuItems();
@@ -187,6 +175,23 @@ export function unregisterReviewExtension(): void {
 
   // Reset state
   resetAnnotationStore();
+  _context = null;
 
-  console.log("[Review] Unregistered.");
+  console.log("[Review] Deactivated.");
 }
+
+// ============================================================================
+// Extension Module
+// ============================================================================
+
+const extension: ExtensionModule = {
+  manifest: {
+    id: "calcula.review",
+    name: "Review",
+    version: "1.0.0",
+    description: "Comments, notes, and annotation management for cells.",
+  },
+  activate,
+  deactivate,
+};
+export default extension;

@@ -4,7 +4,7 @@
 // CONTEXT: Opened from Data > Connections menu item. Excel-style connection manager.
 
 import React, { useState, useCallback, useEffect } from "react";
-import type { TaskPaneViewProps } from "../../../src/api";
+import type { TaskPaneViewProps } from "@api";
 import {
   useGridState,
   columnToLetter,
@@ -12,8 +12,8 @@ import {
   clearTaskPaneManuallyClosed,
   addTaskPaneContextKey,
   DialogExtensions,
-} from "../../../src/api";
-import { pivot } from "../../../src/api/pivot";
+} from "@api";
+import { pivot } from "@api/pivot";
 import {
   getConnections,
   connect,

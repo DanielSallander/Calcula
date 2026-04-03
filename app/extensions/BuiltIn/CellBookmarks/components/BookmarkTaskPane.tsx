@@ -3,7 +3,7 @@
 // CONTEXT: Registered as a task pane view with contextKey "always".
 
 import React, { useState, useEffect, useCallback } from "react";
-import type { TaskPaneViewProps } from "../../../../src/api";
+import type { TaskPaneViewProps } from "@api";
 import {
   getAllBookmarks,
   getBookmarksForSheet,

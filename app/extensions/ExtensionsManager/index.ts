@@ -3,7 +3,7 @@
 // CONTEXT: Lists all loaded extensions with status badges
 
 import React from "react";
-import { registerActivityView, unregisterActivityView, toggleActivityView } from "../../src/api";
+import type { ExtensionModule, ExtensionContext } from "@api/contract";
 import { ExtensionsListView } from "./ExtensionsListView";
 
 const cleanupFns: Array<() => void> = [];
@@ -26,8 +26,8 @@ const ExtensionsIcon = React.createElement(
   })
 );
 
-export function registerExtensionsManagerExtension(): void {
-  registerActivityView({
+function activate(context: ExtensionContext): void {
+  context.ui.activityBar.register({
     id: "extensions",
     title: "Extensions",
     icon: ExtensionsIcon,
@@ -35,23 +35,36 @@ export function registerExtensionsManagerExtension(): void {
     priority: 10,
     bottom: true,
   });
-  cleanupFns.push(() => unregisterActivityView("extensions"));
+  cleanupFns.push(() => context.ui.activityBar.unregister("extensions"));
 
   // Keyboard shortcut: Ctrl+Shift+X
   const handleKeyDown = (e: KeyboardEvent) => {
     if (e.ctrlKey && e.shiftKey && e.key === "X") {
       e.preventDefault();
-      toggleActivityView("extensions");
+      context.ui.activityBar.toggle("extensions");
     }
   };
   window.addEventListener("keydown", handleKeyDown, true);
   cleanupFns.push(() => window.removeEventListener("keydown", handleKeyDown, true));
 
-  console.log("[ExtensionsManager] Extension registered");
+  console.log("[ExtensionsManager] Extension activated");
 }
 
-export function unregisterExtensionsManagerExtension(): void {
+function deactivate(): void {
   cleanupFns.forEach((fn) => fn());
   cleanupFns.length = 0;
-  console.log("[ExtensionsManager] Extension unregistered");
+  console.log("[ExtensionsManager] Extension deactivated");
 }
+
+const extension: ExtensionModule = {
+  manifest: {
+    id: "calcula.extensions-manager",
+    name: "Extensions Manager",
+    version: "1.0.0",
+    description: "Activity Bar panel for managing loaded extensions",
+  },
+  activate,
+  deactivate,
+};
+
+export default extension;

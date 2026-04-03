@@ -1,24 +1,16 @@
 //! FILENAME: app/extensions/Controls/index.ts
-// PURPOSE: Controls extension entry point. Registers Button control, Design Mode,
-//          and Properties Pane. Supports both embedded (cell) and floating button modes.
-// CONTEXT: Called from extensions/index.ts during app initialization.
+// PURPOSE: Controls extension entry point (ExtensionModule pattern).
+//          Registers Button control, Design Mode, and Properties Pane.
+//          Supports both embedded (cell) and floating button modes.
+// NOTE: Default exports an ExtensionModule object per the contract.
 
+import type { ExtensionModule, ExtensionContext } from "@api/contract";
 import {
-  registerCellClickInterceptor,
-  registerStyleInterceptor,
-  registerMenuItem,
-  registerTaskPane,
-  unregisterTaskPane,
-  openTaskPane,
-  closeTaskPane,
   ExtensionRegistry,
-  onAppEvent,
   AppEvents,
-  notifyMenusChanged,
-} from "../../src/api";
-import { registerCellDecoration } from "../../src/api/cellDecorations";
-import { registerGridOverlay } from "../../src/api/gridOverlays";
-import { emitAppEvent } from "../../src/api/events";
+} from "@api";
+import { emitAppEvent } from "@api/events";
+import type { OverlayRenderContext, OverlayHitTestContext } from "@api/gridOverlays";
 import { drawButton } from "./Button/rendering";
 import {
   buttonStyleInterceptor,
@@ -81,9 +73,10 @@ const PROPERTIES_PANE_ID = "control-properties";
 const DESIGN_MODE_MENU_ITEM_ID = "developer:designMode";
 
 // ============================================================================
-// Cleanup tracking
+// State
 // ============================================================================
 
+let isActivated = false;
 const cleanupFns: (() => void)[] = [];
 
 /** Reference to the design mode menu item for toggling its checked state. */
@@ -92,8 +85,6 @@ let designModeMenuItem: { checked?: boolean } | null = null;
 // ============================================================================
 // Overlay Dispatchers (route render/hitTest by controlType)
 // ============================================================================
-
-import type { OverlayRenderContext, OverlayHitTestContext } from "../../src/api/gridOverlays";
 
 function renderFloatingControl(overlayCtx: OverlayRenderContext): void {
   const controlType = overlayCtx.region.data?.controlType;
@@ -118,18 +109,23 @@ function hitTestFloatingControl(hitCtx: OverlayHitTestContext): boolean {
 }
 
 // ============================================================================
-// Registration
+// Activation
 // ============================================================================
 
-export function registerControlsExtension(): void {
-  console.log("[Controls] Registering...");
+function activate(context: ExtensionContext): void {
+  if (isActivated) {
+    console.warn("[Controls] Already activated, skipping.");
+    return;
+  }
+
+  console.log("[Controls] Activating...");
 
   // 1. Register button cell decoration for rendering (embedded buttons)
-  const unregDecoration = registerCellDecoration("button", drawButton, 10);
+  const unregDecoration = context.grid.decorations.register("button", drawButton, 10);
   cleanupFns.push(unregDecoration);
 
   // 2. Register style interceptor to suppress default text for embedded buttons
-  const unregStyleInterceptor = registerStyleInterceptor(
+  const unregStyleInterceptor = context.grid.styleInterceptors.register(
     "button",
     buttonStyleInterceptor,
     5,
@@ -137,7 +133,7 @@ export function registerControlsExtension(): void {
   cleanupFns.push(unregStyleInterceptor);
 
   // 3. Register cell click interceptor for embedded button behavior
-  const unregClickInterceptor = registerCellClickInterceptor(buttonClickInterceptor);
+  const unregClickInterceptor = context.grid.cellClicks.registerClickInterceptor(buttonClickInterceptor);
   cleanupFns.push(unregClickInterceptor);
 
   // 4. Track selection changes for design mode interactions
@@ -160,7 +156,7 @@ export function registerControlsExtension(): void {
   // 6. Re-evaluate formula-driven properties whenever cells are updated.
   //    CELLS_UPDATED fires reliably on every cell change (typing, paste,
   //    undo/redo, fill, delete, scripts, etc.) via the Core cellEvents system.
-  const unregCellsUpdated = onAppEvent(AppEvents.CELLS_UPDATED, () => {
+  const unregCellsUpdated = context.events.on(AppEvents.CELLS_UPDATED, () => {
     refreshStyleCache();
     invalidateAllFloatingButtonCaches();
     invalidateAllShapeCaches();
@@ -171,7 +167,7 @@ export function registerControlsExtension(): void {
 
   // 6b. Re-evaluate formula-driven properties whenever named ranges change.
   //     Named ranges can be referenced in control property formulas (e.g., =test).
-  const unregNamedRangesChanged = onAppEvent(AppEvents.NAMED_RANGES_CHANGED, () => {
+  const unregNamedRangesChanged = context.events.on(AppEvents.NAMED_RANGES_CHANGED, () => {
     invalidateAllFloatingButtonCaches();
     invalidateAllShapeCaches();
     invalidateAllImageCaches();
@@ -180,7 +176,7 @@ export function registerControlsExtension(): void {
   cleanupFns.push(unregNamedRangesChanged);
 
   // 7. Register Properties Pane as a task pane
-  registerTaskPane({
+  context.ui.taskPanes.register({
     id: PROPERTIES_PANE_ID,
     title: "Properties",
     component: PropertiesPane,
@@ -188,10 +184,10 @@ export function registerControlsExtension(): void {
     priority: 40,
     closable: true,
   });
-  cleanupFns.push(() => unregisterTaskPane(PROPERTIES_PANE_ID));
+  cleanupFns.push(() => context.ui.taskPanes.unregister(PROPERTIES_PANE_ID));
 
   // 8. Register Insert > Controls > Button menu item
-  registerMenuItem("insert", {
+  context.ui.menus.registerItem("insert", {
     id: "insert.controls",
     label: "Controls",
     children: [
@@ -204,7 +200,7 @@ export function registerControlsExtension(): void {
   });
 
   // 8b. Register Insert > Shapes with gallery submenu
-  registerMenuItem("insert", {
+  context.ui.menus.registerItem("insert", {
     id: "insert.shapes",
     label: "Shapes",
     customContent: (onClose) =>
@@ -212,7 +208,7 @@ export function registerControlsExtension(): void {
   });
 
   // 8c. Register Insert > Image menu item
-  registerMenuItem("insert", {
+  context.ui.menus.registerItem("insert", {
     id: "insert.image",
     label: "Image",
     action: insertImage,
@@ -227,17 +223,17 @@ export function registerControlsExtension(): void {
       toggleDesignMode();
       menuItem.checked = getDesignMode();
       designModeMenuItem = menuItem;
-      notifyMenusChanged();
+      context.ui.menus.notifyChanged();
     },
   };
   designModeMenuItem = menuItem;
-  registerMenuItem("developer", menuItem);
+  context.ui.menus.registerItem("developer", menuItem);
 
   // 10. Listen to design mode changes for auto-show/hide
   const unregDesignMode = onDesignModeChange((_isDesignMode) => {
     if (designModeMenuItem) {
       designModeMenuItem.checked = _isDesignMode;
-      notifyMenusChanged();
+      context.ui.menus.notifyChanged();
     }
     // Re-evaluate whether properties pane should be open
     evaluatePropertiesPaneVisibility();
@@ -257,7 +253,7 @@ export function registerControlsExtension(): void {
   // -----------------------------------------------------------------------
   // 13. Register floating button overlay renderer
   // -----------------------------------------------------------------------
-  const unregOverlay = registerGridOverlay({
+  const unregOverlay = context.grid.overlays.register({
     type: "floating-control",
     render: renderFloatingControl,
     hitTest: hitTestFloatingControl,
@@ -341,7 +337,8 @@ export function registerControlsExtension(): void {
   // -----------------------------------------------------------------------
   loadFloatingControls();
 
-  console.log("[Controls] Registered successfully");
+  isActivated = true;
+  console.log("[Controls] Activated successfully.");
 }
 
 // ============================================================================
@@ -697,7 +694,8 @@ async function deleteFloatingControl(controlId: string): Promise<void> {
 
   // Clear selection and close properties pane
   deselectFloatingControl();
-  closeTaskPane(PROPERTIES_PANE_ID);
+  const { closeTaskPane: closeTP } = await import("../../src/api/ui");
+  closeTP(PROPERTIES_PANE_ID);
   lastPropertiesCell = null;
 
   // Invalidate caches and refresh
@@ -730,11 +728,13 @@ function setupFloatingObjectEvents(): void {
       // (shapes and images are always selectable regardless of design mode)
       selectFloatingControl(controlId);
       lastPropertiesCell = { row: controlRow, col: controlCol };
-      openTaskPane(PROPERTIES_PANE_ID, {
-        row: controlRow,
-        col: controlCol,
-        sheetIndex: controlSheet,
-        controlType: ctrlType,
+      import("../../src/api/ui").then(({ openTaskPane: openTP }) => {
+        openTP(PROPERTIES_PANE_ID, {
+          row: controlRow,
+          col: controlCol,
+          sheetIndex: controlSheet,
+          controlType: ctrlType,
+        });
       });
       emitAppEvent(AppEvents.GRID_REFRESH);
     } else {
@@ -909,7 +909,7 @@ async function executeFloatingButtonAction(sheetIndex: number, row: number, col:
 }
 
 // ============================================================================
-// Embedded ↔ Floating Toggle
+// Embedded <-> Floating Toggle
 // ============================================================================
 
 /**
@@ -925,11 +925,12 @@ async function handleEmbeddedToggle(
   const { getGridStateSnapshot, getCellFromPixel } = await import("../../src/api/grid");
   const { getColumnWidth, getRowHeight } = await import("../../src/api/dimensions");
   const { setControlProperty } = await import("./lib/controlApi");
+  const { openTaskPane: openTP } = await import("../../src/api/ui");
 
   const controlId = makeFloatingControlId(sheetIndex, row, col);
 
   if (embedded) {
-    // ---- FLOATING → EMBEDDED ----
+    // ---- FLOATING -> EMBEDDED ----
     const ctrl = getFloatingControl(controlId);
     if (!ctrl) return;
 
@@ -988,7 +989,7 @@ async function handleEmbeddedToggle(
     emitAppEvent(AppEvents.GRID_REFRESH);
 
     // Re-open properties pane at new location
-    openTaskPane(PROPERTIES_PANE_ID, {
+    openTP(PROPERTIES_PANE_ID, {
       row: targetRow,
       col: targetCol,
       sheetIndex,
@@ -996,7 +997,7 @@ async function handleEmbeddedToggle(
     });
     lastPropertiesCell = { row: targetRow, col: targetCol };
   } else {
-    // ---- EMBEDDED → FLOATING ----
+    // ---- EMBEDDED -> FLOATING ----
     const gridState = getGridStateSnapshot();
     if (!gridState) return;
 
@@ -1052,7 +1053,7 @@ async function handleEmbeddedToggle(
 
     // Select the floating control and re-open properties pane
     selectFloatingControl(controlId);
-    openTaskPane(PROPERTIES_PANE_ID, {
+    openTP(PROPERTIES_PANE_ID, {
       row,
       col,
       sheetIndex,
@@ -1178,10 +1179,11 @@ async function evaluatePropertiesPaneVisibility(
       lastPropertiesCell = { row, col };
 
       const { getGridStateSnapshot } = await import("../../src/api/grid");
+      const { openTaskPane: openTP } = await import("../../src/api/ui");
       const gridState = getGridStateSnapshot();
       const sheetIndex = gridState?.config?.activeSheet ?? 0;
 
-      openTaskPane(PROPERTIES_PANE_ID, {
+      openTP(PROPERTIES_PANE_ID, {
         row,
         col,
         sheetIndex,
@@ -1193,10 +1195,11 @@ async function evaluatePropertiesPaneVisibility(
   }
 }
 
-function closePropertiesIfOpen(): void {
+async function closePropertiesIfOpen(): Promise<void> {
   if (lastPropertiesCell) {
     lastPropertiesCell = null;
-    closeTaskPane(PROPERTIES_PANE_ID);
+    const { closeTaskPane: closeTP } = await import("../../src/api/ui");
+    closeTP(PROPERTIES_PANE_ID);
   }
 }
 
@@ -1294,11 +1297,13 @@ function setupButtonCursor(): () => void {
 }
 
 // ============================================================================
-// Unregistration
+// Deactivation
 // ============================================================================
 
-export function unregisterControlsExtension(): void {
-  console.log("[Controls] Unregistering...");
+function deactivate(): void {
+  if (!isActivated) return;
+
+  console.log("[Controls] Deactivating...");
   for (const cleanup of cleanupFns) {
     cleanup();
   }
@@ -1310,5 +1315,23 @@ export function unregisterControlsExtension(): void {
   invalidateAllFloatingButtonCaches();
   invalidateAllShapeCaches();
   invalidateAllImageCaches();
-  console.log("[Controls] Unregistered");
+  isActivated = false;
+  console.log("[Controls] Deactivated.");
 }
+
+// ============================================================================
+// Extension Module Export
+// ============================================================================
+
+const extension: ExtensionModule = {
+  manifest: {
+    id: "calcula.controls",
+    name: "Controls",
+    version: "1.0.0",
+    description: "Button, Shape, and Image controls with floating and embedded modes.",
+  },
+  activate,
+  deactivate,
+};
+
+export default extension;

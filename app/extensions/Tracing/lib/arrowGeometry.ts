@@ -2,7 +2,7 @@
 // PURPOSE: Compute pixel coordinates for trace arrows on the canvas.
 // CONTEXT: Maps cell row/col to canvas pixel positions using the overlay API helpers.
 
-import type { OverlayRenderContext } from "../../../src/api";
+import type { OverlayRenderContext } from "@api";
 import {
   overlayGetColumnX,
   overlayGetRowY,
@@ -10,7 +10,7 @@ import {
   overlayGetRowHeight,
   overlayGetColumnsWidth,
   overlayGetRowsHeight,
-} from "../../../src/api";
+} from "@api";
 import type { TraceArrow, ArrowPath } from "../types";
 
 // ============================================================================

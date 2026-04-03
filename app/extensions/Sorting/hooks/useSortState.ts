@@ -4,7 +4,7 @@
 
 import { create } from "zustand";
 import type { SortLevel, SortDialogState } from "../types";
-import type { SortOn, SortDataOption, SortOrientation } from "../../../src/api/lib";
+import type { SortOn, SortDataOption, SortOrientation } from "@api/lib";
 import { MAX_SORT_LEVELS } from "../types";
 
 // ============================================================================

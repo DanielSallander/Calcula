@@ -3,7 +3,7 @@
 // CONTEXT: Registered as an overlay via OverlayExtensions. Reads from the Zustand store.
 
 import React, { useRef, useEffect } from "react";
-import type { OverlayProps } from "../../../src/api/uiTypes";
+import type { OverlayProps } from "@api/uiTypes";
 import { useColumnAutocompleteStore } from "./useColumnAutocompleteStore";
 import * as S from "./ColumnAutocompleteOverlay.styles";
 

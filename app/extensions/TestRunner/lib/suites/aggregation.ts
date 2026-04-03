@@ -5,7 +5,7 @@
 import type { TestSuite } from "../types";
 import { assertTrue, assertEqual, expectNotNull } from "../assertions";
 import { AREA_AGGREGATION } from "../testArea";
-import { getSelectionAggregations } from "../../../../src/api";
+import { getSelectionAggregations } from "@api";
 
 const A = AREA_AGGREGATION;
 

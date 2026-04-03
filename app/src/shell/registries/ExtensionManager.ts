@@ -5,7 +5,62 @@
 
 import type { ExtensionModule, ExtensionContext } from "../../api/contract";
 import { CommandRegistry } from "../../api/commands";
+import { API_VERSION } from "../../api/version";
 import { builtInExtensions } from "../../../extensions/manifest";
+
+// Import free functions from API to wire into the context object
+import {
+  registerMenu,
+  registerMenuItem,
+  getMenus,
+  subscribeToMenus,
+  notifyMenusChanged,
+  registerTaskPane,
+  unregisterTaskPane,
+  openTaskPane,
+  closeTaskPane,
+  getTaskPane,
+  showTaskPaneContainer,
+  hideTaskPaneContainer,
+  isTaskPaneContainerOpen,
+  getTaskPaneManuallyClosed,
+  markTaskPaneManuallyClosed,
+  clearTaskPaneManuallyClosed,
+  addTaskPaneContextKey,
+  removeTaskPaneContextKey,
+  registerDialog,
+  unregisterDialog,
+  showDialog,
+  hideDialog,
+  registerOverlay,
+  unregisterOverlay,
+  showOverlay,
+  hideOverlay,
+  hideAllOverlays,
+  registerStatusBarItem,
+  unregisterStatusBarItem,
+  registerActivityView,
+  unregisterActivityView,
+  openActivityView,
+  closeActivityView,
+  toggleActivityView,
+} from "../../api/ui";
+import { emitAppEvent, onAppEvent } from "../../api/events";
+import { showToast } from "../../api/notifications";
+import {
+  registerCellDecoration,
+  unregisterCellDecoration,
+} from "../../api/cellDecorations";
+import {
+  registerStyleInterceptor,
+  unregisterStyleInterceptor,
+  markRangeDirty,
+  markSheetDirty,
+} from "../../api/styleInterceptors";
+import { registerGridOverlay } from "../../api/gridOverlays";
+import { registerEditGuard } from "../../api/editGuards";
+import { registerCellClickInterceptor } from "../../api/cellClickInterceptors";
+import { registerCellDoubleClickInterceptor } from "../../api/cellDoubleClickInterceptors";
 
 // ============================================================================
 // Types
@@ -25,6 +80,127 @@ export interface LoadedExtension {
 type ChangeListener = () => void;
 
 // ============================================================================
+// API Version Compatibility Check
+// ============================================================================
+
+/**
+ * Parse a version string into [major, minor, patch].
+ */
+function parseVersion(version: string): [number, number, number] {
+  const parts = version.replace(/^[^0-9]*/, "").split(".").map(Number);
+  return [parts[0] || 0, parts[1] || 0, parts[2] || 0];
+}
+
+/**
+ * Check if the host API version satisfies the extension's required version.
+ * Supports caret ranges (^1.2.3 means >=1.2.3 and <2.0.0).
+ * If no prefix, treats as exact major match (1.x compatible with 1.y).
+ */
+function isApiVersionCompatible(required: string, host: string): boolean {
+  const isCaret = required.startsWith("^");
+  const [reqMajor, reqMinor, reqPatch] = parseVersion(required);
+  const [hostMajor, hostMinor, hostPatch] = parseVersion(host);
+
+  if (isCaret) {
+    // ^1.2.3 means >=1.2.3 and <2.0.0
+    if (hostMajor !== reqMajor) return false;
+    if (hostMinor < reqMinor) return false;
+    if (hostMinor === reqMinor && hostPatch < reqPatch) return false;
+    return true;
+  }
+
+  // Default: same major version is compatible
+  return hostMajor === reqMajor;
+}
+
+// ============================================================================
+// Build the ExtensionContext (DI wiring)
+// ============================================================================
+
+function buildContext(): ExtensionContext {
+  return {
+    commands: CommandRegistry,
+    ui: {
+      menus: {
+        register: registerMenu,
+        registerItem: registerMenuItem,
+        getAll: getMenus,
+        subscribe: subscribeToMenus,
+        notifyChanged: notifyMenusChanged,
+      },
+      taskPanes: {
+        register: registerTaskPane,
+        unregister: unregisterTaskPane,
+        open: openTaskPane,
+        close: closeTaskPane,
+        getView: getTaskPane,
+        showContainer: showTaskPaneContainer,
+        hideContainer: hideTaskPaneContainer,
+        isContainerOpen: isTaskPaneContainerOpen,
+        addContextKey: addTaskPaneContextKey,
+        removeContextKey: removeTaskPaneContextKey,
+        getManuallyClosed: getTaskPaneManuallyClosed,
+        markManuallyClosed: markTaskPaneManuallyClosed,
+        clearManuallyClosed: clearTaskPaneManuallyClosed,
+      },
+      dialogs: {
+        register: registerDialog,
+        unregister: unregisterDialog,
+        show: showDialog,
+        hide: hideDialog,
+      },
+      overlays: {
+        register: registerOverlay,
+        unregister: unregisterOverlay,
+        show: showOverlay,
+        hide: hideOverlay,
+        hideAll: hideAllOverlays,
+      },
+      statusBar: {
+        register: registerStatusBarItem,
+        unregister: unregisterStatusBarItem,
+      },
+      activityBar: {
+        register: registerActivityView,
+        unregister: unregisterActivityView,
+        open: openActivityView,
+        close: closeActivityView,
+        toggle: toggleActivityView,
+      },
+      notifications: {
+        showToast,
+      },
+    },
+    events: {
+      emit: emitAppEvent,
+      on: onAppEvent,
+    },
+    grid: {
+      decorations: {
+        register: registerCellDecoration,
+        unregister: unregisterCellDecoration,
+      },
+      styleInterceptors: {
+        register: registerStyleInterceptor,
+        unregister: unregisterStyleInterceptor,
+        markRangeDirty,
+        markSheetDirty,
+      },
+      overlays: {
+        register: registerGridOverlay,
+      },
+      editGuards: {
+        register: registerEditGuard,
+      },
+      cellClicks: {
+        registerClickInterceptor: registerCellClickInterceptor,
+        registerDoubleClickInterceptor: registerCellDoubleClickInterceptor,
+      },
+    },
+  };
+}
+
+// ============================================================================
 // ExtensionManager Implementation
 // ============================================================================
 
@@ -40,12 +216,7 @@ class ExtensionManagerImpl {
    * The context passed to all extensions during activation.
    * This is our Dependency Injection container.
    */
-  private readonly context: ExtensionContext = {
-    commands: CommandRegistry,
-    // Future: Add more API surfaces as needed
-    // ribbon: RibbonRegistry,
-    // menus: MenuRegistry,
-  };
+  private readonly context: ExtensionContext = buildContext();
 
   // --------------------------------------------------------------------------
   // Initialization
@@ -108,6 +279,20 @@ class ExtensionManagerImpl {
     this.extensions.set(id, entry);
     this.updateCachedArray();
     this.notifyChange();
+
+    // Check API version compatibility
+    if (module.manifest.apiVersion) {
+      if (!isApiVersionCompatible(module.manifest.apiVersion, API_VERSION)) {
+        entry.status = "error";
+        entry.error = new Error(
+          `Extension '${id}' requires API ${module.manifest.apiVersion} but host is ${API_VERSION}`
+        );
+        console.error(`[ExtensionManager] ${entry.error.message}`);
+        this.updateCachedArray();
+        this.notifyChange();
+        return;
+      }
+    }
 
     try {
       console.log(`[ExtensionManager] Activating extension: ${id} (${name} v${version})`);

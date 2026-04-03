@@ -7,7 +7,7 @@ import styled from "styled-components";
 import { useFormatCellsStore } from "../hooks/useFormatCellsState";
 import { FONT_LIST, FONT_SIZES, THEME_FONTS } from "../utils/fontList";
 import { ColorPicker } from "../components/ColorPicker";
-import { getCachedTheme } from "../../../../src/api/theme";
+import { getCachedTheme } from "@api/theme";
 
 const v = (name: string) => `var(${name})`;
 

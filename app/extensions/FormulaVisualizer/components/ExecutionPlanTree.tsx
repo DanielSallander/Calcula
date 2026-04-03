@@ -2,7 +2,7 @@
 // PURPOSE: SVG tree renderer for the execution plan - nodes, edges, and animations.
 
 import React, { useMemo } from "react";
-import type { EvalPlanNode, FormulaEvalPlan } from "../../../src/api";
+import type { EvalPlanNode, FormulaEvalPlan } from "@api";
 import type { LayoutNode, NodeVisualState, PlanEdgeData } from "../types";
 import { useTreeLayout } from "../hooks/useTreeLayout";
 import { PlanNode } from "./PlanNode";

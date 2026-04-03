@@ -8,7 +8,7 @@ import {
   removeGridRegionsByType,
   addGridRegions,
   type GridRegion,
-} from "../../../src/api/gridOverlays";
+} from "@api/gridOverlays";
 
 import type { ChartDefinition, ChartSpec } from "../types";
 

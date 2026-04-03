@@ -4,7 +4,7 @@
 //          "Sparkline" Design tab. When they move outside, we hide it.
 //          Follows the same pattern as Pivot's selectionHandler.ts.
 
-import { ExtensionRegistry } from "../../../src/api";
+import { ExtensionRegistry } from "@api";
 import { hasSparkline } from "../store";
 import { SparklineDesignTabDefinition, SPARKLINE_DESIGN_TAB_ID } from "../manifest";
 

@@ -1,17 +1,14 @@
 //! FILENAME: app/extensions/BusinessIntelligence/index.ts
-// PURPOSE: BI extension registration — edit guards, events, ribbon, task pane.
-// CONTEXT: Follows the standard Calcula extension lifecycle pattern.
+// PURPOSE: BI extension entry point (ExtensionModule pattern).
+//          Registers edit guards, events, ribbon, task pane, and dialogs.
+// NOTE: Default exports an ExtensionModule object per the contract.
 
+import type { ExtensionModule, ExtensionContext } from "@api/contract";
 import {
   ExtensionRegistry,
   TaskPaneExtensions,
-  DialogExtensions,
-  registerEditGuard,
-  registerMenuItem,
-  addTaskPaneContextKey,
   removeTaskPaneContextKey,
-  openTaskPane,
-} from "../../src/api";
+} from "@api";
 
 import {
   BiManifest,
@@ -26,17 +23,23 @@ import { ModelDialog } from "./components/ModelDialog";
 const MODEL_DIALOG_ID = "bi:modelDialog";
 
 // ============================================================================
-// Cleanup tracking
+// State
 // ============================================================================
 
-let cleanupFunctions: Array<() => void> = [];
+let isActivated = false;
+const cleanupFunctions: Array<() => void> = [];
 
 // ============================================================================
-// Registration
+// Activation
 // ============================================================================
 
-export function registerBiExtension(): void {
-  console.log("[BI Extension] Registering...");
+function activate(context: ExtensionContext): void {
+  if (isActivated) {
+    console.warn("[BI Extension] Already activated, skipping.");
+    return;
+  }
+
+  console.log("[BI Extension] Activating...");
 
   // 1. Register manifest
   ExtensionRegistry.registerAddIn(BiManifest);
@@ -45,9 +48,9 @@ export function registerBiExtension(): void {
   TaskPaneExtensions.registerView(BiPaneDefinition);
   TaskPaneExtensions.registerView(ConnectionsPaneDefinition);
 
-  // 3. Register edit guard — blocks edits in BI locked regions
+  // 3. Register edit guard - blocks edits in BI locked regions
   cleanupFunctions.push(
-    registerEditGuard(async (row, col) => {
+    context.grid.editGuards.register(async (row, col) => {
       try {
         const region = await getRegionAtCell(row, col);
         if (region) {
@@ -65,25 +68,25 @@ export function registerBiExtension(): void {
   );
 
   // 4. Register Model Dialog (for "Get Data > Calcula Model")
-  DialogExtensions.registerDialog({
+  context.ui.dialogs.register({
     id: MODEL_DIALOG_ID,
     component: ModelDialog,
     priority: 100,
   });
-  cleanupFunctions.push(() => DialogExtensions.unregisterDialog(MODEL_DIALOG_ID));
+  cleanupFunctions.push(() => context.ui.dialogs.unregister(MODEL_DIALOG_ID));
 
   // 5. Register "Connections" menu item in Data menu
-  registerMenuItem("data", {
+  context.ui.menus.registerItem("data", {
     id: "data:connections",
     label: "Connections",
     action: () => {
-      addTaskPaneContextKey("connections");
-      openTaskPane(CONNECTIONS_PANE_ID);
+      context.ui.taskPanes.addContextKey("connections");
+      context.ui.taskPanes.open(CONNECTIONS_PANE_ID);
     },
   });
 
   // 6. Register "Get Data" submenu in the Data menu
-  registerMenuItem("data", {
+  context.ui.menus.registerItem("data", {
     id: "data:getData",
     label: "Get Data",
     children: [
@@ -91,31 +94,55 @@ export function registerBiExtension(): void {
         id: "data:getData:calculaModel",
         label: "Calcula Model...",
         action: () => {
-          DialogExtensions.openDialog(MODEL_DIALOG_ID);
+          context.ui.dialogs.show(MODEL_DIALOG_ID);
         },
       },
     ],
   });
 
-  console.log("[BI Extension] Registered");
+  isActivated = true;
+  console.log("[BI Extension] Activated successfully.");
 }
 
-export function unregisterBiExtension(): void {
-  console.log("[BI Extension] Unregistering...");
+// ============================================================================
+// Deactivation
+// ============================================================================
+
+function deactivate(): void {
+  if (!isActivated) return;
+
+  console.log("[BI Extension] Deactivating...");
 
   // Run all cleanup functions
   cleanupFunctions.forEach((fn) => fn());
-  cleanupFunctions = [];
+  cleanupFunctions.length = 0;
 
   // Remove context keys
   removeTaskPaneContextKey("bi");
   removeTaskPaneContextKey("connections");
 
   // Unregister from registries
-  DialogExtensions.unregisterDialog(MODEL_DIALOG_ID);
   TaskPaneExtensions.unregisterView(BI_PANE_ID);
   TaskPaneExtensions.unregisterView(CONNECTIONS_PANE_ID);
   ExtensionRegistry.unregisterAddIn(BiManifest.id);
 
-  console.log("[BI Extension] Unregistered");
+  isActivated = false;
+  console.log("[BI Extension] Deactivated.");
 }
+
+// ============================================================================
+// Extension Module Export
+// ============================================================================
+
+const extension: ExtensionModule = {
+  manifest: {
+    id: "calcula.business-intelligence",
+    name: "Business Intelligence",
+    version: "1.0.0",
+    description: "BI engine integration with data connections, queries, and model loading.",
+  },
+  activate,
+  deactivate,
+};
+
+export default extension;

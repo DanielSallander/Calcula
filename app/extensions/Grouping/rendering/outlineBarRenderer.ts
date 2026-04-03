@@ -5,7 +5,7 @@
 //          Called synchronously during each canvas frame; accesses pre-fetched
 //          outline data.
 
-import type { GridConfig, Viewport, DimensionOverrides } from "../../../src/api";
+import type { GridConfig, Viewport, DimensionOverrides } from "@api";
 import {
   getCurrentOutlineInfo,
   updateLastRenderedState,

@@ -3,9 +3,9 @@
 // CONTEXT: Registers Edit menu. File, View, Insert are handled by StandardMenus.tsx hooks.
 // NOTE: Default exports an ExtensionModule object per the contract.
 
-import type { ExtensionModule, ExtensionContext } from "../../../src/api/contract";
-import { registerMenu, type MenuDefinition } from "../../../src/api/ui";
-import { CoreCommands } from "../../../src/api/commands";
+import type { ExtensionModule, ExtensionContext } from "@api/contract";
+import { registerMenu, type MenuDefinition } from "@api/ui";
+import { CoreCommands } from "@api/commands";
 import { registerFormatMenu } from "./FormatMenu";
 
 // ============================================================================

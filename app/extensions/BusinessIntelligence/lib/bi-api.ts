@@ -17,7 +17,7 @@ import {
   biRefreshConnection as apiRefreshConnection,
   biGetModelInfo as apiGetModelInfo,
   biGetRegionAtCell as apiGetRegionAtCell,
-} from "../../../src/api/backend";
+} from "@api/backend";
 
 import type {
   ConnectionInfo,

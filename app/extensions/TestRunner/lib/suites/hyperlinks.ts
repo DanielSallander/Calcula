@@ -12,7 +12,7 @@ import {
   hasHyperlink,
   getAllHyperlinks,
   clearHyperlinksInRange,
-} from "../../../../src/api/backend";
+} from "@api/backend";
 
 const A = AREA_HYPERLINKS;
 

@@ -3,11 +3,11 @@
 // CONTEXT: Shows password field and permission checkboxes, calls protectSheet() on confirm.
 
 import React, { useState } from "react";
-import type { DialogProps, SheetProtectionOptions } from "../../../src/api";
+import type { DialogProps, SheetProtectionOptions } from "@api";
 import {
   protectSheet,
   DEFAULT_PROTECTION_OPTIONS,
-} from "../../../src/api";
+} from "@api";
 import { refreshProtectionState } from "../lib/protectionStore";
 
 // ============================================================================

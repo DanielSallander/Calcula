@@ -2,7 +2,7 @@
 // PURPOSE: Modifies sheet tab context menu items when workbook is protected.
 // CONTEXT: Disables Insert/Delete/Rename/Move sheet operations when workbook structure is locked.
 
-import { sheetExtensions, showDialog } from "../../../src/api";
+import { sheetExtensions, showDialog } from "@api";
 import { isCurrentWorkbookProtected } from "../lib/protectionStore";
 
 const PROTECTION_WARNING_DIALOG_ID = "protection-warning";

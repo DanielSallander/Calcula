@@ -12,13 +12,13 @@ import {
   removeGridRegionsByType,
   requestOverlayRedraw,
   markSheetDirty,
-} from "../../../src/api";
+} from "@api";
 
 import type {
   ConditionalFormatDefinition,
   CellConditionalFormat,
   GridRegion,
-} from "../../../src/api";
+} from "@api";
 
 import type { CFState } from "../types";
 import { CFEvents } from "./cfEvents";

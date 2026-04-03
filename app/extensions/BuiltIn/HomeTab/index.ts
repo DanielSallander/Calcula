@@ -2,9 +2,9 @@
 // PURPOSE: Home tab extension - always-visible ribbon tab with quick-access formatting.
 // CONTEXT: Replaces the empty ribbon placeholder with a customizable Home tab.
 
-import type { ExtensionModule, ExtensionContext } from "../../../src/api/contract";
-import { ExtensionRegistry } from "../../../src/api/extensions";
-import { DialogExtensions } from "../../../src/api/ui";
+import type { ExtensionModule, ExtensionContext } from "@api/contract";
+import { ExtensionRegistry } from "@api/extensions";
+import { DialogExtensions } from "@api/ui";
 import { HomeTabComponent } from "./components/HomeTabComponent";
 import { HomeTabCustomizeDialog } from "./components/HomeTabCustomizeDialog";
 

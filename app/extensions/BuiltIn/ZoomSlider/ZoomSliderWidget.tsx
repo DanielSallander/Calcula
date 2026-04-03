@@ -12,7 +12,7 @@ import {
   ZOOM_MIN,
   ZOOM_MAX,
   ZOOM_STEP,
-} from "../../../src/api";
+} from "@api";
 import { ZoomPresetMenu } from "./ZoomPresetMenu";
 
 export function ZoomSliderWidget(): React.ReactElement {

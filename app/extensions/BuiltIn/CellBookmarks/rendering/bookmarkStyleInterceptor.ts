@@ -3,7 +3,7 @@
 // CONTEXT: When highlight mode is enabled, applies a subtle background tint
 //          to bookmarked cells. Follows the pattern from styleInterceptors.ts.
 
-import type { StyleInterceptorFn } from "../../../../src/api";
+import type { StyleInterceptorFn } from "@api";
 import { isHighlightEnabled, hasBookmarkAt, getBookmarkAt } from "../lib/bookmarkStore";
 import { BOOKMARK_TINT_COLORS } from "../lib/bookmarkTypes";
 

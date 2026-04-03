@@ -2,7 +2,7 @@
 // PURPOSE: Sugiyama-style layered tree layout algorithm for the execution plan tree.
 
 import { useMemo } from "react";
-import type { EvalPlanNode } from "../../../src/api";
+import type { EvalPlanNode } from "@api";
 import type { LayoutNode } from "../types";
 import {
   NODE_MIN_WIDTH,

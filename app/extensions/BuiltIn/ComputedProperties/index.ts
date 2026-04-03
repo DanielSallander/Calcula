@@ -10,13 +10,13 @@
 import type {
   ExtensionModule,
   ExtensionContext,
-} from "../../../src/api/contract";
-import { DialogExtensions } from "../../../src/api/ui";
+} from "@api/contract";
+import { DialogExtensions } from "@api/ui";
 import {
   gridExtensions,
   GridMenuGroups,
-} from "../../../src/api/extensions";
-import type { GridMenuContext } from "../../../src/api/extensions";
+} from "@api/extensions";
+import type { GridMenuContext } from "@api/extensions";
 import { ComputedPropertiesDialog } from "./ComputedPropertiesDialog";
 
 let isActivated = false;

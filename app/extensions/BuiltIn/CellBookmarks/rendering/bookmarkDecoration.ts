@@ -3,7 +3,7 @@
 // CONTEXT: Draws a small colored circle in the bottom-left corner of bookmarked cells.
 //          Follows the same pattern as Review/rendering/triangleRenderer.ts.
 
-import type { CellDecorationContext } from "../../../../src/api";
+import type { CellDecorationContext } from "@api";
 import { hasBookmarkAt, getBookmarkAt } from "../lib/bookmarkStore";
 import { BOOKMARK_DOT_COLORS } from "../lib/bookmarkTypes";
 

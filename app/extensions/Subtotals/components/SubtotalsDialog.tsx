@@ -3,12 +3,12 @@
 // CONTEXT: User selects: group-by column, function, and target columns for subtotaling.
 
 import React, { useState, useEffect, useCallback } from "react";
-import type { DialogProps } from "../../../src/api/uiTypes";
+import type { DialogProps } from "@api/uiTypes";
 import {
   indexToCol,
   colToIndex,
   restoreFocusToGrid,
-} from "../../../src/api";
+} from "@api";
 import { SUBTOTAL_FUNCTIONS } from "../types";
 import type { SubtotalFunction, SubtotalConfig } from "../types";
 import { applySubtotals } from "../lib/subtotalEngine";

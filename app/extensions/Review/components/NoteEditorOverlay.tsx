@@ -3,7 +3,7 @@
 // CONTEXT: Opens when user creates/edits a note. Supports content editing and resizing.
 
 import React, { useEffect, useRef, useState, useCallback } from "react";
-import type { OverlayProps } from "../../../src/api";
+import type { OverlayProps } from "@api";
 import {
   updateNote,
   getNote,
@@ -12,7 +12,7 @@ import {
   emitAppEvent,
   AppEvents,
   restoreFocusToGrid,
-} from "../../../src/api";
+} from "@api";
 import { refreshAnnotationState } from "../lib/annotationStore";
 
 // ============================================================================

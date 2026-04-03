@@ -6,7 +6,7 @@ import type {
   DataValidationAlertStyle,
   DataValidation,
   ValidationRange,
-} from "../../src/api";
+} from "@api";
 
 /** Cached state for the Data Validation extension. */
 export interface ValidationState {

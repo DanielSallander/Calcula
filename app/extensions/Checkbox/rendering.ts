@@ -3,7 +3,7 @@
 // CONTEXT: Registered as a cell decoration. Draws checkbox graphics
 //          for cells whose style has checkbox=true.
 
-import type { CellDecorationContext } from "../../src/api/cellDecorations";
+import type { CellDecorationContext } from "@api/cellDecorations";
 
 // ============================================================================
 // Checkbox Drawing

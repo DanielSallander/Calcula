@@ -2,10 +2,8 @@
 // PURPOSE: Solver extension entry point.
 // CONTEXT: Registers the Solver dialog and Data menu item.
 
-import {
-  DialogExtensions,
-  ExtensionRegistry,
-} from "../../src/api";
+import type { ExtensionModule, ExtensionContext } from "@api/contract";
+import { ExtensionRegistry } from "@api";
 import { SolverDialog } from "./components/SolverDialog";
 import { SolverResultDialog } from "./components/SolverResultDialog";
 import {
@@ -20,27 +18,27 @@ import {
 const cleanupFns: (() => void)[] = [];
 
 // ============================================================================
-// Registration
+// Lifecycle
 // ============================================================================
 
-export function registerSolverExtension(): void {
-  console.log("[Solver] Registering...");
+function activate(context: ExtensionContext): void {
+  console.log("[Solver] Activating...");
 
-  DialogExtensions.registerDialog({
+  context.ui.dialogs.register({
     id: "solver",
     component: SolverDialog,
     priority: 100,
   });
-  cleanupFns.push(() => DialogExtensions.unregisterDialog("solver"));
+  cleanupFns.push(() => context.ui.dialogs.unregister("solver"));
 
-  DialogExtensions.registerDialog({
+  context.ui.dialogs.register({
     id: "solver-result",
     component: SolverResultDialog,
     priority: 100,
   });
-  cleanupFns.push(() => DialogExtensions.unregisterDialog("solver-result"));
+  cleanupFns.push(() => context.ui.dialogs.unregister("solver-result"));
 
-  registerSolverMenuItems();
+  registerSolverMenuItems(context);
 
   const unsubSelection = ExtensionRegistry.onSelectionChange((sel) => {
     setCurrentSelection(
@@ -51,18 +49,31 @@ export function registerSolverExtension(): void {
   });
   cleanupFns.push(unsubSelection);
 
-  console.log("[Solver] Registered successfully.");
+  console.log("[Solver] Activated successfully.");
 }
 
-// ============================================================================
-// Unregistration
-// ============================================================================
-
-export function unregisterSolverExtension(): void {
-  console.log("[Solver] Unregistering...");
+function deactivate(): void {
+  console.log("[Solver] Deactivating...");
   for (const fn of cleanupFns) {
     try { fn(); } catch (err) { console.error("[Solver] Cleanup error:", err); }
   }
   cleanupFns.length = 0;
-  console.log("[Solver] Unregistered.");
+  console.log("[Solver] Deactivated.");
 }
+
+// ============================================================================
+// Extension Module Export
+// ============================================================================
+
+const extension: ExtensionModule = {
+  manifest: {
+    id: "calcula.solver",
+    name: "Solver",
+    version: "1.0.0",
+    description: "Optimization solver for finding optimal cell values subject to constraints.",
+  },
+  activate,
+  deactivate,
+};
+
+export default extension;

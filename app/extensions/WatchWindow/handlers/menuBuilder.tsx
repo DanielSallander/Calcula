@@ -8,8 +8,8 @@ import {
   showDialog,
   gridExtensions,
   GridMenuGroups,
-} from "../../../src/api";
-import type { GridMenuContext } from "../../../src/api";
+} from "@api";
+import type { GridMenuContext } from "@api";
 import { addWatch, removeWatch, refreshWatches, getItems } from "../lib/watchStore";
 
 const DIALOG_ID = "watch-window";

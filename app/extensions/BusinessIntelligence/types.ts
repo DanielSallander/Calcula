@@ -19,4 +19,4 @@ export type {
   BiRegionInfo,
   BiConnectRequest,
   BiBindRequest,
-} from "../../src/api/backend";
+} from "@api/backend";

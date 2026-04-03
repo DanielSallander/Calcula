@@ -13,8 +13,8 @@ import {
   colToIndex,
   setAdvancedFilterHiddenRows,
   clearAdvancedFilterHiddenRows,
-} from "../../../src/api";
-import type { CellData } from "../../../src/api";
+} from "@api";
+import type { CellData } from "@api";
 import type {
   AdvancedFilterParams,
   AdvancedFilterResult,

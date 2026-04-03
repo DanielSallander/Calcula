@@ -19,8 +19,8 @@ import {
   // Events and utilities
   cellEvents,
   columnToLetter,
-} from "../../../src/api";
-import type { DialogProps } from "../../../src/api/uiTypes";
+} from "@api";
+import type { DialogProps } from "@api/uiTypes";
 // Extension-local state management
 import { useFindStore } from "./useFindStore";
 import * as S from "./FindReplaceDialog.styles";

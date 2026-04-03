@@ -4,14 +4,14 @@
 //          Lists all cross-sheet references; user selects one and clicks OK to navigate.
 
 import React, { useState } from "react";
-import type { DialogProps } from "../../../src/api/uiTypes";
+import type { DialogProps } from "@api/uiTypes";
 import {
   setActiveSheet,
   scrollToCell,
   setSelection,
   columnToLetter,
   DialogExtensions,
-} from "../../../src/api";
+} from "@api";
 
 // ============================================================================
 // Styles

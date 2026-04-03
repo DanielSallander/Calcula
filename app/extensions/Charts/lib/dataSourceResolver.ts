@@ -7,8 +7,8 @@
 import {
   getNamedRange,
   getSheets,
-} from "../../../src/api";
-import { getViewportCells } from "../../../src/api/lib";
+} from "@api";
+import { getViewportCells } from "@api/lib";
 import type { ChartSpec, DataSource, DataRangeRef } from "../types";
 import { isDataRangeRef, isPivotDataSource } from "../types";
 

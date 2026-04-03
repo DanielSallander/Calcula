@@ -3,7 +3,7 @@
 // CONTEXT: Configures the error alert shown when invalid data is entered.
 
 import React from "react";
-import type { DataValidationAlertStyle } from "../../../../src/api";
+import type { DataValidationAlertStyle } from "@api";
 
 // ============================================================================
 // Styles

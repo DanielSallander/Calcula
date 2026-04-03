@@ -2,7 +2,7 @@
 // PURPOSE: Utility functions for building and parsing LAMBDA-based named ranges.
 // CONTEXT: Used by NewFunctionDialog to wrap/unwrap LAMBDA formulas.
 
-import type { NamedRange } from "../../../src/api/lib";
+import type { NamedRange } from "@api/lib";
 
 /**
  * Reserved folder name for custom functions.

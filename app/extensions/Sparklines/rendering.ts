@@ -4,7 +4,7 @@
 //          sparklines for cells that have sparkline definitions.
 //          Data is fetched asynchronously and cached per group.
 
-import type { CellDecorationContext } from "../../src/api/cellDecorations";
+import type { CellDecorationContext } from "@api/cellDecorations";
 import {
   getSparklineForCell,
   getCachedGroupData,

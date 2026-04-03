@@ -3,8 +3,8 @@
 // CONTEXT: Shows built-in lists (read-only) and user-defined lists (editable).
 
 import React, { useState, useEffect, useCallback, useRef } from "react";
-import type { DialogProps } from "../../../src/api/uiTypes";
-import { FillListRegistry, type FillList } from "../../../src/api";
+import type { DialogProps } from "@api/uiTypes";
+import { FillListRegistry, type FillList } from "@api";
 
 // ============================================================================
 // Styles

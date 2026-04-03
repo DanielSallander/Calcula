@@ -7,7 +7,7 @@
 
 import type { TestSuite } from "../types";
 import { expectCellValue, expectCellEmpty } from "../assertions";
-import { CoreCommands } from "../../../../src/api/commands";
+import { CoreCommands } from "@api/commands";
 import { TEST_AREA } from "../testArea";
 
 export const clipboardSuite: TestSuite = {

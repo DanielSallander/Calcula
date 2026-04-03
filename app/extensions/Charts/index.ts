@@ -4,19 +4,17 @@
 //          Charts are free-floating overlays that can be moved and resized.
 //          Handles mousemove for tooltips and deferred clicks for hierarchical selection.
 
+import type { ExtensionModule, ExtensionContext } from "@api/contract";
 import {
   ExtensionRegistry,
-  DialogExtensions,
-  onAppEvent,
   AppEvents,
-} from "../../src/api";
-import { getActiveSheet } from "../../src/api/lib";
+} from "@api";
+import { getActiveSheet } from "@api/lib";
 import {
-  registerGridOverlay,
   removeGridRegionsByType,
   type OverlayRenderContext,
-} from "../../src/api/gridOverlays";
-import { emitAppEvent } from "../../src/api/events";
+} from "@api/gridOverlays";
+import { emitAppEvent } from "@api/events";
 
 import {
   ChartManifest,
@@ -66,7 +64,7 @@ import type { PivotChartFieldButton } from "./types";
 import { PivotEvents } from "../Pivot/lib/pivotEvents";
 
 // ============================================================================
-// Extension Lifecycle
+// Module State
 // ============================================================================
 
 let cleanupFunctions: Array<() => void> = [];
@@ -81,22 +79,22 @@ let lastCanvasY = 0;
 /** requestAnimationFrame guard for throttling mousemove redraws. */
 let rafPending = false;
 
-/**
- * Register the chart extension.
- * Call this during application initialization.
- */
-export function registerChartExtension(): void {
+// ============================================================================
+// Activation
+// ============================================================================
+
+function activate(context: ExtensionContext): void {
   console.log("[Chart Extension] Registering...");
 
   // Register add-in manifest
   ExtensionRegistry.registerAddIn(ChartManifest);
 
   // Register dialog
-  DialogExtensions.registerDialog(ChartDialogDefinition);
+  context.ui.dialogs.register(ChartDialogDefinition);
 
   // Register grid overlay renderer for charts
   cleanupFunctions.push(
-    registerGridOverlay({
+    context.grid.overlays.register({
       type: "chart",
       render: (ctx: OverlayRenderContext) => {
         renderChart(ctx);
@@ -121,14 +119,14 @@ export function registerChartExtension(): void {
 
   // Listen for data changes to invalidate chart caches
   cleanupFunctions.push(
-    onAppEvent(AppEvents.CELLS_UPDATED, () => {
+    context.events.on(AppEvents.CELLS_UPDATED, () => {
       // For simplicity, invalidate all chart caches when any cell changes.
       // A future optimization could check if changed cells overlap chart data ranges.
       const charts = getAllCharts();
       if (charts.length > 0) {
         invalidateAllChartCaches();
         resetSubSelection();
-        emitAppEvent(AppEvents.GRID_REFRESH);
+        context.events.emit(AppEvents.GRID_REFRESH);
       }
     }),
   );
@@ -142,7 +140,7 @@ export function registerChartExtension(): void {
         invalidateChartCache(chart.chartId);
       }
       resetSubSelection();
-      emitAppEvent(AppEvents.GRID_REFRESH);
+      context.events.emit(AppEvents.GRID_REFRESH);
     }
   };
   window.addEventListener("pivot:refresh", handlePivotChanged);
@@ -151,7 +149,7 @@ export function registerChartExtension(): void {
   });
 
   cleanupFunctions.push(
-    onAppEvent(PivotEvents.PIVOT_REGIONS_UPDATED, handlePivotChanged),
+    context.events.on(PivotEvents.PIVOT_REGIONS_UPDATED, handlePivotChanged),
   );
 
   // -----------------------------------------------------------------------
@@ -186,7 +184,7 @@ export function registerChartExtension(): void {
         }
       }
     }
-    emitAppEvent(AppEvents.GRID_REFRESH);
+    context.events.emit(AppEvents.GRID_REFRESH);
   };
   window.addEventListener("floatingObject:selected", handleFloatingSelected);
   cleanupFunctions.push(() => {
@@ -203,7 +201,7 @@ export function registerChartExtension(): void {
       clearPendingClick();
       moveChart(chartId, detail.x, detail.y);
       syncChartRegions();
-      emitAppEvent(AppEvents.GRID_REFRESH);
+      context.events.emit(AppEvents.GRID_REFRESH);
     }
   };
   window.addEventListener("floatingObject:movePreview", handleMovePreview);
@@ -222,7 +220,7 @@ export function registerChartExtension(): void {
       moveChart(chartId, detail.x, detail.y);
       syncChartRegions();
       invalidateChartCache(chartId);
-      emitAppEvent(AppEvents.GRID_REFRESH);
+      context.events.emit(AppEvents.GRID_REFRESH);
     }
   };
   window.addEventListener("floatingObject:moveComplete", handleMoveComplete);
@@ -241,7 +239,7 @@ export function registerChartExtension(): void {
     if (chartId != null) {
       resizeChart(chartId, detail.x, detail.y, detail.width, detail.height);
       syncChartRegions();
-      emitAppEvent(AppEvents.GRID_REFRESH);
+      context.events.emit(AppEvents.GRID_REFRESH);
     }
   };
   window.addEventListener("floatingObject:resizePreview", handleResizePreview);
@@ -258,7 +256,7 @@ export function registerChartExtension(): void {
       resizeChart(chartId, detail.x, detail.y, detail.width, detail.height);
       syncChartRegions();
       invalidateChartCache(chartId);
-      emitAppEvent(AppEvents.GRID_REFRESH);
+      context.events.emit(AppEvents.GRID_REFRESH);
     }
   };
   window.addEventListener("floatingObject:resizeComplete", handleResizeComplete);
@@ -349,7 +347,7 @@ export function registerChartExtension(): void {
 
     const hitResult = hitTestBarChart(local.localX, local.localY, cachedData.barRects, cachedData.layout);
     advanceSelection(click.chartId, hitResult);
-    emitAppEvent(AppEvents.GRID_REFRESH);
+    context.events.emit(AppEvents.GRID_REFRESH);
   };
   window.addEventListener("mouseup", handleMouseUp);
   cleanupFunctions.push(() => {
@@ -364,17 +362,17 @@ export function registerChartExtension(): void {
   getActiveSheet().then((idx) => {
     setActiveSheetIndex(idx);
     syncChartRegions();
-    emitAppEvent(AppEvents.GRID_REFRESH);
+    context.events.emit(AppEvents.GRID_REFRESH);
   }).catch(() => {});
 
   cleanupFunctions.push(
-    onAppEvent(AppEvents.SHEET_CHANGED, async () => {
+    context.events.on(AppEvents.SHEET_CHANGED, async () => {
       try {
         const idx = await getActiveSheet();
         setActiveSheetIndex(idx);
         deselectChart();
         syncChartRegions();
-        emitAppEvent(AppEvents.GRID_REFRESH);
+        context.events.emit(AppEvents.GRID_REFRESH);
       } catch {
         // Ignore
       }
@@ -408,7 +406,7 @@ export function registerChartExtension(): void {
     removeChartFromCache(chartId);
     syncChartRegions();
     window.dispatchEvent(new CustomEvent(ChartEvents.CHART_DELETED));
-    emitAppEvent(AppEvents.GRID_REFRESH);
+    context.events.emit(AppEvents.GRID_REFRESH);
   };
   document.addEventListener("keydown", handleDeleteKey, true); // capture phase
   cleanupFunctions.push(() => document.removeEventListener("keydown", handleDeleteKey, true));
@@ -416,11 +414,11 @@ export function registerChartExtension(): void {
   console.log("[Chart Extension] Registered successfully");
 }
 
-/**
- * Unregister the chart extension.
- * Call this during application shutdown or hot reload.
- */
-export function unregisterChartExtension(): void {
+// ============================================================================
+// Deactivation
+// ============================================================================
+
+function deactivate(): void {
   console.log("[Chart Extension] Unregistering...");
 
   // Cleanup event listeners
@@ -437,7 +435,6 @@ export function unregisterChartExtension(): void {
 
   // Unregister from extension registries
   ExtensionRegistry.unregisterAddIn(ChartManifest.id);
-  DialogExtensions.unregisterDialog(CHART_DIALOG_ID);
 
   console.log("[Chart Extension] Unregistered successfully");
 }
@@ -514,6 +511,23 @@ function handlePivotFieldButtonClick(
     });
   }
 }
+
+// ============================================================================
+// Extension Module Export
+// ============================================================================
+
+const extension: ExtensionModule = {
+  manifest: {
+    id: "calcula.charts",
+    name: "Charts",
+    version: "1.0.0",
+    description: "Free-floating chart overlays with interactive selection and tooltips.",
+  },
+  activate,
+  deactivate,
+};
+
+export default extension;
 
 // Re-export for convenience
 export { CHART_DIALOG_ID };

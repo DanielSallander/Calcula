@@ -4,18 +4,18 @@
 
 import React, { useState, useEffect, useCallback, useRef, useMemo } from "react";
 import { css } from "@emotion/css";
-import { useGridState, cellEvents } from "../../../../src/api";
-import { CommandRegistry, CoreCommands } from "../../../../src/api/commands";
-import { DialogExtensions } from "../../../../src/api/ui";
+import { useGridState, cellEvents } from "@api";
+import { CommandRegistry, CoreCommands } from "@api/commands";
+import { DialogExtensions } from "@api/ui";
 import {
   getCell,
   getStyle,
   applyFormatting,
   setCellRichText,
-} from "../../../../src/api/lib";
-import type { RichTextRun, CellData } from "../../../../src/api/types";
-import type { RibbonContext } from "../../../../src/api/extensions";
-import type { StyleData } from "../../../../src/api/types";
+} from "@api/lib";
+import type { RichTextRun, CellData } from "@api/types";
+import type { RibbonContext } from "@api/extensions";
+import type { StyleData } from "@api/types";
 import {
   loadLayout,
   ITEMS_BY_ID,
@@ -24,7 +24,7 @@ import {
 } from "../homeTabConfig";
 import { CellStylesGallery } from "./CellStylesGallery";
 import type { CellStyleDefinition } from "./CellStylesGallery";
-import { useRibbonCollapse, RibbonGroup } from "../../../../src/api/ribbonCollapse";
+import { useRibbonCollapse, RibbonGroup } from "@api/ribbonCollapse";
 
 // ============================================================================
 // Styles

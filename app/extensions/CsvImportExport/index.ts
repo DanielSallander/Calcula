@@ -3,7 +3,8 @@
 // CONTEXT: Registers import/export dialogs and Data menu items.
 //          Called from extensions/index.ts during app initialization.
 
-import { DialogExtensions } from "../../src/api";
+import type { ExtensionModule, ExtensionContext } from "@api/contract";
+import { DialogExtensions } from "@api";
 import { CsvImportDialog } from "./components/CsvImportDialog";
 import { CsvExportDialog } from "./components/CsvExportDialog";
 import { registerCsvMenuItems } from "./handlers/dataMenuBuilder";
@@ -15,11 +16,11 @@ import { registerCsvMenuItems } from "./handlers/dataMenuBuilder";
 const cleanupFns: (() => void)[] = [];
 
 // ============================================================================
-// Registration
+// Lifecycle
 // ============================================================================
 
-export function registerCsvImportExportExtension(): void {
-  console.log("[CsvImportExport] Registering...");
+function activate(_context: ExtensionContext): void {
+  console.log("[CsvImportExport] Activating...");
 
   // 1. Register dialogs
   DialogExtensions.registerDialog({
@@ -39,15 +40,11 @@ export function registerCsvImportExportExtension(): void {
   // 2. Register menu items in Data menu
   registerCsvMenuItems();
 
-  console.log("[CsvImportExport] Registered successfully.");
+  console.log("[CsvImportExport] Activated successfully.");
 }
 
-// ============================================================================
-// Unregistration
-// ============================================================================
-
-export function unregisterCsvImportExportExtension(): void {
-  console.log("[CsvImportExport] Unregistering...");
+function deactivate(): void {
+  console.log("[CsvImportExport] Deactivating...");
 
   for (const fn of cleanupFns) {
     try {
@@ -58,5 +55,21 @@ export function unregisterCsvImportExportExtension(): void {
   }
   cleanupFns.length = 0;
 
-  console.log("[CsvImportExport] Unregistered.");
+  console.log("[CsvImportExport] Deactivated.");
 }
+
+// ============================================================================
+// Extension Module
+// ============================================================================
+
+const extension: ExtensionModule = {
+  manifest: {
+    id: "calcula.csv-import-export",
+    name: "CSV Import/Export",
+    version: "1.0.0",
+    description: "Import and export data in CSV format.",
+  },
+  activate,
+  deactivate,
+};
+export default extension;

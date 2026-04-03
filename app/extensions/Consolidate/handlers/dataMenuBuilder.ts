@@ -1,8 +1,8 @@
 //! FILENAME: app/extensions/Consolidate/handlers/dataMenuBuilder.ts
 // PURPOSE: Registers the "Consolidate..." item in the Data menu.
-// CONTEXT: Uses registerMenuItem to append to the existing "data" menu.
+// CONTEXT: Uses context.ui.menus.registerItem to append to the existing "data" menu.
 
-import { registerMenuItem, DialogExtensions } from "../../../src/api";
+import type { ExtensionContext } from "@api/contract";
 
 // ============================================================================
 // State
@@ -30,19 +30,19 @@ export function setCurrentSelection(
  * Register the "Consolidate..." item in the Data menu.
  * Assumes the "data" menu was already created by AutoFilter.
  */
-export function registerConsolidateMenuItem(): void {
-  registerMenuItem("data", {
+export function registerConsolidateMenuItem(context: ExtensionContext): void {
+  context.ui.menus.registerItem("data", {
     id: "data:consolidate:separator",
     label: "",
     separator: true,
   });
 
-  registerMenuItem("data", {
+  context.ui.menus.registerItem("data", {
     id: "data:consolidate",
     label: "Consolidate...",
     action: () => {
       const sel = currentSelection;
-      DialogExtensions.openDialog("consolidate", {
+      context.ui.dialogs.show("consolidate", {
         activeRow: sel?.activeRow ?? 0,
         activeCol: sel?.activeCol ?? 0,
       });

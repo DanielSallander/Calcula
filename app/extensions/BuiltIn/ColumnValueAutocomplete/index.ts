@@ -3,16 +3,16 @@
 // CONTEXT: When typing in a cell (non-formula), suggests matching values from
 // the same column. Similar to Excel's AutoComplete feature.
 
-import type { ExtensionModule } from "../../../src/api/contract";
-import { OverlayExtensions } from "../../../src/api/ui";
-import { onAppEvent, AppEvents } from "../../../src/api/events";
-import { AutocompleteEvents } from "../../../src/api/formulaAutocomplete";
-import type { AutocompleteInputPayload } from "../../../src/api/formulaAutocomplete";
+import type { ExtensionModule } from "@api/contract";
+import { OverlayExtensions } from "@api/ui";
+import { onAppEvent, AppEvents } from "@api/events";
+import { AutocompleteEvents } from "@api/formulaAutocomplete";
+import type { AutocompleteInputPayload } from "@api/formulaAutocomplete";
 import {
   setColumnAutocompleteVisible,
   ColumnAutocompleteEvents,
-} from "../../../src/api/columnAutocomplete";
-import type { AutocompleteKeyPayload } from "../../../src/api/formulaAutocomplete";
+} from "@api/columnAutocomplete";
+import type { AutocompleteKeyPayload } from "@api/formulaAutocomplete";
 import { ColumnAutocompleteOverlay } from "./ColumnAutocompleteOverlay";
 import {
   useColumnAutocompleteStore,

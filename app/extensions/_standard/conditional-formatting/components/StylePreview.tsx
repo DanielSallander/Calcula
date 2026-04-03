@@ -3,7 +3,7 @@
 // CONTEXT: Shows a sample of how the formatting will look
 
 import React from "react";
-import type { IStyleOverride } from "../../../../src/api/styleInterceptors";
+import type { IStyleOverride } from "@api/styleInterceptors";
 
 // ============================================================================
 // Props

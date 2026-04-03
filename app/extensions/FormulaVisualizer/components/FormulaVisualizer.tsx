@@ -3,9 +3,9 @@
 // CONTEXT: Loads the evaluation plan from backend, wires all sub-components.
 
 import React, { useState, useEffect, useCallback, useRef } from "react";
-import type { DialogProps } from "../../../src/api/uiTypes";
-import type { FormulaEvalPlan } from "../../../src/api";
-import { getFormulaEvalPlan } from "../../../src/api";
+import type { DialogProps } from "@api/uiTypes";
+import type { FormulaEvalPlan } from "@api";
+import { getFormulaEvalPlan } from "@api";
 import { FormulaReductionStrip } from "./FormulaReductionStrip";
 import { PlaybackControls } from "./PlaybackControls";
 import { ExecutionPlanTree } from "./ExecutionPlanTree";

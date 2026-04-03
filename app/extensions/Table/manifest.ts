@@ -6,7 +6,7 @@ import type {
   AddInManifest,
   DialogDefinition,
   DialogProps,
-} from "../../src/api";
+} from "@api";
 import React from "react";
 import { CreateTableDialog } from "./components/CreateTableDialog";
 import { RemoveDuplicatesDialog } from "./components/RemoveDuplicatesDialog";

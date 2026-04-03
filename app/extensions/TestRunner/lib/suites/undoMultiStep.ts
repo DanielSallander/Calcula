@@ -18,7 +18,7 @@ import {
   createWholeNumberRule,
   DEFAULT_ERROR_ALERT,
   DEFAULT_PROMPT,
-} from "../../../../src/api";
+} from "@api";
 
 const A = AREA_UNDO_MULTISTEP;
 

@@ -9,7 +9,7 @@ import {
   type OverlayRenderContext,
   type OverlayHitTestContext,
   type OverlayCursorFn,
-} from "../../../src/api/gridOverlays";
+} from "@api/gridOverlays";
 import { getSlicerById, getCachedItems } from "../lib/slicerStore";
 import { isSlicerSelected } from "../handlers/selectionHandler";
 import { SLICER_STYLES_BY_ID } from "../components/SlicerStylesGallery";

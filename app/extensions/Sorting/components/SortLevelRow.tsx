@@ -4,7 +4,7 @@
 
 import React, { useEffect, useState, useCallback } from "react";
 import type { SortLevel } from "../types";
-import type { SortOn } from "../../../src/api/lib";
+import type { SortOn } from "@api/lib";
 import { useSortStore } from "../hooks/useSortState";
 import { getUniqueColorsInColumn } from "../lib/sortHelpers";
 import * as S from "./SortDialog.styles";

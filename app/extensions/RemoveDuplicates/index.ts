@@ -1,12 +1,10 @@
 //! FILENAME: app/extensions/RemoveDuplicates/index.ts
 // PURPOSE: Remove Duplicates extension entry point.
 // CONTEXT: Registers the dialog and Data menu item.
-//          Called from extensions/index.ts during app initialization.
+//          Uses ExtensionModule lifecycle (Path A).
 
-import {
-  DialogExtensions,
-  ExtensionRegistry,
-} from "../../src/api";
+import type { ExtensionModule, ExtensionContext } from "@api/contract";
+import { ExtensionRegistry } from "@api";
 import { RemoveDuplicatesDialog } from "./components/RemoveDuplicatesDialog";
 import {
   registerRemoveDuplicatesMenuItem,
@@ -20,22 +18,22 @@ import {
 const cleanupFns: (() => void)[] = [];
 
 // ============================================================================
-// Registration
+// Activation
 // ============================================================================
 
-export function registerRemoveDuplicatesExtension(): void {
-  console.log("[RemoveDuplicates] Registering...");
+function activate(context: ExtensionContext): void {
+  console.log("[RemoveDuplicates] Activating...");
 
   // 1. Register dialog
-  DialogExtensions.registerDialog({
+  context.ui.dialogs.register({
     id: "remove-duplicates",
     component: RemoveDuplicatesDialog,
     priority: 100,
   });
-  cleanupFns.push(() => DialogExtensions.unregisterDialog("remove-duplicates"));
+  cleanupFns.push(() => context.ui.dialogs.unregister("remove-duplicates"));
 
   // 2. Register menu item in Data menu
-  registerRemoveDuplicatesMenuItem();
+  registerRemoveDuplicatesMenuItem(context);
 
   // 3. Track current selection (for menu item to know active cell)
   const unsubSelection = ExtensionRegistry.onSelectionChange((sel) => {
@@ -54,15 +52,15 @@ export function registerRemoveDuplicatesExtension(): void {
   });
   cleanupFns.push(unsubSelection);
 
-  console.log("[RemoveDuplicates] Registered successfully.");
+  console.log("[RemoveDuplicates] Activated successfully.");
 }
 
 // ============================================================================
-// Unregistration
+// Deactivation
 // ============================================================================
 
-export function unregisterRemoveDuplicatesExtension(): void {
-  console.log("[RemoveDuplicates] Unregistering...");
+function deactivate(): void {
+  console.log("[RemoveDuplicates] Deactivating...");
 
   for (const fn of cleanupFns) {
     try {
@@ -73,5 +71,22 @@ export function unregisterRemoveDuplicatesExtension(): void {
   }
   cleanupFns.length = 0;
 
-  console.log("[RemoveDuplicates] Unregistered.");
+  console.log("[RemoveDuplicates] Deactivated.");
 }
+
+// ============================================================================
+// Extension Module Export
+// ============================================================================
+
+const extension: ExtensionModule = {
+  manifest: {
+    id: "calcula.remove-duplicates",
+    name: "Remove Duplicates",
+    version: "1.0.0",
+    description: "Remove duplicate rows from a data range.",
+  },
+  activate,
+  deactivate,
+};
+
+export default extension;

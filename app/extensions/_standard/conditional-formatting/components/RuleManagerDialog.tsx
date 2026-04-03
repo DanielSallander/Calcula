@@ -14,7 +14,7 @@ import {
 } from "../index";
 import type { ConditionalRule, RuleCondition } from "../types";
 import { PRESET_STYLES, COMPARISON_OPERATOR_LABELS, TEXT_OPERATOR_LABELS } from "../types";
-import type { IStyleOverride } from "../../../../src/api/styleInterceptors";
+import type { IStyleOverride } from "@api/styleInterceptors";
 import { RuleEditor } from "./RuleEditor";
 import { StylePreview } from "./StylePreview";
 

@@ -3,8 +3,8 @@
 // CONTEXT: Opens when user creates/edits a threaded comment. Shows thread with replies.
 
 import React, { useEffect, useRef, useState, useCallback } from "react";
-import type { OverlayProps } from "../../../src/api";
-import type { Comment, CommentReply } from "../../../src/api";
+import type { OverlayProps } from "@api";
+import type { Comment, CommentReply } from "@api";
 import {
   getComment,
   updateComment,
@@ -17,7 +17,7 @@ import {
   AppEvents,
   restoreFocusToGrid,
   DEFAULT_COMMENT_AUTHOR,
-} from "../../../src/api";
+} from "@api";
 import { refreshAnnotationState } from "../lib/annotationStore";
 
 // ============================================================================

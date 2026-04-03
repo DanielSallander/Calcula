@@ -3,7 +3,7 @@
 // CONTEXT: Opened from Formulas > Name Manager menu item.
 
 import React, { useState, useEffect, useCallback, useRef } from "react";
-import type { DialogProps } from "../../../src/api/uiTypes";
+import type { DialogProps } from "@api/uiTypes";
 import {
   getAllNamedRanges,
   deleteNamedRange,
@@ -13,8 +13,8 @@ import {
   AppEvents,
   emitAppEvent,
   onAppEvent,
-} from "../../../src/api";
-import type { NamedRange } from "../../../src/api";
+} from "@api";
+import type { NamedRange } from "@api";
 import { formatScope, formatRangeDisplay } from "../lib/nameUtils";
 import { isCustomFunction, formatFunctionSignature } from "../lib/lambdaUtils";
 

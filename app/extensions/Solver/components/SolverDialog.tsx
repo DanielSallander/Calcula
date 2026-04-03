@@ -2,19 +2,19 @@
 // PURPOSE: Solver dialog - configure objective, variables, constraints, and method.
 
 import React, { useState, useEffect, useCallback, useRef } from "react";
-import type { DialogProps } from "../../../src/api/uiTypes";
+import type { DialogProps } from "@api/uiTypes";
 import {
   solverSolve,
   columnToLetter,
   DialogExtensions,
-} from "../../../src/api";
+} from "@api";
 import type {
   SolverObjective,
   SolverMethod,
   ConstraintOperator,
   SolverConstraint,
   SolverVariableCell,
-} from "../../../src/api";
+} from "@api";
 
 // ============================================================================
 // Styles

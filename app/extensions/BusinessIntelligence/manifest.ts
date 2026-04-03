@@ -4,7 +4,7 @@
 import type {
   AddInManifest,
   TaskPaneViewDefinition,
-} from "../../src/api";
+} from "@api";
 import { BiPane } from "./components/BiPane";
 import { ConnectionsPane } from "./components/ConnectionsPane";
 

@@ -2,56 +2,72 @@
 // PURPOSE: Extension entry point for Defined Names / Name Manager feature.
 // CONTEXT: Registers dialogs and menu items for managing named ranges.
 
-import { DialogExtensions } from "../../src/api";
+import type { ExtensionModule, ExtensionContext } from "@api/contract";
 import { NameManagerDialog } from "./components/NameManagerDialog";
 import { NewNameDialog } from "./components/NewNameDialog";
 import { NewFunctionDialog } from "./components/NewFunctionDialog";
 import { registerDefinedNamesMenuItems } from "./handlers/formulasMenuItemBuilder";
 
+// ============================================================================
+// State
+// ============================================================================
+
+let isActivated = false;
 const cleanupFns: (() => void)[] = [];
 
-/**
- * Register the DefinedNames extension.
- */
-export function registerDefinedNamesExtension(): void {
-  console.log("[DefinedNames] Registering extension...");
+// ============================================================================
+// Lifecycle
+// ============================================================================
+
+function activate(context: ExtensionContext): void {
+  if (isActivated) {
+    console.warn("[DefinedNames] Already activated, skipping.");
+    return;
+  }
+
+  console.log("[DefinedNames] Activating...");
 
   // Register the Name Manager dialog
-  DialogExtensions.registerDialog({
+  context.ui.dialogs.register({
     id: "name-manager",
     component: NameManagerDialog,
     priority: 50,
   });
-  cleanupFns.push(() => DialogExtensions.unregisterDialog("name-manager"));
+  cleanupFns.push(() => context.ui.dialogs.unregister("name-manager"));
 
   // Register the New/Edit Name dialog
-  DialogExtensions.registerDialog({
+  context.ui.dialogs.register({
     id: "define-name",
     component: NewNameDialog,
     priority: 51,
   });
-  cleanupFns.push(() => DialogExtensions.unregisterDialog("define-name"));
+  cleanupFns.push(() => context.ui.dialogs.unregister("define-name"));
 
   // Register the New/Edit Function dialog
-  DialogExtensions.registerDialog({
+  context.ui.dialogs.register({
     id: "define-function",
     component: NewFunctionDialog,
     priority: 52,
   });
-  cleanupFns.push(() => DialogExtensions.unregisterDialog("define-function"));
+  cleanupFns.push(() => context.ui.dialogs.unregister("define-function"));
 
   // Register menu items in the Formulas menu
-  const cleanupMenus = registerDefinedNamesMenuItems();
+  const cleanupMenus = registerDefinedNamesMenuItems(context);
   cleanupFns.push(cleanupMenus);
 
-  console.log("[DefinedNames] Extension registered.");
+  isActivated = true;
+  console.log("[DefinedNames] Activated successfully.");
 }
 
-/**
- * Unregister the DefinedNames extension.
- */
-export function unregisterDefinedNamesExtension(): void {
-  console.log("[DefinedNames] Unregistering extension...");
+// ============================================================================
+// Deactivation
+// ============================================================================
+
+function deactivate(): void {
+  if (!isActivated) return;
+
+  console.log("[DefinedNames] Deactivating...");
+
   for (const cleanup of cleanupFns) {
     try {
       cleanup();
@@ -60,5 +76,24 @@ export function unregisterDefinedNamesExtension(): void {
     }
   }
   cleanupFns.length = 0;
-  console.log("[DefinedNames] Extension unregistered.");
+
+  isActivated = false;
+  console.log("[DefinedNames] Deactivated.");
 }
+
+// ============================================================================
+// Extension Module Export
+// ============================================================================
+
+const extension: ExtensionModule = {
+  manifest: {
+    id: "calcula.defined-names",
+    name: "Defined Names",
+    version: "1.0.0",
+    description: "Name Manager for defining, editing, and managing named ranges and custom functions.",
+  },
+  activate,
+  deactivate,
+};
+
+export default extension;

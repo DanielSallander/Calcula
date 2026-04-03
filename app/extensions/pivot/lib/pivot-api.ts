@@ -25,7 +25,7 @@ import {
   getInflightOperation,
   setInflightOperation,
 } from "./pivotViewStore";
-import { requestOverlayRedraw } from "../../../src/api/gridOverlays";
+import { requestOverlayRedraw } from "@api/gridOverlays";
 
 /**
  * Pipeline stages (total = 4):
@@ -97,7 +97,7 @@ import {
   addCalculatedItem as apiAddCalculatedItem,
   removeCalculatedItem as apiRemoveCalculatedItem,
   showReportFilterPages as apiShowReportFilterPages,
-} from "../../../src/api/backend";
+} from "@api/backend";
 
 // ============================================================================
 // Types

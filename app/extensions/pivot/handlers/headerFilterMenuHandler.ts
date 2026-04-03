@@ -2,7 +2,7 @@
 // PURPOSE: Handles pivot:openHeaderFilterMenu events to show the
 //          Row Labels / Column Labels header filter dropdown.
 
-import { OverlayExtensions } from "../../../src/api";
+import { OverlayExtensions } from "@api";
 import { PIVOT_HEADER_FILTER_OVERLAY_ID } from "../manifest";
 
 /**

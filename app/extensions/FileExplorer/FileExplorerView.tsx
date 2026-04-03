@@ -3,7 +3,7 @@
 // CONTEXT: Activity Bar view - displays sheets, tables, named ranges, and virtual files inside .cala
 
 import React, { useCallback, useEffect, useRef, useState } from "react";
-import type { ActivityViewProps } from "../../src/api/uiTypes";
+import type { ActivityViewProps } from "@api/uiTypes";
 import {
   getSheets,
   getAllNamedRanges,
@@ -16,7 +16,7 @@ import {
   type NamedRange,
   onAppEvent,
   AppEvents,
-} from "../../src/api";
+} from "@api";
 import {
   getAllTables,
   listVirtualFiles,
@@ -27,12 +27,12 @@ import {
   renameVirtualFile,
   type Table,
   type VirtualFileEntry,
-} from "../../src/api/backend";
+} from "@api/backend";
 import { FILE_VIEWER_PANE_ID } from "./constants";
 import { getSettings } from "../Settings/SettingsView";
 import { MarkdownView, getViewMode } from "./FileRenderer";
 import { listNotebooks, deleteNotebook as deleteNotebookApi } from "../ScriptNotebook/lib/notebookApi";
-import { openActivityView } from "../../src/api";
+import { openActivityView } from "@api";
 import { useNotebookStore } from "../ScriptNotebook/lib/useNotebookStore";
 import type { NotebookSummary } from "../ScriptNotebook/types";
 

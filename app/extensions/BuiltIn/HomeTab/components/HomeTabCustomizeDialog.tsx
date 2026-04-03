@@ -4,7 +4,7 @@
 
 import React, { useState, useEffect, useCallback, useRef } from "react";
 import { css } from "@emotion/css";
-import type { DialogProps } from "../../../../src/api/uiTypes";
+import type { DialogProps } from "@api/uiTypes";
 import {
   loadLayout,
   saveLayout,

@@ -5,8 +5,8 @@
 import type { TestSuite } from "../types";
 import { assertTrue, assertEqual, expectNotNull } from "../assertions";
 import { AREA_CONSOLIDATION } from "../testArea";
-import { consolidateData } from "../../../../src/api";
-import { getActiveSheet } from "../../../../src/api/lib";
+import { consolidateData } from "@api";
+import { getActiveSheet } from "@api/lib";
 
 const A = AREA_CONSOLIDATION;
 

@@ -4,7 +4,7 @@
 //          columns, etc.) via formulas that reference cell values.
 
 import React, { useState, useEffect, useCallback } from "react";
-import type { DialogProps } from "../../../src/api";
+import type { DialogProps } from "@api";
 import { getSlicerById } from "../lib/slicerStore";
 import {
   getSlicerComputedProperties,
@@ -13,7 +13,7 @@ import {
   updateSlicerComputedProperty,
   removeSlicerComputedProperty,
 } from "../lib/slicer-api";
-import { requestOverlayRedraw } from "../../../src/api/gridOverlays";
+import { requestOverlayRedraw } from "@api/gridOverlays";
 import { broadcastSelectedSlicers } from "../handlers/selectionHandler";
 import { refreshCache } from "../lib/slicerStore";
 import type { SlicerComputedPropertyData } from "../lib/slicerTypes";

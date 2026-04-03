@@ -3,7 +3,7 @@
 // CONTEXT: Bottom section of Activity Bar, provides user preferences panel
 
 import React from "react";
-import { registerActivityView, unregisterActivityView, toggleActivityView } from "../../src/api";
+import type { ExtensionModule, ExtensionContext } from "@api/contract";
 import { SettingsView } from "./SettingsView";
 
 const cleanupFns: Array<() => void> = [];
@@ -28,8 +28,8 @@ const SettingsIcon = React.createElement(
   }),
 );
 
-export function registerSettingsExtension(): void {
-  registerActivityView({
+function activate(context: ExtensionContext): void {
+  context.ui.activityBar.register({
     id: "settings",
     title: "Settings",
     icon: SettingsIcon,
@@ -37,23 +37,36 @@ export function registerSettingsExtension(): void {
     priority: 5,
     bottom: true,
   });
-  cleanupFns.push(() => unregisterActivityView("settings"));
+  cleanupFns.push(() => context.ui.activityBar.unregister("settings"));
 
   // Keyboard shortcut: Ctrl+,
   const handleKeyDown = (e: KeyboardEvent) => {
     if (e.ctrlKey && !e.shiftKey && e.key === ",") {
       e.preventDefault();
-      toggleActivityView("settings");
+      context.ui.activityBar.toggle("settings");
     }
   };
   window.addEventListener("keydown", handleKeyDown, true);
   cleanupFns.push(() => window.removeEventListener("keydown", handleKeyDown, true));
 
-  console.log("[Settings] Extension registered");
+  console.log("[Settings] Extension activated");
 }
 
-export function unregisterSettingsExtension(): void {
+function deactivate(): void {
   cleanupFns.forEach((fn) => fn());
   cleanupFns.length = 0;
-  console.log("[Settings] Extension unregistered");
+  console.log("[Settings] Extension deactivated");
 }
+
+const extension: ExtensionModule = {
+  manifest: {
+    id: "calcula.settings",
+    name: "Settings",
+    version: "1.0.0",
+    description: "User preferences panel in the Activity Bar",
+  },
+  activate,
+  deactivate,
+};
+
+export default extension;

@@ -22,7 +22,7 @@ import {
   convertToRange,
   resolveStructuredReference,
   setCalculatedColumn,
-} from "../../../../src/api/backend";
+} from "@api/backend";
 
 const A = AREA_TABLES;
 

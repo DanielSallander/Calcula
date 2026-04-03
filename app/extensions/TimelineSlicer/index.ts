@@ -3,18 +3,16 @@
 // CONTEXT: Registers all timeline slicer functionality with the extension system:
 //          grid overlays, event handlers, dialogs, contextual ribbon tab.
 
+import type { ExtensionModule, ExtensionContext } from "@api/contract";
 import {
   ExtensionRegistry,
-  DialogExtensions,
-  onAppEvent,
   AppEvents,
-} from "../../src/api";
+} from "@api";
 import {
-  registerGridOverlay,
   requestOverlayRedraw,
   type OverlayRenderContext,
-} from "../../src/api/gridOverlays";
-import { getGridStateSnapshot } from "../../src/api/state";
+} from "@api/gridOverlays";
+import { getGridStateSnapshot } from "@api/state";
 
 import {
   TimelineSlicerManifest,
@@ -81,22 +79,22 @@ let periodDragState: {
 } | null = null;
 
 // ============================================================================
-// Extension Lifecycle
+// Activation
 // ============================================================================
 
-export function registerTimelineSlicerExtension(): void {
+function activate(context: ExtensionContext): void {
   console.log("[TimelineSlicer Extension] Registering...");
 
   // Register add-in manifest
   ExtensionRegistry.registerAddIn(TimelineSlicerManifest);
 
   // Register dialogs
-  DialogExtensions.registerDialog(InsertTimelineDialogDefinition);
-  DialogExtensions.registerDialog(TimelineSettingsDialogDefinition);
+  context.ui.dialogs.register(InsertTimelineDialogDefinition);
+  context.ui.dialogs.register(TimelineSettingsDialogDefinition);
 
   // Register grid overlay renderer
   cleanupFunctions.push(
-    registerGridOverlay({
+    context.grid.overlays.register({
       type: "timeline-slicer",
       render: (ctx: OverlayRenderContext) => {
         renderTimelineSlicer(ctx);
@@ -432,7 +430,7 @@ export function registerTimelineSlicerExtension(): void {
   // -----------------------------------------------------------------------
 
   cleanupFunctions.push(
-    onAppEvent(AppEvents.SHEET_CHANGED, () => {
+    context.events.on(AppEvents.SHEET_CHANGED, () => {
       refreshCache().catch(console.error);
     }),
   );
@@ -483,7 +481,11 @@ export function registerTimelineSlicerExtension(): void {
   console.log("[TimelineSlicer Extension] Registered successfully");
 }
 
-export function unregisterTimelineSlicerExtension(): void {
+// ============================================================================
+// Deactivation
+// ============================================================================
+
+function deactivate(): void {
   console.log("[TimelineSlicer Extension] Unregistering...");
 
   for (const cleanup of cleanupFunctions) {
@@ -499,6 +501,9 @@ export function unregisterTimelineSlicerExtension(): void {
   pendingClick = null;
   dragStartPositions = null;
   periodDragState = null;
+
+  // Unregister from extension registries
+  ExtensionRegistry.unregisterAddIn(TimelineSlicerManifest.id);
 
   console.log("[TimelineSlicer Extension] Unregistered");
 }
@@ -603,3 +608,20 @@ function finishPeriodDrag(): void {
     ).catch(console.error);
   }
 }
+
+// ============================================================================
+// Extension Module Export
+// ============================================================================
+
+const extension: ExtensionModule = {
+  manifest: {
+    id: "calcula.timeline-slicer",
+    name: "Timeline Slicer",
+    version: "1.0.0",
+    description: "Timeline slicer panels for date-based filtering of tables and pivot tables.",
+  },
+  activate,
+  deactivate,
+};
+
+export default extension;

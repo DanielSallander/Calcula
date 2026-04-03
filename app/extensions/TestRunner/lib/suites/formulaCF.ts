@@ -10,8 +10,8 @@ import {
   getAllConditionalFormats,
   clearConditionalFormatsInRange,
   calculateNow,
-} from "../../../../src/api";
-import { evaluateConditionalFormats } from "../../../../src/api/backend";
+} from "@api";
+import { evaluateConditionalFormats } from "@api/backend";
 
 const A = AREA_FORMULA_CF;
 

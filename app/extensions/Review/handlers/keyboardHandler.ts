@@ -12,7 +12,7 @@ import {
   AppEvents,
   DEFAULT_COMMENT_AUTHOR,
   DEFAULT_NOTE_AUTHOR,
-} from "../../../src/api";
+} from "@api";
 import { refreshAnnotationState } from "../lib/annotationStore";
 
 // ============================================================================

@@ -20,7 +20,7 @@ import {
   COMPARISON_OPERATOR_LABELS, 
   TEXT_OPERATOR_LABELS 
 } from "../types";
-import type { IStyleOverride } from "../../../../src/api/styleInterceptors";
+import type { IStyleOverride } from "@api/styleInterceptors";
 import { StylePreview } from "./StylePreview";
 import { ColorPicker } from "./ColorPicker";
 

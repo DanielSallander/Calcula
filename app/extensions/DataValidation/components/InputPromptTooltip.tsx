@@ -3,7 +3,7 @@
 // CONTEXT: Displays the prompt title and message near the active cell.
 
 import React, { useEffect, useRef } from "react";
-import type { OverlayProps } from "../../../src/api";
+import type { OverlayProps } from "@api";
 
 // ============================================================================
 // Styles

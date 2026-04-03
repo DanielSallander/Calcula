@@ -3,11 +3,11 @@
 // CONTEXT: Registers the Paste Special dialog and the PASTE_SPECIAL command.
 // NOTE: Default exports an ExtensionModule object per the contract.
 
-import type { ExtensionModule, ExtensionContext } from "../../../src/api/contract";
-import { CoreCommands } from "../../../src/api/commands";
-import { DialogExtensions } from "../../../src/api/ui";
-import { getGridStateSnapshot } from "../../../src/api/state";
-import { getInternalClipboard } from "../../../src/api/lib";
+import type { ExtensionModule, ExtensionContext } from "@api/contract";
+import { CoreCommands } from "@api/commands";
+import { DialogExtensions } from "@api/ui";
+import { getGridStateSnapshot } from "@api/state";
+import { getInternalClipboard } from "@api/lib";
 import { PasteSpecialDialog } from "./PasteSpecialDialog";
 import { executePasteSpecial, executePasteLink } from "./pasteSpecialExecute";
 

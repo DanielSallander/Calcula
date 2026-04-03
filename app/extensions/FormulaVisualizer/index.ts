@@ -1,12 +1,8 @@
 //! FILENAME: app/extensions/FormulaVisualizer/index.ts
 // PURPOSE: FormulaVisualizer extension entry point (visual formula debugger).
-// CONTEXT: Registers the dialog, Formulas menu item, and selection tracking.
-//          Called from extensions/index.ts during app initialization.
+// CONTEXT: Registers the dialog. Menu item is registered by EvaluateFormula extension as a submenu child.
 
-import {
-  DialogExtensions,
-  ExtensionRegistry,
-} from "../../src/api";
+import type { ExtensionModule, ExtensionContext } from "@api/contract";
 import { FormulaVisualizer } from "./components/FormulaVisualizer";
 
 // ============================================================================
@@ -16,31 +12,27 @@ import { FormulaVisualizer } from "./components/FormulaVisualizer";
 const cleanupFns: (() => void)[] = [];
 
 // ============================================================================
-// Registration
+// Lifecycle
 // ============================================================================
 
-export function registerFormulaVisualizerExtension(): void {
-  console.log("[FormulaVisualizer] Registering...");
+function activate(context: ExtensionContext): void {
+  console.log("[FormulaVisualizer] Activating...");
 
   // 1. Register dialog
-  DialogExtensions.registerDialog({
+  context.ui.dialogs.register({
     id: "formula-visualizer",
     component: FormulaVisualizer,
     priority: 111,
   });
-  cleanupFns.push(() => DialogExtensions.unregisterDialog("formula-visualizer"));
+  cleanupFns.push(() => context.ui.dialogs.unregister("formula-visualizer"));
 
   // 2. Menu item is now registered by EvaluateFormula extension as a submenu child.
 
-  console.log("[FormulaVisualizer] Registered successfully.");
+  console.log("[FormulaVisualizer] Activated successfully.");
 }
 
-// ============================================================================
-// Unregistration
-// ============================================================================
-
-export function unregisterFormulaVisualizerExtension(): void {
-  console.log("[FormulaVisualizer] Unregistering...");
+function deactivate(): void {
+  console.log("[FormulaVisualizer] Deactivating...");
 
   for (const fn of cleanupFns) {
     try {
@@ -51,5 +43,21 @@ export function unregisterFormulaVisualizerExtension(): void {
   }
   cleanupFns.length = 0;
 
-  console.log("[FormulaVisualizer] Unregistered.");
+  console.log("[FormulaVisualizer] Deactivated.");
 }
+
+// ============================================================================
+// Extension Module
+// ============================================================================
+
+const extension: ExtensionModule = {
+  manifest: {
+    id: "calcula.formula-visualizer",
+    name: "Formula Visualizer",
+    version: "1.0.0",
+    description: "Visual formula debugger for understanding formula structure.",
+  },
+  activate,
+  deactivate,
+};
+export default extension;

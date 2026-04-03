@@ -4,20 +4,12 @@
 // CONTEXT: Shows sheets, tables, and named ranges in a tree view
 
 import React from "react";
-import {
-  registerActivityView,
-  unregisterActivityView,
-  toggleActivityView,
-  registerTaskPane,
-  unregisterTaskPane,
-  cellEvents,
-  emitAppEvent,
-  AppEvents,
-} from "../../src/api";
+import type { ExtensionModule, ExtensionContext } from "@api/contract";
+import { cellEvents, AppEvents } from "@api";
 import {
   recalculateFormulas,
   listenForEvent,
-} from "../../src/api/backend";
+} from "@api/backend";
 import { FileExplorerView } from "./FileExplorerView";
 import { FileViewerPane } from "./FileViewerPane";
 import { FILE_VIEWER_PANE_ID } from "./constants";
@@ -42,19 +34,19 @@ const FolderIcon = React.createElement(
   })
 );
 
-export function registerFileExplorerExtension(): void {
+function activate(context: ExtensionContext): void {
   // Activity Bar view (left side panel)
-  registerActivityView({
+  context.ui.activityBar.register({
     id: "explorer",
     title: "Explorer",
     icon: FolderIcon,
     component: FileExplorerView,
     priority: 100,
   });
-  cleanupFns.push(() => unregisterActivityView("explorer"));
+  cleanupFns.push(() => context.ui.activityBar.unregister("explorer"));
 
   // Task Pane view (right side panel) for full file viewing
-  registerTaskPane({
+  context.ui.taskPanes.register({
     id: FILE_VIEWER_PANE_ID,
     title: "File Viewer",
     component: FileViewerPane,
@@ -62,13 +54,13 @@ export function registerFileExplorerExtension(): void {
     priority: 5,
     closable: true,
   });
-  cleanupFns.push(() => unregisterTaskPane(FILE_VIEWER_PANE_ID));
+  cleanupFns.push(() => context.ui.taskPanes.unregister(FILE_VIEWER_PANE_ID));
 
   // Keyboard shortcut: Ctrl+Shift+E
   const handleKeyDown = (e: KeyboardEvent) => {
     if (e.ctrlKey && e.shiftKey && e.key === "E") {
       e.preventDefault();
-      toggleActivityView("explorer");
+      context.ui.activityBar.toggle("explorer");
     }
   };
   window.addEventListener("keydown", handleKeyDown, true);
@@ -87,7 +79,7 @@ export function registerFileExplorerExtension(): void {
             formula: cell.formula ?? null,
           });
         }
-        emitAppEvent(AppEvents.GRID_REFRESH);
+        context.events.emit(AppEvents.GRID_REFRESH);
       })
       .catch((err) => {
         console.warn("[FileExplorer] Recalc after file change failed:", err);
@@ -96,11 +88,24 @@ export function registerFileExplorerExtension(): void {
     cleanupFns.push(unlisten);
   });
 
-  console.log("[FileExplorer] Extension registered");
+  console.log("[FileExplorer] Extension activated");
 }
 
-export function unregisterFileExplorerExtension(): void {
+function deactivate(): void {
   cleanupFns.forEach((fn) => fn());
   cleanupFns.length = 0;
-  console.log("[FileExplorer] Extension unregistered");
+  console.log("[FileExplorer] Extension deactivated");
 }
+
+const extension: ExtensionModule = {
+  manifest: {
+    id: "calcula.file-explorer",
+    name: "File Explorer",
+    version: "1.0.0",
+    description: "Workbook structure browser and virtual file viewer",
+  },
+  activate,
+  deactivate,
+};
+
+export default extension;

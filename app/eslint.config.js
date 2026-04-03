@@ -3,7 +3,6 @@ import globals from 'globals'
 import reactHooks from 'eslint-plugin-react-hooks'
 import reactRefresh from 'eslint-plugin-react-refresh'
 import tseslint from 'typescript-eslint'
-import boundaries from 'eslint-plugin-boundaries'
 import { defineConfig, globalIgnores } from 'eslint/config'
 
 export default defineConfig([
@@ -17,10 +16,6 @@ export default defineConfig([
       reactHooks.configs.flat.recommended,
       reactRefresh.configs.vite,
     ],
-    // Register the boundaries plugin here
-    plugins: {
-      boundaries,
-    },
     languageOptions: {
       ecmaVersion: 2020,
       globals: globals.browser,
@@ -30,65 +25,7 @@ export default defineConfig([
         tsconfigRootDir: import.meta.dirname,
       },
     },
-    // =========================================================================
-    // ARCHITECTURE SETTINGS
-    // Define what your folders represent
-    // =========================================================================
-    settings: {
-      "boundaries/include": ["src/**/*", "extensions/**/*"],
-      "boundaries/elements": [
-        {
-          type: "core",
-          mode: "full",
-          pattern: "src/core"
-        },
-        {
-          type: "shell",
-          mode: "full",
-          pattern: "src/shell"
-        },
-        {
-          type: "api",
-          mode: "full",
-          pattern: "src/api"
-        },
-        {
-          type: "extension",
-          mode: "full",
-          pattern: "extensions"
-        }
-      ]
-    },
     rules: {
-      // 1. BOUNDARIES: Ensure imports match the Microkernel Architecture
-      "boundaries/no-unknown": "error",
-      "boundaries/element-types": [
-        "error",
-        {
-          default: "allow",
-          rules: [
-            // ALIEN RULE: Core cannot import Shell or Extensions
-            {
-              from: "core",
-              disallow: ["shell", "extension"],
-              message: "CRITICAL: The Core Engine cannot depend on the Shell or Extensions."
-            },
-            // FACADE RULE: Extensions can ONLY import API
-            {
-              from: "extension",
-              allow: ["api"], 
-              disallow: ["core", "shell", "extension"],
-              message: "SANDBOX VIOLATION: Extensions may only speak to the API Facade."
-            },
-            // API RULE: API is a contract, cannot depend on volatile Shell/Extensions
-            {
-              from: "api",
-              disallow: ["shell", "extension"],
-              message: "The API is a stable contract and cannot depend on volatile layers."
-            }
-          ]
-        }
-      ],
 
       // 2. NAMING CONVENTION: Enforce camelCase for Rust compatibility
       "@typescript-eslint/naming-convention": [
@@ -142,6 +79,49 @@ export default defineConfig([
         'warn',
         { allowConstantExport: true },
       ],
+    },
+  },
+
+  // =========================================================================
+  // ARCHITECTURE BOUNDARY ENFORCEMENT
+  // Uses no-restricted-imports (built-in, no resolver needed)
+  // =========================================================================
+
+  // FACADE RULE: Extensions must ONLY import from src/api
+  {
+    files: ['extensions/**/*.{ts,tsx}'],
+    rules: {
+      'no-restricted-imports': ['error', {
+        patterns: [
+          {
+            group: ['**/src/core/**', '**/core/types/**', '**/core/types', '**/core/lib/**', '**/core/state/**'],
+            message: 'Extensions must import through src/api only (Facade Rule).',
+          },
+          {
+            group: ['**/src/shell/**', '**/shell/registries/**', '**/shell/Ribbon/**'],
+            message: 'Extensions must import through src/api only (Facade Rule).',
+          },
+        ],
+      }],
+    },
+  },
+
+  // ALIEN RULE: Core cannot import from Shell or Extensions
+  {
+    files: ['src/core/**/*.{ts,tsx}'],
+    rules: {
+      'no-restricted-imports': ['error', {
+        patterns: [
+          {
+            group: ['**/src/shell/**', '**/shell/**'],
+            message: 'Core must not depend on the Shell (Alien Rule).',
+          },
+          {
+            group: ['**/extensions/**'],
+            message: 'Core must not depend on Extensions (Alien Rule).',
+          },
+        ],
+      }],
     },
   },
 ])

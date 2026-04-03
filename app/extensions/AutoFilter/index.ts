@@ -1,21 +1,18 @@
 //! FILENAME: app/extensions/AutoFilter/index.ts
-// PURPOSE: AutoFilter extension entry point. Registers/unregisters all components.
-// CONTEXT: Called from extensions/index.ts during app initialization.
+// PURPOSE: AutoFilter extension entry point (ExtensionModule pattern).
+// CONTEXT: Registers grid overlay, cell click interceptor, menu, events, and keyboard shortcuts.
+// NOTE: Default exports an ExtensionModule object per the contract.
 
+import type { ExtensionModule, ExtensionContext } from "@api/contract";
 import {
-  registerGridOverlay,
-  registerCellClickInterceptor,
-  onAppEvent,
-  AppEvents,
-  emitAppEvent,
   ExtensionRegistry,
   showOverlay,
   hideOverlay,
-  registerOverlay,
-  unregisterOverlay,
   indexToCol,
+  AppEvents,
   type OverlayRegistration,
-} from "../../src/api";
+} from "@api";
+import { emitAppEvent } from "@api/events";
 import { renderFilterChevrons, hitTestFilterChevron, isClickOnChevronButton, isMouseOverAnyChevronButton, getFilterChevronCanvas } from "./rendering/filterChevronRenderer";
 import {
   refreshFilterState,
@@ -39,9 +36,10 @@ const OVERLAY_ID = "autofilter-dropdown";
 const REGION_TYPE = "autofilter";
 
 // ============================================================================
-// Cleanup tracking
+// State
 // ============================================================================
 
+let isActivated = false;
 const cleanupFns: (() => void)[] = [];
 
 // ============================================================================
@@ -58,14 +56,19 @@ function handleKeyDown(e: KeyboardEvent): void {
 }
 
 // ============================================================================
-// Registration
+// Activation
 // ============================================================================
 
-export function registerAutoFilterExtension(): void {
-  console.log("[AutoFilter] Registering...");
+function activate(context: ExtensionContext): void {
+  if (isActivated) {
+    console.warn("[AutoFilter] Already activated, skipping.");
+    return;
+  }
+
+  console.log("[AutoFilter] Activating...");
 
   // 1. Register grid overlay for chevrons/funnels
-  const unregOverlay = registerGridOverlay({
+  const unregOverlay = context.grid.overlays.register({
     type: REGION_TYPE,
     render: renderFilterChevrons,
     hitTest: hitTestFilterChevron,
@@ -74,15 +77,15 @@ export function registerAutoFilterExtension(): void {
   cleanupFns.push(unregOverlay);
 
   // 2. Register the dropdown overlay component
-  registerOverlay({
+  context.ui.overlays.register({
     id: OVERLAY_ID,
     component: FilterDropdownOverlay,
     layer: "dropdown",
   });
-  cleanupFns.push(() => unregisterOverlay(OVERLAY_ID));
+  cleanupFns.push(() => context.ui.overlays.unregister(OVERLAY_ID));
 
   // 3. Register cell click interceptor for chevron clicks
-  const unregClick = registerCellClickInterceptor(async (row, col, event) => {
+  const unregClick = context.grid.cellClicks.registerClickInterceptor(async (row, col, event) => {
     const info = getAutoFilterInfo();
     if (!info || !info.enabled) return false;
 
@@ -137,7 +140,7 @@ export function registerAutoFilterExtension(): void {
   cleanupFns.push(unregClick);
 
   // 4. Register the Data menu
-  registerDataMenu();
+  registerDataMenu(context);
 
   // 5. Register keyboard shortcut
   window.addEventListener("keydown", handleKeyDown, true);
@@ -223,7 +226,7 @@ export function registerAutoFilterExtension(): void {
   cleanupFns.push(() => window.removeEventListener("table:filterHeaderClick", handleFilterHeaderClick));
 
   // 7. Subscribe to events
-  const unsubSheet = onAppEvent(AppEvents.SHEET_CHANGED, () => {
+  const unsubSheet = context.events.on(AppEvents.SHEET_CHANGED, () => {
     hideOverlay(OVERLAY_ID);
     setOpenDropdownCol(null);
     refreshFilterState();
@@ -250,15 +253,18 @@ export function registerAutoFilterExtension(): void {
   // 8. Load initial filter state
   refreshFilterState();
 
-  console.log("[AutoFilter] Registered successfully.");
+  isActivated = true;
+  console.log("[AutoFilter] Activated successfully.");
 }
 
 // ============================================================================
-// Unregistration
+// Deactivation
 // ============================================================================
 
-export function unregisterAutoFilterExtension(): void {
-  console.log("[AutoFilter] Unregistering...");
+function deactivate(): void {
+  if (!isActivated) return;
+
+  console.log("[AutoFilter] Deactivating...");
 
   hideOverlay(OVERLAY_ID);
 
@@ -273,5 +279,23 @@ export function unregisterAutoFilterExtension(): void {
 
   resetState();
 
-  console.log("[AutoFilter] Unregistered.");
+  isActivated = false;
+  console.log("[AutoFilter] Deactivated.");
 }
+
+// ============================================================================
+// Extension Module Export
+// ============================================================================
+
+const extension: ExtensionModule = {
+  manifest: {
+    id: "calcula.auto-filter",
+    name: "AutoFilter",
+    version: "1.0.0",
+    description: "Column filtering with dropdown value selection, sort, and search.",
+  },
+  activate,
+  deactivate,
+};
+
+export default extension;

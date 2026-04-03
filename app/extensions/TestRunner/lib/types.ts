@@ -2,7 +2,7 @@
 // PURPOSE: Type definitions for the macro-based test runner.
 // CONTEXT: Defines TestMacro, TestSuite, TestContext, and result types.
 
-import type { CellData, Selection } from "../../../src/api/types";
+import type { CellData, Selection } from "@api/types";
 
 // ============================================================================
 // Test Context (passed to each test macro)
