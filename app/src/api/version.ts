@@ -10,4 +10,4 @@
  * - Minor: New APIs added (backward compatible)
  * - Patch: Bug fixes to existing APIs
  */
-export const API_VERSION = "1.0.0";
+export const API_VERSION = "1.1.0";

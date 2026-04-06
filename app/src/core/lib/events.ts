@@ -51,6 +51,15 @@ export const AppEvents = {
   EDIT_STARTED: "app:edit-started",
   EDIT_ENDED: "app:edit-ended",
   PREVENT_BLUR_COMMIT: "app:prevent-blur-commit",
+
+  // Workbook lifecycle events
+  BEFORE_SAVE: "app:before-save",
+  AFTER_SAVE: "app:after-save",
+  BEFORE_OPEN: "app:before-open",
+  AFTER_OPEN: "app:after-open",
+  BEFORE_NEW: "app:before-new",
+  AFTER_NEW: "app:after-new",
+  BEFORE_CLOSE: "app:before-close",
 } as const;
 
 export type AppEventType = (typeof AppEvents)[keyof typeof AppEvents];

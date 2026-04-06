@@ -77,6 +77,15 @@ export const AppEvents = {
 
   // Theme events
   THEME_CHANGED: "app:theme-changed",
+
+  // Workbook lifecycle events
+  BEFORE_SAVE: "app:before-save",
+  AFTER_SAVE: "app:after-save",
+  BEFORE_OPEN: "app:before-open",
+  AFTER_OPEN: "app:after-open",
+  BEFORE_NEW: "app:before-new",
+  AFTER_NEW: "app:after-new",
+  BEFORE_CLOSE: "app:before-close",
 } as const;
 
 /** Payload emitted with FILL_COMPLETED event. */

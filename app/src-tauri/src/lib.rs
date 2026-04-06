@@ -3403,6 +3403,94 @@ pub fn get_column_row_dependents(
 }
 
 // ============================================================================
+// Third-Party Extension Loading
+// ============================================================================
+
+/// Extension file entry returned by scan_extension_directory.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExtensionFileEntry {
+    /// File name (e.g., "my-extension.js")
+    pub file_name: String,
+    /// Full absolute path
+    pub path: String,
+    /// File content (the JavaScript source)
+    pub content: String,
+}
+
+/// Scan a directory for third-party extension bundles (.js files).
+/// Returns the file name, path, and content of each found extension.
+#[tauri::command]
+fn scan_extension_directory(dir: String) -> Result<Vec<ExtensionFileEntry>, String> {
+    let path = std::path::Path::new(&dir);
+    if !path.exists() {
+        // Directory doesn't exist — not an error, just no extensions
+        return Ok(vec![]);
+    }
+    if !path.is_dir() {
+        return Err(format!("'{}' is not a directory", dir));
+    }
+
+    let mut entries = Vec::new();
+    let read_dir = std::fs::read_dir(path).map_err(|e| format!("Failed to read directory: {}", e))?;
+
+    for entry in read_dir {
+        let entry = entry.map_err(|e| format!("Failed to read entry: {}", e))?;
+        let file_path = entry.path();
+
+        // Only load .js files (pre-built extension bundles)
+        if file_path.extension().and_then(|e| e.to_str()) == Some("js") {
+            let file_name = file_path.file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("unknown")
+                .to_string();
+            let content = std::fs::read_to_string(&file_path)
+                .map_err(|e| format!("Failed to read '{}': {}", file_name, e))?;
+            entries.push(ExtensionFileEntry {
+                file_name,
+                path: file_path.to_string_lossy().to_string(),
+                content,
+            });
+        }
+
+        // Also support directories with an index.js entry point
+        if file_path.is_dir() {
+            let index_path = file_path.join("index.js");
+            if index_path.exists() {
+                let dir_name = file_path.file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("unknown")
+                    .to_string();
+                let content = std::fs::read_to_string(&index_path)
+                    .map_err(|e| format!("Failed to read '{}/index.js': {}", dir_name, e))?;
+                entries.push(ExtensionFileEntry {
+                    file_name: format!("{}/index.js", dir_name),
+                    path: index_path.to_string_lossy().to_string(),
+                    content,
+                });
+            }
+        }
+    }
+
+    Ok(entries)
+}
+
+/// Get the default path for third-party extensions (next to the app data dir).
+#[tauri::command]
+fn get_extensions_directory(app_handle: tauri::AppHandle) -> Result<String, String> {
+    use tauri::Manager;
+    let app_data = app_handle.path().app_data_dir()
+        .map_err(|e| format!("Failed to get app data dir: {}", e))?;
+    let ext_dir = app_data.join("extensions");
+    // Create the directory if it doesn't exist
+    if !ext_dir.exists() {
+        std::fs::create_dir_all(&ext_dir)
+            .map_err(|e| format!("Failed to create extensions dir: {}", e))?;
+    }
+    Ok(ext_dir.to_string_lossy().to_string())
+}
+
+// ============================================================================
 // TAURI APP ENTRY
 // ============================================================================
 
@@ -3886,6 +3974,9 @@ pub fn run() {
             theme_commands::set_document_theme,
             theme_commands::list_builtin_themes,
             theme_commands::get_theme_color_palette,
+            // Third-party extension loading
+            scan_extension_directory,
+            get_extensions_directory,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")

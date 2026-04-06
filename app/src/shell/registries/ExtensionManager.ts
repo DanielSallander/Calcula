@@ -7,6 +7,7 @@ import type { ExtensionModule, ExtensionContext } from "../../api/contract";
 import { CommandRegistry } from "../../api/commands";
 import { API_VERSION } from "../../api/version";
 import { builtInExtensions } from "../../../extensions/manifest";
+import { invokeBackend } from "../../api/backend";
 
 // Import free functions from API to wire into the context object
 import {
@@ -61,6 +62,15 @@ import { registerGridOverlay } from "../../api/gridOverlays";
 import { registerEditGuard } from "../../api/editGuards";
 import { registerCellClickInterceptor } from "../../api/cellClickInterceptors";
 import { registerCellDoubleClickInterceptor } from "../../api/cellDoubleClickInterceptors";
+import { registerShortcut, getShortcuts } from "../../api/keyboard";
+import {
+  getSetting,
+  setSetting,
+  removeSetting,
+  registerSettingDefinitions,
+} from "../../api/settings";
+import { registerCellEditor } from "../../api/cellEditors";
+import { registerFileFormat, getFileFormats } from "../../api/fileFormats";
 
 // ============================================================================
 // Types
@@ -78,6 +88,13 @@ export interface LoadedExtension {
 }
 
 type ChangeListener = () => void;
+
+/** Entry returned by the Rust scan_extension_directory command */
+interface ExtensionFileEntry {
+  fileName: string;
+  path: string;
+  content: string;
+}
 
 // ============================================================================
 // API Version Compatibility Check
@@ -240,6 +257,9 @@ class ExtensionManagerImpl {
       await this.activateExtension(module);
     }
 
+    // Load third-party extensions from the user's extensions directory
+    await this.loadThirdPartyExtensions();
+
     console.log(
       `[ExtensionManager] Initialization complete. ${this.extensions.size} extensions loaded.`
     );
@@ -296,7 +316,33 @@ class ExtensionManagerImpl {
 
     try {
       console.log(`[ExtensionManager] Activating extension: ${id} (${name} v${version})`);
-      await module.activate(this.context);
+      // Create a per-extension context with extension-scoped APIs
+      const extContext: ExtensionContext = {
+        ...this.context,
+        keyboard: {
+          registerShortcut: (combo, commandId, options) =>
+            registerShortcut(combo, commandId, id, options),
+          getShortcuts,
+        },
+        settings: {
+          get: <T extends string | number | boolean>(key: string, defaultValue: T) =>
+            getSetting(id, key, defaultValue),
+          set: (key: string, value: string | number | boolean) =>
+            setSetting(id, key, value),
+          remove: (key: string) => removeSetting(id, key),
+          registerSettings: (definitions) =>
+            registerSettingDefinitions(id, definitions),
+        },
+        cellEditors: {
+          register: (editorId, canEdit, component, priority) =>
+            registerCellEditor(editorId, canEdit, component, priority),
+        },
+        fileFormats: {
+          registerFormat: registerFileFormat,
+          getFormats: getFileFormats,
+        },
+      };
+      await module.activate(extContext);
 
       entry.status = "active";
       console.log(`[ExtensionManager] Extension '${id}' activated successfully.`);
@@ -338,6 +384,78 @@ class ExtensionManagerImpl {
     } catch (error) {
       console.error(`[ExtensionManager] Runtime load failed for ${url}:`, error);
       throw error;
+    }
+  }
+
+  // --------------------------------------------------------------------------
+  // Third-Party Extension Loading
+  // --------------------------------------------------------------------------
+
+  /**
+   * Load all third-party extensions from the user's extensions directory.
+   * Extensions are pre-built .js bundles placed in the app data extensions folder.
+   * Each bundle must be an ES module that default-exports an ExtensionModule.
+   */
+  async loadThirdPartyExtensions(): Promise<void> {
+    try {
+      // Get the extensions directory path from the backend
+      const extDir = await invokeBackend<string>("get_extensions_directory");
+      console.log(`[ExtensionManager] Scanning for third-party extensions in: ${extDir}`);
+
+      // Scan directory for .js extension bundles
+      const entries = await invokeBackend<ExtensionFileEntry[]>("scan_extension_directory", {
+        dir: extDir,
+      });
+
+      if (entries.length === 0) {
+        console.log("[ExtensionManager] No third-party extensions found.");
+        return;
+      }
+
+      console.log(`[ExtensionManager] Found ${entries.length} third-party extension(s).`);
+
+      for (const entry of entries) {
+        try {
+          await this.loadExtensionFromSource(entry.content, entry.fileName);
+        } catch (error) {
+          console.error(
+            `[ExtensionManager] Failed to load third-party extension '${entry.fileName}':`,
+            error
+          );
+        }
+      }
+    } catch (error) {
+      console.error("[ExtensionManager] Failed to scan for third-party extensions:", error);
+    }
+  }
+
+  /**
+   * Load an extension from JavaScript source code.
+   * Creates a blob URL and uses dynamic import to load the module.
+   */
+  private async loadExtensionFromSource(source: string, name: string): Promise<void> {
+    console.log(`[ExtensionManager] Loading third-party extension: ${name}`);
+
+    // Create a blob URL from the source code
+    const blob = new Blob([source], { type: "application/javascript" });
+    const blobUrl = URL.createObjectURL(blob);
+
+    try {
+      // Dynamic import of the blob URL
+      const imported = await import(/* @vite-ignore */ blobUrl);
+      const module: ExtensionModule = imported.default ?? imported;
+
+      // Validate
+      if (!module.manifest) {
+        throw new Error(`Extension '${name}' does not export a 'manifest' object.`);
+      }
+      if (!module.activate) {
+        throw new Error(`Extension '${name}' does not export an 'activate' function.`);
+      }
+
+      await this.activateExtension(module);
+    } finally {
+      URL.revokeObjectURL(blobUrl);
     }
   }
 

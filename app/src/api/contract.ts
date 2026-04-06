@@ -26,6 +26,10 @@ import type {
   OverlayRegistration,
 } from "./gridOverlays";
 import type { AppEventName } from "./events";
+import type { IKeyboardAPI } from "./keyboard";
+import type { ISettingsAPI } from "./settings";
+import type { ICellEditorAPI } from "./cellEditors";
+import type { IFileFormatAPI } from "./fileFormats";
 
 // ============================================================================
 // Sub-API Interfaces (Services available through ExtensionContext)
@@ -159,6 +163,18 @@ export interface ExtensionContext {
 
   /** Application event bus */
   events: IEventAPI;
+
+  /** Keyboard shortcut registration */
+  keyboard: IKeyboardAPI;
+
+  /** Extension settings/preferences */
+  settings: ISettingsAPI;
+
+  /** Custom cell editor registration */
+  cellEditors: ICellEditorAPI;
+
+  /** File format importers/exporters */
+  fileFormats: IFileFormatAPI;
 
   /** Grid rendering hooks */
   grid: {

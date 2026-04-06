@@ -508,6 +508,73 @@ export {
 } from "./menuIcons";
 
 // ============================================================================
+// File Format API (Custom Importers/Exporters)
+// ============================================================================
+
+export {
+  registerFileFormat,
+  findImporter,
+  findExporter,
+  getFileFormats,
+  getFileDialogFilters,
+  subscribeToFileFormats,
+} from "./fileFormats";
+export type {
+  ImportCellData,
+  ImportSheetData,
+  ImportResult,
+  ExportContext,
+  FileFormatRegistration,
+  IFileFormatAPI,
+} from "./fileFormats";
+
+// ============================================================================
+// Custom Cell Editors API
+// ============================================================================
+
+export {
+  registerCellEditor,
+  findCellEditor,
+  hasCellEditors,
+  subscribeToCellEditors,
+} from "./cellEditors";
+export type {
+  CellEditorContext,
+  CellEditorProps,
+  CellEditorRegistration,
+  ICellEditorAPI,
+} from "./cellEditors";
+
+// ============================================================================
+// Extension Settings API
+// ============================================================================
+
+export {
+  getSetting,
+  setSetting,
+  removeSetting,
+  registerSettingDefinitions,
+  getAllSettingDefinitions,
+  subscribeToSettings,
+} from "./settings";
+export type {
+  SettingDefinition,
+  ISettingsAPI,
+} from "./settings";
+
+// ============================================================================
+// Keyboard Shortcuts API
+// ============================================================================
+
+export { registerShortcut, getShortcuts } from "./keyboard";
+export type {
+  ShortcutBinding,
+  ShortcutModifiers,
+  RegisterShortcutOptions,
+  IKeyboardAPI,
+} from "./keyboard";
+
+// ============================================================================
 // Formula Autocomplete API
 // ============================================================================
 
