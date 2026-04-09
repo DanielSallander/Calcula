@@ -73,6 +73,8 @@ export interface SetSelectionPayload {
   endRow: number;
   endCol: number;
   type?: SelectionType;
+  /** Optional multi-selection ranges (e.g. for Select Visible Cells, Go To Special). */
+  additionalRanges?: Array<{ startRow: number; startCol: number; endRow: number; endCol: number }>;
 }
 
 export interface SetSelectionAction {
@@ -383,6 +385,7 @@ export function setSelection(
         endRow: startRowOrPayload.endRow,
         endCol: startRowOrPayload.endCol,
         type: startRowOrPayload.type || "cells",
+        additionalRanges: startRowOrPayload.additionalRanges,
       },
     };
   }

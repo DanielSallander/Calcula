@@ -3,6 +3,7 @@
 // CONTEXT: Uses ExtensionContext to register menu items and show dialogs.
 
 import type { ExtensionContext } from "@api/contract";
+import { IconRemoveDuplicates } from "@api";
 
 // ============================================================================
 // State
@@ -48,6 +49,7 @@ export function registerRemoveDuplicatesMenuItem(context: ExtensionContext): voi
   context.ui.menus.registerItem("data", {
     id: "data:removeDuplicates",
     label: "Remove Duplicates...",
+    icon: IconRemoveDuplicates,
     action: () => {
       const sel = currentSelection;
       context.ui.dialogs.show("remove-duplicates", {

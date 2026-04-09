@@ -74,6 +74,9 @@ import SlicerExtension from "./Slicer";
 import TimelineSlicerExtension from "./TimelineSlicer";
 import AutoFilterExtension from "./AutoFilter";
 import ControlsExtension from "./Controls";
+import ExternalDataExtension from "./ExternalData";
+import SelectVisibleCellsExtension from "./SelectVisibleCells";
+import QuickAccessExtension from "./QuickAccess";
 import BusinessIntelligenceExtension from "./BusinessIntelligence";
 import AIChatExtension from "./AIChat";
 import ReportStoreExtension from "./ReportStore";
@@ -131,10 +134,13 @@ export const builtInExtensions: ExtensionModule[] = [
   TextToColumnsExtension,
   GoalSeekExtension,
   GoToSpecialExtension,
+  SelectVisibleCellsExtension,
   FlashFillExtension,
   CustomFillListsExtension,
   AdvancedFilterExtension,
   SubtotalsExtension,
+  // ExternalData creates the "externalData" menu — must load before CSV/BI
+  ExternalDataExtension,
   CsvImportExportExtension,
   WatchWindowExtension,
   CalculationOptionsExtension,
@@ -167,6 +173,8 @@ export const builtInExtensions: ExtensionModule[] = [
   BusinessIntelligenceExtension,
   AIChatExtension,
   ReportStoreExtension,
+  // Quick Access (loads last — needs all menu items registered for command palette)
+  QuickAccessExtension,
   // Test Runner (dev-only, macro-based integration tests)
   ...(import.meta.env.DEV ? [TestRunnerExtension] : []),
 ];

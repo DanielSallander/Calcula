@@ -8,6 +8,7 @@ import {
   sortRangeByColumn,
 } from "@api/lib";
 import type { SortRangeResult } from "@api";
+import { IconSortAZ, IconSortZA, IconCustomSort } from "@api";
 
 // ============================================================================
 // State
@@ -98,6 +99,7 @@ export function registerSortMenuItems(context: ExtensionContext): void {
   context.ui.menus.registerItem("data", {
     id: "data:sort:ascending",
     label: "Sort A to Z",
+    icon: IconSortAZ,
     action: () => quickSort(true),
   });
 
@@ -105,6 +107,7 @@ export function registerSortMenuItems(context: ExtensionContext): void {
   context.ui.menus.registerItem("data", {
     id: "data:sort:descending",
     label: "Sort Z to A",
+    icon: IconSortZA,
     action: () => quickSort(false),
   });
 
@@ -112,6 +115,7 @@ export function registerSortMenuItems(context: ExtensionContext): void {
   context.ui.menus.registerItem("data", {
     id: "data:sort:custom",
     label: "Custom Sort...",
+    icon: IconCustomSort,
     action: () => {
       const sel = currentSelection;
       context.ui.dialogs.show("sort-dialog", {

@@ -1,6 +1,6 @@
 //! FILENAME: app/extensions/CsvImportExport/handlers/dataMenuBuilder.ts
-// PURPOSE: Registers "Get Data" menu items in the Data menu for CSV import/export.
-// CONTEXT: Appends items to the existing "data" menu created by AutoFilter.
+// PURPOSE: Registers "Get Data" menu items in the External Data menu for CSV import/export.
+// CONTEXT: Appends items to the "externalData" menu created by ExternalData extension.
 
 import { registerMenuItem, DialogExtensions } from "@api";
 
@@ -9,19 +9,12 @@ import { registerMenuItem, DialogExtensions } from "@api";
 // ============================================================================
 
 export function registerCsvMenuItems(): void {
-  // Separator before the Get Data section
-  registerMenuItem("data", {
-    id: "data:csv:separator",
-    label: "",
-    separator: true,
-  });
-
-  registerMenuItem("data", {
-    id: "data:getData",
+  registerMenuItem("externalData", {
+    id: "externalData:getData",
     label: "Get Data",
     children: [
       {
-        id: "data:getData:csv",
+        id: "externalData:getData:csv",
         label: "From CSV...",
         action: () => {
           DialogExtensions.openDialog("csv-import", {});
@@ -30,8 +23,8 @@ export function registerCsvMenuItems(): void {
     ],
   });
 
-  registerMenuItem("data", {
-    id: "data:csv:export",
+  registerMenuItem("externalData", {
+    id: "externalData:csv:export",
     label: "Export to CSV...",
     action: () => {
       DialogExtensions.openDialog("csv-export", {});

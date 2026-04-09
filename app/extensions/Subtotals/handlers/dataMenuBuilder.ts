@@ -1,10 +1,12 @@
 //! FILENAME: app/extensions/Subtotals/handlers/dataMenuBuilder.ts
-// PURPOSE: Registers Subtotals menu item in the Data menu.
-// CONTEXT: Uses registerMenuItem to add to the existing "data" menu.
+// PURPOSE: Registers Subtotals menu item in the Data > Outline submenu.
+// CONTEXT: Uses registerMenuItem to add to the "Outline" submenu in the "data" menu.
 
 import {
   registerMenuItem,
   DialogExtensions,
+  IconOutline,
+  IconSubtotals,
 } from "@api";
 
 /** Current selection state, updated by the extension's selection listener. */
@@ -22,31 +24,33 @@ export function setCurrentSelection(
 }
 
 export function registerSubtotalsMenuItem(): void {
-  // Add separator before subtotals
+  // Register under "Outline" submenu (merged with Grouping's Outline)
   registerMenuItem("data", {
-    id: "data:subtotals:separator",
-    label: "",
-    separator: true,
-  });
-
-  registerMenuItem("data", {
-    id: "data:subtotals",
-    label: "Subtotals...",
-    action: () => {
-      const context = currentSelection
-        ? {
-            startRow: currentSelection.startRow,
-            endRow: currentSelection.endRow,
-            startCol: currentSelection.startCol,
-            endCol: currentSelection.endCol,
-          }
-        : {
-            startRow: 0,
-            endRow: 10,
-            startCol: 0,
-            endCol: 5,
-          };
-      DialogExtensions.openDialog("subtotals", context);
-    },
+    id: "data:outline",
+    label: "Outline",
+    icon: IconOutline,
+    children: [
+      {
+        id: "data:outline:subtotals",
+        label: "Subtotals...",
+        icon: IconSubtotals,
+        action: () => {
+          const context = currentSelection
+            ? {
+                startRow: currentSelection.startRow,
+                endRow: currentSelection.endRow,
+                startCol: currentSelection.startCol,
+                endCol: currentSelection.endCol,
+              }
+            : {
+                startRow: 0,
+                endRow: 10,
+                startCol: 0,
+                endCol: 5,
+              };
+          DialogExtensions.openDialog("subtotals", context);
+        },
+      },
+    ],
   });
 }

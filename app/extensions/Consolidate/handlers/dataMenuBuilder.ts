@@ -3,6 +3,7 @@
 // CONTEXT: Uses context.ui.menus.registerItem to append to the existing "data" menu.
 
 import type { ExtensionContext } from "@api/contract";
+import { IconConsolidate } from "@api";
 
 // ============================================================================
 // State
@@ -40,6 +41,7 @@ export function registerConsolidateMenuItem(context: ExtensionContext): void {
   context.ui.menus.registerItem("data", {
     id: "data:consolidate",
     label: "Consolidate...",
+    icon: IconConsolidate,
     action: () => {
       const sel = currentSelection;
       context.ui.dialogs.show("consolidate", {

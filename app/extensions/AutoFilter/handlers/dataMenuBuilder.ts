@@ -3,6 +3,7 @@
 // CONTEXT: Menu is hook-based for dynamic checked/disabled states.
 
 import type { ExtensionContext } from "@api/contract";
+import { IconFilter, IconClearFilter, IconReapply } from "@api";
 import {
   toggleFilter,
   clearAllFilters,
@@ -23,6 +24,7 @@ export function registerDataMenu(context: ExtensionContext): void {
         id: "data:filter",
         label: "Filter",
         shortcut: "Ctrl+Shift+L",
+        icon: IconFilter,
         action: () => {
           toggleFilter();
         },
@@ -30,6 +32,7 @@ export function registerDataMenu(context: ExtensionContext): void {
       {
         id: "data:clearFilter",
         label: "Clear Filter",
+        icon: IconClearFilter,
         action: () => {
           clearAllFilters();
         },
@@ -37,6 +40,7 @@ export function registerDataMenu(context: ExtensionContext): void {
       {
         id: "data:reapply",
         label: "Reapply",
+        icon: IconReapply,
         action: () => {
           reapplyFilter();
         },

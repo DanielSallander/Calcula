@@ -276,7 +276,7 @@ function isCellInViewport(
 export function gridReducer(state: GridState, action: GridAction): GridState {
   switch (action.type) {
     case GRID_ACTIONS.SET_SELECTION: {
-      const { startRow, startCol, endRow, endCol, type } = action.payload;
+      const { startRow, startCol, endRow, endCol, type, additionalRanges } = action.payload;
       const maxRow = state.config.totalRows - 1;
       const maxCol = state.config.totalCols - 1;
 
@@ -286,6 +286,7 @@ export function gridReducer(state: GridState, action: GridAction): GridState {
         endRow: clamp(endRow, 0, maxRow),
         endCol: clamp(endCol, 0, maxCol),
         type: type || "cells",
+        additionalRanges: additionalRanges,
       };
 
       // FIX: For column/row selections, do NOT expand virtual bounds to include the full range.

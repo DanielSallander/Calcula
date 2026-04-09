@@ -3,6 +3,7 @@
 // CONTEXT: Uses ExtensionContext to register menu items and show dialogs.
 
 import type { ExtensionContext } from "@api/contract";
+import { IconTextToColumns } from "@api";
 
 // ============================================================================
 // State
@@ -44,6 +45,7 @@ export function registerTextToColumnsMenuItem(context: ExtensionContext): void {
   context.ui.menus.registerItem("data", {
     id: "data:textToColumns",
     label: "Text to Columns...",
+    icon: IconTextToColumns,
     action: () => {
       const sel = currentSelection;
       context.ui.dialogs.show("text-to-columns", {

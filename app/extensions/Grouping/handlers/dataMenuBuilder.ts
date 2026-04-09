@@ -7,6 +7,11 @@ import type { ExtensionContext } from "@api/contract";
 import {
   gridExtensions,
   type GridContextMenuItem,
+  IconOutline,
+  IconGroup,
+  IconUngroup,
+  IconShowLevel,
+  IconClearOutline,
 } from "@api";
 import {
   performGroupRows,
@@ -52,78 +57,77 @@ export function registerGroupingMenuItems(
   context: ExtensionContext,
   getSelection: () => { startRow: number; endRow: number; startCol: number; endCol: number; type?: string } | null
 ): void {
-  // Separator before grouping section
+  // "Outline" submenu grouping all outline/grouping commands
   context.ui.menus.registerItem("data", {
-    id: "data:outline:separator",
-    label: "",
-    separator: true,
-  });
-
-  context.ui.menus.registerItem("data", {
-    id: "data:outline:group",
-    label: "Group",
-    shortcut: "Alt+Shift+Right",
-    action: () => {
-      const sel = getSelection();
-      if (!sel) return;
-      const norm = normalizeRange(sel);
-      if (sel.type === "columns") {
-        performGroupColumns(norm.startCol, norm.endCol);
-      } else {
-        performGroupRows(norm.startRow, norm.endRow);
-      }
-    },
-  });
-
-  context.ui.menus.registerItem("data", {
-    id: "data:outline:ungroup",
-    label: "Ungroup",
-    shortcut: "Alt+Shift+Left",
-    action: () => {
-      const sel = getSelection();
-      if (!sel) return;
-      const norm = normalizeRange(sel);
-      if (sel.type === "columns") {
-        performUngroupColumns(norm.startCol, norm.endCol);
-      } else {
-        performUngroupRows(norm.startRow, norm.endRow);
-      }
-    },
-  });
-
-  // "Show Level" submenu with levels 1-8
-  context.ui.menus.registerItem("data", {
-    id: "data:outline:showLevel",
-    label: "Show Level",
-    children: Array.from({ length: 8 }, (_, i) => i + 1).map((level) => ({
-      id: `data:outline:showLevel${level}`,
-      label: `Level ${level}`,
-      action: () => {
-        performShowLevel(level);
+    id: "data:outline",
+    label: "Outline",
+    icon: IconOutline,
+    children: [
+      {
+        id: "data:outline:group",
+        label: "Group",
+        shortcut: "Alt+Shift+Right",
+        icon: IconGroup,
+        action: () => {
+          const sel = getSelection();
+          if (!sel) return;
+          const norm = normalizeRange(sel);
+          if (sel.type === "columns") {
+            performGroupColumns(norm.startCol, norm.endCol);
+          } else {
+            performGroupRows(norm.startRow, norm.endRow);
+          }
+        },
       },
-    })),
-  });
-
-  context.ui.menus.registerItem("data", {
-    id: "data:outline:clearOutline",
-    label: "Clear Outline",
-    action: () => {
-      performClearOutline();
-    },
-  });
-
-  context.ui.menus.registerItem("data", {
-    id: "data:outline:settingsSeparator",
-    label: "",
-    separator: true,
-  });
-
-  context.ui.menus.registerItem("data", {
-    id: "data:outline:settings",
-    label: "Group Settings...",
-    action: () => {
-      context.ui.dialogs.show("group-settings");
-    },
+      {
+        id: "data:outline:ungroup",
+        label: "Ungroup",
+        shortcut: "Alt+Shift+Left",
+        icon: IconUngroup,
+        action: () => {
+          const sel = getSelection();
+          if (!sel) return;
+          const norm = normalizeRange(sel);
+          if (sel.type === "columns") {
+            performUngroupColumns(norm.startCol, norm.endCol);
+          } else {
+            performUngroupRows(norm.startRow, norm.endRow);
+          }
+        },
+      },
+      {
+        id: "data:outline:showLevel",
+        label: "Show Level",
+        icon: IconShowLevel,
+        children: Array.from({ length: 8 }, (_, i) => i + 1).map((level) => ({
+          id: `data:outline:showLevel${level}`,
+          label: `Level ${level}`,
+          action: () => {
+            performShowLevel(level);
+          },
+        })),
+      },
+      {
+        id: "data:outline:separator1",
+        label: "",
+        separator: true,
+      },
+      {
+        id: "data:outline:clearOutline",
+        label: "Clear Outline",
+        icon: IconClearOutline,
+        action: () => {
+          performClearOutline();
+        },
+      },
+      {
+        id: "data:outline:settings",
+        label: "Group Settings...",
+        action: () => {
+          context.ui.dialogs.show("group-settings");
+        },
+      },
+    ],
   });
 }
 

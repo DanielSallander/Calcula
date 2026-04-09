@@ -75,9 +75,9 @@ function activate(context: ExtensionContext): void {
   });
   cleanupFunctions.push(() => context.ui.dialogs.unregister(MODEL_DIALOG_ID));
 
-  // 5. Register "Connections" menu item in Data menu
-  context.ui.menus.registerItem("data", {
-    id: "data:connections",
+  // 5. Register "Connections" menu item in External Data menu
+  context.ui.menus.registerItem("externalData", {
+    id: "externalData:connections",
     label: "Connections",
     action: () => {
       context.ui.taskPanes.addContextKey("connections");
@@ -85,13 +85,13 @@ function activate(context: ExtensionContext): void {
     },
   });
 
-  // 6. Register "Get Data" submenu in the Data menu
-  context.ui.menus.registerItem("data", {
-    id: "data:getData",
+  // 6. Register "Get Data" submenu in the External Data menu
+  context.ui.menus.registerItem("externalData", {
+    id: "externalData:getData",
     label: "Get Data",
     children: [
       {
-        id: "data:getData:calculaModel",
+        id: "externalData:getData:calculaModel",
         label: "Calcula Model...",
         action: () => {
           context.ui.dialogs.show(MODEL_DIALOG_ID);

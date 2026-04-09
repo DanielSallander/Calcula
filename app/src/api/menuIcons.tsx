@@ -207,3 +207,278 @@ export const IconDeleteAll = (
     <line x1="9.5" y1="7" x2="9.5" y2="11.5" />
   </svg>
 );
+
+// ============================================================================
+// Data Menu Icons
+// ============================================================================
+
+/** Funnel (Filter) */
+export const IconFilter = (
+  <svg viewBox="0 0 16 16" fill={fill} stroke={stroke} strokeWidth="1.3" style={iconStyle}>
+    <path d="M1.5 2.5h13l-4.5 5v4.5l-4 2V7.5L1.5 2.5z" />
+  </svg>
+);
+
+/** Funnel with X (Clear Filter) */
+export const IconClearFilter = (
+  <svg viewBox="0 0 16 16" fill={fill} stroke={stroke} strokeWidth="1.3" style={iconStyle}>
+    <path d="M1.5 2.5h13l-4.5 5v4.5l-4 2V7.5L1.5 2.5z" opacity="0.5" />
+    <line x1="10" y1="9" x2="15" y2="14" strokeWidth="1.8" />
+    <line x1="15" y1="9" x2="10" y2="14" strokeWidth="1.8" />
+  </svg>
+);
+
+/** Funnel with circular arrow (Reapply) */
+export const IconReapply = (
+  <svg viewBox="0 0 16 16" fill={fill} stroke={stroke} strokeWidth="1.3" style={iconStyle}>
+    <path d="M1.5 2.5h13l-4.5 5v4.5l-4 2V7.5L1.5 2.5z" opacity="0.5" />
+    <path d="M11 10a3 3 0 1 1-.5-1.7" strokeWidth="1.4" />
+    <polyline points="13,8.3 10.5,8.3 10.5,10.8" strokeWidth="1.2" />
+  </svg>
+);
+
+/** A-Z with down arrow (Sort Ascending) */
+export const IconSortAZ = (
+  <svg viewBox="0 0 16 16" fill={fill} stroke={stroke} strokeWidth="1" style={iconStyle}>
+    <text x="0.5" y="7" fontSize="6" fontWeight="600" fill={stroke} stroke="none" fontFamily="sans-serif">A</text>
+    <text x="0.5" y="14" fontSize="6" fontWeight="600" fill={stroke} stroke="none" fontFamily="sans-serif">Z</text>
+    <line x1="12" y1="2" x2="12" y2="13" strokeWidth="1.5" />
+    <polyline points="9.5,10.5 12,13 14.5,10.5" strokeWidth="1.5" fill="none" />
+  </svg>
+);
+
+/** Z-A with down arrow (Sort Descending) */
+export const IconSortZA = (
+  <svg viewBox="0 0 16 16" fill={fill} stroke={stroke} strokeWidth="1" style={iconStyle}>
+    <text x="0.5" y="7" fontSize="6" fontWeight="600" fill={stroke} stroke="none" fontFamily="sans-serif">Z</text>
+    <text x="0.5" y="14" fontSize="6" fontWeight="600" fill={stroke} stroke="none" fontFamily="sans-serif">A</text>
+    <line x1="12" y1="2" x2="12" y2="13" strokeWidth="1.5" />
+    <polyline points="9.5,10.5 12,13 14.5,10.5" strokeWidth="1.5" fill="none" />
+  </svg>
+);
+
+/** Sort lines with gear (Custom Sort) */
+export const IconCustomSort = (
+  <svg viewBox="0 0 16 16" fill={fill} stroke={stroke} strokeWidth="1.3" style={iconStyle}>
+    <line x1="2" y1="3" x2="10" y2="3" />
+    <line x1="2" y1="6.5" x2="8" y2="6.5" />
+    <line x1="2" y1="10" x2="6" y2="10" />
+    <circle cx="12" cy="11" r="2.5" strokeWidth="1.2" />
+    <line x1="12" y1="8" x2="12" y2="8.5" strokeWidth="1.2" />
+    <line x1="12" y1="13.5" x2="12" y2="14" strokeWidth="1.2" />
+    <line x1="9" y1="11" x2="9.5" y2="11" strokeWidth="1.2" />
+    <line x1="14.5" y1="11" x2="15" y2="11" strokeWidth="1.2" />
+  </svg>
+);
+
+/** Overlapping squares with X (Remove Duplicates) */
+export const IconRemoveDuplicates = (
+  <svg viewBox="0 0 16 16" fill={fill} stroke={stroke} strokeWidth="1.2" style={iconStyle}>
+    <rect x="1" y="3" width="8" height="8" rx="1" />
+    <rect x="5" y="1" width="8" height="8" rx="1" opacity="0.5" />
+    <line x1="10" y1="10" x2="14.5" y2="14.5" strokeWidth="1.6" />
+    <line x1="14.5" y1="10" x2="10" y2="14.5" strokeWidth="1.6" />
+  </svg>
+);
+
+/** Column split (Text to Columns) */
+export const IconTextToColumns = (
+  <svg viewBox="0 0 16 16" fill={fill} stroke={stroke} strokeWidth="1.2" style={iconStyle}>
+    <rect x="1" y="2" width="14" height="3" rx="0.5" />
+    <rect x="1" y="7" width="6" height="3" rx="0.5" />
+    <rect x="9" y="7" width="6" height="3" rx="0.5" />
+    <rect x="1" y="12" width="6" height="3" rx="0.5" />
+    <rect x="9" y="12" width="6" height="3" rx="0.5" />
+  </svg>
+);
+
+/** Lightning bolt (Flash Fill) */
+export const IconFlashFill = (
+  <svg viewBox="0 0 16 16" fill={stroke} stroke="none" style={iconStyle}>
+    <path d="M9 1L4 9h3.5L6 15l6-8H8.5L9 1z" />
+  </svg>
+);
+
+/** Funnel with star (Advanced Filter) */
+export const IconAdvancedFilter = (
+  <svg viewBox="0 0 16 16" fill={fill} stroke={stroke} strokeWidth="1.3" style={iconStyle}>
+    <path d="M1.5 2.5h13l-4.5 5v4.5l-4 2V7.5L1.5 2.5z" opacity="0.5" />
+    <path d="M12.5 1l.8 1.8 1.9.3-1.4 1.3.3 1.9-1.6-.9-1.6.9.3-1.9-1.4-1.3 1.9-.3z" fill={stroke} stroke="none" />
+  </svg>
+);
+
+/** Checkmark in shield (Validation submenu) */
+export const IconValidation = (
+  <svg viewBox="0 0 16 16" fill={fill} stroke={stroke} strokeWidth="1.3" style={iconStyle}>
+    <path d="M8 1L2 4v4c0 3.5 2.5 6.5 6 7.5 3.5-1 6-4 6-7.5V4L8 1z" />
+    <polyline points="5,8 7.5,10.5 11,5.5" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
+  </svg>
+);
+
+/** Checkmark in cell (Data Validation dialog) */
+export const IconDataValidation = (
+  <svg viewBox="0 0 16 16" fill={fill} stroke={stroke} strokeWidth="1.2" style={iconStyle}>
+    <rect x="1" y="2" width="14" height="12" rx="1.5" />
+    <polyline points="4.5,8 7,10.5 11.5,5" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
+  </svg>
+);
+
+/** Circle with exclamation (Circle Invalid Data) */
+export const IconCircleInvalid = (
+  <svg viewBox="0 0 16 16" fill={fill} stroke={stroke} strokeWidth="1.3" style={iconStyle}>
+    <circle cx="8" cy="8" r="6.5" />
+    <line x1="8" y1="4.5" x2="8" y2="9" strokeWidth="1.8" strokeLinecap="round" />
+    <circle cx="8" cy="11.5" r="0.8" fill={stroke} stroke="none" />
+  </svg>
+);
+
+/** Circle with X (Clear Validation Circles) */
+export const IconClearCircles = (
+  <svg viewBox="0 0 16 16" fill={fill} stroke={stroke} strokeWidth="1.3" style={iconStyle}>
+    <circle cx="8" cy="8" r="6.5" opacity="0.5" />
+    <line x1="5.5" y1="5.5" x2="10.5" y2="10.5" strokeWidth="1.8" />
+    <line x1="10.5" y1="5.5" x2="5.5" y2="10.5" strokeWidth="1.8" />
+  </svg>
+);
+
+/** Branch with question mark (What-If Analysis submenu) */
+export const IconWhatIfAnalysis = (
+  <svg viewBox="0 0 16 16" fill={fill} stroke={stroke} strokeWidth="1.3" style={iconStyle}>
+    <path d="M3 12V4h4" />
+    <path d="M3 8h3" />
+    <circle cx="10" cy="4" r="2" />
+    <circle cx="10" cy="8" r="2" />
+    <circle cx="10" cy="12" r="2" />
+  </svg>
+);
+
+/** Target / crosshair (Goal Seek) */
+export const IconGoalSeek = (
+  <svg viewBox="0 0 16 16" fill={fill} stroke={stroke} strokeWidth="1.3" style={iconStyle}>
+    <circle cx="8" cy="8" r="6" />
+    <circle cx="8" cy="8" r="3" />
+    <circle cx="8" cy="8" r="0.8" fill={stroke} stroke="none" />
+    <line x1="8" y1="1" x2="8" y2="3.5" />
+    <line x1="8" y1="12.5" x2="8" y2="15" />
+    <line x1="1" y1="8" x2="3.5" y2="8" />
+    <line x1="12.5" y1="8" x2="15" y2="8" />
+  </svg>
+);
+
+/** Branching paths (Scenario Manager) */
+export const IconScenarioManager = (
+  <svg viewBox="0 0 16 16" fill={fill} stroke={stroke} strokeWidth="1.3" style={iconStyle}>
+    <circle cx="3" cy="8" r="2" />
+    <circle cx="13" cy="3" r="2" />
+    <circle cx="13" cy="8" r="2" />
+    <circle cx="13" cy="13" r="2" />
+    <line x1="5" y1="8" x2="11" y2="3" />
+    <line x1="5" y1="8" x2="11" y2="8" />
+    <line x1="5" y1="8" x2="11" y2="13" />
+  </svg>
+);
+
+/** Grid with question mark (What-If Data Table) */
+export const IconDataTable = (
+  <svg viewBox="0 0 16 16" fill={fill} stroke={stroke} strokeWidth="1.2" style={iconStyle}>
+    <rect x="1" y="1" width="14" height="14" rx="1.5" />
+    <line x1="1" y1="5" x2="15" y2="5" />
+    <line x1="5" y1="1" x2="5" y2="15" />
+    <text x="7.5" y="12.5" fontSize="7" fontWeight="700" fill={stroke} stroke="none" textAnchor="middle" fontFamily="sans-serif">?</text>
+  </svg>
+);
+
+/** Puzzle piece (Solver) */
+export const IconSolver = (
+  <svg viewBox="0 0 16 16" fill={fill} stroke={stroke} strokeWidth="1.2" style={iconStyle}>
+    <path d="M2 4h3.5a1.5 1.5 0 0 1 3 0H12v3.5a1.5 1.5 0 0 0 0 3V14H8.5a1.5 1.5 0 0 1-3 0H2V10.5a1.5 1.5 0 0 0 0-3V4z" />
+  </svg>
+);
+
+/** Bracket / tree (Outline submenu) */
+export const IconOutline = (
+  <svg viewBox="0 0 16 16" fill={fill} stroke={stroke} strokeWidth="1.3" style={iconStyle}>
+    <path d="M3 2v12" />
+    <line x1="3" y1="4" x2="7" y2="4" />
+    <line x1="3" y1="8" x2="7" y2="8" />
+    <line x1="3" y1="12" x2="7" y2="12" />
+    <rect x="8" y="2.5" width="6" height="3" rx="0.5" />
+    <rect x="8" y="6.5" width="6" height="3" rx="0.5" />
+    <rect x="8" y="10.5" width="6" height="3" rx="0.5" />
+  </svg>
+);
+
+/** Right indent bracket (Group) */
+export const IconGroup = (
+  <svg viewBox="0 0 16 16" fill={fill} stroke={stroke} strokeWidth="1.5" style={iconStyle}>
+    <path d="M4 2l4 6-4 6" strokeLinecap="round" strokeLinejoin="round" />
+    <line x1="10" y1="4" x2="14" y2="4" />
+    <line x1="10" y1="8" x2="14" y2="8" />
+    <line x1="10" y1="12" x2="14" y2="12" />
+  </svg>
+);
+
+/** Left indent bracket (Ungroup) */
+export const IconUngroup = (
+  <svg viewBox="0 0 16 16" fill={fill} stroke={stroke} strokeWidth="1.5" style={iconStyle}>
+    <path d="M8 2l-4 6 4 6" strokeLinecap="round" strokeLinejoin="round" />
+    <line x1="10" y1="4" x2="14" y2="4" />
+    <line x1="10" y1="8" x2="14" y2="8" />
+    <line x1="10" y1="12" x2="14" y2="12" />
+  </svg>
+);
+
+/** Stacked levels (Show Level) */
+export const IconShowLevel = (
+  <svg viewBox="0 0 16 16" fill={fill} stroke={stroke} strokeWidth="1.2" style={iconStyle}>
+    <rect x="2" y="2" width="12" height="3" rx="0.5" />
+    <rect x="4" y="6.5" width="10" height="3" rx="0.5" />
+    <rect x="6" y="11" width="8" height="3" rx="0.5" />
+  </svg>
+);
+
+/** Sigma (Subtotals) */
+export const IconSubtotals = (
+  <svg viewBox="0 0 16 16" fill={stroke} stroke="none" style={iconStyle}>
+    <path d="M3 2h10v2.5L8.5 8 13 11.5V14H3v-2.5l2-1.5H3V8h2L3 4.5V2z" />
+  </svg>
+);
+
+/** Bracket with X (Clear Outline) */
+export const IconClearOutline = (
+  <svg viewBox="0 0 16 16" fill={fill} stroke={stroke} strokeWidth="1.3" style={iconStyle}>
+    <path d="M3 2v12" opacity="0.5" />
+    <line x1="3" y1="4" x2="7" y2="4" opacity="0.5" />
+    <line x1="3" y1="8" x2="7" y2="8" opacity="0.5" />
+    <line x1="3" y1="12" x2="7" y2="12" opacity="0.5" />
+    <line x1="9" y1="9" x2="14" y2="14" strokeWidth="1.8" />
+    <line x1="14" y1="9" x2="9" y2="14" strokeWidth="1.8" />
+  </svg>
+);
+
+/** Merge arrows (Consolidate) */
+export const IconConsolidate = (
+  <svg viewBox="0 0 16 16" fill={fill} stroke={stroke} strokeWidth="1.3" style={iconStyle}>
+    <line x1="2" y1="3" x2="8" y2="8" />
+    <line x1="2" y1="13" x2="8" y2="8" />
+    <line x1="2" y1="8" x2="8" y2="8" />
+    <line x1="8" y1="8" x2="14" y2="8" />
+    <polyline points="11.5,5.5 14,8 11.5,10.5" strokeLinecap="round" strokeLinejoin="round" />
+  </svg>
+);
+
+/** Grid with hidden rows indicator (Select Visible Cells) */
+export const IconSelectVisibleCells = (
+  <svg viewBox="0 0 16 16" fill={fill} stroke={stroke} strokeWidth="1" style={iconStyle}>
+    {/* Top visible row */}
+    <rect x="1" y="1" width="5" height="3" fill={stroke} stroke="none" opacity="0.85" />
+    <rect x="7.5" y="1" width="5" height="3" fill={stroke} stroke="none" opacity="0.85" />
+    {/* Hidden row indicator (dashed) */}
+    <line x1="1" y1="6.5" x2="12.5" y2="6.5" strokeDasharray="1.5 1.5" opacity="0.5" />
+    {/* Middle visible row */}
+    <rect x="1" y="8.5" width="5" height="3" fill={stroke} stroke="none" opacity="0.85" />
+    <rect x="7.5" y="8.5" width="5" height="3" fill={stroke} stroke="none" opacity="0.85" />
+    {/* Bottom border */}
+    <line x1="1" y1="14" x2="12.5" y2="14" strokeDasharray="1.5 1.5" opacity="0.5" />
+  </svg>
+);

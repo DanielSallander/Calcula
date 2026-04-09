@@ -13,6 +13,7 @@ import {
   emitAppEvent,
   AppEvents,
   showToast,
+  IconFlashFill,
 } from "@api";
 import { getGridBounds } from "@api/lib";
 import { getGridStateSnapshot } from "@api/grid";
@@ -325,6 +326,7 @@ function activate(context: ExtensionContext): void {
     id: "flashfill",
     label: "Flash Fill",
     shortcut: "Ctrl+E",
+    icon: IconFlashFill,
     action: () => {
       executeFlashFill();
     },

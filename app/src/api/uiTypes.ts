@@ -38,6 +38,12 @@ export interface MenuItemDefinition {
   /** Custom content to render as the flyout submenu instead of children.
    *  Receives an onClose callback to close the entire menu when done. */
   customContent?: (onClose: () => void) => React.ReactNode;
+  /** Optional clickable action icon rendered on the right side of the item. */
+  rightAction?: {
+    icon: React.ReactNode;
+    onClick: () => void;
+    title?: string;
+  };
 }
 
 /**

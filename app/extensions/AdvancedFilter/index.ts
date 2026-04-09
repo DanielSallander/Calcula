@@ -10,6 +10,7 @@ import {
   registerMenuItem,
   ExtensionRegistry,
   detectDataRegion,
+  IconAdvancedFilter,
 } from "@api";
 import { AdvancedFilterDialog } from "./components/AdvancedFilterDialog";
 import { formatRangeRef } from "./lib/advancedFilterEngine";
@@ -99,6 +100,7 @@ function activate(_context: ExtensionContext): void {
   registerMenuItem("data", {
     id: "data:advancedFilter",
     label: "Advanced...",
+    icon: IconAdvancedFilter,
     action: () => openAdvancedFilterDialog(),
   });
 

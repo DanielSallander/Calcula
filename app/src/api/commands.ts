@@ -63,6 +63,8 @@ export interface ICommandRegistry {
   register(commandId: string, handler: (args?: unknown) => void | Promise<void>): void;
   unregister(commandId: string): void;
   has(commandId: string): boolean;
+  /** Return all registered command IDs (local handlers + grid command bridge). */
+  getAll(): string[];
 }
 
 // ============================================================================
@@ -163,6 +165,17 @@ class CommandRegistryImpl implements ICommandRegistry {
 
     // 3. No handler found
     console.warn(`[CommandRegistry] No handler registered for command: ${commandId}`);
+  }
+
+  /**
+   * Return all registered command IDs (local handlers + grid command bridge).
+   */
+  getAll(): string[] {
+    const ids = new Set<string>(this.handlers.keys());
+    for (const commandId of Object.keys(GRID_COMMAND_MAP)) {
+      ids.add(commandId);
+    }
+    return Array.from(ids).sort();
   }
 
   /**

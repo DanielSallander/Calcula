@@ -92,6 +92,17 @@ function RecursiveMenuItem({ item, index, executeMenuItem, closeMenu }: Recursiv
           {item.checked !== undefined && (
             <S.CheckIndicator $checked={item.checked} />
           )}
+          {item.rightAction && (
+            <S.RightActionButton
+              onClick={(e) => {
+                e.stopPropagation();
+                item.rightAction!.onClick();
+              }}
+              title={item.rightAction.title}
+            >
+              {item.rightAction.icon}
+            </S.RightActionButton>
+          )}
           {hasChildren && (
             <S.SubmenuArrow>&#9656;</S.SubmenuArrow>
           )}

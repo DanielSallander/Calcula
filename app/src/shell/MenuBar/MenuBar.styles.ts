@@ -190,3 +190,29 @@ export const Separator = styled.div`
   background-color: ${v('--menu-separator')};
   margin: 4px 0;
 `;
+
+export const RightActionButton = styled.button`
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  margin-left: 4px;
+  background: transparent;
+  border: none;
+  cursor: pointer;
+  border-radius: 3px;
+  color: ${v('--accent-color')};
+  flex-shrink: 0;
+
+  &:hover {
+    background-color: ${v('--menu-item-hover-bg')};
+    opacity: 0.85;
+  }
+
+  & > svg {
+    width: 14px;
+    height: 14px;
+  }
+`;

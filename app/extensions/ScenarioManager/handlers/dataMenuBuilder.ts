@@ -1,7 +1,8 @@
 //! FILENAME: app/extensions/ScenarioManager/handlers/dataMenuBuilder.ts
-// PURPOSE: Registers Scenario Manager items in the Data menu.
+// PURPOSE: Registers Scenario Manager items under "What-If Analysis" in the Data menu.
 
 import type { ExtensionContext } from "@api/contract";
+import { IconWhatIfAnalysis, IconScenarioManager } from "@api";
 
 // ============================================================================
 // State
@@ -35,16 +36,24 @@ export function getCurrentSelection() {
 
 export function registerScenarioMenuItems(context: ExtensionContext): void {
   context.ui.menus.registerItem("data", {
-    id: "data:scenarioManager",
-    label: "Scenario Manager...",
-    action: () => {
-      const sel = currentSelection;
-      context.ui.dialogs.show("scenario-manager", {
-        activeRow: sel?.activeRow ?? 0,
-        activeCol: sel?.activeCol ?? 0,
-        endRow: sel?.endRow ?? 0,
-        endCol: sel?.endCol ?? 0,
-      });
-    },
+    id: "data:whatIf",
+    label: "What-If Analysis",
+    icon: IconWhatIfAnalysis,
+    children: [
+      {
+        id: "data:whatIf:scenarioManager",
+        label: "Scenario Manager...",
+        icon: IconScenarioManager,
+        action: () => {
+          const sel = currentSelection;
+          context.ui.dialogs.show("scenario-manager", {
+            activeRow: sel?.activeRow ?? 0,
+            activeCol: sel?.activeCol ?? 0,
+            endRow: sel?.endRow ?? 0,
+            endCol: sel?.endCol ?? 0,
+          });
+        },
+      },
+    ],
   });
 }
