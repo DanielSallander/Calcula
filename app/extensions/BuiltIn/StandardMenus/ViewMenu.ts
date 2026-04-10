@@ -1,6 +1,6 @@
 //! FILENAME: app/extensions/BuiltIn/StandardMenus/ViewMenu.ts
 // REFACTORED: All imports now go through app/src/api (The Facade Rule).
-// UPDATED: Added Split Window, Go To Special, Page Layout View items.
+// UPDATED: Reorganized into submenus (Sidebar, Panels, Freeze Panes).
 
 import { useCallback, useEffect, useState } from 'react';
 import type { MenuDefinition, MenuItemDefinition } from '@api/ui';
@@ -31,6 +31,22 @@ import {
   toggleActivityView,
   ActivityBarExtensions,
 } from '@api/ui';
+import {
+  IconNormalView,
+  IconPageLayoutView,
+  IconPageBreakPreview,
+  IconSidebar,
+  IconPanels,
+  IconFreezePanes,
+  IconFreezeRow,
+  IconFreezeCol,
+  IconFreezeBoth,
+  IconUnfreeze,
+  IconSplitWindow,
+  IconGoToSpecial,
+  IconShowFormulas,
+  IconOtherOptions,
+} from '@api';
 
 export interface ViewMenuHandlers {
   handleFreezeTopRow: () => Promise<void>;
@@ -124,7 +140,7 @@ export function useViewMenu(): { menu: MenuDefinition; handlers: ViewMenuHandler
     }
   }, []);
 
-  // Split Window handler: splits at current selection or at row 5 / col 3 if no multi-cell selection
+  // Split Window handler
   const handleSplitWindow = useCallback(async () => {
     try {
       if (isSplit) {
@@ -156,7 +172,7 @@ export function useViewMenu(): { menu: MenuDefinition; handlers: ViewMenuHandler
     showDialog("go-to-special");
   }, []);
 
-  // Page Layout View handlers
+  // View Mode handlers
   const handleNormalView = useCallback(() => {
     emitAppEvent(AppEvents.VIEW_MODE_CHANGED, { viewMode: "normal" as ViewMode });
     emitAppEvent(AppEvents.GRID_REFRESH);
@@ -224,11 +240,11 @@ export function useViewMenu(): { menu: MenuDefinition; handlers: ViewMenuHandler
   }
 
   // ---------------------------------------------------------------------------
-  // Activity Bar view items
+  // Activity Bar (Sidebar) items
   // ---------------------------------------------------------------------------
 
   const activityBarViews = ActivityBarExtensions.getAllViews();
-  const activityBarItems: MenuItemDefinition[] = activityBarViews.map((view) => ({
+  const sidebarChildren: MenuItemDefinition[] = activityBarViews.map((view) => ({
     id: `view.activity.${view.id}`,
     label: view.title,
     shortcut: view.id === 'explorer' ? 'Ctrl+Shift+E' :
@@ -239,6 +255,20 @@ export function useViewMenu(): { menu: MenuDefinition; handlers: ViewMenuHandler
   }));
 
   // ---------------------------------------------------------------------------
+  // Panels submenu children (Taskpane toggle + dynamic panes)
+  // ---------------------------------------------------------------------------
+
+  const panelsChildren: MenuItemDefinition[] = [
+    { id: 'view.showTaskpane', label: 'Show Taskpane', action: openTaskPane, hidden: isTaskPaneOpen },
+    { id: 'view.hideTaskpane', label: 'Hide Taskpane', action: closeTaskPane, hidden: !isTaskPaneOpen },
+  ];
+
+  if (dynamicPaneItems.length > 0) {
+    panelsChildren.push({ id: 'view.panelsSep', label: '', separator: true });
+    panelsChildren.push(...dynamicPaneItems);
+  }
+
+  // ---------------------------------------------------------------------------
   // Build menu
   // ---------------------------------------------------------------------------
 
@@ -247,57 +277,75 @@ export function useViewMenu(): { menu: MenuDefinition; handlers: ViewMenuHandler
 
   // View Mode section
   items.push(
-    { id: 'view.normalView', label: 'Normal View', action: handleNormalView, checked: currentViewMode === "normal" },
-    { id: 'view.pageLayoutView', label: 'Page Layout View', action: handlePageLayoutView, checked: currentViewMode === "pageLayout" },
-    { id: 'view.pageBreakPreview', label: 'Page Break Preview', action: handlePageBreakPreview, checked: currentViewMode === "pageBreakPreview" },
+    { id: 'view.normalView', label: 'Normal View', icon: IconNormalView, action: handleNormalView, checked: currentViewMode === "normal" },
+    { id: 'view.pageLayoutView', label: 'Page Layout View', icon: IconPageLayoutView, action: handlePageLayoutView, checked: currentViewMode === "pageLayout" },
+    { id: 'view.pageBreakPreview', label: 'Page Break Preview', icon: IconPageBreakPreview, action: handlePageBreakPreview, checked: currentViewMode === "pageBreakPreview" },
     { id: 'view.sepViews', label: '', separator: true },
   );
 
-  // Side Bar section
-  if (activityBarItems.length > 0) {
-    items.push(...activityBarItems);
-    items.push({ id: 'view.sepActivity', label: '', separator: true });
+  // Sidebar submenu (Activity Bar views)
+  if (sidebarChildren.length > 0) {
+    items.push({
+      id: 'view.sidebar',
+      label: 'Sidebar',
+      icon: IconSidebar,
+      children: sidebarChildren,
+    });
   }
 
-  // Task Pane section
-  items.push(
-    { id: 'view.showTaskpane', label: 'Show Taskpane', action: openTaskPane, hidden: isTaskPaneOpen },
-    { id: 'view.hideTaskpane', label: 'Hide Taskpane', action: closeTaskPane, hidden: !isTaskPaneOpen },
-  );
+  // Panels submenu (Task pane views)
+  items.push({
+    id: 'view.panels',
+    label: 'Panels',
+    icon: IconPanels,
+    children: panelsChildren,
+  });
 
-  if (dynamicPaneItems.length > 0) {
-    items.push({ id: 'view.sepPanes', label: '', separator: true });
-    items.push(...dynamicPaneItems);
-  }
+  items.push({ id: 'view.sep1', label: '', separator: true });
 
-  // Freeze Panes section
-  items.push(
-    { id: 'view.sep1', label: '', separator: true },
-    { id: 'view.freezeRow', label: 'Freeze Top Row', action: handleFreezeTopRow, checked: freezeState.row },
-    { id: 'view.freezeCol', label: 'Freeze First Column', action: handleFreezeFirstColumn, checked: freezeState.col },
-    { id: 'view.sep2', label: '', separator: true },
-    { id: 'view.freezeBoth', label: 'Freeze Top Row and First Column', action: handleFreezeBoth, checked: freezeState.row && freezeState.col },
-    { id: 'view.sep3', label: '', separator: true },
-    { id: 'view.unfreeze', label: 'Unfreeze Panes', action: handleUnfreeze, disabled: !freezeState.row && !freezeState.col },
-  );
+  // Freeze Panes submenu
+  items.push({
+    id: 'view.freezePanes',
+    label: 'Freeze Panes',
+    icon: IconFreezePanes,
+    children: [
+      { id: 'view.freezeRow', label: 'Freeze Top Row', icon: IconFreezeRow, action: handleFreezeTopRow, checked: freezeState.row },
+      { id: 'view.freezeCol', label: 'Freeze First Column', icon: IconFreezeCol, action: handleFreezeFirstColumn, checked: freezeState.col },
+      { id: 'view.freezeSep', label: '', separator: true },
+      { id: 'view.freezeBoth', label: 'Freeze Top Row and First Column', icon: IconFreezeBoth, action: handleFreezeBoth, checked: freezeState.row && freezeState.col },
+      { id: 'view.unfreezeSep', label: '', separator: true },
+      { id: 'view.unfreeze', label: 'Unfreeze Panes', icon: IconUnfreeze, action: handleUnfreeze, disabled: !freezeState.row && !freezeState.col },
+    ],
+  });
 
-  // Split Window section
-  items.push(
-    { id: 'view.sep4', label: '', separator: true },
-    { id: 'view.split', label: isSplit ? 'Remove Split' : 'Split Window', action: isSplit ? handleRemoveSplit : handleSplitWindow },
-  );
+  // Split Window
+  items.push({
+    id: 'view.split',
+    label: isSplit ? 'Remove Split' : 'Split Window',
+    icon: IconSplitWindow,
+    action: isSplit ? handleRemoveSplit : handleSplitWindow,
+  });
 
-  // Go To Special section
-  items.push(
-    { id: 'view.sep5', label: '', separator: true },
-    { id: 'view.goToSpecial', label: 'Go To Special...', action: handleGoToSpecial, shortcut: 'Ctrl+G' },
-  );
+  items.push({ id: 'view.sep2', label: '', separator: true });
 
-  // Show Formulas section
-  items.push(
-    { id: 'view.sep6', label: '', separator: true },
-    { id: 'view.showFormulas', label: 'Show Formulas', action: handleToggleShowFormulas, checked: gridState.showFormulas, shortcut: 'Ctrl+`' },
-  );
+  // Go To Special
+  items.push({
+    id: 'view.goToSpecial',
+    label: 'Go To Special...',
+    icon: IconGoToSpecial,
+    action: handleGoToSpecial,
+    shortcut: 'Ctrl+G',
+  });
+
+  // Show Formulas
+  items.push({
+    id: 'view.showFormulas',
+    label: 'Show Formulas',
+    icon: IconShowFormulas,
+    action: handleToggleShowFormulas,
+    checked: gridState.showFormulas,
+    shortcut: 'Ctrl+`',
+  });
 
   const menu: MenuDefinition = {
     id: 'view',

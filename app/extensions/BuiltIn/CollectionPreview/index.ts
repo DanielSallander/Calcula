@@ -14,7 +14,7 @@ import {
   registerMenuItem,
   notifyMenusChanged,
 } from "@api/ui";
-import { ExtensionRegistry } from "@api/extensions";
+import { ExtensionRegistry, IconOtherOptions } from "@api";
 import { getCellCollection } from "@api/lib";
 import { CollectionPreviewPanel } from "./components/CollectionPreviewPanel";
 
@@ -76,6 +76,7 @@ function activate(context: ExtensionContext): void {
   const menuItem: import("../../../src/api/uiTypes").MenuItemDefinition = {
     id: "view.otherOptions",
     label: "Other Options",
+    icon: IconOtherOptions,
     children: [
       {
         id: "view.otherOptions.autoShowCollection",

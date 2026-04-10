@@ -8,6 +8,11 @@ import type { ExtensionModule, ExtensionContext } from "@api/contract";
 import {
   ExtensionRegistry,
   AppEvents,
+  IconPageBreaks,
+  IconInsertPageBreak,
+  IconRemovePageBreak,
+  IconResetPageBreaks,
+  IconPrintArea,
 } from "@api";
 import type { Selection } from "@api";
 import {
@@ -383,78 +388,102 @@ function activate(context: ExtensionContext): void {
   );
   cleanupFns.push(unsubViewMode);
 
-  // 7. Add Page Layout menu items for page breaks
+  // 7. "Page Breaks" submenu in View menu
   context.ui.menus.registerItem("view", {
-    id: "view.insert-row-page-break",
-    label: "Insert Row Page Break",
-    action: handleInsertRowPageBreak,
+    id: "view.pageBreaks",
+    label: "Page Breaks",
+    icon: IconPageBreaks,
+    children: [
+      {
+        id: "view.pageBreaks:insertRow",
+        label: "Insert Row Page Break",
+        icon: IconInsertPageBreak,
+        action: handleInsertRowPageBreak,
+      },
+      {
+        id: "view.pageBreaks:insertCol",
+        label: "Insert Column Page Break",
+        icon: IconInsertPageBreak,
+        action: handleInsertColPageBreak,
+      },
+      {
+        id: "view.pageBreaks:sep1",
+        label: "",
+        separator: true,
+      },
+      {
+        id: "view.pageBreaks:removeRow",
+        label: "Remove Row Page Break",
+        icon: IconRemovePageBreak,
+        action: handleRemoveRowPageBreak,
+      },
+      {
+        id: "view.pageBreaks:removeCol",
+        label: "Remove Column Page Break",
+        icon: IconRemovePageBreak,
+        action: handleRemoveColPageBreak,
+      },
+      {
+        id: "view.pageBreaks:sep2",
+        label: "",
+        separator: true,
+      },
+      {
+        id: "view.pageBreaks:resetAll",
+        label: "Reset All Page Breaks",
+        icon: IconResetPageBreaks,
+        action: handleResetAllPageBreaks,
+      },
+    ],
   });
 
+  // 8. "Print Area" submenu in View menu
   context.ui.menus.registerItem("view", {
-    id: "view.insert-col-page-break",
-    label: "Insert Column Page Break",
-    action: handleInsertColPageBreak,
-  });
-
-  context.ui.menus.registerItem("view", {
-    id: "view.remove-row-page-break",
-    label: "Remove Row Page Break",
-    action: handleRemoveRowPageBreak,
-  });
-
-  context.ui.menus.registerItem("view", {
-    id: "view.remove-col-page-break",
-    label: "Remove Column Page Break",
-    action: handleRemoveColPageBreak,
-  });
-
-  context.ui.menus.registerItem("view", {
-    id: "view.reset-all-page-breaks",
-    label: "Reset All Page Breaks",
-    action: handleResetAllPageBreaks,
-  });
-
-  // 8. Add Page Layout menu items for Print Area & Titles
-  context.ui.menus.registerItem("view", {
-    id: "view.print-area-separator",
-    label: "",
-    separator: true,
-  });
-
-  context.ui.menus.registerItem("view", {
-    id: "view.set-print-area",
-    label: "Set Print Area",
-    action: handleSetPrintArea,
-  });
-
-  context.ui.menus.registerItem("view", {
-    id: "view.clear-print-area",
-    label: "Clear Print Area",
-    action: handleClearPrintArea,
-  });
-
-  context.ui.menus.registerItem("view", {
-    id: "view.set-title-rows",
-    label: "Rows to Repeat at Top...",
-    action: handleSetPrintTitleRows,
-  });
-
-  context.ui.menus.registerItem("view", {
-    id: "view.clear-title-rows",
-    label: "Clear Title Rows",
-    action: handleClearPrintTitleRows,
-  });
-
-  context.ui.menus.registerItem("view", {
-    id: "view.set-title-cols",
-    label: "Columns to Repeat at Left...",
-    action: handleSetPrintTitleCols,
-  });
-
-  context.ui.menus.registerItem("view", {
-    id: "view.clear-title-cols",
-    label: "Clear Title Columns",
-    action: handleClearPrintTitleCols,
+    id: "view.printArea",
+    label: "Print Area",
+    icon: IconPrintArea,
+    children: [
+      {
+        id: "view.printArea:set",
+        label: "Set Print Area",
+        action: handleSetPrintArea,
+      },
+      {
+        id: "view.printArea:clear",
+        label: "Clear Print Area",
+        action: handleClearPrintArea,
+      },
+      {
+        id: "view.printArea:sep",
+        label: "",
+        separator: true,
+      },
+      {
+        id: "view.printArea:setTitleRows",
+        label: "Rows to Repeat at Top...",
+        action: handleSetPrintTitleRows,
+      },
+      {
+        id: "view.printArea:clearTitleRows",
+        label: "Clear Title Rows",
+        action: handleClearPrintTitleRows,
+      },
+      {
+        id: "view.printArea:sep2",
+        label: "",
+        separator: true,
+      },
+      {
+        id: "view.printArea:setTitleCols",
+        label: "Columns to Repeat at Left...",
+        action: handleSetPrintTitleCols,
+      },
+      {
+        id: "view.printArea:clearTitleCols",
+        label: "Clear Title Columns",
+        action: handleClearPrintTitleCols,
+      },
+    ],
   });
 
   isActivated = true;

@@ -209,6 +209,190 @@ export const IconDeleteAll = (
 );
 
 // ============================================================================
+// View Menu Icons
+// ============================================================================
+
+/** Monitor / screen (Normal View) */
+export const IconNormalView = (
+  <svg viewBox="0 0 16 16" fill={fill} stroke={stroke} strokeWidth="1.3" style={iconStyle}>
+    <rect x="1" y="2" width="14" height="10" rx="1.5" />
+    <line x1="5" y1="14" x2="11" y2="14" />
+    <line x1="8" y1="12" x2="8" y2="14" />
+  </svg>
+);
+
+/** Page with layout lines (Page Layout View) */
+export const IconPageLayoutView = (
+  <svg viewBox="0 0 16 16" fill={fill} stroke={stroke} strokeWidth="1.2" style={iconStyle}>
+    <rect x="2" y="1" width="12" height="14" rx="1" />
+    <line x1="4" y1="4" x2="12" y2="4" />
+    <line x1="4" y1="7" x2="12" y2="7" />
+    <line x1="4" y1="10" x2="9" y2="10" />
+  </svg>
+);
+
+/** Dashed page grid (Page Break Preview) */
+export const IconPageBreakPreview = (
+  <svg viewBox="0 0 16 16" fill={fill} stroke={stroke} strokeWidth="1.2" style={iconStyle}>
+    <rect x="1" y="1" width="14" height="14" rx="1" />
+    <line x1="1" y1="8" x2="15" y2="8" strokeDasharray="2 2" />
+    <line x1="8" y1="1" x2="8" y2="15" strokeDasharray="2 2" />
+  </svg>
+);
+
+/** Sidebar panel (Sidebar submenu) */
+export const IconSidebar = (
+  <svg viewBox="0 0 16 16" fill={fill} stroke={stroke} strokeWidth="1.3" style={iconStyle}>
+    <rect x="1" y="2" width="14" height="12" rx="1.5" />
+    <line x1="5.5" y1="2" x2="5.5" y2="14" />
+    <line x1="2.5" y1="5.5" x2="4.5" y2="5.5" strokeWidth="1" />
+    <line x1="2.5" y1="8" x2="4.5" y2="8" strokeWidth="1" />
+    <line x1="2.5" y1="10.5" x2="4.5" y2="10.5" strokeWidth="1" />
+  </svg>
+);
+
+/** Right panel (Panels submenu) */
+export const IconPanels = (
+  <svg viewBox="0 0 16 16" fill={fill} stroke={stroke} strokeWidth="1.3" style={iconStyle}>
+    <rect x="1" y="2" width="14" height="12" rx="1.5" />
+    <line x1="10.5" y1="2" x2="10.5" y2="14" />
+  </svg>
+);
+
+/** Snowflake / pin (Freeze Panes submenu) */
+export const IconFreezePanes = (
+  <svg viewBox="0 0 16 16" fill={fill} stroke={stroke} strokeWidth="1.3" style={iconStyle}>
+    <line x1="8" y1="1" x2="8" y2="15" />
+    <line x1="1" y1="8" x2="15" y2="8" />
+    <line x1="3" y1="3" x2="13" y2="13" strokeWidth="0.8" />
+    <line x1="13" y1="3" x2="3" y2="13" strokeWidth="0.8" />
+    <line x1="6" y1="2.5" x2="8" y2="4.5" strokeWidth="0.8" />
+    <line x1="10" y1="2.5" x2="8" y2="4.5" strokeWidth="0.8" />
+    <line x1="6" y1="13.5" x2="8" y2="11.5" strokeWidth="0.8" />
+    <line x1="10" y1="13.5" x2="8" y2="11.5" strokeWidth="0.8" />
+  </svg>
+);
+
+/** Horizontal split (Freeze Top Row) */
+export const IconFreezeRow = (
+  <svg viewBox="0 0 16 16" fill={fill} stroke={stroke} strokeWidth="1.2" style={iconStyle}>
+    <rect x="1" y="2" width="14" height="12" rx="1" />
+    <line x1="1" y1="6" x2="15" y2="6" strokeWidth="2" />
+  </svg>
+);
+
+/** Vertical split (Freeze First Column) */
+export const IconFreezeCol = (
+  <svg viewBox="0 0 16 16" fill={fill} stroke={stroke} strokeWidth="1.2" style={iconStyle}>
+    <rect x="1" y="2" width="14" height="12" rx="1" />
+    <line x1="5" y1="2" x2="5" y2="14" strokeWidth="2" />
+  </svg>
+);
+
+/** Cross split (Freeze Both) */
+export const IconFreezeBoth = (
+  <svg viewBox="0 0 16 16" fill={fill} stroke={stroke} strokeWidth="1.2" style={iconStyle}>
+    <rect x="1" y="2" width="14" height="12" rx="1" />
+    <line x1="1" y1="6" x2="15" y2="6" strokeWidth="2" />
+    <line x1="5" y1="2" x2="5" y2="14" strokeWidth="2" />
+  </svg>
+);
+
+/** Broken ice (Unfreeze Panes) */
+export const IconUnfreeze = (
+  <svg viewBox="0 0 16 16" fill={fill} stroke={stroke} strokeWidth="1.2" style={iconStyle}>
+    <rect x="1" y="2" width="14" height="12" rx="1" />
+    <line x1="1" y1="6" x2="15" y2="6" strokeDasharray="2 2" opacity="0.5" />
+    <line x1="5" y1="2" x2="5" y2="14" strokeDasharray="2 2" opacity="0.5" />
+  </svg>
+);
+
+/** Two-pane split (Split Window) */
+export const IconSplitWindow = (
+  <svg viewBox="0 0 16 16" fill={fill} stroke={stroke} strokeWidth="1.3" style={iconStyle}>
+    <rect x="1" y="2" width="14" height="12" rx="1.5" />
+    <line x1="1" y1="8" x2="15" y2="8" />
+    <line x1="8" y1="2" x2="8" y2="14" />
+  </svg>
+);
+
+/** Magnifying glass with arrow (Go To Special) */
+export const IconGoToSpecial = (
+  <svg viewBox="0 0 16 16" fill={fill} stroke={stroke} strokeWidth="1.3" style={iconStyle}>
+    <circle cx="6.5" cy="6.5" r="4.5" />
+    <line x1="10" y1="10" x2="14" y2="14" strokeWidth="2" strokeLinecap="round" />
+    <polyline points="5,6.5 7,8.5 9,4.5" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" />
+  </svg>
+);
+
+/** fx= (Show Formulas) */
+export const IconShowFormulas = (
+  <svg viewBox="0 0 16 16" fill={fill} stroke={stroke} strokeWidth="1.2" style={iconStyle}>
+    <rect x="1" y="2" width="14" height="12" rx="1" />
+    <text x="4" y="11" fontSize="7" fontWeight="600" fontStyle="italic" fill={stroke} stroke="none" fontFamily="serif">fx</text>
+  </svg>
+);
+
+/** Dashed line between pages (Page Breaks submenu) */
+export const IconPageBreaks = (
+  <svg viewBox="0 0 16 16" fill={fill} stroke={stroke} strokeWidth="1.2" style={iconStyle}>
+    <rect x="2" y="1" width="12" height="5.5" rx="0.5" />
+    <rect x="2" y="9.5" width="12" height="5.5" rx="0.5" />
+    <line x1="1" y1="8" x2="15" y2="8" strokeDasharray="2.5 2" strokeWidth="1.5" />
+  </svg>
+);
+
+/** Page break + (Insert Page Break) */
+export const IconInsertPageBreak = (
+  <svg viewBox="0 0 16 16" fill={fill} stroke={stroke} strokeWidth="1.2" style={iconStyle}>
+    <rect x="2" y="1" width="12" height="5" rx="0.5" />
+    <rect x="2" y="10" width="12" height="5" rx="0.5" />
+    <line x1="1" y1="8" x2="15" y2="8" strokeDasharray="2 2" />
+    <line x1="11" y1="5.5" x2="11" y2="10.5" strokeWidth="1.5" />
+    <line x1="8.5" y1="8" x2="13.5" y2="8" strokeWidth="1.5" />
+  </svg>
+);
+
+/** Page break - (Remove Page Break) */
+export const IconRemovePageBreak = (
+  <svg viewBox="0 0 16 16" fill={fill} stroke={stroke} strokeWidth="1.2" style={iconStyle}>
+    <rect x="2" y="1" width="12" height="5" rx="0.5" />
+    <rect x="2" y="10" width="12" height="5" rx="0.5" />
+    <line x1="1" y1="8" x2="15" y2="8" strokeDasharray="2 2" opacity="0.5" />
+    <line x1="9" y1="8" x2="14" y2="8" strokeWidth="1.8" />
+  </svg>
+);
+
+/** Page break X (Reset All Page Breaks) */
+export const IconResetPageBreaks = (
+  <svg viewBox="0 0 16 16" fill={fill} stroke={stroke} strokeWidth="1.2" style={iconStyle}>
+    <rect x="2" y="1" width="12" height="5" rx="0.5" />
+    <rect x="2" y="10" width="12" height="5" rx="0.5" />
+    <line x1="1" y1="8" x2="15" y2="8" strokeDasharray="2 2" opacity="0.5" />
+    <line x1="9.5" y1="6" x2="13.5" y2="10" strokeWidth="1.6" />
+    <line x1="13.5" y1="6" x2="9.5" y2="10" strokeWidth="1.6" />
+  </svg>
+);
+
+/** Dotted rectangle (Print Area submenu) */
+export const IconPrintArea = (
+  <svg viewBox="0 0 16 16" fill={fill} stroke={stroke} strokeWidth="1.3" style={iconStyle}>
+    <rect x="2" y="2" width="12" height="12" rx="1" strokeDasharray="3 2" />
+    <line x1="5" y1="6" x2="11" y2="6" strokeWidth="1" />
+    <line x1="5" y1="8.5" x2="11" y2="8.5" strokeWidth="1" />
+    <line x1="5" y1="11" x2="8" y2="11" strokeWidth="1" />
+  </svg>
+);
+
+/** Gear (Other Options) */
+export const IconOtherOptions = (
+  <svg viewBox="0 0 16 16" fill={fill} stroke={stroke} strokeWidth="1.2" style={iconStyle}>
+    <circle cx="8" cy="8" r="2.5" />
+    <path d="M8 1v2M8 13v2M1 8h2M13 8h2M3.05 3.05l1.4 1.4M11.55 11.55l1.4 1.4M3.05 12.95l1.4-1.4M11.55 4.45l1.4-1.4" strokeLinecap="round" />
+  </svg>
+);
+
+// ============================================================================
 // Data Menu Icons
 // ============================================================================
 
