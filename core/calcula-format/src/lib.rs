@@ -23,7 +23,7 @@ mod manifest;
 mod cell_ref;
 mod sheet_data;
 mod sheet_styles;
-mod sheet_layout;
+pub mod sheet_layout;
 mod zip_io;
 pub mod features;
 pub mod ai;
@@ -31,7 +31,7 @@ pub mod ai;
 pub use error::FormatError;
 pub use manifest::{Manifest, SheetEntry};
 
-pub mod package;
+pub mod publish;
 
 use persistence::Workbook;
 

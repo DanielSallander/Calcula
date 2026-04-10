@@ -1043,36 +1043,35 @@ export {
 } from "./lib";
 
 // ============================================================================
-// Distribution API
+// Linked Sheets (Centralized Report Distribution)
 // ============================================================================
 
 export {
-  registerRegistryProvider,
-  unregisterRegistryProvider,
-  getRegistryProviders,
-  getRegistryProvider,
-  parsePackageInfo,
-  browsePackages,
-  exportAsPackage,
-  importPackage,
-  downloadPackage,
-  publishPackage,
-} from "./distribution";
+  publishSheets,
+  getPublishInfo,
+  unpublishSheet,
+  browsePublishedSheets,
+  linkPublishedSheets,
+  refreshLinkedSheet,
+  refreshAllLinkedSheets,
+  unlinkSheet,
+  getLinkedSheetStatus,
+  getLinkedSheets,
+} from "./linkedSheets";
 
 export type {
-  PackageInfo,
-  PackageContent,
-  DataSourceDeclaration,
-  DataSourceColumn,
-  ImportResult,
-  ImportBinding,
-  PublishResult,
-  RegistryProvider,
-  RegistryQuery,
-  RegistrySearchResult,
-  VersionInfo,
-  UpdateInfo,
-} from "./distribution";
+  PublishedSheetInfo,
+  PublishedConnection,
+  ConnectionParameter,
+  ConnectionInput,
+  PublishManifestInfo,
+  PublishSheetsResult,
+  LinkResult as LinkedLinkResult,
+  RefreshResult,
+  LinkState,
+  LinkedSheetStatus,
+  LinkedSheetInfo,
+} from "./linkedSheets";
 
 // ============================================================================
 // Scenario Manager

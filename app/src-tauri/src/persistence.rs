@@ -399,6 +399,9 @@ pub fn save_file(
     workbook.user_files = user_files_state.files.lock().map_err(|e| e.to_string())?.clone();
     workbook.theme = state.theme.lock().unwrap().clone();
 
+    // Save linked sheet metadata into user_files
+    save_linked_sheets_metadata(&state, &mut workbook)?;
+
     let path_buf = PathBuf::from(&path);
 
     // Route by file extension
@@ -436,7 +439,7 @@ pub fn open_file(
         .unwrap_or("")
         .to_lowercase();
 
-    let workbook = match ext.as_str() {
+    let mut workbook = match ext.as_str() {
         "cala" => load_calcula(&path_buf).map_err(|e| e.to_string())?,
         _ => load_xlsx(&path_buf).map_err(|e| e.to_string())?,
     };
@@ -484,7 +487,8 @@ pub fn open_file(
     // Restore slicers from workbook
     restore_slicers(&workbook.slicers, &slicer_state);
 
-    // Restore user files from workbook
+    // Restore user files from workbook (extract linked sheets metadata first)
+    restore_linked_sheets_metadata(&state, &mut workbook)?;
     *user_files_state.files.lock().map_err(|e| e.to_string())? = workbook.user_files;
 
     // Restore document theme
@@ -567,6 +571,9 @@ pub fn new_file(
 
     // Clear user files
     user_files_state.files.lock().map_err(|e| e.to_string())?.clear();
+
+    // Clear linked sheets
+    state.linked_sheets.lock().map_err(|e| e.to_string())?.clear();
 
     *file_state.current_path.lock().map_err(|e| e.to_string())? = None;
     *file_state.is_modified.lock().map_err(|e| e.to_string())? = false;
@@ -914,4 +921,51 @@ pub fn write_text_file(path: String, content: String, encoding: Option<String>) 
     };
 
     std::fs::write(&path_buf, bytes).map_err(|e| format!("Failed to write file: {}", e))
+}
+
+// ============================================================================
+// LINKED SHEETS METADATA (save/restore via user_files)
+// ============================================================================
+
+const LINKED_SHEETS_META_KEY: &str = "_meta/linked_sheets.json";
+
+/// Save linked sheet metadata into the workbook's user_files map.
+fn save_linked_sheets_metadata(
+    state: &State<AppState>,
+    workbook: &mut Workbook,
+) -> Result<(), String> {
+    let linked = state.linked_sheets.lock().map_err(|e| e.to_string())?;
+    if linked.is_empty() {
+        // Remove stale metadata if present
+        workbook.user_files.remove(LINKED_SHEETS_META_KEY);
+        return Ok(());
+    }
+
+    let json = serde_json::to_string_pretty(&*linked)
+        .map_err(|e| format!("Failed to serialize linked sheets: {}", e))?;
+    workbook
+        .user_files
+        .insert(LINKED_SHEETS_META_KEY.to_string(), json.into_bytes());
+    Ok(())
+}
+
+/// Restore linked sheet metadata from the workbook's user_files map.
+/// Removes the metadata key from user_files so it doesn't show as a virtual file.
+fn restore_linked_sheets_metadata(
+    state: &State<AppState>,
+    workbook: &mut Workbook,
+) -> Result<(), String> {
+    let mut linked = state.linked_sheets.lock().map_err(|e| e.to_string())?;
+    linked.clear();
+
+    if let Some(bytes) = workbook.user_files.remove(LINKED_SHEETS_META_KEY) {
+        let json = String::from_utf8(bytes)
+            .map_err(|e| format!("Invalid UTF-8 in linked sheets metadata: {}", e))?;
+        let infos: Vec<calcula_format::publish::linked::LinkedSheetInfo> =
+            serde_json::from_str(&json)
+                .map_err(|e| format!("Failed to parse linked sheets metadata: {}", e))?;
+        *linked = infos;
+    }
+
+    Ok(())
 }

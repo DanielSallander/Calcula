@@ -79,7 +79,7 @@ import SelectVisibleCellsExtension from "./SelectVisibleCells";
 import QuickAccessExtension from "./QuickAccess";
 import BusinessIntelligenceExtension from "./BusinessIntelligence";
 import AIChatExtension from "./AIChat";
-import ReportStoreExtension from "./ReportStore";
+import LinkedSheetsExtension from "./LinkedSheets";
 
 // Dev-only extensions
 import TestRunnerExtension from "./TestRunner";
@@ -172,7 +172,7 @@ export const builtInExtensions: ExtensionModule[] = [
   ControlsExtension,
   BusinessIntelligenceExtension,
   AIChatExtension,
-  ReportStoreExtension,
+  LinkedSheetsExtension,
   // Quick Access (loads last — needs all menu items registered for command palette)
   QuickAccessExtension,
   // Test Runner (dev-only, macro-based integration tests)

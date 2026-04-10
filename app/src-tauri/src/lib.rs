@@ -43,7 +43,7 @@ pub mod autofilter;
 pub mod hyperlinks;
 pub mod protection;
 pub mod grouping;
-pub mod distribution;
+pub mod linked_sheets;
 pub mod conditional_formatting;
 pub mod tables;
 pub mod goal_seek;
@@ -248,6 +248,8 @@ pub struct AppState {
     pub theme: Mutex<engine::ThemeDefinition>,
     /// Scenario Manager: per-sheet list of scenarios
     pub scenarios: Mutex<HashMap<usize, Vec<api_types::Scenario>>>,
+    /// Linked sheets: tracks which sheets are linked to published sources
+    pub linked_sheets: Mutex<Vec<calcula_format::publish::linked::LinkedSheetInfo>>,
 }
 
 impl AppState {
@@ -329,6 +331,7 @@ pub fn create_app_state() -> AppState {
         advanced_filter_hidden_rows: Mutex::new(HashMap::new()),
         theme: Mutex::new(engine::ThemeDefinition::default()),
         scenarios: Mutex::new(HashMap::new()),
+        linked_sheets: Mutex::new(Vec::new()),
     }
 }
 
@@ -3934,13 +3937,17 @@ pub fn run() {
             mcp::mcp_stop,
             mcp::mcp_status,
             mcp::mcp_set_port,
-            // Distribution / Package commands
-            distribution::parse_package_info,
-            distribution::browse_packages,
-            distribution::export_as_package,
-            distribution::import_package,
-            distribution::download_package,
-            distribution::publish_package,
+            // Linked Sheet commands
+            linked_sheets::publish_sheets,
+            linked_sheets::get_publish_info,
+            linked_sheets::unpublish_sheet,
+            linked_sheets::browse_published_sheets,
+            linked_sheets::link_published_sheets,
+            linked_sheets::refresh_linked_sheet,
+            linked_sheets::refresh_all_linked_sheets,
+            linked_sheets::unlink_sheet,
+            linked_sheets::get_linked_sheet_status,
+            linked_sheets::get_linked_sheets,
             // Slicer commands
             slicer::create_slicer,
             slicer::delete_slicer,

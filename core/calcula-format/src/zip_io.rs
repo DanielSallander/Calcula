@@ -376,6 +376,7 @@ mod tests {
             tables: vec![],
             slicers: vec![],
             user_files: HashMap::new(),
+            theme: ThemeDefinition::default(),
         }
     }
 

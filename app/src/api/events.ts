@@ -86,6 +86,9 @@ export const AppEvents = {
   BEFORE_NEW: "app:before-new",
   AFTER_NEW: "app:after-new",
   BEFORE_CLOSE: "app:before-close",
+
+  // Linked sheet events
+  LINKED_SHEETS_REFRESHED: "app:linked-sheets-refreshed",
 } as const;
 
 /** Payload emitted with FILL_COMPLETED event. */
