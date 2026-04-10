@@ -5,7 +5,7 @@
 
 import type { ExtensionModule, ExtensionContext } from "@api/contract";
 import { CoreCommands } from "@api/commands";
-import { ExtensionRegistry } from "@api/extensions";
+import { ExtensionRegistry, IconFormatPainter } from "@api";
 import { registerMenuItem } from "@api/ui";
 import { activateFormatPainter, deactivateFormatPainter } from "./formatPainterLogic";
 import { isFormatPainterActive } from "./formatPainterState";
@@ -77,6 +77,7 @@ function activate(context: ExtensionContext): void {
   registerMenuItem("edit", {
     id: "edit:formatPainter",
     label: "Format Painter",
+    icon: IconFormatPainter,
     shortcut: "Ctrl+Shift+C",
     commandId: CoreCommands.FORMAT_PAINTER,
     action: () => context.commands.execute(CoreCommands.FORMAT_PAINTER),

@@ -2,6 +2,7 @@
 import { useCallback } from 'react';
 import type { MenuDefinition } from '@api/ui';
 import { showDialog } from '@api/ui';
+import { IconInsertTable, IconInsertPivot, IconInsertSlicer, IconInsertChart } from '@api';
 
 const TABLE_DIALOG_ID = 'table:createDialog';
 const PIVOT_DIALOG_ID = 'pivot:createDialog';
@@ -30,12 +31,12 @@ export function useInsertMenu(): { menu: MenuDefinition } {
     label: 'Insert',
     order: 40,
     items: [
-      { id: 'insert.table', label: 'Table...', shortcut: 'Ctrl+T', action: handleInsertTable },
+      { id: 'insert.table', label: 'Table...', icon: IconInsertTable, shortcut: 'Ctrl+T', action: handleInsertTable },
       { id: 'insert.sep1', label: '', separator: true },
-      { id: 'insert.pivot', label: 'PivotTable...', action: handleInsertPivotTable },
-      { id: 'insert.slicer', label: 'Slicer...', action: handleInsertSlicer },
+      { id: 'insert.pivot', label: 'PivotTable...', icon: IconInsertPivot, action: handleInsertPivotTable },
+      { id: 'insert.slicer', label: 'Slicer...', icon: IconInsertSlicer, action: handleInsertSlicer },
       { id: 'insert.sep2', label: '', separator: true },
-      { id: 'insert.chart', label: 'Chart...', action: handleInsertChart },
+      { id: 'insert.chart', label: 'Chart...', icon: IconInsertChart, action: handleInsertChart },
     ],
   };
 

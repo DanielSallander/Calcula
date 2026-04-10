@@ -4,6 +4,7 @@
 import { useCallback } from 'react';
 import { workspace } from '@api/system';
 import type { MenuDefinition } from '@api/ui';
+import { IconNew, IconOpen, IconSave, IconSaveAs } from '@api';
 
 export interface FileMenuHandlers {
   handleNew: () => Promise<void>;
@@ -74,11 +75,11 @@ export function useFileMenu(): { menu: MenuDefinition; handlers: FileMenuHandler
     label: 'File',
     order: 10,
     items: [
-      { id: 'file.new', label: 'New', shortcut: 'Ctrl+N', action: handleNew },
-      { id: 'file.open', label: 'Open...', shortcut: 'Ctrl+O', action: handleOpen },
+      { id: 'file.new', label: 'New', icon: IconNew, shortcut: 'Ctrl+N', action: handleNew },
+      { id: 'file.open', label: 'Open...', icon: IconOpen, shortcut: 'Ctrl+O', action: handleOpen },
       { id: 'file.sep1', label: '', separator: true },
-      { id: 'file.save', label: 'Save', shortcut: 'Ctrl+S', action: handleSave },
-      { id: 'file.saveas', label: 'Save As...', shortcut: 'Ctrl+Shift+S', action: handleSaveAs },
+      { id: 'file.save', label: 'Save', icon: IconSave, shortcut: 'Ctrl+S', action: handleSave },
+      { id: 'file.saveas', label: 'Save As...', icon: IconSaveAs, shortcut: 'Ctrl+Shift+S', action: handleSaveAs },
     ],
   };
 

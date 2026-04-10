@@ -8,6 +8,8 @@ import {
   ExtensionRegistry,
   TaskPaneExtensions,
   removeTaskPaneContextKey,
+  IconConnections,
+  IconGetData,
 } from "@api";
 
 import {
@@ -79,6 +81,7 @@ function activate(context: ExtensionContext): void {
   context.ui.menus.registerItem("externalData", {
     id: "externalData:connections",
     label: "Connections",
+    icon: IconConnections,
     action: () => {
       context.ui.taskPanes.addContextKey("connections");
       context.ui.taskPanes.open(CONNECTIONS_PANE_ID);
@@ -89,6 +92,7 @@ function activate(context: ExtensionContext): void {
   context.ui.menus.registerItem("externalData", {
     id: "externalData:getData",
     label: "Get Data",
+    icon: IconGetData,
     children: [
       {
         id: "externalData:getData:calculaModel",

@@ -6,6 +6,7 @@ import type { ExtensionModule, ExtensionContext } from "@api/contract";
 import {
   DialogExtensions,
   registerMenuItem,
+  IconCustomLists,
 } from "@api";
 import { CustomFillListsDialog } from "./components/CustomFillListsDialog";
 
@@ -34,6 +35,7 @@ function activate(_context: ExtensionContext): void {
   registerMenuItem("edit", {
     id: "customFillLists",
     label: "Custom Lists...",
+    icon: IconCustomLists,
     action: () => {
       DialogExtensions.openDialog("custom-fill-lists");
     },

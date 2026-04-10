@@ -7,7 +7,7 @@ import { CoreCommands } from '@api/commands';
 import { registerMenu } from '@api/ui';
 import type { MenuDefinition } from '@api/ui';
 import { applyFormatting } from '@api/lib';
-import { cellEvents, useGridState } from '@api';
+import { cellEvents, useGridState, IconFormatCells, IconCellStyles } from '@api';
 import { CellStylesGallery } from '../HomeTab/components/CellStylesGallery';
 import type { CellStyleDefinition } from '../HomeTab/components/CellStylesGallery';
 
@@ -74,6 +74,7 @@ export function registerFormatMenu(): void {
       {
         id: 'format:cells',
         label: 'Format Cells...',
+        icon: IconFormatCells,
         shortcut: 'Ctrl+1',
         commandId: CoreCommands.FORMAT_CELLS,
       },
@@ -81,6 +82,7 @@ export function registerFormatMenu(): void {
       {
         id: 'format:cellStyles',
         label: 'Cell Styles',
+        icon: IconCellStyles,
         customContent: (onClose: () => void) =>
           React.createElement(CellStylesMenuPanel, { onClose }),
       },

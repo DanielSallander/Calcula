@@ -8,6 +8,7 @@ import {
   showDialog,
   addConditionalFormat,
   clearConditionalFormatsInRange,
+  IconConditionalFormatting,
 } from "@api";
 
 import type {
@@ -120,6 +121,7 @@ export function registerCFMenuItems(context: ExtensionContext): void {
   context.ui.menus.registerItem("format", {
     id: "format:conditionalFormatting",
     label: "Conditional Formatting",
+    icon: IconConditionalFormatting,
     children: [
       // ---- Highlight Cells Rules ----
       {

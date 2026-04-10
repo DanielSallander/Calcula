@@ -209,6 +209,333 @@ export const IconDeleteAll = (
 );
 
 // ============================================================================
+// File Menu Icons
+// ============================================================================
+
+/** Blank page (New) */
+export const IconNew = (
+  <svg viewBox="0 0 16 16" fill={fill} stroke={stroke} strokeWidth="1.2" style={iconStyle}>
+    <path d="M4 1h6l4 4v10H4V1z" />
+    <path d="M10 1v4h4" />
+  </svg>
+);
+
+/** Open folder (Open) */
+export const IconOpen = (
+  <svg viewBox="0 0 16 16" fill={fill} stroke={stroke} strokeWidth="1.2" style={iconStyle}>
+    <path d="M2 3h4l2 2h6v9H2V3z" />
+    <path d="M2 7h12l-1.5 7H3.5L2 7z" />
+  </svg>
+);
+
+/** Floppy disk (Save) */
+export const IconSave = (
+  <svg viewBox="0 0 16 16" fill={fill} stroke={stroke} strokeWidth="1.2" style={iconStyle}>
+    <path d="M2 1h10l2 2v11H2V1z" />
+    <rect x="4" y="1" width="6" height="5" rx="0.5" />
+    <rect x="4" y="9" width="8" height="5" rx="0.5" />
+    <line x1="8.5" y1="1" x2="8.5" y2="5.5" />
+  </svg>
+);
+
+/** Floppy disk with pencil (Save As) */
+export const IconSaveAs = (
+  <svg viewBox="0 0 16 16" fill={fill} stroke={stroke} strokeWidth="1.2" style={iconStyle}>
+    <path d="M2 1h10l2 2v11H2V1z" opacity="0.6" />
+    <rect x="4" y="1" width="6" height="5" rx="0.5" opacity="0.6" />
+    <rect x="4" y="9" width="8" height="5" rx="0.5" opacity="0.6" />
+    <path d="M10 8l4-4 1.5 1.5-4 4H10V8z" fill={stroke} stroke="none" />
+  </svg>
+);
+
+// ============================================================================
+// Insert Menu Icons
+// ============================================================================
+
+/** Grid table (Insert Table) */
+export const IconInsertTable = (
+  <svg viewBox="0 0 16 16" fill={fill} stroke={stroke} strokeWidth="1.2" style={iconStyle}>
+    <rect x="1" y="1" width="14" height="14" rx="1.5" />
+    <line x1="1" y1="5" x2="15" y2="5" />
+    <line x1="1" y1="9" x2="15" y2="9" />
+    <line x1="5.5" y1="1" x2="5.5" y2="15" />
+    <line x1="10.5" y1="1" x2="10.5" y2="15" />
+  </svg>
+);
+
+/** Pivot arrows (Insert PivotTable) */
+export const IconInsertPivot = (
+  <svg viewBox="0 0 16 16" fill={fill} stroke={stroke} strokeWidth="1.2" style={iconStyle}>
+    <rect x="1" y="1" width="14" height="14" rx="1" />
+    <line x1="1" y1="5" x2="15" y2="5" />
+    <line x1="5" y1="1" x2="5" y2="15" />
+    <polyline points="8,8 11,8" strokeWidth="1.5" />
+    <polyline points="8,8 8,11" strokeWidth="1.5" />
+    <polyline points="10,7 11,8 10,9" strokeWidth="1" />
+    <polyline points="7,10 8,11 9,10" strokeWidth="1" />
+  </svg>
+);
+
+/** Filter card (Insert Slicer) */
+export const IconInsertSlicer = (
+  <svg viewBox="0 0 16 16" fill={fill} stroke={stroke} strokeWidth="1.2" style={iconStyle}>
+    <rect x="2" y="1" width="12" height="14" rx="1.5" />
+    <line x1="2" y1="4.5" x2="14" y2="4.5" />
+    <rect x="4" y="6.5" width="8" height="2" rx="0.5" fill={stroke} stroke="none" opacity="0.3" />
+    <rect x="4" y="9.5" width="8" height="2" rx="0.5" />
+    <rect x="4" y="12.5" width="8" height="1" rx="0.5" fill={stroke} stroke="none" opacity="0.3" />
+  </svg>
+);
+
+/** Bar chart (Insert Chart) */
+export const IconInsertChart = (
+  <svg viewBox="0 0 16 16" fill={fill} stroke={stroke} strokeWidth="1.2" style={iconStyle}>
+    <rect x="2" y="8" width="3" height="6" rx="0.5" fill={stroke} stroke="none" opacity="0.6" />
+    <rect x="6.5" y="4" width="3" height="10" rx="0.5" fill={stroke} stroke="none" opacity="0.8" />
+    <rect x="11" y="6" width="3" height="8" rx="0.5" fill={stroke} stroke="none" />
+    <line x1="1" y1="14.5" x2="15" y2="14.5" />
+  </svg>
+);
+
+/** Bookmark flag (Bookmarks submenu) */
+export const IconBookmarks = (
+  <svg viewBox="0 0 16 16" fill={fill} stroke={stroke} strokeWidth="1.3" style={iconStyle}>
+    <path d="M4 1h8v14l-4-3-4 3V1z" />
+  </svg>
+);
+
+/** Bookmark + (Add Bookmark) */
+export const IconBookmarkAdd = (
+  <svg viewBox="0 0 16 16" fill={fill} stroke={stroke} strokeWidth="1.2" style={iconStyle}>
+    <path d="M3 1h7v14l-3.5-2.5L3 15V1z" opacity="0.6" />
+    <line x1="12" y1="3" x2="12" y2="9" strokeWidth="1.5" />
+    <line x1="9" y1="6" x2="15" y2="6" strokeWidth="1.5" />
+  </svg>
+);
+
+/** Bookmark - (Remove Bookmark) */
+export const IconBookmarkRemove = (
+  <svg viewBox="0 0 16 16" fill={fill} stroke={stroke} strokeWidth="1.2" style={iconStyle}>
+    <path d="M3 1h7v14l-3.5-2.5L3 15V1z" opacity="0.6" />
+    <line x1="9" y1="6" x2="15" y2="6" strokeWidth="1.8" />
+  </svg>
+);
+
+/** Arrow right (Next) */
+export const IconNext = (
+  <svg viewBox="0 0 16 16" fill={fill} stroke={stroke} strokeWidth="1.5" style={iconStyle}>
+    <line x1="2" y1="8" x2="13" y2="8" strokeLinecap="round" />
+    <polyline points="9,4 13,8 9,12" strokeLinecap="round" strokeLinejoin="round" />
+  </svg>
+);
+
+/** Arrow left (Previous) */
+export const IconPrev = (
+  <svg viewBox="0 0 16 16" fill={fill} stroke={stroke} strokeWidth="1.5" style={iconStyle}>
+    <line x1="14" y1="8" x2="3" y2="8" strokeLinecap="round" />
+    <polyline points="7,4 3,8 7,12" strokeLinecap="round" strokeLinejoin="round" />
+  </svg>
+);
+
+// ============================================================================
+// Format Menu Icons
+// ============================================================================
+
+/** Cell with format lines (Format Cells) */
+export const IconFormatCells = (
+  <svg viewBox="0 0 16 16" fill={fill} stroke={stroke} strokeWidth="1.2" style={iconStyle}>
+    <rect x="1" y="2" width="14" height="12" rx="1.5" />
+    <line x1="4" y1="5.5" x2="12" y2="5.5" strokeWidth="1" />
+    <line x1="4" y1="8" x2="12" y2="8" strokeWidth="1" />
+    <line x1="4" y1="10.5" x2="9" y2="10.5" strokeWidth="1" />
+  </svg>
+);
+
+/** Paint palette (Cell Styles) */
+export const IconCellStyles = (
+  <svg viewBox="0 0 16 16" fill={fill} stroke={stroke} strokeWidth="1.2" style={iconStyle}>
+    <path d="M8 1a7 7 0 0 0-1 13.9c1 .2 1-.4 1-1v-.5c-4 .8-5-2-5-2-.7-1.7-1.6-2.2-1.6-2.2-1.3-.9.1-.9.1-.9 1.4.1 2.2 1.5 2.2 1.5 1.3 2.2 3.3 1.5 4.1 1.2.1-.9.5-1.5.9-1.9-3.2-.4-6.6-1.6-6.6-7.2 0-1.6.6-2.9 1.5-3.9-.1-.4-.7-1.8.2-3.8 0 0 1.2-.4 4 1.5a13.5 13.5 0 0 1 7.2 0c2.8-1.9 4-1.5 4-1.5.8 2 .3 3.4.2 3.8.9 1 1.5 2.3 1.5 3.9 0 5.6-3.4 6.8-6.6 7.2" />
+  </svg>
+);
+
+/** Conditional rules (Conditional Formatting) */
+export const IconConditionalFormatting = (
+  <svg viewBox="0 0 16 16" fill={fill} stroke={stroke} strokeWidth="1.2" style={iconStyle}>
+    <rect x="1" y="2" width="14" height="4" rx="0.5" fill={stroke} stroke="none" opacity="0.3" />
+    <rect x="1" y="7" width="14" height="4" rx="0.5" fill={stroke} stroke="none" opacity="0.6" />
+    <rect x="1" y="12" width="8" height="3" rx="0.5" fill={stroke} stroke="none" opacity="0.9" />
+  </svg>
+);
+
+// ============================================================================
+// External Data Menu Icons
+// ============================================================================
+
+/** Database with arrow (Get Data) */
+export const IconGetData = (
+  <svg viewBox="0 0 16 16" fill={fill} stroke={stroke} strokeWidth="1.2" style={iconStyle}>
+    <ellipse cx="8" cy="3.5" rx="6" ry="2.5" />
+    <path d="M2 3.5v9c0 1.4 2.7 2.5 6 2.5s6-1.1 6-2.5v-9" />
+    <ellipse cx="8" cy="8" rx="6" ry="2.5" opacity="0.3" />
+  </svg>
+);
+
+/** CSV file (From CSV) */
+export const IconFromCsv = (
+  <svg viewBox="0 0 16 16" fill={fill} stroke={stroke} strokeWidth="1.1" style={iconStyle}>
+    <path d="M3 1h7l4 4v10H3V1z" />
+    <path d="M10 1v4h4" />
+    <text x="5" y="12.5" fontSize="5" fontWeight="700" fill={stroke} stroke="none" fontFamily="sans-serif">CSV</text>
+  </svg>
+);
+
+/** Arrow up from box (Export) */
+export const IconExport = (
+  <svg viewBox="0 0 16 16" fill={fill} stroke={stroke} strokeWidth="1.3" style={iconStyle}>
+    <path d="M3 8v6h10V8" />
+    <line x1="8" y1="10" x2="8" y2="2" strokeLinecap="round" />
+    <polyline points="5,4.5 8,2 11,4.5" strokeLinecap="round" strokeLinejoin="round" />
+  </svg>
+);
+
+/** Plug (Connections) */
+export const IconConnections = (
+  <svg viewBox="0 0 16 16" fill={fill} stroke={stroke} strokeWidth="1.3" style={iconStyle}>
+    <line x1="4" y1="2" x2="4" y2="6" strokeLinecap="round" />
+    <line x1="8" y1="2" x2="8" y2="6" strokeLinecap="round" />
+    <rect x="2" y="6" width="8" height="3" rx="1" />
+    <line x1="6" y1="9" x2="6" y2="14" strokeLinecap="round" />
+  </svg>
+);
+
+// ============================================================================
+// Edit Menu Icons
+// ============================================================================
+
+/** Curved arrow back (Undo) */
+export const IconUndo = (
+  <svg viewBox="0 0 16 16" fill={fill} stroke={stroke} strokeWidth="1.5" style={iconStyle}>
+    <path d="M4 6h7a3.5 3.5 0 0 1 0 7H8" strokeLinecap="round" />
+    <polyline points="6.5,3.5 4,6 6.5,8.5" strokeLinecap="round" strokeLinejoin="round" />
+  </svg>
+);
+
+/** Curved arrow forward (Redo) */
+export const IconRedo = (
+  <svg viewBox="0 0 16 16" fill={fill} stroke={stroke} strokeWidth="1.5" style={iconStyle}>
+    <path d="M12 6H5a3.5 3.5 0 0 0 0 7h3" strokeLinecap="round" />
+    <polyline points="9.5,3.5 12,6 9.5,8.5" strokeLinecap="round" strokeLinejoin="round" />
+  </svg>
+);
+
+/** Scissors (Cut) */
+export const IconCut = (
+  <svg viewBox="0 0 16 16" fill={fill} stroke={stroke} strokeWidth="1.3" style={iconStyle}>
+    <circle cx="4.5" cy="4" r="2.5" />
+    <circle cx="4.5" cy="12" r="2.5" />
+    <line x1="6.5" y1="5.5" x2="14" y2="12" strokeLinecap="round" />
+    <line x1="6.5" y1="10.5" x2="14" y2="4" strokeLinecap="round" />
+  </svg>
+);
+
+/** Two overlapping pages (Copy) */
+export const IconCopy = (
+  <svg viewBox="0 0 16 16" fill={fill} stroke={stroke} strokeWidth="1.2" style={iconStyle}>
+    <rect x="5" y="4" width="9" height="11" rx="1" />
+    <path d="M11 4V2a1 1 0 0 0-1-1H3a1 1 0 0 0-1 1v9a1 1 0 0 0 1 1h2" />
+  </svg>
+);
+
+/** Clipboard (Paste) */
+export const IconPaste = (
+  <svg viewBox="0 0 16 16" fill={fill} stroke={stroke} strokeWidth="1.2" style={iconStyle}>
+    <rect x="3" y="3" width="10" height="12" rx="1" />
+    <rect x="5.5" y="1" width="5" height="3" rx="1" />
+    <line x1="5.5" y1="8" x2="10.5" y2="8" strokeWidth="1" />
+    <line x1="5.5" y1="10.5" x2="10.5" y2="10.5" strokeWidth="1" />
+    <line x1="5.5" y1="13" x2="8.5" y2="13" strokeWidth="1" />
+  </svg>
+);
+
+/** Eraser (Clear) */
+export const IconClear = (
+  <svg viewBox="0 0 16 16" fill={fill} stroke={stroke} strokeWidth="1.3" style={iconStyle}>
+    <path d="M8.5 2.5l5 5-6 6H3l-1-1 4.5-4.5" />
+    <line x1="6" y1="8" x2="11" y2="3" />
+    <line x1="2" y1="13.5" x2="14" y2="13.5" strokeWidth="1" />
+  </svg>
+);
+
+/** Down-right arrow (Fill) */
+export const IconFill = (
+  <svg viewBox="0 0 16 16" fill={fill} stroke={stroke} strokeWidth="1.3" style={iconStyle}>
+    <path d="M3 3v5h5" />
+    <line x1="3" y1="8" x2="13" y2="8" />
+    <polyline points="10.5,5.5 13,8 10.5,10.5" strokeLinecap="round" strokeLinejoin="round" />
+    <line x1="8" y1="3" x2="8" y2="13" />
+    <polyline points="5.5,10.5 8,13 10.5,10.5" strokeLinecap="round" strokeLinejoin="round" />
+  </svg>
+);
+
+/** Magnifying glass (Find) */
+export const IconFind = (
+  <svg viewBox="0 0 16 16" fill={fill} stroke={stroke} strokeWidth="1.4" style={iconStyle}>
+    <circle cx="6.5" cy="6.5" r="4.5" />
+    <line x1="10" y1="10" x2="14.5" y2="14.5" strokeWidth="2" strokeLinecap="round" />
+  </svg>
+);
+
+/** Magnifying glass with pencil (Replace) */
+export const IconReplace = (
+  <svg viewBox="0 0 16 16" fill={fill} stroke={stroke} strokeWidth="1.3" style={iconStyle}>
+    <circle cx="6" cy="6" r="4" />
+    <line x1="9" y1="9" x2="11" y2="11" strokeWidth="1.8" strokeLinecap="round" />
+    <path d="M11 11l3.5-3.5 1 1-3.5 3.5H11V11z" fill={stroke} stroke="none" opacity="0.8" />
+  </svg>
+);
+
+/** Two cells merging (Merge Cells) */
+export const IconMergeCells = (
+  <svg viewBox="0 0 16 16" fill={fill} stroke={stroke} strokeWidth="1.2" style={iconStyle}>
+    <rect x="1" y="4" width="14" height="8" rx="1" />
+    <polyline points="5,6.5 8,8 5,9.5" fill={stroke} stroke="none" />
+    <polyline points="11,6.5 8,8 11,9.5" fill={stroke} stroke="none" />
+  </svg>
+);
+
+/** Two cells splitting (Unmerge Cells) */
+export const IconUnmergeCells = (
+  <svg viewBox="0 0 16 16" fill={fill} stroke={stroke} strokeWidth="1.2" style={iconStyle}>
+    <rect x="1" y="4" width="6" height="8" rx="1" />
+    <rect x="9" y="4" width="6" height="8" rx="1" />
+    <polyline points="5.5,6.5 3,8 5.5,9.5" fill={stroke} stroke="none" />
+    <polyline points="10.5,6.5 13,8 10.5,9.5" fill={stroke} stroke="none" />
+  </svg>
+);
+
+/** Paint roller (Format Painter) */
+export const IconFormatPainter = (
+  <svg viewBox="0 0 16 16" fill={fill} stroke={stroke} strokeWidth="1.2" style={iconStyle}>
+    <rect x="2" y="1.5" width="11" height="5" rx="1" />
+    <rect x="4" y="6.5" width="3" height="2" fill={stroke} stroke="none" />
+    <line x1="5.5" y1="8.5" x2="5.5" y2="11" />
+    <rect x="4" y="11" width="3" height="3.5" rx="0.5" />
+  </svg>
+);
+
+/** List with bullet (Custom Lists) */
+export const IconCustomLists = (
+  <svg viewBox="0 0 16 16" fill={fill} stroke={stroke} strokeWidth="1.2" style={iconStyle}>
+    <circle cx="3" cy="3.5" r="1.2" fill={stroke} stroke="none" />
+    <circle cx="3" cy="8" r="1.2" fill={stroke} stroke="none" />
+    <circle cx="3" cy="12.5" r="1.2" fill={stroke} stroke="none" />
+    <line x1="6" y1="3.5" x2="14" y2="3.5" />
+    <line x1="6" y1="8" x2="14" y2="8" />
+    <line x1="6" y1="12.5" x2="14" y2="12.5" />
+  </svg>
+);
+
+// ============================================================================
 // View Menu Icons
 // ============================================================================
 

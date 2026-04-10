@@ -23,6 +23,8 @@ export interface CommandEntry {
   commandId?: string;
   /** Keyboard shortcut hint */
   shortcut?: string;
+  /** Icon from the menu item */
+  icon?: React.ReactNode;
 }
 
 interface CommandPaletteProps {
@@ -54,6 +56,7 @@ function collectAllCommands(): CommandEntry[] {
           action: item.action,
           commandId: item.commandId,
           shortcut: item.shortcut,
+          icon: item.icon,
         });
       }
 
@@ -127,6 +130,22 @@ const Row = styled.button`
 
   &:hover {
     background-color: ${v("--menu-item-hover-bg")};
+  }
+`;
+
+const RowIcon = styled.span`
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  margin-right: 8px;
+  flex-shrink: 0;
+  opacity: 0.85;
+
+  & > svg {
+    width: 16px;
+    height: 16px;
   }
 `;
 
@@ -234,6 +253,7 @@ export function CommandPalette({
         ) : (
           filtered.map((cmd) => (
             <Row key={cmd.id}>
+              {cmd.icon && <RowIcon>{cmd.icon}</RowIcon>}
               <RowLabel
                 onClick={() => {
                   onExecute(cmd);

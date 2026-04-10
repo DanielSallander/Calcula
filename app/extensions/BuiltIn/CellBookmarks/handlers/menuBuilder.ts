@@ -6,6 +6,11 @@ import {
   registerMenuItem,
   showToast,
   openTaskPane,
+  IconBookmarks,
+  IconBookmarkAdd,
+  IconBookmarkRemove,
+  IconNext,
+  IconPrev,
 } from "@api";
 import { getGridStateSnapshot } from "@api/grid";
 import {
@@ -28,10 +33,12 @@ export function registerBookmarkMenuItems(): void {
   registerMenuItem("insert", {
     id: "insert.bookmarks",
     label: "Bookmarks",
+    icon: IconBookmarks,
     children: [
       {
         id: "insert.bookmarks.add",
         label: "Add Bookmark",
+        icon: IconBookmarkAdd,
         shortcut: "Ctrl+Shift+B",
         action: () => {
           const state = getGridStateSnapshot();
@@ -49,6 +56,7 @@ export function registerBookmarkMenuItems(): void {
       {
         id: "insert.bookmarks.remove",
         label: "Remove Bookmark",
+        icon: IconBookmarkRemove,
         action: () => {
           const state = getGridStateSnapshot();
           if (!state?.selection) return;
@@ -67,6 +75,7 @@ export function registerBookmarkMenuItems(): void {
       {
         id: "insert.bookmarks.next",
         label: "Next Bookmark",
+        icon: IconNext,
         shortcut: "Ctrl+]",
         action: () => {
           const target = navigateToNextBookmark();
@@ -78,6 +87,7 @@ export function registerBookmarkMenuItems(): void {
       {
         id: "insert.bookmarks.prev",
         label: "Previous Bookmark",
+        icon: IconPrev,
         shortcut: "Ctrl+[",
         action: () => {
           const target = navigateToPrevBookmark();
