@@ -380,6 +380,7 @@ pub fn save_file(
     file_state: State<FileState>,
     user_files_state: State<UserFilesState>,
     slicer_state: State<crate::slicer::SlicerState>,
+    script_state: State<crate::scripting::types::ScriptState>,
     path: String,
 ) -> Result<(), String> {
     let grid = state.grid.lock().map_err(|e| e.to_string())?;
@@ -396,6 +397,8 @@ pub fn save_file(
     let mut workbook = Workbook::from_grid(&grid, &styles, &dimensions);
     workbook.tables = collect_tables_for_save(&tables);
     workbook.slicers = collect_slicers_for_save(&slicer_state);
+    workbook.scripts = collect_scripts_for_save(&script_state);
+    workbook.notebooks = collect_notebooks_for_save(&script_state);
     workbook.user_files = user_files_state.files.lock().map_err(|e| e.to_string())?.clone();
     workbook.theme = state.theme.lock().unwrap().clone();
 
@@ -428,6 +431,7 @@ pub fn open_file(
     file_state: State<FileState>,
     user_files_state: State<UserFilesState>,
     slicer_state: State<crate::slicer::SlicerState>,
+    script_state: State<crate::scripting::types::ScriptState>,
     path: String,
 ) -> Result<Vec<CellData>, String> {
     let path_buf = PathBuf::from(&path);
@@ -487,6 +491,10 @@ pub fn open_file(
     // Restore slicers from workbook
     restore_slicers(&workbook.slicers, &slicer_state);
 
+    // Restore scripts and notebooks
+    restore_scripts(&workbook.scripts, &script_state);
+    restore_notebooks(&workbook.notebooks, &script_state);
+
     // Restore user files from workbook (extract linked sheets metadata first)
     restore_linked_sheets_metadata(&state, &mut workbook)?;
     *user_files_state.files.lock().map_err(|e| e.to_string())? = workbook.user_files;
@@ -531,6 +539,7 @@ pub fn new_file(
     file_state: State<FileState>,
     user_files_state: State<UserFilesState>,
     slicer_state: State<crate::slicer::SlicerState>,
+    script_state: State<crate::scripting::types::ScriptState>,
 ) -> Result<(), String> {
     {
         let mut grid = state.grid.lock().map_err(|e| e.to_string())?;
@@ -569,6 +578,10 @@ pub fn new_file(
     *slicer_state.next_computed_prop_id.lock().unwrap() = 1;
     slicer_state.computed_prop_dependencies.lock().unwrap().clear();
     slicer_state.computed_prop_dependents.lock().unwrap().clear();
+
+    // Clear script/notebook state
+    script_state.workbook_scripts.lock().unwrap().clear();
+    script_state.workbook_notebooks.lock().unwrap().clear();
 
     // Clear user files
     user_files_state.files.lock().map_err(|e| e.to_string())?.clear();
@@ -969,4 +982,102 @@ fn restore_linked_sheets_metadata(
     }
 
     Ok(())
+}
+
+// ============================================================================
+// SCRIPTS & NOTEBOOKS (save/restore via .cala features)
+// ============================================================================
+
+/// Collect scripts from ScriptState into SavedScript format for persistence.
+fn collect_scripts_for_save(
+    script_state: &State<crate::scripting::types::ScriptState>,
+) -> Vec<persistence::SavedScript> {
+    let scripts = script_state.workbook_scripts.lock().unwrap();
+    scripts
+        .values()
+        .map(|s| persistence::SavedScript {
+            id: s.id.clone(),
+            name: s.name.clone(),
+            description: s.description.clone(),
+            source: s.source.clone(),
+        })
+        .collect()
+}
+
+/// Collect notebooks from ScriptState into SavedNotebook format for persistence.
+fn collect_notebooks_for_save(
+    script_state: &State<crate::scripting::types::ScriptState>,
+) -> Vec<persistence::SavedNotebook> {
+    let notebooks = script_state.workbook_notebooks.lock().unwrap();
+    notebooks
+        .values()
+        .map(|n| persistence::SavedNotebook {
+            id: n.id.clone(),
+            name: n.name.clone(),
+            cells: n
+                .cells
+                .iter()
+                .map(|c| persistence::SavedNotebookCell {
+                    id: c.id.clone(),
+                    source: c.source.clone(),
+                    last_output: c.last_output.clone(),
+                    last_error: c.last_error.clone(),
+                    cells_modified: c.cells_modified,
+                    duration_ms: c.duration_ms,
+                    execution_index: c.execution_index,
+                })
+                .collect(),
+        })
+        .collect()
+}
+
+/// Restore scripts from saved data into ScriptState.
+fn restore_scripts(
+    saved: &[persistence::SavedScript],
+    script_state: &State<crate::scripting::types::ScriptState>,
+) {
+    let mut scripts = script_state.workbook_scripts.lock().unwrap();
+    scripts.clear();
+    for s in saved {
+        scripts.insert(
+            s.id.clone(),
+            crate::scripting::types::WorkbookScript {
+                id: s.id.clone(),
+                name: s.name.clone(),
+                description: s.description.clone(),
+                source: s.source.clone(),
+            },
+        );
+    }
+}
+
+/// Restore notebooks from saved data into ScriptState.
+fn restore_notebooks(
+    saved: &[persistence::SavedNotebook],
+    script_state: &State<crate::scripting::types::ScriptState>,
+) {
+    let mut notebooks = script_state.workbook_notebooks.lock().unwrap();
+    notebooks.clear();
+    for n in saved {
+        notebooks.insert(
+            n.id.clone(),
+            crate::scripting::types::NotebookDocument {
+                id: n.id.clone(),
+                name: n.name.clone(),
+                cells: n
+                    .cells
+                    .iter()
+                    .map(|c| crate::scripting::types::NotebookCell {
+                        id: c.id.clone(),
+                        source: c.source.clone(),
+                        last_output: c.last_output.clone(),
+                        last_error: c.last_error.clone(),
+                        cells_modified: c.cells_modified,
+                        duration_ms: c.duration_ms,
+                        execution_index: c.execution_index,
+                    })
+                    .collect(),
+            },
+        );
+    }
 }

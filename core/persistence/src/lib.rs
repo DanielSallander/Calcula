@@ -44,6 +44,10 @@ pub struct Workbook {
     pub user_files: HashMap<String, Vec<u8>>,
     /// Document theme (colors + fonts). Defaults to Office theme.
     pub theme: ThemeDefinition,
+    /// Workbook-embedded scripts
+    pub scripts: Vec<SavedScript>,
+    /// Workbook-embedded notebooks
+    pub notebooks: Vec<SavedNotebook>,
 }
 
 impl Workbook {
@@ -55,6 +59,8 @@ impl Workbook {
             slicers: Vec::new(),
             user_files: HashMap::new(),
             theme: ThemeDefinition::default(),
+            scripts: Vec::new(),
+            notebooks: Vec::new(),
         }
     }
 
@@ -66,6 +72,8 @@ impl Workbook {
             slicers: Vec::new(),
             user_files: HashMap::new(),
             theme: ThemeDefinition::default(),
+            scripts: Vec::new(),
+            notebooks: Vec::new(),
         }
     }
 }
@@ -439,4 +447,37 @@ impl CalculaMeta {
     pub fn from_json(json: &str) -> Option<Self> {
         serde_json::from_str(json).ok()
     }
+}
+
+// ============================================================================
+// SCRIPTS & NOTEBOOKS
+// ============================================================================
+
+/// A workbook-embedded script for .cala persistence.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SavedScript {
+    pub id: String,
+    pub name: String,
+    pub description: Option<String>,
+    pub source: String,
+}
+
+/// A workbook-embedded notebook for .cala persistence.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SavedNotebook {
+    pub id: String,
+    pub name: String,
+    pub cells: Vec<SavedNotebookCell>,
+}
+
+/// A single cell in a saved notebook.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SavedNotebookCell {
+    pub id: String,
+    pub source: String,
+    pub last_output: Vec<String>,
+    pub last_error: Option<String>,
+    pub cells_modified: u32,
+    pub duration_ms: u64,
+    pub execution_index: Option<u32>,
 }

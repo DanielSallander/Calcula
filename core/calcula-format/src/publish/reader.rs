@@ -183,6 +183,8 @@ mod tests {
             slicers: vec![],
             user_files: HashMap::new(),
             theme: ThemeDefinition::default(),
+            scripts: Vec::new(),
+            notebooks: Vec::new(),
         }
     }
 

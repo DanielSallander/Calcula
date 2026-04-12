@@ -4,3 +4,5 @@
 
 pub mod tables;
 pub mod slicers;
+pub mod scripts;
+pub mod notebooks;

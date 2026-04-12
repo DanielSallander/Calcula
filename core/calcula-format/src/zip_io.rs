@@ -6,6 +6,8 @@
 use crate::error::FormatError;
 use crate::features::tables::TableDef;
 use crate::features::slicers::SlicerDef;
+use crate::features::scripts::ScriptDef;
+use crate::features::notebooks::NotebookDef;
 use crate::manifest::Manifest;
 use crate::sheet_data::{cells_to_sheet_data, sheet_data_to_cells, SheetData};
 use crate::sheet_layout::SheetLayout;
@@ -15,7 +17,7 @@ use crate::sheet_styles::{
 };
 
 use engine::theme::ThemeDefinition;
-use persistence::{SavedSlicer, SavedTable, Workbook};
+use persistence::{SavedNotebook, SavedScript, SavedSlicer, SavedTable, Workbook};
 use std::io::{Read, Write};
 use std::path::Path;
 use zip::write::FileOptions;
@@ -37,6 +39,12 @@ pub fn write_calcula(workbook: &Workbook, path: &Path) -> Result<(), FormatError
     }
     if !workbook.slicers.is_empty() {
         manifest.features.push("slicers".to_string());
+    }
+    if !workbook.scripts.is_empty() {
+        manifest.features.push("scripts".to_string());
+    }
+    if !workbook.notebooks.is_empty() {
+        manifest.features.push("notebooks".to_string());
     }
     if !workbook.user_files.is_empty() {
         manifest.features.push("files".to_string());
@@ -108,6 +116,28 @@ pub fn write_calcula(workbook: &Workbook, path: &Path) -> Result<(), FormatError
             options.clone(),
         )?;
         zip.write_all(slicer_json.as_bytes())?;
+    }
+
+    // Write scripts
+    for script in &workbook.scripts {
+        let script_def = ScriptDef::from(script);
+        let script_json = serde_json::to_string_pretty(&script_def)?;
+        zip.start_file(
+            format!("scripts/script_{}.json", script.id),
+            options.clone(),
+        )?;
+        zip.write_all(script_json.as_bytes())?;
+    }
+
+    // Write notebooks
+    for notebook in &workbook.notebooks {
+        let notebook_def = NotebookDef::from(notebook);
+        let notebook_json = serde_json::to_string_pretty(&notebook_def)?;
+        zip.start_file(
+            format!("notebooks/notebook_{}.json", notebook.id),
+            options.clone(),
+        )?;
+        zip.write_all(notebook_json.as_bytes())?;
     }
 
     // Write user files (stored under files/ prefix)
@@ -237,6 +267,50 @@ pub fn read_calcula(path: &Path) -> Result<Workbook, FormatError> {
         }
     }
 
+    // Read scripts
+    let mut scripts: Vec<SavedScript> = Vec::new();
+    if manifest.features.contains(&"scripts".to_string()) {
+        let script_names: Vec<String> = (0..archive.len())
+            .filter_map(|i| {
+                let entry = archive.by_index(i).ok()?;
+                let name = entry.name().to_string();
+                if name.starts_with("scripts/") && name.ends_with(".json") {
+                    Some(name)
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        for script_name in script_names {
+            if let Some(script_def) = read_optional_json::<ScriptDef>(&mut archive, &script_name)? {
+                scripts.push(SavedScript::from(&script_def));
+            }
+        }
+    }
+
+    // Read notebooks
+    let mut notebooks: Vec<SavedNotebook> = Vec::new();
+    if manifest.features.contains(&"notebooks".to_string()) {
+        let notebook_names: Vec<String> = (0..archive.len())
+            .filter_map(|i| {
+                let entry = archive.by_index(i).ok()?;
+                let name = entry.name().to_string();
+                if name.starts_with("notebooks/") && name.ends_with(".json") {
+                    Some(name)
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        for notebook_name in notebook_names {
+            if let Some(notebook_def) = read_optional_json::<NotebookDef>(&mut archive, &notebook_name)? {
+                notebooks.push(SavedNotebook::from(&notebook_def));
+            }
+        }
+    }
+
     // Read user files (files/ prefix)
     let mut user_files = std::collections::HashMap::new();
     if manifest.features.contains(&"files".to_string()) {
@@ -270,6 +344,8 @@ pub fn read_calcula(path: &Path) -> Result<Workbook, FormatError> {
         slicers,
         user_files,
         theme,
+        scripts,
+        notebooks,
     })
 }
 
@@ -377,6 +453,8 @@ mod tests {
             slicers: vec![],
             user_files: HashMap::new(),
             theme: ThemeDefinition::default(),
+            scripts: Vec::new(),
+            notebooks: Vec::new(),
         }
     }
 
