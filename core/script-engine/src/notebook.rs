@@ -60,6 +60,9 @@ impl NotebookSession {
             active_sheet,
             console_output: RefCell::new(Vec::new()),
             cells_modified: RefCell::new(0),
+            cell_bookmarks_json: "[]".to_string(),
+            view_bookmarks_json: "[]".to_string(),
+            bookmark_mutations: RefCell::new(Vec::new()),
         };
 
         let shared_ctx = Rc::new(RefCell::new(initial_ctx));
@@ -135,10 +138,12 @@ impl NotebookSession {
                 let output = ctx.console_output.borrow().clone();
                 let cells_modified = *ctx.cells_modified.borrow();
                 let grids = ctx.grids.clone();
+                let bookmark_mutations = ctx.bookmark_mutations.borrow().clone();
                 let result = ScriptResult::Success {
                     output,
                     cells_modified,
                     duration_ms,
+                    bookmark_mutations,
                 };
                 (result, grids)
             }

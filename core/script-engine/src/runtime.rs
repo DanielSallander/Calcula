@@ -85,6 +85,9 @@ fn register_calcula_api<'js>(
     // Utility operations (log)
     ops::utility::register_utility_ops(ctx, &calcula, shared_ctx.clone())?;
 
+    // Bookmark operations
+    ops::bookmarks::register_bookmark_ops(ctx, &calcula, shared_ctx.clone())?;
+
     globals
         .set("Calcula", calcula)
         .map_err(|e| format!("Failed to set Calcula global: {}", e))?;

@@ -15,6 +15,7 @@ import type { RunScriptResponse } from "../types";
 import {
   onOpenWithCode,
   emitGridNeedsRefresh,
+  emitBookmarkMutations,
   emitEditorClosed,
 } from "../lib/crossWindowEvents";
 import { useModuleStore } from "../lib/useModuleStore";
@@ -405,6 +406,10 @@ export function MonacoEditorApp(): React.ReactElement {
         // Notify main window to refresh grid if cells were modified
         if (result.cellsModified > 0) {
           await emitGridNeedsRefresh(result.cellsModified);
+        }
+
+        if (result.bookmarkMutations && result.bookmarkMutations.length > 0) {
+          await emitBookmarkMutations(result.bookmarkMutations);
         }
       } else {
         const newLines: ConsoleEntry[] = result.output.map((line) => ({

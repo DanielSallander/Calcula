@@ -17,6 +17,8 @@ export const ScriptEditorEvents = {
   GRID_NEEDS_REFRESH: "script-editor:grid-needs-refresh",
   /** Editor -> Main: editor window was closed */
   EDITOR_CLOSED: "script-editor:editor-closed",
+  /** Editor -> Main: script produced bookmark mutations */
+  BOOKMARK_MUTATIONS: "script-editor:bookmark-mutations",
 } as const;
 
 // ============================================================================
@@ -43,6 +45,10 @@ export async function emitGridNeedsRefresh(cellsModified: number): Promise<void>
   await emitTauriEvent(ScriptEditorEvents.GRID_NEEDS_REFRESH, { cellsModified } satisfies GridNeedsRefreshPayload);
 }
 
+export async function emitBookmarkMutations(mutations: unknown[]): Promise<void> {
+  await emitTauriEvent(ScriptEditorEvents.BOOKMARK_MUTATIONS, { mutations });
+}
+
 export async function emitEditorClosed(): Promise<void> {
   await emitTauriEvent(ScriptEditorEvents.EDITOR_CLOSED);
 }
@@ -61,6 +67,12 @@ export function onGridNeedsRefresh(
   callback: (payload: GridNeedsRefreshPayload) => void,
 ): Promise<UnlistenFn> {
   return listenTauriEvent<GridNeedsRefreshPayload>(ScriptEditorEvents.GRID_NEEDS_REFRESH, callback);
+}
+
+export function onBookmarkMutations(
+  callback: (payload: { mutations: unknown[] }) => void,
+): Promise<UnlistenFn> {
+  return listenTauriEvent<{ mutations: unknown[] }>(ScriptEditorEvents.BOOKMARK_MUTATIONS, callback);
 }
 
 export function onEditorClosed(

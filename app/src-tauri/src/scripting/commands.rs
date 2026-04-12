@@ -26,14 +26,16 @@ pub fn run_script(
     let sheet_names = state.sheet_names.lock().map_err(|e| e.to_string())?.clone();
     let active_sheet = *state.active_sheet.lock().map_err(|e| e.to_string())?;
 
-    // 2. Run the script in the V8 engine
-    let (result, modified_grids) = script_engine::ScriptEngine::run(
+    // 2. Run the script in the engine
+    let (result, modified_grids) = script_engine::ScriptEngine::run_with_bookmarks(
         &request.source,
         &request.filename,
         grids,
         style_registry,
         sheet_names,
         active_sheet,
+        request.cell_bookmarks_json.unwrap_or_else(|| "[]".to_string()),
+        request.view_bookmarks_json.unwrap_or_else(|| "[]".to_string()),
     );
 
     // 3. If successful and grids were modified, apply changes back
@@ -65,10 +67,12 @@ pub fn run_script(
             output,
             cells_modified,
             duration_ms,
+            bookmark_mutations,
         } => Ok(RunScriptResponse::Success {
             output,
             cells_modified,
             duration_ms,
+            bookmark_mutations,
         }),
         script_engine::ScriptResult::Error { message, output } => {
             Ok(RunScriptResponse::Error { message, output })

@@ -5,12 +5,14 @@
 import {
   registerMenuItem,
   showToast,
+  showOverlay,
   openTaskPane,
   IconBookmarks,
   IconBookmarkAdd,
   IconBookmarkRemove,
   IconNext,
   IconPrev,
+  IconSave,
 } from "@api";
 import { getGridStateSnapshot } from "@api/grid";
 import {
@@ -24,6 +26,7 @@ import {
 import { navigateToNextBookmark, navigateToPrevBookmark } from "../lib/bookmarkNavigation";
 
 const TASK_PANE_ID = "bookmarks-pane";
+const VIEW_BOOKMARK_CREATE_OVERLAY_ID = "view-bookmark-creator";
 
 /**
  * Register bookmark menu items under the Insert menu.
@@ -124,6 +127,20 @@ export function registerBookmarkMenuItems(): void {
       },
       {
         id: "insert.bookmarks.separator3",
+        label: "",
+        separator: true,
+      },
+      {
+        id: "insert.bookmarks.saveView",
+        label: "Save Current View...",
+        icon: IconSave,
+        shortcut: "Ctrl+Shift+V",
+        action: () => {
+          showOverlay(VIEW_BOOKMARK_CREATE_OVERLAY_ID, {});
+        },
+      },
+      {
+        id: "insert.bookmarks.separator4",
         label: "",
         separator: true,
       },

@@ -229,6 +229,7 @@ fn run_cell_internal(
                         output,
                         cells_modified,
                         duration_ms,
+                        ..
                     } => {
                         cell.last_output = output.clone();
                         cell.last_error = None;
@@ -252,6 +253,7 @@ fn run_cell_internal(
             output,
             cells_modified,
             duration_ms,
+            ..
         } => Ok(NotebookCellResponse::Success {
             output,
             cells_modified,

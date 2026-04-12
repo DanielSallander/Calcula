@@ -1,5 +1,5 @@
 //! FILENAME: app/extensions/BuiltIn/CellBookmarks/components/BookmarkTaskPane.tsx
-// PURPOSE: Task pane component listing all bookmarks with click-to-navigate.
+// PURPOSE: Task pane component with tabs for Cell Bookmarks and View Bookmarks.
 // CONTEXT: Registered as a task pane view with contextKey "always".
 
 import React, { useState, useEffect, useCallback } from "react";
@@ -10,10 +10,16 @@ import {
   removeBookmarkById,
   onChange,
   getCurrentSheet,
+  getBookmarkCount,
 } from "../lib/bookmarkStore";
+import {
+  getViewBookmarkCount,
+  onViewBookmarkChange,
+} from "../lib/viewBookmarkStore";
 import { navigateToBookmark } from "../lib/bookmarkNavigation";
 import { BOOKMARK_DOT_COLORS, BOOKMARK_COLORS } from "../lib/bookmarkTypes";
 import type { Bookmark, BookmarkColor } from "../lib/bookmarkTypes";
+import { ViewBookmarkList } from "./ViewBookmarkList";
 
 // ============================================================================
 // Styles
@@ -140,27 +146,64 @@ const scopeBtnActiveStyle: React.CSSProperties = {
   color: "#FFF",
 };
 
+const tabBarStyle: React.CSSProperties = {
+  display: "flex",
+  borderBottom: "1px solid #E0E0E0",
+  backgroundColor: "#FFF",
+};
+
+const tabStyle: React.CSSProperties = {
+  flex: 1,
+  padding: "8px 12px",
+  fontSize: 12,
+  fontWeight: 500,
+  textAlign: "center",
+  cursor: "pointer",
+  border: "none",
+  backgroundColor: "transparent",
+  color: "#666",
+  borderBottom: "2px solid transparent",
+  transition: "color 0.15s, border-color 0.15s",
+};
+
+const tabActiveStyle: React.CSSProperties = {
+  ...tabStyle,
+  color: "#4A86C8",
+  borderBottomColor: "#4A86C8",
+  fontWeight: 600,
+};
+
+const tabCountStyle: React.CSSProperties = {
+  fontSize: 10,
+  color: "#999",
+  marginLeft: 4,
+};
+
 // ============================================================================
 // Component
 // ============================================================================
 
+type Tab = "cells" | "views";
 type Scope = "sheet" | "all";
 
 export const BookmarkTaskPane: React.FC<TaskPaneViewProps> = () => {
+  const [activeTab, setActiveTab] = useState<Tab>("cells");
   const [bookmarkList, setBookmarkList] = useState<Bookmark[]>([]);
   const [colorFilter, setColorFilter] = useState<BookmarkColor | null>(null);
   const [scope, setScope] = useState<Scope>("all");
+  const [cellCount, setCellCount] = useState(getBookmarkCount());
+  const [viewCount, setViewCount] = useState(getViewBookmarkCount());
 
   const refresh = useCallback(() => {
     const all = scope === "all" ? getAllBookmarks() : getBookmarksForSheet(getCurrentSheet());
     const filtered = colorFilter ? all.filter((bm) => bm.color === colorFilter) : all;
-    // Sort by sheet, row, col
     filtered.sort((a, b) => {
       if (a.sheetIndex !== b.sheetIndex) return a.sheetIndex - b.sheetIndex;
       if (a.row !== b.row) return a.row - b.row;
       return a.col - b.col;
     });
     setBookmarkList(filtered);
+    setCellCount(getBookmarkCount());
   }, [colorFilter, scope]);
 
   useEffect(() => {
@@ -168,6 +211,13 @@ export const BookmarkTaskPane: React.FC<TaskPaneViewProps> = () => {
     const cleanup = onChange(refresh);
     return cleanup;
   }, [refresh]);
+
+  useEffect(() => {
+    const cleanup = onViewBookmarkChange(() => {
+      setViewCount(getViewBookmarkCount());
+    });
+    return cleanup;
+  }, []);
 
   const handleClick = (bookmark: Bookmark) => {
     navigateToBookmark(bookmark);
@@ -184,99 +234,123 @@ export const BookmarkTaskPane: React.FC<TaskPaneViewProps> = () => {
 
   return (
     <div style={containerStyle}>
-      {/* Scope toggle */}
-      <div style={scopeToggleStyle}>
+      {/* Tab bar */}
+      <div style={tabBarStyle}>
         <button
-          style={scope === "all" ? scopeBtnActiveStyle : scopeBtnStyle}
-          onClick={() => setScope("all")}
+          style={activeTab === "cells" ? tabActiveStyle : tabStyle}
+          onClick={() => setActiveTab("cells")}
         >
-          All Sheets
+          Cells
+          {cellCount > 0 && <span style={tabCountStyle}>({cellCount})</span>}
         </button>
         <button
-          style={scope === "sheet" ? scopeBtnActiveStyle : scopeBtnStyle}
-          onClick={() => setScope("sheet")}
+          style={activeTab === "views" ? tabActiveStyle : tabStyle}
+          onClick={() => setActiveTab("views")}
         >
-          This Sheet
+          Views
+          {viewCount > 0 && <span style={tabCountStyle}>({viewCount})</span>}
         </button>
       </div>
 
-      {/* Color filter */}
-      <div style={filterBarStyle}>
-        {BOOKMARK_COLORS.map((color) => (
-          <div
-            key={color}
-            style={{
-              ...filterDotStyle,
-              backgroundColor: BOOKMARK_DOT_COLORS[color],
-              borderColor: colorFilter === color ? "#333" : "transparent",
-              opacity: colorFilter && colorFilter !== color ? 0.3 : 1,
-            }}
-            onClick={() => toggleColorFilter(color)}
-            title={`Filter: ${color}`}
-          />
-        ))}
-        {colorFilter && (
-          <button
-            style={{ ...deleteBtnStyle, fontSize: 11 }}
-            onClick={() => setColorFilter(null)}
-            title="Clear filter"
-          >
-            Clear
-          </button>
-        )}
-      </div>
-
-      {/* Bookmark list */}
-      <div style={listStyle}>
-        {bookmarkList.length === 0 ? (
-          <div style={emptyStyle}>
-            {colorFilter ? "No bookmarks with this color" : "No bookmarks yet"}
-          </div>
-        ) : (
-          bookmarkList.map((bm) => (
-            <div
-              key={bm.id}
-              style={itemStyle}
-              onClick={() => handleClick(bm)}
-              onMouseEnter={(e) => {
-                (e.currentTarget as HTMLDivElement).style.borderColor = "#4A86C8";
-              }}
-              onMouseLeave={(e) => {
-                (e.currentTarget as HTMLDivElement).style.borderColor = "#E8E8E8";
-              }}
+      {activeTab === "cells" ? (
+        <>
+          {/* Scope toggle */}
+          <div style={scopeToggleStyle}>
+            <button
+              style={scope === "all" ? scopeBtnActiveStyle : scopeBtnStyle}
+              onClick={() => setScope("all")}
             >
-              <div
-                style={{
-                  ...dotStyle,
-                  backgroundColor: BOOKMARK_DOT_COLORS[bm.color],
-                }}
-              />
-              <div style={{ flex: 1, minWidth: 0 }}>
-                <div style={cellRefStyle}>
-                  {bm.sheetName}!{bm.label}
-                </div>
-                {bm.label !== `${bm.sheetName}!${bm.label}` && (
-                  <div style={labelStyle}>{bm.label}</div>
-                )}
-              </div>
-              <button
-                style={deleteBtnStyle}
-                onClick={(e) => handleDelete(e, bm.id)}
-                title="Remove bookmark"
-              >
-                x
-              </button>
-            </div>
-          ))
-        )}
-      </div>
+              All Sheets
+            </button>
+            <button
+              style={scope === "sheet" ? scopeBtnActiveStyle : scopeBtnStyle}
+              onClick={() => setScope("sheet")}
+            >
+              This Sheet
+            </button>
+          </div>
 
-      {/* Footer with count */}
-      <div style={headerStyle}>
-        <span style={{ color: "#999", fontSize: 11 }}>
-          {bookmarkList.length} bookmark{bookmarkList.length !== 1 ? "s" : ""}
-        </span>
-      </div>
+          {/* Color filter */}
+          <div style={filterBarStyle}>
+            {BOOKMARK_COLORS.map((color) => (
+              <div
+                key={color}
+                style={{
+                  ...filterDotStyle,
+                  backgroundColor: BOOKMARK_DOT_COLORS[color],
+                  borderColor: colorFilter === color ? "#333" : "transparent",
+                  opacity: colorFilter && colorFilter !== color ? 0.3 : 1,
+                }}
+                onClick={() => toggleColorFilter(color)}
+                title={`Filter: ${color}`}
+              />
+            ))}
+            {colorFilter && (
+              <button
+                style={{ ...deleteBtnStyle, fontSize: 11 }}
+                onClick={() => setColorFilter(null)}
+                title="Clear filter"
+              >
+                Clear
+              </button>
+            )}
+          </div>
+
+          {/* Cell bookmark list */}
+          <div style={listStyle}>
+            {bookmarkList.length === 0 ? (
+              <div style={emptyStyle}>
+                {colorFilter ? "No bookmarks with this color" : "No bookmarks yet"}
+              </div>
+            ) : (
+              bookmarkList.map((bm) => (
+                <div
+                  key={bm.id}
+                  style={itemStyle}
+                  onClick={() => handleClick(bm)}
+                  onMouseEnter={(e) => {
+                    (e.currentTarget as HTMLDivElement).style.borderColor = "#4A86C8";
+                  }}
+                  onMouseLeave={(e) => {
+                    (e.currentTarget as HTMLDivElement).style.borderColor = "#E8E8E8";
+                  }}
+                >
+                  <div
+                    style={{
+                      ...dotStyle,
+                      backgroundColor: BOOKMARK_DOT_COLORS[bm.color],
+                    }}
+                  />
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <div style={cellRefStyle}>
+                      {bm.sheetName}!{bm.label}
+                    </div>
+                    {bm.label !== `${bm.sheetName}!${bm.label}` && (
+                      <div style={labelStyle}>{bm.label}</div>
+                    )}
+                  </div>
+                  <button
+                    style={deleteBtnStyle}
+                    onClick={(e) => handleDelete(e, bm.id)}
+                    title="Remove bookmark"
+                  >
+                    x
+                  </button>
+                </div>
+              ))
+            )}
+          </div>
+
+          {/* Footer with count */}
+          <div style={headerStyle}>
+            <span style={{ color: "#999", fontSize: 11 }}>
+              {bookmarkList.length} bookmark{bookmarkList.length !== 1 ? "s" : ""}
+            </span>
+          </div>
+        </>
+      ) : (
+        <ViewBookmarkList />
+      )}
     </div>
   );
 };

@@ -35,7 +35,7 @@ import {
 } from "@api";
 import { getGridStateSnapshot } from "@api/grid";
 
-// Internal modules
+// Internal modules — Cell Bookmarks
 import { drawBookmarkDot } from "./rendering/bookmarkDecoration";
 import { bookmarkStyleInterceptor } from "./rendering/bookmarkStyleInterceptor";
 import { registerBookmarkMenuItems } from "./handlers/menuBuilder";
@@ -58,6 +58,26 @@ import {
   navigateToPrevBookmark,
 } from "./lib/bookmarkNavigation";
 
+// Internal modules — View Bookmarks
+import { ViewBookmarkCreateOverlay } from "./components/ViewBookmarkCreateOverlay";
+import { ViewBookmarkEditOverlay } from "./components/ViewBookmarkEditOverlay";
+import {
+  addViewBookmark,
+  activateViewBookmark,
+  removeViewBookmark,
+  removeAllViewBookmarks,
+  getViewBookmarkCount,
+  onViewBookmarkChange,
+  setScriptRunner,
+} from "./lib/viewBookmarkStore";
+import { DEFAULT_VIEW_DIMENSIONS } from "./lib/viewBookmarkTypes";
+
+// Internal modules — Persistence
+import { saveBookmarks, loadBookmarks } from "./lib/bookmarkPersistence";
+
+// Internal modules — Script integration
+import { processBookmarkMutations } from "./lib/scriptMutationHandler";
+
 // ============================================================================
 // Constants
 // ============================================================================
@@ -65,6 +85,8 @@ import {
 const DECORATION_ID = "cell-bookmarks";
 const INTERCEPTOR_ID = "cell-bookmarks";
 const OVERLAY_ID = "bookmark-editor";
+const VIEW_CREATE_OVERLAY_ID = "view-bookmark-creator";
+const VIEW_EDIT_OVERLAY_ID = "view-bookmark-editor";
 const TASK_PANE_ID = "bookmarks-pane";
 const STATUS_BAR_ID = "calcula.statusbar.bookmarks";
 
@@ -95,13 +117,29 @@ function activate(context: ExtensionContext): void {
   const unregInterceptor = registerStyleInterceptor(INTERCEPTOR_ID, bookmarkStyleInterceptor, 50);
   cleanupFns.push(unregInterceptor);
 
-  // ---- 3. Overlay (bookmark editor popover) ----
+  // ---- 3. Overlay (cell bookmark editor popover) ----
   registerOverlay({
     id: OVERLAY_ID,
     component: BookmarkEditOverlay,
     layer: "popover",
   });
   cleanupFns.push(() => unregisterOverlay(OVERLAY_ID));
+
+  // ---- 3b. Overlay (view bookmark create) ----
+  registerOverlay({
+    id: VIEW_CREATE_OVERLAY_ID,
+    component: ViewBookmarkCreateOverlay,
+    layer: "popover",
+  });
+  cleanupFns.push(() => unregisterOverlay(VIEW_CREATE_OVERLAY_ID));
+
+  // ---- 3c. Overlay (view bookmark edit) ----
+  registerOverlay({
+    id: VIEW_EDIT_OVERLAY_ID,
+    component: ViewBookmarkEditOverlay,
+    layer: "popover",
+  });
+  cleanupFns.push(() => unregisterOverlay(VIEW_EDIT_OVERLAY_ID));
 
   // ---- 4. Task Pane (bookmarks panel) ----
   registerTaskPane({
@@ -191,6 +229,43 @@ function activate(context: ExtensionContext): void {
     });
   });
 
+  // ---- 6b. View Bookmark Commands ----
+  context.commands.register("bookmarks.saveView", () => {
+    showOverlay(VIEW_CREATE_OVERLAY_ID, {});
+  });
+
+  context.commands.register("bookmarks.activateView", async (args?: { id?: string }) => {
+    if (!args?.id) return;
+    const success = await activateViewBookmark(args.id);
+    if (success) {
+      showToast("View activated", { variant: "success" });
+    } else {
+      showToast("View bookmark not found", { variant: "warning" });
+    }
+  });
+
+  context.commands.register("bookmarks.deleteView", (args?: { id?: string }) => {
+    if (!args?.id) return;
+    if (removeViewBookmark(args.id)) {
+      showToast("View bookmark removed", { variant: "info" });
+    }
+  });
+
+  context.commands.register("bookmarks.editView", (args?: { id?: string }) => {
+    if (!args?.id) return;
+    showOverlay(VIEW_EDIT_OVERLAY_ID, { data: { viewBookmarkId: args.id } });
+  });
+
+  context.commands.register("bookmarks.removeAllViews", () => {
+    const count = getViewBookmarkCount();
+    if (count === 0) {
+      showToast("No view bookmarks to remove", { variant: "info" });
+      return;
+    }
+    removeAllViewBookmarks();
+    showToast(`Removed ${count} view bookmark${count > 1 ? "s" : ""}`, { variant: "info" });
+  });
+
   // ---- 7. Menu Items (Insert > Bookmarks) ----
   registerBookmarkMenuItems();
 
@@ -259,16 +334,92 @@ function activate(context: ExtensionContext): void {
         showToast("No bookmarks", { variant: "info" });
       }
     }
+
+    // Ctrl+Shift+V: Save current view
+    if (e.ctrlKey && e.shiftKey && e.key === "V") {
+      e.preventDefault();
+      showOverlay(VIEW_CREATE_OVERLAY_ID, {});
+    }
   };
 
   window.addEventListener("keydown", handleKeyDown);
   cleanupFns.push(() => window.removeEventListener("keydown", handleKeyDown));
+
+  // ---- 12b. Persistence: save/load bookmarks with workbook ----
+  const unregBeforeSave = onAppEvent(AppEvents.BEFORE_SAVE, async () => {
+    try {
+      await saveBookmarks();
+    } catch (error) {
+      console.error("[CellBookmarks] Failed to save bookmarks:", error);
+    }
+  });
+  cleanupFns.push(unregBeforeSave);
+
+  const unregAfterOpen = onAppEvent(AppEvents.AFTER_OPEN, async () => {
+    try {
+      await loadBookmarks();
+    } catch (error) {
+      console.error("[CellBookmarks] Failed to load bookmarks:", error);
+    }
+  });
+  cleanupFns.push(unregAfterOpen);
+
+  // ---- 12c. Script bookmark mutations listener ----
+  const handleScriptMutations = (e: Event) => {
+    const detail = (e as CustomEvent).detail;
+    if (Array.isArray(detail)) {
+      processBookmarkMutations(detail);
+    }
+  };
+  window.addEventListener("script:bookmark-mutations", handleScriptMutations);
+  cleanupFns.push(() => window.removeEventListener("script:bookmark-mutations", handleScriptMutations));
+
+  // Also listen for cross-window mutations from the Monaco editor
+  // (Tauri events are handled separately via listenTauriEvent)
+  let unlistenTauriBookmarks: (() => void) | null = null;
+  import("@api/backend").then(({ listenTauriEvent }) => {
+    listenTauriEvent<{ mutations: unknown[] }>(
+      "script-editor:bookmark-mutations",
+      (payload) => {
+        if (payload.mutations && Array.isArray(payload.mutations)) {
+          processBookmarkMutations(payload.mutations as Parameters<typeof processBookmarkMutations>[0]);
+        }
+      }
+    ).then((unlisten) => {
+      unlistenTauriBookmarks = unlisten;
+    });
+  });
+  cleanupFns.push(() => unlistenTauriBookmarks?.());
+
+  // ---- 13. Script runner for view bookmark onActivate ----
+  setScriptRunner(async (scriptId: string) => {
+    const { invokeBackend } = await import("@api/backend");
+    const script = await invokeBackend<{ id: string; name: string; source: string }>(
+      "get_script",
+      { id: scriptId }
+    );
+    if (script) {
+      const result = await invokeBackend<{ success: boolean; error?: string }>(
+        "run_script",
+        { request: { source: script.source, filename: script.name || "bookmark-script.js" } }
+      );
+      if (!result.success && result.error) {
+        showToast(`Script error: ${result.error}`, { variant: "error" });
+      }
+    }
+  });
+  cleanupFns.push(() => setScriptRunner(null));
 
   // ---- Trigger grid repaint when bookmarks change ----
   const unregOnChange = onChange(() => {
     markSheetDirty();
   });
   cleanupFns.push(unregOnChange);
+
+  const unregViewChange = onViewBookmarkChange(() => {
+    markSheetDirty();
+  });
+  cleanupFns.push(unregViewChange);
 
   isActivated = true;
   console.log("[CellBookmarks] Activated successfully.");
@@ -300,11 +451,12 @@ function deactivate(): void {
 const extension: ExtensionModule = {
   manifest: {
     id: "calcula.builtin.cell-bookmarks",
-    name: "Cell Bookmarks",
-    version: "1.0.0",
+    name: "Bookmarks",
+    version: "2.0.0",
     description:
-      "Mark, navigate, and manage cell bookmarks with color coding. " +
-      "Exercises 12 distinct API surfaces to validate the extensibility architecture.",
+      "Cell bookmarks for marking and navigating cells. " +
+      "View bookmarks for capturing and restoring application state (filters, zoom, scroll, etc.). " +
+      "Scripts can create bookmarks and view bookmarks can trigger scripts on activation.",
   },
   activate,
   deactivate,

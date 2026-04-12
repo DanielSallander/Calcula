@@ -303,6 +303,7 @@ pub fn execute_script(
             output,
             cells_modified,
             duration_ms,
+            ..
         } => {
             // Apply modified grids back to state
             if *cells_modified > 0 && !modified_grids.is_empty() {

@@ -14,6 +14,18 @@ export interface RunScriptRequest {
   filename: string;
 }
 
+/** A bookmark mutation produced by a script. */
+export interface BookmarkMutation {
+  action: "addCellBookmark" | "removeCellBookmark" | "createViewBookmark" | "deleteViewBookmark" | "activateViewBookmark";
+  row?: number;
+  col?: number;
+  sheetIndex?: number;
+  label?: string;
+  color?: string;
+  id?: string;
+  dimensionsJson?: string;
+}
+
 /** Successful script execution result. */
 export interface ScriptSuccess {
   type: "success";
@@ -23,6 +35,8 @@ export interface ScriptSuccess {
   cellsModified: number;
   /** Execution time in milliseconds */
   durationMs: number;
+  /** Bookmark mutations to apply on the frontend */
+  bookmarkMutations?: BookmarkMutation[];
 }
 
 /** Script execution error result. */

@@ -122,6 +122,80 @@ declare namespace Calcula {
    * @param args - One or more values to log (joined with spaces)
    */
   function log(...args: string[]): void;
+
+  // --------------------------------------------------------------------------
+  // Bookmarks
+  // --------------------------------------------------------------------------
+
+  namespace bookmarks {
+    /**
+     * List all cell bookmarks.
+     * @returns JSON string of cell bookmarks array
+     */
+    function listCellBookmarks(): string;
+
+    /**
+     * Add a cell bookmark. The bookmark is created after the script completes.
+     * @param row - 0-based row index
+     * @param col - 0-based column index
+     * @param sheetIndex - Optional sheet index (defaults to active sheet)
+     * @param label - Optional label (defaults to cell reference)
+     * @param color - Optional color: "blue"|"green"|"orange"|"red"|"purple"|"yellow"
+     */
+    function addCellBookmark(
+      row: number,
+      col: number,
+      sheetIndex?: number,
+      label?: string,
+      color?: string,
+    ): void;
+
+    /**
+     * Remove a cell bookmark at the specified location.
+     * @param row - 0-based row index
+     * @param col - 0-based column index
+     * @param sheetIndex - Optional sheet index (defaults to active sheet)
+     */
+    function removeCellBookmark(
+      row: number,
+      col: number,
+      sheetIndex?: number,
+    ): void;
+
+    /**
+     * List all view bookmarks.
+     * @returns JSON string of view bookmarks array
+     */
+    function listViewBookmarks(): string;
+
+    /**
+     * Create a view bookmark that captures the current view state.
+     * The view state is captured after the script completes.
+     * @param label - Display name for the view bookmark
+     * @param color - Optional color: "blue"|"green"|"orange"|"red"|"purple"|"yellow"
+     * @param dimensionsJson - Optional JSON string specifying which dimensions to capture.
+     *   Example: '{"selection":true,"zoom":true,"autoFilter":true}'
+     *   If omitted, default dimensions are used (selection, activeSheet, zoom, viewport, autoFilter).
+     */
+    function createViewBookmark(
+      label: string,
+      color?: string,
+      dimensionsJson?: string,
+    ): void;
+
+    /**
+     * Delete a view bookmark by ID.
+     * @param id - The view bookmark ID
+     */
+    function deleteViewBookmark(id: string): void;
+
+    /**
+     * Activate a view bookmark (restore its captured state).
+     * The activation happens after the script completes.
+     * @param id - The view bookmark ID
+     */
+    function activateViewBookmark(id: string): void;
+  }
 }
 
 // ============================================================================

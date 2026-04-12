@@ -212,6 +212,15 @@ export function ScriptEditorPane(
         if (result.cellsModified > 0) {
           window.dispatchEvent(new CustomEvent("grid:refresh"));
         }
+
+        // If the script produced bookmark mutations, dispatch them
+        if (result.bookmarkMutations && result.bookmarkMutations.length > 0) {
+          window.dispatchEvent(
+            new CustomEvent("script:bookmark-mutations", {
+              detail: result.bookmarkMutations,
+            })
+          );
+        }
       } else {
         // Error result
         const newLines: ConsoleEntry[] = result.output.map((line) => ({

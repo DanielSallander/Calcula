@@ -9,6 +9,41 @@ use engine::style::StyleRegistry;
 use serde::{Deserialize, Serialize};
 use std::cell::RefCell;
 
+/// A queued bookmark mutation produced by a script.
+/// Applied on the frontend after script execution completes.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", tag = "action")]
+pub enum BookmarkMutation {
+    /// Add a cell bookmark
+    AddCellBookmark {
+        row: u32,
+        col: u32,
+        sheet_index: usize,
+        label: Option<String>,
+        color: Option<String>,
+    },
+    /// Remove a cell bookmark
+    RemoveCellBookmark {
+        row: u32,
+        col: u32,
+        sheet_index: usize,
+    },
+    /// Create a view bookmark (capture happens on frontend after script completes)
+    CreateViewBookmark {
+        label: String,
+        color: Option<String>,
+        dimensions_json: Option<String>,
+    },
+    /// Delete a view bookmark by ID
+    DeleteViewBookmark {
+        id: String,
+    },
+    /// Activate a view bookmark by ID
+    ActivateViewBookmark {
+        id: String,
+    },
+}
+
 /// The data context shared with the QuickJS runtime via Rc<RefCell<>>.
 /// Contains cloned data from AppState for isolated script execution.
 /// After execution, changes are extracted and applied back to AppState.
@@ -25,6 +60,12 @@ pub struct ScriptContext {
     pub console_output: RefCell<Vec<String>>,
     /// Count of cells modified by the script
     pub cells_modified: RefCell<u32>,
+    /// Serialized cell bookmarks JSON (read-only from script perspective)
+    pub cell_bookmarks_json: String,
+    /// Serialized view bookmarks JSON (read-only from script perspective)
+    pub view_bookmarks_json: String,
+    /// Queued bookmark mutations to apply after script execution
+    pub bookmark_mutations: RefCell<Vec<BookmarkMutation>>,
 }
 
 /// The result of executing a script, returned to the Tauri command layer.
@@ -39,6 +80,9 @@ pub enum ScriptResult {
         cells_modified: u32,
         /// Execution duration in milliseconds
         duration_ms: u64,
+        /// Bookmark mutations to apply on the frontend
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        bookmark_mutations: Vec<BookmarkMutation>,
     },
     /// Script encountered an error
     Error {

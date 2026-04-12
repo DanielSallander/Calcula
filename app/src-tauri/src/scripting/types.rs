@@ -62,6 +62,12 @@ pub struct RunScriptRequest {
     pub source: String,
     /// Display name for the script (used in error messages)
     pub filename: String,
+    /// Serialized cell bookmarks JSON (passed from frontend for script access)
+    #[serde(default)]
+    pub cell_bookmarks_json: Option<String>,
+    /// Serialized view bookmarks JSON (passed from frontend for script access)
+    #[serde(default)]
+    pub view_bookmarks_json: Option<String>,
 }
 
 /// Response payload from script execution.
@@ -77,6 +83,9 @@ pub enum RunScriptResponse {
         cells_modified: u32,
         /// Execution time in milliseconds
         duration_ms: u64,
+        /// Bookmark mutations to apply on the frontend
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        bookmark_mutations: Vec<script_engine::types::BookmarkMutation>,
     },
     /// Script encountered an error
     #[serde(rename_all = "camelCase")]

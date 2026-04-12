@@ -41,6 +41,20 @@ impl ScriptEngine {
         sheet_names: Vec<String>,
         active_sheet: usize,
     ) -> (ScriptResult, Vec<Grid>) {
+        Self::run_with_bookmarks(source, filename, grids, style_registry, sheet_names, active_sheet, "[]".to_string(), "[]".to_string())
+    }
+
+    /// Execute a script with bookmark context.
+    pub fn run_with_bookmarks(
+        source: &str,
+        filename: &str,
+        grids: Vec<Grid>,
+        style_registry: StyleRegistry,
+        sheet_names: Vec<String>,
+        active_sheet: usize,
+        cell_bookmarks_json: String,
+        view_bookmarks_json: String,
+    ) -> (ScriptResult, Vec<Grid>) {
         let start = Instant::now();
 
         let context = types::ScriptContext {
@@ -50,6 +64,9 @@ impl ScriptEngine {
             active_sheet,
             console_output: RefCell::new(Vec::new()),
             cells_modified: RefCell::new(0),
+            cell_bookmarks_json,
+            view_bookmarks_json,
+            bookmark_mutations: RefCell::new(Vec::new()),
         };
 
         match runtime::execute_script(source, filename, context) {
@@ -57,11 +74,13 @@ impl ScriptEngine {
                 let duration_ms = start.elapsed().as_millis() as u64;
                 let output = ctx.console_output.borrow().clone();
                 let cells_modified = *ctx.cells_modified.borrow();
+                let bookmark_mutations = ctx.bookmark_mutations.borrow().clone();
                 let grids = ctx.grids;
                 let result = types::ScriptResult::Success {
                     output,
                     cells_modified,
                     duration_ms,
+                    bookmark_mutations,
                 };
                 (result, grids)
             }

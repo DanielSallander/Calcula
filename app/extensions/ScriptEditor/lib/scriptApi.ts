@@ -25,8 +25,18 @@ import type {
 export async function runScript(
   source: string,
   filename: string = "script.js",
+  cellBookmarksJson?: string,
+  viewBookmarksJson?: string,
 ): Promise<RunScriptResponse> {
-  const request: RunScriptRequest = { source, filename };
+  const request: RunScriptRequest & {
+    cellBookmarksJson?: string;
+    viewBookmarksJson?: string;
+  } = {
+    source,
+    filename,
+    cellBookmarksJson,
+    viewBookmarksJson,
+  };
   return invokeBackend<RunScriptResponse>("run_script", { request });
 }
 

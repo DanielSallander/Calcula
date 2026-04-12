@@ -3,6 +3,7 @@
 //! CONTEXT: Each module registers functions on the global Calcula object
 //! that bridge JavaScript calls to Rust spreadsheet operations.
 
+pub mod bookmarks;
 pub mod cells;
 pub mod sheets;
 pub mod utility;
