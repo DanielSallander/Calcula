@@ -108,6 +108,13 @@ pub enum RunScriptResponse {
         /// Bookmark mutations to apply on the frontend
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         bookmark_mutations: Vec<script_engine::types::BookmarkMutation>,
+        /// Deferred actions from Application object (goto, calculate, statusBar)
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        deferred_actions: Vec<script_engine::types::DeferredAction>,
+        /// Application.screenUpdating value at end of script
+        screen_updating: bool,
+        /// Application.enableEvents value at end of script
+        enable_events: bool,
     },
     /// Script encountered an error
     #[serde(rename_all = "camelCase")]

@@ -124,6 +124,109 @@ declare namespace Calcula {
   function log(...args: string[]): void;
 
   // --------------------------------------------------------------------------
+  // Application Object (modelled after Excel's Application object)
+  // --------------------------------------------------------------------------
+
+  /**
+   * Application-level properties and methods, analogous to Excel's
+   * `Application` object. Provides read-only app metadata, read-write
+   * control properties, and deferred action methods.
+   *
+   * @example
+   * // Read application info
+   * Calcula.log(Calcula.application.name);           // "Calcula"
+   * Calcula.log(Calcula.application.version);         // "0.1.0"
+   * Calcula.log(Calcula.application.decimalSeparator); // "." or ","
+   *
+   * // Suppress grid refresh during batch operations
+   * Calcula.application.screenUpdating = false;
+   * // ... bulk cell writes ...
+   * Calcula.application.screenUpdating = true;
+   *
+   * // Navigate to a cell after script completes
+   * Calcula.application.goto(0, 0);
+   *
+   * // Set a status bar message
+   * Calcula.application.statusBar = "Processing complete!";
+   */
+  namespace application {
+    // -- Read-only Properties --
+
+    /** Application name. Always "Calcula". */
+    const name: string;
+
+    /** Application version (e.g. "0.1.0"). */
+    const version: string;
+
+    /** Operating system identifier (e.g. "windows", "macos", "linux"). */
+    const operatingSystem: string;
+
+    /** File path separator ("\" on Windows, "/" on Unix). */
+    const pathSeparator: string;
+
+    /** Locale decimal separator (e.g. "." or ","). */
+    const decimalSeparator: string;
+
+    /** Locale thousands/grouping separator (e.g. ",", ".", or space). */
+    const thousandsSeparator: string;
+
+    // -- Read-write Properties --
+
+    /**
+     * Calculation mode: "automatic" or "manual".
+     * Read-only in the current version.
+     */
+    let calculationMode: string;
+
+    /**
+     * Controls whether the grid refreshes after the script completes.
+     * Set to `false` before batch operations to improve performance,
+     * then set back to `true` when done.
+     * Default: `true`.
+     *
+     * Analogous to Excel's `Application.ScreenUpdating`.
+     */
+    let screenUpdating: boolean;
+
+    /**
+     * Controls whether application events are fired during script execution.
+     * Default: `true`.
+     *
+     * Analogous to Excel's `Application.EnableEvents`.
+     */
+    let enableEvents: boolean;
+
+    /**
+     * Set to a string to display a message in the status bar.
+     * Set to `"false"` or empty string to reset to default.
+     *
+     * Analogous to Excel's `Application.StatusBar`.
+     */
+    let statusBar: string;
+
+    // -- Methods --
+
+    /**
+     * Request a full recalculation after the script completes.
+     *
+     * Analogous to Excel's `Application.Calculate`.
+     */
+    function calculate(): void;
+
+    /**
+     * Navigate to a specific cell after the script completes.
+     * Sets the selection and scrolls the viewport.
+     *
+     * Analogous to Excel's `Application.Goto`.
+     *
+     * @param row - 0-based row index
+     * @param col - 0-based column index
+     * @param sheetIndex - Optional sheet index (defaults to active sheet)
+     */
+    function goto(row: number, col: number, sheetIndex?: number): void;
+  }
+
+  // --------------------------------------------------------------------------
   // Bookmarks
   // --------------------------------------------------------------------------
 

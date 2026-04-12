@@ -16,6 +16,7 @@ import {
   onOpenWithCode,
   emitGridNeedsRefresh,
   emitBookmarkMutations,
+  emitDeferredActions,
   emitEditorClosed,
 } from "../lib/crossWindowEvents";
 import { useModuleStore } from "../lib/useModuleStore";
@@ -410,6 +411,10 @@ export function MonacoEditorApp(): React.ReactElement {
 
         if (result.bookmarkMutations && result.bookmarkMutations.length > 0) {
           await emitBookmarkMutations(result.bookmarkMutations);
+        }
+
+        if (result.deferredActions && result.deferredActions.length > 0) {
+          await emitDeferredActions(result.deferredActions);
         }
       } else {
         const newLines: ConsoleEntry[] = result.output.map((line) => ({

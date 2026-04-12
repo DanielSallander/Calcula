@@ -221,6 +221,15 @@ export function ScriptEditorPane(
             })
           );
         }
+
+        // Process deferred actions from Application object
+        if (result.deferredActions && result.deferredActions.length > 0) {
+          window.dispatchEvent(
+            new CustomEvent("script:deferred-actions", {
+              detail: result.deferredActions,
+            })
+          );
+        }
       } else {
         // Error result
         const newLines: ConsoleEntry[] = result.output.map((line) => ({

@@ -9,6 +9,62 @@ use engine::style::StyleRegistry;
 use serde::{Deserialize, Serialize};
 use std::cell::RefCell;
 
+/// Application-level metadata passed into the script runtime.
+/// Maps to Excel's Application object read-only properties.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AppInfo {
+    /// Application name ("Calcula")
+    pub name: String,
+    /// Application version (e.g. "0.1.0")
+    pub version: String,
+    /// Operating system description
+    pub operating_system: String,
+    /// File path separator ("\" on Windows, "/" on Unix)
+    pub path_separator: String,
+    /// Locale decimal separator (e.g. "." or ",")
+    pub decimal_separator: String,
+    /// Locale thousands separator (e.g. "," or ".")
+    pub thousands_separator: String,
+    /// Calculation mode: "automatic" or "manual"
+    pub calculation_mode: String,
+}
+
+impl Default for AppInfo {
+    fn default() -> Self {
+        Self {
+            name: "Calcula".to_string(),
+            version: "0.1.0".to_string(),
+            operating_system: std::env::consts::OS.to_string(),
+            path_separator: std::path::MAIN_SEPARATOR.to_string(),
+            decimal_separator: ".".to_string(),
+            thousands_separator: ",".to_string(),
+            calculation_mode: "automatic".to_string(),
+        }
+    }
+}
+
+/// A deferred action requested by a script, to be executed by the frontend
+/// after the script completes. Analogous to Excel Application methods/properties
+/// that affect the UI.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", tag = "action")]
+pub enum DeferredAction {
+    /// Navigate to a specific cell (Excel: Application.Goto)
+    Goto {
+        row: u32,
+        col: u32,
+        sheet_index: usize,
+    },
+    /// Request a full recalculation (Excel: Application.Calculate)
+    Calculate,
+    /// Set the status bar message (Excel: Application.StatusBar)
+    /// message = None means reset to default
+    SetStatusBar {
+        message: Option<String>,
+    },
+}
+
 /// A queued bookmark mutation produced by a script.
 /// Applied on the frontend after script execution completes.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -66,6 +122,14 @@ pub struct ScriptContext {
     pub view_bookmarks_json: String,
     /// Queued bookmark mutations to apply after script execution
     pub bookmark_mutations: RefCell<Vec<BookmarkMutation>>,
+    /// Application-level metadata (read-only from script perspective)
+    pub app_info: AppInfo,
+    /// Writable: Application.screenUpdating (default true)
+    pub screen_updating: RefCell<bool>,
+    /// Writable: Application.enableEvents (default true)
+    pub enable_events: RefCell<bool>,
+    /// Deferred actions queued by the script (goto, calculate, statusBar, etc.)
+    pub deferred_actions: RefCell<Vec<DeferredAction>>,
 }
 
 /// The result of executing a script, returned to the Tauri command layer.
@@ -83,6 +147,13 @@ pub enum ScriptResult {
         /// Bookmark mutations to apply on the frontend
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         bookmark_mutations: Vec<BookmarkMutation>,
+        /// Deferred actions to execute on the frontend
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        deferred_actions: Vec<DeferredAction>,
+        /// Whether screen updating was enabled (Application.screenUpdating)
+        screen_updating: bool,
+        /// Whether events were enabled (Application.enableEvents)
+        enable_events: bool,
     },
     /// Script encountered an error
     Error {

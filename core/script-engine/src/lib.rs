@@ -41,10 +41,20 @@ impl ScriptEngine {
         sheet_names: Vec<String>,
         active_sheet: usize,
     ) -> (ScriptResult, Vec<Grid>) {
-        Self::run_with_bookmarks(source, filename, grids, style_registry, sheet_names, active_sheet, "[]".to_string(), "[]".to_string())
+        Self::run_with_bookmarks(
+            source,
+            filename,
+            grids,
+            style_registry,
+            sheet_names,
+            active_sheet,
+            "[]".to_string(),
+            "[]".to_string(),
+            types::AppInfo::default(),
+        )
     }
 
-    /// Execute a script with bookmark context.
+    /// Execute a script with bookmark context and application info.
     pub fn run_with_bookmarks(
         source: &str,
         filename: &str,
@@ -54,6 +64,7 @@ impl ScriptEngine {
         active_sheet: usize,
         cell_bookmarks_json: String,
         view_bookmarks_json: String,
+        app_info: types::AppInfo,
     ) -> (ScriptResult, Vec<Grid>) {
         let start = Instant::now();
 
@@ -67,6 +78,10 @@ impl ScriptEngine {
             cell_bookmarks_json,
             view_bookmarks_json,
             bookmark_mutations: RefCell::new(Vec::new()),
+            app_info,
+            screen_updating: RefCell::new(true),
+            enable_events: RefCell::new(true),
+            deferred_actions: RefCell::new(Vec::new()),
         };
 
         match runtime::execute_script(source, filename, context) {
@@ -75,12 +90,18 @@ impl ScriptEngine {
                 let output = ctx.console_output.borrow().clone();
                 let cells_modified = *ctx.cells_modified.borrow();
                 let bookmark_mutations = ctx.bookmark_mutations.borrow().clone();
+                let deferred_actions = ctx.deferred_actions.borrow().clone();
+                let screen_updating = *ctx.screen_updating.borrow();
+                let enable_events = *ctx.enable_events.borrow();
                 let grids = ctx.grids;
                 let result = types::ScriptResult::Success {
                     output,
                     cells_modified,
                     duration_ms,
                     bookmark_mutations,
+                    deferred_actions,
+                    screen_updating,
+                    enable_events,
                 };
                 (result, grids)
             }

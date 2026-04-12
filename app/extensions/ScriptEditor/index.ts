@@ -3,9 +3,12 @@
 // CONTEXT: Registers the task pane, Developer menu items, and cross-window event bridge.
 
 import type { ExtensionModule, ExtensionContext } from "@api/contract";
+import { scrollToCell, setSelection } from "@api/grid";
+import { dispatchGridAction } from "@api/gridDispatch";
 import { ScriptEditorPane } from "./components/ScriptEditorPane";
 import { openAdvancedEditor } from "./lib/openEditorWindow";
-import { onGridNeedsRefresh } from "./lib/crossWindowEvents";
+import { onGridNeedsRefresh, onDeferredActions } from "./lib/crossWindowEvents";
+import type { DeferredAction } from "./types";
 
 // ============================================================================
 // Constants
@@ -67,7 +70,33 @@ function activate(context: ExtensionContext): void {
     ],
   });
 
-  // 3. Listen for grid refresh requests from the Advanced Editor window.
+  // 3. Listen for deferred actions from Application object (goto, calculate, statusBar)
+  const handleDeferredActions = (e: Event) => {
+    const actions = (e as CustomEvent).detail as DeferredAction[];
+    if (!Array.isArray(actions)) return;
+    for (const action of actions) {
+      switch (action.action) {
+        case "goto":
+          dispatchGridAction(setSelection(action.row, action.col, action.row, action.col));
+          dispatchGridAction(scrollToCell(action.row, action.col, false));
+          break;
+        case "calculate":
+          // Trigger a full grid data re-fetch (equivalent to recalculation)
+          window.dispatchEvent(new CustomEvent("grid:refresh"));
+          break;
+        case "setStatusBar":
+          // Dispatch status bar update (extensions can listen via statusBar API)
+          window.dispatchEvent(
+            new CustomEvent("script:status-bar", { detail: action.message })
+          );
+          break;
+      }
+    }
+  };
+  window.addEventListener("script:deferred-actions", handleDeferredActions);
+  cleanupFns.push(() => window.removeEventListener("script:deferred-actions", handleDeferredActions));
+
+  // 4. Listen for grid refresh requests from the Advanced Editor window.
   //    The Monaco editor window uses Tauri events (cross-window) instead of
   //    DOM CustomEvents. We bridge them here: Tauri event -> DOM event.
   let unlistenGridRefresh: (() => void) | undefined;
@@ -78,6 +107,21 @@ function activate(context: ExtensionContext): void {
   });
   cleanupFns.push(() => {
     unlistenGridRefresh?.();
+  });
+
+  // 5. Listen for deferred actions from the Advanced Editor window (cross-window).
+  let unlistenDeferredActions: (() => void) | undefined;
+  onDeferredActions((payload) => {
+    if (Array.isArray(payload.actions)) {
+      window.dispatchEvent(
+        new CustomEvent("script:deferred-actions", { detail: payload.actions })
+      );
+    }
+  }).then((fn) => {
+    unlistenDeferredActions = fn;
+  });
+  cleanupFns.push(() => {
+    unlistenDeferredActions?.();
   });
 
   isActivated = true;

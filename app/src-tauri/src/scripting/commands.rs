@@ -25,6 +25,19 @@ pub fn run_script(
     let style_registry = state.style_registry.lock().map_err(|e| e.to_string())?.clone();
     let sheet_names = state.sheet_names.lock().map_err(|e| e.to_string())?.clone();
     let active_sheet = *state.active_sheet.lock().map_err(|e| e.to_string())?;
+    let locale = state.locale.lock().map_err(|e| e.to_string())?.clone();
+    let calculation_mode = state.calculation_mode.lock().map_err(|e| e.to_string())?.clone();
+
+    // Build Application info from current AppState
+    let app_info = script_engine::types::AppInfo {
+        name: "Calcula".to_string(),
+        version: env!("CARGO_PKG_VERSION").to_string(),
+        operating_system: std::env::consts::OS.to_string(),
+        path_separator: std::path::MAIN_SEPARATOR.to_string(),
+        decimal_separator: locale.decimal_separator.to_string(),
+        thousands_separator: locale.thousands_separator.to_string(),
+        calculation_mode,
+    };
 
     // 2. Run the script in the engine
     let (result, modified_grids) = script_engine::ScriptEngine::run_with_bookmarks(
@@ -36,6 +49,7 @@ pub fn run_script(
         active_sheet,
         request.cell_bookmarks_json.unwrap_or_else(|| "[]".to_string()),
         request.view_bookmarks_json.unwrap_or_else(|| "[]".to_string()),
+        app_info,
     );
 
     // 3. If successful and grids were modified, apply changes back
@@ -68,11 +82,17 @@ pub fn run_script(
             cells_modified,
             duration_ms,
             bookmark_mutations,
+            deferred_actions,
+            screen_updating,
+            enable_events,
         } => Ok(RunScriptResponse::Success {
             output,
             cells_modified,
             duration_ms,
             bookmark_mutations,
+            deferred_actions,
+            screen_updating,
+            enable_events,
         }),
         script_engine::ScriptResult::Error { message, output } => {
             Ok(RunScriptResponse::Error { message, output })

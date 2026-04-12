@@ -63,6 +63,10 @@ impl NotebookSession {
             cell_bookmarks_json: "[]".to_string(),
             view_bookmarks_json: "[]".to_string(),
             bookmark_mutations: RefCell::new(Vec::new()),
+            app_info: crate::types::AppInfo::default(),
+            screen_updating: RefCell::new(true),
+            enable_events: RefCell::new(true),
+            deferred_actions: RefCell::new(Vec::new()),
         };
 
         let shared_ctx = Rc::new(RefCell::new(initial_ctx));
@@ -111,6 +115,7 @@ impl NotebookSession {
             // Reset per-cell counters
             *ctx.console_output.borrow_mut() = Vec::new();
             *ctx.cells_modified.borrow_mut() = 0;
+            *ctx.deferred_actions.borrow_mut() = Vec::new();
         }
 
         // Execute the cell source in the persistent JS context
@@ -139,11 +144,17 @@ impl NotebookSession {
                 let cells_modified = *ctx.cells_modified.borrow();
                 let grids = ctx.grids.clone();
                 let bookmark_mutations = ctx.bookmark_mutations.borrow().clone();
+                let deferred_actions = ctx.deferred_actions.borrow().clone();
+                let screen_updating = *ctx.screen_updating.borrow();
+                let enable_events = *ctx.enable_events.borrow();
                 let result = ScriptResult::Success {
                     output,
                     cells_modified,
                     duration_ms,
                     bookmark_mutations,
+                    deferred_actions,
+                    screen_updating,
+                    enable_events,
                 };
                 (result, grids)
             }
@@ -200,6 +211,13 @@ fn register_calcula_api<'js>(
     globals
         .set("Calcula", calcula)
         .map_err(|e| format!("Failed to set Calcula global: {}", e))?;
+
+    // Application ops must be registered after Calcula is on globals
+    // (the JS defineProperty snippet references Calcula.application)
+    let calcula_ref: Object = globals
+        .get("Calcula")
+        .map_err(|e| format!("Failed to get Calcula global: {}", e))?;
+    ops::application::register_application_ops(ctx, &calcula_ref, shared_ctx.clone())?;
 
     Ok(())
 }

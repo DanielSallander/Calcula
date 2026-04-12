@@ -26,6 +26,12 @@ export interface BookmarkMutation {
   dimensionsJson?: string;
 }
 
+/** A deferred action from Application object methods/properties. */
+export type DeferredAction =
+  | { action: "goto"; row: number; col: number; sheetIndex: number }
+  | { action: "calculate" }
+  | { action: "setStatusBar"; message: string | null };
+
 /** Successful script execution result. */
 export interface ScriptSuccess {
   type: "success";
@@ -37,6 +43,12 @@ export interface ScriptSuccess {
   durationMs: number;
   /** Bookmark mutations to apply on the frontend */
   bookmarkMutations?: BookmarkMutation[];
+  /** Deferred actions from Application object (goto, calculate, statusBar) */
+  deferredActions?: DeferredAction[];
+  /** Application.screenUpdating value at end of script */
+  screenUpdating?: boolean;
+  /** Application.enableEvents value at end of script */
+  enableEvents?: boolean;
 }
 
 /** Script execution error result. */

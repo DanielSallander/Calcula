@@ -19,6 +19,8 @@ export const ScriptEditorEvents = {
   EDITOR_CLOSED: "script-editor:editor-closed",
   /** Editor -> Main: script produced bookmark mutations */
   BOOKMARK_MUTATIONS: "script-editor:bookmark-mutations",
+  /** Editor -> Main: script produced deferred actions (Application object) */
+  DEFERRED_ACTIONS: "script-editor:deferred-actions",
 } as const;
 
 // ============================================================================
@@ -49,6 +51,10 @@ export async function emitBookmarkMutations(mutations: unknown[]): Promise<void>
   await emitTauriEvent(ScriptEditorEvents.BOOKMARK_MUTATIONS, { mutations });
 }
 
+export async function emitDeferredActions(actions: unknown[]): Promise<void> {
+  await emitTauriEvent(ScriptEditorEvents.DEFERRED_ACTIONS, { actions });
+}
+
 export async function emitEditorClosed(): Promise<void> {
   await emitTauriEvent(ScriptEditorEvents.EDITOR_CLOSED);
 }
@@ -73,6 +79,12 @@ export function onBookmarkMutations(
   callback: (payload: { mutations: unknown[] }) => void,
 ): Promise<UnlistenFn> {
   return listenTauriEvent<{ mutations: unknown[] }>(ScriptEditorEvents.BOOKMARK_MUTATIONS, callback);
+}
+
+export function onDeferredActions(
+  callback: (payload: { actions: unknown[] }) => void,
+): Promise<UnlistenFn> {
+  return listenTauriEvent<{ actions: unknown[] }>(ScriptEditorEvents.DEFERRED_ACTIONS, callback);
 }
 
 export function onEditorClosed(

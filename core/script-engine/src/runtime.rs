@@ -88,9 +88,18 @@ fn register_calcula_api<'js>(
     // Bookmark operations
     ops::bookmarks::register_bookmark_ops(ctx, &calcula, shared_ctx.clone())?;
 
+    // Set Calcula on globals BEFORE application ops (application.rs uses eval
+    // that references the global Calcula object for defineProperty wiring)
     globals
         .set("Calcula", calcula)
         .map_err(|e| format!("Failed to set Calcula global: {}", e))?;
+
+    // Application operations (must be registered AFTER Calcula is on globals
+    // because the JS defineProperty snippet references Calcula.application)
+    let calcula_ref: Object = globals
+        .get("Calcula")
+        .map_err(|e| format!("Failed to get Calcula global: {}", e))?;
+    ops::application::register_application_ops(ctx, &calcula_ref, shared_ctx.clone())?;
 
     Ok(())
 }
