@@ -21,8 +21,7 @@ export function ThemeGallery(): React.ReactElement {
 
   useEffect(() => {
     getDocumentTheme().then((t) => setActiveThemeName(t.name));
-    const unsub = onAppEvent(AppEvents.THEME_CHANGED, (e: Event) => {
-      const detail = (e as CustomEvent).detail;
+    const unsub = onAppEvent(AppEvents.THEME_CHANGED, (detail: { theme?: ThemeDefinitionData }) => {
       if (detail?.theme) setActiveThemeName(detail.theme.name);
     });
     return unsub;

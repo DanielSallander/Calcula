@@ -27,6 +27,8 @@ function activate(_context: ExtensionContext): void {
   // Listen for theme changes and trigger re-render
   const unsubTheme = onAppEvent(AppEvents.THEME_CHANGED, () => {
     markSheetDirty();
+    // Refresh the style cache so resolved font families update immediately
+    window.dispatchEvent(new CustomEvent("styles:refresh"));
   });
   cleanupFns.push(unsubTheme);
 
