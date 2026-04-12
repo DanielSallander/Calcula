@@ -55,10 +55,16 @@ export type RunScriptResponse = ScriptSuccess | ScriptError;
 // Script Module Types
 // ============================================================================
 
+/** Scope of a script: workbook-level or attached to a specific sheet. */
+export type ScriptScope =
+  | { type: "workbook" }
+  | { type: "sheet"; name: string };
+
 /** Lightweight script summary (for listing without source code). */
 export interface ScriptSummary {
   id: string;
   name: string;
+  scope?: ScriptScope;
 }
 
 /** Full script module stored in the workbook. */
@@ -67,4 +73,5 @@ export interface WorkbookScript {
   name: string;
   description: string | null;
   source: string;
+  scope?: ScriptScope;
 }

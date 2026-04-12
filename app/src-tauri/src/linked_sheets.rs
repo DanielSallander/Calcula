@@ -280,23 +280,54 @@ fn is_leap_year(y: i64) -> bool {
 pub fn publish_sheets(
     state: State<AppState>,
     user_files_state: State<UserFilesState>,
+    script_state: State<crate::scripting::types::ScriptState>,
     request: PublishSheetsRequest,
 ) -> Result<PublishSheetsResultJson, String> {
     use calcula_format::publish::manifest::{
         build_connection_template, parse_connection_params, ConnectionParameter,
         PublishedConnection,
     };
+    use calcula_format::publish::writer::ScriptToPublish;
+    use crate::scripting::types::ScriptScope;
 
     let workbook = crate::persistence::build_workbook_for_save(&state, &user_files_state)
         .map_err(|e| e.to_string())?;
 
     let pub_dir = std::path::Path::new(&request.pub_dir);
 
+    // Collect sheet names being published
+    let published_sheet_names: Vec<String> = request
+        .sheet_indices
+        .iter()
+        .filter_map(|&idx| workbook.sheets.get(idx).map(|s| s.name.clone()))
+        .collect();
+
+    // Automatically collect scripts scoped to the published sheets
+    let scripts_to_publish: Vec<ScriptToPublish> = {
+        let scripts = script_state.workbook_scripts.lock().map_err(|e| e.to_string())?;
+        scripts
+            .values()
+            .filter_map(|s| match &s.scope {
+                ScriptScope::Sheet { name } if published_sheet_names.contains(name) => {
+                    Some(ScriptToPublish {
+                        id: s.id.clone(),
+                        name: s.name.clone(),
+                        description: s.description.clone(),
+                        source: s.source.clone(),
+                        sheet_name: name.clone(),
+                    })
+                }
+                _ => None,
+            })
+            .collect()
+    };
+
     let pub_request = PublishRequest {
         sheet_indices: request.sheet_indices,
         descriptions: request.descriptions,
         author: request.author.clone(),
         now: now_iso8601(),
+        scripts: scripts_to_publish,
     };
 
     let mut result = do_publish(&workbook, &pub_request, pub_dir)
@@ -418,6 +449,7 @@ pub fn browse_published_sheets(
 #[tauri::command]
 pub fn link_published_sheets(
     state: State<AppState>,
+    script_state: State<crate::scripting::types::ScriptState>,
     request: LinkSheetsRequest,
 ) -> Result<LinkResultJson, String> {
     let pub_dir = std::path::Path::new(&request.pub_dir);
@@ -502,6 +534,30 @@ pub fn link_published_sheets(
 
         linked_indices.push(new_idx);
         linked_names.push(sheet.name.clone());
+    }
+
+    // Import scripts that are scoped to the linked sheets
+    if !manifest.scripts.is_empty() {
+        use crate::scripting::types::{ScriptScope, WorkbookScript};
+        let mut scripts = script_state.workbook_scripts.lock().map_err(|e| e.to_string())?;
+
+        for published_script in &manifest.scripts {
+            // Only import scripts for sheets we just linked
+            if linked_names.contains(&published_script.sheet_name) {
+                scripts.insert(
+                    published_script.id.clone(),
+                    WorkbookScript {
+                        id: published_script.id.clone(),
+                        name: published_script.name.clone(),
+                        description: published_script.description.clone(),
+                        source: published_script.source.clone(),
+                        scope: ScriptScope::Sheet {
+                            name: published_script.sheet_name.clone(),
+                        },
+                    },
+                );
+            }
+        }
     }
 
     Ok(LinkResultJson {

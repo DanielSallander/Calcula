@@ -6,11 +6,22 @@ use crate::sheet_data::cells_to_sheet_data;
 use crate::sheet_layout::SheetLayout;
 use crate::sheet_styles::{cells_to_sheet_styles, serialize_style_registry};
 
-use super::manifest::{PublishManifest, PublishedSheet};
+use super::manifest::{PublishManifest, PublishedScript, PublishedSheet};
 use persistence::Workbook;
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 use std::path::Path;
+
+/// A script to be published alongside a sheet.
+#[derive(Debug, Clone)]
+pub struct ScriptToPublish {
+    pub id: String,
+    pub name: String,
+    pub description: Option<String>,
+    pub source: String,
+    /// The sheet name this script is scoped to.
+    pub sheet_name: String,
+}
 
 /// Request to publish selected sheets from a workbook.
 #[derive(Debug, Clone)]
@@ -23,6 +34,8 @@ pub struct PublishRequest {
     pub author: String,
     /// ISO 8601 timestamp of this publish action.
     pub now: String,
+    /// Scripts scoped to the published sheets.
+    pub scripts: Vec<ScriptToPublish>,
 }
 
 /// Result of a publish operation.
@@ -119,6 +132,14 @@ pub fn publish_sheets(
             registry_json.as_bytes(),
         )?;
 
+        // Collect script IDs scoped to this sheet
+        let script_ids: Vec<String> = request
+            .scripts
+            .iter()
+            .filter(|s| s.sheet_name == sheet.name)
+            .map(|s| s.id.clone())
+            .collect();
+
         // Update or insert the manifest entry
         if let Some(entry) = manifest.find_sheet_mut(&stable_id) {
             entry.name = sheet.name.clone();
@@ -126,6 +147,7 @@ pub fn publish_sheets(
             entry.published_at = request.now.clone();
             entry.version += 1;
             entry.checksum = checksum;
+            entry.script_ids = script_ids;
         } else {
             manifest.sheets.push(PublishedSheet {
                 id: stable_id,
@@ -135,10 +157,38 @@ pub fn publish_sheets(
                 published_at: request.now.clone(),
                 version: 1,
                 checksum,
+                script_ids,
             });
         }
 
         sheets_published += 1;
+    }
+
+    // Write scripts scoped to published sheets
+    if !request.scripts.is_empty() {
+        std::fs::create_dir_all(pub_dir.join("scripts"))?;
+
+        // Replace all published scripts with the current set
+        manifest.scripts.clear();
+
+        for script in &request.scripts {
+            let published_script = PublishedScript {
+                id: script.id.clone(),
+                name: script.name.clone(),
+                description: script.description.clone(),
+                source: script.source.clone(),
+                sheet_name: script.sheet_name.clone(),
+            };
+
+            // Write individual script file
+            let script_json = serde_json::to_string_pretty(&published_script)?;
+            std::fs::write(
+                pub_dir.join("scripts").join(format!("script_{}.json", script.id)),
+                script_json.as_bytes(),
+            )?;
+
+            manifest.scripts.push(published_script);
+        }
     }
 
     // Ensure styles directory exists for registry files
@@ -320,6 +370,7 @@ mod tests {
             descriptions: vec!["Monthly revenue".to_string()],
             author: "jane.doe".to_string(),
             now: "2026-04-09T12:00:00Z".to_string(),
+            scripts: vec![],
         };
 
         let result = publish_sheets(&workbook, &request, &pub_dir).unwrap();
@@ -347,6 +398,7 @@ mod tests {
             descriptions: vec![],
             author: "jane.doe".to_string(),
             now: "2026-04-09T12:00:00Z".to_string(),
+            scripts: vec![],
         };
 
         // Publish once
@@ -370,6 +422,7 @@ mod tests {
             descriptions: vec!["Dashboard".to_string(), "By region".to_string()],
             author: "jane.doe".to_string(),
             now: "2026-04-09T12:00:00Z".to_string(),
+            scripts: vec![],
         };
 
         let result = publish_sheets(&workbook, &request, &pub_dir).unwrap();
@@ -388,6 +441,7 @@ mod tests {
             descriptions: vec![],
             author: "jane.doe".to_string(),
             now: "2026-04-09T12:00:00Z".to_string(),
+            scripts: vec![],
         };
 
         let result = publish_sheets(&workbook, &request, &pub_dir).unwrap();

@@ -453,6 +453,20 @@ impl CalculaMeta {
 // SCRIPTS & NOTEBOOKS
 // ============================================================================
 
+/// Scope of a script: workbook-level or attached to a sheet.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", tag = "type")]
+pub enum SavedScriptScope {
+    Workbook,
+    Sheet { name: String },
+}
+
+impl Default for SavedScriptScope {
+    fn default() -> Self {
+        SavedScriptScope::Workbook
+    }
+}
+
 /// A workbook-embedded script for .cala persistence.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SavedScript {
@@ -460,6 +474,9 @@ pub struct SavedScript {
     pub name: String,
     pub description: Option<String>,
     pub source: String,
+    /// Where this script lives: workbook-level or scoped to a sheet.
+    #[serde(default)]
+    pub scope: SavedScriptScope,
 }
 
 /// A workbook-embedded notebook for .cala persistence.

@@ -199,6 +199,7 @@ mod tests {
             descriptions: vec!["Test description".to_string()],
             author: "tester".to_string(),
             now: "2026-04-09T12:00:00Z".to_string(),
+            scripts: vec![],
         };
 
         let result = publish_sheets(&workbook, &request, &pub_dir).unwrap();
@@ -231,6 +232,7 @@ mod tests {
             descriptions: vec!["A test".to_string()],
             author: "tester".to_string(),
             now: "2026-01-01T00:00:00Z".to_string(),
+            scripts: vec![],
         };
 
         publish_sheets(&workbook, &request, &pub_dir).unwrap();

@@ -36,6 +36,23 @@ impl ScriptState {
     }
 }
 
+/// Scope of a script: workbook-level or attached to a specific sheet.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", tag = "type")]
+pub enum ScriptScope {
+    /// Global script, not tied to any sheet.
+    Workbook,
+    /// Attached to a specific sheet by name.
+    /// When that sheet is published, this script is included.
+    Sheet { name: String },
+}
+
+impl Default for ScriptScope {
+    fn default() -> Self {
+        ScriptScope::Workbook
+    }
+}
+
 /// A script stored within a workbook.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -44,6 +61,9 @@ pub struct WorkbookScript {
     pub name: String,
     pub description: Option<String>,
     pub source: String,
+    /// Where this script lives: workbook-level or scoped to a sheet.
+    #[serde(default)]
+    pub scope: ScriptScope,
 }
 
 /// Lightweight summary of a script (for listing without source code).
@@ -52,6 +72,8 @@ pub struct WorkbookScript {
 pub struct ScriptSummary {
     pub id: String,
     pub name: String,
+    #[serde(default)]
+    pub scope: ScriptScope,
 }
 
 /// Request payload for running a script.

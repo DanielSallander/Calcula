@@ -19,6 +19,9 @@ pub struct PublishManifest {
     pub published_by: String,
     /// All published sheets.
     pub sheets: Vec<PublishedSheet>,
+    /// Scripts published alongside sheets (scoped scripts only).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub scripts: Vec<PublishedScript>,
     /// BI connections used by published sheets (auto-extracted on publish).
     /// Connection strings are parameterized with `${PARAM}` placeholders.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -51,6 +54,22 @@ pub struct PublishedSheet {
     pub version: u64,
     /// Hash digest of data.json content (for change detection).
     pub checksum: String,
+    /// IDs of scripts scoped to this sheet (stored in scripts/ directory).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub script_ids: Vec<String>,
+}
+
+/// A published script included with a sheet.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PublishedScript {
+    pub id: String,
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    pub source: String,
+    /// The sheet name this script is scoped to.
+    pub sheet_name: String,
 }
 
 /// A BI connection published alongside sheets.
@@ -92,6 +111,7 @@ impl PublishManifest {
             published_at: now,
             published_by,
             sheets: Vec::new(),
+            scripts: Vec::new(),
             connections: Vec::new(),
             parameters: Vec::new(),
             environments: HashMap::new(),
@@ -237,7 +257,9 @@ mod tests {
                 published_at: "2026-04-09T12:00:00Z".to_string(),
                 version: 1,
                 checksum: "hash:abc123".to_string(),
+                script_ids: vec![],
             }],
+            scripts: vec![],
             connections: vec![PublishedConnection {
                 name: "Sales DB".to_string(),
                 connection_type: "PostgreSQL".to_string(),
@@ -364,6 +386,7 @@ mod tests {
                     published_at: "2026-01-01T00:00:00Z".to_string(),
                     version: 1,
                     checksum: "abc".to_string(),
+                    script_ids: vec![],
                 },
                 PublishedSheet {
                     id: "sheet-b".to_string(),
@@ -373,8 +396,10 @@ mod tests {
                     published_at: "2026-01-01T00:00:00Z".to_string(),
                     version: 2,
                     checksum: "def".to_string(),
+                    script_ids: vec![],
                 },
             ],
+            scripts: Vec::new(),
             connections: Vec::new(),
             parameters: Vec::new(),
             environments: HashMap::new(),

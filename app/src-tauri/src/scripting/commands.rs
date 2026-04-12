@@ -132,6 +132,7 @@ pub fn list_scripts(
         .map(|s| ScriptSummary {
             id: s.id.clone(),
             name: s.name.clone(),
+            scope: s.scope.clone(),
         })
         .collect();
 

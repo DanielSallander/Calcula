@@ -992,6 +992,7 @@ fn restore_linked_sheets_metadata(
 fn collect_scripts_for_save(
     script_state: &State<crate::scripting::types::ScriptState>,
 ) -> Vec<persistence::SavedScript> {
+    use crate::scripting::types::ScriptScope;
     let scripts = script_state.workbook_scripts.lock().unwrap();
     scripts
         .values()
@@ -1000,6 +1001,12 @@ fn collect_scripts_for_save(
             name: s.name.clone(),
             description: s.description.clone(),
             source: s.source.clone(),
+            scope: match &s.scope {
+                ScriptScope::Workbook => persistence::SavedScriptScope::Workbook,
+                ScriptScope::Sheet { name } => persistence::SavedScriptScope::Sheet {
+                    name: name.clone(),
+                },
+            },
         })
         .collect()
 }
@@ -1036,6 +1043,7 @@ fn restore_scripts(
     saved: &[persistence::SavedScript],
     script_state: &State<crate::scripting::types::ScriptState>,
 ) {
+    use crate::scripting::types::ScriptScope;
     let mut scripts = script_state.workbook_scripts.lock().unwrap();
     scripts.clear();
     for s in saved {
@@ -1046,6 +1054,12 @@ fn restore_scripts(
                 name: s.name.clone(),
                 description: s.description.clone(),
                 source: s.source.clone(),
+                scope: match &s.scope {
+                    persistence::SavedScriptScope::Workbook => ScriptScope::Workbook,
+                    persistence::SavedScriptScope::Sheet { name } => ScriptScope::Sheet {
+                        name: name.clone(),
+                    },
+                },
             },
         );
     }
