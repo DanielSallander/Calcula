@@ -22,14 +22,16 @@ export const TaskPaneWrapper = styled.div<{
   background-color: #f8f9fa;
   border-left: 1px solid #e0e0e0;
   overflow: hidden;
-  
+
   /* Fixed width */
   width: ${({ $width }) => $width}px;
-  
-  /* Slide animation using transform */
-  transform: translateX(${({ $isOpen }) => ($isOpen ? "0" : "100%")});
-  transition: transform 0.15s ease-out;
-  will-change: transform;
+
+  /* Slide animation using right offset instead of transform.
+     transform (even translateX(0)) creates a containing block that traps
+     position:fixed elements (e.g. Monaco suggest widget) inside the pane,
+     where overflow:hidden clips them.  Using right avoids this. */
+  right: ${({ $isOpen, $width }) => ($isOpen ? "0" : `-${$width}px`)};
+  transition: right 0.15s ease-out;
   
   /* Shadow only when open */
   box-shadow: ${({ $isOpen }) => ($isOpen ? "-4px 0 12px rgba(0, 0, 0, 0.1)" : "none")};

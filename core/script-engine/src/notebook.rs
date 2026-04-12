@@ -118,29 +118,41 @@ impl NotebookSession {
             *ctx.deferred_actions.borrow_mut() = Vec::new();
         }
 
-        // Execute the cell source in the persistent JS context
-        let eval_result = self.context.with(|ctx| -> Result<(), String> {
+        // Execute the cell source in the persistent JS context.
+        // Like a REPL / Jupyter notebook, the value of the last expression is
+        // captured and displayed as output (unless it is undefined).
+        let eval_result = self.context.with(|ctx| -> Result<Option<String>, String> {
             let result: rquickjs::Result<Value> = ctx.eval(source);
-            result.map(|_| ()).map_err(|e| {
-                let caught = ctx.catch();
-                if let Some(exc) = caught.as_exception() {
-                    let msg = exc.message().unwrap_or_default();
-                    let stack = exc.stack().unwrap_or_default();
-                    if stack.is_empty() {
-                        return msg;
-                    }
-                    return format!("{}\n{}", msg, stack);
+            match result {
+                Ok(val) => {
+                    let repr = value_to_display_string(&ctx, &val);
+                    Ok(repr)
                 }
-                format!("Script error: {}", e)
-            })
+                Err(e) => {
+                    let caught = ctx.catch();
+                    if let Some(exc) = caught.as_exception() {
+                        let msg = exc.message().unwrap_or_default();
+                        let stack = exc.stack().unwrap_or_default();
+                        if stack.is_empty() {
+                            return Err(msg);
+                        }
+                        return Err(format!("{}\n{}", msg, stack));
+                    }
+                    Err(format!("Script error: {}", e))
+                }
+            }
         });
 
         let duration_ms = start.elapsed().as_millis() as u64;
 
         match eval_result {
-            Ok(()) => {
+            Ok(last_value) => {
                 let ctx = self.shared_ctx.borrow();
-                let output = ctx.console_output.borrow().clone();
+                let mut output = ctx.console_output.borrow().clone();
+                // Append the last expression value (REPL-style), like Jupyter's Out[N]
+                if let Some(repr) = last_value {
+                    output.push(repr);
+                }
                 let cells_modified = *ctx.cells_modified.borrow();
                 let grids = ctx.grids.clone();
                 let bookmark_mutations = ctx.bookmark_mutations.borrow().clone();
@@ -220,6 +232,53 @@ fn register_calcula_api<'js>(
     ops::application::register_application_ops(ctx, &calcula_ref, shared_ctx.clone())?;
 
     Ok(())
+}
+
+/// Convert a QuickJS Value to a human-readable display string (REPL-style).
+/// Returns `None` for `undefined` (so that statements like `let x = 1` don't
+/// produce spurious output), and a JSON representation for objects/arrays.
+fn value_to_display_string<'js>(ctx: &rquickjs::Ctx<'js>, val: &Value<'js>) -> Option<String> {
+    if val.is_undefined() {
+        return None;
+    }
+    if val.is_null() {
+        return Some("null".to_string());
+    }
+    if let Some(b) = val.as_bool() {
+        return Some(if b { "true" } else { "false" }.to_string());
+    }
+    if let Some(n) = val.as_int() {
+        return Some(n.to_string());
+    }
+    if let Some(n) = val.as_float() {
+        // Format like JS: no trailing ".0" for integers stored as f64
+        if n.fract() == 0.0 && n.is_finite() {
+            return Some(format!("{}", n as i64));
+        }
+        return Some(format!("{}", n));
+    }
+    if let Some(s) = val.as_string() {
+        if let Ok(s) = s.to_string() {
+            return Some(format!("\"{}\"", s));
+        }
+    }
+    // For objects/arrays, use JSON.stringify for a readable representation
+    if val.is_object() {
+        let json_stringify: rquickjs::Result<rquickjs::Function> = ctx
+            .globals()
+            .get::<_, Object>("JSON")
+            .and_then(|json| json.get("stringify"));
+        if let Ok(stringify) = json_stringify {
+            // JSON.stringify(value, null, 2) for pretty-printing
+            let result: rquickjs::Result<Option<String>> =
+                stringify.call((val.clone(), Value::new_null(ctx.clone()), 2i32));
+            if let Ok(Some(s)) = result {
+                return Some(s);
+            }
+        }
+    }
+    // Fallback: show the type name
+    Some(format!("[{}]", val.type_name()))
 }
 
 /// Register `console` global object with log/warn/error/info methods.
