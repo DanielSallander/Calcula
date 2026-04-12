@@ -17,9 +17,14 @@ export interface CsvParseOptions {
   skipRows: number;
 }
 
-export function createDefaultParseOptions(): CsvParseOptions {
+/**
+ * Create default CSV parse options.
+ * If a locale decimal separator is provided, the default delimiter is adjusted:
+ * locales using ',' as decimal get ';' as CSV delimiter.
+ */
+export function createDefaultParseOptions(localeDecimalSeparator?: string): CsvParseOptions {
   return {
-    delimiter: ",",
+    delimiter: localeDecimalSeparator === "," ? ";" : ",",
     textQualifier: '"',
     hasHeaders: false,
     skipRows: 0,

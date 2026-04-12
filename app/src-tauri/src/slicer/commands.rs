@@ -340,6 +340,7 @@ fn get_table_column_values(state: &State<AppState>, slicer: &Slicer) -> Result<V
     let tables = state.tables.lock().unwrap();
     let grids = state.grids.lock().unwrap();
     let style_registry = state.style_registry.lock().unwrap();
+    let locale = state.locale.lock().unwrap();
 
     // Find the table
     let table = tables
@@ -371,7 +372,7 @@ fn get_table_column_values(state: &State<AppState>, slicer: &Slicer) -> Result<V
     for row in data_start_row..=table.end_row {
         let value = if let Some(cell) = grid.cells.get(&(row, abs_col)) {
             let style = style_registry.get(cell.style_index);
-            format_cell_value(&cell.value, style)
+            format_cell_value(&cell.value, style, &locale)
         } else {
             String::new()
         };
@@ -395,6 +396,7 @@ fn get_table_available_values(
     let tables = state.tables.lock().unwrap();
     let grids = state.grids.lock().unwrap();
     let style_registry = state.style_registry.lock().unwrap();
+    let locale = state.locale.lock().unwrap();
 
     let table = tables
         .values()
@@ -440,7 +442,7 @@ fn get_table_available_values(
         let passes = filter_cols.iter().all(|(col, allowed)| {
             let value = if let Some(cell) = grid.cells.get(&(row, *col)) {
                 let style = style_registry.get(cell.style_index);
-                format_cell_value(&cell.value, style)
+                format_cell_value(&cell.value, style, &locale)
             } else {
                 String::new()
             };
@@ -451,7 +453,7 @@ fn get_table_available_values(
             // This row passes all sibling filters — record the target column value
             let value = if let Some(cell) = grid.cells.get(&(row, target_abs_col)) {
                 let style = style_registry.get(cell.style_index);
-                format_cell_value(&cell.value, style)
+                format_cell_value(&cell.value, style, &locale)
             } else {
                 String::new()
             };

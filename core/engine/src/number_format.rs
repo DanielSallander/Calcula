@@ -4,40 +4,41 @@
 //! formatted display strings based on the cell's NumberFormat setting.
 
 use crate::custom_format::{self, FormatResult};
+use crate::locale::LocaleSettings;
 use crate::style::{CurrencyPosition, NumberFormat};
 
-/// Format a number according to the specified format.
-pub fn format_number(value: f64, format: &NumberFormat) -> String {
+/// Format a number according to the specified format and locale.
+pub fn format_number(value: f64, format: &NumberFormat, locale: &LocaleSettings) -> String {
     match format {
-        NumberFormat::General => format_general(value),
+        NumberFormat::General => format_general(value, locale),
         NumberFormat::Number {
             decimal_places,
             use_thousands_separator,
-        } => format_decimal(value, *decimal_places, *use_thousands_separator),
+        } => format_decimal(value, *decimal_places, *use_thousands_separator, locale),
         NumberFormat::Currency {
             decimal_places,
             symbol,
             symbol_position,
-        } => format_currency(value, *decimal_places, symbol, *symbol_position),
+        } => format_currency(value, *decimal_places, symbol, *symbol_position, locale),
         NumberFormat::Accounting {
             decimal_places,
             symbol,
             symbol_position,
-        } => format_accounting_display(value, *decimal_places, symbol, *symbol_position),
+        } => format_accounting_display(value, *decimal_places, symbol, *symbol_position, locale),
         NumberFormat::Fraction {
             denominator,
             max_digits,
         } => format_fraction(value, *denominator, *max_digits),
-        NumberFormat::Percentage { decimal_places } => format_percentage(value, *decimal_places),
+        NumberFormat::Percentage { decimal_places } => format_percentage(value, *decimal_places, locale),
         NumberFormat::Scientific { decimal_places } => format_scientific(value, *decimal_places),
         NumberFormat::Date { format: date_fmt } => format_date_number(value, date_fmt),
         NumberFormat::Time { format: time_fmt } => format_time_number(value, time_fmt),
-        NumberFormat::Custom { format: custom_fmt } => format_custom(value, custom_fmt),
+        NumberFormat::Custom { format: custom_fmt } => format_custom(value, custom_fmt, locale),
     }
 }
 
 /// Format a number in general format (auto-detect best representation).
-fn format_general(value: f64) -> String {
+fn format_general(value: f64, locale: &LocaleSettings) -> String {
     if value == 0.0 {
         return "0".to_string();
     }
@@ -46,10 +47,11 @@ fn format_general(value: f64) -> String {
 
     // Use scientific notation for very large or very small numbers
     if abs_value >= 1e10 || (abs_value < 1e-4 && abs_value > 0.0) {
-        return format!("{:.5e}", value)
+        let s = format!("{:.5e}", value)
             .trim_end_matches('0')
             .trim_end_matches('.')
             .to_string();
+        return localize_decimal_output(&s, locale);
     }
 
     // For integers, don't show decimal point
@@ -59,25 +61,34 @@ fn format_general(value: f64) -> String {
 
     // For decimals, show up to 10 significant digits but trim trailing zeros
     let formatted = format!("{:.10}", value);
-    formatted
+    let trimmed = formatted
         .trim_end_matches('0')
-        .trim_end_matches('.')
-        .to_string()
+        .trim_end_matches('.');
+    localize_decimal_output(trimmed, locale)
 }
 
-/// Format a number with specified decimal places and optional thousands separator.
-fn format_decimal(value: f64, decimal_places: u8, use_thousands_separator: bool) -> String {
-    let rounded = format!("{:.prec$}", value, prec = decimal_places as usize);
-
-    if use_thousands_separator {
-        add_thousands_separator(&rounded)
+/// Replace '.' with locale decimal separator in formatted output.
+fn localize_decimal_output(s: &str, locale: &LocaleSettings) -> String {
+    if locale.decimal_separator == '.' {
+        s.to_string()
     } else {
-        rounded
+        s.replace('.', &locale.decimal_separator.to_string())
     }
 }
 
-/// Add thousands separators to a numeric string.
-fn add_thousands_separator(s: &str) -> String {
+/// Format a number with specified decimal places and optional thousands separator.
+fn format_decimal(value: f64, decimal_places: u8, use_thousands_separator: bool, locale: &LocaleSettings) -> String {
+    let rounded = format!("{:.prec$}", value, prec = decimal_places as usize);
+
+    if use_thousands_separator {
+        add_thousands_separator(&rounded, locale)
+    } else {
+        localize_decimal_output(&rounded, locale)
+    }
+}
+
+/// Add thousands separators to a numeric string, using locale-appropriate characters.
+fn add_thousands_separator(s: &str, locale: &LocaleSettings) -> String {
     let parts: Vec<&str> = s.split('.').collect();
     let integer_part = parts[0];
     let decimal_part = parts.get(1);
@@ -90,7 +101,7 @@ fn add_thousands_separator(s: &str) -> String {
 
     for (i, c) in digits.chars().enumerate() {
         if i > 0 && (len - i) % 3 == 0 {
-            result.push(',');
+            result.push(locale.thousands_separator);
         }
         result.push(c);
     }
@@ -100,7 +111,7 @@ fn add_thousands_separator(s: &str) -> String {
     }
 
     if let Some(decimal) = decimal_part {
-        result.push('.');
+        result.push(locale.decimal_separator);
         result.push_str(decimal);
     }
 
@@ -113,8 +124,9 @@ fn format_currency(
     decimal_places: u8,
     symbol: &str,
     position: CurrencyPosition,
+    locale: &LocaleSettings,
 ) -> String {
-    let formatted = add_thousands_separator(&format!("{:.prec$}", value.abs(), prec = decimal_places as usize));
+    let formatted = add_thousands_separator(&format!("{:.prec$}", value.abs(), prec = decimal_places as usize), locale);
 
     let with_symbol = match position {
         CurrencyPosition::Before => format!("{}{}", symbol, formatted),
@@ -146,6 +158,7 @@ pub fn format_accounting_parts(
     decimal_places: u8,
     symbol: &str,
     position: CurrencyPosition,
+    locale: &LocaleSettings,
 ) -> AccountingParts {
     let value_text = if value == 0.0 {
         // Dash for zero values
@@ -153,6 +166,7 @@ pub fn format_accounting_parts(
     } else {
         let formatted = add_thousands_separator(
             &format!("{:.prec$}", value.abs(), prec = decimal_places as usize),
+            locale,
         );
         if value < 0.0 {
             format!("({})", formatted)
@@ -174,8 +188,9 @@ fn format_accounting_display(
     decimal_places: u8,
     symbol: &str,
     position: CurrencyPosition,
+    locale: &LocaleSettings,
 ) -> String {
-    let parts = format_accounting_parts(value, decimal_places, symbol, position);
+    let parts = format_accounting_parts(value, decimal_places, symbol, position, locale);
     if parts.symbol_before {
         format!("{} {}", parts.symbol, parts.value)
     } else {
@@ -310,9 +325,10 @@ pub fn fraction_parts(value: f64, denominator: Option<u32>, max_digits: u8) -> (
 }
 
 /// Format a number as percentage.
-fn format_percentage(value: f64, decimal_places: u8) -> String {
+fn format_percentage(value: f64, decimal_places: u8, locale: &LocaleSettings) -> String {
     let percentage = value * 100.0;
-    format!("{:.prec$}%", percentage, prec = decimal_places as usize)
+    let s = format!("{:.prec$}%", percentage, prec = decimal_places as usize);
+    localize_decimal_output(&s, locale)
 }
 
 /// Format a number in scientific notation.
@@ -422,23 +438,23 @@ fn format_time_number(value: f64, format: &str) -> String {
 }
 
 /// Format a number using a custom format string (full Excel-compatible engine).
-fn format_custom(value: f64, format: &str) -> String {
-    custom_format::format_custom_value(value, format).text
+fn format_custom(value: f64, format: &str, locale: &LocaleSettings) -> String {
+    custom_format::format_custom_value(value, format, locale).text
 }
 
 /// Format a number and return both the display string and optional color override.
 /// The color is only returned for Custom formats that include [Color] tokens.
-pub fn format_number_with_color(value: f64, format: &NumberFormat) -> FormatResult {
+pub fn format_number_with_color(value: f64, format: &NumberFormat, locale: &LocaleSettings) -> FormatResult {
     match format {
         NumberFormat::Custom { format: custom_fmt } => {
-            custom_format::format_custom_value(value, custom_fmt)
+            custom_format::format_custom_value(value, custom_fmt, locale)
         }
         NumberFormat::Accounting {
             decimal_places,
             symbol,
             symbol_position,
         } => {
-            let parts = format_accounting_parts(value, *decimal_places, symbol, *symbol_position);
+            let parts = format_accounting_parts(value, *decimal_places, symbol, *symbol_position, locale);
             let text = if parts.symbol_before {
                 format!("{} {}", parts.symbol, parts.value)
             } else {
@@ -451,7 +467,7 @@ pub fn format_number_with_color(value: f64, format: &NumberFormat) -> FormatResu
             }
         }
         other => FormatResult {
-            text: format_number(value, other),
+            text: format_number(value, other, locale),
             color: None,
             accounting: None,
         },
@@ -562,42 +578,62 @@ pub mod presets {
 mod tests {
     use super::*;
 
+    fn us() -> LocaleSettings { LocaleSettings::invariant() }
+    fn se() -> LocaleSettings { LocaleSettings::from_locale_id("sv-SE") }
+
     #[test]
     fn test_format_general() {
-        assert_eq!(format_general(0.0), "0");
-        assert_eq!(format_general(42.0), "42");
-        assert_eq!(format_general(3.14159), "3.14159");
-        assert_eq!(format_general(1000000000000.0), "1000000000000");
+        let l = us();
+        assert_eq!(format_general(0.0, &l), "0");
+        assert_eq!(format_general(42.0, &l), "42");
+        assert_eq!(format_general(3.14159, &l), "3.14159");
+        assert_eq!(format_general(1000000000000.0, &l), "1000000000000");
+    }
+
+    #[test]
+    fn test_format_general_swedish() {
+        let l = se();
+        assert_eq!(format_general(3.14159, &l), "3,14159");
     }
 
     #[test]
     fn test_format_decimal() {
-        assert_eq!(format_decimal(1234.567, 2, false), "1234.57");
-        assert_eq!(format_decimal(1234.567, 2, true), "1,234.57");
-        assert_eq!(format_decimal(1000000.0, 0, true), "1,000,000");
+        let l = us();
+        assert_eq!(format_decimal(1234.567, 2, false, &l), "1234.57");
+        assert_eq!(format_decimal(1234.567, 2, true, &l), "1,234.57");
+        assert_eq!(format_decimal(1000000.0, 0, true, &l), "1,000,000");
+    }
+
+    #[test]
+    fn test_format_decimal_swedish() {
+        let l = se();
+        assert_eq!(format_decimal(1234.567, 2, false, &l), "1234,57");
+        assert_eq!(format_decimal(1234.567, 2, true, &l), "1\u{00A0}234,57");
     }
 
     #[test]
     fn test_format_currency() {
+        let l = us();
         assert_eq!(
-            format_currency(1234.56, 2, "$", CurrencyPosition::Before),
+            format_currency(1234.56, 2, "$", CurrencyPosition::Before, &l),
             "$1,234.56"
         );
         assert_eq!(
-            format_currency(-1234.56, 2, "$", CurrencyPosition::Before),
+            format_currency(-1234.56, 2, "$", CurrencyPosition::Before, &l),
             "($1,234.56)"
         );
         assert_eq!(
-            format_currency(1234.56, 2, " kr", CurrencyPosition::After),
+            format_currency(1234.56, 2, " kr", CurrencyPosition::After, &l),
             "1,234.56 kr"
         );
     }
 
     #[test]
     fn test_format_percentage() {
-        assert_eq!(format_percentage(0.5, 0), "50%");
-        assert_eq!(format_percentage(0.1234, 2), "12.34%");
-        assert_eq!(format_percentage(1.5, 1), "150.0%");
+        let l = us();
+        assert_eq!(format_percentage(0.5, 0, &l), "50%");
+        assert_eq!(format_percentage(0.1234, 2, &l), "12.34%");
+        assert_eq!(format_percentage(1.5, 1, &l), "150.0%");
     }
 
     #[test]
@@ -608,9 +644,10 @@ mod tests {
 
     #[test]
     fn test_thousands_separator() {
-        assert_eq!(add_thousands_separator("1234567"), "1,234,567");
-        assert_eq!(add_thousands_separator("123"), "123");
-        assert_eq!(add_thousands_separator("-1234.56"), "-1,234.56");
+        let l = us();
+        assert_eq!(add_thousands_separator("1234567", &l), "1,234,567");
+        assert_eq!(add_thousands_separator("123", &l), "123");
+        assert_eq!(add_thousands_separator("-1234.56", &l), "-1,234.56");
     }
 
     #[test]

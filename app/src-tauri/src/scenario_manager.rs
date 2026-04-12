@@ -27,10 +27,11 @@ fn build_cell_data(
     merged_regions: &HashSet<MergedRegion>,
     r: u32,
     c: u32,
+    locale: &engine::LocaleSettings,
 ) -> Option<CellData> {
     let cell = grid.get_cell(r, c)?;
     let style = styles.get(cell.style_index);
-    let display = format_cell_value(&cell.value, style);
+    let display = format_cell_value(&cell.value, style, locale);
 
     let merge = merged_regions
         .iter()
@@ -214,6 +215,7 @@ pub fn scenario_show(
     let column_dependents_map = state.column_dependents.lock().unwrap();
     let row_dependents_map = state.row_dependents.lock().unwrap();
     let merged_regions = state.merged_regions.lock().unwrap();
+    let locale = state.locale.lock().unwrap();
 
     let sheet_idx = params.sheet_index;
     let mut all_affected = Vec::new();
@@ -270,7 +272,7 @@ pub fn scenario_show(
     // Build updated cells
     let mut updated_cells = Vec::new();
     for &(r, c) in &all_affected {
-        if let Some(cd) = build_cell_data(&grids[sheet_idx], &styles, &merged_regions, r, c) {
+        if let Some(cd) = build_cell_data(&grids[sheet_idx], &styles, &merged_regions, r, c, &locale) {
             updated_cells.push(cd);
         }
     }
@@ -310,6 +312,7 @@ pub fn scenario_summary(
     let dependents_map = state.dependents.lock().unwrap();
     let column_dependents_map = state.column_dependents.lock().unwrap();
     let row_dependents_map = state.row_dependents.lock().unwrap();
+    let locale = state.locale.lock().unwrap();
 
     let sheet_idx = params.sheet_index;
     let scenario_names: Vec<String> = sheet_scenarios.iter().map(|s| s.name.clone()).collect();
@@ -346,7 +349,7 @@ pub fn scenario_summary(
             .get_cell(r, c)
             .map(|cell| {
                 let style = styles.get(cell.style_index);
-                format_cell_value(&cell.value, style)
+                format_cell_value(&cell.value, style, &locale)
             })
             .unwrap_or_default();
         current_changing_values.push(val);
@@ -358,7 +361,7 @@ pub fn scenario_summary(
             .get_cell(r, c)
             .map(|cell| {
                 let style = styles.get(cell.style_index);
-                format_cell_value(&cell.value, style)
+                format_cell_value(&cell.value, style, &locale)
             })
             .unwrap_or_default();
         current_result_values.push(val);
@@ -437,7 +440,7 @@ pub fn scenario_summary(
                 .get_cell(r, c)
                 .map(|cell| {
                     let style = styles.get(cell.style_index);
-                    format_cell_value(&cell.value, style)
+                    format_cell_value(&cell.value, style, &locale)
                 })
                 .unwrap_or_default();
             result_vals.push(val);

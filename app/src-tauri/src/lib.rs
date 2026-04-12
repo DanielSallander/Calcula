@@ -61,6 +61,7 @@ pub mod controls;
 pub mod slicer;
 pub mod timeline_slicer;
 pub mod mcp;
+pub mod locale_commands;
 
 pub use api_types::{CellData, StyleData, DimensionData, FormattingParams, MergedRegion};
 pub use logging::{init_log_file, get_log_path, next_seq, write_log, write_log_raw};
@@ -250,6 +251,8 @@ pub struct AppState {
     pub scenarios: Mutex<HashMap<usize, Vec<api_types::Scenario>>>,
     /// Linked sheets: tracks which sheets are linked to published sources
     pub linked_sheets: Mutex<Vec<calcula_format::publish::linked::LinkedSheetInfo>>,
+    /// Locale/regional settings (decimal separator, list separator, date format, etc.)
+    pub locale: Mutex<engine::LocaleSettings>,
 }
 
 impl AppState {
@@ -332,6 +335,12 @@ pub fn create_app_state() -> AppState {
         theme: Mutex::new(engine::ThemeDefinition::default()),
         scenarios: Mutex::new(HashMap::new()),
         linked_sheets: Mutex::new(Vec::new()),
+        locale: Mutex::new({
+            let system_locale = sys_locale::get_locale()
+                .unwrap_or_else(|| "en-US".to_string());
+            log_info!("SYS", "Detected system locale: {}", system_locale);
+            engine::LocaleSettings::from_locale_id(&system_locale)
+        }),
     }
 }
 
@@ -355,17 +364,17 @@ pub struct AccountingLayoutData {
     pub value: String,
 }
 
-pub fn format_cell_value(value: &CellValue, style: &CellStyle) -> String {
-    format_cell_value_with_color(value, style).text
+pub fn format_cell_value(value: &CellValue, style: &CellStyle, locale: &engine::LocaleSettings) -> String {
+    format_cell_value_with_color(value, style, locale).text
 }
 
 /// Format a cell value and return both display text and optional color override.
 /// The color is only populated for Custom formats that include [Color] tokens.
-pub fn format_cell_value_with_color(value: &CellValue, style: &CellStyle) -> CellDisplayResult {
+pub fn format_cell_value_with_color(value: &CellValue, style: &CellStyle, locale: &engine::LocaleSettings) -> CellDisplayResult {
     match value {
         CellValue::Empty => CellDisplayResult { text: String::new(), color: None, accounting: None },
         CellValue::Number(n) => {
-            let result = format_number_with_color(*n, &style.number_format);
+            let result = format_number_with_color(*n, &style.number_format, locale);
             if !matches!(style.number_format, NumberFormat::General) {
                 log_debug!("FMT", "num={} fmt={:?} --> {}", n, style.number_format, result.text);
             }
@@ -3194,13 +3203,15 @@ pub fn batch_evaluate_formulas(
         .collect()
 }
 
-pub fn parse_cell_input(input: &str) -> Cell {
+pub fn parse_cell_input(input: &str, locale: &engine::LocaleSettings) -> Cell {
     let trimmed = input.trim();
     if trimmed.is_empty() {
         return Cell::new();
     }
     if trimmed.starts_with('=') {
-        return Cell::new_formula(trimmed.to_string());
+        // Delocalize the formula: convert locale separators to invariant format for storage
+        let invariant = engine::delocalize_formula(trimmed, locale);
+        return Cell::new_formula(invariant);
     }
     let upper = trimmed.to_uppercase();
     if upper == "TRUE" {
@@ -3209,22 +3220,45 @@ pub fn parse_cell_input(input: &str) -> Cell {
     if upper == "FALSE" {
         return Cell::new_boolean(false);
     }
-    if let Some(num) = parse_number(trimmed) {
+    if let Some(num) = parse_number(trimmed, locale) {
         return Cell::new_number(num);
     }
     Cell::new_text(trimmed.to_string())
 }
 
-fn parse_number(s: &str) -> Option<f64> {
+/// Parse a string as a number, respecting locale separators.
+/// - Strips the locale's thousands separator
+/// - Replaces the locale's decimal separator with '.' for f64 parsing
+fn parse_number(s: &str, locale: &engine::LocaleSettings) -> Option<f64> {
     let trimmed = s.trim();
     if trimmed.ends_with('%') {
         let num_part = trimmed.trim_end_matches('%').trim();
-        if let Ok(n) = num_part.parse::<f64>() {
+        // For percentage parsing, also apply locale decimal separator
+        let cleaned = if locale.decimal_separator == ',' {
+            num_part
+                .replace('.', "") // strip thousands (dot in comma-decimal locales)
+                .replace(',', ".") // convert decimal comma to dot
+        } else {
+            num_part.replace(',', "") // strip thousands
+        };
+        if let Ok(n) = cleaned.parse::<f64>() {
             return Some(n / 100.0);
         }
         return None;
     }
-    let cleaned = trimmed.replace(',', "");
+
+    // Strip thousands separator, then convert decimal separator to '.'
+    let cleaned = if locale.decimal_separator == ',' {
+        // Comma-decimal locale: thousands separator is '.', ' ', or '\u{00A0}'
+        let s = trimmed
+            .replace(&locale.thousands_separator.to_string(), "")
+            .replace(',', ".");
+        s
+    } else {
+        // Dot-decimal locale: thousands separator is ','
+        trimmed.replace(&locale.thousands_separator.to_string(), "")
+    };
+
     if let Ok(n) = cleaned.parse::<f64>() {
         if n.is_finite() {
             return Some(n);
@@ -3981,6 +4015,10 @@ pub fn run() {
             theme_commands::set_document_theme,
             theme_commands::list_builtin_themes,
             theme_commands::get_theme_color_palette,
+            // Locale / regional settings
+            locale_commands::get_locale_settings,
+            locale_commands::set_locale,
+            locale_commands::get_supported_locales,
             // Third-party extension loading
             scan_extension_directory,
             get_extensions_directory,

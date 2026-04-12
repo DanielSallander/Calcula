@@ -3,7 +3,7 @@
 
 use crate::api_types::{AccountingLayout, CellData, MergedRegion};
 use crate::format_cell_value_with_color;
-use engine::{Grid, StyleRegistry};
+use engine::{Grid, LocaleSettings, StyleRegistry, localize_formula};
 use std::collections::HashSet;
 
 /// Internal helper for getting cell data with merge span information.
@@ -14,6 +14,7 @@ pub(crate) fn get_cell_internal_with_merge(
     merged_regions: &HashSet<MergedRegion>,
     row: u32,
     col: u32,
+    locale: &LocaleSettings,
 ) -> Option<CellData> {
     // Check if this cell is the master of a merged region
     let merge_info = merged_regions.iter().find(|r| r.start_row == row && r.start_col == col);
@@ -38,13 +39,14 @@ pub(crate) fn get_cell_internal_with_merge(
 
     let (display, display_color, formula, style_index, accounting_layout) = if let Some(c) = cell {
         let style = styles.get(c.style_index);
-        let result = format_cell_value_with_color(&c.value, style);
+        let result = format_cell_value_with_color(&c.value, style, locale);
         let acct = result.accounting.map(|a| AccountingLayout {
             symbol: a.symbol,
             symbol_before: a.symbol_before,
             value: a.value,
         });
-        (result.text, result.color, c.formula.clone(), c.style_index, acct)
+        let localized_formula = c.formula.as_ref().map(|f| localize_formula(f, locale));
+        (result.text, result.color, localized_formula, c.style_index, acct)
     } else {
         // Empty merge master
         (String::new(), None, None, 0, None)

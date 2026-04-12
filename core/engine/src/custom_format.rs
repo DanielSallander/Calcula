@@ -6,6 +6,7 @@
 //! with optional color overrides. The formatting is non-destructive — it only
 //! changes the visual representation, not the underlying cell value.
 
+use crate::locale::LocaleSettings;
 use crate::number_format::format_number;
 use crate::style::NumberFormat;
 
@@ -815,7 +816,7 @@ fn remove_trailing_scale_commas(tokens: &mut Vec<FormatToken>) {
 // ============================================================================
 
 /// Apply a parsed format to a numeric value.
-pub fn apply_custom_format_number(value: f64, format: &ParsedCustomFormat) -> FormatResult {
+pub fn apply_custom_format_number(value: f64, format: &ParsedCustomFormat, locale: &LocaleSettings) -> FormatResult {
     // Select the appropriate section
     let section = select_section_for_number(value, format);
 
@@ -898,6 +899,7 @@ pub fn apply_custom_format_number(value: f64, format: &ParsedCustomFormat) -> Fo
         int_placeholders,
         value < 0.0,
         section,
+        locale,
     );
 
     FormatResult {
@@ -1003,6 +1005,7 @@ fn render_number_tokens(
     int_placeholder_count: usize,
     is_negative: bool,
     _section: &FormatSection,
+    locale: &LocaleSettings,
 ) -> String {
     let mut result = String::new();
     let int_digits: Vec<char> = int_str.chars().collect();
@@ -1094,7 +1097,7 @@ fn render_number_tokens(
             }
             FormatToken::DecimalPoint => {
                 past_decimal = true;
-                result.push('.');
+                result.push(locale.decimal_separator);
 
                 // Before rendering fractional digits, we need to flush any remaining
                 // integer digits that haven't been consumed (when the number has more
@@ -1139,7 +1142,7 @@ fn render_number_tokens(
     // This is handled by the int_digit_idx logic above starting from a negative index,
     // but we need to also insert thousands separators if applicable
     if has_thousands {
-        result = insert_thousands_separators_in_result(&result);
+        result = insert_thousands_separators_in_result(&result, locale);
     }
 
     result
@@ -1193,9 +1196,9 @@ fn has_thousands_separator(tokens: &[FormatToken]) -> bool {
 }
 
 /// Insert thousands separators into the integer portion of a formatted result.
-fn insert_thousands_separators_in_result(formatted: &str) -> String {
-    // Find the integer portion (before '.' or before end)
-    let dot_pos = formatted.find('.');
+fn insert_thousands_separators_in_result(formatted: &str, locale: &LocaleSettings) -> String {
+    // Find the integer portion (before the locale decimal separator or before end)
+    let dot_pos = formatted.find(locale.decimal_separator);
     let (prefix, int_start, int_end) = find_integer_portion(formatted, dot_pos);
 
     if int_end <= int_start {
@@ -1215,11 +1218,11 @@ fn insert_thousands_separators_in_result(formatted: &str) -> String {
     let mut result = String::new();
     result.push_str(prefix);
 
-    // Insert commas into the digit string
+    // Insert locale thousands separator into the digit string
     let digit_count = digits_only.len();
     for (i, ch) in digits_only.chars().enumerate() {
         if i > 0 && (digit_count - i) % 3 == 0 {
-            result.push(',');
+            result.push(locale.thousands_separator);
         }
         result.push(ch);
     }
@@ -1345,7 +1348,7 @@ fn format_fraction_section(value: f64, section: &FormatSection) -> FormatResult 
         None => {
             // Should not happen since has_fraction is true, but fallback
             return FormatResult {
-                text: format_number(value, &NumberFormat::General),
+                text: format_number(value, &NumberFormat::General, &LocaleSettings::invariant()),
                 color: section.color,
                 accounting: None,
             };
@@ -1805,11 +1808,11 @@ pub fn apply_custom_format_text(text: &str, format: &ParsedCustomFormat) -> Form
 
 /// Format a value using a custom format string (convenience wrapper).
 /// Returns FormatResult with display text and optional color.
-pub fn format_custom_value(value: f64, format_str: &str) -> FormatResult {
+pub fn format_custom_value(value: f64, format_str: &str, locale: &LocaleSettings) -> FormatResult {
     match parse_custom_format(format_str) {
-        Ok(parsed) => apply_custom_format_number(value, &parsed),
+        Ok(parsed) => apply_custom_format_number(value, &parsed, locale),
         Err(_) => FormatResult {
-            text: format_number(value, &NumberFormat::General),
+            text: format_number(value, &NumberFormat::General, locale),
             color: None,
             accounting: None,
         },
@@ -1968,94 +1971,94 @@ mod tests {
 
     #[test]
     fn test_digit_zero_placeholder() {
-        let result = format_custom_value(5.0, "000");
+        let result = format_custom_value(5.0, "000", &LocaleSettings::invariant());
         assert_eq!(result.text, "005");
     }
 
     #[test]
     fn test_digit_zero_with_decimal() {
-        let result = format_custom_value(42.5, "000.00");
+        let result = format_custom_value(42.5, "000.00", &LocaleSettings::invariant());
         assert_eq!(result.text, "042.50");
     }
 
     #[test]
     fn test_digit_hash_placeholder() {
-        let result = format_custom_value(42.5, "#.##");
+        let result = format_custom_value(42.5, "#.##", &LocaleSettings::invariant());
         assert_eq!(result.text, "42.5");
     }
 
     #[test]
     fn test_digit_hash_integer() {
-        let result = format_custom_value(1234.0, "#");
+        let result = format_custom_value(1234.0, "#", &LocaleSettings::invariant());
         assert_eq!(result.text, "1234");
     }
 
     #[test]
     fn test_digit_space_placeholder() {
-        let result = format_custom_value(5.0, "??0");
+        let result = format_custom_value(5.0, "??0", &LocaleSettings::invariant());
         assert_eq!(result.text, "  5");
     }
 
     #[test]
     fn test_thousands_separator() {
-        let result = format_custom_value(1234.0, "#,##0");
+        let result = format_custom_value(1234.0, "#,##0", &LocaleSettings::invariant());
         assert_eq!(result.text, "1,234");
     }
 
     #[test]
     fn test_thousands_separator_large() {
-        let result = format_custom_value(1234567.0, "#,##0");
+        let result = format_custom_value(1234567.0, "#,##0", &LocaleSettings::invariant());
         assert_eq!(result.text, "1,234,567");
     }
 
     #[test]
     fn test_thousands_with_decimals() {
-        let result = format_custom_value(1234.56, "#,##0.00");
+        let result = format_custom_value(1234.56, "#,##0.00", &LocaleSettings::invariant());
         assert_eq!(result.text, "1,234.56");
     }
 
     #[test]
     fn test_percentage() {
-        let result = format_custom_value(0.5, "0%");
+        let result = format_custom_value(0.5, "0%", &LocaleSettings::invariant());
         assert_eq!(result.text, "50%");
     }
 
     #[test]
     fn test_percentage_with_decimals() {
-        let result = format_custom_value(0.1234, "0.00%");
+        let result = format_custom_value(0.1234, "0.00%", &LocaleSettings::invariant());
         assert_eq!(result.text, "12.34%");
     }
 
     #[test]
     fn test_scaling_one_comma() {
-        let result = format_custom_value(1500000.0, "0.0,");
+        let result = format_custom_value(1500000.0, "0.0,", &LocaleSettings::invariant());
         assert_eq!(result.text, "1500.0");
     }
 
     #[test]
     fn test_scaling_two_commas() {
-        let result = format_custom_value(1500000.0, "0.0,,");
+        let result = format_custom_value(1500000.0, "0.0,,", &LocaleSettings::invariant());
         assert_eq!(result.text, "1.5");
     }
 
     #[test]
     fn test_scaling_with_literal() {
-        let result = format_custom_value(1500000.0, "0.0,,\" M\"");
+        let result = format_custom_value(1500000.0, "0.0,,\" M\"", &LocaleSettings::invariant());
         assert_eq!(result.text, "1.5 M");
     }
 
     #[test]
     fn test_positive_negative_sections() {
-        let result_pos = format_custom_value(1234.0, "#,##0;(#,##0)");
+        let result_pos = format_custom_value(1234.0, "#,##0;(#,##0)", &LocaleSettings::invariant());
         assert_eq!(result_pos.text, "1,234");
 
-        let result_neg = format_custom_value(-1234.0, "#,##0;(#,##0)");
+        let result_neg = format_custom_value(-1234.0, "#,##0;(#,##0)", &LocaleSettings::invariant());
         assert_eq!(result_neg.text, "(1,234)");
     }
 
     #[test]
     fn test_zero_section() {
-        let result = format_custom_value(0.0, "#,##0;-#,##0;\"Zero\"");
+        let result = format_custom_value(0.0, "#,##0;-#,##0;\"Zero\"", &LocaleSettings::invariant());
         assert_eq!(result.text, "Zero");
     }
 
@@ -2068,131 +2071,131 @@ mod tests {
 
     #[test]
     fn test_color_positive() {
-        let result = format_custom_value(42.0, "[Green]0.00");
+        let result = format_custom_value(42.0, "[Green]0.00", &LocaleSettings::invariant());
         assert_eq!(result.color, Some(FormatColor::Green));
         assert_eq!(result.text, "42.00");
     }
 
     #[test]
     fn test_color_negative() {
-        let result = format_custom_value(-42.0, "0.00;[Red]-0.00");
+        let result = format_custom_value(-42.0, "0.00;[Red]-0.00", &LocaleSettings::invariant());
         assert_eq!(result.color, Some(FormatColor::Red));
     }
 
     #[test]
     fn test_conditional_format() {
-        let result_high = format_custom_value(150.0, "[>=100][Green]0;[Red]0");
+        let result_high = format_custom_value(150.0, "[>=100][Green]0;[Red]0", &LocaleSettings::invariant());
         assert_eq!(result_high.color, Some(FormatColor::Green));
         assert_eq!(result_high.text, "150");
 
-        let result_low = format_custom_value(50.0, "[>=100][Green]0;[Red]0");
+        let result_low = format_custom_value(50.0, "[>=100][Green]0;[Red]0", &LocaleSettings::invariant());
         assert_eq!(result_low.color, Some(FormatColor::Red));
         assert_eq!(result_low.text, "50");
     }
 
     #[test]
     fn test_literal_text_prefix() {
-        let result = format_custom_value(42.5, "\"Total: \"0.00");
+        let result = format_custom_value(42.5, "\"Total: \"0.00", &LocaleSettings::invariant());
         assert_eq!(result.text, "Total: 42.50");
     }
 
     #[test]
     fn test_literal_text_suffix() {
-        let result = format_custom_value(1234.0, "$#,##0\" USD\"");
+        let result = format_custom_value(1234.0, "$#,##0\" USD\"", &LocaleSettings::invariant());
         assert_eq!(result.text, "$1,234 USD");
     }
 
     #[test]
     fn test_hidden_format() {
-        let result = format_custom_value(42.0, ";;;");
+        let result = format_custom_value(42.0, ";;;", &LocaleSettings::invariant());
         assert_eq!(result.text, "");
     }
 
     #[test]
     fn test_hidden_format_negative() {
-        let result = format_custom_value(-42.0, ";;;");
+        let result = format_custom_value(-42.0, ";;;", &LocaleSettings::invariant());
         assert_eq!(result.text, "");
     }
 
     #[test]
     fn test_hidden_format_zero() {
-        let result = format_custom_value(0.0, ";;;");
+        let result = format_custom_value(0.0, ";;;", &LocaleSettings::invariant());
         assert_eq!(result.text, "");
     }
 
     #[test]
     fn test_scientific_notation() {
-        let result = format_custom_value(1234.0, "0.00E+00");
+        let result = format_custom_value(1234.0, "0.00E+00", &LocaleSettings::invariant());
         assert!(result.text.contains("E+"), "Expected scientific notation, got: {}", result.text);
     }
 
     #[test]
     fn test_negative_with_auto_sign() {
         // Single section format - negative should get auto minus
-        let result = format_custom_value(-42.0, "0.00");
+        let result = format_custom_value(-42.0, "0.00", &LocaleSettings::invariant());
         assert_eq!(result.text, "-42.00");
     }
 
     #[test]
     fn test_negative_with_explicit_parens() {
         // Two section format - negative section has explicit parens
-        let result = format_custom_value(-42.0, "0.00;(0.00)");
+        let result = format_custom_value(-42.0, "0.00;(0.00)", &LocaleSettings::invariant());
         assert_eq!(result.text, "(42.00)");
     }
 
     #[test]
     fn test_zero_as_positive() {
         // Two section format: zero uses positive section
-        let result = format_custom_value(0.0, "#,##0;(#,##0)");
+        let result = format_custom_value(0.0, "#,##0;(#,##0)", &LocaleSettings::invariant());
         assert_eq!(result.text, "0");
     }
 
     #[test]
     fn test_simple_integer() {
-        let result = format_custom_value(42.0, "0");
+        let result = format_custom_value(42.0, "0", &LocaleSettings::invariant());
         assert_eq!(result.text, "42");
     }
 
     #[test]
     fn test_large_number() {
-        let result = format_custom_value(9999999.0, "#,##0");
+        let result = format_custom_value(9999999.0, "#,##0", &LocaleSettings::invariant());
         assert_eq!(result.text, "9,999,999");
     }
 
     #[test]
     fn test_small_decimal() {
-        let result = format_custom_value(0.123, "0.000");
+        let result = format_custom_value(0.123, "0.000", &LocaleSettings::invariant());
         assert_eq!(result.text, "0.123");
     }
 
     #[test]
     fn test_hash_suppresses_leading_zeros() {
-        let result = format_custom_value(0.5, "#.00");
+        let result = format_custom_value(0.5, "#.00", &LocaleSettings::invariant());
         // # suppresses the leading 0 before decimal
         assert_eq!(result.text, ".50");
     }
 
     #[test]
     fn test_zero_forces_leading_zeros() {
-        let result = format_custom_value(0.5, "0.00");
+        let result = format_custom_value(0.5, "0.00", &LocaleSettings::invariant());
         assert_eq!(result.text, "0.50");
     }
 
     #[test]
     fn test_space_width_token() {
-        let result = format_custom_value(42.0, "0.00_)");
+        let result = format_custom_value(42.0, "0.00_)", &LocaleSettings::invariant());
         assert!(result.text.contains(' '), "Expected trailing space");
     }
 
     #[test]
     fn test_currency_format() {
-        let result = format_custom_value(1234.56, "$#,##0.00");
+        let result = format_custom_value(1234.56, "$#,##0.00", &LocaleSettings::invariant());
         assert_eq!(result.text, "$1,234.56");
     }
 
     #[test]
     fn test_empty_format_string() {
-        let result = format_custom_value(42.0, "");
+        let result = format_custom_value(42.0, "", &LocaleSettings::invariant());
         assert_eq!(result.text, "");
     }
 
@@ -2213,13 +2216,13 @@ mod tests {
     #[test]
     fn test_condition_with_color() {
         let fmt = "[>=100][Green]0;[<=50][Red]0;[Blue]0";
-        let result_high = format_custom_value(150.0, fmt);
+        let result_high = format_custom_value(150.0, fmt, &LocaleSettings::invariant());
         assert_eq!(result_high.color, Some(FormatColor::Green));
 
-        let result_low = format_custom_value(30.0, fmt);
+        let result_low = format_custom_value(30.0, fmt, &LocaleSettings::invariant());
         assert_eq!(result_low.color, Some(FormatColor::Red));
 
-        let result_mid = format_custom_value(75.0, fmt);
+        let result_mid = format_custom_value(75.0, fmt, &LocaleSettings::invariant());
         assert_eq!(result_mid.color, Some(FormatColor::Blue));
     }
 
@@ -2228,33 +2231,33 @@ mod tests {
     #[test]
     fn test_date_format_iso() {
         // Jan 15, 2024 = serial 45306
-        let result = format_custom_value(45306.0, "yyyy-mm-dd");
+        let result = format_custom_value(45306.0, "yyyy-mm-dd", &LocaleSettings::invariant());
         assert_eq!(result.text, "2024-01-15");
     }
 
     #[test]
     fn test_time_format() {
         // 0.5625 = 13:30:00
-        let result = format_custom_value(0.5625, "hh:mm:ss");
+        let result = format_custom_value(0.5625, "hh:mm:ss", &LocaleSettings::invariant());
         assert_eq!(result.text, "13:30:00");
     }
 
     #[test]
     fn test_time_format_12h() {
         // 0.5625 = 1:30 PM
-        let result = format_custom_value(0.5625, "h:mm AM/PM");
+        let result = format_custom_value(0.5625, "h:mm AM/PM", &LocaleSettings::invariant());
         assert_eq!(result.text, "1:30 PM");
     }
 
     #[test]
     fn test_month_name_short() {
-        let result = format_custom_value(45306.0, "dd-mmm-yyyy");
+        let result = format_custom_value(45306.0, "dd-mmm-yyyy", &LocaleSettings::invariant());
         assert_eq!(result.text, "15-Jan-2024");
     }
 
     #[test]
     fn test_month_name_full() {
-        let result = format_custom_value(45306.0, "mmmm d, yyyy");
+        let result = format_custom_value(45306.0, "mmmm d, yyyy", &LocaleSettings::invariant());
         assert_eq!(result.text, "January 15, 2024");
     }
 
@@ -2262,43 +2265,43 @@ mod tests {
 
     #[test]
     fn test_fraction_best_fit_one_digit() {
-        let result = format_custom_value(1.5, "# ?/?");
+        let result = format_custom_value(1.5, "# ?/?", &LocaleSettings::invariant());
         assert_eq!(result.text, "1 1/2");
     }
 
     #[test]
     fn test_fraction_best_fit_two_digit() {
-        let result = format_custom_value(1.0 + 1.0 / 3.0, "# ??/??");
+        let result = format_custom_value(1.0 + 1.0 / 3.0, "# ??/??", &LocaleSettings::invariant());
         assert_eq!(result.text, "1  1/3 ");
     }
 
     #[test]
     fn test_fraction_fixed_denom_halves() {
-        let result = format_custom_value(2.5, "# ?/2");
+        let result = format_custom_value(2.5, "# ?/2", &LocaleSettings::invariant());
         assert_eq!(result.text, "2 1/2");
     }
 
     #[test]
     fn test_fraction_fixed_denom_quarters() {
-        let result = format_custom_value(1.75, "# ?/4");
+        let result = format_custom_value(1.75, "# ?/4", &LocaleSettings::invariant());
         assert_eq!(result.text, "1 3/4");
     }
 
     #[test]
     fn test_fraction_fixed_denom_eighths() {
-        let result = format_custom_value(0.125, "# ?/8");
+        let result = format_custom_value(0.125, "# ?/8", &LocaleSettings::invariant());
         assert_eq!(result.text, "1/8");
     }
 
     #[test]
     fn test_fraction_integer_value() {
-        let result = format_custom_value(5.0, "# ?/?");
+        let result = format_custom_value(5.0, "# ?/?", &LocaleSettings::invariant());
         assert_eq!(result.text.trim(), "5");
     }
 
     #[test]
     fn test_fraction_zero_value() {
-        let result = format_custom_value(0.0, "# ?/?");
+        let result = format_custom_value(0.0, "# ?/?", &LocaleSettings::invariant());
         assert_eq!(result.text.trim(), "0");
     }
 }

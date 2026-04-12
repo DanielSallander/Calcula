@@ -89,6 +89,9 @@ export const AppEvents = {
 
   // Linked sheet events
   LINKED_SHEETS_REFRESHED: "app:linked-sheets-refreshed",
+
+  // Locale events
+  LOCALE_CHANGED: "app:locale-changed",
 } as const;
 
 /** Payload emitted with FILL_COMPLETED event. */

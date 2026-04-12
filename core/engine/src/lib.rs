@@ -9,7 +9,9 @@ pub mod date_serial;
 pub mod dependency_extractor;
 pub mod dependency_graph;
 pub mod evaluator;
+pub mod formula_locale;
 pub mod grid;
+pub mod locale;
 pub mod number_format;
 pub mod style;
 pub mod theme;
@@ -23,6 +25,8 @@ pub use dependency_extractor::{extract_dependencies, BinaryOperator, BuiltinFunc
 pub use dependency_graph::{CycleError, DependencyGraph};
 pub use evaluator::{EvalContext, EvalResult, Evaluator};
 pub use grid::Grid;
+pub use formula_locale::{delocalize_formula, localize_formula};
+pub use locale::{LocaleCurrencyPosition, LocaleSettings};
 pub use number_format::{format_number, format_number_with_color, format_text_with_color};
 pub use style::{
     BorderLineStyle, BorderStyle, Borders, CellStyle, Color, CurrencyPosition, Fill,
@@ -208,7 +212,8 @@ mod tests {
         let retrieved = registry.get(idx);
 
         // Format a number with this style
-        let formatted = format_number(1234.56, &retrieved.number_format);
+        let locale = locale::LocaleSettings::invariant();
+        let formatted = format_number(1234.56, &retrieved.number_format, &locale);
         assert!(formatted.contains("$"));
         assert!(formatted.contains("1234.56") || formatted.contains("1,234.56"));
     }

@@ -138,10 +138,11 @@ fn build_cell_data(
     row: u32,
     col: u32,
     sheet_index: Option<usize>,
+    locale: &engine::LocaleSettings,
 ) -> Option<CellData> {
     let cell = grid.get_cell(row, col)?;
     let style = styles.get(cell.style_index);
-    let display = format_cell_value(&cell.value, style);
+    let display = format_cell_value(&cell.value, style, locale);
 
     let merge = merged_regions
         .iter()
@@ -419,6 +420,7 @@ pub fn consolidate_data(state: State<AppState>, params: ConsolidateParams) -> Co
     let active_sheet = *state.active_sheet.lock().unwrap();
     let styles = state.style_registry.lock().unwrap();
     let merged_regions = state.merged_regions.lock().unwrap();
+    let locale = state.locale.lock().unwrap();
 
     let num_sheets = grids.len();
 
@@ -531,6 +533,7 @@ pub fn consolidate_data(state: State<AppState>, params: ConsolidateParams) -> Co
                     abs_r,
                     abs_c,
                     sheet_idx_param,
+                    &locale,
                 ) {
                     updated_cells.push(cd);
                 }
@@ -595,6 +598,7 @@ pub fn consolidate_data(state: State<AppState>, params: ConsolidateParams) -> Co
                 abs_r,
                 abs_c,
                 sheet_idx_param,
+                &locale,
             ) {
                 updated_cells.push(cd);
             }

@@ -67,6 +67,7 @@ pub fn replace_all(
     let styles = state.style_registry.lock().unwrap();
     let mut undo_stack = state.undo_stack.lock().unwrap();
     let merged_regions = state.merged_regions.lock().unwrap();
+    let locale = state.locale.lock().unwrap();
 
     // Find all matching cells first
     let matches = grid.find_all(&search, case_sensitive, match_entire_cell, false);
@@ -176,7 +177,7 @@ pub fn replace_all(
 
                 // Get display value for frontend
                 let style = styles.get(new_cell.style_index);
-                let display = format_cell_value(&new_cell.value, style);
+                let display = format_cell_value(&new_cell.value, style, &locale);
 
                 // Get merge span info
                 let merge_info = merged_regions.iter().find(|r| r.start_row == row && r.start_col == col);
@@ -251,6 +252,7 @@ pub fn replace_single(
     let styles = state.style_registry.lock().unwrap();
     let mut undo_stack = state.undo_stack.lock().unwrap();
     let merged_regions = state.merged_regions.lock().unwrap();
+    let locale = state.locale.lock().unwrap();
 
     let previous_cell = grid.get_cell(row, col).cloned();
     
@@ -314,7 +316,7 @@ pub fn replace_single(
             }
 
             let style = styles.get(new_cell.style_index);
-            let display = format_cell_value(&new_cell.value, style);
+            let display = format_cell_value(&new_cell.value, style, &locale);
 
             // Get merge span info
             let merge_info = merged_regions.iter().find(|r| r.start_row == row && r.start_col == col);

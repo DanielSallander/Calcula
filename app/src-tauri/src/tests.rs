@@ -24,27 +24,29 @@ fn test_format_number_decimal() {
 #[test]
 fn test_format_cell_value() {
     let default_style = CellStyle::new();
-    assert_eq!(format_cell_value(&CellValue::Empty, &default_style), "");
+    let locale = engine::LocaleSettings::invariant();
+    assert_eq!(format_cell_value(&CellValue::Empty, &default_style, &locale), "");
     assert_eq!(
-        format_cell_value(&CellValue::Number(42.0), &default_style),
+        format_cell_value(&CellValue::Number(42.0), &default_style, &locale),
         "42"
     );
     assert_eq!(
-        format_cell_value(&CellValue::Text("Hello".to_string()), &default_style),
+        format_cell_value(&CellValue::Text("Hello".to_string()), &default_style, &locale),
         "Hello"
     );
     assert_eq!(
-        format_cell_value(&CellValue::Boolean(true), &default_style),
+        format_cell_value(&CellValue::Boolean(true), &default_style, &locale),
         "TRUE"
     );
     assert_eq!(
-        format_cell_value(&CellValue::Boolean(false), &default_style),
+        format_cell_value(&CellValue::Boolean(false), &default_style, &locale),
         "FALSE"
     );
 }
 
 #[test]
 fn test_format_cell_value_with_style() {
+    let locale = engine::LocaleSettings::invariant();
     // Test currency formatting
     let currency_style = CellStyle::new().with_number_format(NumberFormat::Currency {
         decimal_places: 2,
@@ -52,7 +54,7 @@ fn test_format_cell_value_with_style() {
         symbol_position: engine::CurrencyPosition::Before,
     });
     assert_eq!(
-        format_cell_value(&CellValue::Number(1234.56), &currency_style),
+        format_cell_value(&CellValue::Number(1234.56), &currency_style, &locale),
         "$1,234.56"
     );
 
@@ -60,50 +62,52 @@ fn test_format_cell_value_with_style() {
     let percentage_style =
         CellStyle::new().with_number_format(NumberFormat::Percentage { decimal_places: 1 });
     assert_eq!(
-        format_cell_value(&CellValue::Number(0.5), &percentage_style),
+        format_cell_value(&CellValue::Number(0.5), &percentage_style, &locale),
         "50.0%"
     );
 }
 
 #[test]
 fn test_parse_number() {
-    assert_eq!(parse_number("42"), Some(42.0));
-    assert_eq!(parse_number("3.14"), Some(3.14));
-    assert_eq!(parse_number("-100"), Some(-100.0));
-    assert_eq!(parse_number("50%"), Some(0.5));
-    assert_eq!(parse_number("1,000"), Some(1000.0));
-    assert_eq!(parse_number("1,234.56"), Some(1234.56));
-    assert_eq!(parse_number("hello"), None);
-    assert_eq!(parse_number(""), None);
+    let locale = engine::LocaleSettings::invariant();
+    assert_eq!(parse_number("42", &locale), Some(42.0));
+    assert_eq!(parse_number("3.14", &locale), Some(3.14));
+    assert_eq!(parse_number("-100", &locale), Some(-100.0));
+    assert_eq!(parse_number("50%", &locale), Some(0.5));
+    assert_eq!(parse_number("1,000", &locale), Some(1000.0));
+    assert_eq!(parse_number("1,234.56", &locale), Some(1234.56));
+    assert_eq!(parse_number("hello", &locale), None);
+    assert_eq!(parse_number("", &locale), None);
 }
 
 #[test]
 fn test_parse_cell_input() {
+    let locale = engine::LocaleSettings::invariant();
     // Empty
-    let cell = parse_cell_input("");
+    let cell = parse_cell_input("", &locale);
     assert!(matches!(cell.value, CellValue::Empty));
 
     // Number
-    let cell = parse_cell_input("42");
+    let cell = parse_cell_input("42", &locale);
     assert!(matches!(cell.value, CellValue::Number(n) if n == 42.0));
 
     // Text
-    let cell = parse_cell_input("Hello");
+    let cell = parse_cell_input("Hello", &locale);
     assert!(matches!(cell.value, CellValue::Text(ref s) if s == "Hello"));
 
     // Boolean
-    let cell = parse_cell_input("TRUE");
+    let cell = parse_cell_input("TRUE", &locale);
     assert!(matches!(cell.value, CellValue::Boolean(true)));
 
-    let cell = parse_cell_input("false");
+    let cell = parse_cell_input("false", &locale);
     assert!(matches!(cell.value, CellValue::Boolean(false)));
 
     // Formula (value is Empty until evaluated)
-    let cell = parse_cell_input("=A1+B1");
+    let cell = parse_cell_input("=A1+B1", &locale);
     assert_eq!(cell.formula, Some("=A1+B1".to_string()));
 
     // Percentage
-    let cell = parse_cell_input("50%");
+    let cell = parse_cell_input("50%", &locale);
     assert!(matches!(cell.value, CellValue::Number(n) if (n - 0.5).abs() < 0.001));
 }
 

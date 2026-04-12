@@ -699,12 +699,13 @@ pub fn insert_rows(
     let grid = state.grid.lock().map_err(|e| e.to_string())?;
     let styles = state.style_registry.lock().map_err(|e| e.to_string())?;
     let merged_regions = state.merged_regions.lock().map_err(|e| e.to_string())?;
+    let locale = state.locale.lock().map_err(|e| e.to_string())?;
 
     // Return updated cells with merge info
     let mut result: Vec<CellData> = Vec::new();
     for r in 0..=grid.max_row {
         for c in 0..=grid.max_col {
-            if let Some(cell_data) = get_cell_internal_with_merge(&grid, &styles, &merged_regions, r, c) {
+            if let Some(cell_data) = get_cell_internal_with_merge(&grid, &styles, &merged_regions, r, c, &locale) {
                 result.push(cell_data);
             }
         }
@@ -856,12 +857,13 @@ pub fn insert_columns(
     let grid = state.grid.lock().map_err(|e| e.to_string())?;
     let styles = state.style_registry.lock().map_err(|e| e.to_string())?;
     let merged_regions = state.merged_regions.lock().map_err(|e| e.to_string())?;
+    let locale = state.locale.lock().map_err(|e| e.to_string())?;
 
     // Return updated cells with merge info
     let mut result: Vec<CellData> = Vec::new();
     for r in 0..=grid.max_row {
         for c in 0..=grid.max_col {
-            if let Some(cell_data) = get_cell_internal_with_merge(&grid, &styles, &merged_regions, r, c) {
+            if let Some(cell_data) = get_cell_internal_with_merge(&grid, &styles, &merged_regions, r, c, &locale) {
                 result.push(cell_data);
             }
         }
@@ -1470,12 +1472,13 @@ pub fn delete_rows(
     let grid = state.grid.lock().map_err(|e| e.to_string())?;
     let styles = state.style_registry.lock().map_err(|e| e.to_string())?;
     let merged_regions = state.merged_regions.lock().map_err(|e| e.to_string())?;
+    let locale = state.locale.lock().map_err(|e| e.to_string())?;
     
     // Return updated cells with merge info
     let mut result: Vec<CellData> = Vec::new();
     for r in 0..=grid.max_row {
         for c in 0..=grid.max_col {
-            if let Some(cell_data) = get_cell_internal_with_merge(&grid, &styles, &merged_regions, r, c) {
+            if let Some(cell_data) = get_cell_internal_with_merge(&grid, &styles, &merged_regions, r, c, &locale) {
                 result.push(cell_data);
             }
         }
@@ -1651,12 +1654,13 @@ pub fn delete_columns(
     let grid = state.grid.lock().map_err(|e| e.to_string())?;
     let styles = state.style_registry.lock().map_err(|e| e.to_string())?;
     let merged_regions = state.merged_regions.lock().map_err(|e| e.to_string())?;
+    let locale = state.locale.lock().map_err(|e| e.to_string())?;
 
     // Return updated cells with merge info
     let mut result: Vec<CellData> = Vec::new();
     for r in 0..=grid.max_row {
         for c in 0..=grid.max_col {
-            if let Some(cell_data) = get_cell_internal_with_merge(&grid, &styles, &merged_regions, r, c) {
+            if let Some(cell_data) = get_cell_internal_with_merge(&grid, &styles, &merged_regions, r, c, &locale) {
                 result.push(cell_data);
             }
         }
@@ -1803,6 +1807,7 @@ pub fn relocate_cell_references(
     let mut cross_sheet_dependents_map = state.cross_sheet_dependents.lock().unwrap();
     let mut cross_sheet_dependencies_map = state.cross_sheet_dependencies.lock().unwrap();
     let mut undo_stack = state.undo_stack.lock().unwrap();
+    let locale = state.locale.lock().unwrap();
 
     // Collect cells whose formulas reference the source range
     let dest_max_row = dest_start_row + (src_max_row - src_min_row);
@@ -1905,7 +1910,7 @@ pub fn relocate_cell_references(
         }
 
         // Build CellData for result
-        if let Some(cd) = get_cell_internal_with_merge(&grid, &styles, &merged_regions, *r, *c) {
+        if let Some(cd) = get_cell_internal_with_merge(&grid, &styles, &merged_regions, *r, *c, &locale) {
             result.push(cd);
         }
     }

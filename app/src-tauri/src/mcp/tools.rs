@@ -40,6 +40,7 @@ pub fn read_cell_range(
     let state = handle.state::<AppState>();
     let grid = state.grid.lock().map_err(|e| e.to_string())?;
     let styles = state.style_registry.lock().map_err(|e| e.to_string())?;
+    let locale = state.locale.lock().map_err(|e| e.to_string())?;
 
     let mut table = String::new();
     let mut formulas: Vec<String> = Vec::new();
@@ -49,7 +50,7 @@ pub fn read_cell_range(
         for col in start_col..=end_col {
             if let Some(cell) = grid.get_cell(row, col) {
                 let style = styles.get(cell.style_index);
-                let display = format_cell_value(&cell.value, style);
+                let display = format_cell_value(&cell.value, style, &locale);
                 vals.push(display);
                 if let Some(ref f) = cell.formula {
                     formulas.push(format!("{}{}:{}", col_letter(col), row + 1, f));

@@ -11,9 +11,14 @@ export interface CsvExportOptions {
   lineEnding: string;
 }
 
-export function createDefaultExportOptions(): CsvExportOptions {
+/**
+ * Create default CSV export options.
+ * If a locale decimal separator is provided, the default delimiter is adjusted:
+ * locales using ',' as decimal get ';' as CSV delimiter.
+ */
+export function createDefaultExportOptions(localeDecimalSeparator?: string): CsvExportOptions {
   return {
-    delimiter: ",",
+    delimiter: localeDecimalSeparator === "," ? ";" : ",",
     textQualifier: '"',
     lineEnding: "\r\n",
   };

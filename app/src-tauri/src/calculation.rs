@@ -55,6 +55,7 @@ pub fn calculate_now(state: State<AppState>, user_files_state: State<UserFilesSt
     let active_sheet = *state.active_sheet.lock().unwrap();
     let mut styles = state.style_registry.lock().unwrap();
     let user_files = user_files_state.files.lock().unwrap();
+    let locale = state.locale.lock().unwrap();
 
     // Build pivot data lookup closure for GETPIVOTDATA
     let pivot_tables = pivot_state.pivot_tables.lock().unwrap();
@@ -149,7 +150,7 @@ pub fn calculate_now(state: State<AppState>, user_files_state: State<UserFilesSt
             }
 
             let style = styles.get(updated.style_index);
-            let display = format_cell_value(&updated.value, style);
+            let display = format_cell_value(&updated.value, style, &locale);
 
             updated_cells.push(CellData {
                 row,

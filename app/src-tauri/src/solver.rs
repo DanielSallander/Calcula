@@ -28,10 +28,11 @@ fn build_cell_data(
     merged_regions: &HashSet<MergedRegion>,
     r: u32,
     c: u32,
+    locale: &engine::LocaleSettings,
 ) -> Option<CellData> {
     let cell = grid.get_cell(r, c)?;
     let style = styles.get(cell.style_index);
-    let display = format_cell_value(&cell.value, style);
+    let display = format_cell_value(&cell.value, style, locale);
 
     let merge = merged_regions
         .iter()
@@ -608,6 +609,7 @@ pub fn solver_solve(
     let column_dependents_map = state.column_dependents.lock().unwrap();
     let row_dependents_map = state.row_dependents.lock().unwrap();
     let merged_regions = state.merged_regions.lock().unwrap();
+    let locale = state.locale.lock().unwrap();
 
     let sheet_idx = params.sheet_index;
 
@@ -773,7 +775,7 @@ pub fn solver_solve(
     // Build updated cells
     let mut updated_cells = Vec::new();
     for var in &params.variable_cells {
-        if let Some(cd) = build_cell_data(&grids[sheet_idx], &styles, &merged_regions, var.row, var.col) {
+        if let Some(cd) = build_cell_data(&grids[sheet_idx], &styles, &merged_regions, var.row, var.col, &locale) {
             updated_cells.push(cd);
         }
     }
@@ -784,6 +786,7 @@ pub fn solver_solve(
         &merged_regions,
         params.objective_row,
         params.objective_col,
+        &locale,
     ) {
         updated_cells.push(cd);
     }
@@ -791,7 +794,7 @@ pub fn solver_solve(
     for &(r, c) in &all_deps {
         let already = updated_cells.iter().any(|cd| cd.row == r && cd.col == c);
         if !already {
-            if let Some(cd) = build_cell_data(&grids[sheet_idx], &styles, &merged_regions, r, c) {
+            if let Some(cd) = build_cell_data(&grids[sheet_idx], &styles, &merged_regions, r, c, &locale) {
                 updated_cells.push(cd);
             }
         }
@@ -833,6 +836,7 @@ pub fn solver_revert(
     let column_dependents_map = state.column_dependents.lock().unwrap();
     let row_dependents_map = state.row_dependents.lock().unwrap();
     let merged_regions = state.merged_regions.lock().unwrap();
+    let locale = state.locale.lock().unwrap();
 
     // Restore original values
     for orig in &original_values {
@@ -881,12 +885,12 @@ pub fn solver_revert(
     // Build updated cells
     let mut updated_cells = Vec::new();
     for orig in &original_values {
-        if let Some(cd) = build_cell_data(&grids[sheet_index], &styles, &merged_regions, orig.row, orig.col) {
+        if let Some(cd) = build_cell_data(&grids[sheet_index], &styles, &merged_regions, orig.row, orig.col, &locale) {
             updated_cells.push(cd);
         }
     }
     for &(r, c) in &all_deps {
-        if let Some(cd) = build_cell_data(&grids[sheet_index], &styles, &merged_regions, r, c) {
+        if let Some(cd) = build_cell_data(&grids[sheet_index], &styles, &merged_regions, r, c, &locale) {
             updated_cells.push(cd);
         }
     }

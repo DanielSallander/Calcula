@@ -499,6 +499,7 @@ pub fn open_file(
 
     let grid = state.grid.lock().map_err(|e| e.to_string())?;
     let styles = state.style_registry.lock().map_err(|e| e.to_string())?;
+    let locale = state.locale.lock().map_err(|e| e.to_string())?;
 
     let cells: Vec<CellData> = grid
         .cells
@@ -509,7 +510,7 @@ pub fn open_file(
                 row: *row,
                 col: *col,
                 formula: cell.formula.clone(),
-                display: format_cell_value(&cell.value, style),
+                display: format_cell_value(&cell.value, style, &locale),
                 display_color: None,
                 style_index: cell.style_index,
                 row_span: 1,

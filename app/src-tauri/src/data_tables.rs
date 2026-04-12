@@ -23,10 +23,11 @@ fn build_cell_data(
     merged_regions: &HashSet<MergedRegion>,
     r: u32,
     c: u32,
+    locale: &engine::LocaleSettings,
 ) -> Option<CellData> {
     let cell = grid.get_cell(r, c)?;
     let style = styles.get(cell.style_index);
-    let display = format_cell_value(&cell.value, style);
+    let display = format_cell_value(&cell.value, style, locale);
 
     let merge = merged_regions
         .iter()
@@ -115,6 +116,7 @@ pub fn data_table_one_var(
     let sheet_names = state.sheet_names.lock().unwrap();
     let styles = state.style_registry.lock().unwrap();
     let merged_regions = state.merged_regions.lock().unwrap();
+    let locale = state.locale.lock().unwrap();
 
     let sheet_idx = params.sheet_index;
 
@@ -273,7 +275,7 @@ pub fn data_table_one_var(
     // Build updated cells for grid refresh
     for r in params.start_row..=params.end_row {
         for c in params.start_col..=params.end_col {
-            if let Some(cd) = build_cell_data(&grids[sheet_idx], &styles, &merged_regions, r, c) {
+            if let Some(cd) = build_cell_data(&grids[sheet_idx], &styles, &merged_regions, r, c, &locale) {
                 updated_cells.push(cd);
             }
         }
@@ -327,6 +329,7 @@ pub fn data_table_two_var(
     let sheet_names = state.sheet_names.lock().unwrap();
     let styles = state.style_registry.lock().unwrap();
     let merged_regions = state.merged_regions.lock().unwrap();
+    let locale = state.locale.lock().unwrap();
 
     let sheet_idx = params.sheet_index;
 
@@ -435,7 +438,7 @@ pub fn data_table_two_var(
     let mut updated_cells = Vec::new();
     for r in params.start_row..=params.end_row {
         for c in params.start_col..=params.end_col {
-            if let Some(cd) = build_cell_data(&grids[sheet_idx], &styles, &merged_regions, r, c) {
+            if let Some(cd) = build_cell_data(&grids[sheet_idx], &styles, &merged_regions, r, c, &locale) {
                 updated_cells.push(cd);
             }
         }

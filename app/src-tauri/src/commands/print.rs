@@ -43,6 +43,7 @@ pub fn get_print_data(state: State<AppState>) -> Result<PrintData, String> {
     let grid = state.grid.lock().unwrap();
     let styles = state.style_registry.lock().unwrap();
     let merged_regions = state.merged_regions.lock().unwrap();
+    let locale = state.locale.lock().unwrap();
     let sheet_names = state.sheet_names.lock().unwrap();
     let page_setups = state.page_setups.lock().unwrap();
     let col_widths_map = state.column_widths.lock().unwrap();
@@ -65,7 +66,7 @@ pub fn get_print_data(state: State<AppState>) -> Result<PrintData, String> {
     let mut cells = Vec::new();
     for (&(row, col), cell) in &grid.cells {
         let style = styles.get(cell.style_index);
-        let display = format_cell_value(&cell.value, style);
+        let display = format_cell_value(&cell.value, style, &locale);
         if display.is_empty() && cell.formula.is_none() {
             continue; // Skip truly empty cells
         }

@@ -1407,6 +1407,7 @@ pub fn set_calculated_column(
         let table_names = state.table_names.lock().unwrap();
         let user_files = user_files_state.files.lock().unwrap();
         let styles = state.style_registry.lock().unwrap();
+        let locale = state.locale.lock().unwrap();
 
         for row in data_start..=data_end {
             // Resolve table references for this specific row
@@ -1453,7 +1454,7 @@ pub fn set_calculated_column(
 
             // Format display value for frontend
             let style = styles.get(cell.style_index);
-            let display = crate::format_cell_value(&cell.value, style);
+            let display = crate::format_cell_value(&cell.value, style, &locale);
 
             computed.push(ComputedCell {
                 row,

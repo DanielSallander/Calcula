@@ -34,6 +34,7 @@ pub fn merge_cells(
     let styles = state.style_registry.lock().map_err(|e| e.to_string())?;
     let mut merged_regions = state.merged_regions.lock().map_err(|e| e.to_string())?;
     let mut undo_stack = state.undo_stack.lock().map_err(|e| e.to_string())?;
+    let locale = state.locale.lock().map_err(|e| e.to_string())?;
 
     // Normalize coordinates (ensure start <= end)
     let min_row = start_row.min(end_row);
@@ -122,7 +123,7 @@ pub fn merge_cells(
     let style = styles.get(master_style_index);
     let display = master_cell
         .as_ref()
-        .map(|c| format_cell_value(&c.value, style))
+        .map(|c| format_cell_value(&c.value, style, &locale))
         .unwrap_or_default();
 
     updated_cells.push(CellData {
@@ -158,6 +159,7 @@ pub fn unmerge_cells(
     let styles = state.style_registry.lock().map_err(|e| e.to_string())?;
     let mut merged_regions = state.merged_regions.lock().map_err(|e| e.to_string())?;
     let mut undo_stack = state.undo_stack.lock().map_err(|e| e.to_string())?;
+    let locale = state.locale.lock().map_err(|e| e.to_string())?;
 
     // Find the merged region containing this cell
     let region_to_remove = merged_regions
@@ -184,7 +186,7 @@ pub fn unmerge_cells(
         let style = styles.get(master_style_index);
         let display = master_cell
             .as_ref()
-            .map(|c| format_cell_value(&c.value, style))
+            .map(|c| format_cell_value(&c.value, style, &locale))
             .unwrap_or_default();
 
         let updated_cells = vec![CellData {

@@ -137,6 +137,7 @@ pub fn goal_seek(
     let column_dependents_map = state.column_dependents.lock().unwrap();
     let row_dependents_map = state.row_dependents.lock().unwrap();
     let merged_regions = state.merged_regions.lock().unwrap();
+    let locale = state.locale.lock().unwrap();
 
     let target_pos = (params.target_row, params.target_col);
     let variable_pos = (params.variable_row, params.variable_col);
@@ -211,6 +212,7 @@ pub fn goal_seek(
             variable_pos, variable_style_index,
             target_pos, &target_formula,
             x0, original_value, 0, true,
+            &locale,
         );
     }
 
@@ -238,6 +240,7 @@ pub fn goal_seek(
             variable_pos, variable_style_index,
             target_pos, &target_formula,
             x1, original_value, 1, true,
+            &locale,
         );
     }
 
@@ -319,6 +322,7 @@ pub fn goal_seek(
         variable_pos, variable_style_index,
         target_pos, &target_formula,
         best_x, original_value, iterations, found,
+        &locale,
     )
 }
 
@@ -345,6 +349,7 @@ fn finalize_result(
     original_value: f64,
     iterations: u32,
     found: bool,
+    locale: &engine::LocaleSettings,
 ) -> GoalSeekResult {
     // 1. Set the final value in the variable cell
     let mut final_cell = Cell::new_number(final_value);
@@ -406,7 +411,7 @@ fn finalize_result(
     let build_cell_data = |g: &Grid, r: u32, c: u32| -> Option<CellData> {
         let cell = g.get_cell(r, c)?;
         let style = styles.get(cell.style_index);
-        let display = format_cell_value(&cell.value, style);
+        let display = format_cell_value(&cell.value, style, &locale);
 
         let merge = merged_regions.iter().find(|m| m.start_row == r && m.start_col == c);
         let (row_span, col_span) = match merge {

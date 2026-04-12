@@ -616,7 +616,7 @@ pub(crate) fn auto_fit_pivot_columns(
             let display = if let Some(ref fmt) = cell.number_format {
                 if !fmt.is_empty() {
                     if let pivot_engine::PivotCellValue::Number(n) = &cell.value {
-                        engine::format_number(*n, &parse_number_format(fmt))
+                        engine::format_number(*n, &parse_number_format(fmt), &engine::LocaleSettings::invariant())
                     } else {
                         cell.formatted_value.clone()
                     }

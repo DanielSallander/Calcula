@@ -463,7 +463,7 @@ pub(crate) fn view_to_response(
                 },
                 formatted_value: match (&cell.value, &cell.number_format) {
                     (pivot_engine::PivotCellValue::Number(n), Some(fmt)) if !fmt.is_empty() => {
-                        format_number(*n, &parse_number_format(fmt))
+                        format_number(*n, &parse_number_format(fmt), &engine::LocaleSettings::invariant())
                     }
                     _ => String::new(),
                 },
@@ -524,7 +524,7 @@ pub(crate) fn view_to_response(
             let display = if let Some(ref fmt) = cell.number_format {
                 if !fmt.is_empty() {
                     if let pivot_engine::PivotCellValue::Number(n) = &cell.value {
-                        format_number(*n, &parse_number_format(fmt))
+                        format_number(*n, &parse_number_format(fmt), &engine::LocaleSettings::invariant())
                     } else {
                         cell.formatted_value.clone()
                     }
@@ -729,7 +729,7 @@ pub(crate) fn extract_cell_window(
                     },
                     formatted_value: match (&cell.value, &cell.number_format) {
                         (pivot_engine::PivotCellValue::Number(n), Some(fmt)) if !fmt.is_empty() => {
-                            format_number(*n, &parse_number_format(fmt))
+                            format_number(*n, &parse_number_format(fmt), &engine::LocaleSettings::invariant())
                         }
                         _ => String::new(),
                     },

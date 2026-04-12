@@ -72,6 +72,7 @@ pub fn get_viewport_cells(
     let grid = state.grid.lock().unwrap();
     let styles = state.style_registry.lock().unwrap();
     let merged_regions = state.merged_regions.lock().unwrap();
+    let locale = state.locale.lock().unwrap();
     let perf_t1_locks = Instant::now();
 
     // Build O(1) merge lookup by master cell (same pattern as update_cells_batch)
@@ -132,7 +133,7 @@ pub fn get_viewport_cells(
 
             let (display, display_color, formula, style_index, rich_text, accounting_layout) = if let Some(c) = cell {
                 let style = styles.get(c.style_index);
-                let result = crate::format_cell_value_with_color(&c.value, style);
+                let result = crate::format_cell_value_with_color(&c.value, style, &locale);
                 let rt = c.rich_text.as_ref().map(|runs| {
                     crate::api_types::rich_text_runs_to_data(runs)
                 });
@@ -183,7 +184,8 @@ pub fn get_cell(state: State<AppState>, row: u32, col: u32) -> Option<CellData> 
     let grid = state.grid.lock().unwrap();
     let styles = state.style_registry.lock().unwrap();
     let merged_regions = state.merged_regions.lock().unwrap();
-    get_cell_internal_with_merge(&grid, &styles, &merged_regions, row, col)
+    let locale = state.locale.lock().unwrap();
+    get_cell_internal_with_merge(&grid, &styles, &merged_regions, row, col, &locale)
 }
 
 /// Batch-get cell display values from arbitrary sheets (for Watch Window).
@@ -198,6 +200,7 @@ pub fn get_watch_cells(
     let active_grid = state.grid.lock().unwrap();
     let active_sheet = *state.active_sheet.lock().unwrap();
     let styles = state.style_registry.lock().unwrap();
+    let locale = state.locale.lock().unwrap();
 
     fn read_cell(
         grid: &Grid,
@@ -205,10 +208,11 @@ pub fn get_watch_cells(
         sheet_index: usize,
         row: u32,
         col: u32,
+        locale: &engine::LocaleSettings,
     ) -> Option<CellData> {
         grid.get_cell(row, col).map(|c| {
             let style = styles.get(c.style_index);
-            let r = crate::format_cell_value_with_color(&c.value, style);
+            let r = crate::format_cell_value_with_color(&c.value, style, locale);
             CellData {
                 row,
                 col,
@@ -229,9 +233,9 @@ pub fn get_watch_cells(
         .iter()
         .map(|&(sheet_index, row, col)| {
             if sheet_index == active_sheet {
-                read_cell(&active_grid, &styles, sheet_index, row, col)
+                read_cell(&active_grid, &styles, sheet_index, row, col, &locale)
             } else if sheet_index < grids.len() {
-                read_cell(&grids[sheet_index], &styles, sheet_index, row, col)
+                read_cell(&grids[sheet_index], &styles, sheet_index, row, col, &locale)
             } else {
                 None
             }
@@ -424,17 +428,17 @@ pub fn get_collection_texts(
 
 /// Internal helper for getting cell data without merge info (for backward compatibility).
 #[allow(dead_code)]
-fn get_cell_internal(grid: &Grid, styles: &StyleRegistry, row: u32, col: u32) -> Option<CellData> {
+fn get_cell_internal(grid: &Grid, styles: &StyleRegistry, row: u32, col: u32, locale: &engine::LocaleSettings) -> Option<CellData> {
     let cell = grid.get_cell(row, col)?;
     let style = styles.get(cell.style_index);
-    let display = format_cell_value(&cell.value, style);
+    let display = format_cell_value(&cell.value, style, locale);
 
     Some(CellData {
         row,
         col,
         display,
         display_color: None,
-        formula: cell.formula.clone(),
+        formula: cell.formula.as_ref().map(|f| engine::localize_formula(f, locale)),
         style_index: cell.style_index,
         row_span: 1,
         col_span: 1,
@@ -503,6 +507,7 @@ pub fn update_cell(
     let calc_mode = state.calculation_mode.lock().unwrap();
     let mut undo_stack = state.undo_stack.lock().unwrap();
     let merged_regions = state.merged_regions.lock().unwrap();
+    let locale = state.locale.lock().unwrap();
     let perf_t1_locks = Instant::now();
 
     let current_sheet_name = sheet_names.get(active_sheet).cloned().unwrap_or_default();
@@ -603,7 +608,7 @@ pub fn update_cell(
     }
 
     // Parse the input
-    let mut cell = parse_cell_input(&value);
+    let mut cell = parse_cell_input(&value, &locale);
 
     // Preserve existing style
     if let Some(existing) = grid.get_cell(row, col) {
@@ -805,7 +810,7 @@ pub fn update_cell(
                             }
 
                             let style = styles.get(0);
-                            let display = format_cell_value(&cv, style);
+                            let display = format_cell_value(&cv, style, &locale);
                             updated_cells.push(CellData {
                                 row: target_r, col: target_c, display,
                                 display_color: None, formula: None, style_index: 0,
@@ -874,7 +879,7 @@ pub fn update_cell(
 
     // Get the display value
     let style = styles.get(cell.style_index);
-    let display = format_cell_value(&cell.value, style);
+    let display = format_cell_value(&cell.value, style, &locale);
     let perf_t3_stored = Instant::now();
 
     // Get merge span info
@@ -1001,7 +1006,7 @@ pub fn update_cell(
                             }
 
                             let dep_style = styles.get(updated_with_ast.style_index);
-                            let dep_display = format_cell_value(&updated_with_ast.value, dep_style);
+                            let dep_display = format_cell_value(&updated_with_ast.value, dep_style, &locale);
 
                             let (dep_row_span, dep_col_span) =
                                 if let Some(region) = merge_lookup.get(&(dep_row, dep_col)) {
@@ -1043,7 +1048,7 @@ pub fn update_cell(
                     }
 
                     let dep_style = styles.get(updated_dep.style_index);
-                    let dep_display = format_cell_value(&updated_dep.value, dep_style);
+                    let dep_display = format_cell_value(&updated_dep.value, dep_style, &locale);
 
                     // Get merge span info for dependent (O(1) HashMap lookup)
                     let (dep_row_span, dep_col_span) =
@@ -1145,7 +1150,7 @@ pub fn update_cell(
 
                                 // Format the display value and add to updated_cells
                                 let dep_style = styles.get(updated_dep.style_index);
-                                let dep_display = format_cell_value(&updated_dep.value, dep_style);
+                                let dep_display = format_cell_value(&updated_dep.value, dep_style, &locale);
 
                                 // Same-sheet deps: use merge span info and sheet_index=None
                                 // so the frontend emits cell events for re-rendering.
@@ -1245,7 +1250,7 @@ pub fn update_cell(
 
                                 // Format the display value and add to updated_cells
                                 let dep_style = styles.get(updated_dep.style_index);
-                                let dep_display = format_cell_value(&updated_dep.value, dep_style);
+                                let dep_display = format_cell_value(&updated_dep.value, dep_style, &locale);
 
                                 updated_cells.push(CellData {
                                     row: ss_dep_row,
@@ -1404,6 +1409,7 @@ pub fn update_cells_batch(
     let calc_mode = state.calculation_mode.lock().unwrap();
     let mut undo_stack = state.undo_stack.lock().unwrap();
     let merged_regions = state.merged_regions.lock().unwrap();
+    let locale = state.locale.lock().unwrap();
 
     // Only open a new undo transaction if one isn't already open
     // (e.g. the frontend may have called beginUndoTransaction for cut+paste)
@@ -1498,7 +1504,7 @@ pub fn update_cells_batch(
         }
 
         // Parse the input
-        let mut cell = parse_cell_input(value);
+        let mut cell = parse_cell_input(value, &locale);
 
         // Apply explicit style from input if provided, otherwise preserve existing
         if let Some(explicit_style) = update.style_index {
@@ -1691,7 +1697,7 @@ pub fn update_cells_batch(
                                 }
 
                                 let spill_style = styles.get(0);
-                                let display = format_cell_value(&cv, spill_style);
+                                let display = format_cell_value(&cv, spill_style, &locale);
                                 updated_cells.push(CellData {
                                     row: target_r, col: target_c, display,
                                     display_color: None, formula: None, style_index: 0,
@@ -1754,7 +1760,7 @@ pub fn update_cells_batch(
 
         // Get the display value
         let style = styles.get(cell.style_index);
-        let display = format_cell_value(&cell.value, style);
+        let display = format_cell_value(&cell.value, style, &locale);
 
         let (row_span, col_span) = if let Some(region) = merge_lookup.get(&(row, col)) {
             (
@@ -1872,7 +1878,7 @@ pub fn update_cells_batch(
                             }
 
                             let dep_style = styles.get(updated_with_ast.style_index);
-                            let dep_display = format_cell_value(&updated_with_ast.value, dep_style);
+                            let dep_display = format_cell_value(&updated_with_ast.value, dep_style, &locale);
 
                             let (dep_row_span, dep_col_span) =
                                 if let Some(region) = merge_lookup.get(&(*dep_row, *dep_col)) {
@@ -1911,7 +1917,7 @@ pub fn update_cells_batch(
                     }
 
                     let dep_style = styles.get(updated_dep.style_index);
-                    let dep_display = format_cell_value(&updated_dep.value, dep_style);
+                    let dep_display = format_cell_value(&updated_dep.value, dep_style, &locale);
 
                     let (dep_row_span, dep_col_span) =
                         if let Some(region) = merge_lookup.get(&(*dep_row, *dep_col)) {
@@ -1997,7 +2003,7 @@ pub fn update_cells_batch(
                                 );
 
                                 let dep_style = styles.get(updated_dep.style_index);
-                                let dep_display = format_cell_value(&updated_dep.value, dep_style);
+                                let dep_display = format_cell_value(&updated_dep.value, dep_style, &locale);
 
                                 updated_cells.push(CellData {
                                     row: *dep_row,
@@ -2237,6 +2243,7 @@ pub fn clear_range_with_options(
     let mut cross_sheet_dependencies_map = state.cross_sheet_dependencies.lock().unwrap();
     let mut undo_stack = state.undo_stack.lock().unwrap();
     let merged_regions = state.merged_regions.lock().unwrap();
+    let locale = state.locale.lock().unwrap();
 
     let ClearRangeParams {
         start_row,
@@ -2445,7 +2452,7 @@ pub fn clear_range_with_options(
                     }
 
                     let default_style = style_registry.get(0);
-                    let display = format_cell_value(&cell.value, default_style);
+                    let display = format_cell_value(&cell.value, default_style, &locale);
 
                     // Get merge span info
                     let merge_info = merged_regions
@@ -2491,7 +2498,7 @@ pub fn clear_range_with_options(
                         }
 
                         let default_style = style_registry.get(0);
-                        let display = format_cell_value(&cell.value, default_style);
+                        let display = format_cell_value(&cell.value, default_style, &locale);
 
                         // Get merge span info
                         let merge_info = merged_regions
@@ -2550,6 +2557,7 @@ pub fn sort_range(state: State<AppState>, params: SortRangeParams) -> SortRangeR
     let styles = state.style_registry.lock().unwrap();
     let mut undo_stack = state.undo_stack.lock().unwrap();
     let merged_regions = state.merged_regions.lock().unwrap();
+    let locale = state.locale.lock().unwrap();
 
     let SortRangeParams {
         start_row,
@@ -2659,7 +2667,7 @@ pub fn sort_range(state: State<AppState>, params: SortRangeParams) -> SortRangeR
                         }
 
                         let style = styles.get(cell.style_index);
-                        let display = format_cell_value(&cell.value, style);
+                        let display = format_cell_value(&cell.value, style, &locale);
 
                         updated_cells.push(CellData {
                             row: target_row,
@@ -2761,7 +2769,7 @@ pub fn sort_range(state: State<AppState>, params: SortRangeParams) -> SortRangeR
                         }
 
                         let style = styles.get(cell.style_index);
-                        let display = format_cell_value(&cell.value, style);
+                        let display = format_cell_value(&cell.value, style, &locale);
 
                         updated_cells.push(CellData {
                             row: target_row,
@@ -3063,12 +3071,13 @@ pub fn get_cells_in_rows(
     let grid = state.grid.lock().unwrap();
     let styles = state.style_registry.lock().unwrap();
     let merged_regions = state.merged_regions.lock().unwrap();
+    let locale = state.locale.lock().unwrap();
     let mut cells = Vec::new();
 
     for &(row, col) in grid.cells.keys() {
         if row >= start_row && row <= end_row {
             if let Some(cell_data) =
-                get_cell_internal_with_merge(&grid, &styles, &merged_regions, row, col)
+                get_cell_internal_with_merge(&grid, &styles, &merged_regions, row, col, &locale)
             {
                 cells.push(cell_data);
             }
@@ -3090,12 +3099,13 @@ pub fn get_cells_in_cols(
     let grid = state.grid.lock().unwrap();
     let styles = state.style_registry.lock().unwrap();
     let merged_regions = state.merged_regions.lock().unwrap();
+    let locale = state.locale.lock().unwrap();
     let mut cells = Vec::new();
 
     for &(row, col) in grid.cells.keys() {
         if col >= start_col && col <= end_col {
             if let Some(cell_data) =
-                get_cell_internal_with_merge(&grid, &styles, &merged_regions, row, col)
+                get_cell_internal_with_merge(&grid, &styles, &merged_regions, row, col, &locale)
             {
                 cells.push(cell_data);
             }
@@ -3145,6 +3155,7 @@ pub fn remove_duplicates(
     let styles = state.style_registry.lock().unwrap();
     let mut undo_stack = state.undo_stack.lock().unwrap();
     let merged_regions = state.merged_regions.lock().unwrap();
+    let locale = state.locale.lock().unwrap();
 
     let RemoveDuplicatesParams {
         start_row,
@@ -3293,7 +3304,7 @@ pub fn remove_duplicates(
                 }
 
                 let style = styles.get(cell.style_index);
-                let display = format_cell_value(&cell.value, style);
+                let display = format_cell_value(&cell.value, style, &locale);
 
                 updated_cells.push(CellData {
                     row: target_row,
@@ -3384,6 +3395,7 @@ pub fn update_cell_on_sheets(
     col: u32,
     value: String,
 ) -> Result<(), String> {
+    let locale = state.locale.lock().unwrap();
     let user_files = user_files_state.files.lock().unwrap();
     let sheet_names = state.sheet_names.lock().unwrap();
     let mut grids = state.grids.lock().unwrap();
@@ -3408,7 +3420,7 @@ pub fn update_cell_on_sheets(
     }
 
     // Parse the input (same logic as update_cell)
-    let cell_template = parse_cell_input(&value);
+    let cell_template = parse_cell_input(&value, &locale);
     let is_formula = cell_template.formula.is_some();
 
     // If formula, parse and convert the AST once for reuse across sheets

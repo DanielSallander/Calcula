@@ -1904,3 +1904,47 @@ pub struct SolverVariableValue {
     pub col: u32,
     pub value: f64,
 }
+
+// ============================================================================
+// LOCALE / REGIONAL SETTINGS
+// ============================================================================
+
+/// Locale settings returned to the frontend.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LocaleSettingsData {
+    pub locale_id: String,
+    pub display_name: String,
+    pub decimal_separator: String,
+    pub thousands_separator: String,
+    pub list_separator: String,
+    pub date_format: String,
+    pub currency_symbol: String,
+    pub currency_position: String,
+}
+
+impl From<&engine::LocaleSettings> for LocaleSettingsData {
+    fn from(locale: &engine::LocaleSettings) -> Self {
+        Self {
+            locale_id: locale.locale_id.clone(),
+            display_name: locale.display_name.clone(),
+            decimal_separator: locale.decimal_separator.to_string(),
+            thousands_separator: locale.thousands_separator.to_string(),
+            list_separator: locale.list_separator.to_string(),
+            date_format: locale.date_format.clone(),
+            currency_symbol: locale.currency_symbol.clone(),
+            currency_position: match locale.currency_position {
+                engine::LocaleCurrencyPosition::Before => "before".to_string(),
+                engine::LocaleCurrencyPosition::After => "after".to_string(),
+            },
+        }
+    }
+}
+
+/// A supported locale entry for the settings UI dropdown.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SupportedLocaleEntry {
+    pub locale_id: String,
+    pub display_name: String,
+}

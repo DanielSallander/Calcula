@@ -101,6 +101,7 @@ pub fn undo(state: State<AppState>) -> UndoResult {
     let mut column_widths = state.column_widths.lock().unwrap();
     let mut row_heights = state.row_heights.lock().unwrap();
     let mut merged_regions = state.merged_regions.lock().unwrap();
+    let locale = state.locale.lock().unwrap();
 
     let transaction = match undo_stack.pop_undo() {
         Some(t) => t,
@@ -145,7 +146,7 @@ pub fn undo(state: State<AppState>) -> UndoResult {
                             grids[active_sheet].set_cell(*row, *col, cell.clone());
                         }
                         let style = styles.get(cell.style_index);
-                        let display = format_cell_value(&cell.value, style);
+                        let display = format_cell_value(&cell.value, style, &locale);
                         updated_cells.push(CellData {
                             row: *row,
                             col: *col,
@@ -293,6 +294,7 @@ pub fn redo(state: State<AppState>) -> UndoResult {
     let mut column_widths = state.column_widths.lock().unwrap();
     let mut row_heights = state.row_heights.lock().unwrap();
     let mut merged_regions = state.merged_regions.lock().unwrap();
+    let locale = state.locale.lock().unwrap();
 
     let transaction = match undo_stack.pop_redo() {
         Some(t) => t,
@@ -335,7 +337,7 @@ pub fn redo(state: State<AppState>) -> UndoResult {
                             grids[active_sheet].set_cell(*row, *col, cell.clone());
                         }
                         let style = styles.get(cell.style_index);
-                        let display = format_cell_value(&cell.value, style);
+                        let display = format_cell_value(&cell.value, style, &locale);
                         updated_cells.push(CellData {
                             row: *row,
                             col: *col,

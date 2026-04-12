@@ -632,6 +632,22 @@ export type {
 } from "./cellEditors";
 
 // ============================================================================
+// Locale / Regional Settings API
+// ============================================================================
+
+export {
+  getLocaleSettings,
+  setLocale,
+  getSupportedLocales,
+  getCachedLocale,
+  onLocaleChanged,
+} from "./locale";
+export type {
+  LocaleSettings,
+  SupportedLocaleEntry,
+} from "./locale";
+
+// ============================================================================
 // Extension Settings API
 // ============================================================================
 

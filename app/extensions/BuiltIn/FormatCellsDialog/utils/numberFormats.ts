@@ -14,13 +14,24 @@ export interface NumberFormatPreset {
   example?: string;
 }
 
-export const NUMBER_FORMAT_CATEGORIES: NumberFormatCategory[] = [
+/** Format a number example using locale separators. */
+function fmt(n: string, dec = ".", thou = ","): string {
+  return n.replace(/\./g, "\x00").replace(/,/g, thou).replace(/\x00/g, dec);
+}
+
+/**
+ * Get number format categories with locale-aware examples.
+ * @param dec Decimal separator (default ".")
+ * @param thou Thousands separator (default ",")
+ */
+export function getNumberFormatCategories(dec = ".", thou = ","): NumberFormatCategory[] {
+  return [
   {
     id: "general",
     label: "General",
     description:
       "General format cells have no specific number format. Values are displayed as entered.",
-    formats: [{ label: "General", value: "general", example: "1234.5" }],
+    formats: [{ label: "General", value: "general", example: fmt("1234.5", dec, thou) }],
   },
   {
     id: "number",
@@ -28,8 +39,8 @@ export const NUMBER_FORMAT_CATEGORIES: NumberFormatCategory[] = [
     description:
       "Number formats are used for general display of numbers. Currency and Accounting offer specialized formatting for monetary values.",
     formats: [
-      { label: "1234.00", value: "number", example: "1234.00" },
-      { label: "1,234.00", value: "number_sep", example: "1,234.00" },
+      { label: fmt("1234.00", dec, thou), value: "number", example: fmt("1234.00", dec, thou) },
+      { label: fmt("1,234.00", dec, thou), value: "number_sep", example: fmt("1,234.00", dec, thou) },
     ],
   },
   {
@@ -38,9 +49,9 @@ export const NUMBER_FORMAT_CATEGORIES: NumberFormatCategory[] = [
     description:
       "Currency formats are used for general monetary values. Use Accounting formats to align decimal points in a column.",
     formats: [
-      { label: "$ (USD)", value: "currency_usd", example: "$1,234.00" },
-      { label: "EUR", value: "currency_eur", example: "EUR 1,234.00" },
-      { label: "kr (SEK)", value: "currency_sek", example: "1,234.00 kr" },
+      { label: "$ (USD)", value: "currency_usd", example: "$" + fmt("1,234.00", dec, thou) },
+      { label: "EUR", value: "currency_eur", example: "EUR " + fmt("1,234.00", dec, thou) },
+      { label: "kr (SEK)", value: "currency_sek", example: fmt("1,234.00", dec, thou) + " kr" },
     ],
   },
   {
@@ -49,7 +60,7 @@ export const NUMBER_FORMAT_CATEGORIES: NumberFormatCategory[] = [
     description:
       "Percentage formats multiply the cell value by 100 and display the result with a percent symbol.",
     formats: [
-      { label: "12.00%", value: "percentage", example: "12.00%" },
+      { label: fmt("12.00", dec, thou) + "%", value: "percentage", example: fmt("12.00", dec, thou) + "%" },
     ],
   },
   {
@@ -88,10 +99,10 @@ export const NUMBER_FORMAT_CATEGORIES: NumberFormatCategory[] = [
       "Accounting formats line up the currency symbols and decimal points in a column. " +
       "Use Currency formats for general monetary values.",
     formats: [
-      { label: "$ (USD)", value: "accounting_usd", example: "$ 1,234.00" },
-      { label: "$ (no decimals)", value: "accounting_usd_0", example: "$ 1,234" },
-      { label: "EUR", value: "accounting_eur", example: "EUR 1,234.00" },
-      { label: "kr (SEK)", value: "accounting_sek", example: "1,234.00 kr" },
+      { label: "$ (USD)", value: "accounting_usd", example: "$ " + fmt("1,234.00", dec, thou) },
+      { label: "$ (no decimals)", value: "accounting_usd_0", example: "$ " + fmt("1,234", dec, thou) },
+      { label: "EUR", value: "accounting_eur", example: "EUR " + fmt("1,234.00", dec, thou) },
+      { label: "kr (SEK)", value: "accounting_sek", example: fmt("1,234.00", dec, thou) + " kr" },
     ],
   },
   {
@@ -131,18 +142,22 @@ export const NUMBER_FORMAT_CATEGORIES: NumberFormatCategory[] = [
       "Custom formats let you create your own number format using format codes. " +
       "Use 0 for required digits, # for optional digits, and ; to separate positive, negative, zero, and text sections.",
     formats: [
-      { label: "#,##0", value: "#,##0", example: "1,235" },
-      { label: "#,##0.00", value: "#,##0.00", example: "1,234.50" },
-      { label: "#,##0;(#,##0)", value: "#,##0;(#,##0)", example: "1,235" },
-      { label: "#,##0;[Red](#,##0)", value: "#,##0;[Red](#,##0)", example: "1,235" },
-      { label: "$#,##0.00", value: "$#,##0.00", example: "$1,234.50" },
+      { label: "#,##0", value: "#,##0", example: fmt("1,235", dec, thou) },
+      { label: "#,##0.00", value: "#,##0.00", example: fmt("1,234.50", dec, thou) },
+      { label: "#,##0;(#,##0)", value: "#,##0;(#,##0)", example: fmt("1,235", dec, thou) },
+      { label: "#,##0;[Red](#,##0)", value: "#,##0;[Red](#,##0)", example: fmt("1,235", dec, thou) },
+      { label: "$#,##0.00", value: "$#,##0.00", example: "$" + fmt("1,234.50", dec, thou) },
       { label: "0%", value: "0%", example: "50%" },
-      { label: "0.00%", value: "0.00%", example: "50.00%" },
+      { label: "0.00%", value: "0.00%", example: fmt("50.00", dec, thou) + "%" },
       { label: "0.00E+00", value: "0.00E+00", example: "1.23E+03" },
-      { label: "#,##0.0,", value: "#,##0.0,", example: "1,234.5" },
-      { label: "0.00;[Red]-0.00", value: "0.00;[Red]-0.00", example: "1234.50" },
-      { label: '0.00" kr"', value: '0.00" kr"', example: "1234.50 kr" },
+      { label: "#,##0.0,", value: "#,##0.0,", example: fmt("1,234.5", dec, thou) },
+      { label: "0.00;[Red]-0.00", value: "0.00;[Red]-0.00", example: fmt("1234.50", dec, thou) },
+      { label: '0.00" kr"', value: '0.00" kr"', example: fmt("1234.50", dec, thou) + " kr" },
       { label: ";;;", value: ";;;", example: "(hidden)" },
     ],
   },
 ];
+}
+
+/** Default categories using US-English separators (backward compatibility). */
+export const NUMBER_FORMAT_CATEGORIES: NumberFormatCategory[] = getNumberFormatCategories();

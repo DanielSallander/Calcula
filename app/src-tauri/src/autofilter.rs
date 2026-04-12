@@ -409,10 +409,10 @@ pub struct UniqueValue {
 // ============================================================================
 
 /// Get the display value of a cell for filtering purposes.
-fn get_cell_filter_value(grid: &Grid, row: u32, col: u32, style_registry: &engine::StyleRegistry) -> String {
+fn get_cell_filter_value(grid: &Grid, row: u32, col: u32, style_registry: &engine::StyleRegistry, locale: &engine::LocaleSettings) -> String {
     if let Some(cell) = grid.cells.get(&(row, col)) {
         let style = style_registry.get(cell.style_index);
-        format_cell_value(&cell.value, style)
+        format_cell_value(&cell.value, style, locale)
     } else {
         String::new()
     }
@@ -541,6 +541,7 @@ fn should_row_be_visible(
     style_registry: &engine::StyleRegistry,
     row: u32,
     auto_filter: &AutoFilter,
+    locale: &engine::LocaleSettings,
 ) -> bool {
     // Header row is always visible
     if row == auto_filter.start_row {
@@ -550,7 +551,7 @@ fn should_row_be_visible(
     // Check each column filter
     for (rel_col, col_filter) in &auto_filter.column_filters {
         let abs_col = auto_filter.start_col + rel_col;
-        let cell_value = get_cell_filter_value(grid, row, abs_col, style_registry);
+        let cell_value = get_cell_filter_value(grid, row, abs_col, style_registry, locale);
         let is_blank = cell_value.is_empty();
 
         let criteria = &col_filter.criteria;
@@ -702,6 +703,7 @@ fn recompute_hidden_rows(
     grid: &Grid,
     style_registry: &engine::StyleRegistry,
     auto_filter: &mut AutoFilter,
+    locale: &engine::LocaleSettings,
 ) {
     let mut hidden = HashSet::new();
 
@@ -718,7 +720,7 @@ fn recompute_hidden_rows(
 
     // Second pass: check each row against all other filters
     for row in (auto_filter.start_row + 1)..=auto_filter.end_row {
-        if !should_row_be_visible(grid, style_registry, row, auto_filter) {
+        if !should_row_be_visible(grid, style_registry, row, auto_filter, locale) {
             hidden.insert(row);
         }
     }
@@ -740,6 +742,7 @@ pub fn apply_auto_filter(
     let mut auto_filters = state.auto_filters.lock().unwrap();
     let grids = state.grids.lock().unwrap();
     let style_registry = state.style_registry.lock().unwrap();
+    let locale = state.locale.lock().unwrap();
 
     // Normalize coordinates
     let start_row = params.start_row.min(params.end_row);
@@ -771,7 +774,7 @@ pub fn apply_auto_filter(
 
     // Recompute hidden rows
     if active_sheet < grids.len() {
-        recompute_hidden_rows(&grids[active_sheet], &style_registry, auto_filter);
+        recompute_hidden_rows(&grids[active_sheet], &style_registry, auto_filter, &locale);
     }
 
     let hidden_rows: Vec<u32> = auto_filter.hidden_rows.iter().copied().collect();
@@ -797,13 +800,14 @@ pub fn clear_column_criteria(
     let mut auto_filters = state.auto_filters.lock().unwrap();
     let grids = state.grids.lock().unwrap();
     let style_registry = state.style_registry.lock().unwrap();
+    let locale = state.locale.lock().unwrap();
 
     if let Some(auto_filter) = auto_filters.get_mut(&active_sheet) {
         auto_filter.column_filters.remove(&column_index);
 
         // Recompute hidden rows
         if active_sheet < grids.len() {
-            recompute_hidden_rows(&grids[active_sheet], &style_registry, auto_filter);
+            recompute_hidden_rows(&grids[active_sheet], &style_registry, auto_filter, &locale);
         }
 
         let hidden_rows: Vec<u32> = auto_filter.hidden_rows.iter().copied().collect();
@@ -869,11 +873,12 @@ pub fn reapply_auto_filter(
     let mut auto_filters = state.auto_filters.lock().unwrap();
     let grids = state.grids.lock().unwrap();
     let style_registry = state.style_registry.lock().unwrap();
+    let locale = state.locale.lock().unwrap();
 
     if let Some(auto_filter) = auto_filters.get_mut(&active_sheet) {
         // Recompute hidden rows
         if active_sheet < grids.len() {
-            recompute_hidden_rows(&grids[active_sheet], &style_registry, auto_filter);
+            recompute_hidden_rows(&grids[active_sheet], &style_registry, auto_filter, &locale);
         }
 
         let hidden_rows: Vec<u32> = auto_filter.hidden_rows.iter().copied().collect();
@@ -1020,6 +1025,7 @@ pub fn get_filter_unique_values(
     let auto_filters = state.auto_filters.lock().unwrap();
     let grids = state.grids.lock().unwrap();
     let style_registry = state.style_registry.lock().unwrap();
+    let locale = state.locale.lock().unwrap();
 
     let auto_filter = match auto_filters.get(&active_sheet) {
         Some(af) => af,
@@ -1058,7 +1064,7 @@ pub fn get_filter_unique_values(
 
     // Skip header row, collect values from data rows
     for row in (auto_filter.start_row + 1)..=auto_filter.end_row {
-        let value = get_cell_filter_value(grid, row, abs_col, &style_registry);
+        let value = get_cell_filter_value(grid, row, abs_col, &style_registry, &locale);
         if value.is_empty() {
             has_blanks = true;
         } else {
@@ -1094,6 +1100,7 @@ pub fn set_column_filter_values(
     let mut auto_filters = state.auto_filters.lock().unwrap();
     let grids = state.grids.lock().unwrap();
     let style_registry = state.style_registry.lock().unwrap();
+    let locale = state.locale.lock().unwrap();
 
     if let Some(auto_filter) = auto_filters.get_mut(&active_sheet) {
         let mut filter_values = values;
@@ -1115,7 +1122,7 @@ pub fn set_column_filter_values(
 
         // Recompute hidden rows
         if active_sheet < grids.len() {
-            recompute_hidden_rows(&grids[active_sheet], &style_registry, auto_filter);
+            recompute_hidden_rows(&grids[active_sheet], &style_registry, auto_filter, &locale);
         }
 
         let hidden_rows: Vec<u32> = auto_filter.hidden_rows.iter().copied().collect();
@@ -1153,6 +1160,7 @@ pub fn set_column_custom_filter(
     let mut auto_filters = state.auto_filters.lock().unwrap();
     let grids = state.grids.lock().unwrap();
     let style_registry = state.style_registry.lock().unwrap();
+    let locale = state.locale.lock().unwrap();
 
     if let Some(auto_filter) = auto_filters.get_mut(&active_sheet) {
         let criteria = FilterCriteria {
@@ -1170,7 +1178,7 @@ pub fn set_column_custom_filter(
 
         // Recompute hidden rows
         if active_sheet < grids.len() {
-            recompute_hidden_rows(&grids[active_sheet], &style_registry, auto_filter);
+            recompute_hidden_rows(&grids[active_sheet], &style_registry, auto_filter, &locale);
         }
 
         let hidden_rows: Vec<u32> = auto_filter.hidden_rows.iter().copied().collect();
@@ -1207,6 +1215,7 @@ pub fn set_column_top_bottom_filter(
     let mut auto_filters = state.auto_filters.lock().unwrap();
     let grids = state.grids.lock().unwrap();
     let style_registry = state.style_registry.lock().unwrap();
+    let locale = state.locale.lock().unwrap();
 
     // Validate filter_on
     let valid_filter = matches!(
@@ -1237,7 +1246,7 @@ pub fn set_column_top_bottom_filter(
 
         // Recompute hidden rows
         if active_sheet < grids.len() {
-            recompute_hidden_rows(&grids[active_sheet], &style_registry, auto_filter);
+            recompute_hidden_rows(&grids[active_sheet], &style_registry, auto_filter, &locale);
         }
 
         let hidden_rows: Vec<u32> = auto_filter.hidden_rows.iter().copied().collect();
@@ -1273,6 +1282,7 @@ pub fn set_column_dynamic_filter(
     let mut auto_filters = state.auto_filters.lock().unwrap();
     let grids = state.grids.lock().unwrap();
     let style_registry = state.style_registry.lock().unwrap();
+    let locale = state.locale.lock().unwrap();
 
     if let Some(auto_filter) = auto_filters.get_mut(&active_sheet) {
         let criteria = FilterCriteria {
@@ -1288,7 +1298,7 @@ pub fn set_column_dynamic_filter(
 
         // Recompute hidden rows
         if active_sheet < grids.len() {
-            recompute_hidden_rows(&grids[active_sheet], &style_registry, auto_filter);
+            recompute_hidden_rows(&grids[active_sheet], &style_registry, auto_filter, &locale);
         }
 
         let hidden_rows: Vec<u32> = auto_filter.hidden_rows.iter().copied().collect();

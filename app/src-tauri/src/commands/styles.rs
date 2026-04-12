@@ -39,6 +39,7 @@ pub fn set_cell_style(
     let styles = state.style_registry.lock().unwrap();
     let mut undo_stack = state.undo_stack.lock().unwrap();
     let merged_regions = state.merged_regions.lock().unwrap();
+    let locale = state.locale.lock().unwrap();
 
     // Record previous state for undo
     let previous_cell = grid.get_cell(row, col).cloned();
@@ -64,7 +65,7 @@ pub fn set_cell_style(
         undo_stack.record_cell_change(row, col, previous_cell);
 
         let style = styles.get(style_index);
-        let result = format_cell_value_with_color(&updated_cell.value, style);
+        let result = format_cell_value_with_color(&updated_cell.value, style, &locale);
 
         let accounting_layout = result.accounting.map(|a| crate::api_types::AccountingLayout {
             symbol: a.symbol,
@@ -130,6 +131,7 @@ pub fn apply_formatting(
     let mut styles = state.style_registry.lock().unwrap();
     let mut undo_stack = state.undo_stack.lock().unwrap();
     let merged_regions = state.merged_regions.lock().unwrap();
+    let locale = state.locale.lock().unwrap();
 
     let mut updated_cells = Vec::new();
     let mut updated_styles = Vec::new();
@@ -286,7 +288,7 @@ pub fn apply_formatting(
             // Record undo
             undo_stack.record_cell_change(row, col, previous_cell);
 
-            let fmt_result = format_cell_value_with_color(&updated_cell.value, &new_style);
+            let fmt_result = format_cell_value_with_color(&updated_cell.value, &new_style, &locale);
             let acct_layout = fmt_result.accounting.map(|a| crate::api_types::AccountingLayout {
                 symbol: a.symbol,
                 symbol_before: a.symbol_before,
@@ -471,10 +473,11 @@ pub fn apply_formatting_to_sheets(
 /// Preview a custom number format string against a sample value.
 /// Used by the Format Cells dialog for live preview.
 #[tauri::command]
-pub fn preview_number_format(format_string: String, sample_value: f64) -> PreviewResult {
+pub fn preview_number_format(state: State<AppState>, format_string: String, sample_value: f64) -> PreviewResult {
+    let locale = state.locale.lock().unwrap();
     let nf = NumberFormat::Custom { format: format_string };
     let style = CellStyle::new().with_number_format(nf);
-    let result = format_cell_value_with_color(&CellValue::Number(sample_value), &style);
+    let result = format_cell_value_with_color(&CellValue::Number(sample_value), &style, &locale);
     PreviewResult {
         display: result.text,
         color: result.color,
@@ -830,6 +833,7 @@ pub fn set_cell_rich_text(
     let styles = state.style_registry.lock().unwrap();
     let mut undo_stack = state.undo_stack.lock().unwrap();
     let merged_regions = state.merged_regions.lock().unwrap();
+    let locale = state.locale.lock().unwrap();
 
     // Record undo
     let previous = grid.get_cell(row, col).cloned();
@@ -851,7 +855,7 @@ pub fn set_cell_rich_text(
     // Build response
     let cell = grid.get_cell(row, col)?;
     let style = styles.get(cell.style_index);
-    let result = format_cell_value_with_color(&cell.value, style);
+    let result = format_cell_value_with_color(&cell.value, style, &locale);
     let accounting_layout = result.accounting.map(|a| crate::api_types::AccountingLayout {
         symbol: a.symbol,
         symbol_before: a.symbol_before,

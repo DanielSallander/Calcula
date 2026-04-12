@@ -23,10 +23,10 @@ fn cell_is_error(grid: &Grid, row: u32, col: u32) -> bool {
 }
 
 /// Get the display string for a cell (used for tooltips).
-fn cell_display(grid: &Grid, styles: &StyleRegistry, row: u32, col: u32) -> String {
+fn cell_display(grid: &Grid, styles: &StyleRegistry, row: u32, col: u32, locale: &engine::LocaleSettings) -> String {
     if let Some(cell) = grid.cells.get(&(row, col)) {
         let style = styles.get(cell.style_index);
-        format_cell_value(&cell.value, style)
+        format_cell_value(&cell.value, style, locale)
     } else {
         String::new()
     }
@@ -116,6 +116,7 @@ pub fn trace_precedents(state: State<AppState>, row: u32, col: u32) -> TraceResu
     let cross_sheet_deps = state.cross_sheet_dependencies.lock().unwrap();
     let active_sheet = *state.active_sheet.lock().unwrap();
     let sheet_names = state.sheet_names.lock().unwrap();
+    let locale = state.locale.lock().unwrap();
 
     let source_is_error = cell_is_error(&grid, row, col);
 
@@ -158,7 +159,7 @@ pub fn trace_precedents(state: State<AppState>, row: u32, col: u32) -> TraceResu
             row: r,
             col: c,
             is_error: cell_is_error(&grid, r, c),
-            display: cell_display(&grid, &styles, r, c),
+            display: cell_display(&grid, &styles, r, c, &locale),
         })
         .collect();
 
@@ -217,6 +218,7 @@ pub fn trace_dependents(state: State<AppState>, row: u32, col: u32) -> TraceResu
     let cross_sheet_deps = state.cross_sheet_dependents.lock().unwrap();
     let active_sheet = *state.active_sheet.lock().unwrap();
     let sheet_names = state.sheet_names.lock().unwrap();
+    let locale = state.locale.lock().unwrap();
 
     let source_is_error = cell_is_error(&grid, row, col);
 
@@ -246,7 +248,7 @@ pub fn trace_dependents(state: State<AppState>, row: u32, col: u32) -> TraceResu
             row: r,
             col: c,
             is_error: cell_is_error(&grid, r, c),
-            display: cell_display(&grid, &styles, r, c),
+            display: cell_display(&grid, &styles, r, c, &locale),
         })
         .collect();
 
