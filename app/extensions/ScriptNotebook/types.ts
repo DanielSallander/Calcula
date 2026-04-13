@@ -40,6 +40,12 @@ export interface RewindNotebookRequest {
   targetCellId: string;
 }
 
+/** A deferred action from Application object methods/properties. */
+export type DeferredAction =
+  | { action: "goto"; row: number; col: number; sheetIndex: number }
+  | { action: "calculate" }
+  | { action: "setStatusBar"; message: string | null };
+
 /** Response from notebook cell execution. */
 export type NotebookCellResponse =
   | {
@@ -50,6 +56,10 @@ export type NotebookCellResponse =
       executionIndex: number;
       /** Application.screenUpdating value at end of cell execution */
       screenUpdating: boolean;
+      /** Application.enableEvents value at end of cell execution */
+      enableEvents: boolean;
+      /** Deferred actions from Application object (goto, calculate, statusBar) */
+      deferredActions?: DeferredAction[];
     }
   | {
       type: "error";

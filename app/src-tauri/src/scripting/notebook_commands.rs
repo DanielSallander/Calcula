@@ -254,6 +254,8 @@ fn run_cell_internal(
             cells_modified,
             duration_ms,
             screen_updating,
+            enable_events,
+            deferred_actions,
             ..
         } => Ok(NotebookCellResponse::Success {
             output,
@@ -261,6 +263,8 @@ fn run_cell_internal(
             duration_ms,
             execution_index,
             screen_updating,
+            enable_events,
+            deferred_actions,
         }),
         script_engine::ScriptResult::Error { message, output } => {
             Ok(NotebookCellResponse::Error { message, output })

@@ -17,6 +17,22 @@ function shouldSuppressRefresh(responses: NotebookCellResponse[]): boolean {
   return last?.type === "success" && last.screenUpdating === false;
 }
 
+/** Dispatch deferred actions from the last successful response in a batch. */
+function dispatchBatchDeferredActions(responses: NotebookCellResponse[]): void {
+  const last = responses[responses.length - 1];
+  if (
+    last?.type === "success" &&
+    last.deferredActions &&
+    last.deferredActions.length > 0
+  ) {
+    window.dispatchEvent(
+      new CustomEvent("script:deferred-actions", {
+        detail: last.deferredActions,
+      })
+    );
+  }
+}
+
 interface NotebookState {
   /** All notebooks in the workbook (summaries). */
   notebooks: NotebookSummary[];
@@ -244,6 +260,19 @@ export const useNotebookStore = create<NotebookState>((set, get) => ({
       if (response.type !== "success" || response.screenUpdating !== false) {
         window.dispatchEvent(new CustomEvent("grid:refresh"));
       }
+
+      // Process deferred actions from Application object
+      if (
+        response.type === "success" &&
+        response.deferredActions &&
+        response.deferredActions.length > 0
+      ) {
+        window.dispatchEvent(
+          new CustomEvent("script:deferred-actions", {
+            detail: response.deferredActions,
+          })
+        );
+      }
     } catch (err) {
       console.error("[ScriptNotebook] Run cell error:", err);
     } finally {
@@ -268,6 +297,7 @@ export const useNotebookStore = create<NotebookState>((set, get) => ({
       if (!shouldSuppressRefresh(responses)) {
         window.dispatchEvent(new CustomEvent("grid:refresh"));
       }
+      dispatchBatchDeferredActions(responses);
     } catch (err) {
       console.error("[ScriptNotebook] Run all error:", err);
     } finally {
@@ -294,6 +324,7 @@ export const useNotebookStore = create<NotebookState>((set, get) => ({
       if (!shouldSuppressRefresh(responses)) {
         window.dispatchEvent(new CustomEvent("grid:refresh"));
       }
+      dispatchBatchDeferredActions(responses);
     } catch (err) {
       console.error("[ScriptNotebook] Rewind error:", err);
     } finally {
@@ -320,6 +351,7 @@ export const useNotebookStore = create<NotebookState>((set, get) => ({
       if (!shouldSuppressRefresh(responses)) {
         window.dispatchEvent(new CustomEvent("grid:refresh"));
       }
+      dispatchBatchDeferredActions(responses);
     } catch (err) {
       console.error("[ScriptNotebook] Run from error:", err);
     } finally {
