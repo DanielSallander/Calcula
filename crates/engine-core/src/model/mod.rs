@@ -13,7 +13,7 @@ pub use calculated_column::CalculatedColumn;
 pub use column::Column;
 pub use context::{ClearTarget, ContextDefinition, ContextOp};
 pub use global_variable::GlobalVariable;
-pub use relationship::{Cardinality, FilterPropagation, Relationship};
+pub use relationship::{Cardinality, FilterPropagation, JoinCondition, JoinOperator, Relationship};
 pub use schema::{DataModel, DataModelBuilder};
 pub use table::Table;
 pub use table_variable::TableVariable;

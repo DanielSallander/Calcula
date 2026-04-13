@@ -190,23 +190,29 @@ async fn build_joined_dataframe(
     ctx.register_batch("from_t", from_batch)?;
     ctx.register_batch("to_t", to_batch)?;
 
-    let from_df = ctx.table("from_t").await?;
-    let to_df = ctx.table("to_t").await?;
-
-    let df_join_type = match join_type {
-        JoinType::Inner => DfJoinType::Inner,
-        JoinType::Left => DfJoinType::Left,
-    };
-
-    let joined = from_df.join(
-        to_df,
-        df_join_type,
-        &[relationship.from_column()],
-        &[relationship.to_column()],
-        None,
-    )?;
-
-    Ok((ctx, joined))
+    if relationship.is_equi_only() {
+        // Fast path: use DataFusion's native equi-join API.
+        let from_df = ctx.table("from_t").await?;
+        let to_df = ctx.table("to_t").await?;
+        let df_join_type = match join_type {
+            JoinType::Inner => DfJoinType::Inner,
+            JoinType::Left => DfJoinType::Left,
+        };
+        let from_cols: Vec<&str> = relationship.conditions().iter().map(|c| c.from_column()).collect();
+        let to_cols: Vec<&str> = relationship.conditions().iter().map(|c| c.to_column()).collect();
+        let joined = from_df.join(to_df, df_join_type, &from_cols, &to_cols, None)?;
+        Ok((ctx, joined))
+    } else {
+        // Non-equi path: build SQL with the full ON clause.
+        let join_keyword = match join_type {
+            JoinType::Inner => "INNER",
+            JoinType::Left => "LEFT",
+        };
+        let on_clause = relationship.build_on_clause("from_t", "to_t", true);
+        let sql = format!("SELECT * FROM from_t {join_keyword} JOIN to_t ON {on_clause}");
+        let joined = ctx.sql(&sql).await?;
+        Ok((ctx, joined))
+    }
 }
 
 /// Concatenate result batches into a single RecordBatch.
@@ -545,5 +551,102 @@ mod tests {
                 other => panic!("Unexpected category: {other}"),
             }
         }
+    }
+
+    // --- Non-equi join tests ---
+
+    use crate::model::relationship::{JoinCondition, JoinOperator};
+
+    /// Create a "Periods" table with start_date and end_date (Int64 for simplicity).
+    fn periods_table() -> Table {
+        Table::new(
+            "Periods",
+            vec![
+                Column::new("period", DataType::String),
+                Column::new("start_id", DataType::Int64),
+                Column::new("end_id", DataType::Int64),
+            ],
+        )
+        .unwrap()
+    }
+
+    fn populated_periods() -> TableData {
+        let mut data = TableData::new(periods_table());
+        data.insert_rows(vec![
+            // Period "P1" covers product IDs 101..=102
+            vec![
+                Value::String("P1".into()),
+                Value::Int64(101),
+                Value::Int64(102),
+            ],
+            // Period "P2" covers product IDs 102..=103
+            vec![
+                Value::String("P2".into()),
+                Value::Int64(102),
+                Value::Int64(103),
+            ],
+        ])
+        .unwrap();
+        data
+    }
+
+    #[tokio::test]
+    async fn non_equi_between_join() {
+        let sales = populated_sales();
+        let periods = populated_periods();
+
+        // Sales.product_id BETWEEN Periods.start_id AND Periods.end_id
+        let rel = Relationship::many_to_many(
+            "Sales_Periods",
+            "Sales",
+            "Periods",
+            vec![
+                JoinCondition::new("product_id", "start_id", JoinOperator::GreaterThanOrEqual),
+                JoinCondition::new("product_id", "end_id", JoinOperator::LessThanOrEqual),
+            ],
+        );
+
+        let result = join_tables(&sales, &periods, &rel, JoinType::Inner)
+            .await
+            .unwrap();
+
+        // Sales rows: pid=101, pid=102, pid=101, pid=103
+        // P1 covers 101..=102 → matches pid=101(×2), pid=102(×1) → 3 rows
+        // P2 covers 102..=103 → matches pid=102(×1), pid=103(×1) → 2 rows
+        // Total: 5 rows
+        assert_eq!(result.num_rows(), 5);
+    }
+
+    #[tokio::test]
+    async fn non_equi_left_join() {
+        // One sale with product_id=999 won't match any period.
+        let mut sales = TableData::new(sales_table());
+        sales
+            .insert_rows(vec![
+                vec![Value::Int64(1), Value::Int64(101), Value::Float64(10.0)],
+                vec![Value::Int64(2), Value::Int64(999), Value::Float64(20.0)],
+            ])
+            .unwrap();
+
+        let periods = populated_periods();
+
+        let rel = Relationship::many_to_many(
+            "Sales_Periods",
+            "Sales",
+            "Periods",
+            vec![
+                JoinCondition::new("product_id", "start_id", JoinOperator::GreaterThanOrEqual),
+                JoinCondition::new("product_id", "end_id", JoinOperator::LessThanOrEqual),
+            ],
+        );
+
+        let result = join_tables(&sales, &periods, &rel, JoinType::Left)
+            .await
+            .unwrap();
+
+        // pid=101 matches P1 → 1 row
+        // pid=999 matches nothing → 1 row (nulls for period cols)
+        // Total: 2 rows
+        assert_eq!(result.num_rows(), 2);
     }
 }

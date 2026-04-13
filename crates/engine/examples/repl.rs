@@ -514,14 +514,25 @@ async fn main() {
                 print_tables(engine.model());
                 println!("  Relationships:");
                 for r in engine.model().relationships() {
+                    let conditions_str: Vec<String> = r
+                        .conditions()
+                        .iter()
+                        .map(|c| {
+                            format!(
+                                "{}.{} {} {}.{}",
+                                r.from_table(),
+                                c.from_column(),
+                                c.operator().as_sql(),
+                                r.to_table(),
+                                c.to_column()
+                            )
+                        })
+                        .collect();
                     println!(
-                        "    {} -> {} ({}.{} -> {}.{})",
+                        "    {} -> {} ({})",
                         r.from_table(),
                         r.to_table(),
-                        r.from_table(),
-                        r.from_column(),
-                        r.to_table(),
-                        r.to_column()
+                        conditions_str.join(", ")
                     );
                 }
                 println!();

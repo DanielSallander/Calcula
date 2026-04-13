@@ -109,7 +109,11 @@ impl QueryExecutor {
                 continue;
             }
             // Check for a relationship to the fact table.
+            // IN-list optimization only works for single-condition equi-joins.
             if let Ok(rel) = model.find_relationship(fact_table_name, table_name) {
+                if rel.conditions().len() != 1 || !rel.is_equi_only() {
+                    continue;
+                }
                 let (fact_col, dim_col) = if rel.from_table() == fact_table_name {
                     (rel.from_column().to_string(), rel.to_column().to_string())
                 } else {
@@ -379,17 +383,10 @@ impl QueryExecutor {
                 return Ok(());
             }
             let rel = model.find_relationship(fact_model_name, dim_table)?;
-            let (left_col, right_col) = if rel.from_table() == fact_model_name {
-                (rel.from_column(), rel.to_column())
-            } else {
-                (rel.to_column(), rel.from_column())
-            };
-            sql.push_str(&format!(
-                " JOIN {dim_lower} ON {fact_table}.\"{left_col}\" = {dim_lower}.\"{right_col}\""
-            ));
-            descs.push(format!(
-                "{fact_model_name}.{left_col} = {dim_table}.{right_col}"
-            ));
+            let left_is_from = rel.from_table() == fact_model_name;
+            let on_clause = rel.build_on_clause(fact_table, &dim_lower, left_is_from);
+            sql.push_str(&format!(" JOIN {dim_lower} ON {on_clause}"));
+            descs.push(on_clause);
             joined.insert(dim_lower);
             Ok(())
         };
@@ -800,14 +797,9 @@ async fn materialize_query_in_pipeline(
             continue;
         }
         let rel = model.find_relationship(fact_table, table)?;
-        let (left_col, right_col) = if rel.from_table() == fact_table {
-            (rel.from_column(), rel.to_column())
-        } else {
-            (rel.to_column(), rel.from_column())
-        };
-        sql.push_str(&format!(
-            " JOIN {dim_lower} ON {fact_lower}.\"{left_col}\" = {dim_lower}.\"{right_col}\""
-        ));
+        let left_is_from = rel.from_table() == fact_table;
+        let on_clause = rel.build_on_clause(&fact_lower, &dim_lower, left_is_from);
+        sql.push_str(&format!(" JOIN {dim_lower} ON {on_clause}"));
         joined.insert(dim_lower);
     }
 
@@ -818,14 +810,9 @@ async fn materialize_query_in_pipeline(
             continue;
         }
         if let Ok(rel) = model.find_relationship(fact_table, &f.table) {
-            let (left_col, right_col) = if rel.from_table() == fact_table {
-                (rel.from_column(), rel.to_column())
-            } else {
-                (rel.to_column(), rel.from_column())
-            };
-            sql.push_str(&format!(
-                " JOIN {dim_lower} ON {fact_lower}.\"{left_col}\" = {dim_lower}.\"{right_col}\""
-            ));
+            let left_is_from = rel.from_table() == fact_table;
+            let on_clause = rel.build_on_clause(&fact_lower, &dim_lower, left_is_from);
+            sql.push_str(&format!(" JOIN {dim_lower} ON {on_clause}"));
             joined.insert(dim_lower);
         }
     }
@@ -837,14 +824,9 @@ async fn materialize_query_in_pipeline(
             continue;
         }
         if let Ok(rel) = model.find_relationship(fact_table, dim) {
-            let (left_col, right_col) = if rel.from_table() == fact_table {
-                (rel.from_column(), rel.to_column())
-            } else {
-                (rel.to_column(), rel.from_column())
-            };
-            sql.push_str(&format!(
-                " JOIN {dim_lower} ON {fact_lower}.\"{left_col}\" = {dim_lower}.\"{right_col}\""
-            ));
+            let left_is_from = rel.from_table() == fact_table;
+            let on_clause = rel.build_on_clause(&fact_lower, &dim_lower, left_is_from);
+            sql.push_str(&format!(" JOIN {dim_lower} ON {on_clause}"));
             joined.insert(dim_lower);
         }
     }

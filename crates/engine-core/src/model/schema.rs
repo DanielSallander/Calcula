@@ -347,42 +347,52 @@ impl DataModelBuilder {
                     reason: format!("to_table '{}' not found", rel.to_table()),
                 })?;
 
-            let from_col = from_table.column(rel.from_column()).map_err(|_| {
-                EngineError::InvalidRelationship {
-                    relationship: rel.name().to_string(),
-                    reason: format!(
-                        "column '{}' not found in table '{}'",
-                        rel.from_column(),
-                        rel.from_table()
-                    ),
-                }
-            })?;
-
-            let to_col =
-                to_table
-                    .column(rel.to_column())
-                    .map_err(|_| EngineError::InvalidRelationship {
-                        relationship: rel.name().to_string(),
-                        reason: format!(
-                            "column '{}' not found in table '{}'",
-                            rel.to_column(),
-                            rel.to_table()
-                        ),
-                    })?;
-
-            if from_col.data_type() != to_col.data_type() {
+            if rel.conditions().is_empty() {
                 return Err(EngineError::InvalidRelationship {
                     relationship: rel.name().to_string(),
-                    reason: format!(
-                        "type mismatch: {}.{} is {:?}, {}.{} is {:?}",
-                        rel.from_table(),
-                        rel.from_column(),
-                        from_col.data_type(),
-                        rel.to_table(),
-                        rel.to_column(),
-                        to_col.data_type(),
-                    ),
+                    reason: "conditions must not be empty".to_string(),
                 });
+            }
+
+            for condition in rel.conditions() {
+                let from_col =
+                    from_table
+                        .column(condition.from_column())
+                        .map_err(|_| EngineError::InvalidRelationship {
+                            relationship: rel.name().to_string(),
+                            reason: format!(
+                                "column '{}' not found in table '{}'",
+                                condition.from_column(),
+                                rel.from_table()
+                            ),
+                        })?;
+
+                let to_col =
+                    to_table
+                        .column(condition.to_column())
+                        .map_err(|_| EngineError::InvalidRelationship {
+                            relationship: rel.name().to_string(),
+                            reason: format!(
+                                "column '{}' not found in table '{}'",
+                                condition.to_column(),
+                                rel.to_table()
+                            ),
+                        })?;
+
+                if from_col.data_type() != to_col.data_type() {
+                    return Err(EngineError::InvalidRelationship {
+                        relationship: rel.name().to_string(),
+                        reason: format!(
+                            "type mismatch: {}.{} is {:?}, {}.{} is {:?}",
+                            rel.from_table(),
+                            condition.from_column(),
+                            from_col.data_type(),
+                            rel.to_table(),
+                            condition.to_column(),
+                            to_col.data_type(),
+                        ),
+                    });
+                }
             }
         }
 

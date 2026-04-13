@@ -66,7 +66,8 @@ pub use engine_core::compute::plan::{
 pub use engine_core::error::{EngineError, EngineResult};
 pub use engine_core::model::{
     CalculatedColumn, Cardinality, ClearTarget, Column, ContextDefinition, ContextOp, DataModel,
-    DataModelBuilder, FilterPropagation, GlobalVariable, Relationship, Table, TableVariable,
+    DataModelBuilder, FilterPropagation, GlobalVariable, JoinCondition, JoinOperator, Relationship,
+    Table, TableVariable,
 };
 pub use engine_core::store::{ColumnStore, TableData};
 pub use engine_core::types::{DataType, TableColumn, Value};

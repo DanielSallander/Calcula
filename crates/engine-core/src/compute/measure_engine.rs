@@ -218,15 +218,9 @@ impl<'a> MeasureEngine<'a> {
             }
 
             let rel = self.model.find_relationship(fact_table, table_name)?;
-            let (left_col, right_col) = if rel.from_table() == fact_table {
-                (rel.from_column(), rel.to_column())
-            } else {
-                (rel.to_column(), rel.from_column())
-            };
-
-            sql.push_str(&format!(
-                " JOIN {dim_lower} ON {fact_lower}.\"{left_col}\" = {dim_lower}.\"{right_col}\""
-            ));
+            let left_is_from = rel.from_table() == fact_table;
+            let on_clause = rel.build_on_clause(&fact_lower, &dim_lower, left_is_from);
+            sql.push_str(&format!(" JOIN {dim_lower} ON {on_clause}"));
             joined.insert(dim_lower);
         }
 
@@ -594,14 +588,9 @@ impl<'a> MeasureEngine<'a> {
                 continue;
             }
             let rel = self.model.find_relationship(fact_table, dim)?;
-            let (left_col, right_col) = if rel.from_table() == fact_table {
-                (rel.from_column(), rel.to_column())
-            } else {
-                (rel.to_column(), rel.from_column())
-            };
-            sql.push_str(&format!(
-                " JOIN {dim_lower} ON {fact_lower}.\"{left_col}\" = {dim_lower}.\"{right_col}\""
-            ));
+            let left_is_from = rel.from_table() == fact_table;
+            let on_clause = rel.build_on_clause(&fact_lower, &dim_lower, left_is_from);
+            sql.push_str(&format!(" JOIN {dim_lower} ON {on_clause}"));
             joined.insert(dim_lower);
         }
 
@@ -680,13 +669,7 @@ impl<'a> MeasureEngine<'a> {
             let dim_lower = filter.table.to_lowercase();
             session.register_batch(&dim_lower, batch)?;
 
-            let (fact_col, dim_col) = if rel.from_table() == fact_table {
-                (rel.from_column(), rel.to_column())
-            } else {
-                (rel.to_column(), rel.from_column())
-            };
-
-            let join_clause = format!("t.\"{fact_col}\" = {dim_lower}.\"{dim_col}\"");
+            let join_clause = rel.build_on_clause("t", &dim_lower, rel.from_table() == fact_table);
             joins.push((dim_lower.clone(), join_clause));
             registered.insert(filter.table.clone());
         }
