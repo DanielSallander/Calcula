@@ -250,6 +250,8 @@ pub enum NotebookCellResponse {
         cells_modified: u32,
         duration_ms: u64,
         execution_index: u32,
+        /// Application.screenUpdating value at end of cell execution
+        screen_updating: bool,
     },
     #[serde(rename_all = "camelCase")]
     Error {

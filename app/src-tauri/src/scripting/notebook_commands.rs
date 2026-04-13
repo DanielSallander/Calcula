@@ -253,12 +253,14 @@ fn run_cell_internal(
             output,
             cells_modified,
             duration_ms,
+            screen_updating,
             ..
         } => Ok(NotebookCellResponse::Success {
             output,
             cells_modified,
             duration_ms,
             execution_index,
+            screen_updating,
         }),
         script_engine::ScriptResult::Error { message, output } => {
             Ok(NotebookCellResponse::Error { message, output })

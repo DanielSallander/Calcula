@@ -169,8 +169,8 @@ async function executeButtonAction(row: number, col: number): Promise<void> {
     const fullSource = preamble + onSelect.value;
     const result = await runScript(fullSource, "button_onSelect.js");
 
-    if (result.type === "success" && result.cellsModified > 0) {
-      // Refresh grid if cells were modified
+    if (result.type === "success" && result.cellsModified > 0 && result.screenUpdating !== false) {
+      // Refresh grid if cells were modified and screenUpdating is on
       window.dispatchEvent(new CustomEvent("grid:refresh"));
     } else if (result.type === "error") {
       console.error(`[Controls] Button OnSelect error: ${result.message}`);

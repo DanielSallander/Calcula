@@ -48,6 +48,8 @@ export type NotebookCellResponse =
       cellsModified: number;
       durationMs: number;
       executionIndex: number;
+      /** Application.screenUpdating value at end of cell execution */
+      screenUpdating: boolean;
     }
   | {
       type: "error";

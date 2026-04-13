@@ -404,8 +404,9 @@ export function MonacoEditorApp(): React.ReactElement {
           `${result.durationMs}ms, ${result.cellsModified} cell(s) modified`,
         );
 
-        // Notify main window to refresh grid if cells were modified
-        if (result.cellsModified > 0) {
+        // Notify main window to refresh grid if cells were modified and screenUpdating is on.
+        // When screenUpdating is false, the script explicitly suppressed screen refresh.
+        if (result.cellsModified > 0 && result.screenUpdating !== false) {
           await emitGridNeedsRefresh(result.cellsModified);
         }
 

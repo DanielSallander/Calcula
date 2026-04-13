@@ -206,10 +206,11 @@ export function ScriptEditorPane(
 
         setConsoleLines((prev) => [...prev, ...newLines]);
 
-        // If cells were modified, trigger a grid data re-fetch.
+        // If cells were modified and screenUpdating is on, trigger a grid data re-fetch.
+        // When screenUpdating is false, the script explicitly suppressed screen refresh.
         // Note: "grid:refresh" re-fetches data from backend;
         // AppEvents.GRID_REFRESH only repaints the existing cache.
-        if (result.cellsModified > 0) {
+        if (result.cellsModified > 0 && result.screenUpdating !== false) {
           window.dispatchEvent(new CustomEvent("grid:refresh"));
         }
 

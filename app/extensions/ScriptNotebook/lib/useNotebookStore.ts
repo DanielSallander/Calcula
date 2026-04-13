@@ -6,9 +6,16 @@ import { create } from "zustand";
 import type {
   NotebookDocument,
   NotebookCell,
+  NotebookCellResponse,
   NotebookSummary,
 } from "../types";
 import * as api from "./notebookApi";
+
+/** Check if the last response in a batch has screenUpdating=false (suppressed). */
+function shouldSuppressRefresh(responses: NotebookCellResponse[]): boolean {
+  const last = responses[responses.length - 1];
+  return last?.type === "success" && last.screenUpdating === false;
+}
 
 interface NotebookState {
   /** All notebooks in the workbook (summaries). */
@@ -233,8 +240,10 @@ export const useNotebookStore = create<NotebookState>((set, get) => ({
         activeNotebook: { ...activeNotebook, cells },
       });
 
-      // Refresh grid to show cell changes
-      window.dispatchEvent(new CustomEvent("grid:refresh"));
+      // Refresh grid to show cell changes (unless screenUpdating was set to false)
+      if (response.type !== "success" || response.screenUpdating !== false) {
+        window.dispatchEvent(new CustomEvent("grid:refresh"));
+      }
     } catch (err) {
       console.error("[ScriptNotebook] Run cell error:", err);
     } finally {
@@ -256,7 +265,9 @@ export const useNotebookStore = create<NotebookState>((set, get) => ({
       const updated = await api.loadNotebook(activeNotebook.id);
       set({ activeNotebook: updated });
 
-      window.dispatchEvent(new CustomEvent("grid:refresh"));
+      if (!shouldSuppressRefresh(responses)) {
+        window.dispatchEvent(new CustomEvent("grid:refresh"));
+      }
     } catch (err) {
       console.error("[ScriptNotebook] Run all error:", err);
     } finally {
@@ -271,7 +282,7 @@ export const useNotebookStore = create<NotebookState>((set, get) => ({
     set({ isExecuting: true });
 
     try {
-      await api.rewindNotebook({
+      const responses = await api.rewindNotebook({
         notebookId: activeNotebook.id,
         targetCellId: cellId,
       });
@@ -280,7 +291,9 @@ export const useNotebookStore = create<NotebookState>((set, get) => ({
       const updated = await api.loadNotebook(activeNotebook.id);
       set({ activeNotebook: updated });
 
-      window.dispatchEvent(new CustomEvent("grid:refresh"));
+      if (!shouldSuppressRefresh(responses)) {
+        window.dispatchEvent(new CustomEvent("grid:refresh"));
+      }
     } catch (err) {
       console.error("[ScriptNotebook] Rewind error:", err);
     } finally {
@@ -296,7 +309,7 @@ export const useNotebookStore = create<NotebookState>((set, get) => ({
 
     try {
       await api.saveNotebook(activeNotebook);
-      await api.runFromCell({
+      const responses = await api.runFromCell({
         notebookId: activeNotebook.id,
         targetCellId: cellId,
       });
@@ -304,7 +317,9 @@ export const useNotebookStore = create<NotebookState>((set, get) => ({
       const updated = await api.loadNotebook(activeNotebook.id);
       set({ activeNotebook: updated });
 
-      window.dispatchEvent(new CustomEvent("grid:refresh"));
+      if (!shouldSuppressRefresh(responses)) {
+        window.dispatchEvent(new CustomEvent("grid:refresh"));
+      }
     } catch (err) {
       console.error("[ScriptNotebook] Run from error:", err);
     } finally {
