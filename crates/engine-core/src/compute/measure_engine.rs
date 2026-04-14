@@ -922,17 +922,16 @@ mod tests {
             ))
             .add_measure(expression_measure(
                 "Revenue",
-                "Sales",
                 expr::agg(
                     AggregateOp::Sum,
-                    expr::col("price").multiply(expr::col("quantity")),
+                    expr::qualified_col("Sales", "price")
+                        .multiply(expr::qualified_col("Sales", "quantity")),
                 ),
             ))
             .add_measure(expression_measure(
                 "AvgOrderValue",
-                "Sales",
-                expr::agg(AggregateOp::Sum, expr::col("amount"))
-                    .divide(expr::agg(AggregateOp::Count, expr::col("id"))),
+                expr::agg(AggregateOp::Sum, expr::qualified_col("Sales", "amount"))
+                    .divide(expr::agg(AggregateOp::Count, expr::qualified_col("Sales", "id"))),
             ))
             .build()
             .unwrap()
@@ -1184,11 +1183,10 @@ mod tests {
             // Measure with keep(): sum only US
             .add_measure(expression_measure(
                 "US_Revenue",
-                "Sales",
                 expr::agg(
                     AggregateOp::Sum,
                     expr::keep(
-                        expr::col("amount"),
+                        expr::qualified_col("Sales", "amount"),
                         vec![FilterPredicate::new(
                             "Sales",
                             "region",
@@ -1201,19 +1199,17 @@ mod tests {
             // Measure with reset(): always total
             .add_measure(expression_measure(
                 "TotalAll",
-                "Sales",
-                expr::agg(AggregateOp::Sum, expr::reset(expr::col("amount"))),
+                expr::agg(AggregateOp::Sum, expr::reset(expr::qualified_col("Sales", "amount"))),
             ))
             // Plain measure for comparison
             .add_measure(sum_measure("Revenue", "Sales", "amount"))
             // Measure with cross-table keep
             .add_measure(expression_measure(
                 "CategoryA_Revenue",
-                "Sales",
                 expr::agg(
                     AggregateOp::Sum,
                     expr::keep(
-                        expr::col("amount"),
+                        expr::qualified_col("Sales", "amount"),
                         vec![FilterPredicate::new(
                             "Products",
                             "category",
@@ -1235,8 +1231,7 @@ mod tests {
             ))
             .add_measure(expression_measure(
                 "US_Revenue_Via_Context",
-                "Sales",
-                expr::agg(AggregateOp::Sum, expr::using(expr::col("amount"), "ctx_us")),
+                expr::agg(AggregateOp::Sum, expr::using(expr::qualified_col("Sales", "amount"), "ctx_us")),
             ))
             .build()
             .unwrap()
@@ -1339,11 +1334,10 @@ mod tests {
             ))
             .add_measure(crate::compute::measure::Measure::new(
                 "PremiumRevenue",
-                "Sales",
                 expr::agg(
                     AggregateOp::Sum,
                     expr::keep_in(
-                        expr::col("amount"),
+                        expr::qualified_col("Sales", "amount"),
                         vec![InPredicate::new("Sales", "product_id", "premium", "id")],
                     ),
                 ),
@@ -1400,11 +1394,10 @@ mod tests {
             ))
             .add_measure(crate::compute::measure::Measure::new(
                 "NamedPremiumRevenue",
-                "Sales",
                 expr::agg(
                     AggregateOp::Sum,
                     expr::keep_in(
-                        expr::col("amount"),
+                        expr::qualified_col("Sales", "amount"),
                         vec![InPredicate::new(
                             "Sales",
                             "product_id",
@@ -1558,13 +1551,12 @@ mod tests {
             )
             .add_measure(expression_measure(
                 "AvgMonthlyRevenue",
-                "Orders",
                 Expression::Block {
                     bindings: vec![(
                         "monthly".to_string(),
                         Expression::Query {
                             aggregates: vec![(
-                                expr::agg(AggregateOp::Sum, expr::col("amount")),
+                                expr::agg(AggregateOp::Sum, expr::qualified_col("Orders", "amount")),
                                 "revenue".to_string(),
                             )],
                             group_by: vec![("Orders".to_string(), "month".to_string())],
@@ -1614,13 +1606,12 @@ mod tests {
             )
             .add_measure(expression_measure(
                 "MaxMonthlyRevenue",
-                "Orders",
                 Expression::Block {
                     bindings: vec![(
                         "monthly".to_string(),
                         Expression::Query {
                             aggregates: vec![(
-                                expr::agg(AggregateOp::Sum, expr::col("amount")),
+                                expr::agg(AggregateOp::Sum, expr::qualified_col("Orders", "amount")),
                                 "revenue".to_string(),
                             )],
                             group_by: vec![("Orders".to_string(), "month".to_string())],
@@ -1688,13 +1679,12 @@ mod tests {
             ))
             .add_measure(expression_measure(
                 "MaxCategoryRevenue",
-                "Orders",
                 Expression::Block {
                     bindings: vec![(
                         "by_cat".to_string(),
                         Expression::Query {
                             aggregates: vec![(
-                                expr::agg(AggregateOp::Sum, expr::col("amount")),
+                                expr::agg(AggregateOp::Sum, expr::qualified_col("Orders", "amount")),
                                 "revenue".to_string(),
                             )],
                             group_by: vec![("Products".to_string(), "category".to_string())],
@@ -1745,13 +1735,12 @@ mod tests {
             )
             .add_measure(expression_measure(
                 "AvgMonthlyRevenue",
-                "Orders",
                 Expression::Block {
                     bindings: vec![(
                         "monthly".to_string(),
                         Expression::Query {
                             aggregates: vec![(
-                                expr::agg(AggregateOp::Sum, expr::col("amount")),
+                                expr::agg(AggregateOp::Sum, expr::qualified_col("Orders", "amount")),
                                 "revenue".to_string(),
                             )],
                             group_by: vec![("Orders".to_string(), "month".to_string())],
@@ -1804,13 +1793,12 @@ mod tests {
             )
             .add_measure(expression_measure(
                 "MonthCount",
-                "Orders",
                 Expression::Block {
                     bindings: vec![(
                         "monthly".to_string(),
                         Expression::Query {
                             aggregates: vec![(
-                                expr::agg(AggregateOp::Sum, expr::col("amount")),
+                                expr::agg(AggregateOp::Sum, expr::qualified_col("Orders", "amount")),
                                 "revenue".to_string(),
                             )],
                             group_by: vec![("Orders".to_string(), "month".to_string())],
@@ -1863,13 +1851,12 @@ mod tests {
             )
             .add_measure(expression_measure(
                 "Month2Revenue",
-                "Orders",
                 Expression::Block {
                     bindings: vec![(
                         "monthly".to_string(),
                         Expression::Query {
                             aggregates: vec![(
-                                expr::agg(AggregateOp::Sum, expr::col("amount")),
+                                expr::agg(AggregateOp::Sum, expr::qualified_col("Orders", "amount")),
                                 "revenue".to_string(),
                             )],
                             group_by: vec![("Orders".to_string(), "month".to_string())],
@@ -1928,13 +1915,12 @@ mod tests {
             )
             .add_measure(expression_measure(
                 "SingleCell",
-                "Orders",
                 Expression::Block {
                     bindings: vec![(
                         "detail".to_string(),
                         Expression::Query {
                             aggregates: vec![(
-                                expr::agg(AggregateOp::Sum, expr::col("amount")),
+                                expr::agg(AggregateOp::Sum, expr::qualified_col("Orders", "amount")),
                                 "revenue".to_string(),
                             )],
                             group_by: vec![
@@ -2000,13 +1986,12 @@ mod tests {
             )
             .add_measure(expression_measure(
                 "FilteredRevenue",
-                "Orders",
                 Expression::Block {
                     bindings: vec![(
                         "monthly".to_string(),
                         Expression::Query {
                             aggregates: vec![(
-                                expr::agg(AggregateOp::Sum, expr::col("amount")),
+                                expr::agg(AggregateOp::Sum, expr::qualified_col("Orders", "amount")),
                                 "revenue".to_string(),
                             )],
                             group_by: vec![("Orders".to_string(), "month".to_string())],
@@ -2068,13 +2053,12 @@ mod tests {
             )
             .add_measure(expression_measure(
                 "RecentRevenue",
-                "Orders",
                 Expression::Block {
                     bindings: vec![(
                         "monthly".to_string(),
                         Expression::Query {
                             aggregates: vec![(
-                                expr::agg(AggregateOp::Sum, expr::col("amount")),
+                                expr::agg(AggregateOp::Sum, expr::qualified_col("Orders", "amount")),
                                 "revenue".to_string(),
                             )],
                             group_by: vec![("Orders".to_string(), "month".to_string())],

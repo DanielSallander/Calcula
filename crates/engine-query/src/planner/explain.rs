@@ -297,11 +297,10 @@ mod tests {
             .add_table(sales)
             .add_measure(expression_measure(
                 "US_Revenue",
-                "Sales",
                 expr::agg(
                     AggregateOp::Sum,
                     expr::keep(
-                        expr::col("amount"),
+                        expr::qualified_col("Sales", "amount"),
                         vec![FilterPredicate::new(
                             "Sales",
                             "region",

@@ -49,7 +49,8 @@
 
 use crate::compute::aggregate::AggregateOp;
 use crate::compute::expression::{
-    self as expr, ComparisonOp, Expression, FilterPredicate, ScalarFunction, TextFunction,
+    self as expr, infer_fact_table, ComparisonOp, Expression, FilterPredicate, ScalarFunction,
+    TextFunction,
 };
 use crate::error::{EngineError, EngineResult};
 use crate::model::context::{ClearTarget, ContextDefinition, ContextOp};
@@ -1246,23 +1247,26 @@ pub fn parse_measure_expression(input: &str) -> EngineResult<Expression> {
 
 /// Parse a measure expression and infer the fact table from qualified column references.
 ///
-/// Returns `(fact_table, expression)`. The fact table is the table referenced
-/// in the first aggregate's operand. Returns an error if no table can be inferred.
+/// Returns the parsed expression. Validates that a fact table can be inferred
+/// from qualified column references; returns an error if not.
 ///
 /// # Example
 ///
 /// ```
 /// use engine_core::compute::parser::parse_measure;
+/// use engine_core::compute::expression::infer_fact_table;
 ///
-/// let (table, expr) = parse_measure("SUM(fact_sales[linetotal])").unwrap();
-/// assert_eq!(table, "fact_sales");
+/// let expr = parse_measure("SUM(fact_sales[linetotal])").unwrap();
+/// assert_eq!(infer_fact_table(&expr), Some("fact_sales".to_string()));
 /// ```
-pub fn parse_measure(input: &str) -> EngineResult<(String, Expression)> {
+pub fn parse_measure(input: &str) -> EngineResult<Expression> {
     let expression = parse_measure_expression(input)?;
-    let table = infer_fact_table(&expression).ok_or_else(|| {
-        EngineError::InvalidData("cannot infer fact table — use table[column] syntax".into())
-    })?;
-    Ok((table, expression))
+    if infer_fact_table(&expression).is_none() {
+        return Err(EngineError::InvalidData(
+            "cannot infer fact table — use table[column] syntax".into(),
+        ));
+    }
+    Ok(expression)
 }
 
 /// Parse a table variable definition from a `KEEP(source, filter, ...)` expression.
@@ -1582,80 +1586,6 @@ impl Parser {
     }
 }
 
-/// Walk the expression tree to find the first qualified column reference's table.
-fn infer_fact_table(expr: &Expression) -> Option<String> {
-    match expr {
-        Expression::QualifiedColumnRef { table_or_var, .. } => Some(table_or_var.clone()),
-        Expression::TableRef(name) => Some(name.clone()),
-        Expression::Aggregate { operand, .. } => infer_fact_table(operand),
-        Expression::BinaryOp { left, right, .. }
-        | Expression::Comparison { left, right, .. }
-        | Expression::And(left, right)
-        | Expression::Or(left, right) => infer_fact_table(left).or_else(|| infer_fact_table(right)),
-        Expression::Not(inner) | Expression::IsBlank(inner) => infer_fact_table(inner),
-        Expression::Keep { expr, .. }
-        | Expression::Clear { expr, .. }
-        | Expression::Reset { expr }
-        | Expression::ClearInner { expr, .. }
-        | Expression::ClearOuter { expr, .. }
-        | Expression::ResetInner { expr }
-        | Expression::ResetOuter { expr }
-        | Expression::Traverse { expr, .. }
-        | Expression::Using { expr, .. }
-        | Expression::KeepIn { expr, .. } => infer_fact_table(expr),
-        Expression::Block { bindings, result } => {
-            for (_, e) in bindings {
-                if let Some(t) = infer_fact_table(e) {
-                    return Some(t);
-                }
-            }
-            infer_fact_table(result)
-        }
-        Expression::If {
-            condition,
-            then_expr,
-            else_expr,
-        } => infer_fact_table(condition)
-            .or_else(|| infer_fact_table(then_expr))
-            .or_else(|| infer_fact_table(else_expr)),
-        Expression::Switch {
-            expr,
-            cases,
-            default,
-        } => {
-            if let Some(t) = infer_fact_table(expr) {
-                return Some(t);
-            }
-            for (v, r) in cases {
-                if let Some(t) = infer_fact_table(v).or_else(|| infer_fact_table(r)) {
-                    return Some(t);
-                }
-            }
-            default.as_ref().and_then(|d| infer_fact_table(d))
-        }
-        Expression::SafeDivide {
-            numerator,
-            denominator,
-            alternate,
-        } => infer_fact_table(numerator)
-            .or_else(|| infer_fact_table(denominator))
-            .or_else(|| alternate.as_ref().and_then(|a| infer_fact_table(a))),
-        Expression::Coalesce(exprs) => exprs.iter().find_map(infer_fact_table),
-        Expression::ScalarFunc { args, .. } => args.iter().find_map(infer_fact_table),
-        Expression::Query {
-            aggregates,
-            group_by,
-        } => {
-            // Try aggregate expressions first, then group-by table names.
-            aggregates
-                .iter()
-                .find_map(|(e, _)| infer_fact_table(e))
-                .or_else(|| group_by.first().map(|(table, _)| table.clone()))
-        }
-        _ => None,
-    }
-}
-
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -1820,14 +1750,14 @@ mod tests {
 
     #[test]
     fn parse_measure_infers_table() {
-        let (table, _) = parse_measure("SUM(fact_sales[linetotal])").unwrap();
-        assert_eq!(table, "fact_sales");
+        let expr = parse_measure("SUM(fact_sales[linetotal])").unwrap();
+        assert_eq!(infer_fact_table(&expr), Some("fact_sales".to_string()));
     }
 
     #[test]
     fn parse_measure_infers_from_ratio() {
-        let (table, _) = parse_measure("SUM(Sales[amount]) / COUNT(Sales[id])").unwrap();
-        assert_eq!(table, "Sales");
+        let expr = parse_measure("SUM(Sales[amount]) / COUNT(Sales[id])").unwrap();
+        assert_eq!(infer_fact_table(&expr), Some("Sales".to_string()));
     }
 
     #[test]
@@ -1960,8 +1890,8 @@ mod tests {
 
     #[test]
     fn parse_countrows_infer_table() {
-        let (table, _expr) = parse_measure("COUNTROWS(fact_sales)").unwrap();
-        assert_eq!(table, "fact_sales");
+        let expr = parse_measure("COUNTROWS(fact_sales)").unwrap();
+        assert_eq!(infer_fact_table(&expr), Some("fact_sales".to_string()));
     }
 
     #[test]
@@ -2394,8 +2324,8 @@ mod tests {
 
     #[test]
     fn parse_var_return_infer_table() {
-        let (table, _expr) = parse_measure("VAR total = SUM(Sales[amount]) RETURN total").unwrap();
-        assert_eq!(table, "Sales");
+        let expr = parse_measure("VAR total = SUM(Sales[amount]) RETURN total").unwrap();
+        assert_eq!(infer_fact_table(&expr), Some("Sales".to_string()));
     }
 
     #[test]
@@ -2527,11 +2457,11 @@ mod tests {
     #[test]
     fn parse_query_infer_table() {
         // parse_measure should infer the fact table from the QUERY's aggregate
-        let (table, _expr) = parse_measure(
+        let expr = parse_measure(
             "VAR tbl = QUERY(SUM(fact_sales[linetotal]) AS revenue BY dim_date[year]) RETURN AVG(tbl[revenue])",
         )
         .unwrap();
-        assert_eq!(table, "fact_sales");
+        assert_eq!(infer_fact_table(&expr), Some("fact_sales".to_string()));
     }
 
     #[test]

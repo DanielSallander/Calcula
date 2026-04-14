@@ -49,8 +49,8 @@ pub use engine_core::compute::context::{
     ContextResolver, EvaluationContext, FilterSource, ResolvedFilter, ResolvedInFilter,
 };
 pub use engine_core::compute::expression::{
-    self, expand_global_variables, ArithmeticOp, ComparisonOp, Expression, FilterPredicate,
-    InPredicate, RelationshipPath,
+    self, expand_global_variables, infer_fact_table, ArithmeticOp, ComparisonOp, Expression,
+    FilterPredicate, InPredicate, RelationshipPath,
 };
 pub use engine_core::compute::measure::{
     average_measure, count_measure, distinct_count_measure, expression_measure, sum_measure,

@@ -1541,11 +1541,10 @@ mod tests {
             .add_table(sales)
             .add_measure(expression_measure(
                 "US_Revenue",
-                "Sales",
                 expr::agg(
                     AggregateOp::Sum,
                     expr::keep(
-                        expr::col("amount"),
+                        expr::qualified_col("Sales", "amount"),
                         vec![FilterPredicate::new(
                             "Sales",
                             "region",
@@ -1690,11 +1689,10 @@ mod tests {
             ))
             .add_measure(expression_measure(
                 "Revenue2014",
-                "Sales",
                 expr::agg(
                     AggregateOp::Sum,
                     expr::keep(
-                        expr::col("amount"),
+                        expr::qualified_col("Sales", "amount"),
                         vec![FilterPredicate::new(
                             "Dates",
                             "year",
@@ -1760,11 +1758,10 @@ mod tests {
             ))
             .add_measure(expression_measure(
                 "BikeRevenue",
-                "Sales",
                 expr::agg(
                     AggregateOp::Sum,
                     expr::keep(
-                        expr::col("amount"),
+                        expr::qualified_col("Sales", "amount"),
                         vec![FilterPredicate::new(
                             "Products",
                             "category",
@@ -1824,11 +1821,10 @@ mod tests {
             ))
             .add_measure(expression_measure(
                 "LargeOrders",
-                "Sales",
                 expr::agg(
                     AggregateOp::Sum,
                     expr::keep(
-                        expr::col("amount"),
+                        expr::qualified_col("Sales", "amount"),
                         vec![FilterPredicate::new(
                             "Sales",
                             "amount",
@@ -1887,11 +1883,10 @@ mod tests {
             ))
             .add_measure(expression_measure(
                 "Revenue2014",
-                "Sales",
                 expr::agg(
                     AggregateOp::Sum,
                     expr::keep(
-                        expr::col("amount"),
+                        expr::qualified_col("Sales", "amount"),
                         vec![FilterPredicate::new(
                             "Dates",
                             "year",
@@ -1903,11 +1898,10 @@ mod tests {
             ))
             .add_measure(expression_measure(
                 "Revenue2015",
-                "Sales",
                 expr::agg(
                     AggregateOp::Sum,
                     expr::keep(
-                        expr::col("amount"),
+                        expr::qualified_col("Sales", "amount"),
                         vec![FilterPredicate::new(
                             "Dates",
                             "year",
@@ -1967,11 +1961,10 @@ mod tests {
             ))
             .add_measure(expression_measure(
                 "SumRevenue2014",
-                "Sales",
                 expr::agg(
                     AggregateOp::Sum,
                     expr::keep(
-                        expr::col("amount"),
+                        expr::qualified_col("Sales", "amount"),
                         vec![FilterPredicate::new(
                             "Dates",
                             "year",
@@ -1983,11 +1976,10 @@ mod tests {
             ))
             .add_measure(expression_measure(
                 "CountRevenue2014",
-                "Sales",
                 expr::agg(
                     AggregateOp::Count,
                     expr::keep(
-                        expr::col("amount"),
+                        expr::qualified_col("Sales", "amount"),
                         vec![FilterPredicate::new(
                             "Dates",
                             "year",
@@ -2046,11 +2038,10 @@ mod tests {
             ))
             .add_measure(expression_measure(
                 "Revenue2014",
-                "Sales",
                 expr::agg(
                     AggregateOp::Sum,
                     expr::keep(
-                        expr::col("amount"),
+                        expr::qualified_col("Sales", "amount"),
                         vec![FilterPredicate::new(
                             "Dates",
                             "year",

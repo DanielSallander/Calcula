@@ -119,14 +119,6 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     // Parse table variable definitions and add them to the model.
     let mut builder = clone_model_into_builder(&base_model);
 
-    // Track variable sources for resolving variable names to base tables.
-    // Maps variable name → source (which may be another variable or a real table).
-    let mut var_sources: Vec<(String, String)> = base_model
-        .table_variables()
-        .iter()
-        .map(|v| (v.name().to_string(), v.source().to_string()))
-        .collect();
-
     if !vars.is_empty() {
         println!();
         println!("Variables:");
@@ -136,7 +128,6 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
                     println!("  + VAR {} = {} (source: {})", name, expr_text, source);
                     builder =
                         builder.add_table_variable(TableVariable::new(name, &source, filters));
-                    var_sources.push((name.clone(), source));
                 }
                 Err(e) => {
                     eprintln!("  ! VAR {} — parse error: {e}", name);
@@ -156,11 +147,9 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     println!("Measures:");
     for (name, expr_text) in &defines {
         match parse_measure(expr_text) {
-            Ok((table, expr)) => {
-                // If the inferred table is actually a table variable, resolve to its base table.
-                let resolved_table = resolve_to_base_table_from_vars(&table, &var_sources);
-                println!("  + {} = {} (table: {})", name, expr_text, resolved_table);
-                builder = builder.add_measure(expression_measure(name, &resolved_table, expr));
+            Ok(expr) => {
+                println!("  + {} = {}", name, expr_text);
+                builder = builder.add_measure(expression_measure(name, expr));
                 measure_names.push(name.clone());
             }
             Err(e) => {
@@ -362,19 +351,6 @@ fn clone_model_into_builder(model: &DataModel) -> DataModelBuilder {
         builder = builder.add_table_variable(tv.clone());
     }
     builder
-}
-
-/// If `name` is a table variable, follow the source chain to find the real base table.
-/// Otherwise return `name` unchanged.
-fn resolve_to_base_table_from_vars(name: &str, var_sources: &[(String, String)]) -> String {
-    let mut current = name.to_string();
-    loop {
-        if let Some((_, source)) = var_sources.iter().find(|(n, _)| n == &current) {
-            current = source.clone();
-        } else {
-            return current;
-        }
-    }
 }
 
 // --- Query parsing (reused from repl.rs) ---

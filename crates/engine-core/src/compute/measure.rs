@@ -9,7 +9,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::compute::aggregate::AggregateOp;
-use crate::compute::expression::{self as expr, Expression};
+use crate::compute::expression::{self as expr, infer_fact_table, Expression};
 
 /// A named measure: a reusable aggregation expression over a table.
 ///
@@ -17,33 +17,73 @@ use crate::compute::expression::{self as expr, Expression};
 /// The simplest form is `AGG(column)`, but measures can also be
 /// expressions over aggregates like `SUM(price * quantity)` or
 /// `SUM(revenue) / COUNT(orders)`.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+///
+/// The fact table is inferred from the expression's qualified column
+/// references (e.g. `Sales[amount]`). A cached copy is stored at
+/// construction time for efficient `&str` access.
+#[derive(Debug, Clone, Serialize)]
 pub struct Measure {
     name: String,
-    table: String,
     expression: Expression,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     group: Option<String>,
+    /// Fact table inferred from the expression's qualified column refs.
+    #[serde(skip)]
+    cached_table: String,
+}
+
+impl<'de> Deserialize<'de> for Measure {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        struct Fields {
+            name: String,
+            expression: Expression,
+            #[serde(default)]
+            group: Option<String>,
+        }
+        let f = Fields::deserialize(deserializer)?;
+        let cached_table = infer_fact_table(&f.expression).unwrap_or_default();
+        Ok(Measure {
+            name: f.name,
+            expression: f.expression,
+            group: f.group,
+            cached_table,
+        })
+    }
 }
 
 impl Measure {
     /// Create a new measure from an expression.
-    pub fn new(name: impl Into<String>, table: impl Into<String>, expression: Expression) -> Self {
+    ///
+    /// The fact table is inferred from the expression's qualified column
+    /// references. Use `table[column]` syntax in expressions so the table
+    /// can be determined automatically.
+    pub fn new(name: impl Into<String>, expression: Expression) -> Self {
+        let cached_table = infer_fact_table(&expression).unwrap_or_default();
         Self {
             name: name.into(),
-            table: table.into(),
             expression,
             group: None,
+            cached_table,
         }
     }
 
-    /// Create a simple aggregate measure: `AGG(column)`.
+    /// Create a simple aggregate measure: `AGG(table[column])`.
+    ///
+    /// Builds a qualified column reference internally so the fact table
+    /// is embedded in the expression.
     pub fn simple(
         name: impl Into<String>,
         table: impl Into<String>,
         column: impl Into<String>,
         operation: AggregateOp,
     ) -> Self {
-        Self::new(name, table, expr::agg(operation, expr::col(&column.into())))
+        let t = table.into();
+        let c = column.into();
+        Self::new(name, expr::agg(operation, expr::qualified_col(&t, &c)))
     }
 
     /// Set the measure group.
@@ -58,8 +98,11 @@ impl Measure {
     }
 
     /// Returns the table this measure operates on.
+    ///
+    /// Inferred from qualified column references in the expression at
+    /// construction time.
     pub fn table(&self) -> &str {
-        &self.table
+        &self.cached_table
     }
 
     /// Returns the expression tree.
@@ -176,13 +219,11 @@ pub fn distinct_count_measure(
 
 /// Create a measure from an arbitrary expression.
 ///
-/// The expression should contain at least one `Aggregate` node.
-pub fn expression_measure(
-    name: impl Into<String>,
-    table: impl Into<String>,
-    expression: Expression,
-) -> Measure {
-    Measure::new(name, table, expression)
+/// The expression should contain at least one `Aggregate` node and
+/// use qualified column references (`table[column]`) so the fact table
+/// can be inferred.
+pub fn expression_measure(name: impl Into<String>, expression: Expression) -> Measure {
+    Measure::new(name, expression)
 }
 
 #[cfg(test)]
@@ -195,33 +236,35 @@ mod tests {
         assert!(m.is_simple_aggregate());
         assert_eq!(m.simple_column(), Some("amount"));
         assert_eq!(m.simple_operation(), Some(AggregateOp::Sum));
+        assert_eq!(m.table(), "Sales");
     }
 
     #[test]
     fn expression_measure_is_not_simple() {
         let m = expression_measure(
             "Revenue",
-            "Sales",
             expr::agg(
                 AggregateOp::Sum,
-                expr::col("price").multiply(expr::col("quantity")),
+                expr::qualified_col("Sales", "price")
+                    .multiply(expr::qualified_col("Sales", "quantity")),
             ),
         );
         assert!(!m.is_simple_aggregate());
         assert_eq!(m.simple_column(), None);
         assert_eq!(m.simple_operation(), None);
+        assert_eq!(m.table(), "Sales");
     }
 
     #[test]
     fn ratio_measure_is_not_simple() {
         let m = expression_measure(
             "AvgOrder",
-            "Sales",
-            expr::agg(AggregateOp::Sum, expr::col("amount"))
-                .divide(expr::agg(AggregateOp::Count, expr::col("id"))),
+            expr::agg(AggregateOp::Sum, expr::qualified_col("Sales", "amount"))
+                .divide(expr::agg(AggregateOp::Count, expr::qualified_col("Sales", "id"))),
         );
         assert!(!m.is_simple_aggregate());
         assert_eq!(m.column_references(), vec!["amount", "id"]);
+        assert_eq!(m.table(), "Sales");
     }
 
     #[test]
@@ -246,12 +289,22 @@ mod tests {
     fn column_references_for_expression_measure() {
         let m = expression_measure(
             "Revenue",
-            "Sales",
             expr::agg(
                 AggregateOp::Sum,
-                expr::col("price").multiply(expr::col("quantity")),
+                expr::qualified_col("Sales", "price")
+                    .multiply(expr::qualified_col("Sales", "quantity")),
             ),
         );
         assert_eq!(m.column_references(), vec!["price", "quantity"]);
+    }
+
+    #[test]
+    fn serialize_roundtrip() {
+        let m = sum_measure("Total", "Sales", "amount");
+        let json = serde_json::to_string(&m).unwrap();
+        let restored: Measure = serde_json::from_str(&json).unwrap();
+        assert_eq!(restored.name(), "Total");
+        assert_eq!(restored.table(), "Sales");
+        assert!(restored.is_simple_aggregate());
     }
 }

@@ -407,17 +407,17 @@ let us_revenue = expression_measure(
 Parse DAX-like text expressions into the internal `Expression` AST. The parser lives in `engine-core` and is re-exported by the `engine` facade.
 
 ```rust
-use engine::{parse_measure, parse_measure_expression, parse_table_variable, expression_measure};
+use engine::{parse_measure, parse_measure_expression, parse_table_variable, expression_measure, infer_fact_table};
 
 // Parse expression text into an Expression AST
 let expr = parse_measure_expression("SUM(Sales[amount])")?;
 
-// Parse and auto-detect the fact table name
-let (table, expr) = parse_measure("SUM(Sales[amount], KEEP(dim_date, dim_date[year] = 2024))")?;
-// table == "Sales"
+// Parse with fact-table validation — errors if no qualified column ref
+let expr = parse_measure("SUM(Sales[amount], KEEP(dim_date, dim_date[year] = 2024))")?;
+// infer_fact_table(&expr) == Some("Sales".to_string())
 
 // Create a named measure from the parsed expression
-let measure = expression_measure("Revenue 2024", &table, expr);
+let measure = expression_measure("Revenue 2024", expr);
 
 // Parse a table variable definition
 let (source, filters) = parse_table_variable(r#"KEEP(Products, Products[category] = "Bikes")"#)?;

@@ -79,7 +79,7 @@ impl QueryExecutor {
                 .iter()
                 .map(|m| {
                     let expanded_expr = expand_global_variables(m.expression(), model);
-                    Measure::new(m.name(), m.table(), expanded_expr)
+                    Measure::new(m.name(), expanded_expr)
                 })
                 .collect()
         };

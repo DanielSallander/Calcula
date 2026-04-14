@@ -184,7 +184,7 @@ fn build_base_model() -> EngineResult<DataModel> {
 /// Rebuild the DataModel by cloning the existing one and adding extra measures.
 fn rebuild_model_with_measures(
     base: &DataModel,
-    extra_measures: &[(String, String, Expression)],
+    extra_measures: &[(String, Expression)],
 ) -> EngineResult<DataModel> {
     let mut builder = DataModel::builder();
 
@@ -208,8 +208,8 @@ fn rebuild_model_with_measures(
     }
 
     // Add user-defined measures.
-    for (name, table, expr) in extra_measures {
-        builder = builder.add_measure(expression_measure(name, table, expr.clone()));
+    for (name, expr) in extra_measures {
+        builder = builder.add_measure(expression_measure(name, expr.clone()));
     }
 
     builder.build()
@@ -451,12 +451,12 @@ async fn main() {
     println!();
 
     // User-defined measures: (name, table, expression)
-    let mut user_measures: Vec<(String, String, Expression)> = Vec::new();
+    let mut user_measures: Vec<(String, Expression)> = Vec::new();
 
     /// Rebuild engine model with updated measures, preserving registry.
     fn rebuild_engine(
         base_model: &DataModel,
-        user_measures: &[(String, String, Expression)],
+        user_measures: &[(String, Expression)],
         engine: &mut Engine,
     ) -> bool {
         match rebuild_model_with_measures(base_model, user_measures) {
@@ -500,7 +500,7 @@ async fn main() {
                 continue;
             }
             ":measures" | ":m" => {
-                let names: Vec<String> = user_measures.iter().map(|(n, _, _)| n.clone()).collect();
+                let names: Vec<String> = user_measures.iter().map(|(n, _)| n.clone()).collect();
                 print_measures(engine.model(), &names);
                 continue;
             }
@@ -509,7 +509,7 @@ async fn main() {
                 continue;
             }
             ":model" => {
-                let names: Vec<String> = user_measures.iter().map(|(n, _, _)| n.clone()).collect();
+                let names: Vec<String> = user_measures.iter().map(|(n, _)| n.clone()).collect();
                 print_measures(engine.model(), &names);
                 print_tables(engine.model());
                 println!("  Relationships:");
@@ -553,11 +553,11 @@ async fn main() {
                 }
 
                 match parse_measure(expr_str) {
-                    Ok((table, expr)) => {
+                    Ok(expr) => {
                         // Remove existing measure with same name if any.
-                        user_measures.retain(|(n, _, _)| n != &name);
-                        println!("  Parsed: {} = {} (table: {})", name, expr_str, table);
-                        user_measures.push((name.clone(), table, expr));
+                        user_measures.retain(|(n, _)| n != &name);
+                        println!("  Parsed: {} = {}", name, expr_str);
+                        user_measures.push((name.clone(), expr));
 
                         // Rebuild engine with new measure.
                         if rebuild_engine(&base_model, &user_measures, &mut engine) {
@@ -580,7 +580,7 @@ async fn main() {
         if let Some(name) = line.strip_prefix(":remove ") {
             let name = name.trim();
             let before = user_measures.len();
-            user_measures.retain(|(n, _, _)| n != name);
+            user_measures.retain(|(n, _)| n != name);
             if user_measures.len() < before {
                 rebuild_engine(&base_model, &user_measures, &mut engine);
                 println!("  Measure '{}' removed.", name);
@@ -598,7 +598,7 @@ async fn main() {
                     println!("  SQL: {}", expr.to_sql_string());
                     println!("  has_aggregate: {}", expr.has_aggregate());
                     println!("  has_context_ops: {}", expr.has_context_ops());
-                    if let Ok((table, _)) = parse_measure(expr_str.trim()) {
+                    if let Some(table) = infer_fact_table(&expr) {
                         println!("  inferred table: {}", table);
                     }
                 }

@@ -157,7 +157,6 @@ fn build_model_with_vars(measures: Vec<(&str, &str)>) -> EngineResult<DataModel>
         ),
     ];
 
-    let mut var_sources: Vec<(String, String)> = Vec::new();
     let mut builder = DataModel::builder()
         .add_table(fact_sales)
         .add_table(dim_product)
@@ -202,27 +201,13 @@ fn build_model_with_vars(measures: Vec<(&str, &str)>) -> EngineResult<DataModel>
         let (source, filters) = parse_table_variable(expr_text)
             .unwrap_or_else(|e| panic!("Failed to parse VAR '{name}': {e}"));
         builder = builder.add_table_variable(TableVariable::new(*name, &source, filters));
-        var_sources.push((name.to_string(), source));
     }
 
-    // Resolve variable names to base tables for measure creation.
-    fn resolve_base_table(name: &str, sources: &[(String, String)]) -> String {
-        let mut current = name.to_string();
-        loop {
-            if let Some((_, source)) = sources.iter().find(|(n, _)| n == &current) {
-                current = source.clone();
-            } else {
-                return current;
-            }
-        }
-    }
-
-    // Add measures — resolve table variable references to base tables.
+    // Add measures.
     for (name, expr_text) in &measures {
-        let (table, expr) = parse_measure(expr_text)
+        let expr = parse_measure(expr_text)
             .unwrap_or_else(|e| panic!("Failed to parse measure '{name}': {e}"));
-        let resolved_table = resolve_base_table(&table, &var_sources);
-        builder = builder.add_measure(expression_measure(*name, &resolved_table, expr));
+        builder = builder.add_measure(expression_measure(*name, expr));
     }
 
     builder.build()

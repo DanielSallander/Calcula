@@ -2428,6 +2428,89 @@ fn expand_scalar_globals(expr: &Expression, model: &crate::model::schema::DataMo
     }
 }
 
+/// Walk the expression tree to find the first qualified column reference's table.
+///
+/// Returns `Some(table_name)` if a `QualifiedColumnRef` or `TableRef` is found
+/// anywhere in the expression tree. Used by `Measure` to infer which fact table
+/// the measure operates on, removing the need for a stored `table` field.
+pub fn infer_fact_table(expr: &Expression) -> Option<String> {
+    match expr {
+        Expression::QualifiedColumnRef { table_or_var, .. } => Some(table_or_var.clone()),
+        Expression::TableRef(name) => Some(name.clone()),
+        Expression::Aggregate { operand, .. } => infer_fact_table(operand),
+        Expression::BinaryOp { left, right, .. }
+        | Expression::Comparison { left, right, .. }
+        | Expression::And(left, right)
+        | Expression::Or(left, right) => infer_fact_table(left).or_else(|| infer_fact_table(right)),
+        Expression::Not(inner) | Expression::IsBlank(inner) => infer_fact_table(inner),
+        Expression::Keep { expr, .. }
+        | Expression::Clear { expr, .. }
+        | Expression::Reset { expr }
+        | Expression::ClearInner { expr, .. }
+        | Expression::ClearOuter { expr, .. }
+        | Expression::ResetInner { expr }
+        | Expression::ResetOuter { expr }
+        | Expression::Traverse { expr, .. }
+        | Expression::Using { expr, .. }
+        | Expression::KeepIn { expr, .. } => infer_fact_table(expr),
+        Expression::Block { bindings, result } => {
+            for (_, e) in bindings {
+                if let Some(t) = infer_fact_table(e) {
+                    return Some(t);
+                }
+            }
+            infer_fact_table(result)
+        }
+        Expression::If {
+            condition,
+            then_expr,
+            else_expr,
+        } => infer_fact_table(condition)
+            .or_else(|| infer_fact_table(then_expr))
+            .or_else(|| infer_fact_table(else_expr)),
+        Expression::Switch {
+            expr,
+            cases,
+            default,
+        } => {
+            if let Some(t) = infer_fact_table(expr) {
+                return Some(t);
+            }
+            for (v, r) in cases {
+                if let Some(t) = infer_fact_table(v).or_else(|| infer_fact_table(r)) {
+                    return Some(t);
+                }
+            }
+            default.as_ref().and_then(|d| infer_fact_table(d))
+        }
+        Expression::SafeDivide {
+            numerator,
+            denominator,
+            alternate,
+        } => infer_fact_table(numerator)
+            .or_else(|| infer_fact_table(denominator))
+            .or_else(|| alternate.as_ref().and_then(|a| infer_fact_table(a))),
+        Expression::Coalesce(exprs) => exprs.iter().find_map(infer_fact_table),
+        Expression::ScalarFunc { args, .. } | Expression::TextFunc { args, .. } => {
+            args.iter().find_map(infer_fact_table)
+        }
+        Expression::Query {
+            aggregates,
+            group_by,
+        } => aggregates
+            .iter()
+            .find_map(|(e, _)| infer_fact_table(e))
+            .or_else(|| group_by.first().map(|(table, _)| table.clone())),
+        Expression::HasOneValue { column } => infer_fact_table(column),
+        Expression::SelectedValue { column, alternate } => infer_fact_table(column)
+            .or_else(|| alternate.as_ref().and_then(|a| infer_fact_table(a))),
+        Expression::FirstValue { column, order_by } => {
+            infer_fact_table(column).or_else(|| infer_fact_table(order_by))
+        }
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

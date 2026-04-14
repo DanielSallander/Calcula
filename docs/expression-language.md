@@ -149,18 +149,18 @@ SUM(Sales[price] * Sales[qty])
 ### Parser API
 
 ```rust
-use engine::{parse_measure, parse_measure_expression};
+use engine::{parse_measure, parse_measure_expression, infer_fact_table};
 
 // Parse expression only — returns the Expression AST
 let expr = parse_measure_expression("SUM(Sales[amount])")?;
 
-// Parse and infer fact table — returns (table_name, Expression)
-let (table, expr) = parse_measure("SUM(Sales[amount], KEEP(dim_date, dim_date[year] = 2024))")?;
-assert_eq!(table, "Sales");
+// Parse with fact-table validation — errors if no qualified column ref
+let expr = parse_measure("SUM(Sales[amount], KEEP(dim_date, dim_date[year] = 2024))")?;
+assert_eq!(infer_fact_table(&expr), Some("Sales".to_string()));
 
 // Create a named measure from parsed text
 use engine::{expression_measure, DataModel};
-let measure = expression_measure("Revenue 2024", &table, expr);
+let measure = expression_measure("Revenue 2024", expr);
 ```
 
 ### Interactive REPL

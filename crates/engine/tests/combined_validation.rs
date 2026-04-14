@@ -173,9 +173,9 @@ fn build_model(measures: Vec<(&str, &str)>) -> EngineResult<DataModel> {
 
     // Add measures.
     for (name, expr_text) in &measures {
-        let (table, expr) = parse_measure(expr_text)
+        let expr = parse_measure(expr_text)
             .unwrap_or_else(|e| panic!("Failed to parse measure '{name}': {e}"));
-        builder = builder.add_measure(expression_measure(*name, &table, expr));
+        builder = builder.add_measure(expression_measure(*name, expr));
     }
 
     builder.build()
