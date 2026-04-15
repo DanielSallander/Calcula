@@ -464,7 +464,8 @@ fn pg_type_name_to_arrow(
         "FLOAT4" | "REAL" => Ok(AT::Float64),
         "FLOAT8" | "DOUBLE PRECISION" => Ok(AT::Float64),
         "NUMERIC" | "DECIMAL" => Ok(AT::Decimal128(38, 10)),
-        "TEXT" | "VARCHAR" | "CHAR" | "CHARACTER" | "CHARACTER VARYING" | "BPCHAR" | "NAME" | "UUID" | "JSON" | "JSONB" | "XML" => Ok(AT::Utf8),
+        "TEXT" | "VARCHAR" | "CHAR" | "CHARACTER" | "CHARACTER VARYING" | "BPCHAR" | "NAME"
+        | "UUID" | "JSON" | "JSONB" | "XML" => Ok(AT::Utf8),
         "BOOL" | "BOOLEAN" => Ok(AT::Boolean),
         "DATE" => Ok(AT::Date32),
         "TIMESTAMP" | "TIMESTAMPTZ" => Ok(AT::Timestamp(TimeUnit::Microsecond, None)),

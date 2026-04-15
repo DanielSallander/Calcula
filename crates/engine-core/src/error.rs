@@ -129,6 +129,25 @@ pub enum EngineError {
     #[error("Invalid expression: {0}")]
     InvalidExpression(String),
 
+    /// Attempted an in-memory operation on a DirectQuery table.
+    #[error("Table '{0}' is not configured for in-memory storage")]
+    TableNotInMemory(String),
+
+    /// Refreshing a table would exceed the memory budget.
+    #[error("Memory budget exceeded: need {needed} bytes but only {available} bytes available (budget: {budget} bytes)")]
+    MemoryBudgetExceeded {
+        /// Bytes needed by the new data.
+        needed: usize,
+        /// Bytes currently available within the budget.
+        available: usize,
+        /// Total configured budget in bytes.
+        budget: usize,
+    },
+
+    /// An in-memory table was queried before its first refresh.
+    #[error("Table '{0}' has not been refreshed yet — call refresh_table() before querying")]
+    TableNotCached(String),
+
     /// An aggregation was attempted on an unsupported column type.
     #[error("Aggregation '{operation}' is not supported on column type '{column_type}'")]
     UnsupportedAggregation {

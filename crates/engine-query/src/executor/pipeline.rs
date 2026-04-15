@@ -13,7 +13,9 @@ use engine_core::compute::context::{format_filter_value, ContextResolver, Resolv
 use engine_core::compute::expression::{expand_global_variables, Expression};
 use engine_core::compute::measure::Measure;
 use engine_core::compute::plan::{PlanNode, PlanOperation, PlanValue};
+use engine_core::error::EngineError;
 use engine_core::model::DataModel;
+use engine_core::store::InMemoryCache;
 
 use crate::error::QueryResult;
 use crate::planner::QueryPlan;
@@ -25,10 +27,14 @@ pub struct QueryExecutor;
 
 impl QueryExecutor {
     /// Execute a query plan and return results as Arrow `RecordBatch` values.
+    ///
+    /// When `cache` is provided, tables configured for in-memory storage are
+    /// served from the cache instead of being fetched from the source connector.
     pub async fn execute(
         plan: &QueryPlan,
         model: &DataModel,
         registry: &SourceRegistry,
+        cache: Option<&InMemoryCache>,
     ) -> QueryResult<Vec<RecordBatch>> {
         match plan {
             QueryPlan::PushedAggregation {
@@ -52,6 +58,7 @@ impl QueryExecutor {
                     lookup_specs,
                     model,
                     registry,
+                    cache,
                     None,
                 )
                 .await
@@ -61,7 +68,9 @@ impl QueryExecutor {
 
     /// Execute a local aggregation: fetch data, join, and aggregate via DataFusion.
     ///
-    /// When `plan` is `Some`, timing and metadata are recorded into child nodes.
+    /// When `plan_node` is `Some`, timing and metadata are recorded into child nodes.
+    /// When `cache` is provided, in-memory tables are served from the cache.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) async fn execute_local_aggregation(
         fetches: &[(String, engine_connectors::FetchRequest)],
         measures: &[engine_core::compute::measure::Measure],
@@ -69,6 +78,7 @@ impl QueryExecutor {
         lookup_specs: &[crate::planner::LookupSpec],
         model: &DataModel,
         registry: &SourceRegistry,
+        cache: Option<&InMemoryCache>,
         mut plan: Option<&mut PlanNode>,
     ) -> QueryResult<Vec<RecordBatch>> {
         // Expand global variable references in all measure expressions.
@@ -97,15 +107,43 @@ impl QueryExecutor {
         // Phase 2: use extracted join key values as IN filters on the fact table.
         let fact_table_name = measures[0].table();
 
+        // Resolve in-memory tables from the cache first (no connector needed).
+        let mut inmemory_results: Vec<(String, Vec<RecordBatch>, usize, std::time::Duration)> =
+            Vec::new();
+        let mut inmemory_indices: std::collections::HashSet<usize> =
+            std::collections::HashSet::new();
+
+        for (i, (table_name, _)) in fetches.iter().enumerate() {
+            let is_in_memory = model.table(table_name).is_ok_and(|t| t.is_in_memory());
+            if is_in_memory {
+                let batch = cache.and_then(|c| c.get(table_name)).ok_or_else(|| {
+                    crate::error::QueryError::Engine(EngineError::TableNotCached(
+                        table_name.clone(),
+                    ))
+                })?;
+                inmemory_indices.insert(i);
+                inmemory_results.push((
+                    table_name.clone(),
+                    vec![batch.clone()],
+                    batch.num_rows(),
+                    std::time::Duration::ZERO,
+                ));
+            }
+        }
+
         // Find dimension fetches that have context-pushed filters AND a
-        // relationship to the fact table.
+        // relationship to the fact table (only for connector-fetched tables).
         let mut pre_fetch_indices: Vec<usize> = Vec::new();
         // (pre_fetch_index, dim_join_col, fact_join_col)
         let mut propagation_info: Vec<(usize, String, String)> = Vec::new();
 
         for (i, (table_name, request)) in fetches.iter().enumerate() {
-            // Skip the fact table itself and tables with no filters.
-            if table_name.eq_ignore_ascii_case(fact_table_name) || request.filters.is_empty() {
+            // Skip in-memory tables (already resolved), the fact table, and
+            // tables with no filters.
+            if inmemory_indices.contains(&i)
+                || table_name.eq_ignore_ascii_case(fact_table_name)
+                || request.filters.is_empty()
+            {
                 continue;
             }
             // Check for a relationship to the fact table.
@@ -148,14 +186,14 @@ impl QueryExecutor {
 
         let pre_fetch_results = futures::future::try_join_all(pre_fetch_futures).await?;
 
-        // Extract join key values from pre-fetched dimensions and build IN
-        // filters for the fact table.
+        // Extract join key values from pre-fetched dimensions (and in-memory
+        // dimensions with filters) and build IN filters for the fact table.
         let mut fact_in_filters: Vec<InFilterCondition> = Vec::new();
         let pre_fetch_set: std::collections::HashSet<usize> =
             pre_fetch_indices.iter().copied().collect();
 
+        // Extract from connector pre-fetches.
         for (idx, _dim_table, ref batches, _, _) in &pre_fetch_results {
-            // Find the propagation info for this pre-fetch.
             if let Some((_, dim_col, fact_col)) = propagation_info.iter().find(|(i, _, _)| i == idx)
             {
                 let values = extract_column_values(batches, dim_col);
@@ -168,11 +206,51 @@ impl QueryExecutor {
             }
         }
 
-        // Phase 2: fetch remaining tables, adding IN filters to the fact table.
+        // Also extract from in-memory dimension tables that have filter
+        // relationships to the fact table.
+        for (i, (table_name, request)) in fetches.iter().enumerate() {
+            if !inmemory_indices.contains(&i)
+                || table_name.eq_ignore_ascii_case(fact_table_name)
+                || request.filters.is_empty()
+            {
+                continue;
+            }
+            if let Ok(rel) = model.find_relationship(fact_table_name, table_name) {
+                if rel.conditions().len() != 1 || !rel.is_equi_only() {
+                    continue;
+                }
+                let (fact_col, dim_col) = if rel.from_table() == fact_table_name {
+                    (rel.from_column().to_string(), rel.to_column().to_string())
+                } else {
+                    (rel.to_column().to_string(), rel.from_column().to_string())
+                };
+                // Find the cached batch for this table.
+                if let Some((_, batches, _, _)) =
+                    inmemory_results.iter().find(|(n, _, _, _)| n == table_name)
+                {
+                    let values = extract_column_values(batches, &dim_col);
+                    if !values.is_empty() {
+                        fact_in_filters.push(InFilterCondition {
+                            column: fact_col,
+                            values,
+                        });
+                    }
+                }
+            }
+        }
+
+        // Phase 2: fetch remaining connector tables, adding IN filters to the
+        // fact table.
+        let skip_set: std::collections::HashSet<usize> = pre_fetch_set
+            .iter()
+            .chain(inmemory_indices.iter())
+            .copied()
+            .collect();
+
         let main_fetch_futures: Vec<_> = fetches
             .iter()
             .enumerate()
-            .filter(|(i, _)| !pre_fetch_set.contains(i))
+            .filter(|(i, _)| !skip_set.contains(i))
             .map(|(_, (table_name, request))| {
                 let in_filters = if table_name.eq_ignore_ascii_case(fact_table_name) {
                     &fact_in_filters
@@ -208,19 +286,34 @@ impl QueryExecutor {
         let mut all_fetch_results: Vec<(String, Vec<RecordBatch>, usize, std::time::Duration)> =
             Vec::new();
 
+        // In-memory tables first.
+        all_fetch_results.extend(inmemory_results);
+        // Then connector pre-fetches.
         for (_, table_name, batches, row_count, elapsed) in pre_fetch_results {
             all_fetch_results.push((table_name, batches, row_count, elapsed));
         }
+        // Then remaining connector fetches.
         all_fetch_results.extend(main_fetch_results);
 
         // Build fetch plan nodes if collecting plan data.
         if let Some(ref mut plan_node) = plan.as_deref_mut() {
             for (table_name, _, row_count, elapsed) in &all_fetch_results {
-                let mut fetch_node =
-                    PlanNode::new(PlanOperation::SourceFetch, format!("Fetch: {table_name}"))
-                        .with_duration(*elapsed)
-                        .with_property("table", PlanValue::Text(table_name.clone()))
-                        .with_property("rows_fetched", PlanValue::Number(*row_count as f64));
+                let is_cached = model.table(table_name).is_ok_and(|t| t.is_in_memory());
+                let label = if is_cached {
+                    format!("Cache: {table_name}")
+                } else {
+                    format!("Fetch: {table_name}")
+                };
+
+                let mut fetch_node = PlanNode::new(PlanOperation::SourceFetch, label)
+                    .with_duration(*elapsed)
+                    .with_property("table", PlanValue::Text(table_name.clone()))
+                    .with_property("rows_fetched", PlanValue::Number(*row_count as f64));
+
+                if is_cached {
+                    fetch_node
+                        .add_property("source", PlanValue::Text("in_memory_cache".to_string()));
+                }
 
                 // Annotate fact table fetch with propagated IN filter info.
                 if table_name.eq_ignore_ascii_case(fact_table_name) && !fact_in_filters.is_empty() {

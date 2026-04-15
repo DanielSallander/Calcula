@@ -259,8 +259,10 @@ mod tests {
     fn ratio_measure_is_not_simple() {
         let m = expression_measure(
             "AvgOrder",
-            expr::agg(AggregateOp::Sum, expr::qualified_col("Sales", "amount"))
-                .divide(expr::agg(AggregateOp::Count, expr::qualified_col("Sales", "id"))),
+            expr::agg(AggregateOp::Sum, expr::qualified_col("Sales", "amount")).divide(expr::agg(
+                AggregateOp::Count,
+                expr::qualified_col("Sales", "id"),
+            )),
         );
         assert!(!m.is_simple_aggregate());
         assert_eq!(m.column_references(), vec!["amount", "id"]);

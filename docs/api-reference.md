@@ -164,6 +164,48 @@ let table = Table::new("Sales", vec![
 ])?;
 ```
 
+#### Storage Mode
+
+Tables can be configured for **in-memory caching** to avoid repeated network fetches for small, rarely-changing dimension tables. By default, all tables use `DirectQuery` (fetched from the source on every query).
+
+```rust
+use engine::StorageMode;
+
+// Mark a dimension table for in-memory caching.
+let products = Table::new("Products", vec![
+    Column::new("id", DataType::Int64),
+    Column::new("name", DataType::String),
+])?.with_storage_mode(StorageMode::InMemory);
+```
+
+After adding the table to the model and binding it to a source, refresh it:
+
+```rust
+// Load data into the in-memory cache.
+engine.refresh_table("Products").await?;
+
+// Refresh all in-memory tables at once.
+engine.refresh_all_in_memory().await?;
+```
+
+Subsequent queries that reference `Products` will read from the cache instead of fetching from the database. The cache tracks memory usage with a configurable budget (default 256 MB):
+
+```rust
+// Custom memory budget (e.g. 512 MB).
+let engine = Engine::with_memory_budget(model, 512 * 1024 * 1024);
+
+// Check staleness.
+if engine.needs_refresh("Products", std::time::Duration::from_secs(3600)) {
+    engine.refresh_table("Products").await?;
+}
+```
+
+**Design notes:**
+- In-memory tables always use `LocalAggregation` (aggregation is never pushed to the source).
+- The two-phase relationship filter propagation (IN-filter optimization) works transparently with cached dimensions.
+- The host application controls refresh timing — the engine does not run timers.
+- JSON serialization is backward-compatible: `storage_mode` is omitted when `DirectQuery`.
+
 #### Lookup Columns
 
 Lookup columns are dimension columns that are retrieved post-aggregation rather than included in the GROUP BY clause. This avoids unnecessary GROUP BY complexity and improves performance for pivot tables with many dimension properties.

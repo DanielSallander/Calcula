@@ -143,11 +143,17 @@ impl PushdownPlanner {
         // Resolve lookup columns (if any).
         let lookup_specs = resolve_lookups(&request.lookups, &request.group_by, model)?;
 
+        // In-memory tables are already local — never push aggregates to a source.
+        let any_in_memory = all_tables
+            .iter()
+            .any(|t| model.table(t).is_ok_and(|tbl| tbl.is_in_memory()));
+
         if unique_tables.len() == 1
             && all_simple
             && !any_context_ops
             && !any_table_var_refs
             && lookup_specs.is_empty()
+            && !any_in_memory
         {
             let table_name = all_tables[0];
             let binding = registry.binding_for(table_name)?;

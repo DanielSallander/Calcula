@@ -67,9 +67,9 @@ pub use engine_core::error::{EngineError, EngineResult};
 pub use engine_core::model::{
     CalculatedColumn, Cardinality, ClearTarget, Column, ContextDefinition, ContextOp, DataModel,
     DataModelBuilder, FilterPropagation, GlobalVariable, JoinCondition, JoinOperator, Relationship,
-    Table, TableVariable,
+    StorageMode, Table, TableVariable,
 };
-pub use engine_core::store::{ColumnStore, TableData};
+pub use engine_core::store::{ColumnStore, InMemoryCache, TableData};
 pub use engine_core::types::{DataType, TableColumn, Value};
 
 // --- Re-exports from engine-connectors ---
@@ -93,19 +93,32 @@ pub use engine_query::{LookupSpec, PushdownPlanner, QueryExecutor, QueryPlan};
 
 /// High-level engine facade coordinating model, sources, and queries.
 ///
-/// The `Engine` owns a [`DataModel`] and a [`SourceRegistry`], providing
-/// a single entry point for the host application.
+/// The `Engine` owns a [`DataModel`], a [`SourceRegistry`], and an
+/// [`InMemoryCache`] for tables configured with [`StorageMode::InMemory`].
 pub struct Engine {
     model: DataModel,
     registry: SourceRegistry,
+    cache: InMemoryCache,
 }
 
 impl Engine {
     /// Create a new engine with the given data model.
+    ///
+    /// Uses the default memory budget (256 MB) for the in-memory cache.
     pub fn new(model: DataModel) -> Self {
         Self {
             model,
             registry: SourceRegistry::new(),
+            cache: InMemoryCache::new(),
+        }
+    }
+
+    /// Create a new engine with a custom memory budget for in-memory tables.
+    pub fn with_memory_budget(model: DataModel, budget_bytes: usize) -> Self {
+        Self {
+            model,
+            registry: SourceRegistry::new(),
+            cache: InMemoryCache::with_budget(budget_bytes),
         }
     }
 
@@ -140,9 +153,10 @@ impl Engine {
     /// Execute a query against the model using registered data sources.
     ///
     /// The query planner decides what to push down and what to compute locally.
+    /// Tables configured for in-memory storage are served from the cache.
     pub async fn query(&self, request: QueryRequest) -> QueryResult<Vec<RecordBatch>> {
         let plan = PushdownPlanner::plan(&request, &self.model, &self.registry)?;
-        QueryExecutor::execute(&plan, &self.model, &self.registry).await
+        QueryExecutor::execute(&plan, &self.model, &self.registry, Some(&self.cache)).await
     }
 
     /// Execute a query and return results with an execution plan.
@@ -157,8 +171,13 @@ impl Engine {
 
         let (query_plan, pushdown_node) =
             PushdownPlanner::plan_explained(&request, &self.model, &self.registry)?;
-        let (batches, exec_node) =
-            QueryExecutor::execute_explained(&query_plan, &self.model, &self.registry).await?;
+        let (batches, exec_node) = QueryExecutor::execute_explained(
+            &query_plan,
+            &self.model,
+            &self.registry,
+            Some(&self.cache),
+        )
+        .await?;
 
         let total_duration = start.elapsed();
 
@@ -189,10 +208,82 @@ impl Engine {
         Ok((batches, plan))
     }
 
-    /// Replace the data model, keeping the source registry intact.
+    /// Refresh an in-memory table by fetching all data from its source connector.
+    ///
+    /// Returns an error if the table is not configured for `InMemory` storage,
+    /// has no registered source, or if the fetched data would exceed the memory
+    /// budget.
+    pub async fn refresh_table(&mut self, table_name: &str) -> EngineResult<()> {
+        let table = self.model.table(table_name)?;
+        if !table.is_in_memory() {
+            return Err(EngineError::TableNotInMemory(table_name.to_string()));
+        }
+
+        let binding = self
+            .registry
+            .binding_for(table_name)
+            .map_err(|e| EngineError::InvalidData(e.to_string()))?;
+        let request = FetchRequest {
+            schema: Some(binding.schema.clone()),
+            table: binding.table.clone(),
+            ..Default::default()
+        };
+        let connector = self
+            .registry
+            .connector_for(table_name)
+            .map_err(|e| EngineError::InvalidData(e.to_string()))?;
+        let batches = connector
+            .fetch_data(&request)
+            .await
+            .map_err(|e| EngineError::InvalidData(e.to_string()))?;
+
+        if batches.is_empty() {
+            let schema = std::sync::Arc::new(table.to_arrow_schema());
+            let batch = RecordBatch::new_empty(schema);
+            self.cache.store(table_name, batch)?;
+        } else {
+            let schema = batches[0].schema();
+            let combined = arrow::compute::concat_batches(&schema, &batches)?;
+            self.cache.store(table_name, combined)?;
+        }
+        Ok(())
+    }
+
+    /// Refresh all tables configured for in-memory storage.
+    pub async fn refresh_all_in_memory(&mut self) -> EngineResult<()> {
+        let table_names: Vec<String> = self
+            .model
+            .tables()
+            .iter()
+            .filter(|t| t.is_in_memory())
+            .map(|t| t.name().to_string())
+            .collect();
+        for name in table_names {
+            self.refresh_table(&name).await?;
+        }
+        Ok(())
+    }
+
+    /// Returns when the table was last refreshed, if it is cached.
+    pub fn last_refreshed(&self, table_name: &str) -> Option<std::time::Instant> {
+        self.cache.last_refreshed(table_name)
+    }
+
+    /// Returns `true` if the table's cache is older than `max_age` or not yet
+    /// cached.
+    pub fn needs_refresh(&self, table_name: &str, max_age: std::time::Duration) -> bool {
+        self.cache.is_stale(table_name, max_age)
+    }
+
+    /// Returns a reference to the in-memory cache for inspection.
+    pub fn cache(&self) -> &InMemoryCache {
+        &self.cache
+    }
+
+    /// Replace the data model, keeping the source registry and cache intact.
     ///
     /// Existing table bindings remain valid as long as the new model contains
-    /// the same table names.
+    /// the same table names. Cached in-memory tables are preserved.
     pub fn set_model(&mut self, model: DataModel) {
         self.model = model;
     }

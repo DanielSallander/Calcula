@@ -250,7 +250,13 @@ impl Relationship {
         to_table: impl Into<String>,
         conditions: Vec<JoinCondition>,
     ) -> Self {
-        Self::with_conditions(name, from_table, to_table, conditions, Cardinality::ManyToMany)
+        Self::with_conditions(
+            name,
+            from_table,
+            to_table,
+            conditions,
+            Cardinality::ManyToMany,
+        )
     }
 
     /// Returns the relationship name.
@@ -294,7 +300,9 @@ impl Relationship {
     /// Equi-only relationships can use optimized join paths (DataFusion `.join()` API,
     /// IN-list pushdown). Non-equi relationships fall back to SQL string generation.
     pub fn is_equi_only(&self) -> bool {
-        self.conditions.iter().all(|c| c.operator == JoinOperator::Equal)
+        self.conditions
+            .iter()
+            .all(|c| c.operator == JoinOperator::Equal)
     }
 
     /// Build the SQL ON clause for this relationship's join conditions.
@@ -311,7 +319,12 @@ impl Relationship {
     /// build_on_clause("fact", "dim", true)
     /// // → fact."order_date" >= dim."start_date" AND fact."order_date" <= dim."end_date"
     /// ```
-    pub fn build_on_clause(&self, left_alias: &str, right_alias: &str, left_is_from: bool) -> String {
+    pub fn build_on_clause(
+        &self,
+        left_alias: &str,
+        right_alias: &str,
+        left_is_from: bool,
+    ) -> String {
         self.conditions
             .iter()
             .map(|c| {
@@ -464,12 +477,7 @@ mod tests {
 
     #[test]
     fn many_to_many_defaults_to_none_propagation() {
-        let rel = Relationship::many_to_many(
-            "R",
-            "A",
-            "B",
-            vec![JoinCondition::equal("x", "y")],
-        );
+        let rel = Relationship::many_to_many("R", "A", "B", vec![JoinCondition::equal("x", "y")]);
         assert_eq!(rel.propagation(), FilterPropagation::None);
     }
 

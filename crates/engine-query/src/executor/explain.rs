@@ -10,6 +10,7 @@ use arrow::record_batch::RecordBatch;
 
 use engine_core::compute::plan::{PlanNode, PlanOperation, PlanValue};
 use engine_core::model::DataModel;
+use engine_core::store::InMemoryCache;
 
 use crate::error::QueryResult;
 use crate::planner::QueryPlan;
@@ -24,6 +25,7 @@ impl super::QueryExecutor {
         plan: &QueryPlan,
         model: &DataModel,
         registry: &SourceRegistry,
+        cache: Option<&InMemoryCache>,
     ) -> QueryResult<(Vec<RecordBatch>, PlanNode)> {
         match plan {
             QueryPlan::PushedAggregation {
@@ -74,6 +76,7 @@ impl super::QueryExecutor {
                     lookup_specs,
                     model,
                     registry,
+                    cache,
                     Some(&mut node),
                 )
                 .await?;

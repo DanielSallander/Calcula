@@ -930,8 +930,9 @@ mod tests {
             ))
             .add_measure(expression_measure(
                 "AvgOrderValue",
-                expr::agg(AggregateOp::Sum, expr::qualified_col("Sales", "amount"))
-                    .divide(expr::agg(AggregateOp::Count, expr::qualified_col("Sales", "id"))),
+                expr::agg(AggregateOp::Sum, expr::qualified_col("Sales", "amount")).divide(
+                    expr::agg(AggregateOp::Count, expr::qualified_col("Sales", "id")),
+                ),
             ))
             .build()
             .unwrap()
@@ -1199,7 +1200,10 @@ mod tests {
             // Measure with reset(): always total
             .add_measure(expression_measure(
                 "TotalAll",
-                expr::agg(AggregateOp::Sum, expr::reset(expr::qualified_col("Sales", "amount"))),
+                expr::agg(
+                    AggregateOp::Sum,
+                    expr::reset(expr::qualified_col("Sales", "amount")),
+                ),
             ))
             // Plain measure for comparison
             .add_measure(sum_measure("Revenue", "Sales", "amount"))
@@ -1231,7 +1235,10 @@ mod tests {
             ))
             .add_measure(expression_measure(
                 "US_Revenue_Via_Context",
-                expr::agg(AggregateOp::Sum, expr::using(expr::qualified_col("Sales", "amount"), "ctx_us")),
+                expr::agg(
+                    AggregateOp::Sum,
+                    expr::using(expr::qualified_col("Sales", "amount"), "ctx_us"),
+                ),
             ))
             .build()
             .unwrap()
@@ -1556,7 +1563,10 @@ mod tests {
                         "monthly".to_string(),
                         Expression::Query {
                             aggregates: vec![(
-                                expr::agg(AggregateOp::Sum, expr::qualified_col("Orders", "amount")),
+                                expr::agg(
+                                    AggregateOp::Sum,
+                                    expr::qualified_col("Orders", "amount"),
+                                ),
                                 "revenue".to_string(),
                             )],
                             group_by: vec![("Orders".to_string(), "month".to_string())],
@@ -1611,7 +1621,10 @@ mod tests {
                         "monthly".to_string(),
                         Expression::Query {
                             aggregates: vec![(
-                                expr::agg(AggregateOp::Sum, expr::qualified_col("Orders", "amount")),
+                                expr::agg(
+                                    AggregateOp::Sum,
+                                    expr::qualified_col("Orders", "amount"),
+                                ),
                                 "revenue".to_string(),
                             )],
                             group_by: vec![("Orders".to_string(), "month".to_string())],
@@ -1684,7 +1697,10 @@ mod tests {
                         "by_cat".to_string(),
                         Expression::Query {
                             aggregates: vec![(
-                                expr::agg(AggregateOp::Sum, expr::qualified_col("Orders", "amount")),
+                                expr::agg(
+                                    AggregateOp::Sum,
+                                    expr::qualified_col("Orders", "amount"),
+                                ),
                                 "revenue".to_string(),
                             )],
                             group_by: vec![("Products".to_string(), "category".to_string())],
@@ -1740,7 +1756,10 @@ mod tests {
                         "monthly".to_string(),
                         Expression::Query {
                             aggregates: vec![(
-                                expr::agg(AggregateOp::Sum, expr::qualified_col("Orders", "amount")),
+                                expr::agg(
+                                    AggregateOp::Sum,
+                                    expr::qualified_col("Orders", "amount"),
+                                ),
                                 "revenue".to_string(),
                             )],
                             group_by: vec![("Orders".to_string(), "month".to_string())],
@@ -1798,7 +1817,10 @@ mod tests {
                         "monthly".to_string(),
                         Expression::Query {
                             aggregates: vec![(
-                                expr::agg(AggregateOp::Sum, expr::qualified_col("Orders", "amount")),
+                                expr::agg(
+                                    AggregateOp::Sum,
+                                    expr::qualified_col("Orders", "amount"),
+                                ),
                                 "revenue".to_string(),
                             )],
                             group_by: vec![("Orders".to_string(), "month".to_string())],
@@ -1856,7 +1878,10 @@ mod tests {
                         "monthly".to_string(),
                         Expression::Query {
                             aggregates: vec![(
-                                expr::agg(AggregateOp::Sum, expr::qualified_col("Orders", "amount")),
+                                expr::agg(
+                                    AggregateOp::Sum,
+                                    expr::qualified_col("Orders", "amount"),
+                                ),
                                 "revenue".to_string(),
                             )],
                             group_by: vec![("Orders".to_string(), "month".to_string())],
@@ -1920,7 +1945,10 @@ mod tests {
                         "detail".to_string(),
                         Expression::Query {
                             aggregates: vec![(
-                                expr::agg(AggregateOp::Sum, expr::qualified_col("Orders", "amount")),
+                                expr::agg(
+                                    AggregateOp::Sum,
+                                    expr::qualified_col("Orders", "amount"),
+                                ),
                                 "revenue".to_string(),
                             )],
                             group_by: vec![
@@ -1991,7 +2019,10 @@ mod tests {
                         "monthly".to_string(),
                         Expression::Query {
                             aggregates: vec![(
-                                expr::agg(AggregateOp::Sum, expr::qualified_col("Orders", "amount")),
+                                expr::agg(
+                                    AggregateOp::Sum,
+                                    expr::qualified_col("Orders", "amount"),
+                                ),
                                 "revenue".to_string(),
                             )],
                             group_by: vec![("Orders".to_string(), "month".to_string())],
@@ -2058,7 +2089,10 @@ mod tests {
                         "monthly".to_string(),
                         Expression::Query {
                             aggregates: vec![(
-                                expr::agg(AggregateOp::Sum, expr::qualified_col("Orders", "amount")),
+                                expr::agg(
+                                    AggregateOp::Sum,
+                                    expr::qualified_col("Orders", "amount"),
+                                ),
                                 "revenue".to_string(),
                             )],
                             group_by: vec![("Orders".to_string(), "month".to_string())],

@@ -355,29 +355,27 @@ impl DataModelBuilder {
             }
 
             for condition in rel.conditions() {
-                let from_col =
-                    from_table
-                        .column(condition.from_column())
-                        .map_err(|_| EngineError::InvalidRelationship {
-                            relationship: rel.name().to_string(),
-                            reason: format!(
-                                "column '{}' not found in table '{}'",
-                                condition.from_column(),
-                                rel.from_table()
-                            ),
-                        })?;
+                let from_col = from_table.column(condition.from_column()).map_err(|_| {
+                    EngineError::InvalidRelationship {
+                        relationship: rel.name().to_string(),
+                        reason: format!(
+                            "column '{}' not found in table '{}'",
+                            condition.from_column(),
+                            rel.from_table()
+                        ),
+                    }
+                })?;
 
-                let to_col =
-                    to_table
-                        .column(condition.to_column())
-                        .map_err(|_| EngineError::InvalidRelationship {
-                            relationship: rel.name().to_string(),
-                            reason: format!(
-                                "column '{}' not found in table '{}'",
-                                condition.to_column(),
-                                rel.to_table()
-                            ),
-                        })?;
+                let to_col = to_table.column(condition.to_column()).map_err(|_| {
+                    EngineError::InvalidRelationship {
+                        relationship: rel.name().to_string(),
+                        reason: format!(
+                            "column '{}' not found in table '{}'",
+                            condition.to_column(),
+                            rel.to_table()
+                        ),
+                    }
+                })?;
 
                 if from_col.data_type() != to_col.data_type() {
                     return Err(EngineError::InvalidRelationship {

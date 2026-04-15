@@ -198,8 +198,16 @@ async fn build_joined_dataframe(
             JoinType::Inner => DfJoinType::Inner,
             JoinType::Left => DfJoinType::Left,
         };
-        let from_cols: Vec<&str> = relationship.conditions().iter().map(|c| c.from_column()).collect();
-        let to_cols: Vec<&str> = relationship.conditions().iter().map(|c| c.to_column()).collect();
+        let from_cols: Vec<&str> = relationship
+            .conditions()
+            .iter()
+            .map(|c| c.from_column())
+            .collect();
+        let to_cols: Vec<&str> = relationship
+            .conditions()
+            .iter()
+            .map(|c| c.to_column())
+            .collect();
         let joined = from_df.join(to_df, df_join_type, &from_cols, &to_cols, None)?;
         Ok((ctx, joined))
     } else {
