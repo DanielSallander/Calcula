@@ -111,12 +111,15 @@ impl QueryExecutor {
         let fact_table_name = measures[0].table();
 
         // Resolve in-memory tables from the cache first (no connector needed).
+        // If the FetchRequest has filters (e.g., context-pushed filters), apply
+        // them to the cached batch locally so that downstream logic (IN-filter
+        // propagation, joins) sees the filtered data — not the full table.
         let mut inmemory_results: Vec<(String, Vec<RecordBatch>, usize, std::time::Duration)> =
             Vec::new();
         let mut inmemory_indices: std::collections::HashSet<usize> =
             std::collections::HashSet::new();
 
-        for (i, (table_name, _)) in fetches.iter().enumerate() {
+        for (i, (table_name, request)) in fetches.iter().enumerate() {
             let is_in_memory = model.table(table_name).is_ok_and(|t| t.is_in_memory());
             if is_in_memory {
                 let batch = cache.and_then(|c| c.get(table_name)).ok_or_else(|| {
@@ -124,11 +127,19 @@ impl QueryExecutor {
                         table_name.clone(),
                     ))
                 })?;
+
+                let filtered_batch = if request.filters.is_empty() {
+                    batch.clone()
+                } else {
+                    filter_cached_batch(batch, &request.filters).await?
+                };
+
+                let row_count = filtered_batch.num_rows();
                 inmemory_indices.insert(i);
                 inmemory_results.push((
                     table_name.clone(),
-                    vec![batch.clone()],
-                    batch.num_rows(),
+                    vec![filtered_batch],
+                    row_count,
                     std::time::Duration::ZERO,
                 ));
             }
@@ -1047,6 +1058,42 @@ fn build_condition_sql(
         })
         .collect();
     parts.join(" AND ")
+}
+
+/// Apply filter conditions to a cached `RecordBatch` using DataFusion.
+///
+/// This ensures that in-memory tables respect the same filters that would have
+/// been pushed to the source connector (e.g., context-pushed KEEP filters on
+/// dimension tables). Without this, the full cached batch would be used, leading
+/// to incorrect IN-filter propagation and wrong query results.
+async fn filter_cached_batch(
+    batch: &RecordBatch,
+    filters: &[engine_connectors::FilterCondition],
+) -> crate::error::QueryResult<RecordBatch> {
+    let filter_ctx = SessionContext::new();
+    filter_ctx.register_batch("_cached", batch.clone())?;
+
+    let mut conditions = Vec::new();
+    for filter in filters {
+        // Quote the value as a string literal for the WHERE clause.
+        let escaped = filter.value.replace('\'', "''");
+        conditions.push(format!(
+            "CAST(\"{}\" AS TEXT) {} '{}'",
+            filter.column,
+            filter.operator.as_sql(),
+            escaped
+        ));
+    }
+
+    let sql = format!("SELECT * FROM _cached WHERE {}", conditions.join(" AND "));
+    let df = filter_ctx.sql(&sql).await?;
+    let batches = df.collect().await?;
+
+    if batches.is_empty() {
+        Ok(RecordBatch::new_empty(batch.schema()))
+    } else {
+        Ok(concat_batches(&batch.schema(), &batches)?)
+    }
 }
 
 /// Extract unique string values from a named column across Arrow record batches.
