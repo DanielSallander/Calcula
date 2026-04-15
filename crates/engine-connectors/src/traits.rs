@@ -149,6 +149,9 @@ pub struct FetchRequest {
     /// Aggregations to compute. When non-empty, the result contains the
     /// `group_by` columns followed by one column per aggregate expression.
     pub aggregates: Vec<AggregateExpr>,
+    /// Maximum number of IN-filter values to inline in SQL before switching
+    /// to a temp-table strategy. `None` means always inline.
+    pub max_inline_in_values: Option<usize>,
 }
 
 /// Trait for data source connectors.
@@ -201,6 +204,7 @@ mod tests {
         assert!(req.limit.is_none());
         assert!(req.group_by.is_empty());
         assert!(req.aggregates.is_empty());
+        assert!(req.max_inline_in_values.is_none());
     }
 
     #[test]

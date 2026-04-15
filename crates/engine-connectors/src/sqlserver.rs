@@ -1,5 +1,7 @@
 //! SQL Server connector using `tiberius` with `bb8` connection pooling.
 
+use std::sync::atomic::{AtomicU64, Ordering};
+
 use arrow::datatypes::{Field, Schema};
 use arrow::record_batch::RecordBatch;
 use bb8::Pool;
@@ -41,6 +43,8 @@ impl SqlServerConfig {
 /// SQL Server connector using `tiberius` with `bb8` connection pooling.
 pub struct SqlServerConnector {
     pool: Pool<ConnectionManager>,
+    /// Counter for generating unique temp table names.
+    temp_table_counter: AtomicU64,
 }
 
 impl SqlServerConnector {
@@ -58,7 +62,10 @@ impl SqlServerConnector {
             .await
             .map_err(|e| ConnectorError::ConnectionFailed(e.to_string()))?;
 
-        Ok(Self { pool })
+        Ok(Self {
+            pool,
+            temp_table_counter: AtomicU64::new(0),
+        })
     }
 
     /// Get a connection from the pool.
@@ -121,16 +128,7 @@ impl SqlServerConnector {
             }
             for in_filter in &request.in_filters {
                 if !in_filter.values.is_empty() {
-                    let quoted: Vec<String> = in_filter
-                        .values
-                        .iter()
-                        .map(|v| format!("N'{}'", v.replace('\'', "''")))
-                        .collect();
-                    conditions.push(format!(
-                        "CAST([{}] AS NVARCHAR(MAX)) IN ({})",
-                        in_filter.column,
-                        quoted.join(", ")
-                    ));
+                    conditions.push(build_inline_in_ss(&in_filter.column, &in_filter.values));
                 }
             }
             sql.push_str(" WHERE ");
@@ -171,6 +169,219 @@ impl SqlServerConnector {
 
         let schema = infer_schema_from_row(&rows[0])?;
         tiberius_rows_to_record_batches(&rows, &schema)
+    }
+
+    /// Generate a unique temp table name (SQL Server `#` prefix).
+    fn next_temp_table_name(&self) -> String {
+        let id = self.temp_table_counter.fetch_add(1, Ordering::Relaxed);
+        format!("#_ef_{id}")
+    }
+
+    /// Create a temp table on the given connection and populate it with values.
+    ///
+    /// Returns `true` on success, `false` if creation failed (permissions).
+    /// Values are inserted in batches of 500.
+    async fn create_temp_filter_table(
+        conn: &mut bb8::PooledConnection<'_, ConnectionManager>,
+        name: &str,
+        values: &[String],
+    ) -> bool {
+        let create_sql = format!("CREATE TABLE [{name}] (val NVARCHAR(MAX))");
+        if conn.execute(&create_sql, &[]).await.is_err() {
+            return false;
+        }
+
+        for chunk in values.chunks(500) {
+            let rows: Vec<String> = chunk
+                .iter()
+                .map(|v| format!("(N'{}')", v.replace('\'', "''")))
+                .collect();
+            let insert_sql = format!("INSERT INTO [{name}] (val) VALUES {}", rows.join(", "));
+            if conn.execute(&insert_sql, &[]).await.is_err() {
+                let _ = conn
+                    .execute(&format!("DROP TABLE IF EXISTS [{name}]"), &[])
+                    .await;
+                return false;
+            }
+        }
+        true
+    }
+
+    /// Fetch data using temp tables for large IN-filter value sets.
+    ///
+    /// Uses a single pooled connection so that temp tables are visible for
+    /// the entire CREATE → INSERT → SELECT → DROP sequence.
+    async fn fetch_data_with_temp_tables(
+        &self,
+        request: &FetchRequest,
+        threshold: usize,
+    ) -> ConnectorResult<Vec<RecordBatch>> {
+        let schema_name = request.schema.as_deref().unwrap_or("dbo");
+        let mut conn = self.get_conn().await?;
+
+        let mut temp_tables: Vec<String> = Vec::new();
+
+        // Build WHERE conditions, using temp tables for large IN-filter sets.
+        let mut conditions = Vec::new();
+        let mut params: Vec<String> = Vec::new();
+
+        for filter in &request.filters {
+            params.push(filter.value.clone());
+            let param_idx = params.len();
+            conditions.push(format!(
+                "CAST([{}] AS NVARCHAR(MAX)) {} @P{}",
+                filter.column,
+                filter.operator.as_sql(),
+                param_idx
+            ));
+        }
+
+        for in_filter in &request.in_filters {
+            if in_filter.values.is_empty() {
+                continue;
+            }
+            if in_filter.values.len() > threshold {
+                let temp_name = self.next_temp_table_name();
+                if Self::create_temp_filter_table(&mut conn, &temp_name, &in_filter.values).await {
+                    conditions.push(format!(
+                        "CAST([{}] AS NVARCHAR(MAX)) IN (SELECT val FROM [{}])",
+                        in_filter.column, temp_name
+                    ));
+                    temp_tables.push(temp_name);
+                } else {
+                    // Fallback: inline IN list if temp table creation failed.
+                    conditions.push(build_inline_in_ss(&in_filter.column, &in_filter.values));
+                }
+            } else {
+                conditions.push(build_inline_in_ss(&in_filter.column, &in_filter.values));
+            }
+        }
+
+        // Build SQL.
+        let is_aggregate = !request.aggregates.is_empty();
+        let sql = if is_aggregate {
+            Self::build_aggregate_sql_with_conditions(request, &conditions, &params)
+        } else {
+            let select_clause = if request.columns.is_empty() {
+                "*".to_string()
+            } else {
+                request
+                    .columns
+                    .iter()
+                    .map(|c| format!("[{c}]"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            };
+            let table_ref = format!("[{schema_name}].[{table}]", table = request.table);
+            let top_clause = request
+                .limit
+                .map(|n| format!("TOP({n}) "))
+                .unwrap_or_default();
+            let mut sql = format!("SELECT {top_clause}{select_clause} FROM {table_ref}");
+            if !conditions.is_empty() {
+                sql.push_str(" WHERE ");
+                sql.push_str(&conditions.join(" AND "));
+            }
+            sql
+        };
+
+        // Execute on the pinned connection.
+        let mut query = tiberius::Query::new(&sql);
+        for param in &params {
+            query.bind(param.as_str());
+        }
+        let results = query.query(&mut *conn).await?;
+        let rows: Vec<tiberius::Row> = results.into_first_result().await?;
+
+        // Cleanup temp tables.
+        for name in &temp_tables {
+            let _ = conn
+                .execute(&format!("DROP TABLE IF EXISTS [{name}]"), &[])
+                .await;
+        }
+
+        if rows.is_empty() {
+            return Ok(vec![]);
+        }
+
+        if is_aggregate {
+            let schema = infer_schema_from_row(&rows[0])?;
+            tiberius_rows_to_record_batches(&rows, &schema)
+        } else {
+            let arrow_schema = {
+                let table = self.introspect_table(schema_name, &request.table).await?;
+                let fields: Vec<Field> = if request.columns.is_empty() {
+                    table
+                        .columns()
+                        .iter()
+                        .map(|c| Field::new(c.name(), c.data_type().to_arrow(), c.nullable()))
+                        .collect()
+                } else {
+                    request
+                        .columns
+                        .iter()
+                        .map(|name| {
+                            let col = table.column(name)?;
+                            Ok(Field::new(
+                                col.name(),
+                                col.data_type().to_arrow(),
+                                col.nullable(),
+                            ))
+                        })
+                        .collect::<ConnectorResult<Vec<_>>>()?
+                };
+                Schema::new(fields)
+            };
+            tiberius_rows_to_record_batches(&rows, &arrow_schema)
+        }
+    }
+
+    /// Build aggregate SQL with pre-built WHERE conditions (for temp table path).
+    fn build_aggregate_sql_with_conditions(
+        request: &FetchRequest,
+        conditions: &[String],
+        _params: &[String],
+    ) -> String {
+        let schema_name = request.schema.as_deref().unwrap_or("dbo");
+        let table_ref = format!("[{schema_name}].[{table}]", table = request.table);
+
+        let mut select_parts: Vec<String> =
+            request.group_by.iter().map(|c| format!("[{c}]")).collect();
+
+        for agg in &request.aggregates {
+            let func = agg.function.as_sql();
+            let col = &agg.column;
+            let default_alias = format!("{}_{}", func.to_lowercase(), col);
+            let alias = agg.alias.as_deref().unwrap_or(&default_alias);
+            if agg.function == crate::traits::AggregateFunction::CountDistinct {
+                select_parts.push(format!("{func}(DISTINCT [{col}]) AS [{alias}]"));
+            } else if agg.function == crate::traits::AggregateFunction::CountAll {
+                select_parts.push(format!("COUNT(*) AS [{alias}]"));
+            } else {
+                select_parts.push(format!("{func}([{col}]) AS [{alias}]"));
+            }
+        }
+
+        let select_clause = select_parts.join(", ");
+        let top_clause = request
+            .limit
+            .map(|n| format!("TOP({n}) "))
+            .unwrap_or_default();
+        let mut sql = format!("SELECT {top_clause}{select_clause} FROM {table_ref}");
+
+        if !conditions.is_empty() {
+            sql.push_str(" WHERE ");
+            sql.push_str(&conditions.join(" AND "));
+        }
+
+        if !request.group_by.is_empty() {
+            let group_clause: Vec<String> =
+                request.group_by.iter().map(|c| format!("[{c}]")).collect();
+            sql.push_str(" GROUP BY ");
+            sql.push_str(&group_clause.join(", "));
+        }
+
+        sql
     }
 }
 
@@ -255,6 +466,16 @@ impl Connector for SqlServerConnector {
     }
 
     async fn fetch_data(&self, request: &FetchRequest) -> ConnectorResult<Vec<RecordBatch>> {
+        // Check if any IN-filter exceeds the temp-table threshold.
+        let threshold = request.max_inline_in_values.unwrap_or(usize::MAX);
+        let needs_temp_table = request
+            .in_filters
+            .iter()
+            .any(|f| f.values.len() > threshold);
+        if needs_temp_table {
+            return self.fetch_data_with_temp_tables(request, threshold).await;
+        }
+
         // Aggregate pushdown: build GROUP BY query and use schema inference.
         if !request.aggregates.is_empty() {
             let (sql, params) = Self::build_aggregate_sql(request);
@@ -328,16 +549,7 @@ impl Connector for SqlServerConnector {
             }
             for in_filter in &request.in_filters {
                 if !in_filter.values.is_empty() {
-                    let quoted: Vec<String> = in_filter
-                        .values
-                        .iter()
-                        .map(|v| format!("N'{}'", v.replace('\'', "''")))
-                        .collect();
-                    conditions.push(format!(
-                        "CAST([{}] AS NVARCHAR(MAX)) IN ({})",
-                        in_filter.column,
-                        quoted.join(", ")
-                    ));
+                    conditions.push(build_inline_in_ss(&in_filter.column, &in_filter.values));
                 }
             }
             sql.push_str(" WHERE ");
@@ -415,6 +627,19 @@ fn infer_schema_from_row(row: &tiberius::Row) -> ConnectorResult<Schema> {
     }
 
     Ok(Schema::new(fields))
+}
+
+/// Build an inline `CAST([col] AS NVARCHAR(MAX)) IN (N'v1', ...)` condition for SQL Server.
+fn build_inline_in_ss(column: &str, values: &[String]) -> String {
+    let quoted: Vec<String> = values
+        .iter()
+        .map(|v| format!("N'{}'", v.replace('\'', "''")))
+        .collect();
+    format!(
+        "CAST([{}] AS NVARCHAR(MAX)) IN ({})",
+        column,
+        quoted.join(", ")
+    )
 }
 
 /// Convert a tiberius error into a `ConnectorError`.

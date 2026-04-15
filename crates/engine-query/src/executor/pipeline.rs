@@ -35,6 +35,7 @@ impl QueryExecutor {
         model: &DataModel,
         registry: &SourceRegistry,
         cache: Option<&InMemoryCache>,
+        max_inline_in_values: Option<usize>,
     ) -> QueryResult<Vec<RecordBatch>> {
         match plan {
             QueryPlan::PushedAggregation {
@@ -59,6 +60,7 @@ impl QueryExecutor {
                     model,
                     registry,
                     cache,
+                    max_inline_in_values,
                     None,
                 )
                 .await
@@ -79,6 +81,7 @@ impl QueryExecutor {
         model: &DataModel,
         registry: &SourceRegistry,
         cache: Option<&InMemoryCache>,
+        max_inline_in_values: Option<usize>,
         mut plan: Option<&mut PlanNode>,
     ) -> QueryResult<Vec<RecordBatch>> {
         // Expand global variable references in all measure expressions.
@@ -264,6 +267,7 @@ impl QueryExecutor {
                     let batches = if !in_filters.is_empty() {
                         let mut augmented = request.clone();
                         augmented.in_filters.extend(in_filters.iter().cloned());
+                        augmented.max_inline_in_values = max_inline_in_values;
                         connector.fetch_data(&augmented).await?
                     } else {
                         connector.fetch_data(request).await?
@@ -317,9 +321,22 @@ impl QueryExecutor {
 
                 // Annotate fact table fetch with propagated IN filter info.
                 if table_name.eq_ignore_ascii_case(fact_table_name) && !fact_in_filters.is_empty() {
+                    let threshold = max_inline_in_values.unwrap_or(usize::MAX);
                     let in_desc: Vec<String> = fact_in_filters
                         .iter()
-                        .map(|f| format!("{} IN ({} values)", f.column, f.values.len()))
+                        .map(|f| {
+                            let strategy = if f.values.len() > threshold {
+                                "temp_table"
+                            } else {
+                                "inline"
+                            };
+                            format!(
+                                "{} IN ({} values, strategy: {})",
+                                f.column,
+                                f.values.len(),
+                                strategy
+                            )
+                        })
                         .collect();
                     fetch_node.add_property("relationship_filters", PlanValue::List(in_desc));
                 }

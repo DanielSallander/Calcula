@@ -26,6 +26,7 @@ impl super::QueryExecutor {
         model: &DataModel,
         registry: &SourceRegistry,
         cache: Option<&InMemoryCache>,
+        max_inline_in_values: Option<usize>,
     ) -> QueryResult<(Vec<RecordBatch>, PlanNode)> {
         match plan {
             QueryPlan::PushedAggregation {
@@ -77,6 +78,7 @@ impl super::QueryExecutor {
                     model,
                     registry,
                     cache,
+                    max_inline_in_values,
                     Some(&mut node),
                 )
                 .await?;

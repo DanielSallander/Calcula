@@ -1,10 +1,12 @@
 //! PostgreSQL connector using `sqlx` with connection pooling.
 
+use std::sync::atomic::{AtomicU64, Ordering};
+
 use arrow::datatypes::{Field, Schema};
 use arrow::record_batch::RecordBatch;
 use engine_core::model::{Column, Table};
 use sqlx::postgres::PgPoolOptions;
-use sqlx::{Column as SqlxColumn, PgPool, Row};
+use sqlx::{Column as SqlxColumn, Executor, PgPool, Row};
 
 use crate::arrow_convert::rows_to_record_batches;
 use crate::error::{ConnectorError, ConnectorResult};
@@ -39,6 +41,8 @@ impl PostgresConfig {
 /// PostgreSQL connector using `sqlx` with connection pooling.
 pub struct PostgresConnector {
     pool: PgPool,
+    /// Counter for generating unique temp table names.
+    temp_table_counter: AtomicU64,
 }
 
 impl PostgresConnector {
@@ -49,7 +53,10 @@ impl PostgresConnector {
             .connect(&config.connection_url)
             .await
             .map_err(|e| ConnectorError::ConnectionFailed(e.to_string()))?;
-        Ok(Self { pool })
+        Ok(Self {
+            pool,
+            temp_table_counter: AtomicU64::new(0),
+        })
     }
 
     /// Close the connection pool gracefully.
@@ -171,16 +178,7 @@ impl PostgresConnector {
             }
             for in_filter in &request.in_filters {
                 if !in_filter.values.is_empty() {
-                    let quoted: Vec<String> = in_filter
-                        .values
-                        .iter()
-                        .map(|v| format!("'{}'", v.replace('\'', "''")))
-                        .collect();
-                    conditions.push(format!(
-                        "\"{}\"::text IN ({})",
-                        in_filter.column,
-                        quoted.join(", ")
-                    ));
+                    conditions.push(build_inline_in_pg(&in_filter.column, &in_filter.values));
                 }
             }
             sql.push_str(" WHERE ");
@@ -203,6 +201,225 @@ impl PostgresConnector {
         }
 
         (sql, params)
+    }
+
+    /// Generate a unique temp table name.
+    fn next_temp_table_name(&self) -> String {
+        let id = self.temp_table_counter.fetch_add(1, Ordering::Relaxed);
+        format!("_ef_{id}")
+    }
+
+    /// Create a temp table on the given connection and populate it with values.
+    ///
+    /// Returns the temp table name on success, or `None` if creation failed
+    /// (e.g., insufficient permissions). Values are inserted in batches of 500.
+    async fn create_temp_filter_table(
+        &self,
+        conn: &mut sqlx::pool::PoolConnection<sqlx::Postgres>,
+        values: &[String],
+    ) -> Option<String> {
+        let name = self.next_temp_table_name();
+        let create_sql = format!("CREATE TEMP TABLE \"{name}\" (val TEXT)");
+        if conn.execute(create_sql.as_str()).await.is_err() {
+            return None;
+        }
+
+        for chunk in values.chunks(500) {
+            let rows: Vec<String> = chunk
+                .iter()
+                .map(|v| format!("('{}')", v.replace('\'', "''")))
+                .collect();
+            let insert_sql = format!("INSERT INTO \"{name}\" (val) VALUES {}", rows.join(", "));
+            if conn.execute(insert_sql.as_str()).await.is_err() {
+                let _ = conn
+                    .execute(format!("DROP TABLE IF EXISTS \"{name}\"").as_str())
+                    .await;
+                return None;
+            }
+        }
+        Some(name)
+    }
+
+    /// Fetch data using temp tables for large IN-filter value sets.
+    ///
+    /// Acquires a single pooled connection so that temp tables are visible
+    /// for the duration of the CREATE → INSERT → SELECT → DROP sequence.
+    async fn fetch_data_with_temp_tables(
+        &self,
+        request: &FetchRequest,
+        threshold: usize,
+    ) -> ConnectorResult<Vec<RecordBatch>> {
+        let schema_name = request.schema.as_deref().unwrap_or("public");
+        let mut conn = self.pool.acquire().await.map_err(|e| {
+            ConnectorError::ConnectionFailed(format!("failed to acquire connection: {e}"))
+        })?;
+
+        let mut temp_tables: Vec<String> = Vec::new();
+
+        // Build WHERE conditions, using temp tables for large IN-filter sets.
+        let mut conditions = Vec::new();
+        let mut params: Vec<String> = Vec::new();
+
+        for filter in &request.filters {
+            params.push(filter.value.clone());
+            let param_idx = params.len();
+            conditions.push(format!(
+                "\"{}\"::text {} ${}",
+                filter.column,
+                filter.operator.as_sql(),
+                param_idx
+            ));
+        }
+
+        for in_filter in &request.in_filters {
+            if in_filter.values.is_empty() {
+                continue;
+            }
+            if in_filter.values.len() > threshold {
+                // Temp table path.
+                match self
+                    .create_temp_filter_table(&mut conn, &in_filter.values)
+                    .await
+                {
+                    Some(temp_name) => {
+                        conditions.push(format!(
+                            "\"{}\"::text IN (SELECT val FROM \"{}\")",
+                            in_filter.column, temp_name
+                        ));
+                        temp_tables.push(temp_name);
+                    }
+                    None => {
+                        // Fallback: inline IN list if temp table creation failed.
+                        conditions.push(build_inline_in_pg(&in_filter.column, &in_filter.values));
+                    }
+                }
+            } else {
+                // Below threshold: inline.
+                conditions.push(build_inline_in_pg(&in_filter.column, &in_filter.values));
+            }
+        }
+
+        // Build the SQL query.
+        let is_aggregate = !request.aggregates.is_empty();
+        let sql = if is_aggregate {
+            Self::build_aggregate_sql_with_conditions(request, &conditions, &params)
+        } else {
+            let select_clause = if request.columns.is_empty() {
+                "*".to_string()
+            } else {
+                request
+                    .columns
+                    .iter()
+                    .map(|c| format!("\"{c}\""))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            };
+            let table_ref = format!("\"{schema_name}\".\"{table}\"", table = request.table);
+            let mut sql = format!("SELECT {select_clause} FROM {table_ref}");
+            if !conditions.is_empty() {
+                sql.push_str(" WHERE ");
+                sql.push_str(&conditions.join(" AND "));
+            }
+            if let Some(limit) = request.limit {
+                sql.push_str(&format!(" LIMIT {limit}"));
+            }
+            sql
+        };
+
+        // Execute on the pinned connection.
+        let mut query = sqlx::query(&sql);
+        for param in &params {
+            query = query.bind(param);
+        }
+        let rows = query
+            .fetch_all(&mut *conn)
+            .await
+            .map_err(ConnectorError::from)?;
+
+        // Cleanup temp tables.
+        for name in &temp_tables {
+            let _ = conn
+                .execute(format!("DROP TABLE IF EXISTS \"{name}\"").as_str())
+                .await;
+        }
+
+        if rows.is_empty() {
+            return Ok(vec![]);
+        }
+
+        if is_aggregate {
+            // Infer schema from result metadata (aggregate queries change the schema).
+            let first_row = &rows[0];
+            let pg_columns = first_row.columns();
+            let mut fields = Vec::with_capacity(pg_columns.len());
+            for pg_col in pg_columns {
+                let col_name = pg_col.name();
+                let type_info = pg_col.type_info().to_string();
+                let arrow_type = pg_type_name_to_arrow(&type_info, col_name)?;
+                fields.push(Field::new(col_name, arrow_type, true));
+            }
+            let schema = Schema::new(fields);
+            rows_to_record_batches(&rows, &schema)
+        } else {
+            let arrow_schema = self
+                .build_arrow_schema_for_query(schema_name, &request.table, &request.columns)
+                .await?;
+            rows_to_record_batches(&rows, &arrow_schema)
+        }
+    }
+
+    /// Build aggregate SQL with pre-built WHERE conditions (for temp table path).
+    fn build_aggregate_sql_with_conditions(
+        request: &FetchRequest,
+        conditions: &[String],
+        _params: &[String],
+    ) -> String {
+        let schema_name = request.schema.as_deref().unwrap_or("public");
+        let table_ref = format!("\"{schema_name}\".\"{table}\"", table = request.table);
+
+        let mut select_parts: Vec<String> = request
+            .group_by
+            .iter()
+            .map(|c| format!("\"{c}\""))
+            .collect();
+
+        for agg in &request.aggregates {
+            let func = agg.function.as_sql();
+            let col = &agg.column;
+            let default_alias = format!("{}_{}", func.to_lowercase(), col);
+            let alias = agg.alias.as_deref().unwrap_or(&default_alias);
+            if agg.function == crate::traits::AggregateFunction::CountDistinct {
+                select_parts.push(format!("{func}(DISTINCT \"{col}\") AS \"{alias}\""));
+            } else if agg.function == crate::traits::AggregateFunction::CountAll {
+                select_parts.push(format!("COUNT(*) AS \"{alias}\""));
+            } else {
+                select_parts.push(format!("{func}(\"{col}\") AS \"{alias}\""));
+            }
+        }
+
+        let select_clause = select_parts.join(", ");
+        let mut sql = format!("SELECT {select_clause} FROM {table_ref}");
+
+        if !conditions.is_empty() {
+            sql.push_str(" WHERE ");
+            sql.push_str(&conditions.join(" AND "));
+        }
+
+        if !request.group_by.is_empty() {
+            let group_clause: Vec<String> = request
+                .group_by
+                .iter()
+                .map(|c| format!("\"{c}\""))
+                .collect();
+            sql.push_str(" GROUP BY ");
+            sql.push_str(&group_clause.join(", "));
+        }
+
+        if let Some(limit) = request.limit {
+            sql.push_str(&format!(" LIMIT {limit}"));
+        }
+
+        sql
     }
 
     /// Resolve a custom PostgreSQL domain type to its base type name.
@@ -318,6 +535,16 @@ impl Connector for PostgresConnector {
     }
 
     async fn fetch_data(&self, request: &FetchRequest) -> ConnectorResult<Vec<RecordBatch>> {
+        // Check if any IN-filter exceeds the temp-table threshold.
+        let threshold = request.max_inline_in_values.unwrap_or(usize::MAX);
+        let needs_temp_table = request
+            .in_filters
+            .iter()
+            .any(|f| f.values.len() > threshold);
+        if needs_temp_table {
+            return self.fetch_data_with_temp_tables(request, threshold).await;
+        }
+
         // Aggregate pushdown: build GROUP BY query and use schema inference.
         if !request.aggregates.is_empty() {
             let (sql, params) = Self::build_aggregate_sql(request);
@@ -365,16 +592,7 @@ impl Connector for PostgresConnector {
             }
             for in_filter in &request.in_filters {
                 if !in_filter.values.is_empty() {
-                    let quoted: Vec<String> = in_filter
-                        .values
-                        .iter()
-                        .map(|v| format!("'{}'", v.replace('\'', "''")))
-                        .collect();
-                    conditions.push(format!(
-                        "\"{}\"::text IN ({})",
-                        in_filter.column,
-                        quoted.join(", ")
-                    ));
+                    conditions.push(build_inline_in_pg(&in_filter.column, &in_filter.values));
                 }
             }
             sql.push_str(" WHERE ");
@@ -425,6 +643,15 @@ impl Connector for PostgresConnector {
         let count: i64 = row.try_get("cnt")?;
         Ok(count as usize)
     }
+}
+
+/// Build an inline `"col"::text IN ('v1', 'v2', ...)` condition for PostgreSQL.
+fn build_inline_in_pg(column: &str, values: &[String]) -> String {
+    let quoted: Vec<String> = values
+        .iter()
+        .map(|v| format!("'{}'", v.replace('\'', "''")))
+        .collect();
+    format!("\"{}\"::text IN ({})", column, quoted.join(", "))
 }
 
 /// Map a pg_type base type name (e.g., `"bool"`, `"int4"`) back to

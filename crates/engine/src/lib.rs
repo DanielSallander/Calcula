@@ -95,10 +95,16 @@ pub use engine_query::{LookupSpec, PushdownPlanner, QueryExecutor, QueryPlan};
 ///
 /// The `Engine` owns a [`DataModel`], a [`SourceRegistry`], and an
 /// [`InMemoryCache`] for tables configured with [`StorageMode::InMemory`].
+/// Default threshold for inline IN-filter values before switching to temp tables.
+const DEFAULT_MAX_INLINE_IN_VALUES: usize = 1000;
+
 pub struct Engine {
     model: DataModel,
     registry: SourceRegistry,
     cache: InMemoryCache,
+    /// Maximum number of IN-filter values to inline in SQL before switching
+    /// to a temp-table strategy. Default: 1000.
+    max_inline_in_values: usize,
 }
 
 impl Engine {
@@ -110,6 +116,7 @@ impl Engine {
             model,
             registry: SourceRegistry::new(),
             cache: InMemoryCache::new(),
+            max_inline_in_values: DEFAULT_MAX_INLINE_IN_VALUES,
         }
     }
 
@@ -119,7 +126,22 @@ impl Engine {
             model,
             registry: SourceRegistry::new(),
             cache: InMemoryCache::with_budget(budget_bytes),
+            max_inline_in_values: DEFAULT_MAX_INLINE_IN_VALUES,
         }
+    }
+
+    /// Set the maximum number of IN-filter values to inline in SQL.
+    ///
+    /// When a relationship filter propagation produces more values than this
+    /// threshold, the connector uses a server-side temp table instead of an
+    /// inline `IN (...)` list. Default: 1000.
+    pub fn set_max_inline_in_values(&mut self, max: usize) {
+        self.max_inline_in_values = max;
+    }
+
+    /// Returns the current maximum inline IN-filter values threshold.
+    pub fn max_inline_in_values(&self) -> usize {
+        self.max_inline_in_values
     }
 
     /// Register a PostgreSQL data source and return its connector index.
@@ -156,7 +178,14 @@ impl Engine {
     /// Tables configured for in-memory storage are served from the cache.
     pub async fn query(&self, request: QueryRequest) -> QueryResult<Vec<RecordBatch>> {
         let plan = PushdownPlanner::plan(&request, &self.model, &self.registry)?;
-        QueryExecutor::execute(&plan, &self.model, &self.registry, Some(&self.cache)).await
+        QueryExecutor::execute(
+            &plan,
+            &self.model,
+            &self.registry,
+            Some(&self.cache),
+            Some(self.max_inline_in_values),
+        )
+        .await
     }
 
     /// Execute a query and return results with an execution plan.
@@ -176,6 +205,7 @@ impl Engine {
             &self.model,
             &self.registry,
             Some(&self.cache),
+            Some(self.max_inline_in_values),
         )
         .await?;
 
