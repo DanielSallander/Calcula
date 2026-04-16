@@ -119,6 +119,12 @@ impl QueryExecutor {
         let mut inmemory_indices: std::collections::HashSet<usize> =
             std::collections::HashSet::new();
 
+        // Track which table (if any) caused an early short-circuit due to
+        // 0 rows after filtering. Since all tables are inner-joined, any
+        // empty table means the final result is guaranteed to be empty —
+        // regardless of whether the table is a fact, dimension, or lookup.
+        let mut empty_table: Option<String> = None;
+
         for (i, (table_name, request)) in fetches.iter().enumerate() {
             let is_in_memory = model.table(table_name).is_ok_and(|t| t.is_in_memory());
             if is_in_memory {
@@ -142,17 +148,57 @@ impl QueryExecutor {
                     row_count,
                     std::time::Duration::ZERO,
                 ));
+
+                if row_count == 0 {
+                    empty_table = Some(table_name.clone());
+                }
             }
         }
 
+        // Early exit: if an in-memory table returned 0 rows after filtering,
+        // every inner join is guaranteed empty. Report and return immediately,
+        // skipping all connector fetches and DataFusion execution.
+        if let Some(ref tbl) = empty_table {
+            if let Some(ref mut plan_node) = plan.as_deref_mut() {
+                // Report the tables we did resolve before the short-circuit.
+                for (table_name, _, row_count, elapsed) in &inmemory_results {
+                    let label = format!("Cache: {table_name}");
+                    let fetch_node = PlanNode::new(PlanOperation::SourceFetch, label)
+                        .with_duration(*elapsed)
+                        .with_property("table", PlanValue::Text(table_name.clone()))
+                        .with_property("rows_fetched", PlanValue::Number(*row_count as f64))
+                        .with_property(
+                            "source",
+                            PlanValue::Text("in_memory_cache".to_string()),
+                        );
+                    plan_node.add_child(fetch_node);
+                }
+                plan_node.add_child(
+                    PlanNode::new(
+                        PlanOperation::DataFusionExecution,
+                        "Skipped (empty table)".to_string(),
+                    )
+                    .with_duration(std::time::Duration::ZERO)
+                    .with_property("result_rows", PlanValue::Number(0.0))
+                    .with_property(
+                        "reason",
+                        PlanValue::Text(format!(
+                            "{tbl} returned 0 rows, all inner joins would be empty"
+                        )),
+                    ),
+                );
+            }
+            return Ok(vec![]);
+        }
+
         // Find dimension fetches that have context-pushed filters AND a
-        // relationship to the fact table (only for connector-fetched tables).
+        // relationship to the measure table (only for connector-fetched tables).
         let mut pre_fetch_indices: Vec<usize> = Vec::new();
-        // (pre_fetch_index, dim_join_col, fact_join_col)
+        // (pre_fetch_index, dim_join_col, measure_table_join_col)
         let mut propagation_info: Vec<(usize, String, String)> = Vec::new();
 
         for (i, (table_name, request)) in fetches.iter().enumerate() {
-            // Skip in-memory tables (already resolved), the fact table, and
+            // Skip in-memory tables (already resolved), the measure table, and
             // tables with no filters.
             if inmemory_indices.contains(&i)
                 || table_name.eq_ignore_ascii_case(fact_table_name)
@@ -160,7 +206,7 @@ impl QueryExecutor {
             {
                 continue;
             }
-            // Check for a relationship to the fact table.
+            // Check for a relationship to the measure table.
             // IN-list optimization only works for single-condition equi-joins.
             if let Ok(rel) = model.find_relationship(fact_table_name, table_name) {
                 if rel.conditions().len() != 1 || !rel.is_equi_only() {
@@ -200,8 +246,57 @@ impl QueryExecutor {
 
         let pre_fetch_results = futures::future::try_join_all(pre_fetch_futures).await?;
 
+        // Check connector pre-fetches for empty tables (same logic: any
+        // empty table means every inner join is empty).
+        for (_, table_name, _, row_count, _) in &pre_fetch_results {
+            if *row_count == 0 {
+                empty_table = Some(table_name.clone());
+                break;
+            }
+        }
+
+        if let Some(ref tbl) = empty_table {
+            if let Some(ref mut plan_node) = plan.as_deref_mut() {
+                for (table_name, _, row_count, elapsed) in &inmemory_results {
+                    let label = format!("Cache: {table_name}");
+                    let fetch_node = PlanNode::new(PlanOperation::SourceFetch, label)
+                        .with_duration(*elapsed)
+                        .with_property("table", PlanValue::Text(table_name.clone()))
+                        .with_property("rows_fetched", PlanValue::Number(*row_count as f64))
+                        .with_property(
+                            "source",
+                            PlanValue::Text("in_memory_cache".to_string()),
+                        );
+                    plan_node.add_child(fetch_node);
+                }
+                for (_, table_name, _, row_count, elapsed) in &pre_fetch_results {
+                    let label = format!("Fetch: {table_name}");
+                    let fetch_node = PlanNode::new(PlanOperation::SourceFetch, label)
+                        .with_duration(*elapsed)
+                        .with_property("table", PlanValue::Text(table_name.clone()))
+                        .with_property("rows_fetched", PlanValue::Number(*row_count as f64));
+                    plan_node.add_child(fetch_node);
+                }
+                plan_node.add_child(
+                    PlanNode::new(
+                        PlanOperation::DataFusionExecution,
+                        "Skipped (empty table)".to_string(),
+                    )
+                    .with_duration(std::time::Duration::ZERO)
+                    .with_property("result_rows", PlanValue::Number(0.0))
+                    .with_property(
+                        "reason",
+                        PlanValue::Text(format!(
+                            "{tbl} returned 0 rows, all inner joins would be empty"
+                        )),
+                    ),
+                );
+            }
+            return Ok(vec![]);
+        }
+
         // Extract join key values from pre-fetched dimensions (and in-memory
-        // dimensions with filters) and build IN filters for the fact table.
+        // dimensions with filters) and build IN filters for the measure table.
         let mut fact_in_filters: Vec<InFilterCondition> = Vec::new();
         let pre_fetch_set: std::collections::HashSet<usize> =
             pre_fetch_indices.iter().copied().collect();
@@ -221,7 +316,7 @@ impl QueryExecutor {
         }
 
         // Also extract from in-memory dimension tables that have filter
-        // relationships to the fact table.
+        // relationships to the measure table.
         for (i, (table_name, request)) in fetches.iter().enumerate() {
             if !inmemory_indices.contains(&i)
                 || table_name.eq_ignore_ascii_case(fact_table_name)
@@ -254,7 +349,7 @@ impl QueryExecutor {
         }
 
         // Phase 2: fetch remaining connector tables, adding IN filters to the
-        // fact table.
+        // measure table.
         let skip_set: std::collections::HashSet<usize> = pre_fetch_set
             .iter()
             .chain(inmemory_indices.iter())
@@ -274,7 +369,7 @@ impl QueryExecutor {
                 async move {
                     let start = Instant::now();
                     let connector = registry.connector_for(table_name)?;
-                    // Add IN filters to the fact table fetch if available.
+                    // Add IN filters to the measure table fetch if available.
                     let batches = if !in_filters.is_empty() {
                         let mut augmented = request.clone();
                         augmented.in_filters.extend(in_filters.iter().cloned());
@@ -296,6 +391,14 @@ impl QueryExecutor {
             .collect();
 
         let main_fetch_results = futures::future::try_join_all(main_fetch_futures).await?;
+
+        // Check main fetch results for empty tables too.
+        for (table_name, _, row_count, _) in &main_fetch_results {
+            if *row_count == 0 {
+                empty_table = Some(table_name.clone());
+                break;
+            }
+        }
 
         // Combine all fetch results for plan reporting and DataFusion registration.
         let mut all_fetch_results: Vec<(String, Vec<RecordBatch>, usize, std::time::Duration)> =
@@ -330,7 +433,7 @@ impl QueryExecutor {
                         .add_property("source", PlanValue::Text("in_memory_cache".to_string()));
                 }
 
-                // Annotate fact table fetch with propagated IN filter info.
+                // Annotate measure table fetch with propagated IN filter info.
                 if table_name.eq_ignore_ascii_case(fact_table_name) && !fact_in_filters.is_empty() {
                     let threshold = max_inline_in_values.unwrap_or(usize::MAX);
                     let in_desc: Vec<String> = fact_in_filters
@@ -354,6 +457,27 @@ impl QueryExecutor {
 
                 plan_node.add_child(fetch_node);
             }
+        }
+
+        // After all fetches, if any table was empty, short-circuit.
+        if let Some(ref tbl) = empty_table {
+            if let Some(ref mut plan_node) = plan.as_deref_mut() {
+                plan_node.add_child(
+                    PlanNode::new(
+                        PlanOperation::DataFusionExecution,
+                        "Skipped (empty table)".to_string(),
+                    )
+                    .with_duration(std::time::Duration::ZERO)
+                    .with_property("result_rows", PlanValue::Number(0.0))
+                    .with_property(
+                        "reason",
+                        PlanValue::Text(format!(
+                            "{tbl} returned 0 rows, all inner joins would be empty"
+                        )),
+                    ),
+                );
+            }
+            return Ok(vec![]);
         }
 
         // Register fetched data in DataFusion.
