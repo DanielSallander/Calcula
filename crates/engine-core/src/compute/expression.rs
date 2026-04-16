@@ -1587,13 +1587,7 @@ impl Expression {
     pub fn to_case_when_sql(&self, condition: &str, fact_table: &str) -> String {
         match self {
             Expression::Aggregate { operation, operand } => {
-                let operand_sql = operand.to_sql_string();
-                // Qualify unqualified column refs with fact table name.
-                let qualified = if !operand_sql.contains('.') {
-                    format!("{fact_table}.{operand_sql}")
-                } else {
-                    operand_sql
-                };
+                let qualified = qualify_operand_sql(operand, fact_table);
                 let case_expr = format!("CASE WHEN {condition} THEN {qualified} END");
                 match operation {
                     AggregateOp::DistinctCount => {
@@ -2251,7 +2245,7 @@ fn expand_scalar_globals(expr: &Expression, model: &crate::model::schema::DataMo
             right: Box::new(expand_scalar_globals(right, model)),
         },
         Expression::Aggregate { operation, operand } => Expression::Aggregate {
-            operation: operation.clone(),
+            operation: *operation,
             operand: Box::new(expand_scalar_globals(operand, model)),
         },
         Expression::Keep {
@@ -2390,14 +2384,14 @@ fn expand_scalar_globals(expr: &Expression, model: &crate::model::schema::DataMo
                 .collect(),
         ),
         Expression::ScalarFunc { function, args } => Expression::ScalarFunc {
-            function: function.clone(),
+            function: *function,
             args: args
                 .iter()
                 .map(|a| expand_scalar_globals(a, model))
                 .collect(),
         },
         Expression::TextFunc { function, args } => Expression::TextFunc {
-            function: function.clone(),
+            function: *function,
             args: args
                 .iter()
                 .map(|a| expand_scalar_globals(a, model))
@@ -2425,6 +2419,38 @@ fn expand_scalar_globals(expr: &Expression, model: &crate::model::schema::DataMo
         | Expression::TableRef(_)
         | Expression::QualifiedColumnRef { .. }
         | Expression::Query { .. } => expr.clone(),
+    }
+}
+
+/// Qualify column references in an aggregate operand expression with the fact table name.
+///
+/// For simple column references (`"col"`), prepends `fact_table."col"`.
+/// For compound expressions (e.g., `"price" * "qty"`), qualifies each leaf
+/// column reference individually so the result is `fact_table."price" * fact_table."qty"`.
+fn qualify_operand_sql(operand: &Expression, fact_table: &str) -> String {
+    match operand {
+        Expression::ColumnRef(name) => format!("{fact_table}.\"{name}\""),
+        Expression::QualifiedColumnRef { table_or_var, column, .. } => {
+            let tbl = table_or_var.to_lowercase();
+            format!("{tbl}.\"{column}\"")
+        }
+        Expression::BinaryOp { left, op, right } => {
+            let l = qualify_operand_sql(left, fact_table);
+            let r = qualify_operand_sql(right, fact_table);
+            format!("({l} {} {r})", op.as_sql())
+        }
+        Expression::ScalarFunc { function, args } => {
+            let mapped: Vec<String> = args.iter().map(|a| qualify_operand_sql(a, fact_table)).collect();
+            function.to_sql_strs(&mapped)
+        }
+        Expression::If { condition, then_expr, else_expr } => {
+            let c = qualify_operand_sql(condition, fact_table);
+            let t = qualify_operand_sql(then_expr, fact_table);
+            let e = qualify_operand_sql(else_expr, fact_table);
+            format!("CASE WHEN {c} THEN {t} ELSE {e} END")
+        }
+        // For literals and other leaf nodes, just use to_sql_string (no qualification needed).
+        _ => operand.to_sql_string(),
     }
 }
 

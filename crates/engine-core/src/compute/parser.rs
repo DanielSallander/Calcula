@@ -1648,6 +1648,64 @@ mod tests {
         assert!(expr.has_aggregate());
     }
 
+    #[tokio::test]
+    async fn case_when_sql_with_arithmetic_in_aggregate() {
+        use arrow::array::{Float64Array, Int32Array};
+        use arrow::datatypes::{DataType, Field, Schema};
+        use arrow::record_batch::RecordBatch;
+        use datafusion::prelude::SessionContext;
+        use std::sync::Arc;
+
+        let input = "DIVIDE(SUM(fact_sales[unitprice] * fact_sales[orderqty]), SUM(fact_sales[orderqty]), 0)";
+        let expr = parse_measure_expression(input).unwrap();
+
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("unitprice", DataType::Float64, false),
+            Field::new("orderqty", DataType::Float64, false),
+            Field::new("categoryid", DataType::Int32, false),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(Float64Array::from(vec![10.0, 20.0, 30.0])),
+                Arc::new(Float64Array::from(vec![1.0, 2.0, 3.0])),
+                Arc::new(Int32Array::from(vec![1, 1, 2])),
+            ],
+        )
+        .unwrap();
+
+        let dim_schema = Arc::new(Schema::new(vec![
+            Field::new("categoryid", DataType::Int32, false),
+            Field::new("categoryname", DataType::Utf8, false),
+        ]));
+        let dim_batch = RecordBatch::try_new(
+            dim_schema,
+            vec![
+                Arc::new(Int32Array::from(vec![1, 2])),
+                Arc::new(arrow::array::StringArray::from(vec!["Bikes", "Parts"])),
+            ],
+        )
+        .unwrap();
+
+        let ctx = SessionContext::new();
+        ctx.register_batch("fact_sales", batch).unwrap();
+        ctx.register_batch("dim_category", dim_batch).unwrap();
+
+        // to_case_when_sql must qualify columns inside arithmetic operands.
+        let case_sql = expr.to_case_when_sql("dim_category.\"categoryname\" = 'Bikes'", "fact_sales");
+        assert!(
+            case_sql.contains("fact_sales.\"unitprice\" * fact_sales.\"orderqty\""),
+            "columns inside arithmetic should be individually qualified, got: {case_sql}"
+        );
+
+        let sql = format!(
+            "SELECT dim_category.\"categoryname\", {case_sql} AS result FROM fact_sales \
+             JOIN dim_category ON fact_sales.\"categoryid\" = dim_category.\"categoryid\" \
+             GROUP BY dim_category.\"categoryname\""
+        );
+        ctx.sql(&sql).await.unwrap().collect().await.unwrap();
+    }
+
     #[test]
     fn parse_keep_context() {
         let expr = parse_measure_expression(
