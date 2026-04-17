@@ -2,7 +2,7 @@
 
 use std::time::Instant;
 
-use arrow::array::Array;
+use arrow::array::{Array, Int64Array};
 use arrow::compute::concat_batches;
 use arrow::record_batch::RecordBatch;
 use datafusion::prelude::SessionContext;
@@ -628,6 +628,12 @@ impl QueryExecutor {
             select_parts.push(sql_fragment);
         }
 
+        // When building an explained plan, add COUNT(*) to measure intermediate join rows.
+        let has_plan = plan.is_some();
+        if has_plan {
+            select_parts.push("COUNT(*) AS \"__plan_join_rows\"".to_string());
+        }
+
         let select_clause = select_parts.join(", ");
         let mut sql = format!("SELECT {select_clause} FROM {fact_table}");
 
@@ -752,6 +758,39 @@ impl QueryExecutor {
             agg_node.duration = df_elapsed.into();
             let result_rows: usize = batches.iter().map(|b| b.num_rows()).sum();
             agg_node.add_property("result_rows", PlanValue::Number(result_rows as f64));
+
+            // Extract intermediate join row count from the __plan_join_rows column
+            // and strip it from the result batches.
+            let batches = {
+                let mut join_rows_total: i64 = 0;
+                let mut stripped = Vec::with_capacity(batches.len());
+                for batch in &batches {
+                    let schema = batch.schema();
+                    if let Ok(idx) = schema.index_of("__plan_join_rows") {
+                        // Extract the count value.
+                        if let Some(arr) = batch.column(idx).as_any().downcast_ref::<Int64Array>() {
+                            for i in 0..arr.len() {
+                                if !arr.is_null(i) {
+                                    join_rows_total += arr.value(i);
+                                }
+                            }
+                        }
+                        // Remove the extra column from the batch.
+                        let keep: Vec<usize> = (0..schema.fields().len())
+                            .filter(|&i| i != idx)
+                            .collect();
+                        let projected = batch.project(&keep)?;
+                        stripped.push(projected);
+                    } else {
+                        stripped.push(batch.clone());
+                    }
+                }
+                if join_rows_total > 0 {
+                    agg_node.add_property("intermediate_rows", PlanValue::Number(join_rows_total as f64));
+                }
+                stripped
+            };
+
             plan_node.add_child(agg_node);
 
             if !lookup_specs.is_empty() {

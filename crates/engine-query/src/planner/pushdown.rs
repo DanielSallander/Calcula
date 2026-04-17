@@ -102,6 +102,14 @@ impl PushdownPlanner {
             .flat_map(|m| collect_named_context_tables(m.expression(), model))
             .collect();
 
+        // Collect tables referenced by USERELATIONSHIP overrides.
+        // When a measure activates an inactive relationship, both tables in
+        // that relationship must be fetched and registered in DataFusion.
+        let userelationship_tables: Vec<String> = measures
+            .iter()
+            .flat_map(|m| collect_userelationship_tables(m.expression(), model))
+            .collect();
+
         // Collect QUERY binding names from Block expressions — these are
         // intermediate tables computed at runtime, not registered data sources.
         let query_binding_names: std::collections::HashSet<String> = measures
@@ -117,6 +125,7 @@ impl PushdownPlanner {
             .copied()
             .chain(variable_tables.iter().map(|s| s.as_str()))
             .chain(named_context_tables.iter().map(|s| s.as_str()))
+            .chain(userelationship_tables.iter().map(|s| s.as_str()))
             .collect();
 
         // Verify all tables have registered sources (skip QUERY binding names).
@@ -601,6 +610,133 @@ fn collect_tables_from_context(ctx_name: &str, model: &DataModel, tables: &mut V
                 _ => {}
             }
         }
+    }
+}
+
+/// Collect all tables referenced by USERELATIONSHIP expressions.
+///
+/// When a measure uses `USERELATIONSHIP("rel_name")`, the relationship's
+/// from_table and to_table must be fetched and registered in DataFusion so
+/// the aliased JOIN can reference them.
+fn collect_userelationship_tables(expr: &Expression, model: &DataModel) -> Vec<String> {
+    let mut rel_names = Vec::new();
+    collect_userelationship_names(expr, &mut rel_names);
+
+    let mut tables = Vec::new();
+    for rel_name in &rel_names {
+        if let Ok(rel) = model.relationship(rel_name) {
+            tables.push(rel.from_table().to_string());
+            tables.push(rel.to_table().to_string());
+        }
+    }
+    tables.sort();
+    tables.dedup();
+    tables
+}
+
+/// Recursively collect all relationship names from UseRelationship expressions.
+fn collect_userelationship_names(expr: &Expression, names: &mut Vec<String>) {
+    match expr {
+        Expression::UseRelationship {
+            expr: inner,
+            relationship_name,
+        } => {
+            names.push(relationship_name.clone());
+            collect_userelationship_names(inner, names);
+        }
+        Expression::Aggregate { operand, .. } => {
+            collect_userelationship_names(operand, names);
+        }
+        Expression::BinaryOp { left, right, .. }
+        | Expression::Comparison { left, right, .. }
+        | Expression::And(left, right)
+        | Expression::Or(left, right)
+        | Expression::Xor(left, right) => {
+            collect_userelationship_names(left, names);
+            collect_userelationship_names(right, names);
+        }
+        Expression::Not(inner) | Expression::IsBlank(inner) => {
+            collect_userelationship_names(inner, names);
+        }
+        Expression::Keep { expr: inner, .. }
+        | Expression::KeepIn { expr: inner, .. }
+        | Expression::Clear { expr: inner, .. }
+        | Expression::Reset { expr: inner }
+        | Expression::ClearInner { expr: inner, .. }
+        | Expression::ClearOuter { expr: inner, .. }
+        | Expression::ResetInner { expr: inner }
+        | Expression::ResetOuter { expr: inner }
+        | Expression::Traverse { expr: inner, .. }
+        | Expression::Using { expr: inner, .. } => {
+            collect_userelationship_names(inner, names);
+        }
+        Expression::Block { bindings, result } => {
+            for (_, binding_expr) in bindings {
+                collect_userelationship_names(binding_expr, names);
+            }
+            collect_userelationship_names(result, names);
+        }
+        Expression::If {
+            condition,
+            then_expr,
+            else_expr,
+        } => {
+            collect_userelationship_names(condition, names);
+            collect_userelationship_names(then_expr, names);
+            collect_userelationship_names(else_expr, names);
+        }
+        Expression::SafeDivide {
+            numerator,
+            denominator,
+            alternate,
+        } => {
+            collect_userelationship_names(numerator, names);
+            collect_userelationship_names(denominator, names);
+            if let Some(a) = alternate {
+                collect_userelationship_names(a, names);
+            }
+        }
+        Expression::Coalesce(exprs) => {
+            for e in exprs {
+                collect_userelationship_names(e, names);
+            }
+        }
+        Expression::ScalarFunc { args, .. } | Expression::TextFunc { args, .. } => {
+            for a in args {
+                collect_userelationship_names(a, names);
+            }
+        }
+        Expression::Switch {
+            expr: inner,
+            cases,
+            default,
+        } => {
+            collect_userelationship_names(inner, names);
+            for (v, r) in cases {
+                collect_userelationship_names(v, names);
+                collect_userelationship_names(r, names);
+            }
+            if let Some(d) = default {
+                collect_userelationship_names(d, names);
+            }
+        }
+        Expression::Query { aggregates, .. } => {
+            for (agg_expr, _) in aggregates {
+                collect_userelationship_names(agg_expr, names);
+            }
+        }
+        Expression::HasOneValue { column } => collect_userelationship_names(column, names),
+        Expression::SelectedValue { column, alternate } => {
+            collect_userelationship_names(column, names);
+            if let Some(a) = alternate {
+                collect_userelationship_names(a, names);
+            }
+        }
+        Expression::FirstValue { column, order_by } => {
+            collect_userelationship_names(column, names);
+            collect_userelationship_names(order_by, names);
+        }
+        _ => {}
     }
 }
 
