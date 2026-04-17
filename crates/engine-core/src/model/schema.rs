@@ -748,10 +748,7 @@ impl DataModelBuilder {
         // 10. Validate measure references are acyclic and target existing measures.
         for measure in model.measures() {
             if crate::compute::expression::has_measure_ref(measure.expression()) {
-                crate::compute::expression::expand_measure_refs(
-                    measure.expression(),
-                    &model,
-                )?;
+                crate::compute::expression::expand_measure_refs(measure.expression(), &model)?;
             }
         }
 
@@ -1124,8 +1121,7 @@ mod tests {
     fn rejects_multiple_active_relationships_between_same_tables() {
         let rel1 =
             Relationship::many_to_one("Sales_Prod_1", "Sales", "product_id", "Products", "id");
-        let rel2 =
-            Relationship::many_to_one("Sales_Prod_2", "Sales", "store_id", "Products", "id");
+        let rel2 = Relationship::many_to_one("Sales_Prod_2", "Sales", "store_id", "Products", "id");
 
         let result = DataModel::builder()
             .add_table(sales_table())

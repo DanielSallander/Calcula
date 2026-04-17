@@ -162,6 +162,11 @@ pub struct EvaluationContext {
     /// use between two tables, these are checked in reverse order (innermost
     /// scope wins) before falling back to the model's active relationship.
     pub relationship_overrides: Vec<String>,
+    /// Expression-based filter conditions (boolean expressions from KEEP).
+    ///
+    /// These are arbitrary boolean expressions like `dim[price] > dim[cost] * 1.5`
+    /// that are AND'd with the simple filters.
+    pub conditions: Vec<Expression>,
 }
 
 impl EvaluationContext {
@@ -326,6 +331,8 @@ impl<'a> ContextResolver<'a> {
                 expr,
                 filters,
                 variables,
+                conditions,
+                in_predicates,
             } => {
                 // If the inner expression is a TableRef referencing a variable,
                 // resolve the variable's filters into the context.
@@ -354,6 +361,19 @@ impl<'a> ContextResolver<'a> {
                     // Validate cross-table filter propagation
                     self.validate_filter_propagation(filter)?;
                     ctx.filters.push(ResolvedFilter::from_predicate(filter));
+                }
+                // Collect expression-based conditions into the context.
+                ctx.conditions.extend(conditions.clone());
+                // Resolve IN-membership predicates (merged from KEEPIN).
+                for pred in in_predicates {
+                    let (base_table, var_filters) = self.resolve_table_variable(&pred.var_name)?;
+                    ctx.in_filters.push(ResolvedInFilter {
+                        table: pred.table.clone(),
+                        column: pred.column.clone(),
+                        var_base_table: base_table,
+                        var_column: pred.var_column.clone(),
+                        var_filters,
+                    });
                 }
                 Ok(inner)
             }
@@ -649,6 +669,65 @@ impl<'a> ContextResolver<'a> {
                 Ok(Expression::FirstValue {
                     column: Box::new(column),
                     order_by: Box::new(order_by),
+                })
+            }
+
+            // Window functions: recurse into inner expression only.
+            // order_by/partition_by are structural, not context-sensitive.
+            Expression::Window {
+                inner,
+                function,
+                order_by,
+                partition_by,
+                frame,
+            } => {
+                let inner = self.walk(inner, ctx)?;
+                Ok(Expression::Window {
+                    inner: Box::new(inner),
+                    function: *function,
+                    order_by: order_by.clone(),
+                    partition_by: partition_by.clone(),
+                    frame: frame.clone(),
+                })
+            }
+            Expression::Offset {
+                inner,
+                delta,
+                order_by,
+                partition_by,
+            } => {
+                let inner = self.walk(inner, ctx)?;
+                Ok(Expression::Offset {
+                    inner: Box::new(inner),
+                    delta: *delta,
+                    order_by: order_by.clone(),
+                    partition_by: partition_by.clone(),
+                })
+            }
+            Expression::Index {
+                inner,
+                position,
+                order_by,
+                partition_by,
+            } => {
+                let inner = self.walk(inner, ctx)?;
+                Ok(Expression::Index {
+                    inner: Box::new(inner),
+                    position: *position,
+                    order_by: order_by.clone(),
+                    partition_by: partition_by.clone(),
+                })
+            }
+
+            Expression::InList { expr, values } => {
+                let expr = self.walk(expr, ctx)?;
+                let walked: Vec<Expression> = values
+                    .iter()
+                    .map(|v| self.walk(v, ctx))
+                    .collect::<EngineResult<_>>()?;
+                Ok(Expression::InList {
+                    expr: Box::new(expr),
+                    values: walked,
                 })
             }
         }

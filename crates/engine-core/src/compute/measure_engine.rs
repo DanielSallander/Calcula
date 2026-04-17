@@ -62,8 +62,8 @@ impl<'a> MeasureEngine<'a> {
         // Infer fact table after expansion (MeasureRef measures have empty cached_table).
         let table_name_owned;
         let table_name = if measure.table().is_empty() {
-            table_name_owned = crate::compute::expression::infer_fact_table(&expanded)
-                .ok_or_else(|| {
+            table_name_owned =
+                crate::compute::expression::infer_fact_table(&expanded).ok_or_else(|| {
                     crate::error::EngineError::InvalidData(format!(
                         "cannot infer fact table for measure '{measure_name}'"
                     ))
@@ -165,8 +165,8 @@ impl<'a> MeasureEngine<'a> {
         // Infer fact table after expansion (MeasureRef measures have empty cached_table).
         let fact_table_owned;
         let fact_table = if measure.table().is_empty() {
-            fact_table_owned = crate::compute::expression::infer_fact_table(&expanded)
-                .ok_or_else(|| {
+            fact_table_owned =
+                crate::compute::expression::infer_fact_table(&expanded).ok_or_else(|| {
                     crate::error::EngineError::InvalidData(format!(
                         "cannot infer fact table for measure '{measure_name}'"
                     ))

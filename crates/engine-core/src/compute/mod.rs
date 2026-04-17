@@ -20,8 +20,8 @@ pub use context::{
 };
 pub use evaluate::{evaluate_expression, materialize_calculated_columns};
 pub use expression::{
-    infer_fact_table, ArithmeticOp, ComparisonOp, Expression, FilterPredicate, InPredicate,
-    RelationshipPath, ScalarFunction, TextFunction,
+    infer_fact_table, ArithmeticOp, BoundaryType, ComparisonOp, Expression, FilterPredicate,
+    InPredicate, RelationshipPath, ScalarFunction, TextFunction, WindowFrame,
 };
 pub use join::{aggregate_over_relationship, join_tables, JoinType};
 pub use measure::{

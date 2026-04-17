@@ -5,13 +5,18 @@ Adds filter conditions to the evaluation context of a measure. Filters are appli
 ## Syntax
 
 ```
-SUM(table[column], KEEP(dimension_table, filter1 [, filter2, ...]))
+SUM(table[column], KEEP(dimension_table, condition1 [, condition2, ...]))
 ```
 
-Where each filter has the form:
+Each condition can be either a **simple filter** or an **expression-based condition**:
 
 ```
+-- Simple filter: column compared to a literal value
 table[column] operator value
+
+-- Expression condition: column compared to another column or expression
+table[column] operator table[column] * 1.5
+table[column] operator table[other_column]
 ```
 
 ### Parameters
@@ -19,7 +24,7 @@ table[column] operator value
 | Parameter | Definition |
 |-----------|------------|
 | `dimension_table` | The name of the dimension table being filtered. This is the first argument and identifies which table the filters apply to. |
-| `filter` | One or more filter conditions in the form `table[column] operator value`. Multiple filters are separated by commas and combined with AND. |
+| `condition` | One or more filter conditions. Multiple conditions are separated by commas and combined with AND. |
 
 ### Supported operators
 
@@ -34,10 +39,20 @@ table[column] operator value
 
 ### Value types
 
+Simple filters support literal values on the right-hand side:
+
 | Type | Syntax | Example |
 |------|--------|---------|
 | Numeric | Unquoted number | `dim_date[year] = 2024` |
 | String | Double-quoted text | `dim_product[categoryname] = "Bikes"` |
+
+Expression conditions support arbitrary expressions on the right-hand side:
+
+| Type | Example |
+|------|---------|
+| Column reference | `dim[price] > dim[cost]` |
+| Arithmetic expression | `dim[price] > dim[cost] * 1.5` |
+| Complex expression | `dim[margin] >= dim[target] + 100` |
 
 ## Return value
 
@@ -121,6 +136,55 @@ DEFINE Road Bike Count = DISTINCTCOUNT(road_bikes[productid])
 ```
 
 The engine chains the filters: `categoryname = "Bikes"` AND `productline = "R"`.
+
+## Example 6: Expression-based condition (column vs column)
+
+Filter to products where the list price exceeds the standard cost.
+
+```
+DEFINE Profitable = SUM(fact_sales[linetotal], KEEP(dim_product, dim_product[listprice] > dim_product[standardcost]))
+```
+
+## Example 7: Expression-based condition with arithmetic
+
+Filter to products with at least 50% markup.
+
+```
+DEFINE High Margin = SUM(fact_sales[linetotal], KEEP(dim_product, dim_product[listprice] > dim_product[standardcost] * 1.5))
+```
+
+## Example 8: Mixed simple and expression conditions
+
+Combine a literal filter with an expression condition.
+
+```
+DEFINE Premium Bikes 2014 = SUM(fact_sales[linetotal], KEEP(dim_product, dim_date[year] = 2014, dim_product[listprice] > dim_product[standardcost] * 2))
+```
+
+## Example 9: IN with a literal value list
+
+Filter to specific colors using the `IN` operator with a set of values.
+
+```
+DEFINE Color Sales = SUM(fact_sales[linetotal], KEEP(dim_product, dim_product[color] IN {"Blue", "Red", "Black"}))
+```
+
+Numeric values work too:
+
+```
+DEFINE Recent Sales = SUM(fact_sales[linetotal], KEEP(dim_date, dim_date[year] IN {2022, 2023, 2024}))
+```
+
+## Example 10: IN with a table variable
+
+Filter by membership in a pre-filtered set. This is equivalent to the standalone `KEEPIN` function.
+
+```
+VAR premium = KEEP(dim_product, dim_product[listprice] > 1000)
+DEFINE Premium Sales = SUM(fact_sales[linetotal], KEEP(fact_sales, fact_sales[productkey] IN premium[productkey]))
+```
+
+The engine generates a SQL `WHERE ... IN (SELECT ...)` subquery to filter the fact table to only rows whose product key exists in the premium variable.
 
 ## See also
 

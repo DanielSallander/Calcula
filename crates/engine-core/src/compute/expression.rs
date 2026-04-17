@@ -470,6 +470,32 @@ impl std::fmt::Display for TextFunction {
     }
 }
 
+/// Window frame boundary type (DAX-inspired).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum BoundaryType {
+    /// Relative to current row: 0 = current, negative = before, positive = after.
+    Rel,
+    /// Absolute position: 1-based from start, negative from end.
+    Abs,
+}
+
+/// Defines window frame boundaries for WINDOW expressions.
+///
+/// Uses DAX-inspired conventions:
+/// - `WindowFrame { from: 1, from_type: Abs, to: 0, to_type: Rel }` = unbounded preceding to current row
+/// - `WindowFrame { from: -2, from_type: Rel, to: 0, to_type: Rel }` = 2 preceding to current row
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WindowFrame {
+    /// Start boundary value.
+    pub from: i64,
+    /// How to interpret `from`.
+    pub from_type: BoundaryType,
+    /// End boundary value.
+    pub to: i64,
+    /// How to interpret `to`.
+    pub to_type: BoundaryType,
+}
+
 /// An expression tree for computations over table columns.
 ///
 /// Expressions can be:
@@ -525,11 +551,22 @@ pub enum Expression {
     Keep {
         /// The inner expression to evaluate in the filtered context.
         expr: Box<Expression>,
-        /// Filter conditions to add.
+        /// Simple filter conditions: `table[column] op literal_value`.
         filters: Vec<FilterPredicate>,
         /// Table variable names whose filters should be applied.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         variables: Vec<String>,
+        /// Expression-based filter conditions (boolean expressions).
+        ///
+        /// Unlike `filters` which only support `column op literal`, these
+        /// support arbitrary boolean expressions like `dim[price] > dim[cost] * 1.5`.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        conditions: Vec<Expression>,
+        /// IN-membership filter predicates from `col IN var[col]` syntax.
+        ///
+        /// Merged from the former KEEPIN function — these are now part of KEEP.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        in_predicates: Vec<InPredicate>,
     },
     /// Remove filters on specific dimensions from the evaluation context.
     ///
@@ -797,6 +834,78 @@ pub enum Expression {
         /// The expression to order by.
         order_by: Box<Expression>,
     },
+
+    /// Window function: aggregate over a sliding frame of pre-aggregated rows.
+    ///
+    /// ```text
+    /// WINDOW(SUM(fact[amount]), SUM, ORDERBY(dim_date[date]), ROWS(1, ABS, 0, REL))
+    /// ```
+    ///
+    /// Two-stage evaluation: the inner measure is materialized grouped by
+    /// ORDER BY + PARTITION BY columns, then the window aggregate is applied.
+    Window {
+        /// The inner measure expression to evaluate per-row before windowing.
+        inner: Box<Expression>,
+        /// The window aggregation function (SUM, AVG, MIN, MAX, COUNT).
+        function: AggregateOp,
+        /// ORDER BY columns as `(table, column)` pairs.
+        order_by: Vec<(String, String)>,
+        /// PARTITION BY columns as `(table, column)` pairs. Empty = single partition.
+        partition_by: Vec<(String, String)>,
+        /// Window frame boundaries. Default (None) = unbounded preceding to current row.
+        frame: Option<WindowFrame>,
+    },
+
+    /// Get measure value at a relative offset from the current row.
+    ///
+    /// ```text
+    /// OFFSET(SUM(fact[amount]), -1, ORDERBY(dim_date[month]))
+    /// ```
+    ///
+    /// Returns the measure value at `delta` rows from current (negative = before,
+    /// positive = after). Returns NULL if out of bounds.
+    Offset {
+        /// The inner measure expression.
+        inner: Box<Expression>,
+        /// Offset from current row.
+        delta: i64,
+        /// ORDER BY columns as `(table, column)` pairs.
+        order_by: Vec<(String, String)>,
+        /// PARTITION BY columns as `(table, column)` pairs.
+        partition_by: Vec<(String, String)>,
+    },
+
+    /// Get measure value at an absolute position within a partition.
+    ///
+    /// ```text
+    /// INDEX(SUM(fact[amount]), 1, ORDERBY(dim_date[month]))
+    /// ```
+    ///
+    /// Position is 1-based from start (positive) or from end (negative, -1 = last).
+    /// Returns NULL if out of bounds.
+    Index {
+        /// The inner measure expression.
+        inner: Box<Expression>,
+        /// Absolute position (1-based positive, or negative from end).
+        position: i64,
+        /// ORDER BY columns as `(table, column)` pairs.
+        order_by: Vec<(String, String)>,
+        /// PARTITION BY columns as `(table, column)` pairs.
+        partition_by: Vec<(String, String)>,
+    },
+
+    /// IN-list membership test: `expr IN (value1, value2, ...)`.
+    ///
+    /// Used inside KEEP conditions to filter by a set of literal values:
+    /// ```text
+    /// KEEP(dim, dim_product[color] IN {"Blue", "Red", "Black"})
+    /// ```
+    InList {
+        /// The expression to test (typically a column reference).
+        expr: Box<Expression>,
+        /// The set of values to test against.
+        values: Vec<Expression>,
+    },
 }
 
 impl Expression {
@@ -952,6 +1061,20 @@ impl Expression {
                 column.collect_column_refs(refs);
                 order_by.collect_column_refs(refs);
             }
+            Expression::Window { inner, .. }
+            | Expression::Offset { inner, .. }
+            | Expression::Index { inner, .. } => {
+                // Only collect refs from the inner measure expression.
+                // order_by/partition_by are structural (table, column) pairs,
+                // not column refs of the fact table.
+                inner.collect_column_refs(refs);
+            }
+            Expression::InList { expr, values } => {
+                expr.collect_column_refs(refs);
+                for v in values {
+                    v.collect_column_refs(refs);
+                }
+            }
         }
     }
 
@@ -1024,6 +1147,13 @@ impl Expression {
             Expression::HasOneValue { .. }
             | Expression::SelectedValue { .. }
             | Expression::FirstValue { .. } => true,
+            // Window functions contain implicit aggregates (two-stage).
+            Expression::Window { .. } | Expression::Offset { .. } | Expression::Index { .. } => {
+                true
+            }
+            Expression::InList { expr, values } => {
+                expr.has_aggregate() || values.iter().any(|v| v.has_aggregate())
+            }
         }
     }
 
@@ -1102,6 +1232,12 @@ impl Expression {
             Expression::FirstValue { column, order_by } => {
                 column.has_context_ops() || order_by.has_context_ops()
             }
+            Expression::Window { inner, .. }
+            | Expression::Offset { inner, .. }
+            | Expression::Index { inner, .. } => inner.has_context_ops(),
+            Expression::InList { expr, values } => {
+                expr.has_context_ops() || values.iter().any(|v| v.has_context_ops())
+            }
         }
     }
 
@@ -1144,6 +1280,8 @@ impl Expression {
                 expr,
                 filters,
                 variables,
+                conditions,
+                in_predicates,
             } => {
                 for f in filters {
                     tables.push(&f.table);
@@ -1151,6 +1289,14 @@ impl Expression {
                 // Variable tables are resolved at context-resolution time,
                 // not tracked here — they add filters dynamically.
                 let _ = variables;
+                // Expression conditions may reference dimension tables via
+                // QualifiedColumnRef — collect those too.
+                for cond in conditions {
+                    cond.collect_context_filter_tables(tables);
+                }
+                for p in in_predicates {
+                    tables.push(&p.table);
+                }
                 expr.collect_context_filter_tables(tables);
             }
             Expression::KeepIn { expr, predicates } => {
@@ -1241,6 +1387,38 @@ impl Expression {
             Expression::FirstValue { column, order_by } => {
                 column.collect_context_filter_tables(tables);
                 order_by.collect_context_filter_tables(tables);
+            }
+            Expression::Window {
+                inner,
+                order_by,
+                partition_by,
+                ..
+            }
+            | Expression::Offset {
+                inner,
+                order_by,
+                partition_by,
+                ..
+            }
+            | Expression::Index {
+                inner,
+                order_by,
+                partition_by,
+                ..
+            } => {
+                inner.collect_context_filter_tables(tables);
+                for (table, _) in order_by {
+                    tables.push(table);
+                }
+                for (table, _) in partition_by {
+                    tables.push(table);
+                }
+            }
+            Expression::InList { expr, values } => {
+                expr.collect_context_filter_tables(tables);
+                for v in values {
+                    v.collect_context_filter_tables(tables);
+                }
             }
         }
     }
@@ -1400,6 +1578,41 @@ impl Expression {
                 column: Box::new(column.substitute_vars(env)),
                 order_by: Box::new(order_by.substitute_vars(env)),
             },
+            Expression::Window {
+                inner,
+                function,
+                order_by,
+                partition_by,
+                frame,
+            } => Expression::Window {
+                inner: Box::new(inner.substitute_vars(env)),
+                function: *function,
+                order_by: order_by.clone(),
+                partition_by: partition_by.clone(),
+                frame: frame.clone(),
+            },
+            Expression::Offset {
+                inner,
+                delta,
+                order_by,
+                partition_by,
+            } => Expression::Offset {
+                inner: Box::new(inner.substitute_vars(env)),
+                delta: *delta,
+                order_by: order_by.clone(),
+                partition_by: partition_by.clone(),
+            },
+            Expression::Index {
+                inner,
+                position,
+                order_by,
+                partition_by,
+            } => Expression::Index {
+                inner: Box::new(inner.substitute_vars(env)),
+                position: *position,
+                order_by: order_by.clone(),
+                partition_by: partition_by.clone(),
+            },
             // Leaf expressions that don't contain ColumnRef — return as-is.
             _ => self.clone(),
         }
@@ -1416,8 +1629,14 @@ impl Expression {
             Expression::Block { bindings, result } => {
                 let mut env = std::collections::HashMap::new();
                 for (name, binding_expr) in bindings {
-                    // Skip Query bindings — they produce tables, not scalars.
-                    if matches!(binding_expr, Expression::Query { .. }) {
+                    // Skip Query/Window/Offset/Index bindings — they produce tables, not scalars.
+                    if matches!(
+                        binding_expr,
+                        Expression::Query { .. }
+                            | Expression::Window { .. }
+                            | Expression::Offset { .. }
+                            | Expression::Index { .. }
+                    ) {
                         continue;
                     }
                     let resolved = binding_expr.substitute_vars(&env);
@@ -1438,6 +1657,63 @@ impl Expression {
     pub fn has_query_bindings(&self) -> bool {
         match self {
             Expression::Block { bindings, .. } => bindings.iter().any(|(_, e)| e.is_query()),
+            _ => false,
+        }
+    }
+
+    /// Returns `true` if this expression is a `Window`, `Offset`, or `Index` expression.
+    pub fn is_window(&self) -> bool {
+        matches!(
+            self,
+            Expression::Window { .. } | Expression::Offset { .. } | Expression::Index { .. }
+        )
+    }
+
+    /// Returns `true` if this expression contains any window function nodes.
+    pub fn has_window(&self) -> bool {
+        match self {
+            Expression::Window { .. } | Expression::Offset { .. } | Expression::Index { .. } => {
+                true
+            }
+            Expression::BinaryOp { left, right, .. }
+            | Expression::Comparison { left, right, .. }
+            | Expression::And(left, right)
+            | Expression::Or(left, right)
+            | Expression::Xor(left, right) => left.has_window() || right.has_window(),
+            Expression::Not(inner) | Expression::IsBlank(inner) => inner.has_window(),
+            Expression::Aggregate { operand, .. } => operand.has_window(),
+            Expression::Keep { expr, .. }
+            | Expression::Clear { expr, .. }
+            | Expression::Reset { expr }
+            | Expression::ClearInner { expr, .. }
+            | Expression::ClearOuter { expr, .. }
+            | Expression::ResetInner { expr }
+            | Expression::ResetOuter { expr }
+            | Expression::Traverse { expr, .. }
+            | Expression::Using { expr, .. }
+            | Expression::UseRelationship { expr, .. }
+            | Expression::KeepIn { expr, .. } => expr.has_window(),
+            Expression::Block { bindings, result } => {
+                bindings.iter().any(|(_, e)| e.has_window()) || result.has_window()
+            }
+            Expression::If {
+                condition,
+                then_expr,
+                else_expr,
+            } => condition.has_window() || then_expr.has_window() || else_expr.has_window(),
+            Expression::SafeDivide {
+                numerator,
+                denominator,
+                alternate,
+            } => {
+                numerator.has_window()
+                    || denominator.has_window()
+                    || alternate.as_ref().is_some_and(|a| a.has_window())
+            }
+            Expression::Coalesce(exprs) => exprs.iter().any(|e| e.has_window()),
+            Expression::ScalarFunc { args, .. } | Expression::TextFunc { args, .. } => {
+                args.iter().any(|a| a.has_window())
+            }
             _ => false,
         }
     }
@@ -1600,6 +1876,16 @@ impl Expression {
                     order_by.to_sql_string()
                 )
             }
+            Expression::Window { .. } | Expression::Offset { .. } | Expression::Index { .. } => {
+                // Window expressions produce tables and must be materialized,
+                // not rendered inline. This should not be reached in normal flow.
+                "/* WINDOW: must be materialized */".to_string()
+            }
+            Expression::InList { expr, values } => {
+                let expr_sql = expr.to_sql_string();
+                let vals: Vec<String> = values.iter().map(|v| v.to_sql_string()).collect();
+                format!("{expr_sql} IN ({})", vals.join(", "))
+            }
         }
     }
 
@@ -1743,6 +2029,10 @@ impl Expression {
                 let case_order = format!("CASE WHEN {condition} THEN {qualified_order} END");
                 format!("FIRST_VALUE({case_col} ORDER BY {case_order})")
             }
+            Expression::Window { .. } | Expression::Offset { .. } | Expression::Index { .. } => {
+                "/* WINDOW: must be materialized */".to_string()
+            }
+            Expression::InList { .. } => self.to_sql_string(),
             // For leaf expressions (literals, column refs, etc.), fall back to regular SQL.
             _ => self.to_sql_string(),
         }
@@ -1817,6 +2107,8 @@ pub fn keep(expr: Expression, filters: Vec<FilterPredicate>) -> Expression {
         expr: Box::new(expr),
         filters,
         variables: Vec::new(),
+        conditions: Vec::new(),
+        in_predicates: Vec::new(),
     }
 }
 
@@ -1829,6 +2121,21 @@ pub fn keep_vars(expr: Expression, variables: Vec<String>) -> Expression {
         expr: Box::new(expr),
         filters: Vec::new(),
         variables,
+        conditions: Vec::new(),
+        in_predicates: Vec::new(),
+    }
+}
+
+/// Create a `keep()` expression with expression-based conditions.
+///
+/// Each condition is an arbitrary boolean expression (e.g., a Comparison).
+pub fn keep_conditions(expr: Expression, conditions: Vec<Expression>) -> Expression {
+    Expression::Keep {
+        expr: Box::new(expr),
+        filters: Vec::new(),
+        variables: Vec::new(),
+        conditions,
+        in_predicates: Vec::new(),
     }
 }
 
@@ -2082,6 +2389,53 @@ pub fn first_value(column: Expression, order_by: Expression) -> Expression {
     }
 }
 
+/// Create a WINDOW expression: aggregate over a sliding frame.
+pub fn window_expr(
+    inner: Expression,
+    function: AggregateOp,
+    order_by: Vec<(String, String)>,
+    partition_by: Vec<(String, String)>,
+    frame: Option<WindowFrame>,
+) -> Expression {
+    Expression::Window {
+        inner: Box::new(inner),
+        function,
+        order_by,
+        partition_by,
+        frame,
+    }
+}
+
+/// Create an OFFSET expression: value at relative position.
+pub fn offset_expr(
+    inner: Expression,
+    delta: i64,
+    order_by: Vec<(String, String)>,
+    partition_by: Vec<(String, String)>,
+) -> Expression {
+    Expression::Offset {
+        inner: Box::new(inner),
+        delta,
+        order_by,
+        partition_by,
+    }
+}
+
+/// Create an INDEX expression: value at absolute position.
+pub fn index_expr(
+    inner: Expression,
+    position: i64,
+    order_by: Vec<(String, String)>,
+    partition_by: Vec<(String, String)>,
+) -> Expression {
+    Expression::Index {
+        inner: Box::new(inner),
+        position,
+        order_by,
+        partition_by,
+    }
+}
+
 /// Expand global variable references in an expression.
 ///
 /// This function performs two kinds of substitution:
@@ -2120,6 +2474,9 @@ pub fn has_measure_ref(expr: &Expression) -> bool {
         Expression::Block { bindings, result } => {
             bindings.iter().any(|(_, e)| has_measure_ref(e)) || has_measure_ref(result)
         }
+        Expression::Window { inner, .. }
+        | Expression::Offset { inner, .. }
+        | Expression::Index { inner, .. } => has_measure_ref(inner),
         _ => false,
     }
 }
@@ -2161,10 +2518,17 @@ fn expand_measure_refs_inner(
             expr: inner,
             filters,
             variables,
+            conditions,
+            in_predicates,
         } => Ok(Expression::Keep {
             expr: Box::new(expand_measure_refs_inner(inner, model, visited)?),
             filters: filters.clone(),
             variables: variables.clone(),
+            conditions: conditions
+                .iter()
+                .map(|c| expand_measure_refs_inner(c, model, visited))
+                .collect::<crate::error::EngineResult<Vec<_>>>()?,
+            in_predicates: in_predicates.clone(),
         }),
         Expression::Clear {
             expr: inner,
@@ -2241,6 +2605,41 @@ fn expand_measure_refs_inner(
                 result: Box::new(expand_measure_refs_inner(result, model, visited)?),
             })
         }
+        Expression::Window {
+            inner,
+            function,
+            order_by,
+            partition_by,
+            frame,
+        } => Ok(Expression::Window {
+            inner: Box::new(expand_measure_refs_inner(inner, model, visited)?),
+            function: *function,
+            order_by: order_by.clone(),
+            partition_by: partition_by.clone(),
+            frame: frame.clone(),
+        }),
+        Expression::Offset {
+            inner,
+            delta,
+            order_by,
+            partition_by,
+        } => Ok(Expression::Offset {
+            inner: Box::new(expand_measure_refs_inner(inner, model, visited)?),
+            delta: *delta,
+            order_by: order_by.clone(),
+            partition_by: partition_by.clone(),
+        }),
+        Expression::Index {
+            inner,
+            position,
+            order_by,
+            partition_by,
+        } => Ok(Expression::Index {
+            inner: Box::new(expand_measure_refs_inner(inner, model, visited)?),
+            position: *position,
+            order_by: order_by.clone(),
+            partition_by: partition_by.clone(),
+        }),
         // Leaf nodes and anything without MeasureRef pass through unchanged.
         _ => Ok(expr.clone()),
     }
@@ -2415,6 +2814,17 @@ fn collect_query_global_refs(
             collect_query_global_refs(column, model, found);
             collect_query_global_refs(order_by, model, found);
         }
+        Expression::Window { inner, .. }
+        | Expression::Offset { inner, .. }
+        | Expression::Index { inner, .. } => {
+            collect_query_global_refs(inner, model, found);
+        }
+        Expression::InList { expr, values } => {
+            collect_query_global_refs(expr, model, found);
+            for v in values {
+                collect_query_global_refs(v, model, found);
+            }
+        }
     }
 }
 
@@ -2442,10 +2852,17 @@ fn expand_scalar_globals(expr: &Expression, model: &crate::model::schema::DataMo
             expr: inner,
             filters,
             variables,
+            conditions,
+            in_predicates,
         } => Expression::Keep {
             expr: Box::new(expand_scalar_globals(inner, model)),
             filters: filters.clone(),
             variables: variables.clone(),
+            conditions: conditions
+                .iter()
+                .map(|c| expand_scalar_globals(c, model))
+                .collect(),
+            in_predicates: in_predicates.clone(),
         },
         Expression::Clear {
             expr: inner,
@@ -2607,6 +3024,48 @@ fn expand_scalar_globals(expr: &Expression, model: &crate::model::schema::DataMo
             column: Box::new(expand_scalar_globals(column, model)),
             order_by: Box::new(expand_scalar_globals(order_by, model)),
         },
+        Expression::Window {
+            inner,
+            function,
+            order_by,
+            partition_by,
+            frame,
+        } => Expression::Window {
+            inner: Box::new(expand_scalar_globals(inner, model)),
+            function: *function,
+            order_by: order_by.clone(),
+            partition_by: partition_by.clone(),
+            frame: frame.clone(),
+        },
+        Expression::Offset {
+            inner,
+            delta,
+            order_by,
+            partition_by,
+        } => Expression::Offset {
+            inner: Box::new(expand_scalar_globals(inner, model)),
+            delta: *delta,
+            order_by: order_by.clone(),
+            partition_by: partition_by.clone(),
+        },
+        Expression::Index {
+            inner,
+            position,
+            order_by,
+            partition_by,
+        } => Expression::Index {
+            inner: Box::new(expand_scalar_globals(inner, model)),
+            position: *position,
+            order_by: order_by.clone(),
+            partition_by: partition_by.clone(),
+        },
+        Expression::InList { expr, values } => Expression::InList {
+            expr: Box::new(expand_scalar_globals(expr, model)),
+            values: values
+                .iter()
+                .map(|v| expand_scalar_globals(v, model))
+                .collect(),
+        },
         // Leaves that don't contain sub-expressions or ColumnRef.
         Expression::LiteralFloat(_)
         | Expression::LiteralInt(_)
@@ -2628,7 +3087,11 @@ fn expand_scalar_globals(expr: &Expression, model: &crate::model::schema::DataMo
 fn qualify_operand_sql(operand: &Expression, fact_table: &str) -> String {
     match operand {
         Expression::ColumnRef(name) => format!("{fact_table}.\"{name}\""),
-        Expression::QualifiedColumnRef { table_or_var, column, .. } => {
+        Expression::QualifiedColumnRef {
+            table_or_var,
+            column,
+            ..
+        } => {
             let tbl = table_or_var.to_lowercase();
             format!("{tbl}.\"{column}\"")
         }
@@ -2638,10 +3101,17 @@ fn qualify_operand_sql(operand: &Expression, fact_table: &str) -> String {
             format!("({l} {} {r})", op.as_sql())
         }
         Expression::ScalarFunc { function, args } => {
-            let mapped: Vec<String> = args.iter().map(|a| qualify_operand_sql(a, fact_table)).collect();
+            let mapped: Vec<String> = args
+                .iter()
+                .map(|a| qualify_operand_sql(a, fact_table))
+                .collect();
             function.to_sql_strs(&mapped)
         }
-        Expression::If { condition, then_expr, else_expr } => {
+        Expression::If {
+            condition,
+            then_expr,
+            else_expr,
+        } => {
             let c = qualify_operand_sql(condition, fact_table);
             let t = qualify_operand_sql(then_expr, fact_table);
             let e = qualify_operand_sql(else_expr, fact_table);
@@ -2732,6 +3202,15 @@ pub fn infer_fact_table(expr: &Expression) -> Option<String> {
         Expression::FirstValue { column, order_by } => {
             infer_fact_table(column).or_else(|| infer_fact_table(order_by))
         }
+        Expression::Window {
+            inner, order_by, ..
+        }
+        | Expression::Offset {
+            inner, order_by, ..
+        }
+        | Expression::Index {
+            inner, order_by, ..
+        } => infer_fact_table(inner).or_else(|| order_by.first().map(|(table, _)| table.clone())),
         _ => None,
     }
 }
@@ -4083,10 +4562,7 @@ mod tests {
         );
 
         // [TotalSales](USERELATIONSHIP("some_rel")) → UseRelationship wrapping expanded expr
-        let ref_expr = use_relationship(
-            Expression::MeasureRef("TotalSales".into()),
-            "some_rel",
-        );
+        let ref_expr = use_relationship(Expression::MeasureRef("TotalSales".into()), "some_rel");
         let ref_measure = Measure::new("ShipSales", ref_expr);
 
         let model = DataModel::builder()
@@ -4139,10 +4615,7 @@ mod tests {
         let table = Table::new("T", vec![Column::new("x", DataType::Int64)]).unwrap();
         let m = Measure::new("A", Expression::MeasureRef("NonExistent".into()));
 
-        let result = DataModel::builder()
-            .add_table(table)
-            .add_measure(m)
-            .build();
+        let result = DataModel::builder().add_table(table).add_measure(m).build();
 
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
@@ -4184,12 +4657,149 @@ mod tests {
             .build()
             .unwrap();
 
-        let expanded = expand_measure_refs(
-            model.measure("Top").unwrap().expression(),
-            &model,
-        )
-        .unwrap();
+        let expanded =
+            expand_measure_refs(model.measure("Top").unwrap().expression(), &model).unwrap();
         // Should fully expand to SUM(Sales.amount)
         assert!(matches!(expanded, Expression::Aggregate { .. }));
+    }
+
+    // --- Window expression tests ---
+
+    #[test]
+    fn window_has_aggregate() {
+        let w = window_expr(
+            agg(AggregateOp::Sum, qualified_col("fact", "amount")),
+            AggregateOp::Sum,
+            vec![("dim_date".into(), "month".into())],
+            vec![],
+            None,
+        );
+        assert!(w.has_aggregate());
+        assert!(w.has_window());
+        assert!(w.is_window());
+    }
+
+    #[test]
+    fn window_not_simple_aggregate() {
+        let w = window_expr(
+            agg(AggregateOp::Sum, qualified_col("fact", "amount")),
+            AggregateOp::Sum,
+            vec![("dim_date".into(), "month".into())],
+            vec![],
+            None,
+        );
+        assert!(!w.is_simple_aggregate());
+    }
+
+    #[test]
+    fn window_column_refs() {
+        let w = window_expr(
+            agg(AggregateOp::Sum, qualified_col("fact", "amount")),
+            AggregateOp::Sum,
+            vec![("dim_date".into(), "month".into())],
+            vec![],
+            None,
+        );
+        let refs = w.column_references();
+        assert_eq!(refs, vec!["amount"]);
+    }
+
+    #[test]
+    fn offset_basic() {
+        let o = offset_expr(
+            agg(AggregateOp::Sum, qualified_col("fact", "amount")),
+            -1,
+            vec![("dim".into(), "month".into())],
+            vec![],
+        );
+        assert!(o.has_aggregate());
+        assert!(o.has_window());
+        assert!(o.is_window());
+        assert!(!o.is_simple_aggregate());
+    }
+
+    #[test]
+    fn index_basic() {
+        let i = index_expr(
+            agg(AggregateOp::Sum, qualified_col("fact", "amount")),
+            1,
+            vec![("dim".into(), "month".into())],
+            vec![],
+        );
+        assert!(i.has_aggregate());
+        assert!(i.has_window());
+        assert!(i.is_window());
+    }
+
+    #[test]
+    fn window_to_sql_placeholder() {
+        let w = window_expr(
+            agg(AggregateOp::Sum, qualified_col("fact", "amount")),
+            AggregateOp::Sum,
+            vec![("dim_date".into(), "month".into())],
+            vec![],
+            None,
+        );
+        assert!(w.to_sql_string().contains("WINDOW"));
+    }
+
+    #[test]
+    fn window_context_filter_tables() {
+        let w = window_expr(
+            agg(AggregateOp::Sum, qualified_col("fact", "amount")),
+            AggregateOp::Sum,
+            vec![("dim_date".into(), "month".into())],
+            vec![("dim_product".into(), "category".into())],
+            None,
+        );
+        let tables = w.context_filter_tables();
+        assert!(tables.contains(&"dim_date"));
+        assert!(tables.contains(&"dim_product"));
+    }
+
+    #[test]
+    fn window_infer_fact_table() {
+        let w = window_expr(
+            agg(AggregateOp::Sum, qualified_col("fact_sales", "amount")),
+            AggregateOp::Sum,
+            vec![("dim_date".into(), "month".into())],
+            vec![],
+            None,
+        );
+        assert_eq!(infer_fact_table(&w), Some("fact_sales".into()));
+    }
+
+    #[test]
+    fn window_serialization_roundtrip() {
+        let w = window_expr(
+            agg(AggregateOp::Sum, qualified_col("fact", "amount")),
+            AggregateOp::Sum,
+            vec![("dim_date".into(), "month".into())],
+            vec![("dim_product".into(), "cat".into())],
+            Some(WindowFrame {
+                from: -2,
+                from_type: BoundaryType::Rel,
+                to: 0,
+                to_type: BoundaryType::Rel,
+            }),
+        );
+        let json = serde_json::to_string(&w).unwrap();
+        let deserialized: Expression = serde_json::from_str(&json).unwrap();
+        if let Expression::Window {
+            function,
+            order_by,
+            partition_by,
+            frame,
+            ..
+        } = &deserialized
+        {
+            assert_eq!(*function, AggregateOp::Sum);
+            assert_eq!(order_by.len(), 1);
+            assert_eq!(partition_by.len(), 1);
+            let f = frame.as_ref().unwrap();
+            assert_eq!(f.from, -2);
+        } else {
+            panic!("expected Window after deserialization");
+        }
     }
 }

@@ -173,10 +173,7 @@ impl QueryExecutor {
                         .with_duration(*elapsed)
                         .with_property("table", PlanValue::Text(table_name.clone()))
                         .with_property("rows_fetched", PlanValue::Number(*row_count as f64))
-                        .with_property(
-                            "source",
-                            PlanValue::Text("in_memory_cache".to_string()),
-                        );
+                        .with_property("source", PlanValue::Text("in_memory_cache".to_string()));
                     plan_node.add_child(fetch_node);
                 }
                 plan_node.add_child(
@@ -269,10 +266,7 @@ impl QueryExecutor {
                         .with_duration(*elapsed)
                         .with_property("table", PlanValue::Text(table_name.clone()))
                         .with_property("rows_fetched", PlanValue::Number(*row_count as f64))
-                        .with_property(
-                            "source",
-                            PlanValue::Text("in_memory_cache".to_string()),
-                        );
+                        .with_property("source", PlanValue::Text("in_memory_cache".to_string()));
                     plan_node.add_child(fetch_node);
                 }
                 for (_, table_name, _, row_count, elapsed) in &pre_fetch_results {
@@ -517,6 +511,15 @@ impl QueryExecutor {
             .await;
         }
 
+        // Separate window measures from normal measures.
+        let (window_measures, _non_window): (Vec<&Measure>, Vec<&Measure>) =
+            measures.iter().partition(|m| m.expression().has_window());
+
+        // If we have window measures, evaluate them via two-stage window execution.
+        if !window_measures.is_empty() {
+            return Self::execute_window_measures(&ctx, &window_measures, group_by, model).await;
+        }
+
         // Build the SQL query for the local aggregation.
         let fact_table = &measures[0].table().to_lowercase();
         let fact_model_name = measures[0].table();
@@ -584,16 +587,26 @@ impl QueryExecutor {
                         context_join_tables.push(f.table.clone());
                     }
                 }
+                // Record tables from expression conditions.
+                for cond in &eval_ctx.conditions {
+                    collect_qualified_tables(cond, fact_model_name, &mut context_join_tables);
+                }
 
                 // Collect alias map from USERELATIONSHIP overrides.
-                let alias_map =
-                    build_override_alias_map(&eval_ctx, model, fact_model_name, fact_table, &mut override_joins);
+                let alias_map = build_override_alias_map(
+                    &eval_ctx,
+                    model,
+                    fact_model_name,
+                    fact_table,
+                    &mut override_joins,
+                );
 
-                if !effective.is_empty() {
+                if !effective.is_empty() || !eval_ctx.conditions.is_empty() {
                     // Track measures with CASE WHEN for HAVING clause.
                     case_when_measures.push(name.to_string());
-                    let condition = build_condition_sql_with_aliases(
+                    let condition = build_condition_sql_with_conditions(
                         &effective,
+                        &eval_ctx.conditions,
                         fact_table,
                         fact_model_name,
                         model,
@@ -701,9 +714,7 @@ impl QueryExecutor {
             if !joined_tables.contains(alias) {
                 // The source table name is the alias prefix before "__".
                 let source_table = alias.split("__").next().unwrap_or(alias);
-                sql.push_str(&format!(
-                    " JOIN {source_table} AS {alias} ON {on_clause}"
-                ));
+                sql.push_str(&format!(" JOIN {source_table} AS {alias} ON {on_clause}"));
                 join_descriptions.push(on_clause.clone());
                 joined_tables.insert(alias.clone());
             }
@@ -776,9 +787,8 @@ impl QueryExecutor {
                             }
                         }
                         // Remove the extra column from the batch.
-                        let keep: Vec<usize> = (0..schema.fields().len())
-                            .filter(|&i| i != idx)
-                            .collect();
+                        let keep: Vec<usize> =
+                            (0..schema.fields().len()).filter(|&i| i != idx).collect();
                         let projected = batch.project(&keep)?;
                         stripped.push(projected);
                     } else {
@@ -786,7 +796,10 @@ impl QueryExecutor {
                     }
                 }
                 if join_rows_total > 0 {
-                    agg_node.add_property("intermediate_rows", PlanValue::Number(join_rows_total as f64));
+                    agg_node.add_property(
+                        "intermediate_rows",
+                        PlanValue::Number(join_rows_total as f64),
+                    );
                 }
                 stripped
             };
@@ -1047,6 +1060,298 @@ impl QueryExecutor {
 
         Ok(all_batches)
     }
+
+    /// Evaluate window measures via two-stage execution.
+    ///
+    /// Stage 1: Materialize inner measure grouped by ORDER BY + PARTITION BY
+    ///          columns (+ outer GROUP BY for context propagation).
+    /// Stage 2: Apply SQL window function over the materialized result.
+    async fn execute_window_measures(
+        ctx: &SessionContext,
+        window_measures: &[&Measure],
+        group_by: &[ColumnRef],
+        model: &DataModel,
+    ) -> QueryResult<Vec<RecordBatch>> {
+        let resolver = ContextResolver::new(model);
+        let mut all_batches: Vec<RecordBatch> = Vec::new();
+
+        for measure in window_measures {
+            let name = measure.name();
+            let expr = measure.expression();
+            let fact_table = measure.table();
+
+            // Resolve context operations on the inner expression.
+            let (stripped_expr, _eval_ctx) = resolver.resolve(expr)?;
+
+            // Extract window parameters from the (potentially context-stripped) expression.
+            let (inner, window_info) = extract_window_info(&stripped_expr)?;
+
+            // Build the group-by columns for stage 1: ORDERBY + PARTITIONBY + outer GROUP BY.
+            let mut stage1_group_by: Vec<(String, String)> = Vec::new();
+            for (table, column) in &window_info.order_by {
+                if !stage1_group_by
+                    .iter()
+                    .any(|(t, c)| t.eq_ignore_ascii_case(table) && c.eq_ignore_ascii_case(column))
+                {
+                    stage1_group_by.push((table.clone(), column.clone()));
+                }
+            }
+            for (table, column) in &window_info.partition_by {
+                if !stage1_group_by
+                    .iter()
+                    .any(|(t, c)| t.eq_ignore_ascii_case(table) && c.eq_ignore_ascii_case(column))
+                {
+                    stage1_group_by.push((table.clone(), column.clone()));
+                }
+            }
+            // Inject outer GROUP BY for context propagation.
+            for dim in group_by {
+                if !stage1_group_by.iter().any(|(t, c)| {
+                    t.eq_ignore_ascii_case(&dim.table) && c.eq_ignore_ascii_case(&dim.column)
+                }) {
+                    stage1_group_by.push((dim.table.clone(), dim.column.clone()));
+                }
+            }
+
+            // Stage 1: Materialize inner measure grouped by stage1_group_by.
+            let base_table_name = format!("__window_{}", name.to_lowercase());
+            let agg_pair = vec![(inner.clone(), "__val".to_string())];
+            let batch = materialize_query_in_pipeline(
+                ctx,
+                &agg_pair,
+                &stage1_group_by,
+                &fact_table.to_lowercase(),
+                &[],
+                model,
+            )
+            .await?;
+            ctx.register_batch(&base_table_name, batch)?;
+
+            // Stage 2: Build and execute window function SQL.
+            let mut select_parts: Vec<String> = Vec::new();
+
+            // Include outer GROUP BY columns in SELECT.
+            for dim in group_by {
+                let col_lower = dim.column.to_lowercase();
+                select_parts.push(format!("\"{col_lower}\""));
+            }
+
+            // Build the window function expression.
+            let window_sql = build_window_sql(&window_info, &stage1_group_by, group_by, name);
+            select_parts.push(window_sql);
+
+            let sql = format!("SELECT {} FROM {base_table_name}", select_parts.join(", "));
+
+            let df = ctx.sql(&sql).await?;
+            let batches = df.collect().await?;
+            all_batches.extend(batches);
+        }
+
+        // If multiple window measures, we'd need to join results.
+        // For now, return the batches from the last (or only) measure.
+        Ok(all_batches)
+    }
+}
+
+/// Extracted window function parameters.
+struct WindowInfo {
+    /// Window aggregate function (for WINDOW) or None (for OFFSET/INDEX).
+    function: Option<engine_core::compute::aggregate::AggregateOp>,
+    /// ORDER BY columns.
+    order_by: Vec<(String, String)>,
+    /// PARTITION BY columns.
+    partition_by: Vec<(String, String)>,
+    /// Window frame (for WINDOW).
+    frame: Option<engine_core::compute::expression::WindowFrame>,
+    /// OFFSET delta (for OFFSET).
+    delta: Option<i64>,
+    /// INDEX position (for INDEX).
+    position: Option<i64>,
+}
+
+/// Extract window parameters from an expression, returning (inner_measure, window_info).
+fn extract_window_info(expr: &Expression) -> QueryResult<(Expression, WindowInfo)> {
+    match expr {
+        Expression::Window {
+            inner,
+            function,
+            order_by,
+            partition_by,
+            frame,
+        } => Ok((
+            *inner.clone(),
+            WindowInfo {
+                function: Some(*function),
+                order_by: order_by.clone(),
+                partition_by: partition_by.clone(),
+                frame: frame.clone(),
+                delta: None,
+                position: None,
+            },
+        )),
+        Expression::Offset {
+            inner,
+            delta,
+            order_by,
+            partition_by,
+        } => Ok((
+            *inner.clone(),
+            WindowInfo {
+                function: None,
+                order_by: order_by.clone(),
+                partition_by: partition_by.clone(),
+                frame: None,
+                delta: Some(*delta),
+                position: None,
+            },
+        )),
+        Expression::Index {
+            inner,
+            position,
+            order_by,
+            partition_by,
+        } => Ok((
+            *inner.clone(),
+            WindowInfo {
+                function: None,
+                order_by: order_by.clone(),
+                partition_by: partition_by.clone(),
+                frame: None,
+                delta: None,
+                position: Some(*position),
+            },
+        )),
+        _ => Err(crate::error::QueryError::InvalidQuery(
+            "expected Window, Offset, or Index expression".into(),
+        )),
+    }
+}
+
+/// Build the SQL window function expression for stage 2.
+fn build_window_sql(
+    info: &WindowInfo,
+    _stage1_group_by: &[(String, String)],
+    outer_group_by: &[ColumnRef],
+    measure_name: &str,
+) -> String {
+    use engine_core::compute::aggregate::AggregateOp;
+
+    // Build ORDER BY clause.
+    let order_clause: Vec<String> = info
+        .order_by
+        .iter()
+        .map(|(_, col)| format!("\"{}\"", col.to_lowercase()))
+        .collect();
+    let order_sql = order_clause.join(", ");
+
+    // Build PARTITION BY clause (includes outer group-by columns that aren't in ORDER BY).
+    let mut partition_cols: Vec<String> = info
+        .partition_by
+        .iter()
+        .map(|(_, col)| format!("\"{}\"", col.to_lowercase()))
+        .collect();
+    // Add outer group-by columns to PARTITION BY if not already in ORDER BY or PARTITION BY.
+    for dim in outer_group_by {
+        let col_lower = dim.column.to_lowercase();
+        let col_quoted = format!("\"{col_lower}\"");
+        if !partition_cols.contains(&col_quoted) && !order_clause.contains(&col_quoted) {
+            partition_cols.push(col_quoted);
+        }
+    }
+    let partition_sql = if partition_cols.is_empty() {
+        String::new()
+    } else {
+        format!("PARTITION BY {} ", partition_cols.join(", "))
+    };
+
+    if let Some(function) = info.function {
+        // WINDOW: AGG("__val") OVER (PARTITION BY ... ORDER BY ... ROWS BETWEEN ...)
+        let func_name = match function {
+            AggregateOp::Sum => "SUM",
+            AggregateOp::Average => "AVG",
+            AggregateOp::Min => "MIN",
+            AggregateOp::Max => "MAX",
+            AggregateOp::Count => "COUNT",
+            AggregateOp::DistinctCount => "COUNT",
+            AggregateOp::CountRows => "COUNT",
+        };
+
+        let frame_sql = match &info.frame {
+            Some(frame) => translate_frame(frame),
+            None => "ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW".to_string(),
+        };
+
+        format!(
+            "{func_name}(\"__val\") OVER ({partition_sql}ORDER BY {order_sql} {frame_sql}) AS \"{measure_name}\""
+        )
+    } else if let Some(delta) = info.delta {
+        // OFFSET: LAG/LEAD("__val", N) OVER (...)
+        if delta < 0 {
+            format!(
+                "LAG(\"__val\", {}) OVER ({partition_sql}ORDER BY {order_sql}) AS \"{measure_name}\"",
+                delta.unsigned_abs()
+            )
+        } else {
+            format!(
+                "LEAD(\"__val\", {delta}) OVER ({partition_sql}ORDER BY {order_sql}) AS \"{measure_name}\""
+            )
+        }
+    } else if let Some(position) = info.position {
+        // INDEX: NTH_VALUE("__val", N) OVER (...) with full frame.
+        if position >= 1 {
+            format!(
+                "NTH_VALUE(\"__val\", {position}) OVER ({partition_sql}ORDER BY {order_sql} ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING) AS \"{measure_name}\""
+            )
+        } else {
+            // Negative position: from end. Use NTH_VALUE with reversed ordering.
+            let reverse_order: Vec<String> = info
+                .order_by
+                .iter()
+                .map(|(_, col)| format!("\"{}\" DESC", col.to_lowercase()))
+                .collect();
+            let rev_order_sql = reverse_order.join(", ");
+            let abs_pos = position.unsigned_abs();
+            format!(
+                "NTH_VALUE(\"__val\", {abs_pos}) OVER ({partition_sql}ORDER BY {rev_order_sql} ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING) AS \"{measure_name}\""
+            )
+        }
+    } else {
+        format!("\"__val\" AS \"{measure_name}\"")
+    }
+}
+
+/// Translate a DAX-style WindowFrame to SQL ROWS BETWEEN clause.
+fn translate_frame(frame: &engine_core::compute::expression::WindowFrame) -> String {
+    use engine_core::compute::expression::BoundaryType;
+
+    let from_sql = match (frame.from, frame.from_type) {
+        (1, BoundaryType::Abs) | (0, BoundaryType::Abs) => "UNBOUNDED PRECEDING".to_string(),
+        (0, BoundaryType::Rel) => "CURRENT ROW".to_string(),
+        (n, BoundaryType::Rel) if n < 0 => format!("{} PRECEDING", n.unsigned_abs()),
+        (n, BoundaryType::Rel) => format!("{n} FOLLOWING"),
+        (n, BoundaryType::Abs) if n > 0 => {
+            // Absolute position from start — approximate as UNBOUNDED PRECEDING
+            // (DataFusion doesn't support absolute row positioning directly).
+            "UNBOUNDED PRECEDING".to_string()
+        }
+        (n, BoundaryType::Abs) if n < 0 => {
+            // Absolute from end — approximate as UNBOUNDED FOLLOWING.
+            "UNBOUNDED PRECEDING".to_string()
+        }
+        _ => "CURRENT ROW".to_string(),
+    };
+
+    let to_sql = match (frame.to, frame.to_type) {
+        (-1, BoundaryType::Abs) | (0, BoundaryType::Abs) => "UNBOUNDED FOLLOWING".to_string(),
+        (0, BoundaryType::Rel) => "CURRENT ROW".to_string(),
+        (n, BoundaryType::Rel) if n < 0 => format!("{} PRECEDING", n.unsigned_abs()),
+        (n, BoundaryType::Rel) => format!("{n} FOLLOWING"),
+        (n, BoundaryType::Abs) if n < 0 => "UNBOUNDED FOLLOWING".to_string(),
+        (n, BoundaryType::Abs) if n > 0 => "UNBOUNDED FOLLOWING".to_string(),
+        _ => "CURRENT ROW".to_string(),
+    };
+
+    format!("ROWS BETWEEN {from_sql} AND {to_sql}")
 }
 
 /// Materialize a QUERY binding in the pipeline context.
@@ -1265,8 +1570,11 @@ fn build_override_alias_map(
 
         // Create an alias: dim_table__rel_name (lowercased, sanitized).
         let alias = format!(
-            "{}__{}", dim_table.to_lowercase(),
-            rel_name.to_lowercase().replace(|c: char| !c.is_alphanumeric(), "_")
+            "{}__{}",
+            dim_table.to_lowercase(),
+            rel_name
+                .to_lowercase()
+                .replace(|c: char| !c.is_alphanumeric(), "_")
         );
         let left_is_from = rel.from_table() == fact_model_name;
         let on_clause = rel.build_on_clause(fact_table, &alias, left_is_from);
@@ -1288,22 +1596,14 @@ fn build_condition_sql_with_aliases(
     model: &DataModel,
     alias_map: &std::collections::HashMap<String, String>,
 ) -> String {
-    let parts: Vec<String> = filters
-        .iter()
-        .map(|f| {
-            let tbl = if f.table == fact_model_name {
-                fact_table.to_string()
-            } else if let Some(alias) = alias_map.get(&f.table) {
-                alias.clone()
-            } else {
-                f.table.to_lowercase()
-            };
-            let op = f.operator.as_sql();
-            let val = format_filter_value(&f.table, &f.column, &f.value, model);
-            format!("{tbl}.\"{}\" {op} {val}", f.column)
-        })
-        .collect();
-    parts.join(" AND ")
+    build_condition_sql_impl(
+        filters,
+        &[],
+        fact_table,
+        fact_model_name,
+        model,
+        Some(alias_map),
+    )
 }
 
 fn build_condition_sql(
@@ -1312,11 +1612,46 @@ fn build_condition_sql(
     fact_model_name: &str,
     model: &DataModel,
 ) -> String {
-    let parts: Vec<String> = filters
+    build_condition_sql_impl(filters, &[], fact_table, fact_model_name, model, None)
+}
+
+fn build_condition_sql_with_conditions(
+    filters: &[ResolvedFilter],
+    conditions: &[Expression],
+    fact_table: &str,
+    fact_model_name: &str,
+    model: &DataModel,
+    alias_map: &std::collections::HashMap<String, String>,
+) -> String {
+    build_condition_sql_impl(
+        filters,
+        conditions,
+        fact_table,
+        fact_model_name,
+        model,
+        Some(alias_map),
+    )
+}
+
+fn build_condition_sql_impl(
+    filters: &[ResolvedFilter],
+    conditions: &[Expression],
+    fact_table: &str,
+    fact_model_name: &str,
+    model: &DataModel,
+    alias_map: Option<&std::collections::HashMap<String, String>>,
+) -> String {
+    let mut parts: Vec<String> = filters
         .iter()
         .map(|f| {
             let tbl = if f.table == fact_model_name {
                 fact_table.to_string()
+            } else if let Some(map) = alias_map {
+                if let Some(alias) = map.get(&f.table) {
+                    alias.clone()
+                } else {
+                    f.table.to_lowercase()
+                }
             } else {
                 f.table.to_lowercase()
             };
@@ -1325,7 +1660,94 @@ fn build_condition_sql(
             format!("{tbl}.\"{}\" {op} {val}", f.column)
         })
         .collect();
+
+    // Render expression-based conditions with table-qualified column references.
+    for cond in conditions {
+        parts.push(qualify_condition_sql(cond));
+    }
+
     parts.join(" AND ")
+}
+
+/// Collect table names from QualifiedColumnRef nodes in an expression,
+/// excluding the fact table. Used to determine which dimension tables need JOINs.
+fn collect_qualified_tables(expr: &Expression, fact_table: &str, tables: &mut Vec<String>) {
+    match expr {
+        Expression::QualifiedColumnRef { table_or_var, .. } => {
+            if !table_or_var.eq_ignore_ascii_case(fact_table) {
+                tables.push(table_or_var.clone());
+            }
+        }
+        Expression::BinaryOp { left, right, .. }
+        | Expression::Comparison { left, right, .. }
+        | Expression::And(left, right)
+        | Expression::Or(left, right) => {
+            collect_qualified_tables(left, fact_table, tables);
+            collect_qualified_tables(right, fact_table, tables);
+        }
+        Expression::Not(inner) | Expression::IsBlank(inner) => {
+            collect_qualified_tables(inner, fact_table, tables);
+        }
+        _ => {}
+    }
+}
+
+/// Render an expression-based condition as SQL with table-qualified column references.
+///
+/// QualifiedColumnRef nodes are rendered as `table."column"` (lowercased table name).
+fn qualify_condition_sql(expr: &Expression) -> String {
+    match expr {
+        Expression::QualifiedColumnRef {
+            table_or_var,
+            column,
+        } => {
+            let tbl = table_or_var.to_lowercase();
+            format!("{tbl}.\"{column}\"")
+        }
+        Expression::ColumnRef(name) => format!("\"{name}\""),
+        Expression::Comparison { left, op, right } => {
+            format!(
+                "({} {} {})",
+                qualify_condition_sql(left),
+                op.as_sql(),
+                qualify_condition_sql(right)
+            )
+        }
+        Expression::BinaryOp { left, op, right } => {
+            format!(
+                "({} {} {})",
+                qualify_condition_sql(left),
+                op.as_sql(),
+                qualify_condition_sql(right)
+            )
+        }
+        Expression::And(left, right) => {
+            format!(
+                "({} AND {})",
+                qualify_condition_sql(left),
+                qualify_condition_sql(right)
+            )
+        }
+        Expression::Or(left, right) => {
+            format!(
+                "({} OR {})",
+                qualify_condition_sql(left),
+                qualify_condition_sql(right)
+            )
+        }
+        Expression::Not(inner) => format!("(NOT {})", qualify_condition_sql(inner)),
+        Expression::IsBlank(inner) => format!("({} IS NULL)", qualify_condition_sql(inner)),
+        Expression::InList {
+            expr: inner,
+            values,
+        } => {
+            let lhs = qualify_condition_sql(inner);
+            let vals: Vec<String> = values.iter().map(qualify_condition_sql).collect();
+            format!("{lhs} IN ({})", vals.join(", "))
+        }
+        // For literals and other expressions, fall back to to_sql_string().
+        _ => expr.to_sql_string(),
+    }
 }
 
 /// Apply filter conditions to a cached `RecordBatch` using DataFusion.
@@ -1468,7 +1890,14 @@ fn resolve_compound_sql(
             let mapped = args
                 .iter()
                 .map(|a| {
-                    resolve_compound_sql(a, model, fact_table, fact_model_name, context_join_tables, override_joins)
+                    resolve_compound_sql(
+                        a,
+                        model,
+                        fact_table,
+                        fact_model_name,
+                        context_join_tables,
+                        override_joins,
+                    )
                 })
                 .collect::<QueryResult<Vec<_>>>()?;
             Ok(function.to_sql_strs(&mapped))
@@ -1477,7 +1906,14 @@ fn resolve_compound_sql(
             let mapped = exprs
                 .iter()
                 .map(|e| {
-                    resolve_compound_sql(e, model, fact_table, fact_model_name, context_join_tables, override_joins)
+                    resolve_compound_sql(
+                        e,
+                        model,
+                        fact_table,
+                        fact_model_name,
+                        context_join_tables,
+                        override_joins,
+                    )
                 })
                 .collect::<QueryResult<Vec<_>>>()?;
             Ok(format!("COALESCE({})", mapped.join(", ")))
@@ -1564,7 +2000,11 @@ fn resolve_compound_sql(
             }
 
             let condition = build_condition_sql_with_aliases(
-                &effective, fact_table, fact_model_name, model, &alias_map,
+                &effective,
+                fact_table,
+                fact_model_name,
+                model,
+                &alias_map,
             );
             let measure_table = &fact_model_name.to_lowercase();
             Ok(stripped.to_case_when_sql(&condition, measure_table))
