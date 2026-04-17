@@ -13,7 +13,8 @@
       "NotebookEdit"
     ],
     "deny": [
-      "Bash(git *)"
+      "Bash(git commit*)",
+      "Bash(git push*)"
     ],
     "ask": []
   }

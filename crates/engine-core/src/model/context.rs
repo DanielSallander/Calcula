@@ -43,6 +43,8 @@ pub enum ContextOp {
     KeepIn(Vec<InPredicate>),
     /// Inherit all operations from another named context.
     Inherit(String),
+    /// Activate an inactive relationship for this context's scope.
+    UseRelationship(String),
 }
 
 /// A named, reusable context definition.

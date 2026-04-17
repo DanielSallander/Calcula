@@ -336,6 +336,7 @@ impl Parser {
                 Ok(inner)
             }
             Some(Token::Ident(_)) => self.parse_ident_or_call(),
+            Some(Token::LBracket) => self.parse_measure_ref(),
             Some(tok) => Err(EngineError::InvalidData(format!(
                 "unexpected token: {tok:?}"
             ))),
@@ -414,6 +415,7 @@ impl Parser {
             "RESET_INNER" | "RESETINNER" => self.parse_reset_inner_call(),
             "RESET_OUTER" | "RESETOUTER" => self.parse_reset_outer_call(),
             "USING" => self.parse_using_call(),
+            "USERELATIONSHIP" => self.parse_use_relationship_call(),
             // Logical functions (function-call syntax)
             "AND" => self.parse_and_call(),
             "OR" => self.parse_or_call(),
@@ -538,6 +540,7 @@ impl Parser {
                         | "RESET_INNER"
                         | "RESET_OUTER"
                         | "USING"
+                        | "USERELATIONSHIP"
                 );
                 if is_func {
                     // Delegate to the normal atom parser which handles function calls.
@@ -656,6 +659,75 @@ impl Parser {
             expr: Box::new(expr::lit_int(0)), // placeholder
             context_name: name,
         })
+    }
+
+    /// Parse `[MeasureName]` or `[MeasureName](context_args...)`.
+    ///
+    /// A lone `[name]` without a preceding table identifier is a measure reference.
+    /// Optional parenthesized context args wrap the reference with context operations.
+    fn parse_measure_ref(&mut self) -> EngineResult<Expression> {
+        self.advance()?; // consume [
+        let name = match self.advance()?.clone() {
+            Token::Ident(s) => s,
+            tok => {
+                return Err(EngineError::InvalidData(format!(
+                    "expected measure name inside [], got {tok:?}"
+                )));
+            }
+        };
+        self.expect(&Token::RBracket)?;
+
+        let mut result = Expression::MeasureRef(name);
+
+        // Optional context arguments: [MeasureName](KEEP(...), USERELATIONSHIP("rel"), ...)
+        if self.peek() == Some(&Token::LParen) {
+            self.advance()?; // consume (
+            loop {
+                let context_arg = self.parse_context_arg()?;
+                result = wrap_context_op(result, context_arg)?;
+                if self.peek() != Some(&Token::Comma) {
+                    break;
+                }
+                self.advance()?; // consume comma
+            }
+            self.expect(&Token::RParen)?;
+        }
+
+        Ok(result)
+    }
+
+    /// Parse `USERELATIONSHIP(expr, "relationship_name")` or
+    /// `USERELATIONSHIP("relationship_name")` (as context arg in aggregates).
+    fn parse_use_relationship_call(&mut self) -> EngineResult<Expression> {
+        // First argument: could be a string literal (relationship name when used
+        // as context arg) or a full expression (when used as standalone wrapper).
+        let first = match self.peek().cloned() {
+            Some(Token::StringLit(_)) => {
+                // USERELATIONSHIP("rel_name") — context argument form
+                let rel_name = match self.advance()?.clone() {
+                    Token::StringLit(s) => s,
+                    _ => unreachable!(),
+                };
+                self.expect(&Token::RParen)?;
+                return Ok(Expression::UseRelationship {
+                    expr: Box::new(expr::lit_int(0)), // placeholder, replaced by wrap_context_op
+                    relationship_name: rel_name,
+                });
+            }
+            _ => self.parse_expression()?,
+        };
+        // USERELATIONSHIP(expr, "rel_name") — standalone wrapper form
+        self.expect(&Token::Comma)?;
+        let rel_name = match self.advance()?.clone() {
+            Token::StringLit(s) => s,
+            tok => {
+                return Err(EngineError::InvalidData(format!(
+                    "USERELATIONSHIP: expected string literal for relationship name, got {tok:?}"
+                )));
+            }
+        };
+        self.expect(&Token::RParen)?;
+        Ok(expr::use_relationship(first, rel_name))
     }
 
     /// Parse one or more clear targets (table or table[column]), comma-separated.
@@ -1184,8 +1256,11 @@ fn wrap_context_op(aggregate: Expression, context_op: Expression) -> EngineResul
         Expression::ResetInner { .. } => Ok(expr::reset_inner(aggregate)),
         Expression::ResetOuter { .. } => Ok(expr::reset_outer(aggregate)),
         Expression::Using { context_name, .. } => Ok(expr::using(aggregate, context_name)),
+        Expression::UseRelationship {
+            relationship_name, ..
+        } => Ok(expr::use_relationship(aggregate, relationship_name)),
         _ => Err(EngineError::InvalidData(
-            "expected context operation (KEEP, CLEAR, RESET, USING, etc.)".into(),
+            "expected context operation (KEEP, CLEAR, RESET, USING, USERELATIONSHIP, etc.)".into(),
         )),
     }
 }
@@ -1505,6 +1580,20 @@ impl Parser {
                 self.expect(&Token::LParen)?;
                 self.expect(&Token::RParen)?;
                 Ok(ContextOp::ResetOuter)
+            }
+            "USERELATIONSHIP" => {
+                self.advance()?;
+                self.expect(&Token::LParen)?;
+                let rel_name = match self.advance()?.clone() {
+                    Token::StringLit(s) => s,
+                    tok => {
+                        return Err(EngineError::InvalidData(format!(
+                            "USERELATIONSHIP: expected string literal, got {tok:?}"
+                        )));
+                    }
+                };
+                self.expect(&Token::RParen)?;
+                Ok(ContextOp::UseRelationship(rel_name))
             }
             _ => {
                 // Bare name — inherit from another context.
@@ -2864,5 +2953,64 @@ mod tests {
     fn parse_global_invalid_expression() {
         let result = parse_global("bad", "t", "INVALID(((");
         assert!(result.is_err());
+    }
+
+    // --- Measure reference tests ---
+
+    #[test]
+    fn parse_bare_measure_ref() {
+        let expr = parse_measure_expression("[TotalSales]").unwrap();
+        assert!(matches!(expr, Expression::MeasureRef(ref name) if name == "TotalSales"));
+    }
+
+    #[test]
+    fn parse_measure_ref_with_keep() {
+        let expr =
+            parse_measure_expression("[TotalSales](KEEP(dim, dim[year] = 2014))").unwrap();
+        assert!(matches!(expr, Expression::Keep { .. }));
+        if let Expression::Keep { expr: inner, .. } = &expr {
+            assert!(matches!(**inner, Expression::MeasureRef(ref n) if n == "TotalSales"));
+        }
+    }
+
+    #[test]
+    fn parse_measure_ref_with_userelationship() {
+        let expr = parse_measure_expression(
+            "[TotalSales](USERELATIONSHIP(\"Sales_Dates_Ship\"))",
+        )
+        .unwrap();
+        assert!(matches!(expr, Expression::UseRelationship { .. }));
+        if let Expression::UseRelationship {
+            expr: inner,
+            relationship_name,
+        } = &expr
+        {
+            assert!(matches!(**inner, Expression::MeasureRef(ref n) if n == "TotalSales"));
+            assert_eq!(relationship_name, "Sales_Dates_Ship");
+        }
+    }
+
+    #[test]
+    fn parse_measure_ref_with_multiple_context_ops() {
+        let expr = parse_measure_expression(
+            "[TotalSales](USERELATIONSHIP(\"rel\"), KEEP(dim, dim[y] = 2024))",
+        )
+        .unwrap();
+        // Outer should be Keep (last context arg wraps outermost)
+        assert!(matches!(expr, Expression::Keep { .. }));
+        if let Expression::Keep { expr: inner, .. } = &expr {
+            // Inner should be UseRelationship
+            assert!(matches!(**inner, Expression::UseRelationship { .. }));
+        }
+    }
+
+    #[test]
+    fn parse_measure_ref_in_arithmetic() {
+        let expr = parse_measure_expression("[A] + [B]").unwrap();
+        assert!(matches!(expr, Expression::BinaryOp { .. }));
+        if let Expression::BinaryOp { left, right, .. } = &expr {
+            assert!(matches!(**left, Expression::MeasureRef(ref n) if n == "A"));
+            assert!(matches!(**right, Expression::MeasureRef(ref n) if n == "B"));
+        }
     }
 }

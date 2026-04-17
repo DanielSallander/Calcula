@@ -565,6 +565,17 @@ pub enum Expression {
         /// Name of the context definition to apply.
         context_name: String,
     },
+    /// Activate an inactive relationship for the inner expression's evaluation.
+    ///
+    /// `use_relationship(expr, "rel_name")` — within this expression, the named
+    /// (inactive) relationship is used instead of the default active one between
+    /// the same table pair.
+    UseRelationship {
+        /// The inner expression to evaluate with the overridden relationship.
+        expr: Box<Expression>,
+        /// Name of the relationship to activate.
+        relationship_name: String,
+    },
     /// Clear only inner (group-by) filters on specific dimensions.
     ///
     /// `clear_inner(expr, targets...)` — removes group-by context filters,
@@ -599,6 +610,12 @@ pub enum Expression {
         /// The inner expression to evaluate without query-level filters.
         expr: Box<Expression>,
     },
+    /// Reference to another measure by name.
+    ///
+    /// `[MeasureName]` — expanded before evaluation by replacing with the
+    /// referenced measure's expression tree. Must be expanded via
+    /// `expand_measure_refs()` before context resolution or SQL generation.
+    MeasureRef(String),
     /// Reference to a table or table variable.
     ///
     /// Used as a target in `keep()` to apply a table variable's filters.
@@ -797,6 +814,7 @@ impl Expression {
             Expression::ColumnRef(name) => refs.push(name),
             Expression::QualifiedColumnRef { column, .. } => refs.push(column),
             Expression::TableRef(_)
+            | Expression::MeasureRef(_)
             | Expression::LiteralFloat(_)
             | Expression::LiteralInt(_)
             | Expression::LiteralString(_)
@@ -825,6 +843,7 @@ impl Expression {
             | Expression::ResetOuter { expr }
             | Expression::Traverse { expr, .. }
             | Expression::Using { expr, .. }
+            | Expression::UseRelationship { expr, .. }
             | Expression::KeepIn { expr, .. } => {
                 expr.collect_column_refs(refs);
             }
@@ -942,6 +961,7 @@ impl Expression {
             Expression::ColumnRef(_)
             | Expression::QualifiedColumnRef { .. }
             | Expression::TableRef(_)
+            | Expression::MeasureRef(_)
             | Expression::LiteralFloat(_)
             | Expression::LiteralInt(_)
             | Expression::LiteralString(_)
@@ -963,6 +983,7 @@ impl Expression {
             | Expression::ResetOuter { expr }
             | Expression::Traverse { expr, .. }
             | Expression::Using { expr, .. }
+            | Expression::UseRelationship { expr, .. }
             | Expression::KeepIn { expr, .. } => expr.has_aggregate(),
             Expression::Block { bindings, result } => {
                 bindings.iter().any(|(_, e)| e.has_aggregate()) || result.has_aggregate()
@@ -1013,6 +1034,7 @@ impl Expression {
             Expression::ColumnRef(_)
             | Expression::QualifiedColumnRef { .. }
             | Expression::TableRef(_)
+            | Expression::MeasureRef(_)
             | Expression::LiteralFloat(_)
             | Expression::LiteralInt(_)
             | Expression::LiteralString(_)
@@ -1034,6 +1056,7 @@ impl Expression {
             | Expression::ResetOuter { .. }
             | Expression::Traverse { .. }
             | Expression::Using { .. }
+            | Expression::UseRelationship { .. }
             | Expression::KeepIn { .. }
             | Expression::Block { .. } => true,
             Expression::If {
@@ -1097,6 +1120,7 @@ impl Expression {
             Expression::ColumnRef(_)
             | Expression::QualifiedColumnRef { .. }
             | Expression::TableRef(_)
+            | Expression::MeasureRef(_)
             | Expression::LiteralFloat(_)
             | Expression::LiteralInt(_)
             | Expression::LiteralString(_)
@@ -1142,7 +1166,8 @@ impl Expression {
             | Expression::ResetInner { expr }
             | Expression::ResetOuter { expr }
             | Expression::Traverse { expr, .. }
-            | Expression::Using { expr, .. } => {
+            | Expression::Using { expr, .. }
+            | Expression::UseRelationship { expr, .. } => {
                 expr.collect_context_filter_tables(tables);
             }
             Expression::Block { bindings, result } => {
@@ -1426,6 +1451,9 @@ impl Expression {
             Expression::ColumnRef(name) => format!("\"{name}\""),
             Expression::QualifiedColumnRef { column, .. } => format!("\"{column}\""),
             Expression::TableRef(_) => String::new(),
+            Expression::MeasureRef(name) => {
+                panic!("MeasureRef '{name}' must be expanded before SQL generation")
+            }
             Expression::LiteralFloat(v) => format!("{v}"),
             Expression::LiteralInt(v) => format!("{v}"),
             Expression::LiteralBool(b) => {
@@ -1464,6 +1492,7 @@ impl Expression {
             | Expression::ResetOuter { expr }
             | Expression::Traverse { expr, .. }
             | Expression::Using { expr, .. }
+            | Expression::UseRelationship { expr, .. }
             | Expression::KeepIn { expr, .. } => expr.to_sql_string(),
             Expression::Block { .. } => self.inline_bindings().to_sql_string(),
             Expression::Blank => "NULL".to_string(),
@@ -1864,6 +1893,14 @@ pub fn using(expr: Expression, context_name: impl Into<String>) -> Expression {
     }
 }
 
+/// Create a `use_relationship()` expression — activate an inactive relationship.
+pub fn use_relationship(expr: Expression, relationship_name: impl Into<String>) -> Expression {
+    Expression::UseRelationship {
+        expr: Box::new(expr),
+        relationship_name: relationship_name.into(),
+    }
+}
+
 /// Create a `keep_in()` expression — apply IN-membership filters.
 pub fn keep_in(expr: Expression, predicates: Vec<InPredicate>) -> Expression {
     Expression::KeepIn {
@@ -2058,6 +2095,157 @@ pub fn first_value(column: Expression, order_by: Expression) -> Expression {
 ///
 /// The function is idempotent: if no global references are found, the expression
 /// is returned unchanged (cloned).
+/// Returns `true` if the expression tree contains any `MeasureRef` nodes.
+pub fn has_measure_ref(expr: &Expression) -> bool {
+    match expr {
+        Expression::MeasureRef(_) => true,
+        Expression::BinaryOp { left, right, .. }
+        | Expression::Comparison { left, right, .. }
+        | Expression::And(left, right)
+        | Expression::Or(left, right)
+        | Expression::Xor(left, right) => has_measure_ref(left) || has_measure_ref(right),
+        Expression::Not(inner) | Expression::IsBlank(inner) => has_measure_ref(inner),
+        Expression::Aggregate { operand, .. } => has_measure_ref(operand),
+        Expression::Keep { expr, .. }
+        | Expression::Clear { expr, .. }
+        | Expression::Reset { expr }
+        | Expression::ClearInner { expr, .. }
+        | Expression::ClearOuter { expr, .. }
+        | Expression::ResetInner { expr }
+        | Expression::ResetOuter { expr }
+        | Expression::Traverse { expr, .. }
+        | Expression::Using { expr, .. }
+        | Expression::UseRelationship { expr, .. }
+        | Expression::KeepIn { expr, .. } => has_measure_ref(expr),
+        Expression::Block { bindings, result } => {
+            bindings.iter().any(|(_, e)| has_measure_ref(e)) || has_measure_ref(result)
+        }
+        _ => false,
+    }
+}
+
+/// Expand all `MeasureRef` nodes by inlining the referenced measure's expression.
+///
+/// Detects circular references (A -> B -> A) and returns an error with the
+/// full chain in the message. Should be called BEFORE `expand_global_variables`.
+pub fn expand_measure_refs(
+    expr: &Expression,
+    model: &crate::model::schema::DataModel,
+) -> crate::error::EngineResult<Expression> {
+    let mut visited = Vec::new();
+    expand_measure_refs_inner(expr, model, &mut visited)
+}
+
+fn expand_measure_refs_inner(
+    expr: &Expression,
+    model: &crate::model::schema::DataModel,
+    visited: &mut Vec<String>,
+) -> crate::error::EngineResult<Expression> {
+    match expr {
+        Expression::MeasureRef(name) => {
+            if visited.contains(name) {
+                visited.push(name.clone());
+                let chain = visited.join(" -> ");
+                return Err(crate::error::EngineError::InvalidData(format!(
+                    "circular measure reference: {chain}"
+                )));
+            }
+            visited.push(name.clone());
+            let measure = model.measure(name)?;
+            let expanded = expand_measure_refs_inner(measure.expression(), model, visited)?;
+            visited.pop();
+            Ok(expanded)
+        }
+        // Context wrappers: recurse into inner expr.
+        Expression::Keep {
+            expr: inner,
+            filters,
+            variables,
+        } => Ok(Expression::Keep {
+            expr: Box::new(expand_measure_refs_inner(inner, model, visited)?),
+            filters: filters.clone(),
+            variables: variables.clone(),
+        }),
+        Expression::Clear {
+            expr: inner,
+            targets,
+        } => Ok(Expression::Clear {
+            expr: Box::new(expand_measure_refs_inner(inner, model, visited)?),
+            targets: targets.clone(),
+        }),
+        Expression::Reset { expr: inner } => Ok(Expression::Reset {
+            expr: Box::new(expand_measure_refs_inner(inner, model, visited)?),
+        }),
+        Expression::Traverse { expr: inner, path } => Ok(Expression::Traverse {
+            expr: Box::new(expand_measure_refs_inner(inner, model, visited)?),
+            path: path.clone(),
+        }),
+        Expression::Using {
+            expr: inner,
+            context_name,
+        } => Ok(Expression::Using {
+            expr: Box::new(expand_measure_refs_inner(inner, model, visited)?),
+            context_name: context_name.clone(),
+        }),
+        Expression::UseRelationship {
+            expr: inner,
+            relationship_name,
+        } => Ok(Expression::UseRelationship {
+            expr: Box::new(expand_measure_refs_inner(inner, model, visited)?),
+            relationship_name: relationship_name.clone(),
+        }),
+        Expression::ClearInner {
+            expr: inner,
+            targets,
+        } => Ok(Expression::ClearInner {
+            expr: Box::new(expand_measure_refs_inner(inner, model, visited)?),
+            targets: targets.clone(),
+        }),
+        Expression::ClearOuter {
+            expr: inner,
+            targets,
+        } => Ok(Expression::ClearOuter {
+            expr: Box::new(expand_measure_refs_inner(inner, model, visited)?),
+            targets: targets.clone(),
+        }),
+        Expression::ResetInner { expr: inner } => Ok(Expression::ResetInner {
+            expr: Box::new(expand_measure_refs_inner(inner, model, visited)?),
+        }),
+        Expression::ResetOuter { expr: inner } => Ok(Expression::ResetOuter {
+            expr: Box::new(expand_measure_refs_inner(inner, model, visited)?),
+        }),
+        Expression::KeepIn {
+            expr: inner,
+            predicates,
+        } => Ok(Expression::KeepIn {
+            expr: Box::new(expand_measure_refs_inner(inner, model, visited)?),
+            predicates: predicates.clone(),
+        }),
+        // Compound expressions: recurse into children.
+        Expression::BinaryOp { left, op, right } => Ok(Expression::BinaryOp {
+            left: Box::new(expand_measure_refs_inner(left, model, visited)?),
+            op: *op,
+            right: Box::new(expand_measure_refs_inner(right, model, visited)?),
+        }),
+        Expression::Aggregate { operation, operand } => Ok(Expression::Aggregate {
+            operation: *operation,
+            operand: Box::new(expand_measure_refs_inner(operand, model, visited)?),
+        }),
+        Expression::Block { bindings, result } => {
+            let expanded_bindings = bindings
+                .iter()
+                .map(|(name, e)| Ok((name.clone(), expand_measure_refs_inner(e, model, visited)?)))
+                .collect::<crate::error::EngineResult<Vec<_>>>()?;
+            Ok(Expression::Block {
+                bindings: expanded_bindings,
+                result: Box::new(expand_measure_refs_inner(result, model, visited)?),
+            })
+        }
+        // Leaf nodes and anything without MeasureRef pass through unchanged.
+        _ => Ok(expr.clone()),
+    }
+}
+
 pub fn expand_global_variables(
     expr: &Expression,
     model: &crate::model::schema::DataModel,
@@ -2131,7 +2319,8 @@ fn collect_query_global_refs(
         | Expression::LiteralString(_)
         | Expression::LiteralBool(_)
         | Expression::Blank
-        | Expression::TableRef(_) => {}
+        | Expression::TableRef(_)
+        | Expression::MeasureRef(_) => {}
         Expression::BinaryOp { left, right, .. }
         | Expression::Comparison { left, right, .. }
         | Expression::And(left, right)
@@ -2155,6 +2344,7 @@ fn collect_query_global_refs(
         | Expression::Clear { expr, .. }
         | Expression::Traverse { expr, .. }
         | Expression::Using { expr, .. }
+        | Expression::UseRelationship { expr, .. }
         | Expression::ClearInner { expr, .. }
         | Expression::ClearOuter { expr, .. }
         | Expression::KeepIn { expr, .. } => {
@@ -2277,6 +2467,13 @@ fn expand_scalar_globals(expr: &Expression, model: &crate::model::schema::DataMo
         } => Expression::Using {
             expr: Box::new(expand_scalar_globals(inner, model)),
             context_name: context_name.clone(),
+        },
+        Expression::UseRelationship {
+            expr: inner,
+            relationship_name,
+        } => Expression::UseRelationship {
+            expr: Box::new(expand_scalar_globals(inner, model)),
+            relationship_name: relationship_name.clone(),
         },
         Expression::ClearInner {
             expr: inner,
@@ -2417,6 +2614,7 @@ fn expand_scalar_globals(expr: &Expression, model: &crate::model::schema::DataMo
         | Expression::LiteralBool(_)
         | Expression::Blank
         | Expression::TableRef(_)
+        | Expression::MeasureRef(_)
         | Expression::QualifiedColumnRef { .. }
         | Expression::Query { .. } => expr.clone(),
     }
@@ -2478,6 +2676,7 @@ pub fn infer_fact_table(expr: &Expression) -> Option<String> {
         | Expression::ResetOuter { expr }
         | Expression::Traverse { expr, .. }
         | Expression::Using { expr, .. }
+        | Expression::UseRelationship { expr, .. }
         | Expression::KeepIn { expr, .. } => infer_fact_table(expr),
         Expression::Block { bindings, result } => {
             for (_, e) in bindings {
@@ -3819,5 +4018,178 @@ mod tests {
             }
             other => panic!("Expected Block, got {other:?}"),
         }
+    }
+
+    // --- MeasureRef expansion tests ---
+
+    #[test]
+    fn expand_measure_ref_simple() {
+        use crate::compute::aggregate::AggregateOp;
+        use crate::compute::measure::Measure;
+        use crate::model::column::Column;
+        use crate::model::schema::DataModel;
+        use crate::model::table::Table;
+        use crate::types::DataType;
+
+        let table = Table::new(
+            "Sales",
+            vec![
+                Column::new("id", DataType::Int64),
+                Column::new("amount", DataType::Float64),
+            ],
+        )
+        .unwrap();
+
+        let total = Measure::new(
+            "TotalSales",
+            agg(AggregateOp::Sum, qualified_col("Sales", "amount")),
+        );
+
+        let ref_measure = Measure::new("RefMeasure", Expression::MeasureRef("TotalSales".into()));
+
+        let model = DataModel::builder()
+            .add_table(table)
+            .add_measure(total)
+            .add_measure(ref_measure)
+            .build()
+            .unwrap();
+
+        let expr = model.measure("RefMeasure").unwrap().expression();
+        let expanded = expand_measure_refs(expr, &model).unwrap();
+        assert!(matches!(expanded, Expression::Aggregate { .. }));
+    }
+
+    #[test]
+    fn expand_measure_ref_with_context() {
+        use crate::compute::aggregate::AggregateOp;
+        use crate::compute::measure::Measure;
+        use crate::model::column::Column;
+        use crate::model::schema::DataModel;
+        use crate::model::table::Table;
+        use crate::types::DataType;
+
+        let table = Table::new(
+            "Sales",
+            vec![
+                Column::new("id", DataType::Int64),
+                Column::new("amount", DataType::Float64),
+            ],
+        )
+        .unwrap();
+
+        let total = Measure::new(
+            "TotalSales",
+            agg(AggregateOp::Sum, qualified_col("Sales", "amount")),
+        );
+
+        // [TotalSales](USERELATIONSHIP("some_rel")) → UseRelationship wrapping expanded expr
+        let ref_expr = use_relationship(
+            Expression::MeasureRef("TotalSales".into()),
+            "some_rel",
+        );
+        let ref_measure = Measure::new("ShipSales", ref_expr);
+
+        let model = DataModel::builder()
+            .add_table(table)
+            .add_measure(total)
+            .add_measure(ref_measure)
+            .build()
+            .unwrap();
+
+        let expr = model.measure("ShipSales").unwrap().expression();
+        let expanded = expand_measure_refs(expr, &model).unwrap();
+        // Should be UseRelationship { expr: Aggregate { Sum, ... }, ... }
+        assert!(matches!(expanded, Expression::UseRelationship { .. }));
+        if let Expression::UseRelationship { expr: inner, .. } = &expanded {
+            assert!(matches!(**inner, Expression::Aggregate { .. }));
+        }
+    }
+
+    #[test]
+    fn expand_measure_ref_circular_detected() {
+        use crate::compute::measure::Measure;
+        use crate::model::column::Column;
+        use crate::model::schema::DataModel;
+        use crate::model::table::Table;
+        use crate::types::DataType;
+
+        let table = Table::new("T", vec![Column::new("x", DataType::Int64)]).unwrap();
+        let m_a = Measure::new("A", Expression::MeasureRef("B".into()));
+        let m_b = Measure::new("B", Expression::MeasureRef("A".into()));
+
+        let result = DataModel::builder()
+            .add_table(table)
+            .add_measure(m_a)
+            .add_measure(m_b)
+            .build();
+
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("circular"));
+    }
+
+    #[test]
+    fn expand_measure_ref_missing_target() {
+        use crate::compute::measure::Measure;
+        use crate::model::column::Column;
+        use crate::model::schema::DataModel;
+        use crate::model::table::Table;
+        use crate::types::DataType;
+
+        let table = Table::new("T", vec![Column::new("x", DataType::Int64)]).unwrap();
+        let m = Measure::new("A", Expression::MeasureRef("NonExistent".into()));
+
+        let result = DataModel::builder()
+            .add_table(table)
+            .add_measure(m)
+            .build();
+
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("NonExistent"));
+    }
+
+    #[test]
+    fn expand_measure_ref_chained() {
+        use crate::compute::aggregate::AggregateOp;
+        use crate::compute::measure::Measure;
+        use crate::model::column::Column;
+        use crate::model::schema::DataModel;
+        use crate::model::table::Table;
+        use crate::types::DataType;
+
+        let table = Table::new(
+            "Sales",
+            vec![
+                Column::new("id", DataType::Int64),
+                Column::new("amount", DataType::Float64),
+            ],
+        )
+        .unwrap();
+
+        let base = Measure::new(
+            "Base",
+            agg(AggregateOp::Sum, qualified_col("Sales", "amount")),
+        );
+        // Mid references Base
+        let mid = Measure::new("Mid", Expression::MeasureRef("Base".into()));
+        // Top references Mid
+        let top = Measure::new("Top", Expression::MeasureRef("Mid".into()));
+
+        let model = DataModel::builder()
+            .add_table(table)
+            .add_measure(base)
+            .add_measure(mid)
+            .add_measure(top)
+            .build()
+            .unwrap();
+
+        let expanded = expand_measure_refs(
+            model.measure("Top").unwrap().expression(),
+            &model,
+        )
+        .unwrap();
+        // Should fully expand to SUM(Sales.amount)
+        assert!(matches!(expanded, Expression::Aggregate { .. }));
     }
 }

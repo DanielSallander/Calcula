@@ -9,8 +9,10 @@ use datafusion::prelude::SessionContext;
 
 use engine_connectors::InFilterCondition;
 use engine_core::compute::aggregate::AggregateOp;
-use engine_core::compute::context::{format_filter_value, ContextResolver, ResolvedFilter};
-use engine_core::compute::expression::{expand_global_variables, Expression};
+use engine_core::compute::context::{
+    format_filter_value, ContextResolver, EvaluationContext, ResolvedFilter,
+};
+use engine_core::compute::expression::{expand_global_variables, expand_measure_refs, Expression};
 use engine_core::compute::measure::Measure;
 use engine_core::compute::plan::{PlanNode, PlanOperation, PlanValue};
 use engine_core::error::EngineError;
@@ -84,17 +86,21 @@ impl QueryExecutor {
         max_inline_in_values: Option<usize>,
         mut plan: Option<&mut PlanNode>,
     ) -> QueryResult<Vec<RecordBatch>> {
-        // Expand global variable references in all measure expressions.
-        let expanded_measures: Vec<Measure> = if model.global_variables().is_empty() {
-            Vec::new() // no globals — use original measures directly
-        } else {
+        // Expand measure references and global variable references.
+        let needs_expansion = measures
+            .iter()
+            .any(|m| m.table().is_empty() || !model.global_variables().is_empty());
+        let expanded_measures: Vec<Measure> = if needs_expansion {
             measures
                 .iter()
                 .map(|m| {
-                    let expanded_expr = expand_global_variables(m.expression(), model);
-                    Measure::new(m.name(), expanded_expr)
+                    let ref_expanded = expand_measure_refs(m.expression(), model)?;
+                    let expanded_expr = expand_global_variables(&ref_expanded, model);
+                    Ok(Measure::new(m.name(), expanded_expr))
                 })
-                .collect()
+                .collect::<Result<Vec<_>, EngineError>>()?
+        } else {
+            Vec::new()
         };
         let measures: &[Measure] = if expanded_measures.is_empty() {
             measures
@@ -534,6 +540,9 @@ impl QueryExecutor {
         let mut context_join_tables: Vec<String> = Vec::new();
         // Measures using CASE WHEN filters — need HAVING to exclude NULL groups.
         let mut case_when_measures: Vec<String> = Vec::new();
+        // Aliased JOINs from USERELATIONSHIP overrides.
+        // Each entry: (alias, on_clause) — added after standard JOINs.
+        let mut override_joins: Vec<(String, String)> = Vec::new();
 
         for measure in measures {
             let name = measure.name();
@@ -561,6 +570,7 @@ impl QueryExecutor {
                     fact_table,
                     fact_model_name,
                     &mut context_join_tables,
+                    &mut override_joins,
                 )?;
                 format!("{expr_sql} AS \"{name}\"")
             } else {
@@ -575,11 +585,20 @@ impl QueryExecutor {
                     }
                 }
 
+                // Collect alias map from USERELATIONSHIP overrides.
+                let alias_map =
+                    build_override_alias_map(&eval_ctx, model, fact_model_name, fact_table, &mut override_joins);
+
                 if !effective.is_empty() {
                     // Track measures with CASE WHEN for HAVING clause.
                     case_when_measures.push(name.to_string());
-                    let condition =
-                        build_condition_sql(&effective, fact_table, fact_model_name, model);
+                    let condition = build_condition_sql_with_aliases(
+                        &effective,
+                        fact_table,
+                        fact_model_name,
+                        model,
+                        &alias_map,
+                    );
                     // Use the measure's own table for column qualification.
                     let measure_table = &measure.table().to_lowercase();
                     let expr_sql = stripped_expr.to_case_when_sql(&condition, measure_table);
@@ -666,6 +685,22 @@ impl QueryExecutor {
                 &mut joined_tables,
                 &mut join_descriptions,
             )?;
+        }
+
+        // Add aliased JOINs from USERELATIONSHIP overrides.
+        // These duplicate a dimension table under a different alias with a
+        // different ON clause so that measures using the override see the
+        // rows matched by the inactive relationship.
+        for (alias, on_clause) in &override_joins {
+            if !joined_tables.contains(alias) {
+                // The source table name is the alias prefix before "__".
+                let source_table = alias.split("__").next().unwrap_or(alias);
+                sql.push_str(&format!(
+                    " JOIN {source_table} AS {alias} ON {on_clause}"
+                ));
+                join_descriptions.push(on_clause.clone());
+                joined_tables.insert(alias.clone());
+            }
         }
 
         // GROUP BY clause.
@@ -1162,6 +1197,76 @@ fn format_intermediate_value(
 }
 
 /// Build a SQL condition string from resolved filters.
+/// Build a map of table name → SQL alias for USERELATIONSHIP overrides.
+///
+/// For each relationship override, determines which dimension table it affects
+/// and creates an aliased JOIN. Returns a map from model table name to the
+/// SQL alias that should be used in filter conditions for this measure.
+fn build_override_alias_map(
+    eval_ctx: &EvaluationContext,
+    model: &DataModel,
+    fact_model_name: &str,
+    fact_table: &str,
+    override_joins: &mut Vec<(String, String)>,
+) -> std::collections::HashMap<String, String> {
+    let mut alias_map = std::collections::HashMap::new();
+
+    for rel_name in &eval_ctx.relationship_overrides {
+        let Ok(rel) = model.relationship(rel_name) else {
+            continue;
+        };
+        // Determine which table is the dimension (not the fact).
+        let dim_table = if rel.from_table() == fact_model_name {
+            rel.to_table()
+        } else if rel.to_table() == fact_model_name {
+            rel.from_table()
+        } else {
+            continue;
+        };
+
+        // Create an alias: dim_table__rel_name (lowercased, sanitized).
+        let alias = format!(
+            "{}__{}", dim_table.to_lowercase(),
+            rel_name.to_lowercase().replace(|c: char| !c.is_alphanumeric(), "_")
+        );
+        let left_is_from = rel.from_table() == fact_model_name;
+        let on_clause = rel.build_on_clause(fact_table, &alias, left_is_from);
+
+        // Check if this alias is already queued.
+        if !override_joins.iter().any(|(a, _)| a == &alias) {
+            override_joins.push((alias.clone(), on_clause));
+        }
+        alias_map.insert(dim_table.to_string(), alias);
+    }
+    alias_map
+}
+
+/// Build SQL conditions, using aliases from USERELATIONSHIP overrides.
+fn build_condition_sql_with_aliases(
+    filters: &[ResolvedFilter],
+    fact_table: &str,
+    fact_model_name: &str,
+    model: &DataModel,
+    alias_map: &std::collections::HashMap<String, String>,
+) -> String {
+    let parts: Vec<String> = filters
+        .iter()
+        .map(|f| {
+            let tbl = if f.table == fact_model_name {
+                fact_table.to_string()
+            } else if let Some(alias) = alias_map.get(&f.table) {
+                alias.clone()
+            } else {
+                f.table.to_lowercase()
+            };
+            let op = f.operator.as_sql();
+            let val = format_filter_value(&f.table, &f.column, &f.value, model);
+            format!("{tbl}.\"{}\" {op} {val}", f.column)
+        })
+        .collect();
+    parts.join(" AND ")
+}
+
 fn build_condition_sql(
     filters: &[ResolvedFilter],
     fact_table: &str,
@@ -1261,6 +1366,7 @@ fn resolve_compound_sql(
     fact_table: &str,
     fact_model_name: &str,
     context_join_tables: &mut Vec<String>,
+    override_joins: &mut Vec<(String, String)>,
 ) -> QueryResult<String> {
     match expr {
         // Compound expressions: recurse into each operand independently.
@@ -1271,6 +1377,7 @@ fn resolve_compound_sql(
                 fact_table,
                 fact_model_name,
                 context_join_tables,
+                override_joins,
             )?;
             let r = resolve_compound_sql(
                 right,
@@ -1278,6 +1385,7 @@ fn resolve_compound_sql(
                 fact_table,
                 fact_model_name,
                 context_join_tables,
+                override_joins,
             )?;
             Ok(format!("({l} {} {r})", op.as_sql()))
         }
@@ -1292,6 +1400,7 @@ fn resolve_compound_sql(
                 fact_table,
                 fact_model_name,
                 context_join_tables,
+                override_joins,
             )?;
             let d = resolve_compound_sql(
                 denominator,
@@ -1299,6 +1408,7 @@ fn resolve_compound_sql(
                 fact_table,
                 fact_model_name,
                 context_join_tables,
+                override_joins,
             )?;
             let alt = match alternate {
                 Some(a) => resolve_compound_sql(
@@ -1307,6 +1417,7 @@ fn resolve_compound_sql(
                     fact_table,
                     fact_model_name,
                     context_join_tables,
+                    override_joins,
                 )?,
                 None => "NULL".to_string(),
             };
@@ -1318,7 +1429,7 @@ fn resolve_compound_sql(
             let mapped = args
                 .iter()
                 .map(|a| {
-                    resolve_compound_sql(a, model, fact_table, fact_model_name, context_join_tables)
+                    resolve_compound_sql(a, model, fact_table, fact_model_name, context_join_tables, override_joins)
                 })
                 .collect::<QueryResult<Vec<_>>>()?;
             Ok(function.to_sql_strs(&mapped))
@@ -1327,7 +1438,7 @@ fn resolve_compound_sql(
             let mapped = exprs
                 .iter()
                 .map(|e| {
-                    resolve_compound_sql(e, model, fact_table, fact_model_name, context_join_tables)
+                    resolve_compound_sql(e, model, fact_table, fact_model_name, context_join_tables, override_joins)
                 })
                 .collect::<QueryResult<Vec<_>>>()?;
             Ok(format!("COALESCE({})", mapped.join(", ")))
@@ -1343,6 +1454,7 @@ fn resolve_compound_sql(
                 fact_table,
                 fact_model_name,
                 context_join_tables,
+                override_joins,
             )?;
             let t = resolve_compound_sql(
                 then_expr,
@@ -1350,6 +1462,7 @@ fn resolve_compound_sql(
                 fact_table,
                 fact_model_name,
                 context_join_tables,
+                override_joins,
             )?;
             let e = resolve_compound_sql(
                 else_expr,
@@ -1357,6 +1470,7 @@ fn resolve_compound_sql(
                 fact_table,
                 fact_model_name,
                 context_join_tables,
+                override_joins,
             )?;
             Ok(format!("CASE WHEN {c} THEN {t} ELSE {e} END"))
         }
@@ -1367,6 +1481,7 @@ fn resolve_compound_sql(
                 fact_table,
                 fact_model_name,
                 context_join_tables,
+                override_joins,
             )?;
             Ok(format!("({i} IS NULL)"))
         }
@@ -1377,6 +1492,7 @@ fn resolve_compound_sql(
                 fact_table,
                 fact_model_name,
                 context_join_tables,
+                override_joins,
             )?;
             Ok(format!("(NOT {i})"))
         }
@@ -1393,6 +1509,10 @@ fn resolve_compound_sql(
                 }
             }
 
+            // Collect alias map from USERELATIONSHIP overrides.
+            let alias_map =
+                build_override_alias_map(&ctx, model, fact_model_name, fact_table, override_joins);
+
             if effective.is_empty() {
                 return resolve_compound_sql(
                     &stripped,
@@ -1400,10 +1520,13 @@ fn resolve_compound_sql(
                     fact_table,
                     fact_model_name,
                     context_join_tables,
+                    override_joins,
                 );
             }
 
-            let condition = build_condition_sql(&effective, fact_table, fact_model_name, model);
+            let condition = build_condition_sql_with_aliases(
+                &effective, fact_table, fact_model_name, model, &alias_map,
+            );
             let measure_table = &fact_model_name.to_lowercase();
             Ok(stripped.to_case_when_sql(&condition, measure_table))
         }

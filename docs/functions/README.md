@@ -122,6 +122,7 @@ Functions that modify the evaluation context — the set of filters applied when
 | [KEEP](KEEP.md) | Adds filter conditions to the evaluation context |
 | [CLEAR](CLEAR.md) | Removes filters on a specific table or column |
 | [RESET](RESET.md) | Removes all filters from the evaluation context |
+| [USERELATIONSHIP](USERELATIONSHIP.md) | Activates an inactive relationship for the measure's evaluation |
 
 ### Source-Specific Context Functions
 
@@ -235,6 +236,9 @@ DEFINE Label = SWITCH(INT(DIVIDE(SUM(fact_sales[orderqty]), 1000)), 0, "Small", 
 DEFINE Rev 2014 = SUM(fact_sales[linetotal], KEEP(dim_date, dim_date[year] = 2014))
 DEFINE Rev All Time = SUM(fact_sales[linetotal], CLEAR(dim_date))
 DEFINE Grand Total = SUM(fact_sales[linetotal], RESET())
+
+// Relationship overrides
+DEFINE Ship Revenue = SUM(fact_sales[linetotal], USERELATIONSHIP("Sales_Dates_Ship"))
 
 // Queries
 QUERY: Revenue, Rev 2014 BY dim_product[categoryname]

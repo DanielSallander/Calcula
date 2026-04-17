@@ -12,10 +12,10 @@ use datafusion::prelude::SessionContext;
 
 use crate::compute::aggregate::AggregateResult;
 use crate::compute::context::{
-    format_filter_value, ContextResolver, ResolvedFilter, ResolvedInFilter,
+    format_filter_value, ContextResolver, EvaluationContext, ResolvedFilter, ResolvedInFilter,
 };
 use crate::compute::evaluate::materialize_calculated_columns;
-use crate::compute::expression::expand_global_variables;
+use crate::compute::expression::{expand_global_variables, expand_measure_refs};
 use crate::error::EngineResult;
 use crate::model::schema::DataModel;
 use crate::store::ColumnStore;
@@ -54,10 +54,24 @@ impl<'a> MeasureEngine<'a> {
         outer_filters: &[ResolvedFilter],
     ) -> EngineResult<AggregateResult> {
         let measure = self.model.measure(measure_name)?;
-        let table_name = measure.table();
 
-        // Expand global variable references before context resolution.
-        let expanded = expand_global_variables(measure.expression(), self.model);
+        // Expand measure references, then global variable references.
+        let ref_expanded = expand_measure_refs(measure.expression(), self.model)?;
+        let expanded = expand_global_variables(&ref_expanded, self.model);
+
+        // Infer fact table after expansion (MeasureRef measures have empty cached_table).
+        let table_name_owned;
+        let table_name = if measure.table().is_empty() {
+            table_name_owned = crate::compute::expression::infer_fact_table(&expanded)
+                .ok_or_else(|| {
+                    crate::error::EngineError::InvalidData(format!(
+                        "cannot infer fact table for measure '{measure_name}'"
+                    ))
+                })?;
+            &table_name_owned
+        } else {
+            measure.table()
+        };
 
         // Resolve context operations from the expression.
         let resolver = ContextResolver::new(self.model);
@@ -79,7 +93,7 @@ impl<'a> MeasureEngine<'a> {
 
         // Register dimension tables if we have cross-table filters.
         let cross_table_filters = self
-            .register_cross_table_data(&ctx, table_name, &effective)
+            .register_cross_table_data(&ctx, table_name, &effective, &eval_ctx)
             .await?;
 
         let expr_sql = stripped_expr.to_sql_string();
@@ -143,10 +157,24 @@ impl<'a> MeasureEngine<'a> {
         outer_filters: &[ResolvedFilter],
     ) -> EngineResult<RecordBatch> {
         let measure = self.model.measure(measure_name)?;
-        let fact_table = measure.table();
 
-        // Expand global variable references before context resolution.
-        let expanded = expand_global_variables(measure.expression(), self.model);
+        // Expand measure references, then global variable references.
+        let ref_expanded = expand_measure_refs(measure.expression(), self.model)?;
+        let expanded = expand_global_variables(&ref_expanded, self.model);
+
+        // Infer fact table after expansion (MeasureRef measures have empty cached_table).
+        let fact_table_owned;
+        let fact_table = if measure.table().is_empty() {
+            fact_table_owned = crate::compute::expression::infer_fact_table(&expanded)
+                .ok_or_else(|| {
+                    crate::error::EngineError::InvalidData(format!(
+                        "cannot infer fact table for measure '{measure_name}'"
+                    ))
+                })?;
+            &fact_table_owned
+        } else {
+            measure.table()
+        };
 
         // Resolve context operations.
         let resolver = ContextResolver::new(self.model);
@@ -217,7 +245,7 @@ impl<'a> MeasureEngine<'a> {
                 continue;
             }
 
-            let rel = self.model.find_relationship(fact_table, table_name)?;
+            let rel = eval_ctx.resolve_relationship(self.model, fact_table, table_name)?;
             let left_is_from = rel.from_table() == fact_table;
             let on_clause = rel.build_on_clause(&fact_lower, &dim_lower, left_is_from);
             sql.push_str(&format!(" JOIN {dim_lower} ON {on_clause}"));
@@ -327,7 +355,7 @@ impl<'a> MeasureEngine<'a> {
             } = binding_expr
             {
                 let batch = self
-                    .materialize_query(aggregates, group_by, fact_table, &source_filters)
+                    .materialize_query(aggregates, group_by, fact_table, &source_filters, &[])
                     .await?;
                 let schema = batch.schema();
                 ctx.register_batch(&name.to_lowercase(), batch)?;
@@ -434,7 +462,7 @@ impl<'a> MeasureEngine<'a> {
                 }
 
                 let batch = self
-                    .materialize_query(aggregates, &augmented_gb, fact_table, &source_filters)
+                    .materialize_query(aggregates, &augmented_gb, fact_table, &source_filters, &[])
                     .await?;
                 let schema = batch.schema();
                 ctx.register_batch(&name.to_lowercase(), batch)?;
@@ -505,6 +533,7 @@ impl<'a> MeasureEngine<'a> {
         group_by: &[(String, String)],
         fact_table: &str,
         outer_filters: &[ResolvedFilter],
+        relationship_overrides: &[String],
     ) -> EngineResult<RecordBatch> {
         let ctx = SessionContext::new();
         let fact_lower = fact_table.to_lowercase();
@@ -587,7 +616,12 @@ impl<'a> MeasureEngine<'a> {
             if joined.contains(&dim_lower) {
                 continue;
             }
-            let rel = self.model.find_relationship(fact_table, dim)?;
+            // Use relationship overrides if available.
+            let resolve_ctx = EvaluationContext {
+                relationship_overrides: relationship_overrides.to_vec(),
+                ..Default::default()
+            };
+            let rel = resolve_ctx.resolve_relationship(self.model, fact_table, dim)?;
             let left_is_from = rel.from_table() == fact_table;
             let on_clause = rel.build_on_clause(&fact_lower, &dim_lower, left_is_from);
             sql.push_str(&format!(" JOIN {dim_lower} ON {on_clause}"));
@@ -653,6 +687,7 @@ impl<'a> MeasureEngine<'a> {
         session: &SessionContext,
         fact_table: &str,
         filters: &[ResolvedFilter],
+        eval_ctx: &EvaluationContext,
     ) -> EngineResult<Vec<(String, String)>> {
         let mut joins = Vec::new();
         let mut registered = std::collections::HashSet::new();
@@ -663,8 +698,9 @@ impl<'a> MeasureEngine<'a> {
                 continue;
             }
 
-            // Find relationship between fact table and filter's table.
-            let rel = self.model.find_relationship(fact_table, &filter.table)?;
+            // Find relationship between fact table and filter's table,
+            // respecting USERELATIONSHIP overrides.
+            let rel = eval_ctx.resolve_relationship(self.model, fact_table, &filter.table)?;
             let batch = self.get_table_batch(&filter.table).await?;
             let dim_lower = filter.table.to_lowercase();
             session.register_batch(&dim_lower, batch)?;

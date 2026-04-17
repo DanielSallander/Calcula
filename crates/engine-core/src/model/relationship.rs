@@ -162,10 +162,20 @@ pub struct Relationship {
     cardinality: Cardinality,
     #[serde(default = "default_propagation")]
     propagation: FilterPropagation,
+    /// Whether this relationship is the active default between its table pair.
+    ///
+    /// Only one relationship between any two tables may be active. Inactive
+    /// relationships can be activated per-measure via `USERELATIONSHIP`.
+    #[serde(default = "default_active")]
+    active: bool,
 }
 
 fn default_propagation() -> FilterPropagation {
     FilterPropagation::Auto
+}
+
+fn default_active() -> bool {
+    true
 }
 
 impl Relationship {
@@ -194,6 +204,7 @@ impl Relationship {
             conditions: vec![JoinCondition::equal(from_column, to_column)],
             cardinality,
             propagation,
+            active: true,
         }
     }
 
@@ -216,6 +227,7 @@ impl Relationship {
             conditions,
             cardinality,
             propagation,
+            active: true,
         }
     }
 
@@ -355,6 +367,23 @@ impl Relationship {
     /// Set the filter propagation mode, returning a modified relationship.
     pub fn with_propagation(mut self, propagation: FilterPropagation) -> Self {
         self.propagation = propagation;
+        self
+    }
+
+    /// Returns whether this relationship is the active default between its table pair.
+    ///
+    /// Only one relationship per table pair may be active. Inactive relationships
+    /// can be activated per-measure via `USERELATIONSHIP`.
+    pub fn is_active(&self) -> bool {
+        self.active
+    }
+
+    /// Set whether this relationship is active, returning a modified relationship.
+    ///
+    /// Use this to create inactive relationships that can be activated via
+    /// `USERELATIONSHIP` in measure expressions.
+    pub fn with_active(mut self, active: bool) -> Self {
+        self.active = active;
         self
     }
 }
@@ -562,6 +591,63 @@ mod tests {
         // left_is_from=false means left alias is the "to" table
         let clause = rel.build_on_clause("products", "sales", false);
         assert_eq!(clause, r#"products."id" = sales."pid""#);
+    }
+
+    // --- Active/inactive relationship tests ---
+
+    #[test]
+    fn relationship_defaults_to_active() {
+        let rel = Relationship::many_to_one("R", "Sales", "pid", "Products", "id");
+        assert!(rel.is_active());
+    }
+
+    #[test]
+    fn with_active_sets_inactive() {
+        let rel =
+            Relationship::many_to_one("R", "Sales", "pid", "Products", "id").with_active(false);
+        assert!(!rel.is_active());
+    }
+
+    #[test]
+    fn serde_roundtrip_active_field() {
+        let rel =
+            Relationship::many_to_one("R", "Sales", "pid", "Products", "id").with_active(false);
+        let json = serde_json::to_string(&rel).unwrap();
+        let deserialized: Relationship = serde_json::from_str(&json).unwrap();
+        assert!(!deserialized.is_active());
+    }
+
+    #[test]
+    fn serde_backward_compat_no_active_field() {
+        // JSON without "active" field should deserialize as active (default true).
+        let json = r#"{
+            "name": "R",
+            "from_table": "Sales",
+            "to_table": "Products",
+            "conditions": [{"from_column": "pid", "to_column": "id", "operator": "Equal"}],
+            "cardinality": "ManyToOne",
+            "propagation": "Auto"
+        }"#;
+        let rel: Relationship = serde_json::from_str(json).unwrap();
+        assert!(rel.is_active());
+    }
+
+    #[test]
+    fn with_conditions_defaults_to_active() {
+        let rel = Relationship::with_conditions(
+            "R",
+            "A",
+            "B",
+            vec![JoinCondition::equal("x", "y")],
+            Cardinality::OneToOne,
+        );
+        assert!(rel.is_active());
+    }
+
+    #[test]
+    fn many_to_many_defaults_to_active() {
+        let rel = Relationship::many_to_many("R", "A", "B", vec![JoinCondition::equal("x", "y")]);
+        assert!(rel.is_active());
     }
 
     #[test]

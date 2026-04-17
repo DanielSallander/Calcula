@@ -9,6 +9,7 @@ use std::collections::HashSet;
 use crate::compute::expression::{ComparisonOp, Expression, FilterPredicate, RelationshipPath};
 use crate::error::{EngineError, EngineResult};
 use crate::model::context::{ClearTarget, ContextOp};
+use crate::model::relationship::Relationship;
 use crate::model::schema::DataModel;
 
 /// Identifies where a filter originated.
@@ -155,12 +156,42 @@ pub struct EvaluationContext {
     pub traversals: Vec<RelationshipPath>,
     /// IN-membership filters (resolved from `keep_in()` expressions).
     pub in_filters: Vec<ResolvedInFilter>,
+    /// Relationship overrides from `USERELATIONSHIP()` expressions.
+    ///
+    /// Each entry is a relationship name. When resolving which relationship to
+    /// use between two tables, these are checked in reverse order (innermost
+    /// scope wins) before falling back to the model's active relationship.
+    pub relationship_overrides: Vec<String>,
 }
 
 impl EvaluationContext {
     /// Create an empty context.
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Resolve which relationship to use between two tables, respecting overrides.
+    ///
+    /// Checks `relationship_overrides` in reverse order (innermost scope wins).
+    /// If an override names a relationship that connects the given table pair,
+    /// that relationship is returned. Otherwise falls back to the model's
+    /// active relationship.
+    pub fn resolve_relationship<'a>(
+        &self,
+        model: &'a DataModel,
+        table_a: &str,
+        table_b: &str,
+    ) -> EngineResult<&'a Relationship> {
+        for rel_name in self.relationship_overrides.iter().rev() {
+            if let Ok(rel) = model.relationship(rel_name) {
+                if (rel.from_table() == table_a && rel.to_table() == table_b)
+                    || (rel.from_table() == table_b && rel.to_table() == table_a)
+                {
+                    return Ok(rel);
+                }
+            }
+        }
+        model.find_relationship(table_a, table_b)
     }
 
     /// Apply outer filters, respecting clear/reset operations and filter sources.
@@ -251,7 +282,8 @@ impl<'a> ContextResolver<'a> {
             | Expression::LiteralFloat(_)
             | Expression::LiteralInt(_)
             | Expression::LiteralBool(_)
-            | Expression::TableRef(_) => Ok(expr.clone()),
+            | Expression::TableRef(_)
+            | Expression::MeasureRef(_) => Ok(expr.clone()),
 
             // Qualified column ref: if table_or_var is a table variable, resolve it
             Expression::QualifiedColumnRef {
@@ -403,6 +435,17 @@ impl<'a> ContextResolver<'a> {
                 let inner = self.walk(expr, ctx)?;
                 // Expand the named context
                 self.expand_context(context_name, ctx, &mut HashSet::new())?;
+                Ok(inner)
+            }
+
+            Expression::UseRelationship {
+                expr,
+                relationship_name,
+            } => {
+                let inner = self.walk(expr, ctx)?;
+                // Validate the relationship exists (active or inactive)
+                self.model.relationship(relationship_name)?;
+                ctx.relationship_overrides.push(relationship_name.clone());
                 Ok(inner)
             }
 
@@ -696,6 +739,11 @@ impl<'a> ContextResolver<'a> {
                 }
                 ContextOp::Inherit(parent_name) => {
                     self.expand_context(parent_name, ctx, visited)?;
+                }
+                ContextOp::UseRelationship(rel_name) => {
+                    // Validate the relationship exists
+                    self.model.relationship(rel_name)?;
+                    ctx.relationship_overrides.push(rel_name.clone());
                 }
             }
         }

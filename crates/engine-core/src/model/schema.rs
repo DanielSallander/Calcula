@@ -206,11 +206,35 @@ impl DataModel {
         Ok(())
     }
 
-    /// Find a relationship between two tables (searches both directions).
+    /// Find the active relationship between two tables (searches both directions).
     ///
-    /// Returns the first relationship where one table is on the "from" side
-    /// and the other is on the "to" side.
+    /// Returns the first **active** relationship where one table is on the "from"
+    /// side and the other is on the "to" side. Inactive relationships (used via
+    /// `USERELATIONSHIP`) are skipped.
     pub fn find_relationship(&self, table_a: &str, table_b: &str) -> EngineResult<&Relationship> {
+        self.relationships
+            .iter()
+            .find(|r| {
+                r.is_active()
+                    && ((r.from_table() == table_a && r.to_table() == table_b)
+                        || (r.from_table() == table_b && r.to_table() == table_a))
+            })
+            .ok_or_else(|| {
+                EngineError::RelationshipNotFound(format!(
+                    "No active relationship between '{table_a}' and '{table_b}'"
+                ))
+            })
+    }
+
+    /// Find any relationship between two tables (active or inactive).
+    ///
+    /// Unlike [`find_relationship`](Self::find_relationship), this does not
+    /// filter by active status. Used internally for validation.
+    pub fn find_any_relationship(
+        &self,
+        table_a: &str,
+        table_b: &str,
+    ) -> EngineResult<&Relationship> {
         self.relationships
             .iter()
             .find(|r| {
@@ -394,6 +418,30 @@ impl DataModelBuilder {
             }
         }
 
+        // 3b. At most one active relationship per table pair.
+        {
+            let mut active_pairs = std::collections::HashSet::new();
+            for rel in &self.relationships {
+                if rel.is_active() {
+                    let pair = if rel.from_table() < rel.to_table() {
+                        (rel.from_table().to_string(), rel.to_table().to_string())
+                    } else {
+                        (rel.to_table().to_string(), rel.from_table().to_string())
+                    };
+                    if !active_pairs.insert(pair) {
+                        return Err(EngineError::InvalidRelationship {
+                            relationship: rel.name().to_string(),
+                            reason: format!(
+                                "multiple active relationships between '{}' and '{}'",
+                                rel.from_table(),
+                                rel.to_table()
+                            ),
+                        });
+                    }
+                }
+            }
+        }
+
         // 4. Validate measure groups (before measures, so groups exist for reference).
         let mut seen_groups = std::collections::HashSet::new();
         for group in &self.measure_groups {
@@ -413,6 +461,18 @@ impl DataModelBuilder {
                     "Duplicate measure '{}'",
                     measure.name()
                 )));
+            }
+
+            // Skip table/column validation for measures containing MeasureRef —
+            // their table is inferred after expansion (validated in step 10).
+            if crate::compute::expression::has_measure_ref(measure.expression()) {
+                // If measure references a group, that group must exist.
+                if let Some(group_name) = measure.group() {
+                    if !seen_groups.contains(group_name) {
+                        return Err(EngineError::MeasureGroupNotFound(group_name.to_string()));
+                    }
+                }
+                continue;
             }
 
             // Table must exist.
@@ -673,7 +733,7 @@ impl DataModelBuilder {
             }
         }
 
-        Ok(DataModel {
+        let model = DataModel {
             tables: self.tables,
             relationships: self.relationships,
             measures: self.measures,
@@ -683,7 +743,19 @@ impl DataModelBuilder {
             table_variables: self.table_variables,
             global_variables: self.global_variables,
             default_lookup_resolution: self.default_lookup_resolution,
-        })
+        };
+
+        // 10. Validate measure references are acyclic and target existing measures.
+        for measure in model.measures() {
+            if crate::compute::expression::has_measure_ref(measure.expression()) {
+                crate::compute::expression::expand_measure_refs(
+                    measure.expression(),
+                    &model,
+                )?;
+            }
+        }
+
+        Ok(model)
     }
 }
 
@@ -990,6 +1062,167 @@ mod tests {
         assert_eq!(model.tables().len(), 4);
         assert_eq!(model.relationships().len(), 3);
         assert_eq!(model.relationships_for_table("Sales").len(), 3);
+    }
+
+    // --- Active/inactive relationship tests ---
+
+    #[test]
+    fn find_relationship_skips_inactive() {
+        let active = Relationship::many_to_one("Active", "Sales", "product_id", "Products", "id");
+        let inactive = Relationship::many_to_one("Inactive", "Sales", "store_id", "Stores", "id")
+            .with_active(false);
+
+        let model = DataModel::builder()
+            .add_table(sales_table())
+            .add_table(products_table())
+            .add_table(stores_table())
+            .add_relationship(active)
+            .add_relationship(inactive)
+            .build()
+            .unwrap();
+
+        // Active relationship is found.
+        assert!(model.find_relationship("Sales", "Products").is_ok());
+        // Inactive relationship is NOT found via find_relationship.
+        assert!(model.find_relationship("Sales", "Stores").is_err());
+        // But IS found via find_any_relationship.
+        assert!(model.find_any_relationship("Sales", "Stores").is_ok());
+    }
+
+    #[test]
+    fn find_relationship_prefers_active_when_multiple_exist() {
+        let active =
+            Relationship::many_to_one("Sales_Dates_Order", "Sales", "product_id", "Products", "id");
+        let inactive =
+            Relationship::many_to_one("Sales_Dates_Ship", "Sales", "store_id", "Products", "id")
+                .with_active(false);
+
+        // Need a Products table with both id columns for the join
+        let products = Table::new(
+            "Products",
+            vec![
+                Column::new("id", DataType::Int64),
+                Column::new("name", DataType::String),
+                Column::new("category", DataType::String),
+            ],
+        )
+        .unwrap();
+
+        let model = DataModel::builder()
+            .add_table(sales_table())
+            .add_table(products)
+            .add_relationship(active)
+            .add_relationship(inactive)
+            .build()
+            .unwrap();
+
+        let rel = model.find_relationship("Sales", "Products").unwrap();
+        assert_eq!(rel.name(), "Sales_Dates_Order");
+    }
+
+    #[test]
+    fn rejects_multiple_active_relationships_between_same_tables() {
+        let rel1 =
+            Relationship::many_to_one("Sales_Prod_1", "Sales", "product_id", "Products", "id");
+        let rel2 =
+            Relationship::many_to_one("Sales_Prod_2", "Sales", "store_id", "Products", "id");
+
+        let result = DataModel::builder()
+            .add_table(sales_table())
+            .add_table(products_table())
+            .add_relationship(rel1)
+            .add_relationship(rel2)
+            .build();
+
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("multiple active"));
+    }
+
+    #[test]
+    fn allows_multiple_inactive_relationships_between_same_tables() {
+        let active =
+            Relationship::many_to_one("Sales_Prod_Active", "Sales", "product_id", "Products", "id");
+        let inactive1 =
+            Relationship::many_to_one("Sales_Prod_Alt1", "Sales", "store_id", "Products", "id")
+                .with_active(false);
+        let inactive2 =
+            Relationship::many_to_one("Sales_Prod_Alt2", "Sales", "id", "Products", "id")
+                .with_active(false);
+
+        let model = DataModel::builder()
+            .add_table(sales_table())
+            .add_table(products_table())
+            .add_relationship(active)
+            .add_relationship(inactive1)
+            .add_relationship(inactive2)
+            .build()
+            .unwrap();
+
+        assert_eq!(model.relationships().len(), 3);
+    }
+
+    #[test]
+    fn allows_zero_active_relationships_between_tables() {
+        // Both inactive — valid (no default path, must always use USERELATIONSHIP)
+        let inactive1 =
+            Relationship::many_to_one("Sales_Prod_1", "Sales", "product_id", "Products", "id")
+                .with_active(false);
+        let inactive2 =
+            Relationship::many_to_one("Sales_Prod_2", "Sales", "store_id", "Products", "id")
+                .with_active(false);
+
+        let model = DataModel::builder()
+            .add_table(sales_table())
+            .add_table(products_table())
+            .add_relationship(inactive1)
+            .add_relationship(inactive2)
+            .build()
+            .unwrap();
+
+        // find_relationship should fail (no active)
+        assert!(model.find_relationship("Sales", "Products").is_err());
+        // but find_any_relationship should succeed
+        assert!(model.find_any_relationship("Sales", "Products").is_ok());
+    }
+
+    #[test]
+    fn relationship_by_name_finds_inactive() {
+        let inactive =
+            Relationship::many_to_one("Sales_Prod_Ship", "Sales", "product_id", "Products", "id")
+                .with_active(false);
+
+        let model = DataModel::builder()
+            .add_table(sales_table())
+            .add_table(products_table())
+            .add_relationship(inactive)
+            .build()
+            .unwrap();
+
+        // Lookup by name always works regardless of active status.
+        let rel = model.relationship("Sales_Prod_Ship").unwrap();
+        assert!(!rel.is_active());
+    }
+
+    #[test]
+    fn serde_backward_compat_no_active_field_in_model() {
+        // JSON model without "active" field in relationships should deserialize as active.
+        let json = r#"{
+            "tables": [],
+            "relationships": [{
+                "name": "R",
+                "from_table": "Sales",
+                "to_table": "Products",
+                "conditions": [{"from_column": "pid", "to_column": "id", "operator": "Equal"}],
+                "cardinality": "ManyToOne",
+                "propagation": "Auto"
+            }],
+            "measures": [],
+            "calculated_columns": [],
+            "measure_groups": []
+        }"#;
+        let model: DataModel = serde_json::from_str(json).unwrap();
+        assert!(model.relationships()[0].is_active());
     }
 
     // --- Calculated column tests ---
