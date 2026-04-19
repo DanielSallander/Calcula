@@ -25,11 +25,10 @@
 
     /* ARCHITECTURE PATHS */
     /* This allows imports like: import { ... } from '@api/types' */
-    "baseUrl": ".",
     "paths": {
-      "@api/*": ["src/api/*"],
-      "@core/*": ["src/core/*"],
-      "@shell/*": ["src/shell/*"]
+      "@api/*": ["./src/api/*"],
+      "@core/*": ["./src/core/*"],
+      "@shell/*": ["./src/shell/*"]
     }
   },
   /* CRITICAL FIX: Use glob patterns to automatically include all extension files */

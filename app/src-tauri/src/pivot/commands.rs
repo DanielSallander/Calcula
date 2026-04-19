@@ -3441,9 +3441,10 @@ pub async fn update_bi_pivot_fields(
 
     let has_values = !request.value_fields.is_empty();
     let has_dimensions = !request.row_fields.is_empty() || !request.column_fields.is_empty();
+    let has_filters = !request.filter_fields.is_empty();
 
     // If no fields at all, clear to empty pivot
-    if !has_values && !has_dimensions {
+    if !has_values && !has_dimensions && !has_filters {
         log_info!("PIVOT", "No fields assigned, clearing to empty pivot");
         let mut pivot_tables = pivot_state.pivot_tables.lock().unwrap();
         let (definition, _cache) = pivot_tables
@@ -3476,33 +3477,56 @@ pub async fn update_bi_pivot_fields(
         return Ok(response);
     }
 
-    // If dimensions but no values, show empty too (nothing to aggregate)
-    if !has_values {
-        log_info!("PIVOT", "No value fields, clearing to empty pivot");
+    // When there are dimensions/filters but no user-selected measures, inject a
+    // synthetic measure so the BI engine query succeeds (it requires >= 1 measure).
+    // The synthetic measure column will be present in the cache but NOT mapped to
+    // any value_field in the pivot definition, so the engine renders blank data cells
+    // — matching Excel's behaviour of showing distinct dimension values without aggregates.
+    let synthetic_measure: Option<String> = if !has_values && (has_dimensions || has_filters) {
+        let bi_meta = pivot_state.bi_metadata.lock().unwrap();
+        bi_meta.get(&pivot_id)
+            .and_then(|m| m.measures.first())
+            .map(|m| m.name.clone())
+    } else {
+        None
+    };
+
+    // If we need a synthetic measure but the model has none, we can't query the
+    // BI engine. Save the field assignments to the definition (so they persist
+    // across deselect/reselect) and show an empty pivot.
+    if !has_values && synthetic_measure.is_none() && (has_dimensions || has_filters) {
+        log_info!("PIVOT", "No measures in model for synthetic query, saving fields only");
         let mut pivot_tables = pivot_state.pivot_tables.lock().unwrap();
-        let (definition, _) = pivot_tables
+        let (definition, stored_cache) = pivot_tables
             .get_mut(&pivot_id)
             .ok_or_else(|| format!("Pivot {} not found", pivot_id))?;
 
-        definition.row_fields.clear();
-        definition.column_fields.clear();
+        // Save field assignments (even though we can't compute)
+        definition.row_fields = request.row_fields.iter()
+            .map(|f| PivotField::new(0, format!("{}.{}", f.table, f.column)))
+            .collect();
+        definition.column_fields = request.column_fields.iter()
+            .map(|f| PivotField::new(0, format!("{}.{}", f.table, f.column)))
+            .collect();
         definition.value_fields.clear();
-        definition.filter_fields.clear();
+        definition.filter_fields = request.filter_fields.iter()
+            .map(|f| {
+                let field = PivotField::new(0, format!("{}.{}", f.table, f.column));
+                pivot_engine::PivotFilter {
+                    field,
+                    condition: pivot_engine::FilterCondition::ValueList(Vec::new()),
+                }
+            })
+            .collect();
         definition.bump_version();
 
         let empty_cache = PivotCache::new(pivot_id, 0);
         let view = create_empty_view(pivot_id, definition.version);
         let response = view_to_response(&view, definition, &mut empty_cache.clone());
-
         let destination = definition.destination;
         let dest_sheet_idx = resolve_dest_sheet_index(&state, definition);
+        *stored_cache = empty_cache;
         drop(pivot_tables);
-
-        let mut pt = pivot_state.pivot_tables.lock().unwrap();
-        if let Some((_, cache)) = pt.get_mut(&pivot_id) {
-            *cache = empty_cache;
-        }
-        drop(pt);
 
         update_pivot_in_grid(&state, pivot_id, dest_sheet_idx, destination, &view);
         update_pivot_region(&state, pivot_id, dest_sheet_idx, destination, &view);
@@ -3559,7 +3583,14 @@ pub async fn update_bi_pivot_fields(
     let filter_group_fields: Vec<&BiFieldRef> = request.filter_fields.iter().collect();
 
     // Build BI engine QueryRequest
-    let query_measures: Vec<String> = request.value_fields.iter().map(|v| v.measure_name.clone()).collect();
+    // If no user measures but we have a synthetic one, include it in the query
+    // so the BI engine gets a valid request. The synthetic measure column will
+    // be in the cache but ignored (no value_field maps to it).
+    let query_measures: Vec<String> = if let Some(ref syn) = synthetic_measure {
+        vec![syn.clone()]
+    } else {
+        request.value_fields.iter().map(|v| v.measure_name.clone()).collect()
+    };
     let query_group_by: Vec<bi_engine::ColumnRef> = row_group_fields
         .iter()
         .chain(col_group_fields.iter())
@@ -3612,13 +3643,47 @@ pub async fn update_bi_pivot_fields(
 
     // SAFE ENGINE TAKE: take engine out of connection, drop guard, query, put back
     let t_query = Instant::now();
-    let engine = {
+    let mut engine = {
         let mut connections = bi_state.connections.lock().unwrap();
         let conn = connections.get_mut(&connection_id)
             .ok_or_else(|| format!("Connection {} not found", connection_id))?;
         conn.engine.take().ok_or("No BI model loaded.")?
     };
     // Guard is dropped here — safe to await
+
+    // Auto-refresh in-memory tables that haven't been cached yet.
+    // Multi-table queries go through LocalAggregation which reads from the
+    // in-memory cache — tables must be refreshed at least once before querying.
+    // `needs_refresh(..., Duration::ZERO)` returns true only if the table has
+    // NEVER been refreshed, so this is a one-time cost per table per session.
+    {
+        // Collect all tables referenced by the query (dimensions + measure tables)
+        let tables_to_refresh: Vec<String> = {
+            let mut tables = referenced_tables.clone();
+            let bi_meta = pivot_state.bi_metadata.lock().unwrap();
+            if let Some(meta) = bi_meta.get(&pivot_id) {
+                for measure_name in &query_measures {
+                    if let Some(m) = meta.measures.iter().find(|m| m.name == *measure_name) {
+                        if !tables.contains(&m.table) {
+                            tables.push(m.table.clone());
+                        }
+                    }
+                }
+            }
+            tables
+        }; // bi_meta lock released here
+
+        for table_name in &tables_to_refresh {
+            if engine.needs_refresh(table_name, std::time::Duration::from_secs(0)) {
+                log_info!("PIVOT", "Auto-refreshing in-memory table '{}'", table_name);
+                if let Err(e) = engine.refresh_table(table_name).await {
+                    // Not all tables are in-memory — ignore errors for non-in-memory tables
+                    log_info!("PIVOT", "refresh_table('{}') skipped: {}", table_name, e);
+                }
+            }
+        }
+    }
+
     let query_result = engine.query(query_request).await;
     // PUT BACK before propagating error
     {
@@ -3627,7 +3692,55 @@ pub async fn update_bi_pivot_fields(
             conn.engine = Some(engine);
         }
     }
-    let batches = query_result.map_err(|e| format!("BI query failed: {}", e))?;
+    let batches = match query_result {
+        Ok(b) => b,
+        Err(e) => {
+            // If the query failed and we were using a synthetic measure,
+            // save the field assignments anyway so they persist, then return
+            // an empty view.
+            if synthetic_measure.is_some() {
+                log_info!("PIVOT", "Synthetic measure query failed ({}), saving fields only", e);
+                let mut pivot_tables = pivot_state.pivot_tables.lock().unwrap();
+                let (definition, stored_cache) = pivot_tables
+                    .get_mut(&pivot_id)
+                    .ok_or_else(|| format!("Pivot {} not found", pivot_id))?;
+
+                definition.row_fields = request.row_fields.iter()
+                    .map(|f| PivotField::new(0, format!("{}.{}", f.table, f.column)))
+                    .collect();
+                definition.column_fields = request.column_fields.iter()
+                    .map(|f| PivotField::new(0, format!("{}.{}", f.table, f.column)))
+                    .collect();
+                definition.value_fields.clear();
+                definition.filter_fields = request.filter_fields.iter()
+                    .map(|f| {
+                        let field = PivotField::new(0, format!("{}.{}", f.table, f.column));
+                        pivot_engine::PivotFilter {
+                            field,
+                            condition: pivot_engine::FilterCondition::ValueList(Vec::new()),
+                        }
+                    })
+                    .collect();
+                if let Some(ref layout_config) = request.layout {
+                    apply_layout_config(&mut definition.layout, layout_config);
+                }
+                definition.bump_version();
+
+                let empty_cache = PivotCache::new(pivot_id, 0);
+                let view = create_empty_view(pivot_id, definition.version);
+                let response = view_to_response(&view, definition, &mut empty_cache.clone());
+                let destination = definition.destination;
+                let dest_sheet_idx = resolve_dest_sheet_index(&state, definition);
+                *stored_cache = empty_cache;
+                drop(pivot_tables);
+
+                update_pivot_in_grid(&state, pivot_id, dest_sheet_idx, destination, &view);
+                update_pivot_region(&state, pivot_id, dest_sheet_idx, destination, &view);
+                return Ok(response);
+            }
+            return Err(format!("BI query failed: {}", e));
+        }
+    };
     let query_ms = t_query.elapsed().as_secs_f64() * 1000.0;
 
     log_info!(
@@ -3660,7 +3773,8 @@ pub async fn update_bi_pivot_fields(
 
     // Build a mapping from (table, column) -> cache column index.
     // BI engine result column order: [GROUP BY cols] [Measure cols] [Lookup cols]
-    let num_measures = request.value_fields.len();
+    // num_measures reflects actual query columns (includes synthetic if present)
+    let num_measures = if synthetic_measure.is_some() { 1 } else { request.value_fields.len() };
     let mut field_to_cache_idx: std::collections::HashMap<(String, String), usize> =
         std::collections::HashMap::new();
 
@@ -3735,18 +3849,24 @@ pub async fn update_bi_pivot_fields(
     // Use "[MeasureName]" format so the frontend can extract the measure name
     // consistently via toBiValueFieldRef. The BI engine handles aggregation,
     // so we use Sum as an identity operation on pre-aggregated data.
-    definition.value_fields = request
-        .value_fields
-        .iter()
-        .enumerate()
-        .map(|(i, v)| {
-            ValueField::new(
-                measure_start + i,
-                format!("[{}]", v.measure_name),
-                AggregationType::Sum, // SUM of pre-aggregated = identity
-            )
-        })
-        .collect();
+    // When using a synthetic measure (dimensions-only), leave value_fields empty
+    // so the pivot engine renders blank data cells for each dimension combination.
+    if synthetic_measure.is_some() {
+        definition.value_fields = Vec::new();
+    } else {
+        definition.value_fields = request
+            .value_fields
+            .iter()
+            .enumerate()
+            .map(|(i, v)| {
+                ValueField::new(
+                    measure_start + i,
+                    format!("[{}]", v.measure_name),
+                    AggregationType::Sum, // SUM of pre-aggregated = identity
+                )
+            })
+            .collect();
+    }
 
     // Filter fields — same as row/column fields, map BiFieldRef to PivotFilter
     let old_filter_fields = definition.filter_fields.clone();

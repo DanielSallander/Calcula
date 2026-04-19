@@ -3,7 +3,7 @@
 // CONTEXT: Each scenario stores a set of changing cell values that can be applied
 //          to the spreadsheet. Scenarios are stored per-sheet in AppState.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use tauri::State;
 
 use crate::api_types::{
