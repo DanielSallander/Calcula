@@ -123,6 +123,11 @@ export interface IEditGuardAPI {
   register(guard: (row: number, col: number) => boolean | string): () => void;
 }
 
+/** Range guard registration (blocks drag/move/copy onto protected ranges) */
+export interface IRangeGuardAPI {
+  register(guard: (startRow: number, startCol: number, endRow: number, endCol: number) => { blocked: boolean; message?: string } | null): () => void;
+}
+
 /** Cell click interceptor registration */
 export interface ICellClickAPI {
   registerClickInterceptor(handler: (row: number, col: number, event: MouseEvent) => boolean | Promise<boolean>): () => void;
@@ -182,6 +187,7 @@ export interface ExtensionContext {
     styleInterceptors: IStyleInterceptorAPI;
     overlays: IGridOverlayAPI;
     editGuards: IEditGuardAPI;
+    rangeGuards: IRangeGuardAPI;
     cellClicks: ICellClickAPI;
   };
 }

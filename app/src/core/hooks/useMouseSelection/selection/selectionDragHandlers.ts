@@ -8,6 +8,7 @@ import type { GridConfig, Viewport, DimensionOverrides, Selection, FreezeConfig 
 import type { SelectionDragState, CellPosition, MousePosition } from "../types";
 import { getCellFromPixel, getSelectionBorderAtPixel, getRowFromHeader, getColumnFromHeader } from "../../../lib/gridRenderer";
 import { getCellFromMousePosition } from "../utils/cellUtils";
+import { checkRangeGuards } from "../../../lib/editGuards";
 
 interface SelectionDragDependencies {
   config: GridConfig;
@@ -122,6 +123,17 @@ export function createSelectionDragHandlers(deps: SelectionDragDependencies): Se
     );
 
     if (!borderHit) {
+      return false;
+    }
+
+    // Check if the source selection overlaps a protected range (e.g., pivot table)
+    const srcMinRow = Math.min(selection.startRow, selection.endRow);
+    const srcMaxRow = Math.max(selection.startRow, selection.endRow);
+    const srcMinCol = Math.min(selection.startCol, selection.endCol);
+    const srcMaxCol = Math.max(selection.startCol, selection.endCol);
+    const sourceGuard = checkRangeGuards(srcMinRow, srcMinCol, srcMaxRow, srcMaxCol);
+    if (sourceGuard?.blocked) {
+      if (sourceGuard.message) alert(sourceGuard.message);
       return false;
     }
 
@@ -303,6 +315,15 @@ export function createSelectionDragHandlers(deps: SelectionDragDependencies): Se
       (sourceSelection.type === "cells" && targetRow === sourceMinRow && targetCol === sourceMinCol);
 
     if (!isSamePosition) {
+      // Check if the destination overlaps a protected range (e.g., pivot table)
+      const rowSpan = Math.abs(sourceSelection.endRow - sourceSelection.startRow);
+      const colSpan = Math.abs(sourceSelection.endCol - sourceSelection.startCol);
+      const destGuard = checkRangeGuards(targetRow, targetCol, targetRow + rowSpan, targetCol + colSpan);
+      if (destGuard?.blocked) {
+        if (destGuard.message) alert(destGuard.message);
+        return;
+      }
+
       // Execute the move or copy operation
       try {
         if (copyMode) {

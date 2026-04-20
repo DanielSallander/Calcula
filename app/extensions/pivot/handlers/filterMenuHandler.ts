@@ -132,6 +132,7 @@ async function handleApplyFilter(
     // Trigger pivot and grid refresh
     window.dispatchEvent(new Event("pivot:refresh"));
     window.dispatchEvent(new CustomEvent("grid:refresh"));
+    window.dispatchEvent(new CustomEvent("styles:refresh"));
   } catch (error) {
     console.error("[Pivot Extension] Failed to apply filter:", error);
   }

@@ -88,6 +88,13 @@ export function ensureDesignTabRegistered(): void {
 // ---------------------------------------------------------------------------
 
 /**
+ * Get all cached pivot regions (for guard checks, etc.).
+ */
+export function getCachedRegions(): PivotRegionData[] {
+  return cachedRegions;
+}
+
+/**
  * Fast local check if a cell is within any cached pivot region.
  * Exported so other pivot handlers (e.g., context menu) can reuse the cache.
  */

@@ -13,6 +13,7 @@ import { cellEvents } from "../lib/cellEvents";
 import type { Selection, GridConfig } from "../types";
 import { getColumnWidth, getRowHeight, getColumnX, getRowY, calculateVisibleRange } from "../lib/gridRenderer";
 import { calculateAutoScrollDelta } from "./useMouseSelection/utils/autoScrollUtils";
+import { checkRangeGuards } from "../lib/editGuards";
 import { DEFAULT_AUTO_SCROLL_CONFIG } from "./useMouseSelection/constants";
 import { getGridRegions } from "../../api/gridOverlays";
 import { FillListRegistry, type FillListMatch } from "../lib/fillLists";
@@ -1020,6 +1021,22 @@ export function useFillHandle(props: UseFillHandleProps): UseFillHandleReturn {
     const selMaxCol = Math.max(selection.startCol, selection.endCol);
 
     const finalRange = fillState.previewRange;
+
+    // Check if fill target overlaps a protected range (e.g., pivot table)
+    if (finalRange) {
+      const rangeGuard = checkRangeGuards(
+        Math.min(finalRange.startRow, finalRange.endRow),
+        Math.min(finalRange.startCol, finalRange.endCol),
+        Math.max(finalRange.startRow, finalRange.endRow),
+        Math.max(finalRange.startCol, finalRange.endCol)
+      );
+      if (rangeGuard?.blocked) {
+        if (rangeGuard.message) alert(rangeGuard.message);
+        setFillState({ isDragging: false, direction: null, targetRow: 0, targetCol: 0, previewRange: null });
+        dragStartRef.current = null;
+        return;
+      }
+    }
 
     await beginUndoTransaction("Fill series");
     try {

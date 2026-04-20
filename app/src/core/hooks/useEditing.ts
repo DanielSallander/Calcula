@@ -46,7 +46,7 @@ import {
 } from "../lib/gridRenderer";
 import type { EditingCell, CellUpdateResult, FormulaReference } from "../types";
 import { isFormulaExpectingReference, FORMULA_REFERENCE_COLORS } from "../types";
-import { checkEditGuards } from "../lib/editGuards";
+import { checkEditGuards, checkRangeGuards } from "../lib/editGuards";
 import { checkCommitGuards } from "../lib/commitGuards";
 import {
   parseFormulaReferences,
@@ -769,8 +769,15 @@ export function useEditing(): UseEditingReturn {
     async (row: number, col: number, initialValue?: string) => {
       setLastError(null);
       setPendingReference(null);
-      
-      // Check if any extension blocks editing this cell (e.g., pivot regions)
+
+      // Synchronous guard: immediately block editing in protected ranges (no async yield)
+      const rangeGuard = checkRangeGuards(row, col, row, col);
+      if (rangeGuard?.blocked) {
+        console.log("[useEditing] Edit blocked by range guard (sync)");
+        return;
+      }
+
+      // Async guard: check extension-registered edit guards
       const guardResult = await checkEditGuards(row, col);
       if (guardResult?.blocked) {
         console.log("[useEditing] Edit blocked by guard");
@@ -866,7 +873,14 @@ export function useEditing(): UseEditingReturn {
       const row = selection.endRow;
       const col = selection.endCol;
 
-      // Check if any extension blocks editing this cell (e.g., pivot regions)
+      // Synchronous guard: immediately block editing in protected ranges (no async yield)
+      const rangeGuard = checkRangeGuards(row, col, row, col);
+      if (rangeGuard?.blocked) {
+        console.log("[useEditing] Edit blocked by range guard (sync)");
+        return;
+      }
+
+      // Async guard: check extension-registered edit guards
       const guardResult = await checkEditGuards(row, col);
       if (guardResult?.blocked) {
         console.log("[useEditing] Edit blocked by guard");
@@ -1566,7 +1580,14 @@ export function useEditing(): UseEditingReturn {
         return;
       }
 
-      // Check if any extension blocks editing this cell (e.g., pivot regions)
+      // Synchronous guard: immediately block editing in protected ranges
+      const rangeGuard = checkRangeGuards(selection.endRow, selection.endCol, selection.endRow, selection.endCol);
+      if (rangeGuard?.blocked) {
+        console.log("[useEditing] Edit blocked by range guard (sync)");
+        return;
+      }
+
+      // Async guard: check extension-registered edit guards
       const guardResult = await checkEditGuards(selection.endRow, selection.endCol);
       if (guardResult?.blocked) {
         console.log("[useEditing] Edit blocked by guard");

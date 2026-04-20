@@ -1,10 +1,14 @@
 //! FILENAME: app/src-tauri/src/pivot/operations.rs
 use std::collections::HashMap;
+use crate::api_types::MergedRegion;
 use crate::commands::styles::parse_number_format;
 use crate::pivot::utils::col_index_to_letter;
 use crate::{log_debug, AppState, ProtectedRegion};
 use pivot_engine::{calculate_pivot, PivotCache, PivotDefinition, PivotId, PivotView};
-use engine::{Cell, CellStyle, CellValue, StyleRegistry};
+use engine::{
+    Cell, CellStyle, CellValue, StyleRegistry,
+    Borders, BorderStyle, BorderLineStyle, Color, Fill, TextAlign, ThemeColor,
+};
 use arrow::array::{
     Array, BooleanArray, Date32Array, Decimal128Array,
     Float32Array, Float64Array, Int16Array, Int32Array, Int64Array,
@@ -336,16 +340,165 @@ pub(crate) fn get_pivot_region(state: &AppState, pivot_id: PivotId) -> Option<Pr
     regions.iter().find(|r| r.region_type == "pivot" && r.owner_id == pivot_id as u64).cloned()
 }
 
+// ============================================================================
+// PIVOT THEME COLORS (matches frontend DEFAULT_PIVOT_THEME)
+// ============================================================================
+
+const PIVOT_HEADER_BG: Color = Color::new(192, 230, 245);       // #C0E6F5
+const PIVOT_TOTAL_BG: Color = Color::new(232, 232, 232);        // #e8e8e8
+const PIVOT_GRAND_TOTAL_BG: Color = Color::new(192, 230, 245);  // #C0E6F5
+const PIVOT_FILTER_BG: Color = Color::new(217, 217, 217);       // #D9D9D9
+const PIVOT_BORDER_COLOR: Color = Color::new(232, 232, 232);    // #e8e8e8
+const PIVOT_HEADER_BORDER: Color = Color::new(160, 208, 232);   // #a0d0e8
+
+/// Cache key for deduplicating pivot cell styles.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct PivotStyleKey {
+    background_style: u8,
+    is_bold: bool,
+    indent_level: u8,
+    text_align: u8,
+    number_format_key: String,
+    border_key: u8,
+}
+
+/// Build a full CellStyle for a pivot cell based on its metadata.
+fn build_pivot_cell_style(
+    pivot_cell: &pivot_engine::PivotViewCell,
+    styles: &mut StyleRegistry,
+    style_cache: &mut HashMap<PivotStyleKey, usize>,
+) -> usize {
+    use pivot_engine::{BackgroundStyle, PivotCellType};
+
+    // Determine bold
+    let is_bold = pivot_cell.is_bold
+        || pivot_cell.is_expandable
+        || matches!(
+            pivot_cell.cell_type,
+            PivotCellType::FilterLabel | PivotCellType::RowLabelHeader | PivotCellType::ColumnLabelHeader
+        )
+        || matches!(
+            pivot_cell.background_style,
+            BackgroundStyle::Header | BackgroundStyle::Subtotal | BackgroundStyle::Total | BackgroundStyle::GrandTotal
+        );
+
+    // Determine text alignment
+    let text_align = match pivot_cell.cell_type {
+        PivotCellType::Data
+        | PivotCellType::RowSubtotal
+        | PivotCellType::ColumnSubtotal
+        | PivotCellType::GrandTotal
+        | PivotCellType::GrandTotalRow
+        | PivotCellType::GrandTotalColumn
+        | PivotCellType::FilterLabel => TextAlign::Right,
+        _ => TextAlign::Left,
+    };
+
+    // Border key: encode the border configuration as a single byte
+    let border_key: u8 = match pivot_cell.background_style {
+        BackgroundStyle::Header => 1,       // bottom 2px
+        BackgroundStyle::Subtotal | BackgroundStyle::Total => 2, // top+bottom 1px
+        BackgroundStyle::GrandTotal => 3,   // top+bottom 2px
+        BackgroundStyle::FilterRow => 4,    // bottom 1px
+        _ => 0,                             // no borders
+    };
+
+    // Background style as u8
+    let bg_key: u8 = match pivot_cell.background_style {
+        BackgroundStyle::Normal => 0,
+        BackgroundStyle::Header => 1,
+        BackgroundStyle::Subtotal => 2,
+        BackgroundStyle::Total => 3,
+        BackgroundStyle::GrandTotal => 4,
+        BackgroundStyle::Alternate => 5,
+        BackgroundStyle::FilterRow => 6,
+    };
+
+    // Text align as u8
+    let align_key: u8 = match text_align {
+        TextAlign::Right => 1,
+        _ => 0,
+    };
+
+    let nf_key = pivot_cell.number_format.clone().unwrap_or_default();
+
+    let cache_key = PivotStyleKey {
+        background_style: bg_key,
+        is_bold,
+        indent_level: pivot_cell.indent_level,
+        text_align: align_key,
+        number_format_key: nf_key.clone(),
+        border_key,
+    };
+
+    if let Some(&cached_idx) = style_cache.get(&cache_key) {
+        return cached_idx;
+    }
+
+    // Build the fill
+    let fill = match pivot_cell.background_style {
+        BackgroundStyle::Header => Fill::Solid { color: ThemeColor::Absolute(PIVOT_HEADER_BG) },
+        BackgroundStyle::Subtotal | BackgroundStyle::Total => Fill::Solid { color: ThemeColor::Absolute(PIVOT_TOTAL_BG) },
+        BackgroundStyle::GrandTotal => Fill::Solid { color: ThemeColor::Absolute(PIVOT_GRAND_TOTAL_BG) },
+        BackgroundStyle::FilterRow => Fill::Solid { color: ThemeColor::Absolute(PIVOT_FILTER_BG) },
+        _ => Fill::Solid { color: ThemeColor::Absolute(Color::white()) },
+    };
+
+    // Build borders
+    let borders = match pivot_cell.background_style {
+        BackgroundStyle::Header => Borders {
+            bottom: BorderStyle { width: 2, color: ThemeColor::Absolute(PIVOT_HEADER_BORDER), style: BorderLineStyle::Solid },
+            ..Borders::default()
+        },
+        BackgroundStyle::Subtotal | BackgroundStyle::Total => Borders {
+            top: BorderStyle { width: 1, color: ThemeColor::Absolute(PIVOT_BORDER_COLOR), style: BorderLineStyle::Solid },
+            bottom: BorderStyle { width: 1, color: ThemeColor::Absolute(PIVOT_BORDER_COLOR), style: BorderLineStyle::Solid },
+            ..Borders::default()
+        },
+        BackgroundStyle::GrandTotal => Borders {
+            top: BorderStyle { width: 2, color: ThemeColor::Absolute(PIVOT_HEADER_BORDER), style: BorderLineStyle::Solid },
+            bottom: BorderStyle { width: 2, color: ThemeColor::Absolute(PIVOT_HEADER_BORDER), style: BorderLineStyle::Solid },
+            ..Borders::default()
+        },
+        BackgroundStyle::FilterRow => Borders {
+            bottom: BorderStyle { width: 1, color: ThemeColor::Absolute(PIVOT_BORDER_COLOR), style: BorderLineStyle::Solid },
+            ..Borders::default()
+        },
+        _ => Borders::default(),
+    };
+
+    // Build number format
+    let nf = if !nf_key.is_empty() {
+        parse_number_format(&nf_key)
+    } else {
+        engine::NumberFormat::General
+    };
+
+    // Assemble the full style
+    let mut style = CellStyle::new()
+        .with_bold(is_bold)
+        .with_fill(fill)
+        .with_text_align(text_align)
+        .with_number_format(nf);
+    style.borders = borders;
+    style.indent = pivot_cell.indent_level;
+
+    let idx = styles.get_or_create(style);
+    style_cache.insert(cache_key, idx);
+    idx
+}
+
 /// Writes pivot view cells to the destination grid.
-/// Uses the StyleRegistry to create proper cell styles when pivot cells
-/// have a number_format, so that number formatting displays correctly.
+/// Creates full cell styles (fill, bold, borders, alignment, indent, number format)
+/// so that pivot cells render correctly via the grid renderer without an overlay.
+/// Returns a list of merge regions for cells with col_span/row_span > 1.
 pub(crate) fn write_pivot_to_grid(
     grid: &mut engine::Grid,
     mut active_grid: Option<&mut engine::Grid>,
     view: &PivotView,
     destination: (u32, u32),
     styles: &mut StyleRegistry,
-) {
+) -> Vec<MergedRegion> {
     let (dest_row, dest_col) = destination;
 
     log_debug!(
@@ -361,12 +514,14 @@ pub(crate) fn write_pivot_to_grid(
     // If view is empty, nothing to write
     if view.row_count == 0 || view.col_count == 0 {
         log_debug!("PIVOT", "Empty view, nothing to write to grid");
-        return;
+        return Vec::new();
     }
 
-    // Cache: format string → style_index. Avoids re-parsing + re-looking up
-    // the same number format for every cell (typically only 1-3 unique formats).
-    let mut format_cache: HashMap<String, usize> = HashMap::new();
+    // Collect merge regions for cells with col_span/row_span > 1
+    let mut merge_regions: Vec<MergedRegion> = Vec::new();
+
+    // Cache: composite style key → style_index. Avoids redundant style lookups.
+    let mut style_cache: HashMap<PivotStyleKey, usize> = HashMap::new();
 
     // Pre-allocate grid capacity to avoid HashMap resizing during bulk insert.
     let cell_count = view.row_count * view.col_count;
@@ -408,20 +563,8 @@ pub(crate) fn write_pivot_to_grid(
                 pivot_engine::PivotCellValue::Error(e) => CellValue::Text(format!("#{}", e)),
             };
 
-            // Apply number format via cache (avoids re-parsing the same format 98K times)
-            let style_idx = if let Some(ref fmt) = pivot_cell.number_format {
-                if !fmt.is_empty() {
-                    *format_cache.entry(fmt.clone()).or_insert_with(|| {
-                        let nf = parse_number_format(fmt);
-                        let style = CellStyle::new().with_number_format(nf);
-                        styles.get_or_create(style)
-                    })
-                } else {
-                    0
-                }
-            } else {
-                0
-            };
+            // Build full cell style (fill, bold, borders, alignment, indent, number format)
+            let style_idx = build_pivot_cell_style(pivot_cell, styles, &mut style_cache);
 
             // Write to both grids using unchecked insert (bounds set once after loop)
             if let Some(ag) = active_grid.as_deref_mut() {
@@ -440,6 +583,16 @@ pub(crate) fn write_pivot_to_grid(
                 rich_text: None,
                 cached_ast: None,
             });
+
+            // Collect merge regions for spanned cells
+            if pivot_cell.col_span > 1 || pivot_cell.row_span > 1 {
+                merge_regions.push(MergedRegion {
+                    start_row: grid_row,
+                    start_col: grid_col,
+                    end_row: grid_row + (pivot_cell.row_span as u32).max(1) - 1,
+                    end_col: grid_col + (pivot_cell.col_span as u32).max(1) - 1,
+                });
+            }
         }
     }
 
@@ -455,9 +608,12 @@ pub(crate) fn write_pivot_to_grid(
 
     log_debug!(
         "PIVOT",
-        "write_pivot_to_grid: wrote {} rows to grid",
-        view.rows.iter().filter(|r| r.visible).count()
+        "write_pivot_to_grid: wrote {} rows to grid ({} merge regions)",
+        view.rows.iter().filter(|r| r.visible).count(),
+        merge_regions.len()
     );
+
+    merge_regions
 }
 
 /// Updates the pivot region tracking for a pivot table.
@@ -548,7 +704,7 @@ pub(crate) fn update_pivot_in_grid(
         let active_sheet = *state.active_sheet.lock().unwrap();
         let is_active = dest_sheet_idx == active_sheet;
 
-        if is_active {
+        let pivot_merges = if is_active {
             let mut active_grid = state.grid.lock().unwrap();
 
             // Clear old region from active grid too
@@ -564,12 +720,36 @@ pub(crate) fn update_pivot_in_grid(
             }
 
             // Single-pass write to both grids (eliminates second iteration + clones)
-            write_pivot_to_grid(dest_grid, Some(&mut active_grid), view, destination, &mut styles);
+            let merges = write_pivot_to_grid(dest_grid, Some(&mut active_grid), view, destination, &mut styles);
             active_grid.recalculate_bounds();
             log_debug!("PIVOT", "wrote pivot to both grids in single pass (active sheet)");
+            merges
         } else {
             // Not the active sheet — write to sheet grid only
-            write_pivot_to_grid(dest_grid, None, view, destination, &mut styles);
+            write_pivot_to_grid(dest_grid, None, view, destination, &mut styles)
+        };
+        let (dest_row, dest_col) = destination;
+        let new_end_row = dest_row + view.row_count.max(1) as u32 - 1;
+        let new_end_col = dest_col + view.col_count.max(1) as u32 - 1;
+
+        let mut merged = state.merged_regions.lock().unwrap();
+
+        // Remove merges in old pivot region
+        if let Some(ref region) = old_region {
+            merged.retain(|m| {
+                !(m.start_row >= region.start_row && m.end_row <= region.end_row
+                    && m.start_col >= region.start_col && m.end_col <= region.end_col)
+            });
+        }
+        // Also remove merges in new pivot region (in case of overlap)
+        merged.retain(|m| {
+            !(m.start_row >= dest_row && m.end_row <= new_end_row
+                && m.start_col >= dest_col && m.end_col <= new_end_col)
+        });
+
+        // Add new pivot merge regions
+        for mr in pivot_merges {
+            merged.insert(mr);
         }
     }
 }

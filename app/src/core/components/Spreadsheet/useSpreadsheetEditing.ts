@@ -8,6 +8,7 @@ import { useGridState } from "../../state";
 import { toggleReferenceAtCursor } from "../../lib/formulaRefToggle";
 import { updateCellsBatch, beginUndoTransaction, commitUndoTransaction, type CellUpdateInput } from "../../lib/tauri-api";
 import { cellEvents } from "../../lib/cellEvents";
+import { checkRangeGuards } from "../../lib/editGuards";
 
 type GridState = ReturnType<typeof useGridState>;
 
@@ -152,9 +153,18 @@ export function useSpreadsheetEditing({
     [updateValue]
   );
 
-  const handleFormulaBarFocus = useCallback(() => {
+  const handleFormulaBarFocus = useCallback(async () => {
     if (!isEditing && selection) {
-      startEditing();
+      // Synchronous guard: block editing in protected ranges (e.g., pivot tables)
+      const guard = checkRangeGuards(selection.endRow, selection.endCol, selection.endRow, selection.endCol);
+      if (guard?.blocked) {
+        // Blur the formula bar to prevent typing
+        if (document.activeElement instanceof HTMLElement) {
+          document.activeElement.blur();
+        }
+        return;
+      }
+      await startEditing();
     }
   }, [isEditing, selection, startEditing]);
 
@@ -394,9 +404,21 @@ export function useSpreadsheetEditing({
         return;
       }
 
+      // Synchronous guard: block editing in protected ranges (e.g., pivot tables)
+      if (selection) {
+        const guard = checkRangeGuards(selection.endRow, selection.endCol, selection.endRow, selection.endCol);
+        if (guard?.blocked) {
+          // Allow navigation keys but block all editing keys
+          if (event.key !== "Enter" && !navigationKeys.includes(event.key)) {
+            event.preventDefault();
+          }
+          return;
+        }
+      }
+
       if (event.key === "F2") {
         event.preventDefault();
-        startEditing();
+        await startEditing();
         return;
       }
 
@@ -414,18 +436,18 @@ export function useSpreadsheetEditing({
         !event.altKey
       ) {
         event.preventDefault();
-        startEditing(event.key);
+        await startEditing(event.key);
         return;
       }
 
       if (event.key === "Delete" || event.key === "Backspace") {
         event.preventDefault();
-        startEditing("");
+        await startEditing("");
         await handleCommitEdit();
         return;
       }
     },
-    [isEditingRef, editing, isOnDifferentSheet, startEditing, handleCommitEdit, handleInlineCtrlEnter, cancelEdit, moveActiveCell, scrollToSelection, focusContainerRef]
+    [isEditingRef, editing, isOnDifferentSheet, startEditing, handleCommitEdit, handleInlineCtrlEnter, cancelEdit, moveActiveCell, scrollToSelection, focusContainerRef, selection]
   );
 
   const getFormulaBarValueInternal = (): string => {

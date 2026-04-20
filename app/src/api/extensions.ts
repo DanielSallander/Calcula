@@ -163,10 +163,15 @@ export interface GridExtensionsService {
   onChange(callback: () => void): () => void;
 }
 
+/** Guard function type - receives current selection, return true to allow, or a string (error message) to block. */
+export type CommandGuard = (selection: Selection | null) => boolean | string;
+
 export interface GridCommandsService {
   register(command: GridCommand, handler: () => void | Promise<void>): void;
   execute(command: GridCommand): Promise<boolean>;
   hasHandler(command: GridCommand): boolean;
+  registerGuard(commands: GridCommand[], guard: CommandGuard): () => void;
+  setSelection(selection: Selection | null): void;
 }
 
 export interface SheetExtensionsService {
@@ -284,6 +289,12 @@ export const gridCommands = {
   },
   hasHandler(command: GridCommand): boolean {
     return gridCommandsService?.hasHandler(command) ?? false;
+  },
+  registerGuard(commands: GridCommand[], guard: CommandGuard): () => void {
+    return gridCommandsService?.registerGuard(commands, guard) ?? (() => {});
+  },
+  setSelection(selection: Selection | null): void {
+    gridCommandsService?.setSelection(selection);
   },
 };
 

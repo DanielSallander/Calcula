@@ -69,3 +69,56 @@ export async function checkEditGuards(
   }
   return null;
 }
+
+// ============================================================================
+// Range Guard Registry
+// ============================================================================
+
+/**
+ * A synchronous function that checks whether a range can be modified.
+ * Return `{ blocked: true, message }` to prevent the operation.
+ * Return `null` to allow (or let the next guard decide).
+ */
+export type RangeGuardFn = (
+  startRow: number,
+  startCol: number,
+  endRow: number,
+  endCol: number
+) => EditGuardResult | null;
+
+const rangeGuards = new Set<RangeGuardFn>();
+
+/**
+ * Register a range guard that can block operations on cell ranges.
+ * Used by drag/move/copy operations to check source and destination ranges.
+ * @returns A cleanup function that unregisters the guard.
+ */
+export function registerRangeGuard(guard: RangeGuardFn): () => void {
+  rangeGuards.add(guard);
+  return () => {
+    rangeGuards.delete(guard);
+  };
+}
+
+/**
+ * Check all registered range guards for a given range.
+ * Returns the first blocking result, or `null` if all guards allow the operation.
+ */
+export function checkRangeGuards(
+  startRow: number,
+  startCol: number,
+  endRow: number,
+  endCol: number
+): EditGuardResult | null {
+  for (const guard of rangeGuards) {
+    try {
+      const result = guard(startRow, startCol, endRow, endCol);
+      if (result?.blocked) {
+        return result;
+      }
+    } catch (error) {
+      console.error("Error in range guard:", error);
+    }
+  }
+  return null;
+}

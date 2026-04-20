@@ -32,6 +32,7 @@ import type { CellUpdateInput, FormulaShiftInput } from "../lib/tauri-api";
 import { cellEvents } from "../lib/cellEvents";
 import { setClipboard, clearClipboard, setSelection } from "../state/gridActions";
 import type { Selection, CellData, ClipboardMode, Comment, DataValidation } from "../types";
+import { checkRangeGuards } from "../lib/editGuards";
 
 /**
  * Internal clipboard data structure.
@@ -462,6 +463,16 @@ export function useClipboard(): UseClipboardReturn {
     const actualPasteHeight = Math.min(pasteHeight, config.totalRows - targetRow);
     const actualPasteWidth = Math.min(pasteWidth, config.totalCols - targetCol);
 
+    // Check if paste target overlaps a protected range (e.g., pivot table)
+    const rangeGuard = checkRangeGuards(
+      targetRow, targetCol,
+      targetRow + actualPasteHeight - 1, targetCol + actualPasteWidth - 1
+    );
+    if (rangeGuard?.blocked) {
+      if (rangeGuard.message) alert(rangeGuard.message);
+      return;
+    }
+
     // Track if this was a cut operation (need to check before we potentially modify internalClipboard)
     const wasCutOperation = usingInternalClipboard && internalClipboard?.isCut;
 
@@ -657,9 +668,23 @@ export function useClipboard(): UseClipboardReturn {
       const height = srcMaxRow - srcMinRow + 1;
       const width = srcMaxCol - srcMinCol + 1;
 
-      // Check if destination area has content (excluding source overlap) and confirm
+      // Check if destination overlaps a protected range (e.g., pivot table)
       const destEndRow = targetRow + height - 1;
       const destEndCol = targetCol + width - 1;
+      const destGuard = checkRangeGuards(targetRow, targetCol, destEndRow, destEndCol);
+      if (destGuard?.blocked) {
+        if (destGuard.message) alert(destGuard.message);
+        return;
+      }
+
+      // Also check if source overlaps a protected range
+      const srcGuard = checkRangeGuards(srcMinRow, srcMinCol, srcMaxRow, srcMaxCol);
+      if (srcGuard?.blocked) {
+        if (srcGuard.message) alert(srcGuard.message);
+        return;
+      }
+
+      // Check if destination area has content (excluding source overlap) and confirm
       const hasContent = await hasContentInRange(targetRow, targetCol, destEndRow, destEndCol);
       if (hasContent) {
         const confirmed = await ask(
@@ -842,8 +867,13 @@ export function useClipboard(): UseClipboardReturn {
         return;
       }
 
-      // Check if destination rows have content and confirm with user
+      // Check if source or destination rows overlap a protected range
       const targetEndRow = targetRow + count - 1;
+      const srcRowGuard = checkRangeGuards(minRow, 0, maxRow, config.totalCols - 1);
+      if (srcRowGuard?.blocked) { if (srcRowGuard.message) alert(srcRowGuard.message); return; }
+      const destRowGuard = checkRangeGuards(targetRow, 0, targetEndRow, config.totalCols - 1);
+      if (destRowGuard?.blocked) { if (destRowGuard.message) alert(destRowGuard.message); return; }
+
       const hasContent = await hasContentInRange(targetRow, 0, targetEndRow, config.totalCols - 1);
       if (hasContent) {
         const confirmed = await ask(
@@ -971,8 +1001,13 @@ export function useClipboard(): UseClipboardReturn {
         return;
       }
 
-      // Check if destination columns have content and confirm with user
+      // Check if source or destination columns overlap a protected range
       const targetEndCol = targetCol + count - 1;
+      const srcColGuard = checkRangeGuards(0, minCol, config.totalRows - 1, maxCol);
+      if (srcColGuard?.blocked) { if (srcColGuard.message) alert(srcColGuard.message); return; }
+      const destColGuard = checkRangeGuards(0, targetCol, config.totalRows - 1, targetEndCol);
+      if (destColGuard?.blocked) { if (destColGuard.message) alert(destColGuard.message); return; }
+
       const hasContent = await hasContentInRange(0, targetCol, config.totalRows - 1, targetEndCol);
       if (hasContent) {
         const confirmed = await ask(
@@ -1100,6 +1135,14 @@ export function useClipboard(): UseClipboardReturn {
 
       const destEndRow = targetRow + height - 1;
       const destEndCol = targetCol + width - 1;
+
+      // Check if destination overlaps a protected range (e.g., pivot table)
+      const destGuard = checkRangeGuards(targetRow, targetCol, destEndRow, destEndCol);
+      if (destGuard?.blocked) {
+        if (destGuard.message) alert(destGuard.message);
+        return;
+      }
+
       const hasContent = await hasContentInRange(targetRow, targetCol, destEndRow, destEndCol);
       if (hasContent) {
         const confirmed = await ask(
@@ -1193,6 +1236,9 @@ export function useClipboard(): UseClipboardReturn {
       }
 
       const targetEndRow = targetRow + count - 1;
+      const destRowGuard = checkRangeGuards(targetRow, 0, targetEndRow, config.totalCols - 1);
+      if (destRowGuard?.blocked) { if (destRowGuard.message) alert(destRowGuard.message); return; }
+
       const hasContent = await hasContentInRange(targetRow, 0, targetEndRow, config.totalCols - 1);
       if (hasContent) {
         const confirmed = await ask(
@@ -1273,6 +1319,9 @@ export function useClipboard(): UseClipboardReturn {
       }
 
       const targetEndCol = targetCol + count - 1;
+      const destColGuard = checkRangeGuards(0, targetCol, config.totalRows - 1, targetEndCol);
+      if (destColGuard?.blocked) { if (destColGuard.message) alert(destColGuard.message); return; }
+
       const hasContent = await hasContentInRange(0, targetCol, config.totalRows - 1, targetEndCol);
       if (hasContent) {
         const confirmed = await ask(

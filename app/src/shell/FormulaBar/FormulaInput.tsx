@@ -7,7 +7,7 @@
 // REFACTOR: Imports from api layer instead of core internals
 
 import React, { useCallback, useRef, useEffect } from "react";
-import { useGridContext, getCell, getMergeInfo, isSheetProtected, getCellProtection } from "../../api";
+import { useGridContext, getCell, getMergeInfo, isSheetProtected, getCellProtection, checkRangeGuards } from "../../api";
 import { useEditing, setGlobalIsEditing, getGlobalEditingValue, setGlobalCursorPosition, getGlobalCursorPosition } from "../../api/editing";
 import { toggleReferenceAtCursor } from "../../core/lib/formulaRefToggle";
 import { parseFormulaReferences } from "../../core/lib/formulaRefParser";
@@ -155,9 +155,22 @@ export function FormulaInput(): React.ReactElement {
   );
 
   const handleFocus = useCallback(async () => {
+    // Block editing in protected ranges (e.g., pivot tables)
+    if (state.selection) {
+      const guard = checkRangeGuards(
+        state.selection.endRow, state.selection.endCol,
+        state.selection.endRow, state.selection.endCol
+      );
+      if (guard?.blocked) {
+        // Blur immediately to prevent typing
+        if (inputRef.current) inputRef.current.blur();
+        return;
+      }
+    }
+
     setIsFocused(true);
     setGlobalIsEditing(true);
-    
+
     if (!editing && state.selection) {
       await startEdit(state.selection.endRow, state.selection.endCol);
     }
@@ -257,6 +270,14 @@ export function FormulaInput(): React.ReactElement {
     e.stopPropagation();
   }, []);
 
+  // Check if the current selection is in a protected range (e.g., pivot table)
+  const isProtectedCell = state.selection
+    ? checkRangeGuards(
+        state.selection.endRow, state.selection.endCol,
+        state.selection.endRow, state.selection.endCol
+      )?.blocked === true
+    : false;
+
   return (
     <S.StyledInput
       ref={inputRef}
@@ -268,6 +289,7 @@ export function FormulaInput(): React.ReactElement {
       onKeyDown={handleKeyDown}
       onMouseDown={handleMouseDown}
       onSelect={handleSelect}
+      readOnly={isProtectedCell}
       $isFocused={isFocused}
       data-formula-bar="true"
       placeholder=""

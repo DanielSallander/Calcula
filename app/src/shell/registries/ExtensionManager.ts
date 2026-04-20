@@ -59,7 +59,7 @@ import {
   markSheetDirty,
 } from "../../api/styleInterceptors";
 import { registerGridOverlay } from "../../api/gridOverlays";
-import { registerEditGuard } from "../../api/editGuards";
+import { registerEditGuard, registerRangeGuard } from "../../api/editGuards";
 import { registerCellClickInterceptor } from "../../api/cellClickInterceptors";
 import { registerCellDoubleClickInterceptor } from "../../api/cellDoubleClickInterceptors";
 import { registerShortcut, getShortcuts } from "../../api/keyboard";
@@ -208,6 +208,9 @@ function buildContext(): ExtensionContext {
       },
       editGuards: {
         register: registerEditGuard,
+      },
+      rangeGuards: {
+        register: registerRangeGuard,
       },
       cellClicks: {
         registerClickInterceptor: registerCellClickInterceptor,

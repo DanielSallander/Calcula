@@ -40,7 +40,7 @@ import type { FormattingOptions } from "../../types";
 import { DEFAULT_THEME, measureOptimalColumnWidth, measureOptimalRowHeight } from "../../lib/gridRenderer";
 import { checkCellClickInterceptors } from "../../lib/cellClickInterceptors";
 import { checkCellDoubleClickInterceptors } from "../../lib/cellDoubleClickInterceptors";
-import { checkEditGuards } from "../../lib/editGuards";
+import { checkEditGuards, checkRangeGuards } from "../../lib/editGuards";
 import { isSheetGroupingActive, getSelectedSheetIndices } from "../../state/sheetGrouping";
 import { setColumnWidth, setRowHeight, setManuallyHiddenCols, setManuallyHiddenRows } from "../../state/gridActions";
 import { cellEvents } from "../../lib/cellEvents";
@@ -1377,6 +1377,10 @@ export function useSpreadsheetSelection({
         if (intercepted) {
           return;
         }
+
+        // Synchronous guard: block editing in protected ranges (e.g., pivot tables)
+        const rangeGuard = checkRangeGuards(cell.row, cell.col, cell.row, cell.col);
+        if (rangeGuard?.blocked) return;
 
         // First expand selection to cover merged region (for visual feedback)
         await selectCellWithMergeExpansion(cell.row, cell.col);

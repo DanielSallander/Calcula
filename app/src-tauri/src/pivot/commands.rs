@@ -190,7 +190,7 @@ pub fn create_pivot_table(
         }
 
         if let Some(dest_grid) = grids.get_mut(dest_sheet_idx) {
-            write_pivot_to_grid(dest_grid, None, &view, destination, &mut styles);
+            let pivot_merges = write_pivot_to_grid(dest_grid, None, &view, destination, &mut styles);
             log_info!(
                 "PIVOT",
                 "wrote pivot output to grids[{}] at ({},{}) size {}x{}",
@@ -200,7 +200,15 @@ pub fn create_pivot_table(
                 view.row_count,
                 view.col_count
             );
-            
+
+            // Insert pivot merge regions
+            if !pivot_merges.is_empty() {
+                let mut merged = state.merged_regions.lock().unwrap();
+                for mr in pivot_merges {
+                    merged.insert(mr);
+                }
+            }
+
             // IMPORTANT: If dest_sheet is the currently active sheet, sync state.grid
             let active_sheet = *state.active_sheet.lock().unwrap();
             if dest_sheet_idx == active_sheet {
@@ -3367,12 +3375,28 @@ pub async fn create_pivot_from_bi_model(
         let mut grids = state.grids.lock().unwrap();
         if let Some(dest_grid) = grids.get_mut(dest_sheet_idx) {
             let active_sheet = *state.active_sheet.lock().unwrap();
-            if dest_sheet_idx == active_sheet {
+            let pivot_merges = if dest_sheet_idx == active_sheet {
                 let mut grid = state.grid.lock().unwrap();
-                write_pivot_to_grid(dest_grid, Some(&mut grid), &view, destination, &mut styles);
+                let merges = write_pivot_to_grid(dest_grid, Some(&mut grid), &view, destination, &mut styles);
                 grid.recalculate_bounds();
+                merges
             } else {
-                write_pivot_to_grid(dest_grid, None, &view, destination, &mut styles);
+                write_pivot_to_grid(dest_grid, None, &view, destination, &mut styles)
+            };
+
+            // Update merge regions
+            if !pivot_merges.is_empty() {
+                let mut merged = state.merged_regions.lock().unwrap();
+                // Clear merges in pivot region first
+                let (dr, dc) = destination;
+                let er = dr + view.row_count.max(1) as u32 - 1;
+                let ec = dc + view.col_count.max(1) as u32 - 1;
+                merged.retain(|m| {
+                    !(m.start_row >= dr && m.end_row <= er && m.start_col >= dc && m.end_col <= ec)
+                });
+                for mr in pivot_merges {
+                    merged.insert(mr);
+                }
             }
         }
     }
@@ -4079,7 +4103,7 @@ pub fn show_report_filter_pages(
         // Write the pivot view to the new sheet as static cells
         let mut styles = state.style_registry.lock().unwrap();
         if let Some(grid) = grids.get_mut(sheet_idx) {
-            crate::pivot::operations::write_pivot_to_grid(
+            let _ = crate::pivot::operations::write_pivot_to_grid(
                 grid,
                 None,
                 &view,

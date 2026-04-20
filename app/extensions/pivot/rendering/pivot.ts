@@ -3,8 +3,6 @@
 import type {
   PivotViewResponse,
   PivotCellData,
-  BackgroundStyle,
-  PivotCellType,
 } from '../lib/pivot-api';
 import { getCellDisplayValue } from '../lib/pivot-api';
 import {
@@ -214,95 +212,8 @@ const DEFAULT_PIVOT_CELL_HEIGHT = 24;
 // HELPER FUNCTIONS
 // =============================================================================
 
-function getPivotBackgroundColor(
-  backgroundStyle: BackgroundStyle | undefined,
-  theme: PivotTheme,
-  rowIndex: number
-): string {
-  switch (backgroundStyle) {
-    case 'Header':
-      return theme.headerBackground;
-    case 'Normal':
-      return theme.valueBackground;
-    case 'Alternate':
-      return theme.alternateRowBackground;
-    case 'Subtotal':
-    case 'Total':
-      return theme.totalBackground;
-    case 'GrandTotal':
-      return theme.grandTotalBackground;
-    case 'FilterRow':
-      return theme.filterRowBackground;
-    default:
-      return theme.valueBackground;
-  }
-}
-
-function getPivotTextColor(
-  cellType: PivotCellType | undefined,
-  backgroundStyle: BackgroundStyle | undefined,
-  theme: PivotTheme
-): string {
-  // Filter cells
-  if (cellType === 'FilterLabel' || cellType === 'FilterDropdown') {
-    return theme.filterText;
-  }
-
-  // Header filter cells (Row Labels / Column Labels)
-  if (cellType === 'RowLabelHeader' || cellType === 'ColumnLabelHeader') {
-    return theme.headerText;
-  }
-
-  switch (backgroundStyle) {
-    case 'Header':
-      return theme.headerText;
-    case 'Subtotal':
-    case 'Total':
-      return theme.totalText;
-    case 'GrandTotal':
-      return theme.grandTotalText;
-    default:
-      return theme.valueText;
-  }
-}
-
-function getFontWeight(
-  cellType: PivotCellType | undefined,
-  backgroundStyle: BackgroundStyle | undefined,
-  isBold?: boolean,
-  isExpandable?: boolean
-): string {
-  if (
-    isBold ||
-    isExpandable || // Parent group headers are bold (like Excel)
-    backgroundStyle === 'Header' ||
-    backgroundStyle === 'Subtotal' ||
-    backgroundStyle === 'Total' ||
-    backgroundStyle === 'GrandTotal' ||
-    cellType === 'FilterLabel' ||
-    cellType === 'RowLabelHeader' ||
-    cellType === 'ColumnLabelHeader'
-  ) {
-    return '600';
-  }
-  return '400';
-}
-
-function getTextAlign(
-  cellType: PivotCellType | undefined
-): CanvasTextAlign {
-  if (
-    cellType === 'Data' ||
-    cellType === 'RowSubtotal' ||
-    cellType === 'ColumnSubtotal' ||
-    cellType === 'GrandTotal' ||
-    cellType === 'GrandTotalRow' ||
-    cellType === 'GrandTotalColumn'
-  ) {
-    return 'right';
-  }
-  return 'left';
-}
+// NOTE: getPivotBackgroundColor, getPivotTextColor, getFontWeight, getTextAlign
+// were removed — cell styling is now handled by the backend via CellStyle.
 
 function truncateText(
   ctx: CanvasRenderingContext2D,
@@ -508,79 +419,21 @@ export function drawPivotCell(
     headerFilterBounds: null,
   };
 
-  // Draw background
-  const bgColor = getPivotBackgroundColor(cell.backgroundStyle, theme, rowIndex);
-  ctx.fillStyle = bgColor;
-  ctx.fillRect(x, y, width, height);
+  // Cell backgrounds, borders, and text are now rendered by the grid renderer
+  // via styled cells written by the backend. This function only draws
+  // interactive chrome elements that can't be expressed as cell styles.
 
-  // Draw contextual borders (modern Excel-like styling)
-  if (cell.backgroundStyle === 'Header') {
-    // Header cells: bottom border separating header from data
-    ctx.strokeStyle = theme.headerBorderColor;
-    ctx.lineWidth = 2;
-    ctx.beginPath();
-    ctx.moveTo(x, Math.floor(y + height) - 0.5);
-    ctx.lineTo(x + width, Math.floor(y + height) - 0.5);
-    ctx.stroke();
-  } else if (
-    cell.backgroundStyle === 'Subtotal' ||
-    cell.backgroundStyle === 'Total'
-  ) {
-    // Subtotal/Total: top and bottom border for clear visual grouping
-    ctx.strokeStyle = theme.borderColor;
-    ctx.lineWidth = 1;
-    ctx.beginPath();
-    ctx.moveTo(x, Math.floor(y) + 0.5);
-    ctx.lineTo(x + width, Math.floor(y) + 0.5);
-    ctx.stroke();
-    ctx.beginPath();
-    ctx.moveTo(x, Math.floor(y + height) - 0.5);
-    ctx.lineTo(x + width, Math.floor(y + height) - 0.5);
-    ctx.stroke();
-  } else if (cell.backgroundStyle === 'GrandTotal') {
-    // Grand total: stronger top border + bottom border for visual closure
-    ctx.strokeStyle = theme.headerBorderColor;
-    ctx.lineWidth = 2;
-    ctx.beginPath();
-    ctx.moveTo(x, Math.floor(y) + 0.5);
-    ctx.lineTo(x + width, Math.floor(y) + 0.5);
-    ctx.stroke();
-    ctx.strokeStyle = theme.headerBorderColor;
-    ctx.lineWidth = 2;
-    ctx.beginPath();
-    ctx.moveTo(x, Math.floor(y + height) - 0.5);
-    ctx.lineTo(x + width, Math.floor(y + height) - 0.5);
-    ctx.stroke();
-  } else if (cell.backgroundStyle === 'FilterRow') {
-    // Filter rows: subtle bottom border only (clean separation)
-    ctx.strokeStyle = theme.borderColor;
-    ctx.lineWidth = 1;
-    ctx.beginPath();
-    ctx.moveTo(x, Math.floor(y + height) - 0.5);
-    ctx.lineTo(x + width, Math.floor(y + height) - 0.5);
-    ctx.stroke();
-  }
-  // Normal/Alternate data cells: no borders (clean modern look)
-
-  // Handle FilterLabel - bold, right-aligned text
+  // FilterLabel — no interactive chrome, grid renders the text
   if (cell.cellType === 'FilterLabel') {
-    const displayText = cell.formattedValue || getCellDisplayValue(cell.value) || '';
-    if (displayText) {
-      ctx.fillStyle = theme.filterText;
-      ctx.font = `600 ${theme.fontSize}px ${theme.fontFamily}`;
-      ctx.textAlign = 'right';
-      ctx.textBaseline = 'middle';
-
-      const textX = x + width - CELL_PADDING_X;
-      const textY = y + height / 2;
-      const truncatedText = truncateText(ctx, displayText, width - CELL_PADDING_X * 2);
-      ctx.fillText(truncatedText, textX, textY);
-    }
     return result;
   }
 
-  // Handle FilterDropdown specially — Excel-style combo box filling the cell
+  // FilterDropdown — interactive combo box drawn on top of the grid cell
   if (cell.cellType === 'FilterDropdown') {
+    // Fill over the grid cell content since the dropdown has custom draw logic
+    ctx.fillStyle = theme.filterButtonBackground || '#D9D9D9';
+    ctx.fillRect(x, y, width, height);
+
     const margin = 2;
     const comboX = x + margin;
     const comboY = y + margin;
@@ -611,21 +464,9 @@ export function drawPivotCell(
     return result;
   }
 
-  // Handle RowLabelHeader / ColumnLabelHeader (header cells with dropdown arrow)
+  // RowLabelHeader / ColumnLabelHeader — draw only the dropdown button overlay
   if (cell.cellType === 'RowLabelHeader' || cell.cellType === 'ColumnLabelHeader') {
     const zone: 'row' | 'column' = cell.cellType === 'RowLabelHeader' ? 'row' : 'column';
-    const displayText = cell.formattedValue || getCellDisplayValue(cell.value) || '';
-    const arrowAreaWidth = HEADER_FILTER_ARROW_AREA;
-    const textMaxWidth = width - CELL_PADDING_X * 2 - arrowAreaWidth;
-
-    // Draw text
-    ctx.fillStyle = theme.headerText;
-    ctx.font = `${theme.headerFontWeight} ${theme.headerFontSize}px ${theme.fontFamily}`;
-    ctx.textAlign = 'left';
-    ctx.textBaseline = 'middle';
-    const textY = y + height / 2;
-    const truncatedText = truncateText(ctx, displayText, textMaxWidth);
-    ctx.fillText(truncatedText, x + CELL_PADDING_X, textY);
 
     // Draw dropdown button on the right side of the cell
     const isHovered = options.isHoveredHeaderFilter || false;
@@ -666,18 +507,18 @@ export function drawPivotCell(
       // Funnel icon (matching AutoFilter style)
       ctx.fillStyle = '#1a73e8';
       ctx.beginPath();
-      ctx.moveTo(iconCx - 5, iconCy - 4);  // Top-left
-      ctx.lineTo(iconCx + 5, iconCy - 4);  // Top-right
-      ctx.lineTo(iconCx + 1, iconCy);       // Narrow right
-      ctx.lineTo(iconCx + 1, iconCy + 4);   // Stem right
-      ctx.lineTo(iconCx - 1, iconCy + 4);   // Stem left
-      ctx.lineTo(iconCx - 1, iconCy);       // Narrow left
+      ctx.moveTo(iconCx - 5, iconCy - 4);
+      ctx.lineTo(iconCx + 5, iconCy - 4);
+      ctx.lineTo(iconCx + 1, iconCy);
+      ctx.lineTo(iconCx + 1, iconCy + 4);
+      ctx.lineTo(iconCx - 1, iconCy + 4);
+      ctx.lineTo(iconCx - 1, iconCy);
       ctx.closePath();
       ctx.fill();
     } else {
       // Dropdown triangle
       const triSize = 7;
-      ctx.fillStyle = theme.headerText;
+      ctx.fillStyle = '#000000';
       ctx.beginPath();
       ctx.moveTo(iconCx - triSize / 2, iconCy - triSize / 3);
       ctx.lineTo(iconCx + triSize / 2, iconCy - triSize / 3);
@@ -686,7 +527,6 @@ export function drawPivotCell(
       ctx.fill();
     }
 
-    // Store interactive bounds for just the dropdown button (not the entire cell)
     result.headerFilterBounds = {
       x: btnX,
       y: btnY,
@@ -700,17 +540,11 @@ export function drawPivotCell(
     return result;
   }
 
-  // Calculate text position
-  let textX = x + CELL_PADDING_X;
-  let textMaxWidth = width - CELL_PADDING_X * 2;
-
-  // Handle expand/collapse icon for row headers
+  // Expand/collapse icons for row headers
   if (cell.cellType === 'RowHeader' && cell.isExpandable) {
     const iconX = x + CELL_PADDING_X + (cell.indentLevel || 0) * INDENT_SIZE;
     const iconY = y + (height - EXPAND_ICON_SIZE) / 2;
 
-    // isCollapsed means currently collapsed (show + icon)
-    // !isCollapsed means currently expanded (show - icon)
     drawExpandCollapseIcon(
       ctx,
       iconX,
@@ -731,10 +565,11 @@ export function drawPivotCell(
       isRow: true,
     };
 
-    textX = iconX + EXPAND_ICON_SIZE + EXPAND_ICON_PADDING;
-    textMaxWidth = width - (textX - x) - CELL_PADDING_X;
-  } else if (cell.cellType === 'ColumnHeader' && cell.isExpandable) {
-    // Handle expand/collapse icon for column headers
+    return result;
+  }
+
+  // Expand/collapse icons for column headers
+  if (cell.cellType === 'ColumnHeader' && cell.isExpandable) {
     const iconX = x + CELL_PADDING_X;
     const iconY = y + (height - EXPAND_ICON_SIZE) / 2;
 
@@ -758,38 +593,10 @@ export function drawPivotCell(
       isRow: false,
     };
 
-    textX = iconX + EXPAND_ICON_SIZE + EXPAND_ICON_PADDING;
-    textMaxWidth = width - (textX - x) - CELL_PADDING_X;
-  } else if (cell.indentLevel && cell.indentLevel > 0) {
-    // Apply indentation without icon
-    textX += cell.indentLevel * INDENT_SIZE;
-    textMaxWidth -= cell.indentLevel * INDENT_SIZE;
+    return result;
   }
 
-  // Draw text
-  const displayText = cell.formattedValue || getCellDisplayValue(cell.value);
-  if (displayText) {
-    const textColor = getPivotTextColor(cell.cellType, cell.backgroundStyle, theme);
-    const fontWeight = getFontWeight(cell.cellType, cell.backgroundStyle, cell.isBold, cell.isExpandable);
-    const textAlign = getTextAlign(cell.cellType);
-
-    ctx.fillStyle = textColor;
-    ctx.font = `${fontWeight} ${theme.fontSize}px ${theme.fontFamily}`;
-    ctx.textAlign = textAlign;
-    ctx.textBaseline = 'middle';
-
-    const textY = y + height / 2;
-
-    if (textAlign === 'right') {
-      const rightX = x + width - CELL_PADDING_X;
-      const truncatedDisplayText = truncateText(ctx, displayText, textMaxWidth);
-      ctx.fillText(truncatedDisplayText, rightX, textY);
-    } else {
-      const truncatedDisplayText = truncateText(ctx, displayText, textMaxWidth);
-      ctx.fillText(truncatedDisplayText, textX, textY);
-    }
-  }
-
+  // All other cells (Data, Corner, Blank, etc.) — no interactive chrome needed
   return result;
 }
 

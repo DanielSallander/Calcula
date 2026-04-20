@@ -33,6 +33,13 @@ export interface GridMenuContext {
 /** Command handler function type */
 type CommandHandler = () => void | Promise<void>;
 
+/**
+ * Guard function type. Called before a command executes.
+ * Receives the current selection so guards can determine which rows/columns
+ * would be affected. Return `true` to allow, or a string (error message) to block.
+ */
+export type CommandGuard = (selection: Selection | null) => boolean | string;
+
 /** Available command names */
 export type GridCommand =
   | "cut"
@@ -57,6 +64,16 @@ export type GridCommand =
 /** Command registry for direct handler invocation */
 class GridCommandRegistry {
   private handlers: Map<GridCommand, CommandHandler> = new Map();
+  private guards: Map<GridCommand, CommandGuard[]> = new Map();
+  private currentSelection: Selection | null = null;
+
+  /**
+   * Update the current selection (called by the Spreadsheet component).
+   * Guards use this to determine which rows/columns are affected.
+   */
+  setSelection(selection: Selection | null): void {
+    this.currentSelection = selection;
+  }
 
   /**
    * Register a command handler.
@@ -76,11 +93,48 @@ class GridCommandRegistry {
   }
 
   /**
+   * Register a guard for one or more commands.
+   * Guards are checked before execution. If any guard returns a string,
+   * the command is blocked and the string is shown as an alert.
+   * @returns An unregister function
+   */
+  registerGuard(commands: GridCommand[], guard: CommandGuard): () => void {
+    for (const cmd of commands) {
+      const existing = this.guards.get(cmd) ?? [];
+      existing.push(guard);
+      this.guards.set(cmd, existing);
+    }
+    return () => {
+      for (const cmd of commands) {
+        const arr = this.guards.get(cmd);
+        if (arr) {
+          const idx = arr.indexOf(guard);
+          if (idx >= 0) arr.splice(idx, 1);
+        }
+      }
+    };
+  }
+
+  /**
    * Execute a command if a handler is registered.
+   * Guards are checked first - if any guard returns a string, the command
+   * is blocked and the message is shown as an alert.
    * @param command The command to execute
    * @returns true if the command was executed, false otherwise
    */
   async execute(command: GridCommand): Promise<boolean> {
+    // Check guards
+    const guards = this.guards.get(command);
+    if (guards) {
+      for (const guard of guards) {
+        const result = guard(this.currentSelection);
+        if (typeof result === "string") {
+          alert(result);
+          return false;
+        }
+      }
+    }
+
     const handler = this.handlers.get(command);
     if (handler) {
       await handler();
@@ -101,10 +155,11 @@ class GridCommandRegistry {
   }
 
   /**
-   * Clear all registered handlers (useful for cleanup/testing).
+   * Clear all registered handlers and guards (useful for cleanup/testing).
    */
   clear(): void {
     this.handlers.clear();
+    this.guards.clear();
   }
 }
 

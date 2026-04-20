@@ -769,6 +769,11 @@ function SpreadsheetContent({
     handleUnmergeCells,
   ]);
 
+  // Keep gridCommands aware of the current selection for guard checks
+  useEffect(() => {
+    gridCommands.setSelection(selection);
+  }, [selection]);
+
   // -------------------------------------------------------------------------
   // Context Menu Handler - Now emits event instead of rendering
   // -------------------------------------------------------------------------

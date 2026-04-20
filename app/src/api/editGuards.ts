@@ -6,6 +6,9 @@
 export {
   type EditGuardResult,
   type EditGuardFn,
+  type RangeGuardFn,
   registerEditGuard,
+  registerRangeGuard,
   checkEditGuards,
+  checkRangeGuards,
 } from "../core/lib/editGuards";

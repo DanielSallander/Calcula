@@ -296,7 +296,7 @@ export { dispatchGridAction } from "./gridDispatch";
 // Edit Guards
 // ============================================================================
 
-export { registerEditGuard } from "./editGuards";
+export { registerEditGuard, checkRangeGuards } from "./editGuards";
 
 // ============================================================================
 // Commit Guards
@@ -361,6 +361,7 @@ export {
 export type {
   AddInManifest,
   CommandDefinition,
+  CommandGuard,
   RibbonTabDefinition,
   RibbonGroupDefinition,
   RibbonContext,

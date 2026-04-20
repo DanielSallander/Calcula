@@ -27,6 +27,7 @@ import {
   type GridCommandsService,
   type SheetExtensionsService,
   type GridCommand,
+  type CommandGuard,
   type GridMenuContext,
   type GridContextMenuItem,
 } from "../api/extensions";
@@ -206,6 +207,9 @@ export function bootstrapShell(): void {
     },
     execute: (command: GridCommand) => gridCommandsImpl.execute(command),
     hasHandler: (command: GridCommand) => gridCommandsImpl.hasHandler(command),
+    registerGuard: (commands: GridCommand[], guard: CommandGuard) =>
+      gridCommandsImpl.registerGuard(commands, guard),
+    setSelection: (selection) => gridCommandsImpl.setSelection(selection),
   };
   registerGridCommandsService(gridCommandsService);
 

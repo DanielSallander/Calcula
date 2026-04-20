@@ -8,6 +8,7 @@ import {
   TaskPaneExtensions,
   OverlayExtensions,
   AppEvents,
+  gridCommands,
 } from "@api";
 import { emitAppEvent } from "@api/events";
 
@@ -58,6 +59,8 @@ import {
   updateCachedRegions,
   resetSelectionHandlerState,
   forceRecheck,
+  getCachedRegions,
+  findPivotRegionAtCell,
 } from "./handlers/selectionHandler";
 import type { PivotRegionData } from "./types";
 import { getPivotRegionsForSheet, getPivotAtCell, getPivotView, togglePivotGroup, getPivotCellWindow, cancelPivotOperation, getAllPivotTables, refreshPivotCache } from "./lib/pivot-api";
@@ -252,68 +255,7 @@ async function refreshPivotViewCache(regions: PivotRegionData[], allowCachedHit 
  * During transitions (collapse/expand), the white background is extended to cover
  * max(current, previous) bounds so stale cells aren't briefly visible.
  */
-function drawPivotBackground(overlayCtx: OverlayRenderContext): void {
-  const { ctx, region } = overlayCtx;
-  const rowHeaderWidth = overlayGetRowHeaderWidth(overlayCtx);
-  const colHeaderHeight = overlayGetColHeaderHeight(overlayCtx);
-
-  const startX = overlayGetColumnX(overlayCtx, region.startCol);
-  const startY = overlayGetRowY(overlayCtx, region.startRow);
-
-  // During transitions, extend the white fill to cover the old (larger) region
-  // so stale cached cells aren't visible while refreshCells is in flight.
-  const pivotId = region.data?.pivotId as number | undefined;
-  let fillEndRow = region.endRow;
-  let fillEndCol = region.endCol;
-  if (pivotId !== undefined) {
-    const prev = transitionBounds.get(pivotId);
-    if (prev) {
-      fillEndRow = Math.max(fillEndRow, prev.endRow);
-      fillEndCol = Math.max(fillEndCol, prev.endCol);
-    }
-  }
-
-  // PERF FIX: Compute fill dimensions using incremental Y instead of
-  // overlayGetRowsHeight which loops over all rows (O(n) for 19000 rows).
-  // Use endY - startY which is just one overlayGetRowY call.
-  const fillEndY = overlayGetRowY(overlayCtx, fillEndRow + 1);
-  const fillWidth = overlayGetColumnsWidth(overlayCtx, region.startCol, fillEndCol);
-  const fillHeight = fillEndY - startY;
-
-  if (startX + fillWidth < rowHeaderWidth || startY + fillHeight < colHeaderHeight) {
-    return;
-  }
-
-  ctx.save();
-  ctx.beginPath();
-  ctx.rect(
-    rowHeaderWidth,
-    colHeaderHeight,
-    ctx.canvas.width / (window.devicePixelRatio || 1) - rowHeaderWidth,
-    ctx.canvas.height / (window.devicePixelRatio || 1) - colHeaderHeight,
-  );
-  ctx.clip();
-
-  // White fill over extended area (covers stale cells during transition)
-  ctx.fillStyle = "#ffffff";
-  ctx.fillRect(startX, startY, fillWidth, fillHeight);
-
-  // Border only around the actual current region
-  const regionWidth = overlayGetColumnsWidth(overlayCtx, region.startCol, region.endCol);
-  const regionEndY = overlayGetRowY(overlayCtx, region.endRow + 1);
-  const regionHeight = regionEndY - startY;
-  ctx.strokeStyle = "#d0d0d0";
-  ctx.lineWidth = 1;
-  ctx.setLineDash([]);
-  ctx.strokeRect(
-    Math.floor(startX) + 0.5,
-    Math.floor(startY) + 0.5,
-    regionWidth - 1,
-    regionHeight - 1,
-  );
-
-  ctx.restore();
-}
+// drawPivotBackground removed — grid cells now have proper backgrounds from the backend.
 
 // ============================================================================
 // Loading Overlay
@@ -873,6 +815,8 @@ async function refreshPivotRegions(triggerRepaint: boolean = false, allowCachedH
     // triggers refreshCells() in GridCanvas, unlike AppEvents.GRID_REFRESH which only redraws.
     if (triggerRepaint) {
       window.dispatchEvent(new CustomEvent("grid:refresh"));
+      // Refresh styles so the frontend picks up new pivot cell styles from the backend
+      window.dispatchEvent(new CustomEvent("styles:refresh"));
       // Also refresh column/row dimensions so auto-fit widths take effect
       window.dispatchEvent(new CustomEvent("dimensions:refresh"));
 
@@ -1045,16 +989,66 @@ function activate(context: ExtensionContext): void {
   context.ui.overlays.register(PivotFilterOverlayDefinition);
   context.ui.overlays.register(PivotHeaderFilterOverlayDefinition);
 
-  // Register edit guard - block editing in pivot regions
+  // Register edit guard - block editing in pivot regions (synchronous using cached regions)
   cleanupFunctions.push(
     context.grid.editGuards.register(async (row, col) => {
-      try {
-        const pivotInfo = await getPivotAtCell(row, col);
-        if (pivotInfo) {
-          return { blocked: true, message: "You can't change this part of the PivotTable." };
+      const region = findPivotRegionAtCell(row, col);
+      if (region) {
+        return { blocked: true, message: "You can't change this part of the PivotTable." };
+      }
+      return null;
+    })
+  );
+
+  // Register structural command guards - block insert/delete that would affect pivot regions
+  const pivotStructuralGuardMessage = "We can't make this change for the selected cells because it will affect a PivotTable. Use the field list to change the report. If you are trying to insert or delete cells, move the PivotTable and try again.";
+
+  cleanupFunctions.push(
+    gridCommands.registerGuard(["insertRow", "deleteRow"], (selection) => {
+      if (!selection) return true;
+      const regions = getCachedRegions();
+      if (regions.length === 0) return true;
+
+      const minRow = Math.min(selection.startRow, selection.endRow);
+      const maxRow = Math.max(selection.startRow, selection.endRow);
+
+      for (const region of regions) {
+        if (minRow <= region.endRow && maxRow >= region.startRow) {
+          return pivotStructuralGuardMessage;
         }
-      } catch (error) {
-        console.error("[Pivot Extension] Failed to check pivot region:", error);
+      }
+      return true;
+    })
+  );
+
+  cleanupFunctions.push(
+    gridCommands.registerGuard(["insertColumn", "deleteColumn"], (selection) => {
+      if (!selection) return true;
+      const regions = getCachedRegions();
+      if (regions.length === 0) return true;
+
+      const minCol = Math.min(selection.startCol, selection.endCol);
+      const maxCol = Math.max(selection.startCol, selection.endCol);
+
+      for (const region of regions) {
+        if (minCol <= region.endCol && maxCol >= region.startCol) {
+          return pivotStructuralGuardMessage;
+        }
+      }
+      return true;
+    })
+  );
+
+  // Register range guard - block drag/move/copy/paste operations that overlap pivot regions
+  cleanupFunctions.push(
+    context.grid.rangeGuards.register((startRow, startCol, endRow, endCol) => {
+      const regions = getCachedRegions();
+      for (const region of regions) {
+        const rowOverlap = startRow <= region.endRow && endRow >= region.startRow;
+        const colOverlap = startCol <= region.endCol && endCol >= region.startCol;
+        if (rowOverlap && colOverlap) {
+          return { blocked: true, message: pivotStructuralGuardMessage };
+        }
       }
       return null;
     })
@@ -1307,8 +1301,8 @@ function activate(context: ExtensionContext): void {
         // Cache reference to the canvas element for use in click handlers
         cachedCanvasElement = ctx.ctx.canvas;
 
-        // Always draw white background to hide underlying grid lines and cell text
-        drawPivotBackground(ctx);
+        // Grid cells now have proper backgrounds/styles from the backend.
+        // No white background fill needed — the grid renderer handles it.
 
         if (ctx.region.data?.isEmpty) {
           drawPivotPlaceholderText(ctx);
