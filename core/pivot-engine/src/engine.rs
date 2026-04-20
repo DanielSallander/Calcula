@@ -2231,6 +2231,7 @@ impl<'a> PivotCalculator<'a> {
                         cell.cell_type = PivotCellType::RowSubtotal;
                     } else if item.is_grand_total {
                         cell = cell.as_total();
+                        cell.background_style = BackgroundStyle::GrandTotal;
                         cell.cell_type = PivotCellType::GrandTotalRow;
                     }
 
@@ -2243,8 +2244,11 @@ impl<'a> PivotCalculator<'a> {
                             .cloned()
                             .unwrap_or_default();
                         let mut attr_cell = PivotViewCell::row_header(label, 0);
-                        if item.is_subtotal || item.is_grand_total {
+                        if item.is_subtotal {
                             attr_cell = attr_cell.as_total();
+                        } else if item.is_grand_total {
+                            attr_cell = attr_cell.as_total();
+                            attr_cell.background_style = BackgroundStyle::GrandTotal;
                         }
                         cells.push(attr_cell);
                     }
@@ -2270,8 +2274,11 @@ impl<'a> PivotCalculator<'a> {
                             cell.is_collapsed = item.is_collapsed;
                             cell.group_path = row_gp.clone();
 
-                            if item.is_subtotal || item.is_grand_total {
+                            if item.is_subtotal {
                                 cell = cell.as_total();
+                            } else if item.is_grand_total {
+                                cell = cell.as_total();
+                                cell.background_style = BackgroundStyle::GrandTotal;
                             }
 
                             cells.push(cell);
@@ -2295,8 +2302,11 @@ impl<'a> PivotCalculator<'a> {
                             .cloned()
                             .unwrap_or_default();
                         let mut attr_cell = PivotViewCell::row_header(label, 0);
-                        if item.is_subtotal || item.is_grand_total {
+                        if item.is_subtotal {
                             attr_cell = attr_cell.as_total();
+                        } else if item.is_grand_total {
+                            attr_cell = attr_cell.as_total();
+                            attr_cell.background_style = BackgroundStyle::GrandTotal;
                         }
                         cells.push(attr_cell);
                     }
@@ -2531,11 +2541,11 @@ impl<'a> PivotCalculator<'a> {
                     cell.is_bold = true;
                 } else if row_item.is_grand_total {
                     cell.cell_type = PivotCellType::GrandTotalRow;
-                    cell.background_style = BackgroundStyle::Total;
+                    cell.background_style = BackgroundStyle::GrandTotal;
                     cell.is_bold = true;
                 } else if col_item.is_grand_total {
                     cell.cell_type = PivotCellType::GrandTotalColumn;
-                    cell.background_style = BackgroundStyle::Total;
+                    cell.background_style = BackgroundStyle::Normal;
                     cell.is_bold = true;
                 } else if is_row_total && is_col_total {
                     cell.cell_type = PivotCellType::RowSubtotal;
@@ -2653,6 +2663,14 @@ impl<'a> PivotCalculator<'a> {
                     if row_item.is_grand_total && col_item.is_grand_total {
                         cell.cell_type = PivotCellType::GrandTotal;
                         cell.background_style = BackgroundStyle::GrandTotal;
+                        cell.is_bold = true;
+                    } else if row_item.is_grand_total {
+                        cell.cell_type = PivotCellType::GrandTotalRow;
+                        cell.background_style = BackgroundStyle::GrandTotal;
+                        cell.is_bold = true;
+                    } else if col_item.is_grand_total {
+                        cell.cell_type = PivotCellType::GrandTotalColumn;
+                        cell.background_style = BackgroundStyle::Normal;
                         cell.is_bold = true;
                     } else if is_row_total || is_col_total {
                         cell.cell_type = PivotCellType::RowSubtotal;

@@ -6,242 +6,170 @@
 import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import ReactDOM from 'react-dom';
 import { css } from '@emotion/css';
+import type { PivotTheme } from '../rendering/pivot';
+import {
+  EXCEL_PIVOT_STYLES,
+  EXCEL_PIVOT_STYLES_BY_NAME,
+  DEFAULT_EXCEL_PIVOT_STYLE,
+  type ExcelPivotStyle,
+} from '../styles/excelPivotStyles';
 
 // ============================================================================
-// Types
+// Re-exports (consumed by index.ts and PivotDesignTab.tsx)
 // ============================================================================
 
-interface ThumbColors {
-  headerBg: string;
-  headerFg: string;
-  bandBg: string;
-  baseBg: string;
-  borderH: string;
-  borderV: string;
-  outerBorder: string;
-  dashColor: string;
-  headerBorderBottom?: string;
-  totalBorderTop?: string;
-}
-
-export interface PivotStyleDef {
-  id: string;
-  category: 'light' | 'medium' | 'dark';
-  group: number;        // 0-3 within category
-  accentIndex: number;  // 0-6 index into STYLE_ACCENTS
-  thumb: ThumbColors;
-}
-
-// ============================================================================
-// Accent Color Palette (matches Excel Office theme)
-// ============================================================================
-
-interface AccentColor {
-  base: string;
-  light: string;
-  lighter: string;
-  medium: string;
-  dark: string;
-}
-
-const STYLE_ACCENTS: AccentColor[] = [
-  // 0: No accent (gray/neutral)
-  { base: '#999999', light: '#f2f2f2', lighter: '#f8f8f8', medium: '#d9d9d9', dark: '#595959' },
-  // 1: Blue (Accent 1)
-  { base: '#4472c4', light: '#d6e4f0', lighter: '#edf2f9', medium: '#8faadc', dark: '#2f5496' },
-  // 2: Orange (Accent 2)
-  { base: '#ed7d31', light: '#fbe5d6', lighter: '#fdf2eb', medium: '#f4b183', dark: '#c55a11' },
-  // 3: Gray (Accent 3)
-  { base: '#a5a5a5', light: '#ededed', lighter: '#f6f6f6', medium: '#c9c9c9', dark: '#7f7f7f' },
-  // 4: Gold (Accent 4)
-  { base: '#ffc000', light: '#fff2cc', lighter: '#fff9e5', medium: '#ffd966', dark: '#bf9000' },
-  // 5: Light Blue (Accent 5)
-  { base: '#5b9bd5', light: '#deeaf6', lighter: '#eff5fb', medium: '#9bc2e6', dark: '#2e75b6' },
-  // 6: Green (Accent 6)
-  { base: '#70ad47', light: '#e2efda', lighter: '#f0f7ec', medium: '#a9d18e', dark: '#548235' },
-];
-
-// ============================================================================
-// Style Generation
-// ============================================================================
-
-function addStyle(
-  styles: PivotStyleDef[],
-  category: PivotStyleDef['category'],
-  group: number,
-  accentIndex: number,
-  thumb: ThumbColors,
-): void {
-  const num = group * 7 + accentIndex + 1;
-  styles.push({ id: `${category}-${num}`, category, group, accentIndex, thumb });
-}
-
-function generatePivotStyles(): PivotStyleDef[] {
-  const styles: PivotStyleDef[] = [];
-
-  STYLE_ACCENTS.forEach((accent, i) => {
-    // --- LIGHT Group 0 (Light 1-7): Very minimal, thin horizontal lines ---
-    addStyle(styles, 'light', 0, i, {
-      headerBg: '#ffffff', headerFg: accent.dark, bandBg: '#ffffff', baseBg: '#ffffff',
-      borderH: accent.medium, borderV: '', outerBorder: accent.medium, dashColor: accent.medium,
-      headerBorderBottom: accent.base, totalBorderTop: accent.base,
-    });
-    // --- LIGHT Group 1 (Light 8-14): Header accent border, subtle banding ---
-    addStyle(styles, 'light', 1, i, {
-      headerBg: '#ffffff', headerFg: accent.dark, bandBg: accent.lighter, baseBg: '#ffffff',
-      borderH: '#e8e8e8', borderV: '', outerBorder: '#cccccc', dashColor: '#999999',
-      headerBorderBottom: accent.base, totalBorderTop: accent.base,
-    });
-    // --- LIGHT Group 2 (Light 15-21): Colored header, banded rows ---
-    addStyle(styles, 'light', 2, i, {
-      headerBg: accent.base, headerFg: '#ffffff', bandBg: accent.light, baseBg: '#ffffff',
-      borderH: 'transparent', borderV: '', outerBorder: accent.medium, dashColor: '#777777',
-    });
-    // --- LIGHT Group 3 (Light 22-28): Colored header, banded rows, grid lines ---
-    addStyle(styles, 'light', 3, i, {
-      headerBg: accent.base, headerFg: '#ffffff', bandBg: accent.light, baseBg: '#ffffff',
-      borderH: accent.medium, borderV: accent.medium, outerBorder: accent.base, dashColor: '#666666',
-    });
-
-    // --- MEDIUM Group 0 (Medium 1-7): Colored header, accent horizontal lines ---
-    addStyle(styles, 'medium', 0, i, {
-      headerBg: accent.base, headerFg: '#ffffff', bandBg: '#ffffff', baseBg: '#ffffff',
-      borderH: accent.medium, borderV: '', outerBorder: accent.base, dashColor: '#777777',
-      totalBorderTop: accent.base,
-    });
-    // --- MEDIUM Group 1 (Medium 8-14): Colored header, subtle banding ---
-    addStyle(styles, 'medium', 1, i, {
-      headerBg: accent.base, headerFg: '#ffffff', bandBg: accent.lighter, baseBg: '#ffffff',
-      borderH: 'transparent', borderV: '', outerBorder: accent.base, dashColor: '#777777',
-      totalBorderTop: accent.dark,
-    });
-    // --- MEDIUM Group 2 (Medium 15-21): Dark header, strong banding, borders ---
-    addStyle(styles, 'medium', 2, i, {
-      headerBg: accent.dark, headerFg: '#ffffff', bandBg: accent.light, baseBg: '#ffffff',
-      borderH: accent.medium, borderV: accent.medium, outerBorder: accent.dark, dashColor: '#555555',
-    });
-    // --- MEDIUM Group 3 (Medium 22-28): Dark header, full grid, strong bands ---
-    addStyle(styles, 'medium', 3, i, {
-      headerBg: accent.dark, headerFg: '#ffffff', bandBg: accent.light, baseBg: accent.lighter,
-      borderH: accent.base, borderV: accent.base, outerBorder: accent.dark, dashColor: '#555555',
-    });
-
-    // --- DARK Group 0 (Dark 1-7): Dark header, medium body ---
-    addStyle(styles, 'dark', 0, i, {
-      headerBg: accent.dark, headerFg: '#ffffff', bandBg: accent.light, baseBg: accent.lighter,
-      borderH: 'transparent', borderV: '', outerBorder: accent.dark, dashColor: accent.dark,
-    });
-    // --- DARK Group 1 (Dark 8-14): Very dark, accent fills ---
-    addStyle(styles, 'dark', 1, i, {
-      headerBg: accent.dark, headerFg: '#ffffff', bandBg: accent.base, baseBg: accent.medium,
-      borderH: 'transparent', borderV: '', outerBorder: accent.dark, dashColor: '#ffffff',
-    });
-    // --- DARK Group 2 (Dark 15-21): Black header, dark accent body ---
-    addStyle(styles, 'dark', 2, i, {
-      headerBg: '#333333', headerFg: '#ffffff', bandBg: accent.dark, baseBg: accent.base,
-      borderH: 'transparent', borderV: '', outerBorder: '#333333', dashColor: '#ffffff',
-    });
-    // --- DARK Group 3 (Dark 22-28): Black header, dark body, grid lines ---
-    addStyle(styles, 'dark', 3, i, {
-      headerBg: '#333333', headerFg: '#ffffff', bandBg: accent.dark, baseBg: accent.base,
-      borderH: accent.medium, borderV: accent.medium, outerBorder: '#333333', dashColor: '#ffffff',
-    });
-  });
-
-  // Sort by category order (light, medium, dark), then by id number
-  const catOrder = { light: 0, medium: 1, dark: 2 };
-  styles.sort((a, b) => {
-    const catDiff = catOrder[a.category] - catOrder[b.category];
-    if (catDiff !== 0) return catDiff;
-    const aNum = parseInt(a.id.split('-')[1]);
-    const bNum = parseInt(b.id.split('-')[1]);
-    return aNum - bNum;
-  });
-
-  return styles;
-}
-
-export const PIVOT_STYLES = generatePivotStyles();
-export const PIVOT_STYLES_BY_ID = new Map(PIVOT_STYLES.map((s) => [s.id, s]));
-
-// Default style
-export const DEFAULT_PIVOT_STYLE_ID = 'medium-3';
+export { EXCEL_PIVOT_STYLES as PIVOT_STYLES };
+export const PIVOT_STYLES_BY_ID = EXCEL_PIVOT_STYLES_BY_NAME;
+export const DEFAULT_PIVOT_STYLE_ID = DEFAULT_EXCEL_PIVOT_STYLE;
 
 // ============================================================================
 // Style → PivotTheme Mapping
 // ============================================================================
 
-// Import type only — the actual DEFAULT_PIVOT_THEME is in rendering/pivot.ts.
-// We return Partial overrides so callers merge with createPivotTheme().
-import type { PivotTheme } from '../rendering/pivot';
+/** Lighten a hex color by blending with white. ratio=0 is original, ratio=1 is white. */
+function lighten(hex: string, ratio: number): string {
+  const r = parseInt(hex.slice(1, 3), 16);
+  const g = parseInt(hex.slice(3, 5), 16);
+  const b = parseInt(hex.slice(5, 7), 16);
+  const lr = Math.round(r + (255 - r) * ratio);
+  const lg = Math.round(g + (255 - g) * ratio);
+  const lb = Math.round(b + (255 - b) * ratio);
+  return `#${lr.toString(16).padStart(2, '0')}${lg.toString(16).padStart(2, '0')}${lb.toString(16).padStart(2, '0')}`;
+}
 
-/**
- * Convert a PivotStyleDef into PivotTheme overrides.
- * Returns a Partial<PivotTheme> that should be merged with DEFAULT_PIVOT_THEME.
- */
-function styleDefToThemeOverrides(def: PivotStyleDef): Partial<PivotTheme> {
-  const accent = STYLE_ACCENTS[def.accentIndex];
-  const t = def.thumb;
-  const isDark = def.category === 'dark' && def.group >= 1;
-  const hasColoredHeader = t.headerBg !== '#ffffff';
+/** Relative luminance of a hex color (0=black, 1=white). */
+function luminance(hex: string): number {
+  const r = parseInt(hex.slice(1, 3), 16) / 255;
+  const g = parseInt(hex.slice(3, 5), 16) / 255;
+  const b = parseInt(hex.slice(5, 7), 16) / 255;
+  const srgb = (c: number) => (c <= 0.03928 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4));
+  return 0.2126 * srgb(r) + 0.7152 * srgb(g) + 0.0722 * srgb(b);
+}
 
-  // Determine text colors based on brightness of backgrounds
-  const darkText = '#1f2937';
-  const mediumText = '#374151';
-  const lightText = '#ffffff';
-  const darkBodyText = isDark ? '#e8e8e8' : darkText;
-  const darkBodyValueText = isDark ? '#d0d0d0' : mediumText;
-
-  return {
-    // Header
-    headerBackground: t.headerBg,
-    headerText: hasColoredHeader ? lightText : accent.dark,
-    headerBorderColor: t.headerBorderBottom || (hasColoredHeader ? t.headerBg : accent.base),
-    headerFontWeight: '700',
-
-    // Data cells
-    valueBackground: t.baseBg,
-    labelBackground: t.baseBg,
-    alternateRowBackground: t.bandBg,
-
-    // Totals — derive from accent
-    totalBackground: isDark ? accent.dark : accent.light,
-    grandTotalBackground: isDark ? accent.dark : accent.medium,
-    totalText: isDark ? lightText : darkText,
-    grandTotalText: isDark ? lightText : darkText,
-
-    // Text colors
-    labelText: darkBodyText,
-    valueText: darkBodyValueText,
-    filterText: darkBodyValueText,
-
-    // Borders
-    borderColor: t.borderH !== 'transparent' ? t.borderH : (isDark ? 'transparent' : '#e8e8e8'),
-
-    // Filter row
-    filterRowBackground: t.bandBg,
-
-    // Filter button — adapt to header color
-    filterButtonBackground: hasColoredHeader ? t.headerBg : '#ffffff',
-    filterButtonBorder: hasColoredHeader ? accent.medium : '#C5CDE0',
-    filterButtonHoverBackground: hasColoredHeader ? accent.medium : accent.light,
-    filterDropdownArrow: hasColoredHeader ? lightText : '#4b5563',
-
-    // Icons — adapt to body darkness
-    iconColor: isDark ? '#cccccc' : '#6b7280',
-    iconHoverColor: isDark ? lightText : darkText,
-  };
+/** True if the color is "dark" (needs light text on top). */
+function isDarkColor(hex: string): boolean {
+  return luminance(hex) < 0.35;
 }
 
 /**
- * Get PivotTheme overrides for a given style ID.
+ * Convert an ExcelPivotStyle into PivotTheme overrides.
+ * Returns a Partial<PivotTheme> that should be merged with DEFAULT_PIVOT_THEME.
+ */
+function excelStyleToThemeOverrides(style: ExcelPivotStyle): Partial<PivotTheme> {
+  const headerBg = style.headerRow?.bg || style.wholeTable?.bg || '';
+  const headerFg = style.headerRow?.fg || style.wholeTable?.fg || '#000000';
+  const hasColoredHeader = !!headerBg && headerBg !== '#FFFFFF' && headerBg !== '#ffffff';
+  const bodyBg = style.wholeTable?.bg || '#ffffff';
+  const bodyFg = style.wholeTable?.fg || '#000000';
+  const totalBg = style.totalRow?.bg || '';
+  const totalFg = style.totalRow?.fg || bodyFg;
+  const subtotalBg = style.subtotalRow1?.bg || '';
+  const subtotalFg = style.subtotalRow1?.fg || bodyFg;
+  const bandBg = style.rowStripe1?.bg || '';
+  const isDarkBody = !!bodyBg && bodyBg !== '#ffffff' && bodyBg !== '#FFFFFF' && isDarkColor(bodyBg);
+
+  // Determine appropriate text color for headers
+  const headerTextColor = hasColoredHeader
+    ? (isDarkColor(headerBg) ? '#ffffff' : '#000000')
+    : headerFg;
+
+  // For dark themes, we need light text on dark backgrounds
+  const labelText = isDarkBody ? (bodyFg || '#e0e0e0') : (bodyFg || '#1f2937');
+  const valueText = isDarkBody ? (bodyFg || '#d0d0d0') : (bodyFg || '#374151');
+
+  // Grand total: use totalRow styling
+  const grandTotalBg = totalBg || (isDarkBody ? lighten(bodyBg, -0.1) : '#f0f0f0');
+  const grandTotalFg = totalFg;
+
+  // Subtotal: use subtotalRow1 styling, fall back to lighter version of total
+  const subtotalResultBg = subtotalBg || (totalBg ? lighten(totalBg, 0.3) : '');
+  const subtotalResultFg = subtotalFg;
+
+  // Border color: derive from the accent or banding
+  const borderColor = isDarkBody
+    ? lighten(bodyBg, 0.15)
+    : (bandBg && bandBg !== '#ffffff' ? lighten(bandBg, 0.3) : '#e8e8e8');
+
+  // Filter-related colors
+  const filterButtonBg = hasColoredHeader ? headerBg : '#ffffff';
+  const filterButtonBorder = hasColoredHeader
+    ? lighten(headerBg, 0.3)
+    : '#C5CDE0';
+  const filterButtonHoverBg = hasColoredHeader
+    ? lighten(headerBg, 0.2)
+    : '#E8EEF7';
+  const filterDropdownArrow = hasColoredHeader
+    ? (isDarkColor(headerBg) ? '#ffffff' : '#4b5563')
+    : '#4b5563';
+
+  const overrides: Partial<PivotTheme> = {};
+
+  // Header
+  if (hasColoredHeader) {
+    overrides.headerBackground = headerBg;
+    overrides.headerBorderColor = headerBg;
+  }
+  overrides.headerText = headerTextColor;
+  overrides.headerFontWeight = style.headerRow?.b ? '700' : '400';
+
+  // Body
+  if (bodyBg !== '#ffffff') {
+    overrides.valueBackground = bodyBg;
+    overrides.labelBackground = bodyBg;
+  }
+  overrides.labelText = labelText;
+  overrides.valueText = valueText;
+  overrides.filterText = valueText;
+
+  // Banding
+  if (bandBg) {
+    overrides.alternateRowBackground = bandBg;
+  }
+
+  // Totals
+  if (totalBg) {
+    overrides.grandTotalBackground = totalBg;
+  } else if (isDarkBody) {
+    overrides.grandTotalBackground = lighten(bodyBg, -0.05);
+  }
+  overrides.grandTotalText = grandTotalFg;
+
+  // Subtotals
+  if (subtotalResultBg) {
+    overrides.totalBackground = subtotalResultBg;
+  }
+  overrides.totalText = subtotalResultFg;
+
+  // Borders
+  overrides.borderColor = borderColor;
+
+  // Filter row
+  if (bandBg) {
+    overrides.filterRowBackground = bandBg;
+  }
+
+  // Filter button
+  overrides.filterButtonBackground = filterButtonBg;
+  overrides.filterButtonBorder = filterButtonBorder;
+  overrides.filterButtonHoverBackground = filterButtonHoverBg;
+  overrides.filterDropdownArrow = filterDropdownArrow;
+
+  // Icons
+  overrides.iconColor = isDarkBody ? '#cccccc' : '#6b7280';
+  overrides.iconHoverColor = isDarkBody ? '#ffffff' : '#1f2937';
+
+  return overrides;
+}
+
+/**
+ * Get PivotTheme overrides for a given style ID (e.g. "PivotStyleLight16").
  * Returns empty object if style not found (will use default theme).
  */
 export function getThemeOverridesForStyle(styleId: string): Partial<PivotTheme> {
   if (!styleId) return {};
-  const def = PIVOT_STYLES_BY_ID.get(styleId);
-  if (!def) return {};
-  return styleDefToThemeOverrides(def);
+  const style = EXCEL_PIVOT_STYLES_BY_NAME.get(styleId);
+  if (!style) return {};
+  return excelStyleToThemeOverrides(style);
 }
 
 // ============================================================================
@@ -250,6 +178,46 @@ export function getThemeOverridesForStyle(styleId: string): Partial<PivotTheme> 
 
 const THUMB_ROWS = 5;
 const THUMB_COLS = 4;
+
+interface ThumbColors {
+  headerBg: string;
+  headerFg: string;
+  bandBg: string;
+  baseBg: string;
+  borderColor: string;
+  accentColor: string;
+}
+
+/** Derive thumbnail colors from an ExcelPivotStyle. */
+function getThumbColors(style: ExcelPivotStyle): ThumbColors {
+  const headerBg = style.headerRow?.bg || '#ffffff';
+  const headerFg = style.headerRow?.fg || style.wholeTable?.fg || '#000000';
+  const baseBg = style.wholeTable?.bg || '#ffffff';
+  const bandBg = style.rowStripe1?.bg || style.rowStripe2?.bg || baseBg;
+
+  // Accent: use the most prominent non-white color
+  const accentColor = (headerBg !== '#ffffff' && headerBg !== '#FFFFFF' && headerBg)
+    || style.subtotalRow1?.bg
+    || style.totalRow?.bg
+    || style.pageFieldLabels?.bg
+    || bandBg
+    || '#d0d0d0';
+
+  const borderColor = (baseBg !== '#ffffff' && baseBg !== '#FFFFFF')
+    ? lighten(baseBg, 0.15)
+    : (bandBg !== baseBg ? lighten(bandBg, 0.3) : '#e0e0e0');
+
+  return {
+    headerBg,
+    headerFg: (headerBg !== '#ffffff' && headerBg !== '#FFFFFF')
+      ? (isDarkColor(headerBg) ? '#ffffff' : '#333333')
+      : headerFg,
+    bandBg,
+    baseBg,
+    borderColor,
+    accentColor,
+  };
+}
 
 function drawPivotThumbnail(
   ctx: CanvasRenderingContext2D,
@@ -270,9 +238,7 @@ function drawPivotThumbnail(
   for (let r = 0; r < THUMB_ROWS; r++) {
     const isHeader = r === 0;
     const isBanded = r > 0 && r % 2 === 0;
-    const isLast = r === THUMB_ROWS - 1;
 
-    // Row background
     let bg = isBanded ? thumb.bandBg : thumb.baseBg;
     if (isHeader) bg = thumb.headerBg;
 
@@ -280,7 +246,9 @@ function drawPivotThumbnail(
     ctx.fillRect(0, y, w, rowH);
 
     // Content dashes
-    const fg = isHeader ? thumb.headerFg : thumb.dashColor;
+    const fg = isHeader ? thumb.headerFg : (thumb.baseBg !== '#ffffff' && thumb.baseBg !== '#FFFFFF'
+      ? lighten(thumb.baseBg, 0.6)
+      : '#999999');
     ctx.fillStyle = fg;
     for (let c = 0; c < THUMB_COLS; c++) {
       const x = c * colW + dashMarginX;
@@ -289,40 +257,18 @@ function drawPivotThumbnail(
       ctx.fillRect(x, dy, dw, isHeader ? headerDashH : dashH);
     }
 
-    // Vertical borders
-    if (thumb.borderV) {
-      ctx.fillStyle = thumb.borderV;
-      for (let c = 1; c < THUMB_COLS; c++) {
-        ctx.fillRect(c * colW, y, 0.5, rowH);
-      }
-    }
-
     y += rowH;
 
     // Horizontal border after row
     if (r < THUMB_ROWS - 1) {
-      if (isHeader && thumb.headerBorderBottom) {
-        ctx.fillStyle = thumb.headerBorderBottom;
-        ctx.fillRect(0, y, w, borderW);
-      } else if (isLast && thumb.totalBorderTop) {
-        // drawn below
-      } else if (thumb.borderH && thumb.borderH !== 'transparent') {
-        ctx.fillStyle = thumb.borderH;
-        ctx.fillRect(0, y, w, borderW);
-      }
+      ctx.fillStyle = thumb.borderColor;
+      ctx.fillRect(0, y, w, borderW);
       y += borderW;
     }
   }
 
-  // Total row top border (drawn on top of existing border)
-  if (thumb.totalBorderTop) {
-    const totalY = (THUMB_ROWS - 1) * (rowH + borderW);
-    ctx.fillStyle = thumb.totalBorderTop;
-    ctx.fillRect(0, totalY - borderW, w, borderW + 0.5);
-  }
-
   // Outer border
-  ctx.strokeStyle = thumb.outerBorder;
+  ctx.strokeStyle = thumb.accentColor;
   ctx.lineWidth = 1;
   ctx.strokeRect(0.5, 0.5, w - 1, h - 1);
 }
@@ -335,7 +281,7 @@ const THUMB_W = 72;
 const THUMB_H = 50;
 
 interface ThumbnailProps {
-  style: PivotStyleDef;
+  style: ExcelPivotStyle;
   selected?: boolean;
   onClick?: () => void;
   width?: number;
@@ -345,6 +291,7 @@ interface ThumbnailProps {
 function PivotStyleThumbnail({ style, selected, onClick, width = THUMB_W, height = THUMB_H }: ThumbnailProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const dpr = window.devicePixelRatio || 1;
+  const thumb = useMemo(() => getThumbColors(style), [style]);
 
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -356,8 +303,8 @@ function PivotStyleThumbnail({ style, selected, onClick, width = THUMB_W, height
     canvas.height = height * dpr;
     ctx.scale(dpr, dpr);
 
-    drawPivotThumbnail(ctx, style.thumb, width, height);
-  }, [style, width, height, dpr]);
+    drawPivotThumbnail(ctx, thumb, width, height);
+  }, [thumb, width, height, dpr]);
 
   return (
     <canvas
@@ -370,7 +317,7 @@ function PivotStyleThumbnail({ style, selected, onClick, width = THUMB_W, height
         outline: selected ? '2px solid #005fb8' : '2px solid transparent',
         outlineOffset: -1,
       }}
-      title={style.id}
+      title={style.name}
       onClick={onClick}
       onMouseEnter={(e) => {
         if (!selected) {
@@ -391,7 +338,6 @@ function PivotStyleThumbnail({ style, selected, onClick, width = THUMB_W, height
 // ============================================================================
 
 const galleryStyles = {
-  // Collapsed strip in the ribbon
   stripContainer: css`
     display: flex;
     flex-direction: column;
@@ -442,8 +388,6 @@ const galleryStyles = {
     text-transform: uppercase;
     letter-spacing: 0.3px;
   `,
-
-  // Full dropdown gallery
   dropdownOverlay: css`
     position: fixed;
     top: 0;
@@ -527,12 +471,12 @@ const galleryStyles = {
 // ============================================================================
 
 const CATEGORY_LABELS: Record<string, string> = {
-  light: 'Light',
-  medium: 'Medium',
-  dark: 'Dark',
+  Light: 'Light',
+  Medium: 'Medium',
+  Dark: 'Dark',
 };
 
-const CATEGORY_ORDER = ['light', 'medium', 'dark'] as const;
+const CATEGORY_ORDER = ['Light', 'Medium', 'Dark'] as const;
 
 // ============================================================================
 // PivotStylesDropdown Component (full gallery)
@@ -549,13 +493,11 @@ interface DropdownProps {
 function PivotStylesDropdown({ anchorRect, selectedStyleId, onSelect, onClear, onClose }: DropdownProps) {
   const ref = useRef<HTMLDivElement>(null);
 
-  // Position the dropdown below the anchor (synchronous to avoid blink)
   const pos = useMemo(() => {
     const dropdownW = 560;
     let top = anchorRect.bottom + 2;
     let left = anchorRect.left;
 
-    // Keep within viewport
     if (left + dropdownW > window.innerWidth) {
       left = window.innerWidth - dropdownW - 8;
     }
@@ -568,7 +510,6 @@ function PivotStylesDropdown({ anchorRect, selectedStyleId, onSelect, onClear, o
     return { top, left };
   }, [anchorRect]);
 
-  // Close on Escape
   useEffect(() => {
     const handleKey = (e: KeyboardEvent) => {
       if (e.key === 'Escape') onClose();
@@ -577,13 +518,12 @@ function PivotStylesDropdown({ anchorRect, selectedStyleId, onSelect, onClear, o
     return () => document.removeEventListener('keydown', handleKey);
   }, [onClose]);
 
-  // Group styles by category
   const grouped = useMemo(
     () =>
       CATEGORY_ORDER.map((cat) => ({
         category: cat,
         label: CATEGORY_LABELS[cat],
-        items: PIVOT_STYLES.filter((s) => s.category === cat),
+        items: EXCEL_PIVOT_STYLES.filter((s) => s.category === cat),
       })),
     [],
   );
@@ -602,11 +542,11 @@ function PivotStylesDropdown({ anchorRect, selectedStyleId, onSelect, onClear, o
             <div className={galleryStyles.styleGrid}>
               {group.items.map((styleDef) => (
                 <PivotStyleThumbnail
-                  key={styleDef.id}
+                  key={styleDef.name}
                   style={styleDef}
-                  selected={styleDef.id === selectedStyleId}
+                  selected={styleDef.name === selectedStyleId}
                   onClick={() => {
-                    onSelect(styleDef.id);
+                    onSelect(styleDef.name);
                     onClose();
                   }}
                 />
@@ -636,7 +576,7 @@ function PivotStylesDropdown({ anchorRect, selectedStyleId, onSelect, onClear, o
 }
 
 // ============================================================================
-// Collapsed "Quick Styles" button (shown when ribbon is too narrow for strip)
+// Collapsed "Quick Styles" button
 // ============================================================================
 
 const collapsedStyles = {
@@ -677,11 +617,11 @@ const collapsedStyles = {
   `,
 };
 
-/** Small icon thumbnail drawn on canvas for the collapsed Quick Styles button. */
-function QuickStyleIcon({ style }: { style: PivotStyleDef }) {
+function QuickStyleIcon({ style }: { style: ExcelPivotStyle }) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const dpr = window.devicePixelRatio || 1;
   const size = 32;
+  const thumb = useMemo(() => getThumbColors(style), [style]);
 
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -691,8 +631,8 @@ function QuickStyleIcon({ style }: { style: PivotStyleDef }) {
     canvas.width = size * dpr;
     canvas.height = size * dpr;
     ctx.scale(dpr, dpr);
-    drawPivotThumbnail(ctx, style.thumb, size, size);
-  }, [style, dpr]);
+    drawPivotThumbnail(ctx, thumb, size, size);
+  }, [thumb, dpr]);
 
   return (
     <canvas
@@ -703,27 +643,23 @@ function QuickStyleIcon({ style }: { style: PivotStyleDef }) {
 }
 
 // ============================================================================
-// PivotTableStylesGallery Component (collapsed strip for ribbon, responsive)
+// PivotTableStylesGallery Component
 // ============================================================================
 
 interface GalleryProps {
   selectedStyleId: string;
   onStyleSelect: (styleId: string) => void;
   onStyleClear: () => void;
-  /** When true, collapse to a compact "Quick Styles" button (driven by useRibbonCollapse). */
   collapsed?: boolean;
 }
 
-// Show Medium Group 1 (styles 1-7) in the collapsed strip by default
-const STRIP_STYLES = PIVOT_STYLES.filter(
-  (s) => s.category === 'medium' && parseInt(s.id.split('-')[1]) >= 1 && parseInt(s.id.split('-')[1]) <= 7,
+// Show Medium 1-7 in the collapsed strip by default
+const STRIP_STYLES = EXCEL_PIVOT_STYLES.filter(
+  (s) => s.category === 'Medium' && s.name.match(/PivotStyleMedium[1-7]$/),
 );
 
-/** Width of one thumbnail + gap in the strip */
-const THUMB_STRIP_W = 62 + 3; // width + gap
-/** Minimum width to show at least one thumbnail + dropdown button */
-const MIN_STRIP_W = 62 + 18 + 12; // thumb + button + padding
-/** Width threshold below which we collapse to the Quick Styles button */
+const THUMB_STRIP_W = 62 + 3;
+const MIN_STRIP_W = 62 + 18 + 12;
 const COLLAPSE_THRESHOLD = MIN_STRIP_W;
 
 export function PivotTableStylesGallery({ selectedStyleId, onStyleSelect, onStyleClear, collapsed = false }: GalleryProps) {
@@ -732,7 +668,6 @@ export function PivotTableStylesGallery({ selectedStyleId, onStyleSelect, onStyl
   const [anchorRect, setAnchorRect] = useState<DOMRect | null>(null);
   const [availableWidth, setAvailableWidth] = useState<number>(9999);
 
-  // Observe own container width to determine how many thumbs to show
   useEffect(() => {
     const el = containerRef.current;
     if (!el) return;
@@ -746,7 +681,6 @@ export function PivotTableStylesGallery({ selectedStyleId, onStyleSelect, onStyl
     return () => observer.disconnect();
   }, []);
 
-  // Collapse via prop (from useRibbonCollapse) or when container is too narrow
   const isCollapsed = collapsed || availableWidth < COLLAPSE_THRESHOLD;
   const visibleCount = isCollapsed
     ? 0
@@ -763,13 +697,11 @@ export function PivotTableStylesGallery({ selectedStyleId, onStyleSelect, onStyl
     setIsOpen(false);
   }, []);
 
-  // Find the selected style def for the collapsed icon
-  const selectedDef = PIVOT_STYLES_BY_ID.get(selectedStyleId) ?? STRIP_STYLES[0];
+  const selectedDef = EXCEL_PIVOT_STYLES_BY_NAME.get(selectedStyleId) ?? STRIP_STYLES[0];
 
   return (
     <div ref={containerRef} className={galleryStyles.stripContainer}>
       {isCollapsed ? (
-        // Collapsed: "Quick Styles" button
         <button
           className={collapsedStyles.button}
           onClick={handleOpenDropdown}
@@ -783,17 +715,16 @@ export function PivotTableStylesGallery({ selectedStyleId, onStyleSelect, onStyl
           </span>
         </button>
       ) : (
-        // Expanded: thumbnail strip
         <div className={galleryStyles.stripRow}>
           <div className={galleryStyles.stripThumbnails}>
             {STRIP_STYLES.slice(0, visibleCount).map((styleDef) => (
               <PivotStyleThumbnail
-                key={styleDef.id}
+                key={styleDef.name}
                 style={styleDef}
                 width={62}
                 height={44}
-                selected={styleDef.id === selectedStyleId}
-                onClick={() => onStyleSelect(styleDef.id)}
+                selected={styleDef.name === selectedStyleId}
+                onClick={() => onStyleSelect(styleDef.name)}
               />
             ))}
           </div>

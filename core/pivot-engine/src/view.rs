@@ -166,12 +166,12 @@ impl PivotViewCell {
             row_span: 1,
             col_span: 1,
             is_bold: false,
-            background_style: BackgroundStyle::Header,
+            background_style: BackgroundStyle::Normal,
             group_path: Vec::new(),
             filter_field_index: None,
         }
     }
-    
+
     /// Creates a column header cell.
     pub fn column_header(label: String) -> Self {
         PivotViewCell {

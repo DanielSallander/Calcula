@@ -63,34 +63,34 @@ export interface PivotTheme {
 }
 
 export const DEFAULT_PIVOT_THEME: PivotTheme = {
-  // Text colors
-  headerText: '#ffffff',
-  labelText: '#1f2937',
-  valueText: '#374151',
-  totalText: '#1f2937',
-  grandTotalText: '#111827',
-  filterText: '#374151',
+  // Text colors — PivotStyleLight16 uses black text throughout
+  headerText: '#000000',
+  labelText: '#000000',
+  valueText: '#000000',
+  totalText: '#000000',
+  grandTotalText: '#000000',
+  filterText: '#000000',
 
-  // Background colors — modern blue-grey palette
-  headerBackground: '#4472C4',
+  // Background colors — PivotStyleLight16: light blue header/total, gray banding
+  headerBackground: '#C0E6F5',
   labelBackground: '#ffffff',
   valueBackground: '#ffffff',
-  totalBackground: '#E8EEF7',
-  grandTotalBackground: '#D6E0F0',
-  filterRowBackground: '#f0f4fa',
+  totalBackground: '#e8e8e8',
+  grandTotalBackground: '#C0E6F5',
+  filterRowBackground: '#D9D9D9',
 
-  // Alternating rows — very subtle banding
-  alternateRowBackground: '#F2F6FC',
+  // Alternating rows — only used when banding is explicitly enabled
+  alternateRowBackground: '#ffffff',
 
-  // Borders — light and clean
-  borderColor: '#D5DEEF',
-  headerBorderColor: '#4472C4',
+  // Borders
+  borderColor: '#e8e8e8',
+  headerBorderColor: '#C0E6F5',
 
   // Filter button
-  filterButtonBackground: '#ffffff',
-  filterButtonBorder: '#C5CDE0',
-  filterButtonHoverBackground: '#E8EEF7',
-  filterDropdownArrow: '#4b5563',
+  filterButtonBackground: '#C0E6F5',
+  filterButtonBorder: '#a0d0e8',
+  filterButtonHoverBackground: '#d5eff9',
+  filterDropdownArrow: '#000000',
 
   // Icons
   iconColor: '#6b7280',
@@ -223,7 +223,7 @@ function getPivotBackgroundColor(
     case 'Header':
       return theme.headerBackground;
     case 'Normal':
-      return rowIndex % 2 === 0 ? theme.valueBackground : theme.alternateRowBackground;
+      return theme.valueBackground;
     case 'Alternate':
       return theme.alternateRowBackground;
     case 'Subtotal':
