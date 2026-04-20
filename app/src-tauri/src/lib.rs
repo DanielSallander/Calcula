@@ -3681,6 +3681,7 @@ pub fn run() {
             pivot::cancel_pivot_operation,
             pivot::revert_pivot_operation,
             pivot::delete_pivot_table,
+            pivot::relocate_pivot,
             pivot::get_pivot_source_data,
             pivot::refresh_pivot_cache,
             pivot::get_pivot_at_cell,

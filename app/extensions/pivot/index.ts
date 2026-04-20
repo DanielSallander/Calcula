@@ -63,7 +63,7 @@ import {
   findPivotRegionAtCell,
 } from "./handlers/selectionHandler";
 import type { PivotRegionData } from "./types";
-import { getPivotRegionsForSheet, getPivotAtCell, getPivotView, togglePivotGroup, getPivotCellWindow, cancelPivotOperation, getAllPivotTables, refreshPivotCache } from "./lib/pivot-api";
+import { getPivotRegionsForSheet, getPivotAtCell, getPivotView, togglePivotGroup, getPivotCellWindow, cancelPivotOperation, getAllPivotTables, refreshPivotCache, relocatePivot } from "./lib/pivot-api";
 import type { PivotViewResponse } from "./lib/pivot-api";
 import {
   cachePivotView,
@@ -1039,7 +1039,8 @@ function activate(context: ExtensionContext): void {
     })
   );
 
-  // Register range guard - block drag/move/copy/paste operations that overlap pivot regions
+  // Register range guard - block operations that PARTIALLY overlap pivot regions.
+  // Full containment is allowed (e.g., selecting the entire pivot and moving it).
   cleanupFunctions.push(
     context.grid.rangeGuards.register((startRow, startCol, endRow, endCol) => {
       const regions = getCachedRegions();
@@ -1047,7 +1048,13 @@ function activate(context: ExtensionContext): void {
         const rowOverlap = startRow <= region.endRow && endRow >= region.startRow;
         const colOverlap = startCol <= region.endCol && endCol >= region.startCol;
         if (rowOverlap && colOverlap) {
-          return { blocked: true, message: pivotStructuralGuardMessage };
+          // Allow if the range fully contains the pivot region (enables move)
+          const fullyContained =
+            startRow <= region.startRow && endRow >= region.endRow &&
+            startCol <= region.startCol && endCol >= region.endCol;
+          if (!fullyContained) {
+            return { blocked: true, message: pivotStructuralGuardMessage };
+          }
         }
       }
       return null;
@@ -1496,6 +1503,32 @@ function activate(context: ExtensionContext): void {
   const handlePivotRefresh = () => { refreshPivotRegions(true); };
   window.addEventListener("pivot:refresh", handlePivotRefresh);
   cleanupFunctions.push(() => window.removeEventListener("pivot:refresh", handlePivotRefresh));
+
+  // Listen for cell move operations — relocate any pivot tables that were fully contained
+  const handleCellsMoved = async (e: Event) => {
+    const { sourceStartRow, sourceStartCol, sourceEndRow, sourceEndCol, targetRow, targetCol } =
+      (e as CustomEvent).detail;
+    const regions = getCachedRegions();
+    for (const region of regions) {
+      const fullyContained =
+        region.startRow >= sourceStartRow && region.endRow <= sourceEndRow &&
+        region.startCol >= sourceStartCol && region.endCol <= sourceEndCol;
+      if (fullyContained) {
+        const newRow = region.startRow + (targetRow - sourceStartRow);
+        const newCol = region.startCol + (targetCol - sourceStartCol);
+        console.log(`[Pivot Extension] Relocating pivot ${region.pivotId} to (${newRow},${newCol})`);
+        try {
+          await relocatePivot(region.pivotId, newRow, newCol);
+        } catch (err) {
+          console.error(`[Pivot Extension] Failed to relocate pivot ${region.pivotId}:`, err);
+        }
+      }
+    }
+    // Refresh to pick up new positions
+    refreshPivotRegions(true);
+  };
+  window.addEventListener("cells:moved", handleCellsMoved);
+  cleanupFunctions.push(() => window.removeEventListener("cells:moved", handleCellsMoved));
 
   // When a table's definition changes (resize, expand, etc.), refresh any
   // pivot tables that are linked to that table so their source range stays in sync.

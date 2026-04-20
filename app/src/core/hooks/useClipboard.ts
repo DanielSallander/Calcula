@@ -668,9 +668,48 @@ export function useClipboard(): UseClipboardReturn {
       const height = srcMaxRow - srcMinRow + 1;
       const width = srcMaxCol - srcMinCol + 1;
 
-      // Check if destination overlaps a protected range (e.g., pivot table)
       const destEndRow = targetRow + height - 1;
       const destEndCol = targetCol + width - 1;
+
+      // Detect if source contains a protected region (e.g., pivot table).
+      // Test sample points — if any single cell is blocked, there's a protected region.
+      const hasPivotInSource = (() => {
+        const testPoints = [
+          [srcMinRow, srcMinCol], [srcMinRow, srcMaxCol],
+          [srcMaxRow, srcMinCol], [srcMaxRow, srcMaxCol],
+          [Math.floor((srcMinRow + srcMaxRow) / 2), Math.floor((srcMinCol + srcMaxCol) / 2)],
+        ];
+        for (const [r, c] of testPoints) {
+          const g = checkRangeGuards(r, c, r, c);
+          if (g?.blocked) return true;
+        }
+        return false;
+      })();
+
+      if (hasPivotInSource) {
+        // Delegate to extensions — emit event and update selection, skip cell-by-cell move.
+        // The extension (e.g., Pivot) handles clearing old cells and writing new ones.
+        console.log("[Clipboard] Source contains protected region, delegating move to extensions");
+
+        window.dispatchEvent(new CustomEvent("cells:moved", {
+          detail: {
+            sourceStartRow: srcMinRow, sourceStartCol: srcMinCol,
+            sourceEndRow: srcMaxRow, sourceEndCol: srcMaxCol,
+            targetRow, targetCol,
+          }
+        }));
+
+        dispatch(setSelection({
+          startRow: targetRow,
+          startCol: targetCol,
+          endRow: targetRow + height - 1,
+          endCol: targetCol + width - 1,
+          type: source.type,
+        }));
+        return;
+      }
+
+      // Check if destination overlaps a protected range (e.g., pivot table)
       const destGuard = checkRangeGuards(targetRow, targetCol, destEndRow, destEndCol);
       if (destGuard?.blocked) {
         if (destGuard.message) alert(destGuard.message);
@@ -831,6 +870,15 @@ export function useClipboard(): UseClipboardReturn {
         // Refresh style cache so the canvas picks up styles from moved cells
         window.dispatchEvent(new CustomEvent("styles:refresh"));
         window.dispatchEvent(new CustomEvent("grid:refresh"));
+
+        // Notify extensions that cells were moved (e.g., pivot relocation)
+        window.dispatchEvent(new CustomEvent("cells:moved", {
+          detail: {
+            sourceStartRow: srcMinRow, sourceStartCol: srcMinCol,
+            sourceEndRow: srcMaxRow, sourceEndCol: srcMaxCol,
+            targetRow, targetCol,
+          }
+        }));
 
         // 5. Update selection to new position
         dispatch(setSelection({

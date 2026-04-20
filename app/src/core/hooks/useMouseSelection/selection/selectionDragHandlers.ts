@@ -315,13 +315,25 @@ export function createSelectionDragHandlers(deps: SelectionDragDependencies): Se
       (sourceSelection.type === "cells" && targetRow === sourceMinRow && targetCol === sourceMinCol);
 
     if (!isSamePosition) {
-      // Check if the destination overlaps a protected range (e.g., pivot table)
+      // Check if the destination overlaps a protected range (e.g., pivot table).
+      // Skip this check when the SOURCE fully contains a protected region (pivot move),
+      // since the extension handles clearing the old region and the destination may overlap it.
       const rowSpan = Math.abs(sourceSelection.endRow - sourceSelection.startRow);
       const colSpan = Math.abs(sourceSelection.endCol - sourceSelection.startCol);
-      const destGuard = checkRangeGuards(targetRow, targetCol, targetRow + rowSpan, targetCol + colSpan);
-      if (destGuard?.blocked) {
-        if (destGuard.message) alert(destGuard.message);
-        return;
+
+      const srcHasProtectedRegion = (() => {
+        const sr = Math.min(sourceSelection.startRow, sourceSelection.endRow);
+        const sc = Math.min(sourceSelection.startCol, sourceSelection.endCol);
+        const g = checkRangeGuards(sr, sc, sr, sc);
+        return g?.blocked === true;
+      })();
+
+      if (!srcHasProtectedRegion) {
+        const destGuard = checkRangeGuards(targetRow, targetCol, targetRow + rowSpan, targetCol + colSpan);
+        if (destGuard?.blocked) {
+          if (destGuard.message) alert(destGuard.message);
+          return;
+        }
       }
 
       // Execute the move or copy operation

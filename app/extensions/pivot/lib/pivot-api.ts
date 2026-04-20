@@ -54,6 +54,7 @@ import {
   togglePivotGroup as apiTogglePivotGroup,
   getPivotView as apiGetPivotView,
   deletePivotTable as apiDeletePivotTable,
+  relocatePivot as apiRelocatePivot,
   getPivotSourceData as apiGetPivotSourceData,
   refreshPivotCache as apiRefreshPivotCache,
   getPivotAtCell as apiGetPivotAtCell,
@@ -649,6 +650,13 @@ export async function getPivotCellWindow(
  */
 export async function deletePivotTable(pivotId: PivotId): Promise<void> {
   return apiDeletePivotTable(pivotId);
+}
+
+/**
+ * Relocate a pivot table to a new destination cell.
+ */
+export async function relocatePivot(pivotId: PivotId, newRow: number, newCol: number): Promise<void> {
+  return apiRelocatePivot(pivotId, newRow, newCol);
 }
 
 /**

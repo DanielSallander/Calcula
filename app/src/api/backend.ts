@@ -132,6 +132,13 @@ export async function deletePivotTable(pivotId: PivotId): Promise<void> {
 }
 
 /**
+ * Relocate a pivot table to a new destination cell.
+ */
+export async function relocatePivot(pivotId: PivotId, newRow: number, newCol: number): Promise<void> {
+  return invoke<void>("relocate_pivot", { pivotId, newRow, newCol });
+}
+
+/**
  * Get source data for drill-down.
  * @param pivotId - The pivot table ID
  * @param groupPath - The path identifying which cell to drill into

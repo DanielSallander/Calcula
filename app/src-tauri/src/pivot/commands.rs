@@ -833,6 +833,56 @@ pub fn delete_pivot_table(state: State<AppState>, pivot_state: State<'_, PivotSt
     Ok(())
 }
 
+/// Relocate a pivot table to a new destination cell.
+/// Updates the definition, recalculates, rewrites grid cells, and updates region tracking.
+#[tauri::command]
+pub fn relocate_pivot(
+    state: State<AppState>,
+    pivot_state: State<'_, PivotState>,
+    pivot_id: PivotId,
+    new_row: u32,
+    new_col: u32,
+) -> Result<(), String> {
+    log_info!("PIVOT", "relocate_pivot pivot_id={} to ({},{})", pivot_id, new_row, new_col);
+
+    // 1. Update the definition's destination
+    let view = {
+        let mut pivot_tables = pivot_state.pivot_tables.lock().unwrap();
+        let (definition, cache) = pivot_tables
+            .get_mut(&pivot_id)
+            .ok_or_else(|| format!("Pivot table {} not found", pivot_id))?;
+
+        let old_dest = definition.destination;
+        if old_dest == (new_row, new_col) {
+            return Ok(()); // No-op if destination unchanged
+        }
+
+        definition.destination = (new_row, new_col);
+
+        // 2. Recalculate the view at the new destination
+        safe_calculate_pivot(definition, cache)
+    };
+
+    // 3. Resolve sheet index
+    let dest_sheet_idx = {
+        let pivot_tables = pivot_state.pivot_tables.lock().unwrap();
+        let (definition, _) = pivot_tables.get(&pivot_id).unwrap();
+        resolve_dest_sheet_index(&state, definition)
+    };
+
+    // 4. Clear old region and write new cells at new destination
+    update_pivot_in_grid(&state, pivot_id, dest_sheet_idx, (new_row, new_col), &view);
+
+    // 5. Update protected region tracking
+    update_pivot_region(&state, pivot_id, dest_sheet_idx, (new_row, new_col), &view);
+
+    // 6. Store the updated view
+    store_view(&pivot_state, pivot_id, &view);
+
+    log_info!("PIVOT", "relocate_pivot pivot_id={} complete", pivot_id);
+    Ok(())
+}
+
 /// Gets source data for drill-down (detail view)
 #[tauri::command]
 pub fn get_pivot_source_data(
