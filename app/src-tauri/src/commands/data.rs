@@ -11,7 +11,7 @@ use crate::commands::utils::get_cell_internal_with_merge;
 use crate::{
     evaluate_formula_multi_sheet_with_files,
     evaluate_formula_multi_sheet_with_ast_and_files,
-    evaluate_formula_raw_with_files,
+    evaluate_formula_raw_with_files_and_pivot,
     extract_all_references, format_cell_value, get_column_row_dependents,
     get_recalculation_order, parse_cell_input,
     update_column_dependencies, update_cross_sheet_dependencies,
@@ -142,7 +142,7 @@ pub fn get_viewport_cells(
                     symbol_before: a.symbol_before,
                     value: a.value,
                 });
-                (result.text, result.color, c.formula.clone(), c.style_index, rt, acct)
+                (result.text, result.color, c.formula.as_ref().map(|f| engine::localize_formula(f, &locale)), c.style_index, rt, acct)
             } else {
                 (String::new(), None, None, 0, None, None)
             };
@@ -218,7 +218,7 @@ pub fn get_watch_cells(
                 col,
                 display: r.text,
                 display_color: r.color,
-                formula: c.formula.clone(),
+                formula: c.formula.as_ref().map(|f| engine::localize_formula(f, locale)),
                 style_index: c.style_index,
                 row_span: 1,
                 col_span: 1,
@@ -458,6 +458,7 @@ pub fn update_cell(
     state: State<AppState>,
     user_files_state: State<UserFilesState>,
     slicer_state: State<SlicerState>,
+    pivot_state: State<'_, crate::pivot::PivotState>,
     row: u32,
     col: u32,
     value: String,
@@ -508,6 +509,21 @@ pub fn update_cell(
     let mut undo_stack = state.undo_stack.lock().unwrap();
     let merged_regions = state.merged_regions.lock().unwrap();
     let locale = state.locale.lock().unwrap();
+
+    // Lock pivot state for GETPIVOTDATA support
+    let pivot_tables = pivot_state.pivot_tables.lock().unwrap();
+    let pivot_views = pivot_state.views.lock().unwrap();
+    let pivot_data_fn = |data_field: &str, pivot_row: u32, pivot_col: u32, pairs: &[(&str, &str)]| -> Option<f64> {
+        crate::pivot::operations::lookup_pivot_data(
+            &pivot_tables,
+            &pivot_views,
+            data_field,
+            pivot_row,
+            pivot_col,
+            pairs,
+        )
+    };
+
     let perf_t1_locks = Instant::now();
 
     let current_sheet_name = sheet_names.get(active_sheet).cloned().unwrap_or_default();
@@ -729,7 +745,7 @@ pub fn update_cell(
                     column_widths: Some(cw_map),
                     hidden_rows: None,
                 };
-                let raw_result = evaluate_formula_raw_with_files(
+                let raw_result = evaluate_formula_raw_with_files_and_pivot(
                     &grids,
                     &sheet_names,
                     active_sheet,
@@ -737,6 +753,7 @@ pub fn update_cell(
                     eval_ctx,
                     Some(&styles),
                     &user_files,
+                    Some(&pivot_data_fn),
                 );
 
                 // Clear any previous spill range for this cell
@@ -900,7 +917,7 @@ pub fn update_cell(
         col,
         display,
         display_color: None,
-        formula: cell.formula.clone(),
+        formula: cell.formula.as_ref().map(|f| engine::localize_formula(f, &locale)),
         style_index: cell.style_index,
         row_span,
         col_span,
@@ -1023,7 +1040,7 @@ pub fn update_cell(
                                 col: dep_col,
                                 display: dep_display,
                                 display_color: None,
-                                formula: updated_with_ast.formula.clone(),
+                                formula: updated_with_ast.formula.as_ref().map(|f| engine::localize_formula(f, &locale)),
                                 style_index: updated_with_ast.style_index,
                                 row_span: dep_row_span,
                                 col_span: dep_col_span,
@@ -1066,7 +1083,7 @@ pub fn update_cell(
                         col: dep_col,
                         display: dep_display,
                         display_color: None,
-                        formula: updated_dep.formula.clone(),
+                        formula: updated_dep.formula.as_ref().map(|f| engine::localize_formula(f, &locale)),
                         style_index: updated_dep.style_index,
                         row_span: dep_row_span,
                         col_span: dep_col_span,
@@ -1175,7 +1192,7 @@ pub fn update_cell(
                                     col: *dep_col,
                                     display: dep_display,
                                     display_color: None,
-                                    formula: updated_dep.formula.clone(),
+                                    formula: updated_dep.formula.as_ref().map(|f| engine::localize_formula(f, &locale)),
                                     style_index: updated_dep.style_index,
                                     row_span: dep_row_span,
                                     col_span: dep_col_span,
@@ -1257,7 +1274,7 @@ pub fn update_cell(
                                     col: ss_dep_col,
                                     display: dep_display,
                                     display_color: None,
-                                    formula: updated_dep.formula.clone(),
+                                    formula: updated_dep.formula.as_ref().map(|f| engine::localize_formula(f, &locale)),
                                     style_index: updated_dep.style_index,
                                     row_span: 1,
                                     col_span: 1,
@@ -1379,6 +1396,7 @@ pub fn update_cell(
 pub fn update_cells_batch(
     state: State<AppState>,
     user_files_state: State<UserFilesState>,
+    pivot_state: State<'_, crate::pivot::PivotState>,
     updates: Vec<crate::api_types::CellUpdateInput>,
 ) -> Result<Vec<CellData>, String> {
     use std::collections::HashMap;
@@ -1410,6 +1428,20 @@ pub fn update_cells_batch(
     let mut undo_stack = state.undo_stack.lock().unwrap();
     let merged_regions = state.merged_regions.lock().unwrap();
     let locale = state.locale.lock().unwrap();
+
+    // Lock pivot state for GETPIVOTDATA support
+    let pivot_tables = pivot_state.pivot_tables.lock().unwrap();
+    let pivot_views = pivot_state.views.lock().unwrap();
+    let pivot_data_fn = |data_field: &str, pivot_row: u32, pivot_col: u32, pairs: &[(&str, &str)]| -> Option<f64> {
+        crate::pivot::operations::lookup_pivot_data(
+            &pivot_tables,
+            &pivot_views,
+            data_field,
+            pivot_row,
+            pivot_col,
+            pairs,
+        )
+    };
 
     // Only open a new undo transaction if one isn't already open
     // (e.g. the frontend may have called beginUndoTransaction for cut+paste)
@@ -1620,7 +1652,7 @@ pub fn update_cells_batch(
                         column_widths: None,
                         hidden_rows: None,
                     };
-                    let raw_result = crate::evaluate_formula_raw_with_files(
+                    let raw_result = crate::evaluate_formula_raw_with_files_and_pivot(
                         &grids,
                         &sheet_names,
                         active_sheet,
@@ -1628,6 +1660,7 @@ pub fn update_cells_batch(
                         eval_ctx,
                         Some(&styles),
                         &user_files,
+                        Some(&pivot_data_fn),
                     );
 
                     // Clear any previous spill range for this cell
@@ -1776,7 +1809,7 @@ pub fn update_cells_batch(
             col,
             display,
             display_color: None,
-            formula: cell.formula.clone(),
+            formula: cell.formula.as_ref().map(|f| engine::localize_formula(f, &locale)),
             style_index: cell.style_index,
             row_span,
             col_span,
@@ -1895,7 +1928,7 @@ pub fn update_cells_batch(
                                 col: *dep_col,
                                 display: dep_display,
                                 display_color: None,
-                                formula: updated_with_ast.formula.clone(),
+                                formula: updated_with_ast.formula.as_ref().map(|f| engine::localize_formula(f, &locale)),
                                 style_index: updated_with_ast.style_index,
                                 row_span: dep_row_span,
                                 col_span: dep_col_span,
@@ -1934,7 +1967,7 @@ pub fn update_cells_batch(
                         col: *dep_col,
                         display: dep_display,
                         display_color: None,
-                        formula: updated_dep.formula.clone(),
+                        formula: updated_dep.formula.as_ref().map(|f| engine::localize_formula(f, &locale)),
                         style_index: updated_dep.style_index,
                         row_span: dep_row_span,
                         col_span: dep_col_span,
@@ -2010,7 +2043,7 @@ pub fn update_cells_batch(
                                     col: *dep_col,
                                     display: dep_display,
                                     display_color: None,
-                                    formula: updated_dep.formula.clone(),
+                                    formula: updated_dep.formula.as_ref().map(|f| engine::localize_formula(f, &locale)),
                                     style_index: updated_dep.style_index,
                                     row_span: 1,
                                     col_span: 1,
@@ -2472,7 +2505,7 @@ pub fn clear_range_with_options(
                         col,
                         display,
                         display_color: None,
-                        formula: cell.formula.clone(),
+                        formula: cell.formula.as_ref().map(|f| engine::localize_formula(f, &locale)),
                         style_index: 0,
                         row_span,
                         col_span,
@@ -2518,7 +2551,7 @@ pub fn clear_range_with_options(
                             col,
                             display,
                             display_color: None,
-                            formula: cell.formula.clone(),
+                            formula: cell.formula.as_ref().map(|f| engine::localize_formula(f, &locale)),
                             style_index: 0,
                             row_span,
                             col_span,
@@ -2674,7 +2707,7 @@ pub fn sort_range(state: State<AppState>, params: SortRangeParams) -> SortRangeR
                             col: target_col,
                             display,
                             display_color: None,
-                            formula: cell.formula.clone(),
+                            formula: cell.formula.as_ref().map(|f| engine::localize_formula(f, &locale)),
                             style_index: cell.style_index,
                             row_span: 1,
                             col_span: 1,
@@ -2776,7 +2809,7 @@ pub fn sort_range(state: State<AppState>, params: SortRangeParams) -> SortRangeR
                             col: target_col,
                             display,
                             display_color: None,
-                            formula: cell.formula.clone(),
+                            formula: cell.formula.as_ref().map(|f| engine::localize_formula(f, &locale)),
                             style_index: cell.style_index,
                             row_span: 1,
                             col_span: 1,
@@ -3311,7 +3344,7 @@ pub fn remove_duplicates(
                     col: target_col,
                     display,
                     display_color: None,
-                    formula: cell.formula.clone(),
+                    formula: cell.formula.as_ref().map(|f| engine::localize_formula(f, &locale)),
                     style_index: cell.style_index,
                     row_span: 1,
                     col_span: 1,

@@ -318,6 +318,13 @@ export { registerCellClickInterceptor, registerCellCursorInterceptor } from "./c
 export { registerCellDoubleClickInterceptor } from "./cellDoubleClickInterceptors";
 
 // ============================================================================
+// Formula Reference Interceptors
+// ============================================================================
+
+export { registerFormulaReferenceInterceptor } from "./formulaReferenceInterceptors";
+export type { FormulaReferenceOverride, FormulaReferenceInterceptorFn } from "./formulaReferenceInterceptors";
+
+// ============================================================================
 // Events
 // ============================================================================
 

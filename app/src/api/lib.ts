@@ -401,6 +401,7 @@ export {
   // Query operations
   getPivotSourceData,
   getPivotAtCell,
+  getPivotDataFormula,
   getPivotRegionsForSheet,
   getPivotFieldUniqueValues,
 
@@ -465,6 +466,7 @@ export type {
   PivotFieldConfiguration,
   FilterZoneInfo,
   PivotRegionInfo,
+  GetPivotDataFormulaResult,
   PivotRegionData,
   FieldUniqueValuesResponse,
   SetItemExpandedRequest,

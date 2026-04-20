@@ -551,6 +551,8 @@ export interface UseEditingReturn {
   clearError: () => void;
   /** Insert a cell reference into the current formula */
   insertReference: (row: number, col: number) => void;
+  /** Insert arbitrary formula text (e.g., GETPIVOTDATA) with optional cell highlight */
+  insertFormulaText: (text: string, highlightRow: number, highlightCol: number) => void;
   /** Insert a range reference into the current formula */
   insertRangeReference: (startRow: number, startCol: number, endRow: number, endCol: number) => void;
   /** Insert a column reference into the current formula (e.g., "A:A") */
@@ -1019,6 +1021,48 @@ export function useEditing(): UseEditingReturn {
       dispatchReferenceInsertedEvent();
     },
     [editing, dispatch, formulaReferences, pendingReference, getNextReferenceColor, getTargetSheetName, getSourceSheetName]
+  );
+
+  /**
+   * Insert arbitrary formula text with an optional cell reference highlight.
+   * Used by formula reference interceptors (e.g., GETPIVOTDATA).
+   */
+  const insertFormulaText = useCallback(
+    (text: string, highlightRow: number, highlightCol: number) => {
+      if (!editing || !isFormulaExpectingReference(globalEditingValue, globalCursorPosition)) {
+        return;
+      }
+
+      const cursorPos = globalCursorPosition;
+      const newValue = editing.value.substring(0, cursorPos) + text + editing.value.substring(cursorPos);
+
+      setGlobalEditingValue(newValue);
+      globalCursorPosition = cursorPos + text.length;
+      dispatch(updateEditing(newValue));
+
+      const targetSheet = getTargetSheetName();
+      const color = pendingReference?.color || getNextReferenceColor();
+      const newRef: FormulaReference = {
+        startRow: highlightRow,
+        startCol: highlightCol,
+        endRow: highlightRow,
+        endCol: highlightCol,
+        color,
+        sheetName: targetSheet ?? undefined,
+      };
+      dispatch(setFormulaReferences([...formulaReferences.filter(r => r !== pendingReference), newRef]));
+      setPendingReference(null);
+
+      // Set up arrow cursor state (no further arrow navigation for intercepted refs)
+      arrowRefCursor = { row: highlightRow, col: highlightCol };
+      arrowRefAnchor = { row: highlightRow, col: highlightCol };
+      arrowRefInsertIndex = cursorPos;
+      arrowRefSuffix = editing.value.substring(cursorPos);
+      arrowRefColor = color;
+
+      dispatchReferenceInsertedEvent();
+    },
+    [editing, dispatch, formulaReferences, pendingReference, getNextReferenceColor, getTargetSheetName]
   );
 
   /**
@@ -2086,6 +2130,7 @@ export function useEditing(): UseEditingReturn {
     replaceCurrentCell,
     clearError,
     insertReference,
+    insertFormulaText,
     insertRangeReference,
     insertColumnReference,
     insertColumnRangeReference,

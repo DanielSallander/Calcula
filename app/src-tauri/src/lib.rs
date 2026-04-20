@@ -3022,6 +3022,23 @@ pub fn evaluate_formula_raw_with_files(
     style_registry: Option<&engine::StyleRegistry>,
     user_files: &HashMap<String, Vec<u8>>,
 ) -> EvalResult {
+    evaluate_formula_raw_with_files_and_pivot(
+        grids, sheet_names, current_sheet_index, ast, eval_ctx,
+        style_registry, user_files, None,
+    )
+}
+
+/// Like `evaluate_formula_raw_with_files` but also supports GETPIVOTDATA via an optional closure.
+pub fn evaluate_formula_raw_with_files_and_pivot(
+    grids: &[Grid],
+    sheet_names: &[String],
+    current_sheet_index: usize,
+    ast: &EngineExpr,
+    eval_ctx: engine::EvalContext,
+    style_registry: Option<&engine::StyleRegistry>,
+    user_files: &HashMap<String, Vec<u8>>,
+    pivot_data_fn: Option<&dyn Fn(&str, u32, u32, &[(&str, &str)]) -> Option<f64>>,
+) -> EvalResult {
     if current_sheet_index >= grids.len() || current_sheet_index >= sheet_names.len() {
         return EvalResult::Error(CellError::Ref);
     }
@@ -3037,6 +3054,9 @@ pub fn evaluate_formula_raw_with_files(
         evaluator.set_styles(sr);
     }
     evaluator.set_file_reader(&reader);
+    if let Some(pf) = pivot_data_fn {
+        evaluator.set_pivot_data_fn(pf);
+    }
     evaluator.evaluate(ast)
 }
 
@@ -3685,6 +3705,7 @@ pub fn run() {
             pivot::get_pivot_source_data,
             pivot::refresh_pivot_cache,
             pivot::get_pivot_at_cell,
+            pivot::get_pivot_data_formula,
             pivot::get_pivot_regions_for_sheet,
             pivot::get_pivot_field_unique_values,
             // Pivot table commands - Excel-compatible API

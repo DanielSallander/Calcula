@@ -105,6 +105,7 @@ export function useSpreadsheetSelection({
     isFormulaMode,
     startEdit,  // FIX: Added startEdit to avoid stale state issues
     insertReference,
+    insertFormulaText,
     insertRangeReference,
     insertColumnReference,
     insertColumnRangeReference,
@@ -617,6 +618,7 @@ export function useSpreadsheetSelection({
     onScroll: handleScrollUpdate,
     onDragEnd: handleDragEnd,
     onInsertReference: insertReference,
+    onInsertFormulaText: insertFormulaText,
     onInsertRangeReference: insertRangeReference,
     onInsertColumnReference: insertColumnReference,
     onInsertColumnRangeReference: insertColumnRangeReference,

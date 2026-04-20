@@ -1156,6 +1156,16 @@ pub struct FieldUniqueValuesResponse {
     pub unique_values: Vec<String>,
 }
 
+/// Result from resolving a pivot cell into GETPIVOTDATA formula arguments.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GetPivotDataFormulaResult {
+    /// The value field name (e.g., "Sum of Sales").
+    pub data_field: String,
+    /// The field/item pairs for filtering (e.g., [("Region", "North"), ("Product", "Apples")]).
+    pub field_item_pairs: Vec<(String, String)>,
+}
+
 // ============================================================================
 // EXPAND/COLLAPSE AND GROUPING REQUEST TYPES
 // ============================================================================

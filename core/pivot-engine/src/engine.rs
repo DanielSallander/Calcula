@@ -2460,6 +2460,7 @@ impl<'a> PivotCalculator<'a> {
 
                 let mut cell = PivotViewCell::data(display_value);
                 cell.number_format = vf.number_format.clone();
+                cell.value_field_index = Some(vf_idx);
 
                 // Override number format for percentage-based show_values_as
                 if matches!(vf.show_values_as,
@@ -2520,6 +2521,7 @@ impl<'a> PivotCalculator<'a> {
 
                 let mut cell = PivotViewCell::data(display_value);
                 cell.number_format = vf.number_format.clone();
+                cell.value_field_index = Some(vf_idx);
 
                 // Override number format for percentage-based show_values_as
                 if matches!(vf.show_values_as,
@@ -2530,7 +2532,7 @@ impl<'a> PivotCalculator<'a> {
                 ) {
                     cell.number_format = Some("0.00%".to_string());
                 }
-                
+
                 // Determine cell type and styling
                 let is_row_total = row_item.is_subtotal || row_item.is_grand_total;
                 let is_col_total = col_item.is_subtotal || col_item.is_grand_total;

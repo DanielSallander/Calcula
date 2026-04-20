@@ -125,7 +125,12 @@ pub struct PivotViewCell {
     /// Link back to source data: (field_index, value_id) pairs.
     /// Used for drill-down functionality.
     pub group_path: Vec<(usize, ValueId)>,
-    
+
+    /// Index of the value field this data cell represents.
+    /// Only set for Data, Subtotal, and GrandTotal cells.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub value_field_index: Option<usize>,
+
     /// Pre-formatted display string.
     pub formatted_value: String,
     
@@ -149,10 +154,11 @@ impl PivotViewCell {
             is_bold: false,
             background_style: BackgroundStyle::Normal,
             group_path: Vec::new(),
+            value_field_index: None,
             filter_field_index: None,
         }
     }
-    
+
     /// Creates a row header cell.
     pub fn row_header(label: String, indent: u8) -> Self {
         PivotViewCell {
@@ -168,6 +174,7 @@ impl PivotViewCell {
             is_bold: false,
             background_style: BackgroundStyle::Normal,
             group_path: Vec::new(),
+            value_field_index: None,
             filter_field_index: None,
         }
     }
@@ -187,10 +194,11 @@ impl PivotViewCell {
             is_bold: true,
             background_style: BackgroundStyle::Header,
             group_path: Vec::new(),
+            value_field_index: None,
             filter_field_index: None,
         }
     }
-    
+
     /// Creates a corner cell.
     pub fn corner() -> Self {
         PivotViewCell {
@@ -206,10 +214,11 @@ impl PivotViewCell {
             is_bold: false,
             background_style: BackgroundStyle::Header,
             group_path: Vec::new(),
+            value_field_index: None,
             filter_field_index: None,
         }
     }
-    
+
     /// Creates a blank cell.
     pub fn blank() -> Self {
         PivotViewCell {
@@ -225,10 +234,11 @@ impl PivotViewCell {
             is_bold: false,
             background_style: BackgroundStyle::Normal,
             group_path: Vec::new(),
+            value_field_index: None,
             filter_field_index: None,
         }
     }
-    
+
     /// Creates a filter label cell (left side of filter row).
     pub fn filter_label(field_name: String, field_index: usize) -> Self {
         PivotViewCell {
@@ -244,10 +254,11 @@ impl PivotViewCell {
             is_bold: false,
             background_style: BackgroundStyle::Header,
             group_path: Vec::new(),
+            value_field_index: None,
             filter_field_index: Some(field_index),
         }
     }
-    
+
     /// Creates a filter dropdown cell (right side of filter row).
     pub fn filter_dropdown(display_value: String, field_index: usize) -> Self {
         PivotViewCell {
@@ -263,6 +274,7 @@ impl PivotViewCell {
             is_bold: false,
             background_style: BackgroundStyle::Normal,
             group_path: Vec::new(),
+            value_field_index: None,
             filter_field_index: Some(field_index),
         }
     }
@@ -283,6 +295,7 @@ impl PivotViewCell {
             is_bold: true,
             background_style: BackgroundStyle::Header,
             group_path: Vec::new(),
+            value_field_index: None,
             filter_field_index: None,
         }
     }
@@ -303,6 +316,7 @@ impl PivotViewCell {
             is_bold: true,
             background_style: BackgroundStyle::Header,
             group_path: Vec::new(),
+            value_field_index: None,
             filter_field_index: None,
         }
     }

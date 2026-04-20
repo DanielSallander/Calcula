@@ -182,6 +182,19 @@ export async function getPivotAtCell<TResponse>(
 }
 
 /**
+ * Resolve a pivot cell into GETPIVOTDATA formula arguments.
+ * @param row - Row index (0-based)
+ * @param col - Column index (0-based)
+ * @returns Formula arguments if cell is a data cell in a pivot, null otherwise
+ */
+export async function getPivotDataFormula<TResponse>(
+  row: number,
+  col: number
+): Promise<TResponse | null> {
+  return invoke<TResponse | null>("get_pivot_data_formula", { row, col });
+}
+
+/**
  * Get all pivot regions for the current sheet.
  * @returns Array of pivot region data
  */

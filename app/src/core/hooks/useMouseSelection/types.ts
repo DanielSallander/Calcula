@@ -135,6 +135,8 @@ export interface UseMouseSelectionProps {
   onDragEnd?: () => void;
   /** Callback to insert a cell reference (formula mode) */
   onInsertReference?: (row: number, col: number) => void;
+  /** Callback to insert arbitrary formula text (e.g., GETPIVOTDATA) with cell highlight */
+  onInsertFormulaText?: (text: string, highlightRow: number, highlightCol: number) => void;
   /** Callback to insert a range reference (formula mode) */
   onInsertRangeReference?: (startRow: number, startCol: number, endRow: number, endCol: number) => void;
   /** Callback to insert a column reference (formula mode) */

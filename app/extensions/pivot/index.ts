@@ -9,6 +9,10 @@ import {
   OverlayExtensions,
   AppEvents,
   gridCommands,
+  registerFormulaReferenceInterceptor,
+  registerMenuItem,
+  notifyMenusChanged,
+  columnToLetter,
 } from "@api";
 import { emitAppEvent } from "@api/events";
 
@@ -63,7 +67,7 @@ import {
   findPivotRegionAtCell,
 } from "./handlers/selectionHandler";
 import type { PivotRegionData } from "./types";
-import { getPivotRegionsForSheet, getPivotAtCell, getPivotView, togglePivotGroup, getPivotCellWindow, cancelPivotOperation, getAllPivotTables, refreshPivotCache, relocatePivot } from "./lib/pivot-api";
+import { getPivotRegionsForSheet, getPivotAtCell, getPivotDataFormula, getPivotView, togglePivotGroup, getPivotCellWindow, cancelPivotOperation, getAllPivotTables, refreshPivotCache, relocatePivot } from "./lib/pivot-api";
 import type { PivotViewResponse } from "./lib/pivot-api";
 import {
   cachePivotView,
@@ -963,6 +967,9 @@ function shiftPivotRegionsForRowDelete(row: number, count: number): void {
 // Cleanup functions for event listeners
 let cleanupFunctions: Array<() => void> = [];
 
+import { isGenerateGetPivotDataEnabled, setGenerateGetPivotData } from "./lib/getPivotDataToggle";
+import { getLocaleSettings } from "@api/locale";
+
 // ============================================================================
 // Activation
 // ============================================================================
@@ -999,6 +1006,50 @@ function activate(context: ExtensionContext): void {
       return null;
     })
   );
+
+  // Register formula reference interceptor for GETPIVOTDATA generation
+  cleanupFunctions.push(
+    registerFormulaReferenceInterceptor(async (row, col) => {
+      if (!isGenerateGetPivotDataEnabled()) return null;
+
+      // Quick check: is this cell in a cached pivot region?
+      const region = findPivotRegionAtCell(row, col);
+      if (!region) return null;
+
+      // Ask the backend for the GETPIVOTDATA formula arguments
+      const result = await getPivotDataFormula(row, col);
+      if (!result) return null;
+
+      // Build the GETPIVOTDATA formula text using locale-aware separator.
+      // The editing pipeline will delocalize the formula before storing it,
+      // so we must use the locale's list separator (e.g., ";" for Swedish).
+      const locale = await getLocaleSettings();
+      const sep = locale.listSeparator;
+      const cellRef = "$" + columnToLetter(col) + "$" + (row + 1);
+      let formula = `GETPIVOTDATA("${result.dataField}"${sep}${cellRef}`;
+      for (const [fieldName, itemValue] of result.fieldItemPairs) {
+        formula += `${sep}"${fieldName}"${sep}"${itemValue}"`;
+      }
+      formula += ")";
+
+      return {
+        text: formula,
+        highlightRow: row,
+        highlightCol: col,
+      };
+    })
+  );
+
+  // Register "Generate GetPivotData" toggle in the Formulas menu
+  registerMenuItem("formulas", {
+    id: "pivot.generateGetPivotData",
+    label: "Generate GetPivotData",
+    get checked() { return isGenerateGetPivotDataEnabled(); },
+    action: () => {
+      setGenerateGetPivotData(!isGenerateGetPivotDataEnabled());
+      notifyMenusChanged();
+    },
+  });
 
   // Register structural command guards - block insert/delete that would affect pivot regions
   const pivotStructuralGuardMessage = "We can't make this change for the selected cells because it will affect a PivotTable. Use the field list to change the report. If you are trying to insert or delete cells, move the PivotTable and try again.";

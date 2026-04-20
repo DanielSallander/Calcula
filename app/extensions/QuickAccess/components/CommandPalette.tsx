@@ -25,6 +25,10 @@ export interface CommandEntry {
   shortcut?: string;
   /** Icon from the menu item */
   icon?: React.ReactNode;
+  /** Whether this is a toggle item with checked state */
+  checked?: boolean;
+  /** Reference to the source menu item (for reading dynamic checked state) */
+  sourceItem?: MenuItemDefinition;
 }
 
 interface CommandPaletteProps {
@@ -57,6 +61,8 @@ function collectAllCommands(): CommandEntry[] {
           commandId: item.commandId,
           shortcut: item.shortcut,
           icon: item.icon,
+          checked: item.checked,
+          sourceItem: item,
         });
       }
 
@@ -185,6 +191,28 @@ const PinButton = styled.button<{ $pinned: boolean }>`
   }
 `;
 
+const CheckIndicator = styled.span<{ $checked: boolean }>`
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 14px;
+  height: 14px;
+  margin-left: 4px;
+  flex-shrink: 0;
+  border-radius: 50%;
+  border: 1.5px solid ${({ $checked }) => ($checked ? v("--accent-color") : v("--menu-shortcut-text"))};
+  transition: border-color 0.15s, background-color 0.15s;
+
+  &::after {
+    content: '';
+    display: ${({ $checked }) => ($checked ? "block" : "none")};
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background-color: ${v("--accent-color")};
+  }
+`;
+
 const EmptyMessage = styled.div`
   padding: 16px;
   text-align: center;
@@ -264,6 +292,12 @@ export function CommandPalette({
                 {cmd.shortLabel}
               </RowLabel>
               {cmd.shortcut && <Shortcut>{cmd.shortcut}</Shortcut>}
+              {cmd.sourceItem?.checked !== undefined && (
+                <CheckIndicator
+                  $checked={!!cmd.sourceItem.checked}
+                  title={cmd.sourceItem.checked ? "Enabled" : "Disabled"}
+                />
+              )}
               <PinButton
                 $pinned={pinnedIds.has(cmd.id)}
                 onClick={(e) => {

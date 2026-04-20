@@ -58,6 +58,7 @@ import {
   getPivotSourceData as apiGetPivotSourceData,
   refreshPivotCache as apiRefreshPivotCache,
   getPivotAtCell as apiGetPivotAtCell,
+  getPivotDataFormula as apiGetPivotDataFormula,
   getPivotRegionsForSheet as apiGetPivotRegionsForSheet,
   getPivotFieldUniqueValues as apiGetPivotFieldUniqueValues,
   // New Excel-compatible API functions
@@ -719,6 +720,23 @@ export async function getPivotAtCell(
   col: number
 ): Promise<PivotRegionInfo | null> {
   return apiGetPivotAtCell<PivotRegionInfo>(row, col);
+}
+
+/** Result of resolving a pivot cell into GETPIVOTDATA formula arguments. */
+export interface GetPivotDataFormulaResult {
+  dataField: string;
+  fieldItemPairs: [string, string][];
+}
+
+/**
+ * Resolves a pivot cell into GETPIVOTDATA formula arguments.
+ * Returns null if the cell is not a data cell in a pivot.
+ */
+export async function getPivotDataFormula(
+  row: number,
+  col: number
+): Promise<GetPivotDataFormulaResult | null> {
+  return apiGetPivotDataFormula<GetPivotDataFormulaResult>(row, col);
 }
 
 /**

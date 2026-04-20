@@ -16,6 +16,7 @@ import {
   // Query operations
   getPivotSourceData,
   getPivotAtCell,
+  getPivotDataFormula,
   getPivotRegionsForSheet,
   getPivotFieldUniqueValues,
 
@@ -207,6 +208,9 @@ export const pivot = {
 
   /** Checks if a cell is within a pivot table region. */
   getAtCell: getPivotAtCell,
+
+  /** Resolves a pivot cell into GETPIVOTDATA formula arguments. */
+  getDataFormula: getPivotDataFormula,
 
   /** Gets all pivot regions for the current sheet. */
   getRegionsForSheet: getPivotRegionsForSheet,

@@ -8,6 +8,7 @@ import type { GridConfig, Viewport, DimensionOverrides, FreezeConfig } from "../
 import type { CellPosition, MousePosition } from "../types";
 import { getCellFromPixel } from "../../../lib/gridRenderer";
 import { getCellFromMousePosition } from "../utils/cellUtils";
+import { checkFormulaReferenceInterceptors } from "../../../lib/formulaReferenceInterceptors";
 
 interface FormulaDependencies {
   config: GridConfig;
@@ -18,6 +19,7 @@ interface FormulaDependencies {
   splitViewport?: Viewport;
   containerRef: React.RefObject<HTMLElement | null>;
   onInsertReference?: (row: number, col: number) => void;
+  onInsertFormulaText?: (text: string, highlightRow: number, highlightCol: number) => void;
   onInsertRangeReference?: (startRow: number, startCol: number, endRow: number, endCol: number) => void;
   onUpdatePendingReference?: (startRow: number, startCol: number, endRow: number, endCol: number) => void;
   onClearPendingReference?: () => void;
@@ -56,6 +58,7 @@ export function createFormulaHandlers(deps: FormulaDependencies): FormulaHandler
     splitViewport,
     containerRef,
     onInsertReference,
+    onInsertFormulaText,
     onInsertRangeReference,
     onUpdatePendingReference,
     onClearPendingReference,
@@ -121,6 +124,7 @@ export function createFormulaHandlers(deps: FormulaDependencies): FormulaHandler
   /**
    * Handle mouse up to complete formula cell reference.
    * Inserts either a single cell or range reference.
+   * Checks formula reference interceptors (e.g., GETPIVOTDATA) for single cell clicks.
    */
   const handleFormulaCellMouseUp = (stopAutoScroll: () => void): void => {
     if (!formulaDragStartRef.current) {
@@ -136,12 +140,16 @@ export function createFormulaHandlers(deps: FormulaDependencies): FormulaHandler
       if (cell) {
         const startCell = formulaDragStartRef.current;
         if (startCell.row === cell.row && startCell.col === cell.col) {
-          // Single cell reference
-          if (onInsertReference) {
-            onInsertReference(cell.row, cell.col);
-          }
+          // Single cell reference - check interceptors first (e.g., GETPIVOTDATA)
+          checkFormulaReferenceInterceptors(cell.row, cell.col).then((override) => {
+            if (override && onInsertFormulaText) {
+              onInsertFormulaText(override.text, override.highlightRow, override.highlightCol);
+            } else if (onInsertReference) {
+              onInsertReference(cell.row, cell.col);
+            }
+          });
         } else {
-          // Range reference
+          // Range reference - no interceptor override
           if (onInsertRangeReference) {
             onInsertRangeReference(startCell.row, startCell.col, cell.row, cell.col);
           }
@@ -153,7 +161,7 @@ export function createFormulaHandlers(deps: FormulaDependencies): FormulaHandler
     stopAutoScroll();
     formulaDragStartRef.current = null;
     lastMousePosRef.current = null;
-    
+
     if (onClearPendingReference) {
       onClearPendingReference();
     }

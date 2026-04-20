@@ -6056,9 +6056,10 @@ impl<'a> Evaluator<'a> {
         };
 
         // Evaluate pivot_table reference - must be a cell ref
+        // Parser stores rows as 1-based, convert to 0-based for lookup
         let (pivot_row, pivot_col) = match &args[1] {
             Expression::CellRef { row, col, .. } => {
-                let r = *row;
+                let r = row.saturating_sub(1);
                 let c = col_to_index(col) as u32;
                 (r, c)
             }

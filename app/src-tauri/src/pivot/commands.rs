@@ -1304,6 +1304,34 @@ pub fn get_pivot_at_cell(
     }))
 }
 
+/// Resolve a grid cell into GETPIVOTDATA formula arguments.
+/// Returns the data field name and field/item pairs for the cell.
+#[tauri::command]
+pub fn get_pivot_data_formula(
+    state: State<AppState>,
+    pivot_state: State<'_, PivotState>,
+    row: u32,
+    col: u32,
+) -> Result<Option<super::types::GetPivotDataFormulaResult>, String> {
+    let active_sheet = *state.active_sheet.lock().unwrap();
+
+    // Check if cell is in a pivot region
+    let _pivot_id = match state.get_region_at_cell(active_sheet, row, col) {
+        Some(region) if region.region_type == "pivot" => region.owner_id as pivot_engine::PivotId,
+        _ => return Ok(None),
+    };
+
+    let pivot_tables = pivot_state.pivot_tables.lock().unwrap();
+    let pivot_views = pivot_state.views.lock().unwrap();
+
+    Ok(crate::pivot::operations::resolve_pivot_data_formula(
+        &pivot_tables,
+        &pivot_views,
+        row,
+        col,
+    ))
+}
+
 /// Get all pivot regions for the current sheet (for rendering placeholders)
 #[tauri::command]
 pub fn get_pivot_regions_for_sheet(

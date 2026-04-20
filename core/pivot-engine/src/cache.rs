@@ -1138,6 +1138,26 @@ impl PivotCache {
         self.fields.get(field_index).map(|f| f.name.clone())
     }
 
+    /// Returns a display label for a value in a field.
+    /// Uses label_map overrides (for date/number grouping) if available,
+    /// otherwise formats the raw CacheValue.
+    pub fn get_value_label(&self, field_index: usize, value_id: ValueId) -> Option<String> {
+        let field = self.get_field(field_index)?;
+        // Check label_map first (for grouped fields)
+        if let Some(label) = field.label_map.get(&value_id) {
+            return Some(label.clone());
+        }
+        // Fall back to raw value display
+        let value = field.get_value(value_id)?;
+        Some(match value {
+            CacheValue::Empty => String::new(),
+            CacheValue::Number(n) => format!("{}", n.0),
+            CacheValue::Text(s) => s.clone(),
+            CacheValue::Boolean(b) => if *b { "TRUE".to_string() } else { "FALSE".to_string() },
+            CacheValue::Error(e) => e.clone(),
+        })
+    }
+
 }
 
 impl PivotCache {
