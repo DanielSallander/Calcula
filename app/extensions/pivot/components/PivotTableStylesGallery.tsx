@@ -56,100 +56,103 @@ function isDarkColor(hex: string): boolean {
  * Returns a Partial<PivotTheme> that should be merged with DEFAULT_PIVOT_THEME.
  */
 function excelStyleToThemeOverrides(style: ExcelPivotStyle): Partial<PivotTheme> {
-  const headerBg = style.headerRow?.bg || style.wholeTable?.bg || '';
+  // ---------------------------------------------------------------------------
+  // Extract raw values from the Excel style definition
+  // ---------------------------------------------------------------------------
+  const headerBg = style.headerRow?.bg || '';
   const headerFg = style.headerRow?.fg || style.wholeTable?.fg || '#000000';
   const hasColoredHeader = !!headerBg && headerBg !== '#FFFFFF' && headerBg !== '#ffffff';
   const bodyBg = style.wholeTable?.bg || '#ffffff';
   const bodyFg = style.wholeTable?.fg || '#000000';
-  const totalBg = style.totalRow?.bg || '';
-  const totalFg = style.totalRow?.fg || bodyFg;
-  const subtotalBg = style.subtotalRow1?.bg || '';
-  const subtotalFg = style.subtotalRow1?.fg || bodyFg;
-  const bandBg = style.rowStripe1?.bg || '';
   const isDarkBody = !!bodyBg && bodyBg !== '#ffffff' && bodyBg !== '#FFFFFF' && isDarkColor(bodyBg);
 
-  // Determine appropriate text color for headers
+  const bandBg = style.rowStripe1?.bg || '';
+
+  // Text color auto-detection for colored backgrounds
   const headerTextColor = hasColoredHeader
     ? (isDarkColor(headerBg) ? '#ffffff' : '#000000')
     : headerFg;
-
-  // For dark themes, we need light text on dark backgrounds
   const labelText = isDarkBody ? (bodyFg || '#e0e0e0') : (bodyFg || '#1f2937');
   const valueText = isDarkBody ? (bodyFg || '#d0d0d0') : (bodyFg || '#374151');
 
-  // Grand total: use totalRow styling
-  const grandTotalBg = totalBg || (isDarkBody ? lighten(bodyBg, -0.1) : '#f0f0f0');
-  const grandTotalFg = totalFg;
+  // ---------------------------------------------------------------------------
+  // Totals — use explicit totalRow, fall back to header color (Excel behavior)
+  // ---------------------------------------------------------------------------
+  const totalBg = style.totalRow?.bg || '';
+  const totalFg = style.totalRow?.fg || '';
+  const grandTotalBg = totalBg || (hasColoredHeader ? headerBg : (isDarkBody ? lighten(bodyBg, -0.1) : ''));
+  const grandTotalFg = totalFg || (hasColoredHeader && !totalBg ? headerTextColor : bodyFg);
 
-  // Subtotal: use subtotalRow1 styling, fall back to lighter version of total
+  // Subtotals — use explicit subtotalRow1, fall back to lighter total color
+  const subtotalBg = style.subtotalRow1?.bg || '';
+  const subtotalFg = style.subtotalRow1?.fg || bodyFg;
   const subtotalResultBg = subtotalBg || (totalBg ? lighten(totalBg, 0.3) : '');
-  const subtotalResultFg = subtotalFg;
+
+  // ---------------------------------------------------------------------------
+  // Filter row — use explicit pageFieldLabels/pageFieldValues from Excel style
+  // These are Excel's names for filter label and filter dropdown cells
+  // ---------------------------------------------------------------------------
+  const pageLabels = style.pageFieldLabels;
+  const pageValues = style.pageFieldValues;
+  const filterLabelBg = pageLabels?.bg || (hasColoredHeader ? headerBg : '');
+  const filterLabelFg = pageLabels?.fg || (filterLabelBg && isDarkColor(filterLabelBg) ? '#ffffff' : headerFg);
+  const filterValueBg = pageValues?.bg || filterLabelBg;
+  const filterValueFg = pageValues?.fg || filterLabelFg;
 
   // Border color: derive from the accent or banding
   const borderColor = isDarkBody
     ? lighten(bodyBg, 0.15)
     : (bandBg && bandBg !== '#ffffff' ? lighten(bandBg, 0.3) : '#e8e8e8');
 
-  // Filter-related colors
-  const filterButtonBg = hasColoredHeader ? headerBg : '#ffffff';
-  const filterButtonBorder = hasColoredHeader
-    ? lighten(headerBg, 0.3)
+  // Filter button appearance (the combo box inside filter dropdown cells)
+  const filterBtnBaseBg = filterLabelBg || (hasColoredHeader ? headerBg : '');
+  const filterButtonBorder = filterBtnBaseBg
+    ? lighten(filterBtnBaseBg, 0.3)
     : '#C5CDE0';
-  const filterButtonHoverBg = hasColoredHeader
-    ? lighten(headerBg, 0.2)
+  const filterButtonHoverBg = filterBtnBaseBg
+    ? lighten(filterBtnBaseBg, 0.2)
     : '#E8EEF7';
-  const filterDropdownArrow = hasColoredHeader
-    ? (isDarkColor(headerBg) ? '#ffffff' : '#4b5563')
+  const filterDropdownArrow = filterBtnBaseBg && isDarkColor(filterBtnBaseBg)
+    ? '#ffffff'
     : '#4b5563';
 
+  // ---------------------------------------------------------------------------
+  // Build the overrides
+  // ---------------------------------------------------------------------------
   const overrides: Partial<PivotTheme> = {};
 
-  // Header
-  if (hasColoredHeader) {
-    overrides.headerBackground = headerBg;
-    overrides.headerBorderColor = headerBg;
-  }
+  // Header — always set so defaults don't bleed through when switching styles
+  overrides.headerBackground = hasColoredHeader ? headerBg : bodyBg;
+  overrides.headerBorderColor = hasColoredHeader ? headerBg : borderColor;
   overrides.headerText = headerTextColor;
   overrides.headerFontWeight = style.headerRow?.b ? '700' : '400';
 
   // Body
-  if (bodyBg !== '#ffffff') {
-    overrides.valueBackground = bodyBg;
-    overrides.labelBackground = bodyBg;
-  }
+  overrides.valueBackground = bodyBg;
+  overrides.labelBackground = bodyBg;
   overrides.labelText = labelText;
   overrides.valueText = valueText;
-  overrides.filterText = headerTextColor;
 
   // Banding
-  if (bandBg) {
-    overrides.alternateRowBackground = bandBg;
-  }
+  overrides.alternateRowBackground = bandBg || bodyBg;
 
-  // Totals
-  if (totalBg) {
-    overrides.grandTotalBackground = totalBg;
-  } else if (isDarkBody) {
-    overrides.grandTotalBackground = lighten(bodyBg, -0.05);
-  }
+  // Grand total — always set; fall back to body bg for styles with no accent
+  overrides.grandTotalBackground = grandTotalBg || bodyBg;
   overrides.grandTotalText = grandTotalFg;
 
   // Subtotals
-  if (subtotalResultBg) {
-    overrides.totalBackground = subtotalResultBg;
-  }
-  overrides.totalText = subtotalResultFg;
+  overrides.totalBackground = subtotalResultBg || bodyBg;
+  overrides.totalText = subtotalFg;
 
   // Borders
   overrides.borderColor = borderColor;
 
-  // Filter row — follows the header color to match Excel
-  if (hasColoredHeader) {
-    overrides.filterRowBackground = headerBg;
-  }
+  // Filter row — uses Excel's pageFieldLabels/pageFieldValues definitions
+  overrides.filterRowBackground = filterLabelBg || bodyBg;
+  overrides.filterText = filterLabelFg;
 
   // Filter button
-  overrides.filterButtonBackground = filterButtonBg;
+  overrides.filterButtonBackground = filterBtnBaseBg || '#ffffff';
   overrides.filterButtonBorder = filterButtonBorder;
   overrides.filterButtonHoverBackground = filterButtonHoverBg;
   overrides.filterDropdownArrow = filterDropdownArrow;
@@ -454,7 +457,12 @@ const galleryStyles = {
     border-radius: 3px;
     text-align: left;
 
-    &:hover {
+    &:disabled {
+      color: var(--text-secondary, #aaa);
+      cursor: default;
+    }
+
+    &:hover:not(:disabled) {
       background: var(--menu-item-hover, #3a3a3a);
     }
   `,

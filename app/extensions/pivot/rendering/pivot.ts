@@ -382,6 +382,97 @@ function drawFilterDropdownButton(
   };
 }
 
+// =============================================================================
+// THEME-AWARE CELL STYLING HELPERS
+// =============================================================================
+
+/** Returns the themed background color for a pivot cell based on its backgroundStyle. */
+function getThemedBackground(cell: PivotCellData, theme: PivotTheme): string {
+  switch (cell.backgroundStyle) {
+    case 'Header':
+      return theme.headerBackground;
+    case 'Subtotal':
+    case 'Total':
+      return theme.totalBackground;
+    case 'GrandTotal':
+      return theme.grandTotalBackground;
+    case 'FilterRow':
+      return theme.filterRowBackground;
+    case 'Alternate':
+      return theme.alternateRowBackground;
+    case 'Normal':
+    default:
+      // Use label background for row headers, value background for data cells
+      if (cell.cellType === 'RowHeader' || cell.cellType === 'Corner'
+        || cell.cellType === 'RowLabelHeader' || cell.cellType === 'ColumnLabelHeader') {
+        return theme.labelBackground;
+      }
+      return theme.valueBackground;
+  }
+}
+
+/** Returns themed text color, font, and alignment for a pivot cell. */
+function getThemedTextStyle(
+  cell: PivotCellData,
+  theme: PivotTheme
+): { color: string; font: string; align: CanvasTextAlign } {
+  // Text color by cell type / background style
+  let color: string;
+  switch (cell.backgroundStyle) {
+    case 'Header':
+      color = theme.headerText;
+      break;
+    case 'GrandTotal':
+      color = theme.grandTotalText;
+      break;
+    case 'Subtotal':
+    case 'Total':
+      color = theme.totalText;
+      break;
+    case 'FilterRow':
+      color = theme.filterText;
+      break;
+    default:
+      if (cell.cellType === 'RowHeader' || cell.cellType === 'ColumnHeader'
+        || cell.cellType === 'Corner' || cell.cellType === 'RowLabelHeader'
+        || cell.cellType === 'ColumnLabelHeader') {
+        color = theme.labelText;
+      } else {
+        color = theme.valueText;
+      }
+  }
+
+  // Bold for headers, totals, expandable items, filter labels, label headers
+  const isBold = cell.isBold
+    || cell.isExpandable
+    || cell.cellType === 'FilterLabel'
+    || cell.cellType === 'RowLabelHeader'
+    || cell.cellType === 'ColumnLabelHeader'
+    || cell.backgroundStyle === 'Header'
+    || cell.backgroundStyle === 'Subtotal'
+    || cell.backgroundStyle === 'Total'
+    || cell.backgroundStyle === 'GrandTotal';
+
+  const weight = isBold ? theme.headerFontWeight : '400';
+  const font = `${weight} ${theme.fontSize}px ${theme.fontFamily}`;
+
+  // Alignment: right for data/totals/filter labels, left for everything else
+  let align: CanvasTextAlign = 'left';
+  switch (cell.cellType) {
+    case 'Data':
+    case 'RowSubtotal':
+    case 'ColumnSubtotal':
+    case 'GrandTotal':
+    case 'GrandTotalRow':
+    case 'GrandTotalColumn':
+    case 'FilterLabel':
+      align = 'right';
+      break;
+  }
+
+  return { color, font, align };
+}
+
 interface DrawCellOptions {
   isHoveredFilterButton?: boolean;
   isHoveredIcon?: boolean;
@@ -408,35 +499,50 @@ export function drawPivotCell(
     headerFilterBounds: null,
   };
 
-  // Cell backgrounds, borders, and text are now rendered by the grid renderer
-  // via styled cells written by the backend. This function only draws
-  // interactive chrome elements that can't be expressed as cell styles.
-
-  // FilterLabel — draw themed background and text (overrides the grid cell style
-  // so that filter labels follow the active pivot theme, not hardcoded backend colors)
-  if (cell.cellType === 'FilterLabel') {
-    // Fill with themed filter row background (matches header color)
-    ctx.fillStyle = theme.filterRowBackground || '#C0E6F5';
+  // Paint themed background for all cells. The backend writes hardcoded default
+  // colors; this overlay pass applies the user-selected pivot table style on top.
+  const bgColor = getThemedBackground(cell, theme);
+  if (bgColor) {
+    ctx.fillStyle = bgColor;
     ctx.fillRect(x, y, width, height);
+  }
 
-    // Draw right-aligned bold label text
+  // Paint themed text for cells whose text is rendered by the grid renderer.
+  // The overlay redraws the text so it matches the theme colors.
+  if (cell.cellType !== 'FilterDropdown' && cell.cellType !== 'Blank') {
     const displayText = cell.formattedValue || getCellDisplayValue(cell.value) || '';
     if (displayText) {
-      ctx.fillStyle = theme.filterText || '#000000';
-      ctx.font = `${theme.headerFontWeight || '700'} ${theme.fontSize}px ${theme.fontFamily}`;
-      ctx.textAlign = 'right';
+      const { color, font, align } = getThemedTextStyle(cell, theme);
+      ctx.fillStyle = color;
+      ctx.font = font;
+      ctx.textAlign = align;
       ctx.textBaseline = 'middle';
-      ctx.fillText(displayText, x + width - CELL_PADDING_X, y + height / 2);
-    }
 
+      // Indented row headers: offset text for expand icon + indent
+      let textX: number;
+      if (align === 'right') {
+        textX = x + width - CELL_PADDING_X;
+      } else if (cell.cellType === 'RowHeader' && (cell.indentLevel || 0) > 0) {
+        const indentPx = (cell.indentLevel || 0) * INDENT_SIZE;
+        const iconSpace = cell.isExpandable ? EXPAND_ICON_SIZE + EXPAND_ICON_PADDING : 0;
+        textX = x + CELL_PADDING_X + indentPx + iconSpace;
+      } else if (cell.cellType === 'RowHeader' && cell.isExpandable) {
+        textX = x + CELL_PADDING_X + EXPAND_ICON_SIZE + EXPAND_ICON_PADDING;
+      } else {
+        textX = x + CELL_PADDING_X;
+      }
+
+      ctx.fillText(displayText, textX, y + height / 2);
+    }
+  }
+
+  // FilterLabel — background and text already drawn above, no interactive chrome
+  if (cell.cellType === 'FilterLabel') {
     return result;
   }
 
-  // FilterDropdown — interactive combo box drawn on top of the grid cell
+  // FilterDropdown — draw text + arrow button on top of themed background
   if (cell.cellType === 'FilterDropdown') {
-    // Fill with filter row background so both label and dropdown areas match
-    ctx.fillStyle = theme.filterRowBackground || '#C0E6F5';
-    ctx.fillRect(x, y, width, height);
 
     const displayText = cell.formattedValue || getCellDisplayValue(cell.value) || '(All)';
     const buttonResult = drawFilterDropdownButton(
