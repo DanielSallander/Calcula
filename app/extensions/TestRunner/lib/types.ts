@@ -17,6 +17,8 @@ export interface TestContext {
   executeCommand: (id: string, args?: unknown) => Promise<void>;
   /** Get a cell's data from the backend */
   getCell: (row: number, col: number) => Promise<CellData | null>;
+  /** Batch-read all cells in a rectangular range, indexed by A1 address */
+  getCells: (startRow: number, startCol: number, endRow: number, endCol: number) => Promise<Map<string, CellData>>;
   /** Set cell values in bulk */
   setCells: (updates: Array<{ row: number; col: number; value: string }>) => Promise<void>;
   /** Get the current grid selection */
@@ -25,8 +27,16 @@ export interface TestContext {
   setSelection: (sel: { startRow: number; startCol: number; endRow: number; endCol: number }) => void;
   /** Undo the last action (calls Tauri backend directly) */
   undo: () => Promise<void>;
-  /** Small delay to allow backend round-trips to settle */
+  /** Small delay (50ms) to allow frontend to process IPC responses */
   settle: () => Promise<void>;
+  /** Custom delay in ms for cases needing longer settling */
+  settleMs: (ms: number) => Promise<void>;
+  /** Capture a cell range under a named label for later comparison */
+  storeState: (label: string, startRow: number, startCol: number, endRow: number, endCol: number) => Promise<Map<string, CellData>>;
+  /** Retrieve a previously stored state by label */
+  getStoredState: (label: string) => Map<string, CellData>;
+  /** Diff two stored states and return a human-readable change summary */
+  diffStates: (labelA: string, labelB: string) => string;
   /** Log a message to the test output */
   log: (message: string) => void;
 }
@@ -81,6 +91,8 @@ export interface TestResult {
   durationMs: number;
   error?: string;
   logs: string[];
+  /** State diffs captured during the test (included in failure output) */
+  stateDiffs?: string[];
 }
 
 export interface SuiteResult {

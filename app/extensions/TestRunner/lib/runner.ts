@@ -4,6 +4,7 @@
 
 import {
   getCell,
+  getViewportCells,
   updateCellsBatch,
   CommandRegistry,
   undo as tauriUndo,
@@ -11,7 +12,9 @@ import {
 } from "@api";
 import { getGridStateSnapshot } from "@api/grid";
 import { setSelection } from "@api/grid";
+import type { CellData } from "@api/types";
 import type { TestSuite, TestContext, TestResult, SuiteResult } from "./types";
+import { diffCellMaps } from "./diff";
 
 // ============================================================================
 // Result Store (module-level state for the task pane to read)
@@ -64,14 +67,54 @@ export function clearSuites(): void {
 // Test Context Factory
 // ============================================================================
 
-function createTestContext(logs: string[]): TestContext {
-  return {
+/** Convert 0-based column index to A1-style letter(s) (0=A, 25=Z, 26=AA, ...) */
+function colToLetter(col: number): string {
+  let s = "";
+  let c = col;
+  do {
+    s = String.fromCharCode(65 + (c % 26)) + s;
+    c = Math.floor(c / 26) - 1;
+  } while (c >= 0);
+  return s;
+}
+
+/** Build A1 address from 0-based row/col */
+function toA1(row: number, col: number): string {
+  return `${colToLetter(col)}${row + 1}`;
+}
+
+/** Index an array of CellData by A1 address */
+function indexByAddress(cells: CellData[]): Map<string, CellData> {
+  const map = new Map<string, CellData>();
+  for (const cell of cells) {
+    map.set(toA1(cell.row, cell.col), cell);
+  }
+  return map;
+}
+
+interface ContextInternals {
+  storedStates: Map<string, Map<string, CellData>>;
+  diffLog: string[];
+}
+
+function createTestContext(logs: string[]): { ctx: TestContext; internals: ContextInternals } {
+  const internals: ContextInternals = {
+    storedStates: new Map(),
+    diffLog: [],
+  };
+
+  const ctx: TestContext = {
     async executeCommand(id: string, args?: unknown): Promise<void> {
       await CommandRegistry.execute(id, args);
     },
 
     async getCell(row: number, col: number) {
       return getCell(row, col);
+    },
+
+    async getCells(startRow: number, startCol: number, endRow: number, endCol: number) {
+      const cells = await getViewportCells(startRow, startCol, endRow, endCol);
+      return indexByAddress(cells);
     },
 
     async setCells(updates: Array<{ row: number; col: number; value: string }>) {
@@ -93,8 +136,37 @@ function createTestContext(logs: string[]): TestContext {
     },
 
     async settle() {
-      // Small delay to let Tauri IPC round-trips complete
+      // Small delay to let frontend process IPC responses
       await new Promise((resolve) => setTimeout(resolve, 50));
+    },
+
+    async settleMs(ms: number) {
+      await new Promise((resolve) => setTimeout(resolve, ms));
+    },
+
+    async storeState(label: string, startRow: number, startCol: number, endRow: number, endCol: number) {
+      const cells = await getViewportCells(startRow, startCol, endRow, endCol);
+      const map = indexByAddress(cells);
+      internals.storedStates.set(label, map);
+      return map;
+    },
+
+    getStoredState(label: string) {
+      const state = internals.storedStates.get(label);
+      if (!state) {
+        throw new Error(`No stored state with label "${label}"`);
+      }
+      return state;
+    },
+
+    diffStates(labelA: string, labelB: string) {
+      const a = internals.storedStates.get(labelA);
+      const b = internals.storedStates.get(labelB);
+      if (!a) throw new Error(`No stored state with label "${labelA}"`);
+      if (!b) throw new Error(`No stored state with label "${labelB}"`);
+      const diff = diffCellMaps(a, b);
+      internals.diffLog.push(diff);
+      return diff;
     },
 
     log(message: string) {
@@ -102,6 +174,8 @@ function createTestContext(logs: string[]): TestContext {
       console.log(`  [LOG] ${message}`);
     },
   };
+
+  return { ctx, internals };
 }
 
 // ============================================================================
@@ -121,7 +195,7 @@ async function runSuite(suite: TestSuite): Promise<SuiteResult> {
 
   for (const test of suite.tests) {
     const logs: string[] = [];
-    const ctx = createTestContext(logs);
+    const { ctx, internals } = createTestContext(logs);
     const testStart = performance.now();
     let status: "pass" | "fail" | "error" = "pass";
     let error: string | undefined;
@@ -157,6 +231,11 @@ async function runSuite(suite: TestSuite): Promise<SuiteResult> {
 
     const durationMs = performance.now() - testStart;
 
+    // Collect state diffs for failed/errored tests
+    const stateDiffs = (status !== "pass" && internals.diffLog.length > 0)
+      ? [...internals.diffLog]
+      : undefined;
+
     results.push({
       name: test.name,
       suiteName: suite.name,
@@ -164,6 +243,7 @@ async function runSuite(suite: TestSuite): Promise<SuiteResult> {
       durationMs,
       error,
       logs,
+      stateDiffs,
     });
 
     const statusTag = status === "pass" ? "[PASS]" : status === "fail" ? "[FAIL]" : "[ERROR]";

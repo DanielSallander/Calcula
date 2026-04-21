@@ -42,6 +42,14 @@ export function formatResultsForClipboard(results: SuiteResult[]): string {
             lines.push(`  > log: ${log}`);
           }
         }
+        if (test.stateDiffs && test.stateDiffs.length > 0) {
+          lines.push(`  > State diffs:`);
+          for (const diff of test.stateDiffs) {
+            for (const line of diff.split("\n")) {
+              lines.push(`  >   ${line}`);
+            }
+          }
+        }
       }
     }
 
