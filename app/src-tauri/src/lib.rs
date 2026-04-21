@@ -3246,6 +3246,36 @@ pub fn parse_cell_input(input: &str, locale: &engine::LocaleSettings) -> Cell {
     Cell::new_text(trimmed.to_string())
 }
 
+/// Parse cell input that is already in invariant (US) format.
+/// Formulas are stored as-is without delocalization; numbers use '.' as decimal separator.
+pub fn parse_cell_input_invariant(input: &str, locale: &engine::LocaleSettings) -> Cell {
+    let trimmed = input.trim();
+    if trimmed.is_empty() {
+        return Cell::new();
+    }
+    if trimmed.starts_with('=') {
+        // Formula is already in invariant format — store directly
+        return Cell::new_formula(trimmed.to_string());
+    }
+    let upper = trimmed.to_uppercase();
+    if upper == "TRUE" {
+        return Cell::new_boolean(true);
+    }
+    if upper == "FALSE" {
+        return Cell::new_boolean(false);
+    }
+    // Try invariant number parsing first (dot decimal), then locale-aware
+    if let Ok(n) = trimmed.parse::<f64>() {
+        if n.is_finite() {
+            return Cell::new_number(n);
+        }
+    }
+    if let Some(num) = parse_number(trimmed, locale) {
+        return Cell::new_number(num);
+    }
+    Cell::new_text(trimmed.to_string())
+}
+
 /// Parse a string as a number, respecting locale separators.
 /// - Strips the locale's thousands separator
 /// - Replaces the locale's decimal separator with '.' for f64 parsing

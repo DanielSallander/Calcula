@@ -75,7 +75,8 @@ function createTestContext(logs: string[]): TestContext {
     },
 
     async setCells(updates: Array<{ row: number; col: number; value: string }>) {
-      await updateCellsBatch(updates);
+      // Tests send formulas in invariant (US) format — skip delocalization
+      await updateCellsBatch(updates.map(u => ({ ...u, invariant: true })));
     },
 
     getSelection() {

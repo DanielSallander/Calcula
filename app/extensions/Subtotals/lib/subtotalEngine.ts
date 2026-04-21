@@ -87,6 +87,7 @@ export async function applySubtotals(config: SubtotalConfig): Promise<void> {
           row: insertAt,
           col,
           value: `=SUBTOTAL(${functionCode},${colLetter}${formulaStartRow}:${colLetter}${formulaEndRow})`,
+          invariant: true,
         });
       }
 
@@ -121,6 +122,7 @@ export async function applySubtotals(config: SubtotalConfig): Promise<void> {
         row: grandTotalRow,
         col,
         value: `=SUBTOTAL(${functionCode},${colLetter}${gtStartRow}:${colLetter}${gtEndRow})`,
+        invariant: true,
       });
     }
 

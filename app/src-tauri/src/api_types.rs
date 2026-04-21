@@ -127,6 +127,10 @@ pub struct CellUpdateInput {
     /// Optional style index to apply. When None, preserves existing style.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub style_index: Option<usize>,
+    /// When true, the value is already in invariant (US) format — skip delocalization.
+    /// Used by extensions and tests that send formulas with ',' as argument separator.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub invariant: Option<bool>,
 }
 
 /// A single border side (top, right, bottom, or left).

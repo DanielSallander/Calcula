@@ -130,6 +130,8 @@ export interface CellUpdateInput {
   value: string;
   /** Optional style index. When provided, overrides the cell's style. */
   styleIndex?: number;
+  /** When true, the value is already in invariant (US) format — skip delocalization. */
+  invariant?: boolean;
 }
 
 /**

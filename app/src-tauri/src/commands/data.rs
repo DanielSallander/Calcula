@@ -13,7 +13,7 @@ use crate::{
     evaluate_formula_multi_sheet_with_ast_and_files,
     evaluate_formula_raw_with_files_and_pivot,
     extract_all_references, format_cell_value, get_column_row_dependents,
-    get_recalculation_order, parse_cell_input,
+    get_recalculation_order, parse_cell_input, parse_cell_input_invariant,
     update_column_dependencies, update_cross_sheet_dependencies,
     update_dependencies, update_row_dependencies, AppState, log_perf
 };
@@ -1535,8 +1535,12 @@ pub fn update_cells_batch(
             continue;
         }
 
-        // Parse the input
-        let mut cell = parse_cell_input(value, &locale);
+        // Parse the input. When invariant=true, skip delocalization (formula already in US format).
+        let mut cell = if update.invariant.unwrap_or(false) {
+            parse_cell_input_invariant(value, &locale)
+        } else {
+            parse_cell_input(value, &locale)
+        };
 
         // Apply explicit style from input if provided, otherwise preserve existing
         if let Some(explicit_style) = update.style_index {

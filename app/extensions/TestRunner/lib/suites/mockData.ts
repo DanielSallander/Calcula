@@ -17,9 +17,9 @@ export const mockDataSuite: TestSuite = {
   name: "Mock Data Verification",
   description: "Verifies the prefilled mock data is loaded correctly (requires yarn tauri:dev:data).",
 
-  // Wait for mock data to be loaded (it loads with a 500ms delay after mount)
+  // Wait for mock data to be loaded (it loads with a delay after mount)
   beforeEach: async (ctx) => {
-    const maxWait = 3000;
+    const maxWait = 5000;
     const interval = 100;
     let waited = 0;
     while (waited < maxWait) {

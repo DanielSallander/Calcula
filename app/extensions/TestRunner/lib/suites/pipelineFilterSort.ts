@@ -143,8 +143,11 @@ export const pipelineFilterSortSuite: TestSuite = {
         expectCellValue(sumCell, "270", "SUM of named range");
         const avgCell = await ctx.getCell(R + 6, C);
         expectNotNull(avgCell, "AVERAGE cell should exist");
-        // AVERAGE of 75+45+90+60 = 270/4 = 67.5
-        assertTrue(avgCell!.display.includes("67.5"), `AVERAGE should be 67.5, got ${avgCell!.display}`);
+        // AVERAGE of 75+45+90+60 = 270/4 = 67.5 (locale may format as "67,5")
+        assertTrue(
+          avgCell!.display.includes("67.5") || avgCell!.display.includes("67,5"),
+          `AVERAGE should be 67.5, got ${avgCell!.display}`
+        );
 
         // Apply CF to the named range area: values > 70 get formatting
         const cf = await addConditionalFormat({
