@@ -297,8 +297,7 @@ pub fn revert_pivot_operation(
         }
 
         // Re-write grid with the old view
-        update_pivot_in_grid(&state, pivot_id, dest_sheet_idx, destination, &view);
-        update_pivot_region(&state, pivot_id, dest_sheet_idx, destination, &view);
+        finalize_pivot_update(&state, &pivot_state, pivot_id, dest_sheet_idx, destination, &view);
 
         Ok(())
     } else {
@@ -476,6 +475,9 @@ pub async fn update_pivot_fields(
     update_pivot_region(&state, pivot_id, dest_sheet_idx, destination, &view);
     let region_ms = t3.elapsed().as_secs_f64() * 1000.0;
 
+    // Recalculate formulas referencing pivot cells
+    recalculate_sheet_formulas(&state, &pivot_state);
+
     // Clean up cancellation token (keep previous_states for potential revert command)
     pivot_state.cancellation_tokens.lock().unwrap().remove(&pivot_id);
 
@@ -638,8 +640,7 @@ pub fn toggle_pivot_group(
 
             // Clear old cells and write updated view to grid (prevents orphaned cells
             // when pivot shrinks after collapse)
-            update_pivot_in_grid(&state, pivot_id, dest_sheet_idx, destination, view);
-            update_pivot_region(&state, pivot_id, dest_sheet_idx, destination, view);
+            finalize_pivot_update(&state, &pivot_state, pivot_id, dest_sheet_idx, destination, view);
 
             let total_ms = t_total.elapsed().as_secs_f64() * 1000.0;
             log_perf!(
@@ -671,8 +672,7 @@ pub fn toggle_pivot_group(
     drop(pivot_tables);
 
     // Clear old cells and write updated view to grid, then update region bounds
-    update_pivot_in_grid(&state, pivot_id, dest_sheet_idx, destination, &view);
-    update_pivot_region(&state, pivot_id, dest_sheet_idx, destination, &view);
+    finalize_pivot_update(&state, &pivot_state, pivot_id, dest_sheet_idx, destination, &view);
 
     let total_ms = t_total.elapsed().as_secs_f64() * 1000.0;
 
@@ -875,6 +875,9 @@ pub fn relocate_pivot(
 
     // 5. Update protected region tracking
     update_pivot_region(&state, pivot_id, dest_sheet_idx, (new_row, new_col), &view);
+
+    // 5b. Recalculate formulas referencing pivot cells
+    recalculate_sheet_formulas(&state, &pivot_state);
 
     // 6. Store the updated view
     store_view(&pivot_state, pivot_id, &view);
@@ -1109,6 +1112,9 @@ pub async fn refresh_pivot_cache(
 
     // Update pivot region tracking
     update_pivot_region(&state, pivot_id, dest_sheet_idx, destination, &view);
+
+    // Recalculate formulas referencing pivot cells
+    recalculate_sheet_formulas(&state, &pivot_state);
 
     // Clean up cancellation token
     pivot_state.cancellation_tokens.lock().unwrap().remove(&pivot_id);
@@ -1599,8 +1605,7 @@ pub async fn change_pivot_data_source(
 
     // Write to grid
     emit_pivot_progress(&window, pivot_id, "Updating grid...", 3, 4);
-    update_pivot_in_grid(&state, pivot_id, dest_sheet_idx, destination, &view);
-    update_pivot_region(&state, pivot_id, dest_sheet_idx, destination, &view);
+    finalize_pivot_update(&state, &pivot_state, pivot_id, dest_sheet_idx, destination, &view);
 
     // Store updated cache
     {
@@ -1811,8 +1816,7 @@ pub fn update_pivot_layout(
     drop(pivot_tables);
 
     // Update pivot in grid
-    update_pivot_in_grid(&state, pivot_id, dest_sheet_idx, destination, &view);
-    update_pivot_region(&state, pivot_id, dest_sheet_idx, destination, &view);
+    finalize_pivot_update(&state, &pivot_state, pivot_id, dest_sheet_idx, destination, &view);
 
     Ok(response)
 }
@@ -2000,8 +2004,7 @@ pub fn add_pivot_hierarchy(
 
     drop(pivot_tables);
 
-    update_pivot_in_grid(&state, pivot_id, dest_sheet_idx, destination, &view);
-    update_pivot_region(&state, pivot_id, dest_sheet_idx, destination, &view);
+    finalize_pivot_update(&state, &pivot_state, pivot_id, dest_sheet_idx, destination, &view);
 
     Ok(response)
 }
@@ -2072,8 +2075,7 @@ pub fn remove_pivot_hierarchy(
 
     drop(pivot_tables);
 
-    update_pivot_in_grid(&state, pivot_id, dest_sheet_idx, destination, &view);
-    update_pivot_region(&state, pivot_id, dest_sheet_idx, destination, &view);
+    finalize_pivot_update(&state, &pivot_state, pivot_id, dest_sheet_idx, destination, &view);
 
     Ok(response)
 }
@@ -2202,8 +2204,7 @@ pub fn move_pivot_field(
 
     drop(pivot_tables);
 
-    update_pivot_in_grid(&state, pivot_id, dest_sheet_idx, destination, &view);
-    update_pivot_region(&state, pivot_id, dest_sheet_idx, destination, &view);
+    finalize_pivot_update(&state, &pivot_state, pivot_id, dest_sheet_idx, destination, &view);
 
     Ok(response)
 }
@@ -2251,8 +2252,7 @@ pub fn set_pivot_aggregation(
 
     drop(pivot_tables);
 
-    update_pivot_in_grid(&state, pivot_id, dest_sheet_idx, destination, &view);
-    update_pivot_region(&state, pivot_id, dest_sheet_idx, destination, &view);
+    finalize_pivot_update(&state, &pivot_state, pivot_id, dest_sheet_idx, destination, &view);
 
     Ok(response)
 }
@@ -2299,8 +2299,7 @@ pub fn set_pivot_number_format(
 
     drop(pivot_tables);
 
-    update_pivot_in_grid(&state, pivot_id, dest_sheet_idx, destination, &view);
-    update_pivot_region(&state, pivot_id, dest_sheet_idx, destination, &view);
+    finalize_pivot_update(&state, &pivot_state, pivot_id, dest_sheet_idx, destination, &view);
 
     Ok(response)
 }
@@ -2405,8 +2404,7 @@ pub fn apply_pivot_filter(
 
     drop(pivot_tables);
 
-    update_pivot_in_grid(&state, pivot_id, dest_sheet_idx, destination, &view);
-    update_pivot_region(&state, pivot_id, dest_sheet_idx, destination, &view);
+    finalize_pivot_update(&state, &pivot_state, pivot_id, dest_sheet_idx, destination, &view);
 
     Ok(response)
 }
@@ -2461,8 +2459,7 @@ pub fn clear_pivot_filter(
 
     drop(pivot_tables);
 
-    update_pivot_in_grid(&state, pivot_id, dest_sheet_idx, destination, &view);
-    update_pivot_region(&state, pivot_id, dest_sheet_idx, destination, &view);
+    finalize_pivot_update(&state, &pivot_state, pivot_id, dest_sheet_idx, destination, &view);
 
     Ok(response)
 }
@@ -2516,8 +2513,7 @@ pub fn sort_pivot_field(
 
     drop(pivot_tables);
 
-    update_pivot_in_grid(&state, pivot_id, dest_sheet_idx, destination, &view);
-    update_pivot_region(&state, pivot_id, dest_sheet_idx, destination, &view);
+    finalize_pivot_update(&state, &pivot_state, pivot_id, dest_sheet_idx, destination, &view);
 
     Ok(response)
 }
@@ -2665,8 +2661,7 @@ pub fn set_pivot_item_visibility(
 
     drop(pivot_tables);
 
-    update_pivot_in_grid(&state, pivot_id, dest_sheet_idx, destination, &view);
-    update_pivot_region(&state, pivot_id, dest_sheet_idx, destination, &view);
+    finalize_pivot_update(&state, &pivot_state, pivot_id, dest_sheet_idx, destination, &view);
 
     Ok(response)
 }
@@ -2758,8 +2753,7 @@ pub fn set_pivot_item_expanded(
 
     drop(pivot_tables);
 
-    update_pivot_in_grid(&state, pivot_id, dest_sheet_idx, destination, &view);
-    update_pivot_region(&state, pivot_id, dest_sheet_idx, destination, &view);
+    finalize_pivot_update(&state, &pivot_state, pivot_id, dest_sheet_idx, destination, &view);
 
     Ok(response)
 }
@@ -2817,8 +2811,7 @@ pub fn expand_collapse_level(
 
     drop(pivot_tables);
 
-    update_pivot_in_grid(&state, pivot_id, dest_sheet_idx, destination, &view);
-    update_pivot_region(&state, pivot_id, dest_sheet_idx, destination, &view);
+    finalize_pivot_update(&state, &pivot_state, pivot_id, dest_sheet_idx, destination, &view);
 
     Ok(response)
 }
@@ -2859,8 +2852,7 @@ pub fn expand_collapse_all(
 
     drop(pivot_tables);
 
-    update_pivot_in_grid(&state, pivot_id, dest_sheet_idx, destination, &view);
-    update_pivot_region(&state, pivot_id, dest_sheet_idx, destination, &view);
+    finalize_pivot_update(&state, &pivot_state, pivot_id, dest_sheet_idx, destination, &view);
 
     Ok(response)
 }
@@ -3044,8 +3036,7 @@ pub fn group_pivot_field(
 
     drop(pivot_tables);
 
-    update_pivot_in_grid(&state, pivot_id, dest_sheet_idx, destination, &view);
-    update_pivot_region(&state, pivot_id, dest_sheet_idx, destination, &view);
+    finalize_pivot_update(&state, &pivot_state, pivot_id, dest_sheet_idx, destination, &view);
 
     Ok(response)
 }
@@ -3116,8 +3107,7 @@ pub fn create_manual_group(
 
     drop(pivot_tables);
 
-    update_pivot_in_grid(&state, pivot_id, dest_sheet_idx, destination, &view);
-    update_pivot_region(&state, pivot_id, dest_sheet_idx, destination, &view);
+    finalize_pivot_update(&state, &pivot_state, pivot_id, dest_sheet_idx, destination, &view);
 
     Ok(response)
 }
@@ -3168,8 +3158,7 @@ pub fn ungroup_pivot_field(
 
     drop(pivot_tables);
 
-    update_pivot_in_grid(&state, pivot_id, dest_sheet_idx, destination, &view);
-    update_pivot_region(&state, pivot_id, dest_sheet_idx, destination, &view);
+    finalize_pivot_update(&state, &pivot_state, pivot_id, dest_sheet_idx, destination, &view);
 
     Ok(response)
 }
@@ -3574,8 +3563,7 @@ pub async fn update_bi_pivot_fields(
         }
         drop(pt);
 
-        update_pivot_in_grid(&state, pivot_id, dest_sheet_idx, destination, &view);
-        update_pivot_region(&state, pivot_id, dest_sheet_idx, destination, &view);
+        finalize_pivot_update(&state, &pivot_state, pivot_id, dest_sheet_idx, destination, &view);
         return Ok(response);
     }
 
@@ -3630,8 +3618,7 @@ pub async fn update_bi_pivot_fields(
         *stored_cache = empty_cache;
         drop(pivot_tables);
 
-        update_pivot_in_grid(&state, pivot_id, dest_sheet_idx, destination, &view);
-        update_pivot_region(&state, pivot_id, dest_sheet_idx, destination, &view);
+        finalize_pivot_update(&state, &pivot_state, pivot_id, dest_sheet_idx, destination, &view);
         return Ok(response);
     }
 
@@ -3836,8 +3823,7 @@ pub async fn update_bi_pivot_fields(
                 *stored_cache = empty_cache;
                 drop(pivot_tables);
 
-                update_pivot_in_grid(&state, pivot_id, dest_sheet_idx, destination, &view);
-                update_pivot_region(&state, pivot_id, dest_sheet_idx, destination, &view);
+                finalize_pivot_update(&state, &pivot_state, pivot_id, dest_sheet_idx, destination, &view);
                 return Ok(response);
             }
             return Err(format!("BI query failed: {}", e));
@@ -4026,6 +4012,7 @@ pub async fn update_bi_pivot_fields(
         auto_fit_pivot_columns(&state, destination, &view);
     }
     update_pivot_region(&state, pivot_id, dest_sheet_idx, destination, &view);
+    recalculate_sheet_formulas(&state, &pivot_state);
     let grid_ms = t_grid.elapsed().as_secs_f64() * 1000.0;
 
     // Store last query + lookup column set in bi_metadata
@@ -4263,8 +4250,7 @@ pub fn add_calculated_field(
 
     drop(pivot_tables);
 
-    update_pivot_in_grid(&state, pivot_id, dest_sheet_idx, destination, &view);
-    update_pivot_region(&state, pivot_id, dest_sheet_idx, destination, &view);
+    finalize_pivot_update(&state, &pivot_state, pivot_id, dest_sheet_idx, destination, &view);
 
     Ok(response)
 }
@@ -4319,8 +4305,7 @@ pub fn update_calculated_field(
 
     drop(pivot_tables);
 
-    update_pivot_in_grid(&state, pivot_id, dest_sheet_idx, destination, &view);
-    update_pivot_region(&state, pivot_id, dest_sheet_idx, destination, &view);
+    finalize_pivot_update(&state, &pivot_state, pivot_id, dest_sheet_idx, destination, &view);
 
     Ok(response)
 }
@@ -4365,8 +4350,7 @@ pub fn remove_calculated_field(
 
     drop(pivot_tables);
 
-    update_pivot_in_grid(&state, pivot_id, dest_sheet_idx, destination, &view);
-    update_pivot_region(&state, pivot_id, dest_sheet_idx, destination, &view);
+    finalize_pivot_update(&state, &pivot_state, pivot_id, dest_sheet_idx, destination, &view);
 
     Ok(response)
 }
@@ -4417,8 +4401,7 @@ pub fn add_calculated_item(
 
     drop(pivot_tables);
 
-    update_pivot_in_grid(&state, pivot_id, dest_sheet_idx, destination, &view);
-    update_pivot_region(&state, pivot_id, dest_sheet_idx, destination, &view);
+    finalize_pivot_update(&state, &pivot_state, pivot_id, dest_sheet_idx, destination, &view);
 
     Ok(response)
 }
@@ -4463,8 +4446,7 @@ pub fn remove_calculated_item(
 
     drop(pivot_tables);
 
-    update_pivot_in_grid(&state, pivot_id, dest_sheet_idx, destination, &view);
-    update_pivot_region(&state, pivot_id, dest_sheet_idx, destination, &view);
+    finalize_pivot_update(&state, &pivot_state, pivot_id, dest_sheet_idx, destination, &view);
 
     Ok(response)
 }

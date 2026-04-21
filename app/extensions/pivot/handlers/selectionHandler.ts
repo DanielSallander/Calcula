@@ -95,6 +95,78 @@ export function getCachedRegions(): PivotRegionData[] {
 }
 
 /**
+ * Shift cached pivot regions when columns are inserted.
+ * This keeps cachedRegions in sync with the grid overlay regions
+ * so that findPivotRegionAtCell returns correct results immediately.
+ */
+export function shiftCachedRegionsForColInsert(col: number, count: number): void {
+  for (const r of cachedRegions) {
+    if (r.startCol >= col) {
+      r.startCol += count;
+      r.endCol += count;
+    } else if (r.endCol >= col) {
+      r.endCol += count;
+    }
+  }
+  // Reset so the next selection change re-evaluates against updated regions
+  lastCheckedSelection = null;
+}
+
+/**
+ * Shift cached pivot regions when rows are inserted.
+ */
+export function shiftCachedRegionsForRowInsert(row: number, count: number): void {
+  for (const r of cachedRegions) {
+    if (r.startRow >= row) {
+      r.startRow += count;
+      r.endRow += count;
+    } else if (r.endRow >= row) {
+      r.endRow += count;
+    }
+  }
+  lastCheckedSelection = null;
+}
+
+/**
+ * Shift cached pivot regions when columns are deleted.
+ */
+export function shiftCachedRegionsForColDelete(col: number, count: number): void {
+  cachedRegions = cachedRegions.filter((r) => {
+    // Remove regions fully within the deleted range
+    if (r.startCol >= col && r.endCol < col + count) return false;
+    return true;
+  });
+  for (const r of cachedRegions) {
+    if (r.startCol >= col + count) {
+      r.startCol -= count;
+      r.endCol -= count;
+    } else if (r.endCol >= col) {
+      r.endCol -= count;
+    }
+  }
+  lastCheckedSelection = null;
+}
+
+/**
+ * Shift cached pivot regions when rows are deleted.
+ */
+export function shiftCachedRegionsForRowDelete(row: number, count: number): void {
+  cachedRegions = cachedRegions.filter((r) => {
+    if (r.startRow >= row && r.endRow < row + count) return false;
+    return true;
+  });
+  for (const r of cachedRegions) {
+    if (r.startRow >= row + count) {
+      r.startRow -= count;
+      r.endRow -= count;
+    } else if (r.endRow >= row) {
+      r.endRow -= count;
+    }
+  }
+  lastCheckedSelection = null;
+}
+
+/**
  * Fast local check if a cell is within any cached pivot region.
  * Exported so other pivot handlers (e.g., context menu) can reuse the cache.
  */

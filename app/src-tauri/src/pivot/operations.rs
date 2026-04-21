@@ -4,6 +4,7 @@ use crate::api_types::MergedRegion;
 use crate::commands::styles::parse_number_format;
 use crate::pivot::utils::col_index_to_letter;
 use crate::{log_debug, AppState, ProtectedRegion};
+use crate::pivot::types::PivotState;
 use pivot_engine::{calculate_pivot, PivotCache, PivotDefinition, PivotId, PivotView};
 use engine::{
     Cell, CellStyle, CellValue, StyleRegistry,
@@ -1040,4 +1041,133 @@ pub fn resolve_pivot_data_formula(
         data_field,
         field_item_pairs,
     })
+}
+
+// ============================================================================
+// FINALIZE PIVOT UPDATE (grid write + region update + formula recalc)
+// ============================================================================
+
+/// Combined helper that writes pivot cells to the grid, updates the protected
+/// region, and recalculates all formula cells on the active sheet so that
+/// formulas referencing pivot cells (both regular refs like =E5 and
+/// GETPIVOTDATA) pick up the new values.
+///
+/// Every pivot command that modifies cell values should call this instead of
+/// calling `update_pivot_in_grid` + `update_pivot_region` separately.
+pub(crate) fn finalize_pivot_update(
+    state: &AppState,
+    pivot_state: &PivotState,
+    pivot_id: PivotId,
+    dest_sheet_idx: usize,
+    destination: (u32, u32),
+    view: &PivotView,
+) {
+    update_pivot_in_grid(state, pivot_id, dest_sheet_idx, destination, view);
+    update_pivot_region(state, pivot_id, dest_sheet_idx, destination, view);
+    recalculate_sheet_formulas(state, pivot_state);
+}
+
+/// Re-evaluate all formula cells on the active sheet when calculation mode is
+/// "automatic".  This is intentionally a full-sheet recalculation (like the
+/// Ctrl+= "Calculate Now" command) to keep the implementation simple.  Pivot
+/// operations are infrequent enough that the cost is negligible.
+pub(crate) fn recalculate_sheet_formulas(state: &AppState, pivot_state: &PivotState) {
+    // Only recalculate in automatic mode
+    {
+        let calc_mode = state.calculation_mode.lock().unwrap();
+        if *calc_mode != "automatic" {
+            return;
+        }
+    }
+
+    let mut grid = state.grid.lock().unwrap();
+    let mut grids = state.grids.lock().unwrap();
+    let sheet_names = state.sheet_names.lock().unwrap();
+    let active_sheet = *state.active_sheet.lock().unwrap();
+    let styles = state.style_registry.lock().unwrap();
+    // Build pivot data lookup closure for GETPIVOTDATA evaluation
+    let pivot_tables = pivot_state.pivot_tables.lock().unwrap();
+    let pivot_views = pivot_state.views.lock().unwrap();
+    let pivot_data_fn = |data_field: &str, pivot_row: u32, pivot_col: u32, pairs: &[(&str, &str)]| -> Option<f64> {
+        lookup_pivot_data(&pivot_tables, &pivot_views, data_field, pivot_row, pivot_col, pairs)
+    };
+
+    // Collect all cells with formulas on the active sheet
+    let formula_cells: Vec<_> = grid
+        .cells
+        .iter()
+        .filter_map(|(&(row, col), cell)| {
+            cell.formula.as_ref().map(|f| (row, col, f.clone()))
+        })
+        .collect();
+
+    if formula_cells.is_empty() {
+        return;
+    }
+
+    let tables_map = state.tables.lock().unwrap();
+    let table_names_map = state.table_names.lock().unwrap();
+    let named_ranges_map = state.named_ranges.lock().unwrap();
+    let row_heights = state.row_heights.lock().unwrap();
+    let column_widths = state.column_widths.lock().unwrap();
+
+    // Empty user files map — pivot recalc doesn't need external file references
+    let empty_user_files: HashMap<String, Vec<u8>> = HashMap::new();
+
+    for (row, col, formula) in formula_cells {
+        let eval_ctx = engine::EvalContext {
+            current_row: Some(row),
+            current_col: Some(col),
+            row_heights: Some(row_heights.clone()),
+            column_widths: Some(column_widths.clone()),
+            hidden_rows: None,
+        };
+
+        let result = match parser::parse(&formula) {
+            Ok(parsed) => {
+                let resolved = if crate::ast_has_named_refs(&parsed) {
+                    let mut visited = std::collections::HashSet::new();
+                    crate::resolve_names_in_ast(&parsed, &named_ranges_map, active_sheet, &mut visited)
+                } else {
+                    parsed
+                };
+
+                let resolved = if crate::ast_has_table_refs(&resolved) {
+                    let ctx = crate::TableRefContext {
+                        tables: &tables_map,
+                        table_names: &table_names_map,
+                        current_sheet_index: active_sheet,
+                        current_row: row,
+                    };
+                    crate::resolve_table_refs_in_ast(&resolved, &ctx)
+                } else {
+                    resolved
+                };
+
+                let engine_ast = crate::convert_expr(&resolved);
+                crate::evaluate_formula_with_pivot(
+                    &grids,
+                    &sheet_names,
+                    active_sheet,
+                    &engine_ast,
+                    eval_ctx,
+                    Some(&styles),
+                    &empty_user_files,
+                    Some(&pivot_data_fn),
+                )
+            }
+            Err(_) => CellValue::Error(engine::CellError::Value),
+        };
+
+        if let Some(cell) = grid.get_cell(row, col) {
+            let mut updated = cell.clone();
+            updated.value = result;
+            grid.set_cell(row, col, updated.clone());
+
+            // Keep grids vector in sync
+            if active_sheet < grids.len() {
+                grids[active_sheet].set_cell(row, col, updated);
+            }
+        }
+    }
 }

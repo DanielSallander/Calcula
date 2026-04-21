@@ -65,6 +65,10 @@ import {
   forceRecheck,
   getCachedRegions,
   findPivotRegionAtCell,
+  shiftCachedRegionsForColInsert,
+  shiftCachedRegionsForRowInsert,
+  shiftCachedRegionsForColDelete,
+  shiftCachedRegionsForRowDelete,
 } from "./handlers/selectionHandler";
 import type { PivotRegionData } from "./types";
 import { getPivotRegionsForSheet, getPivotAtCell, getPivotDataFormula, getPivotView, togglePivotGroup, getPivotCellWindow, cancelPivotOperation, getAllPivotTables, refreshPivotCache, relocatePivot } from "./lib/pivot-api";
@@ -1054,8 +1058,30 @@ function activate(context: ExtensionContext): void {
   // Register structural command guards - block insert/delete that would affect pivot regions
   const pivotStructuralGuardMessage = "We can't make this change for the selected cells because it will affect a PivotTable. Use the field list to change the report. If you are trying to insert or delete cells, move the PivotTable and try again.";
 
+  // Insert row: only block if the insertion point is strictly inside the pivot
+  // (inserting at startRow shifts the whole pivot down — that's safe)
   cleanupFunctions.push(
-    gridCommands.registerGuard(["insertRow", "deleteRow"], (selection) => {
+    gridCommands.registerGuard(["insertRow"], (selection) => {
+      if (!selection) return true;
+      const regions = getCachedRegions();
+      if (regions.length === 0) return true;
+
+      const minRow = Math.min(selection.startRow, selection.endRow);
+      const maxRow = Math.max(selection.startRow, selection.endRow);
+
+      for (const region of regions) {
+        // Block if any part of the selection is strictly inside the pivot range
+        if (minRow <= region.endRow && maxRow > region.startRow) {
+          return pivotStructuralGuardMessage;
+        }
+      }
+      return true;
+    })
+  );
+
+  // Delete row: block any overlap with the pivot region (deleting any pivot row is destructive)
+  cleanupFunctions.push(
+    gridCommands.registerGuard(["deleteRow"], (selection) => {
       if (!selection) return true;
       const regions = getCachedRegions();
       if (regions.length === 0) return true;
@@ -1072,8 +1098,30 @@ function activate(context: ExtensionContext): void {
     })
   );
 
+  // Insert column: only block if the insertion point is strictly inside the pivot
+  // (inserting at startCol shifts the whole pivot right — that's safe)
   cleanupFunctions.push(
-    gridCommands.registerGuard(["insertColumn", "deleteColumn"], (selection) => {
+    gridCommands.registerGuard(["insertColumn"], (selection) => {
+      if (!selection) return true;
+      const regions = getCachedRegions();
+      if (regions.length === 0) return true;
+
+      const minCol = Math.min(selection.startCol, selection.endCol);
+      const maxCol = Math.max(selection.startCol, selection.endCol);
+
+      for (const region of regions) {
+        // Block if any part of the selection is strictly inside the pivot range
+        if (minCol <= region.endCol && maxCol > region.startCol) {
+          return pivotStructuralGuardMessage;
+        }
+      }
+      return true;
+    })
+  );
+
+  // Delete column: block any overlap with the pivot region (deleting any pivot column is destructive)
+  cleanupFunctions.push(
+    gridCommands.registerGuard(["deleteColumn"], (selection) => {
       if (!selection) return true;
       const regions = getCachedRegions();
       if (regions.length === 0) return true;
@@ -1615,21 +1663,25 @@ function activate(context: ExtensionContext): void {
   cleanupFunctions.push(
     context.events.on<{ col: number; count: number }>(AppEvents.COLUMNS_INSERTED, (e) => {
       shiftPivotRegionsForColInsert(e.col, e.count);
+      shiftCachedRegionsForColInsert(e.col, e.count);
     })
   );
   cleanupFunctions.push(
     context.events.on<{ row: number; count: number }>(AppEvents.ROWS_INSERTED, (e) => {
       shiftPivotRegionsForRowInsert(e.row, e.count);
+      shiftCachedRegionsForRowInsert(e.row, e.count);
     })
   );
   cleanupFunctions.push(
     context.events.on<{ col: number; count: number }>(AppEvents.COLUMNS_DELETED, (e) => {
       shiftPivotRegionsForColDelete(e.col, e.count);
+      shiftCachedRegionsForColDelete(e.col, e.count);
     })
   );
   cleanupFunctions.push(
     context.events.on<{ row: number; count: number }>(AppEvents.ROWS_DELETED, (e) => {
       shiftPivotRegionsForRowDelete(e.row, e.count);
+      shiftCachedRegionsForRowDelete(e.row, e.count);
     })
   );
 
