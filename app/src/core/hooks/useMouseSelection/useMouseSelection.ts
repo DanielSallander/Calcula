@@ -34,6 +34,7 @@ import { createSelectionDragHandlers } from "./selection/selectionDragHandlers";
 import { isGlobalFormulaMode, isEditingFormula, setHoveringOverReferenceBorder } from "../../hooks/useEditing";
 import { getColumnHeaderOverride } from "../../../api/columnHeaderOverrides";
 import { getColumnWidth } from "../../lib/gridRenderer/layout/dimensions";
+import { getGridRegions, getOverlayRegistration } from "../../../api/gridOverlays";
 
 // Custom cursor data URLs for Excel-style header selection arrows
 const COLUMN_SELECT_CURSOR = `url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='24' height='24' viewBox='0 0 24 24'%3E%3Cpath d='M12 2 L12 18 M12 18 L8 14 M12 18 L16 14' stroke='black' stroke-width='2' fill='none' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E") 12 12, pointer`;
@@ -656,7 +657,28 @@ export function useMouseSelection(props: UseMouseSelectionProps): UseMouseSelect
                   // Check if over a cell (standard cell cursor)
                   const cell = getCellFromPixel(mouseX, mouseY, config, viewport, dimensions, { freezeConfig: propFreezeConfig, splitBarSize: propSplitBarSize, splitViewport: propSplitViewport });
                   if (cell) {
-                    setCursorStyle("cell");
+                    // Check if the cell is within a non-floating overlay that provides a cursor
+                    let overlayCursor: string | null = null;
+                    for (const region of getGridRegions()) {
+                      if (region.floating) continue;
+                      if (
+                        cell.row >= region.startRow && cell.row <= region.endRow &&
+                        cell.col >= region.startCol && cell.col <= region.endCol
+                      ) {
+                        const registration = getOverlayRegistration(region.type);
+                        if (registration?.getCursor) {
+                          overlayCursor = registration.getCursor({
+                            region,
+                            canvasX: mouseX,
+                            canvasY: mouseY,
+                            row: cell.row,
+                            col: cell.col,
+                          });
+                          if (overlayCursor) break;
+                        }
+                      }
+                    }
+                    setCursorStyle(overlayCursor ?? "cell");
                   } else {
                     setCursorStyle("default");
                   }

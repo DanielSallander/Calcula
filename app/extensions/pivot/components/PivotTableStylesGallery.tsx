@@ -119,7 +119,7 @@ function excelStyleToThemeOverrides(style: ExcelPivotStyle): Partial<PivotTheme>
   }
   overrides.labelText = labelText;
   overrides.valueText = valueText;
-  overrides.filterText = valueText;
+  overrides.filterText = headerTextColor;
 
   // Banding
   if (bandBg) {
@@ -143,9 +143,9 @@ function excelStyleToThemeOverrides(style: ExcelPivotStyle): Partial<PivotTheme>
   // Borders
   overrides.borderColor = borderColor;
 
-  // Filter row
-  if (bandBg) {
-    overrides.filterRowBackground = bandBg;
+  // Filter row — follows the header color to match Excel
+  if (hasColoredHeader) {
+    overrides.filterRowBackground = headerBg;
   }
 
   // Filter button

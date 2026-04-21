@@ -347,7 +347,7 @@ pub(crate) fn get_pivot_region(state: &AppState, pivot_id: PivotId) -> Option<Pr
 const PIVOT_HEADER_BG: Color = Color::new(192, 230, 245);       // #C0E6F5
 const PIVOT_TOTAL_BG: Color = Color::new(232, 232, 232);        // #e8e8e8
 const PIVOT_GRAND_TOTAL_BG: Color = Color::new(192, 230, 245);  // #C0E6F5
-const PIVOT_FILTER_BG: Color = Color::new(217, 217, 217);       // #D9D9D9
+const PIVOT_FILTER_BG: Color = Color::new(192, 230, 245);       // #C0E6F5 (matches header)
 const PIVOT_BORDER_COLOR: Color = Color::new(232, 232, 232);    // #e8e8e8
 const PIVOT_HEADER_BORDER: Color = Color::new(160, 208, 232);   // #a0d0e8
 

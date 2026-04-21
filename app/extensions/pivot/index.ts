@@ -1387,86 +1387,95 @@ function activate(context: ExtensionContext): void {
           hitCtx.col <= hitCtx.region.endCol
         );
       },
+      getCursor: (hitCtx) => {
+        const { canvasX, canvasY } = hitCtx;
+
+        // Check expand/collapse icon bounds
+        for (const bounds of overlayIconBounds.values()) {
+          if (
+            canvasX >= bounds.x - ICON_HIT_PADDING &&
+            canvasX <= bounds.x + bounds.width + ICON_HIT_PADDING &&
+            canvasY >= bounds.y - ICON_HIT_PADDING &&
+            canvasY <= bounds.y + bounds.height + ICON_HIT_PADDING
+          ) {
+            return "pointer";
+          }
+        }
+
+        // Check header filter button bounds
+        for (const bounds of overlayHeaderFilterBounds.values()) {
+          if (
+            canvasX >= bounds.x &&
+            canvasX <= bounds.x + bounds.width &&
+            canvasY >= bounds.y &&
+            canvasY <= bounds.y + bounds.height
+          ) {
+            return "pointer";
+          }
+        }
+
+        // Check filter dropdown bounds
+        for (const bounds of overlayFilterDropdownBounds.values()) {
+          if (
+            canvasX >= bounds.x &&
+            canvasX <= bounds.x + bounds.width &&
+            canvasY >= bounds.y &&
+            canvasY <= bounds.y + bounds.height
+          ) {
+            return "pointer";
+          }
+        }
+
+        // Check cancel button bounds
+        for (const bounds of overlayCancelBounds.values()) {
+          if (
+            canvasX >= bounds.x &&
+            canvasX <= bounds.x + bounds.width &&
+            canvasY >= bounds.y &&
+            canvasY <= bounds.y + bounds.height
+          ) {
+            return "pointer";
+          }
+        }
+
+        return null;
+      },
       priority: 10,
       renderBelowSelection: true,
     })
   );
 
-  // Track cursor state to avoid redundant style changes
-  let currentCursorOverride = false;
-
-  // Add mousemove handler for cursor changes on expand/collapse icon hover
-  const handleCanvasMouseMove = (event: MouseEvent) => {
+  // Track filter dropdown hover state for visual highlight via document-level
+  // mousemove (the core cursor system handles pointer cursor via getCursor above)
+  const handleDocMouseMove = (event: MouseEvent) => {
     if (!cachedCanvasElement) return;
+    const isOverCanvas = event.target === cachedCanvasElement || cachedCanvasElement.contains(event.target as Node);
+
+    if (!isOverCanvas) {
+      // Clear filter dropdown hover when mouse leaves canvas
+      if (hoveredFilterFieldIndex !== -1) {
+        hoveredFilterFieldIndex = -1;
+        requestOverlayRedraw();
+      }
+      return;
+    }
+
     const rect = cachedCanvasElement.getBoundingClientRect();
     const canvasX = event.clientX - rect.left;
     const canvasY = event.clientY - rect.top;
 
-    let isOverInteractive = false;
-    for (const bounds of overlayIconBounds.values()) {
-      if (
-        canvasX >= bounds.x - ICON_HIT_PADDING &&
-        canvasX <= bounds.x + bounds.width + ICON_HIT_PADDING &&
-        canvasY >= bounds.y - ICON_HIT_PADDING &&
-        canvasY <= bounds.y + bounds.height + ICON_HIT_PADDING
-      ) {
-        isOverInteractive = true;
-        break;
-      }
-    }
-
-    if (!isOverInteractive) {
-      for (const bounds of overlayHeaderFilterBounds.values()) {
-        if (
-          canvasX >= bounds.x &&
-          canvasX <= bounds.x + bounds.width &&
-          canvasY >= bounds.y &&
-          canvasY <= bounds.y + bounds.height
-        ) {
-          isOverInteractive = true;
-          break;
-        }
-      }
-    }
-
     // Track filter dropdown hover for visual highlight
     let newHoveredFilterFieldIndex = -1;
-    if (!isOverInteractive) {
-      for (const bounds of overlayFilterDropdownBounds.values()) {
-        if (
-          canvasX >= bounds.x &&
-          canvasX <= bounds.x + bounds.width &&
-          canvasY >= bounds.y &&
-          canvasY <= bounds.y + bounds.height
-        ) {
-          isOverInteractive = true;
-          newHoveredFilterFieldIndex = bounds.fieldIndex;
-          break;
-        }
+    for (const bounds of overlayFilterDropdownBounds.values()) {
+      if (
+        canvasX >= bounds.x &&
+        canvasX <= bounds.x + bounds.width &&
+        canvasY >= bounds.y &&
+        canvasY <= bounds.y + bounds.height
+      ) {
+        newHoveredFilterFieldIndex = bounds.fieldIndex;
+        break;
       }
-    }
-
-    // Check cancel button hover
-    if (!isOverInteractive) {
-      for (const bounds of overlayCancelBounds.values()) {
-        if (
-          canvasX >= bounds.x &&
-          canvasX <= bounds.x + bounds.width &&
-          canvasY >= bounds.y &&
-          canvasY <= bounds.y + bounds.height
-        ) {
-          isOverInteractive = true;
-          break;
-        }
-      }
-    }
-
-    if (isOverInteractive && !currentCursorOverride) {
-      cachedCanvasElement.style.cursor = "pointer";
-      currentCursorOverride = true;
-    } else if (!isOverInteractive && currentCursorOverride) {
-      cachedCanvasElement.style.cursor = "";
-      currentCursorOverride = false;
     }
 
     // Trigger repaint when filter dropdown hover state changes
@@ -1475,30 +1484,9 @@ function activate(context: ExtensionContext): void {
       requestOverlayRedraw();
     }
   };
-
-  // Attach the mousemove handler to the document (canvas may not exist yet)
-  // We use document-level listener and check if event target is the canvas
-  const handleDocMouseMove = (event: MouseEvent) => {
-    if (cachedCanvasElement && (event.target === cachedCanvasElement || cachedCanvasElement.contains(event.target as Node))) {
-      handleCanvasMouseMove(event);
-    } else if (cachedCanvasElement) {
-      if (currentCursorOverride) {
-        cachedCanvasElement.style.cursor = "";
-        currentCursorOverride = false;
-      }
-      // Clear filter dropdown hover when mouse leaves canvas
-      if (hoveredFilterFieldIndex !== -1) {
-        hoveredFilterFieldIndex = -1;
-        requestOverlayRedraw();
-      }
-    }
-  };
   document.addEventListener("mousemove", handleDocMouseMove);
   cleanupFunctions.push(() => {
     document.removeEventListener("mousemove", handleDocMouseMove);
-    if (cachedCanvasElement && currentCursorOverride) {
-      cachedCanvasElement.style.cursor = "";
-    }
   });
 
   // Subscribe to events

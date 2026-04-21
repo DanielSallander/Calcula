@@ -75,7 +75,7 @@ export const DEFAULT_PIVOT_THEME: PivotTheme = {
   valueBackground: '#ffffff',
   totalBackground: '#e8e8e8',
   grandTotalBackground: '#C0E6F5',
-  filterRowBackground: '#D9D9D9',
+  filterRowBackground: '#C0E6F5',
 
   // Alternating rows — only used when banding is explicitly enabled
   alternateRowBackground: '#ffffff',
@@ -302,27 +302,17 @@ function drawFilterDropdownButton(
   isHovered: boolean,
   hasActiveFilter: boolean = false
 ): { buttonBounds: { x: number; y: number; width: number; height: number } } {
-  const comboWidth = Math.max(FILTER_BUTTON_MIN_WIDTH, width);
-  const arrowBtnWidth = 18; // compact dropdown arrow button
+  // Arrow button dimensions (matches row/column header filter buttons)
+  const btnMargin = 3;
+  const btnSize = height - btnMargin * 2;
+  const btnX = x + width - btnSize - btnMargin;
+  const btnY = y + btnMargin;
 
   ctx.save();
 
-  // Draw combo box background (white, full width)
-  ctx.fillStyle = isHovered ? '#f5f7fa' : theme.filterButtonBackground;
-  ctx.fillRect(x, y, comboWidth, height);
-
-  // Draw combo box border — blue tint when filter is active
-  if (hasActiveFilter) {
-    ctx.strokeStyle = isHovered ? '#1565c0' : '#1a73e8';
-  } else {
-    ctx.strokeStyle = isHovered ? theme.headerBorderColor : theme.filterButtonBorder;
-  }
-  ctx.lineWidth = 1;
-  ctx.strokeRect(x + 0.5, y + 0.5, comboWidth - 1, height - 1);
-
-  // Draw the value text on the left side
-  const textX = x + FILTER_BUTTON_PADDING;
-  const textMaxWidth = comboWidth - FILTER_BUTTON_PADDING * 2 - arrowBtnWidth;
+  // Draw value text (left-aligned, same style as filter label)
+  const textX = x + CELL_PADDING_X;
+  const textMaxWidth = width - CELL_PADDING_X * 2 - btnSize - btnMargin;
   const textY = y + height / 2;
 
   ctx.fillStyle = hasActiveFilter ? '#1a73e8' : theme.filterText;
@@ -333,63 +323,62 @@ function drawFilterDropdownButton(
   const truncatedText = truncateText(ctx, displayValue, textMaxWidth);
   ctx.fillText(truncatedText, textX, textY);
 
-  // Draw dropdown arrow button on the right edge (Excel-style)
-  const btnX = x + comboWidth - arrowBtnWidth;
-  const btnY = y;
-
-  // Arrow button background
+  // Draw dropdown arrow button on the right (matches row/column header style)
   if (hasActiveFilter) {
     ctx.fillStyle = isHovered ? '#d0e2f4' : '#e8f0fe';
+  } else if (isHovered) {
+    ctx.fillStyle = 'rgba(0, 0, 0, 0.12)';
   } else {
-    ctx.fillStyle = isHovered ? '#e0e4ea' : '#f0f0f0';
+    ctx.fillStyle = 'rgba(0, 0, 0, 0.06)';
   }
-  ctx.fillRect(btnX, btnY, arrowBtnWidth, height);
+  ctx.beginPath();
+  ctx.roundRect(btnX, btnY, btnSize, btnSize, 2);
+  ctx.fill();
 
-  // Arrow button left border (separator from text area)
+  // Button border
   if (hasActiveFilter) {
     ctx.strokeStyle = isHovered ? '#1565c0' : '#1a73e8';
   } else {
-    ctx.strokeStyle = isHovered ? theme.headerBorderColor : theme.filterButtonBorder;
+    ctx.strokeStyle = isHovered ? 'rgba(0, 0, 0, 0.25)' : 'rgba(0, 0, 0, 0.15)';
   }
   ctx.lineWidth = 1;
   ctx.beginPath();
-  ctx.moveTo(Math.floor(btnX) + 0.5, btnY);
-  ctx.lineTo(Math.floor(btnX) + 0.5, btnY + height);
+  ctx.roundRect(btnX + 0.5, btnY + 0.5, btnSize - 1, btnSize - 1, 2);
   ctx.stroke();
 
   // Draw icon centered in the arrow button
-  const arrowCx = btnX + arrowBtnWidth / 2;
-  const arrowCy = btnY + height / 2;
+  const arrowCx = btnX + btnSize / 2;
+  const arrowCy = btnY + btnSize / 2;
 
   if (hasActiveFilter) {
-    // Funnel icon when filter is active (matches header filter style)
+    // Funnel icon when filter is active
     ctx.fillStyle = '#1a73e8';
     ctx.beginPath();
-    ctx.moveTo(arrowCx - 5, arrowCy - 4);  // Top-left
-    ctx.lineTo(arrowCx + 5, arrowCy - 4);  // Top-right
-    ctx.lineTo(arrowCx + 1, arrowCy);       // Narrow right
-    ctx.lineTo(arrowCx + 1, arrowCy + 4);   // Stem right
-    ctx.lineTo(arrowCx - 1, arrowCy + 4);   // Stem left
-    ctx.lineTo(arrowCx - 1, arrowCy);       // Narrow left
+    ctx.moveTo(arrowCx - 5, arrowCy - 4);
+    ctx.lineTo(arrowCx + 5, arrowCy - 4);
+    ctx.lineTo(arrowCx + 1, arrowCy);
+    ctx.lineTo(arrowCx + 1, arrowCy + 4);
+    ctx.lineTo(arrowCx - 1, arrowCy + 4);
+    ctx.lineTo(arrowCx - 1, arrowCy);
     ctx.closePath();
     ctx.fill();
   } else {
-    // Dropdown triangle
-    const triSize = 5;
-    ctx.fillStyle = theme.filterDropdownArrow;
+    // Dropdown triangle (same dimensions as header filter buttons)
+    const triSize = 7;
+    ctx.fillStyle = '#000000';
     ctx.beginPath();
-    ctx.moveTo(arrowCx - triSize, arrowCy - triSize / 2);
-    ctx.lineTo(arrowCx + triSize, arrowCy - triSize / 2);
-    ctx.lineTo(arrowCx, arrowCy + triSize / 2 + 1);
+    ctx.moveTo(arrowCx - triSize / 2, arrowCy - triSize / 3);
+    ctx.lineTo(arrowCx + triSize / 2, arrowCy - triSize / 3);
+    ctx.lineTo(arrowCx, arrowCy + triSize / 2);
     ctx.closePath();
     ctx.fill();
   }
 
   ctx.restore();
 
-  // The clickable bounds covers the entire combo box (not just the arrow button)
+  // Clickable bounds covers only the arrow button, not the whole cell
   return {
-    buttonBounds: { x, y, width: comboWidth, height },
+    buttonBounds: { x: btnX, y: btnY, width: btnSize, height: btnSize },
   };
 }
 
@@ -423,29 +412,39 @@ export function drawPivotCell(
   // via styled cells written by the backend. This function only draws
   // interactive chrome elements that can't be expressed as cell styles.
 
-  // FilterLabel — no interactive chrome, grid renders the text
+  // FilterLabel — draw themed background and text (overrides the grid cell style
+  // so that filter labels follow the active pivot theme, not hardcoded backend colors)
   if (cell.cellType === 'FilterLabel') {
+    // Fill with themed filter row background (matches header color)
+    ctx.fillStyle = theme.filterRowBackground || '#C0E6F5';
+    ctx.fillRect(x, y, width, height);
+
+    // Draw right-aligned bold label text
+    const displayText = cell.formattedValue || getCellDisplayValue(cell.value) || '';
+    if (displayText) {
+      ctx.fillStyle = theme.filterText || '#000000';
+      ctx.font = `${theme.headerFontWeight || '700'} ${theme.fontSize}px ${theme.fontFamily}`;
+      ctx.textAlign = 'right';
+      ctx.textBaseline = 'middle';
+      ctx.fillText(displayText, x + width - CELL_PADDING_X, y + height / 2);
+    }
+
     return result;
   }
 
   // FilterDropdown — interactive combo box drawn on top of the grid cell
   if (cell.cellType === 'FilterDropdown') {
-    // Fill over the grid cell content since the dropdown has custom draw logic
-    ctx.fillStyle = theme.filterButtonBackground || '#D9D9D9';
+    // Fill with filter row background so both label and dropdown areas match
+    ctx.fillStyle = theme.filterRowBackground || '#C0E6F5';
     ctx.fillRect(x, y, width, height);
 
-    const margin = 2;
-    const comboX = x + margin;
-    const comboY = y + margin;
-    const comboW = width - margin * 2;
-    const comboH = height - margin * 2;
     const displayText = cell.formattedValue || getCellDisplayValue(cell.value) || '(All)';
     const buttonResult = drawFilterDropdownButton(
       ctx,
-      comboX,
-      comboY,
-      comboW,
-      comboH,
+      x,
+      y,
+      width,
+      height,
       displayText,
       theme,
       options.isHoveredFilterButton || false,
@@ -454,8 +453,6 @@ export function drawPivotCell(
 
     result.filterButtonBounds = {
       ...buttonResult.buttonBounds,
-      x: comboX,
-      y: comboY,
       fieldIndex: cell.filterFieldIndex ?? -1,
       row: rowIndex,
       col: colIndex,
