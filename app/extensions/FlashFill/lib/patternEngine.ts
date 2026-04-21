@@ -111,7 +111,7 @@ function evaluateExpr(expr: Expression, sources: string[]): string {
 // Candidate Generation
 // ============================================================================
 
-const COMMON_DELIMITERS = [" ", ",", ";", "-", "_", ".", "/", "\\", "|", "\t", ", ", " - ", ": "];
+const COMMON_DELIMITERS = [" ", ",", ";", "-", "_", "@", ".", "/", "\\", "|", "\t", ", ", " - ", ": "];
 
 /**
  * Generate all candidate programs for a single example.
@@ -124,14 +124,6 @@ function generateCandidates(example: Example): Program[] {
     const src = sources[si];
     if (!src) continue;
 
-    // --- Direct substring ---
-    const idx = src.indexOf(output);
-    if (idx >= 0 && output.length > 0) {
-      candidates.push({
-        expressions: [{ type: "substring", sourceIndex: si, start: idx, end: idx + output.length }],
-      });
-    }
-
     // --- Case transformation of entire source ---
     if (src.toUpperCase() === output && src !== output) {
       candidates.push({ expressions: [{ type: "upper", inner: { type: "substring", sourceIndex: si, start: 0, end: src.length } }] });
@@ -143,7 +135,7 @@ function generateCandidates(example: Example): Program[] {
       candidates.push({ expressions: [{ type: "capitalize", inner: { type: "substring", sourceIndex: si, start: 0, end: src.length } }] });
     }
 
-    // --- Delimiter-based strategies ---
+    // --- Delimiter-based strategies (before substring — generalizes better) ---
     for (const delim of COMMON_DELIMITERS) {
       if (!src.includes(delim)) continue;
       const parts = src.split(delim);
@@ -195,6 +187,14 @@ function generateCandidates(example: Example): Program[] {
     const positional = decomposePositional(si, src, output);
     if (positional) {
       candidates.push({ expressions: positional });
+    }
+
+    // --- Direct substring (last resort — position-based, fragile for variable-length inputs) ---
+    const idx = src.indexOf(output);
+    if (idx >= 0 && output.length > 0) {
+      candidates.push({
+        expressions: [{ type: "substring", sourceIndex: si, start: idx, end: idx + output.length }],
+      });
     }
   }
 

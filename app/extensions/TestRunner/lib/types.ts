@@ -25,6 +25,8 @@ export interface TestContext {
   getSelection: () => Selection | null;
   /** Set the active selection */
   setSelection: (sel: { startRow: number; startCol: number; endRow: number; endCol: number }) => void;
+  /** Set selection and wait until it is reflected in the grid state snapshot */
+  setSelectionAndWait: (sel: { startRow: number; startCol: number; endRow: number; endCol: number }, timeoutMs?: number) => Promise<void>;
   /** Undo the last action (calls Tauri backend directly) */
   undo: () => Promise<void>;
   /** Small delay (50ms) to allow frontend to process IPC responses */

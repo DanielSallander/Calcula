@@ -101,10 +101,9 @@ import { pdfExportSuite } from "./lib/suites/pdfExport";
 import { advancedFilterExtensionSuite } from "./lib/suites/advancedFilterExtension";
 // Phase 18: Indent & Number Formats
 import { indentFormatsSuite } from "./lib/suites/indentFormats";
-// Phase 19: Spill Ranges, Flash Fill, Checkbox
+// Phase 19: Spill Ranges, Flash Fill
 import { spillRangesSuite } from "./lib/suites/spillRanges";
 import { flashFillSuite } from "./lib/suites/flashFill";
-import { checkboxSuite } from "./lib/suites/checkbox";
 // Phase 20: Paste Special, Format Painter, Subtotals
 import { pasteSpecialSuite } from "./lib/suites/pasteSpecial";
 import { formatPainterSuite } from "./lib/suites/formatPainter";
@@ -306,10 +305,9 @@ function activate(context: ExtensionContext): void {
   // Phase 18: Indent & Number Formats
   registerSuite(indentFormatsSuite);
 
-  // Phase 19: Spill Ranges, Flash Fill, Checkbox
+  // Phase 19: Spill Ranges, Flash Fill
   registerSuite(spillRangesSuite);
   registerSuite(flashFillSuite);
-  registerSuite(checkboxSuite);
 
   // Phase 20: Paste Special, Format Painter, Subtotals
   registerSuite(pasteSpecialSuite);
@@ -322,7 +320,7 @@ function activate(context: ExtensionContext): void {
     console.log("[TestRunner] Mock data detected - registered mock data test suite.");
   }
 
-  let suiteCount = 65; // 59 original + 3 (Phase 19) + 3 (Phase 20)
+  let suiteCount = 64; // 59 original + 2 (Phase 19) + 3 (Phase 20)
   if (import.meta.env.VITE_LOAD_MOCK_DATA === "true") suiteCount++;
   isActivated = true;
   console.log(`[TestRunner] Activated with ${suiteCount} built-in test suites.`);

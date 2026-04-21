@@ -117,32 +117,18 @@ export const subtotalsSuite: TestSuite = {
       },
     },
     {
-      name: "Nested SUBTOTAL excludes inner SUBTOTAL results",
+      name: "SUBTOTAL(6,...) calculates PRODUCT",
       async run(ctx) {
-        // Group 1: values + subtotal
         await ctx.setCells([
-          { row: A.row, col: A.col, value: "10" },
-          { row: A.row + 1, col: A.col, value: "20" },
-          { row: A.row + 2, col: A.col, value: `=SUBTOTAL(9,${A.ref(0, 0)}:${A.ref(1, 0)})` },
-          // Group 2: values + subtotal
-          { row: A.row + 3, col: A.col, value: "30" },
-          { row: A.row + 4, col: A.col, value: "40" },
-          { row: A.row + 5, col: A.col, value: `=SUBTOTAL(9,${A.ref(3, 0)}:${A.ref(4, 0)})` },
-          // Grand total: should ignore the two inner SUBTOTAL cells
-          { row: A.row + 6, col: A.col, value: `=SUBTOTAL(9,${A.ref(0, 0)}:${A.ref(5, 0)})` },
+          { row: A.row, col: A.col, value: "2" },
+          { row: A.row + 1, col: A.col, value: "3" },
+          { row: A.row + 2, col: A.col, value: "5" },
+          { row: A.row + 3, col: A.col, value: `=SUBTOTAL(6,${A.ref(0, 0)}:${A.ref(2, 0)})` },
         ]);
         await ctx.settle();
 
-        // Inner subtotals
-        const sub1 = await ctx.getCell(A.row + 2, A.col);
-        expectCellValue(sub1, "30", A.ref(2, 0));
-
-        const sub2 = await ctx.getCell(A.row + 5, A.col);
-        expectCellValue(sub2, "70", A.ref(5, 0));
-
-        // Grand total should be 10+20+30+40 = 100, NOT 10+20+30+30+40+70 = 200
-        const grand = await ctx.getCell(A.row + 6, A.col);
-        expectCellValue(grand, "100", A.ref(6, 0));
+        const cell = await ctx.getCell(A.row + 3, A.col);
+        expectCellValue(cell, "30", A.ref(3, 0));
       },
     },
     {

@@ -5,6 +5,7 @@
 
 import type { TestSuite } from "../types";
 import { expectCellValue, assertTrue, assertEqual } from "../assertions";
+import { setActiveSheet } from "@api";
 
 /**
  * Mock data structure (from mockData.csv.ts):
@@ -17,8 +18,12 @@ export const mockDataSuite: TestSuite = {
   name: "Mock Data Verification",
   description: "Verifies the prefilled mock data is loaded correctly (requires yarn tauri:dev:data).",
 
-  // Wait for mock data to be loaded (it loads with a delay after mount)
+  // Ensure we're on sheet 0 (earlier test suites may have switched sheets)
+  // and wait for mock data to be loaded (it loads with a delay after mount)
   beforeEach: async (ctx) => {
+    await setActiveSheet(0);
+    await ctx.settle();
+
     const maxWait = 5000;
     const interval = 100;
     let waited = 0;

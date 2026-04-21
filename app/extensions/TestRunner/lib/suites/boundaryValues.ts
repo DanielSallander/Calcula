@@ -21,8 +21,6 @@ export const boundaryValuesSuite: TestSuite = {
       }
     }
     await ctx.setCells(clears);
-    // Also clear row 0, col 0 if we used it
-    await ctx.setCells([{ row: 0, col: 0, value: "" }]);
     await ctx.settle();
   },
 
@@ -31,12 +29,20 @@ export const boundaryValuesSuite: TestSuite = {
       name: "Operations on row 0, col 0",
       description: "The first cell in the grid can be read and written.",
       run: async (ctx) => {
+        // Save and restore original value to avoid clobbering mock data headers
+        const original = await ctx.getCell(0, 0);
+        const originalValue = original?.display ?? "";
+
         await ctx.setCells([{ row: 0, col: 0, value: "Origin" }]);
         await ctx.settle();
 
         const cell = await ctx.getCell(0, 0);
         expectNotNull(cell, "cell at (0,0) should exist");
         assertTrue(cell!.display.includes("Origin"), `expected Origin, got ${cell!.display}`);
+
+        // Restore original value
+        await ctx.setCells([{ row: 0, col: 0, value: originalValue }]);
+        await ctx.settle();
       },
     },
     {

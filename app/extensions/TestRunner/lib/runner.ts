@@ -131,6 +131,21 @@ function createTestContext(logs: string[]): { ctx: TestContext; internals: Conte
       dispatchGridAction(setSelection(sel));
     },
 
+    async setSelectionAndWait(sel: { startRow: number; startCol: number; endRow: number; endCol: number }, timeoutMs = 2000) {
+      dispatchGridAction(setSelection(sel));
+      const deadline = Date.now() + timeoutMs;
+      while (Date.now() < deadline) {
+        await new Promise((r) => setTimeout(r, 20));
+        const snapshot = getGridStateSnapshot();
+        const cur = snapshot?.selection;
+        if (cur && cur.startRow === sel.startRow && cur.startCol === sel.startCol
+            && cur.endRow === sel.endRow && cur.endCol === sel.endCol) {
+          return;
+        }
+      }
+      throw new Error(`setSelectionAndWait timed out waiting for selection to propagate`);
+    },
+
     async undo() {
       await tauriUndo();
     },

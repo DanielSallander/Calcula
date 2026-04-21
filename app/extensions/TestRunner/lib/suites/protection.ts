@@ -32,6 +32,14 @@ export const protectionSuite: TestSuite = {
     try { await unprotectSheet(); } catch { /* ignore */ }
     try { await unprotectWorkbook(); } catch { /* ignore */ }
     try { await removeAllowEditRange("TestEditRange"); } catch { /* ignore */ }
+    // Reset cell protection to default (locked) for the test area
+    try {
+      await setCellProtection({
+        startRow: A.row, startCol: A.col,
+        endRow: A.row + 4, endCol: A.col + 2,
+        locked: true,
+      });
+    } catch { /* ignore */ }
     const clears = [];
     for (let r = 0; r < 5; r++) {
       for (let c = 0; c < 3; c++) {
