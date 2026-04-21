@@ -206,3 +206,19 @@ export const AREA_ADVANCED_FILTER = suiteArea(58);
 // Phase 18: Indent & Number Formats
 /** Suite 59: Indent & Formats (row 3450) */
 export const AREA_INDENT_FORMATS = suiteArea(59);
+
+// Phase 19: Spill Ranges, Flash Fill, Checkbox
+/** Suite 60: Spill Ranges / Dynamic Arrays (row 3500) */
+export const AREA_SPILL_RANGES = suiteArea(60);
+/** Suite 61: Flash Fill (row 3550) */
+export const AREA_FLASH_FILL = suiteArea(61);
+/** Suite 62: Checkbox (row 3600) */
+export const AREA_CHECKBOX = suiteArea(62);
+
+// Phase 20: Paste Special, Format Painter, Subtotals
+/** Suite 63: Paste Special (row 3650) */
+export const AREA_PASTE_SPECIAL = suiteArea(63);
+/** Suite 64: Format Painter (row 3700) */
+export const AREA_FORMAT_PAINTER = suiteArea(64);
+/** Suite 65: Subtotals (row 3750) */
+export const AREA_SUBTOTALS = suiteArea(65);
