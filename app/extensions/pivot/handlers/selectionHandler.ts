@@ -57,6 +57,25 @@ export function updateCachedRegions(regions: PivotRegionData[]): void {
   cachedRegions = Array.isArray(regions) ? regions : [];
   // Regions arrived, so clear the just-created flag
   justCreatedPivot = false;
+
+  // When there are no pivot regions on the current sheet (e.g. after
+  // deleting a pivot sheet), unregister the contextual ribbon tabs and
+  // close the task pane immediately. Without this, the tabs and pane
+  // linger because the selection handler's lastCheckedSelection cache
+  // may prevent re-evaluation.
+  if (cachedRegions.length === 0) {
+    lastCheckedSelection = null;
+    if (analyzeTabRegistered) {
+      ExtensionRegistry.unregisterRibbonTab(PIVOT_ANALYZE_TAB_ID);
+      analyzeTabRegistered = false;
+    }
+    if (designTabRegistered) {
+      ExtensionRegistry.unregisterRibbonTab(PIVOT_DESIGN_TAB_ID);
+      designTabRegistered = false;
+    }
+    removeTaskPaneContextKey("pivot");
+    closeTaskPane(PIVOT_PANE_ID);
+  }
 }
 
 /**

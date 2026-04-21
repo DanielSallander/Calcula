@@ -2284,8 +2284,8 @@ impl<'a> PivotCalculator<'a> {
                             cells.push(cell);
                         } else if col < item.depth
                             && repeat_row_labels
-                            && matches!(report_layout, ReportLayout::Tabular) {
-                            // Repeat parent labels in tabular layout
+                            && matches!(report_layout, ReportLayout::Outline | ReportLayout::Tabular) {
+                            // Repeat parent labels in outline/tabular layout
                             let parent_label = self.get_parent_label_at_depth(&row_items, row_idx, col);
                             let mut cell = PivotViewCell::row_header(parent_label, 0);
                             cell.group_path = row_gp.clone();
@@ -2351,7 +2351,7 @@ impl<'a> PivotCalculator<'a> {
     fn get_parent_label_at_depth(&self, row_items: &[FlatAxisItem], current_idx: usize, depth: usize) -> String {
         // Walk up the parent chain to find label at depth
         let mut idx = current_idx;
-        while idx > 0 {
+        loop {
             let item = &row_items[idx];
             if item.depth == depth {
                 return item.label.clone();

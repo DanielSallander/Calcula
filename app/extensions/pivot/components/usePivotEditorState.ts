@@ -55,6 +55,23 @@ export function usePivotEditorState({
   const isInitialMount = useRef(true);
   const pendingUpdate = useRef(false);
 
+  // When the pivotId changes (e.g. a new pivot is created after deleting the
+  // old one), reset zone state to the new initial values. Without this,
+  // useState keeps the previous pivot's field configuration.
+  const prevPivotId = useRef(pivotId);
+  useEffect(() => {
+    if (prevPivotId.current !== pivotId) {
+      prevPivotId.current = pivotId;
+      isInitialMount.current = true;
+      setRows(initialRows);
+      setColumns(initialColumns);
+      setValues(initialValues);
+      setFilters(initialFilters);
+      setLayout(initialLayout);
+      setTimeout(() => { isInitialMount.current = false; }, 0);
+    }
+  }, [pivotId, initialRows, initialColumns, initialValues, initialFilters, initialLayout]);
+
   // Track which fields are currently used in any zone
   const usedFields = useMemo(() => {
     const used = new Set<number>();

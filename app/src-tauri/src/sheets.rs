@@ -6,6 +6,7 @@
 use std::collections::HashMap;
 use tauri::State;
 use crate::AppState;
+use crate::pivot::types::PivotState;
 use serde::{Deserialize, Serialize};
 
 /// Freeze panes configuration for a sheet
@@ -234,7 +235,7 @@ pub fn add_sheet(state: State<AppState>, name: Option<String>) -> Result<SheetsR
 }
 
 #[tauri::command]
-pub fn delete_sheet(state: State<AppState>, index: usize) -> Result<SheetsResult, String> {
+pub fn delete_sheet(state: State<AppState>, pivot_state: State<'_, PivotState>, index: usize) -> Result<SheetsResult, String> {
     let mut sheet_names = state.sheet_names.lock().unwrap();
     let mut grids = state.grids.lock().unwrap();
     let mut active_sheet = state.active_sheet.lock().unwrap();
@@ -278,6 +279,58 @@ pub fn delete_sheet(state: State<AppState>, index: usize) -> Result<SheetsResult
     if let Some(sheet_tables) = tables.remove(&index) {
         for table in sheet_tables.values() {
             table_names.remove(&table.name.to_uppercase());
+        }
+    }
+
+    // Remove pivot tables whose destination is the deleted sheet
+    {
+        let mut pivot_tables = pivot_state.pivot_tables.lock().unwrap();
+        let pivots_to_delete: Vec<u32> = pivot_tables
+            .iter()
+            .filter(|(_, (def, _))| {
+                def.destination_sheet.as_deref() == Some(deleted_name.as_str())
+            })
+            .map(|(&id, _)| id)
+            .collect();
+
+        for pivot_id in &pivots_to_delete {
+            pivot_tables.remove(pivot_id);
+        }
+        drop(pivot_tables);
+
+        // Clean up associated pivot state
+        if !pivots_to_delete.is_empty() {
+            let mut views = pivot_state.views.lock().unwrap();
+            let mut bi_metadata = pivot_state.bi_metadata.lock().unwrap();
+            let mut cancellation_tokens = pivot_state.cancellation_tokens.lock().unwrap();
+            let mut previous_states = pivot_state.previous_states.lock().unwrap();
+            let mut active = pivot_state.active_pivot_id.lock().unwrap();
+
+            for pivot_id in &pivots_to_delete {
+                views.remove(pivot_id);
+                bi_metadata.remove(pivot_id);
+                cancellation_tokens.remove(pivot_id);
+                previous_states.remove(pivot_id);
+                if *active == Some(*pivot_id) {
+                    *active = None;
+                }
+            }
+        }
+
+        // Remove protected regions for deleted pivots and shift sheet indices
+        let mut regions = state.protected_regions.lock().unwrap();
+        regions.retain(|r| {
+            if r.sheet_index == index {
+                // Remove all protected regions on the deleted sheet
+                return false;
+            }
+            true
+        });
+        // Shift sheet indices for regions on sheets above the deleted one
+        for r in regions.iter_mut() {
+            if r.sheet_index > index {
+                r.sheet_index -= 1;
+            }
         }
     }
 
