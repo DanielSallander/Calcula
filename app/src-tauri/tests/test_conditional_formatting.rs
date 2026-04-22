@@ -158,11 +158,13 @@ fn test_icon_set_rule() {
                 value_type: CFValueType::Percent,
                 value: 33.0,
                 operator: ThresholdOperator::GreaterThanOrEqual,
+                formula: None,
             },
             IconSetThreshold {
                 value_type: CFValueType::Percent,
                 value: 67.0,
                 operator: ThresholdOperator::GreaterThanOrEqual,
+                formula: None,
             },
         ],
         reverse_icons: false,

@@ -2954,6 +2954,32 @@ fn compare_cells(
 ) -> std::cmp::Ordering {
     match field.sort_on {
         SortOn::Value => {
+            // Check for custom sort order
+            if let Some(ref custom_order) = field.custom_order {
+                let list = resolve_custom_order(custom_order);
+                if !list.is_empty() {
+                    let text_a = cell_a.as_ref().and_then(|c| match &c.value {
+                        engine::CellValue::Text(s) => Some(s.as_str()),
+                        _ => None,
+                    });
+                    let text_b = cell_b.as_ref().and_then(|c| match &c.value {
+                        engine::CellValue::Text(s) => Some(s.as_str()),
+                        _ => None,
+                    });
+
+                    return match (text_a, text_b) {
+                        (None, None) => std::cmp::Ordering::Equal,
+                        (None, Some(_)) => std::cmp::Ordering::Greater,
+                        (Some(_), None) => std::cmp::Ordering::Less,
+                        (Some(a), Some(b)) => {
+                            let key_a = custom_sort_key(a, &list);
+                            let key_b = custom_sort_key(b, &list);
+                            key_a.cmp(&key_b)
+                        }
+                    };
+                }
+            }
+
             // Compare by cell value
             let val_a = cell_a.as_ref().map(|c| &c.value);
             let val_b = cell_b.as_ref().map(|c| &c.value);
@@ -3033,6 +3059,36 @@ fn compare_cells(
             }
         }
     }
+}
+
+// ============================================================================
+// Built-in Custom Sort Lists
+// ============================================================================
+
+const WEEKDAYS: &[&str] = &["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
+const WEEKDAYS_SHORT: &[&str] = &["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+const MONTHS: &[&str] = &["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
+const MONTHS_SHORT: &[&str] = &["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+
+/// Resolve a custom_order string into a list of values.
+/// Built-in names: "weekdays", "weekdaysShort", "months", "monthsShort".
+/// Otherwise treated as a comma-separated list of custom values.
+fn resolve_custom_order(custom_order: &str) -> Vec<String> {
+    match custom_order {
+        "weekdays" => WEEKDAYS.iter().map(|s| s.to_string()).collect(),
+        "weekdaysShort" => WEEKDAYS_SHORT.iter().map(|s| s.to_string()).collect(),
+        "months" => MONTHS.iter().map(|s| s.to_string()).collect(),
+        "monthsShort" => MONTHS_SHORT.iter().map(|s| s.to_string()).collect(),
+        _ => custom_order.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect(),
+    }
+}
+
+/// Get the sort position of a value in a custom list (case-insensitive).
+/// Values not found in the list sort after all list values (usize::MAX).
+fn custom_sort_key(value: &str, list: &[String]) -> usize {
+    list.iter()
+        .position(|item| item.eq_ignore_ascii_case(value))
+        .unwrap_or(usize::MAX)
 }
 
 /// Compare two cell values with support for different data types and options.

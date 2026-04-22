@@ -330,7 +330,7 @@ export type { FormulaReferenceOverride, FormulaReferenceInterceptorFn } from "./
 // ============================================================================
 
 export { AppEvents, emitAppEvent, onAppEvent, restoreFocusToGrid } from "./events";
-export type { AppEventName, FillCompletedPayload } from "./events";
+export type { AppEventName, FillCompletedPayload, CellValueChange, CellValuesChangedPayload } from "./events";
 
 // ============================================================================
 // Cross-Window Events (Tauri)
@@ -391,6 +391,7 @@ export type { ContextMenuRequestPayload } from "./contextMenuTypes";
 
 export { freezePanes, loadFreezePanesConfig } from "./grid";
 export { splitWindow, loadSplitWindowConfig, removeSplitWindow } from "./grid";
+export { navigateToCell, navigateToRange } from "./grid";
 export { goToSpecial } from "./grid";
 export type { GoToSpecialResult, GoToSpecialCriteria } from "./grid";
 

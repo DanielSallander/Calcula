@@ -308,7 +308,7 @@ export function useSpreadsheetEditing({
           oldValue: undefined,
           newValue: updatedCells[0].display,
           formula: updatedCells[0].formula ?? null,
-        });
+        }, "fill");
       }
     } catch (error) {
       console.error("[useSpreadsheetEditing] Ctrl+Enter fill failed:", error);

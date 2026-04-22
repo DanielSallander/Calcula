@@ -441,7 +441,7 @@ export function HomeTabComponent({
           await applyFormat({ italic: !(currentStyle?.italic ?? false) });
           break;
         case "underline":
-          await applyFormat({ underline: !(currentStyle?.underline ?? false) });
+          await applyFormat({ underline: (currentStyle?.underline ?? "none") !== "none" ? "none" : "single" });
           break;
         case "strikethrough":
           await applyFormat({ strikethrough: !(currentStyle?.strikethrough ?? false) });
@@ -598,7 +598,7 @@ export function HomeTabComponent({
       switch (itemId) {
         case "bold": return currentStyle.bold;
         case "italic": return currentStyle.italic;
-        case "underline": return currentStyle.underline;
+        case "underline": return currentStyle.underline !== "none";
         case "strikethrough": return currentStyle.strikethrough;
         case "wrapText": return currentStyle.wrapText;
         case "alignLeft": return currentStyle.textAlign === "left";

@@ -8,3 +8,4 @@ pub mod bookmarks;
 pub mod cells;
 pub mod sheets;
 pub mod utility;
+pub mod worksheet_props;

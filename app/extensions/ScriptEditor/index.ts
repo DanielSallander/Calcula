@@ -77,7 +77,9 @@ function activate(context: ExtensionContext): void {
     for (const action of actions) {
       switch (action.action) {
         case "goto":
-          dispatchGridAction(setSelection(action.row, action.col, action.row, action.col));
+          if (action.select !== false) {
+            dispatchGridAction(setSelection(action.row, action.col, action.row, action.col));
+          }
           dispatchGridAction(scrollToCell(action.row, action.col, false));
           break;
         case "calculate":

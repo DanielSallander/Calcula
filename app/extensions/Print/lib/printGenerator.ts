@@ -141,10 +141,11 @@ function buildCellStyle(
 
   if (styleData.bold) parts.push("font-weight:bold");
   if (styleData.italic) parts.push("font-style:italic");
-  if (styleData.underline) parts.push("text-decoration:underline");
+  const hasUnderline = styleData.underline && styleData.underline !== "none";
+  if (hasUnderline) parts.push("text-decoration:underline");
   if (styleData.strikethrough) {
     parts.push(
-      styleData.underline
+      hasUnderline
         ? "text-decoration:underline line-through"
         : "text-decoration:line-through",
     );

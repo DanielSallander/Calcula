@@ -1206,7 +1206,7 @@ export function useFillHandle(props: UseFillHandleProps): UseFillHandleReturn {
             newValue: cell.display,
             formula: cell.formula ?? null,
           }));
-        cellEvents.emitBatch(batchEvents);
+        cellEvents.emitBatch(batchEvents, "fill");
         const perfFillT3 = performance.now();
 
         console.log(
@@ -1429,7 +1429,7 @@ export function useFillHandle(props: UseFillHandleProps): UseFillHandleReturn {
             newValue: cell.display,
             formula: cell.formula ?? null,
           }));
-        cellEvents.emitBatch(batchEvents);
+        cellEvents.emitBatch(batchEvents, "fill");
         const perfAutoT3 = performance.now();
 
         console.log(

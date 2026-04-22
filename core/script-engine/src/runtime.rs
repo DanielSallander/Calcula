@@ -88,6 +88,9 @@ fn register_calcula_api<'js>(
     // Bookmark operations
     ops::bookmarks::register_bookmark_ops(ctx, &calcula, shared_ctx.clone())?;
 
+    // Worksheet property operations
+    ops::worksheet_props::register_worksheet_props_ops(ctx, &calcula, shared_ctx.clone())?;
+
     // Set Calcula on globals BEFORE application ops (application.rs uses eval
     // that references the global Calcula object for defineProperty wiring)
     globals

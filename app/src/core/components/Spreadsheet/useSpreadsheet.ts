@@ -108,15 +108,17 @@ export function useSpreadsheet() {
   // Listen for NAVIGATE_TO_CELL events (e.g., from pivot table creation)
   // This handles scroll + selection + refresh in the correct sequence
   useEffect(() => {
-    const cleanup = onAppEvent<{ row: number; col: number }>(
+    const cleanup = onAppEvent<{ row: number; col: number; select?: boolean; endRow?: number; endCol?: number }>(
       AppEvents.NAVIGATE_TO_CELL,
-      ({ row, col }) => {
-        console.log('[useSpreadsheet] NAVIGATE_TO_CELL event received:', { row, col });
+      ({ row, col, select, endRow, endCol }) => {
+        console.log('[useSpreadsheet] NAVIGATE_TO_CELL event received:', { row, col, select, endRow, endCol });
 
-        // First set selection to the target cell - this will also trigger scroll in the reducer
-        dispatch(setSelection(row, col, row, col, 'cells'));
+        // Set selection unless explicitly opted out
+        if (select !== false) {
+          dispatch(setSelection(row, col, endRow ?? row, endCol ?? col, 'cells'));
+        }
 
-        // Also explicitly dispatch scroll to ensure visibility
+        // Scroll to make the target cell visible
         dispatch(scrollToCell(row, col, false));
 
         // Wait for React to re-render with new viewport state, then refresh cells

@@ -803,7 +803,7 @@ export function useClipboard(): UseClipboardReturn {
                   oldValue: undefined,
                   newValue: cell.display,
                   formula: cell.formula ?? null,
-                });
+                }, "paste");
               }
             } catch (err) {
               console.error(`[Clipboard] Failed to write cell (${destRow}, ${destCol}):`, err);
@@ -833,7 +833,7 @@ export function useClipboard(): UseClipboardReturn {
                   oldValue: undefined,
                   newValue: "",
                   formula: null,
-                });
+                }, "paste");
               } catch (err) {
                 console.error(`[Clipboard] Failed to clear source (${r}, ${c}):`, err);
               }
@@ -855,7 +855,7 @@ export function useClipboard(): UseClipboardReturn {
               oldValue: undefined,
               newValue: cell.display,
               formula: cell.formula ?? null,
-            });
+            }, "paste");
           }
           if (relocated.length > 0) {
             console.log(`[Clipboard] Relocated references in ${relocated.length} formulas`);
@@ -1012,7 +1012,7 @@ export function useClipboard(): UseClipboardReturn {
           oldValue: undefined,
           newValue: "structure_change",
           formula: null,
-        });
+        }, "paste");
 
         // 6. Update selection to new position
         dispatch(setSelection({
@@ -1146,7 +1146,7 @@ export function useClipboard(): UseClipboardReturn {
           oldValue: undefined,
           newValue: "structure_change",
           formula: null,
-        });
+        }, "paste");
 
         // 6. Update selection to new position
         dispatch(setSelection({
@@ -1235,7 +1235,7 @@ export function useClipboard(): UseClipboardReturn {
                   oldValue: undefined,
                   newValue: cell.display,
                   formula: cell.formula ?? null,
-                });
+                }, "paste");
               }
             } catch (err) {
               console.error(`[Clipboard] Failed to write cell (${destRow}, ${destCol}):`, err);
@@ -1331,7 +1331,7 @@ export function useClipboard(): UseClipboardReturn {
           oldValue: undefined,
           newValue: "structure_change",
           formula: null,
-        });
+        }, "paste");
 
         dispatch(setSelection({
           startRow: targetRow,
@@ -1414,7 +1414,7 @@ export function useClipboard(): UseClipboardReturn {
           oldValue: undefined,
           newValue: "structure_change",
           formula: null,
-        });
+        }, "paste");
 
         dispatch(setSelection({
           startRow: 0,

@@ -510,7 +510,7 @@ function drawCellTextZone(
 
       ctx.fillText(cellDisplayText, drawX, textY, availableWidth);
       
-      if (cellStyle?.underline) {
+      if (cellStyle?.underline && cellStyle.underline !== "none") {
         ctx.beginPath();
         ctx.strokeStyle = cellStyle?.textColor ?? theme.cellText;
         ctx.lineWidth = 1;

@@ -167,6 +167,7 @@ export function SortDialog(props: DialogProps): React.ReactElement | null {
         sortOn: level.sortOn,
         color: level.color,
         dataOption: level.dataOption,
+        customOrder: level.customOrder,
       }));
 
       const result = await sortRange<SortRangeResult>(

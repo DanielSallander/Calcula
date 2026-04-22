@@ -432,7 +432,7 @@ function SpreadsheetContent({
         oldValue: undefined,
         newValue: "",
         formula: null,
-      });
+      }, "clear");
     } catch (error) {
       console.error("[Spreadsheet] Failed to clear contents:", error);
     }
@@ -510,7 +510,7 @@ function SpreadsheetContent({
       await clearRangeWithOptions(minRow, minCol, maxRow, maxCol, "all");
       await clearCommentsInRange(minRow, minCol, maxRow, maxCol);
       await clearHyperlinksInRange(minRow, minCol, maxRow, maxCol);
-      cellEvents.emit({ row: minRow, col: minCol, oldValue: undefined, newValue: "", formula: null });
+      cellEvents.emit({ row: minRow, col: minCol, oldValue: undefined, newValue: "", formula: null }, "clear");
     } catch (error) {
       console.error("[Spreadsheet] Failed to clear all:", error);
     }

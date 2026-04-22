@@ -7,6 +7,13 @@
 import type { CellChangeEvent } from "../types";
 import { AppEvents, emitAppEvent } from "./events";
 
+import type { CellValueChange, CellValuesChangedPayload } from "../../api/events";
+
+/**
+ * Source of a cell value change, used in the CELL_VALUES_CHANGED payload.
+ */
+export type CellChangeSource = CellValuesChangedPayload["source"];
+
 /**
  * Callback type for cell change listeners.
  */
@@ -19,6 +26,13 @@ export type CellChangeListener = (event: CellChangeEvent) => void;
 class CellEventEmitter {
   private listeners: Set<CellChangeListener> = new Set();
   private cellsUpdatedPending = false;
+
+  /**
+   * Accumulated changes for the current debounce window.
+   * Flushed alongside CELLS_UPDATED via requestAnimationFrame.
+   */
+  private pendingChanges: CellValueChange[] = [];
+  private pendingSource: CellChangeSource = "user";
 
   /**
    * Subscribe to cell change events.
@@ -34,11 +48,12 @@ class CellEventEmitter {
 
   /**
    * Emit a cell change event to all listeners.
-   * Also schedules a debounced CELLS_UPDATED app event so extensions
-   * (e.g. Charts) can react to data changes.
+   * Also schedules a debounced CELLS_UPDATED and CELL_VALUES_CHANGED app event
+   * so extensions can react to data changes.
    * @param event - The cell change event
+   * @param source - What triggered the change (default: "user")
    */
-  emit(event: CellChangeEvent): void {
+  emit(event: CellChangeEvent, source: CellChangeSource = "user"): void {
     this.listeners.forEach((listener) => {
       try {
         listener(event);
@@ -47,16 +62,19 @@ class CellEventEmitter {
       }
     });
 
+    this.accumulateChange(event, source);
     this.scheduleCellsUpdated();
   }
 
   /**
    * Emit a batch of cell change events efficiently.
    * Listeners are called ONCE with the last event (for selection tracking),
-   * while CELLS_UPDATED fires once for all extensions.
+   * while CELLS_UPDATED and CELL_VALUES_CHANGED fire once for all extensions.
    * Use this for bulk operations (fill, paste) instead of calling emit() per cell.
+   * @param events - Array of cell change events
+   * @param source - What triggered the changes (default: "user")
    */
-  emitBatch(events: CellChangeEvent[]): void {
+  emitBatch(events: CellChangeEvent[], source: CellChangeSource = "user"): void {
     if (events.length === 0) return;
 
     // Notify listeners once with a summary — listeners that care about
@@ -72,11 +90,30 @@ class CellEventEmitter {
       }
     });
 
+    for (const event of events) {
+      this.accumulateChange(event, source);
+    }
     this.scheduleCellsUpdated();
   }
 
   /**
+   * Accumulate a change into the pending buffer for CELL_VALUES_CHANGED.
+   */
+  private accumulateChange(event: CellChangeEvent, source: CellChangeSource): void {
+    this.pendingChanges.push({
+      row: event.row,
+      col: event.col,
+      oldValue: event.oldValue,
+      newValue: event.newValue,
+      formula: event.formula,
+    });
+    // The source of the last operation wins for the batch.
+    this.pendingSource = source;
+  }
+
+  /**
    * Schedule a debounced CELLS_UPDATED app event via requestAnimationFrame.
+   * Also flushes accumulated changes as a CELL_VALUES_CHANGED event.
    */
   private scheduleCellsUpdated(): void {
     // Debounce CELLS_UPDATED via requestAnimationFrame so bulk operations
@@ -85,6 +122,18 @@ class CellEventEmitter {
       this.cellsUpdatedPending = true;
       requestAnimationFrame(() => {
         this.cellsUpdatedPending = false;
+
+        // Flush accumulated changes as CELL_VALUES_CHANGED
+        if (this.pendingChanges.length > 0) {
+          const payload: CellValuesChangedPayload = {
+            changes: this.pendingChanges,
+            source: this.pendingSource,
+          };
+          this.pendingChanges = [];
+          this.pendingSource = "user";
+          emitAppEvent(AppEvents.CELL_VALUES_CHANGED, payload);
+        }
+
         emitAppEvent(AppEvents.CELLS_UPDATED);
       });
     }

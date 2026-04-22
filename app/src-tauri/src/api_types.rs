@@ -5,6 +5,60 @@
 
 use serde::{Deserialize, Serialize};
 
+/// Underline style for font rendering (Excel-compatible).
+/// Mirrors engine::UnderlineStyle with camelCase serialization for TypeScript.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub enum UnderlineStyle {
+    None,
+    Single,
+    Double,
+    SingleAccounting,
+    DoubleAccounting,
+}
+
+impl Default for UnderlineStyle {
+    fn default() -> Self {
+        UnderlineStyle::None
+    }
+}
+
+impl From<engine::UnderlineStyle> for UnderlineStyle {
+    fn from(u: engine::UnderlineStyle) -> Self {
+        match u {
+            engine::UnderlineStyle::None => UnderlineStyle::None,
+            engine::UnderlineStyle::Single => UnderlineStyle::Single,
+            engine::UnderlineStyle::Double => UnderlineStyle::Double,
+            engine::UnderlineStyle::SingleAccounting => UnderlineStyle::SingleAccounting,
+            engine::UnderlineStyle::DoubleAccounting => UnderlineStyle::DoubleAccounting,
+        }
+    }
+}
+
+impl From<UnderlineStyle> for engine::UnderlineStyle {
+    fn from(u: UnderlineStyle) -> Self {
+        match u {
+            UnderlineStyle::None => engine::UnderlineStyle::None,
+            UnderlineStyle::Single => engine::UnderlineStyle::Single,
+            UnderlineStyle::Double => engine::UnderlineStyle::Double,
+            UnderlineStyle::SingleAccounting => engine::UnderlineStyle::SingleAccounting,
+            UnderlineStyle::DoubleAccounting => engine::UnderlineStyle::DoubleAccounting,
+        }
+    }
+}
+
+impl From<bool> for UnderlineStyle {
+    fn from(b: bool) -> Self {
+        if b { UnderlineStyle::Single } else { UnderlineStyle::None }
+    }
+}
+
+impl From<UnderlineStyle> for bool {
+    fn from(u: UnderlineStyle) -> Self {
+        !matches!(u, UnderlineStyle::None)
+    }
+}
+
 /// A single run of rich text with formatting overrides.
 /// Sent to the frontend for Canvas rendering of partially formatted cell text.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -16,7 +70,7 @@ pub struct RichTextRunData {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub italic: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub underline: Option<bool>,
+    pub underline: Option<UnderlineStyle>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub strikethrough: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -148,7 +202,7 @@ pub struct BorderSideData {
 pub struct StyleData {
     pub bold: bool,
     pub italic: bool,
-    pub underline: bool,
+    pub underline: UnderlineStyle,
     pub strikethrough: bool,
     pub font_size: u8,
     pub font_family: String,
@@ -187,6 +241,12 @@ pub struct StyleData {
     /// Fill data (solid/gradient/pattern). None means legacy solid bg only.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fill: Option<FillData>,
+    /// Whether the cell is locked (cannot be edited when sheet is protected).
+    /// Default: true (Excel behavior).
+    pub locked: bool,
+    /// Whether the formula is hidden when the sheet is protected.
+    /// Default: false.
+    pub formula_hidden: bool,
 }
 
 // ============================================================================
@@ -422,7 +482,7 @@ pub struct FormattingParams {
     pub cols: Vec<u32>,
     pub bold: Option<bool>,
     pub italic: Option<bool>,
-    pub underline: Option<bool>,
+    pub underline: Option<UnderlineStyle>,
     pub strikethrough: Option<bool>,
     pub font_size: Option<u8>,
     pub font_family: Option<String>,
@@ -451,6 +511,10 @@ pub struct FormattingParams {
     pub bg_color_tint: Option<i16>,
     /// Fill data (solid/gradient/pattern). When set, overrides background_color.
     pub fill: Option<FillParam>,
+    /// Whether the cell is locked when sheet is protected.
+    pub locked: Option<bool>,
+    /// Whether the formula is hidden when sheet is protected.
+    pub formula_hidden: Option<bool>,
 }
 
 /// Result from apply_formatting that includes both updated cells and new styles.
@@ -666,6 +730,9 @@ pub struct SortField {
     pub data_option: SortDataOption,
     /// For sorting rich values - the subfield/property name to sort on.
     pub sub_field: Option<String>,
+    /// Custom sort order: a built-in list name ("weekdays", "weekdaysShort", "months",
+    /// "monthsShort") or a comma-separated list of values for custom ordering.
+    pub custom_order: Option<String>,
 }
 
 fn default_ascending() -> bool {
@@ -724,7 +791,7 @@ pub fn rich_text_runs_to_data(runs: &[RichTextRun]) -> Vec<RichTextRunData> {
             text: run.text.clone(),
             bold: run.bold,
             italic: run.italic,
-            underline: run.underline,
+            underline: run.underline.map(|u| u.into()),
             strikethrough: run.strikethrough,
             font_size: run.font_size,
             font_family: run.font_family.clone(),
@@ -742,7 +809,7 @@ pub fn data_to_rich_text_runs(data: &[RichTextRunData]) -> Vec<RichTextRun> {
             text: d.text.clone(),
             bold: d.bold,
             italic: d.italic,
-            underline: d.underline,
+            underline: d.underline.map(|u| u.into()),
             strikethrough: d.strikethrough,
             font_size: d.font_size,
             font_family: d.font_family.clone(),
@@ -804,7 +871,7 @@ impl StyleData {
         StyleData {
             bold: style.font.bold,
             italic: style.font.italic,
-            underline: style.font.underline,
+            underline: UnderlineStyle::from(style.font.underline),
             strikethrough: style.font.strikethrough,
             font_size: style.font.size,
             font_family,
@@ -845,6 +912,8 @@ impl StyleData {
             bg_color_tint,
             font_family_theme,
             fill: fill_to_data(&style.fill, theme),
+            locked: style.locked,
+            formula_hidden: style.formula_hidden,
         }
     }
 }

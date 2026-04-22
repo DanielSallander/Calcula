@@ -29,6 +29,7 @@ export const AppEvents = {
 
   // Cell events
   CELLS_UPDATED: "app:cells-updated",
+  CELL_VALUES_CHANGED: "app:cell-values-changed",
 
   // Context Menu events
   CONTEXT_MENU_REQUEST: "app:context-menu-request",

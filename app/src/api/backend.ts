@@ -553,6 +553,9 @@ export interface SortField {
   dataOption?: SortDataOption;
   /** Subfield for rich values */
   subField?: string;
+  /** Custom sort order: a built-in list name ("weekdays", "weekdaysShort", "months",
+   *  "monthsShort") or a comma-separated list of values for custom ordering. */
+  customOrder?: string;
 }
 
 /**
@@ -1883,8 +1886,10 @@ export interface DataBarRule {
   type: "dataBar";
   minValueType: CFValueType;
   minValue?: number;
+  minFormula?: string;
   maxValueType: CFValueType;
   maxValue?: number;
+  maxFormula?: string;
   fillColor: string;
   borderColor?: string;
   negativeFillColor?: string;
@@ -1933,6 +1938,7 @@ export interface IconSetThreshold {
   valueType: CFValueType;
   value: number;
   operator: ThresholdOperator;
+  formula?: string;
 }
 
 /**

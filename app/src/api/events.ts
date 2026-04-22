@@ -37,6 +37,7 @@ export const AppEvents = {
   // Data events
   DATA_CHANGED: "app:data-changed",
   CELLS_UPDATED: "app:cells-updated",
+  CELL_VALUES_CHANGED: "app:cell-values-changed",
 
   // Editing events
   EDIT_STARTED: "app:edit-started",
@@ -94,6 +95,21 @@ export const AppEvents = {
   // Locale events
   LOCALE_CHANGED: "app:locale-changed",
 } as const;
+
+/** A single cell value change within a CELL_VALUES_CHANGED event. */
+export interface CellValueChange {
+  row: number;
+  col: number;
+  oldValue?: string;
+  newValue: string;
+  formula?: string | null;
+}
+
+/** Payload emitted with CELL_VALUES_CHANGED event. */
+export interface CellValuesChangedPayload {
+  changes: CellValueChange[];
+  source: "user" | "undo" | "redo" | "paste" | "fill" | "clear" | "script" | "api";
+}
 
 /** Payload emitted with FILL_COMPLETED event. */
 export interface FillCompletedPayload {

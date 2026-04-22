@@ -44,6 +44,9 @@ export type {
   PatternType,
   GradientDirection,
 
+  // Underline
+  UnderlineStyle,
+
   // View mode
   ViewMode,
 

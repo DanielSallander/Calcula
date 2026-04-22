@@ -430,6 +430,8 @@ export async function applyFormatting(
       indent: formatting.indent,
       shrinkToFit: formatting.shrinkToFit,
       fill: formatting.fill,
+      locked: formatting.locked,
+      formulaHidden: formatting.formulaHidden,
     },
   });
   console.log(
@@ -518,6 +520,8 @@ export async function applyFormattingToSheets(
       indent: formatting.indent,
       shrinkToFit: formatting.shrinkToFit,
       fill: formatting.fill,
+      locked: formatting.locked,
+      formulaHidden: formatting.formulaHidden,
     },
   });
 }

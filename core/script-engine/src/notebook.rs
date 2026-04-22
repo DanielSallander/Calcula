@@ -67,6 +67,8 @@ impl NotebookSession {
             screen_updating: RefCell::new(true),
             enable_events: RefCell::new(true),
             deferred_actions: RefCell::new(Vec::new()),
+            display_zeros: true,
+            is_dirty: false,
         };
 
         let shared_ctx = Rc::new(RefCell::new(initial_ctx));
@@ -219,6 +221,7 @@ fn register_calcula_api<'js>(
     ops::cells::register_cell_ops(ctx, &calcula, shared_ctx.clone())?;
     ops::sheets::register_sheet_ops(ctx, &calcula, shared_ctx.clone())?;
     ops::utility::register_utility_ops(ctx, &calcula, shared_ctx.clone())?;
+    ops::worksheet_props::register_worksheet_props_ops(ctx, &calcula, shared_ctx.clone())?;
 
     globals
         .set("Calcula", calcula)

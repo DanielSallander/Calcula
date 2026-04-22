@@ -4,7 +4,7 @@
 // before applying. Loads initial values from the active cell's style.
 
 import { create } from "zustand";
-import type { PatternType, GradientDirection } from "@api";
+import type { PatternType, GradientDirection, UnderlineStyle } from "@api";
 
 // ============================================================================
 // Types
@@ -18,7 +18,7 @@ export interface FormatCellsState {
   fontSize: number;
   bold: boolean;
   italic: boolean;
-  underline: boolean;
+  underline: UnderlineStyle;
   strikethrough: boolean;
   textColor: string;
 
@@ -76,7 +76,7 @@ export interface FormatCellsActions {
   setFontSize: (v: number) => void;
   setBold: (v: boolean) => void;
   setItalic: (v: boolean) => void;
-  setUnderline: (v: boolean) => void;
+  setUnderline: (v: UnderlineStyle) => void;
   setStrikethrough: (v: boolean) => void;
   setTextColor: (v: string) => void;
   setTextAlign: (v: string) => void;
@@ -116,7 +116,7 @@ const DEFAULT_STATE: FormatCellsState = {
   fontSize: 11,
   bold: false,
   italic: false,
-  underline: false,
+  underline: "none" as UnderlineStyle,
   strikethrough: false,
   textColor: "#000000",
   textAlign: "general",

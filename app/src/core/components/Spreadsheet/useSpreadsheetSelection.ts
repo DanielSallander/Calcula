@@ -842,12 +842,16 @@ export function useSpreadsheetSelection({
       const styleIndex = activeCell?.styleIndex ?? 0;
       const style = await getStyle(styleIndex);
 
-      // Determine new value: toggle the current state
-      const currentValue = style[property] as boolean;
-      const newValue = !currentValue;
-
       const formatting: FormattingOptions = {};
-      formatting[property] = newValue;
+
+      if (property === "underline") {
+        // Underline uses UnderlineStyle enum: toggle between "none" and "single"
+        formatting.underline = style.underline !== "none" ? "none" : "single";
+      } else {
+        // Boolean properties: toggle the current state
+        const currentValue = style[property] as boolean;
+        formatting[property] = !currentValue;
+      }
 
       await applyFormattingToSelection(formatting);
     } catch (error) {

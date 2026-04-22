@@ -145,6 +145,28 @@ export type GoToSpecialCriteria =
   | "conditionalFormats"
   | "dataValidation";
 
+// ============================================================================
+// Scroll / Navigation API
+// ============================================================================
+
+/**
+ * Scroll the grid to make the specified cell visible.
+ * @param row 0-based row index
+ * @param col 0-based column index
+ * @param select If true, also select the cell (default: true)
+ */
+export function navigateToCell(row: number, col: number, select?: boolean): void {
+  emitAppEvent(AppEvents.NAVIGATE_TO_CELL, { row, col, select: select !== false });
+}
+
+/**
+ * Scroll the grid to make the specified range visible.
+ * Scrolls to the top-left corner of the range and selects the full range.
+ */
+export function navigateToRange(startRow: number, startCol: number, endRow: number, endCol: number): void {
+  emitAppEvent(AppEvents.NAVIGATE_TO_CELL, { row: startRow, col: startCol, select: true, endRow, endCol });
+}
+
 /**
  * Find cells matching specific criteria.
  */

@@ -179,11 +179,14 @@ export function FontTab(): React.ReactElement {
         <FieldGroup>
           <FieldLabel>Underline:</FieldLabel>
           <Select
-            value={underline ? "single" : "none"}
-            onChange={(e) => setUnderline(e.target.value === "single")}
+            value={underline}
+            onChange={(e) => setUnderline(e.target.value as "none" | "single" | "double" | "singleAccounting" | "doubleAccounting")}
           >
             <option value="none">None</option>
             <option value="single">Single</option>
+            <option value="double">Double</option>
+            <option value="singleAccounting">Single Accounting</option>
+            <option value="doubleAccounting">Double Accounting</option>
           </Select>
         </FieldGroup>
 
@@ -215,7 +218,7 @@ export function FontTab(): React.ReactElement {
               fontWeight: bold ? 700 : 400,
               fontStyle: italic ? "italic" : "normal",
               textDecoration: [
-                underline ? "underline" : "",
+                underline !== "none" ? "underline" : "",
                 strikethrough ? "line-through" : "",
               ]
                 .filter(Boolean)

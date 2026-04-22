@@ -1,8 +1,9 @@
 //! FILENAME: app/extensions/Hyperlinks/index.ts
-// PURPOSE: Hyperlinks extension - enables click-to-follow and cursor feedback.
+// PURPOSE: Hyperlinks extension - enables click-to-follow, cursor feedback,
+//          insert/edit dialog, context menu, and Ctrl+K shortcut.
 // CONTEXT: Registers a cell click interceptor (Ctrl+Click to follow) and a
 //          cursor interceptor (pointer cursor on hyperlink cells).
-//          Also registers Insert menu item for adding hyperlinks.
+//          Registers Insert Hyperlink dialog, context menu items, and keyboard shortcut.
 
 import type { ExtensionModule, ExtensionContext } from "@api/contract";
 import {
@@ -11,14 +12,20 @@ import {
   emitAppEvent,
   AppEvents,
   registerMenuItem,
+  gridExtensions,
+  ExtensionRegistry,
+  showDialog,
 } from "@api";
+import type { GridContextMenuItem, GridMenuContext } from "@api";
 import {
   getHyperlink,
   getHyperlinkIndicators,
+  removeHyperlink,
   type Hyperlink,
   type HyperlinkIndicator,
 } from "@api/backend";
 import { setActiveSheet, getSheets } from "@api/lib";
+import { InsertHyperlinkDialog } from "./InsertHyperlinkDialog";
 
 // ============================================================================
 // State
@@ -27,6 +34,9 @@ import { setActiveSheet, getSheets } from "@api/lib";
 /** Cached hyperlink indicators for the current sheet. */
 let cachedIndicators: HyperlinkIndicator[] = [];
 let indicatorSet: Set<string> = new Set();
+
+/** Currently active cell (tracked for keyboard shortcut). */
+let currentActiveCell: { row: number; col: number } | null = null;
 
 function cellKey(row: number, col: number): string {
   return `${row},${col}`;
@@ -107,6 +117,143 @@ async function navigateToInternalRef(hyperlink: Hyperlink): Promise<void> {
 }
 
 // ============================================================================
+// Open Dialog Helpers
+// ============================================================================
+
+function openInsertDialog(row: number, col: number): void {
+  showDialog("insert-hyperlink", { row, col, editMode: false });
+}
+
+function openEditDialog(row: number, col: number): void {
+  showDialog("insert-hyperlink", { row, col, editMode: true });
+}
+
+// ============================================================================
+// Keyboard Shortcut
+// ============================================================================
+
+let keydownHandler: ((e: KeyboardEvent) => void) | null = null;
+
+async function handleKeyDown(e: KeyboardEvent): Promise<void> {
+  // Ctrl+K: Insert/Edit Hyperlink
+  if (e.ctrlKey && !e.altKey && !e.shiftKey && e.key.toLowerCase() === "k") {
+    // Don't intercept if an input/textarea/contenteditable is focused
+    const active = document.activeElement;
+    if (
+      active &&
+      (active.tagName === "INPUT" ||
+        active.tagName === "TEXTAREA" ||
+        (active as HTMLElement).isContentEditable)
+    ) {
+      return;
+    }
+
+    e.preventDefault();
+    e.stopPropagation();
+
+    if (!currentActiveCell) return;
+    const { row, col } = currentActiveCell;
+
+    // Check if cell already has a hyperlink -> edit mode
+    const existing = await getHyperlink(row, col);
+    if (existing) {
+      openEditDialog(row, col);
+    } else {
+      openInsertDialog(row, col);
+    }
+  }
+}
+
+function registerKeyboardShortcut(): void {
+  keydownHandler = handleKeyDown;
+  window.addEventListener("keydown", keydownHandler, true);
+}
+
+function unregisterKeyboardShortcut(): void {
+  if (keydownHandler) {
+    window.removeEventListener("keydown", keydownHandler, true);
+    keydownHandler = null;
+  }
+}
+
+// ============================================================================
+// Context Menu
+// ============================================================================
+
+const HYPERLINK_GROUP = "hyperlinks";
+const HYPERLINK_ORDER_BASE = 750;
+
+const contextMenuItems: GridContextMenuItem[] = [
+  // Insert Hyperlink (shown when cell does NOT have a hyperlink)
+  {
+    id: "ctx:insertHyperlink",
+    label: "Insert Hyperlink...",
+    shortcut: "Ctrl+K",
+    group: HYPERLINK_GROUP,
+    order: HYPERLINK_ORDER_BASE,
+    visible: (ctx: GridMenuContext) => {
+      if (!ctx.clickedCell) return false;
+      return !indicatorSet.has(cellKey(ctx.clickedCell.row, ctx.clickedCell.col));
+    },
+    onClick: (ctx: GridMenuContext) => {
+      if (!ctx.clickedCell) return;
+      openInsertDialog(ctx.clickedCell.row, ctx.clickedCell.col);
+    },
+  },
+
+  // Edit Hyperlink (shown when cell HAS a hyperlink)
+  {
+    id: "ctx:editHyperlink",
+    label: "Edit Hyperlink...",
+    group: HYPERLINK_GROUP,
+    order: HYPERLINK_ORDER_BASE + 1,
+    visible: (ctx: GridMenuContext) => {
+      if (!ctx.clickedCell) return false;
+      return indicatorSet.has(cellKey(ctx.clickedCell.row, ctx.clickedCell.col));
+    },
+    onClick: (ctx: GridMenuContext) => {
+      if (!ctx.clickedCell) return;
+      openEditDialog(ctx.clickedCell.row, ctx.clickedCell.col);
+    },
+  },
+
+  // Remove Hyperlink (shown when cell HAS a hyperlink)
+  {
+    id: "ctx:removeHyperlink",
+    label: "Remove Hyperlink",
+    group: HYPERLINK_GROUP,
+    order: HYPERLINK_ORDER_BASE + 2,
+    separatorAfter: true,
+    visible: (ctx: GridMenuContext) => {
+      if (!ctx.clickedCell) return false;
+      return indicatorSet.has(cellKey(ctx.clickedCell.row, ctx.clickedCell.col));
+    },
+    onClick: async (ctx: GridMenuContext) => {
+      if (!ctx.clickedCell) return;
+      const { row, col } = ctx.clickedCell;
+      try {
+        await removeHyperlink(row, col);
+        await refreshIndicators();
+        emitAppEvent(AppEvents.DATA_CHANGED, {});
+        window.dispatchEvent(new CustomEvent("grid:refresh"));
+      } catch (err) {
+        console.error("[Hyperlinks] Remove hyperlink failed:", err);
+      }
+    },
+  },
+];
+
+function registerContextMenuItems(): void {
+  gridExtensions.registerContextMenuItems(contextMenuItems);
+}
+
+function unregisterContextMenuItems(): void {
+  for (const item of contextMenuItems) {
+    gridExtensions.unregisterContextMenuItem(item.id);
+  }
+}
+
+// ============================================================================
 // Interceptors
 // ============================================================================
 
@@ -138,15 +285,25 @@ const cursorInterceptor = (row: number, col: number): string | null => {
 
 const cleanups: Array<() => void> = [];
 
-function activate(_context: ExtensionContext): void {
-  // Register interceptors
+function activate(context: ExtensionContext): void {
+  console.log("[Hyperlinks] Activating...");
+
+  // 1. Register the Insert Hyperlink dialog
+  context.ui.dialogs.register({
+    id: "insert-hyperlink",
+    component: InsertHyperlinkDialog,
+    priority: 100,
+  });
+  cleanups.push(() => context.ui.dialogs.unregister("insert-hyperlink"));
+
+  // 2. Register interceptors
   cleanups.push(registerCellClickInterceptor(clickInterceptor));
   cleanups.push(registerCellCursorInterceptor(cursorInterceptor));
 
-  // Load initial indicators
+  // 3. Load initial indicators
   refreshIndicators();
 
-  // Refresh indicators on sheet change or data change
+  // 4. Refresh indicators on sheet change or data change
   const onSheetChange = () => { refreshIndicators(); };
   window.addEventListener(AppEvents.SHEET_CHANGED, onSheetChange);
   window.addEventListener(AppEvents.DATA_CHANGED, onSheetChange);
@@ -155,26 +312,67 @@ function activate(_context: ExtensionContext): void {
     window.removeEventListener(AppEvents.DATA_CHANGED, onSheetChange);
   });
 
-  // Add "Follow Hyperlink" to the Insert menu (if it exists)
+  // 5. Track current selection for keyboard shortcut
+  const unsubSelection = ExtensionRegistry.onSelectionChange((sel) => {
+    currentActiveCell = sel
+      ? { row: sel.startRow, col: sel.startCol }
+      : null;
+  });
+  cleanups.push(unsubSelection);
+
+  // 6. Register keyboard shortcut (Ctrl+K)
+  registerKeyboardShortcut();
+  cleanups.push(unregisterKeyboardShortcut);
+
+  // 7. Register context menu items
+  registerContextMenuItems();
+
+  // 8. Add "Insert Hyperlink" to the Insert menu
+  registerMenuItem("insert", {
+    id: "insert:insertHyperlink",
+    label: "Hyperlink...",
+    shortcut: "Ctrl+K",
+    action: () => {
+      if (currentActiveCell) {
+        openInsertDialog(currentActiveCell.row, currentActiveCell.col);
+      }
+    },
+  });
+
+  // 9. Add "Follow Hyperlink" to the Insert menu
   registerMenuItem("insert", {
     id: "insert:followHyperlink",
     label: "Follow Hyperlink",
     shortcut: "Ctrl+Click",
     action: () => {
-      // Follow hyperlink in currently selected cell
-      const sel = document.querySelector("[data-active-row]");
-      if (sel) {
-        const row = parseInt(sel.getAttribute("data-active-row") || "0", 10);
-        const col = parseInt(sel.getAttribute("data-active-col") || "0", 10);
-        followHyperlink(row, col);
+      if (currentActiveCell) {
+        followHyperlink(currentActiveCell.row, currentActiveCell.col);
       }
     },
   });
+
+  console.log("[Hyperlinks] Activated successfully.");
 }
 
 function deactivate(): void {
-  for (const cleanup of cleanups) cleanup();
+  console.log("[Hyperlinks] Deactivating...");
+
+  // Unregister context menu items
+  unregisterContextMenuItems();
+
+  // Run cleanup functions
+  for (const cleanup of cleanups) {
+    try {
+      cleanup();
+    } catch (err) {
+      console.error("[Hyperlinks] Cleanup error:", err);
+    }
+  }
   cleanups.length = 0;
+
+  currentActiveCell = null;
+
+  console.log("[Hyperlinks] Deactivated.");
 }
 
 // ============================================================================
@@ -186,7 +384,7 @@ const extension: ExtensionModule = {
     id: "calcula.hyperlinks",
     name: "Hyperlinks",
     version: "1.0.0",
-    description: "Ctrl+Click to follow hyperlinks, cursor feedback on hyperlink cells.",
+    description: "Insert, edit, follow hyperlinks with Ctrl+K shortcut and context menu.",
   },
   activate,
   deactivate,

@@ -271,6 +271,34 @@ impl Fill {
     }
 }
 
+/// Underline style for font rendering (Excel-compatible).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum UnderlineStyle {
+    None,
+    Single,
+    Double,
+    SingleAccounting,
+    DoubleAccounting,
+}
+
+impl Default for UnderlineStyle {
+    fn default() -> Self {
+        UnderlineStyle::None
+    }
+}
+
+impl From<bool> for UnderlineStyle {
+    fn from(b: bool) -> Self {
+        if b { UnderlineStyle::Single } else { UnderlineStyle::None }
+    }
+}
+
+impl From<UnderlineStyle> for bool {
+    fn from(u: UnderlineStyle) -> Self {
+        !matches!(u, UnderlineStyle::None)
+    }
+}
+
 /// Font style configuration.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct FontStyle {
@@ -278,7 +306,7 @@ pub struct FontStyle {
     pub size: u8,         // Font size in points
     pub bold: bool,
     pub italic: bool,
-    pub underline: bool,
+    pub underline: UnderlineStyle,
     pub strikethrough: bool,
     pub color: ThemeColor,
 }
@@ -290,7 +318,7 @@ impl Default for FontStyle {
             size: 11,
             bold: false,
             italic: false,
-            underline: false,
+            underline: UnderlineStyle::None,
             strikethrough: false,
             color: ThemeColor::default_text(),
         }
@@ -299,7 +327,7 @@ impl Default for FontStyle {
 
 /// Complete cell style definition.
 /// This is what gets stored in the StyleRegistry.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(default)]
 pub struct CellStyle {
     pub font: FontStyle,
@@ -314,6 +342,8 @@ pub struct CellStyle {
     pub shrink_to_fit: bool, // Auto-reduce font size to fit cell width
     pub checkbox: bool, // In-cell checkbox presentation mode
     pub button: bool, // In-cell button control presentation mode
+    pub locked: bool, // Cell locked when sheet is protected (Excel default: true)
+    pub formula_hidden: bool, // Hide formula when sheet is protected
 }
 
 impl CellStyle {
@@ -332,6 +362,8 @@ impl CellStyle {
             shrink_to_fit: false,
             checkbox: false,
             button: false,
+            locked: true,
+            formula_hidden: false,
         }
     }
 
@@ -396,7 +428,7 @@ impl CellStyle {
     }
 
     /// Create a style with underline text.
-    pub fn with_underline(mut self, underline: bool) -> Self {
+    pub fn with_underline(mut self, underline: UnderlineStyle) -> Self {
         self.font.underline = underline;
         self
     }
@@ -411,6 +443,12 @@ impl CellStyle {
     pub fn with_checkbox(mut self, checkbox: bool) -> Self {
         self.checkbox = checkbox;
         self
+    }
+}
+
+impl Default for CellStyle {
+    fn default() -> Self {
+        CellStyle::new()
     }
 }
 
@@ -617,7 +655,7 @@ mod tests {
                 "size": 11,
                 "bold": false,
                 "italic": false,
-                "underline": false,
+                "underline": "None",
                 "strikethrough": false,
                 "color": {"Absolute": {"r": 0, "g": 0, "b": 0, "a": 255}}
             },

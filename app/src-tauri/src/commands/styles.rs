@@ -186,7 +186,7 @@ pub fn apply_formatting(
                 new_style.font.italic = italic;
             }
             if let Some(underline) = params.underline {
-                new_style.font.underline = underline;
+                new_style.font.underline = underline.into();
             }
             if let Some(strikethrough) = params.strikethrough {
                 new_style.font.strikethrough = strikethrough;
@@ -281,6 +281,14 @@ pub fn apply_formatting(
             // Apply fill
             if let Some(ref fill_param) = params.fill {
                 new_style.fill = parse_fill_param(fill_param);
+            }
+
+            // Apply protection
+            if let Some(locked) = params.locked {
+                new_style.locked = locked;
+            }
+            if let Some(formula_hidden) = params.formula_hidden {
+                new_style.formula_hidden = formula_hidden;
             }
 
             // Get or create style index
@@ -409,7 +417,7 @@ pub fn apply_formatting_to_sheets(
                 // Apply all formatting fields (same logic as apply_formatting)
                 if let Some(bold) = params.bold { new_style.font.bold = bold; }
                 if let Some(italic) = params.italic { new_style.font.italic = italic; }
-                if let Some(underline) = params.underline { new_style.font.underline = underline; }
+                if let Some(underline) = params.underline { new_style.font.underline = underline.into(); }
                 if let Some(strikethrough) = params.strikethrough { new_style.font.strikethrough = strikethrough; }
                 if let Some(font_size) = params.font_size { new_style.font.size = font_size; }
                 if let Some(ref font_family) = params.font_family { new_style.font.family = font_family.clone(); }
@@ -469,6 +477,10 @@ pub fn apply_formatting_to_sheets(
 
                 // Apply fill
                 if let Some(ref fill_param) = params.fill { new_style.fill = parse_fill_param(fill_param); }
+
+                // Apply protection
+                if let Some(locked) = params.locked { new_style.locked = locked; }
+                if let Some(formula_hidden) = params.formula_hidden { new_style.formula_hidden = formula_hidden; }
 
                 let new_style_index = styles.get_or_create(new_style);
 

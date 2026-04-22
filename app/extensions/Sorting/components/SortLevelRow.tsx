@@ -2,12 +2,25 @@
 // PURPOSE: A single sort criterion row with Column, Sort On, and Order dropdowns.
 // CONTEXT: Used within the Sort dialog to configure each sort level.
 
-import React, { useEffect, useState, useCallback } from "react";
+import React, { useEffect, useState, useCallback, useMemo } from "react";
 import type { SortLevel } from "../types";
 import type { SortOn } from "@api/lib";
+import { FillListRegistry, type FillList } from "@api";
 import { useSortStore } from "../hooks/useSortState";
 import { getUniqueColorsInColumn } from "../lib/sortHelpers";
 import * as S from "./SortDialog.styles";
+
+// ============================================================================
+// Constants
+// ============================================================================
+
+/** Built-in custom sort list identifiers mapped to their display names */
+const BUILTIN_SORT_LISTS: { id: string; label: string }[] = [
+  { id: "weekdays", label: "Sun, Mon, Tue, ... (Weekdays)" },
+  { id: "weekdaysShort", label: "Sun, Mon, Tue, ... (Short)" },
+  { id: "months", label: "Jan, Feb, Mar, ... (Months)" },
+  { id: "monthsShort", label: "Jan, Feb, Mar, ... (Short)" },
+];
 
 // ============================================================================
 // Props
@@ -39,6 +52,16 @@ export function SortLevelRow({
   } = useSortStore();
 
   const [uniqueColors, setUniqueColors] = useState<string[]>([]);
+  const [userLists, setUserLists] = useState<FillList[]>([]);
+
+  // Load user-defined custom fill lists
+  useEffect(() => {
+    setUserLists(FillListRegistry.getUserLists());
+    const unsub = FillListRegistry.subscribe(() => {
+      setUserLists(FillListRegistry.getUserLists());
+    });
+    return unsub;
+  }, []);
 
   // Scan for colors when sortOn is color-based
   useEffect(() => {
@@ -65,8 +88,9 @@ export function SortLevelRow({
       const newSortOn = e.target.value as SortOn;
       updateLevel(level.id, {
         sortOn: newSortOn,
-        // Reset color when switching away from color sort
+        // Reset color and custom order when switching sort-on type
         color: undefined,
+        customOrder: undefined,
       });
     },
     [level.id, updateLevel],
@@ -82,10 +106,28 @@ export function SortLevelRow({
         updateLevel(level.id, {
           color,
           ascending: direction === "top",
+          customOrder: undefined,
+        });
+      } else if (value.startsWith("custom:")) {
+        // Custom list selection: "custom:<listId>"
+        const listId = value.slice(7);
+        updateLevel(level.id, {
+          ascending: true,
+          customOrder: listId,
+        });
+      } else if (value.startsWith("customDesc:")) {
+        // Custom list descending: "customDesc:<listId>"
+        const listId = value.slice(11);
+        updateLevel(level.id, {
+          ascending: false,
+          customOrder: listId,
         });
       } else {
         // Value is "asc" or "desc"
-        updateLevel(level.id, { ascending: value === "asc" });
+        updateLevel(level.id, {
+          ascending: value === "asc",
+          customOrder: undefined,
+        });
       }
     },
     [level.id, level.sortOn, updateLevel],
@@ -101,8 +143,21 @@ export function SortLevelRow({
       const color = level.color || uniqueColors[0] || "";
       return `${color}|${level.ascending ? "top" : "bottom"}`;
     }
+    if (level.customOrder) {
+      return level.ascending
+        ? `custom:${level.customOrder}`
+        : `customDesc:${level.customOrder}`;
+    }
     return level.ascending ? "asc" : "desc";
   };
+
+  // Build user list options for the order dropdown
+  const userListOptions = useMemo(() => {
+    return userLists.map((list) => ({
+      id: list.items.join(","),
+      label: list.name,
+    }));
+  }, [userLists]);
 
   const label = index === 0 ? "Sort by" : "Then by";
 
@@ -134,6 +189,30 @@ export function SortLevelRow({
           <>
             <option value="asc">A to Z</option>
             <option value="desc">Z to A</option>
+            {/* Built-in custom sort lists */}
+            <optgroup label="Custom List">
+              {BUILTIN_SORT_LISTS.map((list) => (
+                <React.Fragment key={list.id}>
+                  <option value={`custom:${list.id}`}>
+                    {list.label}
+                  </option>
+                  <option value={`customDesc:${list.id}`}>
+                    {list.label} (Desc)
+                  </option>
+                </React.Fragment>
+              ))}
+              {/* User-defined custom lists */}
+              {userListOptions.map((list) => (
+                <React.Fragment key={list.id}>
+                  <option value={`custom:${list.id}`}>
+                    {list.label}
+                  </option>
+                  <option value={`customDesc:${list.id}`}>
+                    {list.label} (Desc)
+                  </option>
+                </React.Fragment>
+              ))}
+            </optgroup>
           </>
         ) : (
           // Color-based sorting: show each color with On Top / On Bottom options

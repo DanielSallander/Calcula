@@ -157,7 +157,7 @@ describe("drawRichTextRuns", () => {
   });
 
   it("draws underline for underlined run", () => {
-    const runs: RichTextRun[] = [{ text: "Underlined", underline: true }];
+    const runs: RichTextRun[] = [{ text: "Underlined", underline: "single" }];
 
     drawRichTextRuns(
       ctx, runs, 10, 20, 200, "left",

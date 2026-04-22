@@ -62,7 +62,7 @@ interface CurrentStyle {
   fontSize: number;
   bold: boolean;
   italic: boolean;
-  underline: boolean;
+  underline: string;
   strikethrough: boolean;
   textColor: string;
   backgroundColor: string;
@@ -74,7 +74,7 @@ const DEFAULT_STYLE: CurrentStyle = {
   fontSize: 11,
   bold: false,
   italic: false,
-  underline: false,
+  underline: "none",
   strikethrough: false,
   textColor: "#000000",
   backgroundColor: "#ffffff",
@@ -181,7 +181,7 @@ export function MiniFormatToolbar({
           fontSize: s.fontSize || 11,
           bold: !!s.bold,
           italic: !!s.italic,
-          underline: !!s.underline,
+          underline: s.underline || "none",
           strikethrough: !!s.strikethrough,
           textColor: s.textColor || "#000000",
           backgroundColor: s.backgroundColor || "#ffffff",
@@ -256,7 +256,7 @@ export function MiniFormatToolbar({
   }, [style.italic, apply]);
 
   const toggleUnderline = useCallback(async () => {
-    const next = !style.underline;
+    const next = style.underline !== "none" ? "none" as const : "single" as const;
     setStyle((s) => ({ ...s, underline: next }));
     await apply({ underline: next });
   }, [style.underline, apply]);
@@ -428,7 +428,7 @@ export function MiniFormatToolbar({
         </S.ToolbarButton>
 
         <S.ToolbarButton
-          $active={style.underline}
+          $active={style.underline !== "none"}
           onClick={toggleUnderline}
           disabled={disabled}
           title="Underline (Ctrl+U)"

@@ -44,6 +44,10 @@ impl Default for AppInfo {
     }
 }
 
+fn default_true() -> bool {
+    true
+}
+
 /// A deferred action requested by a script, to be executed by the frontend
 /// after the script completes. Analogous to Excel Application methods/properties
 /// that affect the UI.
@@ -55,6 +59,9 @@ pub enum DeferredAction {
         row: u32,
         col: u32,
         sheet_index: usize,
+        /// If false, only scroll without changing selection (default: true)
+        #[serde(default = "default_true")]
+        select: bool,
     },
     /// Request a full recalculation (Excel: Application.Calculate)
     Calculate,
@@ -62,6 +69,10 @@ pub enum DeferredAction {
     /// message = None means reset to default
     SetStatusBar {
         message: Option<String>,
+    },
+    /// Set whether zeros are displayed in cells (Worksheet.DisplayZeros)
+    SetDisplayZeros {
+        value: bool,
     },
 }
 
@@ -130,6 +141,10 @@ pub struct ScriptContext {
     pub enable_events: RefCell<bool>,
     /// Deferred actions queued by the script (goto, calculate, statusBar, etc.)
     pub deferred_actions: RefCell<Vec<DeferredAction>>,
+    /// Whether to display zero values in cells (default: true)
+    pub display_zeros: bool,
+    /// Whether the workbook has unsaved changes (default: false)
+    pub is_dirty: bool,
 }
 
 /// The result of executing a script, returned to the Tauri command layer.

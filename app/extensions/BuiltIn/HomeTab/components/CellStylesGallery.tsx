@@ -20,7 +20,7 @@ export interface CellStyleDefinition {
   formatting: {
     bold?: boolean;
     italic?: boolean;
-    underline?: boolean;
+    underline?: string;
     fontSize?: number;
     fontFamily?: string;
     textColor?: string;
@@ -296,7 +296,7 @@ function getItemStyle(def: CellStyleDefinition): React.CSSProperties {
   const style: React.CSSProperties = {};
   if (f.bold) style.fontWeight = 700;
   if (f.italic) style.fontStyle = "italic";
-  if (f.underline) style.textDecoration = "underline";
+  if (f.underline && f.underline !== "none") style.textDecoration = "underline";
   if (f.textColor) style.color = f.textColor;
   if (f.backgroundColor && f.backgroundColor !== "#ffffff") {
     style.backgroundColor = f.backgroundColor;
@@ -363,7 +363,7 @@ export function CellStylesGallery({ onApplyStyle, onClose, inline }: CellStylesG
   const handleClick = (def: CellStyleDefinition) => {
     if (def.id === "normal") {
       onApplyStyle({
-        bold: false, italic: false, underline: false,
+        bold: false, italic: false, underline: "none",
         fontSize: 11, textColor: "#000000", backgroundColor: "#ffffff",
         numberFormat: "General",
         borderTop: { style: "none", color: "#000000" },

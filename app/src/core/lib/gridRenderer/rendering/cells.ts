@@ -5,7 +5,7 @@
 // UPDATED: Added vertical alignment, text wrapping, text rotation, and empty cell background rendering
 
 import type { RenderState } from "../types";
-import type { RichTextRun, AccountingLayout } from "../../../types";
+import type { RichTextRun, AccountingLayout, UnderlineStyle } from "../../../types";
 import { calculateVisibleRange } from "../layout/viewport";
 import { getColumnWidth, getRowHeight } from "../layout/dimensions";
 import { getStyleFromCache, isValidColor, isDefaultTextColor, isDefaultBackgroundColor } from "../styles/styleUtils";
@@ -156,7 +156,7 @@ export function drawRichTextRuns(
       color,
       fontString,
       width,
-      hasUnderline: run.underline ?? baseUnderline,
+      hasUnderline: run.underline != null ? run.underline !== "none" : baseUnderline,
       hasStrikethrough: run.strikethrough ?? baseStrikethrough,
       superscript: isSuperscript,
       subscript: isSubscript,
@@ -695,13 +695,14 @@ export function drawCellText(state: RenderState): void {
       }
 
       // Build base style info for interceptors
+      // Note: interceptors use boolean underline, so convert enum to bool for them
       let effectiveStyle: BaseStyleInfo = {
         styleIndex,
         backgroundColor: baseCellStyle.backgroundColor,
         textColor: baseCellStyle.textColor,
         bold: baseCellStyle.bold,
         italic: baseCellStyle.italic,
-        underline: baseCellStyle.underline,
+        underline: baseCellStyle.underline !== "none",
         strikethrough: baseCellStyle.strikethrough,
         fontSize: baseCellStyle.fontSize,
         fontFamily: baseCellStyle.fontFamily,
@@ -724,7 +725,8 @@ export function drawCellText(state: RenderState): void {
       let fontStyle = "normal";
       let fontSize = theme.cellFontSize;
       let fontFamily = theme.cellFontFamily;
-      let hasUnderline = false;
+      // Resolve underline style: interceptors may set boolean, base style has enum
+      let underlineStyle: UnderlineStyle = "none";
       let hasStrikethrough = false;
 
       // Apply all style properties from effectiveStyle (includes interceptor overrides)
@@ -734,8 +736,10 @@ export function drawCellText(state: RenderState): void {
       if (effectiveStyle.italic === true) {
         fontStyle = "italic";
       }
+      // Interceptors produce boolean underline; base style uses UnderlineStyle enum.
+      // If interceptor set underline=true, use "single"; otherwise use the enum from baseCellStyle.
       if (effectiveStyle.underline === true) {
-        hasUnderline = true;
+        underlineStyle = baseCellStyle.underline !== "none" ? baseCellStyle.underline : "single";
       }
       if (effectiveStyle.strikethrough === true) {
         hasStrikethrough = true;
@@ -958,7 +962,7 @@ export function drawCellText(state: RenderState): void {
           fontSize, fontFamily, fontWeight, fontStyle, textColor,
           effectiveStyle.bold === true,
           effectiveStyle.italic === true,
-          hasUnderline, hasStrikethrough,
+          underlineStyle !== "none", hasStrikethrough,
         );
 
         ctx.restore();
@@ -1025,30 +1029,54 @@ export function drawCellText(state: RenderState): void {
       drawTextWithTruncation(ctx, displayValue, textX, textY, availableWidth, textAlign);
 
       // Draw underline if needed
-      if (hasUnderline) {
-        const metrics = ctx.measureText(displayValue);
-        const textWidth = Math.min(metrics.width, availableWidth);
-        let underlineX = textX;
-        if (textAlign === "right") {
-          underlineX = textX + availableWidth - textWidth;
-        } else if (textAlign === "center") {
-          underlineX = textX + (availableWidth - textWidth) / 2;
+      if (underlineStyle !== "none") {
+        const isAccounting = underlineStyle === "singleAccounting" || underlineStyle === "doubleAccounting";
+        const isDouble = underlineStyle === "double" || underlineStyle === "doubleAccounting";
+
+        // Accounting underlines span the full cell width at the cell bottom;
+        // standard underlines follow the text width under the text baseline.
+        const ulWidth = isAccounting ? (cellRight - cellLeft - paddingX * 2) : Math.min(ctx.measureText(displayValue).width, availableWidth);
+        let underlineX: number;
+        if (isAccounting) {
+          underlineX = cellLeft + paddingX;
+        } else {
+          underlineX = textX;
+          if (textAlign === "right") {
+            underlineX = textX + availableWidth - ulWidth;
+          } else if (textAlign === "center") {
+            underlineX = textX + (availableWidth - ulWidth) / 2;
+          }
         }
-        // Position underline relative to baseline
+
+        // Position underline Y: accounting styles sit at the cell bottom, standard styles under the text
         let underlineY: number;
-        if (vAlign === "top") {
+        if (isAccounting) {
+          underlineY = cellBottom - paddingY;
+        } else if (vAlign === "top") {
           underlineY = cellTop + paddingY + fontSize + 1;
         } else if (vAlign === "bottom") {
           underlineY = cellBottom - paddingY + 1;
         } else {
           underlineY = textY + fontSize / 2 + 1;
         }
-        ctx.beginPath();
+
         ctx.strokeStyle = textColor;
         ctx.lineWidth = 1;
+
+        // Draw first line
+        ctx.beginPath();
         ctx.moveTo(underlineX, underlineY);
-        ctx.lineTo(underlineX + textWidth, underlineY);
+        ctx.lineTo(underlineX + ulWidth, underlineY);
         ctx.stroke();
+
+        // Draw second line for double styles (2px gap)
+        if (isDouble) {
+          const secondY = underlineY - 2;
+          ctx.beginPath();
+          ctx.moveTo(underlineX, secondY);
+          ctx.lineTo(underlineX + ulWidth, secondY);
+          ctx.stroke();
+        }
       }
 
       // Draw strikethrough if needed

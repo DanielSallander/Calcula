@@ -99,9 +99,15 @@ pub struct DataBarRule {
     pub min_value_type: CFValueType,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub min_value: Option<f64>,
+    /// Formula string when min_value_type is Formula
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub min_formula: Option<String>,
     pub max_value_type: CFValueType,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_value: Option<f64>,
+    /// Formula string when max_value_type is Formula
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_formula: Option<String>,
     pub fill_color: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub border_color: Option<String>,
@@ -122,8 +128,10 @@ impl Default for DataBarRule {
         Self {
             min_value_type: CFValueType::AutoMin,
             min_value: None,
+            min_formula: None,
             max_value_type: CFValueType::AutoMax,
             max_value: None,
+            max_formula: None,
             fill_color: "#638EC6".to_string(),
             border_color: None,
             negative_fill_color: Some("#FF0000".to_string()),
@@ -194,6 +202,9 @@ pub struct IconSetThreshold {
     pub value_type: CFValueType,
     pub value: f64,
     pub operator: ThresholdOperator,
+    /// Formula string when value_type is Formula
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub formula: Option<String>,
 }
 
 /// Icon set rule
@@ -1276,8 +1287,9 @@ fn evaluate_rule(
                 return None;
             }
 
-            let min_val = resolve_cf_point_value(&cs_rule.min_point, stats);
-            let max_val = resolve_cf_point_value(&cs_rule.max_point, stats);
+            let ctx = CFFormulaContext { grids, sheet_names, active_sheet };
+            let min_val = resolve_cf_point_value(&cs_rule.min_point, stats, &ctx);
+            let max_val = resolve_cf_point_value(&cs_rule.max_point, stats, &ctx);
 
             if (max_val - min_val).abs() < f64::EPSILON {
                 // All values are the same; use min color
@@ -1290,7 +1302,7 @@ fn evaluate_rule(
 
             let color = if let Some(ref mid_point) = cs_rule.mid_point {
                 // 3-color scale
-                let mid_val = resolve_cf_point_value(mid_point, stats);
+                let mid_val = resolve_cf_point_value(mid_point, stats, &ctx);
                 let mid_frac = if (max_val - min_val).abs() > f64::EPSILON {
                     ((mid_val - min_val) / (max_val - min_val)).clamp(0.0, 1.0)
                 } else {
@@ -1330,6 +1342,8 @@ fn evaluate_rule(
                 return None;
             }
 
+            let ctx = CFFormulaContext { grids, sheet_names, active_sheet };
+
             let min_val = match db_rule.min_value_type {
                 CFValueType::AutoMin | CFValueType::Min => stats.min,
                 CFValueType::Number => db_rule.min_value.unwrap_or(stats.min),
@@ -1341,6 +1355,13 @@ fn evaluate_rule(
                     let pct = db_rule.min_value.unwrap_or(0.0) / 100.0;
                     let idx = (pct * (stats.sorted_values.len() - 1) as f64).round() as usize;
                     stats.sorted_values[idx.min(stats.sorted_values.len() - 1)]
+                }
+                CFValueType::Formula => {
+                    if let Some(ref formula) = db_rule.min_formula {
+                        evaluate_cf_formula(formula, &ctx, db_rule.min_value.unwrap_or(stats.min))
+                    } else {
+                        db_rule.min_value.unwrap_or(stats.min)
+                    }
                 }
                 _ => stats.min,
             };
@@ -1356,6 +1377,13 @@ fn evaluate_rule(
                     let pct = db_rule.max_value.unwrap_or(100.0) / 100.0;
                     let idx = (pct * (stats.sorted_values.len() - 1) as f64).round() as usize;
                     stats.sorted_values[idx.min(stats.sorted_values.len() - 1)]
+                }
+                CFValueType::Formula => {
+                    if let Some(ref formula) = db_rule.max_formula {
+                        evaluate_cf_formula(formula, &ctx, db_rule.max_value.unwrap_or(stats.max))
+                    } else {
+                        db_rule.max_value.unwrap_or(stats.max)
+                    }
                 }
                 _ => stats.max,
             };
@@ -1380,6 +1408,7 @@ fn evaluate_rule(
                 return None;
             }
 
+            let ctx = CFFormulaContext { grids, sheet_names, active_sheet };
             let icon_count = get_icon_count(&is_rule.icon_set);
             let thresholds = &is_rule.thresholds;
 
@@ -1390,7 +1419,7 @@ fn evaluate_rule(
             let mut icon_index = 0u32; // Default to lowest icon
 
             for (i, threshold) in thresholds.iter().enumerate().rev() {
-                let threshold_val = resolve_threshold_value(threshold, stats);
+                let threshold_val = resolve_threshold_value(threshold, stats, &ctx);
                 let passes = match threshold.operator {
                     ThresholdOperator::GreaterThanOrEqual => num >= threshold_val,
                     ThresholdOperator::GreaterThan => num > threshold_val,
@@ -1424,8 +1453,38 @@ fn make_cf(row: u32, col: u32, format: &ConditionalFormat) -> CellConditionalFor
     }
 }
 
+/// Context needed for formula evaluation within CF threshold resolution
+struct CFFormulaContext<'a> {
+    grids: &'a [Grid],
+    sheet_names: &'a [String],
+    active_sheet: usize,
+}
+
+/// Evaluate a formula string and return its numeric result, or a fallback value
+fn evaluate_cf_formula(
+    formula: &str,
+    ctx: &CFFormulaContext,
+    fallback: f64,
+) -> f64 {
+    let result = crate::evaluate_formula_multi_sheet(
+        ctx.grids,
+        ctx.sheet_names,
+        ctx.active_sheet,
+        formula,
+    );
+    match result {
+        CellValue::Number(n) => n,
+        CellValue::Boolean(b) => if b { 1.0 } else { 0.0 },
+        _ => fallback,
+    }
+}
+
 /// Resolve a ColorScalePoint's effective numeric value given range stats
-fn resolve_cf_point_value(point: &ColorScalePoint, stats: &RangeStats) -> f64 {
+fn resolve_cf_point_value(
+    point: &ColorScalePoint,
+    stats: &RangeStats,
+    ctx: &CFFormulaContext,
+) -> f64 {
     match point.value_type {
         CFValueType::Min | CFValueType::AutoMin => stats.min,
         CFValueType::Max | CFValueType::AutoMax => stats.max,
@@ -1443,14 +1502,22 @@ fn resolve_cf_point_value(point: &ColorScalePoint, stats: &RangeStats) -> f64 {
             stats.sorted_values[idx.min(stats.sorted_values.len() - 1)]
         }
         CFValueType::Formula => {
-            // Formula evaluation would require grid context; fall back to the literal value
-            point.value.unwrap_or(stats.min)
+            if let Some(ref formula) = point.formula {
+                evaluate_cf_formula(formula, ctx, point.value.unwrap_or(stats.min))
+            } else {
+                // No formula string provided; fall back to literal value
+                point.value.unwrap_or(stats.min)
+            }
         }
     }
 }
 
 /// Resolve an icon set threshold value given range stats
-fn resolve_threshold_value(threshold: &IconSetThreshold, stats: &RangeStats) -> f64 {
+fn resolve_threshold_value(
+    threshold: &IconSetThreshold,
+    stats: &RangeStats,
+    ctx: &CFFormulaContext,
+) -> f64 {
     match threshold.value_type {
         CFValueType::Number => threshold.value,
         CFValueType::Percent => {
@@ -1463,6 +1530,13 @@ fn resolve_threshold_value(threshold: &IconSetThreshold, stats: &RangeStats) -> 
             let pct = threshold.value / 100.0;
             let idx = (pct * (stats.sorted_values.len() - 1) as f64).round() as usize;
             stats.sorted_values[idx.min(stats.sorted_values.len() - 1)]
+        }
+        CFValueType::Formula => {
+            if let Some(ref formula) = threshold.formula {
+                evaluate_cf_formula(formula, ctx, threshold.value)
+            } else {
+                threshold.value
+            }
         }
         _ => threshold.value,
     }

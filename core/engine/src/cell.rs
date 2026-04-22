@@ -9,7 +9,7 @@
 
 use serde::{Deserialize, Serialize};
 use crate::dependency_extractor::Expression;
-use crate::style::Color;
+use crate::style::{Color, UnderlineStyle};
 
 /// Represents valid key types for Dict cells.
 /// Follows Python conventions: strings, numbers, and booleans are hashable.
@@ -68,9 +68,9 @@ pub struct RichTextRun {
     /// Override: italic.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub italic: Option<bool>,
-    /// Override: underline.
+    /// Override: underline style.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub underline: Option<bool>,
+    pub underline: Option<UnderlineStyle>,
     /// Override: strikethrough.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub strikethrough: Option<bool>,
@@ -326,7 +326,7 @@ mod tests {
             text: "formatted".to_string(),
             bold: Some(true),
             italic: Some(true),
-            underline: Some(true),
+            underline: Some(UnderlineStyle::Single),
             strikethrough: Some(false),
             font_size: Some(18),
             font_family: Some("Arial".to_string()),

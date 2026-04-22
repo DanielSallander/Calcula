@@ -222,3 +222,7 @@ export const AREA_PASTE_SPECIAL = suiteArea(63);
 export const AREA_FORMAT_PAINTER = suiteArea(64);
 /** Suite 65: Subtotals (row 3750) */
 export const AREA_SUBTOTALS = suiteArea(65);
+
+// Phase 21: Excel Gap Features
+/** Suite 66: Excel Gap Features (row 3800) */
+export const AREA_EXCEL_GAP = suiteArea(66);

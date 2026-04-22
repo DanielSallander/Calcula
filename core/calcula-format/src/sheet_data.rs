@@ -411,7 +411,7 @@ mod tests {
                         text: "Hello ".to_string(),
                         bold: Some(true),
                         italic: Some(true),
-                        underline: Some(true),
+                        underline: Some(engine::UnderlineStyle::Single),
                         strikethrough: None,
                         font_size: Some(14),
                         font_family: Some("Arial".to_string()),

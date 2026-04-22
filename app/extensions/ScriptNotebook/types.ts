@@ -42,7 +42,7 @@ export interface RewindNotebookRequest {
 
 /** A deferred action from Application object methods/properties. */
 export type DeferredAction =
-  | { action: "goto"; row: number; col: number; sheetIndex: number }
+  | { action: "goto"; row: number; col: number; sheetIndex: number; select?: boolean }
   | { action: "calculate" }
   | { action: "setStatusBar"; message: string | null };
 

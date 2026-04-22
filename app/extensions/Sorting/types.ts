@@ -20,6 +20,8 @@ export interface SortLevel {
   color?: string;
   /** Data option: normal or treat text as numbers */
   dataOption: SortDataOption;
+  /** Custom sort order: built-in list name or comma-separated values */
+  customOrder?: string;
 }
 
 /**

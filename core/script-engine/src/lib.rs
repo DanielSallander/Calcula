@@ -82,6 +82,8 @@ impl ScriptEngine {
             screen_updating: RefCell::new(true),
             enable_events: RefCell::new(true),
             deferred_actions: RefCell::new(Vec::new()),
+            display_zeros: true,
+            is_dirty: false,
         };
 
         match runtime::execute_script(source, filename, context) {

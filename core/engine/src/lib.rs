@@ -31,7 +31,7 @@ pub use number_format::{format_number, format_number_with_color, format_text_wit
 pub use style::{
     BorderLineStyle, BorderStyle, Borders, CellStyle, Color, CurrencyPosition, Fill,
     FontStyle, GradientDirection, NumberFormat, PatternType, StyleRegistry, TextAlign,
-    TextRotation, VerticalAlign,
+    TextRotation, UnderlineStyle, VerticalAlign,
 };
 pub use theme::{
     ThemeColor, ThemeColorSlot, ThemeColors, ThemeDefinition, ThemeFonts, Tint,

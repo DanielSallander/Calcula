@@ -168,6 +168,7 @@ pub fn register_application_ops<'js>(
                         row: row.max(0) as u32,
                         col: col.max(0) as u32,
                         sheet_index: si,
+                        select: true,
                     });
             },
         )

@@ -253,8 +253,8 @@ export interface RichTextRun {
   bold?: boolean;
   /** Override: italic */
   italic?: boolean;
-  /** Override: underline */
-  underline?: boolean;
+  /** Override: underline style */
+  underline?: UnderlineStyle;
   /** Override: strikethrough */
   strikethrough?: boolean;
   /** Override: font size in points */
@@ -349,6 +349,12 @@ export interface DimensionData {
 }
 
 /**
+ * Underline style for font rendering (Excel-compatible).
+ * Matches Rust's UnderlineStyle enum with camelCase serialization.
+ */
+export type UnderlineStyle = "none" | "single" | "double" | "singleAccounting" | "doubleAccounting";
+
+/**
  * A single border side (top, right, bottom, or left).
  */
 export interface BorderSideData {
@@ -364,7 +370,7 @@ export interface BorderSideData {
 export interface StyleData {
   bold: boolean;
   italic: boolean;
-  underline: boolean;
+  underline: UnderlineStyle;
   strikethrough: boolean;
   fontSize: number;
   fontFamily: string;
@@ -397,6 +403,10 @@ export interface StyleData {
   fontFamilyTheme?: string;
   /** Fill data (solid/gradient/pattern). Undefined means no advanced fill. */
   fill?: FillData;
+  /** Whether the cell is locked (cannot be edited when sheet is protected). Default: true */
+  locked: boolean;
+  /** Whether the formula is hidden when the sheet is protected. Default: false */
+  formulaHidden: boolean;
 }
 
 // ============================================================================
@@ -548,7 +558,7 @@ export const DEFAULT_BORDER_SIDE: BorderSideData = {
 export const DEFAULT_STYLE: StyleData = {
   bold: false,
   italic: false,
-  underline: false,
+  underline: "none",
   strikethrough: false,
   fontSize: 11,
   fontFamily: "system-ui",
@@ -569,6 +579,8 @@ export const DEFAULT_STYLE: StyleData = {
   button: false,
   indent: 0,
   shrinkToFit: false,
+  locked: true,
+  formulaHidden: false,
 };
 
 /**
@@ -585,7 +597,7 @@ export interface BorderSideParam {
 export interface FormattingOptions {
   bold?: boolean;
   italic?: boolean;
-  underline?: boolean;
+  underline?: UnderlineStyle;
   strikethrough?: boolean;
   fontSize?: number;
   fontFamily?: string;
@@ -607,6 +619,8 @@ export interface FormattingOptions {
   indent?: number;
   shrinkToFit?: boolean;
   fill?: FillParam;
+  locked?: boolean;
+  formulaHidden?: boolean;
 }
 
 /**

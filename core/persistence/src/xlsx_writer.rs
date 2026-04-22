@@ -122,8 +122,20 @@ fn convert_style_to_format(style: &CellStyle) -> Format {
     if style.font.italic {
         format = format.set_italic();
     }
-    if style.font.underline {
-        format = format.set_underline(rust_xlsxwriter::FormatUnderline::Single);
+    match style.font.underline {
+        engine::UnderlineStyle::None => {}
+        engine::UnderlineStyle::Single => {
+            format = format.set_underline(rust_xlsxwriter::FormatUnderline::Single);
+        }
+        engine::UnderlineStyle::Double => {
+            format = format.set_underline(rust_xlsxwriter::FormatUnderline::Double);
+        }
+        engine::UnderlineStyle::SingleAccounting => {
+            format = format.set_underline(rust_xlsxwriter::FormatUnderline::SingleAccounting);
+        }
+        engine::UnderlineStyle::DoubleAccounting => {
+            format = format.set_underline(rust_xlsxwriter::FormatUnderline::DoubleAccounting);
+        }
     }
     if style.font.strikethrough {
         format = format.set_font_strikethrough();
