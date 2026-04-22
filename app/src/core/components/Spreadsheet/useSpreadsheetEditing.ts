@@ -9,6 +9,7 @@ import { toggleReferenceAtCursor } from "../../lib/formulaRefToggle";
 import { updateCellsBatch, beginUndoTransaction, commitUndoTransaction, type CellUpdateInput } from "../../lib/tauri-api";
 import { cellEvents } from "../../lib/cellEvents";
 import { checkRangeGuards } from "../../lib/editGuards";
+import { getMoveAfterReturn, getMoveDirection, getMoveDelta } from "../../../api/editingPreferences";
 
 type GridState = ReturnType<typeof useGridState>;
 
@@ -253,9 +254,16 @@ export function useSpreadsheetEditing({
   }, [moveActiveCell, scrollToSelection, focusContainerRef]);
 
   const handleInlineEnter = useCallback((shiftKey: boolean) => {
-    moveActiveCell(shiftKey ? -1 : 1, 0);
+    if (!getMoveAfterReturn()) {
+      // Stay on current cell
+      focusContainerRef.current?.focus();
+      return;
+    }
+    const direction = getMoveDirection();
+    const [dr, dc] = getMoveDelta(direction);
+    // Shift reverses the direction
+    moveActiveCell(shiftKey ? -dr : dr, shiftKey ? -dc : dc);
     scrollToSelection();
-    // FIX: Use focusContainerRef instead of containerRef
     focusContainerRef.current?.focus();
   }, [moveActiveCell, scrollToSelection, focusContainerRef]);
 

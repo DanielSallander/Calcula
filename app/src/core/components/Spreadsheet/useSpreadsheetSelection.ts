@@ -699,7 +699,7 @@ export function useSpreadsheetSelection({
         const intercepted = await checkCellClickInterceptors(
           clickedCell.row,
           clickedCell.col,
-          { clientX: event.clientX, clientY: event.clientY }
+          { clientX: event.clientX, clientY: event.clientY, ctrlKey: event.ctrlKey, metaKey: event.metaKey }
         );
         if (intercepted) {
           window.removeEventListener("mouseup", onEarlyMouseUp);
@@ -1330,10 +1330,18 @@ export function useSpreadsheetSelection({
         break;
       }
 
+      // Display Zeros toggle
+      case 'view.toggleDisplayZeros': {
+        const currentDisplayZeros = state.displayZeros;
+        emitAppEvent(AppEvents.DISPLAY_ZEROS_TOGGLED, { displayZeros: !currentDisplayZeros });
+        emitAppEvent(AppEvents.GRID_REFRESH);
+        break;
+      }
+
       default:
         console.warn(`[useSpreadsheetSelection] Unknown command: ${command}`);
     }
-  }, [toggleFormatProperty, applyFormattingToSelection, handleInsertDate, handleInsertTime, handleFillDown, handleFillRight, handleFillUp, handleFillLeft, state.showFormulas]);
+  }, [toggleFormatProperty, applyFormattingToSelection, handleInsertDate, handleInsertTime, handleFillDown, handleFillRight, handleFillUp, handleFillLeft, state.showFormulas, state.displayZeros]);
 
   // Keyboard handling with clipboard shortcuts, ESC to clear clipboard, DELETE to clear contents, and undo/redo
   // FIX: Use focusContainerRef instead of containerRef for keyboard events

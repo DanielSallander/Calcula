@@ -60,6 +60,9 @@ export const AppEvents = {
   BEFORE_NEW: "app:before-new",
   AFTER_NEW: "app:after-new",
   BEFORE_CLOSE: "app:before-close",
+
+  // Dirty state events
+  DIRTY_STATE_CHANGED: "app:dirty-state-changed",
 } as const;
 
 export type AppEventType = (typeof AppEvents)[keyof typeof AppEvents];

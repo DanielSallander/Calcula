@@ -3,6 +3,7 @@
 // CONTEXT: Handles merging and unmerging cells in the spreadsheet.
 
 use crate::api_types::{CellData, MergedRegion, MergeResult};
+use crate::persistence::FileState;
 use crate::{format_cell_value, AppState};
 use engine::UndoMergeRegion;
 use tauri::State;
@@ -23,6 +24,7 @@ fn to_undo_region(r: &MergedRegion) -> UndoMergeRegion {
 #[tauri::command]
 pub fn merge_cells(
     state: State<AppState>,
+    file_state: State<FileState>,
     start_row: u32,
     start_col: u32,
     end_row: u32,
@@ -140,6 +142,9 @@ pub fn merge_cells(
                 accounting_layout: None,
     });
 
+    // Mark workbook as dirty
+    if let Ok(mut modified) = file_state.is_modified.lock() { *modified = true; }
+
     Ok(MergeResult {
         success: true,
         merged_regions: merged_regions.iter().cloned().collect(),
@@ -152,6 +157,7 @@ pub fn merge_cells(
 #[tauri::command]
 pub fn unmerge_cells(
     state: State<AppState>,
+    file_state: State<FileState>,
     row: u32,
     col: u32,
 ) -> Result<MergeResult, String> {
@@ -202,6 +208,9 @@ pub fn unmerge_cells(
             rich_text: None,
                 accounting_layout: None,
         }];
+
+        // Mark workbook as dirty
+        if let Ok(mut modified) = file_state.is_modified.lock() { *modified = true; }
 
         Ok(MergeResult {
             success: true,

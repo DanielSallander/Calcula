@@ -49,6 +49,7 @@ export {
   setSplitConfig,
   setViewMode,
   setShowFormulas,
+  setDisplayZeros,
 } from "../core/state/gridActions";
 
 // Re-export action types

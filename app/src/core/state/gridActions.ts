@@ -63,6 +63,7 @@ export const GRID_ACTIONS = {
   SET_SPLIT_VIEWPORT: "SET_SPLIT_VIEWPORT",
   SET_VIEW_MODE: "SET_VIEW_MODE",
   SET_SHOW_FORMULAS: "SET_SHOW_FORMULAS",
+  SET_DISPLAY_ZEROS: "SET_DISPLAY_ZEROS",
 } as const;
 
 // Action interfaces
@@ -288,6 +289,11 @@ export interface SetShowFormulasAction {
   payload: { showFormulas: boolean };
 }
 
+export interface SetDisplayZerosAction {
+  type: typeof GRID_ACTIONS.SET_DISPLAY_ZEROS;
+  payload: { displayZeros: boolean };
+}
+
 // Union type of all actions
 export type GridAction =
   | SetSelectionAction
@@ -329,7 +335,8 @@ export type GridAction =
   | SetSplitConfigAction
   | SetSplitViewportAction
   | SetViewModeAction
-  | SetShowFormulasAction;
+  | SetShowFormulasAction
+  | SetDisplayZerosAction;
 
 // Action creators
 
@@ -794,5 +801,16 @@ export function setShowFormulas(showFormulas: boolean): SetShowFormulasAction {
   return {
     type: GRID_ACTIONS.SET_SHOW_FORMULAS,
     payload: { showFormulas },
+  };
+}
+
+/**
+ * Toggle or set the Display Zeros mode.
+ * When disabled, cells containing zero display as blank.
+ */
+export function setDisplayZeros(displayZeros: boolean): SetDisplayZerosAction {
+  return {
+    type: GRID_ACTIONS.SET_DISPLAY_ZEROS,
+    payload: { displayZeros },
   };
 }

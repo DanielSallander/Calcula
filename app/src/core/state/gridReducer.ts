@@ -1237,6 +1237,13 @@ export function gridReducer(state: GridState, action: GridAction): GridState {
       };
     }
 
+    case GRID_ACTIONS.SET_DISPLAY_ZEROS: {
+      return {
+        ...state,
+        displayZeros: action.payload.displayZeros,
+      };
+    }
+
     default: {
       return state;
     }

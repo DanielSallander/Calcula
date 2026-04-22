@@ -2,6 +2,7 @@
 // PURPOSE: Styling operations, formatting, and style definitions.
 
 use crate::api_types::{CellData, FillParam, FormattingParams, FormattingResult, PreviewResult, StyleData, StyleEntry};
+use crate::persistence::FileState;
 use crate::{format_cell_value_with_color, AppState};
 use engine::{
     BorderLineStyle, BorderStyle, Cell, CellStyle, CellValue, Color, CurrencyPosition, Fill,
@@ -29,6 +30,7 @@ pub fn get_all_styles(state: State<AppState>) -> Vec<StyleData> {
 #[tauri::command]
 pub fn set_cell_style(
     state: State<AppState>,
+    file_state: State<FileState>,
     row: u32,
     col: u32,
     style_index: usize,
@@ -72,6 +74,10 @@ pub fn set_cell_style(
             symbol_before: a.symbol_before,
             value: a.value,
         });
+
+        // Mark workbook as dirty
+        if let Ok(mut modified) = file_state.is_modified.lock() { *modified = true; }
+
         Some(CellData {
             row,
             col,
@@ -103,6 +109,9 @@ pub fn set_cell_style(
         // Record undo (previous was None since cell didn't exist)
         undo_stack.record_cell_change(row, col, previous_cell);
 
+        // Mark workbook as dirty
+        if let Ok(mut modified) = file_state.is_modified.lock() { *modified = true; }
+
         Some(CellData {
             row,
             col,
@@ -123,6 +132,7 @@ pub fn set_cell_style(
 #[tauri::command]
 pub fn apply_formatting(
     state: State<AppState>,
+    file_state: State<FileState>,
     params: FormattingParams,
 ) -> Result<FormattingResult, String> {
     let mut grid = state.grid.lock().unwrap();
@@ -331,6 +341,11 @@ pub fn apply_formatting(
         });
     }
 
+    // Mark workbook as dirty
+    if !updated_cells.is_empty() {
+        if let Ok(mut modified) = file_state.is_modified.lock() { *modified = true; }
+    }
+
     Ok(FormattingResult {
         cells: updated_cells,
         styles: updated_styles,
@@ -343,6 +358,7 @@ pub fn apply_formatting(
 #[tauri::command]
 pub fn apply_formatting_to_sheets(
     state: State<AppState>,
+    file_state: State<FileState>,
     sheet_indices: Vec<usize>,
     params: FormattingParams,
 ) -> Result<(), String> {
@@ -465,6 +481,11 @@ pub fn apply_formatting_to_sheets(
         }
 
         undo_stack.commit_transaction();
+    }
+
+    // Mark workbook as dirty
+    if !sheet_indices.is_empty() {
+        if let Ok(mut modified) = file_state.is_modified.lock() { *modified = true; }
     }
 
     Ok(())
@@ -823,6 +844,7 @@ pub fn get_style_count(state: State<AppState>) -> usize {
 #[tauri::command]
 pub fn set_cell_rich_text(
     state: State<AppState>,
+    file_state: State<FileState>,
     row: u32,
     col: u32,
     runs: Option<Vec<crate::api_types::RichTextRunData>>,
@@ -868,6 +890,9 @@ pub fn set_cell_rich_text(
         Some(m) => (m.end_row - m.start_row + 1, m.end_col - m.start_col + 1),
         None => (1, 1),
     };
+
+    // Mark workbook as dirty
+    if let Ok(mut modified) = file_state.is_modified.lock() { *modified = true; }
 
     Some(CellData {
         row,

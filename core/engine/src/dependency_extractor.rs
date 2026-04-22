@@ -165,6 +165,7 @@ pub enum BuiltinFunction {
     Int,
     Sign,
     SumProduct,
+    Product,
     Rand,
     RandBetween,
     Pi,
@@ -626,6 +627,20 @@ pub enum BuiltinFunction {
     Mdeterm,
     Minverse,
     Munit,
+
+    // Database functions
+    DAverage,
+    DCount,
+    DCountA,
+    DGet,
+    DMax,
+    DMin,
+    DProduct,
+    DStdev,
+    DStdevP,
+    DSum,
+    DVar,
+    DVarP,
 
     /// Fallback for unrecognized function names (future extensions/plugins).
     Custom(String),

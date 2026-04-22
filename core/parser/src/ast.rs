@@ -209,6 +209,7 @@ pub enum BuiltinFunction {
     Int,
     Sign,
     SumProduct,
+    Product,
     Rand,
     RandBetween,
     Pi,
@@ -671,6 +672,20 @@ pub enum BuiltinFunction {
     Minverse,
     Munit,
 
+    // Database functions
+    DAverage,
+    DCount,
+    DCountA,
+    DGet,
+    DMax,
+    DMin,
+    DProduct,
+    DStdev,
+    DStdevP,
+    DSum,
+    DVar,
+    DVarP,
+
     /// Fallback for unrecognized function names (future extensions/plugins).
     Custom(String),
 }
@@ -723,6 +738,7 @@ impl BuiltinFunction {
             "INT" => BuiltinFunction::Int,
             "SIGN" => BuiltinFunction::Sign,
             "SUMPRODUCT" => BuiltinFunction::SumProduct,
+            "PRODUCT" => BuiltinFunction::Product,
             "RAND" => BuiltinFunction::Rand,
             "RANDBETWEEN" => BuiltinFunction::RandBetween,
             "PI" => BuiltinFunction::Pi,
@@ -1176,6 +1192,20 @@ impl BuiltinFunction {
             "MDETERM" => BuiltinFunction::Mdeterm,
             "MINVERSE" => BuiltinFunction::Minverse,
             "MUNIT" => BuiltinFunction::Munit,
+
+            // Database functions
+            "DAVERAGE" => BuiltinFunction::DAverage,
+            "DCOUNT" => BuiltinFunction::DCount,
+            "DCOUNTA" => BuiltinFunction::DCountA,
+            "DGET" => BuiltinFunction::DGet,
+            "DMAX" => BuiltinFunction::DMax,
+            "DMIN" => BuiltinFunction::DMin,
+            "DPRODUCT" => BuiltinFunction::DProduct,
+            "DSTDEV" => BuiltinFunction::DStdev,
+            "DSTDEVP" => BuiltinFunction::DStdevP,
+            "DSUM" => BuiltinFunction::DSum,
+            "DVAR" => BuiltinFunction::DVar,
+            "DVARP" => BuiltinFunction::DVarP,
 
             // Array reshaping
             "EXPAND" => BuiltinFunction::Expand,

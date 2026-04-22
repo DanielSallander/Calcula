@@ -304,6 +304,15 @@ export interface CellData {
   accountingLayout?: AccountingLayout;
 }
 
+/** Bounding box of all non-empty cells in the active sheet. */
+export interface UsedRangeResult {
+  startRow: number;
+  startCol: number;
+  endRow: number;
+  endCol: number;
+  empty: boolean;
+}
+
 /** Spill range information for visual rendering of dynamic array borders. */
 export interface SpillRangeInfo {
   originRow: number;
@@ -891,6 +900,8 @@ export interface GridState {
   zoom: number;
   /** Whether to show raw formulas instead of calculated values */
   showFormulas: boolean;
+  /** Whether to display zero values in cells (when false, zeros appear as blank) */
+  displayZeros: boolean;
 }
 
 /**
@@ -939,6 +950,7 @@ export function createInitialGridState(): GridState {
     viewMode: "normal",
     zoom: ZOOM_DEFAULT,
     showFormulas: false,
+    displayZeros: true,
   };
 }
 

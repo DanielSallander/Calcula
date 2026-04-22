@@ -10,5 +10,6 @@ export {
   saveFileAs,
   isFileModified,
   markFileModified,
+  updateWindowTitle,
   getCurrentFilePath,
 } from "../core/lib/file-api";

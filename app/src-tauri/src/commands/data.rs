@@ -6,6 +6,7 @@ use crate::api_types::{
     CellData, ClearApplyTo, ClearRangeParams, ClearRangeResult, DimensionData, MergedRegion,
     RemoveDuplicatesParams, RemoveDuplicatesResult, SortDataOption, SortField, SortOn,
     SortOrientation, SortRangeParams, SortRangeResult, SpillRangeInfo, UpdateCellResult,
+    UsedRangeResult,
 };
 use crate::commands::utils::get_cell_internal_with_merge;
 use crate::{
@@ -18,7 +19,7 @@ use crate::{
     update_dependencies, update_row_dependencies, AppState, log_perf
 };
 use engine::{self, Grid, StyleRegistry};
-use crate::persistence::UserFilesState;
+use crate::persistence::{FileState, UserFilesState};
 use crate::slicer::SlicerState;
 use std::collections::HashSet;
 use tauri::State;
@@ -456,6 +457,7 @@ fn get_cell_internal(grid: &Grid, styles: &StyleRegistry, row: u32, col: u32, lo
 #[tauri::command]
 pub fn update_cell(
     state: State<AppState>,
+    file_state: State<FileState>,
     user_files_state: State<UserFilesState>,
     slicer_state: State<SlicerState>,
     pivot_state: State<'_, crate::pivot::PivotState>,
@@ -619,6 +621,9 @@ pub fn update_cell(
 
         // Record undo after successful change
         undo_stack.record_cell_change(row, col, previous_cell);
+
+        // Mark workbook as dirty
+        if let Ok(mut modified) = file_state.is_modified.lock() { *modified = true; }
 
         return Ok(UpdateCellResult { cells: updated_cells, dimension_changes, needs_style_refresh, slicer_changed: false });
     }
@@ -1385,6 +1390,9 @@ pub fn update_cell(
         }
     };
 
+    // Mark workbook as dirty
+    if let Ok(mut modified) = file_state.is_modified.lock() { *modified = true; }
+
     Ok(UpdateCellResult { cells: updated_cells, dimension_changes, needs_style_refresh, slicer_changed })
 }
 
@@ -1395,6 +1403,7 @@ pub fn update_cell(
 #[tauri::command]
 pub fn update_cells_batch(
     state: State<AppState>,
+    file_state: State<FileState>,
     user_files_state: State<UserFilesState>,
     pivot_state: State<'_, crate::pivot::PivotState>,
     updates: Vec<crate::api_types::CellUpdateInput>,
@@ -2096,12 +2105,15 @@ pub fn update_cells_batch(
         undo_stack.commit_transaction();
     }
 
+    // Mark workbook as dirty
+    if let Ok(mut modified) = file_state.is_modified.lock() { *modified = true; }
+
     Ok(updated_cells)
 }
 
 /// Clear a cell.
 #[tauri::command]
-pub fn clear_cell(state: State<AppState>, row: u32, col: u32) {
+pub fn clear_cell(state: State<AppState>, file_state: State<FileState>, row: u32, col: u32) {
     let mut grid = state.grid.lock().unwrap();
     let mut grids = state.grids.lock().unwrap();
     let active_sheet = *state.active_sheet.lock().unwrap();
@@ -2154,6 +2166,8 @@ pub fn clear_cell(state: State<AppState>, row: u32, col: u32) {
     // Record undo if there was actually a cell to clear
     if previous_cell.is_some() {
         undo_stack.record_cell_change(row, col, previous_cell);
+        // Mark workbook as dirty
+        if let Ok(mut modified) = file_state.is_modified.lock() { *modified = true; }
     }
 }
 
@@ -2162,6 +2176,7 @@ pub fn clear_cell(state: State<AppState>, row: u32, col: u32) {
 #[tauri::command]
 pub fn clear_range(
     state: State<AppState>,
+    file_state: State<FileState>,
     start_row: u32,
     start_col: u32,
     end_row: u32,
@@ -2248,6 +2263,8 @@ pub fn clear_range(
     // Commit undo transaction
     if count > 0 {
         undo_stack.commit_transaction();
+        // Mark workbook as dirty
+        if let Ok(mut modified) = file_state.is_modified.lock() { *modified = true; }
     }
 
     count
@@ -2264,6 +2281,7 @@ pub fn clear_range(
 #[tauri::command]
 pub fn clear_range_with_options(
     state: State<AppState>,
+    file_state: State<FileState>,
     params: ClearRangeParams,
 ) -> ClearRangeResult {
     let mut grid = state.grid.lock().unwrap();
@@ -2571,6 +2589,8 @@ pub fn clear_range_with_options(
 
     if count > 0 {
         undo_stack.commit_transaction();
+        // Mark workbook as dirty
+        if let Ok(mut modified) = file_state.is_modified.lock() { *modified = true; }
     }
 
     ClearRangeResult {
@@ -2587,7 +2607,7 @@ pub fn clear_range_with_options(
 /// - Header row handling
 /// - Row or column orientation
 #[tauri::command]
-pub fn sort_range(state: State<AppState>, params: SortRangeParams) -> SortRangeResult {
+pub fn sort_range(state: State<AppState>, file_state: State<FileState>, params: SortRangeParams) -> SortRangeResult {
     let mut grid = state.grid.lock().unwrap();
     let mut grids = state.grids.lock().unwrap();
     let active_sheet = *state.active_sheet.lock().unwrap();
@@ -2744,6 +2764,9 @@ pub fn sort_range(state: State<AppState>, params: SortRangeParams) -> SortRangeR
 
             undo_stack.commit_transaction();
 
+            // Mark workbook as dirty
+            if let Ok(mut modified) = file_state.is_modified.lock() { *modified = true; }
+
             SortRangeResult {
                 success: true,
                 sorted_count,
@@ -2845,6 +2868,9 @@ pub fn sort_range(state: State<AppState>, params: SortRangeParams) -> SortRangeR
             }
 
             undo_stack.commit_transaction();
+
+            // Mark workbook as dirty
+            if let Ok(mut modified) = file_state.is_modified.lock() { *modified = true; }
 
             SortRangeResult {
                 success: true,
@@ -3094,6 +3120,38 @@ pub fn get_grid_bounds(state: State<AppState>) -> (u32, u32) {
 pub fn get_cell_count(state: State<AppState>) -> usize {
     let grid = state.grid.lock().unwrap();
     grid.cells.len()
+}
+
+/// Get the bounding box (used range) of all non-empty cells in the active sheet.
+#[tauri::command]
+pub fn get_used_range(state: State<AppState>) -> UsedRangeResult {
+    let grid = state.grid.lock().unwrap();
+    if grid.cells.is_empty() {
+        return UsedRangeResult {
+            start_row: 0,
+            start_col: 0,
+            end_row: 0,
+            end_col: 0,
+            empty: true,
+        };
+    }
+    let mut min_row = u32::MAX;
+    let mut min_col = u32::MAX;
+    let mut max_row = 0u32;
+    let mut max_col = 0u32;
+    for &(row, col) in grid.cells.keys() {
+        if row < min_row { min_row = row; }
+        if col < min_col { min_col = col; }
+        if row > max_row { max_row = row; }
+        if col > max_col { max_col = col; }
+    }
+    UsedRangeResult {
+        start_row: min_row,
+        start_col: min_col,
+        end_row: max_row,
+        end_col: max_col,
+        empty: false,
+    }
 }
 
 /// Get all non-empty cells in a row range (sparse iteration).

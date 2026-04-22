@@ -13,6 +13,8 @@
 export interface CellClickEvent {
   clientX: number;
   clientY: number;
+  ctrlKey?: boolean;
+  metaKey?: boolean;
 }
 
 /**

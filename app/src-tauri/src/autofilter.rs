@@ -4,6 +4,7 @@
 //! and AutoFilter management with full Excel API compatibility.
 
 use crate::{format_cell_value, AppState};
+use chrono::{Datelike, Local, NaiveDate};
 use engine::{CellValue, Grid};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
@@ -535,6 +536,143 @@ fn calculate_column_average(grid: &Grid, col: u32, start_row: u32, end_row: u32)
     }
 }
 
+/// Convert an Excel date serial number to a chrono NaiveDate.
+/// Excel epoch: 1899-12-30 (serial 0). Day 1 = 1900-01-01.
+fn serial_to_date(serial: f64) -> Option<NaiveDate> {
+    let base = NaiveDate::from_ymd_opt(1899, 12, 30)?;
+    let days = serial.floor() as i64;
+    base.checked_add_signed(chrono::Duration::days(days))
+}
+
+/// Check if a cell's date serial number matches a date-based dynamic filter criterion.
+fn matches_date_dynamic_filter(serial: f64, criteria: DynamicFilterCriteria) -> bool {
+    let cell_date = match serial_to_date(serial) {
+        Some(d) => d,
+        None => return false,
+    };
+
+    let today = Local::now().date_naive();
+
+    match criteria {
+        DynamicFilterCriteria::Today => cell_date == today,
+        DynamicFilterCriteria::Yesterday => {
+            cell_date == today.pred_opt().unwrap_or(today)
+        }
+        DynamicFilterCriteria::Tomorrow => {
+            cell_date == today.succ_opt().unwrap_or(today)
+        }
+        DynamicFilterCriteria::ThisWeek => {
+            let weekday_num = today.weekday().num_days_from_monday();
+            let week_start = today - chrono::Duration::days(weekday_num as i64);
+            let week_end = week_start + chrono::Duration::days(6);
+            cell_date >= week_start && cell_date <= week_end
+        }
+        DynamicFilterCriteria::LastWeek => {
+            let weekday_num = today.weekday().num_days_from_monday();
+            let this_week_start = today - chrono::Duration::days(weekday_num as i64);
+            let last_week_start = this_week_start - chrono::Duration::days(7);
+            let last_week_end = this_week_start - chrono::Duration::days(1);
+            cell_date >= last_week_start && cell_date <= last_week_end
+        }
+        DynamicFilterCriteria::NextWeek => {
+            let weekday_num = today.weekday().num_days_from_monday();
+            let this_week_start = today - chrono::Duration::days(weekday_num as i64);
+            let next_week_start = this_week_start + chrono::Duration::days(7);
+            let next_week_end = next_week_start + chrono::Duration::days(6);
+            cell_date >= next_week_start && cell_date <= next_week_end
+        }
+        DynamicFilterCriteria::ThisMonth => {
+            cell_date.year() == today.year() && cell_date.month() == today.month()
+        }
+        DynamicFilterCriteria::LastMonth => {
+            let (y, m) = if today.month() == 1 {
+                (today.year() - 1, 12)
+            } else {
+                (today.year(), today.month() - 1)
+            };
+            cell_date.year() == y && cell_date.month() == m
+        }
+        DynamicFilterCriteria::NextMonth => {
+            let (y, m) = if today.month() == 12 {
+                (today.year() + 1, 1)
+            } else {
+                (today.year(), today.month() + 1)
+            };
+            cell_date.year() == y && cell_date.month() == m
+        }
+        DynamicFilterCriteria::ThisQuarter => {
+            let q = (today.month() - 1) / 3;
+            let cq = (cell_date.month() - 1) / 3;
+            cell_date.year() == today.year() && cq == q
+        }
+        DynamicFilterCriteria::LastQuarter => {
+            let q = (today.month() - 1) / 3;
+            let (y, lq) = if q == 0 {
+                (today.year() - 1, 3)
+            } else {
+                (today.year(), q - 1)
+            };
+            let cq = (cell_date.month() - 1) / 3;
+            cell_date.year() == y && cq == lq
+        }
+        DynamicFilterCriteria::NextQuarter => {
+            let q = (today.month() - 1) / 3;
+            let (y, nq) = if q == 3 {
+                (today.year() + 1, 0)
+            } else {
+                (today.year(), q + 1)
+            };
+            let cq = (cell_date.month() - 1) / 3;
+            cell_date.year() == y && cq == nq
+        }
+        DynamicFilterCriteria::ThisYear => {
+            cell_date.year() == today.year()
+        }
+        DynamicFilterCriteria::LastYear => {
+            cell_date.year() == today.year() - 1
+        }
+        DynamicFilterCriteria::NextYear => {
+            cell_date.year() == today.year() + 1
+        }
+        DynamicFilterCriteria::YearToDate => {
+            let jan1 = NaiveDate::from_ymd_opt(today.year(), 1, 1).unwrap_or(today);
+            cell_date >= jan1 && cell_date <= today
+        }
+        // AllDatesInPeriod month variants - match the month regardless of year
+        DynamicFilterCriteria::AllDatesInPeriodJanuary => cell_date.month() == 1,
+        DynamicFilterCriteria::AllDatesInPeriodFebruary => cell_date.month() == 2,
+        DynamicFilterCriteria::AllDatesInPeriodMarch => cell_date.month() == 3,
+        DynamicFilterCriteria::AllDatesInPeriodApril => cell_date.month() == 4,
+        DynamicFilterCriteria::AllDatesInPeriodMay => cell_date.month() == 5,
+        DynamicFilterCriteria::AllDatesInPeriodJune => cell_date.month() == 6,
+        DynamicFilterCriteria::AllDatesInPeriodJuly => cell_date.month() == 7,
+        DynamicFilterCriteria::AllDatesInPeriodAugust => cell_date.month() == 8,
+        DynamicFilterCriteria::AllDatesInPeriodSeptember => cell_date.month() == 9,
+        DynamicFilterCriteria::AllDatesInPeriodOctober => cell_date.month() == 10,
+        DynamicFilterCriteria::AllDatesInPeriodNovember => cell_date.month() == 11,
+        DynamicFilterCriteria::AllDatesInPeriodDecember => cell_date.month() == 12,
+        // AllDatesInPeriod quarter variants - match the quarter regardless of year
+        DynamicFilterCriteria::AllDatesInPeriodQuarter1 => {
+            let m = cell_date.month();
+            m >= 1 && m <= 3
+        }
+        DynamicFilterCriteria::AllDatesInPeriodQuarter2 => {
+            let m = cell_date.month();
+            m >= 4 && m <= 6
+        }
+        DynamicFilterCriteria::AllDatesInPeriodQuarter3 => {
+            let m = cell_date.month();
+            m >= 7 && m <= 9
+        }
+        DynamicFilterCriteria::AllDatesInPeriodQuarter4 => {
+            let m = cell_date.month();
+            m >= 10 && m <= 12
+        }
+        // AboveAverage/BelowAverage/Unknown handled elsewhere
+        _ => false,
+    }
+}
+
 /// Check if a row should be visible based on all column filters.
 fn should_row_be_visible(
     grid: &Grid,
@@ -627,8 +765,48 @@ fn should_row_be_visible(
                                 return false;
                             }
                         }
-                        // TODO: Implement date-based dynamic filters
-                        _ => {}
+                        DynamicFilterCriteria::Today
+                        | DynamicFilterCriteria::Yesterday
+                        | DynamicFilterCriteria::Tomorrow
+                        | DynamicFilterCriteria::ThisWeek
+                        | DynamicFilterCriteria::LastWeek
+                        | DynamicFilterCriteria::NextWeek
+                        | DynamicFilterCriteria::ThisMonth
+                        | DynamicFilterCriteria::LastMonth
+                        | DynamicFilterCriteria::NextMonth
+                        | DynamicFilterCriteria::ThisQuarter
+                        | DynamicFilterCriteria::LastQuarter
+                        | DynamicFilterCriteria::NextQuarter
+                        | DynamicFilterCriteria::ThisYear
+                        | DynamicFilterCriteria::LastYear
+                        | DynamicFilterCriteria::NextYear
+                        | DynamicFilterCriteria::YearToDate
+                        | DynamicFilterCriteria::AllDatesInPeriodJanuary
+                        | DynamicFilterCriteria::AllDatesInPeriodFebruary
+                        | DynamicFilterCriteria::AllDatesInPeriodMarch
+                        | DynamicFilterCriteria::AllDatesInPeriodApril
+                        | DynamicFilterCriteria::AllDatesInPeriodMay
+                        | DynamicFilterCriteria::AllDatesInPeriodJune
+                        | DynamicFilterCriteria::AllDatesInPeriodJuly
+                        | DynamicFilterCriteria::AllDatesInPeriodAugust
+                        | DynamicFilterCriteria::AllDatesInPeriodSeptember
+                        | DynamicFilterCriteria::AllDatesInPeriodOctober
+                        | DynamicFilterCriteria::AllDatesInPeriodNovember
+                        | DynamicFilterCriteria::AllDatesInPeriodDecember
+                        | DynamicFilterCriteria::AllDatesInPeriodQuarter1
+                        | DynamicFilterCriteria::AllDatesInPeriodQuarter2
+                        | DynamicFilterCriteria::AllDatesInPeriodQuarter3
+                        | DynamicFilterCriteria::AllDatesInPeriodQuarter4 => {
+                            if let Some(serial) = get_cell_numeric_value(grid, row, abs_col) {
+                                if !matches_date_dynamic_filter(serial, dyn_criteria) {
+                                    return false;
+                                }
+                            } else {
+                                // Non-numeric cells never match date filters
+                                return false;
+                            }
+                        }
+                        DynamicFilterCriteria::Unknown => {}
                     }
                 }
             }

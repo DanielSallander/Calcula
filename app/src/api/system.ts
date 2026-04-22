@@ -10,6 +10,7 @@ import {
   saveFileAs,
   isFileModified,
   markFileModified,
+  updateWindowTitle,
   getCurrentFilePath,
 } from '../core/lib/file-api';
 
@@ -38,4 +39,7 @@ export const workspace = {
 
   /** Gets the current file path, or null if unsaved. */
   getCurrentPath: getCurrentFilePath,
+
+  /** Updates the window title to reflect filename and dirty state. */
+  updateTitle: updateWindowTitle,
 };

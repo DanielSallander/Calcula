@@ -45,6 +45,7 @@ import {
   IconSplitWindow,
   IconGoToSpecial,
   IconShowFormulas,
+  IconDisplayZeros,
   IconOtherOptions,
 } from '@api';
 
@@ -194,6 +195,13 @@ export function useViewMenu(): { menu: MenuDefinition; handlers: ViewMenuHandler
     emitAppEvent(AppEvents.SHOW_FORMULAS_TOGGLED, { showFormulas: newValue });
     emitAppEvent(AppEvents.GRID_REFRESH);
   }, [gridState.showFormulas]);
+
+  // Display Zeros handler
+  const handleToggleDisplayZeros = useCallback(() => {
+    const newValue = !gridState.displayZeros;
+    emitAppEvent(AppEvents.DISPLAY_ZEROS_TOGGLED, { displayZeros: newValue });
+    emitAppEvent(AppEvents.GRID_REFRESH);
+  }, [gridState.displayZeros]);
 
   // Activity Bar state
   const isActivityBarOpen = useIsActivityBarOpen();
@@ -345,6 +353,15 @@ export function useViewMenu(): { menu: MenuDefinition; handlers: ViewMenuHandler
     action: handleToggleShowFormulas,
     checked: gridState.showFormulas,
     shortcut: 'Ctrl+`',
+  });
+
+  // Display Zeros
+  items.push({
+    id: 'view.displayZeros',
+    label: 'Display Zeros',
+    icon: IconDisplayZeros,
+    action: handleToggleDisplayZeros,
+    checked: gridState.displayZeros,
   });
 
   const menu: MenuDefinition = {

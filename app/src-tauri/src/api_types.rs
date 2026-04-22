@@ -1952,3 +1952,14 @@ pub struct SupportedLocaleEntry {
     pub locale_id: String,
     pub display_name: String,
 }
+
+/// Bounding box of all non-empty cells in the active sheet.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UsedRangeResult {
+    pub start_row: u32,
+    pub start_col: u32,
+    pub end_row: u32,
+    pub end_col: u32,
+    pub empty: bool,
+}

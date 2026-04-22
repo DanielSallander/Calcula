@@ -4,6 +4,7 @@
 use crate::api_types::CellData;
 use crate::commands::utils::get_cell_internal_with_merge;
 use crate::AppState;
+use crate::persistence::FileState;
 use crate::pivot::types::PivotState;
 use engine::{Cell, GridSnapshot, UndoMergeRegion};
 use once_cell::sync::Lazy;
@@ -561,6 +562,7 @@ fn shift_col_dependencies_map(map: &mut HashMap<(u32, u32), HashSet<u32>>, from_
 #[tauri::command]
 pub fn insert_rows(
     state: State<AppState>,
+    file_state: State<FileState>,
     pivot_state: State<'_, PivotState>,
     row: u32,
     count: u32,
@@ -711,6 +713,9 @@ pub fn insert_rows(
         }
     }
     
+    // Mark workbook as dirty
+    if let Ok(mut modified) = file_state.is_modified.lock() { *modified = true; }
+
     Ok(result)
 }
 
@@ -719,6 +724,7 @@ pub fn insert_rows(
 #[tauri::command]
 pub fn insert_columns(
     state: State<AppState>,
+    file_state: State<FileState>,
     pivot_state: State<'_, PivotState>,
     col: u32,
     count: u32,
@@ -868,7 +874,10 @@ pub fn insert_columns(
             }
         }
     }
-    
+
+    // Mark workbook as dirty
+    if let Ok(mut modified) = file_state.is_modified.lock() { *modified = true; }
+
     Ok(result)
 }
 
@@ -1310,6 +1319,7 @@ fn shift_col_dependencies_map_for_delete(map: &mut HashMap<(u32, u32), HashSet<u
 #[tauri::command]
 pub fn delete_rows(
     state: State<AppState>,
+    file_state: State<FileState>,
     pivot_state: State<'_, PivotState>,
     row: u32,
     count: u32,
@@ -1484,6 +1494,9 @@ pub fn delete_rows(
         }
     }
     
+    // Mark workbook as dirty
+    if let Ok(mut modified) = file_state.is_modified.lock() { *modified = true; }
+
     Ok(result)
 }
 
@@ -1492,6 +1505,7 @@ pub fn delete_rows(
 #[tauri::command]
 pub fn delete_columns(
     state: State<AppState>,
+    file_state: State<FileState>,
     pivot_state: State<'_, PivotState>,
     col: u32,
     count: u32,
@@ -1665,6 +1679,9 @@ pub fn delete_columns(
             }
         }
     }
+
+    // Mark workbook as dirty
+    if let Ok(mut modified) = file_state.is_modified.lock() { *modified = true; }
 
     Ok(result)
 }

@@ -660,6 +660,14 @@ export const IconShowFormulas = (
   </svg>
 );
 
+/** 0 with slash (Display Zeros toggle) */
+export const IconDisplayZeros = (
+  <svg viewBox="0 0 16 16" fill={fill} stroke={stroke} strokeWidth="1.2" style={iconStyle}>
+    <rect x="1" y="2" width="14" height="12" rx="1" />
+    <text x="8" y="11.5" fontSize="9" fontWeight="600" fill={stroke} stroke="none" textAnchor="middle" fontFamily="sans-serif">0</text>
+  </svg>
+);
+
 /** Dashed line between pages (Page Breaks submenu) */
 export const IconPageBreaks = (
   <svg viewBox="0 0 16 16" fill={fill} stroke={stroke} strokeWidth="1.2" style={iconStyle}>

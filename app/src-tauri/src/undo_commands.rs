@@ -2,6 +2,7 @@
 // PURPOSE: Tauri commands for undo/redo operations.
 
 use crate::api_types::{CellData, MergedRegion};
+use crate::persistence::FileState;
 use crate::{format_cell_value, AppState};
 use engine::{CellChange, GridSnapshot, Transaction, UndoMergeRegion};
 use serde::Serialize;
@@ -92,7 +93,7 @@ pub fn get_undo_state(state: State<AppState>) -> UndoState {
 
 /// Perform undo operation.
 #[tauri::command]
-pub fn undo(state: State<AppState>) -> UndoResult {
+pub fn undo(state: State<AppState>, file_state: State<FileState>) -> UndoResult {
     let mut undo_stack = state.undo_stack.lock().unwrap();
     let mut grid = state.grid.lock().unwrap();
     let mut grids = state.grids.lock().unwrap();
@@ -272,6 +273,9 @@ pub fn undo(state: State<AppState>) -> UndoResult {
     // Push to redo stack
     undo_stack.push_redo(redo_transaction);
 
+    // Mark workbook as dirty (undo changes data state)
+    if let Ok(mut modified) = file_state.is_modified.lock() { *modified = true; }
+
     UndoResult {
         success: true,
         description: Some(description),
@@ -285,7 +289,7 @@ pub fn undo(state: State<AppState>) -> UndoResult {
 
 /// Perform redo operation.
 #[tauri::command]
-pub fn redo(state: State<AppState>) -> UndoResult {
+pub fn redo(state: State<AppState>, file_state: State<FileState>) -> UndoResult {
     let mut undo_stack = state.undo_stack.lock().unwrap();
     let mut grid = state.grid.lock().unwrap();
     let mut grids = state.grids.lock().unwrap();
@@ -460,6 +464,9 @@ pub fn redo(state: State<AppState>) -> UndoResult {
 
     // Push to undo stack (without clearing redo)
     undo_stack.push_undo_for_redo(undo_transaction);
+
+    // Mark workbook as dirty (redo changes data state)
+    if let Ok(mut modified) = file_state.is_modified.lock() { *modified = true; }
 
     UndoResult {
         success: true,

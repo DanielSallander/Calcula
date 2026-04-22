@@ -26,6 +26,7 @@ export const AppEvents = {
   // View mode events
   VIEW_MODE_CHANGED: "app:view-mode-changed",
   SHOW_FORMULAS_TOGGLED: "app:show-formulas-toggled",
+  DISPLAY_ZEROS_TOGGLED: "app:display-zeros-toggled",
 
   // Selection events
   SELECTION_CHANGED: "app:selection-changed",

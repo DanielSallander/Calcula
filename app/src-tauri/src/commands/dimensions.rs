@@ -2,12 +2,13 @@
 // PURPOSE: Managing row heights and column widths.
 
 use crate::api_types::DimensionData;
+use crate::persistence::FileState;
 use crate::AppState;
 use tauri::State;
 
 /// Set a column width.
 #[tauri::command]
-pub fn set_column_width(state: State<AppState>, col: u32, width: f64) {
+pub fn set_column_width(state: State<AppState>, file_state: State<FileState>, col: u32, width: f64) {
     let mut widths = state.column_widths.lock().unwrap();
     let mut undo_stack = state.undo_stack.lock().unwrap();
 
@@ -22,6 +23,9 @@ pub fn set_column_width(state: State<AppState>, col: u32, width: f64) {
 
     // Record undo
     undo_stack.record_column_width_change(col, previous_width);
+
+    // Mark workbook as dirty
+    if let Ok(mut modified) = file_state.is_modified.lock() { *modified = true; }
 }
 
 /// Get a column width.
@@ -43,7 +47,7 @@ pub fn get_all_column_widths(state: State<AppState>) -> Vec<DimensionData> {
 
 /// Set a row height.
 #[tauri::command]
-pub fn set_row_height(state: State<AppState>, row: u32, height: f64) {
+pub fn set_row_height(state: State<AppState>, file_state: State<FileState>, row: u32, height: f64) {
     let mut heights = state.row_heights.lock().unwrap();
     let mut undo_stack = state.undo_stack.lock().unwrap();
 
@@ -58,6 +62,9 @@ pub fn set_row_height(state: State<AppState>, row: u32, height: f64) {
 
     // Record undo
     undo_stack.record_row_height_change(row, previous_height);
+
+    // Mark workbook as dirty
+    if let Ok(mut modified) = file_state.is_modified.lock() { *modified = true; }
 }
 
 /// Get a row height.

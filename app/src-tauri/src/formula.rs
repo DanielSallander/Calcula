@@ -42,6 +42,12 @@ pub fn get_functions_by_category(category: String) -> FunctionListResult {
                 category: "Math".to_string(),
             },
             FunctionInfo {
+                name: "PRODUCT".to_string(),
+                syntax: "PRODUCT(number1, [number2], ...)".to_string(),
+                description: "Multiplies all the numbers given as arguments".to_string(),
+                category: "Math".to_string(),
+            },
+            FunctionInfo {
                 name: "AVERAGE".to_string(),
                 syntax: "AVERAGE(number1, [number2], ...)".to_string(),
                 description: "Returns the average of numbers".to_string(),
@@ -1283,6 +1289,80 @@ pub fn get_functions_by_category(category: String) -> FunctionListResult {
                 category: "File".to_string(),
             },
         ],
+        "database" => vec![
+            FunctionInfo {
+                name: "DAVERAGE".to_string(),
+                syntax: "DAVERAGE(database, field, criteria)".to_string(),
+                description: "Averages values in a column of a list or database that match conditions".to_string(),
+                category: "Database".to_string(),
+            },
+            FunctionInfo {
+                name: "DCOUNT".to_string(),
+                syntax: "DCOUNT(database, field, criteria)".to_string(),
+                description: "Counts cells containing numbers in a database that match conditions".to_string(),
+                category: "Database".to_string(),
+            },
+            FunctionInfo {
+                name: "DCOUNTA".to_string(),
+                syntax: "DCOUNTA(database, field, criteria)".to_string(),
+                description: "Counts nonblank cells in a database that match conditions".to_string(),
+                category: "Database".to_string(),
+            },
+            FunctionInfo {
+                name: "DGET".to_string(),
+                syntax: "DGET(database, field, criteria)".to_string(),
+                description: "Extracts a single value from a database that matches conditions".to_string(),
+                category: "Database".to_string(),
+            },
+            FunctionInfo {
+                name: "DMAX".to_string(),
+                syntax: "DMAX(database, field, criteria)".to_string(),
+                description: "Returns the maximum value in a database that matches conditions".to_string(),
+                category: "Database".to_string(),
+            },
+            FunctionInfo {
+                name: "DMIN".to_string(),
+                syntax: "DMIN(database, field, criteria)".to_string(),
+                description: "Returns the minimum value in a database that matches conditions".to_string(),
+                category: "Database".to_string(),
+            },
+            FunctionInfo {
+                name: "DPRODUCT".to_string(),
+                syntax: "DPRODUCT(database, field, criteria)".to_string(),
+                description: "Multiplies values in a database that match conditions".to_string(),
+                category: "Database".to_string(),
+            },
+            FunctionInfo {
+                name: "DSTDEV".to_string(),
+                syntax: "DSTDEV(database, field, criteria)".to_string(),
+                description: "Estimates standard deviation based on a sample from matching database entries".to_string(),
+                category: "Database".to_string(),
+            },
+            FunctionInfo {
+                name: "DSTDEVP".to_string(),
+                syntax: "DSTDEVP(database, field, criteria)".to_string(),
+                description: "Calculates standard deviation based on the entire population of matching database entries".to_string(),
+                category: "Database".to_string(),
+            },
+            FunctionInfo {
+                name: "DSUM".to_string(),
+                syntax: "DSUM(database, field, criteria)".to_string(),
+                description: "Sums values in a database that match conditions".to_string(),
+                category: "Database".to_string(),
+            },
+            FunctionInfo {
+                name: "DVAR".to_string(),
+                syntax: "DVAR(database, field, criteria)".to_string(),
+                description: "Estimates variance based on a sample from matching database entries".to_string(),
+                category: "Database".to_string(),
+            },
+            FunctionInfo {
+                name: "DVARP".to_string(),
+                syntax: "DVARP(database, field, criteria)".to_string(),
+                description: "Calculates variance based on the entire population of matching database entries".to_string(),
+                category: "Database".to_string(),
+            },
+        ],
         _ => vec![],
     };
 
@@ -1298,7 +1378,7 @@ pub fn get_all_functions() -> FunctionListResult {
     let mut all_functions = Vec::new();
 
     // Collect from all categories
-    for category in &["math", "logical", "text", "lookup", "info", "date", "statistical", "financial", "engineering", "matrix", "dynamic", "ui", "file"] {
+    for category in &["math", "logical", "text", "lookup", "info", "date", "statistical", "financial", "engineering", "matrix", "dynamic", "ui", "file", "database"] {
         let result = get_functions_by_category(category.to_string());
         all_functions.extend(result.functions);
     }
@@ -1318,6 +1398,7 @@ pub fn get_function_template(function_name: String) -> String {
         "SUMIF" => "=SUMIF(, )".to_string(),
         "SUMIFS" => "=SUMIFS(, , )".to_string(),
         "SUMPRODUCT" => "=SUMPRODUCT()".to_string(),
+        "PRODUCT" => "=PRODUCT()".to_string(),
         "AVERAGE" => "=AVERAGE()".to_string(),
         "AVERAGEIF" => "=AVERAGEIF(, )".to_string(),
         "AVERAGEIFS" => "=AVERAGEIFS(, , )".to_string(),
@@ -1542,6 +1623,20 @@ pub fn get_function_template(function_name: String) -> String {
         "FILEREAD" => "=FILEREAD(\"\")".to_string(),
         "FILELINES" => "=FILELINES(\"\")".to_string(),
         "FILEEXISTS" => "=FILEEXISTS(\"\")".to_string(),
+
+        // Database functions
+        "DAVERAGE" => "=DAVERAGE(, , )".to_string(),
+        "DCOUNT" => "=DCOUNT(, , )".to_string(),
+        "DCOUNTA" => "=DCOUNTA(, , )".to_string(),
+        "DGET" => "=DGET(, , )".to_string(),
+        "DMAX" => "=DMAX(, , )".to_string(),
+        "DMIN" => "=DMIN(, , )".to_string(),
+        "DPRODUCT" => "=DPRODUCT(, , )".to_string(),
+        "DSTDEV" => "=DSTDEV(, , )".to_string(),
+        "DSTDEVP" => "=DSTDEVP(, , )".to_string(),
+        "DSUM" => "=DSUM(, , )".to_string(),
+        "DVAR" => "=DVAR(, , )".to_string(),
+        "DVARP" => "=DVARP(, , )".to_string(),
 
         // Default: generic function call
         _ => format!("={}()", function_name.to_uppercase()),

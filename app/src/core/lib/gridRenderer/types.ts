@@ -135,4 +135,6 @@ export interface RenderState {
   splitViewport?: Viewport;
   /** Whether to show raw formulas instead of calculated values */
   showFormulas?: boolean;
+  /** Whether to display zero values in cells (when false, zeros appear as blank) */
+  displayZeros?: boolean;
 }

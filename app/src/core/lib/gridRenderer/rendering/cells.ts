@@ -605,9 +605,18 @@ export function drawCellText(state: RenderState): void {
 
       // In Show Formulas mode, display "=formula" for formula cells
       const rawDisplay = cell.display ?? "";
-      const displayValue = (state.showFormulas && cell.formula)
+      let displayValue = (state.showFormulas && cell.formula)
         ? cell.formula
         : rawDisplay;
+
+      // In Display Zeros = false mode, hide zero values for non-formula cells
+      if (state.displayZeros === false && !cell.formula && displayValue !== "") {
+        const num = Number(displayValue);
+        if (num === 0 && !isNaN(num)) {
+          displayValue = "";
+        }
+      }
+
       const isEmpty = displayValue === "";
 
       // For empty cells with default style, skip entirely (unless interceptors or decorations exist)

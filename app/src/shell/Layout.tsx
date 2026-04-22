@@ -26,10 +26,12 @@ import {
   setSplitConfig,
   setViewMode,
   setShowFormulas,
+  setDisplayZeros,
   ExtensionRegistry,
   AppEvents,
   onAppEvent,
 } from "../api";
+import { updateWindowTitle } from "../core/lib/file-api";
 import type { ViewMode } from "../core/types";
 // Extension management
 import { useExtensionInitializer, useExtensions } from "./hooks/useExtensions";
@@ -157,6 +159,32 @@ function LayoutInner(): React.ReactElement {
     });
     return cleanup;
   }, [dispatch]);
+
+  // Bridge: sync display zeros mode from API events into Core state.
+  useEffect(() => {
+    const cleanup = onAppEvent<{
+      displayZeros: boolean;
+    }>(AppEvents.DISPLAY_ZEROS_TOGGLED, (detail) => {
+      dispatch(setDisplayZeros(detail.displayZeros));
+    });
+    return cleanup;
+  }, [dispatch]);
+
+  // Window title tracking: update on cells-updated, rows/cols inserted/deleted, and dirty state changes.
+  useEffect(() => {
+    // Set initial title on mount
+    updateWindowTitle();
+
+    const cleanups = [
+      onAppEvent(AppEvents.CELLS_UPDATED, () => updateWindowTitle()),
+      onAppEvent(AppEvents.ROWS_INSERTED, () => updateWindowTitle()),
+      onAppEvent(AppEvents.ROWS_DELETED, () => updateWindowTitle()),
+      onAppEvent(AppEvents.COLUMNS_INSERTED, () => updateWindowTitle()),
+      onAppEvent(AppEvents.COLUMNS_DELETED, () => updateWindowTitle()),
+      onAppEvent(AppEvents.DIRTY_STATE_CHANGED, () => updateWindowTitle()),
+    ];
+    return () => cleanups.forEach((fn) => fn());
+  }, []);
 
   // DEV ONLY: Load mock data on mount if environment variable is set
   // DELETE THIS BLOCK when done testing

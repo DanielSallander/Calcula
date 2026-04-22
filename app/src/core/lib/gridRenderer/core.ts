@@ -398,9 +398,17 @@ function drawCellTextZone(
       const cell = cells.get(key);
       
       // In Show Formulas mode, use "=formula" for formula cells
-      const cellDisplayText = (state.showFormulas && cell?.formula)
+      let cellDisplayText = (state.showFormulas && cell?.formula)
         ? cell.formula
         : cell?.display ?? "";
+
+      // In Display Zeros = false mode, hide zero values for non-formula cells
+      if (state.displayZeros === false && cell && !cell.formula && cellDisplayText !== "") {
+        const num = Number(cellDisplayText);
+        if (num === 0 && !isNaN(num)) {
+          cellDisplayText = "";
+        }
+      }
 
       if (!cell || cellDisplayText === "") {
         baseX += colWidth;
@@ -579,6 +587,8 @@ export function renderGrid(
   pageSetup?: { marginTop: number; marginBottom: number; marginLeft: number; marginRight: number; paperWidth: number; paperHeight: number; header: string; footer: string },
   // Show Formulas mode - display raw formulas instead of calculated values
   showFormulas?: boolean,
+  // Display Zeros mode - when false, zero values display as blank
+  displayZeros?: boolean,
 ): void {
   const rowHeaderWidth = config.rowHeaderWidth || 50;
   const colHeaderHeight = config.colHeaderHeight || 24;
@@ -636,6 +646,8 @@ export function renderGrid(
     splitViewport: hasSplit ? splitViewport : undefined,
     // Show Formulas mode
     showFormulas: showFormulas || false,
+    // Display Zeros mode
+    displayZeros: displayZeros !== undefined ? displayZeros : true,
   };
 
   ctx.fillStyle = theme.cellBackground;

@@ -30,6 +30,8 @@ export async function saveFileAs(): Promise<string | null> {
       emitAppEvent(AppEvents.BEFORE_SAVE, { path });
       await tracedInvoke('save_file', { path });
       emitAppEvent(AppEvents.AFTER_SAVE, { path });
+      emitAppEvent(AppEvents.DIRTY_STATE_CHANGED, { isDirty: false });
+      updateWindowTitle();
       return path;
     }
     return null;
@@ -47,6 +49,8 @@ export async function saveFile(): Promise<string | null> {
       emitAppEvent(AppEvents.BEFORE_SAVE, { path: currentPath });
       await tracedInvoke('save_file', { path: currentPath });
       emitAppEvent(AppEvents.AFTER_SAVE, { path: currentPath });
+      emitAppEvent(AppEvents.DIRTY_STATE_CHANGED, { isDirty: false });
+      updateWindowTitle();
       return currentPath;
     }
 
@@ -69,6 +73,8 @@ export async function openFile(): Promise<CellData[] | null> {
       emitAppEvent(AppEvents.BEFORE_OPEN, { path });
       const cells = await tracedInvoke<CellData[]>('open_file', { path });
       emitAppEvent(AppEvents.AFTER_OPEN, { path });
+      emitAppEvent(AppEvents.DIRTY_STATE_CHANGED, { isDirty: false });
+      updateWindowTitle();
       return cells;
     }
     return null;
@@ -83,6 +89,8 @@ export async function newFile(): Promise<void> {
     emitAppEvent(AppEvents.BEFORE_NEW);
     await tracedInvoke('new_file', {});
     emitAppEvent(AppEvents.AFTER_NEW);
+    emitAppEvent(AppEvents.DIRTY_STATE_CHANGED, { isDirty: false });
+    updateWindowTitle();
   } catch (error) {
     console.error('[FILE] newFile error:', error);
     throw error;
@@ -99,4 +107,23 @@ export async function isFileModified(): Promise<boolean> {
 
 export async function markFileModified(): Promise<void> {
   await tracedInvoke('mark_file_modified', {});
+  emitAppEvent(AppEvents.DIRTY_STATE_CHANGED, { isDirty: true });
+}
+
+/**
+ * Update the window title to reflect the current file name and dirty state.
+ * Format: "filename - Calcula" or "filename * - Calcula" when dirty.
+ */
+export async function updateWindowTitle(): Promise<void> {
+  const [filePath, isDirty] = await Promise.all([
+    getCurrentFilePath(),
+    isFileModified(),
+  ]);
+
+  const fileName = filePath
+    ? filePath.replace(/\\/g, '/').split('/').pop() || 'Untitled'
+    : 'Untitled';
+
+  const dirtyIndicator = isDirty ? ' *' : '';
+  document.title = `${fileName}${dirtyIndicator} - Calcula`;
 }

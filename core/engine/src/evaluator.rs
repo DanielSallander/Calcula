@@ -1115,6 +1115,7 @@ impl<'a> Evaluator<'a> {
             BuiltinFunction::Int => self.fn_int(args),
             BuiltinFunction::Sign => self.fn_sign(args),
             BuiltinFunction::SumProduct => self.fn_sumproduct(args),
+            BuiltinFunction::Product => self.fn_product(args),
             BuiltinFunction::Rand => self.fn_rand(args),
             BuiltinFunction::RandBetween => self.fn_randbetween(args),
             BuiltinFunction::Pi => EvalResult::Number(std::f64::consts::PI),
@@ -1569,6 +1570,20 @@ impl<'a> Evaluator<'a> {
             BuiltinFunction::Minverse => self.fn_minverse(args),
             BuiltinFunction::Munit => self.fn_munit(args),
 
+            // Database functions
+            BuiltinFunction::DAverage => self.fn_daverage(args),
+            BuiltinFunction::DCount => self.fn_dcount(args),
+            BuiltinFunction::DCountA => self.fn_dcounta(args),
+            BuiltinFunction::DGet => self.fn_dget(args),
+            BuiltinFunction::DMax => self.fn_dmax(args),
+            BuiltinFunction::DMin => self.fn_dmin(args),
+            BuiltinFunction::DProduct => self.fn_dproduct(args),
+            BuiltinFunction::DStdev => self.fn_dstdev(args),
+            BuiltinFunction::DStdevP => self.fn_dstdevp(args),
+            BuiltinFunction::DSum => self.fn_dsum(args),
+            BuiltinFunction::DVar => self.fn_dvar(args),
+            BuiltinFunction::DVarP => self.fn_dvarp(args),
+
             // Array reshaping
             BuiltinFunction::Expand => self.fn_expand(args),
             BuiltinFunction::VStack => self.fn_vstack(args),
@@ -1703,6 +1718,17 @@ impl<'a> Evaluator<'a> {
             Ok(numbers) => {
                 let sum: f64 = numbers.iter().sum();
                 EvalResult::Number(sum)
+            }
+            Err(e) => EvalResult::Error(e),
+        }
+    }
+
+    fn fn_product(&self, args: &[Expression]) -> EvalResult {
+        match self.collect_numbers(args) {
+            Ok(numbers) if numbers.is_empty() => EvalResult::Number(0.0),
+            Ok(numbers) => {
+                let product: f64 = numbers.iter().product();
+                EvalResult::Number(product)
             }
             Err(e) => EvalResult::Error(e),
         }
@@ -11044,6 +11070,356 @@ impl<'a> Evaluator<'a> {
                 }
             }
             None => EvalResult::Number(1.0),
+        }
+    }
+
+    // ==================== Database Functions ====================
+
+    /// Resolves database function arguments and returns the filtered values from the target column.
+    /// All D-functions take 3 args: database (range), field (column name or 1-based index), criteria (range).
+    /// The database range has headers in row 0 and data in subsequent rows.
+    /// The criteria range has headers in row 0 matching database headers, with filter values below.
+    /// Within a criteria row, conditions are AND'd. Across rows, conditions are OR'd.
+    fn resolve_database_args(&self, args: &[Expression]) -> Result<Vec<EvalResult>, CellError> {
+        if args.len() != 3 {
+            return Err(CellError::Value);
+        }
+
+        // 1. Evaluate database range as 2D
+        let (db_rows, db_cols, db_flat) = self.eval_range_2d(&args[0]);
+        if db_rows < 2 || db_cols == 0 {
+            return Err(CellError::Value);
+        }
+
+        // 2. Extract headers from row 0 of the database
+        let mut db_headers: Vec<String> = Vec::with_capacity(db_cols);
+        for c in 0..db_cols {
+            db_headers.push(db_flat[c].as_text().to_uppercase());
+        }
+
+        // 3. Evaluate field argument to determine target column index
+        let field_val = self.evaluate(&args[1]);
+        let field_col = match &field_val {
+            EvalResult::Number(n) => {
+                let idx = *n as i64;
+                if idx < 1 || idx as usize > db_cols {
+                    return Err(CellError::Value);
+                }
+                (idx - 1) as usize
+            }
+            EvalResult::Text(s) => {
+                let upper = s.to_uppercase();
+                match db_headers.iter().position(|h| *h == upper) {
+                    Some(pos) => pos,
+                    None => return Err(CellError::Value),
+                }
+            }
+            _ => return Err(CellError::Value),
+        };
+
+        // 4. Evaluate criteria range as 2D
+        let (cr_rows, cr_cols, cr_flat) = self.eval_range_2d(&args[2]);
+        if cr_rows < 1 || cr_cols == 0 {
+            return Err(CellError::Value);
+        }
+
+        // 5. Extract criteria headers and map to database column indices
+        let mut cr_col_map: Vec<Option<usize>> = Vec::with_capacity(cr_cols);
+        for c in 0..cr_cols {
+            let header = cr_flat[c].as_text().to_uppercase();
+            let db_col_idx = db_headers.iter().position(|h| *h == header);
+            cr_col_map.push(db_col_idx);
+        }
+
+        // 6. Apply criteria filtering
+        // If criteria has only 1 row (just headers, no conditions), all data rows match
+        let criteria_data_rows = if cr_rows > 1 { cr_rows - 1 } else { 0 };
+
+        let mut matching_row_indices: Vec<usize> = Vec::new();
+
+        if criteria_data_rows == 0 {
+            // No criteria conditions: all data rows match
+            for r in 0..(db_rows - 1) {
+                matching_row_indices.push(r);
+            }
+        } else {
+            // For each data row in the database (skip header row)
+            for data_row in 0..(db_rows - 1) {
+                let db_row_offset = (data_row + 1) * db_cols; // +1 to skip header
+
+                // Check if any criteria row matches (OR across criteria rows)
+                let mut any_criteria_row_matches = false;
+                for cr_row in 0..criteria_data_rows {
+                    let cr_row_offset = (cr_row + 1) * cr_cols; // +1 to skip criteria header
+
+                    // All conditions in this criteria row must match (AND within row)
+                    let mut all_conditions_match = true;
+                    for cr_col in 0..cr_cols {
+                        let cr_val = &cr_flat[cr_row_offset + cr_col];
+
+                        // Skip blank criteria cells
+                        let is_blank = match cr_val {
+                            EvalResult::Text(s) => s.is_empty(),
+                            EvalResult::Number(_) => false,
+                            EvalResult::Boolean(_) => false,
+                            _ => true,
+                        };
+                        if is_blank {
+                            continue;
+                        }
+
+                        // Find which database column this criteria column maps to
+                        let db_col = match cr_col_map[cr_col] {
+                            Some(idx) => idx,
+                            None => {
+                                all_conditions_match = false;
+                                break;
+                            }
+                        };
+
+                        // Get the database cell value for this row/column
+                        let db_val = &db_flat[db_row_offset + db_col];
+
+                        // Parse criteria and test match
+                        let criteria = self.parse_criteria(cr_val);
+                        if !self.matches_criteria(db_val, &criteria) {
+                            all_conditions_match = false;
+                            break;
+                        }
+                    }
+
+                    if all_conditions_match {
+                        any_criteria_row_matches = true;
+                        break; // OR: only need one criteria row to match
+                    }
+                }
+
+                if any_criteria_row_matches {
+                    matching_row_indices.push(data_row);
+                }
+            }
+        }
+
+        // 7. Extract values from the target column for matching rows
+        let mut result_values: Vec<EvalResult> = Vec::with_capacity(matching_row_indices.len());
+        for &data_row in &matching_row_indices {
+            let db_row_offset = (data_row + 1) * db_cols; // +1 to skip header
+            result_values.push(db_flat[db_row_offset + field_col].clone());
+        }
+
+        Ok(result_values)
+    }
+
+    /// DSUM(database, field, criteria) - Sums values in matching rows
+    fn fn_dsum(&self, args: &[Expression]) -> EvalResult {
+        match self.resolve_database_args(args) {
+            Err(e) => EvalResult::Error(e),
+            Ok(values) => {
+                let mut total = 0.0;
+                for v in &values {
+                    if let Some(n) = v.as_number() {
+                        total += n;
+                    }
+                }
+                EvalResult::Number(total)
+            }
+        }
+    }
+
+    /// DAVERAGE(database, field, criteria) - Averages values in matching rows
+    fn fn_daverage(&self, args: &[Expression]) -> EvalResult {
+        match self.resolve_database_args(args) {
+            Err(e) => EvalResult::Error(e),
+            Ok(values) => {
+                let mut total = 0.0;
+                let mut count = 0usize;
+                for v in &values {
+                    if let Some(n) = v.as_number() {
+                        total += n;
+                        count += 1;
+                    }
+                }
+                if count == 0 {
+                    EvalResult::Error(CellError::Div0)
+                } else {
+                    EvalResult::Number(total / count as f64)
+                }
+            }
+        }
+    }
+
+    /// DCOUNT(database, field, criteria) - Counts numeric values in matching rows
+    fn fn_dcount(&self, args: &[Expression]) -> EvalResult {
+        match self.resolve_database_args(args) {
+            Err(e) => EvalResult::Error(e),
+            Ok(values) => {
+                let count = values.iter().filter(|v| v.as_number().is_some()).count();
+                EvalResult::Number(count as f64)
+            }
+        }
+    }
+
+    /// DCOUNTA(database, field, criteria) - Counts non-blank values in matching rows
+    fn fn_dcounta(&self, args: &[Expression]) -> EvalResult {
+        match self.resolve_database_args(args) {
+            Err(e) => EvalResult::Error(e),
+            Ok(values) => {
+                let count = values.iter().filter(|v| {
+                    match v {
+                        EvalResult::Text(s) => !s.is_empty(),
+                        EvalResult::Error(_) => false,
+                        _ => true,
+                    }
+                }).count();
+                EvalResult::Number(count as f64)
+            }
+        }
+    }
+
+    /// DGET(database, field, criteria) - Returns single matching value; error if 0 or >1
+    fn fn_dget(&self, args: &[Expression]) -> EvalResult {
+        match self.resolve_database_args(args) {
+            Err(e) => EvalResult::Error(e),
+            Ok(values) => {
+                if values.len() == 1 {
+                    values.into_iter().next().unwrap()
+                } else if values.is_empty() {
+                    EvalResult::Error(CellError::Value)
+                } else {
+                    // Multiple matches: Excel returns #NUM!, we use #VALUE!
+                    EvalResult::Error(CellError::Value)
+                }
+            }
+        }
+    }
+
+    /// DMAX(database, field, criteria) - Maximum value in matching rows
+    fn fn_dmax(&self, args: &[Expression]) -> EvalResult {
+        match self.resolve_database_args(args) {
+            Err(e) => EvalResult::Error(e),
+            Ok(values) => {
+                let mut max_val: Option<f64> = None;
+                for v in &values {
+                    if let Some(n) = v.as_number() {
+                        max_val = Some(match max_val {
+                            Some(current) => if n > current { n } else { current },
+                            None => n,
+                        });
+                    }
+                }
+                match max_val {
+                    Some(n) => EvalResult::Number(n),
+                    None => EvalResult::Number(0.0),
+                }
+            }
+        }
+    }
+
+    /// DMIN(database, field, criteria) - Minimum value in matching rows
+    fn fn_dmin(&self, args: &[Expression]) -> EvalResult {
+        match self.resolve_database_args(args) {
+            Err(e) => EvalResult::Error(e),
+            Ok(values) => {
+                let mut min_val: Option<f64> = None;
+                for v in &values {
+                    if let Some(n) = v.as_number() {
+                        min_val = Some(match min_val {
+                            Some(current) => if n < current { n } else { current },
+                            None => n,
+                        });
+                    }
+                }
+                match min_val {
+                    Some(n) => EvalResult::Number(n),
+                    None => EvalResult::Number(0.0),
+                }
+            }
+        }
+    }
+
+    /// DPRODUCT(database, field, criteria) - Product of values in matching rows
+    fn fn_dproduct(&self, args: &[Expression]) -> EvalResult {
+        match self.resolve_database_args(args) {
+            Err(e) => EvalResult::Error(e),
+            Ok(values) => {
+                let mut product = 1.0;
+                let mut has_number = false;
+                for v in &values {
+                    if let Some(n) = v.as_number() {
+                        product *= n;
+                        has_number = true;
+                    }
+                }
+                if has_number {
+                    EvalResult::Number(product)
+                } else {
+                    EvalResult::Number(0.0)
+                }
+            }
+        }
+    }
+
+    /// DSTDEV(database, field, criteria) - Sample standard deviation of matching rows
+    fn fn_dstdev(&self, args: &[Expression]) -> EvalResult {
+        match self.resolve_database_args(args) {
+            Err(e) => EvalResult::Error(e),
+            Ok(values) => {
+                let nums: Vec<f64> = values.iter().filter_map(|v| v.as_number()).collect();
+                if nums.len() < 2 {
+                    return EvalResult::Error(CellError::Div0);
+                }
+                let mean = nums.iter().sum::<f64>() / nums.len() as f64;
+                let variance = nums.iter().map(|x| (x - mean).powi(2)).sum::<f64>() / (nums.len() - 1) as f64;
+                EvalResult::Number(variance.sqrt())
+            }
+        }
+    }
+
+    /// DSTDEVP(database, field, criteria) - Population standard deviation of matching rows
+    fn fn_dstdevp(&self, args: &[Expression]) -> EvalResult {
+        match self.resolve_database_args(args) {
+            Err(e) => EvalResult::Error(e),
+            Ok(values) => {
+                let nums: Vec<f64> = values.iter().filter_map(|v| v.as_number()).collect();
+                if nums.is_empty() {
+                    return EvalResult::Error(CellError::Div0);
+                }
+                let mean = nums.iter().sum::<f64>() / nums.len() as f64;
+                let variance = nums.iter().map(|x| (x - mean).powi(2)).sum::<f64>() / nums.len() as f64;
+                EvalResult::Number(variance.sqrt())
+            }
+        }
+    }
+
+    /// DVAR(database, field, criteria) - Sample variance of matching rows
+    fn fn_dvar(&self, args: &[Expression]) -> EvalResult {
+        match self.resolve_database_args(args) {
+            Err(e) => EvalResult::Error(e),
+            Ok(values) => {
+                let nums: Vec<f64> = values.iter().filter_map(|v| v.as_number()).collect();
+                if nums.len() < 2 {
+                    return EvalResult::Error(CellError::Div0);
+                }
+                let mean = nums.iter().sum::<f64>() / nums.len() as f64;
+                let variance = nums.iter().map(|x| (x - mean).powi(2)).sum::<f64>() / (nums.len() - 1) as f64;
+                EvalResult::Number(variance)
+            }
+        }
+    }
+
+    /// DVARP(database, field, criteria) - Population variance of matching rows
+    fn fn_dvarp(&self, args: &[Expression]) -> EvalResult {
+        match self.resolve_database_args(args) {
+            Err(e) => EvalResult::Error(e),
+            Ok(values) => {
+                let nums: Vec<f64> = values.iter().filter_map(|v| v.as_number()).collect();
+                if nums.is_empty() {
+                    return EvalResult::Error(CellError::Div0);
+                }
+                let mean = nums.iter().sum::<f64>() / nums.len() as f64;
+                let variance = nums.iter().map(|x| (x - mean).powi(2)).sum::<f64>() / nums.len() as f64;
+                EvalResult::Number(variance)
+            }
         }
     }
 }

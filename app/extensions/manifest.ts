@@ -45,6 +45,8 @@ import SubtotalsExtension from "./Subtotals";
 import CsvImportExportExtension from "./CsvImportExport";
 import WatchWindowExtension from "./WatchWindow";
 import CalculationOptionsExtension from "./CalculationOptions";
+import EditingOptionsExtension from "./EditingOptions";
+import HyperlinksExtension from "./Hyperlinks";
 import ReviewExtension from "./Review";
 import EvaluateFormulaExtension from "./EvaluateFormula";
 import FormulaVisualizerExtension from "./FormulaVisualizer";
@@ -144,6 +146,8 @@ export const builtInExtensions: ExtensionModule[] = [
   CsvImportExportExtension,
   WatchWindowExtension,
   CalculationOptionsExtension,
+  EditingOptionsExtension,
+  HyperlinksExtension,
   ReviewExtension,
   EvaluateFormulaExtension,
   FormulaVisualizerExtension,

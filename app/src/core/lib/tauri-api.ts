@@ -15,6 +15,7 @@ import type {
   FunctionInfo,
   UpdateCellResult,
   SpillRangeInfo,
+  UsedRangeResult,
 } from "../types";
 import { isSheetGroupingActive, getSelectedSheetIndices } from "../state/sheetGrouping";
 
@@ -224,6 +225,10 @@ export async function getGridBounds(): Promise<[number, number]> {
 
 export async function getCellCount(): Promise<number> {
   return invoke<number>("get_cell_count");
+}
+
+export async function getUsedRange(): Promise<UsedRangeResult> {
+  return invoke<UsedRangeResult>("get_used_range");
 }
 
 /**
