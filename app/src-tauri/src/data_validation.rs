@@ -376,6 +376,7 @@ pub fn validate_cell_value(
     cell_value: &CellValue,
     validation: &DataValidation,
     list_resolver: Option<&dyn Fn(&ListSource) -> Vec<String>>,
+    formula_evaluator: Option<&dyn Fn(&str) -> CellValue>,
 ) -> bool {
     // Handle blanks
     if matches!(cell_value, CellValue::Empty) {
@@ -463,11 +464,18 @@ pub fn validate_cell_value(
             check_numeric_rule(length, rule)
         }
 
-        DataValidationRule::Custom(_rule) => {
-            // Custom formulas require formula evaluation context
-            // For now, we'll return true and implement full formula evaluation later
-            // when we have access to the evaluator context
-            true
+        DataValidationRule::Custom(rule) => {
+            if let Some(evaluator) = formula_evaluator {
+                let result = evaluator(&rule.formula);
+                match result {
+                    CellValue::Number(n) => n != 0.0,
+                    CellValue::Boolean(b) => b,
+                    _ => false,
+                }
+            } else {
+                // No evaluator available - assume valid
+                true
+            }
         }
     }
 }
@@ -695,7 +703,12 @@ pub fn validate_cell(
         resolve_list_source(source, grids_ref, sheet_names_ref, active_sheet)
     };
 
-    let is_valid = validate_cell_value(&cell_value, &validation, Some(&resolver));
+    // Create a formula evaluator for custom validation
+    let formula_eval = |formula: &str| -> CellValue {
+        crate::evaluate_formula_multi_sheet(grids_ref, sheet_names_ref, active_sheet, formula)
+    };
+
+    let is_valid = validate_cell_value(&cell_value, &validation, Some(&resolver), Some(&formula_eval));
 
     CellValidationResult {
         is_valid,
@@ -752,6 +765,11 @@ pub fn get_invalid_cells(
                 resolve_list_source(source, grids_ref, sheet_names_ref, active_sheet)
             };
 
+            // Create a formula evaluator for custom validation
+            let formula_eval = |formula: &str| -> CellValue {
+                crate::evaluate_formula_multi_sheet(grids_ref, sheet_names_ref, active_sheet, formula)
+            };
+
             // Check each validation range
             for vr in sheet_validations {
                 for row in vr.start_row..=vr.end_row {
@@ -762,7 +780,7 @@ pub fn get_invalid_cells(
                             .map(|c| c.value.clone())
                             .unwrap_or(CellValue::Empty);
 
-                        if !validate_cell_value(&cell_value, &vr.validation, Some(&resolver)) {
+                        if !validate_cell_value(&cell_value, &vr.validation, Some(&resolver), Some(&formula_eval)) {
                             invalid_cells.push((row, col));
                         }
                     }
@@ -885,7 +903,12 @@ pub fn validate_pending_value(
         resolve_list_source(source, grids_ref, sheet_names_ref, active_sheet)
     };
 
-    let is_valid = validate_cell_value(&cell_value, &validation, Some(&resolver));
+    // Create a formula evaluator for custom validation
+    let formula_eval = |formula: &str| -> CellValue {
+        crate::evaluate_formula_multi_sheet(grids_ref, sheet_names_ref, active_sheet, formula)
+    };
+
+    let is_valid = validate_cell_value(&cell_value, &validation, Some(&resolver), Some(&formula_eval));
 
     CellValidationResult {
         is_valid,

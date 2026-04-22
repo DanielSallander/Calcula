@@ -188,6 +188,7 @@ mod tests {
             default_row_height: 24.0,
             default_column_width: 100.0,
             properties: persistence::WorkbookProperties::default(),
+            charts: Vec::new(),
         }
     }
 

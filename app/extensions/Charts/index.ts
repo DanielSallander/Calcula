@@ -43,6 +43,7 @@ import {
   resizeChart,
   deleteChart,
   setActiveSheetIndex,
+  loadChartsFromBackend,
 } from "./lib/chartStore";
 import {
   renderChart,
@@ -358,11 +359,16 @@ function activate(context: ExtensionContext): void {
   // Sheet Change: re-sync chart regions for the new active sheet
   // -----------------------------------------------------------------------
 
-  // Set initial active sheet
-  getActiveSheet().then((idx) => {
-    setActiveSheetIndex(idx);
-    syncChartRegions();
-    context.events.emit(AppEvents.GRID_REFRESH);
+  // Load persisted charts from backend, then sync regions for the active sheet
+  loadChartsFromBackend().then(async () => {
+    try {
+      const idx = await getActiveSheet();
+      setActiveSheetIndex(idx);
+      syncChartRegions();
+      context.events.emit(AppEvents.GRID_REFRESH);
+    } catch {
+      // Ignore
+    }
   }).catch(() => {});
 
   cleanupFunctions.push(
@@ -377,6 +383,27 @@ function activate(context: ExtensionContext): void {
         // Ignore
       }
     }),
+  );
+
+  // Reload charts from backend after file open or new file
+  const reloadCharts = async () => {
+    try {
+      await loadChartsFromBackend();
+      const idx = await getActiveSheet();
+      setActiveSheetIndex(idx);
+      deselectChart();
+      invalidateAllChartCaches();
+      syncChartRegions();
+      context.events.emit(AppEvents.GRID_REFRESH);
+    } catch {
+      // Ignore
+    }
+  };
+  cleanupFunctions.push(
+    context.events.on(AppEvents.AFTER_OPEN, reloadCharts),
+  );
+  cleanupFunctions.push(
+    context.events.on(AppEvents.AFTER_NEW, reloadCharts),
   );
 
   // -----------------------------------------------------------------------

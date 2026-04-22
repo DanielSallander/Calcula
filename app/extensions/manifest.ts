@@ -84,6 +84,7 @@ import AIChatExtension from "./AIChat";
 import LinkedSheetsExtension from "./LinkedSheets";
 import ErrorCheckingExtension from "./ErrorChecking";
 import AutoRecoverExtension from "./AutoRecover";
+import DataFormExtension from "./DataForm";
 
 // Dev-only extensions
 import TestRunnerExtension from "./TestRunner";
@@ -137,6 +138,7 @@ export const builtInExtensions: ExtensionModule[] = [
   RemoveDuplicatesExtension,
   TextToColumnsExtension,
   GoalSeekExtension,
+  DataFormExtension,
   GoToSpecialExtension,
   SelectVisibleCellsExtension,
   FlashFillExtension,

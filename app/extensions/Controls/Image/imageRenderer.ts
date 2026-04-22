@@ -23,6 +23,8 @@ interface CachedImageData {
   src: string;
   opacity: number;
   rotation: number;
+  flipH: boolean;
+  flipV: boolean;
 }
 
 const imageDataCache = new Map<string, CachedImageData>();
@@ -150,6 +152,8 @@ export function renderFloatingImage(overlayCtx: OverlayRenderContext): void {
       src: "",
       opacity: 1,
       rotation: 0,
+      flipH: false,
+      flipV: false,
     };
   }
 
@@ -163,6 +167,15 @@ export function renderFloatingImage(overlayCtx: OverlayRenderContext): void {
     const cy = canvasY + imgHeight / 2;
     ctx.translate(cx, cy);
     ctx.rotate((data.rotation * Math.PI) / 180);
+    ctx.translate(-cx, -cy);
+  }
+
+  // Apply flip transforms around center
+  if (data.flipH || data.flipV) {
+    const cx = canvasX + imgWidth / 2;
+    const cy = canvasY + imgHeight / 2;
+    ctx.translate(cx, cy);
+    ctx.scale(data.flipH ? -1 : 1, data.flipV ? -1 : 1);
     ctx.translate(-cx, -cy);
   }
 
@@ -237,6 +250,8 @@ async function fetchImageData(
       src: resolved.src ?? "",
       opacity: parseFloat(resolved.opacity ?? "1") || 1,
       rotation: parseFloat(resolved.rotation ?? "0") || 0,
+      flipH: resolved.flipH === "true",
+      flipV: resolved.flipV === "true",
     });
     staleEntries.delete(controlId);
 

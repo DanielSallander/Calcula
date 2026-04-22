@@ -647,6 +647,14 @@ export async function getCalculationMode(): Promise<string> {
   return invoke<string>("get_calculation_mode");
 }
 
+/**
+ * Get the current calculation state.
+ * Returns "done", "calculating", or "pending".
+ */
+export async function getCalculationState(): Promise<string> {
+  return invoke<string>("get_calculation_state");
+}
+
 export async function calculateNow(): Promise<CellData[]> {
   console.log("[tauri-api] calculateNow - recalculating all formulas");
   const result = await invoke<CellData[]>("calculate_now");
@@ -685,6 +693,30 @@ export async function setIterationSettings(
     maxIterations,
     maxChange,
   });
+}
+
+// ============================================================================
+// Precision As Displayed
+// ============================================================================
+
+export async function getPrecisionAsDisplayed(): Promise<boolean> {
+  return invoke<boolean>("get_precision_as_displayed");
+}
+
+export async function setPrecisionAsDisplayed(enabled: boolean): Promise<boolean> {
+  return invoke<boolean>("set_precision_as_displayed", { enabled });
+}
+
+// ============================================================================
+// Calculate Before Save
+// ============================================================================
+
+export async function getCalculateBeforeSave(): Promise<boolean> {
+  return invoke<boolean>("get_calculate_before_save");
+}
+
+export async function setCalculateBeforeSave(enabled: boolean): Promise<boolean> {
+  return invoke<boolean>("set_calculate_before_save", { enabled });
 }
 
 // ============================================================================
@@ -1032,6 +1064,26 @@ export async function setSplitWindow(
 
 export async function getSplitWindow(): Promise<SplitConfig> {
   return await invoke<SplitConfig>("get_split_window", {});
+}
+
+// ============================================================================
+// SCROLL AREA API
+// ============================================================================
+
+/**
+ * Set the scrollable area restriction for the active sheet.
+ * @param scrollArea - A1-style range like "A1:Z100", or null to clear.
+ */
+export async function setScrollArea(scrollArea: string | null): Promise<void> {
+  await invoke<void>("set_scroll_area", { scrollArea });
+}
+
+/**
+ * Get the scrollable area restriction for the active sheet.
+ * Returns null if no restriction is set.
+ */
+export async function getScrollArea(): Promise<string | null> {
+  return invoke<string | null>("get_scroll_area");
 }
 
 // ============================================================================

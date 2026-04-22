@@ -31,6 +31,21 @@ export const IMAGE_PROPERTIES: PropertyDefinition[] = [
     supportsFormula: true,
   },
   {
+    key: "flipH",
+    label: "Flip Horizontal",
+    inputType: "boolean",
+    defaultValue: "false",
+    supportsFormula: false,
+  },
+  {
+    key: "flipV",
+    label: "Flip Vertical",
+    inputType: "boolean",
+    defaultValue: "false",
+    supportsFormula: false,
+  },
+
+  {
     key: "width",
     label: "Width",
     inputType: "number",

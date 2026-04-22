@@ -1586,6 +1586,15 @@ pub struct PageSetup {
     /// Manual column page breaks (0-indexed col numbers where a new page starts)
     #[serde(default)]
     pub manual_col_breaks: Vec<u32>,
+    /// Print comments mode: "none", "atEnd", "asDisplayed"
+    #[serde(default)]
+    pub print_comments: String,
+    /// First page number: -1 = auto, 1+ = custom starting page number
+    #[serde(default = "default_first_page_number")]
+    pub first_page_number: i32,
+    /// Page order: "downThenOver" or "overThenDown"
+    #[serde(default)]
+    pub page_order: String,
 }
 
 fn default_paper_size() -> String { "a4".to_string() }
@@ -1595,6 +1604,7 @@ fn default_margin_side() -> f64 { 0.7 }
 fn default_header_margin() -> f64 { 0.3 }
 fn default_scale() -> u32 { 100 }
 fn default_footer() -> String { "Page &P".to_string() }
+fn default_first_page_number() -> i32 { -1 }
 
 impl Default for PageSetup {
     fn default() -> Self {
@@ -1621,6 +1631,9 @@ impl Default for PageSetup {
             footer: default_footer(),
             manual_row_breaks: Vec::new(),
             manual_col_breaks: Vec::new(),
+            print_comments: String::new(),
+            first_page_number: default_first_page_number(),
+            page_order: String::new(),
         }
     }
 }
@@ -2051,6 +2064,23 @@ pub struct UsedRangeResult {
     pub end_row: u32,
     pub end_col: u32,
     pub empty: bool,
+}
+
+// ============================================================================
+// Chart Entry (opaque JSON persistence)
+// ============================================================================
+
+/// A chart entry stored in the backend. The chart specification is stored as
+/// an opaque JSON string to avoid replicating the full ChartSpec type in Rust.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChartEntry {
+    /// Unique chart ID (numeric, assigned by the frontend).
+    pub id: u32,
+    /// Sheet index where the chart is rendered.
+    pub sheet_index: usize,
+    /// The full ChartDefinition serialized as a JSON string.
+    pub spec_json: String,
 }
 
 /// Default row height and column width for the workbook.

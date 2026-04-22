@@ -71,10 +71,15 @@ export {
   // Calculation
   setCalculationMode,
   getCalculationMode,
+  getCalculationState,
   calculateNow,
   calculateSheet,
   getIterationSettings,
   setIterationSettings,
+  getPrecisionAsDisplayed,
+  setPrecisionAsDisplayed,
+  getCalculateBeforeSave,
+  setCalculateBeforeSave,
 
   // Sheets
   getSheets,
@@ -90,6 +95,8 @@ export {
   setTabColor,
   nextSheet,
   previousSheet,
+  setScrollArea,
+  getScrollArea,
 
   // Row/Column operations
   insertRows,

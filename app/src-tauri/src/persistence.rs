@@ -187,6 +187,7 @@ pub fn build_workbook_for_save(
 
     let mut workbook = Workbook::from_grid(&grid, &styles, &dimensions);
     workbook.tables = collect_tables_for_save(&tables);
+    workbook.charts = collect_charts_for_save(state);
     workbook.user_files = user_files_state.files.lock().map_err(|e| e.to_string())?.clone();
     workbook.theme = state.theme.lock().unwrap().clone();
     workbook.default_row_height = *state.default_row_height.lock().unwrap();
@@ -388,6 +389,36 @@ fn restore_slicers(
 }
 
 // ============================================================================
+// Chart <-> SavedChart conversion
+// ============================================================================
+
+/// Collect charts from AppState into SavedChart format for persistence.
+fn collect_charts_for_save(state: &State<AppState>) -> Vec<persistence::SavedChart> {
+    let charts = state.charts.lock().unwrap();
+    charts
+        .iter()
+        .map(|c| persistence::SavedChart {
+            id: c.id,
+            sheet_index: c.sheet_index,
+            spec_json: c.spec_json.clone(),
+        })
+        .collect()
+}
+
+/// Restore charts from SavedChart format into AppState.
+fn restore_charts(saved: &[persistence::SavedChart], state: &State<AppState>) {
+    let mut charts = state.charts.lock().unwrap();
+    charts.clear();
+    for s in saved {
+        charts.push(crate::api_types::ChartEntry {
+            id: s.id,
+            sheet_index: s.sheet_index,
+            spec_json: s.spec_json.clone(),
+        });
+    }
+}
+
+// ============================================================================
 // COMMANDS
 // ============================================================================
 
@@ -398,8 +429,21 @@ pub fn save_file(
     user_files_state: State<UserFilesState>,
     slicer_state: State<crate::slicer::SlicerState>,
     script_state: State<crate::scripting::types::ScriptState>,
+    pivot_state: State<'_, crate::pivot::types::PivotState>,
     path: String,
 ) -> Result<(), String> {
+    // If calculate_before_save is enabled, recalculate all formulas first
+    {
+        let calc_before_save = *state.calculate_before_save.lock().unwrap();
+        if calc_before_save {
+            let _ = crate::calculation::calculate_now(
+                state.clone(),
+                user_files_state.clone(),
+                pivot_state.clone(),
+            );
+        }
+    }
+
     let grid = state.grid.lock().map_err(|e| e.to_string())?;
     let styles = state.style_registry.lock().map_err(|e| e.to_string())?;
     let col_widths = state.column_widths.lock().map_err(|e| e.to_string())?;
@@ -416,6 +460,7 @@ pub fn save_file(
     workbook.slicers = collect_slicers_for_save(&slicer_state);
     workbook.scripts = collect_scripts_for_save(&script_state);
     workbook.notebooks = collect_notebooks_for_save(&script_state);
+    workbook.charts = collect_charts_for_save(&state);
     workbook.user_files = user_files_state.files.lock().map_err(|e| e.to_string())?.clone();
     workbook.theme = state.theme.lock().unwrap().clone();
     workbook.default_row_height = *state.default_row_height.lock().unwrap();
@@ -530,6 +575,9 @@ pub fn open_file(
     // Restore slicers from workbook
     restore_slicers(&workbook.slicers, &slicer_state);
 
+    // Restore charts from workbook
+    restore_charts(&workbook.charts, &state);
+
     // Restore scripts and notebooks
     restore_scripts(&workbook.scripts, &script_state);
     restore_notebooks(&workbook.notebooks, &script_state);
@@ -636,6 +684,9 @@ pub fn new_file(
     *slicer_state.next_computed_prop_id.lock().unwrap() = 1;
     slicer_state.computed_prop_dependencies.lock().unwrap().clear();
     slicer_state.computed_prop_dependents.lock().unwrap().clear();
+
+    // Clear chart state
+    state.charts.lock().unwrap().clear();
 
     // Clear script/notebook state
     script_state.workbook_scripts.lock().unwrap().clear();
@@ -1238,6 +1289,7 @@ pub fn auto_recover_save(
     workbook.slicers = collect_slicers_for_save(&slicer_state);
     workbook.scripts = collect_scripts_for_save(&script_state);
     workbook.notebooks = collect_notebooks_for_save(&script_state);
+    workbook.charts = collect_charts_for_save(&state);
     workbook.user_files = user_files_state
         .files
         .lock()

@@ -109,6 +109,56 @@ export function resetFloatingStore(): void {
 }
 
 // ============================================================================
+// Z-Order Operations
+// ============================================================================
+
+/**
+ * Bring a floating control to the front (highest z-order).
+ * Moves the control to the end of the array so it renders last (on top).
+ */
+export function bringToFront(controlId: string): void {
+  const idx = floatingControls.findIndex((c) => c.id === controlId);
+  if (idx < 0 || idx === floatingControls.length - 1) return;
+  const [ctrl] = floatingControls.splice(idx, 1);
+  floatingControls.push(ctrl);
+}
+
+/**
+ * Send a floating control to the back (lowest z-order).
+ * Moves the control to the beginning of the array so it renders first (behind everything).
+ */
+export function sendToBack(controlId: string): void {
+  const idx = floatingControls.findIndex((c) => c.id === controlId);
+  if (idx <= 0) return;
+  const [ctrl] = floatingControls.splice(idx, 1);
+  floatingControls.unshift(ctrl);
+}
+
+/**
+ * Move a floating control one step forward in z-order.
+ * Swaps the control with the one after it in the array.
+ */
+export function bringForward(controlId: string): void {
+  const idx = floatingControls.findIndex((c) => c.id === controlId);
+  if (idx < 0 || idx === floatingControls.length - 1) return;
+  const temp = floatingControls[idx];
+  floatingControls[idx] = floatingControls[idx + 1];
+  floatingControls[idx + 1] = temp;
+}
+
+/**
+ * Move a floating control one step backward in z-order.
+ * Swaps the control with the one before it in the array.
+ */
+export function sendBackward(controlId: string): void {
+  const idx = floatingControls.findIndex((c) => c.id === controlId);
+  if (idx <= 0) return;
+  const temp = floatingControls[idx];
+  floatingControls[idx] = floatingControls[idx - 1];
+  floatingControls[idx - 1] = temp;
+}
+
+// ============================================================================
 // Grid Overlay Sync
 // ============================================================================
 

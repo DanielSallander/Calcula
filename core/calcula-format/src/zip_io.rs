@@ -17,7 +17,7 @@ use crate::sheet_styles::{
 };
 
 use engine::theme::ThemeDefinition;
-use persistence::{SavedNotebook, SavedScript, SavedSlicer, SavedTable, Workbook, WorkbookProperties};
+use persistence::{SavedChart, SavedNotebook, SavedScript, SavedSlicer, SavedTable, Workbook, WorkbookProperties};
 use std::io::{Read, Write};
 use std::path::Path;
 use zip::write::FileOptions;
@@ -45,6 +45,9 @@ pub fn write_calcula(workbook: &Workbook, path: &Path) -> Result<(), FormatError
     }
     if !workbook.notebooks.is_empty() {
         manifest.features.push("notebooks".to_string());
+    }
+    if !workbook.charts.is_empty() {
+        manifest.features.push("charts".to_string());
     }
     if !workbook.user_files.is_empty() {
         manifest.features.push("files".to_string());
@@ -142,6 +145,13 @@ pub fn write_calcula(workbook: &Workbook, path: &Path) -> Result<(), FormatError
             options.clone(),
         )?;
         zip.write_all(notebook_json.as_bytes())?;
+    }
+
+    // Write charts as a single charts.json array
+    if !workbook.charts.is_empty() {
+        let charts_json = serde_json::to_string_pretty(&workbook.charts)?;
+        zip.start_file("charts.json", options.clone())?;
+        zip.write_all(charts_json.as_bytes())?;
     }
 
     // Write workbook properties (properties.json)
@@ -320,6 +330,14 @@ pub fn read_calcula(path: &Path) -> Result<Workbook, FormatError> {
         }
     }
 
+    // Read charts
+    let charts: Vec<SavedChart> = if manifest.features.contains(&"charts".to_string()) {
+        read_optional_json::<Vec<SavedChart>>(&mut archive, "charts.json")?
+            .unwrap_or_default()
+    } else {
+        Vec::new()
+    };
+
     // Read user files (files/ prefix)
     let mut user_files = std::collections::HashMap::new();
     if manifest.features.contains(&"files".to_string()) {
@@ -362,6 +380,7 @@ pub fn read_calcula(path: &Path) -> Result<Workbook, FormatError> {
         default_row_height: manifest.default_row_height,
         default_column_width: manifest.default_column_width,
         properties,
+        charts,
     })
 }
 
@@ -474,6 +493,7 @@ mod tests {
             default_row_height: 24.0,
             default_column_width: 100.0,
             properties: WorkbookProperties::default(),
+            charts: Vec::new(),
         }
     }
 

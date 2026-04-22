@@ -64,6 +64,7 @@ pub mod mcp;
 pub mod locale_commands;
 pub mod error_checking;
 pub mod named_styles_cmd;
+pub mod chart_commands;
 
 pub use api_types::{CellData, StyleData, DimensionData, FormattingParams, MergedRegion};
 pub use logging::{init_log_file, get_log_path, next_seq, write_log, write_log_raw};
@@ -273,6 +274,14 @@ pub struct AppState {
     pub named_styles: Mutex<HashMap<String, api_types::NamedCellStyle>>,
     /// Workbook document properties (author, title, subject, etc.)
     pub workbook_properties: Mutex<api_types::WorkbookProperties>,
+    /// Use displayed precision for calculations (default: false)
+    pub precision_as_displayed: Mutex<bool>,
+    /// Recalculate before saving (default: true)
+    pub calculate_before_save: Mutex<bool>,
+    /// Chart entries: persisted chart definitions (opaque JSON)
+    pub charts: Mutex<Vec<api_types::ChartEntry>>,
+    /// Scroll area restriction per sheet (A1-style range like "A1:Z100", or None for unrestricted)
+    pub scroll_areas: Mutex<Vec<Option<String>>>,
 }
 
 impl AppState {
@@ -381,6 +390,10 @@ pub fn create_app_state() -> AppState {
                 ..Default::default()
             }
         }),
+        precision_as_displayed: Mutex::new(false),
+        calculate_before_save: Mutex::new(true),
+        charts: Mutex::new(Vec::new()),
+        scroll_areas: Mutex::new(vec![None]),
     };
 
     // Populate built-in named styles
@@ -3817,6 +3830,11 @@ pub fn run() {
             calculation::calculate_sheet,
             calculation::get_iteration_settings,
             calculation::set_iteration_settings,
+            calculation::get_calculation_state,
+            calculation::get_precision_as_displayed,
+            calculation::set_precision_as_displayed,
+            calculation::get_calculate_before_save,
+            calculation::set_calculate_before_save,
             // Formula library commands
             formula::get_functions_by_category,
             formula::get_all_functions,
@@ -3861,6 +3879,8 @@ pub fn run() {
             sheets::set_tab_color,
             sheets::next_sheet,
             sheets::previous_sheet,
+            sheets::set_scroll_area,
+            sheets::get_scroll_area,
             // Find & Replace commands
             commands::find_all,
             commands::count_matches,
@@ -4227,6 +4247,11 @@ pub fn run() {
             named_styles_cmd::apply_named_style,
             // Error checking indicators
             error_checking::get_error_indicators,
+            // Chart persistence commands
+            chart_commands::get_charts,
+            chart_commands::save_chart,
+            chart_commands::update_chart,
+            chart_commands::delete_chart,
             // Third-party extension loading
             scan_extension_directory,
             get_extensions_directory,

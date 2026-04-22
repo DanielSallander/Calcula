@@ -223,6 +223,10 @@ pub fn add_sheet(state: State<AppState>, name: Option<String>) -> Result<SheetsR
         let mut split_configs = state.split_configs.lock().unwrap();
         split_configs.push(SplitConfig::default());
     }
+    {
+        let mut scroll_areas = state.scroll_areas.lock().unwrap();
+        scroll_areas.push(None);
+    }
     tab_colors.push(String::new());
     sheet_visibility.push("visible".to_string());
     // New sheet gets empty dimensions
@@ -374,6 +378,12 @@ pub fn delete_sheet(state: State<AppState>, pivot_state: State<'_, PivotState>, 
         let mut split_configs = state.split_configs.lock().unwrap();
         if index < split_configs.len() {
             split_configs.remove(index);
+        }
+    }
+    {
+        let mut scroll_areas = state.scroll_areas.lock().unwrap();
+        if index < scroll_areas.len() {
+            scroll_areas.remove(index);
         }
     }
     if index < tab_colors.len() {
@@ -623,6 +633,11 @@ pub fn move_sheet(
         ensure_vec_len(&mut split_configs, count);
         rotate_element(&mut *split_configs, from_index, to_index);
     }
+    {
+        let mut scroll_areas = state.scroll_areas.lock().unwrap();
+        ensure_vec_len(&mut scroll_areas, count);
+        rotate_element(&mut *scroll_areas, from_index, to_index);
+    }
     rotate_element(&mut *tab_colors, from_index, to_index);
     rotate_element(&mut *sheet_visibility, from_index, to_index);
     rotate_element(&mut *all_column_widths, from_index, to_index);
@@ -738,6 +753,12 @@ pub fn copy_sheet(
         ensure_vec_len(&mut split_configs, count);
         let cloned_split = split_configs[source_index].clone();
         split_configs.insert(insert_at, cloned_split);
+    }
+    {
+        let mut scroll_areas = state.scroll_areas.lock().unwrap();
+        ensure_vec_len(&mut scroll_areas, count);
+        let cloned_scroll = scroll_areas[source_index].clone();
+        scroll_areas.insert(insert_at, cloned_scroll);
     }
     tab_colors.insert(insert_at, cloned_tab_color);
     sheet_visibility.insert(insert_at, "visible".to_string()); // Copy is always visible
@@ -892,6 +913,33 @@ pub fn next_sheet(state: State<AppState>) -> Result<SheetsResult, String> {
         }
         None => Err("No other visible sheet to navigate to".to_string()),
     }
+}
+
+// ============================================================================
+// Scroll Area Commands
+// ============================================================================
+
+/// Set the scrollable area restriction for the active sheet.
+/// `scroll_area` is an A1-style range like "A1:Z100", or None to clear.
+#[tauri::command]
+pub fn set_scroll_area(state: State<AppState>, scroll_area: Option<String>) -> Result<(), String> {
+    let active_sheet = *state.active_sheet.lock().unwrap();
+    let mut scroll_areas = state.scroll_areas.lock().unwrap();
+
+    ensure_vec_len(&mut scroll_areas, active_sheet + 1);
+    scroll_areas[active_sheet] = scroll_area;
+
+    Ok(())
+}
+
+/// Get the scrollable area restriction for the active sheet.
+/// Returns None if no restriction is set.
+#[tauri::command]
+pub fn get_scroll_area(state: State<AppState>) -> Option<String> {
+    let active_sheet = *state.active_sheet.lock().unwrap();
+    let scroll_areas = state.scroll_areas.lock().unwrap();
+
+    scroll_areas.get(active_sheet).cloned().flatten()
 }
 
 /// Navigate to the previous visible sheet (wraps around).

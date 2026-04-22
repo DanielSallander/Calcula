@@ -8,7 +8,12 @@ import {
   IconNameManager,
   IconDefineName,
   IconDefineFunction,
+  getAllNamedRanges,
+  updateCellsBatch,
+  emitAppEvent,
+  AppEvents,
 } from "@api";
+import { getGridStateSnapshot } from "@api/grid";
 
 /**
  * Register defined names menu items in the Formulas menu.
@@ -51,6 +56,39 @@ export function registerDefinedNamesMenuItems(context: ExtensionContext): () => 
           },
         },
       ],
+    })
+  );
+
+  // "Paste Names" menu item - pastes a list of all defined names into the sheet
+  cleanups.push(
+    context.ui.menus.registerItem("formulas", {
+      id: "formulas:pasteNames",
+      label: "Paste Names...",
+      action: async () => {
+        try {
+          const namedRanges = await getAllNamedRanges();
+          if (namedRanges.length === 0) {
+            console.warn("[DefinedNames] No named ranges to paste.");
+            return;
+          }
+
+          const gridState = getGridStateSnapshot();
+          if (!gridState) return;
+
+          const startRow = gridState.selection.startRow;
+          const startCol = gridState.selection.startCol;
+
+          const updates = namedRanges.map((nr, i) => [
+            { row: startRow + i, col: startCol, value: nr.name },
+            { row: startRow + i, col: startCol + 1, value: nr.refersTo },
+          ]).flat();
+
+          await updateCellsBatch(updates);
+          emitAppEvent(AppEvents.GRID_REFRESH);
+        } catch (err) {
+          console.error("[DefinedNames] Failed to paste names:", err);
+        }
+      },
     })
   );
 

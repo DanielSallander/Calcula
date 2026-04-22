@@ -1,16 +1,28 @@
 //! FILENAME: app/extensions/Charts/lib/chartStore.ts
-// PURPOSE: In-memory chart store for tracking chart definitions.
-// CONTEXT: Temporary frontend-only store. Same pattern as tableStore.ts.
-//          Will be replaced with backend API calls when Rust chart persistence is added.
-//          Charts are free-floating objects positioned by pixel coordinates.
+// PURPOSE: Chart store with Tauri backend persistence.
+// CONTEXT: Charts are persisted via Rust backend as opaque JSON blobs.
+//          The in-memory array provides synchronous access for rendering;
+//          every mutation is mirrored to the backend for persistence.
 
 import {
   removeGridRegionsByType,
   addGridRegions,
   type GridRegion,
 } from "@api/gridOverlays";
+import { invokeBackend } from "@api/backend";
 
 import type { ChartDefinition, ChartSpec } from "../types";
+
+// ============================================================================
+// Backend Types
+// ============================================================================
+
+/** Matches Rust ChartEntry (api_types.rs). */
+interface ChartEntry {
+  id: number;
+  sheetIndex: number;
+  specJson: string;
+}
 
 // ============================================================================
 // Store State
@@ -21,6 +33,51 @@ let charts: ChartDefinition[] = [];
 
 /** Active sheet index used for filtering which charts to render. */
 let activeSheetIndex = 0;
+
+// ============================================================================
+// Backend Sync Helpers
+// ============================================================================
+
+/** Serialize a ChartDefinition to a ChartEntry for backend persistence. */
+function toEntry(chart: ChartDefinition): ChartEntry {
+  return {
+    id: chart.chartId,
+    sheetIndex: chart.sheetIndex,
+    specJson: JSON.stringify(chart),
+  };
+}
+
+/** Deserialize a ChartEntry from the backend into a ChartDefinition. */
+function fromEntry(entry: ChartEntry): ChartDefinition {
+  return JSON.parse(entry.specJson) as ChartDefinition;
+}
+
+// ============================================================================
+// Backend Load (call on init / file open)
+// ============================================================================
+
+/**
+ * Load all charts from the Rust backend into the in-memory store.
+ * Call this on extension activation and after file open.
+ */
+export async function loadChartsFromBackend(): Promise<void> {
+  try {
+    const entries = await invokeBackend<ChartEntry[]>("get_charts");
+    charts = entries.map(fromEntry);
+    // Set nextChartId to one past the highest existing ID
+    let maxId = 0;
+    for (const chart of charts) {
+      if (chart.chartId > maxId) {
+        maxId = chart.chartId;
+      }
+    }
+    nextChartId = maxId + 1;
+  } catch {
+    // If backend call fails (e.g., fresh app), start with empty store
+    charts = [];
+    nextChartId = 1;
+  }
+}
 
 // ============================================================================
 // Store Operations
@@ -52,6 +109,8 @@ export function createChart(
     spec,
   };
   charts.push(chart);
+  // Persist to backend (fire-and-forget)
+  invokeBackend("save_chart", { entry: toEntry(chart) }).catch(() => {});
   return chart;
 }
 
@@ -79,6 +138,8 @@ export function updateChartSpec(
   const chart = charts.find((c) => c.chartId === chartId);
   if (chart) {
     chart.spec = { ...chart.spec, ...specUpdates };
+    // Persist to backend
+    invokeBackend("update_chart", { entry: toEntry(chart) }).catch(() => {});
   }
 }
 
@@ -87,6 +148,8 @@ export function updateChartSpec(
  */
 export function deleteChart(chartId: number): void {
   charts = charts.filter((c) => c.chartId !== chartId);
+  // Persist to backend
+  invokeBackend("delete_chart", { id: chartId }).catch(() => {});
 }
 
 /**
@@ -101,6 +164,8 @@ export function moveChart(
   if (chart) {
     chart.x = x;
     chart.y = y;
+    // Persist to backend
+    invokeBackend("update_chart", { entry: toEntry(chart) }).catch(() => {});
   }
 }
 
@@ -120,6 +185,8 @@ export function resizeChart(
     chart.y = y;
     chart.width = width;
     chart.height = height;
+    // Persist to backend
+    invokeBackend("update_chart", { entry: toEntry(chart) }).catch(() => {});
   }
 }
 

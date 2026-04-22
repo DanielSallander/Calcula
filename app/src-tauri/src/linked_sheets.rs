@@ -465,6 +465,7 @@ pub fn link_published_sheets(
     let mut all_rh = state.all_row_heights.lock().map_err(|e| e.to_string())?;
     let mut freeze_configs = state.freeze_configs.lock().map_err(|e| e.to_string())?;
     let mut split_configs = state.split_configs.lock().map_err(|e| e.to_string())?;
+    let mut scroll_areas = state.scroll_areas.lock().map_err(|e| e.to_string())?;
     let mut page_setups = state.page_setups.lock().map_err(|e| e.to_string())?;
     let mut tab_colors = state.tab_colors.lock().map_err(|e| e.to_string())?;
     let mut sheet_visibility = state.sheet_visibility.lock().map_err(|e| e.to_string())?;
@@ -502,6 +503,7 @@ pub fn link_published_sheets(
         all_rh.push(sheet.row_heights.clone());
         freeze_configs.push(crate::sheets::FreezeConfig::default());
         split_configs.push(crate::sheets::SplitConfig::default());
+        scroll_areas.push(None);
         page_setups.push(crate::api_types::PageSetup::default());
         tab_colors.push(String::new());
         sheet_visibility.push("visible".to_string());

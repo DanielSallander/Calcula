@@ -54,6 +54,8 @@ pub struct Workbook {
     pub default_column_width: f64,
     /// Document properties (author, title, subject, etc.)
     pub properties: WorkbookProperties,
+    /// Chart entries (opaque JSON blobs)
+    pub charts: Vec<SavedChart>,
 }
 
 /// Workbook-level document properties.
@@ -80,6 +82,16 @@ pub struct WorkbookProperties {
     pub last_modified: String,
 }
 
+/// A chart entry persisted in the workbook.
+/// The chart specification is stored as an opaque JSON string.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SavedChart {
+    pub id: u32,
+    pub sheet_index: usize,
+    pub spec_json: String,
+}
+
 impl Workbook {
     pub fn new() -> Self {
         Self {
@@ -94,6 +106,7 @@ impl Workbook {
             default_row_height: 24.0,
             default_column_width: 100.0,
             properties: WorkbookProperties::default(),
+            charts: Vec::new(),
         }
     }
 
@@ -110,6 +123,7 @@ impl Workbook {
             default_row_height: 24.0,
             default_column_width: 100.0,
             properties: WorkbookProperties::default(),
+            charts: Vec::new(),
         }
     }
 }

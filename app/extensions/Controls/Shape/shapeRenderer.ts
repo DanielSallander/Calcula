@@ -34,6 +34,8 @@ interface CachedShapeData {
   textAlign: CanvasTextAlign;
   opacity: number;
   rotation: number;
+  flipH: boolean;
+  flipV: boolean;
 }
 
 const shapeDataCache = new Map<string, CachedShapeData>();
@@ -180,6 +182,8 @@ export function renderFloatingShape(overlayCtx: OverlayRenderContext): void {
       textAlign: "center",
       opacity: 1,
       rotation: 0,
+      flipH: false,
+      flipV: false,
     };
   }
 
@@ -199,6 +203,15 @@ export function renderFloatingShape(overlayCtx: OverlayRenderContext): void {
     const cy = canvasY + shapeHeight / 2;
     ctx.translate(cx, cy);
     ctx.rotate((data.rotation * Math.PI) / 180);
+    ctx.translate(-cx, -cy);
+  }
+
+  // Apply flip transforms around center
+  if (data.flipH || data.flipV) {
+    const cx = canvasX + shapeWidth / 2;
+    const cy = canvasY + shapeHeight / 2;
+    ctx.translate(cx, cy);
+    ctx.scale(data.flipH ? -1 : 1, data.flipV ? -1 : 1);
     ctx.translate(-cx, -cy);
   }
 
@@ -312,6 +325,8 @@ async function fetchShapeData(
       textAlign: (resolved.textAlign as CanvasTextAlign) ?? "center",
       opacity: parseFloat(resolved.opacity ?? "1") || 1,
       rotation: parseFloat(resolved.rotation ?? "0") || 0,
+      flipH: resolved.flipH === "true",
+      flipV: resolved.flipV === "true",
     });
     staleEntries.delete(controlId);
 

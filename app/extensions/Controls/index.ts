@@ -64,6 +64,13 @@ import {
 } from "./lib/designMode";
 import { setControlMetadata, getControlMetadata, getAllControls } from "./lib/controlApi";
 import { PropertiesPane } from "./PropertiesPane/PropertiesPane";
+import { registerControlContextMenu } from "./lib/controlContextMenu";
+import {
+  copyControl,
+  pasteControl,
+  duplicateControl,
+  hasClipboardControl,
+} from "./lib/controlClipboard";
 
 // ============================================================================
 // Constants
@@ -336,6 +343,60 @@ function activate(context: ExtensionContext): void {
   // 19. Load existing floating controls on startup
   // -----------------------------------------------------------------------
   loadFloatingControls();
+
+  // -----------------------------------------------------------------------
+  // 20. Register context menu items for floating controls
+  // -----------------------------------------------------------------------
+  const unregContextMenu = registerControlContextMenu();
+  cleanupFns.push(unregContextMenu);
+
+  // -----------------------------------------------------------------------
+  // 21. Handle Ctrl+C / Ctrl+V / Ctrl+D for floating controls
+  // -----------------------------------------------------------------------
+  const handleControlKeyboard = async (e: KeyboardEvent) => {
+    // Don't intercept when editing a cell or input field
+    const target = e.target as HTMLElement;
+    if (
+      target.tagName === "INPUT" ||
+      target.tagName === "TEXTAREA" ||
+      target.isContentEditable
+    ) return;
+
+    const selectedId = getSelectedFloatingControl();
+
+    if (e.ctrlKey && e.key === "c" && selectedId) {
+      e.preventDefault();
+      e.stopPropagation();
+      await copyControl(selectedId);
+    } else if (e.ctrlKey && e.key === "v" && selectedId && hasClipboardControl()) {
+      // Only intercept Ctrl+V when a floating control is selected,
+      // otherwise let the grid handle normal cell paste
+      e.preventDefault();
+      e.stopPropagation();
+      const { getGridStateSnapshot } = await import("../../src/api/grid");
+      const gridState = getGridStateSnapshot();
+      const sheetIndex = gridState?.config?.activeSheet ?? 0;
+      await pasteControl(sheetIndex);
+    } else if (e.ctrlKey && e.key === "d" && selectedId) {
+      e.preventDefault();
+      e.stopPropagation();
+      await duplicateControl(selectedId);
+    }
+  };
+  document.addEventListener("keydown", handleControlKeyboard, true);
+  cleanupFns.push(() => document.removeEventListener("keydown", handleControlKeyboard, true));
+
+  // -----------------------------------------------------------------------
+  // 22. Handle controls:delete-selected event (from context menu)
+  // -----------------------------------------------------------------------
+  const handleDeleteSelected = () => {
+    const selectedId = getSelectedFloatingControl();
+    if (selectedId) {
+      deleteFloatingControl(selectedId);
+    }
+  };
+  window.addEventListener("controls:delete-selected", handleDeleteSelected);
+  cleanupFns.push(() => window.removeEventListener("controls:delete-selected", handleDeleteSelected));
 
   isActivated = true;
   console.log("[Controls] Activated successfully.");

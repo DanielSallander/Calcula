@@ -253,7 +253,7 @@ function LayoutInner(): React.ReactElement {
           // If checking dirty state or saving fails, still allow close
           console.error("[Layout] Error during close handler:", error);
         }
-        // Allow the window to close (don't call event.preventDefault())
+        // Don't call event.preventDefault() — let the window close naturally
       })
       .then((fn) => {
         unlisten = fn;

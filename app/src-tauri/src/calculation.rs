@@ -100,6 +100,19 @@ pub fn set_iteration_settings(
 }
 
 // ============================================================================
+// CALCULATION STATE
+// ============================================================================
+
+/// Get the current calculation state.
+/// Returns "done", "calculating", or "pending".
+/// Currently always returns "done" since calculation is synchronous,
+/// but having this API ready enables future async calculation.
+#[tauri::command]
+pub fn get_calculation_state(_state: State<AppState>) -> String {
+    "done".to_string()
+}
+
+// ============================================================================
 // RECALCULATION COMMANDS
 // ============================================================================
 
@@ -515,4 +528,34 @@ pub fn calculate_sheet(state: State<AppState>, user_files_state: State<UserFiles
 
     log_exit_info!("CMD", "calculate_sheet", "done");
     result
+}
+
+// ============================================================================
+// PRECISION AS DISPLAYED
+// ============================================================================
+
+#[tauri::command]
+pub fn get_precision_as_displayed(state: State<AppState>) -> bool {
+    *state.precision_as_displayed.lock().unwrap()
+}
+
+#[tauri::command]
+pub fn set_precision_as_displayed(state: State<AppState>, enabled: bool) -> bool {
+    *state.precision_as_displayed.lock().unwrap() = enabled;
+    enabled
+}
+
+// ============================================================================
+// CALCULATE BEFORE SAVE
+// ============================================================================
+
+#[tauri::command]
+pub fn get_calculate_before_save(state: State<AppState>) -> bool {
+    *state.calculate_before_save.lock().unwrap()
+}
+
+#[tauri::command]
+pub fn set_calculate_before_save(state: State<AppState>, enabled: bool) -> bool {
+    *state.calculate_before_save.lock().unwrap() = enabled;
+    enabled
 }

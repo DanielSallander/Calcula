@@ -122,6 +122,8 @@ export {
   setTabColor,
   nextSheet,
   previousSheet,
+  setScrollArea,
+  getScrollArea,
   indexToCol,
   colToIndex,
   setActiveSheet as setActiveSheetApi,
@@ -1167,6 +1169,7 @@ export type {
 export {
   setCalculationMode,
   getCalculationMode,
+  getCalculationState,
   calculateNow,
   calculateSheet,
   getIterationSettings,

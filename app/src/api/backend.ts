@@ -3439,6 +3439,9 @@ export interface PageSetup {
   footer: string;
   manualRowBreaks: number[];
   manualColBreaks: number[];
+  printComments: string;
+  firstPageNumber: number;
+  pageOrder: string;
 }
 
 /** All data needed to render a print preview or print. */

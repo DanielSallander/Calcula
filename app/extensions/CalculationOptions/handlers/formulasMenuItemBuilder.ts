@@ -23,6 +23,10 @@ import {
   calculateSheet,
   getIterationSettings,
   setIterationSettings,
+  getPrecisionAsDisplayed,
+  setPrecisionAsDisplayed,
+  getCalculateBeforeSave,
+  setCalculateBeforeSave,
 } from "@api/lib";
 
 // ============================================================================
@@ -36,6 +40,12 @@ let currentMode: "automatic" | "manual" = "automatic";
 let iterationEnabled = false;
 let iterationMaxIterations = 100;
 let iterationMaxChange = 0.001;
+
+/** Precision as displayed setting. */
+let precisionAsDisplayed = false;
+
+/** Calculate before save setting. */
+let calculateBeforeSave = true;
 
 // ============================================================================
 // Helpers
@@ -171,6 +181,42 @@ export function registerCalculationMenuItems(): void {
     },
   };
 
+  // ---- Precision As Displayed ----
+  const precisionItem = {
+    id: "formulas:calcOptions:precisionAsDisplayed",
+    label: "Precision As Displayed",
+    get checked() { return precisionAsDisplayed; },
+    action: () => {
+      precisionAsDisplayed = !precisionAsDisplayed;
+      setPrecisionAsDisplayed(precisionAsDisplayed)
+        .then(() => {
+          console.log(`[CalculationOptions] Precision as displayed: ${precisionAsDisplayed}`);
+        })
+        .catch((err: unknown) => {
+          console.error("[CalculationOptions] Failed to set precision as displayed:", err);
+          precisionAsDisplayed = !precisionAsDisplayed; // Revert on error
+        });
+    },
+  };
+
+  // ---- Calculate Before Save ----
+  const calcBeforeSaveItem = {
+    id: "formulas:calcOptions:calculateBeforeSave",
+    label: "Calculate Before Save",
+    get checked() { return calculateBeforeSave; },
+    action: () => {
+      calculateBeforeSave = !calculateBeforeSave;
+      setCalculateBeforeSave(calculateBeforeSave)
+        .then(() => {
+          console.log(`[CalculationOptions] Calculate before save: ${calculateBeforeSave}`);
+        })
+        .catch((err: unknown) => {
+          console.error("[CalculationOptions] Failed to set calculate before save:", err);
+          calculateBeforeSave = !calculateBeforeSave; // Revert on error
+        });
+    },
+  };
+
   // ---- Calculation Options (with submenu) ----
   registerMenuItem("formulas", {
     id: "formulas:calcOptions",
@@ -182,6 +228,9 @@ export function registerCalculationMenuItems(): void {
       { id: "formulas:calcOptions:iterSep", label: "", separator: true },
       iterationToggleItem,
       iterationSettingsItem,
+      { id: "formulas:calcOptions:settingsSep", label: "", separator: true },
+      precisionItem,
+      calcBeforeSaveItem,
     ],
   });
 
@@ -238,5 +287,17 @@ export async function syncCalculationMode(): Promise<void> {
     iterationMaxChange = settings.maxChange;
   } catch (err) {
     console.error("[CalculationOptions] Failed to get iteration settings:", err);
+  }
+
+  try {
+    precisionAsDisplayed = await getPrecisionAsDisplayed();
+  } catch (err) {
+    console.error("[CalculationOptions] Failed to get precision as displayed:", err);
+  }
+
+  try {
+    calculateBeforeSave = await getCalculateBeforeSave();
+  } catch (err) {
+    console.error("[CalculationOptions] Failed to get calculate before save:", err);
   }
 }
