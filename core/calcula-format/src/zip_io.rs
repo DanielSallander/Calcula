@@ -17,7 +17,7 @@ use crate::sheet_styles::{
 };
 
 use engine::theme::ThemeDefinition;
-use persistence::{SavedNotebook, SavedScript, SavedSlicer, SavedTable, Workbook};
+use persistence::{SavedNotebook, SavedScript, SavedSlicer, SavedTable, Workbook, WorkbookProperties};
 use std::io::{Read, Write};
 use std::path::Path;
 use zip::write::FileOptions;
@@ -50,6 +50,10 @@ pub fn write_calcula(workbook: &Workbook, path: &Path) -> Result<(), FormatError
         manifest.features.push("files".to_string());
     }
     manifest.features.push("theme".to_string());
+
+    // Store default dimensions in manifest
+    manifest.default_row_height = workbook.default_row_height;
+    manifest.default_column_width = workbook.default_column_width;
 
     // Write manifest.json
     let manifest_json = serde_json::to_string_pretty(&manifest)?;
@@ -139,6 +143,11 @@ pub fn write_calcula(workbook: &Workbook, path: &Path) -> Result<(), FormatError
         )?;
         zip.write_all(notebook_json.as_bytes())?;
     }
+
+    // Write workbook properties (properties.json)
+    let props_json = serde_json::to_string_pretty(&workbook.properties)?;
+    zip.start_file("properties.json", options.clone())?;
+    zip.write_all(props_json.as_bytes())?;
 
     // Write user files (stored under files/ prefix)
     for (path, content) in &workbook.user_files {
@@ -337,6 +346,10 @@ pub fn read_calcula(path: &Path) -> Result<Workbook, FormatError> {
         }
     }
 
+    // Read workbook properties
+    let properties = read_optional_json::<WorkbookProperties>(&mut archive, "properties.json")?
+        .unwrap_or_default();
+
     Ok(Workbook {
         sheets,
         active_sheet: manifest.active_sheet,
@@ -346,6 +359,9 @@ pub fn read_calcula(path: &Path) -> Result<Workbook, FormatError> {
         theme,
         scripts,
         notebooks,
+        default_row_height: manifest.default_row_height,
+        default_column_width: manifest.default_column_width,
+        properties,
     })
 }
 
@@ -455,6 +471,9 @@ mod tests {
             theme: ThemeDefinition::default(),
             scripts: Vec::new(),
             notebooks: Vec::new(),
+            default_row_height: 24.0,
+            default_column_width: 100.0,
+            properties: WorkbookProperties::default(),
         }
     }
 

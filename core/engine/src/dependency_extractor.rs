@@ -165,6 +165,9 @@ pub enum BuiltinFunction {
     Int,
     Sign,
     SumProduct,
+    SumX2MY2,
+    SumX2PY2,
+    SumXMY2,
     Product,
     Rand,
     RandBetween,
@@ -525,6 +528,37 @@ pub enum BuiltinFunction {
     VLookup,
     HLookup,
     Lookup,
+
+    // Hyperbolic & reciprocal trig functions
+    Sinh,
+    Cosh,
+    Tanh,
+    Cot,
+    Coth,
+    Csc,
+    Csch,
+    Sec,
+    Sech,
+    Acot,
+
+    // Rounding variants
+    CeilingMath,
+    CeilingPrecise,
+    FloorMath,
+    FloorPrecise,
+    IsoCeiling,
+
+    // Additional math functions (Group 3)
+    Multinomial,
+    Combina,
+    FactDouble,
+    SqrtPi,
+
+    // Aggregate function
+    Aggregate,
+
+    // Web functions
+    EncodeUrl,
 
     // Additional math functions
     MRound,

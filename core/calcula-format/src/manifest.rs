@@ -24,7 +24,18 @@ pub struct Manifest {
     /// Declares which optional feature sections are present in the archive.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub features: Vec<String>,
+    /// Default row height in pixels (omitted when 24.0).
+    #[serde(default = "default_row_height", skip_serializing_if = "is_default_row_height")]
+    pub default_row_height: f64,
+    /// Default column width in pixels (omitted when 100.0).
+    #[serde(default = "default_column_width", skip_serializing_if = "is_default_column_width")]
+    pub default_column_width: f64,
 }
+
+fn default_row_height() -> f64 { 24.0 }
+fn default_column_width() -> f64 { 100.0 }
+fn is_default_row_height(v: &f64) -> bool { (*v - 24.0).abs() < f64::EPSILON }
+fn is_default_column_width(v: &f64) -> bool { (*v - 100.0).abs() < f64::EPSILON }
 
 /// Entry for a single sheet in the manifest.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -62,6 +73,8 @@ impl Manifest {
             sheets,
             active_sheet,
             features: Vec::new(),
+            default_row_height: 24.0,
+            default_column_width: 100.0,
         }
     }
 }

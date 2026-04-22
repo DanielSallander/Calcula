@@ -29,7 +29,7 @@ export const multiSheetOpsSuite: TestSuite = {
         await setActiveSheet(0);
       }
       for (let i = 0; i < result.sheets.length; i++) {
-        if (result.sheets[i].hidden) {
+        if (result.sheets[i].visibility !== "visible") {
           try { await unhideSheet(i); } catch { /* ignore */ }
         }
       }

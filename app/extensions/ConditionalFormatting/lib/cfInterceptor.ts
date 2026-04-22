@@ -63,6 +63,26 @@ export function conditionalFormattingInterceptor(
       override.strikethrough = fmt.strikethrough;
       hasOverride = true;
     }
+    if (fmt.borderTopColor && !override.borderTopColor) {
+      override.borderTopColor = fmt.borderTopColor;
+      override.borderTopStyle = fmt.borderTopStyle || "solid";
+      hasOverride = true;
+    }
+    if (fmt.borderBottomColor && !override.borderBottomColor) {
+      override.borderBottomColor = fmt.borderBottomColor;
+      override.borderBottomStyle = fmt.borderBottomStyle || "solid";
+      hasOverride = true;
+    }
+    if (fmt.borderLeftColor && !override.borderLeftColor) {
+      override.borderLeftColor = fmt.borderLeftColor;
+      override.borderLeftStyle = fmt.borderLeftStyle || "solid";
+      hasOverride = true;
+    }
+    if (fmt.borderRightColor && !override.borderRightColor) {
+      override.borderRightColor = fmt.borderRightColor;
+      override.borderRightStyle = fmt.borderRightStyle || "solid";
+      hasOverride = true;
+    }
   }
 
   return hasOverride ? override : null;

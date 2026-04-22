@@ -29,7 +29,7 @@ export const sheetsSuite: TestSuite = {
       let result = await getSheets();
       // Unhide all hidden sheets first
       for (const sheet of result.sheets) {
-        if (sheet.hidden) {
+        if (sheet.visibility !== "visible") {
           await unhideSheet(sheet.index);
         }
       }
@@ -175,7 +175,7 @@ export const sheetsSuite: TestSuite = {
         const hidden = await getSheets();
         const hiddenSheet = hidden.sheets.find(s => s.name === "HideMe");
         expectNotNull(hiddenSheet, "Hidden sheet should still be in list");
-        assertTrue(hiddenSheet!.hidden === true, "Sheet should be hidden");
+        assertTrue(hiddenSheet!.visibility === "hidden", "Sheet should be hidden");
 
         await unhideSheet(idx);
         await ctx.settle();
@@ -183,7 +183,7 @@ export const sheetsSuite: TestSuite = {
         const visible = await getSheets();
         const visibleSheet = visible.sheets.find(s => s.name === "HideMe");
         expectNotNull(visibleSheet, "Unhidden sheet should be in list");
-        assertTrue(!visibleSheet!.hidden, "Sheet should be visible");
+        assertTrue(visibleSheet!.visibility === "visible", "Sheet should be visible");
       },
     },
     {

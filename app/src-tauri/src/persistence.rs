@@ -189,6 +189,23 @@ pub fn build_workbook_for_save(
     workbook.tables = collect_tables_for_save(&tables);
     workbook.user_files = user_files_state.files.lock().map_err(|e| e.to_string())?.clone();
     workbook.theme = state.theme.lock().unwrap().clone();
+    workbook.default_row_height = *state.default_row_height.lock().unwrap();
+    workbook.default_column_width = *state.default_column_width.lock().unwrap();
+
+    // Include workbook properties
+    {
+        let props = state.workbook_properties.lock().unwrap();
+        workbook.properties = persistence::WorkbookProperties {
+            title: props.title.clone(),
+            author: props.author.clone(),
+            subject: props.subject.clone(),
+            description: props.description.clone(),
+            keywords: props.keywords.clone(),
+            category: props.category.clone(),
+            created: props.created.clone(),
+            last_modified: chrono::Utc::now().to_rfc3339(),
+        };
+    }
 
     Ok(workbook)
 }
@@ -401,6 +418,24 @@ pub fn save_file(
     workbook.notebooks = collect_notebooks_for_save(&script_state);
     workbook.user_files = user_files_state.files.lock().map_err(|e| e.to_string())?.clone();
     workbook.theme = state.theme.lock().unwrap().clone();
+    workbook.default_row_height = *state.default_row_height.lock().unwrap();
+    workbook.default_column_width = *state.default_column_width.lock().unwrap();
+
+    // Save workbook properties (update last_modified timestamp)
+    {
+        let mut props = state.workbook_properties.lock().unwrap();
+        props.last_modified = chrono::Utc::now().to_rfc3339();
+        workbook.properties = persistence::WorkbookProperties {
+            title: props.title.clone(),
+            author: props.author.clone(),
+            subject: props.subject.clone(),
+            description: props.description.clone(),
+            keywords: props.keywords.clone(),
+            category: props.category.clone(),
+            created: props.created.clone(),
+            last_modified: props.last_modified.clone(),
+        };
+    }
 
     // Save linked sheet metadata into user_files
     save_linked_sheets_metadata(&state, &mut workbook)?;
@@ -486,6 +521,10 @@ pub fn open_file(
         *tables = new_tables;
         *table_names = new_table_names;
         *next_table_id = next_id;
+
+        // Restore default dimensions
+        *state.default_row_height.lock().unwrap() = workbook.default_row_height;
+        *state.default_column_width.lock().unwrap() = workbook.default_column_width;
     }
 
     // Restore slicers from workbook
@@ -501,6 +540,21 @@ pub fn open_file(
 
     // Restore document theme
     *state.theme.lock().map_err(|e| e.to_string())? = workbook.theme;
+
+    // Restore workbook properties
+    {
+        let mut props = state.workbook_properties.lock().unwrap();
+        *props = crate::api_types::WorkbookProperties {
+            title: workbook.properties.title,
+            author: workbook.properties.author,
+            subject: workbook.properties.subject,
+            description: workbook.properties.description,
+            keywords: workbook.properties.keywords,
+            category: workbook.properties.category,
+            created: workbook.properties.created,
+            last_modified: workbook.properties.last_modified,
+        };
+    }
 
     *file_state.current_path.lock().map_err(|e| e.to_string())? = Some(path_buf);
     *file_state.is_modified.lock().map_err(|e| e.to_string())? = false;
@@ -569,6 +623,10 @@ pub fn new_file(
         tables.clear();
         table_names.clear();
         *next_table_id = 1;
+
+        // Reset default dimensions
+        *state.default_row_height.lock().unwrap() = 24.0;
+        *state.default_column_width.lock().unwrap() = 100.0;
     }
 
     // Clear slicer state
@@ -588,6 +646,21 @@ pub fn new_file(
 
     // Clear linked sheets
     state.linked_sheets.lock().map_err(|e| e.to_string())?.clear();
+
+    // Reset workbook properties with defaults
+    {
+        let mut props = state.workbook_properties.lock().unwrap();
+        let author = std::env::var("USERNAME")
+            .or_else(|_| std::env::var("USER"))
+            .unwrap_or_default();
+        let now = chrono::Utc::now().to_rfc3339();
+        *props = crate::api_types::WorkbookProperties {
+            author,
+            created: now.clone(),
+            last_modified: now,
+            ..Default::default()
+        };
+    }
 
     *file_state.current_path.lock().map_err(|e| e.to_string())? = None;
     *file_state.is_modified.lock().map_err(|e| e.to_string())? = false;
@@ -614,6 +687,29 @@ pub fn mark_file_modified(file_state: State<FileState>) {
     if let Ok(mut modified) = file_state.is_modified.lock() {
         *modified = true;
     }
+}
+
+// ============================================================================
+// WORKBOOK PROPERTIES
+// ============================================================================
+
+#[tauri::command]
+pub fn get_workbook_properties(
+    state: State<AppState>,
+) -> crate::api_types::WorkbookProperties {
+    state.workbook_properties.lock().unwrap().clone()
+}
+
+#[tauri::command]
+pub fn set_workbook_properties(
+    state: State<AppState>,
+    props: crate::api_types::WorkbookProperties,
+) -> crate::api_types::WorkbookProperties {
+    let mut stored = state.workbook_properties.lock().unwrap();
+    *stored = props;
+    // Update last_modified timestamp
+    stored.last_modified = chrono::Utc::now().to_rfc3339();
+    stored.clone()
 }
 
 // ============================================================================
@@ -1066,6 +1162,101 @@ fn restore_scripts(
 }
 
 /// Restore notebooks from saved data into ScriptState.
+// ============================================================================
+// AUTO-RECOVER SETTINGS & SAVE
+// ============================================================================
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AutoRecoverSettings {
+    pub enabled: bool,
+    pub interval_ms: u64,
+}
+
+#[tauri::command]
+pub fn get_auto_recover_settings(state: State<AppState>) -> AutoRecoverSettings {
+    let enabled = *state.auto_recover_enabled.lock().unwrap();
+    let interval_ms = *state.auto_recover_interval_ms.lock().unwrap();
+    AutoRecoverSettings { enabled, interval_ms }
+}
+
+#[tauri::command]
+pub fn set_auto_recover_settings(
+    state: State<AppState>,
+    enabled: bool,
+    interval_ms: u64,
+) -> AutoRecoverSettings {
+    *state.auto_recover_enabled.lock().unwrap() = enabled;
+    *state.auto_recover_interval_ms.lock().unwrap() = interval_ms;
+    AutoRecoverSettings { enabled, interval_ms }
+}
+
+#[tauri::command]
+pub fn auto_recover_save(
+    state: State<AppState>,
+    file_state: State<FileState>,
+    user_files_state: State<UserFilesState>,
+    slicer_state: State<crate::slicer::SlicerState>,
+    script_state: State<crate::scripting::types::ScriptState>,
+) -> Result<String, String> {
+    // Only save if the file is dirty
+    let is_modified = *file_state.is_modified.lock().map_err(|e| e.to_string())?;
+    if !is_modified {
+        return Err("not_dirty".to_string());
+    }
+
+    // Determine recovery file path
+    let current_path = file_state.current_path.lock().map_err(|e| e.to_string())?;
+    let recovery_path = if let Some(ref path) = *current_path {
+        // Place recovery file next to original: ~$filename.cala.recovery
+        let parent = path.parent().unwrap_or(std::path::Path::new("."));
+        let file_name = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("untitled.cala");
+        parent.join(format!("~${}.recovery", file_name))
+    } else {
+        // No file saved yet: use temp directory
+        let temp_dir = std::env::temp_dir();
+        temp_dir.join("~$calcula_unsaved.cala.recovery")
+    };
+
+    // Build the workbook from current state
+    let grid = state.grid.lock().map_err(|e| e.to_string())?;
+    let styles = state.style_registry.lock().map_err(|e| e.to_string())?;
+    let col_widths = state.column_widths.lock().map_err(|e| e.to_string())?;
+    let row_heights = state.row_heights.lock().map_err(|e| e.to_string())?;
+    let tables = state.tables.lock().map_err(|e| e.to_string())?;
+
+    let dimensions = DimensionData {
+        column_widths: col_widths.clone(),
+        row_heights: row_heights.clone(),
+    };
+
+    let mut workbook = Workbook::from_grid(&grid, &styles, &dimensions);
+    workbook.tables = collect_tables_for_save(&tables);
+    workbook.slicers = collect_slicers_for_save(&slicer_state);
+    workbook.scripts = collect_scripts_for_save(&script_state);
+    workbook.notebooks = collect_notebooks_for_save(&script_state);
+    workbook.user_files = user_files_state
+        .files
+        .lock()
+        .map_err(|e| e.to_string())?
+        .clone();
+    workbook.theme = state.theme.lock().unwrap().clone();
+    workbook.default_row_height = *state.default_row_height.lock().unwrap();
+    workbook.default_column_width = *state.default_column_width.lock().unwrap();
+
+    // Save linked sheet metadata
+    save_linked_sheets_metadata(&state, &mut workbook)?;
+
+    // Save as .cala format to the recovery path
+    calcula_format::save_calcula(&workbook, &recovery_path).map_err(|e| e.to_string())?;
+
+    // Do NOT reset the dirty flag -- this is a background save
+    Ok(recovery_path.to_string_lossy().to_string())
+}
+
 fn restore_notebooks(
     saved: &[persistence::SavedNotebook],
     script_state: &State<crate::scripting::types::ScriptState>,

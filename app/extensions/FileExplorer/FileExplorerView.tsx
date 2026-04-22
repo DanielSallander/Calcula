@@ -766,8 +766,8 @@ export function FileExplorerView(_props: ActivityViewProps): React.ReactElement 
       children: sheets.map((s) => ({
         id: `sheet-${s.index}`,
         label: s.name,
-        icon: s.hidden ? h(HiddenSheetIcon, null) : h(SheetIcon, null),
-        detail: s.hidden ? "hidden" : s.index === activeSheet ? "active" : undefined,
+        icon: s.visibility !== "visible" ? h(HiddenSheetIcon, null) : h(SheetIcon, null),
+        detail: s.visibility !== "visible" ? s.visibility : s.index === activeSheet ? "active" : undefined,
         action: () => handleNavigateSheet(s.index),
       })),
     },

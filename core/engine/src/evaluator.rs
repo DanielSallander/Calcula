@@ -1115,6 +1115,9 @@ impl<'a> Evaluator<'a> {
             BuiltinFunction::Int => self.fn_int(args),
             BuiltinFunction::Sign => self.fn_sign(args),
             BuiltinFunction::SumProduct => self.fn_sumproduct(args),
+            BuiltinFunction::SumX2MY2 => self.fn_sumx2my2(args),
+            BuiltinFunction::SumX2PY2 => self.fn_sumx2py2(args),
+            BuiltinFunction::SumXMY2 => self.fn_sumxmy2(args),
             BuiltinFunction::Product => self.fn_product(args),
             BuiltinFunction::Rand => self.fn_rand(args),
             BuiltinFunction::RandBetween => self.fn_randbetween(args),
@@ -1475,6 +1478,37 @@ impl<'a> Evaluator<'a> {
             BuiltinFunction::VLookup => self.fn_vlookup(args),
             BuiltinFunction::HLookup => self.fn_hlookup(args),
             BuiltinFunction::Lookup => self.fn_lookup(args),
+
+            // Hyperbolic & reciprocal trig functions
+            BuiltinFunction::Sinh => self.fn_sinh(args),
+            BuiltinFunction::Cosh => self.fn_cosh(args),
+            BuiltinFunction::Tanh => self.fn_tanh(args),
+            BuiltinFunction::Cot => self.fn_cot(args),
+            BuiltinFunction::Coth => self.fn_coth(args),
+            BuiltinFunction::Csc => self.fn_csc(args),
+            BuiltinFunction::Csch => self.fn_csch(args),
+            BuiltinFunction::Sec => self.fn_sec(args),
+            BuiltinFunction::Sech => self.fn_sech(args),
+            BuiltinFunction::Acot => self.fn_acot(args),
+
+            // Rounding variants
+            BuiltinFunction::CeilingMath => self.fn_ceiling_math(args),
+            BuiltinFunction::CeilingPrecise => self.fn_ceiling_precise(args),
+            BuiltinFunction::FloorMath => self.fn_floor_math(args),
+            BuiltinFunction::FloorPrecise => self.fn_floor_precise(args),
+            BuiltinFunction::IsoCeiling => self.fn_ceiling_precise(args),
+
+            // Additional math (Group 3)
+            BuiltinFunction::Multinomial => self.fn_multinomial(args),
+            BuiltinFunction::Combina => self.fn_combina(args),
+            BuiltinFunction::FactDouble => self.fn_factdouble(args),
+            BuiltinFunction::SqrtPi => self.fn_sqrtpi(args),
+
+            // Aggregate function
+            BuiltinFunction::Aggregate => self.fn_aggregate(args),
+
+            // Web functions
+            BuiltinFunction::EncodeUrl => self.fn_encodeurl(args),
 
             // Additional math functions
             BuiltinFunction::MRound => self.fn_mround(args),
@@ -3557,6 +3591,49 @@ impl<'a> Evaluator<'a> {
         EvalResult::Number(total)
     }
 
+    fn fn_sumx2my2(&self, args: &[Expression]) -> EvalResult {
+        if args.len() != 2 { return EvalResult::Error(CellError::Value); }
+        let xs = self.eval_flat(&args[0]);
+        let ys = self.eval_flat(&args[1]);
+        if xs.len() != ys.len() { return EvalResult::Error(CellError::NA); }
+        let mut total = 0.0;
+        for i in 0..xs.len() {
+            let x = xs[i].as_number().unwrap_or(0.0);
+            let y = ys[i].as_number().unwrap_or(0.0);
+            total += x * x - y * y;
+        }
+        EvalResult::Number(total)
+    }
+
+    fn fn_sumx2py2(&self, args: &[Expression]) -> EvalResult {
+        if args.len() != 2 { return EvalResult::Error(CellError::Value); }
+        let xs = self.eval_flat(&args[0]);
+        let ys = self.eval_flat(&args[1]);
+        if xs.len() != ys.len() { return EvalResult::Error(CellError::NA); }
+        let mut total = 0.0;
+        for i in 0..xs.len() {
+            let x = xs[i].as_number().unwrap_or(0.0);
+            let y = ys[i].as_number().unwrap_or(0.0);
+            total += x * x + y * y;
+        }
+        EvalResult::Number(total)
+    }
+
+    fn fn_sumxmy2(&self, args: &[Expression]) -> EvalResult {
+        if args.len() != 2 { return EvalResult::Error(CellError::Value); }
+        let xs = self.eval_flat(&args[0]);
+        let ys = self.eval_flat(&args[1]);
+        if xs.len() != ys.len() { return EvalResult::Error(CellError::NA); }
+        let mut total = 0.0;
+        for i in 0..xs.len() {
+            let x = xs[i].as_number().unwrap_or(0.0);
+            let y = ys[i].as_number().unwrap_or(0.0);
+            let diff = x - y;
+            total += diff * diff;
+        }
+        EvalResult::Number(total)
+    }
+
     fn fn_rand(&self, _args: &[Expression]) -> EvalResult {
         use std::collections::hash_map::RandomState;
         use std::hash::{BuildHasher, Hasher};
@@ -3787,6 +3864,629 @@ impl<'a> Evaluator<'a> {
             Some(n) => EvalResult::Number(n.to_radians()),
             None => EvalResult::Error(CellError::Value),
         }
+    }
+
+    // ==================== Hyperbolic & Reciprocal Trig Functions ====================
+
+    fn fn_sinh(&self, args: &[Expression]) -> EvalResult {
+        if args.len() != 1 { return EvalResult::Error(CellError::Value); }
+        match self.evaluate(&args[0]).as_number() { Some(n) => EvalResult::Number(n.sinh()), None => EvalResult::Error(CellError::Value) }
+    }
+    fn fn_cosh(&self, args: &[Expression]) -> EvalResult {
+        if args.len() != 1 { return EvalResult::Error(CellError::Value); }
+        match self.evaluate(&args[0]).as_number() { Some(n) => EvalResult::Number(n.cosh()), None => EvalResult::Error(CellError::Value) }
+    }
+    fn fn_tanh(&self, args: &[Expression]) -> EvalResult {
+        if args.len() != 1 { return EvalResult::Error(CellError::Value); }
+        match self.evaluate(&args[0]).as_number() { Some(n) => EvalResult::Number(n.tanh()), None => EvalResult::Error(CellError::Value) }
+    }
+    fn fn_cot(&self, args: &[Expression]) -> EvalResult {
+        if args.len() != 1 { return EvalResult::Error(CellError::Value); }
+        match self.evaluate(&args[0]).as_number() {
+            Some(n) => {
+                let t = n.tan();
+                if t == 0.0 { return EvalResult::Error(CellError::Div0); }
+                EvalResult::Number(1.0 / t)
+            }
+            None => EvalResult::Error(CellError::Value),
+        }
+    }
+    fn fn_coth(&self, args: &[Expression]) -> EvalResult {
+        if args.len() != 1 { return EvalResult::Error(CellError::Value); }
+        match self.evaluate(&args[0]).as_number() {
+            Some(n) => {
+                let t = n.tanh();
+                if t == 0.0 { return EvalResult::Error(CellError::Div0); }
+                EvalResult::Number(1.0 / t)
+            }
+            None => EvalResult::Error(CellError::Value),
+        }
+    }
+    fn fn_csc(&self, args: &[Expression]) -> EvalResult {
+        if args.len() != 1 { return EvalResult::Error(CellError::Value); }
+        match self.evaluate(&args[0]).as_number() {
+            Some(n) => {
+                let s = n.sin();
+                if s == 0.0 { return EvalResult::Error(CellError::Div0); }
+                EvalResult::Number(1.0 / s)
+            }
+            None => EvalResult::Error(CellError::Value),
+        }
+    }
+    fn fn_csch(&self, args: &[Expression]) -> EvalResult {
+        if args.len() != 1 { return EvalResult::Error(CellError::Value); }
+        match self.evaluate(&args[0]).as_number() {
+            Some(n) => {
+                let s = n.sinh();
+                if s == 0.0 { return EvalResult::Error(CellError::Div0); }
+                EvalResult::Number(1.0 / s)
+            }
+            None => EvalResult::Error(CellError::Value),
+        }
+    }
+    fn fn_sec(&self, args: &[Expression]) -> EvalResult {
+        if args.len() != 1 { return EvalResult::Error(CellError::Value); }
+        match self.evaluate(&args[0]).as_number() {
+            Some(n) => {
+                let c = n.cos();
+                if c == 0.0 { return EvalResult::Error(CellError::Div0); }
+                EvalResult::Number(1.0 / c)
+            }
+            None => EvalResult::Error(CellError::Value),
+        }
+    }
+    fn fn_sech(&self, args: &[Expression]) -> EvalResult {
+        if args.len() != 1 { return EvalResult::Error(CellError::Value); }
+        match self.evaluate(&args[0]).as_number() {
+            Some(n) => {
+                let c = n.cosh();
+                if c == 0.0 { return EvalResult::Error(CellError::Div0); }
+                EvalResult::Number(1.0 / c)
+            }
+            None => EvalResult::Error(CellError::Value),
+        }
+    }
+    fn fn_acot(&self, args: &[Expression]) -> EvalResult {
+        if args.len() != 1 { return EvalResult::Error(CellError::Value); }
+        match self.evaluate(&args[0]).as_number() {
+            Some(n) => EvalResult::Number((1.0_f64 / n).atan()),
+            None => EvalResult::Error(CellError::Value),
+        }
+    }
+
+    // ==================== Rounding Variants ====================
+
+    fn fn_ceiling_math(&self, args: &[Expression]) -> EvalResult {
+        if args.is_empty() || args.len() > 3 {
+            return EvalResult::Error(CellError::Value);
+        }
+        let num = match self.evaluate(&args[0]).as_number() {
+            Some(n) => n,
+            None => return EvalResult::Error(CellError::Value),
+        };
+        let significance = if args.len() >= 2 {
+            match self.evaluate(&args[1]).as_number() {
+                Some(s) => s.abs(),
+                None => return EvalResult::Error(CellError::Value),
+            }
+        } else {
+            1.0
+        };
+        if significance == 0.0 {
+            return EvalResult::Number(0.0);
+        }
+        let mode = if args.len() == 3 {
+            match self.evaluate(&args[2]).as_number() {
+                Some(m) => m as i32,
+                None => return EvalResult::Error(CellError::Value),
+            }
+        } else {
+            0
+        };
+        let result = if num >= 0.0 {
+            (num / significance).ceil() * significance
+        } else if mode != 0 {
+            // Round toward zero for negatives
+            (num / significance).ceil() * significance
+        } else {
+            // Round away from zero for negatives (up in magnitude)
+            -(-num / significance).ceil() * significance
+        };
+        EvalResult::Number(result)
+    }
+
+    fn fn_ceiling_precise(&self, args: &[Expression]) -> EvalResult {
+        if args.is_empty() || args.len() > 2 {
+            return EvalResult::Error(CellError::Value);
+        }
+        let num = match self.evaluate(&args[0]).as_number() {
+            Some(n) => n,
+            None => return EvalResult::Error(CellError::Value),
+        };
+        let significance = if args.len() == 2 {
+            match self.evaluate(&args[1]).as_number() {
+                Some(s) => s.abs(),
+                None => return EvalResult::Error(CellError::Value),
+            }
+        } else {
+            1.0
+        };
+        if significance == 0.0 {
+            return EvalResult::Number(0.0);
+        }
+        // Always rounds up (toward positive infinity)
+        let result = (num / significance).ceil() * significance;
+        EvalResult::Number(result)
+    }
+
+    fn fn_floor_math(&self, args: &[Expression]) -> EvalResult {
+        if args.is_empty() || args.len() > 3 {
+            return EvalResult::Error(CellError::Value);
+        }
+        let num = match self.evaluate(&args[0]).as_number() {
+            Some(n) => n,
+            None => return EvalResult::Error(CellError::Value),
+        };
+        let significance = if args.len() >= 2 {
+            match self.evaluate(&args[1]).as_number() {
+                Some(s) => s.abs(),
+                None => return EvalResult::Error(CellError::Value),
+            }
+        } else {
+            1.0
+        };
+        if significance == 0.0 {
+            return EvalResult::Number(0.0);
+        }
+        let mode = if args.len() == 3 {
+            match self.evaluate(&args[2]).as_number() {
+                Some(m) => m as i32,
+                None => return EvalResult::Error(CellError::Value),
+            }
+        } else {
+            0
+        };
+        let result = if num >= 0.0 {
+            (num / significance).floor() * significance
+        } else if mode != 0 {
+            // Round toward zero for negatives
+            (num / significance).floor() * significance
+        } else {
+            // Round away from zero for negatives (down in magnitude)
+            -(-num / significance).floor() * significance
+        };
+        EvalResult::Number(result)
+    }
+
+    fn fn_floor_precise(&self, args: &[Expression]) -> EvalResult {
+        if args.is_empty() || args.len() > 2 {
+            return EvalResult::Error(CellError::Value);
+        }
+        let num = match self.evaluate(&args[0]).as_number() {
+            Some(n) => n,
+            None => return EvalResult::Error(CellError::Value),
+        };
+        let significance = if args.len() == 2 {
+            match self.evaluate(&args[1]).as_number() {
+                Some(s) => s.abs(),
+                None => return EvalResult::Error(CellError::Value),
+            }
+        } else {
+            1.0
+        };
+        if significance == 0.0 {
+            return EvalResult::Number(0.0);
+        }
+        // Always rounds down (toward negative infinity)
+        let result = (num / significance).floor() * significance;
+        EvalResult::Number(result)
+    }
+
+    // ==================== Additional Math (Group 3) ====================
+
+    fn fn_multinomial(&self, args: &[Expression]) -> EvalResult {
+        if args.is_empty() { return EvalResult::Error(CellError::Value); }
+        let mut nums: Vec<u64> = Vec::new();
+        for arg in args {
+            match self.evaluate(arg).as_number() {
+                Some(n) if n >= 0.0 => nums.push(n as u64),
+                _ => return EvalResult::Error(CellError::Value),
+            }
+        }
+        let total: u64 = nums.iter().sum();
+        let mut numerator = 1u64;
+        for i in 2..=total { numerator = numerator.saturating_mul(i); }
+        let mut denominator = 1u64;
+        for &n in &nums {
+            for i in 2..=n { denominator = denominator.saturating_mul(i); }
+        }
+        if denominator == 0 { return EvalResult::Error(CellError::Div0); }
+        EvalResult::Number((numerator / denominator) as f64)
+    }
+
+    fn fn_combina(&self, args: &[Expression]) -> EvalResult {
+        if args.len() != 2 { return EvalResult::Error(CellError::Value); }
+        let n = match self.evaluate(&args[0]).as_number() { Some(v) => v as u64, None => return EvalResult::Error(CellError::Value) };
+        let k = match self.evaluate(&args[1]).as_number() { Some(v) => v as u64, None => return EvalResult::Error(CellError::Value) };
+        // COMBINA(n, k) = COMBIN(n + k - 1, k)
+        if n == 0 && k == 0 { return EvalResult::Number(1.0); }
+        let nn = n + k - 1;
+        let kk = k.min(nn - k);
+        let mut result = 1u64;
+        for i in 0..kk { result = result * (nn - i) / (i + 1); }
+        EvalResult::Number(result as f64)
+    }
+
+    fn fn_factdouble(&self, args: &[Expression]) -> EvalResult {
+        if args.len() != 1 { return EvalResult::Error(CellError::Value); }
+        match self.evaluate(&args[0]).as_number() {
+            Some(n) if n >= -1.0 => {
+                let n = n as i64;
+                if n <= 0 { return EvalResult::Number(1.0); }
+                let mut result = 1u64;
+                let mut i = n as u64;
+                while i > 1 {
+                    result = result.saturating_mul(i);
+                    i -= 2;
+                }
+                EvalResult::Number(result as f64)
+            }
+            _ => EvalResult::Error(CellError::Value),
+        }
+    }
+
+    fn fn_sqrtpi(&self, args: &[Expression]) -> EvalResult {
+        if args.len() != 1 { return EvalResult::Error(CellError::Value); }
+        match self.evaluate(&args[0]).as_number() {
+            Some(n) if n >= 0.0 => EvalResult::Number((n * std::f64::consts::PI).sqrt()),
+            Some(_) => EvalResult::Error(CellError::Value),
+            None => EvalResult::Error(CellError::Value),
+        }
+    }
+
+    // ==================== AGGREGATE Function ====================
+
+    fn fn_aggregate(&self, args: &[Expression]) -> EvalResult {
+        if args.len() < 3 {
+            return EvalResult::Error(CellError::Value);
+        }
+
+        let func_num = match self.evaluate(&args[0]) {
+            EvalResult::Number(n) => n as i32,
+            EvalResult::Error(e) => return EvalResult::Error(e),
+            _ => return EvalResult::Error(CellError::Value),
+        };
+
+        if func_num < 1 || func_num > 19 {
+            return EvalResult::Error(CellError::Value);
+        }
+
+        let options = match self.evaluate(&args[1]) {
+            EvalResult::Number(n) => n as i32,
+            EvalResult::Error(e) => return EvalResult::Error(e),
+            _ => return EvalResult::Error(CellError::Value),
+        };
+
+        if options < 0 || options > 7 {
+            return EvalResult::Error(CellError::Value);
+        }
+
+        let skip_errors = matches!(options, 1 | 2 | 3 | 5 | 6 | 7);
+
+        let range_args = &args[2..];
+
+        // Collect values from ranges
+        let mut values = Vec::new();
+        for arg in range_args {
+            let result = self.evaluate(arg);
+            Self::flatten_into(&mut values, result);
+        }
+
+        // Optionally skip errors
+        if skip_errors {
+            values.retain(|v| !matches!(v, EvalResult::Error(_)));
+        } else {
+            // If not skipping errors, propagate any error found
+            for v in &values {
+                if let EvalResult::Error(e) = v {
+                    return EvalResult::Error(e.clone());
+                }
+            }
+        }
+
+        let extract_numbers = || -> Vec<f64> {
+            values.iter().filter_map(|v| v.as_number()).collect()
+        };
+
+        match func_num {
+            1 => {
+                // AVERAGE
+                let numbers = extract_numbers();
+                if numbers.is_empty() { return EvalResult::Error(CellError::Div0); }
+                let sum: f64 = numbers.iter().sum();
+                EvalResult::Number(sum / numbers.len() as f64)
+            }
+            2 => {
+                // COUNT
+                let numbers = extract_numbers();
+                EvalResult::Number(numbers.len() as f64)
+            }
+            3 => {
+                // COUNTA
+                let count = values.iter()
+                    .filter(|v| !matches!(v, EvalResult::Text(s) if s.is_empty()))
+                    .count();
+                EvalResult::Number(count as f64)
+            }
+            4 => {
+                // MAX
+                let numbers = extract_numbers();
+                if numbers.is_empty() { return EvalResult::Number(0.0); }
+                EvalResult::Number(numbers.iter().cloned().fold(f64::NEG_INFINITY, f64::max))
+            }
+            5 => {
+                // MIN
+                let numbers = extract_numbers();
+                if numbers.is_empty() { return EvalResult::Number(0.0); }
+                EvalResult::Number(numbers.iter().cloned().fold(f64::INFINITY, f64::min))
+            }
+            6 => {
+                // PRODUCT
+                let numbers = extract_numbers();
+                if numbers.is_empty() { return EvalResult::Number(0.0); }
+                EvalResult::Number(numbers.iter().product())
+            }
+            7 => {
+                // STDEV.S
+                let numbers = extract_numbers();
+                if numbers.len() < 2 { return EvalResult::Error(CellError::Div0); }
+                let mean: f64 = numbers.iter().sum::<f64>() / numbers.len() as f64;
+                let variance: f64 = numbers.iter().map(|x| (x - mean).powi(2)).sum::<f64>() / (numbers.len() - 1) as f64;
+                EvalResult::Number(variance.sqrt())
+            }
+            8 => {
+                // STDEV.P
+                let numbers = extract_numbers();
+                if numbers.is_empty() { return EvalResult::Error(CellError::Div0); }
+                let mean: f64 = numbers.iter().sum::<f64>() / numbers.len() as f64;
+                let variance: f64 = numbers.iter().map(|x| (x - mean).powi(2)).sum::<f64>() / numbers.len() as f64;
+                EvalResult::Number(variance.sqrt())
+            }
+            9 => {
+                // SUM
+                let numbers = extract_numbers();
+                EvalResult::Number(numbers.iter().sum())
+            }
+            10 => {
+                // VAR.S
+                let numbers = extract_numbers();
+                if numbers.len() < 2 { return EvalResult::Error(CellError::Div0); }
+                let mean: f64 = numbers.iter().sum::<f64>() / numbers.len() as f64;
+                let variance: f64 = numbers.iter().map(|x| (x - mean).powi(2)).sum::<f64>() / (numbers.len() - 1) as f64;
+                EvalResult::Number(variance)
+            }
+            11 => {
+                // VAR.P
+                let numbers = extract_numbers();
+                if numbers.is_empty() { return EvalResult::Error(CellError::Div0); }
+                let mean: f64 = numbers.iter().sum::<f64>() / numbers.len() as f64;
+                let variance: f64 = numbers.iter().map(|x| (x - mean).powi(2)).sum::<f64>() / numbers.len() as f64;
+                EvalResult::Number(variance)
+            }
+            12 => {
+                // MEDIAN
+                let mut numbers = extract_numbers();
+                if numbers.is_empty() { return EvalResult::Error(CellError::Value); }
+                numbers.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+                let mid = numbers.len() / 2;
+                if numbers.len() % 2 == 0 {
+                    EvalResult::Number((numbers[mid - 1] + numbers[mid]) / 2.0)
+                } else {
+                    EvalResult::Number(numbers[mid])
+                }
+            }
+            13 => {
+                // MODE.SNGL
+                let numbers = extract_numbers();
+                if numbers.is_empty() { return EvalResult::Error(CellError::Value); }
+                let mut counts = std::collections::HashMap::new();
+                for &n in &numbers {
+                    let key = n.to_bits();
+                    *counts.entry(key).or_insert(0u32) += 1;
+                }
+                let max_count = counts.values().cloned().max().unwrap_or(0);
+                if max_count < 2 { return EvalResult::Error(CellError::NA); }
+                let mode_bits = counts.into_iter()
+                    .filter(|(_, c)| *c == max_count)
+                    .map(|(k, _)| k)
+                    .min()
+                    .unwrap();
+                EvalResult::Number(f64::from_bits(mode_bits))
+            }
+            14 => {
+                // LARGE
+                if range_args.len() < 2 { return EvalResult::Error(CellError::Value); }
+                let k_val = match self.evaluate(&args[args.len() - 1]).as_number() {
+                    Some(k) => k as usize,
+                    None => return EvalResult::Error(CellError::Value),
+                };
+                // Recollect values from all but last arg
+                let mut nums = Vec::new();
+                for arg in &args[2..args.len()-1] {
+                    let result = self.evaluate(arg);
+                    let mut flat = Vec::new();
+                    Self::flatten_into(&mut flat, result);
+                    for v in flat {
+                        if skip_errors && matches!(v, EvalResult::Error(_)) { continue; }
+                        if let Some(n) = v.as_number() { nums.push(n); }
+                    }
+                }
+                if k_val < 1 || k_val > nums.len() { return EvalResult::Error(CellError::Value); }
+                nums.sort_by(|a, b| b.partial_cmp(a).unwrap_or(std::cmp::Ordering::Equal));
+                EvalResult::Number(nums[k_val - 1])
+            }
+            15 => {
+                // SMALL
+                if range_args.len() < 2 { return EvalResult::Error(CellError::Value); }
+                let k_val = match self.evaluate(&args[args.len() - 1]).as_number() {
+                    Some(k) => k as usize,
+                    None => return EvalResult::Error(CellError::Value),
+                };
+                let mut nums = Vec::new();
+                for arg in &args[2..args.len()-1] {
+                    let result = self.evaluate(arg);
+                    let mut flat = Vec::new();
+                    Self::flatten_into(&mut flat, result);
+                    for v in flat {
+                        if skip_errors && matches!(v, EvalResult::Error(_)) { continue; }
+                        if let Some(n) = v.as_number() { nums.push(n); }
+                    }
+                }
+                if k_val < 1 || k_val > nums.len() { return EvalResult::Error(CellError::Value); }
+                nums.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+                EvalResult::Number(nums[k_val - 1])
+            }
+            16 => {
+                // PERCENTILE.INC
+                if range_args.len() < 2 { return EvalResult::Error(CellError::Value); }
+                let k_val = match self.evaluate(&args[args.len() - 1]).as_number() {
+                    Some(k) if (0.0..=1.0).contains(&k) => k,
+                    _ => return EvalResult::Error(CellError::Value),
+                };
+                let mut nums = Vec::new();
+                for arg in &args[2..args.len()-1] {
+                    let result = self.evaluate(arg);
+                    let mut flat = Vec::new();
+                    Self::flatten_into(&mut flat, result);
+                    for v in flat {
+                        if skip_errors && matches!(v, EvalResult::Error(_)) { continue; }
+                        if let Some(n) = v.as_number() { nums.push(n); }
+                    }
+                }
+                if nums.is_empty() { return EvalResult::Error(CellError::Value); }
+                nums.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+                let n = nums.len() as f64;
+                let rank = k_val * (n - 1.0);
+                let lower = rank.floor() as usize;
+                let frac = rank - lower as f64;
+                if lower >= nums.len() - 1 {
+                    EvalResult::Number(*nums.last().unwrap())
+                } else {
+                    EvalResult::Number(nums[lower] + frac * (nums[lower + 1] - nums[lower]))
+                }
+            }
+            17 => {
+                // QUARTILE.INC
+                if range_args.len() < 2 { return EvalResult::Error(CellError::Value); }
+                let q = match self.evaluate(&args[args.len() - 1]).as_number() {
+                    Some(q) if (0.0..=4.0).contains(&q) => q as i32,
+                    _ => return EvalResult::Error(CellError::Value),
+                };
+                let k_val = q as f64 / 4.0;
+                let mut nums = Vec::new();
+                for arg in &args[2..args.len()-1] {
+                    let result = self.evaluate(arg);
+                    let mut flat = Vec::new();
+                    Self::flatten_into(&mut flat, result);
+                    for v in flat {
+                        if skip_errors && matches!(v, EvalResult::Error(_)) { continue; }
+                        if let Some(n) = v.as_number() { nums.push(n); }
+                    }
+                }
+                if nums.is_empty() { return EvalResult::Error(CellError::Value); }
+                nums.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+                let n = nums.len() as f64;
+                let rank = k_val * (n - 1.0);
+                let lower = rank.floor() as usize;
+                let frac = rank - lower as f64;
+                if lower >= nums.len() - 1 {
+                    EvalResult::Number(*nums.last().unwrap())
+                } else {
+                    EvalResult::Number(nums[lower] + frac * (nums[lower + 1] - nums[lower]))
+                }
+            }
+            18 => {
+                // PERCENTILE.EXC
+                if range_args.len() < 2 { return EvalResult::Error(CellError::Value); }
+                let k_val = match self.evaluate(&args[args.len() - 1]).as_number() {
+                    Some(k) if k > 0.0 && k < 1.0 => k,
+                    _ => return EvalResult::Error(CellError::Value),
+                };
+                let mut nums = Vec::new();
+                for arg in &args[2..args.len()-1] {
+                    let result = self.evaluate(arg);
+                    let mut flat = Vec::new();
+                    Self::flatten_into(&mut flat, result);
+                    for v in flat {
+                        if skip_errors && matches!(v, EvalResult::Error(_)) { continue; }
+                        if let Some(n) = v.as_number() { nums.push(n); }
+                    }
+                }
+                if nums.is_empty() { return EvalResult::Error(CellError::Value); }
+                nums.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+                let n = nums.len() as f64;
+                let rank = k_val * (n + 1.0) - 1.0;
+                if rank < 0.0 || rank > n - 1.0 { return EvalResult::Error(CellError::Value); }
+                let lower = rank.floor() as usize;
+                let frac = rank - lower as f64;
+                if lower >= nums.len() - 1 {
+                    EvalResult::Number(*nums.last().unwrap())
+                } else {
+                    EvalResult::Number(nums[lower] + frac * (nums[lower + 1] - nums[lower]))
+                }
+            }
+            19 => {
+                // QUARTILE.EXC
+                if range_args.len() < 2 { return EvalResult::Error(CellError::Value); }
+                let q = match self.evaluate(&args[args.len() - 1]).as_number() {
+                    Some(q) if q >= 1.0 && q <= 3.0 => q as i32,
+                    _ => return EvalResult::Error(CellError::Value),
+                };
+                let k_val = q as f64 / 4.0;
+                let mut nums = Vec::new();
+                for arg in &args[2..args.len()-1] {
+                    let result = self.evaluate(arg);
+                    let mut flat = Vec::new();
+                    Self::flatten_into(&mut flat, result);
+                    for v in flat {
+                        if skip_errors && matches!(v, EvalResult::Error(_)) { continue; }
+                        if let Some(n) = v.as_number() { nums.push(n); }
+                    }
+                }
+                if nums.is_empty() { return EvalResult::Error(CellError::Value); }
+                nums.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+                let n = nums.len() as f64;
+                let rank = k_val * (n + 1.0) - 1.0;
+                if rank < 0.0 || rank > n - 1.0 { return EvalResult::Error(CellError::Value); }
+                let lower = rank.floor() as usize;
+                let frac = rank - lower as f64;
+                if lower >= nums.len() - 1 {
+                    EvalResult::Number(*nums.last().unwrap())
+                } else {
+                    EvalResult::Number(nums[lower] + frac * (nums[lower + 1] - nums[lower]))
+                }
+            }
+            _ => EvalResult::Error(CellError::Value),
+        }
+    }
+
+    // ==================== Web Functions ====================
+
+    fn fn_encodeurl(&self, args: &[Expression]) -> EvalResult {
+        if args.len() != 1 { return EvalResult::Error(CellError::Value); }
+        let text = self.evaluate(&args[0]).as_text();
+        let mut encoded = String::new();
+        for byte in text.as_bytes() {
+            match *byte {
+                b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                    encoded.push(*byte as char);
+                }
+                _ => {
+                    encoded.push_str(&format!("%{:02X}", byte));
+                }
+            }
+        }
+        EvalResult::Text(encoded)
     }
 
     // ==================== Text Functions (Batch 6) ====================

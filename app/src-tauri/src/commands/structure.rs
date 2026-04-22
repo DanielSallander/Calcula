@@ -1080,7 +1080,7 @@ pub fn shift_formula_for_fill(
 }
 
 /// Internal function to shift a single formula (no Result wrapper).
-fn shift_formula_internal(formula: &str, row_delta: i32, col_delta: i32) -> String {
+pub(crate) fn shift_formula_internal(formula: &str, row_delta: i32, col_delta: i32) -> String {
     let mut result = formula.to_string();
 
     // Shift rows if there's a row delta

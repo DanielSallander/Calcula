@@ -10,6 +10,7 @@ import type {
   RichTextRun,
   StyleData,
   DimensionData,
+  DefaultDimensions,
   FormattingOptions,
   FormattingResult,
   FunctionInfo,
@@ -324,6 +325,29 @@ export async function detectDataRegion(
   });
 }
 
+/**
+ * Result of getCurrentRegion - structured version of detectDataRegion.
+ */
+export interface CurrentRegionResult {
+  startRow: number;
+  startCol: number;
+  endRow: number;
+  endCol: number;
+  empty: boolean;
+}
+
+/**
+ * Get the current region around a cell as a structured result.
+ * Returns a CurrentRegionResult with `empty: true` if the cell is isolated,
+ * or the bounding rectangle of the contiguous data region otherwise.
+ */
+export async function getCurrentRegion(
+  row: number,
+  col: number
+): Promise<CurrentRegionResult> {
+  return invoke<CurrentRegionResult>("get_current_region", { row, col });
+}
+
 // ============================================================================
 // Dimension Operations
 // ============================================================================
@@ -350,6 +374,18 @@ export async function getRowHeight(row: number): Promise<number | null> {
 
 export async function getAllRowHeights(): Promise<DimensionData[]> {
   return invoke<DimensionData[]>("get_all_row_heights");
+}
+
+export async function getDefaultDimensions(): Promise<DefaultDimensions> {
+  return invoke<DefaultDimensions>("get_default_dimensions");
+}
+
+export async function setDefaultRowHeight(height: number): Promise<DefaultDimensions> {
+  return invoke<DefaultDimensions>("set_default_row_height", { height });
+}
+
+export async function setDefaultColumnWidth(width: number): Promise<DefaultDimensions> {
+  return invoke<DefaultDimensions>("set_default_column_width", { width });
 }
 
 // ============================================================================
@@ -462,6 +498,39 @@ export async function applyFormatting(
 
 export async function getStyleCount(): Promise<number> {
   return invoke<number>("get_style_count");
+}
+
+/**
+ * Apply a border preset to a rectangular range.
+ * @param startRow - First row of range (inclusive)
+ * @param startCol - First column of range (inclusive)
+ * @param endRow - Last row of range (inclusive)
+ * @param endCol - Last column of range (inclusive)
+ * @param preset - One of: "insideHorizontal", "insideVertical", "insideBoth", "outside", "allBorders", "none"
+ * @param style - Border line style: "solid", "dashed", "dotted", "double"
+ * @param color - CSS hex color (e.g. "#000000")
+ * @param width - Border width 0-3
+ */
+export async function applyBorderPreset(
+  startRow: number,
+  startCol: number,
+  endRow: number,
+  endCol: number,
+  preset: string,
+  style: string,
+  color: string,
+  width: number
+): Promise<FormattingResult> {
+  return invoke<FormattingResult>("apply_border_preset", {
+    startRow,
+    startCol,
+    endRow,
+    endCol,
+    preset,
+    style,
+    color,
+    width,
+  });
 }
 
 // ============================================================================
@@ -593,14 +662,43 @@ export async function calculateSheet(): Promise<CellData[]> {
 }
 
 // ============================================================================
+// Iterative Calculation Settings
+// ============================================================================
+
+export interface IterationSettings {
+  enabled: boolean;
+  maxIterations: number;
+  maxChange: number;
+}
+
+export async function getIterationSettings(): Promise<IterationSettings> {
+  return invoke<IterationSettings>("get_iteration_settings");
+}
+
+export async function setIterationSettings(
+  enabled: boolean,
+  maxIterations: number,
+  maxChange: number,
+): Promise<IterationSettings> {
+  return invoke<IterationSettings>("set_iteration_settings", {
+    enabled,
+    maxIterations,
+    maxChange,
+  });
+}
+
+// ============================================================================
 // Sheet Operations
 // ============================================================================
+
+export type SheetVisibility = "visible" | "hidden" | "veryHidden";
 
 export interface SheetInfo {
   index: number;
   name: string;
   tabColor?: string;
-  hidden?: boolean;
+  /** Sheet visibility: "visible", "hidden", or "veryHidden" */
+  visibility: SheetVisibility;
 }
 
 export interface SheetsResult {
@@ -640,8 +738,8 @@ export async function copySheet(sourceIndex: number, newName?: string): Promise<
   return invoke<SheetsResult>("copy_sheet", { sourceIndex, newName: newName ?? null });
 }
 
-export async function hideSheet(index: number): Promise<SheetsResult> {
-  return invoke<SheetsResult>("hide_sheet", { index });
+export async function hideSheet(index: number, level?: "hidden" | "veryHidden"): Promise<SheetsResult> {
+  return invoke<SheetsResult>("hide_sheet", { index, level: level ?? null });
 }
 
 export async function unhideSheet(index: number): Promise<SheetsResult> {
@@ -650,6 +748,14 @@ export async function unhideSheet(index: number): Promise<SheetsResult> {
 
 export async function setTabColor(index: number, color: string): Promise<SheetsResult> {
   return invoke<SheetsResult>("set_tab_color", { index, color });
+}
+
+export async function nextSheet(): Promise<SheetsResult> {
+  return invoke<SheetsResult>("next_sheet");
+}
+
+export async function previousSheet(): Promise<SheetsResult> {
+  return invoke<SheetsResult>("previous_sheet");
 }
 
 /**
@@ -1049,6 +1155,41 @@ export async function shiftFormulasBatch(
   const dt = performance.now() - t0;
   console.log(`[PERF][bridge] shiftFormulasBatch(${inputs.length}) | ipc=${dt.toFixed(1)}ms`);
   return result.formulas;
+}
+
+/**
+ * Fill a target range by copying/tiling source cells from the source range.
+ * Formulas have their relative references shifted by the delta between source and target.
+ * Non-formula cells are copied verbatim (value + style).
+ * This is the backend for Ctrl+D (Fill Down), Ctrl+R (Fill Right), etc.
+ */
+export async function fillRange(
+  sourceStartRow: number,
+  sourceStartCol: number,
+  sourceEndRow: number,
+  sourceEndCol: number,
+  targetStartRow: number,
+  targetStartCol: number,
+  targetEndRow: number,
+  targetEndCol: number,
+): Promise<CellData[]> {
+  const t0 = performance.now();
+  const result = await invoke<CellData[]>("fill_range", {
+    sourceStartRow,
+    sourceStartCol,
+    sourceEndRow,
+    sourceEndCol,
+    targetStartRow,
+    targetStartCol,
+    targetEndRow,
+    targetEndCol,
+  });
+  const dt = performance.now() - t0;
+  console.log(
+    `[PERF][bridge] fillRange src=(${sourceStartRow},${sourceStartCol})-(${sourceEndRow},${sourceEndCol}) ` +
+    `tgt=(${targetStartRow},${targetStartCol})-(${targetEndRow},${targetEndCol}) => ${result.length} cells | ipc=${dt.toFixed(1)}ms`
+  );
+  return result;
 }
 
 /**
@@ -1826,6 +1967,33 @@ export interface SelectionAggregationResult {
   max: number | null;
   count: number;
   numericalCount: number;
+}
+
+// ============================================================================
+// Auto-Recover Settings
+// ============================================================================
+
+export interface AutoRecoverSettings {
+  enabled: boolean;
+  intervalMs: number;
+}
+
+/** Get current auto-recover settings. */
+export async function getAutoRecoverSettings(): Promise<AutoRecoverSettings> {
+  return invoke<AutoRecoverSettings>("get_auto_recover_settings");
+}
+
+/** Update auto-recover settings. */
+export async function setAutoRecoverSettings(
+  enabled: boolean,
+  intervalMs: number,
+): Promise<AutoRecoverSettings> {
+  return invoke<AutoRecoverSettings>("set_auto_recover_settings", { enabled, intervalMs });
+}
+
+/** Perform a background auto-recover save. Returns the recovery file path or rejects if not dirty. */
+export async function autoRecoverSave(): Promise<string> {
+  return invoke<string>("auto_recover_save");
 }
 
 /** Compute aggregations (sum, average, count, etc.) for a cell selection range. */

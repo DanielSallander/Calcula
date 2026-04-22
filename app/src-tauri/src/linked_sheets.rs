@@ -467,7 +467,7 @@ pub fn link_published_sheets(
     let mut split_configs = state.split_configs.lock().map_err(|e| e.to_string())?;
     let mut page_setups = state.page_setups.lock().map_err(|e| e.to_string())?;
     let mut tab_colors = state.tab_colors.lock().map_err(|e| e.to_string())?;
-    let mut hidden_sheets = state.hidden_sheets.lock().map_err(|e| e.to_string())?;
+    let mut sheet_visibility = state.sheet_visibility.lock().map_err(|e| e.to_string())?;
     let mut protected_regions = state.protected_regions.lock().map_err(|e| e.to_string())?;
     let mut linked_sheets = state.linked_sheets.lock().map_err(|e| e.to_string())?;
     let mut style_registry = state.style_registry.lock().map_err(|e| e.to_string())?;
@@ -504,7 +504,7 @@ pub fn link_published_sheets(
         split_configs.push(crate::sheets::SplitConfig::default());
         page_setups.push(crate::api_types::PageSetup::default());
         tab_colors.push(String::new());
-        hidden_sheets.push(false);
+        sheet_visibility.push("visible".to_string());
 
         // Create protected region covering the entire data area
         if !sheet.cells.is_empty() {

@@ -383,6 +383,22 @@ pub struct ConditionalFormat {
     pub strikethrough: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub number_format: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub border_top_color: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub border_top_style: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub border_bottom_color: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub border_bottom_style: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub border_left_color: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub border_left_style: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub border_right_color: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub border_right_style: Option<String>,
 }
 
 // ============================================================================

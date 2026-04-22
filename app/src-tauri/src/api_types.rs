@@ -2022,6 +2022,26 @@ pub struct SupportedLocaleEntry {
     pub display_name: String,
 }
 
+// ============================================================================
+// Named Cell Styles
+// ============================================================================
+
+/// A named cell style (e.g. "Heading 1", "Good", "Currency").
+/// Maps a user-facing name to a style_index in the StyleRegistry.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NamedCellStyle {
+    /// Display name (e.g. "Heading 1")
+    pub name: String,
+    /// Whether this is a built-in style (cannot be deleted)
+    pub built_in: bool,
+    /// Index into the StyleRegistry
+    pub style_index: usize,
+    /// Category for grouping: "Good, Bad and Neutral", "Data and Model",
+    /// "Titles and Headings", "Number Format", "Themed Cell Styles", "Custom"
+    pub category: String,
+}
+
 /// Bounding box of all non-empty cells in the active sheet.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -2031,4 +2051,32 @@ pub struct UsedRangeResult {
     pub end_row: u32,
     pub end_col: u32,
     pub empty: bool,
+}
+
+/// Default row height and column width for the workbook.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DefaultDimensions {
+    pub default_row_height: f64,
+    pub default_column_width: f64,
+}
+
+// ============================================================================
+// Workbook Properties (document metadata)
+// ============================================================================
+
+/// Workbook-level document properties (author, title, subject, etc.).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkbookProperties {
+    pub title: String,
+    pub author: String,
+    pub subject: String,
+    pub description: String,
+    pub keywords: String,
+    pub category: String,
+    /// ISO 8601 date string
+    pub created: String,
+    /// ISO 8601 date string
+    pub last_modified: String,
 }

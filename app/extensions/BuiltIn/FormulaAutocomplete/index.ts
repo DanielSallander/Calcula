@@ -20,7 +20,7 @@ import type {
 } from "@api/formulaAutocomplete";
 import { FormulaAutocompleteOverlay } from "./FormulaAutocompleteOverlay";
 import { useAutocompleteStore } from "./useAutocompleteStore";
-import { reloadNamedRanges } from "./functionCatalog";
+import { reloadNamedRanges, subscribeToCustomFunctionChanges } from "./functionCatalog";
 
 const OVERLAY_ID = "formula-autocomplete";
 
@@ -76,6 +76,13 @@ function activate(): void {
     onAppEvent(AppEvents.NAMED_RANGES_CHANGED, () => {
       console.log("[FormulaAutocomplete] Named ranges changed, reloading...");
       reloadNamedRanges();
+    })
+  );
+
+  // 7. Listen for custom function registry changes
+  cleanups.push(
+    subscribeToCustomFunctionChanges(() => {
+      console.log("[FormulaAutocomplete] Custom functions changed, autocomplete updated.");
     })
   );
 }

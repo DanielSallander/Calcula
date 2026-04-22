@@ -587,6 +587,19 @@ export function drawCellText(state: RenderState): void {
               ctx.fillStyle = effective.backgroundColor;
               ctx.fillRect(cellLeft, cellTop, cellRight - cellLeft, cellBottom - cellTop);
             }
+            // Draw CF border overrides on empty cells
+            if (effective.borderTopColor) {
+              drawBorderLine(ctx, cellLeft, cellTop, cellRight, cellTop, { style: effective.borderTopStyle || "solid", color: effective.borderTopColor, width: 1 });
+            }
+            if (effective.borderBottomColor) {
+              drawBorderLine(ctx, cellLeft, cellBottom, cellRight, cellBottom, { style: effective.borderBottomStyle || "solid", color: effective.borderBottomColor, width: 1 });
+            }
+            if (effective.borderLeftColor) {
+              drawBorderLine(ctx, cellLeft, cellTop, cellLeft, cellBottom, { style: effective.borderLeftStyle || "solid", color: effective.borderLeftColor, width: 1 });
+            }
+            if (effective.borderRightColor) {
+              drawBorderLine(ctx, cellRight, cellTop, cellRight, cellBottom, { style: effective.borderRightStyle || "solid", color: effective.borderRightColor, width: 1 });
+            }
           }
           if (hasCellDecorations()) {
             applyCellDecorations({
@@ -806,11 +819,19 @@ export function drawCellText(state: RenderState): void {
         ctx.fillRect(cellLeft, cellTop, cellRight - cellLeft, cellBottom - cellTop);
       }
 
-      // Draw cell borders
-      const bTop = baseCellStyle.borderTop;
-      const bRight = baseCellStyle.borderRight;
-      const bBottom = baseCellStyle.borderBottom;
-      const bLeft = baseCellStyle.borderLeft;
+      // Draw cell borders (with CF overrides from style interceptors)
+      const bTop = effectiveStyle.borderTopColor
+        ? { style: effectiveStyle.borderTopStyle || "solid", color: effectiveStyle.borderTopColor, width: 1 }
+        : baseCellStyle.borderTop;
+      const bRight = effectiveStyle.borderRightColor
+        ? { style: effectiveStyle.borderRightStyle || "solid", color: effectiveStyle.borderRightColor, width: 1 }
+        : baseCellStyle.borderRight;
+      const bBottom = effectiveStyle.borderBottomColor
+        ? { style: effectiveStyle.borderBottomStyle || "solid", color: effectiveStyle.borderBottomColor, width: 1 }
+        : baseCellStyle.borderBottom;
+      const bLeft = effectiveStyle.borderLeftColor
+        ? { style: effectiveStyle.borderLeftStyle || "solid", color: effectiveStyle.borderLeftColor, width: 1 }
+        : baseCellStyle.borderLeft;
       const bDiagDown = baseCellStyle.borderDiagonalDown;
       const bDiagUp = baseCellStyle.borderDiagonalUp;
 

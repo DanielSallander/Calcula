@@ -5,6 +5,11 @@
 import { getAllFunctions, getAllNamedRanges } from "@api/lib";
 import type { FunctionInfo } from "@api/types";
 import type { NamedRange } from "@api/lib";
+import {
+  getAllCustomFunctions,
+  subscribeToCustomFunctions,
+} from "@api/formulaFunctions";
+import type { CustomFunctionDef } from "@api/formulaFunctions";
 
 // ============================================================================
 // Common functions that should appear at the top of results
@@ -254,10 +259,52 @@ export function reloadNamedRanges(): void {
 }
 
 /**
- * Get the cached function catalog (synchronous). Returns empty if not yet loaded.
+ * Convert a CustomFunctionDef to a FunctionInfo for use in autocomplete.
+ */
+function customToFunctionInfo(def: CustomFunctionDef): FunctionInfo {
+  return {
+    name: def.name,
+    syntax: def.syntax,
+    description: def.description,
+    category: def.category,
+  };
+}
+
+/**
+ * Get the cached function catalog merged with custom functions (synchronous).
+ * Returns empty if not yet loaded.
  */
 export function getFunctionCatalog(): FunctionInfo[] {
-  return cachedFunctions;
+  const customFns = getAllCustomFunctions().map(customToFunctionInfo);
+  if (customFns.length === 0) {
+    return cachedFunctions;
+  }
+  // Merge: custom functions override built-in ones with the same name
+  const builtinNames = new Set(cachedFunctions.map((f) => f.name.toUpperCase()));
+  const uniqueCustom = customFns.filter(
+    (f) => !builtinNames.has(f.name.toUpperCase())
+  );
+  return [...cachedFunctions, ...uniqueCustom];
+}
+
+/** Unsubscribe function for the custom functions listener */
+let customFnUnsub: (() => void) | null = null;
+
+/**
+ * Subscribe to custom function registry changes so autocomplete stays in sync.
+ * Called once during extension activation.
+ */
+export function subscribeToCustomFunctionChanges(onChange: () => void): () => void {
+  if (customFnUnsub) {
+    customFnUnsub();
+  }
+  customFnUnsub = subscribeToCustomFunctions(onChange);
+  return () => {
+    if (customFnUnsub) {
+      customFnUnsub();
+      customFnUnsub = null;
+    }
+  };
 }
 
 // ============================================================================
@@ -320,8 +367,9 @@ export function filterSuggestions(token: string, limit: number = 10): ScoredSugg
   const upper = token.toUpperCase();
   const results: ScoredSuggestion[] = [];
 
-  // Score functions
-  for (const fn of cachedFunctions) {
+  // Score functions (built-in + custom)
+  const allFunctions = getFunctionCatalog();
+  for (const fn of allFunctions) {
     const nameUpper = fn.name.toUpperCase();
     const popularityBonus = COMMON_FUNCTIONS[fn.name] || 0;
 
@@ -391,14 +439,15 @@ export function filterSuggestions(token: string, limit: number = 10): ScoredSugg
  *   - Shorter names rank higher (less to type)
  */
 export function filterFunctions(token: string, limit: number = 10): ScoredFunction[] {
-  if (!token || cachedFunctions.length === 0) {
+  const allFunctions = getFunctionCatalog();
+  if (!token || allFunctions.length === 0) {
     return [];
   }
 
   const upper = token.toUpperCase();
   const results: ScoredFunction[] = [];
 
-  for (const fn of cachedFunctions) {
+  for (const fn of allFunctions) {
     const nameUpper = fn.name.toUpperCase();
     const popularityBonus = COMMON_FUNCTIONS[fn.name] || 0;
 
@@ -435,5 +484,12 @@ export function filterFunctions(token: string, limit: number = 10): ScoredFuncti
  */
 export function getFunctionByName(name: string): FunctionInfo | undefined {
   const upper = name.toUpperCase();
-  return cachedFunctions.find((fn) => fn.name.toUpperCase() === upper);
+  // Check built-in functions first, then custom functions
+  const builtIn = cachedFunctions.find((fn) => fn.name.toUpperCase() === upper);
+  if (builtIn) return builtIn;
+  // Check custom functions
+  const customFn = getAllCustomFunctions().find(
+    (def) => def.name.toUpperCase() === upper
+  );
+  return customFn ? customToFunctionInfo(customFn) : undefined;
 }

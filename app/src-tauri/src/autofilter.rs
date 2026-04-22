@@ -677,6 +677,7 @@ fn matches_date_dynamic_filter(serial: f64, criteria: DynamicFilterCriteria) -> 
 fn should_row_be_visible(
     grid: &Grid,
     style_registry: &engine::StyleRegistry,
+    theme: &engine::ThemeDefinition,
     row: u32,
     auto_filter: &AutoFilter,
     locale: &engine::LocaleSettings,
@@ -810,8 +811,41 @@ fn should_row_be_visible(
                     }
                 }
             }
-            FilterOn::CellColor | FilterOn::FontColor | FilterOn::Icon => {
-                // TODO: Implement color and icon filtering when we have style access
+            FilterOn::CellColor => {
+                if let Some(target_color) = &criteria.color {
+                    let target_css = target_color.to_lowercase();
+                    let cell_bg_css = if let Some(cell) = grid.cells.get(&(row, abs_col)) {
+                        let style = style_registry.get(cell.style_index);
+                        style.fill.background_color().to_css(theme).to_lowercase()
+                    } else {
+                        // Empty cell uses default background
+                        engine::ThemeColor::default_background().to_css(theme).to_lowercase()
+                    };
+                    if cell_bg_css != target_css {
+                        return false;
+                    }
+                }
+            }
+            FilterOn::FontColor => {
+                if let Some(target_color) = &criteria.color {
+                    let target_css = target_color.to_lowercase();
+                    let cell_font_css = if let Some(cell) = grid.cells.get(&(row, abs_col)) {
+                        let style = style_registry.get(cell.style_index);
+                        style.font.color.to_css(theme).to_lowercase()
+                    } else {
+                        // Empty cell uses default text color
+                        engine::ThemeColor::default_text().to_css(theme).to_lowercase()
+                    };
+                    if cell_font_css != target_css {
+                        return false;
+                    }
+                }
+            }
+            FilterOn::Icon => {
+                // Icon filtering depends on conditional formatting evaluation context,
+                // which determines which icon is displayed for each cell based on CF rules.
+                // This requires resolving CF icon sets at filter time, which is not yet
+                // integrated. For now, icon-filtered rows are always shown.
             }
         }
     }
@@ -880,6 +914,7 @@ fn apply_top_bottom_filter(
 fn recompute_hidden_rows(
     grid: &Grid,
     style_registry: &engine::StyleRegistry,
+    theme: &engine::ThemeDefinition,
     auto_filter: &mut AutoFilter,
     locale: &engine::LocaleSettings,
 ) {
@@ -898,7 +933,7 @@ fn recompute_hidden_rows(
 
     // Second pass: check each row against all other filters
     for row in (auto_filter.start_row + 1)..=auto_filter.end_row {
-        if !should_row_be_visible(grid, style_registry, row, auto_filter, locale) {
+        if !should_row_be_visible(grid, style_registry, theme, row, auto_filter, locale) {
             hidden.insert(row);
         }
     }
@@ -921,6 +956,7 @@ pub fn apply_auto_filter(
     let grids = state.grids.lock().unwrap();
     let style_registry = state.style_registry.lock().unwrap();
     let locale = state.locale.lock().unwrap();
+    let theme = state.theme.lock().unwrap();
 
     // Normalize coordinates
     let start_row = params.start_row.min(params.end_row);
@@ -952,7 +988,7 @@ pub fn apply_auto_filter(
 
     // Recompute hidden rows
     if active_sheet < grids.len() {
-        recompute_hidden_rows(&grids[active_sheet], &style_registry, auto_filter, &locale);
+        recompute_hidden_rows(&grids[active_sheet], &style_registry, &theme, auto_filter, &locale);
     }
 
     let hidden_rows: Vec<u32> = auto_filter.hidden_rows.iter().copied().collect();
@@ -979,13 +1015,14 @@ pub fn clear_column_criteria(
     let grids = state.grids.lock().unwrap();
     let style_registry = state.style_registry.lock().unwrap();
     let locale = state.locale.lock().unwrap();
+    let theme = state.theme.lock().unwrap();
 
     if let Some(auto_filter) = auto_filters.get_mut(&active_sheet) {
         auto_filter.column_filters.remove(&column_index);
 
         // Recompute hidden rows
         if active_sheet < grids.len() {
-            recompute_hidden_rows(&grids[active_sheet], &style_registry, auto_filter, &locale);
+            recompute_hidden_rows(&grids[active_sheet], &style_registry, &theme, auto_filter, &locale);
         }
 
         let hidden_rows: Vec<u32> = auto_filter.hidden_rows.iter().copied().collect();
@@ -1052,11 +1089,12 @@ pub fn reapply_auto_filter(
     let grids = state.grids.lock().unwrap();
     let style_registry = state.style_registry.lock().unwrap();
     let locale = state.locale.lock().unwrap();
+    let theme = state.theme.lock().unwrap();
 
     if let Some(auto_filter) = auto_filters.get_mut(&active_sheet) {
         // Recompute hidden rows
         if active_sheet < grids.len() {
-            recompute_hidden_rows(&grids[active_sheet], &style_registry, auto_filter, &locale);
+            recompute_hidden_rows(&grids[active_sheet], &style_registry, &theme, auto_filter, &locale);
         }
 
         let hidden_rows: Vec<u32> = auto_filter.hidden_rows.iter().copied().collect();
@@ -1204,6 +1242,7 @@ pub fn get_filter_unique_values(
     let grids = state.grids.lock().unwrap();
     let style_registry = state.style_registry.lock().unwrap();
     let locale = state.locale.lock().unwrap();
+    let _theme = state.theme.lock().unwrap();
 
     let auto_filter = match auto_filters.get(&active_sheet) {
         Some(af) => af,
@@ -1279,6 +1318,7 @@ pub fn set_column_filter_values(
     let grids = state.grids.lock().unwrap();
     let style_registry = state.style_registry.lock().unwrap();
     let locale = state.locale.lock().unwrap();
+    let theme = state.theme.lock().unwrap();
 
     if let Some(auto_filter) = auto_filters.get_mut(&active_sheet) {
         let mut filter_values = values;
@@ -1300,7 +1340,7 @@ pub fn set_column_filter_values(
 
         // Recompute hidden rows
         if active_sheet < grids.len() {
-            recompute_hidden_rows(&grids[active_sheet], &style_registry, auto_filter, &locale);
+            recompute_hidden_rows(&grids[active_sheet], &style_registry, &theme, auto_filter, &locale);
         }
 
         let hidden_rows: Vec<u32> = auto_filter.hidden_rows.iter().copied().collect();
@@ -1339,6 +1379,7 @@ pub fn set_column_custom_filter(
     let grids = state.grids.lock().unwrap();
     let style_registry = state.style_registry.lock().unwrap();
     let locale = state.locale.lock().unwrap();
+    let theme = state.theme.lock().unwrap();
 
     if let Some(auto_filter) = auto_filters.get_mut(&active_sheet) {
         let criteria = FilterCriteria {
@@ -1356,7 +1397,7 @@ pub fn set_column_custom_filter(
 
         // Recompute hidden rows
         if active_sheet < grids.len() {
-            recompute_hidden_rows(&grids[active_sheet], &style_registry, auto_filter, &locale);
+            recompute_hidden_rows(&grids[active_sheet], &style_registry, &theme, auto_filter, &locale);
         }
 
         let hidden_rows: Vec<u32> = auto_filter.hidden_rows.iter().copied().collect();
@@ -1394,6 +1435,7 @@ pub fn set_column_top_bottom_filter(
     let grids = state.grids.lock().unwrap();
     let style_registry = state.style_registry.lock().unwrap();
     let locale = state.locale.lock().unwrap();
+    let theme = state.theme.lock().unwrap();
 
     // Validate filter_on
     let valid_filter = matches!(
@@ -1424,7 +1466,7 @@ pub fn set_column_top_bottom_filter(
 
         // Recompute hidden rows
         if active_sheet < grids.len() {
-            recompute_hidden_rows(&grids[active_sheet], &style_registry, auto_filter, &locale);
+            recompute_hidden_rows(&grids[active_sheet], &style_registry, &theme, auto_filter, &locale);
         }
 
         let hidden_rows: Vec<u32> = auto_filter.hidden_rows.iter().copied().collect();
@@ -1461,6 +1503,7 @@ pub fn set_column_dynamic_filter(
     let grids = state.grids.lock().unwrap();
     let style_registry = state.style_registry.lock().unwrap();
     let locale = state.locale.lock().unwrap();
+    let theme = state.theme.lock().unwrap();
 
     if let Some(auto_filter) = auto_filters.get_mut(&active_sheet) {
         let criteria = FilterCriteria {
@@ -1476,7 +1519,7 @@ pub fn set_column_dynamic_filter(
 
         // Recompute hidden rows
         if active_sheet < grids.len() {
-            recompute_hidden_rows(&grids[active_sheet], &style_registry, auto_filter, &locale);
+            recompute_hidden_rows(&grids[active_sheet], &style_registry, &theme, auto_filter, &locale);
         }
 
         let hidden_rows: Vec<u32> = auto_filter.hidden_rows.iter().copied().collect();

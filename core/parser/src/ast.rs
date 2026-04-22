@@ -209,6 +209,9 @@ pub enum BuiltinFunction {
     Int,
     Sign,
     SumProduct,
+    SumX2MY2,
+    SumX2PY2,
+    SumXMY2,
     Product,
     Rand,
     RandBetween,
@@ -570,6 +573,37 @@ pub enum BuiltinFunction {
     HLookup,
     Lookup,
 
+    // Hyperbolic & reciprocal trig functions
+    Sinh,
+    Cosh,
+    Tanh,
+    Cot,
+    Coth,
+    Csc,
+    Csch,
+    Sec,
+    Sech,
+    Acot,
+
+    // Rounding variants
+    CeilingMath,
+    CeilingPrecise,
+    FloorMath,
+    FloorPrecise,
+    IsoCeiling,
+
+    // Additional math functions (Group 3)
+    Multinomial,
+    Combina,
+    FactDouble,
+    SqrtPi,
+
+    // Aggregate function
+    Aggregate,
+
+    // Web functions
+    EncodeUrl,
+
     // Additional math functions
     MRound,
     Quotient,
@@ -738,6 +772,9 @@ impl BuiltinFunction {
             "INT" => BuiltinFunction::Int,
             "SIGN" => BuiltinFunction::Sign,
             "SUMPRODUCT" => BuiltinFunction::SumProduct,
+            "SUMX2MY2" => BuiltinFunction::SumX2MY2,
+            "SUMX2PY2" => BuiltinFunction::SumX2PY2,
+            "SUMXMY2" => BuiltinFunction::SumXMY2,
             "PRODUCT" => BuiltinFunction::Product,
             "RAND" => BuiltinFunction::Rand,
             "RANDBETWEEN" => BuiltinFunction::RandBetween,
@@ -1098,6 +1135,37 @@ impl BuiltinFunction {
             "VLOOKUP" => BuiltinFunction::VLookup,
             "HLOOKUP" => BuiltinFunction::HLookup,
             "LOOKUP" => BuiltinFunction::Lookup,
+
+            // Hyperbolic & reciprocal trig functions
+            "SINH" => BuiltinFunction::Sinh,
+            "COSH" => BuiltinFunction::Cosh,
+            "TANH" => BuiltinFunction::Tanh,
+            "COT" => BuiltinFunction::Cot,
+            "COTH" => BuiltinFunction::Coth,
+            "CSC" => BuiltinFunction::Csc,
+            "CSCH" => BuiltinFunction::Csch,
+            "SEC" => BuiltinFunction::Sec,
+            "SECH" => BuiltinFunction::Sech,
+            "ACOT" => BuiltinFunction::Acot,
+
+            // Rounding variants
+            "CEILING.MATH" => BuiltinFunction::CeilingMath,
+            "CEILING.PRECISE" => BuiltinFunction::CeilingPrecise,
+            "FLOOR.MATH" => BuiltinFunction::FloorMath,
+            "FLOOR.PRECISE" => BuiltinFunction::FloorPrecise,
+            "ISO.CEILING" => BuiltinFunction::IsoCeiling,
+
+            // Additional math functions (Group 3)
+            "MULTINOMIAL" => BuiltinFunction::Multinomial,
+            "COMBINA" => BuiltinFunction::Combina,
+            "FACTDOUBLE" => BuiltinFunction::FactDouble,
+            "SQRTPI" => BuiltinFunction::SqrtPi,
+
+            // Aggregate function
+            "AGGREGATE" => BuiltinFunction::Aggregate,
+
+            // Web functions
+            "ENCODEURL" => BuiltinFunction::EncodeUrl,
 
             // Additional math functions
             "MROUND" => BuiltinFunction::MRound,

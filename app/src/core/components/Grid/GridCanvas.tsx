@@ -54,6 +54,10 @@ export interface GridCanvasProps {
   showFormulas?: boolean;
   /** Whether to display zero values in cells (when false, zeros appear as blank) */
   displayZeros?: boolean;
+  /** Whether to display gridlines (when false, gridlines are hidden) */
+  displayGridlines?: boolean;
+  /** Whether to display row/column headings (when false, headers are hidden) */
+  displayHeadings?: boolean;
   /** Optional theme override */
   theme?: GridTheme;
   /** Callback when canvas is clicked */
@@ -175,6 +179,8 @@ export const GridCanvas = forwardRef<GridCanvasHandle, GridCanvasProps>(
       viewMode = "normal",
       showFormulas = false,
       displayZeros = true,
+      displayGridlines = true,
+      displayHeadings = true,
       theme = DEFAULT_THEME,
       onMouseDown,
       onMouseMove,
@@ -511,13 +517,15 @@ export const GridCanvas = forwardRef<GridCanvasHandle, GridCanvasProps>(
         undefined, // pageSetup
         showFormulas,
         displayZeros,
+        displayGridlines,
+        displayHeadings,
       );
 
       const perfDrawMs = performance.now() - perfDrawStart;
       if (perfDrawMs > 5) {
         console.log(`[PERF] draw ms=${perfDrawMs.toFixed(1)}`, new Error().stack?.split('\n').slice(1, 4).join(' <- '));
       }
-    }, [context, canvasSize.width, canvasSize.height, config, viewport, selection, editing, cells, theme, formulaReferences, dims, styleCache, fillPreviewRange, selectionDragPreview, selectionDragMode, clipboardSelection, clipboardMode, freezeConfig, splitConfig, splitViewport, viewMode, showFormulas, displayZeros, currentSheetName, zoom, spillRanges]);
+    }, [context, canvasSize.width, canvasSize.height, config, viewport, selection, editing, cells, theme, formulaReferences, dims, styleCache, fillPreviewRange, selectionDragPreview, selectionDragMode, clipboardSelection, clipboardMode, freezeConfig, splitConfig, splitViewport, viewMode, showFormulas, displayZeros, displayGridlines, displayHeadings, currentSheetName, zoom, spillRanges]);
 
     /**
      * Start row insertion animation.

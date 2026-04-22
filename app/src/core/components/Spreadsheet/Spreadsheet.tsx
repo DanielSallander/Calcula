@@ -6,7 +6,7 @@
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import { useGridState, useGridContext } from "../../state";
 // FIX: Removed openFind import to resolve SyntaxError
-import { setViewportDimensions, setAllDimensions, setSelection, setManuallyHiddenRows, setManuallyHiddenCols, setZoom, setSplitConfig, setSplitViewport } from "../../state/gridActions";
+import { setViewportDimensions, setAllDimensions, setSelection, setManuallyHiddenRows, setManuallyHiddenCols, setZoom, setSplitConfig, setSplitViewport, updateConfig } from "../../state/gridActions";
 import { ZOOM_MIN, ZOOM_MAX, ZOOM_STEP } from "../../types";
 import type { Selection, Viewport, VirtualBounds } from "../../types";
 import { GridCanvas } from "../Grid";
@@ -25,6 +25,7 @@ import {
   deleteColumns,
   getAllColumnWidths,
   getAllRowHeights,
+  getDefaultDimensions,
   mergeCells,
   unmergeCells,
   setSplitWindow as backendSetSplitWindow,
@@ -116,7 +117,7 @@ function SpreadsheetContent({
   } = state;
 
   // 5. Extract freezeConfig, splitConfig, viewMode from gridState
-  const { freezeConfig, splitConfig, splitViewport, viewMode, showFormulas, displayZeros } = gridState;
+  const { freezeConfig, splitConfig, splitViewport, viewMode, showFormulas, displayZeros, displayGridlines, displayHeadings } = gridState;
 
   // -------------------------------------------------------------------------
   // Split bar drag state
@@ -219,9 +220,10 @@ function SpreadsheetContent({
   // -------------------------------------------------------------------------
   const refreshDimensions = useCallback(async () => {
     try {
-      const [colWidths, rowHeights] = await Promise.all([
+      const [colWidths, rowHeights, defaults] = await Promise.all([
         getAllColumnWidths(),
         getAllRowHeights(),
+        getDefaultDimensions(),
       ]);
 
       const columnWidthsMap = new Map<number, number>();
@@ -235,6 +237,10 @@ function SpreadsheetContent({
       }
 
       dispatch(setAllDimensions(columnWidthsMap, rowHeightsMap));
+      dispatch(updateConfig({
+        defaultCellWidth: defaults.defaultColumnWidth,
+        defaultCellHeight: defaults.defaultRowHeight,
+      }));
       console.log("[Spreadsheet] Dimensions refreshed from backend");
     } catch (error) {
       console.error("[Spreadsheet] Failed to refresh dimensions:", error);
@@ -1214,6 +1220,8 @@ function SpreadsheetContent({
             viewMode={viewMode}
             showFormulas={showFormulas}
             displayZeros={displayZeros}
+            displayGridlines={displayGridlines}
+            displayHeadings={displayHeadings}
             currentSheetName={gridState.sheetContext.activeSheetName}
             zoom={gridState.zoom}
           />

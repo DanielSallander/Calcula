@@ -38,9 +38,13 @@ pub struct SheetInfo {
     /// Tab color as CSS hex string (e.g., "#ff0000"). Empty = no color.
     #[serde(default)]
     pub tab_color: String,
-    /// Whether the sheet is hidden
-    #[serde(default)]
-    pub hidden: bool,
+    /// Sheet visibility: "visible", "hidden", or "veryHidden"
+    #[serde(default = "default_visibility")]
+    pub visibility: String,
+}
+
+fn default_visibility() -> String {
+    "visible".to_string()
 }
 
 /// Result of get_sheets command
@@ -59,20 +63,21 @@ fn build_sheet_list(
     sheet_names: &[String],
     freeze_configs: &[FreezeConfig],
     tab_colors: &[String],
-    hidden_sheets: &[bool],
+    sheet_visibility: &[String],
 ) -> Vec<SheetInfo> {
     sheet_names
         .iter()
         .enumerate()
         .map(|(index, name)| {
             let freeze = freeze_configs.get(index).cloned().unwrap_or_default();
+            let vis = sheet_visibility.get(index).cloned().unwrap_or_else(|| "visible".to_string());
             SheetInfo {
                 index,
                 name: name.clone(),
                 freeze_row: freeze.freeze_row,
                 freeze_col: freeze.freeze_col,
                 tab_color: tab_colors.get(index).cloned().unwrap_or_default(),
-                hidden: hidden_sheets.get(index).copied().unwrap_or(false),
+                visibility: vis,
             }
         })
         .collect()
@@ -95,10 +100,10 @@ pub fn get_sheets(state: State<AppState>) -> SheetsResult {
     let active_index = *state.active_sheet.lock().unwrap();
     let freeze_configs = state.freeze_configs.lock().unwrap();
     let tab_colors = state.tab_colors.lock().unwrap();
-    let hidden_sheets = state.hidden_sheets.lock().unwrap();
+    let sheet_visibility = state.sheet_visibility.lock().unwrap();
 
     SheetsResult {
-        sheets: build_sheet_list(&sheet_names, &freeze_configs, &tab_colors, &hidden_sheets),
+        sheets: build_sheet_list(&sheet_names, &freeze_configs, &tab_colors, &sheet_visibility),
         active_index,
     }
 }
@@ -116,7 +121,7 @@ pub fn set_active_sheet(state: State<AppState>, index: usize) -> Result<SheetsRe
     let mut current_grid = state.grid.lock().unwrap();
     let freeze_configs = state.freeze_configs.lock().unwrap();
     let tab_colors = state.tab_colors.lock().unwrap();
-    let hidden_sheets = state.hidden_sheets.lock().unwrap();
+    let sheet_visibility = state.sheet_visibility.lock().unwrap();
     let mut column_widths = state.column_widths.lock().unwrap();
     let mut row_heights = state.row_heights.lock().unwrap();
     let mut all_column_widths = state.all_column_widths.lock().unwrap();
@@ -160,7 +165,7 @@ pub fn set_active_sheet(state: State<AppState>, index: usize) -> Result<SheetsRe
     *active_sheet = index;
 
     Ok(SheetsResult {
-        sheets: build_sheet_list(&sheet_names, &freeze_configs, &tab_colors, &hidden_sheets),
+        sheets: build_sheet_list(&sheet_names, &freeze_configs, &tab_colors, &sheet_visibility),
         active_index: index,
     })
 }
@@ -173,7 +178,7 @@ pub fn add_sheet(state: State<AppState>, name: Option<String>) -> Result<SheetsR
     let mut current_grid = state.grid.lock().unwrap();
     let mut freeze_configs = state.freeze_configs.lock().unwrap();
     let mut tab_colors = state.tab_colors.lock().unwrap();
-    let mut hidden_sheets = state.hidden_sheets.lock().unwrap();
+    let mut sheet_visibility = state.sheet_visibility.lock().unwrap();
     let mut column_widths = state.column_widths.lock().unwrap();
     let mut row_heights = state.row_heights.lock().unwrap();
     let mut all_column_widths = state.all_column_widths.lock().unwrap();
@@ -219,7 +224,7 @@ pub fn add_sheet(state: State<AppState>, name: Option<String>) -> Result<SheetsR
         split_configs.push(SplitConfig::default());
     }
     tab_colors.push(String::new());
-    hidden_sheets.push(false);
+    sheet_visibility.push("visible".to_string());
     // New sheet gets empty dimensions
     all_column_widths.push(HashMap::new());
     all_row_heights.push(HashMap::new());
@@ -229,7 +234,7 @@ pub fn add_sheet(state: State<AppState>, name: Option<String>) -> Result<SheetsR
     *current_grid = new_grid;
 
     Ok(SheetsResult {
-        sheets: build_sheet_list(&sheet_names, &freeze_configs, &tab_colors, &hidden_sheets),
+        sheets: build_sheet_list(&sheet_names, &freeze_configs, &tab_colors, &sheet_visibility),
         active_index: *active_sheet,
     })
 }
@@ -242,7 +247,7 @@ pub fn delete_sheet(state: State<AppState>, pivot_state: State<'_, PivotState>, 
     let mut current_grid = state.grid.lock().unwrap();
     let mut freeze_configs = state.freeze_configs.lock().unwrap();
     let mut tab_colors = state.tab_colors.lock().unwrap();
-    let mut hidden_sheets = state.hidden_sheets.lock().unwrap();
+    let mut sheet_visibility = state.sheet_visibility.lock().unwrap();
     let mut tables = state.tables.lock().unwrap();
     let mut table_names = state.table_names.lock().unwrap();
     let mut column_widths = state.column_widths.lock().unwrap();
@@ -374,8 +379,8 @@ pub fn delete_sheet(state: State<AppState>, pivot_state: State<'_, PivotState>, 
     if index < tab_colors.len() {
         tab_colors.remove(index);
     }
-    if index < hidden_sheets.len() {
-        hidden_sheets.remove(index);
+    if index < sheet_visibility.len() {
+        sheet_visibility.remove(index);
     }
     if index < all_column_widths.len() {
         all_column_widths.remove(index);
@@ -415,7 +420,7 @@ pub fn delete_sheet(state: State<AppState>, pivot_state: State<'_, PivotState>, 
     }
 
     Ok(SheetsResult {
-        sheets: build_sheet_list(&sheet_names, &freeze_configs, &tab_colors, &hidden_sheets),
+        sheets: build_sheet_list(&sheet_names, &freeze_configs, &tab_colors, &sheet_visibility),
         active_index: *active_sheet,
     })
 }
@@ -426,7 +431,7 @@ pub fn rename_sheet(state: State<AppState>, index: usize, new_name: String) -> R
     let active_sheet = *state.active_sheet.lock().unwrap();
     let freeze_configs = state.freeze_configs.lock().unwrap();
     let tab_colors = state.tab_colors.lock().unwrap();
-    let hidden_sheets = state.hidden_sheets.lock().unwrap();
+    let sheet_visibility = state.sheet_visibility.lock().unwrap();
     let mut grids = state.grids.lock().unwrap();
     let mut current_grid = state.grid.lock().unwrap();
 
@@ -466,7 +471,7 @@ pub fn rename_sheet(state: State<AppState>, index: usize, new_name: String) -> R
     }
 
     Ok(SheetsResult {
-        sheets: build_sheet_list(&sheet_names, &freeze_configs, &tab_colors, &hidden_sheets),
+        sheets: build_sheet_list(&sheet_names, &freeze_configs, &tab_colors, &sheet_visibility),
         active_index: active_sheet,
     })
 }
@@ -481,7 +486,7 @@ pub fn set_freeze_panes(
     let active_sheet = *state.active_sheet.lock().unwrap();
     let mut freeze_configs = state.freeze_configs.lock().unwrap();
     let tab_colors = state.tab_colors.lock().unwrap();
-    let hidden_sheets = state.hidden_sheets.lock().unwrap();
+    let sheet_visibility = state.sheet_visibility.lock().unwrap();
 
     // Ensure freeze_configs has enough entries
     while freeze_configs.len() <= active_sheet {
@@ -494,7 +499,7 @@ pub fn set_freeze_panes(
     };
 
     Ok(SheetsResult {
-        sheets: build_sheet_list(&sheet_names, &freeze_configs, &tab_colors, &hidden_sheets),
+        sheets: build_sheet_list(&sheet_names, &freeze_configs, &tab_colors, &sheet_visibility),
         active_index: active_sheet,
     })
 }
@@ -558,7 +563,7 @@ pub fn move_sheet(
     let mut current_grid = state.grid.lock().unwrap();
     let mut freeze_configs = state.freeze_configs.lock().unwrap();
     let mut tab_colors = state.tab_colors.lock().unwrap();
-    let mut hidden_sheets = state.hidden_sheets.lock().unwrap();
+    let mut sheet_visibility = state.sheet_visibility.lock().unwrap();
     let mut column_widths = state.column_widths.lock().unwrap();
     let mut row_heights = state.row_heights.lock().unwrap();
     let mut all_column_widths = state.all_column_widths.lock().unwrap();
@@ -574,7 +579,7 @@ pub fn move_sheet(
     }
     if from_index == to_index {
         return Ok(SheetsResult {
-            sheets: build_sheet_list(&sheet_names, &freeze_configs, &tab_colors, &hidden_sheets),
+            sheets: build_sheet_list(&sheet_names, &freeze_configs, &tab_colors, &sheet_visibility),
             active_index: *active_sheet,
         });
     }
@@ -607,7 +612,7 @@ pub fn move_sheet(
     // Ensure all per-sheet vecs are long enough
     ensure_vec_len(&mut freeze_configs, count);
     ensure_vec_len(&mut tab_colors, count);
-    ensure_vec_len(&mut hidden_sheets, count);
+    ensure_vec_len(&mut sheet_visibility, count);
     ensure_vec_len(&mut page_setups, count);
 
     rotate_element(&mut *sheet_names, from_index, to_index);
@@ -619,7 +624,7 @@ pub fn move_sheet(
         rotate_element(&mut *split_configs, from_index, to_index);
     }
     rotate_element(&mut *tab_colors, from_index, to_index);
-    rotate_element(&mut *hidden_sheets, from_index, to_index);
+    rotate_element(&mut *sheet_visibility, from_index, to_index);
     rotate_element(&mut *all_column_widths, from_index, to_index);
     rotate_element(&mut *all_row_heights, from_index, to_index);
     rotate_element(&mut *page_setups, from_index, to_index);
@@ -649,7 +654,7 @@ pub fn move_sheet(
     *row_heights = std::mem::take(&mut all_row_heights[new_active]);
 
     Ok(SheetsResult {
-        sheets: build_sheet_list(&sheet_names, &freeze_configs, &tab_colors, &hidden_sheets),
+        sheets: build_sheet_list(&sheet_names, &freeze_configs, &tab_colors, &sheet_visibility),
         active_index: new_active,
     })
 }
@@ -667,7 +672,7 @@ pub fn copy_sheet(
     let mut current_grid = state.grid.lock().unwrap();
     let mut freeze_configs = state.freeze_configs.lock().unwrap();
     let mut tab_colors = state.tab_colors.lock().unwrap();
-    let mut hidden_sheets = state.hidden_sheets.lock().unwrap();
+    let mut sheet_visibility = state.sheet_visibility.lock().unwrap();
     let mut column_widths = state.column_widths.lock().unwrap();
     let mut row_heights = state.row_heights.lock().unwrap();
     let mut all_column_widths = state.all_column_widths.lock().unwrap();
@@ -714,7 +719,7 @@ pub fn copy_sheet(
     let cloned_grid = grids[source_index].clone();
     ensure_vec_len(&mut freeze_configs, count);
     ensure_vec_len(&mut tab_colors, count);
-    ensure_vec_len(&mut hidden_sheets, count);
+    ensure_vec_len(&mut sheet_visibility, count);
     ensure_vec_len(&mut page_setups, count);
 
     let cloned_freeze = freeze_configs[source_index].clone();
@@ -735,7 +740,7 @@ pub fn copy_sheet(
         split_configs.insert(insert_at, cloned_split);
     }
     tab_colors.insert(insert_at, cloned_tab_color);
-    hidden_sheets.insert(insert_at, false); // Copy is always visible
+    sheet_visibility.insert(insert_at, "visible".to_string()); // Copy is always visible
     all_column_widths.insert(insert_at, cloned_widths);
     all_row_heights.insert(insert_at, cloned_heights);
     page_setups.insert(insert_at, cloned_page_setup);
@@ -748,51 +753,59 @@ pub fn copy_sheet(
     *row_heights = std::mem::take(&mut all_row_heights[new_index]);
 
     Ok(SheetsResult {
-        sheets: build_sheet_list(&sheet_names, &freeze_configs, &tab_colors, &hidden_sheets),
+        sheets: build_sheet_list(&sheet_names, &freeze_configs, &tab_colors, &sheet_visibility),
         active_index: new_index,
     })
 }
 
 /// Hide a sheet. Cannot hide the last visible sheet.
+/// `level` controls the visibility: "hidden" (default, unhidable from UI) or "veryHidden"
+/// (only unhidable via code/VBA, not from the UI).
 /// Returns the recommended new active_index (frontend should call set_active_sheet if it changed).
 #[tauri::command]
 pub fn hide_sheet(
     state: State<AppState>,
     index: usize,
+    level: Option<String>,
 ) -> Result<SheetsResult, String> {
     let sheet_names = state.sheet_names.lock().unwrap();
     let active_sheet = *state.active_sheet.lock().unwrap();
     let freeze_configs = state.freeze_configs.lock().unwrap();
     let tab_colors = state.tab_colors.lock().unwrap();
-    let mut hidden_sheets = state.hidden_sheets.lock().unwrap();
+    let mut sheet_visibility = state.sheet_visibility.lock().unwrap();
 
     if index >= sheet_names.len() {
         return Err(format!("Sheet index {} out of range", index));
     }
 
-    ensure_vec_len(&mut hidden_sheets, sheet_names.len());
+    let hide_level = level.unwrap_or_else(|| "hidden".to_string());
+    if hide_level != "hidden" && hide_level != "veryHidden" {
+        return Err(format!("Invalid visibility level '{}'. Use 'hidden' or 'veryHidden'.", hide_level));
+    }
+
+    ensure_vec_len(&mut sheet_visibility, sheet_names.len());
 
     // Check: at least one visible sheet must remain
-    let visible_count = hidden_sheets.iter().enumerate()
-        .filter(|(i, &h)| !h && *i != index)
+    let visible_count = sheet_visibility.iter().enumerate()
+        .filter(|(i, vis)| vis.as_str() == "visible" && *i != index)
         .count();
     if visible_count == 0 {
         return Err("Cannot hide the last visible sheet".to_string());
     }
 
-    hidden_sheets[index] = true;
+    sheet_visibility[index] = hide_level;
 
     // If hiding the active sheet, recommend the nearest visible sheet
     let recommended_active = if index == active_sheet {
         (0..sheet_names.len())
-            .find(|&i| !hidden_sheets[i])
+            .find(|&i| sheet_visibility[i] == "visible")
             .unwrap_or(0)
     } else {
         active_sheet
     };
 
     Ok(SheetsResult {
-        sheets: build_sheet_list(&sheet_names, &freeze_configs, &tab_colors, &hidden_sheets),
+        sheets: build_sheet_list(&sheet_names, &freeze_configs, &tab_colors, &sheet_visibility),
         active_index: recommended_active,
     })
 }
@@ -807,17 +820,17 @@ pub fn unhide_sheet(
     let active_sheet = *state.active_sheet.lock().unwrap();
     let freeze_configs = state.freeze_configs.lock().unwrap();
     let tab_colors = state.tab_colors.lock().unwrap();
-    let mut hidden_sheets = state.hidden_sheets.lock().unwrap();
+    let mut sheet_visibility = state.sheet_visibility.lock().unwrap();
 
     if index >= sheet_names.len() {
         return Err(format!("Sheet index {} out of range", index));
     }
 
-    ensure_vec_len(&mut hidden_sheets, sheet_names.len());
-    hidden_sheets[index] = false;
+    ensure_vec_len(&mut sheet_visibility, sheet_names.len());
+    sheet_visibility[index] = "visible".to_string();
 
     Ok(SheetsResult {
-        sheets: build_sheet_list(&sheet_names, &freeze_configs, &tab_colors, &hidden_sheets),
+        sheets: build_sheet_list(&sheet_names, &freeze_configs, &tab_colors, &sheet_visibility),
         active_index: active_sheet,
     })
 }
@@ -833,7 +846,7 @@ pub fn set_tab_color(
     let active_sheet = *state.active_sheet.lock().unwrap();
     let freeze_configs = state.freeze_configs.lock().unwrap();
     let mut tab_colors = state.tab_colors.lock().unwrap();
-    let hidden_sheets = state.hidden_sheets.lock().unwrap();
+    let sheet_visibility = state.sheet_visibility.lock().unwrap();
 
     if index >= sheet_names.len() {
         return Err(format!("Sheet index {} out of range", index));
@@ -843,7 +856,73 @@ pub fn set_tab_color(
     tab_colors[index] = color;
 
     Ok(SheetsResult {
-        sheets: build_sheet_list(&sheet_names, &freeze_configs, &tab_colors, &hidden_sheets),
+        sheets: build_sheet_list(&sheet_names, &freeze_configs, &tab_colors, &sheet_visibility),
         active_index: active_sheet,
     })
+}
+
+/// Navigate to the next visible sheet (wraps around).
+#[tauri::command]
+pub fn next_sheet(state: State<AppState>) -> Result<SheetsResult, String> {
+    let sheet_names = state.sheet_names.lock().unwrap();
+    let active_sheet = *state.active_sheet.lock().unwrap();
+    let sheet_visibility = state.sheet_visibility.lock().unwrap();
+
+    let count = sheet_names.len();
+    if count == 0 {
+        return Err("No sheets available".to_string());
+    }
+
+    // Find the next visible sheet after the current one, wrapping around
+    let mut next_index = None;
+    for offset in 1..count {
+        let candidate = (active_sheet + offset) % count;
+        let vis = sheet_visibility.get(candidate).map(|s| s.as_str()).unwrap_or("visible");
+        if vis == "visible" {
+            next_index = Some(candidate);
+            break;
+        }
+    }
+
+    match next_index {
+        Some(idx) => {
+            drop(sheet_names);
+            drop(sheet_visibility);
+            set_active_sheet(state, idx)
+        }
+        None => Err("No other visible sheet to navigate to".to_string()),
+    }
+}
+
+/// Navigate to the previous visible sheet (wraps around).
+#[tauri::command]
+pub fn previous_sheet(state: State<AppState>) -> Result<SheetsResult, String> {
+    let sheet_names = state.sheet_names.lock().unwrap();
+    let active_sheet = *state.active_sheet.lock().unwrap();
+    let sheet_visibility = state.sheet_visibility.lock().unwrap();
+
+    let count = sheet_names.len();
+    if count == 0 {
+        return Err("No sheets available".to_string());
+    }
+
+    // Find the previous visible sheet before the current one, wrapping around
+    let mut prev_index = None;
+    for offset in 1..count {
+        let candidate = (active_sheet + count - offset) % count;
+        let vis = sheet_visibility.get(candidate).map(|s| s.as_str()).unwrap_or("visible");
+        if vis == "visible" {
+            prev_index = Some(candidate);
+            break;
+        }
+    }
+
+    match prev_index {
+        Some(idx) => {
+            drop(sheet_names);
+            drop(sheet_visibility);
+            set_active_sheet(state, idx)
+        }
+        None => Err("No other visible sheet to navigate to".to_string()),
+    }
 }

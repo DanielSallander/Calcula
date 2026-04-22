@@ -920,3 +920,210 @@ pub fn set_cell_rich_text(
         accounting_layout,
     })
 }
+
+/// Apply a border preset to a rectangular range.
+///
+/// Presets:
+/// - "insideHorizontal" - horizontal borders between rows (not on outer edges)
+/// - "insideVertical"   - vertical borders between columns (not on outer edges)
+/// - "insideBoth"       - both inside horizontal and vertical
+/// - "outside"          - borders on the outer edges only
+/// - "allBorders"       - all inside + outside borders
+/// - "none"             - clear all borders in the range
+#[tauri::command]
+pub fn apply_border_preset(
+    state: State<AppState>,
+    file_state: State<FileState>,
+    start_row: u32,
+    start_col: u32,
+    end_row: u32,
+    end_col: u32,
+    preset: String,
+    style: String,
+    color: String,
+    width: u8,
+) -> Result<FormattingResult, String> {
+    let mut grid = state.grid.lock().unwrap();
+    let mut grids = state.grids.lock().unwrap();
+    let active_sheet = *state.active_sheet.lock().unwrap();
+    let mut styles = state.style_registry.lock().unwrap();
+    let mut undo_stack = state.undo_stack.lock().unwrap();
+    let merged_regions = state.merged_regions.lock().unwrap();
+    let locale = state.locale.lock().unwrap();
+
+    // Build the border style to apply
+    let line_style = match style.as_str() {
+        "solid" => BorderLineStyle::Solid,
+        "dashed" => BorderLineStyle::Dashed,
+        "dotted" => BorderLineStyle::Dotted,
+        "double" => BorderLineStyle::Double,
+        _ => BorderLineStyle::Solid,
+    };
+    let border_color = ThemeColor::Absolute(
+        Color::from_hex(&color).unwrap_or(Color::new(0, 0, 0)),
+    );
+    let active_border = BorderStyle {
+        width,
+        color: border_color,
+        style: line_style,
+    };
+    let no_border = BorderStyle::default();
+
+    let cell_count = ((end_row - start_row + 1) * (end_col - start_col + 1)) as usize;
+    undo_stack.begin_transaction(format!("Border preset '{}' on {} cells", preset, cell_count));
+
+    let mut updated_cells = Vec::new();
+
+    for row in start_row..=end_row {
+        for col in start_col..=end_col {
+            // Record previous state for undo
+            let previous_cell = grid.get_cell(row, col).cloned();
+
+            // Get or create cell
+            let (cell, old_style_index) = if let Some(existing) = grid.get_cell(row, col) {
+                (existing.clone(), existing.style_index)
+            } else {
+                (
+                    Cell {
+                        value: CellValue::Empty,
+                        formula: None,
+                        style_index: 0,
+                        rich_text: None,
+                        cached_ast: None,
+                    },
+                    0,
+                )
+            };
+
+            let mut new_style = styles.get(old_style_index).clone();
+
+            match preset.as_str() {
+                "insideHorizontal" => {
+                    // Bottom border on all rows except the last
+                    if row < end_row {
+                        new_style.borders.bottom = active_border.clone();
+                    }
+                    // Top border on all rows except the first
+                    if row > start_row {
+                        new_style.borders.top = active_border.clone();
+                    }
+                }
+                "insideVertical" => {
+                    // Right border on all cols except the last
+                    if col < end_col {
+                        new_style.borders.right = active_border.clone();
+                    }
+                    // Left border on all cols except the first
+                    if col > start_col {
+                        new_style.borders.left = active_border.clone();
+                    }
+                }
+                "insideBoth" => {
+                    if row < end_row {
+                        new_style.borders.bottom = active_border.clone();
+                    }
+                    if row > start_row {
+                        new_style.borders.top = active_border.clone();
+                    }
+                    if col < end_col {
+                        new_style.borders.right = active_border.clone();
+                    }
+                    if col > start_col {
+                        new_style.borders.left = active_border.clone();
+                    }
+                }
+                "outside" => {
+                    if row == start_row {
+                        new_style.borders.top = active_border.clone();
+                    }
+                    if row == end_row {
+                        new_style.borders.bottom = active_border.clone();
+                    }
+                    if col == start_col {
+                        new_style.borders.left = active_border.clone();
+                    }
+                    if col == end_col {
+                        new_style.borders.right = active_border.clone();
+                    }
+                }
+                "allBorders" => {
+                    new_style.borders.top = active_border.clone();
+                    new_style.borders.bottom = active_border.clone();
+                    new_style.borders.left = active_border.clone();
+                    new_style.borders.right = active_border.clone();
+                }
+                "none" => {
+                    new_style.borders.top = no_border.clone();
+                    new_style.borders.bottom = no_border.clone();
+                    new_style.borders.left = no_border.clone();
+                    new_style.borders.right = no_border.clone();
+                    new_style.borders.diagonal_down = no_border.clone();
+                    new_style.borders.diagonal_up = no_border.clone();
+                }
+                _ => {
+                    return Err(format!("Unknown border preset: {}", preset));
+                }
+            }
+
+            let new_style_index = styles.get_or_create(new_style.clone());
+
+            let mut updated_cell = cell;
+            updated_cell.style_index = new_style_index;
+            grid.set_cell(row, col, updated_cell.clone());
+
+            if active_sheet < grids.len() {
+                grids[active_sheet].set_cell(row, col, updated_cell.clone());
+            }
+
+            undo_stack.record_cell_change(row, col, previous_cell);
+
+            let fmt_result = format_cell_value_with_color(&updated_cell.value, &new_style, &locale);
+            let acct_layout = fmt_result.accounting.map(|a| crate::api_types::AccountingLayout {
+                symbol: a.symbol,
+                symbol_before: a.symbol_before,
+                value: a.value,
+            });
+
+            let merge_info = merged_regions.iter().find(|r| r.start_row == row && r.start_col == col);
+            let (row_span, col_span) = if let Some(region) = merge_info {
+                (region.end_row - region.start_row + 1, region.end_col - region.start_col + 1)
+            } else {
+                (1, 1)
+            };
+
+            updated_cells.push(CellData {
+                row,
+                col,
+                display: fmt_result.text,
+                display_color: fmt_result.color,
+                formula: updated_cell.formula,
+                style_index: new_style_index,
+                row_span,
+                col_span,
+                sheet_index: None,
+                rich_text: None,
+                accounting_layout: acct_layout,
+            });
+        }
+    }
+
+    undo_stack.commit_transaction();
+
+    let mut updated_styles = Vec::new();
+    let theme = state.theme.lock().unwrap();
+    for (index, style) in styles.all_styles().iter().enumerate() {
+        updated_styles.push(StyleEntry {
+            index,
+            style: StyleData::from_cell_style(style, &theme),
+        });
+    }
+
+    if !updated_cells.is_empty() {
+        if let Ok(mut modified) = file_state.is_modified.lock() { *modified = true; }
+    }
+
+    Ok(FormattingResult {
+        cells: updated_cells,
+        styles: updated_styles,
+    })
+}

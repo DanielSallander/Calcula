@@ -21,6 +21,8 @@ import {
   getCalculationMode,
   calculateNow,
   calculateSheet,
+  getIterationSettings,
+  setIterationSettings,
 } from "@api/lib";
 
 // ============================================================================
@@ -29,6 +31,11 @@ import {
 
 /** Current calculation mode. Drives the checked state of submenu items via getters. */
 let currentMode: "automatic" | "manual" = "automatic";
+
+/** Current iterative calculation state. */
+let iterationEnabled = false;
+let iterationMaxIterations = 100;
+let iterationMaxChange = 0.001;
 
 // ============================================================================
 // Helpers
@@ -114,12 +121,68 @@ export function registerCalculationMenuItems(): void {
     },
   };
 
+  // ---- Iterative Calculation submenu items ----
+  const iterationToggleItem = {
+    id: "formulas:calcOptions:iterationToggle",
+    label: "Enable Iterative Calculation",
+    get checked() { return iterationEnabled; },
+    action: () => {
+      iterationEnabled = !iterationEnabled;
+      setIterationSettings(iterationEnabled, iterationMaxIterations, iterationMaxChange)
+        .then(() => {
+          console.log(`[CalculationOptions] Iterative calculation ${iterationEnabled ? "enabled" : "disabled"}`);
+        })
+        .catch((err: unknown) => {
+          console.error("[CalculationOptions] Failed to toggle iteration:", err);
+          iterationEnabled = !iterationEnabled; // Revert on error
+        });
+    },
+  };
+
+  const iterationSettingsItem = {
+    id: "formulas:calcOptions:iterationSettings",
+    label: "Iteration Settings...",
+    action: () => {
+      const maxIterInput = window.prompt("Maximum Iterations:", String(iterationMaxIterations));
+      if (maxIterInput === null) return; // User cancelled
+      const maxIter = parseInt(maxIterInput, 10);
+      if (isNaN(maxIter) || maxIter < 1) {
+        window.alert("Maximum Iterations must be a positive integer.");
+        return;
+      }
+
+      const maxChangeInput = window.prompt("Maximum Change:", String(iterationMaxChange));
+      if (maxChangeInput === null) return; // User cancelled
+      const maxChg = parseFloat(maxChangeInput);
+      if (isNaN(maxChg) || maxChg <= 0) {
+        window.alert("Maximum Change must be a positive number.");
+        return;
+      }
+
+      iterationMaxIterations = maxIter;
+      iterationMaxChange = maxChg;
+      setIterationSettings(iterationEnabled, iterationMaxIterations, iterationMaxChange)
+        .then(() => {
+          console.log(`[CalculationOptions] Iteration settings: maxIterations=${maxIter}, maxChange=${maxChg}`);
+        })
+        .catch((err: unknown) => {
+          console.error("[CalculationOptions] Failed to set iteration settings:", err);
+        });
+    },
+  };
+
   // ---- Calculation Options (with submenu) ----
   registerMenuItem("formulas", {
     id: "formulas:calcOptions",
     label: "Calculation Options",
     icon: IconCalcOptions,
-    children: [autoItem, manualItem],
+    children: [
+      autoItem,
+      manualItem,
+      { id: "formulas:calcOptions:iterSep", label: "", separator: true },
+      iterationToggleItem,
+      iterationSettingsItem,
+    ],
   });
 
   // ---- Calculate (with submenu) ----
@@ -166,5 +229,14 @@ export async function syncCalculationMode(): Promise<void> {
     }
   } catch (err) {
     console.error("[CalculationOptions] Failed to get calculation mode:", err);
+  }
+
+  try {
+    const settings = await getIterationSettings();
+    iterationEnabled = settings.enabled;
+    iterationMaxIterations = settings.maxIterations;
+    iterationMaxChange = settings.maxChange;
+  } catch (err) {
+    console.error("[CalculationOptions] Failed to get iteration settings:", err);
   }
 }

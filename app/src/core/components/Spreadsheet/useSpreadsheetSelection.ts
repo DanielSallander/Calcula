@@ -29,12 +29,9 @@ import {
   getCellsInCols,
   getCellsInRows,
   updateCell,
-  updateCellsBatch,
   beginUndoTransaction,
   commitUndoTransaction,
-  shiftFormulasBatch,
-  type CellUpdateInput,
-  type FormulaShiftInput,
+  fillRange,
 } from "../../lib/tauri-api";
 import type { FormattingOptions } from "../../types";
 import { DEFAULT_THEME, measureOptimalColumnWidth, measureOptimalRowHeight } from "../../lib/gridRenderer";
@@ -875,68 +872,14 @@ export function useSpreadsheetSelection({
     if (maxRow <= minRow) return;
 
     try {
-      await beginUndoTransaction("Fill Down");
+      // Single IPC call: source = first row, target = rows below
+      const updatedCells = await fillRange(
+        minRow, minCol, minRow, maxCol,       // source: first row
+        minRow + 1, minCol, maxRow, maxCol,   // target: rows below
+      );
 
-      const updates: CellUpdateInput[] = [];
-
-      for (let col = minCol; col <= maxCol; col++) {
-        const sourceCell = await getCell(minRow, col);
-        const sourceFormula = sourceCell?.formula;
-        const sourceDisplay = sourceCell?.display || "";
-
-        if (sourceFormula) {
-          // Shift formula references for each target row
-          const shiftInputs: FormulaShiftInput[] = [];
-          for (let row = minRow + 1; row <= maxRow; row++) {
-            shiftInputs.push({ formula: sourceFormula, rowDelta: row - minRow, colDelta: 0 });
-          }
-          const shifted = await shiftFormulasBatch(shiftInputs);
-          for (let i = 0; i < shifted.length; i++) {
-            updates.push({ row: minRow + 1 + i, col, value: shifted[i] });
-          }
-        } else {
-          for (let row = minRow + 1; row <= maxRow; row++) {
-            updates.push({ row, col, value: sourceDisplay });
-          }
-        }
-      }
-
-      if (updates.length > 0) {
-        const updatedCells = await updateCellsBatch(updates);
-        await commitUndoTransaction();
-
-        // Also copy formatting from source row
-        for (let col = minCol; col <= maxCol; col++) {
-          const sourceCell = await getCell(minRow, col);
-          if (sourceCell && sourceCell.styleIndex > 0) {
-            const sourceStyle = await getStyle(sourceCell.styleIndex);
-            const targetRows: number[] = [];
-            for (let row = minRow + 1; row <= maxRow; row++) {
-              targetRows.push(row);
-            }
-            // Apply the source cell's formatting to target cells
-            await applyFormatting(targetRows, [col], {
-              bold: sourceStyle.bold,
-              italic: sourceStyle.italic,
-              underline: sourceStyle.underline,
-              strikethrough: sourceStyle.strikethrough,
-              numberFormat: sourceStyle.numberFormat !== "General" ? sourceStyle.numberFormat : undefined,
-            });
-          }
-        }
-
-        // Emit event to trigger canvas refresh
-        if (updatedCells.length > 0) {
-          cellEvents.emit({
-            row: updatedCells[0].row,
-            col: updatedCells[0].col,
-            oldValue: undefined,
-            newValue: updatedCells[0].display,
-            formula: updatedCells[0].formula ?? null,
-          });
-        }
-      } else {
-        await commitUndoTransaction();
+      if (updatedCells.length > 0) {
+        emitAppEvent(AppEvents.CELL_VALUES_CHANGED, { cells: updatedCells });
       }
     } catch (error) {
       console.error("[useSpreadsheetSelection] Fill Down failed:", error);
@@ -959,65 +902,14 @@ export function useSpreadsheetSelection({
     if (maxCol <= minCol) return;
 
     try {
-      await beginUndoTransaction("Fill Right");
+      // Single IPC call: source = first column, target = columns to the right
+      const updatedCells = await fillRange(
+        minRow, minCol, maxRow, minCol,       // source: first column
+        minRow, minCol + 1, maxRow, maxCol,   // target: columns to the right
+      );
 
-      const updates: CellUpdateInput[] = [];
-
-      for (let row = minRow; row <= maxRow; row++) {
-        const sourceCell = await getCell(row, minCol);
-        const sourceFormula = sourceCell?.formula;
-        const sourceDisplay = sourceCell?.display || "";
-
-        if (sourceFormula) {
-          const shiftInputs: FormulaShiftInput[] = [];
-          for (let col = minCol + 1; col <= maxCol; col++) {
-            shiftInputs.push({ formula: sourceFormula, rowDelta: 0, colDelta: col - minCol });
-          }
-          const shifted = await shiftFormulasBatch(shiftInputs);
-          for (let i = 0; i < shifted.length; i++) {
-            updates.push({ row, col: minCol + 1 + i, value: shifted[i] });
-          }
-        } else {
-          for (let col = minCol + 1; col <= maxCol; col++) {
-            updates.push({ row, col, value: sourceDisplay });
-          }
-        }
-      }
-
-      if (updates.length > 0) {
-        const updatedCells = await updateCellsBatch(updates);
-        await commitUndoTransaction();
-
-        // Copy formatting from source column
-        for (let row = minRow; row <= maxRow; row++) {
-          const sourceCell = await getCell(row, minCol);
-          if (sourceCell && sourceCell.styleIndex > 0) {
-            const sourceStyle = await getStyle(sourceCell.styleIndex);
-            const targetCols: number[] = [];
-            for (let col = minCol + 1; col <= maxCol; col++) {
-              targetCols.push(col);
-            }
-            await applyFormatting([row], targetCols, {
-              bold: sourceStyle.bold,
-              italic: sourceStyle.italic,
-              underline: sourceStyle.underline,
-              strikethrough: sourceStyle.strikethrough,
-              numberFormat: sourceStyle.numberFormat !== "General" ? sourceStyle.numberFormat : undefined,
-            });
-          }
-        }
-
-        if (updatedCells.length > 0) {
-          cellEvents.emit({
-            row: updatedCells[0].row,
-            col: updatedCells[0].col,
-            oldValue: undefined,
-            newValue: updatedCells[0].display,
-            formula: updatedCells[0].formula ?? null,
-          });
-        }
-      } else {
-        await commitUndoTransaction();
+      if (updatedCells.length > 0) {
+        emitAppEvent(AppEvents.CELL_VALUES_CHANGED, { cells: updatedCells });
       }
     } catch (error) {
       console.error("[useSpreadsheetSelection] Fill Right failed:", error);
@@ -1040,65 +932,14 @@ export function useSpreadsheetSelection({
     if (maxRow <= minRow) return;
 
     try {
-      await beginUndoTransaction("Fill Up");
+      // Single IPC call: source = last row, target = rows above
+      const updatedCells = await fillRange(
+        maxRow, minCol, maxRow, maxCol,       // source: last row
+        minRow, minCol, maxRow - 1, maxCol,   // target: rows above
+      );
 
-      const updates: CellUpdateInput[] = [];
-
-      for (let col = minCol; col <= maxCol; col++) {
-        const sourceCell = await getCell(maxRow, col);
-        const sourceFormula = sourceCell?.formula;
-        const sourceDisplay = sourceCell?.display || "";
-
-        if (sourceFormula) {
-          const shiftInputs: FormulaShiftInput[] = [];
-          for (let row = minRow; row < maxRow; row++) {
-            shiftInputs.push({ formula: sourceFormula, rowDelta: row - maxRow, colDelta: 0 });
-          }
-          const shifted = await shiftFormulasBatch(shiftInputs);
-          for (let i = 0; i < shifted.length; i++) {
-            updates.push({ row: minRow + i, col, value: shifted[i] });
-          }
-        } else {
-          for (let row = minRow; row < maxRow; row++) {
-            updates.push({ row, col, value: sourceDisplay });
-          }
-        }
-      }
-
-      if (updates.length > 0) {
-        const updatedCells = await updateCellsBatch(updates);
-        await commitUndoTransaction();
-
-        // Copy formatting from source row (bottom)
-        for (let col = minCol; col <= maxCol; col++) {
-          const sourceCell = await getCell(maxRow, col);
-          if (sourceCell && sourceCell.styleIndex > 0) {
-            const sourceStyle = await getStyle(sourceCell.styleIndex);
-            const targetRows: number[] = [];
-            for (let row = minRow; row < maxRow; row++) {
-              targetRows.push(row);
-            }
-            await applyFormatting(targetRows, [col], {
-              bold: sourceStyle.bold,
-              italic: sourceStyle.italic,
-              underline: sourceStyle.underline,
-              strikethrough: sourceStyle.strikethrough,
-              numberFormat: sourceStyle.numberFormat !== "General" ? sourceStyle.numberFormat : undefined,
-            });
-          }
-        }
-
-        if (updatedCells.length > 0) {
-          cellEvents.emit({
-            row: updatedCells[0].row,
-            col: updatedCells[0].col,
-            oldValue: undefined,
-            newValue: updatedCells[0].display,
-            formula: updatedCells[0].formula ?? null,
-          });
-        }
-      } else {
-        await commitUndoTransaction();
+      if (updatedCells.length > 0) {
+        emitAppEvent(AppEvents.CELL_VALUES_CHANGED, { cells: updatedCells });
       }
     } catch (error) {
       console.error("[useSpreadsheetSelection] Fill Up failed:", error);
@@ -1121,65 +962,14 @@ export function useSpreadsheetSelection({
     if (maxCol <= minCol) return;
 
     try {
-      await beginUndoTransaction("Fill Left");
+      // Single IPC call: source = last column, target = columns to the left
+      const updatedCells = await fillRange(
+        minRow, maxCol, maxRow, maxCol,       // source: last column
+        minRow, minCol, maxRow, maxCol - 1,   // target: columns to the left
+      );
 
-      const updates: CellUpdateInput[] = [];
-
-      for (let row = minRow; row <= maxRow; row++) {
-        const sourceCell = await getCell(row, maxCol);
-        const sourceFormula = sourceCell?.formula;
-        const sourceDisplay = sourceCell?.display || "";
-
-        if (sourceFormula) {
-          const shiftInputs: FormulaShiftInput[] = [];
-          for (let col = minCol; col < maxCol; col++) {
-            shiftInputs.push({ formula: sourceFormula, rowDelta: 0, colDelta: col - maxCol });
-          }
-          const shifted = await shiftFormulasBatch(shiftInputs);
-          for (let i = 0; i < shifted.length; i++) {
-            updates.push({ row, col: minCol + i, value: shifted[i] });
-          }
-        } else {
-          for (let col = minCol; col < maxCol; col++) {
-            updates.push({ row, col, value: sourceDisplay });
-          }
-        }
-      }
-
-      if (updates.length > 0) {
-        const updatedCells = await updateCellsBatch(updates);
-        await commitUndoTransaction();
-
-        // Copy formatting from source column (right)
-        for (let row = minRow; row <= maxRow; row++) {
-          const sourceCell = await getCell(row, maxCol);
-          if (sourceCell && sourceCell.styleIndex > 0) {
-            const sourceStyle = await getStyle(sourceCell.styleIndex);
-            const targetCols: number[] = [];
-            for (let col = minCol; col < maxCol; col++) {
-              targetCols.push(col);
-            }
-            await applyFormatting([row], targetCols, {
-              bold: sourceStyle.bold,
-              italic: sourceStyle.italic,
-              underline: sourceStyle.underline,
-              strikethrough: sourceStyle.strikethrough,
-              numberFormat: sourceStyle.numberFormat !== "General" ? sourceStyle.numberFormat : undefined,
-            });
-          }
-        }
-
-        if (updatedCells.length > 0) {
-          cellEvents.emit({
-            row: updatedCells[0].row,
-            col: updatedCells[0].col,
-            oldValue: undefined,
-            newValue: updatedCells[0].display,
-            formula: updatedCells[0].formula ?? null,
-          });
-        }
-      } else {
-        await commitUndoTransaction();
+      if (updatedCells.length > 0) {
+        emitAppEvent(AppEvents.CELL_VALUES_CHANGED, { cells: updatedCells });
       }
     } catch (error) {
       console.error("[useSpreadsheetSelection] Fill Left failed:", error);

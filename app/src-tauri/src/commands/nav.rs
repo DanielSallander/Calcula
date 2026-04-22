@@ -6,20 +6,49 @@ use engine::CellValue;
 use serde::{Deserialize, Serialize};
 use tauri::State;
 
-/// Detect the contiguous data region around a given cell (Excel's CurrentRegion).
+/// Result of get_current_region command - structured version of detect_data_region.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CurrentRegionResult {
+    pub start_row: u32,
+    pub start_col: u32,
+    pub end_row: u32,
+    pub end_col: u32,
+    pub empty: bool,
+}
+
+/// Get the current region around a cell as a structured result.
 ///
-/// Expands outward from the starting cell in all directions, stopping when
-/// an entire row (within the current column span) or an entire column
-/// (within the current row span) is empty. Iterates until stable because
-/// expanding rows can reveal new columns and vice versa.
-///
-/// Returns `None` if the starting cell is empty and has no adjacent data.
+/// Returns a `CurrentRegionResult` with `empty: true` if the cell is isolated,
+/// or the bounding rectangle of the contiguous data region otherwise.
 #[tauri::command]
-pub fn detect_data_region(
+pub fn get_current_region(
     state: State<AppState>,
     row: u32,
     col: u32,
-) -> Option<(u32, u32, u32, u32)> {
+) -> Result<CurrentRegionResult, String> {
+    let region = detect_data_region_impl(&state, row, col);
+    match region {
+        Some((sr, sc, er, ec)) => Ok(CurrentRegionResult {
+            start_row: sr,
+            start_col: sc,
+            end_row: er,
+            end_col: ec,
+            empty: false,
+        }),
+        None => Ok(CurrentRegionResult {
+            start_row: row,
+            start_col: col,
+            end_row: row,
+            end_col: col,
+            empty: true,
+        }),
+    }
+}
+
+/// Internal implementation of data region detection.
+/// Shared by both `detect_data_region` and `get_current_region`.
+fn detect_data_region_impl(state: &AppState, row: u32, col: u32) -> Option<(u32, u32, u32, u32)> {
     let grid = state.grid.lock().unwrap();
 
     // Helper: does this cell have content?
@@ -85,6 +114,19 @@ pub fn detect_data_region(
     }
 
     Some((sr, sc, er, ec))
+}
+
+/// Detect the contiguous data region around a given cell (Excel's CurrentRegion).
+///
+/// Returns the bounding tuple `(startRow, startCol, endRow, endCol)` or `None`
+/// if the starting cell is empty and has no adjacent data.
+#[tauri::command]
+pub fn detect_data_region(
+    state: State<AppState>,
+    row: u32,
+    col: u32,
+) -> Option<(u32, u32, u32, u32)> {
+    detect_data_region_impl(&state, row, col)
 }
 
 /// Find the target cell for Ctrl+Arrow navigation (Excel-like behavior).

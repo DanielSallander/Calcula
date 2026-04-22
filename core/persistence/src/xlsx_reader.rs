@@ -96,5 +96,8 @@ pub fn load_xlsx(path: &Path) -> Result<Workbook, PersistenceError> {
         theme: engine::theme::ThemeDefinition::default(),
         scripts: Vec::new(),
         notebooks: Vec::new(),
+        default_row_height: 24.0,
+        default_column_width: 100.0,
+        properties: crate::WorkbookProperties::default(),
     })
 }

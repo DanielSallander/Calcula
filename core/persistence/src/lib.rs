@@ -48,6 +48,36 @@ pub struct Workbook {
     pub scripts: Vec<SavedScript>,
     /// Workbook-embedded notebooks
     pub notebooks: Vec<SavedNotebook>,
+    /// Default row height in pixels (24.0 when not customized)
+    pub default_row_height: f64,
+    /// Default column width in pixels (100.0 when not customized)
+    pub default_column_width: f64,
+    /// Document properties (author, title, subject, etc.)
+    pub properties: WorkbookProperties,
+}
+
+/// Workbook-level document properties.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkbookProperties {
+    #[serde(default)]
+    pub title: String,
+    #[serde(default)]
+    pub author: String,
+    #[serde(default)]
+    pub subject: String,
+    #[serde(default)]
+    pub description: String,
+    #[serde(default)]
+    pub keywords: String,
+    #[serde(default)]
+    pub category: String,
+    /// ISO 8601 date string
+    #[serde(default)]
+    pub created: String,
+    /// ISO 8601 date string
+    #[serde(default)]
+    pub last_modified: String,
 }
 
 impl Workbook {
@@ -61,6 +91,9 @@ impl Workbook {
             theme: ThemeDefinition::default(),
             scripts: Vec::new(),
             notebooks: Vec::new(),
+            default_row_height: 24.0,
+            default_column_width: 100.0,
+            properties: WorkbookProperties::default(),
         }
     }
 
@@ -74,6 +107,9 @@ impl Workbook {
             theme: ThemeDefinition::default(),
             scripts: Vec::new(),
             notebooks: Vec::new(),
+            default_row_height: 24.0,
+            default_column_width: 100.0,
+            properties: WorkbookProperties::default(),
         }
     }
 }

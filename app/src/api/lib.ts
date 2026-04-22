@@ -27,12 +27,14 @@ export {
   clearRange,
   clearRangeWithOptions,
   clearHyperlinksInRange,
+  fillRange,
   getGridBounds,
   getCellCount,
 
   // Navigation
   findCtrlArrowTarget,
   detectDataRegion,
+  getCurrentRegion,
   indexToCol,
   colToIndex,
 
@@ -43,6 +45,9 @@ export {
   setRowHeight,
   getRowHeight,
   getAllRowHeights,
+  getDefaultDimensions,
+  setDefaultRowHeight,
+  setDefaultColumnWidth,
 
   // Styles
   getStyle,
@@ -50,6 +55,7 @@ export {
   setCellStyle,
   setCellRichText,
   applyFormatting,
+  applyBorderPreset,
   getStyleCount,
 
   // Multi-Sheet (Sheet Grouping) Operations
@@ -67,6 +73,8 @@ export {
   getCalculationMode,
   calculateNow,
   calculateSheet,
+  getIterationSettings,
+  setIterationSettings,
 
   // Sheets
   getSheets,
@@ -80,6 +88,8 @@ export {
   hideSheet,
   unhideSheet,
   setTabColor,
+  nextSheet,
+  previousSheet,
 
   // Row/Column operations
   insertRows,
@@ -192,6 +202,11 @@ export {
 
   // Status bar aggregation
   getSelectionAggregations,
+
+  // Auto-recover
+  getAutoRecoverSettings,
+  setAutoRecoverSettings,
+  autoRecoverSave,
 } from "../core/lib/tauri-api";
 
 // Type exports from tauri-api
@@ -199,7 +214,9 @@ export type {
   CollectionItem,
   CollectionPreviewResult,
   ArrowDirection,
+  CurrentRegionResult,
   SheetInfo,
+  SheetVisibility,
   SheetsResult,
   UndoState,
   UndoResult,
@@ -222,6 +239,8 @@ export type {
   SheetOutline,
   PreviewResult,
   SelectionAggregationResult,
+  IterationSettings,
+  AutoRecoverSettings,
 } from "../core/lib/tauri-api";
 
 // Named range type exports
@@ -748,4 +767,32 @@ export type {
   SolverParams,
   SolverVariableValue,
   SolverResultData,
+} from "./backend";
+
+// ============================================================================
+// Named Cell Styles API
+// ============================================================================
+
+export {
+  getNamedStyles,
+  createNamedStyle,
+  deleteNamedStyle,
+  applyNamedStyle,
+} from "./backend";
+
+export type {
+  NamedCellStyle,
+} from "./backend";
+
+// ============================================================================
+// Workbook Properties API
+// ============================================================================
+
+export {
+  getWorkbookProperties,
+  setWorkbookProperties,
+} from "./backend";
+
+export type {
+  WorkbookProperties,
 } from "./backend";

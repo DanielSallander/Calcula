@@ -600,7 +600,7 @@ export function renderPageBreakOverlay(
 
     ctx.strokeStyle = isManual ? "#0066cc" : "#4488cc";
     ctx.lineWidth = isManual ? 2 : 1.5;
-    ctx.setLineDash(isManual ? [6, 3] : [4, 4]);
+    ctx.setLineDash(isManual ? [] : [4, 4]);
 
     ctx.beginPath();
     ctx.moveTo(rowHeaderWidth, y);
@@ -629,7 +629,7 @@ export function renderPageBreakOverlay(
 
     ctx.strokeStyle = isManual ? "#0066cc" : "#4488cc";
     ctx.lineWidth = isManual ? 2 : 1.5;
-    ctx.setLineDash(isManual ? [6, 3] : [4, 4]);
+    ctx.setLineDash(isManual ? [] : [4, 4]);
 
     ctx.beginPath();
     ctx.moveTo(x, colHeaderHeight);

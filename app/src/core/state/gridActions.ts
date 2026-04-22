@@ -64,6 +64,9 @@ export const GRID_ACTIONS = {
   SET_VIEW_MODE: "SET_VIEW_MODE",
   SET_SHOW_FORMULAS: "SET_SHOW_FORMULAS",
   SET_DISPLAY_ZEROS: "SET_DISPLAY_ZEROS",
+  SET_DISPLAY_GRIDLINES: "SET_DISPLAY_GRIDLINES",
+  SET_DISPLAY_HEADINGS: "SET_DISPLAY_HEADINGS",
+  SET_DISPLAY_FORMULA_BAR: "SET_DISPLAY_FORMULA_BAR",
 } as const;
 
 // Action interfaces
@@ -294,6 +297,21 @@ export interface SetDisplayZerosAction {
   payload: { displayZeros: boolean };
 }
 
+export interface SetDisplayGridlinesAction {
+  type: typeof GRID_ACTIONS.SET_DISPLAY_GRIDLINES;
+  payload: { displayGridlines: boolean };
+}
+
+export interface SetDisplayHeadingsAction {
+  type: typeof GRID_ACTIONS.SET_DISPLAY_HEADINGS;
+  payload: { displayHeadings: boolean };
+}
+
+export interface SetDisplayFormulaBarAction {
+  type: typeof GRID_ACTIONS.SET_DISPLAY_FORMULA_BAR;
+  payload: { displayFormulaBar: boolean };
+}
+
 // Union type of all actions
 export type GridAction =
   | SetSelectionAction
@@ -336,7 +354,10 @@ export type GridAction =
   | SetSplitViewportAction
   | SetViewModeAction
   | SetShowFormulasAction
-  | SetDisplayZerosAction;
+  | SetDisplayZerosAction
+  | SetDisplayGridlinesAction
+  | SetDisplayHeadingsAction
+  | SetDisplayFormulaBarAction;
 
 // Action creators
 
@@ -812,5 +833,38 @@ export function setDisplayZeros(displayZeros: boolean): SetDisplayZerosAction {
   return {
     type: GRID_ACTIONS.SET_DISPLAY_ZEROS,
     payload: { displayZeros },
+  };
+}
+
+/**
+ * Toggle or set the Display Gridlines mode.
+ * When disabled, gridlines are not drawn in the cell area.
+ */
+export function setDisplayGridlines(displayGridlines: boolean): SetDisplayGridlinesAction {
+  return {
+    type: GRID_ACTIONS.SET_DISPLAY_GRIDLINES,
+    payload: { displayGridlines },
+  };
+}
+
+/**
+ * Toggle or set the Display Headings mode.
+ * When disabled, row numbers and column letters are not drawn.
+ */
+export function setDisplayHeadings(displayHeadings: boolean): SetDisplayHeadingsAction {
+  return {
+    type: GRID_ACTIONS.SET_DISPLAY_HEADINGS,
+    payload: { displayHeadings },
+  };
+}
+
+/**
+ * Toggle or set the Display Formula Bar mode.
+ * When disabled, the formula bar is hidden.
+ */
+export function setDisplayFormulaBar(displayFormulaBar: boolean): SetDisplayFormulaBarAction {
+  return {
+    type: GRID_ACTIONS.SET_DISPLAY_FORMULA_BAR,
+    payload: { displayFormulaBar },
   };
 }

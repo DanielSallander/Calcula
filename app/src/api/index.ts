@@ -37,6 +37,7 @@ export type {
   IEditGuardAPI,
   ICellClickAPI,
   INotificationAPI,
+  IFormulasAPI,
 } from "./contract";
 
 // ============================================================================
@@ -81,6 +82,9 @@ export {
   setViewMode,
   setShowFormulas,
   setDisplayZeros,
+  setDisplayGridlines,
+  setDisplayHeadings,
+  setDisplayFormulaBar,
   setHiddenRows,
   setHiddenCols,
   setManuallyHiddenRows,
@@ -106,6 +110,7 @@ export {
   getViewportCells,
   getMergeInfo,
   detectDataRegion,
+  getCurrentRegion,
   getSheets,
   addSheet,
   deleteSheet,
@@ -115,6 +120,8 @@ export {
   hideSheet,
   unhideSheet,
   setTabColor,
+  nextSheet,
+  previousSheet,
   indexToCol,
   colToIndex,
   setActiveSheet as setActiveSheetApi,
@@ -143,9 +150,16 @@ export {
   deleteColumns,
   getColumnWidth,
   getRowHeight,
+  getDefaultDimensions,
+  setDefaultRowHeight,
+  setDefaultColumnWidth,
+  // Fill
+  fillRange,
   // Sorting
   sortRange,
   sortRangeByColumn,
+  // Border presets
+  applyBorderPreset,
   // Multi-Sheet (Sheet Grouping) Operations
   updateCellOnSheets,
   applyFormattingToSheets,
@@ -155,7 +169,9 @@ export {
 export type {
   LayoutConfig,
   AggregationType,
+  CurrentRegionResult,
   SheetInfo,
+  SheetVisibility,
   SheetsResult,
   RemoveDuplicatesResult,
   CellUpdateInput,
@@ -393,7 +409,18 @@ export { freezePanes, loadFreezePanesConfig } from "./grid";
 export { splitWindow, loadSplitWindowConfig, removeSplitWindow } from "./grid";
 export { navigateToCell, navigateToRange } from "./grid";
 export { goToSpecial } from "./grid";
+export { borderAround } from "./grid";
+export { fillDown, fillRight, fillUp, fillLeft } from "./grid";
 export type { GoToSpecialResult, GoToSpecialCriteria } from "./grid";
+
+// Zoom control (programmatic, non-React)
+export { getZoom, setZoomLevel } from "./grid";
+
+// View mode control (programmatic, non-React)
+export { getViewMode, changeViewMode } from "./grid";
+
+// Status bar text
+export { setStatusBarText, clearStatusBarText } from "./grid";
 
 // ============================================================================
 // Extension Manager
@@ -701,6 +728,23 @@ export type {
   AutocompleteKeyPayload,
   AutocompleteAcceptedPayload,
 } from "./formulaAutocomplete";
+
+// ============================================================================
+// Custom Formula Functions API
+// ============================================================================
+
+export {
+  registerFunction as registerFormulaFunction,
+  getCustomFunction,
+  getAllCustomFunctions,
+  hasCustomFunction,
+  executeCustomFunction,
+  subscribeToCustomFunctions,
+  getCustomFunctionCount,
+} from "./formulaFunctions";
+export type {
+  CustomFunctionDef,
+} from "./formulaFunctions";
 
 // ============================================================================
 // Grid Overlays
@@ -1125,6 +1169,12 @@ export {
   getCalculationMode,
   calculateNow,
   calculateSheet,
+  getIterationSettings,
+  setIterationSettings,
+} from "./lib";
+
+export type {
+  IterationSettings,
 } from "./lib";
 
 // ============================================================================
@@ -1220,3 +1270,37 @@ export type {
   SolverVariableValue,
   SolverResultData,
 } from "./lib";
+
+// ============================================================================
+// Named Cell Styles API
+// ============================================================================
+
+export {
+  getNamedStyles,
+  createNamedStyle,
+  deleteNamedStyle,
+  applyNamedStyle,
+} from "./lib";
+
+export type {
+  NamedCellStyle,
+} from "./lib";
+
+// ============================================================================
+// Workbook Properties API
+// ============================================================================
+
+export {
+  getWorkbookProperties,
+  setWorkbookProperties,
+} from "./lib";
+
+export type {
+  WorkbookProperties,
+} from "./lib";
+
+// ============================================================================
+// Range API
+// ============================================================================
+
+export { CellRange } from "./range";

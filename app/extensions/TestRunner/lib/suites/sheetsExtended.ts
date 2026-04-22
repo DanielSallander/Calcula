@@ -32,7 +32,7 @@ export const sheetsExtendedSuite: TestSuite = {
       }
       // Try to unhide all sheets first
       for (let i = 0; i < result.sheets.length; i++) {
-        if (result.sheets[i].hidden) {
+        if (result.sheets[i].visibility !== "visible") {
           try { await unhideSheet(i); } catch { /* ignore */ }
         }
       }
@@ -72,11 +72,11 @@ export const sheetsExtendedSuite: TestSuite = {
         // Hide the new sheet
         const hideResult = await hideSheet(newIdx);
         const hiddenSheet = hideResult.sheets[newIdx];
-        assertTrue(hiddenSheet.hidden === true, "sheet should be hidden");
+        assertTrue(hiddenSheet.visibility === "hidden", "sheet should be hidden");
 
         // Unhide it
         const unhideResult = await unhideSheet(newIdx);
-        assertTrue(!unhideResult.sheets[newIdx].hidden, "sheet should be visible again");
+        assertTrue(unhideResult.sheets[newIdx].visibility === "visible", "sheet should be visible again");
       },
     },
     {

@@ -640,6 +640,9 @@ pub(crate) fn builtin_fn_name(func: &BuiltinFunction) -> String {
         BuiltinFunction::Switch => "SWITCH".to_string(),
         BuiltinFunction::Xor => "XOR".to_string(),
         BuiltinFunction::SumProduct => "SUMPRODUCT".to_string(),
+        BuiltinFunction::SumX2MY2 => "SUMX2MY2".to_string(),
+        BuiltinFunction::SumX2PY2 => "SUMX2PY2".to_string(),
+        BuiltinFunction::SumXMY2 => "SUMXMY2".to_string(),
         BuiltinFunction::Product => "PRODUCT".to_string(),
         BuiltinFunction::Rand => "RAND".to_string(),
         BuiltinFunction::RandBetween => "RANDBETWEEN".to_string(),
@@ -770,6 +773,32 @@ pub(crate) fn builtin_fn_name(func: &BuiltinFunction) -> String {
         BuiltinFunction::ByRow => "BYROW".to_string(),
         BuiltinFunction::ByCol => "BYCOL".to_string(),
         BuiltinFunction::Subtotal => "SUBTOTAL".to_string(),
+        // Hyperbolic & reciprocal trig
+        BuiltinFunction::Sinh => "SINH".to_string(),
+        BuiltinFunction::Cosh => "COSH".to_string(),
+        BuiltinFunction::Tanh => "TANH".to_string(),
+        BuiltinFunction::Cot => "COT".to_string(),
+        BuiltinFunction::Coth => "COTH".to_string(),
+        BuiltinFunction::Csc => "CSC".to_string(),
+        BuiltinFunction::Csch => "CSCH".to_string(),
+        BuiltinFunction::Sec => "SEC".to_string(),
+        BuiltinFunction::Sech => "SECH".to_string(),
+        BuiltinFunction::Acot => "ACOT".to_string(),
+        // Rounding variants
+        BuiltinFunction::CeilingMath => "CEILING.MATH".to_string(),
+        BuiltinFunction::CeilingPrecise => "CEILING.PRECISE".to_string(),
+        BuiltinFunction::FloorMath => "FLOOR.MATH".to_string(),
+        BuiltinFunction::FloorPrecise => "FLOOR.PRECISE".to_string(),
+        BuiltinFunction::IsoCeiling => "ISO.CEILING".to_string(),
+        // Additional math (Group 3)
+        BuiltinFunction::Multinomial => "MULTINOMIAL".to_string(),
+        BuiltinFunction::Combina => "COMBINA".to_string(),
+        BuiltinFunction::FactDouble => "FACTDOUBLE".to_string(),
+        BuiltinFunction::SqrtPi => "SQRTPI".to_string(),
+        // Aggregate
+        BuiltinFunction::Aggregate => "AGGREGATE".to_string(),
+        // Web
+        BuiltinFunction::EncodeUrl => "ENCODEURL".to_string(),
         // Database functions
         BuiltinFunction::DAverage => "DAVERAGE".to_string(),
         BuiltinFunction::DCount => "DCOUNT".to_string(),

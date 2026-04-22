@@ -349,6 +349,16 @@ export interface DimensionData {
 }
 
 /**
+ * Default row height and column width for the workbook.
+ */
+export interface DefaultDimensions {
+  /** Default row height in pixels */
+  defaultRowHeight: number;
+  /** Default column width in pixels */
+  defaultColumnWidth: number;
+}
+
+/**
  * Underline style for font rendering (Excel-compatible).
  * Matches Rust's UnderlineStyle enum with camelCase serialization.
  */
@@ -916,6 +926,12 @@ export interface GridState {
   showFormulas: boolean;
   /** Whether to display zero values in cells (when false, zeros appear as blank) */
   displayZeros: boolean;
+  /** Whether to display gridlines in the cell area */
+  displayGridlines: boolean;
+  /** Whether to display row/column headings */
+  displayHeadings: boolean;
+  /** Whether to display the formula bar */
+  displayFormulaBar: boolean;
 }
 
 /**
@@ -965,6 +981,9 @@ export function createInitialGridState(): GridState {
     zoom: ZOOM_DEFAULT,
     showFormulas: false,
     displayZeros: true,
+    displayGridlines: true,
+    displayHeadings: true,
+    displayFormulaBar: true,
   };
 }
 

@@ -62,6 +62,8 @@ pub mod slicer;
 pub mod timeline_slicer;
 pub mod mcp;
 pub mod locale_commands;
+pub mod error_checking;
+pub mod named_styles_cmd;
 
 pub use api_types::{CellData, StyleData, DimensionData, FormattingParams, MergedRegion};
 pub use logging::{init_log_file, get_log_path, next_seq, write_log, write_log_raw};
@@ -165,10 +167,20 @@ pub struct AppState {
     pub all_column_widths: Mutex<Vec<HashMap<u32, f64>>>,
     /// Per-sheet row heights storage (indexed by sheet index)
     pub all_row_heights: Mutex<Vec<HashMap<u32, f64>>>,
+    /// Default row height for rows without custom heights (pixels)
+    pub default_row_height: Mutex<f64>,
+    /// Default column width for columns without custom widths (pixels)
+    pub default_column_width: Mutex<f64>,
     pub dependents: Mutex<HashMap<(u32, u32), HashSet<(u32, u32)>>>,
     pub dependencies: Mutex<HashMap<(u32, u32), HashSet<(u32, u32)>>>,
     /// Calculation mode: "automatic" or "manual"
     pub calculation_mode: Mutex<String>,
+    /// Iterative calculation: allow circular references to converge
+    pub iteration_enabled: Mutex<bool>,
+    /// Maximum number of iterations for circular reference resolution
+    pub max_iterations: Mutex<u32>,
+    /// Maximum change threshold for convergence (stop when delta < this value)
+    pub max_change: Mutex<f64>,
     /// Column-level dependencies: column index -> set of formula cells that depend on entire column
     pub column_dependents: Mutex<HashMap<u32, HashSet<(u32, u32)>>>,
     /// Row-level dependencies: row index -> set of formula cells that depend on entire row
@@ -235,8 +247,8 @@ pub struct AppState {
     pub page_setups: Mutex<Vec<crate::api_types::PageSetup>>,
     /// Tab colors per sheet (CSS hex string, empty = no color)
     pub tab_colors: Mutex<Vec<String>>,
-    /// Hidden state per sheet
-    pub hidden_sheets: Mutex<Vec<bool>>,
+    /// Visibility state per sheet: "visible", "hidden", or "veryHidden"
+    pub sheet_visibility: Mutex<Vec<String>>,
     /// Spill tracking: maps (sheet_index, origin_row, origin_col) to list of (row, col) spill cells
     /// Used by dynamic array functions (FILTER, SORT, UNIQUE, SEQUENCE)
     pub spill_ranges: Mutex<HashMap<(usize, u32, u32), Vec<(u32, u32)>>>,
@@ -253,6 +265,14 @@ pub struct AppState {
     pub linked_sheets: Mutex<Vec<calcula_format::publish::linked::LinkedSheetInfo>>,
     /// Locale/regional settings (decimal separator, list separator, date format, etc.)
     pub locale: Mutex<engine::LocaleSettings>,
+    /// Auto-recover enabled (background save to prevent data loss)
+    pub auto_recover_enabled: Mutex<bool>,
+    /// Auto-recover interval in milliseconds (default: 300000 = 5 minutes)
+    pub auto_recover_interval_ms: Mutex<u64>,
+    /// Named cell styles: name -> NamedCellStyle
+    pub named_styles: Mutex<HashMap<String, api_types::NamedCellStyle>>,
+    /// Workbook document properties (author, title, subject, etc.)
+    pub workbook_properties: Mutex<api_types::WorkbookProperties>,
 }
 
 impl AppState {
@@ -282,7 +302,7 @@ impl AppState {
 pub fn create_app_state() -> AppState {
     log_info!("SYS", "Creating AppState");
     let initial_grid = Grid::new();
-    AppState {
+    let app_state = AppState {
         grids: Mutex::new(vec![initial_grid.clone()]),
         sheet_names: Mutex::new(vec!["Sheet1".to_string()]),
         active_sheet: Mutex::new(0),
@@ -292,9 +312,14 @@ pub fn create_app_state() -> AppState {
         row_heights: Mutex::new(HashMap::new()),
         all_column_widths: Mutex::new(vec![HashMap::new()]),
         all_row_heights: Mutex::new(vec![HashMap::new()]),
+        default_row_height: Mutex::new(24.0),
+        default_column_width: Mutex::new(100.0),
         dependents: Mutex::new(HashMap::new()),
         dependencies: Mutex::new(HashMap::new()),
         calculation_mode: Mutex::new("automatic".to_string()),
+        iteration_enabled: Mutex::new(false),
+        max_iterations: Mutex::new(100),
+        max_change: Mutex::new(0.001),
         column_dependents: Mutex::new(HashMap::new()),
         row_dependents: Mutex::new(HashMap::new()),
         column_dependencies: Mutex::new(HashMap::new()),
@@ -328,7 +353,7 @@ pub fn create_app_state() -> AppState {
         controls: Mutex::new(HashMap::new()),
         page_setups: Mutex::new(vec![crate::api_types::PageSetup::default()]),
         tab_colors: Mutex::new(vec![String::new()]),
-        hidden_sheets: Mutex::new(vec![false]),
+        sheet_visibility: Mutex::new(vec!["visible".to_string()]),
         spill_ranges: Mutex::new(HashMap::new()),
         spill_hosts: Mutex::new(HashMap::new()),
         advanced_filter_hidden_rows: Mutex::new(HashMap::new()),
@@ -341,7 +366,27 @@ pub fn create_app_state() -> AppState {
             log_info!("SYS", "Detected system locale: {}", system_locale);
             engine::LocaleSettings::from_locale_id(&system_locale)
         }),
-    }
+        auto_recover_enabled: Mutex::new(true),
+        auto_recover_interval_ms: Mutex::new(300_000), // 5 minutes
+        named_styles: Mutex::new(HashMap::new()),
+        workbook_properties: Mutex::new({
+            let author = std::env::var("USERNAME")
+                .or_else(|_| std::env::var("USER"))
+                .unwrap_or_default();
+            let now = chrono::Utc::now().to_rfc3339();
+            api_types::WorkbookProperties {
+                author,
+                created: now.clone(),
+                last_modified: now,
+                ..Default::default()
+            }
+        }),
+    };
+
+    // Populate built-in named styles
+    named_styles_cmd::init_builtin_named_styles(&app_state);
+
+    app_state
 }
 
 // ============================================================================
@@ -521,6 +566,9 @@ fn convert_builtin_function(func: &ParserBuiltinFn) -> EngineBuiltinFn {
         ParserBuiltinFn::Int => EngineBuiltinFn::Int,
         ParserBuiltinFn::Sign => EngineBuiltinFn::Sign,
         ParserBuiltinFn::SumProduct => EngineBuiltinFn::SumProduct,
+        ParserBuiltinFn::SumX2MY2 => EngineBuiltinFn::SumX2MY2,
+        ParserBuiltinFn::SumX2PY2 => EngineBuiltinFn::SumX2PY2,
+        ParserBuiltinFn::SumXMY2 => EngineBuiltinFn::SumXMY2,
         ParserBuiltinFn::Product => EngineBuiltinFn::Product,
         ParserBuiltinFn::Rand => EngineBuiltinFn::Rand,
         ParserBuiltinFn::RandBetween => EngineBuiltinFn::RandBetween,
@@ -707,6 +755,33 @@ fn convert_builtin_function(func: &ParserBuiltinFn) -> EngineBuiltinFn {
         ParserBuiltinFn::VLookup => EngineBuiltinFn::VLookup,
         ParserBuiltinFn::HLookup => EngineBuiltinFn::HLookup,
         ParserBuiltinFn::Lookup => EngineBuiltinFn::Lookup,
+
+        // Hyperbolic & reciprocal trig
+        ParserBuiltinFn::Sinh => EngineBuiltinFn::Sinh,
+        ParserBuiltinFn::Cosh => EngineBuiltinFn::Cosh,
+        ParserBuiltinFn::Tanh => EngineBuiltinFn::Tanh,
+        ParserBuiltinFn::Cot => EngineBuiltinFn::Cot,
+        ParserBuiltinFn::Coth => EngineBuiltinFn::Coth,
+        ParserBuiltinFn::Csc => EngineBuiltinFn::Csc,
+        ParserBuiltinFn::Csch => EngineBuiltinFn::Csch,
+        ParserBuiltinFn::Sec => EngineBuiltinFn::Sec,
+        ParserBuiltinFn::Sech => EngineBuiltinFn::Sech,
+        ParserBuiltinFn::Acot => EngineBuiltinFn::Acot,
+        // Rounding variants
+        ParserBuiltinFn::CeilingMath => EngineBuiltinFn::CeilingMath,
+        ParserBuiltinFn::CeilingPrecise => EngineBuiltinFn::CeilingPrecise,
+        ParserBuiltinFn::FloorMath => EngineBuiltinFn::FloorMath,
+        ParserBuiltinFn::FloorPrecise => EngineBuiltinFn::FloorPrecise,
+        ParserBuiltinFn::IsoCeiling => EngineBuiltinFn::IsoCeiling,
+        // Additional math (Group 3)
+        ParserBuiltinFn::Multinomial => EngineBuiltinFn::Multinomial,
+        ParserBuiltinFn::Combina => EngineBuiltinFn::Combina,
+        ParserBuiltinFn::FactDouble => EngineBuiltinFn::FactDouble,
+        ParserBuiltinFn::SqrtPi => EngineBuiltinFn::SqrtPi,
+        // Aggregate
+        ParserBuiltinFn::Aggregate => EngineBuiltinFn::Aggregate,
+        // Web
+        ParserBuiltinFn::EncodeUrl => EngineBuiltinFn::EncodeUrl,
 
         // Additional math functions
         ParserBuiltinFn::MRound => EngineBuiltinFn::MRound,
@@ -2376,6 +2451,9 @@ fn builtin_function_to_name(func: &ParserBuiltinFn) -> String {
         ParserBuiltinFn::Int => "INT".to_string(),
         ParserBuiltinFn::Sign => "SIGN".to_string(),
         ParserBuiltinFn::SumProduct => "SUMPRODUCT".to_string(),
+        ParserBuiltinFn::SumX2MY2 => "SUMX2MY2".to_string(),
+        ParserBuiltinFn::SumX2PY2 => "SUMX2PY2".to_string(),
+        ParserBuiltinFn::SumXMY2 => "SUMXMY2".to_string(),
         ParserBuiltinFn::Product => "PRODUCT".to_string(),
         ParserBuiltinFn::Rand => "RAND".to_string(),
         ParserBuiltinFn::RandBetween => "RANDBETWEEN".to_string(),
@@ -2528,6 +2606,32 @@ fn builtin_function_to_name(func: &ParserBuiltinFn) -> String {
         ParserBuiltinFn::ByRow => "BYROW".to_string(),
         ParserBuiltinFn::ByCol => "BYCOL".to_string(),
         ParserBuiltinFn::Subtotal => "SUBTOTAL".to_string(),
+        // Hyperbolic & reciprocal trig
+        ParserBuiltinFn::Sinh => "SINH".to_string(),
+        ParserBuiltinFn::Cosh => "COSH".to_string(),
+        ParserBuiltinFn::Tanh => "TANH".to_string(),
+        ParserBuiltinFn::Cot => "COT".to_string(),
+        ParserBuiltinFn::Coth => "COTH".to_string(),
+        ParserBuiltinFn::Csc => "CSC".to_string(),
+        ParserBuiltinFn::Csch => "CSCH".to_string(),
+        ParserBuiltinFn::Sec => "SEC".to_string(),
+        ParserBuiltinFn::Sech => "SECH".to_string(),
+        ParserBuiltinFn::Acot => "ACOT".to_string(),
+        // Rounding variants
+        ParserBuiltinFn::CeilingMath => "CEILING.MATH".to_string(),
+        ParserBuiltinFn::CeilingPrecise => "CEILING.PRECISE".to_string(),
+        ParserBuiltinFn::FloorMath => "FLOOR.MATH".to_string(),
+        ParserBuiltinFn::FloorPrecise => "FLOOR.PRECISE".to_string(),
+        ParserBuiltinFn::IsoCeiling => "ISO.CEILING".to_string(),
+        // Additional math (Group 3)
+        ParserBuiltinFn::Multinomial => "MULTINOMIAL".to_string(),
+        ParserBuiltinFn::Combina => "COMBINA".to_string(),
+        ParserBuiltinFn::FactDouble => "FACTDOUBLE".to_string(),
+        ParserBuiltinFn::SqrtPi => "SQRTPI".to_string(),
+        // Aggregate
+        ParserBuiltinFn::Aggregate => "AGGREGATE".to_string(),
+        // Web
+        ParserBuiltinFn::EncodeUrl => "ENCODEURL".to_string(),
         // Database functions
         ParserBuiltinFn::DAverage => "DAVERAGE".to_string(),
         ParserBuiltinFn::DCount => "DCOUNT".to_string(),
@@ -3651,6 +3755,7 @@ pub fn run() {
             commands::clear_range,
             commands::clear_range_with_options,
             commands::sort_range,
+            commands::fill_range,
             commands::update_cell_on_sheets,
             commands::clear_range_on_sheets,
             commands::remove_duplicates,
@@ -3663,6 +3768,7 @@ pub fn run() {
             // Navigation commands
             commands::find_ctrl_arrow_target,
             commands::detect_data_region,
+            commands::get_current_region,
             commands::go_to_special,
             // Dimension commands
             commands::set_column_width,
@@ -3671,6 +3777,9 @@ pub fn run() {
             commands::set_row_height,
             commands::get_row_height,
             commands::get_all_row_heights,
+            commands::get_default_dimensions,
+            commands::set_default_row_height,
+            commands::set_default_column_width,
             // Style commands
             commands::get_style,
             commands::get_all_styles,
@@ -3678,6 +3787,7 @@ pub fn run() {
             commands::set_cell_rich_text,
             commands::apply_formatting,
             commands::apply_formatting_to_sheets,
+            commands::apply_border_preset,
             commands::preview_number_format,
             commands::get_style_count,
             commands::insert_rows,
@@ -3705,6 +3815,8 @@ pub fn run() {
             calculation::get_calculation_mode,
             calculation::calculate_now,
             calculation::calculate_sheet,
+            calculation::get_iteration_settings,
+            calculation::set_iteration_settings,
             // Formula library commands
             formula::get_functions_by_category,
             formula::get_all_functions,
@@ -3726,6 +3838,11 @@ pub fn run() {
             persistence::get_ai_context,
             persistence::read_text_file,
             persistence::write_text_file,
+            persistence::get_auto_recover_settings,
+            persistence::set_auto_recover_settings,
+            persistence::auto_recover_save,
+            persistence::get_workbook_properties,
+            persistence::set_workbook_properties,
             // Sheet commands
             sheets::get_sheets,
             sheets::get_active_sheet,
@@ -3742,6 +3859,8 @@ pub fn run() {
             sheets::hide_sheet,
             sheets::unhide_sheet,
             sheets::set_tab_color,
+            sheets::next_sheet,
+            sheets::previous_sheet,
             // Find & Replace commands
             commands::find_all,
             commands::count_matches,
@@ -4101,6 +4220,13 @@ pub fn run() {
             locale_commands::get_locale_settings,
             locale_commands::set_locale,
             locale_commands::get_supported_locales,
+            // Named cell styles commands
+            named_styles_cmd::get_named_styles,
+            named_styles_cmd::create_named_style,
+            named_styles_cmd::delete_named_style,
+            named_styles_cmd::apply_named_style,
+            // Error checking indicators
+            error_checking::get_error_indicators,
             // Third-party extension loading
             scan_extension_directory,
             get_extensions_directory,

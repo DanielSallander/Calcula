@@ -236,7 +236,7 @@ export function SheetTabs({ onSheetChange }: SheetTabsProps): React.ReactElement
     const handleUnhide = async () => {
       try {
         const current = await getSheets();
-        const hiddenSheets = current.sheets.filter(s => s.hidden);
+        const hiddenSheets = current.sheets.filter(s => s.visibility === "hidden");
         if (hiddenSheets.length === 0) {
           alert("No hidden sheets to unhide.");
           return;
@@ -773,7 +773,7 @@ export function SheetTabs({ onSheetChange }: SheetTabsProps): React.ReactElement
         const dragging = prev.dragging || Math.abs(e.clientX - prev.startX) > 5;
         const dropIdx = resolveDropIndex(e.clientX);
         // Map visible index back to real sheet index
-        const visibleSheets = sheets.filter(s => !s.hidden);
+        const visibleSheets = sheets.filter(s => s.visibility === "visible");
         const targetSheet = visibleSheets[dropIdx];
         const targetRealIndex = targetSheet ? targetSheet.index : prev.currentIndex;
         return { ...prev, dragging, currentIndex: targetRealIndex };
@@ -831,7 +831,7 @@ export function SheetTabs({ onSheetChange }: SheetTabsProps): React.ReactElement
         {isLoading ? (
           <S.LoadingText>Loading...</S.LoadingText>
         ) : (
-          sheets.filter(s => !s.hidden).map((sheet) => {
+          sheets.filter(s => s.visibility === "visible").map((sheet) => {
             const isSourceSheet = isInFormulaMode &&
               editing?.sourceSheetIndex === sheet.index;
             const isTargetSheet = isInFormulaMode &&
@@ -917,7 +917,7 @@ export function SheetTabs({ onSheetChange }: SheetTabsProps): React.ReactElement
       {/* Drag indicator */}
       {dragState?.dragging && (() => {
         const tabs = getVisibleTabs();
-        const visibleSheets = sheets.filter(s => !s.hidden);
+        const visibleSheets = sheets.filter(s => s.visibility === "visible");
         const dropVisibleIdx = visibleSheets.findIndex(s => s.index === dragState.currentIndex);
         const sourceVisibleIdx = visibleSheets.findIndex(s => s.index === dragState.sourceIndex);
         if (dropVisibleIdx < 0 || sourceVisibleIdx < 0 || dropVisibleIdx === sourceVisibleIdx) return null;

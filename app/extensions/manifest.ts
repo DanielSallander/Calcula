@@ -82,6 +82,8 @@ import QuickAccessExtension from "./QuickAccess";
 import BusinessIntelligenceExtension from "./BusinessIntelligence";
 import AIChatExtension from "./AIChat";
 import LinkedSheetsExtension from "./LinkedSheets";
+import ErrorCheckingExtension from "./ErrorChecking";
+import AutoRecoverExtension from "./AutoRecover";
 
 // Dev-only extensions
 import TestRunnerExtension from "./TestRunner";
@@ -149,6 +151,10 @@ export const builtInExtensions: ExtensionModule[] = [
   EditingOptionsExtension,
   HyperlinksExtension,
   ReviewExtension,
+  // Error Checking (green triangle indicators for number-as-text, formula errors)
+  ErrorCheckingExtension,
+  // AutoRecover (background save at regular intervals)
+  AutoRecoverExtension,
   EvaluateFormulaExtension,
   FormulaVisualizerExtension,
   // Medium complexity extensions

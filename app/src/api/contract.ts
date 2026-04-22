@@ -30,6 +30,7 @@ import type { IKeyboardAPI } from "./keyboard";
 import type { ISettingsAPI } from "./settings";
 import type { ICellEditorAPI } from "./cellEditors";
 import type { IFileFormatAPI } from "./fileFormats";
+import type { CustomFunctionDef } from "./formulaFunctions";
 
 // ============================================================================
 // Sub-API Interfaces (Services available through ExtensionContext)
@@ -128,6 +129,16 @@ export interface IRangeGuardAPI {
   register(guard: (startRow: number, startCol: number, endRow: number, endCol: number) => { blocked: boolean; message?: string } | null): () => void;
 }
 
+/** Custom worksheet function registration */
+export interface IFormulasAPI {
+  /**
+   * Register a custom worksheet function.
+   * @param def The function definition including name, metadata, and implementation.
+   * @returns An unregister function that removes the custom function.
+   */
+  registerFunction(def: CustomFunctionDef): () => void;
+}
+
 /** Cell click interceptor registration */
 export interface ICellClickAPI {
   registerClickInterceptor(handler: (row: number, col: number, event: MouseEvent) => boolean | Promise<boolean>): () => void;
@@ -180,6 +191,9 @@ export interface ExtensionContext {
 
   /** File format importers/exporters */
   fileFormats: IFileFormatAPI;
+
+  /** Custom worksheet function registration */
+  formulas: IFormulasAPI;
 
   /** Grid rendering hooks */
   grid: {

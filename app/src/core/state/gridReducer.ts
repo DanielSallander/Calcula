@@ -1244,6 +1244,27 @@ export function gridReducer(state: GridState, action: GridAction): GridState {
       };
     }
 
+    case GRID_ACTIONS.SET_DISPLAY_GRIDLINES: {
+      return {
+        ...state,
+        displayGridlines: action.payload.displayGridlines,
+      };
+    }
+
+    case GRID_ACTIONS.SET_DISPLAY_HEADINGS: {
+      return {
+        ...state,
+        displayHeadings: action.payload.displayHeadings,
+      };
+    }
+
+    case GRID_ACTIONS.SET_DISPLAY_FORMULA_BAR: {
+      return {
+        ...state,
+        displayFormulaBar: action.payload.displayFormulaBar,
+      };
+    }
+
     default: {
       return state;
     }

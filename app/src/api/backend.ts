@@ -7,7 +7,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { emit, listen } from "@tauri-apps/api/event";
 import type { UnlistenFn } from "@tauri-apps/api/event";
-import type { CellData, DimensionData } from "../core/types";
+import type { CellData, DimensionData, FormattingResult } from "../core/types";
 
 // ============================================================================
 // Types
@@ -2121,6 +2121,14 @@ export interface ConditionalFormat {
   underline?: boolean;
   strikethrough?: boolean;
   numberFormat?: string;
+  borderTopColor?: string;
+  borderTopStyle?: string;
+  borderBottomColor?: string;
+  borderBottomStyle?: string;
+  borderLeftColor?: string;
+  borderLeftStyle?: string;
+  borderRightColor?: string;
+  borderRightStyle?: string;
 }
 
 /**
@@ -3927,4 +3935,78 @@ export async function removeCalculatedItem<TRequest, TResponse>(
   request: TRequest
 ): Promise<TResponse> {
   return invoke<TResponse>("remove_calculated_item", { request });
+}
+
+// ============================================================================
+// NAMED CELL STYLES
+// ============================================================================
+
+/** A named cell style (e.g. "Heading 1", "Good", "Currency"). */
+export interface NamedCellStyle {
+  /** Display name */
+  name: string;
+  /** Whether this is a built-in style (cannot be deleted) */
+  builtIn: boolean;
+  /** Index into the StyleRegistry */
+  styleIndex: number;
+  /** Category for grouping */
+  category: string;
+}
+
+/** Get all named styles. */
+export async function getNamedStyles(): Promise<NamedCellStyle[]> {
+  return invoke<NamedCellStyle[]>("get_named_styles");
+}
+
+/** Create a new named style. */
+export async function createNamedStyle(
+  name: string,
+  styleIndex: number,
+  category: string,
+): Promise<NamedCellStyle> {
+  return invoke<NamedCellStyle>("create_named_style", { name, styleIndex, category });
+}
+
+/** Delete a named style by name. Built-in styles cannot be deleted. */
+export async function deleteNamedStyle(name: string): Promise<void> {
+  return invoke<void>("delete_named_style", { name });
+}
+
+/** Apply a named style to specified cells. Returns updated cells and styles. */
+export async function applyNamedStyle(
+  name: string,
+  rows: number[],
+  cols: number[],
+): Promise<FormattingResult> {
+  return invoke<FormattingResult>("apply_named_style", { name, rows, cols });
+}
+
+// ============================================================================
+// WORKBOOK PROPERTIES
+// ============================================================================
+
+/** Workbook document properties (author, title, subject, etc.). */
+export interface WorkbookProperties {
+  title: string;
+  author: string;
+  subject: string;
+  description: string;
+  keywords: string;
+  category: string;
+  /** ISO 8601 date string */
+  created: string;
+  /** ISO 8601 date string */
+  lastModified: string;
+}
+
+/** Get workbook document properties. */
+export async function getWorkbookProperties(): Promise<WorkbookProperties> {
+  return invoke<WorkbookProperties>("get_workbook_properties");
+}
+
+/** Set workbook document properties. Returns updated properties (with refreshed lastModified). */
+export async function setWorkbookProperties(
+  props: WorkbookProperties,
+): Promise<WorkbookProperties> {
+  return invoke<WorkbookProperties>("set_workbook_properties", { props });
 }

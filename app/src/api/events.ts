@@ -27,6 +27,9 @@ export const AppEvents = {
   VIEW_MODE_CHANGED: "app:view-mode-changed",
   SHOW_FORMULAS_TOGGLED: "app:show-formulas-toggled",
   DISPLAY_ZEROS_TOGGLED: "app:display-zeros-toggled",
+  DISPLAY_GRIDLINES_TOGGLED: "app:display-gridlines-toggled",
+  DISPLAY_HEADINGS_TOGGLED: "app:display-headings-toggled",
+  DISPLAY_FORMULA_BAR_TOGGLED: "app:display-formula-bar-toggled",
 
   // Selection events
   SELECTION_CHANGED: "app:selection-changed",
@@ -89,11 +92,17 @@ export const AppEvents = {
   AFTER_NEW: "app:after-new",
   BEFORE_CLOSE: "app:before-close",
 
+  // Dirty state events
+  DIRTY_STATE_CHANGED: "app:dirty-state-changed",
+
   // Linked sheet events
   LINKED_SHEETS_REFRESHED: "app:linked-sheets-refreshed",
 
   // Locale events
   LOCALE_CHANGED: "app:locale-changed",
+
+  // Status bar text events
+  STATUS_BAR_TEXT_CHANGED: "app:status-bar-text-changed",
 } as const;
 
 /** A single cell value change within a CELL_VALUES_CHANGED event. */

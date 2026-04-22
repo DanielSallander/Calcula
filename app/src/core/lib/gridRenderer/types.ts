@@ -137,4 +137,8 @@ export interface RenderState {
   showFormulas?: boolean;
   /** Whether to display zero values in cells (when false, zeros appear as blank) */
   displayZeros?: boolean;
+  /** Whether to display gridlines in the cell area */
+  displayGridlines?: boolean;
+  /** Whether to display row/column headings */
+  displayHeadings?: boolean;
 }

@@ -3678,3 +3678,556 @@ pub fn clear_range_on_sheets(
 
     Ok(())
 }
+
+/// Fill a target range by copying/tiling source cells.
+/// Formulas have their relative references shifted by the delta between source and target.
+/// Non-formula cells are cloned verbatim (value + style).
+/// This is the backend for Ctrl+D (Fill Down), Ctrl+R (Fill Right), etc.
+#[tauri::command]
+pub fn fill_range(
+    state: State<AppState>,
+    file_state: State<FileState>,
+    user_files_state: State<UserFilesState>,
+    pivot_state: State<'_, crate::pivot::PivotState>,
+    source_start_row: u32,
+    source_start_col: u32,
+    source_end_row: u32,
+    source_end_col: u32,
+    target_start_row: u32,
+    target_start_col: u32,
+    target_end_row: u32,
+    target_end_col: u32,
+) -> Result<Vec<CellData>, String> {
+    use std::collections::HashMap;
+    use std::time::Instant;
+    let perf_t0 = Instant::now();
+
+    let user_files = user_files_state.files.lock().unwrap();
+
+    // Acquire all locks once
+    let sheet_names = state.sheet_names.lock().unwrap();
+    let mut grid = state.grid.lock().unwrap();
+    let mut grids = state.grids.lock().unwrap();
+    let active_sheet = *state.active_sheet.lock().unwrap();
+    let styles = state.style_registry.lock().unwrap();
+    let mut dependents_map = state.dependents.lock().unwrap();
+    let mut dependencies_map = state.dependencies.lock().unwrap();
+    let mut column_dependents_map = state.column_dependents.lock().unwrap();
+    let mut column_dependencies_map = state.column_dependencies.lock().unwrap();
+    let mut row_dependents_map = state.row_dependents.lock().unwrap();
+    let mut row_dependencies_map = state.row_dependencies.lock().unwrap();
+    let mut cross_sheet_dependents_map = state.cross_sheet_dependents.lock().unwrap();
+    let mut cross_sheet_dependencies_map = state.cross_sheet_dependencies.lock().unwrap();
+    let calc_mode = state.calculation_mode.lock().unwrap();
+    let mut undo_stack = state.undo_stack.lock().unwrap();
+    let merged_regions = state.merged_regions.lock().unwrap();
+    let locale = state.locale.lock().unwrap();
+
+    // Lock pivot state for GETPIVOTDATA support
+    let pivot_tables = pivot_state.pivot_tables.lock().unwrap();
+    let pivot_views = pivot_state.views.lock().unwrap();
+    let pivot_data_fn = |data_field: &str, pivot_row: u32, pivot_col: u32, pairs: &[(&str, &str)]| -> Option<f64> {
+        crate::pivot::operations::lookup_pivot_data(
+            &pivot_tables,
+            &pivot_views,
+            data_field,
+            pivot_row,
+            pivot_col,
+            pairs,
+        )
+    };
+
+    let perf_t1_locks = Instant::now();
+
+    // Source range dimensions
+    let src_rows = source_end_row - source_start_row + 1;
+    let src_cols = source_end_col - source_start_col + 1;
+
+    // Collect source cells into a lookup map (relative position -> Cell)
+    let mut source_cells: HashMap<(u32, u32), engine::Cell> = HashMap::new();
+    for r in source_start_row..=source_end_row {
+        for c in source_start_col..=source_end_col {
+            if let Some(cell) = grid.get_cell(r, c) {
+                let rel_r = r - source_start_row;
+                let rel_c = c - source_start_col;
+                source_cells.insert((rel_r, rel_c), cell.clone());
+            }
+        }
+    }
+
+    // Begin undo transaction
+    let opened_transaction = !undo_stack.has_open_transaction();
+    if opened_transaction {
+        let fill_count = (target_end_row - target_start_row + 1) * (target_end_col - target_start_col + 1);
+        undo_stack.begin_transaction(format!("Fill {} cells", fill_count));
+    }
+
+    let current_sheet_name = sheet_names.get(active_sheet).cloned().unwrap_or_default();
+
+    // Build merge lookup for span info
+    let merge_lookup: HashMap<(u32, u32), &MergedRegion> = merged_regions
+        .iter()
+        .map(|r| ((r.start_row, r.start_col), r))
+        .collect();
+
+    let mut updated_cells: Vec<CellData> = Vec::new();
+    let mut cells_needing_recalc: Vec<(u32, u32)> = Vec::new();
+
+    // Iterate over target range
+    for tr in target_start_row..=target_end_row {
+        for tc in target_start_col..=target_end_col {
+            // Map target cell to source cell using modular tiling
+            let rel_r = (tr - target_start_row) % src_rows;
+            let rel_c = (tc - target_start_col) % src_cols;
+
+            // Record previous state for undo
+            let previous_cell = grid.get_cell(tr, tc).cloned();
+            undo_stack.record_cell_change(tr, tc, previous_cell);
+
+            // Find the source cell
+            let source_cell = source_cells.get(&(rel_r, rel_c));
+
+            if let Some(src) = source_cell {
+                // Compute the delta from the source cell's absolute position to the target
+                let src_abs_r = source_start_row + rel_r;
+                let src_abs_c = source_start_col + rel_c;
+                let row_delta = tr as i32 - src_abs_r as i32;
+                let col_delta = tc as i32 - src_abs_c as i32;
+
+                let mut new_cell = src.clone();
+                // Clear cached AST - it will be rebuilt
+                new_cell.cached_ast = None;
+                // Clear rich text (not meaningful when filling)
+                new_cell.rich_text = None;
+
+                // If the source has a formula, shift the references
+                if let Some(ref formula) = src.formula {
+                    let shifted = crate::commands::structure::shift_formula_internal(
+                        formula,
+                        row_delta,
+                        col_delta,
+                    );
+                    new_cell.formula = Some(shifted.clone());
+
+                    // Parse and evaluate the shifted formula
+                    match parser::parse(&shifted) {
+                        Ok(parsed) => {
+                            // Resolve named references
+                            let resolved = if crate::ast_has_named_refs(&parsed) {
+                                let named_ranges_map = state.named_ranges.lock().unwrap();
+                                let mut visited = HashSet::new();
+                                let resolved = crate::resolve_names_in_ast(
+                                    &parsed,
+                                    &named_ranges_map,
+                                    active_sheet,
+                                    &mut visited,
+                                );
+                                drop(named_ranges_map);
+                                resolved
+                            } else {
+                                parsed
+                            };
+
+                            // Resolve structured table references
+                            let resolved = if crate::ast_has_table_refs(&resolved) {
+                                let tables_map = state.tables.lock().unwrap();
+                                let table_names_map = state.table_names.lock().unwrap();
+                                let ctx = crate::TableRefContext {
+                                    tables: &tables_map,
+                                    table_names: &table_names_map,
+                                    current_sheet_index: active_sheet,
+                                    current_row: tr,
+                                };
+                                let resolved = crate::resolve_table_refs_in_ast(&resolved, &ctx);
+                                drop(table_names_map);
+                                drop(tables_map);
+                                resolved
+                            } else {
+                                resolved
+                            };
+
+                            // Resolve spill range references
+                            let resolved = if crate::ast_has_spill_refs(&resolved) {
+                                let spill_ranges_map = state.spill_ranges.lock().unwrap();
+                                let resolved = crate::resolve_spill_refs_in_ast(
+                                    &resolved,
+                                    &spill_ranges_map,
+                                    active_sheet,
+                                );
+                                drop(spill_ranges_map);
+                                resolved
+                            } else {
+                                resolved
+                            };
+
+                            let refs = extract_all_references(&resolved, &grid);
+
+                            update_dependencies(
+                                (tr, tc),
+                                refs.cells,
+                                &mut dependencies_map,
+                                &mut dependents_map,
+                            );
+                            update_column_dependencies(
+                                (tr, tc),
+                                refs.columns,
+                                &mut column_dependencies_map,
+                                &mut column_dependents_map,
+                            );
+                            update_row_dependencies(
+                                (tr, tc),
+                                refs.rows,
+                                &mut row_dependencies_map,
+                                &mut row_dependents_map,
+                            );
+
+                            // Cross-sheet dependencies
+                            let normalized_cross_sheet_refs: HashSet<(String, u32, u32)> = refs
+                                .cross_sheet_cells
+                                .iter()
+                                .filter_map(|(parsed_sheet_name, r, c)| {
+                                    let normalized = sheet_names
+                                        .iter()
+                                        .find(|name| name.eq_ignore_ascii_case(parsed_sheet_name))
+                                        .cloned()
+                                        .unwrap_or_else(|| parsed_sheet_name.clone());
+                                    Some((normalized, *r, *c))
+                                })
+                                .collect();
+                            update_cross_sheet_dependencies(
+                                (active_sheet, tr, tc),
+                                normalized_cross_sheet_refs,
+                                &mut cross_sheet_dependencies_map,
+                                &mut cross_sheet_dependents_map,
+                            );
+
+                            // Convert AST and evaluate
+                            let engine_ast = crate::convert_expr(&resolved);
+                            new_cell.set_cached_ast(engine_ast.clone());
+
+                            let eval_ctx = engine::EvalContext {
+                                current_row: Some(tr),
+                                current_col: Some(tc),
+                                row_heights: None,
+                                column_widths: None,
+                                hidden_rows: None,
+                            };
+                            let raw_result = evaluate_formula_raw_with_files_and_pivot(
+                                &grids,
+                                &sheet_names,
+                                active_sheet,
+                                &engine_ast,
+                                eval_ctx,
+                                Some(&styles),
+                                &user_files,
+                                Some(&pivot_data_fn),
+                            );
+
+                            // For fill, we take the simple scalar result (no spill handling)
+                            new_cell.value = raw_result.to_cell_value();
+                        }
+                        Err(e) => {
+                            // If formula can't be parsed after shifting, store as error
+                            new_cell.value = engine::CellValue::Error(engine::CellError::Value);
+                            log_debug!("FILL", "fill_range: failed to parse shifted formula '{}': {}", shifted, e);
+                        }
+                    }
+                }
+                // else: non-formula cell - value and style already cloned from source
+
+                // Write the cell
+                grid.set_cell(tr, tc, new_cell.clone());
+                if active_sheet < grids.len() {
+                    grids[active_sheet].set_cell(tr, tc, new_cell.clone());
+                }
+
+                // Build CellData for the response
+                let style = styles.get(new_cell.style_index);
+                let display = format_cell_value(&new_cell.value, style, &locale);
+
+                let (row_span, col_span) = if let Some(region) = merge_lookup.get(&(tr, tc)) {
+                    (
+                        region.end_row - region.start_row + 1,
+                        region.end_col - region.start_col + 1,
+                    )
+                } else {
+                    (1, 1)
+                };
+
+                updated_cells.push(CellData {
+                    row: tr,
+                    col: tc,
+                    display,
+                    display_color: None,
+                    formula: new_cell.formula.as_ref().map(|f| engine::localize_formula(f, &locale)),
+                    style_index: new_cell.style_index,
+                    row_span,
+                    col_span,
+                    sheet_index: None,
+                    rich_text: None,
+                    accounting_layout: None,
+                });
+            } else {
+                // Source cell is empty - clear the target cell
+                grid.clear_cell(tr, tc);
+                if active_sheet < grids.len() {
+                    grids[active_sheet].clear_cell(tr, tc);
+                }
+
+                // Clear dependencies for this cell
+                update_cross_sheet_dependencies(
+                    (active_sheet, tr, tc),
+                    HashSet::new(),
+                    &mut cross_sheet_dependencies_map,
+                    &mut cross_sheet_dependents_map,
+                );
+                update_dependencies(
+                    (tr, tc),
+                    HashSet::new(),
+                    &mut dependencies_map,
+                    &mut dependents_map,
+                );
+                update_column_dependencies(
+                    (tr, tc),
+                    HashSet::new(),
+                    &mut column_dependencies_map,
+                    &mut column_dependents_map,
+                );
+                update_row_dependencies(
+                    (tr, tc),
+                    HashSet::new(),
+                    &mut row_dependencies_map,
+                    &mut row_dependents_map,
+                );
+
+                let (row_span, col_span) = if let Some(region) = merge_lookup.get(&(tr, tc)) {
+                    (
+                        region.end_row - region.start_row + 1,
+                        region.end_col - region.start_col + 1,
+                    )
+                } else {
+                    (1, 1)
+                };
+
+                updated_cells.push(CellData {
+                    row: tr,
+                    col: tc,
+                    display: String::new(),
+                    display_color: None,
+                    formula: None,
+                    style_index: 0,
+                    row_span,
+                    col_span,
+                    sheet_index: None,
+                    rich_text: None,
+                    accounting_layout: None,
+                });
+            }
+
+            cells_needing_recalc.push((tr, tc));
+        }
+    }
+
+    let perf_t2_processed = Instant::now();
+
+    // Recalculate dependents if automatic mode
+    if *calc_mode == "automatic" {
+        let mut all_recalc_order: Vec<(u32, u32)> = Vec::new();
+        let mut recalc_set: HashSet<(u32, u32)> = HashSet::new();
+        let updated_set: HashSet<(u32, u32)> = cells_needing_recalc.iter().copied().collect();
+
+        for (row, col) in &cells_needing_recalc {
+            let recalc_order = get_recalculation_order((*row, *col), &dependents_map);
+            for dep in recalc_order {
+                if !recalc_set.contains(&dep) && !updated_set.contains(&dep) {
+                    recalc_set.insert(dep);
+                    all_recalc_order.push(dep);
+                }
+            }
+            let col_row_deps =
+                get_column_row_dependents((*row, *col), &column_dependents_map, &row_dependents_map);
+            for dep in col_row_deps {
+                if !recalc_set.contains(&dep) && !updated_set.contains(&dep) {
+                    recalc_set.insert(dep);
+                    all_recalc_order.push(dep);
+                }
+            }
+        }
+
+        // Lock table state for cascade recalculation
+        let batch_tables = state.tables.lock().unwrap();
+        let batch_table_names = state.table_names.lock().unwrap();
+        let batch_named_ranges = state.named_ranges.lock().unwrap();
+
+        for (dep_row, dep_col) in &all_recalc_order {
+            if let Some(dep_cell) = grid.get_cell(*dep_row, *dep_col) {
+                if let Some(ref formula) = dep_cell.formula {
+                    let result = if let Some(cached_ast) = dep_cell.get_cached_ast() {
+                        evaluate_formula_multi_sheet_with_ast_and_files(
+                            &grids,
+                            &sheet_names,
+                            active_sheet,
+                            cached_ast,
+                            &user_files,
+                        )
+                    } else {
+                        if let Ok(engine_ast) = {
+                            parser::parse(formula).map(|parsed| {
+                                let resolved = if crate::ast_has_named_refs(&parsed) {
+                                    let mut visited = HashSet::new();
+                                    crate::resolve_names_in_ast(&parsed, &batch_named_ranges, active_sheet, &mut visited)
+                                } else {
+                                    parsed
+                                };
+                                let resolved = if crate::ast_has_table_refs(&resolved) {
+                                    let ctx = crate::TableRefContext {
+                                        tables: &batch_tables,
+                                        table_names: &batch_table_names,
+                                        current_sheet_index: active_sheet,
+                                        current_row: *dep_row,
+                                    };
+                                    crate::resolve_table_refs_in_ast(&resolved, &ctx)
+                                } else {
+                                    resolved
+                                };
+                                crate::convert_expr(&resolved)
+                            }).map_err(|e| format!("{}", e))
+                        } {
+                            let result = evaluate_formula_multi_sheet_with_ast_and_files(
+                                &grids,
+                                &sheet_names,
+                                active_sheet,
+                                &engine_ast,
+                                &user_files,
+                            );
+                            let mut updated_with_ast = dep_cell.clone();
+                            updated_with_ast.set_cached_ast(engine_ast);
+                            updated_with_ast.value = result.clone();
+                            grid.set_cell(*dep_row, *dep_col, updated_with_ast.clone());
+                            if active_sheet < grids.len() {
+                                grids[active_sheet].set_cell(*dep_row, *dep_col, updated_with_ast.clone());
+                            }
+                            let dep_style = styles.get(updated_with_ast.style_index);
+                            let dep_display = format_cell_value(&updated_with_ast.value, dep_style, &locale);
+                            let (drspan, dcspan) = if let Some(region) = merge_lookup.get(&(*dep_row, *dep_col)) {
+                                (region.end_row - region.start_row + 1, region.end_col - region.start_col + 1)
+                            } else {
+                                (1, 1)
+                            };
+                            updated_cells.push(CellData {
+                                row: *dep_row, col: *dep_col, display: dep_display,
+                                display_color: None,
+                                formula: updated_with_ast.formula.as_ref().map(|f| engine::localize_formula(f, &locale)),
+                                style_index: updated_with_ast.style_index,
+                                row_span: drspan, col_span: dcspan,
+                                sheet_index: None, rich_text: None, accounting_layout: None,
+                            });
+                            continue;
+                        }
+                        evaluate_formula_multi_sheet_with_files(&grids, &sheet_names, active_sheet, formula, &user_files)
+                    };
+
+                    let mut updated_dep = dep_cell.clone();
+                    updated_dep.value = result;
+                    grid.set_cell(*dep_row, *dep_col, updated_dep.clone());
+                    if active_sheet < grids.len() {
+                        grids[active_sheet].set_cell(*dep_row, *dep_col, updated_dep.clone());
+                    }
+                    let dep_style = styles.get(updated_dep.style_index);
+                    let dep_display = format_cell_value(&updated_dep.value, dep_style, &locale);
+                    let (drspan, dcspan) = if let Some(region) = merge_lookup.get(&(*dep_row, *dep_col)) {
+                        (region.end_row - region.start_row + 1, region.end_col - region.start_col + 1)
+                    } else {
+                        (1, 1)
+                    };
+                    updated_cells.push(CellData {
+                        row: *dep_row, col: *dep_col, display: dep_display,
+                        display_color: None,
+                        formula: updated_dep.formula.as_ref().map(|f| engine::localize_formula(f, &locale)),
+                        style_index: updated_dep.style_index,
+                        row_span: drspan, col_span: dcspan,
+                        sheet_index: None, rich_text: None, accounting_layout: None,
+                    });
+                }
+            }
+        }
+
+        // Handle cross-sheet dependents
+        let mut work_queue: Vec<(usize, String, u32, u32)> = cells_needing_recalc
+            .iter()
+            .map(|(r, c)| (active_sheet, current_sheet_name.clone(), *r, *c))
+            .collect();
+        let mut processed: HashSet<(usize, u32, u32)> = HashSet::new();
+        for (row, col) in &cells_needing_recalc {
+            processed.insert((active_sheet, *row, *col));
+        }
+        for (dep_row, dep_col) in &all_recalc_order {
+            processed.insert((active_sheet, *dep_row, *dep_col));
+        }
+
+        while let Some((_source_sheet_idx, source_sheet_name, source_row, source_col)) = work_queue.pop() {
+            let cross_sheet_key = (source_sheet_name.clone(), source_row, source_col);
+            if let Some(cross_deps) = cross_sheet_dependents_map.get(&cross_sheet_key).cloned() {
+                for (dep_sheet_idx, dep_row, dep_col) in cross_deps.iter() {
+                    if processed.contains(&(*dep_sheet_idx, *dep_row, *dep_col)) {
+                        continue;
+                    }
+                    processed.insert((*dep_sheet_idx, *dep_row, *dep_col));
+                    if *dep_sheet_idx < grids.len() {
+                        if let Some(dep_cell) = grids[*dep_sheet_idx].get_cell(*dep_row, *dep_col) {
+                            if let Some(ref formula) = dep_cell.formula {
+                                let result = if let Some(cached_ast) = dep_cell.get_cached_ast() {
+                                    evaluate_formula_multi_sheet_with_ast_and_files(
+                                        &grids, &sheet_names, *dep_sheet_idx, cached_ast, &user_files,
+                                    )
+                                } else {
+                                    evaluate_formula_multi_sheet_with_files(
+                                        &grids, &sheet_names, *dep_sheet_idx, formula, &user_files,
+                                    )
+                                };
+                                let mut updated_dep = dep_cell.clone();
+                                updated_dep.value = result;
+                                grids[*dep_sheet_idx].set_cell(*dep_row, *dep_col, updated_dep.clone());
+                                let dep_style = styles.get(updated_dep.style_index);
+                                let dep_display = format_cell_value(&updated_dep.value, dep_style, &locale);
+                                updated_cells.push(CellData {
+                                    row: *dep_row, col: *dep_col, display: dep_display,
+                                    display_color: None,
+                                    formula: updated_dep.formula.as_ref().map(|f| engine::localize_formula(f, &locale)),
+                                    style_index: updated_dep.style_index,
+                                    row_span: 1, col_span: 1,
+                                    sheet_index: Some(*dep_sheet_idx), rich_text: None, accounting_layout: None,
+                                });
+                                if let Some(dep_sheet_name) = sheet_names.get(*dep_sheet_idx) {
+                                    work_queue.push((*dep_sheet_idx, dep_sheet_name.clone(), *dep_row, *dep_col));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Commit undo transaction
+    if opened_transaction {
+        undo_stack.commit_transaction();
+    }
+
+    // Mark workbook as dirty
+    if let Ok(mut modified) = file_state.is_modified.lock() { *modified = true; }
+
+    let perf_tend = Instant::now();
+    log_perf!("FILL",
+        "fill_range src=({},{})..({},{}) tgt=({},{})..({},{}) => {} cells | locks={:.2}ms process={:.2}ms recalc={:.2}ms TOTAL={:.2}ms",
+        source_start_row, source_start_col, source_end_row, source_end_col,
+        target_start_row, target_start_col, target_end_row, target_end_col,
+        updated_cells.len(),
+        perf_t1_locks.duration_since(perf_t0).as_secs_f64() * 1000.0,
+        perf_t2_processed.duration_since(perf_t1_locks).as_secs_f64() * 1000.0,
+        perf_tend.duration_since(perf_t2_processed).as_secs_f64() * 1000.0,
+        perf_tend.duration_since(perf_t0).as_secs_f64() * 1000.0
+    );
+
+    Ok(updated_cells)
+}

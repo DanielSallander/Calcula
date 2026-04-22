@@ -71,6 +71,7 @@ import {
 } from "../../api/settings";
 import { registerCellEditor } from "../../api/cellEditors";
 import { registerFileFormat, getFileFormats } from "../../api/fileFormats";
+import { registerFunction } from "../../api/formulaFunctions";
 
 // ============================================================================
 // Types
@@ -137,6 +138,9 @@ function isApiVersionCompatible(required: string, host: string): boolean {
 function buildContext(): ExtensionContext {
   return {
     commands: CommandRegistry,
+    formulas: {
+      registerFunction,
+    },
     ui: {
       menus: {
         register: registerMenu,

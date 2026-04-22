@@ -61,7 +61,7 @@ const GROUP_ORDER: Record<string, number> = {
 
 // Import gridCommands for use in registerCoreGridContextMenu
 import { gridCommands } from "../../core/lib/gridCommands";
-import { setColumnWidth, setRowHeight, getColumnWidth, getRowHeight } from "../../core/lib/tauri-api";
+import { setColumnWidth, setRowHeight, getColumnWidth, getRowHeight, getDefaultDimensions } from "../../core/lib/tauri-api";
 
 // ============================================================================
 // Grid Extension Registry
@@ -210,10 +210,7 @@ export const gridExtensions = new GridExtensionRegistry();
 // Built-in Context Menu Items (Core functionality)
 // ============================================================================
 
-/** Default column width in pixels */
-const DEFAULT_COLUMN_WIDTH = 100;
-/** Default row height in pixels */
-const DEFAULT_ROW_HEIGHT = 24;
+// Default dimensions are now fetched from the backend via getDefaultDimensions().
 
 /** Register the default/core context menu items */
 export function registerCoreGridContextMenu(): void {
@@ -376,7 +373,8 @@ export function registerCoreGridContextMenu(): void {
       const endCol = Math.max(ctx.selection.startCol, ctx.selection.endCol);
       
       // Get the current width of the first selected column
-      const currentWidth = await getColumnWidth(startCol) ?? DEFAULT_COLUMN_WIDTH;
+      const defaults = await getDefaultDimensions();
+      const currentWidth = await getColumnWidth(startCol) ?? defaults.defaultColumnWidth;
       
       // Prompt user for new width
       const input = window.prompt(
@@ -421,7 +419,8 @@ export function registerCoreGridContextMenu(): void {
       const endRow = Math.max(ctx.selection.startRow, ctx.selection.endRow);
       
       // Get the current height of the first selected row
-      const currentHeight = await getRowHeight(startRow) ?? DEFAULT_ROW_HEIGHT;
+      const defaults = await getDefaultDimensions();
+      const currentHeight = await getRowHeight(startRow) ?? defaults.defaultRowHeight;
       
       // Prompt user for new height
       const input = window.prompt(

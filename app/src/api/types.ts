@@ -24,6 +24,7 @@ export type {
   StyleData,
   StyleDataMap,
   DimensionData,
+  DefaultDimensions,
 
   // Formatting
   FormattingOptions,

@@ -772,7 +772,9 @@ fn estimate_cost(expr: &Expression) -> f64 {
                 BuiltinFunction::Sum | BuiltinFunction::Average |
                 BuiltinFunction::Count | BuiltinFunction::CountA |
                 BuiltinFunction::Min | BuiltinFunction::Max => 15.0,
-                BuiltinFunction::SumProduct => 25.0,
+                BuiltinFunction::SumProduct |
+                BuiltinFunction::SumX2MY2 | BuiltinFunction::SumX2PY2 |
+                BuiltinFunction::SumXMY2 => 25.0,
                 BuiltinFunction::Filter | BuiltinFunction::Sort |
                 BuiltinFunction::Unique => 20.0,
                 _ => 5.0,

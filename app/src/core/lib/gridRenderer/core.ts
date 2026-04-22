@@ -258,7 +258,9 @@ function renderZone(
   ctx.clip();
   ctx.fillStyle = theme.cellBackground;
   ctx.fillRect(clipX, clipY, clipWidth, clipHeight);
-  drawGridLinesZone(state, range, clipX, clipY, clipWidth, clipHeight);
+  if (state.displayGridlines !== false) {
+    drawGridLinesZone(state, range, clipX, clipY, clipWidth, clipHeight);
+  }
   drawCellTextZone(state, range, clipX, clipY, clipWidth, clipHeight);
   ctx.restore();
 }
@@ -589,9 +591,18 @@ export function renderGrid(
   showFormulas?: boolean,
   // Display Zeros mode - when false, zero values display as blank
   displayZeros?: boolean,
+  // Display Gridlines mode - when false, gridlines are not drawn
+  displayGridlines?: boolean,
+  // Display Headings mode - when false, row/column headers are not drawn
+  displayHeadings?: boolean,
 ): void {
-  const rowHeaderWidth = config.rowHeaderWidth || 50;
-  const colHeaderHeight = config.colHeaderHeight || 24;
+  // When headings are hidden, collapse header dimensions to 0
+  // so the cell area expands to fill the full canvas
+  const effectiveConfig = displayHeadings === false
+    ? { ...config, rowHeaderWidth: 0, colHeaderHeight: 0 }
+    : config;
+  const rowHeaderWidth = effectiveConfig.rowHeaderWidth || (displayHeadings === false ? 0 : 50);
+  const colHeaderHeight = effectiveConfig.colHeaderHeight || (displayHeadings === false ? 0 : 24);
 
   const dims = dimensions || {
     columnWidths: new Map(),
@@ -614,7 +625,7 @@ export function renderGrid(
     ctx,
     width,
     height,
-    config,
+    config: effectiveConfig,
     viewport,
     selection,
     editing,
@@ -648,6 +659,10 @@ export function renderGrid(
     showFormulas: showFormulas || false,
     // Display Zeros mode
     displayZeros: displayZeros !== undefined ? displayZeros : true,
+    // Display Gridlines mode
+    displayGridlines: displayGridlines !== undefined ? displayGridlines : true,
+    // Display Headings mode
+    displayHeadings: displayHeadings !== undefined ? displayHeadings : true,
   };
 
   ctx.fillStyle = theme.cellBackground;
@@ -665,7 +680,7 @@ export function renderGrid(
       freezeRow: splitConfig!.splitRow ?? null,
       freezeCol: splitConfig!.splitCol ?? null,
     };
-    const layout = calculateFreezePaneLayout(splitFreezeConfig, config, dims);
+    const layout = calculateFreezePaneLayout(splitFreezeConfig, effectiveConfig, dims);
 
     const splitBarSize = 4;
     const topPaneHeight = layout.frozenRowsHeight;
@@ -683,27 +698,27 @@ export function renderGrid(
     // Bottom-right pane: uses main viewport for both axes
     if (rightPaneWidth > 0 && bottomPaneHeight > 0) {
       // Trick: add header sizes so calculateVisibleRange subtracts them to get correct pane size
-      const brRange = calculateVisibleRange(viewport, config, rightPaneWidth + rowHeaderWidth, bottomPaneHeight + colHeaderHeight, dims);
+      const brRange = calculateVisibleRange(viewport, effectiveConfig, rightPaneWidth + rowHeaderWidth, bottomPaneHeight + colHeaderHeight, dims);
       renderZone(state, brRange, rightPaneLeft, bottomPaneTop, rightPaneWidth, bottomPaneHeight);
     }
 
     // Bottom-left pane: scrolls vertically with main viewport, horizontally with split viewport
     if (hasSplitCols && leftPaneWidth > 0 && bottomPaneHeight > 0) {
       const blViewport: Viewport = { ...viewport, scrollX: svp.scrollX };
-      const blRange = calculateVisibleRange(blViewport, config, leftPaneWidth + rowHeaderWidth, bottomPaneHeight + colHeaderHeight, dims);
+      const blRange = calculateVisibleRange(blViewport, effectiveConfig, leftPaneWidth + rowHeaderWidth, bottomPaneHeight + colHeaderHeight, dims);
       renderZone(state, blRange, rowHeaderWidth, bottomPaneTop, leftPaneWidth, bottomPaneHeight);
     }
 
     // Top-right pane: scrolls horizontally with main viewport, vertically with split viewport
     if (hasSplitRows && topPaneHeight > 0 && rightPaneWidth > 0) {
       const trViewport: Viewport = { ...viewport, scrollY: svp.scrollY };
-      const trRange = calculateVisibleRange(trViewport, config, rightPaneWidth + rowHeaderWidth, topPaneHeight + colHeaderHeight, dims);
+      const trRange = calculateVisibleRange(trViewport, effectiveConfig, rightPaneWidth + rowHeaderWidth, topPaneHeight + colHeaderHeight, dims);
       renderZone(state, trRange, rightPaneLeft, colHeaderHeight, rightPaneWidth, topPaneHeight);
     }
 
     // Top-left pane: independent scroll from split viewport (both axes)
     if (hasSplitRows && hasSplitCols && topPaneHeight > 0 && leftPaneWidth > 0) {
-      const tlRange = calculateVisibleRange(svp, config, leftPaneWidth + rowHeaderWidth, topPaneHeight + colHeaderHeight, dims);
+      const tlRange = calculateVisibleRange(svp, effectiveConfig, leftPaneWidth + rowHeaderWidth, topPaneHeight + colHeaderHeight, dims);
       renderZone(state, tlRange, rowHeaderWidth, colHeaderHeight, leftPaneWidth, topPaneHeight);
     }
 
@@ -744,36 +759,36 @@ export function renderGrid(
   const hasFreezeCols = !hasSplitRows && !hasSplitCols && freezeConfig && freezeConfig.freezeCol !== null && freezeConfig.freezeCol > 0;
 
   if (hasFreezeRows || hasFreezeCols) {
-    const layout = calculateFreezePaneLayout(freezeConfig!, config, dims);
-    
+    const layout = calculateFreezePaneLayout(freezeConfig!, effectiveConfig, dims);
+
     const frozenColsX = rowHeaderWidth;
     const frozenRowsY = colHeaderHeight;
     const scrollableX = rowHeaderWidth + layout.frozenColsWidth;
     const scrollableY = colHeaderHeight + layout.frozenRowsHeight;
     const scrollableWidth = width - scrollableX;
     const scrollableHeight = height - scrollableY;
-    
-    const scrollableRange = calculateScrollableRange(viewport, freezeConfig!, config, width, height, dims);
+
+    const scrollableRange = calculateScrollableRange(viewport, freezeConfig!, effectiveConfig, width, height, dims);
     if (scrollableWidth > 0 && scrollableHeight > 0) {
       renderZone(state, scrollableRange, scrollableX, scrollableY, scrollableWidth, scrollableHeight);
     }
-    
+
     if (hasFreezeCols) {
-      const leftRange = calculateFrozenLeftRange(viewport, freezeConfig!, config, width, height, dims);
+      const leftRange = calculateFrozenLeftRange(viewport, freezeConfig!, effectiveConfig, width, height, dims);
       if (leftRange && scrollableHeight > 0) {
         renderZone(state, leftRange, frozenColsX, scrollableY, layout.frozenColsWidth, scrollableHeight);
       }
     }
-    
+
     if (hasFreezeRows) {
-      const topRange = calculateFrozenTopRange(viewport, freezeConfig!, config, width, height, dims);
+      const topRange = calculateFrozenTopRange(viewport, freezeConfig!, effectiveConfig, width, height, dims);
       if (topRange && scrollableWidth > 0) {
         renderZone(state, topRange, scrollableX, frozenRowsY, scrollableWidth, layout.frozenRowsHeight);
       }
     }
-    
+
     if (hasFreezeRows && hasFreezeCols) {
-      const topLeftRange = calculateFrozenTopLeftRange(freezeConfig!, config, width, height, dims);
+      const topLeftRange = calculateFrozenTopLeftRange(freezeConfig!, effectiveConfig, width, height, dims);
       if (topLeftRange) {
         renderZone(state, topLeftRange, frozenColsX, frozenRowsY, layout.frozenColsWidth, layout.frozenRowsHeight);
       }
@@ -797,7 +812,9 @@ export function renderGrid(
     }
     
   } else if (!hasSplitRows && !hasSplitCols) {
-    drawGridLines(state);
+    if (displayGridlines !== false) {
+      drawGridLines(state);
+    }
     drawCellText(state);
   }
 
@@ -857,7 +874,7 @@ export function renderGrid(
       ctx.save();
       ctx.translate(animOverlayOffsetX, animOverlayOffsetY);
     }
-    renderer.render({ ctx, region, config, viewport, dimensions: dims, canvasWidth: width, canvasHeight: height });
+    renderer.render({ ctx, region, config: effectiveConfig, viewport, dimensions: dims, canvasWidth: width, canvasHeight: height });
     if (needsOffset) {
       ctx.restore();
     }
@@ -890,18 +907,20 @@ export function renderGrid(
     }
   }
 
-  drawColumnHeaders(state);
-  drawRowHeaders(state);
-  drawCorner(state);
+  if (displayHeadings !== false) {
+    drawColumnHeaders(state);
+    drawRowHeaders(state);
+    drawCorner(state);
+  }
 
   // Post-header renderers: draw on top of all headers (e.g. outline bar)
   for (const renderer of postHeaderRenderers) {
-    renderer(ctx, config, viewport, dims, width, height);
+    renderer(ctx, effectiveConfig, viewport, dims, width, height);
   }
 
   // Page Layout View: draw page boundaries, margins, and header/footer areas
   if (viewMode === "pageLayout" && pageSetup) {
-    drawPageLayoutOverlay(ctx, config, viewport, dims, width, height, pageSetup);
+    drawPageLayoutOverlay(ctx, effectiveConfig, viewport, dims, width, height, pageSetup);
   }
 }
 

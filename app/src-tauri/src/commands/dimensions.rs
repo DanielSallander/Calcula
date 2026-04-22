@@ -1,7 +1,7 @@
 //! FILENAME: app/src-tauri/src/commands/dimensions.rs
 // PURPOSE: Managing row heights and column widths.
 
-use crate::api_types::DimensionData;
+use crate::api_types::{DefaultDimensions, DimensionData};
 use crate::persistence::FileState;
 use crate::AppState;
 use tauri::State;
@@ -82,4 +82,41 @@ pub fn get_all_row_heights(state: State<AppState>) -> Vec<DimensionData> {
         .iter()
         .map(|(&index, &size)| DimensionData { index, size, dimension_type: "row".to_string() })
         .collect()
+}
+
+/// Get the default row height and column width.
+#[tauri::command]
+pub fn get_default_dimensions(state: State<AppState>) -> DefaultDimensions {
+    let row_h = *state.default_row_height.lock().unwrap();
+    let col_w = *state.default_column_width.lock().unwrap();
+    DefaultDimensions {
+        default_row_height: row_h,
+        default_column_width: col_w,
+    }
+}
+
+/// Set the default row height.
+#[tauri::command]
+pub fn set_default_row_height(state: State<AppState>, file_state: State<FileState>, height: f64) -> DefaultDimensions {
+    let clamped = if height < 1.0 { 1.0 } else { height };
+    *state.default_row_height.lock().unwrap() = clamped;
+    if let Ok(mut modified) = file_state.is_modified.lock() { *modified = true; }
+    let col_w = *state.default_column_width.lock().unwrap();
+    DefaultDimensions {
+        default_row_height: clamped,
+        default_column_width: col_w,
+    }
+}
+
+/// Set the default column width.
+#[tauri::command]
+pub fn set_default_column_width(state: State<AppState>, file_state: State<FileState>, width: f64) -> DefaultDimensions {
+    let clamped = if width < 1.0 { 1.0 } else { width };
+    *state.default_column_width.lock().unwrap() = clamped;
+    if let Ok(mut modified) = file_state.is_modified.lock() { *modified = true; }
+    let row_h = *state.default_row_height.lock().unwrap();
+    DefaultDimensions {
+        default_row_height: row_h,
+        default_column_width: clamped,
+    }
 }

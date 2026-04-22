@@ -18,6 +18,14 @@ export interface IStyleOverride {
   strikethrough?: boolean;
   fontSize?: number;
   fontFamily?: string;
+  borderTopColor?: string;
+  borderTopStyle?: string;
+  borderBottomColor?: string;
+  borderBottomStyle?: string;
+  borderLeftColor?: string;
+  borderLeftStyle?: string;
+  borderRightColor?: string;
+  borderRightStyle?: string;
 }
 
 /** Cell coordinates passed to interceptors */

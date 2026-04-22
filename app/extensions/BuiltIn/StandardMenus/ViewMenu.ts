@@ -203,6 +203,26 @@ export function useViewMenu(): { menu: MenuDefinition; handlers: ViewMenuHandler
     emitAppEvent(AppEvents.GRID_REFRESH);
   }, [gridState.displayZeros]);
 
+  // Display Gridlines handler
+  const handleToggleDisplayGridlines = useCallback(() => {
+    const newValue = !gridState.displayGridlines;
+    emitAppEvent(AppEvents.DISPLAY_GRIDLINES_TOGGLED, { displayGridlines: newValue });
+    emitAppEvent(AppEvents.GRID_REFRESH);
+  }, [gridState.displayGridlines]);
+
+  // Display Headings handler
+  const handleToggleDisplayHeadings = useCallback(() => {
+    const newValue = !gridState.displayHeadings;
+    emitAppEvent(AppEvents.DISPLAY_HEADINGS_TOGGLED, { displayHeadings: newValue });
+    emitAppEvent(AppEvents.GRID_REFRESH);
+  }, [gridState.displayHeadings]);
+
+  // Display Formula Bar handler
+  const handleToggleDisplayFormulaBar = useCallback(() => {
+    const newValue = !gridState.displayFormulaBar;
+    emitAppEvent(AppEvents.DISPLAY_FORMULA_BAR_TOGGLED, { displayFormulaBar: newValue });
+  }, [gridState.displayFormulaBar]);
+
   // Activity Bar state
   const isActivityBarOpen = useIsActivityBarOpen();
   const activeActivityViewId = useActiveActivityViewId();
@@ -362,6 +382,30 @@ export function useViewMenu(): { menu: MenuDefinition; handlers: ViewMenuHandler
     icon: IconDisplayZeros,
     action: handleToggleDisplayZeros,
     checked: gridState.displayZeros,
+  });
+
+  // Display Gridlines
+  items.push({
+    id: 'view.displayGridlines',
+    label: 'Gridlines',
+    action: handleToggleDisplayGridlines,
+    checked: gridState.displayGridlines !== false,
+  });
+
+  // Display Headings
+  items.push({
+    id: 'view.displayHeadings',
+    label: 'Headings',
+    action: handleToggleDisplayHeadings,
+    checked: gridState.displayHeadings !== false,
+  });
+
+  // Display Formula Bar
+  items.push({
+    id: 'view.displayFormulaBar',
+    label: 'Formula Bar',
+    action: handleToggleDisplayFormulaBar,
+    checked: gridState.displayFormulaBar !== false,
   });
 
   const menu: MenuDefinition = {

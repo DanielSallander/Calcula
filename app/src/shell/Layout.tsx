@@ -27,11 +27,17 @@ import {
   setViewMode,
   setShowFormulas,
   setDisplayZeros,
+  setDisplayGridlines,
+  setDisplayHeadings,
+  setDisplayFormulaBar,
   ExtensionRegistry,
   AppEvents,
   onAppEvent,
+  emitAppEvent,
 } from "../api";
-import { updateWindowTitle } from "../core/lib/file-api";
+import { updateWindowTitle, isFileModified, saveFile } from "../core/lib/file-api";
+import { getCurrentWindow } from "@tauri-apps/api/window";
+import { ask } from "@tauri-apps/plugin-dialog";
 import type { ViewMode } from "../core/types";
 // Extension management
 import { useExtensionInitializer, useExtensions } from "./hooks/useExtensions";
@@ -170,6 +176,36 @@ function LayoutInner(): React.ReactElement {
     return cleanup;
   }, [dispatch]);
 
+  // Bridge: sync display gridlines mode from API events into Core state.
+  useEffect(() => {
+    const cleanup = onAppEvent<{
+      displayGridlines: boolean;
+    }>(AppEvents.DISPLAY_GRIDLINES_TOGGLED, (detail) => {
+      dispatch(setDisplayGridlines(detail.displayGridlines));
+    });
+    return cleanup;
+  }, [dispatch]);
+
+  // Bridge: sync display headings mode from API events into Core state.
+  useEffect(() => {
+    const cleanup = onAppEvent<{
+      displayHeadings: boolean;
+    }>(AppEvents.DISPLAY_HEADINGS_TOGGLED, (detail) => {
+      dispatch(setDisplayHeadings(detail.displayHeadings));
+    });
+    return cleanup;
+  }, [dispatch]);
+
+  // Bridge: sync display formula bar mode from API events into Core state.
+  useEffect(() => {
+    const cleanup = onAppEvent<{
+      displayFormulaBar: boolean;
+    }>(AppEvents.DISPLAY_FORMULA_BAR_TOGGLED, (detail) => {
+      dispatch(setDisplayFormulaBar(detail.displayFormulaBar));
+    });
+    return cleanup;
+  }, [dispatch]);
+
   // Window title tracking: update on cells-updated, rows/cols inserted/deleted, and dirty state changes.
   useEffect(() => {
     // Set initial title on mount
@@ -184,6 +220,48 @@ function LayoutInner(): React.ReactElement {
       onAppEvent(AppEvents.DIRTY_STATE_CHANGED, () => updateWindowTitle()),
     ];
     return () => cleanups.forEach((fn) => fn());
+  }, []);
+
+  // Window close handler: emit BEFORE_CLOSE and prompt for unsaved changes.
+  useEffect(() => {
+    let unlisten: (() => void) | undefined;
+
+    getCurrentWindow()
+      .onCloseRequested(async (event) => {
+        // Emit BEFORE_CLOSE so extensions can prepare (e.g., persist state)
+        emitAppEvent(AppEvents.BEFORE_CLOSE);
+
+        // Check for unsaved changes and prompt the user
+        try {
+          const dirty = await isFileModified();
+          if (dirty) {
+            const shouldSave = await ask(
+              "Do you want to save changes before closing?",
+              {
+                title: "Calcula",
+                kind: "warning",
+                okLabel: "Save",
+                cancelLabel: "Don't Save",
+              }
+            );
+
+            if (shouldSave) {
+              await saveFile();
+            }
+          }
+        } catch (error) {
+          // If checking dirty state or saving fails, still allow close
+          console.error("[Layout] Error during close handler:", error);
+        }
+        // Allow the window to close (don't call event.preventDefault())
+      })
+      .then((fn) => {
+        unlisten = fn;
+      });
+
+    return () => {
+      if (unlisten) unlisten();
+    };
   }, []);
 
   // DEV ONLY: Load mock data on mount if environment variable is set
@@ -220,8 +298,8 @@ function LayoutInner(): React.ReactElement {
       {/* Ribbon Area */}
       <RibbonContainer />
 
-      {/* Formula Bar */}
-      <FormulaBar />
+      {/* Formula Bar (hidden when displayFormulaBar is false) */}
+      {state.displayFormulaBar !== false && <FormulaBar />}
 
       {/* Main Content Area - Activity Bar + Side Panel + Spreadsheet + Task Pane */}
       <div

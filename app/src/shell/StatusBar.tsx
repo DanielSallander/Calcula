@@ -8,6 +8,7 @@ import {
   getStatusBarItems,
   subscribeToStatusBar,
   emitAppEvent,
+  onAppEvent,
   AppEvents,
   type StatusBarItemDefinition,
 } from "../api";
@@ -19,6 +20,7 @@ interface StatusBarProps {
 
 export function StatusBar(_props: StatusBarProps): React.ReactElement {
   const [items, setItems] = useState<StatusBarItemDefinition[]>(() => getStatusBarItems());
+  const [customText, setCustomText] = useState<string | null>(null);
 
   const refresh = useCallback(() => {
     setItems(getStatusBarItems());
@@ -27,6 +29,13 @@ export function StatusBar(_props: StatusBarProps): React.ReactElement {
   useEffect(() => {
     return subscribeToStatusBar(refresh);
   }, [refresh]);
+
+  // Listen for custom status bar text from extensions
+  useEffect(() => {
+    return onAppEvent<{ text: string | null }>(AppEvents.STATUS_BAR_TEXT_CHANGED, (detail) => {
+      setCustomText(detail.text);
+    });
+  }, []);
 
   const leftItems = items.filter((item) => item.alignment === "left");
   const rightItems = items.filter((item) => item.alignment === "right");
@@ -54,7 +63,7 @@ export function StatusBar(_props: StatusBarProps): React.ReactElement {
     >
       {/* Left zone */}
       <div style={{ display: "flex", alignItems: "center", gap: "12px" }}>
-        <span>Ready</span>
+        <span>{customText ?? "Ready"}</span>
         {leftItems.map((item) => (
           <item.component key={item.id} />
         ))}
