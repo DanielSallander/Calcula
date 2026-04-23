@@ -200,8 +200,10 @@ pub struct AppState {
     pub freeze_configs: Mutex<Vec<FreezeConfig>>,
     /// Split window configurations per sheet
     pub split_configs: Mutex<Vec<SplitConfig>>,
-    /// Merged cell regions for the current sheet
+    /// Merged cell regions for the current (active) sheet
     pub merged_regions: Mutex<HashSet<MergedRegion>>,
+    /// Merged cell regions for ALL sheets (swapped on sheet switch)
+    pub all_merged_regions: Mutex<Vec<HashSet<MergedRegion>>>,
     /// Protected regions - cells in these regions cannot be edited directly.
     /// Registered by extensions (e.g., pivot tables, charts).
     pub protected_regions: Mutex<Vec<ProtectedRegion>>,
@@ -342,6 +344,7 @@ pub fn create_app_state() -> AppState {
         freeze_configs: Mutex::new(vec![FreezeConfig::default()]),
         split_configs: Mutex::new(vec![SplitConfig::default()]),
         merged_regions: Mutex::new(HashSet::new()),
+        all_merged_regions: Mutex::new(Vec::new()),
         protected_regions: Mutex::new(Vec::new()),
         named_ranges: Mutex::new(HashMap::new()),
         data_validations: Mutex::new(HashMap::new()),

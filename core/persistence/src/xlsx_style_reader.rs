@@ -134,28 +134,130 @@ pub fn parse_xlsx_styles(path: &Path) -> Option<XlsxStyleData> {
         parse_styles_xml(&styles_xml, &mut data);
     }
 
-    // Parse each sheet's XML for cell style refs, merge cells, dimensions, freeze panes
-    // First find all sheet XML files
-    let mut sheet_paths: Vec<(usize, String)> = Vec::new();
-    for i in 0..archive.len() {
-        if let Ok(entry) = archive.by_index(i) {
-            let name = entry.name().to_string();
-            // Match xl/worksheets/sheet1.xml, sheet2.xml, etc.
-            if let Some(num) = extract_sheet_number(&name) {
-                sheet_paths.push((num, name));
+    // Build logical sheet order → XML path mapping via workbook.xml + rels
+    let logical_sheet_paths = build_sheet_path_mapping(&mut archive);
+
+    if !logical_sheet_paths.is_empty() {
+        // Use the relationship-based mapping (1-based logical index → path)
+        for (logical_idx, sheet_path) in &logical_sheet_paths {
+            if let Ok(sheet_xml) = read_zip_entry(&mut archive, sheet_path) {
+                let meta = parse_sheet_xml(&sheet_xml);
+                data.sheet_meta.insert(*logical_idx, meta);
             }
         }
-    }
-    sheet_paths.sort_by_key(|(n, _)| *n);
+    } else {
+        // Fallback: enumerate sheet XML files by filename number
+        let mut sheet_paths: Vec<(usize, String)> = Vec::new();
+        for i in 0..archive.len() {
+            if let Ok(entry) = archive.by_index(i) {
+                let name = entry.name().to_string();
+                if let Some(num) = extract_sheet_number(&name) {
+                    sheet_paths.push((num, name));
+                }
+            }
+        }
+        sheet_paths.sort_by_key(|(n, _)| *n);
 
-    for (sheet_num, sheet_path) in &sheet_paths {
-        if let Ok(sheet_xml) = read_zip_entry(&mut archive, sheet_path) {
-            let meta = parse_sheet_xml(&sheet_xml);
-            data.sheet_meta.insert(*sheet_num, meta);
+        for (sheet_num, sheet_path) in &sheet_paths {
+            if let Ok(sheet_xml) = read_zip_entry(&mut archive, sheet_path) {
+                let meta = parse_sheet_xml(&sheet_xml);
+                data.sheet_meta.insert(*sheet_num, meta);
+            }
         }
     }
 
     Some(data)
+}
+
+/// Build mapping from logical sheet order (1-based) to sheet XML path
+/// by parsing xl/workbook.xml and xl/_rels/workbook.xml.rels.
+fn build_sheet_path_mapping(
+    archive: &mut zip::ZipArchive<std::fs::File>,
+) -> Vec<(usize, String)> {
+    // Step 1: Parse relationships to get rId → Target path
+    let rels_xml = match read_zip_entry(archive, "xl/_rels/workbook.xml.rels") {
+        Ok(xml) => xml,
+        Err(_) => return Vec::new(),
+    };
+    let mut rid_to_target: HashMap<String, String> = HashMap::new();
+    {
+        let mut reader = Reader::from_str(&rels_xml);
+        reader.trim_text(true);
+        let mut buf = Vec::new();
+        loop {
+            match reader.read_event_into(&mut buf) {
+                Ok(Event::Eof) => break,
+                Ok(Event::Start(ref e)) | Ok(Event::Empty(ref e)) => {
+                    let local = e.local_name();
+                    let tag = std::str::from_utf8(local.as_ref()).unwrap_or("");
+                    if tag == "Relationship" {
+                        let id = get_attr(e, "Id").unwrap_or_default();
+                        let target = get_attr(e, "Target").unwrap_or_default();
+                        let rel_type = get_attr(e, "Type").unwrap_or_default();
+                        if rel_type.contains("worksheet") && !id.is_empty() {
+                            // Target is relative to xl/, e.g., "worksheets/sheet1.xml"
+                            rid_to_target.insert(id, format!("xl/{}", target));
+                        }
+                    }
+                }
+                Err(_) => break,
+                _ => {}
+            }
+            buf.clear();
+        }
+    }
+
+    if rid_to_target.is_empty() {
+        return Vec::new();
+    }
+
+    // Step 2: Parse workbook.xml to get sheet order and rId references
+    let wb_xml = match read_zip_entry(archive, "xl/workbook.xml") {
+        Ok(xml) => xml,
+        Err(_) => return Vec::new(),
+    };
+    let mut result: Vec<(usize, String)> = Vec::new();
+    let mut logical_idx: usize = 0;
+    {
+        let mut reader = Reader::from_str(&wb_xml);
+        reader.trim_text(true);
+        let mut buf = Vec::new();
+        loop {
+            match reader.read_event_into(&mut buf) {
+                Ok(Event::Eof) => break,
+                Ok(Event::Start(ref e)) | Ok(Event::Empty(ref e)) => {
+                    let local = e.local_name();
+                    let tag = std::str::from_utf8(local.as_ref()).unwrap_or("");
+                    if tag == "sheet" {
+                        logical_idx += 1;
+                        // Get r:id attribute (may be "r:id" or just "id" depending on namespace)
+                        let rid = get_attr(e, "r:id")
+                            .or_else(|| {
+                                // Try with namespace prefix variations
+                                for attr in e.attributes().flatten() {
+                                    let key = std::str::from_utf8(attr.key.as_ref()).unwrap_or("");
+                                    if key.ends_with(":id") || key == "r:id" {
+                                        return std::str::from_utf8(&attr.value)
+                                            .ok()
+                                            .map(|s| s.to_string());
+                                    }
+                                }
+                                None
+                            })
+                            .unwrap_or_default();
+                        if let Some(path) = rid_to_target.get(&rid) {
+                            result.push((logical_idx, path.clone()));
+                        }
+                    }
+                }
+                Err(_) => break,
+                _ => {}
+            }
+            buf.clear();
+        }
+    }
+
+    result
 }
 
 /// Read a file entry from the ZIP archive as a UTF-8 string.
@@ -197,7 +299,13 @@ fn parse_styles_xml(xml: &str, data: &mut XlsxStyleData) {
     let mut xf_depth = 0u32;
 
     loop {
-        match reader.read_event_into(&mut buf) {
+        // Read event and track whether it's self-closing (Empty).
+        // Self-closing elements like <xf .../> fire Empty but NOT End,
+        // so container elements must be pushed immediately.
+        let event = reader.read_event_into(&mut buf);
+        let is_empty = matches!(&event, Ok(Event::Empty(_)));
+
+        match event {
             Ok(Event::Eof) => break,
             Ok(Event::Start(ref e)) | Ok(Event::Empty(ref e)) => {
                 let tag = e.local_name();
@@ -227,12 +335,20 @@ fn parse_styles_xml(xml: &str, data: &mut XlsxStyleData) {
                             name: "Calibri".to_string(),
                             ..Default::default()
                         };
+                        // Self-closing <font/> — push immediately
+                        if is_empty {
+                            data.fonts.push(current_font.clone());
+                            current_font = ParsedFont::default();
+                        }
                     }
                     "b" if matches!(context, StyleParseContext::Fonts) => {
-                        current_font.bold = true;
+                        // <b/> or <b val="1"> means bold; <b val="0"> means NOT bold
+                        let val = get_attr(e, "val");
+                        current_font.bold = val.as_deref() != Some("0") && val.as_deref() != Some("false");
                     }
                     "i" if matches!(context, StyleParseContext::Fonts) => {
-                        current_font.italic = true;
+                        let val = get_attr(e, "val");
+                        current_font.italic = val.as_deref() != Some("0") && val.as_deref() != Some("false");
                     }
                     "u" if matches!(context, StyleParseContext::Fonts) => {
                         let val_attr = get_attr(e, "val");
@@ -245,7 +361,8 @@ fn parse_styles_xml(xml: &str, data: &mut XlsxStyleData) {
                         };
                     }
                     "strike" if matches!(context, StyleParseContext::Fonts) => {
-                        current_font.strikethrough = true;
+                        let val = get_attr(e, "val");
+                        current_font.strikethrough = val.as_deref() != Some("0") && val.as_deref() != Some("false");
                     }
                     "sz" if matches!(context, StyleParseContext::Fonts) => {
                         if let Some(v) = get_attr(e, "val") {
@@ -263,11 +380,18 @@ fn parse_styles_xml(xml: &str, data: &mut XlsxStyleData) {
                     "fills" => context = StyleParseContext::Fills,
                     "fill" if matches!(context, StyleParseContext::Fills) => {
                         current_fill = ParsedFill::default();
+                        // Self-closing <fill/> — push immediately
+                        if is_empty {
+                            data.fills.push(current_fill.clone());
+                            current_fill = ParsedFill::default();
+                        }
                     }
                     "patternFill" if matches!(context, StyleParseContext::Fills) => {
                         if let Some(v) = get_attr(e, "patternType") {
                             current_fill.pattern_type = v;
                         }
+                        // Self-closing <patternFill patternType="none"/> is common.
+                        // The fill will be pushed when </fill> or empty <fill/> fires.
                     }
                     "fgColor" if matches!(context, StyleParseContext::Fills) => {
                         current_fill.fg_color = parse_color_element(e);
@@ -278,6 +402,11 @@ fn parse_styles_xml(xml: &str, data: &mut XlsxStyleData) {
                     "borders" => context = StyleParseContext::Borders,
                     "border" if matches!(context, StyleParseContext::Borders) => {
                         current_border = ParsedBorder::default();
+                        // Self-closing <border/> — push immediately
+                        if is_empty {
+                            data.borders.push(current_border.clone());
+                            current_border = ParsedBorder::default();
+                        }
                     }
                     "left" | "right" | "top" | "bottom"
                         if matches!(context, StyleParseContext::Borders) =>
@@ -290,6 +419,10 @@ fn parse_styles_xml(xml: &str, data: &mut XlsxStyleData) {
                             "top" => current_border.top.style = style,
                             "bottom" => current_border.bottom.style = style,
                             _ => {}
+                        }
+                        // Self-closing border edge like <left/> — clear edge context
+                        if is_empty {
+                            current_border_edge.clear();
                         }
                     }
                     "color" if matches!(context, StyleParseContext::Borders)
@@ -346,7 +479,14 @@ fn parse_styles_xml(xml: &str, data: &mut XlsxStyleData) {
                                 _ => {}
                             }
                         }
-                        xf_depth = 1;
+                        // Self-closing <xf .../> — push immediately (no alignment child)
+                        if is_empty {
+                            data.cell_xfs.push(current_xf.clone());
+                            current_xf = ParsedXf::default();
+                            xf_depth = 0;
+                        } else {
+                            xf_depth = 1;
+                        }
                     }
                     "alignment" if in_cell_xfs && xf_depth > 0 => {
                         for attr in e.attributes().flatten() {
@@ -704,15 +844,18 @@ fn indexed_color(idx: u32) -> Color {
 
 /// Resolve a theme color index (0-based from OOXML) to an approximate RGB color.
 /// Uses the default Office theme as fallback. Tint is applied.
+///
+/// IMPORTANT: OOXML theme indices 0-3 are swapped relative to the clrScheme order.
+/// The theme XML defines [dk1, lt1, dk2, lt2, accent1..6, hlink, folHlink],
+/// but the OOXML theme index mapping is:
+///   0 → lt1 (light background), 1 → dk1 (dark text),
+///   2 → lt2 (light accent bg), 3 → dk2 (dark accent text)
 fn resolve_theme_color(theme_idx: u32, tint: f64) -> Color {
-    // Default Office theme colors (the 12 standard slots):
-    // 0=Dark1(black), 1=Light1(white), 2=Dark2(dark gray), 3=Light2(light beige),
-    // 4-9=Accent1-6, 10=Hyperlink, 11=FollowedHyperlink
     let base = match theme_idx {
-        0 => Color::new(0, 0, 0),         // dk1
-        1 => Color::new(255, 255, 255),   // lt1
-        2 => Color::new(68, 84, 106),     // dk2
-        3 => Color::new(232, 232, 232),   // lt2
+        0 => Color::new(255, 255, 255),   // lt1 (OOXML index 0 = light 1)
+        1 => Color::new(0, 0, 0),         // dk1 (OOXML index 1 = dark 1)
+        2 => Color::new(232, 232, 232),   // lt2 (OOXML index 2 = light 2)
+        3 => Color::new(68, 84, 106),     // dk2 (OOXML index 3 = dark 2)
         4 => Color::new(68, 114, 196),    // accent1
         5 => Color::new(237, 125, 49),    // accent2
         6 => Color::new(165, 165, 165),   // accent3
@@ -800,7 +943,8 @@ pub fn xf_to_cell_style(
 ) -> CellStyle {
     let mut style = CellStyle::new();
 
-    // Font
+    // Font — always apply from the XF record's fontId.
+    // In cellXfs, the fontId IS the definitive font for the cell.
     if let Some(font) = fonts.get(xf.font_id) {
         style.font.bold = font.bold;
         style.font.italic = font.italic;
@@ -880,13 +1024,15 @@ fn convert_fill(fill: &ParsedFill) -> Fill {
             }
         }
         "none" | "" => Fill::None,
+        // gray125 is Excel's "default empty fill" placeholder (fill index 1).
+        // It's not meant to produce visible coloring — treat as no fill.
+        "gray125" | "gray0625" => Fill::None,
         // Map Excel gray patterns
         pattern_name => {
             let pattern_type = match pattern_name {
                 "darkGray" => PatternType::DarkGray,
                 "mediumGray" => PatternType::MediumGray,
                 "lightGray" => PatternType::LightGray,
-                "gray125" | "gray0625" => PatternType::Gray125,
                 "darkHorizontal" => PatternType::DarkHorizontal,
                 "darkVertical" => PatternType::DarkVertical,
                 "darkDown" => PatternType::DarkDown,

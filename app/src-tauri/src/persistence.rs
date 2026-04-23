@@ -811,17 +811,25 @@ pub fn open_file(
             sheet_visibility.push(sheet.visibility.clone());
         }
 
-        // ---- Merged regions for the active sheet ----
+        // ---- Merged regions for ALL sheets ----
         let mut merged_regions = state.merged_regions.lock().map_err(|e| e.to_string())?;
         merged_regions.clear();
-        let active_sheet_data = &workbook.sheets[active_idx];
-        for mr in &active_sheet_data.merged_regions {
-            merged_regions.insert(crate::api_types::MergedRegion {
-                start_row: mr.start_row,
-                start_col: mr.start_col,
-                end_row: mr.end_row,
-                end_col: mr.end_col,
-            });
+        let mut all_merged = state.all_merged_regions.lock().map_err(|e| e.to_string())?;
+        all_merged.clear();
+        for (sheet_idx, sheet) in workbook.sheets.iter().enumerate() {
+            let mut sheet_merges = std::collections::HashSet::new();
+            for mr in &sheet.merged_regions {
+                sheet_merges.insert(crate::api_types::MergedRegion {
+                    start_row: mr.start_row,
+                    start_col: mr.start_col,
+                    end_row: mr.end_row,
+                    end_col: mr.end_col,
+                });
+            }
+            if sheet_idx == active_idx {
+                *merged_regions = sheet_merges.clone();
+            }
+            all_merged.push(sheet_merges);
         }
 
         // ---- Page setups for all sheets ----

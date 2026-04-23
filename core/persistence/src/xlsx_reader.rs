@@ -92,8 +92,16 @@ pub fn load_xlsx(path: &Path) -> Result<Workbook, PersistenceError> {
 
         let mut cells = HashMap::new();
 
+        // Calamine Range may not start at (0,0) — get the offset
+        let range_start = range.start().unwrap_or((0, 0));
+        let start_row_offset = range_start.0 as u32;
+        let start_col_offset = range_start.1 as u32;
+
         for (row_idx, row) in range.rows().enumerate() {
+            let actual_row = start_row_offset + row_idx as u32;
             for (col_idx, cell) in row.iter().enumerate() {
+                let actual_col = start_col_offset + col_idx as u32;
+
                 let saved_value = match cell {
                     Data::Empty => continue,
                     Data::String(s) => SavedCellValue::Text(s.clone()),
@@ -107,6 +115,7 @@ pub fn load_xlsx(path: &Path) -> Result<Workbook, PersistenceError> {
                 };
 
                 // Try to get formula if available
+                // Range::get() uses relative (0-based) coordinates
                 let formula = workbook
                     .worksheet_formula(sheet_name)
                     .ok()
@@ -116,15 +125,16 @@ pub fn load_xlsx(path: &Path) -> Result<Workbook, PersistenceError> {
                             .map(|f| format!("={}", f))
                     });
 
-                // Look up the XLSX style index for this cell, then map to calcula style index
+                // Look up the XLSX style index for this cell (using absolute coords
+                // since the XML parser stores absolute positions)
                 let style_index = sheet_meta
-                    .and_then(|m| m.cell_styles.get(&(row_idx as u32, col_idx as u32)))
+                    .and_then(|m| m.cell_styles.get(&(actual_row, actual_col)))
                     .and_then(|xlsx_xf| xf_to_calcula.get(xlsx_xf))
                     .copied()
                     .unwrap_or(0);
 
                 cells.insert(
-                    (row_idx as u32, col_idx as u32),
+                    (actual_row, actual_col),
                     SavedCell {
                         value: saved_value,
                         formula,

@@ -3,7 +3,7 @@
 // CONTEXT: Provides Tauri commands for creating, switching, renaming, deleting,
 //          moving, copying, hiding/unhiding sheets, tab colors, and freeze panes.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use tauri::State;
 use crate::AppState;
 use crate::pivot::types::PivotState;
@@ -126,6 +126,8 @@ pub fn set_active_sheet(state: State<AppState>, index: usize) -> Result<SheetsRe
     let mut row_heights = state.row_heights.lock().unwrap();
     let mut all_column_widths = state.all_column_widths.lock().unwrap();
     let mut all_row_heights = state.all_row_heights.lock().unwrap();
+    let mut merged_regions = state.merged_regions.lock().unwrap();
+    let mut all_merged_regions = state.all_merged_regions.lock().unwrap();
 
     if index >= sheet_names.len() {
         return Err(format!("Sheet index {} out of range", index));
@@ -141,6 +143,9 @@ pub fn set_active_sheet(state: State<AppState>, index: usize) -> Result<SheetsRe
     }
     while all_row_heights.len() <= index {
         all_row_heights.push(HashMap::new());
+    }
+    while all_merged_regions.len() <= index {
+        all_merged_regions.push(HashSet::new());
     }
 
     let old_index = *active_sheet;
@@ -160,6 +165,12 @@ pub fn set_active_sheet(state: State<AppState>, index: usize) -> Result<SheetsRe
         }
         *column_widths = std::mem::take(&mut all_column_widths[index]);
         *row_heights = std::mem::take(&mut all_row_heights[index]);
+
+        // Swap merged regions: save current to old sheet, load from new sheet
+        if old_index < all_merged_regions.len() {
+            all_merged_regions[old_index] = std::mem::take(&mut *merged_regions);
+        }
+        *merged_regions = std::mem::take(&mut all_merged_regions[index]);
     }
 
     *active_sheet = index;
@@ -229,9 +240,19 @@ pub fn add_sheet(state: State<AppState>, name: Option<String>) -> Result<SheetsR
     }
     tab_colors.push(String::new());
     sheet_visibility.push("visible".to_string());
-    // New sheet gets empty dimensions
+    // New sheet gets empty dimensions and merged regions
     all_column_widths.push(HashMap::new());
     all_row_heights.push(HashMap::new());
+    {
+        let mut all_merged = state.all_merged_regions.lock().unwrap();
+        // Save current sheet's merged regions before switching
+        let mut current_merged = state.merged_regions.lock().unwrap();
+        while all_merged.len() <= old_index {
+            all_merged.push(HashSet::new());
+        }
+        all_merged[old_index] = std::mem::take(&mut *current_merged);
+        all_merged.push(HashSet::new());
+    }
 
     let new_index = sheet_names.len() - 1;
     *active_sheet = new_index;
@@ -398,6 +419,18 @@ pub fn delete_sheet(state: State<AppState>, pivot_state: State<'_, PivotState>, 
     if index < all_row_heights.len() {
         all_row_heights.remove(index);
     }
+    {
+        let mut all_merged = state.all_merged_regions.lock().unwrap();
+        // Save current merged regions before deleting
+        let mut current_merged = state.merged_regions.lock().unwrap();
+        while all_merged.len() <= old_active {
+            all_merged.push(HashSet::new());
+        }
+        all_merged[old_active] = std::mem::take(&mut *current_merged);
+        if index < all_merged.len() {
+            all_merged.remove(index);
+        }
+    }
 
     let new_active = if old_active >= sheet_names.len() {
         sheet_names.len() - 1
@@ -427,6 +460,14 @@ pub fn delete_sheet(state: State<AppState>, pivot_state: State<'_, PivotState>, 
     }
     if new_active < all_row_heights.len() {
         *row_heights = std::mem::take(&mut all_row_heights[new_active]);
+    }
+    // Load new active sheet's merged regions
+    {
+        let mut all_merged = state.all_merged_regions.lock().unwrap();
+        let mut current_merged = state.merged_regions.lock().unwrap();
+        if new_active < all_merged.len() {
+            *current_merged = std::mem::take(&mut all_merged[new_active]);
+        }
     }
 
     Ok(SheetsResult {
@@ -643,6 +684,13 @@ pub fn move_sheet(
     rotate_element(&mut *all_column_widths, from_index, to_index);
     rotate_element(&mut *all_row_heights, from_index, to_index);
     rotate_element(&mut *page_setups, from_index, to_index);
+    {
+        let mut all_merged = state.all_merged_regions.lock().unwrap();
+        let mut current_merged = state.merged_regions.lock().unwrap();
+        ensure_vec_len(&mut all_merged, count);
+        all_merged[old_active] = std::mem::take(&mut *current_merged);
+        rotate_element(&mut *all_merged, from_index, to_index);
+    }
 
     // Update active_sheet to follow the moved sheet
     let new_active = if old_active == from_index {
@@ -667,6 +715,13 @@ pub fn move_sheet(
     *current_grid = grids[new_active].clone();
     *column_widths = std::mem::take(&mut all_column_widths[new_active]);
     *row_heights = std::mem::take(&mut all_row_heights[new_active]);
+    {
+        let mut all_merged = state.all_merged_regions.lock().unwrap();
+        let mut current_merged = state.merged_regions.lock().unwrap();
+        if new_active < all_merged.len() {
+            *current_merged = std::mem::take(&mut all_merged[new_active]);
+        }
+    }
 
     Ok(SheetsResult {
         sheets: build_sheet_list(&sheet_names, &freeze_configs, &tab_colors, &sheet_visibility),
@@ -765,6 +820,14 @@ pub fn copy_sheet(
     all_column_widths.insert(insert_at, cloned_widths);
     all_row_heights.insert(insert_at, cloned_heights);
     page_setups.insert(insert_at, cloned_page_setup);
+    {
+        let mut all_merged = state.all_merged_regions.lock().unwrap();
+        let mut current_merged = state.merged_regions.lock().unwrap();
+        ensure_vec_len(&mut all_merged, count);
+        all_merged[old_active] = std::mem::take(&mut *current_merged);
+        let cloned_merged = all_merged[source_index].clone();
+        all_merged.insert(insert_at, cloned_merged);
+    }
 
     // Switch to the new copy
     let new_index = insert_at;
@@ -772,6 +835,13 @@ pub fn copy_sheet(
     *current_grid = cloned_grid;
     *column_widths = std::mem::take(&mut all_column_widths[new_index]);
     *row_heights = std::mem::take(&mut all_row_heights[new_index]);
+    {
+        let mut all_merged = state.all_merged_regions.lock().unwrap();
+        let mut current_merged = state.merged_regions.lock().unwrap();
+        if new_index < all_merged.len() {
+            *current_merged = std::mem::take(&mut all_merged[new_index]);
+        }
+    }
 
     Ok(SheetsResult {
         sheets: build_sheet_list(&sheet_names, &freeze_configs, &tab_colors, &sheet_visibility),

@@ -632,9 +632,16 @@ export function drawCellText(state: RenderState): void {
 
       const isEmpty = displayValue === "";
 
-      // For empty cells with default style, skip entirely (unless interceptors or decorations exist)
+      // Get merge spans BEFORE the empty-cell-skip check.
+      // Merged master cells must never be skipped even if empty,
+      // because they need to draw backgrounds/borders and mark slave cells.
+      const rowSpan = (cell as { rowSpan?: number }).rowSpan ?? 1;
+      const colSpan = (cell as { colSpan?: number }).colSpan ?? 1;
+      const isMergedMaster = rowSpan > 1 || colSpan > 1;
+
+      // For empty cells with default style, skip entirely (unless merged, interceptors, or decorations)
       const hasDecorations = hasCellDecorations();
-      if (isEmpty) {
+      if (isEmpty && !isMergedMaster) {
         const si = cell.styleIndex ?? 0;
         if (si === 0 && !hasDecorations && !useInterceptors) {
           baseX += colWidth;
@@ -657,10 +664,6 @@ export function drawCellText(state: RenderState): void {
           }
         }
       }
-
-      // Get merge spans
-      const rowSpan = (cell as { rowSpan?: number }).rowSpan ?? 1;
-      const colSpan = (cell as { colSpan?: number }).colSpan ?? 1;
 
       // Calculate actual cell dimensions (may span multiple cells)
       const actualWidth = colSpan > 1
@@ -699,8 +702,8 @@ export function drawCellText(state: RenderState): void {
       const indentLevel = (baseCellStyle as { indent?: number }).indent ?? 0;
       const indentOffset = indentLevel * 8;
 
-      // Available width for text (reduced by indent)
-      const availableWidth = cellRight - cellLeft - paddingX * 2 - indentOffset;
+      // Available width for text (reduced by indent) — may be extended by overflow later
+      let availableWidth = cellRight - cellLeft - paddingX * 2 - indentOffset;
 
       if (availableWidth <= 0) {
         baseX += colWidth;
@@ -804,10 +807,46 @@ export function drawCellText(state: RenderState): void {
         }
       }
 
-      // Set up clipping region to prevent text overflow
+      // Calculate overflow width for text that extends beyond the cell.
+      // When a cell's text is wider than the column and:
+      // - not wrapping, not merged, left/general aligned
+      // - adjacent cells to the right are empty
+      // the text visually overflows into those cells (like Excel).
+      let overflowRight = cellRight;
+      const shouldWrapEarly = baseCellStyle.wrapText === true;
+      if (!shouldWrapEarly && !isMergedMaster && (textAlign === "left" || textAlign === "center")) {
+        // Measure text to see if it exceeds cell width
+        const testFont = `${fontStyle} ${fontWeight} ${fontSize}px ${fontFamily}`;
+        ctx.font = testFont;
+        const textWidth = ctx.measureText(displayValue).width + paddingX * 2 + indentOffset;
+        if (textWidth > actualWidth) {
+          // Extend overflow into adjacent empty columns
+          let overflowCol = col + 1;
+          let overflowW = actualWidth;
+          while (overflowW < textWidth && overflowCol < totalCols) {
+            const adjKey = cellKey(row, overflowCol);
+            const adjCell = cells.get(adjKey);
+            // Stop if adjacent cell has content
+            if (adjCell && (adjCell.display ?? "") !== "") break;
+            const adjWidth = getColumnWidth(overflowCol, config, dimensions);
+            overflowW += adjWidth;
+            // Mark overflowed cells so they won't draw their own content
+            drawnCells.add(adjKey);
+            overflowCol++;
+          }
+          overflowRight = Math.min(x + overflowW, width);
+        }
+      }
+
+      // Update available width if overflow extended the region
+      if (overflowRight > cellRight) {
+        availableWidth = overflowRight - cellLeft - paddingX * 2 - indentOffset;
+      }
+
+      // Set up clipping region (extended for text overflow)
       ctx.save();
       ctx.beginPath();
-      ctx.rect(cellLeft, cellTop, cellRight - cellLeft, cellBottom - cellTop);
+      ctx.rect(cellLeft, cellTop, overflowRight - cellLeft, cellBottom - cellTop);
       ctx.clip();
 
       // Draw background: use advanced fill if present, otherwise solid color
