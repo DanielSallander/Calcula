@@ -153,6 +153,21 @@ function saveUserOverrides(): void {
 // Key Combo Parsing & Matching
 // ============================================================================
 
+/** Cache of parsed combos to avoid repeated string splitting on every keypress. */
+const comboCache = new Map<string, ParsedCombo>();
+
+/**
+ * Get a parsed combo from cache, or parse and cache it.
+ */
+function getCachedParsedCombo(combo: string): ParsedCombo {
+  let parsed = comboCache.get(combo);
+  if (!parsed) {
+    parsed = parseCombo(combo);
+    comboCache.set(combo, parsed);
+  }
+  return parsed;
+}
+
 /**
  * Parse a combo string like "Ctrl+Shift+B" into structured form.
  * The last token is always the key, everything before is modifiers.
@@ -175,9 +190,10 @@ export function parseCombo(combo: string): ParsedCombo {
 
 /**
  * Check if a KeyboardEvent matches a combo string.
+ * Uses cached parsed combos to avoid repeated string splitting.
  */
 export function matchesEvent(combo: string, event: KeyboardEvent): boolean {
-  const parsed = parseCombo(combo);
+  const parsed = getCachedParsedCombo(combo);
   if (parsed.ctrl !== event.ctrlKey) return false;
   if (parsed.shift !== event.shiftKey) return false;
   if (parsed.alt !== event.altKey) return false;
@@ -190,7 +206,7 @@ export function matchesEvent(combo: string, event: KeyboardEvent): boolean {
  * Normalizes casing: "ctrl+shift+b" -> "Ctrl+Shift+B"
  */
 export function formatCombo(combo: string): string {
-  const parsed = parseCombo(combo);
+  const parsed = getCachedParsedCombo(combo);
   const parts: string[] = [];
   if (parsed.ctrl) parts.push("Ctrl");
   if (parsed.alt) parts.push("Alt");
@@ -439,13 +455,13 @@ export function getAvailableCommands(): string[] {
  * Find conflicts for a given combo (excluding a specific binding id).
  */
 export function findConflicts(combo: string, excludeId?: string): KeyBinding[] {
-  const parsed = parseCombo(combo);
+  const parsed = getCachedParsedCombo(combo);
   const conflicts: KeyBinding[] = [];
 
   registry.forEach((binding) => {
     if (excludeId && binding.id === excludeId) return;
     const effectiveCombo = getEffectiveCombo(binding.id);
-    const otherParsed = parseCombo(effectiveCombo);
+    const otherParsed = getCachedParsedCombo(effectiveCombo);
 
     if (
       parsed.key.toLowerCase() === otherParsed.key.toLowerCase() &&
@@ -504,6 +520,9 @@ export function subscribeToKeybindingChanges(callback: ChangeListener): () => vo
 }
 
 function notifyChange(): void {
+  // Invalidate parsed combo cache — bindings may have changed
+  comboCache.clear();
+
   changeListeners.forEach((cb) => {
     try {
       cb();

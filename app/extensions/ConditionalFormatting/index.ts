@@ -9,6 +9,7 @@ import {
   cellEvents,
   type OverlayRegistration,
 } from "@api";
+import { getGridStateSnapshot } from "@api/grid";
 
 import {
   refreshRules,
@@ -31,6 +32,26 @@ import { NewRuleDialog } from "./components/NewRuleDialog";
 
 let isActivated = false;
 const cleanupFns: (() => void)[] = [];
+
+// ============================================================================
+// Helpers
+// ============================================================================
+
+/** Read the current viewport bounds from the grid state. */
+function getCurrentViewportBounds(): { startRow: number; startCol: number; endRow: number; endCol: number } {
+  const state = getGridStateSnapshot();
+  if (state) {
+    const vp = state.viewport;
+    return {
+      startRow: vp.startRow,
+      startCol: vp.startCol,
+      endRow: vp.startRow + vp.rowCount,
+      endCol: vp.startCol + vp.colCount,
+    };
+  }
+  // Fallback if state not available yet
+  return { startRow: 0, startCol: 0, endRow: 100, endCol: 30 };
+}
 
 // ============================================================================
 // Lifecycle
@@ -110,11 +131,12 @@ function activate(context: ExtensionContext): void {
   });
   cleanupFns.push(unsubSelection);
 
-  // Sheet changed: reset state and reload
+  // Sheet changed: reset state and reload with actual viewport
   const unsubSheet = context.events.on(AppEvents.SHEET_CHANGED, () => {
     resetState();
+    const vp = getCurrentViewportBounds();
     refreshRules().then(() => {
-      evaluateViewport(0, 0, 100, 30);
+      evaluateViewport(vp.startRow, vp.startCol, vp.endRow, vp.endCol);
     });
   });
   cleanupFns.push(unsubSheet);
@@ -131,10 +153,17 @@ function activate(context: ExtensionContext): void {
   });
   cleanupFns.push(unsubData);
 
-  // 7. Initial load
+  // Grid refresh (viewport scroll / resize): re-evaluate for new viewport
+  const unsubGrid = context.events.on(AppEvents.GRID_REFRESH, () => {
+    const vp = getCurrentViewportBounds();
+    evaluateViewport(vp.startRow, vp.startCol, vp.endRow, vp.endCol);
+  });
+  cleanupFns.push(unsubGrid);
+
+  // 7. Initial load with actual viewport bounds
   refreshRules().then(() => {
-    // Evaluate a default viewport area on initial load
-    evaluateViewport(0, 0, 100, 30);
+    const vp = getCurrentViewportBounds();
+    evaluateViewport(vp.startRow, vp.startCol, vp.endRow, vp.endCol);
   });
 
   isActivated = true;

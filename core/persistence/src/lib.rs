@@ -5,6 +5,7 @@
 
 mod error;
 mod xlsx_reader;
+mod xlsx_style_reader;
 mod xlsx_writer;
 
 pub use error::PersistenceError;
@@ -16,7 +17,7 @@ use engine::grid::Grid;
 use engine::style::{CellStyle, StyleRegistry};
 use engine::theme::ThemeDefinition;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 // ============================================================================
 // METADATA SHEET NAME (used for persisting Calcula-specific data in XLSX)
@@ -56,6 +57,8 @@ pub struct Workbook {
     pub properties: WorkbookProperties,
     /// Chart entries (opaque JSON blobs)
     pub charts: Vec<SavedChart>,
+    /// Named ranges / defined names
+    pub named_ranges: Vec<SavedNamedRange>,
 }
 
 /// Workbook-level document properties.
@@ -92,6 +95,95 @@ pub struct SavedChart {
     pub spec_json: String,
 }
 
+/// A merged cell region for persistence.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SavedMergedRegion {
+    pub start_row: u32,
+    pub start_col: u32,
+    pub end_row: u32,
+    pub end_col: u32,
+}
+
+/// A named range / defined name for persistence.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SavedNamedRange {
+    /// The name identifier (e.g. "SalesData")
+    pub name: String,
+    /// The formula this name refers to (e.g. "Sheet1!$A$1:$B$10")
+    pub refers_to: String,
+    /// Sheet index for sheet-scoped names, None for workbook-scoped
+    pub sheet_index: Option<usize>,
+}
+
+/// A note/comment attached to a cell for persistence.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SavedNote {
+    pub row: u32,
+    pub col: u32,
+    pub text: String,
+    pub author: String,
+}
+
+/// A hyperlink attached to a cell for persistence.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SavedHyperlink {
+    pub row: u32,
+    pub col: u32,
+    /// The target URL, file path, or internal reference
+    pub target: String,
+    /// Display text (if different from cell value)
+    pub display_text: Option<String>,
+    /// Tooltip text
+    pub tooltip: Option<String>,
+}
+
+/// Page setup / print settings for a sheet.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SavedPageSetup {
+    /// Paper size name: "letter", "a4", "a3", "legal", "tabloid"
+    pub paper_size: String,
+    /// Page orientation: "portrait" or "landscape"
+    pub orientation: String,
+    /// Margins in inches
+    pub margin_top: f64,
+    pub margin_bottom: f64,
+    pub margin_left: f64,
+    pub margin_right: f64,
+    pub margin_header: f64,
+    pub margin_footer: f64,
+    /// Header text
+    pub header: String,
+    /// Footer text
+    pub footer: String,
+    /// Print area (e.g. "A1:F20"), empty = entire sheet
+    pub print_area: String,
+    /// Rows to repeat at top (e.g. "1:2"), empty = none
+    pub print_titles_rows: String,
+    /// Manual row page breaks (0-indexed)
+    pub manual_row_breaks: Vec<u32>,
+    /// Print gridlines
+    pub print_gridlines: bool,
+    /// Center horizontally
+    pub center_horizontally: bool,
+    /// Center vertically
+    pub center_vertically: bool,
+    /// Scaling percentage (100 = no scaling)
+    pub scale: u32,
+    /// Fit to N pages wide (0 = disabled)
+    pub fit_to_width: u32,
+    /// Fit to N pages tall (0 = disabled)
+    pub fit_to_height: u32,
+    /// Page order: "downThenOver" or "overThenDown"
+    pub page_order: String,
+    /// First page number: -1 = auto
+    pub first_page_number: i32,
+}
+
 impl Workbook {
     pub fn new() -> Self {
         Self {
@@ -107,6 +199,7 @@ impl Workbook {
             default_column_width: 100.0,
             properties: WorkbookProperties::default(),
             charts: Vec::new(),
+            named_ranges: Vec::new(),
         }
     }
 
@@ -124,6 +217,7 @@ impl Workbook {
             default_column_width: 100.0,
             properties: WorkbookProperties::default(),
             charts: Vec::new(),
+            named_ranges: Vec::new(),
         }
     }
 }
@@ -146,6 +240,26 @@ pub struct Sheet {
     pub column_widths: HashMap<u32, f64>,
     pub row_heights: HashMap<u32, f64>,
     pub styles: Vec<CellStyle>,
+    /// Merged cell regions
+    pub merged_regions: Vec<SavedMergedRegion>,
+    /// Freeze pane row (rows 0..freeze_row are frozen at top)
+    pub freeze_row: Option<u32>,
+    /// Freeze pane column (cols 0..freeze_col are frozen at left)
+    pub freeze_col: Option<u32>,
+    /// Hidden row indices
+    pub hidden_rows: HashSet<u32>,
+    /// Hidden column indices
+    pub hidden_cols: HashSet<u32>,
+    /// Tab color as CSS hex string (e.g. "#ff0000"). Empty = no color.
+    pub tab_color: String,
+    /// Sheet visibility: "visible", "hidden", or "veryHidden"
+    pub visibility: String,
+    /// Notes/comments attached to cells
+    pub notes: Vec<SavedNote>,
+    /// Hyperlinks attached to cells
+    pub hyperlinks: Vec<SavedHyperlink>,
+    /// Page setup / print settings
+    pub page_setup: Option<SavedPageSetup>,
 }
 
 impl Sheet {
@@ -156,6 +270,16 @@ impl Sheet {
             column_widths: HashMap::new(),
             row_heights: HashMap::new(),
             styles: vec![CellStyle::new()],
+            merged_regions: Vec::new(),
+            freeze_row: None,
+            freeze_col: None,
+            hidden_rows: HashSet::new(),
+            hidden_cols: HashSet::new(),
+            tab_color: String::new(),
+            visibility: "visible".to_string(),
+            notes: Vec::new(),
+            hyperlinks: Vec::new(),
+            page_setup: None,
         }
     }
 
@@ -172,6 +296,16 @@ impl Sheet {
             column_widths: dimensions.column_widths.clone(),
             row_heights: dimensions.row_heights.clone(),
             styles: styles.all_styles().to_vec(),
+            merged_regions: Vec::new(),
+            freeze_row: None,
+            freeze_col: None,
+            hidden_rows: HashSet::new(),
+            hidden_cols: HashSet::new(),
+            tab_color: String::new(),
+            visibility: "visible".to_string(),
+            notes: Vec::new(),
+            hyperlinks: Vec::new(),
+            page_setup: None,
         }
     }
 

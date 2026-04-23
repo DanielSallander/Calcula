@@ -238,6 +238,16 @@ pub fn read_calcula(path: &Path) -> Result<Workbook, FormatError> {
             column_widths: col_widths,
             row_heights: row_heights,
             styles: style_list.clone(),
+            merged_regions: Vec::new(),
+            freeze_row: None,
+            freeze_col: None,
+            hidden_rows: std::collections::HashSet::new(),
+            hidden_cols: std::collections::HashSet::new(),
+            tab_color: String::new(),
+            visibility: "visible".to_string(),
+            notes: Vec::new(),
+            hyperlinks: Vec::new(),
+            page_setup: None,
         });
     }
 
@@ -381,6 +391,7 @@ pub fn read_calcula(path: &Path) -> Result<Workbook, FormatError> {
         default_column_width: manifest.default_column_width,
         properties,
         charts,
+        named_ranges: Vec::new(),
     })
 }
 
@@ -479,6 +490,16 @@ mod tests {
             column_widths: col_widths,
             row_heights: row_heights,
             styles,
+            merged_regions: Vec::new(),
+            freeze_row: None,
+            freeze_col: None,
+            hidden_rows: std::collections::HashSet::new(),
+            hidden_cols: std::collections::HashSet::new(),
+            tab_color: String::new(),
+            visibility: "visible".to_string(),
+            notes: Vec::new(),
+            hyperlinks: Vec::new(),
+            page_setup: None,
         };
 
         Workbook {
@@ -494,6 +515,7 @@ mod tests {
             default_column_width: 100.0,
             properties: WorkbookProperties::default(),
             charts: Vec::new(),
+            named_ranges: Vec::new(),
         }
     }
 

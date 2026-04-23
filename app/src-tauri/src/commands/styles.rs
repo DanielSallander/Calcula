@@ -145,10 +145,16 @@ pub fn apply_formatting(
 
     let mut updated_cells = Vec::new();
     let mut updated_styles = Vec::new();
+    let mut used_style_indices = std::collections::HashSet::new();
 
     // Begin undo transaction for batch formatting
     let cell_count = params.rows.len() * params.cols.len();
     undo_stack.begin_transaction(format!("Format {} cells", cell_count));
+
+    // Optimization: cache computed style index per base style index.
+    // When many cells share the same base style (common case: formatting a selection),
+    // we only compute the new style once per unique base style.
+    let mut style_cache: std::collections::HashMap<usize, usize> = std::collections::HashMap::new();
 
     // Iterate over all row/col combinations from the params
     for row in &params.rows {
@@ -175,7 +181,46 @@ pub fn apply_formatting(
                 )
             };
 
-            // Get base style
+            // Check style cache: if we've already computed the new style for this base, reuse it
+            if let Some(&cached_new_index) = style_cache.get(&old_style_index) {
+                // Fast path: reuse cached style
+                let mut updated_cell = cell;
+                updated_cell.style_index = cached_new_index;
+                grid.set_cell(row, col, updated_cell.clone());
+                if active_sheet < grids.len() {
+                    grids[active_sheet].set_cell(row, col, updated_cell.clone());
+                }
+                undo_stack.record_cell_change(row, col, previous_cell);
+                let new_style = styles.get(cached_new_index);
+                let fmt_result = format_cell_value_with_color(&updated_cell.value, new_style, &locale);
+                let acct_layout = fmt_result.accounting.map(|a| crate::api_types::AccountingLayout {
+                    symbol: a.symbol,
+                    symbol_before: a.symbol_before,
+                    value: a.value,
+                });
+                let merge_info = merged_regions.iter().find(|r| r.start_row == row && r.start_col == col);
+                let (row_span, col_span) = if let Some(region) = merge_info {
+                    (region.end_row - region.start_row + 1, region.end_col - region.start_col + 1)
+                } else {
+                    (1, 1)
+                };
+                updated_cells.push(CellData {
+                    row,
+                    col,
+                    display: fmt_result.text,
+                    display_color: fmt_result.color,
+                    formula: updated_cell.formula,
+                    style_index: cached_new_index,
+                    row_span,
+                    col_span,
+                    sheet_index: None,
+                    rich_text: None,
+                    accounting_layout: acct_layout,
+                });
+                continue;
+            }
+
+            // Slow path: compute new style from base
             let mut new_style = styles.get(old_style_index).clone();
 
             // Apply formatting changes
@@ -293,6 +338,8 @@ pub fn apply_formatting(
 
             // Get or create style index
             let new_style_index = styles.get_or_create(new_style.clone());
+            used_style_indices.insert(new_style_index);
+            style_cache.insert(old_style_index, new_style_index);
 
             // Update cell
             let mut updated_cell = cell;
@@ -340,13 +387,15 @@ pub fn apply_formatting(
     // Commit undo transaction
     undo_stack.commit_transaction();
 
-    // Collect all styles
+    // Collect only the styles that were used/created (not the entire registry)
     let theme = state.theme.lock().unwrap();
-    for (index, style) in styles.all_styles().iter().enumerate() {
-        updated_styles.push(StyleEntry {
-            index,
-            style: StyleData::from_cell_style(style, &theme),
-        });
+    for &index in &used_style_indices {
+        if let Some(style) = styles.all_styles().get(index) {
+            updated_styles.push(StyleEntry {
+                index,
+                style: StyleData::from_cell_style(style, &theme),
+            });
+        }
     }
 
     // Mark workbook as dirty

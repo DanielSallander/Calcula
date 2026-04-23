@@ -5,10 +5,12 @@
 
 import type { ExtensionModule, ExtensionContext } from "@api/contract";
 import { AppEvents, cellEvents } from "@api";
+import { getGridStateSnapshot } from "@api/grid";
 
 import { drawErrorTriangle } from "./rendering/errorTriangleRenderer";
 import {
-  refreshErrorIndicatorsImmediate,
+  refreshErrorIndicators,
+  refreshErrorIndicatorsFromLastViewport,
   resetErrorStore,
 } from "./lib/errorCheckingStore";
 
@@ -18,6 +20,27 @@ import {
 
 let isActivated = false;
 const cleanupFns: (() => void)[] = [];
+
+// ============================================================================
+// Helpers
+// ============================================================================
+
+/**
+ * Read the current viewport bounds from the grid state and trigger
+ * a viewport-scoped error indicator refresh.
+ */
+function refreshFromCurrentViewport(): void {
+  const state = getGridStateSnapshot();
+  if (!state) return;
+
+  const vp = state.viewport;
+  refreshErrorIndicators(
+    vp.startRow,
+    vp.startCol,
+    vp.startRow + vp.rowCount,
+    vp.startCol + vp.colCount,
+  );
+}
 
 // ============================================================================
 // Lifecycle
@@ -41,26 +64,34 @@ function activate(context: ExtensionContext): void {
   cleanupFns.push(unregDecoration);
 
   // 2. Subscribe to cell data changes (edits, formula recalculations)
+  //    Re-evaluate using the last known viewport bounds.
   const unsubCells = cellEvents.subscribe(() => {
-    refreshErrorIndicatorsImmediate();
+    refreshErrorIndicatorsFromLastViewport();
   });
   cleanupFns.push(unsubCells);
 
   // 3. Subscribe to sheet changes
   const unsubSheet = context.events.on(AppEvents.SHEET_CHANGED, () => {
     resetErrorStore();
-    refreshErrorIndicatorsImmediate();
+    refreshFromCurrentViewport();
   });
   cleanupFns.push(unsubSheet);
 
   // 4. Subscribe to data changes (batch operations, paste, fill, etc.)
   const unsubData = context.events.on(AppEvents.DATA_CHANGED, () => {
-    refreshErrorIndicatorsImmediate();
+    refreshErrorIndicatorsFromLastViewport();
   });
   cleanupFns.push(unsubData);
 
-  // 5. Initial load
-  refreshErrorIndicatorsImmediate();
+  // 5. Subscribe to grid refresh (viewport scroll / resize)
+  //    Re-scan the new viewport so indicators appear as the user scrolls.
+  const unsubGrid = context.events.on(AppEvents.GRID_REFRESH, () => {
+    refreshFromCurrentViewport();
+  });
+  cleanupFns.push(unsubGrid);
+
+  // 6. Initial load
+  refreshFromCurrentViewport();
 
   isActivated = true;
   console.log("[ErrorChecking] Activated successfully.");

@@ -110,6 +110,8 @@ import { formatPainterSuite } from "./lib/suites/formatPainter";
 import { subtotalsSuite } from "./lib/suites/subtotals";
 // Phase 21: Excel Gap Features
 import { excelGapFeaturesSuite } from "./lib/suites/excelGapFeatures";
+// Phase 22: Performance Tests
+import { performanceSuite } from "./lib/suites/performance";
 
 // ============================================================================
 // Constants
@@ -319,13 +321,16 @@ function activate(context: ExtensionContext): void {
   // Phase 21: Excel Gap Features
   registerSuite(excelGapFeaturesSuite);
 
+  // Phase 22: Performance Tests
+  registerSuite(performanceSuite);
+
   // Register mock data suite only when launched with prefilled data
   if (import.meta.env.VITE_LOAD_MOCK_DATA === "true") {
     registerSuite(mockDataSuite);
     console.log("[TestRunner] Mock data detected - registered mock data test suite.");
   }
 
-  let suiteCount = 65; // 59 original + 2 (Phase 19) + 3 (Phase 20) + 1 (Phase 21)
+  let suiteCount = 66; // 59 original + 2 (Phase 19) + 3 (Phase 20) + 1 (Phase 21) + 1 (Phase 22)
   if (import.meta.env.VITE_LOAD_MOCK_DATA === "true") suiteCount++;
   isActivated = true;
   console.log(`[TestRunner] Activated with ${suiteCount} built-in test suites.`);

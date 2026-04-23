@@ -610,11 +610,13 @@ version = "0.1.0"
 dependencies = [
  "calamine",
  "engine",
+ "quick-xml",
  "rust_xlsxwriter",
  "serde",
  "serde_json",
  "tempfile",
  "thiserror 1.0.69",
+ "zip",
 ]
 
 [[package]]

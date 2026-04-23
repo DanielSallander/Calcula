@@ -226,3 +226,7 @@ export const AREA_SUBTOTALS = suiteArea(65);
 // Phase 21: Excel Gap Features
 /** Suite 66: Excel Gap Features (row 3800) */
 export const AREA_EXCEL_GAP = suiteArea(66);
+
+// Phase 22: Performance Tests
+/** Suite 67: Performance Tests (row 3850) */
+export const AREA_PERFORMANCE = suiteArea(67);

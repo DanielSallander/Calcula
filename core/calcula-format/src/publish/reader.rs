@@ -117,6 +117,16 @@ pub fn read_published_sheet(
         column_widths,
         row_heights,
         styles,
+        merged_regions: Vec::new(),
+        freeze_row: None,
+        freeze_col: None,
+        hidden_rows: std::collections::HashSet::new(),
+        hidden_cols: std::collections::HashSet::new(),
+        tab_color: String::new(),
+        visibility: "visible".to_string(),
+        notes: Vec::new(),
+        hyperlinks: Vec::new(),
+        page_setup: None,
     })
 }
 
@@ -177,6 +187,16 @@ mod tests {
                 column_widths: [(0, 150.0)].into_iter().collect(),
                 row_heights: HashMap::new(),
                 styles: vec![engine::style::CellStyle::new()],
+                merged_regions: Vec::new(),
+                freeze_row: None,
+                freeze_col: None,
+                hidden_rows: std::collections::HashSet::new(),
+                hidden_cols: std::collections::HashSet::new(),
+                tab_color: String::new(),
+                visibility: "visible".to_string(),
+                notes: Vec::new(),
+                hyperlinks: Vec::new(),
+                page_setup: None,
             }],
             active_sheet: 0,
             tables: vec![],
@@ -189,6 +209,7 @@ mod tests {
             default_column_width: 100.0,
             properties: persistence::WorkbookProperties::default(),
             charts: Vec::new(),
+            named_ranges: Vec::new(),
         }
     }
 

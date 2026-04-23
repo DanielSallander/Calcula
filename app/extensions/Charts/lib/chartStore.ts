@@ -53,6 +53,56 @@ function fromEntry(entry: ChartEntry): ChartDefinition {
 }
 
 // ============================================================================
+// Debounced Persistence (for high-frequency operations like drag/resize)
+// ============================================================================
+
+/** Chart IDs that have been mutated but not yet persisted. */
+const dirtyChartIds = new Set<number>();
+
+/** Timer handle for the debounced save. */
+let saveTimer: number | null = null;
+
+/**
+ * Mark a chart as dirty and schedule a debounced persist.
+ * Multiple calls within 300ms are batched into a single flush.
+ */
+function scheduleSave(chartId: number): void {
+  dirtyChartIds.add(chartId);
+  if (saveTimer !== null) clearTimeout(saveTimer);
+  saveTimer = window.setTimeout(flushDirtyCharts, 300);
+}
+
+/**
+ * Flush all dirty charts to the backend.
+ * Called automatically after the debounce delay, or can be called
+ * manually (e.g., before file save) via `flushPendingChartSaves()`.
+ */
+async function flushDirtyCharts(): Promise<void> {
+  const ids = Array.from(dirtyChartIds);
+  dirtyChartIds.clear();
+  saveTimer = null;
+  for (const id of ids) {
+    const chart = getChartById(id);
+    if (chart) {
+      await invokeBackend("update_chart", { entry: toEntry(chart) }).catch(() => {});
+    }
+  }
+}
+
+/**
+ * Public API: flush any pending debounced chart saves immediately.
+ * Call this before file save or app close to avoid losing changes.
+ */
+export function flushPendingChartSaves(): Promise<void> {
+  if (saveTimer !== null) {
+    clearTimeout(saveTimer);
+    saveTimer = null;
+  }
+  if (dirtyChartIds.size === 0) return Promise.resolve();
+  return flushDirtyCharts();
+}
+
+// ============================================================================
 // Backend Load (call on init / file open)
 // ============================================================================
 
@@ -138,8 +188,8 @@ export function updateChartSpec(
   const chart = charts.find((c) => c.chartId === chartId);
   if (chart) {
     chart.spec = { ...chart.spec, ...specUpdates };
-    // Persist to backend
-    invokeBackend("update_chart", { entry: toEntry(chart) }).catch(() => {});
+    // Debounced persist — spec changes during interactive editing
+    scheduleSave(chartId);
   }
 }
 
@@ -164,8 +214,8 @@ export function moveChart(
   if (chart) {
     chart.x = x;
     chart.y = y;
-    // Persist to backend
-    invokeBackend("update_chart", { entry: toEntry(chart) }).catch(() => {});
+    // Debounced persist — drag operations fire many times per second
+    scheduleSave(chartId);
   }
 }
 
@@ -185,8 +235,8 @@ export function resizeChart(
     chart.y = y;
     chart.width = width;
     chart.height = height;
-    // Persist to backend
-    invokeBackend("update_chart", { entry: toEntry(chart) }).catch(() => {});
+    // Debounced persist — resize operations fire many times per second
+    scheduleSave(chartId);
   }
 }
 
@@ -208,6 +258,12 @@ export function getActiveSheetIndex(): number {
  * Reset the entire chart store (used during extension deactivation).
  */
 export function resetChartStore(): void {
+  // Cancel any pending debounced saves — the store is being torn down
+  if (saveTimer !== null) {
+    clearTimeout(saveTimer);
+    saveTimer = null;
+  }
+  dirtyChartIds.clear();
   charts = [];
   nextChartId = 1;
   activeSheetIndex = 0;

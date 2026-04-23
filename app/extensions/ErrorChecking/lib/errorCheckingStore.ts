@@ -2,6 +2,7 @@
 // PURPOSE: Local state cache for error checking indicators.
 // CONTEXT: Caches error indicator data fetched from the backend for fast
 //          per-cell lookup during the render loop (hot path).
+//          Only scans the current VIEWPORT (not the full used range) for performance.
 
 import { invoke } from "@tauri-apps/api/core";
 
@@ -16,14 +17,6 @@ export interface CellErrorIndicator {
   message: string;
 }
 
-interface UsedRangeResult {
-  startRow: number;
-  startCol: number;
-  endRow: number;
-  endCol: number;
-  empty: boolean;
-}
-
 // ============================================================================
 // Internal State
 // ============================================================================
@@ -33,6 +26,9 @@ let errorIndicatorMap = new Map<string, CellErrorIndicator>();
 
 /** Debounce timer for refresh calls */
 let refreshTimer: ReturnType<typeof setTimeout> | null = null;
+
+/** Last viewport bounds used for fetch, so invalidation can re-evaluate */
+let lastViewport: { startRow: number; startCol: number; endRow: number; endCol: number } | null = null;
 
 // ============================================================================
 // Key helpers
@@ -47,11 +43,31 @@ function cellKey(row: number, col: number): string {
 // ============================================================================
 
 /**
- * Refresh the error indicator cache from the backend.
- * Fetches indicators for the entire used range of the active sheet.
+ * Refresh the error indicator cache from the backend for the given viewport.
+ * Only scans visible rows/cols (plus a small buffer) instead of the full used range.
  * Uses debouncing (200ms) to avoid hammering the backend during rapid edits.
+ *
+ * @param startRow - First visible row
+ * @param startCol - First visible column
+ * @param endRow   - Last visible row
+ * @param endCol   - Last visible column
  */
-export function refreshErrorIndicatorsImmediate(): void {
+export function refreshErrorIndicators(
+  startRow: number,
+  startCol: number,
+  endRow: number,
+  endCol: number,
+): void {
+  // Add a buffer around the viewport for smoother scrolling
+  const bufferRows = 20;
+  const bufferCols = 5;
+  lastViewport = {
+    startRow: Math.max(0, startRow - bufferRows),
+    startCol: Math.max(0, startCol - bufferCols),
+    endRow: endRow + bufferRows,
+    endCol: endCol + bufferCols,
+  };
+
   // Cancel any pending debounced refresh
   if (refreshTimer !== null) {
     clearTimeout(refreshTimer);
@@ -59,8 +75,22 @@ export function refreshErrorIndicatorsImmediate(): void {
 
   refreshTimer = setTimeout(() => {
     refreshTimer = null;
-    doFetch();
+    doFetch(lastViewport!.startRow, lastViewport!.startCol, lastViewport!.endRow, lastViewport!.endCol);
   }, 200);
+}
+
+/**
+ * Re-evaluate using the last known viewport bounds (e.g., after a data change).
+ * If no viewport has been set yet, this is a no-op.
+ */
+export function refreshErrorIndicatorsFromLastViewport(): void {
+  if (!lastViewport) return;
+  refreshErrorIndicators(
+    lastViewport.startRow,
+    lastViewport.startCol,
+    lastViewport.endRow,
+    lastViewport.endCol,
+  );
 }
 
 /**
@@ -79,6 +109,7 @@ export function getErrorIndicatorAt(
  */
 export function resetErrorStore(): void {
   errorIndicatorMap.clear();
+  lastViewport = null;
   if (refreshTimer !== null) {
     clearTimeout(refreshTimer);
     refreshTimer = null;
@@ -89,21 +120,18 @@ export function resetErrorStore(): void {
 // Internal
 // ============================================================================
 
-async function doFetch(): Promise<void> {
+async function doFetch(
+  startRow: number,
+  startCol: number,
+  endRow: number,
+  endCol: number,
+): Promise<void> {
   try {
-    // Get the used range to know how far to scan
-    const usedRange = await invoke<UsedRangeResult>("get_used_range");
-    if (usedRange.empty) {
-      // Empty sheet — no cells to check
-      errorIndicatorMap.clear();
-      return;
-    }
-
     const indicators = await invoke<CellErrorIndicator[]>("get_error_indicators", {
-      startRow: usedRange.startRow,
-      startCol: usedRange.startCol,
-      endRow: usedRange.endRow,
-      endCol: usedRange.endCol,
+      startRow,
+      startCol,
+      endRow,
+      endCol,
     });
 
     // Rebuild the lookup map

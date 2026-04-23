@@ -7,6 +7,7 @@ use crate::tables::{
 use crate::{format_cell_value, AppState};
 use persistence::{
     load_xlsx, save_xlsx, DimensionData, SavedTable, SavedTableColumn, SavedTableStyleOptions,
+    SavedMergedRegion, SavedNamedRange, SavedNote, SavedHyperlink, SavedPageSetup,
     Workbook,
 };
 use calcula_format::{save_calcula, load_calcula};
@@ -208,6 +209,9 @@ pub fn build_workbook_for_save(
         };
     }
 
+    // Enrich with sheet-level metadata (merged regions, freeze panes, etc.)
+    enrich_workbook_metadata(&mut workbook, state);
+
     Ok(workbook)
 }
 
@@ -220,6 +224,155 @@ pub fn build_workbook_for_save_with_slicers(
     let mut workbook = build_workbook_for_save(state, user_files_state)?;
     workbook.slicers = collect_slicers_for_save(slicer_state);
     Ok(workbook)
+}
+
+/// Enrich a workbook with sheet-level metadata from AppState:
+/// merged regions, freeze panes, hidden rows/cols, tab colors,
+/// sheet visibility, notes, hyperlinks, page setup, and named ranges.
+fn enrich_workbook_metadata(workbook: &mut Workbook, state: &AppState) {
+    // We only have one sheet in the workbook (from_grid creates a single sheet).
+    // Populate it with data from the active sheet in AppState.
+    if workbook.sheets.is_empty() {
+        return;
+    }
+
+    let active_sheet = *state.active_sheet.lock().unwrap();
+
+    // ---- Merged regions ----
+    if let Ok(regions) = state.merged_regions.lock() {
+        workbook.sheets[0].merged_regions = regions
+            .iter()
+            .map(|r| SavedMergedRegion {
+                start_row: r.start_row,
+                start_col: r.start_col,
+                end_row: r.end_row,
+                end_col: r.end_col,
+            })
+            .collect();
+    }
+
+    // ---- Freeze panes ----
+    if let Ok(freeze_configs) = state.freeze_configs.lock() {
+        if let Some(fc) = freeze_configs.get(active_sheet) {
+            workbook.sheets[0].freeze_row = fc.freeze_row;
+            workbook.sheets[0].freeze_col = fc.freeze_col;
+        }
+    }
+
+    // ---- Hidden rows/cols (from autofilter + grouping) ----
+    // AutoFilter hidden rows
+    if let Ok(auto_filters) = state.auto_filters.lock() {
+        if let Some(af) = auto_filters.get(&active_sheet) {
+            for row in &af.hidden_rows {
+                workbook.sheets[0].hidden_rows.insert(*row);
+            }
+        }
+    }
+    // Grouping hidden rows/cols
+    if let Ok(outlines) = state.outlines.lock() {
+        if let Some(outline) = outlines.get(&active_sheet) {
+            for group in &outline.row_groups {
+                if group.collapsed {
+                    for r in group.start_row..=group.end_row {
+                        workbook.sheets[0].hidden_rows.insert(r);
+                    }
+                }
+            }
+            for group in &outline.column_groups {
+                if group.collapsed {
+                    for c in group.start_col..=group.end_col {
+                        workbook.sheets[0].hidden_cols.insert(c);
+                    }
+                }
+            }
+        }
+    }
+
+    // ---- Tab color ----
+    if let Ok(tab_colors) = state.tab_colors.lock() {
+        if let Some(color) = tab_colors.get(active_sheet) {
+            workbook.sheets[0].tab_color = color.clone();
+        }
+    }
+
+    // ---- Sheet visibility ----
+    if let Ok(vis) = state.sheet_visibility.lock() {
+        if let Some(v) = vis.get(active_sheet) {
+            workbook.sheets[0].visibility = v.clone();
+        }
+    }
+
+    // ---- Notes ----
+    if let Ok(notes) = state.notes.lock() {
+        if let Some(sheet_notes) = notes.get(&active_sheet) {
+            workbook.sheets[0].notes = sheet_notes
+                .values()
+                .map(|n| SavedNote {
+                    row: n.row,
+                    col: n.col,
+                    text: n.content.clone(),
+                    author: n.author_name.clone(),
+                })
+                .collect();
+        }
+    }
+
+    // ---- Hyperlinks ----
+    if let Ok(hyperlinks) = state.hyperlinks.lock() {
+        if let Some(sheet_links) = hyperlinks.get(&active_sheet) {
+            workbook.sheets[0].hyperlinks = sheet_links
+                .values()
+                .map(|h| SavedHyperlink {
+                    row: h.row,
+                    col: h.col,
+                    target: h.target.clone(),
+                    display_text: h.display_text.clone(),
+                    tooltip: h.tooltip.clone(),
+                })
+                .collect();
+        }
+    }
+
+    // ---- Page setup ----
+    if let Ok(page_setups) = state.page_setups.lock() {
+        if let Some(ps) = page_setups.get(active_sheet) {
+            workbook.sheets[0].page_setup = Some(SavedPageSetup {
+                paper_size: ps.paper_size.clone(),
+                orientation: ps.orientation.clone(),
+                margin_top: ps.margin_top,
+                margin_bottom: ps.margin_bottom,
+                margin_left: ps.margin_left,
+                margin_right: ps.margin_right,
+                margin_header: ps.margin_header,
+                margin_footer: ps.margin_footer,
+                header: ps.header.clone(),
+                footer: ps.footer.clone(),
+                print_area: ps.print_area.clone(),
+                print_titles_rows: ps.print_titles_rows.clone(),
+                manual_row_breaks: ps.manual_row_breaks.clone(),
+                print_gridlines: ps.print_gridlines,
+                center_horizontally: ps.center_horizontally,
+                center_vertically: ps.center_vertically,
+                scale: ps.scale,
+                fit_to_width: ps.fit_to_width,
+                fit_to_height: ps.fit_to_height,
+                page_order: ps.page_order.clone(),
+                first_page_number: ps.first_page_number,
+            });
+        }
+    }
+
+    // ---- Named ranges ----
+    if let Ok(named_ranges) = state.named_ranges.lock() {
+        workbook.named_ranges = named_ranges
+            .values()
+            .map(|nr| SavedNamedRange {
+                name: nr.name.clone(),
+                refers_to: nr.refers_to.clone(),
+                sheet_index: nr.sheet_index,
+            })
+            .collect();
+    }
 }
 
 /// Collect slicers from SlicerState into SavedSlicer format.
@@ -481,6 +634,9 @@ pub fn save_file(
             last_modified: props.last_modified.clone(),
         };
     }
+
+    // Enrich with sheet-level metadata (merged regions, freeze panes, etc.)
+    enrich_workbook_metadata(&mut workbook, &state);
 
     // Save linked sheet metadata into user_files
     save_linked_sheets_metadata(&state, &mut workbook)?;
@@ -1298,6 +1454,9 @@ pub fn auto_recover_save(
     workbook.theme = state.theme.lock().unwrap().clone();
     workbook.default_row_height = *state.default_row_height.lock().unwrap();
     workbook.default_column_width = *state.default_column_width.lock().unwrap();
+
+    // Enrich with sheet-level metadata (merged regions, freeze panes, etc.)
+    enrich_workbook_metadata(&mut workbook, &state);
 
     // Save linked sheet metadata
     save_linked_sheets_metadata(&state, &mut workbook)?;

@@ -431,12 +431,7 @@ export async function applyFormatting(
 ): Promise<FormattingResult> {
   console.log(
     "[tauri-api] applyFormatting:",
-    "rows=",
-    rows,
-    "cols=",
-    cols,
-    "formatting=",
-    formatting
+    `${rows.length} rows x ${cols.length} cols`,
   );
   const result = await invoke<FormattingResult>("apply_formatting", {
     params: {
