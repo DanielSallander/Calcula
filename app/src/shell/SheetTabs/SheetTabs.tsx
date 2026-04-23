@@ -56,7 +56,7 @@ export function SheetTabs({ onSheetChange }: SheetTabsProps): React.ReactElement
   const { state, dispatch } = useGridContext();
   const { editing, sheetContext } = state;
 
-  const [sheets, setSheets] = useState<SheetInfo[]>([{ index: 0, name: "Sheet1" }]);
+  const [sheets, setSheets] = useState<SheetInfo[]>([{ index: 0, name: "Sheet1", visibility: "visible" as const }]);
   const [activeIndex, setActiveIndex] = useState<number>(0);
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -312,7 +312,7 @@ export function SheetTabs({ onSheetChange }: SheetTabsProps): React.ReactElement
     } catch (err) {
       console.error("[SheetTabs] getSheets error:", err);
       setError(String(err));
-      setSheets([{ index: 0, name: "Sheet1" }]);
+      setSheets([{ index: 0, name: "Sheet1", visibility: "visible" as const }]);
       setActiveIndex(0);
     } finally {
       setIsLoading(false);

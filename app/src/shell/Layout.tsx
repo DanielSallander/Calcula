@@ -290,13 +290,21 @@ function LayoutInner(): React.ReactElement {
   // DELETE THIS BLOCK when done testing
   useEffect(() => {
     if (shouldLoadMockData()) {
-      // Small delay to ensure grid is fully initialized
-      const timer = setTimeout(() => {
-        loadMockData().catch((error) => {
-          console.error("[Layout] Failed to load mock data:", error);
+      // Don't load mock data if a file is already open (e.g., after window.location.reload() on file open)
+      import("../core/lib/file-api").then(({ getCurrentFilePath }) => {
+        getCurrentFilePath().then((path) => {
+          if (path) {
+            console.log("[Layout] File already open, skipping mock data:", path);
+            return;
+          }
+          // Small delay to ensure grid is fully initialized
+          setTimeout(() => {
+            loadMockData().catch((error) => {
+              console.error("[Layout] Failed to load mock data:", error);
+            });
+          }, 500);
         });
-      }, 500);
-      return () => clearTimeout(timer);
+      });
     }
   }, []);
 

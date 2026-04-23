@@ -275,6 +275,14 @@ function SpreadsheetContent({
   }, [handleCut, handleCopy, handlePaste, dispatch]);
 
   // -------------------------------------------------------------------------
+  // Initial dimensions load on mount
+  // -------------------------------------------------------------------------
+  useEffect(() => {
+    refreshDimensions();
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // -------------------------------------------------------------------------
   // Dimensions Refresh Listener (from context menu column width / row height)
   // -------------------------------------------------------------------------
   useEffect(() => {

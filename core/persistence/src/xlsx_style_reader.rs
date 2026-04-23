@@ -477,15 +477,16 @@ fn parse_sheet_xml(xml: &str) -> SheetMeta {
                         if let Some(r_str) = get_attr(e, "r") {
                             current_row = r_str.parse::<u32>().unwrap_or(1).saturating_sub(1);
                         }
-                        // Row height
-                        let custom_height = get_attr(e, "customHeight")
-                            .map(|v| v == "1" || v == "true")
-                            .unwrap_or(false);
-                        if custom_height {
-                            if let Some(ht_str) = get_attr(e, "ht") {
-                                if let Ok(ht) = ht_str.parse::<f64>() {
-                                    // Excel stores row height in points; convert to pixels (1 pt = 1.333 px)
-                                    let px = (ht * 1.333).round();
+                        // Row height: read whenever ht is present
+                        // (customHeight="1" means user-set, but ht without it
+                        // still represents the actual rendered height)
+                        if let Some(ht_str) = get_attr(e, "ht") {
+                            if let Ok(ht) = ht_str.parse::<f64>() {
+                                // Excel stores row height in points; convert to pixels (1 pt = 1.333 px)
+                                let px = (ht * 1.333).round();
+                                // Only store if different from the default (15pt = 20px)
+                                // to avoid bloating the map with thousands of default-height rows
+                                if (px - 20.0).abs() > 1.0 {
                                     meta.row_heights.insert(current_row, px);
                                 }
                             }

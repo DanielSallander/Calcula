@@ -31,11 +31,6 @@ export function useFileMenu(): { menu: MenuDefinition; handlers: FileMenuHandler
 
   const handleOpen = useCallback(async () => {
     try {
-      const modified = await workspace.isModified();
-      if (modified) {
-        const confirmed = window.confirm('You have unsaved changes. Open file anyway?');
-        if (!confirmed) return;
-      }
       const cells = await workspace.open();
       if (cells) {
         window.location.reload();

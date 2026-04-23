@@ -688,37 +688,83 @@ pub fn open_file(
         return Err("No sheets in workbook".to_string());
     }
 
-    let sheet = &workbook.sheets[workbook.active_sheet];
-    let (new_grid, new_styles) = sheet.to_grid();
+    let active_idx = workbook.active_sheet.min(workbook.sheets.len() - 1);
 
     // Restore tables from the workbook metadata
     let (new_tables, new_table_names, next_id) = restore_tables(&workbook.tables);
 
     {
+        // Build a single shared StyleRegistry from all sheets.
+        // Each sheet's to_grid() returns its own local registry; we merge them
+        // into one shared registry and remap cell style_index values.
+        let mut shared_styles = engine::style::StyleRegistry::new();
+        let mut all_grids: Vec<engine::grid::Grid> = Vec::with_capacity(workbook.sheets.len());
+        let mut all_cw_vec: Vec<std::collections::HashMap<u32, f64>> = Vec::with_capacity(workbook.sheets.len());
+        let mut all_rh_vec: Vec<std::collections::HashMap<u32, f64>> = Vec::with_capacity(workbook.sheets.len());
+
+        for sheet in &workbook.sheets {
+            let (mut grid, local_styles) = sheet.to_grid();
+
+            // Build remap table: local style index -> shared style index
+            let local_all = local_styles.all_styles();
+            let mut remap: Vec<usize> = Vec::with_capacity(local_all.len());
+            for style in local_all {
+                remap.push(shared_styles.get_or_create(style.clone()));
+            }
+
+            // Remap style_index on every cell in this grid
+            for (_key, cell) in grid.cells.iter_mut() {
+                if cell.style_index < remap.len() {
+                    cell.style_index = remap[cell.style_index];
+                }
+            }
+
+            all_grids.push(grid);
+            all_cw_vec.push(sheet.column_widths.clone());
+            all_rh_vec.push(sheet.row_heights.clone());
+        }
+
+        // Set sheet names
+        let mut names = state.sheet_names.lock().map_err(|e| e.to_string())?;
+        *names = workbook.sheets.iter().map(|s| s.name.clone()).collect();
+
+        // Set active sheet index
+        *state.active_sheet.lock().map_err(|e| e.to_string())? = active_idx;
+
+        // Set the active grid (clone from the all_grids vec)
         let mut grid = state.grid.lock().map_err(|e| e.to_string())?;
-        let mut styles = state.style_registry.lock().map_err(|e| e.to_string())?;
+        *grid = all_grids[active_idx].clone();
+
+        // Set active sheet dimensions
         let mut col_widths = state.column_widths.lock().map_err(|e| e.to_string())?;
         let mut row_heights = state.row_heights.lock().map_err(|e| e.to_string())?;
+        *col_widths = all_cw_vec[active_idx].clone();
+        *row_heights = all_rh_vec[active_idx].clone();
+
+        // Store per-sheet grids and dimensions
+        // Note: set_active_sheet swaps between grids[i] and state.grid,
+        // so the active sheet slot in grids holds a copy too.
+        let mut grids = state.grids.lock().map_err(|e| e.to_string())?;
+        *grids = all_grids;
+
+        let mut all_cw = state.all_column_widths.lock().map_err(|e| e.to_string())?;
+        *all_cw = all_cw_vec;
+
+        let mut all_rh = state.all_row_heights.lock().map_err(|e| e.to_string())?;
+        *all_rh = all_rh_vec;
+
+        // Set shared style registry
+        let mut styles = state.style_registry.lock().map_err(|e| e.to_string())?;
+        *styles = shared_styles;
+
+        // Clear dependency maps (will be rebuilt on recalculation)
         let mut deps = state.dependents.lock().map_err(|e| e.to_string())?;
+        deps.clear();
+
+        // Restore table state
         let mut tables = state.tables.lock().map_err(|e| e.to_string())?;
         let mut table_names = state.table_names.lock().map_err(|e| e.to_string())?;
         let mut next_table_id = state.next_table_id.lock().map_err(|e| e.to_string())?;
-
-        *grid = new_grid;
-        *styles = new_styles;
-        *col_widths = sheet.column_widths.clone();
-        *row_heights = sheet.row_heights.clone();
-        deps.clear();
-
-        // Reset per-sheet dimension storage (active sheet dims are in col_widths/row_heights)
-        let mut all_cw = state.all_column_widths.lock().map_err(|e| e.to_string())?;
-        let mut all_rh = state.all_row_heights.lock().map_err(|e| e.to_string())?;
-        all_cw.clear();
-        all_cw.push(std::collections::HashMap::new()); // placeholder for active sheet
-        all_rh.clear();
-        all_rh.push(std::collections::HashMap::new());
-
-        // Restore table state
         *tables = new_tables;
         *table_names = new_table_names;
         *next_table_id = next_id;
@@ -726,6 +772,139 @@ pub fn open_file(
         // Restore default dimensions
         *state.default_row_height.lock().unwrap() = workbook.default_row_height;
         *state.default_column_width.lock().unwrap() = workbook.default_column_width;
+
+        // ---- Freeze pane configs for all sheets ----
+        let mut freeze_configs = state.freeze_configs.lock().map_err(|e| e.to_string())?;
+        freeze_configs.clear();
+        for sheet in &workbook.sheets {
+            freeze_configs.push(crate::sheets::FreezeConfig {
+                freeze_row: sheet.freeze_row,
+                freeze_col: sheet.freeze_col,
+            });
+        }
+
+        // ---- Split configs (reset to defaults for each sheet) ----
+        let mut split_configs = state.split_configs.lock().map_err(|e| e.to_string())?;
+        split_configs.clear();
+        for _ in &workbook.sheets {
+            split_configs.push(crate::sheets::SplitConfig::default());
+        }
+
+        // ---- Scroll areas (reset to None for each sheet) ----
+        let mut scroll_areas = state.scroll_areas.lock().map_err(|e| e.to_string())?;
+        scroll_areas.clear();
+        for _ in &workbook.sheets {
+            scroll_areas.push(None);
+        }
+
+        // ---- Tab colors for all sheets ----
+        let mut tab_colors = state.tab_colors.lock().map_err(|e| e.to_string())?;
+        tab_colors.clear();
+        for sheet in &workbook.sheets {
+            tab_colors.push(sheet.tab_color.clone());
+        }
+
+        // ---- Sheet visibility for all sheets ----
+        let mut sheet_visibility = state.sheet_visibility.lock().map_err(|e| e.to_string())?;
+        sheet_visibility.clear();
+        for sheet in &workbook.sheets {
+            sheet_visibility.push(sheet.visibility.clone());
+        }
+
+        // ---- Merged regions for the active sheet ----
+        let mut merged_regions = state.merged_regions.lock().map_err(|e| e.to_string())?;
+        merged_regions.clear();
+        let active_sheet_data = &workbook.sheets[active_idx];
+        for mr in &active_sheet_data.merged_regions {
+            merged_regions.insert(crate::api_types::MergedRegion {
+                start_row: mr.start_row,
+                start_col: mr.start_col,
+                end_row: mr.end_row,
+                end_col: mr.end_col,
+            });
+        }
+
+        // ---- Page setups for all sheets ----
+        let mut page_setups = state.page_setups.lock().map_err(|e| e.to_string())?;
+        page_setups.clear();
+        for sheet in &workbook.sheets {
+            if let Some(ps) = &sheet.page_setup {
+                page_setups.push(crate::api_types::PageSetup {
+                    paper_size: ps.paper_size.clone(),
+                    orientation: ps.orientation.clone(),
+                    margin_top: ps.margin_top,
+                    margin_bottom: ps.margin_bottom,
+                    margin_left: ps.margin_left,
+                    margin_right: ps.margin_right,
+                    margin_header: ps.margin_header,
+                    margin_footer: ps.margin_footer,
+                    header: ps.header.clone(),
+                    footer: ps.footer.clone(),
+                    print_area: ps.print_area.clone(),
+                    print_titles_rows: ps.print_titles_rows.clone(),
+                    manual_row_breaks: ps.manual_row_breaks.clone(),
+                    print_gridlines: ps.print_gridlines,
+                    center_horizontally: ps.center_horizontally,
+                    center_vertically: ps.center_vertically,
+                    scale: ps.scale,
+                    fit_to_width: ps.fit_to_width,
+                    fit_to_height: ps.fit_to_height,
+                    page_order: ps.page_order.clone(),
+                    first_page_number: ps.first_page_number,
+                    ..Default::default()
+                });
+            } else {
+                page_setups.push(crate::api_types::PageSetup::default());
+            }
+        }
+
+        // ---- Notes for all sheets ----
+        let mut notes_storage = state.notes.lock().map_err(|e| e.to_string())?;
+        notes_storage.clear();
+        for (sheet_idx, sheet) in workbook.sheets.iter().enumerate() {
+            if !sheet.notes.is_empty() {
+                let mut sheet_notes = std::collections::HashMap::new();
+                for n in &sheet.notes {
+                    sheet_notes.insert((n.row, n.col), crate::notes::Note {
+                        id: uuid::Uuid::new_v4().to_string(),
+                        row: n.row,
+                        col: n.col,
+                        sheet_index: sheet_idx,
+                        author_name: n.author.clone(),
+                        content: n.text.clone(),
+                        rich_content: None,
+                        width: 200.0,
+                        height: 100.0,
+                        visible: false,
+                        created_at: chrono::Utc::now().to_rfc3339(),
+                        modified_at: None,
+                    });
+                }
+                notes_storage.insert(sheet_idx, sheet_notes);
+            }
+        }
+
+        // ---- Hyperlinks for all sheets ----
+        let mut hyperlinks_storage = state.hyperlinks.lock().map_err(|e| e.to_string())?;
+        hyperlinks_storage.clear();
+        for (sheet_idx, sheet) in workbook.sheets.iter().enumerate() {
+            if !sheet.hyperlinks.is_empty() {
+                let mut sheet_links = std::collections::HashMap::new();
+                for h in &sheet.hyperlinks {
+                    sheet_links.insert((h.row, h.col), crate::hyperlinks::Hyperlink {
+                        row: h.row,
+                        col: h.col,
+                        sheet_index: sheet_idx,
+                        link_type: crate::hyperlinks::HyperlinkType::Url,
+                        target: h.target.clone(),
+                        internal_ref: None,
+                        display_text: h.display_text.clone(),
+                        tooltip: h.tooltip.clone(),
+                    });
+                }
+                hyperlinks_storage.insert(sheet_idx, sheet_links);
+            }
+        }
     }
 
     // Restore slicers from workbook
@@ -766,12 +945,19 @@ pub fn open_file(
     let grid = state.grid.lock().map_err(|e| e.to_string())?;
     let styles = state.style_registry.lock().map_err(|e| e.to_string())?;
     let locale = state.locale.lock().map_err(|e| e.to_string())?;
+    let merged = state.merged_regions.lock().map_err(|e| e.to_string())?;
 
     let cells: Vec<CellData> = grid
         .cells
         .iter()
         .map(|((row, col), cell)| {
             let style = styles.get(cell.style_index);
+            // Look up merge span for this cell
+            let (row_span, col_span) = merged
+                .iter()
+                .find(|r| r.start_row == *row && r.start_col == *col)
+                .map(|r| (r.end_row - r.start_row + 1, r.end_col - r.start_col + 1))
+                .unwrap_or((1, 1));
             CellData {
                 row: *row,
                 col: *col,
@@ -779,8 +965,8 @@ pub fn open_file(
                 display: format_cell_value(&cell.value, style, &locale),
                 display_color: None,
                 style_index: cell.style_index,
-                row_span: 1,
-                col_span: 1,
+                row_span,
+                col_span,
                 sheet_index: None,
                 rich_text: None,
                 accounting_layout: None,

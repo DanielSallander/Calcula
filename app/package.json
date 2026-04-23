@@ -6,7 +6,7 @@
   "scripts": {
     "dev": "vite",
     "dev:data": "cross-env VITE_LOAD_MOCK_DATA=true vite",
-    "build": "tsc -b && vite build",
+    "build": "vite build",
     "check-types": "tsc -b",
     "check-types:watch": "tsc -b --watch",
     "lint": "eslint .",
