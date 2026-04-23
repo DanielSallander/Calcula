@@ -18,6 +18,7 @@ import { getCurrentChartId } from "../handlers/selectionHandler";
 import { ChartEvents } from "../lib/chartEvents";
 import { PALETTES, PALETTE_NAMES } from "../rendering/chartTheme";
 import { CHART_DIALOG_ID } from "../manifest";
+import { exportChartAsImage } from "../lib/chartExport";
 
 // ============================================================================
 // Styles
@@ -328,6 +329,22 @@ function ScatterIcon() {
   );
 }
 
+function SaveImageIcon() {
+  return (
+    <svg width="20" height="20" viewBox="0 0 20 20" fill="none">
+      {/* Image frame */}
+      <rect x="2" y="3" width="16" height="14" rx="1.5" stroke="#4472C4" strokeWidth="1.5" fill="#EAF0F9" />
+      {/* Mountain/landscape */}
+      <path d="M2 14 L7 9 L10 12 L13 8 L18 14 L18 16 L2 16 Z" fill="#4472C4" opacity="0.5" />
+      {/* Sun */}
+      <circle cx="14" cy="7" r="2" fill="#ED7D31" />
+      {/* Download arrow overlay */}
+      <path d="M10 11 L10 16" stroke="#333" strokeWidth="1.5" strokeLinecap="round" />
+      <path d="M7.5 14 L10 16.5 L12.5 14" stroke="#333" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  );
+}
+
 // ============================================================================
 // Collapse configuration
 // ============================================================================
@@ -339,7 +356,7 @@ const GROUP_DEFS = [
   { collapseOrder: 1, expandedWidth: 140 }, // Trendline
   { collapseOrder: 4, expandedWidth: 220 }, // Colors
   { collapseOrder: 3, expandedWidth: 130 }, // Legend
-  { collapseOrder: 7, expandedWidth: 80 },  // Actions
+  { collapseOrder: 7, expandedWidth: 150 }, // Actions
 ];
 
 // ============================================================================
@@ -707,6 +724,22 @@ export function ChartDesignTab({
           >
             <span className={s.actionIcon}>&#9998;</span>
             Edit Chart
+          </button>
+          <button
+            className={s.actionBtn}
+            onClick={async () => {
+              if (chartId == null) return;
+              try {
+                await exportChartAsImage(chartId);
+              } catch (err) {
+                console.error("[Charts] Export failed:", err);
+                alert("Failed to export chart: " + String(err));
+              }
+            }}
+            title="Save chart as PNG image"
+          >
+            <span className={s.actionIcon}><SaveImageIcon /></span>
+            Save Image
           </button>
         </div>
       </RibbonGroup>

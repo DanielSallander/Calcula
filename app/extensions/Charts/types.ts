@@ -46,6 +46,22 @@ export function isCartesianChart(mark: ChartType): mark is CartesianChartType {
 /** Stacking mode for bar, line, and area charts. */
 export type StackMode = "none" | "stacked" | "percentStacked";
 
+/** Error bar configuration for showing uncertainty/variability. */
+export interface ErrorBarOptions {
+  /** Whether error bars are enabled. */
+  enabled: boolean;
+  /** How to compute error bar extent. */
+  type: "standardError" | "percentage" | "standardDeviation" | "custom";
+  /** Value for percentage (e.g., 10 = +/-10%) or stddev multiplier. Default: 10 */
+  value?: number;
+  /** Which direction to draw error bars. Default: "both" */
+  direction: "both" | "plus" | "minus";
+  /** Override color (hex). Null = use dark gray. Default: "#333333" */
+  color?: string;
+  /** Line width in pixels. Default: 1.5 */
+  lineWidth?: number;
+}
+
 /** Options specific to bar and horizontal bar charts. */
 export interface BarMarkOptions {
   /** Border radius on bars (pixels). Default: 2 */
@@ -54,6 +70,8 @@ export interface BarMarkOptions {
   barGap?: number;
   /** Stacking mode. Default: "none" */
   stackMode?: StackMode;
+  /** Error bars configuration. */
+  errorBars?: ErrorBarOptions;
 }
 
 /** Line interpolation mode. */
@@ -71,6 +89,8 @@ export interface LineMarkOptions {
   markerRadius?: number;
   /** Stacking mode. Default: "none" */
   stackMode?: StackMode;
+  /** Error bars configuration. */
+  errorBars?: ErrorBarOptions;
 }
 
 /** Options specific to area charts. */
@@ -100,6 +120,8 @@ export interface ScatterMarkOptions {
   pointShape?: PointShape;
   /** Point size (radius in pixels). Default: 5 */
   pointSize?: number;
+  /** Error bars configuration. */
+  errorBars?: ErrorBarOptions;
 }
 
 /** Options specific to pie and donut charts. */
@@ -638,6 +660,20 @@ export interface ThemeOverrides {
   barGap?: number;
 }
 
+/** Data table configuration (grid of values below the chart plot area). */
+export interface DataTableOptions {
+  /** Whether the data table is shown. */
+  enabled: boolean;
+  /** Show legend color swatches in the first column. Default: true */
+  showLegendKeys?: boolean;
+  /** Show horizontal borders between rows. Default: true */
+  showHorizontalBorder?: boolean;
+  /** Show vertical borders between columns. Default: true */
+  showVerticalBorder?: boolean;
+  /** Show outline border around the entire table. Default: true */
+  showOutlineBorder?: boolean;
+}
+
 /** Chart-level configuration for theming and defaults. */
 export interface ChartConfig {
   /** Override any theme property. */
@@ -761,6 +797,8 @@ export interface ChartSpec {
   trendlines?: TrendlineSpec[];
   /** Data labels displayed on data points. */
   dataLabels?: DataLabelSpec;
+  /** Data table displayed below the chart plot area. */
+  dataTable?: DataTableOptions;
 }
 
 // ============================================================================

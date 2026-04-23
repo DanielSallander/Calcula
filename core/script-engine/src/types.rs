@@ -8,6 +8,7 @@ use engine::grid::Grid;
 use engine::style::StyleRegistry;
 use serde::{Deserialize, Serialize};
 use std::cell::RefCell;
+use std::collections::HashMap;
 
 /// Application-level metadata passed into the script runtime.
 /// Maps to Excel's Application object read-only properties.
@@ -73,6 +74,61 @@ pub enum DeferredAction {
     /// Set whether zeros are displayed in cells (Worksheet.DisplayZeros)
     SetDisplayZeros {
         value: bool,
+    },
+    /// Set the view mode ("normal" or "pageBreakPreview")
+    SetViewMode {
+        mode: String,
+    },
+    /// Set the zoom level (percentage, e.g. 1.0 = 100%)
+    SetZoom {
+        percent: f64,
+    },
+    /// Set the reference style ("A1" or "R1C1")
+    SetReferenceStyle {
+        style: String,
+    },
+    /// Set whether gridlines are displayed
+    SetDisplayGridlines {
+        value: bool,
+    },
+    /// Set whether row/column headings are displayed
+    SetDisplayHeadings {
+        value: bool,
+    },
+    /// Fill down: copy first row of range to remaining rows
+    FillDown {
+        start_row: u32,
+        start_col: u32,
+        end_row: u32,
+        end_col: u32,
+    },
+    /// Fill right: copy first column of range to remaining columns
+    FillRight {
+        start_row: u32,
+        start_col: u32,
+        end_row: u32,
+        end_col: u32,
+    },
+    /// Apply a named style to a cell
+    ApplyNamedStyle {
+        name: String,
+        row: u32,
+        col: u32,
+    },
+    /// Set or clear the scroll area restriction
+    SetScrollArea {
+        area: Option<String>,
+    },
+    /// Set iteration calculation settings
+    SetIterationSettings {
+        enabled: bool,
+        max_iterations: u32,
+        max_change: f64,
+    },
+    /// Set sheet visibility
+    SetSheetVisibility {
+        sheet_index: usize,
+        visibility: String,
     },
 }
 
@@ -145,6 +201,30 @@ pub struct ScriptContext {
     pub display_zeros: bool,
     /// Whether the workbook has unsaved changes (default: false)
     pub is_dirty: bool,
+    /// Current view mode: "normal" or "pageBreakPreview"
+    pub view_mode: String,
+    /// Current zoom level (1.0 = 100%)
+    pub zoom: f64,
+    /// Reference style: "A1" or "R1C1"
+    pub reference_style: String,
+    /// Sheet visibility states: "visible", "hidden", or "veryHidden"
+    pub sheet_visibility: Vec<String>,
+    /// Workbook-level custom properties
+    pub workbook_properties: HashMap<String, String>,
+    /// Named style names available in the workbook
+    pub named_style_names: Vec<String>,
+    /// Iteration calculation enabled
+    pub iteration_enabled: bool,
+    /// Max iteration count for circular reference resolution
+    pub iteration_max_count: u32,
+    /// Max change threshold for iteration convergence
+    pub iteration_max_change: f64,
+    /// Scroll area restriction (e.g. "A1:Z100") or None
+    pub scroll_area: Option<String>,
+    /// Whether gridlines are displayed
+    pub display_gridlines: bool,
+    /// Whether row/column headings are displayed
+    pub display_headings: bool,
 }
 
 /// The result of executing a script, returned to the Tauri command layer.

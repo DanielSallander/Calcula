@@ -84,6 +84,18 @@ impl ScriptEngine {
             deferred_actions: RefCell::new(Vec::new()),
             display_zeros: true,
             is_dirty: false,
+            view_mode: "normal".to_string(),
+            zoom: 1.0,
+            reference_style: "A1".to_string(),
+            sheet_visibility: Vec::new(),
+            workbook_properties: std::collections::HashMap::new(),
+            named_style_names: Vec::new(),
+            iteration_enabled: false,
+            iteration_max_count: 100,
+            iteration_max_change: 0.001,
+            scroll_area: None,
+            display_gridlines: true,
+            display_headings: true,
         };
 
         match runtime::execute_script(source, filename, context) {

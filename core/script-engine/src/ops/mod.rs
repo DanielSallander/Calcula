@@ -6,6 +6,7 @@
 pub mod application;
 pub mod bookmarks;
 pub mod cells;
+pub mod extended;
 pub mod sheets;
 pub mod utility;
 pub mod worksheet_props;

@@ -19,7 +19,9 @@ import {
   invokeBackend,
   addConditionalFormat,
   deleteConditionalFormat,
+  sortRange,
 } from "@api/backend";
+import type { SortField } from "@api/backend";
 import {
   applyFormatting,
   getStyle,
@@ -34,6 +36,24 @@ import {
   deleteNamedStyle,
   applyNamedStyle,
   getCurrentRegion,
+  getAutoRecoverSettings,
+  setAutoRecoverSettings,
+  getWorkbookProperties,
+  setWorkbookProperties,
+  getSheets,
+  addSheet,
+  deleteSheet,
+  hideSheet,
+  unhideSheet,
+  nextSheet,
+  previousSheet,
+  setScrollArea,
+  getScrollArea,
+  getCalculationState,
+  getPrecisionAsDisplayed,
+  setPrecisionAsDisplayed,
+  getCalculateBeforeSave,
+  setCalculateBeforeSave,
 } from "@api/lib";
 import {
   registerFormulaFunction,
@@ -41,7 +61,23 @@ import {
   getAllCustomFunctions,
 } from "@api";
 import type { CustomFunctionDef } from "@api";
-import { navigateToCell, AppEvents, onAppEvent, emitAppEvent, fillDown, borderAround } from "@api";
+import {
+  navigateToCell,
+  AppEvents,
+  onAppEvent,
+  emitAppEvent,
+  fillDown,
+  borderAround,
+  getZoom,
+  setZoomLevel,
+  setStatusBarText,
+  clearStatusBarText,
+  getViewMode,
+  changeViewMode,
+  getReferenceStyle,
+  changeReferenceStyle,
+  convertFormulaStyle,
+} from "@api";
 import type { CellValuesChangedPayload } from "@api";
 import { CellRange } from "@api";
 import {
@@ -83,6 +119,29 @@ export const excelGapFeaturesSuite: TestSuite = {
     try {
       await setDefaultRowHeight(24);
       await setDefaultColumnWidth(100);
+    } catch {
+      /* ignore */
+    }
+
+    // Reset view/calc settings added in Batch 7-11
+    try {
+      changeViewMode("normal");
+    } catch {
+      /* ignore */
+    }
+    try {
+      await changeReferenceStyle("A1");
+    } catch {
+      /* ignore */
+    }
+    try {
+      await setScrollArea(null);
+    } catch {
+      /* ignore */
+    }
+    try {
+      await setPrecisionAsDisplayed(false);
+      await setCalculateBeforeSave(true);
     } catch {
       /* ignore */
     }
@@ -1332,6 +1391,462 @@ export const excelGapFeaturesSuite: TestSuite = {
 
         const cell = await ctx.getCell(A.row, A.col);
         expectCellValue(cell, "hello%20world", A.ref(0, 0));
+      },
+    },
+
+    // ======================================================================
+    // 27. Custom Sort Lists (Batch 2)
+    // ======================================================================
+    {
+      name: "Custom sort: weekdays order",
+      description: "Sort using customOrder='weekdays' orders Mon, Wed, Fri correctly.",
+      async run(ctx) {
+        // Set up cells: Wed, Mon, Fri in a column
+        await ctx.setCells([
+          { row: A.row, col: A.col, value: "Wed" },
+          { row: A.row + 1, col: A.col, value: "Mon" },
+          { row: A.row + 2, col: A.col, value: "Fri" },
+        ]);
+        await ctx.settle();
+
+        // Sort using customOrder weekdays
+        const fields: SortField[] = [
+          { key: 0, ascending: true, customOrder: "weekdaysShort" },
+        ];
+        await sortRange(
+          A.row, A.col, A.row + 2, A.col,
+          fields,
+          { hasHeaders: false }
+        );
+        await ctx.settle();
+
+        // Verify order becomes Mon, Wed, Fri
+        const cell0 = await ctx.getCell(A.row, A.col);
+        expectCellValue(cell0, "Mon", A.ref(0, 0));
+
+        const cell1 = await ctx.getCell(A.row + 1, A.col);
+        expectCellValue(cell1, "Wed", A.ref(1, 0));
+
+        const cell2 = await ctx.getCell(A.row + 2, A.col);
+        expectCellValue(cell2, "Fri", A.ref(2, 0));
+      },
+    },
+
+    // ======================================================================
+    // 28. AutoRecover Settings (Batch 3)
+    // ======================================================================
+    {
+      name: "AutoRecover: default settings",
+      description: "Default auto-recover settings are enabled=true, intervalMs=300000.",
+      async run(ctx) {
+        // Reset to defaults first
+        await setAutoRecoverSettings(true, 300000);
+        await ctx.settle();
+
+        const settings = await getAutoRecoverSettings();
+        assertEqual(settings.enabled, true, "default enabled should be true");
+        assertEqual(settings.intervalMs, 300000, "default intervalMs should be 300000");
+      },
+    },
+    {
+      name: "AutoRecover: change and read back",
+      description: "Changing auto-recover settings persists correctly.",
+      async run(ctx) {
+        // Change settings
+        const updated = await setAutoRecoverSettings(false, 60000);
+        await ctx.settle();
+
+        assertEqual(updated.enabled, false, "returned enabled should be false");
+        assertEqual(updated.intervalMs, 60000, "returned intervalMs should be 60000");
+
+        // Read back to confirm
+        const readBack = await getAutoRecoverSettings();
+        assertEqual(readBack.enabled, false, "readBack enabled should be false");
+        assertEqual(readBack.intervalMs, 60000, "readBack intervalMs should be 60000");
+
+        // Reset to defaults
+        await setAutoRecoverSettings(true, 300000);
+        await ctx.settle();
+      },
+    },
+
+    // ======================================================================
+    // 29. Display Toggles: Gridlines and Headings (Batch 7)
+    // ======================================================================
+    {
+      name: "Display toggles: gridlines event infrastructure",
+      description: "Emit DISPLAY_GRIDLINES_TOGGLED event and verify listener fires.",
+      async run(ctx) {
+        let received = false;
+        const cleanup = onAppEvent(
+          AppEvents.DISPLAY_GRIDLINES_TOGGLED,
+          () => { received = true; }
+        );
+
+        // Emit gridlines off
+        emitAppEvent(AppEvents.DISPLAY_GRIDLINES_TOGGLED, { displayGridlines: false });
+        await ctx.settle();
+
+        assertTrue(received, "listener should have been called for gridlines toggle off");
+
+        // Reset: emit gridlines on
+        received = false;
+        emitAppEvent(AppEvents.DISPLAY_GRIDLINES_TOGGLED, { displayGridlines: true });
+        await ctx.settle();
+
+        assertTrue(received, "listener should have been called for gridlines toggle on");
+        cleanup();
+      },
+    },
+    {
+      name: "Display toggles: headings event infrastructure",
+      description: "Emit DISPLAY_HEADINGS_TOGGLED event and verify listener fires.",
+      async run(ctx) {
+        let received = false;
+        const cleanup = onAppEvent(
+          AppEvents.DISPLAY_HEADINGS_TOGGLED,
+          () => { received = true; }
+        );
+
+        // Emit headings off
+        emitAppEvent(AppEvents.DISPLAY_HEADINGS_TOGGLED, { displayHeadings: false });
+        await ctx.settle();
+
+        assertTrue(received, "listener should have been called for headings toggle off");
+
+        // Reset: emit headings on
+        emitAppEvent(AppEvents.DISPLAY_HEADINGS_TOGGLED, { displayHeadings: true });
+        await ctx.settle();
+
+        cleanup();
+      },
+    },
+
+    // ======================================================================
+    // 30. SUMX Functions (Batch 6)
+    // ======================================================================
+    {
+      name: "SUMXMY2: sum of squared differences",
+      description: "SUMXMY2({1,2,3},{4,5,6}) returns 27.",
+      async run(ctx) {
+        // Set up two columns of data
+        await ctx.setCells([
+          { row: A.row, col: A.col, value: "1" },
+          { row: A.row + 1, col: A.col, value: "2" },
+          { row: A.row + 2, col: A.col, value: "3" },
+          { row: A.row, col: A.col + 1, value: "4" },
+          { row: A.row + 1, col: A.col + 1, value: "5" },
+          { row: A.row + 2, col: A.col + 1, value: "6" },
+          {
+            row: A.row + 4,
+            col: A.col,
+            value: `=SUMXMY2(${A.ref(0, 0)}:${A.ref(2, 0)},${A.ref(0, 1)}:${A.ref(2, 1)})`,
+          },
+        ]);
+        await ctx.settle();
+
+        const cell = await ctx.getCell(A.row + 4, A.col);
+        // (1-4)^2 + (2-5)^2 + (3-6)^2 = 9 + 9 + 9 = 27
+        expectCellValue(cell, "27", A.ref(4, 0));
+      },
+    },
+
+    // ======================================================================
+    // 31. Zoom API (Batch 7)
+    // ======================================================================
+    {
+      name: "Zoom API: get, set, and reset zoom level",
+      description: "Set zoom to 150, verify, then reset to original.",
+      async run(ctx) {
+        const original = getZoom();
+
+        setZoomLevel(150);
+        await ctx.settle();
+
+        const updated = getZoom();
+        assertEqual(updated, 150, "zoom should be 150 after set");
+
+        // Reset to original
+        setZoomLevel(original);
+        await ctx.settle();
+
+        const restored = getZoom();
+        assertEqual(restored, original, "zoom should be restored to original");
+      },
+    },
+
+    // ======================================================================
+    // 32. StatusBar API (Batch 7)
+    // ======================================================================
+    {
+      name: "StatusBar API: set and clear without errors",
+      description: "setStatusBarText and clearStatusBarText should not throw.",
+      async run(ctx) {
+        // Set status bar text
+        setStatusBarText("test message");
+        await ctx.settle();
+
+        // Clear status bar text
+        clearStatusBarText();
+        await ctx.settle();
+
+        // If we got here without throwing, the test passes
+        assertTrue(true, "statusBar API should not throw");
+      },
+    },
+
+    // ======================================================================
+    // 33. Workbook Properties (Batch 8)
+    // ======================================================================
+    {
+      name: "Workbook properties: get, set title, and reset",
+      description: "Set workbook title, read back, verify, then reset.",
+      async run(ctx) {
+        const original = await getWorkbookProperties();
+        await ctx.settle();
+
+        // Set title
+        const updated = await setWorkbookProperties({
+          ...original,
+          title: "Test Title",
+        });
+        await ctx.settle();
+
+        assertEqual(updated.title, "Test Title", "title should be 'Test Title' after set");
+
+        // Read back to confirm
+        const readBack = await getWorkbookProperties();
+        assertEqual(readBack.title, "Test Title", "readBack title should match");
+
+        // Reset title to empty
+        await setWorkbookProperties({
+          ...readBack,
+          title: "",
+        });
+        await ctx.settle();
+      },
+    },
+
+    // ======================================================================
+    // 34. Sheet Visibility (Batch 8)
+    // ======================================================================
+    {
+      name: "Sheet visibility: hide and unhide with veryHidden",
+      description: "Add sheet, hide as veryHidden, verify visibility, unhide, delete.",
+      async run(ctx) {
+        // Add a new sheet
+        const added = await addSheet("VisibilityTest");
+        await ctx.settle();
+
+        const newIndex = added.sheets.findIndex(s => s.name === "VisibilityTest");
+        assertTrue(newIndex >= 0, "new sheet should exist");
+
+        // Hide with veryHidden
+        const hidden = await hideSheet(newIndex, "veryHidden");
+        await ctx.settle();
+
+        const hiddenSheet = hidden.sheets.find(s => s.name === "VisibilityTest");
+        expectNotNull(hiddenSheet, "hidden sheet should still exist in list");
+        assertEqual(hiddenSheet!.visibility, "veryHidden", "visibility should be veryHidden");
+
+        // Unhide
+        const unhidden = await unhideSheet(newIndex);
+        await ctx.settle();
+
+        const unhiddenSheet = unhidden.sheets.find(s => s.name === "VisibilityTest");
+        expectNotNull(unhiddenSheet, "unhidden sheet should exist");
+        assertEqual(unhiddenSheet!.visibility, "visible", "visibility should be visible after unhide");
+
+        // Clean up: delete the sheet
+        await deleteSheet(newIndex);
+        await ctx.settle();
+      },
+    },
+
+    // ======================================================================
+    // 35. Next/Previous Sheet (Batch 8)
+    // ======================================================================
+    {
+      name: "Next/Previous sheet: navigate between sheets",
+      description: "Add 2 sheets, navigate with nextSheet/previousSheet, verify active changes.",
+      async run(ctx) {
+        // Add 2 extra sheets
+        await addSheet("NavTest1");
+        const added2 = await addSheet("NavTest2");
+        await ctx.settle();
+
+        // Navigate with nextSheet
+        const afterNext = await nextSheet();
+        await ctx.settle();
+        assertTrue(
+          afterNext.activeIndex !== added2.activeIndex,
+          "active sheet should change after nextSheet"
+        );
+
+        // Navigate with previousSheet
+        const afterPrev = await previousSheet();
+        await ctx.settle();
+        assertTrue(
+          afterPrev.activeIndex !== afterNext.activeIndex,
+          "active sheet should change after previousSheet"
+        );
+
+        // Clean up: find and delete the added sheets
+        const sheetsNow = await getSheets();
+        const idx1 = sheetsNow.sheets.findIndex(s => s.name === "NavTest2");
+        if (idx1 >= 0) await deleteSheet(idx1);
+        const sheetsAfter1 = await getSheets();
+        const idx2 = sheetsAfter1.sheets.findIndex(s => s.name === "NavTest1");
+        if (idx2 >= 0) await deleteSheet(idx2);
+        await ctx.settle();
+      },
+    },
+
+    // ======================================================================
+    // 36. View Mode (Batch 8)
+    // ======================================================================
+    {
+      name: "View mode: default is normal, change to pageBreakPreview and back",
+      description: "Verify default view mode, change it, verify, and reset.",
+      async run(ctx) {
+        const defaultMode = getViewMode();
+        assertEqual(defaultMode, "normal", "default view mode should be 'normal'");
+
+        changeViewMode("pageBreakPreview");
+        await ctx.settle();
+
+        const changed = getViewMode();
+        assertEqual(changed, "pageBreakPreview", "view mode should be 'pageBreakPreview'");
+
+        // Reset to normal
+        changeViewMode("normal");
+        await ctx.settle();
+
+        const reset = getViewMode();
+        assertEqual(reset, "normal", "view mode should be 'normal' after reset");
+      },
+    },
+
+    // ======================================================================
+    // 37. R1C1 Reference Style (Batch 11)
+    // ======================================================================
+    {
+      name: "R1C1 reference style: toggle and convert formula",
+      description: "Verify default A1 style, switch to R1C1, convert formula, and reset.",
+      async run(ctx) {
+        // Verify default is A1
+        const defaultStyle = await getReferenceStyle();
+        assertEqual(defaultStyle, "A1", "default reference style should be A1");
+
+        // Change to R1C1
+        await changeReferenceStyle("R1C1");
+        await ctx.settle();
+
+        const changed = await getReferenceStyle();
+        assertEqual(changed, "R1C1", "reference style should be R1C1 after change");
+
+        // Convert formula from A1 to R1C1
+        const converted = await convertFormulaStyle("=A1+B2", "A1", "R1C1", 0, 0);
+        assertTrue(
+          converted.includes("R") && converted.includes("C"),
+          `converted formula should contain R and C, got: ${converted}`
+        );
+
+        // Reset to A1
+        await changeReferenceStyle("A1");
+        await ctx.settle();
+
+        const reset = await getReferenceStyle();
+        assertEqual(reset, "A1", "reference style should be A1 after reset");
+      },
+    },
+
+    // ======================================================================
+    // 38. ScrollArea (Batch 10)
+    // ======================================================================
+    {
+      name: "ScrollArea: set, get, and clear",
+      description: "Set scroll area to A1:Z100, read back, then clear with null.",
+      async run(ctx) {
+        // Set scroll area
+        await setScrollArea("A1:Z100");
+        await ctx.settle();
+
+        const area = await getScrollArea();
+        assertEqual(area, "A1:Z100", "scroll area should be A1:Z100");
+
+        // Clear with null
+        await setScrollArea(null);
+        await ctx.settle();
+
+        const cleared = await getScrollArea();
+        assertTrue(cleared === null, "scroll area should be null after clearing");
+      },
+    },
+
+    // ======================================================================
+    // 39. CalculationState (Batch 10)
+    // ======================================================================
+    {
+      name: "CalculationState: returns done",
+      description: "getCalculationState should return 'done' when idle.",
+      async run(ctx) {
+        const state = await getCalculationState();
+        assertEqual(state, "done", "calculation state should be 'done'");
+      },
+    },
+
+    // ======================================================================
+    // 40. Print/Calc Settings (Batch 9)
+    // ======================================================================
+    {
+      name: "PrecisionAsDisplayed: default is false, toggle and reset",
+      description: "Verify default, toggle to true, read back, reset.",
+      async run(ctx) {
+        // Reset to default first
+        await setPrecisionAsDisplayed(false);
+        await ctx.settle();
+
+        const defaultVal = await getPrecisionAsDisplayed();
+        assertEqual(defaultVal, false, "default precisionAsDisplayed should be false");
+
+        // Toggle to true
+        const toggled = await setPrecisionAsDisplayed(true);
+        await ctx.settle();
+        assertEqual(toggled, true, "precisionAsDisplayed should be true after toggle");
+
+        // Read back
+        const readBack = await getPrecisionAsDisplayed();
+        assertEqual(readBack, true, "readBack precisionAsDisplayed should be true");
+
+        // Reset
+        await setPrecisionAsDisplayed(false);
+        await ctx.settle();
+      },
+    },
+    {
+      name: "CalculateBeforeSave: default is true, toggle and reset",
+      description: "Verify default, toggle to false, read back, reset.",
+      async run(ctx) {
+        // Reset to default first
+        await setCalculateBeforeSave(true);
+        await ctx.settle();
+
+        const defaultVal = await getCalculateBeforeSave();
+        assertEqual(defaultVal, true, "default calculateBeforeSave should be true");
+
+        // Toggle to false
+        const toggled = await setCalculateBeforeSave(false);
+        await ctx.settle();
+        assertEqual(toggled, false, "calculateBeforeSave should be false after toggle");
+
+        // Read back
+        const readBack = await getCalculateBeforeSave();
+        assertEqual(readBack, false, "readBack calculateBeforeSave should be false");
+
+        // Reset
+        await setCalculateBeforeSave(true);
+        await ctx.settle();
       },
     },
   ],

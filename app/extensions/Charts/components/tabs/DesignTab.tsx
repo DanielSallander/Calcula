@@ -2,7 +2,7 @@
 // PURPOSE: Design tab of the chart dialog. Chart type, title, axis, legend, palette, mark options.
 
 import React from "react";
-import type { ChartSpec, ChartType, DataLabelSpec, BoxPlotMarkOptions, SunburstMarkOptions, ParetoMarkOptions } from "../../types";
+import type { ChartSpec, ChartType, DataLabelSpec, DataTableOptions, ErrorBarOptions, BoxPlotMarkOptions, SunburstMarkOptions, ParetoMarkOptions } from "../../types";
 import { isCartesianChart } from "../../types";
 import { PALETTES, PALETTE_NAMES } from "../../rendering/chartTheme";
 import {
@@ -217,6 +217,16 @@ export function DesignTab({ spec, onSpecChange }: DesignTabProps): React.ReactEl
           </div>
         )}
       </FieldGroup>
+
+      {/* Error Bars (bar, line, scatter only) */}
+      {(spec.mark === "bar" || spec.mark === "horizontalBar" || spec.mark === "line" || spec.mark === "scatter") && (
+        <ErrorBarsSection spec={spec} onSpecChange={onSpecChange} />
+      )}
+
+      {/* Data Table (cartesian charts only) */}
+      {cartesian && (
+        <DataTableSection spec={spec} onSpecChange={onSpecChange} />
+      )}
 
       {/* Palette */}
       <FieldGroup>
@@ -676,4 +686,151 @@ function MarkOptions({ spec, onSpecChange }: DesignTabProps): React.ReactElement
     default:
       return null;
   }
+}
+
+// ============================================================================
+// Error Bars Section
+// ============================================================================
+
+function ErrorBarsSection({ spec, onSpecChange }: DesignTabProps): React.ReactElement {
+  const opts = spec.markOptions ?? {};
+  const errorBars: ErrorBarOptions = (opts as any).errorBars ?? {
+    enabled: false,
+    type: "standardError",
+    direction: "both",
+  };
+
+  const updateErrorBars = (updates: Partial<ErrorBarOptions>) => {
+    const newEB = { ...errorBars, ...updates };
+    onSpecChange({ markOptions: { ...opts, errorBars: newEB } });
+  };
+
+  return (
+    <FieldGroup>
+      <Label>Error Bars</Label>
+      <CheckboxLabel>
+        <input
+          type="checkbox"
+          checked={errorBars.enabled}
+          onChange={(e) => updateErrorBars({ enabled: e.target.checked })}
+        />
+        Show error bars
+      </CheckboxLabel>
+      {errorBars.enabled && (
+        <>
+          <div style={{ display: "flex", alignItems: "center", gap: "8px", marginBottom: "4px" }}>
+            <span style={{ fontSize: "12px", color: "var(--text-secondary)" }}>Type:</span>
+            <Select
+              value={errorBars.type}
+              onChange={(e) =>
+                updateErrorBars({ type: e.target.value as ErrorBarOptions["type"] })
+              }
+            >
+              <option value="standardError">Standard Error</option>
+              <option value="percentage">Percentage</option>
+              <option value="standardDeviation">Standard Deviation</option>
+              <option value="custom">Custom (fixed value)</option>
+            </Select>
+          </div>
+          {(errorBars.type === "percentage" || errorBars.type === "standardDeviation" || errorBars.type === "custom") && (
+            <div style={{ display: "flex", alignItems: "center", gap: "8px", marginBottom: "4px" }}>
+              <span style={{ fontSize: "12px", color: "var(--text-secondary)" }}>
+                {errorBars.type === "percentage" ? "Percentage:" : errorBars.type === "standardDeviation" ? "Multiplier:" : "Value:"}
+              </span>
+              <Input
+                type="number"
+                min={0}
+                step={errorBars.type === "percentage" ? 1 : 0.1}
+                value={errorBars.value ?? (errorBars.type === "percentage" ? 10 : 1)}
+                onChange={(e) => updateErrorBars({ value: parseFloat(e.target.value) || 0 })}
+                style={{ width: "70px" }}
+              />
+            </div>
+          )}
+          <div style={{ display: "flex", alignItems: "center", gap: "8px", marginBottom: "4px" }}>
+            <span style={{ fontSize: "12px", color: "var(--text-secondary)" }}>Direction:</span>
+            <Select
+              value={errorBars.direction}
+              onChange={(e) =>
+                updateErrorBars({ direction: e.target.value as ErrorBarOptions["direction"] })
+              }
+            >
+              <option value="both">Both</option>
+              <option value="plus">Plus only</option>
+              <option value="minus">Minus only</option>
+            </Select>
+          </div>
+        </>
+      )}
+    </FieldGroup>
+  );
+}
+
+// ============================================================================
+// Data Table Section
+// ============================================================================
+
+function DataTableSection({ spec, onSpecChange }: DesignTabProps): React.ReactElement {
+  const dt: DataTableOptions = spec.dataTable ?? {
+    enabled: false,
+    showLegendKeys: true,
+    showHorizontalBorder: true,
+    showVerticalBorder: true,
+    showOutlineBorder: true,
+  };
+
+  const updateDataTable = (updates: Partial<DataTableOptions>) => {
+    const newDT = { ...dt, ...updates };
+    onSpecChange({ dataTable: newDT });
+  };
+
+  return (
+    <FieldGroup>
+      <Label>Data Table</Label>
+      <CheckboxLabel>
+        <input
+          type="checkbox"
+          checked={dt.enabled}
+          onChange={(e) => updateDataTable({ enabled: e.target.checked })}
+        />
+        Show data table below chart
+      </CheckboxLabel>
+      {dt.enabled && (
+        <>
+          <CheckboxLabel>
+            <input
+              type="checkbox"
+              checked={dt.showLegendKeys !== false}
+              onChange={(e) => updateDataTable({ showLegendKeys: e.target.checked })}
+            />
+            Show legend keys
+          </CheckboxLabel>
+          <CheckboxLabel>
+            <input
+              type="checkbox"
+              checked={dt.showHorizontalBorder !== false}
+              onChange={(e) => updateDataTable({ showHorizontalBorder: e.target.checked })}
+            />
+            Horizontal borders
+          </CheckboxLabel>
+          <CheckboxLabel>
+            <input
+              type="checkbox"
+              checked={dt.showVerticalBorder !== false}
+              onChange={(e) => updateDataTable({ showVerticalBorder: e.target.checked })}
+            />
+            Vertical borders
+          </CheckboxLabel>
+          <CheckboxLabel>
+            <input
+              type="checkbox"
+              checked={dt.showOutlineBorder !== false}
+              onChange={(e) => updateDataTable({ showOutlineBorder: e.target.checked })}
+            />
+            Outline border
+          </CheckboxLabel>
+        </>
+      )}
+    </FieldGroup>
+  );
 }

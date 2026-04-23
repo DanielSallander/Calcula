@@ -69,6 +69,18 @@ impl NotebookSession {
             deferred_actions: RefCell::new(Vec::new()),
             display_zeros: true,
             is_dirty: false,
+            view_mode: "normal".to_string(),
+            zoom: 1.0,
+            reference_style: "A1".to_string(),
+            sheet_visibility: Vec::new(),
+            workbook_properties: std::collections::HashMap::new(),
+            named_style_names: Vec::new(),
+            iteration_enabled: false,
+            iteration_max_count: 100,
+            iteration_max_change: 0.001,
+            scroll_area: None,
+            display_gridlines: true,
+            display_headings: true,
         };
 
         let shared_ctx = Rc::new(RefCell::new(initial_ctx));
@@ -222,6 +234,7 @@ fn register_calcula_api<'js>(
     ops::sheets::register_sheet_ops(ctx, &calcula, shared_ctx.clone())?;
     ops::utility::register_utility_ops(ctx, &calcula, shared_ctx.clone())?;
     ops::worksheet_props::register_worksheet_props_ops(ctx, &calcula, shared_ctx.clone())?;
+    ops::extended::register_extended_ops(ctx, &calcula, shared_ctx.clone())?;
 
     globals
         .set("Calcula", calcula)

@@ -91,6 +91,9 @@ fn register_calcula_api<'js>(
     // Worksheet property operations
     ops::worksheet_props::register_worksheet_props_ops(ctx, &calcula, shared_ctx.clone())?;
 
+    // Extended operations (view, navigation, formatting, data, display)
+    ops::extended::register_extended_ops(ctx, &calcula, shared_ctx.clone())?;
+
     // Set Calcula on globals BEFORE application ops (application.rs uses eval
     // that references the global Calcula object for defineProperty wiring)
     globals

@@ -243,9 +243,18 @@ function LayoutInner(): React.ReactElement {
         emitAppEvent(AppEvents.BEFORE_CLOSE);
 
         // Check for unsaved changes and prompt the user
+        let dirty = false;
         try {
-          const dirty = await isFileModified();
-          if (dirty) {
+          dirty = await isFileModified();
+        } catch {
+          // If check fails, allow close
+        }
+
+        if (dirty) {
+          // Prevent close while we show the dialog
+          event.preventDefault();
+
+          try {
             const shouldSave = await ask(
               "Do you want to save changes before closing?",
               {
@@ -259,13 +268,14 @@ function LayoutInner(): React.ReactElement {
             if (shouldSave) {
               await saveFile();
             }
+          } catch (error) {
+            console.error("[Layout] Error during close handler:", error);
           }
-        } catch (error) {
-          // If checking dirty state or saving fails, still allow close
-          console.error("[Layout] Error during close handler:", error);
+
+          // User has responded — now close
+          await getCurrentWindow().destroy();
         }
-        // Explicitly destroy the window to close the app
-        await getCurrentWindow().destroy();
+        // If not dirty, don't preventDefault — window closes normally
       })
       .then((fn) => {
         unlisten = fn;

@@ -1564,3 +1564,23 @@ export function getShapeDefinition(shapeType: string): ShapeDefinition | null {
 export function getShapeCategories(): ShapeCategory[] {
   return SHAPE_CATEGORIES;
 }
+
+/** Connector shape IDs (lines that conceptually connect two shapes). */
+const CONNECTOR_SHAPE_IDS = new Set([
+  "elbowConnector",
+  "elbowConnectorArrow",
+  "curvedConnector",
+  "lineArrow",
+  "doubleArrow",
+  "line",
+  "diagonalLine",
+  "diagonalLineReverse",
+]);
+
+/**
+ * Check if a shape type is a connector/line shape.
+ * Used to determine whether to show connection point indicators on other shapes.
+ */
+export function isConnectorShape(shapeType: string): boolean {
+  return CONNECTOR_SHAPE_IDS.has(shapeType);
+}

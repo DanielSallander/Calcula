@@ -14,8 +14,8 @@ import {
 } from "@api/gridOverlays";
 import { getDesignMode } from "../lib/designMode";
 import { resolveControlProperties } from "../lib/controlApi";
-import { isFloatingControlSelected } from "../Button/floatingSelection";
-import { getShapeDefinition, type ShapePathCommand } from "./shapeCatalog";
+import { isFloatingControlSelected, getSelectedFloatingControls } from "../Button/floatingSelection";
+import { getShapeDefinition, isConnectorShape, type ShapePathCommand } from "./shapeCatalog";
 
 // ============================================================================
 // Cached Metadata (async fetch with sync render)
@@ -271,6 +271,17 @@ export function renderFloatingShape(overlayCtx: OverlayRenderContext): void {
     drawResizeHandles(ctx, canvasX, canvasY, shapeWidth, shapeHeight);
   }
 
+  // 5. Connection point indicators
+  // Show connection points (small circles at edge midpoints) on non-connector
+  // shapes when a connector/line shape is currently selected. This gives
+  // visual guidance about potential attachment points.
+  if (!shapeDef.isLine) {
+    const shouldShowConnectionPoints = isConnectorSelectedGlobal();
+    if (shouldShowConnectionPoints) {
+      drawConnectionPoints(ctx, canvasX, canvasY, shapeWidth, shapeHeight);
+    }
+  }
+
   ctx.restore();
 }
 
@@ -385,4 +396,61 @@ function drawResizeHandles(
   ctx.fillRect(x + w / 2 - handleSize / 2, y + h - handleSize / 2, handleSize, handleSize);
   ctx.fillRect(x - handleSize / 2, y + h / 2 - handleSize / 2, handleSize, handleSize);
   ctx.fillRect(x + w - handleSize / 2, y + h / 2 - handleSize / 2, handleSize, handleSize);
+}
+
+// ============================================================================
+// Connection Point Indicators
+// ============================================================================
+
+/**
+ * Check if any currently selected floating control is a connector/line shape.
+ * Used to decide whether to show connection point indicators on other shapes.
+ */
+function isConnectorSelectedGlobal(): boolean {
+  const selectedIds = getSelectedFloatingControls();
+  for (const id of selectedIds) {
+    const cached = shapeDataCache.get(id);
+    if (cached && isConnectorShape(cached.shapeType)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * Draw connection point indicators at the four edge midpoints of a shape.
+ * Each indicator is a small circle with a green fill and dark border,
+ * providing visual guidance for where connectors can attach.
+ */
+function drawConnectionPoints(
+  ctx: CanvasRenderingContext2D,
+  x: number,
+  y: number,
+  w: number,
+  h: number,
+): void {
+  const radius = 4;
+  const points = [
+    { cx: x + w / 2, cy: y },           // top center
+    { cx: x + w,     cy: y + h / 2 },   // right center
+    { cx: x + w / 2, cy: y + h },       // bottom center
+    { cx: x,         cy: y + h / 2 },   // left center
+  ];
+
+  for (const pt of points) {
+    // Outer circle (border)
+    ctx.beginPath();
+    ctx.arc(pt.cx, pt.cy, radius + 1, 0, Math.PI * 2);
+    ctx.fillStyle = "#ffffff";
+    ctx.fill();
+    ctx.strokeStyle = "#0e639c";
+    ctx.lineWidth = 1.5;
+    ctx.stroke();
+
+    // Inner filled circle
+    ctx.beginPath();
+    ctx.arc(pt.cx, pt.cy, radius - 1, 0, Math.PI * 2);
+    ctx.fillStyle = "#4CAF50";
+    ctx.fill();
+  }
 }

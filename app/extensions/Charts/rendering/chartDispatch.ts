@@ -34,6 +34,8 @@ import { paintRule } from "./rulePainter";
 import { paintTextMark } from "./textMarkPainter";
 import { paintTrendlines } from "./trendlinePainter";
 import { paintDataLabels } from "./dataLabelPainter";
+import { paintErrorBars } from "./errorBarPainter";
+import { paintDataTable, computeDataTableHeight } from "./dataTablePainter";
 
 // ============================================================================
 // Paint Dispatch
@@ -49,6 +51,15 @@ export function dispatchPaint(
 ): void {
   // Paint the primary mark
   paintMark(ctx, data, spec.mark, spec, layout, theme);
+
+  // Paint error bars (after primary mark, before data labels)
+  const errorBarMarks = ["bar", "horizontalBar", "line", "scatter"];
+  if (errorBarMarks.includes(spec.mark)) {
+    const geometry = dispatchComputeGeometry(data, spec, layout, theme);
+    if (geometry) {
+      paintErrorBars(ctx, data, spec, layout, theme, geometry);
+    }
+  }
 
   // Paint data labels (after primary mark)
   if (spec.dataLabels?.enabled) {
@@ -82,6 +93,11 @@ export function dispatchPaint(
         paintMark(ctx, layerData, layer.mark, layerSpec, layout, theme);
       }
     }
+  }
+
+  // Paint data table (below the plot area, after everything else)
+  if (spec.dataTable?.enabled) {
+    paintDataTable(ctx, data, spec, layout, theme);
   }
 }
 
@@ -162,26 +178,38 @@ export function dispatchComputeLayout(
   data: ParsedChartData,
   theme: ChartRenderTheme,
 ): ChartLayout {
+  let layout: ChartLayout;
+
   switch (spec.mark) {
-    case "bar": return computeBarLayout(width, height, spec, data, theme);
-    case "horizontalBar": return computeHorizontalBarLayout(width, height, spec, data, theme);
-    case "line": return computeLineLayout(width, height, spec, data, theme);
-    case "area": return computeAreaLayout(width, height, spec, data, theme);
-    case "scatter": return computeScatterLayout(width, height, spec, data, theme);
+    case "bar": layout = computeBarLayout(width, height, spec, data, theme); break;
+    case "horizontalBar": layout = computeHorizontalBarLayout(width, height, spec, data, theme); break;
+    case "line": layout = computeLineLayout(width, height, spec, data, theme); break;
+    case "area": layout = computeAreaLayout(width, height, spec, data, theme); break;
+    case "scatter": layout = computeScatterLayout(width, height, spec, data, theme); break;
     case "pie":
-    case "donut": return computePieLayout(width, height, spec, data, theme);
-    case "waterfall": return computeWaterfallLayout(width, height, spec, data, theme);
-    case "combo": return computeComboLayout(width, height, spec, data, theme);
-    case "radar": return computeRadarLayout(width, height, spec, data, theme);
-    case "bubble": return computeBubbleLayout(width, height, spec, data, theme);
-    case "histogram": return computeHistogramLayout(width, height, spec, data, theme);
-    case "funnel": return computeFunnelLayout(width, height, spec, data, theme);
-    case "treemap": return computeTreemapLayout(width, height, spec, data, theme);
-    case "stock": return computeStockLayout(width, height, spec, data, theme);
-    case "boxPlot": return computeBoxPlotLayout(width, height, spec, data, theme);
-    case "sunburst": return computeSunburstLayout(width, height, spec, data, theme);
-    case "pareto": return computeParetoLayout(width, height, spec, data, theme);
+    case "donut": layout = computePieLayout(width, height, spec, data, theme); break;
+    case "waterfall": layout = computeWaterfallLayout(width, height, spec, data, theme); break;
+    case "combo": layout = computeComboLayout(width, height, spec, data, theme); break;
+    case "radar": layout = computeRadarLayout(width, height, spec, data, theme); break;
+    case "bubble": layout = computeBubbleLayout(width, height, spec, data, theme); break;
+    case "histogram": layout = computeHistogramLayout(width, height, spec, data, theme); break;
+    case "funnel": layout = computeFunnelLayout(width, height, spec, data, theme); break;
+    case "treemap": layout = computeTreemapLayout(width, height, spec, data, theme); break;
+    case "stock": layout = computeStockLayout(width, height, spec, data, theme); break;
+    case "boxPlot": layout = computeBoxPlotLayout(width, height, spec, data, theme); break;
+    case "sunburst": layout = computeSunburstLayout(width, height, spec, data, theme); break;
+    case "pareto": layout = computeParetoLayout(width, height, spec, data, theme); break;
+    default: layout = computeBarLayout(width, height, spec, data, theme); break;
   }
+
+  // Reserve space for data table below the plot area
+  const dtHeight = computeDataTableHeight(spec, data);
+  if (dtHeight > 0) {
+    layout.plotArea.height = Math.max(layout.plotArea.height - dtHeight, 40);
+    layout.margin.bottom += dtHeight;
+  }
+
+  return layout;
 }
 
 // ============================================================================
