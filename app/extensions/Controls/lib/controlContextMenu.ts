@@ -9,6 +9,8 @@ import { emitAppEvent } from "@api/events";
 import type { GridContextMenuItem, GridMenuContext } from "@api/extensions";
 import {
   getSelectedFloatingControl,
+  getSelectedFloatingControls,
+  getSelectedControlCount,
 } from "../Button/floatingSelection";
 import {
   getFloatingControl,
@@ -17,6 +19,10 @@ import {
   bringForward,
   sendBackward,
   syncFloatingControlRegions,
+  groupControls,
+  ungroupControls,
+  getGroupForControl,
+  getGroupMembers,
 } from "./floatingStore";
 import {
   setControlProperty,
@@ -46,6 +52,8 @@ const ITEM_IDS = [
   "controls.duplicate",
   "controls.copy",
   "controls.paste",
+  "controls.group",
+  "controls.ungroup",
   "controls.order",
   "controls.order.bringToFront",
   "controls.order.bringForward",
@@ -63,6 +71,18 @@ const ITEM_IDS = [
 /** Check if a floating control is currently selected. */
 function isControlSelected(): boolean {
   return getSelectedFloatingControl() !== null;
+}
+
+/** Check if multiple controls are selected (for grouping). */
+function isMultipleControlsSelected(): boolean {
+  return getSelectedControlCount() >= 2;
+}
+
+/** Check if a grouped control is selected (for ungrouping). */
+function isGroupedControlSelected(): boolean {
+  const id = getSelectedFloatingControl();
+  if (!id) return false;
+  return getGroupForControl(id) !== null;
 }
 
 /** Check if the selected control supports flip (shape or image, not button). */
@@ -107,7 +127,7 @@ async function toggleFlip(property: "flipH" | "flipV"): Promise<void> {
 }
 
 /**
- * Delete the currently selected floating control.
+ * Delete the currently selected floating control(s).
  */
 async function deleteSelectedControl(): Promise<void> {
   const id = getSelectedFloatingControl();
@@ -116,6 +136,31 @@ async function deleteSelectedControl(): Promise<void> {
   // Dispatch custom event that index.ts handles for deletion
   // (reuse the existing deleteFloatingControl logic)
   window.dispatchEvent(new CustomEvent("controls:delete-selected"));
+}
+
+// ============================================================================
+// Group / Ungroup Handlers
+// ============================================================================
+
+function handleGroup(): void {
+  const selectedIds = getSelectedFloatingControls();
+  if (selectedIds.size < 2) return;
+
+  groupControls([...selectedIds]);
+  syncFloatingControlRegions();
+  emitAppEvent(AppEvents.GRID_REFRESH);
+}
+
+function handleUngroup(): void {
+  const id = getSelectedFloatingControl();
+  if (!id) return;
+
+  const groupId = getGroupForControl(id);
+  if (!groupId) return;
+
+  ungroupControls(groupId);
+  syncFloatingControlRegions();
+  emitAppEvent(AppEvents.GRID_REFRESH);
 }
 
 // ============================================================================
@@ -215,6 +260,29 @@ export function registerControlContextMenu(): () => void {
       order: 3,
       visible: () => hasClipboardControl(),
       onClick: handlePaste,
+    },
+
+    // -- Group --
+    {
+      id: "controls.group",
+      label: "Group",
+      shortcut: "Ctrl+G",
+      group: "controls",
+      order: 5,
+      visible: () => isMultipleControlsSelected(),
+      onClick: handleGroup,
+    },
+
+    // -- Ungroup --
+    {
+      id: "controls.ungroup",
+      label: "Ungroup",
+      shortcut: "Ctrl+Shift+G",
+      group: "controls",
+      order: 6,
+      visible: () => isGroupedControlSelected(),
+      separatorAfter: true,
+      onClick: handleUngroup,
     },
 
     // -- Order (sub-menu) --

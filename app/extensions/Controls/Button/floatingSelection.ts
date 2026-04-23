@@ -1,34 +1,67 @@
 //! FILENAME: app/extensions/Controls/Button/floatingSelection.ts
-// PURPOSE: Track which floating control is currently selected.
-// CONTEXT: Used by the floating renderer to draw selection indicators
-//          and by the index to manage properties pane visibility.
+// PURPOSE: Track which floating controls are currently selected.
+// CONTEXT: Supports both single and multi-selection (Ctrl+Click).
+//          Used by renderers for selection indicators and by index.ts
+//          for properties pane and group operations.
 
 // ============================================================================
 // State
 // ============================================================================
 
-let selectedControlId: string | null = null;
+const selectedControlIds: Set<string> = new Set();
 
 // ============================================================================
 // API
 // ============================================================================
 
-/** Get the currently selected floating control ID. */
+/** Get the currently selected floating control ID (primary / first). */
 export function getSelectedFloatingControl(): string | null {
-  return selectedControlId;
+  if (selectedControlIds.size === 0) return null;
+  // Return first selected
+  return selectedControlIds.values().next().value ?? null;
+}
+
+/** Get all selected floating control IDs. */
+export function getSelectedFloatingControls(): Set<string> {
+  return selectedControlIds;
 }
 
 /** Check if a specific floating control is selected. */
 export function isFloatingControlSelected(controlId: string): boolean {
-  return selectedControlId === controlId;
+  return selectedControlIds.has(controlId);
 }
 
-/** Select a floating control. */
-export function selectFloatingControl(controlId: string): void {
-  selectedControlId = controlId;
+/** Select a floating control (replaces current selection unless additive). */
+export function selectFloatingControl(controlId: string, additive = false): void {
+  if (!additive) {
+    selectedControlIds.clear();
+  }
+  selectedControlIds.add(controlId);
 }
 
-/** Deselect the current floating control. */
+/** Toggle selection of a floating control (for Ctrl+Click). */
+export function toggleFloatingControlSelection(controlId: string): void {
+  if (selectedControlIds.has(controlId)) {
+    selectedControlIds.delete(controlId);
+  } else {
+    selectedControlIds.add(controlId);
+  }
+}
+
+/** Select multiple floating controls (replaces current selection). */
+export function selectFloatingControls(controlIds: string[]): void {
+  selectedControlIds.clear();
+  for (const id of controlIds) {
+    selectedControlIds.add(id);
+  }
+}
+
+/** Deselect the current floating control(s). */
 export function deselectFloatingControl(): void {
-  selectedControlId = null;
+  selectedControlIds.clear();
+}
+
+/** Get the count of selected controls. */
+export function getSelectedControlCount(): number {
+  return selectedControlIds.size;
 }

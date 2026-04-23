@@ -932,6 +932,8 @@ export interface GridState {
   displayHeadings: boolean;
   /** Whether to display the formula bar */
   displayFormulaBar: boolean;
+  /** Reference style: "A1" (default) or "R1C1" */
+  referenceStyle: "A1" | "R1C1";
 }
 
 /**
@@ -984,6 +986,7 @@ export function createInitialGridState(): GridState {
     displayGridlines: true,
     displayHeadings: true,
     displayFormulaBar: true,
+    referenceStyle: "A1",
   };
 }
 
@@ -1234,6 +1237,14 @@ export interface NamedRangeResult {
   success: boolean;
   namedRange: NamedRange | null;
   error: string | null;
+}
+
+/**
+ * Result of applying named range names to formulas.
+ */
+export interface ApplyNamesResult {
+  formulasModified: number;
+  cells: CellData[];
 }
 
 // ============================================================================

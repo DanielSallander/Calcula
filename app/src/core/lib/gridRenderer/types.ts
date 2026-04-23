@@ -141,4 +141,6 @@ export interface RenderState {
   displayGridlines?: boolean;
   /** Whether to display row/column headings */
   displayHeadings?: boolean;
+  /** Reference style: "A1" shows letters, "R1C1" shows numbers for column headers */
+  referenceStyle?: "A1" | "R1C1";
 }

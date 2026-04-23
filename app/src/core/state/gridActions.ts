@@ -67,6 +67,7 @@ export const GRID_ACTIONS = {
   SET_DISPLAY_GRIDLINES: "SET_DISPLAY_GRIDLINES",
   SET_DISPLAY_HEADINGS: "SET_DISPLAY_HEADINGS",
   SET_DISPLAY_FORMULA_BAR: "SET_DISPLAY_FORMULA_BAR",
+  SET_REFERENCE_STYLE: "SET_REFERENCE_STYLE",
 } as const;
 
 // Action interfaces
@@ -312,6 +313,11 @@ export interface SetDisplayFormulaBarAction {
   payload: { displayFormulaBar: boolean };
 }
 
+export interface SetReferenceStyleAction {
+  type: typeof GRID_ACTIONS.SET_REFERENCE_STYLE;
+  payload: { referenceStyle: "A1" | "R1C1" };
+}
+
 // Union type of all actions
 export type GridAction =
   | SetSelectionAction
@@ -357,7 +363,8 @@ export type GridAction =
   | SetDisplayZerosAction
   | SetDisplayGridlinesAction
   | SetDisplayHeadingsAction
-  | SetDisplayFormulaBarAction;
+  | SetDisplayFormulaBarAction
+  | SetReferenceStyleAction;
 
 // Action creators
 
@@ -866,5 +873,16 @@ export function setDisplayFormulaBar(displayFormulaBar: boolean): SetDisplayForm
   return {
     type: GRID_ACTIONS.SET_DISPLAY_FORMULA_BAR,
     payload: { displayFormulaBar },
+  };
+}
+
+/**
+ * Set the reference style ("A1" or "R1C1").
+ * In R1C1 mode, column headers show numbers and formulas display in R1C1 notation.
+ */
+export function setReferenceStyle(referenceStyle: "A1" | "R1C1"): SetReferenceStyleAction {
+  return {
+    type: GRID_ACTIONS.SET_REFERENCE_STYLE,
+    payload: { referenceStyle },
   };
 }

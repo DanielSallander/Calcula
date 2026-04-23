@@ -85,6 +85,7 @@ export {
   setDisplayGridlines,
   setDisplayHeadings,
   setDisplayFormulaBar,
+  setReferenceStyle,
   setHiddenRows,
   setHiddenCols,
   setManuallyHiddenRows,
@@ -275,11 +276,13 @@ export {
   getAllNamedRanges,
   getNamedRangeForSelection,
   renameNamedRange,
+  applyNamesToFormulas,
 } from "./lib";
 
 export type {
   NamedRange,
   NamedRangeResult,
+  ApplyNamesResult,
 } from "./lib";
 
 // ============================================================================
@@ -423,6 +426,9 @@ export { getViewMode, changeViewMode } from "./grid";
 
 // Status bar text
 export { setStatusBarText, clearStatusBarText } from "./grid";
+
+// R1C1 Reference Style
+export { getReferenceStyle, changeReferenceStyle, convertFormulaStyle } from "./grid";
 
 // ============================================================================
 // Extension Manager

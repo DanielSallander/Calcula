@@ -81,6 +81,11 @@ The \`mark\` field determines the chart type:
 | bubble | Scatter with sized bubbles | Cartesian |
 | histogram | Auto-binned histogram | Cartesian |
 | funnel | Funnel chart | None |
+| treemap | Treemap chart | None |
+| stock | OHLC/Candlestick chart | Cartesian |
+| boxPlot | Box & Whisker (distribution) | Cartesian |
+| sunburst | Hierarchical concentric rings | Radial |
+| pareto | Bars + cumulative % line | Cartesian |
 
 ## Data Sources
 

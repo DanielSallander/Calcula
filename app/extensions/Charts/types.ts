@@ -23,17 +23,20 @@ export type ChartType =
   | "histogram"
   | "funnel"
   | "treemap"
-  | "stock";
+  | "stock"
+  | "boxPlot"
+  | "sunburst"
+  | "pareto";
 
 /** Chart types that use cartesian axes (X/Y). */
-export type CartesianChartType = "bar" | "horizontalBar" | "line" | "area" | "scatter" | "waterfall" | "combo" | "bubble" | "histogram" | "stock";
+export type CartesianChartType = "bar" | "horizontalBar" | "line" | "area" | "scatter" | "waterfall" | "combo" | "bubble" | "histogram" | "stock" | "boxPlot" | "pareto";
 
 /** Chart types that use polar/radial layout (no axes). */
 export type RadialChartType = "pie" | "donut" | "radar";
 
 /** Check if a chart type uses cartesian axes. */
 export function isCartesianChart(mark: ChartType): mark is CartesianChartType {
-  return mark !== "pie" && mark !== "donut" && mark !== "radar" && mark !== "funnel" && mark !== "treemap";
+  return mark !== "pie" && mark !== "donut" && mark !== "radar" && mark !== "funnel" && mark !== "treemap" && mark !== "sunburst";
 }
 
 // ============================================================================
@@ -228,6 +231,54 @@ export interface StockMarkOptions {
   ohlcIndices?: [number, number, number, number];
 }
 
+/** Options specific to box & whisker (box plot) charts. */
+export interface BoxPlotMarkOptions {
+  /** Width of each box as fraction of available space (0-1). Default: 0.5 */
+  boxWidth?: number;
+  /** Show individual outlier points beyond whiskers. Default: true */
+  showOutliers?: boolean;
+  /** Outlier point radius in pixels. Default: 3 */
+  outlierRadius?: number;
+  /** Median line color override. Null = use contrasting color. Default: null */
+  medianColor?: string | null;
+  /** Median line width in pixels. Default: 2 */
+  medianLineWidth?: number;
+  /** Whisker line width in pixels. Default: 1 */
+  whiskerLineWidth?: number;
+  /** Show mean marker (diamond). Default: false */
+  showMean?: boolean;
+}
+
+/** Options specific to sunburst charts. */
+export interface SunburstMarkOptions {
+  /** Show labels on arc segments. Default: true */
+  showLabels?: boolean;
+  /** Label format: "category", "value", "percent", "both". Default: "category" */
+  labelFormat?: "category" | "value" | "percent" | "both";
+  /** Inner radius of the center hole as fraction of total radius (0-0.5). Default: 0.15 */
+  innerRadiusRatio?: number;
+  /** Padding angle between segments in degrees. Default: 0.5 */
+  padAngle?: number;
+  /** Level separator in category labels (to define hierarchy). Default: " > " */
+  levelSeparator?: string;
+}
+
+/** Options specific to Pareto charts. */
+export interface ParetoMarkOptions {
+  /** Border radius on bars (pixels). Default: 2 */
+  borderRadius?: number;
+  /** Color for the cumulative percentage line. Default: "#E53935" */
+  lineColor?: string;
+  /** Line width in pixels. Default: 2 */
+  lineWidth?: number;
+  /** Show point markers on the cumulative line. Default: true */
+  showMarkers?: boolean;
+  /** Marker radius in pixels. Default: 4 */
+  markerRadius?: number;
+  /** Show the 80% reference line. Default: true */
+  show80PercentLine?: boolean;
+}
+
 /** Options for rule marks (reference lines). Used in layers. */
 export interface RuleMarkOptions {
   /** Y value for a horizontal reference line. */
@@ -277,6 +328,9 @@ export type MarkOptions =
   | FunnelMarkOptions
   | TreemapMarkOptions
   | StockMarkOptions
+  | BoxPlotMarkOptions
+  | SunburstMarkOptions
+  | ParetoMarkOptions
   | RuleMarkOptions
   | TextMarkOptions;
 

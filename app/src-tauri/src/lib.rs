@@ -65,13 +65,14 @@ pub mod locale_commands;
 pub mod error_checking;
 pub mod named_styles_cmd;
 pub mod chart_commands;
+pub mod r1c1;
 
 pub use api_types::{CellData, StyleData, DimensionData, FormattingParams, MergedRegion};
 pub use logging::{init_log_file, get_log_path, next_seq, write_log, write_log_raw};
 pub use engine::{Transaction, CellChange};
 pub use sheets::FreezeConfig;
 pub use sheets::SplitConfig;
-pub use named_ranges::{NamedRange, NamedRangeResult};
+pub use named_ranges::{NamedRange, NamedRangeResult, ApplyNamesResult};
 pub use data_validation::{
     DataValidation, DataValidationType, DataValidationOperator, DataValidationAlertStyle,
     DataValidationRule, DataValidationErrorAlert, DataValidationPrompt,
@@ -282,6 +283,8 @@ pub struct AppState {
     pub charts: Mutex<Vec<api_types::ChartEntry>>,
     /// Scroll area restriction per sheet (A1-style range like "A1:Z100", or None for unrestricted)
     pub scroll_areas: Mutex<Vec<Option<String>>>,
+    /// Reference style: "A1" (default) or "R1C1"
+    pub reference_style: Mutex<String>,
 }
 
 impl AppState {
@@ -394,6 +397,7 @@ pub fn create_app_state() -> AppState {
         calculate_before_save: Mutex::new(true),
         charts: Mutex::new(Vec::new()),
         scroll_areas: Mutex::new(vec![None]),
+        reference_style: Mutex::new("A1".to_string()),
     };
 
     // Populate built-in named styles
@@ -3950,6 +3954,7 @@ pub fn run() {
             named_ranges::get_all_named_ranges,
             named_ranges::get_named_range_for_selection,
             named_ranges::rename_named_range,
+            named_ranges::apply_names_to_formulas,
             // BI (Business Intelligence) commands
             bi::bi_create_connection,
             bi::bi_delete_connection,
@@ -4252,6 +4257,10 @@ pub fn run() {
             chart_commands::save_chart,
             chart_commands::update_chart,
             chart_commands::delete_chart,
+            // R1C1 reference style commands
+            r1c1::get_reference_style,
+            r1c1::set_reference_style,
+            r1c1::convert_formula_style,
             // Third-party extension loading
             scan_extension_directory,
             get_extensions_directory,

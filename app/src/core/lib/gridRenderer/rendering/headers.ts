@@ -85,9 +85,12 @@ export function drawCorner(state: RenderState): void {
  * Supports freeze panes - frozen column headers are drawn at fixed positions.
  */
 export function drawColumnHeaders(state: RenderState): void {
-  const { ctx, width, height, config, viewport, theme, selection, dimensions, freezeConfig, insertionAnimation, splitBarSize = 0, splitViewport } = state;
+  const { ctx, width, height, config, viewport, theme, selection, dimensions, freezeConfig, insertionAnimation, splitBarSize = 0, splitViewport, referenceStyle } = state;
   const rowHeaderWidth = config.rowHeaderWidth || 50;
   const colHeaderHeight = config.colHeaderHeight || 24;
+  // In R1C1 mode, show column numbers (1-based) instead of letters
+  const isR1C1 = referenceStyle === "R1C1";
+  const getColLabel = (col: number): string => isR1C1 ? String(col + 1) : columnToLetter(col);
   const outlineBarH = config.outlineBarHeight ?? 0;
   const colLetterY = outlineBarH > 0
     ? outlineBarH + (colHeaderHeight - outlineBarH) / 2
@@ -179,7 +182,7 @@ export function drawColumnHeaders(state: RenderState): void {
       }
       ctx.restore();
     } else {
-      ctx.fillText(columnToLetter(col), x + cw / 2, colLetterY);
+      ctx.fillText(getColLabel(col), x + cw / 2, colLetterY);
     }
   };
 
@@ -345,7 +348,7 @@ export function drawColumnHeaders(state: RenderState): void {
         }
         ctx.restore();
       } else {
-        ctx.fillText(columnToLetter(col), x + colWidth / 2, colLetterY);
+        ctx.fillText(getColLabel(col), x + colWidth / 2, colLetterY);
       }
 
       baseX += colWidth;

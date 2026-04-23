@@ -11,6 +11,11 @@ import {
 } from "@api";
 import { emitAppEvent } from "@api/events";
 import type { OverlayRenderContext, OverlayHitTestContext } from "@api/gridOverlays";
+import {
+  overlayGetRowHeaderWidth,
+  overlayGetColHeaderHeight,
+  overlaySheetToCanvas,
+} from "@api/gridOverlays";
 import { drawButton } from "./Button/rendering";
 import {
   buttonStyleInterceptor,
@@ -44,8 +49,13 @@ import { getShapeDefinition } from "./Shape/shapeCatalog";
 import { ShapeGalleryPanel } from "./Shape/ShapeGalleryOverlay";
 import {
   selectFloatingControl,
+  selectFloatingControls,
+  toggleFloatingControlSelection,
   deselectFloatingControl,
   getSelectedFloatingControl,
+  getSelectedFloatingControls,
+  getSelectedControlCount,
+  isFloatingControlSelected,
 } from "./Button/floatingSelection";
 import {
   addFloatingControl,
@@ -56,6 +66,11 @@ import {
   syncFloatingControlRegions,
   resetFloatingStore,
   makeFloatingControlId,
+  getGroupForControl,
+  getGroupMembers,
+  groupControls,
+  ungroupControls,
+  moveGroupControls,
 } from "./lib/floatingStore";
 import {
   getDesignMode,
@@ -93,6 +108,9 @@ let designModeMenuItem: { checked?: boolean } | null = null;
 // Overlay Dispatchers (route render/hitTest by controlType)
 // ============================================================================
 
+/** Track which groups have had their bounding box drawn this render pass. */
+const drawnGroupBounds = new Set<string>();
+
 function renderFloatingControl(overlayCtx: OverlayRenderContext): void {
   const controlType = overlayCtx.region.data?.controlType;
   if (controlType === "shape") {
@@ -102,6 +120,163 @@ function renderFloatingControl(overlayCtx: OverlayRenderContext): void {
   } else {
     renderFloatingButton(overlayCtx);
   }
+
+  // Draw group bounding rectangle if this control is in a selected group
+  const controlId = overlayCtx.region.id;
+  if (isFloatingControlSelected(controlId)) {
+    const groupId = getGroupForControl(controlId);
+    if (groupId && !drawnGroupBounds.has(groupId)) {
+      drawnGroupBounds.add(groupId);
+      drawGroupBoundingBox(overlayCtx, groupId);
+    }
+
+    // Draw multi-selection bounding box (when 2+ controls are selected, even ungrouped)
+    const selectedCount = getSelectedControlCount();
+    if (selectedCount >= 2 && !drawnGroupBounds.has("__multiselect__")) {
+      drawnGroupBounds.add("__multiselect__");
+      drawMultiSelectionBoundingBox(overlayCtx);
+    }
+
+    // Schedule cleanup of the drawn set for next frame
+    if (drawnGroupBounds.size > 0) {
+      requestAnimationFrame(() => drawnGroupBounds.clear());
+    }
+  }
+}
+
+/**
+ * Draw a dashed bounding rectangle around all members of a group.
+ * Called once per group per render frame when the group is selected.
+ */
+function drawGroupBoundingBox(overlayCtx: OverlayRenderContext, groupId: string): void {
+  const memberIds = getGroupMembers(groupId);
+  if (memberIds.length === 0) return;
+
+  // Compute the bounding box of all group members in sheet coordinates
+  let minX = Infinity;
+  let minY = Infinity;
+  let maxX = -Infinity;
+  let maxY = -Infinity;
+
+  for (const memberId of memberIds) {
+    const ctrl = getFloatingControl(memberId);
+    if (!ctrl) continue;
+    minX = Math.min(minX, ctrl.x);
+    minY = Math.min(minY, ctrl.y);
+    maxX = Math.max(maxX, ctrl.x + ctrl.width);
+    maxY = Math.max(maxY, ctrl.y + ctrl.height);
+  }
+
+  if (minX === Infinity) return;
+
+  // Convert to canvas coordinates
+  const topLeft = overlaySheetToCanvas(overlayCtx, minX, minY);
+  const bottomRight = overlaySheetToCanvas(overlayCtx, maxX, maxY);
+
+  const rowHeaderWidth = overlayGetRowHeaderWidth(overlayCtx);
+  const colHeaderHeight = overlayGetColHeaderHeight(overlayCtx);
+
+  const { ctx } = overlayCtx;
+  ctx.save();
+
+  // Clip to cell area (not over headers)
+  ctx.beginPath();
+  ctx.rect(
+    rowHeaderWidth,
+    colHeaderHeight,
+    overlayCtx.canvasWidth - rowHeaderWidth,
+    overlayCtx.canvasHeight - colHeaderHeight,
+  );
+  ctx.clip();
+
+  // Draw dashed bounding rectangle with padding
+  const padding = 6;
+  const bx = topLeft.canvasX - padding;
+  const by = topLeft.canvasY - padding;
+  const bw = (bottomRight.canvasX - topLeft.canvasX) + padding * 2;
+  const bh = (bottomRight.canvasY - topLeft.canvasY) + padding * 2;
+
+  ctx.strokeStyle = "#0e639c";
+  ctx.lineWidth = 1.5;
+  ctx.setLineDash([6, 3]);
+  ctx.strokeRect(bx, by, bw, bh);
+  ctx.setLineDash([]);
+
+  ctx.restore();
+}
+
+/**
+ * Draw a dashed bounding rectangle around all selected controls (multi-selection).
+ * Only drawn when 2+ controls are selected and they are NOT all in one group
+ * (to avoid a duplicate bounding box).
+ */
+function drawMultiSelectionBoundingBox(overlayCtx: OverlayRenderContext): void {
+  const selectedIds = getSelectedFloatingControls();
+  if (selectedIds.size < 2) return;
+
+  // Check if all selected controls are in the same group -- if so, skip
+  // (the group bounding box already covers this)
+  let allSameGroup = true;
+  let commonGroupId: string | null | undefined = undefined;
+  for (const id of selectedIds) {
+    const gid = getGroupForControl(id);
+    if (commonGroupId === undefined) {
+      commonGroupId = gid;
+    } else if (commonGroupId !== gid) {
+      allSameGroup = false;
+      break;
+    }
+  }
+  if (allSameGroup && commonGroupId != null) return;
+
+  // Compute bounding box of all selected controls
+  let minX = Infinity;
+  let minY = Infinity;
+  let maxX = -Infinity;
+  let maxY = -Infinity;
+
+  for (const id of selectedIds) {
+    const ctrl = getFloatingControl(id);
+    if (!ctrl) continue;
+    minX = Math.min(minX, ctrl.x);
+    minY = Math.min(minY, ctrl.y);
+    maxX = Math.max(maxX, ctrl.x + ctrl.width);
+    maxY = Math.max(maxY, ctrl.y + ctrl.height);
+  }
+
+  if (minX === Infinity) return;
+
+  const topLeft = overlaySheetToCanvas(overlayCtx, minX, minY);
+  const bottomRight = overlaySheetToCanvas(overlayCtx, maxX, maxY);
+
+  const rowHeaderWidth = overlayGetRowHeaderWidth(overlayCtx);
+  const colHeaderHeight = overlayGetColHeaderHeight(overlayCtx);
+
+  const { ctx } = overlayCtx;
+  ctx.save();
+
+  ctx.beginPath();
+  ctx.rect(
+    rowHeaderWidth,
+    colHeaderHeight,
+    overlayCtx.canvasWidth - rowHeaderWidth,
+    overlayCtx.canvasHeight - colHeaderHeight,
+  );
+  ctx.clip();
+
+  const padding = 8;
+  const bx = topLeft.canvasX - padding;
+  const by = topLeft.canvasY - padding;
+  const bw = (bottomRight.canvasX - topLeft.canvasX) + padding * 2;
+  const bh = (bottomRight.canvasY - topLeft.canvasY) + padding * 2;
+
+  ctx.strokeStyle = "#0078d4";
+  ctx.lineWidth = 1;
+  ctx.setLineDash([4, 4]);
+  ctx.strokeRect(bx, by, bw, bh);
+  ctx.setLineDash([]);
+
+  ctx.restore();
 }
 
 function hitTestFloatingControl(hitCtx: OverlayHitTestContext): boolean {
@@ -314,7 +489,7 @@ function activate(context: ExtensionContext): void {
   cleanupFns.push(() => window.removeEventListener("controls:bounds-changed", handleBoundsChanged));
 
   // -----------------------------------------------------------------------
-  // 18. Delete selected floating control on Delete/Backspace key
+  // 18. Delete selected floating control(s) on Delete/Backspace key
   // -----------------------------------------------------------------------
   const handleDeleteKey = (e: KeyboardEvent) => {
     if (e.key !== "Delete" && e.key !== "Backspace") return;
@@ -327,14 +502,14 @@ function activate(context: ExtensionContext): void {
       target.isContentEditable
     ) return;
 
-    const selectedId = getSelectedFloatingControl();
-    if (!selectedId) return;
+    const selectedIds = getSelectedFloatingControls();
+    if (selectedIds.size === 0) return;
 
     // Prevent the grid from also handling this key
     e.preventDefault();
     e.stopPropagation();
 
-    deleteFloatingControl(selectedId);
+    deleteSelectedControls();
   };
   document.addEventListener("keydown", handleDeleteKey, true); // capture phase
   cleanupFns.push(() => document.removeEventListener("keydown", handleDeleteKey, true));
@@ -381,6 +556,24 @@ function activate(context: ExtensionContext): void {
       e.preventDefault();
       e.stopPropagation();
       await duplicateControl(selectedId);
+    } else if (e.ctrlKey && !e.shiftKey && e.key === "g" && getSelectedControlCount() >= 2) {
+      // Ctrl+G: Group selected controls
+      e.preventDefault();
+      e.stopPropagation();
+      const ids = [...getSelectedFloatingControls()];
+      groupControls(ids);
+      syncFloatingControlRegions();
+      emitAppEvent(AppEvents.GRID_REFRESH);
+    } else if (e.ctrlKey && e.shiftKey && e.key === "G" && selectedId) {
+      // Ctrl+Shift+G: Ungroup
+      e.preventDefault();
+      e.stopPropagation();
+      const groupId = getGroupForControl(selectedId);
+      if (groupId) {
+        ungroupControls(groupId);
+        syncFloatingControlRegions();
+        emitAppEvent(AppEvents.GRID_REFRESH);
+      }
     }
   };
   document.addEventListener("keydown", handleControlKeyboard, true);
@@ -390,10 +583,7 @@ function activate(context: ExtensionContext): void {
   // 22. Handle controls:delete-selected event (from context menu)
   // -----------------------------------------------------------------------
   const handleDeleteSelected = () => {
-    const selectedId = getSelectedFloatingControl();
-    if (selectedId) {
-      deleteFloatingControl(selectedId);
-    }
+    deleteSelectedControls();
   };
   window.addEventListener("controls:delete-selected", handleDeleteSelected);
   cleanupFns.push(() => window.removeEventListener("controls:delete-selected", handleDeleteSelected));
@@ -768,6 +958,73 @@ async function deleteFloatingControl(controlId: string): Promise<void> {
 }
 
 // ============================================================================
+// Delete Selected Controls (Multi-select / Group aware)
+// ============================================================================
+
+/**
+ * Delete all currently selected floating controls.
+ * If a grouped control is selected, all group members are also deleted.
+ */
+async function deleteSelectedControls(): Promise<void> {
+  const selectedIds = getSelectedFloatingControls();
+  if (selectedIds.size === 0) return;
+
+  // Collect all IDs to delete (expand groups)
+  const idsToDelete = new Set<string>();
+  for (const id of selectedIds) {
+    idsToDelete.add(id);
+    const groupId = getGroupForControl(id);
+    if (groupId) {
+      for (const memberId of getGroupMembers(groupId)) {
+        idsToDelete.add(memberId);
+      }
+    }
+  }
+
+  // Delete each control
+  for (const id of idsToDelete) {
+    await deleteFloatingControl(id);
+  }
+}
+
+// ============================================================================
+// Group / Multi-Selection Helpers
+// ============================================================================
+
+/**
+ * Get the full set of control IDs that should co-move with a dragged control.
+ * This includes: the control itself, all group members if grouped,
+ * and all other selected controls (multi-select).
+ */
+function getCoMovingControlIds(controlId: string): Set<string> {
+  const ids = new Set<string>();
+  ids.add(controlId);
+
+  // Add group members
+  const groupId = getGroupForControl(controlId);
+  if (groupId) {
+    for (const memberId of getGroupMembers(groupId)) {
+      ids.add(memberId);
+    }
+  }
+
+  // Add all selected controls
+  const selected = getSelectedFloatingControls();
+  for (const selId of selected) {
+    ids.add(selId);
+    // Also add group members of selected controls
+    const selGroupId = getGroupForControl(selId);
+    if (selGroupId) {
+      for (const memberId of getGroupMembers(selGroupId)) {
+        ids.add(memberId);
+      }
+    }
+  }
+
+  return ids;
+}
+
+// ============================================================================
 // Floating Object Event Handlers
 // ============================================================================
 
@@ -781,13 +1038,32 @@ function setupFloatingObjectEvents(): void {
     const controlRow = detail.data?.row as number;
     const controlCol = detail.data?.col as number;
     const controlSheet = detail.data?.sheetIndex as number;
+    const ctrlKey = detail.ctrlKey === true;
 
     const ctrlType = detail.data?.controlType ?? "button";
 
     if (getDesignMode() || ctrlType === "shape" || ctrlType === "image") {
       // Design mode, shape, or image: select the control and show properties
       // (shapes and images are always selectable regardless of design mode)
-      selectFloatingControl(controlId);
+
+      if (ctrlKey) {
+        // Ctrl+Click: toggle selection (multi-select)
+        toggleFloatingControlSelection(controlId);
+      } else {
+        // Normal click: check if this control belongs to a group
+        const groupId = getGroupForControl(controlId);
+        if (groupId && !isFloatingControlSelected(controlId)) {
+          // Select all members of the group
+          const memberIds = getGroupMembers(groupId);
+          selectFloatingControls(memberIds);
+        } else if (!isFloatingControlSelected(controlId)) {
+          // Single select (replace)
+          selectFloatingControl(controlId);
+        }
+        // If already selected (and no Ctrl), keep selection as is for dragging
+      }
+
+      // Show properties pane for the clicked control (even in multi-select)
       lastPropertiesCell = { row: controlRow, col: controlCol };
       import("../../src/api/ui").then(({ openTaskPane: openTP }) => {
         openTP(PROPERTIES_PANE_ID, {
@@ -812,7 +1088,31 @@ function setupFloatingObjectEvents(): void {
   const handleMovePreview = (e: Event) => {
     const detail = (e as CustomEvent).detail;
     if (detail.regionType !== "floating-control") return;
-    moveFloatingControl(detail.regionId, detail.x, detail.y);
+
+    const controlId = detail.regionId as string;
+    const newX = detail.x as number;
+    const newY = detail.y as number;
+
+    // Get the dragged control's current position to compute delta
+    const draggedCtrl = getFloatingControl(controlId);
+    if (!draggedCtrl) return;
+
+    const deltaX = newX - draggedCtrl.x;
+    const deltaY = newY - draggedCtrl.y;
+
+    // Move the dragged control
+    moveFloatingControl(controlId, newX, newY);
+
+    // Move all other selected/grouped controls by the same delta
+    const idsToMove = getCoMovingControlIds(controlId);
+    for (const otherId of idsToMove) {
+      if (otherId === controlId) continue;
+      const otherCtrl = getFloatingControl(otherId);
+      if (otherCtrl) {
+        moveFloatingControl(otherId, Math.max(0, otherCtrl.x + deltaX), Math.max(0, otherCtrl.y + deltaY));
+      }
+    }
+
     syncFloatingControlRegions();
     emitAppEvent(AppEvents.GRID_REFRESH);
   };
@@ -823,35 +1123,137 @@ function setupFloatingObjectEvents(): void {
   const handleMoveComplete = (e: Event) => {
     const detail = (e as CustomEvent).detail;
     if (detail.regionType !== "floating-control") return;
-    moveFloatingControl(detail.regionId, detail.x, detail.y);
+
+    const controlId = detail.regionId as string;
+    const newX = detail.x as number;
+    const newY = detail.y as number;
+
+    // Get the dragged control's current position to compute delta
+    const draggedCtrl = getFloatingControl(controlId);
+    if (!draggedCtrl) return;
+
+    const deltaX = newX - draggedCtrl.x;
+    const deltaY = newY - draggedCtrl.y;
+
+    // Move the dragged control
+    moveFloatingControl(controlId, newX, newY);
+
+    // Move all other selected/grouped controls by the same delta
+    const idsToMove = getCoMovingControlIds(controlId);
+    for (const otherId of idsToMove) {
+      if (otherId === controlId) continue;
+      const otherCtrl = getFloatingControl(otherId);
+      if (otherCtrl) {
+        moveFloatingControl(otherId, Math.max(0, otherCtrl.x + deltaX), Math.max(0, otherCtrl.y + deltaY));
+      }
+    }
+
     syncFloatingControlRegions();
-    // Persist the new position to metadata
-    persistFloatingPosition(detail.regionId);
+
+    // Persist positions for all moved controls
+    persistFloatingPosition(controlId);
+    for (const otherId of idsToMove) {
+      if (otherId !== controlId) {
+        persistFloatingPosition(otherId);
+      }
+    }
+
     emitAppEvent(AppEvents.GRID_REFRESH);
   };
   window.addEventListener("floatingObject:moveComplete", handleMoveComplete);
   cleanupFns.push(() => window.removeEventListener("floatingObject:moveComplete", handleMoveComplete));
 
-  // Handle floating object resize preview
+  // Handle floating object resize preview (group-aware)
   const handleResizePreview = (e: Event) => {
     const detail = (e as CustomEvent).detail;
     if (detail.regionType !== "floating-control") return;
-    resizeFloatingControl(detail.regionId, detail.x, detail.y, detail.width, detail.height);
+
+    const controlId = detail.regionId as string;
+    const groupId = getGroupForControl(controlId);
+
+    if (groupId) {
+      // For grouped controls, compute scale from the dragged control's old vs new bounds
+      // and apply proportionally to all group members
+      const oldCtrl = getFloatingControl(controlId);
+      if (oldCtrl) {
+        const scaleX = oldCtrl.width > 0 ? (detail.width as number) / oldCtrl.width : 1;
+        const scaleY = oldCtrl.height > 0 ? (detail.height as number) / oldCtrl.height : 1;
+        const deltaX = (detail.x as number) - oldCtrl.x;
+        const deltaY = (detail.y as number) - oldCtrl.y;
+
+        const members = getGroupMembers(groupId);
+        for (const memberId of members) {
+          if (memberId === controlId) continue;
+          const member = getFloatingControl(memberId);
+          if (!member) continue;
+
+          // Apply position delta and scale
+          const relX = member.x - oldCtrl.x;
+          const relY = member.y - oldCtrl.y;
+          resizeFloatingControl(
+            memberId,
+            oldCtrl.x + deltaX + relX * scaleX,
+            oldCtrl.y + deltaY + relY * scaleY,
+            Math.max(10, member.width * scaleX),
+            Math.max(10, member.height * scaleY),
+          );
+        }
+      }
+    }
+
+    resizeFloatingControl(controlId, detail.x, detail.y, detail.width, detail.height);
     syncFloatingControlRegions();
     emitAppEvent(AppEvents.GRID_REFRESH);
   };
   window.addEventListener("floatingObject:resizePreview", handleResizePreview);
   cleanupFns.push(() => window.removeEventListener("floatingObject:resizePreview", handleResizePreview));
 
-  // Handle floating object resize complete
+  // Handle floating object resize complete (group-aware)
   const handleResizeComplete = (e: Event) => {
     const detail = (e as CustomEvent).detail;
     if (detail.regionType !== "floating-control") return;
-    resizeFloatingControl(detail.regionId, detail.x, detail.y, detail.width, detail.height);
+
+    const controlId = detail.regionId as string;
+    const groupId = getGroupForControl(controlId);
+
+    if (groupId) {
+      const oldCtrl = getFloatingControl(controlId);
+      if (oldCtrl) {
+        const scaleX = oldCtrl.width > 0 ? (detail.width as number) / oldCtrl.width : 1;
+        const scaleY = oldCtrl.height > 0 ? (detail.height as number) / oldCtrl.height : 1;
+        const deltaX = (detail.x as number) - oldCtrl.x;
+        const deltaY = (detail.y as number) - oldCtrl.y;
+
+        const members = getGroupMembers(groupId);
+        for (const memberId of members) {
+          if (memberId === controlId) continue;
+          const member = getFloatingControl(memberId);
+          if (!member) continue;
+
+          const relX = member.x - oldCtrl.x;
+          const relY = member.y - oldCtrl.y;
+          resizeFloatingControl(
+            memberId,
+            oldCtrl.x + deltaX + relX * scaleX,
+            oldCtrl.y + deltaY + relY * scaleY,
+            Math.max(10, member.width * scaleX),
+            Math.max(10, member.height * scaleY),
+          );
+          invalidateFloatingButtonCache(memberId);
+          invalidateShapeCache(memberId);
+          invalidateImageCache(memberId);
+          persistFloatingPosition(memberId);
+        }
+      }
+    }
+
+    resizeFloatingControl(controlId, detail.x, detail.y, detail.width, detail.height);
     syncFloatingControlRegions();
-    invalidateFloatingButtonCache(detail.regionId);
+    invalidateFloatingButtonCache(controlId);
+    invalidateShapeCache(controlId);
+    invalidateImageCache(controlId);
     // Persist the new size to metadata
-    persistFloatingPosition(detail.regionId);
+    persistFloatingPosition(controlId);
     emitAppEvent(AppEvents.GRID_REFRESH);
   };
   window.addEventListener("floatingObject:resizeComplete", handleResizeComplete);

@@ -165,6 +165,7 @@ export function createOverlayMoveHandlers(
         regionId: region.id,
         regionType: region.type,
         data: region.data,
+        ctrlKey: event.ctrlKey,
       },
     }));
 

@@ -98,6 +98,9 @@ export const AppEvents = {
   // Linked sheet events
   LINKED_SHEETS_REFRESHED: "app:linked-sheets-refreshed",
 
+  // Reference style events
+  REFERENCE_STYLE_CHANGED: "app:reference-style-changed",
+
   // Locale events
   LOCALE_CHANGED: "app:locale-changed",
 

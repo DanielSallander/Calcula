@@ -34,11 +34,27 @@ export interface FloatingControl {
   controlType: string;
 }
 
+export interface ControlGroup {
+  /** Unique group ID */
+  id: string;
+  /** IDs of controls that belong to this group */
+  memberIds: string[];
+}
+
 // ============================================================================
 // Store State
 // ============================================================================
 
 let floatingControls: FloatingControl[] = [];
+
+/** Map of group ID -> ControlGroup */
+const controlGroups: Map<string, ControlGroup> = new Map();
+
+/** Reverse lookup: control ID -> group ID */
+const controlToGroup: Map<string, string> = new Map();
+
+/** Counter for generating unique group IDs */
+let groupIdCounter = 0;
 
 // ============================================================================
 // Store Operations
@@ -56,9 +72,10 @@ export function addFloatingControl(ctrl: FloatingControl): void {
   floatingControls.push(ctrl);
 }
 
-/** Remove a floating control by ID. */
+/** Remove a floating control by ID. Also removes it from any group. */
 export function removeFloatingControl(id: string): void {
   floatingControls = floatingControls.filter((c) => c.id !== id);
+  removeControlFromGroups(id);
 }
 
 /** Get a floating control by ID. */
@@ -105,6 +122,9 @@ export function resizeFloatingControl(
 /** Reset the entire floating store (used during extension deactivation). */
 export function resetFloatingStore(): void {
   floatingControls = [];
+  controlGroups.clear();
+  controlToGroup.clear();
+  groupIdCounter = 0;
   removeGridRegionsByType("floating-control");
 }
 
@@ -113,49 +133,281 @@ export function resetFloatingStore(): void {
 // ============================================================================
 
 /**
- * Bring a floating control to the front (highest z-order).
- * Moves the control to the end of the array so it renders last (on top).
+ * Get the set of control IDs to operate on for z-order changes.
+ * If the control belongs to a group, return all group members.
+ */
+function getZOrderIds(controlId: string): string[] {
+  const groupId = controlToGroup.get(controlId);
+  if (groupId) {
+    const group = controlGroups.get(groupId);
+    if (group) return [...group.memberIds];
+  }
+  return [controlId];
+}
+
+/**
+ * Bring a floating control (and its group members) to the front (highest z-order).
+ * Moves the controls to the end of the array so they render last (on top).
  */
 export function bringToFront(controlId: string): void {
-  const idx = floatingControls.findIndex((c) => c.id === controlId);
-  if (idx < 0 || idx === floatingControls.length - 1) return;
-  const [ctrl] = floatingControls.splice(idx, 1);
-  floatingControls.push(ctrl);
+  const ids = new Set(getZOrderIds(controlId));
+  const moved = floatingControls.filter((c) => ids.has(c.id));
+  floatingControls = floatingControls.filter((c) => !ids.has(c.id));
+  floatingControls.push(...moved);
 }
 
 /**
- * Send a floating control to the back (lowest z-order).
- * Moves the control to the beginning of the array so it renders first (behind everything).
+ * Send a floating control (and its group members) to the back (lowest z-order).
+ * Moves the controls to the beginning of the array so they render first (behind everything).
  */
 export function sendToBack(controlId: string): void {
-  const idx = floatingControls.findIndex((c) => c.id === controlId);
-  if (idx <= 0) return;
-  const [ctrl] = floatingControls.splice(idx, 1);
-  floatingControls.unshift(ctrl);
+  const ids = new Set(getZOrderIds(controlId));
+  const moved = floatingControls.filter((c) => ids.has(c.id));
+  floatingControls = floatingControls.filter((c) => !ids.has(c.id));
+  floatingControls.unshift(...moved);
 }
 
 /**
- * Move a floating control one step forward in z-order.
- * Swaps the control with the one after it in the array.
+ * Move a floating control (and its group members) one step forward in z-order.
  */
 export function bringForward(controlId: string): void {
-  const idx = floatingControls.findIndex((c) => c.id === controlId);
-  if (idx < 0 || idx === floatingControls.length - 1) return;
-  const temp = floatingControls[idx];
-  floatingControls[idx] = floatingControls[idx + 1];
-  floatingControls[idx + 1] = temp;
+  const ids = new Set(getZOrderIds(controlId));
+  // Find the highest index of the group in the array
+  let maxIdx = -1;
+  for (let i = 0; i < floatingControls.length; i++) {
+    if (ids.has(floatingControls[i].id)) maxIdx = i;
+  }
+  if (maxIdx < 0 || maxIdx === floatingControls.length - 1) return;
+
+  // Find the next control after the group that's not in the group
+  const nextIdx = maxIdx + 1;
+  if (ids.has(floatingControls[nextIdx].id)) return;
+
+  // Move the non-group control before the group
+  const [nonGroupCtrl] = floatingControls.splice(nextIdx, 1);
+  let minIdx = floatingControls.length;
+  for (let i = 0; i < floatingControls.length; i++) {
+    if (ids.has(floatingControls[i].id)) { minIdx = i; break; }
+  }
+  floatingControls.splice(minIdx, 0, nonGroupCtrl);
 }
 
 /**
- * Move a floating control one step backward in z-order.
- * Swaps the control with the one before it in the array.
+ * Move a floating control (and its group members) one step backward in z-order.
  */
 export function sendBackward(controlId: string): void {
-  const idx = floatingControls.findIndex((c) => c.id === controlId);
-  if (idx <= 0) return;
-  const temp = floatingControls[idx];
-  floatingControls[idx] = floatingControls[idx - 1];
-  floatingControls[idx - 1] = temp;
+  const ids = new Set(getZOrderIds(controlId));
+  // Find the lowest index of the group in the array
+  let minIdx = floatingControls.length;
+  for (let i = 0; i < floatingControls.length; i++) {
+    if (ids.has(floatingControls[i].id)) { minIdx = i; break; }
+  }
+  if (minIdx <= 0) return;
+
+  // Move the control before the group to after the group
+  const prevIdx = minIdx - 1;
+  if (ids.has(floatingControls[prevIdx].id)) return;
+
+  const [nonGroupCtrl] = floatingControls.splice(prevIdx, 1);
+  let maxIdx = -1;
+  for (let i = 0; i < floatingControls.length; i++) {
+    if (ids.has(floatingControls[i].id)) maxIdx = i;
+  }
+  floatingControls.splice(maxIdx + 1, 0, nonGroupCtrl);
+}
+
+// ============================================================================
+// Group Operations
+// ============================================================================
+
+/**
+ * Create a group from the given control IDs.
+ * Returns the new group ID.
+ * Controls that already belong to another group are removed from that group first.
+ */
+export function groupControls(controlIds: string[]): string {
+  if (controlIds.length < 2) {
+    throw new Error("Cannot group fewer than 2 controls");
+  }
+
+  // Remove controls from any existing groups
+  for (const ctrlId of controlIds) {
+    const existingGroupId = controlToGroup.get(ctrlId);
+    if (existingGroupId) {
+      ungroupControls(existingGroupId);
+    }
+  }
+
+  groupIdCounter++;
+  const groupId = `group-${groupIdCounter}`;
+
+  const group: ControlGroup = {
+    id: groupId,
+    memberIds: [...controlIds],
+  };
+
+  controlGroups.set(groupId, group);
+  for (const ctrlId of controlIds) {
+    controlToGroup.set(ctrlId, groupId);
+  }
+
+  return groupId;
+}
+
+/**
+ * Dissolve a group, returning the member IDs.
+ * The controls themselves are not affected, only the grouping is removed.
+ */
+export function ungroupControls(groupId: string): string[] {
+  const group = controlGroups.get(groupId);
+  if (!group) return [];
+
+  const memberIds = [...group.memberIds];
+
+  // Clear reverse lookup
+  for (const ctrlId of memberIds) {
+    controlToGroup.delete(ctrlId);
+  }
+
+  controlGroups.delete(groupId);
+  return memberIds;
+}
+
+/**
+ * Find the group a control belongs to.
+ * Returns the group ID or null if the control is not grouped.
+ */
+export function getGroupForControl(controlId: string): string | null {
+  return controlToGroup.get(controlId) ?? null;
+}
+
+/**
+ * Get all control IDs in a group.
+ */
+export function getGroupMembers(groupId: string): string[] {
+  const group = controlGroups.get(groupId);
+  return group ? [...group.memberIds] : [];
+}
+
+/**
+ * Get the ControlGroup object by ID.
+ */
+export function getControlGroup(groupId: string): ControlGroup | null {
+  return controlGroups.get(groupId) ?? null;
+}
+
+/**
+ * Get all groups.
+ */
+export function getAllGroups(): ControlGroup[] {
+  return [...controlGroups.values()];
+}
+
+/**
+ * Compute the bounding rectangle of a group from its members.
+ * Returns { x, y, width, height } in sheet pixels, or null if no members found.
+ */
+export function getGroupBounds(groupId: string): { x: number; y: number; width: number; height: number } | null {
+  const group = controlGroups.get(groupId);
+  if (!group || group.memberIds.length === 0) return null;
+
+  let minX = Infinity;
+  let minY = Infinity;
+  let maxX = -Infinity;
+  let maxY = -Infinity;
+
+  for (const memberId of group.memberIds) {
+    const ctrl = floatingControls.find((c) => c.id === memberId);
+    if (!ctrl) continue;
+
+    minX = Math.min(minX, ctrl.x);
+    minY = Math.min(minY, ctrl.y);
+    maxX = Math.max(maxX, ctrl.x + ctrl.width);
+    maxY = Math.max(maxY, ctrl.y + ctrl.height);
+  }
+
+  if (minX === Infinity) return null;
+
+  return {
+    x: minX,
+    y: minY,
+    width: maxX - minX,
+    height: maxY - minY,
+  };
+}
+
+/**
+ * Move all members of a group by the given delta.
+ */
+export function moveGroupControls(groupId: string, deltaX: number, deltaY: number): void {
+  const group = controlGroups.get(groupId);
+  if (!group) return;
+
+  for (const memberId of group.memberIds) {
+    const ctrl = floatingControls.find((c) => c.id === memberId);
+    if (ctrl) {
+      ctrl.x = Math.max(0, ctrl.x + deltaX);
+      ctrl.y = Math.max(0, ctrl.y + deltaY);
+    }
+  }
+}
+
+/**
+ * Resize all members of a group proportionally.
+ * The group bounds change from (oldBounds) to (newBounds), and each member
+ * is scaled/repositioned accordingly.
+ */
+export function resizeGroupControls(
+  groupId: string,
+  oldBounds: { x: number; y: number; width: number; height: number },
+  newBounds: { x: number; y: number; width: number; height: number },
+): void {
+  const group = controlGroups.get(groupId);
+  if (!group || oldBounds.width === 0 || oldBounds.height === 0) return;
+
+  const scaleX = newBounds.width / oldBounds.width;
+  const scaleY = newBounds.height / oldBounds.height;
+
+  for (const memberId of group.memberIds) {
+    const ctrl = floatingControls.find((c) => c.id === memberId);
+    if (!ctrl) continue;
+
+    // Compute relative position within old bounds
+    const relX = ctrl.x - oldBounds.x;
+    const relY = ctrl.y - oldBounds.y;
+
+    // Apply scale
+    ctrl.x = newBounds.x + relX * scaleX;
+    ctrl.y = newBounds.y + relY * scaleY;
+    ctrl.width = Math.max(10, ctrl.width * scaleX);
+    ctrl.height = Math.max(10, ctrl.height * scaleY);
+  }
+}
+
+/**
+ * When a control is removed from the store, also remove it from any group.
+ * If the group drops below 2 members, dissolve the group.
+ */
+function removeControlFromGroups(controlId: string): void {
+  const groupId = controlToGroup.get(controlId);
+  if (!groupId) return;
+
+  const group = controlGroups.get(groupId);
+  if (!group) {
+    controlToGroup.delete(controlId);
+    return;
+  }
+
+  group.memberIds = group.memberIds.filter((id) => id !== controlId);
+  controlToGroup.delete(controlId);
+
+  // If fewer than 2 members remain, dissolve the group
+  if (group.memberIds.length < 2) {
+    for (const remainingId of group.memberIds) {
+      controlToGroup.delete(remainingId);
+    }
+    controlGroups.delete(groupId);
+  }
 }
 
 // ============================================================================

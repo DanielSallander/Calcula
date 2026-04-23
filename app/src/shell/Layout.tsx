@@ -30,6 +30,7 @@ import {
   setDisplayGridlines,
   setDisplayHeadings,
   setDisplayFormulaBar,
+  setReferenceStyle,
   ExtensionRegistry,
   AppEvents,
   onAppEvent,
@@ -206,6 +207,16 @@ function LayoutInner(): React.ReactElement {
     return cleanup;
   }, [dispatch]);
 
+  // Bridge: sync reference style from API events into Core state.
+  useEffect(() => {
+    const cleanup = onAppEvent<{
+      referenceStyle: "A1" | "R1C1";
+    }>(AppEvents.REFERENCE_STYLE_CHANGED, (detail) => {
+      dispatch(setReferenceStyle(detail.referenceStyle));
+    });
+    return cleanup;
+  }, [dispatch]);
+
   // Window title tracking: update on cells-updated, rows/cols inserted/deleted, and dirty state changes.
   useEffect(() => {
     // Set initial title on mount
@@ -253,7 +264,8 @@ function LayoutInner(): React.ReactElement {
           // If checking dirty state or saving fails, still allow close
           console.error("[Layout] Error during close handler:", error);
         }
-        // Don't call event.preventDefault() — let the window close naturally
+        // Explicitly destroy the window to close the app
+        await getCurrentWindow().destroy();
       })
       .then((fn) => {
         unlisten = fn;

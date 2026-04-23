@@ -9,6 +9,7 @@ import {
   IconDefineName,
   IconDefineFunction,
   getAllNamedRanges,
+  applyNamesToFormulas,
   updateCellsBatch,
   emitAppEvent,
   AppEvents,
@@ -87,6 +88,35 @@ export function registerDefinedNamesMenuItems(context: ExtensionContext): () => 
           emitAppEvent(AppEvents.GRID_REFRESH);
         } catch (err) {
           console.error("[DefinedNames] Failed to paste names:", err);
+        }
+      },
+    })
+  );
+
+  // "Apply Names..." menu item - replaces cell references in formulas with named range names
+  cleanups.push(
+    context.ui.menus.registerItem("formulas", {
+      id: "formulas:applyNames",
+      label: "Apply Names...",
+      action: async () => {
+        try {
+          const namedRanges = await getAllNamedRanges();
+          if (namedRanges.length === 0) {
+            console.warn("[DefinedNames] No named ranges to apply.");
+            return;
+          }
+
+          const result = await applyNamesToFormulas([]);
+          if (result.formulasModified > 0) {
+            emitAppEvent(AppEvents.GRID_REFRESH);
+            console.log(
+              `[DefinedNames] Applied names to ${result.formulasModified} formula(s).`
+            );
+          } else {
+            console.log("[DefinedNames] No formulas were modified.");
+          }
+        } catch (err) {
+          console.error("[DefinedNames] Failed to apply names:", err);
         }
       },
     })

@@ -27,6 +27,9 @@ import { paintHistogramChart, computeHistogramLayout, computeHistogramBarRects }
 import { paintFunnelChart, computeFunnelLayout, computeFunnelBarRects } from "./funnelChartPainter";
 import { paintTreemapChart, computeTreemapLayout, computeTreemapBarRects } from "./treemapChartPainter";
 import { paintStockChart, computeStockLayout, computeStockBarRects } from "./stockChartPainter";
+import { paintBoxPlotChart, computeBoxPlotLayout, computeBoxPlotBarRects } from "./boxPlotChartPainter";
+import { paintSunburstChart, computeSunburstLayout, computeSunburstBarRects } from "./sunburstChartPainter";
+import { paintParetoChart, computeParetoLayout, computeParetoBarRects, computeParetoHitGeometry } from "./paretoChartPainter";
 import { paintRule } from "./rulePainter";
 import { paintTextMark } from "./textMarkPainter";
 import { paintTrendlines } from "./trendlinePainter";
@@ -135,6 +138,15 @@ function paintMark(
     case "stock":
       paintStockChart(ctx, data, spec, layout, theme);
       break;
+    case "boxPlot":
+      paintBoxPlotChart(ctx, data, spec, layout, theme);
+      break;
+    case "sunburst":
+      paintSunburstChart(ctx, data, spec, layout, theme);
+      break;
+    case "pareto":
+      paintParetoChart(ctx, data, spec, layout, theme);
+      break;
   }
 }
 
@@ -166,6 +178,9 @@ export function dispatchComputeLayout(
     case "funnel": return computeFunnelLayout(width, height, spec, data, theme);
     case "treemap": return computeTreemapLayout(width, height, spec, data, theme);
     case "stock": return computeStockLayout(width, height, spec, data, theme);
+    case "boxPlot": return computeBoxPlotLayout(width, height, spec, data, theme);
+    case "sunburst": return computeSunburstLayout(width, height, spec, data, theme);
+    case "pareto": return computeParetoLayout(width, height, spec, data, theme);
   }
 }
 
@@ -210,6 +225,12 @@ export function dispatchComputeGeometry(
       return { type: "bars", rects: computeTreemapBarRects(data, spec, layout, theme) };
     case "stock":
       return { type: "bars", rects: computeStockBarRects(data, spec, layout, theme) };
+    case "boxPlot":
+      return { type: "bars", rects: computeBoxPlotBarRects(data, spec, layout, theme) };
+    case "sunburst":
+      return { type: "bars", rects: computeSunburstBarRects(data, spec, layout, theme) };
+    case "pareto":
+      return computeParetoHitGeometry(data, spec, layout, theme);
   }
 }
 

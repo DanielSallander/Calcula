@@ -2,7 +2,7 @@
 // PURPOSE: Design tab of the chart dialog. Chart type, title, axis, legend, palette, mark options.
 
 import React from "react";
-import type { ChartSpec, ChartType, DataLabelSpec } from "../../types";
+import type { ChartSpec, ChartType, DataLabelSpec, BoxPlotMarkOptions, SunburstMarkOptions, ParetoMarkOptions } from "../../types";
 import { isCartesianChart } from "../../types";
 import { PALETTES, PALETTE_NAMES } from "../../rendering/chartTheme";
 import {
@@ -37,6 +37,9 @@ const CHART_TYPES: Array<{ value: ChartType; label: string }> = [
   { value: "funnel", label: "Funnel Chart" },
   { value: "treemap", label: "Treemap" },
   { value: "stock", label: "Stock (OHLC)" },
+  { value: "boxPlot", label: "Box & Whisker" },
+  { value: "sunburst", label: "Sunburst" },
+  { value: "pareto", label: "Pareto" },
 ];
 
 export function DesignTab({ spec, onSpecChange }: DesignTabProps): React.ReactElement {
@@ -561,6 +564,111 @@ function MarkOptions({ spec, onSpecChange }: DesignTabProps): React.ReactElement
           </div>
           <div style={{ fontSize: "11px", color: "var(--text-secondary)", marginTop: "4px" }}>
             Requires 4 series: Open, High, Low, Close
+          </div>
+        </FieldGroup>
+      );
+
+    case "boxPlot":
+      return (
+        <FieldGroup>
+          <Label>Box &amp; Whisker Options</Label>
+          <CheckboxLabel>
+            <input
+              type="checkbox"
+              checked={(opts as any).showOutliers ?? true}
+              onChange={(e) => updateMarkOptions({ showOutliers: e.target.checked })}
+            />
+            Show outliers
+          </CheckboxLabel>
+          <CheckboxLabel>
+            <input
+              type="checkbox"
+              checked={(opts as any).showMean ?? false}
+              onChange={(e) => updateMarkOptions({ showMean: e.target.checked })}
+            />
+            Show mean marker
+          </CheckboxLabel>
+          <div style={{ display: "flex", alignItems: "center", gap: "8px", marginBottom: "4px" }}>
+            <span style={{ fontSize: "12px", color: "var(--text-secondary)" }}>Box width:</span>
+            <Input
+              type="number"
+              min={0.1}
+              max={0.9}
+              step={0.1}
+              value={(opts as any).boxWidth ?? 0.5}
+              onChange={(e) => updateMarkOptions({ boxWidth: parseFloat(e.target.value) || 0.5 })}
+              style={{ width: "60px" }}
+            />
+          </div>
+          <div style={{ fontSize: "11px", color: "var(--text-secondary)", marginTop: "4px" }}>
+            Multiple series values per category define the distribution.
+          </div>
+        </FieldGroup>
+      );
+
+    case "sunburst":
+      return (
+        <FieldGroup>
+          <Label>Sunburst Options</Label>
+          <CheckboxLabel>
+            <input
+              type="checkbox"
+              checked={(opts as any).showLabels ?? true}
+              onChange={(e) => updateMarkOptions({ showLabels: e.target.checked })}
+            />
+            Show labels
+          </CheckboxLabel>
+          {(opts as any).showLabels !== false && (
+            <div style={{ display: "flex", alignItems: "center", gap: "8px", marginBottom: "4px" }}>
+              <span style={{ fontSize: "12px", color: "var(--text-secondary)" }}>Label format:</span>
+              <Select
+                value={(opts as any).labelFormat ?? "category"}
+                onChange={(e) => updateMarkOptions({ labelFormat: e.target.value })}
+              >
+                <option value="category">Category only</option>
+                <option value="value">Value only</option>
+                <option value="percent">Percentage</option>
+                <option value="both">Category + Value</option>
+              </Select>
+            </div>
+          )}
+          <div style={{ display: "flex", alignItems: "center", gap: "8px", marginBottom: "4px" }}>
+            <span style={{ fontSize: "12px", color: "var(--text-secondary)" }}>Level separator:</span>
+            <Input
+              type="text"
+              value={(opts as any).levelSeparator ?? " > "}
+              onChange={(e) => updateMarkOptions({ levelSeparator: e.target.value })}
+              style={{ width: "60px" }}
+            />
+          </div>
+          <div style={{ fontSize: "11px", color: "var(--text-secondary)", marginTop: "4px" }}>
+            Use separator in category names to define hierarchy (e.g., "A &gt; B &gt; C").
+          </div>
+        </FieldGroup>
+      );
+
+    case "pareto":
+      return (
+        <FieldGroup>
+          <Label>Pareto Options</Label>
+          <CheckboxLabel>
+            <input
+              type="checkbox"
+              checked={(opts as any).showMarkers ?? true}
+              onChange={(e) => updateMarkOptions({ showMarkers: e.target.checked })}
+            />
+            Show line markers
+          </CheckboxLabel>
+          <CheckboxLabel>
+            <input
+              type="checkbox"
+              checked={(opts as any).show80PercentLine ?? true}
+              onChange={(e) => updateMarkOptions({ show80PercentLine: e.target.checked })}
+            />
+            Show 80% reference line
+          </CheckboxLabel>
+          <div style={{ fontSize: "11px", color: "var(--text-secondary)", marginTop: "4px" }}>
+            Bars are auto-sorted descending. Cumulative % line uses right axis.
           </div>
         </FieldGroup>
       );

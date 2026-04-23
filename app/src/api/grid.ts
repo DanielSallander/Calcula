@@ -53,6 +53,7 @@ export {
   setDisplayGridlines,
   setDisplayHeadings,
   setDisplayFormulaBar,
+  setReferenceStyle,
 } from "../core/state/gridActions";
 
 // Re-export action types
@@ -75,6 +76,7 @@ import {
 import { emitAppEvent, AppEvents } from "./events";
 import { getGridStateSnapshot } from "../core/state/GridContext";
 import { dispatchGridAction } from "./gridDispatch";
+import { invokeBackend } from "./backend";
 import { setZoom as setZoomAction } from "../core/state/gridActions";
 
 /**
@@ -383,4 +385,49 @@ export function setStatusBarText(text: string): void {
  */
 export function clearStatusBarText(): void {
   emitAppEvent(AppEvents.STATUS_BAR_TEXT_CHANGED, { text: null });
+}
+
+// ============================================================================
+// R1C1 Reference Style
+// ============================================================================
+
+/**
+ * Get the current reference style from the backend.
+ */
+export async function getReferenceStyle(): Promise<"A1" | "R1C1"> {
+  return invokeBackend<string>("get_reference_style") as Promise<"A1" | "R1C1">;
+}
+
+/**
+ * Set the reference style in the backend and update frontend state.
+ * Emits REFERENCE_STYLE_CHANGED event to sync the grid state.
+ */
+export async function changeReferenceStyle(style: "A1" | "R1C1"): Promise<void> {
+  await invokeBackend<string>("set_reference_style", { style });
+  emitAppEvent(AppEvents.REFERENCE_STYLE_CHANGED, { referenceStyle: style });
+  emitAppEvent(AppEvents.GRID_REFRESH);
+}
+
+/**
+ * Convert a formula between A1 and R1C1 notation.
+ * @param formula - The formula string (with or without leading `=`)
+ * @param fromStyle - Source notation ("A1" or "R1C1")
+ * @param toStyle - Target notation ("A1" or "R1C1")
+ * @param baseRow - 0-based row of the cell containing the formula
+ * @param baseCol - 0-based column of the cell containing the formula
+ */
+export async function convertFormulaStyle(
+  formula: string,
+  fromStyle: "A1" | "R1C1",
+  toStyle: "A1" | "R1C1",
+  baseRow: number,
+  baseCol: number,
+): Promise<string> {
+  return invokeBackend<string>("convert_formula_style", {
+    formula,
+    fromStyle,
+    toStyle,
+    baseRow,
+    baseCol,
+  });
 }

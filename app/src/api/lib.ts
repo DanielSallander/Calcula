@@ -138,6 +138,7 @@ export {
   getAllNamedRanges,
   getNamedRangeForSelection,
   renameNamedRange,
+  applyNamesToFormulas,
 
   // Data validation
   setDataValidation,
@@ -254,6 +255,7 @@ export type {
 export type {
   NamedRange,
   NamedRangeResult,
+  ApplyNamesResult,
 } from "../core/types";
 
 // Data validation type exports

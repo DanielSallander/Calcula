@@ -13,7 +13,7 @@ export const chartSpecJsonSchema: object = {
   properties: {
     mark: {
       type: "string",
-      enum: ["bar", "horizontalBar", "line", "area", "scatter", "pie", "donut", "waterfall", "combo", "radar", "bubble", "histogram", "funnel", "treemap", "stock"],
+      enum: ["bar", "horizontalBar", "line", "area", "scatter", "pie", "donut", "waterfall", "combo", "radar", "bubble", "histogram", "funnel", "treemap", "stock", "boxPlot", "sunburst", "pareto"],
       description: "Chart type. Determines the visual mark used to represent data.",
     },
     data: {
@@ -524,6 +524,45 @@ export const chartSpecJsonSchema: object = {
       },
       additionalProperties: false,
     },
+    BoxPlotMarkOptions: {
+      type: "object",
+      description: "Options for box & whisker (box plot) charts. Shows distribution statistics per category.",
+      properties: {
+        boxWidth: { type: "number", minimum: 0.1, maximum: 0.9, description: "Box width as fraction of band (0-1). Default: 0.5." },
+        showOutliers: { type: "boolean", description: "Show outlier points beyond whiskers. Default: true." },
+        outlierRadius: { type: "number", minimum: 1, description: "Outlier point radius (px). Default: 3." },
+        medianColor: { type: ["string", "null"], description: "Median line color. Null = white. Default: null." },
+        medianLineWidth: { type: "number", minimum: 0.5, description: "Median line width (px). Default: 2." },
+        whiskerLineWidth: { type: "number", minimum: 0.5, description: "Whisker line width (px). Default: 1." },
+        showMean: { type: "boolean", description: "Show mean marker (diamond). Default: false." },
+      },
+      additionalProperties: false,
+    },
+    SunburstMarkOptions: {
+      type: "object",
+      description: "Options for sunburst charts. Hierarchical data via concentric rings.",
+      properties: {
+        showLabels: { type: "boolean", description: "Show labels on arc segments. Default: true." },
+        labelFormat: { type: "string", enum: ["category", "value", "percent", "both"], description: "Label format. Default: \"category\"." },
+        innerRadiusRatio: { type: "number", minimum: 0, maximum: 0.5, description: "Inner hole radius as fraction (0-0.5). Default: 0.15." },
+        padAngle: { type: "number", minimum: 0, description: "Padding between segments (deg). Default: 0.5." },
+        levelSeparator: { type: "string", description: "Separator in category labels to define hierarchy. Default: \" > \"." },
+      },
+      additionalProperties: false,
+    },
+    ParetoMarkOptions: {
+      type: "object",
+      description: "Options for Pareto charts. Bars sorted descending + cumulative % line.",
+      properties: {
+        borderRadius: { type: "number", minimum: 0, description: "Bar corner radius (px). Default: 2." },
+        lineColor: { type: "string", description: "Cumulative line color. Default: \"#E53935\"." },
+        lineWidth: { type: "number", minimum: 0.5, description: "Cumulative line width (px). Default: 2." },
+        showMarkers: { type: "boolean", description: "Show point markers on cumulative line. Default: true." },
+        markerRadius: { type: "number", minimum: 1, description: "Marker radius (px). Default: 4." },
+        show80PercentLine: { type: "boolean", description: "Show 80% reference line. Default: true." },
+      },
+      additionalProperties: false,
+    },
     RuleMarkOptions: {
       type: "object",
       description: "Options for rule marks (reference lines). Used in layers.",
@@ -563,7 +602,7 @@ export const chartSpecJsonSchema: object = {
       properties: {
         mark: {
           type: "string",
-          enum: ["bar", "horizontalBar", "line", "area", "scatter", "pie", "donut", "waterfall", "combo", "radar", "bubble", "histogram", "funnel", "treemap", "stock", "rule", "text"],
+          enum: ["bar", "horizontalBar", "line", "area", "scatter", "pie", "donut", "waterfall", "combo", "radar", "bubble", "histogram", "funnel", "treemap", "stock", "boxPlot", "sunburst", "pareto", "rule", "text"],
           description: "Mark type for this layer. Use \"rule\" for reference lines, \"text\" for annotations.",
         },
         data: {
@@ -791,7 +830,7 @@ export function generateSpecReference(): string {
   lines.push("");
   lines.push("| Property | Type | Description |");
   lines.push("|----------|------|-------------|");
-  lines.push("| mark | string | Chart type: bar, horizontalBar, line, area, scatter, pie, donut, waterfall, combo, radar, bubble, histogram, funnel, treemap, stock |");
+  lines.push("| mark | string | Chart type: bar, horizontalBar, line, area, scatter, pie, donut, waterfall, combo, radar, bubble, histogram, funnel, treemap, stock, boxPlot, sunburst, pareto |");
   lines.push("| data | object \\| string | DataRangeRef object, A1 reference string, named range name, or PivotDataSource |");
   lines.push("| hasHeaders | boolean | First row/column contains header labels |");
   lines.push("| seriesOrientation | string | \"columns\" or \"rows\" |");
@@ -978,6 +1017,42 @@ export function generateSpecReference(): string {
   lines.push("| bodyWidth | number | 0.6 | Candle body width fraction |");
   lines.push("| wickWidth | number | 1 | Wick line width (px) |");
   lines.push("| ohlcIndices | [int,int,int,int] | [0,1,2,3] | Series indices for O,H,L,C |");
+  lines.push("");
+
+  lines.push("### boxPlot (Box & Whisker)");
+  lines.push("Multiple series values per category define the distribution.");
+  lines.push("| Property | Type | Default | Description |");
+  lines.push("|----------|------|---------|-------------|");
+  lines.push("| boxWidth | number | 0.5 | Box width fraction (0.1-0.9) |");
+  lines.push("| showOutliers | boolean | true | Show outlier points |");
+  lines.push("| outlierRadius | number | 3 | Outlier point radius (px) |");
+  lines.push("| medianColor | string \\| null | null | Median line color |");
+  lines.push("| medianLineWidth | number | 2 | Median line width (px) |");
+  lines.push("| whiskerLineWidth | number | 1 | Whisker line width (px) |");
+  lines.push("| showMean | boolean | false | Show mean marker (diamond) |");
+  lines.push("");
+
+  lines.push("### sunburst");
+  lines.push("Hierarchical data via concentric rings. Use separator in category names for hierarchy.");
+  lines.push("| Property | Type | Default | Description |");
+  lines.push("|----------|------|---------|-------------|");
+  lines.push("| showLabels | boolean | true | Show labels on segments |");
+  lines.push("| labelFormat | string | \"category\" | category, value, percent, or both |");
+  lines.push("| innerRadiusRatio | number | 0.15 | Inner hole size (0-0.5) |");
+  lines.push("| padAngle | number | 0.5 | Padding between segments (deg) |");
+  lines.push("| levelSeparator | string | \" > \" | Separator in category names |");
+  lines.push("");
+
+  lines.push("### pareto");
+  lines.push("Bars auto-sorted descending + cumulative percentage line on right axis.");
+  lines.push("| Property | Type | Default | Description |");
+  lines.push("|----------|------|---------|-------------|");
+  lines.push("| borderRadius | number | 2 | Bar corner radius (px) |");
+  lines.push("| lineColor | string | \"#E53935\" | Cumulative line color |");
+  lines.push("| lineWidth | number | 2 | Cumulative line width (px) |");
+  lines.push("| showMarkers | boolean | true | Show markers on line |");
+  lines.push("| markerRadius | number | 4 | Marker radius (px) |");
+  lines.push("| show80PercentLine | boolean | true | Show 80% reference line |");
   lines.push("");
 
   lines.push("### rule (reference line)");

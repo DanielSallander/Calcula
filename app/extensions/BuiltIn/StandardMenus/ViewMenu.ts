@@ -408,6 +408,25 @@ export function useViewMenu(): { menu: MenuDefinition; handlers: ViewMenuHandler
     checked: gridState.displayFormulaBar !== false,
   });
 
+  // R1C1 Reference Style
+  items.push({
+    id: 'view.separator.refStyle',
+    label: '',
+    separator: true,
+    action: () => {},
+  });
+
+  items.push({
+    id: 'view.r1c1ReferenceStyle',
+    label: 'R1C1 Reference Style',
+    action: async () => {
+      const { changeReferenceStyle, getReferenceStyle } = await import("@api/grid");
+      const current = await getReferenceStyle();
+      await changeReferenceStyle(current === "R1C1" ? "A1" : "R1C1");
+    },
+    get checked() { return gridState.referenceStyle === "R1C1"; },
+  });
+
   const menu: MenuDefinition = {
     id: 'view',
     label: 'View',

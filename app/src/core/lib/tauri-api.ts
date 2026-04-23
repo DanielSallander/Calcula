@@ -1275,6 +1275,7 @@ export async function relocateCellReferences(
 import type {
   NamedRange,
   NamedRangeResult,
+  ApplyNamesResult,
   DataValidation,
   DataValidationResult,
   DataValidationPrompt,
@@ -1370,6 +1371,30 @@ export async function renameNamedRange(
   newName: string
 ): Promise<NamedRangeResult> {
   return invoke<NamedRangeResult>("rename_named_range", { oldName, newName });
+}
+
+/**
+ * Apply named range names to formulas, replacing cell references with names.
+ * @param names Which named ranges to apply (empty array = all)
+ * @param startRow Restrict to range start row (undefined = entire sheet)
+ * @param startCol Restrict to range start col (undefined = entire sheet)
+ * @param endRow Restrict to range end row (undefined = entire sheet)
+ * @param endCol Restrict to range end col (undefined = entire sheet)
+ */
+export async function applyNamesToFormulas(
+  names: string[] = [],
+  startRow?: number,
+  startCol?: number,
+  endRow?: number,
+  endCol?: number
+): Promise<ApplyNamesResult> {
+  return invoke<ApplyNamesResult>("apply_names_to_formulas", {
+    names,
+    startRow: startRow ?? null,
+    startCol: startCol ?? null,
+    endRow: endRow ?? null,
+    endCol: endCol ?? null,
+  });
 }
 
 // ============================================================================

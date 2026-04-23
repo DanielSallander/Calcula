@@ -1265,6 +1265,13 @@ export function gridReducer(state: GridState, action: GridAction): GridState {
       };
     }
 
+    case GRID_ACTIONS.SET_REFERENCE_STYLE: {
+      return {
+        ...state,
+        referenceStyle: action.payload.referenceStyle,
+      };
+    }
+
     default: {
       return state;
     }

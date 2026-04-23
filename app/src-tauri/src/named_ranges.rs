@@ -3,8 +3,11 @@
 //! CONTEXT: Allows users to define names for cell ranges that can be used in formulas.
 
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 use tauri::State;
 
+use crate::api_types::CellData;
+use crate::commands::utils::get_cell_internal_with_merge;
 use crate::AppState;
 
 /// A named range definition.
@@ -424,6 +427,245 @@ pub fn rename_named_range(
             error: Some("Unexpected error during rename.".to_string()),
         }
     }
+}
+
+/// Result of the apply names operation.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ApplyNamesResult {
+    pub formulas_modified: u32,
+    pub cells: Vec<CellData>,
+}
+
+/// Parse a `refers_to` string and extract the single-cell reference as (col_letters, row_number).
+/// Returns None for range references, constant values, or formulas.
+/// Handles formats like "=Sheet1!$B$5", "=$B$5", "=B5", etc.
+fn extract_single_cell_ref(refers_to: &str) -> Option<(String, u32)> {
+    let formula = refers_to.trim();
+    if let Ok(parsed) = parser::parse(formula) {
+        match &parsed {
+            parser::ast::Expression::CellRef { col, row, .. } => {
+                Some((col.to_uppercase(), *row))
+            }
+            _ => None, // Skip ranges, constants, formulas
+        }
+    } else {
+        None
+    }
+}
+
+/// Build all possible reference patterns for a cell (col_letters, row_1based).
+/// For example, for ("B", 5) this returns: ["$B$5", "B$5", "$B5", "B5"].
+fn build_ref_patterns(col: &str, row: u32) -> Vec<String> {
+    vec![
+        format!("${}${}", col, row),
+        format!("{}${}", col, row),
+        format!("${}{}", col, row),
+        format!("{}{}", col, row),
+    ]
+}
+
+/// Check if a character is valid to appear immediately before or after a cell reference
+/// in a formula. Cell references are bounded by operators, parentheses, commas, etc.
+/// Returns true if the character is a valid boundary (i.e., the reference is standalone).
+fn is_ref_boundary(ch: char) -> bool {
+    matches!(
+        ch,
+        '+' | '-' | '*' | '/' | '^' | '=' | '<' | '>' | '('
+            | ')' | ',' | ' ' | '&' | ':' | ';' | '%' | '!'
+            | '{' | '}'
+    )
+}
+
+/// Replace cell references in a formula string with a named range name.
+/// Only replaces standalone references (not part of another reference or name).
+fn replace_ref_in_formula(formula: &str, patterns: &[String], name: &str) -> String {
+    let mut result = formula.to_string();
+
+    for pattern in patterns {
+        let pat_upper = pattern.to_uppercase();
+        let pat_len = pattern.len();
+
+        // Search case-insensitively by working on an uppercase copy for matching
+        let mut new_result = String::new();
+        let mut i = 0;
+        let chars: Vec<char> = result.chars().collect();
+        let upper_chars: Vec<char> = result.to_uppercase().chars().collect();
+        let pat_chars: Vec<char> = pat_upper.chars().collect();
+
+        while i < chars.len() {
+            // Check if we're inside a string literal
+            if chars[i] == '"' {
+                new_result.push(chars[i]);
+                i += 1;
+                while i < chars.len() && chars[i] != '"' {
+                    new_result.push(chars[i]);
+                    i += 1;
+                }
+                if i < chars.len() {
+                    new_result.push(chars[i]); // closing quote
+                    i += 1;
+                }
+                continue;
+            }
+
+            // Check for pattern match at current position
+            if i + pat_len <= chars.len() {
+                let segment: Vec<char> = upper_chars[i..i + pat_len].to_vec();
+                if segment == pat_chars {
+                    // Check boundary before
+                    let before_ok = if i == 0 {
+                        true
+                    } else {
+                        is_ref_boundary(chars[i - 1])
+                    };
+
+                    // Check boundary after
+                    let after_ok = if i + pat_len >= chars.len() {
+                        true
+                    } else {
+                        is_ref_boundary(chars[i + pat_len])
+                    };
+
+                    // Also ensure the character before isn't a letter or digit
+                    // (which would mean this is part of a larger reference like "Sheet1!B5")
+                    // But we DO want to match after '!' (sheet qualifier)
+                    let before_not_alnum = if i == 0 {
+                        true
+                    } else {
+                        let prev = chars[i - 1];
+                        !prev.is_alphanumeric() && prev != '_'
+                    };
+
+                    // After must not be a letter or digit (would be part of a name)
+                    let after_not_alnum = if i + pat_len >= chars.len() {
+                        true
+                    } else {
+                        let next = chars[i + pat_len];
+                        !next.is_alphanumeric() && next != '_'
+                    };
+
+                    if before_ok && after_ok && before_not_alnum && after_not_alnum {
+                        // Don't replace if preceded by '!' (sheet-qualified reference like Sheet1!B5)
+                        // Those should only be replaced if the sheet matches the named range's scope,
+                        // but for simplicity we skip sheet-qualified refs entirely.
+                        let preceded_by_bang = i > 0 && chars[i - 1] == '!';
+                        if !preceded_by_bang {
+                            new_result.push_str(name);
+                            i += pat_len;
+                            continue;
+                        }
+                    }
+                }
+            }
+
+            new_result.push(chars[i]);
+            i += 1;
+        }
+
+        result = new_result;
+    }
+
+    result
+}
+
+/// Apply named range names to formulas, replacing cell references with names.
+/// This is Excel's "Apply Names" feature.
+///
+/// - `names`: Which named ranges to apply (empty = all)
+/// - `start_row`, `start_col`, `end_row`, `end_col`: Restrict to a cell range (None = entire sheet)
+#[tauri::command]
+pub fn apply_names_to_formulas(
+    state: State<AppState>,
+    names: Vec<String>,
+    start_row: Option<u32>,
+    start_col: Option<u32>,
+    end_row: Option<u32>,
+    end_col: Option<u32>,
+) -> Result<ApplyNamesResult, String> {
+    let named_ranges = state.named_ranges.lock().unwrap();
+    let mut grid = state.grid.lock().unwrap();
+    let styles = state.style_registry.lock().unwrap();
+    let merged_regions = state.merged_regions.lock().unwrap();
+    let locale = state.locale.lock().unwrap();
+
+    // Build the list of (name, col_letters, row_1based) for single-cell named ranges
+    let names_filter: HashSet<String> = names.iter().map(|n| n.to_uppercase()).collect();
+    let apply_all = names_filter.is_empty();
+
+    let mut replacements: Vec<(String, Vec<String>)> = Vec::new();
+
+    for nr in named_ranges.values() {
+        if !apply_all && !names_filter.contains(&nr.name.to_uppercase()) {
+            continue;
+        }
+
+        if let Some((col_letters, row_num)) = extract_single_cell_ref(&nr.refers_to) {
+            let patterns = build_ref_patterns(&col_letters, row_num);
+            replacements.push((nr.name.clone(), patterns));
+        }
+    }
+
+    if replacements.is_empty() {
+        return Ok(ApplyNamesResult {
+            formulas_modified: 0,
+            cells: Vec::new(),
+        });
+    }
+
+    // Determine the cell range to scan
+    let scan_start_row = start_row.unwrap_or(0);
+    let scan_start_col = start_col.unwrap_or(0);
+    let scan_end_row = end_row.unwrap_or(grid.max_row);
+    let scan_end_col = end_col.unwrap_or(grid.max_col);
+
+    // Collect cells that need modification first (to avoid borrow issues)
+    let mut modifications: Vec<(u32, u32, String)> = Vec::new();
+
+    for (&(row, col), cell) in grid.cells.iter() {
+        if row < scan_start_row || row > scan_end_row
+            || col < scan_start_col || col > scan_end_col
+        {
+            continue;
+        }
+
+        if let Some(ref formula) = cell.formula {
+            let mut new_formula = formula.clone();
+
+            for (name, patterns) in &replacements {
+                new_formula = replace_ref_in_formula(&new_formula, patterns, name);
+            }
+
+            if new_formula != *formula {
+                modifications.push((row, col, new_formula));
+            }
+        }
+    }
+
+    // Apply modifications
+    let mut updated_cells: Vec<CellData> = Vec::new();
+
+    for (row, col, new_formula) in &modifications {
+        if let Some(cell) = grid.cells.get_mut(&(*row, *col)) {
+            cell.formula = Some(new_formula.clone());
+            // Clear cached AST so it gets re-parsed with the new formula
+            cell.cached_ast = None;
+        }
+    }
+
+    // Build CellData results for the frontend
+    for (row, col, _) in &modifications {
+        if let Some(cell_data) =
+            get_cell_internal_with_merge(&grid, &styles, &merged_regions, *row, *col, &locale)
+        {
+            updated_cells.push(cell_data);
+        }
+    }
+
+    Ok(ApplyNamesResult {
+        formulas_modified: modifications.len() as u32,
+        cells: updated_cells,
+    })
 }
 
 #[cfg(test)]

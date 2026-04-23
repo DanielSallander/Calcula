@@ -260,6 +260,9 @@ const MORE_TYPES: Array<{ value: ChartType; label: string }> = [
   { value: "funnel", label: "Funnel" },
   { value: "treemap", label: "Treemap" },
   { value: "stock", label: "Stock" },
+  { value: "boxPlot", label: "Box & Whisker" },
+  { value: "sunburst", label: "Sunburst" },
+  { value: "pareto", label: "Pareto" },
 ];
 
 // ============================================================================
