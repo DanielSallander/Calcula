@@ -14,7 +14,7 @@
 import { useCallback, useEffect } from "react";
 import { useGridContext } from "../state/GridContext";
 import { setSelection } from "../state/gridActions";
-import { findCtrlArrowTarget, getMergeInfo, type ArrowDirection } from "../lib/tauri-api";
+import { findCtrlArrowTarget, getMergeInfo, getUsedRange, type ArrowDirection } from "../lib/tauri-api";
 import { fnLog, stateLog, eventLog } from '../../utils/component-logger';
 import { getGlobalIsEditing } from "./useEditing";
 
@@ -434,6 +434,54 @@ export function useGridKeyboard(options: UseGridKeyboardOptions): void {
         return;
       }
 
+      // Handle F5 - Focus Name Box (Go To)
+      if (key === "F5" && !modKey && !altKey && !shiftKey) {
+        event.preventDefault();
+        event.stopPropagation();
+        eventLog.keyboard('Grid', 'handleKeyDown', 'F5', []);
+        if (onCommand) {
+          onCommand('navigate.focusNameBox');
+        }
+        fnLog.exit('handleKeyDown', 'focus name box');
+        return;
+      }
+
+      // Handle F9 - Calculate Now (recalculate all formulas)
+      if (key === "F9" && !modKey && !altKey && !shiftKey) {
+        event.preventDefault();
+        event.stopPropagation();
+        eventLog.keyboard('Grid', 'handleKeyDown', 'F9', []);
+        if (onCommand) {
+          onCommand('calculate.now');
+        }
+        fnLog.exit('handleKeyDown', 'calculate now');
+        return;
+      }
+
+      // Handle F11 - Insert Chart
+      if (key === "F11" && !modKey && !altKey && !shiftKey) {
+        event.preventDefault();
+        event.stopPropagation();
+        eventLog.keyboard('Grid', 'handleKeyDown', 'F11', []);
+        if (onCommand) {
+          onCommand('insert.chart');
+        }
+        fnLog.exit('handleKeyDown', 'insert chart');
+        return;
+      }
+
+      // Handle Ctrl+F1 - Toggle Ribbon Minimize
+      if (key === "F1" && modKey && !altKey && !shiftKey) {
+        event.preventDefault();
+        event.stopPropagation();
+        eventLog.keyboard('Grid', 'handleKeyDown', 'Ctrl+F1', ['Ctrl']);
+        if (onCommand) {
+          onCommand('view.toggleRibbon');
+        }
+        fnLog.exit('handleKeyDown', 'toggle ribbon');
+        return;
+      }
+
       // Handle DELETE/Backspace key - clear selection contents
       if ((key === "Delete" || key === "Backspace") && onDelete) {
         event.preventDefault();
@@ -739,6 +787,34 @@ export function useGridKeyboard(options: UseGridKeyboardOptions): void {
             fnLog.exit('handleKeyDown', 'format number');
             return;
         }
+      }
+
+      // Handle Ctrl+Shift+End - Extend selection to last used cell
+      if (modKey && shiftKey && !altKey && key === "End" && selection) {
+        event.preventDefault();
+        event.stopPropagation();
+        eventLog.keyboard('Grid', 'handleKeyDown', 'Ctrl+Shift+End', ['Ctrl', 'Shift']);
+
+        (async () => {
+          try {
+            const usedRange = await getUsedRange();
+            dispatch(setSelection({
+              startRow: selection.startRow,
+              startCol: selection.startCol,
+              endRow: usedRange.endRow,
+              endCol: usedRange.endCol,
+              type: selection.type,
+            }));
+            if (onSelectionChange) {
+              setTimeout(onSelectionChange, 0);
+            }
+          } catch (error) {
+            console.error("[useGridKeyboard] Ctrl+Shift+End failed:", error);
+          }
+        })();
+
+        fnLog.exit('handleKeyDown', 'extend to last used cell');
+        return;
       }
 
       // Handle Ctrl+Arrow for Excel-like navigation (async)

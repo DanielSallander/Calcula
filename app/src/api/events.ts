@@ -106,6 +106,12 @@ export const AppEvents = {
 
   // Status bar text events
   STATUS_BAR_TEXT_CHANGED: "app:status-bar-text-changed",
+
+  // UI focus events
+  NAMEBOX_FOCUS: "app:namebox-focus",
+
+  // Ribbon visibility events
+  RIBBON_TOGGLE_MINIMIZE: "app:ribbon-toggle-minimize",
 } as const;
 
 /** A single cell value change within a CELL_VALUES_CHANGED event. */

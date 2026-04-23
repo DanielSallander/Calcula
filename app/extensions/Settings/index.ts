@@ -39,15 +39,11 @@ function activate(context: ExtensionContext): void {
   });
   cleanupFns.push(() => context.ui.activityBar.unregister("settings"));
 
-  // Keyboard shortcut: Ctrl+,
-  const handleKeyDown = (e: KeyboardEvent) => {
-    if (e.ctrlKey && !e.shiftKey && e.key === ",") {
-      e.preventDefault();
-      context.ui.activityBar.toggle("settings");
-    }
-  };
-  window.addEventListener("keydown", handleKeyDown, true);
-  cleanupFns.push(() => window.removeEventListener("keydown", handleKeyDown, true));
+  // Register command so keybinding system can invoke it
+  context.commands.register("settings.toggle", () => {
+    context.ui.activityBar.toggle("settings");
+  });
+  cleanupFns.push(() => context.commands.unregister("settings.toggle"));
 
   console.log("[Settings] Extension activated");
 }

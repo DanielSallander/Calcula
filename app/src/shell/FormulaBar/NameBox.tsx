@@ -184,6 +184,16 @@ export function NameBox(): React.ReactElement {
     });
   }, []);
 
+  // Listen for F5 / Go To - focus the Name Box input
+  useEffect(() => {
+    return onAppEvent(AppEvents.NAMEBOX_FOCUS, () => {
+      if (inputRef.current) {
+        inputRef.current.focus();
+        inputRef.current.select();
+      }
+    });
+  }, []);
+
   // The displayed value: either a matched name or the cell address
   const displayValue = matchedName ?? displayAddress;
 

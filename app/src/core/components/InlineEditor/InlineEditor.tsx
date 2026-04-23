@@ -341,6 +341,25 @@ export function InlineEditor(props: InlineEditorProps): React.ReactElement | nul
 
       switch (event.key) {
         case "Enter":
+          // Alt+Enter - insert newline in cell
+          if (event.altKey && !event.ctrlKey && !event.metaKey) {
+            event.preventDefault();
+            event.stopPropagation();
+            const inputEl = inputRef.current;
+            if (inputEl) {
+              const cursorPos = inputEl.selectionStart ?? inputEl.value.length;
+              const currentValue = inputEl.value;
+              const newValue = currentValue.slice(0, cursorPos) + "\n" + currentValue.slice(cursorPos);
+              onValueChange(newValue);
+              // Restore cursor position after the inserted newline
+              requestAnimationFrame(() => {
+                if (inputRef.current) {
+                  inputRef.current.setSelectionRange(cursorPos + 1, cursorPos + 1);
+                }
+              });
+            }
+            break;
+          }
           // Ctrl+Enter - fill selected range with current entry
           if ((event.ctrlKey || event.metaKey) && onCtrlEnter) {
             event.preventDefault();

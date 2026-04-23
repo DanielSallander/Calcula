@@ -208,6 +208,25 @@ export function FormulaInput(): React.ReactElement {
         }
       }
 
+      if (e.key === "Enter" && e.altKey && !e.ctrlKey && !e.metaKey) {
+        // Alt+Enter - insert newline in cell
+        e.preventDefault();
+        e.stopPropagation();
+        const inputEl = inputRef.current;
+        if (inputEl) {
+          const cursorPos = inputEl.selectionStart ?? inputEl.value.length;
+          const currentValue = inputEl.value;
+          const newValue = currentValue.slice(0, cursorPos) + "\n" + currentValue.slice(cursorPos);
+          updateValue(newValue);
+          requestAnimationFrame(() => {
+            if (inputRef.current) {
+              inputRef.current.setSelectionRange(cursorPos + 1, cursorPos + 1);
+            }
+          });
+        }
+        return;
+      }
+
       if (e.key === "Enter") {
         e.preventDefault();
         const shiftKey = e.shiftKey;

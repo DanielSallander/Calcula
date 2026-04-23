@@ -17,6 +17,8 @@ import {
   type ActivityBarService,
 } from "../api/ui";
 
+import { initKeybindings } from "../api/keybindings";
+
 import {
   registerExtensionRegistryService,
   registerGridExtensionsService,
@@ -228,6 +230,9 @@ export function bootstrapShell(): void {
 
   registerCoreGridContextMenu();
   registerCoreSheetContextMenu();
+
+  // Initialize centralized keybinding system
+  initKeybindings();
 
   isBootstrapped = true;
   console.log("[Shell] Bootstrap complete.");

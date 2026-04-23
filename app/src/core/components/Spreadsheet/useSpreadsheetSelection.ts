@@ -32,6 +32,7 @@ import {
   beginUndoTransaction,
   commitUndoTransaction,
   fillRange,
+  calculateNow,
 } from "../../lib/tauri-api";
 import type { FormattingOptions } from "../../types";
 import { DEFAULT_THEME, measureOptimalColumnWidth, measureOptimalRowHeight } from "../../lib/gridRenderer";
@@ -1132,10 +1133,54 @@ export function useSpreadsheetSelection({
         break;
       }
 
+      // Navigate: Focus Name Box (F5)
+      case 'navigate.focusNameBox':
+        emitAppEvent(AppEvents.NAMEBOX_FOCUS);
+        break;
+
+      // Calculate Now (F9) - recalculate all formulas
+      case 'calculate.now': {
+        try {
+          const updatedCells = await calculateNow();
+          console.log(`[useSpreadsheetSelection] Calculate Now - ${updatedCells.length} cells updated`);
+
+          // Refresh canvas to show updated values
+          const canvas = canvasRef.current;
+          if (canvas) {
+            await canvas.refreshCells();
+            canvas.redraw();
+          }
+
+          // Emit event to update formula bar etc.
+          if (updatedCells.length > 0) {
+            cellEvents.emit({
+              row: updatedCells[0].row,
+              col: updatedCells[0].col,
+              oldValue: undefined,
+              newValue: updatedCells[0].display,
+              formula: updatedCells[0].formula ?? null,
+            });
+          }
+        } catch (error) {
+          console.error("[useSpreadsheetSelection] Calculate Now failed:", error);
+        }
+        break;
+      }
+
+      // Insert Chart (F11) - emit command for Charts extension to handle
+      case 'insert.chart':
+        await CommandRegistry.execute('charts.insertChart');
+        break;
+
+      // Toggle Ribbon minimize (Ctrl+F1)
+      case 'view.toggleRibbon':
+        emitAppEvent(AppEvents.RIBBON_TOGGLE_MINIMIZE);
+        break;
+
       default:
         console.warn(`[useSpreadsheetSelection] Unknown command: ${command}`);
     }
-  }, [toggleFormatProperty, applyFormattingToSelection, handleInsertDate, handleInsertTime, handleFillDown, handleFillRight, handleFillUp, handleFillLeft, state.showFormulas, state.displayZeros]);
+  }, [toggleFormatProperty, applyFormattingToSelection, handleInsertDate, handleInsertTime, handleFillDown, handleFillRight, handleFillUp, handleFillLeft, state.showFormulas, state.displayZeros, canvasRef]);
 
   // Keyboard handling with clipboard shortcuts, ESC to clear clipboard, DELETE to clear contents, and undo/redo
   // FIX: Use focusContainerRef instead of containerRef for keyboard events

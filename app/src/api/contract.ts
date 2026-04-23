@@ -27,6 +27,7 @@ import type {
 } from "./gridOverlays";
 import type { AppEventName } from "./events";
 import type { IKeyboardAPI } from "./keyboard";
+import type { IKeybindingsAPI } from "./keybindings";
 import type { ISettingsAPI } from "./settings";
 import type { ICellEditorAPI } from "./cellEditors";
 import type { IFileFormatAPI } from "./fileFormats";
@@ -182,6 +183,9 @@ export interface ExtensionContext {
 
   /** Keyboard shortcut registration */
   keyboard: IKeyboardAPI;
+
+  /** Centralized keybinding registry with user customization */
+  keybindings: IKeybindingsAPI;
 
   /** Extension settings/preferences */
   settings: ISettingsAPI;

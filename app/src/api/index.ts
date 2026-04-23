@@ -723,6 +723,40 @@ export type {
 } from "./keyboard";
 
 // ============================================================================
+// Keybindings API (Centralized, user-configurable)
+// ============================================================================
+
+export {
+  initKeybindings,
+  registerKeybinding,
+  getAllKeybindings,
+  getKeybinding,
+  getKeybindingsForCategory,
+  getCategories,
+  getEffectiveCombo,
+  getDefaultCombo,
+  hasUserOverride,
+  setUserKeybinding,
+  resetUserKeybinding,
+  resetAllKeybindings,
+  findConflicts,
+  parseCombo,
+  matchesEvent as matchesKeybindingEvent,
+  formatCombo,
+  eventToCombo,
+  handleGlobalKeyDown,
+  subscribeToKeybindingChanges,
+  addCustomKeybinding,
+  removeCustomKeybinding,
+  getAvailableCommands,
+} from "./keybindings";
+export type {
+  KeyBinding,
+  ParsedCombo,
+  IKeybindingsAPI,
+} from "./keybindings";
+
+// ============================================================================
 // Formula Autocomplete API
 // ============================================================================
 

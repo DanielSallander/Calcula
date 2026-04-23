@@ -11,8 +11,11 @@ import {
   type LocaleSettings,
   type SupportedLocaleEntry,
 } from "@api/locale";
+import { KeybindingsPage } from "./components/KeybindingsPage";
 
 const h = React.createElement;
+
+type SettingsTab = "general" | "keybindings";
 
 // ============================================================================
 // Settings Storage
@@ -56,6 +59,7 @@ function saveSettings(settings: CalcuaSettings): void {
 // ============================================================================
 
 export function SettingsView(_props: ActivityViewProps): React.ReactElement {
+  const [activeTab, setActiveTab] = useState<SettingsTab>("general");
   const [settings, setSettings] = useState<CalcuaSettings>(getSettings);
   const [locale, setLocaleState] = useState<LocaleSettings | null>(null);
   const [supportedLocales, setSupportedLocales] = useState<SupportedLocaleEntry[]>([]);
@@ -88,7 +92,25 @@ export function SettingsView(_props: ActivityViewProps): React.ReactElement {
     setLocale(value).then(setLocaleState);
   }, []);
 
+  // Tab bar + content
   return h("div", { style: styles.container },
+    // Tab bar
+    h("div", { style: styles.tabBar },
+      h("button", {
+        style: activeTab === "general" ? { ...styles.tab, ...styles.tabActive } : styles.tab,
+        onClick: () => setActiveTab("general"),
+      }, "General"),
+      h("button", {
+        style: activeTab === "keybindings" ? { ...styles.tab, ...styles.tabActive } : styles.tab,
+        onClick: () => setActiveTab("keybindings"),
+      }, "Keyboard Shortcuts"),
+    ),
+
+    // Keybindings tab
+    activeTab === "keybindings" && h(KeybindingsPage, null),
+
+    // General tab
+    activeTab === "general" && h("div", { style: styles.generalContent },
     // Section: Regional Settings
     h("div", { style: styles.section },
       h("div", { style: styles.sectionTitle }, "Regional Settings"),
@@ -187,6 +209,7 @@ export function SettingsView(_props: ActivityViewProps): React.ReactElement {
         ),
       ),
     ),
+    ), // end generalContent
   );
 }
 
@@ -199,9 +222,36 @@ const styles: Record<string, React.CSSProperties> = {
     display: "flex",
     flexDirection: "column",
     height: "100%",
+    overflow: "hidden",
+    fontFamily: "'Segoe UI Variable', 'Segoe UI', system-ui, sans-serif",
+  },
+  tabBar: {
+    display: "flex",
+    gap: 0,
+    borderBottom: "1px solid #e0e0e0",
+    padding: "0 12px",
+    flexShrink: 0,
+  },
+  tab: {
+    padding: "10px 16px",
+    fontSize: 12,
+    fontWeight: 500,
+    color: "#777",
+    backgroundColor: "transparent",
+    border: "none",
+    borderBottom: "2px solid transparent",
+    cursor: "pointer",
+    outline: "none",
+  },
+  tabActive: {
+    color: "#333",
+    fontWeight: 600,
+    borderBottomColor: "#10b981",
+  },
+  generalContent: {
+    flex: 1,
     overflow: "auto",
     padding: "14px 16px",
-    fontFamily: "'Segoe UI Variable', 'Segoe UI', system-ui, sans-serif",
   },
   section: {
     marginBottom: 24,

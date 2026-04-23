@@ -350,6 +350,14 @@ export function useSpreadsheetEditing({
         // If InlineEditor has focus, it handles these keys and stops propagation,
         // so this code only runs when the container has focus during editing.
         if (event.key === "Enter") {
+          // Alt+Enter - insert newline in cell (during cross-sheet editing)
+          if (event.altKey && !event.ctrlKey && !event.metaKey && editing) {
+            event.preventDefault();
+            const currentValue = editing.value;
+            // Append newline at end (no cursor position available in container mode)
+            updateValue(currentValue + "\n");
+            return;
+          }
           event.preventDefault();
           console.log("[handleContainerKeyDown] Enter pressed while isEditingRef.current is true, editing state:", !!editing);
           // FIX: If editing state is not yet set (race condition with async startEditing),
@@ -455,7 +463,7 @@ export function useSpreadsheetEditing({
         return;
       }
     },
-    [isEditingRef, editing, isOnDifferentSheet, startEditing, handleCommitEdit, handleInlineCtrlEnter, cancelEdit, moveActiveCell, scrollToSelection, focusContainerRef, selection]
+    [isEditingRef, editing, isOnDifferentSheet, startEditing, handleCommitEdit, handleInlineCtrlEnter, cancelEdit, updateValue, moveActiveCell, scrollToSelection, focusContainerRef, selection]
   );
 
   const getFormulaBarValueInternal = (): string => {

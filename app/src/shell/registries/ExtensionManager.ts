@@ -64,6 +64,11 @@ import { registerCellClickInterceptor } from "../../api/cellClickInterceptors";
 import { registerCellDoubleClickInterceptor } from "../../api/cellDoubleClickInterceptors";
 import { registerShortcut, getShortcuts } from "../../api/keyboard";
 import {
+  registerKeybinding,
+  getAllKeybindings,
+  getEffectiveCombo,
+} from "../../api/keybindings";
+import {
   getSetting,
   setSetting,
   removeSetting,
@@ -330,6 +335,12 @@ class ExtensionManagerImpl {
           registerShortcut: (combo, commandId, options) =>
             registerShortcut(combo, commandId, id, options),
           getShortcuts,
+        },
+        keybindings: {
+          register: (binding) =>
+            registerKeybinding({ ...binding, source: "extension", extensionId: id }),
+          getAll: getAllKeybindings,
+          getEffectiveCombo,
         },
         settings: {
           get: <T extends string | number | boolean>(key: string, defaultValue: T) =>

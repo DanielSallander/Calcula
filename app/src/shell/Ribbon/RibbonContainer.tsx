@@ -3,16 +3,67 @@
 // CONTEXT: This is an empty ribbon shell that add-ins populate via ExtensionRegistry
 // REFACTOR: Imports from api layer instead of core internals
 
-import React, { useState, useEffect, useRef } from "react";
+import React, { useState, useEffect, useRef, useCallback } from "react";
 import { ExtensionRegistry } from "../../api/extensions";
 import type { RibbonTabDefinition, RibbonContext } from "../../api/extensions";
 import { useGridState } from "../../api/state";
+import { onAppEvent, AppEvents } from "../../api/events";
 
 export function RibbonContainer(): React.ReactElement {
   const state = useGridState();
   const [activeTabId, setActiveTabId] = useState<string | null>(null);
   const [tabs, setTabs] = useState<RibbonTabDefinition[]>([]);
+  const [isMinimized, setIsMinimized] = useState(false);
   const prevTabIdsRef = useRef<Set<string>>(new Set());
+
+  // Listen for Ctrl+F1 toggle ribbon minimize
+  useEffect(() => {
+    return onAppEvent(AppEvents.RIBBON_TOGGLE_MINIMIZE, () => {
+      setIsMinimized((prev) => !prev);
+    });
+  }, []);
+
+  // When minimized, clicking a tab temporarily shows the content, then re-hides on blur
+  const [tempExpanded, setTempExpanded] = useState(false);
+
+  const handleTabClick = useCallback(
+    (tabId: string) => {
+      if (isMinimized) {
+        if (activeTabId === tabId && tempExpanded) {
+          // Clicking the same tab while expanded: collapse again
+          setTempExpanded(false);
+        } else {
+          setActiveTabId(tabId);
+          setTempExpanded(true);
+        }
+      } else {
+        setActiveTabId(tabId);
+      }
+    },
+    [isMinimized, activeTabId, tempExpanded]
+  );
+
+  // Close temp-expanded ribbon when clicking outside
+  useEffect(() => {
+    if (!tempExpanded) return;
+
+    const handleClickOutside = (e: MouseEvent) => {
+      // If clicking inside the ribbon content area, don't close (let buttons work)
+      const target = e.target as HTMLElement;
+      if (target.closest("[data-ribbon-content]")) return;
+      setTempExpanded(false);
+    };
+
+    // Use a short delay so the current click doesn't immediately close it
+    const timeoutId = setTimeout(() => {
+      document.addEventListener("mousedown", handleClickOutside);
+    }, 0);
+
+    return () => {
+      clearTimeout(timeoutId);
+      document.removeEventListener("mousedown", handleClickOutside);
+    };
+  }, [tempExpanded]);
 
   // Subscribe to registry changes
   useEffect(() => {
@@ -96,7 +147,7 @@ export function RibbonContainer(): React.ReactElement {
           return (
             <button
               key={tab.id}
-              onClick={() => setActiveTabId(tab.id)}
+              onClick={() => handleTabClick(tab.id)}
               style={{
                 padding: "6px 16px",
                 border: "none",
@@ -135,13 +186,21 @@ export function RibbonContainer(): React.ReactElement {
       </div>
 
       {/* Tab Content Area - fixed height to prevent grid jumping when tabs change */}
+      {/* When minimized, only show if temporarily expanded (tab clicked) */}
       <div
+        data-ribbon-content
         style={{
-          height: "92px",
-          padding: "6px 8px",
+          height: isMinimized && !tempExpanded ? "0px" : "92px",
+          padding: isMinimized && !tempExpanded ? "0 8px" : "6px 8px",
           backgroundColor: "#fff",
-          display: "flex",
+          display: isMinimized && !tempExpanded ? "none" : "flex",
           gap: "0",
+          position: isMinimized && tempExpanded ? "absolute" : "relative",
+          left: isMinimized && tempExpanded ? 0 : undefined,
+          right: isMinimized && tempExpanded ? 0 : undefined,
+          zIndex: isMinimized && tempExpanded ? 100 : undefined,
+          boxShadow: isMinimized && tempExpanded ? "0 4px 12px rgba(0,0,0,0.15)" : undefined,
+          borderBottom: isMinimized && tempExpanded ? "1px solid #d0d0d0" : undefined,
         }}
       >
         {groups.length > 0 ? (
