@@ -1023,6 +1023,18 @@ pub fn new_file(
         row_heights.clear();
         deps.clear();
 
+        // Reset per-sheet grids to a single empty sheet
+        let mut grids = state.grids.lock().map_err(|e| e.to_string())?;
+        grids.clear();
+        grids.push(engine::grid::Grid::new());
+
+        // Reset sheet names to a single "Sheet1"
+        let mut sheet_names = state.sheet_names.lock().map_err(|e| e.to_string())?;
+        *sheet_names = vec!["Sheet1".to_string()];
+
+        // Reset active sheet to 0
+        *state.active_sheet.lock().map_err(|e| e.to_string())? = 0;
+
         // Reset per-sheet dimension storage
         let mut all_cw = state.all_column_widths.lock().map_err(|e| e.to_string())?;
         let mut all_rh = state.all_row_heights.lock().map_err(|e| e.to_string())?;
@@ -1039,7 +1051,114 @@ pub fn new_file(
         // Reset default dimensions
         *state.default_row_height.lock().unwrap() = 24.0;
         *state.default_column_width.lock().unwrap() = 100.0;
+
+        // Reset freeze/split/scroll configs to single default sheet
+        let mut freeze_configs = state.freeze_configs.lock().map_err(|e| e.to_string())?;
+        freeze_configs.clear();
+        freeze_configs.push(crate::sheets::FreezeConfig { freeze_row: None, freeze_col: None });
+
+        let mut split_configs = state.split_configs.lock().map_err(|e| e.to_string())?;
+        split_configs.clear();
+        split_configs.push(crate::sheets::SplitConfig::default());
+
+        let mut scroll_areas = state.scroll_areas.lock().map_err(|e| e.to_string())?;
+        scroll_areas.clear();
+        scroll_areas.push(None);
+
+        // Reset tab colors and sheet visibility
+        let mut tab_colors = state.tab_colors.lock().map_err(|e| e.to_string())?;
+        tab_colors.clear();
+        tab_colors.push(String::new());
+
+        let mut sheet_visibility = state.sheet_visibility.lock().map_err(|e| e.to_string())?;
+        sheet_visibility.clear();
+        sheet_visibility.push("visible".to_string());
+
+        // Reset merged regions
+        state.merged_regions.lock().map_err(|e| e.to_string())?.clear();
+        let mut all_merged = state.all_merged_regions.lock().map_err(|e| e.to_string())?;
+        all_merged.clear();
+        all_merged.push(std::collections::HashSet::new());
+
+        // Reset gridlines visibility
+        let mut show_gridlines = state.show_gridlines.lock().map_err(|e| e.to_string())?;
+        show_gridlines.clear();
+        show_gridlines.push(true);
+
+        // Reset page setups
+        let mut page_setups = state.page_setups.lock().map_err(|e| e.to_string())?;
+        page_setups.clear();
+        page_setups.push(crate::api_types::PageSetup::default());
     }
+
+    // Clear notes, hyperlinks, comments
+    state.notes.lock().map_err(|e| e.to_string())?.clear();
+    state.hyperlinks.lock().map_err(|e| e.to_string())?.clear();
+    state.comments.lock().map_err(|e| e.to_string())?.clear();
+
+    // Clear named ranges
+    state.named_ranges.lock().map_err(|e| e.to_string())?.clear();
+
+    // Clear data validations
+    state.data_validations.lock().map_err(|e| e.to_string())?.clear();
+
+    // Clear conditional formats
+    state.conditional_formats.lock().map_err(|e| e.to_string())?.clear();
+
+    // Clear cross-sheet dependencies
+    state.cross_sheet_dependents.lock().map_err(|e| e.to_string())?.clear();
+    state.cross_sheet_dependencies.lock().map_err(|e| e.to_string())?.clear();
+
+    // Reset undo stack
+    *state.undo_stack.lock().map_err(|e| e.to_string())? = engine::UndoStack::new();
+
+    // Clear sheet protection and cell protection
+    state.sheet_protection.lock().map_err(|e| e.to_string())?.clear();
+    state.cell_protection.lock().map_err(|e| e.to_string())?.clear();
+
+    // Clear auto filters
+    state.auto_filters.lock().map_err(|e| e.to_string())?.clear();
+
+    // Clear outlines/grouping
+    state.outlines.lock().map_err(|e| e.to_string())?.clear();
+
+    // Clear protected regions
+    state.protected_regions.lock().map_err(|e| e.to_string())?.clear();
+
+    // Clear computed properties
+    state.computed_properties.lock().map_err(|e| e.to_string())?.clear();
+    *state.next_computed_prop_id.lock().map_err(|e| e.to_string())? = 1;
+    state.computed_prop_dependencies.lock().map_err(|e| e.to_string())?.clear();
+    state.computed_prop_dependents.lock().map_err(|e| e.to_string())?.clear();
+
+    // Clear controls
+    state.controls.lock().map_err(|e| e.to_string())?.clear();
+
+    // Clear spill tracking
+    state.spill_ranges.lock().map_err(|e| e.to_string())?.clear();
+    state.spill_hosts.lock().map_err(|e| e.to_string())?.clear();
+
+    // Clear advanced filter hidden rows
+    state.advanced_filter_hidden_rows.lock().map_err(|e| e.to_string())?.clear();
+
+    // Clear dependency maps
+    state.dependencies.lock().map_err(|e| e.to_string())?.clear();
+    state.column_dependents.lock().map_err(|e| e.to_string())?.clear();
+    state.row_dependents.lock().map_err(|e| e.to_string())?.clear();
+    state.column_dependencies.lock().map_err(|e| e.to_string())?.clear();
+    state.row_dependencies.lock().map_err(|e| e.to_string())?.clear();
+
+    // Reset conditional format ID counter
+    *state.next_cf_rule_id.lock().map_err(|e| e.to_string())? = 1;
+
+    // Clear scenarios
+    state.scenarios.lock().map_err(|e| e.to_string())?.clear();
+
+    // Clear named styles
+    state.named_styles.lock().map_err(|e| e.to_string())?.clear();
+
+    // Reset theme to default
+    *state.theme.lock().map_err(|e| e.to_string())? = engine::ThemeDefinition::office();
 
     // Clear slicer state
     slicer_state.slicers.lock().unwrap().clear();
