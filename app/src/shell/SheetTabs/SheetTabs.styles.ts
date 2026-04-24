@@ -56,7 +56,7 @@ export const HiddenCount = styled.span`
 export const TabsArea = styled.div`
   display: flex;
   align-items: center;
-  flex: 1 1 0;
+  flex: 0 1 auto;
   min-width: 0;
   overflow-x: auto;
   overflow-y: hidden;

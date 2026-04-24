@@ -358,6 +358,11 @@ function SpreadsheetContent({
       console.log("[Spreadsheet] Sheet switch - refreshing dimensions");
       refreshDimensions();
 
+      // Sync per-sheet gridlines visibility from backend
+      invoke<boolean>("get_show_gridlines").then((show) => {
+        dispatch(setDisplayGridlines(show));
+      }).catch(() => {});
+
       // Restore the new sheet's saved state if available
       const savedState = sheetStatesMap.get(newSheetIndex);
       if (savedState) {

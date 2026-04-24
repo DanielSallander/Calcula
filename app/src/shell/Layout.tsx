@@ -37,6 +37,7 @@ import {
   emitAppEvent,
 } from "../api";
 import { updateWindowTitle, isFileModified, saveFile } from "../core/lib/file-api";
+import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { ask } from "@tauri-apps/plugin-dialog";
 import type { ViewMode } from "../core/types";
@@ -178,11 +179,13 @@ function LayoutInner(): React.ReactElement {
   }, [dispatch]);
 
   // Bridge: sync display gridlines mode from API events into Core state.
+  // Persists the per-sheet setting to the Rust backend.
   useEffect(() => {
     const cleanup = onAppEvent<{
       displayGridlines: boolean;
     }>(AppEvents.DISPLAY_GRIDLINES_TOGGLED, (detail) => {
       dispatch(setDisplayGridlines(detail.displayGridlines));
+      invoke("set_show_gridlines", { visible: detail.displayGridlines }).catch(() => {});
     });
     return cleanup;
   }, [dispatch]);

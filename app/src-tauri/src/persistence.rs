@@ -362,6 +362,13 @@ fn enrich_workbook_metadata(workbook: &mut Workbook, state: &AppState) {
         }
     }
 
+    // ---- Gridlines visibility ----
+    if let Ok(gridlines) = state.show_gridlines.lock() {
+        if let Some(&visible) = gridlines.get(active_sheet) {
+            workbook.sheets[0].show_gridlines = visible;
+        }
+    }
+
     // ---- Named ranges ----
     if let Ok(named_ranges) = state.named_ranges.lock() {
         workbook.named_ranges = named_ranges

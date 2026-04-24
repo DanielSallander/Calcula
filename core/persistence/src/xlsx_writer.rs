@@ -47,6 +47,11 @@ pub fn save_xlsx(workbook: &Workbook, path: &Path) -> Result<(), PersistenceErro
         let worksheet = xlsx.add_worksheet();
         worksheet.set_name(&sheet.name)?;
 
+        // ---- Gridlines visibility ----
+        if !sheet.show_gridlines {
+            worksheet.set_screen_gridlines(false);
+        }
+
         // ---- Tab color ----
         if !sheet.tab_color.is_empty() {
             let hex = sheet.tab_color.trim_start_matches('#');

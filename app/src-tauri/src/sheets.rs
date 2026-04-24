@@ -121,6 +121,17 @@ pub fn get_show_gridlines(state: State<AppState>) -> bool {
     gridlines.get(active).copied().unwrap_or(true)
 }
 
+/// Set the gridlines visibility for the active sheet.
+#[tauri::command]
+pub fn set_show_gridlines(state: State<AppState>, visible: bool) {
+    let active = *state.active_sheet.lock().unwrap();
+    let mut gridlines = state.show_gridlines.lock().unwrap();
+    while gridlines.len() <= active {
+        gridlines.push(true);
+    }
+    gridlines[active] = visible;
+}
+
 #[tauri::command]
 pub fn set_active_sheet(state: State<AppState>, index: usize) -> Result<SheetsResult, String> {
     let sheet_names = state.sheet_names.lock().unwrap();
@@ -248,6 +259,11 @@ pub fn add_sheet(state: State<AppState>, name: Option<String>) -> Result<SheetsR
     }
     tab_colors.push(String::new());
     sheet_visibility.push("visible".to_string());
+    // New sheet shows gridlines by default
+    {
+        let mut gridlines = state.show_gridlines.lock().unwrap();
+        gridlines.push(true);
+    }
     // New sheet gets empty dimensions and merged regions
     all_column_widths.push(HashMap::new());
     all_row_heights.push(HashMap::new());
@@ -420,6 +436,12 @@ pub fn delete_sheet(state: State<AppState>, pivot_state: State<'_, PivotState>, 
     }
     if index < sheet_visibility.len() {
         sheet_visibility.remove(index);
+    }
+    {
+        let mut gridlines = state.show_gridlines.lock().unwrap();
+        if index < gridlines.len() {
+            gridlines.remove(index);
+        }
     }
     if index < all_column_widths.len() {
         all_column_widths.remove(index);
@@ -693,6 +715,13 @@ pub fn move_sheet(
     rotate_element(&mut *all_row_heights, from_index, to_index);
     rotate_element(&mut *page_setups, from_index, to_index);
     {
+        let mut gridlines = state.show_gridlines.lock().unwrap();
+        while gridlines.len() < count {
+            gridlines.push(true);
+        }
+        rotate_element(&mut *gridlines, from_index, to_index);
+    }
+    {
         let mut all_merged = state.all_merged_regions.lock().unwrap();
         let mut current_merged = state.merged_regions.lock().unwrap();
         ensure_vec_len(&mut all_merged, count);
@@ -825,6 +854,14 @@ pub fn copy_sheet(
     }
     tab_colors.insert(insert_at, cloned_tab_color);
     sheet_visibility.insert(insert_at, "visible".to_string()); // Copy is always visible
+    {
+        let mut gridlines = state.show_gridlines.lock().unwrap();
+        while gridlines.len() < count {
+            gridlines.push(true);
+        }
+        let cloned_gridlines = gridlines[source_index];
+        gridlines.insert(insert_at, cloned_gridlines);
+    }
     all_column_widths.insert(insert_at, cloned_widths);
     all_row_heights.insert(insert_at, cloned_heights);
     page_setups.insert(insert_at, cloned_page_setup);
