@@ -446,8 +446,41 @@ fn parse_chart_xml(xml: &str, anchor: &ChartAnchor) -> Option<String> {
         _ => "none", // "clustered" or "standard"
     };
 
-    // Build the data range: find the overall range covering all series
-    let data_range = build_data_range(&series_list);
+    // Detect series orientation from the shape of value references.
+    // If val_ref spans columns (same row), series are in rows.
+    // If val_ref spans rows (same column), series are in columns.
+    let orientation = detect_series_orientation(&series_list);
+
+    // Build the data range and compute indices based on orientation
+    let (data_range, has_headers, category_index, source_indices) = if orientation == "rows" {
+        // Row-oriented: build data range from cat_ref + val_ref only (not name_ref)
+        // because name_ref cells may be in a separate column outside the data area
+        let range = build_data_range_cat_val(&series_list);
+        let range_bounds = parse_range_bounds(&range);
+
+        let cat_index = if let Some((min_row, _, _, _)) = range_bounds {
+            series_list.iter()
+                .find(|s| !s.cat_ref.is_empty())
+                .and_then(|s| parse_first_row_of_ref(&s.cat_ref))
+                .map(|r| r.saturating_sub(min_row) as usize)
+                .unwrap_or(0)
+        } else { 0 };
+
+        let indices: Vec<usize> = series_list.iter().enumerate().map(|(i, s)| {
+            if let Some((min_row, _, _, _)) = range_bounds {
+                parse_first_row_of_ref(&s.val_ref)
+                    .map(|r| r.saturating_sub(min_row) as usize)
+                    .unwrap_or(i + 1)
+            } else { i + 1 }
+        }).collect();
+
+        (range, false, cat_index, indices)
+    } else {
+        // Column-oriented: use all refs (name_ref is typically in the header row)
+        let range = build_data_range(&series_list);
+        let indices: Vec<usize> = (0..series_list.len()).map(|i| i + 1).collect();
+        (range, true, 0usize, indices)
+    };
 
     // Build ChartDefinition JSON with dynamic name references and seriesRefs
     let series_json: Vec<String> = series_list
@@ -460,12 +493,10 @@ fn parse_chart_xml(xml: &str, anchor: &ChartAnchor) -> Option<String> {
             } else {
                 format!("Series {}", i + 1)
             };
-            // sourceIndex is the column index within the data range (0-based).
-            // categoryIndex=0 takes the first column, so series start at index 1.
             format!(
                 r#"{{"name":"{}","sourceIndex":{},"color":null}}"#,
                 escape_json(&name),
-                i + 1
+                source_indices[i]
             )
         })
         .collect();
@@ -520,7 +551,7 @@ fn parse_chart_xml(xml: &str, anchor: &ChartAnchor) -> Option<String> {
     let series_refs_field = format!(r#","seriesRefs":[{}]"#, series_refs_json.join(","));
 
     let spec_json = format!(
-        r#"{{"chartId":{},"name":"{}","sheetIndex":0,"x":{},"y":{},"width":{},"height":{},"spec":{{"mark":"{}","data":"{}","hasHeaders":true,"seriesOrientation":"columns","categoryIndex":0,"series":[{}],"title":{},"xAxis":{{"title":null,"showGrid":false,"showLabels":true}},"yAxis":{{"title":null,"showGrid":true,"showLabels":true}},"legend":{{"position":"right","show":true}},"palette":"default"{}{}}}}}"#,
+        r#"{{"chartId":{},"name":"{}","sheetIndex":0,"x":{},"y":{},"width":{},"height":{},"spec":{{"mark":"{}","data":"{}","hasHeaders":{},"seriesOrientation":"{}","categoryIndex":{},"series":[{}],"title":{},"xAxis":{{"title":null,"showGrid":false,"showLabels":true}},"yAxis":{{"title":null,"showGrid":true,"showLabels":true}},"legend":{{"position":"right","show":true}},"palette":"default"{}{}}}}}"#,
         0, // chartId will be set by the caller
         escape_json(&anchor.name),
         x,
@@ -529,6 +560,9 @@ fn parse_chart_xml(xml: &str, anchor: &ChartAnchor) -> Option<String> {
         h.max(200.0),
         mark,
         escape_json(&data_range),
+        if has_headers { "true" } else { "false" },
+        orientation,
+        category_index,
         series_json.join(","),
         title_json,
         mark_options_json,
@@ -543,6 +577,102 @@ struct SeriesInfo {
     name_ref: String,
     cat_ref: String,
     val_ref: String,
+}
+
+/// Detect whether chart series are oriented as rows or columns.
+/// Examines the val_ref of the first series:
+/// - If val_ref spans columns (same row, multiple cols), series are in rows.
+/// - If val_ref spans rows (same col, multiple rows), series are in columns.
+fn detect_series_orientation(series: &[SeriesInfo]) -> &'static str {
+    for s in series {
+        if s.val_ref.is_empty() { continue; }
+        let cell_part = s.val_ref.split('!').last().unwrap_or(&s.val_ref);
+        let parts: Vec<&str> = cell_part.split(':').collect();
+        if parts.len() == 2 {
+            let start = parts[0].replace('$', "");
+            let end = parts[1].replace('$', "");
+            if let (Some((sr, sc)), Some((er, ec))) = (parse_a1_ref(&start), parse_a1_ref(&end)) {
+                if sr == er && sc != ec {
+                    return "rows"; // Horizontal span → each series occupies a row
+                }
+                if sc == ec && sr != er {
+                    return "columns"; // Vertical span → each series occupies a column
+                }
+                // Both dimensions differ: use the dominant one
+                let row_span = er.saturating_sub(sr);
+                let col_span = ec.saturating_sub(sc);
+                return if col_span > row_span { "rows" } else { "columns" };
+            }
+        }
+    }
+    "columns"
+}
+
+/// Build a data range from cat_ref and val_ref only (excluding name_ref).
+/// Used for row-oriented charts where name_refs may be in a separate column
+/// outside the actual data area.
+fn build_data_range_cat_val(series: &[SeriesInfo]) -> String {
+    let cat_ref = series.iter().find(|s| !s.cat_ref.is_empty()).map(|s| &s.cat_ref);
+    let val_refs: Vec<&str> = series.iter().filter(|s| !s.val_ref.is_empty()).map(|s| s.val_ref.as_str()).collect();
+
+    if val_refs.is_empty() {
+        return String::new();
+    }
+
+    let all_refs: Vec<&str> = cat_ref.map(|c| c.as_str()).into_iter()
+        .chain(val_refs.iter().copied())
+        .collect();
+
+    let sheet_prefix = all_refs.first()
+        .and_then(|r| r.split('!').next())
+        .unwrap_or("");
+
+    let mut min_row = u32::MAX;
+    let mut max_row = 0u32;
+    let mut min_col = u32::MAX;
+    let mut max_col = 0u32;
+
+    for r in &all_refs {
+        let cell_part = r.split('!').last().unwrap_or(r);
+        for part in cell_part.split(':') {
+            let clean = part.replace('$', "");
+            if let Some((row, col)) = parse_a1_ref(&clean) {
+                min_row = min_row.min(row);
+                max_row = max_row.max(row);
+                min_col = min_col.min(col);
+                max_col = max_col.max(col);
+            }
+        }
+    }
+
+    if min_row <= max_row && min_col <= max_col {
+        let start = format_a1(min_row, min_col);
+        let end = format_a1(max_row, max_col);
+        format!("{}!{}:{}", sheet_prefix, start, end)
+    } else {
+        val_refs.first().map(|s| s.to_string()).unwrap_or_default()
+    }
+}
+
+/// Parse the bounding box of an A1-style range string.
+/// Returns (min_row, min_col, max_row, max_col) if parseable.
+fn parse_range_bounds(range: &str) -> Option<(u32, u32, u32, u32)> {
+    let cell_part = range.split('!').last().unwrap_or(range);
+    let parts: Vec<&str> = cell_part.split(':').collect();
+    if parts.len() != 2 { return None; }
+    let start = parts[0].replace('$', "");
+    let end = parts[1].replace('$', "");
+    let (sr, sc) = parse_a1_ref(&start)?;
+    let (er, ec) = parse_a1_ref(&end)?;
+    Some((sr, sc, er, ec))
+}
+
+/// Extract the first row number from a cell reference like "Sheet1!$A$5:$A$10".
+fn parse_first_row_of_ref(ref_str: &str) -> Option<u32> {
+    let cell_part = ref_str.split('!').last().unwrap_or(ref_str);
+    let first_cell = cell_part.split(':').next()?;
+    let clean = first_cell.replace('$', "");
+    parse_a1_ref(&clean).map(|(row, _)| row)
 }
 
 /// Build an A1-style data range string that covers all series data.

@@ -223,6 +223,71 @@ export async function autoDetectSeries(
   return { categoryIndex, series, orientation };
 }
 
+/**
+ * Re-derive series definitions for a specific orientation.
+ * Used when switching between rows and columns orientation on an existing chart.
+ */
+export async function autoDetectSeriesForOrientation(
+  dataRange: DataRangeRef,
+  hasHeaders: boolean,
+  orientation: SeriesOrientation,
+): Promise<{
+  categoryIndex: number;
+  series: ChartSeries[];
+}> {
+  const cells = await getViewportCells(
+    dataRange.startRow,
+    dataRange.startCol,
+    dataRange.endRow,
+    dataRange.endCol,
+  );
+
+  const numRows = dataRange.endRow - dataRange.startRow + 1;
+  const numCols = dataRange.endCol - dataRange.startCol + 1;
+  const grid: string[][] = Array.from({ length: numRows }, () =>
+    Array(numCols).fill(""),
+  );
+
+  for (const cell of cells) {
+    const r = cell.row - dataRange.startRow;
+    const c = cell.col - dataRange.startCol;
+    if (r >= 0 && r < numRows && c >= 0 && c < numCols) {
+      grid[r][c] = cell.display;
+    }
+  }
+
+  const categoryIndex = 0;
+  const series: ChartSeries[] = [];
+
+  if (orientation === "columns") {
+    const dataStartRow = hasHeaders ? 1 : 0;
+    for (let col = 0; col < numCols; col++) {
+      if (col === categoryIndex) continue;
+      let hasNumeric = false;
+      for (let row = dataStartRow; row < numRows; row++) {
+        if (!isNaN(parseDisplayNumber(grid[row][col]))) { hasNumeric = true; break; }
+      }
+      if (!hasNumeric) continue;
+      const name = hasHeaders && grid[0][col] ? grid[0][col] : indexToCol(dataRange.startCol + col);
+      series.push({ name, sourceIndex: col, color: null });
+    }
+  } else {
+    const dataStartCol = hasHeaders ? 1 : 0;
+    for (let row = 0; row < numRows; row++) {
+      if (row === categoryIndex) continue;
+      let hasNumeric = false;
+      for (let col = dataStartCol; col < numCols; col++) {
+        if (!isNaN(parseDisplayNumber(grid[row][col]))) { hasNumeric = true; break; }
+      }
+      if (!hasNumeric) continue;
+      const name = hasHeaders && grid[row][0] ? grid[row][0] : `Row ${dataRange.startRow + row + 1}`;
+      series.push({ name, sourceIndex: row, color: null });
+    }
+  }
+
+  return { categoryIndex, series };
+}
+
 // ============================================================================
 // Internal Parsers
 // ============================================================================

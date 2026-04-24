@@ -10,7 +10,7 @@ import { emitAppEvent, AppEvents, showDialog } from "@api";
 import type { RibbonContext } from "@api/extensions";
 import { useRibbonCollapse, RibbonGroup } from "@api/ribbonCollapse";
 
-import type { ChartType, ChartSpec, StackMode, BarMarkOptions, LineMarkOptions, AreaMarkOptions, TrendlineSpec, TrendlineType, ComboMarkOptions, DataLabelSpec } from "../types";
+import type { ChartType, ChartSpec, StackMode, BarMarkOptions, LineMarkOptions, AreaMarkOptions, TrendlineSpec, TrendlineType, ComboMarkOptions, DataLabelSpec, SeriesOrientation } from "../types";
 import { isPivotDataSource, isCartesianChart } from "../types";
 import { getChartById, updateChartSpec, syncChartRegions } from "../lib/chartStore";
 import { invalidateChartCache } from "../rendering/chartRenderer";
@@ -19,6 +19,8 @@ import { ChartEvents } from "../lib/chartEvents";
 import { PALETTES, PALETTE_NAMES } from "../rendering/chartTheme";
 import { CHART_DIALOG_ID } from "../manifest";
 import { exportChartAsImage } from "../lib/chartExport";
+import { autoDetectSeriesForOrientation } from "../lib/chartDataReader";
+import { resolveDataSource } from "../lib/dataSourceResolver";
 
 // ============================================================================
 // Styles
@@ -345,6 +347,19 @@ function SaveImageIcon() {
   );
 }
 
+function SwitchRowColIcon() {
+  return (
+    <svg width="20" height="20" viewBox="0 0 20 20" fill="none">
+      {/* Horizontal arrow (row) */}
+      <path d="M3 7 L11 7" stroke="#4472C4" strokeWidth="1.8" strokeLinecap="round" />
+      <path d="M9 5 L11.5 7 L9 9" stroke="#4472C4" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+      {/* Vertical arrow (column) */}
+      <path d="M13 17 L13 9" stroke="#ED7D31" strokeWidth="1.8" strokeLinecap="round" />
+      <path d="M11 11 L13 8.5 L15 11" stroke="#ED7D31" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  );
+}
+
 // ============================================================================
 // Collapse configuration
 // ============================================================================
@@ -356,7 +371,7 @@ const GROUP_DEFS = [
   { collapseOrder: 1, expandedWidth: 140 }, // Trendline
   { collapseOrder: 4, expandedWidth: 220 }, // Colors
   { collapseOrder: 3, expandedWidth: 130 }, // Legend
-  { collapseOrder: 7, expandedWidth: 150 }, // Actions
+  { collapseOrder: 7, expandedWidth: 260 }, // Actions
 ];
 
 // ============================================================================
@@ -710,6 +725,34 @@ export function ChartDesignTab({
       {/* ================================================================ */}
       <RibbonGroup label="Actions" collapsed={collapsed[6]}>
         <div className={s.groupContent}>
+          {!isPivot && (
+            <button
+              className={s.actionBtn}
+              onClick={async () => {
+                if (chartId == null || !spec) return;
+                try {
+                  const dataRef = await resolveDataSource(spec.data);
+                  const newOrientation: SeriesOrientation =
+                    spec.seriesOrientation === "columns" ? "rows" : "columns";
+                  const detected = await autoDetectSeriesForOrientation(
+                    dataRef, spec.hasHeaders, newOrientation,
+                  );
+                  updateSpec({
+                    seriesOrientation: newOrientation,
+                    categoryIndex: detected.categoryIndex,
+                    series: detected.series,
+                    seriesRefs: undefined,
+                  });
+                } catch (err) {
+                  console.error("[Charts] Switch Row/Column failed:", err);
+                }
+              }}
+              title="Switch between rows and columns as data series"
+            >
+              <span className={s.actionIcon}><SwitchRowColIcon /></span>
+              Switch Row/Col
+            </button>
+          )}
           <button
             className={s.actionBtn}
             onClick={() => {
