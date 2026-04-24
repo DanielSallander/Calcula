@@ -360,6 +360,24 @@ export type MarkOptions =
 export type SeriesOrientation = "columns" | "rows";
 
 // ============================================================================
+// Per-Series Cell References (for SERIES formula reconstruction)
+// ============================================================================
+
+/**
+ * Per-series cell references from XLSX import or user-defined.
+ * Used to reconstruct the Excel-style =SERIES(name, categories, values, order) formula
+ * and to highlight the source ranges when a series is selected.
+ */
+export interface SeriesRef {
+  /** Cell reference for the series name (e.g., "Sheet1!$B$1"). */
+  nameRef?: string;
+  /** Range reference for category labels (e.g., "Sheet1!$A$2:$A$10"). */
+  catRef?: string;
+  /** Range reference for series values (e.g., "Sheet1!$B$2:$B$10"). */
+  valRef?: string;
+}
+
+// ============================================================================
 // Data Source
 // ============================================================================
 
@@ -799,6 +817,8 @@ export interface ChartSpec {
   dataLabels?: DataLabelSpec;
   /** Data table displayed below the chart plot area. */
   dataTable?: DataTableOptions;
+  /** Per-series cell references for SERIES formula reconstruction (from XLSX import or computed). */
+  seriesRefs?: SeriesRef[];
 }
 
 // ============================================================================

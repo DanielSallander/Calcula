@@ -130,6 +130,9 @@ export function NameBox(): React.ReactElement {
   const [dropdownNames, setDropdownNames] = useState<NamedRange[]>([]);
   const inputRef = useRef<HTMLInputElement>(null);
 
+  /** Chart name to display when a chart is selected. */
+  const [chartName, setChartName] = useState<string | null>(null);
+
   const displayAddress = state.selection
     ? formatSelectionAddress(
         state.selection.startRow,
@@ -184,6 +187,18 @@ export function NameBox(): React.ReactElement {
     });
   }, []);
 
+  // Listen for chart selection changes to show chart name
+  useEffect(() => {
+    return onAppEvent(AppEvents.CHART_SELECTION_CHANGED, (detail: unknown) => {
+      const d = detail as { chartId?: number | null; chartName?: string | null } | null;
+      if (d && d.chartId != null && d.chartName) {
+        setChartName(d.chartName);
+      } else {
+        setChartName(null);
+      }
+    });
+  }, []);
+
   // Listen for F5 / Go To - focus the Name Box input
   useEffect(() => {
     return onAppEvent(AppEvents.NAMEBOX_FOCUS, () => {
@@ -194,8 +209,8 @@ export function NameBox(): React.ReactElement {
     });
   }, []);
 
-  // The displayed value: either a matched name or the cell address
-  const displayValue = matchedName ?? displayAddress;
+  // The displayed value: chart name > matched named range > cell address
+  const displayValue = chartName ?? matchedName ?? displayAddress;
 
   // Sync inputValue with displayValue when not editing
   const [prevDisplay, setPrevDisplay] = useState(displayValue);

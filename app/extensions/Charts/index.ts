@@ -8,6 +8,7 @@ import type { ExtensionModule, ExtensionContext } from "@api/contract";
 import {
   ExtensionRegistry,
   AppEvents,
+  columnToLetter,
 } from "@api";
 import { getActiveSheet } from "@api/lib";
 import {
@@ -34,6 +35,7 @@ import {
   consumePendingClick,
   deselectChart,
   getCurrentChartId,
+  getSubSelection,
 } from "./handlers/selectionHandler";
 import {
   resetChartStore,
@@ -44,7 +46,11 @@ import {
   deleteChart,
   setActiveSheetIndex,
   loadChartsFromBackend,
+  getChartById,
+  updateChartSpec,
 } from "./lib/chartStore";
+import { buildSeriesFormula } from "./lib/seriesFormula";
+import type { DataRangeRef } from "./types";
 import {
   renderChart,
   hitTestChart,
@@ -79,6 +85,73 @@ let lastCanvasY = 0;
 
 /** requestAnimationFrame guard for throttling mousemove redraws. */
 let rafPending = false;
+
+// ============================================================================
+// Chart Selection Event Emission
+// ============================================================================
+
+/**
+ * Emit a CHART_SELECTION_CHANGED event with the current selection state.
+ * Called after every selection change (select, advance, deselect) so the
+ * Shell (FormulaBar, NameBox) can update accordingly.
+ */
+async function emitChartSelectionEvent(): Promise<void> {
+  const chartId = getCurrentChartId();
+  if (chartId == null) {
+    // No chart selected
+    emitAppEvent(AppEvents.CHART_SELECTION_CHANGED, {
+      chartId: null,
+      chartName: null,
+      level: "none",
+    });
+    return;
+  }
+
+  const chart = getChartById(chartId);
+  if (!chart) return;
+
+  const sub = getSubSelection();
+  const payload: Record<string, unknown> = {
+    chartId,
+    chartName: chart.name,
+    level: sub.level,
+    seriesIndex: sub.seriesIndex,
+    categoryIndex: (sub as { categoryIndex?: number }).categoryIndex,
+  };
+
+  // For series-level or dataPoint-level selection, compute the SERIES formula
+  if ((sub.level === "series" || sub.level === "dataPoint") && sub.seriesIndex != null) {
+    try {
+      // Determine the sheet name for the chart's data source
+      let sheetName = "";
+      const data = chart.spec.data;
+      if (typeof data === "string") {
+        // A1 reference like "Sheet1!A1:D10" — extract sheet name
+        const bang = data.lastIndexOf("!");
+        if (bang !== -1) {
+          let name = data.substring(0, bang);
+          if (name.startsWith("'") && name.endsWith("'")) {
+            name = name.substring(1, name.length - 1).replace(/''/g, "'");
+          }
+          sheetName = name;
+        }
+      } else if (typeof data === "object" && "startRow" in data) {
+        // DataRangeRef — resolve sheet index to name
+        const { getSheets } = await import("@api");
+        const result = await getSheets();
+        const sheet = result.sheets.find((s: { index: number }) => s.index === data.sheetIndex);
+        if (sheet) sheetName = sheet.name;
+      }
+
+      const formula = await buildSeriesFormula(chart.spec, sub.seriesIndex, sheetName);
+      payload.seriesFormula = formula;
+    } catch {
+      // If formula computation fails, emit without it
+    }
+  }
+
+  emitAppEvent(AppEvents.CHART_SELECTION_CHANGED, payload);
+}
 
 // ============================================================================
 // Activation
@@ -171,6 +244,7 @@ function activate(context: ExtensionContext): void {
     } else {
       // First click: select the chart (Level 1)
       selectChart(chartId);
+      emitChartSelectionEvent();
 
       // Also check if the click landed on a pivot field button -
       // these should be clickable even on the first click (chart select + button click)
@@ -267,7 +341,11 @@ function activate(context: ExtensionContext): void {
 
   // Subscribe to selection changes (deselect chart when user clicks on grid)
   cleanupFunctions.push(
-    ExtensionRegistry.onSelectionChange(handleSelectionChange),
+    ExtensionRegistry.onSelectionChange((sel) => {
+      const wasSelected = getCurrentChartId() != null;
+      handleSelectionChange(sel);
+      if (wasSelected) emitChartSelectionEvent();
+    }),
   );
 
   // -----------------------------------------------------------------------
@@ -348,6 +426,7 @@ function activate(context: ExtensionContext): void {
 
     const hitResult = hitTestBarChart(local.localX, local.localY, cachedData.barRects, cachedData.layout);
     advanceSelection(click.chartId, hitResult);
+    emitChartSelectionEvent();
     context.events.emit(AppEvents.GRID_REFRESH);
   };
   window.addEventListener("mouseup", handleMouseUp);
@@ -378,6 +457,7 @@ function activate(context: ExtensionContext): void {
         const idx = await getActiveSheet();
         setActiveSheetIndex(idx);
         deselectChart();
+        emitChartSelectionEvent();
         invalidateAllChartCaches();
         syncChartRegions();
         context.events.emit(AppEvents.GRID_REFRESH);
@@ -394,6 +474,7 @@ function activate(context: ExtensionContext): void {
       const idx = await getActiveSheet();
       setActiveSheetIndex(idx);
       deselectChart();
+      emitChartSelectionEvent();
       invalidateAllChartCaches();
       syncChartRegions();
       context.events.emit(AppEvents.GRID_REFRESH);
@@ -407,6 +488,157 @@ function activate(context: ExtensionContext): void {
   cleanupFunctions.push(
     context.events.on(AppEvents.AFTER_NEW, reloadCharts),
   );
+
+  // -----------------------------------------------------------------------
+  // Chart Series Reference Drag/Resize
+  // -----------------------------------------------------------------------
+
+  const handleSeriesRefChanged = async (e: Event) => {
+    const detail = (e as CustomEvent).detail;
+    if (!detail) return;
+    const chartId = getCurrentChartId();
+    if (chartId == null) return;
+    const chart = getChartById(chartId);
+    if (!chart) return;
+    const sub = getSubSelection();
+    if (sub.level !== "series" && sub.level !== "dataPoint") return;
+    if (sub.seriesIndex == null) return;
+
+    const { refIndex, newRef } = detail;
+    const spec = chart.spec;
+    const seriesIndex = sub.seriesIndex;
+
+    // The SERIES formula references are in order: [nameRef, catRef, valRef]
+    // But some may be absent. Map refIndex to which field was dragged.
+    // We determine this by counting which refs exist.
+    type RefField = "name" | "category" | "values";
+    const refFields: RefField[] = [];
+
+    if (spec.seriesRefs && spec.seriesRefs[seriesIndex]) {
+      const sr = spec.seriesRefs[seriesIndex];
+      if (sr.nameRef) refFields.push("name");
+      if (sr.catRef) refFields.push("category");
+      if (sr.valRef) refFields.push("values");
+    } else {
+      // Without seriesRefs, compute from spec structure
+      if (spec.hasHeaders) refFields.push("name");
+      refFields.push("category");
+      refFields.push("values");
+    }
+
+    const movedField = refFields[refIndex];
+    if (!movedField) return;
+
+    // Resolve the current data range to compute relative positions
+    const { resolveDataSource } = await import("./lib/dataSourceResolver");
+    let dataRef: DataRangeRef;
+    try {
+      dataRef = await resolveDataSource(spec.data);
+    } catch {
+      return;
+    }
+
+    const specUpdates: Partial<typeof spec> = {};
+
+    if (movedField === "values") {
+      // Values column moved — update the series sourceIndex relative to the data range
+      // Also expand the data range if needed
+      const newDataStartCol = Math.min(dataRef.startCol, newRef.startCol);
+      const newDataEndCol = Math.max(dataRef.endCol, newRef.endCol);
+      const newDataStartRow = Math.min(dataRef.startRow, newRef.startRow - (spec.hasHeaders ? 1 : 0));
+      const newDataEndRow = Math.max(dataRef.endRow, newRef.endRow);
+
+      // Update data range if it expanded
+      if (newDataStartCol !== dataRef.startCol || newDataEndCol !== dataRef.endCol ||
+          newDataStartRow !== dataRef.startRow || newDataEndRow !== dataRef.endRow) {
+        if (typeof spec.data === "string") {
+          // Rebuild the A1 reference string
+          let sheetPrefix = "";
+          const bangIdx = spec.data.lastIndexOf("!");
+          if (bangIdx !== -1) sheetPrefix = spec.data.substring(0, bangIdx) + "!";
+          specUpdates.data = `${sheetPrefix}$${columnToLetter(newDataStartCol)}$${newDataStartRow + 1}:$${columnToLetter(newDataEndCol)}$${newDataEndRow + 1}`;
+        } else if (typeof spec.data === "object" && "startRow" in spec.data) {
+          specUpdates.data = { ...spec.data, startRow: newDataStartRow, startCol: newDataStartCol, endRow: newDataEndRow, endCol: newDataEndCol };
+        }
+        // Recalculate sourceIndex relative to new data range start
+        const updatedSeries = [...spec.series];
+        updatedSeries[seriesIndex] = { ...updatedSeries[seriesIndex], sourceIndex: newRef.startCol - newDataStartCol };
+        specUpdates.series = updatedSeries;
+      } else {
+        // Data range unchanged — just update sourceIndex
+        const updatedSeries = [...spec.series];
+        updatedSeries[seriesIndex] = { ...updatedSeries[seriesIndex], sourceIndex: newRef.startCol - dataRef.startCol };
+        specUpdates.series = updatedSeries;
+      }
+    } else if (movedField === "category") {
+      // Category column moved — update categoryIndex
+      const newDataStartCol = Math.min(dataRef.startCol, newRef.startCol);
+      const newDataEndCol = Math.max(dataRef.endCol, newRef.endCol);
+      specUpdates.categoryIndex = newRef.startCol - newDataStartCol;
+      if (newDataStartCol !== dataRef.startCol || newDataEndCol !== dataRef.endCol) {
+        if (typeof spec.data === "string") {
+          let sheetPrefix = "";
+          const bangIdx = spec.data.lastIndexOf("!");
+          if (bangIdx !== -1) sheetPrefix = spec.data.substring(0, bangIdx) + "!";
+          specUpdates.data = `${sheetPrefix}$${columnToLetter(newDataStartCol)}$${dataRef.startRow + 1}:$${columnToLetter(newDataEndCol)}$${dataRef.endRow + 1}`;
+        } else if (typeof spec.data === "object" && "startRow" in spec.data) {
+          specUpdates.data = { ...spec.data, startCol: newDataStartCol, endCol: newDataEndCol };
+        }
+      }
+    } else if (movedField === "name") {
+      // Name reference moved — update the series name to point to the new cell
+      const updatedSeries = [...spec.series];
+      let sheetPrefix = "";
+      if (spec.seriesRefs?.[seriesIndex]?.nameRef) {
+        const nr = spec.seriesRefs[seriesIndex].nameRef!;
+        const bangIdx = nr.lastIndexOf("!");
+        if (bangIdx !== -1) sheetPrefix = nr.substring(0, bangIdx) + "!";
+      }
+      updatedSeries[seriesIndex] = {
+        ...updatedSeries[seriesIndex],
+        name: `=${sheetPrefix}$${columnToLetter(newRef.startCol)}$${newRef.startRow + 1}`,
+      };
+      specUpdates.series = updatedSeries;
+    }
+
+    // Update seriesRefs metadata for SERIES formula display
+    if (spec.seriesRefs && spec.seriesRefs[seriesIndex]) {
+      const updatedSeriesRefs = [...(specUpdates.seriesRefs || spec.seriesRefs)];
+      const currentSR = { ...updatedSeriesRefs[seriesIndex] };
+      let sheetPrefix = "";
+      const existingRef = currentSR.valRef || currentSR.catRef || currentSR.nameRef || "";
+      const bangIdx = existingRef.lastIndexOf("!");
+      if (bangIdx !== -1) sheetPrefix = existingRef.substring(0, bangIdx) + "!";
+
+      const newA1 = `${sheetPrefix}$${columnToLetter(newRef.startCol)}$${newRef.startRow + 1}` +
+        (newRef.startRow !== newRef.endRow || newRef.startCol !== newRef.endCol
+          ? `:$${columnToLetter(newRef.endCol)}$${newRef.endRow + 1}` : "");
+
+      if (movedField === "name") currentSR.nameRef = newA1;
+      else if (movedField === "category") currentSR.catRef = newA1;
+      else if (movedField === "values") currentSR.valRef = newA1;
+      updatedSeriesRefs[seriesIndex] = currentSR;
+      specUpdates.seriesRefs = updatedSeriesRefs;
+    }
+
+    // Apply all updates
+    updateChartSpec(chartId, specUpdates);
+
+    // Invalidate and refresh (keep selection — don't resetSubSelection)
+    invalidateChartCache(chartId);
+    window.dispatchEvent(new CustomEvent(ChartEvents.CHART_UPDATED));
+    context.events.emit(AppEvents.GRID_REFRESH);
+
+    // Re-emit selection to update formula bar with new references
+    emitChartSelectionEvent();
+  };
+
+  window.addEventListener("chartSeriesRef:moved", handleSeriesRefChanged);
+  window.addEventListener("chartSeriesRef:resized", handleSeriesRefChanged);
+  cleanupFunctions.push(() => {
+    window.removeEventListener("chartSeriesRef:moved", handleSeriesRefChanged);
+    window.removeEventListener("chartSeriesRef:resized", handleSeriesRefChanged);
+  });
 
   // -----------------------------------------------------------------------
   // Delete Key: delete selected chart
@@ -431,6 +663,7 @@ function activate(context: ExtensionContext): void {
 
     // Delete the chart
     deselectChart();
+    emitChartSelectionEvent();
     deleteChart(chartId);
     removeChartFromCache(chartId);
     syncChartRegions();

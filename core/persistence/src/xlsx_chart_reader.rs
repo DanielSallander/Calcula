@@ -449,13 +449,14 @@ fn parse_chart_xml(xml: &str, anchor: &ChartAnchor) -> Option<String> {
     // Build the data range: find the overall range covering all series
     let data_range = build_data_range(&series_list);
 
-    // Build ChartDefinition JSON
+    // Build ChartDefinition JSON with dynamic name references and seriesRefs
     let series_json: Vec<String> = series_list
         .iter()
         .enumerate()
         .map(|(i, s)| {
+            // Use dynamic name reference if available (resolves to cell value at render time)
             let name = if !s.name_ref.is_empty() {
-                format!("Series {}", i + 1)
+                format!("={}", s.name_ref)
             } else {
                 format!("Series {}", i + 1)
             };
@@ -465,6 +466,32 @@ fn parse_chart_xml(xml: &str, anchor: &ChartAnchor) -> Option<String> {
                 r#"{{"name":"{}","sourceIndex":{},"color":null}}"#,
                 escape_json(&name),
                 i + 1
+            )
+        })
+        .collect();
+
+    // Build per-series references for SERIES formula reconstruction
+    let series_refs_json: Vec<String> = series_list
+        .iter()
+        .map(|s| {
+            let name_ref = if s.name_ref.is_empty() {
+                "null".to_string()
+            } else {
+                format!("\"{}\"", escape_json(&s.name_ref))
+            };
+            let cat_ref = if s.cat_ref.is_empty() {
+                "null".to_string()
+            } else {
+                format!("\"{}\"", escape_json(&s.cat_ref))
+            };
+            let val_ref = if s.val_ref.is_empty() {
+                "null".to_string()
+            } else {
+                format!("\"{}\"", escape_json(&s.val_ref))
+            };
+            format!(
+                r#"{{"nameRef":{},"catRef":{},"valRef":{}}}"#,
+                name_ref, cat_ref, val_ref
             )
         })
         .collect();
@@ -490,8 +517,10 @@ fn parse_chart_xml(xml: &str, anchor: &ChartAnchor) -> Option<String> {
         String::new()
     };
 
+    let series_refs_field = format!(r#","seriesRefs":[{}]"#, series_refs_json.join(","));
+
     let spec_json = format!(
-        r#"{{"chartId":{},"name":"{}","sheetIndex":0,"x":{},"y":{},"width":{},"height":{},"spec":{{"mark":"{}","data":"{}","hasHeaders":true,"seriesOrientation":"columns","categoryIndex":0,"series":[{}],"title":{},"xAxis":{{"title":null,"showGrid":false,"showLabels":true}},"yAxis":{{"title":null,"showGrid":true,"showLabels":true}},"legend":{{"position":"right","show":true}},"palette":"default"{}}}}}"#,
+        r#"{{"chartId":{},"name":"{}","sheetIndex":0,"x":{},"y":{},"width":{},"height":{},"spec":{{"mark":"{}","data":"{}","hasHeaders":true,"seriesOrientation":"columns","categoryIndex":0,"series":[{}],"title":{},"xAxis":{{"title":null,"showGrid":false,"showLabels":true}},"yAxis":{{"title":null,"showGrid":true,"showLabels":true}},"legend":{{"position":"right","show":true}},"palette":"default"{}{}}}}}"#,
         0, // chartId will be set by the caller
         escape_json(&anchor.name),
         x,
@@ -503,6 +532,7 @@ fn parse_chart_xml(xml: &str, anchor: &ChartAnchor) -> Option<String> {
         series_json.join(","),
         title_json,
         mark_options_json,
+        series_refs_field,
     );
 
     Some(spec_json)

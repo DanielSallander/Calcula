@@ -169,6 +169,25 @@ export function isEditingFormula(): boolean {
 }
 
 /**
+ * MODULE-LEVEL flag for chart series reference mode.
+ * When a chart series is selected, the formula bar shows a SERIES formula
+ * and the data ranges are highlighted with draggable handles.
+ * This flag enables reference drag/resize in the mouse handler even when
+ * not in formula editing mode.
+ */
+let globalChartSeriesRefMode = false;
+
+/** Set whether chart series reference mode is active. */
+export function setChartSeriesRefMode(active: boolean): void {
+  globalChartSeriesRefMode = active;
+}
+
+/** Check if chart series reference mode is active. */
+export function isChartSeriesRefMode(): boolean {
+  return globalChartSeriesRefMode;
+}
+
+/**
  * Get the arrow reference cursor position.
  */
 export function getArrowRefCursor(): { row: number; col: number } | null {
@@ -1841,6 +1860,26 @@ export function useEditing(): UseEditingReturn {
    */
   const startRefDrag = useCallback(
     (row: number, col: number): boolean => {
+      // Chart series reference mode: find reference from grid state
+      if (globalChartSeriesRefMode && !editing) {
+        const refIndex = formulaReferences.findIndex(
+          (ref) =>
+            row >= ref.startRow && row <= ref.endRow &&
+            col >= ref.startCol && col <= ref.endCol
+        );
+        if (refIndex === -1) return false;
+        const ref = formulaReferences[refIndex];
+        // Create a synthetic FormulaReferenceWithPosition
+        const syntheticRef: FormulaReferenceWithPosition = {
+          ...ref,
+          textStartIndex: 0, textEndIndex: 0, originalText: "",
+          isStartColAbsolute: true, isStartRowAbsolute: true,
+          isEndColAbsolute: true, isEndRowAbsolute: true,
+        };
+        startReferenceDrag(syntheticRef, refIndex, row, col);
+        return true;
+      }
+
       if (!editing || !editing.value.startsWith("=")) {
         return false;
       }
@@ -1862,7 +1901,7 @@ export function useEditing(): UseEditingReturn {
       startReferenceDrag(ref, refIndex, row, col);
       return true;
     },
-    [editing, sheetContext.activeSheetName]
+    [editing, sheetContext.activeSheetName, formulaReferences]
   );
 
   /**
@@ -1876,7 +1915,7 @@ export function useEditing(): UseEditingReturn {
     (row: number, col: number) => {
       const ref = getDraggedReference();
       const startCell = getDragStartCell();
-      if (!ref || !startCell || !editing) {
+      if (!ref || !startCell || (!editing && !globalChartSeriesRefMode)) {
         return;
       }
 
@@ -1929,6 +1968,28 @@ export function useEditing(): UseEditingReturn {
     (row: number, col: number) => {
       const ref = getDraggedReference();
       const startCell = getDragStartCell();
+
+      // Chart series reference mode: emit event with new reference bounds
+      if (globalChartSeriesRefMode && ref && startCell) {
+        const rowOffset = row - startCell.row;
+        const colOffset = col - startCell.col;
+        if (rowOffset !== 0 || colOffset !== 0) {
+          const newStartRow = Math.max(0, ref.startRow + rowOffset);
+          const newStartCol = Math.max(0, ref.startCol + colOffset);
+          const refHeight = ref.endRow - ref.startRow;
+          const refWidth = ref.endCol - ref.startCol;
+          window.dispatchEvent(new CustomEvent("chartSeriesRef:moved", {
+            detail: {
+              refIndex: draggedRefIndex,
+              oldRef: { startRow: ref.startRow, startCol: ref.startCol, endRow: ref.endRow, endCol: ref.endCol },
+              newRef: { startRow: newStartRow, startCol: newStartCol, endRow: newStartRow + refHeight, endCol: newStartCol + refWidth },
+            },
+          }));
+        }
+        clearReferenceDrag();
+        return;
+      }
+
       if (!ref || !startCell || !editing) {
         clearReferenceDrag();
         return;
@@ -1977,7 +2038,7 @@ export function useEditing(): UseEditingReturn {
    * Cancel the reference drag and restore the original highlighting.
    */
   const cancelRefDrag = useCallback(() => {
-    if (!editing) {
+    if (!editing && !globalChartSeriesRefMode) {
       clearReferenceDrag();
       return;
     }
@@ -2004,6 +2065,25 @@ export function useEditing(): UseEditingReturn {
    */
   const startRefResize = useCallback(
     (row: number, col: number, corner: "topLeft" | "topRight" | "bottomLeft" | "bottomRight"): boolean => {
+      // Chart series reference mode: find reference from grid state
+      if (globalChartSeriesRefMode && !editing) {
+        const refIndex = formulaReferences.findIndex(
+          (ref) =>
+            row >= ref.startRow && row <= ref.endRow &&
+            col >= ref.startCol && col <= ref.endCol
+        );
+        if (refIndex === -1) return false;
+        const ref = formulaReferences[refIndex];
+        const syntheticRef: FormulaReferenceWithPosition = {
+          ...ref,
+          textStartIndex: 0, textEndIndex: 0, originalText: "",
+          isStartColAbsolute: true, isStartRowAbsolute: true,
+          isEndColAbsolute: true, isEndRowAbsolute: true,
+        };
+        startReferenceResize(syntheticRef, refIndex, corner);
+        return true;
+      }
+
       if (!editing || !editing.value.startsWith("=")) {
         return false;
       }
@@ -2025,7 +2105,7 @@ export function useEditing(): UseEditingReturn {
       startReferenceResize(ref, refIndex, corner);
       return true;
     },
-    [editing, sheetContext.activeSheetName]
+    [editing, sheetContext.activeSheetName, formulaReferences]
   );
 
   /**
@@ -2035,7 +2115,7 @@ export function useEditing(): UseEditingReturn {
     (row: number, col: number) => {
       const ref = getResizedReference();
       const anchor = getResizeAnchor();
-      if (!ref || !anchor || !editing) {
+      if (!ref || !anchor || (!editing && !globalChartSeriesRefMode)) {
         return;
       }
 
@@ -2072,6 +2152,24 @@ export function useEditing(): UseEditingReturn {
     (row: number, col: number) => {
       const ref = getResizedReference();
       const anchor = getResizeAnchor();
+
+      // Chart series reference mode: emit event with new reference bounds
+      if (globalChartSeriesRefMode && ref && anchor) {
+        const newStartRow = Math.min(anchor.row, row);
+        const newStartCol = Math.min(anchor.col, col);
+        const newEndRow = Math.max(anchor.row, row);
+        const newEndCol = Math.max(anchor.col, col);
+        window.dispatchEvent(new CustomEvent("chartSeriesRef:resized", {
+          detail: {
+            refIndex: resizedRefIndex,
+            oldRef: { startRow: ref.startRow, startCol: ref.startCol, endRow: ref.endRow, endCol: ref.endCol },
+            newRef: { startRow: newStartRow, startCol: newStartCol, endRow: newEndRow, endCol: newEndCol },
+          },
+        }));
+        clearReferenceResize();
+        return;
+      }
+
       if (!ref || !anchor || !editing) {
         clearReferenceResize();
         return;
@@ -2102,13 +2200,15 @@ export function useEditing(): UseEditingReturn {
    * Cancel the reference resize and restore the original highlighting.
    */
   const cancelRefResize = useCallback(() => {
-    if (!editing) {
+    if (!editing && !globalChartSeriesRefMode) {
       clearReferenceResize();
       return;
     }
 
-    const refs = parseFormulaReferences(editing.value, false);
-    dispatch(setFormulaReferences(refs));
+    if (editing) {
+      const refs = parseFormulaReferences(editing.value, false);
+      dispatch(setFormulaReferences(refs));
+    }
 
     clearReferenceResize();
   }, [editing, dispatch]);

@@ -8,11 +8,12 @@
 
 import React, { useCallback, useRef, useEffect } from "react";
 import { useGridContext, getCell, getMergeInfo, isSheetProtected, getCellProtection, checkRangeGuards } from "../../api";
-import { useEditing, setGlobalIsEditing, getGlobalEditingValue, setGlobalCursorPosition, getGlobalCursorPosition } from "../../api/editing";
+import { useEditing, setGlobalIsEditing, getGlobalEditingValue, setGlobalCursorPosition, getGlobalCursorPosition, setChartSeriesRefMode } from "../../api/editing";
 import { toggleReferenceAtCursor } from "../../core/lib/formulaRefToggle";
 import { parseFormulaReferences } from "../../core/lib/formulaRefParser";
 import { setFormulaReferences, clearFormulaReferences } from "../../core/state/gridActions";
 import { isFormulaAutocompleteVisible, AutocompleteEvents } from "../../api/formulaAutocomplete";
+import { AppEvents } from "../../api/events";
 import * as S from './FormulaInput.styles';
 
 export function FormulaInput(): React.ReactElement {
@@ -23,6 +24,9 @@ export function FormulaInput(): React.ReactElement {
   const [isFocused, setIsFocused] = React.useState(false);
   const [prevEditing, setPrevEditing] = React.useState(editing);
 
+  /** Whether a chart series is currently selected (formula bar shows SERIES formula). */
+  const [chartSeriesFormula, setChartSeriesFormula] = React.useState<string | null>(null);
+
   // Sync displayValue with editing state (render-time derived state pattern)
   if (editing !== prevEditing) {
     setPrevEditing(editing);
@@ -32,9 +36,12 @@ export function FormulaInput(): React.ReactElement {
   }
 
   useEffect(() => {
+    // Skip cell content fetch when chart series formula is displayed
+    if (chartSeriesFormula) return;
+
     if (!editing && state.selection) {
       const { startRow, startCol, endRow, endCol } = state.selection;
-      
+
       const fetchCellContent = async () => {
         try {
           const mergeInfo = await getMergeInfo(startRow, startCol);
@@ -97,7 +104,45 @@ export function FormulaInput(): React.ReactElement {
       
       fetchCellContent();
     }
-  }, [editing, state.selection, dispatch]);
+  }, [editing, state.selection, dispatch, chartSeriesFormula]);
+
+  // Listen for chart selection changes to show SERIES formula
+  useEffect(() => {
+    const handler = (e: Event) => {
+      const detail = (e as CustomEvent).detail;
+      if (!detail || detail.chartId == null) {
+        // Chart deselected — clear chart formula state
+        if (chartSeriesFormula !== null) {
+          setChartSeriesFormula(null);
+          setChartSeriesRefMode(false);
+        }
+        return;
+      }
+
+      if (detail.seriesFormula) {
+        // Series selected — show SERIES formula and highlight ranges
+        setChartSeriesFormula(detail.seriesFormula);
+        setDisplayValue(detail.seriesFormula);
+
+        // Parse the SERIES formula to extract range references for highlighting
+        const refs = parseFormulaReferences(detail.seriesFormula, false);
+        dispatch(setFormulaReferences(refs));
+
+        // Enable chart series reference mode for drag/resize
+        setChartSeriesRefMode(true);
+      } else {
+        // Chart selected but no series (Level 1) — clear series formula
+        setChartSeriesFormula(null);
+        setChartSeriesRefMode(false);
+        dispatch(clearFormulaReferences());
+      }
+    };
+
+    window.addEventListener(AppEvents.CHART_SELECTION_CHANGED, handler);
+    return () => {
+      window.removeEventListener(AppEvents.CHART_SELECTION_CHANGED, handler);
+    };
+  }, [chartSeriesFormula, dispatch]);
 
   // Listen for autocomplete accepted events to update the formula bar value
   React.useEffect(() => {
@@ -297,6 +342,9 @@ export function FormulaInput(): React.ReactElement {
       )?.blocked === true
     : false;
 
+  // Read-only when showing chart series formula or protected cell
+  const isReadOnly = isProtectedCell || chartSeriesFormula !== null;
+
   return (
     <S.StyledInput
       ref={inputRef}
@@ -308,7 +356,7 @@ export function FormulaInput(): React.ReactElement {
       onKeyDown={handleKeyDown}
       onMouseDown={handleMouseDown}
       onSelect={handleSelect}
-      readOnly={isProtectedCell}
+      readOnly={isReadOnly}
       $isFocused={isFocused}
       data-formula-bar="true"
       placeholder=""

@@ -112,6 +112,9 @@ export const AppEvents = {
 
   // Ribbon visibility events
   RIBBON_TOGGLE_MINIMIZE: "app:ribbon-toggle-minimize",
+
+  // Chart selection events
+  CHART_SELECTION_CHANGED: "app:chart-selection-changed",
 } as const;
 
 /** A single cell value change within a CELL_VALUES_CHANGED event. */

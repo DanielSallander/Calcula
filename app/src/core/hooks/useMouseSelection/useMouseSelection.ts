@@ -31,7 +31,7 @@ import { createOverlayResizeHandlers, type OverlayResizeHandlers } from "./layou
 import { createOverlayMoveHandlers, type OverlayMoveHandlers, type OverlayMoveState } from "./layout/overlayMoveHandlers";
 import { createFillHandleCursorChecker } from "./utils/fillHandleUtils";
 import { createSelectionDragHandlers } from "./selection/selectionDragHandlers";
-import { isGlobalFormulaMode, isEditingFormula, setHoveringOverReferenceBorder } from "../../hooks/useEditing";
+import { isGlobalFormulaMode, isEditingFormula, isChartSeriesRefMode, setHoveringOverReferenceBorder } from "../../hooks/useEditing";
 import { getColumnHeaderOverride } from "../../../api/columnHeaderOverrides";
 import { getColumnWidth } from "../../lib/gridRenderer/layout/dimensions";
 import { getGridRegions, getOverlayRegistration } from "../../../api/gridOverlays";
@@ -419,9 +419,12 @@ export function useMouseSelection(props: UseMouseSelectionProps): UseMouseSelect
       // This is separate from isCurrentlyFormulaMode which checks if expecting a reference
       const isCurrentlyEditingFormula = isEditingFormula();
 
+      // Also allow reference drag/resize when chart series is selected
+      const canDragReferences = isCurrentlyEditingFormula || isChartSeriesRefMode();
+
       // Priority 2: Check for reference corner resize when editing any formula
       // Corner resize has higher priority than border drag (corners overlap with borders)
-      if (isCurrentlyEditingFormula) {
+      if (canDragReferences) {
         if (referenceResizeHandlers.handleReferenceResizeMouseDown(mouseX, mouseY, event)) {
           formulaHeaderDragStartRef.current = null;
           formulaDragStartRef.current = null;
@@ -431,7 +434,7 @@ export function useMouseSelection(props: UseMouseSelectionProps): UseMouseSelect
 
       // Priority 3: Check for reference dragging when editing any formula
       // FIX: Allow dragging existing references even when formula doesn't end with an operator
-      if (isCurrentlyEditingFormula) {
+      if (canDragReferences) {
         if (referenceDragHandlers.handleReferenceDragMouseDown(mouseX, mouseY, event)) {
           formulaHeaderDragStartRef.current = null;
           formulaDragStartRef.current = null;
@@ -574,14 +577,14 @@ export function useMouseSelection(props: UseMouseSelectionProps): UseMouseSelect
         if (isOverFillHandle(mouseX, mouseY)) {
           setCursorStyle("crosshair");
           setHoveringOverReferenceBorder(false);
-        } else if (isEditingFormula() && referenceResizeHandlers.getCornerAtPosition(mouseX, mouseY)) {
+        } else if ((isEditingFormula() || isChartSeriesRefMode()) && referenceResizeHandlers.getCornerAtPosition(mouseX, mouseY)) {
           // Check corner handles first (higher priority than border)
           const cornerHit = referenceResizeHandlers.getCornerAtPosition(mouseX, mouseY)!;
           const resizeCursor = cornerHit.corner === "topLeft" || cornerHit.corner === "bottomRight"
             ? "nwse-resize" : "nesw-resize";
           setCursorStyle(resizeCursor);
           setHoveringOverReferenceBorder(true);
-        } else if (isEditingFormula() && referenceDragHandlers.isOverReferenceBorder(mouseX, mouseY)) {
+        } else if ((isEditingFormula() || isChartSeriesRefMode()) && referenceDragHandlers.isOverReferenceBorder(mouseX, mouseY)) {
           // Check if over a formula reference border (for dragging)
           // FIX: Use isEditingFormula() instead of isFormulaMode to allow dragging
           // existing references even when the formula doesn't end with an operator

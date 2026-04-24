@@ -11,4 +11,5 @@ export {
   isGlobalFormulaMode,
   setGlobalCursorPosition,
   getGlobalCursorPosition,
+  setChartSeriesRefMode,
 } from "../core/hooks/useEditing";
