@@ -34,18 +34,39 @@ export const NavButton = styled.button`
   align-items: center;
   justify-content: center;
 
+  &:hover:not(:disabled) {
+    background-color: ${v('--sheet-tab-bg')};
+    border-radius: 2px;
+  }
+
   &:disabled {
     cursor: default;
-    opacity: 0.5;
+    opacity: 0.35;
   }
+`;
+
+export const HiddenCount = styled.span`
+  font-size: 10px;
+  color: ${v('--text-tertiary')};
+  padding: 0 4px;
+  white-space: nowrap;
+  flex-shrink: 0;
 `;
 
 export const TabsArea = styled.div`
   display: flex;
   align-items: center;
-  flex: 0 1 auto;
-  overflow: hidden;
+  flex: 1 1 0;
+  min-width: 0;
+  overflow-x: auto;
+  overflow-y: hidden;
   padding: 0 4px;
+
+  /* Hide scrollbar but keep scrollable */
+  scrollbar-width: none;
+  &::-webkit-scrollbar {
+    display: none;
+  }
 `;
 
 interface TabProps {
@@ -84,9 +105,7 @@ export const Tab = styled.button<TabProps>`
   font-size: 11px;
   margin-right: 2px;
   white-space: nowrap;
-  max-width: 120px;
-  overflow: hidden;
-  text-overflow: ellipsis;
+  flex-shrink: 0;
   position: relative;
 
   ${props => props.$isActive && `
@@ -146,8 +165,7 @@ export const AddButton = styled.button<AddButtonProps>`
 `;
 
 export const ScrollArea = styled.div`
-  flex: 1;
-  min-width: 50px;
+  flex: 0;
 `;
 
 export const LoadingText = styled.span`

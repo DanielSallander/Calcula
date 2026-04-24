@@ -102,6 +102,10 @@ export function SheetTabs({ onSheetChange }: SheetTabsProps): React.ReactElement
   } | null>(null);
   const tabsAreaRef = useRef<HTMLDivElement>(null);
 
+  // Tab scroll state: how many tabs are hidden on each side
+  const [hiddenLeft, setHiddenLeft] = useState(0);
+  const [hiddenRight, setHiddenRight] = useState(0);
+
   // Check if we're in formula reference mode
   // FIX: Use BOTH React state AND synchronous global check. React state may be stale
   // if the user types an operator (e.g., comma) and immediately clicks a sheet tab
@@ -803,28 +807,138 @@ export function SheetTabs({ onSheetChange }: SheetTabsProps): React.ReactElement
     };
   }, [dragState, sheets, resolveDropIndex, applySheetsResult]);
 
+  // ---------------------------------------------------------------------------
+  // Tab scroll navigation
+  // ---------------------------------------------------------------------------
+
+  /** Count how many tabs are hidden on left and right of the visible scroll area */
+  const updateHiddenCounts = useCallback(() => {
+    const container = tabsAreaRef.current;
+    if (!container) return;
+    const tabs = Array.from(container.querySelectorAll('button[data-sheet-tab]')) as HTMLElement[];
+    if (tabs.length === 0) {
+      setHiddenLeft(0);
+      setHiddenRight(0);
+      return;
+    }
+    const containerRect = container.getBoundingClientRect();
+    let left = 0;
+    let right = 0;
+    for (const tab of tabs) {
+      const tabRect = tab.getBoundingClientRect();
+      // Tab is hidden on the left if its right edge is at or before the container's left
+      if (tabRect.right <= containerRect.left + 1) {
+        left++;
+      }
+      // Tab is hidden on the right if its left edge is at or past the container's right
+      else if (tabRect.left >= containerRect.right - 1) {
+        right++;
+      }
+    }
+    setHiddenLeft(left);
+    setHiddenRight(right);
+  }, []);
+
+  // Update hidden counts on scroll, resize, and sheet list changes
+  useEffect(() => {
+    const container = tabsAreaRef.current;
+    if (!container) return;
+
+    const handleScroll = () => updateHiddenCounts();
+    container.addEventListener('scroll', handleScroll);
+
+    const resizeObserver = new ResizeObserver(() => updateHiddenCounts());
+    resizeObserver.observe(container);
+
+    // Initial calculation
+    updateHiddenCounts();
+
+    return () => {
+      container.removeEventListener('scroll', handleScroll);
+      resizeObserver.disconnect();
+    };
+  }, [updateHiddenCounts, sheets]);
+
+  // Auto-scroll active tab into view when it changes
+  useEffect(() => {
+    const container = tabsAreaRef.current;
+    if (!container) return;
+    const activeTab = container.querySelector(`button[data-sheet-tab="${activeIndex}"]`) as HTMLElement | null;
+    if (activeTab) {
+      activeTab.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+    }
+  }, [activeIndex]);
+
+  /** Scroll to show the first tab */
+  const scrollToFirst = useCallback(() => {
+    const container = tabsAreaRef.current;
+    if (container) container.scrollLeft = 0;
+  }, []);
+
+  /** Scroll to show the last tab */
+  const scrollToLast = useCallback(() => {
+    const container = tabsAreaRef.current;
+    if (container) container.scrollLeft = container.scrollWidth;
+  }, []);
+
+  /** Scroll left by one tab — aligns the hidden tab's left edge with the container's left */
+  const scrollPrev = useCallback(() => {
+    const container = tabsAreaRef.current;
+    if (!container) return;
+    const tabs = Array.from(container.querySelectorAll('button[data-sheet-tab]')) as HTMLElement[];
+    // Find the last tab whose left edge is before the container's visible left
+    for (let i = tabs.length - 1; i >= 0; i--) {
+      const tabLeft = tabs[i].offsetLeft;
+      if (tabLeft < container.scrollLeft) {
+        container.scrollLeft = tabLeft;
+        return;
+      }
+    }
+    container.scrollLeft = 0;
+  }, []);
+
+  /** Scroll right by one tab — aligns the hidden tab's right edge with the container's right */
+  const scrollNext = useCallback(() => {
+    const container = tabsAreaRef.current;
+    if (!container) return;
+    const tabs = Array.from(container.querySelectorAll('button[data-sheet-tab]')) as HTMLElement[];
+    const visibleRight = container.scrollLeft + container.clientWidth;
+    // Find the first tab whose right edge extends past the visible area
+    for (const tab of tabs) {
+      const tabRight = tab.offsetLeft + tab.offsetWidth;
+      if (tabRight > visibleRight + 1) {
+        container.scrollLeft = tabRight - container.clientWidth;
+        return;
+      }
+    }
+    container.scrollLeft = container.scrollWidth;
+  }, []);
+
   // Determine if we're viewing a different sheet than the formula source
-  const isViewingDifferentSheet = isInFormulaMode && 
-    editing?.sourceSheetIndex !== undefined && 
+  const isViewingDifferentSheet = isInFormulaMode &&
+    editing?.sourceSheetIndex !== undefined &&
     editing.sourceSheetIndex !== activeIndex;
 
   return (
     <S.Container>
       {/* Navigation arrows */}
       <S.NavArea>
-        <S.NavButton title="First sheet" disabled>
+        <S.NavButton title="First sheet" disabled={hiddenLeft === 0} onClick={scrollToFirst}>
           |&lt;
         </S.NavButton>
-        <S.NavButton title="Previous sheet" disabled>
+        <S.NavButton title="Previous sheet" disabled={hiddenLeft === 0} onClick={scrollPrev}>
           &lt;
         </S.NavButton>
-        <S.NavButton title="Next sheet" disabled>
+        <S.NavButton title="Next sheet" disabled={hiddenRight === 0} onClick={scrollNext}>
           &gt;
         </S.NavButton>
-        <S.NavButton title="Last sheet" disabled>
+        <S.NavButton title="Last sheet" disabled={hiddenRight === 0} onClick={scrollToLast}>
           &gt;|
         </S.NavButton>
       </S.NavArea>
+
+      {/* Hidden tabs indicator (left) */}
+      {hiddenLeft > 0 && <S.HiddenCount>({hiddenLeft})</S.HiddenCount>}
 
       {/* Sheet tabs */}
       <S.TabsArea ref={tabsAreaRef}>
@@ -880,6 +994,9 @@ export function SheetTabs({ onSheetChange }: SheetTabsProps): React.ReactElement
           </S.ErrorText>
         )}
       </S.TabsArea>
+
+      {/* Hidden tabs indicator (right) */}
+      {hiddenRight > 0 && <S.HiddenCount>({hiddenRight})</S.HiddenCount>}
 
       {/* Add sheet button - outside TabsArea to avoid overflow clipping */}
       {!isLoading && (
