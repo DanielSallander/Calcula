@@ -248,6 +248,7 @@ pub fn read_calcula(path: &Path) -> Result<Workbook, FormatError> {
             notes: Vec::new(),
             hyperlinks: Vec::new(),
             page_setup: None,
+            show_gridlines: true,
         });
     }
 

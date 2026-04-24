@@ -94,16 +94,21 @@ pub fn load_xlsx(path: &Path) -> Result<Workbook, PersistenceError> {
 
         // Calamine Range may not start at (0,0) — get the offset
         let range_start = range.start().unwrap_or((0, 0));
-        let start_row_offset = range_start.0 as u32;
-        let start_col_offset = range_start.1 as u32;
+        let start_row_offset = range_start.0;
+        let start_col_offset = range_start.1;
+
+        // Pre-load formula range: it may have a different start/size than data range
+        let formula_range = workbook.worksheet_formula(sheet_name).ok();
+        let formula_start = formula_range.as_ref().and_then(|fr| fr.start()).unwrap_or((0, 0));
 
         for (row_idx, row) in range.rows().enumerate() {
             let actual_row = start_row_offset + row_idx as u32;
             for (col_idx, cell) in row.iter().enumerate() {
                 let actual_col = start_col_offset + col_idx as u32;
 
+                let is_empty = matches!(cell, Data::Empty);
                 let saved_value = match cell {
-                    Data::Empty => continue,
+                    Data::Empty => SavedCellValue::Text(String::new()),
                     Data::String(s) => SavedCellValue::Text(s.clone()),
                     Data::Float(f) => SavedCellValue::Number(*f),
                     Data::Int(i) => SavedCellValue::Number(*i as f64),
@@ -114,17 +119,6 @@ pub fn load_xlsx(path: &Path) -> Result<Workbook, PersistenceError> {
                     Data::DurationIso(s) => SavedCellValue::Text(s.clone()),
                 };
 
-                // Try to get formula if available
-                // Range::get() uses relative (0-based) coordinates
-                let formula = workbook
-                    .worksheet_formula(sheet_name)
-                    .ok()
-                    .and_then(|formulas| {
-                        formulas
-                            .get((row_idx, col_idx))
-                            .map(|f| format!("={}", f))
-                    });
-
                 // Look up the XLSX style index for this cell (using absolute coords
                 // since the XML parser stores absolute positions)
                 let style_index = sheet_meta
@@ -132,6 +126,25 @@ pub fn load_xlsx(path: &Path) -> Result<Workbook, PersistenceError> {
                     .and_then(|xlsx_xf| xf_to_calcula.get(xlsx_xf))
                     .copied()
                     .unwrap_or(0);
+
+                // Skip truly empty cells (no value AND default style)
+                if is_empty && style_index == 0 {
+                    continue;
+                }
+
+                // Try to get formula if available
+                // Convert absolute cell position to formula range's relative coordinates
+                let formula = formula_range.as_ref().and_then(|fr| {
+                    if actual_row >= formula_start.0 && actual_col >= formula_start.1 {
+                        let fr_row = (actual_row - formula_start.0) as usize;
+                        let fr_col = (actual_col - formula_start.1) as usize;
+                        fr.get((fr_row, fr_col))
+                            .filter(|f| !f.is_empty())
+                            .map(|f| format!("={}", f))
+                    } else {
+                        None
+                    }
+                });
 
                 cells.insert(
                     (actual_row, actual_col),
@@ -142,6 +155,30 @@ pub fn load_xlsx(path: &Path) -> Result<Workbook, PersistenceError> {
                         rich_text: None,
                     },
                 );
+            }
+        }
+
+        // Add styled empty cells that calamine didn't return.
+        // The sheet XML may have cells with style attributes but no value;
+        // calamine skips these, but they need to render backgrounds/borders.
+        if let Some(meta) = sheet_meta {
+            for ((r, c), xlsx_xf) in &meta.cell_styles {
+                if cells.contains_key(&(*r, *c)) {
+                    continue; // Already have this cell from calamine
+                }
+                if let Some(&calcula_idx) = xf_to_calcula.get(xlsx_xf) {
+                    if calcula_idx != 0 {
+                        cells.insert(
+                            (*r, *c),
+                            SavedCell {
+                                value: SavedCellValue::Text(String::new()),
+                                formula: None,
+                                style_index: calcula_idx,
+                                rich_text: None,
+                            },
+                        );
+                    }
+                }
             }
         }
 
@@ -189,6 +226,11 @@ pub fn load_xlsx(path: &Path) -> Result<Workbook, PersistenceError> {
             .map(|m| m.hidden_columns.iter().copied().collect())
             .unwrap_or_default();
 
+        // Show gridlines setting
+        let show_gridlines = sheet_meta
+            .map(|m| m.show_gridlines)
+            .unwrap_or(true);
+
         sheets.push(Sheet {
             name: sheet_name.clone(),
             cells,
@@ -205,10 +247,11 @@ pub fn load_xlsx(path: &Path) -> Result<Workbook, PersistenceError> {
             notes: Vec::new(),
             hyperlinks: Vec::new(),
             page_setup: None,
+            show_gridlines,
         });
     }
 
-    Ok(Workbook {
+    let mut wb = Workbook {
         sheets,
         active_sheet: 0,
         tables,
@@ -222,5 +265,34 @@ pub fn load_xlsx(path: &Path) -> Result<Workbook, PersistenceError> {
         properties: crate::WorkbookProperties::default(),
         charts: Vec::new(),
         named_ranges: Vec::new(),
-    })
+    };
+
+    // Parse charts from the XLSX archive (separate ZIP pass)
+    if let Ok(file) = std::fs::File::open(path) {
+        if let Ok(mut archive) = zip::ZipArchive::new(file) {
+            let sheet_paths = crate::xlsx_style_reader::build_sheet_path_mapping(&mut archive);
+            let chart_entries = crate::xlsx_chart_reader::parse_xlsx_charts(&mut archive, &sheet_paths);
+            for (sheet_idx, mut chart) in chart_entries {
+                // Fix sheet index in the chart entry
+                chart.sheet_index = sheet_idx;
+                // Update the sheetIndex inside the JSON spec
+                chart.spec_json = chart.spec_json.replacen(
+                    "\"sheetIndex\":0",
+                    &format!("\"sheetIndex\":{}", sheet_idx),
+                    1,
+                );
+                // Set unique chart ID
+                chart.id = (wb.charts.len() + 1) as u32;
+                // Also update chartId in spec JSON
+                chart.spec_json = chart.spec_json.replacen(
+                    "\"chartId\":0",
+                    &format!("\"chartId\":{}", chart.id),
+                    1,
+                );
+                wb.charts.push(chart);
+            }
+        }
+    }
+
+    Ok(wb)
 }

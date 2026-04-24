@@ -115,6 +115,8 @@ pub struct SheetMeta {
     pub hidden_columns: Vec<u32>,
     /// Hidden rows (0-based)
     pub hidden_rows: Vec<u32>,
+    /// Whether gridlines should be shown (default true)
+    pub show_gridlines: bool,
 }
 
 // ============================================================================
@@ -171,7 +173,7 @@ pub fn parse_xlsx_styles(path: &Path) -> Option<XlsxStyleData> {
 
 /// Build mapping from logical sheet order (1-based) to sheet XML path
 /// by parsing xl/workbook.xml and xl/_rels/workbook.xml.rels.
-fn build_sheet_path_mapping(
+pub fn build_sheet_path_mapping(
     archive: &mut zip::ZipArchive<std::fs::File>,
 ) -> Vec<(usize, String)> {
     // Step 1: Parse relationships to get rId → Target path
@@ -317,10 +319,16 @@ fn parse_styles_xml(xml: &str, data: &mut XlsxStyleData) {
                         let mut code = String::new();
                         for attr in e.attributes().flatten() {
                             let key = std::str::from_utf8(attr.key.as_ref()).unwrap_or("");
-                            let val = std::str::from_utf8(&attr.value).unwrap_or("");
                             match key {
-                                "numFmtId" => id = val.parse().unwrap_or(0),
-                                "formatCode" => code = val.to_string(),
+                                "numFmtId" => {
+                                    let val = std::str::from_utf8(&attr.value).unwrap_or("");
+                                    id = val.parse().unwrap_or(0);
+                                }
+                                "formatCode" => {
+                                    // Decode XML entities like &quot; &amp; &lt; &gt; &apos;
+                                    let raw = std::str::from_utf8(&attr.value).unwrap_or("");
+                                    code = unescape_xml(raw);
+                                }
                                 _ => {}
                             }
                         }
@@ -579,7 +587,10 @@ enum StyleParseContext {
 // ============================================================================
 
 fn parse_sheet_xml(xml: &str) -> SheetMeta {
-    let mut meta = SheetMeta::default();
+    let mut meta = SheetMeta {
+        show_gridlines: true, // Default is to show gridlines
+        ..Default::default()
+    };
     let mut reader = Reader::from_str(xml);
     reader.trim_text(true);
 
@@ -598,6 +609,12 @@ fn parse_sheet_xml(xml: &str) -> SheetMeta {
 
                 match tag_str {
                     "sheetViews" => in_sheet_views = true,
+                    "sheetView" if in_sheet_views => {
+                        // <sheetView showGridLines="0" ...>
+                        if let Some(v) = get_attr(e, "showGridLines") {
+                            meta.show_gridlines = v != "0" && v != "false";
+                        }
+                    }
                     "pane" if in_sheet_views => {
                         // Freeze pane: <pane xSplit="1" ySplit="2" state="frozen" ...>
                         let state = get_attr(e, "state").unwrap_or_default();
@@ -714,6 +731,15 @@ fn parse_sheet_xml(xml: &str) -> SheetMeta {
 // ============================================================================
 // Helper: get attribute value from an XML element
 // ============================================================================
+
+/// Unescape standard XML entities in a string.
+pub fn unescape_xml(s: &str) -> String {
+    s.replace("&quot;", "\"")
+        .replace("&amp;", "&")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&apos;", "'")
+}
 
 fn get_attr(e: &quick_xml::events::BytesStart, name: &str) -> Option<String> {
     for attr in e.attributes().flatten() {
@@ -1204,7 +1230,9 @@ fn convert_number_format(num_fmt_id: u32, custom_formats: &HashMap<u32, String>)
 }
 
 /// Attempt to classify a custom format code string into a Calcula NumberFormat.
-fn parse_format_code(code: &str) -> NumberFormat {
+fn parse_format_code(full_code: &str) -> NumberFormat {
+    // Multi-section format: positive;negative;zero;text — use the positive section
+    let code = extract_positive_section(full_code);
     let lower = code.to_lowercase();
 
     // Date patterns
@@ -1224,15 +1252,35 @@ fn parse_format_code(code: &str) -> NumberFormat {
 
     // Percentage
     if code.contains('%') {
-        let decimals = count_decimal_places(code);
+        let decimals = count_decimal_places(&code);
         return NumberFormat::Percentage {
             decimal_places: decimals,
         };
     }
 
+    // Accounting format: _("$"* #,##0...) or _(* #,##0...) patterns
+    // These use _( padding and * space-fill characters
+    if (code.contains("_(") || code.contains("_ (")) && code.contains('*') {
+        let decimals = count_decimal_places(&code);
+        let symbol = if code.contains('$') {
+            "$".to_string()
+        } else if code.contains('\u{20AC}') {
+            "\u{20AC}".to_string()
+        } else if code.contains('\u{00A3}') {
+            "\u{00A3}".to_string()
+        } else {
+            String::new()
+        };
+        return NumberFormat::Accounting {
+            decimal_places: decimals,
+            symbol,
+            symbol_position: CurrencyPosition::Before,
+        };
+    }
+
     // Currency (contains $ or other currency symbols)
     if code.contains('$') || code.contains('\u{20AC}') || code.contains('\u{00A3}') {
-        let decimals = count_decimal_places(code);
+        let decimals = count_decimal_places(&code);
         // Try to extract symbol
         let symbol = if code.contains('$') {
             "$"
@@ -1241,7 +1289,18 @@ fn parse_format_code(code: &str) -> NumberFormat {
         } else {
             "\u{00A3}"
         };
-        let pos = if code.starts_with(symbol) || code.starts_with('[') {
+        // Determine position: symbol is "before" if it appears before the first digit placeholder.
+        // Strip underscores, parentheses, and accounting padding first.
+        // Find position of first # or 0 (digit placeholder)
+        let first_digit = code.find(|c: char| c == '#' || c == '0').unwrap_or(code.len());
+        let symbol_pos = code.find(symbol).unwrap_or(code.len());
+        // Also check for quoted symbols like "$" at the start
+        let quoted_symbol_pos = code.find(&format!("\"{}\"", symbol)).unwrap_or(code.len());
+        let effective_symbol_pos = symbol_pos.min(quoted_symbol_pos);
+        // Also handle [$-xxx] locale brackets containing $
+        let bracket_pos = code.find("[$").unwrap_or(code.len());
+        let effective_pos = effective_symbol_pos.min(bracket_pos);
+        let pos = if effective_pos < first_digit {
             CurrencyPosition::Before
         } else {
             CurrencyPosition::After
@@ -1255,7 +1314,7 @@ fn parse_format_code(code: &str) -> NumberFormat {
 
     // Scientific
     if lower.contains("e+") || lower.contains("e-") {
-        let decimals = count_decimal_places(code);
+        let decimals = count_decimal_places(&code);
         return NumberFormat::Scientific {
             decimal_places: decimals,
         };
@@ -1271,7 +1330,7 @@ fn parse_format_code(code: &str) -> NumberFormat {
 
     // Plain number
     if code.contains('0') || code.contains('#') {
-        let decimals = count_decimal_places(code);
+        let decimals = count_decimal_places(&code);
         let thousands = code.contains(',') || code.contains(' ');
         return NumberFormat::Number {
             decimal_places: decimals,
@@ -1283,6 +1342,26 @@ fn parse_format_code(code: &str) -> NumberFormat {
     NumberFormat::Custom {
         format: code.to_string(),
     }
+}
+
+/// Extract the positive (first) section from a multi-section format code.
+/// Excel format codes can have up to 4 sections: positive;negative;zero;text
+/// Semicolons inside quotes or brackets are not section separators.
+fn extract_positive_section(code: &str) -> String {
+    let mut depth_bracket = 0u32;
+    let mut in_quotes = false;
+    for (i, ch) in code.char_indices() {
+        match ch {
+            '"' => in_quotes = !in_quotes,
+            '[' if !in_quotes => depth_bracket += 1,
+            ']' if !in_quotes => depth_bracket = depth_bracket.saturating_sub(1),
+            ';' if !in_quotes && depth_bracket == 0 => {
+                return code[..i].to_string();
+            }
+            _ => {}
+        }
+    }
+    code.to_string()
 }
 
 /// Count decimal places from a format code by looking at digits after '.'.

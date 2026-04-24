@@ -127,6 +127,7 @@ pub fn read_published_sheet(
         notes: Vec::new(),
         hyperlinks: Vec::new(),
         page_setup: None,
+        show_gridlines: true,
     })
 }
 

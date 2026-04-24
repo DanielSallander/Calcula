@@ -810,10 +810,12 @@ export function drawCellText(state: RenderState): void {
       // Calculate overflow width for text that extends beyond the cell.
       // When a cell's text is wider than the column and:
       // - not wrapping, not merged, left/general aligned
-      // - adjacent cells to the right are empty
+      // - adjacent cells to the right have no text content
       // the text visually overflows into those cells (like Excel).
       let overflowRight = cellRight;
       const shouldWrapEarly = baseCellStyle.wrapText === true;
+      // Collect overflowed cells so we can draw their backgrounds
+      const overflowedCells: Array<{ key: string; col: number; x: number; width: number; styleIndex: number }> = [];
       if (!shouldWrapEarly && !isMergedMaster && (textAlign === "left" || textAlign === "center")) {
         // Measure text to see if it exceeds cell width
         const testFont = `${fontStyle} ${fontWeight} ${fontSize}px ${fontFamily}`;
@@ -823,15 +825,25 @@ export function drawCellText(state: RenderState): void {
           // Extend overflow into adjacent empty columns
           let overflowCol = col + 1;
           let overflowW = actualWidth;
+          let adjX = x + actualWidth;
           while (overflowW < textWidth && overflowCol < totalCols) {
             const adjKey = cellKey(row, overflowCol);
             const adjCell = cells.get(adjKey);
-            // Stop if adjacent cell has content
+            // Stop if adjacent cell has visible text content
             if (adjCell && (adjCell.display ?? "") !== "") break;
             const adjWidth = getColumnWidth(overflowCol, config, dimensions);
             overflowW += adjWidth;
+            // Track overflowed cell info so we can draw its background
+            overflowedCells.push({
+              key: adjKey,
+              col: overflowCol,
+              x: adjX,
+              width: adjWidth,
+              styleIndex: adjCell?.styleIndex ?? 0,
+            });
             // Mark overflowed cells so they won't draw their own content
             drawnCells.add(adjKey);
+            adjX += adjWidth;
             overflowCol++;
           }
           overflowRight = Math.min(x + overflowW, width);
@@ -856,6 +868,40 @@ export function drawCellText(state: RenderState): void {
       } else if (backgroundColor) {
         ctx.fillStyle = backgroundColor;
         ctx.fillRect(cellLeft, cellTop, cellRight - cellLeft, cellBottom - cellTop);
+      }
+
+      // Draw backgrounds and borders of overflowed-into cells (they're skipped in the main loop)
+      for (const oc of overflowedCells) {
+        if (oc.styleIndex > 0) {
+          const ocStyle = getStyleFromCache(styleCache, oc.styleIndex);
+          const ocLeft = Math.max(oc.x, rowHeaderWidth);
+          const ocRight = Math.min(oc.x + oc.width, width);
+          if (ocRight > ocLeft) {
+            // Background
+            const ocFill = ocStyle.fill;
+            if (ocFill && ocFill.type !== "none") {
+              drawCellFill(ctx, ocFill, ocLeft, cellTop, ocRight - ocLeft, cellBottom - cellTop);
+            } else {
+              const ocBg = ocStyle.backgroundColor;
+              if (isValidColor(ocBg) && !isDefaultBackgroundColor(ocBg)) {
+                ctx.fillStyle = ocBg;
+                ctx.fillRect(ocLeft, cellTop, ocRight - ocLeft, cellBottom - cellTop);
+              }
+            }
+            // Borders
+            const ocBorders = [
+              { b: ocStyle.borderTop, x1: ocLeft, y1: cellTop, x2: ocRight, y2: cellTop },
+              { b: ocStyle.borderBottom, x1: ocLeft, y1: cellBottom, x2: ocRight, y2: cellBottom },
+              { b: ocStyle.borderLeft, x1: ocLeft, y1: cellTop, x2: ocLeft, y2: cellBottom },
+              { b: ocStyle.borderRight, x1: ocRight, y1: cellTop, x2: ocRight, y2: cellBottom },
+            ];
+            for (const { b, x1, y1, x2, y2 } of ocBorders) {
+              if (b && b.style !== "none" && b.width > 0) {
+                drawBorderLine(ctx, x1, y1, x2, y2, b);
+              }
+            }
+          }
+        }
       }
 
       // Draw cell borders (with CF overrides from style interceptors)

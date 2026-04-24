@@ -16,7 +16,7 @@ import {
   type OverlayHitTestContext,
 } from "@api/gridOverlays";
 
-import { getChartById, getAllCharts } from "../lib/chartStore";
+import { getChartById, getAllCharts, getActiveSheetIndex } from "../lib/chartStore";
 import { readChartDataResolved } from "../lib/chartDataReader";
 import { dispatchPaint, dispatchComputeLayout, dispatchComputeGeometry, extractBarRects } from "./chartDispatch";
 import { DEFAULT_CHART_THEME, resolveChartTheme } from "./chartTheme";
@@ -439,6 +439,11 @@ async function renderChartAsync(
     const chart = getChartById(chartId);
     if (!chart) return;
 
+    // Skip rendering if the chart's sheet isn't the active sheet.
+    // getViewportCells only reads from the active sheet, so rendering
+    // a chart for an inactive sheet would produce wrong data.
+    if (chart.sheetIndex !== getActiveSheetIndex()) return;
+
     // Fetch data from the grid and resolve cell references
     const resolved = await readChartDataResolved(chart.spec);
     const data = resolved.data;
@@ -508,8 +513,10 @@ async function renderChartAsync(
 
     // Trigger a canvas redraw so the cached chart gets composited.
     requestOverlayRedraw();
+    // Also emit grid refresh to ensure main canvas repaints
+    window.dispatchEvent(new Event("app:grid-refresh"));
   } catch (err) {
-    console.error(`[Charts] Failed to render chart ${chartId}:`, err);
+    console.error(`[Charts] Failed to render chart ${chartId}:`, err, (err as Error)?.stack);
   } finally {
     pendingRenders.delete(chartId);
   }

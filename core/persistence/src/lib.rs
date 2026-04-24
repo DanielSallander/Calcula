@@ -4,6 +4,7 @@
 //! Handles saving and loading spreadsheet files in XLSX format.
 
 mod error;
+mod xlsx_chart_reader;
 mod xlsx_reader;
 mod xlsx_style_reader;
 mod xlsx_writer;
@@ -260,6 +261,8 @@ pub struct Sheet {
     pub hyperlinks: Vec<SavedHyperlink>,
     /// Page setup / print settings
     pub page_setup: Option<SavedPageSetup>,
+    /// Whether gridlines should be shown (default true)
+    pub show_gridlines: bool,
 }
 
 impl Sheet {
@@ -280,6 +283,7 @@ impl Sheet {
             notes: Vec::new(),
             hyperlinks: Vec::new(),
             page_setup: None,
+            show_gridlines: true,
         }
     }
 
@@ -306,6 +310,7 @@ impl Sheet {
             notes: Vec::new(),
             hyperlinks: Vec::new(),
             page_setup: None,
+            show_gridlines: true,
         }
     }
 

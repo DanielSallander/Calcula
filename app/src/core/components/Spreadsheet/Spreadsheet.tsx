@@ -6,7 +6,8 @@
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import { useGridState, useGridContext } from "../../state";
 // FIX: Removed openFind import to resolve SyntaxError
-import { setViewportDimensions, setAllDimensions, setSelection, setManuallyHiddenRows, setManuallyHiddenCols, setZoom, setSplitConfig, setSplitViewport, updateConfig } from "../../state/gridActions";
+import { setViewportDimensions, setAllDimensions, setSelection, setManuallyHiddenRows, setManuallyHiddenCols, setZoom, setSplitConfig, setSplitViewport, updateConfig, setDisplayGridlines } from "../../state/gridActions";
+import { invoke } from "@tauri-apps/api/core";
 import { ZOOM_MIN, ZOOM_MAX, ZOOM_STEP } from "../../types";
 import type { Selection, Viewport, VirtualBounds } from "../../types";
 import { GridCanvas } from "../Grid";
@@ -279,6 +280,10 @@ function SpreadsheetContent({
   // -------------------------------------------------------------------------
   useEffect(() => {
     refreshDimensions();
+    // Query gridlines visibility from the backend (per-sheet setting from XLSX)
+    invoke<boolean>("get_show_gridlines").then((show) => {
+      dispatch(setDisplayGridlines(show));
+    }).catch(() => { /* ignore if command not available */ });
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 

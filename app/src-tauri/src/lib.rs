@@ -200,6 +200,8 @@ pub struct AppState {
     pub freeze_configs: Mutex<Vec<FreezeConfig>>,
     /// Split window configurations per sheet
     pub split_configs: Mutex<Vec<SplitConfig>>,
+    /// Per-sheet gridlines visibility (default true)
+    pub show_gridlines: Mutex<Vec<bool>>,
     /// Merged cell regions for the current (active) sheet
     pub merged_regions: Mutex<HashSet<MergedRegion>>,
     /// Merged cell regions for ALL sheets (swapped on sheet switch)
@@ -343,6 +345,7 @@ pub fn create_app_state() -> AppState {
         undo_stack: Mutex::new(UndoStack::new()),
         freeze_configs: Mutex::new(vec![FreezeConfig::default()]),
         split_configs: Mutex::new(vec![SplitConfig::default()]),
+        show_gridlines: Mutex::new(vec![true]),
         merged_regions: Mutex::new(HashSet::new()),
         all_merged_regions: Mutex::new(Vec::new()),
         protected_regions: Mutex::new(Vec::new()),
@@ -3871,6 +3874,7 @@ pub fn run() {
             // Sheet commands
             sheets::get_sheets,
             sheets::get_active_sheet,
+            sheets::get_show_gridlines,
             sheets::set_active_sheet,
             sheets::add_sheet,
             sheets::delete_sheet,

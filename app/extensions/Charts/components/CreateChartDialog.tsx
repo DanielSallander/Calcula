@@ -24,7 +24,7 @@ import type {
   PivotDataSource,
 } from "../types";
 import { isPivotDataSource } from "../types";
-import { createChart, syncChartRegions } from "../lib/chartStore";
+import { createChart, getChartById, updateChartSpec, syncChartRegions } from "../lib/chartStore";
 import { autoDetectSeries } from "../lib/chartDataReader";
 import { readChartDataResolved } from "../lib/chartDataReader";
 import { autoDetectPivotSeries } from "../lib/pivotChartDataReader";
@@ -145,6 +145,10 @@ export function CreateChartDialog({
   const pivotId = (dialogData?.pivotId as number) ?? null;
   const isPivotMode = pivotId != null;
 
+  // Edit mode: when opened with an editChartId, pre-populate from existing chart
+  const editChartId = (dialogData?.editChartId as number) ?? null;
+  const isEditMode = editChartId != null;
+
   // Active tab
   const [activeTab, setActiveTab] = useState<TabId>("data");
 
@@ -264,6 +268,36 @@ export function CreateChartDialog({
       setDialogPos(null); // Reset to centered
       loadSheets();
 
+      // In edit mode, load the existing chart's spec
+      if (isEditMode && editChartId != null) {
+        const existingChart = getChartById(editChartId);
+        if (existingChart) {
+          const spec = existingChart.spec;
+          // Set data source
+          if (typeof spec.data === "string") {
+            setSourceRange(spec.data);
+          } else if (spec.data && "startRow" in spec.data) {
+            // DataRangeRef: convert to A1 string
+            const d = spec.data as { startRow: number; startCol: number; endRow: number; endCol: number };
+            const range = selectionToRange(d.startRow, d.startCol, d.endRow, d.endCol);
+            setSourceRange(currentSheetName ? buildSheetRange(currentSheetName, range) : range);
+          }
+          // Set other spec fields
+          setMark(spec.mark);
+          setHasHeaders(spec.hasHeaders);
+          setOrientation(spec.seriesOrientation);
+          setCategoryIndex(spec.categoryIndex);
+          setSeries(spec.series);
+          setTitle(spec.title);
+          if (spec.xAxis) setXAxis(spec.xAxis);
+          if (spec.yAxis) setYAxis(spec.yAxis);
+          if (spec.legend) setLegend(spec.legend);
+          if (spec.palette) setPalette(spec.palette);
+          if (spec.markOptions) setMarkOptions(spec.markOptions);
+          setHasAutoDetected(true);
+        }
+      }
+
       // In pivot mode, auto-detect series from the pivot table
       if (isPivotMode) {
         autoDetectPivotSeries(pivotId!).then((detected) => {
@@ -276,7 +310,7 @@ export function CreateChartDialog({
         }).catch(() => {});
       }
     }
-  }, [isOpen, isPivotMode, pivotId]);
+  }, [isOpen, isPivotMode, pivotId, isEditMode, editChartId, currentSheetName]);
 
   // Use the user's selection as the data range. If the selection is a single
   // cell, auto-detect the surrounding data region; otherwise use the selection as-is.
@@ -508,19 +542,27 @@ export function CreateChartDialog({
       const chartWidth = 600;
       const chartHeight = 400;
 
-      const chart = createChart(currentSpec, {
-        sheetIndex: currentSheetIndex,
-        x: chartX,
-        y: chartY,
-        width: chartWidth,
-        height: chartHeight,
-      });
+      if (isEditMode && editChartId != null) {
+        // Update the existing chart's spec
+        updateChartSpec(editChartId, currentSpec);
+        syncChartRegions();
+        emitAppEvent(ChartEvents.CHART_UPDATED, { chartId: editChartId });
+        emitAppEvent(AppEvents.GRID_REFRESH);
+      } else {
+        const chart = createChart(currentSpec, {
+          sheetIndex: currentSheetIndex,
+          x: chartX,
+          y: chartY,
+          width: chartWidth,
+          height: chartHeight,
+        });
 
-      console.log("[CreateChartDialog] Chart created:", chart.name, chart);
+        console.log("[CreateChartDialog] Chart created:", chart.name, chart);
 
-      syncChartRegions();
-      emitAppEvent(ChartEvents.CHART_CREATED, { chartId: chart.chartId });
-      emitAppEvent(AppEvents.GRID_REFRESH);
+        syncChartRegions();
+        emitAppEvent(ChartEvents.CHART_CREATED, { chartId: chart.chartId });
+        emitAppEvent(AppEvents.GRID_REFRESH);
+      }
 
       handleClose();
     } catch (err) {
@@ -609,7 +651,7 @@ export function CreateChartDialog({
       >
         {/* Header — drag handle */}
         <Header onMouseDown={handleHeaderMouseDown}>
-          <Title>{isPivotMode ? "Insert PivotChart" : "Insert Chart"}</Title>
+          <Title>{isPivotMode ? "Insert PivotChart" : isEditMode ? "Edit Chart" : "Insert Chart"}</Title>
           <CloseButton onClick={handleClose} aria-label="Close">
             x
           </CloseButton>
@@ -693,7 +735,7 @@ export function CreateChartDialog({
             Cancel
           </Button>
           <Button $primary onClick={handleCreate} disabled={isLoading}>
-            {isLoading ? "Creating..." : "Insert Chart"}
+            {isLoading ? "Saving..." : isEditMode ? "Update Chart" : "Insert Chart"}
           </Button>
         </Footer>
       </DialogContainer>

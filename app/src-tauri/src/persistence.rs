@@ -832,6 +832,13 @@ pub fn open_file(
             all_merged.push(sheet_merges);
         }
 
+        // ---- Per-sheet gridlines visibility ----
+        let mut show_gridlines = state.show_gridlines.lock().map_err(|e| e.to_string())?;
+        show_gridlines.clear();
+        for sheet in &workbook.sheets {
+            show_gridlines.push(sheet.show_gridlines);
+        }
+
         // ---- Page setups for all sheets ----
         let mut page_setups = state.page_setups.lock().map_err(|e| e.to_string())?;
         page_setups.clear();

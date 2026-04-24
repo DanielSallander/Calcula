@@ -5,6 +5,61 @@
 
 import { getViewportCells } from "@api/lib";
 import { indexToCol } from "@api";
+
+/**
+ * Parse a display-formatted number string to a numeric value.
+ * Handles currency symbols ($, EUR, GBP), thousands separators (comma, space, period),
+ * percentage signs, parenthesized negatives, and other common formatting.
+ */
+function parseDisplayNumber(raw: string): number {
+  if (!raw || raw.trim() === "" || raw === "-" || raw === "--") return NaN;
+
+  let s = raw.trim();
+
+  // Handle parenthesized negatives: (123) -> -123
+  let negative = false;
+  if (s.startsWith("(") && s.endsWith(")")) {
+    negative = true;
+    s = s.slice(1, -1).trim();
+  }
+  // Handle leading minus
+  if (s.startsWith("-")) {
+    negative = true;
+    s = s.slice(1).trim();
+  }
+
+  // Strip currency symbols and common prefixes/suffixes
+  s = s.replace(/[$\u20AC\u00A3\u00A5\uFFE5\u20B9]/g, ""); // $, EUR, GBP, JPY, CNY, INR
+
+  // Strip percentage (but remember it for later)
+  const isPercent = s.endsWith("%");
+  if (isPercent) {
+    s = s.slice(0, -1);
+  }
+
+  // Strip spaces used as thousands separators (but keep decimal point/comma)
+  // Also strip non-breaking spaces
+  s = s.replace(/[\s\u00A0]/g, "");
+
+  // Handle European decimal comma: if there's exactly one comma and it's followed by 1-2 digits at end
+  // AND there are no periods, treat comma as decimal separator
+  if (!s.includes(".") && /,\d{1,2}$/.test(s)) {
+    s = s.replace(/,/, ".");
+  }
+
+  // Strip remaining commas (thousands separators)
+  s = s.replace(/,/g, "");
+
+  // Strip trailing units text (e.g., " units", " kg") - only keep numeric part
+  s = s.replace(/[a-zA-Z\s]+$/, "");
+
+  const num = parseFloat(s);
+  if (isNaN(num)) return NaN;
+
+  let result = negative ? -num : num;
+  if (isPercent) result /= 100;
+  return result;
+}
 import type {
   ChartSpec,
   ChartSeries,
@@ -146,7 +201,7 @@ export async function autoDetectSeries(
     // Check if this column has any numeric data
     let hasNumeric = false;
     for (let row = dataStartRow; row < numRows; row++) {
-      const val = parseFloat(grid[row][col]);
+      const val = parseDisplayNumber(grid[row][col]);
       if (!isNaN(val)) {
         hasNumeric = true;
         break;
@@ -193,7 +248,7 @@ function parseColumnOriented(
     const values: number[] = [];
     for (let row = dataStartRow; row < numRows; row++) {
       const raw = grid[row][def.sourceIndex];
-      const num = parseFloat(raw);
+      const num = parseDisplayNumber(raw);
       values.push(isNaN(num) ? 0 : num);
     }
     return {
@@ -227,7 +282,7 @@ function parseRowOriented(
     const values: number[] = [];
     for (let col = dataStartCol; col < numCols; col++) {
       const raw = grid[def.sourceIndex][col];
-      const num = parseFloat(raw);
+      const num = parseDisplayNumber(raw);
       values.push(isNaN(num) ? 0 : num);
     }
     return {

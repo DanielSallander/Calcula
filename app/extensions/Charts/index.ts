@@ -364,6 +364,7 @@ function activate(context: ExtensionContext): void {
     try {
       const idx = await getActiveSheet();
       setActiveSheetIndex(idx);
+      invalidateAllChartCaches();
       syncChartRegions();
       context.events.emit(AppEvents.GRID_REFRESH);
     } catch {
@@ -377,6 +378,7 @@ function activate(context: ExtensionContext): void {
         const idx = await getActiveSheet();
         setActiveSheetIndex(idx);
         deselectChart();
+        invalidateAllChartCaches();
         syncChartRegions();
         context.events.emit(AppEvents.GRID_REFRESH);
       } catch {

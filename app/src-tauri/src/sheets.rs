@@ -113,6 +113,14 @@ pub fn get_active_sheet(state: State<AppState>) -> usize {
     *state.active_sheet.lock().unwrap()
 }
 
+/// Get the gridlines visibility setting for the active sheet.
+#[tauri::command]
+pub fn get_show_gridlines(state: State<AppState>) -> bool {
+    let active = *state.active_sheet.lock().unwrap();
+    let gridlines = state.show_gridlines.lock().unwrap();
+    gridlines.get(active).copied().unwrap_or(true)
+}
+
 #[tauri::command]
 pub fn set_active_sheet(state: State<AppState>, index: usize) -> Result<SheetsResult, String> {
     let sheet_names = state.sheet_names.lock().unwrap();
