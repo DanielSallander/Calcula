@@ -35,7 +35,7 @@ pub fn create_slicer(
         width: params.width.unwrap_or(180.0),
         height: params.height.unwrap_or(240.0),
         source_type: params.source_type,
-        source_id: params.source_id,
+        cache_source_id: params.cache_source_id,
         field_name: params.field_name,
         selected_items: None, // All selected by default
         show_header: true,
@@ -53,15 +53,16 @@ pub fn create_slicer(
         autogrid: true,
         item_padding: 0.0,
         button_radius: 2.0,
+        connected_source_ids: params.connected_source_ids,
     };
 
     log_debug!(
         "SLICER",
-        "create_slicer id={} name={} source={:?}:{}",
+        "create_slicer id={} name={} source={:?} connected={:?}",
         id,
         slicer.name,
         slicer.source_type,
-        slicer.source_id
+        slicer.connected_source_ids
     );
 
     let result = slicer.clone();
@@ -170,6 +171,9 @@ pub fn update_slicer(
     if let Some(button_radius) = params.button_radius {
         slicer.button_radius = button_radius.max(0.0).min(20.0);
     }
+    if let Some(connected_source_ids) = params.connected_source_ids {
+        slicer.connected_source_ids = connected_source_ids;
+    }
 
     Ok(slicer.clone())
 }
@@ -269,21 +273,28 @@ pub fn get_slicer_items(
         .get(&slicer_id)
         .ok_or_else(|| format!("Slicer {} not found", slicer_id))?;
 
-    // Collect filters from OTHER slicers on the same source (cross-filtering)
+    // Items always come from the cache source (the data model), regardless of
+    // which pivots the slicer filters via Report Connections.
+    let reference_source_id = slicer.cache_source_id;
+
+    // Collect filters from OTHER slicers that share any connected source (cross-filtering).
+    // Two slicers are siblings if they have overlapping connected source IDs.
+    let slicer_connected: std::collections::HashSet<u64> =
+        slicer.connected_source_ids.iter().copied().collect();
     let sibling_filters: Vec<(String, Vec<String>)> = slicers
         .values()
         .filter(|s| {
             s.id != slicer_id
                 && s.source_type == slicer.source_type
-                && s.source_id == slicer.source_id
                 && s.selected_items.is_some()
+                && s.connected_source_ids.iter().any(|id| slicer_connected.contains(id))
         })
         .map(|s| (s.field_name.clone(), s.selected_items.clone().unwrap()))
         .collect();
 
     let unique_values = match slicer.source_type {
-        SlicerSourceType::Table => get_table_column_values(&state, slicer)?,
-        SlicerSourceType::Pivot => get_pivot_field_values(&pivot_state, slicer)?,
+        SlicerSourceType::Table => get_table_column_values(&state, reference_source_id, &slicer.field_name)?,
+        SlicerSourceType::Pivot => get_pivot_field_values(&pivot_state, reference_source_id, &slicer.field_name)?,
     };
 
     // Compute has_data by checking cross-slicer filters
@@ -292,10 +303,10 @@ pub fn get_slicer_items(
     } else {
         match slicer.source_type {
             SlicerSourceType::Table => {
-                Some(get_table_available_values(&state, slicer, &sibling_filters)?)
+                Some(get_table_available_values(&state, reference_source_id, &slicer.field_name, &sibling_filters)?)
             }
             SlicerSourceType::Pivot => {
-                Some(get_pivot_available_values(&pivot_state, slicer, &sibling_filters)?)
+                Some(get_pivot_available_values(&pivot_state, reference_source_id, &slicer.field_name, &sibling_filters)?)
             }
         }
     };
@@ -335,8 +346,25 @@ pub fn get_slicer_items(
 // INTERNAL HELPERS
 // ============================================================================
 
+/// Match a slicer field name against a cache field name.
+/// Handles "table.column" format: if the slicer field name contains a dot,
+/// the cache field name is matched against the part after the last dot.
+fn field_name_matches(cache_name: &str, slicer_name: &str) -> bool {
+    if cache_name == slicer_name {
+        return true;
+    }
+    // For BI pivots, slicer field name may be "table.column" while
+    // cache field name is just "column" (from Arrow schema)
+    if let Some(col_part) = slicer_name.rsplit('.').next() {
+        if cache_name == col_part {
+            return true;
+        }
+    }
+    false
+}
+
 /// Get unique values from a table column.
-fn get_table_column_values(state: &State<AppState>, slicer: &Slicer) -> Result<Vec<String>, String> {
+fn get_table_column_values(state: &State<AppState>, source_id: u64, field_name: &str) -> Result<Vec<String>, String> {
     let tables = state.tables.lock().unwrap();
     let grids = state.grids.lock().unwrap();
     let style_registry = state.style_registry.lock().unwrap();
@@ -346,15 +374,15 @@ fn get_table_column_values(state: &State<AppState>, slicer: &Slicer) -> Result<V
     let table = tables
         .values()
         .flat_map(|sheet_tables| sheet_tables.values())
-        .find(|t| t.id == slicer.source_id)
-        .ok_or_else(|| format!("Table {} not found", slicer.source_id))?;
+        .find(|t| t.id == source_id)
+        .ok_or_else(|| format!("Table {} not found", source_id))?;
 
     // Find the column index by name
     let col_offset = table
         .columns
         .iter()
-        .position(|c| c.name == slicer.field_name)
-        .ok_or_else(|| format!("Column '{}' not found in table", slicer.field_name))?;
+        .position(|c| c.name == field_name)
+        .ok_or_else(|| format!("Column '{}' not found in table", field_name))?;
 
     let abs_col = table.start_col + col_offset as u32;
     let data_start_row = if table.style_options.header_row {
@@ -390,7 +418,8 @@ fn get_table_column_values(state: &State<AppState>, slicer: &Slicer) -> Result<V
 /// Scans the table rows and checks each row against filters from sibling slicers.
 fn get_table_available_values(
     state: &State<AppState>,
-    slicer: &Slicer,
+    source_id: u64,
+    field_name: &str,
     sibling_filters: &[(String, Vec<String>)],
 ) -> Result<std::collections::HashSet<String>, String> {
     let tables = state.tables.lock().unwrap();
@@ -401,15 +430,15 @@ fn get_table_available_values(
     let table = tables
         .values()
         .flat_map(|sheet_tables| sheet_tables.values())
-        .find(|t| t.id == slicer.source_id)
-        .ok_or_else(|| format!("Table {} not found", slicer.source_id))?;
+        .find(|t| t.id == source_id)
+        .ok_or_else(|| format!("Table {} not found", source_id))?;
 
     // Find the target column index
     let target_col_offset = table
         .columns
         .iter()
-        .position(|c| c.name == slicer.field_name)
-        .ok_or_else(|| format!("Column '{}' not found", slicer.field_name))?;
+        .position(|c| c.name == field_name)
+        .ok_or_else(|| format!("Column '{}' not found", field_name))?;
     let target_abs_col = table.start_col + target_col_offset as u32;
 
     // Resolve sibling filter column indices
@@ -469,22 +498,24 @@ fn get_table_available_values(
 /// Get unique values from a pivot table field.
 fn get_pivot_field_values(
     pivot_state: &State<'_, PivotState>,
-    slicer: &Slicer,
+    source_id: u64,
+    field_name: &str,
 ) -> Result<Vec<String>, String> {
     use pivot_engine::VALUE_ID_EMPTY;
 
-    let pivot_id = slicer.source_id as PivotId;
+    let pivot_id = source_id as PivotId;
     let mut pivot_tables = pivot_state.pivot_tables.lock().unwrap();
     let (_def, cache) = pivot_tables
         .get_mut(&pivot_id)
         .ok_or_else(|| format!("Pivot table {} not found", pivot_id))?;
 
     // Find the field index by name in the cache
+    // Supports both "column" and "table.column" format
     let field_index = cache
         .fields
         .iter()
-        .position(|f| f.name == slicer.field_name)
-        .ok_or_else(|| format!("Field '{}' not found in pivot cache", slicer.field_name))?;
+        .position(|f| field_name_matches(&f.name, field_name))
+        .ok_or_else(|| format!("Field '{}' not found in pivot cache", field_name))?;
 
     let field = cache
         .fields
@@ -531,23 +562,24 @@ fn get_pivot_field_values(
 /// Scans the cache records and checks each record against sibling slicer filters.
 fn get_pivot_available_values(
     pivot_state: &State<'_, PivotState>,
-    slicer: &Slicer,
+    source_id: u64,
+    field_name: &str,
     sibling_filters: &[(String, Vec<String>)],
 ) -> Result<std::collections::HashSet<String>, String> {
     use pivot_engine::VALUE_ID_EMPTY;
 
-    let pivot_id = slicer.source_id as PivotId;
+    let pivot_id = source_id as PivotId;
     let mut pivot_tables = pivot_state.pivot_tables.lock().unwrap();
     let (_def, cache) = pivot_tables
         .get_mut(&pivot_id)
         .ok_or_else(|| format!("Pivot table {} not found", pivot_id))?;
 
-    // Find the target field index
+    // Find the target field index (supports "table.column" format)
     let target_field_idx = cache
         .fields
         .iter()
-        .position(|f| f.name == slicer.field_name)
-        .ok_or_else(|| format!("Field '{}' not found in pivot cache", slicer.field_name))?;
+        .position(|f| field_name_matches(&f.name, field_name))
+        .ok_or_else(|| format!("Field '{}' not found in pivot cache", field_name))?;
 
     // Resolve sibling filter field indices and their allowed ValueIds
     let filter_specs: Vec<(usize, std::collections::HashSet<String>)> = sibling_filters
@@ -556,7 +588,7 @@ fn get_pivot_available_values(
             cache
                 .fields
                 .iter()
-                .position(|f| &f.name == field_name)
+                .position(|f| field_name_matches(&f.name, field_name))
                 .map(|idx| {
                     let allowed_set: std::collections::HashSet<String> =
                         allowed.iter().cloned().collect();

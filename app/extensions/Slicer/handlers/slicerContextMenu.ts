@@ -13,7 +13,7 @@ import {
 } from "../lib/slicerStore";
 import { getGridStateSnapshot } from "@api/state";
 import { showDialog } from "@api";
-import { SLICER_SETTINGS_DIALOG_ID, SLICER_COMPUTED_PROPS_DIALOG_ID } from "../manifest";
+import { SLICER_SETTINGS_DIALOG_ID, SLICER_COMPUTED_PROPS_DIALOG_ID, SLICER_CONNECTIONS_DIALOG_ID } from "../manifest";
 
 // ============================================================================
 // State
@@ -174,6 +174,12 @@ function showContextMenu(clientX: number, clientY: number, slicerId: number): vo
       label: "Slicer Settings...",
       onClick: () => {
         showDialog(SLICER_SETTINGS_DIALOG_ID, { slicerId });
+      },
+    },
+    {
+      label: "Report Connections...",
+      onClick: () => {
+        showDialog(SLICER_CONNECTIONS_DIALOG_ID, { slicerId });
       },
     },
     {

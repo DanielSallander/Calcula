@@ -160,11 +160,13 @@ function computeLayout(slicer: Slicer, itemCount: number, viewportW: number, vie
     };
   }
 
-  // Vertical (default)
-  const cols = 1;
-  const cellW = innerW;
+  // Vertical (default) — still respects slicer.columns so the ribbon
+  // "Columns" dropdown works regardless of arrangement mode.
+  const cols = Math.max(1, slicer.columns);
+  const cellW = cols > 1 ? (innerW + gap) / cols - gap : innerW;
   const cellH = itemH;
-  const contentHeight = total * (cellH + gap) - (total > 0 ? gap : 0);
+  const rows = Math.ceil(total / cols);
+  const contentHeight = rows * (cellH + gap) - (rows > 0 ? gap : 0);
   return {
     cols,
     totalItems: total,

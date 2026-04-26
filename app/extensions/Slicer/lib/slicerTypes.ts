@@ -19,7 +19,8 @@ export interface Slicer {
   width: number;
   height: number;
   sourceType: SlicerSourceType;
-  sourceId: number;
+  /** The pivot/table ID used as the data source for fetching slicer items. */
+  cacheSourceId: number;
   fieldName: string;
   selectedItems: string[] | null;
   showHeader: boolean;
@@ -37,6 +38,7 @@ export interface Slicer {
   autogrid: boolean;
   itemPadding: number;
   buttonRadius: number;
+  connectedSourceIds: number[];
 }
 
 export interface SlicerItem {
@@ -53,8 +55,11 @@ export interface CreateSlicerParams {
   width?: number;
   height?: number;
   sourceType: SlicerSourceType;
-  sourceId: number;
+  /** The pivot/table ID used as the data source for fetching slicer items. */
+  cacheSourceId: number;
   fieldName: string;
+  /** Initial pivot/table IDs this slicer filters (Report Connections). */
+  connectedSourceIds: number[];
   columns?: number;
   stylePreset?: string;
 }
@@ -77,6 +82,7 @@ export interface UpdateSlicerParams {
   autogrid?: boolean;
   itemPadding?: number;
   buttonRadius?: number;
+  connectedSourceIds?: number[];
 }
 
 // ============================================================================

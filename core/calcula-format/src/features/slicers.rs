@@ -19,7 +19,7 @@ pub struct SlicerDef {
     pub width: f64,
     pub height: f64,
     pub source_type: String,
-    pub source_id: u64,
+    pub cache_source_id: u64,
     pub field_name: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub selected_items: Option<Vec<String>>,
@@ -53,6 +53,9 @@ pub struct SlicerDef {
     /// Computed properties (formula-driven attributes)
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub computed_properties: Vec<SlicerComputedPropertyDef>,
+    /// All source IDs (table or pivot IDs) that this slicer filters.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub connected_source_ids: Vec<u64>,
 }
 
 /// JSON-friendly computed property definition for the .cala format.
@@ -99,7 +102,7 @@ impl From<&SavedSlicer> for SlicerDef {
                 SavedSlicerSourceType::Table => "table".to_string(),
                 SavedSlicerSourceType::Pivot => "pivot".to_string(),
             },
-            source_id: s.source_id,
+            cache_source_id: s.cache_source_id,
             field_name: s.field_name.clone(),
             selected_items: s.selected_items.clone(),
             show_header: s.show_header,
@@ -132,6 +135,7 @@ impl From<&SavedSlicer> for SlicerDef {
                     formula: cp.formula.clone(),
                 }
             }).collect(),
+            connected_source_ids: s.connected_source_ids.clone(),
         }
     }
 }
@@ -151,7 +155,7 @@ impl From<&SlicerDef> for SavedSlicer {
                 "pivot" => SavedSlicerSourceType::Pivot,
                 _ => SavedSlicerSourceType::Table,
             },
-            source_id: s.source_id,
+            cache_source_id: s.cache_source_id,
             field_name: s.field_name.clone(),
             selected_items: s.selected_items.clone(),
             show_header: s.show_header,
@@ -184,6 +188,7 @@ impl From<&SlicerDef> for SavedSlicer {
                     formula: cp.formula.clone(),
                 }
             }).collect(),
+            connected_source_ids: s.connected_source_ids.clone(),
         }
     }
 }

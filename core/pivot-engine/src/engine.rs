@@ -767,45 +767,56 @@ impl<'a> PivotCalculator<'a> {
         self.cache.apply_filters(&hidden_items);
     }
     
-    /// Resolves string hidden items to ValueIds.
-    fn resolve_hidden_items(&self, field: &PivotField) -> Vec<ValueId> {
+    /// Converts a CacheValue to its display string for comparison with hidden_items.
+    fn cache_value_display(value: &CacheValue) -> String {
+        match value {
+            CacheValue::Text(s) => s.clone(),
+            CacheValue::Number(n) => {
+                let f = n.as_f64();
+                if f.fract() == 0.0 {
+                    format!("{}", f as i64)
+                } else {
+                    format!("{}", f)
+                }
+            }
+            CacheValue::Boolean(b) => if *b { "TRUE".to_string() } else { "FALSE".to_string() },
+            CacheValue::Error(e) => format!("#{}", e),
+            CacheValue::Empty => String::new(),
+        }
+    }
+
+    /// Resolves string hidden items to ValueIds by comparing display strings.
+    fn resolve_hidden_ids(field_cache: &crate::cache::FieldCache, hidden_items: &[String]) -> Vec<ValueId> {
         let mut ids = Vec::new();
-        
-        if let Some(field_cache) = self.cache.fields.get(field.source_index) {
-            for hidden_str in &field.hidden_items {
-                // Search for matching value in the field cache
-                for id in 0..field_cache.unique_count() as ValueId {
-                    if let Some(CacheValue::Text(s)) = field_cache.get_value(id) {
-                        if s == hidden_str {
-                            ids.push(id);
-                            break;
-                        }
+        for hidden_str in hidden_items {
+            for id in 0..field_cache.unique_count() as ValueId {
+                if let Some(value) = field_cache.get_value(id) {
+                    if Self::cache_value_display(value) == *hidden_str {
+                        ids.push(id);
+                        break;
                     }
                 }
             }
         }
-        
         ids
+    }
+
+    /// Resolves string hidden items to ValueIds.
+    fn resolve_hidden_items(&self, field: &PivotField) -> Vec<ValueId> {
+        if let Some(field_cache) = self.cache.fields.get(field.source_index) {
+            Self::resolve_hidden_ids(field_cache, &field.hidden_items)
+        } else {
+            Vec::new()
+        }
     }
 
     /// Resolves slicer filter hidden items to ValueIds.
     fn resolve_slicer_hidden_items(&self, sf: &SlicerFilter) -> Vec<ValueId> {
-        let mut ids = Vec::new();
-
         if let Some(field_cache) = self.cache.fields.get(sf.source_index) {
-            for hidden_str in &sf.hidden_items {
-                for id in 0..field_cache.unique_count() as ValueId {
-                    if let Some(CacheValue::Text(s)) = field_cache.get_value(id) {
-                        if s == hidden_str {
-                            ids.push(id);
-                            break;
-                        }
-                    }
-                }
-            }
+            Self::resolve_hidden_ids(field_cache, &sf.hidden_items)
+        } else {
+            Vec::new()
         }
-
-        ids
     }
 
     // ========================================================================

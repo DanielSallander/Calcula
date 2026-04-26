@@ -159,6 +159,8 @@ export interface UpdateBiPivotFieldsRequest {
   columnFields: BiFieldRef[];
   valueFields: BiValueFieldRef[];
   filterFields: BiFieldRef[];
+  /** Fields needed only by slicers — included in the query but not shown as visible filter rows */
+  slicerFields?: BiFieldRef[];
   layout?: LayoutConfig;
   /** All columns toggled to LOOKUP mode, including those not in zones */
   lookupColumns?: string[];

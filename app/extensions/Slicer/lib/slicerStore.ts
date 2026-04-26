@@ -11,6 +11,7 @@ import {
 import { getGridStateSnapshot } from "@api/state";
 import * as api from "./slicer-api";
 import { SlicerEvents } from "./slicerEvents";
+import { ensureBiFieldInPivotCache } from "./slicerFilterBridge";
 
 // ============================================================================
 // Module-level cache
@@ -186,6 +187,24 @@ export async function refreshSlicerItems(slicerId: number): Promise<SlicerItem[]
     itemsCache.set(slicerId, items);
     return items;
   } catch (err) {
+    // If field not found in cache (BI pivot), auto-add it and retry
+    const slicer = cachedSlicers.find((s) => s.id === slicerId);
+    if (
+      slicer &&
+      slicer.sourceType === "pivot" &&
+      String(err).includes("not found in pivot cache")
+    ) {
+      const added = await ensureBiFieldInPivotCache(slicer.cacheSourceId, slicer.fieldName);
+      if (added) {
+        try {
+          const items = await api.getSlicerItems(slicerId);
+          itemsCache.set(slicerId, items);
+          return items;
+        } catch (retryErr) {
+          console.error("[Slicer] Retry failed for slicer", slicerId, retryErr);
+        }
+      }
+    }
     console.error("[Slicer] Failed to get items for slicer", slicerId, err);
     return [];
   }

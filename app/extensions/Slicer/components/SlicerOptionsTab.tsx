@@ -16,7 +16,11 @@ import {
 } from "../lib/slicerStore";
 import { requestOverlayRedraw } from "@api/gridOverlays";
 import { showDialog } from "@api";
-import { SLICER_SETTINGS_DIALOG_ID, SLICER_COMPUTED_PROPS_DIALOG_ID } from "../manifest";
+import {
+  SLICER_SETTINGS_DIALOG_ID,
+  SLICER_COMPUTED_PROPS_DIALOG_ID,
+  SLICER_CONNECTIONS_DIALOG_ID,
+} from "../manifest";
 import { SlicerEvents } from "../lib/slicerEvents";
 import type { Slicer } from "../lib/slicerTypes";
 import { SlicerStylesGallery } from "./SlicerStylesGallery";
@@ -40,6 +44,40 @@ function commonValue<T>(slicers: Slicer[], getter: (s: Slicer) => T): MaybeValue
   }
   return first;
 }
+
+// ============================================================================
+// SVG Icons
+// ============================================================================
+
+const SettingsIcon = () => (
+  <svg width="20" height="20" viewBox="0 0 20 20" fill="none" xmlns="http://www.w3.org/2000/svg">
+    <path d="M10 12.5a2.5 2.5 0 100-5 2.5 2.5 0 000 5z" stroke="currentColor" strokeWidth="1.3" />
+    <path d="M16.2 12.2a1.3 1.3 0 00.26 1.43l.05.05a1.58 1.58 0 01-1.12 2.69 1.58 1.58 0 01-1.12-.46l-.05-.05a1.3 1.3 0 00-1.43-.26 1.3 1.3 0 00-.79 1.19v.14a1.58 1.58 0 01-3.16 0v-.07a1.3 1.3 0 00-.85-1.19 1.3 1.3 0 00-1.43.26l-.05.05a1.58 1.58 0 11-2.23-2.23l.05-.05a1.3 1.3 0 00.26-1.43 1.3 1.3 0 00-1.19-.79h-.14a1.58 1.58 0 010-3.16h.07a1.3 1.3 0 001.19-.85 1.3 1.3 0 00-.26-1.43l-.05-.05a1.58 1.58 0 112.23-2.23l.05.05a1.3 1.3 0 001.43.26h.06a1.3 1.3 0 00.79-1.19v-.14a1.58 1.58 0 013.16 0v.07a1.3 1.3 0 00.79 1.19 1.3 1.3 0 001.43-.26l.05-.05a1.58 1.58 0 112.23 2.23l-.05.05a1.3 1.3 0 00-.26 1.43v.06a1.3 1.3 0 001.19.79h.14a1.58 1.58 0 010 3.16h-.07a1.3 1.3 0 00-1.19.79z" stroke="currentColor" strokeWidth="1.1" strokeLinecap="round" strokeLinejoin="round" />
+  </svg>
+);
+
+const ComputedIcon = () => (
+  <svg width="20" height="20" viewBox="0 0 22 22" fill="none" xmlns="http://www.w3.org/2000/svg">
+    <path d="M3 5h10M3 9h8M3 13h9M3 17h6" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round"/>
+    <path d="M15.5 10.5c.8-2 1.4-3.2 2-3.2s1 .5 1.2.8" stroke="#217346" strokeWidth="1.3" strokeLinecap="round" fill="none"/>
+    <path d="M14 15.5l4-4" stroke="#217346" strokeWidth="1.3" strokeLinecap="round"/>
+  </svg>
+);
+
+const ConnectionsIcon = () => (
+  <svg width="20" height="20" viewBox="0 0 20 20" fill="none" xmlns="http://www.w3.org/2000/svg">
+    <rect x="2" y="3" width="6" height="5" rx="1" stroke="currentColor" strokeWidth="1.2" />
+    <rect x="12" y="3" width="6" height="5" rx="1" stroke="currentColor" strokeWidth="1.2" />
+    <rect x="7" y="12" width="6" height="5" rx="1" stroke="currentColor" strokeWidth="1.2" />
+    <path d="M5 8v2.5a1.5 1.5 0 001.5 1.5H7M15 8v2.5a1.5 1.5 0 01-1.5 1.5H13" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" />
+  </svg>
+);
+
+const DeleteIcon = () => (
+  <svg width="20" height="20" viewBox="0 0 20 20" fill="none" xmlns="http://www.w3.org/2000/svg">
+    <path d="M6 6l8 8M14 6l-8 8" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
+  </svg>
+);
 
 // ============================================================================
 // Styles
@@ -80,16 +118,18 @@ const tabStyles = {
   nameInput: css`
     padding: 3px 6px;
     border: 1px solid #d0d0d0;
-    border-radius: 4px;
+    border-radius: 3px;
     font-size: 11px;
     font-family: inherit;
     background: #fff;
     color: #1a1a1a;
     min-width: 100px;
     max-width: 160px;
+    transition: border-color 0.15s;
     &:focus {
       border-color: #4472c4;
       outline: none;
+      box-shadow: 0 0 0 1px rgba(68, 114, 196, 0.2);
     }
     &:disabled {
       background: #f5f5f5;
@@ -98,33 +138,38 @@ const tabStyles = {
   `,
   label: css`
     font-size: 11px;
-    color: #333;
+    color: #444;
     white-space: nowrap;
+    min-width: 42px;
   `,
   columnSelect: css`
     padding: 3px 6px;
     border: 1px solid #d0d0d0;
-    border-radius: 4px;
+    border-radius: 3px;
     font-size: 11px;
     background: #fff;
     color: #1a1a1a;
     width: 50px;
+    transition: border-color 0.15s;
     &:focus {
       border-color: #4472c4;
       outline: none;
+      box-shadow: 0 0 0 1px rgba(68, 114, 196, 0.2);
     }
   `,
   sizeInput: css`
     padding: 3px 6px;
     border: 1px solid #d0d0d0;
-    border-radius: 4px;
+    border-radius: 3px;
     font-size: 11px;
     background: #fff;
     color: #1a1a1a;
     width: 60px;
+    transition: border-color 0.15s;
     &:focus {
       border-color: #4472c4;
       outline: none;
+      box-shadow: 0 0 0 1px rgba(68, 114, 196, 0.2);
     }
   `,
   checkboxLabel: css`
@@ -134,7 +179,7 @@ const tabStyles = {
     cursor: pointer;
     white-space: nowrap;
     font-size: 11px;
-    color: #333;
+    color: #444;
     input {
       cursor: pointer;
     }
@@ -143,16 +188,18 @@ const tabStyles = {
     display: flex;
     flex-direction: column;
     align-items: center;
-    gap: 2px;
-    padding: 4px 10px;
+    gap: 3px;
+    padding: 4px 8px;
     border: 1px solid transparent;
     border-radius: 4px;
     background: transparent;
     cursor: pointer;
     font-family: inherit;
     font-size: 11px;
-    color: #333;
+    color: #444;
     white-space: nowrap;
+    min-width: 48px;
+    transition: background 0.1s, border-color 0.1s;
 
     &:hover {
       background: #e8e8e8;
@@ -164,7 +211,7 @@ const tabStyles = {
     }
 
     &:disabled {
-      opacity: 0.5;
+      opacity: 0.4;
       cursor: default;
       &:hover {
         background: transparent;
@@ -176,8 +223,8 @@ const tabStyles = {
     display: flex;
     flex-direction: column;
     align-items: center;
-    gap: 2px;
-    padding: 4px 10px;
+    gap: 3px;
+    padding: 4px 8px;
     border: 1px solid transparent;
     border-radius: 4px;
     background: transparent;
@@ -186,6 +233,8 @@ const tabStyles = {
     font-size: 11px;
     color: #c42b1c;
     white-space: nowrap;
+    min-width: 48px;
+    transition: background 0.1s, border-color 0.1s;
 
     &:hover {
       background: #fde7e7;
@@ -197,12 +246,11 @@ const tabStyles = {
     }
   `,
   actionIcon: css`
-    font-size: 22px;
-    line-height: 1;
-    height: 26px;
+    height: 24px;
     display: flex;
     align-items: center;
     justify-content: center;
+    color: inherit;
   `,
   actionLabel: css`
     font-size: 10px;
@@ -220,7 +268,7 @@ const SLICER_GROUPS = [
   { collapseOrder: 4, expandedWidth: 220 }, // Properties
   { collapseOrder: 3, expandedWidth: 110 }, // Buttons
   { collapseOrder: 2, expandedWidth: 150 }, // Size
-  { collapseOrder: 1, expandedWidth: 240 }, // Actions (icon buttons wider)
+  { collapseOrder: 1, expandedWidth: 280 }, // Actions (4 buttons now)
 ];
 
 // ============================================================================
@@ -569,8 +617,17 @@ export function SlicerOptionsTab({
             title={isMulti ? "Open settings for the last selected slicer" : "Open slicer settings (layout, selection behavior, data display)"}
             disabled={isMulti}
           >
-            <span className={tabStyles.actionIcon}>&#x2699;</span>
+            <span className={tabStyles.actionIcon}><SettingsIcon /></span>
             <span className={tabStyles.actionLabel}>Settings</span>
+          </button>
+          <button
+            className={tabStyles.actionButton}
+            onClick={() => showDialog(SLICER_CONNECTIONS_DIALOG_ID, { slicerId: primary.id })}
+            title={isMulti ? "Manage report connections for the last selected slicer" : "Choose which PivotTables this slicer filters"}
+            disabled={isMulti}
+          >
+            <span className={tabStyles.actionIcon}><ConnectionsIcon /></span>
+            <span className={tabStyles.actionLabel}>Report Connections</span>
           </button>
           <button
             className={tabStyles.actionButton}
@@ -578,13 +635,7 @@ export function SlicerOptionsTab({
             title={isMulti ? "Open computed properties for the last selected slicer" : "Formula-driven attributes for this slicer"}
             disabled={isMulti}
           >
-            <span className={tabStyles.actionIcon}>
-              <svg width="22" height="22" viewBox="0 0 22 22" fill="none" xmlns="http://www.w3.org/2000/svg">
-                <path d="M3 5h10M3 9h8M3 13h9M3 17h6" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round"/>
-                <path d="M15.5 10.5c.8-2 1.4-3.2 2-3.2s1 .5 1.2.8" stroke="#217346" strokeWidth="1.3" strokeLinecap="round" fill="none"/>
-                <path d="M14 15.5l4-4" stroke="#217346" strokeWidth="1.3" strokeLinecap="round"/>
-              </svg>
-            </span>
+            <span className={tabStyles.actionIcon}><ComputedIcon /></span>
             <span className={tabStyles.actionLabel}>Computed</span>
           </button>
           <button
@@ -592,7 +643,7 @@ export function SlicerOptionsTab({
             onClick={handleDelete}
             title={isMulti ? `Delete ${slicers.length} selected slicers` : "Delete this slicer"}
           >
-            <span className={tabStyles.actionIcon}>&#x2716;</span>
+            <span className={tabStyles.actionIcon}><DeleteIcon /></span>
             <span className={tabStyles.actionLabel}>Delete{isMulti ? ` (${slicers.length})` : ""}</span>
           </button>
         </div>

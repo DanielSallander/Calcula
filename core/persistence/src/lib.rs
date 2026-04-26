@@ -559,7 +559,8 @@ pub struct SavedSlicer {
     pub width: f64,
     pub height: f64,
     pub source_type: SavedSlicerSourceType,
-    pub source_id: u64,
+    /// The pivot/table ID used as the data source for fetching slicer items.
+    pub cache_source_id: u64,
     pub field_name: String,
     pub selected_items: Option<Vec<String>>,
     pub show_header: bool,
@@ -592,6 +593,9 @@ pub struct SavedSlicer {
     /// Computed properties (formula-driven attributes)
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub computed_properties: Vec<SavedSlicerComputedProperty>,
+    /// All source IDs (table or pivot IDs) that this slicer filters.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub connected_source_ids: Vec<u64>,
 }
 
 /// A saved slicer computed property (formula-driven attribute).

@@ -83,8 +83,8 @@ pub struct Slicer {
     pub height: f64,
     /// Source type (table or pivot)
     pub source_type: SlicerSourceType,
-    /// Source ID (table ID or pivot table ID)
-    pub source_id: u64,
+    /// The pivot/table ID used as the data source for fetching slicer items.
+    pub cache_source_id: u64,
     /// Field/column name to filter on
     pub field_name: String,
     /// Selected items. None = all selected (no filter applied).
@@ -132,6 +132,10 @@ pub struct Slicer {
     /// Corner radius for item buttons in pixels (default: 2)
     #[serde(default = "default_button_radius")]
     pub button_radius: f64,
+    /// All source IDs (table or pivot IDs) that this slicer filters.
+    /// For item fetching, the first entry is used as the reference data source.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub connected_source_ids: Vec<u64>,
 }
 
 fn default_true() -> bool {
@@ -177,8 +181,12 @@ pub struct CreateSlicerParams {
     pub width: Option<f64>,
     pub height: Option<f64>,
     pub source_type: SlicerSourceType,
-    pub source_id: u64,
+    /// The pivot/table ID used as the data source for fetching slicer items.
+    pub cache_source_id: u64,
     pub field_name: String,
+    /// Initial pivot/table IDs this slicer filters (Report Connections).
+    #[serde(default)]
+    pub connected_source_ids: Vec<u64>,
     pub columns: Option<u32>,
     pub style_preset: Option<String>,
 }
@@ -204,6 +212,7 @@ pub struct UpdateSlicerParams {
     pub autogrid: Option<bool>,
     pub item_padding: Option<f64>,
     pub button_radius: Option<f64>,
+    pub connected_source_ids: Option<Vec<u64>>,
 }
 
 // ============================================================================

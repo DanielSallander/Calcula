@@ -1069,6 +1069,9 @@ pub struct PivotHierarchiesInfo {
     pub data_hierarchies: Vec<DataHierarchyInfo>,
     /// Filter hierarchies
     pub filter_hierarchies: Vec<RowColumnHierarchyInfo>,
+    /// BI model info (only present for BI-backed pivots)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bi_model: Option<BiPivotModelInfo>,
 }
 
 /// Zone field info - represents a field assigned to a zone
@@ -1387,6 +1390,11 @@ pub struct UpdateBiPivotFieldsRequest {
     pub column_fields: Vec<BiFieldRef>,
     pub value_fields: Vec<BiValueFieldRef>,
     pub filter_fields: Vec<BiFieldRef>,
+    /// Fields needed only by slicers — included in the GROUP BY query so
+    /// they appear in the cache, but NOT shown as visible filter rows.
+    /// Mapped to `definition.slicer_filters` instead of `filter_fields`.
+    #[serde(default)]
+    pub slicer_fields: Vec<BiFieldRef>,
     pub layout: Option<LayoutConfig>,
     /// All columns toggled to LOOKUP mode ("Table.Column" keys), including
     /// those not currently in a zone. Persisted for navigation round-trips.

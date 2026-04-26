@@ -422,7 +422,7 @@ fn slicer_to_saved(slicer: &crate::slicer::Slicer) -> persistence::SavedSlicer {
             crate::slicer::SlicerSourceType::Table => persistence::SavedSlicerSourceType::Table,
             crate::slicer::SlicerSourceType::Pivot => persistence::SavedSlicerSourceType::Pivot,
         },
-        source_id: slicer.source_id,
+        cache_source_id: slicer.cache_source_id,
         field_name: slicer.field_name.clone(),
         selected_items: slicer.selected_items.clone(),
         show_header: slicer.show_header,
@@ -449,6 +449,7 @@ fn slicer_to_saved(slicer: &crate::slicer::Slicer) -> persistence::SavedSlicer {
         item_padding: slicer.item_padding,
         button_radius: slicer.button_radius,
         computed_properties: Vec::new(),
+        connected_source_ids: slicer.connected_source_ids.clone(),
     }
 }
 
@@ -466,7 +467,7 @@ fn saved_to_slicer(saved: &persistence::SavedSlicer) -> crate::slicer::Slicer {
             persistence::SavedSlicerSourceType::Table => crate::slicer::SlicerSourceType::Table,
             persistence::SavedSlicerSourceType::Pivot => crate::slicer::SlicerSourceType::Pivot,
         },
-        source_id: saved.source_id,
+        cache_source_id: saved.cache_source_id,
         field_name: saved.field_name.clone(),
         selected_items: saved.selected_items.clone(),
         show_header: saved.show_header,
@@ -492,6 +493,7 @@ fn saved_to_slicer(saved: &persistence::SavedSlicer) -> crate::slicer::Slicer {
         autogrid: saved.autogrid,
         item_padding: saved.item_padding,
         button_radius: saved.button_radius,
+        connected_source_ids: saved.connected_source_ids.clone(),
     }
 }
 

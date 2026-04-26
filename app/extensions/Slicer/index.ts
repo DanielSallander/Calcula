@@ -19,6 +19,7 @@ import {
   InsertSlicerDialogDefinition,
   SlicerSettingsDialogDefinition,
   SlicerComputedPropsDialogDefinition,
+  SlicerConnectionsDialogDefinition,
 } from "./manifest";
 
 import {
@@ -97,6 +98,7 @@ function activate(context: ExtensionContext): void {
   context.ui.dialogs.register(InsertSlicerDialogDefinition);
   context.ui.dialogs.register(SlicerSettingsDialogDefinition);
   context.ui.dialogs.register(SlicerComputedPropsDialogDefinition);
+  context.ui.dialogs.register(SlicerConnectionsDialogDefinition);
 
   // Register grid overlay renderer for slicer panels
   cleanupFunctions.push(
@@ -418,11 +420,13 @@ function activate(context: ExtensionContext): void {
       applySlicerFilter(slicer).then(() => {
         // Cross-slicer filtering: refresh items for sibling slicers
         // (same source) so they show updated has_data state.
+        // Siblings are slicers that share at least one connected source
+        const slicerConnected = new Set(slicer.connectedSourceIds ?? []);
         const siblings = getAllSlicers().filter(
           (s) =>
             s.id !== slicerId &&
             s.sourceType === slicer.sourceType &&
-            s.sourceId === slicer.sourceId,
+            (s.connectedSourceIds ?? []).some((id) => slicerConnected.has(id)),
         );
         return Promise.all(
           siblings.map((s) => refreshSlicerItems(s.id)),

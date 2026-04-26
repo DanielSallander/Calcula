@@ -1908,12 +1908,26 @@ pub fn get_pivot_hierarchies(
         })
         .collect();
 
+    // Check if this is a BI-backed pivot and include bi_model
+    let bi_model = {
+        let bi_meta = pivot_state.bi_metadata.lock().unwrap();
+        bi_meta.get(&pivot_id).map(|meta| {
+            BiPivotModelInfo {
+                connection_id: meta.connection_id,
+                tables: meta.model_tables.clone(),
+                measures: meta.measures.clone(),
+                lookup_columns: meta.lookup_columns.iter().cloned().collect(),
+            }
+        })
+    };
+
     Ok(PivotHierarchiesInfo {
         hierarchies,
         row_hierarchies,
         column_hierarchies,
         data_hierarchies,
         filter_hierarchies,
+        bi_model,
     })
 }
 
@@ -3533,9 +3547,10 @@ pub async fn update_bi_pivot_fields(
     let has_values = !request.value_fields.is_empty();
     let has_dimensions = !request.row_fields.is_empty() || !request.column_fields.is_empty();
     let has_filters = !request.filter_fields.is_empty();
+    let has_slicer_fields = !request.slicer_fields.is_empty();
 
     // If no fields at all, clear to empty pivot
-    if !has_values && !has_dimensions && !has_filters {
+    if !has_values && !has_dimensions && !has_filters && !has_slicer_fields {
         log_info!("PIVOT", "No fields assigned, clearing to empty pivot");
         let mut pivot_tables = pivot_state.pivot_tables.lock().unwrap();
         let (definition, _cache) = pivot_tables
@@ -3572,7 +3587,7 @@ pub async fn update_bi_pivot_fields(
     // The synthetic measure column will be present in the cache but NOT mapped to
     // any value_field in the pivot definition, so the engine renders blank data cells
     // — matching Excel's behaviour of showing distinct dimension values without aggregates.
-    let synthetic_measure: Option<String> = if !has_values && (has_dimensions || has_filters) {
+    let synthetic_measure: Option<String> = if !has_values && (has_dimensions || has_filters || has_slicer_fields) {
         let bi_meta = pivot_state.bi_metadata.lock().unwrap();
         bi_meta.get(&pivot_id)
             .and_then(|m| m.measures.first())
@@ -3584,7 +3599,7 @@ pub async fn update_bi_pivot_fields(
     // If we need a synthetic measure but the model has none, we can't query the
     // BI engine. Save the field assignments to the definition (so they persist
     // across deselect/reselect) and show an empty pivot.
-    if !has_values && synthetic_measure.is_none() && (has_dimensions || has_filters) {
+    if !has_values && synthetic_measure.is_none() && (has_dimensions || has_filters || has_slicer_fields) {
         log_info!("PIVOT", "No measures in model for synthetic query, saving fields only");
         let mut pivot_tables = pivot_state.pivot_tables.lock().unwrap();
         let (definition, stored_cache) = pivot_tables
@@ -3635,7 +3650,11 @@ pub async fn update_bi_pivot_fields(
 
     // Collect table names referenced in fields for auto-binding
     let mut referenced_tables: Vec<String> = Vec::new();
-    for f in request.row_fields.iter().chain(request.column_fields.iter()).chain(request.filter_fields.iter()) {
+    for f in request.row_fields.iter()
+        .chain(request.column_fields.iter())
+        .chain(request.filter_fields.iter())
+        .chain(request.slicer_fields.iter())
+    {
         if !referenced_tables.contains(&f.table) {
             referenced_tables.push(f.table.clone());
         }
@@ -3670,6 +3689,9 @@ pub async fn update_bi_pivot_fields(
     // Filter fields are always GROUP BY (not lookups) — they need cache columns
     // so the pivot engine can read their unique values and apply hidden_items.
     let filter_group_fields: Vec<&BiFieldRef> = request.filter_fields.iter().collect();
+    // Slicer fields: included in GROUP BY so their values appear in the cache,
+    // but mapped to slicer_filters instead of filter_fields (no visible filter row).
+    let slicer_group_fields: Vec<&BiFieldRef> = request.slicer_fields.iter().collect();
 
     // Build BI engine QueryRequest
     // If no user measures but we have a synthetic one, include it in the query
@@ -3684,6 +3706,7 @@ pub async fn update_bi_pivot_fields(
         .iter()
         .chain(col_group_fields.iter())
         .chain(filter_group_fields.iter())
+        .chain(slicer_group_fields.iter())
         .map(|f| bi_engine::ColumnRef::new(&f.table, &f.column))
         .collect();
 
@@ -3854,9 +3877,9 @@ pub async fn update_bi_pivot_fields(
     // Build PivotDefinition field mappings
     //
     // Cache layout (BI engine result column order):
-    // [group_by columns (row groups, col groups, filter groups)] [measure columns] [lookup columns]
+    // [group_by columns (row groups, col groups, filter groups, slicer groups)] [measure columns] [lookup columns]
     // If synthetic dim: [synthetic at 0] [everything shifted by 1]
-    let num_group_by = row_group_fields.len() + col_group_fields.len() + filter_group_fields.len();
+    let num_group_by = row_group_fields.len() + col_group_fields.len() + filter_group_fields.len() + slicer_group_fields.len();
     let dim_offset: usize = if use_synthetic_dim { 1 } else { 0 };
 
     // Build a mapping from (table, column) -> cache column index.
@@ -3866,9 +3889,9 @@ pub async fn update_bi_pivot_fields(
     let mut field_to_cache_idx: std::collections::HashMap<(String, String), usize> =
         std::collections::HashMap::new();
 
-    // Group-by cols come first: row groups, then col groups, then filter groups
+    // Group-by cols come first: row groups, then col groups, then filter groups, then slicer groups
     let mut cache_idx = dim_offset;
-    for f in row_group_fields.iter().chain(col_group_fields.iter()).chain(filter_group_fields.iter()) {
+    for f in row_group_fields.iter().chain(col_group_fields.iter()).chain(filter_group_fields.iter()).chain(slicer_group_fields.iter()) {
         field_to_cache_idx.insert((f.table.clone(), f.column.clone()), cache_idx);
         cache_idx += 1;
     }
@@ -3982,6 +4005,44 @@ pub async fn update_bi_pivot_fields(
             filter
         })
         .collect();
+
+    // Slicer fields — map to slicer_filters (no visible filter row).
+    // When slicer_fields are provided, create new slicer_filters entries.
+    // When empty (e.g. Pivot editor updates), clear slicer_filters since the
+    // slicer extension will lazily re-add fields via ensureBiFieldInPivotCache.
+    if !request.slicer_fields.is_empty() {
+        // Build a name->old_hidden_items map so we can preserve filter state
+        // across cache rebuilds (source_index may shift).
+        let old_slicer_hidden: std::collections::HashMap<String, Vec<String>> = {
+            let old_cache_fields = &stored_cache.fields; // old cache before replacement
+            definition.slicer_filters.iter().filter_map(|sf| {
+                old_cache_fields.get(sf.source_index)
+                    .map(|fc| (fc.name.clone(), sf.hidden_items.clone()))
+            }).collect()
+        };
+        definition.slicer_filters = request
+            .slicer_fields
+            .iter()
+            .map(|f| {
+                let idx = *field_to_cache_idx
+                    .get(&(f.table.clone(), f.column.clone()))
+                    .unwrap_or(&0);
+                // Preserve hidden_items from the old slicer filter (matched by field name)
+                let hidden_items = old_slicer_hidden.get(&f.column)
+                    .or_else(|| old_slicer_hidden.get(&format!("{}.{}", f.table, f.column)))
+                    .cloned()
+                    .unwrap_or_default();
+                pivot_engine::SlicerFilter {
+                    source_index: idx,
+                    hidden_items,
+                }
+            })
+            .collect();
+    } else {
+        // No slicer_fields in request — clear stale slicer_filters whose
+        // source_index would be invalid in the new cache.
+        definition.slicer_filters.clear();
+    }
 
     // Apply layout
     if let Some(ref layout_config) = request.layout {
