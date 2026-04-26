@@ -53,7 +53,7 @@ pub fn create_slicer(
         autogrid: true,
         item_padding: 0.0,
         button_radius: 2.0,
-        connected_source_ids: params.connected_source_ids,
+        connected_sources: params.connected_sources,
     };
 
     log_debug!(
@@ -62,7 +62,7 @@ pub fn create_slicer(
         id,
         slicer.name,
         slicer.source_type,
-        slicer.connected_source_ids
+        slicer.connected_sources
     );
 
     let result = slicer.clone();
@@ -171,8 +171,8 @@ pub fn update_slicer(
     if let Some(button_radius) = params.button_radius {
         slicer.button_radius = button_radius.max(0.0).min(20.0);
     }
-    if let Some(connected_source_ids) = params.connected_source_ids {
-        slicer.connected_source_ids = connected_source_ids;
+    if let Some(connected_sources) = params.connected_sources {
+        slicer.connected_sources = connected_sources;
     }
 
     Ok(slicer.clone())
@@ -278,16 +278,19 @@ pub fn get_slicer_items(
     let reference_source_id = slicer.cache_source_id;
 
     // Collect filters from OTHER slicers that share any connected source (cross-filtering).
-    // Two slicers are siblings if they have overlapping connected source IDs.
+    // Two slicers are siblings if they have overlapping connected source IDs
+    // (comparing only connections of the same type as the cache source).
     let slicer_connected: std::collections::HashSet<u64> =
-        slicer.connected_source_ids.iter().copied().collect();
+        slicer.connected_sources.iter()
+            .filter(|c| c.source_type == slicer.source_type)
+            .map(|c| c.source_id)
+            .collect();
     let sibling_filters: Vec<(String, Vec<String>)> = slicers
         .values()
         .filter(|s| {
             s.id != slicer_id
-                && s.source_type == slicer.source_type
                 && s.selected_items.is_some()
-                && s.connected_source_ids.iter().any(|id| slicer_connected.contains(id))
+                && s.connected_sources.iter().any(|c| slicer_connected.contains(&c.source_id))
         })
         .map(|s| (s.field_name.clone(), s.selected_items.clone().unwrap()))
         .collect();

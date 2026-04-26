@@ -449,7 +449,15 @@ fn slicer_to_saved(slicer: &crate::slicer::Slicer) -> persistence::SavedSlicer {
         item_padding: slicer.item_padding,
         button_radius: slicer.button_radius,
         computed_properties: Vec::new(),
-        connected_source_ids: slicer.connected_source_ids.clone(),
+        connected_sources: slicer.connected_sources.iter().map(|c| {
+            persistence::SavedSlicerConnection {
+                source_type: match c.source_type {
+                    crate::slicer::SlicerSourceType::Table => persistence::SavedSlicerSourceType::Table,
+                    crate::slicer::SlicerSourceType::Pivot => persistence::SavedSlicerSourceType::Pivot,
+                },
+                source_id: c.source_id,
+            }
+        }).collect(),
     }
 }
 
@@ -493,7 +501,15 @@ fn saved_to_slicer(saved: &persistence::SavedSlicer) -> crate::slicer::Slicer {
         autogrid: saved.autogrid,
         item_padding: saved.item_padding,
         button_radius: saved.button_radius,
-        connected_source_ids: saved.connected_source_ids.clone(),
+        connected_sources: saved.connected_sources.iter().map(|c| {
+            crate::slicer::SlicerConnection {
+                source_type: match c.source_type {
+                    persistence::SavedSlicerSourceType::Table => crate::slicer::SlicerSourceType::Table,
+                    persistence::SavedSlicerSourceType::Pivot => crate::slicer::SlicerSourceType::Pivot,
+                },
+                source_id: c.source_id,
+            }
+        }).collect(),
     }
 }
 

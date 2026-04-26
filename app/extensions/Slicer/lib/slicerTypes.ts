@@ -3,6 +3,12 @@
 
 export type SlicerSourceType = "table" | "pivot";
 
+/** A typed reference to a pivot or table that a slicer filters. */
+export interface SlicerConnection {
+  sourceType: SlicerSourceType;
+  sourceId: number;
+}
+
 /** Selection behavior mode for a slicer. */
 export type SlicerSelectionMode = "standard" | "single" | "multi";
 
@@ -38,7 +44,7 @@ export interface Slicer {
   autogrid: boolean;
   itemPadding: number;
   buttonRadius: number;
-  connectedSourceIds: number[];
+  connectedSources: SlicerConnection[];
 }
 
 export interface SlicerItem {
@@ -58,8 +64,8 @@ export interface CreateSlicerParams {
   /** The pivot/table ID used as the data source for fetching slicer items. */
   cacheSourceId: number;
   fieldName: string;
-  /** Initial pivot/table IDs this slicer filters (Report Connections). */
-  connectedSourceIds: number[];
+  /** Initial Report Connections (pivots/tables this slicer filters). */
+  connectedSources: SlicerConnection[];
   columns?: number;
   stylePreset?: string;
 }
@@ -82,7 +88,7 @@ export interface UpdateSlicerParams {
   autogrid?: boolean;
   itemPadding?: number;
   buttonRadius?: number;
-  connectedSourceIds?: number[];
+  connectedSources?: SlicerConnection[];
 }
 
 // ============================================================================

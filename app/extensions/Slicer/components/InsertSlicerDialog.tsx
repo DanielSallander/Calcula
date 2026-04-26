@@ -402,7 +402,7 @@ export function InsertSlicerDialog({
           sourceType: selectedSource.type,
           cacheSourceId: selectedSource.id,
           fieldName,
-          connectedSourceIds: [selectedSource.id],
+          connectedSources: [{ sourceType: selectedSource.type, sourceId: selectedSource.id }],
         });
 
         if (!slicer) {

@@ -1,7 +1,7 @@
 //! FILENAME: app/extensions/Slicer/lib/slicerFilterBridge.ts
 // PURPOSE: Bridges slicer selection changes to table/pivot filters.
 
-import type { Slicer } from "./slicerTypes";
+import type { Slicer, SlicerConnection } from "./slicerTypes";
 import { invokeBackend, updateBiPivotFields } from "@api/backend";
 import { emitAppEvent, AppEvents } from "@api";
 
@@ -149,38 +149,38 @@ export async function ensureBiFieldInPivotCache(
  */
 export async function syncReportConnections(
   slicer: Slicer,
-  oldIds: number[],
-  newIds: number[],
+  oldConns: SlicerConnection[],
+  newConns: SlicerConnection[],
 ): Promise<void> {
   try {
-    const oldSet = new Set(oldIds);
-    const newSet = new Set(newIds);
+    const oldKeys = new Set(oldConns.map((c) => `${c.sourceType}:${c.sourceId}`));
+    const newKeys = new Set(newConns.map((c) => `${c.sourceType}:${c.sourceId}`));
 
     // Clear filter on disconnected sources
-    const removed = oldIds.filter((id) => !newSet.has(id));
-    for (const sourceId of removed) {
+    const removed = oldConns.filter((c) => !newKeys.has(`${c.sourceType}:${c.sourceId}`));
+    for (const conn of removed) {
       try {
-        if (slicer.sourceType === "pivot") {
-          await applyPivotFilterForSource(sourceId, slicer.fieldName, null, slicer.sheetIndex);
+        if (conn.sourceType === "pivot") {
+          await applyPivotFilterForSource(conn.sourceId, slicer.fieldName, null, slicer.sheetIndex);
         } else {
-          await applyTableFilterForSource(sourceId, slicer.fieldName, null, slicer.sheetIndex);
+          await applyTableFilterForSource(conn.sourceId, slicer.fieldName, null, slicer.sheetIndex);
         }
       } catch (err) {
-        console.warn("[Slicer] Failed to clear filter on disconnected source", sourceId, err);
+        console.warn("[Slicer] Failed to clear filter on disconnected source", conn, err);
       }
     }
 
     // Apply current filter on newly connected sources
-    const added = newIds.filter((id) => !oldSet.has(id));
-    for (const sourceId of added) {
+    const added = newConns.filter((c) => !oldKeys.has(`${c.sourceType}:${c.sourceId}`));
+    for (const conn of added) {
       try {
-        if (slicer.sourceType === "pivot") {
-          await applyPivotFilterForSource(sourceId, slicer.fieldName, slicer.selectedItems, slicer.sheetIndex);
+        if (conn.sourceType === "pivot") {
+          await applyPivotFilterForSource(conn.sourceId, slicer.fieldName, slicer.selectedItems, slicer.sheetIndex);
         } else {
-          await applyTableFilterForSource(sourceId, slicer.fieldName, slicer.selectedItems, slicer.sheetIndex);
+          await applyTableFilterForSource(conn.sourceId, slicer.fieldName, slicer.selectedItems, slicer.sheetIndex);
         }
       } catch (err) {
-        console.warn("[Slicer] Failed to apply filter on new connection", sourceId, err);
+        console.warn("[Slicer] Failed to apply filter on new connection", conn, err);
       }
     }
 
@@ -194,21 +194,21 @@ export async function syncReportConnections(
 
 export async function applySlicerFilter(slicer: Slicer): Promise<void> {
   try {
-    const connected = slicer.connectedSourceIds ?? [];
+    const connected = slicer.connectedSources ?? [];
 
     // No connections — nothing to filter
     if (connected.length === 0) return;
 
-    // Apply filter to ALL connected sources (all equal, no primary)
-    for (const sourceId of connected) {
+    // Apply filter to ALL connected sources, dispatching by each connection's type
+    for (const conn of connected) {
       try {
-        if (slicer.sourceType === "pivot") {
-          await applyPivotFilterForSource(sourceId, slicer.fieldName, slicer.selectedItems, slicer.sheetIndex);
+        if (conn.sourceType === "pivot") {
+          await applyPivotFilterForSource(conn.sourceId, slicer.fieldName, slicer.selectedItems, slicer.sheetIndex);
         } else {
-          await applyTableFilterForSource(sourceId, slicer.fieldName, slicer.selectedItems, slicer.sheetIndex);
+          await applyTableFilterForSource(conn.sourceId, slicer.fieldName, slicer.selectedItems, slicer.sheetIndex);
         }
       } catch (err) {
-        console.warn("[Slicer] Failed to apply filter to connected source", sourceId, err);
+        console.warn("[Slicer] Failed to apply filter to connected source", conn, err);
       }
     }
 

@@ -8,7 +8,7 @@ import { invokeBackend, getAllPivotTables } from "@api/backend";
 import { getSlicerById, updateSlicerAsync } from "../lib/slicerStore";
 import { broadcastSelectedSlicers } from "../handlers/selectionHandler";
 import { syncReportConnections } from "../lib/slicerFilterBridge";
-import type { Slicer, SlicerSourceType } from "../lib/slicerTypes";
+import type { Slicer, SlicerSourceType, SlicerConnection } from "../lib/slicerTypes";
 
 // ============================================================================
 // Types
@@ -34,9 +34,12 @@ export function SlicerConnectionsDialog({
 
   const [slicer, setSlicer] = useState<Slicer | null>(null);
   const [targets, setTargets] = useState<ConnectionTarget[]>([]);
-  const [connectedIds, setConnectedIds] = useState<Set<number>>(new Set());
+  /** Set of "pivot:1" or "table:3" keys for currently checked connections. */
+  const [connectedKeys, setConnectedKeys] = useState<Set<string>>(new Set());
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  const connKey = (type: SlicerSourceType, id: number) => `${type}:${id}`;
 
   // Load slicer and compatible targets when dialog opens
   useEffect(() => {
@@ -49,7 +52,9 @@ export function SlicerConnectionsDialog({
       return;
     }
     setSlicer(s);
-    setConnectedIds(new Set(s.connectedSourceIds ?? []));
+    setConnectedKeys(
+      new Set((s.connectedSources ?? []).map((c) => connKey(c.sourceType, c.sourceId))),
+    );
     loadTargets(s);
   }, [isOpen, slicerId]);
 
@@ -58,8 +63,8 @@ export function SlicerConnectionsDialog({
     try {
       const allTargets: ConnectionTarget[] = [];
 
-      if (s.sourceType === "pivot") {
-        // Load all pivot tables and check which have the same field
+      // Always load all pivot tables
+      try {
         const pivots = await getAllPivotTables<
           Array<{ id: number; name: string; sourceRange: string }>
         >();
@@ -70,7 +75,6 @@ export function SlicerConnectionsDialog({
             const info = await invokeBackend<{
               hierarchies: Array<{ index: number; name: string }>;
             }>("get_pivot_hierarchies", { pivotId: pv.id });
-            // Match exact name or "table.column" → "column" fallback
             hasField = info.hierarchies.some((h) => {
               if (h.name === s.fieldName) return true;
               if (s.fieldName.includes(".")) {
@@ -90,35 +94,38 @@ export function SlicerConnectionsDialog({
             hasField,
           });
         }
-      } else {
-        // For table slicers: load all tables and check field compatibility
-        try {
-          const tables = await invokeBackend<
-            Array<{
-              id: number;
-              name: string;
-              sheetIndex: number;
-              columns: Array<{ name: string }>;
-            }>
-          >("get_all_tables", {});
-
-          for (const t of tables) {
-            const hasField = t.columns.some((c) => c.name === s.fieldName);
-            allTargets.push({
-              type: "table",
-              id: t.id,
-              name: t.name,
-              hasField,
-            });
-          }
-        } catch {
-          // No tables available
-        }
+      } catch {
+        // No pivots available
       }
 
-      // Sort: compatible (hasField) first, then by name
+      // Always load all tables
+      try {
+        const tables = await invokeBackend<
+          Array<{
+            id: number;
+            name: string;
+            sheetIndex: number;
+            columns: Array<{ name: string }>;
+          }>
+        >("get_all_tables", {});
+
+        for (const t of tables) {
+          const hasField = t.columns.some((c) => c.name === s.fieldName);
+          allTargets.push({
+            type: "table",
+            id: t.id,
+            name: t.name,
+            hasField,
+          });
+        }
+      } catch {
+        // No tables available
+      }
+
+      // Sort: compatible (hasField) first, then by type (pivots first), then by name
       allTargets.sort((a, b) => {
         if (a.hasField !== b.hasField) return a.hasField ? -1 : 1;
+        if (a.type !== b.type) return a.type === "pivot" ? -1 : 1;
         return a.name.localeCompare(b.name);
       });
 
@@ -131,13 +138,14 @@ export function SlicerConnectionsDialog({
     }
   };
 
-  const handleToggle = (targetId: number) => {
-    setConnectedIds((prev) => {
+  const handleToggle = (type: SlicerSourceType, id: number) => {
+    const key = connKey(type, id);
+    setConnectedKeys((prev) => {
       const next = new Set(prev);
-      if (next.has(targetId)) {
-        next.delete(targetId);
+      if (next.has(key)) {
+        next.delete(key);
       } else {
-        next.add(targetId);
+        next.add(key);
       }
       return next;
     });
@@ -148,19 +156,25 @@ export function SlicerConnectionsDialog({
     onClose();
   }, [onClose]);
 
+  const buildConnections = (): SlicerConnection[] =>
+    Array.from(connectedKeys).map((key) => {
+      const [type, id] = key.split(":");
+      return { sourceType: type as SlicerSourceType, sourceId: Number(id) };
+    });
+
   const handleOk = async () => {
     if (!slicer) return;
 
     try {
-      const oldIds = slicer.connectedSourceIds ?? [];
-      const newIds = Array.from(connectedIds);
+      const oldConns = slicer.connectedSources ?? [];
+      const newConns = buildConnections();
 
       await updateSlicerAsync(slicer.id, {
-        connectedSourceIds: newIds,
+        connectedSources: newConns,
       });
 
-      // Clear filters on removed pivots, apply on newly added ones
-      await syncReportConnections(slicer, oldIds, newIds);
+      // Clear filters on removed connections, apply on newly added ones
+      await syncReportConnections(slicer, oldConns, newConns);
 
       broadcastSelectedSlicers();
       handleClose();
@@ -175,8 +189,6 @@ export function SlicerConnectionsDialog({
   };
 
   if (!isOpen) return null;
-
-  const sourceLabel = slicer?.sourceType === "pivot" ? "PivotTable" : "Table";
 
   return (
     <div style={s.overlay} onClick={handleClose}>
@@ -211,14 +223,14 @@ export function SlicerConnectionsDialog({
           <div style={s.separator} />
 
           <div style={s.sectionLabel}>
-            Select {sourceLabel}s to connect to this slicer:
+            Select PivotTables or Tables to connect to this slicer:
           </div>
 
           {isLoading ? (
             <div style={s.loadingText}>Loading data sources...</div>
           ) : targets.length === 0 ? (
             <div style={s.emptyText}>
-              No {sourceLabel}s found in this workbook.
+              No PivotTables or Tables found in this workbook.
             </div>
           ) : (
             <div style={s.targetList}>
@@ -237,8 +249,8 @@ export function SlicerConnectionsDialog({
                 >
                   <input
                     type="checkbox"
-                    checked={connectedIds.has(target.id)}
-                    onChange={() => handleToggle(target.id)}
+                    checked={connectedKeys.has(connKey(target.type, target.id))}
+                    onChange={() => handleToggle(target.type, target.id)}
                     disabled={!target.hasField}
                     style={s.checkbox}
                   />

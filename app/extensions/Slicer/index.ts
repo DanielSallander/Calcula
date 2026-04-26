@@ -421,12 +421,15 @@ function activate(context: ExtensionContext): void {
         // Cross-slicer filtering: refresh items for sibling slicers
         // (same source) so they show updated has_data state.
         // Siblings are slicers that share at least one connected source
-        const slicerConnected = new Set(slicer.connectedSourceIds ?? []);
+        const slicerConnectedKeys = new Set(
+          (slicer.connectedSources ?? []).map((c) => `${c.sourceType}:${c.sourceId}`),
+        );
         const siblings = getAllSlicers().filter(
           (s) =>
             s.id !== slicerId &&
-            s.sourceType === slicer.sourceType &&
-            (s.connectedSourceIds ?? []).some((id) => slicerConnected.has(id)),
+            (s.connectedSources ?? []).some((c) =>
+              slicerConnectedKeys.has(`${c.sourceType}:${c.sourceId}`),
+            ),
         );
         return Promise.all(
           siblings.map((s) => refreshSlicerItems(s.id)),

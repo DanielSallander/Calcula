@@ -57,6 +57,18 @@ impl Default for SlicerArrangement {
 }
 
 // ============================================================================
+// SLICER CONNECTION
+// ============================================================================
+
+/// A typed reference to a pivot or table that a slicer filters (Report Connection).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SlicerConnection {
+    pub source_type: SlicerSourceType,
+    pub source_id: u64,
+}
+
+// ============================================================================
 // SLICER DEFINITION
 // ============================================================================
 
@@ -132,10 +144,9 @@ pub struct Slicer {
     /// Corner radius for item buttons in pixels (default: 2)
     #[serde(default = "default_button_radius")]
     pub button_radius: f64,
-    /// All source IDs (table or pivot IDs) that this slicer filters.
-    /// For item fetching, the first entry is used as the reference data source.
+    /// Report Connections: pivots/tables that this slicer filters.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub connected_source_ids: Vec<u64>,
+    pub connected_sources: Vec<SlicerConnection>,
 }
 
 fn default_true() -> bool {
@@ -184,9 +195,9 @@ pub struct CreateSlicerParams {
     /// The pivot/table ID used as the data source for fetching slicer items.
     pub cache_source_id: u64,
     pub field_name: String,
-    /// Initial pivot/table IDs this slicer filters (Report Connections).
+    /// Initial Report Connections (pivots/tables this slicer filters).
     #[serde(default)]
-    pub connected_source_ids: Vec<u64>,
+    pub connected_sources: Vec<SlicerConnection>,
     pub columns: Option<u32>,
     pub style_preset: Option<String>,
 }
@@ -212,7 +223,7 @@ pub struct UpdateSlicerParams {
     pub autogrid: Option<bool>,
     pub item_padding: Option<f64>,
     pub button_radius: Option<f64>,
-    pub connected_source_ids: Option<Vec<u64>>,
+    pub connected_sources: Option<Vec<SlicerConnection>>,
 }
 
 // ============================================================================

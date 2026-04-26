@@ -512,6 +512,13 @@ pub enum SavedSlicerSourceType {
     Pivot,
 }
 
+/// A typed reference to a pivot or table that a slicer filters (Report Connection).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SavedSlicerConnection {
+    pub source_type: SavedSlicerSourceType,
+    pub source_id: u64,
+}
+
 /// Serializable slicer selection mode
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum SavedSlicerSelectionMode {
@@ -593,9 +600,9 @@ pub struct SavedSlicer {
     /// Computed properties (formula-driven attributes)
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub computed_properties: Vec<SavedSlicerComputedProperty>,
-    /// All source IDs (table or pivot IDs) that this slicer filters.
+    /// Report Connections: pivots/tables that this slicer filters.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub connected_source_ids: Vec<u64>,
+    pub connected_sources: Vec<SavedSlicerConnection>,
 }
 
 /// A saved slicer computed property (formula-driven attribute).

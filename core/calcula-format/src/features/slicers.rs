@@ -2,7 +2,7 @@
 //! Slicer definitions serialization.
 //! Each slicer is stored as slicers/slicer_{id}.json.
 
-use persistence::{SavedSlicer, SavedSlicerSourceType, SavedSlicerSelectionMode, SavedSlicerArrangement, SavedSlicerComputedProperty};
+use persistence::{SavedSlicer, SavedSlicerSourceType, SavedSlicerSelectionMode, SavedSlicerArrangement, SavedSlicerComputedProperty, SavedSlicerConnection};
 use serde::{Deserialize, Serialize};
 
 /// JSON-friendly slicer definition that uses camelCase for the .cala format.
@@ -53,9 +53,17 @@ pub struct SlicerDef {
     /// Computed properties (formula-driven attributes)
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub computed_properties: Vec<SlicerComputedPropertyDef>,
-    /// All source IDs (table or pivot IDs) that this slicer filters.
+    /// Report Connections: pivots/tables that this slicer filters.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub connected_source_ids: Vec<u64>,
+    pub connected_sources: Vec<SlicerConnectionDef>,
+}
+
+/// JSON-friendly slicer connection (Report Connection) for the .cala format.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SlicerConnectionDef {
+    pub source_type: String,
+    pub source_id: u64,
 }
 
 /// JSON-friendly computed property definition for the .cala format.
@@ -135,7 +143,15 @@ impl From<&SavedSlicer> for SlicerDef {
                     formula: cp.formula.clone(),
                 }
             }).collect(),
-            connected_source_ids: s.connected_source_ids.clone(),
+            connected_sources: s.connected_sources.iter().map(|c| {
+                SlicerConnectionDef {
+                    source_type: match c.source_type {
+                        SavedSlicerSourceType::Table => "table".to_string(),
+                        SavedSlicerSourceType::Pivot => "pivot".to_string(),
+                    },
+                    source_id: c.source_id,
+                }
+            }).collect(),
         }
     }
 }
@@ -188,7 +204,15 @@ impl From<&SlicerDef> for SavedSlicer {
                     formula: cp.formula.clone(),
                 }
             }).collect(),
-            connected_source_ids: s.connected_source_ids.clone(),
+            connected_sources: s.connected_sources.iter().map(|c| {
+                SavedSlicerConnection {
+                    source_type: match c.source_type.as_str() {
+                        "pivot" => SavedSlicerSourceType::Pivot,
+                        _ => SavedSlicerSourceType::Table,
+                    },
+                    source_id: c.source_id,
+                }
+            }).collect(),
         }
     }
 }
