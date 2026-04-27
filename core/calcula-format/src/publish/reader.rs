@@ -211,6 +211,7 @@ mod tests {
             properties: persistence::WorkbookProperties::default(),
             charts: Vec::new(),
             named_ranges: Vec::new(),
+            ribbon_filters: Vec::new(),
         }
     }
 

@@ -4,5 +4,6 @@
 
 pub mod tables;
 pub mod slicers;
+pub mod ribbon_filters;
 pub mod scripts;
 pub mod notebooks;

@@ -109,6 +109,7 @@ impl From<&SavedSlicer> for SlicerDef {
             source_type: match s.source_type {
                 SavedSlicerSourceType::Table => "table".to_string(),
                 SavedSlicerSourceType::Pivot => "pivot".to_string(),
+                SavedSlicerSourceType::BiConnection => "biConnection".to_string(),
             },
             cache_source_id: s.cache_source_id,
             field_name: s.field_name.clone(),
@@ -148,6 +149,7 @@ impl From<&SavedSlicer> for SlicerDef {
                     source_type: match c.source_type {
                         SavedSlicerSourceType::Table => "table".to_string(),
                         SavedSlicerSourceType::Pivot => "pivot".to_string(),
+                        SavedSlicerSourceType::BiConnection => "biConnection".to_string(),
                     },
                     source_id: c.source_id,
                 }
@@ -169,6 +171,7 @@ impl From<&SlicerDef> for SavedSlicer {
             height: s.height,
             source_type: match s.source_type.as_str() {
                 "pivot" => SavedSlicerSourceType::Pivot,
+                "biConnection" => SavedSlicerSourceType::BiConnection,
                 _ => SavedSlicerSourceType::Table,
             },
             cache_source_id: s.cache_source_id,

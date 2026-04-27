@@ -1,9 +1,10 @@
-//! FILENAME: app/src-tauri/src/slicer/commands.rs
-//! PURPOSE: Tauri commands for slicer CRUD and item retrieval.
-//! CONTEXT: Manages slicer state and bridges to table/pivot data sources.
+//! FILENAME: app/src-tauri/src/ribbon_filter/commands.rs
+//! PURPOSE: Tauri commands for ribbon filter CRUD and item retrieval.
+//! CONTEXT: Manages ribbon filter state and bridges to table/pivot data sources.
 
 use crate::pivot::PivotState;
-use crate::slicer::types::*;
+use crate::ribbon_filter::types::*;
+use crate::slicer::types::{SlicerItem, SlicerSourceType};
 use crate::{format_cell_value, AppState};
 use pivot_engine::PivotId;
 use std::collections::HashMap;
@@ -15,211 +16,135 @@ use crate::log_debug;
 // CRUD COMMANDS
 // ============================================================================
 
-/// Create a new slicer.
+/// Create a new ribbon filter.
 #[tauri::command]
-pub fn create_slicer(
-    slicer_state: State<SlicerState>,
-    params: CreateSlicerParams,
-) -> Result<Slicer, String> {
-    let mut next_id = slicer_state.next_id.lock().unwrap();
+pub fn create_ribbon_filter(
+    ribbon_filter_state: State<RibbonFilterState>,
+    params: CreateRibbonFilterParams,
+) -> Result<RibbonFilter, String> {
+    let mut next_id = ribbon_filter_state.next_id.lock().unwrap();
     let id = *next_id;
     *next_id += 1;
 
-    let slicer = Slicer {
+    let filter = RibbonFilter {
         id,
         name: params.name,
-        header_text: None,
+        scope: params.scope,
         sheet_index: params.sheet_index,
-        x: params.x,
-        y: params.y,
-        width: params.width.unwrap_or(180.0),
-        height: params.height.unwrap_or(240.0),
         source_type: params.source_type,
         cache_source_id: params.cache_source_id,
         field_name: params.field_name,
-        selected_items: None, // All selected by default
-        show_header: true,
-        columns: params.columns.unwrap_or(1),
-        style_preset: params.style_preset.unwrap_or_else(|| "SlicerStyleLight1".to_string()),
-        selection_mode: SlicerSelectionMode::default(),
-        hide_no_data: false,
-        indicate_no_data: true,
-        sort_no_data_last: true,
-        force_selection: false,
-        show_select_all: false,
-        arrangement: SlicerArrangement::default(),
-        rows: 0,
-        item_gap: 4.0,
-        autogrid: true,
-        item_padding: 0.0,
-        button_radius: 2.0,
         connected_sources: params.connected_sources,
+        display_mode: params.display_mode.unwrap_or_default(),
+        selected_items: None,
+        cross_filter_enabled: true,
+        collapsed: false,
+        order: params.order.unwrap_or(0),
+        button_columns: 2,
+        button_rows: 0,
     };
 
     log_debug!(
-        "SLICER",
-        "create_slicer id={} name={} source={:?} connected={:?}",
+        "RIBBON_FILTER",
+        "create_ribbon_filter id={} name={} scope={:?} field={}",
         id,
-        slicer.name,
-        slicer.source_type,
-        slicer.connected_sources
+        filter.name,
+        filter.scope,
+        filter.field_name
     );
 
-    let result = slicer.clone();
-    slicer_state.slicers.lock().unwrap().insert(id, slicer);
+    let result = filter.clone();
+    ribbon_filter_state.filters.lock().unwrap().insert(id, filter);
 
     Ok(result)
 }
 
-/// Delete a slicer.
+/// Delete a ribbon filter.
 #[tauri::command]
-pub fn delete_slicer(
-    slicer_state: State<SlicerState>,
-    slicer_id: u64,
+pub fn delete_ribbon_filter(
+    ribbon_filter_state: State<RibbonFilterState>,
+    filter_id: u64,
 ) -> Result<(), String> {
-    log_debug!("SLICER", "delete_slicer id={}", slicer_id);
+    log_debug!("RIBBON_FILTER", "delete_ribbon_filter id={}", filter_id);
 
-    let mut slicers = slicer_state.slicers.lock().unwrap();
-    slicers
-        .remove(&slicer_id)
-        .ok_or_else(|| format!("Slicer {} not found", slicer_id))?;
-
-    // Clean up computed properties for this slicer
-    let mut computed_props = slicer_state.computed_properties.lock().unwrap();
-    if let Some(props) = computed_props.remove(&slicer_id) {
-        let mut deps = slicer_state.computed_prop_dependencies.lock().unwrap();
-        let mut rev_deps = slicer_state.computed_prop_dependents.lock().unwrap();
-        for prop in &props {
-            if let Some(old_cells) = deps.remove(&prop.id) {
-                for cell in &old_cells {
-                    if let Some(prop_set) = rev_deps.get_mut(cell) {
-                        prop_set.remove(&prop.id);
-                        if prop_set.is_empty() {
-                            rev_deps.remove(cell);
-                        }
-                    }
-                }
-            }
-        }
-    }
+    ribbon_filter_state
+        .filters
+        .lock()
+        .unwrap()
+        .remove(&filter_id)
+        .ok_or_else(|| format!("Ribbon filter {} not found", filter_id))?;
 
     Ok(())
 }
 
-/// Update slicer properties (name, header, columns, style).
+/// Update ribbon filter properties.
 #[tauri::command]
-pub fn update_slicer(
-    slicer_state: State<SlicerState>,
-    slicer_id: u64,
-    params: UpdateSlicerParams,
-) -> Result<Slicer, String> {
-    log_debug!("SLICER", "update_slicer id={}", slicer_id);
+pub fn update_ribbon_filter(
+    ribbon_filter_state: State<RibbonFilterState>,
+    filter_id: u64,
+    params: UpdateRibbonFilterParams,
+) -> Result<RibbonFilter, String> {
+    log_debug!("RIBBON_FILTER", "update_ribbon_filter id={}", filter_id);
 
-    let mut slicers = slicer_state.slicers.lock().unwrap();
-    let slicer = slicers
-        .get_mut(&slicer_id)
-        .ok_or_else(|| format!("Slicer {} not found", slicer_id))?;
+    let mut filters = ribbon_filter_state.filters.lock().unwrap();
+    let filter = filters
+        .get_mut(&filter_id)
+        .ok_or_else(|| format!("Ribbon filter {} not found", filter_id))?;
 
     if let Some(name) = params.name {
-        slicer.name = name;
+        filter.name = name;
     }
-    if let Some(header_text) = params.header_text {
-        slicer.header_text = header_text;
+    if let Some(scope) = params.scope {
+        filter.scope = scope;
     }
-    if let Some(show_header) = params.show_header {
-        slicer.show_header = show_header;
+    if let Some(sheet_index) = params.sheet_index {
+        filter.sheet_index = sheet_index;
     }
-    if let Some(columns) = params.columns {
-        slicer.columns = columns.clamp(1, 20);
+    if let Some(display_mode) = params.display_mode {
+        filter.display_mode = display_mode;
     }
-    if let Some(style_preset) = params.style_preset {
-        slicer.style_preset = style_preset;
+    if let Some(collapsed) = params.collapsed {
+        filter.collapsed = collapsed;
     }
-    if let Some(selection_mode) = params.selection_mode {
-        slicer.selection_mode = selection_mode;
+    if let Some(order) = params.order {
+        filter.order = order;
     }
-    if let Some(hide_no_data) = params.hide_no_data {
-        slicer.hide_no_data = hide_no_data;
+    if let Some(button_columns) = params.button_columns {
+        filter.button_columns = button_columns.clamp(1, 10);
     }
-    if let Some(indicate_no_data) = params.indicate_no_data {
-        slicer.indicate_no_data = indicate_no_data;
+    if let Some(button_rows) = params.button_rows {
+        filter.button_rows = button_rows;
     }
-    if let Some(sort_no_data_last) = params.sort_no_data_last {
-        slicer.sort_no_data_last = sort_no_data_last;
-    }
-    if let Some(force_selection) = params.force_selection {
-        slicer.force_selection = force_selection;
-    }
-    if let Some(show_select_all) = params.show_select_all {
-        slicer.show_select_all = show_select_all;
-    }
-    if let Some(arrangement) = params.arrangement {
-        slicer.arrangement = arrangement;
-    }
-    if let Some(rows) = params.rows {
-        slicer.rows = rows;
-    }
-    if let Some(item_gap) = params.item_gap {
-        slicer.item_gap = item_gap.max(0.0).min(50.0);
-    }
-    if let Some(autogrid) = params.autogrid {
-        slicer.autogrid = autogrid;
-    }
-    if let Some(item_padding) = params.item_padding {
-        slicer.item_padding = item_padding.max(0.0).min(30.0);
-    }
-    if let Some(button_radius) = params.button_radius {
-        slicer.button_radius = button_radius.max(0.0).min(20.0);
+    if let Some(cross_filter_enabled) = params.cross_filter_enabled {
+        filter.cross_filter_enabled = cross_filter_enabled;
     }
     if let Some(connected_sources) = params.connected_sources {
-        slicer.connected_sources = connected_sources;
+        filter.connected_sources = connected_sources;
     }
 
-    Ok(slicer.clone())
+    Ok(filter.clone())
 }
 
-/// Update slicer position and size (called after drag/resize).
+/// Update ribbon filter selection (which items are checked).
 #[tauri::command]
-pub fn update_slicer_position(
-    slicer_state: State<SlicerState>,
-    slicer_id: u64,
-    x: f64,
-    y: f64,
-    width: f64,
-    height: f64,
-) -> Result<(), String> {
-    let mut slicers = slicer_state.slicers.lock().unwrap();
-    let slicer = slicers
-        .get_mut(&slicer_id)
-        .ok_or_else(|| format!("Slicer {} not found", slicer_id))?;
-
-    slicer.x = x;
-    slicer.y = y;
-    slicer.width = width;
-    slicer.height = height;
-    Ok(())
-}
-
-/// Update slicer selection (which items are checked).
-#[tauri::command]
-pub fn update_slicer_selection(
-    slicer_state: State<SlicerState>,
-    slicer_id: u64,
+pub fn update_ribbon_filter_selection(
+    ribbon_filter_state: State<RibbonFilterState>,
+    filter_id: u64,
     selected_items: Option<Vec<String>>,
 ) -> Result<(), String> {
     log_debug!(
-        "SLICER",
-        "update_slicer_selection id={} items={:?}",
-        slicer_id,
+        "RIBBON_FILTER",
+        "update_ribbon_filter_selection id={} items={:?}",
+        filter_id,
         selected_items.as_ref().map(|v| v.len())
     );
 
-    let mut slicers = slicer_state.slicers.lock().unwrap();
-    let slicer = slicers
-        .get_mut(&slicer_id)
-        .ok_or_else(|| format!("Slicer {} not found", slicer_id))?;
+    let mut filters = ribbon_filter_state.filters.lock().unwrap();
+    let filter = filters
+        .get_mut(&filter_id)
+        .ok_or_else(|| format!("Ribbon filter {} not found", filter_id))?;
 
-    slicer.selected_items = selected_items;
+    filter.selected_items = selected_items;
     Ok(())
 }
 
@@ -227,13 +152,13 @@ pub fn update_slicer_selection(
 // QUERY COMMANDS
 // ============================================================================
 
-/// Get all slicers.
+/// Get all ribbon filters.
 #[tauri::command]
-pub fn get_all_slicers(
-    slicer_state: State<SlicerState>,
-) -> Vec<Slicer> {
-    slicer_state
-        .slicers
+pub fn get_all_ribbon_filters(
+    ribbon_filter_state: State<RibbonFilterState>,
+) -> Vec<RibbonFilter> {
+    ribbon_filter_state
+        .filters
         .lock()
         .unwrap()
         .values()
@@ -241,79 +166,95 @@ pub fn get_all_slicers(
         .collect()
 }
 
-/// Get slicers for a specific sheet.
+/// Get ribbon filters by scope (workbook or sheet).
 #[tauri::command]
-pub fn get_slicers_for_sheet(
-    slicer_state: State<SlicerState>,
-    sheet_index: usize,
-) -> Vec<Slicer> {
-    slicer_state
-        .slicers
+pub fn get_ribbon_filters_by_scope(
+    ribbon_filter_state: State<RibbonFilterState>,
+    scope: RibbonFilterScope,
+    sheet_index: Option<usize>,
+) -> Vec<RibbonFilter> {
+    ribbon_filter_state
+        .filters
         .lock()
         .unwrap()
         .values()
-        .filter(|s| s.sheet_index == sheet_index)
+        .filter(|f| {
+            f.scope == scope
+                && (scope == RibbonFilterScope::Workbook || f.sheet_index == sheet_index)
+        })
         .cloned()
         .collect()
 }
 
-/// Get the unique items for a slicer (reads from the data source).
+/// Get the unique items for a ribbon filter (reads from the data source).
 /// Returns items with their selection state and data availability.
-/// Cross-slicer filtering: checks other slicers on the same source to
-/// determine which items still have matching data.
+/// Cross-filtering: checks sibling ribbon filters and canvas slicers that share
+/// connected sources to determine which items still have matching data.
 #[tauri::command]
-pub fn get_slicer_items(
+pub fn get_ribbon_filter_items(
     state: State<AppState>,
     pivot_state: State<'_, PivotState>,
-    slicer_state: State<SlicerState>,
-    slicer_id: u64,
+    slicer_state: State<crate::slicer::SlicerState>,
+    ribbon_filter_state: State<RibbonFilterState>,
+    filter_id: u64,
 ) -> Result<Vec<SlicerItem>, String> {
-    let slicers = slicer_state.slicers.lock().unwrap();
-    let slicer = slicers
-        .get(&slicer_id)
-        .ok_or_else(|| format!("Slicer {} not found", slicer_id))?;
+    let filters = ribbon_filter_state.filters.lock().unwrap();
+    let filter = filters
+        .get(&filter_id)
+        .ok_or_else(|| format!("Ribbon filter {} not found", filter_id))?;
 
-    // Items always come from the cache source (the data model), regardless of
-    // which pivots the slicer filters via Report Connections.
-    let reference_source_id = slicer.cache_source_id;
+    let reference_source_id = filter.cache_source_id;
 
-    // Collect filters from OTHER slicers that share any connected source (cross-filtering).
-    // Two slicers are siblings if they have overlapping connected source IDs
-    // (comparing only connections of the same type as the cache source).
-    let slicer_connected: std::collections::HashSet<u64> =
-        slicer.connected_sources.iter()
-            .filter(|c| c.source_type == slicer.source_type)
+    // Collect cross-filters from sibling ribbon filters
+    let filter_connected: std::collections::HashSet<u64> =
+        filter.connected_sources.iter()
+            .filter(|c| c.source_type == filter.source_type)
             .map(|c| c.source_id)
             .collect();
-    let sibling_filters: Vec<(String, Vec<String>)> = slicers
+
+    let mut sibling_filters: Vec<(String, Vec<String>)> = filters
         .values()
-        .filter(|s| {
-            s.id != slicer_id
-                && s.selected_items.is_some()
-                && s.connected_sources.iter().any(|c| slicer_connected.contains(&c.source_id))
+        .filter(|f| {
+            f.id != filter_id
+                && f.selected_items.is_some()
+                && f.connected_sources.iter().any(|c| filter_connected.contains(&c.source_id))
         })
-        .map(|s| (s.field_name.clone(), s.selected_items.clone().unwrap()))
+        .map(|f| (f.field_name.clone(), f.selected_items.clone().unwrap()))
         .collect();
 
-    let unique_values = match slicer.source_type {
-        SlicerSourceType::Table => get_table_column_values(&state, reference_source_id, &slicer.field_name)?,
-        SlicerSourceType::Pivot => get_pivot_field_values(&pivot_state, reference_source_id, &slicer.field_name)?,
+    // Also collect cross-filters from canvas slicers (if cross_filter_enabled)
+    if filter.cross_filter_enabled {
+        let slicers = slicer_state.slicers.lock().unwrap();
+        let slicer_siblings: Vec<(String, Vec<String>)> = slicers
+            .values()
+            .filter(|s| {
+                s.selected_items.is_some()
+                    && s.connected_sources.iter().any(|c| filter_connected.contains(&c.source_id))
+            })
+            .map(|s| (s.field_name.clone(), s.selected_items.clone().unwrap()))
+            .collect();
+        sibling_filters.extend(slicer_siblings);
+    }
+
+    let unique_values = match filter.source_type {
+        SlicerSourceType::Table => get_table_column_values(&state, reference_source_id, &filter.field_name)?,
+        SlicerSourceType::Pivot => get_pivot_field_values(&pivot_state, reference_source_id, &filter.field_name)?,
         SlicerSourceType::BiConnection => {
             // BI connection items are fetched async via bi_get_column_values on the frontend
             return Err("BiConnection source: use bi_get_column_values instead".to_string());
         }
     };
 
-    // Compute has_data by checking cross-slicer filters
+    // Compute has_data by checking cross-filter state
     let has_data_set = if sibling_filters.is_empty() {
-        None // No cross-filtering needed, all items have data
+        None
     } else {
-        match slicer.source_type {
+        match filter.source_type {
             SlicerSourceType::Table => {
-                Some(get_table_available_values(&state, reference_source_id, &slicer.field_name, &sibling_filters)?)
+                Some(get_table_available_values(&state, reference_source_id, &filter.field_name, &sibling_filters)?)
             }
             SlicerSourceType::Pivot => {
-                Some(get_pivot_available_values(&pivot_state, reference_source_id, &slicer.field_name, &sibling_filters)?)
+                Some(get_pivot_available_values(&pivot_state, reference_source_id, &filter.field_name, &sibling_filters)?)
             }
             SlicerSourceType::BiConnection => {
                 return Err("BiConnection source: use bi_get_column_available_values instead".to_string());
@@ -322,10 +263,10 @@ pub fn get_slicer_items(
     };
 
     // Build items with selection state and data availability
-    let mut items: Vec<SlicerItem> = unique_values
+    let items: Vec<SlicerItem> = unique_values
         .into_iter()
         .map(|value| {
-            let selected = match &slicer.selected_items {
+            let selected = match &filter.selected_items {
                 None => true,
                 Some(selected) => selected.contains(&value),
             };
@@ -341,31 +282,19 @@ pub fn get_slicer_items(
         })
         .collect();
 
-    // Apply display settings
-    if slicer.hide_no_data {
-        items.retain(|item| item.has_data);
-    } else if slicer.sort_no_data_last {
-        // Stable sort: items with data first, then items without data
-        items.sort_by_key(|item| !item.has_data);
-    }
-
     Ok(items)
 }
 
 // ============================================================================
-// INTERNAL HELPERS
+// INTERNAL HELPERS (shared with slicer — will be extracted to filter_common in Phase 3)
 // ============================================================================
 
-/// Match a slicer field name against a cache field name.
-/// Handles "table.column" format: if the slicer field name contains a dot,
-/// the cache field name is matched against the part after the last dot.
-fn field_name_matches(cache_name: &str, slicer_name: &str) -> bool {
-    if cache_name == slicer_name {
+/// Match a filter field name against a cache field name.
+fn field_name_matches(cache_name: &str, filter_name: &str) -> bool {
+    if cache_name == filter_name {
         return true;
     }
-    // For BI pivots, slicer field name may be "table.column" while
-    // cache field name is just "column" (from Arrow schema)
-    if let Some(col_part) = slicer_name.rsplit('.').next() {
+    if let Some(col_part) = filter_name.rsplit('.').next() {
         if cache_name == col_part {
             return true;
         }
@@ -380,14 +309,12 @@ fn get_table_column_values(state: &State<AppState>, source_id: u64, field_name: 
     let style_registry = state.style_registry.lock().unwrap();
     let locale = state.locale.lock().unwrap();
 
-    // Find the table
     let table = tables
         .values()
         .flat_map(|sheet_tables| sheet_tables.values())
         .find(|t| t.id == source_id)
         .ok_or_else(|| format!("Table {} not found", source_id))?;
 
-    // Find the column index by name
     let col_offset = table
         .columns
         .iter()
@@ -424,8 +351,7 @@ fn get_table_column_values(state: &State<AppState>, source_id: u64, field_name: 
     Ok(values)
 }
 
-/// Get values from a table column that still have data given cross-slicer filters.
-/// Scans the table rows and checks each row against filters from sibling slicers.
+/// Get values from a table column that still have data given cross-filter state.
 fn get_table_available_values(
     state: &State<AppState>,
     source_id: u64,
@@ -443,7 +369,6 @@ fn get_table_available_values(
         .find(|t| t.id == source_id)
         .ok_or_else(|| format!("Table {} not found", source_id))?;
 
-    // Find the target column index
     let target_col_offset = table
         .columns
         .iter()
@@ -451,7 +376,6 @@ fn get_table_available_values(
         .ok_or_else(|| format!("Column '{}' not found", field_name))?;
     let target_abs_col = table.start_col + target_col_offset as u32;
 
-    // Resolve sibling filter column indices
     let filter_cols: Vec<(u32, &Vec<String>)> = sibling_filters
         .iter()
         .filter_map(|(field_name, allowed)| {
@@ -477,7 +401,6 @@ fn get_table_available_values(
     let mut available = std::collections::HashSet::new();
 
     for row in data_start_row..=table.end_row {
-        // Check if this row passes all sibling filters
         let passes = filter_cols.iter().all(|(col, allowed)| {
             let value = if let Some(cell) = grid.cells.get(&(row, *col)) {
                 let style = style_registry.get(cell.style_index);
@@ -489,7 +412,6 @@ fn get_table_available_values(
         });
 
         if passes {
-            // This row passes all sibling filters — record the target column value
             let value = if let Some(cell) = grid.cells.get(&(row, target_abs_col)) {
                 let style = style_registry.get(cell.style_index);
                 format_cell_value(&cell.value, style, &locale)
@@ -519,8 +441,6 @@ fn get_pivot_field_values(
         .get_mut(&pivot_id)
         .ok_or_else(|| format!("Pivot table {} not found", pivot_id))?;
 
-    // Find the field index by name in the cache
-    // Supports both "column" and "table.column" format
     let field_index = cache
         .fields
         .iter()
@@ -539,27 +459,20 @@ fn get_pivot_field_values(
             if id == VALUE_ID_EMPTY {
                 return None;
             }
-            field.get_value(id).map(|value| {
-                // Convert pivot cache value to string
-                match value {
-                    pivot_engine::CacheValue::Number(n) => {
-                        if n.0.fract() == 0.0 {
-                            format!("{}", n.0 as i64)
-                        } else {
-                            format!("{}", n.0)
-                        }
+            field.get_value(id).map(|value| match value {
+                pivot_engine::CacheValue::Number(n) => {
+                    if n.0.fract() == 0.0 {
+                        format!("{}", n.0 as i64)
+                    } else {
+                        format!("{}", n.0)
                     }
-                    pivot_engine::CacheValue::Text(s) => s.to_string(),
-                    pivot_engine::CacheValue::Boolean(b) => {
-                        if *b {
-                            "TRUE".to_string()
-                        } else {
-                            "FALSE".to_string()
-                        }
-                    }
-                    pivot_engine::CacheValue::Error(e) => e.to_string(),
-                    pivot_engine::CacheValue::Empty => String::new(),
                 }
+                pivot_engine::CacheValue::Text(s) => s.to_string(),
+                pivot_engine::CacheValue::Boolean(b) => {
+                    if *b { "TRUE".to_string() } else { "FALSE".to_string() }
+                }
+                pivot_engine::CacheValue::Error(e) => e.to_string(),
+                pivot_engine::CacheValue::Empty => String::new(),
             })
         })
         .filter(|s| !s.is_empty())
@@ -568,8 +481,7 @@ fn get_pivot_field_values(
     Ok(unique_values)
 }
 
-/// Get values from a pivot field that still have data given cross-slicer filters.
-/// Scans the cache records and checks each record against sibling slicer filters.
+/// Get values from a pivot field that still have data given cross-filter state.
 fn get_pivot_available_values(
     pivot_state: &State<'_, PivotState>,
     source_id: u64,
@@ -584,14 +496,12 @@ fn get_pivot_available_values(
         .get_mut(&pivot_id)
         .ok_or_else(|| format!("Pivot table {} not found", pivot_id))?;
 
-    // Find the target field index (supports "table.column" format)
     let target_field_idx = cache
         .fields
         .iter()
         .position(|f| field_name_matches(&f.name, field_name))
         .ok_or_else(|| format!("Field '{}' not found in pivot cache", field_name))?;
 
-    // Resolve sibling filter field indices and their allowed ValueIds
     let filter_specs: Vec<(usize, std::collections::HashSet<String>)> = sibling_filters
         .iter()
         .filter_map(|(field_name, allowed)| {
@@ -607,7 +517,6 @@ fn get_pivot_available_values(
         })
         .collect();
 
-    // Helper: convert a cache value to string (same logic as get_pivot_field_values)
     let value_to_string = |field_idx: usize, value_id: pivot_engine::ValueId| -> String {
         if value_id == VALUE_ID_EMPTY {
             return String::new();
@@ -637,7 +546,6 @@ fn get_pivot_available_values(
     let mut available = std::collections::HashSet::new();
 
     for record in &cache.records {
-        // Check if this record passes all sibling filters
         let passes = filter_specs.iter().all(|(field_idx, allowed)| {
             if *field_idx >= record.values.len() {
                 return false;

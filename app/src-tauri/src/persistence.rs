@@ -215,14 +215,16 @@ pub fn build_workbook_for_save(
     Ok(workbook)
 }
 
-/// Build a Workbook from the current AppState including slicer state.
+/// Build a Workbook from the current AppState including slicer and ribbon filter state.
 pub fn build_workbook_for_save_with_slicers(
     state: &State<AppState>,
     user_files_state: &State<UserFilesState>,
     slicer_state: &State<crate::slicer::SlicerState>,
+    ribbon_filter_state: &State<crate::ribbon_filter::RibbonFilterState>,
 ) -> Result<Workbook, String> {
     let mut workbook = build_workbook_for_save(state, user_files_state)?;
     workbook.slicers = collect_slicers_for_save(slicer_state);
+    workbook.ribbon_filters = collect_ribbon_filters_for_save(ribbon_filter_state);
     Ok(workbook)
 }
 
@@ -421,6 +423,7 @@ fn slicer_to_saved(slicer: &crate::slicer::Slicer) -> persistence::SavedSlicer {
         source_type: match slicer.source_type {
             crate::slicer::SlicerSourceType::Table => persistence::SavedSlicerSourceType::Table,
             crate::slicer::SlicerSourceType::Pivot => persistence::SavedSlicerSourceType::Pivot,
+            crate::slicer::SlicerSourceType::BiConnection => persistence::SavedSlicerSourceType::BiConnection,
         },
         cache_source_id: slicer.cache_source_id,
         field_name: slicer.field_name.clone(),
@@ -454,6 +457,7 @@ fn slicer_to_saved(slicer: &crate::slicer::Slicer) -> persistence::SavedSlicer {
                 source_type: match c.source_type {
                     crate::slicer::SlicerSourceType::Table => persistence::SavedSlicerSourceType::Table,
                     crate::slicer::SlicerSourceType::Pivot => persistence::SavedSlicerSourceType::Pivot,
+                    crate::slicer::SlicerSourceType::BiConnection => persistence::SavedSlicerSourceType::BiConnection,
                 },
                 source_id: c.source_id,
             }
@@ -474,6 +478,7 @@ fn saved_to_slicer(saved: &persistence::SavedSlicer) -> crate::slicer::Slicer {
         source_type: match saved.source_type {
             persistence::SavedSlicerSourceType::Table => crate::slicer::SlicerSourceType::Table,
             persistence::SavedSlicerSourceType::Pivot => crate::slicer::SlicerSourceType::Pivot,
+            persistence::SavedSlicerSourceType::BiConnection => crate::slicer::SlicerSourceType::BiConnection,
         },
         cache_source_id: saved.cache_source_id,
         field_name: saved.field_name.clone(),
@@ -506,6 +511,7 @@ fn saved_to_slicer(saved: &persistence::SavedSlicer) -> crate::slicer::Slicer {
                 source_type: match c.source_type {
                     persistence::SavedSlicerSourceType::Table => crate::slicer::SlicerSourceType::Table,
                     persistence::SavedSlicerSourceType::Pivot => crate::slicer::SlicerSourceType::Pivot,
+                    persistence::SavedSlicerSourceType::BiConnection => crate::slicer::SlicerSourceType::BiConnection,
                 },
                 source_id: c.source_id,
             }
@@ -567,6 +573,123 @@ fn restore_slicers(
 }
 
 // ============================================================================
+// RibbonFilter <-> SavedRibbonFilter conversion
+// ============================================================================
+
+/// Collect ribbon filters from RibbonFilterState into SavedRibbonFilter format.
+fn collect_ribbon_filters_for_save(
+    ribbon_filter_state: &State<crate::ribbon_filter::RibbonFilterState>,
+) -> Vec<persistence::SavedRibbonFilter> {
+    let filters = ribbon_filter_state.filters.lock().unwrap();
+    filters
+        .values()
+        .map(|f| ribbon_filter_to_saved(f))
+        .collect()
+}
+
+fn ribbon_filter_to_saved(f: &crate::ribbon_filter::RibbonFilter) -> persistence::SavedRibbonFilter {
+    persistence::SavedRibbonFilter {
+        id: f.id,
+        name: f.name.clone(),
+        scope: match f.scope {
+            crate::ribbon_filter::RibbonFilterScope::Workbook => persistence::SavedRibbonFilterScope::Workbook,
+            crate::ribbon_filter::RibbonFilterScope::Sheet => persistence::SavedRibbonFilterScope::Sheet,
+        },
+        sheet_index: f.sheet_index,
+        source_type: match f.source_type {
+            crate::slicer::SlicerSourceType::Table => persistence::SavedSlicerSourceType::Table,
+            crate::slicer::SlicerSourceType::Pivot => persistence::SavedSlicerSourceType::Pivot,
+            crate::slicer::SlicerSourceType::BiConnection => persistence::SavedSlicerSourceType::BiConnection,
+        },
+        cache_source_id: f.cache_source_id,
+        field_name: f.field_name.clone(),
+        connected_sources: f.connected_sources.iter().map(|c| {
+            persistence::SavedSlicerConnection {
+                source_type: match c.source_type {
+                    crate::slicer::SlicerSourceType::Table => persistence::SavedSlicerSourceType::Table,
+                    crate::slicer::SlicerSourceType::Pivot => persistence::SavedSlicerSourceType::Pivot,
+                    crate::slicer::SlicerSourceType::BiConnection => persistence::SavedSlicerSourceType::BiConnection,
+                },
+                source_id: c.source_id,
+            }
+        }).collect(),
+        display_mode: match f.display_mode {
+            crate::ribbon_filter::RibbonFilterDisplayMode::Checklist => persistence::SavedRibbonFilterDisplayMode::Checklist,
+            crate::ribbon_filter::RibbonFilterDisplayMode::Buttons => persistence::SavedRibbonFilterDisplayMode::Buttons,
+            crate::ribbon_filter::RibbonFilterDisplayMode::Dropdown => persistence::SavedRibbonFilterDisplayMode::Dropdown,
+        },
+        selected_items: f.selected_items.clone(),
+        cross_filter_enabled: f.cross_filter_enabled,
+        collapsed: f.collapsed,
+        order: f.order,
+        button_columns: f.button_columns,
+        button_rows: f.button_rows,
+    }
+}
+
+fn saved_to_ribbon_filter(saved: &persistence::SavedRibbonFilter) -> crate::ribbon_filter::RibbonFilter {
+    crate::ribbon_filter::RibbonFilter {
+        id: saved.id,
+        name: saved.name.clone(),
+        scope: match saved.scope {
+            persistence::SavedRibbonFilterScope::Workbook => crate::ribbon_filter::RibbonFilterScope::Workbook,
+            persistence::SavedRibbonFilterScope::Sheet => crate::ribbon_filter::RibbonFilterScope::Sheet,
+        },
+        sheet_index: saved.sheet_index,
+        source_type: match saved.source_type {
+            persistence::SavedSlicerSourceType::Table => crate::slicer::SlicerSourceType::Table,
+            persistence::SavedSlicerSourceType::Pivot => crate::slicer::SlicerSourceType::Pivot,
+            persistence::SavedSlicerSourceType::BiConnection => crate::slicer::SlicerSourceType::BiConnection,
+        },
+        cache_source_id: saved.cache_source_id,
+        field_name: saved.field_name.clone(),
+        connected_sources: saved.connected_sources.iter().map(|c| {
+            crate::slicer::SlicerConnection {
+                source_type: match c.source_type {
+                    persistence::SavedSlicerSourceType::Table => crate::slicer::SlicerSourceType::Table,
+                    persistence::SavedSlicerSourceType::Pivot => crate::slicer::SlicerSourceType::Pivot,
+                    persistence::SavedSlicerSourceType::BiConnection => crate::slicer::SlicerSourceType::BiConnection,
+                },
+                source_id: c.source_id,
+            }
+        }).collect(),
+        display_mode: match saved.display_mode {
+            persistence::SavedRibbonFilterDisplayMode::Checklist => crate::ribbon_filter::RibbonFilterDisplayMode::Checklist,
+            persistence::SavedRibbonFilterDisplayMode::Buttons => crate::ribbon_filter::RibbonFilterDisplayMode::Buttons,
+            persistence::SavedRibbonFilterDisplayMode::Dropdown => crate::ribbon_filter::RibbonFilterDisplayMode::Dropdown,
+        },
+        selected_items: saved.selected_items.clone(),
+        cross_filter_enabled: saved.cross_filter_enabled,
+        collapsed: saved.collapsed,
+        order: saved.order,
+        button_columns: saved.button_columns,
+        button_rows: saved.button_rows,
+    }
+}
+
+/// Restore ribbon filters from SavedRibbonFilter format into RibbonFilterState.
+fn restore_ribbon_filters(
+    saved_filters: &[persistence::SavedRibbonFilter],
+    ribbon_filter_state: &State<crate::ribbon_filter::RibbonFilterState>,
+) {
+    let mut filters = ribbon_filter_state.filters.lock().unwrap();
+    let mut next_id = ribbon_filter_state.next_id.lock().unwrap();
+
+    filters.clear();
+    let mut max_id: u64 = 0;
+
+    for saved in saved_filters {
+        let filter = saved_to_ribbon_filter(saved);
+        if filter.id > max_id {
+            max_id = filter.id;
+        }
+        filters.insert(filter.id, filter);
+    }
+
+    *next_id = max_id + 1;
+}
+
+// ============================================================================
 // Chart <-> SavedChart conversion
 // ============================================================================
 
@@ -606,6 +729,7 @@ pub fn save_file(
     file_state: State<FileState>,
     user_files_state: State<UserFilesState>,
     slicer_state: State<crate::slicer::SlicerState>,
+    ribbon_filter_state: State<crate::ribbon_filter::RibbonFilterState>,
     script_state: State<crate::scripting::types::ScriptState>,
     pivot_state: State<'_, crate::pivot::types::PivotState>,
     path: String,
@@ -636,6 +760,7 @@ pub fn save_file(
     let mut workbook = Workbook::from_grid(&grid, &styles, &dimensions);
     workbook.tables = collect_tables_for_save(&tables);
     workbook.slicers = collect_slicers_for_save(&slicer_state);
+    workbook.ribbon_filters = collect_ribbon_filters_for_save(&ribbon_filter_state);
     workbook.scripts = collect_scripts_for_save(&script_state);
     workbook.notebooks = collect_notebooks_for_save(&script_state);
     workbook.charts = collect_charts_for_save(&state);
@@ -692,6 +817,7 @@ pub fn open_file(
     file_state: State<FileState>,
     user_files_state: State<UserFilesState>,
     slicer_state: State<crate::slicer::SlicerState>,
+    ribbon_filter_state: State<crate::ribbon_filter::RibbonFilterState>,
     script_state: State<crate::scripting::types::ScriptState>,
     path: String,
 ) -> Result<Vec<CellData>, String> {
@@ -949,6 +1075,9 @@ pub fn open_file(
 
     // Restore slicers from workbook
     restore_slicers(&workbook.slicers, &slicer_state);
+
+    // Restore ribbon filters from workbook
+    restore_ribbon_filters(&workbook.ribbon_filters, &ribbon_filter_state);
 
     // Restore charts from workbook
     restore_charts(&workbook.charts, &state);
@@ -1749,6 +1878,7 @@ pub fn auto_recover_save(
     file_state: State<FileState>,
     user_files_state: State<UserFilesState>,
     slicer_state: State<crate::slicer::SlicerState>,
+    ribbon_filter_state: State<crate::ribbon_filter::RibbonFilterState>,
     script_state: State<crate::scripting::types::ScriptState>,
 ) -> Result<String, String> {
     // Only save if the file is dirty
@@ -1788,6 +1918,7 @@ pub fn auto_recover_save(
     let mut workbook = Workbook::from_grid(&grid, &styles, &dimensions);
     workbook.tables = collect_tables_for_save(&tables);
     workbook.slicers = collect_slicers_for_save(&slicer_state);
+    workbook.ribbon_filters = collect_ribbon_filters_for_save(&ribbon_filter_state);
     workbook.scripts = collect_scripts_for_save(&script_state);
     workbook.notebooks = collect_notebooks_for_save(&script_state);
     workbook.charts = collect_charts_for_save(&state);

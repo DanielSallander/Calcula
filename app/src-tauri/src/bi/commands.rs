@@ -527,6 +527,228 @@ pub async fn bi_query(
     Ok(result)
 }
 
+/// Get distinct values for a column from a BI connection.
+/// Executes a GROUP BY query with no measures to retrieve unique values.
+/// Used by slicers and ribbon filters that connect directly to a BI model.
+/// Auto-connects and auto-binds the table if needed.
+#[tauri::command]
+pub async fn bi_get_column_values(
+    bi_state: State<'_, BiState>,
+    connection_id: ConnectionId,
+    table: String,
+    column: String,
+) -> Result<Vec<String>, String> {
+    log_info!(
+        "BI",
+        "bi_get_column_values: conn={}, {}.{}",
+        connection_id,
+        table,
+        column
+    );
+
+    // Auto-connect if not already connected
+    auto_connect_bi_connection(&bi_state, connection_id).await?;
+
+    // Auto-bind ALL model tables — the query planner may need fact tables
+    // for measure computation even when we only group by a dimension column.
+    {
+        let connections = bi_state.connections.lock().unwrap();
+        let conn = connections.get(&connection_id)
+            .ok_or_else(|| format!("Connection {} not found", connection_id))?;
+        let engine = conn.engine.as_ref().ok_or("No model loaded.")?;
+        let all_tables: Vec<String> = engine.model().tables().iter()
+            .map(|t| t.name().to_string())
+            .collect();
+        drop(connections);
+        auto_bind_tables_on_connection(
+            &bi_state,
+            connection_id,
+            &all_tables.iter().map(|s| s.as_str()).collect::<Vec<_>>(),
+        )?;
+    }
+
+    // The BI engine requires at least one measure. Pick the first available
+    // measure from the model to satisfy the constraint — we'll discard
+    // the measure column from results and only keep the group_by column.
+    let first_measure = {
+        let connections = bi_state.connections.lock().unwrap();
+        let conn = connections.get(&connection_id)
+            .ok_or_else(|| format!("Connection {} not found", connection_id))?;
+        let engine = conn.engine.as_ref().ok_or("No model loaded.")?;
+        let model = engine.model();
+        model.measures().first()
+            .map(|m| m.name().to_string())
+            .ok_or_else(|| "No measures in model — cannot query column values".to_string())?
+    };
+
+    let query_request = bi_engine::QueryRequest {
+        measures: vec![first_measure],
+        group_by: vec![bi_engine::ColumnRef::new(&table, &column)],
+        filters: vec![],
+        lookups: vec![],
+    };
+
+    // Take engine out for async query + refresh
+    let mut engine = {
+        let mut connections = bi_state.connections.lock().unwrap();
+        let conn = connections
+            .get_mut(&connection_id)
+            .ok_or_else(|| format!("Connection {} not found", connection_id))?;
+        conn.engine.take().ok_or("No model loaded.")?
+    };
+
+    // Refresh in-memory tables that haven't been fetched yet
+    if let Err(e) = engine.refresh_all_in_memory().await {
+        log_info!("BI", "bi_get_column_values: refresh warning: {}", e);
+    }
+
+    let result = engine.query(query_request).await;
+
+    // Always put engine back, even on error
+    {
+        let mut connections = bi_state.connections.lock().unwrap();
+        if let Some(conn) = connections.get_mut(&connection_id) {
+            conn.engine = Some(engine);
+        }
+    }
+
+    let batches = result.map_err(|e| format!("Query failed: {}", e))?;
+
+    // Extract unique values from the first column (group_by column),
+    // ignoring the measure column.
+    let mut values: Vec<String> = Vec::new();
+    for batch in &batches {
+        if batch.num_columns() == 0 {
+            continue;
+        }
+        let col = batch.column(0);
+        for row_idx in 0..batch.num_rows() {
+            if let Some(v) = arrow_value_to_string(col, row_idx) {
+                if !v.is_empty() {
+                    values.push(v);
+                }
+            }
+        }
+    }
+
+    values.sort();
+    values.dedup();
+
+    log_info!(
+        "BI",
+        "bi_get_column_values: returned {} unique values",
+        values.len()
+    );
+
+    Ok(values)
+}
+
+/// Get distinct values for a column, filtered by sibling filter constraints.
+/// Used for cross-filtering: determines which values still have data given
+/// other active filters on the same connection.
+#[tauri::command]
+pub async fn bi_get_column_available_values(
+    bi_state: State<'_, BiState>,
+    connection_id: ConnectionId,
+    table: String,
+    column: String,
+    sibling_filters: Vec<BiFilter>,
+) -> Result<Vec<String>, String> {
+    // Auto-connect if not already connected
+    auto_connect_bi_connection(&bi_state, connection_id).await?;
+
+    // Auto-bind ALL model tables
+    {
+        let connections = bi_state.connections.lock().unwrap();
+        let conn = connections.get(&connection_id)
+            .ok_or_else(|| format!("Connection {} not found", connection_id))?;
+        let engine = conn.engine.as_ref().ok_or("No model loaded.")?;
+        let all_tables: Vec<String> = engine.model().tables().iter()
+            .map(|t| t.name().to_string())
+            .collect();
+        drop(connections);
+        auto_bind_tables_on_connection(
+            &bi_state,
+            connection_id,
+            &all_tables.iter().map(|s| s.as_str()).collect::<Vec<_>>(),
+        )?;
+    }
+
+    let first_measure = {
+        let connections = bi_state.connections.lock().unwrap();
+        let conn = connections.get(&connection_id)
+            .ok_or_else(|| format!("Connection {} not found", connection_id))?;
+        let engine = conn.engine.as_ref().ok_or("No model loaded.")?;
+        engine.model().measures().first()
+            .map(|m| m.name().to_string())
+            .ok_or_else(|| "No measures in model".to_string())?
+    };
+
+    let query_request = bi_engine::QueryRequest {
+        measures: vec![first_measure],
+        group_by: vec![bi_engine::ColumnRef::new(&table, &column)],
+        filters: sibling_filters
+            .iter()
+            .map(|f| bi_engine::FilterCondition {
+                column: f.column.clone(),
+                operator: match f.operator.as_str() {
+                    "=" | "eq" => bi_engine::FilterOperator::Equal,
+                    "!=" | "ne" => bi_engine::FilterOperator::NotEqual,
+                    ">" | "gt" => bi_engine::FilterOperator::GreaterThan,
+                    "<" | "lt" => bi_engine::FilterOperator::LessThan,
+                    ">=" | "gte" => bi_engine::FilterOperator::GreaterThanOrEqual,
+                    "<=" | "lte" => bi_engine::FilterOperator::LessThanOrEqual,
+                    _ => bi_engine::FilterOperator::Equal,
+                },
+                value: f.value.clone(),
+            })
+            .collect(),
+        lookups: vec![],
+    };
+
+    let mut engine = {
+        let mut connections = bi_state.connections.lock().unwrap();
+        let conn = connections
+            .get_mut(&connection_id)
+            .ok_or_else(|| format!("Connection {} not found", connection_id))?;
+        conn.engine.take().ok_or("No model loaded.")?
+    };
+
+    // Refresh in-memory tables that haven't been fetched yet
+    let _ = engine.refresh_all_in_memory().await;
+
+    let result = engine.query(query_request).await;
+
+    // Always put engine back, even on error
+    {
+        let mut connections = bi_state.connections.lock().unwrap();
+        if let Some(conn) = connections.get_mut(&connection_id) {
+            conn.engine = Some(engine);
+        }
+    }
+
+    let batches = result.map_err(|e| format!("Query failed: {}", e))?;
+
+    let mut values: Vec<String> = Vec::new();
+    for batch in &batches {
+        if batch.num_columns() == 0 {
+            continue;
+        }
+        let col = batch.column(0);
+        for row_idx in 0..batch.num_rows() {
+            if let Some(v) = arrow_value_to_string(col, row_idx) {
+                if !v.is_empty() {
+                    values.push(v);
+                }
+            }
+        }
+    }
+
+    values.sort();
+    values.dedup();
+    Ok(values)
+}
+
 /// Insert query results into the grid as a locked region.
 #[tauri::command]
 pub async fn bi_insert_result(

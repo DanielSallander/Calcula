@@ -59,6 +59,7 @@ pub mod status_bar;
 pub mod computed_properties;
 pub mod controls;
 pub mod slicer;
+pub mod ribbon_filter;
 pub mod timeline_slicer;
 pub mod mcp;
 pub mod locale_commands;
@@ -3762,6 +3763,7 @@ pub fn run() {
         .manage(evaluate_formula::EvalFormulaState::new())
         .manage(scripting::ScriptState::new())
         .manage(slicer::SlicerState::new())
+        .manage(ribbon_filter::RibbonFilterState::new())
         .manage(timeline_slicer::TimelineSlicerState::new())
         .manage(mcp::McpState::new())
         .invoke_handler(tauri::generate_handler![
@@ -3937,6 +3939,7 @@ pub fn run() {
             pivot::get_pivot_field_info,
             pivot::set_pivot_item_visibility,
             pivot::get_all_pivot_tables,
+            pivot::get_pivot_bi_metadata,
             pivot::refresh_all_pivot_tables,
             pivot::set_pivot_item_expanded,
             pivot::expand_collapse_level,
@@ -3976,6 +3979,8 @@ pub fn run() {
             bi::bi_insert_result,
             bi::bi_refresh_connection,
             bi::bi_get_model_info,
+            bi::bi_get_column_values,
+            bi::bi_get_column_available_values,
             bi::bi_get_region_at_cell,
             // Data validation commands
             data_validation::set_data_validation,
@@ -4231,6 +4236,14 @@ pub fn run() {
             slicer::update_slicer_computed_property,
             slicer::remove_slicer_computed_property,
             slicer::get_slicer_computed_attributes,
+            // Ribbon filter commands
+            ribbon_filter::create_ribbon_filter,
+            ribbon_filter::delete_ribbon_filter,
+            ribbon_filter::update_ribbon_filter,
+            ribbon_filter::update_ribbon_filter_selection,
+            ribbon_filter::get_all_ribbon_filters,
+            ribbon_filter::get_ribbon_filters_by_scope,
+            ribbon_filter::get_ribbon_filter_items,
             // Timeline slicer commands
             timeline_slicer::create_timeline_slicer,
             timeline_slicer::delete_timeline_slicer,

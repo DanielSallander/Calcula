@@ -6,6 +6,7 @@
 use crate::error::FormatError;
 use crate::features::tables::TableDef;
 use crate::features::slicers::SlicerDef;
+use crate::features::ribbon_filters::RibbonFilterDef;
 use crate::features::scripts::ScriptDef;
 use crate::features::notebooks::NotebookDef;
 use crate::manifest::Manifest;
@@ -17,7 +18,7 @@ use crate::sheet_styles::{
 };
 
 use engine::theme::ThemeDefinition;
-use persistence::{SavedChart, SavedNotebook, SavedScript, SavedSlicer, SavedTable, Workbook, WorkbookProperties};
+use persistence::{SavedChart, SavedNotebook, SavedRibbonFilter, SavedScript, SavedSlicer, SavedTable, Workbook, WorkbookProperties};
 use std::io::{Read, Write};
 use std::path::Path;
 use zip::write::FileOptions;
@@ -39,6 +40,9 @@ pub fn write_calcula(workbook: &Workbook, path: &Path) -> Result<(), FormatError
     }
     if !workbook.slicers.is_empty() {
         manifest.features.push("slicers".to_string());
+    }
+    if !workbook.ribbon_filters.is_empty() {
+        manifest.features.push("ribbon_filters".to_string());
     }
     if !workbook.scripts.is_empty() {
         manifest.features.push("scripts".to_string());
@@ -123,6 +127,17 @@ pub fn write_calcula(workbook: &Workbook, path: &Path) -> Result<(), FormatError
             options.clone(),
         )?;
         zip.write_all(slicer_json.as_bytes())?;
+    }
+
+    // Write ribbon filters
+    for ribbon_filter in &workbook.ribbon_filters {
+        let filter_def = RibbonFilterDef::from(ribbon_filter);
+        let filter_json = serde_json::to_string_pretty(&filter_def)?;
+        zip.start_file(
+            format!("ribbon_filters/filter_{}.json", ribbon_filter.id),
+            options.clone(),
+        )?;
+        zip.write_all(filter_json.as_bytes())?;
     }
 
     // Write scripts
@@ -297,6 +312,28 @@ pub fn read_calcula(path: &Path) -> Result<Workbook, FormatError> {
         }
     }
 
+    // Read ribbon filters
+    let mut ribbon_filters: Vec<SavedRibbonFilter> = Vec::new();
+    if manifest.features.contains(&"ribbon_filters".to_string()) {
+        let filter_names: Vec<String> = (0..archive.len())
+            .filter_map(|i| {
+                let entry = archive.by_index(i).ok()?;
+                let name = entry.name().to_string();
+                if name.starts_with("ribbon_filters/") && name.ends_with(".json") {
+                    Some(name)
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        for filter_name in filter_names {
+            if let Some(filter_def) = read_optional_json::<RibbonFilterDef>(&mut archive, &filter_name)? {
+                ribbon_filters.push(SavedRibbonFilter::from(&filter_def));
+            }
+        }
+    }
+
     // Read scripts
     let mut scripts: Vec<SavedScript> = Vec::new();
     if manifest.features.contains(&"scripts".to_string()) {
@@ -384,6 +421,7 @@ pub fn read_calcula(path: &Path) -> Result<Workbook, FormatError> {
         active_sheet: manifest.active_sheet,
         tables,
         slicers,
+        ribbon_filters,
         user_files,
         theme,
         scripts,
@@ -508,6 +546,7 @@ mod tests {
             active_sheet: 0,
             tables: vec![],
             slicers: vec![],
+            ribbon_filters: vec![],
             user_files: HashMap::new(),
             theme: ThemeDefinition::default(),
             scripts: Vec::new(),

@@ -18,6 +18,8 @@ pub enum SlicerSourceType {
     Table,
     /// Slicer connected to a PivotTable
     Pivot,
+    /// Slicer connected directly to a BI Connection (no pivot needed)
+    BiConnection,
 }
 
 /// Selection behavior mode for a slicer.

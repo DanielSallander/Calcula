@@ -2711,6 +2711,33 @@ pub fn get_all_pivot_tables(
         .collect()
 }
 
+/// Get BI metadata for a pivot table (connection ID, sheet index).
+/// Returns null if the pivot is not BI-backed.
+#[tauri::command]
+pub fn get_pivot_bi_metadata(
+    state: State<AppState>,
+    pivot_state: State<'_, PivotState>,
+    pivot_id: u64,
+) -> Option<serde_json::Value> {
+    let bi_meta = pivot_state.bi_metadata.lock().unwrap();
+    let pivot_tables = pivot_state.pivot_tables.lock().unwrap();
+
+    if let Some(meta) = bi_meta.get(&(pivot_id as PivotId)) {
+        // Get the sheet index from the pivot definition
+        let sheet_index = pivot_tables
+            .get(&(pivot_id as PivotId))
+            .map(|(def, _)| resolve_dest_sheet_index(&state, def))
+            .unwrap_or(0);
+
+        Some(serde_json::json!({
+            "connectionId": meta.connection_id,
+            "sheetIndex": sheet_index
+        }))
+    } else {
+        None
+    }
+}
+
 /// Sets the expand/collapse state of a specific pivot item.
 #[tauri::command]
 pub fn set_pivot_item_expanded(

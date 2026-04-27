@@ -60,6 +60,8 @@ pub struct Workbook {
     pub charts: Vec<SavedChart>,
     /// Named ranges / defined names
     pub named_ranges: Vec<SavedNamedRange>,
+    /// Ribbon filter definitions (Filter Pane)
+    pub ribbon_filters: Vec<SavedRibbonFilter>,
 }
 
 /// Workbook-level document properties.
@@ -201,6 +203,7 @@ impl Workbook {
             properties: WorkbookProperties::default(),
             charts: Vec::new(),
             named_ranges: Vec::new(),
+            ribbon_filters: Vec::new(),
         }
     }
 
@@ -219,6 +222,7 @@ impl Workbook {
             properties: WorkbookProperties::default(),
             charts: Vec::new(),
             named_ranges: Vec::new(),
+            ribbon_filters: Vec::new(),
         }
     }
 }
@@ -510,6 +514,8 @@ pub enum SavedSlicerSourceType {
     Table,
     #[serde(rename = "pivot")]
     Pivot,
+    #[serde(rename = "biConnection")]
+    BiConnection,
 }
 
 /// A typed reference to a pivot or table that a slicer filters (Report Connection).
@@ -623,6 +629,75 @@ fn default_gap() -> f64 {
 
 fn default_button_radius() -> f64 {
     2.0
+}
+
+fn default_button_columns() -> u32 {
+    2
+}
+
+// ============================================================================
+// RIBBON FILTERS
+// ============================================================================
+
+/// Serializable ribbon filter scope
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum SavedRibbonFilterScope {
+    #[serde(rename = "workbook")]
+    Workbook,
+    #[serde(rename = "sheet")]
+    Sheet,
+}
+
+impl Default for SavedRibbonFilterScope {
+    fn default() -> Self {
+        SavedRibbonFilterScope::Sheet
+    }
+}
+
+/// Serializable ribbon filter display mode
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum SavedRibbonFilterDisplayMode {
+    #[serde(rename = "checklist")]
+    Checklist,
+    #[serde(rename = "buttons")]
+    Buttons,
+    #[serde(rename = "dropdown")]
+    Dropdown,
+}
+
+impl Default for SavedRibbonFilterDisplayMode {
+    fn default() -> Self {
+        SavedRibbonFilterDisplayMode::Checklist
+    }
+}
+
+/// Serializable ribbon filter definition
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SavedRibbonFilter {
+    pub id: u64,
+    pub name: String,
+    #[serde(default)]
+    pub scope: SavedRibbonFilterScope,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sheet_index: Option<usize>,
+    pub source_type: SavedSlicerSourceType,
+    pub cache_source_id: u64,
+    pub field_name: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub connected_sources: Vec<SavedSlicerConnection>,
+    #[serde(default)]
+    pub display_mode: SavedRibbonFilterDisplayMode,
+    pub selected_items: Option<Vec<String>>,
+    #[serde(default = "default_true")]
+    pub cross_filter_enabled: bool,
+    #[serde(default)]
+    pub collapsed: bool,
+    #[serde(default)]
+    pub order: u32,
+    #[serde(default = "default_button_columns")]
+    pub button_columns: u32,
+    #[serde(default)]
+    pub button_rows: u32,
 }
 
 /// Calcula metadata structure stored as JSON in the hidden _calcula_meta sheet.
