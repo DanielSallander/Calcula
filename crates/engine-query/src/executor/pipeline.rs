@@ -114,8 +114,6 @@ impl QueryExecutor {
         // be propagated through relationships to the fact table as IN filters.
         // Phase 1: fetch those dimensions first.
         // Phase 2: use extracted join key values as IN filters on the fact table.
-        let fact_table_name = measures[0].table();
-
         // Resolve in-memory tables from the cache first (no connector needed).
         // If the FetchRequest has filters (e.g., context-pushed filters), apply
         // them to the cached batch locally so that downstream logic (IN-filter
@@ -124,12 +122,6 @@ impl QueryExecutor {
             Vec::new();
         let mut inmemory_indices: std::collections::HashSet<usize> =
             std::collections::HashSet::new();
-
-        // Track which table (if any) caused an early short-circuit due to
-        // 0 rows after filtering. Since all tables are inner-joined, any
-        // empty table means the final result is guaranteed to be empty —
-        // regardless of whether the table is a fact, dimension, or lookup.
-        let mut empty_table: Option<String> = None;
 
         for (i, (table_name, request)) in fetches.iter().enumerate() {
             let is_in_memory = model.table(table_name).is_ok_and(|t| t.is_in_memory());
@@ -154,74 +146,56 @@ impl QueryExecutor {
                     row_count,
                     std::time::Duration::ZERO,
                 ));
-
-                if row_count == 0 {
-                    empty_table = Some(table_name.clone());
-                }
             }
-        }
-
-        // Early exit: if an in-memory table returned 0 rows after filtering,
-        // every inner join is guaranteed empty. Report and return immediately,
-        // skipping all connector fetches and DataFusion execution.
-        if let Some(ref tbl) = empty_table {
-            if let Some(ref mut plan_node) = plan.as_deref_mut() {
-                // Report the tables we did resolve before the short-circuit.
-                for (table_name, _, row_count, elapsed) in &inmemory_results {
-                    let label = format!("Cache: {table_name}");
-                    let fetch_node = PlanNode::new(PlanOperation::SourceFetch, label)
-                        .with_duration(*elapsed)
-                        .with_property("table", PlanValue::Text(table_name.clone()))
-                        .with_property("rows_fetched", PlanValue::Number(*row_count as f64))
-                        .with_property("source", PlanValue::Text("in_memory_cache".to_string()));
-                    plan_node.add_child(fetch_node);
-                }
-                plan_node.add_child(
-                    PlanNode::new(
-                        PlanOperation::DataFusionExecution,
-                        "Skipped (empty table)".to_string(),
-                    )
-                    .with_duration(std::time::Duration::ZERO)
-                    .with_property("result_rows", PlanValue::Number(0.0))
-                    .with_property(
-                        "reason",
-                        PlanValue::Text(format!(
-                            "{tbl} returned 0 rows, all inner joins would be empty"
-                        )),
-                    ),
-                );
-            }
-            return Ok(vec![]);
         }
 
         // Find dimension fetches that have context-pushed filters AND a
-        // relationship to the measure table (only for connector-fetched tables).
+        // relationship to any measure table (only for connector-fetched tables).
+        // Collect all distinct measure tables for multi-group IN-filter propagation.
+        let measure_table_names: Vec<&str> = {
+            let mut tables = Vec::new();
+            for m in measures {
+                let t = m.table();
+                if !tables.iter().any(|&x: &&str| x.eq_ignore_ascii_case(t)) {
+                    tables.push(t);
+                }
+            }
+            tables
+        };
+
         let mut pre_fetch_indices: Vec<usize> = Vec::new();
-        // (pre_fetch_index, dim_join_col, measure_table_join_col)
-        let mut propagation_info: Vec<(usize, String, String)> = Vec::new();
+        // (pre_fetch_index, dim_join_col, fact_table_name, fact_join_col)
+        let mut propagation_info: Vec<(usize, String, String, String)> = Vec::new();
 
         for (i, (table_name, request)) in fetches.iter().enumerate() {
-            // Skip in-memory tables (already resolved), the measure table, and
-            // tables with no filters.
-            if inmemory_indices.contains(&i)
-                || table_name.eq_ignore_ascii_case(fact_table_name)
-                || request.filters.is_empty()
+            // Skip in-memory tables (already resolved) and tables with no filters.
+            if inmemory_indices.contains(&i) || request.filters.is_empty() {
+                continue;
+            }
+            // Skip if this table is itself a measure table.
+            if measure_table_names
+                .iter()
+                .any(|t| t.eq_ignore_ascii_case(table_name))
             {
                 continue;
             }
-            // Check for a relationship to the measure table.
+            // Check for a relationship to each measure table.
             // IN-list optimization only works for single-condition equi-joins.
-            if let Ok(rel) = model.find_relationship(fact_table_name, table_name) {
-                if rel.conditions().len() != 1 || !rel.is_equi_only() {
-                    continue;
+            for &mt in &measure_table_names {
+                if let Ok(rel) = model.find_relationship(mt, table_name) {
+                    if rel.conditions().len() != 1 || !rel.is_equi_only() {
+                        continue;
+                    }
+                    let (fact_col, dim_col) = if rel.from_table() == mt {
+                        (rel.from_column().to_string(), rel.to_column().to_string())
+                    } else {
+                        (rel.to_column().to_string(), rel.from_column().to_string())
+                    };
+                    if !pre_fetch_indices.contains(&i) {
+                        pre_fetch_indices.push(i);
+                    }
+                    propagation_info.push((i, dim_col, mt.to_string(), fact_col));
                 }
-                let (fact_col, dim_col) = if rel.from_table() == fact_table_name {
-                    (rel.from_column().to_string(), rel.to_column().to_string())
-                } else {
-                    (rel.to_column().to_string(), rel.from_column().to_string())
-                };
-                pre_fetch_indices.push(i);
-                propagation_info.push((i, dim_col, fact_col));
             }
         }
 
@@ -249,100 +223,69 @@ impl QueryExecutor {
 
         let pre_fetch_results = futures::future::try_join_all(pre_fetch_futures).await?;
 
-        // Check connector pre-fetches for empty tables (same logic: any
-        // empty table means every inner join is empty).
-        for (_, table_name, _, row_count, _) in &pre_fetch_results {
-            if *row_count == 0 {
-                empty_table = Some(table_name.clone());
-                break;
-            }
-        }
-
-        if let Some(ref tbl) = empty_table {
-            if let Some(ref mut plan_node) = plan.as_deref_mut() {
-                for (table_name, _, row_count, elapsed) in &inmemory_results {
-                    let label = format!("Cache: {table_name}");
-                    let fetch_node = PlanNode::new(PlanOperation::SourceFetch, label)
-                        .with_duration(*elapsed)
-                        .with_property("table", PlanValue::Text(table_name.clone()))
-                        .with_property("rows_fetched", PlanValue::Number(*row_count as f64))
-                        .with_property("source", PlanValue::Text("in_memory_cache".to_string()));
-                    plan_node.add_child(fetch_node);
-                }
-                for (_, table_name, _, row_count, elapsed) in &pre_fetch_results {
-                    let label = format!("Fetch: {table_name}");
-                    let fetch_node = PlanNode::new(PlanOperation::SourceFetch, label)
-                        .with_duration(*elapsed)
-                        .with_property("table", PlanValue::Text(table_name.clone()))
-                        .with_property("rows_fetched", PlanValue::Number(*row_count as f64));
-                    plan_node.add_child(fetch_node);
-                }
-                plan_node.add_child(
-                    PlanNode::new(
-                        PlanOperation::DataFusionExecution,
-                        "Skipped (empty table)".to_string(),
-                    )
-                    .with_duration(std::time::Duration::ZERO)
-                    .with_property("result_rows", PlanValue::Number(0.0))
-                    .with_property(
-                        "reason",
-                        PlanValue::Text(format!(
-                            "{tbl} returned 0 rows, all inner joins would be empty"
-                        )),
-                    ),
-                );
-            }
-            return Ok(vec![]);
-        }
-
         // Extract join key values from pre-fetched dimensions (and in-memory
-        // dimensions with filters) and build IN filters for the measure table.
-        let mut fact_in_filters: Vec<InFilterCondition> = Vec::new();
+        // dimensions with filters) and build IN filters per measure table.
+        // Key: measure table name (lowercase), Value: list of IN filters.
+        let mut in_filters_by_table: std::collections::HashMap<String, Vec<InFilterCondition>> =
+            std::collections::HashMap::new();
         let pre_fetch_set: std::collections::HashSet<usize> =
             pre_fetch_indices.iter().copied().collect();
 
         // Extract from connector pre-fetches.
         for (idx, _dim_table, ref batches, _, _) in &pre_fetch_results {
-            if let Some((_, dim_col, fact_col)) = propagation_info.iter().find(|(i, _, _)| i == idx)
-            {
-                let values = extract_column_values(batches, dim_col);
-                if !values.is_empty() {
-                    fact_in_filters.push(InFilterCondition {
-                        column: fact_col.clone(),
-                        values,
-                    });
+            for (pi, dim_col, fact_table, fact_col) in &propagation_info {
+                if pi == idx {
+                    let values = extract_column_values(batches, dim_col);
+                    if !values.is_empty() {
+                        in_filters_by_table
+                            .entry(fact_table.to_lowercase())
+                            .or_default()
+                            .push(InFilterCondition {
+                                column: fact_col.clone(),
+                                values,
+                            });
+                    }
                 }
             }
         }
 
         // Also extract from in-memory dimension tables that have filter
-        // relationships to the measure table.
+        // relationships to measure tables.
         for (i, (table_name, request)) in fetches.iter().enumerate() {
-            if !inmemory_indices.contains(&i)
-                || table_name.eq_ignore_ascii_case(fact_table_name)
-                || request.filters.is_empty()
+            if !inmemory_indices.contains(&i) || request.filters.is_empty() {
+                continue;
+            }
+            // Skip if this table is itself a measure table.
+            if measure_table_names
+                .iter()
+                .any(|t| t.eq_ignore_ascii_case(table_name))
             {
                 continue;
             }
-            if let Ok(rel) = model.find_relationship(fact_table_name, table_name) {
-                if rel.conditions().len() != 1 || !rel.is_equi_only() {
-                    continue;
-                }
-                let (fact_col, dim_col) = if rel.from_table() == fact_table_name {
-                    (rel.from_column().to_string(), rel.to_column().to_string())
-                } else {
-                    (rel.to_column().to_string(), rel.from_column().to_string())
-                };
-                // Find the cached batch for this table.
-                if let Some((_, batches, _, _)) =
-                    inmemory_results.iter().find(|(n, _, _, _)| n == table_name)
-                {
-                    let values = extract_column_values(batches, &dim_col);
-                    if !values.is_empty() {
-                        fact_in_filters.push(InFilterCondition {
-                            column: fact_col,
-                            values,
-                        });
+            for &mt in &measure_table_names {
+                if let Ok(rel) = model.find_relationship(mt, table_name) {
+                    if rel.conditions().len() != 1 || !rel.is_equi_only() {
+                        continue;
+                    }
+                    let (fact_col, dim_col) = if rel.from_table() == mt {
+                        (rel.from_column().to_string(), rel.to_column().to_string())
+                    } else {
+                        (rel.to_column().to_string(), rel.from_column().to_string())
+                    };
+                    // Find the cached batch for this table.
+                    if let Some((_, batches, _, _)) =
+                        inmemory_results.iter().find(|(n, _, _, _)| n == table_name)
+                    {
+                        let values = extract_column_values(batches, &dim_col);
+                        if !values.is_empty() {
+                            in_filters_by_table
+                                .entry(mt.to_lowercase())
+                                .or_default()
+                                .push(InFilterCondition {
+                                    column: fact_col,
+                                    values,
+                                });
+                        }
                     }
                 }
             }
@@ -361,15 +304,14 @@ impl QueryExecutor {
             .enumerate()
             .filter(|(i, _)| !skip_set.contains(i))
             .map(|(_, (table_name, request))| {
-                let in_filters = if table_name.eq_ignore_ascii_case(fact_table_name) {
-                    &fact_in_filters
-                } else {
-                    &[][..]
-                };
+                let in_filters = in_filters_by_table
+                    .get(&table_name.to_lowercase())
+                    .map(|v| v.as_slice())
+                    .unwrap_or(&[]);
                 async move {
                     let start = Instant::now();
                     let connector = registry.connector_for(table_name)?;
-                    // Add IN filters to the measure table fetch if available.
+                    // Add IN filters to measure table fetches if available.
                     let batches = if !in_filters.is_empty() {
                         let mut augmented = request.clone();
                         augmented.in_filters.extend(in_filters.iter().cloned());
@@ -391,14 +333,6 @@ impl QueryExecutor {
             .collect();
 
         let main_fetch_results = futures::future::try_join_all(main_fetch_futures).await?;
-
-        // Check main fetch results for empty tables too.
-        for (table_name, _, row_count, _) in &main_fetch_results {
-            if *row_count == 0 {
-                empty_table = Some(table_name.clone());
-                break;
-            }
-        }
 
         // Combine all fetch results for plan reporting and DataFusion registration.
         let mut all_fetch_results: Vec<(String, Vec<RecordBatch>, usize, std::time::Duration)> =
@@ -433,51 +367,32 @@ impl QueryExecutor {
                         .add_property("source", PlanValue::Text("in_memory_cache".to_string()));
                 }
 
-                // Annotate measure table fetch with propagated IN filter info.
-                if table_name.eq_ignore_ascii_case(fact_table_name) && !fact_in_filters.is_empty() {
-                    let threshold = max_inline_in_values.unwrap_or(usize::MAX);
-                    let in_desc: Vec<String> = fact_in_filters
-                        .iter()
-                        .map(|f| {
-                            let strategy = if f.values.len() > threshold {
-                                "temp_table"
-                            } else {
-                                "inline"
-                            };
-                            format!(
-                                "{} IN ({} values, strategy: {})",
-                                f.column,
-                                f.values.len(),
-                                strategy
-                            )
-                        })
-                        .collect();
-                    fetch_node.add_property("relationship_filters", PlanValue::List(in_desc));
+                // Annotate measure table fetches with propagated IN filter info.
+                if let Some(filters) = in_filters_by_table.get(&table_name.to_lowercase()) {
+                    if !filters.is_empty() {
+                        let threshold = max_inline_in_values.unwrap_or(usize::MAX);
+                        let in_desc: Vec<String> = filters
+                            .iter()
+                            .map(|f| {
+                                let strategy = if f.values.len() > threshold {
+                                    "temp_table"
+                                } else {
+                                    "inline"
+                                };
+                                format!(
+                                    "{} IN ({} values, strategy: {})",
+                                    f.column,
+                                    f.values.len(),
+                                    strategy
+                                )
+                            })
+                            .collect();
+                        fetch_node.add_property("relationship_filters", PlanValue::List(in_desc));
+                    }
                 }
 
                 plan_node.add_child(fetch_node);
             }
-        }
-
-        // After all fetches, if any table was empty, short-circuit.
-        if let Some(ref tbl) = empty_table {
-            if let Some(ref mut plan_node) = plan.as_deref_mut() {
-                plan_node.add_child(
-                    PlanNode::new(
-                        PlanOperation::DataFusionExecution,
-                        "Skipped (empty table)".to_string(),
-                    )
-                    .with_duration(std::time::Duration::ZERO)
-                    .with_property("result_rows", PlanValue::Number(0.0))
-                    .with_property(
-                        "reason",
-                        PlanValue::Text(format!(
-                            "{tbl} returned 0 rows, all inner joins would be empty"
-                        )),
-                    ),
-                );
-            }
-            return Ok(vec![]);
         }
 
         // Register fetched data in DataFusion.
@@ -518,6 +433,19 @@ impl QueryExecutor {
         // If we have window measures, evaluate them via two-stage window execution.
         if !window_measures.is_empty() {
             return Self::execute_window_measures(&ctx, &window_measures, group_by, model).await;
+        }
+
+        // Partition measures by home table to detect multi-fact-table queries.
+        let measure_groups = partition_measures_by_table(measures);
+        if measure_groups.len() > 1 {
+            return Self::execute_multi_group_aggregation(
+                &ctx,
+                &measure_groups,
+                group_by,
+                model,
+                plan,
+            )
+            .await;
         }
 
         // Build the SQL query for the local aggregation.
@@ -825,6 +753,367 @@ impl QueryExecutor {
             } else {
                 Ok(batches)
             }
+        }
+    }
+
+    /// Execute measures from multiple independent fact tables.
+    ///
+    /// Each measure group is evaluated as an independent star-schema query.
+    /// Results are combined via FULL OUTER JOIN on shared group-by columns,
+    /// or CROSS JOIN when there are no group-by columns.
+    async fn execute_multi_group_aggregation(
+        ctx: &SessionContext,
+        measure_groups: &[(&str, Vec<&Measure>)],
+        group_by: &[ColumnRef],
+        model: &DataModel,
+        mut plan: Option<&mut PlanNode>,
+    ) -> QueryResult<Vec<RecordBatch>> {
+        let resolver = ContextResolver::new(model);
+
+        // For each group, determine reachable group-by columns and build SQL.
+        let mut group_table_names: Vec<String> = Vec::new();
+
+        for (group_idx, (fact_model_name, measures)) in measure_groups.iter().enumerate() {
+            let fact_table = &fact_model_name.to_lowercase();
+
+            // Determine which group-by columns are reachable from this fact table.
+            let reachable_group_by: Vec<&ColumnRef> = group_by
+                .iter()
+                .filter(|dim| {
+                    dim.table.eq_ignore_ascii_case(fact_model_name)
+                        || model.find_relationship(fact_model_name, &dim.table).is_ok()
+                })
+                .collect();
+
+            let mut select_parts: Vec<String> = Vec::new();
+            let mut group_parts: Vec<String> = Vec::new();
+
+            for dim in &reachable_group_by {
+                let dim_table = dim.table.to_lowercase();
+                let qualified = format!("{dim_table}.\"{}\"", dim.column);
+                select_parts.push(qualified.clone());
+                group_parts.push(qualified);
+            }
+
+            // Resolve context operations for measures in this group.
+            let mut context_join_tables: Vec<String> = Vec::new();
+            let mut case_when_measures: Vec<String> = Vec::new();
+            let mut override_joins: Vec<(String, String)> = Vec::new();
+
+            for measure in measures {
+                let name = measure.name();
+                let expr = measure.expression();
+
+                let is_compound_with_context = expr.has_context_ops()
+                    && matches!(
+                        expr,
+                        Expression::BinaryOp { .. }
+                            | Expression::SafeDivide { .. }
+                            | Expression::ScalarFunc { .. }
+                            | Expression::Coalesce(_)
+                            | Expression::If { .. }
+                    );
+
+                let sql_fragment = if is_compound_with_context {
+                    case_when_measures.push(name.to_string());
+                    let expr_sql = resolve_compound_sql(
+                        expr,
+                        model,
+                        fact_table,
+                        fact_model_name,
+                        &mut context_join_tables,
+                        &mut override_joins,
+                    )?;
+                    format!("{expr_sql} AS \"{name}\"")
+                } else {
+                    let (stripped_expr, eval_ctx) = resolver.resolve(expr)?;
+                    let effective = eval_ctx.effective_filters(&[]);
+
+                    for f in &effective {
+                        if f.table != *fact_model_name {
+                            context_join_tables.push(f.table.clone());
+                        }
+                    }
+                    for cond in &eval_ctx.conditions {
+                        collect_qualified_tables(cond, fact_model_name, &mut context_join_tables);
+                    }
+
+                    let alias_map = build_override_alias_map(
+                        &eval_ctx,
+                        model,
+                        fact_model_name,
+                        fact_table,
+                        &mut override_joins,
+                    );
+
+                    if !effective.is_empty() || !eval_ctx.conditions.is_empty() {
+                        case_when_measures.push(name.to_string());
+                        let condition = build_condition_sql_with_conditions(
+                            &effective,
+                            &eval_ctx.conditions,
+                            fact_table,
+                            fact_model_name,
+                            model,
+                            &alias_map,
+                        );
+                        let measure_table = &measure.table().to_lowercase();
+                        let expr_sql = stripped_expr.to_case_when_sql(&condition, measure_table);
+                        format!("{expr_sql} AS \"{name}\"")
+                    } else if let Some((op, col)) = stripped_expr.as_simple_aggregate() {
+                        let fact = measure.table().to_lowercase();
+                        match op {
+                            AggregateOp::Sum => format!("SUM({fact}.\"{col}\") AS \"{name}\""),
+                            AggregateOp::Count => format!("COUNT({fact}.\"{col}\") AS \"{name}\""),
+                            AggregateOp::Average => format!("AVG({fact}.\"{col}\") AS \"{name}\""),
+                            AggregateOp::Min => format!("MIN({fact}.\"{col}\") AS \"{name}\""),
+                            AggregateOp::Max => format!("MAX({fact}.\"{col}\") AS \"{name}\""),
+                            AggregateOp::DistinctCount => {
+                                format!("COUNT(DISTINCT {fact}.\"{col}\") AS \"{name}\"")
+                            }
+                            AggregateOp::CountRows => format!("COUNT(*) AS \"{name}\""),
+                        }
+                    } else {
+                        let expr_sql = stripped_expr.to_sql_string();
+                        format!("{expr_sql} AS \"{name}\"")
+                    }
+                };
+                select_parts.push(sql_fragment);
+            }
+
+            let select_clause = select_parts.join(", ");
+            let mut sql = format!("SELECT {select_clause} FROM {fact_table}");
+
+            // Add JOINs for dimension tables.
+            let mut joined_tables = std::collections::HashSet::new();
+            joined_tables.insert(fact_table.clone());
+
+            let add_join_to = |dim_table: &str,
+                               sql: &mut String,
+                               joined: &mut std::collections::HashSet<String>|
+             -> Result<(), crate::error::QueryError> {
+                let dim_lower = dim_table.to_lowercase();
+                if joined.contains(&dim_lower) {
+                    return Ok(());
+                }
+                let rel = model.find_relationship(fact_model_name, dim_table)?;
+                let left_is_from = rel.from_table() == *fact_model_name;
+                let on_clause = rel.build_on_clause(fact_table, &dim_lower, left_is_from);
+                sql.push_str(&format!(" JOIN {dim_lower} ON {on_clause}"));
+                joined.insert(dim_lower);
+                Ok(())
+            };
+
+            for dim in &reachable_group_by {
+                add_join_to(&dim.table, &mut sql, &mut joined_tables)?;
+            }
+
+            for dim_table in &context_join_tables {
+                let dim_lower = dim_table.to_lowercase();
+                if joined_tables.contains(&dim_lower) {
+                    continue;
+                }
+                if let Ok(rel) = model.find_relationship(fact_model_name, dim_table) {
+                    let left_is_from = rel.from_table() == *fact_model_name;
+                    let on_clause = rel.build_on_clause(fact_table, &dim_lower, left_is_from);
+                    sql.push_str(&format!(" JOIN {dim_lower} ON {on_clause}"));
+                    joined_tables.insert(dim_lower);
+                }
+            }
+
+            // Add aliased JOINs from USERELATIONSHIP overrides.
+            for (alias, on_clause) in &override_joins {
+                if !joined_tables.contains(alias) {
+                    let source_table = alias.split("__").next().unwrap_or(alias);
+                    sql.push_str(&format!(" JOIN {source_table} AS {alias} ON {on_clause}"));
+                    joined_tables.insert(alias.clone());
+                }
+            }
+
+            // GROUP BY clause.
+            if !group_parts.is_empty() {
+                sql.push_str(" GROUP BY ");
+                sql.push_str(&group_parts.join(", "));
+
+                if !case_when_measures.is_empty() {
+                    let having_parts: Vec<String> = case_when_measures
+                        .iter()
+                        .map(|m| format!("\"{m}\" IS NOT NULL"))
+                        .collect();
+                    sql.push_str(" HAVING ");
+                    sql.push_str(&having_parts.join(" OR "));
+                }
+            }
+
+            // Execute the group query and register result.
+            let group_name = format!("__group_{group_idx}");
+            let df = ctx.sql(&sql).await?;
+            let batches = df.collect().await?;
+
+            if let Some(ref mut plan_node) = plan {
+                let mut group_node = PlanNode::new(
+                    PlanOperation::DataFusionExecution,
+                    format!("Group {group_idx}: {fact_model_name}"),
+                )
+                .with_property("sql", PlanValue::Text(sql.clone()))
+                .with_property(
+                    "measures",
+                    PlanValue::List(measures.iter().map(|m| m.name().to_string()).collect()),
+                );
+                let result_rows: usize = batches.iter().map(|b| b.num_rows()).sum();
+                group_node.add_property("result_rows", PlanValue::Number(result_rows as f64));
+                plan_node.add_child(group_node);
+            }
+
+            if !batches.is_empty() {
+                let schema = batches[0].schema();
+                let combined = concat_batches(&schema, &batches)?;
+                ctx.register_batch(&group_name, combined)?;
+            } else {
+                // Register an empty batch so the FULL OUTER JOIN still works.
+                let empty = RecordBatch::new_empty(arrow::datatypes::SchemaRef::new(
+                    arrow::datatypes::Schema::empty(),
+                ));
+                ctx.register_batch(&group_name, empty)?;
+            }
+            group_table_names.push(group_name);
+        }
+
+        // Build the combining query via FULL OUTER JOIN (or CROSS JOIN for scalars).
+        let measure_names: Vec<String> = measure_groups
+            .iter()
+            .flat_map(|(_, measures)| measures.iter().map(|m| m.name().to_string()))
+            .collect();
+
+        if group_by.is_empty() {
+            // Scalar query: CROSS JOIN all groups.
+            let mut select_parts: Vec<String> = Vec::new();
+            for name in &measure_names {
+                // Find which group table has this measure.
+                for (gi, (_, measures)) in measure_groups.iter().enumerate() {
+                    if measures.iter().any(|m| m.name() == name) {
+                        select_parts.push(format!("__group_{gi}.\"{name}\""));
+                        break;
+                    }
+                }
+            }
+            let mut sql = format!(
+                "SELECT {} FROM {}",
+                select_parts.join(", "),
+                group_table_names[0]
+            );
+            for gt in group_table_names.iter().skip(1) {
+                sql.push_str(&format!(" CROSS JOIN {gt}"));
+            }
+
+            let df = ctx.sql(&sql).await?;
+            let batches = df.collect().await?;
+            Ok(batches)
+        } else {
+            // Grouped query: FULL OUTER JOIN on shared group-by columns.
+            // Determine which group-by columns each group has.
+            let group_reachable: Vec<Vec<&ColumnRef>> = measure_groups
+                .iter()
+                .map(|(fact_name, _)| {
+                    group_by
+                        .iter()
+                        .filter(|dim| {
+                            dim.table.eq_ignore_ascii_case(fact_name)
+                                || model.find_relationship(fact_name, &dim.table).is_ok()
+                        })
+                        .collect()
+                })
+                .collect();
+
+            // Build SELECT: COALESCE group-by cols from all groups that have them,
+            // then measure cols from their respective groups.
+            let mut select_parts: Vec<String> = Vec::new();
+
+            for dim in group_by {
+                let col_name = &dim.column;
+                let sources: Vec<String> = group_reachable
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, reachable)| {
+                        reachable
+                            .iter()
+                            .any(|c| c.table == dim.table && c.column == dim.column)
+                    })
+                    .map(|(gi, _)| format!("__group_{gi}.\"{col_name}\""))
+                    .collect();
+
+                if sources.len() == 1 {
+                    select_parts.push(format!("{} AS \"{col_name}\"", sources[0]));
+                } else {
+                    select_parts.push(format!(
+                        "COALESCE({}) AS \"{col_name}\"",
+                        sources.join(", ")
+                    ));
+                }
+            }
+
+            for name in &measure_names {
+                for (gi, (_, measures)) in measure_groups.iter().enumerate() {
+                    if measures.iter().any(|m| m.name() == name) {
+                        select_parts.push(format!("__group_{gi}.\"{name}\""));
+                        break;
+                    }
+                }
+            }
+
+            // Build FROM with FULL OUTER JOINs.
+            let mut sql = format!(
+                "SELECT {} FROM {}",
+                select_parts.join(", "),
+                group_table_names[0]
+            );
+
+            for (gi, gt) in group_table_names.iter().enumerate().skip(1) {
+                // Find group-by columns shared between group 0 (or previous) and this group.
+                // Join on all columns that both sides have.
+                let prev_reachable = &group_reachable[0];
+                let this_reachable = &group_reachable[gi];
+
+                let shared_cols: Vec<&str> = group_by
+                    .iter()
+                    .filter(|dim| {
+                        prev_reachable
+                            .iter()
+                            .any(|c| c.table == dim.table && c.column == dim.column)
+                            && this_reachable
+                                .iter()
+                                .any(|c| c.table == dim.table && c.column == dim.column)
+                    })
+                    .map(|dim| dim.column.as_str())
+                    .collect();
+
+                if shared_cols.is_empty() {
+                    sql.push_str(&format!(" CROSS JOIN {gt}"));
+                } else {
+                    let on_parts: Vec<String> = shared_cols
+                        .iter()
+                        .map(|col| format!("__group_0.\"{col}\" = {gt}.\"{col}\""))
+                        .collect();
+                    sql.push_str(&format!(
+                        " FULL OUTER JOIN {gt} ON {}",
+                        on_parts.join(" AND ")
+                    ));
+                }
+            }
+
+            if let Some(ref mut plan_node) = plan {
+                plan_node.add_child(
+                    PlanNode::new(
+                        PlanOperation::MultiGroupAggregation,
+                        "Combine measure groups",
+                    )
+                    .with_property("sql", PlanValue::Text(sql.clone()))
+                    .with_property("groups", PlanValue::Number(measure_groups.len() as f64)),
+                );
+            }
+
+            let df = ctx.sql(&sql).await?;
+            let batches = df.collect().await?;
+            Ok(batches)
         }
     }
 
@@ -2035,6 +2324,23 @@ fn resolve_compound_sql(
     }
 }
 
+/// Partition measures into groups by their home table, preserving insertion order.
+///
+/// Returns a list of (table_name, measures) groups. Within each group, the
+/// measures are in their original order.
+fn partition_measures_by_table(measures: &[Measure]) -> Vec<(&str, Vec<&Measure>)> {
+    let mut groups: Vec<(&str, Vec<&Measure>)> = Vec::new();
+    for m in measures {
+        let table = m.table();
+        if let Some(group) = groups.iter_mut().find(|(t, _)| *t == table) {
+            group.1.push(m);
+        } else {
+            groups.push((table, vec![m]));
+        }
+    }
+    groups
+}
+
 /// Build a cache key for a materialized QUERY binding.
 ///
 /// The key combines the binding name, sorted source filters, and sorted group-by
@@ -2136,5 +2442,48 @@ mod tests {
     fn extract_column_values_empty_batches() {
         let values = extract_column_values(&[], "id");
         assert!(values.is_empty());
+    }
+
+    #[test]
+    fn partition_measures_single_table() {
+        let m1 = Measure::simple("m1", "fact_sales", "amount", AggregateOp::Sum);
+        let m2 = Measure::simple("m2", "fact_sales", "id", AggregateOp::Count);
+        let measures = [m1, m2];
+        let groups = partition_measures_by_table(&measures);
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].0, "fact_sales");
+        assert_eq!(groups[0].1.len(), 2);
+    }
+
+    #[test]
+    fn partition_measures_two_tables() {
+        let m1 = Measure::simple("sales_total", "fact_sales", "amount", AggregateOp::Sum);
+        let m2 = Measure::simple(
+            "purchase_total",
+            "fact_purchasing",
+            "amount",
+            AggregateOp::Sum,
+        );
+        let m3 = Measure::simple("sales_count", "fact_sales", "id", AggregateOp::Count);
+        let measures = [m1, m2, m3];
+        let groups = partition_measures_by_table(&measures);
+        assert_eq!(groups.len(), 2);
+        assert_eq!(groups[0].0, "fact_sales");
+        assert_eq!(groups[0].1.len(), 2); // sales_total + sales_count
+        assert_eq!(groups[1].0, "fact_purchasing");
+        assert_eq!(groups[1].1.len(), 1); // purchase_total
+    }
+
+    #[test]
+    fn partition_measures_three_tables() {
+        let m1 = Measure::simple("a", "t1", "x", AggregateOp::Sum);
+        let m2 = Measure::simple("b", "t2", "x", AggregateOp::Sum);
+        let m3 = Measure::simple("c", "t3", "x", AggregateOp::Sum);
+        let measures = [m1, m2, m3];
+        let groups = partition_measures_by_table(&measures);
+        assert_eq!(groups.len(), 3);
+        assert_eq!(groups[0].0, "t1");
+        assert_eq!(groups[1].0, "t2");
+        assert_eq!(groups[2].0, "t3");
     }
 }

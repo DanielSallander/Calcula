@@ -124,6 +124,8 @@ pub enum PlanOperation {
     CalculatedColumnMaterialization,
     /// DataFusion SQL execution.
     DataFusionExecution,
+    /// Multiple measure groups evaluated independently and combined.
+    MultiGroupAggregation,
 }
 
 /// A key-value property attached to a plan node.
