@@ -14,7 +14,7 @@ import {
   addTaskPaneContextKey,
 } from "@api";
 import { pivot } from "@api/pivot";
-import { createConnection, getModelInfo } from "../lib/bi-api";
+import { createConnection, connect, getModelInfo } from "../lib/bi-api";
 import { PIVOT_PANE_ID } from "../../Pivot/manifest";
 import { CONNECTIONS_PANE_ID } from "../manifest";
 import {
@@ -229,7 +229,9 @@ export function ModelDialog({
         modelPath,
       });
 
-      setCreatedConnection(conn);
+      // Establish the database connection immediately so it shows as "Connected"
+      const connectedConn = await connect(conn.id);
+      setCreatedConnection(connectedConn);
 
       // Fetch model info for display
       const info = await getModelInfo(conn.id);
