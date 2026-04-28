@@ -219,6 +219,16 @@ pub struct BiFilter {
     pub value: String,
 }
 
+/// A cross-filter constraint: only include rows where the given column's value
+/// is in the provided list. Used for cross-filtering between ribbon filters.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BiCrossFilter {
+    pub table: String,
+    pub column: String,
+    pub values: Vec<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BiInsertRequest {

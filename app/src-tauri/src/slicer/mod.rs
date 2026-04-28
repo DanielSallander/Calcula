@@ -4,6 +4,8 @@
 pub mod types;
 pub mod commands;
 pub mod computed;
+#[cfg(test)]
+mod tests;
 
 pub use types::*;
 pub use commands::*;

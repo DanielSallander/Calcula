@@ -7,7 +7,6 @@ import type {
   SlicerItem,
   CreateRibbonFilterParams,
   UpdateRibbonFilterParams,
-  RibbonFilterScope,
 } from "./filterPaneTypes";
 
 export async function createRibbonFilter(
@@ -44,20 +43,32 @@ export async function getAllRibbonFilters(): Promise<RibbonFilter[]> {
   return invokeBackend<RibbonFilter[]>("get_all_ribbon_filters");
 }
 
-export async function getRibbonFiltersByScope(
-  scope: RibbonFilterScope,
-  sheetIndex?: number,
-): Promise<RibbonFilter[]> {
-  return invokeBackend<RibbonFilter[]>("get_ribbon_filters_by_scope", {
-    scope,
-    sheetIndex: sheetIndex ?? null,
-  });
+export async function getRibbonFilter(
+  filterId: number,
+): Promise<RibbonFilter> {
+  return invokeBackend<RibbonFilter>("get_ribbon_filter", { filterId });
 }
 
 export async function getRibbonFilterItems(
   filterId: number,
 ): Promise<SlicerItem[]> {
   return invokeBackend<SlicerItem[]>("get_ribbon_filter_items", { filterId });
+}
+
+export async function clearRibbonFilter(filterId: number): Promise<void> {
+  return invokeBackend<void>("clear_ribbon_filter", { filterId });
+}
+
+export async function setRibbonFilterItemSelected(
+  filterId: number,
+  value: string,
+  selected: boolean,
+): Promise<void> {
+  return invokeBackend<void>("set_ribbon_filter_item_selected", {
+    filterId,
+    value,
+    selected,
+  });
 }
 
 // ============================================================================
@@ -106,5 +117,25 @@ export async function getBiColumnValues(
     connectionId,
     table,
     column,
+  });
+}
+
+export interface BiCrossFilter {
+  table: string;
+  column: string;
+  values: string[];
+}
+
+export async function getBiColumnAvailableValues(
+  connectionId: number,
+  table: string,
+  column: string,
+  crossFilters: BiCrossFilter[],
+): Promise<string[]> {
+  return invokeBackend<string[]>("bi_get_column_available_values", {
+    connectionId,
+    table,
+    column,
+    crossFilters,
   });
 }

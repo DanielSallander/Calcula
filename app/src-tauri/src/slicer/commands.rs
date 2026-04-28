@@ -227,6 +227,117 @@ pub fn update_slicer_selection(
 // QUERY COMMANDS
 // ============================================================================
 
+/// Get a single slicer by ID.
+#[tauri::command]
+pub fn get_slicer(
+    slicer_state: State<SlicerState>,
+    slicer_id: u64,
+) -> Result<Slicer, String> {
+    slicer_state
+        .slicers
+        .lock()
+        .unwrap()
+        .get(&slicer_id)
+        .cloned()
+        .ok_or_else(|| format!("Slicer {} not found", slicer_id))
+}
+
+/// Clear all filter selections on a slicer (set all items to selected).
+#[tauri::command]
+pub fn clear_slicer_filter(
+    slicer_state: State<SlicerState>,
+    slicer_id: u64,
+) -> Result<(), String> {
+    let mut slicers = slicer_state.slicers.lock().unwrap();
+    let slicer = slicers
+        .get_mut(&slicer_id)
+        .ok_or_else(|| format!("Slicer {} not found", slicer_id))?;
+
+    slicer.selected_items = None;
+    Ok(())
+}
+
+/// Toggle a single item's selection state within a slicer.
+/// If the slicer currently has all items selected (selectedItems = null),
+/// toggling an item OFF creates a selection list with all items except that one.
+/// If toggling an item ON completes the full set, clears the filter (null).
+#[tauri::command]
+pub fn set_slicer_item_selected(
+    state: State<AppState>,
+    pivot_state: State<'_, crate::pivot::PivotState>,
+    slicer_state: State<SlicerState>,
+    slicer_id: u64,
+    value: String,
+    selected: bool,
+) -> Result<(), String> {
+    // Get the full item list to know when all are selected
+    let all_items: Vec<String> = {
+        let slicers = slicer_state.slicers.lock().unwrap();
+        let slicer = slicers
+            .get(&slicer_id)
+            .ok_or_else(|| format!("Slicer {} not found", slicer_id))?;
+
+        if slicer.source_type == SlicerSourceType::BiConnection {
+            // Can't get items synchronously for BI — work with current selection
+            let mut current = slicer.selected_items.clone().unwrap_or_default();
+            if selected {
+                if !current.contains(&value) {
+                    current.push(value.clone());
+                }
+            } else {
+                current.retain(|v| v != &value);
+            }
+            drop(slicers);
+            let mut slicers = slicer_state.slicers.lock().unwrap();
+            let slicer = slicers.get_mut(&slicer_id).unwrap();
+            slicer.selected_items = if current.is_empty() { None } else { Some(current) };
+            return Ok(());
+        }
+
+        let source_type = slicer.source_type;
+        let cache_source_id = slicer.cache_source_id;
+        let field_name = slicer.field_name.clone();
+        drop(slicers);
+
+        match source_type {
+            SlicerSourceType::Table => {
+                get_table_column_values(&state, cache_source_id, &field_name)
+                    .unwrap_or_default()
+            }
+            SlicerSourceType::Pivot => {
+                get_pivot_field_values(&pivot_state, cache_source_id, &field_name)
+                    .unwrap_or_default()
+            }
+            SlicerSourceType::BiConnection => unreachable!(),
+        }
+    };
+
+    let mut slicers = slicer_state.slicers.lock().unwrap();
+    let slicer = slicers
+        .get_mut(&slicer_id)
+        .ok_or_else(|| format!("Slicer {} not found", slicer_id))?;
+
+    let mut current_selected: std::collections::HashSet<String> = match &slicer.selected_items {
+        None => all_items.iter().cloned().collect(),
+        Some(items) => items.iter().cloned().collect(),
+    };
+
+    if selected {
+        current_selected.insert(value);
+    } else {
+        current_selected.remove(&value);
+    }
+
+    // If all items are selected, clear the filter
+    if current_selected.len() >= all_items.len() {
+        slicer.selected_items = None;
+    } else {
+        slicer.selected_items = Some(current_selected.into_iter().collect());
+    }
+
+    Ok(())
+}
+
 /// Get all slicers.
 #[tauri::command]
 pub fn get_all_slicers(

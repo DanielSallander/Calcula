@@ -1,9 +1,10 @@
 //! FILENAME: app/extensions/FilterPane/lib/filterPaneFilterBridge.ts
 // PURPOSE: Bridges ribbon filter selection changes to table/pivot filters.
 
-import type { RibbonFilter } from "./filterPaneTypes";
-import { invokeBackend, updateBiPivotFields } from "@api/backend";
+import type { RibbonFilter, SlicerConnection } from "./filterPaneTypes";
+import { invokeBackend, updateBiPivotFields, getAllPivotTables } from "@api/backend";
 import { emitAppEvent, AppEvents } from "@api";
+import { getAllFilters } from "./filterPaneStore";
 
 // ============================================================================
 // BI Field Helpers
@@ -94,6 +95,12 @@ async function ensureBiFieldInPivotCache(
 
     if (!info.biModel) return false;
 
+    // Don't modify a pivot that has no measures configured yet —
+    // reconstructing its field config would overwrite user changes.
+    if (info.dataHierarchies.length === 0) {
+      return false;
+    }
+
     const lookupCols = info.biModel.lookupColumns ?? [];
 
     const rowFields = info.rowHierarchies
@@ -135,15 +142,94 @@ async function ensureBiFieldInPivotCache(
 // ============================================================================
 
 /**
+ * Resolve the effective connected sources for a filter based on its connectionMode.
+ * - "manual": uses connectedSources as-is
+ * - "bySheet": finds all pivots/tables on the specified sheets
+ * - "workbook": finds all pivots/tables in the workbook
+ */
+async function resolveConnections(
+  filter: RibbonFilter,
+): Promise<SlicerConnection[]> {
+  if (filter.connectionMode === "manual" || !filter.connectionMode) {
+    return filter.connectedSources ?? [];
+  }
+
+  const connections: SlicerConnection[] = [];
+
+  // Get all pivots
+  try {
+    const pivots = await getAllPivotTables<
+      Array<{ id: number; name: string; sourceRange: string }>
+    >();
+
+    if (filter.connectionMode === "workbook") {
+      // Include all pivots
+      for (const pv of pivots) {
+        connections.push({ sourceType: "pivot", sourceId: pv.id });
+      }
+    } else if (filter.connectionMode === "bySheet") {
+      const sheetSet = new Set(filter.connectedSheets ?? []);
+      for (const pv of pivots) {
+        try {
+          const biMeta = await invokeBackend<{
+            connectionId: number;
+            sheetIndex: number;
+          } | null>("get_pivot_bi_metadata", { pivotId: pv.id });
+          if (biMeta && sheetSet.has(biMeta.sheetIndex)) {
+            connections.push({ sourceType: "pivot", sourceId: pv.id });
+          }
+        } catch {
+          // Non-BI pivot — check via pivot table info
+          // For now include all pivots (sheet detection for range pivots TBD)
+        }
+      }
+    }
+  } catch {
+    // No pivots available
+  }
+
+  // Get all tables
+  try {
+    const tables = await invokeBackend<
+      Array<{ id: number; name: string; sheetIndex: number }>
+    >("get_all_tables", {});
+
+    if (filter.connectionMode === "workbook") {
+      for (const t of tables) {
+        connections.push({ sourceType: "table", sourceId: t.id });
+      }
+    } else if (filter.connectionMode === "bySheet") {
+      const sheetSet = new Set(filter.connectedSheets ?? []);
+      for (const t of tables) {
+        if (sheetSet.has(t.sheetIndex)) {
+          connections.push({ sourceType: "table", sourceId: t.id });
+        }
+      }
+    }
+  } catch {
+    // No tables available
+  }
+
+  return connections;
+}
+
+/**
  * Apply a ribbon filter's selection to all its connected sources.
+ * Resolves connections dynamically based on connectionMode.
+ * After applying, re-applies all OTHER active filters that target the same
+ * pivots, because ensureBiFieldInPivotCache can reset the pivot query.
  */
 export async function applyRibbonFilter(filter: RibbonFilter): Promise<void> {
   try {
-    const connected = filter.connectedSources ?? [];
-    console.log(
-      `[FilterPane] applyRibbonFilter: id=${filter.id}, field=${filter.fieldName}, selectedItems=${filter.selectedItems?.length ?? "all"}, connections=${JSON.stringify(connected)}`,
-    );
+    // If all items are selected (null), there's no filter to apply.
+    // Skip entirely to avoid unnecessary pivot resets and flicker.
+    if (filter.selectedItems === null) return;
+
+    const connected = await resolveConnections(filter);
     if (connected.length === 0) return;
+
+    // Collect pivot IDs we're applying to
+    const affectedPivotIds = new Set<number>();
 
     for (const conn of connected) {
       try {
@@ -153,6 +239,7 @@ export async function applyRibbonFilter(filter: RibbonFilter): Promise<void> {
             filter.fieldName,
             filter.selectedItems,
           );
+          affectedPivotIds.add(conn.sourceId);
         } else {
           await applyTableFilterForSource(
             conn.sourceId,
@@ -169,6 +256,32 @@ export async function applyRibbonFilter(filter: RibbonFilter): Promise<void> {
       }
     }
 
+    // Re-apply other active ribbon filters that target the same pivots.
+    // This is needed because ensureBiFieldInPivotCache may have reset the
+    // pivot query, wiping filters from other ribbon filters.
+    if (affectedPivotIds.size > 0) {
+      const allFilters = getAllFilters();
+      for (const other of allFilters) {
+        if (other.id === filter.id) continue;
+        if (other.selectedItems === null) continue; // no active filter
+
+        const otherConnected = await resolveConnections(other);
+        for (const conn of otherConnected) {
+          if (conn.sourceType === "pivot" && affectedPivotIds.has(conn.sourceId)) {
+            try {
+              await applyPivotFilterForSource(
+                conn.sourceId,
+                other.fieldName,
+                other.selectedItems,
+              );
+            } catch {
+              // Best effort
+            }
+          }
+        }
+      }
+    }
+
     emitAppEvent(AppEvents.GRID_DATA_REFRESH);
   } catch (err) {
     console.error("[FilterPane] Failed to apply filter:", err);
@@ -180,7 +293,7 @@ export async function applyRibbonFilter(filter: RibbonFilter): Promise<void> {
  */
 export async function clearRibbonFilter(filter: RibbonFilter): Promise<void> {
   try {
-    const connected = filter.connectedSources ?? [];
+    const connected = await resolveConnections(filter);
     if (connected.length === 0) return;
 
     for (const conn of connected) {

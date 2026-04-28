@@ -643,21 +643,20 @@ pub async fn bi_get_column_values(
     Ok(values)
 }
 
-/// Get distinct values for a column, filtered by sibling filter constraints.
-/// Used for cross-filtering: determines which values still have data given
-/// other active filters on the same connection.
+/// Get distinct values for a column, filtered by cross-filter constraints.
+/// Each constraint specifies a column and a list of allowed values (IN-list).
+/// The query includes sibling columns in GROUP BY and post-filters results,
+/// so the BI engine's relationship model handles cross-table joins.
 #[tauri::command]
 pub async fn bi_get_column_available_values(
     bi_state: State<'_, BiState>,
     connection_id: ConnectionId,
     table: String,
     column: String,
-    sibling_filters: Vec<BiFilter>,
+    cross_filters: Vec<BiCrossFilter>,
 ) -> Result<Vec<String>, String> {
-    // Auto-connect if not already connected
+    // Auto-connect + auto-bind
     auto_connect_bi_connection(&bi_state, connection_id).await?;
-
-    // Auto-bind ALL model tables
     {
         let connections = bi_state.connections.lock().unwrap();
         let conn = connections.get(&connection_id)
@@ -684,25 +683,16 @@ pub async fn bi_get_column_available_values(
             .ok_or_else(|| "No measures in model".to_string())?
     };
 
+    // Build GROUP BY: target column + all cross-filter columns
+    let mut group_by = vec![bi_engine::ColumnRef::new(&table, &column)];
+    for cf in &cross_filters {
+        group_by.push(bi_engine::ColumnRef::new(&cf.table, &cf.column));
+    }
+
     let query_request = bi_engine::QueryRequest {
         measures: vec![first_measure],
-        group_by: vec![bi_engine::ColumnRef::new(&table, &column)],
-        filters: sibling_filters
-            .iter()
-            .map(|f| bi_engine::FilterCondition {
-                column: f.column.clone(),
-                operator: match f.operator.as_str() {
-                    "=" | "eq" => bi_engine::FilterOperator::Equal,
-                    "!=" | "ne" => bi_engine::FilterOperator::NotEqual,
-                    ">" | "gt" => bi_engine::FilterOperator::GreaterThan,
-                    "<" | "lt" => bi_engine::FilterOperator::LessThan,
-                    ">=" | "gte" => bi_engine::FilterOperator::GreaterThanOrEqual,
-                    "<=" | "lte" => bi_engine::FilterOperator::LessThanOrEqual,
-                    _ => bi_engine::FilterOperator::Equal,
-                },
-                value: f.value.clone(),
-            })
-            .collect(),
+        group_by,
+        filters: vec![],
         lookups: vec![],
     };
 
@@ -714,12 +704,9 @@ pub async fn bi_get_column_available_values(
         conn.engine.take().ok_or("No model loaded.")?
     };
 
-    // Refresh in-memory tables that haven't been fetched yet
     let _ = engine.refresh_all_in_memory().await;
-
     let result = engine.query(query_request).await;
 
-    // Always put engine back, even on error
     {
         let mut connections = bi_state.connections.lock().unwrap();
         if let Some(conn) = connections.get_mut(&connection_id) {
@@ -729,24 +716,52 @@ pub async fn bi_get_column_available_values(
 
     let batches = result.map_err(|e| format!("Query failed: {}", e))?;
 
-    let mut values: Vec<String> = Vec::new();
+    // Post-filter: for each row, check if all cross-filter columns match
+    // their allowed values. Collect target column values from matching rows.
+    // Column 0 = target, columns 1..N = cross-filter columns (in order).
+    let mut values = std::collections::HashSet::new();
+
     for batch in &batches {
         if batch.num_columns() == 0 {
             continue;
         }
-        let col = batch.column(0);
+
+        let num_cross = cross_filters.len();
+
+        // Build allowed-value sets for each cross-filter column
+        let allowed: Vec<std::collections::HashSet<&str>> = cross_filters
+            .iter()
+            .map(|cf| cf.values.iter().map(|v| v.as_str()).collect())
+            .collect();
+
         for row_idx in 0..batch.num_rows() {
-            if let Some(v) = arrow_value_to_string(col, row_idx) {
-                if !v.is_empty() {
-                    values.push(v);
+            // Check all cross-filter columns match
+            let mut passes = true;
+            for (cf_idx, allowed_set) in allowed.iter().enumerate() {
+                let col_idx = 1 + cf_idx; // offset by target column
+                if col_idx < batch.num_columns() {
+                    let val = arrow_value_to_string(batch.column(col_idx), row_idx)
+                        .unwrap_or_default();
+                    if !allowed_set.contains(val.as_str()) {
+                        passes = false;
+                        break;
+                    }
+                }
+            }
+
+            if passes {
+                if let Some(v) = arrow_value_to_string(batch.column(0), row_idx) {
+                    if !v.is_empty() {
+                        values.insert(v);
+                    }
                 }
             }
         }
     }
 
-    values.sort();
-    values.dedup();
-    Ok(values)
+    let mut result: Vec<String> = values.into_iter().collect();
+    result.sort();
+    Ok(result)
 }
 
 /// Insert query results into the grid as a locked region.

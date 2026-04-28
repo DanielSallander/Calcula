@@ -5,5 +5,7 @@
 pub mod tables;
 pub mod slicers;
 pub mod ribbon_filters;
+#[cfg(test)]
+mod ribbon_filter_tests;
 pub mod scripts;
 pub mod notebooks;

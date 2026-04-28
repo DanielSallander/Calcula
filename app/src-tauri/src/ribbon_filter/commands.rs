@@ -29,16 +29,17 @@ pub fn create_ribbon_filter(
     let filter = RibbonFilter {
         id,
         name: params.name,
-        scope: params.scope,
-        sheet_index: params.sheet_index,
         source_type: params.source_type,
         cache_source_id: params.cache_source_id,
         field_name: params.field_name,
+        field_data_type: params.field_data_type,
+        connection_mode: params.connection_mode,
         connected_sources: params.connected_sources,
+        connected_sheets: params.connected_sheets,
         display_mode: params.display_mode.unwrap_or_default(),
         selected_items: None,
-        cross_filter_enabled: true,
-        collapsed: false,
+        cross_filter_targets: vec![],
+        advanced_filter: None,
         order: params.order.unwrap_or(0),
         button_columns: 2,
         button_rows: 0,
@@ -46,10 +47,10 @@ pub fn create_ribbon_filter(
 
     log_debug!(
         "RIBBON_FILTER",
-        "create_ribbon_filter id={} name={} scope={:?} field={}",
+        "create_ribbon_filter id={} name={} mode={:?} field={}",
         id,
         filter.name,
-        filter.scope,
+        filter.connection_mode,
         filter.field_name
     );
 
@@ -94,17 +95,8 @@ pub fn update_ribbon_filter(
     if let Some(name) = params.name {
         filter.name = name;
     }
-    if let Some(scope) = params.scope {
-        filter.scope = scope;
-    }
-    if let Some(sheet_index) = params.sheet_index {
-        filter.sheet_index = sheet_index;
-    }
     if let Some(display_mode) = params.display_mode {
         filter.display_mode = display_mode;
-    }
-    if let Some(collapsed) = params.collapsed {
-        filter.collapsed = collapsed;
     }
     if let Some(order) = params.order {
         filter.order = order;
@@ -115,11 +107,20 @@ pub fn update_ribbon_filter(
     if let Some(button_rows) = params.button_rows {
         filter.button_rows = button_rows;
     }
-    if let Some(cross_filter_enabled) = params.cross_filter_enabled {
-        filter.cross_filter_enabled = cross_filter_enabled;
-    }
     if let Some(connected_sources) = params.connected_sources {
         filter.connected_sources = connected_sources;
+    }
+    if let Some(connection_mode) = params.connection_mode {
+        filter.connection_mode = connection_mode;
+    }
+    if let Some(connected_sheets) = params.connected_sheets {
+        filter.connected_sheets = connected_sheets;
+    }
+    if let Some(cross_filter_targets) = params.cross_filter_targets {
+        filter.cross_filter_targets = cross_filter_targets;
+    }
+    if let Some(advanced_filter) = params.advanced_filter {
+        filter.advanced_filter = advanced_filter;
     }
 
     Ok(filter.clone())
@@ -166,24 +167,127 @@ pub fn get_all_ribbon_filters(
         .collect()
 }
 
-/// Get ribbon filters by scope (workbook or sheet).
+
+/// Get a single ribbon filter by ID.
 #[tauri::command]
-pub fn get_ribbon_filters_by_scope(
+pub fn get_ribbon_filter(
     ribbon_filter_state: State<RibbonFilterState>,
-    scope: RibbonFilterScope,
-    sheet_index: Option<usize>,
-) -> Vec<RibbonFilter> {
+    filter_id: u64,
+) -> Result<RibbonFilter, String> {
     ribbon_filter_state
         .filters
         .lock()
         .unwrap()
-        .values()
-        .filter(|f| {
-            f.scope == scope
-                && (scope == RibbonFilterScope::Workbook || f.sheet_index == sheet_index)
-        })
+        .get(&filter_id)
         .cloned()
-        .collect()
+        .ok_or_else(|| format!("Ribbon filter {} not found", filter_id))
+}
+
+/// Clear all filter selections (set all items to selected).
+/// Convenience wrapper for update_ribbon_filter_selection(id, null).
+#[tauri::command]
+pub fn clear_ribbon_filter(
+    ribbon_filter_state: State<RibbonFilterState>,
+    filter_id: u64,
+) -> Result<(), String> {
+    log_debug!("RIBBON_FILTER", "clear_ribbon_filter id={}", filter_id);
+
+    let mut filters = ribbon_filter_state.filters.lock().unwrap();
+    let filter = filters
+        .get_mut(&filter_id)
+        .ok_or_else(|| format!("Ribbon filter {} not found", filter_id))?;
+
+    filter.selected_items = None;
+    Ok(())
+}
+
+/// Toggle a single item's selection state within a ribbon filter.
+/// If the filter currently has all items selected (selectedItems = null),
+/// toggling an item OFF creates a selection list with all items except that one.
+/// If toggling an item ON when all others are selected, clears the filter (null).
+#[tauri::command]
+pub fn set_ribbon_filter_item_selected(
+    state: State<AppState>,
+    pivot_state: State<'_, PivotState>,
+    slicer_state: State<crate::slicer::SlicerState>,
+    ribbon_filter_state: State<RibbonFilterState>,
+    filter_id: u64,
+    value: String,
+    selected: bool,
+) -> Result<(), String> {
+    log_debug!(
+        "RIBBON_FILTER",
+        "set_ribbon_filter_item_selected id={} value={} selected={}",
+        filter_id,
+        value,
+        selected
+    );
+
+    // First get the current items to know the full list
+    let all_items: Vec<String> = {
+        let filters = ribbon_filter_state.filters.lock().unwrap();
+        let filter = filters
+            .get(&filter_id)
+            .ok_or_else(|| format!("Ribbon filter {} not found", filter_id))?;
+
+        // For BiConnection, we can't get items synchronously — just work with current selection
+        if filter.source_type == SlicerSourceType::BiConnection {
+            let mut current = filter.selected_items.clone().unwrap_or_default();
+            if selected {
+                if !current.contains(&value) {
+                    current.push(value.clone());
+                }
+            } else {
+                current.retain(|v| v != &value);
+            }
+            drop(filters);
+            let mut filters = ribbon_filter_state.filters.lock().unwrap();
+            let filter = filters.get_mut(&filter_id).unwrap();
+            filter.selected_items = if current.is_empty() { None } else { Some(current) };
+            return Ok(());
+        }
+
+        // For table/pivot, get the full item list
+        drop(filters);
+        let items_result = get_ribbon_filter_items(
+            state, pivot_state, slicer_state,
+            ribbon_filter_state.clone(), filter_id,
+        );
+        match items_result {
+            Ok(items) => items.into_iter().map(|i| i.value).collect(),
+            Err(_) => {
+                // Fallback: work with current selection
+                let filters = ribbon_filter_state.filters.lock().unwrap();
+                let filter = filters.get(&filter_id).unwrap();
+                filter.selected_items.clone().unwrap_or_default()
+            }
+        }
+    };
+
+    let mut filters = ribbon_filter_state.filters.lock().unwrap();
+    let filter = filters
+        .get_mut(&filter_id)
+        .ok_or_else(|| format!("Ribbon filter {} not found", filter_id))?;
+
+    let mut current_selected: std::collections::HashSet<String> = match &filter.selected_items {
+        None => all_items.iter().cloned().collect(),
+        Some(items) => items.iter().cloned().collect(),
+    };
+
+    if selected {
+        current_selected.insert(value);
+    } else {
+        current_selected.remove(&value);
+    }
+
+    // If all items are selected, clear the filter
+    if current_selected.len() >= all_items.len() {
+        filter.selected_items = None;
+    } else {
+        filter.selected_items = Some(current_selected.into_iter().collect());
+    }
+
+    Ok(())
 }
 
 /// Get the unique items for a ribbon filter (reads from the data source).
@@ -222,8 +326,8 @@ pub fn get_ribbon_filter_items(
         .map(|f| (f.field_name.clone(), f.selected_items.clone().unwrap()))
         .collect();
 
-    // Also collect cross-filters from canvas slicers (if cross_filter_enabled)
-    if filter.cross_filter_enabled {
+    // Also collect cross-filters from canvas slicers that share connected sources
+    {
         let slicers = slicer_state.slicers.lock().unwrap();
         let slicer_siblings: Vec<(String, Vec<String>)> = slicers
             .values()

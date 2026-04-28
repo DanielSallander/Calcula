@@ -3,7 +3,7 @@
 //! Each ribbon filter is stored as ribbon_filters/filter_{id}.json.
 
 use persistence::{
-    SavedRibbonFilter, SavedRibbonFilterScope, SavedRibbonFilterDisplayMode,
+    SavedRibbonFilter, SavedRibbonFilterDisplayMode, SavedConnectionMode,
     SavedSlicerSourceType, SavedSlicerConnection,
 };
 use serde::{Deserialize, Serialize};
@@ -14,22 +14,23 @@ use serde::{Deserialize, Serialize};
 pub struct RibbonFilterDef {
     pub id: u64,
     pub name: String,
-    pub scope: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub sheet_index: Option<usize>,
     pub source_type: String,
     pub cache_source_id: u64,
     pub field_name: String,
+    #[serde(default = "default_unknown")]
+    pub field_data_type: String,
+    #[serde(default = "default_connection_mode")]
+    pub connection_mode: String,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub connected_sources: Vec<RibbonFilterConnectionDef>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub connected_sheets: Vec<usize>,
     #[serde(default = "default_display_mode")]
     pub display_mode: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub selected_items: Option<Vec<String>>,
-    #[serde(default = "default_true")]
-    pub cross_filter_enabled: bool,
-    #[serde(default)]
-    pub collapsed: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub cross_filter_targets: Vec<u64>,
     #[serde(default)]
     pub order: u32,
     #[serde(default = "default_button_columns")]
@@ -44,6 +45,14 @@ pub struct RibbonFilterDef {
 pub struct RibbonFilterConnectionDef {
     pub source_type: String,
     pub source_id: u64,
+}
+
+fn default_unknown() -> String {
+    "unknown".to_string()
+}
+
+fn default_connection_mode() -> String {
+    "manual".to_string()
 }
 
 fn default_display_mode() -> String {
@@ -63,11 +72,6 @@ impl From<&SavedRibbonFilter> for RibbonFilterDef {
         RibbonFilterDef {
             id: f.id,
             name: f.name.clone(),
-            scope: match f.scope {
-                SavedRibbonFilterScope::Workbook => "workbook".to_string(),
-                SavedRibbonFilterScope::Sheet => "sheet".to_string(),
-            },
-            sheet_index: f.sheet_index,
             source_type: match f.source_type {
                 SavedSlicerSourceType::Table => "table".to_string(),
                 SavedSlicerSourceType::Pivot => "pivot".to_string(),
@@ -75,6 +79,12 @@ impl From<&SavedRibbonFilter> for RibbonFilterDef {
             },
             cache_source_id: f.cache_source_id,
             field_name: f.field_name.clone(),
+            field_data_type: f.field_data_type.clone(),
+            connection_mode: match f.connection_mode {
+                SavedConnectionMode::Manual => "manual".to_string(),
+                SavedConnectionMode::BySheet => "bySheet".to_string(),
+                SavedConnectionMode::Workbook => "workbook".to_string(),
+            },
             connected_sources: f.connected_sources.iter().map(|c| {
                 RibbonFilterConnectionDef {
                     source_type: match c.source_type {
@@ -85,14 +95,14 @@ impl From<&SavedRibbonFilter> for RibbonFilterDef {
                     source_id: c.source_id,
                 }
             }).collect(),
+            connected_sheets: f.connected_sheets.clone(),
             display_mode: match f.display_mode {
                 SavedRibbonFilterDisplayMode::Checklist => "checklist".to_string(),
                 SavedRibbonFilterDisplayMode::Buttons => "buttons".to_string(),
                 SavedRibbonFilterDisplayMode::Dropdown => "dropdown".to_string(),
             },
             selected_items: f.selected_items.clone(),
-            cross_filter_enabled: f.cross_filter_enabled,
-            collapsed: f.collapsed,
+            cross_filter_targets: f.cross_filter_targets.clone(),
             order: f.order,
             button_columns: f.button_columns,
             button_rows: f.button_rows,
@@ -104,12 +114,8 @@ impl From<&RibbonFilterDef> for SavedRibbonFilter {
     fn from(f: &RibbonFilterDef) -> Self {
         SavedRibbonFilter {
             id: f.id,
+            advanced_filter: None,
             name: f.name.clone(),
-            scope: match f.scope.as_str() {
-                "workbook" => SavedRibbonFilterScope::Workbook,
-                _ => SavedRibbonFilterScope::Sheet,
-            },
-            sheet_index: f.sheet_index,
             source_type: match f.source_type.as_str() {
                 "pivot" => SavedSlicerSourceType::Pivot,
                 "biConnection" => SavedSlicerSourceType::BiConnection,
@@ -117,23 +123,30 @@ impl From<&RibbonFilterDef> for SavedRibbonFilter {
             },
             cache_source_id: f.cache_source_id,
             field_name: f.field_name.clone(),
+            field_data_type: f.field_data_type.clone(),
+            connection_mode: match f.connection_mode.as_str() {
+                "bySheet" => SavedConnectionMode::BySheet,
+                "workbook" => SavedConnectionMode::Workbook,
+                _ => SavedConnectionMode::Manual,
+            },
             connected_sources: f.connected_sources.iter().map(|c| {
                 SavedSlicerConnection {
                     source_type: match c.source_type.as_str() {
                         "pivot" => SavedSlicerSourceType::Pivot,
+                        "biConnection" => SavedSlicerSourceType::BiConnection,
                         _ => SavedSlicerSourceType::Table,
                     },
                     source_id: c.source_id,
                 }
             }).collect(),
+            connected_sheets: f.connected_sheets.clone(),
             display_mode: match f.display_mode.as_str() {
                 "buttons" => SavedRibbonFilterDisplayMode::Buttons,
                 "dropdown" => SavedRibbonFilterDisplayMode::Dropdown,
                 _ => SavedRibbonFilterDisplayMode::Checklist,
             },
             selected_items: f.selected_items.clone(),
-            cross_filter_enabled: f.cross_filter_enabled,
-            collapsed: f.collapsed,
+            cross_filter_targets: f.cross_filter_targets.clone(),
             order: f.order,
             button_columns: f.button_columns,
             button_rows: f.button_rows,

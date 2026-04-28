@@ -59,8 +59,28 @@ export async function getSlicersForSheet(sheetIndex: number): Promise<Slicer[]> 
   return invokeBackend<Slicer[]>("get_slicers_for_sheet", { sheetIndex });
 }
 
+export async function getSlicer(slicerId: number): Promise<Slicer> {
+  return invokeBackend<Slicer>("get_slicer", { slicerId });
+}
+
 export async function getSlicerItems(slicerId: number): Promise<SlicerItem[]> {
   return invokeBackend<SlicerItem[]>("get_slicer_items", { slicerId });
+}
+
+export async function clearSlicerFilter(slicerId: number): Promise<void> {
+  return invokeBackend<void>("clear_slicer_filter", { slicerId });
+}
+
+export async function setSlicerItemSelected(
+  slicerId: number,
+  value: string,
+  selected: boolean,
+): Promise<void> {
+  return invokeBackend<void>("set_slicer_item_selected", {
+    slicerId,
+    value,
+    selected,
+  });
 }
 
 // ============================================================================

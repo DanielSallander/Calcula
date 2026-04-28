@@ -6,8 +6,7 @@ import React, { useState, useEffect, useCallback } from "react";
 import type { RibbonContext } from "@api/extensions";
 import { showDialog } from "@api";
 import { FilterPaneEvents } from "../lib/filterPaneEvents";
-import { getAllFilters, getWorkbookFilters, getSheetFilters } from "../lib/filterPaneStore";
-import { getGridStateSnapshot } from "@api/state";
+import { getAllFilters } from "../lib/filterPaneStore";
 import { ADD_FILTER_DIALOG_ID } from "../manifest";
 import { RibbonFilterCard } from "./RibbonFilterCard";
 import type { RibbonFilter } from "../lib/filterPaneTypes";
@@ -17,36 +16,29 @@ export function FilterPaneTab({
 }: {
   context: RibbonContext;
 }): React.ReactElement {
-  const [workbookFilters, setWorkbookFilters] = useState<RibbonFilter[]>([]);
-  const [sheetFilters, setSheetFilters] = useState<RibbonFilter[]>([]);
+  const [filters, setFilters] = useState<RibbonFilter[]>([]);
 
-  const refreshLists = useCallback(() => {
-    setWorkbookFilters(getWorkbookFilters());
-    const snapshot = getGridStateSnapshot();
-    const activeSheet = snapshot?.activeSheet ?? 0;
-    setSheetFilters(getSheetFilters(activeSheet));
+  const refreshList = useCallback(() => {
+    setFilters([...getAllFilters()]);
   }, []);
 
   useEffect(() => {
-    refreshLists();
+    refreshList();
     const events = [
       FilterPaneEvents.FILTER_CREATED,
       FilterPaneEvents.FILTER_DELETED,
       FilterPaneEvents.FILTER_UPDATED,
       FilterPaneEvents.FILTERS_REFRESHED,
-      "sheet:activated",
     ];
-    events.forEach((ev) => window.addEventListener(ev, refreshLists));
+    events.forEach((ev) => window.addEventListener(ev, refreshList));
     return () => {
-      events.forEach((ev) => window.removeEventListener(ev, refreshLists));
+      events.forEach((ev) => window.removeEventListener(ev, refreshList));
     };
-  }, [refreshLists]);
+  }, [refreshList]);
 
   const handleAddFilter = useCallback(() => {
     showDialog(ADD_FILTER_DIALOG_ID);
   }, []);
-
-  const hasFilters = workbookFilters.length > 0 || sheetFilters.length > 0;
 
   return (
     <div style={styles.container}>
@@ -55,34 +47,13 @@ export function FilterPaneTab({
         <span style={styles.addIcon}>+</span>
       </button>
 
-      {!hasFilters && (
+      {filters.length === 0 && (
         <div style={styles.emptyHint}>Click + to add filters</div>
       )}
 
-      {/* Workbook filters */}
-      {workbookFilters.length > 0 && (
-        <>
-          <div style={styles.scopeLabel}>Workbook:</div>
-          {workbookFilters.map((f) => (
-            <RibbonFilterCard key={f.id} filter={f} />
-          ))}
-        </>
-      )}
-
-      {/* Divider between scopes */}
-      {workbookFilters.length > 0 && sheetFilters.length > 0 && (
-        <div style={styles.divider} />
-      )}
-
-      {/* Sheet filters */}
-      {sheetFilters.length > 0 && (
-        <>
-          <div style={styles.scopeLabel}>Sheet:</div>
-          {sheetFilters.map((f) => (
-            <RibbonFilterCard key={f.id} filter={f} />
-          ))}
-        </>
-      )}
+      {filters.map((f) => (
+        <RibbonFilterCard key={f.id} filter={f} />
+      ))}
     </div>
   );
 }
@@ -123,20 +94,5 @@ const styles: Record<string, React.CSSProperties> = {
     color: "#aaa",
     fontStyle: "italic",
     whiteSpace: "nowrap",
-  },
-  scopeLabel: {
-    fontSize: "10px",
-    color: "#888",
-    fontWeight: 600,
-    textTransform: "uppercase" as const,
-    letterSpacing: "0.5px",
-    whiteSpace: "nowrap",
-    flexShrink: 0,
-  },
-  divider: {
-    width: "1px",
-    height: "50px",
-    background: "#d0d0d0",
-    flexShrink: 0,
   },
 };

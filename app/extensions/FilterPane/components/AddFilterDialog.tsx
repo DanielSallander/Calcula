@@ -4,7 +4,6 @@
 
 import React, { useState, useEffect, useCallback } from "react";
 import type { DialogProps } from "@api";
-import { getSheets } from "@api";
 import { invokeBackend, type Table, getAllPivotTables } from "@api/backend";
 import { createFilterAsync } from "../lib/filterPaneStore";
 import {
@@ -12,11 +11,7 @@ import {
   getBiModelInfo,
   type BiConnectionInfo,
 } from "../lib/filterPaneApi";
-import type {
-  RibbonFilterScope,
-  SlicerSourceType,
-  SlicerConnection,
-} from "../lib/filterPaneTypes";
+import type { SlicerSourceType } from "../lib/filterPaneTypes";
 
 // ============================================================================
 // Types
@@ -28,54 +23,10 @@ interface DataSource {
   name: string;
   sheetIndex: number;
   fields: string[];
+  /** Map of field name -> data type */
+  fieldTypes?: Map<string, string>;
   /** For biConnection sources: the connection ID */
   connectionId?: number;
-}
-
-// ============================================================================
-// Helpers
-// ============================================================================
-
-/**
- * Find all pivot tables backed by the same BI connection.
- * For sheet-scope filters, only pivots on the given sheet are included.
- * For workbook-scope, all pivots with that connection are included.
- */
-async function findBiRelatedPivots(
-  connectionId: number,
-  scope: RibbonFilterScope,
-  sheetIndex: number,
-): Promise<SlicerConnection[]> {
-  const connections: SlicerConnection[] = [];
-
-  try {
-    const pivots = await getAllPivotTables<
-      Array<{ id: number; name: string; sourceRange: string }>
-    >();
-
-    for (const pv of pivots) {
-      try {
-        // Check if this pivot is backed by the same BI connection
-        const biMeta = await invokeBackend<{
-          connectionId: number;
-          sheetIndex?: number;
-        } | null>("get_pivot_bi_metadata", { pivotId: pv.id });
-
-        if (biMeta && biMeta.connectionId === connectionId) {
-          // For sheet scope, only include pivots on the target sheet
-          if (scope === "workbook" || biMeta.sheetIndex === sheetIndex) {
-            connections.push({ sourceType: "pivot", sourceId: pv.id });
-          }
-        }
-      } catch {
-        // Pivot might not have BI metadata (range pivot) — skip
-      }
-    }
-  } catch (err) {
-    console.warn("[AddFilterDialog] Failed to find BI-related pivots:", err);
-  }
-
-  return connections;
 }
 
 // ============================================================================
@@ -89,10 +40,8 @@ export function AddFilterDialog({
   const [sources, setSources] = useState<DataSource[]>([]);
   const [selectedSourceIndex, setSelectedSourceIndex] = useState<number>(-1);
   const [checkedFields, setCheckedFields] = useState<Set<string>>(new Set());
-  const [scope, setScope] = useState<RibbonFilterScope>("sheet");
   const [isLoading, setIsLoading] = useState(false);
   const [isLoadingSources, setIsLoadingSources] = useState(false);
-  const [activeSheetIndex, setActiveSheetIndex] = useState(0);
   const [searchText, setSearchText] = useState("");
 
   // Load data sources when dialog opens
@@ -108,10 +57,6 @@ export function AddFilterDialog({
   const loadDataSources = async () => {
     setIsLoadingSources(true);
     try {
-      const sheetsResult = await getSheets();
-      const currentSheetIndex = sheetsResult.activeIndex;
-      setActiveSheetIndex(currentSheetIndex);
-
       const allSources: DataSource[] = [];
 
       // Fetch all tables
@@ -181,9 +126,20 @@ export function AddFilterDialog({
           try {
             const modelInfo = await getBiModelInfo(conn.id);
             const allFields: string[] = [];
+            const fieldTypes = new Map<string, string>();
             for (const table of modelInfo.tables) {
               for (const col of table.columns) {
-                allFields.push(`${table.name}.${col.name}`);
+                const key = `${table.name}.${col.name}`;
+                allFields.push(key);
+                // Map BI data types to our categories
+                const dt = (col.dataType || "").toLowerCase();
+                if (dt.includes("int") || dt.includes("float") || dt.includes("decimal") || dt.includes("numeric") || dt.includes("double") || dt.includes("real")) {
+                  fieldTypes.set(key, "number");
+                } else if (dt.includes("date") || dt.includes("time") || dt.includes("timestamp")) {
+                  fieldTypes.set(key, "date");
+                } else {
+                  fieldTypes.set(key, "text");
+                }
               }
             }
             allSources.push({
@@ -192,6 +148,7 @@ export function AddFilterDialog({
               name: `${conn.name} (BI Model)`,
               sheetIndex: 0,
               fields: allFields,
+              fieldTypes,
               connectionId: conn.id,
             });
           } catch (err) {
@@ -235,34 +192,34 @@ export function AddFilterDialog({
     const source = sources[selectedSourceIndex];
 
     try {
-      // Build Report Connections based on source type
-      let connectedSources: SlicerConnection[];
-
       if (source.type === "biConnection") {
-        // For BI connections, auto-connect to all pivots backed by the same connection.
-        // Scope-based: sheet filters only connect to pivots on that sheet.
-        connectedSources = await findBiRelatedPivots(
-          source.id,
-          scope,
-          activeSheetIndex,
-        );
+        // BI connection: default to "workbook" mode (auto-connect all pivots)
+        for (const fieldName of checkedFields) {
+          const fieldDataType = source.fieldTypes?.get(fieldName) as "text" | "number" | "date" | undefined;
+          await createFilterAsync({
+            name: fieldName,
+            sourceType: source.type,
+            cacheSourceId: source.id,
+            fieldName,
+            fieldDataType: fieldDataType ?? "unknown",
+            connectionMode: "workbook",
+          });
+        }
       } else {
-        // For tables/pivots, connect directly to the source
-        connectedSources = [
+        // Table/Pivot: default to "manual" mode with the source as connection
+        const connectedSources: SlicerConnection[] = [
           { sourceType: source.type, sourceId: source.id },
         ];
-      }
-
-      for (const fieldName of checkedFields) {
-        await createFilterAsync({
-          name: fieldName,
-          scope,
-          sheetIndex: scope === "sheet" ? activeSheetIndex : undefined,
-          sourceType: source.type,
-          cacheSourceId: source.id,
-          fieldName,
-          connectedSources,
-        });
+        for (const fieldName of checkedFields) {
+          await createFilterAsync({
+            name: fieldName,
+            sourceType: source.type,
+            cacheSourceId: source.id,
+            fieldName,
+            connectionMode: "manual",
+            connectedSources,
+          });
+        }
       }
       onClose();
     } catch (err) {
@@ -270,7 +227,7 @@ export function AddFilterDialog({
     } finally {
       setIsLoading(false);
     }
-  }, [selectedSourceIndex, checkedFields, scope, sources, activeSheetIndex, onClose]);
+  }, [selectedSourceIndex, checkedFields, sources, onClose]);
 
   if (!isOpen) return null;
 
@@ -294,31 +251,6 @@ export function AddFilterDialog({
 
         {/* Body */}
         <div style={styles.body}>
-          {/* Scope selector */}
-          <div style={styles.field}>
-            <label style={styles.label}>Scope</label>
-            <div style={styles.radioGroup}>
-              <label style={styles.radioLabel}>
-                <input
-                  type="radio"
-                  name="scope"
-                  checked={scope === "sheet"}
-                  onChange={() => setScope("sheet")}
-                />
-                Sheet
-              </label>
-              <label style={styles.radioLabel}>
-                <input
-                  type="radio"
-                  name="scope"
-                  checked={scope === "workbook"}
-                  onChange={() => setScope("workbook")}
-                />
-                Workbook
-              </label>
-            </div>
-          </div>
-
           {/* Source picker */}
           <div style={styles.field}>
             <label style={styles.label}>Data Source</label>

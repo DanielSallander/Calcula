@@ -29,41 +29,56 @@ export function RibbonFilterCard({ filter }: Props): React.ReactElement {
   const [dropdownOpen, setDropdownOpen] = useState(false);
   const [dropdownAnchor, setDropdownAnchor] = useState<DOMRect | null>(null);
   const cardRef = useRef<HTMLDivElement>(null);
+  const closedAtRef = useRef(0);
 
   // Sync local selection when filter prop changes
   useEffect(() => {
     setLocalSelectedItems(filter.selectedItems);
   }, [filter.selectedItems]);
 
-  // Load items on mount
-  useEffect(() => {
-    const loadItems = async () => {
-      await refreshFilterItems(filter.id);
-      const cached = getCachedItems(filter.id);
-      if (cached) setItems(cached);
-    };
-    loadItems();
+  // Load items lazily — only when dropdown is opened, not on mount.
+  // This avoids taking the BI engine during card creation which would
+  // conflict with pivot operations the user might be doing.
+  const [itemsLoaded, setItemsLoaded] = useState(false);
 
+  useEffect(() => {
+    // Only refresh on cross-filter events from OTHER filters
     const onChanged = (e: Event) => {
       const detail = (e as CustomEvent).detail;
-      if (detail?.filterId && detail.filterId !== filter.id) {
-        loadItems();
+      if (detail?.filterId && detail.filterId !== filter.id && itemsLoaded) {
+        refreshFilterItems(filter.id).then(() => {
+          const cached = getCachedItems(filter.id);
+          if (cached) setItems(cached);
+        });
       }
     };
     window.addEventListener(FilterPaneEvents.FILTER_SELECTION_CHANGED, onChanged);
-    window.addEventListener(FilterPaneEvents.FILTERS_REFRESHED, loadItems);
     return () => {
       window.removeEventListener(FilterPaneEvents.FILTER_SELECTION_CHANGED, onChanged);
-      window.removeEventListener(FilterPaneEvents.FILTERS_REFRESHED, loadItems);
     };
-  }, [filter.id]);
+  }, [filter.id, itemsLoaded]);
 
-  const toggleDropdown = useCallback(() => {
+  const toggleDropdown = useCallback(async () => {
+    // If the dropdown was just closed by an outside click (<100ms ago),
+    // don't reopen it — the user intended to close, not toggle.
+    if (Date.now() - closedAtRef.current < 200) return;
     if (!dropdownOpen && cardRef.current) {
       setDropdownAnchor(cardRef.current.getBoundingClientRect());
+      // Load items on first open (lazy loading)
+      if (!itemsLoaded) {
+        await refreshFilterItems(filter.id);
+        const cached = getCachedItems(filter.id);
+        if (cached) setItems(cached);
+        setItemsLoaded(true);
+      }
     }
     setDropdownOpen((prev) => !prev);
-  }, [dropdownOpen]);
+  }, [dropdownOpen, itemsLoaded, filter.id]);
+
+  const handleDropdownClose = useCallback(() => {
+    closedAtRef.current = Date.now();
+    setDropdownOpen(false);
+  }, []);
 
   const handleSelectionApply = useCallback(
     (selectedItems: string[] | null) => {
@@ -79,14 +94,6 @@ export function RibbonFilterCard({ filter }: Props): React.ReactElement {
     await deleteFilterAsync(filter.id);
   }, [filter.id]);
 
-  const handleMoveScope = useCallback(async () => {
-    setDropdownOpen(false);
-    const newScope = filter.scope === "sheet" ? "workbook" : "sheet";
-    await updateFilterAsync(filter.id, {
-      scope: newScope as "workbook" | "sheet",
-      sheetIndex: newScope === "sheet" ? 0 : null,
-    });
-  }, [filter.id, filter.scope]);
 
   // Build summary text
   const hasFilter = localSelectedItems !== null;
@@ -136,11 +143,15 @@ export function RibbonFilterCard({ filter }: Props): React.ReactElement {
           selectedItems={localSelectedItems}
           anchorRect={dropdownAnchor}
           onApply={handleSelectionApply}
-          onClose={() => setDropdownOpen(false)}
+          onClose={handleDropdownClose}
+          filterId={filter.id}
           onDelete={handleDelete}
-          onMoveScope={handleMoveScope}
-          scopeLabel={filter.scope === "sheet" ? "Move to Workbook" : "Move to Sheet"}
+          connectionMode={filter.connectionMode ?? "manual"}
+          crossFilterTargets={filter.crossFilterTargets ?? []}
+          advancedFilter={filter.advancedFilter ?? null}
+          fieldDataType={filter.fieldDataType ?? "unknown"}
           connectedSources={filter.connectedSources}
+          connectedSheets={filter.connectedSheets}
         />
       )}
     </>

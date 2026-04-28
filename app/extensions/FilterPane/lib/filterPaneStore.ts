@@ -34,23 +34,11 @@ function withBiMutex<T>(fn: () => Promise<T>): Promise<T> {
 // ============================================================================
 
 export function getAllFilters(): RibbonFilter[] {
-  return cachedFilters;
+  return cachedFilters.sort((a, b) => a.order - b.order);
 }
 
 export function getFilterById(id: number): RibbonFilter | undefined {
   return cachedFilters.find((f) => f.id === id);
-}
-
-export function getWorkbookFilters(): RibbonFilter[] {
-  return cachedFilters
-    .filter((f) => f.scope === "workbook")
-    .sort((a, b) => a.order - b.order);
-}
-
-export function getSheetFilters(sheetIndex: number): RibbonFilter[] {
-  return cachedFilters
-    .filter((f) => f.scope === "sheet" && f.sheetIndex === sheetIndex)
-    .sort((a, b) => a.order - b.order);
 }
 
 export function getCachedItems(filterId: number): SlicerItem[] | undefined {
@@ -67,7 +55,9 @@ export async function createFilterAsync(
   try {
     const filter = await api.createRibbonFilter(params);
     cachedFilters = await api.getAllRibbonFilters();
-    await refreshFilterItems(filter.id);
+    // Don't refresh items here — it takes the BI engine and conflicts
+    // with pivot operations. Items are loaded lazily when the user
+    // opens the dropdown for the first time.
     window.dispatchEvent(
       new CustomEvent(FilterPaneEvents.FILTER_CREATED, { detail: filter }),
     );
@@ -182,17 +172,56 @@ export async function refreshFilterItems(filterId: number): Promise<void> {
 /** Fetch items for a BI connection filter via the BI engine. */
 async function refreshBiFilterItems(filter: RibbonFilter): Promise<void> {
   const [table, column] = parseBiFieldName(filter.fieldName);
-  // Serialize BI engine calls to prevent concurrent take/put conflicts
-  const values = await withBiMutex(() =>
+
+  // Get ALL unique values for this column
+  const allValues = await withBiMutex(() =>
     api.getBiColumnValues(filter.cacheSourceId, table, column),
   );
+
+  // Collect cross-filter constraints from sibling BI filters
+  // that have this filter listed in their crossFilterTargets.
+  const crossFilters: api.BiCrossFilter[] = [];
+  {
+    for (const sibling of cachedFilters) {
+      if (
+        sibling.id === filter.id ||
+        sibling.sourceType !== "biConnection" ||
+        sibling.cacheSourceId !== filter.cacheSourceId ||
+        sibling.selectedItems === null ||
+        !(sibling.crossFilterTargets ?? []).includes(filter.id)
+      ) {
+        continue;
+      }
+      const [sTable, sColumn] = parseBiFieldName(sibling.fieldName);
+      crossFilters.push({
+        table: sTable,
+        column: sColumn,
+        values: sibling.selectedItems,
+      });
+    }
+  }
+
+  // If there are cross-filters, get the available values (subset with data)
+  let availableSet: Set<string> | null = null;
+  if (crossFilters.length > 0) {
+    const available = await withBiMutex(() =>
+      api.getBiColumnAvailableValues(
+        filter.cacheSourceId,
+        table,
+        column,
+        crossFilters,
+      ),
+    );
+    availableSet = new Set(available);
+  }
+
   const selectedSet = filter.selectedItems
     ? new Set(filter.selectedItems)
     : null;
-  const items: SlicerItem[] = values.map((v) => ({
+  const items: SlicerItem[] = allValues.map((v) => ({
     value: v,
     selected: selectedSet === null || selectedSet.has(v),
-    hasData: true,
+    hasData: availableSet === null || availableSet.has(v),
   }));
   itemsCache.set(filter.id, items);
 }
@@ -206,26 +235,47 @@ function parseBiFieldName(fieldName: string): [string, string] {
   return ["", fieldName];
 }
 
-/** Refresh items for sibling filters (those sharing connected sources). */
+/** Refresh items for sibling filters (those affected by this filter's selection).
+ *  Includes: filters sharing connected sources + BI filters on the same connection. */
 async function refreshSiblingFilterItems(filterId: number): Promise<void> {
   const filter = cachedFilters.find((f) => f.id === filterId);
   if (!filter) return;
 
+  const siblingIds = new Set<number>();
+
+  // Siblings sharing connected sources (table/pivot cross-filtering)
   const connected = filter.connectedSources ?? [];
-  if (connected.length === 0) return;
+  if (connected.length > 0) {
+    const connectedIds = new Set(connected.map((c) => c.sourceId));
+    for (const f of cachedFilters) {
+      if (
+        f.id !== filterId &&
+        (f.connectedSources ?? []).some((c) => connectedIds.has(c.sourceId))
+      ) {
+        siblingIds.add(f.id);
+      }
+    }
+  }
 
-  const connectedIds = new Set(connected.map((c) => c.sourceId));
+  // BI siblings: filters that this filter targets for cross-filtering
+  const targets = filter.crossFilterTargets ?? [];
+  for (const targetId of targets) {
+    siblingIds.add(targetId);
+  }
 
-  const siblings = cachedFilters.filter(
-    (f) =>
+  // Also refresh any filter that targets US (reverse direction)
+  for (const f of cachedFilters) {
+    if (
       f.id !== filterId &&
-      (f.connectedSources ?? []).some((c) => connectedIds.has(c.sourceId)),
-  );
+      (f.crossFilterTargets ?? []).includes(filterId)
+    ) {
+      siblingIds.add(f.id);
+    }
+  }
 
   // Refresh sequentially to avoid concurrent BI engine access
-  // (the engine uses take/put pattern and can't handle parallel queries)
-  for (const s of siblings) {
-    await refreshFilterItems(s.id);
+  for (const id of siblingIds) {
+    await refreshFilterItems(id);
   }
 }
 

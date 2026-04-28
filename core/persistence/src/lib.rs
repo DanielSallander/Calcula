@@ -671,33 +671,78 @@ impl Default for SavedRibbonFilterDisplayMode {
     }
 }
 
+/// How a ribbon filter determines its connections.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum SavedConnectionMode {
+    #[serde(rename = "manual")]
+    Manual,
+    #[serde(rename = "bySheet")]
+    BySheet,
+    #[serde(rename = "workbook")]
+    Workbook,
+}
+
+impl Default for SavedConnectionMode {
+    fn default() -> Self {
+        SavedConnectionMode::Manual
+    }
+}
+
 /// Serializable ribbon filter definition
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SavedRibbonFilter {
     pub id: u64,
     pub name: String,
-    #[serde(default)]
-    pub scope: SavedRibbonFilterScope,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub sheet_index: Option<usize>,
     pub source_type: SavedSlicerSourceType,
     pub cache_source_id: u64,
     pub field_name: String,
+    #[serde(default = "default_unknown")]
+    pub field_data_type: String,
+    #[serde(default)]
+    pub connection_mode: SavedConnectionMode,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub connected_sources: Vec<SavedSlicerConnection>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub connected_sheets: Vec<usize>,
     #[serde(default)]
     pub display_mode: SavedRibbonFilterDisplayMode,
     pub selected_items: Option<Vec<String>>,
-    #[serde(default = "default_true")]
-    pub cross_filter_enabled: bool,
-    #[serde(default)]
-    pub collapsed: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub cross_filter_targets: Vec<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub advanced_filter: Option<SavedAdvancedFilter>,
     #[serde(default)]
     pub order: u32,
     #[serde(default = "default_button_columns")]
     pub button_columns: u32,
     #[serde(default)]
     pub button_rows: u32,
+}
+
+/// Saved advanced filter condition.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SavedAdvancedFilterCondition {
+    pub operator: String,
+    #[serde(default)]
+    pub value: String,
+}
+
+/// Saved advanced filter (one or two conditions with logic).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SavedAdvancedFilter {
+    pub condition1: SavedAdvancedFilterCondition,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub condition2: Option<SavedAdvancedFilterCondition>,
+    #[serde(default = "default_and")]
+    pub logic: String,
+}
+
+fn default_unknown() -> String {
+    "unknown".to_string()
+}
+
+fn default_and() -> String {
+    "and".to_string()
 }
 
 /// Calcula metadata structure stored as JSON in the hidden _calcula_meta sheet.

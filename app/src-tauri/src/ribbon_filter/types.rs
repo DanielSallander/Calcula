@@ -12,17 +12,21 @@ use crate::slicer::types::{SlicerSourceType, SlicerConnection};
 // ENUMS
 // ============================================================================
 
-/// Whether a ribbon filter applies to the entire workbook or a single sheet.
+/// How a ribbon filter determines which pivots/tables it connects to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub enum RibbonFilterScope {
+pub enum ConnectionMode {
+    /// User manually selects which pivots/tables to filter
+    Manual,
+    /// Automatically filters all pivots/tables on selected sheets
+    BySheet,
+    /// Automatically filters all pivots/tables in the workbook
     Workbook,
-    Sheet,
 }
 
-impl Default for RibbonFilterScope {
+impl Default for ConnectionMode {
     fn default() -> Self {
-        RibbonFilterScope::Sheet
+        ConnectionMode::Manual
     }
 }
 
@@ -56,33 +60,39 @@ pub struct RibbonFilter {
     pub id: u64,
     /// Display name
     pub name: String,
-    /// Workbook or sheet scope
-    pub scope: RibbonFilterScope,
-    /// Sheet index (only relevant when scope == Sheet)
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub sheet_index: Option<usize>,
-    /// Source type (table or pivot)
+    /// Source type (table, pivot, or biConnection)
     pub source_type: SlicerSourceType,
-    /// The pivot/table ID used as the data source for fetching filter items
+    /// The pivot/table/connection ID used as the data source for fetching filter items
     pub cache_source_id: u64,
     /// Field/column name to filter on
     pub field_name: String,
-    /// Report Connections: pivots/tables that this filter controls
+    /// Data type of the field (text, number, date, unknown)
+    #[serde(default = "default_field_data_type")]
+    pub field_data_type: String,
+    /// How connections are determined: manual, bySheet, or workbook
+    #[serde(default)]
+    pub connection_mode: ConnectionMode,
+    /// For manual mode: explicitly selected pivots/tables
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub connected_sources: Vec<SlicerConnection>,
+    /// For bySheet mode: which sheet indices to auto-connect pivots from
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub connected_sheets: Vec<usize>,
     /// Display mode: checklist, buttons, or dropdown
     #[serde(default)]
     pub display_mode: RibbonFilterDisplayMode,
     /// Selected items. None = all selected (no filter applied).
     /// Some(vec) = only these items are selected.
     pub selected_items: Option<Vec<String>>,
-    /// Whether this filter participates in cross-filtering with canvas slicers
-    #[serde(default = "default_true")]
-    pub cross_filter_enabled: bool,
-    /// Whether the card is collapsed in the UI
-    #[serde(default)]
-    pub collapsed: bool,
-    /// Sort order within its section
+    /// IDs of other ribbon filters that this filter cross-filters.
+    /// When this filter's selection changes, the listed filters' items
+    /// are re-evaluated for hasData. Empty = no cross-filtering.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub cross_filter_targets: Vec<u64>,
+    /// Advanced filter condition (None = basic checklist mode).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub advanced_filter: Option<AdvancedFilter>,
+    /// Sort order within the ribbon
     #[serde(default)]
     pub order: u32,
     /// Number of button columns (for Buttons display mode)
@@ -93,8 +103,75 @@ pub struct RibbonFilter {
     pub button_rows: u32,
 }
 
+/// Operator for advanced filter conditions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum AdvancedFilterOperator {
+    // Numeric
+    IsLessThan,
+    IsLessThanOrEqualTo,
+    IsGreaterThan,
+    IsGreaterThanOrEqualTo,
+    // Text
+    Contains,
+    DoesNotContain,
+    StartsWith,
+    DoesNotStartWith,
+    // Date
+    IsAfter,
+    IsOnOrAfter,
+    IsBefore,
+    IsOnOrBefore,
+    // Common
+    Is,
+    IsNot,
+    IsBlank,
+    IsNotBlank,
+    IsEmpty,
+    IsNotEmpty,
+}
+
+/// Logic for combining two conditions in advanced filter.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum AdvancedFilterLogic {
+    And,
+    Or,
+}
+
+impl Default for AdvancedFilterLogic {
+    fn default() -> Self {
+        AdvancedFilterLogic::And
+    }
+}
+
+/// A single condition in an advanced filter.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AdvancedFilterCondition {
+    pub operator: AdvancedFilterOperator,
+    /// Value to compare against (not used for IsBlank/IsNotBlank).
+    #[serde(default)]
+    pub value: String,
+}
+
+/// Advanced filter: one or two conditions with And/Or logic.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AdvancedFilter {
+    pub condition1: AdvancedFilterCondition,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub condition2: Option<AdvancedFilterCondition>,
+    #[serde(default)]
+    pub logic: AdvancedFilterLogic,
+}
+
 fn default_true() -> bool {
     true
+}
+
+fn default_field_data_type() -> String {
+    "unknown".to_string()
 }
 
 fn default_button_columns() -> u32 {
@@ -110,13 +187,17 @@ fn default_button_columns() -> u32 {
 #[serde(rename_all = "camelCase")]
 pub struct CreateRibbonFilterParams {
     pub name: String,
-    pub scope: RibbonFilterScope,
-    pub sheet_index: Option<usize>,
     pub source_type: SlicerSourceType,
     pub cache_source_id: u64,
     pub field_name: String,
+    #[serde(default = "default_field_data_type")]
+    pub field_data_type: String,
+    #[serde(default)]
+    pub connection_mode: ConnectionMode,
     #[serde(default)]
     pub connected_sources: Vec<SlicerConnection>,
+    #[serde(default)]
+    pub connected_sheets: Vec<usize>,
     pub display_mode: Option<RibbonFilterDisplayMode>,
     pub order: Option<u32>,
 }
@@ -126,15 +207,15 @@ pub struct CreateRibbonFilterParams {
 #[serde(rename_all = "camelCase")]
 pub struct UpdateRibbonFilterParams {
     pub name: Option<String>,
-    pub scope: Option<RibbonFilterScope>,
-    pub sheet_index: Option<Option<usize>>,
     pub display_mode: Option<RibbonFilterDisplayMode>,
-    pub collapsed: Option<bool>,
     pub order: Option<u32>,
     pub button_columns: Option<u32>,
     pub button_rows: Option<u32>,
-    pub cross_filter_enabled: Option<bool>,
+    pub connection_mode: Option<ConnectionMode>,
     pub connected_sources: Option<Vec<SlicerConnection>>,
+    pub connected_sheets: Option<Vec<usize>>,
+    pub cross_filter_targets: Option<Vec<u64>>,
+    pub advanced_filter: Option<Option<AdvancedFilter>>,
 }
 
 // ============================================================================

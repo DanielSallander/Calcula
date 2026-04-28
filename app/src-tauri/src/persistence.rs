@@ -591,11 +591,6 @@ fn ribbon_filter_to_saved(f: &crate::ribbon_filter::RibbonFilter) -> persistence
     persistence::SavedRibbonFilter {
         id: f.id,
         name: f.name.clone(),
-        scope: match f.scope {
-            crate::ribbon_filter::RibbonFilterScope::Workbook => persistence::SavedRibbonFilterScope::Workbook,
-            crate::ribbon_filter::RibbonFilterScope::Sheet => persistence::SavedRibbonFilterScope::Sheet,
-        },
-        sheet_index: f.sheet_index,
         source_type: match f.source_type {
             crate::slicer::SlicerSourceType::Table => persistence::SavedSlicerSourceType::Table,
             crate::slicer::SlicerSourceType::Pivot => persistence::SavedSlicerSourceType::Pivot,
@@ -603,6 +598,12 @@ fn ribbon_filter_to_saved(f: &crate::ribbon_filter::RibbonFilter) -> persistence
         },
         cache_source_id: f.cache_source_id,
         field_name: f.field_name.clone(),
+        field_data_type: f.field_data_type.clone(),
+        connection_mode: match f.connection_mode {
+            crate::ribbon_filter::ConnectionMode::Manual => persistence::SavedConnectionMode::Manual,
+            crate::ribbon_filter::ConnectionMode::BySheet => persistence::SavedConnectionMode::BySheet,
+            crate::ribbon_filter::ConnectionMode::Workbook => persistence::SavedConnectionMode::Workbook,
+        },
         connected_sources: f.connected_sources.iter().map(|c| {
             persistence::SavedSlicerConnection {
                 source_type: match c.source_type {
@@ -613,14 +614,30 @@ fn ribbon_filter_to_saved(f: &crate::ribbon_filter::RibbonFilter) -> persistence
                 source_id: c.source_id,
             }
         }).collect(),
+        connected_sheets: f.connected_sheets.clone(),
         display_mode: match f.display_mode {
             crate::ribbon_filter::RibbonFilterDisplayMode::Checklist => persistence::SavedRibbonFilterDisplayMode::Checklist,
             crate::ribbon_filter::RibbonFilterDisplayMode::Buttons => persistence::SavedRibbonFilterDisplayMode::Buttons,
             crate::ribbon_filter::RibbonFilterDisplayMode::Dropdown => persistence::SavedRibbonFilterDisplayMode::Dropdown,
         },
         selected_items: f.selected_items.clone(),
-        cross_filter_enabled: f.cross_filter_enabled,
-        collapsed: f.collapsed,
+        cross_filter_targets: f.cross_filter_targets.clone(),
+        advanced_filter: f.advanced_filter.as_ref().map(|af| {
+            persistence::SavedAdvancedFilter {
+                condition1: persistence::SavedAdvancedFilterCondition {
+                    operator: format!("{:?}", af.condition1.operator).to_lowercase(),
+                    value: af.condition1.value.clone(),
+                },
+                condition2: af.condition2.as_ref().map(|c| persistence::SavedAdvancedFilterCondition {
+                    operator: format!("{:?}", c.operator).to_lowercase(),
+                    value: c.value.clone(),
+                }),
+                logic: match af.logic {
+                    crate::ribbon_filter::AdvancedFilterLogic::And => "and".to_string(),
+                    crate::ribbon_filter::AdvancedFilterLogic::Or => "or".to_string(),
+                },
+            }
+        }),
         order: f.order,
         button_columns: f.button_columns,
         button_rows: f.button_rows,
@@ -631,11 +648,6 @@ fn saved_to_ribbon_filter(saved: &persistence::SavedRibbonFilter) -> crate::ribb
     crate::ribbon_filter::RibbonFilter {
         id: saved.id,
         name: saved.name.clone(),
-        scope: match saved.scope {
-            persistence::SavedRibbonFilterScope::Workbook => crate::ribbon_filter::RibbonFilterScope::Workbook,
-            persistence::SavedRibbonFilterScope::Sheet => crate::ribbon_filter::RibbonFilterScope::Sheet,
-        },
-        sheet_index: saved.sheet_index,
         source_type: match saved.source_type {
             persistence::SavedSlicerSourceType::Table => crate::slicer::SlicerSourceType::Table,
             persistence::SavedSlicerSourceType::Pivot => crate::slicer::SlicerSourceType::Pivot,
@@ -643,6 +655,12 @@ fn saved_to_ribbon_filter(saved: &persistence::SavedRibbonFilter) -> crate::ribb
         },
         cache_source_id: saved.cache_source_id,
         field_name: saved.field_name.clone(),
+        field_data_type: saved.field_data_type.clone(),
+        connection_mode: match saved.connection_mode {
+            persistence::SavedConnectionMode::Manual => crate::ribbon_filter::ConnectionMode::Manual,
+            persistence::SavedConnectionMode::BySheet => crate::ribbon_filter::ConnectionMode::BySheet,
+            persistence::SavedConnectionMode::Workbook => crate::ribbon_filter::ConnectionMode::Workbook,
+        },
         connected_sources: saved.connected_sources.iter().map(|c| {
             crate::slicer::SlicerConnection {
                 source_type: match c.source_type {
@@ -653,17 +671,59 @@ fn saved_to_ribbon_filter(saved: &persistence::SavedRibbonFilter) -> crate::ribb
                 source_id: c.source_id,
             }
         }).collect(),
+        connected_sheets: saved.connected_sheets.clone(),
         display_mode: match saved.display_mode {
             persistence::SavedRibbonFilterDisplayMode::Checklist => crate::ribbon_filter::RibbonFilterDisplayMode::Checklist,
             persistence::SavedRibbonFilterDisplayMode::Buttons => crate::ribbon_filter::RibbonFilterDisplayMode::Buttons,
             persistence::SavedRibbonFilterDisplayMode::Dropdown => crate::ribbon_filter::RibbonFilterDisplayMode::Dropdown,
         },
         selected_items: saved.selected_items.clone(),
-        cross_filter_enabled: saved.cross_filter_enabled,
-        collapsed: saved.collapsed,
+        cross_filter_targets: saved.cross_filter_targets.clone(),
+        advanced_filter: saved.advanced_filter.as_ref().map(|af| {
+            crate::ribbon_filter::AdvancedFilter {
+                condition1: crate::ribbon_filter::AdvancedFilterCondition {
+                    operator: parse_advanced_operator(&af.condition1.operator),
+                    value: af.condition1.value.clone(),
+                },
+                condition2: af.condition2.as_ref().map(|c| crate::ribbon_filter::AdvancedFilterCondition {
+                    operator: parse_advanced_operator(&c.operator),
+                    value: c.value.clone(),
+                }),
+                logic: if af.logic == "or" {
+                    crate::ribbon_filter::AdvancedFilterLogic::Or
+                } else {
+                    crate::ribbon_filter::AdvancedFilterLogic::And
+                },
+            }
+        }),
         order: saved.order,
         button_columns: saved.button_columns,
         button_rows: saved.button_rows,
+    }
+}
+
+fn parse_advanced_operator(s: &str) -> crate::ribbon_filter::AdvancedFilterOperator {
+    use crate::ribbon_filter::AdvancedFilterOperator::*;
+    match s {
+        "islessthan" => IsLessThan,
+        "islessthanorequalto" => IsLessThanOrEqualTo,
+        "isgreaterthan" => IsGreaterThan,
+        "isgreaterthanorequalto" => IsGreaterThanOrEqualTo,
+        "contains" => Contains,
+        "doesnotcontain" => DoesNotContain,
+        "startswith" => StartsWith,
+        "doesnotstartwith" => DoesNotStartWith,
+        "isafter" => IsAfter,
+        "isonorafter" => IsOnOrAfter,
+        "isbefore" => IsBefore,
+        "isonorbefore" => IsOnOrBefore,
+        "is" => Is,
+        "isnot" => IsNot,
+        "isblank" => IsBlank,
+        "isnotblank" => IsNotBlank,
+        "isempty" => IsEmpty,
+        "isnotempty" => IsNotEmpty,
+        _ => Is,
     }
 }
 
