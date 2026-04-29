@@ -188,6 +188,33 @@ impl Engine {
         .await
     }
 
+    /// Execute a query, automatically refreshing any stale in-memory tables first.
+    ///
+    /// This is equivalent to calling [`Engine::refresh_stale`] followed by
+    /// [`Engine::query`]. Tables whose cached data has exceeded their configured
+    /// `refresh_interval` are re-fetched from their source before the query runs.
+    ///
+    /// Returns both the query results and the list of tables that were refreshed.
+    pub async fn query_auto_refresh(
+        &mut self,
+        request: QueryRequest,
+    ) -> QueryResult<(Vec<RecordBatch>, Vec<String>)> {
+        let refreshed = self
+            .refresh_stale()
+            .await
+            .map_err(crate::QueryError::Engine)?;
+        let plan = PushdownPlanner::plan(&request, &self.model, &self.registry)?;
+        let batches = QueryExecutor::execute(
+            &plan,
+            &self.model,
+            &self.registry,
+            Some(&self.cache),
+            Some(self.max_inline_in_values),
+        )
+        .await?;
+        Ok((batches, refreshed))
+    }
+
     /// Execute a query and return results with an execution plan.
     ///
     /// Like [`Engine::query`], but also returns an [`ExecutionPlan`] describing
@@ -292,6 +319,36 @@ impl Engine {
             self.refresh_table(&name).await?;
         }
         Ok(())
+    }
+
+    /// Refresh all in-memory tables whose cache has exceeded their configured
+    /// TTL (`refresh_interval`).
+    ///
+    /// Tables without a configured `refresh_interval` are skipped (they never
+    /// auto-expire). Tables that have never been cached are always refreshed.
+    ///
+    /// Returns the names of tables that were refreshed.
+    pub async fn refresh_stale(&mut self) -> EngineResult<Vec<String>> {
+        let stale_tables: Vec<String> = self
+            .model
+            .tables()
+            .iter()
+            .filter(|t| t.is_in_memory())
+            .filter(|t| {
+                if let Some(max_age) = t.refresh_interval() {
+                    self.cache.is_stale(t.name(), max_age)
+                } else {
+                    // No TTL configured — only refresh if never cached.
+                    !self.cache.contains(t.name())
+                }
+            })
+            .map(|t| t.name().to_string())
+            .collect();
+
+        for name in &stale_tables {
+            self.refresh_table(name).await?;
+        }
+        Ok(stale_tables)
     }
 
     /// Returns when the table was last refreshed, if it is cached.
