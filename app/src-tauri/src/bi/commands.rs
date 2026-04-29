@@ -502,15 +502,19 @@ pub async fn bi_query(
     let query_request = build_engine_query(&request);
 
     // Take engine out for async query
-    let engine = {
+    let mut engine = {
         let mut connections = bi_state.connections.lock().unwrap();
         let conn = connections.get_mut(&connection_id)
             .ok_or_else(|| format!("Connection {} not found", connection_id))?;
         conn.engine.take().ok_or("No model loaded.")?
     };
 
-    let batches = engine.query(query_request).await
+    let (batches, refreshed_tables) = engine.query_auto_refresh(query_request).await
         .map_err(|e| format!("Query failed: {}", e))?;
+
+    if !refreshed_tables.is_empty() {
+        log_info!("BI", "Auto-refreshed stale tables: {}", refreshed_tables.join(", "));
+    }
 
     // Put engine back
     {
@@ -597,12 +601,8 @@ pub async fn bi_get_column_values(
         conn.engine.take().ok_or("No model loaded.")?
     };
 
-    // Refresh in-memory tables that haven't been fetched yet
-    if let Err(e) = engine.refresh_all_in_memory().await {
-        log_info!("BI", "bi_get_column_values: refresh warning: {}", e);
-    }
-
-    let result = engine.query(query_request).await;
+    // Auto-refresh stale in-memory tables, then execute query
+    let result = engine.query_auto_refresh(query_request).await;
 
     // Always put engine back, even on error
     {
@@ -612,7 +612,10 @@ pub async fn bi_get_column_values(
         }
     }
 
-    let batches = result.map_err(|e| format!("Query failed: {}", e))?;
+    let (batches, refreshed_tables) = result.map_err(|e| format!("Query failed: {}", e))?;
+    if !refreshed_tables.is_empty() {
+        log_info!("BI", "bi_get_column_values: auto-refreshed: {}", refreshed_tables.join(", "));
+    }
 
     // Extract unique values from the first column (group_by column),
     // ignoring the measure column.
@@ -704,8 +707,7 @@ pub async fn bi_get_column_available_values(
         conn.engine.take().ok_or("No model loaded.")?
     };
 
-    let _ = engine.refresh_all_in_memory().await;
-    let result = engine.query(query_request).await;
+    let result = engine.query_auto_refresh(query_request).await;
 
     {
         let mut connections = bi_state.connections.lock().unwrap();
@@ -714,7 +716,7 @@ pub async fn bi_get_column_available_values(
         }
     }
 
-    let batches = result.map_err(|e| format!("Query failed: {}", e))?;
+    let (batches, _refreshed) = result.map_err(|e| format!("Query failed: {}", e))?;
 
     // Post-filter: for each row, check if all cross-filter columns match
     // their allowed values. Collect target column values from matching rows.
@@ -980,15 +982,19 @@ pub async fn bi_refresh_connection(
         let query_request = build_engine_query(&active_query.request);
 
         // Take engine out for async query
-        let engine = {
+        let mut engine = {
             let mut connections = bi_state.connections.lock().unwrap();
             let conn = connections.get_mut(&connection_id)
                 .ok_or_else(|| format!("Connection {} not found", connection_id))?;
             conn.engine.take().ok_or("No model loaded.")?
         };
 
-        let batches = engine.query(query_request).await
+        let (batches, refreshed_tables) = engine.query_auto_refresh(query_request).await
             .map_err(|e| format!("Refresh query failed: {}", e))?;
+
+        if !refreshed_tables.is_empty() {
+            log_info!("BI", "bi_refresh_connection: auto-refreshed: {}", refreshed_tables.join(", "));
+        }
 
         // Put engine back
         {
@@ -1160,6 +1166,50 @@ pub async fn bi_refresh_connection(
     }
 
     Ok(results)
+}
+
+/// Refresh all in-memory tables on a connection, regardless of TTL.
+/// Call this on workbook open or when the user explicitly requests a full refresh.
+/// Returns the names of tables that were refreshed.
+#[tauri::command]
+pub async fn bi_refresh_all_in_memory(
+    bi_state: State<'_, BiState>,
+    connection_id: ConnectionId,
+) -> Result<Vec<String>, String> {
+    log_info!("BI", "bi_refresh_all_in_memory: conn={}", connection_id);
+
+    let mut engine = {
+        let mut connections = bi_state.connections.lock().unwrap();
+        let conn = connections.get_mut(&connection_id)
+            .ok_or_else(|| format!("Connection {} not found", connection_id))?;
+        conn.engine.take().ok_or("No model loaded.")?
+    };
+
+    let result = engine.refresh_all_in_memory().await;
+
+    // Always put engine back
+    {
+        let mut connections = bi_state.connections.lock().unwrap();
+        if let Some(conn) = connections.get_mut(&connection_id) {
+            conn.engine = Some(engine);
+            conn.last_refreshed = Some(now_iso());
+        }
+    }
+
+    result.map_err(|e| format!("Refresh failed: {}", e))?;
+
+    // Return names of all in-memory tables (they were all refreshed)
+    let connections = bi_state.connections.lock().unwrap();
+    let conn = connections.get(&connection_id)
+        .ok_or_else(|| format!("Connection {} not found", connection_id))?;
+    let engine = conn.engine.as_ref().ok_or("No model loaded.")?;
+    let table_names: Vec<String> = engine.model().tables().iter()
+        .filter(|t| t.is_in_memory())
+        .map(|t| t.name().to_string())
+        .collect();
+
+    log_info!("BI", "Refreshed {} in-memory tables", table_names.len());
+    Ok(table_names)
 }
 
 // ---------------------------------------------------------------------------

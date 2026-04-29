@@ -3978,6 +3978,7 @@ pub fn run() {
             bi::bi_query,
             bi::bi_insert_result,
             bi::bi_refresh_connection,
+            bi::bi_refresh_all_in_memory,
             bi::bi_get_model_info,
             bi::bi_get_column_values,
             bi::bi_get_column_available_values,

@@ -3392,6 +3392,13 @@ export async function biRefreshConnection(
   return invoke<BiQueryResult[]>("bi_refresh_connection", { connectionId });
 }
 
+/** Refresh all in-memory tables on a connection (regardless of TTL). */
+export async function biRefreshAllInMemory(
+  connectionId: number,
+): Promise<string[]> {
+  return invoke<string[]>("bi_refresh_all_in_memory", { connectionId });
+}
+
 // ---------------------------------------------------------------------------
 // Model Info & Region Check
 // ---------------------------------------------------------------------------

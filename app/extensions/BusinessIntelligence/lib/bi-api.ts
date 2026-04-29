@@ -15,6 +15,7 @@ import {
   biQuery as apiQuery,
   biInsertResult as apiInsertResult,
   biRefreshConnection as apiRefreshConnection,
+  biRefreshAllInMemory as apiRefreshAllInMemory,
   biGetModelInfo as apiGetModelInfo,
   biGetRegionAtCell as apiGetRegionAtCell,
 } from "@api/backend";
@@ -154,6 +155,17 @@ export async function refreshConnection(
   const results = await apiRefreshConnection(connectionId);
   cachedConnections = null;
   return results;
+}
+
+/**
+ * Force-refresh all in-memory tables on a connection (ignores TTL).
+ * Call on workbook open or when the user clicks "Refresh All".
+ * Returns names of tables that were refreshed.
+ */
+export async function refreshAllInMemory(
+  connectionId: number,
+): Promise<string[]> {
+  return apiRefreshAllInMemory(connectionId);
 }
 
 // ---------------------------------------------------------------------------
