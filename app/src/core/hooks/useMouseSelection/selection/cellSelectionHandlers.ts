@@ -111,6 +111,19 @@ export function createCellSelectionHandlers(deps: CellSelectionDependencies): Ce
       return true;
     }
 
+    // FIX: Set drag state BEFORE any async operations to prevent race conditions.
+    // If mouseup fires during an async gap (onCommitBeforeSelect, getMergeInfo),
+    // isDragging must already be true so the global mouseup handler can clean up.
+    // Without this, isDragging gets stuck at true after the async ops complete.
+    if (!isRightClick) {
+      setIsDragging(true);
+      dragStartRef.current = { row, col };
+      headerDragRef.current = null;
+      lastMousePosRef.current = { x: mouseX, y: mouseY };
+    }
+
+    event.preventDefault();
+
     // If we're editing, commit first
     if (onCommitBeforeSelect) {
       await onCommitBeforeSelect();
@@ -122,7 +135,7 @@ export function createCellSelectionHandlers(deps: CellSelectionDependencies): Ce
     let effectiveEndRow = row;
     let effectiveEndCol = col;
     let isMergedCell = false;
-    
+
     try {
       const mergeInfo = await getMergeInfo(row, col);
       if (mergeInfo) {
@@ -132,6 +145,10 @@ export function createCellSelectionHandlers(deps: CellSelectionDependencies): Ce
         effectiveEndRow = mergeInfo.endRow;
         effectiveEndCol = mergeInfo.endCol;
         isMergedCell = true;
+        // Update drag start to use the merge master cell
+        if (!isRightClick && dragStartRef.current) {
+          dragStartRef.current = { row: effectiveStartRow, col: effectiveStartCol };
+        }
       }
     } catch (error) {
       console.error('[cellSelectionHandlers] Failed to get merge info:', error);
@@ -161,16 +178,6 @@ export function createCellSelectionHandlers(deps: CellSelectionDependencies): Ce
       }
     }
 
-    // Only start drag for left-click (button === 0)
-    if (!isRightClick) {
-      setIsDragging(true);
-      // For drag operations, use the effective start position (master cell for merges)
-      dragStartRef.current = { row: effectiveStartRow, col: effectiveStartCol };
-      headerDragRef.current = null;
-      lastMousePosRef.current = { x: mouseX, y: mouseY };
-    }
-
-    event.preventDefault();
     return true;
   };
 

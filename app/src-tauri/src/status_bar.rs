@@ -30,18 +30,9 @@ pub fn get_selection_aggregations(
     let mut r1 = start_row.max(end_row);
     let mut c1 = start_col.max(end_col);
 
-    // Cap to actual data bounds for column/row selections to avoid scanning empty space
-    match selection_type.as_str() {
-        "columns" => {
-            r1 = r1.min(grid.max_row);
-        }
-        "rows" => {
-            c1 = c1.min(grid.max_col);
-        }
-        _ => {
-            // "cells" - use the provided bounds as-is
-        }
-    }
+    // Cap to actual data bounds to avoid scanning empty space
+    r1 = r1.min(grid.max_row);
+    c1 = c1.min(grid.max_col);
 
     let mut count: u32 = 0;
     let mut numerical_count: u32 = 0;

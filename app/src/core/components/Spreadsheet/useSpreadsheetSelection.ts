@@ -709,7 +709,12 @@ export function useSpreadsheetSelection({
 
       window.removeEventListener("mouseup", onEarlyMouseUp);
 
-      baseHandleMouseDown(event);
+      // FIX: Await baseHandleMouseDown so that drag state (isDragging, refs) is fully
+      // initialized before we check mouseUpDuringAsyncCheck. Without await, the async
+      // operations inside baseHandleMouseDown (onCommitBeforeSelect, getMergeInfo) haven't
+      // completed yet, so isDragging is still false when baseHandleMouseUp runs — leaving
+      // the drag state stuck and causing "sticky shift" selection behavior.
+      await baseHandleMouseDown(event);
 
       // If mouseup already occurred during the async gap, immediately end the drag
       // so the drag state doesn't get stuck. The cell selection still happened above.

@@ -254,8 +254,16 @@ export function useClipboard(): UseClipboardReturn {
       const minCol = Math.min(sel.startCol, sel.endCol);
       const maxCol = Math.max(sel.startCol, sel.endCol);
 
+      // Guard against unreasonably large ranges (e.g. select-all on 1M x 16K grid)
+      const MAX_CLIPBOARD_CELLS = 5_000_000;
+      const totalCells = (maxRow - minRow + 1) * (maxCol - minCol + 1);
+      if (totalCells > MAX_CLIPBOARD_CELLS) {
+        console.warn(`[useClipboard] Range too large for clipboard (${totalCells} cells). Skipping.`);
+        return [];
+      }
+
       const cells: (CellData | null)[][] = [];
-      
+
       for (let r = minRow; r <= maxRow; r++) {
         const row: (CellData | null)[] = [];
         for (let c = minCol; c <= maxCol; c++) {

@@ -137,13 +137,29 @@ export function createHeaderSelectionHandlers(deps: HeaderSelectionDependencies)
       return true;
     }
 
+    // Check if interceptor wants to scope the column selection (e.g., table rows only)
+    const selOverride = interceptResult?.selectionOverride;
+
+    // FIX: Set drag state BEFORE any async operations to prevent race conditions.
+    // If mouseup fires during onCommitBeforeSelect, isDragging must already be true
+    // so the global mouseup handler can clean up properly.
+    if (event.button === 0) {
+      setIsDragging(true);
+      headerDragRef.current = {
+        type: "column",
+        startIndex: headerCol,
+        scopedStartRow: selOverride?.startRow,
+        scopedEndRow: selOverride?.endRow,
+      };
+      lastMousePosRef.current = { x: mouseX, y: mouseY };
+      // Reset last extended index for new drag operation
+      lastExtendedIndex = headerCol;
+    }
+
     // If we're editing, commit first
     if (onCommitBeforeSelect) {
       await onCommitBeforeSelect();
     }
-
-    // Check if interceptor wants to scope the column selection (e.g., table rows only)
-    const selOverride = interceptResult?.selectionOverride;
 
     if (shiftKey && selection && onSelectColumn) {
       // Extend column selection
@@ -157,20 +173,6 @@ export function createHeaderSelectionHandlers(deps: HeaderSelectionDependencies)
     } else {
       // Fallback: select all rows in this column
       onSelectCell(0, headerCol, "columns", config.totalRows - 1, headerCol);
-    }
-
-    // Start header drag for extending selection (only for left-click)
-    if (event.button === 0) {
-      setIsDragging(true);
-      headerDragRef.current = {
-        type: "column",
-        startIndex: headerCol,
-        scopedStartRow: selOverride?.startRow,
-        scopedEndRow: selOverride?.endRow,
-      };
-      lastMousePosRef.current = { x: mouseX, y: mouseY };
-      // Reset last extended index for new drag operation
-      lastExtendedIndex = headerCol;
     }
 
     return true;
@@ -200,6 +202,15 @@ export function createHeaderSelectionHandlers(deps: HeaderSelectionDependencies)
       return true;
     }
 
+    // FIX: Set drag state BEFORE any async operations to prevent race conditions.
+    if (event.button === 0) {
+      setIsDragging(true);
+      headerDragRef.current = { type: "row", startIndex: headerRow };
+      lastMousePosRef.current = { x: mouseX, y: mouseY };
+      // Reset last extended index for new drag operation
+      lastExtendedIndex = headerRow;
+    }
+
     // If we're editing, commit first
     if (onCommitBeforeSelect) {
       await onCommitBeforeSelect();
@@ -215,15 +226,6 @@ export function createHeaderSelectionHandlers(deps: HeaderSelectionDependencies)
       // Fallback: select all columns in this row
       onSelectCell(headerRow, 0, "rows");
       onExtendTo(headerRow, config.totalCols - 1);
-    }
-
-    // Start header drag for extending selection (only for left-click)
-    if (event.button === 0) {
-      setIsDragging(true);
-      headerDragRef.current = { type: "row", startIndex: headerRow };
-      lastMousePosRef.current = { x: mouseX, y: mouseY };
-      // Reset last extended index for new drag operation
-      lastExtendedIndex = headerRow;
     }
 
     return true;

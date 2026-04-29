@@ -82,16 +82,14 @@ export function RibbonContainer(): React.ReactElement {
       setTabs(registeredTabs);
 
       setActiveTabId((current) => {
-        // Auto-activate contextual tabs: if a new tab appeared after initial
-        // load, switch to it. Matches Excel behavior where clicking a pivot
-        // auto-switches to the Design tab.
-        if (newlyAddedTab) return newlyAddedTab.id;
         // If no tabs, clear active
         if (registeredTabs.length === 0) return null;
-        // If current tab still exists, keep it
+        // If current tab still exists, keep it (don't auto-switch on new contextual tabs)
         if (current && registeredTabs.some((t) => t.id === current)) return current;
-        // Otherwise select first tab
-        return registeredTabs[0].id;
+        // Current tab was removed (e.g. contextual tab hidden) — fall back to
+        // the first non-contextual tab, or the first tab if all are contextual
+        const fallback = registeredTabs.find((t) => !t.color) ?? registeredTabs[0];
+        return fallback.id;
       });
     };
 
