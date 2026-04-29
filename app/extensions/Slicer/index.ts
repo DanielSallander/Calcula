@@ -445,6 +445,21 @@ function activate(context: ExtensionContext): void {
   });
 
   // -----------------------------------------------------------------------
+  // Cross-filter: refresh slicer items when a ribbon filter selection changes
+  // -----------------------------------------------------------------------
+
+  const handleRibbonFilterChanged = async () => {
+    // Refresh items for all slicers so has_data is updated
+    const slicers = getAllSlicers();
+    await Promise.all(slicers.map((s) => refreshSlicerItems(s.id)));
+    requestOverlayRedraw();
+  };
+  window.addEventListener("ribbonFilter:selectionChanged", handleRibbonFilterChanged);
+  cleanupFunctions.push(() => {
+    window.removeEventListener("ribbonFilter:selectionChanged", handleRibbonFilterChanged);
+  });
+
+  // -----------------------------------------------------------------------
   // Slicer computed property refresh (triggered when cell changes affect slicers)
   // -----------------------------------------------------------------------
 

@@ -1591,6 +1591,28 @@ function activate(context: ExtensionContext): void {
   window.addEventListener("pivot:refresh", handlePivotRefresh);
   cleanupFunctions.push(() => window.removeEventListener("pivot:refresh", handlePivotRefresh));
 
+  // Listen for external loading events (from filter/slicer bridges)
+  const handleSetLoading = (e: Event) => {
+    const { pivotId, stage } = (e as CustomEvent).detail ?? {};
+    if (pivotId != null) {
+      setLoading(pivotId, stage ?? "Applying filter...", 0, 1);
+      requestOverlayRedraw();
+    }
+  };
+  const handleClearLoading = (e: Event) => {
+    const { pivotId } = (e as CustomEvent).detail ?? {};
+    if (pivotId != null) {
+      clearLoading(pivotId);
+      requestOverlayRedraw();
+    }
+  };
+  window.addEventListener("pivot:set-loading", handleSetLoading);
+  window.addEventListener("pivot:clear-loading", handleClearLoading);
+  cleanupFunctions.push(() => {
+    window.removeEventListener("pivot:set-loading", handleSetLoading);
+    window.removeEventListener("pivot:clear-loading", handleClearLoading);
+  });
+
   // Listen for cell move operations — relocate any pivot tables that were fully contained
   const handleCellsMoved = async (e: Event) => {
     const { sourceStartRow, sourceStartCol, sourceEndRow, sourceEndCol, targetRow, targetCol } =

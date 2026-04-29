@@ -370,13 +370,14 @@ pub fn get_slicers_for_sheet(
 
 /// Get the unique items for a slicer (reads from the data source).
 /// Returns items with their selection state and data availability.
-/// Cross-slicer filtering: checks other slicers on the same source to
-/// determine which items still have matching data.
+/// Cross-filtering: checks other slicers AND ribbon filters that share
+/// connected sources to determine which items still have matching data.
 #[tauri::command]
 pub fn get_slicer_items(
     state: State<AppState>,
     pivot_state: State<'_, PivotState>,
     slicer_state: State<SlicerState>,
+    ribbon_filter_state: State<crate::ribbon_filter::RibbonFilterState>,
     slicer_id: u64,
 ) -> Result<Vec<SlicerItem>, String> {
     let slicers = slicer_state.slicers.lock().unwrap();
@@ -389,14 +390,12 @@ pub fn get_slicer_items(
     let reference_source_id = slicer.cache_source_id;
 
     // Collect filters from OTHER slicers that share any connected source (cross-filtering).
-    // Two slicers are siblings if they have overlapping connected source IDs
-    // (comparing only connections of the same type as the cache source).
     let slicer_connected: std::collections::HashSet<u64> =
         slicer.connected_sources.iter()
             .filter(|c| c.source_type == slicer.source_type)
             .map(|c| c.source_id)
             .collect();
-    let sibling_filters: Vec<(String, Vec<String>)> = slicers
+    let mut sibling_filters: Vec<(String, Vec<String>)> = slicers
         .values()
         .filter(|s| {
             s.id != slicer_id
@@ -405,6 +404,23 @@ pub fn get_slicer_items(
         })
         .map(|s| (s.field_name.clone(), s.selected_items.clone().unwrap()))
         .collect();
+
+    // Also collect cross-filters from ribbon filters.
+    // Match if: (a) they share connected sources, OR
+    //           (b) they explicitly target this slicer via crossFilterSlicerTargets.
+    {
+        let filters = ribbon_filter_state.filters.lock().unwrap();
+        let ribbon_siblings: Vec<(String, Vec<String>)> = filters
+            .values()
+            .filter(|f| {
+                f.selected_items.is_some()
+                    && (f.cross_filter_slicer_targets.contains(&slicer_id)
+                        || f.connected_sources.iter().any(|c| slicer_connected.contains(&c.source_id)))
+            })
+            .map(|f| (f.field_name.clone(), f.selected_items.clone().unwrap()))
+            .collect();
+        sibling_filters.extend(ribbon_siblings);
+    }
 
     let unique_values = match slicer.source_type {
         SlicerSourceType::Table => get_table_column_values(&state, reference_source_id, &slicer.field_name)?,

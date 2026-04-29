@@ -622,6 +622,7 @@ fn ribbon_filter_to_saved(f: &crate::ribbon_filter::RibbonFilter) -> persistence
         },
         selected_items: f.selected_items.clone(),
         cross_filter_targets: f.cross_filter_targets.clone(),
+        cross_filter_slicer_targets: f.cross_filter_slicer_targets.clone(),
         advanced_filter: f.advanced_filter.as_ref().map(|af| {
             persistence::SavedAdvancedFilter {
                 condition1: persistence::SavedAdvancedFilterCondition {
@@ -638,6 +639,11 @@ fn ribbon_filter_to_saved(f: &crate::ribbon_filter::RibbonFilter) -> persistence
                 },
             }
         }),
+        hide_no_data: f.hide_no_data,
+        indicate_no_data: f.indicate_no_data,
+        sort_no_data_last: f.sort_no_data_last,
+        show_select_all: f.show_select_all,
+        single_select: f.single_select,
         order: f.order,
         button_columns: f.button_columns,
         button_rows: f.button_rows,
@@ -679,6 +685,7 @@ fn saved_to_ribbon_filter(saved: &persistence::SavedRibbonFilter) -> crate::ribb
         },
         selected_items: saved.selected_items.clone(),
         cross_filter_targets: saved.cross_filter_targets.clone(),
+        cross_filter_slicer_targets: saved.cross_filter_slicer_targets.clone(),
         advanced_filter: saved.advanced_filter.as_ref().map(|af| {
             crate::ribbon_filter::AdvancedFilter {
                 condition1: crate::ribbon_filter::AdvancedFilterCondition {
@@ -696,6 +703,11 @@ fn saved_to_ribbon_filter(saved: &persistence::SavedRibbonFilter) -> crate::ribb
                 },
             }
         }),
+        hide_no_data: saved.hide_no_data,
+        indicate_no_data: saved.indicate_no_data,
+        sort_no_data_last: saved.sort_no_data_last,
+        show_select_all: saved.show_select_all,
+        single_select: saved.single_select,
         order: saved.order,
         button_columns: saved.button_columns,
         button_rows: saved.button_rows,

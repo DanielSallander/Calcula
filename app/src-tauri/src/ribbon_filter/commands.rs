@@ -39,7 +39,13 @@ pub fn create_ribbon_filter(
         display_mode: params.display_mode.unwrap_or_default(),
         selected_items: None,
         cross_filter_targets: vec![],
+        cross_filter_slicer_targets: vec![],
         advanced_filter: None,
+        hide_no_data: false,
+        indicate_no_data: true,
+        sort_no_data_last: true,
+        show_select_all: false,
+        single_select: false,
         order: params.order.unwrap_or(0),
         button_columns: 2,
         button_rows: 0,
@@ -119,8 +125,26 @@ pub fn update_ribbon_filter(
     if let Some(cross_filter_targets) = params.cross_filter_targets {
         filter.cross_filter_targets = cross_filter_targets;
     }
+    if let Some(cross_filter_slicer_targets) = params.cross_filter_slicer_targets {
+        filter.cross_filter_slicer_targets = cross_filter_slicer_targets;
+    }
     if let Some(advanced_filter) = params.advanced_filter {
         filter.advanced_filter = advanced_filter;
+    }
+    if let Some(hide_no_data) = params.hide_no_data {
+        filter.hide_no_data = hide_no_data;
+    }
+    if let Some(indicate_no_data) = params.indicate_no_data {
+        filter.indicate_no_data = indicate_no_data;
+    }
+    if let Some(sort_no_data_last) = params.sort_no_data_last {
+        filter.sort_no_data_last = sort_no_data_last;
+    }
+    if let Some(show_select_all) = params.show_select_all {
+        filter.show_select_all = show_select_all;
+    }
+    if let Some(single_select) = params.single_select {
+        filter.single_select = single_select;
     }
 
     Ok(filter.clone())

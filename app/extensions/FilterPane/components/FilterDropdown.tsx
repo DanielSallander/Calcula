@@ -7,7 +7,8 @@ import { createPortal } from "react-dom";
 import { getSheets, emitAppEvent, AppEvents } from "@api";
 import { invokeBackend, getAllPivotTables } from "@api/backend";
 import type { SlicerItem, SlicerConnection, ConnectionMode, UpdateRibbonFilterParams, AdvancedFilter, AdvancedFilterOperator, AdvancedFilterLogic, FieldDataType } from "../lib/filterPaneTypes";
-import { updateFilterAsync, getAllFilters } from "../lib/filterPaneStore";
+import { updateFilterAsync, updateFilterSelectionAsync, getAllFilters } from "../lib/filterPaneStore";
+import { getAllSlicers as fetchAllSlicers, type SlicerInfo } from "../lib/filterPaneApi";
 
 /** Resolve a pivot field's index from its name. */
 async function resolveFieldIndex(
@@ -40,10 +41,16 @@ export interface FilterDropdownProps {
   onDelete: () => void;
   connectionMode: ConnectionMode;
   crossFilterTargets: number[];
+  crossFilterSlicerTargets: number[];
   advancedFilter: AdvancedFilter | null;
   fieldDataType: FieldDataType;
   connectedSources?: SlicerConnection[];
   connectedSheets?: number[];
+  hideNoData: boolean;
+  indicateNoData: boolean;
+  sortNoDataLast: boolean;
+  showSelectAll: boolean;
+  singleSelect: boolean;
 }
 
 export function FilterDropdown({
@@ -61,6 +68,12 @@ export function FilterDropdown({
   fieldDataType,
   connectedSources,
   connectedSheets,
+  hideNoData,
+  indicateNoData,
+  sortNoDataLast,
+  showSelectAll,
+  singleSelect,
+  crossFilterSlicerTargets,
 }: FilterDropdownProps): React.ReactElement {
   const cachedFilters = getAllFilters();
   // Local selection state for OK/Cancel pattern
@@ -75,8 +88,8 @@ export function FilterDropdown({
   );
   const dropdownRef = useRef<HTMLDivElement>(null);
 
-  // Sub-panel state: "none" | "connections" | "crossTargets" | "advanced"
-  type PanelView = "none" | "connections" | "crossTargets" | "advanced";
+  // Sub-panel state
+  type PanelView = "none" | "connections" | "crossTargets" | "settings";
   const [panelView, setPanelView] = useState<PanelView>("none");
 
   // Alias for backward compat in the JSX
@@ -91,6 +104,10 @@ export function FilterDropdown({
   const [localCrossTargets, setLocalCrossTargets] = useState<Set<number>>(
     new Set(crossFilterTargets),
   );
+  const [localCrossSlicerTargets, setLocalCrossSlicerTargets] = useState<Set<number>>(
+    new Set(crossFilterSlicerTargets),
+  );
+  const [availableSlicers, setAvailableSlicers] = useState<SlicerInfo[]>([]);
 
   // For manual mode: list of all available pivots + tables
   interface SourceEntry {
@@ -104,6 +121,12 @@ export function FilterDropdown({
       (connectedSources ?? []).map((c) => `${c.sourceType}:${c.sourceId}`),
     );
   });
+
+  // Load slicers when cross-filter panel opens
+  useEffect(() => {
+    if (panelView !== "crossTargets") return;
+    fetchAllSlicers().then(setAvailableSlicers).catch(console.error);
+  }, [panelView]);
 
   // Load sheet names + available sources when showing connections
   useEffect(() => {
@@ -144,6 +167,7 @@ export function FilterDropdown({
       connectionMode: localMode,
       connectedSheets: localMode === "bySheet" ? Array.from(localSheets) : [],
       crossFilterTargets: Array.from(localCrossTargets),
+      crossFilterSlicerTargets: Array.from(localCrossSlicerTargets),
     };
     if (localMode === "manual") {
       updates.connectedSources = Array.from(localConnections).map((key) => {
@@ -178,8 +202,16 @@ export function FilterDropdown({
     }
 
     emitAppEvent(AppEvents.GRID_DATA_REFRESH);
+
+    // Trigger slicer refresh so cross-filter has_data is recalculated
+    window.dispatchEvent(
+      new CustomEvent("ribbonFilter:selectionChanged", {
+        detail: { filterId },
+      }),
+    );
+
     setShowConnections(false);
-  }, [filterId, fieldName, localMode, localSheets, localConnections, localCrossTargets, connectedSources]);
+  }, [filterId, fieldName, localMode, localSheets, localConnections, localCrossTargets, localCrossSlicerTargets, connectedSources]);
 
   // Close on outside click
   useEffect(() => {
@@ -208,13 +240,18 @@ export function FilterDropdown({
   }, [onClose]);
 
   const handleToggle = useCallback((value: string) => {
-    setLocalSelected((prev) => {
-      const next = new Set(prev);
-      if (next.has(value)) next.delete(value);
-      else next.add(value);
-      return next;
-    });
-  }, []);
+    if (singleSelect) {
+      // Single-select: only one item at a time
+      setLocalSelected(new Set([value]));
+    } else {
+      setLocalSelected((prev) => {
+        const next = new Set(prev);
+        if (next.has(value)) next.delete(value);
+        else next.add(value);
+        return next;
+      });
+    }
+  }, [singleSelect]);
 
   const handleSelectAll = useCallback(() => {
     setLocalSelected(new Set(allValues));
@@ -234,10 +271,25 @@ export function FilterDropdown({
   }, [localSelected, allValues, onApply]);
 
   const filtered = useMemo(() => {
-    if (!searchText) return items;
-    const lower = searchText.toLowerCase();
-    return items.filter((i) => i.value.toLowerCase().includes(lower));
-  }, [items, searchText]);
+    let result = items;
+    // Hide items with no data if setting is enabled
+    if (hideNoData) {
+      result = result.filter((i) => i.hasData);
+    }
+    // Filter by search text
+    if (searchText) {
+      const lower = searchText.toLowerCase();
+      result = result.filter((i) => i.value.toLowerCase().includes(lower));
+    }
+    // Sort items with no data to the bottom
+    if (sortNoDataLast && !hideNoData) {
+      result = [...result].sort((a, b) => {
+        if (a.hasData === b.hasData) return 0;
+        return a.hasData ? -1 : 1;
+      });
+    }
+    return result;
+  }, [items, searchText, hideNoData, sortNoDataLast]);
 
   // Position: below the card, aligned left
   const top = anchorRect.bottom + 2;
@@ -294,14 +346,16 @@ export function FilterDropdown({
           )}
 
           {/* Select All / None */}
-          <div style={styles.bulkRow}>
-            <button onClick={handleSelectAll} style={styles.bulkButton}>
-              Select All
-            </button>
-            <button onClick={handleSelectNone} style={styles.bulkButton}>
-              Select None
-            </button>
-          </div>
+          {!singleSelect && (showSelectAll || true) && (
+            <div style={styles.bulkRow}>
+              <button onClick={handleSelectAll} style={styles.bulkButton}>
+                Select All
+              </button>
+              <button onClick={handleSelectNone} style={styles.bulkButton}>
+                Select None
+              </button>
+            </div>
+          )}
 
           {/* Items */}
           <div style={styles.itemList}>
@@ -310,13 +364,14 @@ export function FilterDropdown({
                 key={item.value}
                 style={{
                   ...styles.itemRow,
-                  opacity: item.hasData ? 1 : 0.45,
+                  opacity: indicateNoData && !item.hasData ? 0.45 : 1,
                 }}
               >
                 <input
-                  type="checkbox"
+                  type={singleSelect ? "radio" : "checkbox"}
                   checked={localSelected.has(item.value)}
                   onChange={() => handleToggle(item.value)}
+                  name={singleSelect ? `filter-${filterId}` : undefined}
                   style={{ marginRight: 8 }}
                 />
                 <span style={styles.itemLabel}>{item.value || "(Blank)"}</span>
@@ -360,24 +415,37 @@ export function FilterDropdown({
       {panelView === "none" ? (
         <div style={styles.actionsRow}>
           <button onClick={() => setPanelView("connections")} style={styles.actionLink}>
-            Report Connections
+            Connections
           </button>
           <button onClick={() => setPanelView("crossTargets")} style={styles.actionLink}>
             Cross-filter
+          </button>
+          <button onClick={() => setPanelView("settings")} style={styles.actionLink}>
+            Settings
           </button>
           <button onClick={onDelete} style={{ ...styles.actionLink, color: "#c00" }}>
             Remove
           </button>
         </div>
+      ) : panelView === "settings" ? (
+        <FilterSettingsPanel
+          filterId={filterId}
+          hideNoData={hideNoData}
+          indicateNoData={indicateNoData}
+          sortNoDataLast={sortNoDataLast}
+          showSelectAll={showSelectAll}
+          singleSelect={singleSelect}
+          onClose={() => setPanelView("none")}
+        />
       ) : panelView === "crossTargets" ? (
         <div style={styles.connectionsPanel}>
           <div style={styles.connectionsHeader}>Cross-filter Targets</div>
           <div style={styles.modeHint}>
-            Select which other filters this filter should cross-filter.
-            When you select values here, the target filters will dim items
-            that have no matching data.
+            Select which filters and slicers this filter should cross-filter.
+            Target items will be dimmed when they have no matching data.
           </div>
           <div style={styles.sheetList}>
+            {/* Other ribbon filters */}
             {cachedFilters
               .filter((f) => f.id !== filterId)
               .map((f) => {
@@ -385,7 +453,7 @@ export function FilterDropdown({
                   ? f.fieldName.split(".").pop()!
                   : f.fieldName;
                 return (
-                  <label key={f.id} style={styles.itemRow}>
+                  <label key={`f-${f.id}`} style={styles.itemRow}>
                     <input
                       type="checkbox"
                       checked={localCrossTargets.has(f.id)}
@@ -399,12 +467,39 @@ export function FilterDropdown({
                       }}
                       style={{ marginRight: 8 }}
                     />
+                    <span style={{ fontSize: 10, color: "#888", marginRight: 4 }}>[F]</span>
                     <span>{shortName}</span>
                   </label>
                 );
               })}
-            {cachedFilters.filter((f) => f.id !== filterId).length === 0 && (
-              <div style={styles.modeHint}>No other filters to cross-filter.</div>
+            {/* Canvas slicers */}
+            {availableSlicers.map((s) => {
+              const shortName = s.fieldName.includes(".")
+                ? s.fieldName.split(".").pop()!
+                : s.fieldName;
+              return (
+                <label key={`s-${s.id}`} style={styles.itemRow}>
+                  <input
+                    type="checkbox"
+                    checked={localCrossSlicerTargets.has(s.id)}
+                    onChange={() => {
+                      setLocalCrossSlicerTargets((prev) => {
+                        const next = new Set(prev);
+                        if (next.has(s.id)) next.delete(s.id);
+                        else next.add(s.id);
+                        return next;
+                      });
+                    }}
+                    style={{ marginRight: 8 }}
+                  />
+                  <span style={{ fontSize: 10, color: "#888", marginRight: 4 }}>[S]</span>
+                  <span>{shortName}</span>
+                </label>
+              );
+            })}
+            {cachedFilters.filter((f) => f.id !== filterId).length === 0 &&
+              availableSlicers.length === 0 && (
+              <div style={styles.modeHint}>No other filters or slicers to cross-filter.</div>
             )}
           </div>
           <div style={styles.connectionsFooter}>
@@ -412,6 +507,7 @@ export function FilterDropdown({
             <button
               onClick={() => {
                 setLocalCrossTargets(new Set(crossFilterTargets));
+                setLocalCrossSlicerTargets(new Set(crossFilterSlicerTargets));
                 setPanelView("none");
               }}
               style={styles.cancelButton}
@@ -528,6 +624,115 @@ export function FilterDropdown({
       )}
     </div>,
     document.body,
+  );
+}
+
+// ============================================================================
+// Filter Settings Panel
+// ============================================================================
+
+function FilterSettingsPanel({
+  filterId,
+  hideNoData: initHideNoData,
+  indicateNoData: initIndicateNoData,
+  sortNoDataLast: initSortNoDataLast,
+  showSelectAll: initShowSelectAll,
+  singleSelect: initSingleSelect,
+  onClose,
+}: {
+  filterId: number;
+  hideNoData: boolean;
+  indicateNoData: boolean;
+  sortNoDataLast: boolean;
+  showSelectAll: boolean;
+  singleSelect: boolean;
+  onClose: () => void;
+}): React.ReactElement {
+  const [localHideNoData, setLocalHideNoData] = useState(initHideNoData);
+  const [localIndicateNoData, setLocalIndicateNoData] = useState(initIndicateNoData);
+  const [localSortNoDataLast, setLocalSortNoDataLast] = useState(initSortNoDataLast);
+  const [localShowSelectAll, setLocalShowSelectAll] = useState(initShowSelectAll);
+  const [localSingleSelect, setLocalSingleSelect] = useState(initSingleSelect);
+
+  const handleSave = useCallback(async () => {
+    await updateFilterAsync(filterId, {
+      hideNoData: localHideNoData,
+      indicateNoData: localIndicateNoData,
+      sortNoDataLast: localSortNoDataLast,
+      showSelectAll: localShowSelectAll,
+      singleSelect: localSingleSelect,
+    });
+    onClose();
+  }, [
+    filterId, localHideNoData, localIndicateNoData, localSortNoDataLast,
+    localShowSelectAll, localSingleSelect, onClose,
+  ]);
+
+  return (
+    <div style={styles.connectionsPanel}>
+      <div style={styles.connectionsHeader}>Filter Settings</div>
+
+      {/* Selection */}
+      <div style={{ fontSize: 11, fontWeight: 600, color: "#555", marginBottom: 4 }}>
+        Selection
+      </div>
+      <SettingsToggle label="Single select" checked={localSingleSelect} onChange={setLocalSingleSelect} />
+      <SettingsToggle label={'Show "Select all" option'} checked={localShowSelectAll} onChange={setLocalShowSelectAll} />
+
+      {/* Data display */}
+      <div style={{ fontSize: 11, fontWeight: 600, color: "#555", marginTop: 8, marginBottom: 4 }}>
+        Data display
+      </div>
+      <SettingsToggle label="Hide items with no data" checked={localHideNoData} onChange={setLocalHideNoData} />
+      <SettingsToggle
+        label="Visually indicate items with no data"
+        checked={localIndicateNoData}
+        onChange={setLocalIndicateNoData}
+        disabled={localHideNoData}
+      />
+      <SettingsToggle
+        label="Show items with no data last"
+        checked={localSortNoDataLast}
+        onChange={setLocalSortNoDataLast}
+        disabled={localHideNoData}
+      />
+
+      <div style={styles.connectionsFooter}>
+        <button onClick={handleSave} style={styles.okButton}>Save</button>
+        <button onClick={onClose} style={styles.cancelButton}>Cancel</button>
+      </div>
+    </div>
+  );
+}
+
+function SettingsToggle({
+  label,
+  checked,
+  onChange,
+  disabled,
+}: {
+  label: string;
+  checked: boolean;
+  onChange: (v: boolean) => void;
+  disabled?: boolean;
+}): React.ReactElement {
+  return (
+    <label
+      style={{
+        ...styles.itemRow,
+        opacity: disabled ? 0.45 : 1,
+        pointerEvents: disabled ? "none" : "auto",
+        justifyContent: "space-between",
+      }}
+    >
+      <span style={{ fontSize: 11 }}>{label}</span>
+      <input
+        type="checkbox"
+        checked={checked}
+        onChange={() => onChange(!checked)}
+        disabled={disabled}
+      />
+    </label>
   );
 }
 
@@ -675,7 +880,10 @@ function AdvancedFilterPanel({
   }, [filterId, op1, val1, logic, op2, val2, hasCond2, items, onApply]);
 
   const handleClear = useCallback(async () => {
+    // Clear advanced filter and selection together, awaiting both
+    // to ensure the backend is fully updated before closing.
     await updateFilterAsync(filterId, { advancedFilter: null });
+    await updateFilterSelectionAsync(filterId, null);
     onApply(null);
   }, [filterId, onApply]);
 

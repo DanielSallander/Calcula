@@ -118,10 +118,14 @@ export async function updateFilterSelectionAsync(
 
     await api.updateRibbonFilterSelection(filterId, selectedItems);
 
-    // Apply filter to connected sources
+    // Apply or clear filter on connected sources
     const updatedFilter = cachedFilters.find((f) => f.id === filterId);
     if (updatedFilter) {
-      await applyRibbonFilter(updatedFilter);
+      if (selectedItems === null) {
+        await clearRibbonFilter(updatedFilter);
+      } else {
+        await applyRibbonFilter(updatedFilter);
+      }
     }
 
     // Refresh sibling filter items (cross-filtering has_data)
@@ -236,7 +240,8 @@ function parseBiFieldName(fieldName: string): [string, string] {
 }
 
 /** Refresh items for sibling filters (those affected by this filter's selection).
- *  Includes: filters sharing connected sources + BI filters on the same connection. */
+ *  Includes: filters sharing connected sources + BI filters on the same connection.
+ *  Also dispatches slicer refresh events for targeted slicers. */
 async function refreshSiblingFilterItems(filterId: number): Promise<void> {
   const filter = cachedFilters.find((f) => f.id === filterId);
   if (!filter) return;

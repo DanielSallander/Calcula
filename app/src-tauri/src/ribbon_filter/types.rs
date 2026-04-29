@@ -89,9 +89,27 @@ pub struct RibbonFilter {
     /// are re-evaluated for hasData. Empty = no cross-filtering.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub cross_filter_targets: Vec<u64>,
+    /// IDs of canvas slicers that this filter cross-filters.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub cross_filter_slicer_targets: Vec<u64>,
     /// Advanced filter condition (None = basic checklist mode).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub advanced_filter: Option<AdvancedFilter>,
+    /// Hide items that have no matching data (cross-filter)
+    #[serde(default)]
+    pub hide_no_data: bool,
+    /// Visually dim items that have no matching data
+    #[serde(default = "default_true")]
+    pub indicate_no_data: bool,
+    /// Sort items with no data to the bottom of the list
+    #[serde(default = "default_true")]
+    pub sort_no_data_last: bool,
+    /// Show "Select all" option in the dropdown
+    #[serde(default)]
+    pub show_select_all: bool,
+    /// Single-select mode (only one item can be selected at a time)
+    #[serde(default)]
+    pub single_select: bool,
     /// Sort order within the ribbon
     #[serde(default)]
     pub order: u32,
@@ -178,6 +196,18 @@ fn default_button_columns() -> u32 {
     2
 }
 
+/// Deserialize `Option<Option<T>>` correctly from JSON:
+/// - field missing → `None` (outer)
+/// - field: null → `Some(None)` (present but null)
+/// - field: value → `Some(Some(value))`
+fn deserialize_double_option<'de, T, D>(deserializer: D) -> Result<Option<Option<T>>, D::Error>
+where
+    T: Deserialize<'de>,
+    D: serde::Deserializer<'de>,
+{
+    Ok(Some(Option::deserialize(deserializer)?))
+}
+
 // ============================================================================
 // COMMAND PARAMS
 // ============================================================================
@@ -215,7 +245,14 @@ pub struct UpdateRibbonFilterParams {
     pub connected_sources: Option<Vec<SlicerConnection>>,
     pub connected_sheets: Option<Vec<usize>>,
     pub cross_filter_targets: Option<Vec<u64>>,
+    pub cross_filter_slicer_targets: Option<Vec<u64>>,
+    #[serde(default, deserialize_with = "deserialize_double_option")]
     pub advanced_filter: Option<Option<AdvancedFilter>>,
+    pub hide_no_data: Option<bool>,
+    pub indicate_no_data: Option<bool>,
+    pub sort_no_data_last: Option<bool>,
+    pub show_select_all: Option<bool>,
+    pub single_select: Option<bool>,
 }
 
 // ============================================================================

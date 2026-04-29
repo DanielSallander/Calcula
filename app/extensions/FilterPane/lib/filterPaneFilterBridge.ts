@@ -69,14 +69,17 @@ function parseBiValueFieldRef(name: string): BiValueFieldRef {
 }
 
 /**
- * Ensure a BI field is in the pivot cache. If missing, adds it as a slicer
- * field by re-configuring the pivot's BI query.
+ * Ensure ALL given BI fields are in the pivot cache. If any are missing,
+ * adds them all as slicer fields in a single pivot rebuild.
+ * This avoids multiple rebuilds that would wipe each other's filters.
  */
-async function ensureBiFieldInPivotCache(
+async function ensureBiFieldsInPivotCache(
   pivotId: number,
-  fieldName: string,
+  fieldNames: string[],
 ): Promise<boolean> {
-  if (!fieldName.includes(".")) return true;
+  // Only BI pivots use "table.column" format
+  const biFields = fieldNames.filter((f) => f.includes("."));
+  if (biFields.length === 0) return true;
 
   try {
     const info = await invokeBackend<HierarchiesInfo>(
@@ -84,19 +87,19 @@ async function ensureBiFieldInPivotCache(
       { pivotId },
     );
 
-    const colPart = fieldName.split(".").pop()!;
-    if (
-      info.hierarchies.some(
+    // Check which fields are missing from the cache
+    const missingFields = biFields.filter((fieldName) => {
+      const colPart = fieldName.split(".").pop()!;
+      return !info.hierarchies.some(
         (h) => h.name === colPart || h.name === fieldName,
-      )
-    ) {
-      return true;
-    }
+      );
+    });
+
+    if (missingFields.length === 0) return true;
 
     if (!info.biModel) return false;
 
-    // Don't modify a pivot that has no measures configured yet —
-    // reconstructing its field config would overwrite user changes.
+    // Don't modify a pivot that has no measures configured yet
     if (info.dataHierarchies.length === 0) {
       return false;
     }
@@ -116,21 +119,23 @@ async function ensureBiFieldInPivotCache(
       resolveHierarchyFieldRef(h.name, lookupCols, info.biModel),
     );
 
+    // Add ALL missing fields as slicer fields in one rebuild
+    const slicerFields = biFields.map((f) => parseBiFieldRef(f, []));
+
     await updateBiPivotFields({
       pivotId,
       rowFields,
       columnFields,
       valueFields,
       filterFields,
-      slicerFields: [parseBiFieldRef(fieldName, [])],
+      slicerFields,
       lookupColumns: lookupCols,
     });
 
-    window.dispatchEvent(new Event("pivot:refresh"));
     return true;
   } catch (err) {
     console.warn(
-      "[FilterPane] Failed to ensure BI field in pivot cache:",
+      "[FilterPane] Failed to ensure BI fields in pivot cache:",
       err,
     );
     return false;
@@ -217,7 +222,7 @@ async function resolveConnections(
  * Apply a ribbon filter's selection to all its connected sources.
  * Resolves connections dynamically based on connectionMode.
  * After applying, re-applies all OTHER active filters that target the same
- * pivots, because ensureBiFieldInPivotCache can reset the pivot query.
+ * pivots, because adding slicer fields can reset the pivot query.
  */
 export async function applyRibbonFilter(filter: RibbonFilter): Promise<void> {
   try {
@@ -228,58 +233,95 @@ export async function applyRibbonFilter(filter: RibbonFilter): Promise<void> {
     const connected = await resolveConnections(filter);
     if (connected.length === 0) return;
 
+    // Collect ALL active filters so we can ensure all fields exist and apply them together
+    const allFilters = getAllFilters();
+    const activeFilters = allFilters.filter(
+      (f) => f.selectedItems !== null,
+    );
+
     // Collect pivot IDs we're applying to
     const affectedPivotIds = new Set<number>();
 
+    // Show loading overlay on affected pivots
     for (const conn of connected) {
-      try {
-        if (conn.sourceType === "pivot") {
-          await applyPivotFilterForSource(
-            conn.sourceId,
-            filter.fieldName,
-            filter.selectedItems,
-          );
-          affectedPivotIds.add(conn.sourceId);
-        } else {
-          await applyTableFilterForSource(
-            conn.sourceId,
-            filter.fieldName,
-            filter.selectedItems,
-          );
-        }
-      } catch (err) {
-        console.warn(
-          "[FilterPane] Failed to apply filter to connected source",
-          conn,
-          err,
+      if (conn.sourceType === "pivot") {
+        affectedPivotIds.add(conn.sourceId);
+        window.dispatchEvent(
+          new CustomEvent("pivot:set-loading", {
+            detail: { pivotId: conn.sourceId, stage: "Applying filter..." },
+          }),
         );
       }
     }
 
-    // Re-apply other active ribbon filters that target the same pivots.
-    // This is needed because ensureBiFieldInPivotCache may have reset the
-    // pivot query, wiping filters from other ribbon filters.
-    if (affectedPivotIds.size > 0) {
-      const allFilters = getAllFilters();
-      for (const other of allFilters) {
-        if (other.id === filter.id) continue;
-        if (other.selectedItems === null) continue; // no active filter
+    // For each affected pivot, ensure ALL active filter fields are in the cache
+    // in a single rebuild, then apply all filters without intermediate refreshes.
+    for (const pivotId of affectedPivotIds) {
+      // Collect all field names that need to be in this pivot's cache
+      const allFieldNames: string[] = [];
+      const filtersForPivot: Array<{ fieldName: string; selectedItems: string[] }> = [];
 
+      // The current filter
+      allFieldNames.push(filter.fieldName);
+      filtersForPivot.push({
+        fieldName: filter.fieldName,
+        selectedItems: filter.selectedItems!,
+      });
+
+      // Other active filters targeting the same pivot
+      for (const other of activeFilters) {
+        if (other.id === filter.id) continue;
         const otherConnected = await resolveConnections(other);
-        for (const conn of otherConnected) {
-          if (conn.sourceType === "pivot" && affectedPivotIds.has(conn.sourceId)) {
-            try {
-              await applyPivotFilterForSource(
-                conn.sourceId,
-                other.fieldName,
-                other.selectedItems,
-              );
-            } catch {
-              // Best effort
-            }
-          }
+        if (otherConnected.some((c) => c.sourceType === "pivot" && c.sourceId === pivotId)) {
+          allFieldNames.push(other.fieldName);
+          filtersForPivot.push({
+            fieldName: other.fieldName,
+            selectedItems: other.selectedItems!,
+          });
         }
       }
+
+      // Ensure all fields exist in the cache (single rebuild if needed)
+      await ensureBiFieldsInPivotCache(pivotId, allFieldNames);
+
+      // Apply all filters without triggering pivot:refresh between them
+      for (const f of filtersForPivot) {
+        const fieldIndex = await resolveFieldIndex(pivotId, f.fieldName);
+        if (fieldIndex < 0) continue;
+        await invokeBackend("apply_pivot_filter", {
+          request: {
+            pivotId,
+            fieldIndex,
+            filters: { manualFilter: { selectedItems: f.selectedItems } },
+          },
+        });
+      }
+    }
+
+    // Apply table filters
+    for (const conn of connected) {
+      if (conn.sourceType !== "table") continue;
+      try {
+        await applyTableFilterForSource(
+          conn.sourceId,
+          filter.fieldName,
+          filter.selectedItems,
+        );
+      } catch (err) {
+        console.warn("[FilterPane] Failed to apply table filter", conn, err);
+      }
+    }
+
+    // Single pivot:refresh after all filters are applied
+    if (affectedPivotIds.size > 0) {
+      window.dispatchEvent(new Event("pivot:refresh"));
+    }
+
+    // Clear loading overlay on affected pivots
+    for (const pivotId of affectedPivotIds) {
+      window.dispatchEvent(
+        new CustomEvent("pivot:clear-loading", { detail: { pivotId } }),
+      );
     }
 
     emitAppEvent(AppEvents.GRID_DATA_REFRESH);
@@ -296,6 +338,17 @@ export async function clearRibbonFilter(filter: RibbonFilter): Promise<void> {
     const connected = await resolveConnections(filter);
     if (connected.length === 0) return;
 
+    // Show loading overlay on affected pivots
+    for (const conn of connected) {
+      if (conn.sourceType === "pivot") {
+        window.dispatchEvent(
+          new CustomEvent("pivot:set-loading", {
+            detail: { pivotId: conn.sourceId, stage: "Clearing filter..." },
+          }),
+        );
+      }
+    }
+
     for (const conn of connected) {
       try {
         if (conn.sourceType === "pivot") {
@@ -305,6 +358,15 @@ export async function clearRibbonFilter(filter: RibbonFilter): Promise<void> {
         }
       } catch (err) {
         // Best effort
+      }
+    }
+
+    // Clear loading overlay
+    for (const conn of connected) {
+      if (conn.sourceType === "pivot") {
+        window.dispatchEvent(
+          new CustomEvent("pivot:clear-loading", { detail: { pivotId: conn.sourceId } }),
+        );
       }
     }
 
@@ -393,7 +455,7 @@ async function applyPivotFilterForSource(
 
   // If field not found, try to add it to the cache (BI pivots)
   if (fieldIndex < 0) {
-    const added = await ensureBiFieldInPivotCache(pivotId, fieldName);
+    const added = await ensureBiFieldsInPivotCache(pivotId, [fieldName]);
     if (added) {
       fieldIndex = await resolveFieldIndex(pivotId, fieldName);
     }

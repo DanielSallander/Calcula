@@ -709,8 +709,20 @@ pub struct SavedRibbonFilter {
     pub selected_items: Option<Vec<String>>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub cross_filter_targets: Vec<u64>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub cross_filter_slicer_targets: Vec<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub advanced_filter: Option<SavedAdvancedFilter>,
+    #[serde(default)]
+    pub hide_no_data: bool,
+    #[serde(default = "default_true")]
+    pub indicate_no_data: bool,
+    #[serde(default = "default_true")]
+    pub sort_no_data_last: bool,
+    #[serde(default)]
+    pub show_select_all: bool,
+    #[serde(default)]
+    pub single_select: bool,
     #[serde(default)]
     pub order: u32,
     #[serde(default = "default_button_columns")]

@@ -72,6 +72,20 @@ export async function setRibbonFilterItemSelected(
 }
 
 // ============================================================================
+// Slicer helpers (for cross-filter UI)
+// ============================================================================
+
+export interface SlicerInfo {
+  id: number;
+  name: string;
+  fieldName: string;
+}
+
+export async function getAllSlicers(): Promise<SlicerInfo[]> {
+  return invokeBackend<SlicerInfo[]>("get_all_slicers");
+}
+
+// ============================================================================
 // BI Connection helpers
 // ============================================================================
 

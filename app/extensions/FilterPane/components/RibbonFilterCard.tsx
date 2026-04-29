@@ -11,6 +11,7 @@ import {
   updateFilterSelectionAsync,
   deleteFilterAsync,
   updateFilterAsync,
+  getFilterById,
 } from "../lib/filterPaneStore";
 import { FilterPaneEvents } from "../lib/filterPaneEvents";
 import { FilterDropdown } from "./FilterDropdown";
@@ -42,8 +43,8 @@ export function RibbonFilterCard({ filter }: Props): React.ReactElement {
   const [itemsLoaded, setItemsLoaded] = useState(false);
 
   useEffect(() => {
-    // Only refresh on cross-filter events from OTHER filters
-    const onChanged = (e: Event) => {
+    // Refresh on cross-filter events from OTHER filters or slicers
+    const onFilterChanged = (e: Event) => {
       const detail = (e as CustomEvent).detail;
       if (detail?.filterId && detail.filterId !== filter.id && itemsLoaded) {
         refreshFilterItems(filter.id).then(() => {
@@ -52,9 +53,19 @@ export function RibbonFilterCard({ filter }: Props): React.ReactElement {
         });
       }
     };
-    window.addEventListener(FilterPaneEvents.FILTER_SELECTION_CHANGED, onChanged);
+    const onSlicerChanged = () => {
+      if (itemsLoaded) {
+        refreshFilterItems(filter.id).then(() => {
+          const cached = getCachedItems(filter.id);
+          if (cached) setItems(cached);
+        });
+      }
+    };
+    window.addEventListener(FilterPaneEvents.FILTER_SELECTION_CHANGED, onFilterChanged);
+    window.addEventListener("slicer:selectionChanged", onSlicerChanged);
     return () => {
-      window.removeEventListener(FilterPaneEvents.FILTER_SELECTION_CHANGED, onChanged);
+      window.removeEventListener(FilterPaneEvents.FILTER_SELECTION_CHANGED, onFilterChanged);
+      window.removeEventListener("slicer:selectionChanged", onSlicerChanged);
     };
   }, [filter.id, itemsLoaded]);
 
@@ -135,25 +146,34 @@ export function RibbonFilterCard({ filter }: Props): React.ReactElement {
         </button>
       </div>
 
-      {/* Dropdown */}
-      {dropdownOpen && dropdownAnchor && (
-        <FilterDropdown
-          fieldName={filter.fieldName}
-          items={items}
-          selectedItems={localSelectedItems}
-          anchorRect={dropdownAnchor}
-          onApply={handleSelectionApply}
-          onClose={handleDropdownClose}
-          filterId={filter.id}
-          onDelete={handleDelete}
-          connectionMode={filter.connectionMode ?? "manual"}
-          crossFilterTargets={filter.crossFilterTargets ?? []}
-          advancedFilter={filter.advancedFilter ?? null}
-          fieldDataType={filter.fieldDataType ?? "unknown"}
-          connectedSources={filter.connectedSources}
-          connectedSheets={filter.connectedSheets}
-        />
-      )}
+      {/* Dropdown — read fresh filter from store to avoid stale props */}
+      {dropdownOpen && dropdownAnchor && (() => {
+        const f = getFilterById(filter.id) ?? filter;
+        return (
+          <FilterDropdown
+            fieldName={f.fieldName}
+            items={items}
+            selectedItems={localSelectedItems}
+            anchorRect={dropdownAnchor}
+            onApply={handleSelectionApply}
+            onClose={handleDropdownClose}
+            filterId={f.id}
+            onDelete={handleDelete}
+            connectionMode={f.connectionMode ?? "manual"}
+            crossFilterTargets={f.crossFilterTargets ?? []}
+            crossFilterSlicerTargets={f.crossFilterSlicerTargets ?? []}
+            advancedFilter={f.advancedFilter ?? null}
+            fieldDataType={f.fieldDataType ?? "unknown"}
+            connectedSources={f.connectedSources}
+            connectedSheets={f.connectedSheets}
+            hideNoData={f.hideNoData ?? false}
+            indicateNoData={f.indicateNoData ?? true}
+            sortNoDataLast={f.sortNoDataLast ?? true}
+            showSelectAll={f.showSelectAll ?? false}
+            singleSelect={f.singleSelect ?? false}
+          />
+        );
+      })()}
     </>
   );
 }

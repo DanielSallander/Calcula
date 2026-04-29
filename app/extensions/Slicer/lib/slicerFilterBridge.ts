@@ -199,6 +199,17 @@ export async function applySlicerFilter(slicer: Slicer): Promise<void> {
     // No connections — nothing to filter
     if (connected.length === 0) return;
 
+    // Show loading overlay on affected pivots
+    for (const conn of connected) {
+      if (conn.sourceType === "pivot") {
+        window.dispatchEvent(
+          new CustomEvent("pivot:set-loading", {
+            detail: { pivotId: conn.sourceId, stage: "Applying filter..." },
+          }),
+        );
+      }
+    }
+
     // Apply filter to ALL connected sources, dispatching by each connection's type
     for (const conn of connected) {
       try {
@@ -209,6 +220,15 @@ export async function applySlicerFilter(slicer: Slicer): Promise<void> {
         }
       } catch (err) {
         console.warn("[Slicer] Failed to apply filter to connected source", conn, err);
+      }
+    }
+
+    // Clear loading overlay on affected pivots
+    for (const conn of connected) {
+      if (conn.sourceType === "pivot") {
+        window.dispatchEvent(
+          new CustomEvent("pivot:clear-loading", { detail: { pivotId: conn.sourceId } }),
+        );
       }
     }
 

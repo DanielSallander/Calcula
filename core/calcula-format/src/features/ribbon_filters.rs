@@ -31,6 +31,18 @@ pub struct RibbonFilterDef {
     pub selected_items: Option<Vec<String>>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub cross_filter_targets: Vec<u64>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub cross_filter_slicer_targets: Vec<u64>,
+    #[serde(default)]
+    pub hide_no_data: bool,
+    #[serde(default = "default_true")]
+    pub indicate_no_data: bool,
+    #[serde(default = "default_true")]
+    pub sort_no_data_last: bool,
+    #[serde(default)]
+    pub show_select_all: bool,
+    #[serde(default)]
+    pub single_select: bool,
     #[serde(default)]
     pub order: u32,
     #[serde(default = "default_button_columns")]
@@ -103,6 +115,12 @@ impl From<&SavedRibbonFilter> for RibbonFilterDef {
             },
             selected_items: f.selected_items.clone(),
             cross_filter_targets: f.cross_filter_targets.clone(),
+            cross_filter_slicer_targets: f.cross_filter_slicer_targets.clone(),
+            hide_no_data: f.hide_no_data,
+            indicate_no_data: f.indicate_no_data,
+            sort_no_data_last: f.sort_no_data_last,
+            show_select_all: f.show_select_all,
+            single_select: f.single_select,
             order: f.order,
             button_columns: f.button_columns,
             button_rows: f.button_rows,
@@ -147,6 +165,12 @@ impl From<&RibbonFilterDef> for SavedRibbonFilter {
             },
             selected_items: f.selected_items.clone(),
             cross_filter_targets: f.cross_filter_targets.clone(),
+            cross_filter_slicer_targets: f.cross_filter_slicer_targets.clone(),
+            hide_no_data: f.hide_no_data,
+            indicate_no_data: f.indicate_no_data,
+            sort_no_data_last: f.sort_no_data_last,
+            show_select_all: f.show_select_all,
+            single_select: f.single_select,
             order: f.order,
             button_columns: f.button_columns,
             button_rows: f.button_rows,

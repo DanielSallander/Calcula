@@ -25,7 +25,13 @@ export interface RibbonFilter {
   displayMode: RibbonFilterDisplayMode;
   selectedItems: string[] | null;
   crossFilterTargets: number[];
+  crossFilterSlicerTargets: number[];
   advancedFilter: AdvancedFilter | null;
+  hideNoData: boolean;
+  indicateNoData: boolean;
+  sortNoDataLast: boolean;
+  showSelectAll: boolean;
+  singleSelect: boolean;
   order: number;
   buttonColumns: number;
   buttonRows: number;
@@ -60,7 +66,13 @@ export interface UpdateRibbonFilterParams {
   connectedSources?: SlicerConnection[];
   connectedSheets?: number[];
   crossFilterTargets?: number[];
+  crossFilterSlicerTargets?: number[];
   advancedFilter?: AdvancedFilter | null;
+  hideNoData?: boolean;
+  indicateNoData?: boolean;
+  sortNoDataLast?: boolean;
+  showSelectAll?: boolean;
+  singleSelect?: boolean;
 }
 
 export type AdvancedFilterOperator =
