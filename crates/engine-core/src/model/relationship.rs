@@ -386,6 +386,78 @@ impl Relationship {
         self.active = active;
         self
     }
+
+    /// Returns `true` if this relationship is safe for a direct INNER JOIN
+    /// without risk of row explosion on the fact (many) side.
+    ///
+    /// A relationship is safe when:
+    /// - Cardinality is [`ManyToOne`](Cardinality::ManyToOne) or
+    ///   [`OneToOne`](Cardinality::OneToOne) (each fact row matches at most one
+    ///   dimension row)
+    /// - All conditions use equality (enables hash-join optimization)
+    ///
+    /// For [`ManyToMany`](Cardinality::ManyToMany) or non-equi relationships,
+    /// a semi-join (`EXISTS`) or pre-aggregation strategy should be used instead
+    /// to prevent duplicate fact rows from inflating aggregation results.
+    pub fn is_safe_for_direct_join(&self) -> bool {
+        matches!(
+            self.cardinality,
+            Cardinality::ManyToOne | Cardinality::OneToOne
+        ) && self.is_equi_only()
+    }
+
+    /// Build an `EXISTS` subquery for semi-join filter propagation.
+    ///
+    /// Returns a SQL fragment like:
+    /// ```text
+    /// EXISTS (SELECT 1 FROM {dim_table} WHERE {join_conditions} [AND {extra_filters}])
+    /// ```
+    ///
+    /// This is used instead of a direct JOIN when the dimension table's columns
+    /// are not needed in the output (filter-only usage) and the relationship is
+    /// not safe for direct join. The EXISTS subquery prevents row explosion by
+    /// checking for the *existence* of matching rows without duplicating fact rows.
+    ///
+    /// `fact_alias` is the alias of the fact table in the outer query.
+    /// `dim_table` is the table name used inside the subquery.
+    /// `fact_is_from` indicates whether the fact table is the "from" side of the relationship.
+    /// `dim_filters` are optional additional WHERE conditions on the dimension table
+    /// (e.g., context filters resolved to SQL fragments).
+    pub fn build_exists_clause(
+        &self,
+        fact_alias: &str,
+        dim_table: &str,
+        fact_is_from: bool,
+        dim_filters: &[String],
+    ) -> String {
+        // Build the join conditions referencing the outer fact table
+        // and the inner dimension table alias "__d".
+        let join_conditions: Vec<String> = self
+            .conditions
+            .iter()
+            .map(|c| {
+                let (fact_col, dim_col) = if fact_is_from {
+                    (c.from_column(), c.to_column())
+                } else {
+                    (c.to_column(), c.from_column())
+                };
+                format!(
+                    "{fact_alias}.\"{fact_col}\" {} __d.\"{dim_col}\"",
+                    c.operator.as_sql()
+                )
+            })
+            .collect();
+
+        let mut where_parts = join_conditions;
+        for f in dim_filters {
+            where_parts.push(f.clone());
+        }
+
+        format!(
+            "EXISTS (SELECT 1 FROM {dim_table} AS __d WHERE {})",
+            where_parts.join(" AND ")
+        )
+    }
 }
 
 #[cfg(test)]
@@ -648,6 +720,112 @@ mod tests {
     fn many_to_many_defaults_to_active() {
         let rel = Relationship::many_to_many("R", "A", "B", vec![JoinCondition::equal("x", "y")]);
         assert!(rel.is_active());
+    }
+
+    // --- is_safe_for_direct_join tests ---
+
+    #[test]
+    fn safe_for_direct_join_many_to_one_equi() {
+        let rel = Relationship::many_to_one("R", "Sales", "pid", "Products", "id");
+        assert!(rel.is_safe_for_direct_join());
+    }
+
+    #[test]
+    fn safe_for_direct_join_one_to_one_equi() {
+        let rel = Relationship::with_conditions(
+            "R",
+            "A",
+            "B",
+            vec![JoinCondition::equal("x", "y")],
+            Cardinality::OneToOne,
+        );
+        assert!(rel.is_safe_for_direct_join());
+    }
+
+    #[test]
+    fn not_safe_for_direct_join_many_to_many() {
+        let rel = Relationship::many_to_many("R", "A", "B", vec![JoinCondition::equal("x", "y")]);
+        assert!(!rel.is_safe_for_direct_join());
+    }
+
+    #[test]
+    fn not_safe_for_direct_join_one_to_many() {
+        let rel = Relationship::new("R", "A", "x", "B", "y", Cardinality::OneToMany);
+        assert!(!rel.is_safe_for_direct_join());
+    }
+
+    #[test]
+    fn not_safe_for_direct_join_non_equi() {
+        let rel = Relationship::many_to_many(
+            "R",
+            "Sales",
+            "Periods",
+            vec![
+                JoinCondition::new("order_date", "start_date", JoinOperator::GreaterThanOrEqual),
+                JoinCondition::new("order_date", "end_date", JoinOperator::LessThanOrEqual),
+            ],
+        );
+        assert!(!rel.is_safe_for_direct_join());
+    }
+
+    // --- build_exists_clause tests ---
+
+    #[test]
+    fn build_exists_clause_equi_no_filters() {
+        let rel = Relationship::many_to_one("R", "Sales", "pid", "Products", "id");
+        let clause = rel.build_exists_clause("sales", "products", true, &[]);
+        assert_eq!(
+            clause,
+            r#"EXISTS (SELECT 1 FROM products AS __d WHERE sales."pid" = __d."id")"#
+        );
+    }
+
+    #[test]
+    fn build_exists_clause_between_no_filters() {
+        let rel = Relationship::many_to_many(
+            "R",
+            "Sales",
+            "Periods",
+            vec![
+                JoinCondition::new("order_date", "start_date", JoinOperator::GreaterThanOrEqual),
+                JoinCondition::new("order_date", "end_date", JoinOperator::LessThanOrEqual),
+            ],
+        );
+        let clause = rel.build_exists_clause("sales", "periods", true, &[]);
+        assert_eq!(
+            clause,
+            r#"EXISTS (SELECT 1 FROM periods AS __d WHERE sales."order_date" >= __d."start_date" AND sales."order_date" <= __d."end_date")"#
+        );
+    }
+
+    #[test]
+    fn build_exists_clause_with_dim_filters() {
+        let rel = Relationship::many_to_many(
+            "R",
+            "Sales",
+            "Periods",
+            vec![
+                JoinCondition::new("order_date", "start_date", JoinOperator::GreaterThanOrEqual),
+                JoinCondition::new("order_date", "end_date", JoinOperator::LessThanOrEqual),
+            ],
+        );
+        let filters = vec![r#"__d."name" = 'Q1'"#.to_string()];
+        let clause = rel.build_exists_clause("sales", "periods", true, &filters);
+        assert_eq!(
+            clause,
+            r#"EXISTS (SELECT 1 FROM periods AS __d WHERE sales."order_date" >= __d."start_date" AND sales."order_date" <= __d."end_date" AND __d."name" = 'Q1')"#
+        );
+    }
+
+    #[test]
+    fn build_exists_clause_reverse_direction() {
+        let rel = Relationship::many_to_one("R", "Sales", "pid", "Products", "id");
+        // fact_is_from=false means fact is the "to" table
+        let clause = rel.build_exists_clause("products", "sales", false, &[]);
+        assert_eq!(
+            clause,
+            r#"EXISTS (SELECT 1 FROM sales AS __d WHERE products."id" = __d."pid")"#
+        );
     }
 
     #[test]

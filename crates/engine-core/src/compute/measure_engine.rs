@@ -92,6 +92,8 @@ impl<'a> MeasureEngine<'a> {
         ctx.register_batch("t", batch)?;
 
         // Register dimension tables if we have cross-table filters.
+        // For unsafe relationships (ManyToMany, non-equi), use EXISTS
+        // subquery instead of JOIN to prevent row explosion.
         let cross_table_filters = self
             .register_cross_table_data(&ctx, table_name, &effective, &eval_ctx)
             .await?;
@@ -99,13 +101,28 @@ impl<'a> MeasureEngine<'a> {
         let expr_sql = stripped_expr.to_sql_string();
         let mut sql = format!("SELECT {expr_sql} AS \"{}\" FROM t", measure.name());
 
-        // Add JOINs for cross-table filters.
-        for (dim_lower, join_clause) in &cross_table_filters {
-            sql.push_str(&format!(" JOIN {dim_lower} ON {join_clause}"));
+        // Classify cross-table filters into direct JOINs and EXISTS subqueries.
+        let mut exists_parts: Vec<String> = Vec::new();
+        let mut exists_tables: std::collections::HashSet<String> = std::collections::HashSet::new();
+        for (dim_lower, join_clause, is_safe) in &cross_table_filters {
+            if *is_safe {
+                sql.push_str(&format!(" JOIN {dim_lower} ON {join_clause}"));
+            } else {
+                // Unsafe: use EXISTS subquery instead of JOIN.
+                // The EXISTS clause already contains the dim filters.
+                exists_parts.push(join_clause.clone());
+                exists_tables.insert(dim_lower.clone());
+            }
         }
 
-        // Build WHERE clause from resolved filters + IN filters.
-        let where_clause = self.build_where_clause(&effective, table_name);
+        // Build WHERE clause from resolved filters, excluding filters on tables
+        // handled by EXISTS (those filters are already embedded in the EXISTS clause).
+        let safe_filters: Vec<ResolvedFilter> = effective
+            .iter()
+            .filter(|f| !exists_tables.contains(&f.table.to_lowercase()))
+            .cloned()
+            .collect();
+        let where_clause = self.build_where_clause(&safe_filters, table_name);
         let mut registered = std::collections::HashSet::new();
         registered.insert("t".to_string());
         let in_conditions = self
@@ -117,6 +134,7 @@ impl<'a> MeasureEngine<'a> {
             all_where.push(where_clause);
         }
         all_where.extend(in_conditions);
+        all_where.extend(exists_parts);
 
         if !all_where.is_empty() {
             sql.push_str(" WHERE ");
@@ -195,6 +213,9 @@ impl<'a> MeasureEngine<'a> {
         }
 
         // Determine which tables are involved (from group-by + filters).
+        let group_by_tables: std::collections::HashSet<&str> =
+            group_by.iter().map(|tc| tc.table.as_str()).collect();
+
         let mut tables_needed: Vec<&str> = vec![fact_table];
         for tc in group_by {
             if tc.table != fact_table && !tables_needed.contains(&tc.table.as_str()) {
@@ -218,6 +239,63 @@ impl<'a> MeasureEngine<'a> {
 
         let fact_lower = fact_table.to_lowercase();
 
+        // Classify dimension tables by join safety.
+        let mut unsafe_group_by: Vec<&TableColumn> = Vec::new();
+        let mut exists_tables: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let mut exists_parts: Vec<String> = Vec::new();
+
+        for table_name in &tables_needed {
+            if *table_name == fact_table {
+                continue;
+            }
+            let rel = eval_ctx.resolve_relationship(self.model, fact_table, table_name)?;
+            if rel.is_safe_for_direct_join() {
+                continue; // Will use direct JOIN below.
+            }
+
+            let has_group_by_cols = group_by_tables.contains(table_name);
+            if has_group_by_cols {
+                // Track unsafe GROUP BY dims for pre-aggregation.
+                for tc in group_by {
+                    if tc.table.as_str() == *table_name {
+                        unsafe_group_by.push(tc);
+                    }
+                }
+            } else {
+                // Filter-only unsafe dim: use EXISTS.
+                let fact_is_from = rel.from_table() == fact_table;
+                let dim_filters: Vec<String> = effective
+                    .iter()
+                    .filter(|f| f.table.as_str() == *table_name)
+                    .map(|f| {
+                        let op = f.operator.as_sql();
+                        let val = format_filter_value(&f.table, &f.column, &f.value, self.model);
+                        format!("__d.\"{}\" {op} {val}", f.column)
+                    })
+                    .collect();
+                let dim_lower = table_name.to_lowercase();
+                let exists =
+                    rel.build_exists_clause(&fact_lower, &dim_lower, fact_is_from, &dim_filters);
+                exists_parts.push(exists);
+                exists_tables.insert(dim_lower);
+            }
+        }
+
+        // If there are unsafe GROUP BY dims, use pre-aggregate approach.
+        if !unsafe_group_by.is_empty() {
+            return self
+                .evaluate_grouped_pre_aggregate(
+                    measure_name,
+                    &stripped_expr,
+                    fact_table,
+                    group_by,
+                    &effective,
+                    &eval_ctx,
+                    &ctx,
+                )
+                .await;
+        }
+
         // Build SELECT: group_by columns + measure expression
         let mut select_parts: Vec<String> = Vec::new();
         let mut group_parts: Vec<String> = Vec::new();
@@ -235,9 +313,10 @@ impl<'a> MeasureEngine<'a> {
         let select_clause = select_parts.join(", ");
         let mut sql = format!("SELECT {select_clause} FROM {fact_lower}");
 
-        // Add JOINs for dimension tables.
+        // Add JOINs for safe dimension tables only.
         let mut joined = std::collections::HashSet::new();
         joined.insert(fact_lower.clone());
+        joined.extend(exists_tables.iter().cloned());
 
         for table_name in &tables_needed {
             let dim_lower = table_name.to_lowercase();
@@ -252,9 +331,10 @@ impl<'a> MeasureEngine<'a> {
             joined.insert(dim_lower);
         }
 
-        // WHERE clause from context-resolved filters + IN filters.
+        // WHERE clause: exclude filters on tables handled by EXISTS.
         let where_parts: Vec<String> = effective
             .iter()
+            .filter(|f| !exists_tables.contains(&f.table.to_lowercase()))
             .map(|f| {
                 let tbl = if f.table == fact_table {
                     fact_lower.clone()
@@ -272,6 +352,7 @@ impl<'a> MeasureEngine<'a> {
 
         let mut all_where = where_parts;
         all_where.extend(in_conditions);
+        all_where.extend(exists_parts);
 
         if !all_where.is_empty() {
             sql.push_str(" WHERE ");
@@ -295,6 +376,254 @@ impl<'a> MeasureEngine<'a> {
 
         let schema = batches[0].schema();
         let combined = concat_batches(&schema, &batches)?;
+        Ok(combined)
+    }
+
+    /// Pre-aggregate grouped evaluation for unsafe (ManyToMany, non-equi) dimensions.
+    ///
+    /// Two-stage approach:
+    /// Stage 1: Pre-aggregate fact table grouped by safe dim cols + fact join key cols.
+    /// Stage 2: Join pre-aggregated result to unsafe dims, re-aggregate.
+    #[allow(clippy::too_many_arguments)]
+    async fn evaluate_grouped_pre_aggregate(
+        &self,
+        measure_name: &str,
+        stripped_expr: &crate::compute::expression::Expression,
+        fact_table: &str,
+        group_by: &[TableColumn],
+        effective: &[ResolvedFilter],
+        eval_ctx: &EvaluationContext,
+        ctx: &SessionContext,
+    ) -> EngineResult<RecordBatch> {
+        use crate::compute::aggregate::AggregateOp;
+
+        let fact_lower = fact_table.to_lowercase();
+        let group_by_tables: std::collections::HashSet<&str> =
+            group_by.iter().map(|tc| tc.table.as_str()).collect();
+
+        // Classify dims.
+        let mut unsafe_dim_tables: std::collections::HashSet<String> =
+            std::collections::HashSet::new();
+        let mut fact_join_keys: Vec<String> = Vec::new();
+
+        for tc in group_by {
+            if tc.table == fact_table {
+                continue;
+            }
+            let rel = eval_ctx.resolve_relationship(self.model, fact_table, &tc.table)?;
+            if !rel.is_safe_for_direct_join() && group_by_tables.contains(tc.table.as_str()) {
+                unsafe_dim_tables.insert(tc.table.clone());
+                let fact_is_from = rel.from_table() == fact_table;
+                for cond in rel.conditions() {
+                    let fact_col = if fact_is_from {
+                        cond.from_column()
+                    } else {
+                        cond.to_column()
+                    };
+                    if !fact_join_keys.contains(&fact_col.to_string()) {
+                        fact_join_keys.push(fact_col.to_string());
+                    }
+                }
+            }
+        }
+
+        // Safe GROUP BY dims.
+        let safe_group_by: Vec<&TableColumn> = group_by
+            .iter()
+            .filter(|tc| !unsafe_dim_tables.contains(&tc.table))
+            .collect();
+
+        // --- Stage 1: Pre-aggregate ---
+        let mut s1_select: Vec<String> = Vec::new();
+        let mut s1_group: Vec<String> = Vec::new();
+
+        for tc in &safe_group_by {
+            let tbl = tc.table.to_lowercase();
+            let qualified = format!("{tbl}.\"{}\"", tc.column);
+            s1_select.push(qualified.clone());
+            s1_group.push(qualified);
+        }
+
+        for key_col in &fact_join_keys {
+            let qualified = format!("{fact_lower}.\"{key_col}\"");
+            if !s1_group.contains(&qualified) {
+                s1_select.push(qualified.clone());
+                s1_group.push(qualified);
+            }
+        }
+
+        // Pre-aggregate the measure.
+        let pre_alias = "__pre_val";
+        let (s1_agg, s2_agg) = if let Some((op, col)) = stripped_expr.as_simple_aggregate() {
+            let col_ref = format!("{fact_lower}.\"{col}\"");
+            match op {
+                AggregateOp::Sum => (
+                    format!("SUM({col_ref}) AS \"{pre_alias}\""),
+                    format!("SUM(__pre_agg.\"{pre_alias}\") AS \"{measure_name}\""),
+                ),
+                AggregateOp::Count | AggregateOp::CountRows => {
+                    let s1 = if op == AggregateOp::CountRows {
+                        format!("COUNT(*) AS \"{pre_alias}\"")
+                    } else {
+                        format!("COUNT({col_ref}) AS \"{pre_alias}\"")
+                    };
+                    (
+                        s1,
+                        format!("SUM(__pre_agg.\"{pre_alias}\") AS \"{measure_name}\""),
+                    )
+                }
+                AggregateOp::Min => (
+                    format!("MIN({col_ref}) AS \"{pre_alias}\""),
+                    format!("MIN(__pre_agg.\"{pre_alias}\") AS \"{measure_name}\""),
+                ),
+                AggregateOp::Max => (
+                    format!("MAX({col_ref}) AS \"{pre_alias}\""),
+                    format!("MAX(__pre_agg.\"{pre_alias}\") AS \"{measure_name}\""),
+                ),
+                AggregateOp::Average => {
+                    let sum_alias = "__pre_sum";
+                    let cnt_alias = "__pre_cnt";
+                    s1_select.push(format!("SUM({col_ref}) AS \"{sum_alias}\""));
+                    s1_select.push(format!("COUNT({col_ref}) AS \"{cnt_alias}\""));
+                    (
+                        String::new(), // Handled via s1_select above.
+                        format!(
+                            "CAST(SUM(__pre_agg.\"{sum_alias}\") AS DOUBLE) / NULLIF(SUM(__pre_agg.\"{cnt_alias}\"), 0) AS \"{measure_name}\""
+                        ),
+                    )
+                }
+                AggregateOp::DistinctCount => (
+                    format!("COUNT(DISTINCT {col_ref}) AS \"{pre_alias}\""),
+                    format!("SUM(__pre_agg.\"{pre_alias}\") AS \"{measure_name}\""),
+                ),
+            }
+        } else {
+            // Complex expression: best-effort, emit full SQL in Stage 1.
+            let expr_sql = stripped_expr.to_sql_string();
+            (
+                format!("{expr_sql} AS \"{pre_alias}\""),
+                format!("SUM(__pre_agg.\"{pre_alias}\") AS \"{measure_name}\""),
+            )
+        };
+
+        if !s1_agg.is_empty() {
+            s1_select.push(s1_agg);
+        }
+
+        let s1_select_clause = s1_select.join(", ");
+        let mut s1_sql = format!("SELECT {s1_select_clause} FROM {fact_lower}");
+
+        // Join safe dims in Stage 1.
+        let mut s1_joined = std::collections::HashSet::new();
+        s1_joined.insert(fact_lower.clone());
+
+        for tc in &safe_group_by {
+            let dim_lower = tc.table.to_lowercase();
+            if tc.table == fact_table || s1_joined.contains(&dim_lower) {
+                continue;
+            }
+            let rel = eval_ctx.resolve_relationship(self.model, fact_table, &tc.table)?;
+            let left_is_from = rel.from_table() == fact_table;
+            let on_clause = rel.build_on_clause(&fact_lower, &dim_lower, left_is_from);
+            s1_sql.push_str(&format!(" JOIN {dim_lower} ON {on_clause}"));
+            s1_joined.insert(dim_lower);
+        }
+
+        // WHERE clause for fact-table filters (skip filters on unsafe dims).
+        let s1_where: Vec<String> = effective
+            .iter()
+            .filter(|f| !unsafe_dim_tables.contains(&f.table))
+            .map(|f| {
+                let tbl = if f.table == fact_table {
+                    fact_lower.clone()
+                } else {
+                    f.table.to_lowercase()
+                };
+                let op = f.operator.as_sql();
+                let val = format_filter_value(&f.table, &f.column, &f.value, self.model);
+                format!("{tbl}.\"{}\" {op} {val}", f.column)
+            })
+            .collect();
+
+        if !s1_where.is_empty() {
+            s1_sql.push_str(" WHERE ");
+            s1_sql.push_str(&s1_where.join(" AND "));
+        }
+
+        if !s1_group.is_empty() {
+            s1_sql.push_str(" GROUP BY ");
+            s1_sql.push_str(&s1_group.join(", "));
+        }
+
+        // Execute Stage 1 and register.
+        let s1_df = ctx.sql(&s1_sql).await?;
+        let s1_batches = s1_df.collect().await?;
+
+        if s1_batches.is_empty() {
+            return Ok(RecordBatch::new_empty(arrow::datatypes::SchemaRef::new(
+                arrow::datatypes::Schema::empty(),
+            )));
+        }
+
+        let s1_schema = s1_batches[0].schema();
+        let s1_combined = concat_batches(&s1_schema, &s1_batches)?;
+        ctx.register_batch("__pre_agg", s1_combined)?;
+
+        // --- Stage 2: Join to unsafe dims ---
+        let mut s2_select: Vec<String> = Vec::new();
+        let mut s2_group: Vec<String> = Vec::new();
+
+        for tc in group_by {
+            if unsafe_dim_tables.contains(&tc.table) {
+                let dim_lower = tc.table.to_lowercase();
+                let qualified = format!("{dim_lower}.\"{}\"", tc.column);
+                s2_select.push(qualified.clone());
+                s2_group.push(qualified);
+            } else {
+                let qualified = format!("__pre_agg.\"{}\"", tc.column);
+                s2_select.push(qualified.clone());
+                s2_group.push(qualified);
+            }
+        }
+        s2_select.push(s2_agg);
+
+        let s2_select_clause = s2_select.join(", ");
+        let mut s2_sql = format!("SELECT {s2_select_clause} FROM __pre_agg");
+
+        let mut s2_joined = std::collections::HashSet::new();
+        s2_joined.insert("__pre_agg".to_string());
+
+        for tc in group_by {
+            if !unsafe_dim_tables.contains(&tc.table) {
+                continue;
+            }
+            let dim_lower = tc.table.to_lowercase();
+            if s2_joined.contains(&dim_lower) {
+                continue;
+            }
+            let rel = eval_ctx.resolve_relationship(self.model, fact_table, &tc.table)?;
+            let left_is_from = rel.from_table() == fact_table;
+            let on_clause = rel.build_on_clause("__pre_agg", &dim_lower, left_is_from);
+            s2_sql.push_str(&format!(" JOIN {dim_lower} ON {on_clause}"));
+            s2_joined.insert(dim_lower);
+        }
+
+        if !s2_group.is_empty() {
+            s2_sql.push_str(" GROUP BY ");
+            s2_sql.push_str(&s2_group.join(", "));
+        }
+
+        let s2_df = ctx.sql(&s2_sql).await?;
+        let s2_batches = s2_df.collect().await?;
+
+        if s2_batches.is_empty() {
+            return Ok(RecordBatch::new_empty(arrow::datatypes::SchemaRef::new(
+                arrow::datatypes::Schema::empty(),
+            )));
+        }
+
+        let schema = s2_batches[0].schema();
+        let combined = concat_batches(&schema, &s2_batches)?;
         Ok(combined)
     }
 
@@ -682,13 +1011,18 @@ impl<'a> MeasureEngine<'a> {
     ///
     /// Returns a list of `(dim_table_lowercase, join_clause)` for each dimension
     /// table that needs to be joined.
+    /// Register dimension tables for cross-table filters and return join/exists info.
+    ///
+    /// Returns tuples of `(dim_table_lower, sql_clause, is_safe)`:
+    /// - `is_safe = true`: the sql_clause is an ON clause for a direct JOIN.
+    /// - `is_safe = false`: the sql_clause is an EXISTS subquery for a semi-join.
     async fn register_cross_table_data(
         &self,
         session: &SessionContext,
         fact_table: &str,
         filters: &[ResolvedFilter],
         eval_ctx: &EvaluationContext,
-    ) -> EngineResult<Vec<(String, String)>> {
+    ) -> EngineResult<Vec<(String, String, bool)>> {
         let mut joins = Vec::new();
         let mut registered = std::collections::HashSet::new();
         registered.insert(fact_table.to_string());
@@ -701,12 +1035,36 @@ impl<'a> MeasureEngine<'a> {
             // Find relationship between fact table and filter's table,
             // respecting USERELATIONSHIP overrides.
             let rel = eval_ctx.resolve_relationship(self.model, fact_table, &filter.table)?;
-            let batch = self.get_table_batch(&filter.table).await?;
             let dim_lower = filter.table.to_lowercase();
-            session.register_batch(&dim_lower, batch)?;
+            let fact_is_from = rel.from_table() == fact_table;
 
-            let join_clause = rel.build_on_clause("t", &dim_lower, rel.from_table() == fact_table);
-            joins.push((dim_lower.clone(), join_clause));
+            if rel.is_safe_for_direct_join() {
+                // Safe: register dim table and emit a JOIN ON clause.
+                let batch = self.get_table_batch(&filter.table).await?;
+                session.register_batch(&dim_lower, batch)?;
+
+                let join_clause = rel.build_on_clause("t", &dim_lower, fact_is_from);
+                joins.push((dim_lower.clone(), join_clause, true));
+            } else {
+                // Unsafe: register dim table and emit an EXISTS subquery.
+                // Collect all filters targeting this dimension table.
+                let dim_filters: Vec<String> = filters
+                    .iter()
+                    .filter(|f| f.table == filter.table)
+                    .map(|f| {
+                        let op = f.operator.as_sql();
+                        let val = format_filter_value(&f.table, &f.column, &f.value, self.model);
+                        format!("__d.\"{}\" {op} {val}", f.column)
+                    })
+                    .collect();
+
+                let batch = self.get_table_batch(&filter.table).await?;
+                session.register_batch(&dim_lower, batch)?;
+
+                let exists_clause =
+                    rel.build_exists_clause("t", &dim_lower, fact_is_from, &dim_filters);
+                joins.push((dim_lower.clone(), exists_clause, false));
+            }
             registered.insert(filter.table.clone());
         }
 
@@ -2160,5 +2518,211 @@ mod tests {
         let result = engine.evaluate("RecentRevenue").await.unwrap();
         // month2 (280) + month3 (220) = 500
         assert_eq!(result.as_f64(), Some(500.0));
+    }
+
+    // --- Pre-aggregate / semi-join tests for unsafe relationships ---
+
+    use crate::model::relationship::{JoinCondition, JoinOperator};
+
+    fn periods_table() -> Table {
+        Table::new(
+            "Periods",
+            vec![
+                Column::new("period_name", DataType::String),
+                Column::new("start_id", DataType::Int64),
+                Column::new("end_id", DataType::Int64),
+            ],
+        )
+        .unwrap()
+    }
+
+    fn store_with_periods() -> ColumnStore {
+        let mut store = ColumnStore::new();
+        store.register_table(sales_table()).unwrap();
+        store.register_table(periods_table()).unwrap();
+
+        store
+            .insert_rows(
+                "Sales",
+                vec![
+                    vec![
+                        Value::Int64(1),
+                        Value::Int64(101),
+                        Value::Float64(10.0),
+                        Value::Float64(5.0),
+                        Value::Int64(2),
+                    ],
+                    vec![
+                        Value::Int64(2),
+                        Value::Int64(102),
+                        Value::Float64(20.0),
+                        Value::Float64(10.0),
+                        Value::Int64(1),
+                    ],
+                    vec![
+                        Value::Int64(3),
+                        Value::Int64(101),
+                        Value::Float64(30.0),
+                        Value::Float64(15.0),
+                        Value::Int64(2),
+                    ],
+                    vec![
+                        Value::Int64(4),
+                        Value::Int64(103),
+                        Value::Float64(15.0),
+                        Value::Float64(7.0),
+                        Value::Int64(1),
+                    ],
+                ],
+            )
+            .unwrap();
+
+        store
+            .insert_rows(
+                "Periods",
+                vec![
+                    // P1 covers product IDs 101..=102
+                    vec![
+                        Value::String("P1".into()),
+                        Value::Int64(101),
+                        Value::Int64(102),
+                    ],
+                    // P2 covers product IDs 102..=103
+                    vec![
+                        Value::String("P2".into()),
+                        Value::Int64(102),
+                        Value::Int64(103),
+                    ],
+                ],
+            )
+            .unwrap();
+
+        store
+    }
+
+    #[tokio::test]
+    async fn grouped_pre_aggregate_sum_non_equi() {
+        use crate::model::schema::DataModel;
+
+        let model = DataModel::builder()
+            .add_table(sales_table())
+            .add_table(periods_table())
+            .add_relationship(Relationship::many_to_many(
+                "Sales_Periods",
+                "Sales",
+                "Periods",
+                vec![
+                    JoinCondition::new("product_id", "start_id", JoinOperator::GreaterThanOrEqual),
+                    JoinCondition::new("product_id", "end_id", JoinOperator::LessThanOrEqual),
+                ],
+            ))
+            .add_measure(sum_measure("Revenue", "Sales", "amount"))
+            .build()
+            .unwrap();
+
+        let store = store_with_periods();
+        let engine = MeasureEngine::new(&model, &store);
+
+        let result = engine
+            .evaluate_grouped(
+                "Revenue",
+                &[TableColumn {
+                    table: "Periods".to_string(),
+                    column: "period_name".to_string(),
+                }],
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(result.num_rows(), 2);
+
+        let names: Vec<&str> = (0..result.num_rows())
+            .map(|i| {
+                result
+                    .column(0)
+                    .as_any()
+                    .downcast_ref::<arrow::array::StringArray>()
+                    .unwrap()
+                    .value(i)
+            })
+            .collect();
+
+        let sums: Vec<f64> = (0..result.num_rows())
+            .map(|i| {
+                let col = result.column(1);
+                ScalarValue::try_from_array(col, i)
+                    .ok()
+                    .and_then(|s| match s {
+                        ScalarValue::Float64(v) => v,
+                        _ => None,
+                    })
+                    .unwrap_or(0.0)
+            })
+            .collect();
+
+        for (name, total) in names.iter().zip(sums.iter()) {
+            match *name {
+                // P1 covers 101..=102: pid 101 (10+30=40) + pid 102 (20) = 60
+                "P1" => assert!(
+                    (*total - 60.0).abs() < 0.01,
+                    "P1 expected 60.0, got {total}"
+                ),
+                // P2 covers 102..=103: pid 102 (20) + pid 103 (15) = 35
+                "P2" => assert!(
+                    (*total - 35.0).abs() < 0.01,
+                    "P2 expected 35.0, got {total}"
+                ),
+                other => panic!("Unexpected period: {other}"),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn scalar_semi_join_filter_non_equi() {
+        use crate::compute::context::ResolvedFilter;
+        use crate::model::schema::DataModel;
+
+        let model = DataModel::builder()
+            .add_table(sales_table())
+            .add_table(periods_table())
+            .add_relationship(Relationship::many_to_many(
+                "Sales_Periods",
+                "Sales",
+                "Periods",
+                vec![
+                    JoinCondition::new("product_id", "start_id", JoinOperator::GreaterThanOrEqual),
+                    JoinCondition::new("product_id", "end_id", JoinOperator::LessThanOrEqual),
+                ],
+            ))
+            .add_measure(sum_measure("Revenue", "Sales", "amount"))
+            .build()
+            .unwrap();
+
+        let store = store_with_periods();
+        let engine = MeasureEngine::new(&model, &store);
+
+        // Filter to period "P2" (covers 102..=103).
+        // Without semi-join, the JOIN would duplicate sales for pid=102.
+        // With semi-join: SUM of sales where product_id matches any P2 row.
+        // Matching sales: pid=102 (20) + pid=103 (15) = 35
+        let result = engine
+            .evaluate_with_outer_filters(
+                "Revenue",
+                &[ResolvedFilter {
+                    table: "Periods".to_string(),
+                    column: "period_name".to_string(),
+                    operator: ComparisonOp::Equal,
+                    value: "P2".to_string(),
+                    source: crate::compute::context::FilterSource::Query,
+                }],
+            )
+            .await
+            .unwrap();
+
+        assert!(
+            (result.as_f64().unwrap() - 35.0).abs() < 0.01,
+            "Expected 35.0, got {:?}",
+            result.as_f64()
+        );
     }
 }

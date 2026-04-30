@@ -22,6 +22,53 @@ pub enum JoinType {
     Left,
 }
 
+/// Strategy for how a relationship should be materialized in SQL queries.
+///
+/// Different relationship cardinalities and query needs require different SQL
+/// patterns to avoid row explosion (duplicate fact rows inflating aggregation).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum JoinStrategy {
+    /// Standard INNER JOIN. Safe when the relationship guarantees no row
+    /// explosion from the fact side (ManyToOne or OneToOne with equi-join).
+    DirectJoin,
+    /// Semi-join via `EXISTS` subquery. Used for filter propagation from a
+    /// dimension to a fact table without retrieving dimension columns. Works
+    /// for all cardinalities without duplicating fact rows.
+    SemiJoin,
+    /// Two-stage approach: pre-aggregate the fact table by join key columns,
+    /// then join the pre-aggregated result to the dimension. Used when GROUP BY
+    /// references columns from a ManyToMany or non-equi dimension table.
+    PreAggregateJoin,
+}
+
+/// Determine the join strategy for a relationship given the query's needs.
+///
+/// - If the dimension's columns are **not** needed in GROUP BY (filter-only),
+///   a [`SemiJoin`](JoinStrategy::SemiJoin) is used for unsafe relationships
+///   to avoid row explosion, while safe relationships use [`DirectJoin`](JoinStrategy::DirectJoin).
+/// - If the dimension's columns **are** needed in GROUP BY and the relationship
+///   is safe ([`is_safe_for_direct_join`](Relationship::is_safe_for_direct_join)),
+///   a [`DirectJoin`](JoinStrategy::DirectJoin) is used.
+/// - Otherwise (GROUP BY needed + unsafe relationship), a
+///   [`PreAggregateJoin`](JoinStrategy::PreAggregateJoin) is used.
+pub fn determine_join_strategy(
+    relationship: &Relationship,
+    needs_group_by_columns: bool,
+) -> JoinStrategy {
+    if !needs_group_by_columns {
+        if relationship.is_safe_for_direct_join() {
+            // ManyToOne equi-join: direct JOIN is correct even for filter-only.
+            JoinStrategy::DirectJoin
+        } else {
+            JoinStrategy::SemiJoin
+        }
+    } else if relationship.is_safe_for_direct_join() {
+        JoinStrategy::DirectJoin
+    } else {
+        JoinStrategy::PreAggregateJoin
+    }
+}
+
 /// Join two tables following a relationship, producing a combined `RecordBatch`.
 ///
 /// The `from_data` corresponds to `relationship.from_table()` and `to_data`
@@ -66,6 +113,20 @@ pub async fn aggregate_over_relationship(
     fact_data.table().column(aggregate_column)?;
     dimension_data.table().column(group_by_column)?;
 
+    // For unsafe relationships (ManyToMany, non-equi), use two-stage
+    // pre-aggregation to avoid row explosion.
+    if !relationship.is_safe_for_direct_join() {
+        return aggregate_over_relationship_pre_agg(
+            fact_data,
+            dimension_data,
+            relationship,
+            aggregate_column,
+            operation,
+            group_by_column,
+        )
+        .await;
+    }
+
     let (_ctx, joined_df) =
         build_joined_dataframe(fact_data, dimension_data, relationship, JoinType::Inner).await?;
 
@@ -101,6 +162,98 @@ pub async fn aggregate_over_relationship(
     let batches = result_df.collect().await?;
 
     collect_batches(batches)
+}
+
+/// Two-stage pre-aggregation for unsafe (ManyToMany/non-equi) relationships.
+///
+/// Stage 1: Pre-aggregate the fact table by its join key columns.
+/// Stage 2: Join pre-aggregated result to the dimension table and re-aggregate
+///          by the dimension's group-by column.
+async fn aggregate_over_relationship_pre_agg(
+    fact_data: &TableData,
+    dimension_data: &TableData,
+    relationship: &Relationship,
+    aggregate_column: &str,
+    operation: AggregateOp,
+    group_by_column: &str,
+) -> EngineResult<RecordBatch> {
+    let from_batch = fact_data.to_record_batch()?;
+    let to_batch = dimension_data.to_record_batch()?;
+
+    let ctx = SessionContext::new();
+    ctx.register_batch("from_t", from_batch)?;
+    ctx.register_batch("to_t", to_batch)?;
+
+    // Identify unique fact-side join key columns.
+    let mut join_key_cols: Vec<&str> = Vec::new();
+    for c in relationship.conditions() {
+        let col = c.from_column();
+        if !join_key_cols.contains(&col) {
+            join_key_cols.push(col);
+        }
+    }
+
+    let join_key_group: Vec<String> = join_key_cols
+        .iter()
+        .map(|c| format!("from_t.\"{c}\""))
+        .collect();
+
+    // Stage 1: pre-aggregate fact table by join keys.
+    let (s1_agg, s2_agg) = match operation {
+        AggregateOp::Sum => (
+            format!("SUM(from_t.\"{aggregate_column}\") AS \"__pre_val\""),
+            format!("SUM(__pre.\"__pre_val\") AS \"{operation}({aggregate_column})\""),
+        ),
+        AggregateOp::Count => (
+            format!("COUNT(from_t.\"{aggregate_column}\") AS \"__pre_val\""),
+            format!("SUM(__pre.\"__pre_val\") AS \"{operation}({aggregate_column})\""),
+        ),
+        AggregateOp::CountRows => (
+            "COUNT(*) AS \"__pre_val\"".to_string(),
+            format!("SUM(__pre.\"__pre_val\") AS \"{operation}({aggregate_column})\""),
+        ),
+        AggregateOp::Min => (
+            format!("MIN(from_t.\"{aggregate_column}\") AS \"__pre_val\""),
+            format!("MIN(__pre.\"__pre_val\") AS \"{operation}({aggregate_column})\""),
+        ),
+        AggregateOp::Max => (
+            format!("MAX(from_t.\"{aggregate_column}\") AS \"__pre_val\""),
+            format!("MAX(__pre.\"__pre_val\") AS \"{operation}({aggregate_column})\""),
+        ),
+        AggregateOp::Average => {
+            // AVG decomposes into SUM + COUNT.
+            let s1 = format!(
+                "SUM(from_t.\"{aggregate_column}\") AS \"__pre_sum\", COUNT(from_t.\"{aggregate_column}\") AS \"__pre_cnt\""
+            );
+            let s2 = format!(
+                "CAST(SUM(__pre.\"__pre_sum\") AS DOUBLE) / NULLIF(SUM(__pre.\"__pre_cnt\"), 0) AS \"AVG({aggregate_column})\""
+            );
+            (s1, s2)
+        }
+        AggregateOp::DistinctCount => (
+            format!("COUNT(DISTINCT from_t.\"{aggregate_column}\") AS \"__pre_val\""),
+            format!("SUM(__pre.\"__pre_val\") AS \"{operation}({aggregate_column})\""),
+        ),
+    };
+
+    let s1_group_clause = join_key_group.join(", ");
+    let s1_select = format!("{s1_group_clause}, {s1_agg}");
+    let s1_sql = format!("SELECT {s1_select} FROM from_t GROUP BY {s1_group_clause}");
+
+    let s1_df = ctx.sql(&s1_sql).await?;
+    let s1_batches = s1_df.collect().await?;
+    let s1_result = collect_batches(s1_batches)?;
+    ctx.register_batch("__pre", s1_result)?;
+
+    // Stage 2: join pre-aggregated to dimension.
+    let on_clause = relationship.build_on_clause("__pre", "to_t", true);
+    let s2_sql = format!(
+        "SELECT to_t.\"{group_by_column}\", {s2_agg} FROM __pre JOIN to_t ON {on_clause} GROUP BY to_t.\"{group_by_column}\""
+    );
+
+    let s2_df = ctx.sql(&s2_sql).await?;
+    let s2_batches = s2_df.collect().await?;
+    collect_batches(s2_batches)
 }
 
 /// Compute average over relationship as sum/count per group.
@@ -656,5 +809,280 @@ mod tests {
         // pid=999 matches nothing → 1 row (nulls for period cols)
         // Total: 2 rows
         assert_eq!(result.num_rows(), 2);
+    }
+
+    // --- determine_join_strategy tests ---
+
+    #[test]
+    fn strategy_direct_join_for_many_to_one_equi_with_group_by() {
+        let rel = Relationship::many_to_one("R", "Sales", "pid", "Products", "id");
+        assert_eq!(
+            determine_join_strategy(&rel, true),
+            JoinStrategy::DirectJoin
+        );
+    }
+
+    #[test]
+    fn strategy_direct_join_for_many_to_one_equi_filter_only() {
+        let rel = Relationship::many_to_one("R", "Sales", "pid", "Products", "id");
+        assert_eq!(
+            determine_join_strategy(&rel, false),
+            JoinStrategy::DirectJoin
+        );
+    }
+
+    #[test]
+    fn strategy_semi_join_for_many_to_many_filter_only() {
+        let rel = Relationship::many_to_many(
+            "R",
+            "Sales",
+            "Periods",
+            vec![
+                JoinCondition::new("date", "start", JoinOperator::GreaterThanOrEqual),
+                JoinCondition::new("date", "end", JoinOperator::LessThanOrEqual),
+            ],
+        );
+        assert_eq!(determine_join_strategy(&rel, false), JoinStrategy::SemiJoin);
+    }
+
+    #[test]
+    fn strategy_pre_aggregate_for_many_to_many_with_group_by() {
+        let rel = Relationship::many_to_many(
+            "R",
+            "Sales",
+            "Periods",
+            vec![
+                JoinCondition::new("date", "start", JoinOperator::GreaterThanOrEqual),
+                JoinCondition::new("date", "end", JoinOperator::LessThanOrEqual),
+            ],
+        );
+        assert_eq!(
+            determine_join_strategy(&rel, true),
+            JoinStrategy::PreAggregateJoin
+        );
+    }
+
+    #[test]
+    fn strategy_semi_join_for_many_to_many_equi_filter_only() {
+        // ManyToMany even with equi-join is not safe for direct join.
+        let rel = Relationship::many_to_many("R", "A", "B", vec![JoinCondition::equal("x", "y")]);
+        assert_eq!(determine_join_strategy(&rel, false), JoinStrategy::SemiJoin);
+    }
+
+    #[test]
+    fn strategy_pre_aggregate_for_one_to_many_with_group_by() {
+        use crate::model::relationship::Cardinality;
+        let rel = Relationship::new("R", "A", "x", "B", "y", Cardinality::OneToMany);
+        assert_eq!(
+            determine_join_strategy(&rel, true),
+            JoinStrategy::PreAggregateJoin
+        );
+    }
+
+    // --- Pre-aggregate join correctness tests ---
+
+    /// Test that SUM over a non-equi (BETWEEN) relationship gives correct values.
+    ///
+    /// Without pre-aggregation, the direct JOIN would duplicate fact rows:
+    /// - pid=101 (amount=10) matches P1 → counted once for P1
+    /// - pid=102 (amount=20) matches P1 AND P2 → counted TWICE if direct JOIN
+    /// - pid=101 (amount=30) matches P1 → counted once for P1
+    /// - pid=103 (amount=15) matches P2 → counted once for P2
+    ///
+    /// With pre-aggregation:
+    /// Stage 1 groups by product_id: {101→40, 102→20, 103→15}
+    /// Stage 2 joins to periods and re-aggregates:
+    ///   P1 (101..=102): SUM(40, 20) = 60
+    ///   P2 (102..=103): SUM(20, 15) = 35
+    #[tokio::test]
+    async fn pre_aggregate_sum_over_non_equi_join() {
+        let sales = populated_sales();
+        let periods = populated_periods();
+
+        let rel = Relationship::many_to_many(
+            "Sales_Periods",
+            "Sales",
+            "Periods",
+            vec![
+                JoinCondition::new("product_id", "start_id", JoinOperator::GreaterThanOrEqual),
+                JoinCondition::new("product_id", "end_id", JoinOperator::LessThanOrEqual),
+            ],
+        );
+
+        let result = aggregate_over_relationship(
+            &sales,
+            &periods,
+            &rel,
+            "amount",
+            AggregateOp::Sum,
+            "period",
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(result.num_rows(), 2);
+
+        let periods_col: Vec<&str> = (0..result.num_rows())
+            .map(|i| {
+                result
+                    .column(0)
+                    .as_any()
+                    .downcast_ref::<arrow::array::StringArray>()
+                    .unwrap()
+                    .value(i)
+            })
+            .collect();
+
+        let sums: Vec<f64> = (0..result.num_rows())
+            .map(|i| {
+                let col = result.column(1);
+                datafusion::common::ScalarValue::try_from_array(col, i)
+                    .ok()
+                    .and_then(|s| match s {
+                        datafusion::common::ScalarValue::Float64(v) => v,
+                        datafusion::common::ScalarValue::Int64(v) => v.map(|n| n as f64),
+                        _ => None,
+                    })
+                    .unwrap_or(0.0)
+            })
+            .collect();
+
+        for (period, total) in periods_col.iter().zip(sums.iter()) {
+            match *period {
+                // P1 covers 101..=102: amounts for pid=101 (10+30=40) + pid=102 (20) = 60
+                "P1" => assert!(
+                    (*total - 60.0).abs() < 0.01,
+                    "P1 expected 60.0, got {total}"
+                ),
+                // P2 covers 102..=103: amounts for pid=102 (20) + pid=103 (15) = 35
+                "P2" => assert!(
+                    (*total - 35.0).abs() < 0.01,
+                    "P2 expected 35.0, got {total}"
+                ),
+                other => panic!("Unexpected period: {other}"),
+            }
+        }
+    }
+
+    /// Test that COUNT over a non-equi relationship gives correct values.
+    #[tokio::test]
+    async fn pre_aggregate_count_over_non_equi_join() {
+        let sales = populated_sales();
+        let periods = populated_periods();
+
+        let rel = Relationship::many_to_many(
+            "Sales_Periods",
+            "Sales",
+            "Periods",
+            vec![
+                JoinCondition::new("product_id", "start_id", JoinOperator::GreaterThanOrEqual),
+                JoinCondition::new("product_id", "end_id", JoinOperator::LessThanOrEqual),
+            ],
+        );
+
+        let result = aggregate_over_relationship(
+            &sales,
+            &periods,
+            &rel,
+            "amount",
+            AggregateOp::Count,
+            "period",
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(result.num_rows(), 2);
+
+        let periods_col: Vec<&str> = (0..result.num_rows())
+            .map(|i| {
+                result
+                    .column(0)
+                    .as_any()
+                    .downcast_ref::<arrow::array::StringArray>()
+                    .unwrap()
+                    .value(i)
+            })
+            .collect();
+
+        let counts: Vec<i64> = (0..result.num_rows())
+            .map(|i| {
+                let col = result.column(1);
+                datafusion::common::ScalarValue::try_from_array(col, i)
+                    .ok()
+                    .and_then(|s| match s {
+                        datafusion::common::ScalarValue::Int64(v) => v,
+                        datafusion::common::ScalarValue::UInt64(v) => v.map(|n| n as i64),
+                        _ => None,
+                    })
+                    .unwrap_or(0)
+            })
+            .collect();
+
+        for (period, cnt) in periods_col.iter().zip(counts.iter()) {
+            match *period {
+                // P1 covers 101..=102: 3 sales rows (pid=101 ×2, pid=102 ×1)
+                // Pre-agg: pid=101→count=2, pid=102→count=1. Stage 2 SUM: 2+1=3
+                "P1" => assert_eq!(*cnt, 3, "P1 expected 3, got {cnt}"),
+                // P2 covers 102..=103: 2 sales rows (pid=102 ×1, pid=103 ×1)
+                // Pre-agg: pid=102→count=1, pid=103→count=1. Stage 2 SUM: 1+1=2
+                "P2" => assert_eq!(*cnt, 2, "P2 expected 2, got {cnt}"),
+                other => panic!("Unexpected period: {other}"),
+            }
+        }
+    }
+
+    /// Regression test: ManyToOne equi-join still produces the same results
+    /// (no regression from pre-aggregate changes).
+    #[tokio::test]
+    async fn many_to_one_sum_unchanged_after_refactor() {
+        let sales = populated_sales();
+        let products = populated_products();
+        let rel = sales_products_relationship();
+
+        let result = aggregate_over_relationship(
+            &sales,
+            &products,
+            &rel,
+            "amount",
+            AggregateOp::Sum,
+            "category",
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(result.num_rows(), 2);
+
+        let categories: Vec<&str> = (0..result.num_rows())
+            .map(|i| {
+                result
+                    .column(0)
+                    .as_any()
+                    .downcast_ref::<arrow::array::StringArray>()
+                    .unwrap()
+                    .value(i)
+            })
+            .collect();
+
+        let sums: Vec<f64> = (0..result.num_rows())
+            .map(|i| {
+                let col = result.column(1);
+                datafusion::common::ScalarValue::try_from_array(col, i)
+                    .ok()
+                    .and_then(|s| match s {
+                        datafusion::common::ScalarValue::Float64(v) => v,
+                        datafusion::common::ScalarValue::Int64(v) => v.map(|n| n as f64),
+                        _ => None,
+                    })
+                    .unwrap_or(0.0)
+            })
+            .collect();
+
+        for (cat, total) in categories.iter().zip(sums.iter()) {
+            match *cat {
+                "A" => assert!((*total - 55.0).abs() < 0.01, "A expected 55.0, got {total}"),
+                "B" => assert!((*total - 20.0).abs() < 0.01, "B expected 20.0, got {total}"),
+                other => panic!("Unexpected category: {other}"),
+            }
+        }
     }
 }

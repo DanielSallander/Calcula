@@ -23,7 +23,9 @@ pub use expression::{
     infer_fact_table, ArithmeticOp, BoundaryType, ComparisonOp, Expression, FilterPredicate,
     InPredicate, RelationshipPath, ScalarFunction, TextFunction, WindowFrame,
 };
-pub use join::{aggregate_over_relationship, join_tables, JoinType};
+pub use join::{
+    aggregate_over_relationship, determine_join_strategy, join_tables, JoinStrategy, JoinType,
+};
 pub use measure::{
     average_measure, count_measure, distinct_count_measure, expression_measure, sum_measure,
     Measure, MeasureGroup,

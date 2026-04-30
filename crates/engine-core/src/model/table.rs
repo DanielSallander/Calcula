@@ -121,7 +121,8 @@ impl Table {
 
     /// Returns the configured refresh interval as a `Duration`, if set.
     pub fn refresh_interval(&self) -> Option<std::time::Duration> {
-        self.refresh_interval_secs.map(std::time::Duration::from_secs)
+        self.refresh_interval_secs
+            .map(std::time::Duration::from_secs)
     }
 }
 
@@ -157,7 +158,10 @@ mod tests {
         assert!(json.contains("\"refresh_interval_secs\":600"));
 
         let deserialized: Table = serde_json::from_str(&json).unwrap();
-        assert_eq!(deserialized.refresh_interval(), Some(Duration::from_secs(600)));
+        assert_eq!(
+            deserialized.refresh_interval(),
+            Some(Duration::from_secs(600))
+        );
     }
 
     #[test]
