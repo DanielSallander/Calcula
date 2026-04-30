@@ -99,6 +99,44 @@ impl InMemoryCache {
         Ok(())
     }
 
+    /// Store (or replace) cached data with a specific age.
+    ///
+    /// Like [`store`](Self::store), but sets the `last_refreshed` timestamp to
+    /// `age` in the past. This is used when restoring cached data from disk
+    /// so that TTL-based staleness checks remain accurate.
+    pub fn store_with_age(
+        &mut self,
+        table_name: &str,
+        batch: RecordBatch,
+        age: Duration,
+    ) -> EngineResult<()> {
+        let new_size = batch_memory_size(&batch);
+        let old_size = self.entries.get(table_name).map_or(0, |e| e.size_bytes);
+        let projected_total = self.total_bytes - old_size + new_size;
+
+        if projected_total > self.budget_bytes {
+            return Err(EngineError::MemoryBudgetExceeded {
+                needed: new_size,
+                available: self
+                    .budget_bytes
+                    .saturating_sub(self.total_bytes - old_size),
+                budget: self.budget_bytes,
+            });
+        }
+
+        self.total_bytes = projected_total;
+        let last_refreshed = Instant::now() - age;
+        self.entries.insert(
+            table_name.to_string(),
+            CacheEntry {
+                batch,
+                last_refreshed,
+                size_bytes: new_size,
+            },
+        );
+        Ok(())
+    }
+
     /// Get cached data for a table, if present.
     pub fn get(&self, table_name: &str) -> Option<&RecordBatch> {
         self.entries.get(table_name).map(|e| &e.batch)
@@ -148,6 +186,18 @@ impl InMemoryCache {
     /// Returns `true` if no tables are cached.
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
+    }
+
+    /// Returns the names of all cached tables.
+    pub fn table_names(&self) -> Vec<&str> {
+        self.entries.keys().map(|k| k.as_str()).collect()
+    }
+
+    /// Returns how long ago the table was last refreshed, if cached.
+    pub fn age(&self, table_name: &str) -> Option<Duration> {
+        self.entries
+            .get(table_name)
+            .map(|e| e.last_refreshed.elapsed())
     }
 }
 
@@ -281,5 +331,58 @@ mod tests {
     fn default_budget_is_256mb() {
         let cache = InMemoryCache::new();
         assert_eq!(cache.budget_bytes(), 256 * 1024 * 1024);
+    }
+
+    #[test]
+    fn store_with_age_sets_past_timestamp() {
+        let mut cache = InMemoryCache::new();
+        let age = Duration::from_secs(120);
+        cache
+            .store_with_age("products", make_test_batch(10), age)
+            .unwrap();
+
+        // The entry should report as ~120s old.
+        let entry_age = cache.age("products").unwrap();
+        assert!(entry_age >= Duration::from_secs(119));
+
+        // Should be stale with a 60s max_age.
+        assert!(cache.is_stale("products", Duration::from_secs(60)));
+        // Should not be stale with a 300s max_age.
+        assert!(!cache.is_stale("products", Duration::from_secs(300)));
+    }
+
+    #[test]
+    fn store_with_age_respects_budget() {
+        let mut cache = InMemoryCache::with_budget(1);
+        let result = cache.store_with_age("products", make_test_batch(100), Duration::ZERO);
+        assert!(matches!(
+            result.unwrap_err(),
+            EngineError::MemoryBudgetExceeded { .. }
+        ));
+    }
+
+    #[test]
+    fn table_names_returns_cached_tables() {
+        let mut cache = InMemoryCache::new();
+        cache.store("alpha", make_test_batch(5)).unwrap();
+        cache.store("beta", make_test_batch(5)).unwrap();
+
+        let mut names = cache.table_names();
+        names.sort();
+        assert_eq!(names, vec!["alpha", "beta"]);
+    }
+
+    #[test]
+    fn age_returns_none_for_uncached() {
+        let cache = InMemoryCache::new();
+        assert!(cache.age("missing").is_none());
+    }
+
+    #[test]
+    fn age_returns_elapsed_duration() {
+        let mut cache = InMemoryCache::new();
+        cache.store("t", make_test_batch(5)).unwrap();
+        let age = cache.age("t").unwrap();
+        assert!(age < Duration::from_secs(1));
     }
 }

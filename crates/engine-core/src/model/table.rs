@@ -1,5 +1,7 @@
 //! Table definition for the data model.
 
+use std::hash::{Hash, Hasher};
+
 use arrow::datatypes::{Field, Schema};
 use serde::{Deserialize, Serialize};
 
@@ -124,6 +126,26 @@ impl Table {
         self.refresh_interval_secs
             .map(std::time::Duration::from_secs)
     }
+
+    /// Compute a deterministic hash of this table's schema (column names,
+    /// types, and nullability in order).
+    ///
+    /// Used to detect whether cached data on disk is still compatible with the
+    /// current model. A different hash means the schema has changed and the
+    /// cached data should be discarded.
+    pub fn schema_hash(&self) -> String {
+        use std::collections::hash_map::DefaultHasher;
+
+        let mut hasher = DefaultHasher::new();
+        for col in &self.columns {
+            col.name().hash(&mut hasher);
+            // Hash the debug representation of DataType which uniquely
+            // identifies each variant including Decimal(p, s).
+            format!("{:?}", col.data_type()).hash(&mut hasher);
+            col.nullable().hash(&mut hasher);
+        }
+        format!("{:016x}", hasher.finish())
+    }
 }
 
 #[cfg(test)]
@@ -178,5 +200,76 @@ mod tests {
         let table: Table = serde_json::from_str(json).unwrap();
         assert!(table.is_in_memory());
         assert!(table.refresh_interval().is_none());
+    }
+
+    #[test]
+    fn schema_hash_deterministic() {
+        let t1 = make_table("t");
+        let t2 = make_table("t");
+        assert_eq!(t1.schema_hash(), t2.schema_hash());
+    }
+
+    #[test]
+    fn schema_hash_differs_on_column_name_change() {
+        let t1 = Table::new("t", vec![Column::new("id", DataType::Int64)]).unwrap();
+        let t2 = Table::new("t", vec![Column::new("key", DataType::Int64)]).unwrap();
+        assert_ne!(t1.schema_hash(), t2.schema_hash());
+    }
+
+    #[test]
+    fn schema_hash_differs_on_type_change() {
+        let t1 = Table::new("t", vec![Column::new("id", DataType::Int64)]).unwrap();
+        let t2 = Table::new("t", vec![Column::new("id", DataType::Int32)]).unwrap();
+        assert_ne!(t1.schema_hash(), t2.schema_hash());
+    }
+
+    #[test]
+    fn schema_hash_differs_on_nullable_change() {
+        let t1 = Table::new("t", vec![Column::new("id", DataType::Int64)]).unwrap();
+        let t2 = Table::new("t", vec![Column::non_nullable("id", DataType::Int64)]).unwrap();
+        assert_ne!(t1.schema_hash(), t2.schema_hash());
+    }
+
+    #[test]
+    fn schema_hash_differs_on_column_order() {
+        let t1 = Table::new(
+            "t",
+            vec![
+                Column::new("a", DataType::Int64),
+                Column::new("b", DataType::String),
+            ],
+        )
+        .unwrap();
+        let t2 = Table::new(
+            "t",
+            vec![
+                Column::new("b", DataType::String),
+                Column::new("a", DataType::Int64),
+            ],
+        )
+        .unwrap();
+        assert_ne!(t1.schema_hash(), t2.schema_hash());
+    }
+
+    #[test]
+    fn schema_hash_differs_on_column_added() {
+        let t1 = Table::new("t", vec![Column::new("id", DataType::Int64)]).unwrap();
+        let t2 = Table::new(
+            "t",
+            vec![
+                Column::new("id", DataType::Int64),
+                Column::new("name", DataType::String),
+            ],
+        )
+        .unwrap();
+        assert_ne!(t1.schema_hash(), t2.schema_hash());
+    }
+
+    #[test]
+    fn schema_hash_ignores_table_name() {
+        let t1 = Table::new("foo", vec![Column::new("id", DataType::Int64)]).unwrap();
+        let t2 = Table::new("bar", vec![Column::new("id", DataType::Int64)]).unwrap();
+        // Same columns → same schema hash (table name is not part of schema).
+        assert_eq!(t1.schema_hash(), t2.schema_hash());
     }
 }

@@ -367,6 +367,186 @@ impl Engine {
         &self.cache
     }
 
+    /// Save all cached in-memory table data to disk.
+    ///
+    /// Writes each cached table as an Arrow IPC file plus a `metadata.json`
+    /// containing `last_refreshed` ages and schema hashes. The host app
+    /// should call this on shutdown (or periodically) so that
+    /// [`load_cache_from_disk`](Self::load_cache_from_disk) can restore the
+    /// cache on next startup without re-fetching from the source.
+    ///
+    /// The `dir` must already exist; the method creates files inside it.
+    pub fn save_cache_to_disk(&self, dir: &Path) -> EngineResult<()> {
+        use arrow::ipc::writer::FileWriter;
+        use serde_json::{json, Map};
+
+        let mut tables_meta = Map::new();
+
+        for table_name in self.cache.table_names() {
+            // Only persist tables that are in the model and marked InMemory.
+            let table = match self.model.table(table_name) {
+                Ok(t) if t.is_in_memory() => t,
+                _ => continue,
+            };
+
+            let batch = match self.cache.get(table_name) {
+                Some(b) => b,
+                None => continue,
+            };
+
+            // Write Arrow IPC file.
+            let file_path = dir.join(format!("{table_name}.arrow"));
+            let file = std::fs::File::create(&file_path).map_err(|e| {
+                EngineError::InvalidData(format!(
+                    "failed to create cache file '{}': {e}",
+                    file_path.display()
+                ))
+            })?;
+            let mut writer = FileWriter::try_new(file, &batch.schema()).map_err(|e| {
+                EngineError::InvalidData(format!("Arrow IPC writer init failed: {e}"))
+            })?;
+            writer.write(batch).map_err(|e| {
+                EngineError::InvalidData(format!("Arrow IPC write failed: {e}"))
+            })?;
+            writer.finish().map_err(|e| {
+                EngineError::InvalidData(format!("Arrow IPC finish failed: {e}"))
+            })?;
+
+            // Record metadata: age in milliseconds and schema hash.
+            let age_ms = self
+                .cache
+                .age(table_name)
+                .map(|d| d.as_millis() as u64)
+                .unwrap_or(0);
+
+            tables_meta.insert(
+                table_name.to_string(),
+                json!({
+                    "age_ms": age_ms,
+                    "schema_hash": table.schema_hash(),
+                    "row_count": batch.num_rows(),
+                }),
+            );
+        }
+
+        // Write metadata.json.
+        let meta = json!({ "tables": tables_meta });
+        let meta_path = dir.join("metadata.json");
+        let meta_json = serde_json::to_string_pretty(&meta).map_err(|e| {
+            EngineError::InvalidData(format!("metadata serialization failed: {e}"))
+        })?;
+        std::fs::write(&meta_path, meta_json).map_err(|e| {
+            EngineError::InvalidData(format!(
+                "failed to write metadata '{}': {e}",
+                meta_path.display()
+            ))
+        })?;
+
+        Ok(())
+    }
+
+    /// Restore cached in-memory table data from disk.
+    ///
+    /// Reads Arrow IPC files and `metadata.json` previously written by
+    /// [`save_cache_to_disk`](Self::save_cache_to_disk). For each table:
+    ///
+    /// - If the table is no longer in the model or not `InMemory`, it is skipped.
+    /// - If the schema hash differs from the current model, the file is skipped
+    ///   (the table will be re-fetched on next refresh).
+    /// - Otherwise the data is loaded into the cache with its original age so
+    ///   that TTL-based staleness checks remain accurate.
+    ///
+    /// Returns the names of tables that were successfully loaded.
+    pub fn load_cache_from_disk(&mut self, dir: &Path) -> EngineResult<Vec<String>> {
+        use arrow::ipc::reader::FileReader;
+
+        let meta_path = dir.join("metadata.json");
+        if !meta_path.exists() {
+            return Ok(Vec::new());
+        }
+
+        let meta_json = std::fs::read_to_string(&meta_path).map_err(|e| {
+            EngineError::InvalidData(format!(
+                "failed to read metadata '{}': {e}",
+                meta_path.display()
+            ))
+        })?;
+        let meta: serde_json::Value = serde_json::from_str(&meta_json).map_err(|e| {
+            EngineError::InvalidData(format!("metadata parse failed: {e}"))
+        })?;
+
+        let tables_meta = match meta.get("tables").and_then(|v| v.as_object()) {
+            Some(m) => m,
+            None => return Ok(Vec::new()),
+        };
+
+        let mut loaded = Vec::new();
+
+        for (table_name, entry_meta) in tables_meta {
+            // Check the table still exists in the model and is InMemory.
+            let table = match self.model.table(table_name) {
+                Ok(t) if t.is_in_memory() => t,
+                _ => continue,
+            };
+
+            // Validate schema hash.
+            let stored_hash = entry_meta
+                .get("schema_hash")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            if stored_hash != table.schema_hash() {
+                continue; // Schema changed — skip, will be re-fetched.
+            }
+
+            // Read Arrow IPC file.
+            let file_path = dir.join(format!("{table_name}.arrow"));
+            if !file_path.exists() {
+                continue;
+            }
+
+            let file = std::fs::File::open(&file_path).map_err(|e| {
+                EngineError::InvalidData(format!(
+                    "failed to open cache file '{}': {e}",
+                    file_path.display()
+                ))
+            })?;
+            let reader = FileReader::try_new(file, None).map_err(|e| {
+                EngineError::InvalidData(format!(
+                    "Arrow IPC read failed for '{}': {e}",
+                    file_path.display()
+                ))
+            })?;
+
+            let schema = reader.schema();
+            let batches: Vec<RecordBatch> = reader
+                .into_iter()
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|e| {
+                    EngineError::InvalidData(format!(
+                        "Arrow IPC batch read failed for '{table_name}': {e}"
+                    ))
+                })?;
+
+            let batch = if batches.is_empty() {
+                RecordBatch::new_empty(schema)
+            } else {
+                arrow::compute::concat_batches(&schema, &batches)?
+            };
+
+            // Restore with original age.
+            let age_ms = entry_meta
+                .get("age_ms")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0);
+            let age = std::time::Duration::from_millis(age_ms);
+
+            self.cache.store_with_age(table_name, batch, age)?;
+            loaded.push(table_name.clone());
+        }
+
+        Ok(loaded)
+    }
+
     /// Replace the data model, keeping the source registry and cache intact.
     ///
     /// Existing table bindings remain valid as long as the new model contains
@@ -486,5 +666,221 @@ mod tests {
         assert!(result.is_err());
 
         let _ = std::fs::remove_file(&path);
+    }
+
+    // -- Disk cache tests --
+
+    use arrow::array::{Float64Array, Int64Array};
+    use arrow::datatypes::{DataType as ArrowDataType, Field, Schema as ArrowSchema};
+    use std::sync::Arc;
+
+    fn make_inmemory_model() -> DataModel {
+        DataModel::builder()
+            .add_table(
+                Table::new(
+                    "Products",
+                    vec![
+                        Column::new("id", DataType::Int64),
+                        Column::new("price", DataType::Float64),
+                    ],
+                )
+                .unwrap()
+                .with_storage_mode(StorageMode::InMemory)
+                .with_refresh_interval(std::time::Duration::from_secs(300)),
+            )
+            .build()
+            .unwrap()
+    }
+
+    fn make_test_batch() -> RecordBatch {
+        let schema = Arc::new(ArrowSchema::new(vec![
+            Field::new("id", ArrowDataType::Int64, true),
+            Field::new("price", ArrowDataType::Float64, true),
+        ]));
+        RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(Int64Array::from(vec![1, 2, 3])),
+                Arc::new(Float64Array::from(vec![9.99, 19.99, 29.99])),
+            ],
+        )
+        .unwrap()
+    }
+
+    fn make_cache_dir(test_name: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("calcula_cache_test_{test_name}"));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn save_and_load_cache_roundtrip() {
+        let dir = make_cache_dir("roundtrip");
+        let model = make_inmemory_model();
+
+        // Save.
+        let mut engine = Engine::new(model.clone());
+        engine.cache.store("Products", make_test_batch()).unwrap();
+        engine.save_cache_to_disk(&dir).unwrap();
+
+        // Verify files exist.
+        assert!(dir.join("Products.arrow").exists());
+        assert!(dir.join("metadata.json").exists());
+
+        // Load into a fresh engine.
+        let mut engine2 = Engine::new(model);
+        let loaded = engine2.load_cache_from_disk(&dir).unwrap();
+        assert_eq!(loaded, vec!["Products"]);
+
+        let cached = engine2.cache().get("Products").unwrap();
+        assert_eq!(cached.num_rows(), 3);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn load_cache_preserves_age() {
+        let dir = make_cache_dir("age");
+        let model = make_inmemory_model();
+
+        // Store with a known age.
+        let mut engine = Engine::new(model.clone());
+        engine
+            .cache
+            .store_with_age(
+                "Products",
+                make_test_batch(),
+                std::time::Duration::from_secs(200),
+            )
+            .unwrap();
+        engine.save_cache_to_disk(&dir).unwrap();
+
+        // Load and check the age is preserved (approximately).
+        let mut engine2 = Engine::new(model);
+        engine2.load_cache_from_disk(&dir).unwrap();
+
+        let age = engine2.cache().age("Products").unwrap();
+        // Should be ~200s (allow small margin for test execution time).
+        assert!(age >= std::time::Duration::from_secs(199));
+
+        // With 300s TTL and 200s age, should not be stale yet.
+        assert!(!engine2.needs_refresh("Products", std::time::Duration::from_secs(300)));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn load_cache_skips_schema_mismatch() {
+        let dir = make_cache_dir("schema_mismatch");
+
+        // Save with original schema.
+        let model_v1 = make_inmemory_model();
+        let mut engine = Engine::new(model_v1);
+        engine.cache.store("Products", make_test_batch()).unwrap();
+        engine.save_cache_to_disk(&dir).unwrap();
+
+        // Create model v2 with a different column.
+        let model_v2 = DataModel::builder()
+            .add_table(
+                Table::new(
+                    "Products",
+                    vec![
+                        Column::new("id", DataType::Int64),
+                        Column::new("cost", DataType::Float64), // was "price"
+                    ],
+                )
+                .unwrap()
+                .with_storage_mode(StorageMode::InMemory),
+            )
+            .build()
+            .unwrap();
+
+        let mut engine2 = Engine::new(model_v2);
+        let loaded = engine2.load_cache_from_disk(&dir).unwrap();
+        // Should skip — schema hash mismatch.
+        assert!(loaded.is_empty());
+        assert!(engine2.cache().get("Products").is_none());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn load_cache_skips_direct_query_tables() {
+        let dir = make_cache_dir("direct_query");
+
+        // Save with InMemory mode.
+        let model_im = make_inmemory_model();
+        let mut engine = Engine::new(model_im);
+        engine.cache.store("Products", make_test_batch()).unwrap();
+        engine.save_cache_to_disk(&dir).unwrap();
+
+        // Load with DirectQuery mode (table is no longer InMemory).
+        let model_dq = DataModel::builder()
+            .add_table(
+                Table::new(
+                    "Products",
+                    vec![
+                        Column::new("id", DataType::Int64),
+                        Column::new("price", DataType::Float64),
+                    ],
+                )
+                .unwrap(), // default: DirectQuery
+            )
+            .build()
+            .unwrap();
+
+        let mut engine2 = Engine::new(model_dq);
+        let loaded = engine2.load_cache_from_disk(&dir).unwrap();
+        assert!(loaded.is_empty());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn load_cache_returns_empty_for_missing_dir() {
+        let model = make_inmemory_model();
+        let mut engine = Engine::new(model);
+        let loaded = engine
+            .load_cache_from_disk(Path::new("/nonexistent/path"))
+            .unwrap();
+        assert!(loaded.is_empty());
+    }
+
+    #[test]
+    fn save_cache_only_persists_inmemory_tables() {
+        let dir = make_cache_dir("only_inmemory");
+
+        let model = DataModel::builder()
+            .add_table(
+                Table::new("InMem", vec![Column::new("id", DataType::Int64)])
+                    .unwrap()
+                    .with_storage_mode(StorageMode::InMemory),
+            )
+            .add_table(
+                Table::new("Direct", vec![Column::new("id", DataType::Int64)]).unwrap(),
+            )
+            .build()
+            .unwrap();
+
+        let mut engine = Engine::new(model);
+
+        let schema = Arc::new(ArrowSchema::new(vec![Field::new(
+            "id",
+            ArrowDataType::Int64,
+            true,
+        )]));
+        let batch = RecordBatch::try_new(schema, vec![Arc::new(Int64Array::from(vec![1]))])
+            .unwrap();
+        engine.cache.store("InMem", batch.clone()).unwrap();
+        engine.cache.store("Direct", batch).unwrap();
+
+        engine.save_cache_to_disk(&dir).unwrap();
+
+        // Only InMem should have an arrow file.
+        assert!(dir.join("InMem.arrow").exists());
+        assert!(!dir.join("Direct.arrow").exists());
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
