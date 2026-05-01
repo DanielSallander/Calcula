@@ -9,9 +9,11 @@
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
+use arrow::array::Array;
 use arrow::record_batch::RecordBatch;
 
 use crate::error::{EngineError, EngineResult};
+use crate::model::table::RefreshStrategy;
 
 /// Default memory budget: 256 MB.
 const DEFAULT_MEMORY_BUDGET: usize = 256 * 1024 * 1024;
@@ -25,6 +27,10 @@ struct CacheEntry {
     last_refreshed: Instant,
     /// Size in bytes of the Arrow data.
     size_bytes: usize,
+    /// Last-seen result of a `SourceQuery` poll, stored as a string.
+    /// Used to detect changes: if the next poll returns a different value,
+    /// the table should be refreshed.
+    fingerprint: Option<String>,
 }
 
 /// In-memory cache holding Arrow `RecordBatch` data for `InMemory`-mode tables.
@@ -88,12 +94,18 @@ impl InMemoryCache {
         }
 
         self.total_bytes = projected_total;
+        // Preserve existing fingerprint when replacing.
+        let fingerprint = self
+            .entries
+            .get(table_name)
+            .and_then(|e| e.fingerprint.clone());
         self.entries.insert(
             table_name.to_string(),
             CacheEntry {
                 batch,
                 last_refreshed: Instant::now(),
                 size_bytes: new_size,
+                fingerprint,
             },
         );
         Ok(())
@@ -126,12 +138,18 @@ impl InMemoryCache {
 
         self.total_bytes = projected_total;
         let last_refreshed = Instant::now() - age;
+        // Preserve existing fingerprint when replacing.
+        let fingerprint = self
+            .entries
+            .get(table_name)
+            .and_then(|e| e.fingerprint.clone());
         self.entries.insert(
             table_name.to_string(),
             CacheEntry {
                 batch,
                 last_refreshed,
                 size_bytes: new_size,
+                fingerprint,
             },
         );
         Ok(())
@@ -199,6 +217,45 @@ impl InMemoryCache {
             .get(table_name)
             .map(|e| e.last_refreshed.elapsed())
     }
+
+    /// Returns the stored fingerprint for a table, if any.
+    ///
+    /// The fingerprint is the last-seen result of a [`SourceQuery`] poll.
+    pub fn fingerprint(&self, table_name: &str) -> Option<&str> {
+        self.entries
+            .get(table_name)
+            .and_then(|e| e.fingerprint.as_deref())
+    }
+
+    /// Set (or update) the fingerprint for a cached table.
+    ///
+    /// Does nothing if the table is not cached.
+    pub fn set_fingerprint(&mut self, table_name: &str, fingerprint: String) {
+        if let Some(entry) = self.entries.get_mut(table_name) {
+            entry.fingerprint = Some(fingerprint);
+        }
+    }
+
+    /// Evaluate a set of refresh strategies and return `true` if the table
+    /// should be refreshed.
+    ///
+    /// Returns `true` if the table is not yet cached, or if **any** of the
+    /// strategies signals staleness. If `strategies` is empty, returns `false`
+    /// for cached tables (manual refresh only).
+    pub fn should_refresh(
+        &self,
+        table_name: &str,
+        strategies: &[RefreshStrategy],
+    ) -> bool {
+        let entry = match self.entries.get(table_name) {
+            Some(e) => e,
+            None => return true, // Not cached → always refresh.
+        };
+
+        strategies
+            .iter()
+            .any(|s| evaluate_strategy(s, entry))
+    }
 }
 
 impl Default for InMemoryCache {
@@ -214,6 +271,97 @@ fn batch_memory_size(batch: &RecordBatch) -> usize {
         .iter()
         .map(|c| c.get_array_memory_size())
         .sum()
+}
+
+/// Evaluate a single refresh strategy against a cache entry.
+///
+/// `SourceQuery` strategies are skipped (they require I/O and are handled
+/// by the `Engine` layer).
+fn evaluate_strategy(strategy: &RefreshStrategy, entry: &CacheEntry) -> bool {
+    match strategy {
+        RefreshStrategy::Interval { secs } => {
+            entry.last_refreshed.elapsed() > Duration::from_secs(*secs)
+        }
+        RefreshStrategy::ContainsCurrentDate { column } => {
+            !batch_contains_today(&entry.batch, column)
+        }
+        RefreshStrategy::DailyAfter { hour, minute } => {
+            is_past_daily_threshold(entry, *hour, *minute)
+        }
+        RefreshStrategy::SourceQuery { .. } => false, // Evaluated by Engine.
+    }
+}
+
+/// Check whether a `Date32` column in the batch contains today's date.
+///
+/// Returns `false` if the column is not found, is not a Date32 column,
+/// or does not contain today's date value.
+fn batch_contains_today(batch: &RecordBatch, column_name: &str) -> bool {
+    use arrow::array::Date32Array;
+    use arrow::datatypes::DataType as ArrowDataType;
+
+    let col_idx = match batch.schema().index_of(column_name) {
+        Ok(idx) => idx,
+        Err(_) => return false,
+    };
+
+    let schema = batch.schema();
+    let field = schema.field(col_idx);
+    if *field.data_type() != ArrowDataType::Date32 {
+        return false;
+    }
+
+    let array = match batch.column(col_idx).as_any().downcast_ref::<Date32Array>() {
+        Some(a) => a,
+        None => return false,
+    };
+
+    let today = today_as_days_since_epoch();
+    (0..array.len()).any(|i| !array.is_null(i) && array.value(i) == today)
+}
+
+/// Get today's date as days since the Unix epoch (1970-01-01).
+fn today_as_days_since_epoch() -> i32 {
+    use std::time::SystemTime;
+
+    let secs = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    (secs / 86400) as i32
+}
+
+/// Check whether the cache entry was last refreshed before today's occurrence
+/// of the specified wall-clock time.
+///
+/// For example, if `hour=6, minute=0` and it is currently 08:00, returns
+/// `true` if the entry was last refreshed before 06:00 today. If it is
+/// currently 05:00, the threshold is yesterday's 06:00.
+fn is_past_daily_threshold(entry: &CacheEntry, hour: u8, minute: u8) -> bool {
+    use std::time::SystemTime;
+
+    let now = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+
+    // Current day's midnight in UTC.
+    let today_midnight = (now / 86400) * 86400;
+    let threshold_today = today_midnight + (hour as u64) * 3600 + (minute as u64) * 60;
+
+    // The most recent threshold: today's if we've passed it, yesterday's if not.
+    let threshold = if now >= threshold_today {
+        threshold_today
+    } else {
+        threshold_today.saturating_sub(86400)
+    };
+
+    // Convert entry's last_refreshed (Instant) to an approximate epoch.
+    // Instant is monotonic but we can approximate by comparing with now.
+    let age_secs = entry.last_refreshed.elapsed().as_secs();
+    let refreshed_epoch = now.saturating_sub(age_secs);
+
+    refreshed_epoch < threshold
 }
 
 #[cfg(test)]
@@ -384,5 +532,188 @@ mod tests {
         cache.store("t", make_test_batch(5)).unwrap();
         let age = cache.age("t").unwrap();
         assert!(age < Duration::from_secs(1));
+    }
+
+    #[test]
+    fn should_refresh_uncached_returns_true() {
+        let cache = InMemoryCache::new();
+        assert!(cache.should_refresh("missing", &[]));
+    }
+
+    #[test]
+    fn should_refresh_no_strategies_returns_false() {
+        let mut cache = InMemoryCache::new();
+        cache.store("t", make_test_batch(5)).unwrap();
+        // No strategies → manual refresh only → not stale.
+        assert!(!cache.should_refresh("t", &[]));
+    }
+
+    #[test]
+    fn should_refresh_interval_fresh() {
+        let mut cache = InMemoryCache::new();
+        cache.store("t", make_test_batch(5)).unwrap();
+        let strategies = vec![RefreshStrategy::Interval { secs: 300 }];
+        assert!(!cache.should_refresh("t", &strategies));
+    }
+
+    #[test]
+    fn should_refresh_interval_stale() {
+        let mut cache = InMemoryCache::new();
+        cache
+            .store_with_age("t", make_test_batch(5), Duration::from_secs(600))
+            .unwrap();
+        let strategies = vec![RefreshStrategy::Interval { secs: 300 }];
+        assert!(cache.should_refresh("t", &strategies));
+    }
+
+    #[test]
+    fn should_refresh_contains_date_with_today() {
+        use arrow::array::Date32Array;
+        use arrow::datatypes::DataType as ArrowDataType;
+
+        let today = super::today_as_days_since_epoch();
+        let schema = Arc::new(Schema::new(vec![Field::new(
+            "date",
+            ArrowDataType::Date32,
+            false,
+        )]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![Arc::new(Date32Array::from(vec![today - 1, today, today + 1]))],
+        )
+        .unwrap();
+
+        let mut cache = InMemoryCache::new();
+        cache.store("t", batch).unwrap();
+
+        let strategies = vec![RefreshStrategy::ContainsCurrentDate {
+            column: "date".to_string(),
+        }];
+        // Contains today → no refresh needed.
+        assert!(!cache.should_refresh("t", &strategies));
+    }
+
+    #[test]
+    fn should_refresh_contains_date_without_today() {
+        use arrow::array::Date32Array;
+        use arrow::datatypes::DataType as ArrowDataType;
+
+        let today = super::today_as_days_since_epoch();
+        let schema = Arc::new(Schema::new(vec![Field::new(
+            "date",
+            ArrowDataType::Date32,
+            false,
+        )]));
+        // Only yesterday — today is missing.
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![Arc::new(Date32Array::from(vec![today - 2, today - 1]))],
+        )
+        .unwrap();
+
+        let mut cache = InMemoryCache::new();
+        cache.store("t", batch).unwrap();
+
+        let strategies = vec![RefreshStrategy::ContainsCurrentDate {
+            column: "date".to_string(),
+        }];
+        // Does not contain today → needs refresh.
+        assert!(cache.should_refresh("t", &strategies));
+    }
+
+    #[test]
+    fn should_refresh_contains_date_wrong_column() {
+        let mut cache = InMemoryCache::new();
+        cache.store("t", make_test_batch(5)).unwrap();
+
+        let strategies = vec![RefreshStrategy::ContainsCurrentDate {
+            column: "nonexistent".to_string(),
+        }];
+        // Column not found → can't confirm today → needs refresh.
+        assert!(cache.should_refresh("t", &strategies));
+    }
+
+    #[test]
+    fn should_refresh_any_strategy_triggers() {
+        let mut cache = InMemoryCache::new();
+        cache.store("t", make_test_batch(5)).unwrap();
+
+        let strategies = vec![
+            // Interval is fine (just cached).
+            RefreshStrategy::Interval { secs: 300 },
+            // But date column doesn't exist → triggers refresh.
+            RefreshStrategy::ContainsCurrentDate {
+                column: "date".to_string(),
+            },
+        ];
+        // ANY strategy signals → refresh.
+        assert!(cache.should_refresh("t", &strategies));
+    }
+
+    #[test]
+    fn source_query_skipped_in_local_evaluation() {
+        let mut cache = InMemoryCache::new();
+        cache.store("t", make_test_batch(5)).unwrap();
+
+        // SourceQuery alone should NOT trigger refresh locally.
+        let strategies = vec![RefreshStrategy::SourceQuery {
+            sql: "SELECT 1".to_string(),
+            source_table: None,
+        }];
+        assert!(!cache.should_refresh("t", &strategies));
+    }
+
+    #[test]
+    fn fingerprint_default_is_none() {
+        let mut cache = InMemoryCache::new();
+        cache.store("t", make_test_batch(5)).unwrap();
+        assert!(cache.fingerprint("t").is_none());
+    }
+
+    #[test]
+    fn set_and_get_fingerprint() {
+        let mut cache = InMemoryCache::new();
+        cache.store("t", make_test_batch(5)).unwrap();
+
+        cache.set_fingerprint("t", "2026-04-30T12:00:00".to_string());
+        assert_eq!(cache.fingerprint("t"), Some("2026-04-30T12:00:00"));
+    }
+
+    #[test]
+    fn fingerprint_preserved_on_store_replace() {
+        let mut cache = InMemoryCache::new();
+        cache.store("t", make_test_batch(5)).unwrap();
+        cache.set_fingerprint("t", "v1".to_string());
+
+        // Replace data — fingerprint should be preserved.
+        cache.store("t", make_test_batch(10)).unwrap();
+        assert_eq!(cache.fingerprint("t"), Some("v1"));
+    }
+
+    #[test]
+    fn fingerprint_preserved_on_store_with_age() {
+        let mut cache = InMemoryCache::new();
+        cache.store("t", make_test_batch(5)).unwrap();
+        cache.set_fingerprint("t", "v1".to_string());
+
+        // Replace with age — fingerprint should be preserved.
+        cache
+            .store_with_age("t", make_test_batch(10), Duration::from_secs(60))
+            .unwrap();
+        assert_eq!(cache.fingerprint("t"), Some("v1"));
+    }
+
+    #[test]
+    fn fingerprint_none_for_uncached() {
+        let cache = InMemoryCache::new();
+        assert!(cache.fingerprint("missing").is_none());
+    }
+
+    #[test]
+    fn set_fingerprint_noop_for_uncached() {
+        let mut cache = InMemoryCache::new();
+        cache.set_fingerprint("missing", "value".to_string());
+        // Should not panic or create an entry.
+        assert!(!cache.contains("missing"));
     }
 }

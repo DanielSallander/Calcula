@@ -15,5 +15,5 @@ pub use context::{ClearTarget, ContextDefinition, ContextOp};
 pub use global_variable::GlobalVariable;
 pub use relationship::{Cardinality, FilterPropagation, JoinCondition, JoinOperator, Relationship};
 pub use schema::{DataModel, DataModelBuilder};
-pub use table::{StorageMode, Table};
+pub use table::{RefreshStrategy, StorageMode, Table};
 pub use table_variable::TableVariable;

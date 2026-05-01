@@ -26,6 +26,67 @@ impl StorageMode {
     }
 }
 
+/// Strategy that determines when an in-memory table should be refreshed.
+///
+/// Multiple strategies can be combined on a single table — if **any** strategy
+/// signals a refresh, the table is refreshed.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum RefreshStrategy {
+    /// Refresh after a fixed duration has elapsed since the last refresh.
+    Interval {
+        /// Number of seconds before the cache is considered stale.
+        secs: u64,
+    },
+
+    /// Refresh if the cached data does not contain today's date in the
+    /// specified column. Ideal for date/calendar dimension tables.
+    ContainsCurrentDate {
+        /// Name of the date column to check (must be a `Date` column).
+        column: String,
+    },
+
+    /// Refresh once daily after a specific wall-clock time (local time).
+    /// Useful for tables fed by nightly ETL jobs.
+    DailyAfter {
+        /// Hour (0–23) in local time.
+        hour: u8,
+        /// Minute (0–59) in local time.
+        minute: u8,
+    },
+
+    /// Refresh when a source-side query returns a different value than last
+    /// time. Ideal for ETL-driven tables where the ETL process writes a
+    /// completion timestamp or version to a log table.
+    ///
+    /// The SQL must return exactly one row with one column (a scalar value).
+    /// The result is compared as a string against the previously stored
+    /// fingerprint. If different (or if no fingerprint is stored yet), the
+    /// table is refreshed.
+    ///
+    /// # Example
+    ///
+    /// ```text
+    /// sql: "SELECT MAX(loaded_at) FROM etl_log WHERE table_name = 'products'"
+    /// ```
+    SourceQuery {
+        /// SQL query returning a single scalar value (one row, one column).
+        sql: String,
+        /// Which model table's connector to use for running the query.
+        /// If `None`, uses this table's own connector.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        source_table: Option<String>,
+    },
+}
+
+impl RefreshStrategy {
+    /// Returns `true` if this strategy requires I/O (e.g., a database query)
+    /// and cannot be evaluated against cached data alone.
+    pub fn requires_io(&self) -> bool {
+        matches!(self, Self::SourceQuery { .. })
+    }
+}
+
 /// A table definition: a named collection of typed columns.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Table {
@@ -33,11 +94,11 @@ pub struct Table {
     columns: Vec<Column>,
     #[serde(default, skip_serializing_if = "StorageMode::is_direct_query")]
     storage_mode: StorageMode,
-    /// Optional TTL for in-memory tables: if the cached data is older than this
-    /// many seconds, it is considered stale and eligible for automatic refresh.
+    /// Strategies that determine when cached data should be refreshed.
+    /// If **any** strategy signals staleness, the table is refreshed.
     /// Only meaningful when `storage_mode` is `InMemory`.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    refresh_interval_secs: Option<u64>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    refresh_strategies: Vec<RefreshStrategy>,
 }
 
 impl Table {
@@ -61,7 +122,7 @@ impl Table {
             name,
             columns,
             storage_mode: StorageMode::default(),
-            refresh_interval_secs: None,
+            refresh_strategies: Vec::new(),
         })
     }
 
@@ -112,19 +173,44 @@ impl Table {
         self.storage_mode == StorageMode::InMemory
     }
 
-    /// Set the refresh interval (TTL) for this in-memory table.
+    /// Add a refresh strategy to this table.
     ///
-    /// When set, the table's cached data is considered stale after this duration.
-    /// Only meaningful when `storage_mode` is `InMemory`.
-    pub fn with_refresh_interval(mut self, interval: std::time::Duration) -> Self {
-        self.refresh_interval_secs = Some(interval.as_secs());
+    /// Multiple strategies can be combined — if **any** strategy signals
+    /// staleness, the table is refreshed. Only meaningful when `storage_mode`
+    /// is `InMemory`.
+    pub fn with_refresh_strategy(mut self, strategy: RefreshStrategy) -> Self {
+        self.refresh_strategies.push(strategy);
         self
     }
 
-    /// Returns the configured refresh interval as a `Duration`, if set.
-    pub fn refresh_interval(&self) -> Option<std::time::Duration> {
-        self.refresh_interval_secs
-            .map(std::time::Duration::from_secs)
+    /// Convenience: add an interval-based refresh strategy (TTL).
+    ///
+    /// Equivalent to `with_refresh_strategy(RefreshStrategy::Interval { secs })`.
+    pub fn with_refresh_interval(self, interval: std::time::Duration) -> Self {
+        self.with_refresh_strategy(RefreshStrategy::Interval {
+            secs: interval.as_secs(),
+        })
+    }
+
+    /// Returns the configured refresh strategies.
+    pub fn refresh_strategies(&self) -> &[RefreshStrategy] {
+        &self.refresh_strategies
+    }
+
+    /// Returns only the strategies that can be evaluated locally (no I/O).
+    pub fn local_refresh_strategies(&self) -> Vec<&RefreshStrategy> {
+        self.refresh_strategies
+            .iter()
+            .filter(|s| !s.requires_io())
+            .collect()
+    }
+
+    /// Returns only the strategies that require I/O (source queries).
+    pub fn io_refresh_strategies(&self) -> Vec<&RefreshStrategy> {
+        self.refresh_strategies
+            .iter()
+            .filter(|s| s.requires_io())
+            .collect()
     }
 
     /// Compute a deterministic hash of this table's schema (column names,
@@ -159,47 +245,143 @@ mod tests {
     }
 
     #[test]
-    fn refresh_interval_default_is_none() {
+    fn refresh_strategies_default_empty() {
         let table = make_table("t");
-        assert!(table.refresh_interval().is_none());
+        assert!(table.refresh_strategies().is_empty());
     }
 
     #[test]
-    fn with_refresh_interval_sets_duration() {
+    fn with_refresh_interval_adds_interval_strategy() {
         let table = make_table("t").with_refresh_interval(Duration::from_secs(300));
-        assert_eq!(table.refresh_interval(), Some(Duration::from_secs(300)));
+        let strategies = table.refresh_strategies();
+        assert_eq!(strategies.len(), 1);
+        assert_eq!(strategies[0], RefreshStrategy::Interval { secs: 300 });
     }
 
     #[test]
-    fn refresh_interval_serialization_roundtrip() {
+    fn with_refresh_strategy_adds_strategy() {
+        let table = make_table("t")
+            .with_refresh_strategy(RefreshStrategy::ContainsCurrentDate {
+                column: "date".to_string(),
+            });
+        let strategies = table.refresh_strategies();
+        assert_eq!(strategies.len(), 1);
+        assert!(matches!(
+            &strategies[0],
+            RefreshStrategy::ContainsCurrentDate { column } if column == "date"
+        ));
+    }
+
+    #[test]
+    fn multiple_strategies_combined() {
+        let table = make_table("t")
+            .with_refresh_interval(Duration::from_secs(300))
+            .with_refresh_strategy(RefreshStrategy::ContainsCurrentDate {
+                column: "date".to_string(),
+            })
+            .with_refresh_strategy(RefreshStrategy::DailyAfter {
+                hour: 6,
+                minute: 0,
+            });
+        assert_eq!(table.refresh_strategies().len(), 3);
+    }
+
+    #[test]
+    fn refresh_strategies_serialization_roundtrip() {
         let table = make_table("t")
             .with_storage_mode(StorageMode::InMemory)
-            .with_refresh_interval(Duration::from_secs(600));
+            .with_refresh_interval(Duration::from_secs(600))
+            .with_refresh_strategy(RefreshStrategy::ContainsCurrentDate {
+                column: "date".to_string(),
+            });
 
         let json = serde_json::to_string(&table).unwrap();
-        assert!(json.contains("\"refresh_interval_secs\":600"));
+        assert!(json.contains("\"refresh_strategies\""));
+        assert!(json.contains("\"interval\""));
+        assert!(json.contains("\"contains_current_date\""));
 
         let deserialized: Table = serde_json::from_str(&json).unwrap();
-        assert_eq!(
-            deserialized.refresh_interval(),
-            Some(Duration::from_secs(600))
-        );
+        assert_eq!(deserialized.refresh_strategies().len(), 2);
     }
 
     #[test]
-    fn refresh_interval_not_serialized_when_none() {
+    fn strategies_not_serialized_when_empty() {
         let table = make_table("t").with_storage_mode(StorageMode::InMemory);
         let json = serde_json::to_string(&table).unwrap();
-        assert!(!json.contains("refresh_interval"));
+        assert!(!json.contains("refresh_strategies"));
     }
 
     #[test]
-    fn backward_compatible_deserialization() {
-        // Old JSON without refresh_interval_secs should deserialize fine.
-        let json = r#"{"name":"t","columns":[{"name":"id","data_type":"Int64","nullable":true}],"storage_mode":"in_memory"}"#;
-        let table: Table = serde_json::from_str(json).unwrap();
-        assert!(table.is_in_memory());
-        assert!(table.refresh_interval().is_none());
+    fn source_query_serialization_roundtrip() {
+        let table = make_table("t")
+            .with_storage_mode(StorageMode::InMemory)
+            .with_refresh_strategy(RefreshStrategy::SourceQuery {
+                sql: "SELECT MAX(loaded_at) FROM etl_log".to_string(),
+                source_table: Some("etl_log".to_string()),
+            });
+
+        let json = serde_json::to_string(&table).unwrap();
+        assert!(json.contains("\"source_query\""));
+        assert!(json.contains("etl_log"));
+
+        let deserialized: Table = serde_json::from_str(&json).unwrap();
+        let strategies = deserialized.refresh_strategies();
+        assert_eq!(strategies.len(), 1);
+        assert!(matches!(
+            &strategies[0],
+            RefreshStrategy::SourceQuery { sql, source_table }
+                if sql.contains("etl_log") && *source_table == Some("etl_log".to_string())
+        ));
+    }
+
+    #[test]
+    fn source_query_without_source_table_omits_field() {
+        let table = make_table("t")
+            .with_storage_mode(StorageMode::InMemory)
+            .with_refresh_strategy(RefreshStrategy::SourceQuery {
+                sql: "SELECT 1".to_string(),
+                source_table: None,
+            });
+
+        let json = serde_json::to_string(&table).unwrap();
+        assert!(!json.contains("source_table"));
+
+        let deserialized: Table = serde_json::from_str(&json).unwrap();
+        assert!(matches!(
+            &deserialized.refresh_strategies()[0],
+            RefreshStrategy::SourceQuery { source_table, .. } if source_table.is_none()
+        ));
+    }
+
+    #[test]
+    fn requires_io_only_for_source_query() {
+        assert!(!RefreshStrategy::Interval { secs: 60 }.requires_io());
+        assert!(!RefreshStrategy::ContainsCurrentDate {
+            column: "d".into()
+        }
+        .requires_io());
+        assert!(!RefreshStrategy::DailyAfter {
+            hour: 6,
+            minute: 0
+        }
+        .requires_io());
+        assert!(RefreshStrategy::SourceQuery {
+            sql: "SELECT 1".into(),
+            source_table: None,
+        }
+        .requires_io());
+    }
+
+    #[test]
+    fn local_and_io_strategies_split() {
+        let table = make_table("t")
+            .with_refresh_interval(Duration::from_secs(300))
+            .with_refresh_strategy(RefreshStrategy::SourceQuery {
+                sql: "SELECT 1".to_string(),
+                source_table: None,
+            });
+        assert_eq!(table.local_refresh_strategies().len(), 1);
+        assert_eq!(table.io_refresh_strategies().len(), 1);
     }
 
     #[test]

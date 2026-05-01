@@ -67,7 +67,7 @@ pub use engine_core::error::{EngineError, EngineResult};
 pub use engine_core::model::{
     CalculatedColumn, Cardinality, ClearTarget, Column, ContextDefinition, ContextOp, DataModel,
     DataModelBuilder, FilterPropagation, GlobalVariable, JoinCondition, JoinOperator, Relationship,
-    StorageMode, Table, TableVariable,
+    RefreshStrategy, StorageMode, Table, TableVariable,
 };
 pub use engine_core::store::{ColumnStore, InMemoryCache, TableData};
 pub use engine_core::types::{DataType, TableColumn, Value};
@@ -321,34 +321,111 @@ impl Engine {
         Ok(())
     }
 
-    /// Refresh all in-memory tables whose cache has exceeded their configured
-    /// TTL (`refresh_interval`).
+    /// Refresh all in-memory tables whose configured refresh strategies
+    /// indicate staleness.
     ///
-    /// Tables without a configured `refresh_interval` are skipped (they never
-    /// auto-expire). Tables that have never been cached are always refreshed.
+    /// For each in-memory table, its [`RefreshStrategy`] list is evaluated
+    /// against the cache. If **any** strategy signals staleness, the table
+    /// is refreshed. [`SourceQuery`](RefreshStrategy::SourceQuery) strategies
+    /// are evaluated by running the configured SQL against the source and
+    /// comparing the result with the stored fingerprint.
+    ///
+    /// Tables without strategies are only refreshed if they have never been
+    /// cached.
     ///
     /// Returns the names of tables that were refreshed.
     pub async fn refresh_stale(&mut self) -> EngineResult<Vec<String>> {
-        let stale_tables: Vec<String> = self
+        // Collect in-memory tables with their staleness info.
+        let candidates: Vec<(String, bool, Vec<RefreshStrategy>)> = self
             .model
             .tables()
             .iter()
             .filter(|t| t.is_in_memory())
-            .filter(|t| {
-                if let Some(max_age) = t.refresh_interval() {
-                    self.cache.is_stale(t.name(), max_age)
-                } else {
-                    // No TTL configured — only refresh if never cached.
+            .map(|t| {
+                let strategies = t.refresh_strategies();
+                let locally_stale = if strategies.is_empty() {
                     !self.cache.contains(t.name())
-                }
+                } else {
+                    self.cache.should_refresh(t.name(), strategies)
+                };
+                let io_strategies: Vec<RefreshStrategy> = t
+                    .io_refresh_strategies()
+                    .into_iter()
+                    .cloned()
+                    .collect();
+                (t.name().to_string(), locally_stale, io_strategies)
             })
-            .map(|t| t.name().to_string())
             .collect();
+
+        let mut stale_tables = Vec::new();
+
+        for (table_name, locally_stale, io_strategies) in &candidates {
+            if *locally_stale {
+                stale_tables.push(table_name.clone());
+                continue;
+            }
+
+            // Evaluate SourceQuery strategies (requires I/O).
+            for strategy in io_strategies {
+                if let RefreshStrategy::SourceQuery { sql, source_table } = strategy {
+                    let connector_table = source_table.as_deref().unwrap_or(table_name);
+                    match self.poll_source_query(connector_table, sql).await {
+                        Ok(new_fingerprint) => {
+                            let old_fingerprint = self.cache.fingerprint(table_name);
+                            if old_fingerprint.is_none_or(|old| old != new_fingerprint) {
+                                // Fingerprint changed (or first poll) → refresh.
+                                stale_tables.push(table_name.clone());
+                                // Store the new fingerprint after refresh.
+                                self.cache
+                                    .set_fingerprint(table_name, new_fingerprint);
+                                break; // No need to check more strategies.
+                            }
+                        }
+                        Err(_) => {
+                            // Poll failed — skip this strategy, don't force refresh.
+                            continue;
+                        }
+                    }
+                }
+            }
+        }
 
         for name in &stale_tables {
             self.refresh_table(name).await?;
         }
         Ok(stale_tables)
+    }
+
+    /// Run a `SourceQuery` poll SQL against a connector and return the scalar
+    /// result as a string.
+    async fn poll_source_query(
+        &self,
+        connector_table: &str,
+        sql: &str,
+    ) -> EngineResult<String> {
+        let connector = self
+            .registry
+            .connector_for(connector_table)
+            .map_err(|e| EngineError::InvalidData(e.to_string()))?;
+        let batches = connector
+            .execute_query(sql)
+            .await
+            .map_err(|e| EngineError::InvalidData(e.to_string()))?;
+
+        // Extract the first column of the first row as a string.
+        let batch = batches
+            .first()
+            .ok_or_else(|| EngineError::InvalidData("poll query returned no results".into()))?;
+        if batch.num_rows() == 0 || batch.num_columns() == 0 {
+            return Err(EngineError::InvalidData(
+                "poll query returned no rows or columns".into(),
+            ));
+        }
+
+        let col = batch.column(0);
+        let value = arrow::util::display::array_value_to_string(col, 0)
+            .map_err(|e| EngineError::InvalidData(format!("poll result conversion failed: {e}")))?;
+        Ok(value)
     }
 
     /// Returns when the table was last refreshed, if it is cached.
@@ -360,6 +437,25 @@ impl Engine {
     /// cached.
     pub fn needs_refresh(&self, table_name: &str, max_age: std::time::Duration) -> bool {
         self.cache.is_stale(table_name, max_age)
+    }
+
+    /// Returns `true` if the table should be refreshed according to its
+    /// local (non-I/O) strategies.
+    ///
+    /// `SourceQuery` strategies are not evaluated here (they require async
+    /// I/O). Use [`refresh_stale`](Self::refresh_stale) for full evaluation.
+    pub fn needs_refresh_by_strategy(&self, table_name: &str) -> bool {
+        match self.model.table(table_name) {
+            Ok(t) if t.is_in_memory() => {
+                let strategies = t.refresh_strategies();
+                if strategies.is_empty() {
+                    !self.cache.contains(table_name)
+                } else {
+                    self.cache.should_refresh(table_name, strategies)
+                }
+            }
+            _ => false,
+        }
     }
 
     /// Returns a reference to the in-memory cache for inspection.
@@ -412,12 +508,13 @@ impl Engine {
                 EngineError::InvalidData(format!("Arrow IPC finish failed: {e}"))
             })?;
 
-            // Record metadata: age in milliseconds and schema hash.
+            // Record metadata: age in milliseconds, schema hash, and fingerprint.
             let age_ms = self
                 .cache
                 .age(table_name)
                 .map(|d| d.as_millis() as u64)
                 .unwrap_or(0);
+            let fingerprint = self.cache.fingerprint(table_name);
 
             tables_meta.insert(
                 table_name.to_string(),
@@ -425,6 +522,7 @@ impl Engine {
                     "age_ms": age_ms,
                     "schema_hash": table.schema_hash(),
                     "row_count": batch.num_rows(),
+                    "fingerprint": fingerprint,
                 }),
             );
         }
@@ -541,6 +639,12 @@ impl Engine {
             let age = std::time::Duration::from_millis(age_ms);
 
             self.cache.store_with_age(table_name, batch, age)?;
+
+            // Restore fingerprint if present.
+            if let Some(fp) = entry_meta.get("fingerprint").and_then(|v| v.as_str()) {
+                self.cache.set_fingerprint(table_name, fp.to_string());
+            }
+
             loaded.push(table_name.clone());
         }
 
