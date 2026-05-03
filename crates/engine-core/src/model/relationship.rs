@@ -34,6 +34,27 @@ impl JoinOperator {
             Self::LessThanOrEqual => "<=",
         }
     }
+
+    /// Returns the SQL aggregate function to compute the boundary value
+    /// for this operator on the **dimension** side of a non-equi relationship.
+    ///
+    /// When a non-equi relationship is used with a GROUP BY on the dimension,
+    /// the DAX semantics are: for each group, a fact row is included if it
+    /// matches *any* dimension row in that group. This translates to checking
+    /// the fact column against a boundary aggregate of the dimension column.
+    ///
+    /// - `<=` → fact_col <= MAX(dim_col)  → boundary is `MAX`
+    /// - `<`  → fact_col <  MAX(dim_col)  → boundary is `MAX`
+    /// - `>=` → fact_col >= MIN(dim_col)  → boundary is `MIN`
+    /// - `>`  → fact_col >  MIN(dim_col)  → boundary is `MIN`
+    /// - `=`  → not applicable (use equi-join instead)
+    pub fn boundary_aggregate(&self) -> &'static str {
+        match self {
+            Self::LessThan | Self::LessThanOrEqual => "MAX",
+            Self::GreaterThan | Self::GreaterThanOrEqual => "MIN",
+            Self::Equal => "MIN", // Should not be called for equi-joins.
+        }
+    }
 }
 
 /// A single condition in a relationship join.
@@ -404,6 +425,64 @@ impl Relationship {
             self.cardinality,
             Cardinality::ManyToOne | Cardinality::OneToOne
         ) && self.is_equi_only()
+    }
+
+    /// Try to build a scalar boundary clause instead of a correlated `EXISTS`.
+    ///
+    /// For relationships with a **single** non-equi condition, the correlated
+    /// `EXISTS` subquery can be replaced by a scalar boundary check that is
+    /// orders of magnitude faster:
+    ///
+    /// ```text
+    /// -- Instead of (O(n*m) correlated scan):
+    /// WHERE EXISTS (SELECT 1 FROM dim AS __d WHERE fact."col" <= __d."col")
+    ///
+    /// -- Use (O(n + m) scalar subquery):
+    /// WHERE fact."col" <= (SELECT MAX(__d."col") FROM dim AS __d)
+    /// ```
+    ///
+    /// Returns `None` when the optimization is not applicable:
+    /// - Multiple conditions (e.g., BETWEEN needs both conditions on the same row)
+    /// - All conditions are equality (use equi-join instead)
+    ///
+    /// `dim_filters` are optional additional WHERE conditions on the dimension
+    /// table (applied inside the scalar subquery).
+    pub fn build_boundary_clause(
+        &self,
+        fact_alias: &str,
+        dim_table: &str,
+        fact_is_from: bool,
+        dim_filters: &[String],
+    ) -> Option<String> {
+        // Only optimize single-condition non-equi relationships.
+        // Multiple conditions may require both to be satisfied by the SAME row,
+        // which a per-condition scalar aggregate cannot guarantee.
+        if self.conditions.len() != 1 {
+            return None;
+        }
+        let cond = &self.conditions[0];
+        if cond.operator == JoinOperator::Equal {
+            return None;
+        }
+
+        let (fact_col, dim_col) = if fact_is_from {
+            (cond.from_column(), cond.to_column())
+        } else {
+            (cond.to_column(), cond.from_column())
+        };
+
+        let agg = cond.operator.boundary_aggregate();
+
+        let dim_where = if dim_filters.is_empty() {
+            String::new()
+        } else {
+            format!(" WHERE {}", dim_filters.join(" AND "))
+        };
+
+        Some(format!(
+            "{fact_alias}.\"{fact_col}\" {} (SELECT {agg}(__d.\"{dim_col}\") FROM {dim_table} AS __d{dim_where})",
+            cond.operator.as_sql()
+        ))
     }
 
     /// Build an `EXISTS` subquery for semi-join filter propagation.
@@ -826,6 +905,97 @@ mod tests {
             clause,
             r#"EXISTS (SELECT 1 FROM sales AS __d WHERE products."id" = __d."pid")"#
         );
+    }
+
+    // --- build_boundary_clause tests ---
+
+    #[test]
+    fn boundary_clause_single_lte_condition() {
+        let rel = Relationship::many_to_many(
+            "Sales_Date",
+            "Sales",
+            "Dates",
+            vec![JoinCondition::new(
+                "order_date",
+                "datekey",
+                JoinOperator::LessThanOrEqual,
+            )],
+        );
+        let clause = rel.build_boundary_clause("sales", "dates", true, &[]);
+        assert_eq!(
+            clause,
+            Some(
+                r#"sales."order_date" <= (SELECT MAX(__d."datekey") FROM dates AS __d)"#.to_string()
+            )
+        );
+    }
+
+    #[test]
+    fn boundary_clause_single_gte_condition() {
+        let rel = Relationship::many_to_many(
+            "Sales_Date",
+            "Sales",
+            "Dates",
+            vec![JoinCondition::new(
+                "order_date",
+                "start_date",
+                JoinOperator::GreaterThanOrEqual,
+            )],
+        );
+        let clause = rel.build_boundary_clause("sales", "dates", true, &[]);
+        assert_eq!(
+            clause,
+            Some(
+                r#"sales."order_date" >= (SELECT MIN(__d."start_date") FROM dates AS __d)"#
+                    .to_string()
+            )
+        );
+    }
+
+    #[test]
+    fn boundary_clause_with_dim_filters() {
+        let rel = Relationship::many_to_many(
+            "Sales_Date",
+            "Sales",
+            "Dates",
+            vec![JoinCondition::new(
+                "order_date",
+                "datekey",
+                JoinOperator::LessThanOrEqual,
+            )],
+        );
+        let filters = vec![r#"__d."year" = '2024'"#.to_string()];
+        let clause = rel.build_boundary_clause("sales", "dates", true, &filters);
+        assert_eq!(
+            clause,
+            Some(
+                r#"sales."order_date" <= (SELECT MAX(__d."datekey") FROM dates AS __d WHERE __d."year" = '2024')"#.to_string()
+            )
+        );
+    }
+
+    #[test]
+    fn boundary_clause_returns_none_for_multiple_conditions() {
+        let rel = Relationship::many_to_many(
+            "Sales_Periods",
+            "Sales",
+            "Periods",
+            vec![
+                JoinCondition::new("order_date", "start_date", JoinOperator::GreaterThanOrEqual),
+                JoinCondition::new("order_date", "end_date", JoinOperator::LessThanOrEqual),
+            ],
+        );
+        assert!(rel
+            .build_boundary_clause("sales", "periods", true, &[])
+            .is_none());
+    }
+
+    #[test]
+    fn boundary_clause_returns_none_for_equi_join() {
+        let rel = Relationship::many_to_one("R", "Sales", "pid", "Products", "id");
+        assert!(rel
+            .build_boundary_clause("sales", "products", true, &[])
+            .is_none());
     }
 
     #[test]

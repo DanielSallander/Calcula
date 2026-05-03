@@ -66,8 +66,8 @@ pub use engine_core::compute::plan::{
 pub use engine_core::error::{EngineError, EngineResult};
 pub use engine_core::model::{
     CalculatedColumn, Cardinality, ClearTarget, Column, ContextDefinition, ContextOp, DataModel,
-    DataModelBuilder, FilterPropagation, GlobalVariable, JoinCondition, JoinOperator, Relationship,
-    RefreshStrategy, StorageMode, Table, TableVariable,
+    DataModelBuilder, FilterPropagation, GlobalVariable, JoinCondition, JoinOperator,
+    RefreshStrategy, Relationship, StorageMode, Table, TableVariable,
 };
 pub use engine_core::store::{ColumnStore, InMemoryCache, TableData};
 pub use engine_core::types::{DataType, TableColumn, Value};
@@ -348,11 +348,8 @@ impl Engine {
                 } else {
                     self.cache.should_refresh(t.name(), strategies)
                 };
-                let io_strategies: Vec<RefreshStrategy> = t
-                    .io_refresh_strategies()
-                    .into_iter()
-                    .cloned()
-                    .collect();
+                let io_strategies: Vec<RefreshStrategy> =
+                    t.io_refresh_strategies().into_iter().cloned().collect();
                 (t.name().to_string(), locally_stale, io_strategies)
             })
             .collect();
@@ -376,8 +373,7 @@ impl Engine {
                                 // Fingerprint changed (or first poll) → refresh.
                                 stale_tables.push(table_name.clone());
                                 // Store the new fingerprint after refresh.
-                                self.cache
-                                    .set_fingerprint(table_name, new_fingerprint);
+                                self.cache.set_fingerprint(table_name, new_fingerprint);
                                 break; // No need to check more strategies.
                             }
                         }
@@ -398,11 +394,7 @@ impl Engine {
 
     /// Run a `SourceQuery` poll SQL against a connector and return the scalar
     /// result as a string.
-    async fn poll_source_query(
-        &self,
-        connector_table: &str,
-        sql: &str,
-    ) -> EngineResult<String> {
+    async fn poll_source_query(&self, connector_table: &str, sql: &str) -> EngineResult<String> {
         let connector = self
             .registry
             .connector_for(connector_table)
@@ -501,12 +493,12 @@ impl Engine {
             let mut writer = FileWriter::try_new(file, &batch.schema()).map_err(|e| {
                 EngineError::InvalidData(format!("Arrow IPC writer init failed: {e}"))
             })?;
-            writer.write(batch).map_err(|e| {
-                EngineError::InvalidData(format!("Arrow IPC write failed: {e}"))
-            })?;
-            writer.finish().map_err(|e| {
-                EngineError::InvalidData(format!("Arrow IPC finish failed: {e}"))
-            })?;
+            writer
+                .write(batch)
+                .map_err(|e| EngineError::InvalidData(format!("Arrow IPC write failed: {e}")))?;
+            writer
+                .finish()
+                .map_err(|e| EngineError::InvalidData(format!("Arrow IPC finish failed: {e}")))?;
 
             // Record metadata: age in milliseconds, schema hash, and fingerprint.
             let age_ms = self
@@ -530,9 +522,8 @@ impl Engine {
         // Write metadata.json.
         let meta = json!({ "tables": tables_meta });
         let meta_path = dir.join("metadata.json");
-        let meta_json = serde_json::to_string_pretty(&meta).map_err(|e| {
-            EngineError::InvalidData(format!("metadata serialization failed: {e}"))
-        })?;
+        let meta_json = serde_json::to_string_pretty(&meta)
+            .map_err(|e| EngineError::InvalidData(format!("metadata serialization failed: {e}")))?;
         std::fs::write(&meta_path, meta_json).map_err(|e| {
             EngineError::InvalidData(format!(
                 "failed to write metadata '{}': {e}",
@@ -569,9 +560,8 @@ impl Engine {
                 meta_path.display()
             ))
         })?;
-        let meta: serde_json::Value = serde_json::from_str(&meta_json).map_err(|e| {
-            EngineError::InvalidData(format!("metadata parse failed: {e}"))
-        })?;
+        let meta: serde_json::Value = serde_json::from_str(&meta_json)
+            .map_err(|e| EngineError::InvalidData(format!("metadata parse failed: {e}")))?;
 
         let tables_meta = match meta.get("tables").and_then(|v| v.as_object()) {
             Some(m) => m,
@@ -961,9 +951,7 @@ mod tests {
                     .unwrap()
                     .with_storage_mode(StorageMode::InMemory),
             )
-            .add_table(
-                Table::new("Direct", vec![Column::new("id", DataType::Int64)]).unwrap(),
-            )
+            .add_table(Table::new("Direct", vec![Column::new("id", DataType::Int64)]).unwrap())
             .build()
             .unwrap();
 
@@ -974,8 +962,8 @@ mod tests {
             ArrowDataType::Int64,
             true,
         )]));
-        let batch = RecordBatch::try_new(schema, vec![Arc::new(Int64Array::from(vec![1]))])
-            .unwrap();
+        let batch =
+            RecordBatch::try_new(schema, vec![Arc::new(Int64Array::from(vec![1]))]).unwrap();
         engine.cache.store("InMem", batch.clone()).unwrap();
         engine.cache.store("Direct", batch).unwrap();
 

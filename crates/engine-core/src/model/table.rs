@@ -260,10 +260,9 @@ mod tests {
 
     #[test]
     fn with_refresh_strategy_adds_strategy() {
-        let table = make_table("t")
-            .with_refresh_strategy(RefreshStrategy::ContainsCurrentDate {
-                column: "date".to_string(),
-            });
+        let table = make_table("t").with_refresh_strategy(RefreshStrategy::ContainsCurrentDate {
+            column: "date".to_string(),
+        });
         let strategies = table.refresh_strategies();
         assert_eq!(strategies.len(), 1);
         assert!(matches!(
@@ -279,10 +278,7 @@ mod tests {
             .with_refresh_strategy(RefreshStrategy::ContainsCurrentDate {
                 column: "date".to_string(),
             })
-            .with_refresh_strategy(RefreshStrategy::DailyAfter {
-                hour: 6,
-                minute: 0,
-            });
+            .with_refresh_strategy(RefreshStrategy::DailyAfter { hour: 6, minute: 0 });
         assert_eq!(table.refresh_strategies().len(), 3);
     }
 
@@ -356,15 +352,8 @@ mod tests {
     #[test]
     fn requires_io_only_for_source_query() {
         assert!(!RefreshStrategy::Interval { secs: 60 }.requires_io());
-        assert!(!RefreshStrategy::ContainsCurrentDate {
-            column: "d".into()
-        }
-        .requires_io());
-        assert!(!RefreshStrategy::DailyAfter {
-            hour: 6,
-            minute: 0
-        }
-        .requires_io());
+        assert!(!RefreshStrategy::ContainsCurrentDate { column: "d".into() }.requires_io());
+        assert!(!RefreshStrategy::DailyAfter { hour: 6, minute: 0 }.requires_io());
         assert!(RefreshStrategy::SourceQuery {
             sql: "SELECT 1".into(),
             source_table: None,

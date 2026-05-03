@@ -1613,6 +1613,64 @@ impl Expression {
                 order_by: order_by.clone(),
                 partition_by: partition_by.clone(),
             },
+            // Context operations: recurse into inner expression.
+            Expression::Keep {
+                expr,
+                filters,
+                variables,
+                conditions,
+                in_predicates,
+            } => Expression::Keep {
+                expr: Box::new(expr.substitute_vars(env)),
+                filters: filters.clone(),
+                variables: variables.clone(),
+                conditions: conditions.iter().map(|c| c.substitute_vars(env)).collect(),
+                in_predicates: in_predicates.clone(),
+            },
+            Expression::Clear { expr, targets } => Expression::Clear {
+                expr: Box::new(expr.substitute_vars(env)),
+                targets: targets.clone(),
+            },
+            Expression::Reset { expr } => Expression::Reset {
+                expr: Box::new(expr.substitute_vars(env)),
+            },
+            Expression::ClearInner { expr, targets } => Expression::ClearInner {
+                expr: Box::new(expr.substitute_vars(env)),
+                targets: targets.clone(),
+            },
+            Expression::ClearOuter { expr, targets } => Expression::ClearOuter {
+                expr: Box::new(expr.substitute_vars(env)),
+                targets: targets.clone(),
+            },
+            Expression::ResetInner { expr } => Expression::ResetInner {
+                expr: Box::new(expr.substitute_vars(env)),
+            },
+            Expression::ResetOuter { expr } => Expression::ResetOuter {
+                expr: Box::new(expr.substitute_vars(env)),
+            },
+            Expression::Traverse { expr, path } => Expression::Traverse {
+                expr: Box::new(expr.substitute_vars(env)),
+                path: path.clone(),
+            },
+            Expression::Using { expr, context_name } => Expression::Using {
+                expr: Box::new(expr.substitute_vars(env)),
+                context_name: context_name.clone(),
+            },
+            Expression::UseRelationship {
+                expr,
+                relationship_name,
+            } => Expression::UseRelationship {
+                expr: Box::new(expr.substitute_vars(env)),
+                relationship_name: relationship_name.clone(),
+            },
+            Expression::KeepIn { expr, predicates } => Expression::KeepIn {
+                expr: Box::new(expr.substitute_vars(env)),
+                predicates: predicates.clone(),
+            },
+            Expression::InList { expr, values } => Expression::InList {
+                expr: Box::new(expr.substitute_vars(env)),
+                values: values.iter().map(|v| v.substitute_vars(env)).collect(),
+            },
             // Leaf expressions that don't contain ColumnRef — return as-is.
             _ => self.clone(),
         }
@@ -2477,6 +2535,45 @@ pub fn has_measure_ref(expr: &Expression) -> bool {
         Expression::Window { inner, .. }
         | Expression::Offset { inner, .. }
         | Expression::Index { inner, .. } => has_measure_ref(inner),
+        Expression::SafeDivide {
+            numerator,
+            denominator,
+            alternate,
+        } => {
+            has_measure_ref(numerator)
+                || has_measure_ref(denominator)
+                || alternate.as_ref().is_some_and(|a| has_measure_ref(a))
+        }
+        Expression::If {
+            condition,
+            then_expr,
+            else_expr,
+        } => has_measure_ref(condition) || has_measure_ref(then_expr) || has_measure_ref(else_expr),
+        Expression::Switch {
+            expr,
+            cases,
+            default,
+        } => {
+            has_measure_ref(expr)
+                || cases
+                    .iter()
+                    .any(|(v, r)| has_measure_ref(v) || has_measure_ref(r))
+                || default.as_ref().is_some_and(|d| has_measure_ref(d))
+        }
+        Expression::Coalesce(exprs) => exprs.iter().any(has_measure_ref),
+        Expression::ScalarFunc { args, .. } | Expression::TextFunc { args, .. } => {
+            args.iter().any(has_measure_ref)
+        }
+        Expression::InList { expr, values } => {
+            has_measure_ref(expr) || values.iter().any(has_measure_ref)
+        }
+        Expression::Query { aggregates, .. } => aggregates.iter().any(|(e, _)| has_measure_ref(e)),
+        Expression::HasOneValue { column } | Expression::FirstValue { column, .. } => {
+            has_measure_ref(column)
+        }
+        Expression::SelectedValue { column, alternate } => {
+            has_measure_ref(column) || alternate.as_ref().is_some_and(|a| has_measure_ref(a))
+        }
         _ => false,
     }
 }
@@ -2639,6 +2736,105 @@ fn expand_measure_refs_inner(
             position: *position,
             order_by: order_by.clone(),
             partition_by: partition_by.clone(),
+        }),
+        Expression::SafeDivide {
+            numerator,
+            denominator,
+            alternate,
+        } => Ok(Expression::SafeDivide {
+            numerator: Box::new(expand_measure_refs_inner(numerator, model, visited)?),
+            denominator: Box::new(expand_measure_refs_inner(denominator, model, visited)?),
+            alternate: alternate
+                .as_ref()
+                .map(|a| expand_measure_refs_inner(a, model, visited))
+                .transpose()?
+                .map(Box::new),
+        }),
+        Expression::If {
+            condition,
+            then_expr,
+            else_expr,
+        } => Ok(Expression::If {
+            condition: Box::new(expand_measure_refs_inner(condition, model, visited)?),
+            then_expr: Box::new(expand_measure_refs_inner(then_expr, model, visited)?),
+            else_expr: Box::new(expand_measure_refs_inner(else_expr, model, visited)?),
+        }),
+        Expression::Switch {
+            expr: switch_expr,
+            cases,
+            default,
+        } => {
+            let expanded_cases = cases
+                .iter()
+                .map(|(v, r)| {
+                    Ok((
+                        expand_measure_refs_inner(v, model, visited)?,
+                        expand_measure_refs_inner(r, model, visited)?,
+                    ))
+                })
+                .collect::<crate::error::EngineResult<Vec<_>>>()?;
+            Ok(Expression::Switch {
+                expr: Box::new(expand_measure_refs_inner(switch_expr, model, visited)?),
+                cases: expanded_cases,
+                default: default
+                    .as_ref()
+                    .map(|d| expand_measure_refs_inner(d, model, visited))
+                    .transpose()?
+                    .map(Box::new),
+            })
+        }
+        Expression::Coalesce(exprs) => Ok(Expression::Coalesce(
+            exprs
+                .iter()
+                .map(|e| expand_measure_refs_inner(e, model, visited))
+                .collect::<crate::error::EngineResult<Vec<_>>>()?,
+        )),
+        Expression::ScalarFunc { function, args } => Ok(Expression::ScalarFunc {
+            function: *function,
+            args: args
+                .iter()
+                .map(|a| expand_measure_refs_inner(a, model, visited))
+                .collect::<crate::error::EngineResult<Vec<_>>>()?,
+        }),
+        Expression::TextFunc { function, args } => Ok(Expression::TextFunc {
+            function: *function,
+            args: args
+                .iter()
+                .map(|a| expand_measure_refs_inner(a, model, visited))
+                .collect::<crate::error::EngineResult<Vec<_>>>()?,
+        }),
+        Expression::Comparison { left, op, right } => Ok(Expression::Comparison {
+            left: Box::new(expand_measure_refs_inner(left, model, visited)?),
+            op: *op,
+            right: Box::new(expand_measure_refs_inner(right, model, visited)?),
+        }),
+        Expression::And(left, right) => Ok(Expression::And(
+            Box::new(expand_measure_refs_inner(left, model, visited)?),
+            Box::new(expand_measure_refs_inner(right, model, visited)?),
+        )),
+        Expression::Or(left, right) => Ok(Expression::Or(
+            Box::new(expand_measure_refs_inner(left, model, visited)?),
+            Box::new(expand_measure_refs_inner(right, model, visited)?),
+        )),
+        Expression::Xor(left, right) => Ok(Expression::Xor(
+            Box::new(expand_measure_refs_inner(left, model, visited)?),
+            Box::new(expand_measure_refs_inner(right, model, visited)?),
+        )),
+        Expression::Not(inner) => Ok(Expression::Not(Box::new(expand_measure_refs_inner(
+            inner, model, visited,
+        )?))),
+        Expression::IsBlank(inner) => Ok(Expression::IsBlank(Box::new(expand_measure_refs_inner(
+            inner, model, visited,
+        )?))),
+        Expression::InList {
+            expr: inner,
+            values,
+        } => Ok(Expression::InList {
+            expr: Box::new(expand_measure_refs_inner(inner, model, visited)?),
+            values: values
+                .iter()
+                .map(|v| expand_measure_refs_inner(v, model, visited))
+                .collect::<crate::error::EngineResult<Vec<_>>>()?,
         }),
         // Leaf nodes and anything without MeasureRef pass through unchanged.
         _ => Ok(expr.clone()),
@@ -3135,7 +3331,10 @@ pub fn infer_fact_table(expr: &Expression) -> Option<String> {
         Expression::BinaryOp { left, right, .. }
         | Expression::Comparison { left, right, .. }
         | Expression::And(left, right)
-        | Expression::Or(left, right) => infer_fact_table(left).or_else(|| infer_fact_table(right)),
+        | Expression::Or(left, right)
+        | Expression::Xor(left, right) => {
+            infer_fact_table(left).or_else(|| infer_fact_table(right))
+        }
         Expression::Not(inner) | Expression::IsBlank(inner) => infer_fact_table(inner),
         Expression::Keep { expr, .. }
         | Expression::Clear { expr, .. }
@@ -3211,6 +3410,9 @@ pub fn infer_fact_table(expr: &Expression) -> Option<String> {
         | Expression::Index {
             inner, order_by, ..
         } => infer_fact_table(inner).or_else(|| order_by.first().map(|(table, _)| table.clone())),
+        Expression::InList { expr, values } => {
+            infer_fact_table(expr).or_else(|| values.iter().find_map(infer_fact_table))
+        }
         _ => None,
     }
 }

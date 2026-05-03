@@ -132,11 +132,13 @@ impl QueryExecutor {
                     ))
                 })?;
 
+                let filter_start = Instant::now();
                 let filtered_batch = if request.filters.is_empty() {
                     batch.clone()
                 } else {
                     filter_cached_batch(batch, &request.filters).await?
                 };
+                let filter_elapsed = filter_start.elapsed();
 
                 let row_count = filtered_batch.num_rows();
                 inmemory_indices.insert(i);
@@ -144,7 +146,7 @@ impl QueryExecutor {
                     table_name.clone(),
                     vec![filtered_batch],
                     row_count,
-                    std::time::Duration::ZERO,
+                    filter_elapsed,
                 ));
             }
         }
@@ -422,6 +424,7 @@ impl QueryExecutor {
                 &normal_measures,
                 group_by,
                 model,
+                plan,
             )
             .await;
         }
@@ -432,7 +435,8 @@ impl QueryExecutor {
 
         // If we have window measures, evaluate them via two-stage window execution.
         if !window_measures.is_empty() {
-            return Self::execute_window_measures(&ctx, &window_measures, group_by, model).await;
+            return Self::execute_window_measures(&ctx, &window_measures, group_by, model, plan)
+                .await;
         }
 
         // Partition measures by home table to detect multi-fact-table queries.
@@ -490,18 +494,77 @@ impl QueryExecutor {
             group_parts.push(qualified);
         }
 
+        // Detect measures with USERELATIONSHIP overrides that target a GROUP BY
+        // dim through an unsafe (non-equi, ManyToMany) relationship. These
+        // measures need separate pre-aggregate evaluation because they use a
+        // fundamentally different join to the GROUP BY dimension.
+        let group_by_tables: std::collections::HashSet<&str> =
+            group_by.iter().map(|d| d.table.as_str()).collect();
+        let resolver = ContextResolver::new(model);
+
+        let mut unsafe_override_measures: Vec<&Measure> = Vec::new();
+        let mut normal_measures: Vec<&Measure> = Vec::new();
+
+        for m in measures {
+            let ref_expanded = expand_measure_refs(m.expression(), model)?;
+            let expanded = expand_global_variables(&ref_expanded, model);
+            let (_stripped, eval_ctx) = resolver.resolve(&expanded)?;
+
+            let has_unsafe_group_by_override =
+                eval_ctx.relationship_overrides.iter().any(|rel_name| {
+                    model
+                        .relationship(rel_name)
+                        .map(|rel| {
+                            // Check if the override targets a GROUP BY dim with unsafe relationship.
+                            let dim_table = if rel.from_table() == fact_model_name {
+                                rel.to_table()
+                            } else if rel.to_table() == fact_model_name {
+                                rel.from_table()
+                            } else {
+                                return false;
+                            };
+                            !rel.is_safe_for_direct_join() && group_by_tables.contains(dim_table)
+                        })
+                        .unwrap_or(false)
+                });
+
+            if has_unsafe_group_by_override {
+                unsafe_override_measures.push(m);
+            } else {
+                normal_measures.push(m);
+            }
+        }
+
+        // If we have unsafe override measures, split: evaluate normal measures
+        // via the standard path, unsafe override measures via pre-aggregation,
+        // then combine via FULL OUTER JOIN.
+        if !unsafe_override_measures.is_empty() {
+            return Self::execute_split_override_measures(
+                &ctx,
+                &normal_measures,
+                &unsafe_override_measures,
+                group_by,
+                lookup_specs,
+                model,
+                plan,
+                fact_table,
+                fact_model_name,
+            )
+            .await;
+        }
+
+        let measures = &normal_measures[..];
+
         // Resolve context operations for all measures.
         // Per-measure KEEP filters are embedded as CASE WHEN inside the aggregate
         // so they don't affect other measures. Only truly global filters (from
         // query-level WHERE) go into the WHERE clause.
-        let resolver = ContextResolver::new(model);
         // Tables that need JOINs due to context filters.
         let mut context_join_tables: Vec<String> = Vec::new();
         // Measures using CASE WHEN filters — need HAVING to exclude NULL groups.
         let mut case_when_measures: Vec<String> = Vec::new();
         // Aliased JOINs from USERELATIONSHIP overrides.
-        // Each entry: (alias, on_clause) — added after standard JOINs.
-        let mut override_joins: Vec<(String, String)> = Vec::new();
+        let mut override_joins: Vec<OverrideJoinEntry> = Vec::new();
 
         for measure in measures {
             let name = measure.name();
@@ -670,10 +733,18 @@ impl QueryExecutor {
                         &mut join_descriptions,
                     )?;
                 } else {
-                    // Unsafe relationship: use EXISTS instead of JOIN.
+                    // Unsafe relationship: prefer scalar boundary check,
+                    // fall back to EXISTS subquery.
                     let fact_is_from = rel.from_table() == fact_model_name;
-                    let exists = rel.build_exists_clause(fact_table, &dim_lower, fact_is_from, &[]);
-                    exists_conditions.push(exists);
+                    if let Some(boundary) =
+                        rel.build_boundary_clause(fact_table, &dim_lower, fact_is_from, &[])
+                    {
+                        exists_conditions.push(boundary);
+                    } else {
+                        let exists =
+                            rel.build_exists_clause(fact_table, &dim_lower, fact_is_from, &[]);
+                        exists_conditions.push(exists);
+                    }
                     // Mark as handled so we don't try to JOIN it again.
                     joined_tables.insert(dim_lower);
                 }
@@ -692,17 +763,48 @@ impl QueryExecutor {
         // These duplicate a dimension table under a different alias with a
         // different ON clause so that measures using the override see the
         // rows matched by the inactive relationship.
-        for (alias, on_clause) in &override_joins {
-            if !joined_tables.contains(alias) {
-                // The source table name is the alias prefix before "__".
-                let source_table = alias.split("__").next().unwrap_or(alias);
-                sql.push_str(&format!(" JOIN {source_table} AS {alias} ON {on_clause}"));
-                join_descriptions.push(on_clause.clone());
-                joined_tables.insert(alias.clone());
+        //
+        // For unsafe relationships (ManyToMany, non-equi), use EXISTS
+        // subquery instead of JOIN to avoid row explosion.
+        //
+        // Override joins are for measure context (USERELATIONSHIP), NOT for
+        // GROUP BY. The GROUP BY is served by the primary join. So we never
+        // check group_by_tables here — only the relationship safety matters.
+        for entry in &override_joins {
+            if joined_tables.contains(&entry.alias) {
+                continue;
+            }
+            if entry.is_safe {
+                // Safe (ManyToOne equi): direct JOIN won't cause row explosion.
+                sql.push_str(&format!(
+                    " JOIN {} AS {} ON {}",
+                    entry.source_table, entry.alias, entry.on_clause
+                ));
+                join_descriptions.push(entry.on_clause.clone());
+                joined_tables.insert(entry.alias.clone());
+            } else if let Some(ref boundary) = entry.boundary_clause {
+                // Single-condition inequality: use scalar boundary check
+                // instead of expensive correlated EXISTS.
+                exists_conditions.push(boundary.clone());
+                joined_tables.insert(entry.alias.clone());
+            } else {
+                // Unsafe (ManyToMany, non-equi): use EXISTS subquery.
+                // Rewrite the ON clause as an EXISTS condition.
+                // The ON clause references fact_table and alias columns;
+                // for EXISTS we need to reference the source table inside a subquery.
+                let exists = format!(
+                    "EXISTS (SELECT 1 FROM {} AS __d WHERE {})",
+                    entry.source_table,
+                    entry
+                        .on_clause
+                        .replace(&format!("{}.", entry.alias), "__d.")
+                );
+                exists_conditions.push(exists);
+                joined_tables.insert(entry.alias.clone());
             }
         }
 
-        // WHERE clause for EXISTS semi-join conditions (unsafe relationships).
+        // WHERE clause for EXISTS/boundary semi-join conditions (unsafe relationships).
         if !exists_conditions.is_empty() {
             sql.push_str(" WHERE ");
             sql.push_str(&exists_conditions.join(" AND "));
@@ -795,8 +897,14 @@ impl QueryExecutor {
             plan_node.add_child(agg_node);
 
             if !lookup_specs.is_empty() {
-                let batches =
-                    Self::apply_lookup_specs(&ctx, batches, lookup_specs, group_by).await?;
+                let batches = Self::apply_lookup_specs(
+                    &ctx,
+                    batches,
+                    lookup_specs,
+                    group_by,
+                    Some(plan_node),
+                )
+                .await?;
                 Ok(batches)
             } else {
                 Ok(batches)
@@ -808,7 +916,7 @@ impl QueryExecutor {
 
             if !lookup_specs.is_empty() {
                 let batches =
-                    Self::apply_lookup_specs(&ctx, batches, lookup_specs, group_by).await?;
+                    Self::apply_lookup_specs(&ctx, batches, lookup_specs, group_by, None).await?;
                 Ok(batches)
             } else {
                 Ok(batches)
@@ -1078,8 +1186,10 @@ impl QueryExecutor {
         }
 
         // Execute Stage 1 and register the result.
+        let s1_start = Instant::now();
         let s1_df = ctx.sql(&s1_sql).await?;
         let s1_batches = s1_df.collect().await?;
+        let s1_elapsed = s1_start.elapsed();
 
         if s1_batches.is_empty() {
             return Ok(vec![RecordBatch::new_empty(
@@ -1140,26 +1250,398 @@ impl QueryExecutor {
             s2_sql.push_str(&s2_group.join(", "));
         }
 
+        // Execute Stage 2.
+        let s2_start = Instant::now();
+        let s2_df = ctx.sql(&s2_sql).await?;
+        let batches = s2_df.collect().await?;
+        let s2_elapsed = s2_start.elapsed();
+
         // Record plan info.
         if let Some(ref mut plan_node) = plan {
+            let s1_rows: usize = s1_batches.iter().map(|b| b.num_rows()).sum();
             let s1_node = PlanNode::new(PlanOperation::LocalAggregation, "Pre-Aggregate (Stage 1)")
-                .with_property("sql", PlanValue::Text(s1_sql));
+                .with_property("sql", PlanValue::Text(s1_sql))
+                .with_property("result_rows", PlanValue::Number(s1_rows as f64))
+                .with_duration(s1_elapsed);
             plan_node.add_child(s1_node);
 
+            let s2_rows: usize = batches.iter().map(|b| b.num_rows()).sum();
             let s2_node = PlanNode::new(
                 PlanOperation::DataFusionExecution,
                 "Join Unsafe Dims (Stage 2)",
             )
-            .with_property("sql", PlanValue::Text(s2_sql.clone()));
+            .with_property("sql", PlanValue::Text(s2_sql.clone()))
+            .with_property("result_rows", PlanValue::Number(s2_rows as f64))
+            .with_duration(s2_elapsed);
             plan_node.add_child(s2_node);
         }
 
-        // Execute Stage 2.
-        let s2_df = ctx.sql(&s2_sql).await?;
-        let batches = s2_df.collect().await?;
+        if !lookup_specs.is_empty() {
+            let batches =
+                Self::apply_lookup_specs(ctx, batches, lookup_specs, group_by, plan).await?;
+            Ok(batches)
+        } else {
+            Ok(batches)
+        }
+    }
+
+    /// Split evaluation for measures with unsafe USERELATIONSHIP overrides.
+    ///
+    /// Normal measures are evaluated via the standard local aggregation path.
+    /// Unsafe override measures are evaluated via pre-aggregation: the fact
+    /// table is pre-aggregated by its join key columns, then joined to the
+    /// override dimension. Results are combined via FULL OUTER JOIN.
+    #[allow(clippy::too_many_arguments)]
+    async fn execute_split_override_measures(
+        ctx: &SessionContext,
+        normal_measures: &[&Measure],
+        unsafe_measures: &[&Measure],
+        group_by: &[ColumnRef],
+        lookup_specs: &[crate::planner::LookupSpec],
+        model: &DataModel,
+        mut plan: Option<&mut PlanNode>,
+        fact_table: &str,
+        fact_model_name: &str,
+    ) -> QueryResult<Vec<RecordBatch>> {
+        let resolver = ContextResolver::new(model);
+
+        // --- Part A: evaluate normal measures (standard path) ---
+        let normal_table_name = "__normal";
+        let mut has_normal = false;
+
+        if !normal_measures.is_empty() {
+            let mut select_parts: Vec<String> = Vec::new();
+            let mut group_parts: Vec<String> = Vec::new();
+
+            for dim in group_by {
+                let dim_table = dim.table.to_lowercase();
+                let qualified = format!("{dim_table}.\"{}\"", dim.column);
+                select_parts.push(qualified.clone());
+                group_parts.push(qualified);
+            }
+
+            for measure in normal_measures {
+                if let Some((op, col)) = measure.expression().as_simple_aggregate() {
+                    let fact = measure.table().to_lowercase();
+                    let agg_sql = match op {
+                        AggregateOp::Sum => format!("SUM({fact}.\"{col}\")"),
+                        AggregateOp::Count => format!("COUNT({fact}.\"{col}\")"),
+                        AggregateOp::Average => format!("AVG({fact}.\"{col}\")"),
+                        AggregateOp::Min => format!("MIN({fact}.\"{col}\")"),
+                        AggregateOp::Max => format!("MAX({fact}.\"{col}\")"),
+                        AggregateOp::DistinctCount => {
+                            format!("COUNT(DISTINCT {fact}.\"{col}\")")
+                        }
+                        AggregateOp::CountRows => "COUNT(*)".to_string(),
+                    };
+                    select_parts.push(format!("{agg_sql} AS \"{}\"", measure.name()));
+                } else {
+                    let expr_sql = measure.expression().to_sql_string();
+                    select_parts.push(format!("{expr_sql} AS \"{}\"", measure.name()));
+                }
+            }
+
+            let select_clause = select_parts.join(", ");
+            let mut sql = format!("SELECT {select_clause} FROM {fact_table}");
+
+            // Join safe dims for GROUP BY.
+            let mut joined = std::collections::HashSet::new();
+            joined.insert(fact_table.to_string());
+
+            for dim in group_by {
+                let dim_lower = dim.table.to_lowercase();
+                if dim.table == fact_model_name || joined.contains(&dim_lower) {
+                    continue;
+                }
+                let rel = model.find_relationship(fact_model_name, &dim.table)?;
+                let left_is_from = rel.from_table() == fact_model_name;
+                let on_clause = rel.build_on_clause(fact_table, &dim_lower, left_is_from);
+                sql.push_str(&format!(" JOIN {dim_lower} ON {on_clause}"));
+                joined.insert(dim_lower);
+            }
+
+            if !group_parts.is_empty() {
+                sql.push_str(" GROUP BY ");
+                sql.push_str(&group_parts.join(", "));
+            }
+
+            let normal_start = Instant::now();
+            let df = ctx.sql(&sql).await?;
+            let batches = df.collect().await?;
+            let normal_elapsed = normal_start.elapsed();
+
+            if let Some(ref mut pn) = plan {
+                let result_rows: usize = batches.iter().map(|b| b.num_rows()).sum();
+                let node = PlanNode::new(PlanOperation::LocalAggregation, "Normal Measures")
+                    .with_property("sql", PlanValue::Text(sql.clone()))
+                    .with_property("result_rows", PlanValue::Number(result_rows as f64))
+                    .with_duration(normal_elapsed);
+                pn.add_child(node);
+            }
+            if !batches.is_empty() {
+                let schema = batches[0].schema();
+                let combined = concat_batches(&schema, &batches)?;
+                ctx.register_batch(normal_table_name, combined)?;
+                has_normal = true;
+            }
+        }
+
+        // --- Part B: evaluate each unsafe override measure via boundary approach ---
+        //
+        // For non-equi USERELATIONSHIP with GROUP BY on the dim, the DAX
+        // semantics are: for each group, include fact rows that match ANY
+        // dimension row in that group. For a single-condition relationship
+        // like `fact.orderdate <= dim.datekey`, this means:
+        //   "include fact rows where orderdate <= MAX(datekey in group)"
+        //
+        // We compute boundary values (MAX/MIN) per group from the dimension,
+        // then CROSS JOIN with fact and filter by the boundary. Each fact row
+        // is counted once per qualifying group.
+        let mut override_table_names: Vec<(String, String)> = Vec::new(); // (table_name, measure_name)
+
+        for (i, measure) in unsafe_measures.iter().enumerate() {
+            let ref_expanded = expand_measure_refs(measure.expression(), model)?;
+            let expanded = expand_global_variables(&ref_expanded, model);
+            let (stripped, eval_ctx) = resolver.resolve(&expanded)?;
+
+            // Find the override relationship.
+            let override_rel_name = eval_ctx.relationship_overrides.first().ok_or_else(|| {
+                crate::error::QueryError::Engine(EngineError::InvalidData(
+                    "Expected USERELATIONSHIP override".into(),
+                ))
+            })?;
+            let rel = model.relationship(override_rel_name)?;
+            let dim_table = if rel.from_table() == fact_model_name {
+                rel.to_table()
+            } else {
+                rel.from_table()
+            };
+            let dim_lower = dim_table.to_lowercase();
+            let fact_is_from = rel.from_table() == fact_model_name;
+
+            // Build boundary query: compute aggregate boundaries per GROUP BY group.
+            // For each join condition, compute the boundary (MAX or MIN) of the
+            // dim-side column grouped by the GROUP BY columns.
+            let bounds_alias = format!("__bounds_{i}");
+
+            let mut bounds_select: Vec<String> = Vec::new();
+            let mut bounds_group: Vec<String> = Vec::new();
+            let mut where_conditions: Vec<String> = Vec::new();
+
+            // GROUP BY columns from the dim table.
+            for dim in group_by {
+                if dim.table.eq_ignore_ascii_case(dim_table)
+                    || dim.table.eq_ignore_ascii_case(fact_model_name)
+                {
+                    let tbl = dim.table.to_lowercase();
+                    let qualified = format!("{tbl}.\"{}\"", dim.column);
+                    bounds_select.push(qualified.clone());
+                    bounds_group.push(qualified);
+                }
+            }
+
+            // Boundary aggregates for each join condition.
+            for (ci, cond) in rel.conditions().iter().enumerate() {
+                let dim_col = if fact_is_from {
+                    cond.to_column()
+                } else {
+                    cond.from_column()
+                };
+                let fact_col = if fact_is_from {
+                    cond.from_column()
+                } else {
+                    cond.to_column()
+                };
+                let boundary_agg = cond.operator().boundary_aggregate();
+                let boundary_alias = format!("__b_{ci}");
+                bounds_select.push(format!(
+                    "{boundary_agg}({dim_lower}.\"{dim_col}\") AS \"{boundary_alias}\""
+                ));
+
+                // Build WHERE condition for fact table against boundary.
+                let op = cond.operator().as_sql();
+                where_conditions.push(format!(
+                    "{fact_table}.\"{fact_col}\" {op} {bounds_alias}.\"{boundary_alias}\""
+                ));
+            }
+
+            let bounds_sql = format!(
+                "SELECT {} FROM {dim_lower} GROUP BY {}",
+                bounds_select.join(", "),
+                bounds_group.join(", ")
+            );
+
+            let bounds_start = Instant::now();
+            let bounds_df = ctx.sql(&bounds_sql).await?;
+            let bounds_batches = bounds_df.collect().await?;
+            let bounds_elapsed = bounds_start.elapsed();
+
+            if bounds_batches.is_empty() {
+                continue;
+            }
+
+            let bounds_schema = bounds_batches[0].schema();
+            let bounds_combined = concat_batches(&bounds_schema, &bounds_batches)?;
+            ctx.register_batch(&bounds_alias, bounds_combined)?;
+
+            // Main query: CROSS JOIN fact with bounds, filter by boundary.
+            let mut main_select: Vec<String> = Vec::new();
+            let mut main_group: Vec<String> = Vec::new();
+
+            for dim in group_by {
+                let qualified = format!("{bounds_alias}.\"{}\"", dim.column);
+                main_select.push(qualified.clone());
+                main_group.push(qualified);
+            }
+
+            // Measure aggregate.
+            let measure_name = measure.name();
+            if let Some((op, col)) = stripped.as_simple_aggregate() {
+                let col_ref = format!("{fact_table}.\"{col}\"");
+                let agg_sql = match op {
+                    AggregateOp::Sum => format!("SUM({col_ref})"),
+                    AggregateOp::Count => format!("COUNT({col_ref})"),
+                    AggregateOp::Average => format!("AVG({col_ref})"),
+                    AggregateOp::Min => format!("MIN({col_ref})"),
+                    AggregateOp::Max => format!("MAX({col_ref})"),
+                    AggregateOp::DistinctCount => format!("COUNT(DISTINCT {col_ref})"),
+                    AggregateOp::CountRows => "COUNT(*)".to_string(),
+                };
+                main_select.push(format!("{agg_sql} AS \"{measure_name}\""));
+            } else {
+                let expr_sql = stripped.to_sql_string();
+                main_select.push(format!("{expr_sql} AS \"{measure_name}\""));
+            }
+
+            let main_sql = format!(
+                "SELECT {} FROM {fact_table} CROSS JOIN {bounds_alias} WHERE {} GROUP BY {}",
+                main_select.join(", "),
+                where_conditions.join(" AND "),
+                main_group.join(", ")
+            );
+
+            let result_table = format!("__override_{i}");
+            let main_start = Instant::now();
+            let main_df = ctx.sql(&main_sql).await?;
+            let main_batches = main_df.collect().await?;
+            let main_elapsed = main_start.elapsed();
+
+            if let Some(ref mut pn) = plan {
+                let bounds_rows: usize = bounds_batches.iter().map(|b| b.num_rows()).sum();
+                let main_rows: usize = main_batches.iter().map(|b| b.num_rows()).sum();
+                let mut node = PlanNode::new(
+                    PlanOperation::LocalAggregation,
+                    format!("Boundary Override: {measure_name}"),
+                )
+                .with_property("bounds_sql", PlanValue::Text(bounds_sql))
+                .with_property(
+                    "bounds_rows",
+                    PlanValue::Number(bounds_rows as f64),
+                )
+                .with_property("main_sql", PlanValue::Text(main_sql.clone()))
+                .with_property("main_rows", PlanValue::Number(main_rows as f64));
+                // Report combined time for both stages.
+                node.duration = (bounds_elapsed + main_elapsed).into();
+                pn.add_child(node);
+            }
+
+            if !main_batches.is_empty() {
+                let schema = main_batches[0].schema();
+                let combined = concat_batches(&schema, &main_batches)?;
+                ctx.register_batch(&result_table, combined)?;
+                override_table_names.push((result_table, measure_name.to_string()));
+            }
+        }
+
+        // --- Part C: combine via FULL OUTER JOIN ---
+        let group_cols: Vec<String> = group_by
+            .iter()
+            .map(|d| format!("\"{}\"", d.column))
+            .collect();
+
+        if !has_normal && override_table_names.is_empty() {
+            return Ok(vec![RecordBatch::new_empty(
+                arrow::datatypes::SchemaRef::new(arrow::datatypes::Schema::empty()),
+            )]);
+        }
+
+        // Build the combining query.
+        let first_table = if has_normal {
+            normal_table_name.to_string()
+        } else {
+            override_table_names[0].0.clone()
+        };
+
+        // Select: all group columns from first table + all measure columns.
+        let mut combine_select: Vec<String> = group_cols
+            .iter()
+            .map(|c| format!("{first_table}.{c}"))
+            .collect();
+
+        if has_normal {
+            for m in normal_measures {
+                combine_select.push(format!("{normal_table_name}.\"{}\"", m.name()));
+            }
+        }
+
+        let start_idx = if has_normal { 0 } else { 1 };
+        for (tbl, mname) in &override_table_names[start_idx..] {
+            combine_select.push(format!("{tbl}.\"{mname}\""));
+        }
+        if !has_normal && !override_table_names.is_empty() {
+            let (tbl, mname) = &override_table_names[0];
+            combine_select.push(format!("{tbl}.\"{mname}\""));
+        }
+
+        let combine_select_clause = combine_select.join(", ");
+        let mut combine_sql = format!("SELECT {combine_select_clause} FROM {first_table}");
+
+        // FULL OUTER JOIN remaining tables.
+        let tables_to_join: Vec<&str> = if has_normal {
+            override_table_names
+                .iter()
+                .map(|(t, _)| t.as_str())
+                .collect()
+        } else {
+            override_table_names[1..]
+                .iter()
+                .map(|(t, _)| t.as_str())
+                .collect()
+        };
+
+        for join_table in &tables_to_join {
+            if group_cols.is_empty() {
+                combine_sql.push_str(&format!(" CROSS JOIN {join_table}"));
+            } else {
+                let join_conds: Vec<String> = group_cols
+                    .iter()
+                    .map(|c| format!("{first_table}.{c} = {join_table}.{c}"))
+                    .collect();
+                combine_sql.push_str(&format!(
+                    " FULL OUTER JOIN {join_table} ON {}",
+                    join_conds.join(" AND ")
+                ));
+            }
+        }
+
+        let combine_start = Instant::now();
+        let df = ctx.sql(&combine_sql).await?;
+        let batches = df.collect().await?;
+        let combine_elapsed = combine_start.elapsed();
+
+        if let Some(ref mut pn) = plan {
+            let result_rows: usize = batches.iter().map(|b| b.num_rows()).sum();
+            pn.add_child(
+                PlanNode::new(PlanOperation::MultiGroupAggregation, "Combine Override Results")
+                    .with_property("sql", PlanValue::Text(combine_sql))
+                    .with_property("result_rows", PlanValue::Number(result_rows as f64))
+                    .with_duration(combine_elapsed),
+            );
+        }
 
         if !lookup_specs.is_empty() {
-            let batches = Self::apply_lookup_specs(ctx, batches, lookup_specs, group_by).await?;
+            let batches =
+                Self::apply_lookup_specs(ctx, batches, lookup_specs, group_by, plan).await?;
             Ok(batches)
         } else {
             Ok(batches)
@@ -1208,7 +1690,7 @@ impl QueryExecutor {
             // Resolve context operations for measures in this group.
             let mut context_join_tables: Vec<String> = Vec::new();
             let mut case_when_measures: Vec<String> = Vec::new();
-            let mut override_joins: Vec<(String, String)> = Vec::new();
+            let mut override_joins: Vec<OverrideJoinEntry> = Vec::new();
 
             for measure in measures {
                 let name = measure.name();
@@ -1331,12 +1813,39 @@ impl QueryExecutor {
             }
 
             // Add aliased JOINs from USERELATIONSHIP overrides.
-            for (alias, on_clause) in &override_joins {
-                if !joined_tables.contains(alias) {
-                    let source_table = alias.split("__").next().unwrap_or(alias);
-                    sql.push_str(&format!(" JOIN {source_table} AS {alias} ON {on_clause}"));
-                    joined_tables.insert(alias.clone());
+            // Override joins are for measure context, not GROUP BY — only
+            // check relationship safety, not group_by_tables.
+            let mut mg_exists_conditions: Vec<String> = Vec::new();
+            for entry in &override_joins {
+                if joined_tables.contains(&entry.alias) {
+                    continue;
                 }
+                if entry.is_safe {
+                    sql.push_str(&format!(
+                        " JOIN {} AS {} ON {}",
+                        entry.source_table, entry.alias, entry.on_clause
+                    ));
+                    joined_tables.insert(entry.alias.clone());
+                } else if let Some(ref boundary) = entry.boundary_clause {
+                    mg_exists_conditions.push(boundary.clone());
+                    joined_tables.insert(entry.alias.clone());
+                } else {
+                    let exists = format!(
+                        "EXISTS (SELECT 1 FROM {} AS __d WHERE {})",
+                        entry.source_table,
+                        entry
+                            .on_clause
+                            .replace(&format!("{}.", entry.alias), "__d.")
+                    );
+                    mg_exists_conditions.push(exists);
+                    joined_tables.insert(entry.alias.clone());
+                }
+            }
+
+            // WHERE clause for EXISTS/boundary semi-join conditions.
+            if !mg_exists_conditions.is_empty() {
+                sql.push_str(" WHERE ");
+                sql.push_str(&mg_exists_conditions.join(" AND "));
             }
 
             // GROUP BY clause.
@@ -1356,8 +1865,10 @@ impl QueryExecutor {
 
             // Execute the group query and register result.
             let group_name = format!("__group_{group_idx}");
+            let df_start = Instant::now();
             let df = ctx.sql(&sql).await?;
             let batches = df.collect().await?;
+            let df_elapsed = df_start.elapsed();
 
             if let Some(ref mut plan_node) = plan {
                 let mut group_node = PlanNode::new(
@@ -1369,6 +1880,7 @@ impl QueryExecutor {
                     "measures",
                     PlanValue::List(measures.iter().map(|m| m.name().to_string()).collect()),
                 );
+                group_node.duration = df_elapsed.into();
                 let result_rows: usize = batches.iter().map(|b| b.num_rows()).sum();
                 group_node.add_property("result_rows", PlanValue::Number(result_rows as f64));
                 plan_node.add_child(group_node);
@@ -1415,8 +1927,23 @@ impl QueryExecutor {
                 sql.push_str(&format!(" CROSS JOIN {gt}"));
             }
 
+            let combine_start = Instant::now();
             let df = ctx.sql(&sql).await?;
             let batches = df.collect().await?;
+            let combine_elapsed = combine_start.elapsed();
+
+            if let Some(ref mut plan_node) = plan {
+                plan_node.add_child(
+                    PlanNode::new(
+                        PlanOperation::MultiGroupAggregation,
+                        "Combine measure groups (scalar)",
+                    )
+                    .with_property("sql", PlanValue::Text(sql))
+                    .with_property("groups", PlanValue::Number(measure_groups.len() as f64))
+                    .with_duration(combine_elapsed),
+                );
+            }
+
             Ok(batches)
         } else {
             // Grouped query: FULL OUTER JOIN on shared group-by columns.
@@ -1510,6 +2037,11 @@ impl QueryExecutor {
                 }
             }
 
+            let combine_start = Instant::now();
+            let df = ctx.sql(&sql).await?;
+            let batches = df.collect().await?;
+            let combine_elapsed = combine_start.elapsed();
+
             if let Some(ref mut plan_node) = plan {
                 plan_node.add_child(
                     PlanNode::new(
@@ -1517,12 +2049,11 @@ impl QueryExecutor {
                         "Combine measure groups",
                     )
                     .with_property("sql", PlanValue::Text(sql.clone()))
-                    .with_property("groups", PlanValue::Number(measure_groups.len() as f64)),
+                    .with_property("groups", PlanValue::Number(measure_groups.len() as f64))
+                    .with_duration(combine_elapsed),
                 );
             }
 
-            let df = ctx.sql(&sql).await?;
-            let batches = df.collect().await?;
             Ok(batches)
         }
     }
@@ -1538,6 +2069,7 @@ impl QueryExecutor {
         agg_batches: Vec<RecordBatch>,
         lookup_specs: &[crate::planner::LookupSpec],
         group_by: &[ColumnRef],
+        plan: Option<&mut PlanNode>,
     ) -> QueryResult<Vec<RecordBatch>> {
         if agg_batches.is_empty() {
             return Ok(agg_batches);
@@ -1594,8 +2126,26 @@ impl QueryExecutor {
             .collect();
         sql.push_str(&format!(" GROUP BY {}", group_parts.join(", ")));
 
+        let lookup_start = Instant::now();
         let df = ctx.sql(&sql).await?;
         let batches = df.collect().await?;
+        let lookup_elapsed = lookup_start.elapsed();
+
+        if let Some(plan_node) = plan {
+            let result_rows: usize = batches.iter().map(|b| b.num_rows()).sum();
+            let lookup_names: Vec<String> = lookup_specs
+                .iter()
+                .map(|s| format!("{}.{}", s.table, s.column))
+                .collect();
+            plan_node.add_child(
+                PlanNode::new(PlanOperation::DataFusionExecution, "Lookup Resolution")
+                    .with_property("sql", PlanValue::Text(sql))
+                    .with_property("lookups", PlanValue::List(lookup_names))
+                    .with_property("result_rows", PlanValue::Number(result_rows as f64))
+                    .with_duration(lookup_elapsed),
+            );
+        }
+
         Ok(batches)
     }
 
@@ -1610,6 +2160,7 @@ impl QueryExecutor {
         _normal_measures: &[&Measure],
         group_by: &[ColumnRef],
         model: &DataModel,
+        mut plan: Option<&mut PlanNode>,
     ) -> QueryResult<Vec<RecordBatch>> {
         let resolver = ContextResolver::new(model);
 
@@ -1694,7 +2245,21 @@ impl QueryExecutor {
                         // Cache hit: reuse the already-materialized batch.
                         ctx.register_batch(&binding_name.to_lowercase(), cached_batch.clone())?;
                         binding_schemas.insert(binding_name.to_lowercase(), cached_schema.clone());
+
+                        if let Some(ref mut plan_node) = plan {
+                            plan_node.add_child(
+                                PlanNode::new(
+                                    PlanOperation::DataFusionExecution,
+                                    format!("QUERY {binding_name} (cache hit)"),
+                                )
+                                .with_property(
+                                    "result_rows",
+                                    PlanValue::Number(cached_batch.num_rows() as f64),
+                                ),
+                            );
+                        }
                     } else {
+                        let mat_start = Instant::now();
                         let batch = materialize_query_in_pipeline(
                             ctx,
                             aggregates,
@@ -1704,13 +2269,29 @@ impl QueryExecutor {
                             model,
                         )
                         .await?;
+                        let mat_elapsed = mat_start.elapsed();
                         let schema = batch.schema();
+                        let mat_rows = batch.num_rows();
 
                         // Store in cache for potential reuse by other measures.
                         query_cache.insert(cache_key, (batch.clone(), schema.clone()));
 
                         ctx.register_batch(&binding_name.to_lowercase(), batch)?;
                         binding_schemas.insert(binding_name.to_lowercase(), schema);
+
+                        if let Some(ref mut plan_node) = plan {
+                            plan_node.add_child(
+                                PlanNode::new(
+                                    PlanOperation::DataFusionExecution,
+                                    format!("QUERY {binding_name} (materialize)"),
+                                )
+                                .with_property(
+                                    "result_rows",
+                                    PlanValue::Number(mat_rows as f64),
+                                )
+                                .with_duration(mat_elapsed),
+                            );
+                        }
                     }
                     query_binding_names.push(binding_name.clone());
                 }
@@ -1752,8 +2333,24 @@ impl QueryExecutor {
                 sql.push_str(&sql_group_parts.join(", "));
             }
 
+            let s2_start = Instant::now();
             let df = ctx.sql(&sql).await?;
             let batches = df.collect().await?;
+            let s2_elapsed = s2_start.elapsed();
+
+            if let Some(ref mut plan_node) = plan {
+                let result_rows: usize = batches.iter().map(|b| b.num_rows()).sum();
+                plan_node.add_child(
+                    PlanNode::new(
+                        PlanOperation::DataFusionExecution,
+                        format!("QUERY RETURN: {name}"),
+                    )
+                    .with_property("sql", PlanValue::Text(sql))
+                    .with_property("result_rows", PlanValue::Number(result_rows as f64))
+                    .with_duration(s2_elapsed),
+                );
+            }
+
             all_batches.extend(batches);
         }
 
@@ -1770,6 +2367,7 @@ impl QueryExecutor {
         window_measures: &[&Measure],
         group_by: &[ColumnRef],
         model: &DataModel,
+        mut plan: Option<&mut PlanNode>,
     ) -> QueryResult<Vec<RecordBatch>> {
         let resolver = ContextResolver::new(model);
         let mut all_batches: Vec<RecordBatch> = Vec::new();
@@ -1815,6 +2413,7 @@ impl QueryExecutor {
             // Stage 1: Materialize inner measure grouped by stage1_group_by.
             let base_table_name = format!("__window_{}", name.to_lowercase());
             let agg_pair = vec![(inner.clone(), "__val".to_string())];
+            let s1_start = Instant::now();
             let batch = materialize_query_in_pipeline(
                 ctx,
                 &agg_pair,
@@ -1824,6 +2423,8 @@ impl QueryExecutor {
                 model,
             )
             .await?;
+            let s1_elapsed = s1_start.elapsed();
+            let s1_rows = batch.num_rows();
             ctx.register_batch(&base_table_name, batch)?;
 
             // Stage 2: Build and execute window function SQL.
@@ -1841,9 +2442,34 @@ impl QueryExecutor {
 
             let sql = format!("SELECT {} FROM {base_table_name}", select_parts.join(", "));
 
+            let s2_start = Instant::now();
             let df = ctx.sql(&sql).await?;
             let batches = df.collect().await?;
+            let s2_elapsed = s2_start.elapsed();
+            let s2_rows: usize = batches.iter().map(|b| b.num_rows()).sum();
             all_batches.extend(batches);
+
+            // Record plan nodes for this window measure.
+            if let Some(ref mut plan_node) = plan {
+                let mut window_node = PlanNode::new(
+                    PlanOperation::MeasureEvaluation,
+                    format!("Window: {name}"),
+                );
+                window_node.duration = (s1_elapsed + s2_elapsed).into();
+
+                window_node.add_child(
+                    PlanNode::new(PlanOperation::DataFusionExecution, "Materialize Inner (Stage 1)")
+                        .with_property("result_rows", PlanValue::Number(s1_rows as f64))
+                        .with_duration(s1_elapsed),
+                );
+                window_node.add_child(
+                    PlanNode::new(PlanOperation::DataFusionExecution, "Window Function (Stage 2)")
+                        .with_property("sql", PlanValue::Text(sql))
+                        .with_property("result_rows", PlanValue::Number(s2_rows as f64))
+                        .with_duration(s2_elapsed),
+                );
+                plan_node.add_child(window_node);
+            }
         }
 
         // If multiple window measures, we'd need to join results.
@@ -2245,12 +2871,27 @@ fn format_intermediate_value(
 /// For each relationship override, determines which dimension table it affects
 /// and creates an aliased JOIN. Returns a map from model table name to the
 /// SQL alias that should be used in filter conditions for this measure.
+/// Entry for an override JOIN from USERELATIONSHIP.
+///
+/// Contains the alias, ON clause, source table name, and whether the
+/// relationship is safe for a direct JOIN.
+struct OverrideJoinEntry {
+    alias: String,
+    on_clause: String,
+    source_table: String,
+    is_safe: bool,
+    /// Pre-computed scalar boundary clause for single-condition inequality
+    /// relationships. `Some(clause)` when the expensive correlated EXISTS can
+    /// be replaced by a cheap scalar subquery (e.g., `col <= (SELECT MAX(...))`).
+    boundary_clause: Option<String>,
+}
+
 fn build_override_alias_map(
     eval_ctx: &EvaluationContext,
     model: &DataModel,
     fact_model_name: &str,
     fact_table: &str,
-    override_joins: &mut Vec<(String, String)>,
+    override_joins: &mut Vec<OverrideJoinEntry>,
 ) -> std::collections::HashMap<String, String> {
     let mut alias_map = std::collections::HashMap::new();
 
@@ -2277,10 +2918,26 @@ fn build_override_alias_map(
         );
         let left_is_from = rel.from_table() == fact_model_name;
         let on_clause = rel.build_on_clause(fact_table, &alias, left_is_from);
+        let is_safe = rel.is_safe_for_direct_join();
+        let source_table = dim_table.to_lowercase();
+
+        // Pre-compute boundary clause for single-condition inequality
+        // relationships. This avoids the expensive correlated EXISTS.
+        let boundary_clause = if !is_safe {
+            rel.build_boundary_clause(fact_table, &source_table, left_is_from, &[])
+        } else {
+            None
+        };
 
         // Check if this alias is already queued.
-        if !override_joins.iter().any(|(a, _)| a == &alias) {
-            override_joins.push((alias.clone(), on_clause));
+        if !override_joins.iter().any(|e| e.alias == alias) {
+            override_joins.push(OverrideJoinEntry {
+                alias: alias.clone(),
+                on_clause,
+                source_table,
+                is_safe,
+                boundary_clause,
+            });
         }
         alias_map.insert(dim_table.to_string(), alias);
     }
@@ -2526,7 +3183,7 @@ fn resolve_compound_sql(
     fact_table: &str,
     fact_model_name: &str,
     context_join_tables: &mut Vec<String>,
-    override_joins: &mut Vec<(String, String)>,
+    override_joins: &mut Vec<OverrideJoinEntry>,
 ) -> QueryResult<String> {
     match expr {
         // Compound expressions: recurse into each operand independently.

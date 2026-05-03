@@ -15,7 +15,7 @@ use crate::compute::context::{
     format_filter_value, ContextResolver, EvaluationContext, ResolvedFilter, ResolvedInFilter,
 };
 use crate::compute::evaluate::materialize_calculated_columns;
-use crate::compute::expression::{expand_global_variables, expand_measure_refs};
+use crate::compute::expression::{expand_global_variables, expand_measure_refs, Expression};
 use crate::error::EngineResult;
 use crate::model::schema::DataModel;
 use crate::store::ColumnStore;
@@ -194,6 +194,39 @@ impl<'a> MeasureEngine<'a> {
             measure.table()
         };
 
+        // Detect compound expressions with independent context ops combined
+        // with unsafe GROUP BY dims. These need per-sub-expression evaluation.
+        let has_unsafe_group_by_dim = group_by.iter().any(|tc| {
+            tc.table != fact_table
+                && self
+                    .model
+                    .find_relationship(fact_table, &tc.table)
+                    .map(|rel| !rel.is_safe_for_direct_join())
+                    .unwrap_or(false)
+        });
+
+        let is_compound_with_context = expanded.has_context_ops()
+            && matches!(
+                &expanded,
+                Expression::BinaryOp { .. }
+                    | Expression::SafeDivide { .. }
+                    | Expression::ScalarFunc { .. }
+                    | Expression::Coalesce(_)
+                    | Expression::If { .. }
+            );
+
+        if has_unsafe_group_by_dim && is_compound_with_context {
+            return self
+                .evaluate_grouped_compound_boundary(
+                    measure_name,
+                    &expanded,
+                    fact_table,
+                    group_by,
+                    outer_filters,
+                )
+                .await;
+        }
+
         // Resolve context operations.
         let resolver = ContextResolver::new(self.model);
         let (stripped_expr, eval_ctx) = resolver.resolve(&expanded)?;
@@ -274,9 +307,19 @@ impl<'a> MeasureEngine<'a> {
                     })
                     .collect();
                 let dim_lower = table_name.to_lowercase();
-                let exists =
-                    rel.build_exists_clause(&fact_lower, &dim_lower, fact_is_from, &dim_filters);
-                exists_parts.push(exists);
+                if let Some(boundary) =
+                    rel.build_boundary_clause(&fact_lower, &dim_lower, fact_is_from, &dim_filters)
+                {
+                    exists_parts.push(boundary);
+                } else {
+                    let exists = rel.build_exists_clause(
+                        &fact_lower,
+                        &dim_lower,
+                        fact_is_from,
+                        &dim_filters,
+                    );
+                    exists_parts.push(exists);
+                }
                 exists_tables.insert(dim_lower);
             }
         }
@@ -379,160 +422,529 @@ impl<'a> MeasureEngine<'a> {
         Ok(combined)
     }
 
-    /// Pre-aggregate grouped evaluation for unsafe (ManyToMany, non-equi) dimensions.
+    /// Compound expression evaluation with boundary approach for unsafe dims.
     ///
-    /// Two-stage approach:
-    /// Stage 1: Pre-aggregate fact table grouped by safe dim cols + fact join key cols.
-    /// Stage 2: Join pre-aggregated result to unsafe dims, re-aggregate.
+    /// For compound expressions (SafeDivide, BinaryOp, etc.) where sub-expressions
+    /// have independent context ops (KEEP, CLEAR), each sub-aggregate is resolved
+    /// and evaluated independently via the boundary approach. Results are combined
+    /// via FULL OUTER JOIN, and the compound arithmetic is applied in a final SQL.
     #[allow(clippy::too_many_arguments)]
-    async fn evaluate_grouped_pre_aggregate(
+    async fn evaluate_grouped_compound_boundary(
         &self,
         measure_name: &str,
-        stripped_expr: &crate::compute::expression::Expression,
+        expr: &Expression,
+        fact_table: &str,
+        group_by: &[TableColumn],
+        outer_filters: &[ResolvedFilter],
+    ) -> EngineResult<RecordBatch> {
+        let resolver = ContextResolver::new(self.model);
+
+        // Collect all tables we might need.
+        let mut all_tables: Vec<String> = vec![fact_table.to_string()];
+        for tc in group_by {
+            if !all_tables.iter().any(|t| t == &tc.table) {
+                all_tables.push(tc.table.clone());
+            }
+        }
+        // Also register tables from filters and context ops.
+        // We'll resolve sub-expressions later; pre-register all model tables
+        // that have relationships to the fact table to ensure they're available.
+        for rel in self.model.relationships() {
+            let dim = if rel.from_table() == fact_table {
+                rel.to_table()
+            } else if rel.to_table() == fact_table {
+                rel.from_table()
+            } else {
+                continue;
+            };
+            if !all_tables.iter().any(|t| t == dim) {
+                all_tables.push(dim.to_string());
+            }
+        }
+
+        let ctx = SessionContext::new();
+
+        // Register all needed tables.
+        for table_name in &all_tables {
+            let batch = self.get_table_batch(table_name).await?;
+            let df_name = table_name.to_lowercase();
+            // Avoid re-registering.
+            if ctx.table(&df_name).await.is_err() {
+                ctx.register_batch(&df_name, batch)?;
+            }
+        }
+
+        // Extract leaf sub-aggregates from the compound expression.
+        // Each leaf is resolved independently via the context resolver.
+        let mut sub_results: Vec<String> = Vec::new(); // table names for sub-results
+        let mut sub_aliases: Vec<String> = Vec::new(); // alias for measure column in each sub-result
+        let mut counter = 0usize;
+
+        // Recursively decompose and evaluate sub-aggregates.
+        let result_sql = self
+            .decompose_and_evaluate(
+                expr,
+                fact_table,
+                group_by,
+                outer_filters,
+                &resolver,
+                &ctx,
+                &mut sub_results,
+                &mut sub_aliases,
+                &mut counter,
+            )
+            .await?;
+
+        if sub_results.is_empty() {
+            // No sub-aggregates — shouldn't happen for compound expressions.
+            return Err(crate::error::EngineError::InvalidData(
+                "No sub-aggregates found in compound expression".into(),
+            ));
+        }
+
+        // Build a combining query.
+        // Start from the first sub-result table.
+        let first_table = &sub_results[0];
+        let group_cols: Vec<String> = group_by
+            .iter()
+            .map(|tc| format!("\"{}\"", tc.column))
+            .collect();
+
+        let mut from_clause = first_table.clone();
+        for sub_table in &sub_results[1..] {
+            if group_cols.is_empty() {
+                from_clause.push_str(&format!(" CROSS JOIN {sub_table}"));
+            } else {
+                let join_conds: Vec<String> = group_cols
+                    .iter()
+                    .map(|c| format!("{first_table}.{c} = {sub_table}.{c}"))
+                    .collect();
+                from_clause.push_str(&format!(
+                    " FULL OUTER JOIN {sub_table} ON {}",
+                    join_conds.join(" AND ")
+                ));
+            }
+        }
+
+        let mut select_parts: Vec<String> = group_cols
+            .iter()
+            .map(|c| format!("{first_table}.{c}"))
+            .collect();
+        select_parts.push(format!("{result_sql} AS \"{measure_name}\""));
+
+        let combine_sql = format!("SELECT {} FROM {}", select_parts.join(", "), from_clause);
+
+        let df = ctx.sql(&combine_sql).await?;
+        let batches = df.collect().await?;
+
+        if batches.is_empty() {
+            return Ok(RecordBatch::new_empty(arrow::datatypes::SchemaRef::new(
+                arrow::datatypes::Schema::empty(),
+            )));
+        }
+
+        let schema = batches[0].schema();
+        let combined = concat_batches(&schema, &batches)?;
+        Ok(combined)
+    }
+
+    /// Recursively decompose a compound expression, evaluating each leaf
+    /// aggregate via the boundary approach and returning a SQL fragment
+    /// that references the sub-result columns.
+    #[allow(clippy::too_many_arguments)]
+    fn decompose_and_evaluate<'b>(
+        &'b self,
+        expr: &'b Expression,
+        fact_table: &'b str,
+        group_by: &'b [TableColumn],
+        outer_filters: &'b [ResolvedFilter],
+        resolver: &'b ContextResolver<'_>,
+        ctx: &'b SessionContext,
+        sub_results: &'b mut Vec<String>,
+        sub_aliases: &'b mut Vec<String>,
+        counter: &'b mut usize,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = EngineResult<String>> + 'b>> {
+        Box::pin(async move {
+            match expr {
+                Expression::BinaryOp { left, op, right } => {
+                    let l = self
+                        .decompose_and_evaluate(
+                            left,
+                            fact_table,
+                            group_by,
+                            outer_filters,
+                            resolver,
+                            ctx,
+                            sub_results,
+                            sub_aliases,
+                            counter,
+                        )
+                        .await?;
+                    let r = self
+                        .decompose_and_evaluate(
+                            right,
+                            fact_table,
+                            group_by,
+                            outer_filters,
+                            resolver,
+                            ctx,
+                            sub_results,
+                            sub_aliases,
+                            counter,
+                        )
+                        .await?;
+                    Ok(format!("({l} {} {r})", op.as_sql()))
+                }
+                Expression::SafeDivide {
+                    numerator,
+                    denominator,
+                    alternate,
+                } => {
+                    let n = self
+                        .decompose_and_evaluate(
+                            numerator,
+                            fact_table,
+                            group_by,
+                            outer_filters,
+                            resolver,
+                            ctx,
+                            sub_results,
+                            sub_aliases,
+                            counter,
+                        )
+                        .await?;
+                    let d = self
+                        .decompose_and_evaluate(
+                            denominator,
+                            fact_table,
+                            group_by,
+                            outer_filters,
+                            resolver,
+                            ctx,
+                            sub_results,
+                            sub_aliases,
+                            counter,
+                        )
+                        .await?;
+                    let alt = if let Some(a) = alternate {
+                        self.decompose_and_evaluate(
+                            a,
+                            fact_table,
+                            group_by,
+                            outer_filters,
+                            resolver,
+                            ctx,
+                            sub_results,
+                            sub_aliases,
+                            counter,
+                        )
+                        .await?
+                    } else {
+                        "NULL".to_string()
+                    };
+                    Ok(format!(
+                        "CASE WHEN {d} = 0 THEN {alt} ELSE CAST({n} AS DOUBLE) / {d} END"
+                    ))
+                }
+                Expression::If {
+                    condition,
+                    then_expr,
+                    else_expr,
+                } => {
+                    let c = self
+                        .decompose_and_evaluate(
+                            condition,
+                            fact_table,
+                            group_by,
+                            outer_filters,
+                            resolver,
+                            ctx,
+                            sub_results,
+                            sub_aliases,
+                            counter,
+                        )
+                        .await?;
+                    let t = self
+                        .decompose_and_evaluate(
+                            then_expr,
+                            fact_table,
+                            group_by,
+                            outer_filters,
+                            resolver,
+                            ctx,
+                            sub_results,
+                            sub_aliases,
+                            counter,
+                        )
+                        .await?;
+                    let e = self
+                        .decompose_and_evaluate(
+                            else_expr,
+                            fact_table,
+                            group_by,
+                            outer_filters,
+                            resolver,
+                            ctx,
+                            sub_results,
+                            sub_aliases,
+                            counter,
+                        )
+                        .await?;
+                    Ok(format!("CASE WHEN {c} THEN {t} ELSE {e} END"))
+                }
+                Expression::ScalarFunc { function, args } => {
+                    let mut evaluated_args = Vec::new();
+                    for arg in args {
+                        let a = self
+                            .decompose_and_evaluate(
+                                arg,
+                                fact_table,
+                                group_by,
+                                outer_filters,
+                                resolver,
+                                ctx,
+                                sub_results,
+                                sub_aliases,
+                                counter,
+                            )
+                            .await?;
+                        evaluated_args.push(a);
+                    }
+                    Ok(function.to_sql_strs(&evaluated_args))
+                }
+                Expression::Coalesce(exprs) => {
+                    let mut evaluated = Vec::new();
+                    for e in exprs {
+                        let a = self
+                            .decompose_and_evaluate(
+                                e,
+                                fact_table,
+                                group_by,
+                                outer_filters,
+                                resolver,
+                                ctx,
+                                sub_results,
+                                sub_aliases,
+                                counter,
+                            )
+                            .await?;
+                        evaluated.push(a);
+                    }
+                    Ok(format!("COALESCE({})", evaluated.join(", ")))
+                }
+
+                // Leaf: an expression that may have context ops (KEEP/CLEAR/etc.)
+                // or a plain aggregate. Resolve independently, evaluate via boundary.
+                _ if expr.has_aggregate() || expr.has_context_ops() => {
+                    let idx = *counter;
+                    *counter += 1;
+                    let sub_alias = format!("__sub_{idx}");
+                    let sub_table = format!("__sub_tbl_{idx}");
+
+                    // Resolve this sub-expression independently.
+                    let (stripped, eval_ctx) = resolver.resolve(expr)?;
+                    let effective = eval_ctx.effective_filters(outer_filters);
+
+                    // Evaluate via boundary approach.
+                    let batch = self
+                        .evaluate_sub_aggregate_boundary(
+                            &sub_alias, &stripped, fact_table, group_by, &effective, &eval_ctx,
+                            ctx, idx,
+                        )
+                        .await?;
+
+                    if batch.num_rows() > 0 {
+                        ctx.register_batch(&sub_table, batch)?;
+                    } else {
+                        // Register an empty batch with the expected schema.
+                        ctx.register_batch(&sub_table, batch)?;
+                    }
+
+                    sub_results.push(sub_table.clone());
+                    sub_aliases.push(sub_alias.clone());
+
+                    Ok(format!("{sub_table}.\"{sub_alias}\""))
+                }
+
+                // Literals and non-aggregate expressions: render as SQL directly.
+                _ => Ok(expr.to_sql_string()),
+            }
+        })
+    }
+
+    /// Evaluate a single sub-aggregate using the boundary approach.
+    /// Returns a RecordBatch with GROUP BY columns + the aggregate column.
+    #[allow(clippy::too_many_arguments)]
+    async fn evaluate_sub_aggregate_boundary(
+        &self,
+        alias: &str,
+        stripped_expr: &Expression,
         fact_table: &str,
         group_by: &[TableColumn],
         effective: &[ResolvedFilter],
         eval_ctx: &EvaluationContext,
         ctx: &SessionContext,
+        idx: usize,
     ) -> EngineResult<RecordBatch> {
-        use crate::compute::aggregate::AggregateOp;
-
         let fact_lower = fact_table.to_lowercase();
-        let group_by_tables: std::collections::HashSet<&str> =
-            group_by.iter().map(|tc| tc.table.as_str()).collect();
 
-        // Classify dims.
-        let mut unsafe_dim_tables: std::collections::HashSet<String> =
-            std::collections::HashSet::new();
-        let mut fact_join_keys: Vec<String> = Vec::new();
-
+        // Find the unsafe dim in GROUP BY.
+        let mut unsafe_dim: Option<(&str, &crate::model::relationship::Relationship)> = None;
         for tc in group_by {
             if tc.table == fact_table {
                 continue;
             }
-            let rel = eval_ctx.resolve_relationship(self.model, fact_table, &tc.table)?;
-            if !rel.is_safe_for_direct_join() && group_by_tables.contains(tc.table.as_str()) {
-                unsafe_dim_tables.insert(tc.table.clone());
-                let fact_is_from = rel.from_table() == fact_table;
-                for cond in rel.conditions() {
-                    let fact_col = if fact_is_from {
-                        cond.from_column()
-                    } else {
-                        cond.to_column()
-                    };
-                    if !fact_join_keys.contains(&fact_col.to_string()) {
-                        fact_join_keys.push(fact_col.to_string());
-                    }
-                }
+            let rel = self.model.find_relationship(fact_table, &tc.table)?;
+            if !rel.is_safe_for_direct_join() {
+                unsafe_dim = Some((&tc.table, rel));
+                break;
             }
         }
 
-        // Safe GROUP BY dims.
-        let safe_group_by: Vec<&TableColumn> = group_by
-            .iter()
-            .filter(|tc| !unsafe_dim_tables.contains(&tc.table))
-            .collect();
-
-        // --- Stage 1: Pre-aggregate ---
-        let mut s1_select: Vec<String> = Vec::new();
-        let mut s1_group: Vec<String> = Vec::new();
-
-        for tc in &safe_group_by {
-            let tbl = tc.table.to_lowercase();
-            let qualified = format!("{tbl}.\"{}\"", tc.column);
-            s1_select.push(qualified.clone());
-            s1_group.push(qualified);
-        }
-
-        for key_col in &fact_join_keys {
-            let qualified = format!("{fact_lower}.\"{key_col}\"");
-            if !s1_group.contains(&qualified) {
-                s1_select.push(qualified.clone());
-                s1_group.push(qualified);
-            }
-        }
-
-        // Pre-aggregate the measure.
-        let pre_alias = "__pre_val";
-        let (s1_agg, s2_agg) = if let Some((op, col)) = stripped_expr.as_simple_aggregate() {
-            let col_ref = format!("{fact_lower}.\"{col}\"");
-            match op {
-                AggregateOp::Sum => (
-                    format!("SUM({col_ref}) AS \"{pre_alias}\""),
-                    format!("SUM(__pre_agg.\"{pre_alias}\") AS \"{measure_name}\""),
-                ),
-                AggregateOp::Count | AggregateOp::CountRows => {
-                    let s1 = if op == AggregateOp::CountRows {
-                        format!("COUNT(*) AS \"{pre_alias}\"")
-                    } else {
-                        format!("COUNT({col_ref}) AS \"{pre_alias}\"")
-                    };
-                    (
-                        s1,
-                        format!("SUM(__pre_agg.\"{pre_alias}\") AS \"{measure_name}\""),
+        let (unsafe_dim_name, rel) = match unsafe_dim {
+            Some(ud) => ud,
+            None => {
+                // No unsafe dim — evaluate normally with JOINs.
+                return self
+                    .evaluate_sub_aggregate_safe(
+                        alias,
+                        stripped_expr,
+                        fact_table,
+                        group_by,
+                        effective,
+                        eval_ctx,
+                        ctx,
                     )
-                }
-                AggregateOp::Min => (
-                    format!("MIN({col_ref}) AS \"{pre_alias}\""),
-                    format!("MIN(__pre_agg.\"{pre_alias}\") AS \"{measure_name}\""),
-                ),
-                AggregateOp::Max => (
-                    format!("MAX({col_ref}) AS \"{pre_alias}\""),
-                    format!("MAX(__pre_agg.\"{pre_alias}\") AS \"{measure_name}\""),
-                ),
-                AggregateOp::Average => {
-                    let sum_alias = "__pre_sum";
-                    let cnt_alias = "__pre_cnt";
-                    s1_select.push(format!("SUM({col_ref}) AS \"{sum_alias}\""));
-                    s1_select.push(format!("COUNT({col_ref}) AS \"{cnt_alias}\""));
-                    (
-                        String::new(), // Handled via s1_select above.
-                        format!(
-                            "CAST(SUM(__pre_agg.\"{sum_alias}\") AS DOUBLE) / NULLIF(SUM(__pre_agg.\"{cnt_alias}\"), 0) AS \"{measure_name}\""
-                        ),
-                    )
-                }
-                AggregateOp::DistinctCount => (
-                    format!("COUNT(DISTINCT {col_ref}) AS \"{pre_alias}\""),
-                    format!("SUM(__pre_agg.\"{pre_alias}\") AS \"{measure_name}\""),
-                ),
+                    .await;
             }
-        } else {
-            // Complex expression: best-effort, emit full SQL in Stage 1.
-            let expr_sql = stripped_expr.to_sql_string();
-            (
-                format!("{expr_sql} AS \"{pre_alias}\""),
-                format!("SUM(__pre_agg.\"{pre_alias}\") AS \"{measure_name}\""),
-            )
         };
 
-        if !s1_agg.is_empty() {
-            s1_select.push(s1_agg);
+        let dim_lower = unsafe_dim_name.to_lowercase();
+        let fact_is_from = rel.from_table() == fact_table;
+
+        // Step 1: Compute boundary values per group from the unsafe dim.
+        let bounds_name = format!("__bounds_{idx}");
+        let mut bounds_select: Vec<String> = Vec::new();
+        let mut bounds_group: Vec<String> = Vec::new();
+        let mut where_conditions: Vec<String> = Vec::new();
+
+        for tc in group_by {
+            if tc.table.eq_ignore_ascii_case(unsafe_dim_name) {
+                let qualified = format!("{dim_lower}.\"{}\"", tc.column);
+                bounds_select.push(qualified.clone());
+                bounds_group.push(qualified);
+            }
         }
 
-        let s1_select_clause = s1_select.join(", ");
-        let mut s1_sql = format!("SELECT {s1_select_clause} FROM {fact_lower}");
+        for (ci, cond) in rel.conditions().iter().enumerate() {
+            let dim_col = if fact_is_from {
+                cond.to_column()
+            } else {
+                cond.from_column()
+            };
+            let fact_col = if fact_is_from {
+                cond.from_column()
+            } else {
+                cond.to_column()
+            };
+            let boundary_agg = cond.operator().boundary_aggregate();
+            let boundary_alias = format!("__b_{ci}");
+            bounds_select.push(format!(
+                "{boundary_agg}({dim_lower}.\"{dim_col}\") AS \"{boundary_alias}\""
+            ));
 
-        // Join safe dims in Stage 1.
-        let mut s1_joined = std::collections::HashSet::new();
-        s1_joined.insert(fact_lower.clone());
+            let op = cond.operator().as_sql();
+            where_conditions.push(format!(
+                "{fact_lower}.\"{fact_col}\" {op} {bounds_name}.\"{boundary_alias}\""
+            ));
+        }
 
-        for tc in &safe_group_by {
-            let dim_lower = tc.table.to_lowercase();
-            if tc.table == fact_table || s1_joined.contains(&dim_lower) {
+        let bounds_sql = format!(
+            "SELECT {} FROM {} GROUP BY {}",
+            bounds_select.join(", "),
+            dim_lower,
+            bounds_group.join(", ")
+        );
+
+        let bounds_df = ctx.sql(&bounds_sql).await?;
+        let bounds_batches = bounds_df.collect().await?;
+
+        if bounds_batches.is_empty() {
+            return Ok(RecordBatch::new_empty(arrow::datatypes::SchemaRef::new(
+                arrow::datatypes::Schema::empty(),
+            )));
+        }
+
+        let bounds_schema = bounds_batches[0].schema();
+        let bounds_combined = concat_batches(&bounds_schema, &bounds_batches)?;
+        ctx.register_batch(&bounds_name, bounds_combined)?;
+
+        // Step 2: CROSS JOIN fact × bounds + safe dim JOINs.
+        let mut main_select: Vec<String> = Vec::new();
+        let mut main_group: Vec<String> = Vec::new();
+
+        for tc in group_by {
+            if tc.table.eq_ignore_ascii_case(unsafe_dim_name) {
+                let qualified = format!("{bounds_name}.\"{}\"", tc.column);
+                main_select.push(qualified.clone());
+                main_group.push(qualified);
+            } else if tc.table == fact_table {
+                let qualified = format!("{fact_lower}.\"{}\"", tc.column);
+                main_select.push(qualified.clone());
+                main_group.push(qualified);
+            } else {
+                let tbl = tc.table.to_lowercase();
+                let qualified = format!("{tbl}.\"{}\"", tc.column);
+                main_select.push(qualified.clone());
+                main_group.push(qualified);
+            }
+        }
+
+        let expr_sql = stripped_expr.to_sql_string();
+        main_select.push(format!("{expr_sql} AS \"{alias}\""));
+
+        let mut main_from = format!("{fact_lower} CROSS JOIN {bounds_name}");
+
+        // Join safe dims (for GROUP BY + for filters).
+        let mut main_joined = std::collections::HashSet::new();
+        main_joined.insert(fact_lower.clone());
+        main_joined.insert(bounds_name.clone());
+
+        let mut tables_to_join: Vec<String> = Vec::new();
+        for tc in group_by {
+            if tc.table != fact_table
+                && !tc.table.eq_ignore_ascii_case(unsafe_dim_name)
+                && !tables_to_join.contains(&tc.table)
+            {
+                tables_to_join.push(tc.table.clone());
+            }
+        }
+        for f in effective {
+            if f.table != fact_table
+                && !f.table.eq_ignore_ascii_case(unsafe_dim_name)
+                && !tables_to_join.contains(&f.table)
+            {
+                tables_to_join.push(f.table.clone());
+            }
+        }
+
+        for table_name in &tables_to_join {
+            let tbl = table_name.to_lowercase();
+            if main_joined.contains(&tbl) {
                 continue;
             }
-            let rel = eval_ctx.resolve_relationship(self.model, fact_table, &tc.table)?;
-            let left_is_from = rel.from_table() == fact_table;
-            let on_clause = rel.build_on_clause(&fact_lower, &dim_lower, left_is_from);
-            s1_sql.push_str(&format!(" JOIN {dim_lower} ON {on_clause}"));
-            s1_joined.insert(dim_lower);
+            if let Ok(safe_rel) = self.model.find_relationship(fact_table, table_name) {
+                let left_is_from = safe_rel.from_table() == fact_table;
+                let on_clause = safe_rel.build_on_clause(&fact_lower, &tbl, left_is_from);
+                main_from.push_str(&format!(" JOIN {tbl} ON {on_clause}"));
+                main_joined.insert(tbl);
+            }
         }
 
-        // WHERE clause for fact-table filters (skip filters on unsafe dims).
-        let s1_where: Vec<String> = effective
+        // WHERE: boundary conditions + effective filters (all tables).
+        let context_filters: Vec<String> = effective
             .iter()
-            .filter(|f| !unsafe_dim_tables.contains(&f.table))
+            .filter(|f| !f.table.eq_ignore_ascii_case(unsafe_dim_name))
             .map(|f| {
                 let tbl = if f.table == fact_table {
                     fact_lower.clone()
@@ -545,85 +957,331 @@ impl<'a> MeasureEngine<'a> {
             })
             .collect();
 
-        if !s1_where.is_empty() {
-            s1_sql.push_str(" WHERE ");
-            s1_sql.push_str(&s1_where.join(" AND "));
-        }
+        let mut all_where = where_conditions;
+        all_where.extend(context_filters);
 
-        if !s1_group.is_empty() {
-            s1_sql.push_str(" GROUP BY ");
-            s1_sql.push_str(&s1_group.join(", "));
-        }
+        let main_sql = format!(
+            "SELECT {} FROM {} WHERE {} GROUP BY {}",
+            main_select.join(", "),
+            main_from,
+            all_where.join(" AND "),
+            main_group.join(", ")
+        );
 
-        // Execute Stage 1 and register.
-        let s1_df = ctx.sql(&s1_sql).await?;
-        let s1_batches = s1_df.collect().await?;
+        let main_df = ctx.sql(&main_sql).await?;
+        let main_batches = main_df.collect().await?;
 
-        if s1_batches.is_empty() {
+        if main_batches.is_empty() {
             return Ok(RecordBatch::new_empty(arrow::datatypes::SchemaRef::new(
                 arrow::datatypes::Schema::empty(),
             )));
         }
 
-        let s1_schema = s1_batches[0].schema();
-        let s1_combined = concat_batches(&s1_schema, &s1_batches)?;
-        ctx.register_batch("__pre_agg", s1_combined)?;
+        let schema = main_batches[0].schema();
+        let combined = concat_batches(&schema, &main_batches)?;
+        Ok(combined)
+    }
 
-        // --- Stage 2: Join to unsafe dims ---
-        let mut s2_select: Vec<String> = Vec::new();
-        let mut s2_group: Vec<String> = Vec::new();
+    /// Evaluate a sub-aggregate with only safe dims (standard JOIN approach).
+    #[allow(clippy::too_many_arguments)]
+    async fn evaluate_sub_aggregate_safe(
+        &self,
+        alias: &str,
+        stripped_expr: &Expression,
+        fact_table: &str,
+        group_by: &[TableColumn],
+        effective: &[ResolvedFilter],
+        eval_ctx: &EvaluationContext,
+        ctx: &SessionContext,
+    ) -> EngineResult<RecordBatch> {
+        let fact_lower = fact_table.to_lowercase();
+
+        let mut select_parts: Vec<String> = Vec::new();
+        let mut group_parts: Vec<String> = Vec::new();
 
         for tc in group_by {
-            if unsafe_dim_tables.contains(&tc.table) {
-                let dim_lower = tc.table.to_lowercase();
-                let qualified = format!("{dim_lower}.\"{}\"", tc.column);
-                s2_select.push(qualified.clone());
-                s2_group.push(qualified);
-            } else {
-                let qualified = format!("__pre_agg.\"{}\"", tc.column);
-                s2_select.push(qualified.clone());
-                s2_group.push(qualified);
+            let tbl = tc.table.to_lowercase();
+            let qualified = format!("{tbl}.\"{}\"", tc.column);
+            select_parts.push(qualified.clone());
+            group_parts.push(qualified);
+        }
+
+        let expr_sql = stripped_expr.to_sql_string();
+        select_parts.push(format!("{expr_sql} AS \"{alias}\""));
+
+        let mut sql = format!("SELECT {} FROM {fact_lower}", select_parts.join(", "));
+
+        let mut joined = std::collections::HashSet::new();
+        joined.insert(fact_lower.clone());
+
+        // Join all needed tables.
+        let mut tables_to_join: Vec<String> = Vec::new();
+        for tc in group_by {
+            if tc.table != fact_table && !tables_to_join.contains(&tc.table) {
+                tables_to_join.push(tc.table.clone());
             }
         }
-        s2_select.push(s2_agg);
+        for f in effective {
+            if f.table != fact_table && !tables_to_join.contains(&f.table) {
+                tables_to_join.push(f.table.clone());
+            }
+        }
 
-        let s2_select_clause = s2_select.join(", ");
-        let mut s2_sql = format!("SELECT {s2_select_clause} FROM __pre_agg");
-
-        let mut s2_joined = std::collections::HashSet::new();
-        s2_joined.insert("__pre_agg".to_string());
-
-        for tc in group_by {
-            if !unsafe_dim_tables.contains(&tc.table) {
+        for table_name in &tables_to_join {
+            let tbl = table_name.to_lowercase();
+            if joined.contains(&tbl) {
                 continue;
             }
-            let dim_lower = tc.table.to_lowercase();
-            if s2_joined.contains(&dim_lower) {
+            if let Ok(rel) = eval_ctx.resolve_relationship(self.model, fact_table, table_name) {
+                let left_is_from = rel.from_table() == fact_table;
+                let on_clause = rel.build_on_clause(&fact_lower, &tbl, left_is_from);
+                sql.push_str(&format!(" JOIN {tbl} ON {on_clause}"));
+                joined.insert(tbl);
+            }
+        }
+
+        // WHERE clause.
+        let where_parts: Vec<String> = effective
+            .iter()
+            .map(|f| {
+                let tbl = if f.table == fact_table {
+                    fact_lower.clone()
+                } else {
+                    f.table.to_lowercase()
+                };
+                let op = f.operator.as_sql();
+                let val = format_filter_value(&f.table, &f.column, &f.value, self.model);
+                format!("{tbl}.\"{}\" {op} {val}", f.column)
+            })
+            .collect();
+
+        if !where_parts.is_empty() {
+            sql.push_str(" WHERE ");
+            sql.push_str(&where_parts.join(" AND "));
+        }
+
+        if !group_parts.is_empty() {
+            sql.push_str(" GROUP BY ");
+            sql.push_str(&group_parts.join(", "));
+        }
+
+        let df = ctx.sql(&sql).await?;
+        let batches = df.collect().await?;
+
+        if batches.is_empty() {
+            return Ok(RecordBatch::new_empty(arrow::datatypes::SchemaRef::new(
+                arrow::datatypes::Schema::empty(),
+            )));
+        }
+
+        let schema = batches[0].schema();
+        let combined = concat_batches(&schema, &batches)?;
+        Ok(combined)
+    }
+
+    /// Boundary-based grouped evaluation for unsafe (ManyToMany, non-equi) dimensions.
+    ///
+    /// For non-equi relationships, the DAX semantics are: for each GROUP BY
+    /// group, include fact rows that match ANY dimension row in that group.
+    /// This translates to computing boundary values (MAX/MIN) per group,
+    /// then filtering fact rows against those boundaries via CROSS JOIN.
+    #[allow(clippy::too_many_arguments)]
+    async fn evaluate_grouped_pre_aggregate(
+        &self,
+        measure_name: &str,
+        stripped_expr: &crate::compute::expression::Expression,
+        fact_table: &str,
+        group_by: &[TableColumn],
+        effective: &[ResolvedFilter],
+        eval_ctx: &EvaluationContext,
+        ctx: &SessionContext,
+    ) -> EngineResult<RecordBatch> {
+        let fact_lower = fact_table.to_lowercase();
+
+        // Identify the unsafe dim and its relationship.
+        let mut unsafe_dim: Option<(&str, &crate::model::relationship::Relationship)> = None;
+        for tc in group_by {
+            if tc.table == fact_table {
                 continue;
             }
             let rel = eval_ctx.resolve_relationship(self.model, fact_table, &tc.table)?;
-            let left_is_from = rel.from_table() == fact_table;
-            let on_clause = rel.build_on_clause("__pre_agg", &dim_lower, left_is_from);
-            s2_sql.push_str(&format!(" JOIN {dim_lower} ON {on_clause}"));
-            s2_joined.insert(dim_lower);
+            if !rel.is_safe_for_direct_join() {
+                unsafe_dim = Some((&tc.table, rel));
+                break;
+            }
         }
 
-        if !s2_group.is_empty() {
-            s2_sql.push_str(" GROUP BY ");
-            s2_sql.push_str(&s2_group.join(", "));
+        let (unsafe_dim_name, rel) = unsafe_dim.ok_or_else(|| {
+            crate::error::EngineError::InvalidData(
+                "Expected unsafe dimension for pre-aggregate".into(),
+            )
+        })?;
+        let dim_lower = unsafe_dim_name.to_lowercase();
+        let fact_is_from = rel.from_table() == fact_table;
+
+        // --- Step 1: Compute boundary values per GROUP BY group ---
+        let mut bounds_select: Vec<String> = Vec::new();
+        let mut bounds_group: Vec<String> = Vec::new();
+        let mut where_conditions: Vec<String> = Vec::new();
+
+        // Only include unsafe dim columns in the bounds query.
+        for tc in group_by {
+            if tc.table.eq_ignore_ascii_case(unsafe_dim_name) {
+                let qualified = format!("{dim_lower}.\"{}\"", tc.column);
+                bounds_select.push(qualified.clone());
+                bounds_group.push(qualified);
+            }
         }
 
-        let s2_df = ctx.sql(&s2_sql).await?;
-        let s2_batches = s2_df.collect().await?;
+        for (ci, cond) in rel.conditions().iter().enumerate() {
+            let dim_col = if fact_is_from {
+                cond.to_column()
+            } else {
+                cond.from_column()
+            };
+            let fact_col = if fact_is_from {
+                cond.from_column()
+            } else {
+                cond.to_column()
+            };
+            let boundary_agg = cond.operator().boundary_aggregate();
+            let boundary_alias = format!("__b_{ci}");
+            bounds_select.push(format!(
+                "{boundary_agg}({dim_lower}.\"{dim_col}\") AS \"{boundary_alias}\""
+            ));
 
-        if s2_batches.is_empty() {
+            let op = cond.operator().as_sql();
+            where_conditions.push(format!(
+                "{fact_lower}.\"{fact_col}\" {op} __bounds.\"{boundary_alias}\""
+            ));
+        }
+
+        let bounds_sql = format!(
+            "SELECT {} FROM {} GROUP BY {}",
+            bounds_select.join(", "),
+            dim_lower,
+            bounds_group.join(", ")
+        );
+
+        let bounds_df = ctx.sql(&bounds_sql).await?;
+        let bounds_batches = bounds_df.collect().await?;
+
+        if bounds_batches.is_empty() {
             return Ok(RecordBatch::new_empty(arrow::datatypes::SchemaRef::new(
                 arrow::datatypes::Schema::empty(),
             )));
         }
 
-        let schema = s2_batches[0].schema();
-        let combined = concat_batches(&schema, &s2_batches)?;
+        let bounds_schema = bounds_batches[0].schema();
+        let bounds_combined = concat_batches(&bounds_schema, &bounds_batches)?;
+        ctx.register_batch("__bounds", bounds_combined)?;
+
+        // --- Step 2: CROSS JOIN fact × bounds, filter by boundary ---
+        // Also JOIN safe dims for their GROUP BY columns.
+        let mut main_select: Vec<String> = Vec::new();
+        let mut main_group: Vec<String> = Vec::new();
+
+        for tc in group_by {
+            if tc.table.eq_ignore_ascii_case(unsafe_dim_name) {
+                // Unsafe dim columns come from __bounds.
+                let qualified = format!("__bounds.\"{}\"", tc.column);
+                main_select.push(qualified.clone());
+                main_group.push(qualified);
+            } else if tc.table == fact_table {
+                let qualified = format!("{fact_lower}.\"{}\"", tc.column);
+                main_select.push(qualified.clone());
+                main_group.push(qualified);
+            } else {
+                // Safe dim columns come from their joined table.
+                let tbl = tc.table.to_lowercase();
+                let qualified = format!("{tbl}.\"{}\"", tc.column);
+                main_select.push(qualified.clone());
+                main_group.push(qualified);
+            }
+        }
+
+        // Measure aggregate.
+        let expr_sql = stripped_expr.to_sql_string();
+        main_select.push(format!("{expr_sql} AS \"{measure_name}\""));
+
+        let mut main_from = format!("{fact_lower} CROSS JOIN __bounds");
+
+        // Join safe dims (from GROUP BY + from effective filters).
+        let mut main_joined = std::collections::HashSet::new();
+        main_joined.insert(fact_lower.clone());
+        main_joined.insert("__bounds".to_string());
+
+        // Collect all tables that need JOINing: GROUP BY dims + filter dims.
+        let mut tables_to_join: Vec<String> = Vec::new();
+        for tc in group_by {
+            if tc.table != fact_table
+                && !tc.table.eq_ignore_ascii_case(unsafe_dim_name)
+                && !tables_to_join.contains(&tc.table)
+            {
+                tables_to_join.push(tc.table.clone());
+            }
+        }
+        for f in effective {
+            if f.table != fact_table
+                && !f.table.eq_ignore_ascii_case(unsafe_dim_name)
+                && !tables_to_join.contains(&f.table)
+            {
+                tables_to_join.push(f.table.clone());
+            }
+        }
+
+        for table_name in &tables_to_join {
+            let tbl = table_name.to_lowercase();
+            if main_joined.contains(&tbl) {
+                continue;
+            }
+            if let Ok(safe_rel) = eval_ctx.resolve_relationship(self.model, fact_table, table_name)
+            {
+                let left_is_from = safe_rel.from_table() == fact_table;
+                let on_clause = safe_rel.build_on_clause(&fact_lower, &tbl, left_is_from);
+                main_from.push_str(&format!(" JOIN {tbl} ON {on_clause}"));
+                main_joined.insert(tbl);
+            }
+        }
+
+        // WHERE: boundary conditions + ALL effective filters (fact + dim tables).
+        let context_filters: Vec<String> = effective
+            .iter()
+            .filter(|f| !f.table.eq_ignore_ascii_case(unsafe_dim_name))
+            .map(|f| {
+                let tbl = if f.table == fact_table {
+                    fact_lower.clone()
+                } else {
+                    f.table.to_lowercase()
+                };
+                let op = f.operator.as_sql();
+                let val = format_filter_value(&f.table, &f.column, &f.value, self.model);
+                format!("{tbl}.\"{}\" {op} {val}", f.column)
+            })
+            .collect();
+
+        let mut all_where = where_conditions;
+        all_where.extend(context_filters);
+
+        let main_sql = format!(
+            "SELECT {} FROM {} WHERE {} GROUP BY {}",
+            main_select.join(", "),
+            main_from,
+            all_where.join(" AND "),
+            main_group.join(", ")
+        );
+
+        let main_df = ctx.sql(&main_sql).await?;
+        let main_batches = main_df.collect().await?;
+
+        if main_batches.is_empty() {
+            return Ok(RecordBatch::new_empty(arrow::datatypes::SchemaRef::new(
+                arrow::datatypes::Schema::empty(),
+            )));
+        }
+
+        let schema = main_batches[0].schema();
+        let combined = concat_batches(&schema, &main_batches)?;
         Ok(combined)
     }
 
@@ -1061,9 +1719,14 @@ impl<'a> MeasureEngine<'a> {
                 let batch = self.get_table_batch(&filter.table).await?;
                 session.register_batch(&dim_lower, batch)?;
 
-                let exists_clause =
-                    rel.build_exists_clause("t", &dim_lower, fact_is_from, &dim_filters);
-                joins.push((dim_lower.clone(), exists_clause, false));
+                let clause = if let Some(boundary) =
+                    rel.build_boundary_clause("t", &dim_lower, fact_is_from, &dim_filters)
+                {
+                    boundary
+                } else {
+                    rel.build_exists_clause("t", &dim_lower, fact_is_from, &dim_filters)
+                };
+                joins.push((dim_lower.clone(), clause, false));
             }
             registered.insert(filter.table.clone());
         }

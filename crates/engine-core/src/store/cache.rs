@@ -242,19 +242,13 @@ impl InMemoryCache {
     /// Returns `true` if the table is not yet cached, or if **any** of the
     /// strategies signals staleness. If `strategies` is empty, returns `false`
     /// for cached tables (manual refresh only).
-    pub fn should_refresh(
-        &self,
-        table_name: &str,
-        strategies: &[RefreshStrategy],
-    ) -> bool {
+    pub fn should_refresh(&self, table_name: &str, strategies: &[RefreshStrategy]) -> bool {
         let entry = match self.entries.get(table_name) {
             Some(e) => e,
             None => return true, // Not cached → always refresh.
         };
 
-        strategies
-            .iter()
-            .any(|s| evaluate_strategy(s, entry))
+        strategies.iter().any(|s| evaluate_strategy(s, entry))
     }
 }
 
@@ -579,7 +573,11 @@ mod tests {
         )]));
         let batch = RecordBatch::try_new(
             schema,
-            vec![Arc::new(Date32Array::from(vec![today - 1, today, today + 1]))],
+            vec![Arc::new(Date32Array::from(vec![
+                today - 1,
+                today,
+                today + 1,
+            ]))],
         )
         .unwrap();
 

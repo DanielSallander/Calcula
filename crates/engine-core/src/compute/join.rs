@@ -164,11 +164,10 @@ pub async fn aggregate_over_relationship(
     collect_batches(batches)
 }
 
-/// Two-stage pre-aggregation for unsafe (ManyToMany/non-equi) relationships.
+/// Boundary-based aggregation for unsafe (ManyToMany/non-equi) relationships.
 ///
-/// Stage 1: Pre-aggregate the fact table by its join key columns.
-/// Stage 2: Join pre-aggregated result to the dimension table and re-aggregate
-///          by the dimension's group-by column.
+/// Computes boundary values (MAX/MIN) per group from the dimension,
+/// then CROSS JOINs fact with boundaries and filters by the boundary condition.
 async fn aggregate_over_relationship_pre_agg(
     fact_data: &TableData,
     dimension_data: &TableData,
@@ -184,76 +183,57 @@ async fn aggregate_over_relationship_pre_agg(
     ctx.register_batch("from_t", from_batch)?;
     ctx.register_batch("to_t", to_batch)?;
 
-    // Identify unique fact-side join key columns.
-    let mut join_key_cols: Vec<&str> = Vec::new();
-    for c in relationship.conditions() {
-        let col = c.from_column();
-        if !join_key_cols.contains(&col) {
-            join_key_cols.push(col);
-        }
+    // Step 1: Compute boundary values per group from dimension.
+    let mut bounds_select = vec![format!("to_t.\"{group_by_column}\"")];
+    let mut where_conditions: Vec<String> = Vec::new();
+
+    for (ci, cond) in relationship.conditions().iter().enumerate() {
+        let dim_col = cond.to_column();
+        let fact_col = cond.from_column();
+        let boundary_agg = cond.operator().boundary_aggregate();
+        let boundary_alias = format!("__b_{ci}");
+
+        bounds_select.push(format!(
+            "{boundary_agg}(to_t.\"{dim_col}\") AS \"{boundary_alias}\""
+        ));
+
+        let op = cond.operator().as_sql();
+        where_conditions.push(format!(
+            "from_t.\"{fact_col}\" {op} __bounds.\"{boundary_alias}\""
+        ));
     }
 
-    let join_key_group: Vec<String> = join_key_cols
-        .iter()
-        .map(|c| format!("from_t.\"{c}\""))
-        .collect();
-
-    // Stage 1: pre-aggregate fact table by join keys.
-    let (s1_agg, s2_agg) = match operation {
-        AggregateOp::Sum => (
-            format!("SUM(from_t.\"{aggregate_column}\") AS \"__pre_val\""),
-            format!("SUM(__pre.\"__pre_val\") AS \"{operation}({aggregate_column})\""),
-        ),
-        AggregateOp::Count => (
-            format!("COUNT(from_t.\"{aggregate_column}\") AS \"__pre_val\""),
-            format!("SUM(__pre.\"__pre_val\") AS \"{operation}({aggregate_column})\""),
-        ),
-        AggregateOp::CountRows => (
-            "COUNT(*) AS \"__pre_val\"".to_string(),
-            format!("SUM(__pre.\"__pre_val\") AS \"{operation}({aggregate_column})\""),
-        ),
-        AggregateOp::Min => (
-            format!("MIN(from_t.\"{aggregate_column}\") AS \"__pre_val\""),
-            format!("MIN(__pre.\"__pre_val\") AS \"{operation}({aggregate_column})\""),
-        ),
-        AggregateOp::Max => (
-            format!("MAX(from_t.\"{aggregate_column}\") AS \"__pre_val\""),
-            format!("MAX(__pre.\"__pre_val\") AS \"{operation}({aggregate_column})\""),
-        ),
-        AggregateOp::Average => {
-            // AVG decomposes into SUM + COUNT.
-            let s1 = format!(
-                "SUM(from_t.\"{aggregate_column}\") AS \"__pre_sum\", COUNT(from_t.\"{aggregate_column}\") AS \"__pre_cnt\""
-            );
-            let s2 = format!(
-                "CAST(SUM(__pre.\"__pre_sum\") AS DOUBLE) / NULLIF(SUM(__pre.\"__pre_cnt\"), 0) AS \"AVG({aggregate_column})\""
-            );
-            (s1, s2)
-        }
-        AggregateOp::DistinctCount => (
-            format!("COUNT(DISTINCT from_t.\"{aggregate_column}\") AS \"__pre_val\""),
-            format!("SUM(__pre.\"__pre_val\") AS \"{operation}({aggregate_column})\""),
-        ),
-    };
-
-    let s1_group_clause = join_key_group.join(", ");
-    let s1_select = format!("{s1_group_clause}, {s1_agg}");
-    let s1_sql = format!("SELECT {s1_select} FROM from_t GROUP BY {s1_group_clause}");
-
-    let s1_df = ctx.sql(&s1_sql).await?;
-    let s1_batches = s1_df.collect().await?;
-    let s1_result = collect_batches(s1_batches)?;
-    ctx.register_batch("__pre", s1_result)?;
-
-    // Stage 2: join pre-aggregated to dimension.
-    let on_clause = relationship.build_on_clause("__pre", "to_t", true);
-    let s2_sql = format!(
-        "SELECT to_t.\"{group_by_column}\", {s2_agg} FROM __pre JOIN to_t ON {on_clause} GROUP BY to_t.\"{group_by_column}\""
+    let bounds_sql = format!(
+        "SELECT {} FROM to_t GROUP BY to_t.\"{group_by_column}\"",
+        bounds_select.join(", ")
     );
 
-    let s2_df = ctx.sql(&s2_sql).await?;
-    let s2_batches = s2_df.collect().await?;
-    collect_batches(s2_batches)
+    let bounds_df = ctx.sql(&bounds_sql).await?;
+    let bounds_batches = bounds_df.collect().await?;
+    let bounds_result = collect_batches(bounds_batches)?;
+    ctx.register_batch("__bounds", bounds_result)?;
+
+    // Step 2: CROSS JOIN fact × bounds, filter by boundary.
+    let agg_sql = match operation {
+        AggregateOp::Sum => format!("SUM(from_t.\"{aggregate_column}\")"),
+        AggregateOp::Count => format!("COUNT(from_t.\"{aggregate_column}\")"),
+        AggregateOp::CountRows => "COUNT(*)".to_string(),
+        AggregateOp::Min => format!("MIN(from_t.\"{aggregate_column}\")"),
+        AggregateOp::Max => format!("MAX(from_t.\"{aggregate_column}\")"),
+        AggregateOp::Average => format!("AVG(from_t.\"{aggregate_column}\")"),
+        AggregateOp::DistinctCount => {
+            format!("COUNT(DISTINCT from_t.\"{aggregate_column}\")")
+        }
+    };
+
+    let main_sql = format!(
+        "SELECT __bounds.\"{group_by_column}\", {agg_sql} AS \"{operation}({aggregate_column})\" FROM from_t CROSS JOIN __bounds WHERE {} GROUP BY __bounds.\"{group_by_column}\"",
+        where_conditions.join(" AND ")
+    );
+
+    let main_df = ctx.sql(&main_sql).await?;
+    let main_batches = main_df.collect().await?;
+    collect_batches(main_batches)
 }
 
 /// Compute average over relationship as sum/count per group.
