@@ -70,6 +70,22 @@ impl PushdownPlanner {
                     PlanValue::Number(fetch.filters.len() as f64),
                 );
             }
+            QueryPlan::PushedJoinAggregation { source_table, sql } => {
+                node.add_property(
+                    "decision",
+                    PlanValue::Text("PushedJoinAggregation".into()),
+                );
+                node.add_property(
+                    "reason",
+                    PlanValue::Text(
+                        "All tables on same source — pushing JOIN + aggregation".into(),
+                    ),
+                );
+                node.add_property("source", PlanValue::Text(source_table.clone()));
+                node.add_property("sql", PlanValue::Text(sql.clone()));
+                node.add_property("all_simple", PlanValue::Bool(true));
+                node.add_property("has_context_ops", PlanValue::Bool(false));
+            }
             QueryPlan::LocalAggregation {
                 fetches,
                 measures,
@@ -250,9 +266,35 @@ mod tests {
     }
 
     #[test]
-    fn explain_local_plan_shows_reason() {
+    fn explain_pushed_join_plan_shows_reason() {
         let model = star_schema_model();
         let registry = mock_registry(&["Sales", "Products"]);
+        let request = QueryRequest {
+            measures: vec!["TotalAmount".into()],
+            group_by: vec![ColumnRef::new("Products", "category")],
+            filters: vec![],
+            lookups: vec![],
+        };
+
+        let (plan, node) = PushdownPlanner::plan_explained(&request, &model, &registry).unwrap();
+
+        assert!(matches!(plan, QueryPlan::PushedJoinAggregation { .. }));
+
+        let reason = node.properties.iter().find(|p| p.key == "reason").unwrap();
+        match &reason.value {
+            PlanValue::Text(s) => assert!(s.contains("same source")),
+            other => panic!("Expected Text, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn explain_local_plan_cross_source_shows_reason() {
+        let model = star_schema_model();
+        // Bind tables to different connectors to force local aggregation.
+        let mut registry = SourceRegistry::new();
+        registry.bind("Sales", 0, SourceBinding::new("public", "sales"));
+        registry.bind("Products", 1, SourceBinding::new("public", "products"));
+
         let request = QueryRequest {
             measures: vec!["TotalAmount".into()],
             group_by: vec![ColumnRef::new("Products", "category")],
@@ -268,16 +310,6 @@ mod tests {
         match &reason.value {
             PlanValue::Text(s) => assert!(s.contains("Multiple tables")),
             other => panic!("Expected Text, got {other:?}"),
-        }
-
-        let tables = node
-            .properties
-            .iter()
-            .find(|p| p.key == "tables_involved")
-            .unwrap();
-        match &tables.value {
-            PlanValue::List(v) => assert_eq!(v.len(), 2),
-            other => panic!("Expected List, got {other:?}"),
         }
     }
 

@@ -60,6 +60,26 @@ impl super::QueryExecutor {
 
                 Ok((batches, node))
             }
+            QueryPlan::PushedJoinAggregation { source_table, sql } => {
+                let start = Instant::now();
+                let connector = registry.connector_for(source_table)?;
+                let batches = connector.execute_query(sql).await?;
+                let elapsed = start.elapsed();
+
+                let row_count: usize = batches.iter().map(|b| b.num_rows()).sum();
+
+                let mut node = PlanNode::new(
+                    PlanOperation::PushedAggregation,
+                    "Pushed Join Aggregation",
+                )
+                .with_duration(elapsed);
+
+                node.add_property("sql", PlanValue::Text(sql.clone()));
+                node.add_property("rows_returned", PlanValue::Number(row_count as f64));
+                node.add_property("source", PlanValue::Text(source_table.clone()));
+
+                Ok((batches, node))
+            }
             QueryPlan::LocalAggregation {
                 fetches,
                 measures,

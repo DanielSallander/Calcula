@@ -278,10 +278,10 @@ async fn end_to_end_local_aggregation_star_schema() {
 
     let plan = PushdownPlanner::plan(&request, &model, &registry).unwrap();
 
-    // Should be local aggregation (cross-table: fact + dimension).
+    // Same-source star schema → pushed join aggregation.
     assert!(matches!(
         plan,
-        engine_query::QueryPlan::LocalAggregation { .. }
+        engine_query::QueryPlan::PushedJoinAggregation { .. }
     ));
 
     let batches = QueryExecutor::execute(&plan, &model, &registry, None, None)

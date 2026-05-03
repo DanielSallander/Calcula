@@ -48,6 +48,11 @@ impl QueryExecutor {
                 let batches = connector.fetch_data(request).await?;
                 Ok(batches)
             }
+            QueryPlan::PushedJoinAggregation { source_table, sql } => {
+                let connector = registry.connector_for(source_table)?;
+                let batches = connector.execute_query(sql).await?;
+                Ok(batches)
+            }
             QueryPlan::LocalAggregation {
                 fetches,
                 measures,
@@ -3372,6 +3377,9 @@ fn resolve_compound_sql(
             let fact = fact_model_name.to_lowercase();
             let qualified = if col.contains('.') {
                 col
+            } else if col.starts_with('"') {
+                // Already quoted by to_sql_string (e.g., QualifiedColumnRef → "col")
+                format!("{fact}.{col}")
             } else {
                 format!("{fact}.\"{col}\"")
             };

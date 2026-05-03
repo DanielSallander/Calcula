@@ -6,7 +6,7 @@ license.workspace = true
 description = "Calcula Engine: unified API for analytical computation"
 
 [lib]
-name = "bi_engine"
+name = "engine"
 
 [dependencies]
 engine-core = { path = "../engine-core" }

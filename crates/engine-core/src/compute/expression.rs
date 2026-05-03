@@ -1187,8 +1187,13 @@ impl Expression {
             | Expression::Traverse { .. }
             | Expression::Using { .. }
             | Expression::UseRelationship { .. }
-            | Expression::KeepIn { .. }
-            | Expression::Block { .. } => true,
+            | Expression::KeepIn { .. } => true,
+            Expression::Block { bindings, result } => {
+                bindings
+                    .iter()
+                    .any(|(_, expr)| expr.has_context_ops())
+                    || result.has_context_ops()
+            }
             Expression::If {
                 condition,
                 then_expr,
@@ -4126,11 +4131,22 @@ mod tests {
     }
 
     #[test]
-    fn block_has_context_ops() {
+    fn block_without_context_ops_returns_false() {
         let expr = block(
             vec![("total".into(), agg(AggregateOp::Sum, col("amount")))],
             col("total"),
         );
+        assert!(!expr.has_context_ops());
+    }
+
+    #[test]
+    fn block_with_context_ops_returns_true() {
+        use crate::model::ClearTarget;
+        let clear_expr = Expression::Clear {
+            expr: Box::new(agg(AggregateOp::Sum, col("amount"))),
+            targets: vec![ClearTarget::Table("dim".to_string())],
+        };
+        let expr = block(vec![("total".into(), clear_expr)], col("total"));
         assert!(expr.has_context_ops());
     }
 
