@@ -3983,6 +3983,7 @@ pub fn run() {
             bi::bi_get_column_values,
             bi::bi_get_column_available_values,
             bi::bi_get_region_at_cell,
+            bi::bi_save_all_caches,
             // Data validation commands
             data_validation::set_data_validation,
             data_validation::clear_data_validation,
@@ -4302,6 +4303,14 @@ pub fn run() {
                         if let Some(token) = ct.as_ref() {
                             token.cancel();
                         }
+                    }
+                }
+
+                // Save all BI engine caches to disk before exit
+                if let Some(bi_state) = app_handle.try_state::<bi::BiState>() {
+                    let saved = bi_state.engine_registry.save_all_caches();
+                    if saved > 0 {
+                        eprintln!("[BI] Shutdown: saved {} engine cache(s) to disk", saved);
                     }
                 }
             }

@@ -6,7 +6,10 @@
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
+use tokio::sync::Mutex as TokioMutex;
+
+use super::engine_registry::{EngineRegistry, ModelKey};
 
 // ---------------------------------------------------------------------------
 // Connection ID
@@ -20,6 +23,7 @@ pub type ConnectionId = u64;
 
 /// Managed state for the BI extension, stored alongside AppState in Tauri.
 /// Supports multiple named connections, each with its own engine instance.
+/// The EngineRegistry provides shared engines across connections using the same model.
 pub struct BiState {
     /// All connections, keyed by ConnectionId.
     pub connections: Mutex<HashMap<ConnectionId, Connection>>,
@@ -27,6 +31,8 @@ pub struct BiState {
     pub next_connection_id: Mutex<ConnectionId>,
     /// Auto-incrementing ID for BI regions (grid-inserted query results).
     pub next_region_id: Mutex<u64>,
+    /// Shared engine registry — multiple connections using the same model share one Engine.
+    pub engine_registry: EngineRegistry,
 }
 
 impl BiState {
@@ -35,6 +41,7 @@ impl BiState {
             connections: Mutex::new(HashMap::new()),
             next_connection_id: Mutex::new(1),
             next_region_id: Mutex::new(1),
+            engine_registry: EngineRegistry::new(),
         }
     }
 }
@@ -57,8 +64,11 @@ pub struct Connection {
     pub connection_string: String,
     /// Path to the loaded model JSON file.
     pub model_path: Option<String>,
-    /// The BI Engine instance. None until a model is loaded.
-    pub engine: Option<bi_engine::Engine>,
+    /// The shared BI Engine instance (Arc for sharing across connections with the same model).
+    /// None until a model is loaded.
+    pub engine: Option<Arc<TokioMutex<bi_engine::Engine>>>,
+    /// The model key for the shared engine registry.
+    pub model_key: Option<ModelKey>,
     /// Index of the connected database source within the Engine registry.
     pub connector_index: Option<usize>,
     /// Table bindings for re-connect scenarios.
@@ -114,11 +124,17 @@ pub struct ConnectionInfo {
 
 impl Connection {
     /// Build a ConnectionInfo summary for the frontend.
+    /// Note: this uses try_lock since we're often inside a std::sync::Mutex on connections.
     pub fn to_info(&self) -> ConnectionInfo {
         let (table_count, measure_count) = match &self.engine {
-            Some(engine) => {
-                let model = engine.model();
-                (model.tables().len(), model.measures().len())
+            Some(engine_arc) => {
+                match engine_arc.try_lock() {
+                    Ok(engine) => {
+                        let model = engine.model();
+                        (model.tables().len(), model.measures().len())
+                    }
+                    Err(_) => (0, 0), // Engine is busy, return zeros
+                }
             }
             None => (0, 0),
         };

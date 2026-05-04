@@ -3400,6 +3400,15 @@ export async function biRefreshAllInMemory(
 }
 
 // ---------------------------------------------------------------------------
+// Cache Management
+// ---------------------------------------------------------------------------
+
+/** Save all BI engine caches to disk. Returns number of engines saved. */
+export async function biSaveAllCaches(): Promise<number> {
+  return invoke<number>("bi_save_all_caches", {});
+}
+
+// ---------------------------------------------------------------------------
 // Model Info & Region Check
 // ---------------------------------------------------------------------------
 

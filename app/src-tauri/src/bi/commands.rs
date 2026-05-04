@@ -3,8 +3,11 @@
 //!          Create/delete/manage connections, load models, connect to databases,
 //!          bind tables, execute queries, and manage locked regions.
 //! CONTEXT: All async commands use the bi-engine crate (Calcula Engine Lib).
+//!          Engines are shared via Arc<TokioMutex<Engine>> through the EngineRegistry.
 
 use std::path::Path;
+use std::sync::Arc;
+use tokio::sync::Mutex as TokioMutex;
 
 use arrow::array::{
     Array, BooleanArray, Date32Array, Decimal128Array,
@@ -21,6 +24,7 @@ use crate::{
 };
 
 use super::types::*;
+use super::engine_registry::{EngineRegistry, ModelKey};
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -235,11 +239,25 @@ fn build_engine_query(request: &BiQueryRequest) -> bi_engine::QueryRequest {
     }
 }
 
+/// Helper: get the engine Arc from a connection by ID.
+/// Briefly locks the connections mutex, clones the Arc, then releases.
+fn get_engine_arc(
+    bi_state: &BiState,
+    connection_id: ConnectionId,
+) -> Result<Arc<TokioMutex<bi_engine::Engine>>, String> {
+    let connections = bi_state.connections.lock().unwrap();
+    let conn = connections.get(&connection_id)
+        .ok_or_else(|| format!("Connection {} not found", connection_id))?;
+    conn.engine.clone()
+        .ok_or_else(|| "No model loaded.".to_string())
+}
+
 // ---------------------------------------------------------------------------
 // Tauri Commands — Connection Management
 // ---------------------------------------------------------------------------
 
-/// Create a new connection: loads the model, returns ConnectionInfo.
+/// Create a new connection: loads the model, registers in the shared engine registry,
+/// loads disk cache, and refreshes stale tables.
 /// Does NOT connect to the database yet — call `bi_connect` for that.
 #[tauri::command]
 pub async fn bi_create_connection(
@@ -269,7 +287,32 @@ pub async fn bi_create_connection(
         .map_err(|e| format!("Failed to parse model: {}", e))?;
     model.validate().map_err(|e| format!("Model validation failed: {}", e))?;
 
+    let model_key = ModelKey::from_model_path(&request.model_path);
+
+    // Get or create shared engine via the registry
     let engine = bi_engine::Engine::new(model);
+    let (engine_arc, was_existing, cache_dir) =
+        bi_state.engine_registry.get_or_create(&model_key, engine);
+
+    // If this is a new engine (not reused), load disk cache and refresh stale tables
+    if !was_existing {
+        let mut engine_guard = engine_arc.lock().await;
+
+        // Step 1: Load disk cache (fast, from local files)
+        // DEV: Log disk cache load results
+        let cached_tables = EngineRegistry::load_cache(&mut engine_guard, &cache_dir);
+        if !cached_tables.is_empty() {
+            log_info!("BI", "Startup: loaded {} tables from DISK CACHE: {}", cached_tables.len(), cached_tables.join(", "));
+        } else {
+            log_info!("BI", "Startup: no DISK CACHE found, all tables will be fetched from DATABASE on first query");
+        }
+
+        // Step 2: refresh_stale requires a database connection, so we defer it.
+        // It will happen automatically via query_auto_refresh on first query.
+        // If the user explicitly connects (bi_connect), we can refresh then.
+
+        drop(engine_guard);
+    }
 
     // Generate ID
     let id = {
@@ -286,7 +329,8 @@ pub async fn bi_create_connection(
         connection_type: ConnectionType::PostgreSQL,
         connection_string: request.connection_string,
         model_path: Some(request.model_path),
-        engine: Some(engine),
+        engine: Some(engine_arc),
+        model_key: Some(model_key),
         connector_index: None,
         bindings: Vec::new(),
         last_refreshed: None,
@@ -310,6 +354,7 @@ pub async fn bi_create_connection(
 }
 
 /// Delete a connection by ID.
+/// Releases the shared engine reference; saves cache if this was the last reference.
 #[tauri::command]
 pub async fn bi_delete_connection(
     bi_state: State<'_, BiState>,
@@ -318,17 +363,26 @@ pub async fn bi_delete_connection(
 ) -> Result<(), String> {
     log_info!("BI", "bi_delete_connection: id={}", connection_id);
 
-    let mut connections = bi_state.connections.lock().unwrap();
-    let conn = connections.remove(&connection_id)
-        .ok_or_else(|| format!("Connection {} not found", connection_id))?;
+    let (model_key, region_ids) = {
+        let mut connections = bi_state.connections.lock().unwrap();
+        let conn = connections.remove(&connection_id)
+            .ok_or_else(|| format!("Connection {} not found", connection_id))?;
+
+        let region_ids: Vec<u64> = conn.active_queries.keys().copied().collect();
+        (conn.model_key, region_ids)
+    };
 
     // Remove any protected regions owned by this connection's queries
-    let region_ids: Vec<u64> = conn.active_queries.keys().copied().collect();
     if !region_ids.is_empty() {
         let mut regions = state.protected_regions.lock().unwrap();
         regions.retain(|r| {
             !(r.region_type == "bi" && region_ids.contains(&r.owner_id))
         });
+    }
+
+    // Release the shared engine reference (saves cache if last ref)
+    if let Some(key) = model_key {
+        bi_state.engine_registry.release(&key);
     }
 
     Ok(())
@@ -389,7 +443,7 @@ pub async fn bi_get_connection(
 // Tauri Commands — Connect / Disconnect / Bind
 // ---------------------------------------------------------------------------
 
-/// Connect a connection to its PostgreSQL database.
+/// Connect a connection to its PostgreSQL database, then refresh stale cached tables.
 #[tauri::command]
 pub async fn bi_connect(
     bi_state: State<'_, BiState>,
@@ -398,30 +452,54 @@ pub async fn bi_connect(
     let connection_id = request.connection_id;
     log_info!("BI", "bi_connect: connection_id={}", connection_id);
 
-    // Take the engine out of the connection for async work
-    let (mut engine, conn_str) = {
+    // Get the engine Arc and connection string
+    let (engine_arc, conn_str) = {
+        let connections = bi_state.connections.lock().unwrap();
+        let conn = connections.get(&connection_id)
+            .ok_or_else(|| format!("Connection {} not found", connection_id))?;
+        let engine_arc = conn.engine.clone()
+            .ok_or("No model loaded for this connection.")?;
+        (engine_arc, conn.connection_string.clone())
+    };
+
+    // Lock the shared engine for async database connection
+    let idx = {
+        let mut engine = engine_arc.lock().await;
+        let config = bi_engine::PostgresConfig::new(&conn_str);
+        engine.add_postgres(config).await
+            .map_err(|e| format!("Connection failed: {}", e))?
+    };
+
+    // After connecting, refresh stale tables (if any were loaded from disk cache)
+    {
+        let mut engine = engine_arc.lock().await;
+        match engine.refresh_stale().await {
+            Ok(refreshed) => {
+                if !refreshed.is_empty() {
+                    log_info!("BI", "Refreshed stale tables after connect: {}", refreshed.join(", "));
+                }
+            }
+            Err(e) => {
+                log_info!("BI", "refresh_stale after connect failed (non-fatal): {}", e);
+            }
+        }
+    }
+
+    // Update connection state
+    let info = {
         let mut connections = bi_state.connections.lock().unwrap();
         let conn = connections.get_mut(&connection_id)
             .ok_or_else(|| format!("Connection {} not found", connection_id))?;
-        let engine = conn.engine.take()
-            .ok_or("No model loaded for this connection.")?;
-        (engine, conn.connection_string.clone())
+        conn.connector_index = Some(idx);
+        conn.is_connected = true;
+        conn.to_info()
     };
 
-    let config = bi_engine::PostgresConfig::new(&conn_str);
-    let idx = engine.add_postgres(config).await
-        .map_err(|e| format!("Connection failed: {}", e))?;
-
-    // Put engine back and update state
-    let mut connections = bi_state.connections.lock().unwrap();
-    let conn = connections.get_mut(&connection_id)
-        .ok_or_else(|| format!("Connection {} not found", connection_id))?;
-    conn.engine = Some(engine);
-    conn.connector_index = Some(idx);
-    conn.is_connected = true;
+    // Save cache to disk after successful refresh (crash protection)
+    save_cache_for_connection(&bi_state, connection_id).await;
 
     log_info!("BI", "Connected: id={}, connector_index={}", connection_id, idx);
-    Ok(conn.to_info())
+    Ok(info)
 }
 
 /// Disconnect a connection (drops the database link but keeps the engine/model).
@@ -458,21 +536,30 @@ pub async fn bi_bind_table(
         request.source_table
     );
 
-    let mut connections = bi_state.connections.lock().unwrap();
-    let conn = connections.get_mut(&connection_id)
-        .ok_or_else(|| format!("Connection {} not found", connection_id))?;
+    let (engine_arc, connector_index) = {
+        let connections = bi_state.connections.lock().unwrap();
+        let conn = connections.get(&connection_id)
+            .ok_or_else(|| format!("Connection {} not found", connection_id))?;
+        let connector_index = conn.connector_index
+            .ok_or("Not connected to a database. Connect first.")?;
+        let engine_arc = conn.engine.clone()
+            .ok_or("No model loaded.")?;
+        (engine_arc, connector_index)
+    };
 
-    let connector_index = conn.connector_index
-        .ok_or("Not connected to a database. Connect first.")?;
-
-    let engine = conn.engine.as_mut()
-        .ok_or("No model loaded.")?;
-
-    let binding = bi_engine::SourceBinding::new(&request.schema, &request.source_table);
-    engine.bind_table(&request.model_table, connector_index, binding);
+    {
+        let mut engine = engine_arc.lock().await;
+        let binding = bi_engine::SourceBinding::new(&request.schema, &request.source_table);
+        engine.bind_table(&request.model_table, connector_index, binding);
+    }
 
     // Store binding for potential re-connect
-    conn.bindings.push(request.clone());
+    {
+        let mut connections = bi_state.connections.lock().unwrap();
+        if let Some(conn) = connections.get_mut(&connection_id) {
+            conn.bindings.push(request.clone());
+        }
+    }
 
     Ok(format!(
         "Bound '{}' to {}.{}",
@@ -500,27 +587,27 @@ pub async fn bi_query(
     );
 
     let query_request = build_engine_query(&request);
+    let engine_arc = get_engine_arc(&bi_state, connection_id)?;
 
-    // Take engine out for async query
-    let mut engine = {
-        let mut connections = bi_state.connections.lock().unwrap();
-        let conn = connections.get_mut(&connection_id)
-            .ok_or_else(|| format!("Connection {} not found", connection_id))?;
-        conn.engine.take().ok_or("No model loaded.")?
+    let (batches, refreshed_tables) = {
+        let mut engine = engine_arc.lock().await;
+        engine.query_auto_refresh(query_request).await
+            .map_err(|e| format!("Query failed: {}", e))?
     };
 
-    let (batches, refreshed_tables) = engine.query_auto_refresh(query_request).await
-        .map_err(|e| format!("Query failed: {}", e))?;
-
-    if !refreshed_tables.is_empty() {
-        log_info!("BI", "Auto-refreshed stale tables: {}", refreshed_tables.join(", "));
+    // DEV: Log data source (cache vs database)
+    if refreshed_tables.is_empty() {
+        log_info!("BI", "bi_query: data served from CACHE (no tables refreshed)");
+    } else {
+        log_info!("BI", "bi_query: data fetched from DATABASE for: {}", refreshed_tables.join(", "));
+        // Save cache after auto-refresh (crash protection)
+        save_cache_for_connection(&bi_state, connection_id).await;
     }
 
-    // Put engine back
+    // Update last_refreshed timestamp
     {
         let mut connections = bi_state.connections.lock().unwrap();
         if let Some(conn) = connections.get_mut(&connection_id) {
-            conn.engine = Some(engine);
             conn.last_refreshed = Some(now_iso());
         }
     }
@@ -556,33 +643,27 @@ pub async fn bi_get_column_values(
     // Auto-bind ALL model tables — the query planner may need fact tables
     // for measure computation even when we only group by a dimension column.
     {
-        let connections = bi_state.connections.lock().unwrap();
-        let conn = connections.get(&connection_id)
-            .ok_or_else(|| format!("Connection {} not found", connection_id))?;
-        let engine = conn.engine.as_ref().ok_or("No model loaded.")?;
-        let all_tables: Vec<String> = engine.model().tables().iter()
-            .map(|t| t.name().to_string())
-            .collect();
-        drop(connections);
+        let engine_arc = get_engine_arc(&bi_state, connection_id)?;
+        let all_tables: Vec<String> = {
+            let engine = engine_arc.lock().await;
+            engine.model().tables().iter()
+                .map(|t| t.name().to_string())
+                .collect()
+        };
         auto_bind_tables_on_connection(
             &bi_state,
             connection_id,
             &all_tables.iter().map(|s| s.as_str()).collect::<Vec<_>>(),
-        )?;
+        ).await?;
     }
 
-    // The BI engine requires at least one measure. Pick the first available
-    // measure from the model to satisfy the constraint — we'll discard
-    // the measure column from results and only keep the group_by column.
+    // The BI engine requires at least one measure. Pick the first available.
     let first_measure = {
-        let connections = bi_state.connections.lock().unwrap();
-        let conn = connections.get(&connection_id)
-            .ok_or_else(|| format!("Connection {} not found", connection_id))?;
-        let engine = conn.engine.as_ref().ok_or("No model loaded.")?;
-        let model = engine.model();
-        model.measures().first()
+        let engine_arc = get_engine_arc(&bi_state, connection_id)?;
+        let engine = engine_arc.lock().await;
+        engine.model().measures().first()
             .map(|m| m.name().to_string())
-            .ok_or_else(|| "No measures in model — cannot query column values".to_string())?
+            .ok_or_else(|| "No measures in model -- cannot query column values".to_string())?
     };
 
     let query_request = bi_engine::QueryRequest {
@@ -592,33 +673,21 @@ pub async fn bi_get_column_values(
         lookups: vec![],
     };
 
-    // Take engine out for async query + refresh
-    let mut engine = {
-        let mut connections = bi_state.connections.lock().unwrap();
-        let conn = connections
-            .get_mut(&connection_id)
-            .ok_or_else(|| format!("Connection {} not found", connection_id))?;
-        conn.engine.take().ok_or("No model loaded.")?
+    let engine_arc = get_engine_arc(&bi_state, connection_id)?;
+    let (batches, refreshed_tables) = {
+        let mut engine = engine_arc.lock().await;
+        engine.query_auto_refresh(query_request).await
+            .map_err(|e| format!("Query failed: {}", e))?
     };
 
-    // Auto-refresh stale in-memory tables, then execute query
-    let result = engine.query_auto_refresh(query_request).await;
-
-    // Always put engine back, even on error
-    {
-        let mut connections = bi_state.connections.lock().unwrap();
-        if let Some(conn) = connections.get_mut(&connection_id) {
-            conn.engine = Some(engine);
-        }
+    // DEV: Log data source (cache vs database)
+    if refreshed_tables.is_empty() {
+        log_info!("BI", "bi_get_column_values: data served from CACHE");
+    } else {
+        log_info!("BI", "bi_get_column_values: data fetched from DATABASE for: {}", refreshed_tables.join(", "));
     }
 
-    let (batches, refreshed_tables) = result.map_err(|e| format!("Query failed: {}", e))?;
-    if !refreshed_tables.is_empty() {
-        log_info!("BI", "bi_get_column_values: auto-refreshed: {}", refreshed_tables.join(", "));
-    }
-
-    // Extract unique values from the first column (group_by column),
-    // ignoring the measure column.
+    // Extract unique values from the first column (group_by column)
     let mut values: Vec<String> = Vec::new();
     for batch in &batches {
         if batch.num_columns() == 0 {
@@ -647,9 +716,6 @@ pub async fn bi_get_column_values(
 }
 
 /// Get distinct values for a column, filtered by cross-filter constraints.
-/// Each constraint specifies a column and a list of allowed values (IN-list).
-/// The query includes sibling columns in GROUP BY and post-filters results,
-/// so the BI engine's relationship model handles cross-table joins.
 #[tauri::command]
 pub async fn bi_get_column_available_values(
     bi_state: State<'_, BiState>,
@@ -661,26 +727,23 @@ pub async fn bi_get_column_available_values(
     // Auto-connect + auto-bind
     auto_connect_bi_connection(&bi_state, connection_id).await?;
     {
-        let connections = bi_state.connections.lock().unwrap();
-        let conn = connections.get(&connection_id)
-            .ok_or_else(|| format!("Connection {} not found", connection_id))?;
-        let engine = conn.engine.as_ref().ok_or("No model loaded.")?;
-        let all_tables: Vec<String> = engine.model().tables().iter()
-            .map(|t| t.name().to_string())
-            .collect();
-        drop(connections);
+        let engine_arc = get_engine_arc(&bi_state, connection_id)?;
+        let all_tables: Vec<String> = {
+            let engine = engine_arc.lock().await;
+            engine.model().tables().iter()
+                .map(|t| t.name().to_string())
+                .collect()
+        };
         auto_bind_tables_on_connection(
             &bi_state,
             connection_id,
             &all_tables.iter().map(|s| s.as_str()).collect::<Vec<_>>(),
-        )?;
+        ).await?;
     }
 
     let first_measure = {
-        let connections = bi_state.connections.lock().unwrap();
-        let conn = connections.get(&connection_id)
-            .ok_or_else(|| format!("Connection {} not found", connection_id))?;
-        let engine = conn.engine.as_ref().ok_or("No model loaded.")?;
+        let engine_arc = get_engine_arc(&bi_state, connection_id)?;
+        let engine = engine_arc.lock().await;
         engine.model().measures().first()
             .map(|m| m.name().to_string())
             .ok_or_else(|| "No measures in model".to_string())?
@@ -699,28 +762,21 @@ pub async fn bi_get_column_available_values(
         lookups: vec![],
     };
 
-    let mut engine = {
-        let mut connections = bi_state.connections.lock().unwrap();
-        let conn = connections
-            .get_mut(&connection_id)
-            .ok_or_else(|| format!("Connection {} not found", connection_id))?;
-        conn.engine.take().ok_or("No model loaded.")?
+    let engine_arc = get_engine_arc(&bi_state, connection_id)?;
+    let (batches, refreshed_tables) = {
+        let mut engine = engine_arc.lock().await;
+        engine.query_auto_refresh(query_request).await
+            .map_err(|e| format!("Query failed: {}", e))?
     };
 
-    let result = engine.query_auto_refresh(query_request).await;
-
-    {
-        let mut connections = bi_state.connections.lock().unwrap();
-        if let Some(conn) = connections.get_mut(&connection_id) {
-            conn.engine = Some(engine);
-        }
+    // DEV: Log data source (cache vs database)
+    if refreshed_tables.is_empty() {
+        log_info!("BI", "bi_get_column_available_values: data served from CACHE");
+    } else {
+        log_info!("BI", "bi_get_column_available_values: data fetched from DATABASE for: {}", refreshed_tables.join(", "));
     }
 
-    let (batches, _refreshed) = result.map_err(|e| format!("Query failed: {}", e))?;
-
     // Post-filter: for each row, check if all cross-filter columns match
-    // their allowed values. Collect target column values from matching rows.
-    // Column 0 = target, columns 1..N = cross-filter columns (in order).
     let mut values = std::collections::HashSet::new();
 
     for batch in &batches {
@@ -728,19 +784,15 @@ pub async fn bi_get_column_available_values(
             continue;
         }
 
-        let num_cross = cross_filters.len();
-
-        // Build allowed-value sets for each cross-filter column
         let allowed: Vec<std::collections::HashSet<&str>> = cross_filters
             .iter()
             .map(|cf| cf.values.iter().map(|v| v.as_str()).collect())
             .collect();
 
         for row_idx in 0..batch.num_rows() {
-            // Check all cross-filter columns match
             let mut passes = true;
             for (cf_idx, allowed_set) in allowed.iter().enumerate() {
-                let col_idx = 1 + cf_idx; // offset by target column
+                let col_idx = 1 + cf_idx;
                 if col_idx < batch.num_columns() {
                     let val = arrow_value_to_string(batch.column(col_idx), row_idx)
                         .unwrap_or_default();
@@ -976,32 +1028,25 @@ pub async fn bi_refresh_connection(
         return Err("No active queries to refresh.".to_string());
     }
 
+    let engine_arc = get_engine_arc(&bi_state, connection_id)?;
+    let mut any_refreshed = false;
     let mut results = Vec::new();
 
     for active_query in &active_queries {
         let query_request = build_engine_query(&active_query.request);
 
-        // Take engine out for async query
-        let mut engine = {
-            let mut connections = bi_state.connections.lock().unwrap();
-            let conn = connections.get_mut(&connection_id)
-                .ok_or_else(|| format!("Connection {} not found", connection_id))?;
-            conn.engine.take().ok_or("No model loaded.")?
+        let (batches, refreshed_tables) = {
+            let mut engine = engine_arc.lock().await;
+            engine.query_auto_refresh(query_request).await
+                .map_err(|e| format!("Refresh query failed: {}", e))?
         };
 
-        let (batches, refreshed_tables) = engine.query_auto_refresh(query_request).await
-            .map_err(|e| format!("Refresh query failed: {}", e))?;
-
-        if !refreshed_tables.is_empty() {
-            log_info!("BI", "bi_refresh_connection: auto-refreshed: {}", refreshed_tables.join(", "));
-        }
-
-        // Put engine back
-        {
-            let mut connections = bi_state.connections.lock().unwrap();
-            if let Some(conn) = connections.get_mut(&connection_id) {
-                conn.engine = Some(engine);
-            }
+        // DEV: Log data source (cache vs database)
+        if refreshed_tables.is_empty() {
+            log_info!("BI", "bi_refresh_connection: query data served from CACHE");
+        } else {
+            log_info!("BI", "bi_refresh_connection: query data fetched from DATABASE for: {}", refreshed_tables.join(", "));
+            any_refreshed = true;
         }
 
         let result = batches_to_result(&batches);
@@ -1165,6 +1210,11 @@ pub async fn bi_refresh_connection(
         results.push(result);
     }
 
+    // Save cache after refresh if any tables were actually refreshed
+    if any_refreshed {
+        save_cache_for_connection(&bi_state, connection_id).await;
+    }
+
     Ok(results)
 }
 
@@ -1178,35 +1228,33 @@ pub async fn bi_refresh_all_in_memory(
 ) -> Result<Vec<String>, String> {
     log_info!("BI", "bi_refresh_all_in_memory: conn={}", connection_id);
 
-    let mut engine = {
-        let mut connections = bi_state.connections.lock().unwrap();
-        let conn = connections.get_mut(&connection_id)
-            .ok_or_else(|| format!("Connection {} not found", connection_id))?;
-        conn.engine.take().ok_or("No model loaded.")?
-    };
+    let engine_arc = get_engine_arc(&bi_state, connection_id)?;
 
-    let result = engine.refresh_all_in_memory().await;
+    {
+        let mut engine = engine_arc.lock().await;
+        engine.refresh_all_in_memory().await
+            .map_err(|e| format!("Refresh failed: {}", e))?;
+    }
 
-    // Always put engine back
+    // Update timestamp
     {
         let mut connections = bi_state.connections.lock().unwrap();
         if let Some(conn) = connections.get_mut(&connection_id) {
-            conn.engine = Some(engine);
             conn.last_refreshed = Some(now_iso());
         }
     }
 
-    result.map_err(|e| format!("Refresh failed: {}", e))?;
+    // Return names of all in-memory tables
+    let table_names: Vec<String> = {
+        let engine = engine_arc.lock().await;
+        engine.model().tables().iter()
+            .filter(|t| t.is_in_memory())
+            .map(|t| t.name().to_string())
+            .collect()
+    };
 
-    // Return names of all in-memory tables (they were all refreshed)
-    let connections = bi_state.connections.lock().unwrap();
-    let conn = connections.get(&connection_id)
-        .ok_or_else(|| format!("Connection {} not found", connection_id))?;
-    let engine = conn.engine.as_ref().ok_or("No model loaded.")?;
-    let table_names: Vec<String> = engine.model().tables().iter()
-        .filter(|t| t.is_in_memory())
-        .map(|t| t.name().to_string())
-        .collect();
+    // Save cache after full refresh
+    save_cache_for_connection(&bi_state, connection_id).await;
 
     log_info!("BI", "Refreshed {} in-memory tables", table_names.len());
     Ok(table_names)
@@ -1222,11 +1270,18 @@ pub async fn bi_get_model_info(
     bi_state: State<'_, BiState>,
     connection_id: ConnectionId,
 ) -> Result<Option<BiModelInfo>, String> {
-    let connections = bi_state.connections.lock().unwrap();
-    let conn = connections.get(&connection_id)
-        .ok_or_else(|| format!("Connection {} not found", connection_id))?;
-    match &conn.engine {
-        Some(engine) => Ok(Some(model_to_info(engine.model()))),
+    let engine_arc = {
+        let connections = bi_state.connections.lock().unwrap();
+        let conn = connections.get(&connection_id)
+            .ok_or_else(|| format!("Connection {} not found", connection_id))?;
+        conn.engine.clone()
+    };
+
+    match engine_arc {
+        Some(arc) => {
+            let engine = arc.lock().await;
+            Ok(Some(model_to_info(engine.model())))
+        }
         None => Ok(None),
     }
 }
@@ -1263,6 +1318,20 @@ pub async fn bi_get_region_at_cell(
 }
 
 // ---------------------------------------------------------------------------
+// Tauri Commands — Cache Management
+// ---------------------------------------------------------------------------
+
+/// Save all engine caches to disk (e.g., before shutdown or on demand).
+#[tauri::command]
+pub async fn bi_save_all_caches(
+    bi_state: State<'_, BiState>,
+) -> Result<usize, String> {
+    let saved = bi_state.engine_registry.save_all_caches();
+    log_info!("BI", "bi_save_all_caches: saved {} engines", saved);
+    Ok(saved)
+}
+
+// ---------------------------------------------------------------------------
 // Public helpers used by pivot commands
 // ---------------------------------------------------------------------------
 
@@ -1271,47 +1340,41 @@ pub async fn auto_connect_bi_connection(
     bi_state: &BiState,
     connection_id: ConnectionId,
 ) -> Result<(), String> {
-    let already_connected = {
+    let (already_connected, conn_str) = {
         let connections = bi_state.connections.lock().unwrap();
         let conn = connections.get(&connection_id)
             .ok_or_else(|| format!("Connection {} not found", connection_id))?;
-        conn.is_connected
+        (conn.is_connected, conn.connection_string.clone())
     };
 
     if already_connected {
         return Ok(());
     }
 
-    let (mut engine, conn_str) = {
-        let mut connections = bi_state.connections.lock().unwrap();
-        let conn = connections.get_mut(&connection_id)
-            .ok_or_else(|| format!("Connection {} not found", connection_id))?;
-        let engine = conn.engine.take()
-            .ok_or("No model loaded for this connection.")?;
-        (engine, conn.connection_string.clone())
-    };
-
     if conn_str.is_empty() {
-        // Put engine back before erroring
-        let mut connections = bi_state.connections.lock().unwrap();
-        if let Some(conn) = connections.get_mut(&connection_id) {
-            conn.engine = Some(engine);
-        }
         return Err("No connection string configured.".to_string());
     }
 
     log_info!("BI", "auto_connect: conn_id={}, connecting...", connection_id);
 
-    let config = bi_engine::PostgresConfig::new(&conn_str);
-    let result = engine.add_postgres(config).await;
+    let engine_arc = {
+        let connections = bi_state.connections.lock().unwrap();
+        let conn = connections.get(&connection_id)
+            .ok_or_else(|| format!("Connection {} not found", connection_id))?;
+        conn.engine.clone()
+            .ok_or("No model loaded for this connection.")?
+    };
 
-    // Always put engine back
+    let idx = {
+        let mut engine = engine_arc.lock().await;
+        let config = bi_engine::PostgresConfig::new(&conn_str);
+        engine.add_postgres(config).await
+            .map_err(|e| format!("Auto-connect failed: {}", e))?
+    };
+
     let mut connections = bi_state.connections.lock().unwrap();
     let conn = connections.get_mut(&connection_id)
         .ok_or_else(|| format!("Connection {} not found", connection_id))?;
-    conn.engine = Some(engine);
-
-    let idx = result.map_err(|e| format!("Auto-connect failed: {}", e))?;
     conn.connector_index = Some(idx);
     conn.is_connected = true;
 
@@ -1320,21 +1383,23 @@ pub async fn auto_connect_bi_connection(
 }
 
 /// Auto-bind model tables on a specific connection.
-pub fn auto_bind_tables_on_connection(
+pub async fn auto_bind_tables_on_connection(
     bi_state: &BiState,
     connection_id: ConnectionId,
     table_names: &[&str],
 ) -> Result<(), String> {
-    let mut connections = bi_state.connections.lock().unwrap();
-    let conn = connections.get_mut(&connection_id)
-        .ok_or_else(|| format!("Connection {} not found", connection_id))?;
+    let (engine_arc, connector_index) = {
+        let connections = bi_state.connections.lock().unwrap();
+        let conn = connections.get(&connection_id)
+            .ok_or_else(|| format!("Connection {} not found", connection_id))?;
+        let connector_index = conn.connector_index
+            .ok_or("No database connection.")?;
+        let engine_arc = conn.engine.clone()
+            .ok_or("No model loaded.")?;
+        (engine_arc, connector_index)
+    };
 
-    let connector_index = conn.connector_index
-        .ok_or("No database connection.")?;
-
-    let engine = conn.engine.as_mut()
-        .ok_or("No model loaded.")?;
-
+    let mut engine = engine_arc.lock().await;
     for table_name in table_names {
         if !engine.registry().has_table(table_name) {
             let source_table = table_name.to_lowercase();
@@ -1348,14 +1413,39 @@ pub fn auto_bind_tables_on_connection(
 }
 
 /// Extract model metadata from a connection's engine.
-pub fn extract_connection_model_info(
+pub async fn extract_connection_model_info(
     bi_state: &BiState,
     connection_id: ConnectionId,
 ) -> Result<BiModelInfo, String> {
-    let connections = bi_state.connections.lock().unwrap();
-    let conn = connections.get(&connection_id)
-        .ok_or_else(|| format!("Connection {} not found", connection_id))?;
-    let engine = conn.engine.as_ref()
-        .ok_or("No model loaded.")?;
+    let engine_arc = {
+        let connections = bi_state.connections.lock().unwrap();
+        let conn = connections.get(&connection_id)
+            .ok_or_else(|| format!("Connection {} not found", connection_id))?;
+        conn.engine.clone()
+            .ok_or("No model loaded.")?
+    };
+    let engine = engine_arc.lock().await;
     Ok(model_to_info(engine.model()))
+}
+
+// ---------------------------------------------------------------------------
+// Internal helpers
+// ---------------------------------------------------------------------------
+
+/// Save disk cache for a connection's engine (non-fatal on failure).
+/// Called after refreshes for crash protection.
+async fn save_cache_for_connection(bi_state: &BiState, connection_id: ConnectionId) {
+    let (engine_arc, model_key) = {
+        let connections = bi_state.connections.lock().unwrap();
+        match connections.get(&connection_id) {
+            Some(conn) => (conn.engine.clone(), conn.model_key.clone()),
+            None => return,
+        }
+    };
+
+    if let (Some(arc), Some(key)) = (engine_arc, model_key) {
+        let cache_dir = EngineRegistry::cache_dir_for(&key);
+        let engine = arc.lock().await;
+        EngineRegistry::save_cache_sync(&engine, &cache_dir);
+    }
 }

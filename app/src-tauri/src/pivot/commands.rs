@@ -3411,11 +3411,14 @@ pub async fn create_pivot_from_bi_model(
 
     // Extract model metadata from the connection's engine
     let (model_tables, measures) = {
-        let connections = bi_state.connections.lock().unwrap();
-        let conn = connections.get(&connection_id)
-            .ok_or_else(|| format!("Connection {} not found", connection_id))?;
-        let engine = conn.engine.as_ref().ok_or("No BI model loaded.")?;
-        let result = extract_bi_model_metadata(engine);
+        let engine_arc = {
+            let connections = bi_state.connections.lock().unwrap();
+            let conn = connections.get(&connection_id)
+                .ok_or_else(|| format!("Connection {} not found", connection_id))?;
+            conn.engine.clone().ok_or("No BI model loaded.")?
+        };
+        let engine = engine_arc.lock().await;
+        let result = extract_bi_model_metadata(&engine);
         log_info!(
             "PIVOT",
             "extract_bi_model_metadata: {} tables, {} measures",
@@ -3433,7 +3436,7 @@ pub async fn create_pivot_from_bi_model(
 
     // Auto-bind all model tables
     let table_names: Vec<&str> = model_tables.iter().map(|t| t.name.as_str()).collect();
-    auto_bind_tables_on_connection(&bi_state, connection_id, &table_names)?;
+    auto_bind_tables_on_connection(&bi_state, connection_id, &table_names).await?;
 
     log_info!(
         "PIVOT",
@@ -3687,7 +3690,7 @@ pub async fn update_bi_pivot_fields(
         }
     }
     let table_refs: Vec<&str> = referenced_tables.iter().map(|s| s.as_str()).collect();
-    auto_bind_tables_on_connection(&bi_state, connection_id, &table_refs)?;
+    auto_bind_tables_on_connection(&bi_state, connection_id, &table_refs).await?;
 
     // Guardrail: a LOOKUP field must follow at least one GROUP field from the same table.
     // Check across all zones (row + column fields combined for GROUP coverage).
@@ -3780,15 +3783,14 @@ pub async fn update_bi_pivot_fields(
         row_lookup_fields.len() + col_lookup_fields.len()
     );
 
-    // SAFE ENGINE TAKE: take engine out of connection, drop guard, query, put back
+    // Get the shared engine Arc for async query
     let t_query = Instant::now();
-    let mut engine = {
-        let mut connections = bi_state.connections.lock().unwrap();
-        let conn = connections.get_mut(&connection_id)
+    let engine_arc = {
+        let connections = bi_state.connections.lock().unwrap();
+        let conn = connections.get(&connection_id)
             .ok_or_else(|| format!("Connection {} not found", connection_id))?;
-        conn.engine.take().ok_or("No BI model loaded.")?
+        conn.engine.clone().ok_or("No BI model loaded.")?
     };
-    // Guard is dropped here — safe to await
 
     // Auto-refresh in-memory tables that haven't been cached yet.
     // Multi-table queries go through LocalAggregation which reads from the
@@ -3812,6 +3814,7 @@ pub async fn update_bi_pivot_fields(
             tables
         }; // bi_meta lock released here
 
+        let mut engine = engine_arc.lock().await;
         for table_name in &tables_to_refresh {
             if engine.needs_refresh(table_name, std::time::Duration::from_secs(0)) {
                 log_info!("PIVOT", "Auto-refreshing in-memory table '{}'", table_name);
@@ -3823,14 +3826,10 @@ pub async fn update_bi_pivot_fields(
         }
     }
 
-    let query_result = engine.query(query_request).await;
-    // PUT BACK before propagating error
-    {
-        let mut connections = bi_state.connections.lock().unwrap();
-        if let Some(conn) = connections.get_mut(&connection_id) {
-            conn.engine = Some(engine);
-        }
-    }
+    let query_result = {
+        let engine = engine_arc.lock().await;
+        engine.query(query_request).await
+    };
     let batches = match query_result {
         Ok(b) => b,
         Err(e) => {

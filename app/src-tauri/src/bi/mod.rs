@@ -4,6 +4,8 @@
 
 pub mod types;
 pub mod commands;
+pub mod engine_registry;
 
 pub use commands::*;
 pub use types::{BiState, ConnectionId};
+pub use engine_registry::EngineRegistry;
