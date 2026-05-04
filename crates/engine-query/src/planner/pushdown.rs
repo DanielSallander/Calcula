@@ -167,8 +167,16 @@ impl PushdownPlanner {
             .iter()
             .any(|t| model.table(t).is_ok_and(|tbl| tbl.is_in_memory()));
 
+        // Statistical aggregates (MEDIAN, STDEV, etc.) cannot be pushed down.
+        let all_pushable = measures.iter().all(|m| {
+            m.simple_operation()
+                .and_then(aggregate_op_to_function)
+                .is_some()
+        });
+
         if unique_tables.len() == 1
             && all_simple
+            && all_pushable
             && !any_context_ops
             && !any_table_var_refs
             && lookup_specs.is_empty()
@@ -180,12 +188,12 @@ impl PushdownPlanner {
             let aggregates: Vec<AggregateExpr> = measures
                 .iter()
                 .map(|m| {
-                    // Safe to unwrap: we checked is_simple_aggregate above.
+                    // Safe to unwrap: we checked is_simple_aggregate and all_pushable above.
                     let col = m.simple_column().unwrap();
                     let op = m.simple_operation().unwrap();
                     AggregateExpr {
                         column: col.to_string(),
-                        function: aggregate_op_to_function(op),
+                        function: aggregate_op_to_function(op).unwrap(),
                         alias: Some(m.name().to_string()),
                     }
                 })
@@ -236,9 +244,7 @@ impl PushdownPlanner {
         // and measures have no unpushable context ops or table variable refs,
         // push a JOIN query with compound SQL expressions directly to the source.
         // KEEP is pushable (translates to CASE WHEN), but CLEAR/RESET/UseRelationship are not.
-        let has_unpushable_context = measures
-            .iter()
-            .any(|m| has_unpushable_ops(m.expression()));
+        let has_unpushable_context = measures.iter().any(|m| has_unpushable_ops(m.expression()));
 
         if !has_unpushable_context
             && !any_table_var_refs
@@ -1131,17 +1137,30 @@ fn compute_pushable_context_filters(
 }
 
 /// Convert an engine-core `AggregateOp` to a connector `AggregateFunction`.
-fn aggregate_op_to_function(op: engine_core::compute::aggregate::AggregateOp) -> AggregateFunction {
+///
+/// Returns `None` for statistical aggregates (Median, StdevSample, etc.)
+/// that cannot be pushed to data sources and must be computed locally.
+fn aggregate_op_to_function(
+    op: engine_core::compute::aggregate::AggregateOp,
+) -> Option<AggregateFunction> {
     match op {
-        engine_core::compute::aggregate::AggregateOp::Sum => AggregateFunction::Sum,
-        engine_core::compute::aggregate::AggregateOp::Count => AggregateFunction::Count,
-        engine_core::compute::aggregate::AggregateOp::Average => AggregateFunction::Avg,
-        engine_core::compute::aggregate::AggregateOp::Min => AggregateFunction::Min,
-        engine_core::compute::aggregate::AggregateOp::Max => AggregateFunction::Max,
+        engine_core::compute::aggregate::AggregateOp::Sum => Some(AggregateFunction::Sum),
+        engine_core::compute::aggregate::AggregateOp::Count => Some(AggregateFunction::Count),
+        engine_core::compute::aggregate::AggregateOp::Average => Some(AggregateFunction::Avg),
+        engine_core::compute::aggregate::AggregateOp::Min => Some(AggregateFunction::Min),
+        engine_core::compute::aggregate::AggregateOp::Max => Some(AggregateFunction::Max),
         engine_core::compute::aggregate::AggregateOp::DistinctCount => {
-            AggregateFunction::CountDistinct
+            Some(AggregateFunction::CountDistinct)
         }
-        engine_core::compute::aggregate::AggregateOp::CountRows => AggregateFunction::CountAll,
+        engine_core::compute::aggregate::AggregateOp::CountRows => {
+            Some(AggregateFunction::CountAll)
+        }
+        // Statistical aggregates are computed locally, not pushed to sources.
+        engine_core::compute::aggregate::AggregateOp::Median
+        | engine_core::compute::aggregate::AggregateOp::StdevSample
+        | engine_core::compute::aggregate::AggregateOp::StdevPop
+        | engine_core::compute::aggregate::AggregateOp::VarSample
+        | engine_core::compute::aggregate::AggregateOp::VarPop => None,
     }
 }
 
@@ -1198,7 +1217,9 @@ fn has_unpushable_ops(expr: &Expression) -> bool {
             default,
         } => {
             has_unpushable_ops(expr)
-                || cases.iter().any(|(v, r)| has_unpushable_ops(v) || has_unpushable_ops(r))
+                || cases
+                    .iter()
+                    .any(|(v, r)| has_unpushable_ops(v) || has_unpushable_ops(r))
                 || default.as_ref().is_some_and(|d| has_unpushable_ops(d))
         }
         _ => false,
@@ -1246,9 +1267,12 @@ fn expression_to_source_sql(
                         .iter()
                         .map(|f| {
                             let binding = registry.binding_for(&f.table)?;
-                            let qualified_col =
-                                format!("\"{}\".\"{}\"", binding.table, f.column);
-                            Ok(format!("{qualified_col} {} '{}'", f.operator.as_sql(), f.value))
+                            let qualified_col = format!("\"{}\".\"{}\"", binding.table, f.column);
+                            Ok(format!(
+                                "{qualified_col} {} '{}'",
+                                f.operator.as_sql(),
+                                f.value
+                            ))
                         })
                         .collect::<QueryResult<Vec<_>>>()?;
 
@@ -1265,6 +1289,7 @@ fn expression_to_source_sql(
                         AggregateOp::CountRows => {
                             format!("SUM(CASE WHEN {condition} THEN 1 END)")
                         }
+                        _ => format!("{operation}({case_expr})"),
                     });
                 }
             }
@@ -1278,6 +1303,7 @@ fn expression_to_source_sql(
                 AggregateOp::Max => format!("MAX({operand_sql})"),
                 AggregateOp::DistinctCount => format!("COUNT(DISTINCT {operand_sql})"),
                 AggregateOp::CountRows => "COUNT(*)".to_string(),
+                _ => format!("{operation}({operand_sql})"),
             })
         }
         Expression::BinaryOp { left, op, right } => {
@@ -1437,6 +1463,7 @@ fn expression_to_case_when_source_sql(
                 AggregateOp::CountRows => {
                     format!("SUM(CASE WHEN {condition} THEN 1 END)")
                 }
+                _ => format!("{operation}({case_expr})"),
             })
         }
         Expression::BinaryOp { left, op, right } => {
@@ -1479,7 +1506,10 @@ fn expression_to_source_sql_with_clear(
     use engine_core::model::ClearTarget;
 
     match expr {
-        Expression::Clear { expr: inner, targets } => {
+        Expression::Clear {
+            expr: inner,
+            targets,
+        } => {
             // Generate the inner expression SQL (may have KEEP → CASE WHEN).
             let inner_sql = expression_to_source_sql_with_clear(inner, model, registry, group_by)?;
 
@@ -1568,12 +1598,8 @@ fn build_pushed_join_sql(
     }
 
     for m in measures {
-        let expr_sql = expression_to_source_sql_with_clear(
-            m.expression(),
-            model,
-            registry,
-            group_by,
-        )?;
+        let expr_sql =
+            expression_to_source_sql_with_clear(m.expression(), model, registry, group_by)?;
         select_parts.push(format!("{expr_sql} AS \"{}\"", m.name()));
     }
 
@@ -1595,11 +1621,13 @@ fn build_pushed_join_sql(
             continue;
         }
         // Find relationship between fact and dim.
-        let rel = model.find_relationship(fact_table, dim_table).map_err(|_| {
-            QueryError::InvalidQuery(format!(
-                "No relationship between '{fact_table}' and '{dim_table}'"
-            ))
-        })?;
+        let rel = model
+            .find_relationship(fact_table, dim_table)
+            .map_err(|_| {
+                QueryError::InvalidQuery(format!(
+                    "No relationship between '{fact_table}' and '{dim_table}'"
+                ))
+            })?;
 
         let dim_binding = registry.binding_for(dim_table)?;
         let dim_source = format!("\"{}\".\"{}\"", dim_binding.schema, dim_binding.table);

@@ -29,6 +29,16 @@ pub enum AggregateOp {
     DistinctCount,
     /// Count of all rows (including nulls): `COUNT(*)`.
     CountRows,
+    /// Median (50th percentile) of non-null values.
+    Median,
+    /// Sample standard deviation (N-1 denominator).
+    StdevSample,
+    /// Population standard deviation (N denominator).
+    StdevPop,
+    /// Sample variance (N-1 denominator).
+    VarSample,
+    /// Population variance (N denominator).
+    VarPop,
 }
 
 impl std::fmt::Display for AggregateOp {
@@ -41,6 +51,11 @@ impl std::fmt::Display for AggregateOp {
             AggregateOp::Max => write!(f, "MAX"),
             AggregateOp::DistinctCount => write!(f, "COUNT_DISTINCT"),
             AggregateOp::CountRows => write!(f, "COUNT"),
+            AggregateOp::Median => write!(f, "median"),
+            AggregateOp::StdevSample => write!(f, "stddev"),
+            AggregateOp::StdevPop => write!(f, "stddev_pop"),
+            AggregateOp::VarSample => write!(f, "var"),
+            AggregateOp::VarPop => write!(f, "var_pop"),
         }
     }
 }
@@ -129,6 +144,26 @@ async fn run_single_aggregate(
             count(df_lit(1))
         }
         AggregateOp::Average => unreachable!("Average handled separately"),
+        // Statistical aggregates use DataFusion's built-in functions via SQL.
+        // This code path is not normally reached for statistical aggregates
+        // since they go through the SQL-based execution path.
+        AggregateOp::Median
+        | AggregateOp::StdevSample
+        | AggregateOp::StdevPop
+        | AggregateOp::VarSample
+        | AggregateOp::VarPop => {
+            use datafusion::functions_aggregate::median::median;
+            use datafusion::functions_aggregate::stddev::stddev;
+            use datafusion::functions_aggregate::variance::var_sample;
+            match operation {
+                AggregateOp::Median => median(col(column_name)),
+                AggregateOp::StdevSample => stddev(col(column_name)),
+                AggregateOp::StdevPop => stddev(col(column_name)), // approximate
+                AggregateOp::VarSample => var_sample(col(column_name)),
+                AggregateOp::VarPop => var_sample(col(column_name)), // approximate
+                _ => unreachable!(),
+            }
+        }
     };
 
     let result_df = df.aggregate(vec![], vec![agg_expr])?;

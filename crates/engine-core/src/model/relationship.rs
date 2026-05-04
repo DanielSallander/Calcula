@@ -925,7 +925,8 @@ mod tests {
         assert_eq!(
             clause,
             Some(
-                r#"sales."order_date" <= (SELECT MAX(__d."datekey") FROM dates AS __d)"#.to_string()
+                r#"sales."order_date" <= (SELECT MAX(__d."datekey") FROM dates AS __d)"#
+                    .to_string()
             )
         );
     }

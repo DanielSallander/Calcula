@@ -182,6 +182,34 @@ pub enum ScalarFunction {
     Log10,
     /// Sign: `SIGN(x)`.
     Sign,
+    /// Exponential: `EXP(x)` — e^x.
+    Exp,
+    /// Logarithm with custom base: `LOG(x, base)`.
+    Log,
+    /// Pi constant: `PI()` — returns 3.14159...
+    Pi,
+}
+
+/// Date/time functions for use in expressions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum DateTimeFunction {
+    /// Extract year from date: `YEAR(date)`.
+    Year,
+    /// Extract month from date: `MONTH(date)`.
+    Month,
+    /// Extract day from date: `DAY(date)`.
+    Day,
+    /// Extract quarter from date: `QUARTER(date)`.
+    Quarter,
+    /// Construct a date from parts: `DATE(year, month, day)`.
+    Date,
+    /// Difference between dates: `DATEDIFF(start, end, interval_string)`.
+    /// Interval is passed as a `LiteralString`: `"DAY"`, `"MONTH"`, `"YEAR"`, `"QUARTER"`.
+    DateDiff,
+    /// Current date: `TODAY()`.
+    Today,
+    /// Current date and time: `NOW()`.
+    Now,
 }
 
 impl ScalarFunction {
@@ -226,6 +254,12 @@ impl ScalarFunction {
             Self::Ln => format!("LN({})", args[0]),
             Self::Log10 => format!("LOG10({})", args[0]),
             Self::Sign => format!("signum({})", args[0]),
+            Self::Exp => format!("EXP({})", args[0]),
+            Self::Log => {
+                let base = args.get(1).map(|s| s.as_str()).unwrap_or("10");
+                format!("LOG({}, {})", args[0], base)
+            }
+            Self::Pi => "PI()".to_string(),
         }
     }
 }
@@ -247,6 +281,72 @@ impl std::fmt::Display for ScalarFunction {
             Self::Ln => write!(f, "LN"),
             Self::Log10 => write!(f, "LOG10"),
             Self::Sign => write!(f, "SIGN"),
+            Self::Exp => write!(f, "EXP"),
+            Self::Log => write!(f, "LOG"),
+            Self::Pi => write!(f, "PI"),
+        }
+    }
+}
+
+impl DateTimeFunction {
+    /// Render as a SQL function call with the given arguments.
+    pub fn to_sql(&self, args: &[Expression]) -> String {
+        let strs: Vec<String> = args.iter().map(|a| a.to_sql_string()).collect();
+        self.to_sql_strs(&strs)
+    }
+
+    /// Render as a SQL function call with pre-rendered string arguments.
+    pub fn to_sql_strs(&self, args: &[String]) -> String {
+        match self {
+            Self::Year => format!("date_part('year', {})", args[0]),
+            Self::Month => format!("date_part('month', {})", args[0]),
+            Self::Day => format!("date_part('day', {})", args[0]),
+            Self::Quarter => format!("date_part('quarter', {})", args[0]),
+            Self::Date => format!("make_date({}, {}, {})", args[0], args[1], args[2]),
+            Self::DateDiff => {
+                // Third arg is the interval string literal (e.g. 'DAY').
+                // Strip surrounding quotes if present for matching.
+                let interval_raw = args
+                    .get(2)
+                    .map(|s| s.trim_matches('\'').to_uppercase())
+                    .unwrap_or_else(|| "DAY".to_string());
+                let start = &args[0];
+                let end = &args[1];
+                match interval_raw.as_str() {
+                    "DAY" => {
+                        format!("CAST(CAST({end} AS DATE) - CAST({start} AS DATE) AS INTEGER)")
+                    }
+                    "MONTH" => format!(
+                        "CAST((date_part('year', {end}) - date_part('year', {start})) * 12 \
+                         + date_part('month', {end}) - date_part('month', {start}) AS INTEGER)"
+                    ),
+                    "YEAR" => format!(
+                        "CAST(date_part('year', {end}) - date_part('year', {start}) AS INTEGER)"
+                    ),
+                    "QUARTER" => format!(
+                        "CAST((date_part('year', {end}) - date_part('year', {start})) * 4 \
+                         + date_part('quarter', {end}) - date_part('quarter', {start}) AS INTEGER)"
+                    ),
+                    _ => format!("CAST(CAST({end} AS DATE) - CAST({start} AS DATE) AS INTEGER)"),
+                }
+            }
+            Self::Today => "CURRENT_DATE".to_string(),
+            Self::Now => "NOW()".to_string(),
+        }
+    }
+}
+
+impl std::fmt::Display for DateTimeFunction {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Year => write!(f, "YEAR"),
+            Self::Month => write!(f, "MONTH"),
+            Self::Day => write!(f, "DAY"),
+            Self::Quarter => write!(f, "QUARTER"),
+            Self::Date => write!(f, "DATE"),
+            Self::DateDiff => write!(f, "DATEDIFF"),
+            Self::Today => write!(f, "TODAY"),
+            Self::Now => write!(f, "NOW"),
         }
     }
 }
@@ -312,6 +412,9 @@ pub enum TextFunction {
     /// Extract part of a delimited string: `SPLIT(text, delimiter, part_number)`.
     /// Maps to SQL `SPLIT_PART`. Part number is 1-based. Snowflake extension.
     Split,
+    /// Format a value as text: `FORMAT(value, format_string)`.
+    /// Maps to SQL `TO_CHAR(value, format)` for dates, `CAST` for numbers.
+    Format,
 }
 
 impl TextFunction {
@@ -434,6 +537,11 @@ impl TextFunction {
             Self::Split => {
                 format!("SPLIT_PART({}, {}, {})", args[0], args[1], args[2])
             }
+            Self::Format => {
+                // TO_CHAR works in DataFusion for date formatting.
+                // For numbers, falls back to CAST.
+                format!("TO_CHAR({}, {})", args[0], args[1])
+            }
         }
     }
 }
@@ -466,6 +574,7 @@ impl std::fmt::Display for TextFunction {
             Self::Rpad => write!(f, "RPAD"),
             Self::Reverse => write!(f, "REVERSE"),
             Self::Split => write!(f, "SPLIT"),
+            Self::Format => write!(f, "FORMAT"),
         }
     }
 }
@@ -906,6 +1015,72 @@ pub enum Expression {
         /// The set of values to test against.
         values: Vec<Expression>,
     },
+
+    /// Date/time function call: `YEAR(date)`, `MONTH(date)`, `DATEDIFF(...)`, etc.
+    DateTimeFunc {
+        /// The date/time function.
+        function: DateTimeFunction,
+        /// Function arguments.
+        args: Vec<Expression>,
+    },
+
+    /// Error handling: `IFERROR(expr, alternate)`.
+    ///
+    /// Returns `alternate` when `expr` evaluates to NULL/error.
+    /// SQL: `COALESCE(expr, alternate)`.
+    IfError {
+        /// The expression to evaluate.
+        expr: Box<Expression>,
+        /// The alternate value when expr is NULL/error.
+        alternate: Box<Expression>,
+    },
+
+    /// Scope check: `ISINSCOPE(table[column])`.
+    ///
+    /// Returns TRUE if the specified column is in the current GROUP BY context.
+    /// Must be resolved before SQL generation by replacing with `LiteralBool`.
+    IsInScope {
+        /// Table name.
+        table: String,
+        /// Column name.
+        column: String,
+    },
+
+    /// Clear all filters on a table EXCEPT specified columns.
+    ///
+    /// `CLEAREXCEPT(expr, table, col1, col2, ...)` — like CLEAR(table) but
+    /// preserves filters on the listed columns.
+    ClearExcept {
+        /// The inner expression.
+        expr: Box<Expression>,
+        /// The table to clear filters from.
+        table: String,
+        /// Columns whose filters should be preserved.
+        except_columns: Vec<String>,
+    },
+
+    /// Iterator expression: `ITERATE(table, expr)`.
+    ///
+    /// Declares row-context iteration over a table. The expression is evaluated
+    /// per-row and typically wrapped in an aggregate: `SUM(ITERATE(t, t[a] * t[b]))`.
+    /// In SQL, this is transparent — the expression is rendered directly.
+    Iterate {
+        /// The table to iterate over.
+        table: String,
+        /// The per-row expression.
+        expression: Box<Expression>,
+    },
+
+    /// Percentile aggregation: `PERCENTILE(column, k)`.
+    ///
+    /// Returns the k-th percentile (0.0–1.0) of the column values.
+    /// SQL: `approx_percentile_cont(col, k)`.
+    Percentile {
+        /// The expression to aggregate.
+        operand: Box<Expression>,
+        /// The percentile value (0.0 to 1.0), typically a literal float.
+        percentile: Box<Expression>,
+    },
 }
 
 impl Expression {
@@ -1037,10 +1212,30 @@ impl Expression {
                     e.collect_column_refs(refs);
                 }
             }
-            Expression::ScalarFunc { args, .. } | Expression::TextFunc { args, .. } => {
+            Expression::ScalarFunc { args, .. }
+            | Expression::TextFunc { args, .. }
+            | Expression::DateTimeFunc { args, .. } => {
                 for arg in args {
                     arg.collect_column_refs(refs);
                 }
+            }
+            Expression::IfError { expr, alternate } => {
+                expr.collect_column_refs(refs);
+                alternate.collect_column_refs(refs);
+            }
+            Expression::IsInScope { .. } => {}
+            Expression::ClearExcept { expr, .. }
+            | Expression::Iterate {
+                expression: expr, ..
+            } => {
+                expr.collect_column_refs(refs);
+            }
+            Expression::Percentile {
+                operand,
+                percentile,
+            } => {
+                operand.collect_column_refs(refs);
+                percentile.collect_column_refs(refs);
             }
             Expression::Query { aggregates, .. } => {
                 // Only collect refs from aggregate expressions. Group-by
@@ -1139,9 +1334,16 @@ impl Expression {
                     || alternate.as_ref().is_some_and(|a| a.has_aggregate())
             }
             Expression::Coalesce(exprs) => exprs.iter().any(|e| e.has_aggregate()),
-            Expression::ScalarFunc { args, .. } | Expression::TextFunc { args, .. } => {
-                args.iter().any(|a| a.has_aggregate())
+            Expression::ScalarFunc { args, .. }
+            | Expression::TextFunc { args, .. }
+            | Expression::DateTimeFunc { args, .. } => args.iter().any(|a| a.has_aggregate()),
+            Expression::IfError { expr, alternate } => {
+                expr.has_aggregate() || alternate.has_aggregate()
             }
+            Expression::IsInScope { .. } => false,
+            Expression::ClearExcept { expr, .. } => expr.has_aggregate(),
+            Expression::Iterate { expression, .. } => expression.has_aggregate(),
+            Expression::Percentile { .. } => true,
             Expression::Query { .. } => true,
             // These functions contain implicit aggregates.
             Expression::HasOneValue { .. }
@@ -1189,10 +1391,7 @@ impl Expression {
             | Expression::UseRelationship { .. }
             | Expression::KeepIn { .. } => true,
             Expression::Block { bindings, result } => {
-                bindings
-                    .iter()
-                    .any(|(_, expr)| expr.has_context_ops())
-                    || result.has_context_ops()
+                bindings.iter().any(|(_, expr)| expr.has_context_ops()) || result.has_context_ops()
             }
             Expression::If {
                 condition,
@@ -1224,9 +1423,19 @@ impl Expression {
                     || alternate.as_ref().is_some_and(|a| a.has_context_ops())
             }
             Expression::Coalesce(exprs) => exprs.iter().any(|e| e.has_context_ops()),
-            Expression::ScalarFunc { args, .. } | Expression::TextFunc { args, .. } => {
-                args.iter().any(|a| a.has_context_ops())
+            Expression::ScalarFunc { args, .. }
+            | Expression::TextFunc { args, .. }
+            | Expression::DateTimeFunc { args, .. } => args.iter().any(|a| a.has_context_ops()),
+            Expression::IfError { expr, alternate } => {
+                expr.has_context_ops() || alternate.has_context_ops()
             }
+            Expression::IsInScope { .. } => false,
+            Expression::ClearExcept { .. } => true,
+            Expression::Iterate { expression, .. } => expression.has_context_ops(),
+            Expression::Percentile {
+                operand,
+                percentile,
+            } => operand.has_context_ops() || percentile.has_context_ops(),
             Expression::Query { aggregates, .. } => {
                 aggregates.iter().any(|(e, _)| e.has_context_ops())
             }
@@ -1366,10 +1575,30 @@ impl Expression {
                     e.collect_context_filter_tables(tables);
                 }
             }
-            Expression::ScalarFunc { args, .. } | Expression::TextFunc { args, .. } => {
+            Expression::ScalarFunc { args, .. }
+            | Expression::TextFunc { args, .. }
+            | Expression::DateTimeFunc { args, .. } => {
                 for arg in args {
                     arg.collect_context_filter_tables(tables);
                 }
+            }
+            Expression::IfError { expr, alternate } => {
+                expr.collect_context_filter_tables(tables);
+                alternate.collect_context_filter_tables(tables);
+            }
+            Expression::IsInScope { .. } => {}
+            Expression::ClearExcept { expr, .. } => {
+                expr.collect_context_filter_tables(tables);
+            }
+            Expression::Iterate { expression, .. } => {
+                expression.collect_context_filter_tables(tables);
+            }
+            Expression::Percentile {
+                operand,
+                percentile,
+            } => {
+                operand.collect_context_filter_tables(tables);
+                percentile.collect_context_filter_tables(tables);
             }
             Expression::Query {
                 aggregates,
@@ -1504,6 +1733,38 @@ impl Expression {
             Expression::TextFunc { function, args } => Expression::TextFunc {
                 function: *function,
                 args: args.iter().map(|a| a.substitute_vars(env)).collect(),
+            },
+            Expression::DateTimeFunc { function, args } => Expression::DateTimeFunc {
+                function: *function,
+                args: args.iter().map(|a| a.substitute_vars(env)).collect(),
+            },
+            Expression::IfError { expr, alternate } => Expression::IfError {
+                expr: Box::new(expr.substitute_vars(env)),
+                alternate: Box::new(alternate.substitute_vars(env)),
+            },
+            Expression::IsInScope { table, column } => Expression::IsInScope {
+                table: table.clone(),
+                column: column.clone(),
+            },
+            Expression::ClearExcept {
+                expr,
+                table,
+                except_columns,
+            } => Expression::ClearExcept {
+                expr: Box::new(expr.substitute_vars(env)),
+                table: table.clone(),
+                except_columns: except_columns.clone(),
+            },
+            Expression::Iterate { table, expression } => Expression::Iterate {
+                table: table.clone(),
+                expression: Box::new(expression.substitute_vars(env)),
+            },
+            Expression::Percentile {
+                operand,
+                percentile,
+            } => Expression::Percentile {
+                operand: Box::new(operand.substitute_vars(env)),
+                percentile: Box::new(percentile.substitute_vars(env)),
             },
             Expression::Coalesce(exprs) => {
                 Expression::Coalesce(exprs.iter().map(|e| e.substitute_vars(env)).collect())
@@ -1774,9 +2035,18 @@ impl Expression {
                     || alternate.as_ref().is_some_and(|a| a.has_window())
             }
             Expression::Coalesce(exprs) => exprs.iter().any(|e| e.has_window()),
-            Expression::ScalarFunc { args, .. } | Expression::TextFunc { args, .. } => {
-                args.iter().any(|a| a.has_window())
-            }
+            Expression::ScalarFunc { args, .. }
+            | Expression::TextFunc { args, .. }
+            | Expression::DateTimeFunc { args, .. } => args.iter().any(|a| a.has_window()),
+            Expression::IfError { expr, alternate } => expr.has_window() || alternate.has_window(),
+            Expression::ClearExcept { expr, .. }
+            | Expression::Iterate {
+                expression: expr, ..
+            } => expr.has_window(),
+            Expression::Percentile {
+                operand,
+                percentile,
+            } => operand.has_window() || percentile.has_window(),
             _ => false,
         }
     }
@@ -1914,6 +2184,30 @@ impl Expression {
             }
             Expression::ScalarFunc { function, args } => function.to_sql(args),
             Expression::TextFunc { function, args } => function.to_sql(args),
+            Expression::DateTimeFunc { function, args } => function.to_sql(args),
+            Expression::IfError { expr, alternate } => {
+                format!(
+                    "COALESCE({}, {})",
+                    expr.to_sql_string(),
+                    alternate.to_sql_string()
+                )
+            }
+            Expression::IsInScope { .. } => {
+                // Should be resolved before SQL generation. Default to TRUE.
+                "TRUE".to_string()
+            }
+            Expression::ClearExcept { expr, .. } => expr.to_sql_string(),
+            Expression::Iterate { expression, .. } => expression.to_sql_string(),
+            Expression::Percentile {
+                operand,
+                percentile,
+            } => {
+                format!(
+                    "approx_percentile_cont({}, {})",
+                    operand.to_sql_string(),
+                    percentile.to_sql_string()
+                )
+            }
             Expression::Query { .. } => {
                 // Query expressions produce tables and must be materialized,
                 // not rendered inline. This should not be reached in normal flow.
@@ -2015,6 +2309,31 @@ impl Expression {
                     .map(|a| a.to_case_when_sql(condition, fact_table))
                     .collect();
                 function.to_sql_strs(&mapped)
+            }
+            Expression::DateTimeFunc { function, args } => {
+                let mapped: Vec<String> = args
+                    .iter()
+                    .map(|a| a.to_case_when_sql(condition, fact_table))
+                    .collect();
+                function.to_sql_strs(&mapped)
+            }
+            Expression::IfError { expr, alternate } => {
+                let e = expr.to_case_when_sql(condition, fact_table);
+                let a = alternate.to_case_when_sql(condition, fact_table);
+                format!("COALESCE({e}, {a})")
+            }
+            Expression::ClearExcept { expr, .. } => expr.to_case_when_sql(condition, fact_table),
+            Expression::Iterate { expression, .. } => {
+                expression.to_case_when_sql(condition, fact_table)
+            }
+            Expression::Percentile {
+                operand,
+                percentile,
+            } => {
+                let qualified = qualify_operand_sql(operand, fact_table);
+                let case_expr = format!("CASE WHEN {condition} THEN {qualified} END");
+                let p = percentile.to_sql_string();
+                format!("approx_percentile_cont({case_expr}, {p})")
             }
             Expression::Coalesce(exprs) => {
                 let mapped: Vec<String> = exprs
@@ -2499,6 +2818,111 @@ pub fn index_expr(
     }
 }
 
+/// Create a date/time function call.
+pub fn datetime_fn(function: DateTimeFunction, args: Vec<Expression>) -> Expression {
+    Expression::DateTimeFunc { function, args }
+}
+
+/// Create an IFERROR expression: `IFERROR(expr, alternate)`.
+pub fn if_error(expr: Expression, alternate: Expression) -> Expression {
+    Expression::IfError {
+        expr: Box::new(expr),
+        alternate: Box::new(alternate),
+    }
+}
+
+/// Create an ISINSCOPE expression: `ISINSCOPE(table[column])`.
+pub fn is_in_scope(table: impl Into<String>, column: impl Into<String>) -> Expression {
+    Expression::IsInScope {
+        table: table.into(),
+        column: column.into(),
+    }
+}
+
+/// Create a CLEAREXCEPT expression — clear all filters on table except specified columns.
+pub fn clear_except(
+    expr: Expression,
+    table: impl Into<String>,
+    except_columns: Vec<String>,
+) -> Expression {
+    Expression::ClearExcept {
+        expr: Box::new(expr),
+        table: table.into(),
+        except_columns,
+    }
+}
+
+/// Create an ITERATE expression — declare row-context iteration over a table.
+pub fn iterate(table: impl Into<String>, expression: Expression) -> Expression {
+    Expression::Iterate {
+        table: table.into(),
+        expression: Box::new(expression),
+    }
+}
+
+/// Create a PERCENTILE expression: `PERCENTILE(operand, k)`.
+pub fn percentile(operand: Expression, percentile_value: Expression) -> Expression {
+    Expression::Percentile {
+        operand: Box::new(operand),
+        percentile: Box::new(percentile_value),
+    }
+}
+
+/// Resolve `IsInScope` nodes by replacing them with `LiteralBool` based on
+/// whether the referenced column is in the provided group-by list.
+pub fn resolve_is_in_scope(expr: &Expression, group_by: &[(String, String)]) -> Expression {
+    match expr {
+        Expression::IsInScope { table, column } => {
+            let in_scope = group_by.iter().any(|(t, c)| t == table && c == column);
+            Expression::LiteralBool(in_scope)
+        }
+        Expression::BinaryOp { left, op, right } => Expression::BinaryOp {
+            left: Box::new(resolve_is_in_scope(left, group_by)),
+            op: *op,
+            right: Box::new(resolve_is_in_scope(right, group_by)),
+        },
+        Expression::If {
+            condition,
+            then_expr,
+            else_expr,
+        } => Expression::If {
+            condition: Box::new(resolve_is_in_scope(condition, group_by)),
+            then_expr: Box::new(resolve_is_in_scope(then_expr, group_by)),
+            else_expr: Box::new(resolve_is_in_scope(else_expr, group_by)),
+        },
+        Expression::Switch {
+            expr: e,
+            cases,
+            default,
+        } => Expression::Switch {
+            expr: Box::new(resolve_is_in_scope(e, group_by)),
+            cases: cases
+                .iter()
+                .map(|(v, r)| {
+                    (
+                        resolve_is_in_scope(v, group_by),
+                        resolve_is_in_scope(r, group_by),
+                    )
+                })
+                .collect(),
+            default: default
+                .as_ref()
+                .map(|d| Box::new(resolve_is_in_scope(d, group_by))),
+        },
+        Expression::And(l, r) => Expression::And(
+            Box::new(resolve_is_in_scope(l, group_by)),
+            Box::new(resolve_is_in_scope(r, group_by)),
+        ),
+        Expression::Or(l, r) => Expression::Or(
+            Box::new(resolve_is_in_scope(l, group_by)),
+            Box::new(resolve_is_in_scope(r, group_by)),
+        ),
+        Expression::Not(inner) => Expression::Not(Box::new(resolve_is_in_scope(inner, group_by))),
+        // All other nodes: return as-is (IsInScope is typically only in conditions)
+        _ => expr.clone(),
+    }
+}
+
 /// Expand global variable references in an expression.
 ///
 /// This function performs two kinds of substitution:
@@ -2566,9 +2990,20 @@ pub fn has_measure_ref(expr: &Expression) -> bool {
                 || default.as_ref().is_some_and(|d| has_measure_ref(d))
         }
         Expression::Coalesce(exprs) => exprs.iter().any(has_measure_ref),
-        Expression::ScalarFunc { args, .. } | Expression::TextFunc { args, .. } => {
-            args.iter().any(has_measure_ref)
+        Expression::ScalarFunc { args, .. }
+        | Expression::TextFunc { args, .. }
+        | Expression::DateTimeFunc { args, .. } => args.iter().any(has_measure_ref),
+        Expression::IfError { expr, alternate } => {
+            has_measure_ref(expr) || has_measure_ref(alternate)
         }
+        Expression::ClearExcept { expr, .. }
+        | Expression::Iterate {
+            expression: expr, ..
+        } => has_measure_ref(expr),
+        Expression::Percentile {
+            operand,
+            percentile,
+        } => has_measure_ref(operand) || has_measure_ref(percentile),
         Expression::InList { expr, values } => {
             has_measure_ref(expr) || values.iter().any(has_measure_ref)
         }
@@ -2808,6 +3243,37 @@ fn expand_measure_refs_inner(
                 .map(|a| expand_measure_refs_inner(a, model, visited))
                 .collect::<crate::error::EngineResult<Vec<_>>>()?,
         }),
+        Expression::DateTimeFunc { function, args } => Ok(Expression::DateTimeFunc {
+            function: *function,
+            args: args
+                .iter()
+                .map(|a| expand_measure_refs_inner(a, model, visited))
+                .collect::<crate::error::EngineResult<Vec<_>>>()?,
+        }),
+        Expression::IfError { expr, alternate } => Ok(Expression::IfError {
+            expr: Box::new(expand_measure_refs_inner(expr, model, visited)?),
+            alternate: Box::new(expand_measure_refs_inner(alternate, model, visited)?),
+        }),
+        Expression::ClearExcept {
+            expr,
+            table,
+            except_columns,
+        } => Ok(Expression::ClearExcept {
+            expr: Box::new(expand_measure_refs_inner(expr, model, visited)?),
+            table: table.clone(),
+            except_columns: except_columns.clone(),
+        }),
+        Expression::Iterate { table, expression } => Ok(Expression::Iterate {
+            table: table.clone(),
+            expression: Box::new(expand_measure_refs_inner(expression, model, visited)?),
+        }),
+        Expression::Percentile {
+            operand,
+            percentile,
+        } => Ok(Expression::Percentile {
+            operand: Box::new(expand_measure_refs_inner(operand, model, visited)?),
+            percentile: Box::new(expand_measure_refs_inner(percentile, model, visited)?),
+        }),
         Expression::Comparison { left, op, right } => Ok(Expression::Comparison {
             left: Box::new(expand_measure_refs_inner(left, model, visited)?),
             op: *op,
@@ -2989,10 +3455,30 @@ fn collect_query_global_refs(
                 collect_query_global_refs(e, model, found);
             }
         }
-        Expression::ScalarFunc { args, .. } | Expression::TextFunc { args, .. } => {
+        Expression::ScalarFunc { args, .. }
+        | Expression::TextFunc { args, .. }
+        | Expression::DateTimeFunc { args, .. } => {
             for arg in args {
                 collect_query_global_refs(arg, model, found);
             }
+        }
+        Expression::IfError { expr, alternate } => {
+            collect_query_global_refs(expr, model, found);
+            collect_query_global_refs(alternate, model, found);
+        }
+        Expression::IsInScope { .. } => {}
+        Expression::ClearExcept { expr, .. }
+        | Expression::Iterate {
+            expression: expr, ..
+        } => {
+            collect_query_global_refs(expr, model, found);
+        }
+        Expression::Percentile {
+            operand,
+            percentile,
+        } => {
+            collect_query_global_refs(operand, model, found);
+            collect_query_global_refs(percentile, model, found);
         }
         Expression::Block { bindings, result } => {
             for (_, binding_expr) in bindings {
@@ -3211,6 +3697,41 @@ fn expand_scalar_globals(expr: &Expression, model: &crate::model::schema::DataMo
                 .iter()
                 .map(|a| expand_scalar_globals(a, model))
                 .collect(),
+        },
+        Expression::DateTimeFunc { function, args } => Expression::DateTimeFunc {
+            function: *function,
+            args: args
+                .iter()
+                .map(|a| expand_scalar_globals(a, model))
+                .collect(),
+        },
+        Expression::IfError { expr, alternate } => Expression::IfError {
+            expr: Box::new(expand_scalar_globals(expr, model)),
+            alternate: Box::new(expand_scalar_globals(alternate, model)),
+        },
+        Expression::IsInScope { table, column } => Expression::IsInScope {
+            table: table.clone(),
+            column: column.clone(),
+        },
+        Expression::ClearExcept {
+            expr,
+            table,
+            except_columns,
+        } => Expression::ClearExcept {
+            expr: Box::new(expand_scalar_globals(expr, model)),
+            table: table.clone(),
+            except_columns: except_columns.clone(),
+        },
+        Expression::Iterate { table, expression } => Expression::Iterate {
+            table: table.clone(),
+            expression: Box::new(expand_scalar_globals(expression, model)),
+        },
+        Expression::Percentile {
+            operand,
+            percentile,
+        } => Expression::Percentile {
+            operand: Box::new(expand_scalar_globals(operand, model)),
+            percentile: Box::new(expand_scalar_globals(percentile, model)),
         },
         Expression::HasOneValue { column } => Expression::HasOneValue {
             column: Box::new(expand_scalar_globals(column, model)),

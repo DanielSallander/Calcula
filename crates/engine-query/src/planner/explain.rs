@@ -71,10 +71,7 @@ impl PushdownPlanner {
                 );
             }
             QueryPlan::PushedJoinAggregation { source_table, sql } => {
-                node.add_property(
-                    "decision",
-                    PlanValue::Text("PushedJoinAggregation".into()),
-                );
+                node.add_property("decision", PlanValue::Text("PushedJoinAggregation".into()));
                 node.add_property(
                     "reason",
                     PlanValue::Text(

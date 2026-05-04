@@ -656,6 +656,8 @@ impl QueryExecutor {
                             format!("COUNT(DISTINCT {fact}.\"{col}\") AS \"{name}\"")
                         }
                         AggregateOp::CountRows => format!("COUNT(*) AS \"{name}\""),
+                        // Statistical aggregates: use Display for function name
+                        _ => format!("{op}({fact}.\"{col}\") AS \"{name}\""),
                     }
                 } else {
                     let expr_sql = stripped_expr.to_sql_string();
@@ -1150,6 +1152,27 @@ impl QueryExecutor {
                         pre_agg_aliases.push((name.to_string(), op));
                         continue;
                     }
+                    // Statistical aggregates (Median, Stdev, Var): cannot be
+                    // decomposed into two stages. Emit full aggregate in Stage 1
+                    // and pass through in Stage 2.
+                    _ => {
+                        let fn_name = op.to_string();
+                        if has_context {
+                            let condition =
+                                build_condition_sql(&effective, fact_table, fact_model_name, model);
+                            (
+                                format!(
+                                    "{fn_name}(CASE WHEN {condition} THEN {col_ref} END) AS \"{alias}\""
+                                ),
+                                format!("SUM(__pre_agg.\"{alias}\") AS \"{name}\""),
+                            )
+                        } else {
+                            (
+                                format!("{fn_name}({col_ref}) AS \"{alias}\""),
+                                format!("SUM(__pre_agg.\"{alias}\") AS \"{name}\""),
+                            )
+                        }
+                    }
                 };
                 s1_select.push(s1_agg);
                 s2_measure_parts.push(s2_agg);
@@ -1338,6 +1361,7 @@ impl QueryExecutor {
                             format!("COUNT(DISTINCT {fact}.\"{col}\")")
                         }
                         AggregateOp::CountRows => "COUNT(*)".to_string(),
+                        _ => format!("{op}({fact}.\"{col}\")"),
                     };
                     select_parts.push(format!("{agg_sql} AS \"{}\"", measure.name()));
                 } else {
@@ -1511,6 +1535,7 @@ impl QueryExecutor {
                     AggregateOp::Max => format!("MAX({col_ref})"),
                     AggregateOp::DistinctCount => format!("COUNT(DISTINCT {col_ref})"),
                     AggregateOp::CountRows => "COUNT(*)".to_string(),
+                    _ => format!("{op}({col_ref})"),
                 };
                 main_select.push(format!("{agg_sql} AS \"{measure_name}\""));
             } else {
@@ -1539,10 +1564,7 @@ impl QueryExecutor {
                     format!("Boundary Override: {measure_name}"),
                 )
                 .with_property("bounds_sql", PlanValue::Text(bounds_sql))
-                .with_property(
-                    "bounds_rows",
-                    PlanValue::Number(bounds_rows as f64),
-                )
+                .with_property("bounds_rows", PlanValue::Number(bounds_rows as f64))
                 .with_property("main_sql", PlanValue::Text(main_sql.clone()))
                 .with_property("main_rows", PlanValue::Number(main_rows as f64));
                 // Report combined time for both stages.
@@ -1637,10 +1659,13 @@ impl QueryExecutor {
         if let Some(ref mut pn) = plan {
             let result_rows: usize = batches.iter().map(|b| b.num_rows()).sum();
             pn.add_child(
-                PlanNode::new(PlanOperation::MultiGroupAggregation, "Combine Override Results")
-                    .with_property("sql", PlanValue::Text(combine_sql))
-                    .with_property("result_rows", PlanValue::Number(result_rows as f64))
-                    .with_duration(combine_elapsed),
+                PlanNode::new(
+                    PlanOperation::MultiGroupAggregation,
+                    "Combine Override Results",
+                )
+                .with_property("sql", PlanValue::Text(combine_sql))
+                .with_property("result_rows", PlanValue::Number(result_rows as f64))
+                .with_duration(combine_elapsed),
             );
         }
 
@@ -1768,6 +1793,7 @@ impl QueryExecutor {
                                 format!("COUNT(DISTINCT {fact}.\"{col}\") AS \"{name}\"")
                             }
                             AggregateOp::CountRows => format!("COUNT(*) AS \"{name}\""),
+                            _ => format!("{op}({fact}.\"{col}\") AS \"{name}\""),
                         }
                     } else {
                         let expr_sql = stripped_expr.to_sql_string();
@@ -2290,10 +2316,7 @@ impl QueryExecutor {
                                     PlanOperation::DataFusionExecution,
                                     format!("QUERY {binding_name} (materialize)"),
                                 )
-                                .with_property(
-                                    "result_rows",
-                                    PlanValue::Number(mat_rows as f64),
-                                )
+                                .with_property("result_rows", PlanValue::Number(mat_rows as f64))
                                 .with_duration(mat_elapsed),
                             );
                         }
@@ -2456,22 +2479,26 @@ impl QueryExecutor {
 
             // Record plan nodes for this window measure.
             if let Some(ref mut plan_node) = plan {
-                let mut window_node = PlanNode::new(
-                    PlanOperation::MeasureEvaluation,
-                    format!("Window: {name}"),
-                );
+                let mut window_node =
+                    PlanNode::new(PlanOperation::MeasureEvaluation, format!("Window: {name}"));
                 window_node.duration = (s1_elapsed + s2_elapsed).into();
 
                 window_node.add_child(
-                    PlanNode::new(PlanOperation::DataFusionExecution, "Materialize Inner (Stage 1)")
-                        .with_property("result_rows", PlanValue::Number(s1_rows as f64))
-                        .with_duration(s1_elapsed),
+                    PlanNode::new(
+                        PlanOperation::DataFusionExecution,
+                        "Materialize Inner (Stage 1)",
+                    )
+                    .with_property("result_rows", PlanValue::Number(s1_rows as f64))
+                    .with_duration(s1_elapsed),
                 );
                 window_node.add_child(
-                    PlanNode::new(PlanOperation::DataFusionExecution, "Window Function (Stage 2)")
-                        .with_property("sql", PlanValue::Text(sql))
-                        .with_property("result_rows", PlanValue::Number(s2_rows as f64))
-                        .with_duration(s2_elapsed),
+                    PlanNode::new(
+                        PlanOperation::DataFusionExecution,
+                        "Window Function (Stage 2)",
+                    )
+                    .with_property("sql", PlanValue::Text(sql))
+                    .with_property("result_rows", PlanValue::Number(s2_rows as f64))
+                    .with_duration(s2_elapsed),
                 );
                 plan_node.add_child(window_node);
             }
@@ -2596,6 +2623,7 @@ fn build_window_sql(
 
     if let Some(function) = info.function {
         // WINDOW: AGG("__val") OVER (PARTITION BY ... ORDER BY ... ROWS BETWEEN ...)
+        let func_name_owned;
         let func_name = match function {
             AggregateOp::Sum => "SUM",
             AggregateOp::Average => "AVG",
@@ -2604,6 +2632,10 @@ fn build_window_sql(
             AggregateOp::Count => "COUNT",
             AggregateOp::DistinctCount => "COUNT",
             AggregateOp::CountRows => "COUNT",
+            other => {
+                func_name_owned = other.to_string();
+                &func_name_owned
+            }
         };
 
         let frame_sql = match &info.frame {
@@ -3391,6 +3423,7 @@ fn resolve_compound_sql(
                 AggregateOp::Max => format!("MAX({qualified})"),
                 AggregateOp::DistinctCount => format!("COUNT(DISTINCT {qualified})"),
                 AggregateOp::CountRows => "COUNT(*)".to_string(),
+                _ => format!("{operation}({qualified})"),
             })
         }
 

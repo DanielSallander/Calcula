@@ -49,8 +49,8 @@
 
 use crate::compute::aggregate::AggregateOp;
 use crate::compute::expression::{
-    self as expr, infer_fact_table, ComparisonOp, Expression, FilterPredicate, ScalarFunction,
-    TextFunction, WindowFrame,
+    self as expr, infer_fact_table, ComparisonOp, DateTimeFunction, Expression, FilterPredicate,
+    ScalarFunction, TextFunction, WindowFrame,
 };
 use crate::error::{EngineError, EngineResult};
 use crate::model::context::{ClearTarget, ContextDefinition, ContextOp};
@@ -415,9 +415,8 @@ impl Parser {
         self.expect(&Token::LParen)?;
 
         match upper {
-            "SUM" | "COUNT" | "AVG" | "AVERAGE" | "MIN" | "MAX" | "DISTINCTCOUNT" => {
-                self.parse_aggregate_call(upper)
-            }
+            "SUM" | "COUNT" | "AVG" | "AVERAGE" | "MIN" | "MAX" | "DISTINCTCOUNT" | "MEDIAN"
+            | "STDEV" | "STDEVP" | "VARIANCE" | "VARIANCEP" => self.parse_aggregate_call(upper),
             "COUNTROWS" => self.parse_countrows_call(),
             "KEEP" => self.parse_keep_call(),
             "CLEAR" => self.parse_clear_call(),
@@ -467,6 +466,28 @@ impl Parser {
             "LN" => self.parse_scalar_call(ScalarFunction::Ln, 1),
             "LOG10" => self.parse_scalar_call(ScalarFunction::Log10, 1),
             "SIGN" => self.parse_scalar_call(ScalarFunction::Sign, 1),
+            "EXP" => self.parse_scalar_call(ScalarFunction::Exp, 1),
+            "LOG" => self.parse_scalar_call(ScalarFunction::Log, 1),
+            "PI" => self.parse_scalar_call(ScalarFunction::Pi, 0),
+            // Date/time functions
+            "YEAR" => self.parse_datetime_call(DateTimeFunction::Year, 1),
+            "MONTH" => self.parse_datetime_call(DateTimeFunction::Month, 1),
+            "DAY" => self.parse_datetime_call(DateTimeFunction::Day, 1),
+            "QUARTER" => self.parse_datetime_call(DateTimeFunction::Quarter, 1),
+            "DATE" => self.parse_datetime_call(DateTimeFunction::Date, 3),
+            "DATEDIFF" => self.parse_datediff_call(),
+            "TODAY" => self.parse_datetime_call(DateTimeFunction::Today, 0),
+            "NOW" => self.parse_datetime_call(DateTimeFunction::Now, 0),
+            // Error handling
+            "IFERROR" => self.parse_iferror_call(),
+            // Scope check
+            "ISINSCOPE" => self.parse_isinscope_call(),
+            // Context operations
+            "CLEAREXCEPT" | "CLEAR_EXCEPT" => self.parse_clearexcept_call(),
+            // Iterator
+            "ITERATE" => self.parse_iterate_call(),
+            // Percentile
+            "PERCENTILE" => self.parse_percentile_call(),
             // Text functions
             "CONCATENATE" => self.parse_text_call(TextFunction::Concatenate, 1),
             "COMBINEVALUES" => self.parse_text_call(TextFunction::CombineValues, 2),
@@ -493,6 +514,7 @@ impl Parser {
             "RPAD" => self.parse_text_call(TextFunction::Rpad, 2),
             "REVERSE" => self.parse_text_call(TextFunction::Reverse, 1),
             "SPLIT" => self.parse_text_call(TextFunction::Split, 3),
+            "FORMAT" => self.parse_text_call(TextFunction::Format, 2),
             _ => Err(EngineError::InvalidData(format!(
                 "unknown function: {name}"
             ))),
@@ -508,6 +530,11 @@ impl Parser {
             "MIN" => AggregateOp::Min,
             "MAX" => AggregateOp::Max,
             "DISTINCTCOUNT" => AggregateOp::DistinctCount,
+            "MEDIAN" => AggregateOp::Median,
+            "STDEV" => AggregateOp::StdevSample,
+            "STDEVP" => AggregateOp::StdevPop,
+            "VARIANCE" => AggregateOp::VarSample,
+            "VARIANCEP" => AggregateOp::VarPop,
             _ => unreachable!(),
         };
 
@@ -552,6 +579,8 @@ impl Parser {
                         | "CLEAR"
                         | "CLEAR_INNER"
                         | "CLEAR_OUTER"
+                        | "CLEAREXCEPT"
+                        | "CLEAR_EXCEPT"
                         | "RESET"
                         | "RESET_INNER"
                         | "RESET_OUTER"
@@ -1699,6 +1728,11 @@ impl Parser {
         function: ScalarFunction,
         min_args: usize,
     ) -> EngineResult<Expression> {
+        // Handle zero-arg functions like PI()
+        if min_args == 0 && self.peek() == Some(&Token::RParen) {
+            self.advance()?; // consume RParen
+            return Ok(expr::scalar_fn(function, vec![]));
+        }
         let mut args = vec![self.parse_expression()?];
         while self.peek() == Some(&Token::Comma) {
             self.advance()?;
@@ -1734,6 +1768,181 @@ impl Parser {
         self.expect(&Token::RParen)?;
         Ok(expr::text_fn(function, args))
     }
+
+    /// Parse a date/time function call with `min_args` required and optional extra args.
+    fn parse_datetime_call(
+        &mut self,
+        function: DateTimeFunction,
+        min_args: usize,
+    ) -> EngineResult<Expression> {
+        if min_args == 0 {
+            // Zero-arg functions like TODAY(), NOW()
+            self.expect(&Token::RParen)?;
+            return Ok(expr::datetime_fn(function, vec![]));
+        }
+        let mut args = vec![self.parse_expression()?];
+        while self.peek() == Some(&Token::Comma) {
+            self.advance()?;
+            args.push(self.parse_expression()?);
+        }
+        if args.len() < min_args {
+            return Err(EngineError::InvalidData(format!(
+                "{function}: expected at least {min_args} arguments, got {}",
+                args.len()
+            )));
+        }
+        self.expect(&Token::RParen)?;
+        Ok(expr::datetime_fn(function, args))
+    }
+
+    /// Parse `DATEDIFF(start, end, interval)` where interval is DAY/MONTH/YEAR/QUARTER.
+    fn parse_datediff_call(&mut self) -> EngineResult<Expression> {
+        let start = self.parse_expression()?;
+        self.expect(&Token::Comma)?;
+        let end = self.parse_expression()?;
+        self.expect(&Token::Comma)?;
+        // The interval is an identifier keyword: DAY, MONTH, YEAR, QUARTER
+        let interval = match self.advance()?.clone() {
+            Token::Ident(s) => {
+                let upper = s.to_uppercase();
+                match upper.as_str() {
+                    "DAY" | "MONTH" | "YEAR" | "QUARTER" | "HOUR" | "MINUTE" | "SECOND" => upper,
+                    _ => {
+                        return Err(EngineError::InvalidData(format!(
+                            "DATEDIFF: invalid interval '{s}', expected DAY, MONTH, YEAR, or QUARTER"
+                        )));
+                    }
+                }
+            }
+            tok => {
+                return Err(EngineError::InvalidData(format!(
+                    "DATEDIFF: expected interval (DAY/MONTH/YEAR/QUARTER), got {tok:?}"
+                )));
+            }
+        };
+        self.expect(&Token::RParen)?;
+        Ok(expr::datetime_fn(
+            DateTimeFunction::DateDiff,
+            vec![start, end, Expression::LiteralString(interval)],
+        ))
+    }
+
+    /// Parse `IFERROR(expr, alternate)`.
+    fn parse_iferror_call(&mut self) -> EngineResult<Expression> {
+        let inner = self.parse_expression()?;
+        self.expect(&Token::Comma)?;
+        let alternate = self.parse_expression()?;
+        self.expect(&Token::RParen)?;
+        Ok(expr::if_error(inner, alternate))
+    }
+
+    /// Parse `ISINSCOPE(table[column])`.
+    fn parse_isinscope_call(&mut self) -> EngineResult<Expression> {
+        let table = match self.advance()?.clone() {
+            Token::Ident(s) => s,
+            tok => {
+                return Err(EngineError::InvalidData(format!(
+                    "ISINSCOPE: expected table name, got {tok:?}"
+                )));
+            }
+        };
+        self.expect(&Token::LBracket)?;
+        let column = match self.advance()?.clone() {
+            Token::Ident(s) => s,
+            tok => {
+                return Err(EngineError::InvalidData(format!(
+                    "ISINSCOPE: expected column name, got {tok:?}"
+                )));
+            }
+        };
+        self.expect(&Token::RBracket)?;
+        self.expect(&Token::RParen)?;
+        Ok(expr::is_in_scope(table, column))
+    }
+
+    /// Parse `CLEAREXCEPT(table, col1, col2, ...)` as a context argument.
+    ///
+    /// Returns a placeholder ClearExcept wrapping Blank — the actual inner
+    /// expression is set by `wrap_context_op`.
+    fn parse_clearexcept_call(&mut self) -> EngineResult<Expression> {
+        let table = match self.advance()?.clone() {
+            Token::Ident(s) => s,
+            tok => {
+                return Err(EngineError::InvalidData(format!(
+                    "CLEAREXCEPT: expected table name, got {tok:?}"
+                )));
+            }
+        };
+        let mut except_columns = Vec::new();
+        while self.peek() == Some(&Token::Comma) {
+            self.advance()?; // consume comma
+                             // Expect table[column] or just column identifier
+            let col_name = match self.advance()?.clone() {
+                Token::Ident(s) => {
+                    // Could be table[col] or just col
+                    if self.peek() == Some(&Token::LBracket) {
+                        self.advance()?; // consume [
+                        let col = match self.advance()?.clone() {
+                            Token::Ident(c) => c,
+                            tok => {
+                                return Err(EngineError::InvalidData(format!(
+                                    "CLEAREXCEPT: expected column name, got {tok:?}"
+                                )));
+                            }
+                        };
+                        self.expect(&Token::RBracket)?;
+                        col
+                    } else {
+                        s
+                    }
+                }
+                tok => {
+                    return Err(EngineError::InvalidData(format!(
+                        "CLEAREXCEPT: expected column reference, got {tok:?}"
+                    )));
+                }
+            };
+            except_columns.push(col_name);
+        }
+        self.expect(&Token::RParen)?;
+        Ok(Expression::ClearExcept {
+            expr: Box::new(Expression::Blank),
+            table,
+            except_columns,
+        })
+    }
+
+    /// Parse `ITERATE(table, expression)`.
+    fn parse_iterate_call(&mut self) -> EngineResult<Expression> {
+        let table = match self.advance()?.clone() {
+            Token::Ident(s) => s,
+            tok => {
+                return Err(EngineError::InvalidData(format!(
+                    "ITERATE: expected table name, got {tok:?}"
+                )));
+            }
+        };
+        self.expect(&Token::Comma)?;
+        let expression = self.parse_expression()?;
+        self.expect(&Token::RParen)?;
+        Ok(expr::iterate(table, expression))
+    }
+
+    /// Parse `PERCENTILE(operand, k [, context_ops...])`.
+    fn parse_percentile_call(&mut self) -> EngineResult<Expression> {
+        let operand = self.parse_expression()?;
+        self.expect(&Token::Comma)?;
+        let percentile = self.parse_expression()?;
+        // Check for optional context arguments
+        let mut result = expr::percentile(operand, percentile);
+        while self.peek() == Some(&Token::Comma) {
+            self.advance()?;
+            let context_arg = self.parse_context_arg()?;
+            result = wrap_context_op(result, context_arg)?;
+        }
+        self.expect(&Token::RParen)?;
+        Ok(result)
+    }
 }
 
 /// Wrap an aggregate expression with a context operation.
@@ -1766,6 +1975,11 @@ fn wrap_context_op(aggregate: Expression, context_op: Expression) -> EngineResul
         Expression::UseRelationship {
             relationship_name, ..
         } => Ok(expr::use_relationship(aggregate, relationship_name)),
+        Expression::ClearExcept {
+            table,
+            except_columns,
+            ..
+        } => Ok(expr::clear_except(aggregate, table, except_columns)),
         _ => Err(EngineError::InvalidData(
             "expected context operation (KEEP, CLEAR, RESET, USING, USERELATIONSHIP, etc.)".into(),
         )),

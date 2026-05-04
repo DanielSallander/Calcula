@@ -4,7 +4,7 @@
 //! `traverse`, `using`) into a flat [`EvaluationContext`] that can be
 //! translated into SQL WHERE and JOIN clauses.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use crate::compute::expression::{ComparisonOp, Expression, FilterPredicate, RelationshipPath};
 use crate::error::{EngineError, EngineResult};
@@ -167,6 +167,12 @@ pub struct EvaluationContext {
     /// These are arbitrary boolean expressions like `dim[price] > dim[cost] * 1.5`
     /// that are AND'd with the simple filters.
     pub conditions: Vec<Expression>,
+    /// Tables with CLEAREXCEPT — maps table name to set of preserved column names.
+    ///
+    /// When a table appears here, all filters on the table are cleared EXCEPT
+    /// for filters on columns in the preserved set.
+    #[allow(clippy::zero_sized_map_values)]
+    pub clear_except: HashMap<String, HashSet<String>>,
 }
 
 impl EvaluationContext {
@@ -226,6 +232,13 @@ impl EvaluationContext {
                 }
                 if self.cleared_tables.contains(&f.table) {
                     continue;
+                }
+
+                // CLEAREXCEPT: clear all filters on the table except preserved columns
+                if let Some(preserved) = self.clear_except.get(&f.table) {
+                    if !preserved.contains(&f.column) {
+                        continue; // not preserved → cleared
+                    }
                 }
 
                 // Source-specific column clear
@@ -728,6 +741,67 @@ impl<'a> ContextResolver<'a> {
                 Ok(Expression::InList {
                     expr: Box::new(expr),
                     values: walked,
+                })
+            }
+
+            // Date/time functions: recurse into args.
+            Expression::DateTimeFunc { function, args } => {
+                let walked: Vec<Expression> = args
+                    .iter()
+                    .map(|e| self.walk(e, ctx))
+                    .collect::<EngineResult<_>>()?;
+                Ok(Expression::DateTimeFunc {
+                    function: *function,
+                    args: walked,
+                })
+            }
+
+            // IFERROR: recurse into both sub-expressions.
+            Expression::IfError { expr, alternate } => {
+                let expr = self.walk(expr, ctx)?;
+                let alternate = self.walk(alternate, ctx)?;
+                Ok(Expression::IfError {
+                    expr: Box::new(expr),
+                    alternate: Box::new(alternate),
+                })
+            }
+
+            // ISINSCOPE: leaf node, no context modification.
+            Expression::IsInScope { .. } => Ok(expr.clone()),
+
+            // CLEAREXCEPT: context operation — clears table but preserves specified columns.
+            Expression::ClearExcept {
+                expr: inner,
+                table,
+                except_columns,
+            } => {
+                let inner = self.walk(inner, ctx)?;
+                ctx.clear_except
+                    .entry(table.clone())
+                    .or_default()
+                    .extend(except_columns.iter().cloned());
+                Ok(inner)
+            }
+
+            // ITERATE: transparent — just recurse into expression.
+            Expression::Iterate { table, expression } => {
+                let expression = self.walk(expression, ctx)?;
+                Ok(Expression::Iterate {
+                    table: table.clone(),
+                    expression: Box::new(expression),
+                })
+            }
+
+            // PERCENTILE: implicit aggregate, recurse into operand.
+            Expression::Percentile {
+                operand,
+                percentile,
+            } => {
+                let operand = self.walk(operand, ctx)?;
+                let percentile = self.walk(percentile, ctx)?;
+                Ok(Expression::Percentile {
+                    operand: Box::new(operand),
+                    percentile: Box::new(percentile),
                 })
             }
         }

@@ -156,6 +156,27 @@ pub async fn aggregate_over_relationship(
             )
             .await;
         }
+        // Statistical aggregates: use DataFusion built-in functions.
+        AggregateOp::Median => {
+            use datafusion::functions_aggregate::median::median;
+            median(col(aggregate_column))
+        }
+        AggregateOp::StdevSample => {
+            use datafusion::functions_aggregate::stddev::stddev;
+            stddev(col(aggregate_column))
+        }
+        AggregateOp::StdevPop => {
+            use datafusion::functions_aggregate::stddev::stddev;
+            stddev(col(aggregate_column)) // approximate — sample stddev
+        }
+        AggregateOp::VarSample => {
+            use datafusion::functions_aggregate::variance::var_sample;
+            var_sample(col(aggregate_column))
+        }
+        AggregateOp::VarPop => {
+            use datafusion::functions_aggregate::variance::var_sample;
+            var_sample(col(aggregate_column)) // approximate — sample variance
+        }
     };
 
     let result_df = joined_df.aggregate(vec![group_expr], vec![agg_expr])?;
@@ -224,6 +245,7 @@ async fn aggregate_over_relationship_pre_agg(
         AggregateOp::DistinctCount => {
             format!("COUNT(DISTINCT from_t.\"{aggregate_column}\")")
         }
+        _ => format!("{operation}(from_t.\"{aggregate_column}\")"),
     };
 
     let main_sql = format!(

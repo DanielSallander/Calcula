@@ -557,7 +557,10 @@ async fn optimization_loop() {
         println!("\n{}", "─".repeat(80));
         println!("┌─ Query {}/{}: {}", i + 1, queries.len(), q.name);
         println!("│  Description: {}", q.description);
-        println!("│  Measures: {:?}", q.measures.iter().map(|(n,_)| *n).collect::<Vec<_>>());
+        println!(
+            "│  Measures: {:?}",
+            q.measures.iter().map(|(n, _)| *n).collect::<Vec<_>>()
+        );
         println!("│  Group By: {:?}", q.group_by);
         println!("└{}", "─".repeat(78));
 
@@ -581,7 +584,11 @@ async fn optimization_loop() {
         match engine.query_explained(request).await {
             Ok((batches, plan)) => {
                 let wall_time = start.elapsed();
-                println!("\n  ✓ Success in {:.2}ms (wall: {:.2}ms)", plan.total_duration.ms, wall_time.as_millis());
+                println!(
+                    "\n  ✓ Success in {:.2}ms (wall: {:.2}ms)",
+                    plan.total_duration.ms,
+                    wall_time.as_millis()
+                );
                 println!("\n  --- Execution Plan ---");
                 print_plan_tree(&plan.root, 1);
                 println!("\n  --- Results (first 5 rows) ---");

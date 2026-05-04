@@ -23,6 +23,12 @@ Functions that compute a single value from a column of data.
 | [MAX](MAX.md) | Returns the largest value in a column |
 | [DISTINCTCOUNT](DISTINCTCOUNT.md) | Counts the number of distinct (unique) values in a column |
 | [COUNTROWS](COUNTROWS.md) | Counts the total number of rows in a table (including NULLs) |
+| [MEDIAN](MEDIAN.md) | Returns the median (50th percentile) of values |
+| [STDEV](STDEV.md) | Returns the sample standard deviation |
+| [STDEVP](STDEVP.md) | Returns the population standard deviation |
+| [VARIANCE](VARIANCE.md) | Returns the sample variance |
+| [VARIANCEP](VARIANCEP.md) | Returns the population variance |
+| [PERCENTILE](PERCENTILE.md) | Returns the k-th percentile of values |
 
 ## Information Functions
 
@@ -33,6 +39,7 @@ Functions that inspect the current filter context.
 | [HASONEVALUE](HASONEVALUE.md) | Tests whether a column has exactly one distinct value in the current filter context |
 | [SELECTEDVALUE](SELECTEDVALUE.md) | Returns the single value of a column if there is exactly one, otherwise returns an alternate |
 | [FIRST](FIRST.md) | Returns the first value of a column ordered by another expression |
+| [ISINSCOPE](ISINSCOPE.md) | Returns TRUE if a column is in the current GROUP BY context |
 
 ## Logical Functions
 
@@ -59,6 +66,7 @@ Functions for branching logic and handling NULL values.
 | [BLANK](BLANK.md) | Returns a blank (NULL) value |
 | [ISBLANK](ISBLANK.md) | Tests whether an expression is BLANK (NULL) |
 | [COALESCE](COALESCE.md) | Returns the first non-BLANK value from a list of expressions |
+| [IFERROR](IFERROR.md) | Returns an alternate value when an expression evaluates to NULL/error |
 
 ## Math Functions
 
@@ -80,6 +88,24 @@ Scalar math functions that operate on numeric values.
 | [LN](LN.md) | Returns the natural logarithm (base e) |
 | [LOG10](LOG10.md) | Returns the base-10 logarithm |
 | [SIGN](SIGN.md) | Returns the sign of a number (-1, 0, or 1) |
+| [EXP](EXP.md) | Returns e raised to the power of a number |
+| [LOG](LOG.md) | Returns the logarithm of a number to a specified base |
+| [PI](PI.md) | Returns the value of Pi (3.14159...) |
+
+## Date/Time Functions
+
+Functions that extract parts from dates or perform date arithmetic.
+
+| Function | Description |
+|----------|-------------|
+| [YEAR](YEAR.md) | Extracts the year from a date |
+| [MONTH](MONTH.md) | Extracts the month (1-12) from a date |
+| [DAY](DAY.md) | Extracts the day (1-31) from a date |
+| [QUARTER](QUARTER.md) | Extracts the quarter (1-4) from a date |
+| [DATE](DATE.md) | Constructs a date from year, month, and day parts |
+| [DATEDIFF](DATEDIFF.md) | Returns the difference between two dates in the specified interval |
+| [TODAY](TODAY.md) | Returns the current date |
+| [NOW](NOW.md) | Returns the current date and time |
 
 ## Text Functions
 
@@ -112,6 +138,7 @@ Functions that manipulate text strings.
 | [RPAD](RPAD.md) | Right-pads a text string to a specified length (Calcula extension) |
 | [REVERSE](REVERSE.md) | Reverses the order of characters in a text string (Calcula extension) |
 | [SPLIT](SPLIT.md) | Splits text by a delimiter and returns a specified part (Calcula extension) |
+| [FORMAT](FORMAT.md) | Formats a value as text using a format pattern |
 
 ## Context Functions
 
@@ -123,6 +150,7 @@ Functions that modify the evaluation context — the set of filters applied when
 | [CLEAR](CLEAR.md) | Removes filters on a specific table or column |
 | [RESET](RESET.md) | Removes all filters from the evaluation context |
 | [USERELATIONSHIP](USERELATIONSHIP.md) | Activates an inactive relationship for the measure's evaluation |
+| [CLEAREXCEPT](CLEAREXCEPT.md) | Clears all filters on a table except specified columns (like DAX's ALLEXCEPT) |
 
 ### Source-Specific Context Functions
 
@@ -134,6 +162,12 @@ These are advanced variants of CLEAR and RESET that target only one filter sourc
 | [CLEAR_OUTER](CLEAR_OUTER.md) | Query-level filters on specified targets | Group-by filters |
 | [RESET_INNER](RESET_INNER.md) | All group-by filters | Query-level filters |
 | [RESET_OUTER](RESET_OUTER.md) | All query-level filters | Group-by filters |
+
+## Iterator Functions
+
+| Function | Description |
+|----------|-------------|
+| [ITERATE](ITERATE.md) | Declares row-context iteration over a table for use with any aggregate (Calcula's composable alternative to DAX X-functions) |
 
 ## Two-Stage Aggregation
 
