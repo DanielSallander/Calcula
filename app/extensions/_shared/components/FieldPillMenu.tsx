@@ -28,6 +28,8 @@ export interface FieldPillMenuProps {
   onNumberFormat?: () => void;
   onAggregationChange?: (aggregation: AggregationType) => void;
   onClose: () => void;
+  /** When true, suppresses "Move to Zone" options (calc fields stay in VALUES). */
+  isCalculated?: boolean;
 }
 
 const ZONE_LABELS: Record<DropZoneType, string> = {
@@ -143,6 +145,7 @@ export function FieldPillMenu({
   onNumberFormat,
   onAggregationChange,
   onClose,
+  isCalculated,
 }: FieldPillMenuProps): React.ReactElement {
   const menuRef = useRef<HTMLDivElement>(null);
 
@@ -280,8 +283,8 @@ export function FieldPillMenu({
 
       <div className={menuStyles.separator} />
 
-      {/* Move to other zones */}
-      {otherZones.map((targetZone) => (
+      {/* Move to other zones (not available for calculated fields) */}
+      {!isCalculated && otherZones.map((targetZone) => (
         <button
           key={targetZone}
           className={menuStyles.menuItem}

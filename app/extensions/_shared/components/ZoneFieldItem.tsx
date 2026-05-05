@@ -45,8 +45,11 @@ export function ZoneFieldItem({
   const [menuPosition, setMenuPosition] = useState({ x: 0, y: 0 });
 
   const isBiField = field.sourceIndex === -1;
+  const isCalcField = !!field.isCalculated;
   let displayName: string;
-  if (zone === 'values' && field.aggregation && !isBiField) {
+  if (isCalcField) {
+    displayName = field.customName || field.name;
+  } else if (zone === 'values' && field.aggregation && !isBiField) {
     displayName = getValueFieldDisplayName(field.name, field.aggregation);
   } else {
     let raw = field.customName || field.name;
@@ -161,7 +164,17 @@ export function ZoneFieldItem({
         className={`${styles.zoneField} ${isDragging ? 'dragging' : ''}`}
         onContextMenu={handleContextMenu}
       >
-        <span className={styles.zoneFieldName} title={displayName}>
+        {isCalcField && (
+          <span style={{
+            fontSize: '9px',
+            fontWeight: 600,
+            fontStyle: 'italic',
+            color: '#0969da',
+            marginRight: '4px',
+            flexShrink: 0,
+          }}>fx</span>
+        )}
+        <span className={styles.zoneFieldName} title={isCalcField ? `${displayName} = ${field.calculatedFormula || ''}` : displayName}>
           {displayName}
         </span>
         <button
@@ -193,15 +206,16 @@ export function ZoneFieldItem({
           onMoveTo={handleMoveTo}
           onRemove={() => onRemove(zone, index)}
           onValueFieldSettings={
-            zone === 'values' ? handleValueFieldSettings : undefined
+            zone === 'values' && !isCalcField ? handleValueFieldSettings : undefined
           }
           onNumberFormat={
-            zone === 'values' ? handleNumberFormat : undefined
+            zone === 'values' && !isCalcField ? handleNumberFormat : undefined
           }
           onAggregationChange={
-            zone === 'values' ? handleAggregationChange : undefined
+            zone === 'values' && !isCalcField ? handleAggregationChange : undefined
           }
           onClose={() => setShowMenu(false)}
+          isCalculated={isCalcField}
         />
       )}
     </>

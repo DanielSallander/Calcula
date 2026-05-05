@@ -545,6 +545,29 @@ pub struct UpdatePivotFieldsRequest {
     pub filter_fields: Option<Vec<PivotFieldConfig>>,
     /// Layout options (optional)
     pub layout: Option<LayoutConfig>,
+    /// Calculated fields (optional — if Some, replaces all calculated fields)
+    pub calculated_fields: Option<Vec<CalculatedFieldDef>>,
+    /// Unified column ordering: interleaved value + calculated field indices.
+    /// When provided, determines the column order in the pivot output.
+    #[serde(default)]
+    pub value_column_order: Option<Vec<ValueColumnRefDef>>,
+}
+
+/// Reference to a value or calculated field in the unified ordering.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", tag = "type")]
+pub enum ValueColumnRefDef {
+    Value { index: usize },
+    Calculated { index: usize },
+}
+
+/// Inline calculated field definition (used within update requests)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CalculatedFieldDef {
+    pub name: String,
+    pub formula: String,
+    pub number_format: Option<String>,
 }
 
 /// Request to toggle a group's expand/collapse state
@@ -1101,6 +1124,9 @@ pub struct PivotFieldConfiguration {
     pub value_fields: Vec<ZoneFieldInfo>,
     pub filter_fields: Vec<ZoneFieldInfo>,
     pub layout: LayoutConfig,
+    /// Calculated fields defined on this pivot.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub calculated_fields: Vec<CalculatedFieldDef>,
 }
 
 /// Response for pivot region check
@@ -1403,6 +1429,11 @@ pub struct UpdateBiPivotFieldsRequest {
     /// those not currently in a zone. Persisted for navigation round-trips.
     #[serde(default)]
     pub lookup_columns: Vec<String>,
+    /// Calculated fields (optional — if Some, replaces all calculated fields)
+    pub calculated_fields: Option<Vec<CalculatedFieldDef>>,
+    /// Unified column ordering for interleaving values and calculated fields.
+    #[serde(default)]
+    pub value_column_order: Option<Vec<ValueColumnRefDef>>,
 }
 
 /// Reference to a table column (for BI pivot row/column/filter fields).

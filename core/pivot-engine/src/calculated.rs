@@ -121,6 +121,20 @@ impl Tokenizer {
                         }
                         tokens.push(Token::Ident(name));
                     }
+                    '[' => {
+                        // Bracket identifier: [MeasureName] (BI model measures)
+                        self.next_char(); // skip opening bracket
+                        let mut name = String::new();
+                        loop {
+                            match self.next_char() {
+                                Some(']') => break,
+                                Some(c) => name.push(c),
+                                None => return Err("Unterminated bracket field name".to_string()),
+                            }
+                        }
+                        // Store with brackets so it matches BI value field names like "[TotalSales]"
+                        tokens.push(Token::Ident(format!("[{}]", name)));
+                    }
                     c if c.is_ascii_digit() || c == '.' => {
                         let mut num_str = String::new();
                         while let Some(c) = self.peek_char() {

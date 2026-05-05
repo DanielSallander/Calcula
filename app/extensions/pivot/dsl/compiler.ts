@@ -17,7 +17,7 @@ import type {
   SourceField, ZoneField, AggregationType,
 } from '../../_shared/components/types';
 import { getDefaultAggregation, getValueFieldDisplayName } from '../../_shared/components/types';
-import type { LayoutConfig, ShowValuesAs, BiPivotModelInfo } from '../../Pivot/components/types';
+import type { LayoutConfig, ShowValuesAs, BiPivotModelInfo, CalculatedFieldDef, ValueColumnRefDef } from '../../Pivot/components/types';
 
 /** The compiled output of a DSL definition. */
 export interface CompileResult {
@@ -28,6 +28,10 @@ export interface CompileResult {
   layout: LayoutConfig;
   /** Lookup column keys for BI pivots ("Table.Column"). */
   lookupColumns: string[];
+  /** Calculated fields from CALC clauses. */
+  calculatedFields: CalculatedFieldDef[];
+  /** Unified column ordering (interleaved values + calculated fields). */
+  valueColumnOrder: ValueColumnRefDef[];
   /** Save-as name if SAVE AS clause was present. */
   saveAs?: string;
   errors: DslError[];
@@ -114,6 +118,35 @@ class Compiler {
     const layout = this.compileLayout(this.ast.layout);
     const lookupColumns = this.collectLookupColumns();
 
+    // Map CALC clauses to CalculatedFieldDef
+    const calculatedFields: CalculatedFieldDef[] = this.ast.calculatedFields.map(cf => ({
+      name: cf.name,
+      formula: cf.expression,
+    }));
+
+    // Build unified column ordering from the interleaved values list.
+    // ValueFieldNodes with inlineCalcIndex represent CALC entries within VALUES.
+    const valueColumnOrder: ValueColumnRefDef[] = [];
+    let regularValueIdx = 0;
+    for (const node of this.ast.values) {
+      if (node.inlineCalcIndex !== undefined) {
+        valueColumnOrder.push({ type: 'calculated', index: node.inlineCalcIndex });
+      } else {
+        valueColumnOrder.push({ type: 'value', index: regularValueIdx });
+        regularValueIdx++;
+      }
+    }
+    // Append any standalone CALC clauses (not inline in VALUES) that aren't
+    // already referenced by inline entries
+    const inlineCalcIndices = new Set(
+      this.ast.values.filter(n => n.inlineCalcIndex !== undefined).map(n => n.inlineCalcIndex!)
+    );
+    for (let i = 0; i < calculatedFields.length; i++) {
+      if (!inlineCalcIndices.has(i)) {
+        valueColumnOrder.push({ type: 'calculated', index: i });
+      }
+    }
+
     return {
       rows,
       columns,
@@ -121,6 +154,8 @@ class Compiler {
       filters,
       layout,
       lookupColumns,
+      calculatedFields,
+      valueColumnOrder,
       saveAs: this.ast.saveAs,
       errors: this.errors,
     };
@@ -145,6 +180,9 @@ class Compiler {
   private compileValueFields(nodes: ValueFieldNode[]): ZoneField[] {
     const result: ZoneField[] = [];
     for (const node of nodes) {
+      // Skip inline CALC placeholders — they're handled via calculatedFields
+      if (node.inlineCalcIndex !== undefined) continue;
+
       if (node.isMeasure) {
         // Bracket measure: [TotalSales]
         const zf = this.compileBiMeasure(node);

@@ -53,6 +53,8 @@ export interface ValueFieldNode {
   alias?: string;
   /** Show-values-as from [% of Row] etc. */
   showValuesAs?: string;
+  /** When set, this value slot is an inline CALC field (index into calculatedFields). */
+  inlineCalcIndex?: number;
   location: SourceLocation;
 }
 

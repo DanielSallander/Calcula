@@ -388,6 +388,7 @@ async function checkPivotAtSelection(
         initialValues,
         initialFilters,
         initialLayout,
+        initialCalculatedFields: config.calculatedFields,
         biModel: pivotInfo.biModel,
       };
 

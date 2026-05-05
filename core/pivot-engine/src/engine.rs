@@ -20,7 +20,7 @@ use crate::cache::{
 use crate::definition::{
     AggregationType, DateGroupLevel, FieldGrouping, FieldIndex, ManualGroup,
     PivotDefinition, PivotField, ReportLayout, ShowValuesAs, SlicerFilter,
-    SubtotalLocation, ValueField, ValuesPosition,
+    SubtotalLocation, ValueColumnRef, ValueField, ValuesPosition,
 };
 use crate::view::{
     BackgroundStyle, FilterRowInfo, HeaderFieldSummary, PivotCellType,
@@ -1684,7 +1684,7 @@ impl<'a> PivotCalculator<'a> {
     fn generate_view(&mut self) -> PivotView {
         let mut view = PivotView::new(self.definition.id);
         view.version = self.definition.version;
-        
+
         // Determine layout dimensions
         let row_label_cols = self.calculate_row_label_columns();
         let col_header_rows = self.calculate_column_header_rows();
@@ -1928,7 +1928,9 @@ impl<'a> PivotCalculator<'a> {
     /// Generates column descriptors.
     fn generate_column_descriptors(&self, row_label_cols: usize) -> Vec<PivotColumnDescriptor> {
         let mut descriptors = Vec::new();
-        
+        let col_order = self.definition.effective_value_column_order();
+        let total_value_cols = col_order.len();
+
         // Row label columns
         for i in 0..row_label_cols {
             descriptors.push(PivotColumnDescriptor {
@@ -1941,12 +1943,13 @@ impl<'a> PivotCalculator<'a> {
                 group_values: Vec::new(),
             });
         }
-        
+
         // Data columns
-        if self.col_items.is_empty() {
-            // No column fields - one column per value field (or one blank column if no values)
-            if self.definition.value_fields.is_empty() {
-                // No value fields - add a single blank data column
+        // Use effective_col_fields to check for real column fields (not just grand total col_item)
+        if self.effective_col_fields.is_empty() {
+            // No column fields - one column per entry in the unified order
+            if total_value_cols == 0 {
+                // No value or calculated fields - add a single blank data column
                 descriptors.push(PivotColumnDescriptor {
                     view_col: row_label_cols,
                     col_type: PivotColumnType::Data,
@@ -1957,8 +1960,12 @@ impl<'a> PivotCalculator<'a> {
                     group_values: Vec::new(),
                 });
             } else {
-                for (i, _vf) in self.definition.value_fields.iter().enumerate() {
+                for (i, col_ref) in col_order.iter().enumerate() {
                     let col_idx = row_label_cols + i;
+                    let group_values = match col_ref {
+                        ValueColumnRef::Value(vi) => vec![*vi as ValueId],
+                        ValueColumnRef::Calculated(_) => Vec::new(),
+                    };
                     descriptors.push(PivotColumnDescriptor {
                         view_col: col_idx,
                         col_type: PivotColumnType::Data,
@@ -1966,12 +1973,12 @@ impl<'a> PivotCalculator<'a> {
                         width_hint: 100,
                         parent_index: None,
                         children_indices: Vec::new(),
-                        group_values: vec![i as ValueId],
+                        group_values,
                     });
                 }
             }
         } else {
-            // Generate from column items
+            // Generate from column items (column fields present)
             for (i, item) in self.col_items.iter().enumerate() {
                 let col_idx = row_label_cols + i;
                 let col_type = if item.is_grand_total {
@@ -1981,7 +1988,7 @@ impl<'a> PivotCalculator<'a> {
                 } else {
                     PivotColumnType::Data
                 };
-                
+
                 descriptors.push(PivotColumnDescriptor {
                     view_col: col_idx,
                     col_type,
@@ -1996,8 +2003,23 @@ impl<'a> PivotCalculator<'a> {
                     group_values: item.group_values.clone(),
                 });
             }
+            // Calculated field columns (appended after col_item columns when column fields present)
+            let calc_count = self.definition.calculated_fields.len();
+            let calc_start = self.col_items.len();
+            for i in 0..calc_count {
+                let col_idx = row_label_cols + calc_start + i;
+                descriptors.push(PivotColumnDescriptor {
+                    view_col: col_idx,
+                    col_type: PivotColumnType::Data,
+                    depth: 0,
+                    width_hint: 100,
+                    parent_index: None,
+                    children_indices: Vec::new(),
+                    group_values: Vec::new(),
+                });
+            }
         }
-        
+
         descriptors
     }
     
@@ -2090,27 +2112,26 @@ impl<'a> PivotCalculator<'a> {
             }
 
             // Column header cells
-            if self.col_items.is_empty() {
+            // Use effective_col_fields to check for real column fields (not just a grand total col_item)
+            if self.effective_col_fields.is_empty() {
                 // No column fields - show value field names (or blank if no values)
-                if self.definition.value_fields.is_empty() {
-                    // No value fields - add blank header
+                // Generate headers using the unified value column order
+                let col_order = self.definition.effective_value_column_order();
+                if col_order.is_empty() {
+                    // No value or calculated fields - add blank header
                     if is_last_header {
                         cells.push(PivotViewCell::column_header(String::new()));
                     } else {
                         cells.push(PivotViewCell::corner());
                     }
                 } else {
-                    for vf in &self.definition.value_fields {
+                    for col_ref in &col_order {
+                        let name = match col_ref {
+                            ValueColumnRef::Value(i) => self.definition.value_fields[*i].name.clone(),
+                            ValueColumnRef::Calculated(i) => self.definition.calculated_fields[*i].name.clone(),
+                        };
                         if is_last_header {
-                            cells.push(PivotViewCell::column_header(vf.name.clone()));
-                        } else {
-                            cells.push(PivotViewCell::corner());
-                        }
-                    }
-                    // Add calculated field headers
-                    for cf in &self.definition.calculated_fields {
-                        if is_last_header {
-                            cells.push(PivotViewCell::column_header(cf.name.clone()));
+                            cells.push(PivotViewCell::column_header(name));
                         } else {
                             cells.push(PivotViewCell::corner());
                         }
@@ -2178,6 +2199,14 @@ impl<'a> PivotCalculator<'a> {
                         PivotViewCell::column_header(String::new())
                     };
                     cells.push(cell);
+                }
+                // Add calculated field headers after col_item columns
+                for cf in &self.definition.calculated_fields {
+                    if is_last_header {
+                        cells.push(PivotViewCell::column_header(cf.name.clone()));
+                    } else {
+                        cells.push(PivotViewCell::corner());
+                    }
                 }
             }
 
@@ -2434,7 +2463,8 @@ impl<'a> PivotCalculator<'a> {
     ) {
         
         // Handle case with no value fields - generate blank cells
-        if value_fields.is_empty() {
+        // (but not if we have calculated fields — those need the unified order path)
+        if value_fields.is_empty() && self.definition.calculated_fields.is_empty() {
             if col_items.is_empty() {
                 // No columns and no values - add one blank cell
                 cells.push(PivotViewCell::blank());
@@ -2450,53 +2480,89 @@ impl<'a> PivotCalculator<'a> {
         // Prepare the row portion of the key buffer once for all columns
         self.prepare_row_key(&row_item.group_values);
 
-        if col_items.is_empty() {
-            // No column fields - one cell per value field
+        // Use effective_col_fields to determine if there are real column fields.
+        // col_items may contain a grand total item even without real column fields.
+        let has_real_col_fields = !self.effective_col_fields.is_empty();
+        if !has_real_col_fields {
+            // No column fields — emit cells in the unified value column order.
+            // Pre-compute value field aggregates for calculated field evaluation.
+            use std::collections::HashMap;
+            let mut field_values: HashMap<String, f64> = HashMap::new();
+            let mut vf_aggregates: Vec<f64> = Vec::with_capacity(value_fields.len());
             for (vf_idx, vf) in value_fields.iter().enumerate() {
-                let aggregate = self.lookup_aggregate_col(
-                    &[], // No column grouping
-                    vf_idx,
-                    vf.aggregation,
-                );
-
-                // Apply show_values_as transformation
-                let display_value = self.transform_show_values_as(
-                    aggregate,
-                    &row_item.group_values,
-                    &[],
-                    vf_idx,
-                    vf.aggregation,
-                    vf.show_values_as,
-                );
-
-                let mut cell = PivotViewCell::data(display_value);
-                cell.number_format = vf.number_format.clone();
-                cell.value_field_index = Some(vf_idx);
-
-                // Override number format for percentage-based show_values_as
-                if matches!(vf.show_values_as,
-                    ShowValuesAs::PercentOfGrandTotal | ShowValuesAs::PercentOfRowTotal |
-                    ShowValuesAs::PercentOfColumnTotal | ShowValuesAs::PercentOfParentRow |
-                    ShowValuesAs::PercentOfParentColumn | ShowValuesAs::PercentDifference |
-                    ShowValuesAs::PercentOfRunningTotal
-                ) {
-                    cell.number_format = Some("0.00%".to_string());
+                let aggregate = self.lookup_aggregate_col(&[], vf_idx, vf.aggregation);
+                vf_aggregates.push(aggregate);
+                if let Some(fc) = self.cache.get_field(vf.source_index) {
+                    field_values.insert(fc.name.clone(), aggregate);
                 }
+                field_values.insert(vf.name.clone(), aggregate);
+            }
 
-                if row_item.is_subtotal {
-                    cell.cell_type = PivotCellType::RowSubtotal;
-                    cell.background_style = BackgroundStyle::Subtotal;
-                    cell.is_bold = true;
-                } else if row_item.is_grand_total {
-                    cell.cell_type = PivotCellType::GrandTotal;
-                    cell.background_style = BackgroundStyle::GrandTotal;
-                    cell.is_bold = true;
-                } else if row_item.has_children {
-                    // Parent group rows (expandable) get bold data values (like Excel)
-                    cell.is_bold = true;
+            let col_order = self.definition.effective_value_column_order();
+            for col_ref in col_order.iter() {
+                match col_ref {
+                    ValueColumnRef::Value(vf_idx) => {
+                        let vf_idx = *vf_idx;
+                        if vf_idx >= value_fields.len() { continue; }
+                        let vf = &value_fields[vf_idx];
+                        let aggregate = vf_aggregates[vf_idx];
+
+                        let display_value = self.transform_show_values_as(
+                            aggregate, &row_item.group_values, &[],
+                            vf_idx, vf.aggregation, vf.show_values_as,
+                        );
+
+                        let mut cell = PivotViewCell::data(display_value);
+                        cell.number_format = vf.number_format.clone();
+                        cell.value_field_index = Some(vf_idx);
+
+                        if matches!(vf.show_values_as,
+                            ShowValuesAs::PercentOfGrandTotal | ShowValuesAs::PercentOfRowTotal |
+                            ShowValuesAs::PercentOfColumnTotal | ShowValuesAs::PercentOfParentRow |
+                            ShowValuesAs::PercentOfParentColumn | ShowValuesAs::PercentDifference |
+                            ShowValuesAs::PercentOfRunningTotal
+                        ) {
+                            cell.number_format = Some("0.00%".to_string());
+                        }
+
+                        if row_item.is_subtotal {
+                            cell.cell_type = PivotCellType::RowSubtotal;
+                            cell.background_style = BackgroundStyle::Subtotal;
+                            cell.is_bold = true;
+                        } else if row_item.is_grand_total {
+                            cell.cell_type = PivotCellType::GrandTotal;
+                            cell.background_style = BackgroundStyle::GrandTotal;
+                            cell.is_bold = true;
+                        } else if row_item.has_children {
+                            cell.is_bold = true;
+                        }
+
+                        cells.push(cell);
+                    }
+                    ValueColumnRef::Calculated(cf_idx) => {
+                        let cf_idx = *cf_idx;
+                        if cf_idx >= self.definition.calculated_fields.len() { continue; }
+                        let cf = &self.definition.calculated_fields[cf_idx];
+
+                        let result = crate::calculated::eval_calc_formula(&cf.formula, &field_values)
+                            .unwrap_or(f64::NAN);
+
+                        let mut cell = PivotViewCell::data(result);
+                        cell.number_format = cf.number_format.clone();
+
+                        if row_item.is_subtotal {
+                            cell.cell_type = PivotCellType::RowSubtotal;
+                            cell.background_style = BackgroundStyle::Subtotal;
+                            cell.is_bold = true;
+                        } else if row_item.is_grand_total {
+                            cell.cell_type = PivotCellType::GrandTotal;
+                            cell.background_style = BackgroundStyle::GrandTotal;
+                            cell.is_bold = true;
+                        }
+
+                        cells.push(cell);
+                    }
                 }
-
-                cells.push(cell);
             }
         } else {
             // Generate cell for each column item
@@ -2595,8 +2661,9 @@ impl<'a> PivotCalculator<'a> {
             }
         }
 
-        // Generate calculated field cells
-        if !self.definition.calculated_fields.is_empty() {
+        // Generate calculated field cells (only for real column fields case — the
+        // no-column-fields case handles them inline via the unified value_column_order)
+        if has_real_col_fields && !self.definition.calculated_fields.is_empty() {
             self.generate_calculated_field_cells(cells, row_item, col_items, value_fields, values_position);
         }
     }

@@ -262,7 +262,11 @@ export function registerPivotDslLanguage(): void {
           return { suggestions };
 
         case 'CALC':
+          // CALC expressions can reference both dimensions and measures
           addFieldSuggestions(suggestions, range, false);
+          if (currentBiModel) {
+            addMeasureSuggestions(suggestions, range);
+          }
           return { suggestions };
 
         default:

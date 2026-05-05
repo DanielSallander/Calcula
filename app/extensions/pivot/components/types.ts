@@ -85,6 +85,18 @@ export interface LayoutConfig {
   styleId?: string;
 }
 
+/** Inline calculated field definition. */
+export interface CalculatedFieldDef {
+  name: string;
+  formula: string;
+  numberFormat?: string;
+}
+
+/** Reference to a value or calculated field in the unified column ordering. */
+export type ValueColumnRefDef =
+  | { type: 'value'; index: number }
+  | { type: 'calculated'; index: number };
+
 // Update request matching UpdatePivotFieldsRequest in pivot_commands.rs
 export interface UpdatePivotFieldsRequest {
   pivotId: PivotId;
@@ -93,6 +105,8 @@ export interface UpdatePivotFieldsRequest {
   valueFields?: ValueFieldConfig[];
   filterFields?: PivotFieldConfig[];
   layout?: LayoutConfig;
+  calculatedFields?: CalculatedFieldDef[];
+  valueColumnOrder?: ValueColumnRefDef[];
 }
 
 // Editor state
@@ -166,4 +180,8 @@ export interface UpdateBiPivotFieldsRequest {
   layout?: LayoutConfig;
   /** All columns toggled to LOOKUP mode, including those not in zones */
   lookupColumns?: string[];
+  /** Calculated fields (replaces all when provided) */
+  calculatedFields?: CalculatedFieldDef[];
+  /** Unified column ordering for interleaving values and calculated fields. */
+  valueColumnOrder?: ValueColumnRefDef[];
 }

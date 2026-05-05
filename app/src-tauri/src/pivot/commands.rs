@@ -381,6 +381,29 @@ pub async fn update_pivot_fields(
             apply_layout_config(&mut definition.layout, layout_config);
         }
 
+        // Update calculated fields
+        if let Some(ref calc_fields) = request.calculated_fields {
+            definition.calculated_fields = calc_fields
+                .iter()
+                .map(|cf| pivot_engine::CalculatedField {
+                    name: cf.name.clone(),
+                    formula: cf.formula.clone(),
+                    number_format: cf.number_format.clone(),
+                })
+                .collect();
+        }
+
+        // Update value column order
+        if let Some(ref order) = request.value_column_order {
+            definition.value_column_order = order
+                .iter()
+                .map(|r| match r {
+                    ValueColumnRefDef::Value { index } => pivot_engine::ValueColumnRef::Value(*index),
+                    ValueColumnRefDef::Calculated { index } => pivot_engine::ValueColumnRef::Calculated(*index),
+                })
+                .collect();
+        }
+
         // Bump version for cache invalidation
         definition.bump_version();
 
@@ -1253,12 +1276,21 @@ pub fn get_pivot_at_cell(
         auto_fit_column_widths: Some(definition.layout.auto_fit_column_widths),
     };
     
+    let calc_fields: Vec<CalculatedFieldDef> = definition.calculated_fields.iter().map(|cf| {
+        CalculatedFieldDef {
+            name: cf.name.clone(),
+            formula: cf.formula.clone(),
+            number_format: cf.number_format.clone(),
+        }
+    }).collect();
+
     let field_configuration = PivotFieldConfiguration {
         row_fields,
         column_fields,
         value_fields,
         filter_fields: filter_fields.clone(),
         layout,
+        calculated_fields: calc_fields,
     };
 
     // Calculate filter zones from filter field configuration
@@ -4087,6 +4119,29 @@ pub async fn update_bi_pivot_fields(
     // Apply layout
     if let Some(ref layout_config) = request.layout {
         apply_layout_config(&mut definition.layout, layout_config);
+    }
+
+    // Update calculated fields
+    if let Some(ref calc_fields) = request.calculated_fields {
+        definition.calculated_fields = calc_fields
+            .iter()
+            .map(|cf| pivot_engine::CalculatedField {
+                name: cf.name.clone(),
+                formula: cf.formula.clone(),
+                number_format: cf.number_format.clone(),
+            })
+            .collect();
+    }
+
+    // Update value column order
+    if let Some(ref order) = request.value_column_order {
+        definition.value_column_order = order
+            .iter()
+            .map(|r| match r {
+                ValueColumnRefDef::Value { index } => pivot_engine::ValueColumnRef::Value(*index),
+                ValueColumnRefDef::Calculated { index } => pivot_engine::ValueColumnRef::Calculated(*index),
+            })
+            .collect();
     }
 
     definition.bump_version();

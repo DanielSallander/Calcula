@@ -648,6 +648,21 @@ pub struct PivotDefinition {
     /// User-defined calculated items (synthetic items within a field).
     #[serde(default)]
     pub calculated_items: Vec<CalculatedItem>,
+
+    /// Ordering of value columns in the pivot output.
+    /// Each entry is either a regular value field index or a calculated field index.
+    /// When empty, defaults to: all value fields in order, then all calculated fields.
+    #[serde(default)]
+    pub value_column_order: Vec<ValueColumnRef>,
+}
+
+/// Reference to a column in the unified value/calculated field ordering.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub enum ValueColumnRef {
+    /// Index into `value_fields`
+    Value(usize),
+    /// Index into `calculated_fields`
+    Calculated(usize),
 }
 
 impl PivotDefinition {
@@ -676,12 +691,30 @@ impl PivotDefinition {
             source_table_name: None,
             calculated_fields: Vec::new(),
             calculated_items: Vec::new(),
+            value_column_order: Vec::new(),
         }
     }
     
     /// Increments the version (for cache invalidation).
     pub fn bump_version(&mut self) {
         self.version += 1;
+    }
+
+    /// Returns the effective column ordering for the pivot output.
+    /// If `value_column_order` is set, uses it. Otherwise, returns all value
+    /// fields followed by all calculated fields (the default order).
+    pub fn effective_value_column_order(&self) -> Vec<ValueColumnRef> {
+        if !self.value_column_order.is_empty() {
+            return self.value_column_order.clone();
+        }
+        let mut order = Vec::new();
+        for i in 0..self.value_fields.len() {
+            order.push(ValueColumnRef::Value(i));
+        }
+        for i in 0..self.calculated_fields.len() {
+            order.push(ValueColumnRef::Calculated(i));
+        }
+        order
     }
     
     /// Returns the number of source rows (excluding header if applicable).

@@ -11,6 +11,8 @@ import type {
   UpdatePivotFieldsRequest,
   PivotFieldConfig,
   ValueFieldConfig,
+  CalculatedFieldDef,
+  ValueColumnRefDef,
   PivotId,
 } from './types';
 import { getDefaultAggregation, getValueFieldDisplayName } from './types';
@@ -27,6 +29,7 @@ interface UsePivotEditorStateOptions {
   initialValues?: ZoneField[];
   initialFilters?: ZoneField[];
   initialLayout?: LayoutConfig;
+  initialCalculatedFields?: CalculatedFieldDef[];
   onUpdate?: (request: UpdatePivotFieldsRequest) => void;
 }
 
@@ -38,14 +41,41 @@ export function usePivotEditorState({
   initialValues = [],
   initialFilters = [],
   initialLayout = {},
+  initialCalculatedFields,
   onUpdate,
 }: UsePivotEditorStateOptions) {
+  // Merge initial calculated fields into the values array as ZoneField entries
+  const mergedInitialValues = useMemo(() => {
+    const merged = [...initialValues];
+    if (initialCalculatedFields && initialCalculatedFields.length > 0) {
+      for (const cf of initialCalculatedFields) {
+        merged.push({
+          sourceIndex: -2,  // Marker for calculated fields
+          name: cf.name,
+          isNumeric: true,
+          isCalculated: true,
+          customName: cf.name,
+          calculatedFormula: cf.formula,
+        });
+      }
+    }
+    return merged;
+  }, [initialValues, initialCalculatedFields]);
+
   const [rows, setRows] = useState<ZoneField[]>(initialRows);
   const [columns, setColumns] = useState<ZoneField[]>(initialColumns);
-  const [values, setValues] = useState<ZoneField[]>(initialValues);
+  const [values, setValues] = useState<ZoneField[]>(mergedInitialValues);
   const [filters, setFilters] = useState<ZoneField[]>(initialFilters);
   const [layout, setLayout] = useState<LayoutConfig>(initialLayout);
   const [draggingField, setDraggingField] = useState<DragField | null>(null);
+
+  // Calculated fields from DSL CALC clauses or initial load from backend
+  const calculatedFieldsRef = useRef<CalculatedFieldDef[] | undefined>(
+    initialCalculatedFields && initialCalculatedFields.length > 0 ? initialCalculatedFields : undefined
+  );
+
+  // Unified column ordering (value fields + calculated fields interleaved)
+  const valueColumnOrderRef = useRef<ValueColumnRefDef[] | undefined>(undefined);
 
   // Track all unique values per filter field (for smart serialization).
   // Key = field name, Value = all unique values.
@@ -69,12 +99,12 @@ export function usePivotEditorState({
       isInitialMount.current = true;
       setRows(initialRows);
       setColumns(initialColumns);
-      setValues(initialValues);
+      setValues(mergedInitialValues);
       setFilters(initialFilters);
       setLayout(initialLayout);
       setTimeout(() => { isInitialMount.current = false; }, 0);
     }
-  }, [pivotId, initialRows, initialColumns, initialValues, initialFilters, initialLayout]);
+  }, [pivotId, initialRows, initialColumns, mergedInitialValues, initialFilters, initialLayout]);
 
   // Track which fields are currently used in any zone
   const usedFields = useMemo(() => {
@@ -85,7 +115,9 @@ export function usePivotEditorState({
     return used;
   }, [rows, columns, values, filters]);
 
-  // Build the update request from current state
+  // Build the update request from current state.
+  // The values array may contain interleaved regular value fields and calculated
+  // fields (isCalculated=true). We separate them and build the unified ordering.
   const buildUpdateRequest = useCallback((): UpdatePivotFieldsRequest => {
     const rowFields: PivotFieldConfig[] = rows.map((f) => ({
       sourceIndex: f.sourceIndex,
@@ -97,22 +129,41 @@ export function usePivotEditorState({
       name: f.name,
     }));
 
-    const valueFields: ValueFieldConfig[] = values.map((f) => {
-      const aggregation = f.aggregation ?? getDefaultAggregation(f.isNumeric);
-      const isBiField = f.sourceIndex === -1;
-      // For BI fields, use the raw name (e.g., "[Revenue]") — no aggregation prefix.
-      // For regular fields, apply aggregation display name (e.g., "Sum of Sales").
-      const displayName = isBiField
-        ? (f.customName || f.name)
-        : (f.customName || getValueFieldDisplayName(f.name, aggregation));
-      return {
-        sourceIndex: f.sourceIndex,
-        name: displayName,
-        aggregation,
-        numberFormat: f.numberFormat,
-        showValuesAs: f.showValuesAs as ShowValuesAs | undefined,
-      };
-    });
+    // Separate regular values from calculated fields and build ordering
+    const regularValues: ValueFieldConfig[] = [];
+    const calcFields: CalculatedFieldDef[] = [];
+    const columnOrder: ValueColumnRefDef[] = [];
+
+    for (const f of values) {
+      if (f.isCalculated) {
+        const calcIdx = calcFields.length;
+        calcFields.push({
+          name: f.customName || f.name,
+          formula: f.calculatedFormula || '',
+          numberFormat: f.numberFormat,
+        });
+        columnOrder.push({ type: 'calculated', index: calcIdx });
+      } else {
+        const valIdx = regularValues.length;
+        const aggregation = f.aggregation ?? getDefaultAggregation(f.isNumeric);
+        const isBiField = f.sourceIndex === -1;
+        const displayName = isBiField
+          ? (f.customName || f.name)
+          : (f.customName || getValueFieldDisplayName(f.name, aggregation));
+        regularValues.push({
+          sourceIndex: f.sourceIndex,
+          name: displayName,
+          aggregation,
+          numberFormat: f.numberFormat,
+          showValuesAs: f.showValuesAs as ShowValuesAs | undefined,
+        });
+        columnOrder.push({ type: 'value', index: valIdx });
+      }
+    }
+
+    // Sync the ref so the DesignEditor serializer can access them
+    calculatedFieldsRef.current = calcFields.length > 0 ? calcFields : undefined;
+    valueColumnOrderRef.current = columnOrder.length > 0 ? columnOrder : undefined;
 
     // Build filter fields with hidden items
     const filterFields: PivotFieldConfig[] = filters.map((f) => ({
@@ -125,9 +176,11 @@ export function usePivotEditorState({
       pivotId: pivotId,
       rowFields: rowFields,
       columnFields: columnFields,
-      valueFields: valueFields,
+      valueFields: regularValues,
       filterFields: filterFields,
       layout,
+      calculatedFields: calcFields.length > 0 ? calcFields : undefined,
+      valueColumnOrder: columnOrder.length > 0 ? columnOrder : undefined,
     };
   }, [pivotId, rows, columns, values, filters, layout]);
 
@@ -223,6 +276,11 @@ export function usePivotEditorState({
   // Handle drop into a zone
   const handleDrop = useCallback(
     (zone: DropZoneType, dragField: DragField, insertIndex?: number) => {
+      // Calculated fields can only live in the values zone
+      if (dragField.sourceIndex === -2 && zone !== 'values') {
+        return;
+      }
+
       // Remove from source zone if moving between zones
       if (dragField.fromZone && dragField.fromIndex !== undefined) {
         const sourceSetter = getZoneSetter(dragField.fromZone);
@@ -440,6 +498,12 @@ export function usePivotEditorState({
   // Handle moving a field from one zone to another (via pill menu)
   const handleMoveField = useCallback(
     (fromZone: DropZoneType, fromIndex: number, toZone: DropZoneType) => {
+      // Calculated fields can only live in the values zone
+      if (fromZone === 'values') {
+        const field = values[fromIndex];
+        if (field?.isCalculated && toZone !== 'values') return;
+      }
+
       const fromSetter = getZoneSetter(fromZone);
       const toSetter = getZoneSetter(toZone);
 
@@ -520,10 +584,29 @@ export function usePivotEditorState({
     newValues: ZoneField[],
     newFilters: ZoneField[],
     newLayout: LayoutConfig,
+    newCalculatedFields?: CalculatedFieldDef[],
+    newValueColumnOrder?: ValueColumnRefDef[],
   ) => {
+    // Merge calculated fields into the values array as ZoneField entries
+    const mergedValues = [...newValues];
+    if (newCalculatedFields && newCalculatedFields.length > 0) {
+      for (const cf of newCalculatedFields) {
+        mergedValues.push({
+          sourceIndex: -2,
+          name: cf.name,
+          isNumeric: true,
+          isCalculated: true,
+          customName: cf.name,
+          calculatedFormula: cf.formula,
+          numberFormat: cf.numberFormat,
+        });
+      }
+    }
+    calculatedFieldsRef.current = newCalculatedFields;
+    valueColumnOrderRef.current = newValueColumnOrder;
     setRows(newRows);
     setColumns(newColumns);
-    setValues(newValues);
+    setValues(mergedValues);
     setFilters(newFilters);
     setLayout(newLayout);
     scheduleUpdate();
@@ -535,11 +618,11 @@ export function usePivotEditorState({
     isInitialMount.current = true;
     setRows(initialRows);
     setColumns(initialColumns);
-    setValues(initialValues);
+    setValues(mergedInitialValues);
     setFilters(initialFilters);
     // Re-arm after React processes the state updates
     setTimeout(() => { isInitialMount.current = false; }, 0);
-  }, [initialRows, initialColumns, initialValues, initialFilters]);
+  }, [initialRows, initialColumns, mergedInitialValues, initialFilters]);
 
   return {
     sourceFields,
@@ -569,6 +652,7 @@ export function usePivotEditorState({
     buildUpdateRequest,
     setAllZones,
     filterUniqueValues: filterUniqueValuesRef,
+    calculatedFields: calculatedFieldsRef,
     flushUpdate,
     resetZones,
   };

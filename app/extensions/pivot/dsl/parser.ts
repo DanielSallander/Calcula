@@ -198,6 +198,21 @@ class Parser {
     this.skipNewlines();
     const tok = this.peek();
 
+    // Inline CALC: CALC Name = expression
+    if (tok.type === TokenType.Calc) {
+      this.advance(); // consume CALC
+      const calcField = this.parseCalcField(true);
+      const calcIndex = this.ast.calculatedFields.length;
+      this.ast.calculatedFields.push(calcField);
+      // Return a placeholder ValueFieldNode that marks this position as a calc field
+      return {
+        fieldName: calcField.name,
+        isMeasure: false,
+        inlineCalcIndex: calcIndex,
+        location: tok.location,
+      };
+    }
+
     // Bracket measure: [Total Revenue]
     if (tok.type === TokenType.BracketIdentifier) {
       this.advance();
@@ -442,7 +457,11 @@ class Parser {
 
   // --- CALC field ---
 
-  private parseCalcField(): CalcFieldNode {
+  /**
+   * Parse a calculated field definition: Name = expression.
+   * @param inline If true, parsing inside VALUES clause — stop at comma (not inside parens).
+   */
+  private parseCalcField(inline: boolean = false): CalcFieldNode {
     const nameTok = this.peek();
     let name = '';
     if (nameTok.type === TokenType.Identifier || nameTok.type === TokenType.StringLiteral) {
@@ -455,13 +474,31 @@ class Parser {
 
     this.expect(TokenType.Equals, 'Expected "=" after calculated field name');
 
-    // Capture the rest of the line as the expression (opaque to the DSL parser)
+    // Capture tokens as the expression (opaque to the DSL parser).
+    // Bracket identifiers must be reconstructed with their brackets since the
+    // lexer strips them (e.g., [TotalSales] is stored as value="TotalSales").
+    // When inline (inside VALUES), stop at a top-level comma so the next
+    // value field can be parsed.
     let expression = '';
+    let parenDepth = 0;
     while (!this.isAtEnd() && !this.check(TokenType.Newline) && !this.check(TokenType.EOF)) {
+      // In inline mode, stop at comma when not inside parentheses
+      if (inline && parenDepth === 0 && this.check(TokenType.Comma)) {
+        break;
+      }
       const tok = this.advance();
-      expression += tok.value;
+      if (tok.type === TokenType.LeftParen) parenDepth++;
+      if (tok.type === TokenType.RightParen) parenDepth = Math.max(0, parenDepth - 1);
+      if (tok.type === TokenType.BracketIdentifier) {
+        expression += `[${tok.value}]`;
+      } else if (tok.type === TokenType.StringLiteral) {
+        expression += `"${tok.value}"`;
+      } else {
+        expression += tok.value;
+      }
       // Add spacing for readability
-      if (!this.check(TokenType.Newline) && !this.check(TokenType.EOF)) {
+      if (!this.check(TokenType.Newline) && !this.check(TokenType.EOF) &&
+          !(inline && parenDepth === 0 && this.check(TokenType.Comma))) {
         expression += ' ';
       }
     }

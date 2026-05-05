@@ -33,6 +33,7 @@ interface PivotEditorProps {
   initialValues?: ZoneField[];
   initialFilters?: ZoneField[];
   initialLayout?: LayoutConfig;
+  initialCalculatedFields?: CalculatedFieldDef[];
   biModel?: BiPivotModelInfo;
   onClose?: () => void;
   onViewUpdate?: () => void;
@@ -62,6 +63,7 @@ export function PivotEditor({
   initialValues = [],
   initialFilters = [],
   initialLayout = {},
+  initialCalculatedFields,
   biModel,
   onClose,
   onViewUpdate,
@@ -126,6 +128,8 @@ export function PivotEditor({
           filterFields: biFilterFields,
           layout: request.layout,
           lookupColumns: [...lookupColumns],
+          calculatedFields: request.calculatedFields,
+          valueColumnOrder: request.valueColumnOrder,
         };
         await pivot.updateBiFields(biRequest);
       } else {
@@ -177,6 +181,7 @@ export function PivotEditor({
     handleDragEnd,
     setAllZones,
     filterUniqueValues,
+    calculatedFields,
     flushUpdate,
     resetZones,
   } = usePivotEditorState({
@@ -187,6 +192,7 @@ export function PivotEditor({
     initialValues,
     initialFilters,
     initialLayout,
+    initialCalculatedFields,
     onUpdate: handleUpdate,
   });
 
@@ -488,6 +494,7 @@ export function PivotEditor({
           filters={filters}
           layout={currentLayout}
           filterUniqueValues={filterUniqueValues.current}
+          calculatedFields={calculatedFields.current}
           onZoneStateChange={setAllZones}
           isActive={activeTab === 'design'}
         />

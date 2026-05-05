@@ -79,6 +79,9 @@ export function validate(ast: PivotLayoutAST, ctx: ValidateContext): DslError[] 
 
   // --- Validate VALUES fields ---
   for (const node of ast.values) {
+    // Skip inline CALC placeholders — they are validated as calculated fields
+    if (node.inlineCalcIndex !== undefined) continue;
+
     if (node.isMeasure) {
       if (!isBi) {
         errors.push(dslError(

@@ -5,7 +5,7 @@
 import React from "react";
 import { PivotEditor } from "./PivotEditor";
 import type { TaskPaneViewProps } from "@api";
-import type { PivotId, SourceField, ZoneField, LayoutConfig, BiPivotModelInfo } from "./types";
+import type { PivotId, SourceField, ZoneField, LayoutConfig, BiPivotModelInfo, CalculatedFieldDef } from "./types";
 
 /**
  * Data structure expected by PivotEditorView.
@@ -18,6 +18,7 @@ export interface PivotEditorViewData {
   initialValues?: ZoneField[];
   initialFilters?: ZoneField[];
   initialLayout?: LayoutConfig;
+  initialCalculatedFields?: CalculatedFieldDef[];
   biModel?: BiPivotModelInfo;
 }
 
@@ -59,6 +60,7 @@ export function PivotEditorView({
       initialValues={pivotData.initialValues}
       initialFilters={pivotData.initialFilters}
       initialLayout={pivotData.initialLayout}
+      initialCalculatedFields={pivotData.initialCalculatedFields}
       biModel={pivotData.biModel}
       onClose={onClose}
       onViewUpdate={onUpdate}

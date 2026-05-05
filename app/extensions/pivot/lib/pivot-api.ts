@@ -441,6 +441,7 @@ export interface PivotFieldConfiguration {
   valueFields: ZoneFieldInfo[];
   filterFields: ZoneFieldInfo[];
   layout: LayoutConfig;
+  calculatedFields?: { name: string; formula: string; numberFormat?: string }[];
 }
 
 /** Info about a filter dropdown cell position */

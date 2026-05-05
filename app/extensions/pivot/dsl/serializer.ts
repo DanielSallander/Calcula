@@ -5,13 +5,15 @@
 
 import type { ZoneField, AggregationType } from '../../_shared/components/types';
 import { AGGREGATION_OPTIONS, getValueFieldDisplayName } from '../../_shared/components/types';
-import type { LayoutConfig, BiPivotModelInfo } from '../../Pivot/components/types';
+import type { LayoutConfig, BiPivotModelInfo, CalculatedFieldDef } from '../../Pivot/components/types';
 
 /** Options controlling serialization output. */
 export interface SerializeOptions {
   biModel?: BiPivotModelInfo;
   /** If set, include a SAVE AS clause with this name. */
   saveAs?: string;
+  /** Calculated fields to serialize as CALC clauses. */
+  calculatedFields?: CalculatedFieldDef[];
   /**
    * Map from filter field name/sourceIndex to all unique values for that field.
    * When available, the serializer uses whichever of = (inclusion) or NOT IN
@@ -45,8 +47,24 @@ export function serialize(
     lines.push(`COLUMNS: ${serializeFieldList(columns, options)}`);
   }
 
+  // Serialize VALUES with inline CALC entries to preserve interleaved order.
+  // CALC fields appear as "CALC Name = formula" within the VALUES list.
   if (values.length > 0) {
-    lines.push(`VALUES:  ${serializeValueFields(values, options)}`);
+    const parts: string[] = [];
+    for (const v of values) {
+      if (v.isCalculated) {
+        const name = v.customName || v.name;
+        const formula = v.calculatedFormula || '';
+        parts.push(`CALC ${name} = ${formula}`);
+      } else {
+        parts.push(serializeValueField(v, options));
+      }
+    }
+    if (parts.length > 1) {
+      lines.push(`VALUES:  ${parts.join(',\n         ')}`);
+    } else if (parts.length === 1) {
+      lines.push(`VALUES:  ${parts[0]}`);
+    }
   }
 
   if (filters.length > 0) {

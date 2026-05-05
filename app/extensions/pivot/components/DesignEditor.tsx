@@ -8,7 +8,7 @@ import type * as monaco from 'monaco-editor';
 import { processDsl, serialize, type CompileContext } from '../dsl';
 import { LANGUAGE_ID, registerPivotDslLanguage, setDslEditorContext } from './pivotDslLanguage';
 import type { SourceField, ZoneField } from '../../_shared/components/types';
-import type { LayoutConfig, BiPivotModelInfo } from './types';
+import type { LayoutConfig, BiPivotModelInfo, CalculatedFieldDef, ValueColumnRefDef } from './types';
 import type { DslError } from '../dsl/errors';
 
 interface DesignEditorProps {
@@ -22,6 +22,8 @@ interface DesignEditorProps {
   layout: LayoutConfig;
   /** Map from filter field name to all unique values, for smart serialization. */
   filterUniqueValues: Map<string, string[]>;
+  /** Calculated fields to include in serialization. */
+  calculatedFields?: CalculatedFieldDef[];
   /** Callback to apply compiled DSL state to the pivot editor. */
   onZoneStateChange: (
     rows: ZoneField[],
@@ -29,6 +31,8 @@ interface DesignEditorProps {
     values: ZoneField[],
     filters: ZoneField[],
     layout: LayoutConfig,
+    calculatedFields?: CalculatedFieldDef[],
+    valueColumnOrder?: ValueColumnRefDef[],
   ) => void;
   /** Whether this tab is currently visible. */
   isActive: boolean;
@@ -43,6 +47,7 @@ export function DesignEditor({
   filters,
   layout,
   filterUniqueValues,
+  calculatedFields,
   onZoneStateChange,
   isActive,
 }: DesignEditorProps): React.ReactElement {
@@ -85,7 +90,7 @@ export function DesignEditor({
       return;
     }
 
-    const text = serialize(rows, columns, values, filters, layout, { biModel, filterUniqueValues });
+    const text = serialize(rows, columns, values, filters, layout, { biModel, filterUniqueValues, calculatedFields });
     if (text === lastSerializedText.current) return;
     lastSerializedText.current = text;
 
@@ -121,7 +126,7 @@ export function DesignEditor({
     monacoRef.current = monacoInstance;
 
     // Set initial content by serializing current zone state
-    const text = serialize(rows, columns, values, filters, layout, { biModel, filterUniqueValues });
+    const text = serialize(rows, columns, values, filters, layout, { biModel, filterUniqueValues, calculatedFields });
     lastSerializedText.current = text;
     // setValue during mount doesn't trigger onChange (listener not attached yet)
     editor.setValue(text);
@@ -171,6 +176,8 @@ export function DesignEditor({
           result.values,
           result.filters,
           result.layout,
+          result.calculatedFields.length > 0 ? result.calculatedFields : undefined,
+          result.valueColumnOrder.length > 0 ? result.valueColumnOrder : undefined,
         );
       }
     }, 300);
