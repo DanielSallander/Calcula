@@ -4,9 +4,10 @@
 // this handler fetches the unique values and shows the filter overlay.
 
 import { pivot } from "@api/pivot";
-import { OverlayExtensions } from "@api";
+import { OverlayExtensions, emitAppEvent } from "@api";
 import { PIVOT_FILTER_OVERLAY_ID } from "../manifest";
 import { getCachedPivotView } from "../lib/pivotViewStore";
+import { PivotEvents } from "../lib/pivotEvents";
 
 /**
  * State for tracking the current filter menu.
@@ -121,6 +122,15 @@ async function handleApplyFilter(
           hiddenItems: hiddenItems.length > 0 ? hiddenItems : undefined,
         },
       ],
+    });
+
+    // Notify the PivotEditor so it can update its zone state
+    emitAppEvent(PivotEvents.PIVOT_FILTER_APPLIED, {
+      pivotId: currentFilterState.pivotId,
+      fieldIndex,
+      fieldName: currentFilterState.fieldName,
+      hiddenItems: hiddenItems.length > 0 ? hiddenItems : undefined,
+      allValues: [...selectedValues, ...hiddenItems],
     });
 
     // Hide the overlay

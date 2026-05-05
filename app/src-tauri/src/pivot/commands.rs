@@ -1188,6 +1188,7 @@ pub fn get_pivot_at_cell(
             is_numeric,
             aggregation: None,
             is_lookup: f.is_attribute,
+            hidden_items: None,
         }
     }).collect();
 
@@ -1199,6 +1200,7 @@ pub fn get_pivot_at_cell(
             is_numeric,
             aggregation: None,
             is_lookup: f.is_attribute,
+            hidden_items: None,
         }
     }).collect();
 
@@ -1210,17 +1212,24 @@ pub fn get_pivot_at_cell(
             is_numeric,
             aggregation: Some(aggregation_to_string(f.aggregation)),
             is_lookup: false,
+            hidden_items: None,
         }
     }).collect();
 
     let filter_fields: Vec<ZoneFieldInfo> = definition.filter_fields.iter().map(|f| {
         let is_numeric = cache.is_numeric_field(f.field.source_index);
+        let hidden = if f.field.hidden_items.is_empty() {
+            None
+        } else {
+            Some(f.field.hidden_items.clone())
+        };
         ZoneFieldInfo {
             source_index: f.field.source_index,
             name: f.field.name.clone(),
             is_numeric,
             aggregation: None,
             is_lookup: f.field.is_attribute,
+            hidden_items: hidden,
         }
     }).collect();
     
@@ -4005,7 +4014,9 @@ pub async fn update_bi_pivot_fields(
             .collect();
     }
 
-    // Filter fields — same as row/column fields, map BiFieldRef to PivotFilter
+    // Filter fields — same as row/column fields, map BiFieldRef to PivotFilter.
+    // If the request carries hidden_items (from DSL editor), apply them.
+    // Otherwise, preserve hidden_items from the old definition (from filter dropdown).
     let old_filter_fields = definition.filter_fields.clone();
     definition.filter_fields = request
         .filter_fields
@@ -4020,12 +4031,15 @@ pub async fn update_bi_pivot_fields(
             } else {
                 PivotField::new(idx, name)
             };
-            // Preserve hidden_items from the old filter field (if same source_index)
             let mut filter = pivot_engine::PivotFilter {
                 field,
                 condition: pivot_engine::FilterCondition::ValueList(Vec::new()),
             };
-            if let Some(old) = old_filter_fields.iter().find(|of| of.field.source_index == idx) {
+            if !f.hidden_items.is_empty() {
+                // Request explicitly provides hidden_items (e.g., from DSL editor)
+                filter.field.hidden_items = f.hidden_items.clone();
+            } else if let Some(old) = old_filter_fields.iter().find(|of| of.field.source_index == idx) {
+                // Preserve from previous definition (filter dropdown applies via regular updateFields)
                 filter.field.hidden_items = old.field.hidden_items.clone();
             }
             filter

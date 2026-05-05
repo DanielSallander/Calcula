@@ -1,10 +1,12 @@
 //! FILENAME: app/extensions/pivot/components/PivotEditor.tsx
 import React, { useCallback, useRef, useState, useEffect, useMemo } from 'react';
+import { css } from '@emotion/css';
 import { styles } from './PivotEditor.styles';
 import { FieldList } from './FieldList';
 import { DropZones } from './DropZones';
 import { ValueFieldSettingsModal, type ValueFieldSettings } from './ValueFieldSettingsModal';
 import { NumberFormatModal } from './NumberFormatModal';
+import { DesignEditor } from './DesignEditor';
 import { usePivotEditorState } from './usePivotEditorState';
 import { pivot } from '@api/pivot';
 import { TableFieldList } from '../../_shared/components/TableFieldList';
@@ -20,6 +22,8 @@ import type {
   MeasureField,
   PivotId,
 } from './types';
+
+type EditorTab = 'fields' | 'design';
 
 interface PivotEditorProps {
   pivotId: PivotId;
@@ -64,6 +68,9 @@ export function PivotEditor({
 }: PivotEditorProps): React.ReactElement {
   const isBiPivot = !!biModel;
 
+  // Tab state: Fields (visual drag-drop) or Design (DSL text editor)
+  const [activeTab, setActiveTab] = useState<EditorTab>('fields');
+
   // Modal state
   const [valueSettingsIndex, setValueSettingsIndex] = useState<number | null>(null);
   const [numberFormatIndex, setNumberFormatIndex] = useState<number | null>(null);
@@ -104,12 +111,19 @@ export function PivotEditor({
         // Mark fields as lookup based on the lookupColumns state.
         const toBiRef = (f: { name: string }) =>
           toBiFieldRef(f.name, lookupColumns.has(f.name));
+        // Build BI filter refs with hiddenItems preserved
+        const biFilterFields = (request.filterFields ?? [])
+          .filter(isRealBiField)
+          .map(f => ({
+            ...toBiRef(f),
+            hiddenItems: f.hiddenItems,
+          }));
         const biRequest: UpdateBiPivotFieldsRequest = {
           pivotId: request.pivotId,
           rowFields: (request.rowFields ?? []).filter(isRealBiField).map(toBiRef),
           columnFields: (request.columnFields ?? []).filter(isRealBiField).map(toBiRef),
           valueFields: (request.valueFields ?? []).map((f) => toBiValueFieldRef(f.name)),
-          filterFields: (request.filterFields ?? []).filter(isRealBiField).map(toBiRef),
+          filterFields: biFilterFields,
           layout: request.layout,
           lookupColumns: [...lookupColumns],
         };
@@ -146,6 +160,7 @@ export function PivotEditor({
     columns,
     rows,
     values,
+    layout: currentLayout,
     deferUpdate,
     setDeferUpdate,
     hasPendingChanges,
@@ -160,6 +175,8 @@ export function PivotEditor({
     handleNumberFormatChange,
     handleDragStart,
     handleDragEnd,
+    setAllZones,
+    filterUniqueValues,
     flushUpdate,
     resetZones,
   } = usePivotEditorState({
@@ -374,7 +391,20 @@ export function PivotEditor({
   return (
     <div className={styles.container}>
       <div className={styles.header}>
-        <span>PivotTable Fields</span>
+        <div className={tabBarStyles.tabBar}>
+          <button
+            className={`${tabBarStyles.tab} ${activeTab === 'fields' ? tabBarStyles.tabActive : ''}`}
+            onClick={() => setActiveTab('fields')}
+          >
+            Fields
+          </button>
+          <button
+            className={`${tabBarStyles.tab} ${activeTab === 'design' ? tabBarStyles.tabActive : ''}`}
+            onClick={() => setActiveTab('design')}
+          >
+            Design
+          </button>
+        </div>
         {onClose && (
           <button
             className={styles.closeButton}
@@ -408,7 +438,8 @@ export function PivotEditor({
         </div>
       )}
 
-      <div className={styles.content}>
+      {/* Fields tab content */}
+      <div className={styles.content} style={{ display: activeTab === 'fields' ? 'flex' : 'none' }}>
         {isBiPivot && biModel ? (
           <TableFieldList
             biModel={biModel}
@@ -443,6 +474,22 @@ export function PivotEditor({
           onOpenNumberFormat={handleOpenNumberFormat}
           onDragStart={handleDragStart}
           onDragEnd={handleDragEnd}
+        />
+      </div>
+
+      {/* Design tab content */}
+      <div className={styles.content} style={{ display: activeTab === 'design' ? 'flex' : 'none' }}>
+        <DesignEditor
+          sourceFields={sourceFields}
+          biModel={biModel}
+          rows={rows}
+          columns={columns}
+          values={values}
+          filters={filters}
+          layout={currentLayout}
+          filterUniqueValues={filterUniqueValues.current}
+          onZoneStateChange={setAllZones}
+          isActive={activeTab === 'design'}
         />
       </div>
 
@@ -487,3 +534,35 @@ export function PivotEditor({
     </div>
   );
 }
+
+// --- Tab bar styles ---
+
+const tabBarStyles = {
+  tabBar: css`
+    display: flex;
+    gap: 0;
+  `,
+  tab: css`
+    padding: 0 12px;
+    background: none;
+    border: none;
+    cursor: pointer;
+    font-family: inherit;
+    font-size: 13px;
+    font-weight: 400;
+    color: #656d76;
+    line-height: 1;
+    border-bottom: 2px solid transparent;
+    transition: color 0.12s, border-color 0.12s;
+    padding-bottom: 2px;
+
+    &:hover {
+      color: #24292f;
+    }
+  `,
+  tabActive: css`
+    color: #24292f;
+    font-weight: 600;
+    border-bottom-color: #0969da;
+  `,
+};

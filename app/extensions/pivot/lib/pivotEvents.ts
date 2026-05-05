@@ -18,6 +18,8 @@ export const PivotEvents = {
   PIVOT_LAYOUT_CHANGED: "app:pivot-layout-changed",
   /** Emitted by the Design tab on mount to request the PivotEditor re-broadcast layout state */
   PIVOT_REQUEST_LAYOUT: "app:pivot-request-layout",
+  /** Emitted when filter values are applied via the filter dropdown */
+  PIVOT_FILTER_APPLIED: "app:pivot-filter-applied",
   /** Emitted by the backend during long-running pivot operations (Tauri event) */
   PIVOT_PROGRESS: "pivot:progress",
 } as const;

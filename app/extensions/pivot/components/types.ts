@@ -137,6 +137,8 @@ export interface BiFieldRef {
   column: string;
   /** When true, this field is a lookup column (resolved post-aggregation). */
   isLookup?: boolean;
+  /** Items to hide from the filter. Only relevant for filter fields. */
+  hiddenItems?: string[];
 }
 
 /** Reference to a model measure (for BI pivot value fields) */

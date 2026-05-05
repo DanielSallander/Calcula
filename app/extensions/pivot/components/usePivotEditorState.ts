@@ -47,6 +47,10 @@ export function usePivotEditorState({
   const [layout, setLayout] = useState<LayoutConfig>(initialLayout);
   const [draggingField, setDraggingField] = useState<DragField | null>(null);
 
+  // Track all unique values per filter field (for smart serialization).
+  // Key = field name, Value = all unique values.
+  const filterUniqueValuesRef = useRef<Map<string, string[]>>(new Map());
+
   // Defer Layout Update: when true, changes accumulate without triggering updates
   const [deferUpdate, setDeferUpdate] = useState(false);
   const [hasPendingChanges, setHasPendingChanges] = useState(false);
@@ -401,6 +405,38 @@ export function usePivotEditorState({
     );
   }, [pivotId, scheduleUpdate]);
 
+  // Listen for filter applied events from the filter dropdown menu.
+  // The filter dropdown bypasses the editor state (calls pivot.updateFields directly),
+  // so we need to sync the hiddenItems back into our zone state.
+  useEffect(() => {
+    return onAppEvent<{
+      pivotId: PivotId;
+      fieldIndex: number;
+      fieldName: string;
+      hiddenItems?: string[];
+      allValues?: string[];
+    }>(PivotEvents.PIVOT_FILTER_APPLIED, (detail) => {
+      if (detail.pivotId !== pivotId) return;
+
+      // Store unique values for smart serialization (= vs NOT IN)
+      if (detail.allValues && detail.fieldName) {
+        filterUniqueValuesRef.current.set(detail.fieldName, detail.allValues);
+      }
+
+      setFilters((prev) =>
+        prev.map((f) => {
+          // Match by sourceIndex for regular pivots, by name for BI pivots (sourceIndex === -1)
+          const isMatch = f.sourceIndex === -1
+            ? f.name === detail.fieldName
+            : f.sourceIndex === detail.fieldIndex;
+          if (!isMatch) return f;
+          return { ...f, hiddenItems: detail.hiddenItems };
+        })
+      );
+      // Don't scheduleUpdate — the filter dropdown already sent the update to the backend
+    });
+  }, [pivotId]);
+
   // Handle moving a field from one zone to another (via pill menu)
   const handleMoveField = useCallback(
     (fromZone: DropZoneType, fromIndex: number, toZone: DropZoneType) => {
@@ -474,6 +510,25 @@ export function usePivotEditorState({
     prevDeferRef.current = deferUpdate;
   }, [deferUpdate, hasPendingChanges, onUpdate, buildUpdateRequest]);
 
+  /**
+   * Bulk-set all zones at once (for DSL editor sync).
+   * Triggers a single update rather than five separate state changes.
+   */
+  const setAllZones = useCallback((
+    newRows: ZoneField[],
+    newColumns: ZoneField[],
+    newValues: ZoneField[],
+    newFilters: ZoneField[],
+    newLayout: LayoutConfig,
+  ) => {
+    setRows(newRows);
+    setColumns(newColumns);
+    setValues(newValues);
+    setFilters(newFilters);
+    setLayout(newLayout);
+    scheduleUpdate();
+  }, [scheduleUpdate]);
+
   /** Reset all zones to initial values (used on cancel to revert optimistic state). */
   const resetZones = useCallback(() => {
     // Prevent the useEffect from triggering an update for this reset
@@ -512,6 +567,8 @@ export function usePivotEditorState({
     handleDragStart,
     handleDragEnd,
     buildUpdateRequest,
+    setAllZones,
+    filterUniqueValues: filterUniqueValuesRef,
     flushUpdate,
     resetZones,
   };

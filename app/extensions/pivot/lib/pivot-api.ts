@@ -430,6 +430,8 @@ export interface ZoneFieldInfo {
   aggregation?: string;
   /** Whether this is a LOOKUP (attribute) field rather than GROUP. BI pivots only. */
   isLookup?: boolean;
+  /** Items hidden by the filter. Only present for filter fields with active filters. */
+  hiddenItems?: string[];
 }
 
 /** Current field configuration for the pivot editor */

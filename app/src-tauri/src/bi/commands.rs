@@ -17,9 +17,10 @@ use arrow::array::{
 use arrow::datatypes::DataType as ArrowDataType;
 use tauri::State;
 
+use engine::{Cell, CellStyle};
 use crate::{
     log_info,
-    AppState, Cell, CellStyle, ProtectedRegion,
+    AppState, ProtectedRegion,
     NamedRange,
 };
 

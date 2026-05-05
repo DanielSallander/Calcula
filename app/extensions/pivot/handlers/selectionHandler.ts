@@ -367,6 +367,7 @@ async function checkPivotAtSelection(
         isNumeric: f.isNumeric,
         customName: isBiPivot ? f.name : undefined,
         isLookup: f.isLookup || false,
+        hiddenItems: f.hiddenItems,
       }));
 
       const initialLayout: LayoutConfig = {

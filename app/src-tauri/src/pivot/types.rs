@@ -1087,6 +1087,9 @@ pub struct ZoneFieldInfo {
     /// Only relevant for BI-backed pivots.
     #[serde(default)]
     pub is_lookup: bool,
+    /// Items hidden by the filter (only for filter fields).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hidden_items: Option<Vec<String>>,
 }
 
 /// Current field configuration for the pivot editor
@@ -1412,6 +1415,9 @@ pub struct BiFieldRef {
     /// rather than a GROUP BY column.
     #[serde(default)]
     pub is_lookup: bool,
+    /// Items to hide from the filter. Only relevant for filter fields.
+    #[serde(default)]
+    pub hidden_items: Vec<String>,
 }
 
 /// Reference to a model measure (for BI pivot value fields).
