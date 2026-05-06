@@ -7,7 +7,7 @@ import { loader } from '@monaco-editor/react';
 import editorWorker from 'monaco-editor/esm/vs/editor/editor.worker?worker';
 import type { SourceField } from '../../_shared/components/types';
 import type { BiPivotModelInfo } from './types';
-import { AGGREGATION_NAMES, LAYOUT_DIRECTIVES, SHOW_VALUES_AS_NAMES } from '../dsl/tokens';
+import { AGGREGATION_NAMES, LAYOUT_DIRECTIVES, SHOW_VALUES_AS_NAMES, VISUAL_CALC_FUNCTIONS, VISUAL_CALC_RESET_OPTIONS } from '../dsl/tokens';
 
 // Monaco worker setup (local, no CDN)
 self.MonacoEnvironment = {
@@ -114,6 +114,48 @@ function addClauseKeywords(
   }
 }
 
+/** Known aggregation function names (lowercase). */
+const AGGREGATION_FUNC_NAMES = new Set([...AGGREGATION_NAMES]);
+
+/** Known visual calc function names (lowercase). */
+const VISUAL_CALC_FUNC_NAMES = new Set([...VISUAL_CALC_FUNCTIONS.keys()]);
+
+/**
+ * Detect if the cursor is inside a function's parentheses.
+ * Returns the function context or null if not inside parens.
+ */
+function detectFunctionContext(lineText: string): { isAggregation: boolean; isVisualCalc: boolean; argIndex: number } | null {
+  // Walk backwards through the line to find the most recent unmatched '('
+  let depth = 0;
+  let commaCount = 0;
+  for (let i = lineText.length - 1; i >= 0; i--) {
+    const ch = lineText[i];
+    if (ch === ')') depth++;
+    else if (ch === '(') {
+      if (depth > 0) {
+        depth--;
+      } else {
+        // Found unmatched '(' — extract the function name before it
+        const before = lineText.substring(0, i).trimEnd();
+        const funcMatch = before.match(/([A-Za-z_]\w*)$/);
+        if (funcMatch) {
+          const funcName = funcMatch[1].toLowerCase();
+          return {
+            isAggregation: AGGREGATION_FUNC_NAMES.has(funcName),
+            isVisualCalc: VISUAL_CALC_FUNC_NAMES.has(funcName),
+            argIndex: commaCount,
+          };
+        }
+        // Bare parens (not a function call) — treat as grouping
+        return null;
+      }
+    } else if (ch === ',' && depth === 0) {
+      commaCount++;
+    }
+  }
+  return null;
+}
+
 /**
  * Register the pivot-layout-dsl language and its providers.
  * Safe to call multiple times — language is registered once, completion
@@ -138,6 +180,8 @@ export function registerPivotDslLanguage(): void {
           [/\b(AS|BY|VIA|LOOKUP|NOT|IN)\b/i, 'keyword.modifier'],
           [/\b(ASC|DESC)\b/i, 'keyword.sort'],
           [/\b(Sum|Count|Average|Min|Max|CountNumbers|StdDev|StdDevP|Var|VarP|Product)\s*(?=\()/i, 'type.identifier'],
+          [/\b(RunningSum|MovingAverage|Previous|Next|First|Last|Parent|GrandTotal|Children|Leaves|Range|IsAtLevel|Lookup|LookupWithTotals|Collapse|CollapseAll|Expand|ExpandAll)\s*(?=\()/i, 'type.identifier'],
+          [/\b(HIGHESTPARENT|LOWESTPARENT)\b/i, 'keyword.modifier'],
           [/\b[a-zA-Z][\w]*(-[a-zA-Z][\w]*)+\b/, 'variable.predefined'],
           [/[A-Za-z_]\w*\.[A-Za-z_]\w*/, 'variable.name'],
           [/[A-Za-z_]\w*/, 'identifier'],
@@ -175,12 +219,38 @@ export function registerPivotDslLanguage(): void {
       const suggestions: monaco.languages.CompletionItem[] = [];
       const lineTrimmed = lineText.trim().toUpperCase();
 
-      // Determine which clause the cursor is in
-      const clause = findCurrentClause(model, position);
+      // Determine which clause the cursor is in.
+      // Override to 'CALC' if the current line has an inline CALC expression
+      // (e.g., "CALC test = PR" within a VALUES clause).
+      let clause = findCurrentClause(model, position);
+      if (/\bCALC\s+\w+\s*=/.test(lineText)) {
+        clause = 'CALC';
+      }
 
-      // Inside aggregation parens (e.g., Sum(|)) → suggest fields
-      if (/\(\s*$/.test(lineText)) {
-        addFieldSuggestions(suggestions, range, true);
+      // Inside function parens — detect context based on what function we're in
+      // and which argument position (before or after a comma)
+      const funcParenCtx = detectFunctionContext(lineText);
+      if (funcParenCtx) {
+        if (funcParenCtx.isVisualCalc && funcParenCtx.argIndex > 0) {
+          // 2nd+ argument of a visual calc function → suggest reset options + numbers
+          for (const opt of VISUAL_CALC_RESET_OPTIONS) {
+            suggestions.push({
+              label: opt.label,
+              kind: monaco.languages.CompletionItemKind.EnumMember,
+              insertText: opt.label,
+              detail: opt.description,
+              range,
+            });
+          }
+          // Also suggest field names for field-level reset
+          addFieldSuggestions(suggestions, range, false);
+          return { suggestions };
+        }
+        // 1st argument (or aggregation function) → suggest fields + measures
+        addFieldSuggestions(suggestions, range, funcParenCtx.isAggregation);
+        if (currentBiModel) {
+          addMeasureSuggestions(suggestions, range);
+        }
         return { suggestions };
       }
 
@@ -262,10 +332,34 @@ export function registerPivotDslLanguage(): void {
           return { suggestions };
 
         case 'CALC':
-          // CALC expressions can reference both dimensions and measures
+          // CALC expressions can reference dimensions, measures, and visual calc functions
           addFieldSuggestions(suggestions, range, false);
           if (currentBiModel) {
             addMeasureSuggestions(suggestions, range);
+          }
+          // Visual calculation functions
+          for (const [fn, desc] of VISUAL_CALC_FUNCTIONS) {
+            const upperName = fn.toUpperCase();
+            suggestions.push({
+              label: { label: `${upperName}()`, description: 'Visual Calc' },
+              kind: monaco.languages.CompletionItemKind.Function,
+              insertText: `${upperName}($0)`,
+              insertTextRules: monaco.languages.CompletionItemInsertTextRule.InsertAsSnippet,
+              detail: desc,
+              sortText: `00_${fn}`,
+              range,
+            });
+          }
+          // Reset parameter options (when inside a function after a comma)
+          for (const opt of VISUAL_CALC_RESET_OPTIONS) {
+            suggestions.push({
+              label: opt.label,
+              kind: monaco.languages.CompletionItemKind.EnumMember,
+              insertText: opt.label,
+              detail: opt.description,
+              sortText: `01_${opt.label}`,
+              range,
+            });
           }
           return { suggestions };
 

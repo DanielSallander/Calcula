@@ -92,6 +92,37 @@ export const AGGREGATION_NAMES: ReadonlySet<string> = new Set([
   'countnumbers', 'stddev', 'stddevp', 'var', 'varp', 'product',
 ]);
 
+/** Visual Calculation function names for CALC expressions. */
+export const VISUAL_CALC_FUNCTIONS: ReadonlyMap<string, string> = new Map([
+  // Window functions
+  ['runningsum', 'Cumulative sum along rows'],
+  ['movingaverage', 'Moving average with window size'],
+  ['previous', 'Value from N rows before (default 1)'],
+  ['next', 'Value from N rows after (default 1)'],
+  ['first', 'First value in partition'],
+  ['last', 'Last value in partition'],
+  // Hierarchy functions
+  ['parent', 'Value at parent level'],
+  ['grandtotal', 'Value at grand total level'],
+  ['children', 'Average of direct child values'],
+  ['leaves', 'Average of leaf-level values'],
+  // Utility functions
+  ['range', 'Slice of rows for custom window calculations'],
+  ['isatlevel', 'Returns 1 if field is at current level, 0 otherwise'],
+  // Lookup functions
+  ['lookup', 'Find a value where field matches a condition'],
+  ['lookupwithtotals', 'Find a value including total rows'],
+]);
+
+/** Reset parameter options for visual calculation functions. */
+export const VISUAL_CALC_RESET_OPTIONS: ReadonlyArray<{ label: string; description: string }> = [
+  { label: 'HIGHESTPARENT', description: 'Reset at the outermost group level' },
+  { label: 'LOWESTPARENT', description: 'Reset at the immediate parent level' },
+  { label: 'NONE', description: 'No reset (entire axis is one partition)' },
+  { label: 'ROWS', description: 'Traverse rows (top to bottom) — default' },
+  { label: 'COLUMNS', description: 'Traverse columns (left to right)' },
+];
+
 /** Layout directive names recognized in the LAYOUT clause. */
 export const LAYOUT_DIRECTIVES: ReadonlySet<string> = new Set([
   'compact', 'outline', 'tabular',

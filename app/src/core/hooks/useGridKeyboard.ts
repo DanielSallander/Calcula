@@ -391,6 +391,13 @@ export function useGridKeyboard(options: UseGridKeyboardOptions): void {
           return;
         }
       }
+      // Fallback: check document.activeElement (Monaco may route events through
+      // a hidden textarea whose event.target doesn't match the editor DOM tree)
+      const activeEl = document.activeElement as HTMLElement | null;
+      if (activeEl?.closest(".monaco-editor")) {
+        fnLog.exit('handleKeyDown', 'skipped (activeElement in Monaco editor)');
+        return;
+      }
 
       // FIX: Check the global editing flag synchronously
       // The isEditing prop may be stale (from React state that hasn't re-rendered yet)

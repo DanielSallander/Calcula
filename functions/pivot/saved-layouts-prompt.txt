@@ -1,0 +1,46 @@
+I want to implement a **Saved Pivot Layouts** feature for Calcula. This feature allows users to save and load pivot table configurations (the DSL text from the Design view) with proper data source binding.
+
+## Context
+
+Calcula is a spreadsheet app (Rust backend, React/TypeScript frontend, Tauri bridge) with a pivot table feature that includes a text-based DSL ("Design view") for configuring pivot layouts. The DSL looks like:
+
+```
+ROWS:    dim_date.year, dim_customer.country
+VALUES:  [TotalSales],
+         CALC RunTotal = RUNNINGSUM([TotalSales])
+FILTERS: dim_date.year NOT IN ("2011")
+LAYOUT:  compact, repeat-labels
+```
+
+### What already exists:
+- **DSL parser/compiler/serializer** in `app/extensions/Pivot/dsl/` — full pipeline from text to pivot state and back
+- **`SAVE AS` clause** already parsed by the DSL parser (`ast.ts` has `saveAs?: string`)
+- **`namedConfigs.ts`** in `app/extensions/Pivot/lib/` — basic localStorage CRUD with `NamedPivotConfig { name, dslText, createdAt, pivotId? }` but NO source binding
+- **`.calp` publish system** fully implemented in `core/calcula-format/src/publish/` with `PublishManifest` that tracks sheets, connections, parameters, and environments
+- **BI model pivots** use `BiPivotModelInfo { tables, measures, lookupColumns }` — fields reference `Table.Column` notation
+- **Grid pivots** use `SourceField { index, name, isNumeric }` — fields reference column headers by name
+- **Templates** defined in `namedConfigs.ts` as `PIVOT_TEMPLATES` array with name, description, and skeleton DSL text
+
+### Key design decisions needed:
+1. **Source binding**: How to tie a saved layout to its data source (BI model connection + tables/measures, or grid range column names)
+2. **Field validation**: When loading a layout on a different pivot, how to handle missing fields (warn vs. error vs. skip)
+3. **Partial matches**: Should a layout saved on a 10-table model work on a 5-table model if the referenced fields exist?
+4. **Storage**: localStorage for local saves vs. workbook-embedded (in `.cala` file) for persistence across sessions
+5. **UI**: Where does the save/load UI live? Dropdown in the Design tab toolbar? A dialog?
+6. **`.calp` integration**: How saved layouts become part of the PublishManifest for report distribution
+7. **Named configs vs. workbook-level**: Should saved layouts be per-workbook, per-user (global), or both?
+
+### Architecture constraints:
+- Extensions only import from `src/api/` (facade pattern)
+- Pivot extension is at `app/extensions/Pivot/`
+- The Design view is a Monaco editor in `DesignEditor.tsx` within `DesignEditorPane` (tab toggle with Fields view)
+- `usePivotEditorState.ts` manages the unified zone state (values + calculated fields interleaved)
+- Tauri commands in `app/src-tauri/src/pivot/commands.rs`, types in `pivot/types.rs`
+- The `.cala` file format is a ZIP archive of structured JSON, managed by `core/calcula-format/`
+
+### What I want:
+- Design and implement the saved layouts feature end-to-end
+- Include source binding metadata so layouts know what data source they belong to
+- Support both "quick save" (SAVE AS "name" in DSL) and a UI-based save/load workflow
+- Plan for future .calp integration (layouts as publishable artifacts)
+- Validate field availability when loading a layout, with helpful feedback for missing fields
