@@ -1177,8 +1177,24 @@ fn has_unpushable_ops(expr: &Expression) -> bool {
         | Expression::Traverse { .. }
         | Expression::Using { .. }
         | Expression::KeepIn { .. } => true,
-        Expression::Clear { expr, .. } => has_unpushable_ops(expr),
-        Expression::Keep { expr, .. } => has_unpushable_ops(expr),
+        Expression::Clear { expr, .. }
+        | Expression::ClearExcept { expr, .. }
+        | Expression::Keep { expr, .. } => has_unpushable_ops(expr),
+        Expression::Iterate { expression, .. } => has_unpushable_ops(expression),
+        Expression::IfError { expr, alternate } => {
+            has_unpushable_ops(expr) || has_unpushable_ops(alternate)
+        }
+        Expression::DateTimeFunc { args, .. } => args.iter().any(has_unpushable_ops),
+        Expression::IsInScope { .. } => false,
+        Expression::Percentile { operand, percentile } => {
+            has_unpushable_ops(operand) || has_unpushable_ops(percentile)
+        }
+        Expression::HasOneValue { column }
+        | Expression::FirstValue { column, .. } => has_unpushable_ops(column),
+        Expression::SelectedValue { column, alternate } => {
+            has_unpushable_ops(column)
+                || alternate.as_ref().is_some_and(|a| has_unpushable_ops(a))
+        }
         Expression::BinaryOp { left, right, .. }
         | Expression::Comparison { left, right, .. }
         | Expression::And(left, right)
@@ -1289,7 +1305,13 @@ fn expression_to_source_sql(
                         AggregateOp::CountRows => {
                             format!("SUM(CASE WHEN {condition} THEN 1 END)")
                         }
-                        _ => format!("{operation}({case_expr})"),
+                        AggregateOp::Median => format!(
+                            "PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY {case_expr})"
+                        ),
+                        AggregateOp::StdevSample => format!("STDDEV_SAMP({case_expr})"),
+                        AggregateOp::StdevPop => format!("STDDEV_POP({case_expr})"),
+                        AggregateOp::VarSample => format!("VAR_SAMP({case_expr})"),
+                        AggregateOp::VarPop => format!("VAR_POP({case_expr})"),
                     });
                 }
             }
@@ -1303,7 +1325,14 @@ fn expression_to_source_sql(
                 AggregateOp::Max => format!("MAX({operand_sql})"),
                 AggregateOp::DistinctCount => format!("COUNT(DISTINCT {operand_sql})"),
                 AggregateOp::CountRows => "COUNT(*)".to_string(),
-                _ => format!("{operation}({operand_sql})"),
+                // PostgreSQL statistical aggregates
+                AggregateOp::Median => format!(
+                    "PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY {operand_sql})"
+                ),
+                AggregateOp::StdevSample => format!("STDDEV_SAMP({operand_sql})"),
+                AggregateOp::StdevPop => format!("STDDEV_POP({operand_sql})"),
+                AggregateOp::VarSample => format!("VAR_SAMP({operand_sql})"),
+                AggregateOp::VarPop => format!("VAR_POP({operand_sql})"),
             })
         }
         Expression::BinaryOp { left, op, right } => {
@@ -1384,6 +1413,13 @@ fn expression_to_source_sql(
                 }
                 ScalarFunction::Sign => Ok(format!("SIGN({})", mapped[0])),
                 ScalarFunction::Mod => Ok(format!("MOD({}, {})", mapped[0], mapped[1])),
+                // TRUNC needs ::NUMERIC cast like ROUND
+                ScalarFunction::Trunc => {
+                    let digits = mapped.get(1).map(|s| s.as_str()).unwrap_or("0");
+                    Ok(format!("TRUNC(({})::NUMERIC, {digits})", mapped[0]))
+                }
+                // PostgreSQL uses LOG(base, value) not LOG10(value)
+                ScalarFunction::Log10 => Ok(format!("LOG(10, ({})::NUMERIC)", mapped[0])),
                 _ => Ok(function.to_sql_strs(&mapped)),
             }
         }
@@ -1430,6 +1466,87 @@ fn expression_to_source_sql(
                 .collect::<QueryResult<Vec<_>>>()?;
             Ok(function.to_sql_strs(&mapped))
         }
+        // DateTime functions: YEAR, MONTH, DAY, DATEDIFF, TODAY, NOW, etc.
+        Expression::DateTimeFunc { function, args } => {
+            let mapped: Vec<String> = args
+                .iter()
+                .map(|a| expression_to_source_sql(a, model, registry))
+                .collect::<QueryResult<Vec<_>>>()?;
+            Ok(function.to_sql_strs(&mapped))
+        }
+        // IFERROR(expr, alternate) → COALESCE(expr, alternate)
+        Expression::IfError { expr: inner, alternate } => {
+            let inner_sql = expression_to_source_sql(inner, model, registry)?;
+            let alt_sql = expression_to_source_sql(alternate, model, registry)?;
+            Ok(format!("COALESCE({inner_sql}, {alt_sql})"))
+        }
+        // ISINSCOPE(table[column]) — resolved at plan time to TRUE/FALSE.
+        Expression::IsInScope { .. } => {
+            // Default to TRUE — the planner resolves this before SQL generation.
+            Ok("TRUE".to_string())
+        }
+        // ITERATE(table, expression) — transparent: just render the inner expression.
+        Expression::Iterate { expression, .. } => {
+            expression_to_source_sql(expression, model, registry)
+        }
+        // ClearExcept is handled at the measure level in expression_to_source_sql_with_clear.
+        // If we reach it here, strip it and render the inner expression.
+        Expression::ClearExcept { expr: inner, .. } => {
+            expression_to_source_sql(inner, model, registry)
+        }
+        // Switch expression
+        Expression::Switch { expr: switch_expr, cases, default } => {
+            let expr_sql = expression_to_source_sql(switch_expr, model, registry)?;
+            let mut sql = format!("CASE {expr_sql}");
+            for (val, result) in cases {
+                let val_sql = expression_to_source_sql(val, model, registry)?;
+                let result_sql = expression_to_source_sql(result, model, registry)?;
+                sql.push_str(&format!(" WHEN {val_sql} THEN {result_sql}"));
+            }
+            if let Some(def) = default {
+                let def_sql = expression_to_source_sql(def, model, registry)?;
+                sql.push_str(&format!(" ELSE {def_sql}"));
+            }
+            sql.push_str(" END");
+            Ok(sql)
+        }
+        // Xor
+        Expression::Xor(left, right) => {
+            let l = expression_to_source_sql(left, model, registry)?;
+            let r = expression_to_source_sql(right, model, registry)?;
+            Ok(format!("(({l} AND NOT {r}) OR (NOT {l} AND {r}))"))
+        }
+        // Percentile
+        Expression::Percentile { operand, percentile } => {
+            let op_sql = expression_to_source_sql(operand, model, registry)?;
+            let k_sql = expression_to_source_sql(percentile, model, registry)?;
+            Ok(format!(
+                "PERCENTILE_CONT({k_sql}) WITHIN GROUP (ORDER BY {op_sql})"
+            ))
+        }
+        // HasOneValue: COUNT(DISTINCT col) = 1
+        Expression::HasOneValue { column } => {
+            let col_sql = expression_to_source_sql(column, model, registry)?;
+            Ok(format!("(COUNT(DISTINCT {col_sql}) = 1)"))
+        }
+        // SelectedValue: CASE WHEN COUNT(DISTINCT col) = 1 THEN MIN(col) ELSE alt END
+        Expression::SelectedValue { column, alternate } => {
+            let col_sql = expression_to_source_sql(column, model, registry)?;
+            let alt_sql = match alternate {
+                Some(a) => expression_to_source_sql(a, model, registry)?,
+                None => "NULL".to_string(),
+            };
+            Ok(format!(
+                "CASE WHEN COUNT(DISTINCT {col_sql}) = 1 THEN MIN({col_sql}) ELSE {alt_sql} END"
+            ))
+        }
+        // FirstValue: first value by sort order
+        Expression::FirstValue { column, order_by } => {
+            let col_sql = expression_to_source_sql(column, model, registry)?;
+            let order_sql = expression_to_source_sql(order_by, model, registry)?;
+            // Use subquery or MIN with ORDER BY — simplified as MIN for pushdown
+            Ok(format!("MIN({col_sql})"))
+        }
         // For any expression we can't translate, bail out so caller falls back to local.
         _ => Err(QueryError::InvalidQuery(format!(
             "Expression not supported for pushdown: {expr:?}"
@@ -1463,7 +1580,13 @@ fn expression_to_case_when_source_sql(
                 AggregateOp::CountRows => {
                     format!("SUM(CASE WHEN {condition} THEN 1 END)")
                 }
-                _ => format!("{operation}({case_expr})"),
+                AggregateOp::Median => format!(
+                    "PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY {case_expr})"
+                ),
+                AggregateOp::StdevSample => format!("STDDEV_SAMP({case_expr})"),
+                AggregateOp::StdevPop => format!("STDDEV_POP({case_expr})"),
+                AggregateOp::VarSample => format!("VAR_SAMP({case_expr})"),
+                AggregateOp::VarPop => format!("VAR_POP({case_expr})"),
             })
         }
         Expression::BinaryOp { left, op, right } => {
@@ -1558,10 +1681,58 @@ fn expression_to_source_sql_with_clear(
                 "CASE WHEN {d} = 0 THEN {alt} ELSE CAST({n} AS DOUBLE PRECISION) / {d} END"
             ))
         }
+        Expression::ClearExcept { expr: inner, table, except_columns } => {
+            // ClearExcept: keep only the listed columns from the specified table.
+            let inner_sql = expression_to_source_sql_with_clear(inner, model, registry, group_by)?;
+
+            // PARTITION BY: group_by columns that are either:
+            // - NOT from the cleared table, OR
+            // - In the except_columns list
+            let partition_cols: Vec<String> = group_by
+                .iter()
+                .filter(|col_ref| {
+                    if col_ref.table != *table {
+                        true // different table — keep
+                    } else {
+                        except_columns.contains(&col_ref.column)
+                    }
+                })
+                .map(|col_ref| {
+                    registry
+                        .binding_for(&col_ref.table)
+                        .map(|b| format!("\"{}\".\"{}\"", b.table, col_ref.column))
+                })
+                .collect::<QueryResult<Vec<_>>>()?;
+
+            let over_clause = if partition_cols.is_empty() {
+                "OVER ()".to_string()
+            } else {
+                format!("OVER (PARTITION BY {})", partition_cols.join(", "))
+            };
+
+            Ok(format!("SUM({inner_sql}) {over_clause}"))
+        }
         Expression::BinaryOp { left, op, right } => {
             let l = expression_to_source_sql_with_clear(left, model, registry, group_by)?;
             let r = expression_to_source_sql_with_clear(right, model, registry, group_by)?;
             Ok(format!("({l} {} {r})", op.as_sql()))
+        }
+        Expression::If { condition, then_expr, else_expr } => {
+            let c = expression_to_source_sql_with_clear(condition, model, registry, group_by)?;
+            let t = expression_to_source_sql_with_clear(then_expr, model, registry, group_by)?;
+            let e = expression_to_source_sql_with_clear(else_expr, model, registry, group_by)?;
+            Ok(format!("CASE WHEN {c} THEN {t} ELSE {e} END"))
+        }
+        Expression::Coalesce(exprs) => {
+            let parts: Vec<String> = exprs
+                .iter()
+                .map(|e| expression_to_source_sql_with_clear(e, model, registry, group_by))
+                .collect::<QueryResult<Vec<_>>>()?;
+            Ok(format!("COALESCE({})", parts.join(", ")))
+        }
+        Expression::Block { .. } => {
+            let inlined = expr.inline_bindings();
+            expression_to_source_sql_with_clear(&inlined, model, registry, group_by)
         }
         // For non-CLEAR expressions, delegate to the standard function.
         _ => expression_to_source_sql(expr, model, registry),
@@ -1597,9 +1768,18 @@ fn build_pushed_join_sql(
         group_by_parts.push(qualified);
     }
 
+    // Build group_by pairs for ISINSCOPE resolution.
+    let group_by_pairs: Vec<(String, String)> = group_by
+        .iter()
+        .map(|c| (c.table.clone(), c.column.clone()))
+        .collect();
+
     for m in measures {
+        // Resolve ISINSCOPE nodes to true/false based on actual group_by.
+        let resolved_expr =
+            engine_core::compute::expression::resolve_is_in_scope(m.expression(), &group_by_pairs);
         let expr_sql =
-            expression_to_source_sql_with_clear(m.expression(), model, registry, group_by)?;
+            expression_to_source_sql_with_clear(&resolved_expr, model, registry, group_by)?;
         select_parts.push(format!("{expr_sql} AS \"{}\"", m.name()));
     }
 

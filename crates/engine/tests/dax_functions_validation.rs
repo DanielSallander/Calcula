@@ -6,7 +6,7 @@
 //!
 //! Run with: `cargo test -p engine --test dax_functions_validation -- --ignored --nocapture`
 
-use engine::*;
+use bi_engine::*;
 use rust_decimal::Decimal;
 use sqlx::postgres::PgPoolOptions;
 use sqlx::Row;

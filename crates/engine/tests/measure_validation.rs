@@ -9,7 +9,7 @@
 //! can introduce small precision differences compared to native PostgreSQL
 //! computation. Tolerances are set accordingly.
 
-use engine::*;
+use bi_engine::*;
 use rust_decimal::Decimal;
 use sqlx::postgres::PgPoolOptions;
 use sqlx::Row;

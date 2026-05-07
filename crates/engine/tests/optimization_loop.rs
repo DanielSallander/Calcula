@@ -5,7 +5,7 @@
 //!
 //! Run with: `cargo test -p bi-engine --test optimization_loop -- --ignored --nocapture`
 
-use engine::*;
+use bi_engine::*;
 
 const CONNECTION_STRING: &str = "postgresql://postgres:postgres@localhost:5432/Adventureworks";
 const SCHEMA: &str = "BI";
@@ -99,8 +99,28 @@ fn build_model_with_measures(measures: &[(&str, &str)]) -> DataModel {
     )
     .unwrap();
 
+    let fact_purchasing = Table::new(
+        "fact_purchasing",
+        vec![
+            Column::new("purchaseorderdetailid", DataType::Int32),
+            Column::new("purchaseorderid", DataType::Int32),
+            Column::new("orderdate", DataType::Date),
+            Column::new("duedate", DataType::Date),
+            Column::new("productid", DataType::Int32),
+            Column::new("vendorid", DataType::Int32),
+            Column::new("employeeid", DataType::Int32),
+            Column::new("revisionnumber", DataType::Int32),
+            Column::new("status", DataType::Int32),
+            Column::new("unitprice", DataType::Decimal(38, 6)),
+            Column::new("receivedqty", DataType::Decimal(8, 2)),
+            Column::new("rejectedqty", DataType::Decimal(8, 2)),
+        ],
+    )
+    .unwrap();
+
     let mut builder = DataModel::builder()
         .add_table(fact_sales)
+        .add_table(fact_purchasing)
         .add_table(dim_product)
         .add_table(dim_customer)
         .add_table(dim_territory)
@@ -136,10 +156,26 @@ fn build_model_with_measures(measures: &[(&str, &str)]) -> DataModel {
             "dim_date",
             "datekey",
             Cardinality::ManyToOne,
+        ))
+        .add_relationship(Relationship::new(
+            "fact_purchasing_to_dim_product",
+            "fact_purchasing",
+            "productid",
+            "dim_product",
+            "productid",
+            Cardinality::ManyToOne,
+        ))
+        .add_relationship(Relationship::new(
+            "fact_purchasing_to_dim_date",
+            "fact_purchasing",
+            "orderdate",
+            "dim_date",
+            "datekey",
+            Cardinality::ManyToOne,
         ));
 
     for (name, expr_text) in measures {
-        let expr = parse_measure(expr_text)
+        let expr = parse_measure_expression(expr_text)
             .unwrap_or_else(|e| panic!("Failed to parse measure '{name}': {e}"));
         builder = builder.add_measure(expression_measure(*name, expr));
     }
@@ -158,6 +194,7 @@ async fn setup_engine(measures: Vec<(&str, &str)>) -> Engine {
 
     let tables = vec![
         "fact_sales",
+        "fact_purchasing",
         "dim_product",
         "dim_customer",
         "dim_territory",
@@ -536,6 +573,943 @@ fn get_queries() -> Vec<TestQuery> {
             ],
             group_by: vec![],
             description: "Six measures with no group-by — grand total scorecard",
+        },
+        // =====================================================================
+        // Level 29+: New function tests (ITERATE, YEAR, DATEDIFF, IFERROR,
+        //            ISINSCOPE, CLEAREXCEPT)
+        // =====================================================================
+        // --- ITERATE tests ---
+        TestQuery {
+            name: "Q29: ITERATE basic (SUM of row-level product)",
+            measures: vec![
+                ("ComputedRevenue", "SUM(ITERATE(fact_sales, fact_sales[unitprice] * fact_sales[orderqty]))"),
+                ("PlainRevenue", "SUM(fact_sales[linetotal])"),
+            ],
+            group_by: vec![("dim_product", "categoryname")],
+            description: "SUM(ITERATE(...)) vs plain SUM — compare row-level vs column-level",
+        },
+        TestQuery {
+            name: "Q30: ITERATE with division (3 measures)",
+            measures: vec![
+                ("AvgEffectivePrice", "AVG(ITERATE(fact_sales, DIVIDE(fact_sales[linetotal], fact_sales[orderqty], 0)))"),
+                ("MaxEffectivePrice", "MAX(ITERATE(fact_sales, DIVIDE(fact_sales[linetotal], fact_sales[orderqty], 0)))"),
+                ("MinEffectivePrice", "MIN(ITERATE(fact_sales, DIVIDE(fact_sales[linetotal], fact_sales[orderqty], 0)))"),
+            ],
+            group_by: vec![("dim_product", "categoryname")],
+            description: "AVG/MAX/MIN of per-row DIVIDE — iterator aggregate functions",
+        },
+        TestQuery {
+            name: "Q31: ITERATE with conditional logic",
+            measures: vec![
+                ("PremiumRevenue", "SUM(ITERATE(fact_sales, IF(fact_sales[unitprice] > 100, fact_sales[linetotal], 0)))"),
+                ("BudgetRevenue", "SUM(ITERATE(fact_sales, IF(fact_sales[unitprice] <= 100, fact_sales[linetotal], 0)))"),
+                ("PremiumPct", "DIVIDE(SUM(ITERATE(fact_sales, IF(fact_sales[unitprice] > 100, fact_sales[linetotal], 0))), SUM(fact_sales[linetotal]), 0)"),
+            ],
+            group_by: vec![("dim_territory", "countryregioncode")],
+            description: "ITERATE with IF for row-level conditional aggregation + ratio",
+        },
+        TestQuery {
+            name: "Q32: ITERATE with scalar functions",
+            measures: vec![
+                ("RoundedAvgUnit", "AVG(ITERATE(fact_sales, ROUND(fact_sales[unitprice], 0)))"),
+                ("AbsDiff", "SUM(ITERATE(fact_sales, ABS(fact_sales[linetotal] - fact_sales[unitprice] * fact_sales[orderqty])))"),
+            ],
+            group_by: vec![("dim_product", "subcategoryname")],
+            description: "ITERATE with ROUND and ABS scalar functions at row level",
+        },
+        // --- YEAR / date grouping tests ---
+        TestQuery {
+            name: "Q33: Year/quarter measures (3 measures)",
+            measures: vec![
+                ("Revenue", "SUM(fact_sales[linetotal])"),
+                ("OrderCount", "COUNT(fact_sales[salesorderdetailid])"),
+                ("AvgOrder", "DIVIDE(SUM(fact_sales[linetotal]), COUNT(fact_sales[salesorderdetailid]), 0)"),
+            ],
+            group_by: vec![("dim_date", "year"), ("dim_date", "quarter")],
+            description: "Three measures grouped by year and quarter",
+        },
+        // --- IFERROR tests ---
+        TestQuery {
+            name: "Q34: IFERROR safe divisions (3 measures)",
+            measures: vec![
+                ("SafeAvgOrder", "IFERROR(DIVIDE(SUM(fact_sales[linetotal]), COUNT(fact_sales[salesorderdetailid]), 0), 0)"),
+                ("SafeRevPerCust", "IFERROR(DIVIDE(SUM(fact_sales[linetotal]), DISTINCTCOUNT(fact_sales[customerid]), 0), 0)"),
+                ("SafeQtyPerOrder", "IFERROR(DIVIDE(SUM(fact_sales[orderqty]), COUNT(fact_sales[salesorderdetailid]), 0), 0)"),
+            ],
+            group_by: vec![("dim_product", "categoryname")],
+            description: "Three IFERROR-wrapped DIVIDE measures",
+        },
+        TestQuery {
+            name: "Q35: IFERROR nested with SQRT and POWER",
+            measures: vec![
+                ("SafeSqrt", "IFERROR(ROUND(SQRT(DIVIDE(SUM(fact_sales[linetotal]), DISTINCTCOUNT(fact_sales[customerid]), 0)), 2), 0)"),
+                ("SafePower", "IFERROR(POWER(DIVIDE(SUM(fact_sales[linetotal]), 1000000, 1), 0.5), 0)"),
+            ],
+            group_by: vec![("dim_territory", "territoryname")],
+            description: "IFERROR protecting SQRT and POWER from domain errors",
+        },
+        // --- ISINSCOPE tests ---
+        TestQuery {
+            name: "Q36: ISINSCOPE true case (category in scope)",
+            measures: vec![
+                ("Revenue", "SUM(fact_sales[linetotal])"),
+                ("DetailMeasure", r#"IF(ISINSCOPE(dim_product[categoryname]), DIVIDE(SUM(fact_sales[linetotal]), COUNT(fact_sales[salesorderdetailid]), 0), SUM(fact_sales[linetotal]))"#),
+            ],
+            group_by: vec![("dim_product", "categoryname")],
+            description: "ISINSCOPE=TRUE: DetailMeasure shows avg order value",
+        },
+        TestQuery {
+            name: "Q37: ISINSCOPE false case (product not in scope)",
+            measures: vec![
+                ("Revenue", "SUM(fact_sales[linetotal])"),
+                ("ScopedDetail", r#"IF(ISINSCOPE(dim_product[productname]), DIVIDE(SUM(fact_sales[linetotal]), DISTINCTCOUNT(fact_sales[productid]), 0), SUM(fact_sales[linetotal]))"#),
+            ],
+            group_by: vec![("dim_territory", "countryregioncode")],
+            description: "ISINSCOPE=FALSE: ScopedDetail falls back to plain SUM",
+        },
+        // --- CLEAREXCEPT tests ---
+        TestQuery {
+            name: "Q38: CLEAREXCEPT basic (keep category only)",
+            measures: vec![
+                ("Revenue", "SUM(fact_sales[linetotal])"),
+                ("CategoryTotal", "SUM(fact_sales[linetotal], CLEAREXCEPT(dim_product, dim_product[categoryname]))"),
+            ],
+            group_by: vec![("dim_product", "categoryname"), ("dim_product", "subcategoryname")],
+            description: "CLEAREXCEPT keeps categoryname, clears subcategoryname — category-level total",
+        },
+        TestQuery {
+            name: "Q39: CLEAREXCEPT pct-of-category (3 measures)",
+            measures: vec![
+                ("Revenue", "SUM(fact_sales[linetotal])"),
+                ("CategoryTotal", "SUM(fact_sales[linetotal], CLEAREXCEPT(dim_product, dim_product[categoryname]))"),
+                ("PctOfCategory", "DIVIDE(SUM(fact_sales[linetotal]), SUM(fact_sales[linetotal], CLEAREXCEPT(dim_product, dim_product[categoryname])), 0)"),
+            ],
+            group_by: vec![("dim_product", "categoryname"), ("dim_product", "subcategoryname")],
+            description: "Subcategory as pct of category using CLEAREXCEPT",
+        },
+        // --- Combined function tests ---
+        TestQuery {
+            name: "Q40: ITERATE + KEEP combined",
+            measures: vec![
+                ("BikeComputedRev", r#"SUM(ITERATE(fact_sales, fact_sales[unitprice] * fact_sales[orderqty]), KEEP(dim_product, dim_product[categoryname] = "Bikes"))"#),
+                ("AllComputedRev", "SUM(ITERATE(fact_sales, fact_sales[unitprice] * fact_sales[orderqty]))"),
+            ],
+            group_by: vec![("dim_territory", "countryregioncode")],
+            description: "ITERATE inside KEEP context — row-level filtered by category",
+        },
+        TestQuery {
+            name: "Q41: IFERROR + ITERATE safe row compute",
+            measures: vec![
+                ("SafeUnitRev", "AVG(ITERATE(fact_sales, IFERROR(DIVIDE(fact_sales[linetotal], fact_sales[orderqty], 0), 0)))"),
+                ("TotalQty", "SUM(fact_sales[orderqty])"),
+            ],
+            group_by: vec![("dim_product", "categoryname")],
+            description: "IFERROR inside ITERATE for safe per-row division",
+        },
+        TestQuery {
+            name: "Q42: ISINSCOPE + CLEAREXCEPT dashboard (4 measures)",
+            measures: vec![
+                ("Revenue", "SUM(fact_sales[linetotal])"),
+                ("ParentTotal", "SUM(fact_sales[linetotal], CLEAREXCEPT(dim_product, dim_product[categoryname]))"),
+                ("PctOfParent", "DIVIDE(SUM(fact_sales[linetotal]), SUM(fact_sales[linetotal], CLEAREXCEPT(dim_product, dim_product[categoryname])), 0)"),
+                ("ScopedLabel", r#"IF(ISINSCOPE(dim_product[subcategoryname]), DIVIDE(SUM(fact_sales[linetotal]), SUM(fact_sales[linetotal], CLEAREXCEPT(dim_product, dim_product[categoryname])), 0), SUM(fact_sales[linetotal]))"#),
+            ],
+            group_by: vec![("dim_product", "categoryname"), ("dim_product", "subcategoryname")],
+            description: "ISINSCOPE + CLEAREXCEPT — adaptive parent-pct",
+        },
+        TestQuery {
+            name: "Q43: Function kitchen sink (5 measures)",
+            measures: vec![
+                ("ComputedRev", "SUM(ITERATE(fact_sales, fact_sales[unitprice] * fact_sales[orderqty]))"),
+                ("AvgEffPrice", "AVG(ITERATE(fact_sales, IFERROR(DIVIDE(fact_sales[linetotal], fact_sales[orderqty], 0), 0)))"),
+                ("TotalSales", "SUM(fact_sales[linetotal])"),
+                ("BikeShare", r#"DIVIDE(SUM(fact_sales[linetotal], KEEP(dim_product, dim_product[categoryname] = "Bikes")), SUM(fact_sales[linetotal]), 0)"#),
+                ("HealthScore", r#"VAR rev = SUM(fact_sales[linetotal]) VAR orders = COUNT(fact_sales[salesorderdetailid]) RETURN IF(rev > 10000 AND orders > 50, "High", IF(rev > 1000, "Medium", "Low"))"#),
+            ],
+            group_by: vec![("dim_territory", "countryregioncode")],
+            description: "ITERATE, IFERROR, KEEP, VAR — full function coverage",
+        },
+        TestQuery {
+            name: "Q44: CLEAREXCEPT vs CLEAR comparison (4 measures)",
+            measures: vec![
+                ("Revenue", "SUM(fact_sales[linetotal])"),
+                ("AllProductTotal", "SUM(fact_sales[linetotal], CLEAR(dim_product))"),
+                ("CategoryTotal", "SUM(fact_sales[linetotal], CLEAREXCEPT(dim_product, dim_product[categoryname]))"),
+                ("PctOfAll", "DIVIDE(SUM(fact_sales[linetotal]), SUM(fact_sales[linetotal], CLEAR(dim_product)), 0)"),
+            ],
+            group_by: vec![("dim_product", "categoryname"), ("dim_product", "subcategoryname")],
+            description: "CLEAR vs CLEAREXCEPT same query — different scoping",
+        },
+        TestQuery {
+            name: "Q45: Multiple ITERATE aggregates (4 measures)",
+            measures: vec![
+                ("SumRowCalc", "SUM(ITERATE(fact_sales, fact_sales[unitprice] * fact_sales[orderqty]))"),
+                ("AvgRowCalc", "AVG(ITERATE(fact_sales, fact_sales[unitprice] * fact_sales[orderqty]))"),
+                ("MaxRowCalc", "MAX(ITERATE(fact_sales, fact_sales[unitprice] * fact_sales[orderqty]))"),
+                ("MinRowCalc", "MIN(ITERATE(fact_sales, fact_sales[unitprice] * fact_sales[orderqty]))"),
+            ],
+            group_by: vec![("dim_product", "subcategoryname")],
+            description: "Same ITERATE with SUM/AVG/MAX/MIN",
+        },
+        TestQuery {
+            name: "Q46: CLEAREXCEPT multi-dim (year scope)",
+            measures: vec![
+                ("Revenue", "SUM(fact_sales[linetotal])"),
+                ("YearTotal", "SUM(fact_sales[linetotal], CLEAREXCEPT(dim_date, dim_date[year]))"),
+                ("PctOfYear", "DIVIDE(SUM(fact_sales[linetotal]), SUM(fact_sales[linetotal], CLEAREXCEPT(dim_date, dim_date[year])), 0)"),
+            ],
+            group_by: vec![("dim_territory", "countryregioncode"), ("dim_date", "year"), ("dim_date", "quarter")],
+            description: "CLEAREXCEPT on dim_date keeping year — clears quarter",
+        },
+        TestQuery {
+            name: "Q47: Grand total with new functions (5 measures)",
+            measures: vec![
+                ("IteratedRev", "SUM(ITERATE(fact_sales, fact_sales[unitprice] * fact_sales[orderqty]))"),
+                ("SafeAvg", "IFERROR(DIVIDE(SUM(fact_sales[linetotal]), DISTINCTCOUNT(fact_sales[customerid]), 0), 0)"),
+                ("PlainRevenue", "SUM(fact_sales[linetotal])"),
+                ("OrderCount", "COUNT(fact_sales[salesorderdetailid])"),
+                ("UniqueProducts", "DISTINCTCOUNT(fact_sales[productid])"),
+            ],
+            group_by: vec![],
+            description: "Grand total with ITERATE + IFERROR — no group-by",
+        },
+        TestQuery {
+            name: "Q48: ITERATE + CLEAREXCEPT + KEEP mega-mix (6 measures, 3 dims)",
+            measures: vec![
+                ("Revenue", "SUM(fact_sales[linetotal])"),
+                ("ComputedRev", "SUM(ITERATE(fact_sales, fact_sales[unitprice] * fact_sales[orderqty]))"),
+                ("BikeRev", r#"SUM(fact_sales[linetotal], KEEP(dim_product, dim_product[categoryname] = "Bikes"))"#),
+                ("CategoryTotal", "SUM(fact_sales[linetotal], CLEAREXCEPT(dim_product, dim_product[categoryname]))"),
+                ("PctOfCategory", "DIVIDE(SUM(fact_sales[linetotal]), SUM(fact_sales[linetotal], CLEAREXCEPT(dim_product, dim_product[categoryname])), 0)"),
+                ("AvgOrderIFERROR", "IFERROR(DIVIDE(SUM(fact_sales[linetotal]), COUNT(fact_sales[salesorderdetailid]), 0), 0)"),
+            ],
+            group_by: vec![("dim_product", "categoryname"), ("dim_product", "subcategoryname"), ("dim_territory", "countryregioncode")],
+            description: "Everything combined: ITERATE + KEEP + CLEAREXCEPT + IFERROR, 6 measures, 3 dims",
+        },
+        // =====================================================================
+        // Level 49+: Statistical, text, date, Switch, cross-fact, value inspection
+        // =====================================================================
+        // --- Statistical aggregates ---
+        TestQuery {
+            name: "Q49: Statistical aggregates (5 measures)",
+            measures: vec![
+                ("MedianPrice", "MEDIAN(fact_sales[unitprice])"),
+                ("StdevPrice", "STDEV(fact_sales[unitprice])"),
+                ("StdevPopPrice", "STDEVP(fact_sales[unitprice])"),
+                ("VarPrice", "VARIANCE(fact_sales[unitprice])"),
+                ("VarPopPrice", "VARIANCEP(fact_sales[unitprice])"),
+            ],
+            group_by: vec![("dim_product", "categoryname")],
+            description: "MEDIAN, STDEV, STDEVP, VARIANCE, VARIANCEP — statistical aggregates",
+        },
+        TestQuery {
+            name: "Q50: Statistical + simple mix (4 measures)",
+            measures: vec![
+                ("Revenue", "SUM(fact_sales[linetotal])"),
+                ("MedianLineTotal", "MEDIAN(fact_sales[linetotal])"),
+                ("PriceStdDev", "STDEV(fact_sales[unitprice])"),
+                ("AvgPrice", "AVG(fact_sales[unitprice])"),
+            ],
+            group_by: vec![("dim_territory", "countryregioncode")],
+            description: "Mix of statistical and simple aggregates",
+        },
+        // --- SWITCH expression ---
+        TestQuery {
+            name: "Q51: SWITCH with aggregates (2 measures)",
+            measures: vec![
+                ("Revenue", "SUM(fact_sales[linetotal])"),
+                ("PriceTier", r#"VAR avg_p = DIVIDE(SUM(fact_sales[linetotal]), COUNT(fact_sales[salesorderdetailid]), 0) RETURN IF(avg_p > 1000, "Premium", IF(avg_p > 100, "Mid-Range", "Budget"))"#),
+            ],
+            group_by: vec![("dim_product", "categoryname")],
+            description: "Conditional tiering using IF chain (SWITCH-like)",
+        },
+        // --- Text functions in measures ---
+        TestQuery {
+            name: "Q52: Text function measures (3 measures)",
+            measures: vec![
+                ("Revenue", "SUM(fact_sales[linetotal])"),
+                ("OrderCount", "COUNT(fact_sales[salesorderdetailid])"),
+                ("AvgOrder", "DIVIDE(SUM(fact_sales[linetotal]), COUNT(fact_sales[salesorderdetailid]), 0)"),
+            ],
+            group_by: vec![("dim_product", "categoryname"), ("dim_product", "color")],
+            description: "Measures grouped by text columns (categoryname + color)",
+        },
+        // --- Date functions in measures ---
+        TestQuery {
+            name: "Q53: Date-grouped measures (4 measures)",
+            measures: vec![
+                ("Revenue", "SUM(fact_sales[linetotal])"),
+                ("OrderCount", "COUNT(fact_sales[salesorderdetailid])"),
+                ("AvgOrder", "DIVIDE(SUM(fact_sales[linetotal]), COUNT(fact_sales[salesorderdetailid]), 0)"),
+                ("UniqueProducts", "DISTINCTCOUNT(fact_sales[productid])"),
+            ],
+            group_by: vec![("dim_date", "year"), ("dim_date", "monthname")],
+            description: "Four measures grouped by year + monthname",
+        },
+        // --- Cross-fact-table: fact_purchasing ---
+        TestQuery {
+            name: "Q54: Purchasing fact table (3 measures)",
+            measures: vec![
+                ("PurchaseQty", "SUM(fact_purchasing[receivedqty])"),
+                ("PurchaseCost", "SUM(fact_purchasing[unitprice])"),
+                ("AvgPurchasePrice", "DIVIDE(SUM(fact_purchasing[unitprice]), SUM(fact_purchasing[receivedqty]), 0)"),
+            ],
+            group_by: vec![("dim_product", "categoryname")],
+            description: "Measures from fact_purchasing instead of fact_sales",
+        },
+        // --- PERCENTILE ---
+        TestQuery {
+            name: "Q55: Percentile measures (3 measures)",
+            measures: vec![
+                ("P25_Price", "PERCENTILE(fact_sales[unitprice], 0.25)"),
+                ("P50_Price", "PERCENTILE(fact_sales[unitprice], 0.5)"),
+                ("P75_Price", "PERCENTILE(fact_sales[unitprice], 0.75)"),
+            ],
+            group_by: vec![("dim_product", "categoryname")],
+            description: "25th, 50th, 75th percentiles of unit price",
+        },
+        // --- HASONEVALUE / SELECTEDVALUE ---
+        TestQuery {
+            name: "Q56: Value inspection measures (3 measures)",
+            measures: vec![
+                ("Revenue", "SUM(fact_sales[linetotal])"),
+                ("SingleCategory", r#"IF(HASONEVALUE(fact_sales[productid]), SUM(fact_sales[linetotal]), 0)"#),
+                ("MaxPrice", "MAX(fact_sales[unitprice])"),
+            ],
+            group_by: vec![("dim_product", "categoryname")],
+            description: "HASONEVALUE on fact column + aggregates",
+        },
+        // --- Deep ITERATE + statistical ---
+        TestQuery {
+            name: "Q57: ITERATE + statistical mix (4 measures)",
+            measures: vec![
+                ("RowRevenue", "SUM(ITERATE(fact_sales, fact_sales[unitprice] * fact_sales[orderqty]))"),
+                ("MedianRevenue", "MEDIAN(fact_sales[linetotal])"),
+                ("StdevRevenue", "STDEV(fact_sales[linetotal])"),
+                ("AvgRowCalc", "AVG(ITERATE(fact_sales, DIVIDE(fact_sales[linetotal], fact_sales[orderqty], 0)))"),
+            ],
+            group_by: vec![("dim_product", "subcategoryname")],
+            description: "ITERATE + MEDIAN + STDEV — row-level and statistical in one query",
+        },
+        // --- ISINSCOPE + statistical ---
+        TestQuery {
+            name: "Q58: ISINSCOPE adaptive with statistical (3 measures)",
+            measures: vec![
+                ("Revenue", "SUM(fact_sales[linetotal])"),
+                ("AdaptiveMetric", r#"IF(ISINSCOPE(dim_product[subcategoryname]), MEDIAN(fact_sales[unitprice]), AVG(fact_sales[unitprice]))"#),
+                ("Volatility", "STDEV(fact_sales[unitprice])"),
+            ],
+            group_by: vec![("dim_product", "categoryname"), ("dim_product", "subcategoryname")],
+            description: "ISINSCOPE selecting MEDIAN vs AVG based on drill level",
+        },
+        // --- KEEP + statistical ---
+        TestQuery {
+            name: "Q59: KEEP filtered statistical (3 measures)",
+            measures: vec![
+                ("AllMedian", "MEDIAN(fact_sales[unitprice])"),
+                ("BikeMedian", r#"MEDIAN(fact_sales[unitprice], KEEP(dim_product, dim_product[categoryname] = "Bikes"))"#),
+                ("BikeStdev", r#"STDEV(fact_sales[unitprice], KEEP(dim_product, dim_product[categoryname] = "Bikes"))"#),
+            ],
+            group_by: vec![("dim_territory", "countryregioncode")],
+            description: "MEDIAN and STDEV with KEEP filter — statistical + context ops",
+        },
+        // --- Massive multi-measure report ---
+        TestQuery {
+            name: "Q60: 10-measure executive report",
+            measures: vec![
+                ("Revenue", "SUM(fact_sales[linetotal])"),
+                ("Qty", "SUM(fact_sales[orderqty])"),
+                ("Orders", "COUNT(fact_sales[salesorderdetailid])"),
+                ("AvgOrder", "DIVIDE(SUM(fact_sales[linetotal]), COUNT(fact_sales[salesorderdetailid]), 0)"),
+                ("Customers", "DISTINCTCOUNT(fact_sales[customerid])"),
+                ("RevPerCust", "DIVIDE(SUM(fact_sales[linetotal]), DISTINCTCOUNT(fact_sales[customerid]), 0)"),
+                ("MedianPrice", "MEDIAN(fact_sales[unitprice])"),
+                ("PriceStdev", "STDEV(fact_sales[unitprice])"),
+                ("QtyPerOrder", "DIVIDE(SUM(fact_sales[orderqty]), COUNT(fact_sales[salesorderdetailid]), 0)"),
+                ("MaxLineTotal", "MAX(fact_sales[linetotal])"),
+            ],
+            group_by: vec![("dim_product", "categoryname")],
+            description: "10 measures — full executive report with statistical",
+        },
+        // --- CLEAREXCEPT + statistical ---
+        TestQuery {
+            name: "Q61: CLEAREXCEPT with stats (4 measures, 2 dims)",
+            measures: vec![
+                ("Revenue", "SUM(fact_sales[linetotal])"),
+                ("CategoryTotal", "SUM(fact_sales[linetotal], CLEAREXCEPT(dim_product, dim_product[categoryname]))"),
+                ("PctOfCategory", "DIVIDE(SUM(fact_sales[linetotal]), SUM(fact_sales[linetotal], CLEAREXCEPT(dim_product, dim_product[categoryname])), 0)"),
+                ("SubcatMedian", "MEDIAN(fact_sales[unitprice])"),
+            ],
+            group_by: vec![("dim_product", "categoryname"), ("dim_product", "subcategoryname")],
+            description: "CLEAREXCEPT pct + MEDIAN in same query",
+        },
+        // --- VAR + ITERATE + IFERROR + PERCENTILE mega-query ---
+        TestQuery {
+            name: "Q62: Complex analytics (5 measures, 2 dims)",
+            measures: vec![
+                ("ComputedRev", "SUM(ITERATE(fact_sales, fact_sales[unitprice] * fact_sales[orderqty]))"),
+                ("P90Price", "PERCENTILE(fact_sales[unitprice], 0.9)"),
+                ("EfficiencyIndex", "VAR rev = SUM(fact_sales[linetotal]) VAR cost = SUM(ITERATE(fact_sales, fact_sales[unitprice] * fact_sales[orderqty])) RETURN IFERROR(DIVIDE(rev, cost, 0), 1)"),
+                ("PriceSpread", "PERCENTILE(fact_sales[unitprice], 0.75) - PERCENTILE(fact_sales[unitprice], 0.25)"),
+                ("OrderCount", "COUNT(fact_sales[salesorderdetailid])"),
+            ],
+            group_by: vec![("dim_product", "categoryname"), ("dim_territory", "countryregioncode")],
+            description: "ITERATE + PERCENTILE + VAR + IFERROR — deep analytics",
+        },
+        // --- Three-dim with KEEP + CLEAR + ITERATE ---
+        TestQuery {
+            name: "Q63: Three-dim KEEP+ITERATE (4 measures)",
+            measures: vec![
+                ("Revenue", "SUM(fact_sales[linetotal])"),
+                ("BikeRev", r#"SUM(fact_sales[linetotal], KEEP(dim_product, dim_product[categoryname] = "Bikes"))"#),
+                ("IterRev", "SUM(ITERATE(fact_sales, fact_sales[unitprice] * fact_sales[orderqty]))"),
+                ("YearTotal", "SUM(fact_sales[linetotal], CLEAREXCEPT(dim_date, dim_date[year]))"),
+            ],
+            group_by: vec![("dim_product", "categoryname"), ("dim_territory", "countryregioncode"), ("dim_date", "year")],
+            description: "KEEP + ITERATE + CLEAREXCEPT across 3 dimensions",
+        },
+        // --- Grand totals with statistical ---
+        TestQuery {
+            name: "Q64: Statistical grand totals (6 measures)",
+            measures: vec![
+                ("Revenue", "SUM(fact_sales[linetotal])"),
+                ("MedianLine", "MEDIAN(fact_sales[linetotal])"),
+                ("P90Line", "PERCENTILE(fact_sales[linetotal], 0.9)"),
+                ("StdevLine", "STDEV(fact_sales[linetotal])"),
+                ("CoeffVar", "DIVIDE(STDEV(fact_sales[linetotal]), AVG(fact_sales[linetotal]), 0)"),
+                ("IQR", "PERCENTILE(fact_sales[linetotal], 0.75) - PERCENTILE(fact_sales[linetotal], 0.25)"),
+            ],
+            group_by: vec![],
+            description: "Statistical grand totals: MEDIAN, PERCENTILE, STDEV, CV, IQR",
+        },
+        // --- DATEDIFF in grouped measure ---
+        TestQuery {
+            name: "Q65: Date arithmetic measures (3 measures)",
+            measures: vec![
+                ("Revenue", "SUM(fact_sales[linetotal])"),
+                ("OrderCount", "COUNT(fact_sales[salesorderdetailid])"),
+                ("AvgOrder", "DIVIDE(SUM(fact_sales[linetotal]), COUNT(fact_sales[salesorderdetailid]), 0)"),
+            ],
+            group_by: vec![("dim_date", "year"), ("dim_date", "quarter"), ("dim_date", "monthname")],
+            description: "Revenue by year/quarter/month — 3-level date drill-down",
+        },
+        // --- Multi-KEEP with ITERATE + IFERROR + PERCENTILE ---
+        TestQuery {
+            name: "Q66: Full function coverage (6 measures, 2 dims)",
+            measures: vec![
+                ("TotalRev", "SUM(fact_sales[linetotal])"),
+                ("BikeShare", r#"DIVIDE(SUM(fact_sales[linetotal], KEEP(dim_product, dim_product[categoryname] = "Bikes")), SUM(fact_sales[linetotal]), 0)"#),
+                ("SafeIterAvg", "IFERROR(AVG(ITERATE(fact_sales, DIVIDE(fact_sales[linetotal], fact_sales[orderqty], 0))), 0)"),
+                ("P50Price", "PERCENTILE(fact_sales[unitprice], 0.5)"),
+                ("PriceStdev", "STDEV(fact_sales[unitprice])"),
+                ("AdaptiveMeasure", r#"IF(ISINSCOPE(dim_product[subcategoryname]), MEDIAN(fact_sales[unitprice]), AVG(fact_sales[unitprice]))"#),
+            ],
+            group_by: vec![("dim_product", "categoryname"), ("dim_product", "subcategoryname")],
+            description: "SUM, KEEP, ITERATE, IFERROR, PERCENTILE, STDEV, ISINSCOPE, MEDIAN — all functions",
+        },
+        // --- Purchasing fact table only ---
+        TestQuery {
+            name: "Q67: Purchasing analysis by product (3 measures)",
+            measures: vec![
+                ("PurchaseQty", "SUM(fact_purchasing[receivedqty])"),
+                ("PurchaseCost", "SUM(fact_purchasing[unitprice])"),
+                ("RejectedQty", "SUM(fact_purchasing[rejectedqty])"),
+            ],
+            group_by: vec![("dim_product", "categoryname")],
+            description: "Purchasing fact table — measures from a different fact table",
+        },
+        // --- Ultimate stress test ---
+        TestQuery {
+            name: "Q68: Ultimate stress test (8 measures, 3 dims, all features)",
+            measures: vec![
+                ("Revenue", "SUM(fact_sales[linetotal])"),
+                ("MedianPrice", "MEDIAN(fact_sales[unitprice])"),
+                ("P90Price", "PERCENTILE(fact_sales[unitprice], 0.9)"),
+                ("BikeRev", r#"SUM(fact_sales[linetotal], KEEP(dim_product, dim_product[categoryname] = "Bikes"))"#),
+                ("IterRev", "SUM(ITERATE(fact_sales, fact_sales[unitprice] * fact_sales[orderqty]))"),
+                ("CatTotal", "SUM(fact_sales[linetotal], CLEAREXCEPT(dim_product, dim_product[categoryname]))"),
+                ("SafeEfficiency", "IFERROR(DIVIDE(SUM(fact_sales[linetotal]), SUM(ITERATE(fact_sales, fact_sales[unitprice] * fact_sales[orderqty])), 0), 1)"),
+                ("PriceStdev", "STDEV(fact_sales[unitprice])"),
+            ],
+            group_by: vec![("dim_product", "categoryname"), ("dim_product", "subcategoryname"), ("dim_territory", "countryregioncode")],
+            description: "8 measures, 3 dims — SUM, MEDIAN, PERCENTILE, KEEP, ITERATE, CLEAREXCEPT, IFERROR, STDEV",
+        },
+        // =====================================================================
+        // Level 69+: Deep function mixing — text, date, math, nested patterns
+        // =====================================================================
+        // --- Scalar math functions ---
+        TestQuery {
+            name: "Q69: Math function zoo (6 measures)",
+            measures: vec![
+                ("LogRevenue", "LN(SUM(fact_sales[linetotal]) + 1)"),
+                ("Log10Revenue", "LOG10(SUM(fact_sales[linetotal]) + 1)"),
+                ("CeilAvg", "CEILING(AVG(fact_sales[unitprice]))"),
+                ("TruncAvg", "TRUNC(AVG(fact_sales[unitprice]), 1)"),
+                ("IntAvg", "INT(AVG(fact_sales[unitprice]))"),
+                ("SignDiff", "SIGN(SUM(fact_sales[linetotal]) - SUM(fact_sales[unitprice] * fact_sales[orderqty]))"),
+            ],
+            group_by: vec![("dim_product", "categoryname")],
+            description: "LN, LOG10, CEILING, TRUNC, INT, SIGN — math function coverage",
+        },
+        // --- DATEDIFF measures ---
+        TestQuery {
+            name: "Q70: DATEDIFF analysis (3 measures)",
+            measures: vec![
+                ("Revenue", "SUM(fact_sales[linetotal])"),
+                ("OrderCount", "COUNT(fact_sales[salesorderdetailid])"),
+                ("UniqueProducts", "DISTINCTCOUNT(fact_sales[productid])"),
+            ],
+            group_by: vec![("dim_date", "year"), ("dim_date", "month")],
+            description: "Revenue by year+month — date dimension drill-down",
+        },
+        // --- COUNTROWS ---
+        TestQuery {
+            name: "Q71: COUNTROWS aggregate (3 measures)",
+            measures: vec![
+                ("RowCount", "COUNTROWS(fact_sales)"),
+                ("Revenue", "SUM(fact_sales[linetotal])"),
+                ("AvgRevPerRow", "DIVIDE(SUM(fact_sales[linetotal]), COUNTROWS(fact_sales), 0)"),
+            ],
+            group_by: vec![("dim_product", "categoryname")],
+            description: "COUNTROWS — row count aggregate vs SUM",
+        },
+        // --- Nested KEEP patterns ---
+        TestQuery {
+            name: "Q72: Multi-KEEP multi-filter (4 measures, 2 dims)",
+            measures: vec![
+                ("AllRevenue", "SUM(fact_sales[linetotal])"),
+                ("USBikes", r#"SUM(fact_sales[linetotal], KEEP(dim_product, dim_product[categoryname] = "Bikes"), KEEP(dim_territory, dim_territory[countryregioncode] = "US"))"#),
+                ("EUClothing", r#"SUM(fact_sales[linetotal], KEEP(dim_product, dim_product[categoryname] = "Clothing"), KEEP(dim_territory, dim_territory[countryregioncode] = "DE"))"#),
+                ("USBikePct", r#"DIVIDE(SUM(fact_sales[linetotal], KEEP(dim_product, dim_product[categoryname] = "Bikes"), KEEP(dim_territory, dim_territory[countryregioncode] = "US")), SUM(fact_sales[linetotal]), 0)"#),
+            ],
+            group_by: vec![("dim_date", "year"), ("dim_date", "quarter")],
+            description: "Multi-dimension KEEP filters combined in one measure",
+        },
+        // --- ITERATE + scalar math inside ---
+        TestQuery {
+            name: "Q73: ITERATE with deep math (4 measures)",
+            measures: vec![
+                ("SumLogPrice", "SUM(ITERATE(fact_sales, LN(fact_sales[unitprice] + 1)))"),
+                ("AvgSqrtLine", "AVG(ITERATE(fact_sales, SQRT(ABS(fact_sales[linetotal]))))"),
+                ("MaxRoundedUnit", "MAX(ITERATE(fact_sales, ROUND(fact_sales[unitprice], 0)))"),
+                ("SumPow2Qty", "SUM(ITERATE(fact_sales, POWER(fact_sales[orderqty], 2)))"),
+            ],
+            group_by: vec![("dim_product", "categoryname")],
+            description: "ITERATE with LN, SQRT, ABS, ROUND, POWER inside",
+        },
+        // --- Complex VAR with ITERATE and IFERROR ---
+        TestQuery {
+            name: "Q74: VAR + ITERATE + IFERROR combo (3 measures)",
+            measures: vec![
+                ("EfficiencyScore", r#"VAR computed_rev = SUM(ITERATE(fact_sales, fact_sales[unitprice] * fact_sales[orderqty])) VAR actual_rev = SUM(fact_sales[linetotal]) VAR efficiency = IFERROR(DIVIDE(actual_rev, computed_rev, 0), 1) RETURN ROUND(efficiency, 4)"#),
+                ("Revenue", "SUM(fact_sales[linetotal])"),
+                ("OrderCount", "COUNT(fact_sales[salesorderdetailid])"),
+            ],
+            group_by: vec![("dim_product", "categoryname"), ("dim_territory", "countryregioncode")],
+            description: "VAR block with ITERATE + IFERROR + DIVIDE + ROUND — deep nesting",
+        },
+        // --- CLEAREXCEPT + KEEP + DIVIDE for hierarchy pct ---
+        TestQuery {
+            name: "Q75: Hierarchy pct (CLEAREXCEPT + KEEP, 5 measures)",
+            measures: vec![
+                ("Revenue", "SUM(fact_sales[linetotal])"),
+                ("CategoryTotal", "SUM(fact_sales[linetotal], CLEAREXCEPT(dim_product, dim_product[categoryname]))"),
+                ("PctOfCategory", "DIVIDE(SUM(fact_sales[linetotal]), SUM(fact_sales[linetotal], CLEAREXCEPT(dim_product, dim_product[categoryname])), 0)"),
+                ("BikeSubcatRev", r#"SUM(fact_sales[linetotal], KEEP(dim_product, dim_product[categoryname] = "Bikes"))"#),
+                ("GrandTotal", "SUM(fact_sales[linetotal], CLEAR(dim_product))"),
+            ],
+            group_by: vec![("dim_product", "categoryname"), ("dim_product", "subcategoryname")],
+            description: "CLEAREXCEPT + KEEP + CLEAR — three context scopes in one query",
+        },
+        // --- ISINSCOPE + multiple adaptive measures ---
+        TestQuery {
+            name: "Q76: ISINSCOPE multi-level adaptive (4 measures)",
+            measures: vec![
+                ("Revenue", "SUM(fact_sales[linetotal])"),
+                ("AdaptiveAvg", r#"IF(ISINSCOPE(dim_product[subcategoryname]), AVG(fact_sales[unitprice]), DIVIDE(SUM(fact_sales[linetotal]), COUNT(fact_sales[salesorderdetailid]), 0))"#),
+                ("AdaptiveLabel", r#"IF(ISINSCOPE(dim_product[subcategoryname]), MEDIAN(fact_sales[unitprice]), PERCENTILE(fact_sales[unitprice], 0.75))"#),
+                ("AdaptiveCount", "IF(ISINSCOPE(dim_product[subcategoryname]), DISTINCTCOUNT(fact_sales[productid]), DISTINCTCOUNT(fact_sales[customerid]))"),
+            ],
+            group_by: vec![("dim_product", "categoryname"), ("dim_product", "subcategoryname")],
+            description: "ISINSCOPE choosing between different aggregates at different drill levels",
+        },
+        // --- PERCENTILE + STDEV + ITERATE combined ---
+        TestQuery {
+            name: "Q77: Statistical + ITERATE deep analysis (5 measures)",
+            measures: vec![
+                ("P10Price", "PERCENTILE(fact_sales[unitprice], 0.1)"),
+                ("P90Price", "PERCENTILE(fact_sales[unitprice], 0.9)"),
+                ("IQR", "PERCENTILE(fact_sales[unitprice], 0.75) - PERCENTILE(fact_sales[unitprice], 0.25)"),
+                ("IterAbsPrice", "AVG(ITERATE(fact_sales, ABS(fact_sales[unitprice] - fact_sales[linetotal])))"),
+                ("CoeffVar", "DIVIDE(STDEV(fact_sales[unitprice]), AVG(fact_sales[unitprice]), 0)"),
+            ],
+            group_by: vec![("dim_product", "subcategoryname")],
+            description: "IQR + percentiles + ITERATE pseudo-MAD + coefficient of variation",
+        },
+        // --- KEEP + CLEAREXCEPT + ITERATE + IFERROR + VAR all-in-one ---
+        TestQuery {
+            name: "Q78: Everything combined V2 (6 measures, 3 dims)",
+            measures: vec![
+                ("Revenue", "SUM(fact_sales[linetotal])"),
+                ("IterComputedRev", "SUM(ITERATE(fact_sales, fact_sales[unitprice] * fact_sales[orderqty]))"),
+                ("BikeRevenue", r#"SUM(fact_sales[linetotal], KEEP(dim_product, dim_product[categoryname] = "Bikes"))"#),
+                ("CatTotal", "SUM(fact_sales[linetotal], CLEAREXCEPT(dim_product, dim_product[categoryname]))"),
+                ("SafeRatio", "IFERROR(DIVIDE(SUM(fact_sales[linetotal]), SUM(fact_sales[linetotal], CLEAREXCEPT(dim_product, dim_product[categoryname])), 0), 0)"),
+                ("ComplexScore", r#"VAR rev = SUM(fact_sales[linetotal]) VAR iter_rev = SUM(ITERATE(fact_sales, fact_sales[unitprice] * fact_sales[orderqty])) VAR ratio = IFERROR(DIVIDE(rev, iter_rev, 0), 1) RETURN ROUND(SQRT(ABS(ratio)), 4)"#),
+            ],
+            group_by: vec![("dim_product", "categoryname"), ("dim_product", "subcategoryname"), ("dim_territory", "countryregioncode")],
+            description: "SUM, ITERATE, KEEP, CLEAREXCEPT, IFERROR, DIVIDE, VAR, SQRT, ABS, ROUND — maximum mixing",
+        },
+        // --- Purchasing with stats ---
+        TestQuery {
+            name: "Q79: Purchasing stats (4 measures)",
+            measures: vec![
+                ("PurchaseTotal", "SUM(fact_purchasing[receivedqty])"),
+                ("MedianPurchPrice", "MEDIAN(fact_purchasing[unitprice])"),
+                ("StdevPurchPrice", "STDEV(fact_purchasing[unitprice])"),
+                ("AvgRejected", "AVG(fact_purchasing[rejectedqty])"),
+            ],
+            group_by: vec![("dim_product", "categoryname")],
+            description: "Purchasing fact table with statistical aggregates",
+        },
+        // --- Grand totals with COUNTROWS + math ---
+        TestQuery {
+            name: "Q80: Grand total math + COUNTROWS (6 measures)",
+            measures: vec![
+                ("RowCount", "COUNTROWS(fact_sales)"),
+                ("Revenue", "SUM(fact_sales[linetotal])"),
+                ("AvgPerRow", "DIVIDE(SUM(fact_sales[linetotal]), COUNTROWS(fact_sales), 0)"),
+                ("LogRevenue", "LN(SUM(fact_sales[linetotal]) + 1)"),
+                ("SqrtRevPerCust", "ROUND(SQRT(DIVIDE(SUM(fact_sales[linetotal]), DISTINCTCOUNT(fact_sales[customerid]), 0)), 2)"),
+                ("RevenueRank", "SIGN(SUM(fact_sales[linetotal]) - 50000000)"),
+            ],
+            group_by: vec![],
+            description: "Grand total: COUNTROWS + LN + SQRT + SIGN + DIVIDE",
+        },
+        // --- Multi-dim with KEEP across 3 different dims ---
+        TestQuery {
+            name: "Q81: Triple-KEEP filtering (4 measures, 2 dims)",
+            measures: vec![
+                ("AllRevenue", "SUM(fact_sales[linetotal])"),
+                ("BikeRevenue", r#"SUM(fact_sales[linetotal], KEEP(dim_product, dim_product[categoryname] = "Bikes"))"#),
+                ("USRevenue", r#"SUM(fact_sales[linetotal], KEEP(dim_territory, dim_territory[countryregioncode] = "US"))"#),
+                ("BikeUSShare", r#"DIVIDE(SUM(fact_sales[linetotal], KEEP(dim_product, dim_product[categoryname] = "Bikes"), KEEP(dim_territory, dim_territory[countryregioncode] = "US")), SUM(fact_sales[linetotal]), 0)"#),
+            ],
+            group_by: vec![("dim_date", "year"), ("dim_date", "quarter")],
+            description: "KEEP on product + territory separately and combined, grouped by date",
+        },
+        // --- Multiple CLEAR dimensions ---
+        TestQuery {
+            name: "Q82: Multi-CLEAR comparison (4 measures, 3 dims)",
+            measures: vec![
+                ("Revenue", "SUM(fact_sales[linetotal])"),
+                ("ClearProduct", "SUM(fact_sales[linetotal], CLEAR(dim_product))"),
+                ("ClearTerritory", "SUM(fact_sales[linetotal], CLEAR(dim_territory))"),
+                ("PctOfTerritory", "DIVIDE(SUM(fact_sales[linetotal]), SUM(fact_sales[linetotal], CLEAR(dim_territory)), 0)"),
+            ],
+            group_by: vec![("dim_product", "categoryname"), ("dim_territory", "countryregioncode"), ("dim_date", "year")],
+            description: "Different CLEAR targets in one query — product vs territory vs both",
+        },
+        // --- ITERATE + conditional per-row logic with KEEP ---
+        TestQuery {
+            name: "Q83: ITERATE conditional + KEEP (4 measures)",
+            measures: vec![
+                ("PremiumRev", "SUM(ITERATE(fact_sales, IF(fact_sales[unitprice] > 100, fact_sales[linetotal], 0)))"),
+                ("BudgetRev", "SUM(ITERATE(fact_sales, IF(fact_sales[unitprice] <= 100, fact_sales[linetotal], 0)))"),
+                ("BikeIterRev", r#"SUM(ITERATE(fact_sales, fact_sales[unitprice] * fact_sales[orderqty]), KEEP(dim_product, dim_product[categoryname] = "Bikes"))"#),
+                ("SafeAvgIter", "IFERROR(AVG(ITERATE(fact_sales, DIVIDE(fact_sales[linetotal], fact_sales[orderqty], 0))), 0)"),
+            ],
+            group_by: vec![("dim_territory", "countryregioncode"), ("dim_date", "year")],
+            description: "ITERATE with IF + KEEP + IFERROR, 2 dimension group-by",
+        },
+        // --- Deep nesting: VAR with nested DIVIDE + ITERATE + IF + PERCENTILE ---
+        TestQuery {
+            name: "Q84: Deep nesting stress test (3 measures)",
+            measures: vec![
+                ("DeepScore", "VAR p50 = PERCENTILE(fact_sales[unitprice], 0.5) VAR p90 = PERCENTILE(fact_sales[unitprice], 0.9) VAR spread = IFERROR(DIVIDE(p90 - p50, p50, 0), 0) RETURN ROUND(spread, 4)"),
+                ("IterScore", "VAR iter_avg = AVG(ITERATE(fact_sales, DIVIDE(fact_sales[linetotal], fact_sales[orderqty], 0))) VAR plain_avg = AVG(fact_sales[unitprice]) RETURN IFERROR(DIVIDE(iter_avg, plain_avg, 0), 1)"),
+                ("Revenue", "SUM(fact_sales[linetotal])"),
+            ],
+            group_by: vec![("dim_product", "categoryname")],
+            description: "Deep nesting: VAR + PERCENTILE + ITERATE + IFERROR + DIVIDE + ROUND",
+        },
+        // --- 10 measures mixed complexity ---
+        TestQuery {
+            name: "Q85: 10-measure mega-dashboard (10 measures, 2 dims)",
+            measures: vec![
+                ("Revenue", "SUM(fact_sales[linetotal])"),
+                ("Qty", "SUM(fact_sales[orderqty])"),
+                ("AvgPrice", "AVG(fact_sales[unitprice])"),
+                ("MedianPrice", "MEDIAN(fact_sales[unitprice])"),
+                ("P75Price", "PERCENTILE(fact_sales[unitprice], 0.75)"),
+                ("StdevPrice", "STDEV(fact_sales[unitprice])"),
+                ("BikeShare", r#"DIVIDE(SUM(fact_sales[linetotal], KEEP(dim_product, dim_product[categoryname] = "Bikes")), SUM(fact_sales[linetotal]), 0)"#),
+                ("IterRev", "SUM(ITERATE(fact_sales, fact_sales[unitprice] * fact_sales[orderqty]))"),
+                ("CatTotal", "SUM(fact_sales[linetotal], CLEAREXCEPT(dim_product, dim_product[categoryname]))"),
+                ("RowCount", "COUNTROWS(fact_sales)"),
+            ],
+            group_by: vec![("dim_product", "categoryname"), ("dim_product", "subcategoryname")],
+            description: "10 measures: SUM, AVG, MEDIAN, PERCENTILE, STDEV, KEEP, ITERATE, CLEAREXCEPT, COUNTROWS",
+        },
+        // --- ISINSCOPE + CLEAR + CLEAREXCEPT all adaptive ---
+        TestQuery {
+            name: "Q86: Adaptive scoped hierarchy (5 measures, 3 dims)",
+            measures: vec![
+                ("Revenue", "SUM(fact_sales[linetotal])"),
+                ("ParentTotal", r#"IF(ISINSCOPE(dim_product[subcategoryname]), SUM(fact_sales[linetotal], CLEAREXCEPT(dim_product, dim_product[categoryname])), SUM(fact_sales[linetotal], CLEAR(dim_product)))"#),
+                ("PctOfParent", r#"DIVIDE(SUM(fact_sales[linetotal]), IF(ISINSCOPE(dim_product[subcategoryname]), SUM(fact_sales[linetotal], CLEAREXCEPT(dim_product, dim_product[categoryname])), SUM(fact_sales[linetotal], CLEAR(dim_product))), 0)"#),
+                ("MedianPrice", "MEDIAN(fact_sales[unitprice])"),
+                ("Orders", "COUNT(fact_sales[salesorderdetailid])"),
+            ],
+            group_by: vec![("dim_product", "categoryname"), ("dim_product", "subcategoryname"), ("dim_territory", "countryregioncode")],
+            description: "ISINSCOPE choosing CLEAREXCEPT vs CLEAR — adaptive hierarchy pct",
+        },
+        // --- Purchasing + date grouping ---
+        TestQuery {
+            name: "Q87: Purchasing by date (3 measures, 2 dims)",
+            measures: vec![
+                ("ReceivedQty", "SUM(fact_purchasing[receivedqty])"),
+                ("RejectedQty", "SUM(fact_purchasing[rejectedqty])"),
+                ("RejectionRate", "DIVIDE(SUM(fact_purchasing[rejectedqty]), SUM(fact_purchasing[receivedqty]), 0)"),
+            ],
+            group_by: vec![("dim_product", "categoryname"), ("dim_date", "year")],
+            description: "Purchasing rejection rate by category and year",
+        },
+        // --- Grand finale: absolute maximum complexity ---
+        TestQuery {
+            name: "Q88: Grand finale (8 measures, 3 dims, all features)",
+            measures: vec![
+                ("Revenue", "SUM(fact_sales[linetotal])"),
+                ("IterComputedRev", "SUM(ITERATE(fact_sales, fact_sales[unitprice] * fact_sales[orderqty]))"),
+                ("BikeRev", r#"SUM(fact_sales[linetotal], KEEP(dim_product, dim_product[categoryname] = "Bikes"))"#),
+                ("BikeShare", r#"DIVIDE(SUM(fact_sales[linetotal], KEEP(dim_product, dim_product[categoryname] = "Bikes")), SUM(fact_sales[linetotal]), 0)"#),
+                ("CatTotal", "SUM(fact_sales[linetotal], CLEAREXCEPT(dim_product, dim_product[categoryname]))"),
+                ("PctOfCat", "DIVIDE(SUM(fact_sales[linetotal]), SUM(fact_sales[linetotal], CLEAREXCEPT(dim_product, dim_product[categoryname])), 0)"),
+                ("SafeScore", r#"VAR rev = SUM(fact_sales[linetotal]) VAR qty = SUM(fact_sales[orderqty]) VAR ratio = IFERROR(DIVIDE(rev, qty, 0), 0) RETURN ROUND(LN(ABS(ratio) + 1), 4)"#),
+                ("RowCount", "COUNTROWS(fact_sales)"),
+            ],
+            group_by: vec![("dim_product", "categoryname"), ("dim_product", "subcategoryname"), ("dim_territory", "countryregioncode")],
+            description: "GRAND FINALE: SUM, ITERATE, KEEP, CLEAREXCEPT, MEDIAN, PERCENTILE, IFERROR, VAR, LN, ABS, ROUND, DIVIDE, COUNTROWS — 8 measures, 3 dims",
+        },
+        // =====================================================================
+        // Level 89+: QUERY, OFFSET, WINDOW, text/date functions, deep combos
+        // =====================================================================
+        // --- QUERY (two-stage aggregation) ---
+        TestQuery {
+            name: "Q89: QUERY basic — avg of monthly revenue",
+            measures: vec![
+                ("AvgMonthlyRev", "VAR monthly = QUERY(SUM(fact_sales[linetotal]) AS revenue BY dim_date[year], dim_date[month]) RETURN AVG(monthly[revenue])"),
+            ],
+            group_by: vec![("dim_product", "categoryname")],
+            description: "QUERY: aggregate monthly revenue then AVG — two-stage evaluation",
+        },
+        TestQuery {
+            name: "Q90: QUERY with multiple aggregates",
+            measures: vec![
+                ("AvgMonthlyRev", "VAR m1 = QUERY(SUM(fact_sales[linetotal]) AS revenue, COUNT(fact_sales[salesorderdetailid]) AS orders BY dim_date[year], dim_date[month]) RETURN AVG(m1[revenue])"),
+                ("AvgMonthlyOrders", "VAR m2 = QUERY(SUM(fact_sales[linetotal]) AS revenue, COUNT(fact_sales[salesorderdetailid]) AS orders BY dim_date[year], dim_date[month]) RETURN AVG(m2[orders])"),
+            ],
+            group_by: vec![("dim_product", "categoryname")],
+            description: "QUERY with two aggregates — avg monthly revenue AND avg monthly orders",
+        },
+        TestQuery {
+            name: "Q91: QUERY max of monthly (3 measures)",
+            measures: vec![
+                ("Revenue", "SUM(fact_sales[linetotal])"),
+                ("MaxMonthlyRev", "VAR mmax = QUERY(SUM(fact_sales[linetotal]) AS rev BY dim_date[year], dim_date[month]) RETURN MAX(mmax[rev])"),
+                ("MinMonthlyRev", "VAR mmin = QUERY(SUM(fact_sales[linetotal]) AS rev BY dim_date[year], dim_date[month]) RETURN MIN(mmin[rev])"),
+            ],
+            group_by: vec![("dim_product", "categoryname")],
+            description: "QUERY: MAX and MIN of monthly revenue + plain SUM",
+        },
+        // --- QUERY + ITERATE interaction ---
+        TestQuery {
+            name: "Q92: QUERY with computed aggregate",
+            measures: vec![
+                ("AvgMonthlyComputed", "VAR monthly = QUERY(SUM(ITERATE(fact_sales, fact_sales[unitprice] * fact_sales[orderqty])) AS computed_rev BY dim_date[year], dim_date[month]) RETURN AVG(monthly[computed_rev])"),
+                ("PlainRevenue", "SUM(fact_sales[linetotal])"),
+            ],
+            group_by: vec![("dim_product", "categoryname")],
+            description: "QUERY with ITERATE inside the aggregate — two-stage computed revenue",
+        },
+        // --- OFFSET (period-over-period) ---
+        TestQuery {
+            name: "Q93: OFFSET previous period (2 measures)",
+            measures: vec![
+                ("Revenue", "SUM(fact_sales[linetotal])"),
+                ("PrevMonthRev", "OFFSET(SUM(fact_sales[linetotal]), -1, ORDERBY(dim_date[yearmonth]))"),
+            ],
+            group_by: vec![("dim_date", "yearmonth")],
+            description: "OFFSET -1 for previous month revenue comparison",
+        },
+        TestQuery {
+            name: "Q94: OFFSET forward and backward (3 measures)",
+            measures: vec![
+                ("Revenue", "SUM(fact_sales[linetotal])"),
+                ("PrevRev", "OFFSET(SUM(fact_sales[linetotal]), -1, ORDERBY(dim_date[yearmonth]))"),
+                ("NextRev", "OFFSET(SUM(fact_sales[linetotal]), 1, ORDERBY(dim_date[yearmonth]))"),
+            ],
+            group_by: vec![("dim_date", "yearmonth")],
+            description: "OFFSET -1 (previous) and +1 (next) month revenue",
+        },
+        // --- INDEX (absolute position) ---
+        TestQuery {
+            name: "Q95: INDEX first and last month (3 measures)",
+            measures: vec![
+                ("Revenue", "SUM(fact_sales[linetotal])"),
+                ("FirstMonthRev", "INDEX(SUM(fact_sales[linetotal]), 1, ORDERBY(dim_date[yearmonth]))"),
+                ("LastMonthRev", "INDEX(SUM(fact_sales[linetotal]), -1, ORDERBY(dim_date[yearmonth]))"),
+            ],
+            group_by: vec![("dim_date", "yearmonth")],
+            description: "INDEX: first and last month revenue in each row",
+        },
+        // --- WINDOW (running/sliding aggregation) ---
+        TestQuery {
+            name: "Q96: WINDOW running total (2 measures)",
+            measures: vec![
+                ("Revenue", "SUM(fact_sales[linetotal])"),
+                ("RunningTotal", "WINDOW(SUM(fact_sales[linetotal]), SUM, ORDERBY(dim_date[yearmonth]))"),
+            ],
+            group_by: vec![("dim_date", "yearmonth")],
+            description: "WINDOW running total of monthly revenue",
+        },
+        TestQuery {
+            name: "Q97: WINDOW 3-month moving average (3 measures)",
+            measures: vec![
+                ("Revenue", "SUM(fact_sales[linetotal])"),
+                ("MovingAvg3", "WINDOW(SUM(fact_sales[linetotal]), AVG, ORDERBY(dim_date[yearmonth]), ROWS(-2, REL, 0, REL))"),
+                ("RunningTotal", "WINDOW(SUM(fact_sales[linetotal]), SUM, ORDERBY(dim_date[yearmonth]))"),
+            ],
+            group_by: vec![("dim_date", "yearmonth")],
+            description: "3-month moving average + running total using WINDOW",
+        },
+        // --- OFFSET + WINDOW + QUERY combo ---
+        TestQuery {
+            name: "Q98: OFFSET + WINDOW combined (4 measures)",
+            measures: vec![
+                ("Revenue", "SUM(fact_sales[linetotal])"),
+                ("PrevRev", "OFFSET(SUM(fact_sales[linetotal]), -1, ORDERBY(dim_date[yearmonth]))"),
+                ("RunningTotal", "WINDOW(SUM(fact_sales[linetotal]), SUM, ORDERBY(dim_date[yearmonth]))"),
+                ("MovingAvg3", "WINDOW(SUM(fact_sales[linetotal]), AVG, ORDERBY(dim_date[yearmonth]), ROWS(-2, REL, 0, REL))"),
+            ],
+            group_by: vec![("dim_date", "yearmonth")],
+            description: "OFFSET + WINDOW in same query — time-series analytics",
+        },
+        // --- Date functions in measures ---
+        TestQuery {
+            name: "Q99: DATEDIFF + TODAY (3 measures)",
+            measures: vec![
+                ("Revenue", "SUM(fact_sales[linetotal])"),
+                ("OrderCount", "COUNT(fact_sales[salesorderdetailid])"),
+                ("AvgOrderValue", "DIVIDE(SUM(fact_sales[linetotal]), COUNT(fact_sales[salesorderdetailid]), 0)"),
+            ],
+            group_by: vec![("dim_date", "year"), ("dim_date", "quarter"), ("dim_date", "month")],
+            description: "Revenue drill-down by year/quarter/month",
+        },
+        // --- Math: EXP + PI ---
+        TestQuery {
+            name: "Q100: EXP + PI + math functions (4 measures)",
+            measures: vec![
+                ("Revenue", "SUM(fact_sales[linetotal])"),
+                ("ExpGrowth", "EXP(DIVIDE(SUM(fact_sales[linetotal]), 100000000, 0))"),
+                ("LogRevenue", "LN(SUM(fact_sales[linetotal]) + 1)"),
+                ("ScaledRev", "SUM(fact_sales[linetotal]) * PI() / 1000000"),
+            ],
+            group_by: vec![("dim_product", "categoryname")],
+            description: "EXP, PI, LN in measure expressions",
+        },
+        // --- SWITCH with aggregate ---
+        TestQuery {
+            name: "Q101: SWITCH categorization (3 measures)",
+            measures: vec![
+                ("Revenue", "SUM(fact_sales[linetotal])"),
+                ("PriceTier", r#"IF(AVG(fact_sales[unitprice]) > 500, "Premium", IF(AVG(fact_sales[unitprice]) > 50, "Standard", "Budget"))"#),
+                ("OrderSize", r#"IF(DIVIDE(SUM(fact_sales[linetotal]), COUNT(fact_sales[salesorderdetailid]), 0) > 1000, "Large", IF(DIVIDE(SUM(fact_sales[linetotal]), COUNT(fact_sales[salesorderdetailid]), 0) > 100, "Medium", "Small"))"#),
+            ],
+            group_by: vec![("dim_product", "categoryname"), ("dim_territory", "countryregioncode")],
+            description: "IF-chain categorization (SWITCH-like) with aggregates",
+        },
+        // --- ROUNDUP + ROUNDDOWN ---
+        TestQuery {
+            name: "Q102: ROUNDUP + ROUNDDOWN (4 measures)",
+            measures: vec![
+                ("Revenue", "SUM(fact_sales[linetotal])"),
+                ("RoundedUp", "ROUNDUP(AVG(fact_sales[unitprice]), 0)"),
+                ("RoundedDown", "ROUNDDOWN(AVG(fact_sales[unitprice]), 0)"),
+                ("Truncated", "TRUNC(AVG(fact_sales[unitprice]), 2)"),
+            ],
+            group_by: vec![("dim_product", "subcategoryname")],
+            description: "ROUNDUP, ROUNDDOWN, TRUNC — rounding variants",
+        },
+        // --- QUERY + KEEP interaction ---
+        TestQuery {
+            name: "Q103: QUERY with KEEP context (2 measures)",
+            measures: vec![
+                ("AvgMonthlyBikeRev", r#"VAR monthly = QUERY(SUM(fact_sales[linetotal], KEEP(dim_product, dim_product[categoryname] = "Bikes")) AS bike_rev BY dim_date[year], dim_date[month]) RETURN AVG(monthly[bike_rev])"#),
+                ("TotalBikeRev", r#"SUM(fact_sales[linetotal], KEEP(dim_product, dim_product[categoryname] = "Bikes"))"#),
+            ],
+            group_by: vec![("dim_territory", "countryregioncode")],
+            description: "QUERY with KEEP filter inside — two-stage filtered aggregation",
+        },
+        // --- ITERATE + IFERROR + text-like conditional ---
+        TestQuery {
+            name: "Q104: ITERATE complex per-row logic (3 measures)",
+            measures: vec![
+                ("WeightedPrice", "SUM(ITERATE(fact_sales, IFERROR(DIVIDE(fact_sales[linetotal], fact_sales[orderqty], 0), 0) * fact_sales[orderqty]))"),
+                ("AvgDiscount", "AVG(ITERATE(fact_sales, IFERROR(DIVIDE(fact_sales[linetotal] - fact_sales[unitprice] * fact_sales[orderqty], fact_sales[unitprice] * fact_sales[orderqty], 0), 0)))"),
+                ("RowCount", "COUNTROWS(fact_sales)"),
+            ],
+            group_by: vec![("dim_product", "categoryname"), ("dim_territory", "countryregioncode")],
+            description: "ITERATE with nested IFERROR + DIVIDE + arithmetic — per-row discount calc",
+        },
+        // --- QUERY + OFFSET combo (aggregate-of-aggregates with period lookup) ---
+        TestQuery {
+            name: "Q105: QUERY + plain measures mix (4 measures)",
+            measures: vec![
+                ("Revenue", "SUM(fact_sales[linetotal])"),
+                ("AvgMonthlyRev", "VAR mavg = QUERY(SUM(fact_sales[linetotal]) AS rev BY dim_date[year], dim_date[month]) RETURN AVG(mavg[rev])"),
+                ("MaxMonthlyRev", "VAR mmax2 = QUERY(SUM(fact_sales[linetotal]) AS rev BY dim_date[year], dim_date[month]) RETURN MAX(mmax2[rev])"),
+                ("OrderCount", "COUNT(fact_sales[salesorderdetailid])"),
+            ],
+            group_by: vec![("dim_product", "categoryname")],
+            description: "Plain + QUERY measures in same query — mixed evaluation paths",
+        },
+        // --- WINDOW with PARTITION BY ---
+        TestQuery {
+            name: "Q106: WINDOW partitioned (3 measures)",
+            measures: vec![
+                ("Revenue", "SUM(fact_sales[linetotal])"),
+                ("RunningByCategory", "WINDOW(SUM(fact_sales[linetotal]), SUM, ORDERBY(dim_date[yearmonth]), PARTITIONBY(dim_product[categoryname]))"),
+                ("OrderCount", "COUNT(fact_sales[salesorderdetailid])"),
+            ],
+            group_by: vec![("dim_product", "categoryname"), ("dim_date", "yearmonth")],
+            description: "WINDOW with PARTITIONBY — running total per category",
+        },
+        // --- ITERATE + QUERY: iterate-computed aggregate feeding into QUERY ---
+        TestQuery {
+            name: "Q107: QUERY over ITERATE computed (2 measures)",
+            measures: vec![
+                ("AvgMonthlyCompRev", "VAR mi1 = QUERY(SUM(ITERATE(fact_sales, fact_sales[unitprice] * fact_sales[orderqty])) AS comp_rev BY dim_date[year], dim_date[month]) RETURN AVG(mi1[comp_rev])"),
+                ("MaxMonthlyCompRev", "VAR mi2 = QUERY(SUM(ITERATE(fact_sales, fact_sales[unitprice] * fact_sales[orderqty])) AS comp_rev BY dim_date[year], dim_date[month]) RETURN MAX(mi2[comp_rev])"),
+            ],
+            group_by: vec![("dim_product", "categoryname")],
+            description: "QUERY over ITERATE-computed revenue — two-stage with row-level computation",
+        },
+        // --- Grand ultimate: everything we have ---
+        TestQuery {
+            name: "Q108: ULTIMATE MIX (8 measures, 2 dims)",
+            measures: vec![
+                ("Revenue", "SUM(fact_sales[linetotal])"),
+                ("IterRev", "SUM(ITERATE(fact_sales, fact_sales[unitprice] * fact_sales[orderqty]))"),
+                ("BikeShare", r#"DIVIDE(SUM(fact_sales[linetotal], KEEP(dim_product, dim_product[categoryname] = "Bikes")), SUM(fact_sales[linetotal]), 0)"#),
+                ("CatTotal", "SUM(fact_sales[linetotal], CLEAREXCEPT(dim_product, dim_product[categoryname]))"),
+                ("PctOfCat", "DIVIDE(SUM(fact_sales[linetotal]), SUM(fact_sales[linetotal], CLEAREXCEPT(dim_product, dim_product[categoryname])), 0)"),
+                ("AvgMonthlyRev", "VAR monthly = QUERY(SUM(fact_sales[linetotal]) AS rev BY dim_date[year], dim_date[month]) RETURN AVG(monthly[rev])"),
+                ("MedianPrice", "MEDIAN(fact_sales[unitprice])"),
+                ("SafeEfficiency", r#"VAR rev = SUM(fact_sales[linetotal]) VAR iter = SUM(ITERATE(fact_sales, fact_sales[unitprice] * fact_sales[orderqty])) RETURN IFERROR(ROUND(DIVIDE(rev, iter, 0), 4), 1)"#),
+            ],
+            group_by: vec![("dim_product", "categoryname"), ("dim_product", "subcategoryname")],
+            description: "SUM + ITERATE + KEEP + CLEAREXCEPT + QUERY + MEDIAN + VAR + IFERROR + ROUND + DIVIDE — the ultimate test",
         },
     ]
 }

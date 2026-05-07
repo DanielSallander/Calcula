@@ -3939,6 +3939,18 @@ pub fn infer_fact_table(expr: &Expression) -> Option<String> {
         Expression::InList { expr, values } => {
             infer_fact_table(expr).or_else(|| values.iter().find_map(infer_fact_table))
         }
+        Expression::Iterate { table, expression } => {
+            Some(table.clone()).or_else(|| infer_fact_table(expression))
+        }
+        Expression::Percentile { operand, percentile } => {
+            infer_fact_table(operand).or_else(|| infer_fact_table(percentile))
+        }
+        Expression::ClearExcept { expr, .. } => infer_fact_table(expr),
+        Expression::IfError { expr, alternate } => {
+            infer_fact_table(expr).or_else(|| infer_fact_table(alternate))
+        }
+        Expression::DateTimeFunc { args, .. } => args.iter().find_map(infer_fact_table),
+        Expression::IsInScope { .. } => None,
         _ => None,
     }
 }
