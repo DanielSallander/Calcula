@@ -71,6 +71,14 @@ function activate(): void {
     })
   );
 
+  // 5b. Reset when cell editing ends (commit or cancel) so the dropdown
+  //     doesn't stay visible after the cell is committed.
+  cleanups.push(
+    onAppEvent(AppEvents.EDIT_ENDED, () => {
+      useAutocompleteStore.getState().reset();
+    })
+  );
+
   // 6. Listen for named range changes to refresh the cached list
   cleanups.push(
     onAppEvent(AppEvents.NAMED_RANGES_CHANGED, () => {
